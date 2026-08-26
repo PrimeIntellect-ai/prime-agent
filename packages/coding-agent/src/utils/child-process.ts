@@ -23,6 +23,24 @@ export function processIdExists(pid: number): boolean {
 	}
 }
 
+function posixProcessStateChar(pid: number): string | undefined {
+	try {
+		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+		return stat
+			.slice(stat.lastIndexOf(")") + 2)
+			.trimStart()
+			.charAt(0);
+	} catch {
+		// Fall through to the portable process listing used on macOS and BSD.
+	}
+	try {
+		const state = execFileSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" }).trim();
+		return state.charAt(0);
+	} catch {
+		return undefined;
+	}
+}
+
 /** A zombie has already exited; it only lingers until its parent reaps it. */
 export function isZombieProcess(pid: number): boolean {
 	if (process.platform === "win32") {
@@ -49,6 +67,22 @@ export function isZombieProcess(pid: number): boolean {
 /** True only for a process that is actually running: zombies do not count. */
 export function isProcessAlive(pid: number): boolean {
 	return processIdExists(pid) && !isZombieProcess(pid);
+}
+
+/**
+ * True when the OS reports the process as job-control-stopped (POSIX state
+ * `T`/`T+`, e.g. after SIGSTOP or SIGTSTP) -- genuinely frozen and unable to
+ * respond to anything short of SIGCONT or SIGKILL, as distinct from a process
+ * that is merely slow to respond to a request it is actively processing. Used
+ * to decide when a daemon-side wait on a session's kernel process should stop
+ * assuming "still working" and instead attempt recovery (see #1072).
+ */
+export function isStoppedProcess(pid: number): boolean {
+	if (process.platform === "win32") {
+		return false;
+	}
+	const state = posixProcessStateChar(pid);
+	return state === "T";
 }
 
 export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals): void {

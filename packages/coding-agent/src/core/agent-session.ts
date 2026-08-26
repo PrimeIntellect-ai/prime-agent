@@ -11117,6 +11117,16 @@ export class AgentSession {
 		return this._bashAbortController !== undefined || this._userBashRunning;
 	}
 
+	/**
+	 * OS pid of this session's running IPython kernel process, or undefined
+	 * when no kernel is currently up. For OS-level liveness/recovery checks
+	 * (e.g. detecting a job-control-stopped kernel via isStoppedProcess, see
+	 * #1072) -- not a substitute for the Jupyter protocol or for isBashRunning.
+	 */
+	get kernelProcessPid(): number | undefined {
+		return this._ipythonKernelProvisioner?.kernelPid;
+	}
+
 	/** Whether there are pending bash messages waiting to be flushed */
 	get hasPendingBashMessages(): boolean {
 		return this._pendingBashMessages.length > 0;

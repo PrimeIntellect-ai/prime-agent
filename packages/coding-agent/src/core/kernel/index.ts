@@ -1842,4 +1842,14 @@ export class KernelManager {
 	get isRunning(): boolean {
 		return this.state === "running";
 	}
+
+	/**
+	 * OS pid of the kernel process, direct-spawned or forkserver-forked, or
+	 * undefined when no kernel is currently running. For liveness/recovery
+	 * checks against the actual OS process (e.g. detecting a job-control-
+	 * stopped kernel, see #1072) -- not a substitute for the Jupyter protocol.
+	 */
+	get kernelPid(): number | undefined {
+		return this.kernel?.pid ?? this.forkedKernel?.pid;
+	}
 }

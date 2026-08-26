@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
-import { isProcessAlive, isZombieProcess, waitForChildProcess } from "../src/utils/child-process.js";
+import { isProcessAlive, isStoppedProcess, isZombieProcess, waitForChildProcess } from "../src/utils/child-process.js";
 
 describe("waitForChildProcess", () => {
 	it("reports signaled already-exited children as failures", async () => {
@@ -57,5 +57,41 @@ describe("process liveness", () => {
 		} finally {
 			parent.kill("SIGKILL");
 		}
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"detects a SIGSTOPped process as stopped, distinct from merely slow",
+		async () => {
+			const child = spawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+			try {
+				await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+				expect(isStoppedProcess(child.pid!)).toBe(false);
+				expect(isProcessAlive(child.pid!)).toBe(true);
+
+				process.kill(child.pid!, "SIGSTOP");
+				const stoppedDeadline = Date.now() + 5000;
+				while (!isStoppedProcess(child.pid!) && Date.now() < stoppedDeadline) {
+					await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+				}
+				expect(isStoppedProcess(child.pid!)).toBe(true);
+				// Stopped is not the same as dead or zombied: a recovery path must be
+				// able to tell "frozen" apart from "gone" to react correctly.
+				expect(isProcessAlive(child.pid!)).toBe(true);
+				expect(isZombieProcess(child.pid!)).toBe(false);
+
+				process.kill(child.pid!, "SIGCONT");
+				const resumedDeadline = Date.now() + 5000;
+				while (isStoppedProcess(child.pid!) && Date.now() < resumedDeadline) {
+					await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+				}
+				expect(isStoppedProcess(child.pid!)).toBe(false);
+			} finally {
+				child.kill("SIGKILL");
+			}
+		},
+	);
+
+	it("does not report a normal running process as stopped", () => {
+		expect(isStoppedProcess(process.pid)).toBe(false);
 	});
 });

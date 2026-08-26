@@ -364,6 +364,11 @@ export class IpythonKernelProvisioner {
 		return this.startedManager?.isRunning ?? false;
 	}
 
+	/** OS pid of the running kernel process, or undefined if none is running. */
+	get kernelPid(): number | undefined {
+		return this.startedManager?.kernelPid;
+	}
+
 	/** Remove live variables above the snapshot's per-variable size limit. */
 	async pruneOversizedVariables(): Promise<string[] | null> {
 		const m = this.startedManager ?? (await this.managerPromise?.catch(() => undefined));

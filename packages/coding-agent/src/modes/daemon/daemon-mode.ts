@@ -108,6 +108,7 @@ import {
 import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
+import { isStoppedProcess } from "../../utils/child-process.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import {
 	createAgentConnectionCommands,
@@ -238,6 +239,15 @@ const structuredLog = getLogger("coding-agent.daemon");
 const WORKER_SNAPSHOT_TERMINAL_DRAIN_TIMEOUT_MS = 1_000;
 const UPDATE_RESTART_PREPARE_TIMEOUT_MS = 90_000;
 const MAX_SESSION_SNAPSHOT_STABILIZATION_RETRIES = 3;
+// A session close can legitimately take a long time (e.g. draining a real
+// in-flight request) -- that is not a bug and must not be timed out (see the
+// "no blanket RPC timeouts" direction: PR #1701). What genuinely never
+// resolves on its own is a *job-control-stopped* kernel process (POSIX state
+// T, e.g. an external SIGSTOP): closeSessionOnce awaits it indefinitely with
+// no way to know the peer is frozen rather than merely busy. These poll a
+// close's kernel OS state directly instead of guessing from elapsed time.
+const STOPPED_KERNEL_WATCHDOG_POLL_MS = 2_000;
+const STOPPED_KERNEL_WATCHDOG_CONFIRMATIONS_BEFORE_RECOVERY = 3;
 
 const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
@@ -6416,6 +6426,7 @@ export class AgentDaemon {
 		);
 		const close = { promise: closePromise, reason, descendants };
 		this.closingSessions.set(state.activeSessionId, close);
+		this.watchForStoppedKernelDuringClose(state, close);
 		try {
 			await closePromise;
 		} finally {
@@ -6479,6 +6490,70 @@ export class AgentDaemon {
 		while (state.runtime.session.isBashRunning && Date.now() < deadline) {
 			await delay(50);
 		}
+	}
+
+	/**
+	 * Runs alongside a session close, independent of the close's own promise
+	 * chain. If the session's kernel process is found genuinely OS-level
+	 * stopped (job-control state T, e.g. an external SIGSTOP -- distinct from
+	 * merely taking a long time to respond to a real request), send SIGCONT
+	 * once to attempt recovery. If it is still confirmed stopped across
+	 * several further polls despite that, the kernel is not coming back on
+	 * its own: proactively release the closingSessions bookkeeping so a
+	 * stuck-but-not-dead kernel can't wedge every future attach/close attempt
+	 * behind "Active session is closing" forever (#1072). The original close
+	 * keeps running in the background and settles normally whenever/if the
+	 * kernel ever resumes -- the identity check mirrors the one in
+	 * closeSession's own cleanup, so a race between the two is harmless.
+	 */
+	private watchForStoppedKernelDuringClose(
+		state: ActiveSessionState,
+		close: { promise: Promise<void>; reason: DaemonSessionClosedReason; descendants: Set<ActiveSessionState> },
+	): void {
+		let settled = false;
+		void close.promise.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		void (async () => {
+			let sentContinue = false;
+			let consecutiveStoppedPolls = 0;
+			while (!settled) {
+				await delay(STOPPED_KERNEL_WATCHDOG_POLL_MS);
+				if (settled) return;
+				const pid = state.runtime.session.kernelProcessPid;
+				if (pid === undefined || !isStoppedProcess(pid)) {
+					consecutiveStoppedPolls = 0;
+					sentContinue = false;
+					continue;
+				}
+				consecutiveStoppedPolls++;
+				if (!sentContinue) {
+					sentContinue = true;
+					try {
+						process.kill(pid, "SIGCONT");
+					} catch {
+						// Already gone; the real close discovers that on its own.
+					}
+					this.log(
+						`Session ${state.activeSessionId} close is waiting on a job-control-stopped kernel (pid ${pid}); sent SIGCONT to attempt recovery`,
+					);
+					continue;
+				}
+				if (consecutiveStoppedPolls < STOPPED_KERNEL_WATCHDOG_CONFIRMATIONS_BEFORE_RECOVERY) continue;
+				if (this.closingSessions.get(state.activeSessionId) === close) {
+					this.closingSessions.delete(state.activeSessionId);
+					this.log(
+						`Session ${state.activeSessionId} close released after its kernel (pid ${pid}) stayed OS-stopped through SIGCONT; the original close keeps running in the background`,
+					);
+				}
+				return;
+			}
+		})().catch(() => undefined);
 	}
 
 	private async closeSessionOnce(
