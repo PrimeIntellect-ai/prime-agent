@@ -210,11 +210,11 @@ export class AvoSessionRuntime {
 
 export function buildAvoRuntimePrompt(state: AvoRunState): string {
 	return [
-		"Prime uses one host-authoritative AVO substrate across general, coding, and research environments.",
-		`Effective AVO route: environment=${state.routing.environment}; horizon=${state.routing.horizon}.`,
+		"AVO is Prime's default operating architecture for every root task. It is not a user-selected mode.",
+		`The host automatically selected evaluation adapter=${state.routing.environment} and horizon=${state.routing.horizon}.`,
 		state.routing.reasons.length > 0 ? `Route evidence: ${state.routing.reasons.join("; ")}.` : undefined,
-		"Treat environment as the tool/evaluation adapter and horizon as the amount of machinery. Direct tasks use one evaluated action without a retained supervisor. Iterative tasks retain candidate lineage and revise after feedback. Long tasks activate persistent lineage, namespaced memory, recovery, and retained trajectory supervision.",
-		"A model assertion that work succeeded is never canonical progress. Commit success only from evidence-backed host, environment, or external evaluation receipts. Use the avo skill for iterative or long candidate/evaluation cycles when it is available.",
+		"General, coding, and research are internal tool/evaluation adapters, not separate modes. Do not ask the user to choose one. Direct, iterative, and long only control how much AVO machinery is activated: direct uses one evaluated action without a retained supervisor; iterative retains candidate lineage and revises after feedback; long also activates namespaced memory, recovery, and retained trajectory supervision.",
+		"Use the avo skill for the task's candidate/evaluation lifecycle. A model assertion that work succeeded is never canonical progress. Commit success only from evidence-backed host, environment, or external evaluation receipts, and finish only when the AVO stop gate passes. Keep direct tasks lightweight, but do not bypass AVO.",
 	]
 		.filter((line): line is string => line !== undefined)
 		.join("\n\n");

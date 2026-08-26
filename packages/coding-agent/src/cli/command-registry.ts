@@ -82,7 +82,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	{
 		path: ["avo"],
 		usage: "avo dashboard [options]",
-		summary: "Inspect the universal AVO environment, horizon, and progress",
+		summary: "Inspect the default AVO adapter, horizon, and progress",
 	},
 	{
 		path: ["avo", "dashboard"],

@@ -1,3 +1,4 @@
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, type Harness } from "./harness.js";
 
@@ -9,7 +10,7 @@ describe("AgentSession universal AVO runtime", () => {
 		harness = undefined;
 	});
 
-	it("persists one AVO substrate for every root session and handles explicit overrides without a model call", async () => {
+	it("uses one default AVO substrate and automatically selects its internal adapter", async () => {
 		harness = await createHarness({ persistSession: true });
 		const initial = await harness.session.handleAvoHostRequest("avo.get");
 		expect(initial.state).toMatchObject({
@@ -18,15 +19,17 @@ describe("AgentSession universal AVO runtime", () => {
 			horizonSelection: "auto",
 		});
 
-		await harness.session.prompt("/mode coding");
-		await harness.session.prompt("/horizon long");
-		const configured = await harness.session.handleAvoHostRequest("avo.get");
-		expect(configured.state).toMatchObject({
-			environmentSelection: "coding",
-			horizonSelection: "long",
-			routing: { environment: "coding", horizon: "long", source: "user" },
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix and test the parser implementation");
+		const routed = await harness.session.handleAvoHostRequest("avo.get");
+		expect(routed.state).toMatchObject({
+			environmentSelection: "auto",
+			horizonSelection: "auto",
+			routing: { environment: "coding", horizon: "iterative", source: "host_auto" },
 		});
-		expect(harness.session.systemPrompt).toContain("environment=coding; horizon=long");
+		expect(harness.session.systemPrompt).toContain("AVO is Prime's default operating architecture");
+		expect(harness.session.systemPrompt).toContain("adapter=coding and horizon=iterative");
+		expect(harness.session.systemPrompt).toContain("not separate modes");
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 

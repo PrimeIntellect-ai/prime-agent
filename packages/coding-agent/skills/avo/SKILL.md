@@ -1,6 +1,6 @@
 ---
 name: avo
-description: Run Prime's universal AVO candidate-evaluate-revise loop for iterative or long general, coding, and research tasks. Use when work needs multiple attempts, executable or external feedback, persistent lineage, namespaced NOOA memory, recovery, or trajectory supervision. Direct one-step tasks may use the host substrate without loading this full workflow.
+description: Prime's default candidate-evaluate-revise lifecycle for every root task. Always use this skill before completing general, coding, or research work; the host automatically chooses the internal evaluation adapter and task horizon, keeping direct tasks lightweight while enabling lineage, NOOA memory, recovery, and trajectory supervision when needed.
 ---
 
 # Universal AVO
@@ -9,8 +9,12 @@ Prime has one AVO substrate. General, coding, and research are evaluation
 adapters; direct, iterative, and long are task horizons. The TypeScript host
 owns canonical state and lineage. This Python package is a typed bridge.
 
+AVO is always active for a root task; it is not a mode the user has to enter.
+The host selects the adapter and horizon automatically from the task. Do not ask
+the user to choose an adapter. A user may optionally override only the horizon.
+
 Do not inspect the module or guess API signatures. Begin with
-`await avo.initialize(objective, environment=..., horizon=...)` for a new run,
+`await avo.initialize(objective)` for a new run,
 or `await avo.get_state()` after restart. Use the returned execution contract.
 
 ## Required iterative loop
@@ -40,8 +44,6 @@ import avo
 
 await avo.initialize(
     "Fix the parser race without regressions",
-    environment="coding",
-    horizon="iterative",
 )
 candidate = await avo.add_candidate({
     "candidate_id": "patch-parser-lock",

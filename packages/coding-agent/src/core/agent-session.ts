@@ -3281,7 +3281,8 @@ export class AgentSession {
 		const state = this._requireAvoRuntime().getState();
 		const gate = this._requireAvoRuntime().evaluateStopGate();
 		return [
-			`AVO environment: ${state.routing.environment} (selection: ${state.environmentSelection})`,
+			"AVO is active by default for this root task.",
+			`Automatic evaluation adapter: ${state.routing.environment}`,
 			`AVO horizon: ${state.routing.horizon} (selection: ${state.horizonSelection})`,
 			`Status: ${state.status}; cycles: ${state.cycles.length}; candidates: ${state.candidates.length}`,
 			`Final gate: ${gate.passed ? "passed" : `blocked — ${gate.reasons.join("; ")}`}`,
@@ -3290,28 +3291,20 @@ export class AgentSession {
 
 	private _handleAvoSlashCommand(command: SessionSlashCommand): string {
 		const runtime = this._requireAvoRuntime();
-		let target: "mode" | "horizon" | "status" = "status";
+		let target: "horizon" | "status" = "status";
 		let value = command.args.trim();
-		if (command.name === "mode") target = "mode";
-		else if (command.name === "horizon") target = "horizon";
+		if (command.name === "horizon") target = "horizon";
 		else if (value) {
-			const match = /^(status|mode|horizon)(?:\s+(.+))?$/.exec(value);
-			if (!match) throw new Error("Usage: /avo [status|mode <value>|horizon <value>]");
-			target = match[1] as "mode" | "horizon" | "status";
+			const match = /^(status|horizon)(?:\s+(.+))?$/.exec(value);
+			if (!match) throw new Error("Usage: /avo [status|horizon <value>]");
+			target = match[1] as "horizon" | "status";
 			value = (match[2] ?? "").trim();
 		}
 		if (target === "status" || !value) return this._formatAvoStatus();
-		if (target === "mode") {
-			if (value !== "auto" && !AVO_ENVIRONMENTS.includes(value as (typeof AVO_ENVIRONMENTS)[number])) {
-				throw new Error("AVO mode must be auto, general, coding, or research");
-			}
-			runtime.configure({ environment: value as AvoEnvironmentSelection, source: "user" });
-		} else {
-			if (value !== "auto" && !AVO_HORIZONS.includes(value as (typeof AVO_HORIZONS)[number])) {
-				throw new Error("AVO horizon must be auto, direct, iterative, or long");
-			}
-			runtime.configure({ horizon: value as AvoHorizonSelection, source: "user" });
+		if (value !== "auto" && !AVO_HORIZONS.includes(value as (typeof AVO_HORIZONS)[number])) {
+			throw new Error("AVO horizon must be auto, direct, iterative, or long");
 		}
+		runtime.configure({ horizon: value as AvoHorizonSelection, source: "user" });
 		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 		return this._formatAvoStatus();
@@ -7266,7 +7259,6 @@ export class AgentSession {
 					await this._handleAutonomousSlashCommand(input.text);
 					break;
 				case "avo":
-				case "mode":
 				case "horizon":
 					resultText = this._handleAvoSlashCommand(input.command);
 					break;

@@ -10,15 +10,7 @@ export interface SlashCommandInfo {
 	sourceInfo: SourceInfo;
 }
 
-export const SESSION_SLASH_COMMAND_NAMES = [
-	"compact",
-	"refine",
-	"goal",
-	"autonomous",
-	"avo",
-	"mode",
-	"horizon",
-] as const;
+export const SESSION_SLASH_COMMAND_NAMES = ["compact", "refine", "goal", "autonomous", "avo", "horizon"] as const;
 
 export type SessionSlashCommandName = (typeof SESSION_SLASH_COMMAND_NAMES)[number];
 
@@ -181,14 +173,8 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{
 		name: "avo",
-		description: "Show or configure the universal AVO environment and horizon",
-		argumentHint: "[status|mode <auto|general|coding|research>|horizon <auto|direct|iterative|long>]",
-		takesArgument: true,
-	},
-	{
-		name: "mode",
-		description: "Set or view the AVO environment adapter",
-		argumentHint: "[auto|general|coding|research]",
+		description: "Show the default AVO runtime or optionally override its task horizon",
+		argumentHint: "[status|horizon <auto|direct|iterative|long>]",
 		takesArgument: true,
 	},
 	{
