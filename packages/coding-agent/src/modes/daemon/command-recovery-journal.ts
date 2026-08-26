@@ -206,11 +206,16 @@ export class CommandRecoveryJournal {
 			closeSync(descriptor);
 		}
 		renameSync(tempPath, this.path);
-		const directoryDescriptor = openSync(dirname(this.path), "r");
-		try {
-			fsyncSync(directoryDescriptor);
-		} finally {
-			closeSync(directoryDescriptor);
+		// fsyncSync on a directory descriptor is unsupported on Windows and
+		// throws EPERM; the rename durability it would provide is not needed
+		// there. Keep it on POSIX only to avoid failing every compaction.
+		if (process.platform !== "win32") {
+			const directoryDescriptor = openSync(dirname(this.path), "r");
+			try {
+				fsyncSync(directoryDescriptor);
+			} finally {
+				closeSync(directoryDescriptor);
+			}
 		}
 		this.recordCount = records.length;
 	}
