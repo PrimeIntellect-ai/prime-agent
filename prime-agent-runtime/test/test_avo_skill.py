@@ -26,7 +26,7 @@ class AvoSkillTest(unittest.TestCase):
         module = load_skill("avo_contract_test")
         contract = module.execution_contract()
         self.assertTrue(contract["forbid_runtime_introspection"])
-        self.assertIn("model_opinion never commits", contract["canonical_rule"])
+        self.assertIn("callers may issue only model_opinion", contract["canonical_rule"])
         self.assertEqual(contract["horizons"], ["direct", "iterative", "long"])
 
     def test_initialize_configures_the_same_host_runtime(self) -> None:
@@ -48,7 +48,7 @@ class AvoSkillTest(unittest.TestCase):
         self.assertEqual(host.await_args_list[1].args[0], "avo.initialize")
         self.assertEqual(result["execution_contract"]["contract_version"], 1)
 
-    def test_candidate_evaluation_and_direct_cycle_use_host_receipts(self) -> None:
+    def test_candidate_evaluation_and_direct_cycle_use_host_observed_receipts(self) -> None:
         module = load_skill("avo_cycle_test")
         host = AsyncMock(
             side_effect=[
@@ -68,6 +68,20 @@ class AvoSkillTest(unittest.TestCase):
                     }
                 )
             )
+            asyncio.run(module.run_evaluation("patch-1", "python -m pytest -q"))
+            result = asyncio.run(module.complete_cycle({"candidate_id": "patch-1"}))
+        self.assertEqual(host.await_args_list[0].args[0], "avo.candidate.add")
+        self.assertEqual(host.await_args_list[1].args[0], "avo.evaluation.run")
+        self.assertEqual(
+            host.await_args_list[1].args[1],
+            {"candidate_id": "patch-1", "command": "python -m pytest -q"},
+        )
+        self.assertEqual(host.await_args_list[2].args[0], "avo.cycle.complete")
+        self.assertEqual(result["cycle"]["cycleId"], "cycle-1")
+
+    def test_model_cannot_claim_authoritative_evaluation(self) -> None:
+        module = load_skill("avo_authority_boundary_test")
+        with self.assertRaisesRegex(ValueError, "only authority='model_opinion'"):
             asyncio.run(
                 module.record_evaluation(
                     {
@@ -75,16 +89,11 @@ class AvoSkillTest(unittest.TestCase):
                         "evaluator_id": "test",
                         "status": "pass",
                         "authority": "environment",
-                        "evidence_refs": ["test:exit=0"],
-                        "metrics": {"passed": 4},
+                        "evidence_refs": ["claimed:test:passed"],
+                        "metrics": {},
                     }
                 )
             )
-            result = asyncio.run(module.complete_cycle({"candidate_id": "patch-1"}))
-        self.assertEqual(host.await_args_list[0].args[0], "avo.candidate.add")
-        self.assertEqual(host.await_args_list[1].args[0], "avo.evaluation.record")
-        self.assertEqual(host.await_args_list[2].args[0], "avo.cycle.complete")
-        self.assertEqual(result["cycle"]["cycleId"], "cycle-1")
 
     def test_nooa_failure_keeps_host_recall_as_lossless_fallback(self) -> None:
         module = load_skill("avo_nooa_fallback_test")

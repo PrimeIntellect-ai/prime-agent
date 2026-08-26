@@ -16,6 +16,7 @@ export interface AvoEnvironmentAdapter<TAdapterState = unknown> {
 	deriveEvaluationState(
 		candidate: AvoCandidate,
 		receipts: readonly AvoEvaluationReceipt[],
+		state: AvoRunState,
 		adapterState?: TAdapterState,
 	): {
 		status: "pass" | "fail" | "revise" | "inconclusive";
@@ -40,6 +41,8 @@ export const CODING_AVO_CANDIDATE_KINDS = [
 	"diagnosis",
 	"artifact",
 ] as const;
+
+const CODING_CANONICAL_EVALUATORS = ["test", "build", "lint", "benchmark", "runtime"] as const;
 
 function genericProgress(state: AvoRunState): AvoProgressSignals {
 	const outcomes = state.cycles.map((cycle) => cycle.outcome);
@@ -102,8 +105,11 @@ function genericProjection(
 					: 0;
 	const progress = genericProgress(state);
 	return {
+		runId: state.runId,
+		taskRunCount: state.taskRuns.length + 1,
 		environment: state.routing.environment,
 		horizon: state.routing.horizon,
+		verificationPolicy: state.verificationPolicy,
 		status: state.status,
 		phase: {
 			id: phases[active]!.id,
@@ -127,8 +133,9 @@ function genericProjection(
 				id: "routing",
 				title: "Routing",
 				items: [
-					{ label: "Environment", value: state.routing.environment, status: "neutral" },
+					{ label: "Automatic adapter", value: state.routing.environment, status: "neutral" },
 					{ label: "Horizon", value: state.routing.horizon, status: "neutral" },
+					{ label: "Verification", value: state.verificationPolicy, status: "neutral" },
 					{ label: "Decision", value: state.routing.reasons.join("; "), status: "neutral" },
 				],
 			},
@@ -163,7 +170,7 @@ abstract class BaseAdapter implements AvoEnvironmentAdapter {
 		}
 	}
 
-	deriveEvaluationState(_candidate: AvoCandidate, receipts: readonly AvoEvaluationReceipt[]) {
+	deriveEvaluationState(_candidate: AvoCandidate, receipts: readonly AvoEvaluationReceipt[], _state: AvoRunState) {
 		const derived = deriveAvoEvaluation(receipts);
 		return { status: derived.status, canonical: derived.canonical, reasons: derived.reasons };
 	}
@@ -198,6 +205,69 @@ abstract class BaseAdapter implements AvoEnvironmentAdapter {
 export class GeneralAvoAdapter extends BaseAdapter {
 	readonly id = "general" as const;
 
+	deriveEvaluationState(candidate: AvoCandidate, receipts: readonly AvoEvaluationReceipt[], state: AvoRunState) {
+		const authoritative = super.deriveEvaluationState(candidate, receipts, state);
+		if (authoritative.status !== "inconclusive" || authoritative.canonical) return authoritative;
+		const policy = state.verificationPolicy;
+		if (policy === "required") return authoritative;
+		const opinions = receipts.filter((receipt) => receipt.authority === "model_opinion");
+		if (opinions.some((receipt) => receipt.status === "fail" || receipt.status === "revise")) {
+			return {
+				status: "revise" as const,
+				canonical: false,
+				reasons: [`${policy} evaluation found unresolved subjective issues`],
+			};
+		}
+		if (opinions.some((receipt) => receipt.status === "pass")) {
+			return {
+				status: "pass" as const,
+				canonical: true,
+				reasons: [`accepted under the declared ${policy} verification policy`],
+			};
+		}
+		return authoritative;
+	}
+
+	evaluateStopCondition(state: AvoRunState): AvoStopGate {
+		if (state.verificationPolicy === "required") return super.evaluateStopCondition(state);
+		const accepted = [...state.candidates].reverse().find(
+			(candidate) =>
+				this.deriveEvaluationState(
+					candidate,
+					state.evaluations.filter((receipt) => receipt.candidateId === candidate.candidateId),
+					state,
+				).canonical,
+		);
+		const hasEvaluation = state.evaluations.some((receipt) => receipt.status !== "inconclusive");
+		const checks = [
+			{
+				id: "verification_policy",
+				label: "Declared verification policy",
+				passed: true,
+			},
+			{
+				id: "candidate",
+				label: "Candidate recorded",
+				passed: state.candidates.length > 0,
+				reason: state.candidates.length > 0 ? undefined : "no candidate or action has been recorded",
+			},
+			{
+				id: "policy_evaluation",
+				label: state.verificationPolicy === "not_applicable" ? "Subjective quality review" : "Best-effort review",
+				passed: hasEvaluation,
+				reason: hasEvaluation ? undefined : "no transparent policy-appropriate evaluation has been recorded",
+			},
+			{
+				id: "accepted_lineage",
+				label: "Policy-accepted lineage",
+				passed: accepted !== undefined,
+				reason: accepted ? undefined : "no candidate passed the declared verification policy",
+			},
+		];
+		const reasons = checks.flatMap((check) => (!check.passed && check.reason ? [check.reason] : []));
+		return requireTrajectoryVerification(state, { passed: reasons.length === 0, checks, reasons });
+	}
+
 	buildSupervisorContext(state: AvoRunState): Record<string, unknown> {
 		return {
 			...super.buildSupervisorContext(state),
@@ -228,6 +298,11 @@ export class GeneralAvoAdapter extends BaseAdapter {
 			id: "general_evidence",
 			title: "Actions and external evidence",
 			items: [
+				{
+					label: "Verification policy",
+					value: `${state.verificationPolicy} · ${state.verificationReasons.join("; ")}`,
+					status: state.verificationPolicy === "required" ? "neutral" : "watch",
+				},
 				{
 					label: "Latest action",
 					value: state.candidates.at(-1)?.summary ?? "No action candidate yet",
@@ -278,12 +353,12 @@ export class CodingAvoAdapter extends BaseAdapter {
 		}
 	}
 
-	deriveEvaluationState(candidate: AvoCandidate, receipts: readonly AvoEvaluationReceipt[]) {
-		const derived = super.deriveEvaluationState(candidate, receipts);
+	deriveEvaluationState(candidate: AvoCandidate, receipts: readonly AvoEvaluationReceipt[], state: AvoRunState) {
+		const derived = super.deriveEvaluationState(candidate, receipts, state);
 		const executable = receipts.filter(
 			(receipt) =>
 				isAuthoritativeAvoEvaluation(receipt) &&
-				["test", "build", "lint", "benchmark", "runtime", "filesystem", "git"].includes(receipt.evaluatorId),
+				(CODING_CANONICAL_EVALUATORS as readonly string[]).includes(receipt.evaluatorId),
 		);
 		if (executable.length === 0) {
 			return {
@@ -299,7 +374,7 @@ export class CodingAvoAdapter extends BaseAdapter {
 		const generic = super.evaluateStopCondition(state);
 		const accepted = [...state.candidates].reverse().find((candidate) => {
 			const receipts = state.evaluations.filter((receipt) => receipt.candidateId === candidate.candidateId);
-			return this.deriveEvaluationState(candidate, receipts).canonical;
+			return this.deriveEvaluationState(candidate, receipts, state).canonical;
 		});
 		const executableCheck = {
 			id: "executable_feedback",

@@ -22,21 +22,21 @@ def execution_contract() -> dict[str, Any]:
         "authorities": ["host", "environment", "external", "model_opinion"],
         "sequence": [
             "add_candidate",
-            "execute environment check",
-            "record_evaluation",
+            "run_evaluation for host-observed executable checks or record model_opinion",
             "complete_cycle",
             "inspect checkpoint and stop_gate",
         ],
         "calls": {
             "resume": "state = (await avo.get_state())['state']",
             "candidate": "await avo.add_candidate(candidate_dict)",
-            "evaluation": "await avo.record_evaluation(evaluation_dict)",
+            "host_evaluation": "await avo.run_evaluation(candidate_id, command)",
+            "opinion": "await avo.record_evaluation(model_opinion_dict)",
             "cycle": "await avo.complete_cycle({'candidate_id': candidate_id})",
             "gate": "await avo.stop_gate()",
         },
         "canonical_rule": (
-            "model_opinion never commits canonical success; pass requires an evidence-backed "
-            "host, environment, or external receipt"
+            "callers may issue only model_opinion; authoritative success requires an immutable "
+            "receipt created from evidence the host directly observed"
         ),
     }
 
@@ -84,9 +84,27 @@ async def add_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
 
 
 async def record_evaluation(evaluation: dict[str, Any]) -> dict[str, Any]:
+    evaluation = dict(_object(evaluation, "evaluation"))
+    authority = evaluation.setdefault("authority", "model_opinion")
+    if authority != "model_opinion":
+        raise ValueError(
+            "record_evaluation accepts only authority='model_opinion'; "
+            "use run_evaluation for host-observed executable evidence"
+        )
     return await host_request(
         "avo.evaluation.record",
-        {"evaluation": _object(evaluation, "evaluation")},
+        {"evaluation": evaluation},
+    )
+
+
+async def run_evaluation(candidate_id: str, command: str) -> dict[str, Any]:
+    if not isinstance(candidate_id, str) or not candidate_id.strip():
+        raise ValueError("candidate_id must be a non-empty string")
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("command must be a non-empty string")
+    return await host_request(
+        "avo.evaluation.run",
+        {"candidate_id": candidate_id, "command": command},
     )
 
 

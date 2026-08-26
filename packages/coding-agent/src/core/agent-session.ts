@@ -132,6 +132,7 @@ import {
 	buildAvoSupervisorBootstrapPrompt,
 	buildAvoSupervisorPacket,
 	buildAvoSupervisorPrompt,
+	classifyAvoHostEvaluationCommand,
 	parseAvoCandidateInput,
 	parseAvoCycleInput,
 	parseAvoEvaluationInput,
@@ -3282,8 +3283,10 @@ export class AgentSession {
 		const gate = this._requireAvoRuntime().evaluateStopGate();
 		return [
 			"AVO is active by default for this root task.",
+			`Task run: ${state.runId} (${state.taskRuns.length} archived in this session)`,
 			`Automatic evaluation adapter: ${state.routing.environment}`,
 			`AVO horizon: ${state.routing.horizon} (selection: ${state.horizonSelection})`,
+			`Verification policy: ${state.verificationPolicy}`,
 			`Status: ${state.status}; cycles: ${state.cycles.length}; candidates: ${state.candidates.length}`,
 			`Final gate: ${gate.passed ? "passed" : `blocked — ${gate.reasons.join("; ")}`}`,
 		].join("\n");
@@ -3491,8 +3494,68 @@ export class AgentSession {
 			}
 			case "avo.candidate.add":
 				return { candidate: runtime.recordCandidate(parseAvoCandidateInput(payload.candidate)) };
-			case "avo.evaluation.record":
-				return { evaluation: runtime.recordEvaluation(parseAvoEvaluationInput(payload.evaluation)) };
+			case "avo.evaluation.record": {
+				const evaluation = parseAvoEvaluationInput(payload.evaluation);
+				if (evaluation.authority !== "model_opinion") {
+					throw new Error(
+						"model-submitted evaluations must use authority=model_opinion; use avo.evaluation.run for host-observed executable evidence",
+					);
+				}
+				return { evaluation: runtime.recordEvaluation(evaluation) };
+			}
+			case "avo.evaluation.run": {
+				if (typeof payload.candidate_id !== "string") {
+					throw new Error("avo.evaluation.run candidate_id must be a string");
+				}
+				if (typeof payload.command !== "string") throw new Error("avo.evaluation.run command must be a string");
+				const evaluatorId = classifyAvoHostEvaluationCommand(payload.command);
+				const startedAt = Date.now();
+				const result = await this.executeBash(payload.command);
+				const durationMs = Date.now() - startedAt;
+				const receiptDigest = createHash("sha256")
+					.update(
+						JSON.stringify({
+							command: payload.command,
+							cwd: this.sessionManager.getCwd(),
+							exitCode: result.exitCode ?? null,
+							cancelled: result.cancelled,
+							output: result.output,
+							truncated: result.truncated,
+						}),
+					)
+					.digest("hex");
+				const status = result.cancelled
+					? ("inconclusive" as const)
+					: result.exitCode === 0
+						? ("pass" as const)
+						: ("fail" as const);
+				const evaluation = runtime.recordHostEvaluation({
+					candidateId: payload.candidate_id,
+					evaluatorId,
+					status,
+					authority: "environment",
+					evidenceRefs: [`host:command:${receiptDigest}`],
+					metrics: {
+						command_digest: createHash("sha256").update(payload.command).digest("hex"),
+						output_digest: createHash("sha256").update(result.output).digest("hex"),
+						exit_code: result.exitCode ?? "cancelled",
+						cancelled: result.cancelled,
+						truncated: result.truncated,
+						duration_ms: durationMs,
+					},
+				});
+				return {
+					evaluation,
+					execution: {
+						command: payload.command,
+						output: result.output,
+						exit_code: result.exitCode ?? null,
+						cancelled: result.cancelled,
+						truncated: result.truncated,
+						receipt_digest: receiptDigest,
+					},
+				};
+			}
 			case "avo.cycle.complete": {
 				const result = runtime.completeCycle(parseAvoCycleInput(payload.cycle));
 				if (!result.activateSupervisor) return result;
@@ -10385,6 +10448,7 @@ export class AgentSession {
 				"avo.configure",
 				"avo.candidate.add",
 				"avo.evaluation.record",
+				"avo.evaluation.run",
 				"avo.cycle.complete",
 				"avo.results.collect",
 				"avo.memory.remember",

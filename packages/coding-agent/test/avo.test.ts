@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
@@ -7,10 +7,12 @@ import {
 	AvoSessionRuntime,
 	AvoStore,
 	CodingAvoAdapter,
+	classifyAvoHostEvaluationCommand,
 	deriveAvoEvaluation,
 	GeneralAvoAdapter,
 	inferAvoEnvironment,
 	inferAvoHorizon,
+	inferAvoVerificationPolicy,
 	parseAvoSupervisorMessage,
 	ResearchAvoAdapter,
 	shouldActivateAvoSupervisor,
@@ -37,7 +39,7 @@ describe("generic AVO core", () => {
 			summary: "Validate the parser boundary",
 			payload: { diff: "sha256:abc" },
 		});
-		runtime.recordEvaluation({
+		runtime.recordHostEvaluation({
 			evaluationId: "test-1",
 			candidateId: candidate.candidateId,
 			evaluatorId: "test",
@@ -60,16 +62,46 @@ describe("generic AVO core", () => {
 		const store = new AvoStore(undefined, "run-opinion", clock());
 		store.initialize("Write a pleasing answer");
 		const candidate = store.recordCandidate({ kind: "answer", summary: "Draft answer", payload: "draft" });
-		store.recordEvaluation({
+		store.recordEvaluation(
+			{
+				candidateId: candidate.candidateId,
+				evaluatorId: "self_review",
+				status: "pass",
+				authority: "model_opinion",
+				evidenceRefs: [],
+				metrics: { confidence: 0.99 },
+			},
+			"model",
+		);
+		expect(store.completeCycle({ candidateId: candidate.candidateId }).cycle.outcome).toBe("inconclusive");
+		expect(store.evaluateStopGate().passed).toBe(false);
+	});
+
+	test("rejects model-minted authority and allows transparent subjective policy completion", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-subjective", clock());
+		runtime.observeRootPrompt("Write a poem about rain");
+		const candidate = runtime.recordCandidate({ kind: "answer", summary: "Rain poem", payload: "Rain sings." });
+		expect(() =>
+			runtime.recordEvaluation({
+				candidateId: candidate.candidateId,
+				evaluatorId: "claimed_external",
+				status: "pass",
+				authority: "external",
+				evidenceRefs: ["claimed:external"],
+				metrics: {},
+			}),
+		).toThrow(/model-issued evaluations must use authority=model_opinion/);
+		runtime.recordEvaluation({
 			candidateId: candidate.candidateId,
-			evaluatorId: "self_review",
+			evaluatorId: "subjective_review",
 			status: "pass",
 			authority: "model_opinion",
 			evidenceRefs: [],
-			metrics: { confidence: 0.99 },
+			metrics: { reviewed: true },
 		});
-		expect(store.completeCycle({ candidateId: candidate.candidateId }).cycle.outcome).toBe("inconclusive");
-		expect(store.evaluateStopGate().passed).toBe(false);
+		expect(runtime.completeCycle({ candidateId: candidate.candidateId }).cycle.outcome).toBe("accepted");
+		expect(runtime.getState().verificationPolicy).toBe("not_applicable");
+		expect(runtime.evaluateStopGate().passed).toBe(true);
 	});
 
 	test("requires executable feedback before a coding candidate becomes canonical", () => {
@@ -81,7 +113,7 @@ describe("generic AVO core", () => {
 			summary: "Parser patch",
 			payload: { diff: "candidate" },
 		});
-		runtime.recordEvaluation({
+		runtime.recordHostEvaluation({
 			candidateId: candidate.candidateId,
 			evaluatorId: "self_review",
 			status: "pass",
@@ -180,6 +212,7 @@ describe("generic AVO core", () => {
 				evidenceRefs: [],
 				metrics: {},
 				createdAt: "now",
+				issuedBy: "model",
 			},
 			{
 				evaluationId: "test",
@@ -190,6 +223,7 @@ describe("generic AVO core", () => {
 				evidenceRefs: ["test:exit=1"],
 				metrics: {},
 				createdAt: "now",
+				issuedBy: "host",
 			},
 		]);
 		expect(derived.status).toBe("fail");
@@ -208,14 +242,17 @@ describe("generic AVO core", () => {
 				summary: `Attempt ${index}`,
 				payload: { index },
 			});
-			store.recordEvaluation({
-				candidateId: candidate.candidateId,
-				evaluatorId: "external_check",
-				status: "fail",
-				authority: "external",
-				evidenceRefs: [`external:failure:${index}`],
-				metrics: {},
-			});
+			store.recordEvaluation(
+				{
+					candidateId: candidate.candidateId,
+					evaluatorId: "external_check",
+					status: "fail",
+					authority: "external",
+					evidenceRefs: [`external:failure:${index}`],
+					metrics: {},
+				},
+				"host",
+			);
 			store.completeCycle({
 				candidateId: candidate.candidateId,
 				failureSignature: "same failure",
@@ -232,14 +269,17 @@ describe("generic AVO core", () => {
 		store.initialize("Audit everything");
 		store.setHorizon("long");
 		const candidate = store.recordCandidate({ kind: "answer", summary: "Result", payload: "ok" });
-		store.recordEvaluation({
-			candidateId: candidate.candidateId,
-			evaluatorId: "external",
-			status: "pass",
-			authority: "external",
-			evidenceRefs: ["receipt:1"],
-			metrics: {},
-		});
+		store.recordEvaluation(
+			{
+				candidateId: candidate.candidateId,
+				evaluatorId: "external",
+				status: "pass",
+				authority: "external",
+				evidenceRefs: ["receipt:1"],
+				metrics: {},
+			},
+			"host",
+		);
 		store.completeCycle({ candidateId: candidate.candidateId });
 		expect(store.getState().routing.horizon).toBe("long");
 	});
@@ -249,7 +289,7 @@ describe("generic AVO core", () => {
 		runtime.configure({ environment: "general", horizon: "long", source: "user" });
 		runtime.store.initialize("Make a verified decision");
 		const candidate = runtime.recordCandidate({ kind: "answer", summary: "Decision", payload: "grounded" });
-		runtime.recordEvaluation({
+		runtime.recordHostEvaluation({
 			candidateId: candidate.candidateId,
 			evaluatorId: "external_check",
 			status: "pass",
@@ -276,11 +316,64 @@ describe("generic AVO core", () => {
 		const dir = artifactDir();
 		const statePath = join(dir, "avo", "state.json");
 		const initial = new AvoStore(dir, "run-corrupt", clock());
-		expect(initial.getState().runId).toBe("run-corrupt");
+		expect(initial.getState()).toMatchObject({ sessionId: "run-corrupt", runId: "run-corrupt:task-1" });
 		writeFileSync(statePath, "{not-json\n", "utf8");
 		const reopened = new AvoStore(dir, "run-corrupt", clock());
 		expect(() => reopened.getState()).toThrow(/existing file was preserved/);
 		expect(readFileSync(statePath, "utf8")).toBe("{not-json\n");
+	});
+
+	test("migrates the v1 session-level state into the first task run", () => {
+		const dir = artifactDir();
+		const statePath = join(dir, "avo", "state.json");
+		const store = new AvoStore(dir, "legacy-session", clock());
+		store.initialize("Legacy objective");
+		const candidate = store.recordCandidate({ kind: "answer", summary: "Legacy answer", payload: "answer" });
+		store.recordEvaluation(
+			{
+				evaluationId: "legacy-evaluation",
+				candidateId: candidate.candidateId,
+				evaluatorId: "legacy_host",
+				status: "pass",
+				authority: "environment",
+				evidenceRefs: ["legacy:evidence"],
+				metrics: {},
+			},
+			"host",
+		);
+		const legacy = structuredClone(store.getState()) as unknown as Record<string, unknown>;
+		delete legacy.sessionId;
+		delete legacy.taskRuns;
+		delete legacy.verificationPolicy;
+		delete legacy.verificationReasons;
+		writeFileSync(statePath, JSON.stringify({ ...legacy, schemaVersion: 1, runId: "legacy-session" }), "utf8");
+		const migratedStore = new AvoStore(dir, "legacy-session", clock());
+		const migrated = migratedStore.getState();
+		expect(migrated).toMatchObject({
+			schemaVersion: 2,
+			sessionId: "legacy-session",
+			runId: "legacy-session:task-1",
+			objective: "Legacy objective",
+			taskRuns: [],
+		});
+		expect(migrated.evaluations).toContainEqual(
+			expect.objectContaining({ evaluationId: "legacy-evaluation", issuedBy: "legacy_unverified" }),
+		);
+		migratedStore.recordEvaluation(
+			{
+				evaluationId: "legacy-evaluation",
+				candidateId: candidate.candidateId,
+				evaluatorId: "fresh_host",
+				status: "pass",
+				authority: "environment",
+				evidenceRefs: ["host:fresh-evidence"],
+				metrics: {},
+			},
+			"host",
+		);
+		expect(migratedStore.getState().evaluations).toContainEqual(
+			expect.objectContaining({ evaluationId: "legacy-evaluation", issuedBy: "host", evaluatorId: "fresh_host" }),
+		);
 	});
 
 	test("enforces memory namespaces and shared-memory provenance", () => {
@@ -295,6 +388,17 @@ describe("generic AVO core", () => {
 			sourceIds: ["cycle-1"],
 		});
 		expect(store.recall("parser timeout", ["coding", "shared"])).toHaveLength(1);
+		expect(
+			store.remember({
+				namespace: "shared",
+				type: "PROCEDURE",
+				title: "Cross-domain verification",
+				content: "Bind conclusions to observed evidence.",
+				tags: ["verification"],
+				importance: 7,
+				sourceIds: ["coding:test-1", "research:review-1"],
+			}),
+		).toMatchObject({ namespace: "shared" });
 		expect(() =>
 			store.remember({
 				namespace: "shared",
@@ -305,7 +409,7 @@ describe("generic AVO core", () => {
 				importance: 5,
 				sourceIds: [],
 			}),
-		).toThrow(/shared memories require source_ids/);
+		).toThrow(/shared memories require at least two environment-qualified source_ids/);
 	});
 
 	test("reopens namespaced memory without losing its canonical provenance", () => {
@@ -337,6 +441,23 @@ describe("AVO routing and adapters", () => {
 		const routedEnvironment = inferAvoEnvironment(prompt);
 		expect(routedEnvironment.environment).toBe(environment);
 		expect(inferAvoHorizon(prompt, routedEnvironment.environment).horizon).toBe(horizon);
+	});
+
+	test("treats a Git workspace as weak context for a non-coding prompt", () => {
+		const dir = artifactDir();
+		mkdirSync(join(dir, ".git"));
+		const route = inferAvoEnvironment("Explain Bayesian inference", dir);
+		expect(route).toMatchObject({ environment: "general" });
+		expect(route.reasons).toContain("Git workspace treated as context only, not a routing decision");
+		expect(inferAvoVerificationPolicy("Brainstorm name ideas", "general").policy).toBe("not_applicable");
+	});
+
+	test("classifies only direct host-verifiable evaluation commands", () => {
+		expect(classifyAvoHostEvaluationCommand("python -m pytest -q tests/test_parser.py")).toBe("test");
+		expect(classifyAvoHostEvaluationCommand("npm run build")).toBe("build");
+		expect(() => classifyAvoHostEvaluationCommand("true")).toThrow(/not a recognized host-verifiable/);
+		expect(() => classifyAvoHostEvaluationCommand("pytest -q || true")).toThrow(/one direct command/);
+		expect(() => classifyAvoHostEvaluationCommand("node verify.js & true")).toThrow(/one direct command/);
 	});
 
 	test.each([

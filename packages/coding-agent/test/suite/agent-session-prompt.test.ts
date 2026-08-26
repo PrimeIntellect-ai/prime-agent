@@ -531,7 +531,7 @@ stale extension instructions`,
 
 		expect(providerSystemPrompts[0]).toContain("stale extension instructions");
 		expect(providerSystemPrompts[1]).toBe(routedBaseSystemPrompt);
-		expect(providerSystemPrompts[1]).toContain("adapter=general and horizon=direct");
+		expect(providerSystemPrompts[1]).toContain("adapter=general, horizon=direct");
 		expect(providerSystemPrompts[1]).not.toContain("stale extension instructions");
 	});
 

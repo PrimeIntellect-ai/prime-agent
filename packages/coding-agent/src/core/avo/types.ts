@@ -1,10 +1,12 @@
-export const AVO_STATE_VERSION = 1;
+export const AVO_STATE_VERSION = 2;
 export const AVO_SKILL_NAME = "avo";
 
 export const AVO_ENVIRONMENTS = ["general", "coding", "research"] as const;
 export const AVO_HORIZONS = ["direct", "iterative", "long"] as const;
 export const AVO_AUTHORITIES = ["host", "environment", "external", "model_opinion"] as const;
 export const AVO_EVALUATION_STATUSES = ["pass", "fail", "revise", "inconclusive"] as const;
+export const AVO_EVALUATION_ISSUERS = ["host", "model", "legacy_unverified"] as const;
+export const AVO_VERIFICATION_POLICIES = ["required", "best_effort", "not_applicable"] as const;
 export const AVO_RUN_STATUSES = ["active", "completed", "blocked", "failed"] as const;
 export const AVO_CYCLE_OUTCOMES = ["accepted", "rejected", "revised", "inconclusive"] as const;
 export const AVO_MEMORY_NAMESPACES = ["shared", ...AVO_ENVIRONMENTS] as const;
@@ -15,6 +17,8 @@ export type AvoHorizon = (typeof AVO_HORIZONS)[number];
 export type AvoHorizonSelection = "auto" | AvoHorizon;
 export type AvoEvaluationAuthority = (typeof AVO_AUTHORITIES)[number];
 export type AvoEvaluationStatus = (typeof AVO_EVALUATION_STATUSES)[number];
+export type AvoEvaluationIssuer = (typeof AVO_EVALUATION_ISSUERS)[number];
+export type AvoVerificationPolicy = (typeof AVO_VERIFICATION_POLICIES)[number];
 export type AvoRunStatus = (typeof AVO_RUN_STATUSES)[number];
 export type AvoCycleOutcome = (typeof AVO_CYCLE_OUTCOMES)[number];
 export type AvoMemoryNamespace = (typeof AVO_MEMORY_NAMESPACES)[number];
@@ -42,9 +46,30 @@ export interface AvoEvaluationReceipt {
 	evaluatorId: string;
 	status: AvoEvaluationStatus;
 	authority: AvoEvaluationAuthority;
+	issuedBy: AvoEvaluationIssuer;
 	evidenceRefs: string[];
 	metrics: Record<string, number | string | boolean>;
 	createdAt: string;
+}
+
+export interface AvoTaskRunArchive {
+	runId: string;
+	objective: string;
+	verificationPolicy: AvoVerificationPolicy;
+	verificationReasons: string[];
+	routing: AvoRoutingDecision;
+	status: AvoRunStatus;
+	candidates: AvoCandidate[];
+	evaluations: AvoEvaluationReceipt[];
+	cycles: AvoCycle[];
+	lineage: AvoLineageEntry[];
+	checkpoints: AvoCheckpoint[];
+	supervision: AvoSupervisorReview[];
+	adapterStateRef?: AvoAdapterStateRef;
+	createdAt: string;
+	updatedAt: string;
+	archivedAt: string;
+	archiveReason: string;
 }
 
 export interface AvoCycle {
@@ -177,8 +202,12 @@ export interface AvoAdapterStateRef {
 
 export interface AvoRunState {
 	schemaVersion: typeof AVO_STATE_VERSION;
+	sessionId: string;
 	runId: string;
+	taskRuns: AvoTaskRunArchive[];
 	objective?: string;
+	verificationPolicy: AvoVerificationPolicy;
+	verificationReasons: string[];
 	environmentSelection: AvoEnvironmentSelection;
 	horizonSelection: AvoHorizonSelection;
 	routing: AvoRoutingDecision;
@@ -232,8 +261,11 @@ export interface AvoDashboardSection {
 }
 
 export interface AvoDashboardProjection {
+	runId: string;
+	taskRunCount: number;
 	environment: AvoEnvironment;
 	horizon: AvoHorizon;
+	verificationPolicy: AvoVerificationPolicy;
 	status: AvoRunStatus;
 	phase: {
 		id: string;

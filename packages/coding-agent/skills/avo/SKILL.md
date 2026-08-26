@@ -12,6 +12,9 @@ owns canonical state and lineage. This Python package is a typed bridge.
 AVO is always active for a root task; it is not a mode the user has to enter.
 The host selects the adapter and horizon automatically from the task. Do not ask
 the user to choose an adapter. A user may optionally override only the horizon.
+After a task passes its stop gate, the next root task starts a fresh task run;
+the prior candidate/evaluation lineage is archived while verified memory remains
+available across runs.
 
 Do not inspect the module or guess API signatures. Begin with
 `await avo.initialize(objective)` for a new run,
@@ -22,11 +25,13 @@ or `await avo.get_state()` after restart. Use the returned execution contract.
 1. Record a candidate with `add_candidate`. A candidate may be an answer,
    action, artifact, patch, implementation, plan, or hypothesis. The host
    stores a digest rather than trusting a model-supplied hash.
-2. Execute the relevant environment check.
-3. Record every result with `record_evaluation`. Use `authority="environment"`
-   for tests/build/runtime/filesystem checks, `external` for API/web/user-defined
-   evidence, `host` only for a host-issued receipt, and `model_opinion` for
-   subjective self/reviewer judgment.
+2. For an executable check, call `run_evaluation(candidate_id, command)`. The
+   host runs one recognized direct test/build/lint/benchmark/runtime/filesystem/
+   git command and creates the immutable environment receipt from its actual
+   exit status and output. Shell composition is rejected.
+3. Use `record_evaluation` only for subjective self/reviewer judgment. It only
+   accepts `authority="model_opinion"`; callers cannot mint host, environment,
+   or external authority.
 4. Complete the cycle with `complete_cycle`. The host derives accept/reject/
    revise/inconclusive from receipts; callers cannot declare their own outcome.
 5. Inspect the checkpoint and revise. Direct automatically escalates to
@@ -51,14 +56,10 @@ candidate = await avo.add_candidate({
     "summary": "Serialize parser cache mutation",
     "payload": {"diff_sha256": "..."},
 })
-await avo.record_evaluation({
-    "candidate_id": candidate["candidate"]["candidateId"],
-    "evaluator_id": "test",
-    "status": "pass",
-    "authority": "environment",
-    "evidence_refs": ["pytest:test_parser_race:exit=0"],
-    "metrics": {"passed": 18},
-})
+await avo.run_evaluation(
+    candidate["candidate"]["candidateId"],
+    "python -m pytest -q tests/test_parser_race.py",
+)
 await avo.complete_cycle({"candidate_id": "patch-parser-lock"})
 await avo.stop_gate()
 ```
@@ -67,6 +68,7 @@ await avo.stop_gate()
 
 Memory namespaces are `general`, `coding`, `research`, and `shared`. Recall
 uses the active environment plus `shared`. Promote a memory to `shared` only
-with source IDs showing that it is reusable across environments. NOOA 0.0.8
+with at least two environment-qualified source IDs from distinct environments,
+for example `coding:test-123` and `research:review-456`. NOOA 0.0.8
 runs in its pinned Python 3.13 sidecar; host lexical recall remains the lossless
 fallback. Canonical memory remains host-owned.

@@ -8,7 +8,10 @@ export {
 } from "./adapters.js";
 export { evaluateAvoCheckpoint } from "./checkpoint.js";
 export {
+	AVO_HOST_COMMAND_EVALUATORS,
 	type AvoDerivedEvaluation,
+	type AvoHostCommandEvaluator,
+	classifyAvoHostEvaluationCommand,
 	deriveAvoEvaluation,
 	evaluateGenericAvoStopGate,
 	isAuthoritativeAvoEvaluation,
@@ -18,6 +21,7 @@ export {
 	AvoStore,
 	inferAvoEnvironment,
 	inferAvoHorizon,
+	inferAvoVerificationPolicy,
 	parseAvoCandidateInput,
 	parseAvoCycleInput,
 	parseAvoEvaluationInput,

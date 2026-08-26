@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, type Harness } from "./harness.js";
@@ -14,7 +15,8 @@ describe("AgentSession universal AVO runtime", () => {
 		harness = await createHarness({ persistSession: true });
 		const initial = await harness.session.handleAvoHostRequest("avo.get");
 		expect(initial.state).toMatchObject({
-			runId: harness.session.sessionId,
+			sessionId: harness.session.sessionId,
+			runId: `${harness.session.sessionId}:task-1`,
 			environmentSelection: "auto",
 			horizonSelection: "auto",
 		});
@@ -28,9 +30,59 @@ describe("AgentSession universal AVO runtime", () => {
 			routing: { environment: "coding", horizon: "iterative", source: "host_auto" },
 		});
 		expect(harness.session.systemPrompt).toContain("AVO is Prime's default operating architecture");
-		expect(harness.session.systemPrompt).toContain("adapter=coding and horizon=iterative");
+		expect(harness.session.systemPrompt).toContain(
+			"adapter=coding, horizon=iterative, and verification_policy=required",
+		);
 		expect(harness.session.systemPrompt).toContain("not separate modes");
 		expect(harness.getPendingResponseCount()).toBe(0);
+	});
+
+	it("starts a clean task run after a policy-complete subjective task while retaining memory", async () => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([fauxAssistantMessage("draft")]);
+		await harness.session.prompt("Write a poem about rain");
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: { candidate_id: "poem-1", kind: "answer", summary: "Rain poem", payload: "Rain sings." },
+		});
+		await harness.session.handleAvoHostRequest("avo.evaluation.record", {
+			evaluation: {
+				candidate_id: "poem-1",
+				evaluator_id: "subjective_review",
+				status: "pass",
+				authority: "model_opinion",
+				evidence_refs: [],
+				metrics: { reviewed: true },
+			},
+		});
+		await harness.session.handleAvoHostRequest("avo.cycle.complete", {
+			cycle: { candidate_id: "poem-1" },
+		});
+		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
+			stop_gate: { passed: true },
+		});
+		await harness.session.handleAvoHostRequest("avo.memory.remember", {
+			memory: {
+				namespace: "general",
+				type: "STYLE",
+				title: "Rain imagery",
+				content: "The user accepted concise natural imagery.",
+				importance: 5,
+				source_ids: ["poem-1"],
+			},
+		});
+
+		harness.setResponses([fauxAssistantMessage("explanation")]);
+		await harness.session.prompt("Explain photosynthesis");
+		const state = (await harness.session.handleAvoHostRequest("avo.get")).state;
+		expect(state).toMatchObject({
+			runId: `${harness.session.sessionId}:task-2`,
+			objective: "Explain photosynthesis",
+			verificationPolicy: "best_effort",
+			routing: { environment: "general", horizon: "direct" },
+			candidates: [],
+			taskRuns: [{ runId: `${harness.session.sessionId}:task-1`, objective: "Write a poem about rain" }],
+			memories: [{ memoryId: expect.any(String), namespace: "general" }],
+		});
 	});
 
 	it("derives canonical cycle outcome from an environment receipt instead of caller opinion", async () => {
@@ -48,15 +100,31 @@ describe("AgentSession universal AVO runtime", () => {
 				payload: { diff: "host-hashes-this" },
 			},
 		});
-		await harness.session.handleAvoHostRequest("avo.evaluation.record", {
-			evaluation: {
-				candidate_id: "patch-1",
-				evaluator_id: "test",
-				status: "pass",
-				authority: "environment",
-				evidence_refs: ["vitest:parser:exit=0"],
-				metrics: { passed: 7 },
-			},
+		await expect(
+			harness.session.handleAvoHostRequest("avo.evaluation.record", {
+				evaluation: {
+					candidate_id: "patch-1",
+					evaluator_id: "test",
+					status: "pass",
+					authority: "environment",
+					evidence_refs: ["claimed:test:passed"],
+					metrics: { passed: 7 },
+				},
+			}),
+		).rejects.toThrow(/model-submitted evaluations must use authority=model_opinion/);
+		writeFileSync(
+			`${harness.tempDir}/parser.test.cjs`,
+			"const test = require('node:test'); const assert = require('node:assert'); test('parser', () => assert.equal(2 + 2, 4));\n",
+		);
+		const observed = await harness.session.handleAvoHostRequest("avo.evaluation.run", {
+			candidate_id: "patch-1",
+			command: "node --test parser.test.cjs",
+		});
+		expect(observed.evaluation).toMatchObject({
+			evaluatorId: "test",
+			status: "pass",
+			authority: "environment",
+			issuedBy: "host",
 		});
 		const completed = await harness.session.handleAvoHostRequest("avo.cycle.complete", {
 			cycle: { candidate_id: "patch-1", claimed_outcome: "rejected" },
@@ -82,15 +150,10 @@ describe("AgentSession universal AVO runtime", () => {
 				payload: { result: "grounded" },
 			},
 		});
-		await harness.session.handleAvoHostRequest("avo.evaluation.record", {
-			evaluation: {
-				candidate_id: "decision-1",
-				evaluator_id: "external_check",
-				status: "pass",
-				authority: "external",
-				evidence_refs: ["external:decision:verified"],
-				metrics: {},
-			},
+		writeFileSync(`${harness.tempDir}/verify-decision.js`, "process.exit(0);\n");
+		await harness.session.handleAvoHostRequest("avo.evaluation.run", {
+			candidate_id: "decision-1",
+			command: "node verify-decision.js",
 		});
 		const result = await harness.session.handleAvoHostRequest("avo.cycle.complete", {
 			cycle: { candidate_id: "decision-1" },

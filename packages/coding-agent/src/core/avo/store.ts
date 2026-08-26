@@ -6,10 +6,12 @@ import { deriveAvoEvaluation, evaluateGenericAvoStopGate } from "./evaluator.js"
 import {
 	AVO_AUTHORITIES,
 	AVO_ENVIRONMENTS,
+	AVO_EVALUATION_ISSUERS,
 	AVO_EVALUATION_STATUSES,
 	AVO_HORIZONS,
 	AVO_MEMORY_NAMESPACES,
 	AVO_STATE_VERSION,
+	AVO_VERIFICATION_POLICIES,
 	type AvoAdapterStateRef,
 	type AvoCandidate,
 	type AvoCandidateInput,
@@ -18,6 +20,7 @@ import {
 	type AvoEnvironment,
 	type AvoEnvironmentSelection,
 	type AvoEvaluationInput,
+	type AvoEvaluationIssuer,
 	type AvoEvaluationReceipt,
 	type AvoHorizon,
 	type AvoHorizonSelection,
@@ -29,6 +32,7 @@ import {
 	type AvoStopGate,
 	type AvoSupervisorBinding,
 	type AvoSupervisorReview,
+	type AvoVerificationPolicy,
 } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -105,10 +109,18 @@ function defaultRouting(now: string): AvoRoutingDecision {
 	};
 }
 
-function emptyState(runId: string, now: string): AvoRunState {
+function taskRunId(sessionId: string, index: number): string {
+	return `${sessionId}:task-${index}`;
+}
+
+function emptyState(sessionId: string, now: string): AvoRunState {
 	return {
 		schemaVersion: AVO_STATE_VERSION,
-		runId,
+		sessionId,
+		runId: taskRunId(sessionId, 1),
+		taskRuns: [],
+		verificationPolicy: "best_effort",
+		verificationReasons: ["no task prompt has been routed yet"],
 		environmentSelection: "auto",
 		horizonSelection: "auto",
 		routing: defaultRouting(now),
@@ -130,6 +142,32 @@ function isAvoState(value: unknown): value is AvoRunState {
 	if (!isRecord(value) || !isRecord(value.routing)) return false;
 	return (
 		value.schemaVersion === AVO_STATE_VERSION &&
+		typeof value.sessionId === "string" &&
+		typeof value.runId === "string" &&
+		Array.isArray(value.taskRuns) &&
+		AVO_VERIFICATION_POLICIES.includes(value.verificationPolicy as AvoVerificationPolicy) &&
+		Array.isArray(value.verificationReasons) &&
+		typeof value.createdAt === "string" &&
+		typeof value.updatedAt === "string" &&
+		Array.isArray(value.candidates) &&
+		Array.isArray(value.evaluations) &&
+		value.evaluations.every(
+			(receipt) => isRecord(receipt) && AVO_EVALUATION_ISSUERS.includes(receipt.issuedBy as AvoEvaluationIssuer),
+		) &&
+		Array.isArray(value.cycles) &&
+		Array.isArray(value.lineage) &&
+		Array.isArray(value.checkpoints) &&
+		Array.isArray(value.memories) &&
+		Array.isArray(value.memoryReflections) &&
+		Array.isArray(value.supervision) &&
+		AVO_ENVIRONMENTS.includes(value.routing.environment as AvoEnvironment) &&
+		AVO_HORIZONS.includes(value.routing.horizon as AvoHorizon)
+	);
+}
+
+function isLegacyAvoState(value: unknown): value is JsonRecord {
+	if (!isRecord(value) || value.schemaVersion !== 1 || !isRecord(value.routing)) return false;
+	return (
 		typeof value.runId === "string" &&
 		typeof value.createdAt === "string" &&
 		typeof value.updatedAt === "string" &&
@@ -144,6 +182,24 @@ function isAvoState(value: unknown): value is AvoRunState {
 		AVO_ENVIRONMENTS.includes(value.routing.environment as AvoEnvironment) &&
 		AVO_HORIZONS.includes(value.routing.horizon as AvoHorizon)
 	);
+}
+
+function migrateLegacyAvoState(value: JsonRecord): AvoRunState {
+	const environment = (value.routing as AvoRoutingDecision).environment;
+	const sessionId = value.runId as string;
+	return {
+		...(value as unknown as Omit<AvoRunState, "schemaVersion" | "sessionId" | "runId" | "taskRuns">),
+		schemaVersion: AVO_STATE_VERSION,
+		sessionId,
+		runId: taskRunId(sessionId, 1),
+		taskRuns: [],
+		verificationPolicy: environment === "general" ? "best_effort" : "required",
+		verificationReasons: ["migrated from AVO v1; legacy authoritative receipts require fresh host verification"],
+		evaluations: (value.evaluations as AvoEvaluationReceipt[]).map((receipt) => ({
+			...receipt,
+			issuedBy: "legacy_unverified" as const,
+		})),
+	};
 }
 
 function wordSet(value: string): Set<string> {
@@ -172,6 +228,7 @@ export function inferAvoEnvironment(prompt: string, cwd = ""): { environment: Av
 	}
 	const codingSignals = [
 		"code",
+		"coding",
 		"implement",
 		"fix",
 		"debug",
@@ -181,14 +238,75 @@ export function inferAvoEnvironment(prompt: string, cwd = ""): { environment: Av
 		"repository",
 		"git",
 		"package",
+		"compile",
+		"stack trace",
+		"pull request",
 	].filter((signal) => normalized.includes(signal));
-	if (codingSignals.length > 0 || existsSync(join(cwd, ".git"))) {
+	const artifactSignals = normalized.match(
+		/(?:^|[\s`'"(])(?:[\w./-]+\.(?:c|cc|cpp|cs|go|java|js|jsx|kt|php|py|rb|rs|sh|sql|swift|ts|tsx|vue)|package\.json|pyproject\.toml|cargo\.toml)(?:$|[\s`'"),:])/g,
+	);
+	if (codingSignals.length > 0 || (artifactSignals?.length ?? 0) > 0) {
 		return {
 			environment: "coding",
-			reasons: codingSignals.length > 0 ? [`coding signals: ${codingSignals.join(", ")}`] : ["coding workspace"],
+			reasons: [
+				...(codingSignals.length > 0 ? [`coding signals: ${codingSignals.join(", ")}`] : []),
+				...((artifactSignals?.length ?? 0) > 0 ? ["referenced code or repository artifacts"] : []),
+			],
 		};
 	}
-	return { environment: "general", reasons: ["no research or coding-specific signal"] };
+	return {
+		environment: "general",
+		reasons: [
+			"no research or coding-specific task signal",
+			...(existsSync(join(cwd, ".git")) ? ["Git workspace treated as context only, not a routing decision"] : []),
+		],
+	};
+}
+
+export function inferAvoVerificationPolicy(
+	prompt: string,
+	environment: AvoEnvironment,
+): { policy: AvoVerificationPolicy; reasons: string[] } {
+	if (environment === "coding" || environment === "research") {
+		return { policy: "required", reasons: [`${environment} work requires host-observed verification`] };
+	}
+	const normalized = prompt.toLowerCase();
+	const subjectiveSignals = [
+		"write a poem",
+		"write a story",
+		"brainstorm",
+		"suggest names",
+		"name ideas",
+		"rewrite",
+		"rephrase",
+		"make this sound",
+		"creative",
+	].filter((signal) => normalized.includes(signal));
+	if (subjectiveSignals.length > 0) {
+		return {
+			policy: "not_applicable",
+			reasons: [`subjective task signals: ${subjectiveSignals.join(", ")}`],
+		};
+	}
+	const requiredSignals = [
+		"verify",
+		"check whether",
+		"calculate",
+		"compute",
+		"prove",
+		"look up",
+		"latest",
+		"current",
+		"exact",
+		"fact check",
+	].filter((signal) => normalized.includes(signal));
+	if (requiredSignals.length > 0) {
+		return { policy: "required", reasons: [`verification signals: ${requiredSignals.join(", ")}`] };
+	}
+	return {
+		policy: "best_effort",
+		reasons: ["general task permits transparent best-effort evaluation when no external verifier exists"],
+	};
 }
 
 export function inferAvoHorizon(
@@ -296,22 +414,23 @@ export class AvoStore {
 
 	constructor(
 		artifactDir?: string,
-		runId = artifactDir ? basename(artifactDir) : `avo-${randomUUID()}`,
+		sessionId = artifactDir ? basename(artifactDir) : `avo-${randomUUID()}`,
 		private readonly now: () => string = () => new Date().toISOString(),
 		private readonly cwd = process.cwd(),
 	) {
 		this.statePath = artifactDir ? join(artifactDir, "avo", "state.json") : undefined;
-		this.state = this.load(runId);
+		this.state = this.load(sessionId);
 		if (this.statePath && !existsSync(this.statePath) && !this.loadError) this.save();
 	}
 
-	private load(runId: string): AvoRunState {
-		const fallback = emptyState(runId, this.now());
+	private load(sessionId: string): AvoRunState {
+		const fallback = emptyState(sessionId, this.now());
 		if (!this.statePath || !existsSync(this.statePath)) return fallback;
 		try {
 			const parsed = JSON.parse(readFileSync(this.statePath, "utf8")) as unknown;
-			if (!isAvoState(parsed)) throw new Error("state schema is invalid or unsupported");
-			return parsed;
+			if (isAvoState(parsed)) return parsed;
+			if (isLegacyAvoState(parsed)) return migrateLegacyAvoState(parsed);
+			throw new Error("state schema is invalid or unsupported");
 		} catch (error) {
 			this.loadError = error instanceof Error ? error.message : String(error);
 			return fallback;
@@ -358,6 +477,55 @@ export class AvoStore {
 		return this.getState();
 	}
 
+	startTask(objective: string, prompt = objective, archiveReason = "previous task passed its stop gate"): AvoRunState {
+		const normalizedObjective = requireString(objective, "objective");
+		if (this.state.objective) {
+			this.state.taskRuns.push({
+				runId: this.state.runId,
+				objective: this.state.objective,
+				verificationPolicy: this.state.verificationPolicy,
+				verificationReasons: [...this.state.verificationReasons],
+				routing: structuredClone(this.state.routing),
+				status: this.state.status,
+				candidates: structuredClone(this.state.candidates),
+				evaluations: structuredClone(this.state.evaluations),
+				cycles: structuredClone(this.state.cycles),
+				lineage: structuredClone(this.state.lineage),
+				checkpoints: structuredClone(this.state.checkpoints),
+				supervision: structuredClone(this.state.supervision),
+				adapterStateRef: this.state.adapterStateRef ? structuredClone(this.state.adapterStateRef) : undefined,
+				createdAt: this.state.createdAt,
+				updatedAt: this.state.updatedAt,
+				archivedAt: this.now(),
+				archiveReason: requireString(archiveReason, "archive reason"),
+			});
+		}
+		const now = this.now();
+		this.state.runId = taskRunId(this.state.sessionId, this.state.taskRuns.length + 1);
+		this.state.objective = normalizedObjective;
+		this.state.environmentSelection = "auto";
+		this.state.routing = defaultRouting(now);
+		this.state.status = "active";
+		this.state.candidates = [];
+		this.state.evaluations = [];
+		this.state.cycles = [];
+		this.state.lineage = [
+			{
+				lineageId: `lineage-${randomUUID()}`,
+				kind: "initialized",
+				summary: `Initialized AVO task run: ${normalizedObjective}`,
+				recordedAt: now,
+			},
+		];
+		this.state.checkpoints = [];
+		this.state.supervision = [];
+		this.state.adapterStateRef = undefined;
+		this.state.createdAt = now;
+		this.routePrompt(prompt);
+		this.save();
+		return this.getState();
+	}
+
 	routePrompt(prompt: string): AvoRoutingDecision {
 		const normalized = requireString(prompt, "prompt");
 		const inferredEnvironment = inferAvoEnvironment(normalized, this.cwd);
@@ -369,6 +537,7 @@ export class AvoStore {
 					: inferredEnvironment.environment
 				: this.state.environmentSelection;
 		const inferredHorizon = inferAvoHorizon(normalized, environment);
+		const inferredVerification = inferAvoVerificationPolicy(normalized, environment);
 		const horizonRank: Record<AvoHorizon, number> = { direct: 0, iterative: 1, long: 2 };
 		const horizon =
 			this.state.horizonSelection === "auto"
@@ -394,6 +563,8 @@ export class AvoStore {
 			decidedAt: this.now(),
 		};
 		this.state.routing = decision;
+		this.state.verificationPolicy = inferredVerification.policy;
+		this.state.verificationReasons = inferredVerification.reasons;
 		this.save();
 		return structuredClone(decision);
 	}
@@ -401,7 +572,13 @@ export class AvoStore {
 	setEnvironment(selection: AvoEnvironmentSelection, source: "model" | "user" = "user"): AvoRunState {
 		if (selection !== "auto" && !AVO_ENVIRONMENTS.includes(selection)) throw new Error("invalid AVO environment");
 		this.state.environmentSelection = selection;
-		if (selection !== "auto") this.state.routing.environment = selection;
+		if (selection !== "auto") {
+			this.state.routing.environment = selection;
+			if (selection !== "general") {
+				this.state.verificationPolicy = "required";
+				this.state.verificationReasons = [`${selection} work requires host-observed verification`];
+			}
+		}
 		this.recordRoutingChange(`Environment selection changed to ${selection}`, source);
 		return this.getState();
 	}
@@ -456,15 +633,33 @@ export class AvoStore {
 		return structuredClone(candidate);
 	}
 
-	recordEvaluation(input: AvoEvaluationInput): AvoEvaluationReceipt {
+	recordEvaluation(
+		input: AvoEvaluationInput,
+		issuedBy: Exclude<AvoEvaluationIssuer, "legacy_unverified">,
+	): AvoEvaluationReceipt {
 		if (!this.state.candidates.some((candidate) => candidate.candidateId === input.candidateId)) {
 			throw new Error(`evaluation references unknown candidate ${input.candidateId}`);
+		}
+		if (issuedBy === "model" && input.authority !== "model_opinion") {
+			throw new Error("model-issued evaluations must use authority=model_opinion");
+		}
+		if (input.authority !== "model_opinion" && issuedBy !== "host") {
+			throw new Error("authoritative evaluations must be issued from host-observed evidence");
 		}
 		if (input.authority !== "model_opinion" && input.evidenceRefs.length === 0) {
 			throw new Error("host, environment, and external evaluations require evidence_refs");
 		}
 		const evaluationId = input.evaluationId ?? `evaluation-${randomUUID()}`;
-		if (this.state.evaluations.some((evaluation) => evaluation.evaluationId === evaluationId)) {
+		const existingEvaluationIndex = this.state.evaluations.findIndex(
+			(evaluation) => evaluation.evaluationId === evaluationId,
+		);
+		if (
+			existingEvaluationIndex >= 0 &&
+			this.state.evaluations[existingEvaluationIndex]?.issuedBy === "legacy_unverified" &&
+			issuedBy === "host"
+		) {
+			this.state.evaluations.splice(existingEvaluationIndex, 1);
+		} else if (existingEvaluationIndex >= 0) {
 			throw new Error(`evaluation ${evaluationId} already exists`);
 		}
 		const receipt: AvoEvaluationReceipt = {
@@ -473,6 +668,7 @@ export class AvoStore {
 			evaluatorId: requireIdentifier(input.evaluatorId, "evaluation.evaluator_id"),
 			status: input.status,
 			authority: input.authority,
+			issuedBy,
 			evidenceRefs: [...new Set(input.evidenceRefs)],
 			metrics: structuredClone(input.metrics),
 			createdAt: this.now(),
@@ -622,8 +818,18 @@ export class AvoStore {
 			throw new Error(`memory ${memoryId} already exists`);
 		}
 		const sourceIds = input.sourceIds ?? [];
-		if (input.namespace === "shared" && sourceIds.length === 0) {
-			throw new Error("shared memories require source_ids proving cross-environment applicability");
+		if (input.namespace === "shared") {
+			const qualifiedEnvironments = new Set(
+				sourceIds.flatMap((sourceId) => {
+					const match = /^(general|coding|research):[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.exec(sourceId);
+					return match ? [match[1] as AvoEnvironment] : [];
+				}),
+			);
+			if (sourceIds.length < 2 || qualifiedEnvironments.size < 2) {
+				throw new Error(
+					"shared memories require at least two environment-qualified source_ids from distinct environments",
+				);
+			}
 		}
 		const memory: AvoMemory = {
 			memoryId,
@@ -706,8 +912,7 @@ export class AvoStore {
 		return evaluateGenericAvoStopGate(this.state.candidates, this.state.evaluations);
 	}
 
-	complete(): AvoRunState {
-		const gate = this.evaluateStopGate();
+	complete(gate: AvoStopGate = this.evaluateStopGate()): AvoRunState {
 		if (!gate.passed) throw new Error(`AVO completion is blocked: ${gate.reasons.join("; ")}`);
 		this.state.status = "completed";
 		this.state.lineage.push({
