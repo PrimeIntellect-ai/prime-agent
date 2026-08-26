@@ -367,6 +367,12 @@ class ReplTest(unittest.TestCase):
         self.assertIsNone(buffered["id"])
         self.assertLess(events.index(buffered), events.index(one(events, "done")))
 
+    def test_stdout_buffer_write_rejects_int(self):
+        # A real stdout.buffer raises TypeError for ints; bytes(5) would emit five NULs.
+        events = self.repl.execute("bufint", "import sys\nsys.stdout.buffer.write(5)")
+        self.assertEqual(one(events, "error")["ename"], "TypeError")
+        self.assertEqual(one(events, "done")["status"], "error")
+
     def test_asyncio_task_output_keeps_spawning_cell_id(self):
         code = "\n".join(
             [
