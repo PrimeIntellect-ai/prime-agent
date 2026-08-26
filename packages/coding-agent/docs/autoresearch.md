@@ -80,14 +80,22 @@ The skill exposes `crossref_search`, `crossref_verify`, `arxiv_search`, and
 agent-driven search. `download_open_full_text` saves a declared legal OA/arXiv
 copy as a bounded, hashed session artifact after public-HTTPS and redirect
 validation. Crossref results remain `published_status_unclear` until a
-venue/publisher check establishes the status; an arXiv page never silently
-becomes evidence of peer review. Contact emails come from environment variables
-and are not written into canonical state.
+venue establishes `published`; neither Crossref nor an arXiv page establishes
+peer review. `verify_peer_review` requires an explicit peer-review/refereeing
+quote on the DOI item's own publisher page before the ledger records
+`peer_reviewed_verified`. The host rejects negative wording, validates public
+DNS before every redirect, pins the connection to the vetted address, bounds
+the response, and requires a complete item-specific positive sentence in
+visible, applicable context on the same publisher document as the DOI. Contact
+emails come from environment variables and are not written into canonical
+state.
 
-Every serious candidate records whether its search covered mechanism queries,
-adjacent terminology, backward/forward citations, recommendations, recent
-12–24 month work, preprints, and surveys. A surviving candidate cannot omit any
-of those expansions.
+Every serious candidate records literal search receipts: coverage kind, query,
+source, result URLs, inspected publication IDs, candidate digest, and host
+timestamp. The host derives coverage from those receipts; the model cannot
+submit coverage booleans. A surviving candidate must have receipts for
+mechanism queries, adjacent terminology, backward/forward citations,
+recommendations, recent 12–24 month work, preprints, and surveys.
 
 ## Candidate review
 
@@ -102,10 +110,12 @@ children and waits for their marked, automatically ingested responses:
 | Top-tier editor | Tests importance, broad relevance, evidence path, and incrementalism |
 
 Their JSON replies are evidence for the root's decision, not canonical truth.
-A candidate recorded as `survived` or `promoted` must have passing results from
-all four roles and pass all eight problem gates: importance, unresolved status,
-publication support, mechanistic motivation, falsifiability, feasibility,
-closest-prior-work analysis, and broader relevance.
+Every completed major cycle—including rejected, revised, and failed cycles—must
+have results from all four roles. A candidate recorded as `survived` or
+`promoted` must additionally have four passing results and pass all eight
+problem gates: importance, unresolved status, publication support, mechanistic
+motivation, falsifiability, feasibility, closest-prior-work analysis, and
+broader relevance.
 
 `spawn_reviewers` and `await_reviews` remain available separately when a caller
 needs custom orchestration. Reviewer and supervisor replies carry explicit
@@ -123,11 +133,20 @@ reuse an old action. `prepare_memory_reuse` requires current-state bindings,
 applicability conditions, a reusable procedure, and verification requirements;
 `verify_memory_reuse` records the evidence before a plan becomes `verified`.
 
-On Python 3.12–3.13, the optional `nooa` extra mirrors these typed memories into
-NVIDIA NOOA's `MemoryStore`. Prime currently bundles Python 3.14, outside NOOA's
-declared range, so the host ledger is the active lossless fallback. The adapter
-reports this explicitly through `nooa_backend_status()` and automatically uses
-NOOA when it becomes compatible.
+The skill pins NVIDIA NOOA 0.0.8 in an isolated Python 3.13 `uv` sidecar and
+mirrors these typed memories into NOOA's official `MemoryStore`. Prime's active
+model/provider and main Python runtime are unchanged. The adapter reports
+availability through `nooa_backend_status()` and preserves the host ledger as a
+lossless fallback.
+
+Initialization and each completed cycle perform bounded non-reinforcing NOOA
+recall and return the context for the next research step. Official NOOA
+reflection/consolidation runs every five cycles, after a supervisor
+intervention, and at candidate promotion. Its report and newly archived memory
+IDs are written to canonical maintenance history, so maintenance is auditable.
+The host memory ledger stays lossless; a sidecar pruning decision cannot delete
+or invalidate canonical research history. Subsequent syncs preserve NOOA-owned
+access history, graph edges, importance scores, and archive tombstones.
 
 `record_experiment` owns experiment identity, hypothesis, design, baselines,
 data/code/compute requirements, artifacts, metrics, results, interpretation,
@@ -140,11 +159,14 @@ bindings must reference a completed or failed experiment in this ledger.
 Call `autoresearch.complete_cycle(...)` after every major cycle, including a
 rejection, revision, prior-art collision, or failed experiment. The call:
 
-1. deduplicates newly encountered publications;
-2. compares the complete field map with the previous map;
-3. records the outcome and verified promotions in canonical lineage;
-4. computes deterministic progress/stagnation signals in the host; and
-5. sends a compact packet to the retained supervisor.
+1. joins all four results from host-bound reviewer children;
+2. derives search coverage from candidate-bound receipts;
+3. deduplicates newly encountered publications;
+4. compares the complete field map with the previous map;
+5. records the outcome and verified promotions in canonical lineage;
+6. computes deterministic progress/stagnation signals in the host;
+7. sends a compact packet to the retained supervisor; and
+8. runs milestone reflection when due and bounded recall for the next cycle.
 
 The initial thresholds are explicitly prototype heuristics:
 
@@ -176,7 +198,8 @@ user-only file permissions. Kernel restart and compaction therefore do not erase
 the research run. Non-persisted sessions keep the same state in memory only.
 
 `await autoresearch.stop_gate()` checks the promoted candidate, two or more
-status-verified motivation publications including a peer-reviewed work,
+status-verified motivation publications including a publisher-evidence-verified
+peer-reviewed work,
 latest-preprint coverage, closest prior work,
 mechanism, falsifier, feasibility, completed preliminary evidence, baselines,
 broader relevance, four passing reviews, and a `progressing` supervisor result

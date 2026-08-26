@@ -17,13 +17,16 @@ the durable state and stagnation calculation; the Python API is a typed bridge.
    discovery, synonym expansion, references, citations, related work, and
    recent papers. Use Crossref, arXiv, and Unpaywall as verification/full-text
    helpers. Read legal full text where possible and add each important work
-   with `add_publication`.
+   with `add_publication`. For every serious candidate, bind the query, source,
+   result URLs, and inspected verified papers with `record_search` for each
+   applicable coverage category.
 3. Add claims with exact evidence bindings. Promote only claims whose wording
    is supported. Keep contradictions and unresolved objections visible.
 4. Build a candidate, then call `await autoresearch.review_candidate(candidate)`.
    The host—not the root model—spawns and binds the literature auditor,
    prior-art killer, experimental critic, and top-tier editor. A marked JSON
    verdict is accepted only from the child assigned to that candidate and role.
+   This is required even when the candidate will be rejected or revised.
 5. Call `complete_cycle` after **every** major cycle, including rejection,
    revision, prior-art collision, or experimental failure. The host compares
    the complete field map, counts genuinely new publication identities,
@@ -64,9 +67,16 @@ Search helpers return candidate identities, never authoritative status fields.
 `add_publication` immediately asks a fixed-domain host verifier to resolve the
 DOI through Crossref or the preprint ID through arXiv. The host records a
 metadata digest and receipt; callers cannot submit `publication_status` or
-`metadata_verified_by`. Crossref journal/proceedings registrations with a
-container are conservatively classified as `peer_reviewed`; all other Crossref
-types stay `published_status_unclear`, and arXiv-only records stay `preprint`.
+`metadata_verified_by`. A Crossref journal/proceedings registration with a
+container establishes only `published`; other Crossref records stay
+`published_status_unclear`, and arXiv-only records stay `preprint`. To establish
+`peer_reviewed_verified`, call `verify_peer_review(paper_id, evidence_url,
+exact_quote)`. The host resolves the DOI, restricts the evidence page to the
+exact DOI item page on the publisher host, pins each request to the public DNS
+address it vetted before that redirect, downloads it with a byte limit, and
+requires a complete item-specific positive sentence in visible, applicable
+page context. Negative, uncertain, cropped, hidden, or generic policy wording
+cannot upgrade the item.
 Contact emails are read from `CROSSREF_MAILTO` and `UNPAYWALL_EMAIL` and are
 never persisted in research state.
 
@@ -93,13 +103,23 @@ conditions, a reusable procedure, and verification requirements. Call
 `verify_memory_reuse` only after checking those requirements. A plan is not
 usable while its status is `proposed` or `rejected`.
 
-`remember`, `sync_nooa_memory`, and `recall` use NVIDIA NOOA 0.0.8 through a
+`remember`, `sync_nooa_memory`, `recall`, `spontaneous_recall`, and
+`reflect_memory` use NVIDIA NOOA 0.0.8 through a
 pinned Python 3.13 `uv` sidecar. Prime's model, provider, and main Python runtime
 are unchanged. Canonical records remain host-owned; NOOA supplies its real
 hashing embeddings, dense+sparse candidate retrieval, ACT-R scoring, and graph
 spread. If the sidecar is unavailable, recall reports the reason and uses the
 host lexical index as a lossless fallback. Inspect `nooa_backend_status()` and
 the returned `nooa` receipt rather than assuming it ran.
+
+Initialization and every completed cycle return a bounded, non-reinforcing
+`spontaneous_recall` context for the next research step. Official NOOA
+consolidation runs automatically every five cycles, after a supervisor
+intervention, and when a candidate is promoted; its maintenance report and any
+newly archived NOOA memory IDs are recorded in canonical maintenance history.
+NOOA pruning never deletes or invalidates the lossless host memory ledger.
+Later host syncs preserve NOOA's access counters, graph edges, rescored
+importance, and sidecar archive tombstones instead of recreating those records.
 
 ## Publication and claim API
 
@@ -113,6 +133,12 @@ await autoresearch.add_publication({
     "doi": "10.1234/example",
     "full_text_url": "https://example.org/paper.pdf",
 })
+
+await autoresearch.verify_peer_review(
+    "doi:10.1234/example",
+    "https://example.org/articles/example",
+    "This article underwent peer review before publication.",
+)
 
 claim = await autoresearch.add_claim({
     "claim_text": "The evaluated methods share assumption A.",
@@ -168,6 +194,27 @@ candidate = {
 await autoresearch.review_candidate(candidate)
 ```
 
+Before completing a surviving/promoted candidate, record all eight search
+categories. Each receipt must cite at least one public HTTPS result and one
+paper already present in the host-verified publication ledger:
+
+```python
+await autoresearch.record_search(
+    candidate,
+    coverage_kind="mechanism_queries",
+    query='"evidence authority" agent memory mechanism',
+    source="google_search",
+    result_urls=["https://example.org/search-result"],
+    inspected_paper_ids=["doi:10.1234/example"],
+)
+```
+
+Coverage kinds are `mechanism_queries`, `synonyms_and_adjacent`,
+`backward_references`, `forward_citations`, `related_recommendations`,
+`recent_12_to_24_months`, `recent_preprints`, and `surveys_or_reviews`.
+Allowed sources are `google_search`, `arxiv`, `crossref`, `publisher`,
+`repository`, `citation_graph`, and `other`.
+
 Complete the cycle with the candidate, the publications first encountered in
 that cycle, the **entire current** field map, and all problem gates. Do not pass
 reviewer verdicts; the host joins the assigned children’s collected results:
@@ -198,16 +245,6 @@ checkpoint = await autoresearch.complete_cycle({
         "closest_prior_work_analyzed": True,
         "broader_relevance": True,
     },
-    "search_coverage": {
-        "mechanism_queries": True,
-        "synonyms_and_adjacent": True,
-        "backward_references": True,
-        "forward_citations": True,
-        "related_recommendations": True,
-        "recent_12_to_24_months": True,
-        "recent_preprints": True,
-        "surveys_or_reviews": True,
-    },
     "motivation_paper_ids": ["doi:10.1234/example", "arxiv:2608.12345"],
     "closest_prior_work_paper_ids": ["doi:10.1234/example"],
     "preliminary_evidence_experiment_ids": [],
@@ -215,9 +252,11 @@ checkpoint = await autoresearch.complete_cycle({
 })
 ```
 
-`survived` and `promoted` require all four reviewer roles, all eight gates,
-complete search coverage, at least two verified motivation papers, and a
-ledger-backed closest-prior-work comparison. `promoted` additionally requires
+Every completed major cycle requires all four host-bound reviewer roles.
+`survived` and `promoted` additionally require all four verdicts to pass, all
+eight problem gates, host-derived complete search coverage, at least two
+verified motivation papers, and a ledger-backed closest-prior-work comparison.
+`promoted` additionally requires
 an already-canonical claim and at least one completed preliminary experiment.
 The host returns `progressing`, `watch`, or `intervene`; numerical trigger
 thresholds are prototype heuristics, not claims about NVIDIA's private AVO

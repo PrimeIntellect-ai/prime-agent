@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	AutoresearchStore,
+	buildAutoresearchReviewerPrompts,
+	hasApplicablePeerReviewEvidence,
+	isPublicAutoresearchAddress,
 	parseAutoresearchAgentPayload,
 	parseAutoresearchCandidateInput,
 	parseAutoresearchClaimInput,
@@ -13,6 +16,7 @@ import {
 	parseAutoresearchMemoryInput,
 	parseAutoresearchMemoryReuseInput,
 	parseAutoresearchPublicationInput,
+	parseAutoresearchSearchReceiptInput,
 	parseAutoresearchSupervisionInput,
 } from "../src/core/autoresearch.js";
 
@@ -30,7 +34,7 @@ function publication(index = 1) {
 	};
 }
 
-function verification(index = 1, publicationStatus: "peer_reviewed" | "preprint" = "peer_reviewed") {
+function verification(index = 1, publicationStatus: "published" | "preprint" = "published") {
 	return {
 		verificationId: `verification-${index}`,
 		paperId: `doi:10.1000/example-${index}`,
@@ -42,10 +46,22 @@ function verification(index = 1, publicationStatus: "peer_reviewed" | "preprint"
 			title: `Example paper ${index}`,
 			authors: ["A. Researcher"],
 			year: 2026,
-			venue: publicationStatus === "peer_reviewed" ? "Research Conference" : "arXiv",
+			venue: publicationStatus === "published" ? "Research Conference" : "arXiv",
 			doi: `10.1000/example-${index}`,
 			fullTextUrl: `https://example.test/paper-${index}.pdf`,
 		},
+	};
+}
+
+function peerReviewVerification(index = 1) {
+	return {
+		verificationId: `peer-review-verification-${index}`,
+		paperId: `doi:10.1000/example-${index}`,
+		source: "publisher" as const,
+		evidenceUrl: `https://example.test/journal-${index}/article-${index}`,
+		exactQuote: "This article underwent peer review before publication.",
+		verifiedAt: NOW,
+		evidenceDigest: `${index + 2}`.repeat(64),
 	};
 }
 
@@ -89,18 +105,16 @@ function fieldMaps(suffix = "base") {
 	};
 }
 
-function searchCoverage() {
-	return {
-		mechanism_queries: true,
-		synonyms_and_adjacent: true,
-		backward_references: true,
-		forward_citations: true,
-		related_recommendations: true,
-		recent_12_to_24_months: true,
-		recent_preprints: true,
-		surveys_or_reviews: true,
-	};
-}
+const SEARCH_COVERAGE_KINDS = [
+	"mechanism_queries",
+	"synonyms_and_adjacent",
+	"backward_references",
+	"forward_citations",
+	"related_recommendations",
+	"recent_12_to_24_months",
+	"recent_preprints",
+	"surveys_or_reviews",
+] as const;
 
 function passingReviewers() {
 	return ["literature_auditor", "prior_art_killer", "experimental_critic", "top_tier_editor"].map((role) => ({
@@ -139,9 +153,32 @@ describe("autoresearch control plane", () => {
 		return { root, value: new AutoresearchStore(root, () => NOW, root) };
 	}
 
-	function addVerifiedPublication(value: AutoresearchStore, index = 1): void {
+	function addVerifiedPublication(value: AutoresearchStore, index = 1, peerReviewed = true): void {
 		value.addPublication(parseAutoresearchPublicationInput(publication(index), NOW));
 		value.recordPublicationVerification(verification(index));
+		if (peerReviewed) value.recordPeerReviewVerification(peerReviewVerification(index));
+	}
+
+	function recordSearchReceipts(
+		value: AutoresearchStore,
+		candidateValue: ReturnType<typeof parseAutoresearchCandidateInput>,
+		paperId = "doi:10.1000/example-1",
+	): void {
+		for (const coverageKind of SEARCH_COVERAGE_KINDS) {
+			value.recordSearchReceipt(
+				parseAutoresearchSearchReceiptInput(
+					candidateValue,
+					{
+						coverage_kind: coverageKind,
+						query: `${coverageKind} for ${candidateValue.statement}`,
+						source: coverageKind === "recent_preprints" ? "arxiv" : "google_search",
+						result_urls: [`https://example.org/search/${coverageKind}`],
+						inspected_paper_ids: [paperId],
+					},
+					NOW,
+				),
+			);
+		}
 	}
 
 	function ingestPassingReviews(
@@ -240,7 +277,7 @@ describe("autoresearch control plane", () => {
 
 	it("rejects caller-authored publication authority and quote-free textual evidence", () => {
 		expect(() =>
-			parseAutoresearchPublicationInput({ ...publication(), publication_status: "peer_reviewed" }, NOW),
+			parseAutoresearchPublicationInput({ ...publication(), publication_status: "peer_reviewed_verified" }, NOW),
 		).toThrow("publication status is host-verified");
 		expect(() =>
 			parseAutoresearchPublicationInput({ ...publication(), metadata_verified_by: ["crossref"] }, NOW),
@@ -263,25 +300,152 @@ describe("autoresearch control plane", () => {
 				NOW,
 			),
 		).toThrow("exact_quote is required");
+		expect(
+			parseAutoresearchPublicationInput(
+				{
+					paper_id: "arxiv:2608.12345",
+					title: "A preprint",
+					authors: ["A. Researcher"],
+					full_text_url: "https://arxiv.org/pdf/2608.12345",
+				},
+				NOW,
+			).preprintId,
+		).toBe("2608.12345");
+		expect(() =>
+			parseAutoresearchPublicationInput(
+				{
+					...publication(),
+					doi: "10.1000/a-different-paper",
+				},
+				NOW,
+			),
+		).toThrow("must identify the same DOI");
 	});
 
-	it("enforces the four-review and strong-problem gates for surviving candidates", () => {
+	it("keeps Crossref publication evidence separate from explicit publisher peer-review proof", () => {
+		const { value } = store();
+		value.initialize("Test conservative publication authority");
+		addVerifiedPublication(value, 1, false);
+		expect(value.getState().publications[0]?.publicationStatus).toBe("published");
+		expect(() =>
+			value.recordPublicationVerification({
+				...verification(1),
+				verificationId: "forged-peer-review-metadata",
+				publicationStatus: "peer_reviewed_verified",
+			}),
+		).toThrow("metadata cannot establish peer review");
+		expect(() =>
+			value.recordPeerReviewVerification({
+				...peerReviewVerification(1),
+				exactQuote: "Editorials are not peer reviewed.",
+			}),
+		).toThrow("positively establish");
+		for (const exactQuote of [
+			"Peer reviewed articles are distinct from this editorial.",
+			"This publisher produces peer reviewed journals, but this item is an editorial.",
+			"This article may be peer reviewed.",
+		]) {
+			expect(() =>
+				value.recordPeerReviewVerification({
+					...peerReviewVerification(1),
+					exactQuote,
+				}),
+			).toThrow("positively establish");
+		}
+		value.recordPeerReviewVerification(peerReviewVerification(1));
+		expect(value.getState()).toMatchObject({
+			publications: [{ publicationStatus: "peer_reviewed_verified" }],
+			peerReviewVerifications: [{ source: "publisher" }],
+		});
+	});
+
+	it("requires peer-review proof in visible, applicable item-page context", () => {
+		const quote = "This article was peer reviewed.";
+		expect(hasApplicablePeerReviewEvidence(`<main><p>${quote}</p></main>`, quote)).toBe(true);
+		expect(
+			hasApplicablePeerReviewEvidence(
+				`<html><head><title>Example journal</title></head><body><p>${quote}</p></body></html>`,
+				quote,
+			),
+		).toBe(true);
+		for (const documentText of [
+			`<main><p>The following statement is false: ${quote}</p></main>`,
+			`<script>window.status = ${JSON.stringify(quote)}</script>`,
+			`<p hidden>${quote}</p>`,
+			`<p aria-hidden="true">${quote}</p>`,
+			`<p style="display:none">${quote}</p>`,
+			`<p class=related-content>${quote}</p>`,
+			`<div hidden><div>decoy</div><p>${quote}</p></div>`,
+			`<div class=related-content><div>decoy</div><p>${quote}</p></div>`,
+			`<div class="related-content-widget"><p>${quote}</p></div>`,
+			`<div class="recommended-content"><p>${quote}</p></div>`,
+			`<div class="also-read-widget"><p>${quote}</p></div>`,
+			`<del>${quote}</del>`,
+			`<aside class="related-content"><p>${quote}</p></aside>`,
+		]) {
+			expect(hasApplicablePeerReviewEvidence(documentText, quote)).toBe(false);
+		}
+	});
+
+	it("rejects private and special-use addresses before publisher evidence fetches", () => {
+		for (const address of [
+			"127.0.0.1",
+			"169.254.169.254",
+			"10.0.0.1",
+			"::1",
+			"::ffff:127.0.0.1",
+			"::ffff:7f00:1",
+			"fec0::1",
+			"5f00::1",
+			"100:0:0:1::1",
+			"2001:db8::1",
+		]) {
+			expect(isPublicAutoresearchAddress(address)).toBe(false);
+		}
+		expect(isPublicAutoresearchAddress("8.8.8.8")).toBe(true);
+		expect(isPublicAutoresearchAddress("::ffff:8.8.8.8")).toBe(true);
+		expect(isPublicAutoresearchAddress("2606:4700:4700::1111")).toBe(true);
+	});
+
+	it("derives search coverage from receipts and enforces four reviews for every cycle", () => {
 		const { value } = store();
 		value.initialize("Test host-owned reviewer gates");
 		addVerifiedPublication(value);
 		addVerifiedPublication(value, 2);
+		const parsedCandidate = parseAutoresearchCandidateInput(candidate(1));
 		const raw = {
 			...rejectedCycle(1),
 			outcome: "survived",
 			rejection_reason: undefined,
 			gates: gates(),
-			search_coverage: searchCoverage(),
 			motivation_paper_ids: ["doi:10.1000/example-1", "doi:10.1000/example-2"],
 			closest_prior_work_paper_ids: ["doi:10.1000/example-1"],
 		};
-		expect(() => value.recordCycle(parseAutoresearchCycleInput(raw, NOW))).toThrow("require all four reviewer roles");
+		expect(() => value.recordCycle(parseAutoresearchCycleInput(raw, NOW))).toThrow(
+			"requires all four reviewer roles",
+		);
 		expect(() => parseAutoresearchCycleInput({ ...raw, reviewers: passingReviewers() }, NOW)).toThrow(
 			"cycle.reviewers is host-owned",
+		);
+		expect(() => parseAutoresearchCycleInput({ ...raw, search_coverage: { mechanism_queries: true } }, NOW)).toThrow(
+			"cycle.search_coverage is host-owned",
+		);
+		ingestPassingReviews(value, parsedCandidate);
+		expect(() => value.recordCycle(parseAutoresearchCycleInput(raw, NOW))).toThrow(
+			"complete literature-search coverage",
+		);
+		recordSearchReceipts(value, parsedCandidate);
+		expect(value.recordCycle(parseAutoresearchCycleInput(raw, NOW)).cycle).toMatchObject({
+			searchCoverage: {
+				mechanismQueries: true,
+				surveysOrReviews: true,
+			},
+			searchReceiptIds: expect.arrayContaining([expect.stringMatching(/^search-receipt-/)]),
+		});
+
+		const rejected = rejectedCycle(2);
+		expect(() => value.recordCycle(parseAutoresearchCycleInput(rejected, NOW))).toThrow(
+			"requires all four reviewer roles",
 		);
 	});
 
@@ -291,6 +455,7 @@ describe("autoresearch control plane", () => {
 		value.addPublication(parseAutoresearchPublicationInput(publication(), NOW));
 		let finalStatus = "";
 		for (let index = 1; index <= 6; index++) {
+			ingestPassingReviews(value, parseAutoresearchCandidateInput(candidate(index)));
 			const result = value.recordCycle(parseAutoresearchCycleInput(rejectedCycle(index), NOW));
 			finalStatus = result.checkpoint.status;
 			expect(result.packet).toMatchObject({ cycle_id: result.cycle.cycleId });
@@ -336,17 +501,43 @@ describe("autoresearch control plane", () => {
 
 		const restored = new AutoresearchStore(root, () => NOW).getState();
 		expect(restored).toMatchObject({
-			schemaVersion: 3,
+			schemaVersion: 4,
 			objective: "Preserve a version-one research run",
 			publications: [{ paperId: "doi:10.1000/example-1" }],
 			experiments: [],
 			memories: [],
+			peerReviewVerifications: [],
+			searchReceipts: [],
+			memoryReflections: [],
 		});
+	});
+
+	it("downgrades unsupported legacy peer-review claims during version-four migration", () => {
+		const { root, value } = store();
+		value.initialize("Migrate conservative publication status");
+		value.addPublication(parseAutoresearchPublicationInput(publication(), NOW));
+		value.recordPublicationVerification(verification());
+		const statePath = join(root, "autoresearch", "state.json");
+		const legacy = JSON.parse(readFileSync(statePath, "utf8")) as Record<string, unknown>;
+		legacy.schemaVersion = 3;
+		for (const collection of ["publications", "publicationVerifications"]) {
+			const records = legacy[collection] as Array<Record<string, unknown>>;
+			records[0]!.publicationStatus = "peer_reviewed";
+		}
+		for (const key of ["peerReviewVerifications", "memoryReflections", "searchReceipts"]) delete legacy[key];
+		writeFileSync(statePath, `${JSON.stringify(legacy)}\n`, "utf8");
+
+		const restored = new AutoresearchStore(root, () => NOW).getState();
+		expect(restored.schemaVersion).toBe(4);
+		expect(restored.publications[0]?.publicationStatus).toBe("published");
+		expect(restored.publicationVerifications[0]?.publicationStatus).toBe("published");
+		expect(restored.peerReviewVerifications).toEqual([]);
 	});
 
 	it("requires three concrete alternative directions for recorded interventions", () => {
 		const { value } = store();
 		value.initialize("Test supervisor records");
+		ingestPassingReviews(value, parseAutoresearchCandidateInput(candidate(1)));
 		const cycle = value.recordCycle(parseAutoresearchCycleInput(rejectedCycle(1), NOW)).cycle;
 		expect(() =>
 			parseAutoresearchSupervisionInput(
@@ -482,6 +673,14 @@ describe("autoresearch control plane", () => {
 		expect(value.verifyMemoryReuse(reuse.reuseId, true, ["Paper rechecked against current mechanism."]).status).toBe(
 			"verified",
 		);
+		const reflection = value.recordMemoryReflection({
+			trigger: "manual",
+			report: { merged: 0, pruned: 1 },
+			archivedMemoryIds: [memory.memoryId],
+		});
+		expect(reflection.archivedMemoryIds).toEqual([memory.memoryId]);
+		expect(value.recallMemories("stale memory prior art")).toMatchObject([{ memoryId: memory.memoryId }]);
+		expect(value.getState().memories[0]?.invalidatedAt).toBeUndefined();
 	});
 
 	it("ingests marked specialist results exactly once", () => {
@@ -516,6 +715,16 @@ describe("autoresearch control plane", () => {
 		});
 		expect(value.ingestAgentMessage("message-1", message, { sessionName: child.name })).toBeUndefined();
 		expect(value.getCollectedReviews("candidate-1")).toMatchObject([{ role: "prior_art_killer" }]);
+	});
+
+	it("puts each exact machine-readable role identifier in its reviewer prompt", () => {
+		const { value } = store();
+		value.initialize("Keep weak reviewer models on schema");
+		const reviewedCandidate = parseAutoresearchCandidateInput(candidate(1));
+		const prompts = buildAutoresearchReviewerPrompts(reviewedCandidate, value.getState());
+		for (const [role, prompt] of Object.entries(prompts)) {
+			expect(prompt).toContain(`role value MUST be the literal machine identifier "${role}"`);
+		}
 	});
 
 	it("blocks final export until the complete roadmap stop gate passes", () => {
@@ -573,6 +782,7 @@ describe("autoresearch control plane", () => {
 			),
 		);
 		ingestPassingReviews(value, parseAutoresearchCandidateInput(candidate(1)));
+		recordSearchReceipts(value, parseAutoresearchCandidateInput(candidate(1)));
 		const cycle = value.recordCycle(
 			parseAutoresearchCycleInput(
 				{
@@ -583,7 +793,6 @@ describe("autoresearch control plane", () => {
 					publications: [],
 					field_maps: fieldMaps("final"),
 					gates: gates(),
-					search_coverage: searchCoverage(),
 					motivation_paper_ids: ["doi:10.1000/example-1", "doi:10.1000/example-2"],
 					closest_prior_work_paper_ids: ["doi:10.1000/example-1"],
 					preliminary_evidence_experiment_ids: ["experiment-final"],

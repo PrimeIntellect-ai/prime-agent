@@ -159,7 +159,11 @@ async def initialize(objective: str, topic: str | None = None) -> dict[str, Any]
     payload: dict[str, Any] = {"objective": objective}
     if topic is not None:
         payload["topic"] = topic
-    return await host_request("autoresearch.initialize", payload)
+    response = await host_request("autoresearch.initialize", payload)
+    response["spontaneous_recall"] = await spontaneous_recall(
+        " ".join(part for part in (objective, topic) if part),
+    )
+    return response
 
 
 async def get_state() -> dict[str, Any]:
@@ -239,7 +243,8 @@ async def arxiv_search(query: str, *, max_results: int = 10, start: int = 0) -> 
     arxiv = "{http://arxiv.org/schemas/atom}"
     publications: list[dict[str, Any]] = []
     for entry in root.findall(f"{atom}entry"):
-        identifier = (entry.findtext(f"{atom}id") or "").rsplit("/", 1)[-1]
+        entry_url = urlparse(entry.findtext(f"{atom}id") or "")
+        identifier = entry_url.path.split("/abs/", 1)[-1].lstrip("/")
         base_id = re.sub(r"v\d+$", "", identifier)
         title = " ".join((entry.findtext(f"{atom}title") or "").split())
         authors = [
@@ -376,6 +381,64 @@ async def verify_publication(paper_id: str) -> dict[str, Any]:
     return await host_request("autoresearch.publication.verify", {"paper_id": paper_id})
 
 
+async def verify_peer_review(paper_id: str, evidence_url: str, exact_quote: str) -> dict[str, Any]:
+    """Verify an explicit peer-review statement on the DOI publisher's own host."""
+    for value, label in (
+        (paper_id, "paper_id"),
+        (evidence_url, "evidence_url"),
+        (exact_quote, "exact_quote"),
+    ):
+        if not isinstance(value, str):
+            raise TypeError(f"{label} must be str, got {type(value).__name__}")
+    return await host_request(
+        "autoresearch.publication.peer_review.verify",
+        {
+            "evidence": {
+                "paper_id": paper_id,
+                "evidence_url": evidence_url,
+                "exact_quote": exact_quote,
+            }
+        },
+    )
+
+
+async def record_search(
+    candidate: dict[str, Any],
+    *,
+    coverage_kind: str,
+    query: str,
+    source: str,
+    result_urls: list[str],
+    inspected_paper_ids: list[str],
+) -> dict[str, Any]:
+    """Record one auditable search receipt; the host derives candidate coverage."""
+    if not isinstance(coverage_kind, str):
+        raise TypeError(f"coverage_kind must be str, got {type(coverage_kind).__name__}")
+    if not isinstance(query, str):
+        raise TypeError(f"query must be str, got {type(query).__name__}")
+    if not isinstance(source, str):
+        raise TypeError(f"source must be str, got {type(source).__name__}")
+    if not isinstance(result_urls, list) or not all(isinstance(item, str) for item in result_urls):
+        raise TypeError("result_urls must be list[str]")
+    if not isinstance(inspected_paper_ids, list) or not all(
+        isinstance(item, str) for item in inspected_paper_ids
+    ):
+        raise TypeError("inspected_paper_ids must be list[str]")
+    return await host_request(
+        "autoresearch.search.record",
+        {
+            "candidate": _object(candidate, "candidate"),
+            "receipt": {
+                "coverage_kind": coverage_kind,
+                "query": query,
+                "source": source,
+                "result_urls": result_urls,
+                "inspected_paper_ids": inspected_paper_ids,
+            },
+        },
+    )
+
+
 async def record_experiment(experiment: dict[str, Any]) -> dict[str, Any]:
     """Plan, update, fail, or complete an experiment with inspectable artifacts."""
     return await host_request(
@@ -508,6 +571,84 @@ async def sync_nooa_memory() -> dict[str, Any]:
     )
 
 
+async def _spontaneous_recall_synced(
+    query: str,
+    *,
+    limit: int = 5,
+    max_chars: int = 2000,
+) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        _run_nooa_sidecar,
+        "spontaneous",
+        {"query": query, "limit": limit, "max_chars": max_chars},
+    )
+
+
+async def spontaneous_recall(
+    query: str,
+    *,
+    limit: int = 5,
+    max_chars: int = 2000,
+) -> dict[str, Any]:
+    """Inject bounded, non-reinforcing associative recall before a research cycle."""
+    if not isinstance(query, str):
+        raise TypeError(f"query must be str, got {type(query).__name__}")
+    if not isinstance(limit, int) or not 1 <= limit <= 20:
+        raise ValueError("limit must be an integer from 1 to 20")
+    if not isinstance(max_chars, int) or not 256 <= max_chars <= 8000:
+        raise ValueError("max_chars must be an integer from 256 to 8000")
+    sync = await sync_nooa_memory()
+    if not sync.get("ok"):
+        return {**sync, "context": "", "memory_ids": []}
+    result = await _spontaneous_recall_synced(query, limit=limit, max_chars=max_chars)
+    result["sync"] = sync
+    return result
+
+
+async def _reflect_synced(
+    trigger: str,
+    *,
+    cycle_id: str | None = None,
+) -> dict[str, Any]:
+    result = await asyncio.to_thread(_run_nooa_sidecar, "reflect", {"trigger": trigger})
+    if not result.get("ok"):
+        return result
+    report = result.get("report")
+    archived_memory_ids = result.get("archived_memory_ids")
+    if not isinstance(report, dict) or not isinstance(archived_memory_ids, list) or not all(
+        isinstance(item, str) for item in archived_memory_ids
+    ):
+        raise RuntimeError("NOOA reflection returned an invalid report")
+    payload: dict[str, Any] = {
+        "trigger": trigger,
+        "report": report,
+        "archived_memory_ids": archived_memory_ids,
+    }
+    if cycle_id is not None:
+        payload["cycle_id"] = cycle_id
+    result["host_receipt"] = await host_request("autoresearch.memory.reflection.record", payload)
+    return result
+
+
+async def reflect_memory(
+    trigger: str = "manual",
+    *,
+    cycle_id: str | None = None,
+) -> dict[str, Any]:
+    """Run official NOOA consolidation and bind its maintenance receipt to host state."""
+    allowed = {"five_cycles", "supervisor_intervention", "candidate_promotion", "manual"}
+    if trigger not in allowed:
+        raise ValueError(f"trigger must be one of {sorted(allowed)}")
+    if cycle_id is not None and not isinstance(cycle_id, str):
+        raise TypeError(f"cycle_id must be str or None, got {type(cycle_id).__name__}")
+    sync = await sync_nooa_memory()
+    if not sync.get("ok"):
+        return sync
+    result = await _reflect_synced(trigger, cycle_id=cycle_id)
+    result["sync"] = sync
+    return result
+
+
 async def prepare_memory_reuse(reuse: dict[str, Any]) -> dict[str, Any]:
     """Create a QCR-style current-state-conditioned reuse plan."""
     return await host_request(
@@ -624,6 +765,61 @@ async def review_candidate(
     return await await_reviews(candidate_id, timeout=timeout, poll_interval=poll_interval)
 
 
+def _cycle_recall_query(response: dict[str, Any], cycle: dict[str, Any]) -> str:
+    candidate = cycle.get("candidate")
+    statement = candidate.get("statement") if isinstance(candidate, dict) else None
+    supervision = response.get("supervision")
+    supervision_reason = supervision.get("reason") if isinstance(supervision, dict) else None
+    parts = [
+        statement,
+        cycle.get("outcome"),
+        cycle.get("rejection_reason") or cycle.get("rejectionReason"),
+        supervision_reason,
+    ]
+    query = " ".join(str(part).strip() for part in parts if part)
+    return query or "current autoresearch trajectory and next candidate"
+
+
+async def _finish_cycle_memory(response: dict[str, Any], cycle: dict[str, Any]) -> None:
+    """Run milestone maintenance, then return bounded recall for the next cycle."""
+    sync = await sync_nooa_memory()
+    response["nooa"] = sync
+    if not sync.get("ok"):
+        response["spontaneous_recall"] = {**sync, "context": "", "memory_ids": []}
+        return
+
+    cycle_result = response.get("cycle")
+    cycle_id = cycle_result.get("cycleId") if isinstance(cycle_result, dict) else None
+    checkpoint = response.get("checkpoint")
+    supervision = response.get("supervision")
+    trigger: str | None = None
+    if cycle.get("outcome") == "promoted":
+        trigger = "candidate_promotion"
+    elif (
+        isinstance(supervision, dict)
+        and supervision.get("interventionNeeded") is True
+    ) or (
+        isinstance(checkpoint, dict)
+        and checkpoint.get("interventionNeeded") is True
+    ):
+        trigger = "supervisor_intervention"
+    else:
+        state_response = await get_state()
+        state = state_response.get("state")
+        cycles = state.get("cycles", []) if isinstance(state, dict) else []
+        if cycles and len(cycles) % 5 == 0:
+            trigger = "five_cycles"
+
+    if trigger is not None:
+        response["memory_reflection"] = await _reflect_synced(
+            trigger,
+            cycle_id=cycle_id if isinstance(cycle_id, str) else None,
+        )
+    response["spontaneous_recall"] = await _spontaneous_recall_synced(
+        _cycle_recall_query(response, cycle),
+    )
+
+
 async def complete_cycle(
     cycle: dict[str, Any],
     *,
@@ -638,7 +834,7 @@ async def complete_cycle(
     cycle_result = response.get("cycle")
     cycle_id = cycle_result.get("cycleId") if isinstance(cycle_result, dict) else None
     if not await_supervisor or not isinstance(cycle_id, str) or response.get("delivery", {}).get("error"):
-        response["nooa"] = await sync_nooa_memory()
+        await _finish_cycle_memory(response, canonical_cycle)
         return response
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
@@ -653,9 +849,10 @@ async def complete_cycle(
         )
         if supervision:
             response["supervision"] = supervision
-            response["nooa"] = await sync_nooa_memory()
+            await _finish_cycle_memory(response, canonical_cycle)
             return response
         if asyncio.get_running_loop().time() >= deadline:
+            await _finish_cycle_memory(response, canonical_cycle)
             raise TimeoutError(f"timed out waiting for supervisor response for {cycle_id}")
         await asyncio.sleep(poll_interval)
 
@@ -724,15 +921,19 @@ __all__ = [
     "prepare_memory_reuse",
     "promote_claim",
     "recall",
+    "record_search",
     "record_experiment",
     "record_supervision",
+    "reflect_memory",
     "remember",
     "review_candidate",
     "reviewer_prompts",
     "spawn_reviewers",
     "stop_gate",
+    "spontaneous_recall",
     "sync_nooa_memory",
     "unpaywall_lookup",
     "update_claim",
     "verify_memory_reuse",
+    "verify_peer_review",
 ]

@@ -21,13 +21,153 @@ class AutoresearchSkillTest(unittest.TestCase):
     def test_initialize_and_complete_cycle_use_host_owned_requests(self) -> None:
         module = load_skill("autoresearch_host_test")
         host = AsyncMock(return_value={"checkpoint": {"status": "progressing"}})
-        with patch.object(module, "host_request", host):
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(module, "spontaneous_recall", AsyncMock(return_value={"ok": True})),
+            patch.object(module, "_finish_cycle_memory", AsyncMock()),
+        ):
             asyncio.run(module.initialize("Find a problem", topic="agent memory"))
             asyncio.run(module.complete_cycle({"candidate": {"statement": "candidate"}}))
             asyncio.run(module.update_claim("claim-1", {"unresolved_objections": ["new evidence"]}))
         self.assertEqual(host.await_args_list[0].args[0], "autoresearch.initialize")
         self.assertEqual(host.await_args_list[1].args[0], "autoresearch.cycle.complete")
         self.assertEqual(host.await_args_list[2].args[0], "autoresearch.claim.update")
+
+    def test_search_and_peer_review_evidence_use_host_owned_receipts(self) -> None:
+        module = load_skill("autoresearch_receipts_test")
+        host = AsyncMock(return_value={"receipt": {"verified": True}})
+        candidate = {"candidate_id": "candidate-authority", "statement": "Authority failures"}
+        with patch.object(module, "host_request", host):
+            asyncio.run(
+                module.record_search(
+                    candidate,
+                    coverage_kind="mechanism_queries",
+                    query="authority calibration agent memory",
+                    source="google_search",
+                    result_urls=["https://example.org/search?q=authority"],
+                    inspected_paper_ids=["doi:10.1000/example"],
+                )
+            )
+            asyncio.run(
+                module.verify_peer_review(
+                    "doi:10.1000/example",
+                    "https://publisher.example/articles/example",
+                    "This article underwent peer review before publication.",
+                )
+            )
+        self.assertEqual(host.await_args_list[0].args[0], "autoresearch.search.record")
+        self.assertEqual(
+            host.await_args_list[0].args[1]["receipt"]["inspected_paper_ids"],
+            ["doi:10.1000/example"],
+        )
+        self.assertEqual(
+            host.await_args_list[1].args,
+            (
+                "autoresearch.publication.peer_review.verify",
+                {
+                    "evidence": {
+                        "paper_id": "doi:10.1000/example",
+                        "evidence_url": "https://publisher.example/articles/example",
+                        "exact_quote": "This article underwent peer review before publication.",
+                    }
+                },
+            ),
+        )
+
+    def test_cycle_memory_runs_reflection_at_each_required_milestone(self) -> None:
+        module = load_skill("autoresearch_cycle_memory_test")
+        scenarios = (
+            (
+                "candidate_promotion",
+                {"cycle": {"cycleId": "cycle-1"}},
+                {"outcome": "promoted", "candidate": {"statement": "promoted candidate"}},
+                [],
+            ),
+            (
+                "supervisor_intervention",
+                {
+                    "cycle": {"cycleId": "cycle-2"},
+                    "supervision": {"interventionNeeded": True, "reason": "trajectory collapsed"},
+                },
+                {"outcome": "rejected", "candidate": {"statement": "rejected candidate"}},
+                [],
+            ),
+            (
+                "five_cycles",
+                {"cycle": {"cycleId": "cycle-5"}},
+                {"outcome": "rejected", "candidate": {"statement": "fifth candidate"}},
+                [{"cycleId": f"cycle-{index}"} for index in range(1, 6)],
+            ),
+        )
+        for expected_trigger, response, cycle, state_cycles in scenarios:
+            with self.subTest(trigger=expected_trigger):
+                reflect = AsyncMock(return_value={"ok": True})
+                spontaneous = AsyncMock(return_value={"ok": True, "context": "memory"})
+                with (
+                    patch.object(module, "sync_nooa_memory", AsyncMock(return_value={"ok": True})),
+                    patch.object(
+                        module,
+                        "get_state",
+                        AsyncMock(return_value={"state": {"cycles": state_cycles}}),
+                    ),
+                    patch.object(module, "_reflect_synced", reflect),
+                    patch.object(module, "_spontaneous_recall_synced", spontaneous),
+                ):
+                    asyncio.run(module._finish_cycle_memory(response, cycle))
+                reflect.assert_awaited_once_with(expected_trigger, cycle_id=response["cycle"]["cycleId"])
+                spontaneous.assert_awaited_once()
+                self.assertEqual(response["spontaneous_recall"]["context"], "memory")
+
+    def test_nooa_reflection_is_bound_back_to_canonical_host_state(self) -> None:
+        module = load_skill("autoresearch_reflection_receipt_test")
+        host = AsyncMock(return_value={"reflection": {"reflectionId": "reflection-1"}})
+        sidecar = {
+            "ok": True,
+            "report": {"merged": 1, "pruned": 2},
+            "archived_memory_ids": ["memory-1"],
+        }
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(module, "_run_nooa_sidecar", return_value=sidecar),
+        ):
+            result = asyncio.run(
+                module._reflect_synced("supervisor_intervention", cycle_id="cycle-1")
+            )
+        self.assertTrue(result["ok"])
+        host.assert_awaited_once_with(
+            "autoresearch.memory.reflection.record",
+            {
+                "trigger": "supervisor_intervention",
+                "report": {"merged": 1, "pruned": 2},
+                "archived_memory_ids": ["memory-1"],
+                "cycle_id": "cycle-1",
+            },
+        )
+
+    def test_supervisor_timeout_still_runs_next_cycle_memory_maintenance(self) -> None:
+        module = load_skill("autoresearch_timeout_memory_test")
+        host = AsyncMock(
+            return_value={
+                "cycle": {"cycleId": "cycle-timeout"},
+                "checkpoint": {"interventionNeeded": False},
+                "delivery": {},
+            }
+        )
+        finish = AsyncMock()
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(module, "collect_results", AsyncMock(return_value={"supervision": []})),
+            patch.object(module, "_finish_cycle_memory", finish),
+        ):
+            with self.assertRaisesRegex(TimeoutError, "cycle-timeout"):
+                asyncio.run(
+                    module.complete_cycle(
+                        {"candidate": {"statement": "candidate"}, "outcome": "rejected"},
+                        timeout=0,
+                        poll_interval=0,
+                    )
+                )
+        finish.assert_awaited_once()
 
     def test_spawn_reviewers_creates_four_role_separated_children(self) -> None:
         module = load_skill("autoresearch_reviewers_test")
@@ -93,11 +233,18 @@ class AutoresearchSkillTest(unittest.TestCase):
             <author><name>A. Researcher</name></author>
             <link title="pdf" href="https://arxiv.org/pdf/2608.12345v2" type="application/pdf" />
           </entry>
+          <entry>
+            <id>http://arxiv.org/abs/math/0301234v2</id>
+            <title>Legacy Category Identifier</title>
+            <summary>An older identifier must retain its category.</summary>
+            <published>2003-01-20T00:00:00Z</published>
+            <author><name>B. Researcher</name></author>
+          </entry>
         </feed>"""
         with patch.object(module, "_request_json", return_value=crossref_payload):
             crossref = asyncio.run(module.crossref_search("agent memory", rows=1))
         with patch.object(module, "_cached_bytes", return_value=arxiv_xml):
-            arxiv = asyncio.run(module.arxiv_search("agent memory", max_results=1))
+            arxiv = asyncio.run(module.arxiv_search("agent memory", max_results=2))
         self.assertEqual(crossref[0]["paper_id"], "doi:10.1000/example")
         self.assertNotIn("publication_status", crossref[0])
         self.assertNotIn("metadata_verified_by", crossref[0])
@@ -105,6 +252,9 @@ class AutoresearchSkillTest(unittest.TestCase):
         self.assertNotIn("publication_status", arxiv[0])
         self.assertNotIn("metadata_verified_by", arxiv[0])
         self.assertEqual(arxiv[0]["full_text_url"], "https://arxiv.org/pdf/2608.12345v2")
+        self.assertEqual(arxiv[1]["paper_id"], "arxiv:math/0301234")
+        self.assertEqual(arxiv[1]["preprint_id"], "math/0301234")
+        self.assertEqual(arxiv[1]["full_text_url"], "https://arxiv.org/pdf/math/0301234v2")
 
     def test_memory_reuse_and_final_export_use_host_gates(self) -> None:
         module = load_skill("autoresearch_memory_test")

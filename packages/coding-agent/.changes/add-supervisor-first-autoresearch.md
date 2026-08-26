@@ -1,1 +1,7 @@
 - Added a supervisor-first autoresearch control plane with agent-driven literature search; host-verified publications, reviewer assignments, supervision provenance, quoted claim evidence, hashed experiment artifacts; real NOOA sidecar retrieval; cycle-level stagnation checks; autonomous heartbeats; and a strict final stop gate.
+- Replaced self-reported search coverage with candidate-bound receipts, separated publication metadata from publisher-backed peer-review proof, required hostile review for every major cycle, and added automatic official NOOA recall and milestone consolidation receipts.
+- Hardened publisher evidence against negative wording and private/redirected targets, kept the host memory ledger lossless across NOOA pruning, and guaranteed next-cycle memory maintenance even when supervisor delivery times out.
+- Bounded realistic supervisor packets below Prime's child-message limit and strengthened reviewer prompts with literal role identifiers for weaker models.
+- Derived DOI/arXiv verification identity from canonical paper IDs after a live Gemini run exposed omitted duplicate identity fields.
+- Preserved NOOA-owned access history, ACT-R counters, graph edges, rescored importance, and archive tombstones across canonical host syncs.
+- Pinned publisher verification to vetted public addresses and rejected cropped, hidden, or non-applicable peer-review statements before upgrading an item.

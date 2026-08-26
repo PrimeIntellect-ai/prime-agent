@@ -1,6 +1,8 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import type { LookupFunction } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import {
@@ -34,6 +36,12 @@ import {
 	resetApiProviders,
 	supportsFastMode,
 } from "@earendil-works/pi-ai";
+import {
+	Agent as UndiciAgent,
+	type RequestInit as UndiciRequestInit,
+	type Response as UndiciResponse,
+	fetch as undiciFetch,
+} from "undici";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
@@ -91,12 +99,15 @@ import {
 } from "./autonomous.js";
 import {
 	AUTORESEARCH_SKILL_NAME,
+	type AutoresearchPeerReviewVerification,
 	type AutoresearchPublication,
 	type AutoresearchPublicationVerification,
 	type AutoresearchReviewerRole,
 	AutoresearchStore,
 	buildAutoresearchReviewerPrompts,
 	buildAutoresearchSupervisorPrompt,
+	hasApplicablePeerReviewEvidence,
+	isPublicAutoresearchAddress,
 	parseAutoresearchCandidateInput,
 	parseAutoresearchClaimInput,
 	parseAutoresearchClaimUpdateInput,
@@ -104,7 +115,9 @@ import {
 	parseAutoresearchExperimentInput,
 	parseAutoresearchMemoryInput,
 	parseAutoresearchMemoryReuseInput,
+	parseAutoresearchPeerReviewEvidenceInput,
 	parseAutoresearchPublicationInput,
+	parseAutoresearchSearchReceiptInput,
 	parseAutoresearchSupervisionInput,
 } from "./autoresearch.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
@@ -3232,11 +3245,46 @@ export class AgentSession {
 	): Promise<{ receipt?: AgentSessionMessageReceipt; error?: string }> {
 		try {
 			await this._awaitPendingRlmChildPublication(supervisor.name);
+			const original = JSON.stringify(packet);
+			const compactValue = (value: unknown, maxString: number, maxArray: number, depth = 0): unknown => {
+				if (typeof value === "string") {
+					return value.length <= maxString ? value : `${value.slice(0, maxString - 1)}…`;
+				}
+				if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
+				if (depth >= 8) return "[depth truncated]";
+				if (Array.isArray(value)) {
+					return value.slice(0, maxArray).map((item) => compactValue(item, maxString, maxArray, depth + 1));
+				}
+				if (isObjectRecord(value)) {
+					return Object.fromEntries(
+						Object.entries(value).map(([key, item]) => [key, compactValue(item, maxString, maxArray, depth + 1)]),
+					);
+				}
+				return String(value);
+			};
+			let deliveredPacket: Record<string, unknown> = packet;
+			if (original.length > 15_000) {
+				deliveredPacket = {
+					...(compactValue(packet, 600, 12) as Record<string, unknown>),
+					packet_truncated: true,
+					packet_original_chars: original.length,
+				};
+			}
+			let serialized = JSON.stringify(deliveredPacket);
+			if (serialized.length > 15_000) {
+				deliveredPacket = {
+					...(compactValue(packet, 300, 6) as Record<string, unknown>),
+					packet_truncated: true,
+					packet_original_chars: original.length,
+				};
+				serialized = JSON.stringify(deliveredPacket);
+			}
+			if (serialized.length > 15_000) {
+				throw new Error(`autoresearch supervisor packet could not be bounded below 15000 characters`);
+			}
 			const receipt = await this._agentMessageController!.sendAgentMessage({
 				target: assertDirectAgentMessageTarget(supervisor.name),
-				message: normalizeAgentSessionMessage(
-					`[autoresearch checkpoint ${cycleId}]\n\n${JSON.stringify(packet, null, 2)}`,
-				),
+				message: normalizeAgentSessionMessage(`[autoresearch checkpoint ${cycleId}]\n\n${serialized}`),
 			});
 			return { receipt };
 		} catch (error) {
@@ -3290,9 +3338,9 @@ export class AgentSession {
 				}
 			}
 			const registeredType = typeof message.type === "string" ? message.type : "";
-			const peerReviewedTypes = new Set(["journal-article", "proceedings-article"]);
+			const publishedTypes = new Set(["journal-article", "proceedings-article"]);
 			const publicationStatus =
-				peerReviewedTypes.has(registeredType) && venue ? "peer_reviewed" : "published_status_unclear";
+				publishedTypes.has(registeredType) && venue ? "published" : "published_status_unclear";
 			const resolvedMetadata: AutoresearchPublicationVerification["resolvedMetadata"] = {
 				title,
 				authors: authors.length > 0 ? authors : publication.authors,
@@ -3349,6 +3397,145 @@ export class AgentSession {
 			};
 		}
 		throw new Error("host publication verification requires a DOI or arXiv preprint_id");
+	}
+
+	private async _readBoundedAutoresearchEvidence(
+		response: UndiciResponse,
+		maxBytes = 2 * 1024 * 1024,
+	): Promise<string> {
+		const reader = response.body?.getReader();
+		if (!reader) return "";
+		const chunks: Uint8Array[] = [];
+		let size = 0;
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			size += value.byteLength;
+			if (size > maxBytes) {
+				await reader.cancel();
+				throw new Error(`peer-review evidence exceeds ${maxBytes} bytes`);
+			}
+			chunks.push(value);
+		}
+		return Buffer.concat(chunks).toString("utf8");
+	}
+
+	private async _resolvePublicAutoresearchUrl(url: URL, label: string): Promise<{ address: string; family: number }> {
+		if (url.protocol !== "https:" || url.username || url.password) {
+			throw new Error(`${label} must be credential-free HTTPS`);
+		}
+		const addresses = await lookup(url.hostname, { all: true, verbatim: true });
+		if (addresses.length === 0 || addresses.some((item) => !isPublicAutoresearchAddress(item.address))) {
+			throw new Error(`${label} must resolve only to public Internet addresses`);
+		}
+		return addresses[0]!;
+	}
+
+	private async _fetchPublicAutoresearchUrl(
+		initialUrl: string,
+		init: UndiciRequestInit,
+		label: string,
+	): Promise<{ response: UndiciResponse; url: URL; dispatcher: UndiciAgent }> {
+		let url = new URL(initialUrl);
+		for (let redirects = 0; redirects <= 5; redirects++) {
+			const pinnedAddress = await this._resolvePublicAutoresearchUrl(url, label);
+			const pinnedLookup: LookupFunction = (_hostname, options, callback) => {
+				if (options.all) {
+					callback(null, [pinnedAddress]);
+					return;
+				}
+				callback(null, pinnedAddress.address, pinnedAddress.family);
+			};
+			const dispatcher = new UndiciAgent({ connect: { lookup: pinnedLookup } });
+			let response: UndiciResponse;
+			try {
+				response = await undiciFetch(url, { ...init, redirect: "manual", dispatcher });
+			} catch (error) {
+				await dispatcher.close();
+				throw error;
+			}
+			if (![301, 302, 303, 307, 308].includes(response.status)) return { response, url, dispatcher };
+			const location = response.headers.get("location");
+			try {
+				await response.body?.cancel();
+			} finally {
+				await dispatcher.close();
+			}
+			if (!location) throw new Error(`${label} redirect omitted its location`);
+			url = new URL(location, url);
+		}
+		throw new Error(`${label} exceeded five redirects`);
+	}
+
+	private _sameAutoresearchDocument(left: URL, right: URL): boolean {
+		const path = (url: URL): string => url.pathname.replace(/\/+$/, "") || "/";
+		return left.origin.toLowerCase() === right.origin.toLowerCase() && path(left) === path(right);
+	}
+
+	private async _verifyAutoresearchPeerReview(
+		publication: AutoresearchPublication,
+		input: ReturnType<typeof parseAutoresearchPeerReviewEvidenceInput>,
+	): Promise<AutoresearchPeerReviewVerification> {
+		if (!publication.doi) throw new Error("peer-review verification requires a DOI");
+		if (publication.publicationStatus !== "published") {
+			throw new Error("peer-review verification requires Crossref-verified published metadata");
+		}
+		const doiResult = await this._fetchPublicAutoresearchUrl(
+			`https://doi.org/${encodeURIComponent(publication.doi)}`,
+			{
+				headers: { Accept: "text/html", "User-Agent": "Prime-Agent-Autoresearch/0.2" },
+				signal: AbortSignal.timeout(30_000),
+			},
+			"DOI publisher resolution",
+		);
+		const doiResponse = doiResult.response;
+		const publisherUrl = doiResult.url;
+		const publisherHost = publisherUrl.hostname.toLowerCase();
+		try {
+			if (!doiResponse.ok) throw new Error(`DOI publisher resolution failed with HTTP ${doiResponse.status}`);
+		} finally {
+			await doiResponse.body?.cancel().catch(() => undefined);
+			await doiResult.dispatcher.close();
+		}
+		const requestedHost = new URL(input.evidenceUrl).hostname.toLowerCase();
+		if (requestedHost !== publisherHost) {
+			throw new Error(`peer-review evidence must use the DOI publisher host ${publisherHost}`);
+		}
+		const evidenceResult = await this._fetchPublicAutoresearchUrl(
+			input.evidenceUrl,
+			{
+				headers: { Accept: "text/html,text/plain", "User-Agent": "Prime-Agent-Autoresearch/0.2" },
+				signal: AbortSignal.timeout(30_000),
+			},
+			"publisher peer-review evidence",
+		);
+		const { response } = evidenceResult;
+		let body: string;
+		try {
+			if (!response.ok) throw new Error(`publisher peer-review evidence failed with HTTP ${response.status}`);
+			if (evidenceResult.url.hostname.toLowerCase() !== publisherHost) {
+				throw new Error("peer-review evidence redirected away from the DOI publisher host");
+			}
+			if (!this._sameAutoresearchDocument(evidenceResult.url, publisherUrl)) {
+				throw new Error("peer-review evidence must appear on the DOI item's own publisher page");
+			}
+			body = await this._readBoundedAutoresearchEvidence(response);
+		} finally {
+			await response.body?.cancel().catch(() => undefined);
+			await evidenceResult.dispatcher.close();
+		}
+		if (!hasApplicablePeerReviewEvidence(body, input.exactQuote)) {
+			throw new Error("publisher page does not contain applicable visible peer-review evidence for this item");
+		}
+		return {
+			verificationId: `peer-review-verification-${randomUUID()}`,
+			paperId: publication.paperId,
+			source: "publisher",
+			evidenceUrl: evidenceResult.url.toString(),
+			exactQuote: input.exactQuote,
+			verifiedAt: new Date().toISOString(),
+			evidenceDigest: createHash("sha256").update(body).digest("hex"),
+		};
 	}
 
 	private async _spawnAutoresearchReviewers(
@@ -3446,6 +3633,23 @@ export class AgentSession {
 					verification,
 				};
 			}
+			case "autoresearch.publication.peer_review.verify": {
+				const input = parseAutoresearchPeerReviewEvidenceInput(payload.evidence);
+				const publication = store.getState().publications.find((item) => item.paperId === input.paperId);
+				if (!publication) throw new Error(`publication ${input.paperId} was not found`);
+				const verification = store.recordPeerReviewVerification(
+					await this._verifyAutoresearchPeerReview(publication, input),
+				);
+				return {
+					publication: store.getState().publications.find((item) => item.paperId === publication.paperId),
+					verification,
+				};
+			}
+			case "autoresearch.search.record": {
+				const candidate = parseAutoresearchCandidateInput(payload.candidate);
+				const receipt = store.recordSearchReceipt(parseAutoresearchSearchReceiptInput(candidate, payload.receipt));
+				return { receipt };
+			}
 			case "autoresearch.experiment.record": {
 				const experiment = store.recordExperiment(parseAutoresearchExperimentInput(payload.experiment));
 				return { experiment };
@@ -3479,6 +3683,43 @@ export class AgentSession {
 				}
 				return {
 					reuse: store.verifyMemoryReuse(payload.reuse_id, payload.accepted, payload.evidence),
+				};
+			}
+			case "autoresearch.memory.reflection.record": {
+				if (typeof payload.trigger !== "string") {
+					throw new Error("autoresearch.memory.reflection.record trigger must be a string");
+				}
+				if (!isObjectRecord(payload.report)) {
+					throw new Error("autoresearch.memory.reflection.record report must be an object");
+				}
+				const report: Record<string, number | string | boolean> = {};
+				for (const [key, value] of Object.entries(payload.report)) {
+					if (typeof value !== "number" && typeof value !== "string" && typeof value !== "boolean") {
+						throw new Error(`autoresearch.memory.reflection.record report.${key} must be scalar`);
+					}
+					report[key] = value;
+				}
+				if (
+					!Array.isArray(payload.archived_memory_ids) ||
+					!payload.archived_memory_ids.every((item) => typeof item === "string")
+				) {
+					throw new Error("autoresearch.memory.reflection.record archived_memory_ids must be strings");
+				}
+				const trigger = payload.trigger;
+				if (
+					!(["five_cycles", "supervisor_intervention", "candidate_promotion", "manual"] as const).includes(
+						trigger as "five_cycles" | "supervisor_intervention" | "candidate_promotion" | "manual",
+					)
+				) {
+					throw new Error("autoresearch.memory.reflection.record trigger is invalid");
+				}
+				return {
+					reflection: store.recordMemoryReflection({
+						trigger: trigger as "five_cycles" | "supervisor_intervention" | "candidate_promotion" | "manual",
+						cycleId: typeof payload.cycle_id === "string" ? payload.cycle_id : undefined,
+						report,
+						archivedMemoryIds: payload.archived_memory_ids,
+					}),
 				};
 			}
 			case "autoresearch.claim.add": {
@@ -9564,11 +9805,14 @@ export class AgentSession {
 				"autoresearch.get",
 				"autoresearch.publication.add",
 				"autoresearch.publication.verify",
+				"autoresearch.publication.peer_review.verify",
+				"autoresearch.search.record",
 				"autoresearch.experiment.record",
 				"autoresearch.memory.remember",
 				"autoresearch.memory.recall",
 				"autoresearch.memory.reuse.prepare",
 				"autoresearch.memory.reuse.verify",
+				"autoresearch.memory.reflection.record",
 				"autoresearch.claim.add",
 				"autoresearch.claim.update",
 				"autoresearch.claim.promote",

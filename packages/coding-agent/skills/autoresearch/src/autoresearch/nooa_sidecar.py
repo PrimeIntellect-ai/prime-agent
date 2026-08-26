@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from nooa_memory.config import MemoryConfig
 from nooa_memory.embeddings import get_embedder
 from nooa_memory.retrieval import RetrievalEngine
-from nooa_memory.schema import Memory, MemoryType
+from nooa_memory.reflection import ReflectionEngine
+from nooa_memory.schema import AccessRecord, Memory, MemoryType
 from nooa_memory.store import MemoryStore
 
 
@@ -29,17 +32,29 @@ def _memory_type(value: str) -> MemoryType:
 
 
 def _record(value: dict[str, Any]) -> Memory:
+    created_at = value.get("createdAt")
+    parsed_created_at = None
+    if isinstance(created_at, str):
+        try:
+            parsed_created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            parsed_created_at = None
+    kwargs: dict[str, Any] = {
+        "id": str(value["memoryId"]),
+        "type": _memory_type(str(value["type"])),
+        "title": str(value["title"]),
+        "content": str(value["content"]),
+        "importance": float(value["importance"]),
+        "tags": [str(tag) for tag in value.get("tags", [])],
+        "source_task_ref": ",".join(str(source) for source in value.get("sourceIds", [])) or None,
+        "related_files": [str(reference) for reference in value.get("currentStateReferences", [])],
+        "owner": OWNER,
+        "archived": bool(value.get("invalidatedAt")),
+    }
+    if parsed_created_at is not None:
+        kwargs["created_at"] = parsed_created_at
     return Memory(
-        id=str(value["memoryId"]),
-        type=_memory_type(str(value["type"])),
-        title=str(value["title"]),
-        content=str(value["content"]),
-        importance=float(value["importance"]),
-        tags=[str(tag) for tag in value.get("tags", [])],
-        source_task_ref=",".join(str(source) for source in value.get("sourceIds", [])) or None,
-        related_files=[str(reference) for reference in value.get("currentStateReferences", [])],
-        owner=OWNER,
-        archived=bool(value.get("invalidatedAt")),
+        **kwargs,
     )
 
 
@@ -52,6 +67,24 @@ def _components(path: Path) -> tuple[MemoryStore, Any, MemoryConfig]:
 
 def _upsert(store: MemoryStore, embedder: Any, value: dict[str, Any]) -> None:
     record = _record(value)
+    existing = store.get(record.id)
+    if existing is not None:
+        record.created_at = existing.created_at
+        record.last_accessed_at = existing.last_accessed_at
+        record.access_log = existing.access_log
+        record.access_count = existing.access_count
+        record.recalled_count = existing.recalled_count
+        record.searched_count = existing.searched_count
+        record.injected_count = existing.injected_count
+        record.reinforced_count = existing.reinforced_count
+        record.deref_count = existing.deref_count
+        record.salience = existing.salience
+        record.confidence = existing.confidence
+        record.strength = existing.strength
+        record.reinforcement_count = existing.reinforcement_count
+        record.importance = existing.importance
+        record.edges = existing.edges
+        record.archived = record.archived or existing.archived
     embedding_text = "\n".join([record.title or "", record.content, " ".join(record.tags)])
     store.add(record, embedder.embed(embedding_text))
 
@@ -96,6 +129,71 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 "memory_ids": [memory.id for memory in recalled],
                 "retrieval": "NOOA hybrid dense+sparse, ACT-R scoring, one-hop spread",
             }
+        if command == "spontaneous":
+            query = payload.get("query")
+            limit = payload.get("limit", 5)
+            max_chars = payload.get("max_chars", 2000)
+            if not isinstance(query, str) or not query.strip():
+                raise ValueError("spontaneous recall requires a non-empty query")
+            if not isinstance(limit, int) or not 1 <= limit <= 20:
+                raise ValueError("spontaneous recall limit must be an integer from 1 to 20")
+            if not isinstance(max_chars, int) or not 256 <= max_chars <= 8000:
+                raise ValueError("spontaneous recall max_chars must be an integer from 256 to 8000")
+            engine = RetrievalEngine(
+                store,
+                embedder,
+                config.retrieval,
+                access_log_cap=config.observability.access_log_cap,
+            )
+            recalled = engine.recall(query, k=limit, touch=False, owner=OWNER)
+            lines = ["## Recalled research memories (associative)"]
+            for memory in recalled:
+                head = (memory.title or memory.content).replace("\n", " ").strip()
+                lines.append(f"- [{memory.type.value}#{memory.id[:8]}] {head}")
+                memory.log_access(
+                    AccessRecord(ts=time.time(), channel="injected", reader_owner=OWNER, query=query[:500]),
+                    reinforce=False,
+                    cap=config.observability.access_log_cap,
+                )
+                store.save(memory)
+            context = "\n".join(lines) if recalled else ""
+            if len(context) > max_chars:
+                context = context[:max_chars].rstrip() + " …"
+            return {
+                "ok": True,
+                "memory_ids": [memory.id for memory in recalled],
+                "context": context,
+                "chars": len(context),
+                "touch": False,
+                "retrieval": "NOOA spontaneous hybrid dense+sparse, ACT-R scoring, one-hop spread",
+            }
+        if command == "reflect":
+            previously_archived = {
+                memory.id
+                for memory in store.all_memories(include_archived=True, owner=OWNER)
+                if memory.archived
+            }
+            engine = ReflectionEngine(
+                store,
+                embedder,
+                config.reflection,
+                config.forget,
+                owner=OWNER,
+            )
+            report = engine.consolidate()
+            report_data = report.model_dump(exclude_none=True)
+            store.log_maintenance("reflect", {"trigger": payload.get("trigger", "manual"), **report_data})
+            archived = [
+                memory.id
+                for memory in store.all_memories(include_archived=True, owner=OWNER)
+                if memory.archived and memory.id not in previously_archived
+            ]
+            return {
+                "ok": True,
+                "report": report_data,
+                "archived_memory_ids": archived,
+                "reflection": "official NOOA deterministic merge, graph edges, importance rescore, and pruning",
+            }
         raise ValueError(f"unknown command {command!r}")
     finally:
         store.close()
@@ -103,7 +201,7 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> None:
     if len(sys.argv) != 3:
-        raise SystemExit("usage: nooa_sidecar.py <upsert|sync|recall> <sqlite-path>")
+        raise SystemExit("usage: nooa_sidecar.py <upsert|sync|recall|spontaneous|reflect> <sqlite-path>")
     payload = json.load(sys.stdin)
     if not isinstance(payload, dict):
         raise ValueError("sidecar input must be a JSON object")

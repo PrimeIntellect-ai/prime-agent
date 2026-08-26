@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { BlockList, isIP } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export const AUTORESEARCH_SKILL_NAME = "autoresearch";
-export const AUTORESEARCH_STATE_VERSION = 3;
+export const AUTORESEARCH_STATE_VERSION = 4;
 
 const FIELD_MAP_KINDS = [
 	"assumptions",
@@ -24,8 +25,27 @@ const CLAIM_TYPES = [
 ] as const;
 const SOURCE_TYPES = ["publication", "experiment", "dataset", "code", "web"] as const;
 const EVIDENCE_KINDS = ["text", "figure", "table", "result", "code", "dataset"] as const;
-const PUBLICATION_STATUSES = ["peer_reviewed", "preprint", "published_status_unclear"] as const;
+const PUBLICATION_STATUSES = ["preprint", "published", "peer_reviewed_verified", "published_status_unclear"] as const;
 const PUBLICATION_VERIFICATION_SOURCES = ["crossref", "arxiv"] as const;
+const SEARCH_COVERAGE_KINDS = [
+	"mechanism_queries",
+	"synonyms_and_adjacent",
+	"backward_references",
+	"forward_citations",
+	"related_recommendations",
+	"recent_12_to_24_months",
+	"recent_preprints",
+	"surveys_or_reviews",
+] as const;
+const SEARCH_SOURCES = [
+	"google_search",
+	"arxiv",
+	"crossref",
+	"publisher",
+	"repository",
+	"citation_graph",
+	"other",
+] as const;
 const CYCLE_OUTCOMES = ["rejected", "revised", "survived", "experiment_failed", "promoted"] as const;
 const REVIEWER_ROLES = ["literature_auditor", "prior_art_killer", "experimental_critic", "top_tier_editor"] as const;
 const REVIEWER_VERDICTS = ["pass", "revise", "reject"] as const;
@@ -46,12 +66,63 @@ const MEMORY_TYPES = [
 const EXPERIMENT_STATUSES = ["planned", "running", "failed", "completed"] as const;
 const REUSE_STATUSES = ["proposed", "verified", "rejected"] as const;
 
+const AUTORESEARCH_BLOCKED_ADDRESSES = new BlockList();
+for (const [network, prefix] of [
+	["0.0.0.0", 8],
+	["10.0.0.0", 8],
+	["100.64.0.0", 10],
+	["127.0.0.0", 8],
+	["169.254.0.0", 16],
+	["172.16.0.0", 12],
+	["192.0.0.0", 24],
+	["192.0.2.0", 24],
+	["192.88.99.0", 24],
+	["192.168.0.0", 16],
+	["198.18.0.0", 15],
+	["198.51.100.0", 24],
+	["203.0.113.0", 24],
+	["224.0.0.0", 4],
+	["240.0.0.0", 4],
+] as const) {
+	AUTORESEARCH_BLOCKED_ADDRESSES.addSubnet(network, prefix, "ipv4");
+}
+for (const [network, prefix] of [
+	["::", 128],
+	["::1", 128],
+	["64:ff9b::", 96],
+	["64:ff9b:1::", 48],
+	["100::", 64],
+	["100:0:0:1::", 64],
+	["2001::", 23],
+	["2001:db8::", 32],
+	["2002::", 16],
+	["3fff::", 20],
+	["5f00::", 16],
+	["fc00::", 7],
+	["fe80::", 10],
+	["fec0::", 10],
+	["ff00::", 8],
+] as const) {
+	AUTORESEARCH_BLOCKED_ADDRESSES.addSubnet(network, prefix, "ipv6");
+}
+
+export function isPublicAutoresearchAddress(address: string): boolean {
+	const family = isIP(address);
+	if (family === 4) return !AUTORESEARCH_BLOCKED_ADDRESSES.check(address, "ipv4");
+	if (family === 6) {
+		return !AUTORESEARCH_BLOCKED_ADDRESSES.check(address.toLowerCase().split("%", 1)[0]!, "ipv6");
+	}
+	return false;
+}
+
 export type AutoresearchFieldMapKind = (typeof FIELD_MAP_KINDS)[number];
 export type AutoresearchClaimType = (typeof CLAIM_TYPES)[number];
 export type AutoresearchSourceType = (typeof SOURCE_TYPES)[number];
 export type AutoresearchEvidenceKind = (typeof EVIDENCE_KINDS)[number];
 export type AutoresearchPublicationStatus = (typeof PUBLICATION_STATUSES)[number];
 export type AutoresearchPublicationVerificationSource = (typeof PUBLICATION_VERIFICATION_SOURCES)[number];
+export type AutoresearchSearchCoverageKind = (typeof SEARCH_COVERAGE_KINDS)[number];
+export type AutoresearchSearchSource = (typeof SEARCH_SOURCES)[number];
 export type AutoresearchCycleOutcome = (typeof CYCLE_OUTCOMES)[number];
 export type AutoresearchReviewerRole = (typeof REVIEWER_ROLES)[number];
 export type AutoresearchReviewerVerdict = (typeof REVIEWER_VERDICTS)[number];
@@ -91,6 +162,16 @@ export interface AutoresearchPublicationVerification {
 		preprintId?: string;
 		fullTextUrl?: string;
 	};
+}
+
+export interface AutoresearchPeerReviewVerification {
+	verificationId: string;
+	paperId: string;
+	source: "publisher";
+	evidenceUrl: string;
+	exactQuote: string;
+	verifiedAt: string;
+	evidenceDigest: string;
 }
 
 export interface AutoresearchEvidenceBinding {
@@ -166,6 +247,18 @@ export interface AutoresearchSearchCoverage {
 	surveysOrReviews: boolean;
 }
 
+export interface AutoresearchSearchReceipt {
+	receiptId: string;
+	candidateId: string;
+	candidateDigest: string;
+	coverageKind: AutoresearchSearchCoverageKind;
+	query: string;
+	source: AutoresearchSearchSource;
+	resultUrls: string[];
+	inspectedPaperIds: string[];
+	recordedAt: string;
+}
+
 export interface AutoresearchExperiment {
 	experimentId: string;
 	candidateId: string;
@@ -219,6 +312,15 @@ export interface AutoresearchMemoryReusePlan {
 	verificationEvidence: string[];
 	createdAt: string;
 	verifiedAt?: string;
+}
+
+export interface AutoresearchMemoryReflection {
+	reflectionId: string;
+	trigger: "five_cycles" | "supervisor_intervention" | "candidate_promotion" | "manual";
+	cycleId?: string;
+	report: Record<string, number | string | boolean>;
+	archivedMemoryIds: string[];
+	recordedAt: string;
 }
 
 export interface AutoresearchCollectedReview {
@@ -284,6 +386,7 @@ export interface AutoresearchCycle {
 	reviewers: AutoresearchReviewerResult[];
 	gates: AutoresearchProblemGates;
 	searchCoverage: AutoresearchSearchCoverage;
+	searchReceiptIds: string[];
 	motivationPaperIds: string[];
 	closestPriorWorkPaperIds: string[];
 	preliminaryEvidenceExperimentIds: string[];
@@ -355,11 +458,14 @@ export interface AutoresearchState {
 	supervisor?: AutoresearchSupervisorRef;
 	publications: AutoresearchPublication[];
 	publicationVerifications: AutoresearchPublicationVerification[];
+	peerReviewVerifications: AutoresearchPeerReviewVerification[];
 	checkpointedPublicationKeys: string[];
 	claims: AutoresearchClaim[];
 	experiments: AutoresearchExperiment[];
 	memories: AutoresearchMemory[];
 	memoryReusePlans: AutoresearchMemoryReusePlan[];
+	memoryReflections: AutoresearchMemoryReflection[];
+	searchReceipts: AutoresearchSearchReceipt[];
 	reviewerAssignments: AutoresearchReviewerAssignment[];
 	collectedReviews: AutoresearchCollectedReview[];
 	ingestedAgentMessageIds: string[];
@@ -410,11 +516,14 @@ function emptyState(now: string): AutoresearchState {
 		updatedAt: now,
 		publications: [],
 		publicationVerifications: [],
+		peerReviewVerifications: [],
 		checkpointedPublicationKeys: [],
 		claims: [],
 		experiments: [],
 		memories: [],
 		memoryReusePlans: [],
+		memoryReflections: [],
+		searchReceipts: [],
 		reviewerAssignments: [],
 		collectedReviews: [],
 		ingestedAgentMessageIds: [],
@@ -469,6 +578,271 @@ function requireBoolean(value: unknown, label: string): boolean {
 function requireNumber(value: unknown, label: string): number {
 	if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${label} must be a finite number`);
 	return value;
+}
+
+function requirePublicHttpsUrl(value: unknown, label: string): string {
+	const raw = requireString(value, label);
+	let parsed: URL;
+	try {
+		parsed = new URL(raw);
+	} catch {
+		throw new Error(`${label} must be a valid URL`);
+	}
+	const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+	if (
+		parsed.protocol !== "https:" ||
+		parsed.username ||
+		parsed.password ||
+		!hostname ||
+		hostname === "localhost" ||
+		hostname.endsWith(".localhost") ||
+		hostname.endsWith(".local") ||
+		hostname.endsWith(".test") ||
+		hostname.endsWith(".invalid") ||
+		isIP(hostname) !== 0
+	) {
+		throw new Error(`${label} must be a credential-free public HTTPS URL`);
+	}
+	return parsed.toString();
+}
+
+function isPositivePeerReviewEvidenceQuote(value: string): boolean {
+	const normalized = value.toLowerCase().replace(/\s+/g, " ");
+	const uncertaintyOrNegation =
+		/\b(?:no|not|never|nobody|neither|nor|without|non[\s-]?peer|unrefereed|exempt(?:ed)?|exclude[ds]?|waiv(?:e|ed)|bypass(?:ed)?|may|might|could|possibly|perhaps|uncertain|but|however|although|despite|distinct)\b/i;
+	if (uncertaintyOrNegation.test(normalized)) return false;
+	const item = String.raw`(?:this|the)\s+(?:article|paper|manuscript|study|work|item)`;
+	const publicationTiming = String.raw`(?:\s+(?:before|prior\s+to)\s+publication)?`;
+	const directReview = new RegExp(
+		String.raw`^${item}\s+(?:was|is|has\s+been|had\s+been)\s+(?:independently\s+|externally\s+)?(?:peer[\s-]?reviewed|refereed)(?:\s+by\s+(?:independent|external)\s+reviewers)?${publicationTiming}[.!]$`,
+		"i",
+	);
+	const reviewProcess = new RegExp(
+		String.raw`^${item}\s+(?:underwent|has\s+undergone|had\s+undergone|was\s+subjected\s+to)\s+(?:an?\s+)?(?:independent\s+|external\s+)?peer[\s-]?review${publicationTiming}[.!]$`,
+		"i",
+	);
+	return directReview.test(normalized) || reviewProcess.test(normalized);
+}
+
+function autoresearchHtmlAttribute(attributes: string, name: string): string | undefined {
+	const match = new RegExp(String.raw`(?:^|\s)${name}\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>]+))`, "i").exec(
+		attributes,
+	);
+	return match?.[1] ?? match?.[2] ?? match?.[3];
+}
+
+const SUPPRESSED_AUTORESEARCH_HTML_TAGS = new Set([
+	"head",
+	"script",
+	"style",
+	"template",
+	"noscript",
+	"svg",
+	"math",
+	"iframe",
+	"object",
+	"canvas",
+	"nav",
+	"footer",
+	"aside",
+	"s",
+	"strike",
+	"del",
+]);
+
+function suppressAutoresearchHtmlElement(tag: string, attributes: string): boolean {
+	if (SUPPRESSED_AUTORESEARCH_HTML_TAGS.has(tag)) return true;
+	if (/(?:^|\s)hidden(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+))?(?=\s|$)/i.test(attributes)) return true;
+	if (autoresearchHtmlAttribute(attributes, "aria-hidden")?.trim().toLowerCase() === "true") return true;
+	const style = autoresearchHtmlAttribute(attributes, "style")?.toLowerCase().replace(/\s+/g, "");
+	if (style?.includes("display:none") || style?.includes("visibility:hidden")) return true;
+	const excludedToken =
+		/^(?:hidden|is-hidden|u-hidden|visually-hidden|sr-only|d-none|display-none|related(?:-content|-articles?)?|recommended|recommendations|also-read|more-like-this|reference-list|citation-list)(?:[-_].*)?$/;
+	for (const attribute of ["class", "id"]) {
+		const tokens = autoresearchHtmlAttribute(attributes, attribute)?.toLowerCase().split(/\s+/) ?? [];
+		if (tokens.some((token) => excludedToken.test(token))) return true;
+	}
+	return false;
+}
+
+function autoresearchHtmlTagEnd(source: string, start: number): number {
+	let quote: '"' | "'" | undefined;
+	for (let index = start + 1; index < source.length; index++) {
+		const character = source[index];
+		if (quote) {
+			if (character === quote) quote = undefined;
+			continue;
+		}
+		if (character === '"' || character === "'") {
+			quote = character;
+			continue;
+		}
+		if (character === ">") return index;
+	}
+	return -1;
+}
+
+function visibleAutoresearchEvidenceText(source: string): string {
+	const asciiLowerSource = source.replace(/[A-Z]/g, (character) => character.toLowerCase());
+	const suppressedTags = new Set(["script", "style"]);
+	const blockTags = new Set([
+		"article",
+		"main",
+		"section",
+		"div",
+		"p",
+		"li",
+		"h1",
+		"h2",
+		"h3",
+		"h4",
+		"h5",
+		"h6",
+		"br",
+		"hr",
+		"tr",
+		"td",
+		"th",
+		"blockquote",
+		"dd",
+		"dt",
+	]);
+	const voidTags = new Set([
+		"area",
+		"base",
+		"br",
+		"col",
+		"embed",
+		"hr",
+		"img",
+		"input",
+		"link",
+		"meta",
+		"param",
+		"source",
+		"track",
+		"wbr",
+	]);
+	const stack: Array<{ tag: string; startsSuppression: boolean; block: boolean }> = [];
+	const chunks: string[] = [];
+	let suppressionDepth = 0;
+	let cursor = 0;
+	while (cursor < source.length) {
+		const top = stack.at(-1);
+		if (top && top.startsSuppression && suppressedTags.has(top.tag)) {
+			const closeIndex = asciiLowerSource.indexOf(`</${top.tag}`, cursor);
+			if (closeIndex < 0) break;
+			cursor = closeIndex;
+		}
+		const tagStart = source.indexOf("<", cursor);
+		if (tagStart < 0) {
+			if (suppressionDepth === 0) chunks.push(source.slice(cursor));
+			break;
+		}
+		if (suppressionDepth === 0 && tagStart > cursor) chunks.push(source.slice(cursor, tagStart));
+		if (source.startsWith("<!--", tagStart)) {
+			const commentEnd = source.indexOf("-->", tagStart + 4);
+			cursor = commentEnd < 0 ? source.length : commentEnd + 3;
+			continue;
+		}
+		const tagEnd = autoresearchHtmlTagEnd(source, tagStart);
+		if (tagEnd < 0) {
+			if (suppressionDepth === 0) chunks.push(source.slice(tagStart));
+			break;
+		}
+		const token = source.slice(tagStart + 1, tagEnd).trim();
+		const closing = /^\/\s*([a-z][\w:-]*)/i.exec(token);
+		if (closing) {
+			const tag = closing[1]!.toLowerCase();
+			let matchIndex = -1;
+			for (let index = stack.length - 1; index >= 0; index--) {
+				if (stack[index]?.tag === tag) {
+					matchIndex = index;
+					break;
+				}
+			}
+			if (matchIndex >= 0) {
+				let closedBlock = false;
+				while (stack.length > matchIndex) {
+					const frame = stack.pop()!;
+					if (frame.startsSuppression) suppressionDepth--;
+					closedBlock ||= frame.block;
+				}
+				if (suppressionDepth === 0 && closedBlock) chunks.push("\n");
+			}
+			cursor = tagEnd + 1;
+			continue;
+		}
+		const opening = /^([a-z][\w:-]*)/i.exec(token);
+		if (!opening) {
+			cursor = tagEnd + 1;
+			continue;
+		}
+		const tag = opening[1]!.toLowerCase();
+		const attributes = token.slice(opening[0].length).replace(/\/\s*$/, "");
+		const block = blockTags.has(tag);
+		const startsSuppression = suppressAutoresearchHtmlElement(tag, attributes);
+		if (suppressionDepth === 0 && block) chunks.push("\n");
+		if (startsSuppression) suppressionDepth++;
+		const selfClosing = /\/\s*$/.test(token) || voidTags.has(tag);
+		if (selfClosing) {
+			if (startsSuppression) suppressionDepth--;
+		} else {
+			stack.push({ tag, startsSuppression, block });
+		}
+		cursor = tagEnd + 1;
+	}
+	const decodeCodePoint = (value: string, radix: number): string => {
+		const codePoint = Number.parseInt(value, radix);
+		return Number.isFinite(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff
+			? String.fromCodePoint(codePoint)
+			: " ";
+	};
+	const visible = chunks
+		.join("")
+		.replace(/&#x([0-9a-f]+);/gi, (_match, value: string) => decodeCodePoint(value, 16))
+		.replace(/&#(\d+);/g, (_match, value: string) => decodeCodePoint(value, 10))
+		.replace(/&nbsp;/gi, " ")
+		.replace(/&amp;/gi, "&")
+		.replace(/&quot;/gi, '"')
+		.replace(/&#39;|&apos;/gi, "'")
+		.replace(/&lt;/gi, "<")
+		.replace(/&gt;/gi, ">")
+		.replace(/\r\n?/g, "\n")
+		.replace(/[^\S\n]+/g, " ")
+		.replace(/ *\n */g, "\n")
+		.replace(/\n{2,}/g, "\n")
+		.trim()
+		.toLowerCase();
+	return visible;
+}
+
+export function hasApplicablePeerReviewEvidence(documentText: string, exactQuote: string): boolean {
+	if (!isPositivePeerReviewEvidenceQuote(exactQuote)) return false;
+	const visible = visibleAutoresearchEvidenceText(documentText);
+	const quote = exactQuote.toLowerCase().replace(/\s+/g, " ").trim();
+	const hostileContext =
+		/\b(?:false|not\s+true|incorrect|inaccurate|misleading|unverified|unconfirmed|disputed|hypothetical|example|sample|template|alleged|den(?:y|ies|ied)|retract(?:ed|ion)?|no|not|never|nobody|neither|nor|without|may|might|could|possibly|perhaps|uncertain|but|however|although|despite|distinct)\b/i;
+	let offset = 0;
+	while (offset <= visible.length - quote.length) {
+		const index = visible.indexOf(quote, offset);
+		if (index < 0) return false;
+		const lineStart = visible.lastIndexOf("\n", index - 1) + 1;
+		const punctuationStart = Math.max(
+			visible.lastIndexOf(".", index - 1),
+			visible.lastIndexOf("!", index - 1),
+			visible.lastIndexOf("?", index - 1),
+		);
+		const sentenceStart = Math.max(lineStart, punctuationStart + 1);
+		const leadingClause = visible.slice(sentenceStart, index).trim();
+		const context = visible.slice(
+			Math.max(0, sentenceStart - 160),
+			Math.min(visible.length, index + quote.length + 80),
+		);
+		if (!leadingClause && !hostileContext.test(context)) return true;
+		offset = index + 1;
+	}
+	return false;
 }
 
 function scalarRecord(value: unknown, label: string): Record<string, number | string | boolean> {
@@ -557,8 +931,20 @@ export function parseAutoresearchPublicationInput(
 	if (publication.authors.length === 0) throw new Error("publication.authors must contain at least one author");
 	if (year !== undefined) publication.year = year as number;
 	const venue = optionalString(source.venue, "publication.venue");
-	const doi = optionalString(source.doi, "publication.doi");
-	const preprintId = optionalString(source.preprint_id ?? source.preprintId, "publication.preprint_id");
+	const paperDoi = publication.paperId.toLowerCase().startsWith("doi:") ? publication.paperId.slice(4) : undefined;
+	const paperPreprintId = publication.paperId.toLowerCase().startsWith("arxiv:")
+		? publication.paperId.slice(6)
+		: undefined;
+	const suppliedDoi = optionalString(source.doi, "publication.doi");
+	const suppliedPreprintId = optionalString(source.preprint_id ?? source.preprintId, "publication.preprint_id");
+	if (paperDoi && suppliedDoi && paperDoi.toLowerCase() !== suppliedDoi.toLowerCase()) {
+		throw new Error("publication.paper_id and publication.doi must identify the same DOI");
+	}
+	if (paperPreprintId && suppliedPreprintId && paperPreprintId.toLowerCase() !== suppliedPreprintId.toLowerCase()) {
+		throw new Error("publication.paper_id and publication.preprint_id must identify the same preprint");
+	}
+	const doi = suppliedDoi ?? paperDoi;
+	const preprintId = suppliedPreprintId ?? paperPreprintId;
 	const fullTextUrl = optionalString(source.full_text_url ?? source.fullTextUrl, "publication.full_text_url");
 	if (venue) publication.venue = venue;
 	if (doi) publication.doi = doi;
@@ -568,6 +954,26 @@ export function parseAutoresearchPublicationInput(
 		throw new Error("publication must include a DOI, preprint ID, or full-text URL");
 	}
 	return publication;
+}
+
+export function parseAutoresearchPeerReviewEvidenceInput(value: unknown): {
+	paperId: string;
+	evidenceUrl: string;
+	exactQuote: string;
+} {
+	const source = requireRecord(value, "peer_review_evidence");
+	const exactQuote = requireString(source.exact_quote ?? source.exactQuote, "peer_review_evidence.exact_quote");
+	if (!isPositivePeerReviewEvidenceQuote(exactQuote)) {
+		throw new Error("peer_review_evidence.exact_quote must positively establish that the item was peer reviewed");
+	}
+	return {
+		paperId: requireString(source.paper_id ?? source.paperId, "peer_review_evidence.paper_id"),
+		evidenceUrl: requirePublicHttpsUrl(
+			source.evidence_url ?? source.evidenceUrl,
+			"peer_review_evidence.evidence_url",
+		),
+		exactQuote,
+	};
 }
 
 function parseEvidenceBinding(value: unknown, label: string): AutoresearchEvidenceBinding {
@@ -691,6 +1097,39 @@ export function parseAutoresearchCandidateInput(value: unknown): AutoresearchCan
 	};
 }
 
+export function parseAutoresearchSearchReceiptInput(
+	candidate: AutoresearchCandidate,
+	value: unknown,
+	now = new Date().toISOString(),
+): AutoresearchSearchReceipt {
+	const source = requireRecord(value, "search_receipt");
+	const resultUrls = normalizeList(
+		stringArray(source.result_urls ?? source.resultUrls, "search_receipt.result_urls").map((url, index) =>
+			requirePublicHttpsUrl(url, `search_receipt.result_urls[${index}]`),
+		),
+	);
+	const inspectedPaperIds = normalizeList(
+		stringArray(source.inspected_paper_ids ?? source.inspectedPaperIds, "search_receipt.inspected_paper_ids"),
+	);
+	if (resultUrls.length === 0) throw new Error("search_receipt.result_urls must not be empty");
+	if (inspectedPaperIds.length === 0) throw new Error("search_receipt.inspected_paper_ids must not be empty");
+	return {
+		receiptId: `search-receipt-${randomUUID()}`,
+		candidateId: candidate.candidateId,
+		candidateDigest: candidateDigest(candidate),
+		coverageKind: enumValue(
+			source.coverage_kind ?? source.coverageKind,
+			SEARCH_COVERAGE_KINDS,
+			"search_receipt.coverage_kind",
+		),
+		query: requireString(source.query, "search_receipt.query"),
+		source: enumValue(source.source, SEARCH_SOURCES, "search_receipt.source"),
+		resultUrls,
+		inspectedPaperIds,
+		recordedAt: now,
+	};
+}
+
 function parseReviewer(value: unknown, index: number): AutoresearchReviewerResult {
 	const source = requireRecord(value, `cycle.reviewers[${index}]`);
 	return {
@@ -727,53 +1166,16 @@ function parseGates(value: unknown): AutoresearchProblemGates {
 	};
 }
 
-function parseSearchCoverage(value: unknown): AutoresearchSearchCoverage {
-	if (value === undefined) {
-		return {
-			mechanismQueries: false,
-			synonymsAndAdjacent: false,
-			backwardReferences: false,
-			forwardCitations: false,
-			relatedRecommendations: false,
-			recent12To24Months: false,
-			recentPreprints: false,
-			surveysOrReviews: false,
-		};
-	}
-	const source = requireRecord(value, "cycle.search_coverage");
+function emptySearchCoverage(): AutoresearchSearchCoverage {
 	return {
-		mechanismQueries: requireBoolean(
-			source.mechanism_queries ?? source.mechanismQueries,
-			"cycle.search_coverage.mechanism_queries",
-		),
-		synonymsAndAdjacent: requireBoolean(
-			source.synonyms_and_adjacent ?? source.synonymsAndAdjacent,
-			"cycle.search_coverage.synonyms_and_adjacent",
-		),
-		backwardReferences: requireBoolean(
-			source.backward_references ?? source.backwardReferences,
-			"cycle.search_coverage.backward_references",
-		),
-		forwardCitations: requireBoolean(
-			source.forward_citations ?? source.forwardCitations,
-			"cycle.search_coverage.forward_citations",
-		),
-		relatedRecommendations: requireBoolean(
-			source.related_recommendations ?? source.relatedRecommendations,
-			"cycle.search_coverage.related_recommendations",
-		),
-		recent12To24Months: requireBoolean(
-			source.recent_12_to_24_months ?? source.recent12To24Months,
-			"cycle.search_coverage.recent_12_to_24_months",
-		),
-		recentPreprints: requireBoolean(
-			source.recent_preprints ?? source.recentPreprints,
-			"cycle.search_coverage.recent_preprints",
-		),
-		surveysOrReviews: requireBoolean(
-			source.surveys_or_reviews ?? source.surveysOrReviews,
-			"cycle.search_coverage.surveys_or_reviews",
-		),
+		mechanismQueries: false,
+		synonymsAndAdjacent: false,
+		backwardReferences: false,
+		forwardCitations: false,
+		relatedRecommendations: false,
+		recent12To24Months: false,
+		recentPreprints: false,
+		surveysOrReviews: false,
 	};
 }
 
@@ -905,6 +1307,11 @@ export function parseAutoresearchCycleInput(value: unknown, now = new Date().toI
 	if (source.reviewers !== undefined) {
 		throw new Error("cycle.reviewers is host-owned; use autoresearch.review_candidate before completing the cycle");
 	}
+	if (source.search_coverage !== undefined || source.searchCoverage !== undefined) {
+		throw new Error(
+			"cycle.search_coverage is host-owned; record candidate-bound search receipts before completing the cycle",
+		);
+	}
 	const input: AutoresearchCycleInput = {
 		candidate: parseAutoresearchCandidateInput(source.candidate),
 		outcome: enumValue(source.outcome, CYCLE_OUTCOMES, "cycle.outcome"),
@@ -921,7 +1328,7 @@ export function parseAutoresearchCycleInput(value: unknown, now = new Date().toI
 		publications: rawPublications.map((item) => parseAutoresearchPublicationInput(item, now)),
 		fieldMaps: parseFieldMaps(source.field_maps ?? source.fieldMaps),
 		gates: parseGates(source.gates),
-		searchCoverage: parseSearchCoverage(source.search_coverage ?? source.searchCoverage),
+		searchCoverage: emptySearchCoverage(),
 		motivationPaperIds: normalizeList(
 			optionalStringArray(source.motivation_paper_ids ?? source.motivationPaperIds, "cycle.motivation_paper_ids"),
 		),
@@ -957,16 +1364,16 @@ function validateCycleGate(input: AutoresearchCycleInput, reviewers?: Autoresear
 	if (input.outcome === "promoted" && input.canonicalPromotionIds.length === 0) {
 		throw new Error("a promoted cycle requires canonical_promotion_ids");
 	}
-	if (input.outcome !== "survived" && input.outcome !== "promoted") return;
-	if (reviewers) {
-		const missingRoles = REVIEWER_ROLES.filter((role) => !roles.has(role));
-		if (missingRoles.length > 0) {
-			throw new Error(`surviving candidates require all four reviewer roles; missing: ${missingRoles.join(", ")}`);
-		}
-		const failedReview = reviewers.find((reviewer) => reviewer.verdict !== "pass");
-		if (failedReview)
-			throw new Error(`surviving candidates require passing reviews; ${failedReview.role} did not pass`);
+	if (!reviewers) return;
+	const missingRoles = REVIEWER_ROLES.filter((role) => !roles.has(role));
+	if (missingRoles.length > 0) {
+		throw new Error(
+			`every completed major cycle requires all four reviewer roles; missing: ${missingRoles.join(", ")}`,
+		);
 	}
+	if (input.outcome !== "survived" && input.outcome !== "promoted") return;
+	const failedReview = reviewers.find((reviewer) => reviewer.verdict !== "pass");
+	if (failedReview) throw new Error(`surviving candidates require passing reviews; ${failedReview.role} did not pass`);
 	const failedGate = Object.entries(input.gates).find(([, passed]) => !passed);
 	if (failedGate) throw new Error(`surviving candidates require every problem gate; ${failedGate[0]} did not pass`);
 	const missingCoverage = Object.entries(input.searchCoverage).find(([, covered]) => !covered);
@@ -1218,11 +1625,14 @@ function isAutoresearchState(value: unknown): value is AutoresearchState {
 		typeof value.updatedAt === "string" &&
 		Array.isArray(value.publications) &&
 		Array.isArray(value.publicationVerifications) &&
+		Array.isArray(value.peerReviewVerifications) &&
 		Array.isArray(value.checkpointedPublicationKeys) &&
 		Array.isArray(value.claims) &&
 		Array.isArray(value.experiments) &&
 		Array.isArray(value.memories) &&
 		Array.isArray(value.memoryReusePlans) &&
+		Array.isArray(value.memoryReflections) &&
+		Array.isArray(value.searchReceipts) &&
 		Array.isArray(value.reviewerAssignments) &&
 		Array.isArray(value.collectedReviews) &&
 		Array.isArray(value.ingestedAgentMessageIds) &&
@@ -1234,13 +1644,46 @@ function isAutoresearchState(value: unknown): value is AutoresearchState {
 }
 
 function migrateAutoresearchState(value: unknown): unknown {
-	if (!isRecord(value) || (value.schemaVersion !== 1 && value.schemaVersion !== 2)) return value;
+	if (!isRecord(value)) return value;
+	if (value.schemaVersion === 3) {
+		const publications = Array.isArray(value.publications)
+			? value.publications.map((item) =>
+					isRecord(item) && item.publicationStatus === "peer_reviewed"
+						? { ...item, publicationStatus: "published" }
+						: item,
+				)
+			: [];
+		const publicationVerifications = Array.isArray(value.publicationVerifications)
+			? value.publicationVerifications.map((item) =>
+					isRecord(item) && item.publicationStatus === "peer_reviewed"
+						? { ...item, publicationStatus: "published" }
+						: item,
+				)
+			: [];
+		const cycles = Array.isArray(value.cycles)
+			? value.cycles.map((item) =>
+					isRecord(item) ? { ...item, searchCoverage: emptySearchCoverage(), searchReceiptIds: [] } : item,
+				)
+			: [];
+		return {
+			...value,
+			schemaVersion: AUTORESEARCH_STATE_VERSION,
+			publications,
+			publicationVerifications,
+			peerReviewVerifications: [],
+			memoryReflections: [],
+			searchReceipts: [],
+			cycles,
+		};
+	}
+	if (value.schemaVersion !== 1 && value.schemaVersion !== 2) return value;
 	const cycles = Array.isArray(value.cycles)
 		? value.cycles.map((item) => {
 				if (!isRecord(item)) return item;
 				return {
 					...item,
-					searchCoverage: item.searchCoverage ?? parseSearchCoverage(undefined),
+					searchCoverage: emptySearchCoverage(),
+					searchReceiptIds: [],
 					motivationPaperIds: item.motivationPaperIds ?? [],
 					closestPriorWorkPaperIds: item.closestPriorWorkPaperIds ?? [],
 					preliminaryEvidenceExperimentIds: item.preliminaryEvidenceExperimentIds ?? [],
@@ -1278,9 +1721,9 @@ function migrateAutoresearchState(value: unknown): unknown {
 	const supervision = Array.isArray(value.supervision)
 		? value.supervision.map((item) => (isRecord(item) ? { ...item, source: item.source ?? "manual_recovery" } : item))
 		: [];
-	return {
+	return migrateAutoresearchState({
 		...value,
-		schemaVersion: AUTORESEARCH_STATE_VERSION,
+		schemaVersion: 3,
 		publications,
 		publicationVerifications: [],
 		claims,
@@ -1292,7 +1735,7 @@ function migrateAutoresearchState(value: unknown): unknown {
 		ingestedAgentMessageIds: Array.isArray(value.ingestedAgentMessageIds) ? value.ingestedAgentMessageIds : [],
 		cycles,
 		supervision,
-	};
+	});
 }
 
 function publicationKey(publication: AutoresearchPublication): string {
@@ -1339,6 +1782,27 @@ function memoryTerms(value: string): Set<string> {
 
 function candidateDigest(candidate: AutoresearchCandidate): string {
 	return createHash("sha256").update(JSON.stringify(candidate)).digest("hex");
+}
+
+function searchCoverageProperty(kind: AutoresearchSearchCoverageKind): keyof AutoresearchSearchCoverage {
+	switch (kind) {
+		case "mechanism_queries":
+			return "mechanismQueries";
+		case "synonyms_and_adjacent":
+			return "synonymsAndAdjacent";
+		case "backward_references":
+			return "backwardReferences";
+		case "forward_citations":
+			return "forwardCitations";
+		case "related_recommendations":
+			return "relatedRecommendations";
+		case "recent_12_to_24_months":
+			return "recent12To24Months";
+		case "recent_preprints":
+			return "recentPreprints";
+		case "surveys_or_reviews":
+			return "surveysOrReviews";
+	}
 }
 
 function memoryRelevance(memory: AutoresearchMemory, query: string): number {
@@ -1457,8 +1921,14 @@ export class AutoresearchStore {
 		if (!/^[a-f0-9]{64}$/i.test(verification.metadataDigest)) {
 			throw new Error("publication verification metadata digest must be SHA-256");
 		}
-		if (verification.publicationStatus === "peer_reviewed" && verification.source !== "crossref") {
-			throw new Error("only the host Crossref verifier may classify a publication as peer_reviewed");
+		if (verification.publicationStatus === "peer_reviewed_verified") {
+			throw new Error("publication metadata cannot establish peer review; use publisher evidence verification");
+		}
+		if (verification.source === "crossref" && verification.publicationStatus === "preprint") {
+			throw new Error("Crossref metadata verification cannot classify an item as a preprint");
+		}
+		if (verification.source === "arxiv" && verification.publicationStatus !== "preprint") {
+			throw new Error("arXiv metadata verification may only classify an item as a preprint");
 		}
 		if (
 			verification.source === "crossref" &&
@@ -1493,6 +1963,74 @@ export class AutoresearchStore {
 		this.state.publicationVerifications.push(structuredClone(verification));
 		this.save();
 		return structuredClone(verification);
+	}
+
+	recordPeerReviewVerification(verification: AutoresearchPeerReviewVerification): AutoresearchPeerReviewVerification {
+		const publication = this.state.publications.find((item) => item.paperId === verification.paperId);
+		if (!publication) throw new Error(`peer-review verification references unknown paper ${verification.paperId}`);
+		if (publication.publicationStatus !== "published") {
+			throw new Error("peer-review verification requires a host-verified published item");
+		}
+		if (!this.state.publicationVerifications.some((item) => item.paperId === verification.paperId)) {
+			throw new Error("peer-review verification requires a publication metadata receipt");
+		}
+		if (!/^[a-f0-9]{64}$/i.test(verification.evidenceDigest)) {
+			throw new Error("peer-review evidence digest must be SHA-256");
+		}
+		if (!isPositivePeerReviewEvidenceQuote(verification.exactQuote)) {
+			throw new Error("peer-review evidence must positively establish that the item was peer reviewed");
+		}
+		if (this.state.peerReviewVerifications.some((item) => item.paperId === verification.paperId)) {
+			throw new Error(`publication ${verification.paperId} already has peer-review verification`);
+		}
+		publication.publicationStatus = "peer_reviewed_verified";
+		publication.lastVerifiedAt = verification.verifiedAt;
+		publication.metadataVerifiedBy = normalizeList([
+			...(publication.metadataVerifiedBy ?? []),
+			"publisher_peer_review_evidence",
+		]);
+		this.state.peerReviewVerifications.push(structuredClone(verification));
+		this.save();
+		return structuredClone(verification);
+	}
+
+	recordSearchReceipt(receipt: AutoresearchSearchReceipt): AutoresearchSearchReceipt {
+		const existing = this.state.searchReceipts.find(
+			(item) => item.candidateId === receipt.candidateId && item.coverageKind === receipt.coverageKind,
+		);
+		if (existing) {
+			if (existing.candidateDigest !== receipt.candidateDigest) {
+				throw new Error(`candidate ${receipt.candidateId} changed after search receipts were recorded`);
+			}
+			throw new Error(`candidate ${receipt.candidateId} already has ${receipt.coverageKind} search evidence`);
+		}
+		for (const paperId of receipt.inspectedPaperIds) {
+			const publication = this.state.publications.find((item) => item.paperId === paperId);
+			const verification = this.state.publicationVerifications.find((item) => item.paperId === paperId);
+			if (!publication || !verification) {
+				throw new Error(`search receipt inspected paper ${paperId} is not in the verified publication ledger`);
+			}
+		}
+		this.state.searchReceipts.push(structuredClone(receipt));
+		this.save();
+		return structuredClone(receipt);
+	}
+
+	getSearchReceipts(candidate: AutoresearchCandidate): AutoresearchSearchReceipt[] {
+		const digest = candidateDigest(candidate);
+		return this.state.searchReceipts
+			.filter((item) => item.candidateId === candidate.candidateId && item.candidateDigest === digest)
+			.map((item) => structuredClone(item));
+	}
+
+	private deriveSearchCoverage(candidate: AutoresearchCandidate): {
+		coverage: AutoresearchSearchCoverage;
+		receipts: AutoresearchSearchReceipt[];
+	} {
+		const coverage = emptySearchCoverage();
+		const receipts = this.getSearchReceipts(candidate);
+		for (const receipt of receipts) coverage[searchCoverageProperty(receipt.coverageKind)] = true;
+		return { coverage, receipts };
 	}
 
 	recordExperiment(experiment: AutoresearchExperiment): AutoresearchExperiment {
@@ -1612,6 +2150,55 @@ export class AutoresearchStore {
 		}
 		this.save();
 		return structuredClone(plan);
+	}
+
+	recordMemoryReflection(input: {
+		trigger: AutoresearchMemoryReflection["trigger"];
+		cycleId?: string;
+		report: Record<string, number | string | boolean>;
+		archivedMemoryIds: string[];
+	}): AutoresearchMemoryReflection {
+		if (input.cycleId && !this.state.cycles.some((cycle) => cycle.cycleId === input.cycleId)) {
+			throw new Error(`memory reflection references unknown cycle ${input.cycleId}`);
+		}
+		const cycleIndex = input.cycleId ? this.state.cycles.findIndex((cycle) => cycle.cycleId === input.cycleId) : -1;
+		const cycle = cycleIndex >= 0 ? this.state.cycles[cycleIndex] : undefined;
+		if (input.trigger !== "manual" && !cycle) {
+			throw new Error(`${input.trigger} memory reflection requires a cycle_id`);
+		}
+		if (input.trigger === "five_cycles" && (cycleIndex + 1) % 5 !== 0) {
+			throw new Error("five_cycles memory reflection requires the fifth cycle in a milestone block");
+		}
+		if (input.trigger === "candidate_promotion" && cycle?.outcome !== "promoted") {
+			throw new Error("candidate_promotion memory reflection requires a promoted cycle");
+		}
+		if (input.trigger === "supervisor_intervention") {
+			const supervisedIntervention = this.state.supervision.some(
+				(item) => item.cycleId === input.cycleId && item.interventionNeeded,
+			);
+			const hostCheckpointIntervention =
+				cycleIndex === this.state.cycles.length - 1 &&
+				evaluateAutoresearchCheckpoint(this.state.cycles).interventionNeeded;
+			if (!supervisedIntervention && !hostCheckpointIntervention) {
+				throw new Error("supervisor_intervention memory reflection requires an intervention checkpoint");
+			}
+		}
+		const archivedMemoryIds = normalizeList(input.archivedMemoryIds);
+		for (const memoryId of archivedMemoryIds) {
+			const memory = this.state.memories.find((item) => item.memoryId === memoryId);
+			if (!memory) throw new Error(`memory reflection archived unknown memory ${memoryId}`);
+		}
+		const reflection: AutoresearchMemoryReflection = {
+			reflectionId: `memory-reflection-${randomUUID()}`,
+			trigger: input.trigger,
+			report: structuredClone(input.report),
+			archivedMemoryIds,
+			recordedAt: this.now(),
+		};
+		if (input.cycleId) reflection.cycleId = input.cycleId;
+		this.state.memoryReflections.push(reflection);
+		this.save();
+		return structuredClone(reflection);
 	}
 
 	getCollectedReviews(candidateId: string): AutoresearchReviewerResult[] {
@@ -1833,6 +2420,8 @@ export class AutoresearchStore {
 	recordCycle(input: AutoresearchCycleInput): AutoresearchCycleResult {
 		if (!this.state.objective) throw new Error("initialize autoresearch before completing a cycle");
 		const reviewers = this.getCollectedReviews(input.candidate.candidateId);
+		const searchEvidence = this.deriveSearchCoverage(input.candidate);
+		input.searchCoverage = searchEvidence.coverage;
 		validateCycleGate(input, reviewers);
 		const digest = candidateDigest(input.candidate);
 		for (const reviewer of reviewers) {
@@ -1899,6 +2488,7 @@ export class AutoresearchStore {
 			reviewers,
 			gates: input.gates,
 			searchCoverage: input.searchCoverage,
+			searchReceiptIds: searchEvidence.receipts.map((receipt) => receipt.receiptId),
 			motivationPaperIds: input.motivationPaperIds,
 			closestPriorWorkPaperIds: input.closestPriorWorkPaperIds,
 			preliminaryEvidenceExperimentIds: input.preliminaryEvidenceExperimentIds,
@@ -2020,6 +2610,15 @@ export class AutoresearchStore {
 					.map((item) => ({ diagnosis: item.diagnosis, directions: item.alternativeDirections })),
 			},
 			field_maps: compactFieldMaps(this.state),
+			search_receipts: this.state.searchReceipts
+				.filter((receipt) => cycle.searchReceiptIds.includes(receipt.receiptId))
+				.map((receipt) => ({
+					coverage_kind: receipt.coverageKind,
+					query: receipt.query,
+					source: receipt.source,
+					inspected_paper_ids: receipt.inspectedPaperIds,
+					recorded_at: receipt.recordedAt,
+				})),
 			experiments: this.state.experiments.slice(-10).map((experiment) => ({
 				experiment_id: experiment.experimentId,
 				candidate_id: experiment.candidateId,
@@ -2081,7 +2680,9 @@ export class AutoresearchStore {
 						this.state.publicationVerifications.some(
 							(receipt) =>
 								receipt.paperId === publication.paperId &&
-								receipt.publicationStatus === publication.publicationStatus,
+								(receipt.publicationStatus === publication.publicationStatus ||
+									(publication.publicationStatus === "peer_reviewed_verified" &&
+										receipt.publicationStatus === "published")),
 						) &&
 						promotedClaimPublicationIds.has(publication.paperId) &&
 						(promoted?.canonicalPromotionIds ?? []).some((claimId) => {
@@ -2094,7 +2695,11 @@ export class AutoresearchStore {
 							);
 						}),
 				) &&
-				motivationPublications.some((publication) => publication.publicationStatus === "peer_reviewed"),
+				motivationPublications.some(
+					(publication) =>
+						publication.publicationStatus === "peer_reviewed_verified" &&
+						this.state.peerReviewVerifications.some((receipt) => receipt.paperId === publication.paperId),
+				),
 			latestPreprintCheck: promoted?.searchCoverage.recentPreprints === true,
 			strongClosestPriorWorkComparison:
 				!!promoted?.candidate.closestPriorArt.trim() && (promoted?.closestPriorWorkPaperIds.length ?? 0) > 0,
@@ -2159,6 +2764,9 @@ export class AutoresearchStore {
 			final_problem_statement:
 				[...this.state.cycles].reverse().find((cycle) => cycle.outcome === "promoted")?.candidate ?? null,
 			publication_table: this.state.publications,
+			publication_verification_receipts: this.state.publicationVerifications,
+			peer_review_verification_receipts: this.state.peerReviewVerifications,
+			search_receipt_ledger: this.state.searchReceipts,
 			claim_evidence_provenance_ledger: this.state.claims,
 			literature_map: this.state.fieldMaps,
 			assumption_matrix: this.state.fieldMaps.assumptions,
@@ -2197,6 +2805,7 @@ export class AutoresearchStore {
 				]),
 			]),
 			supervisor_intervention_history: this.state.supervision,
+			memory_reflection_history: this.state.memoryReflections,
 			canonical_research_lineage: this.state.lineage,
 		};
 	}
@@ -2236,11 +2845,12 @@ export function buildAutoresearchReviewerPrompts(
 		null,
 		2,
 	);
-	const response = `Reply to the parent with the literal line AUTORESEARCH_REVIEW_JSON:${candidate.candidateId}, then one JSON object with candidate_id, role, verdict (pass|revise|reject), summary, and objections. Send it with agent_message.send. Treat missing evidence as missing; never invent a source.`;
+	const response = (role: AutoresearchReviewerRole): string =>
+		`Reply to the parent with the literal line AUTORESEARCH_REVIEW_JSON:${candidate.candidateId}, then exactly one JSON object with candidate_id, role, verdict, summary, and objections. The role value MUST be the literal machine identifier "${role}"—never a reviewer label such as "Reviewer A" or "reviewer_c". verdict must be exactly pass, revise, or reject. Send the marker and JSON with agent_message.send. Treat missing evidence as missing; never invent a source.`;
 	return {
-		literature_auditor: `Act as Reviewer A, the Literature Auditor. Verify whether every problem-statement claim is supported and whether wording exceeds the evidence. Inspect full text when available.\n\n${shared}\n\n${response}`,
-		prior_art_killer: `Act as Reviewer B, the Prior-Art Killer. Use Prime's native search/web tools to search synonyms, adjacent terminology, backward references, forward citations, related work, and recent preprints for the same mechanism. Try to kill novelty aggressively.\n\n${shared}\n\n${response}`,
-		experimental_critic: `Act as Reviewer C, the Experimental Critic. Test falsifiability, feasibility, confounds, data access, baseline strength, hypothesis separation, validation, reproducibility, and general applicability.\n\n${shared}\n\n${response}`,
-		top_tier_editor: `Act as Reviewer D, the Top-Tier Editor. Apply a demanding editorial filter: technical soundness, strength of evidence, novelty, field importance, a real technical challenge, comparison with previous approaches, broad relevance, and whether this is more than an incremental A+B or benchmark-only result. These are hostile review questions, not an acceptance guarantee.\n\n${shared}\n\n${response}`,
+		literature_auditor: `Act as Reviewer A, the Literature Auditor. Verify whether every problem-statement claim is supported and whether wording exceeds the evidence. Inspect full text when available.\n\n${shared}\n\n${response("literature_auditor")}`,
+		prior_art_killer: `Act as Reviewer B, the Prior-Art Killer. Use Prime's native search/web tools to search synonyms, adjacent terminology, backward references, forward citations, related work, and recent preprints for the same mechanism. Try to kill novelty aggressively.\n\n${shared}\n\n${response("prior_art_killer")}`,
+		experimental_critic: `Act as Reviewer C, the Experimental Critic. Test falsifiability, feasibility, confounds, data access, baseline strength, hypothesis separation, validation, reproducibility, and general applicability.\n\n${shared}\n\n${response("experimental_critic")}`,
+		top_tier_editor: `Act as Reviewer D, the Top-Tier Editor. Apply a demanding editorial filter: technical soundness, strength of evidence, novelty, field importance, a real technical challenge, comparison with previous approaches, broad relevance, and whether this is more than an incremental A+B or benchmark-only result. These are hostile review questions, not an acceptance guarantee.\n\n${shared}\n\n${response("top_tier_editor")}`,
 	};
 }
