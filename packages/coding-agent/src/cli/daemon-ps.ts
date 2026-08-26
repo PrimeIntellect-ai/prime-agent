@@ -958,10 +958,10 @@ async function forceStopTrackedWorkers(
 					await assertAdmission();
 					if (isOrphanProcessIdentityCurrent(orphan)) {
 						killOrphanProcess(orphan.pid);
-					}
-					if (isProcessAlive(orphan.pid)) {
-						cleanupWorkerRecords = false;
-						failures.push(`could not stop child process ${orphan.pid} for worker ${descriptor.workerId}`);
+						if (isProcessAlive(orphan.pid)) {
+							cleanupWorkerRecords = false;
+							failures.push(`could not stop child process ${orphan.pid} for worker ${descriptor.workerId}`);
+						}
 					}
 					continue;
 				}
