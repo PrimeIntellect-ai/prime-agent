@@ -444,4 +444,39 @@ describe("issue 71 authority cleanup races", () => {
 			message: "Agent run scope cleanup failed during session disposal",
 		});
 	});
+
+	it("drains cleanup debt when synchronous dispose wins during async disposal startup", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: false } } });
+		harnesses.push(harness);
+		const refinementDrainStarted = deferred();
+		const releaseRefinementDrain = deferred();
+		let rejectCleanup!: (error: Error) => void;
+		const cleanup = new Promise<void>((_resolve, reject) => {
+			rejectCleanup = reject;
+		});
+		const sessionInternals = harness.session as unknown as {
+			_drainPendingRefinementForDisposal(): Promise<void>;
+			_trackRunScopeCleanupOperation(operation: Promise<void>): Promise<void>;
+		};
+		vi.spyOn(sessionInternals, "_drainPendingRefinementForDisposal").mockImplementation(async () => {
+			refinementDrainStarted.resolve();
+			await releaseRefinementDrain.promise;
+		});
+		void sessionInternals._trackRunScopeCleanupOperation(cleanup).catch(() => undefined);
+
+		const firstDisposal = harness.session.disposeAsync();
+		await refinementDrainStarted.promise;
+		harness.session.dispose();
+		const concurrentDisposal = harness.session.disposeAsync();
+		rejectCleanup(new Error("terminal cleanup debt during disposal startup"));
+		releaseRefinementDrain.resolve();
+
+		const results = await Promise.allSettled([firstDisposal, concurrentDisposal]);
+		expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"]);
+		const [first, second] = results as [PromiseRejectedResult, PromiseRejectedResult];
+		expect(first.reason).toBe(second.reason);
+		expect(first.reason).toMatchObject({
+			message: "Agent run scope cleanup failed during session disposal",
+		});
+	});
 });

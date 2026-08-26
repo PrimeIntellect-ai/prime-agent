@@ -4087,7 +4087,9 @@ export class AgentSession {
 			// agent_end completes instead of being aborted by dispose().
 			await this._drainPendingRefinementForDisposal();
 			if (this._disposed) {
-				return this._disposeCallbacksPromise;
+				await this._drainRunScopeCleanupOperations();
+				await this._disposeCallbacksPromise;
+				return;
 			}
 			this._disposing = true;
 			this._sessionActionCommitDisposeAbortController.abort();
