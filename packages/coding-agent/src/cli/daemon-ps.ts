@@ -953,6 +953,18 @@ async function forceStopTrackedWorkers(
 				if (!isOrphanProcessIdentityCurrent(orphan)) {
 					continue;
 				}
+				if (process.platform === "win32") {
+					// taskkill /T, like the sibling reapers: signalling only the shell pid leaves its descendants alive.
+					await assertAdmission();
+					if (isOrphanProcessIdentityCurrent(orphan)) {
+						killOrphanProcess(orphan.pid);
+					}
+					if (isProcessAlive(orphan.pid)) {
+						cleanupWorkerRecords = false;
+						failures.push(`could not stop child process ${orphan.pid} for worker ${descriptor.workerId}`);
+					}
+					continue;
+				}
 				if (!(await stopTrackedProcess(orphan.pid, orphan.processStartId, assertAdmission))) {
 					cleanupWorkerRecords = false;
 					failures.push(`could not stop child process ${orphan.pid} for worker ${descriptor.workerId}`);
