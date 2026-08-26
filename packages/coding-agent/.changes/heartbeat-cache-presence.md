@@ -1,1 +1,0 @@
-- Prevented outdated heartbeat snapshots from being retained after worker changes.
