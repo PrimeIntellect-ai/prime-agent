@@ -1,0 +1,1 @@
+- Fixed command-recovery-journal compaction, which threw `EPERM: operation not permitted, fsync` on Windows and repeatedly disabled daemon command acknowledgements.
