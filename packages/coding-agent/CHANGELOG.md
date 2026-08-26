@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed a cell that rebound or ignored SIGINT (or a restored prior handler) permanently breaking protocol interrupts: the REPL runtime now re-asserts its SIGINT handler between cells.
 - Fixed the Python REPL runtime surviving its owning process's death while a non-yielding cell runs: an owner-watchdog thread now hard-exits the runtime (killing live bash children first) when the owner process dies.
 - Fixed an interrupt parked during a snapshot's prune window misreporting the completed destructive snapshot as failed; it is now consumed once the manifest is committed, and an interrupt landing just after a completed snapshot/restore request is consumed too instead of failing its done.
 - Fixed a REPL runtime interrupt gap where an interrupt landing during a cell's trailing-expression repr or output drain was dropped; the request now stays interruptible until its done event is emitted, so a slow user __repr__ can be cancelled.
