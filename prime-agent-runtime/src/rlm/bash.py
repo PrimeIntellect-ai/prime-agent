@@ -150,11 +150,7 @@ class BashHandle:
                 raise
             script = _status_script(_with_prefix(command))
         else:
-            # Windows: no status/gate channel; the child is created suspended and
-            # directly inside the kill-on-close job (PROC_THREAD_ATTRIBUTE_JOB_LIST
-            # at CreateProcessW time), so no window exists between creation and
-            # containment. Order: spawn-in-job (suspended) -> journal (may run a
-            # PowerShell start-id query) -> resume.
+            # Windows: the child is created suspended, atomically inside the kill-on-close job.
             script = _with_prefix(command)
             self._job = _winjob.create_job()
             if self._job is None:
