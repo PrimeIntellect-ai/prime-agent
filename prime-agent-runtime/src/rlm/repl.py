@@ -177,9 +177,10 @@ class _TaggedBuffer(io.RawIOBase):
         self._fallback_fd = fallback_fd
 
     def write(self, data: Any) -> int:
-        # Pipe writes can be short for payloads above the pipe capacity.
-        view = memoryview(bytes(data))
+        # memoryview (unlike bytes()) rejects int, matching a real buffer's TypeError.
+        view = memoryview(data).cast("B")
         total = len(view)
+        # Pipe writes can be short for payloads above the pipe capacity.
         while view:
             view = view[os.write(self._fallback_fd, view) :]
         return total
@@ -816,12 +817,14 @@ def _handle_request_line(raw: bytes, queue: asyncio.Queue[dict[str, Any]]) -> No
         return
     if rtype in ("execute", "snapshot", "restore"):
         with _interrupt_lock:
-            # A reused in-flight id would corrupt interrupt/finish bookkeeping
-            # (a targeted interrupt could land on the wrong request).
-            if req["id"] in _inflight:
-                _protocol_error(f"duplicate in-flight request id: {req['id']!r}")
-                return
-            _inflight.add(req["id"])
+            # A reused in-flight id would corrupt interrupt/finish bookkeeping.
+            duplicate = req["id"] in _inflight
+            if not duplicate:
+                _inflight.add(req["id"])
+        # The protocol write can block on backpressure: never send under the lock.
+        if duplicate:
+            _protocol_error(f"duplicate in-flight request id: {req['id']!r}")
+            return
     _loop.call_soon_threadsafe(queue.put_nowait, req)
 
 
