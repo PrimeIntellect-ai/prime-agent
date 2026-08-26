@@ -5,6 +5,8 @@ import {
 	AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
 	assertAgentRunKernelBoundaryScope,
 	createAgentRunKernelBoundaryScope,
+	prepareAgentRunKernelBoundary,
+	revokeAgentRunKernelBoundaryScope,
 } from "../../../src/core/run-kernel-boundary.js";
 import {
 	AGENT_RUN_MODEL_SCOPE_VERSION,
@@ -347,5 +349,46 @@ describe("issue 71 authority cleanup races", () => {
 		releaseCleanup.resolve();
 		await Promise.all([run.catch(() => undefined), disposal]);
 		expect(disposalSettled).toBe(true);
+	});
+
+	it("rejects disposeAsync after waiting for failed run-scope cleanup", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: false } } });
+		harnesses.push(harness);
+		const kernelScope = createAgentRunKernelBoundaryScope({
+			version: AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
+			policy: {
+				filesystem: "workspace-write",
+				workspaceRoot: harness.tempDir,
+				workspaceScopeDigest: "sha256:dispose-cleanup-failure",
+				network: "enabled",
+				reviewerMode: "automatic",
+			},
+			prepare: () => ({
+				launch: () => {
+					throw new Error("not launched");
+				},
+				dispose: () => {
+					throw new Error("confinement cleanup stayed unavailable");
+				},
+			}),
+		});
+		await prepareAgentRunKernelBoundary(kernelScope, {
+			executionId: "dispose-cleanup-failure",
+			sessionId: harness.session.sessionId,
+			recursionDepth: 0,
+			cwd: harness.tempDir,
+			signal: new AbortController().signal,
+		});
+		const cleanup = revokeAgentRunKernelBoundaryScope(kernelScope, "session disposed");
+		const trackCleanup = (
+			harness.session as unknown as {
+				_trackRunScopeCleanupOperation(operation: Promise<void>): Promise<void>;
+			}
+		)._trackRunScopeCleanupOperation.bind(harness.session);
+		void trackCleanup(cleanup).catch(() => undefined);
+
+		await expect(harness.session.disposeAsync()).rejects.toThrow(
+			"Agent run scope cleanup failed during session disposal",
+		);
 	});
 });

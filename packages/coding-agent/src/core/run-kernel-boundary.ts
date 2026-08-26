@@ -88,7 +88,7 @@ class AgentRunKernelBoundaryScopeCapability implements AgentRunKernelBoundarySco
 			context: AgentRunKernelBoundaryContext;
 			lease: AgentRunKernelBoundaryLease;
 			cleanupCompleted: boolean;
-			observerDebt?: AgentRunKernelBoundaryLifecycleEvent & { readonly phase: "terminal" };
+			observerDebt: Array<AgentRunKernelBoundaryLifecycleEvent & { readonly phase: "terminal" }>;
 		}
 	>();
 	#active = true;
@@ -126,7 +126,7 @@ class AgentRunKernelBoundaryScopeCapability implements AgentRunKernelBoundarySco
 			// Once prepare returns a disposable lease, retain it before any further
 			// validation or observation. Failed rollback remains cleanup debt that
 			// revoke() can retry instead of losing the only handle to the boundary.
-			this.#leases.set(context.executionId, { context, lease, cleanupCompleted: false });
+			this.#leases.set(context.executionId, { context, lease, cleanupCompleted: false, observerDebt: [] });
 			this.assertActive();
 			context.signal.throwIfAborted();
 		} catch (error) {
@@ -159,22 +159,17 @@ class AgentRunKernelBoundaryScopeCapability implements AgentRunKernelBoundarySco
 	async release(executionId: string, outcome: "completed" | "failed" | "cancelled", reason: string): Promise<void> {
 		const admitted = this.#leases.get(executionId);
 		if (!admitted) return;
-		if (admitted.observerDebt) {
-			await this.#observe?.(admitted.observerDebt);
-			admitted.observerDebt = undefined;
-			if (admitted.cleanupCompleted) {
-				this.#leases.delete(executionId);
-				return;
-			}
+		if (admitted.cleanupCompleted) {
+			await this.#publishTerminalObserverDebt(admitted.observerDebt);
+			this.#leases.delete(executionId);
+			return;
 		}
 		let cleanup: "completed" | "failed" = "completed";
-		if (!admitted.cleanupCompleted) {
-			try {
-				await admitted.lease.dispose(reason);
-				admitted.cleanupCompleted = true;
-			} catch {
-				cleanup = "failed";
-			}
+		try {
+			await admitted.lease.dispose(reason);
+			admitted.cleanupCompleted = true;
+		} catch {
+			cleanup = "failed";
 		}
 		const terminalEvent = Object.freeze({
 			phase: "terminal",
@@ -183,14 +178,29 @@ class AgentRunKernelBoundaryScopeCapability implements AgentRunKernelBoundarySco
 			outcome,
 			cleanup,
 		} satisfies AgentRunKernelBoundaryLifecycleEvent & { readonly phase: "terminal" });
+		admitted.observerDebt.push(terminalEvent);
 		try {
-			await this.#observe?.(terminalEvent);
-		} catch (error) {
-			admitted.observerDebt = terminalEvent;
-			throw error;
+			await this.#publishTerminalObserverDebt(admitted.observerDebt);
+		} catch (observerError) {
+			if (cleanup === "failed") {
+				throw new AggregateError(
+					[new Error("Kernel boundary cleanup failed"), observerError],
+					"Kernel boundary cleanup and terminal publication failed",
+				);
+			}
+			throw observerError;
 		}
 		if (admitted.cleanupCompleted) this.#leases.delete(executionId);
 		if (cleanup === "failed") throw new Error("Kernel boundary cleanup failed");
+	}
+
+	async #publishTerminalObserverDebt(
+		debt: Array<AgentRunKernelBoundaryLifecycleEvent & { readonly phase: "terminal" }>,
+	): Promise<void> {
+		while (debt.length > 0) {
+			await this.#observe?.(debt[0]!);
+			debt.shift();
+		}
 	}
 
 	async revoke(reason: string): Promise<void> {

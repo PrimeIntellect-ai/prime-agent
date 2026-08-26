@@ -242,6 +242,58 @@ describe("issue 71 bounded kernel", () => {
 		expect(terminalObserverAttempts).toBe(2);
 	});
 
+	it("retries failed confinement cleanup even while terminal observer debt is unavailable", async () => {
+		let disposeAttempts = 0;
+		let terminalObserverAttempts = 0;
+		const publishedCleanup: string[] = [];
+		const scope = createAgentRunKernelBoundaryScope({
+			version: AGENT_RUN_KERNEL_BOUNDARY_SCOPE_VERSION,
+			policy: {
+				filesystem: "workspace-write",
+				workspaceRoot: process.cwd(),
+				workspaceScopeDigest: "sha256:combined-cleanup-observer-debt",
+				network: "enabled",
+				reviewerMode: "automatic",
+			},
+			prepare: () => ({
+				launch: () => {
+					throw new Error("not launched");
+				},
+				dispose: () => {
+					disposeAttempts += 1;
+					if (disposeAttempts === 1) throw new Error("transient confinement cleanup failure");
+				},
+			}),
+			observe: (event) => {
+				if (event.phase !== "terminal") return;
+				terminalObserverAttempts += 1;
+				if (terminalObserverAttempts <= 2) throw new Error("terminal observer unavailable");
+				publishedCleanup.push(event.cleanup);
+			},
+		});
+		const context = {
+			executionId: "combined-cleanup-observer-debt",
+			sessionId: "session",
+			recursionDepth: 0,
+			cwd: process.cwd(),
+			signal: new AbortController().signal,
+		};
+		await prepareAgentRunKernelBoundary(scope, context);
+
+		await expect(
+			releaseAgentRunKernelBoundary(scope, context.executionId, "failed", "first release"),
+		).rejects.toThrow("Kernel boundary cleanup and terminal publication failed");
+		expect(disposeAttempts).toBe(1);
+		await expect(revokeAgentRunKernelBoundaryScope(scope, "retry while observer is down")).rejects.toThrow(
+			"Kernel boundary revocation failed",
+		);
+		expect(disposeAttempts).toBe(2);
+
+		await expect(revokeAgentRunKernelBoundaryScope(scope, "publish retained debt")).resolves.toBeUndefined();
+		expect(disposeAttempts).toBe(2);
+		expect(publishedCleanup).toEqual(["failed", "completed"]);
+	});
+
 	it("uses the trusted launch boundary and awaits terminal confinement cleanup", async () => {
 		const events: AgentRunKernelBoundaryLifecycleEvent[] = [];
 		const launches: Array<{

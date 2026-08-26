@@ -1171,6 +1171,7 @@ export class AgentSession {
 	private readonly _actionRunScopes = new WeakMap<QueuedSessionAction, AgentRunScope>();
 	private readonly _executionRunScopes = new Map<string, AgentRunScope>();
 	private readonly _runScopeCleanupOperations = new Set<Promise<void>>();
+	private readonly _runScopeCleanupFailures: unknown[] = [];
 	private readonly _scopedModelRequestAdmissions = new Set<symbol>();
 	private readonly _auxiliaryModelRequestAdmissions = new Set<symbol>();
 	private readonly _sessionActionCommitDisposeAbortController = new AbortController();
@@ -6028,13 +6029,25 @@ export class AgentSession {
 
 	private _trackRunScopeCleanupOperation(operation: Promise<void>): Promise<void> {
 		this._runScopeCleanupOperations.add(operation);
-		void operation.finally(() => this._runScopeCleanupOperations.delete(operation)).catch(() => undefined);
+		void operation.then(
+			() => this._runScopeCleanupOperations.delete(operation),
+			(error) => {
+				this._runScopeCleanupOperations.delete(operation);
+				this._runScopeCleanupFailures.push(error);
+			},
+		);
 		return operation;
 	}
 
 	private async _drainRunScopeCleanupOperations(): Promise<void> {
 		while (this._runScopeCleanupOperations.size > 0) {
 			await Promise.allSettled([...this._runScopeCleanupOperations]);
+		}
+		if (this._runScopeCleanupFailures.length > 0) {
+			throw new AggregateError(
+				this._runScopeCleanupFailures.splice(0),
+				"Agent run scope cleanup failed during session disposal",
+			);
 		}
 	}
 
