@@ -1707,9 +1707,29 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
         )
 
     def test_complete_payload_respects_aggregate_size_cap(self):
-        result = self._snap({"x" * 10_000: 1}, max_bytes=128, max_variable_bytes=128)
-        self.assertEqual(result, {"error": "write failed: snapshot exceeds aggregate snapshot size cap"})
-        self.assertEqual(os.listdir(self.dir), [])
+        name = "x" * 10_000
+        result = self._snap({name: 1}, max_bytes=128, max_variable_bytes=128)
+        self.assertEqual(result["saved"], [])
+        self.assertEqual(result["skipped"], [{"name": name, "reason": "exceeds aggregate snapshot size cap"}])
+        self.assertLessEqual(result["bytes"], 128)
+        self._assert_only_pair_files()
+
+    def test_near_cap_payload_skips_tail_instead_of_failing_snapshot(self):
+        import dill
+
+        dill.settings["recurse"] = True
+        source = {"a": "first", "b": "second"}
+        blobs = {name: dill.dumps(value) for name, value in source.items()}
+        cap = len(dill.dumps(blobs)) - 1
+        self.assertLessEqual(sum(map(len, blobs.values())), cap)
+        self.assertLessEqual(len(dill.dumps({"a": blobs["a"]})), cap)
+
+        result = self._snap(source, max_bytes=cap, max_variable_bytes=cap)
+        self.assertEqual(result["saved"], ["a"])
+        self.assertEqual(result["skipped"], [{"name": "b", "reason": "exceeds aggregate snapshot size cap"}])
+        self.assertLessEqual(result["bytes"], cap)
+        with open(self.path, "rb") as fh:
+            self.assertEqual(list(dill.load(fh)), ["a"])
 
     def test_zero_size_cap_writes_no_empty_payload_overhead(self):
         result = self._snap({}, max_bytes=0, max_variable_bytes=0)

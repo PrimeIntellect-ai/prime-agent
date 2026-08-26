@@ -688,12 +688,35 @@ def _snapshot_state(
     previous = None
     try:
         try:
-            serialized = _SnapshotBuffer(max_bytes)
-            try:
-                dill.dump(payload, serialized)
-            except _SnapshotSizeLimitExceeded:
-                return {"error": "write failed: snapshot exceeds aggregate snapshot size cap"}
-            serialized_payload = serialized.getvalue()
+            def serialize(candidate: dict[str, bytes]) -> bytes | None:
+                buffer = _SnapshotBuffer(max_bytes)
+                try:
+                    dill.dump(candidate, buffer)
+                except _SnapshotSizeLimitExceeded:
+                    return None
+                return buffer.getvalue()
+
+            serialized_payload = serialize(payload)
+            if serialized_payload is None:
+                items = list(payload.items())
+                serialized_payload = serialize({})
+                if serialized_payload is None:
+                    return {"error": "write failed: snapshot exceeds aggregate snapshot size cap"}
+                # Keep the largest insertion-order prefix whose complete pickle fits.
+                # Prefix pickle size is monotonic because each prefix only adds a string key and bytes value.
+                low, high = 0, len(items) - 1
+                while low < high:
+                    mid = (low + high + 1) // 2
+                    candidate = serialize(dict(items[:mid]))
+                    if candidate is None:
+                        high = mid - 1
+                    else:
+                        low = mid
+                        serialized_payload = candidate
+                for name, _ in items[low:]:
+                    skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
+                payload = dict(items[:low])
+
             fh, tmp = stage_temp(path, "wb")
             with fh:
                 fh.write(serialized_payload)
