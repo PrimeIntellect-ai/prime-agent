@@ -2564,6 +2564,7 @@ export class InteractiveMode {
 	private applyConnectionStateSnapshot(state: AgentConnectionState): void {
 		this.bindPromptStashSession(state.sessionId);
 		this.connectionState = state;
+		this.scheduleHeartbeatManagerRefresh();
 		// Don't touch contextUsageTokenBaseline: a mid-stream snapshot reflects only completed
 		// turns (the in-flight message isn't persisted yet), so the in-flight delta must keep
 		// accumulating. The baseline is managed at turn end (refreshConnectionContextUsage) and
@@ -5916,6 +5917,7 @@ export class InteractiveMode {
 	}
 
 	private refreshSubagentSummary(): void {
+		this.scheduleHeartbeatManagerRefresh();
 		this.updateSubagentSummaryLine();
 		this.updateWorkingPulse();
 		this.syncWorkingLoader();
@@ -5946,6 +5948,7 @@ export class InteractiveMode {
 		this.subagentSnapshots.clear();
 		this.rlmNodeId = undefined;
 		this.updateSubagentSummaryLine();
+		this.scheduleHeartbeatManagerRefresh();
 		// Clearing snapshots can drop the last running subagent; reconcile the
 		// pulse and loader so neither lingers when nothing is in flight.
 		this.updateWorkingPulse();
@@ -7059,27 +7062,30 @@ export class InteractiveMode {
 		return this.enqueueQueueMutation(async () => {
 			if (discardStaleSelection()) return true;
 			const selected = this.queueSelection.selected;
-			if (!selected) return true;
 			let status: AgentConnectionQueuedMessageMutationStatus;
-			try {
-				status = await this.agentConnection.mutateQueuedMessage(
-					selected.lane,
-					selected.index,
-					selected.text,
-					mutation,
-				);
-			} catch (error) {
-				if (discardStaleSelection()) return true;
-				// The editor was already cleared by Enter; restore the edit before surfacing the error.
-				const editorUntouched =
-					submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore;
-				if (editorUntouched) {
-					this.setEditorTextFromQueueSelection(text);
+			if (selected) {
+				try {
+					status = await this.agentConnection.mutateQueuedMessage(
+						selected.lane,
+						selected.index,
+						selected.text,
+						mutation,
+					);
+				} catch (error) {
+					if (discardStaleSelection()) return true;
+					// The editor was already cleared by Enter; restore the edit before surfacing the error.
+					const editorUntouched =
+						submissionGeneration === this.inputSubmissionGeneration && this.editor.getText() === editorTextBefore;
+					if (editorUntouched) {
+						this.setEditorTextFromQueueSelection(text);
+					}
+					if (!this.queueSelection.isBrowsing) {
+						this.queueSelection.replaceDraft(editorUntouched ? text : this.editor.getText());
+					}
+					throw error;
 				}
-				if (!this.queueSelection.isBrowsing) {
-					this.queueSelection.replaceDraft(editorUntouched ? text : this.editor.getText());
-				}
-				throw error;
+			} else {
+				status = "rejected";
 			}
 			if (discardStaleSelection()) return true;
 			const editorUntouched =
