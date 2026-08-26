@@ -1,9 +1,10 @@
 """Windows Job Object containment for bash() children: one kill-on-close job
 per BashHandle, so the child and every descendant (breakaway is never set)
 dies when the job is terminated or its last handle closes -- including on
-kernel crash, since the OS closes handles. Stdlib ctypes only; degrades to
-None/False where kernel32 is missing. Honest note: CI is Ubuntu-only, so all
-tests mock the kernel32 boundary (`_kernel32`)."""
+kernel crash, since the OS closes handles. resume_process() releases a
+CREATE_SUSPENDED child once it is inside its job. Stdlib ctypes only; degrades
+to None/False where kernel32 is missing. Honest note: CI is Ubuntu-only, so
+all tests mock the kernel32 boundary (`_kernel32`)."""
 
 from __future__ import annotations
 
@@ -13,6 +14,10 @@ import ctypes.wintypes as wintypes
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 _JobObjectBasicAccountingInformation, _JobObjectExtendedLimitInformation = 1, 9
 _INT64, _SIZE_T, _DWORD = ctypes.c_int64, ctypes.c_size_t, wintypes.DWORD
+_TH32CS_SNAPTHREAD = 0x4
+_THREAD_SUSPEND_RESUME = 0x2
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_RESUME_FAILED = 0xFFFFFFFF  # (DWORD)-1 from ResumeThread
 
 
 class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
@@ -35,6 +40,13 @@ class _JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
         ("IoInfo", _IO_COUNTERS), ("ProcessMemoryLimit", _SIZE_T),
         ("JobMemoryLimit", _SIZE_T), ("PeakProcessMemoryUsed", _SIZE_T),
         ("PeakJobMemoryUsed", _SIZE_T)]
+
+
+class _THREADENTRY32(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", _DWORD), ("cntUsage", _DWORD), ("th32ThreadID", _DWORD),
+        ("th32OwnerProcessID", _DWORD), ("tpBasePri", wintypes.LONG),
+        ("tpDeltaPri", wintypes.LONG), ("dwFlags", _DWORD)]
 
 
 class _JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
@@ -61,6 +73,11 @@ def _kernel32():
             ("AssignProcessToJobObject", [h, h], b),
             ("TerminateJobObject", [h, wintypes.UINT], b),
             ("CloseHandle", [h], b),
+            ("CreateToolhelp32Snapshot", [_DWORD, _DWORD], h),
+            ("Thread32First", [h, p], b),
+            ("Thread32Next", [h, p], b),
+            ("OpenThread", [_DWORD, wintypes.BOOL, _DWORD], h),
+            ("ResumeThread", [h], _DWORD),  # (DWORD)-1 on failure
         ):
             fn = getattr(k32, name)
             fn.argtypes, fn.restype = argtypes, restype
@@ -89,6 +106,37 @@ def assign(job: int, process_handle: int) -> bool:
     """Assign a process (by OS HANDLE, e.g. Popen._handle) to the job."""
     try:
         return bool(_kernel32().AssignProcessToJobObject(job, process_handle))
+    except (OSError, AttributeError):
+        return False
+
+
+def resume_process(pid: int) -> bool:
+    """Resume every suspended thread of pid; False when nothing was resumed."""
+    try:
+        k32 = _kernel32()
+        snapshot = k32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
+        # Toolhelp returns INVALID_HANDLE_VALUE, not NULL, on failure.
+        if not snapshot or snapshot == _INVALID_HANDLE_VALUE:
+            return False
+        resumed = False
+        try:
+            entry = _THREADENTRY32()
+            entry.dwSize = ctypes.sizeof(entry)  # unset => ERROR_INVALID_PARAMETER
+            more = k32.Thread32First(snapshot, ctypes.byref(entry))
+            while more:
+                if entry.th32OwnerProcessID == pid:
+                    thread = k32.OpenThread(_THREAD_SUSPEND_RESUME, False, entry.th32ThreadID)
+                    if not thread:
+                        return False
+                    prev = k32.ResumeThread(thread)
+                    k32.CloseHandle(thread)
+                    if prev == _RESUME_FAILED:
+                        return False
+                    resumed = True
+                more = k32.Thread32Next(snapshot, ctypes.byref(entry))
+        finally:
+            k32.CloseHandle(snapshot)
+        return resumed
     except (OSError, AttributeError):
         return False
 
