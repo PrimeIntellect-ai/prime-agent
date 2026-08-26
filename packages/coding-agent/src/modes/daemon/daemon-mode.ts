@@ -107,7 +107,7 @@ import {
 } from "../../core/session-manager.js";
 import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
-import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
+import type { SideQuestionRun } from "../../core/side-question.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import {
 	createAgentConnectionCommands,
@@ -4311,9 +4311,7 @@ export class AgentDaemon {
 				if (this.hasActiveSideQuestionFor(client, state.activeSessionId)) {
 					throw new Error("A side question is already running for this client and session");
 				}
-				state.runtime.session.assertSideQuestionAllowed();
-				const run = startSideQuestion(
-					state.runtime.session.agent,
+				const run = state.runtime.session.startSideQuestion(
 					command.sideQuestionId,
 					command.question,
 					(event) => {

@@ -32,7 +32,18 @@ function assertExplicitRequestAccess(model: Model<Api>, options: StreamOptions |
 	if (!supportsExplicitRequestAccess(model.api)) {
 		throw new Error(`Run-scoped requests do not support api: ${model.api}`);
 	}
-	if (/\{CLOUDFLARE_[A-Z0-9_]+\}/.test(model.baseUrl)) {
+	let decodedBaseUrl = model.baseUrl;
+	for (let pass = 0; pass < 4; pass++) {
+		if (/[{}]/.test(decodedBaseUrl)) break;
+		try {
+			const next = decodeURIComponent(decodedBaseUrl);
+			if (next === decodedBaseUrl) break;
+			decodedBaseUrl = next;
+		} catch {
+			break;
+		}
+	}
+	if (/[{}]/.test(decodedBaseUrl) || /%(?:25)*7[bd]/i.test(decodedBaseUrl)) {
 		throw new Error(`Run-scoped request requires a resolved Cloudflare endpoint for provider: ${model.provider}`);
 	}
 	let endpoint: URL;
@@ -41,7 +52,13 @@ function assertExplicitRequestAccess(model: Model<Api>, options: StreamOptions |
 	} catch {
 		throw new Error(`Run-scoped request requires an explicit HTTP endpoint for provider: ${model.provider}`);
 	}
-	if (!["http:", "https:"].includes(endpoint.protocol) || endpoint.username !== "" || endpoint.password !== "") {
+	if (
+		!["http:", "https:"].includes(endpoint.protocol) ||
+		endpoint.username !== "" ||
+		endpoint.password !== "" ||
+		endpoint.hash !== "" ||
+		model.baseUrl.includes("#")
+	) {
 		throw new Error(`Run-scoped request requires an explicit HTTP endpoint for provider: ${model.provider}`);
 	}
 	if (typeof options.apiKey !== "string" || options.apiKey.trim() === "") {

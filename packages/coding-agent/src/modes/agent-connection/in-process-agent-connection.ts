@@ -19,7 +19,7 @@ import type { RefinementResult } from "../../core/refinement/index.js";
 import { type DeleteSessionFileResult, deleteSessionFile } from "../../core/session-file-actions.js";
 import { SessionManager } from "../../core/session-manager.js";
 import type { SessionStats } from "../../core/session-stats.js";
-import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
+import type { SideQuestionRun } from "../../core/side-question.js";
 import { waitForHeadlessCompletion } from "../headless-completion.js";
 import {
 	createAgentConnectionCommands,
@@ -386,9 +386,7 @@ export class InProcessAgentConnection implements AgentConnection {
 		if (this.sideQuestionRuns.has(id)) {
 			throw new Error(`Side question already exists: ${id}`);
 		}
-		this.session.assertSideQuestionAllowed();
-		const run = startSideQuestion(
-			this.session.agent,
+		const run = this.session.startSideQuestion(
 			id,
 			question,
 			(event) => this.emit({ type: "side_question_event", event }),

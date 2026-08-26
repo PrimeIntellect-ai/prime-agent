@@ -7,6 +7,7 @@ import {
 	AGENT_RUN_MODEL_SCOPE_VERSION,
 	createAgentRunModelScope,
 	getAgentRunRequestAccess,
+	revokeAgentRunModelScope,
 } from "../../../src/core/run-model-scope.js";
 import { createAgentSession } from "../../../src/core/sdk.js";
 import { SessionManager } from "../../../src/core/session-manager.js";
@@ -327,6 +328,27 @@ describe("issue 171 run-scoped model overlay", () => {
 				],
 			});
 		}).toThrow("requires a resolved Cloudflare endpoint");
+		for (const baseUrl of [
+			"https://example.invalid/v1#fragment",
+			"https://example.invalid/v1#",
+			"https://gateway.ai.cloudflare.com/v1/%7BACCOUNT%7D/gateway/openai",
+			"https://gateway.ai.cloudflare.com/v1/%257BACCOUNT%257D/gateway/openai",
+		]) {
+			const endpointModel = { ...model, baseUrl };
+			expect(() =>
+				createAgentRunModelScope({
+					version: AGENT_RUN_MODEL_SCOPE_VERSION,
+					root: endpointModel,
+					models: [endpointModel],
+					requestAccess: [
+						{
+							model: endpointModel,
+							access: { kind: "secret", contract: "secret@1", apiKey: "explicit-key" },
+						},
+					],
+				}),
+			).toThrow(baseUrl.includes("#") ? "explicit HTTP endpoint" : "resolved Cloudflare endpoint");
+		}
 		expect(() =>
 			createAgentRunModelScope({
 				version: AGENT_RUN_MODEL_SCOPE_VERSION,
@@ -547,7 +569,7 @@ describe("issue 171 run-scoped model overlay", () => {
 		}
 	});
 
-	it("fails side questions closed while a scoped model run is active", async () => {
+	it("atomically excludes side questions and scoped runs in both admission orders", async () => {
 		const harness = await createHarness({ api: "faux-run-side-question", provider: "native-side-question" });
 		harnesses.push(harness);
 		const model = harness.getModel();
@@ -562,9 +584,9 @@ describe("issue 171 run-scoped model overlay", () => {
 				},
 			],
 		});
-		let release!: () => void;
-		const blocked = new Promise<void>((resolve) => {
-			release = resolve;
+		let releaseScoped!: () => void;
+		const scopedBlocked = new Promise<void>((resolve) => {
+			releaseScoped = resolve;
 		});
 		let started!: () => void;
 		const requestStarted = new Promise<void>((resolve) => {
@@ -573,17 +595,169 @@ describe("issue 171 run-scoped model overlay", () => {
 		harness.setResponses([
 			async () => {
 				started();
-				await blocked;
+				await scopedBlocked;
 				return fauxAssistantMessage("done");
 			},
 		]);
 		const run = harness.session.promptAndWait("hold", { modelScope: scope });
 		await requestStarted;
-		expect(() => harness.session.assertSideQuestionAllowed()).toThrow(
+		expect(() => harness.session.startSideQuestion("blocked-side", "question", () => {})).toThrow(
 			"Side questions are unavailable while a scoped model run is active",
 		);
-		release();
+		releaseScoped();
 		await run;
+
+		let releaseSide!: () => void;
+		const sideBlocked = new Promise<void>((resolve) => {
+			releaseSide = resolve;
+		});
+		let sideStarted!: () => void;
+		const sideRequestStarted = new Promise<void>((resolve) => {
+			sideStarted = resolve;
+		});
+		harness.setResponses([
+			async () => {
+				sideStarted();
+				await sideBlocked;
+				return fauxAssistantMessage("side done");
+			},
+		]);
+		const sideRun = harness.session.startSideQuestion("active-side", "question", () => {});
+		await sideRequestStarted;
+		const secondScope = createAgentRunModelScope({
+			version: AGENT_RUN_MODEL_SCOPE_VERSION,
+			root: model,
+			models: [model],
+			requestAccess: [
+				{
+					model,
+					access: { kind: "secret", contract: "secret@1", apiKey: "second-scoped-side-key" },
+				},
+			],
+		});
+		await expect(harness.session.promptAndWait("blocked scoped", { modelScope: secondScope })).rejects.toThrow(
+			"Scoped model runs are unavailable while an auxiliary model request is active",
+		);
+		releaseSide();
+		await sideRun.done;
+	});
+
+	it("atomically excludes branch summaries and scoped runs in both admission orders", async () => {
+		const harness = await createHarness({ api: "faux-run-branch-summary", provider: "native-branch-summary" });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("first answer"), fauxAssistantMessage("second answer")]);
+		await harness.session.promptAndWait("first prompt");
+		await harness.session.promptAndWait("second prompt");
+		const targetId = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "message" && entry.message.role === "user")!.id;
+		const model = harness.getModel();
+		const makeScope = () =>
+			createAgentRunModelScope({
+				version: AGENT_RUN_MODEL_SCOPE_VERSION,
+				root: model,
+				models: [model],
+				requestAccess: [
+					{
+						model,
+						access: { kind: "secret", contract: "secret@1", apiKey: "branch-scope-key" },
+					},
+				],
+			});
+
+		let releaseScoped!: () => void;
+		const scopedBlocked = new Promise<void>((resolve) => {
+			releaseScoped = resolve;
+		});
+		let scopedStarted!: () => void;
+		const scopedRequestStarted = new Promise<void>((resolve) => {
+			scopedStarted = resolve;
+		});
+		harness.setResponses([
+			async () => {
+				scopedStarted();
+				await scopedBlocked;
+				return fauxAssistantMessage("scoped done");
+			},
+		]);
+		const scopedRun = harness.session.promptAndWait("scoped hold", { modelScope: makeScope() });
+		await scopedRequestStarted;
+		await expect(harness.session.navigateTree(targetId, { summarize: true })).rejects.toThrow(
+			"Branch summarization is unavailable while a scoped model run is active",
+		);
+		releaseScoped();
+		await scopedRun;
+
+		let releaseSummary!: () => void;
+		const summaryBlocked = new Promise<void>((resolve) => {
+			releaseSummary = resolve;
+		});
+		let summaryStarted!: () => void;
+		const summaryRequestStarted = new Promise<void>((resolve) => {
+			summaryStarted = resolve;
+		});
+		harness.setResponses([
+			async () => {
+				summaryStarted();
+				await summaryBlocked;
+				return fauxAssistantMessage("branch summary");
+			},
+		]);
+		const navigation = harness.session.navigateTree(targetId, { summarize: true });
+		await expect(harness.session.promptAndWait("blocked scoped", { modelScope: makeScope() })).rejects.toThrow(
+			"Scoped model runs are unavailable while an auxiliary model request is active",
+		);
+		await summaryRequestStarted;
+		releaseSummary();
+		await navigation;
+	});
+
+	it("validates scope before normalization and fails scoped commands closed", async () => {
+		let inputEffects = 0;
+		let commandEffects = 0;
+		const harness = await createHarness({
+			api: "faux-run-normalization",
+			provider: "native-normalization",
+			extensionFactories: [
+				(pi) => {
+					pi.on("input", async () => {
+						inputEffects++;
+					});
+					pi.registerCommand("mutate", {
+						description: "mutate test state",
+						handler: async () => {
+							commandEffects++;
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const model = harness.getModel();
+		const makeScope = () =>
+			createAgentRunModelScope({
+				version: AGENT_RUN_MODEL_SCOPE_VERSION,
+				root: model,
+				models: [model],
+				requestAccess: [
+					{
+						model,
+						access: { kind: "secret", contract: "secret@1", apiKey: "normalization-key" },
+					},
+				],
+			});
+
+		const revoked = makeScope();
+		revokeAgentRunModelScope(revoked);
+		await expect(harness.session.promptAndWait("ordinary input", { modelScope: revoked })).rejects.toThrow("revoked");
+		for (const command of ["/mutate", "/compact", "/refine"]) {
+			await expect(harness.session.promptAndWait(command, { modelScope: makeScope() })).rejects.toThrow(
+				"Scoped model runs accept prompts only; slash commands are unavailable",
+			);
+		}
+		expect(inputEffects).toBe(0);
+		expect(commandEffects).toBe(0);
+		expect(harness.faux.state.callCount).toBe(0);
 	});
 
 	it("does not accept a lookalike stream option as run-scoped auth authority", async () => {

@@ -284,6 +284,12 @@ import {
 } from "./session-manager.js";
 import type { SessionStats } from "./session-stats.js";
 import type { SettingsManager } from "./settings-manager.js";
+import {
+	type SideQuestionEvent,
+	type SideQuestionRun,
+	type SideQuestionTurn,
+	startSideQuestion as startSideQuestionRun,
+} from "./side-question.js";
 import { getPythonSkillRuntimeInfo, type Skill } from "./skills.js";
 import {
 	parseRefineCommandOptions,
@@ -978,6 +984,10 @@ interface RefinementRequestAuthority {
 	disableEnvApiKey: boolean;
 }
 
+interface ModelRequestAdmission {
+	release(): void;
+}
+
 interface AgentRunAuthorityLineage {
 	references: number;
 	revoked: boolean;
@@ -1148,6 +1158,8 @@ export class AgentSession {
 	private readonly _sessionActionCommitContext = new AsyncLocalStorage<symbol>();
 	private readonly _actionRunScopes = new WeakMap<QueuedSessionAction, AgentRunScope>();
 	private readonly _executionRunScopes = new Map<string, AgentRunScope>();
+	private readonly _scopedModelRequestAdmissions = new Set<symbol>();
+	private readonly _auxiliaryModelRequestAdmissions = new Set<symbol>();
 	private readonly _sessionActionCommitDisposeAbortController = new AbortController();
 	// Checkpoint and handoff waiters share lifecycle-edge notifications to avoid polling.
 	private readonly _sessionInputCheckpointWaiters = new Set<() => void>();
@@ -5030,19 +5042,43 @@ export class AgentSession {
 	}
 
 	private async _prompt(text: string, options?: InternalPromptOptions): Promise<void> {
-		const resumeSuspendedInput = options?.resumeIfIdle !== false;
-		if (!this.isStreaming) {
-			if (resumeSuspendedInput) this._resumeSessionInputAdmission();
-			this._assertSessionActionAdmissionAvailable();
-		}
-		const admissionEpoch = this._sessionInputPumpEpoch;
-		const commitFence = this.isStreaming
-			? undefined
-			: await this._acquireDirectTurnAdmissionFence(options?.signal).catch((error: unknown) => {
-					throwIfPromptAdmissionCancelled(options?.signal);
-					throw error;
-				});
 		const reportPreflight = oncePreflight(options?.preflightResult);
+		const modelScope = options?.authorityLineage?.modelScope ?? options?.modelScope;
+		let modelRequestAdmission: ModelRequestAdmission | undefined;
+		let modelRequestAdmissionTransferred = false;
+		try {
+			if (modelScope) {
+				const selectedModel = options?.selectedModel ?? options?.authorityLineage?.selectedModel ?? modelScope.root;
+				modelRequestAdmission = this._acquireScopedModelRequestAdmission(modelScope, selectedModel);
+				if (parseSlashCommand(text)) {
+					throw new Error("Scoped model runs accept prompts only; slash commands are unavailable");
+				}
+			}
+		} catch (error) {
+			modelRequestAdmission?.release();
+			reportPreflight(false);
+			throw error;
+		}
+		const resumeSuspendedInput = options?.resumeIfIdle !== false;
+		let admissionEpoch: number;
+		let commitFence: { owner: symbol; release(): void } | undefined;
+		try {
+			if (!this.isStreaming) {
+				if (resumeSuspendedInput) this._resumeSessionInputAdmission();
+				this._assertSessionActionAdmissionAvailable();
+			}
+			admissionEpoch = this._sessionInputPumpEpoch;
+			commitFence = this.isStreaming
+				? undefined
+				: await this._acquireDirectTurnAdmissionFence(options?.signal).catch((error: unknown) => {
+						throwIfPromptAdmissionCancelled(options?.signal);
+						throw error;
+					});
+		} catch (error) {
+			modelRequestAdmission?.release();
+			reportPreflight(false);
+			throw error;
+		}
 		const run = async () => {
 			try {
 				throwIfPromptAdmissionCancelled(options?.signal);
@@ -5053,12 +5089,14 @@ export class AgentSession {
 				const isInternalPrompt = options?.internalPrompt === true;
 				const expandPromptTemplates = isInternalPrompt ? false : (options?.expandPromptTemplates ?? true);
 				const normalizationResult = this._normalizeSubmission(text, options?.images, {
-					parseSessionCommands: !isInternalPrompt && !options?.skipPrePromptWork,
-					extensionCommands: expandPromptTemplates ? "execute" : "ignore",
+					parseSessionCommands: !modelScope && !isInternalPrompt && !options?.skipPrePromptWork,
+					extensionCommands: modelScope ? "reject" : expandPromptTemplates ? "execute" : "ignore",
 					inputSource:
-						!isInternalPrompt && !options?.skipInputHandlers ? (options?.source ?? "interactive") : undefined,
-					expandSkills: expandPromptTemplates,
-					expandPromptTemplates,
+						!modelScope && !isInternalPrompt && !options?.skipInputHandlers
+							? (options?.source ?? "interactive")
+							: undefined,
+					expandSkills: !modelScope && expandPromptTemplates,
+					expandPromptTemplates: !modelScope && expandPromptTemplates,
 				});
 				const normalized = normalizationResult instanceof Promise ? await normalizationResult : normalizationResult;
 				if (normalized.kind === "extensionCommand") {
@@ -5177,6 +5215,10 @@ export class AgentSession {
 					reportPreflight(false, false);
 					return;
 				}
+				if (modelRequestAdmission) {
+					modelRequestAdmissionTransferred = true;
+					void result.ticket.completed.then(modelRequestAdmission.release, modelRequestAdmission.release);
+				}
 				if (result.disposition === "queued") {
 					reportPreflight(true, true);
 				} else {
@@ -5228,6 +5270,7 @@ export class AgentSession {
 				throw error;
 			} finally {
 				commitFence?.release();
+				if (!modelRequestAdmissionTransferred) modelRequestAdmission?.release();
 			}
 		};
 		return commitFence ? this._sessionActionCommitContext.run(commitFence.owner, run) : run();
@@ -5881,9 +5924,67 @@ export class AgentSession {
 		return executionId ? this._executionRunScopes.get(executionId) : undefined;
 	}
 
+	private _acquireScopedModelRequestAdmission(
+		modelScope: AgentRunModelScope,
+		selectedModel: Model<Api>,
+	): ModelRequestAdmission {
+		assertAgentRunModelScope(modelScope);
+		getAgentRunRequestAccess(modelScope, selectedModel);
+		if (this._auxiliaryModelRequestAdmissions.size > 0) {
+			throw new Error("Scoped model runs are unavailable while an auxiliary model request is active");
+		}
+		const token = Symbol("scoped-model-request");
+		this._scopedModelRequestAdmissions.add(token);
+		let released = false;
+		return {
+			release: () => {
+				if (released) return;
+				released = true;
+				this._scopedModelRequestAdmissions.delete(token);
+			},
+		};
+	}
+
+	private _acquireAuxiliaryModelRequestAdmission(kind: "side question" | "branch summary"): ModelRequestAdmission {
+		if (this._scopedModelRequestAdmissions.size > 0 || this._activeAgentRunScope()?.modelScope) {
+			throw new Error(
+				`${kind === "side question" ? "Side questions are" : "Branch summarization is"} unavailable while a scoped model run is active`,
+			);
+		}
+		const token = Symbol(`auxiliary-model-request:${kind}`);
+		this._auxiliaryModelRequestAdmissions.add(token);
+		let released = false;
+		return {
+			release: () => {
+				if (released) return;
+				released = true;
+				this._auxiliaryModelRequestAdmissions.delete(token);
+			},
+		};
+	}
+
 	assertSideQuestionAllowed(): void {
-		if (this._activeAgentRunScope()?.modelScope) {
+		if (this._scopedModelRequestAdmissions.size > 0 || this._activeAgentRunScope()?.modelScope) {
 			throw new Error("Side questions are unavailable while a scoped model run is active");
+		}
+	}
+
+	startSideQuestion(
+		id: string,
+		question: string,
+		onEvent: (event: SideQuestionEvent) => void | Promise<void>,
+		previousTurns: SideQuestionTurn[] = [],
+	): SideQuestionRun {
+		const admission = this._acquireAuxiliaryModelRequestAdmission("side question");
+		try {
+			const run = startSideQuestionRun(this.agent, id, question, onEvent, previousTurns);
+			return {
+				done: run.done.finally(admission.release),
+				abort: () => run.abort(),
+			};
+		} catch (error) {
+			admission.release();
+			throw error;
 		}
 	}
 
@@ -11769,16 +11870,20 @@ export class AgentSession {
 		aborted?: boolean;
 		summaryEntry?: BranchSummaryEntry;
 	}> {
+		const modelRequestAdmission = options.summarize
+			? this._acquireAuxiliaryModelRequestAdmission("branch summary")
+			: undefined;
 		const previous = this._branchNavigationQueue;
 		let release = () => {};
 		this._branchNavigationQueue = new Promise<void>((resolve) => {
 			release = resolve;
 		});
-		await previous;
 		try {
+			await previous;
 			return await this._navigateTree(targetId, options);
 		} finally {
 			release();
+			modelRequestAdmission?.release();
 		}
 	}
 

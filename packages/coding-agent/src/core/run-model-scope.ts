@@ -81,7 +81,18 @@ function normalizeRequestAccess(model: Model<Api>, access: AgentRunRequestAccess
 	if (!supportsExplicitRequestAccess(model.api)) {
 		throw new Error(`Agent run api ${model.api} does not support secret@1 access`);
 	}
-	if (/\{CLOUDFLARE_[A-Z0-9_]+\}/.test(model.baseUrl)) {
+	let decodedBaseUrl = model.baseUrl;
+	for (let pass = 0; pass < 4; pass++) {
+		if (/[{}]/.test(decodedBaseUrl)) break;
+		try {
+			const next = decodeURIComponent(decodedBaseUrl);
+			if (next === decodedBaseUrl) break;
+			decodedBaseUrl = next;
+		} catch {
+			break;
+		}
+	}
+	if (/[{}]/.test(decodedBaseUrl) || /%(?:25)*7[bd]/i.test(decodedBaseUrl)) {
 		throw new Error(`Agent run model ${model.provider}/${model.id} requires a resolved Cloudflare endpoint`);
 	}
 	let endpoint: URL;
@@ -90,7 +101,13 @@ function normalizeRequestAccess(model: Model<Api>, access: AgentRunRequestAccess
 	} catch {
 		throw new Error(`Agent run model ${model.provider}/${model.id} requires an explicit HTTP endpoint`);
 	}
-	if (!["http:", "https:"].includes(endpoint.protocol) || endpoint.username !== "" || endpoint.password !== "") {
+	if (
+		!["http:", "https:"].includes(endpoint.protocol) ||
+		endpoint.username !== "" ||
+		endpoint.password !== "" ||
+		endpoint.hash !== "" ||
+		model.baseUrl.includes("#")
+	) {
 		throw new Error(`Agent run model ${model.provider}/${model.id} requires an explicit HTTP endpoint`);
 	}
 	if (typeof access.apiKey !== "string" || access.apiKey.trim() === "") {
