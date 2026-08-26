@@ -175,6 +175,7 @@ class JobProcess:
         self._hthread: int | None = hthread
         self._exit_code: int | None = None
         self._waiters = 0  # wait() calls with a blocking WFSO in flight
+        self._close_requested = False
 
     def resume(self) -> bool:
         """Release the suspended primary thread; the handle stays open on failure."""
@@ -184,6 +185,12 @@ class JobProcess:
             _kernel32().CloseHandle(self._hthread)
             self._hthread = None
             return True
+
+    def close(self) -> None:
+        """Release the process handle (idempotent); owned by BashHandle after reap."""
+        with self._lock:
+            self._close_requested = True
+            self._close_hprocess_locked()
 
     def _cache_exit_code_locked(self) -> int:
         # Runs under the lock after a signaled wait, so never the STILL_ACTIVE(259) sentinel.
@@ -196,12 +203,11 @@ class JobProcess:
         if self._hthread is not None:
             k32.CloseHandle(self._hthread)
             self._hthread = None
-        self._close_hprocess_locked()
         return self._exit_code
 
     def _close_hprocess_locked(self) -> None:
         # Closing a handle mid-WaitForSingleObject is UB: the last returning waiter closes it.
-        if self._exit_code is not None and self._waiters == 0 and self._hprocess is not None:
+        if self._close_requested and self._waiters == 0 and self._hprocess is not None:
             _kernel32().CloseHandle(self._hprocess)
             self._hprocess = None
 
@@ -210,6 +216,8 @@ class JobProcess:
         with self._lock:
             if self._exit_code is not None:
                 return self._exit_code
+            if self._hprocess is None:
+                raise OSError("process handle closed")
             result = _kernel32().WaitForSingleObject(self._hprocess, 0)
             if result == _WAIT_TIMEOUT:
                 return None
@@ -223,27 +231,34 @@ class JobProcess:
         with self._lock:
             if self._exit_code is not None:
                 return self._exit_code
+            if self._hprocess is None:
+                raise OSError("process handle closed")
             hprocess = self._hprocess
             self._waiters += 1  # keeps the handle open while the wait runs
+        result = None
         try:
             result = _kernel32().WaitForSingleObject(hprocess, millis)
         finally:
             with self._lock:
-                self._waiters -= 1
-                self._close_hprocess_locked()  # last waiter after a cache closes
+                try:
+                    # Cache while the handle is still valid: the deferred close
+                    # fires the moment _waiters drops to zero.
+                    if result == _WAIT_OBJECT_0 and self._exit_code is None:
+                        self._cache_exit_code_locked()
+                finally:
+                    self._waiters -= 1
+                    self._close_hprocess_locked()  # last waiter after a close() request closes
         with self._lock:
             # A code cached concurrently during the wait wins, even over WAIT_FAILED.
             if self._exit_code is not None:
                 return self._exit_code
             if result == _WAIT_TIMEOUT:
                 raise subprocess.TimeoutExpired(f"pid {self.pid}", timeout or 0)
-            if result != _WAIT_OBJECT_0:
-                raise OSError(f"WaitForSingleObject failed: {_last_error()}")
-            return self._cache_exit_code_locked()
+            raise OSError(f"WaitForSingleObject failed: {_last_error()}")
 
     def kill(self) -> None:
         with self._lock:
-            if self._exit_code is not None:
+            if self._exit_code is not None or self._hprocess is None:
                 return
             ok = bool(_kernel32().TerminateProcess(self._hprocess, 1))
         if not ok and self.poll() is None:
