@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -20,7 +21,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-from rlm import host_request
+from rlm import host_request, list_subagents
 
 
 _USER_AGENT = "Prime-Agent-Autoresearch/0.1 (scholarly metadata client)"
@@ -30,6 +31,118 @@ _REVIEWER_ROLES = {
     "experimental_critic",
     "top_tier_editor",
 }
+_SUPERVISOR_REBIND_BACKOFF_SECONDS = (30, 60)
+_MAX_SUPERVISOR_HOST_WAIT_MS = 300_000
+
+
+def _remaining_supervisor_timeout_ms(deadline: float, loop: asyncio.AbstractEventLoop) -> int:
+    remaining = max(0.0, deadline - loop.time())
+    return max(1, min(_MAX_SUPERVISOR_HOST_WAIT_MS, math.ceil(remaining * 1000)))
+
+
+def execution_contract() -> dict[str, Any]:
+    """Return the compact call contract that fast models should follow without introspection."""
+    return {
+        "contract_version": 1,
+        "forbid_runtime_introspection": True,
+        "search_tool": (
+            "Use Prime's native Google Search tool. The autoresearch module does not provide "
+            "a general web-search function."
+        ),
+        "do_not": [
+            "probe functions with hasattr, dir, inspect, empty calls, or invented arguments",
+            "guess or brute-force peer-review quotes",
+            "call reflect_memory manually during the required cycle loop",
+            "treat Crossref registration or a journal policy as item-specific peer-review proof",
+        ],
+        "error_policy": (
+            "Fix only the concrete validation error once. If peer-review verification fails, keep "
+            "the item as published and continue; peer-review verification is optional during cycles."
+        ),
+        "calls": {
+            "verify_and_add_paper": "await autoresearch.add_publication(publication_dict)",
+            "record_search_receipt": (
+                "await autoresearch.record_search(candidate, coverage_kind=kind, query=query, "
+                "source='google_search', result_urls=urls, inspected_paper_ids=paper_ids)"
+            ),
+            "host_review": "reviews = await autoresearch.review_candidate(candidate)",
+            "commit_cycle": "result = await autoresearch.complete_cycle(cycle)",
+            "recover_supervisor_after_restart": (
+                "result = await autoresearch.retry_supervision(latest_unsupervised_cycle_id); "
+                "never resubmit the durable cycle"
+            ),
+            "inspect_state": "state = (await autoresearch.get_state())['state']",
+            "final_gate": "gate = (await autoresearch.stop_gate())['stop_gate']",
+            "optional_peer_review": (
+                "Call verify_peer_review only with a visible item-specific positive sentence from "
+                "the DOI item's exact publisher page; otherwise skip it."
+            ),
+        },
+        "publication_required_keys": ["paper_id", "title", "authors", "doi or preprint_id"],
+        "candidate_required_keys": [
+            "candidate_id",
+            "statement",
+            "motivation",
+            "mechanistic_motivation",
+            "closest_prior_art",
+            "unresolved_questions",
+            "falsifier",
+            "experiment_design",
+            "baseline_plan",
+            "broader_relevance",
+            "requirements",
+        ],
+        "search_coverage_kinds": [
+            "mechanism_queries",
+            "synonyms_and_adjacent",
+            "backward_references",
+            "forward_citations",
+            "related_recommendations",
+            "recent_12_to_24_months",
+            "recent_preprints",
+            "surveys_or_reviews",
+        ],
+        "cycle_required_keys": [
+            "candidate",
+            "outcome",
+            "explicit_stuck",
+            "trajectory_fingerprint",
+            "publications",
+            "field_maps",
+            "gates",
+            "motivation_paper_ids",
+            "closest_prior_work_paper_ids",
+            "preliminary_evidence_experiment_ids",
+            "canonical_promotion_ids",
+        ],
+        "cycle_outcomes": ["rejected", "revised", "survived", "experiment_failed", "promoted"],
+        "field_map_keys": [
+            "assumptions",
+            "limitations",
+            "contradictions",
+            "methods_and_evaluations",
+            "closest_prior_work",
+        ],
+        "gate_keys": [
+            "important",
+            "unresolved",
+            "publication_backed",
+            "mechanistically_motivated",
+            "falsifiable",
+            "feasible",
+            "closest_prior_work_analyzed",
+            "broader_relevance",
+        ],
+        "cycle_sequence": [
+            "native search",
+            "add and host-verify important publications",
+            "construct candidate",
+            "record applicable search receipts",
+            "await review_candidate(candidate)",
+            "complete_cycle(cycle) and await supervisor",
+            "inspect spontaneous_recall and stop_gate",
+        ],
+    }
 
 
 def _validate_public_https_url(url: str) -> None:
@@ -163,12 +276,13 @@ async def initialize(objective: str, topic: str | None = None) -> dict[str, Any]
     response["spontaneous_recall"] = await spontaneous_recall(
         " ".join(part for part in (objective, topic) if part),
     )
-    return response
+    return {"execution_contract": execution_contract(), **response}
 
 
 async def get_state() -> dict[str, Any]:
     """Return the host-owned research state for the current root session."""
-    return await host_request("autoresearch.get")
+    response = await host_request("autoresearch.get")
+    return {"execution_contract": execution_contract(), **response}
 
 
 async def crossref_search(
@@ -724,6 +838,52 @@ async def collect_results() -> dict[str, Any]:
     return await host_request("autoresearch.results.collect")
 
 
+async def _failed_reviewers(candidate_id: str, completed_roles: set[str]) -> list[str]:
+    state_response = await get_state()
+    state = state_response.get("state")
+    assignments = state.get("reviewerAssignments", []) if isinstance(state, dict) else []
+    candidate_assignments = [
+        item
+        for item in assignments
+        if isinstance(item, dict)
+        and item.get("candidateId") == candidate_id
+        and item.get("role") not in completed_roles
+    ]
+    if not candidate_assignments:
+        return []
+    children = await list_subagents()
+    by_id = {child.rlm_child_id: child for child in children}
+    by_name = {child.session_name: child for child in children}
+    failures: list[str] = []
+    for assignment in candidate_assignments:
+        child = by_id.get(str(assignment.get("rlmChildId"))) or by_name.get(str(assignment.get("name")))
+        if child is not None and child.status in {"completed", "error"}:
+            failures.append(
+                f"{assignment.get('role')} ({child.session_name}, status={child.status})"
+            )
+    return failures
+
+
+async def _terminal_supervisor_status(response: dict[str, Any]) -> str | None:
+    supervisor = response.get("supervisor")
+    if not isinstance(supervisor, dict):
+        return None
+    child_id = supervisor.get("rlmChildId")
+    child_name = supervisor.get("name")
+    children = await list_subagents()
+    child = next(
+        (
+            item
+            for item in children
+            if item.rlm_child_id == child_id or item.session_name == child_name
+        ),
+        None,
+    )
+    if child is not None and child.status in {"completed", "error"}:
+        return child.status
+    return None
+
+
 async def await_reviews(
     candidate_id: str,
     *,
@@ -745,6 +905,13 @@ async def await_reviews(
         ]
         if {str(review.get("role")) for review in reviews} == _REVIEWER_ROLES:
             return reviews
+        completed_roles = {str(review.get("role")) for review in reviews}
+        failures = await _failed_reviewers(candidate_id, completed_roles)
+        if failures:
+            raise RuntimeError(
+                "reviewer children failed before four verdicts: "
+                f"{', '.join(failures)}; resume after the provider/runtime recovers"
+            )
         if asyncio.get_running_loop().time() >= deadline:
             found = sorted(str(review.get("role")) for review in reviews)
             raise TimeoutError(f"timed out waiting for four reviews for {candidate_id}; received {found}")
@@ -758,6 +925,7 @@ async def review_candidate(
     poll_interval: float = 2,
 ) -> list[dict[str, Any]]:
     """Spawn all specialist reviewers and return their automatically ingested results."""
+    await collect_results()
     await spawn_reviewers(candidate)
     candidate_id = candidate.get("candidate_id") or candidate.get("candidateId")
     if not isinstance(candidate_id, str):
@@ -830,28 +998,88 @@ async def complete_cycle(
     """Commit a cycle, message the retained supervisor, and ingest its response."""
     canonical_cycle = dict(_object(cycle, "cycle"))
     canonical_cycle.pop("reviewers", None)
-    response = await host_request("autoresearch.cycle.complete", {"cycle": canonical_cycle})
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, timeout)
+    response = await host_request(
+        "autoresearch.cycle.complete",
+        {
+            "cycle": canonical_cycle,
+            "supervisor_timeout_ms": _remaining_supervisor_timeout_ms(deadline, loop),
+        },
+    )
     cycle_result = response.get("cycle")
     cycle_id = cycle_result.get("cycleId") if isinstance(cycle_result, dict) else None
-    if not await_supervisor or not isinstance(cycle_id, str) or response.get("delivery", {}).get("error"):
+    if not await_supervisor or not isinstance(cycle_id, str):
         await _finish_cycle_memory(response, canonical_cycle)
         return response
-    deadline = asyncio.get_running_loop().time() + timeout
+    if loop.time() >= deadline:
+        await _finish_cycle_memory(response, canonical_cycle)
+        raise TimeoutError(f"timed out waiting for supervisor response for {cycle_id}")
+    rebinds = 0
     while True:
-        collected = await collect_results()
-        supervision = next(
-            (
-                item
-                for item in collected.get("supervision", [])
-                if isinstance(item, dict) and item.get("cycleId") == cycle_id
-            ),
-            None,
-        )
-        if supervision:
-            response["supervision"] = supervision
-            await _finish_cycle_memory(response, canonical_cycle)
-            return response
-        if asyncio.get_running_loop().time() >= deadline:
+        delivery = response.get("delivery")
+        delivery_error = delivery.get("error") if isinstance(delivery, dict) else None
+        terminal_status: str | None = None
+        if not delivery_error:
+            collected = await collect_results()
+            supervision = next(
+                (
+                    item
+                    for item in collected.get("supervision", [])
+                    if isinstance(item, dict) and item.get("cycleId") == cycle_id
+                ),
+                None,
+            )
+            if supervision:
+                response["supervision"] = supervision
+                await _finish_cycle_memory(response, canonical_cycle)
+                return response
+            terminal_status = await _terminal_supervisor_status(response)
+        if delivery_error or terminal_status is not None:
+            if terminal_status is not None and not delivery_error:
+                await asyncio.sleep(max(5, poll_interval))
+                terminal_status = await _terminal_supervisor_status(response)
+                boundary = await collect_results()
+                supervision = next(
+                    (
+                        item
+                        for item in boundary.get("supervision", [])
+                        if isinstance(item, dict) and item.get("cycleId") == cycle_id
+                    ),
+                    None,
+                )
+                if supervision:
+                    response["supervision"] = supervision
+                    await _finish_cycle_memory(response, canonical_cycle)
+                    return response
+                if terminal_status is None:
+                    continue
+            if rebinds >= 2:
+                await _finish_cycle_memory(response, canonical_cycle)
+                failure = f"delivery error={delivery_error}" if delivery_error else f"child status={terminal_status}"
+                raise RuntimeError(
+                    f"supervisor failed after {rebinds + 1} assignments for {cycle_id}; "
+                    f"last {failure}"
+                )
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                await _finish_cycle_memory(response, canonical_cycle)
+                raise TimeoutError(f"timed out waiting for supervisor response for {cycle_id}")
+            await asyncio.sleep(min(_SUPERVISOR_REBIND_BACKOFF_SECONDS[rebinds], remaining))
+            if loop.time() >= deadline:
+                await _finish_cycle_memory(response, canonical_cycle)
+                raise TimeoutError(f"timed out waiting for supervisor response for {cycle_id}")
+            replacement = await host_request(
+                "autoresearch.supervision.retry",
+                {
+                    "cycle_id": cycle_id,
+                    "supervisor_timeout_ms": _remaining_supervisor_timeout_ms(deadline, loop),
+                },
+            )
+            response.update(replacement)
+            rebinds += 1
+            continue
+        if loop.time() >= deadline:
             await _finish_cycle_memory(response, canonical_cycle)
             raise TimeoutError(f"timed out waiting for supervisor response for {cycle_id}")
         await asyncio.sleep(poll_interval)
@@ -863,6 +1091,104 @@ async def record_supervision(supervision: dict[str, Any]) -> dict[str, Any]:
         "autoresearch.supervision.record",
         {"supervision": _object(supervision, "supervision")},
     )
+
+
+async def retry_supervision(
+    cycle_id: str,
+    *,
+    timeout: float = 300,
+    poll_interval: float = 2,
+) -> dict[str, Any]:
+    """Rebind a supervisor after root recovery and redeliver the latest durable checkpoint."""
+    if not isinstance(cycle_id, str):
+        raise TypeError(f"cycle_id must be str, got {type(cycle_id).__name__}")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.0, timeout)
+    response = await host_request(
+        "autoresearch.supervision.retry",
+        {
+            "cycle_id": cycle_id,
+            "supervisor_timeout_ms": _remaining_supervisor_timeout_ms(deadline, loop),
+        },
+    )
+    cycle = response.get("cycle")
+    if loop.time() >= deadline:
+        if isinstance(cycle, dict):
+            await _finish_cycle_memory(response, cycle)
+        raise TimeoutError(f"timed out waiting for supervisor response for {cycle_id}")
+    rebinds = 0
+    while True:
+        delivery = response.get("delivery")
+        delivery_error = delivery.get("error") if isinstance(delivery, dict) else None
+        terminal_status: str | None = None
+        if not delivery_error:
+            collected = await collect_results()
+            supervision = next(
+                (
+                    item
+                    for item in collected.get("supervision", [])
+                    if isinstance(item, dict) and item.get("cycleId") == cycle_id
+                ),
+                None,
+            )
+            if supervision:
+                response["supervision"] = supervision
+                await _finish_cycle_memory(response, cycle if isinstance(cycle, dict) else {})
+                return response
+            terminal_status = await _terminal_supervisor_status(response)
+        if delivery_error or terminal_status is not None:
+            if terminal_status is not None and not delivery_error:
+                await asyncio.sleep(max(5, poll_interval))
+                terminal_status = await _terminal_supervisor_status(response)
+                boundary = await collect_results()
+                supervision = next(
+                    (
+                        item
+                        for item in boundary.get("supervision", [])
+                        if isinstance(item, dict) and item.get("cycleId") == cycle_id
+                    ),
+                    None,
+                )
+                if supervision:
+                    response["supervision"] = supervision
+                    await _finish_cycle_memory(response, cycle if isinstance(cycle, dict) else {})
+                    return response
+                if terminal_status is None:
+                    continue
+            if rebinds >= 2:
+                if isinstance(cycle, dict):
+                    await _finish_cycle_memory(response, cycle)
+                failure = f"delivery error={delivery_error}" if delivery_error else f"child status={terminal_status}"
+                raise RuntimeError(
+                    f"supervisor failed after {rebinds + 1} assignments for {cycle_id}; "
+                    f"last {failure}"
+                )
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                if isinstance(cycle, dict):
+                    await _finish_cycle_memory(response, cycle)
+                raise TimeoutError(f"timed out waiting for supervisor response for {cycle_id}")
+            await asyncio.sleep(min(_SUPERVISOR_REBIND_BACKOFF_SECONDS[rebinds], remaining))
+            if loop.time() >= deadline:
+                if isinstance(cycle, dict):
+                    await _finish_cycle_memory(response, cycle)
+                raise TimeoutError(f"timed out waiting for supervisor response for {cycle_id}")
+            replacement = await host_request(
+                "autoresearch.supervision.retry",
+                {
+                    "cycle_id": cycle_id,
+                    "supervisor_timeout_ms": _remaining_supervisor_timeout_ms(deadline, loop),
+                },
+            )
+            response.update(replacement)
+            cycle = response.get("cycle")
+            rebinds += 1
+            continue
+        if loop.time() >= deadline:
+            if isinstance(cycle, dict):
+                await _finish_cycle_memory(response, cycle)
+            raise TimeoutError(f"timed out waiting for supervisor response for {cycle_id}")
+        await asyncio.sleep(poll_interval)
 
 
 async def stop_gate() -> dict[str, Any]:
@@ -913,6 +1239,7 @@ __all__ = [
     "disable_heartbeat",
     "download_open_full_text",
     "enable_heartbeat",
+    "execution_contract",
     "export_deliverable",
     "get_state",
     "initialize",
@@ -928,6 +1255,7 @@ __all__ = [
     "remember",
     "review_candidate",
     "reviewer_prompts",
+    "retry_supervision",
     "spawn_reviewers",
     "stop_gate",
     "spontaneous_recall",

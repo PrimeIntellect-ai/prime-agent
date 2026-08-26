@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	AutoresearchStore,
 	buildAutoresearchReviewerPrompts,
+	buildAutoresearchSupervisorBootstrapPrompt,
+	buildAutoresearchSupervisorPrompt,
 	hasApplicablePeerReviewEvidence,
 	isPublicAutoresearchAddress,
 	parseAutoresearchAgentPayload,
@@ -41,7 +43,7 @@ function verification(index = 1, publicationStatus: "published" | "preprint" = "
 		source: publicationStatus === "preprint" ? ("arxiv" as const) : ("crossref" as const),
 		publicationStatus,
 		verifiedAt: NOW,
-		metadataDigest: `${index}`.repeat(64),
+		metadataDigest: `${index % 10}`.repeat(64),
 		resolvedMetadata: {
 			title: `Example paper ${index}`,
 			authors: ["A. Researcher"],
@@ -61,7 +63,7 @@ function peerReviewVerification(index = 1) {
 		evidenceUrl: `https://example.test/journal-${index}/article-${index}`,
 		exactQuote: "This article underwent peer review before publication.",
 		verifiedAt: NOW,
-		evidenceDigest: `${index + 2}`.repeat(64),
+		evidenceDigest: `${(index + 2) % 10}`.repeat(64),
 	};
 }
 
@@ -467,6 +469,96 @@ describe("autoresearch control plane", () => {
 		expect(state.lineage.filter((entry) => entry.kind === "cycle_completed")).toHaveLength(6);
 	});
 
+	it("rebuilds only the latest unsupervised checkpoint without duplicating its durable cycle", () => {
+		const { value } = store();
+		value.initialize("Recover supervision after a root-session restart");
+		ingestPassingReviews(value, parseAutoresearchCandidateInput(candidate(1)));
+		const first = value.recordCycle(parseAutoresearchCycleInput(rejectedCycle(1), NOW));
+		expect(value.getSupervisorCheckpoint(first.cycle.cycleId)).toMatchObject({
+			cycle: { cycleId: first.cycle.cycleId },
+			packet: { cycle_id: first.cycle.cycleId },
+		});
+		ingestPassingReviews(value, parseAutoresearchCandidateInput(candidate(2)));
+		const second = value.recordCycle(parseAutoresearchCycleInput(rejectedCycle(2), NOW));
+		expect(() => value.getSupervisorCheckpoint(first.cycle.cycleId)).toThrow(
+			"only allowed for the latest durable cycle",
+		);
+		expect(value.getSupervisorCheckpoint(second.cycle.cycleId).checkpoint).toEqual(second.checkpoint);
+		expect(value.getState().cycles).toHaveLength(2);
+		value.recordSupervision(
+			parseAutoresearchSupervisionInput(
+				{
+					cycle_id: second.cycle.cycleId,
+					status: "progressing",
+					reason: "The trajectory changed after the latest rejection.",
+					detected_pattern: "none",
+					intervention_needed: false,
+					alternative_directions: [],
+				},
+				NOW,
+			),
+		);
+		expect(() => value.getSupervisorCheckpoint(second.cycle.cycleId)).toThrow("already has supervision");
+	});
+
+	it("distinguishes supervisor intervention thresholds from healthy trajectory changes", () => {
+		function completeRejectedCycle(value: AutoresearchStore, index: number, overrides: Record<string, unknown> = {}) {
+			const raw = { ...rejectedCycle(index), ...overrides };
+			const candidateValue = parseAutoresearchCandidateInput(raw.candidate);
+			ingestPassingReviews(value, candidateValue);
+			return value.recordCycle(parseAutoresearchCycleInput(raw, NOW)).checkpoint;
+		}
+
+		const repeatedReason = store().value;
+		repeatedReason.initialize("Detect repeated rejection causes");
+		expect(completeRejectedCycle(repeatedReason, 1, { rejection_reason: "same causal failure" }).status).toBe(
+			"progressing",
+		);
+		expect(completeRejectedCycle(repeatedReason, 2, { rejection_reason: "same causal failure" }).status).toBe(
+			"watch",
+		);
+		expect(
+			completeRejectedCycle(repeatedReason, 3, { rejection_reason: "same causal failure" }).triggeredHeuristics,
+		).toContain("same_rejection_reason_3_cycles");
+
+		const repeatedPriorArt = store().value;
+		repeatedPriorArt.initialize("Detect repeated prior-art collisions");
+		for (let index = 1; index <= 2; index++) {
+			expect(
+				completeRejectedCycle(repeatedPriorArt, index, { prior_art_cluster: "same prior-art family" })
+					.interventionNeeded,
+			).toBe(false);
+		}
+		expect(
+			completeRejectedCycle(repeatedPriorArt, 3, { prior_art_cluster: "same prior-art family" }).triggeredHeuristics,
+		).toContain("same_prior_art_cluster_3_cycles");
+
+		const literatureSaturation = store().value;
+		literatureSaturation.initialize("Detect literature growth without map changes");
+		completeRejectedCycle(literatureSaturation, 1);
+		for (let index = 1; index <= 10; index++) addVerifiedPublication(literatureSaturation, index, false);
+		expect(completeRejectedCycle(literatureSaturation, 2).triggeredHeuristics).toContain(
+			"literature_expansion_without_map_change",
+		);
+
+		const explicitStuck = store().value;
+		explicitStuck.initialize("Respect an explicit stuck signal");
+		expect(completeRejectedCycle(explicitStuck, 1, { explicit_stuck: true }).triggeredHeuristics).toContain(
+			"main_agent_reported_stuck",
+		);
+
+		const changingTrajectory = store().value;
+		changingTrajectory.initialize("Do not interrupt a changing trajectory");
+		let latestStatus = "";
+		for (let index = 1; index <= 6; index++) {
+			latestStatus = completeRejectedCycle(changingTrajectory, index, {
+				field_maps: fieldMaps(`progress-${index}`),
+				prior_art_cluster: `prior-art-${index}`,
+			}).status;
+		}
+		expect(latestStatus).toBe("progressing");
+	});
+
 	it("preserves an unreadable canonical state file instead of silently replacing it", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-autoresearch-corrupt-"));
 		tempDirs.push(root);
@@ -715,6 +807,32 @@ describe("autoresearch control plane", () => {
 		});
 		expect(value.ingestAgentMessage("message-1", message, { sessionName: child.name })).toBeUndefined();
 		expect(value.getCollectedReviews("candidate-1")).toMatchObject([{ role: "prior_art_killer" }]);
+		expect(() =>
+			value.registerReviewerAssignment(reviewedCandidate, "prior_art_killer", {
+				rlmChildId: "child-replacement",
+				name: "replacement-prior-art-reviewer",
+			}),
+		).toThrow("already has a collected prior_art_killer review");
+	});
+
+	it("rebinds a reviewer role whose previous child failed before producing a verdict", () => {
+		const { value } = store();
+		value.initialize("Recover a failed hostile reviewer");
+		const reviewedCandidate = parseAutoresearchCandidateInput(candidate(1));
+		const first = value.registerReviewerAssignment(reviewedCandidate, "experimental_critic", {
+			rlmChildId: "child-failed",
+			name: "failed-experimental-reviewer",
+		});
+		const replacement = value.registerReviewerAssignment(reviewedCandidate, "experimental_critic", {
+			rlmChildId: "child-replacement",
+			name: "replacement-experimental-reviewer",
+		});
+		expect(replacement).toMatchObject({
+			rlmChildId: "child-replacement",
+			name: "replacement-experimental-reviewer",
+		});
+		expect(replacement.assignmentId).not.toBe(first.assignmentId);
+		expect(value.getReviewerAssignments("candidate-1")).toHaveLength(1);
 	});
 
 	it("puts each exact machine-readable role identifier in its reviewer prompt", () => {
@@ -724,7 +842,20 @@ describe("autoresearch control plane", () => {
 		const prompts = buildAutoresearchReviewerPrompts(reviewedCandidate, value.getState());
 		for (const [role, prompt] of Object.entries(prompts)) {
 			expect(prompt).toContain(`role value MUST be the literal machine identifier "${role}"`);
+			expect(prompt).toContain("objections MUST be an array of strings");
+			expect(prompt).toContain("a final chat response alone does not count");
 		}
+	});
+
+	it("gives weak supervisor models a direct send-only JSON contract", () => {
+		const bootstrap = buildAutoresearchSupervisorBootstrapPrompt();
+		expect(bootstrap).toContain("only permitted tool action is one agent_message.send");
+		expect(bootstrap).toContain("send exactly AUTORESEARCH_SUPERVISOR_READY");
+		const prompt = buildAutoresearchSupervisorPrompt("Detect a stuck trajectory");
+		expect(prompt).toContain("first and only Python action");
+		expect(prompt).toContain("Do not inspect APIs");
+		expect(prompt).toContain('"kill_search":"one search string"');
+		expect(prompt).toContain("kill_search MUST be a string");
 	});
 
 	it("blocks final export until the complete roadmap stop gate passes", () => {

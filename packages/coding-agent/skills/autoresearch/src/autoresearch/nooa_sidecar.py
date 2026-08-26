@@ -19,6 +19,111 @@ from nooa_memory.store import MemoryStore
 
 OWNER = "prime-autoresearch"
 
+_CUE_STOPWORDS = {
+    "about",
+    "after",
+    "and",
+    "agent",
+    "are",
+    "before",
+    "being",
+    "but",
+    "can",
+    "caused",
+    "could",
+    "during",
+    "each",
+    "for",
+    "has",
+    "failure",
+    "from",
+    "have",
+    "how",
+    "into",
+    "its",
+    "long",
+    "may",
+    "not",
+    "observation",
+    "our",
+    "out",
+    "over",
+    "research",
+    "should",
+    "that",
+    "the",
+    "their",
+    "then",
+    "this",
+    "through",
+    "too",
+    "under",
+    "using",
+    "was",
+    "were",
+    "when",
+    "which",
+    "with",
+    "would",
+}
+
+
+def _cue_terms(value: str) -> set[str]:
+    terms: set[str] = set()
+    current: list[str] = []
+    for character in value.lower():
+        if character.isalnum():
+            current.append(character)
+            continue
+        if current:
+            term = "".join(current)
+            current = []
+            if len(term) > 2 and term not in _CUE_STOPWORDS:
+                terms.add(_stem_cue(term))
+    if current:
+        term = "".join(current)
+        if len(term) > 2 and term not in _CUE_STOPWORDS:
+            terms.add(_stem_cue(term))
+    return terms
+
+
+def _stem_cue(term: str) -> str:
+    if len(term) > 5 and term.endswith("ies"):
+        return f"{term[:-3]}y"
+    if len(term) > 4 and term.endswith("s") and not term.endswith("ss"):
+        return term[:-1]
+    return term
+
+
+def _precision_score(memory: Memory, query_terms: set[str]) -> int:
+    title_terms = _cue_terms(memory.title or "")
+    tag_terms = _cue_terms(" ".join(memory.tags))
+    content_terms = _cue_terms(memory.content)
+    title_overlap = len(query_terms & title_terms)
+    tag_overlap = len(query_terms & tag_terms)
+    content_overlap = len(query_terms & content_terms)
+    labelled_overlap = title_overlap + tag_overlap
+    if content_overlap < 2 and (labelled_overlap == 0 or content_overlap == 0):
+        return 0
+    return 4 * title_overlap + 3 * tag_overlap + content_overlap
+
+
+def _high_precision_memories(memories: list[Memory], query: str, limit: int) -> list[Memory]:
+    query_terms = _cue_terms(query)
+    if not query_terms:
+        return []
+    scored = [
+        (memory, _precision_score(memory, query_terms), rank)
+        for rank, memory in enumerate(memories)
+    ]
+    return [
+        memory
+        for memory, score, _rank in sorted(
+            (item for item in scored if item[1] > 0),
+            key=lambda item: (-item[1], item[2]),
+        )[:limit]
+    ]
+
 
 def _memory_type(value: str) -> MemoryType:
     return {
@@ -145,7 +250,9 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 config.retrieval,
                 access_log_cap=config.observability.access_log_cap,
             )
-            recalled = engine.recall(query, k=limit, touch=False, owner=OWNER)
+            candidate_limit = min(50, max(limit * 4, limit))
+            candidates = engine.recall(query, k=candidate_limit, touch=False, owner=OWNER)
+            recalled = _high_precision_memories(candidates, query, limit)
             lines = ["## Recalled research memories (associative)"]
             for memory in recalled:
                 head = (memory.title or memory.content).replace("\n", " ").strip()
@@ -165,7 +272,12 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 "context": context,
                 "chars": len(context),
                 "touch": False,
-                "retrieval": "NOOA spontaneous hybrid dense+sparse, ACT-R scoring, one-hop spread",
+                "candidate_count": len(candidates),
+                "precision_filtered_count": len(candidates) - len(recalled),
+                "retrieval": (
+                    "NOOA spontaneous hybrid dense+sparse, ACT-R scoring, one-hop spread, "
+                    "then lexical precision filtering"
+                ),
             }
         if command == "reflect":
             previously_archived = {

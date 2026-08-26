@@ -4,6 +4,7 @@ import asyncio
 import importlib.util
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 SKILL = Path(__file__).parents[2] / "packages/coding-agent/skills/autoresearch/src/autoresearch/__init__.py"
@@ -18,6 +19,17 @@ def load_skill(name: str):
 
 
 class AutoresearchSkillTest(unittest.TestCase):
+    def test_execution_contract_prevents_guessed_api_calls(self) -> None:
+        module = load_skill("autoresearch_execution_contract_test")
+        contract = module.execution_contract()
+        self.assertTrue(contract["forbid_runtime_introspection"])
+        self.assertIn("native Google Search", contract["search_tool"])
+        self.assertIn("review_candidate", contract["calls"]["host_review"])
+        self.assertIn("peer-review verification is optional", contract["error_policy"])
+        self.assertIn("['state']", contract["calls"]["inspect_state"])
+        self.assertIn("retry_supervision", contract["calls"]["recover_supervisor_after_restart"])
+        self.assertEqual(len(contract["search_coverage_kinds"]), 8)
+
     def test_initialize_and_complete_cycle_use_host_owned_requests(self) -> None:
         module = load_skill("autoresearch_host_test")
         host = AsyncMock(return_value={"checkpoint": {"status": "progressing"}})
@@ -26,11 +38,13 @@ class AutoresearchSkillTest(unittest.TestCase):
             patch.object(module, "spontaneous_recall", AsyncMock(return_value={"ok": True})),
             patch.object(module, "_finish_cycle_memory", AsyncMock()),
         ):
-            asyncio.run(module.initialize("Find a problem", topic="agent memory"))
+            initialized = asyncio.run(module.initialize("Find a problem", topic="agent memory"))
             asyncio.run(module.complete_cycle({"candidate": {"statement": "candidate"}}))
             asyncio.run(module.update_claim("claim-1", {"unresolved_objections": ["new evidence"]}))
         self.assertEqual(host.await_args_list[0].args[0], "autoresearch.initialize")
+        self.assertEqual(initialized["execution_contract"]["contract_version"], 1)
         self.assertEqual(host.await_args_list[1].args[0], "autoresearch.cycle.complete")
+        self.assertGreater(host.await_args_list[1].args[1]["supervisor_timeout_ms"], 0)
         self.assertEqual(host.await_args_list[2].args[0], "autoresearch.claim.update")
 
     def test_search_and_peer_review_evidence_use_host_owned_receipts(self) -> None:
@@ -169,6 +183,224 @@ class AutoresearchSkillTest(unittest.TestCase):
                 )
         finish.assert_awaited_once()
 
+    def test_supervisor_timeout_budget_includes_host_dispatch_time(self) -> None:
+        module = load_skill("autoresearch_host_dispatch_timeout_test")
+        clock = SimpleNamespace(now=100.0)
+        loop = SimpleNamespace(time=lambda: clock.now)
+
+        async def delayed_host(_type, _payload):
+            clock.now += 2.0
+            return {
+                "cycle": {"cycleId": "cycle-host-timeout"},
+                "delivery": {},
+            }
+
+        finish = AsyncMock()
+        collect = AsyncMock(return_value={"supervision": []})
+        with (
+            patch.object(module.asyncio, "get_running_loop", return_value=loop),
+            patch.object(module, "host_request", AsyncMock(side_effect=delayed_host)) as host,
+            patch.object(module, "collect_results", collect),
+            patch.object(module, "_finish_cycle_memory", finish),
+        ):
+            with self.assertRaisesRegex(TimeoutError, "cycle-host-timeout"):
+                asyncio.run(
+                    module.complete_cycle(
+                        {"candidate": {"statement": "candidate"}, "outcome": "rejected"},
+                        timeout=1,
+                        poll_interval=0,
+                    )
+                )
+        self.assertEqual(host.await_args.args[1]["supervisor_timeout_ms"], 1000)
+        collect.assert_not_awaited()
+        finish.assert_awaited_once()
+
+    def test_retry_supervision_redelivers_existing_cycle_and_finishes_memory(self) -> None:
+        module = load_skill("autoresearch_supervisor_retry_test")
+        cycle = {"cycleId": "cycle-retry", "outcome": "rejected"}
+        supervision = {"cycleId": "cycle-retry", "status": "progressing"}
+        host = AsyncMock(
+            return_value={
+                "cycle": cycle,
+                "checkpoint": {"status": "watch"},
+                "delivery": {"receipt": "sent"},
+            }
+        )
+        finish = AsyncMock()
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(
+                module,
+                "collect_results",
+                AsyncMock(return_value={"supervision": [supervision]}),
+            ),
+            patch.object(module, "_finish_cycle_memory", finish),
+        ):
+            result = asyncio.run(module.retry_supervision("cycle-retry", timeout=60))
+        self.assertEqual(host.await_args.args[0], "autoresearch.supervision.retry")
+        self.assertEqual(host.await_args.args[1]["cycle_id"], "cycle-retry")
+        self.assertGreater(host.await_args.args[1]["supervisor_timeout_ms"], 0)
+        self.assertEqual(result["supervision"], supervision)
+        finish.assert_awaited_once_with(result, cycle)
+
+    def test_retry_supervision_rebinds_a_terminal_child_without_waiting_for_timeout(self) -> None:
+        module = load_skill("autoresearch_supervisor_rebind_test")
+        cycle = {"cycleId": "cycle-rebind", "outcome": "rejected"}
+        first = {
+            "cycle": cycle,
+            "supervisor": {"rlmChildId": "sub-failed", "name": "supervisor-failed"},
+            "delivery": {},
+        }
+        replacement = {
+            "cycle": cycle,
+            "supervisor": {"rlmChildId": "sub-replacement", "name": "supervisor-replacement"},
+            "delivery": {},
+        }
+        supervision = {"cycleId": "cycle-rebind", "status": "progressing"}
+        failed_child = SimpleNamespace(
+            rlm_child_id="sub-failed",
+            session_name="supervisor-failed",
+            status="completed",
+        )
+        host = AsyncMock(side_effect=[first, replacement])
+        finish = AsyncMock()
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(
+                module,
+                "collect_results",
+                AsyncMock(
+                    side_effect=[
+                        {"supervision": []},
+                        {"supervision": []},
+                        {"supervision": [supervision]},
+                    ]
+                ),
+            ),
+            patch.object(module, "list_subagents", AsyncMock(return_value=[failed_child])),
+            patch.object(module.asyncio, "sleep", AsyncMock()),
+            patch.object(module, "_finish_cycle_memory", finish),
+        ):
+            result = asyncio.run(module.retry_supervision("cycle-rebind", timeout=60))
+        self.assertEqual(host.await_count, 2)
+        self.assertEqual(host.await_args_list[1].args[0], "autoresearch.supervision.retry")
+        self.assertEqual(host.await_args_list[1].args[1]["cycle_id"], "cycle-rebind")
+        self.assertGreater(host.await_args_list[1].args[1]["supervisor_timeout_ms"], 0)
+        self.assertEqual(result["supervisor"]["rlmChildId"], "sub-replacement")
+        self.assertEqual(result["supervision"], supervision)
+        finish.assert_awaited_once_with(result, cycle)
+
+    def test_retry_supervision_collects_once_more_at_child_settlement_boundary(self) -> None:
+        module = load_skill("autoresearch_supervisor_boundary_collection_test")
+        cycle = {"cycleId": "cycle-boundary", "outcome": "rejected"}
+        response = {
+            "cycle": cycle,
+            "supervisor": {"rlmChildId": "sub-done", "name": "supervisor-done"},
+            "delivery": {},
+        }
+        supervision = {"cycleId": "cycle-boundary", "status": "watch"}
+        completed_child = SimpleNamespace(
+            rlm_child_id="sub-done",
+            session_name="supervisor-done",
+            status="completed",
+        )
+        host = AsyncMock(return_value=response)
+        finish = AsyncMock()
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(
+                module,
+                "collect_results",
+                AsyncMock(side_effect=[{"supervision": []}, {"supervision": [supervision]}]),
+            ),
+            patch.object(module, "list_subagents", AsyncMock(return_value=[completed_child])),
+            patch.object(module.asyncio, "sleep", AsyncMock()),
+            patch.object(module, "_finish_cycle_memory", finish),
+        ):
+            result = asyncio.run(module.retry_supervision("cycle-boundary", timeout=60))
+        host.assert_awaited_once()
+        self.assertEqual(result["supervision"], supervision)
+        finish.assert_awaited_once_with(result, cycle)
+
+    def test_retry_supervision_does_not_rebind_during_queued_followup_transition(self) -> None:
+        module = load_skill("autoresearch_supervisor_followup_transition_test")
+        cycle = {"cycleId": "cycle-followup", "outcome": "rejected"}
+        response = {
+            "cycle": cycle,
+            "supervisor": {"rlmChildId": "sub-followup", "name": "supervisor-followup"},
+            "delivery": {"receipt": "queued"},
+        }
+        supervision = {"cycleId": "cycle-followup", "status": "watch"}
+        completed_child = SimpleNamespace(
+            rlm_child_id="sub-followup",
+            session_name="supervisor-followup",
+            status="completed",
+        )
+        running_child = SimpleNamespace(
+            rlm_child_id="sub-followup",
+            session_name="supervisor-followup",
+            status="running",
+        )
+        host = AsyncMock(return_value=response)
+        finish = AsyncMock()
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(
+                module,
+                "collect_results",
+                AsyncMock(
+                    side_effect=[
+                        {"supervision": []},
+                        {"supervision": []},
+                        {"supervision": [supervision]},
+                    ]
+                ),
+            ),
+            patch.object(
+                module,
+                "list_subagents",
+                AsyncMock(side_effect=[[completed_child], [running_child]]),
+            ),
+            patch.object(module.asyncio, "sleep", AsyncMock()),
+            patch.object(module, "_finish_cycle_memory", finish),
+        ):
+            result = asyncio.run(module.retry_supervision("cycle-followup", timeout=60))
+        host.assert_awaited_once()
+        self.assertEqual(result["supervision"], supervision)
+        finish.assert_awaited_once_with(result, cycle)
+
+    def test_retry_supervision_rebinds_after_bootstrap_delivery_failure(self) -> None:
+        module = load_skill("autoresearch_supervisor_delivery_rebind_test")
+        cycle = {"cycleId": "cycle-delivery", "outcome": "rejected"}
+        first = {
+            "cycle": cycle,
+            "supervisor": {"rlmChildId": "sub-busy", "name": "supervisor-busy"},
+            "delivery": {"error": "Agent is already processing"},
+        }
+        replacement = {
+            "cycle": cycle,
+            "supervisor": {"rlmChildId": "sub-ready", "name": "supervisor-ready"},
+            "delivery": {},
+        }
+        supervision = {"cycleId": "cycle-delivery", "status": "watch"}
+        host = AsyncMock(side_effect=[first, replacement])
+        finish = AsyncMock()
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(
+                module,
+                "collect_results",
+                AsyncMock(return_value={"supervision": [supervision]}),
+            ),
+            patch.object(module.asyncio, "sleep", AsyncMock()),
+            patch.object(module, "_finish_cycle_memory", finish),
+        ):
+            result = asyncio.run(module.retry_supervision("cycle-delivery", timeout=60))
+        self.assertEqual(host.await_count, 2)
+        self.assertEqual(result["supervisor"]["rlmChildId"], "sub-ready")
+        self.assertEqual(result["supervision"], supervision)
+        finish.assert_awaited_once_with(result, cycle)
+
     def test_spawn_reviewers_creates_four_role_separated_children(self) -> None:
         module = load_skill("autoresearch_reviewers_test")
         roles = (
@@ -199,6 +431,31 @@ class AutoresearchSkillTest(unittest.TestCase):
             list(roles),
         )
         host.assert_awaited_once_with("autoresearch.reviewers.spawn", {"candidate": candidate})
+
+    def test_await_reviews_fails_fast_when_a_bound_reviewer_child_errors(self) -> None:
+        module = load_skill("autoresearch_reviewer_failure_test")
+        assignment = {
+            "candidateId": "candidate-authority",
+            "role": "experimental_critic",
+            "rlmChildId": "sub-failed",
+            "name": "research-experimental-critic",
+        }
+        failed_child = SimpleNamespace(
+            rlm_child_id="sub-failed",
+            session_name="research-experimental-critic",
+            status="error",
+        )
+        with (
+            patch.object(module, "collect_results", AsyncMock(return_value={"reviews": []})),
+            patch.object(
+                module,
+                "get_state",
+                AsyncMock(return_value={"state": {"reviewerAssignments": [assignment]}}),
+            ),
+            patch.object(module, "list_subagents", AsyncMock(return_value=[failed_child])),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "experimental_critic"):
+                asyncio.run(module.await_reviews("candidate-authority", timeout=300))
 
     def test_rejects_non_dict_claim_before_contacting_host(self) -> None:
         module = load_skill("autoresearch_validation_test")

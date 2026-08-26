@@ -5,3 +5,7 @@
 - Derived DOI/arXiv verification identity from canonical paper IDs after a live Gemini run exposed omitted duplicate identity fields.
 - Preserved NOOA-owned access history, ACT-R counters, graph edges, rescored importance, and archive tombstones across canonical host syncs.
 - Pinned publisher verification to vetted public addresses and rejected cropped, hidden, or non-applicable peer-review statements before upgrading an item.
+- Added behavioral acceptance coverage for supervisor sensitivity and compaction/restart durability, and filtered spontaneous NOOA recall for high precision without reinforcing injected memories.
+- Prevented fast models from burning research turns on skill/source introspection before creating durable state.
+- Rebound failed reviewers and stale supervisors after provider or root-session failures, including secure terminal-result recovery and idempotent retry of the latest durable supervisor checkpoint.
+- Made weak-model supervision restart-safe by bounding bootstrap behavior and checkpoint deadlines, preserving active daemon follow-up status, accepting only durable parent-send receipts, and recovering bound child receipts from validated artifact descriptors after daemon restarts.

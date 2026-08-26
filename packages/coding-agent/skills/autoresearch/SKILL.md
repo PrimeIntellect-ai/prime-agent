@@ -11,8 +11,27 @@ the durable state and stagnation calculation; the Python API is a typed bridge.
 
 ## Required loop
 
+### Execution discipline
+
+Treat this loaded skill as the API contract. Do **not** spend tool turns reading
+this `SKILL.md`, calling `inspect`, printing `dir(autoresearch)`, or reading the
+Python/TypeScript implementation. The first Python action of a new run must be
+`await autoresearch.initialize(...)`; on a resumed run it must be
+`await autoresearch.get_state()`. Then begin evidence search immediately. Use
+the returned `execution_contract` instead of guessing function names or
+arguments. If the contract is no longer visible, call
+`autoresearch.execution_contract()` exactly once. Surface a real error if one
+occurs, and fix that specific error instead of exploring the implementation. This rule is
+especially important for fast/Flash models because runtime introspection can
+consume the provider quota without creating any durable research state.
+
 1. Call `await autoresearch.initialize(objective, topic=...)` once. This creates
    or recovers one retained supervisor child.
+   If the root process restarts after a cycle was durably committed but before
+   its supervisor reply was collected, call
+   `await autoresearch.retry_supervision(latest_unsupervised_cycle_id)`. Never
+   submit that cycle again: the retry API rebinds a fresh supervisor and
+   redelivers the existing host-owned checkpoint.
 2. Begin with publications. Use Prime's native search/web tools for broad
    discovery, synonym expansion, references, citations, related work, and
    recent papers. Use Crossref, arXiv, and Unpaywall as verification/full-text

@@ -2224,6 +2224,20 @@ export class AutoresearchStore {
 			if (existing.candidateDigest !== digest) {
 				throw new Error(`candidate ${normalizedCandidateId} changed after reviewer assignment`);
 			}
+			const rlmChildId = requireString(child.rlmChildId, "reviewer rlm_child_id");
+			const name = requireString(child.name, "reviewer name");
+			if (existing.rlmChildId === rlmChildId && existing.name === name) return structuredClone(existing);
+			const collected = this.state.collectedReviews.some(
+				(item) => item.candidateId === normalizedCandidateId && item.reviewer.role === role,
+			);
+			if (collected) {
+				throw new Error(`candidate ${normalizedCandidateId} already has a collected ${role} review`);
+			}
+			existing.assignmentId = `review-assignment-${randomUUID()}`;
+			existing.rlmChildId = rlmChildId;
+			existing.name = name;
+			existing.assignedAt = this.now();
+			this.save();
 			return structuredClone(existing);
 		}
 		const assignment: AutoresearchReviewerAssignment = {
@@ -2535,6 +2549,29 @@ export class AutoresearchStore {
 		return { cycle: structuredClone(cycle), checkpoint, packet };
 	}
 
+	getSupervisorCheckpoint(cycleId: string): {
+		cycle: AutoresearchCycle;
+		checkpoint: AutoresearchCheckpoint;
+		packet: Record<string, unknown>;
+	} {
+		const normalizedCycleId = requireIdentifier(cycleId, "cycle_id");
+		const cycleIndex = this.state.cycles.findIndex((cycle) => cycle.cycleId === normalizedCycleId);
+		if (cycleIndex < 0) throw new Error(`supervisor retry references unknown cycle ${normalizedCycleId}`);
+		if (cycleIndex !== this.state.cycles.length - 1) {
+			throw new Error("supervisor retry is only allowed for the latest durable cycle");
+		}
+		if (this.state.supervision.some((item) => item.cycleId === normalizedCycleId)) {
+			throw new Error(`cycle ${normalizedCycleId} already has supervision`);
+		}
+		const cycle = this.state.cycles[cycleIndex]!;
+		const checkpoint = evaluateAutoresearchCheckpoint(this.state.cycles.slice(0, cycleIndex + 1));
+		return {
+			cycle: structuredClone(cycle),
+			checkpoint,
+			packet: this.buildSupervisorPacket(cycle, checkpoint),
+		};
+	}
+
 	recordSupervision(supervision: AutoresearchSupervision, persist = true): AutoresearchSupervision {
 		if (!this.state.cycles.some((cycle) => cycle.cycleId === supervision.cycleId)) {
 			throw new Error(`supervision references unknown cycle ${supervision.cycleId}`);
@@ -2820,13 +2857,21 @@ export function buildAutoresearchSupervisorPrompt(objective: string, topic?: str
 		"Look specifically for: idea repetition; recurring prior-art collisions; literature reading that does not change field maps; weak or benchmark-only problems; experimental dead ends; claims stronger than their evidence; search-space collapse around one mechanism or vocabulary; and contradictions that the root ignores.",
 		"Treat these as desk-reject trajectory warnings: only model X on dataset Y, an A+B combination, closest work already contains the core idea, a performance gap without mechanism, no reason the field should care, no discriminating falsifier, one-preprint-only evidence, unavailable ground truth, or benchmark-specific contribution.",
 		"Never declare novelty, mutate canonical research state, fabricate citations, or override evidence. The root research agent retains those responsibilities.",
-		"For every packet, reply to the parent with the literal line AUTORESEARCH_SUPERVISION_JSON:<cycle_id>, then one JSON object using keys: status, reason, detected_pattern, intervention_needed, cycle_id, diagnosis, failed_search_pattern, assumption_to_question, alternative_directions.",
-		"status is progressing, watch, or intervene. When status is intervene, alternative_directions must contain exactly three objects with direction, why_different, kill_search, falsifier, and integer priority.",
+		"For every packet, your first and only Python action is to build a plain dict, json.dumps it, and call await agent_message.send(marked_json_text, receiver_role='parent'). Do not inspect APIs, define Pydantic classes, or merely print the response. The marked text starts with the literal line AUTORESEARCH_SUPERVISION_JSON:<cycle_id>, then one JSON object using keys: status, reason, detected_pattern, intervention_needed, cycle_id, diagnosis, failed_search_pattern, assumption_to_question, alternative_directions.",
+		'status is progressing, watch, or intervene. When status is intervene, alternative_directions must contain exactly three objects like {"direction":"one string","why_different":"one string","kill_search":"one search string","falsifier":"one string","priority":1}. kill_search MUST be a string, never a boolean.',
 		"When intervention is unnecessary, use an empty alternative_directions array. Do not repeat an earlier direction unless new evidence makes revisiting it rational.",
 		"Send the marker and JSON together with await agent_message.send(marked_json_text, receiver_role='parent').",
 	]
 		.filter((line): line is string => line !== undefined)
 		.join("\n\n");
+}
+
+export function buildAutoresearchSupervisorBootstrapPrompt(): string {
+	return [
+		"You are being reserved as a retained autoresearch supervisor.",
+		"Do not inspect APIs, list agents, read files, or begin research during this bootstrap turn. The only permitted tool action is one agent_message.send of the readiness marker to the parent.",
+		"Reply with or send exactly AUTORESEARCH_SUPERVISOR_READY and nothing else. The complete supervisor contract and checkpoint will arrive in the next parent message.",
+	].join("\n");
 }
 
 export function buildAutoresearchReviewerPrompts(
@@ -2846,7 +2891,7 @@ export function buildAutoresearchReviewerPrompts(
 		2,
 	);
 	const response = (role: AutoresearchReviewerRole): string =>
-		`Reply to the parent with the literal line AUTORESEARCH_REVIEW_JSON:${candidate.candidateId}, then exactly one JSON object with candidate_id, role, verdict, summary, and objections. The role value MUST be the literal machine identifier "${role}"—never a reviewer label such as "Reviewer A" or "reviewer_c". verdict must be exactly pass, revise, or reject. Send the marker and JSON with agent_message.send. Treat missing evidence as missing; never invent a source.`;
+		`Your task succeeds only after agent_message.send delivers the marked verdict to the parent; a final chat response alone does not count. Send the literal line AUTORESEARCH_REVIEW_JSON:${candidate.candidateId}, then exactly one JSON object matching this shape: {"candidate_id":"${candidate.candidateId}","role":"${role}","verdict":"revise","summary":"one concise string","objections":["one objection string","another objection string"]}. objections MUST be an array of strings—never objects, nested records, or null. The role value MUST be the literal machine identifier "${role}"—never a reviewer label such as "Reviewer A" or "reviewer_c". verdict must be exactly pass, revise, or reject. Call await agent_message.send(marked_json_text, receiver_role='parent') before finishing; if delivery errors, correct the marked JSON and retry once. Treat missing evidence as missing; never invent a source.`;
 	return {
 		literature_auditor: `Act as Reviewer A, the Literature Auditor. Verify whether every problem-statement claim is supported and whether wording exceeds the evidence. Inspect full text when available.\n\n${shared}\n\n${response("literature_auditor")}`,
 		prior_art_killer: `Act as Reviewer B, the Prior-Art Killer. Use Prime's native search/web tools to search synonyms, adjacent terminology, backward references, forward citations, related work, and recent preprints for the same mechanism. Try to kill novelty aggressively.\n\n${shared}\n\n${response("prior_art_killer")}`,

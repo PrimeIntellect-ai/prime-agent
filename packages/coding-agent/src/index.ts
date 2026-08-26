@@ -66,6 +66,7 @@ export {
 	type AutoresearchSupervisorRef,
 	type AutoresearchSupervisorStatus,
 	buildAutoresearchReviewerPrompts,
+	buildAutoresearchSupervisorBootstrapPrompt,
 	buildAutoresearchSupervisorPrompt,
 	evaluateAutoresearchCheckpoint,
 	parseAutoresearchAgentPayload,

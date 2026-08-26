@@ -105,6 +105,7 @@ import {
 	type AutoresearchReviewerRole,
 	AutoresearchStore,
 	buildAutoresearchReviewerPrompts,
+	buildAutoresearchSupervisorBootstrapPrompt,
 	buildAutoresearchSupervisorPrompt,
 	hasApplicablePeerReviewEvidence,
 	isPublicAutoresearchAddress,
@@ -1017,6 +1018,29 @@ function readAssistantText(message: AssistantMessage): string {
 		.join("");
 }
 
+export function extractMarkedPersistedAgentMessage(details: unknown, marker: string): string | undefined {
+	if (!isObjectRecord(details) || details.status !== "ok" || !Array.isArray(details.sentAgentMessages)) {
+		return undefined;
+	}
+	for (const value of [...details.sentAgentMessages].reverse()) {
+		if (!isObjectRecord(value) || !isObjectRecord(value.target)) continue;
+		if (
+			typeof value.id !== "string" ||
+			!value.id.startsWith("agentmsg_") ||
+			typeof value.message !== "string" ||
+			!value.message.includes(marker) ||
+			(value.deliveryStatus !== "queued" && value.deliveryStatus !== "delivered") ||
+			value.receiverRole !== "parent" ||
+			typeof value.target.activeSessionId !== "string" ||
+			typeof value.target.sessionId !== "string"
+		) {
+			continue;
+		}
+		return value.message;
+	}
+	return undefined;
+}
+
 function waitForPromiseOrAbort<T>(
 	promise: Promise<T>,
 	signal: AbortSignal | undefined,
@@ -1044,6 +1068,23 @@ function waitForPromiseOrAbort<T>(
 			},
 		);
 	});
+}
+
+const DEFAULT_AUTORESEARCH_SUPERVISOR_TIMEOUT_MS = 60_000;
+const MAX_AUTORESEARCH_SUPERVISOR_TIMEOUT_MS = 300_000;
+
+function parseAutoresearchSupervisorTimeoutMs(value: unknown): number {
+	if (value === undefined) return DEFAULT_AUTORESEARCH_SUPERVISOR_TIMEOUT_MS;
+	if (
+		!Number.isInteger(value) ||
+		(value as number) < 1 ||
+		(value as number) > MAX_AUTORESEARCH_SUPERVISOR_TIMEOUT_MS
+	) {
+		throw new Error(
+			`autoresearch supervisor_timeout_ms must be an integer from 1 to ${MAX_AUTORESEARCH_SUPERVISOR_TIMEOUT_MS}`,
+		);
+	}
+	return value as number;
 }
 
 function attributeChildUsage(parentUsage: Usage, childUsage: Usage): void {
@@ -1157,6 +1198,7 @@ export class AgentSession {
 	private _agentMessageController?: AgentSessionMessageController;
 	private _agentObserveController?: AgentObserveController;
 	private _autoresearchStore?: AutoresearchStore;
+	private _autoresearchSupervisorBoundToRuntime = false;
 	private _mcpManager?: McpManager;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
@@ -3210,13 +3252,15 @@ export class AgentSession {
 		return this._autoresearchStore;
 	}
 
-	private async _ensureAutoresearchSupervisor(): Promise<{ rlmChildId: string; name: string }> {
+	private async _ensureAutoresearchSupervisor(
+		options: { forceRebind?: boolean } = {},
+	): Promise<{ rlmChildId: string; name: string }> {
 		const store = this._requireAutoresearchStore();
 		const state = store.getState();
 		if (!state.objective) throw new Error("initialize autoresearch before starting its supervisor");
 		const children = (await this.listRlmSubagents()).subagents;
 		const configured = state.supervisor;
-		if (configured) {
+		if (configured && this._autoresearchSupervisorBoundToRuntime && !options.forceRebind) {
 			const retained = children.find(
 				(child) => child.rlm_child_id === configured.rlmChildId || child.session_name === configured.name,
 			);
@@ -3224,6 +3268,7 @@ export class AgentSession {
 				if (retained.rlm_child_id !== configured.rlmChildId || retained.session_name !== configured.name) {
 					store.setSupervisor({ rlmChildId: retained.rlm_child_id, name: retained.session_name });
 				}
+				this._autoresearchSupervisorBoundToRuntime = true;
 				return { rlmChildId: retained.rlm_child_id, name: retained.session_name };
 			}
 		}
@@ -3233,8 +3278,9 @@ export class AgentSession {
 		const name = children.some((child) => child.session_name === preferredName)
 			? `${preferredName}-${randomUUID().slice(0, 8)}`
 			: preferredName;
-		const handle = await this.runRlmChild(buildAutoresearchSupervisorPrompt(state.objective, state.topic), { name });
+		const handle = await this.runRlmChild(buildAutoresearchSupervisorBootstrapPrompt(), { name });
 		store.setSupervisor({ rlmChildId: handle.rlm_child_id, name: handle.name });
+		this._autoresearchSupervisorBoundToRuntime = true;
 		return { rlmChildId: handle.rlm_child_id, name: handle.name };
 	}
 
@@ -3242,9 +3288,30 @@ export class AgentSession {
 		supervisor: { rlmChildId: string; name: string },
 		cycleId: string,
 		packet: Record<string, unknown>,
+		timeoutMs: number,
 	): Promise<{ receipt?: AgentSessionMessageReceipt; error?: string }> {
+		const deadline = Date.now() + timeoutMs;
+		const waitWithinDeadline = <T>(promise: Promise<T>, operation: string): Promise<T> => {
+			const remainingMs = Math.max(1, deadline - Date.now());
+			return waitForPromiseOrAbort(
+				promise,
+				AbortSignal.timeout(remainingMs),
+				`autoresearch supervisor timed out ${operation} for ${cycleId}`,
+			);
+		};
 		try {
-			await this._awaitPendingRlmChildPublication(supervisor.name);
+			await waitWithinDeadline(
+				this._awaitPendingRlmChildSettlement(supervisor.name),
+				"waiting for bootstrap settlement",
+			);
+			const state = this._requireAutoresearchStore().getState();
+			if (!state.objective) throw new Error("autoresearch supervisor objective is missing");
+			const instructions = buildAutoresearchSupervisorPrompt(state.objective, state.topic);
+			const envelope = `[autoresearch supervisor instructions]\n\n${instructions}\n\n[autoresearch checkpoint ${cycleId}]\n\n`;
+			const maxSerializedLength = 15_000 - envelope.length;
+			if (maxSerializedLength < 1_000) {
+				throw new Error("autoresearch supervisor instructions leave insufficient room for a checkpoint");
+			}
 			const original = JSON.stringify(packet);
 			const compactValue = (value: unknown, maxString: number, maxArray: number, depth = 0): unknown => {
 				if (typeof value === "string") {
@@ -3263,7 +3330,7 @@ export class AgentSession {
 				return String(value);
 			};
 			let deliveredPacket: Record<string, unknown> = packet;
-			if (original.length > 15_000) {
+			if (original.length > maxSerializedLength) {
 				deliveredPacket = {
 					...(compactValue(packet, 600, 12) as Record<string, unknown>),
 					packet_truncated: true,
@@ -3271,7 +3338,7 @@ export class AgentSession {
 				};
 			}
 			let serialized = JSON.stringify(deliveredPacket);
-			if (serialized.length > 15_000) {
+			if (serialized.length > maxSerializedLength) {
 				deliveredPacket = {
 					...(compactValue(packet, 300, 6) as Record<string, unknown>),
 					packet_truncated: true,
@@ -3279,13 +3346,18 @@ export class AgentSession {
 				};
 				serialized = JSON.stringify(deliveredPacket);
 			}
-			if (serialized.length > 15_000) {
-				throw new Error(`autoresearch supervisor packet could not be bounded below 15000 characters`);
+			if (serialized.length > maxSerializedLength) {
+				throw new Error(
+					`autoresearch supervisor packet could not be bounded below ${maxSerializedLength} characters`,
+				);
 			}
-			const receipt = await this._agentMessageController!.sendAgentMessage({
-				target: assertDirectAgentMessageTarget(supervisor.name),
-				message: normalizeAgentSessionMessage(`[autoresearch checkpoint ${cycleId}]\n\n${serialized}`),
-			});
+			const receipt = await waitWithinDeadline(
+				this._agentMessageController!.sendAgentMessage({
+					target: assertDirectAgentMessageTarget(supervisor.name),
+					message: normalizeAgentSessionMessage(`${envelope}${serialized}`),
+				}),
+				"delivering checkpoint",
+			);
 			return { receipt };
 		} catch (error) {
 			return { error: error instanceof Error ? error.message : String(error) };
@@ -3543,30 +3615,98 @@ export class AgentSession {
 	): Promise<ReturnType<AutoresearchStore["getReviewerAssignments"]>> {
 		const store = this._requireAutoresearchStore();
 		const existing = new Map(store.getReviewerAssignments(candidate.candidateId).map((item) => [item.role, item]));
+		const children = (await this.listRlmSubagents()).subagents;
+		const reviewedRoles = new Set(store.getCollectedReviews(candidate.candidateId).map((review) => review.role));
 		const prompts = buildAutoresearchReviewerPrompts(candidate, store.getState());
 		const roles = Object.keys(prompts) as AutoresearchReviewerRole[];
 		const slug = candidate.candidateId.replace(/[^A-Za-z0-9]+/g, "-").slice(0, 20) || "candidate";
 		for (const role of roles) {
-			if (existing.has(role)) continue;
+			const assignment = existing.get(role);
+			const assignedChild = assignment
+				? children.find(
+						(child) => child.rlm_child_id === assignment.rlmChildId || child.session_name === assignment.name,
+					)
+				: undefined;
+			if (reviewedRoles.has(role) || assignedChild?.status === "running") continue;
 			const kwargs: Record<string, unknown> = {
 				name: `research-${role.replaceAll("_", "-")}-${slug}-${randomUUID().slice(0, 8)}`,
 			};
 			const handle = await this.runRlmChild(prompts[role], kwargs);
-			const assignment = store.registerReviewerAssignment(candidate, role, {
+			const replacement = store.registerReviewerAssignment(candidate, role, {
 				rlmChildId: handle.rlm_child_id,
 				name: handle.name,
 			});
-			existing.set(role, assignment);
+			existing.set(role, replacement);
 		}
 		return store.getReviewerAssignments(candidate.candidateId);
 	}
 
-	private _collectAutoresearchAgentResults(): {
+	private _readAutoresearchTerminal(subagent: RlmSubagentRegistryEntry, marker: string): string | undefined {
+		const liveSession =
+			this._activeRlmChildRuns.get(subagent.rlm_child_id)?.session ??
+			this._rlmChildSessions.get(subagent.rlm_child_id);
+		if (liveSession) {
+			for (const message of [...liveSession.messages].reverse()) {
+				if (message.role === "toolResult" && message.toolName === "ipython" && !message.isError) {
+					const persisted = extractMarkedPersistedAgentMessage(message.details, marker);
+					if (persisted) return persisted;
+				}
+			}
+		}
+
+		try {
+			const descriptorPath = join(subagent.session_dir, "rlm-subagent.json");
+			const descriptor = JSON.parse(readFileSync(descriptorPath, "utf8")) as unknown;
+			if (!isObjectRecord(descriptor)) return undefined;
+			if (descriptor.childId !== subagent.rlm_child_id || descriptor.sessionName !== subagent.session_name) {
+				return undefined;
+			}
+			if (typeof descriptor.sessionFile !== "string") return undefined;
+			const sessionDir = resolve(subagent.session_dir);
+			const sessionFile = resolve(descriptor.sessionFile);
+			if (dirname(sessionFile) !== sessionDir || !existsSync(sessionFile)) return undefined;
+			const sessionManager = SessionManager.open(sessionFile);
+			const branch = [...sessionManager.getBranch()].reverse();
+			for (const entry of branch) {
+				if (entry.type !== "message") continue;
+				if (entry.message.role === "toolResult" && entry.message.toolName === "ipython" && !entry.message.isError) {
+					const persisted = extractMarkedPersistedAgentMessage(entry.message.details, marker);
+					if (persisted) return persisted;
+				}
+			}
+		} catch {
+			return undefined;
+		}
+		return undefined;
+	}
+
+	private _persistedAutoresearchSubagent(
+		rlmChildId: string,
+		sessionName: string,
+	): RlmSubagentRegistryEntry | undefined {
+		const artifactDir = this.sessionManager.getSessionArtifactDir();
+		if (!artifactDir) return undefined;
+		const resolvedArtifactDir = resolve(artifactDir);
+		const sessionDir = resolve(resolvedArtifactDir, rlmChildId);
+		if (dirname(sessionDir) !== resolvedArtifactDir || !existsSync(join(sessionDir, "rlm-subagent.json"))) {
+			return undefined;
+		}
+		return {
+			rlm_child_id: rlmChildId,
+			active_session_id: null,
+			session_id: null,
+			session_name: sessionName,
+			session_dir: sessionDir,
+			status: "completed",
+		};
+	}
+
+	private async _collectAutoresearchAgentResults(): Promise<{
 		ingested: number;
 		reviews: ReturnType<AutoresearchStore["getState"]>["collectedReviews"];
 		supervision: ReturnType<AutoresearchStore["getState"]>["supervision"];
 		errors: Array<{ messageId: string; error: string }>;
-	} {
+	}> {
 		const store = this._requireAutoresearchStore();
 		let ingested = 0;
 		const errors: Array<{ messageId: string; error: string }> = [];
@@ -3585,6 +3725,55 @@ export class AgentSession {
 					messageId: message.details.id,
 					error: error instanceof Error ? error.message : String(error),
 				});
+			}
+		}
+		const stateBeforeTerminalCollection = store.getState();
+		const reviewedRoles = new Set(
+			stateBeforeTerminalCollection.collectedReviews.map((item) => `${item.candidateId}:${item.reviewer.role}`),
+		);
+		const subagents = (await this.listRlmSubagents()).subagents;
+		for (const assignment of stateBeforeTerminalCollection.reviewerAssignments) {
+			if (reviewedRoles.has(`${assignment.candidateId}:${assignment.role}`)) continue;
+			const child =
+				subagents.find(
+					(item) => item.rlm_child_id === assignment.rlmChildId || item.session_name === assignment.name,
+				) ?? this._persistedAutoresearchSubagent(assignment.rlmChildId, assignment.name);
+			if (child?.status !== "completed" && child?.status !== "error") continue;
+			const text = this._readAutoresearchTerminal(child, "AUTORESEARCH_REVIEW_JSON:");
+			if (!text) continue;
+			const messageId = `autoresearch-terminal:${assignment.assignmentId}`;
+			try {
+				if (store.ingestAgentMessage(messageId, text, { sessionName: assignment.name })) ingested++;
+			} catch (error) {
+				errors.push({
+					messageId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		const stateBeforeSupervisorTerminalCollection = store.getState();
+		const configuredSupervisor = stateBeforeSupervisorTerminalCollection.supervisor;
+		if (configuredSupervisor) {
+			const child =
+				subagents.find(
+					(item) =>
+						item.rlm_child_id === configuredSupervisor.rlmChildId ||
+						item.session_name === configuredSupervisor.name,
+				) ?? this._persistedAutoresearchSubagent(configuredSupervisor.rlmChildId, configuredSupervisor.name);
+			if (child?.status === "completed" || child?.status === "error") {
+				const text = this._readAutoresearchTerminal(child, "AUTORESEARCH_SUPERVISION_JSON:");
+				if (text) {
+					const digest = createHash("sha256").update(text).digest("hex");
+					const messageId = `autoresearch-supervisor-terminal:${child.rlm_child_id}:${digest}`;
+					try {
+						if (store.ingestAgentMessage(messageId, text, { sessionName: configuredSupervisor.name })) ingested++;
+					} catch (error) {
+						errors.push({
+							messageId,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				}
 			}
 		}
 		const state = store.getState();
@@ -3762,9 +3951,10 @@ export class AgentSession {
 				return { candidate, assignments };
 			}
 			case "autoresearch.results.collect":
-				return this._collectAutoresearchAgentResults();
+				return await this._collectAutoresearchAgentResults();
 			case "autoresearch.cycle.complete": {
-				const collection = this._collectAutoresearchAgentResults();
+				const timeoutMs = parseAutoresearchSupervisorTimeoutMs(payload.supervisor_timeout_ms);
+				const collection = await this._collectAutoresearchAgentResults();
 				const result = store.recordCycle(parseAutoresearchCycleInput(payload.cycle));
 				let supervisor: { rlmChildId: string; name: string };
 				try {
@@ -3780,20 +3970,36 @@ export class AgentSession {
 					supervisor,
 					result.cycle.cycleId,
 					result.packet,
+					timeoutMs,
 				);
 				return { ...result, supervisor, delivery, collection };
 			}
 			case "autoresearch.supervision.record": {
 				return { supervision: store.recordSupervision(parseAutoresearchSupervisionInput(payload.supervision)) };
 			}
+			case "autoresearch.supervision.retry": {
+				if (typeof payload.cycle_id !== "string") {
+					throw new Error("autoresearch.supervision.retry cycle_id must be a string");
+				}
+				const result = store.getSupervisorCheckpoint(payload.cycle_id);
+				const timeoutMs = parseAutoresearchSupervisorTimeoutMs(payload.supervisor_timeout_ms);
+				const supervisor = await this._ensureAutoresearchSupervisor({ forceRebind: true });
+				const delivery = await this._dispatchAutoresearchCheckpoint(
+					supervisor,
+					result.cycle.cycleId,
+					result.packet,
+					timeoutMs,
+				);
+				return { ...result, supervisor, delivery };
+			}
 			case "autoresearch.stop_gate":
-				this._collectAutoresearchAgentResults();
+				await this._collectAutoresearchAgentResults();
 				return { stop_gate: store.evaluateStopGate() };
 			case "autoresearch.export": {
 				if (payload.final !== undefined && typeof payload.final !== "boolean") {
 					throw new Error("autoresearch.export final must be a boolean when provided");
 				}
-				this._collectAutoresearchAgentResults();
+				await this._collectAutoresearchAgentResults();
 				return { deliverable: store.exportDeliverable(payload.final === true) };
 			}
 			default:
@@ -9822,6 +10028,7 @@ export class AgentSession {
 				"autoresearch.results.collect",
 				"autoresearch.cycle.complete",
 				"autoresearch.supervision.record",
+				"autoresearch.supervision.retry",
 				"autoresearch.stop_gate",
 				"autoresearch.export",
 			]) {
@@ -10141,12 +10348,37 @@ export class AgentSession {
 		return run.session?.sessionId;
 	}
 
+	private async _awaitPendingRlmChildSettlement(selector: string): Promise<string | undefined> {
+		const run = [...this._activeRlmChildRuns.values()].find(
+			(candidate) =>
+				!candidate.detachedDeletion && (candidate.id === selector || candidate.sessionName === selector),
+		);
+		if (!run) return undefined;
+		await run.publication.promise;
+		await run.settlement.promise;
+		if (run.status === "error" || run.status === "cancelled") {
+			throw new Error(run.error ?? `RLM child ${selector} failed before becoming idle`);
+		}
+		return run.session?.sessionId;
+	}
+
 	async listRlmSubagents(): Promise<RlmListSubagentsResult> {
 		return this._buildRlmSubagentList(await this._agentMessageController?.listAgents());
 	}
 
 	private _buildRlmSubagentList(listedAgents?: AgentSessionMessageListResult): RlmListSubagentsResult {
 		const daemonChildren = new Map<string, AgentSessionMessageAgentSummary>();
+		const daemonStatus = (child: AgentSessionMessageAgentSummary): RlmSubagentRegistryEntry["status"] => {
+			if (
+				child.isStreaming ||
+				child.unfinishedActionCount > 0 ||
+				child.rlmChildRegistryStatus === "running" ||
+				child.status === "running"
+			) {
+				return "running";
+			}
+			return child.rlmChildRegistryStatus === "deleted" ? "error" : "completed";
+		};
 		const parentActiveSessionId = listedAgents?.current?.activeSessionId;
 		if (parentActiveSessionId) {
 			for (const agent of listedAgents.agents) {
@@ -10197,7 +10429,7 @@ export class AgentSession {
 				session_name:
 					daemonChild?.sessionName ?? childSession.sessionName ?? createDefaultRlmSubagentSessionName("", childId),
 				session_dir: sessionDir,
-				status: "completed",
+				status: daemonChild ? daemonStatus(daemonChild) : "completed",
 			});
 			recorded.add(childId);
 		}
@@ -10217,7 +10449,7 @@ export class AgentSession {
 				session_id: daemonChild.sessionId,
 				session_name: daemonChild.sessionName ?? createDefaultRlmSubagentSessionName("", childId),
 				session_dir: daemonChild.sessionDir,
-				status: daemonChild.rlmChildRegistryStatus === "completed" ? "completed" : "error",
+				status: daemonStatus(daemonChild),
 			});
 		}
 		return { subagents };
