@@ -122,7 +122,6 @@ host_request(request_type: str, payload: dict | None = None)
 RLMSpawnHandle
 RLMModel
 RLMSubagent
-TokenUsage
 ```
 
 The kernel bootstrap places the callable `rlm` object in the user namespace, so these are equivalent:
@@ -235,7 +234,7 @@ Exact artifact files are created only when their features are used. Non-persiste
 
 ## Trust Boundary
 
-The kernel executes model-generated Python and `bash()` commands with the worker's OS permissions. The kernel boundary isolates protocol and lifecycle concerns; it is not a security sandbox. Installed Python packages, skills, and extensions are trusted code. Use an external sandbox or restricted execution environment when the workspace or generated code is untrusted.
+The REPL runtime process executes model-generated Python and `bash()` commands with the worker's OS permissions. The process boundary isolates protocol and lifecycle concerns; it is not a security sandbox. Installed Python packages, skills, and extensions are trusted code. Use an external sandbox or restricted execution environment when the workspace or generated code is untrusted.
 
 Provider credentials are resolved by the TypeScript host. The bounded model catalog crosses into Python as metadata; the full auth store does not.
 
@@ -243,7 +242,7 @@ Provider credentials are resolved by the TypeScript host. The bounded model cata
 
 | Failure | Behavior |
 |---|---|
-| Managed runtime is missing | Kernel bootstrap rebuilds it; a custom Python without `rlm` fails clearly when recursion is called. |
+| Managed runtime is missing | Kernel bootstrap rebuilds it; a custom `PRIME_AGENT_KERNEL_PYTHON` without a current `prime-agent-runtime` is rejected at kernel startup. |
 | Depth limit reached | The host rejects the `rlm.run` request; the error reply raises in Python. |
 | Unsupported options | Host rejects the request. |
 | Requested model unavailable | Spawn fails instead of substituting another model. |
