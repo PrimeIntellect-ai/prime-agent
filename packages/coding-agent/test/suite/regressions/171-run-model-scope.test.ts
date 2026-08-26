@@ -309,6 +309,24 @@ describe("issue 171 run-scoped model overlay", () => {
 				],
 			});
 		}).toThrow("requires an explicit HTTP endpoint");
+		expect(() => {
+			const unresolvedCloudflare = {
+				...model,
+				provider: "cloudflare-ai-gateway",
+				baseUrl: "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/openai",
+			};
+			return createAgentRunModelScope({
+				version: AGENT_RUN_MODEL_SCOPE_VERSION,
+				root: unresolvedCloudflare,
+				models: [unresolvedCloudflare],
+				requestAccess: [
+					{
+						model: unresolvedCloudflare,
+						access: { kind: "secret", contract: "secret@1", apiKey: "explicit-key" },
+					},
+				],
+			});
+		}).toThrow("requires a resolved Cloudflare endpoint");
 		expect(() =>
 			createAgentRunModelScope({
 				version: AGENT_RUN_MODEL_SCOPE_VERSION,
@@ -472,6 +490,100 @@ describe("issue 171 run-scoped model overlay", () => {
 		});
 		expect(compacted).toBe(false);
 		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({ aborted: false });
+	});
+
+	it("uses exact scoped access for interval review and explicit refine.run planning", async () => {
+		vi.stubEnv("OPENAI_API_KEY", "hostile-openai");
+		vi.stubEnv("PI_CACHE_RETENTION", "long");
+		vi.stubEnv("PRIME_TEAM_ID", "hostile-team");
+		for (const mode of ["interval", "explicit"] as const) {
+			const harness = await createHarness({
+				api: `faux-run-refine-${mode}`,
+				provider: `native-refine-${mode}`,
+				persistSession: true,
+				serializedRefine: true,
+				settings: { autoRefine: { enabled: true, turnInterval: 1, cooldownMs: 0 } },
+			});
+			harnesses.push(harness);
+			const model = harness.getModel();
+			const scope = createAgentRunModelScope({
+				version: AGENT_RUN_MODEL_SCOPE_VERSION,
+				root: model,
+				models: [model],
+				requestAccess: [
+					{
+						model,
+						access: { kind: "secret", contract: "secret@1", apiKey: `scoped-${mode}-key` },
+					},
+				],
+			});
+			let auxiliaryOptions: SimpleStreamOptions | undefined;
+			if (mode === "interval") {
+				harness.setResponses([
+					fauxAssistantMessage("root complete"),
+					(_context, options) => {
+						auxiliaryOptions = options;
+						return fauxAssistantMessage('{"shouldRefine":false,"rationale":"nothing durable"}');
+					},
+				]);
+			} else {
+				harness.setResponses([
+					() => {
+						harness.session.handleRefineHostRequest("refine.run", { global: true });
+						return fauxAssistantMessage("root complete");
+					},
+					(_context, options) => {
+						auxiliaryOptions = options;
+						return fauxAssistantMessage('{"edits":[],"rationale":"nothing durable"}');
+					},
+				]);
+			}
+			if (mode === "interval") harness.session.agent.state.model = undefined as never;
+			await harness.session.promptAndWait(`run ${mode}`, { modelScope: scope });
+			expect(auxiliaryOptions).toMatchObject({
+				apiKey: `scoped-${mode}-key`,
+				disableEnvApiKey: true,
+			});
+		}
+	});
+
+	it("fails side questions closed while a scoped model run is active", async () => {
+		const harness = await createHarness({ api: "faux-run-side-question", provider: "native-side-question" });
+		harnesses.push(harness);
+		const model = harness.getModel();
+		const scope = createAgentRunModelScope({
+			version: AGENT_RUN_MODEL_SCOPE_VERSION,
+			root: model,
+			models: [model],
+			requestAccess: [
+				{
+					model,
+					access: { kind: "secret", contract: "secret@1", apiKey: "scoped-side-key" },
+				},
+			],
+		});
+		let release!: () => void;
+		const blocked = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let started!: () => void;
+		const requestStarted = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		harness.setResponses([
+			async () => {
+				started();
+				await blocked;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		const run = harness.session.promptAndWait("hold", { modelScope: scope });
+		await requestStarted;
+		expect(() => harness.session.assertSideQuestionAllowed()).toThrow(
+			"Side questions are unavailable while a scoped model run is active",
+		);
+		release();
+		await run;
 	});
 
 	it("does not accept a lookalike stream option as run-scoped auth authority", async () => {

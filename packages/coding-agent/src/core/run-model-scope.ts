@@ -81,6 +81,9 @@ function normalizeRequestAccess(model: Model<Api>, access: AgentRunRequestAccess
 	if (!supportsExplicitRequestAccess(model.api)) {
 		throw new Error(`Agent run api ${model.api} does not support secret@1 access`);
 	}
+	if (/\{CLOUDFLARE_[A-Z0-9_]+\}/.test(model.baseUrl)) {
+		throw new Error(`Agent run model ${model.provider}/${model.id} requires a resolved Cloudflare endpoint`);
+	}
 	let endpoint: URL;
 	try {
 		endpoint = new URL(model.baseUrl);

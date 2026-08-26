@@ -971,6 +971,13 @@ interface AgentRunScope {
 	readonly authorityLineage?: AgentRunAuthorityLineage;
 }
 
+interface RefinementRequestAuthority {
+	model: Model<Api>;
+	apiKey: string;
+	headers?: Record<string, string>;
+	disableEnvApiKey: boolean;
+}
+
 interface AgentRunAuthorityLineage {
 	references: number;
 	revoked: boolean;
@@ -2676,7 +2683,13 @@ export class AgentSession {
 			const refineAbort = new AbortController();
 			this._refineAbortController = refineAbort;
 			const branchVersion = this._autoRefineBranchVersion;
-			this._serializedPlanInFlight = this._runBackgroundPlan(pending, refineAbort, branchVersion, true);
+			this._serializedPlanInFlight = this._runBackgroundPlan(
+				pending,
+				refineAbort,
+				branchVersion,
+				true,
+				this._activeScopedRefinementAuthority(),
+			);
 			return;
 		}
 
@@ -2703,7 +2716,13 @@ export class AgentSession {
 		const branchVersion = this._autoRefineBranchVersion;
 		// Pass empty options — _runBackgroundPlan derives instructions from
 		// the review result for interval-triggered auto-refine.
-		this._serializedPlanInFlight = this._runBackgroundPlan({}, refineAbort, branchVersion);
+		this._serializedPlanInFlight = this._runBackgroundPlan(
+			{},
+			refineAbort,
+			branchVersion,
+			false,
+			this._activeScopedRefinementAuthority(),
+		);
 	}
 
 	/**
@@ -2717,8 +2736,11 @@ export class AgentSession {
 		refineAbort: AbortController,
 		branchVersion: number,
 		skipReview = false,
+		capturedRequestAuthority?: RefinementRequestAuthority,
 	): Promise<SerializedBackgroundPlanResult | undefined> {
 		try {
+			// Retain exact request authority before message-end cleanup can release the run map.
+			const requestAuthority = capturedRequestAuthority ?? (await this._refinementRequestAuthority());
 			let planOptions = options;
 			if (!skipReview) {
 				// Interval-triggered: run the review gate first, then derive
@@ -2729,6 +2751,7 @@ export class AgentSession {
 						turnsSinceLastReview: this._assistantTurnsSinceAutoRefine,
 					},
 					refineAbort.signal,
+					requestAuthority,
 				);
 				if (this._disposed || this._disposing || branchVersion !== this._autoRefineBranchVersion) {
 					return { status: "invalidated", branchVersion };
@@ -2742,7 +2765,12 @@ export class AgentSession {
 			}
 			// For explicit refine.run (skipReview=true), plan directly with
 			// the user-provided options — no auto-review gate.
-			const plan = await this._planRefine(planOptions, refineAbort.signal, skipReview ? "manual" : "auto");
+			const plan = await this._planRefine(
+				planOptions,
+				refineAbort.signal,
+				skipReview ? "manual" : "auto",
+				requestAuthority,
+			);
 			if (this._disposed || this._disposing || branchVersion !== this._autoRefineBranchVersion) {
 				return { status: "invalidated", branchVersion };
 			}
@@ -5853,6 +5881,32 @@ export class AgentSession {
 		return executionId ? this._executionRunScopes.get(executionId) : undefined;
 	}
 
+	assertSideQuestionAllowed(): void {
+		if (this._activeAgentRunScope()?.modelScope) {
+			throw new Error("Side questions are unavailable while a scoped model run is active");
+		}
+	}
+
+	private async _refinementRequestAuthority(): Promise<RefinementRequestAuthority> {
+		const scoped = this._activeScopedRefinementAuthority();
+		if (scoped) return scoped;
+		if (!this.model) throw new Error(formatNoModelSelectedMessage());
+		const { apiKey, headers } = await this._getRequiredRequestAuth(this.model);
+		return { model: this.model, apiKey, headers, disableEnvApiKey: false };
+	}
+
+	private _activeScopedRefinementAuthority(): RefinementRequestAuthority | undefined {
+		const runScope = this._activeAgentRunScope();
+		if (!runScope?.modelScope || !runScope.selectedModel) return undefined;
+		const access = getAgentRunRequestAccess(runScope.modelScope, runScope.selectedModel);
+		return {
+			model: runScope.selectedModel,
+			apiKey: access.apiKey,
+			headers: access.headers === undefined ? undefined : { ...access.headers },
+			disableEnvApiKey: true,
+		};
+	}
+
 	private _createSessionCommandAction(
 		text: string,
 		command: SessionSlashCommand,
@@ -8305,15 +8359,19 @@ export class AgentSession {
 		}
 	}
 
-	private async _reviewAutoRefine(context: AutoRefineReviewRequest, signal?: AbortSignal): Promise<AutoRefineReview> {
+	private async _reviewAutoRefine(
+		context: AutoRefineReviewRequest,
+		signal?: AbortSignal,
+		requestAuthority?: RefinementRequestAuthority,
+	): Promise<AutoRefineReview> {
 		if (this._autoRefineReviewer) {
 			return this._autoRefineReviewer(context, signal);
 		}
-		const model = this.model;
-		if (!model) {
+		if (!this.model && !this._activeAgentRunScope()?.selectedModel) {
 			return { shouldRefine: false, rationale: "No model selected." };
 		}
-		const { apiKey, headers } = await this._getRequiredRequestAuth(model);
+		const { model, apiKey, headers, disableEnvApiKey } =
+			requestAuthority ?? (await this._refinementRequestAuthority());
 		return reviewAutoRefine(
 			this.agent.state.messages,
 			this._loadMergedHarnessState(),
@@ -8324,6 +8382,7 @@ export class AgentSession {
 			headers,
 			signal,
 			this.thinkingLevel,
+			disableEnvApiKey,
 		);
 	}
 
@@ -8484,17 +8543,14 @@ export class AgentSession {
 		options: { instructions?: string; rollbackId?: string; global?: boolean },
 		signal: AbortSignal,
 		trigger: "manual" | "auto" = "manual",
+		requestAuthority?: RefinementRequestAuthority,
 	): Promise<RefinementPlan> {
 		if (this._disposed) {
 			throw new Error("Cannot refine a disposed session.");
 		}
 
-		if (!this.model) {
-			throw new Error(formatNoModelSelectedMessage());
-		}
-
-		const model = this.model;
-		const { apiKey, headers } = await this._getRequiredRequestAuth(model);
+		const { model, apiKey, headers, disableEnvApiKey } =
+			requestAuthority ?? (await this._refinementRequestAuthority());
 		const globalHarnessStateDir = getGlobalHarnessStateDir();
 		const localHarnessStateDir = this._localHarnessStateDir();
 		const requestedScope = options.global ? "global" : "local";
@@ -8562,6 +8618,7 @@ export class AgentSession {
 			headers,
 			signal,
 			this.thinkingLevel,
+			disableEnvApiKey,
 		);
 		if (this._disposed || signal.aborted) {
 			throw new Error("Refinement cancelled because the session was disposed.");

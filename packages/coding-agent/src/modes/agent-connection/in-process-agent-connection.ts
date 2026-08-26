@@ -386,6 +386,7 @@ export class InProcessAgentConnection implements AgentConnection {
 		if (this.sideQuestionRuns.has(id)) {
 			throw new Error(`Side question already exists: ${id}`);
 		}
+		this.session.assertSideQuestionAllowed();
 		const run = startSideQuestion(
 			this.session.agent,
 			id,

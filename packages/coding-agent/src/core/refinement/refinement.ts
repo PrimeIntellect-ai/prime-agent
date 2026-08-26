@@ -887,6 +887,7 @@ export async function planRefinement(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	disableEnvApiKey = false,
 ): Promise<RefinementPlan> {
 	const id = generateRefinementId();
 	if (options.rollbackId) {
@@ -930,7 +931,7 @@ export async function planRefinement(
 			systemPrompt: REFINEMENT_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 		},
-		{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers },
+		{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers, disableEnvApiKey },
 	);
 
 	if (response.stopReason === "error") {
@@ -970,6 +971,7 @@ export async function reviewAutoRefine(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	disableEnvApiKey = false,
 ): Promise<AutoRefineReview> {
 	const conversationText = serializeConversation(convertToLlm(messages)).slice(-40_000);
 	const userPrompt = [
@@ -996,7 +998,7 @@ ${conversationText}
 			systemPrompt: AUTO_REFINE_REVIEW_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: userPrompt }], timestamp: Date.now() }],
 		},
-		{ maxTokens: autoRefineReviewMaxOutputTokens(model), signal, apiKey, headers },
+		{ maxTokens: autoRefineReviewMaxOutputTokens(model), signal, apiKey, headers, disableEnvApiKey },
 	);
 	if (response.stopReason === "error") {
 		throw new Error(`Auto-refine review failed: ${response.errorMessage || "Unknown error"}`);

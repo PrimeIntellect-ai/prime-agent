@@ -4311,6 +4311,7 @@ export class AgentDaemon {
 				if (this.hasActiveSideQuestionFor(client, state.activeSessionId)) {
 					throw new Error("A side question is already running for this client and session");
 				}
+				state.runtime.session.assertSideQuestionAllowed();
 				const run = startSideQuestion(
 					state.runtime.session.agent,
 					command.sideQuestionId,
