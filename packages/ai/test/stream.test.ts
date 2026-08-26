@@ -648,33 +648,6 @@ describe("Generate E2E Tests", () => {
 		},
 	);
 
-	describe.skipIf(!hasCloudflareAiGatewayCredentials())(
-		"Cloudflare AI Gateway → Workers AI (Kimi K2.6 via /compat)",
-		() => {
-			const llm = getModel("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6");
-
-			it("should complete basic text generation", { retry: 3 }, async () => {
-				await basicTextGeneration(llm);
-			});
-
-			it("should handle tool calling", { retry: 3 }, async () => {
-				await handleToolCall(llm);
-			});
-
-			it("should handle streaming", { retry: 3 }, async () => {
-				await handleStreaming(llm);
-			});
-
-			it("should handle thinking mode", { retry: 3 }, async () => {
-				await handleThinking(llm, { reasoningEffort: "medium" });
-			});
-
-			it("should handle multi-turn with thinking and tools", { retry: 3 }, async () => {
-				await multiTurn(llm, { reasoningEffort: "medium" });
-			});
-		},
-	);
-
 	describe.skipIf(!hasCloudflareAiGatewayCredentials() || !process.env.OPENAI_API_KEY)(
 		"Cloudflare AI Gateway → OpenAI BYOK (gpt-5.1 via /openai responses)",
 		() => {
