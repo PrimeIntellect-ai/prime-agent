@@ -34,6 +34,7 @@ def _win_spawn(procs=None, resume=True):
             stdin=subprocess.DEVNULL,
         )
         proc.resume = mock.Mock(return_value=resume)
+        proc.close = mock.Mock()
         proc.spawn_job = job
         proc.spawn_argv = argv
         if procs is not None:
@@ -697,6 +698,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         term.assert_called_once_with(sentinel)
         close.assert_called_once_with(sentinel)
         self.assertIsNotNone(spawned[0].poll())
+        spawned[0].close.assert_called_once()
         self.assertEqual(journal_calls, [(spawned[0].pid, True), (spawned[0].pid, False)])
 
     async def test_windows_journal_enrollment_failure_kills_suspended_leader(self):
@@ -756,6 +758,111 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                                 bash("sleep 30")
         close.assert_called_once_with(sentinel)
         self.assertEqual(journal_calls, [])
+
+    async def test_windows_watch_taskkill_fallback_runs_before_process_handle_close(self):
+        # PID-reuse guard: every taskkill-by-pid must run before the handle closes.
+        order = []
+        spawned = []
+        handle_box = []
+        ready, closed_done = threading.Event(), threading.Event()
+
+        def spawn(job, argv, cwd, env):
+            proc = _win_spawn(spawned)(job, argv, cwd, env)
+
+            def record_close():
+                order.append(("proc-close", handle_box[0]._reaped))
+                closed_done.set()
+
+            proc.close = mock.Mock(side_effect=record_close)
+            return proc
+
+        def terminate(job):
+            assert ready.wait(timeout=5)  # gate: handle_box is filled first
+            order.append("terminate")
+            return False
+
+        def taskkill(pid):
+            order.append(("taskkill", spawned[0].close.called))
+            return True
+
+        self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
+        with mock.patch.object(bash_module, "_IS_POSIX", False):
+            with mock.patch.object(bash_module._winjob, "spawn_in_job", spawn):
+                with mock.patch.object(bash_module._winjob, "create_job", return_value=777):
+                    with mock.patch.object(bash_module._winjob, "terminate", terminate):
+                        with mock.patch.object(
+                            bash_module._winjob, "close",
+                            side_effect=lambda job: order.append("job-close"),
+                        ):
+                            with mock.patch.object(bash_module, "_taskkill_tree", taskkill):
+                                handle = bash("echo hi")
+                                handle_box.append(handle)
+                                ready.set()
+                                await asyncio.wait_for(handle, timeout=5)
+                                self.assertTrue(await asyncio.to_thread(closed_done.wait, 5))
+        self.assertEqual(
+            order, ["terminate", "job-close", ("taskkill", False), ("proc-close", True)]
+        )
+
+    async def test_windows_kill_blocked_during_watch_reap_never_taskkills_after_close(self):
+        # kill() blocked on the reap lock must become a no-op, never a raw-pid taskkill.
+        spawned = []
+        entered, release = threading.Event(), threading.Event()
+
+        def spawn(job, argv, cwd, env):
+            return _win_spawn(spawned)(job, argv, cwd, env)
+
+        def terminate(job):
+            entered.set()
+            assert release.wait(timeout=10)
+            return True
+
+        self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
+        with mock.patch.object(bash_module, "_IS_POSIX", False):
+            with mock.patch.object(bash_module._winjob, "spawn_in_job", spawn):
+                with mock.patch.object(bash_module._winjob, "create_job", return_value=778):
+                    with mock.patch.object(
+                        bash_module._winjob, "terminate", side_effect=terminate
+                    ) as term:
+                        with mock.patch.object(bash_module._winjob, "close"):
+                            with mock.patch.object(bash_module, "_taskkill_tree") as taskkill:
+                                handle = bash("echo hi")
+                                await asyncio.wait_for(handle, timeout=5)
+                                self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                                fut = asyncio.get_running_loop().run_in_executor(
+                                    None, handle.kill
+                                )
+                                await asyncio.sleep(0.2)
+                                self.assertFalse(fut.done())  # blocked on the reap lock
+                                taskkill.assert_not_called()
+                                release.set()
+                                await asyncio.wait_for(fut, timeout=5)
+                                for _ in range(100):
+                                    if handle._reaped:
+                                        break
+                                    await asyncio.sleep(0.05)
+        taskkill.assert_not_called()
+        term.assert_called_once()
+        spawned[0].close.assert_called_once()
+        self.assertTrue(handle._reaped)
+
+    async def test_kill_live_handles_skips_reaped_windows_handle(self):
+        stale = mock.Mock(_kill_lock=threading.Lock(), _reaped=True, _job=5, _pid=999)
+        with bash_module._live_lock:
+            bash_module._live_handles.add(stale)
+        try:
+            with mock.patch.object(bash_module, "_IS_POSIX", False):
+                with mock.patch.object(bash_module._winjob, "terminate") as term:
+                    with mock.patch.object(bash_module, "_taskkill_tree") as taskkill:
+                        with mock.patch.object(bash_module, "_record_journal") as journal:
+                            bash_module._kill_live_handles()
+        finally:
+            with bash_module._live_lock:
+                bash_module._live_handles.discard(stale)
+        term.assert_not_called()
+        taskkill.assert_not_called()
+        stale._proc.kill.assert_not_called()
+        journal.assert_not_called()
 
     async def test_windows_job_reap_and_kill(self):
         handle = bash("sleep 30")
