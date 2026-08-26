@@ -400,6 +400,23 @@ describe("interactive queued-message editing", () => {
 		expect(harness.editor.getText()).toBe("draft");
 	});
 
+	it("keeps a chained edit when the preceding move loses its selection", async () => {
+		const harness = createHarness({ steering: ["s1", "s2"], followUp: [] });
+		harness.agentConnection.mutateQueuedMessage.mockImplementation(async () => {
+			emitQueueUpdate(harness, { steering: ["s1"], followUp: [] });
+			return "applied";
+		});
+		harness.editor.setText("draft");
+		harness.browseQueueSelection(-1);
+		harness.moveQueueSelection(-1);
+		harness.editor.setText("");
+		await harness.applyQueueSelection("s2 edited", "steering");
+
+		expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenCalledOnce();
+		expect(harness.editor.getText()).toBe("s2 edited");
+		expect(harness.showStatus).toHaveBeenCalledWith("Queue changed; edit kept in the editor");
+	});
+
 	it("uses canonical post-move positions for consecutive moves and an edit", async () => {
 		const queue = ["s1", "s2", "s3"];
 		const harness = createHarness({ steering: queue, followUp: [] });
