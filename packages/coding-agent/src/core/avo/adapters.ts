@@ -213,8 +213,43 @@ export class GeneralAvoAdapter extends BaseAdapter {
 
 	deriveEvaluationState(candidate: AvoCandidate, receipts: readonly AvoEvaluationReceipt[], state: AvoRunState) {
 		const authoritative = super.deriveEvaluationState(candidate, receipts, state);
-		if (authoritative.status !== "inconclusive" || authoritative.canonical) return authoritative;
+		if (authoritative.status === "fail" || authoritative.status === "revise") return authoritative;
 		const policy = state.verificationPolicy;
+		const claims = candidate.claims ?? [];
+		const hasExternalReceipt = receipts.some((receipt) => receipt.authority === "external");
+		if (claims.length > 0 || hasExternalReceipt) {
+			if (claims.length === 0) {
+				return {
+					status: "inconclusive" as const,
+					canonical: false,
+					reasons: ["external verification requires explicit candidate claims"],
+				};
+			}
+			const supportedClaimIds = new Set(
+				receipts.flatMap((receipt) =>
+					receipt.issuedBy === "host" &&
+					receipt.authority === "external" &&
+					receipt.evaluatorId === "external_claim" &&
+					receipt.status === "pass" &&
+					receipt.metrics.semantic_relation === "supports" &&
+					receipt.metrics.candidate_payload_digest === candidate.payloadDigest &&
+					typeof receipt.metrics.claim_id === "string"
+						? [receipt.metrics.claim_id]
+						: [],
+				),
+			);
+			const unsupported = claims.filter((claim) => !supportedClaimIds.has(claim.claimId));
+			if (unsupported.length > 0) {
+				return {
+					status: "inconclusive" as const,
+					canonical: false,
+					reasons: [
+						`candidate claims lack host-verified semantic support: ${unsupported.map((claim) => claim.claimId).join(", ")}`,
+					],
+				};
+			}
+		}
+		if (authoritative.status !== "inconclusive" || authoritative.canonical) return authoritative;
 		if (policy === "required") return authoritative;
 		const opinions = receipts.filter((receipt) => receipt.authority === "model_opinion");
 		if (opinions.some((receipt) => receipt.status === "fail" || receipt.status === "revise")) {

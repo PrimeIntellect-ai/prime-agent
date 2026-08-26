@@ -14,6 +14,7 @@ import {
 	AVO_VERIFICATION_POLICIES,
 	type AvoAdapterStateRef,
 	type AvoCandidate,
+	type AvoCandidateClaim,
 	type AvoCandidateInput,
 	type AvoCycle,
 	type AvoCycleInput,
@@ -32,6 +33,7 @@ import {
 	type AvoStopGate,
 	type AvoSupervisorBinding,
 	type AvoSupervisorReview,
+	type AvoVerificationBaseline,
 	type AvoVerificationPolicy,
 } from "./types.js";
 
@@ -83,6 +85,38 @@ function scalarMetrics(value: unknown, label: string): Record<string, number | s
 		metrics[key] = metric;
 	}
 	return metrics;
+}
+
+function candidateClaims(value: unknown): AvoCandidateClaim[] {
+	if (value === undefined) return [];
+	if (!Array.isArray(value) || value.length > 64)
+		throw new Error("candidate.claims must be an array of at most 64 claims");
+	const claims = value.map((claim, index) => {
+		if (!isRecord(claim)) throw new Error(`candidate.claims[${index}] must be an object`);
+		const claimText = requireString(claim.claim_text, `candidate.claims[${index}].claim_text`);
+		if (claimText.length < 8 || claimText.length > 4_000) {
+			throw new Error(`candidate.claims[${index}].claim_text must contain 8 to 4000 characters`);
+		}
+		return {
+			claimId: requireIdentifier(claim.claim_id, `candidate.claims[${index}].claim_id`),
+			claimText,
+		};
+	});
+	if (new Set(claims.map((claim) => claim.claimId)).size !== claims.length) {
+		throw new Error("candidate.claims claim_id values must be unique");
+	}
+	return claims;
+}
+
+function payloadText(value: unknown): string {
+	if (typeof value === "string") return value;
+	if (Array.isArray(value)) return value.map(payloadText).join("\n");
+	if (isRecord(value)) return Object.values(value).map(payloadText).join("\n");
+	return value === undefined || value === null ? "" : String(value);
+}
+
+function normalizedText(value: string): string {
+	return value.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 function stableJson(value: unknown): string {
@@ -382,6 +416,7 @@ export function parseAvoCandidateInput(value: unknown): AvoCandidateInput {
 		kind: requireIdentifier(value.kind, "candidate.kind"),
 		summary: requireString(value.summary, "candidate.summary"),
 		payload: value.payload,
+		claims: candidateClaims(value.claims),
 		parentCandidateId: optionalString(value.parent_candidate_id, "candidate.parent_candidate_id"),
 	};
 }
@@ -487,6 +522,24 @@ export class AvoStore {
 		return this.statePath;
 	}
 
+	setVerificationBaseline(baseline: AvoVerificationBaseline): AvoRunState {
+		if (this.state.routing.environment !== "coding") {
+			throw new Error("a coding verification baseline can only be recorded for a host-routed coding task");
+		}
+		if (!/^[a-f0-9]{64}$/.test(baseline.contractDigest) || !/^[a-f0-9]{64}$/.test(baseline.workspaceDigest)) {
+			throw new Error("verification baseline digests must be SHA-256 values");
+		}
+		if (this.state.verificationBaseline) {
+			if (this.state.verificationBaseline.contractDigest !== baseline.contractDigest) {
+				throw new Error("the active task verification baseline is immutable");
+			}
+			return this.getState();
+		}
+		this.state.verificationBaseline = structuredClone(baseline);
+		this.save();
+		return this.getState();
+	}
+
 	initialize(objective: string, prompt = objective): AvoRunState {
 		const normalizedObjective = requireString(objective, "objective");
 		if (!this.state.objective) {
@@ -520,6 +573,9 @@ export class AvoStore {
 				checkpoints: structuredClone(this.state.checkpoints),
 				supervision: structuredClone(this.state.supervision),
 				adapterStateRef: this.state.adapterStateRef ? structuredClone(this.state.adapterStateRef) : undefined,
+				verificationBaseline: this.state.verificationBaseline
+					? structuredClone(this.state.verificationBaseline)
+					: undefined,
 				createdAt: this.state.createdAt,
 				updatedAt: this.state.updatedAt,
 				archivedAt: this.now(),
@@ -546,6 +602,7 @@ export class AvoStore {
 		this.state.checkpoints = [];
 		this.state.supervision = [];
 		this.state.adapterStateRef = undefined;
+		this.state.verificationBaseline = undefined;
 		this.state.createdAt = now;
 		this.routePrompt(prompt);
 		this.save();
@@ -642,11 +699,45 @@ export class AvoStore {
 		if (input.workspaceDigest !== undefined && !/^[a-f0-9]{64}$/.test(input.workspaceDigest)) {
 			throw new Error("candidate workspace digest must be a SHA-256 digest");
 		}
+		if ((input.claims?.length ?? 0) > 64) throw new Error("candidate.claims must contain at most 64 claims");
+		const claims = (input.claims ?? []).map((claim, index) => {
+			const claimText = requireString(claim.claimText, `candidate.claims[${index}].claim_text`);
+			if (claimText.length < 8 || claimText.length > 4_000) {
+				throw new Error(`candidate.claims[${index}].claim_text must contain 8 to 4000 characters`);
+			}
+			return {
+				claimId: requireIdentifier(claim.claimId, `candidate.claims[${index}].claim_id`),
+				claimText,
+			};
+		});
+		if (new Set(claims.map((claim) => claim.claimId)).size !== claims.length) {
+			throw new Error("candidate.claims claim_id values must be unique");
+		}
+		const normalizedPayload = normalizedText(payloadText(input.payload));
+		for (const claim of claims) {
+			if (!normalizedPayload.includes(normalizedText(claim.claimText))) {
+				throw new Error(`candidate claim ${claim.claimId} must occur verbatim in candidate.payload`);
+			}
+		}
+		if (
+			this.state.routing.environment === "general" &&
+			this.state.verificationPolicy === "required" &&
+			claims.length
+		) {
+			const uncovered = claims.reduce(
+				(remaining, claim) => remaining.replaceAll(normalizedText(claim.claimText), " "),
+				normalizedPayload,
+			);
+			if (/[\p{L}\p{N}]{2,}/u.test(uncovered)) {
+				throw new Error("a required factual candidate payload cannot contain undeclared claim text");
+			}
+		}
 		const candidate: AvoCandidate = {
 			candidateId: requireIdentifier(candidateId, "candidate_id"),
 			kind: requireIdentifier(input.kind, "candidate.kind"),
 			summary: requireString(input.summary, "candidate.summary"),
-			payloadDigest: digestPayload(input.payload),
+			payloadDigest: digestPayload({ payload: input.payload, claims }),
+			claims: structuredClone(claims),
 			workspaceDigest: input.workspaceDigest,
 			workspaceHead: input.workspaceHead,
 			workspaceMode: input.workspaceMode,

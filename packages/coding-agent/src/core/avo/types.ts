@@ -36,11 +36,31 @@ export interface AvoCandidate {
 	kind: string;
 	summary: string;
 	payloadDigest: string;
+	claims?: AvoCandidateClaim[];
 	workspaceDigest?: string;
 	workspaceHead?: string;
 	workspaceMode?: "git" | "tree";
 	parentCandidateId?: string;
 	createdAt: string;
+}
+
+export interface AvoCandidateClaim {
+	claimId: string;
+	claimText: string;
+}
+
+export interface AvoBaselineTestFile {
+	path: string;
+	sha256: string;
+}
+
+export interface AvoVerificationBaseline {
+	kind: "coding";
+	contractDigest: string;
+	workspaceDigest: string;
+	testFiles: AvoBaselineTestFile[];
+	userAcceptanceCommands: string[];
+	capturedAt: string;
 }
 
 export interface AvoEvaluationReceipt {
@@ -69,6 +89,7 @@ export interface AvoTaskRunArchive {
 	checkpoints: AvoCheckpoint[];
 	supervision: AvoSupervisorReview[];
 	adapterStateRef?: AvoAdapterStateRef;
+	verificationBaseline?: AvoVerificationBaseline;
 	createdAt: string;
 	updatedAt: string;
 	archivedAt: string;
@@ -165,6 +186,7 @@ export interface AvoCandidateInput {
 	kind: string;
 	summary: string;
 	payload: unknown;
+	claims?: AvoCandidateClaim[];
 	workspaceDigest?: string;
 	workspaceHead?: string;
 	workspaceMode?: "git" | "tree";
@@ -228,6 +250,7 @@ export interface AvoRunState {
 	supervisor?: AvoSupervisorBinding;
 	supervision: AvoSupervisorReview[];
 	adapterStateRef?: AvoAdapterStateRef;
+	verificationBaseline?: AvoVerificationBaseline;
 	createdAt: string;
 	updatedAt: string;
 }

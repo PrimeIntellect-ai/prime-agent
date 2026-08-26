@@ -6,8 +6,11 @@ import type { AutoresearchState, AutoresearchStopGate } from "../src/core/autore
 import {
 	AvoSessionRuntime,
 	AvoStore,
+	assessAvoClaimEvidence,
 	assessAvoHostCommand,
+	assessAvoTestTrust,
 	CodingAvoAdapter,
+	captureAvoCodingVerificationBaseline,
 	captureAvoWorkspaceSnapshot,
 	classifyAvoHostEvaluationCommand,
 	deriveAvoEvaluation,
@@ -177,6 +180,7 @@ describe("generic AVO core", () => {
 
 	test("mirrors research reviewers, experiments, and claim promotion idempotently", () => {
 		const runtime = new AvoSessionRuntime(undefined, "run-research-adapter", clock());
+		runtime.configure({ environment: "research", source: "user" });
 		const researchState = {
 			schemaVersion: 1,
 			objective: "Find a publication-grade gap",
@@ -329,14 +333,23 @@ describe("generic AVO core", () => {
 		const runtime = new AvoSessionRuntime(undefined, "run-long-verifier", clock());
 		runtime.configure({ environment: "general", horizon: "long", source: "user" });
 		runtime.store.initialize("Make a verified decision");
-		const candidate = runtime.recordCandidate({ kind: "answer", summary: "Decision", payload: "grounded" });
+		const candidate = runtime.recordCandidate({
+			kind: "answer",
+			summary: "Decision",
+			payload: "The decision is grounded.",
+			claims: [{ claimId: "decision-grounded", claimText: "The decision is grounded." }],
+		});
 		runtime.recordHostEvaluation({
 			candidateId: candidate.candidateId,
-			evaluatorId: "external_check",
+			evaluatorId: "external_claim",
 			status: "pass",
 			authority: "external",
 			evidenceRefs: ["external:verified"],
-			metrics: {},
+			metrics: {
+				claim_id: "decision-grounded",
+				semantic_relation: "supports",
+				candidate_payload_digest: candidate.payloadDigest,
+			},
 		});
 		const result = runtime.completeCycle({ candidateId: candidate.candidateId });
 		const pendingGate = runtime.evaluateStopGate();
@@ -586,6 +599,59 @@ describe("AVO routing and adapters", () => {
 				output: "# tests 2\n# pass 2\n# fail 0\n",
 			}),
 		).toMatchObject({ status: "pass", metrics: { meaningful: true, observed_work_units: 2 } });
+	});
+
+	test("classifies claim evidence independently from source provenance", () => {
+		expect(assessAvoClaimEvidence("Kuala Lumpur is 31 C.", "Kuala Lumpur is 31 C.")).toMatchObject({
+			relation: "supports",
+		});
+		expect(assessAvoClaimEvidence("Company A's revenue increased 40%.", "Kuala Lumpur is 31 C.")).toMatchObject({
+			relation: "insufficient",
+		});
+		expect(
+			assessAvoClaimEvidence(
+				"Company A's revenue increased 40%.",
+				"The following statement is false: Company A's revenue increased 40%.",
+			),
+		).toMatchObject({ relation: "contradicts" });
+		expect(
+			assessAvoClaimEvidence(
+				"Company A's revenue increased 40%.",
+				"There is no evidence that Company A's revenue increased 40%.",
+			),
+		).toMatchObject({ relation: "contradicts" });
+	});
+
+	test("does not let a factual candidate omit unsupported payload claims", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-claim-completeness", clock());
+		runtime.observeRootPrompt("Check the latest Company A revenue and verify it");
+		expect(() =>
+			runtime.recordCandidate({
+				kind: "answer",
+				summary: "Revenue answer",
+				payload: "Company A's revenue increased 40%. Its profit doubled.",
+				claims: [{ claimId: "revenue-growth", claimText: "Company A's revenue increased 40%." }],
+			}),
+		).toThrow(/undeclared claim text/);
+	});
+
+	test("distinguishes trusted pre-task tests from candidate-created self-certification", () => {
+		const dir = artifactDir();
+		writeFileSync(join(dir, "parser.test.cjs"), "baseline\n", "utf8");
+		const baseline = captureAvoCodingVerificationBaseline(dir, "Fix the parser");
+		expect(assessAvoTestTrust(dir, "node --test parser.test.cjs", baseline)).toMatchObject({
+			trusted: true,
+			basis: "baseline_target",
+		});
+		writeFileSync(join(dir, "self-certifying.test.cjs"), "candidate\n", "utf8");
+		expect(assessAvoTestTrust(dir, "node --test self-certifying.test.cjs", baseline)).toMatchObject({
+			trusted: false,
+			basis: "candidate_only",
+		});
+		expect(assessAvoTestTrust(dir, "python -m pytest -k self_certifying", baseline)).toMatchObject({
+			trusted: false,
+			narrowedSelection: true,
+		});
 	});
 
 	test("changes the host workspace digest when a candidate file changes", () => {

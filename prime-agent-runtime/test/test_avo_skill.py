@@ -27,6 +27,8 @@ class AvoSkillTest(unittest.TestCase):
         contract = module.execution_contract()
         self.assertTrue(contract["forbid_runtime_introspection"])
         self.assertIn("callers may issue only model_opinion", contract["canonical_rule"])
+        self.assertIn("every factual claim", contract["factual_claim_rule"])
+        self.assertIn("cannot certify themselves", contract["coding_test_rule"])
         self.assertEqual(contract["horizons"], ["direct", "iterative", "long"])
 
     def test_initialize_uses_the_host_routed_runtime(self) -> None:
@@ -40,7 +42,7 @@ class AvoSkillTest(unittest.TestCase):
             host.await_args_list[0].args[1],
             {"objective": "Fix the parser"},
         )
-        self.assertEqual(result["execution_contract"]["contract_version"], 2)
+        self.assertEqual(result["execution_contract"]["contract_version"], 3)
 
     def test_model_configure_can_only_escalate_horizon(self) -> None:
         module = load_skill("avo_configure_test")
@@ -106,6 +108,7 @@ class AvoSkillTest(unittest.TestCase):
             result = asyncio.run(
                 module.bind_tool_result(
                     "answer-1",
+                    "version-claim",
                     "web-search-1",
                     "The current version is 1.2.3.",
                 )
@@ -117,6 +120,7 @@ class AvoSkillTest(unittest.TestCase):
                 "avo.evaluation.tool_result",
                 {
                     "candidate_id": "answer-1",
+                    "claim_id": "version-claim",
                     "tool_call_id": "web-search-1",
                     "exact_quote": "The current version is 1.2.3.",
                 },

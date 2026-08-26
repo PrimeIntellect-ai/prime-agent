@@ -15,14 +15,17 @@ from rlm import host_request
 
 def execution_contract() -> dict[str, Any]:
     return {
-        "contract_version": 2,
+        "contract_version": 3,
         "forbid_runtime_introspection": True,
         "environments": ["general", "coding", "research"],
         "horizons": ["direct", "iterative", "long"],
         "authorities": ["host", "environment", "external", "model_opinion"],
         "sequence": [
             "add_candidate",
-            "run_evaluation for host-observed executable checks or record model_opinion",
+            (
+                "run_evaluation for host-observed executable checks, bind every factual "
+                "claim to external evidence, or record model_opinion"
+            ),
             "complete_cycle",
             "inspect checkpoint and stop_gate",
         ],
@@ -31,7 +34,7 @@ def execution_contract() -> dict[str, Any]:
             "candidate": "await avo.add_candidate(candidate_dict)",
             "host_evaluation": "await avo.run_evaluation(candidate_id, command)",
             "external_evidence": (
-                "await avo.bind_tool_result(candidate_id, tool_call_id, exact_quote)"
+                "await avo.bind_tool_result(candidate_id, claim_id, tool_call_id, exact_quote)"
             ),
             "opinion": "await avo.record_evaluation(model_opinion_dict)",
             "cycle": "await avo.complete_cycle({'candidate_id': candidate_id})",
@@ -40,6 +43,14 @@ def execution_contract() -> dict[str, Any]:
         "canonical_rule": (
             "callers may issue only model_opinion; authoritative success requires an immutable "
             "receipt created from evidence the host directly observed"
+        ),
+        "factual_claim_rule": (
+            "every factual claim must occur verbatim in the candidate payload and receive a "
+            "host-classified supports receipt from a real external tool result"
+        ),
+        "coding_test_rule": (
+            "candidate-created tests cannot certify themselves without a trusted pre-task "
+            "test suite or exact user acceptance command"
         ),
     }
 
@@ -101,11 +112,13 @@ async def run_evaluation(candidate_id: str, command: str) -> dict[str, Any]:
 
 async def bind_tool_result(
     candidate_id: str,
+    claim_id: str,
     tool_call_id: str,
     exact_quote: str,
 ) -> dict[str, Any]:
     for value, label in (
         (candidate_id, "candidate_id"),
+        (claim_id, "claim_id"),
         (tool_call_id, "tool_call_id"),
         (exact_quote, "exact_quote"),
     ):
@@ -115,6 +128,7 @@ async def bind_tool_result(
         "avo.evaluation.tool_result",
         {
             "candidate_id": candidate_id,
+            "claim_id": claim_id,
             "tool_call_id": tool_call_id,
             "exact_quote": exact_quote,
         },

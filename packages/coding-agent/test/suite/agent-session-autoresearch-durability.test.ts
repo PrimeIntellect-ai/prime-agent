@@ -46,8 +46,8 @@ describe("AgentSession autoresearch durability", () => {
 			fauxAssistantMessage("durable compaction summary"),
 			fauxAssistantMessage("durable turn summary"),
 		]);
-		await harness.session.prompt("first long-run checkpoint");
-		await harness.session.prompt("second long-run checkpoint");
+		await harness.session.prompt("Run autoresearch: first long-run checkpoint");
+		await harness.session.prompt("Continue autoresearch: second long-run checkpoint");
 
 		await harness.session.handleAutoresearchHostRequest("autoresearch.memory.remember", {
 			memory: {

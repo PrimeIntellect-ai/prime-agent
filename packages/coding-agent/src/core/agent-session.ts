@@ -128,11 +128,14 @@ import {
 	AVO_SKILL_NAME,
 	type AvoHorizonSelection,
 	AvoSessionRuntime,
+	assessAvoClaimEvidence,
 	assessAvoHostCommand,
+	assessAvoTestTrust,
 	buildAvoRuntimePrompt,
 	buildAvoSupervisorBootstrapPrompt,
 	buildAvoSupervisorPacket,
 	buildAvoSupervisorPrompt,
+	captureAvoCodingVerificationBaseline,
 	captureAvoWorkspaceSnapshot,
 	classifyAvoHostEvaluationCommand,
 	parseAvoCandidateInput,
@@ -3329,6 +3332,22 @@ export class AgentSession {
 		].join("\n");
 	}
 
+	private _avoWorkspaceExcludedRoots(): string[] {
+		const artifactDir = this.sessionManager.getSessionArtifactDir();
+		return [this.sessionManager.getSessionDir(), ...(artifactDir ? [artifactDir] : [])];
+	}
+
+	private _ensureAvoCodingVerificationBaseline(): void {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		if (state.routing.environment !== "coding" || state.verificationBaseline || !state.objective) return;
+		runtime.store.setVerificationBaseline(
+			captureAvoCodingVerificationBaseline(this.sessionManager.getCwd(), state.objective, {
+				excludedRoots: this._avoWorkspaceExcludedRoots(),
+			}),
+		);
+	}
+
 	private _handleAvoSlashCommand(command: SessionSlashCommand): string {
 		const runtime = this._requireAvoRuntime();
 		let target: "horizon" | "status" = "status";
@@ -3352,6 +3371,9 @@ export class AgentSession {
 
 	private _syncAvoResearchState(): void {
 		if (!this._avoRuntime || !this._autoresearchStore) return;
+		if (this._avoRuntime.getState().routing.environment !== "research") {
+			throw new Error("autoresearch is only available when the host routed the active task to research");
+		}
 		const state = this._autoresearchStore.getState();
 		this._avoRuntime.syncResearchState(
 			state,
@@ -3522,12 +3544,7 @@ export class AgentSession {
 				const candidate = parseAvoCandidateInput(payload.candidate);
 				if (runtime.getState().routing.environment === "coding") {
 					const workspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
-						excludedRoots: [
-							this.sessionManager.getSessionDir(),
-							...(this.sessionManager.getSessionArtifactDir()
-								? [this.sessionManager.getSessionArtifactDir()!]
-								: []),
-						],
+						excludedRoots: this._avoWorkspaceExcludedRoots(),
 					});
 					candidate.workspaceDigest = workspace.digest;
 					candidate.workspaceHead = workspace.head;
@@ -3554,12 +3571,7 @@ export class AgentSession {
 				const candidate = state.candidates.find((item) => item.candidateId === payload.candidate_id);
 				if (!candidate) throw new Error(`evaluation references unknown candidate ${payload.candidate_id}`);
 				const workspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
-					excludedRoots: [
-						this.sessionManager.getSessionDir(),
-						...(this.sessionManager.getSessionArtifactDir()
-							? [this.sessionManager.getSessionArtifactDir()!]
-							: []),
-					],
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
 				});
 				const requiresWorkspaceBinding = state.routing.environment === "coding";
 				if (
@@ -3594,12 +3606,38 @@ export class AgentSession {
 				const startedAt = Date.now();
 				const result = await this.executeBash(payload.command);
 				const durationMs = Date.now() - startedAt;
-				const assessment = assessAvoHostCommand(evaluatorId, {
+				let assessment = assessAvoHostCommand(evaluatorId, {
 					exitCode: result.exitCode,
 					cancelled: result.cancelled,
 					truncated: result.truncated,
 					output: result.output,
 				});
+				if (requiresWorkspaceBinding && evaluatorId === "test" && assessment.status === "pass") {
+					const trust = assessAvoTestTrust(
+						this.sessionManager.getCwd(),
+						payload.command,
+						state.verificationBaseline,
+					);
+					assessment = {
+						status: trust.trusted && trust.taskSpecific ? "pass" : "inconclusive",
+						metrics: {
+							...assessment.metrics,
+							meaningful: trust.trusted && trust.taskSpecific,
+							trusted_test: trust.trusted,
+							task_specific_test: trust.taskSpecific,
+							test_trust_basis: trust.basis,
+							baseline_contract_digest: state.verificationBaseline?.contractDigest ?? "missing",
+							baseline_test_count: trust.baselineTestCount,
+							unchanged_baseline_test_count: trust.unchangedBaselineTestCount,
+							explicit_baseline_targets: trust.explicitBaselineTargets,
+							narrowed_test_selection: trust.narrowedSelection,
+							validation_reason:
+								trust.trusted && trust.taskSpecific
+									? "test execution included a trusted pre-task suite, target, or user acceptance command"
+									: "candidate-created tests cannot independently certify their own coding change",
+						},
+					};
+				}
 				const receiptDigest = createHash("sha256")
 					.update(
 						JSON.stringify({
@@ -3653,6 +3691,9 @@ export class AgentSession {
 				if (typeof payload.candidate_id !== "string") {
 					throw new Error("avo.evaluation.tool_result candidate_id must be a string");
 				}
+				if (typeof payload.claim_id !== "string") {
+					throw new Error("avo.evaluation.tool_result claim_id must be a string");
+				}
 				if (typeof payload.tool_call_id !== "string") {
 					throw new Error("avo.evaluation.tool_result tool_call_id must be a string");
 				}
@@ -3665,6 +3706,8 @@ export class AgentSession {
 				const state = runtime.getState();
 				const candidate = state.candidates.find((item) => item.candidateId === payload.candidate_id);
 				if (!candidate) throw new Error(`evaluation references unknown candidate ${payload.candidate_id}`);
+				const claim = candidate.claims?.find((item) => item.claimId === payload.claim_id);
+				if (!claim) throw new Error(`candidate ${candidate.candidateId} has no claim ${payload.claim_id}`);
 				const { call, callTimestamp, result } = this._resolveAvoExternalToolResult(payload.tool_call_id);
 				if (callTimestamp < Date.parse(state.createdAt)) {
 					throw new Error("AVO external evidence must come from the active task run");
@@ -3687,6 +3730,7 @@ export class AgentSession {
 				if (!normalizeEvidence(evidenceText).includes(normalizeEvidence(payload.exact_quote))) {
 					throw new Error("AVO exact_quote was not found in the host-observed tool result");
 				}
+				const semanticAssessment = assessAvoClaimEvidence(claim.claimText, payload.exact_quote);
 				const argumentDigest = createHash("sha256").update(JSON.stringify(call.arguments)).digest("hex");
 				const resultDigest = createHash("sha256")
 					.update(JSON.stringify({ content: result.content, details: result.details, isError: result.isError }))
@@ -3701,18 +3745,33 @@ export class AgentSession {
 							resultDigest,
 							candidateId: candidate.candidateId,
 							candidatePayloadDigest: candidate.payloadDigest,
+							claimId: claim.claimId,
+							claimText: claim.claimText,
+							semanticRelation: semanticAssessment.relation,
 						}),
 					)
 					.digest("hex");
 				const evaluation = runtime.recordHostEvaluation({
 					candidateId: candidate.candidateId,
-					evaluatorId: "external_tool",
-					status: "pass",
+					evaluatorId: "external_claim",
+					status:
+						semanticAssessment.relation === "supports"
+							? "pass"
+							: semanticAssessment.relation === "contradicts"
+								? "revise"
+								: "inconclusive",
 					authority: "external",
 					evidenceRefs: [`host:tool:${receiptDigest}`, ...sourceIdentifiers.map((source) => `source:${source}`)],
 					metrics: {
+						meaningful: semanticAssessment.relation === "supports",
 						tool_name: call.name,
 						tool_call_id: call.id,
+						claim_id: claim.claimId,
+						claim_text_digest: createHash("sha256").update(claim.claimText).digest("hex"),
+						semantic_relation: semanticAssessment.relation,
+						semantic_reason: semanticAssessment.reason,
+						semantic_verifier: "host_deterministic_claim_evidence_v1",
+						claim_token_coverage: semanticAssessment.claimTokenCoverage,
 						argument_digest: argumentDigest,
 						result_digest: resultDigest,
 						exact_quote_digest: createHash("sha256").update(payload.exact_quote).digest("hex"),
@@ -3731,6 +3790,9 @@ export class AgentSession {
 						result_digest: resultDigest,
 						source_identifiers: sourceIdentifiers,
 						receipt_digest: receiptDigest,
+						claim_id: claim.claimId,
+						semantic_relation: semanticAssessment.relation,
+						semantic_reason: semanticAssessment.reason,
 					},
 				};
 			}
@@ -4356,6 +4418,9 @@ export class AgentSession {
 		type: string,
 		payload: Record<string, unknown> = {},
 	): Promise<Record<string, unknown>> {
+		if (this._requireAvoRuntime().getState().routing.environment !== "research") {
+			throw new Error("autoresearch is only available when the host routed the active task to research");
+		}
 		const store = this._requireAutoresearchStore();
 		switch (type) {
 			case "autoresearch.initialize": {
@@ -6316,6 +6381,7 @@ export class AgentSession {
 				const prefixMessages = visibleQueued ? this._takePendingNextTurnMessages() : undefined;
 				if (!isInternalPrompt && options?.skipPrePromptWork !== true && this._avoRuntime) {
 					this._avoRuntime.observeRootPrompt(normalized.text);
+					this._ensureAvoCodingVerificationBaseline();
 					this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 					this.agent.state.systemPrompt = this._baseSystemPrompt;
 				}

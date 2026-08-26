@@ -29,6 +29,114 @@ export interface AvoHostCommandAssessment {
 	metrics: Record<string, number | string | boolean>;
 }
 
+export interface AvoClaimEvidenceAssessment {
+	relation: "supports" | "contradicts" | "insufficient";
+	reason: string;
+	claimTokenCoverage: number;
+}
+
+const CLAIM_STOP_WORDS = new Set([
+	"a",
+	"an",
+	"and",
+	"are",
+	"as",
+	"at",
+	"be",
+	"by",
+	"for",
+	"from",
+	"in",
+	"is",
+	"of",
+	"on",
+	"or",
+	"that",
+	"the",
+	"this",
+	"to",
+	"was",
+	"were",
+	"with",
+]);
+
+function normalizedClaimText(value: string): string {
+	return value.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function semanticTokens(value: string): Set<string> {
+	return new Set(
+		normalizedClaimText(value)
+			.match(/[\p{L}\p{N}]+/gu)
+			?.filter((token) => token.length > 1 && !CLAIM_STOP_WORDS.has(token)) ?? [],
+	);
+}
+
+function hasNegation(value: string): boolean {
+	return /(?:^|\s)(?:false|incorrect|never|no|not|untrue|without)(?:\s|[.:,;!?]|$)/i.test(value);
+}
+
+export function assessAvoClaimEvidence(claimText: string, exactQuote: string): AvoClaimEvidenceAssessment {
+	const claim = normalizedClaimText(claimText);
+	const quote = normalizedClaimText(exactQuote);
+	const claimTokens = semanticTokens(claim);
+	const quoteTokens = semanticTokens(quote);
+	const shared = [...claimTokens].filter((token) => quoteTokens.has(token)).length;
+	const coverage = claimTokens.size === 0 ? 0 : shared / claimTokens.size;
+	if (claim === quote) {
+		return {
+			relation: "supports",
+			reason: "the host-observed quote exactly matches the candidate claim",
+			claimTokenCoverage: 1,
+		};
+	}
+	if (quote.includes(claim)) {
+		const index = quote.indexOf(claim);
+		const prefix = quote.slice(Math.max(0, index - 96), index);
+		const suffix = quote.slice(index + claim.length, Math.min(quote.length, index + claim.length + 96));
+		if (
+			/(?:false|incorrect|not true|no evidence|unverified|disputed|denied)(?:\s+(?:that|for|to support))?(?:\s|:|,|-)*$/i.test(
+				prefix,
+			) ||
+			/^(?:\s|:|,|-)*(?:is|was|were|has been)?\s*(?:false|incorrect|untrue|unsupported|disproved|retracted|disputed|denied)(?:\s|[.:,;!?]|$)/i.test(
+				suffix,
+			)
+		) {
+			return {
+				relation: "contradicts",
+				reason: "the quote frames the embedded claim as false, denied, disputed, or unsupported",
+				claimTokenCoverage: coverage,
+			};
+		}
+		return {
+			relation: "supports",
+			reason: "the candidate claim occurs directly in the host-observed quote",
+			claimTokenCoverage: coverage,
+		};
+	}
+	const claimNumbers = claim.match(/\d+(?:[.,]\d+)?%?/g) ?? [];
+	const quoteNumbers = quote.match(/\d+(?:[.,]\d+)?%?/g) ?? [];
+	if (coverage >= 0.6 && claimNumbers.join("|") !== quoteNumbers.join("|")) {
+		return {
+			relation: "contradicts",
+			reason: "the quote overlaps the claim but gives different numeric evidence",
+			claimTokenCoverage: coverage,
+		};
+	}
+	if (coverage >= 0.6 && hasNegation(claim) !== hasNegation(quote)) {
+		return {
+			relation: "contradicts",
+			reason: "the quote and claim have conflicting negation polarity",
+			claimTokenCoverage: coverage,
+		};
+	}
+	return {
+		relation: "insufficient",
+		reason: "the quote does not directly contain the candidate claim",
+		claimTokenCoverage: coverage,
+	};
+}
+
 export function classifyAvoHostEvaluationCommand(command: string): AvoHostCommandEvaluator {
 	const normalized = command.trim().replace(/[ \t]+/g, " ");
 	if (!normalized || normalized.length > 20_000)

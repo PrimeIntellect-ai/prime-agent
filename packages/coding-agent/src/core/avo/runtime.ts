@@ -97,7 +97,9 @@ export class AvoSessionRuntime {
 		autoresearchStatePath?: string,
 	): ResearchAdapterState {
 		const current = this.store.getState();
-		if (current.environmentSelection !== "research") this.store.setEnvironment("research", "model");
+		if (current.routing.environment !== "research") {
+			throw new Error("autoresearch is only available when the host routed the active task to research");
+		}
 		if (this.store.getState().horizonSelection !== "long") this.store.setHorizon("long", "model");
 		if (!this.store.getState().objective && autoresearchState.objective) {
 			this.store.initialize(autoresearchState.objective, autoresearchState.objective);
@@ -251,7 +253,7 @@ export function buildAvoRuntimePrompt(state: AvoRunState): string {
 			: undefined,
 		"General, coding, and research are internal tool/evaluation adapters, not separate modes. Do not ask the user to choose one. Direct, iterative, and long only control how much AVO machinery is activated: direct uses one evaluated action without a retained supervisor; iterative retains candidate lineage and revises after feedback; long also activates namespaced memory, recovery, and retained trajectory supervision.",
 		"Environment routing is host-authoritative. Model calls cannot select general, coding, or research and may only escalate the current horizon to iterative or long.",
-		"Use the avo skill for the task's candidate/evaluation lifecycle. Callers may record only model_opinion. For executable evidence, use avo.run_evaluation so the host runs the check and issues the receipt from the observed result. Never invent host, environment, or external authority. Required verification needs host-issued evidence; best_effort and not_applicable policies may use a transparent model-opinion review without pretending it is external. Finish only when the AVO stop gate passes. A later root task starts a fresh task run after the current gate passes, while namespaced memory survives across runs.",
+		"Use the avo skill for the task's candidate/evaluation lifecycle. Callers may record only model_opinion. Factual candidates must declare verbatim claims and bind each claim to a real tool result; provenance without host-classified semantic support cannot pass. For executable evidence, use avo.run_evaluation so the host runs the check and issues the receipt from the observed result. Candidate-created coding tests cannot certify themselves without a trusted pre-task suite/target or exact user acceptance command. Never invent host, environment, or external authority. Required verification needs host-issued evidence; best_effort and not_applicable policies may use a transparent model-opinion review without pretending it is external. Finish only when the AVO stop gate passes. A later root task starts a fresh task run after the current gate passes, while namespaced memory survives across runs.",
 	]
 		.filter((line): line is string => line !== undefined)
 		.join("\n\n");

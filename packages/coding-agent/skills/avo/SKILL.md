@@ -27,16 +27,23 @@ Never pass or request an environment override.
 
 1. Record a candidate with `add_candidate`. A candidate may be an answer,
    action, artifact, patch, implementation, plan, or hypothesis. The host
-   stores a digest rather than trusting a model-supplied hash.
+   stores a digest rather than trusting a model-supplied hash. Factual answers
+   must declare each verifiable statement in `claims` as
+   `{"claim_id": "...", "claim_text": "verbatim text from payload"}`.
 2. For an executable check, call `run_evaluation(candidate_id, command)`. The
    host runs one recognized direct test/build/lint/benchmark/runtime/filesystem/
    git command and creates the immutable environment receipt from its actual
-   exit status and output. Shell composition is rejected.
+   exit status and output. Shell composition is rejected. A coding test created
+   during the task cannot certify itself alone: the command must also execute a
+   trusted pre-task test target/suite or an exact user-specified acceptance test.
 3. For a real web/API/connector result, call
-   `bind_tool_result(candidate_id, tool_call_id, exact_quote)`. The host resolves
-   the completed external tool call from the current task transcript, verifies
-   that the exact quote occurs in its non-error result, and binds argument,
-   result, source, timestamp, and candidate digests into an external receipt.
+   `bind_tool_result(candidate_id, claim_id, tool_call_id, exact_quote)`. The host
+   resolves the completed external tool call from the current task transcript,
+   verifies that the exact quote occurs in its non-error result, independently
+   classifies it as `supports`, `contradicts`, or `insufficient` for that exact
+   candidate claim, and binds argument, result, source, timestamp, claim, and
+   candidate digests into an external receipt. Every declared claim must have a
+   `supports` receipt before a factual candidate is canonical.
 4. Use `record_evaluation` only for subjective self/reviewer judgment. It only
    accepts `authority="model_opinion"`; callers cannot mint host, environment,
    or external authority.
