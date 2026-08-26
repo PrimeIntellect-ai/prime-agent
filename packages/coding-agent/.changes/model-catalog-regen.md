@@ -1,1 +1,0 @@
-- Changed the Cloudflare AI Gateway default model to claude-sonnet-4.5 after the catalog dropped the gateway's workers-ai mirror ids.
