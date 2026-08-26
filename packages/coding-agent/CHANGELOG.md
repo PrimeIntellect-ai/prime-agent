@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed the REPL snapshot writer leaving a new payload beside a truncated manifest on mid-write failures: payload and manifest now commit via unique same-directory temp files and atomic renames with guaranteed cleanup, and an interrupt during cleanup can no longer misreport a completed destructive snapshot as failed.
 - Fixed a cell that rebound or ignored SIGINT (or a restored prior handler) permanently breaking protocol interrupts: the REPL runtime now re-asserts its SIGINT handler between cells.
 - Fixed the Python REPL runtime surviving its owning process's death while a non-yielding cell runs: an owner-watchdog thread now hard-exits the runtime (killing live bash children first) when the owner process dies.
 - Fixed an interrupt parked during a snapshot's prune window misreporting the completed destructive snapshot as failed; it is now consumed once the manifest is committed, and an interrupt landing just after a completed snapshot/restore request is consumed too instead of failing its done.

@@ -571,6 +571,9 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(sorted(done["saved"]), ["bump", "socket", "x"])
             self.assertEqual([s["name"] for s in done["skipped"]], ["sock"])
             self.assertNotIn("asyncio", done["saved"])
+            self.assertEqual(
+                sorted(os.listdir(tmp)), ["kernel-state.dill", "kernel-state.json"]
+            )  # no temp files survive a successful commit
             with open(manifest_path) as fh:
                 manifest = json.load(fh)
             self.assertEqual(manifest["version"], 1)
@@ -1101,17 +1104,19 @@ class SnapshotPruneShieldTest(unittest.TestCase):
         self.addCleanup(sys.path.remove, SRC)
         from rlm.repl import _snapshot_state
 
-        real_dump = json.dump
-
-        def dump_then_sigint(obj, fh, **kwargs):
-            real_dump(obj, fh, **kwargs)
-            # Synchronous SIGINT right after the manifest commit, before any deletion.
-            signal.raise_signal(signal.SIGINT)
+        real_replace = os.replace
 
         ns = {"big1": b"x" * 100_000, "big2": b"y" * 100_000}
         with tempfile.TemporaryDirectory() as tmp:
             manifest_path = os.path.join(tmp, "kernel-state.json")
-            with mock.patch("json.dump", dump_then_sigint):
+
+            def replace_then_sigint(src, dst):
+                real_replace(src, dst)
+                # Synchronous SIGINT right after the manifest commit, before any deletion.
+                if dst == manifest_path:
+                    signal.raise_signal(signal.SIGINT)
+
+            with mock.patch("os.replace", replace_then_sigint):
                 result = _snapshot_state(
                     ns,
                     os.path.join(tmp, "kernel-state.dill"),
@@ -1161,8 +1166,7 @@ class SnapshotTempCleanupTest(unittest.TestCase):
                         max_variable_bytes=1 << 20,
                         prune_oversized=False,
                     )
-            self.assertFalse(os.path.exists(path + ".tmp"))
-            self.assertFalse(os.path.exists(path))
+            self.assertEqual(os.listdir(tmp), [])  # no temp (or final) files survive
 
     def test_name_deleted_by_background_thread_mid_snapshot_is_skipped(self):
         sys.path.insert(0, SRC)
@@ -1188,6 +1192,212 @@ class SnapshotTempCleanupTest(unittest.TestCase):
         self.assertNotIn("error", result)
         self.assertEqual(result["saved"], ["kept"])
         self.assertEqual(result["skipped"], [{"name": "gone", "reason": "deleted during snapshot"}])
+
+
+
+class SnapshotPairConsistencyTest(unittest.TestCase):
+    # Direct fault injection into _snapshot_state: portable and deterministic
+    # (chmod-based injection breaks as root and has different Windows semantics).
+    def setUp(self):
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+        from rlm.repl import _snapshot_state
+
+        self.snapshot = _snapshot_state
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        self.path = os.path.join(self.dir, "kernel-state.dill")
+        self.manifest_path = os.path.join(self.dir, "kernel-state.json")
+
+    def _snap(self, ns, path=None, manifest_path=None, **kw):
+        args = dict(max_bytes=1 << 20, max_variable_bytes=1 << 20, prune_oversized=False)
+        args.update(kw)
+        return self.snapshot(ns, path or self.path, manifest_path or self.manifest_path, **args)
+
+    def _old_pair(self, path=None, manifest_path=None):
+        self.assertNotIn("error", self._snap({"keep": 1}, path, manifest_path))
+        with open(path or self.path, "rb") as fh:
+            payload = fh.read()
+        with open(manifest_path or self.manifest_path, "rb") as fh:
+            manifest = fh.read()
+        return payload, manifest
+
+    def _assert_pair(self, old_payload, old_manifest, path=None, manifest_path=None):
+        with open(path or self.path, "rb") as fh:
+            self.assertEqual(fh.read(), old_payload)
+        with open(manifest_path or self.manifest_path, "rb") as fh:
+            self.assertEqual(fh.read(), old_manifest)
+
+    def _assert_only_pair_files(self, directory=None):
+        self.assertEqual(
+            sorted(os.listdir(directory or self.dir)),
+            ["kernel-state.dill", "kernel-state.json"],
+        )
+
+    def test_manifest_write_failure_preserves_prior_pair(self):
+        old_payload, old_manifest = self._old_pair()
+        ns = {"keep": 1, "big": b"x" * 100_000}
+        with mock.patch("json.dump", side_effect=OSError("disk full")):
+            result = self._snap(ns, max_variable_bytes=1024, prune_oversized=True)
+        self.assertTrue(result["error"].startswith("manifest write failed"))
+        self._assert_pair(old_payload, old_manifest)
+        self._assert_only_pair_files()
+        self.assertIn("big", ns)  # not pruned
+
+    def test_payload_replace_failure_preserves_prior_pair(self):
+        old_payload, old_manifest = self._old_pair()
+        real_replace = os.replace
+
+        def failing_replace(src, dst):
+            if dst == self.path:
+                raise OSError("rename failed")
+            return real_replace(src, dst)
+
+        with mock.patch("os.replace", failing_replace):
+            result = self._snap({"keep": 2})
+        self.assertTrue(result["error"].startswith("write failed"))
+        self._assert_pair(old_payload, old_manifest)
+        self._assert_only_pair_files()
+
+    def test_getsize_failure_returns_error_dict_and_cleans_temp(self):
+        old_payload, old_manifest = self._old_pair()
+        with mock.patch("os.path.getsize", side_effect=OSError("stat failed")):
+            result = self._snap({"keep": 2})
+        self.assertTrue(result["error"].startswith("write failed"))
+        self._assert_pair(old_payload, old_manifest)
+        self._assert_only_pair_files()
+
+    def test_keyboard_interrupt_between_stages_cleans_temps(self):
+        old_payload, old_manifest = self._old_pair()
+        with mock.patch("json.dump", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self._snap({"keep": 2})
+        self._assert_pair(old_payload, old_manifest)
+        self._assert_only_pair_files()
+
+    def test_sigint_after_payload_replace_is_parked_and_consumed(self):
+        # SIGINT is parked from before the payload replace through the deletions.
+        real_replace = os.replace
+        ns = {"keep": 1, "big": b"x" * 100_000}
+
+        def replace_then_sigint(src, dst):
+            real_replace(src, dst)
+            if dst == self.path:
+                signal.raise_signal(signal.SIGINT)
+
+        with mock.patch("os.replace", replace_then_sigint):
+            result = self._snap(ns, max_variable_bytes=1024, prune_oversized=True)
+        self.assertNotIn("error", result)
+        self.assertEqual(result["pruned"], ["big"])
+        self.assertNotIn("big", ns)  # the prune still ran; the SIGINT was consumed
+        self._assert_only_pair_files()
+        with open(self.manifest_path) as fh:
+            self.assertEqual(json.load(fh)["pruned"], ["big"])
+
+    def test_signal_install_failure_propagates_and_cleans_temps(self):
+        # A SIGINT-handler install failure (e.g. off-main-thread) must not leak temps.
+        old_payload, old_manifest = self._old_pair()
+        with mock.patch("signal.signal", side_effect=ValueError("main thread only")):
+            with self.assertRaises(ValueError):
+                self._snap({"keep": 2})
+        self._assert_pair(old_payload, old_manifest)
+        self._assert_only_pair_files()
+
+    def test_fdopen_failure_closes_raw_fd_and_removes_temp(self):
+        old_payload, old_manifest = self._old_pair()
+        real_mkstemp = tempfile.mkstemp
+        seen = {}
+
+        def spy_mkstemp(**kwargs):
+            seen["fd"], seen["name"] = real_mkstemp(**kwargs)
+            return seen["fd"], seen["name"]
+
+        with mock.patch("tempfile.mkstemp", spy_mkstemp):
+            with mock.patch("os.fdopen", side_effect=OSError("bad fd")):
+                result = self._snap({"keep": 2})
+        self.assertTrue(result["error"].startswith("write failed"))
+        with self.assertRaises(OSError):
+            os.fstat(seen["fd"])  # the raw mkstemp fd was closed
+        self.assertFalse(os.path.exists(seen["name"]))
+        self._assert_pair(old_payload, old_manifest)
+        self._assert_only_pair_files()
+
+    def test_manifest_replace_failure_leaves_new_payload_old_manifest(self):
+        # The documented unavoidable failure state between the two renames.
+        old_payload, old_manifest = self._old_pair()
+        ns = {"keep": 2, "big": b"x" * 100_000}
+        real_replace = os.replace
+
+        def failing_manifest_replace(src, dst):
+            if dst == self.manifest_path:
+                raise OSError("rename failed")
+            return real_replace(src, dst)
+
+        with mock.patch("os.replace", failing_manifest_replace):
+            result = self._snap(ns, max_variable_bytes=1024, prune_oversized=True)
+        self.assertTrue(result["error"].startswith("manifest write failed"))
+        with open(self.path, "rb") as fh:
+            self.assertNotEqual(fh.read(), old_payload)  # new payload committed
+        with open(self.manifest_path, "rb") as fh:
+            self.assertEqual(fh.read(), old_manifest)  # old manifest intact
+        self._assert_only_pair_files()
+        self.assertIn("big", ns)  # not pruned
+
+    def test_sigint_during_final_temp_cleanup_is_parked_and_consumed(self):
+        # The handler must stay parked through discard_temps and restore last.
+        original = signal.getsignal(signal.SIGINT)
+        real_remove = os.remove
+        fired = []
+        ns = {"keep": 1, "big": b"x" * 100_000}
+
+        def remove_then_sigint(name):
+            if not fired:
+                fired.append(name)
+                signal.raise_signal(signal.SIGINT)
+            return real_remove(name)
+
+        with mock.patch("os.remove", remove_then_sigint):
+            result = self._snap(ns, max_variable_bytes=1024, prune_oversized=True)
+        self.assertNotIn("error", result)  # no KeyboardInterrupt escaped
+        self.assertEqual(result["pruned"], ["big"])
+        self.assertNotIn("big", ns)  # pruning completed
+        self.assertTrue(fired)  # the SIGINT really fired during cleanup
+        self.assertIs(signal.getsignal(signal.SIGINT), original)  # handler restored
+        self._assert_only_pair_files()
+
+    def test_cleanup_failure_still_restores_sigint_handler(self):
+        # A non-OSError from cleanup (e.g. an audit hook) must not skip the restore.
+        original = signal.getsignal(signal.SIGINT)
+        with mock.patch("os.remove", side_effect=RuntimeError("audit hook")):
+            with self.assertRaisesRegex(RuntimeError, "audit hook"):
+                self._snap({"keep": 1})
+        self.assertIs(signal.getsignal(signal.SIGINT), original)
+
+    def test_aliased_temp_style_names_never_clobber_the_pair(self):
+        # Regression: fixed path+'.tmp' temp names aliased the OTHER final path.
+        layouts = (
+            ("kernel-state.dill", "kernel-state.dill.tmp"),  # manifest == payload + '.tmp'
+            ("kernel-state.json.tmp", "kernel-state.json"),  # payload == manifest + '.tmp'
+        )
+        for payload_name, manifest_name in layouts:
+            with self.subTest(payload=payload_name, manifest=manifest_name):
+                d = tempfile.mkdtemp(dir=self.dir)
+                path = os.path.join(d, payload_name)
+                manifest_path = os.path.join(d, manifest_name)
+                old_payload, old_manifest = self._old_pair(path, manifest_path)
+                with mock.patch("json.dump", side_effect=OSError("disk full")):
+                    result = self._snap({"keep": 2}, path, manifest_path)
+                self.assertTrue(result["error"].startswith("manifest write failed"))
+                self._assert_pair(old_payload, old_manifest, path, manifest_path)
+                self.assertEqual(sorted(os.listdir(d)), sorted([payload_name, manifest_name]))
+                # A plain success with aliased names must clobber neither file.
+                self.assertNotIn("error", self._snap({"keep": 2}, path, manifest_path))
+                with open(path, "rb") as fh:
+                    self.assertNotEqual(fh.read(), old_payload)  # new payload committed
+                with open(manifest_path) as fh:
+                    self.assertEqual(json.load(fh)["savedNames"], ["keep"])
+                self.assertEqual(sorted(os.listdir(d)), sorted([payload_name, manifest_name]))
 
 
 class OwnerWatchdogTest(unittest.TestCase):
