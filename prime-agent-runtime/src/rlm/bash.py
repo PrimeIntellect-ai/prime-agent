@@ -152,9 +152,9 @@ class BashHandle:
             script = _status_script(_with_prefix(command))
             spawn_kwargs: dict[str, Any] = {"start_new_session": True, "stdin": status_write}
         else:
-            # Windows: no status/gate channel; the child starts CREATE_SUSPENDED
-            # and is resumed only after job assignment and journal enrollment
-            # (no escape window).
+            # Windows: no status/gate channel; the child starts CREATE_SUSPENDED and
+            # is journaled, job-contained, then resumed. A kernel kill before the
+            # journal write leaks at most one suspended, never-run leader.
             script = _with_prefix(command)
             spawn_kwargs = {"stdin": subprocess.DEVNULL, "creationflags": _CREATE_SUSPENDED}
         try:
@@ -176,22 +176,6 @@ class BashHandle:
                 os.close(status_write)
         self._pid: int = self._proc.pid
         self._job: int | None = None
-        if not _IS_POSIX:
-            # Suspended start: the main thread has not run, so no child can
-            # spawn before the job assignment. Containment is mandatory;
-            # failure aborts the never-run leader.
-            self._job = _winjob.create_job()
-            proc_handle = getattr(self._proc, "_handle", None)
-            if self._job is None or proc_handle is None or not _winjob.assign(
-                self._job, int(proc_handle)
-            ):
-                if self._job is not None:
-                    # Not in the job when assign failed: close it so
-                    # _abort_spawn falls through to proc.kill() on the leader.
-                    _winjob.close(self._job)
-                    self._job = None
-                self._abort_spawn()
-                raise RuntimeError("bash(): Windows job containment could not be established")
         self._released = False
         with _live_lock:
             _live_handles.add(self)
@@ -213,9 +197,22 @@ class BashHandle:
             except OSError:
                 pass
         else:
-            # Journal first, then resume: like the POSIX gate above, the child
-            # never runs before its pid is journaled. A failed resume would
-            # strand a permanently suspended child, so it fails closed too.
+            # Journal first, then contain, then resume: the suspended main thread has
+            # never run, so nothing executes or spawns before the pid is journaled
+            # and inside the job. Containment is mandatory; failure aborts the leader.
+            self._job = _winjob.create_job()
+            proc_handle = getattr(self._proc, "_handle", None)
+            if self._job is None or proc_handle is None or not _winjob.assign(
+                self._job, int(proc_handle)
+            ):
+                if self._job is not None:
+                    # Not in the job when assign failed: close it so
+                    # _abort_spawn falls through to proc.kill() on the leader.
+                    _winjob.close(self._job)
+                    self._job = None
+                self._abort_spawn()
+                raise RuntimeError("bash(): Windows job containment could not be established")
+            # A failed resume would strand a permanently suspended child: fail closed.
             if not _winjob.resume_process(self._pid):
                 self._abort_spawn()
                 raise RuntimeError("bash(): Windows job containment could not be established")
@@ -555,9 +552,11 @@ class BashHandle:
                 job, self._job = self._job, None
                 _winjob.close(job)
             if not delivered:
-                # Pre-resume abort: the never-run leader has no descendants.
+                # Pre-resume abort: the never-run leader has no descendants, so a
+                # delivered kill retires the journal record.
                 try:
                     self._proc.kill()
+                    delivered = True
                 except OSError:
                     pass
         if self._proc.stdout is not None:
