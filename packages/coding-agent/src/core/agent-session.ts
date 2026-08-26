@@ -24,6 +24,8 @@ import type {
 	Model,
 	ServiceTier,
 	TextContent,
+	ToolCall,
+	ToolResultMessage,
 	Usage,
 	UserMessage,
 } from "@earendil-works/pi-ai";
@@ -122,16 +124,16 @@ import {
 	parseAutoresearchSupervisionInput,
 } from "./autoresearch.js";
 import {
-	AVO_ENVIRONMENTS,
 	AVO_HORIZONS,
 	AVO_SKILL_NAME,
-	type AvoEnvironmentSelection,
 	type AvoHorizonSelection,
 	AvoSessionRuntime,
+	assessAvoHostCommand,
 	buildAvoRuntimePrompt,
 	buildAvoSupervisorBootstrapPrompt,
 	buildAvoSupervisorPacket,
 	buildAvoSupervisorPrompt,
+	captureAvoWorkspaceSnapshot,
 	classifyAvoHostEvaluationCommand,
 	parseAvoCandidateInput,
 	parseAvoCycleInput,
@@ -3278,6 +3280,41 @@ export class AgentSession {
 		return this._avoRuntime;
 	}
 
+	private _resolveAvoExternalToolResult(toolCallId: string): {
+		call: ToolCall;
+		callTimestamp: number;
+		result: ToolResultMessage;
+	} {
+		let call: ToolCall | undefined;
+		let callTimestamp = 0;
+		let result: ToolResultMessage | undefined;
+		for (const message of this.messages) {
+			if (message.role === "assistant") {
+				const matched = message.content.find(
+					(item): item is ToolCall => item.type === "toolCall" && item.id === toolCallId,
+				);
+				if (matched) {
+					call = matched;
+					callTimestamp = message.timestamp;
+				}
+			} else if (message.role === "toolResult" && message.toolCallId === toolCallId) {
+				result = message;
+			}
+		}
+		if (!call || !result) throw new Error(`AVO could not resolve completed tool call ${toolCallId}`);
+		if (result.toolName !== call.name) throw new Error("AVO tool call and result names do not match");
+		if (result.isError) throw new Error("AVO cannot bind an errored tool result as external evidence");
+		if (
+			!/^mcp__/i.test(call.name) &&
+			!/(?:^|[_:.-])(?:web|websearch|search|browser|fetch|http|api|google|vertex|connector|weather|finance|sports)(?:$|[_:.-])/i.test(
+				call.name,
+			)
+		) {
+			throw new Error(`tool ${call.name} is not an eligible external web/API/connector tool`);
+		}
+		return { call, callTimestamp, result };
+	}
+
 	private _formatAvoStatus(): string {
 		const state = this._requireAvoRuntime().getState();
 		const gate = this._requireAvoRuntime().evaluateStopGate();
@@ -3457,10 +3494,8 @@ export class AgentSession {
 		switch (type) {
 			case "avo.initialize": {
 				if (typeof payload.objective !== "string") throw new Error("avo.initialize objective must be a string");
-				const state = runtime.store.initialize(
-					payload.objective,
-					typeof payload.prompt === "string" ? payload.prompt : payload.objective,
-				);
+				const current = runtime.getState();
+				const state = current.objective ? current : runtime.store.initialize(payload.objective, payload.objective);
 				return { state };
 			}
 			case "avo.get":
@@ -3468,32 +3503,38 @@ export class AgentSession {
 			case "avo.configure": {
 				const environment = payload.environment;
 				const horizon = payload.horizon;
-				if (
-					environment !== undefined &&
-					environment !== "auto" &&
-					!AVO_ENVIRONMENTS.includes(environment as (typeof AVO_ENVIRONMENTS)[number])
-				) {
-					throw new Error("AVO environment must be auto, general, coding, or research");
+				if (environment !== undefined)
+					throw new Error("AVO environment is host-routed and cannot be model-configured");
+				if (horizon !== "iterative" && horizon !== "long") {
+					throw new Error("model-facing AVO configure may only escalate horizon to iterative or long");
 				}
-				if (
-					horizon !== undefined &&
-					horizon !== "auto" &&
-					!AVO_HORIZONS.includes(horizon as (typeof AVO_HORIZONS)[number])
-				) {
-					throw new Error("AVO horizon must be auto, direct, iterative, or long");
-				}
-				if (environment === undefined && horizon === undefined)
-					throw new Error("avo.configure requires environment or horizon");
+				const current = runtime.getState().routing.horizon;
+				const rank = { direct: 0, iterative: 1, long: 2 } as const;
+				if (rank[horizon] < rank[current]) throw new Error("model-facing AVO configure cannot lower the horizon");
 				return {
 					state: runtime.configure({
-						environment: environment as AvoEnvironmentSelection | undefined,
 						horizon: horizon as AvoHorizonSelection | undefined,
 						source: "model",
 					}),
 				};
 			}
-			case "avo.candidate.add":
-				return { candidate: runtime.recordCandidate(parseAvoCandidateInput(payload.candidate)) };
+			case "avo.candidate.add": {
+				const candidate = parseAvoCandidateInput(payload.candidate);
+				if (runtime.getState().routing.environment === "coding") {
+					const workspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+						excludedRoots: [
+							this.sessionManager.getSessionDir(),
+							...(this.sessionManager.getSessionArtifactDir()
+								? [this.sessionManager.getSessionArtifactDir()!]
+								: []),
+						],
+					});
+					candidate.workspaceDigest = workspace.digest;
+					candidate.workspaceHead = workspace.head;
+					candidate.workspaceMode = workspace.mode;
+				}
+				return { candidate: runtime.recordCandidate(candidate) };
+			}
 			case "avo.evaluation.record": {
 				const evaluation = parseAvoEvaluationInput(payload.evaluation);
 				if (evaluation.authority !== "model_opinion") {
@@ -3509,9 +3550,56 @@ export class AgentSession {
 				}
 				if (typeof payload.command !== "string") throw new Error("avo.evaluation.run command must be a string");
 				const evaluatorId = classifyAvoHostEvaluationCommand(payload.command);
+				const state = runtime.getState();
+				const candidate = state.candidates.find((item) => item.candidateId === payload.candidate_id);
+				if (!candidate) throw new Error(`evaluation references unknown candidate ${payload.candidate_id}`);
+				const workspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+					excludedRoots: [
+						this.sessionManager.getSessionDir(),
+						...(this.sessionManager.getSessionArtifactDir()
+							? [this.sessionManager.getSessionArtifactDir()!]
+							: []),
+					],
+				});
+				const requiresWorkspaceBinding = state.routing.environment === "coding";
+				if (
+					requiresWorkspaceBinding &&
+					(!candidate.workspaceDigest || workspace.digest !== candidate.workspaceDigest)
+				) {
+					const evaluation = runtime.recordHostEvaluation({
+						candidateId: candidate.candidateId,
+						evaluatorId: "workspace_binding",
+						status: "revise",
+						authority: "host",
+						evidenceRefs: [`host:workspace:${workspace.digest}`],
+						metrics: {
+							meaningful: false,
+							workspace_matches_candidate: false,
+							candidate_workspace_digest: candidate.workspaceDigest ?? "missing",
+							observed_workspace_digest: workspace.digest,
+							candidate_payload_digest: candidate.payloadDigest,
+							validation_reason: "workspace changed after candidate creation; record a new candidate",
+						},
+					});
+					return {
+						evaluation,
+						execution: {
+							command: payload.command,
+							skipped: true,
+							reason: "workspace changed after candidate creation",
+							workspace_digest: workspace.digest,
+						},
+					};
+				}
 				const startedAt = Date.now();
 				const result = await this.executeBash(payload.command);
 				const durationMs = Date.now() - startedAt;
+				const assessment = assessAvoHostCommand(evaluatorId, {
+					exitCode: result.exitCode,
+					cancelled: result.cancelled,
+					truncated: result.truncated,
+					output: result.output,
+				});
 				const receiptDigest = createHash("sha256")
 					.update(
 						JSON.stringify({
@@ -3521,27 +3609,31 @@ export class AgentSession {
 							cancelled: result.cancelled,
 							output: result.output,
 							truncated: result.truncated,
+							workspaceDigest: workspace.digest,
+							candidatePayloadDigest: candidate.payloadDigest,
 						}),
 					)
 					.digest("hex");
-				const status = result.cancelled
-					? ("inconclusive" as const)
-					: result.exitCode === 0
-						? ("pass" as const)
-						: ("fail" as const);
 				const evaluation = runtime.recordHostEvaluation({
 					candidateId: payload.candidate_id,
 					evaluatorId,
-					status,
+					status: assessment.status,
 					authority: "environment",
-					evidenceRefs: [`host:command:${receiptDigest}`],
+					evidenceRefs: [`host:command:${receiptDigest}`, `host:workspace:${workspace.digest}`],
 					metrics: {
+						...assessment.metrics,
 						command_digest: createHash("sha256").update(payload.command).digest("hex"),
 						output_digest: createHash("sha256").update(result.output).digest("hex"),
-						exit_code: result.exitCode ?? "cancelled",
-						cancelled: result.cancelled,
-						truncated: result.truncated,
 						duration_ms: durationMs,
+						...(requiresWorkspaceBinding
+							? { workspace_matches_candidate: true }
+							: { workspace_binding: "not_required" }),
+						workspace_digest: workspace.digest,
+						workspace_head: workspace.head,
+						workspace_mode: workspace.mode,
+						workspace_changed_files: workspace.changedFileCount,
+						workspace_snapshot_bytes: workspace.totalBytes,
+						candidate_payload_digest: candidate.payloadDigest,
 					},
 				});
 				return {
@@ -3552,6 +3644,92 @@ export class AgentSession {
 						exit_code: result.exitCode ?? null,
 						cancelled: result.cancelled,
 						truncated: result.truncated,
+						receipt_digest: receiptDigest,
+						workspace_digest: workspace.digest,
+					},
+				};
+			}
+			case "avo.evaluation.tool_result": {
+				if (typeof payload.candidate_id !== "string") {
+					throw new Error("avo.evaluation.tool_result candidate_id must be a string");
+				}
+				if (typeof payload.tool_call_id !== "string") {
+					throw new Error("avo.evaluation.tool_result tool_call_id must be a string");
+				}
+				if (typeof payload.exact_quote !== "string" || payload.exact_quote.trim().length < 8) {
+					throw new Error("avo.evaluation.tool_result exact_quote must contain at least 8 characters");
+				}
+				if (payload.exact_quote.length > 4_000) {
+					throw new Error("avo.evaluation.tool_result exact_quote must not exceed 4000 characters");
+				}
+				const state = runtime.getState();
+				const candidate = state.candidates.find((item) => item.candidateId === payload.candidate_id);
+				if (!candidate) throw new Error(`evaluation references unknown candidate ${payload.candidate_id}`);
+				const { call, callTimestamp, result } = this._resolveAvoExternalToolResult(payload.tool_call_id);
+				if (callTimestamp < Date.parse(state.createdAt)) {
+					throw new Error("AVO external evidence must come from the active task run");
+				}
+				let details = "";
+				try {
+					details = result.details === undefined ? "" : JSON.stringify(result.details);
+				} catch {
+					throw new Error("AVO external tool result details are not serializable");
+				}
+				const content = result.content
+					.map((item) =>
+						item.type === "text"
+							? item.text
+							: `[image:${item.mimeType}:${createHash("sha256").update(item.data).digest("hex")}]`,
+					)
+					.join("\n");
+				const evidenceText = `${content}\n${details}`;
+				const normalizeEvidence = (value: string) => value.normalize("NFKC").replace(/\s+/g, " ").trim();
+				if (!normalizeEvidence(evidenceText).includes(normalizeEvidence(payload.exact_quote))) {
+					throw new Error("AVO exact_quote was not found in the host-observed tool result");
+				}
+				const argumentDigest = createHash("sha256").update(JSON.stringify(call.arguments)).digest("hex");
+				const resultDigest = createHash("sha256")
+					.update(JSON.stringify({ content: result.content, details: result.details, isError: result.isError }))
+					.digest("hex");
+				const sourceIdentifiers = [...new Set(evidenceText.match(/https?:\/\/[^\s<>"']+/g) ?? [])].slice(0, 16);
+				const receiptDigest = createHash("sha256")
+					.update(
+						JSON.stringify({
+							toolCallId: call.id,
+							toolName: call.name,
+							argumentDigest,
+							resultDigest,
+							candidateId: candidate.candidateId,
+							candidatePayloadDigest: candidate.payloadDigest,
+						}),
+					)
+					.digest("hex");
+				const evaluation = runtime.recordHostEvaluation({
+					candidateId: candidate.candidateId,
+					evaluatorId: "external_tool",
+					status: "pass",
+					authority: "external",
+					evidenceRefs: [`host:tool:${receiptDigest}`, ...sourceIdentifiers.map((source) => `source:${source}`)],
+					metrics: {
+						tool_name: call.name,
+						tool_call_id: call.id,
+						argument_digest: argumentDigest,
+						result_digest: resultDigest,
+						exact_quote_digest: createHash("sha256").update(payload.exact_quote).digest("hex"),
+						candidate_payload_digest: candidate.payloadDigest,
+						source_count: sourceIdentifiers.length,
+						tool_call_timestamp: callTimestamp,
+						tool_result_timestamp: result.timestamp,
+					},
+				});
+				return {
+					evaluation,
+					tool_receipt: {
+						tool_call_id: call.id,
+						tool_name: call.name,
+						argument_digest: argumentDigest,
+						result_digest: resultDigest,
+						source_identifiers: sourceIdentifiers,
 						receipt_digest: receiptDigest,
 					},
 				};
@@ -10449,6 +10627,7 @@ export class AgentSession {
 				"avo.candidate.add",
 				"avo.evaluation.record",
 				"avo.evaluation.run",
+				"avo.evaluation.tool_result",
 				"avo.cycle.complete",
 				"avo.results.collect",
 				"avo.memory.remember",

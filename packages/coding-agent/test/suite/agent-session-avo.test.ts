@@ -1,5 +1,5 @@
 import { writeFileSync } from "node:fs";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, type Harness } from "./harness.js";
 
@@ -80,18 +80,35 @@ describe("AgentSession universal AVO runtime", () => {
 			verificationPolicy: "best_effort",
 			routing: { environment: "general", horizon: "direct" },
 			candidates: [],
-			taskRuns: [{ runId: `${harness.session.sessionId}:task-1`, objective: "Write a poem about rain" }],
+			taskRuns: [
+				{
+					runId: `${harness.session.sessionId}:task-1`,
+					objective: "Write a poem about rain",
+					status: "completed",
+				},
+			],
 			memories: [{ memoryId: expect.any(String), namespace: "general" }],
 		});
 	});
 
 	it("derives canonical cycle outcome from an environment receipt instead of caller opinion", async () => {
 		harness = await createHarness({ persistSession: true });
-		await harness.session.handleAvoHostRequest("avo.configure", {
-			environment: "coding",
-			horizon: "direct",
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix the parser implementation and run its test");
+		await expect(harness.session.handleAvoHostRequest("avo.configure", { environment: "general" })).rejects.toThrow(
+			/host-routed/,
+		);
+		const initialized = await harness.session.handleAvoHostRequest("avo.initialize", {
+			objective: "Write a poem instead",
 		});
-		await harness.session.handleAvoHostRequest("avo.initialize", { objective: "Fix parser" });
+		expect(initialized.state).toMatchObject({
+			objective: "Fix the parser implementation and run its test",
+			routing: { environment: "coding" },
+		});
+		writeFileSync(
+			`${harness.tempDir}/parser.test.cjs`,
+			"const test = require('node:test'); const assert = require('node:assert'); test('parser', () => assert.equal(2 + 2, 4));\n",
+		);
 		await harness.session.handleAvoHostRequest("avo.candidate.add", {
 			candidate: {
 				candidate_id: "patch-1",
@@ -112,10 +129,6 @@ describe("AgentSession universal AVO runtime", () => {
 				},
 			}),
 		).rejects.toThrow(/model-submitted evaluations must use authority=model_opinion/);
-		writeFileSync(
-			`${harness.tempDir}/parser.test.cjs`,
-			"const test = require('node:test'); const assert = require('node:assert'); test('parser', () => assert.equal(2 + 2, 4));\n",
-		);
 		const observed = await harness.session.handleAvoHostRequest("avo.evaluation.run", {
 			candidate_id: "patch-1",
 			command: "node --test parser.test.cjs",
@@ -125,6 +138,11 @@ describe("AgentSession universal AVO runtime", () => {
 			status: "pass",
 			authority: "environment",
 			issuedBy: "host",
+			metrics: {
+				meaningful: true,
+				observed_work_units: 1,
+				workspace_matches_candidate: true,
+			},
 		});
 		const completed = await harness.session.handleAvoHostRequest("avo.cycle.complete", {
 			cycle: { candidate_id: "patch-1", claimed_outcome: "rejected" },
@@ -137,8 +155,9 @@ describe("AgentSession universal AVO runtime", () => {
 
 	it("keeps a completed long-horizon cycle durable when supervisor startup is unavailable", async () => {
 		harness = await createHarness({ persistSession: true });
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Produce a checked decision");
 		await harness.session.handleAvoHostRequest("avo.configure", {
-			environment: "general",
 			horizon: "long",
 		});
 		await harness.session.handleAvoHostRequest("avo.initialize", { objective: "Produce a checked decision" });
@@ -169,6 +188,122 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 		expect((await harness.session.handleAvoHostRequest("avo.get")).state).toMatchObject({
 			cycles: [{ candidateId: "decision-1", outcome: "accepted" }],
+		});
+	});
+
+	it("refuses to run a coding receipt after the workspace diverges from its candidate", async () => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix the parser module and test it");
+		writeFileSync(`${harness.tempDir}/parser.cjs`, "module.exports = 1;\n");
+		writeFileSync(
+			`${harness.tempDir}/parser.test.cjs`,
+			"const test = require('node:test'); const assert = require('node:assert'); test('parser', () => assert.equal(require('./parser.cjs'), 2));\n",
+		);
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "stale-patch",
+				kind: "patch",
+				summary: "Change parser value",
+				payload: { value: 2 },
+			},
+		});
+		writeFileSync(`${harness.tempDir}/parser.cjs`, "module.exports = 2;\n");
+		const observed = await harness.session.handleAvoHostRequest("avo.evaluation.run", {
+			candidate_id: "stale-patch",
+			command: "node --test parser.test.cjs",
+		});
+		expect(observed).toMatchObject({
+			evaluation: { evaluatorId: "workspace_binding", status: "revise", issuedBy: "host" },
+			execution: { skipped: true, reason: "workspace changed after candidate creation" },
+		});
+		expect(
+			await harness.session.handleAvoHostRequest("avo.cycle.complete", {
+				cycle: { candidate_id: "stale-patch" },
+			}),
+		).toMatchObject({ cycle: { outcome: "revised" } });
+	});
+
+	it("binds a real external tool result and exact quote to a general candidate", async () => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([fauxAssistantMessage("checking")]);
+		await harness.session.prompt("Check the latest weather and verify it");
+		const toolCallId = "web-search-1";
+		const ineligibleToolCallId = "local-capitalizer-1";
+		harness.session.messages.push(
+			fauxAssistantMessage(fauxToolCall("web_search", { query: "Kuala Lumpur weather" }, { id: toolCallId }), {
+				stopReason: "toolUse",
+			}),
+			{
+				role: "toolResult",
+				toolCallId,
+				toolName: "web_search",
+				content: [
+					{
+						type: "text",
+						text: "Kuala Lumpur is 31 C. Source: https://weather.example/current",
+					},
+				],
+				isError: false,
+				timestamp: Date.now(),
+			},
+			fauxAssistantMessage(fauxToolCall("capitalizer", { text: "local text" }, { id: ineligibleToolCallId }), {
+				stopReason: "toolUse",
+			}),
+			{
+				role: "toolResult",
+				toolCallId: ineligibleToolCallId,
+				toolName: "capitalizer",
+				content: [{ type: "text", text: "LOCAL TEXT" }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+		);
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "weather-answer",
+				kind: "answer",
+				summary: "Current weather answer",
+				payload: "Kuala Lumpur is 31 C.",
+			},
+		});
+		await expect(
+			harness.session.handleAvoHostRequest("avo.evaluation.tool_result", {
+				candidate_id: "weather-answer",
+				tool_call_id: ineligibleToolCallId,
+				exact_quote: "LOCAL TEXT",
+			}),
+		).rejects.toThrow(/not an eligible external/);
+		await expect(
+			harness.session.handleAvoHostRequest("avo.evaluation.tool_result", {
+				candidate_id: "weather-answer",
+				tool_call_id: toolCallId,
+				exact_quote: "Kuala Lumpur is 18 C.",
+			}),
+		).rejects.toThrow(/not found in the host-observed tool result/);
+		const receipt = await harness.session.handleAvoHostRequest("avo.evaluation.tool_result", {
+			candidate_id: "weather-answer",
+			tool_call_id: toolCallId,
+			exact_quote: "Kuala Lumpur is 31 C.",
+		});
+		expect(receipt).toMatchObject({
+			evaluation: {
+				evaluatorId: "external_tool",
+				status: "pass",
+				authority: "external",
+				issuedBy: "host",
+			},
+			tool_receipt: {
+				tool_call_id: toolCallId,
+				tool_name: "web_search",
+				source_identifiers: ["https://weather.example/current"],
+			},
+		});
+		await harness.session.handleAvoHostRequest("avo.cycle.complete", {
+			cycle: { candidate_id: "weather-answer" },
+		});
+		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
+			stop_gate: { passed: true },
 		});
 	});
 });

@@ -29,24 +29,28 @@ class AvoSkillTest(unittest.TestCase):
         self.assertIn("callers may issue only model_opinion", contract["canonical_rule"])
         self.assertEqual(contract["horizons"], ["direct", "iterative", "long"])
 
-    def test_initialize_configures_the_same_host_runtime(self) -> None:
+    def test_initialize_uses_the_host_routed_runtime(self) -> None:
         module = load_skill("avo_initialize_test")
-        host = AsyncMock(side_effect=[{"state": {}}, {"state": {"runId": "run-1"}}])
+        host = AsyncMock(return_value={"state": {"runId": "run-1"}})
         with patch.object(module, "host_request", host):
-            result = asyncio.run(
-                module.initialize(
-                    "Fix the parser",
-                    environment="coding",
-                    horizon="iterative",
-                )
-            )
-        self.assertEqual(host.await_args_list[0].args[0], "avo.configure")
+            result = asyncio.run(module.initialize("Fix the parser"))
+        self.assertEqual(host.await_count, 1)
+        self.assertEqual(host.await_args_list[0].args[0], "avo.initialize")
         self.assertEqual(
             host.await_args_list[0].args[1],
-            {"environment": "coding", "horizon": "iterative"},
+            {"objective": "Fix the parser"},
         )
-        self.assertEqual(host.await_args_list[1].args[0], "avo.initialize")
-        self.assertEqual(result["execution_contract"]["contract_version"], 1)
+        self.assertEqual(result["execution_contract"]["contract_version"], 2)
+
+    def test_model_configure_can_only_escalate_horizon(self) -> None:
+        module = load_skill("avo_configure_test")
+        host = AsyncMock(return_value={"state": {"routing": {"horizon": "long"}}})
+        with patch.object(module, "host_request", host):
+            asyncio.run(module.configure(horizon="long"))
+            with self.assertRaisesRegex(ValueError, "only escalate"):
+                asyncio.run(module.configure(horizon="direct"))
+        self.assertEqual(host.await_count, 1)
+        self.assertEqual(host.await_args.args, ("avo.configure", {"horizon": "long"}))
 
     def test_candidate_evaluation_and_direct_cycle_use_host_observed_receipts(self) -> None:
         module = load_skill("avo_cycle_test")
@@ -94,6 +98,30 @@ class AvoSkillTest(unittest.TestCase):
                     }
                 )
             )
+
+    def test_external_tool_binding_uses_a_host_resolved_tool_call(self) -> None:
+        module = load_skill("avo_tool_receipt_test")
+        host = AsyncMock(return_value={"evaluation": {"issuedBy": "host"}})
+        with patch.object(module, "host_request", host):
+            result = asyncio.run(
+                module.bind_tool_result(
+                    "answer-1",
+                    "web-search-1",
+                    "The current version is 1.2.3.",
+                )
+            )
+        self.assertEqual(result["evaluation"]["issuedBy"], "host")
+        self.assertEqual(
+            host.await_args.args,
+            (
+                "avo.evaluation.tool_result",
+                {
+                    "candidate_id": "answer-1",
+                    "tool_call_id": "web-search-1",
+                    "exact_quote": "The current version is 1.2.3.",
+                },
+            ),
+        )
 
     def test_nooa_failure_keeps_host_recall_as_lossless_fallback(self) -> None:
         module = load_skill("avo_nooa_fallback_test")

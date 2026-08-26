@@ -36,6 +36,9 @@ export interface AvoCandidate {
 	kind: string;
 	summary: string;
 	payloadDigest: string;
+	workspaceDigest?: string;
+	workspaceHead?: string;
+	workspaceMode?: "git" | "tree";
 	parentCandidateId?: string;
 	createdAt: string;
 }
@@ -162,6 +165,9 @@ export interface AvoCandidateInput {
 	kind: string;
 	summary: string;
 	payload: unknown;
+	workspaceDigest?: string;
+	workspaceHead?: string;
+	workspaceMode?: "git" | "tree";
 	parentCandidateId?: string;
 }
 

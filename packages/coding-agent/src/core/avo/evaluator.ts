@@ -17,6 +17,18 @@ export const AVO_HOST_COMMAND_EVALUATORS = [
 ] as const;
 export type AvoHostCommandEvaluator = (typeof AVO_HOST_COMMAND_EVALUATORS)[number];
 
+export interface AvoHostCommandObservation {
+	exitCode?: number;
+	cancelled: boolean;
+	truncated: boolean;
+	output: string;
+}
+
+export interface AvoHostCommandAssessment {
+	status: AvoEvaluationStatus;
+	metrics: Record<string, number | string | boolean>;
+}
+
 export function classifyAvoHostEvaluationCommand(command: string): AvoHostCommandEvaluator {
 	const normalized = command.trim().replace(/[ \t]+/g, " ");
 	if (!normalized || normalized.length > 20_000)
@@ -24,10 +36,17 @@ export function classifyAvoHostEvaluationCommand(command: string): AvoHostComman
 	if (/\r|\n|[;&|<>`]|\$\(/.test(normalized)) {
 		throw new Error("AVO authoritative evaluation requires one direct command without shell composition");
 	}
+	if (
+		/(?:^| )(?:(?:--collect-only|--co|--listTests|--list-tests|--passWithNoTests|--allow-no-tests)(?:=\S+)?)(?: |$)/i.test(
+			normalized,
+		)
+	) {
+		throw new Error("AVO test evaluation rejects discovery-only and pass-with-no-tests options");
+	}
 	const patterns: Array<[AvoHostCommandEvaluator, RegExp]> = [
 		[
 			"test",
-			/^(?:(?:npm|pnpm|yarn|bun) (?:run )?test\b|npx (?:[^ ]+ )*(?:vitest|jest)\b|(?:python3?|uv run) (?:-m )?pytest\b|pytest\b|cargo test\b|go test\b|dotnet test\b|mvn test\b|gradle test\b|node --test\b)/,
+			/^(?:(?:npm|pnpm|yarn|bun) (?:run )?test\b|npx (?:(?:--yes|--no-install|-y) )?(?:vitest|jest)\b|(?:python3?|uv run) (?:-m )?pytest\b|pytest\b|cargo test\b|go test\b|dotnet test\b|mvn test\b|gradle test\b|node --test\b)/,
 		],
 		[
 			"build",
@@ -49,6 +68,80 @@ export function classifyAvoHostEvaluationCommand(command: string): AvoHostComman
 	throw new Error(
 		"command is not a recognized host-verifiable test, build, lint, benchmark, runtime, filesystem, or git check",
 	);
+}
+
+function observedTestUnits(output: string): { units: number; parser: string } | undefined {
+	const normalized = output.replaceAll("\r", "");
+	const countedPatterns: Array<[string, RegExp]> = [
+		["node_tap", /^# tests\s+(\d+)\s*$/im],
+		["pytest", /(?:^|\s)(\d+)\s+passed(?:\s|,|$)/i],
+		["vitest", /^\s*Tests\s+(?:\d+\s+failed\s*\|\s*)?(\d+)\s+passed/im],
+		["jest", /^Tests:\s+(?:\d+\s+failed,\s*)?(\d+)\s+passed/im],
+		["cargo", /test result:\s+ok\.\s+(\d+)\s+passed/i],
+		["dotnet", /Passed!\s+-\s+Failed:\s*\d+,\s*Passed:\s*(\d+)/i],
+		["maven", /Tests run:\s*(\d+)/i],
+	];
+	for (const [parser, pattern] of countedPatterns) {
+		const match = pattern.exec(normalized);
+		if (match?.[1]) return { units: Number.parseInt(match[1], 10), parser };
+	}
+	const goPackages = normalized
+		.split("\n")
+		.filter((line) => /^ok\s+\S+/.test(line) && !line.includes("[no test files]")).length;
+	if (goPackages > 0) return { units: goPackages, parser: "go_packages" };
+	return undefined;
+}
+
+export function assessAvoHostCommand(
+	evaluatorId: AvoHostCommandEvaluator,
+	observation: AvoHostCommandObservation,
+): AvoHostCommandAssessment {
+	const baseMetrics: Record<string, number | string | boolean> = {
+		exit_code: observation.exitCode ?? "cancelled",
+		cancelled: observation.cancelled,
+		truncated: observation.truncated,
+		output_bytes: Buffer.byteLength(observation.output),
+	};
+	if (observation.cancelled) {
+		return {
+			status: "inconclusive",
+			metrics: { ...baseMetrics, meaningful: false, validation_reason: "execution was cancelled" },
+		};
+	}
+	if (observation.exitCode !== 0) {
+		return {
+			status: "fail",
+			metrics: { ...baseMetrics, meaningful: true, validation_reason: "command exited non-zero" },
+		};
+	}
+	if (evaluatorId !== "test") {
+		return {
+			status: "pass",
+			metrics: { ...baseMetrics, meaningful: true, validation_reason: "recognized check exited zero" },
+		};
+	}
+	const observed = observedTestUnits(observation.output);
+	if (!observed || observed.units < 1) {
+		return {
+			status: "inconclusive",
+			metrics: {
+				...baseMetrics,
+				meaningful: false,
+				observed_work_units: observed?.units ?? 0,
+				validation_reason: "no executed passing test was observed in runner output",
+			},
+		};
+	}
+	return {
+		status: "pass",
+		metrics: {
+			...baseMetrics,
+			meaningful: true,
+			observed_work_units: observed.units,
+			result_parser: observed.parser,
+			validation_reason: "runner output proved at least one test executed and passed",
+		},
+	};
 }
 
 const AUTHORITY_RANK: Record<AvoEvaluationAuthority, number> = {

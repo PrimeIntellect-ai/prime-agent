@@ -10,7 +10,10 @@ export { evaluateAvoCheckpoint } from "./checkpoint.js";
 export {
 	AVO_HOST_COMMAND_EVALUATORS,
 	type AvoDerivedEvaluation,
+	type AvoHostCommandAssessment,
 	type AvoHostCommandEvaluator,
+	type AvoHostCommandObservation,
+	assessAvoHostCommand,
 	classifyAvoHostEvaluationCommand,
 	deriveAvoEvaluation,
 	evaluateGenericAvoStopGate,
@@ -35,3 +38,4 @@ export {
 	shouldActivateAvoSupervisor,
 } from "./supervisor.js";
 export * from "./types.js";
+export { type AvoWorkspaceSnapshot, captureAvoWorkspaceSnapshot } from "./workspace.js";

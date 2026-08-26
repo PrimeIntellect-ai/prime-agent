@@ -28,7 +28,9 @@ export class AvoSessionRuntime {
 	observeRootPrompt(prompt: string): AvoRunState {
 		const state = this.store.getState();
 		if (!state.objective) return this.store.initialize(prompt, prompt);
-		if (state.status !== "active" || this.evaluateStopGate().passed) {
+		const gate = this.evaluateStopGate();
+		if (state.status === "active" && gate.passed) this.store.complete(gate);
+		if (state.status !== "active" || gate.passed) {
 			return this.store.startTask(prompt, prompt);
 		}
 		this.store.routePrompt(prompt);
@@ -46,11 +48,13 @@ export class AvoSessionRuntime {
 	}
 
 	recordCandidate(input: AvoCandidateInput) {
-		if (
-			this.store.getState().routing.environment === "coding" &&
-			!(CODING_AVO_CANDIDATE_KINDS as readonly string[]).includes(input.kind)
-		) {
-			throw new Error("coding candidates must be a patch, implementation, configuration, diagnosis, or artifact");
+		if (this.store.getState().routing.environment === "coding") {
+			if (!(CODING_AVO_CANDIDATE_KINDS as readonly string[]).includes(input.kind)) {
+				throw new Error("coding candidates must be a patch, implementation, configuration, diagnosis, or artifact");
+			}
+			if (!input.workspaceDigest || !input.workspaceMode) {
+				throw new Error("coding candidates require a host-observed workspace digest");
+			}
 		}
 		const candidate = this.store.recordCandidate(input);
 		this.adapters.get(this.store.getState().routing.environment).validateCandidate(candidate, this.store.getState());
@@ -246,6 +250,7 @@ export function buildAvoRuntimePrompt(state: AvoRunState): string {
 			? `Verification policy evidence: ${state.verificationReasons.join("; ")}.`
 			: undefined,
 		"General, coding, and research are internal tool/evaluation adapters, not separate modes. Do not ask the user to choose one. Direct, iterative, and long only control how much AVO machinery is activated: direct uses one evaluated action without a retained supervisor; iterative retains candidate lineage and revises after feedback; long also activates namespaced memory, recovery, and retained trajectory supervision.",
+		"Environment routing is host-authoritative. Model calls cannot select general, coding, or research and may only escalate the current horizon to iterative or long.",
 		"Use the avo skill for the task's candidate/evaluation lifecycle. Callers may record only model_opinion. For executable evidence, use avo.run_evaluation so the host runs the check and issues the receipt from the observed result. Never invent host, environment, or external authority. Required verification needs host-issued evidence; best_effort and not_applicable policies may use a transparent model-opinion review without pretending it is external. Finish only when the AVO stop gate passes. A later root task starts a fresh task run after the current gate passes, while namespaced memory survives across runs.",
 	]
 		.filter((line): line is string => line !== undefined)

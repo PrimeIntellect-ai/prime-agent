@@ -6,7 +6,9 @@ import type { AutoresearchState, AutoresearchStopGate } from "../src/core/autore
 import {
 	AvoSessionRuntime,
 	AvoStore,
+	assessAvoHostCommand,
 	CodingAvoAdapter,
+	captureAvoWorkspaceSnapshot,
 	classifyAvoHostEvaluationCommand,
 	deriveAvoEvaluation,
 	GeneralAvoAdapter,
@@ -38,6 +40,9 @@ describe("generic AVO core", () => {
 			kind: "patch",
 			summary: "Validate the parser boundary",
 			payload: { diff: "sha256:abc" },
+			workspaceDigest: "a".repeat(64),
+			workspaceHead: "head-1",
+			workspaceMode: "git",
 		});
 		runtime.recordHostEvaluation({
 			evaluationId: "test-1",
@@ -46,7 +51,12 @@ describe("generic AVO core", () => {
 			status: "pass",
 			authority: "environment",
 			evidenceRefs: ["test:parser:exit=0"],
-			metrics: { passed: 18 },
+			metrics: {
+				passed: 18,
+				meaningful: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
 		});
 		const completed = runtime.completeCycle({ candidateId: candidate.candidateId });
 		expect(completed.cycle.outcome).toBe("accepted");
@@ -112,6 +122,9 @@ describe("generic AVO core", () => {
 			kind: "patch",
 			summary: "Parser patch",
 			payload: { diff: "candidate" },
+			workspaceDigest: "b".repeat(64),
+			workspaceHead: "head-2",
+			workspaceMode: "git",
 		});
 		runtime.recordHostEvaluation({
 			candidateId: candidate.candidateId,
@@ -120,6 +133,34 @@ describe("generic AVO core", () => {
 			authority: "external",
 			evidenceRefs: ["review:looks-good"],
 			metrics: {},
+		});
+		expect(runtime.completeCycle({ candidateId: candidate.candidateId }).cycle.outcome).toBe("inconclusive");
+		expect(runtime.evaluateStopGate().passed).toBe(false);
+	});
+
+	test("does not let a successful runtime script certify a patch", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-runtime-boundary", clock());
+		runtime.configure({ environment: "coding", horizon: "direct", source: "user" });
+		runtime.store.initialize("Implement the parser fix");
+		const candidate = runtime.recordCandidate({
+			kind: "patch",
+			summary: "Parser patch",
+			payload: { diff: "candidate" },
+			workspaceDigest: "c".repeat(64),
+			workspaceHead: "head-3",
+			workspaceMode: "git",
+		});
+		runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "runtime",
+			status: "pass",
+			authority: "environment",
+			evidenceRefs: ["host:runtime:exit=0"],
+			metrics: {
+				meaningful: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
 		});
 		expect(runtime.completeCycle({ candidateId: candidate.candidateId }).cycle.outcome).toBe("inconclusive");
 		expect(runtime.evaluateStopGate().passed).toBe(false);
@@ -378,6 +419,49 @@ describe("generic AVO core", () => {
 
 	test("enforces memory namespaces and shared-memory provenance", () => {
 		const store = new AvoStore(undefined, "run-memory", clock());
+		store.initialize("Fix parser code");
+		store.setEnvironment("coding");
+		const codingCandidate = store.recordCandidate({
+			candidateId: "coding-candidate",
+			kind: "patch",
+			summary: "Parser fix",
+			payload: "diff",
+		});
+		store.recordEvaluation(
+			{
+				evaluationId: "coding-evaluation",
+				candidateId: codingCandidate.candidateId,
+				evaluatorId: "test",
+				status: "pass",
+				authority: "environment",
+				evidenceRefs: ["host:test"],
+				metrics: {},
+			},
+			"host",
+		);
+		store.completeCycle({ candidateId: codingCandidate.candidateId });
+		store.complete();
+		store.startTask("Find a research gap");
+		store.setEnvironment("research");
+		const researchCandidate = store.recordCandidate({
+			candidateId: "research-candidate",
+			kind: "research_problem",
+			summary: "Verified gap",
+			payload: "gap",
+		});
+		store.recordEvaluation(
+			{
+				evaluationId: "research-evaluation",
+				candidateId: researchCandidate.candidateId,
+				evaluatorId: "research_adapter",
+				status: "pass",
+				authority: "host",
+				evidenceRefs: ["host:research"],
+				metrics: {},
+			},
+			"host",
+		);
+		store.completeCycle({ candidateId: researchCandidate.candidateId });
 		store.remember({
 			namespace: "coding",
 			type: "FAILED_DIRECTION",
@@ -396,7 +480,7 @@ describe("generic AVO core", () => {
 				content: "Bind conclusions to observed evidence.",
 				tags: ["verification"],
 				importance: 7,
-				sourceIds: ["coding:test-1", "research:review-1"],
+				sourceIds: ["coding:coding-evaluation", "research:research-evaluation"],
 			}),
 		).toMatchObject({ namespace: "shared" });
 		expect(() =>
@@ -409,7 +493,18 @@ describe("generic AVO core", () => {
 				importance: 5,
 				sourceIds: [],
 			}),
-		).toThrow(/shared memories require at least two environment-qualified source_ids/);
+		).toThrow(/shared memories require at least two resolved source_ids/);
+		expect(() =>
+			store.remember({
+				namespace: "shared",
+				type: "PROCEDURE",
+				title: "Syntactic fake",
+				content: "Fake references must not pass.",
+				tags: [],
+				importance: 5,
+				sourceIds: ["coding:fake1", "research:fake2"],
+			}),
+		).toThrow(/does not resolve to accepted host-owned lineage/);
 	});
 
 	test("reopens namespaced memory without losing its canonical provenance", () => {
@@ -452,12 +547,55 @@ describe("AVO routing and adapters", () => {
 		expect(inferAvoVerificationPolicy("Brainstorm name ideas", "general").policy).toBe("not_applicable");
 	});
 
+	test.each([
+		["Check the latest weather", "general"],
+		["Look up the latest version of package X", "general"],
+		["Implement the school policy", "general"],
+		["Fix the parser module", "coding"],
+		["Test the API implementation", "coding"],
+	] as const)("routes boundary-sensitive prompt %s to %s", (prompt, environment) => {
+		expect(inferAvoEnvironment(prompt).environment).toBe(environment);
+	});
+
 	test("classifies only direct host-verifiable evaluation commands", () => {
 		expect(classifyAvoHostEvaluationCommand("python -m pytest -q tests/test_parser.py")).toBe("test");
 		expect(classifyAvoHostEvaluationCommand("npm run build")).toBe("build");
 		expect(() => classifyAvoHostEvaluationCommand("true")).toThrow(/not a recognized host-verifiable/);
 		expect(() => classifyAvoHostEvaluationCommand("pytest -q || true")).toThrow(/one direct command/);
 		expect(() => classifyAvoHostEvaluationCommand("node verify.js & true")).toThrow(/one direct command/);
+		expect(() => classifyAvoHostEvaluationCommand("pytest --collect-only")).toThrow(/discovery-only/);
+		expect(() => classifyAvoHostEvaluationCommand("npx --yes node -e process.exit(0) vitest")).toThrow(
+			/not a recognized host-verifiable/,
+		);
+	});
+
+	test("requires observed test execution instead of exit zero alone", () => {
+		expect(
+			assessAvoHostCommand("test", {
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				output: "TAP version 13\n1..0\n# tests 0\n# pass 0\n",
+			}),
+		).toMatchObject({ status: "inconclusive", metrics: { meaningful: false, observed_work_units: 0 } });
+		expect(
+			assessAvoHostCommand("test", {
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				output: "# tests 2\n# pass 2\n# fail 0\n",
+			}),
+		).toMatchObject({ status: "pass", metrics: { meaningful: true, observed_work_units: 2 } });
+	});
+
+	test("changes the host workspace digest when a candidate file changes", () => {
+		const dir = artifactDir();
+		writeFileSync(join(dir, "parser.ts"), "export const value = 1;\n", "utf8");
+		const first = captureAvoWorkspaceSnapshot(dir);
+		writeFileSync(join(dir, "parser.ts"), "export const value = 2;\n", "utf8");
+		const second = captureAvoWorkspaceSnapshot(dir);
+		expect(first.mode).toBe("tree");
+		expect(second.digest).not.toBe(first.digest);
 	});
 
 	test.each([

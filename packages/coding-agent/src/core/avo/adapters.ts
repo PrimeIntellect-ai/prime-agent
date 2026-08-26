@@ -42,7 +42,13 @@ export const CODING_AVO_CANDIDATE_KINDS = [
 	"artifact",
 ] as const;
 
-const CODING_CANONICAL_EVALUATORS = ["test", "build", "lint", "benchmark", "runtime"] as const;
+const CODING_EVALUATION_CONTRACTS: Record<(typeof CODING_AVO_CANDIDATE_KINDS)[number], readonly string[]> = {
+	patch: ["test", "build"],
+	implementation: ["test", "build"],
+	configuration: ["test", "build", "runtime"],
+	diagnosis: ["test", "runtime"],
+	artifact: ["test", "build", "lint", "benchmark", "runtime"],
+};
 
 function genericProgress(state: AvoRunState): AvoProgressSignals {
 	const outcomes = state.cycles.map((cycle) => cycle.outcome);
@@ -355,16 +361,23 @@ export class CodingAvoAdapter extends BaseAdapter {
 
 	deriveEvaluationState(candidate: AvoCandidate, receipts: readonly AvoEvaluationReceipt[], state: AvoRunState) {
 		const derived = super.deriveEvaluationState(candidate, receipts, state);
+		if (derived.status === "fail" || derived.status === "revise") return derived;
+		const allowedEvaluators = CODING_EVALUATION_CONTRACTS[candidate.kind as keyof typeof CODING_EVALUATION_CONTRACTS];
 		const executable = receipts.filter(
 			(receipt) =>
 				isAuthoritativeAvoEvaluation(receipt) &&
-				(CODING_CANONICAL_EVALUATORS as readonly string[]).includes(receipt.evaluatorId),
+				allowedEvaluators?.includes(receipt.evaluatorId) === true &&
+				receipt.metrics.meaningful === true &&
+				receipt.metrics.workspace_matches_candidate === true &&
+				receipt.metrics.candidate_payload_digest === candidate.payloadDigest,
 		);
 		if (executable.length === 0) {
 			return {
 				status: "inconclusive" as const,
 				canonical: false,
-				reasons: ["coding candidates require an executable or host-verifiable receipt"],
+				reasons: [
+					`${candidate.kind} candidates require a meaningful ${allowedEvaluators?.join(" or ") ?? "kind-specific"} receipt bound to the exact candidate workspace`,
+				],
 			};
 		}
 		return derived;

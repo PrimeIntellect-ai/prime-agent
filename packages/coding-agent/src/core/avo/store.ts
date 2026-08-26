@@ -211,9 +211,19 @@ function wordSet(value: string): Set<string> {
 	);
 }
 
+function containsSignal(value: string, signal: string): boolean {
+	const words = signal.toLowerCase().match(/[a-z0-9]+/g);
+	if (!words || words.length === 0) return false;
+	return new RegExp(`(?:^|[^a-z0-9])${words.join("[^a-z0-9]+")}(?:$|[^a-z0-9])`, "i").test(value);
+}
+
+function matchingSignals(value: string, signals: readonly string[]): string[] {
+	return signals.filter((signal) => containsSignal(value, signal));
+}
+
 export function inferAvoEnvironment(prompt: string, cwd = ""): { environment: AvoEnvironment; reasons: string[] } {
 	const normalized = prompt.toLowerCase();
-	const researchSignals = [
+	const researchSignals = matchingSignals(normalized, [
 		"autoresearch",
 		"research gap",
 		"publication-grade",
@@ -221,27 +231,43 @@ export function inferAvoEnvironment(prompt: string, cwd = ""): { environment: Av
 		"literature review",
 		"novel research",
 		"peer reviewed",
-		"hypothesis",
-	].filter((signal) => normalized.includes(signal));
+		"research hypothesis",
+	]);
 	if (researchSignals.length > 0) {
 		return { environment: "research", reasons: [`research signals: ${researchSignals.join(", ")}`] };
 	}
-	const codingSignals = [
+	const strongCodingSignals = matchingSignals(normalized, [
 		"code",
 		"coding",
-		"implement",
-		"fix",
-		"debug",
-		"test",
-		"build",
-		"refactor",
 		"repository",
 		"git",
-		"package",
 		"compile",
 		"stack trace",
 		"pull request",
-	].filter((signal) => normalized.includes(signal));
+		"unit test",
+		"integration test",
+	]);
+	const codingActions = matchingSignals(normalized, ["implement", "fix", "debug", "test", "build", "refactor"]);
+	const codingObjects = matchingSignals(normalized, [
+		"parser",
+		"function",
+		"class",
+		"module",
+		"api",
+		"cli",
+		"app",
+		"application",
+		"script",
+		"bug",
+		"stack trace",
+		"repository",
+		"software",
+		"test suite",
+	]);
+	const codingSignals = [
+		...strongCodingSignals,
+		...(codingActions.length > 0 && codingObjects.length > 0 ? [...codingActions, ...codingObjects] : []),
+	];
 	const artifactSignals = normalized.match(
 		/(?:^|[\s`'"(])(?:[\w./-]+\.(?:c|cc|cpp|cs|go|java|js|jsx|kt|php|py|rb|rs|sh|sql|swift|ts|tsx|vue)|package\.json|pyproject\.toml|cargo\.toml)(?:$|[\s`'"),:])/g,
 	);
@@ -271,7 +297,7 @@ export function inferAvoVerificationPolicy(
 		return { policy: "required", reasons: [`${environment} work requires host-observed verification`] };
 	}
 	const normalized = prompt.toLowerCase();
-	const subjectiveSignals = [
+	const subjectiveSignals = matchingSignals(normalized, [
 		"write a poem",
 		"write a story",
 		"brainstorm",
@@ -281,14 +307,14 @@ export function inferAvoVerificationPolicy(
 		"rephrase",
 		"make this sound",
 		"creative",
-	].filter((signal) => normalized.includes(signal));
+	]);
 	if (subjectiveSignals.length > 0) {
 		return {
 			policy: "not_applicable",
 			reasons: [`subjective task signals: ${subjectiveSignals.join(", ")}`],
 		};
 	}
-	const requiredSignals = [
+	const requiredSignals = matchingSignals(normalized, [
 		"verify",
 		"check whether",
 		"calculate",
@@ -299,7 +325,7 @@ export function inferAvoVerificationPolicy(
 		"current",
 		"exact",
 		"fact check",
-	].filter((signal) => normalized.includes(signal));
+	]);
 	if (requiredSignals.length > 0) {
 		return { policy: "required", reasons: [`verification signals: ${requiredSignals.join(", ")}`] };
 	}
@@ -314,7 +340,7 @@ export function inferAvoHorizon(
 	environment: AvoEnvironment,
 ): { horizon: AvoHorizon; reasons: string[] } {
 	const normalized = prompt.toLowerCase();
-	const longSignals = [
+	const longSignals = matchingSignals(normalized, [
 		"do not stop",
 		"until done",
 		"keep going",
@@ -324,7 +350,7 @@ export function inferAvoHorizon(
 		"publication-grade",
 		"autoresearch",
 		"exhaustive",
-	].filter((signal) => normalized.includes(signal));
+	]);
 	if (environment === "research" || longSignals.length > 0) {
 		return {
 			horizon: "long",
@@ -332,7 +358,7 @@ export function inferAvoHorizon(
 				longSignals.length > 0 ? [`long-horizon signals: ${longSignals.join(", ")}`] : ["research environment"],
 		};
 	}
-	const iterativeSignals = [
+	const iterativeSignals = matchingSignals(normalized, [
 		"fix",
 		"debug",
 		"implement",
@@ -341,7 +367,7 @@ export function inferAvoHorizon(
 		"optimize",
 		"refactor",
 		"audit",
-	].filter((signal) => normalized.includes(signal));
+	]);
 	if (iterativeSignals.length > 0) {
 		return { horizon: "iterative", reasons: [`iterative signals: ${iterativeSignals.join(", ")}`] };
 	}
@@ -613,11 +639,17 @@ export class AvoStore {
 		) {
 			throw new Error(`candidate parent ${input.parentCandidateId} does not exist`);
 		}
+		if (input.workspaceDigest !== undefined && !/^[a-f0-9]{64}$/.test(input.workspaceDigest)) {
+			throw new Error("candidate workspace digest must be a SHA-256 digest");
+		}
 		const candidate: AvoCandidate = {
 			candidateId: requireIdentifier(candidateId, "candidate_id"),
 			kind: requireIdentifier(input.kind, "candidate.kind"),
 			summary: requireString(input.summary, "candidate.summary"),
 			payloadDigest: digestPayload(input.payload),
+			workspaceDigest: input.workspaceDigest,
+			workspaceHead: input.workspaceHead,
+			workspaceMode: input.workspaceMode,
 			parentCandidateId: input.parentCandidateId,
 			createdAt: this.now(),
 		};
@@ -819,16 +851,62 @@ export class AvoStore {
 		}
 		const sourceIds = input.sourceIds ?? [];
 		if (input.namespace === "shared") {
-			const qualifiedEnvironments = new Set(
-				sourceIds.flatMap((sourceId) => {
-					const match = /^(general|coding|research):[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.exec(sourceId);
-					return match ? [match[1] as AvoEnvironment] : [];
-				}),
+			const runs = [
+				...this.state.taskRuns.map((run) => ({
+					environment: run.routing.environment,
+					candidates: run.candidates,
+					evaluations: run.evaluations,
+					cycles: run.cycles,
+					lineage: run.lineage,
+				})),
+				{
+					environment: this.state.routing.environment,
+					candidates: this.state.candidates,
+					evaluations: this.state.evaluations,
+					cycles: this.state.cycles,
+					lineage: this.state.lineage,
+				},
+			];
+			const references = new Map<AvoEnvironment, Set<string>>(
+				AVO_ENVIRONMENTS.map((environment) => [environment, new Set<string>()]),
 			);
-			if (sourceIds.length < 2 || qualifiedEnvironments.size < 2) {
-				throw new Error(
-					"shared memories require at least two environment-qualified source_ids from distinct environments",
+			for (const run of runs) {
+				const acceptedCandidateIds = new Set(
+					run.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
 				);
+				const accepted = references.get(run.environment)!;
+				for (const candidateId of acceptedCandidateIds) accepted.add(candidateId);
+				for (const cycle of run.cycles) if (cycle.outcome === "accepted") accepted.add(cycle.cycleId);
+				for (const evaluation of run.evaluations) {
+					if (
+						evaluation.issuedBy === "host" &&
+						evaluation.authority !== "model_opinion" &&
+						evaluation.status === "pass" &&
+						acceptedCandidateIds.has(evaluation.candidateId)
+					) {
+						accepted.add(evaluation.evaluationId);
+					}
+				}
+				for (const lineage of run.lineage) {
+					if (lineage.kind === "candidate_accepted" || lineage.kind === "adapter_progress") {
+						accepted.add(lineage.lineageId);
+						if (lineage.referenceId) accepted.add(lineage.referenceId);
+					}
+				}
+			}
+			const qualifiedEnvironments = new Set<AvoEnvironment>();
+			for (const sourceId of sourceIds) {
+				const match = /^(general|coding|research):(.+)$/.exec(sourceId);
+				if (!match) throw new Error(`shared memory source ${sourceId} is not environment-qualified`);
+				const environment = match[1] as AvoEnvironment;
+				const referenceId = match[2]!;
+				if (!references.get(environment)?.has(referenceId)) {
+					throw new Error(`shared memory source ${sourceId} does not resolve to accepted host-owned lineage`);
+				}
+				qualifiedEnvironments.add(environment);
+			}
+			if (sourceIds.length < 2 || qualifiedEnvironments.size < 2) {
+				throw new Error("shared memories require at least two resolved source_ids from distinct environments");
 			}
 		}
 		const memory: AvoMemory = {

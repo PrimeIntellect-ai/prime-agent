@@ -15,7 +15,7 @@ from rlm import host_request
 
 def execution_contract() -> dict[str, Any]:
     return {
-        "contract_version": 1,
+        "contract_version": 2,
         "forbid_runtime_introspection": True,
         "environments": ["general", "coding", "research"],
         "horizons": ["direct", "iterative", "long"],
@@ -30,6 +30,9 @@ def execution_contract() -> dict[str, Any]:
             "resume": "state = (await avo.get_state())['state']",
             "candidate": "await avo.add_candidate(candidate_dict)",
             "host_evaluation": "await avo.run_evaluation(candidate_id, command)",
+            "external_evidence": (
+                "await avo.bind_tool_result(candidate_id, tool_call_id, exact_quote)"
+            ),
             "opinion": "await avo.record_evaluation(model_opinion_dict)",
             "cycle": "await avo.complete_cycle({'candidate_id': candidate_id})",
             "gate": "await avo.stop_gate()",
@@ -49,30 +52,18 @@ def _object(value: dict[str, Any], label: str) -> dict[str, Any]:
 
 async def initialize(
     objective: str,
-    *,
-    environment: str = "auto",
-    horizon: str = "auto",
 ) -> dict[str, Any]:
     if not isinstance(objective, str) or not objective.strip():
         raise ValueError("objective must be a non-empty string")
-    await host_request(
-        "avo.configure",
-        {"environment": environment, "horizon": horizon},
-    )
     response = await host_request("avo.initialize", {"objective": objective})
     response["execution_contract"] = execution_contract()
     return response
 
 
-async def configure(*, environment: str | None = None, horizon: str | None = None) -> dict[str, Any]:
-    payload: dict[str, Any] = {}
-    if environment is not None:
-        payload["environment"] = environment
-    if horizon is not None:
-        payload["horizon"] = horizon
-    if not payload:
-        raise ValueError("configure requires environment or horizon")
-    return await host_request("avo.configure", payload)
+async def configure(*, horizon: str) -> dict[str, Any]:
+    if horizon not in {"iterative", "long"}:
+        raise ValueError("model-facing configure may only escalate horizon to iterative or long")
+    return await host_request("avo.configure", {"horizon": horizon})
 
 
 async def get_state() -> dict[str, Any]:
@@ -105,6 +96,28 @@ async def run_evaluation(candidate_id: str, command: str) -> dict[str, Any]:
     return await host_request(
         "avo.evaluation.run",
         {"candidate_id": candidate_id, "command": command},
+    )
+
+
+async def bind_tool_result(
+    candidate_id: str,
+    tool_call_id: str,
+    exact_quote: str,
+) -> dict[str, Any]:
+    for value, label in (
+        (candidate_id, "candidate_id"),
+        (tool_call_id, "tool_call_id"),
+        (exact_quote, "exact_quote"),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{label} must be a non-empty string")
+    return await host_request(
+        "avo.evaluation.tool_result",
+        {
+            "candidate_id": candidate_id,
+            "tool_call_id": tool_call_id,
+            "exact_quote": exact_quote,
+        },
     )
 
 
@@ -300,6 +313,7 @@ async def reflect_memory(trigger: str = "manual", *, cycle_id: str | None = None
 
 __all__ = [
     "add_candidate",
+    "bind_tool_result",
     "checkpoint",
     "collect_results",
     "complete",

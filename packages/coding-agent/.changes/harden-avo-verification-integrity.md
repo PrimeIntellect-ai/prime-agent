@@ -1,0 +1,3 @@
+- Made AVO environment routing host-authoritative and limited model configuration to horizon escalation.
+- Bound coding candidates and meaningful kind-specific verification receipts to the exact host-observed workspace state.
+- Added host-resolved external tool receipts, real shared-memory lineage resolution, and completed-state archival for automatically advanced tasks.
