@@ -1029,6 +1029,204 @@ class FinishRequestTest(unittest.TestCase):
         self.assertEqual(ns, {})
         self.assertNotIn("snap", repl._inflight)
 
+    def test_protocol_interrupt_during_restore_commit_is_consumed_and_next_request_runs(self):
+        # A protocol interrupt (_request_interrupt -> SIGINT on the main thread)
+        # landing while the restore applies its staged names is consumed: the
+        # restore reports done ok with every name applied, and a following
+        # request runs normally with no interrupt bleed.
+        import signal
+        from unittest import mock
+
+        repl = self.repl_module
+        previous = signal.signal(signal.SIGINT, repl._sigint_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
+        previous_loop = repl._loop
+        self.addCleanup(setattr, repl, "_loop", previous_loop)
+        sent = []
+
+        class InterruptOnFirstSet(dict):
+            def __setitem__(self, key, value):
+                super().__setitem__(key, value)
+                if len(self) == 1:
+                    repl._request_interrupt("restore")
+
+        ns = InterruptOnFirstSet()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            manifest = os.path.join(tmp, "kernel-state.json")
+            snap = repl._snapshot_state({"a": 1, "b": 2}, path, manifest, 1 << 20, 1 << 20, False)
+            self.assertNotIn("error", snap)
+
+            async def main():
+                repl._loop = asyncio.get_running_loop()
+                repl._inflight.add("restore")
+                await repl._handle_request(repl._handle_state, {"type": "restore", "id": "restore", "path": path}, ns)
+                repl._inflight.add("next")
+                await repl._handle_request(repl._handle_execute, {"id": "next", "code": "checked = 1 + 1"}, {})
+
+            with mock.patch.object(repl, "_send", sent.append):
+                with mock.patch.object(repl, "_drain_output", lambda: None):
+                    asyncio.run(main())
+
+        done_restore = next(e for e in sent if e.get("event") == "done" and e["id"] == "restore")
+        self.assertEqual(done_restore["status"], "ok")
+        self.assertEqual(done_restore["restored"], ["a", "b"])
+        self.assertEqual(dict(ns), {"a": 1, "b": 2})
+        done_next = next(e for e in sent if e.get("event") == "done" and e["id"] == "next")
+        self.assertEqual(done_next["status"], "ok")
+        self.assertIsNone(repl._sigint_target)
+        self.assertFalse(repl._pending_interrupts["any"])
+        self.assertFalse(repl._pending_interrupts["ids"])
+
+    @staticmethod
+    def _run_resuming(coro):
+        # Mimic main(): a KI escaping a task stops run_until_complete; the
+        # runtime resumes the loop and serving continues.
+        loop = asyncio.new_event_loop()
+        try:
+            outer = loop.create_task(coro)
+            while not outer.done():
+                try:
+                    loop.run_until_complete(outer)
+                except KeyboardInterrupt:
+                    continue
+        finally:
+            loop.close()
+
+    def test_protocol_interrupt_after_restore_returned_before_task_done_reports_ok(self):
+        # The interrupt raises into the state task AFTER _restore_state returned
+        # but before the task completes; every binding is committed, so the
+        # request must report ok from the committed box, not interrupted.
+        import signal
+        from unittest import mock
+
+        repl = self.repl_module
+        previous = signal.signal(signal.SIGINT, repl._sigint_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
+        previous_loop = repl._loop
+        self.addCleanup(setattr, repl, "_loop", previous_loop)
+        sent = []
+        real_restore = repl._restore_state
+
+        def restore_then_interrupt(*args, **kwargs):
+            result = real_restore(*args, **kwargs)
+            repl._sigint_target = "restore"
+            repl._sigint_handler(signal.SIGINT, None)  # raises into the still-running task
+            return result
+
+        ns: dict = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            manifest = os.path.join(tmp, "kernel-state.json")
+            snap = repl._snapshot_state({"a": 1, "b": 2}, path, manifest, 1 << 20, 1 << 20, False)
+            self.assertNotIn("error", snap)
+
+            async def main():
+                repl._loop = asyncio.get_running_loop()
+                repl._inflight.add("restore")
+                await repl._handle_request(repl._handle_state, {"type": "restore", "id": "restore", "path": path}, ns)
+                repl._inflight.add("next")
+                await repl._handle_request(repl._handle_execute, {"id": "next", "code": "checked = 1 + 1"}, {})
+
+            with mock.patch.object(repl, "_restore_state", restore_then_interrupt):
+                with mock.patch.object(repl, "_send", sent.append):
+                    with mock.patch.object(repl, "_drain_output", lambda: None):
+                        self._run_resuming(main())
+
+        done_restore = next(e for e in sent if e.get("event") == "done" and e["id"] == "restore")
+        self.assertEqual(done_restore["status"], "ok")
+        self.assertEqual(done_restore["restored"], ["a", "b"])
+        self.assertEqual(ns, {"a": 1, "b": 2})
+        done_next = next(e for e in sent if e.get("event") == "done" and e["id"] == "next")
+        self.assertEqual(done_next["status"], "ok")
+        self.assertIsNone(repl._sigint_target)
+        self.assertFalse(repl._pending_interrupts["any"])
+        self.assertFalse(repl._pending_interrupts["ids"])
+
+    def test_nonprotocol_keyboardinterrupt_after_committed_restore_is_not_recovered(self):
+        # A user-originated KeyboardInterrupt (no _sigint_handler provenance:
+        # _active["interrupted"] stays False) after the restore committed must
+        # keep the interrupted error, not be converted to snapshot success.
+        from unittest import mock
+
+        repl = self.repl_module
+        previous_loop = repl._loop
+        self.addCleanup(setattr, repl, "_loop", previous_loop)
+        sent = []
+        real_restore = repl._restore_state
+
+        def restore_then_user_interrupt(*args, **kwargs):
+            real_restore(*args, **kwargs)  # fills the committed box
+            raise KeyboardInterrupt("nonprotocol")
+
+        ns: dict = {}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            manifest = os.path.join(tmp, "kernel-state.json")
+            snap = repl._snapshot_state({"a": 1, "b": 2}, path, manifest, 1 << 20, 1 << 20, False)
+            self.assertNotIn("error", snap)
+
+            async def main():
+                repl._loop = asyncio.get_running_loop()
+                repl._inflight.add("restore")
+                await repl._handle_request(repl._handle_state, {"type": "restore", "id": "restore", "path": path}, ns)
+
+            with mock.patch.object(repl, "_restore_state", restore_then_user_interrupt):
+                with mock.patch.object(repl, "_send", sent.append):
+                    with mock.patch.object(repl, "_drain_output", lambda: None):
+                        self._run_resuming(main())
+
+        done = next(e for e in sent if e.get("event") == "done" and e["id"] == "restore")
+        self.assertEqual(done["status"], "error")
+        self.assertEqual(done["reason"], "interrupted")
+
+    def test_protocol_interrupt_after_destructive_snapshot_returned_reports_ok(self):
+        # Same post-return window for snapshot: the pruning commit already ran,
+        # so the interrupt must not misreport the destructive snapshot as failed.
+        import signal
+        from unittest import mock
+
+        repl = self.repl_module
+        previous = signal.signal(signal.SIGINT, repl._sigint_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
+        previous_loop = repl._loop
+        self.addCleanup(setattr, repl, "_loop", previous_loop)
+        sent = []
+        real_snapshot = repl._snapshot_state
+
+        def snapshot_then_interrupt(*args, **kwargs):
+            result = real_snapshot(*args, **kwargs)
+            repl._sigint_target = "snap"
+            repl._sigint_handler(signal.SIGINT, None)  # raises into the still-running task
+            return result
+
+        ns = {"small": 1, "big": "x" * 100000}
+        with tempfile.TemporaryDirectory() as tmp:
+            req = {
+                "type": "snapshot",
+                "id": "snap",
+                "path": os.path.join(tmp, "kernel-state.dill"),
+                "manifest_path": os.path.join(tmp, "kernel-state.json"),
+                "prune_oversized": True,
+                "max_variable_bytes": 1024,
+            }
+
+            async def main():
+                repl._loop = asyncio.get_running_loop()
+                repl._inflight.add("snap")
+                await repl._handle_request(repl._handle_state, req, ns)
+
+            with mock.patch.object(repl, "_snapshot_state", snapshot_then_interrupt):
+                with mock.patch.object(repl, "_send", sent.append):
+                    self._run_resuming(main())
+
+        done = next(e for e in sent if e.get("event") == "done" and e["id"] == "snap")
+        self.assertEqual(done["status"], "ok")
+        self.assertEqual(done["saved"], ["small"])
+        self.assertEqual(done["pruned"], ["big"])
+        self.assertEqual(ns, {"small": 1})
+        self.assertIsNone(repl._sigint_target)
+
     def test_untargeted_interrupt_in_done_task_handoff_is_not_parked(self):
         # The cell task is done but _run_guarded's finally has not run yet
         # (_active still names the rid, _finishing_rid is unset). An untargeted
@@ -1133,6 +1331,156 @@ class SnapshotPruneShieldTest(unittest.TestCase):
             self.assertEqual(ns, {})
             with open(manifest_path) as fh:
                 self.assertEqual(json.load(fh)["pruned"], ["big1", "big2"])
+
+
+class RestoreApplyShieldTest(unittest.TestCase):
+    """The restore assignment loop must not be split by a SIGINT-raised KeyboardInterrupt."""
+
+    def _write_snapshot(self, tmp: str, source: dict[str, object]) -> str:
+        path = os.path.join(tmp, "kernel-state.dill")
+        from rlm.repl import _snapshot_state
+
+        result = _snapshot_state(
+            source,
+            path,
+            os.path.join(tmp, "kernel-state.json"),
+            max_bytes=1 << 20,
+            max_variable_bytes=1 << 20,
+            prune_oversized=False,
+        )
+        self.assertNotIn("error", result)
+        return path
+
+    def setUp(self):
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+
+    class SigintOnNthSet(dict):
+        """Fires one synchronous SIGINT right after its Nth assignment."""
+
+        def __init__(self, fire_on: int) -> None:
+            super().__init__()
+            self.fire_on = fire_on
+            self.calls = 0
+
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            self.calls += 1
+            if self.calls == self.fire_on:
+                signal.raise_signal(signal.SIGINT)
+
+    def test_sigint_during_staging_leaves_namespace_unchanged(self):
+        import dill
+
+        from rlm.repl import _restore_state
+
+        real_loads = dill.loads
+        calls = {"n": 0}
+
+        def loads_then_sigint(blob):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                # Synchronous SIGINT mid-deserialize: nothing may have touched ns yet.
+                signal.raise_signal(signal.SIGINT)
+            return real_loads(blob)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_snapshot(tmp, {"a": 1, "b": 2})
+            ns = {"a": "old", "unrelated": "keep"}
+            with mock.patch.object(dill, "loads", loads_then_sigint):
+                with self.assertRaises(KeyboardInterrupt):
+                    _restore_state(ns, path)
+        # The old namespace is byte-identical: no partial old/new mixture.
+        self.assertEqual(ns, {"a": "old", "unrelated": "keep"})
+
+    def test_sigint_mid_apply_is_consumed_and_all_names_applied(self):
+        from rlm.repl import _restore_state
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_snapshot(tmp, {"a": 1, "b": 2})
+            ns = self.SigintOnNthSet(fire_on=1)
+            result = _restore_state(ns, path)
+        # The parked SIGINT is consumed: the committed restore reports success.
+        self.assertNotIn("error", result)
+        self.assertEqual(result["restored"], ["a", "b"])
+        self.assertEqual(dict(ns), {"a": 1, "b": 2})
+
+    def test_sigint_after_last_apply_is_consumed(self):
+        from rlm.repl import _restore_state
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_snapshot(tmp, {"a": 1, "b": 2})
+            ns = self.SigintOnNthSet(fire_on=2)
+            result = _restore_state(ns, path)
+        self.assertNotIn("error", result)
+        self.assertEqual(result["restored"], ["a", "b"])
+        self.assertEqual(dict(ns), {"a": 1, "b": 2})
+
+    def _restore_with_sigint_at_unpark(self):
+        """Real unparking swap, then the newly restored handler fires immediately."""
+        from rlm.repl import _restore_state
+
+        real_signal = signal.signal
+        state = {"calls": 0, "fired": False}
+
+        def swap_then_fire(sig, handler):
+            prev = real_signal(sig, handler)
+            state["calls"] += 1
+            if state["calls"] == 2:
+                # A SIGINT delivered while parked but first seen after the swap
+                # runs the restored raising handler inside _restore_state's tail.
+                state["fired"] = True
+                handler(sig, None)
+            return prev
+
+        committed: list = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_snapshot(tmp, {"a": 1, "b": 2})
+            ns: dict = {}
+            with mock.patch("signal.signal", swap_then_fire):
+                with self.assertRaises(KeyboardInterrupt):
+                    _restore_state(ns, path, committed)
+        self.assertTrue(state["fired"])
+        return committed, ns
+
+    def test_sigint_at_handler_restoration_publishes_committed_result(self):
+        # Every binding is applied by unpark time: the KeyboardInterrupt escapes
+        # this frame, but the filled box lets _handle_state report success.
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
+        committed, ns = self._restore_with_sigint_at_unpark()
+        self.assertEqual(committed[0]["restored"], ["a", "b"])
+        self.assertEqual(ns, {"a": 1, "b": 2})
+        self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
+
+    def test_sigint_at_handler_restoration_with_non_default_prior_handler(self):
+        fired = []
+
+        def prior(signum, frame):
+            fired.append(signum)
+            raise KeyboardInterrupt
+
+        previous = signal.signal(signal.SIGINT, prior)
+        self.addCleanup(signal.signal, signal.SIGINT, previous)
+        committed, ns = self._restore_with_sigint_at_unpark()
+        self.assertEqual(committed[0]["restored"], ["a", "b"])
+        self.assertEqual(ns, {"a": 1, "b": 2})
+        self.assertEqual(fired, [signal.SIGINT])
+        self.assertIs(signal.getsignal(signal.SIGINT), prior)
+
+    def test_handler_restored_and_no_interrupt_bleed(self):
+        from rlm.repl import _restore_state
+
+        original = signal.getsignal(signal.SIGINT)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write_snapshot(tmp, {"a": 1, "b": 2})
+            ns = self.SigintOnNthSet(fire_on=1)
+            result = _restore_state(ns, path)
+        self.assertNotIn("error", result)
+        self.assertIs(signal.getsignal(signal.SIGINT), original)
+        # Nothing parked bleeds into later work: a fresh SIGINT raises normally.
+        with self.assertRaises(KeyboardInterrupt):
+            signal.raise_signal(signal.SIGINT)
 
 
 class SnapshotTempCleanupTest(unittest.TestCase):

@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed a protocol interrupt during a REPL state restore leaving a mixed old/new namespace: names are now staged first and applied atomically with SIGINT parked across the apply, and an interrupt landing anywhere between a committed snapshot or restore and its request finishing is recovered instead of misreporting the completed operation as failed.
 - Fixed the REPL snapshot writer leaving a new payload beside a truncated manifest on mid-write failures: payload and manifest now commit via unique same-directory temp files and atomic renames with guaranteed cleanup, and an interrupt during cleanup can no longer misreport a completed destructive snapshot as failed.
 - Fixed a cell that rebound or ignored SIGINT (or a restored prior handler) permanently breaking protocol interrupts: the REPL runtime now re-asserts its SIGINT handler between cells.
 - Fixed the Python REPL runtime surviving its owning process's death while a non-yielding cell runs: an owner-watchdog thread now hard-exits the runtime (killing live bash children first) when the owner process dies.
