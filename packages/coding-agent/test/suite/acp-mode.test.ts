@@ -37,9 +37,9 @@ function injectWorkAfterHeadlessCompletion(
 ): () => boolean {
 	const waitForHeadlessCompletion = connection.waitForHeadlessCompletion.bind(connection);
 	let injected = false;
-	connection.waitForHeadlessCompletion = async () => {
-		const status = await waitForHeadlessCompletion();
-		if (!injected) {
+	connection.waitForHeadlessCompletion = async (options) => {
+		const status = await waitForHeadlessCompletion(options);
+		if (!options?.waitForRlmQuiescence && !injected) {
 			injected = true;
 			void session.prompt(text);
 			const deadline = Date.now() + 5_000;
@@ -249,12 +249,17 @@ describe("ACP mode end to end", () => {
 		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
 		const session = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
 
-		const first = await client.request("session/prompt", {
-			sessionId: session.sessionId,
-			prompt: [{ type: "text", text: "First turn" }],
-		});
-		expect(first.stopReason).toBe("end_turn");
-		expect(injected()).toBe(true);
+		let firstSettled = false;
+		const first = client
+			.request("session/prompt", {
+				sessionId: session.sessionId,
+				prompt: [{ type: "text", text: "First turn" }],
+			})
+			.finally(() => {
+				firstSettled = true;
+			});
+		await vi.waitFor(() => expect(injected()).toBe(true));
+		expect(firstSettled).toBe(false);
 		expect(harness.session.isStreaming).toBe(true);
 
 		let secondSettled = false;
@@ -269,6 +274,7 @@ describe("ACP mode end to end", () => {
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		expect(secondSettled).toBe(false);
 		releaseInjected();
+		await expect(first).resolves.toMatchObject({ stopReason: "end_turn" });
 		await expect(second).resolves.toMatchObject({ stopReason: "end_turn" });
 
 		const text = updates
@@ -279,7 +285,7 @@ describe("ACP mode end to end", () => {
 		harness.cleanup();
 	}, 5_000);
 
-	it("reports the queued turn's stop reason from a fresh autonomous status", async () => {
+	it("reports the prompt stop reason from its terminal autonomous status", async () => {
 		const harness = await createHarness({
 			autonomous: {
 				enabled: true,
@@ -293,38 +299,27 @@ describe("ACP mode end to end", () => {
 		const injectedHeld = new Promise<AssistantMessage>((resolve) => {
 			releaseInjected = () => resolve(fauxAssistantMessage("injected work done"));
 		});
-		harness.setResponses([
-			fauxAssistantMessage("turn one done"),
-			() => injectedHeld,
-			fauxAssistantMessage("turn two done"),
-		]);
+		harness.setResponses([fauxAssistantMessage("turn one done"), () => injectedHeld]);
 		const connection = new InProcessAgentConnection(runtimeHostFor(harness.session));
-		injectWorkAfterHeadlessCompletion(connection, harness.session, "injected work");
+		const injected = injectWorkAfterHeadlessCompletion(connection, harness.session, "injected work");
 		const { client } = connectAcpClient(connection);
 		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
 		const session = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
 
-		const first = await client.request("session/prompt", {
+		const prompt = client.request("session/prompt", {
 			sessionId: session.sessionId,
 			prompt: [{ type: "text", text: "First turn" }],
 		});
-		expect(first.stopReason).toBe("end_turn");
-		expect(harness.session.getAutonomousStatus().turnsUsed).toBe(1);
-
-		const second = client.request("session/prompt", {
-			sessionId: session.sessionId,
-			prompt: [{ type: "text", text: "Second turn" }],
-		});
-		await new Promise((resolve) => setTimeout(resolve, 50));
+		await vi.waitFor(() => expect(injected()).toBe(true));
 		releaseInjected();
-		await expect(second).resolves.toMatchObject({ stopReason: "max_turn_requests" });
+		await expect(prompt).resolves.toMatchObject({ stopReason: "max_turn_requests" });
 		expect(harness.session.getAutonomousStatus().turnsUsed).toBeGreaterThanOrEqual(
 			harness.session.getAutonomousStatus().limits.maxTurns,
 		);
 		harness.cleanup();
 	}, 5_000);
 
-	it("does not hold the prompt response open for detached work", async () => {
+	it("holds the prompt response open for causally admitted work", async () => {
 		const harness = await createHarness();
 		let releaseInjected!: () => void;
 		const injectedHeld = new Promise<AssistantMessage>((resolve) => {
@@ -352,7 +347,7 @@ describe("ACP mode end to end", () => {
 		}
 		expect(injected()).toBe(true);
 		await new Promise((resolve) => setTimeout(resolve, 100));
-		expect(settled).toBe(true);
+		expect(settled).toBe(false);
 		expect(harness.session.isStreaming).toBe(true);
 		releaseInjected();
 		await expect(prompt).resolves.toMatchObject({ stopReason: "end_turn" });
@@ -375,10 +370,11 @@ describe("ACP mode end to end", () => {
 		const { client } = connectAcpClient(connection);
 		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
 		const session = await client.request("session/new", { cwd: harness.tempDir, mcpServers: [] });
-		await client.request("session/prompt", {
+		const first = client.request("session/prompt", {
 			sessionId: session.sessionId,
 			prompt: [{ type: "text", text: "First turn" }],
 		});
+		await vi.waitFor(() => expect(harness.session.isStreaming).toBe(true));
 
 		const queued = client.request("session/prompt", {
 			sessionId: session.sessionId,
@@ -386,8 +382,9 @@ describe("ACP mode end to end", () => {
 		});
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		void client.notify("session/cancel", { sessionId: session.sessionId });
-		await expect(queued).resolves.toMatchObject({ stopReason: "cancelled" });
 		releaseInjected();
+		await expect(first).resolves.toBeDefined();
+		await expect(queued).resolves.toMatchObject({ stopReason: "cancelled" });
 		await new Promise((resolve) => setTimeout(resolve, 300));
 		const assistantText = harness.session.messages
 			.filter((message) => message.role === "assistant")
@@ -481,10 +478,12 @@ describe("ACP mode end to end", () => {
 		const { client, updates, close } = connectAcpClient(connection);
 		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
 		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
-		await client.request("session/prompt", {
-			sessionId: session.sessionId,
-			prompt: [{ type: "text", text: "delegate" }],
-		});
+		await expect(
+			client.request("session/prompt", {
+				sessionId: session.sessionId,
+				prompt: [{ type: "text", text: "delegate" }],
+			}),
+		).rejects.toThrow();
 		await vi.waitFor(() =>
 			expect(
 				updates
@@ -518,10 +517,18 @@ describe("ACP mode end to end", () => {
 		const { client, updates, close } = connectAcpClient(connection);
 		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
 		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
-		await client.request("session/prompt", {
-			sessionId: session.sessionId,
-			prompt: [{ type: "text", text: "delegate" }],
-		});
+		let firstSettled = false;
+		const firstPrompt = client
+			.request("session/prompt", {
+				sessionId: session.sessionId,
+				prompt: [{ type: "text", text: "delegate" }],
+			})
+			.finally(() => {
+				firstSettled = true;
+			});
+		await vi.waitFor(() => expect(promptCalls).toBe(1));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(firstSettled).toBe(false);
 
 		let metadata = updates.map((item) => item.update?._meta?.[PRIME_AGENT_META_NAMESPACE]).filter(Boolean);
 		expect(metadata.filter((item) => item.phase === "terminalQuiescence")).toHaveLength(0);
@@ -547,7 +554,54 @@ describe("ACP mode end to end", () => {
 		});
 		const sequences = metadata.map((item) => item.eventSequence);
 		expect(sequences).toEqual([...sequences].sort((left, right) => left - right));
+		await expect(firstPrompt).resolves.toBeDefined();
 		await nextPrompt;
+		expect(promptCalls).toBe(2);
+		close();
+	});
+
+	it("does not admit the next prompt while terminal settlement is still publishing", async () => {
+		let terminalPublicationStarted!: () => void;
+		let releaseTerminalPublication!: () => void;
+		const terminalPublicationStart = new Promise<void>((resolve) => {
+			terminalPublicationStarted = resolve;
+		});
+		const terminalPublicationRelease = new Promise<void>((resolve) => {
+			releaseTerminalPublication = resolve;
+		});
+		let promptCalls = 0;
+		let blockTerminalPublication = true;
+		const connection = fakeAcpConnection({
+			onPromptAndWait: () => {
+				promptCalls++;
+			},
+		});
+		const { client, close } = connectAcpClient(connection, {
+			beforeAcpUpdatePublish: async (update) => {
+				if (acpUpdatePhase(update) !== "terminalQuiescence" || !blockTerminalPublication) return;
+				blockTerminalPublication = false;
+				terminalPublicationStarted();
+				await terminalPublicationRelease;
+			},
+		});
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		const first = client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "first" }],
+		});
+		await terminalPublicationStart;
+		const second = client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "second" }],
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		const promptCallsBeforeSettlement = promptCalls;
+
+		releaseTerminalPublication();
+		await expect(first).resolves.toBeDefined();
+		await expect(second).resolves.toBeDefined();
+		expect(promptCallsBeforeSettlement).toBe(1);
 		expect(promptCalls).toBe(2);
 		close();
 	});
@@ -577,19 +631,25 @@ describe("ACP mode end to end", () => {
 				releaseBarrier();
 			},
 		});
-		const { client, close } = connectAcpClient(connection);
+		const { client, updates, close } = connectAcpClient(connection);
 		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
 		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
-		await client.request("session/prompt", {
+		const prompt = client.request("session/prompt", {
 			sessionId: session.sessionId,
 			prompt: [{ type: "text", text: "cancel twice" }],
 		});
+		await vi.waitFor(() =>
+			expect(
+				updates.some((item) => item.update?._meta?.[PRIME_AGENT_META_NAMESPACE]?.phase === "responseBoundary"),
+			).toBe(true),
+		);
 		await client.notify("session/cancel", { sessionId: session.sessionId });
 		await abortStarted;
 		await client.notify("session/cancel", { sessionId: session.sessionId });
 		await Promise.resolve();
 		expect(abortCalls).toBe(1);
 		releaseAbort();
+		await expect(prompt).resolves.toBeDefined();
 		await vi.waitFor(async () => {
 			await expect(
 				client.request("session/prompt", {
@@ -630,12 +690,18 @@ describe("ACP mode end to end", () => {
 		const { client, updates, close } = connectAcpClient(connection);
 		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
 		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
-		await client.request("session/prompt", {
+		const prompt = client.request("session/prompt", {
 			sessionId: session.sessionId,
 			prompt: [{ type: "text", text: "delegate" }],
 		});
+		await vi.waitFor(() =>
+			expect(
+				updates.some((item) => item.update?._meta?.[PRIME_AGENT_META_NAMESPACE]?.phase === "responseBoundary"),
+			).toBe(true),
+		);
 		await client.notify("session/cancel", { sessionId: session.sessionId });
 		await aborted;
+		await expect(prompt).resolves.toBeDefined();
 
 		const firstTurnTerminal = updates
 			.map((item) => item.update?._meta?.[PRIME_AGENT_META_NAMESPACE])
@@ -649,6 +715,37 @@ describe("ACP mode end to end", () => {
 				}),
 			).resolves.toBeDefined();
 		});
+		close();
+	});
+
+	it("reports cancellation while terminal settlement is still pending", async () => {
+		let terminalSettlementStarted!: () => void;
+		let releaseTerminalSettlement!: () => void;
+		const terminalSettlementStart = new Promise<void>((resolve) => {
+			terminalSettlementStarted = resolve;
+		});
+		const terminalSettlementRelease = new Promise<void>((resolve) => {
+			releaseTerminalSettlement = resolve;
+		});
+		const connection = fakeAcpConnection({
+			onWaitForHeadlessCompletion: async (options) => {
+				if (!options?.waitForRlmQuiescence) return;
+				terminalSettlementStarted();
+				await terminalSettlementRelease;
+			},
+			onAbort: () => releaseTerminalSettlement(),
+		});
+		const { client, close } = connectAcpClient(connection);
+		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
+		const prompt = client.request("session/prompt", {
+			sessionId: session.sessionId,
+			prompt: [{ type: "text", text: "cancel during terminal settlement" }],
+		});
+
+		await terminalSettlementStart;
+		await client.notify("session/cancel", { sessionId: session.sessionId });
+		await expect(prompt).resolves.toMatchObject({ stopReason: "cancelled" });
 		close();
 	});
 
@@ -671,11 +768,18 @@ describe("ACP mode end to end", () => {
 		const { client, updates, close } = connectAcpClient(connection);
 		await client.request("initialize", { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
 		const session = await client.request("session/new", { cwd: process.cwd(), mcpServers: [] });
-		await client.request("session/prompt", {
+		const prompt = client.request("session/prompt", {
 			sessionId: session.sessionId,
 			prompt: [{ type: "text", text: "delegate" }],
 		});
-		await client.request("session/close", { sessionId: session.sessionId });
+		await vi.waitFor(() =>
+			expect(
+				updates.some((item) => item.update?._meta?.[PRIME_AGENT_META_NAMESPACE]?.phase === "responseBoundary"),
+			).toBe(true),
+		);
+		const closing = client.request("session/close", { sessionId: session.sessionId });
+		await expect(prompt).resolves.toBeDefined();
+		await closing;
 		await Promise.resolve();
 
 		const terminal = updates

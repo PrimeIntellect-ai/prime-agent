@@ -20,12 +20,46 @@ function assistantDelta(type: "text_delta" | "thinking_delta", delta: string): A
 describe("ACP session event mapping", () => {
 	it("maps assistant text deltas to agent_message_chunk", () => {
 		const updates = acpUpdatesForSessionEvent(assistantDelta("text_delta", "hello"));
-		expect(updates).toEqual([{ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "hello" } }]);
+		expect(updates).toEqual([
+			{
+				sessionUpdate: "agent_message_chunk",
+				messageId: "prime-agent-assistant-1",
+				content: { type: "text", text: "hello" },
+			},
+		]);
 	});
 
 	it("maps thinking deltas to agent_thought_chunk, not visible text", () => {
 		const updates = acpUpdatesForSessionEvent(assistantDelta("thinking_delta", "reasoning"));
-		expect(updates).toEqual([{ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "reasoning" } }]);
+		expect(updates).toEqual([
+			{
+				sessionUpdate: "agent_thought_chunk",
+				messageId: "prime-agent-assistant-1",
+				content: { type: "text", text: "reasoning" },
+			},
+		]);
+	});
+
+	it("assigns one message id per assistant message", () => {
+		const state: AcpEventMappingState = {};
+		const message = { role: "assistant", content: [], usage: {} } as never;
+		const start = { type: "message_start", message } as AgentConnectionSessionEvent;
+		const end = { type: "message_end", message } as AgentConnectionSessionEvent;
+
+		expect(acpUpdatesForSessionEvent(start, state)).toEqual([]);
+		expect(acpUpdatesForSessionEvent(assistantDelta("thinking_delta", "think"), state)[0]).toMatchObject({
+			messageId: "prime-agent-assistant-1",
+		});
+		expect(acpUpdatesForSessionEvent(assistantDelta("text_delta", "answer"), state)[0]).toMatchObject({
+			messageId: "prime-agent-assistant-1",
+		});
+		expect(acpUpdatesForSessionEvent(end, state)).toEqual([]);
+		expect(state.activeAssistantMessageId).toBeUndefined();
+
+		expect(acpUpdatesForSessionEvent(start, state)).toEqual([]);
+		expect(acpUpdatesForSessionEvent(assistantDelta("text_delta", "next"), state)[0]).toMatchObject({
+			messageId: "prime-agent-assistant-2",
+		});
 	});
 
 	it("ignores empty deltas and non-assistant messages", () => {
