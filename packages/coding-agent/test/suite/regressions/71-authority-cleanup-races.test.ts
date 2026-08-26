@@ -391,4 +391,31 @@ describe("issue 71 authority cleanup races", () => {
 			"Agent run scope cleanup failed during session disposal",
 		);
 	});
+
+	it("gives concurrent disposeAsync callers the same terminal cleanup failure", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: false } } });
+		harnesses.push(harness);
+		let rejectCleanup!: (error: Error) => void;
+		const cleanup = new Promise<void>((_resolve, reject) => {
+			rejectCleanup = reject;
+		});
+		const sessionInternals = harness.session as unknown as {
+			_disposed: boolean;
+			_trackRunScopeCleanupOperation(operation: Promise<void>): Promise<void>;
+		};
+		void sessionInternals._trackRunScopeCleanupOperation(cleanup).catch(() => undefined);
+
+		const firstDisposal = harness.session.disposeAsync();
+		await vi.waitFor(() => expect(sessionInternals._disposed).toBe(true));
+		const concurrentDisposal = harness.session.disposeAsync();
+		rejectCleanup(new Error("terminal cleanup debt"));
+
+		const results = await Promise.allSettled([firstDisposal, concurrentDisposal]);
+		expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"]);
+		const [first, second] = results as [PromiseRejectedResult, PromiseRejectedResult];
+		expect(first.reason).toBe(second.reason);
+		expect(first.reason).toMatchObject({
+			message: "Agent run scope cleanup failed during session disposal",
+		});
+	});
 });

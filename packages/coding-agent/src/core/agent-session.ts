@@ -4067,15 +4067,18 @@ export class AgentSession {
 	 * the latest state reaches disk instead of racing process exit.
 	 */
 	async disposeAsync(): Promise<void> {
+		// Concurrent callers must adopt the exact in-flight teardown outcome,
+		// including cleanup debt discovered after synchronous dispose() marks the
+		// session disposed.
+		if (this._disposeAsyncPromise) {
+			return this._disposeAsyncPromise;
+		}
 		if (this._disposed) {
 			await this._drainRunScopeCleanupOperations();
 			return this._disposeCallbacksPromise;
 		}
 		// Concurrent callers await the same in-flight teardown so none resolves before
 		// the kernel snapshot flush finishes.
-		if (this._disposeAsyncPromise) {
-			return this._disposeAsyncPromise;
-		}
 		this._disposeAsyncPromise = (async () => {
 			// Drain before marking _disposing so a refine triggered at the final
 			// agent_end completes instead of being aborted by dispose().
