@@ -20,6 +20,7 @@ import os
 import platform
 import signal
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -649,52 +650,90 @@ def _snapshot_state(
         total += len(blob)
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = path + ".tmp"
-    try:
-        with open(tmp, "wb") as fh:
-            dill.dump(payload, fh)
-        os.replace(tmp, path)
-    except BaseException as err:  # noqa: BLE001 - never leave the temp file behind
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        if not isinstance(err, Exception):
-            raise  # e.g. KeyboardInterrupt: clean up, then propagate
-        return {"error": f"write failed: {err}"}
+    temps: list[str] = []
 
-    bytes_written = os.path.getsize(path)
-    saved = sorted(payload.keys())
-    pruned = sorted(name for name in oversized if name in ns) if prune_oversized else []
-    manifest = {
-        "version": 1,
-        "savedNames": saved,
-        "skipped": skipped,
-        "pruned": pruned,
-        "bytes": bytes_written,
-        "pythonVersion": sys.version.split()[0],
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    }
-    # A SIGINT-raised KeyboardInterrupt anywhere between the committed manifest and the
-    # last prune deletion would desync the namespace from the manifest: park SIGINT for
-    # the whole interval (manifest commit through deletions); it is consumed, see below.
+    def stage_temp(target: str, mode: str):
+        # Unique same-directory temps: a fixed '.tmp' name could alias the other
+        # final path (clobbering it) or collide with a concurrent snapshot.
+        fd, name = tempfile.mkstemp(
+            dir=os.path.dirname(target) or ".", prefix=os.path.basename(target) + ".", suffix=".tmp"
+        )
+        temps.append(name)
+        try:
+            return os.fdopen(fd, mode), name
+        except BaseException:
+            os.close(fd)  # fdopen never took ownership: the raw fd would leak
+            raise
+
+    def discard_temps() -> None:
+        for stale in temps:
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+
+    # Stage both temps before replacing anything: any failure up to the first
+    # replace leaves the previous payload+manifest pair fully intact.
+    stage = "write"
     parked: list[int] = []
-    previous = signal.signal(signal.SIGINT, lambda signum, frame: parked.append(signum))
+    handler_installed = False
+    previous = None
     try:
         try:
-            with open(manifest_path, "w") as fh:
+            fh, tmp = stage_temp(path, "wb")
+            with fh:
+                dill.dump(payload, fh)
+            bytes_written = os.path.getsize(tmp)
+            saved = sorted(payload.keys())
+            pruned = sorted(name for name in oversized if name in ns) if prune_oversized else []
+            manifest = {
+                "version": 1,
+                "savedNames": saved,
+                "skipped": skipped,
+                "pruned": pruned,
+                "bytes": bytes_written,
+                "pythonVersion": sys.version.split()[0],
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+            stage = "manifest write"
+            fh, manifest_tmp = stage_temp(manifest_path, "w")
+            with fh:
                 json.dump(manifest, fh)
+        except BaseException as err:  # noqa: BLE001 - Exception -> error dict, rest propagates
+            if not isinstance(err, Exception):
+                raise  # e.g. KeyboardInterrupt: clean up (outer finally), then propagate
+            return {"error": f"{stage} failed: {err}"}
+
+        # A SIGINT-raised KeyboardInterrupt anywhere from the first commit through the
+        # last cleanup removal would desync payload/manifest/namespace or misreport a
+        # committed snapshot: park SIGINT until the end; it is consumed, see below.
+        previous = signal.signal(signal.SIGINT, lambda signum, frame: parked.append(signum))
+        handler_installed = True
+        try:
+            os.replace(tmp, path)
+        except OSError as err:
+            return {"error": f"write failed: {err}"}
+        try:
+            os.replace(manifest_tmp, manifest_path)
         except OSError as err:
             # Fail before the prune deletions so a bad manifest path never destroys state.
             return {"error": f"manifest write failed: {err}"}
         for name in pruned:
             ns.pop(name, None)
     finally:
-        signal.signal(signal.SIGINT, previous)
-        # The parked SIGINT is consumed, not re-raised: with the manifest committed and
-        # the namespace pruned, the destructive snapshot has succeeded, and re-raising
-        # would misreport it as failed and risk the host discarding the only copy of
-        # the pruned variables. The interrupt targeted this now-complete request.
+        # The one guaranteed cleanup point (unique owned names: after a successful
+        # commit the renamed temps no longer exist, so this is a no-op). It runs with
+        # SIGINT still parked; the nested finally makes the restore the guaranteed
+        # last action even when cleanup itself fails.
+        try:
+            discard_temps()
+        finally:
+            if handler_installed:
+                signal.signal(signal.SIGINT, previous)
+                # The parked SIGINT is consumed, not re-raised: with the manifest committed and
+                # the namespace pruned, the destructive snapshot has succeeded, and re-raising
+                # would misreport it as failed and risk the host discarding the only copy of
+                # the pruned variables. The interrupt targeted this now-complete request.
     return {"saved": saved, "skipped": skipped, "pruned": pruned, "bytes": bytes_written}
 
 

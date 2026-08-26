@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fixed the REPL snapshot writer leaving a new payload beside a truncated manifest on mid-write failures: payload and manifest now commit via unique same-directory temp files and atomic renames with guaranteed cleanup, and an interrupt during cleanup can no longer misreport a completed destructive snapshot as failed.
 - Fixed the REPL runtime `list_names` request crashing the serve loop when the namespace held a non-string key; non-string keys are now skipped and every runtime request fails individually through the shared backstop instead of killing the loop.
 - Addressed REPL host-swap review findings: reworded stale IPython-specific busy/restart messages for the default kernel and stopped `restart()` from resurrecting a concurrently killed REPL kernel.
 - Fixed graceful REPL kernel `shutdown()` losing teardown ownership to its own child's exit handler, which made `restart()` misread the shutdown as superseded and never start the kernel again.
