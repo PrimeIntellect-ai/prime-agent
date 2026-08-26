@@ -864,6 +864,104 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         stale._proc.kill.assert_not_called()
         journal.assert_not_called()
 
+    async def test_kill_live_handles_blocked_on_abort_never_taskkills_after_close(self):
+        # PID-reuse guard on the abort path: abort's reaped+close section must block
+        # on _kill_lock while a raw-pid taskkill is in flight, so the handle can
+        # never close mid-taskkill.
+        order = []
+        spawned = []
+        journal_calls = []
+        entered, release_term = threading.Event(), threading.Event()
+        stdout_entered, stdout_release = threading.Event(), threading.Event()
+        tk_entered, tk_release = threading.Event(), threading.Event()
+
+        def spawn(job, argv, cwd, env):
+            proc = _win_spawn(spawned)(job, argv, cwd, env)
+            proc.kill = mock.Mock()
+            proc.close = mock.Mock(side_effect=lambda: order.append("proc-close"))
+            real_stdout = proc.stdout
+
+            def gated_close():
+                # Parks abort between its two locked sections (lock released).
+                stdout_entered.set()
+                assert stdout_release.wait(timeout=10)
+                real_stdout.close()
+
+            proc.stdout = mock.Mock(close=mock.Mock(side_effect=gated_close))
+            return proc
+
+        def journal(pid, active):
+            journal_calls.append((pid, active))
+            return not active  # enrollment fails -> _abort_spawn; retirement succeeds
+
+        def terminate(job):
+            order.append("abort-terminate")
+            entered.set()
+            assert release_term.wait(timeout=10)
+            return True
+
+        def taskkill(pid):
+            # Blocks INSIDE the killer's locked section: abort must wait on the lock.
+            order.append(("killer-taskkill", spawned[0].close.called))
+            tk_entered.set()
+            assert tk_release.wait(timeout=10)
+            return True
+
+        self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
+        loop = asyncio.get_running_loop()
+        with mock.patch.object(bash_module, "_IS_POSIX", False):
+            with mock.patch.object(bash_module._winjob, "spawn_in_job", spawn):
+                with mock.patch.object(bash_module._winjob, "create_job", return_value=900):
+                    with mock.patch.object(
+                        bash_module._winjob, "terminate", side_effect=terminate
+                    ) as term:
+                        with mock.patch.object(
+                            bash_module._winjob, "close",
+                            side_effect=lambda job: order.append("abort-jobclose"),
+                        ):
+                            with mock.patch.object(bash_module, "_record_journal", journal):
+                                with mock.patch.object(
+                                    bash_module, "_taskkill_tree", side_effect=taskkill
+                                ):
+                                    ctor = loop.run_in_executor(
+                                        None, lambda: bash("echo hi")
+                                    )
+                                    self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                                    # Phase 1: abort holds _kill_lock -> the killer blocks.
+                                    killer = loop.run_in_executor(
+                                        None, bash_module._kill_live_handles
+                                    )
+                                    await asyncio.sleep(0.2)
+                                    self.assertFalse(killer.done())
+                                    self.assertFalse(tk_entered.is_set())
+                                    # Phase 2: abort parks at stdout; the killer takes the
+                                    # lock and blocks inside taskkill while holding it.
+                                    release_term.set()
+                                    self.assertTrue(
+                                        await asyncio.to_thread(tk_entered.wait, 5)
+                                    )
+                                    stdout_release.set()
+                                    # Abort finishes stdout/wait but must block on the
+                                    # lock: close cannot run while taskkill is in flight.
+                                    await asyncio.sleep(0.3)
+                                    self.assertFalse(ctor.done())
+                                    self.assertFalse(spawned[0].close.called)
+                                    # Phase 3: taskkill returns, killer releases the lock,
+                                    # abort's reaped+close section finally runs.
+                                    tk_release.set()
+                                    with self.assertRaisesRegex(RuntimeError, "journal"):
+                                        await asyncio.wait_for(ctor, timeout=10)
+                                    await asyncio.wait_for(killer, timeout=10)
+        self.assertEqual(
+            order,
+            ["abort-terminate", "abort-jobclose", ("killer-taskkill", False), "proc-close"],
+        )
+        self.assertEqual(spawned[0].close.call_count, 1)  # once, only after taskkill returned
+        term.assert_called_once()  # the killer saw _job None; no second terminate
+        spawned[0].kill.assert_not_called()
+        pid = spawned[0].pid
+        self.assertEqual(journal_calls, [(pid, True), (pid, False), (pid, False)])
+
     async def test_windows_job_reap_and_kill(self):
         handle = bash("sleep 30")
         job = 777

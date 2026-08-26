@@ -552,28 +552,33 @@ class BashHandle:
             self._status_read = self._wake_read = self._wake_write = -1
             delivered = _signal_group(self._pid, signal.SIGKILL)
         else:
-            delivered = False
-            if self._job is not None:
-                delivered = _winjob.terminate(self._job)
-                job, self._job = self._job, None
-                _winjob.close(job)
-            if not delivered:
-                # Pre-resume abort: the never-run leader has no descendants, so a
-                # delivered kill retires the journal record.
-                try:
-                    self._proc.kill()
-                    delivered = True
-                except OSError:
-                    pass
+            with self._kill_lock:
+                delivered = False
+                if self._job is not None:
+                    delivered = _winjob.terminate(self._job)
+                    job, self._job = self._job, None
+                    _winjob.close(job)
+                if not delivered:
+                    # Pre-resume abort: the never-run leader has no descendants, so a
+                    # delivered kill retires the journal record.
+                    try:
+                        self._proc.kill()
+                        delivered = True
+                    except OSError:
+                        pass
         if self._proc.stdout is not None:
             self._proc.stdout.close()
+        # The blocking wait stays outside the lock: hProcess is still open, so a
+        # concurrent raw-pid fallback stays pinned to the right process.
         try:
             self._proc.wait(timeout=5)
         except (OSError, subprocess.SubprocessError):
             pass
-        self._reaped = True
-        if not _IS_POSIX:
-            cast("_winjob.JobProcess", self._proc).close()
+        with self._kill_lock:
+            self._reaped = True
+            if not _IS_POSIX:
+                # Reaped commits before close: later lock holders skip raw-pid fallbacks.
+                cast("_winjob.JobProcess", self._proc).close()
         with _live_lock:
             _live_handles.discard(self)
         if delivered:
