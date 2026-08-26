@@ -417,6 +417,21 @@ class ReplTest(unittest.TestCase):
         follow = self.repl.execute("after-sync", "1+1")
         self.assertEqual(one(follow, "result")["text"], "2")
 
+    def test_interrupt_survives_cell_rebinding_sigint(self):
+        # A cell that ignores SIGINT must not break protocol interrupts for later cells.
+        events = self.repl.execute(
+            "rebind", "import signal\nsignal.signal(signal.SIGINT, signal.SIG_IGN)"
+        )
+        self.assertEqual(one(events, "done")["status"], "ok")
+        events = self._interrupt_after_running(
+            "sync-after-rebind", "import time\nwhile True:\n    time.sleep(0.05)"
+        )
+        error = one(events, "error")
+        self.assertEqual(error["ename"], "KeyboardInterrupt")
+        self.assertEqual(one(events, "done")["status"], "error")
+        follow = self.repl.execute("after-rebind", "5+5")
+        self.assertEqual(one(follow, "result")["text"], "10")
+
     def test_interrupt_await_suspended(self):
         events = self._interrupt_after_running(
             "await", "import asyncio\nawait asyncio.sleep(1e9)"
