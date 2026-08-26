@@ -1,14 +1,14 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
+import * as publicApi from "../src/index.js";
+import { complete, stream, Type } from "../src/index.js";
 import {
-	complete,
 	fauxAssistantMessage,
 	fauxText,
 	fauxThinking,
 	fauxToolCall,
 	registerFauxProvider,
-	stream,
-	Type,
-} from "../src/index.js";
+} from "../src/providers/faux.js";
 import type { AssistantMessageEvent, Context } from "../src/types.js";
 
 async function collectEvents(streamResult: ReturnType<typeof stream>): Promise<AssistantMessageEvent[]> {
@@ -28,6 +28,13 @@ afterEach(() => {
 });
 
 describe("faux provider", () => {
+	it("is exposed only through the explicit test subpath", () => {
+		expect("registerFauxProvider" in publicApi).toBe(false);
+		const packageJson = readFileSync(new URL("../package.json", import.meta.url), "utf8");
+		expect(packageJson).toContain('"./faux"');
+		expect(packageJson).toContain('"./dist/providers/faux.js"');
+	});
+
 	it("registers a custom provider and estimates usage", async () => {
 		const registration = registerFauxProvider();
 		registrations.push(registration);

@@ -1,4 +1,4 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/faux";
 import { describe, expect, it, vi } from "vitest";
 import type { HostRequestHandlers } from "../../../src/core/kernel/index.js";
 import { SessionManager } from "../../../src/core/session-manager.js";

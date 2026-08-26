@@ -658,18 +658,17 @@ The library uses a registry of API implementations. Built-in APIs include:
 
 ### Faux provider for tests
 
-`registerFauxProvider()` registers a temporary in-memory provider for tests and demos. It is opt-in and not part of the built-in provider set.
+`registerFauxProvider()` registers a temporary in-memory provider for tests and demos. It is available only from the explicit test-only `@earendil-works/pi-ai/faux` entrypoint and is not part of the production root entrypoint or built-in provider set.
 
 ```typescript
+import { complete, stream } from '@earendil-works/pi-ai';
 import {
-  complete,
   fauxAssistantMessage,
   fauxText,
   fauxThinking,
   fauxToolCall,
-  registerFauxProvider,
-  stream,
-} from 'prime-agent-ai';
+  registerFauxProvider
+} from '@earendil-works/pi-ai/faux';
 
 const registration = registerFauxProvider({
   tokensPerSecond: 50 // optional

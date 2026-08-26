@@ -10,6 +10,10 @@
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js"
 		},
+		"./faux": {
+			"types": "./dist/providers/faux.d.ts",
+			"import": "./dist/providers/faux.js"
+		},
 		"./anthropic": {
 			"types": "./dist/providers/anthropic.d.ts",
 			"import": "./dist/providers/anthropic.js"

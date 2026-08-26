@@ -1,5 +1,6 @@
 import * as acp from "@agentclientprotocol/sdk";
-import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/faux";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.js";
 import type { AgentSessionRuntime } from "../../src/core/agent-session-runtime.js";

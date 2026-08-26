@@ -10,7 +10,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/faux";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreateAgentSessionRuntimeFactory } from "../../src/core/agent-session-runtime.js";
 import { SessionManager } from "../../src/core/session-manager.js";

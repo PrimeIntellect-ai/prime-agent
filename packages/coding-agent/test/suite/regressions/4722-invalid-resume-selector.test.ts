@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/faux";
 import { afterEach, describe, expect, it } from "vitest";
 import { parseArgs } from "../../../src/cli/args.js";
 import {

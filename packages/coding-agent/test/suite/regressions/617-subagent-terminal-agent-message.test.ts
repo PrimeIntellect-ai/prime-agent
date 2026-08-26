@@ -1,4 +1,4 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/faux";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CustomMessage } from "../../../src/core/messages.js";
 import { waitForHeadlessCompletion } from "../../../src/modes/headless-completion.js";

@@ -1,5 +1,6 @@
 import type { AgentTool, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/faux";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentCronJob } from "../../src/core/cron-jobs.js";

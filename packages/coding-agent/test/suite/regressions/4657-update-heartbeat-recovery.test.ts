@@ -1,4 +1,4 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/faux";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.js";
 import { AgentCronJobStore, type AgentCronScheduler } from "../../../src/core/cron-jobs.js";

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/faux";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentCronJobStore, AgentCronScheduler } from "../../../src/core/cron-jobs.js";
 import { createHarness, type Harness } from "../harness.js";

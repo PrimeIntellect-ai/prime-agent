@@ -1,15 +1,12 @@
+import type { AssistantMessage, Model, ToolResultMessage, UserMessage } from "@earendil-works/pi-ai";
 import {
-	type AssistantMessage,
 	type FauxProviderRegistration,
 	fauxAssistantMessage,
 	fauxText,
 	fauxThinking,
 	fauxToolCall,
-	type Model,
 	registerFauxProvider,
-	type ToolResultMessage,
-	type UserMessage,
-} from "@earendil-works/pi-ai";
+} from "@earendil-works/pi-ai/faux";
 import { afterEach, describe, expect, it } from "vitest";
 import { Agent, type AgentEvent } from "../src/index.js";
 import { calculateTool } from "./utils/calculate.js";

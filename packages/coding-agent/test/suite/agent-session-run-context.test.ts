@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { type Context, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import type { Context } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/faux";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	createHostRequestHandler,

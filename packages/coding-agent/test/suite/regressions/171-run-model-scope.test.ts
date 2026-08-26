@@ -1,11 +1,5 @@
-import {
-	type Context,
-	fauxAssistantMessage,
-	fauxToolCall,
-	type Model,
-	registerFauxProvider,
-	type SimpleStreamOptions,
-} from "@earendil-works/pi-ai";
+import type { Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@earendil-works/pi-ai/faux";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../../../src/core/auth-storage.js";
 import { ModelRegistry } from "../../../src/core/model-registry.js";

@@ -5,13 +5,8 @@
  * active goal queues its continuation as a session input before compaction.
  */
 import type { AgentMessage, ShouldStopAfterTurnContext } from "@earendil-works/pi-agent-core";
-import {
-	type AssistantMessage,
-	fauxAssistantMessage,
-	fauxToolCall,
-	type ToolResultMessage,
-	type Usage,
-} from "@earendil-works/pi-ai";
+import type { AssistantMessage, ToolResultMessage, Usage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/faux";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.js";

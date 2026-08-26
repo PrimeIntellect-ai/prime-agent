@@ -1,4 +1,5 @@
-import { fauxAssistantMessage, getApiProvider, registerFauxProvider } from "../../../ai/src/index.js";
+import { getApiProvider } from "../../../ai/src/index.js";
+import { fauxAssistantMessage, registerFauxProvider } from "../../../ai/src/providers/faux.js";
 import type { ExtensionAPI } from "../../src/index.js";
 
 export default function registerRpcEofFauxProvider(pi: ExtensionAPI): void {
