@@ -1,0 +1,4 @@
+- Added one universal AVO runtime with automatic general, coding, and research routing across direct, iterative, and long task horizons.
+- Added host-authoritative candidate evaluation, durable lineage, namespaced NOOA memory, and lazy retained supervision with automatic stagnation escalation.
+- Added `/avo`, `/mode`, `/horizon`, and a localhost `prime-agent avo dashboard` phase graph while retaining the autoresearch dashboard alias.
+- Hardened research promotion gates with host-derived search, publication, reviewer-query, inspected-paper, and evidence-binding receipts.

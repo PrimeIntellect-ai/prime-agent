@@ -82,6 +82,7 @@ export {
 	parseAutoresearchSearchReceiptInput,
 	parseAutoresearchSupervisionInput,
 } from "./core/autoresearch.js";
+export * from "./core/avo/index.js";
 // Compaction
 export {
 	type BranchPreparation,

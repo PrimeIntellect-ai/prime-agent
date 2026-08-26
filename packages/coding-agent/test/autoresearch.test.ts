@@ -123,6 +123,16 @@ function passingReviewers() {
 		role,
 		verdict: "pass",
 		summary: `${role} passed`,
+		queries: [`${role} query`],
+		inspected_paper_ids: ["doi:10.1000/example-1"],
+		evidence_bindings: [
+			{
+				paper_id: "doi:10.1000/example-1",
+				exact_pointer: "Section 3",
+				finding: `${role} checked the candidate against the verified paper`,
+			},
+		],
+		collision_paper_ids: [],
 		objections: [],
 	}));
 }
@@ -419,7 +429,16 @@ describe("autoresearch control plane", () => {
 			...rejectedCycle(1),
 			outcome: "survived",
 			rejection_reason: undefined,
-			gates: gates(),
+			gates: gates({
+				important: false,
+				unresolved: false,
+				publication_backed: false,
+				mechanistically_motivated: false,
+				falsifiable: false,
+				feasible: false,
+				closest_prior_work_analyzed: false,
+				broader_relevance: false,
+			}),
 			motivation_paper_ids: ["doi:10.1000/example-1", "doi:10.1000/example-2"],
 			closest_prior_work_paper_ids: ["doi:10.1000/example-1"],
 		};
@@ -438,6 +457,12 @@ describe("autoresearch control plane", () => {
 		);
 		recordSearchReceipts(value, parsedCandidate);
 		expect(value.recordCycle(parseAutoresearchCycleInput(raw, NOW)).cycle).toMatchObject({
+			gates: {
+				important: true,
+				unresolved: true,
+				publicationBacked: true,
+				falsifiable: true,
+			},
 			searchCoverage: {
 				mechanismQueries: true,
 				surveysOrReviews: true,
@@ -793,6 +818,16 @@ describe("autoresearch control plane", () => {
 			role: "prior_art_killer",
 			verdict: "reject",
 			summary: "A direct collision exists.",
+			queries: ["same mechanism query"],
+			inspected_paper_ids: ["doi:10.1000/example-1"],
+			evidence_bindings: [
+				{
+					paper_id: "doi:10.1000/example-1",
+					exact_pointer: "Section 4",
+					finding: "The same mechanism was evaluated.",
+				},
+			],
+			collision_paper_ids: ["doi:10.1000/example-1"],
 			objections: ["Paper X evaluates the same mechanism."],
 		})}`;
 		expect(parseAutoresearchAgentPayload(message, NOW)).toMatchObject({
@@ -843,6 +878,8 @@ describe("autoresearch control plane", () => {
 		for (const [role, prompt] of Object.entries(prompts)) {
 			expect(prompt).toContain(`role value MUST be the literal machine identifier "${role}"`);
 			expect(prompt).toContain("objections MUST be an array of strings");
+			expect(prompt).toContain("inspected_paper_ids");
+			expect(prompt).toContain("evidence_bindings");
 			expect(prompt).toContain("a final chat response alone does not count");
 		}
 	});

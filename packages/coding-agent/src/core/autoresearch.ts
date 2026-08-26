@@ -223,6 +223,14 @@ export interface AutoresearchReviewerResult {
 	verdict: AutoresearchReviewerVerdict;
 	summary: string;
 	objections: string[];
+	queries: string[];
+	inspectedPaperIds: string[];
+	evidenceBindings: Array<{
+		paperId: string;
+		exactPointer: string;
+		finding: string;
+	}>;
+	collisionPaperIds: string[];
 }
 
 export interface AutoresearchProblemGates {
@@ -1132,11 +1140,43 @@ export function parseAutoresearchSearchReceiptInput(
 
 function parseReviewer(value: unknown, index: number): AutoresearchReviewerResult {
 	const source = requireRecord(value, `cycle.reviewers[${index}]`);
+	const rawBindings = source.evidence_bindings ?? source.evidenceBindings ?? [];
+	if (!Array.isArray(rawBindings)) throw new Error(`cycle.reviewers[${index}].evidence_bindings must be an array`);
 	return {
 		role: enumValue(source.role, REVIEWER_ROLES, `cycle.reviewers[${index}].role`),
 		verdict: enumValue(source.verdict, REVIEWER_VERDICTS, `cycle.reviewers[${index}].verdict`),
 		summary: requireString(source.summary, `cycle.reviewers[${index}].summary`),
 		objections: optionalStringArray(source.objections, `cycle.reviewers[${index}].objections`),
+		queries: optionalStringArray(source.queries, `cycle.reviewers[${index}].queries`),
+		inspectedPaperIds: normalizeList(
+			optionalStringArray(
+				source.inspected_paper_ids ?? source.inspectedPaperIds,
+				`cycle.reviewers[${index}].inspected_paper_ids`,
+			),
+		),
+		evidenceBindings: rawBindings.map((binding, bindingIndex) => {
+			const record = requireRecord(binding, `cycle.reviewers[${index}].evidence_bindings[${bindingIndex}]`);
+			return {
+				paperId: requireString(
+					record.paper_id ?? record.paperId,
+					`cycle.reviewers[${index}].evidence_bindings[${bindingIndex}].paper_id`,
+				),
+				exactPointer: requireString(
+					record.exact_pointer ?? record.exactPointer,
+					`cycle.reviewers[${index}].evidence_bindings[${bindingIndex}].exact_pointer`,
+				),
+				finding: requireString(
+					record.finding,
+					`cycle.reviewers[${index}].evidence_bindings[${bindingIndex}].finding`,
+				),
+			};
+		}),
+		collisionPaperIds: normalizeList(
+			optionalStringArray(
+				source.collision_paper_ids ?? source.collisionPaperIds,
+				`cycle.reviewers[${index}].collision_paper_ids`,
+			),
+		),
 	};
 }
 
@@ -1327,7 +1367,19 @@ export function parseAutoresearchCycleInput(value: unknown, now = new Date().toI
 		),
 		publications: rawPublications.map((item) => parseAutoresearchPublicationInput(item, now)),
 		fieldMaps: parseFieldMaps(source.field_maps ?? source.fieldMaps),
-		gates: parseGates(source.gates),
+		gates:
+			source.gates === undefined
+				? {
+						important: false,
+						unresolved: false,
+						publicationBacked: false,
+						mechanisticallyMotivated: false,
+						falsifiable: false,
+						feasible: false,
+						closestPriorWorkAnalyzed: false,
+						broaderRelevance: false,
+					}
+				: parseGates(source.gates),
 		searchCoverage: emptySearchCoverage(),
 		motivationPaperIds: normalizeList(
 			optionalStringArray(source.motivation_paper_ids ?? source.motivationPaperIds, "cycle.motivation_paper_ids"),
@@ -1374,14 +1426,14 @@ function validateCycleGate(input: AutoresearchCycleInput, reviewers?: Autoresear
 	if (input.outcome !== "survived" && input.outcome !== "promoted") return;
 	const failedReview = reviewers.find((reviewer) => reviewer.verdict !== "pass");
 	if (failedReview) throw new Error(`surviving candidates require passing reviews; ${failedReview.role} did not pass`);
-	const failedGate = Object.entries(input.gates).find(([, passed]) => !passed);
-	if (failedGate) throw new Error(`surviving candidates require every problem gate; ${failedGate[0]} did not pass`);
 	const missingCoverage = Object.entries(input.searchCoverage).find(([, covered]) => !covered);
 	if (missingCoverage) {
 		throw new Error(
 			`surviving candidates require complete literature-search coverage; ${missingCoverage[0]} is missing`,
 		);
 	}
+	const failedGate = Object.entries(input.gates).find(([, passed]) => !passed);
+	if (failedGate) throw new Error(`surviving candidates require every problem gate; ${failedGate[0]} did not pass`);
 	if (input.motivationPaperIds.length < 2) {
 		throw new Error("surviving candidates require at least two motivation_paper_ids");
 	}
@@ -2431,12 +2483,95 @@ export class AutoresearchStore {
 		return structuredClone(claim);
 	}
 
+	private deriveProblemGates(
+		input: AutoresearchCycleInput,
+		reviewers: AutoresearchReviewerResult[],
+	): AutoresearchProblemGates {
+		const verifiedPaperIds = new Set(this.state.publicationVerifications.map((receipt) => receipt.paperId));
+		const motivationVerified =
+			input.motivationPaperIds.length >= 2 &&
+			input.motivationPaperIds.every((paperId) => verifiedPaperIds.has(paperId));
+		const closestVerified =
+			input.closestPriorWorkPaperIds.length > 0 &&
+			input.closestPriorWorkPaperIds.every((paperId) => verifiedPaperIds.has(paperId));
+		const literature = reviewers.find((reviewer) => reviewer.role === "literature_auditor");
+		const priorArt = reviewers.find((reviewer) => reviewer.role === "prior_art_killer");
+		const experimental = reviewers.find((reviewer) => reviewer.role === "experimental_critic");
+		const editor = reviewers.find((reviewer) => reviewer.role === "top_tier_editor");
+		const completeSearchCoverage = Object.values(input.searchCoverage).every(Boolean);
+		const promotedClaimsCoverMotivation =
+			input.outcome !== "promoted" ||
+			input.motivationPaperIds.every((paperId) =>
+				input.canonicalPromotionIds.some((claimId) =>
+					this.state.claims
+						.find((claim) => claim.claimId === claimId)
+						?.supportingEvidence.some(
+							(binding) => binding.sourceType === "publication" && binding.sourceId === paperId,
+						),
+				),
+			);
+		return {
+			important: motivationVerified && editor?.verdict === "pass" && input.candidate.motivation.trim().length > 0,
+			unresolved:
+				completeSearchCoverage &&
+				priorArt?.verdict === "pass" &&
+				priorArt.collisionPaperIds.length === 0 &&
+				input.candidate.unresolvedQuestions.length > 0,
+			publicationBacked: motivationVerified && promotedClaimsCoverMotivation && literature?.verdict === "pass",
+			mechanisticallyMotivated:
+				experimental?.verdict === "pass" && input.candidate.mechanisticMotivation.trim().length > 0,
+			falsifiable: experimental?.verdict === "pass" && input.candidate.falsifier.trim().length > 0,
+			feasible:
+				experimental?.verdict === "pass" &&
+				input.candidate.experimentDesign.trim().length > 0 &&
+				input.candidate.baselinePlan.trim().length > 0,
+			closestPriorWorkAnalyzed:
+				closestVerified &&
+				priorArt?.verdict === "pass" &&
+				input.closestPriorWorkPaperIds.every((paperId) => priorArt.inspectedPaperIds.includes(paperId)) &&
+				input.candidate.closestPriorArt.trim().length > 0,
+			broaderRelevance: editor?.verdict === "pass" && input.candidate.broaderRelevance.trim().length > 0,
+		};
+	}
+
+	private validateReviewerEvidenceForSurvival(
+		input: AutoresearchCycleInput,
+		reviewers: AutoresearchReviewerResult[],
+	): void {
+		if (input.outcome !== "survived" && input.outcome !== "promoted") return;
+		const verifiedPaperIds = new Set(this.state.publicationVerifications.map((receipt) => receipt.paperId));
+		const priorArt = reviewers.find((reviewer) => reviewer.role === "prior_art_killer");
+		const literature = reviewers.find((reviewer) => reviewer.role === "literature_auditor");
+		if (!priorArt || priorArt.queries.length === 0 || priorArt.inspectedPaperIds.length === 0) {
+			throw new Error("surviving candidates require prior-art reviewer queries and inspected_paper_ids");
+		}
+		if (!literature || literature.evidenceBindings.length === 0) {
+			throw new Error("surviving candidates require literature reviewer evidence_bindings");
+		}
+		for (const reviewer of reviewers) {
+			for (const paperId of [
+				...reviewer.inspectedPaperIds,
+				...reviewer.collisionPaperIds,
+				...reviewer.evidenceBindings.map((binding) => binding.paperId),
+			]) {
+				if (!verifiedPaperIds.has(paperId)) {
+					throw new Error(`reviewer evidence references unverified paper ${paperId}`);
+				}
+			}
+			if (reviewer.collisionPaperIds.some((paperId) => !reviewer.inspectedPaperIds.includes(paperId))) {
+				throw new Error(`${reviewer.role} collision_paper_ids must be included in inspected_paper_ids`);
+			}
+		}
+	}
+
 	recordCycle(input: AutoresearchCycleInput): AutoresearchCycleResult {
 		if (!this.state.objective) throw new Error("initialize autoresearch before completing a cycle");
 		const reviewers = this.getCollectedReviews(input.candidate.candidateId);
 		const searchEvidence = this.deriveSearchCoverage(input.candidate);
 		input.searchCoverage = searchEvidence.coverage;
+		input.gates = this.deriveProblemGates(input, reviewers);
 		validateCycleGate(input, reviewers);
+		this.validateReviewerEvidenceForSurvival(input, reviewers);
 		const digest = candidateDigest(input.candidate);
 		for (const reviewer of reviewers) {
 			const assignment = this.state.reviewerAssignments.find(
@@ -2891,7 +3026,7 @@ export function buildAutoresearchReviewerPrompts(
 		2,
 	);
 	const response = (role: AutoresearchReviewerRole): string =>
-		`Your task succeeds only after agent_message.send delivers the marked verdict to the parent; a final chat response alone does not count. Send the literal line AUTORESEARCH_REVIEW_JSON:${candidate.candidateId}, then exactly one JSON object matching this shape: {"candidate_id":"${candidate.candidateId}","role":"${role}","verdict":"revise","summary":"one concise string","objections":["one objection string","another objection string"]}. objections MUST be an array of strings—never objects, nested records, or null. The role value MUST be the literal machine identifier "${role}"—never a reviewer label such as "Reviewer A" or "reviewer_c". verdict must be exactly pass, revise, or reject. Call await agent_message.send(marked_json_text, receiver_role='parent') before finishing; if delivery errors, correct the marked JSON and retry once. Treat missing evidence as missing; never invent a source.`;
+		`Your task succeeds only after agent_message.send delivers the marked verdict to the parent; a final chat response alone does not count. Send the literal line AUTORESEARCH_REVIEW_JSON:${candidate.candidateId}, then exactly one JSON object matching this shape: {"candidate_id":"${candidate.candidateId}","role":"${role}","verdict":"revise","summary":"one concise string","queries":["query actually run"],"inspected_paper_ids":["verified paper_id"],"evidence_bindings":[{"paper_id":"verified paper_id","exact_pointer":"section/page/result","finding":"what this evidence establishes"}],"collision_paper_ids":[],"objections":["one objection string","another objection string"]}. queries, inspected_paper_ids, evidence_bindings, collision_paper_ids, and objections MUST be arrays—never null. In particular, objections MUST be an array of strings. Use empty arrays when genuinely inapplicable. The role value MUST be the literal machine identifier "${role}"—never a reviewer label such as "Reviewer A" or "reviewer_c". verdict must be exactly pass, revise, or reject. A prior_art_killer pass requires actual queries and inspected papers; a literature_auditor pass requires evidence bindings. collision_paper_ids must be a subset of inspected_paper_ids. Call await agent_message.send(marked_json_text, receiver_role='parent') before finishing; if delivery errors, correct the marked JSON and retry once. Treat missing evidence as missing; never invent a source.`;
 	return {
 		literature_auditor: `Act as Reviewer A, the Literature Auditor. Verify whether every problem-statement claim is supported and whether wording exceeds the evidence. Inspect full text when available.\n\n${shared}\n\n${response("literature_auditor")}`,
 		prior_art_killer: `Act as Reviewer B, the Prior-Art Killer. Use Prime's native search/web tools to search synonyms, adjacent terminology, backward references, forward citations, related work, and recent preprints for the same mechanism. Try to kill novelty aggressively.\n\n${shared}\n\n${response("prior_art_killer")}`,

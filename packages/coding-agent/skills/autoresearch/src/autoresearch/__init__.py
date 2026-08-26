@@ -109,7 +109,6 @@ def execution_contract() -> dict[str, Any]:
             "trajectory_fingerprint",
             "publications",
             "field_maps",
-            "gates",
             "motivation_paper_ids",
             "closest_prior_work_paper_ids",
             "preliminary_evidence_experiment_ids",
@@ -123,16 +122,10 @@ def execution_contract() -> dict[str, Any]:
             "methods_and_evaluations",
             "closest_prior_work",
         ],
-        "gate_keys": [
-            "important",
-            "unresolved",
-            "publication_backed",
-            "mechanistically_motivated",
-            "falsifiable",
-            "feasible",
-            "closest_prior_work_analyzed",
-            "broader_relevance",
-        ],
+        "problem_gates": (
+            "Host-derived from verified publications, search receipts, reviewer evidence, "
+            "candidate structure, claims, and experiments; callers never submit gate booleans."
+        ),
         "cycle_sequence": [
             "native search",
             "add and host-verify important publications",
@@ -998,6 +991,7 @@ async def complete_cycle(
     """Commit a cycle, message the retained supervisor, and ingest its response."""
     canonical_cycle = dict(_object(cycle, "cycle"))
     canonical_cycle.pop("reviewers", None)
+    canonical_cycle.pop("gates", None)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + max(0.0, timeout)
     response = await host_request(

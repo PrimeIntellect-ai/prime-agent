@@ -235,8 +235,10 @@ Allowed sources are `google_search`, `arxiv`, `crossref`, `publisher`,
 `repository`, `citation_graph`, and `other`.
 
 Complete the cycle with the candidate, the publications first encountered in
-that cycle, the **entire current** field map, and all problem gates. Do not pass
-reviewer verdicts; the host joins the assigned children’s collected results:
+that cycle, and the **entire current** field map. Do not pass problem-gate
+booleans or reviewer verdicts. The host derives all eight gates from verified
+publication/search/experiment receipts and evidence-rich results from its
+assigned reviewer children:
 
 ```python
 checkpoint = await autoresearch.complete_cycle({
@@ -254,16 +256,6 @@ checkpoint = await autoresearch.complete_cycle({
         "methods_and_evaluations": ["..."],
         "closest_prior_work": ["..."],
     },
-    "gates": {
-        "important": True,
-        "unresolved": False,
-        "publication_backed": True,
-        "mechanistically_motivated": True,
-        "falsifiable": True,
-        "feasible": True,
-        "closest_prior_work_analyzed": True,
-        "broader_relevance": True,
-    },
     "motivation_paper_ids": ["doi:10.1234/example", "arxiv:2608.12345"],
     "closest_prior_work_paper_ids": ["doi:10.1234/example"],
     "preliminary_evidence_experiment_ids": [],
@@ -273,7 +265,8 @@ checkpoint = await autoresearch.complete_cycle({
 
 Every completed major cycle requires all four host-bound reviewer roles.
 `survived` and `promoted` additionally require all four verdicts to pass, all
-eight problem gates, host-derived complete search coverage, at least two
+eight host-derived problem gates, reviewer query/paper/evidence receipts,
+host-derived complete search coverage, at least two
 verified motivation papers, and a ledger-backed closest-prior-work comparison.
 `promoted` additionally requires
 an already-canonical claim and at least one completed preliminary experiment.

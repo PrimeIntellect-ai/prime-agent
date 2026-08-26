@@ -121,6 +121,23 @@ import {
 	parseAutoresearchSearchReceiptInput,
 	parseAutoresearchSupervisionInput,
 } from "./autoresearch.js";
+import {
+	AVO_ENVIRONMENTS,
+	AVO_HORIZONS,
+	AVO_SKILL_NAME,
+	type AvoEnvironmentSelection,
+	type AvoHorizonSelection,
+	AvoSessionRuntime,
+	buildAvoRuntimePrompt,
+	buildAvoSupervisorBootstrapPrompt,
+	buildAvoSupervisorPacket,
+	buildAvoSupervisorPrompt,
+	parseAvoCandidateInput,
+	parseAvoCycleInput,
+	parseAvoEvaluationInput,
+	parseAvoMemoryInput,
+	parseAvoSupervisorMessage,
+} from "./avo/index.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 import {
 	COMPACT_SKILL_NAME,
@@ -1197,6 +1214,8 @@ export class AgentSession {
 	private _rlmHeartbeatController?: AgentRlmHeartbeatController;
 	private _agentMessageController?: AgentSessionMessageController;
 	private _agentObserveController?: AgentObserveController;
+	private _avoRuntime?: AvoSessionRuntime;
+	private _avoSupervisorBoundToRuntime = false;
 	private _autoresearchStore?: AutoresearchStore;
 	private _autoresearchSupervisorBoundToRuntime = false;
 	private _mcpManager?: McpManager;
@@ -1328,6 +1347,15 @@ export class AgentSession {
 		const resolvedRlmMaxDepth = this._resolveRlmMaxDepth();
 		this._rlmMaxDepth = resolvedRlmMaxDepth.maxDepth;
 		this._rlmMaxDepthSource = resolvedRlmMaxDepth.source;
+		this._avoRuntime =
+			this._rlmDepth === 0
+				? new AvoSessionRuntime(
+						this.sessionManager.getSessionArtifactDir(),
+						this.sessionManager.getSessionId(),
+						undefined,
+						this._cwd,
+					)
+				: undefined;
 		this._autoresearchStore =
 			this._rlmDepth === 0
 				? new AutoresearchStore(this.sessionManager.getSessionArtifactDir(), undefined, this._cwd)
@@ -3242,6 +3270,311 @@ export class AgentSession {
 		}
 	}
 
+	private _requireAvoRuntime(): AvoSessionRuntime {
+		if (!this._avoRuntime || this._rlmDepth !== 0) {
+			throw new Error("AVO state is only available in a root agent session");
+		}
+		return this._avoRuntime;
+	}
+
+	private _formatAvoStatus(): string {
+		const state = this._requireAvoRuntime().getState();
+		const gate = this._requireAvoRuntime().evaluateStopGate();
+		return [
+			`AVO environment: ${state.routing.environment} (selection: ${state.environmentSelection})`,
+			`AVO horizon: ${state.routing.horizon} (selection: ${state.horizonSelection})`,
+			`Status: ${state.status}; cycles: ${state.cycles.length}; candidates: ${state.candidates.length}`,
+			`Final gate: ${gate.passed ? "passed" : `blocked — ${gate.reasons.join("; ")}`}`,
+		].join("\n");
+	}
+
+	private _handleAvoSlashCommand(command: SessionSlashCommand): string {
+		const runtime = this._requireAvoRuntime();
+		let target: "mode" | "horizon" | "status" = "status";
+		let value = command.args.trim();
+		if (command.name === "mode") target = "mode";
+		else if (command.name === "horizon") target = "horizon";
+		else if (value) {
+			const match = /^(status|mode|horizon)(?:\s+(.+))?$/.exec(value);
+			if (!match) throw new Error("Usage: /avo [status|mode <value>|horizon <value>]");
+			target = match[1] as "mode" | "horizon" | "status";
+			value = (match[2] ?? "").trim();
+		}
+		if (target === "status" || !value) return this._formatAvoStatus();
+		if (target === "mode") {
+			if (value !== "auto" && !AVO_ENVIRONMENTS.includes(value as (typeof AVO_ENVIRONMENTS)[number])) {
+				throw new Error("AVO mode must be auto, general, coding, or research");
+			}
+			runtime.configure({ environment: value as AvoEnvironmentSelection, source: "user" });
+		} else {
+			if (value !== "auto" && !AVO_HORIZONS.includes(value as (typeof AVO_HORIZONS)[number])) {
+				throw new Error("AVO horizon must be auto, direct, iterative, or long");
+			}
+			runtime.configure({ horizon: value as AvoHorizonSelection, source: "user" });
+		}
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
+		return this._formatAvoStatus();
+	}
+
+	private _syncAvoResearchState(): void {
+		if (!this._avoRuntime || !this._autoresearchStore) return;
+		const state = this._autoresearchStore.getState();
+		this._avoRuntime.syncResearchState(
+			state,
+			this._autoresearchStore.evaluateStopGate(),
+			this._avoRuntime.researchStatePath(),
+		);
+	}
+
+	private async _ensureAvoSupervisor(): Promise<{ rlmChildId: string; name: string }> {
+		const runtime = this._requireAvoRuntime();
+		if (!this._agentMessageController) throw new Error("AVO supervision requires retained-child messaging");
+		const state = runtime.getState();
+		if (!state.objective) throw new Error("initialize AVO before starting its supervisor");
+		const children = (await this.listRlmSubagents()).subagents;
+		if (state.supervisor && this._avoSupervisorBoundToRuntime) {
+			const retained = children.find(
+				(child) =>
+					child.rlm_child_id === state.supervisor?.rlmChildId || child.session_name === state.supervisor?.name,
+			);
+			if (retained && retained.status !== "error") {
+				this._avoSupervisorBoundToRuntime = true;
+				return { rlmChildId: retained.rlm_child_id, name: retained.session_name };
+			}
+		}
+		const suffix = this.sessionId.replace(/[^A-Za-z0-9]/g, "").slice(-8) || randomUUID().slice(0, 8);
+		const preferredName = `avo-supervisor-${suffix}`;
+		const name = children.some((child) => child.session_name === preferredName)
+			? `${preferredName}-${randomUUID().slice(0, 8)}`
+			: preferredName;
+		const handle = await this.runRlmChild(buildAvoSupervisorBootstrapPrompt(), { name });
+		runtime.store.setSupervisor({ rlmChildId: handle.rlm_child_id, name: handle.name });
+		this._avoSupervisorBoundToRuntime = true;
+		return { rlmChildId: handle.rlm_child_id, name: handle.name };
+	}
+
+	private async _dispatchAvoCheckpoint(
+		supervisor: { rlmChildId: string; name: string },
+		cycleId: string,
+	): Promise<{ receipt?: AgentSessionMessageReceipt; error?: string }> {
+		try {
+			await this._awaitPendingRlmChildSettlement(supervisor.name);
+			const runtime = this._requireAvoRuntime();
+			const state = runtime.getState();
+			const adapter = runtime.adapters.get(state.routing.environment);
+			const rawContext = adapter.buildSupervisorContext(state);
+			const rawContextJson = JSON.stringify(rawContext);
+			const context =
+				rawContextJson.length <= 3_500
+					? rawContext
+					: {
+							truncated: true,
+							sha256: createHash("sha256").update(rawContextJson).digest("hex"),
+							contextPrefix: rawContextJson.slice(0, 3_000),
+						};
+			const packet = buildAvoSupervisorPacket(state, context);
+			const serialized = JSON.stringify(packet);
+			const boundedPacket =
+				serialized.length <= 7_000
+					? serialized
+					: JSON.stringify({
+							packet_version: 1,
+							truncated: true,
+							sha256: createHash("sha256").update(serialized).digest("hex"),
+							run_id: state.runId,
+							objective: state.objective?.slice(0, 1_500),
+							environment: state.routing.environment,
+							horizon: state.routing.horizon,
+							latest_checkpoint: state.checkpoints.at(-1),
+							adapter_context: context,
+						});
+			const prompt = `${buildAvoSupervisorPrompt(state, cycleId, context)}\n\n[host packet]\n${boundedPacket}`;
+			if (prompt.length > 16_384) throw new Error("AVO supervisor prompt exceeds the retained-message limit");
+			const receipt = await this._agentMessageController!.sendAgentMessage({
+				target: assertDirectAgentMessageTarget(supervisor.name),
+				message: normalizeAgentSessionMessage(prompt),
+			});
+			return { receipt };
+		} catch (error) {
+			return { error: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	private async _collectAvoSupervisorResults(): Promise<{
+		ingested: number;
+		supervision: ReturnType<AvoSessionRuntime["getState"]>["supervision"];
+		errors: string[];
+	}> {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		const supervisor = state.supervisor;
+		if (!supervisor) return { ingested: 0, supervision: state.supervision, errors: [] };
+		let ingested = 0;
+		const errors: string[] = [];
+		const messages = [...this.messages];
+		for (const action of this._actionStore.unfinishedActions()) {
+			if (action.payload.kind === "turn" && action.payload.customMessage)
+				messages.push(action.payload.customMessage);
+		}
+		const pendingCycles = state.cycles.filter(
+			(cycle) =>
+				!state.supervision.some(
+					(review) => review.cycleId === cycle.cycleId && review.source === "retained_supervisor",
+				),
+		);
+		for (const cycle of pendingCycles) {
+			const marker = `AVO_SUPERVISION_JSON:${cycle.cycleId}`;
+			const message = [...messages]
+				.reverse()
+				.find(
+					(item) =>
+						isAgentSessionMessage(item) &&
+						item.details.message.includes(marker) &&
+						item.details.from?.sessionName === supervisor.name,
+				);
+			let text = message && isAgentSessionMessage(message) ? message.details.message : undefined;
+			if (!text) {
+				const children = (await this.listRlmSubagents()).subagents;
+				const child =
+					children.find(
+						(item) => item.rlm_child_id === supervisor.rlmChildId || item.session_name === supervisor.name,
+					) ?? this._persistedAutoresearchSubagent(supervisor.rlmChildId, supervisor.name);
+				if (child?.status === "completed" || child?.status === "error") {
+					text = this._readAutoresearchTerminal(child, marker);
+				}
+			}
+			if (!text) continue;
+			try {
+				const parsed = parseAvoSupervisorMessage(text, cycle.cycleId);
+				runtime.store.recordSupervision({ ...parsed, source: "retained_supervisor" });
+				ingested += 1;
+			} catch (error) {
+				errors.push(error instanceof Error ? error.message : String(error));
+			}
+		}
+		return { ingested, supervision: runtime.getState().supervision, errors };
+	}
+
+	async handleAvoHostRequest(type: string, payload: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+		const runtime = this._requireAvoRuntime();
+		switch (type) {
+			case "avo.initialize": {
+				if (typeof payload.objective !== "string") throw new Error("avo.initialize objective must be a string");
+				const state = runtime.store.initialize(
+					payload.objective,
+					typeof payload.prompt === "string" ? payload.prompt : payload.objective,
+				);
+				return { state };
+			}
+			case "avo.get":
+				return { state: runtime.getState() };
+			case "avo.configure": {
+				const environment = payload.environment;
+				const horizon = payload.horizon;
+				if (
+					environment !== undefined &&
+					environment !== "auto" &&
+					!AVO_ENVIRONMENTS.includes(environment as (typeof AVO_ENVIRONMENTS)[number])
+				) {
+					throw new Error("AVO environment must be auto, general, coding, or research");
+				}
+				if (
+					horizon !== undefined &&
+					horizon !== "auto" &&
+					!AVO_HORIZONS.includes(horizon as (typeof AVO_HORIZONS)[number])
+				) {
+					throw new Error("AVO horizon must be auto, direct, iterative, or long");
+				}
+				if (environment === undefined && horizon === undefined)
+					throw new Error("avo.configure requires environment or horizon");
+				return {
+					state: runtime.configure({
+						environment: environment as AvoEnvironmentSelection | undefined,
+						horizon: horizon as AvoHorizonSelection | undefined,
+						source: "model",
+					}),
+				};
+			}
+			case "avo.candidate.add":
+				return { candidate: runtime.recordCandidate(parseAvoCandidateInput(payload.candidate)) };
+			case "avo.evaluation.record":
+				return { evaluation: runtime.recordEvaluation(parseAvoEvaluationInput(payload.evaluation)) };
+			case "avo.cycle.complete": {
+				const result = runtime.completeCycle(parseAvoCycleInput(payload.cycle));
+				if (!result.activateSupervisor) return result;
+				let supervisor: { rlmChildId: string; name: string };
+				try {
+					supervisor = await this._ensureAvoSupervisor();
+				} catch (error) {
+					return {
+						...result,
+						supervisor: null,
+						delivery: { error: error instanceof Error ? error.message : String(error) },
+					};
+				}
+				const delivery = await this._dispatchAvoCheckpoint(supervisor, result.cycle.cycleId);
+				return { ...result, supervisor, delivery };
+			}
+			case "avo.results.collect":
+				return await this._collectAvoSupervisorResults();
+			case "avo.memory.remember":
+				return { memory: runtime.store.remember(parseAvoMemoryInput(payload.memory)) };
+			case "avo.memory.recall": {
+				if (typeof payload.query !== "string") throw new Error("avo.memory.recall query must be a string");
+				if (payload.limit !== undefined && typeof payload.limit !== "number")
+					throw new Error("avo.memory.recall limit must be a number");
+				const state = runtime.getState();
+				return {
+					memories: runtime.store.recall(payload.query, ["shared", state.routing.environment], payload.limit ?? 8),
+				};
+			}
+			case "avo.memory.reflection.record": {
+				const trigger = payload.trigger;
+				if (
+					trigger !== "five_cycles" &&
+					trigger !== "supervisor_intervention" &&
+					trigger !== "candidate_acceptance" &&
+					trigger !== "manual"
+				) {
+					throw new Error("invalid AVO memory reflection trigger");
+				}
+				if (!isObjectRecord(payload.report)) throw new Error("AVO memory reflection report must be an object");
+				const report: Record<string, number | string | boolean> = {};
+				for (const [key, value] of Object.entries(payload.report)) {
+					if (typeof value !== "number" && typeof value !== "string" && typeof value !== "boolean") {
+						throw new Error(`AVO memory reflection report.${key} must be scalar`);
+					}
+					report[key] = value;
+				}
+				if (
+					!Array.isArray(payload.archived_memory_ids) ||
+					!payload.archived_memory_ids.every((item) => typeof item === "string")
+				) {
+					throw new Error("AVO archived_memory_ids must be an array of strings");
+				}
+				return {
+					reflection: runtime.store.recordMemoryReflection({
+						trigger,
+						cycleId: typeof payload.cycle_id === "string" ? payload.cycle_id : undefined,
+						report,
+						archivedMemoryIds: payload.archived_memory_ids,
+					}),
+				};
+			}
+			case "avo.checkpoint":
+				return { checkpoint: runtime.getState().checkpoints.at(-1) ?? null };
+			case "avo.stop_gate":
+				await this._collectAvoSupervisorResults();
+				return { stop_gate: runtime.evaluateStopGate() };
+			case "avo.complete":
+				await this._collectAvoSupervisorResults();
+				return { state: runtime.complete() };
+			default:
+				throw new Error(`unknown AVO request type "${type}"`);
+		}
+	}
+
 	private _requireAutoresearchStore(): AutoresearchStore {
 		if (!this._autoresearchStore || this._rlmDepth !== 0) {
 			throw new Error("autoresearch is only available in a root agent session");
@@ -3800,6 +4133,7 @@ export class AgentSession {
 				}
 				store.initialize(payload.objective, payload.topic);
 				const supervisor = await this._ensureAutoresearchSupervisor();
+				this._syncAvoResearchState();
 				return { state: store.getState(), supervisor };
 			}
 			case "autoresearch.get":
@@ -3956,6 +4290,7 @@ export class AgentSession {
 				const timeoutMs = parseAutoresearchSupervisorTimeoutMs(payload.supervisor_timeout_ms);
 				const collection = await this._collectAutoresearchAgentResults();
 				const result = store.recordCycle(parseAutoresearchCycleInput(payload.cycle));
+				this._syncAvoResearchState();
 				let supervisor: { rlmChildId: string; name: string };
 				try {
 					supervisor = await this._ensureAutoresearchSupervisor();
@@ -3994,12 +4329,14 @@ export class AgentSession {
 			}
 			case "autoresearch.stop_gate":
 				await this._collectAutoresearchAgentResults();
+				this._syncAvoResearchState();
 				return { stop_gate: store.evaluateStopGate() };
 			case "autoresearch.export": {
 				if (payload.final !== undefined && typeof payload.final !== "boolean") {
 					throw new Error("autoresearch.export final must be a boolean when provided");
 				}
 				await this._collectAutoresearchAgentResults();
+				this._syncAvoResearchState();
 				return { deliverable: store.exportDeliverable(payload.final === true) };
 			}
 			default:
@@ -5198,8 +5535,9 @@ export class AgentSession {
 
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const appendSystemPrompt =
-			loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : undefined;
+		const avoPrompt = this._avoRuntime ? buildAvoRuntimePrompt(this._avoRuntime.getState()) : undefined;
+		const appendSystemPromptParts = [...loaderAppendSystemPrompt, ...(avoPrompt ? [avoPrompt] : [])];
+		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;
 		const loadedSkills = this._modelVisibleSkills();
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
@@ -5742,6 +6080,11 @@ export class AgentSession {
 				}
 				const schedule = options?.streamingBehavior ?? "followUp";
 				const prefixMessages = visibleQueued ? this._takePendingNextTurnMessages() : undefined;
+				if (!isInternalPrompt && this._avoRuntime) {
+					this._avoRuntime.observeRootPrompt(normalized.text);
+					this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+					this.agent.state.systemPrompt = this._baseSystemPrompt;
+				}
 				const content = options?.content
 					? options.content.map((block) => ({ ...block }))
 					: this._buildPromptContent(normalized.text, normalized.images);
@@ -6921,6 +7264,11 @@ export class AgentSession {
 					break;
 				case "autonomous":
 					await this._handleAutonomousSlashCommand(input.text);
+					break;
+				case "avo":
+				case "mode":
+				case "horizon":
+					resultText = this._handleAvoSlashCommand(input.command);
 					break;
 			}
 			if (resultText) {
@@ -9904,6 +10252,9 @@ export class AgentSession {
 		if (!canRunAutoresearch) {
 			skills = skills.filter((skill) => skill.name !== AUTORESEARCH_SKILL_NAME);
 		}
+		if (this._rlmDepth !== 0) {
+			skills = skills.filter((skill) => skill.name !== AVO_SKILL_NAME);
+		}
 		return skills;
 	}
 
@@ -10033,6 +10384,25 @@ export class AgentSession {
 				"autoresearch.export",
 			]) {
 				handlers[type] = async (payload) => this.handleAutoresearchHostRequest(type, payload);
+			}
+		}
+		if (visibleKernelSkillNames.has(AVO_SKILL_NAME)) {
+			for (const type of [
+				"avo.initialize",
+				"avo.get",
+				"avo.configure",
+				"avo.candidate.add",
+				"avo.evaluation.record",
+				"avo.cycle.complete",
+				"avo.results.collect",
+				"avo.memory.remember",
+				"avo.memory.recall",
+				"avo.memory.reflection.record",
+				"avo.checkpoint",
+				"avo.stop_gate",
+				"avo.complete",
+			]) {
+				handlers[type] = async (payload) => this.handleAvoHostRequest(type, payload);
 			}
 		}
 		if (this._mcpManager) {

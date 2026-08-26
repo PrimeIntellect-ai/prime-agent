@@ -5,6 +5,8 @@ import { runMcpManagementCommand } from "../core/mcp/mcp-command.js";
 import { SettingsManager } from "../core/settings-manager.js";
 import { handlePackageCommand, isSelfUpdateSource } from "../package-manager-cli.js";
 import { INTERNAL_RUNTIME_COMMAND_MARKER, parseArgs } from "./args.js";
+import { runAutoresearchDashboardCommand } from "./autoresearch-dashboard.js";
+import { runAvoDashboardCommand } from "./avo-dashboard.js";
 import {
 	findCommandSuggestion,
 	formatCommandHelp,
@@ -106,8 +108,10 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			return runNestedAgentCommand("schedule", "cron", args.slice(1));
 		case "status":
 			return runStatus(args.slice(1));
+		case "avo":
+			await runAvoDashboardCommand(args.slice(1));
+			return HANDLED;
 		case "autoresearch": {
-			const { runAutoresearchDashboardCommand } = await import("./autoresearch-dashboard.js");
 			await runAutoresearchDashboardCommand(args.slice(1));
 			return HANDLED;
 		}
