@@ -722,8 +722,7 @@ def _snapshot_state(
         for name in pruned:
             ns.pop(name, None)
         result = {"saved": saved, "skipped": skipped, "pruned": pruned, "bytes": bytes_written}
-        # Publish while still parked: a KeyboardInterrupt raised into this task at
-        # any later frame finds the committed result in the box (see _handle_state).
+        # Publish while still parked: a later KeyboardInterrupt into this task finds the committed result (see _handle_state).
         if committed is not None:
             committed.append(result)
     finally:
@@ -770,15 +769,12 @@ def _restore_state(
         except Exception as err:  # noqa: BLE001 - revive every other name regardless
             failed.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
     result = {"restored": sorted(staged), "failed": failed}
-    # A SIGINT-raised KeyboardInterrupt mid-assignment would leave a mixed old/new
-    # namespace: park SIGINT across the whole apply so it is all-or-nothing; the
-    # parked interrupt is consumed by the commit (same semantics as snapshot).
+    # Park SIGINT across the whole apply so it is all-or-nothing; the parked interrupt is consumed by the commit (as in snapshot).
     previous = signal.signal(signal.SIGINT, lambda signum, frame: None)
     try:
         for name, value in staged.items():
             ns[name] = value
-        # Publish while still parked: a KeyboardInterrupt raised into this task at
-        # any later frame finds the committed result in the box (see _handle_state).
+        # Publish while still parked: a later KeyboardInterrupt into this task finds the committed result (see _handle_state).
         if committed is not None:
             committed.append(result)
     finally:
@@ -848,10 +844,7 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
         and error is not None
         and error.get("ename") == "KeyboardInterrupt"
     ):
-        # Recover only a protocol interrupt (_sigint_handler set the flag before
-        # raising) that landed after the commit filled the box: report the
-        # committed success. A user-originated KeyboardInterrupt (no provenance)
-        # keeps today's interrupted reporting.
+        # Recover only a protocol interrupt that landed after the commit; a user KeyboardInterrupt keeps interrupted reporting.
         status, result, error = "ok", committed[0], None
     if status != "ok":
         reason = "interrupted" if error and error.get("ename") == "KeyboardInterrupt" else (
