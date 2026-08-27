@@ -1065,7 +1065,7 @@ export class AgentSession {
 	private _pendingSessionActionFenceWaiters = 0;
 	private readonly _sessionActionCommitContext = new AsyncLocalStorage<symbol>();
 	private readonly _sessionActionCommitDisposeAbortController = new AbortController();
-	// Checkpoint and handoff waiters share lifecycle-edge notifications to avoid polling.
+	// Checkpoint, handoff, and activity waiters share lifecycle-edge notifications to avoid polling.
 	private readonly _sessionInputCheckpointWaiters = new Set<() => void>();
 	private _pendingNextTurnMessages: CustomMessage[] = [];
 
@@ -2506,6 +2506,7 @@ export class AgentSession {
 			if (this._refineInFlight === applySettled) {
 				this._refineInFlight = undefined;
 			}
+			this._notifySessionInputCheckpointChange();
 			this._scheduleSessionInputPump();
 		}
 	}
@@ -2714,6 +2715,7 @@ export class AgentSession {
 			if (this._refineInFlight === applySettled) {
 				this._refineInFlight = undefined;
 			}
+			this._notifySessionInputCheckpointChange();
 			this._scheduleSessionInputPump();
 		}
 	}
@@ -3704,6 +3706,7 @@ export class AgentSession {
 			this._retryResolve();
 			this._retryResolve = undefined;
 			this._retryPromise = undefined;
+			this._notifySessionInputCheckpointChange();
 			this._scheduleSessionInputPump();
 		}
 	}
@@ -6583,6 +6586,19 @@ export class AgentSession {
 		for (const resolve of waiters) resolve();
 	}
 
+	private _waitForSessionActivityChange(signal: AbortSignal): Promise<void> {
+		return new Promise<void>((resolve) => {
+			const finish = () => {
+				this._sessionInputCheckpointWaiters.delete(finish);
+				signal.removeEventListener("abort", finish);
+				resolve();
+			};
+			this._sessionInputCheckpointWaiters.add(finish);
+			signal.addEventListener("abort", finish, { once: true });
+			if (signal.aborted) finish();
+		});
+	}
+
 	private _observeSessionActionDeferral(action: QueuedSessionAction): {
 		deferred: Promise<void>;
 		stop(): void;
@@ -7375,6 +7391,7 @@ export class AgentSession {
 				this._compactionOperation = undefined;
 			}
 			resolveCompactionOperation();
+			this._notifySessionInputCheckpointChange();
 			this._scheduleSessionInputPump();
 			if (didCompact) {
 				this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
@@ -7505,6 +7522,7 @@ export class AgentSession {
 		this._postCompactionContinuationSettlement = undefined;
 		if (error) settlement.reject(error);
 		else settlement.resolve();
+		this._notifySessionInputCheckpointChange();
 	}
 
 	private _cancelPostCompactionContinue(): void {
@@ -8019,6 +8037,7 @@ export class AgentSession {
 			if (this._refineInFlight === applySettled) {
 				this._refineInFlight = undefined;
 			}
+			this._notifySessionInputCheckpointChange();
 			this._scheduleSessionInputPump();
 		}
 	}
@@ -8597,6 +8616,7 @@ export class AgentSession {
 			return false;
 		} finally {
 			this._autoCompactionAbortController = undefined;
+			this._notifySessionInputCheckpointChange();
 			this._scheduleSessionInputPump();
 		}
 	}
@@ -10036,12 +10056,9 @@ export class AgentSession {
 		try {
 			while (true) {
 				await wait(this.waitForHeadlessIdle());
-				// Strong RLM quiescence also owns session-level work (bash, refine,
-				// branch mutation, and manual compaction) that interactive waitForIdle
-				// intentionally ignores. Yield a macrotask while such work is active so
-				// recursive parent/child barriers cannot form a microtask busy-loop.
+				// Strong RLM quiescence also owns work that interactive waitForIdle ignores.
 				if (this.isSessionActive || this._hasDeferredRlmTerminalNotices()) {
-					await wait(new Promise<void>((resolve) => setTimeout(resolve, 0)));
+					await wait(this._waitForSessionActivityChange(cancellation.signal));
 					continue;
 				}
 				const unsettledRuns = [...this._unsettledRlmChildRuns].filter((run) => !run.settled);
@@ -10941,6 +10958,7 @@ export class AgentSession {
 			return result;
 		} finally {
 			this._bashAbortController = undefined;
+			this._notifySessionInputCheckpointChange();
 		}
 	}
 
@@ -10985,6 +11003,7 @@ export class AgentSession {
 			);
 		} finally {
 			this._userBashRunning = false;
+			this._notifySessionInputCheckpointChange();
 		}
 		// Emitted after the slot is released so clients never observe a bash_end
 		// while the session still rejects new commands as already running.
@@ -11444,6 +11463,7 @@ export class AgentSession {
 				this._branchSummaryOperation = undefined;
 			}
 			resolveBranchSummaryOperation();
+			this._notifySessionInputCheckpointChange();
 		}
 	}
 
