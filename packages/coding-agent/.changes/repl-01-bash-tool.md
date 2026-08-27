@@ -1,0 +1,2 @@
+- Added an async-by-default `bash()` callable to the kernel runtime: it returns a live handle immediately (pid/tail/poll/kill/await), bounds in-memory output, and enrolls children in the orphan-process journal so kernel teardown reaps them.
+- Fixed bash() orphan-journal writes marking a child inactive even when the kill signal was not delivered; the record now stays active on delivery failure so the host reaper still owns the process (on Windows a shell that already exited counts as delivered, so clean exits still retire their record).

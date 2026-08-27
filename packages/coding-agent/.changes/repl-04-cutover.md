@@ -1,0 +1,2 @@
+- Changed the kernel to a minimal Python REPL: `%%bash` cells, `%cd`, `%env`, and `!` escapes were replaced by `bash('cmd')` and `os.chdir(...)`/`os.environ[...]` (magic-style cells fail with a plain Python `SyntaxError`); startup is faster and memory use is lower.
+- Removed the Jupyter/ipykernel kernel client; existing kernel venvs are rebuilt once (slimmer, no ipykernel) on next start.
