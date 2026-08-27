@@ -3,11 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
-import shutil
-import subprocess
-from pathlib import Path
 from typing import Any
 
 from rlm import host_request
@@ -15,7 +10,7 @@ from rlm import host_request
 
 def execution_contract() -> dict[str, Any]:
     return {
-        "contract_version": 6,
+        "contract_version": 7,
         "forbid_runtime_introspection": True,
         "host_enforces_completion_and_canonical_delivery": True,
         "environments": ["general", "coding", "research"],
@@ -52,6 +47,9 @@ def execution_contract() -> dict[str, Any]:
             "external_source_fetch": "await avo.fetch_external_source(url)",
             "external_url_evidence": "await avo.bind_url(candidate_id, claim_id, url, exact_quote)",
             "opinion": "await avo.record_evaluation(model_opinion_dict)",
+            "experiment": "await avo.record_experiment(experiment_dict)",
+            "trial": "await avo.run_trial(experiment_id, candidate_id, command)",
+            "experiment_complete": "await avo.complete_experiment(experiment_id)",
             "cycle": "await avo.complete_cycle({'candidate_id': candidate_id})",
             "gate": "await avo.stop_gate()",
         },
@@ -114,6 +112,59 @@ async def record_evaluation(evaluation: dict[str, Any]) -> dict[str, Any]:
     return await host_request(
         "avo.evaluation.record",
         {"evaluation": evaluation},
+    )
+
+
+async def record_experiment(experiment: dict[str, Any]) -> dict[str, Any]:
+    return await host_request(
+        "avo.experiment.record",
+        {"experiment": _object(experiment, "experiment")},
+    )
+
+
+async def record_trial(trial: dict[str, Any]) -> dict[str, Any]:
+    return await host_request(
+        "avo.trial.record",
+        {"trial": _object(trial, "trial")},
+    )
+
+
+async def run_trial(
+    experiment_id: str,
+    candidate_id: str,
+    command: str,
+    *,
+    label: str | None = None,
+    seed: str | None = None,
+) -> dict[str, Any]:
+    if not isinstance(experiment_id, str) or not experiment_id.strip():
+        raise ValueError("experiment_id must be a non-empty string")
+    evaluation_response = await run_evaluation(candidate_id, command)
+    evaluation = evaluation_response.get("evaluation")
+    if not isinstance(evaluation, dict) or not isinstance(
+        evaluation.get("evaluationId"), str
+    ):
+        raise RuntimeError("host evaluation did not return a bindable evaluationId")
+    trial = {
+        "experiment_id": experiment_id,
+        "candidate_id": candidate_id,
+        "evaluation_id": evaluation["evaluationId"],
+    }
+    if label is not None:
+        trial["label"] = label
+    if seed is not None:
+        trial["seed"] = seed
+    response = await record_trial(trial)
+    response["evaluation"] = evaluation
+    return response
+
+
+async def complete_experiment(experiment_id: str) -> dict[str, Any]:
+    if not isinstance(experiment_id, str) or not experiment_id.strip():
+        raise ValueError("experiment_id must be a non-empty string")
+    return await host_request(
+        "avo.experiment.complete",
+        {"experiment_id": experiment_id},
     )
 
 
@@ -266,163 +317,23 @@ async def complete() -> dict[str, Any]:
 
 
 def nooa_backend_status() -> dict[str, Any]:
-    uv = shutil.which("uv")
-    session_dir = os.environ.get("RLM_SESSION_DIR")
-    if not uv:
-        return {"available": False, "backend": "host_owned_fallback", "reason": "uv is unavailable"}
-    if not session_dir:
-        return {
-            "available": False,
-            "backend": "host_owned_fallback",
-            "reason": "RLM_SESSION_DIR is unset",
-        }
-    paths = _nooa_paths()
     return {
         "available": True,
-        "backend": "nooa_memory_sidecar",
+        "backend": "host_persistent_nooa_bridge",
         "package": "nooa-memory==0.0.9",
         "runtime": "python3.13",
         "provider_unchanged": True,
         "automatic_before_turn_recall": True,
-        "embedding": os.environ.get("PRIME_AGENT_AVO_MEMORY_EMBEDDING", "hashing"),
-        "owner": os.environ.get("PRIME_AGENT_AVO_MEMORY_OWNER", "prime-avo"),
-        "paths": {scope: str(path) for scope, path in paths.items()},
+        "canonical_sync_owned_by_host": True,
     }
 
 
-def _nooa_paths() -> dict[str, Path]:
-    session_dir = Path(os.environ["RLM_SESSION_DIR"])
-    paths = {
-        "task": Path(
-            os.environ.get(
-                "PRIME_AGENT_AVO_MEMORY_TASK_PATH",
-                str(session_dir / "avo" / "nooa-memory.sqlite"),
-            )
-        )
-    }
-    for scope, variable in (
-        ("project", "PRIME_AGENT_AVO_MEMORY_PROJECT_PATH"),
-        ("global", "PRIME_AGENT_AVO_MEMORY_GLOBAL_PATH"),
-    ):
-        configured = os.environ.get(variable)
-        if configured:
-            paths[scope] = Path(configured)
-    return paths
-
-
-def _sidecar_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    embedding: dict[str, Any] = {
-        "backend": os.environ.get("PRIME_AGENT_AVO_MEMORY_EMBEDDING", "hashing"),
-        "model": os.environ.get("PRIME_AGENT_AVO_MEMORY_EMBEDDING_MODEL"),
-        "endpoint": os.environ.get("PRIME_AGENT_AVO_MEMORY_EMBEDDING_ENDPOINT"),
-        "api_key": os.environ.get("PRIME_AGENT_AVO_MEMORY_EMBEDDING_API_KEY"),
-        "dimensions": os.environ.get("PRIME_AGENT_AVO_MEMORY_EMBEDDING_DIMENSIONS"),
-    }
-    return {
-        **payload,
-        "owner": os.environ.get("PRIME_AGENT_AVO_MEMORY_OWNER", "prime-avo"),
-        "owner_role": os.environ.get("PRIME_AGENT_AVO_MEMORY_OWNER_ROLE", "prime-root"),
-        "embedding": {key: value for key, value in embedding.items() if value},
-    }
-
-
-def _run_nooa_sidecar(
-    command: str,
-    payload: dict[str, Any],
-    *,
-    path: Path | None = None,
-) -> dict[str, Any]:
-    status = nooa_backend_status()
-    if not status["available"]:
-        return status
-    path = path or _nooa_paths()["task"]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    command_line = [
-        shutil.which("uv") or "uv",
-        "run",
-        "--no-project",
-        "--python",
-        "3.13",
-        "--with",
-        "nooa-memory==0.0.9",
-    ]
-    if os.environ.get("PRIME_AGENT_AVO_MEMORY_EMBEDDING") == "litellm":
-        command_line.extend(["--with", "litellm"])
-    command_line.extend(
-        [
-            "python",
-            str(Path(__file__).with_name("nooa_sidecar.py")),
-            command,
-            str(path),
-        ]
-    )
-    process = subprocess.run(
-        command_line,
-        input=json.dumps(_sidecar_payload(payload)),
-        text=True,
-        capture_output=True,
-        timeout=120,
-        check=False,
-    )
-    if process.returncode != 0:
-        reason = process.stderr.strip() or process.stdout.strip() or f"sidecar exited {process.returncode}"
-        return {**status, "ok": False, "reason": reason[-2000:]}
-    try:
-        result = json.loads(process.stdout)
-    except json.JSONDecodeError as error:
-        return {**status, "ok": False, "reason": f"invalid sidecar JSON: {error}"}
-    if not isinstance(result, dict):
-        return {**status, "ok": False, "reason": "sidecar returned a non-object result"}
-    return {**status, **result, "path": str(path)}
-
-
-async def remember(memory: dict[str, Any], *, mirror_nooa: bool = True) -> dict[str, Any]:
-    response = await host_request("avo.memory.remember", {"memory": _object(memory, "memory")})
-    recorded = response.get("memory")
-    target = (
-        _nooa_paths().get(str(recorded.get("scope", "task")))
-        if isinstance(recorded, dict)
-        else None
-    )
-    if mirror_nooa and isinstance(recorded, dict) and target is not None:
-        response["nooa"] = await asyncio.to_thread(
-            _run_nooa_sidecar,
-            "upsert",
-            {"memory": recorded},
-            path=target,
-        )
-    else:
-        response["nooa"] = {
-            **nooa_backend_status(),
-            "ok": False,
-            "reason": "the canonical memory scope has no configured NOOA store",
-        }
-    return response
+async def remember(memory: dict[str, Any]) -> dict[str, Any]:
+    return await host_request("avo.memory.remember", {"memory": _object(memory, "memory")})
 
 
 async def sync_nooa_memory() -> dict[str, Any]:
-    state_response = await get_state()
-    state = state_response.get("state")
-    memories = state.get("memories", []) if isinstance(state, dict) else []
-    mirrored = 0
-    stores: list[dict[str, Any]] = []
-    for scope, path in _nooa_paths().items():
-        scoped = [
-            memory
-            for memory in memories
-            if isinstance(memory, dict) and memory.get("scope", "task") == scope
-        ]
-        result = await asyncio.to_thread(
-            _run_nooa_sidecar,
-            "sync",
-            {"memories": scoped},
-            path=path,
-        )
-        stores.append({"scope": scope, **result})
-        if not result.get("ok"):
-            return {**result, "stores": stores}
-        mirrored += int(result.get("mirrored", 0))
-    return {**nooa_backend_status(), "ok": True, "mirrored": mirrored, "stores": stores}
+    return await host_request("avo.memory.sync")
 
 
 async def recall(query: str, *, limit: int = 8) -> dict[str, Any]:
@@ -460,6 +371,7 @@ __all__ = [
     "collect_results",
     "complete",
     "complete_cycle",
+    "complete_experiment",
     "configure",
     "execution_contract",
     "fetch_external_source",
@@ -468,10 +380,13 @@ __all__ = [
     "nooa_backend_status",
     "recall",
     "record_evaluation",
+    "record_experiment",
+    "record_trial",
     "reflect_memory",
     "remember",
     "run_coding_baseline",
     "run_evaluation",
+    "run_trial",
     "spontaneous_recall",
     "stop_gate",
     "sync_nooa_memory",

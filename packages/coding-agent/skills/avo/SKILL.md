@@ -88,6 +88,14 @@ Never pass or request an environment override.
    no preface/suffix. A skipped gate or different final answer is automatically
    continued instead of being treated as task completion.
 
+For repeatable comparisons in any adapter, use `record_experiment()` to define
+the hypothesis and design. `run_trial(experiment_id, candidate_id, command)`
+runs a host evaluation and binds its immutable receipt to a generic AVO trial;
+`record_trial()` can bind another existing host-issued, non-opinion receipt.
+After at least one conclusive trial, `complete_experiment()` closes the
+experiment and writes a verified project episode containing only the declared
+design and host-observed trial metrics/evidence.
+
 Long runs bind a retained generic supervisor. Iterative runs bind one only when
 the host detects stagnation. Direct tasks never pay that cost.
 
@@ -134,13 +142,24 @@ This uses NOOA's `touch=False` semantics: injected recall is logged but does not
 reinforce itself. `recall()` remains available for deliberate inspection.
 
 The host automatically writes verified project episodes for completed cycles,
-experiments, supervisor interventions, and completed tasks. Exact duplicates
+generic experiments, research-adapter experiments, supervisor interventions,
+and completed tasks. Exact duplicates
 are reinforced instead of copied. Project and global canonical ledgers live
 under Prime's agent data directory at
-`memory/projects/<repository-sha256>/canonical.json` and
+`memory/projects/<git-identity-sha256>/canonical.json` and
 `memory/global/canonical.json`; matching NOOA SQLite indexes sit beside them.
-Task memory remains in the session artifact directory. New sessions in the same
-real repository therefore receive the same project memory.
+Task memory remains in the session artifact directory. Git subdirectories share
+one project identity; a normalized origin remote, or the repository root commit
+when no remote exists, keeps that identity stable when a repository moves.
+Canonical ledgers are refreshed before recall, so concurrent sessions see new
+project/global records without restarting.
+
+Proposed task memories may be recalled deliberately or spontaneously. Proposed
+project memories are deliberate-only until verified. Proposed global memory is
+forbidden; global persistence accepts only host-verified `info`, `skill`, or
+`reflection` records. The retained supervisor receives a separate bounded
+profile containing only verified trajectory episodes/reflections. Ordinary RLM
+workers and adversarial research reviewers do not receive automatic root memory.
 
 Owners use NOOA's `role@instance` format. Root memories are written as
 `prime-root@<session>`. Supervisor and research-reviewer proposals remain
@@ -154,7 +173,7 @@ independent model verifies it, and the host permits archival only when the
 replacement is a newer verified record with the same type, namespace, and
 scope. Similar counterexamples or distinct facts must remain separate.
 
-References can bind memory to current files, candidates, experiments,
+References can bind memory to current files, candidates, experiments, trials,
 evaluations, cycles, artifacts, tasks, or other memories. Prime re-resolves
 them when recalled and labels stale targets `DANGLING`; stored file prose is not
 treated as current state.

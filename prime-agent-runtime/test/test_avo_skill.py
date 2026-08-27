@@ -43,7 +43,7 @@ class AvoSkillTest(unittest.TestCase):
             host.await_args_list[0].args[1],
             {"objective": "Fix the parser"},
         )
-        self.assertEqual(result["execution_contract"]["contract_version"], 6)
+        self.assertEqual(result["execution_contract"]["contract_version"], 7)
 
     def test_coding_baseline_runs_through_the_host_before_candidate_work(self) -> None:
         module = load_skill("avo_coding_baseline_test")
@@ -129,6 +129,84 @@ class AvoSkillTest(unittest.TestCase):
             host.await_args_list[1].args,
             ("avo.evaluation.artifacts", {"candidate_id": "report-1"}),
         )
+
+    def test_universal_experiment_helpers_bind_host_evaluations_to_trials(self) -> None:
+        module = load_skill("avo_experiment_test")
+        for helper in (
+            "record_experiment",
+            "record_trial",
+            "run_trial",
+            "complete_experiment",
+        ):
+            self.assertIn(helper, module.__all__)
+        host = AsyncMock(
+            side_effect=[
+                {"experiment": {"experimentId": "experiment-1"}},
+                {"evaluation": {"evaluationId": "evaluation-1", "issuedBy": "host"}},
+                {"trial": {"trialId": "trial-1"}},
+                {"experiment": {"experimentId": "experiment-1", "status": "completed"}},
+            ]
+        )
+        with patch.object(module, "host_request", host):
+            asyncio.run(
+                module.record_experiment(
+                    {
+                        "experiment_id": "experiment-1",
+                        "title": "Parser comparison",
+                        "hypothesis": "Serialization reduces failures.",
+                        "design": "Run the unchanged suite.",
+                    }
+                )
+            )
+            trial = asyncio.run(
+                module.run_trial(
+                    "experiment-1",
+                    "candidate-1",
+                    "python -m pytest -q tests/test_parser.py",
+                    label="serialized",
+                    seed="suite-v1",
+                )
+            )
+            completed = asyncio.run(module.complete_experiment("experiment-1"))
+        self.assertEqual(trial["trial"]["trialId"], "trial-1")
+        self.assertEqual(trial["evaluation"]["evaluationId"], "evaluation-1")
+        self.assertEqual(completed["experiment"]["status"], "completed")
+        self.assertEqual(host.await_args_list[0].args[0], "avo.experiment.record")
+        self.assertEqual(
+            host.await_args_list[1].args,
+            (
+                "avo.evaluation.run",
+                {
+                    "candidate_id": "candidate-1",
+                    "command": "python -m pytest -q tests/test_parser.py",
+                },
+            ),
+        )
+        self.assertEqual(
+            host.await_args_list[2].args,
+            (
+                "avo.trial.record",
+                {
+                    "trial": {
+                        "experiment_id": "experiment-1",
+                        "candidate_id": "candidate-1",
+                        "evaluation_id": "evaluation-1",
+                        "label": "serialized",
+                        "seed": "suite-v1",
+                    }
+                },
+            ),
+        )
+        self.assertEqual(host.await_args_list[3].args[0], "avo.experiment.complete")
+
+    def test_memory_sync_is_owned_by_the_persistent_host_bridge(self) -> None:
+        module = load_skill("avo_host_memory_sync_test")
+        host = AsyncMock(return_value={"ok": True, "mirrored": 3})
+        with patch.object(module, "host_request", host):
+            result = asyncio.run(module.sync_nooa_memory())
+        self.assertEqual(result, {"ok": True, "mirrored": 3})
+        host.assert_awaited_once_with("avo.memory.sync")
+        self.assertEqual(module.nooa_backend_status()["backend"], "host_persistent_nooa_bridge")
 
     def test_external_tool_binding_uses_a_host_resolved_tool_call(self) -> None:
         module = load_skill("avo_tool_receipt_test")

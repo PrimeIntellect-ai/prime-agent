@@ -1,1 +1,2 @@
 - Reused NOOA 0.0.9 as AVO's automatic memory cognition engine with typed scoped canonical memory, non-reinforcing pre-turn recall, live references, owner isolation, independently verified reflection and semantic reconsolidation, configurable embeddings, and project/global persistence.
+- Added host-verified universal experiments and trials, stable Git project memory, concurrent-ledger refresh, safe proposed-memory promotion, and restricted supervisor trajectory recall.

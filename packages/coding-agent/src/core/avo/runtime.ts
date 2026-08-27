@@ -10,10 +10,12 @@ import type {
 	AvoDashboardProjection,
 	AvoEnvironmentSelection,
 	AvoEvaluationInput,
+	AvoExperimentInput,
 	AvoHorizonSelection,
 	AvoMemory,
 	AvoMemoryReflection,
 	AvoRunState,
+	AvoTrialInput,
 } from "./types.js";
 
 export class AvoSessionRuntime {
@@ -63,26 +65,28 @@ export class AvoSessionRuntime {
 
 	async recallMemory(
 		query: string,
-		options: { limit?: number; maxChars?: number; spontaneous?: boolean } = {},
+		options: {
+			limit?: number;
+			maxChars?: number;
+			spontaneous?: boolean;
+			profile?: "root" | "supervisor";
+		} = {},
 	): Promise<{
 		memories: AvoMemory[];
 		context: string;
 		backend: "nooa-memory" | "host-fallback";
 		reason?: string;
 	}> {
+		this.store.refreshPersistentMemories();
 		const limit = options.limit ?? (options.spontaneous ? 5 : 8);
 		const maxChars = options.maxChars ?? 2_000;
 		const cue = options.spontaneous ? this.memoryCue(query) : query;
 		const state = this.store.getState();
 		const allowed = new Set(this.memoryNamespaces());
+		const channel = options.spontaneous ? "spontaneous" : "deliberate";
+		const profile = options.profile ?? "root";
 		const eligible = state.memories.filter(
-			(memory) =>
-				allowed.has(memory.namespace) &&
-				!memory.invalidatedAt &&
-				memory.verificationState !== "contested" &&
-				(memory.owner === "" || memory.owner.startsWith("prime-root@")) &&
-				(memory.owner !== "" || memory.verificationState === "verified") &&
-				(memory.scope !== "task" || memory.taskRunId === state.runId),
+			(memory) => allowed.has(memory.namespace) && this.store.isMemoryRecallEligible(memory, channel, profile),
 		);
 		const nooa = this.memoryBridge
 			? await this.memoryBridge.spontaneousRecall(this.store.memoryRecordsForSync(), cue, limit, maxChars)
@@ -94,16 +98,19 @@ export class AvoSessionRuntime {
 			if (memory && !recalled.some((item) => item.memoryId === memoryId)) recalled.push(memory);
 		}
 		if (recalled.length < limit) {
-			for (const memory of this.store.recall(cue, this.memoryNamespaces(), limit)) {
+			for (const memory of this.store.recall(cue, this.memoryNamespaces(), limit, { channel, profile })) {
 				if (!recalled.some((item) => item.memoryId === memory.memoryId)) recalled.push(memory);
 				if (recalled.length >= limit) break;
 			}
 		}
-		const context = this.store.formatMemoryContext(recalled, maxChars);
+		const context =
+			profile === "supervisor"
+				? this.store.formatSupervisorMemoryContext(recalled, maxChars)
+				: this.store.formatMemoryContext(recalled, maxChars);
 		this.store.recordMemoryRecall(
 			cue,
 			recalled.map((memory) => memory.memoryId),
-			options.spontaneous ? "spontaneous" : "deliberate",
+			channel,
 			context.length,
 		);
 		return {
@@ -112,6 +119,26 @@ export class AvoSessionRuntime {
 			backend: nooa.ok ? "nooa-memory" : "host-fallback",
 			reason: nooa.reason,
 		};
+	}
+
+	async recallSupervisorMemory(query: string): Promise<{
+		memories: AvoMemory[];
+		context: string;
+		backend: "nooa-memory" | "host-fallback";
+		reason?: string;
+	}> {
+		return this.recallMemory(query, {
+			limit: 6,
+			maxChars: 2_500,
+			spontaneous: true,
+			profile: "supervisor",
+		});
+	}
+
+	async syncMemory(): Promise<Record<string, unknown>> {
+		this.store.refreshPersistentMemories();
+		if (!this.memoryBridge) return { ok: false, reason: "NOOA bridge unavailable" };
+		return this.memoryBridge.sync(this.store.memoryRecordsForSync());
 	}
 
 	async reflectMemory(trigger: AvoMemoryReflection["trigger"], cycleId?: string): Promise<Record<string, unknown>> {
@@ -179,6 +206,18 @@ export class AvoSessionRuntime {
 
 	recordHostEvaluation(input: AvoEvaluationInput) {
 		return this.store.recordEvaluation(input, "host");
+	}
+
+	recordExperiment(input: AvoExperimentInput) {
+		return this.store.recordExperiment(input);
+	}
+
+	recordTrial(input: AvoTrialInput) {
+		return this.store.recordTrial(input);
+	}
+
+	completeExperiment(experimentId: string) {
+		return this.store.completeExperiment(experimentId);
 	}
 
 	completeCycle(input: Parameters<AvoStore["completeCycle"]>[0]) {
@@ -418,9 +457,9 @@ export function buildAvoRuntimePrompt(state: AvoRunState, memoryContext = ""): s
 			: undefined,
 		"General, coding, and research are internal tool/evaluation adapters, not separate modes. Do not ask the user to choose one. Direct, iterative, and long only control how much AVO machinery is activated: direct uses one evaluated action without a retained supervisor; iterative retains candidate lineage and revises after feedback; long also activates namespaced memory, recovery, and retained trajectory supervision.",
 		"Environment routing is host-authoritative. Model calls cannot select general, coding, or research and may only escalate the current horizon to iterative or long.",
-		"Prime automatically recalls NOOA memory before root turns. Recalled proposed memories are hypotheses, verified memories are host-cleared, and live references are re-resolved at recall time. Never treat recall alone as task evidence or authority.",
+		"Prime automatically recalls NOOA memory before root turns. Proposed task memory may surface as a hypothesis; proposed project memory is deliberate-only and proposed global persistence is forbidden. Verified memories are host-cleared, and live references are re-resolved at recall time. Never treat recall alone as task evidence or authority.",
 		memoryContext || undefined,
-		"Use the avo skill for the task's candidate/evaluation lifecycle. The host will automatically continue the root task instead of accepting an answer that skipped AVO, failed its gate, changed a verified workspace/artifact, or differs from the accepted candidate's canonical delivery. Callers may record only model_opinion. Required external_factual candidates must declare verbatim claims and bind each claim to a host-trusted external source record; after Serper IPython or Vertex Google Search, use avo.fetch_external_source on a result URL and avo.bind_url with a visible quote exactly equal to the claim. Provenance without a host-bound independent entailment verdict cannot pass. Required deterministic arithmetic uses a payload exactly shaped as {result: number} and avo.verify_deterministic_result; required artifact candidates declare artifact_paths and use avo.verify_artifacts. An unrelated successful command cannot certify either class. Before changing a coding workspace, use avo.run_coding_baseline with a direct command that explicitly names an unchanged baseline test file, then run the exact same command after the candidate with avo.run_evaluation. Mutable package-script wrappers, output-printed filenames, no-op mutation candidates, and candidate-created tests cannot certify progress. Never invent host, environment, or external authority. Required verification needs host-issued evidence; best_effort and not_applicable policies may use a transparent model-opinion review without pretending it is external. Complete the candidate cycle, then return only its canonical delivery: general payload text, deterministic numeric result, or coding/research summary, with no preface or suffix. A later root task starts a fresh task run after the current gate and delivery pass, while namespaced memory survives across runs.",
+		"Use the avo skill for the task's candidate/evaluation lifecycle. The host will automatically continue the root task instead of accepting an answer that skipped AVO, failed its gate, changed a verified workspace/artifact, or differs from the accepted candidate's canonical delivery. Callers may record only model_opinion. Required external_factual candidates must declare verbatim claims and bind each claim to a host-trusted external source record; after Serper IPython or Vertex Google Search, use avo.fetch_external_source on a result URL and avo.bind_url with a visible quote exactly equal to the claim. Provenance without a host-bound independent entailment verdict cannot pass. Required deterministic arithmetic uses a payload exactly shaped as {result: number} and avo.verify_deterministic_result; required artifact candidates declare artifact_paths and use avo.verify_artifacts. An unrelated successful command cannot certify either class. Before changing a coding workspace, use avo.run_coding_baseline with a direct command that explicitly names an unchanged baseline test file, then run the exact same command after the candidate with avo.run_evaluation. Mutable package-script wrappers, output-printed filenames, no-op mutation candidates, and candidate-created tests cannot certify progress. For repeatable comparisons in any adapter, use avo.record_experiment, bind host-issued receipts with avo.run_trial or avo.record_trial, then avo.complete_experiment to create a verified episode. Never invent host, environment, or external authority. Required verification needs host-issued evidence; best_effort and not_applicable policies may use a transparent model-opinion review without pretending it is external. Complete the candidate cycle, then return only its canonical delivery: general payload text, deterministic numeric result, or coding/research summary, with no preface or suffix. A later root task starts a fresh task run after the current gate and delivery pass, while namespaced memory survives across runs.",
 	]
 		.filter((line): line is string => line !== undefined)
 		.join("\n\n");

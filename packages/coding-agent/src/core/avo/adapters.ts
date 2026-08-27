@@ -141,6 +141,8 @@ function genericProjection(
 			{ label: "Accepted", value: progress.acceptedCandidates },
 			{ label: "Rejected", value: progress.rejectedCandidates },
 			{ label: "Revised", value: progress.revisedCandidates },
+			{ label: "Experiments", value: state.experiments.length },
+			{ label: "Trials", value: state.trials.length },
 			{ label: "Authoritative evals", value: progress.authoritativeEvaluations },
 			{
 				label: "Verified memories",
@@ -178,6 +180,31 @@ function genericProjection(
 						label: "Supervisor",
 						value: state.supervisor?.name ?? "Not activated",
 						status: state.routing.horizon === "long" && !state.supervisor ? "watch" : "neutral",
+					},
+				],
+			},
+			{
+				id: "experiments",
+				title: "Experiments",
+				items: [
+					{
+						label: "Latest experiment",
+						value: state.experiments.at(-1)
+							? `${state.experiments.at(-1)!.title} · ${state.experiments.at(-1)!.status}`
+							: "No experiment recorded",
+						status: state.experiments.at(-1)?.status === "completed" ? "ok" : "neutral",
+					},
+					{
+						label: "Latest host-bound trial",
+						value: state.trials.at(-1)
+							? `${state.trials.at(-1)!.label} · ${state.trials.at(-1)!.status}`
+							: "No trial recorded",
+						status:
+							state.trials.at(-1)?.status === "pass"
+								? "ok"
+								: state.trials.at(-1)?.status === "fail"
+									? "fail"
+									: "neutral",
 					},
 				],
 			},
@@ -250,6 +277,8 @@ abstract class BaseAdapter implements AvoEnvironmentAdapter {
 			recent_cycles: state.cycles.slice(-8),
 			recent_evaluations: state.evaluations.slice(-16),
 			latest_checkpoint: state.checkpoints.at(-1),
+			experiments: state.experiments.slice(-8),
+			trials: state.trials.slice(-16),
 			memory_summary: state.memories
 				.filter((memory) => !memory.invalidatedAt)
 				.slice(-12)

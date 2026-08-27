@@ -168,12 +168,14 @@ import {
 	parseAvoClaimVerifierMessage,
 	parseAvoCycleInput,
 	parseAvoEvaluationInput,
+	parseAvoExperimentInput,
 	parseAvoMemoryInput,
 	parseAvoMemoryReasonerMessage,
 	parseAvoMemoryReconcilerMessage,
 	parseAvoMemoryReconciliationVerifierMessage,
 	parseAvoMemoryVerifierMessage,
 	parseAvoSupervisorMessage,
+	parseAvoTrialInput,
 } from "./avo/index.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 import {
@@ -3904,6 +3906,17 @@ export class AgentSession {
 			await this._awaitPendingRlmChildSettlement(supervisor.name);
 			const runtime = this._requireAvoRuntime();
 			const state = runtime.getState();
+			const supervisorMemory = await runtime.recallSupervisorMemory(
+				[
+					`Review trajectory for cycle ${cycleId}.`,
+					state.objective ? `Objective: ${state.objective}` : undefined,
+					state.cycles.at(-1)?.failureSignature
+						? `Latest failure: ${state.cycles.at(-1)!.failureSignature}`
+						: undefined,
+				]
+					.filter((item): item is string => item !== undefined)
+					.join("\n"),
+			);
 			const adapter = runtime.adapters.get(state.routing.environment);
 			const rawContext = adapter.buildSupervisorContext(state);
 			const rawContextJson = JSON.stringify(rawContext);
@@ -3915,7 +3928,7 @@ export class AgentSession {
 							sha256: createHash("sha256").update(rawContextJson).digest("hex"),
 							contextPrefix: rawContextJson.slice(0, 3_000),
 						};
-			const packet = buildAvoSupervisorPacket(state, context);
+			const packet = buildAvoSupervisorPacket(state, context, supervisorMemory.context);
 			const serialized = JSON.stringify(packet);
 			const boundedPacket =
 				serialized.length <= 7_000
@@ -3931,7 +3944,7 @@ export class AgentSession {
 							latest_checkpoint: state.checkpoints.at(-1),
 							adapter_context: context,
 						});
-			const prompt = `${buildAvoSupervisorPrompt(state, cycleId, context)}\n\n[host packet]\n${boundedPacket}`;
+			const prompt = `${buildAvoSupervisorPrompt(state, cycleId, context, supervisorMemory.context)}\n\n[host packet]\n${boundedPacket}`;
 			if (prompt.length > 16_384) throw new Error("AVO supervisor prompt exceeds the retained-message limit");
 			const receipt = await this._agentMessageController!.sendAgentMessage({
 				target: assertDirectAgentMessageTarget(supervisor.name),
@@ -4776,10 +4789,25 @@ export class AgentSession {
 				const delivery = await this._dispatchAvoCheckpoint(supervisor, result.cycle.cycleId);
 				return { ...result, memoryReflection, supervisor, delivery };
 			}
+			case "avo.experiment.record":
+				return { experiment: runtime.recordExperiment(parseAvoExperimentInput(payload.experiment)) };
+			case "avo.trial.record":
+				return { trial: runtime.recordTrial(parseAvoTrialInput(payload.trial)) };
+			case "avo.experiment.complete": {
+				if (typeof payload.experiment_id !== "string") {
+					throw new Error("avo.experiment.complete experiment_id must be a string");
+				}
+				const result = runtime.completeExperiment(payload.experiment_id);
+				return { ...result, nooa: await runtime.syncMemory() };
+			}
 			case "avo.results.collect":
 				return await this._collectAvoSupervisorResults();
-			case "avo.memory.remember":
-				return { memory: runtime.store.remember(parseAvoMemoryInput(payload.memory)) };
+			case "avo.memory.remember": {
+				const memory = runtime.store.remember(parseAvoMemoryInput(payload.memory));
+				return { memory, nooa: await runtime.syncMemory() };
+			}
+			case "avo.memory.sync":
+				return await runtime.syncMemory();
 			case "avo.memory.recall": {
 				if (typeof payload.query !== "string") throw new Error("avo.memory.recall query must be a string");
 				if (payload.limit !== undefined && typeof payload.limit !== "number")

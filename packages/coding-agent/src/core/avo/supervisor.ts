@@ -31,6 +31,7 @@ export function buildAvoSupervisorPrompt(
 	state: AvoRunState,
 	cycleId: string,
 	context: Record<string, unknown>,
+	memoryContext = "",
 ): string {
 	return [
 		"You are the retained generic AVO supervisor. Judge trajectory health, not the local polish of one answer.",
@@ -39,13 +40,17 @@ export function buildAvoSupervisorPrompt(
 		"You may recommend a redirect, but you cannot mutate canonical state or declare success. Host/environment receipts remain authoritative.",
 		`Send the literal line AVO_SUPERVISION_JSON:${cycleId}, then one JSON object with keys cycle_id, status, reason, detected_patterns, recommended_actions.`,
 		"status must be progressing, watch, or intervene. detected_patterns and recommended_actions must be arrays of strings.",
+		memoryContext || undefined,
 		JSON.stringify(context),
-	].join("\n\n");
+	]
+		.filter((line): line is string => line !== undefined)
+		.join("\n\n");
 }
 
 export function buildAvoSupervisorPacket(
 	state: AvoRunState,
 	context: Record<string, unknown>,
+	memoryContext = "",
 ): Record<string, unknown> {
 	return {
 		packet_version: 1,
@@ -56,6 +61,7 @@ export function buildAvoSupervisorPacket(
 		recent_lineage: state.lineage.slice(-20),
 		latest_checkpoint: state.checkpoints.at(-1),
 		adapter_context: context,
+		supervisor_memory_context: memoryContext || undefined,
 	};
 }
 

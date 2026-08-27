@@ -69,7 +69,9 @@ export {
 	parseAvoCandidateInput,
 	parseAvoCycleInput,
 	parseAvoEvaluationInput,
+	parseAvoExperimentInput,
 	parseAvoMemoryInput,
+	parseAvoTrialInput,
 } from "./store.js";
 export {
 	buildAvoSupervisorBootstrapPrompt,

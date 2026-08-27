@@ -128,8 +128,7 @@ describe("AgentSession universal AVO runtime", () => {
 
 		harness.setResponses([
 			async (context) => {
-				expect(context.systemPrompt).toContain("Recalled AVO memories");
-				expect(context.systemPrompt).toContain("Rain imagery");
+				expect(context.systemPrompt).not.toContain("Rain imagery");
 				await harness!.session.handleAvoHostRequest("avo.candidate.add", {
 					candidate: {
 						candidate_id: "rain-rewrite-1",
@@ -571,6 +570,33 @@ describe("AgentSession universal AVO runtime", () => {
 				baseline_execution_matched: true,
 				workspace_matches_candidate: true,
 			},
+		});
+		await harness.session.handleAvoHostRequest("avo.experiment.record", {
+			experiment: {
+				experiment_id: "parser-comparison",
+				title: "Parser implementation comparison",
+				hypothesis: "The patched parser preserves the regression contract.",
+				design: "Run the immutable baseline test against the candidate workspace.",
+			},
+		});
+		expect(
+			await harness.session.handleAvoHostRequest("avo.trial.record", {
+				trial: {
+					experiment_id: "parser-comparison",
+					candidate_id: "patch-1",
+					evaluation_id: (observed.evaluation as { evaluationId: string }).evaluationId,
+					label: "Patched parser",
+				},
+			}),
+		).toMatchObject({ trial: { experimentId: "parser-comparison", status: "pass" } });
+		expect(
+			await harness.session.handleAvoHostRequest("avo.experiment.complete", {
+				experiment_id: "parser-comparison",
+			}),
+		).toMatchObject({
+			experiment: { experimentId: "parser-comparison", status: "completed" },
+			memory: { type: "episode", verificationState: "verified" },
+			nooa: expect.objectContaining({ ok: expect.any(Boolean) }),
 		});
 		const completed = await harness.session.handleAvoHostRequest("avo.cycle.complete", {
 			cycle: { candidate_id: "patch-1", claimed_outcome: "rejected" },

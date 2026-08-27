@@ -2020,20 +2020,35 @@ describe("AgentSession queue characterization", () => {
 		const authHarness = await createHarness({ withConfiguredAuth: false });
 		harnesses.push(authHarness);
 		await authHarness.session.bindExtensions({ onError: (error) => errors.push(error.error) });
+		const authInternals = authHarness.session as unknown as { _scheduleSessionInputPump(): void };
+		const authSchedule = vi.spyOn(authInternals, "_scheduleSessionInputPump").mockImplementation(() => {});
 		withStreaming(authHarness, true);
 		const delivery = authHarness.session.waitForAgentMessagePromptDelivery("agentmsg_terminal");
+		const deliveryOutcome = delivery.then(
+			() => ({ error: undefined }),
+			(error: unknown) => ({ error }),
+		);
 		const terminalCompletion = authHarness.session.promptAndWait("cannot start", {
 			agentMessageId: "agentmsg_terminal",
 			streamingBehavior: "followUp",
 			resumeIfIdle: true,
 		});
-		const terminalRejection = expect(terminalCompletion).rejects.toThrow("No API key");
+		const terminalOutcome = terminalCompletion.then(
+			() => ({ error: undefined }),
+			(error: unknown) => ({ error }),
+		);
 		await vi.waitFor(() => expect(authHarness.session.getFollowUpMessages()).toEqual(["cannot start"]));
 		withStreaming(authHarness, false);
+		authSchedule.mockRestore();
+		authInternals._scheduleSessionInputPump();
 		await authHarness.session.waitForSessionInputIdle();
 
-		await expect(delivery).rejects.toThrow("No API key");
-		await terminalRejection;
+		expect((await deliveryOutcome).error).toEqual(
+			expect.objectContaining({ message: expect.stringContaining("No API key") }),
+		);
+		expect((await terminalOutcome).error).toEqual(
+			expect.objectContaining({ message: expect.stringContaining("No API key") }),
+		);
 		expect(authHarness.session.getFollowUpMessages()).toEqual([]);
 		expect(errors).toEqual([expect.stringContaining("No API key")]);
 	});

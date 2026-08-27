@@ -1,4 +1,4 @@
-export const AVO_STATE_VERSION = 6;
+export const AVO_STATE_VERSION = 7;
 export const AVO_SKILL_NAME = "avo";
 
 export const AVO_ENVIRONMENTS = ["general", "coding", "research"] as const;
@@ -25,6 +25,7 @@ export const AVO_MEMORY_REFERENCE_KINDS = [
 	"file",
 	"candidate",
 	"experiment",
+	"trial",
 	"evaluation",
 	"cycle",
 	"artifact",
@@ -32,6 +33,7 @@ export const AVO_MEMORY_REFERENCE_KINDS = [
 	"memory",
 ] as const;
 export const AVO_MEMORY_RECALL_CHANNELS = ["deliberate", "spontaneous"] as const;
+export const AVO_EXPERIMENT_STATUSES = ["planned", "running", "completed"] as const;
 
 export type AvoEnvironment = (typeof AVO_ENVIRONMENTS)[number];
 export type AvoEnvironmentSelection = "auto" | AvoEnvironment;
@@ -50,6 +52,7 @@ export type AvoMemoryScope = (typeof AVO_MEMORY_SCOPES)[number];
 export type AvoMemoryVerificationState = (typeof AVO_MEMORY_VERIFICATION_STATES)[number];
 export type AvoMemoryReferenceKind = (typeof AVO_MEMORY_REFERENCE_KINDS)[number];
 export type AvoMemoryRecallChannel = (typeof AVO_MEMORY_RECALL_CHANNELS)[number];
+export type AvoExperimentStatus = (typeof AVO_EXPERIMENT_STATUSES)[number];
 
 export interface AvoRoutingDecision {
 	environment: AvoEnvironment;
@@ -124,6 +127,32 @@ export interface AvoEvaluationReceipt {
 	createdAt: string;
 }
 
+export interface AvoExperiment {
+	experimentId: string;
+	title: string;
+	hypothesis: string;
+	design: string;
+	status: AvoExperimentStatus;
+	trialIds: string[];
+	tags: string[];
+	createdAt: string;
+	updatedAt: string;
+	completedAt?: string;
+}
+
+export interface AvoTrial {
+	trialId: string;
+	experimentId: string;
+	candidateId: string;
+	evaluationId: string;
+	label: string;
+	seed?: string;
+	status: AvoEvaluationStatus;
+	metrics: Record<string, number | string | boolean>;
+	evidenceRefs: string[];
+	recordedAt: string;
+}
+
 export interface AvoTaskRunArchive {
 	runId: string;
 	objective: string;
@@ -134,6 +163,8 @@ export interface AvoTaskRunArchive {
 	status: AvoRunStatus;
 	candidates: AvoCandidate[];
 	evaluations: AvoEvaluationReceipt[];
+	experiments: AvoExperiment[];
+	trials: AvoTrial[];
 	cycles: AvoCycle[];
 	lineage: AvoLineageEntry[];
 	checkpoints: AvoCheckpoint[];
@@ -165,6 +196,9 @@ export interface AvoLineageEntry {
 		| "routing_changed"
 		| "candidate_recorded"
 		| "evaluation_recorded"
+		| "experiment_recorded"
+		| "trial_recorded"
+		| "experiment_completed"
 		| "cycle_completed"
 		| "candidate_accepted"
 		| "horizon_escalated"
@@ -285,6 +319,23 @@ export interface AvoEvaluationInput {
 	metrics: Record<string, number | string | boolean>;
 }
 
+export interface AvoExperimentInput {
+	experimentId?: string;
+	title: string;
+	hypothesis: string;
+	design: string;
+	tags?: string[];
+}
+
+export interface AvoTrialInput {
+	trialId?: string;
+	experimentId: string;
+	candidateId: string;
+	evaluationId: string;
+	label?: string;
+	seed?: string;
+}
+
 export interface AvoCycleInput {
 	candidateId: string;
 	evaluationIds?: string[];
@@ -327,6 +378,8 @@ export interface AvoRunState {
 	status: AvoRunStatus;
 	candidates: AvoCandidate[];
 	evaluations: AvoEvaluationReceipt[];
+	experiments: AvoExperiment[];
+	trials: AvoTrial[];
 	cycles: AvoCycle[];
 	lineage: AvoLineageEntry[];
 	checkpoints: AvoCheckpoint[];

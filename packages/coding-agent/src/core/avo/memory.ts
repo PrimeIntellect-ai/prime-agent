@@ -184,6 +184,26 @@ export class AvoNooaMemoryBridge {
 		});
 	}
 
+	async sync(memories: readonly AvoMemory[]): Promise<AvoNooaCommandResult> {
+		const stores = this.stores(memories);
+		if (stores.length === 0) return { ok: false, reason: "no persistent NOOA store" };
+		const results: AvoNooaCommandResult[] = [];
+		let mirrored = 0;
+		for (const store of stores) {
+			const result = await this.run("sync", String(store.path), store);
+			results.push(result);
+			if (result.ok !== true) {
+				return {
+					ok: false,
+					reason: typeof result.reason === "string" ? result.reason : "NOOA sync failed",
+					stores: results,
+				};
+			}
+			if (typeof result.mirrored === "number") mirrored += result.mirrored;
+		}
+		return { ok: true, mirrored, stores: results };
+	}
+
 	async spontaneousRecall(
 		memories: readonly AvoMemory[],
 		query: string,

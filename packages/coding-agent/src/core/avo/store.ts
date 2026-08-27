@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -14,6 +15,7 @@ import {
 	AVO_ENVIRONMENTS,
 	AVO_EVALUATION_ISSUERS,
 	AVO_EVALUATION_STATUSES,
+	AVO_EXPERIMENT_STATUSES,
 	AVO_HORIZONS,
 	AVO_MEMORY_NAMESPACES,
 	AVO_MEMORY_RECALL_CHANNELS,
@@ -36,6 +38,8 @@ import {
 	type AvoEvaluationInput,
 	type AvoEvaluationIssuer,
 	type AvoEvaluationReceipt,
+	type AvoExperiment,
+	type AvoExperimentInput,
 	type AvoHorizon,
 	type AvoHorizonSelection,
 	type AvoMemory,
@@ -51,6 +55,8 @@ import {
 	type AvoStopGate,
 	type AvoSupervisorBinding,
 	type AvoSupervisorReview,
+	type AvoTrial,
+	type AvoTrialInput,
 	type AvoVerificationBaseline,
 	type AvoVerificationClass,
 	type AvoVerificationPolicy,
@@ -219,7 +225,7 @@ export function digestAvoDeliveryText(text: string): string {
 	return createHash("sha256").update(text).digest("hex");
 }
 
-function projectIdentity(cwd: string): string {
+function canonicalPathIdentity(cwd: string): string {
 	let canonical = resolve(cwd);
 	try {
 		canonical = realpathSync(canonical);
@@ -227,6 +233,58 @@ function projectIdentity(cwd: string): string {
 		// A deleted or virtual working directory still receives a stable resolved identity.
 	}
 	return createHash("sha256").update(canonical).digest("hex");
+}
+
+function gitOutput(cwd: string, args: readonly string[]): string | undefined {
+	try {
+		const output = execFileSync("git", ["-C", cwd, ...args], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
+		return output || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function normalizedGitRemote(value: string): string | undefined {
+	const remote = value.trim();
+	if (!remote) return undefined;
+	const scp = remote.includes("://") ? null : /^(?:[^@/:]+@)?([^/:]+):(.+)$/.exec(remote);
+	if (scp) {
+		return `${scp[1]!.toLowerCase()}/${scp[2]!.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "")}`;
+	}
+	try {
+		const url = new URL(remote);
+		if (url.protocol !== "https:" && url.protocol !== "http:" && url.protocol !== "ssh:" && url.protocol !== "git:") {
+			return undefined;
+		}
+		const port = url.port ? `:${url.port}` : "";
+		const path = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "");
+		return path ? `${url.hostname.toLowerCase()}${port}/${path}` : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function projectIdentity(cwd: string): string {
+	const root = gitOutput(cwd, ["rev-parse", "--show-toplevel"]);
+	if (!root) return canonicalPathIdentity(cwd);
+	const remote = gitOutput(root, ["config", "--get", "remote.origin.url"]);
+	const normalizedRemote = remote ? normalizedGitRemote(remote) : undefined;
+	const rootCommit = gitOutput(root, ["rev-list", "--max-parents=0", "HEAD"])?.split(/\s+/).filter(Boolean).sort()[0];
+	let canonicalRoot = resolve(root);
+	try {
+		canonicalRoot = realpathSync(canonicalRoot);
+	} catch {
+		// Preserve the repository identity even if its root becomes temporarily unavailable.
+	}
+	const identity = normalizedRemote
+		? `git-remote:${normalizedRemote}`
+		: rootCommit
+			? `git-root-commit:${rootCommit}`
+			: `git-root-path:${canonicalRoot}`;
+	return createHash("sha256").update(identity).digest("hex");
 }
 
 function memoryOwner(sessionId: string): string {
@@ -280,6 +338,8 @@ function emptyState(sessionId: string, now: string): AvoRunState {
 		status: "active",
 		candidates: [],
 		evaluations: [],
+		experiments: [],
+		trials: [],
 		cycles: [],
 		lineage: [],
 		checkpoints: [],
@@ -292,6 +352,43 @@ function emptyState(sessionId: string, now: string): AvoRunState {
 	};
 }
 
+function isAvoExperiment(value: unknown): value is AvoExperiment {
+	return (
+		isRecord(value) &&
+		typeof value.experimentId === "string" &&
+		typeof value.title === "string" &&
+		typeof value.hypothesis === "string" &&
+		typeof value.design === "string" &&
+		AVO_EXPERIMENT_STATUSES.includes(value.status as AvoExperiment["status"]) &&
+		Array.isArray(value.trialIds) &&
+		value.trialIds.every((trialId) => typeof trialId === "string") &&
+		Array.isArray(value.tags) &&
+		value.tags.every((tag) => typeof tag === "string") &&
+		typeof value.createdAt === "string" &&
+		typeof value.updatedAt === "string"
+	);
+}
+
+function isAvoTrial(value: unknown): value is AvoTrial {
+	return (
+		isRecord(value) &&
+		typeof value.trialId === "string" &&
+		typeof value.experimentId === "string" &&
+		typeof value.candidateId === "string" &&
+		typeof value.evaluationId === "string" &&
+		typeof value.label === "string" &&
+		AVO_EVALUATION_STATUSES.includes(value.status as AvoTrial["status"]) &&
+		isRecord(value.metrics) &&
+		Object.values(value.metrics).every(
+			(metric) => typeof metric === "number" || typeof metric === "string" || typeof metric === "boolean",
+		) &&
+		Array.isArray(value.evidenceRefs) &&
+		value.evidenceRefs.every((reference) => typeof reference === "string") &&
+		(value.seed === undefined || typeof value.seed === "string") &&
+		typeof value.recordedAt === "string"
+	);
+}
+
 function isAvoState(value: unknown): value is AvoRunState {
 	if (!isRecord(value) || !isRecord(value.routing)) return false;
 	return (
@@ -299,6 +396,14 @@ function isAvoState(value: unknown): value is AvoRunState {
 		typeof value.sessionId === "string" &&
 		typeof value.runId === "string" &&
 		Array.isArray(value.taskRuns) &&
+		value.taskRuns.every(
+			(run) =>
+				isRecord(run) &&
+				Array.isArray(run.experiments) &&
+				run.experiments.every(isAvoExperiment) &&
+				Array.isArray(run.trials) &&
+				run.trials.every(isAvoTrial),
+		) &&
 		AVO_VERIFICATION_POLICIES.includes(value.verificationPolicy as AvoVerificationPolicy) &&
 		AVO_VERIFICATION_CLASSES.includes(value.verificationClass as AvoVerificationClass) &&
 		Array.isArray(value.verificationReasons) &&
@@ -309,6 +414,10 @@ function isAvoState(value: unknown): value is AvoRunState {
 		value.evaluations.every(
 			(receipt) => isRecord(receipt) && AVO_EVALUATION_ISSUERS.includes(receipt.issuedBy as AvoEvaluationIssuer),
 		) &&
+		Array.isArray(value.experiments) &&
+		value.experiments.every(isAvoExperiment) &&
+		Array.isArray(value.trials) &&
+		value.trials.every(isAvoTrial) &&
 		Array.isArray(value.cycles) &&
 		Array.isArray(value.lineage) &&
 		Array.isArray(value.checkpoints) &&
@@ -318,6 +427,19 @@ function isAvoState(value: unknown): value is AvoRunState {
 		Array.isArray(value.supervision) &&
 		AVO_ENVIRONMENTS.includes(value.routing.environment as AvoEnvironment) &&
 		AVO_HORIZONS.includes(value.routing.horizon as AvoHorizon)
+	);
+}
+
+function isAvoV6State(value: unknown): value is JsonRecord {
+	if (!isRecord(value) || value.schemaVersion !== 6 || !isRecord(value.routing)) return false;
+	return (
+		typeof value.sessionId === "string" &&
+		typeof value.runId === "string" &&
+		Array.isArray(value.taskRuns) &&
+		Array.isArray(value.memories) &&
+		Array.isArray(value.memoryRecalls) &&
+		Array.isArray(value.memoryReflections) &&
+		AVO_ENVIRONMENTS.includes(value.routing.environment as AvoEnvironment)
 	);
 }
 
@@ -382,6 +504,15 @@ function migrateMemoryState(value: JsonRecord): AvoRunState {
 	const state = {
 		...(value as unknown as AvoRunState),
 		schemaVersion: AVO_STATE_VERSION,
+		experiments: Array.isArray(value.experiments) ? (value.experiments as AvoExperiment[]) : [],
+		trials: Array.isArray(value.trials) ? (value.trials as AvoTrial[]) : [],
+		taskRuns: Array.isArray(value.taskRuns)
+			? (value.taskRuns as JsonRecord[]).map((run) => ({
+					...(run as unknown as AvoRunState["taskRuns"][number]),
+					experiments: Array.isArray(run.experiments) ? (run.experiments as AvoExperiment[]) : [],
+					trials: Array.isArray(run.trials) ? (run.trials as AvoTrial[]) : [],
+				}))
+			: [],
 		memoryRecalls: Array.isArray(value.memoryRecalls) ? (value.memoryRecalls as AvoMemoryRecall[]) : [],
 	} satisfies AvoRunState;
 	state.memories = Array.isArray(value.memories)
@@ -837,6 +968,30 @@ export function parseAvoEvaluationInput(value: unknown): AvoEvaluationInput {
 	};
 }
 
+export function parseAvoExperimentInput(value: unknown): AvoExperimentInput {
+	if (!isRecord(value)) throw new Error("experiment must be an object");
+	return {
+		experimentId:
+			value.experiment_id === undefined ? undefined : requireIdentifier(value.experiment_id, "experiment_id"),
+		title: requireString(value.title, "experiment.title"),
+		hypothesis: requireString(value.hypothesis, "experiment.hypothesis"),
+		design: requireString(value.design, "experiment.design"),
+		tags: value.tags === undefined ? [] : stringArray(value.tags, "experiment.tags"),
+	};
+}
+
+export function parseAvoTrialInput(value: unknown): AvoTrialInput {
+	if (!isRecord(value)) throw new Error("trial must be an object");
+	return {
+		trialId: value.trial_id === undefined ? undefined : requireIdentifier(value.trial_id, "trial_id"),
+		experimentId: requireIdentifier(value.experiment_id, "trial.experiment_id"),
+		candidateId: requireIdentifier(value.candidate_id, "trial.candidate_id"),
+		evaluationId: requireIdentifier(value.evaluation_id, "trial.evaluation_id"),
+		label: optionalString(value.label, "trial.label"),
+		seed: optionalString(value.seed, "trial.seed"),
+	};
+}
+
 export function parseAvoCycleInput(value: unknown): AvoCycleInput {
 	if (!isRecord(value)) throw new Error("cycle must be an object");
 	return {
@@ -875,12 +1030,15 @@ export function parseAvoMemoryInput(value: unknown): AvoMemoryInput {
 export class AvoStore {
 	private readonly statePath?: string;
 	private readonly projectKey: string;
+	private readonly legacyProjectKey: string;
 	private readonly projectMemoryLedgerPath?: string;
+	private readonly legacyProjectMemoryLedgerPath?: string;
 	private readonly globalMemoryLedgerPath?: string;
 	private readonly sessionMemoryDatabasePath?: string;
 	private readonly projectMemoryDatabasePath?: string;
 	private readonly globalMemoryDatabasePath?: string;
 	private readonly owner: string;
+	private readonly ledgerSignatures = new Map<string, string>();
 	private state: AvoRunState;
 	private loadError?: string;
 
@@ -893,10 +1051,15 @@ export class AvoStore {
 	) {
 		this.statePath = artifactDir ? join(artifactDir, "avo", "state.json") : undefined;
 		this.projectKey = projectIdentity(cwd);
+		this.legacyProjectKey = canonicalPathIdentity(cwd);
 		this.owner = memoryOwner(sessionId);
 		this.projectMemoryLedgerPath = memoryRoot
 			? join(memoryRoot, "projects", this.projectKey, "canonical.json")
 			: undefined;
+		this.legacyProjectMemoryLedgerPath =
+			memoryRoot && this.legacyProjectKey !== this.projectKey
+				? join(memoryRoot, "projects", this.legacyProjectKey, "canonical.json")
+				: undefined;
 		this.globalMemoryLedgerPath = memoryRoot ? join(memoryRoot, "global", "canonical.json") : undefined;
 		this.sessionMemoryDatabasePath = artifactDir ? join(artifactDir, "avo", "nooa-memory.sqlite") : undefined;
 		this.projectMemoryDatabasePath = memoryRoot
@@ -904,7 +1067,7 @@ export class AvoStore {
 			: undefined;
 		this.globalMemoryDatabasePath = memoryRoot ? join(memoryRoot, "global", "nooa-memory.sqlite") : undefined;
 		this.state = this.load(sessionId);
-		this.mergePersistentMemories();
+		this.mergePersistentMemories(true);
 		if (!this.loadError) {
 			this.savePersistentMemories();
 			if (this.statePath) this.save();
@@ -953,17 +1116,40 @@ export class AvoStore {
 		}
 	}
 
-	private mergePersistentMemories(): void {
-		const persisted = [
-			...this.readPersistentLedger(this.projectMemoryLedgerPath, this.projectKey, "project"),
-			...this.readPersistentLedger(this.globalMemoryLedgerPath, "global", "global"),
+	private ledgerSignature(path: string | undefined): string | undefined {
+		if (!path) return undefined;
+		try {
+			const stat = statSync(path);
+			return `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+		} catch {
+			return "missing";
+		}
+	}
+
+	private mergePersistentMemories(force = false): boolean {
+		const sources: Array<{ path?: string; identity: string; scope: AvoMemoryScope }> = [
+			{ path: this.projectMemoryLedgerPath, identity: this.projectKey, scope: "project" },
+			{ path: this.legacyProjectMemoryLedgerPath, identity: this.legacyProjectKey, scope: "project" },
+			{ path: this.globalMemoryLedgerPath, identity: "global", scope: "global" },
 		];
+		const persisted: AvoMemory[] = [];
+		let changed = false;
+		for (const source of sources) {
+			if (!source.path) continue;
+			const signature = this.ledgerSignature(source.path);
+			if (!force && this.ledgerSignatures.get(source.path) === signature) continue;
+			this.ledgerSignatures.set(source.path, signature ?? "missing");
+			persisted.push(...this.readPersistentLedger(source.path, source.identity, source.scope));
+			changed = true;
+		}
+		if (!changed) return false;
 		const byId = new Map(this.state.memories.map((memory) => [memory.memoryId, memory]));
 		for (const memory of persisted) {
 			const current = byId.get(memory.memoryId);
 			if (!current || memory.updatedAt > current.updatedAt) byId.set(memory.memoryId, structuredClone(memory));
 		}
 		this.state.memories = [...byId.values()];
+		return true;
 	}
 
 	private writePersistentLedger(path: string | undefined, identity: string, scope: AvoMemoryScope): void {
@@ -985,6 +1171,7 @@ export class AvoStore {
 			const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
 			writeFileSync(temporaryPath, `${JSON.stringify(ledger, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
 			renameSync(temporaryPath, path);
+			this.ledgerSignatures.set(path, this.ledgerSignature(path) ?? "missing");
 			this.state.memories = [
 				...this.state.memories.filter((memory) => memory.scope !== scope),
 				...memories.map((memory) => structuredClone(memory)),
@@ -999,12 +1186,20 @@ export class AvoStore {
 		this.writePersistentLedger(this.globalMemoryLedgerPath, "global", "global");
 	}
 
+	refreshPersistentMemories(): boolean {
+		this.assertHealthy();
+		const changed = this.mergePersistentMemories();
+		if (changed && this.statePath) this.save();
+		return changed;
+	}
+
 	private load(sessionId: string): AvoRunState {
 		const fallback = emptyState(sessionId, this.now());
 		if (!this.statePath || !existsSync(this.statePath)) return fallback;
 		try {
 			const parsed = JSON.parse(readFileSync(this.statePath, "utf8")) as unknown;
 			if (isAvoState(parsed)) return parsed;
+			if (isAvoV6State(parsed)) return migrateMemoryState(parsed);
 			if (isAvoV5State(parsed)) return migrateMemoryState(parsed);
 			if (isAvoV4State(parsed)) return migrateMemoryState(migrateAvoV4State(parsed) as unknown as JsonRecord);
 			if (isAvoV3State(parsed)) return migrateMemoryState(migrateAvoV3State(parsed) as unknown as JsonRecord);
@@ -1060,6 +1255,20 @@ export class AvoStore {
 	private ownerForRole(role: string): string {
 		if (!/^[a-z][a-z0-9_-]{1,63}$/i.test(role)) throw new Error("memory owner role is invalid");
 		return `${role}@${this.owner.split("@").at(-1)}`;
+	}
+
+	private findCurrentOrArchived<T>(
+		current: readonly T[],
+		archived: (run: AvoRunState["taskRuns"][number]) => readonly T[],
+		predicate: (item: T) => boolean,
+	): T | undefined {
+		const active = current.find(predicate);
+		if (active) return active;
+		for (const run of [...this.state.taskRuns].reverse()) {
+			const item = archived(run).find(predicate);
+			if (item) return item;
+		}
+		return undefined;
 	}
 
 	setVerificationBaseline(baseline: AvoVerificationBaseline): AvoRunState {
@@ -1158,6 +1367,8 @@ export class AvoStore {
 				status: this.state.status,
 				candidates: structuredClone(this.state.candidates),
 				evaluations: structuredClone(this.state.evaluations),
+				experiments: structuredClone(this.state.experiments),
+				trials: structuredClone(this.state.trials),
 				cycles: structuredClone(this.state.cycles),
 				lineage: structuredClone(this.state.lineage),
 				checkpoints: structuredClone(this.state.checkpoints),
@@ -1188,6 +1399,8 @@ export class AvoStore {
 		this.state.status = "active";
 		this.state.candidates = [];
 		this.state.evaluations = [];
+		this.state.experiments = [];
+		this.state.trials = [];
 		this.state.cycles = [];
 		this.state.lineage = [
 			{
@@ -1483,6 +1696,152 @@ export class AvoStore {
 		});
 		this.save();
 		return structuredClone(receipt);
+	}
+
+	recordExperiment(input: AvoExperimentInput): AvoExperiment {
+		const experimentId = requireIdentifier(input.experimentId ?? `experiment-${randomUUID()}`, "experiment_id");
+		if (
+			this.findCurrentOrArchived(
+				this.state.experiments,
+				(run) => run.experiments,
+				(experiment) => experiment.experimentId === experimentId,
+			)
+		) {
+			throw new Error(`experiment ${experimentId} already exists`);
+		}
+		const createdAt = this.now();
+		const experiment: AvoExperiment = {
+			experimentId,
+			title: requireString(input.title, "experiment.title"),
+			hypothesis: requireString(input.hypothesis, "experiment.hypothesis"),
+			design: requireString(input.design, "experiment.design"),
+			status: "planned",
+			trialIds: [],
+			tags: [...new Set(input.tags ?? [])],
+			createdAt,
+			updatedAt: createdAt,
+		};
+		this.state.experiments.push(experiment);
+		this.state.lineage.push({
+			lineageId: `lineage-${randomUUID()}`,
+			kind: "experiment_recorded",
+			summary: experiment.title,
+			referenceId: experiment.experimentId,
+			recordedAt: createdAt,
+		});
+		this.save();
+		return structuredClone(experiment);
+	}
+
+	recordTrial(input: AvoTrialInput): AvoTrial {
+		const experiment = this.state.experiments.find((item) => item.experimentId === input.experimentId);
+		if (!experiment) throw new Error(`trial references unknown experiment ${input.experimentId}`);
+		if (experiment.status === "completed") throw new Error(`experiment ${input.experimentId} is already completed`);
+		const candidate = this.state.candidates.find((item) => item.candidateId === input.candidateId);
+		if (!candidate) throw new Error(`trial references unknown candidate ${input.candidateId}`);
+		const evaluation = this.state.evaluations.find((item) => item.evaluationId === input.evaluationId);
+		if (!evaluation || evaluation.candidateId !== candidate.candidateId) {
+			throw new Error(`trial evaluation ${input.evaluationId} is not bound to candidate ${input.candidateId}`);
+		}
+		if (evaluation.issuedBy !== "host" || evaluation.authority === "model_opinion") {
+			throw new Error("experiment trials require a host-issued, non-opinion evaluation");
+		}
+		if (evaluation.status === "inconclusive") {
+			throw new Error("an inconclusive evaluation cannot establish an experiment trial");
+		}
+		if (this.state.trials.some((trial) => trial.evaluationId === evaluation.evaluationId)) {
+			throw new Error(`evaluation ${evaluation.evaluationId} is already bound to an experiment trial`);
+		}
+		const trialId = requireIdentifier(input.trialId ?? `trial-${randomUUID()}`, "trial_id");
+		if (
+			this.findCurrentOrArchived(
+				this.state.trials,
+				(run) => run.trials,
+				(trial) => trial.trialId === trialId,
+			)
+		)
+			throw new Error(`trial ${trialId} already exists`);
+		const recordedAt = this.now();
+		const trial: AvoTrial = {
+			trialId,
+			experimentId: experiment.experimentId,
+			candidateId: candidate.candidateId,
+			evaluationId: evaluation.evaluationId,
+			label: input.label?.trim() || `Trial ${experiment.trialIds.length + 1}`,
+			seed: input.seed,
+			status: evaluation.status,
+			metrics: structuredClone(evaluation.metrics),
+			evidenceRefs: [...evaluation.evidenceRefs],
+			recordedAt,
+		};
+		this.state.trials.push(trial);
+		experiment.trialIds.push(trial.trialId);
+		experiment.status = "running";
+		experiment.updatedAt = recordedAt;
+		this.state.lineage.push({
+			lineageId: `lineage-${randomUUID()}`,
+			kind: "trial_recorded",
+			summary: `${experiment.title}: ${trial.label}=${trial.status}`,
+			referenceId: trial.trialId,
+			recordedAt,
+		});
+		this.save();
+		return structuredClone(trial);
+	}
+
+	completeExperiment(experimentId: string): { experiment: AvoExperiment; memory: AvoMemory } {
+		const normalizedId = requireIdentifier(experimentId, "experiment_id");
+		const experiment = this.state.experiments.find((item) => item.experimentId === normalizedId);
+		if (!experiment) throw new Error(`experiment ${normalizedId} does not exist`);
+		if (experiment.status === "completed") throw new Error(`experiment ${normalizedId} is already completed`);
+		const trials = experiment.trialIds.map((trialId) => {
+			const trial = this.state.trials.find((item) => item.trialId === trialId);
+			if (!trial) throw new Error(`experiment ${normalizedId} has a missing trial ${trialId}`);
+			return trial;
+		});
+		if (trials.length === 0)
+			throw new Error("an experiment requires at least one host-verified trial before completion");
+		const completedAt = this.now();
+		experiment.status = "completed";
+		experiment.updatedAt = completedAt;
+		experiment.completedAt = completedAt;
+		const memory = this.recordMemory(
+			{
+				memoryId: `episode:experiment:${experiment.experimentId}`,
+				namespace: this.state.routing.environment,
+				type: "episode",
+				scope: "project",
+				title: `Experiment: ${experiment.title}`,
+				content: [
+					`Hypothesis: ${experiment.hypothesis}`,
+					`Design: ${experiment.design}`,
+					...trials.map(
+						(trial) =>
+							`${trial.label}: ${trial.status}; metrics=${JSON.stringify(trial.metrics)}; evidence=${trial.evidenceRefs.join(", ")}`,
+					),
+				].join("\n"),
+				tags: [...experiment.tags, "experiment", "host-verified-trials"],
+				importance: 8,
+				sourceIds: [experiment.experimentId, ...trials.flatMap((trial) => [trial.trialId, trial.evaluationId])],
+				references: [
+					{ kind: "experiment", key: experiment.experimentId },
+					...trials.flatMap((trial) => [
+						{ kind: "trial" as const, key: trial.trialId },
+						{ kind: "evaluation" as const, key: trial.evaluationId },
+					]),
+				],
+			},
+			"verified",
+		);
+		this.state.lineage.push({
+			lineageId: `lineage-${randomUUID()}`,
+			kind: "experiment_completed",
+			summary: `${experiment.title}: ${trials.length} host-verified trial${trials.length === 1 ? "" : "s"}`,
+			referenceId: experiment.experimentId,
+			recordedAt: completedAt,
+		});
+		this.save();
+		return { experiment: structuredClone(experiment), memory };
 	}
 
 	completeCycle(
@@ -1781,6 +2140,14 @@ export class AvoStore {
 	}
 
 	private resolveExperimentReference(experimentId: string): string | undefined {
+		const universal = this.findCurrentOrArchived(
+			this.state.experiments,
+			(run) => run.experiments,
+			(experiment) => experiment.experimentId === experimentId,
+		);
+		if (universal) {
+			return `${universal.experimentId}: ${universal.status}; ${universal.title}; trials=${universal.trialIds.length}`;
+		}
 		const statePath =
 			this.state.adapterStateRef?.adapterId === "research" ? this.state.adapterStateRef.statePath : undefined;
 		if (!statePath || !existsSync(statePath)) return undefined;
@@ -1817,14 +2184,33 @@ export class AvoStore {
 					: `${input.key} (not a file)`;
 			}
 		} else if (input.kind === "candidate") {
-			preview = this.state.candidates.find((candidate) => candidate.candidateId === input.key)?.summary;
+			preview = this.findCurrentOrArchived(
+				this.state.candidates,
+				(run) => run.candidates,
+				(candidate) => candidate.candidateId === input.key,
+			)?.summary;
 		} else if (input.kind === "evaluation") {
-			const evaluation = this.state.evaluations.find((item) => item.evaluationId === input.key);
+			const evaluation = this.findCurrentOrArchived(
+				this.state.evaluations,
+				(run) => run.evaluations,
+				(item) => item.evaluationId === input.key,
+			);
 			preview = evaluation ? `${evaluation.evaluatorId}: ${evaluation.status}` : undefined;
 		} else if (input.kind === "experiment") {
 			preview = this.resolveExperimentReference(input.key);
+		} else if (input.kind === "trial") {
+			const trial = this.findCurrentOrArchived(
+				this.state.trials,
+				(run) => run.trials,
+				(item) => item.trialId === input.key,
+			);
+			preview = trial ? `${trial.label}: ${trial.status}; evaluation=${trial.evaluationId}` : undefined;
 		} else if (input.kind === "cycle") {
-			const cycle = this.state.cycles.find((item) => item.cycleId === input.key);
+			const cycle = this.findCurrentOrArchived(
+				this.state.cycles,
+				(run) => run.cycles,
+				(item) => item.cycleId === input.key,
+			);
 			preview = cycle ? `${cycle.candidateId}: ${cycle.outcome}` : undefined;
 		} else if (input.kind === "task") {
 			preview =
@@ -1849,6 +2235,18 @@ export class AvoStore {
 		if (input.namespace === "shared") this.assertSharedMemoryProvenance(sourceIds);
 		const scope = input.scope ?? this.defaultMemoryScope(input);
 		if (input.type === "scratch" && scope !== "task") throw new Error("scratch memories must use task scope");
+		if (scope === "global" && verificationState !== "verified") {
+			throw new Error("global memories must be host-verified before persistence");
+		}
+		if (
+			scope === "global" &&
+			verificationState === "verified" &&
+			input.type !== "info" &&
+			input.type !== "skill" &&
+			input.type !== "reflection"
+		) {
+			throw new Error("global memory accepts only verified info, skill, or reflection records");
+		}
 		const title = requireString(input.title, "memory.title");
 		const content = requireString(input.content, "memory.content");
 		const fingerprint = digestAvoPayload({
@@ -1932,6 +2330,14 @@ export class AvoStore {
 		const memory = this.state.memories.find((item) => item.memoryId === memoryId);
 		if (!memory || memory.invalidatedAt) throw new Error(`memory ${memoryId} is unavailable`);
 		if (memory.verificationState !== "proposed") throw new Error(`memory ${memoryId} is not proposed`);
+		if (
+			memory.scope === "global" &&
+			memory.type !== "info" &&
+			memory.type !== "skill" &&
+			memory.type !== "reflection"
+		) {
+			throw new Error("global memory accepts only verified info, skill, or reflection records");
+		}
 		if (memory.type === "reflection" || memory.type === "skill") {
 			const sourceEpisodes = new Set(
 				memory.sourceIds.filter((sourceId) =>
@@ -2020,17 +2426,53 @@ export class AvoStore {
 		return archived;
 	}
 
-	recall(query: string, namespaces: readonly AvoMemory["namespace"][], limit = 8): AvoMemory[] {
+	isMemoryRecallEligible(
+		memory: AvoMemory,
+		channel: AvoMemoryRecallChannel,
+		profile: "root" | "supervisor" = "root",
+	): boolean {
+		if (
+			memory.invalidatedAt ||
+			memory.verificationState === "contested" ||
+			(memory.owner !== "" && !memory.owner.startsWith("prime-root@")) ||
+			(memory.owner === "" && memory.verificationState !== "verified") ||
+			(memory.scope === "task" && memory.taskRunId !== this.state.runId)
+		) {
+			return false;
+		}
+		if (memory.scope === "global" && memory.verificationState !== "verified") return false;
+		if (
+			memory.scope === "global" &&
+			memory.type !== "info" &&
+			memory.type !== "skill" &&
+			memory.type !== "reflection"
+		) {
+			return false;
+		}
+		if (profile === "supervisor") {
+			return memory.verificationState === "verified" && (memory.type === "episode" || memory.type === "reflection");
+		}
+		if (channel === "spontaneous" && memory.scope === "project") {
+			return memory.verificationState === "verified";
+		}
+		return true;
+	}
+
+	recall(
+		query: string,
+		namespaces: readonly AvoMemory["namespace"][],
+		limit = 8,
+		options: { channel?: AvoMemoryRecallChannel; profile?: "root" | "supervisor" } = {},
+	): AvoMemory[] {
 		const terms = wordSet(requireString(query, "query"));
 		if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error("limit must be an integer from 1 to 50");
 		const allowed = new Set(namespaces);
+		const channel = options.channel ?? "deliberate";
+		const profile = options.profile ?? "root";
 		return this.state.memories
 			.filter(
 				(memory) =>
-					!memory.invalidatedAt &&
-					memory.verificationState !== "contested" &&
-					(memory.owner === "" || memory.owner.startsWith("prime-root@")) &&
-					(memory.owner !== "" || memory.verificationState === "verified") &&
+					this.isMemoryRecallEligible(memory, channel, profile) &&
 					allowed.has(memory.namespace) &&
 					(memory.scope !== "task" || memory.taskRunId === this.state.runId),
 			)
@@ -2086,15 +2528,34 @@ export class AvoStore {
 				}
 			}
 		} else if (reference.kind === "candidate") {
-			value = this.state.candidates.find((candidate) => candidate.candidateId === reference.key)?.summary;
+			value = this.findCurrentOrArchived(
+				this.state.candidates,
+				(run) => run.candidates,
+				(candidate) => candidate.candidateId === reference.key,
+			)?.summary;
 		} else if (reference.kind === "evaluation") {
-			const evaluation = this.state.evaluations.find((item) => item.evaluationId === reference.key);
+			const evaluation = this.findCurrentOrArchived(
+				this.state.evaluations,
+				(run) => run.evaluations,
+				(item) => item.evaluationId === reference.key,
+			);
 			value = evaluation ? `${evaluation.evaluatorId}: ${evaluation.status}` : undefined;
 		} else if (reference.kind === "cycle") {
-			const cycle = this.state.cycles.find((item) => item.cycleId === reference.key);
+			const cycle = this.findCurrentOrArchived(
+				this.state.cycles,
+				(run) => run.cycles,
+				(item) => item.cycleId === reference.key,
+			);
 			value = cycle ? `${cycle.candidateId}: ${cycle.outcome}` : undefined;
 		} else if (reference.kind === "experiment") {
 			value = this.resolveExperimentReference(reference.key);
+		} else if (reference.kind === "trial") {
+			const trial = this.findCurrentOrArchived(
+				this.state.trials,
+				(run) => run.trials,
+				(item) => item.trialId === reference.key,
+			);
+			value = trial ? `${trial.label}: ${trial.status}; evaluation=${trial.evaluationId}` : undefined;
 		} else if (reference.kind === "task") {
 			value =
 				reference.key === this.state.runId
@@ -2125,11 +2586,24 @@ export class AvoStore {
 		return context.length <= maxChars ? context : `${context.slice(0, maxChars - 2).trimEnd()} …`;
 	}
 
+	formatSupervisorMemoryContext(memories: readonly AvoMemory[], maxChars = 2_500): string {
+		if (memories.length === 0) return "";
+		const lines = ["## Host-verified trajectory memory"];
+		for (const memory of memories) {
+			lines.push(`- [${memory.type}/${memory.scope}#${memory.memoryId.slice(0, 12)}] ${memory.title}`);
+			lines.push(`  ${memory.content.replace(/\s+/g, " ").slice(0, 600)}`);
+		}
+		const context = lines.join("\n");
+		return context.length <= maxChars ? context : `${context.slice(0, maxChars - 2).trimEnd()} …`;
+	}
+
 	memoryRecordsForSync(): AvoMemory[] {
+		this.refreshPersistentMemories();
 		return this.state.memories.map((memory) => structuredClone(memory));
 	}
 
 	verifiedEpisodesForReflection(limit = 50): AvoMemory[] {
+		this.refreshPersistentMemories();
 		return this.state.memories
 			.filter(
 				(memory) => memory.type === "episode" && memory.verificationState === "verified" && !memory.invalidatedAt,
