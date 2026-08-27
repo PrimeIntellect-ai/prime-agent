@@ -872,6 +872,7 @@ describe("ENG-4509 side questions", () => {
 			isAgentCompacting: () => false,
 			isBashRunning: () => true,
 			applyConnectionStateSnapshot: vi.fn(),
+			refreshQueueSelectionFromState: vi.fn(),
 			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
 				messages: [],
