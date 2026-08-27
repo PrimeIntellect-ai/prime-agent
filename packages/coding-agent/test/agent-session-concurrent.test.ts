@@ -546,7 +546,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(session.unfinishedActionCount).toBe(0);
 	});
 
-	it("retains an accepted agent message across direct compaction until resume", async () => {
+	it("accepts agent messages during and after direct compaction", async () => {
 		createSession();
 		let releaseCompaction: (result: CompactionResult) => void = () => {};
 		const compactionGate = new Promise<CompactionResult>((resolve) => {
@@ -573,18 +573,29 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(session.getSessionActionSnapshot().steering).toContain("message during direct compaction");
 		releaseCompaction({ summary: "compacted", firstKeptEntryId: "entry-1", tokensBefore: 1 });
 		await compaction;
-		const deliveryCount = () =>
+		let postCompactionQueued: boolean | undefined;
+		await session.acceptAgentMessagePrompt("message after direct compaction", {
+			queueIfBusy: true,
+			streamingBehavior: "steer",
+			preflightResult: (accepted, didQueue) => {
+				expect(accepted).toBe(true);
+				postCompactionQueued = didQueue;
+			},
+		});
+		expect(postCompactionQueued).toBe(true);
+		const deliveryCount = (text: string) =>
 			session.messages.filter(
 				(message) =>
 					message.role === "user" &&
 					typeof message.content !== "string" &&
-					message.content.some((part) => part.type === "text" && part.text === "message during direct compaction"),
+					message.content.some((part) => part.type === "text" && part.text === text),
 			).length;
-		expect(deliveryCount()).toBe(0);
+		expect(deliveryCount("message during direct compaction")).toBe(0);
+		expect(deliveryCount("message after direct compaction")).toBe(0);
 
 		session.resumeQueuedWork();
-		await vi.waitFor(() => expect(deliveryCount()).toBe(1));
-		expect(deliveryCount()).toBe(1);
+		await vi.waitFor(() => expect(deliveryCount("message during direct compaction")).toBe(1));
+		expect(session.getSessionActionSnapshot().steering).toContain("message after direct compaction");
 	});
 
 	it("delivers an accepted agent message once after scheduler-owned compaction", async () => {

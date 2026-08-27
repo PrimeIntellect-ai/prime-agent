@@ -4585,7 +4585,7 @@ export class AgentSession {
 		};
 		if (
 			this._sessionInputPumpSuspended &&
-			this.isCompacting &&
+			this._isBusyForSessionInput("preflight") &&
 			options?.queueIfBusy === true &&
 			options.streamingBehavior
 		) {
