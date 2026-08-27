@@ -5,7 +5,7 @@ description: Read and write Linear issues, projects, cycles, comments, and more 
 
 # Linear
 
-Talk to Linear through its official hosted MCP server from the IPython kernel.
+Talk to Linear through its official hosted MCP server from the Python kernel.
 
 ## Setup
 

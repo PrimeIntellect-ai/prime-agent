@@ -5,7 +5,7 @@ Connect external services (Linear, Notion, …) to Prime Agent over the
 
 Consistent with Prime Agent's single-tool design, MCP integrations are **not**
 exposed as new agent tools. Each integration is a [Python-backed skill](skills.md)
-that the model imports and calls from the IPython kernel:
+that the model imports and calls from the Python kernel:
 
 ```python
 import linear
@@ -123,7 +123,7 @@ to the user settings file:
 }
 ```
 
-The generic `mcp` module is pre-imported in IPython. Server and tool names are
+The generic `mcp` module is pre-imported in the Python REPL. Server and tool names are
 passed through unchanged:
 
 ```python
