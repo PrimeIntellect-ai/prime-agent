@@ -88,6 +88,9 @@ describe("AgentSession universal AVO runtime", () => {
 		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
 			state: { status: "completed", candidates: [{ candidateId: "rain-poem", deliveryDigest: expect.any(String) }] },
 		});
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			terminalEvidence: { kind: "avo_completion", runId: `${harness.session.sessionId}:task-1` },
+		});
 	});
 
 	it("starts a clean task run after a policy-complete subjective task while retaining memory", async () => {

@@ -112,6 +112,13 @@ function requireString(value: unknown, label: string): string {
 	return value.trim();
 }
 
+function requireExperimentString(value: unknown, label: string): string {
+	if (typeof value !== "string" || value.trim().length === 0) {
+		throw new Error(`REQUIRED ${label}: must be a non-empty string`);
+	}
+	return value.trim();
+}
+
 function requireIdentifier(value: unknown, label: string): string {
 	const identifier = requireString(value, label);
 	if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(identifier)) {
@@ -1013,6 +1020,12 @@ export function parseAvoExperimentInput(value: unknown): AvoExperimentInput {
 	if (!isRecord(value)) throw new Error("experiment must be an object");
 	if (!isRecord(value.plan)) throw new Error("experiment.plan must be an object");
 	const plan = value.plan;
+	if ("direction" in plan) {
+		throw new Error("INVALID_FIELD experiment.plan.direction: unknown field; use experiment.plan.metric_direction");
+	}
+	if (plan.metric_direction === undefined) {
+		throw new Error("REQUIRED experiment.plan.metric_direction: must be one of maximize, minimize");
+	}
 	if (!Array.isArray(plan.candidate_ids)) throw new Error("experiment.plan.candidate_ids must be an array");
 	if (!Array.isArray(plan.seeds)) throw new Error("experiment.plan.seeds must be an array");
 	if (!Array.isArray(plan.conditions)) throw new Error("experiment.plan.conditions must be an array");
@@ -1045,9 +1058,9 @@ export function parseAvoExperimentInput(value: unknown): AvoExperimentInput {
 	return {
 		experimentId:
 			value.experiment_id === undefined ? undefined : requireIdentifier(value.experiment_id, "experiment_id"),
-		title: requireString(value.title, "experiment.title"),
-		hypothesis: requireString(value.hypothesis, "experiment.hypothesis"),
-		design: requireString(value.design, "experiment.design"),
+		title: requireExperimentString(value.title, "experiment.title"),
+		hypothesis: requireExperimentString(value.hypothesis, "experiment.hypothesis"),
+		design: requireExperimentString(value.design, "experiment.design"),
 		plan: parsedPlan,
 		tags: value.tags === undefined ? [] : stringArray(value.tags, "experiment.tags"),
 	};

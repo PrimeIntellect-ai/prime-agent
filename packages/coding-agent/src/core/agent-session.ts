@@ -7031,7 +7031,16 @@ export class AgentSession {
 	}
 
 	getAutonomousStatus(): AgentAutonomousStatus {
-		return autonomousStatus(this._autonomousState);
+		const status = autonomousStatus(this._autonomousState);
+		const avoState = this._avoRuntime?.getState();
+		if (avoState?.status !== "completed") return status;
+		return {
+			...status,
+			terminalEvidence: {
+				kind: "avo_completion",
+				runId: avoState.runId,
+			},
+		};
 	}
 
 	recordHostAutonomousContinuation(): void {

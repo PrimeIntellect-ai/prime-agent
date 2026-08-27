@@ -30,6 +30,7 @@ import {
 	inferAvoVerificationPolicy,
 	normalizeAvoExperimentPlan,
 	parseAvoClaimVerifierMessage,
+	parseAvoExperimentInput,
 	parseAvoMemoryInput,
 	parseAvoMemoryReasonerMessage,
 	parseAvoMemoryReconcilerMessage,
@@ -52,6 +53,35 @@ function clock(): () => string {
 
 describe("generic AVO core", () => {
 	test("fails closed on ambiguous experiment plans and undeclared trial metrics", () => {
+		expect(() =>
+			parseAvoExperimentInput({
+				experiment_id: "wrong-direction-field",
+				title: "Direction field",
+				hypothesis: "The candidate improves score.",
+				design: "One fixed trial.",
+				plan: {
+					candidate_ids: ["candidate"],
+					conditions: [{ condition_id: "suite", command_template: "node bench.cjs --seed {{seed}}" }],
+					seeds: [1],
+					primary_metric: "score",
+					direction: "maximize",
+				},
+			}),
+		).toThrow("INVALID_FIELD experiment.plan.direction: unknown field; use experiment.plan.metric_direction");
+		expect(() =>
+			parseAvoExperimentInput({
+				experiment_id: "missing-title",
+				hypothesis: "The candidate improves score.",
+				design: "One fixed trial.",
+				plan: {
+					candidate_ids: ["candidate"],
+					conditions: [{ condition_id: "suite", command_template: "node bench.cjs --seed {{seed}}" }],
+					seeds: [1],
+					primary_metric: "score",
+					metric_direction: "maximize",
+				},
+			}),
+		).toThrow("REQUIRED experiment.title: must be a non-empty string");
 		expect(
 			normalizeAvoExperimentPlan(
 				{
@@ -702,15 +732,40 @@ describe("generic AVO core", () => {
 				expect.objectContaining({ label: "Trials", value: 1 }),
 			]),
 		);
-		expect(dashboard.sections).toContainEqual(
+		const codingDashboard = new CodingAvoAdapter().dashboardProjection(store.getState());
+		expect(codingDashboard.sections).toContainEqual(
 			expect.objectContaining({
 				id: "experiments",
 				items: expect.arrayContaining([
 					expect.objectContaining({ label: "Latest experiment", value: expect.stringContaining("completed") }),
 					expect.objectContaining({ label: "Latest plan coverage", value: "1/1 cells · paired" }),
 					expect.objectContaining({
+						label: "Experiment plan",
+						value: "passed_tests · maximize · paired",
+					}),
+					expect.objectContaining({
+						label: "Candidate candidate-parser-serialized",
+						value: expect.stringContaining("mean 12 · median 12 · 95% CI [12, 12] · min/max 12/12"),
+					}),
+					expect.objectContaining({
 						label: "Host experiment outcome",
 						value: expect.stringContaining("inconclusive"),
+					}),
+					expect.objectContaining({
+						label: "Trial candidate-parser-serialized · parser-regression · seed fixed-suite-v1",
+						value: expect.stringContaining("passed_tests=12 · pass"),
+					}),
+					expect.objectContaining({ label: "Aggregate / manifest digests" }),
+				]),
+			}),
+		);
+		expect(codingDashboard.sections).toContainEqual(
+			expect.objectContaining({
+				id: "coding_feedback",
+				items: expect.arrayContaining([
+					expect.objectContaining({
+						label: "Latest benchmark",
+						value: expect.stringContaining("passed_tests"),
 					}),
 				]),
 			}),

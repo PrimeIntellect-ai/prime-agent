@@ -697,6 +697,29 @@ describe("runPrintMode", () => {
 		);
 	});
 
+	it("returns zero when canonical AVO completion precedes an autonomous limit", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "Verified candidate delivered." }), {
+			enabled: true,
+			continuationsUsed: 3,
+			turnsUsed: 22,
+			tokensUsed: 10_000,
+			startedAt: Date.now(),
+			limits: { maxContinuations: 3, maxTurns: 12, maxTokens: 100_000, timeoutMs: 60_000 },
+			gates: { commands: [], maxRetries: 3, timeoutMs: 300_000 },
+			gateAttempts: {},
+			terminalEvidence: { kind: "avo_completion", runId: "session-1:task-1" },
+		});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+		});
+
+		expect(exitCode).toBe(0);
+		expect(output.write).toHaveBeenCalledWith("Verified candidate delivered.\n");
+		expect(errorSpy).not.toHaveBeenCalledWith(expect.stringContaining("Autonomous run stopped"));
+	});
+
 	it("keeps prompting while autonomous gates fail below retry limits", async () => {
 		const statuses: AgentAutonomousStatus[] = [
 			{

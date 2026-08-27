@@ -99,6 +99,36 @@ any declared `--name {{param:name}}`; multi-candidate non-coding plans also
 bind `--candidate {{candidate_id}}`. A successful trial command emits exactly one line such as
 `AVO_TRIAL_METRICS_JSON:{"score":12.5}`.
 
+Use this canonical Python shape. Field names are snake_case; the direction
+field is `metric_direction` (plain `direction` is invalid). `title`,
+`hypothesis`, and `design` are required.
+
+```python
+experiment = await avo.record_experiment({
+    "experiment_id": "batch-size-test",
+    "title": "Batch size comparison",
+    "hypothesis": "Batch size 8 improves score.",
+    "design": "Evaluate batch size 8 on three fixed seeds.",
+    "plan": {
+        "mode": "prospective",
+        "candidate_ids": ["batch-size-8"],
+        "conditions": [{
+            "condition_id": "default",
+            "command_template": "python benchmark.py --seed {{seed}}",
+        }],
+        "seeds": [1, 2, 3],
+        "pairing": "independent",
+        "primary_metric": "score",
+        "metric_direction": "maximize",
+    },
+})
+```
+
+For a paired multi-candidate plan, list every candidate, set
+`baseline_candidate_id` to the current champion, and use the same conditions
+and seeds for every candidate. In coding tasks, restore each candidate's exact
+workspace state before calling `run_trial()` for its cells.
+
 Call `run_trial(experiment_id, candidate_id, condition_id, seed)`. The host
 selects the preregistered cell, renders the direct command, binds its digest and
 candidate payload to the receipt, and records only the declared finite numeric

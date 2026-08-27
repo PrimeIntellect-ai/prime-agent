@@ -151,7 +151,12 @@ async function runPrintModeWithConnectionInternal(
 				`Autonomous quality gate still failing after attempt ${latestAutonomousGateAttempt(autonomousStatus)}/${autonomousStatus.gates.maxRetries}: ${autonomousStatus.lastGateFailure.exitText}${limitText}`,
 			);
 			exitCode = 1;
-		} else if (autonomousStatus.enabled && autonomousStatus.gates.commands.length === 0 && autonomousLimit) {
+		} else if (
+			autonomousStatus.enabled &&
+			autonomousStatus.gates.commands.length === 0 &&
+			autonomousLimit &&
+			!autonomousStatus.terminalEvidence
+		) {
 			console.error(
 				`Autonomous run stopped before terminal evidence; ${describeAutonomousLimit(autonomousStatus, autonomousLimit)}`,
 			);

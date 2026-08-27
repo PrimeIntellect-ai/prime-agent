@@ -104,6 +104,103 @@ function phaseStatus(index: number, active: number, passed: boolean): "complete"
 	return index === active ? "active" : "pending";
 }
 
+type AvoDashboardItem = AvoDashboardProjection["sections"][number]["items"][number];
+
+function formatDashboardNumber(value: number): string {
+	if (!Number.isFinite(value)) return String(value);
+	if (Number.isInteger(value)) return String(value);
+	const digits = Math.abs(value) >= 1 ? 3 : 6;
+	return value.toFixed(digits).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function shortDashboardReference(value: string | undefined): string {
+	if (!value) return "none";
+	return value.length > 16 ? `${value.slice(0, 12)}…` : value;
+}
+
+function experimentDashboardItems(
+	experiment: AvoRunState["experiments"][number] | undefined,
+	trials: AvoRunState["trials"],
+): AvoDashboardItem[] {
+	if (!experiment) {
+		return [{ label: "Latest experiment", value: "No experiment recorded", status: "neutral" }];
+	}
+	const plan = experiment.plan;
+	const outcome = experiment.outcome;
+	const items: AvoDashboardItem[] = [
+		{
+			label: "Latest experiment",
+			value: `${experiment.title} · ${experiment.status}`,
+			status: experiment.status === "completed" ? "ok" : "neutral",
+		},
+		{
+			label: "Latest plan coverage",
+			value: plan
+				? `${trials.length}/${plan.expectedTrials} cells · ${plan.pairing}`
+				: "No structured plan recorded",
+			status: plan && trials.length === plan.expectedTrials ? "ok" : "watch",
+		},
+		{
+			label: "Experiment plan",
+			value: plan
+				? `${plan.primaryMetric} · ${plan.metricDirection} · ${plan.pairing}${plan.baselineCandidateId ? ` · baseline ${plan.baselineCandidateId}` : ""}`
+				: "No structured plan recorded",
+			status: "neutral",
+		},
+	];
+	for (const aggregate of outcome?.candidateAggregates ?? []) {
+		const metric = aggregate.metric;
+		items.push({
+			label: `Candidate ${aggregate.candidateId}`,
+			value: `n=${metric.count} · mean ${formatDashboardNumber(metric.mean)} · median ${formatDashboardNumber(metric.median)} · 95% CI [${formatDashboardNumber(metric.ci95Low)}, ${formatDashboardNumber(metric.ci95High)}] · min/max ${formatDashboardNumber(metric.minimum)}/${formatDashboardNumber(metric.maximum)}`,
+			status: "neutral",
+		});
+	}
+	for (const comparison of outcome?.pairedComparisons ?? []) {
+		items.push({
+			label: `Paired ${comparison.candidateId} vs ${comparison.baselineCandidateId}`,
+			value: `Δ mean ${formatDashboardNumber(comparison.delta.mean)} · 95% CI [${formatDashboardNumber(comparison.delta.ci95Low)}, ${formatDashboardNumber(comparison.delta.ci95High)}] · W/L/T ${comparison.wins}/${comparison.losses}/${comparison.ties} · win rate ${formatDashboardNumber(comparison.winRate * 100)}%`,
+			status: comparison.favorableCi95Low > 0 ? "ok" : "watch",
+		});
+	}
+	items.push({
+		label: "Host experiment outcome",
+		value: outcome
+			? `${outcome.decision}${outcome.championCandidateId ? ` · champion ${outcome.championCandidateId}` : ""} · ${outcome.reason}`
+			: "No aggregate outcome yet",
+		status:
+			outcome?.decision === "promote" || outcome?.decision === "retain"
+				? "ok"
+				: experiment.status === "completed"
+					? "watch"
+					: "neutral",
+	});
+	for (const trial of trials.slice(-12)) {
+		const primaryMetric = plan?.primaryMetric;
+		const primaryValue = primaryMetric ? trial.metrics[primaryMetric] : undefined;
+		items.push({
+			label: `Trial ${trial.candidateId} · ${trial.conditionId ?? "unlabeled"} · seed ${trial.seed ?? "none"}`,
+			value: `${primaryMetric ?? "metric"}=${typeof primaryValue === "number" ? formatDashboardNumber(primaryValue) : String(primaryValue ?? "missing")} · ${trial.status} · eval ${shortDashboardReference(trial.evaluationId)} · cell ${shortDashboardReference(trial.cellDigest)} · cmd ${shortDashboardReference(trial.commandDigest)}`,
+			status: trial.status === "pass" ? "ok" : trial.status === "fail" ? "fail" : "watch",
+		});
+	}
+	if (trials.length > 12) {
+		items.push({
+			label: "Earlier trials",
+			value: `${trials.length - 12} additional host-bound cells are retained in the trace`,
+			status: "neutral",
+		});
+	}
+	if (outcome) {
+		items.push({
+			label: "Aggregate / manifest digests",
+			value: `${outcome.aggregateDigest} / ${outcome.trialManifestDigest}`,
+			status: "neutral",
+		});
+	}
+	return items;
+}
+
 function genericProjection(
 	state: AvoRunState,
 	stopGate: AvoStopGate,
@@ -193,64 +290,7 @@ function genericProjection(
 			{
 				id: "experiments",
 				title: "Experiments",
-				items: [
-					{
-						label: "Latest experiment",
-						value: state.experiments.at(-1)
-							? `${state.experiments.at(-1)!.title} · ${state.experiments.at(-1)!.status}`
-							: "No experiment recorded",
-						status: state.experiments.at(-1)?.status === "completed" ? "ok" : "neutral",
-					},
-					{
-						label: "Latest plan coverage",
-						value: latestExperiment?.plan
-							? `${latestExperimentTrials.length}/${latestExperiment.plan.expectedTrials} cells · ${latestExperiment.plan.pairing}`
-							: "No structured plan recorded",
-						status:
-							latestExperiment?.plan && latestExperimentTrials.length === latestExperiment.plan.expectedTrials
-								? "ok"
-								: latestExperiment
-									? "watch"
-									: "neutral",
-					},
-					{
-						label: "Host experiment outcome",
-						value: latestExperiment?.outcome
-							? `${latestExperiment.outcome.decision}${latestExperiment.outcome.championCandidateId ? ` · champion ${latestExperiment.outcome.championCandidateId}` : ""} · ${latestExperiment.outcome.primaryMetric}`
-							: "No aggregate outcome yet",
-						status:
-							latestExperiment?.outcome?.decision === "promote" ||
-							latestExperiment?.outcome?.decision === "retain"
-								? "ok"
-								: latestExperiment?.status === "completed"
-									? "watch"
-									: "neutral",
-					},
-					{
-						label: "Condition effects",
-						value:
-							latestExperiment?.outcome?.conditionPairedComparisons
-								.slice(0, 6)
-								.map(
-									(item) =>
-										`${item.conditionId}:${item.candidateId} Δ=${item.delta.mean} CI=[${item.delta.ci95Low},${item.delta.ci95High}]`,
-								)
-								.join(" · ") || "No paired condition effects yet",
-						status: "neutral",
-					},
-					{
-						label: "Latest host-bound trial",
-						value: state.trials.at(-1)
-							? `${state.trials.at(-1)!.label} · ${state.trials.at(-1)!.status}`
-							: "No trial recorded",
-						status:
-							state.trials.at(-1)?.status === "pass"
-								? "ok"
-								: state.trials.at(-1)?.status === "fail"
-									? "fail"
-									: "neutral",
-					},
-				],
+				items: experimentDashboardItems(latestExperiment, latestExperimentTrials),
 			},
 			{
 				id: "memory",
@@ -689,12 +729,14 @@ export class CodingAvoAdapter extends BaseAdapter {
 			{ id: "final_gate", title: "Final gate", short: "Executable feedback passed" },
 		]);
 		const executable = state.evaluations.filter((receipt) =>
-			["test", "build", "lint", "benchmark", "runtime", "filesystem", "git"].includes(receipt.evaluatorId),
+			["test", "build", "lint", "benchmark", "runtime", "filesystem", "git", "experiment_trial"].includes(
+				receipt.evaluatorId,
+			),
 		);
-		const item = (evaluatorId: string) =>
-			[...executable].reverse().find((receipt) => receipt.evaluatorId === evaluatorId);
-		const receiptItem = (label: string, evaluatorId: string) => {
-			const receipt = item(evaluatorId);
+		const item = (evaluatorIds: readonly string[]) =>
+			[...executable].reverse().find((receipt) => evaluatorIds.includes(receipt.evaluatorId));
+		const receiptItem = (label: string, ...evaluatorIds: string[]) => {
+			const receipt = item(evaluatorIds);
 			return {
 				label,
 				value: receipt ? `${receipt.status} · ${JSON.stringify(receipt.metrics)}` : "No receipt yet",
@@ -713,7 +755,7 @@ export class CodingAvoAdapter extends BaseAdapter {
 				receiptItem("Latest tests", "test"),
 				receiptItem("Latest build", "build"),
 				receiptItem("Latest lint", "lint"),
-				receiptItem("Latest benchmark", "benchmark"),
+				receiptItem("Latest benchmark", "benchmark", "experiment_trial"),
 				{
 					label: "Current failure",
 					value:
