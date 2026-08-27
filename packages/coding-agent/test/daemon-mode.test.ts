@@ -1258,8 +1258,6 @@ describe("daemon mode helpers", () => {
 			): AgentSessionMessageController;
 			getBoundSessionState(id: string): ActiveSessionState;
 			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
-			agentMessageTargetLocks: Map<string, Promise<void>>;
-			promptWithAgentMessagePreparingGuard(state: ActiveSessionState, message: string): Promise<boolean>;
 		};
 		internals.sessions.set(parentState.activeSessionId, parentState);
 		internals.sessions.set(childState.activeSessionId, childState);
@@ -1282,19 +1280,6 @@ describe("daemon mode helpers", () => {
 		] as const) {
 			await expect(internals.handleCommand(client, command)).rejects.toThrow("is closing");
 		}
-
-		internals.closingSessions.delete(childState.activeSessionId);
-		let releaseTargetLock: () => void = () => {};
-		const targetLock = new Promise<void>((resolve) => {
-			releaseTargetLock = resolve;
-		});
-		internals.agentMessageTargetLocks.set(childState.activeSessionId, targetLock);
-		const guardedPrompt = internals.promptWithAgentMessagePreparingGuard(childState, "continue");
-		await Promise.resolve();
-		internals.closingSessions.set(childState.activeSessionId, { promise: Promise.resolve(), reason: "shutdown" });
-		releaseTargetLock();
-		await expect(guardedPrompt).rejects.toThrow("closing before prompt delivery");
-		expect(sessionPrompt).not.toHaveBeenCalled();
 	});
 
 	it("removes a closing daemon session even when runtime disposal fails", async () => {
@@ -1806,6 +1791,71 @@ describe("daemon mode helpers", () => {
 		expect(acceptAgentMessagePrompt.mock.calls[0]?.[1]).toMatchObject({ streamingBehavior: "steer" });
 	});
 
+	it("rejects an agent message when pause wins core admission", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const targetState = makeState("target");
+		let releaseAdmission: () => void = () => {};
+		const admissionGate = new Promise<void>((resolve) => {
+			releaseAdmission = resolve;
+		});
+		let markAdmissionStarted: () => void = () => {};
+		const admissionStarted = new Promise<void>((resolve) => {
+			markAdmissionStarted = resolve;
+		});
+		const acceptAgentMessagePrompt = vi.fn(
+			async (
+				_message: string,
+				options?: {
+					admissionCommitted?: () => void;
+					preflightResult?: (accepted: boolean) => void;
+				},
+			) => {
+				markAdmissionStarted();
+				await admissionGate;
+				options?.admissionCommitted?.();
+				options?.preflightResult?.(true);
+			},
+		);
+		targetState.runtime = {
+			...targetState.runtime,
+			cwd: "/tmp",
+			session: {
+				sessionId: "session-target",
+				sessionName: "Target",
+				acceptAgentMessagePrompt,
+				clearQueuedAgentMessages: vi.fn(() => ({ steering: [], followUp: [] })),
+			},
+		} as never;
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+			sendAgentSessionMessage(options: {
+				targetSelector: string;
+				message: string;
+				origin: "agent" | "cli";
+			}): Promise<unknown>;
+		};
+		internals.sessions.set(targetState.activeSessionId, targetState);
+
+		const send = internals.sendAgentSessionMessage({
+			targetSelector: targetState.activeSessionId,
+			message: "pause race",
+			origin: "agent",
+		});
+		await admissionStarted;
+		await internals.handleCommand(makeClient("client-1", targetState.activeSessionId), {
+			type: "agent_messages_pause",
+		});
+		releaseAdmission();
+
+		await expect(send).rejects.toThrow("Agent messaging is paused");
+	});
+
 	it("ignores a legacy follow-up mode and always steers agent messages", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
@@ -1814,7 +1864,12 @@ describe("daemon mode helpers", () => {
 			},
 		});
 		const targetState = makeState("target");
-		const queueAgentMessagePrompt = vi.fn(async () => true);
+		const acceptAgentMessagePrompt = vi.fn(
+			(_message: string, options?: { preflightResult?: (accepted: boolean, queued?: boolean) => void }) => {
+				options?.preflightResult?.(true, true);
+				return Promise.resolve();
+			},
+		);
 		targetState.runtime = {
 			...targetState.runtime,
 			cwd: "/tmp",
@@ -1826,7 +1881,7 @@ describe("daemon mode helpers", () => {
 				isRetrying: false,
 				isBashRunning: false,
 				unfinishedActionCount: 0,
-				queueAgentMessagePrompt,
+				acceptAgentMessagePrompt,
 			},
 		} as never;
 		const internals = daemon as unknown as {
@@ -1843,10 +1898,12 @@ describe("daemon mode helpers", () => {
 		});
 
 		expect(response).toMatchObject({ data: { deliveryStatus: "queued", deliveryMode: "steer" } });
-		expect(queueAgentMessagePrompt).toHaveBeenCalledWith(
+		expect(acceptAgentMessagePrompt).toHaveBeenCalledWith(
 			expect.stringContaining("do not defer"),
-			"steer",
-			expect.objectContaining({ customType: "agent_message" }),
+			expect.objectContaining({
+				streamingBehavior: "steer",
+				customMessage: expect.objectContaining({ customType: "agent_message" }),
+			}),
 		);
 	});
 
@@ -1873,10 +1930,15 @@ describe("daemon mode helpers", () => {
 					sessionName: targetState.activeSessionId,
 					isStreaming: false,
 					sessionActions: { queuedCount: 0, steering: [], followUps: [] },
-					prompt: vi.fn(async () => {}),
+					acceptAgentMessagePrompt: vi.fn(
+						(_message: string, options?: { preflightResult?: (accepted: boolean) => void }) => {
+							options?.preflightResult?.(true);
+							return Promise.resolve();
+						},
+					),
 					followUp: vi.fn(async () => true),
 					clearQueue: vi.fn(() => ({ cleared: 0 })),
-					clearQueuedUserMessagesMatching: vi.fn(() => ({ steering: [], followUp: [] })),
+					clearQueuedAgentMessages: vi.fn(() => ({ steering: [], followUp: [] })),
 				},
 			} as never;
 		}
@@ -1943,12 +2005,7 @@ describe("daemon mode helpers", () => {
 			},
 		});
 		const targetState = makeState("target");
-		const agentMessageText =
-			"Agent-to-agent message received.\nSource: agent_message\nTo: Target, active target, session session-target\nMessage id: agentmsg_test\n\nhello";
-		const clearQueuedUserMessagesMatching = vi.fn((predicate: (text: string) => boolean) => ({
-			steering: [agentMessageText].filter(predicate),
-			followUp: [],
-		}));
+		const clearQueuedAgentMessages = vi.fn(() => ({ steering: ["agent message"], followUp: [] }));
 		const clearQueue = vi.fn(() => ({ steering: ["user prompt"], followUp: ["heartbeat"] }));
 		targetState.runtime = {
 			...targetState.runtime,
@@ -1958,7 +2015,7 @@ describe("daemon mode helpers", () => {
 				sessionName: "Target",
 				isStreaming: false,
 				unfinishedActionCount: 2,
-				clearQueuedUserMessagesMatching,
+				clearQueuedAgentMessages,
 				clearQueue,
 			},
 		} as never;
@@ -1974,10 +2031,7 @@ describe("daemon mode helpers", () => {
 			activeSessionId: targetState.activeSessionId,
 		});
 
-		expect(clearQueuedUserMessagesMatching).toHaveBeenCalledOnce();
-		const predicate = clearQueuedUserMessagesMatching.mock.calls[0]?.[0];
-		expect(predicate?.(agentMessageText)).toBe(true);
-		expect(predicate?.("ordinary queued follow-up")).toBe(false);
+		expect(clearQueuedAgentMessages).toHaveBeenCalledOnce();
 		expect(clearQueue).not.toHaveBeenCalled();
 	});
 
@@ -1992,7 +2046,7 @@ describe("daemon mode helpers", () => {
 		const secondState = makeState("target-2");
 		const firstClear = vi.fn(() => ({ steering: [], followUp: ["agent message"] }));
 		const secondClear = vi.fn(() => ({ steering: ["agent message"], followUp: [] }));
-		for (const [state, clearQueuedUserMessagesMatching] of [
+		for (const [state, clearQueuedAgentMessages] of [
 			[firstState, firstClear],
 			[secondState, secondClear],
 		] as const) {
@@ -2004,7 +2058,7 @@ describe("daemon mode helpers", () => {
 					sessionName: state.activeSessionId,
 					isStreaming: false,
 					unfinishedActionCount: 1,
-					clearQueuedUserMessagesMatching,
+					clearQueuedAgentMessages,
 				},
 			} as never;
 		}
@@ -2044,7 +2098,7 @@ describe("daemon mode helpers", () => {
 				}),
 		);
 		const readyClear = vi.fn(() => ({ steering: [], followUp: ["agent message"] }));
-		for (const [state, clearQueuedUserMessagesMatching] of [
+		for (const [state, clearQueuedAgentMessages] of [
 			[blockedState, blockedClear],
 			[readyState, readyClear],
 		] as const) {
@@ -2056,7 +2110,7 @@ describe("daemon mode helpers", () => {
 					sessionName: state.activeSessionId,
 					isStreaming: false,
 					unfinishedActionCount: 1,
-					clearQueuedUserMessagesMatching,
+					clearQueuedAgentMessages,
 				},
 			} as never;
 		}
@@ -2101,7 +2155,7 @@ describe("daemon mode helpers", () => {
 				sessionName: "Target",
 				isStreaming: false,
 				unfinishedActionCount: 0,
-				prompt: vi.fn(async () => {
+				acceptAgentMessagePrompt: vi.fn(async () => {
 					throw new Error("missing model");
 				}),
 			},
@@ -2136,315 +2190,6 @@ describe("daemon mode helpers", () => {
 				origin: "agent",
 			}),
 		).rejects.toThrow("missing model");
-	});
-
-	it("counts concurrent agent message queue reservations against the target queue cap", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const fromState = makeState("source");
-		const targetState = makeState("target");
-		fromState.runtime = {
-			...fromState.runtime,
-			session: { sessionId: "session-source", sessionName: "Source" },
-		} as never;
-		let rejectQueuedMessage: (error: Error) => void = () => {};
-		const queueAgentMessagePrompt = vi.fn(
-			(_message: string, _streamingBehavior: "steer" | "followUp") =>
-				new Promise<boolean>((_resolve, reject) => {
-					rejectQueuedMessage = reject;
-				}),
-		);
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: true,
-				unfinishedActionCount: 19,
-				clearQueue: vi.fn(() => ({ cleared: 0 })),
-				clearQueuedUserMessagesMatching: vi.fn(() => ({ steering: [], followUp: [] })),
-				queueAgentMessagePrompt,
-				prompt: vi.fn(async () => {}),
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				fromState?: ActiveSessionState;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(fromState.activeSessionId, fromState);
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		const first = internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "first",
-			fromState,
-			origin: "agent",
-		});
-		await Promise.resolve();
-
-		const clear = internals.handleCommand(makeClient("client-1", targetState.activeSessionId), {
-			id: "command-1",
-			type: "agent_messages_clear",
-			activeSessionId: targetState.activeSessionId,
-		});
-		await Promise.resolve();
-
-		await expect(
-			internals.sendAgentSessionMessage({
-				targetSelector: targetState.activeSessionId,
-				message: "second",
-				fromState,
-				origin: "agent",
-			}),
-		).rejects.toThrow("Target session has too many pending messages");
-
-		rejectQueuedMessage(new Error("release reservation"));
-		await expect(first).rejects.toThrow("release reservation");
-		await clear;
-	});
-
-	it("releases queue reservations once messages are queued so concurrent senders do not halve capacity", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const targetState = makeState("target");
-		let pending = 0;
-		const queueAgentMessagePrompt = vi.fn(async (_message: string, _streamingBehavior: "steer" | "followUp") => {
-			pending += 1;
-			return true;
-		});
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: true,
-				get unfinishedActionCount() {
-					return pending;
-				},
-				queueAgentMessagePrompt,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				fromState?: ActiveSessionState;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(targetState.activeSessionId, targetState);
-		// Distinct senders so the per-sender rate limit stays out of the way.
-		const senders = Array.from({ length: 12 }, (_, i) => {
-			const fromState = makeState(`source-${i}`);
-			fromState.runtime = {
-				...fromState.runtime,
-				session: { sessionId: `session-source-${i}`, sessionName: `Source ${i}` },
-			} as never;
-			internals.sessions.set(fromState.activeSessionId, fromState);
-			return fromState;
-		});
-
-		const errors: unknown[] = [];
-		for (const [i, fromState] of senders.entries()) {
-			void internals
-				.sendAgentSessionMessage({
-					targetSelector: targetState.activeSessionId,
-					message: `message ${i}`,
-					fromState,
-					origin: "agent",
-				})
-				.catch((error) => {
-					errors.push(error);
-				});
-		}
-		for (let attempt = 0; attempt < 200 && queueAgentMessagePrompt.mock.calls.length < 12; attempt++) {
-			await Promise.resolve();
-		}
-
-		// With reservations held past queue time, 12 concurrent senders would
-		// count as 24 against the 20-slot cap and the tail would reject.
-		expect(errors).toEqual([]);
-		expect(queueAgentMessagePrompt).toHaveBeenCalledTimes(12);
-	});
-
-	it("resolves queued sends immediately with a queued receipt while the target is streaming", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const fromState = makeState("source");
-		const targetState = makeState("target");
-		fromState.runtime = {
-			...fromState.runtime,
-			session: { sessionId: "session-source", sessionName: "Source" },
-		} as never;
-		const queueAgentMessagePrompt = vi.fn(async (_message: string, _streamingBehavior: "steer" | "followUp") => true);
-		// A real streaming session only resolves this once its turn progresses;
-		// the send must not depend on it.
-		const waitForAgentMessagePromptDelivery = vi.fn(() => new Promise<void>(() => {}));
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: true,
-				unfinishedActionCount: 0,
-				queueAgentMessagePrompt,
-				waitForAgentMessagePromptDelivery,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				fromState?: ActiveSessionState;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(fromState.activeSessionId, fromState);
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		await expect(
-			internals.sendAgentSessionMessage({
-				targetSelector: targetState.activeSessionId,
-				message: "queued while streaming",
-				fromState,
-				origin: "agent",
-			}),
-		).resolves.toMatchObject({
-			deliveryStatus: "queued",
-			target: { activeSessionId: targetState.activeSessionId },
-		});
-		expect(queueAgentMessagePrompt).toHaveBeenCalledOnce();
-		expect(waitForAgentMessagePromptDelivery).not.toHaveBeenCalled();
-	});
-
-	it("resolves mutual sends between two busy sessions without deadlocking", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const makeBusyState = (name: string) => {
-			const state = makeState(name);
-			state.runtime = {
-				...state.runtime,
-				cwd: "/tmp",
-				session: {
-					sessionId: `session-${name}`,
-					sessionName: name,
-					isStreaming: true,
-					unfinishedActionCount: 0,
-					queueAgentMessagePrompt: vi.fn(async () => true),
-					// Neither turn ends while both sessions block inside their own send.
-					waitForAgentMessagePromptDelivery: vi.fn(() => new Promise<void>(() => {})),
-				},
-			} as never;
-			return state;
-		};
-		const stateA = makeBusyState("alpha");
-		const stateB = makeBusyState("beta");
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				fromState?: ActiveSessionState;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(stateA.activeSessionId, stateA);
-		internals.sessions.set(stateB.activeSessionId, stateB);
-
-		const [aToB, bToA] = await Promise.all([
-			internals.sendAgentSessionMessage({
-				targetSelector: stateB.activeSessionId,
-				message: "alpha to beta",
-				fromState: stateA,
-				origin: "agent",
-			}),
-			internals.sendAgentSessionMessage({
-				targetSelector: stateA.activeSessionId,
-				message: "beta to alpha",
-				fromState: stateB,
-				origin: "agent",
-			}),
-		]);
-
-		expect(aToB).toMatchObject({ deliveryStatus: "queued", target: { activeSessionId: stateB.activeSessionId } });
-		expect(bToA).toMatchObject({ deliveryStatus: "queued", target: { activeSessionId: stateA.activeSessionId } });
-	});
-
-	it("counts accepted in-flight agent messages against the target queue cap", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const fromState = makeState("source");
-		const targetState = makeState("target");
-		fromState.runtime = {
-			...fromState.runtime,
-			session: { sessionId: "session-source", sessionName: "Source" },
-		} as never;
-		const acceptAgentMessagePrompt = vi.fn(async () => {});
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				unfinishedActionCount: 20,
-				hasAcceptedPromptInFlight: true,
-				acceptAgentMessagePrompt,
-				queueAgentMessagePrompt: vi.fn(async () => true),
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				fromState?: ActiveSessionState;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(fromState.activeSessionId, fromState);
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		await expect(
-			internals.sendAgentSessionMessage({
-				targetSelector: targetState.activeSessionId,
-				message: "over cap",
-				fromState,
-				origin: "agent",
-			}),
-		).rejects.toThrow("Target session has too many pending messages");
-		expect(acceptAgentMessagePrompt).not.toHaveBeenCalled();
 	});
 
 	it("reports accepted in-flight agent messages in agent-message lists", async () => {
@@ -2874,483 +2619,6 @@ describe("daemon mode helpers", () => {
 		expect(sibling.acceptAgentMessagePrompt).not.toHaveBeenCalled();
 	});
 
-	it("serializes concurrent agent messages to an idle target", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const fromState = makeState("source");
-		const targetState = makeState("target");
-		fromState.runtime = {
-			...fromState.runtime,
-			session: { sessionId: "session-source", sessionName: "Source" },
-		} as never;
-		const promptResolves: Array<() => void> = [];
-		const prompt = vi.fn(
-			(_message: string, _options?: { streamingBehavior?: "steer" | "followUp" }) =>
-				new Promise<void>((resolve) => {
-					promptResolves.push(resolve);
-				}),
-		);
-		const followUp = vi.fn(async () => true);
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				unfinishedActionCount: 0,
-				prompt,
-				followUp,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				fromState?: ActiveSessionState;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(fromState.activeSessionId, fromState);
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		const first = internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "first",
-			fromState,
-			origin: "agent",
-		});
-		const second = internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "second",
-			fromState,
-			origin: "agent",
-		});
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(prompt).toHaveBeenCalledTimes(1);
-
-		promptResolves[0]?.();
-		await expect(first).resolves.toMatchObject({ message: "first" });
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(prompt).toHaveBeenCalledTimes(2);
-		expect(followUp).not.toHaveBeenCalled();
-		promptResolves[1]?.();
-		await expect(second).resolves.toMatchObject({ message: "second" });
-	});
-
-	it("queues agent messages behind an idle target with a pending retry", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const fromState = makeState("source");
-		const targetState = makeState("target");
-		fromState.runtime = {
-			...fromState.runtime,
-			session: { sessionId: "session-source", sessionName: "Source" },
-		} as never;
-		const prompt = vi.fn(async (_message: string, _options?: { streamingBehavior?: "steer" | "followUp" }) => {});
-		const followUp = vi.fn(async () => true);
-		const queueAgentMessagePrompt = vi.fn(async (_message: string, _streamingBehavior: "steer" | "followUp") => true);
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				isRetrying: true,
-				unfinishedActionCount: 0,
-				prompt,
-				followUp,
-				queueAgentMessagePrompt,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				fromState?: ActiveSessionState;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(fromState.activeSessionId, fromState);
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		await expect(
-			internals.sendAgentSessionMessage({
-				targetSelector: targetState.activeSessionId,
-				message: "queued behind retry",
-				fromState,
-				origin: "agent",
-			}),
-		).resolves.toMatchObject({ target: { activeSessionId: targetState.activeSessionId } });
-
-		expect(queueAgentMessagePrompt).toHaveBeenCalledOnce();
-		expect(queueAgentMessagePrompt.mock.calls[0]?.[1]).toBe("steer");
-		expect(followUp).not.toHaveBeenCalled();
-		expect(prompt).not.toHaveBeenCalled();
-	});
-
-	it("queues agent messages behind existing pending work on an idle target", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const fromState = makeState("source");
-		const targetState = makeState("target");
-		fromState.runtime = {
-			...fromState.runtime,
-			session: { sessionId: "session-source", sessionName: "Source" },
-		} as never;
-		const prompt = vi.fn(async (_message: string, _options?: { streamingBehavior?: "steer" | "followUp" }) => {});
-		const followUp = vi.fn(async () => true);
-		const queueAgentMessagePrompt = vi.fn(async (_message: string, _streamingBehavior: "steer" | "followUp") => true);
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				unfinishedActionCount: 1,
-				prompt,
-				followUp,
-				queueAgentMessagePrompt,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				fromState?: ActiveSessionState;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(fromState.activeSessionId, fromState);
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		await expect(
-			internals.sendAgentSessionMessage({
-				targetSelector: targetState.activeSessionId,
-				message: "queued behind existing work",
-				fromState,
-				origin: "agent",
-			}),
-		).resolves.toMatchObject({ target: { activeSessionId: targetState.activeSessionId } });
-
-		expect(queueAgentMessagePrompt).toHaveBeenCalledOnce();
-		expect(queueAgentMessagePrompt.mock.calls[0]?.[1]).toBe("steer");
-		expect(followUp).not.toHaveBeenCalled();
-		expect(prompt).not.toHaveBeenCalled();
-	});
-
-	it("queues agent messages while the target is compacting", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const fromState = makeState("source");
-		const targetState = makeState("target");
-		fromState.runtime = {
-			...fromState.runtime,
-			session: { sessionId: "session-source", sessionName: "Source" },
-		} as never;
-		const prompt = vi.fn(async (_message: string, _options?: { streamingBehavior?: "steer" | "followUp" }) => {});
-		const queueAgentMessagePrompt = vi.fn(async (_message: string, _streamingBehavior: "steer" | "followUp") => true);
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				isCompacting: true,
-				unfinishedActionCount: 0,
-				prompt,
-				queueAgentMessagePrompt,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				fromState?: ActiveSessionState;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(fromState.activeSessionId, fromState);
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		await expect(
-			internals.sendAgentSessionMessage({
-				targetSelector: targetState.activeSessionId,
-				message: "queued behind compaction",
-				fromState,
-				origin: "agent",
-			}),
-		).resolves.toMatchObject({ target: { activeSessionId: targetState.activeSessionId } });
-
-		expect(queueAgentMessagePrompt).toHaveBeenCalledOnce();
-		expect(queueAgentMessagePrompt.mock.calls[0]?.[1]).toBe("steer");
-		expect(prompt).not.toHaveBeenCalled();
-	});
-
-	it("queues agent messages while target bash is running", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const fromState = makeState("source");
-		const targetState = makeState("target");
-		fromState.runtime = {
-			...fromState.runtime,
-			session: { sessionId: "session-source", sessionName: "Source" },
-		} as never;
-		const acceptAgentMessagePrompt = vi.fn(async () => {});
-		const queueAgentMessagePrompt = vi.fn(async (_message: string, _streamingBehavior: "steer" | "followUp") => true);
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				isBashRunning: true,
-				unfinishedActionCount: 0,
-				acceptAgentMessagePrompt,
-				queueAgentMessagePrompt,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				fromState?: ActiveSessionState;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(fromState.activeSessionId, fromState);
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		await expect(
-			internals.sendAgentSessionMessage({
-				targetSelector: targetState.activeSessionId,
-				message: "queued behind bash",
-				fromState,
-				origin: "agent",
-			}),
-		).resolves.toMatchObject({ target: { activeSessionId: targetState.activeSessionId } });
-
-		expect(queueAgentMessagePrompt).toHaveBeenCalledOnce();
-		expect(queueAgentMessagePrompt.mock.calls[0]?.[1]).toBe("steer");
-		expect(acceptAgentMessagePrompt).not.toHaveBeenCalled();
-	});
-
-	it("acknowledges queued agent messages after queue insertion", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const fromState = makeState("source");
-		const targetState = makeState("target");
-		fromState.runtime = {
-			...fromState.runtime,
-			session: { sessionId: "session-source", sessionName: "Source" },
-		} as never;
-		let resolveQueuedDelivery: () => void = () => {};
-		const waitForAgentMessagePromptDelivery = vi.fn(
-			() =>
-				new Promise<void>((resolve) => {
-					resolveQueuedDelivery = resolve;
-				}),
-		);
-		const queueAgentMessagePrompt = vi.fn(async () => true);
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: true,
-				unfinishedActionCount: 0,
-				queueAgentMessagePrompt,
-				waitForAgentMessagePromptDelivery,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				fromState?: ActiveSessionState;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(fromState.activeSessionId, fromState);
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		await expect(
-			internals.sendAgentSessionMessage({
-				targetSelector: targetState.activeSessionId,
-				message: "queued",
-				fromState,
-				origin: "agent",
-			}),
-		).resolves.toMatchObject({ target: { activeSessionId: targetState.activeSessionId } });
-
-		expect(queueAgentMessagePrompt).toHaveBeenCalledOnce();
-		expect(waitForAgentMessagePromptDelivery).not.toHaveBeenCalled();
-		resolveQueuedDelivery();
-	});
-
-	it("recomputes agent message streaming behavior after waiting for the target lock", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const fromState = makeState("source");
-		const targetState = makeState("target");
-		fromState.runtime = {
-			...fromState.runtime,
-			session: { sessionId: "session-source", sessionName: "Source" },
-		} as never;
-		const promptResolves: Array<() => void> = [];
-		const prompt = vi.fn(
-			(_message: string, _options?: { streamingBehavior?: "steer" | "followUp" }) =>
-				new Promise<void>((resolve) => {
-					promptResolves.push(resolve);
-				}),
-		);
-		const followUp = vi.fn(async () => true);
-		const queueAgentMessagePrompt = vi.fn(async (_message: string, _streamingBehavior: "steer" | "followUp") => true);
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				unfinishedActionCount: 0,
-				prompt,
-				followUp,
-				queueAgentMessagePrompt,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				fromState?: ActiveSessionState;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(fromState.activeSessionId, fromState);
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		const first = internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "first",
-			fromState,
-			origin: "agent",
-		});
-		const second = internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "second",
-			fromState,
-			origin: "agent",
-		});
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(prompt).toHaveBeenCalledTimes(1);
-		(targetState.runtime.session as { isStreaming: boolean }).isStreaming = true;
-		promptResolves[0]?.();
-		await expect(first).resolves.toMatchObject({ message: "first" });
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(prompt).toHaveBeenCalledTimes(1);
-		expect(queueAgentMessagePrompt).toHaveBeenCalledOnce();
-		expect(queueAgentMessagePrompt.mock.calls[0]?.[1]).toBe("steer");
-		expect(followUp).not.toHaveBeenCalled();
-		await expect(second).resolves.toMatchObject({ message: "second" });
-	});
-
-	it("rejects agent messages when queued delivery is coalesced", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const fromState = makeState("source");
-		const targetState = makeState("target");
-		fromState.runtime = {
-			...fromState.runtime,
-			session: { sessionId: "session-source", sessionName: "Source" },
-		} as never;
-		const queueAgentMessagePrompt = vi.fn(async () => false);
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: true,
-				unfinishedActionCount: 1,
-				queueAgentMessagePrompt,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				fromState?: ActiveSessionState;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(fromState.activeSessionId, fromState);
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		await expect(
-			internals.sendAgentSessionMessage({
-				targetSelector: targetState.activeSessionId,
-				message: "coalesced",
-				fromState,
-				origin: "agent",
-			}),
-		).rejects.toThrow("Agent message was not queued");
-		expect(queueAgentMessagePrompt).toHaveBeenCalledOnce();
-	});
-
 	it("rejects agent messages when direct delivery preflight fails", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
@@ -3403,353 +2671,6 @@ describe("daemon mode helpers", () => {
 		).rejects.toThrow("Agent message was not accepted");
 	});
 
-	it("queues agent messages while daemon prompts prepare to stream", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const targetState = makeState("target");
-		let resolvePrompt: () => void = () => {};
-		let reportPreflight: ((didSucceed: boolean) => void) | undefined;
-		const prompt = vi.fn((_message: string, options?: { preflightResult?: (didSucceed: boolean) => void }) => {
-			reportPreflight = options?.preflightResult;
-			return new Promise<void>((resolve) => {
-				resolvePrompt = resolve;
-			});
-		});
-		const acceptAgentMessagePrompt = vi.fn(async () => {});
-		const queueAgentMessagePrompt = vi.fn(async (_message: string, _streamingBehavior: "steer" | "followUp") => true);
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				unfinishedActionCount: 0,
-				prompt,
-				acceptAgentMessagePrompt,
-				queueAgentMessagePrompt,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown> | undefined;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(targetState.activeSessionId, targetState);
-		const promptClient = makeClient("client-1", targetState.activeSessionId);
-		(promptClient.socket as unknown as { write: ReturnType<typeof vi.fn> }).write = vi.fn();
-
-		internals.handleCommand(promptClient, {
-			id: "command-1",
-			type: "prompt",
-			activeSessionId: targetState.activeSessionId,
-			message: "normal prompt",
-		});
-		await Promise.resolve();
-		await Promise.resolve();
-		reportPreflight?.(true);
-
-		const send = internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "agent message",
-			origin: "agent",
-		});
-		await Promise.resolve();
-		await send;
-		expect(acceptAgentMessagePrompt).not.toHaveBeenCalled();
-		expect(queueAgentMessagePrompt).toHaveBeenCalledOnce();
-		expect(queueAgentMessagePrompt.mock.calls[0]?.[1]).toBe("steer");
-		resolvePrompt();
-	});
-
-	it("waits for an in-flight agent-message accept before starting daemon prompts", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const targetState = makeState("target");
-		let resolveAccept: () => void = () => {};
-		const acceptAgentMessagePrompt = vi.fn(
-			(_message: string, options?: { preflightResult?: (didSucceed: boolean) => void }) => {
-				options?.preflightResult?.(true);
-				return new Promise<void>((resolve) => {
-					resolveAccept = resolve;
-				});
-			},
-		);
-		const prompt = vi.fn(async (_message: string, options?: { preflightResult?: (didSucceed: boolean) => void }) => {
-			options?.preflightResult?.(true);
-		});
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				unfinishedActionCount: 0,
-				prompt,
-				acceptAgentMessagePrompt,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown> | undefined;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		const send = internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "agent message",
-			origin: "agent",
-		});
-		await Promise.resolve();
-		await Promise.resolve();
-		expect(acceptAgentMessagePrompt).toHaveBeenCalledOnce();
-
-		const promptClient = makeClient("client-1", targetState.activeSessionId);
-		(promptClient.socket as unknown as { write: ReturnType<typeof vi.fn> }).write = vi.fn();
-		internals.handleCommand(promptClient, {
-			id: "command-1",
-			type: "prompt",
-			activeSessionId: targetState.activeSessionId,
-			message: "normal prompt",
-		});
-		await Promise.resolve();
-		await Promise.resolve();
-		expect(prompt).not.toHaveBeenCalled();
-
-		resolveAccept();
-		await send;
-		for (let attempt = 0; attempt < 10 && prompt.mock.calls.length === 0; attempt++) {
-			await Promise.resolve();
-		}
-
-		expect(prompt).toHaveBeenCalledOnce();
-	});
-
-	it("releases cron preparing state after prompt admission", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const targetState = makeState("target");
-		let resolvePrompt: () => void = () => {};
-		const prompt = vi.fn(
-			(_message: string, _options?: unknown) =>
-				new Promise<void>((resolve) => {
-					resolvePrompt = resolve;
-				}),
-		);
-		const promptUntilAccepted = vi.fn(async () => {});
-		const acceptAgentMessagePrompt = vi.fn(async () => {});
-		const queueAgentMessagePrompt = vi.fn(async (_message: string, _streamingBehavior: "steer" | "followUp") => true);
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				isBashRunning: false,
-				unfinishedActionCount: 0,
-				prompt,
-				promptUntilAccepted,
-				acceptAgentMessagePrompt,
-				queueAgentMessagePrompt,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			runCronJob(job: AgentCronJob): Promise<"skipped" | undefined>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		const cronRun = internals.runCronJob(
-			makeCronJob({ id: "cron-1", source: "cron", activeSessionId: targetState.activeSessionId }),
-		);
-		await Promise.resolve();
-		await Promise.resolve();
-		expect(promptUntilAccepted).toHaveBeenCalledOnce();
-		expect(prompt).not.toHaveBeenCalled();
-
-		await internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "agent message",
-			origin: "agent",
-		});
-
-		expect(acceptAgentMessagePrompt).toHaveBeenCalledOnce();
-		expect(queueAgentMessagePrompt).not.toHaveBeenCalled();
-		resolvePrompt();
-		await cronRun;
-	});
-
-	it("keeps the preparing state until every concurrent prompt settles", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const targetState = makeState("target");
-		const promptResolves: Array<() => void> = [];
-		const prompt = vi.fn(
-			(_message: string, _options?: unknown) =>
-				new Promise<void>((resolve) => {
-					promptResolves.push(resolve);
-				}),
-		);
-		const acceptAgentMessagePrompt = vi.fn(async () => {});
-		const queueAgentMessagePrompt = vi.fn(async (_message: string, _streamingBehavior: "steer" | "followUp") => true);
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				unfinishedActionCount: 0,
-				prompt,
-				acceptAgentMessagePrompt,
-				queueAgentMessagePrompt,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown> | undefined;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(targetState.activeSessionId, targetState);
-		const promptClient = makeClient("client-1", targetState.activeSessionId);
-		(promptClient.socket as unknown as { write: ReturnType<typeof vi.fn> }).write = vi.fn();
-
-		internals.handleCommand(promptClient, {
-			id: "command-1",
-			type: "prompt",
-			activeSessionId: targetState.activeSessionId,
-			message: "first prompt",
-		});
-		internals.handleCommand(promptClient, {
-			id: "command-2",
-			type: "prompt",
-			activeSessionId: targetState.activeSessionId,
-			message: "second prompt",
-		});
-		await Promise.resolve();
-		await Promise.resolve();
-		expect(prompt).toHaveBeenCalledTimes(2);
-
-		// The first prompt settles; the second is still in preflight, so agent
-		// messages must keep queueing (a plain Set would have lost the flag here).
-		promptResolves[0]?.();
-		await Promise.resolve();
-		await Promise.resolve();
-
-		await internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "agent message",
-			origin: "agent",
-		});
-
-		expect(acceptAgentMessagePrompt).not.toHaveBeenCalled();
-		expect(queueAgentMessagePrompt).toHaveBeenCalledOnce();
-		promptResolves[1]?.();
-	});
-
-	it("re-checks agent message queue capacity after waiting for the target lock", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const fromState = makeState("source");
-		const targetState = makeState("target");
-		fromState.runtime = {
-			...fromState.runtime,
-			session: { sessionId: "session-source", sessionName: "Source" },
-		} as never;
-		let resolveFirstPrompt: () => void = () => {};
-		const acceptAgentMessagePrompt = vi.fn(
-			() =>
-				new Promise<void>((resolve) => {
-					resolveFirstPrompt = resolve;
-				}),
-		);
-		const followUp = vi.fn(async () => true);
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				unfinishedActionCount: 0,
-				acceptAgentMessagePrompt,
-				followUp,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				fromState?: ActiveSessionState;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(fromState.activeSessionId, fromState);
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		const first = internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "first",
-			fromState,
-			origin: "agent",
-		});
-		const second = internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "second",
-			fromState,
-			origin: "agent",
-		});
-		await Promise.resolve();
-		await Promise.resolve();
-		(targetState.runtime.session as { unfinishedActionCount: number }).unfinishedActionCount = 20;
-
-		resolveFirstPrompt();
-		await expect(first).resolves.toMatchObject({ message: "first" });
-		await expect(second).rejects.toThrow("Target session has too many pending messages");
-		expect(followUp).not.toHaveBeenCalled();
-	});
-
 	it("rate limits CLI agent messages by stable daemon identity", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
@@ -3766,7 +2687,12 @@ describe("daemon mode helpers", () => {
 				sessionName: "Target",
 				isStreaming: false,
 				unfinishedActionCount: 0,
-				prompt: vi.fn(async () => {}),
+				acceptAgentMessagePrompt: vi.fn(
+					(_message: string, options?: { preflightResult?: (accepted: boolean) => void }) => {
+						options?.preflightResult?.(true);
+						return Promise.resolve();
+					},
+				),
 			},
 		} as never;
 		const internals = daemon as unknown as {
@@ -3793,266 +2719,6 @@ describe("daemon mode helpers", () => {
 				message: "over limit",
 			}),
 		).rejects.toThrow("Agent messaging rate limit exceeded");
-	});
-
-	it("holds the target lock while clearing queued agent messages", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const targetState = makeState("target");
-		let resolvePrompt: () => void = () => {};
-		const acceptAgentMessagePrompt = vi.fn(
-			(_message: string, options?: { preflightResult?: (didSucceed: boolean) => void }) => {
-				options?.preflightResult?.(true);
-				return new Promise<void>((resolve) => {
-					resolvePrompt = resolve;
-				});
-			},
-		);
-		const clearQueuedUserMessagesMatching = vi.fn(() => ({ steering: [], followUp: [] }));
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				unfinishedActionCount: 0,
-				acceptAgentMessagePrompt,
-				clearQueuedUserMessagesMatching,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		const send = internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "first",
-			origin: "agent",
-		});
-		await Promise.resolve();
-		await Promise.resolve();
-
-		const clear = internals.handleCommand(makeClient("client-1", targetState.activeSessionId), {
-			id: "command-1",
-			type: "agent_messages_clear",
-			activeSessionId: targetState.activeSessionId,
-		});
-		await Promise.resolve();
-		expect(clearQueuedUserMessagesMatching).not.toHaveBeenCalled();
-
-		resolvePrompt();
-		await send;
-		await clear;
-		expect(clearQueuedUserMessagesMatching).toHaveBeenCalledOnce();
-	});
-
-	it("rejects agent messages when pause wins the target lock", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const targetState = makeState("target");
-		let resolveBlockedClear: () => void = () => {};
-		const clearQueuedUserMessagesMatching = vi.fn(
-			() =>
-				new Promise<{ steering: string[]; followUp: string[] }>((resolve) => {
-					resolveBlockedClear = () => resolve({ steering: [], followUp: [] });
-				}),
-		);
-		const acceptAgentMessagePrompt = vi.fn(async () => {});
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				unfinishedActionCount: 0,
-				acceptAgentMessagePrompt,
-				clearQueuedUserMessagesMatching,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		const pause = internals.handleCommand(makeClient("client-1", targetState.activeSessionId), {
-			id: "command-1",
-			type: "agent_messages_pause",
-		});
-		await Promise.resolve();
-		await Promise.resolve();
-
-		const send = internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "after pause requested",
-			origin: "agent",
-		});
-		await Promise.resolve();
-		expect(acceptAgentMessagePrompt).not.toHaveBeenCalled();
-
-		resolveBlockedClear();
-		await pause;
-		await expect(send).rejects.toThrow("Agent messaging is paused");
-		expect(acceptAgentMessagePrompt).not.toHaveBeenCalled();
-	});
-
-	it("rejects agent messages when the target session changes before delivery", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const targetState = makeState("target");
-		let resolveBlockedClear: () => void = () => {};
-		const clearQueuedUserMessagesMatching = vi.fn(
-			() =>
-				new Promise<{ steering: string[]; followUp: string[] }>((resolve) => {
-					resolveBlockedClear = () => resolve({ steering: [], followUp: [] });
-				}),
-		);
-		const acceptAgentMessagePrompt = vi.fn(async () => {});
-		targetState.runtime = {
-			...targetState.runtime,
-			cwd: "/tmp",
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				unfinishedActionCount: 0,
-				acceptAgentMessagePrompt,
-				clearQueuedUserMessagesMatching,
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		const clear = internals.handleCommand(makeClient("client-1", targetState.activeSessionId), {
-			id: "command-1",
-			type: "agent_messages_clear",
-			activeSessionId: targetState.activeSessionId,
-		});
-		await Promise.resolve();
-		await Promise.resolve();
-
-		const send = internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "after session switch",
-			origin: "agent",
-		});
-		await Promise.resolve();
-		(targetState.runtime.session as { sessionId: string }).sessionId = "session-replacement";
-		resolveBlockedClear();
-		await clear;
-
-		await expect(send).rejects.toThrow("Target session changed before agent message delivery");
-		expect(acceptAgentMessagePrompt).not.toHaveBeenCalled();
-	});
-
-	it("rejects agent messages when the target session closes before delivery", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const targetState = makeState("target");
-		targetState.extensionUiRequests = new Map();
-		let resolveBlockedClear: () => void = () => {};
-		const clearQueuedUserMessagesMatching = vi.fn(
-			() =>
-				new Promise<{ steering: string[]; followUp: string[] }>((resolve) => {
-					resolveBlockedClear = () => resolve({ steering: [], followUp: [] });
-				}),
-		);
-		const acceptAgentMessagePrompt = vi.fn(async () => {});
-		const dispose = vi.fn(async () => {});
-		targetState.runtime = {
-			...targetState.runtime,
-			dispose,
-			cwd: "/tmp",
-			metadata: { kind: "subagent", createdAt: 1 },
-			session: {
-				sessionId: "session-target",
-				sessionName: "Target",
-				isStreaming: false,
-				unfinishedActionCount: 0,
-				messages: [],
-				acceptAgentMessagePrompt,
-				clearQueuedUserMessagesMatching,
-				abort: vi.fn(async () => {}),
-				dispose: vi.fn(),
-				sessionManager: { appendSessionState: vi.fn(), hasUserContent: () => true },
-			},
-		} as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
-			sendAgentSessionMessage(options: {
-				targetSelector: string;
-				message: string;
-				origin: "agent" | "cli";
-			}): Promise<unknown>;
-		};
-		internals.sessions.set(targetState.activeSessionId, targetState);
-
-		const clear = internals.handleCommand(makeClient("client-1", targetState.activeSessionId), {
-			id: "command-1",
-			type: "agent_messages_clear",
-			activeSessionId: targetState.activeSessionId,
-		});
-		await Promise.resolve();
-		await Promise.resolve();
-
-		const send = internals.sendAgentSessionMessage({
-			targetSelector: targetState.activeSessionId,
-			message: "after close requested",
-			origin: "agent",
-		});
-		await Promise.resolve();
-
-		const close = internals.handleCommand(makeClient("client-2", targetState.activeSessionId), {
-			id: "command-2",
-			type: "kill",
-			activeSessionId: targetState.activeSessionId,
-		});
-		await close;
-		expect(dispose).toHaveBeenCalledOnce();
-
-		resolveBlockedClear();
-		await clear;
-		await expect(send).rejects.toThrow("Target session is closing before agent message delivery");
-		expect(acceptAgentMessagePrompt).not.toHaveBeenCalled();
 	});
 
 	it("rejects agent messages to the sending session", async () => {
@@ -7834,7 +6500,12 @@ describe("daemon mode helpers", () => {
 			});
 			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
 				const session = makeRuntimeSession(options.sessionManager);
-				session.prompt = vi.fn(async () => {});
+				session.acceptAgentMessagePrompt = vi.fn(
+					(_message: string, promptOptions?: { preflightResult?: (accepted: boolean) => void }) => {
+						promptOptions?.preflightResult?.(true);
+						return Promise.resolve();
+					},
+				);
 				session.bindExtensions = vi.fn(async () => {
 					await bindBarrier;
 				});
@@ -8834,126 +7505,6 @@ describe("daemon mode helpers", () => {
 		expect(fixture.followUp).not.toHaveBeenCalled();
 	});
 
-	it("delivers steer heartbeats after an RPC prompt finishes preflight while its turn is still streaming", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		let releasePrompt = () => {};
-		const promptFinished = new Promise<void>((resolve) => {
-			releasePrompt = resolve;
-		});
-		let reportPromptStarted = () => {};
-		const promptStarted = new Promise<void>((resolve) => {
-			reportPromptStarted = resolve;
-		});
-		const sessionState = {
-			isStreaming: false,
-			isBashRunning: false,
-			hasPendingSessionWork: false,
-			unfinishedActionCount: 1,
-			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
-		};
-		const prompt = vi.fn(async (_message: string, options?: { preflightResult?: (didSucceed: boolean) => void }) => {
-			sessionState.isStreaming = true;
-			options?.preflightResult?.(true);
-			reportPromptStarted();
-			await promptFinished;
-		});
-		const promptHeartbeat = vi.fn(
-			async (
-				_job: AgentCronJob,
-				options?: { streamingBehavior?: "steer" | "followUp"; preflightResult?: (didSucceed: boolean) => void },
-			) => {
-				options?.preflightResult?.(true);
-			},
-		);
-		const state = makeState("active-1") as ActiveSessionState & {
-			runtime: ActiveSessionState["runtime"] & {
-				session: typeof sessionState & {
-					prompt: typeof prompt;
-					promptHeartbeat: typeof promptHeartbeat;
-				};
-			};
-		};
-		state.runtime.session = Object.assign(sessionState, { prompt, promptHeartbeat }) as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			agentMessagePreparingTargets: Map<string, number>;
-			promptWithAgentMessagePreparingGuard(state: ActiveSessionState, message: string): Promise<void>;
-			runCronJob(job: AgentCronJob): Promise<"skipped" | undefined>;
-		};
-		internals.sessions.set(state.activeSessionId, state);
-
-		const promptPromise = internals.promptWithAgentMessagePreparingGuard(state, "long-running prompt");
-		await promptStarted;
-		const preparingReleased = !internals.agentMessagePreparingTargets.has(state.activeSessionId);
-		const result = await internals.runCronJob(
-			makeCronJob({ id: "heartbeat-1", source: "heartbeat", activeSessionId: state.activeSessionId }),
-		);
-		releasePrompt();
-		await promptPromise;
-
-		expect(preparingReleased).toBe(true);
-		expect(result).toBeUndefined();
-		expect(promptHeartbeat).toHaveBeenCalledWith(
-			expect.objectContaining({ id: "heartbeat-1" }),
-			expect.objectContaining({ streamingBehavior: "steer" }),
-		);
-	});
-
-	it.each(["steer", "follow_up"] as const)(
-		"idle daemon %s inserts into its scheduler lane exactly once",
-		async (type) => {
-			const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-				defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-				createRuntime: async () => {
-					throw new Error("unexpected runtime creation");
-				},
-			});
-			const steer = vi.fn(async () => {});
-			const followUp = vi.fn(async () => true);
-			const state = makeState("active-1") as ActiveSessionState & {
-				runtime: ActiveSessionState["runtime"] & {
-					session: { isStreaming: boolean; steer: typeof steer; followUp: typeof followUp };
-				};
-			};
-			state.runtime = { ...state.runtime, session: { isStreaming: false, steer, followUp } } as never;
-			const internals = daemon as unknown as {
-				sessions: Map<string, ActiveSessionState>;
-				recordWorkerRecoveryState: ReturnType<typeof vi.fn>;
-				handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
-			};
-			internals.sessions.set(state.activeSessionId, state);
-			internals.recordWorkerRecoveryState = vi.fn();
-
-			await expect(
-				internals.handleCommand(makeClient("client-1", state.activeSessionId), {
-					id: "command-1",
-					type,
-					activeSessionId: state.activeSessionId,
-					message: "idle queued turn",
-				}),
-			).resolves.toMatchObject({
-				success: true,
-				command: type,
-				...(type === "follow_up" ? { data: { queued: true } } : {}),
-			});
-			const queue = type === "steer" ? steer : followUp;
-			expect(queue).toHaveBeenCalledOnce();
-			expect(queue).toHaveBeenCalledWith("idle queued turn", undefined, {
-				queueKey: undefined,
-				agentMessageId: undefined,
-				resumeIfIdle: true,
-			});
-			if (type === "follow_up") {
-				expect(internals.recordWorkerRecoveryState).toHaveBeenCalledWith(state, "follow_up_queued", true);
-			}
-		},
-	);
-
 	it("clears prompt admission registered before unauthenticated worker rejection", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-worker-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
@@ -9189,53 +7740,6 @@ describe("daemon mode helpers", () => {
 		).resolves.toMatchObject({ success: true, data: { status: "owned" } });
 		expect(promptOptions?.signal?.aborted).toBe(true);
 		rejectPrompt?.(new Error("test cleanup"));
-	});
-
-	it("settles cancellation while prompt routing waits on the target lock", async () => {
-		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
-			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		const promptUntilAccepted = vi.fn(async () => {});
-		const state = makeState("active-lock") as ActiveSessionState;
-		state.runtime = { ...state.runtime, session: { promptUntilAccepted } } as never;
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			agentMessageTargetLocks: Map<string, Promise<void>>;
-			promptAdmissions: Map<string, unknown>;
-			parseCommandAndRegisterPromptAdmission(client: DaemonSocketClient, line: string): unknown;
-			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown> | undefined;
-		};
-		internals.sessions.set(state.activeSessionId, state);
-		internals.agentMessageTargetLocks.set(state.activeSessionId, new Promise(() => {}));
-		const client = makeClient("client-lock", state.activeSessionId);
-		client.socket = { destroyed: false, write: vi.fn(() => true) } as unknown as Socket;
-		internals.parseCommandAndRegisterPromptAdmission(
-			client,
-			JSON.stringify({
-				type: "prompt",
-				activeSessionId: state.activeSessionId,
-				message: "blocked",
-				admissionId: "lock-admission",
-			}),
-		);
-		internals.handleCommand(client, {
-			type: "prompt",
-			activeSessionId: state.activeSessionId,
-			message: "blocked",
-			admissionId: "lock-admission",
-		});
-		await expect(
-			internals.handleCommand(client, {
-				type: "cancel_prompt_admission",
-				activeSessionId: state.activeSessionId,
-				admissionId: "lock-admission",
-			}),
-		).resolves.toMatchObject({ data: { status: "cancelled" } });
-		await vi.waitFor(() => expect(internals.promptAdmissions.size).toBe(0));
-		expect(promptUntilAccepted).not.toHaveBeenCalled();
 	});
 
 	it("aborts waiting prompt admissions when their session closes", () => {
@@ -9967,10 +8471,11 @@ function makeCronAdmissionFixture(
 			isCompacting: false,
 			isRetrying: false,
 			isBashRunning: false,
-			hasPendingSessionWork: false,
-			unfinishedActionCount: 0,
+			hasPendingSessionWork: options.acceptingAgentMessage === true,
+			unfinishedActionCount: options.acceptingAgentMessage === true ? 1 : 0,
 			...activity,
 			prompt,
+			promptUntilAccepted: prompt,
 			promptHeartbeat,
 			followUp,
 			removeQueuedFollowUp,
@@ -9978,13 +8483,9 @@ function makeCronAdmissionFixture(
 	} as never;
 	const internals = daemon as unknown as {
 		sessions: Map<string, ActiveSessionState>;
-		agentMessageAcceptingTargets: Set<string>;
 		runCronJob(job: AgentCronJob): Promise<"skipped" | undefined>;
 	};
 	internals.sessions.set(activeSessionId, state);
-	if (options.acceptingAgentMessage) {
-		internals.agentMessageAcceptingTargets.add(activeSessionId);
-	}
 
 	return {
 		activeSessionId,
@@ -10108,13 +8609,19 @@ function makePersistedRlmDaemonFixture(
 `,
 	);
 
+	let admissionPending = false;
 	const acceptAgentMessagePrompt = vi.fn(
 		async (_message: string, promptOptions?: { preflightResult?: (didSucceed: boolean) => void }) => {
-			if (options.childAdmissionGate) {
-				options.childAdmissionStarted?.();
-				await options.childAdmissionGate;
+			admissionPending = true;
+			try {
+				if (options.childAdmissionGate) {
+					options.childAdmissionStarted?.();
+					await options.childAdmissionGate;
+				}
+				promptOptions?.preflightResult?.(true);
+			} finally {
+				admissionPending = false;
 			}
-			promptOptions?.preflightResult?.(true);
 		},
 	);
 	const runtimeSessions: Array<ReturnType<typeof makeRuntimeSession>> = [];
@@ -10144,6 +8651,9 @@ function makePersistedRlmDaemonFixture(
 				await options.childDisposeGate;
 			});
 		}
+		Object.defineProperty(runtimeSession, "hasPendingAdmissionWaiters", {
+			get: () => admissionPending,
+		});
 		Object.assign(runtimeSession, {
 			isStreaming: false,
 			isCompacting: false,
