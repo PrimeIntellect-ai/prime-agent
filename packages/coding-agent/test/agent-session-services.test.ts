@@ -148,7 +148,7 @@ describe("createAgentSessionFromServices", () => {
 		try {
 			const initialPrompt = session.systemPrompt;
 			expect(initialPrompt).toContain(
-				"Generic MCP connections are accessed through the pre-imported Python `mcp` object in IPython, not as top-level native tool namespaces or installed Python skills.",
+				"Generic MCP connections are accessed through the pre-imported Python `mcp` object in the Python REPL, not as top-level native tool namespaces or installed Python skills.",
 			);
 			expect(initialPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
 			expect(initialPrompt).toContain('await mcp.list_tools("filesystem")');

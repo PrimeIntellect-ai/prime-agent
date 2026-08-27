@@ -18,7 +18,7 @@ flowchart TD
         policy["Continuation policy"]
         queue["Session prompt queue"]
         session["AgentSession"]
-        kernel["Persistent IPython kernel"]
+        kernel["Persistent Python kernel"]
         children["RLM child sessions"]
 
         heartbeat --> queue
@@ -44,7 +44,7 @@ The client can detach at any point. The resident worker continues to own the que
 
 ## Daemon-Backed Sessions
 
-Normal interactive sessions run in resident worker processes managed by a local supervisor. The worker owns the root session, its IPython kernel, scheduled jobs, and RLM descendants.
+Normal interactive sessions run in resident worker processes managed by a local supervisor. The worker owns the root session, its Python kernel, scheduled jobs, and RLM descendants.
 
 Closing the terminal UI detaches the client; it does not stop the worker. List and reconnect to active agents with:
 
@@ -76,7 +76,7 @@ The daemon routes direct messages between active sessions and retained daemon-ba
 prime-agent send <agent> "Please verify the latest migration"
 ```
 
-From the IPython kernel, use the preloaded `agent_message` Python skill:
+From the Python kernel, use the preloaded `agent_message` Python skill:
 
 ```python
 roster = await agent_message.list_agents()
@@ -227,7 +227,7 @@ Goals and autonomous mode are complementary but different:
 
 ## Compaction and Continuity
 
-Automatic compaction handles context growth during long tasks. On overflow or near the configured threshold, Prime Agent summarizes older messages, retains recent context, and continues. The IPython kernel persists through compaction, so variables, imports, helper functions, and task state remain available.
+Automatic compaction handles context growth during long tasks. On overflow or near the configured threshold, Prime Agent summarizes older messages, retains recent context, and continues. The Python kernel persists through compaction, so variables, imports, helper functions, and task state remain available.
 
 The agent can inspect or request compaction programmatically:
 

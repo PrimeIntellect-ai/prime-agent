@@ -1,6 +1,6 @@
 ---
 name: compact
-description: Check context usage and compact the conversation from IPython. Use when context is filling up and substantial work remains, so the session is summarized and you keep working instead of stopping early.
+description: Check context usage and compact the conversation from the Python REPL. Use when context is filling up and substantial work remains, so the session is summarized and you keep working instead of stopping early.
 ---
 
 # Compact
@@ -8,7 +8,7 @@ description: Check context usage and compact the conversation from IPython. Use 
 Compaction replaces older conversation history with a dense summary, freeing
 context so long-running work can continue. The implementation lives in the
 host (the same one behind the user's `/compact` command); this skill is the
-kernel-side interface to it. Call it directly from IPython:
+kernel-side interface to it. Call it directly from the Python REPL:
 
 ```python
 await compact.status()
@@ -32,7 +32,7 @@ await compact.run("keep the failing test names and the migration checklist")
 - Compaction never runs mid-cell. A scheduled compaction runs when the
   current turn ends; the harness then resumes you automatically with the
   summary plus recent messages, and you continue the task.
-- The IPython kernel persists through compaction — variables, imports, and
+- The Python kernel persists through compaction — variables, imports, and
   helpers you defined all remain available.
 - Compact at a natural boundary when context usage is high and substantial
   work remains, instead of becoming terse or returning to the user early.

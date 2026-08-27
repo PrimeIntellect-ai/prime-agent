@@ -2,7 +2,7 @@
 
 Compaction runs host-side (the same implementation as /compact); these
 functions are thin typed wrappers over the generic host bridge
-(`rlm.host_request`). They only work inside the Prime Agent IPython kernel.
+(`rlm.host_request`). They only work inside the Prime Agent Python kernel.
 """
 
 from __future__ import annotations
