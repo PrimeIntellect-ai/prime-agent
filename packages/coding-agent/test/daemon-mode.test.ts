@@ -1144,6 +1144,88 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("skips a heartbeat whose instruction changed while its prompt waits for admission", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-heartbeat-admission-"));
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const manager = SessionManager.create(tempDir, sessionDir);
+			manager.newSession();
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) {
+				throw new Error("Missing session file");
+			}
+			let updateHeartbeatDuringAdmission: (() => void) | undefined;
+			const promptHeartbeat = vi.fn(async (_job: AgentCronJob, options?: { admissionCommitted?: () => void }) => {
+				updateHeartbeatDuringAdmission?.();
+				updateHeartbeatDuringAdmission = undefined;
+				options?.admissionCommitted?.();
+			});
+			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
+				const session = makeRuntimeSession(options.sessionManager);
+				Object.assign(session, {
+					isStreaming: false,
+					isCompacting: false,
+					isRetrying: false,
+					isBashRunning: false,
+					unfinishedActionCount: 0,
+					hasAcceptedPromptInFlight: false,
+					sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+					promptHeartbeat,
+				});
+				return {
+					session,
+					extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["extensionsResult"],
+					services: { cwd: options.cwd, agentDir: options.agentDir } as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["services"],
+					diagnostics: [],
+				};
+			});
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
+				createRuntime,
+			});
+			const internals = daemon as unknown as {
+				cronStore: AgentCronJobStore;
+				cronScheduler: { runDue(now: Date): Promise<number> };
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+			};
+			const state = await internals.createRuntime({ type: "create", sessionPath: sessionFile });
+			const heartbeat = internals.cronStore.createRlmHeartbeat({
+				activeSessionId: state.activeSessionId,
+				sessionId: state.runtime.session.sessionId,
+				sessionFile,
+				cwd: tempDir,
+				runtimeKind: "top-level",
+				scheduleText: "every 5m",
+				prompt: "old instruction",
+			});
+			updateHeartbeatDuringAdmission = () => {
+				internals.cronStore.updateRlmHeartbeat(state.activeSessionId, heartbeat.id, { prompt: "new instruction" });
+			};
+
+			expect(await internals.cronScheduler.runDue(new Date(Date.now() + 10 * 60 * 1000))).toBe(0);
+			expect(promptHeartbeat).toHaveBeenCalledOnce();
+			expect(promptHeartbeat.mock.calls[0]?.[0]).toMatchObject({ prompt: "old instruction" });
+			expect(internals.cronStore.list().find((candidate) => candidate.id === heartbeat.id)).toMatchObject({
+				status: "active",
+				runCount: 0,
+			});
+
+			expect(await internals.cronScheduler.runDue(new Date(Date.now() + 20 * 60 * 1000))).toBe(1);
+			expect(promptHeartbeat).toHaveBeenCalledTimes(2);
+			expect(promptHeartbeat.mock.calls[1]?.[0]).toMatchObject({ prompt: "new instruction" });
+			expect(internals.cronStore.list().find((candidate) => candidate.id === heartbeat.id)).toMatchObject({
+				status: "active",
+				runCount: 1,
+			});
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("closes the exact parent-scoped daemon runtime when a retained subagent is deleted", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },

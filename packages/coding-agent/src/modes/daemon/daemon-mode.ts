@@ -1803,10 +1803,13 @@ export class AgentDaemon {
 		if (!current) {
 			return "skipped";
 		}
-		// Re-check after the session admission fence wait: the job may have been cancelled or completed meanwhile.
+		// Re-check after the session admission fence wait: the job may have been cancelled, completed, or updated meanwhile.
 		const unrunnableAtAdmission = new Error("Cron job became unrunnable before admission");
 		const admissionCommitted = () => {
-			if (!getRunnableJob()) throw unrunnableAtAdmission;
+			const refreshed = getRunnableJob();
+			if (!refreshed || refreshed.prompt !== current.prompt || refreshed.deliveryMode !== current.deliveryMode) {
+				throw unrunnableAtAdmission;
+			}
 		};
 		try {
 			if (isHeartbeatCronJob(current)) {
