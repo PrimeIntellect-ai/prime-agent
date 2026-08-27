@@ -1803,18 +1803,32 @@ export class AgentDaemon {
 		if (!current) {
 			return "skipped";
 		}
-		if (isHeartbeatCronJob(current)) {
-			await session.promptHeartbeat(current, {
-				streamingBehavior: resolveHeartbeatStreamingBehavior(current.deliveryMode),
-				followUpQueueKey: `heartbeat:${current.id}`,
+		// Re-check after the session admission fence wait: the job may have been cancelled or completed meanwhile.
+		const unrunnableAtAdmission = new Error("Cron job became unrunnable before admission");
+		const admissionCommitted = () => {
+			if (!getRunnableJob()) throw unrunnableAtAdmission;
+		};
+		try {
+			if (isHeartbeatCronJob(current)) {
+				await session.promptHeartbeat(current, {
+					streamingBehavior: resolveHeartbeatStreamingBehavior(current.deliveryMode),
+					followUpQueueKey: `heartbeat:${current.id}`,
+					source: "rpc",
+					admissionCommitted,
+				});
+				return;
+			}
+			await session.promptUntilAccepted(current.prompt, {
+				streamingBehavior: "followUp",
 				source: "rpc",
+				admissionCommitted,
 			});
-			return;
+		} catch (error) {
+			if (error === unrunnableAtAdmission) {
+				return "skipped";
+			}
+			throw error;
 		}
-		await session.promptUntilAccepted(current.prompt, {
-			streamingBehavior: "followUp",
-			source: "rpc",
-		});
 	}
 
 	private getRunnableCronJob(jobId: string): AgentCronJob | undefined {

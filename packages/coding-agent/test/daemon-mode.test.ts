@@ -1056,6 +1056,74 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("skips a cron job cancelled while its prompt waits for admission", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-cron-admission-"));
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const manager = SessionManager.create(tempDir, sessionDir);
+			manager.newSession();
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) {
+				throw new Error("Missing session file");
+			}
+			let cancelJobDuringAdmission: (() => void) | undefined;
+			const promptUntilAccepted = vi.fn(async (_prompt: string, options?: { admissionCommitted?: () => void }) => {
+				cancelJobDuringAdmission?.();
+				options?.admissionCommitted?.();
+			});
+			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
+				const session = makeRuntimeSession(options.sessionManager);
+				Object.assign(session, {
+					isStreaming: false,
+					isCompacting: false,
+					isRetrying: false,
+					isBashRunning: false,
+					unfinishedActionCount: 0,
+					hasAcceptedPromptInFlight: false,
+					sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+					promptUntilAccepted,
+				});
+				return {
+					session,
+					extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["extensionsResult"],
+					services: { cwd: options.cwd, agentDir: options.agentDir } as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["services"],
+					diagnostics: [],
+				};
+			});
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
+				createRuntime,
+			});
+			const internals = daemon as unknown as {
+				cronStore: AgentCronJobStore;
+				cronScheduler: { runDue(now: Date): Promise<number> };
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+			};
+			const state = await internals.createRuntime({ type: "create", sessionPath: sessionFile });
+			const job = internals.cronStore.create({
+				activeSessionId: state.activeSessionId,
+				sessionId: state.runtime.session.sessionId,
+				sessionFile,
+				cwd: tempDir,
+				scheduleText: "every 5m",
+				prompt: "scheduled work",
+			});
+			cancelJobDuringAdmission = () => {
+				internals.cronStore.cancel(job.id);
+			};
+
+			expect(await internals.cronScheduler.runDue(new Date(Date.now() + 10 * 60 * 1000))).toBe(0);
+			expect(promptUntilAccepted).toHaveBeenCalledOnce();
+			expect(internals.cronStore.list().find((candidate) => candidate.id === job.id)?.status).toBe("cancelled");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("closes the exact parent-scoped daemon runtime when a retained subagent is deleted", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
