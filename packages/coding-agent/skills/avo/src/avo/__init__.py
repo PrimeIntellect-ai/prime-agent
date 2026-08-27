@@ -10,7 +10,7 @@ from rlm import host_request
 
 def execution_contract() -> dict[str, Any]:
     return {
-        "contract_version": 7,
+        "contract_version": 8,
         "forbid_runtime_introspection": True,
         "host_enforces_completion_and_canonical_delivery": True,
         "environments": ["general", "coding", "research"],
@@ -48,7 +48,9 @@ def execution_contract() -> dict[str, Any]:
             "external_url_evidence": "await avo.bind_url(candidate_id, claim_id, url, exact_quote)",
             "opinion": "await avo.record_evaluation(model_opinion_dict)",
             "experiment": "await avo.record_experiment(experiment_dict)",
-            "trial": "await avo.run_trial(experiment_id, candidate_id, command)",
+            "trial": (
+                "await avo.run_trial(experiment_id, candidate_id, condition_id, seed)"
+            ),
             "experiment_complete": "await avo.complete_experiment(experiment_id)",
             "cycle": "await avo.complete_cycle({'candidate_id': candidate_id})",
             "gate": "await avo.stop_gate()",
@@ -67,6 +69,11 @@ def execution_contract() -> dict[str, Any]:
             "run_coding_baseline, then require the exact same command and baseline identities "
             "to execute and pass after the candidate; mutable package scripts and output-printed "
             "filenames are not identity proof"
+        ),
+        "experiment_rule": (
+            "record a structured prospective plan before trials; the host renders and hashes "
+            "each candidate/condition/seed command, requires exact grid coverage, derives "
+            "aggregate statistics, and alone issues champion promotion decisions"
         ),
     }
 
@@ -132,31 +139,32 @@ async def record_trial(trial: dict[str, Any]) -> dict[str, Any]:
 async def run_trial(
     experiment_id: str,
     candidate_id: str,
-    command: str,
-    *,
-    label: str | None = None,
-    seed: str | None = None,
+    condition_id: str,
+    seed: str | int,
 ) -> dict[str, Any]:
-    if not isinstance(experiment_id, str) or not experiment_id.strip():
-        raise ValueError("experiment_id must be a non-empty string")
-    evaluation_response = await run_evaluation(candidate_id, command)
-    evaluation = evaluation_response.get("evaluation")
-    if not isinstance(evaluation, dict) or not isinstance(
-        evaluation.get("evaluationId"), str
+    for value, label in (
+        (experiment_id, "experiment_id"),
+        (candidate_id, "candidate_id"),
+        (condition_id, "condition_id"),
     ):
-        raise RuntimeError("host evaluation did not return a bindable evaluationId")
-    trial = {
-        "experiment_id": experiment_id,
-        "candidate_id": candidate_id,
-        "evaluation_id": evaluation["evaluationId"],
-    }
-    if label is not None:
-        trial["label"] = label
-    if seed is not None:
-        trial["seed"] = seed
-    response = await record_trial(trial)
-    response["evaluation"] = evaluation
-    return response
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{label} must be a non-empty string")
+    if isinstance(seed, bool) or not isinstance(seed, (str, int)):
+        raise ValueError("seed must be a non-empty string or integer")
+    seed_value = str(seed)
+    if not seed_value.strip():
+        raise ValueError("seed must be a non-empty string or integer")
+    return await host_request(
+        "avo.trial.run",
+        {
+            "trial": {
+                "experiment_id": experiment_id,
+                "candidate_id": candidate_id,
+                "condition_id": condition_id,
+                "seed": seed_value,
+            }
+        },
+    )
 
 
 async def complete_experiment(experiment_id: str) -> dict[str, Any]:

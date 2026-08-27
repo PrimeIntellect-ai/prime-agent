@@ -1,0 +1,1 @@
+- Added preregistered experiment grids with host-bound trial parameters, aggregate statistics, conservative champion decisions, and structured verified NOOA episodes.

@@ -392,20 +392,28 @@ export class AvoSessionRuntime {
 				);
 				const experimentMemoryId = `episode:experiment:${experimentId}`;
 				if (!this.store.getState().memories.some((memory) => memory.memoryId === experimentMemoryId)) {
+					const episode = {
+						record_type: "avo_research_experiment_episode_v2",
+						verification_semantics:
+							"declared_hypothesis, planned_design, reported_results, and reported_interpretation record the research declaration; only observed_status, observed_metrics, and observed_artifacts are host-bound evidence",
+						declared_hypothesis: experiment.hypothesis,
+						planned_design: experiment.design,
+						reported_results: experiment.results ?? null,
+						reported_interpretation: experiment.interpretation ?? null,
+						observed_status: experiment.status,
+						observed_metrics: experiment.metrics,
+						observed_artifacts: experiment.artifactReceipts.map((receipt) => ({
+							path: receipt.path,
+							sha256: receipt.sha256,
+						})),
+					};
 					this.store.rememberVerified({
 						memoryId: experimentMemoryId,
 						namespace: "research",
 						type: "episode",
 						scope: "project",
 						title: `Experiment ${experimentId}: ${experiment.status}`,
-						content: [
-							`Hypothesis: ${experiment.hypothesis}`,
-							`Design: ${experiment.design}`,
-							`Status: ${experiment.status}`,
-							`Results: ${experiment.results ?? "not reported"}`,
-							`Interpretation: ${experiment.interpretation ?? "not reported"}`,
-							`Metrics: ${JSON.stringify(experiment.metrics)}`,
-						].join("\n"),
+						content: JSON.stringify(episode, null, 2),
 						tags: ["experiment", experiment.status],
 						importance: experiment.status === "completed" ? 8 : 5,
 						sourceIds: [experimentId, experimentEvaluationId],
@@ -459,7 +467,7 @@ export function buildAvoRuntimePrompt(state: AvoRunState, memoryContext = ""): s
 		"Environment routing is host-authoritative. Model calls cannot select general, coding, or research and may only escalate the current horizon to iterative or long.",
 		"Prime automatically recalls NOOA memory before root turns. Proposed task memory may surface as a hypothesis; proposed project memory is deliberate-only and proposed global persistence is forbidden. Verified memories are host-cleared, and live references are re-resolved at recall time. Never treat recall alone as task evidence or authority.",
 		memoryContext || undefined,
-		"Use the avo skill for the task's candidate/evaluation lifecycle. The host will automatically continue the root task instead of accepting an answer that skipped AVO, failed its gate, changed a verified workspace/artifact, or differs from the accepted candidate's canonical delivery. Callers may record only model_opinion. Required external_factual candidates must declare verbatim claims and bind each claim to a host-trusted external source record; after Serper IPython or Vertex Google Search, use avo.fetch_external_source on a result URL and avo.bind_url with a visible quote exactly equal to the claim. Provenance without a host-bound independent entailment verdict cannot pass. Required deterministic arithmetic uses a payload exactly shaped as {result: number} and avo.verify_deterministic_result; required artifact candidates declare artifact_paths and use avo.verify_artifacts. An unrelated successful command cannot certify either class. Before changing a coding workspace, use avo.run_coding_baseline with a direct command that explicitly names an unchanged baseline test file, then run the exact same command after the candidate with avo.run_evaluation. Mutable package-script wrappers, output-printed filenames, no-op mutation candidates, and candidate-created tests cannot certify progress. For repeatable comparisons in any adapter, use avo.record_experiment, bind host-issued receipts with avo.run_trial or avo.record_trial, then avo.complete_experiment to create a verified episode. Never invent host, environment, or external authority. Required verification needs host-issued evidence; best_effort and not_applicable policies may use a transparent model-opinion review without pretending it is external. Complete the candidate cycle, then return only its canonical delivery: general payload text, deterministic numeric result, or coding/research summary, with no preface or suffix. A later root task starts a fresh task run after the current gate and delivery pass, while namespaced memory survives across runs.",
+		"Use the avo skill for the task's candidate/evaluation lifecycle. The host will automatically continue the root task instead of accepting an answer that skipped AVO, failed its gate, changed a verified workspace/artifact, or differs from the accepted candidate's canonical delivery. Callers may record only model_opinion. Required external_factual candidates must declare verbatim claims and bind each claim to a host-trusted external source record; after Serper IPython or Vertex Google Search, use avo.fetch_external_source on a result URL and avo.bind_url with a visible quote exactly equal to the claim. Provenance without a host-bound independent entailment verdict cannot pass. Required deterministic arithmetic uses a payload exactly shaped as {result: number} and avo.verify_deterministic_result; required artifact candidates declare artifact_paths and use avo.verify_artifacts. An unrelated successful command cannot certify either class. Before changing a coding workspace, use avo.run_coding_baseline with a direct command that explicitly names an unchanged baseline test file, then run the exact same command after the candidate with avo.run_evaluation. Mutable package-script wrappers, output-printed filenames, no-op mutation candidates, and candidate-created tests cannot certify progress. For repeatable comparisons in any adapter, preregister a structured candidate/condition/seed plan with avo.record_experiment, run each exact cell through avo.run_trial, and call avo.complete_experiment only after the full grid. The host renders and hashes cell commands, derives aggregate statistics and paired confidence bounds, issues promote/retain outcomes, and stores declared hypotheses separately from empirical observations in NOOA. Never invent host, environment, or external authority. Required verification needs host-issued evidence; best_effort and not_applicable policies may use a transparent model-opinion review without pretending it is external. Complete the candidate cycle, then return only its canonical delivery: general payload text, deterministic numeric result, or coding/research summary, with no preface or suffix. A later root task starts a fresh task run after the current gate and delivery pass, while namespaced memory survives across runs.",
 	]
 		.filter((line): line is string => line !== undefined)
 		.join("\n\n");

@@ -511,6 +511,10 @@ describe("AgentSession universal AVO runtime", () => {
 		harness = await createHarness({ persistSession: true });
 		writeFileSync(`${harness.tempDir}/parser.cjs`, "module.exports = 1;\n");
 		writeFileSync(
+			`${harness.tempDir}/parser-benchmark.cjs`,
+			"console.log('AVO_TRIAL_METRICS_JSON:{\"passed_tests\":12}');\n",
+		);
+		writeFileSync(
 			`${harness.tempDir}/parser.test.cjs`,
 			"const test = require('node:test'); const assert = require('node:assert'); test('parser', () => assert.equal(2 + 2, 4));\n",
 		);
@@ -577,24 +581,50 @@ describe("AgentSession universal AVO runtime", () => {
 				title: "Parser implementation comparison",
 				hypothesis: "The patched parser preserves the regression contract.",
 				design: "Run the immutable baseline test against the candidate workspace.",
+				plan: {
+					candidate_ids: ["patch-1"],
+					conditions: [
+						{
+							condition_id: "parser-regression",
+							command_template: "node parser-benchmark.cjs --seed {{seed}}",
+						},
+					],
+					seeds: ["suite-v1"],
+					primary_metric: "passed_tests",
+					metric_direction: "maximize",
+				},
 			},
 		});
 		expect(
-			await harness.session.handleAvoHostRequest("avo.trial.record", {
+			await harness.session.handleAvoHostRequest("avo.trial.run", {
 				trial: {
 					experiment_id: "parser-comparison",
 					candidate_id: "patch-1",
-					evaluation_id: (observed.evaluation as { evaluationId: string }).evaluationId,
-					label: "Patched parser",
+					condition_id: "parser-regression",
+					seed: "suite-v1",
 				},
 			}),
-		).toMatchObject({ trial: { experimentId: "parser-comparison", status: "pass" } });
+		).toMatchObject({
+			trial: {
+				experimentId: "parser-comparison",
+				status: "pass",
+				conditionId: "parser-regression",
+				seed: "suite-v1",
+				metrics: { passed_tests: 12 },
+			},
+			evaluation: { evaluatorId: "experiment_trial", issuedBy: "host" },
+		});
 		expect(
 			await harness.session.handleAvoHostRequest("avo.experiment.complete", {
 				experiment_id: "parser-comparison",
 			}),
 		).toMatchObject({
-			experiment: { experimentId: "parser-comparison", status: "completed" },
+			experiment: {
+				experimentId: "parser-comparison",
+				status: "completed",
+				aggregateEvaluationId: expect.any(String),
+			},
+			outcome: { primaryMetric: "passed_tests", decision: "inconclusive" },
 			memory: { type: "episode", verificationState: "verified" },
 			nooa: expect.objectContaining({ ok: expect.any(Boolean) }),
 		});
@@ -604,6 +634,152 @@ describe("AgentSession universal AVO runtime", () => {
 		expect(completed).toMatchObject({ cycle: { outcome: "accepted" }, activateSupervisor: false });
 		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
 			stop_gate: { passed: true },
+		});
+	});
+
+	it("enforces the preregistered experiment grid and issues a host champion outcome", async () => {
+		harness = await createHarness({ persistSession: true });
+		writeFileSync(
+			`${harness.tempDir}/candidate-benchmark.cjs`,
+			[
+				"const args = process.argv.slice(2);",
+				"const candidate = args[args.indexOf('--candidate') + 1];",
+				"const seed = Number(args[args.indexOf('--seed') + 1]);",
+				"const score = (candidate === 'challenger' ? 20 : 10) + seed;",
+				"console.log('AVO_TRIAL_METRICS_JSON:' + JSON.stringify({ score }));",
+			].join("\n"),
+		);
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Compare two optimization candidates with a host benchmark");
+		await harness.session.handleAvoHostRequest("avo.experiment.record", {
+			experiment: {
+				experiment_id: "optimizer-comparison",
+				title: "Optimizer candidate comparison",
+				hypothesis: "The challenger improves the benchmark score.",
+				design: "Paired benchmark over two preregistered seeds.",
+				plan: {
+					mode: "prospective",
+					candidate_ids: ["baseline", "challenger"],
+					conditions: [
+						{
+							condition_id: "frozen-suite",
+							command_template:
+								"node candidate-benchmark.cjs --candidate {{candidate_id}} --condition {{condition_id}} --seed {{seed}}",
+						},
+					],
+					seeds: ["1", "2"],
+					pairing: "paired",
+					primary_metric: "score",
+					metric_direction: "maximize",
+					baseline_candidate_id: "baseline",
+				},
+			},
+		});
+		for (const candidateId of ["baseline", "challenger"]) {
+			await harness.session.handleAvoHostRequest("avo.candidate.add", {
+				candidate: {
+					candidate_id: candidateId,
+					kind: "answer",
+					summary: `${candidateId} optimizer`,
+					payload: `${candidateId} optimizer`,
+				},
+			});
+		}
+		const runCell = (candidateId: string, seed: string) =>
+			harness!.session.handleAvoHostRequest("avo.trial.run", {
+				trial: {
+					experiment_id: "optimizer-comparison",
+					candidate_id: candidateId,
+					condition_id: "frozen-suite",
+					seed,
+				},
+			});
+		await runCell("baseline", "1");
+		await runCell("baseline", "2");
+		await runCell("challenger", "1");
+		await expect(
+			harness.session.handleAvoHostRequest("avo.experiment.complete", {
+				experiment_id: "optimizer-comparison",
+			}),
+		).rejects.toThrow(/expected=4, observed=3, missing=1/);
+		await expect(runCell("challenger", "1")).rejects.toThrow(/already recorded/);
+		await runCell("challenger", "2");
+		const completed = await harness.session.handleAvoHostRequest("avo.experiment.complete", {
+			experiment_id: "optimizer-comparison",
+		});
+		expect(completed).toMatchObject({
+			experiment: {
+				status: "completed",
+				plan: { expectedTrials: 4 },
+				outcome: { decision: "promote", championCandidateId: "challenger" },
+			},
+			evaluation: {
+				evaluatorId: "experiment_aggregate",
+				status: "pass",
+				issuedBy: "host",
+				metrics: { expected_trials: 4, observed_trials: 4, decision: "promote" },
+			},
+			outcome: {
+				decision: "promote",
+				championCandidateId: "challenger",
+				ranking: ["challenger", "baseline"],
+				candidateAggregates: [
+					{ candidateId: "baseline", metric: { count: 2, mean: 11.5 } },
+					{ candidateId: "challenger", metric: { count: 2, mean: 21.5 } },
+				],
+				conditionAggregates: [
+					{ conditionId: "frozen-suite", candidateId: "baseline", metric: { count: 2, mean: 11.5 } },
+					{ conditionId: "frozen-suite", candidateId: "challenger", metric: { count: 2, mean: 21.5 } },
+				],
+				pairedComparisons: [
+					{
+						candidateId: "challenger",
+						baselineCandidateId: "baseline",
+						delta: { count: 2, mean: 10, ci95Low: 10, ci95High: 10 },
+						wins: 2,
+						losses: 0,
+						ties: 0,
+						winRate: 1,
+					},
+				],
+				conditionPairedComparisons: [
+					{
+						conditionId: "frozen-suite",
+						candidateId: "challenger",
+						baselineCandidateId: "baseline",
+						delta: { count: 2, mean: 10 },
+						wins: 2,
+						losses: 0,
+						ties: 0,
+						winRate: 1,
+					},
+				],
+			},
+			memory: { type: "episode", verificationState: "verified" },
+		});
+		const episode = JSON.parse((completed.memory as { content: string }).content);
+		expect(episode).toMatchObject({
+			record_type: "avo_experiment_episode_v2",
+			declared_hypothesis: "The challenger improves the benchmark score.",
+			observed_trials: expect.arrayContaining([
+				expect.objectContaining({ candidate_id: "challenger", seed: "2", primary_metric: 22 }),
+			]),
+			derived_statistics: { decision: "promote", championCandidateId: "challenger" },
+		});
+		const dashboard = await harness.session.handleAvoHostRequest("avo.get");
+		expect(dashboard.state).toMatchObject({
+			experiments: [
+				expect.objectContaining({
+					status: "completed",
+					outcome: expect.objectContaining({ decision: "promote" }),
+				}),
+			],
+			trials: expect.arrayContaining([
+				expect.objectContaining({ conditionId: "frozen-suite", commandDigest: expect.any(String) }),
+			]),
+			lineage: expect.arrayContaining([
+				expect.objectContaining({ kind: "champion_promoted", referenceId: "challenger" }),
+			]),
 		});
 	});
 

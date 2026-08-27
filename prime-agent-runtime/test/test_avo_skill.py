@@ -30,6 +30,7 @@ class AvoSkillTest(unittest.TestCase):
         self.assertIn("callers may issue only model_opinion", contract["canonical_rule"])
         self.assertIn("every factual claim", contract["factual_claim_rule"])
         self.assertIn("cannot certify themselves", contract["coding_test_rule"])
+        self.assertIn("structured prospective plan", contract["experiment_rule"])
         self.assertEqual(contract["horizons"], ["direct", "iterative", "long"])
 
     def test_initialize_uses_the_host_routed_runtime(self) -> None:
@@ -43,7 +44,7 @@ class AvoSkillTest(unittest.TestCase):
             host.await_args_list[0].args[1],
             {"objective": "Fix the parser"},
         )
-        self.assertEqual(result["execution_contract"]["contract_version"], 7)
+        self.assertEqual(result["execution_contract"]["contract_version"], 8)
 
     def test_coding_baseline_runs_through_the_host_before_candidate_work(self) -> None:
         module = load_skill("avo_coding_baseline_test")
@@ -142,8 +143,10 @@ class AvoSkillTest(unittest.TestCase):
         host = AsyncMock(
             side_effect=[
                 {"experiment": {"experimentId": "experiment-1"}},
-                {"evaluation": {"evaluationId": "evaluation-1", "issuedBy": "host"}},
-                {"trial": {"trialId": "trial-1"}},
+                {
+                    "trial": {"trialId": "trial-1"},
+                    "evaluation": {"issuedBy": "host"},
+                },
                 {"experiment": {"experimentId": "experiment-1", "status": "completed"}},
             ]
         )
@@ -155,6 +158,21 @@ class AvoSkillTest(unittest.TestCase):
                         "title": "Parser comparison",
                         "hypothesis": "Serialization reduces failures.",
                         "design": "Run the unchanged suite.",
+                        "plan": {
+                            "candidate_ids": ["candidate-1"],
+                            "conditions": [
+                                {
+                                    "condition_id": "parser-suite",
+                                    "command_template": (
+                                        "python -m pytest -q tests/test_parser.py "
+                                        "--seed {{seed}}"
+                                    ),
+                                }
+                            ],
+                            "seeds": ["suite-v1"],
+                            "primary_metric": "passed_tests",
+                            "metric_direction": "maximize",
+                        },
                     }
                 )
             )
@@ -162,42 +180,48 @@ class AvoSkillTest(unittest.TestCase):
                 module.run_trial(
                     "experiment-1",
                     "candidate-1",
-                    "python -m pytest -q tests/test_parser.py",
-                    label="serialized",
-                    seed="suite-v1",
+                    "parser-suite",
+                    "suite-v1",
                 )
             )
             completed = asyncio.run(module.complete_experiment("experiment-1"))
         self.assertEqual(trial["trial"]["trialId"], "trial-1")
-        self.assertEqual(trial["evaluation"]["evaluationId"], "evaluation-1")
+        self.assertEqual(trial["evaluation"]["issuedBy"], "host")
         self.assertEqual(completed["experiment"]["status"], "completed")
         self.assertEqual(host.await_args_list[0].args[0], "avo.experiment.record")
         self.assertEqual(
             host.await_args_list[1].args,
             (
-                "avo.evaluation.run",
-                {
-                    "candidate_id": "candidate-1",
-                    "command": "python -m pytest -q tests/test_parser.py",
-                },
-            ),
-        )
-        self.assertEqual(
-            host.await_args_list[2].args,
-            (
-                "avo.trial.record",
+                "avo.trial.run",
                 {
                     "trial": {
                         "experiment_id": "experiment-1",
                         "candidate_id": "candidate-1",
-                        "evaluation_id": "evaluation-1",
-                        "label": "serialized",
+                        "condition_id": "parser-suite",
                         "seed": "suite-v1",
-                    }
+                    },
                 },
             ),
         )
-        self.assertEqual(host.await_args_list[3].args[0], "avo.experiment.complete")
+        self.assertEqual(host.await_args_list[2].args[0], "avo.experiment.complete")
+
+    def test_trial_helper_canonicalizes_integer_seeds(self) -> None:
+        module = load_skill("avo_integer_seed_test")
+        host = AsyncMock(return_value={"trial": {"seed": "7"}})
+        with patch.object(module, "host_request", host):
+            result = asyncio.run(
+                module.run_trial("experiment-1", "candidate-1", "opponent-a", 7)
+            )
+        self.assertEqual(result["trial"]["seed"], "7")
+        self.assertEqual(
+            host.await_args.args[1]["trial"],
+            {
+                "experiment_id": "experiment-1",
+                "candidate_id": "candidate-1",
+                "condition_id": "opponent-a",
+                "seed": "7",
+            },
+        )
 
     def test_memory_sync_is_owned_by_the_persistent_host_bridge(self) -> None:
         module = load_skill("avo_host_memory_sync_test")

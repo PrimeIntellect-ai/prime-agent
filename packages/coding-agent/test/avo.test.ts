@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -6,8 +7,10 @@ import { describe, expect, test } from "vitest";
 import type { AutoresearchState, AutoresearchStopGate } from "../src/core/autoresearch.js";
 import {
 	AVO_NOOA_VERSION,
+	type AvoExperiment,
 	AvoSessionRuntime,
 	AvoStore,
+	type AvoTrial,
 	assertAvoClaimVerifierQuoteSafe,
 	assessAvoClaimEvidence,
 	assessAvoHostCommand,
@@ -19,11 +22,13 @@ import {
 	combineAvoClaimEvidenceAssessments,
 	deriveAvoDeterministicArithmeticContract,
 	deriveAvoEvaluation,
+	deriveAvoExperimentOutcome,
 	digestAvoDeliveryText,
 	GeneralAvoAdapter,
 	inferAvoEnvironment,
 	inferAvoHorizon,
 	inferAvoVerificationPolicy,
+	normalizeAvoExperimentPlan,
 	parseAvoClaimVerifierMessage,
 	parseAvoMemoryInput,
 	parseAvoMemoryReasonerMessage,
@@ -31,6 +36,7 @@ import {
 	parseAvoMemoryReconciliationVerifierMessage,
 	parseAvoMemoryVerifierMessage,
 	parseAvoSupervisorMessage,
+	parseAvoTrialMetricsOutput,
 	ResearchAvoAdapter,
 	shouldActivateAvoSupervisor,
 } from "../src/core/avo/index.js";
@@ -45,6 +51,117 @@ function clock(): () => string {
 }
 
 describe("generic AVO core", () => {
+	test("fails closed on ambiguous experiment plans and undeclared trial metrics", () => {
+		expect(
+			normalizeAvoExperimentPlan(
+				{
+					candidateIds: ["candidate"],
+					conditions: [{ conditionId: "suite", commandTemplate: "node bench.cjs --seed {{seed}}" }],
+					seeds: [1, 2],
+					primaryMetric: "score",
+					metricDirection: "maximize",
+				},
+				"general",
+			).seeds,
+		).toEqual(["1", "2"]);
+		expect(() =>
+			normalizeAvoExperimentPlan(
+				{
+					candidateIds: ["baseline", "challenger"],
+					conditions: [{ conditionId: "suite", commandTemplate: "node bench.cjs --seed {{seed}}" }],
+					seeds: ["1", "2"],
+					pairing: "paired",
+					primaryMetric: "score",
+					metricDirection: "maximize",
+					baselineCandidateId: "baseline",
+				},
+				"general",
+			),
+		).toThrow(/--candidate \{\{candidate_id\}\}/);
+		expect(() =>
+			normalizeAvoExperimentPlan(
+				{
+					candidateIds: ["candidate"],
+					conditions: [
+						{
+							conditionId: "suite",
+							parameters: { opponent: "bot-a" },
+							commandTemplate: "node bench.cjs --seed {{seed}}",
+						},
+					],
+					seeds: ["1"],
+					primaryMetric: "score",
+					metricDirection: "maximize",
+				},
+				"coding",
+			),
+		).toThrow(/--opponent \{\{param:opponent\}\}/);
+		expect(() => parseAvoTrialMetricsOutput('AVO_TRIAL_METRICS_JSON:{"score":2,"invented":99}\n', "score")).toThrow(
+			/undeclared metric invented/,
+		);
+		expect(() =>
+			parseAvoTrialMetricsOutput(
+				'AVO_TRIAL_METRICS_JSON:{"score":2}\nAVO_TRIAL_METRICS_JSON:{"score":3}\n',
+				"score",
+			),
+		).toThrow(/at most one metrics marker/);
+	});
+
+	test("retains the baseline when a higher challenger mean has an uncertain paired interval", () => {
+		const experiment: AvoExperiment = {
+			experimentId: "uncertain-comparison",
+			title: "Uncertain comparison",
+			hypothesis: "The challenger improves score.",
+			design: "Two paired seeds.",
+			plan: {
+				mode: "prospective",
+				candidateIds: ["baseline", "challenger"],
+				conditions: [
+					{ conditionId: "suite", label: "Suite", parameters: {}, commandTemplate: "node bench --seed {{seed}}" },
+				],
+				seeds: ["1", "2"],
+				pairing: "paired",
+				primaryMetric: "score",
+				metricDirection: "maximize",
+				baselineCandidateId: "baseline",
+				expectedTrials: 4,
+			},
+			status: "running",
+			trialIds: ["baseline-1", "baseline-2", "challenger-1", "challenger-2"],
+			tags: [],
+			createdAt: "2026-08-27T00:00:00.000Z",
+			updatedAt: "2026-08-27T00:00:01.000Z",
+		};
+		const trial = (candidateId: string, seed: string, score: number): AvoTrial => ({
+			trialId: `${candidateId}-${seed}`,
+			experimentId: experiment.experimentId,
+			candidateId,
+			evaluationId: `evaluation-${candidateId}-${seed}`,
+			label: `${candidateId}/${seed}`,
+			seed,
+			conditionId: "suite",
+			status: "pass",
+			metrics: { score },
+			evidenceRefs: ["host:test"],
+			recordedAt: "2026-08-27T00:00:02.000Z",
+		});
+		const outcome = deriveAvoExperimentOutcome(experiment, [
+			trial("baseline", "1", 0),
+			trial("baseline", "2", 0),
+			trial("challenger", "1", 10),
+			trial("challenger", "2", 1),
+		]);
+		expect(outcome).toMatchObject({
+			decision: "retain",
+			championCandidateId: "baseline",
+			ranking: ["challenger", "baseline"],
+			pairedComparisons: [
+				expect.objectContaining({ candidateId: "challenger", favorableCi95Low: expect.any(Number) }),
+			],
+		});
+		expect(outcome.pairedComparisons[0]!.favorableCi95Low).toBeLessThan(0);
+	});
+
 	test("adopts NOOA 0.0.9 taxonomy and reinforces exact duplicate memories", () => {
 		expect(AVO_NOOA_VERSION).toBe("0.0.9");
 		expect(
@@ -454,6 +571,18 @@ describe("generic AVO core", () => {
 			title: "Parser recovery comparison",
 			hypothesis: "Serialized initialization reduces parser failures.",
 			design: "Run the unchanged parser regression against each candidate.",
+			plan: {
+				candidateIds: ["candidate-parser-serialized"],
+				conditions: [
+					{
+						conditionId: "parser-regression",
+						commandTemplate: "node parser-benchmark.cjs --seed {{seed}}",
+					},
+				],
+				seeds: ["fixed-suite-v1"],
+				primaryMetric: "passed_tests",
+				metricDirection: "maximize",
+			},
 			tags: ["parser", "recovery"],
 		});
 		const candidate = store.recordCandidate({
@@ -479,17 +608,52 @@ describe("generic AVO core", () => {
 				experimentId: experiment.experimentId,
 				candidateId: candidate.candidateId,
 				evaluationId: opinion.evaluationId,
+				conditionId: "parser-regression",
+				seed: "fixed-suite-v1",
 			}),
-		).toThrow(/host-issued, non-opinion/);
+		).toThrow(/host-issued experiment_trial/);
+		const contract = store.prepareTrialExecution(
+			experiment.experimentId,
+			candidate.candidateId,
+			"parser-regression",
+			"fixed-suite-v1",
+		);
 		const evaluation = store.recordEvaluation(
 			{
 				evaluationId: "evaluation-parser-regression",
 				candidateId: candidate.candidateId,
-				evaluatorId: "runtime_test",
+				evaluatorId: "runtime",
 				status: "pass",
 				authority: "environment",
 				evidenceRefs: ["host:test:parser-regression"],
-				metrics: { passed_tests: 12, meaningful: true },
+				metrics: {
+					meaningful: true,
+					command_digest: contract.commandDigest,
+					candidate_payload_digest: candidate.payloadDigest,
+				},
+			},
+			"host",
+		);
+		const binding = store.recordEvaluation(
+			{
+				evaluationId: "evaluation-parser-experiment-cell",
+				candidateId: candidate.candidateId,
+				evaluatorId: "experiment_trial",
+				status: "pass",
+				authority: "host",
+				evidenceRefs: [...evaluation.evidenceRefs, `host:experiment-cell:${contract.cellDigest}`],
+				metrics: {
+					meaningful: true,
+					passed_tests: 12,
+					experiment_id: experiment.experimentId,
+					condition_id: contract.conditionId,
+					seed: contract.seed,
+					command_digest: contract.commandDigest,
+					cell_digest: contract.cellDigest,
+					source_evaluation_id: evaluation.evaluationId,
+					source_evaluation_created_at: evaluation.createdAt,
+					candidate_payload_digest: candidate.payloadDigest,
+				},
 			},
 			"host",
 		);
@@ -497,29 +661,44 @@ describe("generic AVO core", () => {
 			trialId: "trial-parser-serialized",
 			experimentId: experiment.experimentId,
 			candidateId: candidate.candidateId,
-			evaluationId: evaluation.evaluationId,
-			label: "Serialized initialization",
+			evaluationId: binding.evaluationId,
+			conditionId: "parser-regression",
 			seed: "fixed-suite-v1",
 		});
 		expect(trial).toMatchObject({ status: "pass", metrics: { passed_tests: 12 } });
 		const completed = store.completeExperiment(experiment.experimentId);
 		expect(completed.experiment).toMatchObject({ status: "completed", trialIds: [trial.trialId] });
+		expect(completed.outcome).toMatchObject({
+			decision: "inconclusive",
+			candidateAggregates: [{ candidateId: candidate.candidateId, metric: { count: 1, mean: 12 } }],
+		});
+		expect(completed.evaluation).toMatchObject({
+			evaluatorId: "experiment_aggregate",
+			issuedBy: "host",
+			status: "pass",
+		});
 		expect(completed.memory).toMatchObject({
 			type: "episode",
 			scope: "project",
 			verificationState: "verified",
 		});
+		expect(JSON.parse(completed.memory.content)).toMatchObject({
+			record_type: "avo_experiment_episode_v2",
+			declared_hypothesis: experiment.hypothesis,
+			observed_trials: [{ primary_metric: 12 }],
+			derived_statistics: { decision: "inconclusive" },
+		});
 		expect(completed.memory.references).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({ kind: "experiment", key: experiment.experimentId }),
 				expect.objectContaining({ kind: "trial", key: trial.trialId }),
-				expect.objectContaining({ kind: "evaluation", key: evaluation.evaluationId }),
+				expect.objectContaining({ kind: "evaluation", key: binding.evaluationId }),
 			]),
 		);
 		const dashboard = runtime.dashboardProjection();
 		expect(dashboard.metrics).toEqual(
 			expect.arrayContaining([
-				expect.objectContaining({ label: "Experiments", value: 1 }),
+				expect.objectContaining({ label: "Experiments", value: "1/1" }),
 				expect.objectContaining({ label: "Trials", value: 1 }),
 			]),
 		);
@@ -528,6 +707,11 @@ describe("generic AVO core", () => {
 				id: "experiments",
 				items: expect.arrayContaining([
 					expect.objectContaining({ label: "Latest experiment", value: expect.stringContaining("completed") }),
+					expect.objectContaining({ label: "Latest plan coverage", value: "1/1 cells · paired" }),
+					expect.objectContaining({
+						label: "Host experiment outcome",
+						value: expect.stringContaining("inconclusive"),
+					}),
 				]),
 			}),
 		);
@@ -535,7 +719,7 @@ describe("generic AVO core", () => {
 		const archivedContext = store.formatMemoryContext([completed.memory]);
 		expect(archivedContext).toContain(`ref experiment:${experiment.experimentId} (LIVE)`);
 		expect(archivedContext).toContain(`ref trial:${trial.trialId} (LIVE)`);
-		expect(archivedContext).toContain(`ref evaluation:${evaluation.evaluationId} (LIVE)`);
+		expect(archivedContext).toContain(`ref evaluation:${binding.evaluationId} (LIVE)`);
 		expect(archivedContext).not.toContain("DANGLING");
 		expect(() =>
 			store.recordExperiment({
@@ -543,9 +727,91 @@ describe("generic AVO core", () => {
 				title: "Ambiguous reused experiment",
 				hypothesis: "A reused ID should fail closed.",
 				design: "Do not alias archived experiment references.",
+				plan: {
+					candidateIds: [candidate.candidateId],
+					conditions: [{ conditionId: "same", commandTemplate: "node check.cjs --seed {{seed}}" }],
+					seeds: ["1"],
+					primaryMetric: "score",
+					metricDirection: "maximize",
+				},
 			}),
 		).toThrow(/already exists/);
 		runtime.dispose();
+	});
+
+	test("rejects prospective trials whose source execution predates preregistration", () => {
+		const store = new AvoStore(undefined, "prospective-experiment", clock());
+		store.initialize("Compare one candidate across a fixed seed");
+		const candidate = store.recordCandidate({
+			candidateId: "candidate-before-plan",
+			kind: "answer",
+			summary: "Candidate recorded before the plan",
+			payload: "candidate",
+		});
+		const command = "node benchmark.cjs --seed '1'";
+		const source = store.recordEvaluation(
+			{
+				evaluationId: "source-before-plan",
+				candidateId: candidate.candidateId,
+				evaluatorId: "runtime",
+				status: "pass",
+				authority: "environment",
+				evidenceRefs: ["host:command:before-plan"],
+				metrics: {
+					meaningful: true,
+					command_digest: createHash("sha256").update(command).digest("hex"),
+					candidate_payload_digest: candidate.payloadDigest,
+				},
+			},
+			"host",
+		);
+		const experiment = store.recordExperiment({
+			experimentId: "prospective-plan",
+			title: "Prospective plan",
+			hypothesis: "The candidate performs well.",
+			design: "One preregistered seed.",
+			plan: {
+				mode: "prospective",
+				candidateIds: [candidate.candidateId],
+				conditions: [{ conditionId: "suite", commandTemplate: "node benchmark.cjs --seed {{seed}}" }],
+				seeds: ["1"],
+				primaryMetric: "score",
+				metricDirection: "maximize",
+			},
+		});
+		const contract = store.prepareTrialExecution(experiment.experimentId, candidate.candidateId, "suite", "1");
+		const binding = store.recordEvaluation(
+			{
+				evaluationId: "binding-before-plan-source",
+				candidateId: candidate.candidateId,
+				evaluatorId: "experiment_trial",
+				status: "pass",
+				authority: "host",
+				evidenceRefs: ["host:experiment-cell:before-plan"],
+				metrics: {
+					meaningful: true,
+					score: 5,
+					experiment_id: experiment.experimentId,
+					condition_id: contract.conditionId,
+					seed: contract.seed,
+					command_digest: contract.commandDigest,
+					cell_digest: contract.cellDigest,
+					source_evaluation_id: source.evaluationId,
+					source_evaluation_created_at: source.createdAt,
+					candidate_payload_digest: candidate.payloadDigest,
+				},
+			},
+			"host",
+		);
+		expect(() =>
+			store.recordTrial({
+				experimentId: experiment.experimentId,
+				candidateId: candidate.candidateId,
+				evaluationId: binding.evaluationId,
+				conditionId: "suite",
+				seed: "1",
+			}),
+		).toThrow(/must execute after preregistration/);
 	});
 
 	test("gives the retained supervisor only verified trajectory memory", async () => {
@@ -1283,7 +1549,7 @@ describe("generic AVO core", () => {
 		const migratedStore = new AvoStore(dir, "legacy-session", clock());
 		const migrated = migratedStore.getState();
 		expect(migrated).toMatchObject({
-			schemaVersion: 7,
+			schemaVersion: 8,
 			sessionId: "legacy-session",
 			runId: "legacy-session:task-1",
 			objective: "Legacy objective",
@@ -1320,7 +1586,47 @@ describe("generic AVO core", () => {
 		delete previous.trials;
 		writeFileSync(statePath, JSON.stringify(previous), "utf8");
 		const migrated = new AvoStore(dir, "v6-session", clock()).getState();
-		expect(migrated).toMatchObject({ schemaVersion: 7, experiments: [], trials: [] });
+		expect(migrated).toMatchObject({ schemaVersion: 8, experiments: [], trials: [] });
+	});
+
+	test("preserves v7 memory while contesting legacy unstructured experiment episodes", () => {
+		const dir = artifactDir();
+		const statePath = join(dir, "avo", "state.json");
+		const store = new AvoStore(dir, "v7-session", clock());
+		store.initialize("Continue the deployed v7 task");
+		store.rememberVerified({
+			memoryId: "info:v7-preserved",
+			namespace: "general",
+			type: "info",
+			scope: "project",
+			title: "Verified v7 fact",
+			content: "This verified fact must survive the schema migration.",
+			importance: 7,
+		});
+		store.rememberVerified({
+			memoryId: "episode:experiment:legacy-v7",
+			namespace: "general",
+			type: "episode",
+			scope: "project",
+			title: "Legacy mixed experiment",
+			content: "Hypothesis: unsupported declaration\nTrial: host observation",
+			importance: 8,
+		});
+		const previous = structuredClone(store.getState()) as unknown as Record<string, unknown>;
+		previous.schemaVersion = 7;
+		writeFileSync(statePath, JSON.stringify(previous), "utf8");
+		const migrated = new AvoStore(dir, "v7-session", clock()).getState();
+		expect(migrated.schemaVersion).toBe(8);
+		expect(migrated.memories).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ memoryId: "info:v7-preserved", verificationState: "verified" }),
+				expect.objectContaining({
+					memoryId: "episode:experiment:legacy-v7",
+					verificationState: "contested",
+					tags: expect.arrayContaining(["legacy-unstructured-experiment"]),
+				}),
+			]),
+		);
 	});
 
 	test("migrates v2 task state and verification baselines without losing lineage", () => {
@@ -1333,7 +1639,7 @@ describe("generic AVO core", () => {
 		writeFileSync(statePath, JSON.stringify({ ...previous, schemaVersion: 2 }), "utf8");
 		const migrated = new AvoStore(dir, "v2-session", clock()).getState();
 		expect(migrated).toMatchObject({
-			schemaVersion: 7,
+			schemaVersion: 8,
 			sessionId: "v2-session",
 			verificationClass: "external_factual",
 			verificationPolicy: "required",
@@ -1358,7 +1664,7 @@ describe("generic AVO core", () => {
 		};
 		writeFileSync(statePath, JSON.stringify(previous), "utf8");
 		const migrated = new AvoStore(dir, "v3-session", clock()).getState();
-		expect(migrated.schemaVersion).toBe(7);
+		expect(migrated.schemaVersion).toBe(8);
 		expect(migrated.verificationBaseline?.executions).toEqual([]);
 	});
 
@@ -1384,7 +1690,7 @@ describe("generic AVO core", () => {
 		previous.schemaVersion = 4;
 		writeFileSync(statePath, JSON.stringify(previous), "utf8");
 		const migrated = new AvoStore(dir, "v4-session", clock()).getState();
-		expect(migrated.schemaVersion).toBe(7);
+		expect(migrated.schemaVersion).toBe(8);
 		expect(migrated.evaluations).toContainEqual(
 			expect.objectContaining({ issuedBy: "legacy_unverified", evaluatorId: "external_claim" }),
 		);

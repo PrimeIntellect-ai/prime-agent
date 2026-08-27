@@ -88,13 +88,30 @@ Never pass or request an environment override.
    no preface/suffix. A skipped gate or different final answer is automatically
    continued instead of being treated as task completion.
 
-For repeatable comparisons in any adapter, use `record_experiment()` to define
-the hypothesis and design. `run_trial(experiment_id, candidate_id, command)`
-runs a host evaluation and binds its immutable receipt to a generic AVO trial;
-`record_trial()` can bind another existing host-issued, non-opinion receipt.
-After at least one conclusive trial, `complete_experiment()` closes the
-experiment and writes a verified project episode containing only the declared
-design and host-observed trial metrics/evidence.
+For repeatable comparisons in any adapter, call `record_experiment()` before
+executing trials with a structured `plan`: preregister candidate IDs,
+conditions and their command templates/parameters, seeds, pairing, a baseline
+candidate for multi-candidate comparisons, and the primary metric/direction.
+Seeds may be marker-safe strings or safe integers and are stored canonically as strings.
+The cross-product may contain at most 1,024 cells.
+The prospective mode is the default. Templates must bind `--seed {{seed}}` and
+any declared `--name {{param:name}}`; multi-candidate non-coding plans also
+bind `--candidate {{candidate_id}}`. A successful trial command emits exactly one line such as
+`AVO_TRIAL_METRICS_JSON:{"score":12.5}`.
+
+Call `run_trial(experiment_id, candidate_id, condition_id, seed)`. The host
+selects the preregistered cell, renders the direct command, binds its digest and
+candidate payload to the receipt, and records only the declared finite numeric
+metric. `record_trial()` may bind an already existing matching host receipt.
+`complete_experiment()` requires every candidate × condition × seed cell once,
+then derives overall and per-condition candidate means, medians, sample
+variances, standard deviations, ranges, normal 95% confidence intervals,
+paired deltas, win/loss/tie counts, and win rates. In paired
+multi-candidate plans, the host issues a conservative `promote` or `retain`
+decision; promotion requires at least two pairs and a favorable 95% confidence
+bound. The verified NOOA episode stores declared hypothesis/design separately
+from observed trials and derived statistics, so declarations are never treated
+as empirical findings.
 
 Long runs bind a retained generic supervisor. Iterative runs bind one only when
 the host detects stagnation. Direct tasks never pay that cost.

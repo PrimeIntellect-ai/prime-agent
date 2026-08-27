@@ -31,6 +31,14 @@ export {
 	isAuthoritativeAvoEvaluation,
 } from "./evaluator.js";
 export {
+	type AvoExperimentCellContract,
+	deriveAvoExperimentCellContract,
+	deriveAvoExperimentOutcome,
+	digestAvoExperimentValue,
+	normalizeAvoExperimentPlan,
+	parseAvoTrialMetricsOutput,
+} from "./experiment.js";
+export {
 	type AvoCandidateIntegrityAssessment,
 	assessAvoCandidateIntegrity,
 	reconcileAvoIntegrityForProjection,
@@ -72,6 +80,7 @@ export {
 	parseAvoExperimentInput,
 	parseAvoMemoryInput,
 	parseAvoTrialInput,
+	parseAvoTrialRunInput,
 } from "./store.js";
 export {
 	buildAvoSupervisorBootstrapPrompt,

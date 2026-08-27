@@ -11,10 +11,18 @@ import {
 	evaluateGenericAvoStopGate,
 } from "./evaluator.js";
 import {
+	type AvoExperimentCellContract,
+	deriveAvoExperimentCellContract,
+	deriveAvoExperimentOutcome,
+	normalizeAvoExperimentPlan,
+} from "./experiment.js";
+import {
 	AVO_AUTHORITIES,
 	AVO_ENVIRONMENTS,
 	AVO_EVALUATION_ISSUERS,
 	AVO_EVALUATION_STATUSES,
+	AVO_EXPERIMENT_MODES,
+	AVO_EXPERIMENT_PAIRINGS,
 	AVO_EXPERIMENT_STATUSES,
 	AVO_HORIZONS,
 	AVO_MEMORY_NAMESPACES,
@@ -23,6 +31,7 @@ import {
 	AVO_MEMORY_SCOPES,
 	AVO_MEMORY_TYPES,
 	AVO_MEMORY_VERIFICATION_STATES,
+	AVO_METRIC_DIRECTIONS,
 	AVO_STATE_VERSION,
 	AVO_VERIFICATION_CLASSES,
 	AVO_VERIFICATION_POLICIES,
@@ -40,6 +49,7 @@ import {
 	type AvoEvaluationReceipt,
 	type AvoExperiment,
 	type AvoExperimentInput,
+	type AvoExperimentPlanInput,
 	type AvoHorizon,
 	type AvoHorizonSelection,
 	type AvoMemory,
@@ -57,6 +67,7 @@ import {
 	type AvoSupervisorReview,
 	type AvoTrial,
 	type AvoTrialInput,
+	type AvoTrialRunInput,
 	type AvoVerificationBaseline,
 	type AvoVerificationClass,
 	type AvoVerificationPolicy,
@@ -107,6 +118,14 @@ function requireIdentifier(value: unknown, label: string): string {
 		throw new Error(`${label} must be a marker-safe identifier`);
 	}
 	return identifier;
+}
+
+function requireExperimentSeed(value: unknown, label: string): string {
+	if (typeof value === "number") {
+		if (!Number.isSafeInteger(value)) throw new Error(`${label} numeric value must be a safe integer`);
+		return String(value);
+	}
+	return requireIdentifier(value, label);
 }
 
 function optionalString(value: unknown, label: string): string | undefined {
@@ -430,6 +449,21 @@ function isAvoState(value: unknown): value is AvoRunState {
 	);
 }
 
+function isAvoV7State(value: unknown): value is JsonRecord {
+	if (!isRecord(value) || value.schemaVersion !== 7 || !isRecord(value.routing)) return false;
+	return (
+		typeof value.sessionId === "string" &&
+		typeof value.runId === "string" &&
+		Array.isArray(value.taskRuns) &&
+		Array.isArray(value.experiments) &&
+		Array.isArray(value.trials) &&
+		Array.isArray(value.memories) &&
+		Array.isArray(value.memoryRecalls) &&
+		Array.isArray(value.memoryReflections) &&
+		AVO_ENVIRONMENTS.includes(value.routing.environment as AvoEnvironment)
+	);
+}
+
 function isAvoV6State(value: unknown): value is JsonRecord {
 	if (!isRecord(value) || value.schemaVersion !== 6 || !isRecord(value.routing)) return false;
 	return (
@@ -522,6 +556,13 @@ function migrateMemoryState(value: JsonRecord): AvoRunState {
 			})
 		: [];
 	return state;
+}
+
+function migrateAvoV7State(value: JsonRecord): AvoRunState {
+	return {
+		...(value as unknown as AvoRunState),
+		schemaVersion: AVO_STATE_VERSION,
+	};
 }
 
 function isAvoV2State(value: unknown): value is JsonRecord {
@@ -970,12 +1011,44 @@ export function parseAvoEvaluationInput(value: unknown): AvoEvaluationInput {
 
 export function parseAvoExperimentInput(value: unknown): AvoExperimentInput {
 	if (!isRecord(value)) throw new Error("experiment must be an object");
+	if (!isRecord(value.plan)) throw new Error("experiment.plan must be an object");
+	const plan = value.plan;
+	if (!Array.isArray(plan.candidate_ids)) throw new Error("experiment.plan.candidate_ids must be an array");
+	if (!Array.isArray(plan.seeds)) throw new Error("experiment.plan.seeds must be an array");
+	if (!Array.isArray(plan.conditions)) throw new Error("experiment.plan.conditions must be an array");
+	const parsedPlan: AvoExperimentPlanInput = {
+		mode: plan.mode === undefined ? undefined : enumValue(plan.mode, AVO_EXPERIMENT_MODES, "experiment.plan.mode"),
+		candidateIds: plan.candidate_ids.map((item, index) =>
+			requireIdentifier(item, `experiment.plan.candidate_ids[${index}]`),
+		),
+		conditions: plan.conditions.map((condition, index) => {
+			if (!isRecord(condition)) throw new Error(`experiment.plan.conditions[${index}] must be an object`);
+			return {
+				conditionId: requireIdentifier(condition.condition_id, `experiment.plan.conditions[${index}].condition_id`),
+				label: optionalString(condition.label, `experiment.plan.conditions[${index}].label`),
+				parameters: scalarMetrics(condition.parameters ?? {}, `experiment.plan.conditions[${index}].parameters`),
+				commandTemplate: requireString(
+					condition.command_template,
+					`experiment.plan.conditions[${index}].command_template`,
+				),
+			};
+		}),
+		seeds: plan.seeds.map((item, index) => requireExperimentSeed(item, `experiment.plan.seeds[${index}]`)),
+		pairing:
+			plan.pairing === undefined
+				? undefined
+				: enumValue(plan.pairing, AVO_EXPERIMENT_PAIRINGS, "experiment.plan.pairing"),
+		primaryMetric: requireIdentifier(plan.primary_metric, "experiment.plan.primary_metric"),
+		metricDirection: enumValue(plan.metric_direction, AVO_METRIC_DIRECTIONS, "experiment.plan.metric_direction"),
+		baselineCandidateId: optionalString(plan.baseline_candidate_id, "experiment.plan.baseline_candidate_id"),
+	};
 	return {
 		experimentId:
 			value.experiment_id === undefined ? undefined : requireIdentifier(value.experiment_id, "experiment_id"),
 		title: requireString(value.title, "experiment.title"),
 		hypothesis: requireString(value.hypothesis, "experiment.hypothesis"),
 		design: requireString(value.design, "experiment.design"),
+		plan: parsedPlan,
 		tags: value.tags === undefined ? [] : stringArray(value.tags, "experiment.tags"),
 	};
 }
@@ -987,8 +1060,18 @@ export function parseAvoTrialInput(value: unknown): AvoTrialInput {
 		experimentId: requireIdentifier(value.experiment_id, "trial.experiment_id"),
 		candidateId: requireIdentifier(value.candidate_id, "trial.candidate_id"),
 		evaluationId: requireIdentifier(value.evaluation_id, "trial.evaluation_id"),
-		label: optionalString(value.label, "trial.label"),
-		seed: optionalString(value.seed, "trial.seed"),
+		conditionId: requireIdentifier(value.condition_id, "trial.condition_id"),
+		seed: requireExperimentSeed(value.seed, "trial.seed"),
+	};
+}
+
+export function parseAvoTrialRunInput(value: unknown): AvoTrialRunInput {
+	if (!isRecord(value)) throw new Error("trial run must be an object");
+	return {
+		experimentId: requireIdentifier(value.experiment_id, "trial.experiment_id"),
+		candidateId: requireIdentifier(value.candidate_id, "trial.candidate_id"),
+		conditionId: requireIdentifier(value.condition_id, "trial.condition_id"),
+		seed: requireExperimentSeed(value.seed, "trial.seed"),
 	};
 }
 
@@ -1068,9 +1151,37 @@ export class AvoStore {
 		this.globalMemoryDatabasePath = memoryRoot ? join(memoryRoot, "global", "nooa-memory.sqlite") : undefined;
 		this.state = this.load(sessionId);
 		this.mergePersistentMemories(true);
+		this.hardenLegacyExperimentMemories();
 		if (!this.loadError) {
 			this.savePersistentMemories();
 			if (this.statePath) this.save();
+		}
+	}
+
+	private hardenLegacyExperimentMemories(): void {
+		for (const memory of this.state.memories) {
+			if (
+				memory.type !== "episode" ||
+				!memory.memoryId.startsWith("episode:experiment:") ||
+				memory.verificationState !== "verified"
+			) {
+				continue;
+			}
+			let structured = false;
+			try {
+				const content = JSON.parse(memory.content) as unknown;
+				structured =
+					isRecord(content) &&
+					(content.record_type === "avo_experiment_episode_v2" ||
+						content.record_type === "avo_research_experiment_episode_v2");
+			} catch {
+				// Legacy prose mixed declarations with observations and must not remain verified evidence.
+			}
+			if (structured) continue;
+			memory.verificationState = "contested";
+			memory.contestedAt = this.now();
+			memory.updatedAt = memory.contestedAt;
+			memory.tags = [...new Set([...memory.tags, "legacy-unstructured-experiment"])];
 		}
 	}
 
@@ -1199,6 +1310,7 @@ export class AvoStore {
 		try {
 			const parsed = JSON.parse(readFileSync(this.statePath, "utf8")) as unknown;
 			if (isAvoState(parsed)) return parsed;
+			if (isAvoV7State(parsed)) return migrateAvoV7State(parsed);
 			if (isAvoV6State(parsed)) return migrateMemoryState(parsed);
 			if (isAvoV5State(parsed)) return migrateMemoryState(parsed);
 			if (isAvoV4State(parsed)) return migrateMemoryState(migrateAvoV4State(parsed) as unknown as JsonRecord);
@@ -1710,11 +1822,13 @@ export class AvoStore {
 			throw new Error(`experiment ${experimentId} already exists`);
 		}
 		const createdAt = this.now();
+		const plan = normalizeAvoExperimentPlan(input.plan, this.state.routing.environment);
 		const experiment: AvoExperiment = {
 			experimentId,
 			title: requireString(input.title, "experiment.title"),
 			hypothesis: requireString(input.hypothesis, "experiment.hypothesis"),
 			design: requireString(input.design, "experiment.design"),
+			plan,
 			status: "planned",
 			trialIds: [],
 			tags: [...new Set(input.tags ?? [])],
@@ -1733,23 +1847,120 @@ export class AvoStore {
 		return structuredClone(experiment);
 	}
 
+	prepareTrialExecution(
+		experimentId: string,
+		candidateId: string,
+		conditionId: string,
+		seed: string,
+	): AvoExperimentCellContract {
+		const normalizedExperimentId = requireIdentifier(experimentId, "experiment_id");
+		const experiment = this.state.experiments.find((item) => item.experimentId === normalizedExperimentId);
+		if (!experiment) throw new Error(`trial references unknown experiment ${normalizedExperimentId}`);
+		if (experiment.status === "completed")
+			throw new Error(`experiment ${normalizedExperimentId} is already completed`);
+		const contract = deriveAvoExperimentCellContract(
+			experiment,
+			requireIdentifier(candidateId, "candidate_id"),
+			requireIdentifier(conditionId, "condition_id"),
+			requireIdentifier(seed, "seed"),
+		);
+		if (this.state.trials.some((trial) => trial.cellDigest === contract.cellDigest)) {
+			throw new Error(
+				`experiment cell ${contract.candidateId}/${contract.conditionId}/${contract.seed} is already recorded`,
+			);
+		}
+		return contract;
+	}
+
+	assertTrialSourceOrder(experimentId: string, sourceEvaluationId: string): void {
+		const experiment = this.state.experiments.find((item) => item.experimentId === experimentId);
+		if (!experiment) throw new Error(`trial references unknown experiment ${experimentId}`);
+		if (experiment.plan?.mode !== "prospective") return;
+		const experimentIndex = this.state.lineage.findIndex(
+			(entry) => entry.kind === "experiment_recorded" && entry.referenceId === experimentId,
+		);
+		const sourceIndex = this.state.lineage.findIndex(
+			(entry) => entry.kind === "evaluation_recorded" && entry.referenceId === sourceEvaluationId,
+		);
+		if (experimentIndex < 0 || sourceIndex <= experimentIndex) {
+			throw new Error("prospective experiment trials must execute after preregistration");
+		}
+	}
+
 	recordTrial(input: AvoTrialInput): AvoTrial {
 		const experiment = this.state.experiments.find((item) => item.experimentId === input.experimentId);
 		if (!experiment) throw new Error(`trial references unknown experiment ${input.experimentId}`);
 		if (experiment.status === "completed") throw new Error(`experiment ${input.experimentId} is already completed`);
 		const candidate = this.state.candidates.find((item) => item.candidateId === input.candidateId);
 		if (!candidate) throw new Error(`trial references unknown candidate ${input.candidateId}`);
+		const contract = this.prepareTrialExecution(
+			experiment.experimentId,
+			candidate.candidateId,
+			input.conditionId,
+			input.seed,
+		);
 		const evaluation = this.state.evaluations.find((item) => item.evaluationId === input.evaluationId);
 		if (!evaluation || evaluation.candidateId !== candidate.candidateId) {
 			throw new Error(`trial evaluation ${input.evaluationId} is not bound to candidate ${input.candidateId}`);
 		}
-		if (evaluation.issuedBy !== "host" || evaluation.authority === "model_opinion") {
-			throw new Error("experiment trials require a host-issued, non-opinion evaluation");
+		if (
+			evaluation.issuedBy !== "host" ||
+			evaluation.authority === "model_opinion" ||
+			evaluation.evaluatorId !== "experiment_trial"
+		) {
+			throw new Error("experiment trials require a host-issued experiment_trial evaluation");
 		}
-		if (evaluation.status === "inconclusive") {
-			throw new Error("an inconclusive evaluation cannot establish an experiment trial");
+		if (evaluation.status !== "pass" || evaluation.metrics.meaningful !== true) {
+			throw new Error("an experiment trial requires a meaningful passing host evaluation");
 		}
-		if (this.state.trials.some((trial) => trial.evaluationId === evaluation.evaluationId)) {
+		const sourceEvaluationId = evaluation.metrics.source_evaluation_id;
+		const sourceEvaluationCreatedAt = evaluation.metrics.source_evaluation_created_at;
+		if (typeof sourceEvaluationId !== "string" || typeof sourceEvaluationCreatedAt !== "string") {
+			throw new Error("experiment trial evaluation lacks source receipt provenance");
+		}
+		const sourceEvaluation = this.state.evaluations.find((item) => item.evaluationId === sourceEvaluationId);
+		if (
+			!sourceEvaluation ||
+			sourceEvaluation.candidateId !== candidate.candidateId ||
+			sourceEvaluation.issuedBy !== "host" ||
+			sourceEvaluation.authority === "model_opinion" ||
+			["experiment_trial", "experiment_aggregate"].includes(sourceEvaluation.evaluatorId) ||
+			sourceEvaluation.status !== "pass" ||
+			sourceEvaluation.metrics.meaningful !== true ||
+			sourceEvaluation.createdAt !== sourceEvaluationCreatedAt ||
+			sourceEvaluation.metrics.command_digest !== contract.commandDigest ||
+			sourceEvaluation.metrics.candidate_payload_digest !== candidate.payloadDigest
+		) {
+			throw new Error("experiment trial source receipt provenance is invalid");
+		}
+		this.assertTrialSourceOrder(experiment.experimentId, sourceEvaluationId);
+		const primaryMetric = experiment.plan?.primaryMetric;
+		if (
+			!primaryMetric ||
+			typeof evaluation.metrics[primaryMetric] !== "number" ||
+			!Number.isFinite(evaluation.metrics[primaryMetric])
+		) {
+			throw new Error(`experiment trial evaluation lacks numeric primary metric ${primaryMetric ?? "unknown"}`);
+		}
+		const candidatePayloadDigest = evaluation.metrics.candidate_payload_digest;
+		if (
+			evaluation.metrics.experiment_id !== experiment.experimentId ||
+			evaluation.metrics.condition_id !== contract.conditionId ||
+			evaluation.metrics.seed !== contract.seed ||
+			evaluation.metrics.command_digest !== contract.commandDigest ||
+			evaluation.metrics.cell_digest !== contract.cellDigest ||
+			candidatePayloadDigest !== candidate.payloadDigest
+		) {
+			throw new Error("experiment trial evaluation does not match its preregistered cell");
+		}
+		if (
+			this.state.trials.some(
+				(trial) =>
+					trial.evaluationId === evaluation.evaluationId ||
+					trial.evaluationId === sourceEvaluationId ||
+					trial.sourceEvaluationId === sourceEvaluationId,
+			)
+		) {
 			throw new Error(`evaluation ${evaluation.evaluationId} is already bound to an experiment trial`);
 		}
 		const trialId = requireIdentifier(input.trialId ?? `trial-${randomUUID()}`, "trial_id");
@@ -1767,8 +1978,13 @@ export class AvoStore {
 			experimentId: experiment.experimentId,
 			candidateId: candidate.candidateId,
 			evaluationId: evaluation.evaluationId,
-			label: input.label?.trim() || `Trial ${experiment.trialIds.length + 1}`,
-			seed: input.seed,
+			sourceEvaluationId,
+			label: contract.label,
+			seed: contract.seed,
+			conditionId: contract.conditionId,
+			parameters: contract.parameters,
+			commandDigest: contract.commandDigest,
+			cellDigest: contract.cellDigest,
 			status: evaluation.status,
 			metrics: structuredClone(evaluation.metrics),
 			evidenceRefs: [...evaluation.evidenceRefs],
@@ -1789,7 +2005,12 @@ export class AvoStore {
 		return structuredClone(trial);
 	}
 
-	completeExperiment(experimentId: string): { experiment: AvoExperiment; memory: AvoMemory } {
+	completeExperiment(experimentId: string): {
+		experiment: AvoExperiment;
+		memory: AvoMemory;
+		evaluation: AvoEvaluationReceipt;
+		outcome: NonNullable<AvoExperiment["outcome"]>;
+	} {
 		const normalizedId = requireIdentifier(experimentId, "experiment_id");
 		const experiment = this.state.experiments.find((item) => item.experimentId === normalizedId);
 		if (!experiment) throw new Error(`experiment ${normalizedId} does not exist`);
@@ -1799,12 +2020,91 @@ export class AvoStore {
 			if (!trial) throw new Error(`experiment ${normalizedId} has a missing trial ${trialId}`);
 			return trial;
 		});
-		if (trials.length === 0)
-			throw new Error("an experiment requires at least one host-verified trial before completion");
+		const plan = experiment.plan;
+		if (!plan) throw new Error(`experiment ${normalizedId} predates structured trial planning`);
+		const expectedCells = new Map<string, AvoExperimentCellContract>();
+		for (const candidateId of plan.candidateIds) {
+			for (const condition of plan.conditions) {
+				for (const seed of plan.seeds) {
+					const contract = deriveAvoExperimentCellContract(experiment, candidateId, condition.conditionId, seed);
+					expectedCells.set(contract.cellDigest, contract);
+				}
+			}
+		}
+		const observedCells = new Set<string>();
+		for (const trial of trials) {
+			if (!trial.cellDigest || !expectedCells.has(trial.cellDigest)) {
+				throw new Error(`experiment ${normalizedId} contains an unplanned trial ${trial.trialId}`);
+			}
+			if (observedCells.has(trial.cellDigest))
+				throw new Error(`experiment ${normalizedId} contains a duplicate cell`);
+			observedCells.add(trial.cellDigest);
+		}
+		const missing = [...expectedCells.values()].filter((cell) => !observedCells.has(cell.cellDigest));
+		if (missing.length > 0 || trials.length !== plan.expectedTrials) {
+			const preview = missing
+				.slice(0, 8)
+				.map((cell) => `${cell.candidateId}/${cell.conditionId}/${cell.seed}`)
+				.join(", ");
+			throw new Error(
+				`experiment coverage incomplete: expected=${plan.expectedTrials}, observed=${trials.length}, missing=${missing.length}${preview ? ` (${preview})` : ""}`,
+			);
+		}
+		const outcome = deriveAvoExperimentOutcome(experiment, trials);
 		const completedAt = this.now();
+		const aggregateCandidateId = outcome.championCandidateId ?? plan.baselineCandidateId ?? plan.candidateIds[0]!;
+		const evaluation = this.recordEvaluation(
+			{
+				evaluationId: `experiment-aggregate-${randomUUID()}`,
+				candidateId: aggregateCandidateId,
+				evaluatorId: "experiment_aggregate",
+				status: "pass",
+				authority: "host",
+				evidenceRefs: [
+					`host:experiment:${experiment.experimentId}:aggregate:${outcome.aggregateDigest}`,
+					...trials.flatMap((trial) => trial.evidenceRefs).slice(0, 63),
+				],
+				metrics: {
+					meaningful: true,
+					experiment_id: experiment.experimentId,
+					aggregate_digest: outcome.aggregateDigest,
+					trial_manifest_digest: outcome.trialManifestDigest,
+					expected_trials: plan.expectedTrials,
+					observed_trials: trials.length,
+					condition_count: plan.conditions.length,
+					paired_comparison_count: outcome.pairedComparisons.length,
+					primary_metric: plan.primaryMetric,
+					decision: outcome.decision,
+					...(outcome.championCandidateId ? { champion_candidate_id: outcome.championCandidateId } : {}),
+				},
+			},
+			"host",
+		);
 		experiment.status = "completed";
 		experiment.updatedAt = completedAt;
 		experiment.completedAt = completedAt;
+		experiment.aggregateEvaluationId = evaluation.evaluationId;
+		experiment.outcome = outcome;
+		const episode = {
+			record_type: "avo_experiment_episode_v2",
+			verification_semantics:
+				"declared_hypothesis and planned_design record preregistration, not empirical truth; only observed_trials and derived_statistics are host-verified evidence",
+			declared_hypothesis: experiment.hypothesis,
+			planned_design: experiment.design,
+			plan,
+			observed_trials: trials.map((trial) => ({
+				trial_id: trial.trialId,
+				candidate_id: trial.candidateId,
+				condition_id: trial.conditionId,
+				seed: trial.seed,
+				parameters: trial.parameters,
+				status: trial.status,
+				primary_metric: trial.metrics[plan.primaryMetric],
+				command_digest: trial.commandDigest,
+				evidence_refs: trial.evidenceRefs,
+			})),
+			derived_statistics: outcome,
+		};
 		const memory = this.recordMemory(
 			{
 				memoryId: `episode:experiment:${experiment.experimentId}`,
@@ -1812,19 +2112,17 @@ export class AvoStore {
 				type: "episode",
 				scope: "project",
 				title: `Experiment: ${experiment.title}`,
-				content: [
-					`Hypothesis: ${experiment.hypothesis}`,
-					`Design: ${experiment.design}`,
-					...trials.map(
-						(trial) =>
-							`${trial.label}: ${trial.status}; metrics=${JSON.stringify(trial.metrics)}; evidence=${trial.evidenceRefs.join(", ")}`,
-					),
-				].join("\n"),
-				tags: [...experiment.tags, "experiment", "host-verified-trials"],
+				content: JSON.stringify(episode, null, 2),
+				tags: [...experiment.tags, "experiment", "host-verified-trials", `decision:${outcome.decision}`],
 				importance: 8,
-				sourceIds: [experiment.experimentId, ...trials.flatMap((trial) => [trial.trialId, trial.evaluationId])],
+				sourceIds: [
+					experiment.experimentId,
+					evaluation.evaluationId,
+					...trials.flatMap((trial) => [trial.trialId, trial.evaluationId]),
+				],
 				references: [
 					{ kind: "experiment", key: experiment.experimentId },
+					{ kind: "evaluation", key: evaluation.evaluationId },
 					...trials.flatMap((trial) => [
 						{ kind: "trial" as const, key: trial.trialId },
 						{ kind: "evaluation" as const, key: trial.evaluationId },
@@ -1833,15 +2131,24 @@ export class AvoStore {
 			},
 			"verified",
 		);
+		if (outcome.decision === "promote" && outcome.championCandidateId) {
+			this.state.lineage.push({
+				lineageId: `lineage-${randomUUID()}`,
+				kind: "champion_promoted",
+				summary: `${outcome.championCandidateId} promoted by host aggregate ${outcome.aggregateDigest}`,
+				referenceId: outcome.championCandidateId,
+				recordedAt: completedAt,
+			});
+		}
 		this.state.lineage.push({
 			lineageId: `lineage-${randomUUID()}`,
 			kind: "experiment_completed",
-			summary: `${experiment.title}: ${trials.length} host-verified trial${trials.length === 1 ? "" : "s"}`,
+			summary: `${experiment.title}: ${trials.length}/${plan.expectedTrials} trials, decision=${outcome.decision}${outcome.championCandidateId ? `, champion=${outcome.championCandidateId}` : ""}`,
 			referenceId: experiment.experimentId,
 			recordedAt: completedAt,
 		});
 		this.save();
-		return { experiment: structuredClone(experiment), memory };
+		return { experiment: structuredClone(experiment), memory, evaluation, outcome: structuredClone(outcome) };
 	}
 
 	completeCycle(

@@ -137,6 +137,7 @@ import {
 import {
 	AVO_HORIZONS,
 	AVO_SKILL_NAME,
+	type AvoEvaluationReceipt,
 	type AvoHorizonSelection,
 	type AvoIndependentClaimVerdict,
 	AvoSessionRuntime,
@@ -176,6 +177,8 @@ import {
 	parseAvoMemoryVerifierMessage,
 	parseAvoSupervisorMessage,
 	parseAvoTrialInput,
+	parseAvoTrialMetricsOutput,
+	parseAvoTrialRunInput,
 } from "./avo/index.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 import {
@@ -4015,6 +4018,75 @@ export class AgentSession {
 		return { ingested, supervision: runtime.getState().supervision, errors };
 	}
 
+	private _bindAvoExperimentTrial(
+		runtime: AvoSessionRuntime,
+		input: ReturnType<typeof parseAvoTrialInput>,
+		sourceEvaluation: AvoEvaluationReceipt,
+		output = "",
+	): Record<string, unknown> {
+		const contract = runtime.store.prepareTrialExecution(
+			input.experimentId,
+			input.candidateId,
+			input.conditionId,
+			input.seed,
+		);
+		const state = runtime.getState();
+		const experiment = state.experiments.find((item) => item.experimentId === input.experimentId);
+		const candidate = state.candidates.find((item) => item.candidateId === input.candidateId);
+		if (!experiment?.plan || !candidate) throw new Error("experiment trial references missing host state");
+		if (
+			sourceEvaluation.candidateId !== candidate.candidateId ||
+			sourceEvaluation.issuedBy !== "host" ||
+			sourceEvaluation.authority === "model_opinion" ||
+			["experiment_trial", "experiment_aggregate"].includes(sourceEvaluation.evaluatorId) ||
+			sourceEvaluation.status !== "pass" ||
+			sourceEvaluation.metrics.meaningful !== true
+		) {
+			throw new Error("experiment trial source must be a meaningful passing host evaluation for the candidate");
+		}
+		if (sourceEvaluation.metrics.command_digest !== contract.commandDigest) {
+			throw new Error("experiment trial source command does not match the host-rendered preregistered cell");
+		}
+		if (sourceEvaluation.metrics.candidate_payload_digest !== candidate.payloadDigest) {
+			throw new Error("experiment trial source is not bound to the current candidate payload");
+		}
+		runtime.store.assertTrialSourceOrder(experiment.experimentId, sourceEvaluation.evaluationId);
+		const outputMetrics = parseAvoTrialMetricsOutput(output, experiment.plan.primaryMetric);
+		const primaryValue =
+			outputMetrics[experiment.plan.primaryMetric] ?? sourceEvaluation.metrics[experiment.plan.primaryMetric];
+		if (typeof primaryValue !== "number" || !Number.isFinite(primaryValue)) {
+			throw new Error(
+				`trial command must emit AVO_TRIAL_METRICS_JSON:{"${experiment.plan.primaryMetric}":<finite number>}`,
+			);
+		}
+		const evaluation = runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "experiment_trial",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: [
+				...sourceEvaluation.evidenceRefs,
+				`host:experiment-cell:${contract.cellDigest}`,
+				`evaluation:${sourceEvaluation.evaluationId}`,
+			],
+			metrics: {
+				...sourceEvaluation.metrics,
+				meaningful: true,
+				[experiment.plan.primaryMetric]: primaryValue,
+				experiment_id: experiment.experimentId,
+				condition_id: contract.conditionId,
+				seed: contract.seed,
+				command_digest: contract.commandDigest,
+				cell_digest: contract.cellDigest,
+				source_evaluation_id: sourceEvaluation.evaluationId,
+				source_evaluation_created_at: sourceEvaluation.createdAt,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		const trial = runtime.recordTrial({ ...input, evaluationId: evaluation.evaluationId });
+		return { trial, evaluation, sourceEvaluation, contract };
+	}
+
 	async handleAvoHostRequest(type: string, payload: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
 		const runtime = this._requireAvoRuntime();
 		switch (type) {
@@ -4791,8 +4863,54 @@ export class AgentSession {
 			}
 			case "avo.experiment.record":
 				return { experiment: runtime.recordExperiment(parseAvoExperimentInput(payload.experiment)) };
-			case "avo.trial.record":
-				return { trial: runtime.recordTrial(parseAvoTrialInput(payload.trial)) };
+			case "avo.trial.record": {
+				const input = parseAvoTrialInput(payload.trial);
+				const sourceEvaluation = runtime
+					.getState()
+					.evaluations.find((evaluation) => evaluation.evaluationId === input.evaluationId);
+				if (!sourceEvaluation) throw new Error(`trial source evaluation ${input.evaluationId} does not exist`);
+				return this._bindAvoExperimentTrial(runtime, input, sourceEvaluation);
+			}
+			case "avo.trial.run": {
+				const input = parseAvoTrialRunInput(payload.trial);
+				const contract = runtime.store.prepareTrialExecution(
+					input.experimentId,
+					input.candidateId,
+					input.conditionId,
+					input.seed,
+				);
+				const run = await this.handleAvoHostRequest("avo.evaluation.run", {
+					candidate_id: input.candidateId,
+					command: contract.command,
+				});
+				const evaluationId =
+					typeof run.evaluation === "object" &&
+					run.evaluation !== null &&
+					"evaluationId" in run.evaluation &&
+					typeof run.evaluation.evaluationId === "string"
+						? run.evaluation.evaluationId
+						: undefined;
+				const output =
+					typeof run.execution === "object" &&
+					run.execution !== null &&
+					"output" in run.execution &&
+					typeof run.execution.output === "string"
+						? run.execution.output
+						: "";
+				const sourceEvaluation = runtime
+					.getState()
+					.evaluations.find((evaluation) => evaluation.evaluationId === evaluationId);
+				if (!sourceEvaluation) throw new Error("trial execution did not produce a host evaluation");
+				return {
+					...this._bindAvoExperimentTrial(
+						runtime,
+						{ ...input, evaluationId: sourceEvaluation.evaluationId },
+						sourceEvaluation,
+						output,
+					),
+					execution: run.execution,
+				};
+			}
 			case "avo.experiment.complete": {
 				if (typeof payload.experiment_id !== "string") {
 					throw new Error("avo.experiment.complete experiment_id must be a string");
@@ -11866,6 +11984,10 @@ export class AgentSession {
 				"avo.evaluation.url",
 				"avo.evaluation.tool_result",
 				"avo.cycle.complete",
+				"avo.experiment.record",
+				"avo.trial.run",
+				"avo.trial.record",
+				"avo.experiment.complete",
 				"avo.results.collect",
 				"avo.memory.remember",
 				"avo.memory.recall",

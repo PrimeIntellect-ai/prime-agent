@@ -109,6 +109,10 @@ function genericProjection(
 	stopGate: AvoStopGate,
 	phases: Array<{ id: string; title: string; short: string }>,
 ): AvoDashboardProjection {
+	const latestExperiment = state.experiments.at(-1);
+	const latestExperimentTrials = latestExperiment
+		? state.trials.filter((trial) => trial.experimentId === latestExperiment.experimentId)
+		: [];
 	const active = stopGate.passed
 		? phases.length - 1
 		: state.cycles.length > 0
@@ -141,7 +145,10 @@ function genericProjection(
 			{ label: "Accepted", value: progress.acceptedCandidates },
 			{ label: "Rejected", value: progress.rejectedCandidates },
 			{ label: "Revised", value: progress.revisedCandidates },
-			{ label: "Experiments", value: state.experiments.length },
+			{
+				label: "Experiments",
+				value: `${state.experiments.filter((experiment) => experiment.status === "completed").length}/${state.experiments.length}`,
+			},
 			{ label: "Trials", value: state.trials.length },
 			{ label: "Authoritative evals", value: progress.authoritativeEvaluations },
 			{
@@ -193,6 +200,43 @@ function genericProjection(
 							? `${state.experiments.at(-1)!.title} · ${state.experiments.at(-1)!.status}`
 							: "No experiment recorded",
 						status: state.experiments.at(-1)?.status === "completed" ? "ok" : "neutral",
+					},
+					{
+						label: "Latest plan coverage",
+						value: latestExperiment?.plan
+							? `${latestExperimentTrials.length}/${latestExperiment.plan.expectedTrials} cells · ${latestExperiment.plan.pairing}`
+							: "No structured plan recorded",
+						status:
+							latestExperiment?.plan && latestExperimentTrials.length === latestExperiment.plan.expectedTrials
+								? "ok"
+								: latestExperiment
+									? "watch"
+									: "neutral",
+					},
+					{
+						label: "Host experiment outcome",
+						value: latestExperiment?.outcome
+							? `${latestExperiment.outcome.decision}${latestExperiment.outcome.championCandidateId ? ` · champion ${latestExperiment.outcome.championCandidateId}` : ""} · ${latestExperiment.outcome.primaryMetric}`
+							: "No aggregate outcome yet",
+						status:
+							latestExperiment?.outcome?.decision === "promote" ||
+							latestExperiment?.outcome?.decision === "retain"
+								? "ok"
+								: latestExperiment?.status === "completed"
+									? "watch"
+									: "neutral",
+					},
+					{
+						label: "Condition effects",
+						value:
+							latestExperiment?.outcome?.conditionPairedComparisons
+								.slice(0, 6)
+								.map(
+									(item) =>
+										`${item.conditionId}:${item.candidateId} Δ=${item.delta.mean} CI=[${item.delta.ci95Low},${item.delta.ci95High}]`,
+								)
+								.join(" · ") || "No paired condition effects yet",
+						status: "neutral",
 					},
 					{
 						label: "Latest host-bound trial",

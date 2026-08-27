@@ -1,4 +1,4 @@
-export const AVO_STATE_VERSION = 7;
+export const AVO_STATE_VERSION = 8;
 export const AVO_SKILL_NAME = "avo";
 
 export const AVO_ENVIRONMENTS = ["general", "coding", "research"] as const;
@@ -34,6 +34,10 @@ export const AVO_MEMORY_REFERENCE_KINDS = [
 ] as const;
 export const AVO_MEMORY_RECALL_CHANNELS = ["deliberate", "spontaneous"] as const;
 export const AVO_EXPERIMENT_STATUSES = ["planned", "running", "completed"] as const;
+export const AVO_EXPERIMENT_MODES = ["prospective", "retrospective"] as const;
+export const AVO_EXPERIMENT_PAIRINGS = ["paired", "independent"] as const;
+export const AVO_METRIC_DIRECTIONS = ["maximize", "minimize"] as const;
+export const AVO_EXPERIMENT_DECISIONS = ["promote", "retain", "inconclusive"] as const;
 
 export type AvoEnvironment = (typeof AVO_ENVIRONMENTS)[number];
 export type AvoEnvironmentSelection = "auto" | AvoEnvironment;
@@ -53,6 +57,10 @@ export type AvoMemoryVerificationState = (typeof AVO_MEMORY_VERIFICATION_STATES)
 export type AvoMemoryReferenceKind = (typeof AVO_MEMORY_REFERENCE_KINDS)[number];
 export type AvoMemoryRecallChannel = (typeof AVO_MEMORY_RECALL_CHANNELS)[number];
 export type AvoExperimentStatus = (typeof AVO_EXPERIMENT_STATUSES)[number];
+export type AvoExperimentMode = (typeof AVO_EXPERIMENT_MODES)[number];
+export type AvoExperimentPairing = (typeof AVO_EXPERIMENT_PAIRINGS)[number];
+export type AvoMetricDirection = (typeof AVO_METRIC_DIRECTIONS)[number];
+export type AvoExperimentDecision = (typeof AVO_EXPERIMENT_DECISIONS)[number];
 
 export interface AvoRoutingDecision {
 	environment: AvoEnvironment;
@@ -132,12 +140,87 @@ export interface AvoExperiment {
 	title: string;
 	hypothesis: string;
 	design: string;
+	plan?: AvoExperimentPlan;
 	status: AvoExperimentStatus;
 	trialIds: string[];
 	tags: string[];
 	createdAt: string;
 	updatedAt: string;
 	completedAt?: string;
+	aggregateEvaluationId?: string;
+	outcome?: AvoExperimentOutcome;
+}
+
+export interface AvoExperimentCondition {
+	conditionId: string;
+	label: string;
+	parameters: Record<string, number | string | boolean>;
+	commandTemplate: string;
+}
+
+export interface AvoExperimentPlan {
+	mode: AvoExperimentMode;
+	candidateIds: string[];
+	conditions: AvoExperimentCondition[];
+	seeds: string[];
+	pairing: AvoExperimentPairing;
+	primaryMetric: string;
+	metricDirection: AvoMetricDirection;
+	baselineCandidateId?: string;
+	expectedTrials: number;
+}
+
+export interface AvoMetricSummary {
+	count: number;
+	mean: number;
+	median: number;
+	variance: number;
+	standardDeviation: number;
+	minimum: number;
+	maximum: number;
+	ci95Low: number;
+	ci95High: number;
+}
+
+export interface AvoCandidateAggregate {
+	candidateId: string;
+	metric: AvoMetricSummary;
+}
+
+export interface AvoConditionAggregate extends AvoCandidateAggregate {
+	conditionId: string;
+}
+
+export interface AvoPairedComparison {
+	candidateId: string;
+	baselineCandidateId: string;
+	delta: AvoMetricSummary;
+	favorableMean: number;
+	favorableCi95Low: number;
+	favorableCi95High: number;
+	wins: number;
+	losses: number;
+	ties: number;
+	winRate: number;
+}
+
+export interface AvoConditionPairedComparison extends AvoPairedComparison {
+	conditionId: string;
+}
+
+export interface AvoExperimentOutcome {
+	primaryMetric: string;
+	metricDirection: AvoMetricDirection;
+	candidateAggregates: AvoCandidateAggregate[];
+	conditionAggregates: AvoConditionAggregate[];
+	pairedComparisons: AvoPairedComparison[];
+	conditionPairedComparisons: AvoConditionPairedComparison[];
+	ranking: string[];
+	championCandidateId?: string;
+	decision: AvoExperimentDecision;
+	reason: string;
+	trialManifestDigest: string;
+	aggregateDigest: string;
 }
 
 export interface AvoTrial {
@@ -145,8 +228,13 @@ export interface AvoTrial {
 	experimentId: string;
 	candidateId: string;
 	evaluationId: string;
+	sourceEvaluationId?: string;
 	label: string;
 	seed?: string;
+	conditionId?: string;
+	parameters?: Record<string, number | string | boolean>;
+	commandDigest?: string;
+	cellDigest?: string;
 	status: AvoEvaluationStatus;
 	metrics: Record<string, number | string | boolean>;
 	evidenceRefs: string[];
@@ -199,6 +287,7 @@ export interface AvoLineageEntry {
 		| "experiment_recorded"
 		| "trial_recorded"
 		| "experiment_completed"
+		| "champion_promoted"
 		| "cycle_completed"
 		| "candidate_accepted"
 		| "horizon_escalated"
@@ -324,7 +413,26 @@ export interface AvoExperimentInput {
 	title: string;
 	hypothesis: string;
 	design: string;
+	plan: AvoExperimentPlanInput;
 	tags?: string[];
+}
+
+export interface AvoExperimentConditionInput {
+	conditionId: string;
+	label?: string;
+	parameters?: Record<string, number | string | boolean>;
+	commandTemplate: string;
+}
+
+export interface AvoExperimentPlanInput {
+	mode?: AvoExperimentMode;
+	candidateIds: string[];
+	conditions: AvoExperimentConditionInput[];
+	seeds: Array<string | number>;
+	pairing?: AvoExperimentPairing;
+	primaryMetric: string;
+	metricDirection: AvoMetricDirection;
+	baselineCandidateId?: string;
 }
 
 export interface AvoTrialInput {
@@ -332,8 +440,15 @@ export interface AvoTrialInput {
 	experimentId: string;
 	candidateId: string;
 	evaluationId: string;
-	label?: string;
-	seed?: string;
+	conditionId: string;
+	seed: string;
+}
+
+export interface AvoTrialRunInput {
+	experimentId: string;
+	candidateId: string;
+	conditionId: string;
+	seed: string;
 }
 
 export interface AvoCycleInput {
