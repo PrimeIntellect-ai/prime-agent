@@ -117,10 +117,6 @@ export class UserMessageSelectorComponent extends Container {
 
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
-
-		if (messages.length === 0) {
-			setTimeout(() => onCancel(), 100);
-		}
 	}
 
 	getMessageList(): UserMessageList {
