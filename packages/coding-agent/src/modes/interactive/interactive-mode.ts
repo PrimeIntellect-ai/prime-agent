@@ -992,7 +992,6 @@ export class InteractiveMode {
 	private connectionResourceSnapshot: AgentConnectionResourceSnapshot | undefined;
 	private sessionHasMessages = false;
 	private heartbeatCatalog: AgentConnectionHeartbeat[] = [];
-	private heartbeats: AgentConnectionHeartbeat[] = [];
 	private heartbeatRefreshPromise: Promise<void> | undefined;
 	private heartbeatRefreshRequested = false;
 	private heartbeatManager: HeartbeatManagerComponent | undefined;
@@ -2570,32 +2569,19 @@ export class InteractiveMode {
 
 	private applyHeartbeatCatalog(heartbeats: AgentConnectionHeartbeat[]): void {
 		this.heartbeatCatalog = heartbeats;
-		this.updateScopedHeartbeats();
-	}
-
-	private updateScopedHeartbeats(): void {
-		const heartbeats = scopeHeartbeatsToSession(
-			this.heartbeatCatalog,
-			this.connectionState,
-			this.subagentSnapshots.values(),
-		);
-		if (
-			heartbeats.length === this.heartbeats.length &&
-			heartbeats.every((heartbeat, index) => heartbeat === this.heartbeats[index])
-		) {
-			return;
-		}
-		this.heartbeats = heartbeats;
-		this.heartbeatManager?.setHeartbeats(heartbeats);
 		this.scheduleHeartbeatManagerRefresh();
 		this.updateSubagentSummaryLine();
 		this.ui.requestRender();
 	}
 
+	private getScopedHeartbeats(): AgentConnectionHeartbeat[] {
+		return scopeHeartbeatsToSession(this.heartbeatCatalog, this.connectionState, this.subagentSnapshots.values());
+	}
+
 	private applyConnectionStateSnapshot(state: AgentConnectionState): void {
 		this.bindPromptStashSession(state.sessionId);
 		this.connectionState = state;
-		this.updateScopedHeartbeats();
+		this.scheduleHeartbeatManagerRefresh();
 		// Don't touch contextUsageTokenBaseline: a mid-stream snapshot reflects only completed
 		// turns (the in-flight message isn't persisted yet), so the in-flight delta must keep
 		// accumulating. The baseline is managed at turn end (refreshConnectionContextUsage) and
@@ -5938,7 +5924,7 @@ export class InteractiveMode {
 	}
 
 	private refreshSubagentSummary(): void {
-		this.updateScopedHeartbeats();
+		this.scheduleHeartbeatManagerRefresh();
 		this.updateSubagentSummaryLine();
 		this.updateWorkingPulse();
 		this.syncWorkingLoader();
@@ -5969,7 +5955,7 @@ export class InteractiveMode {
 		this.subagentSnapshots.clear();
 		this.rlmNodeId = undefined;
 		this.updateSubagentSummaryLine();
-		this.updateScopedHeartbeats();
+		this.scheduleHeartbeatManagerRefresh();
 		// Clearing snapshots can drop the last running subagent; reconcile the
 		// pulse and loader so neither lingers when nothing is in flight.
 		this.updateWorkingPulse();
@@ -6099,11 +6085,12 @@ export class InteractiveMode {
 	}
 
 	private getTrayHeartbeatLabel(): string | undefined {
-		if (this.heartbeats.length === 0) {
+		const heartbeats = this.getScopedHeartbeats();
+		if (heartbeats.length === 0) {
 			return undefined;
 		}
-		const paused = this.heartbeats.filter((heartbeat) => heartbeat.job.status === "paused").length;
-		const count = `${this.heartbeats.length} heartbeat${this.heartbeats.length === 1 ? "" : "s"}`;
+		const paused = heartbeats.filter((heartbeat) => heartbeat.job.status === "paused").length;
+		const count = `${heartbeats.length} heartbeat${heartbeats.length === 1 ? "" : "s"}`;
 		const pausedLabel = paused ? ` · ${paused} paused` : "";
 		const shortcut = keyText("app.heartbeats.open");
 		return `${count}${pausedLabel}${shortcut ? ` (${shortcut})` : ""}`;
@@ -9585,7 +9572,8 @@ export class InteractiveMode {
 			this.showError(error instanceof Error ? error.message : String(error));
 			return;
 		}
-		const manager = new HeartbeatManagerComponent(this.heartbeats, {
+		const manager = new HeartbeatManagerComponent({
+			getHeartbeats: () => this.getScopedHeartbeats(),
 			getRows: () => this.ui.terminal.rows,
 			onAction: (heartbeat, action) => this.manageHeartbeat(heartbeat, action),
 			onClose: () => this.closeHeartbeatManager(),
@@ -9618,7 +9606,7 @@ export class InteractiveMode {
 		if (!this.heartbeatManager) {
 			return;
 		}
-		const nextRunAt = this.heartbeats
+		const nextRunAt = this.getScopedHeartbeats()
 			.filter((heartbeat) => heartbeat.job.status === "active" && heartbeat.job.nextRunAt)
 			.map((heartbeat) => Date.parse(heartbeat.job.nextRunAt!))
 			.filter(Number.isFinite)
