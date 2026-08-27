@@ -32,7 +32,7 @@ compute over it. Use `attach_image` when you need to *see* the image.
 
 ## Usage
 
-Call the prepared `attach_image` import directly in the IPython kernel:
+Call the prepared `attach_image` import directly in the Python kernel:
 
 ```python
 print(await attach_image("diagram.png"))
