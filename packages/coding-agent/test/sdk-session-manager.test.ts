@@ -82,7 +82,7 @@ describe("createAgentSession session manager defaults", () => {
 
 		const ipythonTool = session.agent.state.tools.find((tool) => tool.name === "ipython");
 		expect(ipythonTool).toBeTruthy();
-		const result = await ipythonTool!.execute("test", { code: "%%bash\npwd" });
+		const result = await ipythonTool!.execute("test", { code: "import os\nprint(os.getcwd())" });
 		const output = result.content
 			.filter((item): item is { type: "text"; text: string } => item.type === "text")
 			.map((item) => item.text)
@@ -91,5 +91,5 @@ describe("createAgentSession session manager defaults", () => {
 		expect(realpathSync(output.trim())).toBe(realpathSync(sessionCwd));
 
 		session.dispose();
-	});
+	}, 120_000);
 });

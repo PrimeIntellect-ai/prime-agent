@@ -798,7 +798,7 @@ interface SpawnCodeGroup {
 	children: MutableAgentsViewRow[];
 }
 
-// Subagents spawned by the same IPython cell share its source; group them so
+// Subagents spawned by the same Python cell share its source; group them so
 // each spawn cell renders once, above the subagents it launched. Different turns
 // produce different cells and therefore distinct groups. Insertion order follows
 // each cell's first subagent so groups read top-to-bottom in spawn order.

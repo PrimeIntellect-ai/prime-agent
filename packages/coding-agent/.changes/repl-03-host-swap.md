@@ -1,0 +1,1 @@
+- Changed the kernel to run on a minimal CPython REPL runtime speaking JSON lines over stdio.
