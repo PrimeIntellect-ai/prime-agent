@@ -50,11 +50,11 @@ _DIFF_DISPLAY_MIME = "application/vnd.prime-agent.diff+json"
 
 
 def _emit_diff(path: str, old_str: str, new_str: str, start_line: int) -> None:
-    """Stream a diff to the host via display_data; best-effort outside IPython."""
+    """Stream a diff to the host as a display event; best-effort outside the kernel."""
     try:
-        from IPython.display import display
+        from rlm import emit
 
-        display(
+        emit(
             {
                 _DIFF_DISPLAY_MIME: {
                     "path": path,
@@ -63,8 +63,7 @@ def _emit_diff(path: str, old_str: str, new_str: str, start_line: int) -> None:
                     "start_line": start_line,
                 },
                 "text/plain": f"Edited {path}",
-            },
-            raw=True,
+            }
         )
     except Exception:
         pass

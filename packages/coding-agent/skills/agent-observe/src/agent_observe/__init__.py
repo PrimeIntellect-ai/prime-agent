@@ -1,7 +1,7 @@
 """Read-only Prime Agent session observation skill.
 
 All session lookup and data access live in the TypeScript daemon. These
-functions only call the host bridge exposed inside the Prime Agent IPython
+functions only call the host bridge exposed inside the Prime Agent Python
 kernel.
 """
 
