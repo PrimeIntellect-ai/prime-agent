@@ -400,6 +400,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		stale.descriptor.createCommand = { config: { cwd: directory }, sessionPath };
 		supervisor.workers.set(stale.descriptor.workerId, stale);
 		const resident = worker("opened");
+		resident.descriptor.ownerClientId = "owner";
 		const launchWorker = vi.fn(async () => resident);
 		const reclaimStaleWorkerRegistration = vi.fn(async () => {
 			await reclaimGate;
@@ -408,11 +409,17 @@ describe("daemon supervisor passive subagent topology", () => {
 		});
 		Object.assign(supervisor, { launchWorker, reclaimStaleWorkerRegistration });
 
-		const create = { type: "create" as const, sessionPath };
-		const first = supervisor.createOrReuseWorker("client", create);
-		const second = supervisor.createOrReuseWorker("client", create);
+		const create = { type: "create" as const, sessionPath, lifecycle: "client_owned" as const };
+		const first = supervisor.createOrReuseWorker("owner", create);
+		const second = supervisor.createOrReuseWorker("owner", create);
+		const intruder = supervisor.createOrReuseWorker("intruder", create);
+		const expectations = Promise.all([
+			expect(first).resolves.toBe(resident),
+			expect(second).resolves.toBe(resident),
+			expect(intruder).rejects.toMatchObject({ code: "session_already_active" }),
+		]);
 		releaseReclaim();
-		expect(await Promise.all([first, second])).toEqual([resident, resident]);
+		await expectations;
 		expect(launchWorker).toHaveBeenCalledOnce();
 	});
 
