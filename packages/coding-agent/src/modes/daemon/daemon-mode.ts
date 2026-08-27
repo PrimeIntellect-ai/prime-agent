@@ -9,7 +9,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { type Api, getLogger, type Model } from "@earendil-works/pi-ai";
@@ -195,9 +195,11 @@ import {
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
 import {
 	createRlmLedgerRegistrySeedSource,
+	type LegacyRlmSubagentRegistryEntry,
 	type RlmLedgerDeleteReason,
 	type RlmLedgerEdge,
 	RlmSpawnLedger,
+	readLegacyRlmSubagentRegistry as readLegacyRlmSubagentRegistryFile,
 } from "./rlm-ledger.js";
 import {
 	readRlmSubagentDisplayEntry,
@@ -403,17 +405,6 @@ interface PassiveRlmSubagentEntry {
 	model?: { provider: string; modelId: string };
 	status: "running" | "completed" | "deleted";
 	createdAt: number;
-}
-
-/**
- * Legacy per-parent `rlm-subagents.jsonl` entry shape, exactly as the daemon
- * wrote it before the spawn ledger became topology authority. Read-only:
- * registries are consumed only as the ledger seed source and as fallback
- * hydration metadata for pre-ledger children without a display file.
- */
-interface LegacyRlmSubagentRegistryEntry extends PassiveRlmSubagentEntry {
-	type: "rlm_subagent";
-	updatedAt: string;
 }
 
 /** Spread-ready optional metadata fields shared by display files and legacy registry entries. */
@@ -966,50 +957,14 @@ export class AgentDaemon {
 		return join(getSessionArtifactPathForFile(parentSessionFile, parentSessionId), RLM_SUBAGENT_REGISTRY_FILE);
 	}
 
-	private async readLegacyRlmSubagentRegistry(
+	private readLegacyRlmSubagentRegistry(
 		path: string,
 		throwOnReadError = false,
 	): Promise<LegacyRlmSubagentRegistryEntry[]> {
-		let lines: string[];
-		try {
-			lines = (await readFile(path, "utf8")).split(/\r?\n/);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-				this.log(`failed to read RLM subagent registry: ${error instanceof Error ? error.message : String(error)}`);
-				if (throwOnReadError) {
-					throw error;
-				}
-			}
-			return [];
-		}
-		const latest = new Map<string, LegacyRlmSubagentRegistryEntry>();
-		for (const line of lines) {
-			const trimmed = line.trim();
-			if (!trimmed) {
-				continue;
-			}
-			try {
-				const entry = JSON.parse(trimmed) as Partial<LegacyRlmSubagentRegistryEntry>;
-				if (
-					entry.type !== "rlm_subagent" ||
-					typeof entry.childId !== "string" ||
-					typeof entry.sessionName !== "string" ||
-					typeof entry.sessionDir !== "string" ||
-					typeof entry.sessionFile !== "string" ||
-					(entry.status !== "running" && entry.status !== "completed" && entry.status !== "deleted") ||
-					(entry.rlmDepth !== undefined && (!Number.isSafeInteger(entry.rlmDepth) || entry.rlmDepth < 0)) ||
-					(entry.rlmMaxDepth !== undefined && (!Number.isSafeInteger(entry.rlmMaxDepth) || entry.rlmMaxDepth < 0))
-				) {
-					continue;
-				}
-				latest.set(entry.childId, entry as LegacyRlmSubagentRegistryEntry);
-			} catch (error) {
-				this.log(
-					`ignored malformed RLM subagent registry entry: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-		}
-		return [...latest.values()];
+		return readLegacyRlmSubagentRegistryFile(path, {
+			throwOnReadError,
+			log: (message) => this.log(message),
+		});
 	}
 
 	/**
