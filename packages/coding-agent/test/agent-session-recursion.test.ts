@@ -335,6 +335,7 @@ describe("AgentSession rlm recursion", () => {
 			rlmDepth: options.depth,
 			rlmMaxDepth: options.maxDepth,
 			rlmSessionDir: options.rlmSessionDir,
+			enforceAvoCompletion: false,
 		});
 		return session;
 	}
@@ -4323,6 +4324,7 @@ describe("AgentSession RLM session dir", () => {
 			modelRegistry: ModelRegistry.create(authStorage, join(tempDir, "models.json")),
 			resourceLoader: createTestResourceLoader({ skills }),
 			rlmSessionDir,
+			enforceAvoCompletion: false,
 		});
 		return session;
 	}
