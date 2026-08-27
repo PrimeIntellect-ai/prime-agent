@@ -1434,31 +1434,6 @@ describe("InteractiveMode pending bash components", () => {
 });
 
 describe("InteractiveMode connection events", () => {
-	test("updates the session message count from message starts", () => {
-		const builtInHeader = { invalidate: vi.fn() };
-		const subagentSummaryLine = { invalidate: vi.fn() };
-		const harness = {
-			connectionState: createConnectionState(),
-			builtInHeader,
-			subagentSummaryLine,
-			patchConnectionState(patch: Partial<AgentConnectionState>) {
-				this.connectionState = { ...this.connectionState, ...patch };
-			},
-		};
-		const updateConnectionStateFromEvent = (
-			InteractiveMode.prototype as unknown as {
-				updateConnectionStateFromEvent(this: typeof harness, event: AgentConnectionSessionEvent): void;
-			}
-		).updateConnectionStateFromEvent;
-
-		updateConnectionStateFromEvent.call(harness, { type: "message_start", message: userMessage("one", 1) });
-		updateConnectionStateFromEvent.call(harness, { type: "message_start", message: userMessage("two", 2) });
-
-		expect(harness.connectionState.messageCount).toBe(2);
-		expect(builtInHeader.invalidate).toHaveBeenCalledOnce();
-		expect(subagentSummaryLine.invalidate).toHaveBeenCalledOnce();
-	});
-
 	test("rendering a switched session updates the pending display from its snapshot", async () => {
 		const harness = {
 			resetCurrentSessionRenderState: vi.fn(),

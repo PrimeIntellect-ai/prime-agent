@@ -2641,11 +2641,17 @@ export class InteractiveMode {
 			return;
 		}
 		switch (event.type) {
-			case "agent_start":
+			case "agent_start": {
+				const wasNewChat = this.isNewChat();
 				this.patchConnectionState({ isStreaming: true, activeToolNames: [] });
+				if (wasNewChat) {
+					this.builtInHeader?.invalidate();
+					this.subagentSummaryLine.invalidate();
+				}
 				break;
-			case "message_start": {
-				const wasNewChat = this.connectionState.messageCount === 0;
+			}
+			case "message_end": {
+				const wasNewChat = this.isNewChat();
 				this.patchConnectionState({ messageCount: this.connectionState.messageCount + 1 });
 				if (wasNewChat) {
 					this.builtInHeader?.invalidate();
@@ -6044,7 +6050,7 @@ export class InteractiveMode {
 	}
 
 	private isNewChat(): boolean {
-		return (this.connectionState?.messageCount ?? 0) === 0;
+		return (this.connectionState?.messageCount ?? 0) === 0 && this.connectionState?.isStreaming !== true;
 	}
 
 	private getModelTrayLabel(): string {
