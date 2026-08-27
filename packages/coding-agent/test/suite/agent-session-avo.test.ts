@@ -117,7 +117,8 @@ describe("AgentSession universal AVO runtime", () => {
 		await harness.session.handleAvoHostRequest("avo.memory.remember", {
 			memory: {
 				namespace: "general",
-				type: "STYLE",
+				type: "info",
+				scope: "project",
 				title: "Rain imagery",
 				content: "The user accepted concise natural imagery.",
 				importance: 5,
@@ -126,19 +127,21 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 
 		harness.setResponses([
-			async () => {
+			async (context) => {
+				expect(context.systemPrompt).toContain("Recalled AVO memories");
+				expect(context.systemPrompt).toContain("Rain imagery");
 				await harness!.session.handleAvoHostRequest("avo.candidate.add", {
 					candidate: {
-						candidate_id: "photosynthesis-1",
+						candidate_id: "rain-rewrite-1",
 						kind: "answer",
-						summary: "Photosynthesis explanation",
-						payload: "Photosynthesis stores light energy.",
+						summary: "Concise rain rewrite",
+						payload: "Rain whispers.",
 					},
 				});
 				await harness!.session.handleAvoHostRequest("avo.evaluation.record", {
 					evaluation: {
-						candidate_id: "photosynthesis-1",
-						evaluator_id: "best_effort_review",
+						candidate_id: "rain-rewrite-1",
+						evaluator_id: "subjective_review",
 						status: "pass",
 						authority: "model_opinion",
 						evidence_refs: [],
@@ -146,20 +149,20 @@ describe("AgentSession universal AVO runtime", () => {
 					},
 				});
 				await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
-					cycle: { candidate_id: "photosynthesis-1" },
+					cycle: { candidate_id: "rain-rewrite-1" },
 				});
-				return fauxAssistantMessage("Photosynthesis stores light energy.");
+				return fauxAssistantMessage("Rain whispers.");
 			},
 		]);
-		await harness.session.prompt("Explain photosynthesis");
+		await harness.session.prompt("Rewrite the rain poem with concise natural imagery");
 		const state = (await harness.session.handleAvoHostRequest("avo.get")).state;
 		expect(state).toMatchObject({
 			runId: `${harness.session.sessionId}:task-2`,
-			objective: "Explain photosynthesis",
-			verificationPolicy: "best_effort",
+			objective: "Rewrite the rain poem with concise natural imagery",
+			verificationPolicy: "not_applicable",
 			routing: { environment: "general", horizon: "direct" },
 			status: "completed",
-			candidates: [{ candidateId: "photosynthesis-1" }],
+			candidates: [{ candidateId: "rain-rewrite-1" }],
 			taskRuns: [
 				{
 					runId: `${harness.session.sessionId}:task-1`,
@@ -167,7 +170,15 @@ describe("AgentSession universal AVO runtime", () => {
 					status: "completed",
 				},
 			],
-			memories: [{ memoryId: expect.any(String), namespace: "general" }],
+			memories: expect.arrayContaining([
+				expect.objectContaining({
+					title: "Rain imagery",
+					namespace: "general",
+					scope: "project",
+					verificationState: "proposed",
+				}),
+				expect.objectContaining({ type: "episode", scope: "project", verificationState: "verified" }),
+			]),
 		});
 	});
 

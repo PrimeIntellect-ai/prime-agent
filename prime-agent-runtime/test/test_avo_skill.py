@@ -190,26 +190,23 @@ class AvoSkillTest(unittest.TestCase):
             ),
         )
 
-    def test_nooa_failure_keeps_host_recall_as_lossless_fallback(self) -> None:
-        module = load_skill("avo_nooa_fallback_test")
+    def test_recall_delegates_to_the_host_native_nooa_bridge(self) -> None:
+        module = load_skill("avo_nooa_host_test")
         host = AsyncMock(
-            side_effect=[
-                {"memories": [{"memoryId": "memory-1"}]},
-                {"state": {"memories": [{"memoryId": "memory-1"}]}},
-                {"state": {"memories": [{"memoryId": "memory-1"}]}},
-            ]
+            return_value={
+                "memories": [{"memoryId": "memory-1"}],
+                "context": "[verified episode] parser fix",
+                "backend": "nooa-memory",
+            }
         )
-        with (
-            patch.object(module, "host_request", host),
-            patch.object(
-                module,
-                "_run_nooa_sidecar",
-                return_value={"ok": False, "reason": "sidecar unavailable"},
-            ),
-        ):
+        with patch.object(module, "host_request", host):
             result = asyncio.run(module.recall("parser", limit=3))
         self.assertEqual(result["memories"], [{"memoryId": "memory-1"}])
-        self.assertFalse(result["nooa"]["ok"])
+        self.assertEqual(result["backend"], "nooa-memory")
+        host.assert_awaited_once_with(
+            "avo.memory.recall",
+            {"query": "parser", "limit": 3},
+        )
 
 
 if __name__ == "__main__":

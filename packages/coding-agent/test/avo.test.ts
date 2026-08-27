@@ -1,9 +1,10 @@
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
 import type { AutoresearchState, AutoresearchStopGate } from "../src/core/autoresearch.js";
 import {
+	AVO_NOOA_VERSION,
 	AvoSessionRuntime,
 	AvoStore,
 	assertAvoClaimVerifierQuoteSafe,
@@ -23,6 +24,11 @@ import {
 	inferAvoHorizon,
 	inferAvoVerificationPolicy,
 	parseAvoClaimVerifierMessage,
+	parseAvoMemoryInput,
+	parseAvoMemoryReasonerMessage,
+	parseAvoMemoryReconcilerMessage,
+	parseAvoMemoryReconciliationVerifierMessage,
+	parseAvoMemoryVerifierMessage,
 	parseAvoSupervisorMessage,
 	ResearchAvoAdapter,
 	shouldActivateAvoSupervisor,
@@ -38,6 +44,465 @@ function clock(): () => string {
 }
 
 describe("generic AVO core", () => {
+	test("adopts NOOA 0.0.9 taxonomy and reinforces exact duplicate memories", () => {
+		expect(AVO_NOOA_VERSION).toBe("0.0.9");
+		expect(
+			parseAvoMemoryInput({
+				namespace: "coding",
+				type: "skill",
+				scope: "project",
+				title: "Parser verification",
+				content: "Run the unchanged parser regression before and after the patch.",
+				importance: 7,
+			}),
+		).toMatchObject({ type: "skill", scope: "project" });
+		expect(() =>
+			parseAvoMemoryInput({
+				namespace: "coding",
+				type: "useful_search_query",
+				title: "Legacy free-form type",
+				content: "No longer accepted.",
+				importance: 5,
+			}),
+		).toThrow(/memory.type/);
+
+		const store = new AvoStore(undefined, "memory-taxonomy", clock());
+		store.initialize("Fix the parser");
+		const input = {
+			namespace: "coding" as const,
+			type: "skill" as const,
+			scope: "project" as const,
+			title: "Parser verification",
+			content: "Run the unchanged parser regression before and after the patch.",
+			tags: ["parser"],
+			importance: 7,
+		};
+		const first = store.remember(input);
+		const reinforced = store.remember({ ...input, tags: ["regression"], importance: 8 });
+		expect(reinforced).toMatchObject({
+			memoryId: first.memoryId,
+			reinforcementCount: 1,
+			importance: 8,
+			verificationState: "proposed",
+		});
+		expect(reinforced.tags).toEqual(expect.arrayContaining(["parser", "regression"]));
+	});
+
+	test("keeps owner-scoped proposals isolated until two verified episodes clear them", () => {
+		const store = new AvoStore(undefined, "memory-owners", clock());
+		store.initialize("Improve parser recovery");
+		const episodeOne = store.rememberVerified({
+			memoryId: "episode:owner-one",
+			namespace: "coding",
+			type: "episode",
+			scope: "project",
+			title: "Timeout attempt",
+			content: "Increasing the timeout did not remove the parser race.",
+			importance: 7,
+		});
+		const episodeTwo = store.rememberVerified({
+			memoryId: "episode:owner-two",
+			namespace: "coding",
+			type: "episode",
+			scope: "project",
+			title: "Ordering attempt",
+			content: "Serializing parser initialization removed the race.",
+			importance: 8,
+		});
+		const proposal = store.rememberProposedForRole(
+			{
+				namespace: "coding",
+				type: "reflection",
+				scope: "project",
+				title: "Parser race lesson",
+				content: "Prefer initialization ordering evidence over timeout changes for this parser race.",
+				importance: 7,
+				sourceIds: [episodeOne.memoryId, episodeTwo.memoryId],
+			},
+			"avo-supervisor",
+		);
+		expect(proposal.owner).toMatch(/^avo-supervisor@/);
+		expect(store.recall("parser race", ["coding"]).map((memory) => memory.memoryId)).not.toContain(proposal.memoryId);
+		const verified = store.verifyProposedMemory(proposal.memoryId, "memory-verifier:passed");
+		expect(verified).toMatchObject({ verificationState: "verified", owner: "" });
+		expect(store.recall("parser race", ["coding"]).map((memory) => memory.memoryId)).toContain(proposal.memoryId);
+		store.recordMemoryReflection({
+			trigger: "manual",
+			report: { archived: 1 },
+			archivedMemoryIds: [proposal.memoryId, episodeOne.memoryId],
+		});
+		expect(
+			store
+				.getState()
+				.memories.filter((memory) => [proposal.memoryId, episodeOne.memoryId].includes(memory.memoryId)),
+		).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ memoryId: proposal.memoryId, verificationState: "verified" }),
+				expect.objectContaining({ memoryId: episodeOne.memoryId, verificationState: "verified" }),
+			]),
+		);
+	});
+
+	test("persists project and global memory independently of session scratch memory", () => {
+		const root = artifactDir();
+		const project = join(root, "project-a");
+		const otherProject = join(root, "project-b");
+		const memoryRoot = join(root, "agent-memory");
+		mkdirSync(project, { recursive: true });
+		mkdirSync(otherProject, { recursive: true });
+		const first = new AvoStore(join(root, "session-a"), "session-a", clock(), project, memoryRoot);
+		first.initialize("Fix parser recovery");
+		first.remember({
+			memoryId: "memory-project-parser",
+			namespace: "coding",
+			type: "skill",
+			scope: "project",
+			title: "Project parser recovery",
+			content: "This repository requires serialized parser initialization.",
+			importance: 8,
+		});
+		first.remember({
+			memoryId: "memory-global-evidence",
+			namespace: "coding",
+			type: "info",
+			scope: "global",
+			title: "Global evidence rule",
+			content: "Do not promote unverified memory to task evidence.",
+			importance: 8,
+		});
+		first.remember({
+			memoryId: "memory-task-scratch",
+			namespace: "coding",
+			type: "scratch",
+			scope: "task",
+			title: "Temporary scratch",
+			content: "Transient hypothesis for this turn only.",
+			importance: 3,
+		});
+
+		const sameProject = new AvoStore(join(root, "session-b"), "session-b", clock(), project, memoryRoot);
+		expect(sameProject.getState().memories.map((memory) => memory.memoryId)).toEqual(
+			expect.arrayContaining(["memory-project-parser", "memory-global-evidence"]),
+		);
+		expect(sameProject.getState().memories.map((memory) => memory.memoryId)).not.toContain("memory-task-scratch");
+		const differentProject = new AvoStore(join(root, "session-c"), "session-c", clock(), otherProject, memoryRoot);
+		expect(differentProject.getState().memories.map((memory) => memory.memoryId)).toContain("memory-global-evidence");
+		expect(differentProject.getState().memories.map((memory) => memory.memoryId)).not.toContain(
+			"memory-project-parser",
+		);
+
+		const concurrentOne = new AvoStore(join(root, "session-d"), "session-d", clock(), project, memoryRoot);
+		const concurrentTwo = new AvoStore(join(root, "session-e"), "session-e", clock(), project, memoryRoot);
+		concurrentOne.initialize("First concurrent task");
+		concurrentTwo.initialize("Second concurrent task");
+		concurrentOne.remember({
+			memoryId: "memory-concurrent-one",
+			namespace: "coding",
+			type: "info",
+			scope: "project",
+			title: "Concurrent memory one",
+			content: "The first session preserved this project observation.",
+			importance: 5,
+		});
+		concurrentTwo.remember({
+			memoryId: "memory-concurrent-two",
+			namespace: "coding",
+			type: "info",
+			scope: "project",
+			title: "Concurrent memory two",
+			content: "The second session preserved this project observation.",
+			importance: 5,
+		});
+		const afterConcurrentWrites = new AvoStore(join(root, "session-f"), "session-f", clock(), project, memoryRoot);
+		expect(afterConcurrentWrites.getState().memories.map((memory) => memory.memoryId)).toEqual(
+			expect.arrayContaining(["memory-concurrent-one", "memory-concurrent-two"]),
+		);
+	});
+
+	test("preserves a corrupt canonical memory ledger instead of replacing it", () => {
+		const root = artifactDir();
+		const project = join(root, "project");
+		const memoryRoot = join(root, "agent-memory");
+		mkdirSync(project, { recursive: true });
+		const first = new AvoStore(join(root, "session-a"), "session-a", clock(), project, memoryRoot);
+		const projectDatabase = first.getMemoryBackendConfig().paths.project;
+		expect(projectDatabase).toBeDefined();
+		const ledgerPath = join(dirname(projectDatabase!), "canonical.json");
+		const corrupt = '{"schemaVersion":1,"identity":"wrong","memories":[]}\n';
+		writeFileSync(ledgerPath, corrupt, "utf8");
+		expect(() => new AvoStore(join(root, "session-b"), "session-b", clock(), project, memoryRoot)).toThrow(
+			/invalid and was preserved/,
+		);
+		expect(readFileSync(ledgerPath, "utf8")).toBe(corrupt);
+	});
+
+	test("re-resolves live file references and records spontaneous recall outcomes", async () => {
+		const root = artifactDir();
+		const project = join(root, "project");
+		const agentDir = join(root, "agent");
+		mkdirSync(project, { recursive: true });
+		writeFileSync(join(project, "parser.config.json"), '{"timeout":10}\n', "utf8");
+		const calls: string[] = [];
+		let memoryId = "";
+		const runtime = new AvoSessionRuntime(
+			join(root, "session"),
+			"memory-recall-session",
+			clock(),
+			project,
+			agentDir,
+			async (command) => {
+				calls.push(command);
+				return { ok: true, memory_ids: [memoryId], retrieval: "test NOOA recall" };
+			},
+		);
+		runtime.observeRootPrompt("Write a poem about parser recovery");
+		const memory = runtime.store.rememberVerified({
+			namespace: "general",
+			type: "info",
+			scope: "project",
+			title: "Parser recovery configuration",
+			content: "The parser recovery behavior is controlled by its live configuration.",
+			importance: 8,
+			references: [{ kind: "file", key: "parser.config.json" }],
+		});
+		memoryId = memory.memoryId;
+		const before = runtime.store.formatMemoryContext([memory]);
+		writeFileSync(join(project, "parser.config.json"), '{"timeout":20}\n', "utf8");
+		const after = runtime.store.formatMemoryContext([memory]);
+		expect(after).not.toBe(before);
+		expect(after).toContain("LIVE");
+
+		const recalled = await runtime.recallMemory("parser recovery configuration", { spontaneous: true });
+		expect(recalled).toMatchObject({ backend: "nooa-memory", memories: [{ memoryId: memory.memoryId }] });
+		expect(calls).toEqual(["sync_spontaneous"]);
+		const candidate = runtime.recordCandidate({ kind: "answer", summary: "Parser poem", payload: "Parser sings." });
+		runtime.recordEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "subjective_review",
+			status: "pass",
+			authority: "model_opinion",
+			evidenceRefs: [],
+			metrics: { reviewed: true },
+		});
+		runtime.completeCycle({ candidateId: candidate.candidateId });
+		runtime.complete();
+		const state = runtime.getState();
+		expect(state.memoryRecalls).toContainEqual(
+			expect.objectContaining({ channel: "spontaneous", cycleOutcome: "accepted", memoryIds: [memory.memoryId] }),
+		);
+		expect(state.memories).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					type: "episode",
+					title: "Accepted general cycle",
+					verificationState: "verified",
+				}),
+				expect.objectContaining({ type: "episode", title: "Completed AVO task", verificationState: "verified" }),
+			]),
+		);
+		expect(runtime.dashboardProjection().metrics).toEqual(
+			expect.arrayContaining([expect.objectContaining({ label: "Spontaneous recalls", value: 1 })]),
+		);
+		runtime.dispose();
+	});
+
+	test("uses official NOOA similarity candidates as bounded reconciliation input", async () => {
+		const root = artifactDir();
+		const project = join(root, "project");
+		const commands: string[] = [];
+		mkdirSync(project, { recursive: true });
+		const runtime = new AvoSessionRuntime(
+			join(root, "session"),
+			"memory-reconciliation-bridge",
+			clock(),
+			project,
+			join(root, "agent"),
+			async (command) => {
+				commands.push(command);
+				return {
+					ok: true,
+					clusters: [{ scope: "project", memory_ids: ["memory:old", "memory:new"] }],
+				};
+			},
+		);
+		runtime.observeRootPrompt("Maintain parser API knowledge");
+		for (const [memoryId, version] of [
+			["memory:old", "2"],
+			["memory:new", "3"],
+		] as const) {
+			runtime.store.rememberVerified({
+				memoryId,
+				namespace: "coding",
+				type: "info",
+				scope: "project",
+				title: "Parser API version",
+				content: `The parser API is version ${version}.`,
+				importance: 7,
+			});
+		}
+		expect(await runtime.reconciliationCandidates()).toEqual([
+			{ scope: "project", memoryIds: ["memory:old", "memory:new"] },
+		]);
+		expect(commands).toEqual(["sync_reconciliation_candidates"]);
+		runtime.dispose();
+	});
+
+	test("fails closed when memory reasoners do not cite two shown verified episodes", () => {
+		const marker = "AVO_MEMORY_REASONER_JSON:test";
+		const allowed = new Set(["episode:one", "episode:two"]);
+		expect(() =>
+			parseAvoMemoryReasonerMessage(
+				`${marker}\n${JSON.stringify({
+					reflections: [
+						{
+							title: "Overclaim",
+							content: "One event proves a rule.",
+							tags: [],
+							source_episode_ids: ["episode:one"],
+						},
+					],
+				})}`,
+				marker,
+				allowed,
+			),
+		).toThrow(/two shown verified episodes/);
+		const proposals = parseAvoMemoryReasonerMessage(
+			`${marker}\n${JSON.stringify({
+				reflections: [
+					{
+						title: "Bounded lesson",
+						content: "The two shown parser episodes support an ordering-specific lesson.",
+						tags: ["parser"],
+						source_episode_ids: ["episode:one", "episode:two"],
+					},
+				],
+			})}`,
+			marker,
+			allowed,
+		);
+		expect(proposals).toHaveLength(1);
+		const verifierMarker = "AVO_MEMORY_VERIFIER_JSON:test";
+		expect(
+			parseAvoMemoryVerifierMessage(
+				`${verifierMarker}\n${JSON.stringify({
+					decisions: [{ memory_id: "memory:reflection", verdict: "supports", reason: "Both episodes agree." }],
+				})}`,
+				verifierMarker,
+				new Set(["memory:reflection"]),
+			),
+		).toEqual([{ memoryId: "memory:reflection", verdict: "supports", reason: "Both episodes agree." }]);
+	});
+
+	test("requires a newer verified same-domain memory before atomic reconsolidation", () => {
+		const store = new AvoStore(undefined, "memory-reconciliation", clock());
+		store.initialize("Maintain parser API knowledge");
+		const oldMemory = store.rememberVerified({
+			memoryId: "memory:parser-api-v2",
+			namespace: "coding",
+			type: "info",
+			scope: "project",
+			title: "Parser API version",
+			content: "The parser API is version 2.",
+			importance: 7,
+		});
+		const unrelated = store.rememberVerified({
+			memoryId: "memory:parser-skill",
+			namespace: "coding",
+			type: "skill",
+			scope: "project",
+			title: "Parser verification",
+			content: "Run the parser regression suite after editing the API.",
+			importance: 7,
+		});
+		const currentMemory = store.rememberVerified({
+			memoryId: "memory:parser-api-v3",
+			namespace: "coding",
+			type: "info",
+			scope: "project",
+			title: "Parser API version",
+			content: "The parser API is version 3.",
+			importance: 8,
+		});
+
+		expect(() =>
+			store.reconcileMemories(
+				currentMemory.memoryId,
+				[oldMemory.memoryId, unrelated.memoryId],
+				"memory-verifier:failed-cluster",
+			),
+		).toThrow(/same type, namespace, and scope/);
+		const unchangedOldMemory = store.getState().memories.find((memory) => memory.memoryId === oldMemory.memoryId);
+		expect(unchangedOldMemory).toMatchObject({ verificationState: "verified" });
+		expect(unchangedOldMemory).not.toHaveProperty("invalidatedAt");
+
+		const archived = store.reconcileMemories(currentMemory.memoryId, [oldMemory.memoryId], "memory-verifier:passed");
+		expect(archived).toMatchObject([
+			{
+				memoryId: oldMemory.memoryId,
+				verificationState: "invalidated",
+				supersededBy: currentMemory.memoryId,
+			},
+		]);
+		expect(
+			store.recordMemoryReflection({
+				trigger: "post_task",
+				report: { host_superseded: 1 },
+				archivedMemoryIds: [oldMemory.memoryId],
+			}).archivedMemoryIds,
+		).toEqual([oldMemory.memoryId]);
+		expect(() =>
+			store.reconcileMemories(oldMemory.memoryId, [currentMemory.memoryId], "memory-verifier:stale"),
+		).toThrow(/current host-verified record/);
+	});
+
+	test("binds reconcilers and their independent verifiers to shown NOOA clusters", () => {
+		const marker = "AVO_MEMORY_RECONCILER_JSON:test";
+		const clusters = [{ clusterId: "cluster-1", memoryIds: ["memory:old", "memory:new"] }];
+		expect(
+			parseAvoMemoryReconcilerMessage(
+				`${marker}\n${JSON.stringify({
+					decisions: [
+						{
+							cluster_id: "cluster-1",
+							current_memory_id: "memory:new",
+							supersede_memory_ids: ["memory:old"],
+							reason: "The verified v3 record is newer than v2.",
+						},
+					],
+				})}`,
+				marker,
+				clusters,
+			),
+		).toMatchObject([{ clusterId: "cluster-1", currentMemoryId: "memory:new", supersedeMemoryIds: ["memory:old"] }]);
+		expect(() =>
+			parseAvoMemoryReconcilerMessage(
+				`${marker}\n${JSON.stringify({
+					decisions: [
+						{
+							cluster_id: "cluster-1",
+							current_memory_id: "memory:new",
+							supersede_memory_ids: ["memory:outside"],
+							reason: "Escape the shown cluster.",
+						},
+					],
+				})}`,
+				marker,
+				clusters,
+			),
+		).toThrow(/escapes its shown cluster/);
+
+		const verifierMarker = "AVO_MEMORY_RECONCILIATION_VERIFIER_JSON:test";
+		expect(
+			parseAvoMemoryReconciliationVerifierMessage(
+				`${verifierMarker}\n${JSON.stringify({
+					decisions: [{ cluster_id: "cluster-1", verdict: "supports", reason: "Same fact; newer evidence." }],
+				})}`,
+				verifierMarker,
+				new Set(["cluster-1"]),
+			),
+		).toEqual([{ clusterId: "cluster-1", verdict: "supports", reason: "Same fact; newer evidence." }]);
+	});
+
 	test("persists a host-authoritative accepted lineage across restart", () => {
 		const dir = artifactDir();
 		const runtime = new AvoSessionRuntime(dir, "run-1", clock(), "/workspace/repo");
@@ -518,7 +983,7 @@ describe("generic AVO core", () => {
 		const migratedStore = new AvoStore(dir, "legacy-session", clock());
 		const migrated = migratedStore.getState();
 		expect(migrated).toMatchObject({
-			schemaVersion: 5,
+			schemaVersion: 6,
 			sessionId: "legacy-session",
 			runId: "legacy-session:task-1",
 			objective: "Legacy objective",
@@ -554,7 +1019,7 @@ describe("generic AVO core", () => {
 		writeFileSync(statePath, JSON.stringify({ ...previous, schemaVersion: 2 }), "utf8");
 		const migrated = new AvoStore(dir, "v2-session", clock()).getState();
 		expect(migrated).toMatchObject({
-			schemaVersion: 5,
+			schemaVersion: 6,
 			sessionId: "v2-session",
 			verificationClass: "external_factual",
 			verificationPolicy: "required",
@@ -579,7 +1044,7 @@ describe("generic AVO core", () => {
 		};
 		writeFileSync(statePath, JSON.stringify(previous), "utf8");
 		const migrated = new AvoStore(dir, "v3-session", clock()).getState();
-		expect(migrated.schemaVersion).toBe(5);
+		expect(migrated.schemaVersion).toBe(6);
 		expect(migrated.verificationBaseline?.executions).toEqual([]);
 	});
 
@@ -605,7 +1070,7 @@ describe("generic AVO core", () => {
 		previous.schemaVersion = 4;
 		writeFileSync(statePath, JSON.stringify(previous), "utf8");
 		const migrated = new AvoStore(dir, "v4-session", clock()).getState();
-		expect(migrated.schemaVersion).toBe(5);
+		expect(migrated.schemaVersion).toBe(6);
 		expect(migrated.evaluations).toContainEqual(
 			expect.objectContaining({ issuedBy: "legacy_unverified", evaluatorId: "external_claim" }),
 		);
@@ -631,7 +1096,7 @@ describe("generic AVO core", () => {
 		expect(() =>
 			migratedStore.remember({
 				namespace: "shared",
-				type: "PROCEDURE",
+				type: "skill",
 				title: "Unsafe legacy merge",
 				content: "Must not trust a legacy acceptance.",
 				importance: 8,
@@ -697,7 +1162,7 @@ describe("generic AVO core", () => {
 		expect(() =>
 			store.remember({
 				namespace: "shared",
-				type: "PROCEDURE",
+				type: "skill",
 				title: "Stale upgraded lineage",
 				content: "Do not promote evidence under an obsolete contract.",
 				importance: 8,
@@ -758,18 +1223,20 @@ describe("generic AVO core", () => {
 		store.completeCycle({ candidateId: researchCandidate.candidateId });
 		store.remember({
 			namespace: "coding",
-			type: "FAILED_DIRECTION",
+			type: "episode",
 			title: "Timeout was irrelevant",
 			content: "Changing the timeout did not fix the parser race.",
 			tags: ["parser", "timeout"],
 			importance: 8,
 			sourceIds: ["cycle-1"],
 		});
-		expect(store.recall("parser timeout", ["coding", "shared"])).toHaveLength(1);
+		expect(store.recall("parser timeout", ["coding", "shared"])).toEqual(
+			expect.arrayContaining([expect.objectContaining({ title: "Timeout was irrelevant" })]),
+		);
 		expect(
 			store.remember({
 				namespace: "shared",
-				type: "PROCEDURE",
+				type: "skill",
 				title: "Cross-domain verification",
 				content: "Bind conclusions to observed evidence.",
 				tags: ["verification"],
@@ -791,7 +1258,7 @@ describe("generic AVO core", () => {
 		expect(() =>
 			store.remember({
 				namespace: "shared",
-				type: "PROCEDURE",
+				type: "skill",
 				title: "Stale cross-domain verification",
 				content: "Do not retain revoked conclusions.",
 				tags: ["verification"],
@@ -802,7 +1269,7 @@ describe("generic AVO core", () => {
 		expect(() =>
 			store.remember({
 				namespace: "shared",
-				type: "PROCEDURE",
+				type: "skill",
 				title: "Unproven cross-domain rule",
 				content: "Apply everywhere.",
 				tags: [],
@@ -813,7 +1280,7 @@ describe("generic AVO core", () => {
 		expect(() =>
 			store.remember({
 				namespace: "shared",
-				type: "PROCEDURE",
+				type: "skill",
 				title: "Syntactic fake",
 				content: "Fake references must not pass.",
 				tags: [],
@@ -829,7 +1296,7 @@ describe("generic AVO core", () => {
 		store.remember({
 			memoryId: "memory-1",
 			namespace: "coding",
-			type: "FAILED_DIRECTION",
+			type: "episode",
 			title: "Timeout change failed",
 			content: "The parser race remained after increasing the timeout.",
 			tags: ["parser", "timeout"],

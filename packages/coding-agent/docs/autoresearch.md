@@ -133,7 +133,7 @@ reuse an old action. `prepare_memory_reuse` requires current-state bindings,
 applicability conditions, a reusable procedure, and verification requirements;
 `verify_memory_reuse` records the evidence before a plan becomes `verified`.
 
-The skill pins NVIDIA NOOA 0.0.8 in an isolated Python 3.13 `uv` sidecar and
+The skill pins NVIDIA NOOA 0.0.9 in an isolated Python 3.13 `uv` sidecar and
 mirrors these typed memories into NOOA's official `MemoryStore`. Prime's active
 model/provider and main Python runtime are unchanged. The adapter reports
 availability through `nooa_backend_status()` and preserves the host ledger as a

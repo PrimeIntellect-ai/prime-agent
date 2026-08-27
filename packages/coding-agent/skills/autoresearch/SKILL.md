@@ -123,7 +123,7 @@ conditions, a reusable procedure, and verification requirements. Call
 usable while its status is `proposed` or `rejected`.
 
 `remember`, `sync_nooa_memory`, `recall`, `spontaneous_recall`, and
-`reflect_memory` use NVIDIA NOOA 0.0.8 through a
+`reflect_memory` use NVIDIA NOOA 0.0.9 through a
 pinned Python 3.13 `uv` sidecar. Prime's model, provider, and main Python runtime
 are unchanged. Canonical records remain host-owned; NOOA supplies its real
 hashing embeddings, dense+sparse candidate retrieval, ACT-R scoring, and graph

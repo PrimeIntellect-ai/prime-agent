@@ -118,12 +118,61 @@ await avo.stop_gate()
 
 ## Memory
 
-Memory namespaces are `general`, `coding`, `research`, and `shared`. Recall
-uses the active environment plus `shared`. Promote a memory to `shared` only
-with at least two environment-qualified source IDs from distinct environments,
-for example `coding:test-123` and `research:review-456`. Promotion runs only
-after the host resolves every ID to an accepted candidate, cycle,
-authoritative passing evaluation, or canonical adapter-progress entry in the
-current/archived AVO lineage. Syntactically plausible IDs are rejected. NOOA 0.0.8
-runs in its pinned Python 3.13 sidecar; host lexical recall remains the lossless
-fallback. Canonical memory remains host-owned.
+Prime uses NVIDIA NOOA 0.0.9 as its cognition engine while the TypeScript host
+remains the truth authority. Every memory has four independent dimensions:
+
+- cognitive type: `info`, `skill`, `episode`, `intent`, `todo`, `reflection`,
+  or task-only `scratch`;
+- environment namespace: `general`, `coding`, `research`, or `shared`;
+- persistence scope: `task`, `project`, or `global`;
+- verification: `proposed`, `verified`, `contested`, or `invalidated`.
+
+Before every root turn, Prime automatically builds a cue from the user message,
+objective, environment, latest candidate, and latest failure. It asks NOOA for
+spontaneous recall and inserts a bounded context block before model reasoning.
+This uses NOOA's `touch=False` semantics: injected recall is logged but does not
+reinforce itself. `recall()` remains available for deliberate inspection.
+
+The host automatically writes verified project episodes for completed cycles,
+experiments, supervisor interventions, and completed tasks. Exact duplicates
+are reinforced instead of copied. Project and global canonical ledgers live
+under Prime's agent data directory at
+`memory/projects/<repository-sha256>/canonical.json` and
+`memory/global/canonical.json`; matching NOOA SQLite indexes sit beside them.
+Task memory remains in the session artifact directory. New sessions in the same
+real repository therefore receive the same project memory.
+
+Owners use NOOA's `role@instance` format. Root memories are written as
+`prime-root@<session>`. Supervisor and research-reviewer proposals remain
+owner-isolated. A reflection or skill becomes unowned canonical shared memory
+only after an independent verifier supports it against at least two verified
+episodes. NOOA consolidation may archive proposed records but cannot invalidate
+host-verified canonical memory.
+For semantic reconsolidation, NOOA finds similar `info`, `skill`, and
+`reflection` clusters. The current model proposes same-fact supersession, an
+independent model verifies it, and the host permits archival only when the
+replacement is a newer verified record with the same type, namespace, and
+scope. Similar counterexamples or distinct facts must remain separate.
+
+References can bind memory to current files, candidates, experiments,
+evaluations, cycles, artifacts, tasks, or other memories. Prime re-resolves
+them when recalled and labels stale targets `DANGLING`; stored file prose is not
+treated as current state.
+
+NOOA's hashing embedder is the zero-cost default. To opt into an explicitly
+configured LiteLLM/OpenAI-compatible embedding endpoint, set:
+
+```text
+PRIME_AGENT_AVO_MEMORY_EMBEDDING=litellm
+PRIME_AGENT_AVO_MEMORY_EMBEDDING_MODEL=<model>
+PRIME_AGENT_AVO_MEMORY_EMBEDDING_ENDPOINT=<endpoint>
+PRIME_AGENT_AVO_MEMORY_EMBEDDING_API_KEY=<key>
+PRIME_AGENT_AVO_MEMORY_EMBEDDING_DIMENSIONS=<integer>
+```
+
+Recall uses the active environment plus `shared`. Add a memory to the `shared`
+namespace only with at least two environment-qualified source IDs from distinct
+environments, for example `coding:test-123` and `research:review-456`. The host
+must resolve every ID to current accepted host-owned lineage. Syntactically
+plausible IDs are rejected. If NOOA is unavailable, host lexical recall remains
+the lossless fallback and the dashboard exposes the recall/verification counts.

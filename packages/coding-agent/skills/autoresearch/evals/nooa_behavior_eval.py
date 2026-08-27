@@ -2,12 +2,13 @@
 
 Run with:
 PYTHONPATH=packages/coding-agent/skills/autoresearch/src/autoresearch \
-  uv run --no-project --python 3.13 --with nooa-memory==0.0.8 \
+  uv run --no-project --python 3.13 --with nooa-memory==0.0.9 \
   python packages/coding-agent/skills/autoresearch/evals/nooa_behavior_eval.py
 """
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 import tempfile
@@ -19,6 +20,14 @@ sys.path.insert(0, str(SKILL_SOURCE))
 
 from nooa_sidecar import OWNER, run
 from nooa_memory.store import MemoryStore
+
+
+AVO_SIDECAR = Path(__file__).resolve().parents[2] / "avo" / "src" / "avo" / "nooa_sidecar.py"
+AVO_SIDECAR_SPEC = importlib.util.spec_from_file_location("prime_avo_nooa_sidecar", AVO_SIDECAR)
+if AVO_SIDECAR_SPEC is None or AVO_SIDECAR_SPEC.loader is None:
+    raise RuntimeError(f"cannot load AVO NOOA sidecar from {AVO_SIDECAR}")
+AVO_SIDECAR_MODULE = importlib.util.module_from_spec(AVO_SIDECAR_SPEC)
+AVO_SIDECAR_SPEC.loader.exec_module(AVO_SIDECAR_MODULE)
 
 
 CODING_QUERY = (
@@ -156,6 +165,53 @@ def main() -> None:
             {"query": AGRICULTURE_QUERY, "limit": 3, "max_chars": 1200},
         )
         final_access = _access_snapshot(path)
+        reconciliation_path = Path(directory) / "avo-nooa-memory.sqlite"
+        reconciliation_memories = [
+            {
+                "memoryId": "memory:parser-api-v2",
+                "type": "info",
+                "namespace": "coding",
+                "scope": "project",
+                "verificationState": "verified",
+                "title": "Parser API version",
+                "content": "The current parser API version is version 2 for this repository.",
+                "importance": 7,
+                "tags": ["parser", "api"],
+                "sourceIds": ["evaluation:v2"],
+                "owner": "prime-root@behavior-eval",
+                "createdAt": "2026-08-24T00:00:00.000Z",
+            },
+            {
+                "memoryId": "memory:parser-api-v3",
+                "type": "info",
+                "namespace": "coding",
+                "scope": "project",
+                "verificationState": "verified",
+                "title": "Parser API version",
+                "content": "The current parser API version is version 3 for this repository.",
+                "importance": 8,
+                "tags": ["parser", "api"],
+                "sourceIds": ["evaluation:v3"],
+                "owner": "prime-root@behavior-eval",
+                "createdAt": "2026-08-25T00:00:00.000Z",
+            },
+        ]
+        reconciliation = AVO_SIDECAR_MODULE.run(
+            "sync_reconciliation_candidates",
+            reconciliation_path,
+            {
+                "stores": [
+                    {
+                        "path": str(reconciliation_path),
+                        "scope": "project",
+                        "owner": "prime-root@behavior-eval",
+                        "owner_role": "prime-root",
+                        "embedding": {"backend": "hashing"},
+                        "memories": reconciliation_memories,
+                    }
+                ]
+            },
+        )
 
         expected = {"relevant-stale-deps", "related-env-cache"}
         expected_agriculture = {"relevant-seasonal-sensor", "related-smallholder-transfer"}
@@ -174,6 +230,11 @@ def main() -> None:
             ),
             "sync_preserves_access_state": after_sync == first_access,
             "reopen_preserves_recall_result": reopened_ids == first_ids,
+            "nooa_finds_semantic_reconciliation_candidates": any(
+                set(cluster.get("memory_ids", []))
+                == {"memory:parser-api-v2", "memory:parser-api-v3"}
+                for cluster in reconciliation.get("clusters", [])
+            ),
         }
         report = {
             "passed": all(checks.values()),
@@ -185,6 +246,7 @@ def main() -> None:
             "reopened_recall": reopened,
             "agriculture_recall": agriculture,
             "final_access": final_access,
+            "reconciliation_candidates": reconciliation,
         }
         print(json.dumps(report, indent=2, sort_keys=True))
         if not report["passed"]:

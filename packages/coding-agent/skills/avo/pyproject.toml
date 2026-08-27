@@ -7,7 +7,7 @@ dependencies = []
 
 [project.optional-dependencies]
 nooa = [
-  "nooa-memory>=0.0.8,<0.0.9 ; python_version >= '3.12' and python_version < '3.14'",
+  "nooa-memory>=0.0.9,<0.0.10 ; python_version >= '3.12' and python_version < '3.14'",
 ]
 
 [build-system]

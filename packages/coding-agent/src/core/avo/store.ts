@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { lockSync } from "proper-lockfile";
 import { AvoAdapterRegistry } from "./adapters.js";
 import { evaluateAvoCheckpoint } from "./checkpoint.js";
 import {
@@ -15,6 +16,11 @@ import {
 	AVO_EVALUATION_STATUSES,
 	AVO_HORIZONS,
 	AVO_MEMORY_NAMESPACES,
+	AVO_MEMORY_RECALL_CHANNELS,
+	AVO_MEMORY_REFERENCE_KINDS,
+	AVO_MEMORY_SCOPES,
+	AVO_MEMORY_TYPES,
+	AVO_MEMORY_VERIFICATION_STATES,
 	AVO_STATE_VERSION,
 	AVO_VERIFICATION_CLASSES,
 	AVO_VERIFICATION_POLICIES,
@@ -34,7 +40,12 @@ import {
 	type AvoHorizonSelection,
 	type AvoMemory,
 	type AvoMemoryInput,
+	type AvoMemoryRecall,
+	type AvoMemoryRecallChannel,
+	type AvoMemoryReference,
+	type AvoMemoryReferenceKind,
 	type AvoMemoryReflection,
+	type AvoMemoryScope,
 	type AvoRoutingDecision,
 	type AvoRunState,
 	type AvoStopGate,
@@ -46,6 +57,34 @@ import {
 } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
+
+interface AvoPersistentMemoryLedger {
+	schemaVersion: 1;
+	identity: string;
+	memories: AvoMemory[];
+}
+
+const memoryLedgerLockWait = new Int32Array(new SharedArrayBuffer(4));
+
+function lockMemoryLedger(path: string): () => void {
+	for (let attempt = 0; attempt < 21; attempt++) {
+		try {
+			return lockSync(path, { realpath: false });
+		} catch (error) {
+			if (
+				attempt === 20 ||
+				typeof error !== "object" ||
+				error === null ||
+				!("code" in error) ||
+				error.code !== "ELOCKED"
+			) {
+				throw error;
+			}
+			Atomics.wait(memoryLedgerLockWait, 0, 0, 25);
+		}
+	}
+	throw new Error("unreachable memory ledger lock state");
+}
 
 function isRecord(value: unknown): value is JsonRecord {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -74,6 +113,41 @@ function stringArray(value: unknown, label: string): string[] {
 		throw new Error(`${label} must be an array of non-empty strings`);
 	}
 	return [...new Set(value.map((item) => item.trim()))];
+}
+
+function memoryReferenceInputs(value: unknown): Array<{ kind: AvoMemoryReferenceKind; key: string }> {
+	if (value === undefined) return [];
+	if (!Array.isArray(value) || value.length > 32) {
+		throw new Error("memory.references must be an array of at most 32 references");
+	}
+	const references = value.map((reference, index) => {
+		if (typeof reference === "string") {
+			const separator = reference.indexOf(":");
+			if (separator <= 0 || separator === reference.length - 1) {
+				throw new Error(`memory.references[${index}] must be '<kind>:<key>'`);
+			}
+			return {
+				kind: enumValue(
+					reference.slice(0, separator),
+					AVO_MEMORY_REFERENCE_KINDS,
+					`memory.references[${index}].kind`,
+				),
+				key: requireString(reference.slice(separator + 1), `memory.references[${index}].key`),
+			};
+		}
+		if (!isRecord(reference)) throw new Error(`memory.references[${index}] must be a string or object`);
+		return {
+			kind: enumValue(reference.kind, AVO_MEMORY_REFERENCE_KINDS, `memory.references[${index}].kind`),
+			key: requireString(reference.key, `memory.references[${index}].key`),
+		};
+	});
+	const seen = new Set<string>();
+	return references.filter((reference) => {
+		const identity = `${reference.kind}:${reference.key}`;
+		if (seen.has(identity)) return false;
+		seen.add(identity);
+		return true;
+	});
 }
 
 function enumValue<T extends string>(value: unknown, allowed: readonly T[], label: string): T {
@@ -145,6 +219,25 @@ export function digestAvoDeliveryText(text: string): string {
 	return createHash("sha256").update(text).digest("hex");
 }
 
+function projectIdentity(cwd: string): string {
+	let canonical = resolve(cwd);
+	try {
+		canonical = realpathSync(canonical);
+	} catch {
+		// A deleted or virtual working directory still receives a stable resolved identity.
+	}
+	return createHash("sha256").update(canonical).digest("hex");
+}
+
+function memoryOwner(sessionId: string): string {
+	return `prime-root@${createHash("sha256").update(sessionId).digest("hex").slice(0, 16)}`;
+}
+
+function isPathContained(root: string, candidate: string): boolean {
+	const relation = relative(root, candidate);
+	return relation === "" || (!relation.startsWith(`..${sep}`) && relation !== ".." && !isAbsolute(relation));
+}
+
 function deterministicResult(value: unknown): string | undefined {
 	if (!isRecord(value) || Object.keys(value).some((key) => key !== "result") || !("result" in value)) {
 		return undefined;
@@ -191,6 +284,7 @@ function emptyState(sessionId: string, now: string): AvoRunState {
 		lineage: [],
 		checkpoints: [],
 		memories: [],
+		memoryRecalls: [],
 		memoryReflections: [],
 		supervision: [],
 		createdAt: now,
@@ -219,11 +313,84 @@ function isAvoState(value: unknown): value is AvoRunState {
 		Array.isArray(value.lineage) &&
 		Array.isArray(value.checkpoints) &&
 		Array.isArray(value.memories) &&
+		Array.isArray(value.memoryRecalls) &&
 		Array.isArray(value.memoryReflections) &&
 		Array.isArray(value.supervision) &&
 		AVO_ENVIRONMENTS.includes(value.routing.environment as AvoEnvironment) &&
 		AVO_HORIZONS.includes(value.routing.horizon as AvoHorizon)
 	);
+}
+
+function isAvoV5State(value: unknown): value is JsonRecord {
+	if (!isRecord(value) || value.schemaVersion !== 5 || !isRecord(value.routing)) return false;
+	return (
+		typeof value.sessionId === "string" &&
+		typeof value.runId === "string" &&
+		Array.isArray(value.taskRuns) &&
+		Array.isArray(value.memories) &&
+		Array.isArray(value.memoryReflections) &&
+		AVO_ENVIRONMENTS.includes(value.routing.environment as AvoEnvironment)
+	);
+}
+
+function legacyMemoryType(value: unknown): AvoMemory["type"] {
+	const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+	if (AVO_MEMORY_TYPES.includes(normalized as AvoMemory["type"])) return normalized as AvoMemory["type"];
+	if (["failed_direction", "experiment_result"].includes(normalized)) return "episode";
+	if (["procedure", "useful_search_query"].includes(normalized)) return "skill";
+	if (["reviewer_objection", "supervisor_intervention"].includes(normalized)) return "reflection";
+	if (normalized === "open_question") return "todo";
+	return "info";
+}
+
+function migrateLegacyMemory(value: unknown, state: AvoRunState): AvoMemory | undefined {
+	if (!isRecord(value) || typeof value.memoryId !== "string") return undefined;
+	const now = typeof value.createdAt === "string" ? value.createdAt : state.createdAt;
+	const originalType = typeof value.type === "string" ? value.type.trim() : "";
+	const type = legacyMemoryType(originalType);
+	const tags = Array.isArray(value.tags)
+		? value.tags.filter((tag): tag is string => typeof tag === "string" && tag.trim().length > 0)
+		: [];
+	if (originalType && originalType.toLowerCase() !== type) tags.push(`legacy-type:${originalType.toLowerCase()}`);
+	return {
+		memoryId: value.memoryId,
+		namespace: AVO_MEMORY_NAMESPACES.includes(value.namespace as AvoMemory["namespace"])
+			? (value.namespace as AvoMemory["namespace"])
+			: state.routing.environment,
+		type,
+		scope: "project",
+		verificationState: value.invalidatedAt ? "invalidated" : "proposed",
+		owner: memoryOwner(state.sessionId),
+		taskRunId: state.runId,
+		title: typeof value.title === "string" ? value.title : originalType || "Migrated memory",
+		content: typeof value.content === "string" ? value.content : "",
+		tags: [...new Set(tags)],
+		importance: typeof value.importance === "number" ? value.importance : 5,
+		sourceIds: Array.isArray(value.sourceIds)
+			? value.sourceIds.filter((source): source is string => typeof source === "string")
+			: [],
+		references: [],
+		reinforcementCount: 0,
+		createdAt: now,
+		updatedAt: now,
+		lastVerifiedAt: typeof value.lastVerifiedAt === "string" ? value.lastVerifiedAt : undefined,
+		invalidatedAt: typeof value.invalidatedAt === "string" ? value.invalidatedAt : undefined,
+	};
+}
+
+function migrateMemoryState(value: JsonRecord): AvoRunState {
+	const state = {
+		...(value as unknown as AvoRunState),
+		schemaVersion: AVO_STATE_VERSION,
+		memoryRecalls: Array.isArray(value.memoryRecalls) ? (value.memoryRecalls as AvoMemoryRecall[]) : [],
+	} satisfies AvoRunState;
+	state.memories = Array.isArray(value.memories)
+		? value.memories.flatMap((memory) => {
+				const migrated = migrateLegacyMemory(memory, state);
+				return migrated ? [migrated] : [];
+			})
+		: [];
+	return state;
 }
 
 function isAvoV2State(value: unknown): value is JsonRecord {
@@ -343,6 +510,7 @@ function migrateAvoV4State(value: JsonRecord): AvoRunState {
 			verificationBaseline: migrateVerificationBaseline(run.verificationBaseline),
 		})),
 		verificationBaseline: migrateVerificationBaseline(value.verificationBaseline),
+		memoryRecalls: [],
 	};
 }
 
@@ -357,6 +525,7 @@ function migrateAvoV3State(value: JsonRecord): AvoRunState {
 			verificationBaseline: migrateVerificationBaseline(run.verificationBaseline),
 		})),
 		verificationBaseline: migrateVerificationBaseline(value.verificationBaseline),
+		memoryRecalls: [],
 	};
 }
 
@@ -379,6 +548,7 @@ function migrateAvoV2State(value: JsonRecord): AvoRunState {
 			verificationBaseline: migrateVerificationBaseline(run.verificationBaseline),
 		})),
 		verificationBaseline: migrateVerificationBaseline(value.verificationBaseline),
+		memoryRecalls: [],
 	};
 }
 
@@ -400,6 +570,7 @@ function migrateAvoV1State(value: JsonRecord): AvoRunState {
 			...receipt,
 			issuedBy: "legacy_unverified" as const,
 		})),
+		memoryRecalls: [],
 	};
 }
 
@@ -690,17 +861,26 @@ export function parseAvoMemoryInput(value: unknown): AvoMemoryInput {
 	return {
 		memoryId: value.memory_id === undefined ? undefined : requireIdentifier(value.memory_id, "memory_id"),
 		namespace: enumValue(value.namespace, AVO_MEMORY_NAMESPACES, "memory.namespace"),
-		type: requireIdentifier(value.type, "memory.type"),
+		type: enumValue(value.type, AVO_MEMORY_TYPES, "memory.type"),
+		scope: value.scope === undefined ? undefined : enumValue(value.scope, AVO_MEMORY_SCOPES, "memory.scope"),
 		title: requireString(value.title, "memory.title"),
 		content: requireString(value.content, "memory.content"),
 		tags: value.tags === undefined ? [] : stringArray(value.tags, "memory.tags"),
 		importance: value.importance,
 		sourceIds: value.source_ids === undefined ? [] : stringArray(value.source_ids, "memory.source_ids"),
+		references: memoryReferenceInputs(value.references),
 	};
 }
 
 export class AvoStore {
 	private readonly statePath?: string;
+	private readonly projectKey: string;
+	private readonly projectMemoryLedgerPath?: string;
+	private readonly globalMemoryLedgerPath?: string;
+	private readonly sessionMemoryDatabasePath?: string;
+	private readonly projectMemoryDatabasePath?: string;
+	private readonly globalMemoryDatabasePath?: string;
+	private readonly owner: string;
 	private state: AvoRunState;
 	private loadError?: string;
 
@@ -709,10 +889,114 @@ export class AvoStore {
 		sessionId = artifactDir ? basename(artifactDir) : `avo-${randomUUID()}`,
 		private readonly now: () => string = () => new Date().toISOString(),
 		private readonly cwd = process.cwd(),
+		memoryRoot?: string,
 	) {
 		this.statePath = artifactDir ? join(artifactDir, "avo", "state.json") : undefined;
+		this.projectKey = projectIdentity(cwd);
+		this.owner = memoryOwner(sessionId);
+		this.projectMemoryLedgerPath = memoryRoot
+			? join(memoryRoot, "projects", this.projectKey, "canonical.json")
+			: undefined;
+		this.globalMemoryLedgerPath = memoryRoot ? join(memoryRoot, "global", "canonical.json") : undefined;
+		this.sessionMemoryDatabasePath = artifactDir ? join(artifactDir, "avo", "nooa-memory.sqlite") : undefined;
+		this.projectMemoryDatabasePath = memoryRoot
+			? join(memoryRoot, "projects", this.projectKey, "nooa-memory.sqlite")
+			: undefined;
+		this.globalMemoryDatabasePath = memoryRoot ? join(memoryRoot, "global", "nooa-memory.sqlite") : undefined;
 		this.state = this.load(sessionId);
-		if (this.statePath && !existsSync(this.statePath) && !this.loadError) this.save();
+		this.mergePersistentMemories();
+		if (!this.loadError) {
+			this.savePersistentMemories();
+			if (this.statePath) this.save();
+		}
+	}
+
+	private readPersistentLedger(path: string | undefined, identity: string, scope: AvoMemoryScope): AvoMemory[] {
+		if (!path || !existsSync(path)) return [];
+		try {
+			const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+			if (
+				!isRecord(parsed) ||
+				parsed.schemaVersion !== 1 ||
+				parsed.identity !== identity ||
+				!Array.isArray(parsed.memories)
+			) {
+				throw new Error("schema or identity does not match");
+			}
+			if (
+				!parsed.memories.every(
+					(memory): memory is AvoMemory =>
+						isRecord(memory) &&
+						typeof memory.memoryId === "string" &&
+						memory.scope === scope &&
+						AVO_MEMORY_TYPES.includes(memory.type as AvoMemory["type"]) &&
+						AVO_MEMORY_NAMESPACES.includes(memory.namespace as AvoMemory["namespace"]) &&
+						AVO_MEMORY_VERIFICATION_STATES.includes(memory.verificationState as AvoMemory["verificationState"]) &&
+						typeof memory.owner === "string" &&
+						typeof memory.taskRunId === "string" &&
+						typeof memory.title === "string" &&
+						typeof memory.content === "string" &&
+						Array.isArray(memory.tags) &&
+						Array.isArray(memory.sourceIds) &&
+						Array.isArray(memory.references) &&
+						typeof memory.createdAt === "string" &&
+						typeof memory.updatedAt === "string",
+				)
+			) {
+				throw new Error("one or more memory records are invalid");
+			}
+			return parsed.memories;
+		} catch (error) {
+			throw new Error(
+				`AVO persistent memory ledger ${path} is invalid and was preserved: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	private mergePersistentMemories(): void {
+		const persisted = [
+			...this.readPersistentLedger(this.projectMemoryLedgerPath, this.projectKey, "project"),
+			...this.readPersistentLedger(this.globalMemoryLedgerPath, "global", "global"),
+		];
+		const byId = new Map(this.state.memories.map((memory) => [memory.memoryId, memory]));
+		for (const memory of persisted) {
+			const current = byId.get(memory.memoryId);
+			if (!current || memory.updatedAt > current.updatedAt) byId.set(memory.memoryId, structuredClone(memory));
+		}
+		this.state.memories = [...byId.values()];
+	}
+
+	private writePersistentLedger(path: string | undefined, identity: string, scope: AvoMemoryScope): void {
+		if (!path) return;
+		mkdirSync(dirname(path), { recursive: true });
+		const release = lockMemoryLedger(path);
+		try {
+			const merged = new Map(
+				this.readPersistentLedger(path, identity, scope).map((memory) => [memory.memoryId, memory]),
+			);
+			for (const memory of this.state.memories.filter((item) => item.scope === scope)) {
+				const persisted = merged.get(memory.memoryId);
+				if (!persisted || memory.updatedAt >= persisted.updatedAt) {
+					merged.set(memory.memoryId, structuredClone(memory));
+				}
+			}
+			const memories = [...merged.values()];
+			const ledger: AvoPersistentMemoryLedger = { schemaVersion: 1, identity, memories };
+			const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+			writeFileSync(temporaryPath, `${JSON.stringify(ledger, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+			renameSync(temporaryPath, path);
+			this.state.memories = [
+				...this.state.memories.filter((memory) => memory.scope !== scope),
+				...memories.map((memory) => structuredClone(memory)),
+			];
+		} finally {
+			release();
+		}
+	}
+
+	private savePersistentMemories(): void {
+		this.writePersistentLedger(this.projectMemoryLedgerPath, this.projectKey, "project");
+		this.writePersistentLedger(this.globalMemoryLedgerPath, "global", "global");
 	}
 
 	private load(sessionId: string): AvoRunState {
@@ -721,10 +1005,11 @@ export class AvoStore {
 		try {
 			const parsed = JSON.parse(readFileSync(this.statePath, "utf8")) as unknown;
 			if (isAvoState(parsed)) return parsed;
-			if (isAvoV4State(parsed)) return migrateAvoV4State(parsed);
-			if (isAvoV3State(parsed)) return migrateAvoV3State(parsed);
-			if (isAvoV2State(parsed)) return migrateAvoV2State(parsed);
-			if (isAvoV1State(parsed)) return migrateAvoV1State(parsed);
+			if (isAvoV5State(parsed)) return migrateMemoryState(parsed);
+			if (isAvoV4State(parsed)) return migrateMemoryState(migrateAvoV4State(parsed) as unknown as JsonRecord);
+			if (isAvoV3State(parsed)) return migrateMemoryState(migrateAvoV3State(parsed) as unknown as JsonRecord);
+			if (isAvoV2State(parsed)) return migrateMemoryState(migrateAvoV2State(parsed) as unknown as JsonRecord);
+			if (isAvoV1State(parsed)) return migrateMemoryState(migrateAvoV1State(parsed) as unknown as JsonRecord);
 			throw new Error("state schema is invalid or unsupported");
 		} catch (error) {
 			this.loadError = error instanceof Error ? error.message : String(error);
@@ -754,6 +1039,27 @@ export class AvoStore {
 
 	getStatePath(): string | undefined {
 		return this.statePath;
+	}
+
+	getMemoryBackendConfig(): {
+		owner: string;
+		ownerRole: string;
+		paths: Partial<Record<AvoMemoryScope, string>>;
+	} {
+		return {
+			owner: this.owner,
+			ownerRole: "prime-root",
+			paths: {
+				task: this.sessionMemoryDatabasePath,
+				project: this.projectMemoryDatabasePath,
+				global: this.globalMemoryDatabasePath,
+			},
+		};
+	}
+
+	private ownerForRole(role: string): string {
+		if (!/^[a-z][a-z0-9_-]{1,63}$/i.test(role)) throw new Error("memory owner role is invalid");
+		return `${role}@${this.owner.split("@").at(-1)}`;
 	}
 
 	setVerificationBaseline(baseline: AvoVerificationBaseline): AvoRunState {
@@ -866,6 +1172,13 @@ export class AvoStore {
 				archivedAt: this.now(),
 				archiveReason: requireString(archiveReason, "archive reason"),
 			});
+			const expiredAt = this.now();
+			for (const memory of this.state.memories) {
+				if (memory.scope !== "task" || memory.taskRunId !== this.state.runId || memory.invalidatedAt) continue;
+				memory.verificationState = "invalidated";
+				memory.invalidatedAt = expiredAt;
+				memory.updatedAt = expiredAt;
+			}
 		}
 		const now = this.now();
 		this.state.runId = taskRunId(this.state.sessionId, this.state.taskRuns.length + 1);
@@ -1237,8 +1550,63 @@ export class AvoStore {
 		const checkpoint = evaluateAvoCheckpoint(this.state.cycles, completedAt);
 		this.state.checkpoints.push(checkpoint);
 		this.applyAutomaticEscalation(cycle, checkpoint);
+		this.linkMemoryRecallsToCycle(cycle);
+		this.recordCycleEpisode(cycle, candidate, candidateEvaluations);
 		this.save();
 		return { cycle: structuredClone(cycle), checkpoint: structuredClone(checkpoint) };
+	}
+
+	private linkMemoryRecallsToCycle(cycle: AvoCycle): void {
+		for (const recall of this.state.memoryRecalls) {
+			if (recall.runId !== this.state.runId || recall.cycleId) continue;
+			recall.cycleId = cycle.cycleId;
+			recall.cycleOutcome = cycle.outcome;
+		}
+	}
+
+	private recordCycleEpisode(
+		cycle: AvoCycle,
+		candidate: AvoCandidate,
+		evaluations: readonly AvoEvaluationReceipt[],
+	): void {
+		const evidence = evaluations.flatMap((evaluation) => evaluation.evidenceRefs).slice(0, 24);
+		const artifactReferences = (candidate.artifactPaths ?? []).slice(0, 8).flatMap((path) => {
+			const key = isAbsolute(path) ? relative(resolve(this.cwd), resolve(path)) : path;
+			return !isAbsolute(key) && isPathContained(resolve(this.cwd), resolve(this.cwd, key))
+				? [{ kind: "artifact" as const, key }]
+				: [];
+		});
+		const content = [
+			`Objective: ${this.state.objective ?? "Unspecified"}`,
+			`Candidate: ${candidate.summary}`,
+			`Outcome: ${cycle.outcome}`,
+			`Evaluations: ${evaluations.map((evaluation) => `${evaluation.evaluatorId}=${evaluation.status}`).join(", ") || "none"}`,
+			...(cycle.failureSignature ? [`Failure or significant observation: ${cycle.failureSignature}`] : []),
+			...(evidence.length > 0 ? [`Evidence: ${evidence.join(", ")}`] : []),
+		].join("\n");
+		this.recordMemory(
+			{
+				memoryId: `episode:${cycle.cycleId}`,
+				namespace: this.state.routing.environment,
+				type: "episode",
+				scope: "project",
+				title: `${cycle.outcome[0]!.toUpperCase()}${cycle.outcome.slice(1)} ${this.state.routing.environment} cycle`,
+				content,
+				tags: [this.state.routing.environment, cycle.outcome, candidate.kind],
+				importance: cycle.outcome === "accepted" ? 7 : 6,
+				sourceIds: [candidate.candidateId, cycle.cycleId, ...cycle.evaluationIds],
+				references: [
+					{ kind: "candidate", key: candidate.candidateId },
+					{ kind: "cycle", key: cycle.cycleId },
+					...cycle.evaluationIds.slice(0, 8).map((evaluationId) => ({
+						kind: "evaluation" as const,
+						key: evaluationId,
+					})),
+					...artifactReferences,
+				],
+			},
+			"verified",
+		);
 	}
 
 	private applyAutomaticEscalation(cycle: AvoCycle, checkpoint: ReturnType<typeof evaluateAvoCheckpoint>): void {
@@ -1294,111 +1662,362 @@ export class AvoStore {
 				referenceId: recorded.reviewId,
 				recordedAt: recorded.recordedAt,
 			});
+			this.recordMemory(
+				{
+					memoryId: `episode:${recorded.reviewId}`,
+					namespace: this.state.routing.environment,
+					type: "episode",
+					scope: "project",
+					title: "Supervisor intervention",
+					content: [
+						`Objective: ${this.state.objective ?? "Unspecified"}`,
+						`Intervention: ${recorded.reason}`,
+						`Patterns: ${recorded.detectedPatterns.join(", ") || "none"}`,
+						`Recommended actions: ${recorded.recommendedActions.join(", ") || "none"}`,
+					].join("\n"),
+					tags: [this.state.routing.environment, "supervisor", "intervention"],
+					importance: 8,
+					sourceIds: [recorded.reviewId, recorded.cycleId],
+					references: [
+						{ kind: "cycle", key: recorded.cycleId },
+						{ kind: "task", key: this.state.runId },
+					],
+				},
+				"verified",
+			);
 		}
 		this.save();
 		return structuredClone(recorded);
 	}
 
-	remember(input: AvoMemoryInput): AvoMemory {
-		const memoryId = input.memoryId ?? `memory-${randomUUID()}`;
-		if (this.state.memories.some((memory) => memory.memoryId === memoryId)) {
-			throw new Error(`memory ${memoryId} already exists`);
-		}
-		const sourceIds = input.sourceIds ?? [];
-		if (input.namespace === "shared") {
-			const runs: AvoRunState[] = [
-				...this.state.taskRuns.map(
-					(run) =>
-						({
-							...this.state,
-							...run,
-							taskRuns: [],
-						}) as AvoRunState,
-				),
-				this.state,
-			];
-			const adapters = new AvoAdapterRegistry();
-			const references = new Map<AvoEnvironment, Set<string>>(
-				AVO_ENVIRONMENTS.map((environment) => [environment, new Set<string>()]),
+	private acceptedLineageReferences(): Map<AvoEnvironment, Set<string>> {
+		const runs: AvoRunState[] = [
+			...this.state.taskRuns.map(
+				(run) =>
+					({
+						...this.state,
+						...run,
+						taskRuns: [],
+					}) as AvoRunState,
+			),
+			this.state,
+		];
+		const adapters = new AvoAdapterRegistry();
+		const references = new Map<AvoEnvironment, Set<string>>(
+			AVO_ENVIRONMENTS.map((environment) => [environment, new Set<string>()]),
+		);
+		for (const run of runs) {
+			const adapter = adapters.get(run.routing.environment);
+			const currentlyCanonicalCandidateIds = new Set(
+				run.candidates
+					.filter((candidate) => {
+						const evaluations = run.evaluations.filter(
+							(evaluation) => evaluation.candidateId === candidate.candidateId,
+						);
+						return (
+							deriveAvoEvaluation(evaluations).canonical &&
+							adapter.deriveEvaluationState(candidate, evaluations, run).canonical
+						);
+					})
+					.map((candidate) => candidate.candidateId),
 			);
-			for (const run of runs) {
-				const adapter = adapters.get(run.routing.environment);
-				const currentlyCanonicalCandidateIds = new Set(
-					run.candidates
-						.filter((candidate) => {
-							const evaluations = run.evaluations.filter(
-								(evaluation) => evaluation.candidateId === candidate.candidateId,
-							);
-							return (
-								deriveAvoEvaluation(evaluations).canonical &&
-								adapter.deriveEvaluationState(candidate, evaluations, run).canonical
-							);
-						})
-						.map((candidate) => candidate.candidateId),
-				);
-				const acceptedCandidateIds = new Set(
-					run.cycles
-						.filter(
-							(cycle) => cycle.outcome === "accepted" && currentlyCanonicalCandidateIds.has(cycle.candidateId),
-						)
-						.map((cycle) => cycle.candidateId),
-				);
-				const accepted = references.get(run.routing.environment)!;
-				for (const candidateId of acceptedCandidateIds) accepted.add(candidateId);
-				for (const cycle of run.cycles) {
-					if (cycle.outcome === "accepted" && acceptedCandidateIds.has(cycle.candidateId))
-						accepted.add(cycle.cycleId);
-				}
-				for (const evaluation of run.evaluations) {
-					if (
-						evaluation.issuedBy === "host" &&
-						evaluation.authority !== "model_opinion" &&
-						evaluation.status === "pass" &&
-						acceptedCandidateIds.has(evaluation.candidateId)
-					) {
-						accepted.add(evaluation.evaluationId);
-					}
-				}
-				for (const lineage of run.lineage) {
-					if (
-						lineage.kind === "candidate_accepted" &&
-						lineage.referenceId &&
-						acceptedCandidateIds.has(lineage.referenceId)
-					) {
-						accepted.add(lineage.lineageId);
-						accepted.add(lineage.referenceId);
-					}
+			const acceptedCandidateIds = new Set(
+				run.cycles
+					.filter((cycle) => cycle.outcome === "accepted" && currentlyCanonicalCandidateIds.has(cycle.candidateId))
+					.map((cycle) => cycle.candidateId),
+			);
+			const accepted = references.get(run.routing.environment)!;
+			for (const candidateId of acceptedCandidateIds) accepted.add(candidateId);
+			for (const cycle of run.cycles) {
+				if (cycle.outcome === "accepted" && acceptedCandidateIds.has(cycle.candidateId))
+					accepted.add(cycle.cycleId);
+			}
+			for (const evaluation of run.evaluations) {
+				if (
+					evaluation.issuedBy === "host" &&
+					evaluation.authority !== "model_opinion" &&
+					evaluation.status === "pass" &&
+					acceptedCandidateIds.has(evaluation.candidateId)
+				) {
+					accepted.add(evaluation.evaluationId);
 				}
 			}
-			const qualifiedEnvironments = new Set<AvoEnvironment>();
-			for (const sourceId of sourceIds) {
-				const match = /^(general|coding|research):(.+)$/.exec(sourceId);
-				if (!match) throw new Error(`shared memory source ${sourceId} is not environment-qualified`);
-				const environment = match[1] as AvoEnvironment;
-				const referenceId = match[2]!;
-				if (!references.get(environment)?.has(referenceId)) {
-					throw new Error(`shared memory source ${sourceId} does not resolve to accepted host-owned lineage`);
+			for (const lineage of run.lineage) {
+				if (
+					lineage.kind === "candidate_accepted" &&
+					lineage.referenceId &&
+					acceptedCandidateIds.has(lineage.referenceId)
+				) {
+					accepted.add(lineage.lineageId);
+					accepted.add(lineage.referenceId);
 				}
-				qualifiedEnvironments.add(environment);
-			}
-			if (sourceIds.length < 2 || qualifiedEnvironments.size < 2) {
-				throw new Error("shared memories require at least two resolved source_ids from distinct environments");
 			}
 		}
+		return references;
+	}
+
+	private assertSharedMemoryProvenance(sourceIds: readonly string[]): void {
+		const references = this.acceptedLineageReferences();
+		const qualifiedEnvironments = new Set<AvoEnvironment>();
+		for (const sourceId of sourceIds) {
+			const match = /^(general|coding|research):(.+)$/.exec(sourceId);
+			if (!match) throw new Error(`shared memory source ${sourceId} is not environment-qualified`);
+			const environment = match[1] as AvoEnvironment;
+			const referenceId = match[2]!;
+			if (!references.get(environment)?.has(referenceId)) {
+				throw new Error(`shared memory source ${sourceId} does not resolve to accepted host-owned lineage`);
+			}
+			qualifiedEnvironments.add(environment);
+		}
+		if (sourceIds.length < 2 || qualifiedEnvironments.size < 2) {
+			throw new Error("shared memories require at least two resolved source_ids from distinct environments");
+		}
+	}
+
+	private defaultMemoryScope(input: AvoMemoryInput): AvoMemoryScope {
+		if (input.type === "scratch") return "task";
+		if (input.namespace === "general") return "task";
+		return "project";
+	}
+
+	private resolveExperimentReference(experimentId: string): string | undefined {
+		const statePath =
+			this.state.adapterStateRef?.adapterId === "research" ? this.state.adapterStateRef.statePath : undefined;
+		if (!statePath || !existsSync(statePath)) return undefined;
+		try {
+			const stat = statSync(statePath);
+			if (!stat.isFile() || stat.size > 20_000_000) return undefined;
+			const parsed = JSON.parse(readFileSync(statePath, "utf8")) as unknown;
+			if (!isRecord(parsed) || !Array.isArray(parsed.experiments)) return undefined;
+			const experiment = parsed.experiments.find(
+				(item): item is JsonRecord => isRecord(item) && item.experimentId === experimentId,
+			);
+			if (!experiment) return undefined;
+			const status = typeof experiment.status === "string" ? experiment.status : "unknown";
+			const result = typeof experiment.results === "string" ? experiment.results.slice(0, 600) : "no result text";
+			return `${experimentId}: ${status}; ${result}`;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private captureMemoryReference(input: { kind: AvoMemoryReferenceKind; key: string }): AvoMemoryReference {
+		const capturedAt = this.now();
+		let preview: string | undefined;
+		if (input.kind === "file" || input.kind === "artifact") {
+			if (isAbsolute(input.key)) throw new Error(`${input.kind} memory references must be workspace-relative`);
+			const target = resolve(this.cwd, input.key);
+			if (!isPathContained(resolve(this.cwd), target)) {
+				throw new Error(`${input.kind} memory reference escapes the workspace`);
+			}
+			if (existsSync(target)) {
+				const stat = statSync(target);
+				preview = stat.isFile()
+					? `${input.key} (${stat.size} bytes, sha256=${createHash("sha256").update(readFileSync(target)).digest("hex")})`
+					: `${input.key} (not a file)`;
+			}
+		} else if (input.kind === "candidate") {
+			preview = this.state.candidates.find((candidate) => candidate.candidateId === input.key)?.summary;
+		} else if (input.kind === "evaluation") {
+			const evaluation = this.state.evaluations.find((item) => item.evaluationId === input.key);
+			preview = evaluation ? `${evaluation.evaluatorId}: ${evaluation.status}` : undefined;
+		} else if (input.kind === "experiment") {
+			preview = this.resolveExperimentReference(input.key);
+		} else if (input.kind === "cycle") {
+			const cycle = this.state.cycles.find((item) => item.cycleId === input.key);
+			preview = cycle ? `${cycle.candidateId}: ${cycle.outcome}` : undefined;
+		} else if (input.kind === "task") {
+			preview =
+				input.key === this.state.runId
+					? this.state.objective
+					: this.state.taskRuns.find((run) => run.runId === input.key)?.objective;
+		} else if (input.kind === "memory") {
+			preview = this.state.memories.find((memory) => memory.memoryId === input.key)?.title;
+		}
+		return { ...input, preview, capturedAt };
+	}
+
+	private recordMemory(
+		input: AvoMemoryInput,
+		verificationState: AvoMemory["verificationState"],
+		owner = input.namespace === "shared" ? "" : this.owner,
+	): AvoMemory {
+		if (!Number.isFinite(input.importance) || input.importance < 0 || input.importance > 10) {
+			throw new Error("memory.importance must be a number from 0 to 10");
+		}
+		const sourceIds = [...new Set(input.sourceIds ?? [])];
+		if (input.namespace === "shared") this.assertSharedMemoryProvenance(sourceIds);
+		const scope = input.scope ?? this.defaultMemoryScope(input);
+		if (input.type === "scratch" && scope !== "task") throw new Error("scratch memories must use task scope");
+		const title = requireString(input.title, "memory.title");
+		const content = requireString(input.content, "memory.content");
+		const fingerprint = digestAvoPayload({
+			namespace: input.namespace,
+			type: input.type,
+			scope,
+			owner,
+			title,
+			content,
+		});
+		const duplicate = this.state.memories.find(
+			(memory) =>
+				!memory.invalidatedAt &&
+				digestAvoPayload({
+					namespace: memory.namespace,
+					type: memory.type,
+					scope: memory.scope,
+					owner: memory.owner,
+					title: memory.title,
+					content: memory.content,
+				}) === fingerprint,
+		);
+		if (duplicate) {
+			duplicate.reinforcementCount += 1;
+			duplicate.importance = Math.max(duplicate.importance, input.importance);
+			duplicate.tags = [...new Set([...duplicate.tags, ...(input.tags ?? [])])];
+			duplicate.sourceIds = [...new Set([...duplicate.sourceIds, ...sourceIds])];
+			duplicate.updatedAt = this.now();
+			if (verificationState === "verified") {
+				duplicate.verificationState = "verified";
+				if (duplicate.type === "reflection" || duplicate.type === "skill") duplicate.owner = "";
+				duplicate.lastVerifiedAt = duplicate.updatedAt;
+			}
+			this.savePersistentMemories();
+			this.save();
+			return structuredClone(duplicate);
+		}
+		const memoryId = requireIdentifier(input.memoryId ?? `memory-${randomUUID()}`, "memory_id");
+		if (this.state.memories.some((memory) => memory.memoryId === memoryId)) {
+			throw new Error(`memory ${memoryId} already exists with different content`);
+		}
+		const createdAt = this.now();
 		const memory: AvoMemory = {
 			memoryId,
 			namespace: input.namespace,
 			type: input.type,
-			title: input.title,
-			content: input.content,
-			tags: input.tags ?? [],
+			scope,
+			verificationState,
+			owner,
+			taskRunId: this.state.runId,
+			title,
+			content,
+			tags: [...new Set(input.tags ?? [])],
 			importance: input.importance,
 			sourceIds,
-			createdAt: this.now(),
+			references: (input.references ?? []).map((reference) => this.captureMemoryReference(reference)),
+			reinforcementCount: 0,
+			createdAt,
+			updatedAt: createdAt,
+			lastVerifiedAt: verificationState === "verified" ? createdAt : undefined,
 		};
 		this.state.memories.push(memory);
+		this.savePersistentMemories();
 		this.save();
 		return structuredClone(memory);
+	}
+
+	remember(input: AvoMemoryInput): AvoMemory {
+		return this.recordMemory(input, "proposed");
+	}
+
+	rememberVerified(input: AvoMemoryInput): AvoMemory {
+		return this.recordMemory(input, "verified");
+	}
+
+	rememberProposedForRole(input: AvoMemoryInput, role: string): AvoMemory {
+		return this.recordMemory(input, "proposed", this.ownerForRole(role));
+	}
+
+	verifyProposedMemory(memoryId: string, evidenceRef: string): AvoMemory {
+		const memory = this.state.memories.find((item) => item.memoryId === memoryId);
+		if (!memory || memory.invalidatedAt) throw new Error(`memory ${memoryId} is unavailable`);
+		if (memory.verificationState !== "proposed") throw new Error(`memory ${memoryId} is not proposed`);
+		if (memory.type === "reflection" || memory.type === "skill") {
+			const sourceEpisodes = new Set(
+				memory.sourceIds.filter((sourceId) =>
+					this.state.memories.some(
+						(source) =>
+							source.memoryId === sourceId &&
+							source.type === "episode" &&
+							source.verificationState === "verified" &&
+							!source.invalidatedAt,
+					),
+				),
+			);
+			if (sourceEpisodes.size < 2) {
+				throw new Error("reflection and skill promotion requires at least two verified source episodes");
+			}
+		}
+		memory.verificationState = "verified";
+		if (memory.type === "reflection" || memory.type === "skill") memory.owner = "";
+		memory.lastVerifiedAt = this.now();
+		memory.updatedAt = memory.lastVerifiedAt;
+		memory.sourceIds = [...new Set([...memory.sourceIds, requireString(evidenceRef, "memory evidence reference")])];
+		this.savePersistentMemories();
+		this.save();
+		return structuredClone(memory);
+	}
+
+	contestMemory(memoryId: string, evidenceRef: string): AvoMemory {
+		const memory = this.state.memories.find((item) => item.memoryId === memoryId);
+		if (!memory || memory.invalidatedAt) throw new Error(`memory ${memoryId} is unavailable`);
+		memory.verificationState = "contested";
+		memory.contestedAt = this.now();
+		memory.updatedAt = memory.contestedAt;
+		memory.sourceIds = [...new Set([...memory.sourceIds, requireString(evidenceRef, "memory evidence reference")])];
+		this.savePersistentMemories();
+		this.save();
+		return structuredClone(memory);
+	}
+
+	reconcileMemories(currentMemoryId: string, supersedeMemoryIds: readonly string[], evidenceRef: string): AvoMemory[] {
+		const current = this.state.memories.find(
+			(memory) => memory.memoryId === currentMemoryId && !memory.invalidatedAt,
+		);
+		if (!current || current.verificationState !== "verified") {
+			throw new Error("memory reconciliation requires a current host-verified record");
+		}
+		if (!(["info", "skill", "reflection"] as const).includes(current.type as "info" | "skill" | "reflection")) {
+			throw new Error("episodes, intents, todos, and scratch memories cannot supersede canonical memory");
+		}
+		const uniqueIds = [...new Set(supersedeMemoryIds)];
+		if (uniqueIds.length === 0 || uniqueIds.includes(currentMemoryId)) {
+			throw new Error("memory reconciliation requires distinct superseded records");
+		}
+		const currentVerifiedAt = Date.parse(current.lastVerifiedAt ?? current.updatedAt);
+		const targets = uniqueIds.map((memoryId) => {
+			const memory = this.state.memories.find((item) => item.memoryId === memoryId && !item.invalidatedAt);
+			if (!memory) throw new Error(`memory reconciliation target ${memoryId} is unavailable`);
+			return memory;
+		});
+		for (const memory of targets) {
+			if (memory.type !== current.type || memory.namespace !== current.namespace || memory.scope !== current.scope) {
+				throw new Error("memory reconciliation records must have the same type, namespace, and scope");
+			}
+			if (memory.verificationState === "verified") {
+				const supersededVerifiedAt = Date.parse(memory.lastVerifiedAt ?? memory.updatedAt);
+				if (
+					!Number.isFinite(currentVerifiedAt) ||
+					!Number.isFinite(supersededVerifiedAt) ||
+					currentVerifiedAt <= supersededVerifiedAt
+				) {
+					throw new Error("a verified memory can be superseded only by a newer verified record");
+				}
+			}
+		}
+		const normalizedEvidence = requireString(evidenceRef, "memory reconciliation evidence");
+		const archived: AvoMemory[] = [];
+		for (const memory of targets) {
+			memory.verificationState = "invalidated";
+			memory.invalidatedAt = this.now();
+			memory.updatedAt = memory.invalidatedAt;
+			memory.supersededBy = current.memoryId;
+			memory.sourceIds = [...new Set([...memory.sourceIds, normalizedEvidence])];
+			archived.push(structuredClone(memory));
+		}
+		this.savePersistentMemories();
+		this.save();
+		return archived;
 	}
 
 	recall(query: string, namespaces: readonly AvoMemory["namespace"][], limit = 8): AvoMemory[] {
@@ -1406,12 +2025,24 @@ export class AvoStore {
 		if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error("limit must be an integer from 1 to 50");
 		const allowed = new Set(namespaces);
 		return this.state.memories
-			.filter((memory) => !memory.invalidatedAt && allowed.has(memory.namespace))
+			.filter(
+				(memory) =>
+					!memory.invalidatedAt &&
+					memory.verificationState !== "contested" &&
+					(memory.owner === "" || memory.owner.startsWith("prime-root@")) &&
+					(memory.owner !== "" || memory.verificationState === "verified") &&
+					allowed.has(memory.namespace) &&
+					(memory.scope !== "task" || memory.taskRunId === this.state.runId),
+			)
 			.map((memory) => {
 				const memoryTerms = wordSet(`${memory.title} ${memory.content} ${memory.tags.join(" ")}`);
 				let overlap = 0;
 				for (const term of terms) if (memoryTerms.has(term)) overlap += 1;
-				return { memory, score: terms.size === 0 ? 0 : overlap / terms.size + memory.importance / 100 };
+				const verificationBoost = memory.verificationState === "verified" ? 0.2 : 0;
+				return {
+					memory,
+					score: terms.size === 0 ? 0 : overlap / terms.size + memory.importance / 100 + verificationBoost,
+				};
 			})
 			.filter((item) => item.score > 0.05)
 			.sort((left, right) => right.score - left.score)
@@ -1419,17 +2050,117 @@ export class AvoStore {
 			.map((item) => structuredClone(item.memory));
 	}
 
+	recordMemoryRecall(
+		query: string,
+		memoryIds: readonly string[],
+		channel: AvoMemoryRecallChannel,
+		contextChars: number,
+	): AvoMemoryRecall {
+		if (!AVO_MEMORY_RECALL_CHANNELS.includes(channel)) throw new Error("invalid memory recall channel");
+		const recall: AvoMemoryRecall = {
+			recallId: `memory-recall-${randomUUID()}`,
+			runId: this.state.runId,
+			channel,
+			queryDigest: createHash("sha256").update(requireString(query, "memory recall query")).digest("hex"),
+			memoryIds: [...new Set(memoryIds)].filter((memoryId) =>
+				this.state.memories.some((memory) => memory.memoryId === memoryId),
+			),
+			contextChars: Math.max(0, Math.trunc(contextChars)),
+			recordedAt: this.now(),
+		};
+		this.state.memoryRecalls.push(recall);
+		if (this.state.memoryRecalls.length > 500)
+			this.state.memoryRecalls.splice(0, this.state.memoryRecalls.length - 500);
+		this.save();
+		return structuredClone(recall);
+	}
+
+	private resolveMemoryReference(reference: AvoMemoryReference): { status: "LIVE" | "DANGLING"; value: string } {
+		let value: string | undefined;
+		if (reference.kind === "file" || reference.kind === "artifact") {
+			const target = resolve(this.cwd, reference.key);
+			if (isPathContained(resolve(this.cwd), target) && existsSync(target)) {
+				const stat = statSync(target);
+				if (stat.isFile()) {
+					value = `${reference.key} (${stat.size} bytes, sha256=${createHash("sha256").update(readFileSync(target)).digest("hex")})`;
+				}
+			}
+		} else if (reference.kind === "candidate") {
+			value = this.state.candidates.find((candidate) => candidate.candidateId === reference.key)?.summary;
+		} else if (reference.kind === "evaluation") {
+			const evaluation = this.state.evaluations.find((item) => item.evaluationId === reference.key);
+			value = evaluation ? `${evaluation.evaluatorId}: ${evaluation.status}` : undefined;
+		} else if (reference.kind === "cycle") {
+			const cycle = this.state.cycles.find((item) => item.cycleId === reference.key);
+			value = cycle ? `${cycle.candidateId}: ${cycle.outcome}` : undefined;
+		} else if (reference.kind === "experiment") {
+			value = this.resolveExperimentReference(reference.key);
+		} else if (reference.kind === "task") {
+			value =
+				reference.key === this.state.runId
+					? this.state.objective
+					: this.state.taskRuns.find((run) => run.runId === reference.key)?.objective;
+		} else if (reference.kind === "memory") {
+			const memory = this.state.memories.find((item) => item.memoryId === reference.key && !item.invalidatedAt);
+			value = memory ? `[${memory.type}/${memory.verificationState}] ${memory.title}` : undefined;
+		}
+		return value
+			? { status: "LIVE", value }
+			: { status: "DANGLING", value: reference.preview ?? "no snapshot captured" };
+	}
+
+	formatMemoryContext(memories: readonly AvoMemory[], maxChars = 2_000): string {
+		if (memories.length === 0) return "";
+		const lines = ["## Recalled AVO memories (NOOA associative retrieval)"];
+		for (const memory of memories) {
+			lines.push(
+				`- [${memory.type}/${memory.verificationState}/${memory.scope}#${memory.memoryId.slice(0, 12)}] ${memory.title}`,
+			);
+			for (const reference of memory.references.slice(0, 4)) {
+				const resolved = this.resolveMemoryReference(reference);
+				lines.push(`    ref ${reference.kind}:${reference.key} (${resolved.status}) -> ${resolved.value}`);
+			}
+		}
+		const context = lines.join("\n");
+		return context.length <= maxChars ? context : `${context.slice(0, maxChars - 2).trimEnd()} …`;
+	}
+
+	memoryRecordsForSync(): AvoMemory[] {
+		return this.state.memories.map((memory) => structuredClone(memory));
+	}
+
+	verifiedEpisodesForReflection(limit = 50): AvoMemory[] {
+		return this.state.memories
+			.filter(
+				(memory) => memory.type === "episode" && memory.verificationState === "verified" && !memory.invalidatedAt,
+			)
+			.slice(-limit)
+			.map((memory) => structuredClone(memory));
+	}
+
 	recordMemoryReflection(input: Omit<AvoMemoryReflection, "reflectionId" | "recordedAt">): AvoMemoryReflection {
+		const archivedMemoryIds: string[] = [];
 		for (const memoryId of input.archivedMemoryIds) {
 			const memory = this.state.memories.find((item) => item.memoryId === memoryId);
-			if (memory && !memory.invalidatedAt) memory.invalidatedAt = this.now();
+			if (!memory) continue;
+			if (memory.invalidatedAt) {
+				if (memory.supersededBy) archivedMemoryIds.push(memoryId);
+				continue;
+			}
+			if (memory.verificationState === "verified") continue;
+			memory.verificationState = "invalidated";
+			memory.invalidatedAt = this.now();
+			memory.updatedAt = memory.invalidatedAt;
+			archivedMemoryIds.push(memoryId);
 		}
 		const reflection: AvoMemoryReflection = {
 			...input,
+			archivedMemoryIds,
 			reflectionId: `reflection-${randomUUID()}`,
 			recordedAt: this.now(),
 		};
 		this.state.memoryReflections.push(reflection);
+		this.savePersistentMemories();
 		this.save();
 		return structuredClone(reflection);
 	}
@@ -1468,6 +2199,36 @@ export class AvoStore {
 
 	complete(gate: AvoStopGate = this.evaluateStopGate()): AvoRunState {
 		if (!gate.passed) throw new Error(`AVO completion is blocked: ${gate.reasons.join("; ")}`);
+		const acceptedCycle = [...this.state.cycles].reverse().find((cycle) => cycle.outcome === "accepted");
+		const acceptedCandidate = acceptedCycle
+			? this.state.candidates.find((candidate) => candidate.candidateId === acceptedCycle.candidateId)
+			: undefined;
+		this.recordMemory(
+			{
+				memoryId: `episode:task:${this.state.runId}`,
+				namespace: this.state.routing.environment,
+				type: "episode",
+				scope: "project",
+				title: "Completed AVO task",
+				content: [
+					`Objective: ${this.state.objective ?? "Unspecified"}`,
+					`Result: ${acceptedCandidate?.summary ?? "The authoritative gate passed."}`,
+					`Cycles: ${this.state.cycles.length}`,
+					`Verification: ${this.state.verificationClass}/${this.state.verificationPolicy}`,
+				].join("\n"),
+				tags: [this.state.routing.environment, "task-completed"],
+				importance: 7,
+				sourceIds: [
+					...(acceptedCandidate ? [acceptedCandidate.candidateId] : []),
+					...(acceptedCycle ? [acceptedCycle.cycleId, ...acceptedCycle.evaluationIds] : []),
+				],
+				references: [
+					{ kind: "task", key: this.state.runId },
+					...(acceptedCycle ? [{ kind: "cycle" as const, key: acceptedCycle.cycleId }] : []),
+				],
+			},
+			"verified",
+		);
 		this.state.status = "completed";
 		this.state.lineage.push({
 			lineageId: `lineage-${randomUUID()}`,

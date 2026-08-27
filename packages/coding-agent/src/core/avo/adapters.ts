@@ -142,7 +142,15 @@ function genericProjection(
 			{ label: "Rejected", value: progress.rejectedCandidates },
 			{ label: "Revised", value: progress.revisedCandidates },
 			{ label: "Authoritative evals", value: progress.authoritativeEvaluations },
-			{ label: "Memories", value: state.memories.filter((memory) => !memory.invalidatedAt).length },
+			{
+				label: "Verified memories",
+				value: state.memories.filter((memory) => !memory.invalidatedAt && memory.verificationState === "verified")
+					.length,
+			},
+			{
+				label: "Spontaneous recalls",
+				value: state.memoryRecalls.filter((recall) => recall.channel === "spontaneous").length,
+			},
 		],
 		sections: [
 			{
@@ -170,6 +178,43 @@ function genericProjection(
 						label: "Supervisor",
 						value: state.supervisor?.name ?? "Not activated",
 						status: state.routing.horizon === "long" && !state.supervisor ? "watch" : "neutral",
+					},
+				],
+			},
+			{
+				id: "memory",
+				title: "NOOA memory",
+				items: [
+					{
+						label: "Cognitive records",
+						value: JSON.stringify(
+							state.memories
+								.filter((memory) => !memory.invalidatedAt)
+								.reduce<Record<string, number>>((counts, memory) => {
+									counts[memory.type] = (counts[memory.type] ?? 0) + 1;
+									return counts;
+								}, {}),
+						),
+						status: "neutral",
+					},
+					{
+						label: "Accepted cycles after recall",
+						value: String(
+							state.memoryRecalls.filter(
+								(recall) => recall.memoryIds.length > 0 && recall.cycleOutcome === "accepted",
+							).length,
+						),
+						status: "neutral",
+					},
+					{
+						label: "Contested or invalidated",
+						value: String(
+							state.memories.filter((memory) => memory.verificationState === "contested" || memory.invalidatedAt)
+								.length,
+						),
+						status: state.memories.some((memory) => memory.verificationState === "contested")
+							? "watch"
+							: "neutral",
 					},
 				],
 			},
@@ -208,7 +253,14 @@ abstract class BaseAdapter implements AvoEnvironmentAdapter {
 			memory_summary: state.memories
 				.filter((memory) => !memory.invalidatedAt)
 				.slice(-12)
-				.map((memory) => ({ namespace: memory.namespace, type: memory.type, title: memory.title })),
+				.map((memory) => ({
+					namespace: memory.namespace,
+					type: memory.type,
+					scope: memory.scope,
+					verification: memory.verificationState,
+					owner: memory.owner,
+					title: memory.title,
+				})),
 		};
 	}
 

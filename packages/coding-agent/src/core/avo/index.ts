@@ -35,6 +35,29 @@ export {
 	assessAvoCandidateIntegrity,
 	reconcileAvoIntegrityForProjection,
 } from "./integrity.js";
+export {
+	AVO_NOOA_VERSION,
+	type AvoNooaBackendConfig,
+	AvoNooaMemoryBridge,
+	type AvoNooaRecallResult,
+	type AvoNooaReconciliationCluster,
+	type AvoNooaRunner,
+} from "./memory.js";
+export {
+	type AvoMemoryProposal,
+	type AvoMemoryReconciliationDecision,
+	type AvoMemoryReconciliationInput,
+	type AvoMemoryReconciliationVerification,
+	type AvoMemoryVerificationDecision,
+	buildAvoMemoryReasonerPrompt,
+	buildAvoMemoryReconcilerPrompt,
+	buildAvoMemoryReconciliationVerifierPrompt,
+	buildAvoMemoryVerifierPrompt,
+	parseAvoMemoryReasonerMessage,
+	parseAvoMemoryReconcilerMessage,
+	parseAvoMemoryReconciliationVerifierMessage,
+	parseAvoMemoryVerifierMessage,
+} from "./memory-reasoner.js";
 export { AvoSessionRuntime, buildAvoRuntimePrompt } from "./runtime.js";
 export {
 	AvoStore,

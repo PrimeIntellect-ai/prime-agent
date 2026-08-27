@@ -276,36 +276,89 @@ def nooa_backend_status() -> dict[str, Any]:
             "backend": "host_owned_fallback",
             "reason": "RLM_SESSION_DIR is unset",
         }
+    paths = _nooa_paths()
     return {
         "available": True,
         "backend": "nooa_memory_sidecar",
-        "package": "nooa-memory==0.0.8",
+        "package": "nooa-memory==0.0.9",
         "runtime": "python3.13",
         "provider_unchanged": True,
+        "automatic_before_turn_recall": True,
+        "embedding": os.environ.get("PRIME_AGENT_AVO_MEMORY_EMBEDDING", "hashing"),
+        "owner": os.environ.get("PRIME_AGENT_AVO_MEMORY_OWNER", "prime-avo"),
+        "paths": {scope: str(path) for scope, path in paths.items()},
     }
 
 
-def _run_nooa_sidecar(command: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _nooa_paths() -> dict[str, Path]:
+    session_dir = Path(os.environ["RLM_SESSION_DIR"])
+    paths = {
+        "task": Path(
+            os.environ.get(
+                "PRIME_AGENT_AVO_MEMORY_TASK_PATH",
+                str(session_dir / "avo" / "nooa-memory.sqlite"),
+            )
+        )
+    }
+    for scope, variable in (
+        ("project", "PRIME_AGENT_AVO_MEMORY_PROJECT_PATH"),
+        ("global", "PRIME_AGENT_AVO_MEMORY_GLOBAL_PATH"),
+    ):
+        configured = os.environ.get(variable)
+        if configured:
+            paths[scope] = Path(configured)
+    return paths
+
+
+def _sidecar_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    embedding: dict[str, Any] = {
+        "backend": os.environ.get("PRIME_AGENT_AVO_MEMORY_EMBEDDING", "hashing"),
+        "model": os.environ.get("PRIME_AGENT_AVO_MEMORY_EMBEDDING_MODEL"),
+        "endpoint": os.environ.get("PRIME_AGENT_AVO_MEMORY_EMBEDDING_ENDPOINT"),
+        "api_key": os.environ.get("PRIME_AGENT_AVO_MEMORY_EMBEDDING_API_KEY"),
+        "dimensions": os.environ.get("PRIME_AGENT_AVO_MEMORY_EMBEDDING_DIMENSIONS"),
+    }
+    return {
+        **payload,
+        "owner": os.environ.get("PRIME_AGENT_AVO_MEMORY_OWNER", "prime-avo"),
+        "owner_role": os.environ.get("PRIME_AGENT_AVO_MEMORY_OWNER_ROLE", "prime-root"),
+        "embedding": {key: value for key, value in embedding.items() if value},
+    }
+
+
+def _run_nooa_sidecar(
+    command: str,
+    payload: dict[str, Any],
+    *,
+    path: Path | None = None,
+) -> dict[str, Any]:
     status = nooa_backend_status()
     if not status["available"]:
         return status
-    path = Path(os.environ["RLM_SESSION_DIR"]) / "avo" / "nooa-memory.sqlite"
+    path = path or _nooa_paths()["task"]
     path.parent.mkdir(parents=True, exist_ok=True)
-    process = subprocess.run(
+    command_line = [
+        shutil.which("uv") or "uv",
+        "run",
+        "--no-project",
+        "--python",
+        "3.13",
+        "--with",
+        "nooa-memory==0.0.9",
+    ]
+    if os.environ.get("PRIME_AGENT_AVO_MEMORY_EMBEDDING") == "litellm":
+        command_line.extend(["--with", "litellm"])
+    command_line.extend(
         [
-            shutil.which("uv") or "uv",
-            "run",
-            "--no-project",
-            "--python",
-            "3.13",
-            "--with",
-            "nooa-memory==0.0.8",
             "python",
             str(Path(__file__).with_name("nooa_sidecar.py")),
             command,
             str(path),
-        ],
-        input=json.dumps(payload),
+        ]
+    )
+    process = subprocess.run(
+        command_line,
+        input=json.dumps(_sidecar_payload(payload)),
         text=True,
         capture_output=True,
         timeout=120,
@@ -326,11 +379,24 @@ def _run_nooa_sidecar(command: str, payload: dict[str, Any]) -> dict[str, Any]:
 async def remember(memory: dict[str, Any], *, mirror_nooa: bool = True) -> dict[str, Any]:
     response = await host_request("avo.memory.remember", {"memory": _object(memory, "memory")})
     recorded = response.get("memory")
-    response["nooa"] = (
-        await asyncio.to_thread(_run_nooa_sidecar, "upsert", {"memory": recorded})
-        if mirror_nooa and isinstance(recorded, dict)
-        else nooa_backend_status()
+    target = (
+        _nooa_paths().get(str(recorded.get("scope", "task")))
+        if isinstance(recorded, dict)
+        else None
     )
+    if mirror_nooa and isinstance(recorded, dict) and target is not None:
+        response["nooa"] = await asyncio.to_thread(
+            _run_nooa_sidecar,
+            "upsert",
+            {"memory": recorded},
+            path=target,
+        )
+    else:
+        response["nooa"] = {
+            **nooa_backend_status(),
+            "ok": False,
+            "reason": "the canonical memory scope has no configured NOOA store",
+        }
     return response
 
 
@@ -338,67 +404,52 @@ async def sync_nooa_memory() -> dict[str, Any]:
     state_response = await get_state()
     state = state_response.get("state")
     memories = state.get("memories", []) if isinstance(state, dict) else []
-    return await asyncio.to_thread(
-        _run_nooa_sidecar,
-        "sync",
-        {"memories": [memory for memory in memories if isinstance(memory, dict)]},
-    )
+    mirrored = 0
+    stores: list[dict[str, Any]] = []
+    for scope, path in _nooa_paths().items():
+        scoped = [
+            memory
+            for memory in memories
+            if isinstance(memory, dict) and memory.get("scope", "task") == scope
+        ]
+        result = await asyncio.to_thread(
+            _run_nooa_sidecar,
+            "sync",
+            {"memories": scoped},
+            path=path,
+        )
+        stores.append({"scope": scope, **result})
+        if not result.get("ok"):
+            return {**result, "stores": stores}
+        mirrored += int(result.get("mirrored", 0))
+    return {**nooa_backend_status(), "ok": True, "mirrored": mirrored, "stores": stores}
 
 
 async def recall(query: str, *, limit: int = 8) -> dict[str, Any]:
-    fallback = await host_request("avo.memory.recall", {"query": query, "limit": limit})
-    state_response = await get_state()
-    state = state_response.get("state")
-    memories = state.get("memories", []) if isinstance(state, dict) else []
-    sync = await sync_nooa_memory()
-    if not sync.get("ok"):
-        fallback["nooa"] = sync
-        return fallback
-    nooa = await asyncio.to_thread(_run_nooa_sidecar, "recall", {"query": query, "limit": limit})
-    memory_ids = nooa.get("memory_ids")
-    if isinstance(memory_ids, list):
-        by_id = {
-            str(memory.get("memoryId")): memory
-            for memory in memories
-            if isinstance(memory, dict) and memory.get("memoryId")
-        }
-        fallback["memories"] = [by_id[memory_id] for memory_id in memory_ids if memory_id in by_id]
-    fallback["nooa"] = nooa
-    return fallback
+    return await host_request("avo.memory.recall", {"query": query, "limit": limit})
 
 
 async def spontaneous_recall(query: str, *, limit: int = 5, max_chars: int = 2000) -> dict[str, Any]:
-    sync = await sync_nooa_memory()
-    if not sync.get("ok"):
-        return {**sync, "context": "", "memory_ids": []}
-    result = await asyncio.to_thread(
-        _run_nooa_sidecar,
-        "spontaneous",
+    return await host_request(
+        "avo.memory.spontaneous",
         {"query": query, "limit": limit, "max_chars": max_chars},
     )
-    result["sync"] = sync
-    return result
 
 
 async def reflect_memory(trigger: str = "manual", *, cycle_id: str | None = None) -> dict[str, Any]:
-    allowed = {"five_cycles", "supervisor_intervention", "candidate_acceptance", "manual"}
+    allowed = {
+        "five_cycles",
+        "supervisor_intervention",
+        "candidate_acceptance",
+        "post_task",
+        "manual",
+    }
     if trigger not in allowed:
         raise ValueError(f"trigger must be one of {sorted(allowed)}")
-    sync = await sync_nooa_memory()
-    if not sync.get("ok"):
-        return sync
-    result = await asyncio.to_thread(_run_nooa_sidecar, "reflect", {"trigger": trigger})
-    if not result.get("ok"):
-        return result
-    payload = {
-        "trigger": trigger,
-        "cycle_id": cycle_id,
-        "report": result.get("report", {}),
-        "archived_memory_ids": result.get("archived_memory_ids", []),
-    }
-    result["host_receipt"] = await host_request("avo.memory.reflection.record", payload)
-    result["sync"] = sync
-    return result
+    return await host_request(
+        "avo.memory.reflect",
+        {"trigger": trigger, "cycle_id": cycle_id},
+    )
 
 
 __all__ = [

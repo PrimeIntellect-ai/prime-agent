@@ -1,4 +1,4 @@
-export const AVO_STATE_VERSION = 5;
+export const AVO_STATE_VERSION = 6;
 export const AVO_SKILL_NAME = "avo";
 
 export const AVO_ENVIRONMENTS = ["general", "coding", "research"] as const;
@@ -18,6 +18,20 @@ export const AVO_VERIFICATION_CLASSES = [
 export const AVO_RUN_STATUSES = ["active", "completed", "blocked", "failed"] as const;
 export const AVO_CYCLE_OUTCOMES = ["accepted", "rejected", "revised", "inconclusive"] as const;
 export const AVO_MEMORY_NAMESPACES = ["shared", ...AVO_ENVIRONMENTS] as const;
+export const AVO_MEMORY_TYPES = ["info", "skill", "episode", "intent", "todo", "reflection", "scratch"] as const;
+export const AVO_MEMORY_SCOPES = ["task", "project", "global"] as const;
+export const AVO_MEMORY_VERIFICATION_STATES = ["proposed", "verified", "contested", "invalidated"] as const;
+export const AVO_MEMORY_REFERENCE_KINDS = [
+	"file",
+	"candidate",
+	"experiment",
+	"evaluation",
+	"cycle",
+	"artifact",
+	"task",
+	"memory",
+] as const;
+export const AVO_MEMORY_RECALL_CHANNELS = ["deliberate", "spontaneous"] as const;
 
 export type AvoEnvironment = (typeof AVO_ENVIRONMENTS)[number];
 export type AvoEnvironmentSelection = "auto" | AvoEnvironment;
@@ -31,6 +45,11 @@ export type AvoVerificationClass = (typeof AVO_VERIFICATION_CLASSES)[number];
 export type AvoRunStatus = (typeof AVO_RUN_STATUSES)[number];
 export type AvoCycleOutcome = (typeof AVO_CYCLE_OUTCOMES)[number];
 export type AvoMemoryNamespace = (typeof AVO_MEMORY_NAMESPACES)[number];
+export type AvoMemoryType = (typeof AVO_MEMORY_TYPES)[number];
+export type AvoMemoryScope = (typeof AVO_MEMORY_SCOPES)[number];
+export type AvoMemoryVerificationState = (typeof AVO_MEMORY_VERIFICATION_STATES)[number];
+export type AvoMemoryReferenceKind = (typeof AVO_MEMORY_REFERENCE_KINDS)[number];
+export type AvoMemoryRecallChannel = (typeof AVO_MEMORY_RECALL_CHANNELS)[number];
 
 export interface AvoRoutingDecision {
 	environment: AvoEnvironment;
@@ -193,23 +212,53 @@ export interface AvoCheckpoint {
 export interface AvoMemory {
 	memoryId: string;
 	namespace: AvoMemoryNamespace;
-	type: string;
+	type: AvoMemoryType;
+	scope: AvoMemoryScope;
+	verificationState: AvoMemoryVerificationState;
+	owner: string;
+	taskRunId: string;
 	title: string;
 	content: string;
 	tags: string[];
 	importance: number;
 	sourceIds: string[];
+	references: AvoMemoryReference[];
+	reinforcementCount: number;
 	createdAt: string;
+	updatedAt: string;
 	lastVerifiedAt?: string;
+	contestedAt?: string;
 	invalidatedAt?: string;
+	supersededBy?: string;
+}
+
+export interface AvoMemoryReference {
+	kind: AvoMemoryReferenceKind;
+	key: string;
+	preview?: string;
+	capturedAt: string;
+}
+
+export interface AvoMemoryRecall {
+	recallId: string;
+	runId: string;
+	channel: AvoMemoryRecallChannel;
+	queryDigest: string;
+	memoryIds: string[];
+	contextChars: number;
+	recordedAt: string;
+	cycleId?: string;
+	cycleOutcome?: AvoCycleOutcome;
 }
 
 export interface AvoMemoryReflection {
 	reflectionId: string;
-	trigger: "five_cycles" | "supervisor_intervention" | "candidate_acceptance" | "manual";
+	trigger: "five_cycles" | "supervisor_intervention" | "candidate_acceptance" | "post_task" | "manual";
 	cycleId?: string;
 	report: Record<string, number | string | boolean>;
 	archivedMemoryIds: string[];
+	proposedMemoryIds?: string[];
+	verifiedMemoryIds?: string[];
 	recordedAt: string;
 }
 
@@ -246,12 +295,14 @@ export interface AvoCycleInput {
 export interface AvoMemoryInput {
 	memoryId?: string;
 	namespace: AvoMemoryNamespace;
-	type: string;
+	type: AvoMemoryType;
+	scope?: AvoMemoryScope;
 	title: string;
 	content: string;
 	tags?: string[];
 	importance: number;
 	sourceIds?: string[];
+	references?: Array<{ kind: AvoMemoryReferenceKind; key: string }>;
 }
 
 export interface AvoAdapterStateRef {
@@ -280,6 +331,7 @@ export interface AvoRunState {
 	lineage: AvoLineageEntry[];
 	checkpoints: AvoCheckpoint[];
 	memories: AvoMemory[];
+	memoryRecalls: AvoMemoryRecall[];
 	memoryReflections: AvoMemoryReflection[];
 	supervisor?: AvoSupervisorBinding;
 	supervision: AvoSupervisorReview[];

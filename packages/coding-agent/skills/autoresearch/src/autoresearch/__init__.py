@@ -569,7 +569,7 @@ def nooa_backend_status() -> dict[str, Any]:
     return {
         "available": True,
         "backend": "nooa_memory_sidecar",
-        "package": "nooa-memory==0.0.8",
+        "package": "nooa-memory==0.0.9",
         "runtime": "python3.13",
         "provider_unchanged": True,
     }
@@ -591,7 +591,7 @@ def _run_nooa_sidecar(command: str, payload: dict[str, Any]) -> dict[str, Any]:
             "--python",
             "3.13",
             "--with",
-            "nooa-memory==0.0.8",
+            "nooa-memory==0.0.9",
             "python",
             str(sidecar),
             command,

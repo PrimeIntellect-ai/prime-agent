@@ -53,6 +53,7 @@ import {
 	type Response as UndiciResponse,
 	fetch as undiciFetch,
 } from "undici";
+import { getAgentDir } from "../config.js";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
@@ -147,6 +148,10 @@ import {
 	assessAvoTestTrust,
 	avoClaimVerifierMarker,
 	buildAvoClaimVerifierPrompt,
+	buildAvoMemoryReasonerPrompt,
+	buildAvoMemoryReconcilerPrompt,
+	buildAvoMemoryReconciliationVerifierPrompt,
+	buildAvoMemoryVerifierPrompt,
 	buildAvoRuntimePrompt,
 	buildAvoSupervisorBootstrapPrompt,
 	buildAvoSupervisorPacket,
@@ -164,6 +169,10 @@ import {
 	parseAvoCycleInput,
 	parseAvoEvaluationInput,
 	parseAvoMemoryInput,
+	parseAvoMemoryReasonerMessage,
+	parseAvoMemoryReconcilerMessage,
+	parseAvoMemoryReconciliationVerifierMessage,
+	parseAvoMemoryVerifierMessage,
 	parseAvoSupervisorMessage,
 } from "./avo/index.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
@@ -1245,6 +1254,7 @@ export class AgentSession {
 	private _agentMessageController?: AgentSessionMessageController;
 	private _agentObserveController?: AgentObserveController;
 	private _avoRuntime?: AvoSessionRuntime;
+	private _avoMemoryContext = "";
 	private readonly _enforceAvoCompletion: boolean;
 	private _avoSupervisorBoundToRuntime = false;
 	private _autoresearchStore?: AutoresearchStore;
@@ -1385,6 +1395,7 @@ export class AgentSession {
 						this.sessionManager.getSessionId(),
 						undefined,
 						this._cwd,
+						this._agentDir ?? getAgentDir(),
 					)
 				: undefined;
 		this._enforceAvoCompletion = config.enforceAvoCompletion ?? true;
@@ -3437,6 +3448,282 @@ export class AgentSession {
 		}
 	}
 
+	private async _runIsolatedAvoMemoryModel(
+		prompt: string,
+		namePrefix: string,
+	): Promise<{ text: string; childId: string; model: string; responseDigest: string }> {
+		const suffix = randomUUID().replaceAll("-", "").slice(0, 10);
+		const handle = await this._startRlmChildRun(prompt, { name: `${namePrefix}-${suffix}` }, undefined, {
+			allowedToolNames: [],
+		});
+		await this._awaitPendingRlmChildSettlement(handle.name);
+		const children = (await this.listRlmSubagents()).subagents;
+		const child =
+			children.find((item) => item.rlm_child_id === handle.rlm_child_id || item.session_name === handle.name) ??
+			this._persistedAutoresearchSubagent(handle.rlm_child_id, handle.name);
+		if (!child) throw new Error("isolated memory model was not retained for host inspection");
+		const text = this._readRlmLastAssistantText(child);
+		if (!text) throw new Error("isolated memory model produced no final text");
+		return {
+			text,
+			childId: handle.rlm_child_id,
+			model: handle.model,
+			responseDigest: createHash("sha256").update(text).digest("hex"),
+		};
+	}
+
+	private async _runAvoGenerativeMemoryReflection(
+		cycleId: string,
+		trigger: "five_cycles" | "candidate_acceptance" | "supervisor_intervention",
+	): Promise<Record<string, unknown>> {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		if (
+			state.memoryReflections.some(
+				(reflection) => reflection.cycleId === cycleId && (reflection.proposedMemoryIds?.length ?? 0) > 0,
+			)
+		) {
+			return { ok: true, skipped: "cycle already has generative memory proposals" };
+		}
+		const episodes = runtime.store.verifiedEpisodesForReflection(12);
+		if (episodes.length < 2) return { ok: false, reason: "at least two verified episodes are required" };
+		const reasonerMarker = `AVO_MEMORY_REASONER_JSON:${cycleId}:${randomUUID().replaceAll("-", "")}`;
+		let reasoner: Awaited<ReturnType<AgentSession["_runIsolatedAvoMemoryModel"]>>;
+		try {
+			reasoner = await this._runIsolatedAvoMemoryModel(
+				buildAvoMemoryReasonerPrompt(reasonerMarker, episodes),
+				"avo-memory-reasoner",
+			);
+		} catch (error) {
+			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+		let proposals: ReturnType<typeof parseAvoMemoryReasonerMessage>;
+		try {
+			proposals = parseAvoMemoryReasonerMessage(
+				reasoner.text,
+				reasonerMarker,
+				new Set(episodes.map((episode) => episode.memoryId)),
+			);
+		} catch (error) {
+			return {
+				ok: false,
+				reason: error instanceof Error ? error.message : String(error),
+				reasoner_child_id: reasoner.childId,
+			};
+		}
+		const proposedMemories = proposals.map((proposal) =>
+			runtime.store.rememberProposedForRole(
+				{
+					namespace: state.routing.environment,
+					type: "reflection",
+					scope: "project",
+					title: proposal.title,
+					content: proposal.content,
+					tags: proposal.tags,
+					importance: 6,
+					sourceIds: proposal.sourceEpisodeIds,
+					references: proposal.sourceEpisodeIds.map((memoryId) => ({ kind: "memory", key: memoryId })),
+				},
+				"avo-supervisor",
+			),
+		);
+		if (proposedMemories.length === 0) {
+			const reflection = runtime.store.recordMemoryReflection({
+				trigger,
+				cycleId,
+				report: {
+					reasoner_proposals: 0,
+					reasoner_child_id: reasoner.childId,
+					reasoner_model: reasoner.model,
+				},
+				archivedMemoryIds: [],
+				proposedMemoryIds: [],
+				verifiedMemoryIds: [],
+			});
+			return { ok: true, reflection };
+		}
+		const verifierMarker = `AVO_MEMORY_VERIFIER_JSON:${cycleId}:${randomUUID().replaceAll("-", "")}`;
+		let verifier: Awaited<ReturnType<AgentSession["_runIsolatedAvoMemoryModel"]>>;
+		try {
+			verifier = await this._runIsolatedAvoMemoryModel(
+				buildAvoMemoryVerifierPrompt(verifierMarker, episodes, proposedMemories),
+				"avo-memory-verifier",
+			);
+		} catch (error) {
+			const reflection = runtime.store.recordMemoryReflection({
+				trigger,
+				cycleId,
+				report: {
+					reasoner_proposals: proposedMemories.length,
+					verifier_error: (error instanceof Error ? error.message : String(error)).slice(0, 1_000),
+				},
+				archivedMemoryIds: [],
+				proposedMemoryIds: proposedMemories.map((memory) => memory.memoryId),
+				verifiedMemoryIds: [],
+			});
+			return { ok: false, reflection, reason: "independent memory verifier was unavailable" };
+		}
+		let decisions: ReturnType<typeof parseAvoMemoryVerifierMessage>;
+		try {
+			decisions = parseAvoMemoryVerifierMessage(
+				verifier.text,
+				verifierMarker,
+				new Set(proposedMemories.map((memory) => memory.memoryId)),
+			);
+		} catch (error) {
+			const reflection = runtime.store.recordMemoryReflection({
+				trigger,
+				cycleId,
+				report: {
+					reasoner_proposals: proposedMemories.length,
+					verifier_error: (error instanceof Error ? error.message : String(error)).slice(0, 1_000),
+				},
+				archivedMemoryIds: [],
+				proposedMemoryIds: proposedMemories.map((memory) => memory.memoryId),
+				verifiedMemoryIds: [],
+			});
+			return { ok: false, reflection, reason: "independent memory verifier reply failed closed" };
+		}
+		const verifiedMemoryIds: string[] = [];
+		for (const decision of decisions) {
+			const evidenceRef = `memory-verifier:${verifier.childId}:${verifier.responseDigest}`;
+			if (decision.verdict === "supports") {
+				runtime.store.verifyProposedMemory(decision.memoryId, evidenceRef);
+				verifiedMemoryIds.push(decision.memoryId);
+			} else {
+				runtime.store.contestMemory(decision.memoryId, `${evidenceRef}:${decision.reason}`);
+			}
+		}
+		const reflection = runtime.store.recordMemoryReflection({
+			trigger,
+			cycleId,
+			report: {
+				reasoner_proposals: proposedMemories.length,
+				verifier_supported: verifiedMemoryIds.length,
+				verifier_rejected: proposedMemories.length - verifiedMemoryIds.length,
+				reasoner_child_id: reasoner.childId,
+				verifier_child_id: verifier.childId,
+				verifier_model: verifier.model,
+			},
+			archivedMemoryIds: [],
+			proposedMemoryIds: proposedMemories.map((memory) => memory.memoryId),
+			verifiedMemoryIds,
+		});
+		const consolidation = await runtime.reflectMemory("post_task", cycleId);
+		return { ok: true, reflection, consolidation };
+	}
+
+	private async _runAvoGenerativeMemoryReconciliation(cycleId: string): Promise<Record<string, unknown>> {
+		const runtime = this._requireAvoRuntime();
+		const proposedClusters = await runtime.reconciliationCandidates();
+		const memories = runtime.getState().memories;
+		const byId = new Map(memories.map((memory) => [memory.memoryId, memory]));
+		const clusters = proposedClusters
+			.flatMap((cluster) => {
+				const groups = new Map<string, string[]>();
+				for (const memoryId of cluster.memoryIds) {
+					const memory = byId.get(memoryId);
+					if (
+						!memory ||
+						memory.invalidatedAt ||
+						memory.verificationState === "contested" ||
+						!(["info", "skill", "reflection"] as const).includes(memory.type as "info" | "skill" | "reflection")
+					)
+						continue;
+					const key = `${memory.type}:${memory.namespace}:${memory.scope}`;
+					groups.set(key, [...(groups.get(key) ?? []), memoryId]);
+				}
+				return [...groups.values()].filter(
+					(memoryIds) =>
+						memoryIds.length >= 2 &&
+						memoryIds.some((memoryId) => byId.get(memoryId)?.verificationState === "verified"),
+				);
+			})
+			.slice(0, 8)
+			.map((memoryIds, index) => ({ clusterId: `recon-${index + 1}`, memoryIds }));
+		if (clusters.length === 0) return { ok: true, skipped: "NOOA found no reconsolidation clusters" };
+
+		const reconcilerMarker = `AVO_MEMORY_RECONCILER_JSON:${cycleId}:${randomUUID().replaceAll("-", "")}`;
+		let reconciler: Awaited<ReturnType<AgentSession["_runIsolatedAvoMemoryModel"]>>;
+		try {
+			reconciler = await this._runIsolatedAvoMemoryModel(
+				buildAvoMemoryReconcilerPrompt(reconcilerMarker, clusters, memories),
+				"avo-memory-reconciler",
+			);
+		} catch (error) {
+			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+		let decisions: ReturnType<typeof parseAvoMemoryReconcilerMessage>;
+		try {
+			decisions = parseAvoMemoryReconcilerMessage(reconciler.text, reconcilerMarker, clusters).filter(
+				(decision) => decision.currentMemoryId && decision.supersedeMemoryIds.length > 0,
+			);
+		} catch (error) {
+			return {
+				ok: false,
+				reason: error instanceof Error ? error.message : String(error),
+				reconciler_child_id: reconciler.childId,
+			};
+		}
+		if (decisions.length === 0) return { ok: true, reconciled: 0, reconciler_child_id: reconciler.childId };
+
+		const verifierMarker = `AVO_MEMORY_RECONCILIATION_VERIFIER_JSON:${cycleId}:${randomUUID().replaceAll("-", "")}`;
+		let verifier: Awaited<ReturnType<AgentSession["_runIsolatedAvoMemoryModel"]>>;
+		try {
+			verifier = await this._runIsolatedAvoMemoryModel(
+				buildAvoMemoryReconciliationVerifierPrompt(verifierMarker, clusters, memories, decisions),
+				"avo-memory-reconciliation-verifier",
+			);
+		} catch (error) {
+			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+		let verification: ReturnType<typeof parseAvoMemoryReconciliationVerifierMessage>;
+		try {
+			verification = parseAvoMemoryReconciliationVerifierMessage(
+				verifier.text,
+				verifierMarker,
+				new Set(decisions.map((decision) => decision.clusterId)),
+			);
+		} catch (error) {
+			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+		const supported = new Set(
+			verification.filter((decision) => decision.verdict === "supports").map((decision) => decision.clusterId),
+		);
+		const archivedMemoryIds: string[] = [];
+		const errors: string[] = [];
+		for (const decision of decisions) {
+			if (!supported.has(decision.clusterId) || !decision.currentMemoryId) continue;
+			try {
+				const archived = runtime.store.reconcileMemories(
+					decision.currentMemoryId,
+					decision.supersedeMemoryIds,
+					`memory-reconciliation:${reconciler.childId}:${reconciler.responseDigest}:${verifier.childId}:${verifier.responseDigest}`,
+				);
+				archivedMemoryIds.push(...archived.map((memory) => memory.memoryId));
+			} catch (error) {
+				errors.push(error instanceof Error ? error.message : String(error));
+			}
+		}
+		const reflection = runtime.store.recordMemoryReflection({
+			trigger: "post_task",
+			cycleId,
+			report: {
+				nooa_candidate_clusters: clusters.length,
+				reconciler_actionable: decisions.length,
+				verifier_supported: supported.size,
+				host_superseded: archivedMemoryIds.length,
+				reconciliation_errors: errors.length,
+				reconciler_child_id: reconciler.childId,
+				verifier_child_id: verifier.childId,
+			},
+			archivedMemoryIds,
+			proposedMemoryIds: [],
+			verifiedMemoryIds: [],
+		});
+		return { ok: errors.length === 0, reflection, errors };
+	}
+
 	private _formatAvoStatus(): string {
 		const state = this._requireAvoRuntime().getState();
 		const gate = this._evaluateAvoHostBoundStopGate();
@@ -3483,6 +3770,19 @@ export class AgentSession {
 				excludedRoots: this._avoWorkspaceExcludedRoots(),
 			}),
 		);
+	}
+
+	private async _refreshAvoMemoryContext(prompt: string): Promise<void> {
+		if (!this._avoRuntime || this._rlmDepth !== 0) {
+			this._avoMemoryContext = "";
+			return;
+		}
+		try {
+			const recalled = await this._avoRuntime.recallMemory(prompt, { spontaneous: true, limit: 5, maxChars: 2_000 });
+			this._avoMemoryContext = recalled.context;
+		} catch {
+			this._avoMemoryContext = "";
+		}
 	}
 
 	private _recordAvoCandidateIntegrityFailure(candidateId: string): void {
@@ -3690,6 +3990,10 @@ export class AgentSession {
 			try {
 				const parsed = parseAvoSupervisorMessage(text, cycle.cycleId);
 				runtime.store.recordSupervision({ ...parsed, source: "retained_supervisor" });
+				if (parsed.status === "intervene" && runtime.getState().routing.horizon === "long") {
+					await this._runAvoGenerativeMemoryReflection(cycle.cycleId, "supervisor_intervention");
+					await this._runAvoGenerativeMemoryReconciliation(cycle.cycleId);
+				}
 				ingested += 1;
 			} catch (error) {
 				errors.push(error instanceof Error ? error.message : String(error));
@@ -4443,19 +4747,34 @@ export class AgentSession {
 				const cycleInput = parseAvoCycleInput(payload.cycle);
 				this._recordAvoCandidateIntegrityFailure(cycleInput.candidateId);
 				const result = runtime.completeCycle(cycleInput);
-				if (!result.activateSupervisor) return result;
+				const stateAfterCycle = runtime.getState();
+				let memoryReflection: Record<string, unknown> | undefined;
+				if (stateAfterCycle.routing.horizon === "long") {
+					const trigger = stateAfterCycle.cycles.length % 5 === 0 ? "five_cycles" : "candidate_acceptance";
+					memoryReflection =
+						result.cycle.outcome === "accepted"
+							? {
+									reflection: await this._runAvoGenerativeMemoryReflection(result.cycle.cycleId, trigger),
+									reconciliation: await this._runAvoGenerativeMemoryReconciliation(result.cycle.cycleId),
+								}
+							: stateAfterCycle.cycles.length % 5 === 0
+								? await runtime.reflectMemory(trigger, result.cycle.cycleId)
+								: undefined;
+				}
+				if (!result.activateSupervisor) return { ...result, memoryReflection };
 				let supervisor: { rlmChildId: string; name: string };
 				try {
 					supervisor = await this._ensureAvoSupervisor();
 				} catch (error) {
 					return {
 						...result,
+						memoryReflection,
 						supervisor: null,
 						delivery: { error: error instanceof Error ? error.message : String(error) },
 					};
 				}
 				const delivery = await this._dispatchAvoCheckpoint(supervisor, result.cycle.cycleId);
-				return { ...result, supervisor, delivery };
+				return { ...result, memoryReflection, supervisor, delivery };
 			}
 			case "avo.results.collect":
 				return await this._collectAvoSupervisorResults();
@@ -4465,10 +4784,37 @@ export class AgentSession {
 				if (typeof payload.query !== "string") throw new Error("avo.memory.recall query must be a string");
 				if (payload.limit !== undefined && typeof payload.limit !== "number")
 					throw new Error("avo.memory.recall limit must be a number");
-				const state = runtime.getState();
-				return {
-					memories: runtime.store.recall(payload.query, ["shared", state.routing.environment], payload.limit ?? 8),
-				};
+				return await runtime.recallMemory(payload.query, { limit: payload.limit ?? 8 });
+			}
+			case "avo.memory.spontaneous": {
+				if (typeof payload.query !== "string") throw new Error("avo.memory.spontaneous query must be a string");
+				if (payload.limit !== undefined && typeof payload.limit !== "number") {
+					throw new Error("avo.memory.spontaneous limit must be a number");
+				}
+				if (payload.max_chars !== undefined && typeof payload.max_chars !== "number") {
+					throw new Error("avo.memory.spontaneous max_chars must be a number");
+				}
+				return await runtime.recallMemory(payload.query, {
+					limit: payload.limit ?? 5,
+					maxChars: payload.max_chars ?? 2_000,
+					spontaneous: true,
+				});
+			}
+			case "avo.memory.reflect": {
+				const trigger = payload.trigger;
+				if (
+					trigger !== "five_cycles" &&
+					trigger !== "supervisor_intervention" &&
+					trigger !== "candidate_acceptance" &&
+					trigger !== "post_task" &&
+					trigger !== "manual"
+				) {
+					throw new Error("invalid AVO memory reflection trigger");
+				}
+				return await runtime.reflectMemory(
+					trigger,
+					typeof payload.cycle_id === "string" ? payload.cycle_id : undefined,
+				);
 			}
 			case "avo.memory.reflection.record": {
 				const trigger = payload.trigger;
@@ -4476,6 +4822,7 @@ export class AgentSession {
 					trigger !== "five_cycles" &&
 					trigger !== "supervisor_intervention" &&
 					trigger !== "candidate_acceptance" &&
+					trigger !== "post_task" &&
 					trigger !== "manual"
 				) {
 					throw new Error("invalid AVO memory reflection trigger");
@@ -5587,6 +5934,11 @@ export class AgentSession {
 				? ["the assistant text does not exactly match the accepted candidate's canonical delivery"]
 				: []),
 		];
+		await this._refreshAvoMemoryContext(
+			`${state.objective ?? "Active AVO task"}\nCurrent blocking conditions: ${reasons.join("; ")}`,
+		);
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
 		const content = [
 			"<avo_completion_required>",
 			"The host blocked task completion. Continue working now; do not ask the user to re-prompt you.",
@@ -6383,6 +6735,7 @@ export class AgentSession {
 			);
 			this._disconnectFromAgent();
 			this._eventListeners = [];
+			this._avoRuntime?.dispose();
 			cleanupSessionResources(this.sessionId);
 		} finally {
 			void this._startDisposeCallbacks();
@@ -6615,7 +6968,9 @@ export class AgentSession {
 
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const avoPrompt = this._avoRuntime ? buildAvoRuntimePrompt(this._avoRuntime.getState()) : undefined;
+		const avoPrompt = this._avoRuntime
+			? buildAvoRuntimePrompt(this._avoRuntime.getState(), this._avoMemoryContext)
+			: undefined;
 		const appendSystemPromptParts = [...loaderAppendSystemPrompt, ...(avoPrompt ? [avoPrompt] : [])];
 		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;
 		const loadedSkills = this._modelVisibleSkills();
@@ -7164,6 +7519,7 @@ export class AgentSession {
 					this._avoRuntime.observeRootPrompt(normalized.text);
 					this._ensureAvoCodingVerificationBaseline();
 					this._ensureAvoArtifactVerificationBaseline();
+					await this._refreshAvoMemoryContext(normalized.text);
 					this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 					this.agent.state.systemPrompt = this._baseSystemPrompt;
 				}
@@ -11485,6 +11841,8 @@ export class AgentSession {
 				"avo.results.collect",
 				"avo.memory.remember",
 				"avo.memory.recall",
+				"avo.memory.spontaneous",
+				"avo.memory.reflect",
 				"avo.memory.reflection.record",
 				"avo.checkpoint",
 				"avo.stop_gate",
@@ -11547,6 +11905,14 @@ export class AgentSession {
 			// the same local harness path. Subagents prefer their own artifact dir;
 			// ephemeral sessions fall back to the RLM session dir once it exists.
 			env.RLM_HARNESS_STATE_DIR = this._localHarnessStateDir() ?? getLocalHarnessStateDir(rlmSessionDir)!;
+		}
+		const memoryBackend = this._avoRuntime?.store.getMemoryBackendConfig();
+		if (memoryBackend) {
+			env.PRIME_AGENT_AVO_MEMORY_OWNER = memoryBackend.owner;
+			env.PRIME_AGENT_AVO_MEMORY_OWNER_ROLE = memoryBackend.ownerRole;
+			if (memoryBackend.paths.task) env.PRIME_AGENT_AVO_MEMORY_TASK_PATH = memoryBackend.paths.task;
+			if (memoryBackend.paths.project) env.PRIME_AGENT_AVO_MEMORY_PROJECT_PATH = memoryBackend.paths.project;
+			if (memoryBackend.paths.global) env.PRIME_AGENT_AVO_MEMORY_GLOBAL_PATH = memoryBackend.paths.global;
 		}
 		this._addWebsearchKeyEnv(env);
 		return env;
