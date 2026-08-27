@@ -37,7 +37,6 @@ import {
 	parseDiffDisplay,
 	parseSentAgentMessage,
 	raceStartupWithAbort,
-	SNAPSHOT_DISPOSE_TIMEOUT_MS,
 	SNAPSHOT_EXECUTION_TIMEOUT_MS,
 } from "./shared.js";
 import {
@@ -1100,19 +1099,21 @@ export class ReplKernelManager {
 		}
 	}
 
-	/** Best-effort final snapshot before a graceful dispose, bounded by a timeout. */
 	private async flushSnapshotForDispose(): Promise<void> {
 		if (!this.options.snapshot || !this.isRunning) return;
+		const pendingExecutions = this.executionQueue;
+		if (this.activeExecution) void this.interrupt().catch(() => undefined);
 		let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
-		const guard = new Promise<void>((resolve) => {
-			timeout = globalThis.setTimeout(resolve, SNAPSHOT_DISPOSE_TIMEOUT_MS);
-			if (timeout && typeof timeout === "object" && "unref" in timeout) timeout.unref();
-		});
-		try {
-			await Promise.race([this.snapshotState().then(() => undefined), guard]);
-		} finally {
-			if (timeout) clearTimeout(timeout);
-		}
+		const queueSettled = await Promise.race([
+			pendingExecutions.then(() => true),
+			new Promise<false>((resolve) => {
+				timeout = globalThis.setTimeout(() => resolve(false), SNAPSHOT_EXECUTION_TIMEOUT_MS);
+				timeout.unref?.();
+			}),
+		]);
+		if (timeout) globalThis.clearTimeout(timeout);
+		if (!queueSettled) return;
+		await this.captureSnapshot({ executionTimeoutMs: SNAPSHOT_EXECUTION_TIMEOUT_MS });
 	}
 
 	/** Graceful cleanup. Waits briefly for in-flight host request handlers before killing the child. */
