@@ -19,7 +19,7 @@ export interface AcpSessionUpdate {
 	[key: string]: unknown;
 }
 
-/** prime-agent's model-facing tool is IPython; bash is the secondary escape hatch. */
+/** prime-agent's model-facing tool is the Python REPL; bash is the secondary escape hatch. */
 export const IPYTHON_TOOL_NAME = "ipython";
 
 export function acpToolKind(toolName: string): AcpToolKind {
@@ -64,7 +64,7 @@ function assistantDeltaUpdates(event: AssistantMessageEvent, messageId: string):
 	return [];
 }
 
-/** Extract the IPython cell source so a client can show what is executing. */
+/** Extract the Python cell source so a client can show what is executing. */
 function ipythonCellSource(args: unknown): string | undefined {
 	if (!args || typeof args !== "object") return undefined;
 	const code = (args as { code?: unknown }).code;
@@ -91,7 +91,7 @@ function toolResultText(result: unknown): string | undefined {
 }
 
 /**
- * Rich IPython output that ACP has no content type for.
+ * Rich kernel output that ACP has no content type for.
  *
  * The ipython tool reports media and diffs under `details` (images additionally
  * ride along as ACP image content blocks); mirror those exact fields rather than
@@ -161,7 +161,7 @@ export function acpUpdatesForSessionEvent(
 				{
 					sessionUpdate: "tool_call",
 					toolCallId: event.toolCallId,
-					title: event.toolName === IPYTHON_TOOL_NAME ? "IPython cell" : event.toolName,
+					title: event.toolName === IPYTHON_TOOL_NAME ? "Python cell" : event.toolName,
 					kind: acpToolKind(event.toolName),
 					status: "in_progress" satisfies AcpToolStatus,
 					rawInput: cell !== undefined ? { code: cell } : event.args,
