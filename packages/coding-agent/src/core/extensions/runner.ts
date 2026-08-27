@@ -11,6 +11,7 @@ import type { KeybindingsConfig } from "../keybindings.js";
 import type { ModelRegistry } from "../model-registry.js";
 import type { SessionManager } from "../session-manager.js";
 import type { BuildSystemPromptOptions } from "../system-prompt.js";
+import type { IpythonKernelProvisioner } from "../tools/index.js";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -249,6 +250,7 @@ export class ExtensionRunner {
 	private getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	private compactFn: (options?: CompactOptions) => void = () => {};
 	private getSystemPromptFn: () => string = () => "";
+	private getIpythonKernelFn: () => IpythonKernelProvisioner | undefined = () => undefined;
 	private newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	private forkHandler: ForkHandler = async () => ({ cancelled: false });
 	private navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -306,6 +308,11 @@ export class ExtensionRunner {
 		this.getContextUsageFn = contextActions.getContextUsage;
 		this.compactFn = contextActions.compact;
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
+		// The shared IPython kernel provisioner is host session state; it is
+		// exposed on both ctx (via getIpythonKernelFn) and pi (via the runtime
+		// action) so either surface can reach the agent's own kernel.
+		this.getIpythonKernelFn = actions.getIpythonKernel ?? (() => undefined);
+		this.runtime.getIpythonKernel = this.getIpythonKernelFn;
 
 		for (const { name, config, extensionPath } of this.runtime.pendingProviderRegistrations) {
 			try {
@@ -634,6 +641,10 @@ export class ExtensionRunner {
 			getSystemPrompt: () => {
 				runner.assertActive();
 				return runner.getSystemPromptFn();
+			},
+			getIpythonKernel: () => {
+				runner.assertActive();
+				return runner.getIpythonKernelFn();
 			},
 		};
 	}

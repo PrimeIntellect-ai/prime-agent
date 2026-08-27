@@ -139,6 +139,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		setModel: () => Promise.reject(new Error("Extension runtime not initialized")),
 		getThinkingLevel: notInitialized,
 		setThinkingLevel: notInitialized,
+		getIpythonKernel: notInitialized,
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
 		assertActive,
@@ -302,6 +303,11 @@ function createExtensionAPI(
 		setThinkingLevel(level) {
 			runtime.assertActive();
 			runtime.setThinkingLevel(level);
+		},
+
+		getIpythonKernel() {
+			runtime.assertActive();
+			return runtime.getIpythonKernel?.();
 		},
 
 		registerProvider(name: string, config: ProviderConfig) {

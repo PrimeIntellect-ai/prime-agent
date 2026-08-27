@@ -66,6 +66,7 @@ import type {
 	BashToolDetails,
 	BashToolInput,
 	EditToolInput,
+	IpythonKernelProvisioner,
 	IpythonToolDetails,
 	IpythonToolInput,
 } from "../tools/index.js";
@@ -308,6 +309,12 @@ export interface ExtensionContext {
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string;
+	/**
+	 * Access the agent's shared IPython kernel provisioner (the same kernel
+	 * the `ipython` tool executes on). Returns undefined when no session
+	 * runtime with an IPython kernel is active.
+	 */
+	getIpythonKernel?(): IpythonKernelProvisioner | undefined;
 }
 
 /**
@@ -1101,6 +1108,24 @@ export interface ExtensionAPI {
 	/** Set the active tools by name. */
 	setActiveTools(toolNames: string[]): void;
 
+	/**
+	 * Access the agent's shared IPython kernel provisioner (the same kernel
+	 * the `ipython` tool executes on), so extensions can run code without
+	 * provisioning their own kernel.
+	 *
+	 * Returns undefined when no session runtime with an IPython kernel is
+	 * active (e.g. hosts that never built one). Throws when called during
+	 * extension loading, before the session runtime is bound.
+	 *
+	 * @example
+	 * const provisioner = pi.getIpythonKernel?.();
+	 * if (provisioner) {
+	 *   const manager = await provisioner.ensure();
+	 *   const result = await manager.execute("print('hello from extension')");
+	 * }
+	 */
+	getIpythonKernel?(): IpythonKernelProvisioner | undefined;
+
 	/** Get available slash commands in the current session. */
 	getCommands(): SlashCommandInfo[];
 	/** Set the current model. Returns false if no API key available. */
@@ -1356,6 +1381,12 @@ export interface ExtensionActions {
 	setModel: SetModelHandler;
 	getThinkingLevel: GetThinkingLevelHandler;
 	setThinkingLevel: SetThinkingLevelHandler;
+	/**
+	 * Get the host session's shared IPython kernel provisioner, or undefined
+	 * when the host has no active kernel runtime. Optional so hosts without
+	 * an IPython kernel can still bind the core actions.
+	 */
+	getIpythonKernel?: () => IpythonKernelProvisioner | undefined;
 }
 
 /**
