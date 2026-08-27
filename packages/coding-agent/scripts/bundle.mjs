@@ -44,7 +44,8 @@ rmSync(outdir, { recursive: true, force: true });
 // bundle it (and its `@aws-sdk` closure) into the exact filename the runtime
 // specifier expects, without changing the lazy, on-first-use loading behavior
 // for ordinary startup.
-const bedrockEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai/bedrock-provider"));
+const bedrockProviderShimEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-ai/bedrock-provider"));
+const bedrockEntry = join(dirname(bedrockProviderShimEntry), "providers", "amazon-bedrock.js");
 
 await build({
 	entryPoints: [
