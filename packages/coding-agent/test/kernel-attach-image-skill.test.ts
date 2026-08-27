@@ -263,8 +263,8 @@ except ValueError as error:
 		provisioner = new IpythonKernelProvisioner(tempDir, { pythonSkills: [] });
 		const manager = await provisioner.ensure();
 		const result = await manager.execute(`
-from IPython.display import display
-display({"application/vnd.prime-agent.attachment+json": {"mime_type": "image/png", "data": "A" * 10_000_001}}, raw=True)
+from rlm import emit
+emit({"application/vnd.prime-agent.attachment+json": {"mime_type": "image/png", "data": "A" * 10_000_001}})
 print("done")
 `);
 

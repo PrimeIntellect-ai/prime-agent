@@ -1524,7 +1524,7 @@ const active = pi.getActiveTools();
 const all = pi.getAllTools();
 // [{
 //   name: "ipython",
-//   description: "Execute Python code in a persistent IPython kernel...",
+//   description: "Execute Python code in a persistent Python REPL...",
 //   parameters: ..., 
 //   sourceInfo: { path: "<builtin:ipython>", source: "builtin", scope: "temporary", origin: "top-level" }
 // }, ...]

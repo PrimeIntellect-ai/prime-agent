@@ -186,7 +186,7 @@ function formatGenericMcpGuidance(servers: string[] | undefined): string {
 	return [
 		"# Generic MCP Connections",
 		"",
-		"Generic MCP connections are accessed through the pre-imported Python `mcp` object in IPython, not as top-level native tool namespaces or installed Python skills.",
+		"Generic MCP connections are accessed through the pre-imported Python `mcp` object in the Python REPL, not as top-level native tool namespaces or installed Python skills.",
 		`Enabled generic MCP servers: ${enabledServers.map((server) => `\`${server}\``).join(", ")}.`,
 		...enabledServers.map(
 			(server) =>
