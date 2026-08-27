@@ -660,6 +660,9 @@ def bash(command: str) -> BashHandle:
     POSIX; a kill-on-close job object on Windows entered while the child is
     still suspended, so no descendant can escape it and kill()/crash cleanup
     are unconditional -- bash() raises if containment cannot be established.
+    Output written after the completion fence (e.g. by an EXIT trap or a
+    background job) is not in BashResult.output but stays visible via
+    handle.output()/tail().
     """
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
