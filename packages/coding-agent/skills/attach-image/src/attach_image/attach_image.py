@@ -192,15 +192,14 @@ def _resize_image(filepath: Path, mime_type: str, size: int, dimensions: tuple[i
 
 
 def _emit_attachment(filepath: Path, mime_type: str, size: int, dimensions: tuple[int, int]) -> str | None:
-    from IPython.display import display
+    from rlm import emit
 
     data_b64, emitted_mime_type, resize_note = _resize_image(filepath, mime_type, size, dimensions)
-    display(
+    emit(
         {
             _ATTACHMENT_DISPLAY_MIME: {"mime_type": emitted_mime_type, "data": data_b64, "path": str(filepath)},
             "text/plain": f"Loaded image into context: {filepath}",
-        },
-        raw=True,
+        }
     )
     return resize_note
 
