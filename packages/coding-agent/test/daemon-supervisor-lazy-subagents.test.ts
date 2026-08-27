@@ -20,7 +20,7 @@ interface SupervisorInternals {
 	findSummaryInWorker(worker: WorkerFixture, selector: string): SessionSummary | undefined;
 	createOrReuseWorker(
 		clientId: string,
-		command: { type: "create"; name?: string; sessionPath?: string },
+		command: { type: "create"; name?: string; sessionPath?: string; lifecycle?: "client_owned" },
 	): Promise<WorkerFixture>;
 	assertSupervisorSavedSessionNameAvailable(sessionPath: string, name: string): Promise<void>;
 	assertSavedSiblingNameAvailable(
@@ -348,6 +348,69 @@ describe("daemon supervisor passive subagent topology", () => {
 		releaseSiblings();
 		expect(await Promise.all([first, second])).toEqual([resident, resident]);
 		expect(launchWorker).toHaveBeenCalledOnce();
+	});
+
+	it("enforces session ownership when joining an in-flight open", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-pending-owner-"));
+		tempDirs.push(directory);
+		const sessionPath = join(directory, "session.jsonl");
+		let releaseLaunch!: () => void;
+		const launchGate = new Promise<void>((resolve) => {
+			releaseLaunch = resolve;
+		});
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorInternals;
+		const resident = worker("opened");
+		resident.descriptor.ownerClientId = "owner";
+		const launchWorker = vi.fn(async () => {
+			await launchGate;
+			return resident;
+		});
+		Object.assign(supervisor, { launchWorker });
+
+		const create = { type: "create" as const, sessionPath, lifecycle: "client_owned" as const };
+		const first = supervisor.createOrReuseWorker("owner", create);
+		const sameOwner = supervisor.createOrReuseWorker("owner", create);
+		const otherClient = supervisor.createOrReuseWorker("intruder", create);
+		const expectations = Promise.all([
+			expect(first).resolves.toBe(resident),
+			expect(sameOwner).resolves.toBe(resident),
+			expect(otherClient).rejects.toMatchObject({ code: "session_already_active" }),
+		]);
+		releaseLaunch();
+		await expectations;
+		expect(launchWorker).toHaveBeenCalledOnce();
+	});
+
+	it("propagates an in-flight open failure to joiners", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-pending-failure-"));
+		tempDirs.push(directory);
+		const sessionPath = join(directory, "session.jsonl");
+		let releaseLaunch!: () => void;
+		const launchGate = new Promise<void>((resolve) => {
+			releaseLaunch = resolve;
+		});
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorInternals;
+		const launchWorker = vi.fn(async () => {
+			await launchGate;
+			throw new Error("launch exploded");
+		});
+		Object.assign(supervisor, { launchWorker });
+
+		const create = { type: "create" as const, sessionPath, lifecycle: "client_owned" as const };
+		const first = supervisor.createOrReuseWorker("owner", create);
+		const joiner = supervisor.createOrReuseWorker("intruder", create);
+		const expectations = Promise.all([
+			expect(first).rejects.toThrow("launch exploded"),
+			expect(joiner).rejects.toThrow("launch exploded"),
+		]);
+		releaseLaunch();
+		await expectations;
 	});
 
 	it("uses injective structural session name reservation keys", () => {

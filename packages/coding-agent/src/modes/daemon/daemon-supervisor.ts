@@ -2264,7 +2264,9 @@ export class DaemonSupervisor {
 			: `new:${command.id ? createCommandIdempotencyKey(clientId, command.id) : createActiveSessionId()}`;
 		const pending = this.openingWorkers.get(key);
 		if (pending) {
-			return pending;
+			const worker = await pending;
+			this.assertWorkerCreateOwner(worker, ownerClientId, createCommand.sessionPath ?? key);
+			return worker;
 		}
 		if (createCommand.sessionPath) {
 			const existing = this.findWorkerBySessionFile(createCommand.sessionPath);
@@ -2309,9 +2311,7 @@ export class DaemonSupervisor {
 				`Session "${sessionPath}" is registered to a failed worker that could not be safely reclaimed`,
 			);
 		}
-		if (worker.descriptor.ownerClientId !== ownerClientId) {
-			throw new SessionAlreadyActiveError(sessionPath, worker.descriptor.rootActiveSessionId);
-		}
+		this.assertWorkerCreateOwner(worker, ownerClientId, sessionPath);
 		if (!this.isWorkerReadyForCreate(worker)) {
 			if (worker.recovery) {
 				await worker.recovery;
@@ -2323,9 +2323,7 @@ export class DaemonSupervisor {
 		if (!current) {
 			throw new Error(`Session "${sessionPath}" worker recovery was interrupted; retry opening the session`);
 		}
-		if (current.descriptor.ownerClientId !== ownerClientId) {
-			throw new SessionAlreadyActiveError(sessionPath, current.descriptor.rootActiveSessionId);
-		}
+		this.assertWorkerCreateOwner(current, ownerClientId, sessionPath);
 		if (!this.isWorkerReadyForCreate(current)) {
 			if (!current.summaries.has(current.descriptor.rootActiveSessionId)) {
 				throw new Error(
@@ -2336,6 +2334,16 @@ export class DaemonSupervisor {
 			throw new Error(`Session "${sessionPath}" worker is ${this.effectiveWorkerState(current)}${detail}`);
 		}
 		return current;
+	}
+
+	private assertWorkerCreateOwner(
+		worker: ResidentWorker,
+		ownerClientId: string | undefined,
+		sessionPath: string,
+	): void {
+		if (worker.descriptor.ownerClientId !== ownerClientId) {
+			throw new SessionAlreadyActiveError(sessionPath, worker.descriptor.rootActiveSessionId);
+		}
 	}
 
 	private isWorkerReadyForCreate(worker: ResidentWorker): boolean {
