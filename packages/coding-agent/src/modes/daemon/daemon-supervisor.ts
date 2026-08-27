@@ -168,6 +168,7 @@ const WORKER_STARTUP_GATE_FD = 3;
 const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
 	"list",
+	"list_agent_peers",
 	"list_saved_sessions",
 	"create",
 	"attach",
@@ -1540,7 +1541,10 @@ export class DaemonSupervisor {
 				const peers = [...this.workers.values()]
 					.filter(
 						(worker) =>
-							worker !== requester && this.isLiveWorker(worker) && worker.descriptor.lifecycle === "ready",
+							worker !== requester &&
+							this.isLiveWorker(worker) &&
+							worker.descriptor.lifecycle === "ready" &&
+							worker.client !== undefined,
 					)
 					.flatMap((worker) => {
 						const root = worker.summaries.get(worker.descriptor.rootActiveSessionId);
