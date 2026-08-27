@@ -36,9 +36,10 @@ import {
 } from "../../core/cron-jobs.js";
 import {
 	clearOrphanProcessJournal,
-	isOrphanProcessIdentityCurrent,
+	killOrphanProcess,
 	ORPHAN_PROCESS_JOURNAL_ENV,
 	readActiveOrphanProcesses,
+	shouldReapOrphanProcess,
 } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
 import {
@@ -3176,19 +3177,10 @@ export class DaemonSupervisor {
 		if (orphanProcessJournalPath) {
 			try {
 				for (const orphan of readActiveOrphanProcesses(orphanProcessJournalPath, worker.descriptor.pid)) {
-					if (!isOrphanProcessIdentityCurrent(orphan)) {
+					if (!shouldReapOrphanProcess(orphan)) {
 						continue;
 					}
-					const { pid } = orphan;
-					try {
-						process.kill(-pid, "SIGKILL");
-					} catch {
-						try {
-							process.kill(pid, "SIGKILL");
-						} catch {
-							// The detached resource may already have exited.
-						}
-					}
+					killOrphanProcess(orphan.pid);
 				}
 				clearOrphanProcessJournal(orphanProcessJournalPath);
 			} catch (error) {

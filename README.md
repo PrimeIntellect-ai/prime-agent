@@ -43,7 +43,7 @@ Prime Agent is an open-source coding and research agent for general and long-run
 
 Prime Agent combines a persistent Python control environment with durable harness state, so useful working context and reusable operating patterns can outlive a single chat window.
 
-- **Everything is programmatic:** persistent IPython is the built-in model tool; file operations, shell commands, tool use, subagents, and context management happen through code.
+- **Everything is programmatic:** a persistent Python REPL is the built-in model tool; file operations, shell commands, tool use, subagents, and context management happen through code.
 - **Subagents are built in:** `rlm(...)` spawns real child agents for parallel or background work and returns their results programmatically.
 - **The harness can improve:** `/refine` reviews the current trajectory and can apply small, evidence-backed updates to supplemental harness state. It never rewrites the immutable base system prompt, and recorded snapshots support rollback.
 - **Skills are executable:** skills are importable Python packages, and the built-in skill creator can turn recurring workflows into project or personal skills.
@@ -59,7 +59,7 @@ Install the latest stable release on macOS or Linux:
 curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
-The installer downloads a versioned release, verifies its SHA-256 checksum, installs the `prime-agent` command, and can prepare the IPython runtime used by the agent.
+The installer downloads a versioned release, verifies its SHA-256 checksum, installs the `prime-agent` command, and can prepare the Python runtime used by the agent.
 
 Start Prime Agent from the repository or directory you want it to work in:
 
@@ -90,7 +90,7 @@ Prime Agent is built for long-running work, especially for evaluations in resear
 
 - **Continual Harness:** `/refine` can persist focused, reviewable lessons as supplemental prompts, memories, reusable skill descriptions, or subagent specifications, with recorded refinement history. It does not replace packaging and reviewing new executable skills.
 - **Direct agent-to-agent communication:** running agents and retained subagents can discover one another, exchange messages, and steer active work.
-- **Daemon-backed continuity:** active sessions, IPython state, schedules, and subagents keep running when the terminal detaches and can be reattached later.
+- **Daemon-backed continuity:** active sessions, Python REPL state, schedules, and subagents keep running when the terminal detaches and can be reattached later.
 - **Heartbeats and schedules:** `/heartbeat`, `rlm_heartbeat`, and `prime-agent schedule` can re-enter a session periodically or at a specific time.
 - **Persistent goals:** `/goal` keeps an objective and its progress active across turns until it is completed, paused, or cleared.
 - **Bounded autonomous mode:** `/autonomous` continues within configured turn, token, and time budgets and can run user-defined quality gates. A passed gate checks only what that gate verifies; reaching a limit does not imply task success.
@@ -100,7 +100,7 @@ Prime Agent is built for long-running work, especially for evaluations in resear
 - [Quickstart](packages/coding-agent/docs/quickstart.md) — install, authenticate, and run a first session
 - [Usage and CLI reference](packages/coding-agent/docs/usage.md) — commands, sessions, autonomous limits, and output modes
 - [Long-running and background agents](packages/coding-agent/docs/long-running-agents.md) — detach and reattach, goals, heartbeats, and schedules
-- [RLM programming model](packages/coding-agent/docs/rlm.md) — persistent IPython, subagents, skills, and the trust model
+- [RLM programming model](packages/coding-agent/docs/rlm.md) — the persistent Python REPL, subagents, skills, and the trust model
 - [JSON mode](packages/coding-agent/docs/json.md) and [RPC mode](packages/coding-agent/docs/rpc.md) — headless automation and integrations
 - [Skills](packages/coding-agent/docs/skills.md) — install and create reusable capabilities
 - [Provider setup](packages/coding-agent/docs/providers.md) — subscription and API-key providers

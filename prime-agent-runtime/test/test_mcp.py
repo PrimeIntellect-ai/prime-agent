@@ -683,42 +683,6 @@ class McpRegistryTest(unittest.TestCase):
 
         run(scenario())
 
-    def test_shutdown_hook_supports_synchronous_kernel_handler(self):
-        class Kernel:
-            def __init__(self):
-                self._prime_agent_mcp_shutdown = False
-
-            def do_shutdown(self, restart):
-                return {"status": "ok", "restart": restart}
-
-        kernel = Kernel()
-        shell = SimpleNamespace(kernel=kernel)
-
-        async def scenario():
-            with mock.patch.object(mcp, "get_ipython", create=True, return_value=shell):
-                mcp.install_shutdown_hook()
-            with mock.patch.object(mcp, "close", mock.AsyncMock()) as close:
-                self.assertEqual(await kernel.do_shutdown(False), {"status": "ok", "restart": False})
-            close.assert_awaited_once()
-
-        run(scenario())
-
-    def test_shutdown_hook_runs_kernel_handler_when_mcp_close_fails(self):
-        original = mock.AsyncMock(return_value={"status": "ok", "restart": False})
-        kernel = SimpleNamespace(_prime_agent_mcp_shutdown=False, do_shutdown=original)
-        shell = SimpleNamespace(kernel=kernel)
-
-        async def scenario():
-            with mock.patch.object(mcp, "get_ipython", create=True, return_value=shell):
-                mcp.install_shutdown_hook()
-            with mock.patch.object(mcp, "close", mock.AsyncMock(side_effect=TimeoutError("close deadline"))):
-                with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
-                    self.assertEqual(await kernel.do_shutdown(False), {"status": "ok", "restart": False})
-                    self.assertIn("MCP shutdown failed: TimeoutError: close deadline", stderr.getvalue())
-            original.assert_awaited_once_with(False)
-
-        run(scenario())
-
     def test_close_waits_for_inflight_startup(self):
         started = asyncio.Event()
         release = asyncio.Event()
