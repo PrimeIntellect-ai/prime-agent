@@ -1,5 +1,10 @@
 import type { AutoresearchState, AutoresearchStopGate } from "../autoresearch.js";
 import { deriveAvoEvaluation, evaluateGenericAvoStopGate, isAuthoritativeAvoEvaluation } from "./evaluator.js";
+import {
+	deriveAvoExperimentOutcome,
+	digestAvoExperimentCandidateIdentity,
+	digestAvoExperimentValue,
+} from "./experiment.js";
 import type {
 	AvoCandidate,
 	AvoDashboardProjection,
@@ -10,7 +15,7 @@ import type {
 	AvoRunState,
 	AvoStopGate,
 } from "./types.js";
-import { AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION } from "./types.js";
+import { AVO_EXPERIMENT_INFERENCE_VERSION } from "./types.js";
 
 export interface AvoEnvironmentAdapter<TAdapterState = unknown> {
 	id: AvoEnvironment;
@@ -64,6 +69,95 @@ function genericProgress(state: AvoRunState): AvoProgressSignals {
 		openCandidates: state.candidates.filter((candidate) => !cycled.has(candidate.candidateId)).length,
 		latestFailure: [...state.cycles].reverse().find((cycle) => cycle.failureSignature)?.failureSignature,
 	};
+}
+
+function experimentAndCandidates(
+	state: AvoRunState,
+	experimentId: string,
+): { experiment: AvoRunState["experiments"][number]; candidates: AvoCandidate[] } | undefined {
+	const current = state.experiments.find((experiment) => experiment.experimentId === experimentId);
+	if (current) return { experiment: current, candidates: state.candidates };
+	for (const run of [...state.taskRuns].reverse()) {
+		const experiment = run.experiments.find((item) => item.experimentId === experimentId);
+		if (experiment) return { experiment, candidates: run.candidates };
+	}
+	return undefined;
+}
+
+function isCurrentPolicyConfirmation(experiment: AvoRunState["experiments"][number], state: AvoRunState): boolean {
+	const plan = experiment.plan;
+	const outcome = experiment.outcome;
+	if (
+		experiment.status !== "completed" ||
+		plan?.stage !== "confirmation" ||
+		outcome?.stage !== "confirmation" ||
+		outcome.inferenceVersion !== AVO_EXPERIMENT_INFERENCE_VERSION ||
+		!outcome.championCandidateId ||
+		!plan.confirmationOfExperimentId ||
+		!plan.confirmationCandidateIdentityDigests ||
+		!outcome.confirmationCandidateIdentityDigests ||
+		plan.candidateIds.length !== 2
+	) {
+		return false;
+	}
+	const identityDigests = plan.confirmationCandidateIdentityDigests;
+	if (
+		Object.keys(identityDigests).length !== 2 ||
+		Object.values(identityDigests).some((digest) => !/^[a-f0-9]{64}$/.test(digest)) ||
+		digestAvoExperimentValue(identityDigests) !==
+			digestAvoExperimentValue(outcome.confirmationCandidateIdentityDigests)
+	) {
+		return false;
+	}
+	const sourceRecord = experimentAndCandidates(state, plan.confirmationOfExperimentId);
+	if (
+		!sourceRecord ||
+		sourceRecord.experiment.status !== "completed" ||
+		sourceRecord.experiment.plan?.stage !== "screening" ||
+		sourceRecord.experiment.outcome?.stage !== "screening" ||
+		sourceRecord.experiment.outcome.inferenceVersion !== AVO_EXPERIMENT_INFERENCE_VERSION
+	) {
+		return false;
+	}
+	const sourcePlan = sourceRecord.experiment.plan;
+	const requiredCandidates = [
+		sourcePlan.baselineCandidateId,
+		sourceRecord.experiment.outcome.provisionalBestCandidateId,
+	].sort();
+	if (
+		requiredCandidates.some((candidateId) => !candidateId) ||
+		plan.candidateIds
+			.slice()
+			.sort()
+			.some((candidateId, index) => candidateId !== requiredCandidates[index]) ||
+		plan.baselineCandidateId !== sourcePlan.baselineCandidateId ||
+		plan.primaryMetric !== sourcePlan.primaryMetric ||
+		plan.metricDirection !== sourcePlan.metricDirection ||
+		digestAvoExperimentValue(plan.conditions) !== digestAvoExperimentValue(sourcePlan.conditions)
+	) {
+		return false;
+	}
+	for (const candidateId of plan.candidateIds) {
+		const currentCandidate = state.candidates.find((candidate) => candidate.candidateId === candidateId);
+		const sourceCandidate = sourceRecord.candidates.find((candidate) => candidate.candidateId === candidateId);
+		if (
+			!currentCandidate ||
+			!sourceCandidate ||
+			digestAvoExperimentCandidateIdentity(currentCandidate) !== identityDigests[candidateId] ||
+			digestAvoExperimentCandidateIdentity(sourceCandidate) !== identityDigests[candidateId]
+		) {
+			return false;
+		}
+	}
+	try {
+		const recomputed = deriveAvoExperimentOutcome(
+			experiment,
+			state.trials.filter((trial) => trial.experimentId === experiment.experimentId),
+		);
+		return recomputed.aggregateDigest === outcome.aggregateDigest;
+	} catch {
+		return false;
+	}
 }
 
 function requireTrajectoryVerification(
@@ -130,17 +224,22 @@ function shortDashboardReference(value: string | undefined): string {
 function experimentDashboardItems(
 	experiment: AvoRunState["experiments"][number] | undefined,
 	trials: AvoRunState["trials"],
+	state: AvoRunState,
 ): AvoDashboardItem[] {
 	if (!experiment) {
 		return [{ label: "Latest experiment", value: "No experiment recorded", status: "neutral" }];
 	}
 	const plan = experiment.plan;
 	const outcome = experiment.outcome;
+	const currentPolicyEligible =
+		plan?.stage !== "confirmation" ||
+		experiment.status !== "completed" ||
+		isCurrentPolicyConfirmation(experiment, state);
 	const items: AvoDashboardItem[] = [
 		{
 			label: "Latest experiment",
 			value: `${experiment.title} · ${experiment.status}`,
-			status: experiment.status === "completed" ? "ok" : "neutral",
+			status: experiment.status === "completed" ? (currentPolicyEligible ? "ok" : "watch") : "neutral",
 		},
 		{
 			label: "Latest plan coverage",
@@ -152,11 +251,21 @@ function experimentDashboardItems(
 		{
 			label: "Experiment plan",
 			value: plan
-				? `${plan.primaryMetric} · ${plan.metricDirection} · ${plan.pairing}${plan.baselineCandidateId ? ` · baseline ${plan.baselineCandidateId}` : ""}`
+				? `${plan.stage} · ${plan.primaryMetric} · ${plan.metricDirection} · ${plan.pairing}${plan.baselineCandidateId ? ` · baseline ${plan.baselineCandidateId}` : ""}${plan.confirmationOfExperimentId ? ` · confirms ${plan.confirmationOfExperimentId}` : ""}`
 				: "No structured plan recorded",
 			status: "neutral",
 		},
 	];
+	if (plan?.confirmationCandidateIdentityDigests) {
+		items.push({
+			label: "Screening identity bindings",
+			value: Object.entries(plan.confirmationCandidateIdentityDigests)
+				.sort(([left], [right]) => left.localeCompare(right))
+				.map(([candidateId, digest]) => `${candidateId}=${shortDashboardReference(digest)}`)
+				.join(" · "),
+			status: "ok",
+		});
+	}
 	for (const aggregate of outcome?.candidateAggregates ?? []) {
 		const metric = aggregate.metric;
 		items.push({
@@ -170,27 +279,34 @@ function experimentDashboardItems(
 			label: `Paired ${comparison.candidateId} vs ${comparison.baselineCandidateId}`,
 			value: `Δ mean ${formatDashboardNumber(comparison.delta.mean)} · ${formatDashboardConfidenceInterval(comparison.delta)} · W/L/T ${comparison.wins}/${comparison.losses}/${comparison.ties} · win rate ${formatDashboardNumber(comparison.winRate * 100)}%`,
 			status:
-				comparison.delta.count >= AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION &&
+				outcome?.stage === "confirmation" &&
+				currentPolicyEligible &&
+				comparison.delta.count >= outcome.minimumPairedObservationsForPromotion &&
 				comparison.favorableCi95Low !== null &&
-				comparison.favorableCi95Low > 0
+				comparison.favorableCi95Low > (outcome.requiredMinimumEffect ?? 0)
 					? "ok"
 					: "watch",
 		});
 	}
 	items.push({
 		label: "Statistical policy",
-		value: outcome?.inferenceVersion
-			? `Student-t 95% intervals · automatic promotion requires ${outcome.minimumPairedObservationsForPromotion} pairs · ${outcome.inferenceVersion}`
-			: "Legacy interval policy · rerun to apply Student-t inference and the five-pair promotion floor",
-		status: outcome?.inferenceVersion ? "ok" : outcome ? "watch" : "neutral",
+		value: !currentPolicyEligible
+			? "superseded confirmation · missing or inconsistent current-policy candidate identity / aggregate binding"
+			: outcome?.stage === "screening"
+				? `screening ranks only · provisional ${outcome.provisionalBestCandidateId ?? "none"} · fresh confirmation required · ${outcome.inferenceVersion}`
+				: outcome?.stage === "confirmation"
+					? `Student-t 95% lower bound must exceed ${formatDashboardNumber(outcome.requiredMinimumEffect ?? 0)} · ≥${outcome.minimumPairedObservationsForPromotion} fresh pairs · absolute ${formatDashboardNumber(outcome.minimumAbsoluteEffectForPromotion)} · relative ${formatDashboardNumber(outcome.minimumRelativeEffectForPromotion * 100)}% · ${outcome.inferenceVersion}`
+					: "Legacy interval policy · rerun with a screening stage and fresh confirmatory promotion",
+		status: !currentPolicyEligible ? "watch" : outcome?.stage ? "ok" : outcome ? "watch" : "neutral",
 	});
 	items.push({
 		label: "Host experiment outcome",
 		value: outcome
-			? `${outcome.decision}${outcome.championCandidateId ? ` · champion ${outcome.championCandidateId}` : ""} · ${outcome.reason}`
+			? `${currentPolicyEligible ? "" : "current-policy ineligible · recorded "}${outcome.decision}${outcome.provisionalBestCandidateId ? ` · provisional ${outcome.provisionalBestCandidateId}` : ""}${outcome.championCandidateId ? ` · champion ${outcome.championCandidateId}` : ""} · ${outcome.reason}`
 			: "No aggregate outcome yet",
-		status:
-			outcome?.decision === "promote" || outcome?.decision === "retain"
+		status: !currentPolicyEligible
+			? "watch"
+			: outcome?.decision === "promote" || outcome?.decision === "retain"
 				? "ok"
 				: experiment.status === "completed"
 					? "watch"
@@ -311,7 +427,7 @@ function genericProjection(
 			{
 				id: "experiments",
 				title: "Experiments",
-				items: experimentDashboardItems(latestExperiment, latestExperimentTrials),
+				items: experimentDashboardItems(latestExperiment, latestExperimentTrials, state),
 			},
 			{
 				id: "memory",
@@ -364,7 +480,37 @@ abstract class BaseAdapter implements AvoEnvironmentAdapter {
 		}
 	}
 
-	deriveEvaluationState(_candidate: AvoCandidate, receipts: readonly AvoEvaluationReceipt[], _state: AvoRunState) {
+	private experimentDecisionConstraint(candidate: AvoCandidate, state: AvoRunState): string | undefined {
+		const experiments = state.experiments.filter(
+			(item) =>
+				item.plan?.candidateIds.includes(candidate.candidateId) === true &&
+				(!item.outcome || item.outcome.inferenceVersion === AVO_EXPERIMENT_INFERENCE_VERSION),
+		);
+		const latestConfirmation = [...experiments].reverse().find((item) => isCurrentPolicyConfirmation(item, state));
+		if (latestConfirmation?.outcome?.championCandidateId) {
+			return latestConfirmation.outcome.championCandidateId === candidate.candidateId
+				? undefined
+				: `host confirmation selected ${latestConfirmation.outcome.championCandidateId}, not ${candidate.candidateId}`;
+		}
+		const comparativeScreening = [...experiments]
+			.reverse()
+			.find(
+				(item) =>
+					item.plan?.stage === "screening" &&
+					item.plan.candidateIds.length > 1 &&
+					item.plan.baselineCandidateId !== candidate.candidateId,
+			);
+		if (!comparativeScreening) return undefined;
+		return comparativeScreening.status === "completed"
+			? `screening candidate ${candidate.candidateId} is provisional only; a fresh completed confirmation must promote it`
+			: `screening candidate ${candidate.candidateId} cannot be canonical before screening and fresh confirmation complete`;
+	}
+
+	deriveEvaluationState(candidate: AvoCandidate, receipts: readonly AvoEvaluationReceipt[], state: AvoRunState) {
+		const experimentConstraint = this.experimentDecisionConstraint(candidate, state);
+		if (experimentConstraint) {
+			return { status: "revise" as const, canonical: false, reasons: [experimentConstraint] };
+		}
 		const derived = deriveAvoEvaluation(receipts);
 		return { status: derived.status, canonical: derived.canonical, reasons: derived.reasons };
 	}

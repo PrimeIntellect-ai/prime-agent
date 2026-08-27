@@ -30,7 +30,8 @@ class AvoSkillTest(unittest.TestCase):
         self.assertIn("callers may issue only model_opinion", contract["canonical_rule"])
         self.assertIn("every factual claim", contract["factual_claim_rule"])
         self.assertIn("cannot certify themselves", contract["coding_test_rule"])
-        self.assertIn("structured prospective plan", contract["experiment_rule"])
+        self.assertIn("screening experiments rank only", contract["experiment_rule"])
+        self.assertIn("positive preregistered meaningful-effect threshold", contract["experiment_rule"])
         self.assertEqual(contract["horizons"], ["direct", "iterative", "long"])
 
     def test_initialize_uses_the_host_routed_runtime(self) -> None:
@@ -44,7 +45,8 @@ class AvoSkillTest(unittest.TestCase):
             host.await_args_list[0].args[1],
             {"objective": "Fix the parser"},
         )
-        self.assertEqual(result["execution_contract"]["contract_version"], 8)
+        self.assertEqual(result["execution_contract"]["contract_version"], 9)
+        self.assertIn("unused seeds", result["execution_contract"]["experiment_rule"])
 
     def test_coding_baseline_runs_through_the_host_before_candidate_work(self) -> None:
         module = load_skill("avo_coding_baseline_test")

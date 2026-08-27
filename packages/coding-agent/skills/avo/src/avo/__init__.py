@@ -10,7 +10,7 @@ from rlm import host_request
 
 def execution_contract() -> dict[str, Any]:
     return {
-        "contract_version": 8,
+        "contract_version": 9,
         "forbid_runtime_introspection": True,
         "host_enforces_completion_and_canonical_delivery": True,
         "environments": ["general", "coding", "research"],
@@ -71,9 +71,10 @@ def execution_contract() -> dict[str, Any]:
             "filenames are not identity proof"
         ),
         "experiment_rule": (
-            "record a structured prospective plan before trials; the host renders and hashes "
-            "each candidate/condition/seed command, requires exact grid coverage, derives "
-            "aggregate statistics, and alone issues champion promotion decisions"
+            "screening experiments rank only; promotion requires a separate prospective "
+            "two-candidate confirmation against the same baseline and conditions, with unused "
+            "seeds and a positive preregistered meaningful-effect threshold; the host renders "
+            "and hashes every cell and alone issues confirmatory champion decisions"
         ),
     }
 

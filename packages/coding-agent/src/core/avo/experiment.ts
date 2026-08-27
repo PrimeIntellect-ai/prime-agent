@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { classifyAvoHostEvaluationCommand } from "./evaluator.js";
 import type {
+	AvoCandidate,
 	AvoCandidateAggregate,
 	AvoConditionAggregate,
 	AvoConditionPairedComparison,
@@ -114,6 +115,12 @@ function experimentSeed(value: string | number): string {
 	return markerSafe(value, "experiment seed");
 }
 
+function nonNegativeFinite(value: number | undefined, fallback: number, label: string): number {
+	const resolved = value ?? fallback;
+	if (!Number.isFinite(resolved) || resolved < 0) throw new Error(`${label} must be a finite non-negative number`);
+	return resolved;
+}
+
 function stableJson(value: unknown): string {
 	if (value === undefined) return "null";
 	if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -126,6 +133,18 @@ function stableJson(value: unknown): string {
 
 export function digestAvoExperimentValue(value: unknown): string {
 	return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+export function digestAvoExperimentCandidateIdentity(candidate: AvoCandidate): string {
+	return digestAvoExperimentValue({
+		kind: candidate.kind,
+		payloadDigest: candidate.payloadDigest,
+		deterministicResult: candidate.deterministicResult ?? null,
+		artifactTargetDigest: candidate.artifactTargetDigest ?? null,
+		claims: [...(candidate.claims ?? [])].sort((left, right) => left.claimId.localeCompare(right.claimId)),
+		workspaceDigest: candidate.workspaceDigest ?? null,
+		workspaceMode: candidate.workspaceMode ?? null,
+	});
 }
 
 function scalarParameters(
@@ -236,6 +255,8 @@ export function normalizeAvoExperimentPlan(
 	if (mode !== "prospective" && mode !== "retrospective") throw new Error("experiment mode is invalid");
 	const pairing = input.pairing ?? "paired";
 	if (pairing !== "paired" && pairing !== "independent") throw new Error("experiment pairing is invalid");
+	const stage = input.stage ?? "screening";
+	if (stage !== "screening" && stage !== "confirmation") throw new Error("experiment stage is invalid");
 	if (input.metricDirection !== "maximize" && input.metricDirection !== "minimize") {
 		throw new Error("experiment metric_direction must be maximize or minimize");
 	}
@@ -247,7 +268,59 @@ export function normalizeAvoExperimentPlan(
 	}
 	const expectedTrials = candidateIds.length * conditions.length * seeds.length;
 	if (expectedTrials > 1_024) throw new Error("experiment plan exceeds the 1024-trial host limit");
+	const pairedObservations = conditions.length * seeds.length;
+	const minimumPairedObservations =
+		input.promotion?.minimumPairedObservations ?? AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION;
+	if (
+		!Number.isSafeInteger(minimumPairedObservations) ||
+		minimumPairedObservations < AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION ||
+		minimumPairedObservations > 1_024
+	) {
+		throw new Error(
+			`experiment promotion.min_pairs must be an integer from ${AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION} to 1024`,
+		);
+	}
+	const minimumAbsoluteEffect = nonNegativeFinite(
+		input.promotion?.minimumAbsoluteEffect,
+		0,
+		"experiment promotion.min_effect",
+	);
+	const minimumRelativeEffect = nonNegativeFinite(
+		input.promotion?.minimumRelativeEffect,
+		0,
+		"experiment promotion.min_relative_effect",
+	);
+	const confirmationOfExperimentId = input.confirmationOfExperimentId
+		? markerSafe(input.confirmationOfExperimentId, "confirmation_of_experiment_id")
+		: undefined;
+	if (stage === "screening") {
+		if (confirmationOfExperimentId) {
+			throw new Error("screening experiments cannot declare confirmation_of_experiment_id");
+		}
+		if (input.promotion !== undefined) {
+			throw new Error("screening experiments rank candidates only and cannot declare a promotion policy");
+		}
+	} else {
+		if (mode !== "prospective") throw new Error("confirmation experiments must be prospective");
+		if (pairing !== "paired") throw new Error("confirmation experiments must use paired observations");
+		if (candidateIds.length !== 2 || !baselineCandidateId) {
+			throw new Error("confirmation experiments require exactly one baseline and one challenger");
+		}
+		if (!confirmationOfExperimentId) {
+			throw new Error("confirmation experiments require confirmation_of_experiment_id");
+		}
+		if (!input.promotion) throw new Error("confirmation experiments require a promotion policy");
+		if (minimumAbsoluteEffect === 0 && minimumRelativeEffect === 0) {
+			throw new Error("confirmation promotion requires a positive min_effect or min_relative_effect");
+		}
+		if (minimumPairedObservations > pairedObservations) {
+			throw new Error(
+				`confirmation plan has ${pairedObservations} matched cells but requires ${minimumPairedObservations} paired observations`,
+			);
+		}
+	}
 	const plan: AvoExperimentPlan = {
+		stage,
 		mode,
 		candidateIds,
 		conditions,
@@ -256,6 +329,12 @@ export function normalizeAvoExperimentPlan(
 		primaryMetric: metricName(input.primaryMetric),
 		metricDirection: input.metricDirection,
 		baselineCandidateId,
+		confirmationOfExperimentId,
+		promotion: {
+			minimumPairedObservations,
+			minimumAbsoluteEffect,
+			minimumRelativeEffect,
+		},
 		expectedTrials,
 	};
 	for (const condition of conditions) {
@@ -500,30 +579,51 @@ export function deriveAvoExperimentOutcome(
 			}
 		}
 	}
+	const provisionalBestCandidateId = ranking[0];
 	let championCandidateId: string | undefined;
 	let decision: AvoExperimentOutcome["decision"] = "inconclusive";
-	let reason = "a single candidate or independent design does not support host-issued champion promotion";
-	if (plan.candidateIds.length > 1 && plan.pairing === "paired" && plan.baselineCandidateId) {
+	let reason =
+		plan.candidateIds.length > 1
+			? "screening ranked a provisional best candidate; host promotion requires a fresh two-candidate confirmation experiment"
+			: "a single-candidate screening experiment cannot issue a champion decision";
+	let requiredMinimumEffect: number | undefined;
+	if (
+		plan.stage === "confirmation" &&
+		plan.candidateIds.length === 2 &&
+		plan.pairing === "paired" &&
+		plan.baselineCandidateId
+	) {
+		const baselineAggregate = candidateAggregates.find(
+			(aggregate) => aggregate.candidateId === plan.baselineCandidateId,
+		)!;
+		requiredMinimumEffect = Math.max(
+			plan.promotion.minimumAbsoluteEffect,
+			Math.abs(baselineAggregate.metric.mean) * plan.promotion.minimumRelativeEffect,
+		);
 		const top = ranking[0]!;
 		if (top === plan.baselineCandidateId) {
 			championCandidateId = plan.baselineCandidateId;
 			decision = "retain";
-			reason = "the preregistered baseline retained the best aggregate primary metric";
+			reason = "the preregistered baseline retained the best confirmatory aggregate primary metric";
 		} else {
 			const comparison = pairedComparisons.find((item) => item.candidateId === top)!;
-			if (comparison.delta.count < AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION) {
+			if (requiredMinimumEffect <= 0) {
 				championCandidateId = plan.baselineCandidateId;
 				decision = "retain";
-				reason = `the challenger has ${comparison.delta.count} paired observations; automatic promotion requires at least ${AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION}`;
-			} else if (comparison.favorableCi95Low !== null && comparison.favorableCi95Low > 0) {
+				reason =
+					"the relative meaningful-effect threshold resolves to zero at the confirmatory baseline; preregister a positive absolute effect to permit promotion";
+			} else if (comparison.delta.count < plan.promotion.minimumPairedObservations) {
+				championCandidateId = plan.baselineCandidateId;
+				decision = "retain";
+				reason = `the challenger has ${comparison.delta.count} paired observations; automatic promotion requires at least ${plan.promotion.minimumPairedObservations}`;
+			} else if (comparison.favorableCi95Low !== null && comparison.favorableCi95Low > requiredMinimumEffect) {
 				championCandidateId = top;
 				decision = "promote";
-				reason =
-					"the top challenger improved the paired primary metric with a positive Student-t 95% confidence interval and sufficient paired evidence";
+				reason = `the preregistered challenger cleared the Student-t 95% lower bound, ${plan.promotion.minimumPairedObservations}-pair floor, and meaningful-effect threshold ${requiredMinimumEffect}`;
 			} else {
 				championCandidateId = plan.baselineCandidateId;
 				decision = "retain";
-				reason = "the challenger did not clear the positive paired 95% confidence bound";
+				reason = `the challenger did not clear the paired Student-t 95% lower bound above the meaningful-effect threshold ${requiredMinimumEffect}`;
 			}
 		}
 	}
@@ -544,7 +644,15 @@ export function deriveAvoExperimentOutcome(
 	);
 	const withoutDigest: Omit<AvoExperimentOutcome, "aggregateDigest"> = {
 		inferenceVersion: AVO_EXPERIMENT_INFERENCE_VERSION,
-		minimumPairedObservationsForPromotion: AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION,
+		stage: plan.stage,
+		confirmationOfExperimentId: plan.confirmationOfExperimentId,
+		confirmationCandidateIdentityDigests: plan.confirmationCandidateIdentityDigests
+			? structuredClone(plan.confirmationCandidateIdentityDigests)
+			: undefined,
+		minimumPairedObservationsForPromotion: plan.promotion.minimumPairedObservations,
+		minimumAbsoluteEffectForPromotion: plan.promotion.minimumAbsoluteEffect,
+		minimumRelativeEffectForPromotion: plan.promotion.minimumRelativeEffect,
+		requiredMinimumEffect,
 		primaryMetric: plan.primaryMetric,
 		metricDirection: plan.metricDirection,
 		candidateAggregates,
@@ -552,6 +660,7 @@ export function deriveAvoExperimentOutcome(
 		pairedComparisons,
 		conditionPairedComparisons,
 		ranking,
+		provisionalBestCandidateId,
 		championCandidateId,
 		decision,
 		reason,

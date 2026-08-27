@@ -26,6 +26,7 @@ import {
 	deriveAvoEvaluation,
 	deriveAvoExperimentOutcome,
 	digestAvoDeliveryText,
+	digestAvoExperimentValue,
 	GeneralAvoAdapter,
 	inferAvoEnvironment,
 	inferAvoHorizon,
@@ -146,6 +147,7 @@ describe("generic AVO core", () => {
 			hypothesis: "The challenger improves score.",
 			design: "Two paired seeds.",
 			plan: {
+				stage: "confirmation",
 				mode: "prospective",
 				candidateIds: ["baseline", "challenger"],
 				conditions: [
@@ -156,6 +158,12 @@ describe("generic AVO core", () => {
 				primaryMetric: "score",
 				metricDirection: "maximize",
 				baselineCandidateId: "baseline",
+				confirmationOfExperimentId: "screening-source",
+				promotion: {
+					minimumPairedObservations: 5,
+					minimumAbsoluteEffect: 1,
+					minimumRelativeEffect: 0,
+				},
 				expectedTrials: 4,
 			},
 			status: "running",
@@ -203,6 +211,7 @@ describe("generic AVO core", () => {
 			hypothesis: "The candidate has a stable score.",
 			design: "Three independent fixed seeds.",
 			plan: {
+				stage: "screening",
 				mode: "prospective",
 				candidateIds: ["candidate"],
 				conditions: [
@@ -212,6 +221,11 @@ describe("generic AVO core", () => {
 				pairing: "independent",
 				primaryMetric: "score",
 				metricDirection: "maximize",
+				promotion: {
+					minimumPairedObservations: 5,
+					minimumAbsoluteEffect: 0,
+					minimumRelativeEffect: 0,
+				},
 				expectedTrials: 3,
 			},
 			status: "running",
@@ -277,6 +291,7 @@ describe("generic AVO core", () => {
 				hypothesis: "The challenger improves score.",
 				design: `${pairCount} paired fixed seeds.`,
 				plan: {
+					stage: "confirmation",
 					mode: "prospective",
 					candidateIds: ["baseline", "challenger"],
 					conditions: [
@@ -292,6 +307,12 @@ describe("generic AVO core", () => {
 					primaryMetric: "score",
 					metricDirection: "maximize",
 					baselineCandidateId: "baseline",
+					confirmationOfExperimentId: "screening-source",
+					promotion: {
+						minimumPairedObservations: 5,
+						minimumAbsoluteEffect: 1,
+						minimumRelativeEffect: 0,
+					},
 					expectedTrials: pairCount * 2,
 				},
 				status: "running",
@@ -335,8 +356,177 @@ describe("generic AVO core", () => {
 		expect(fivePairs).toMatchObject({
 			decision: "promote",
 			championCandidateId: "challenger",
-			reason: expect.stringContaining("Student-t 95% confidence interval"),
+			reason: expect.stringContaining("Student-t 95% lower bound"),
 		});
+	});
+
+	test("keeps multi-challenger screening exploratory and ranks only a provisional winner", () => {
+		const candidates = ["baseline", "challenger-a", "challenger-b"];
+		const seeds = ["1", "2"];
+		const experiment: AvoExperiment = {
+			experimentId: "multi-challenger-screening",
+			title: "Multi-challenger screening",
+			hypothesis: "One challenger may improve score.",
+			design: "Rank two challengers without promotion.",
+			plan: {
+				stage: "screening",
+				mode: "prospective",
+				candidateIds: candidates,
+				conditions: [
+					{ conditionId: "suite", label: "Suite", parameters: {}, commandTemplate: "node bench --seed {{seed}}" },
+				],
+				seeds,
+				pairing: "paired",
+				primaryMetric: "score",
+				metricDirection: "maximize",
+				baselineCandidateId: "baseline",
+				promotion: {
+					minimumPairedObservations: 5,
+					minimumAbsoluteEffect: 0,
+					minimumRelativeEffect: 0,
+				},
+				expectedTrials: 6,
+			},
+			status: "running",
+			trialIds: [],
+			tags: [],
+			createdAt: "2026-08-27T00:00:00.000Z",
+			updatedAt: "2026-08-27T00:00:01.000Z",
+		};
+		const trials = candidates.flatMap((candidateId, candidateIndex) =>
+			seeds.map(
+				(seed): AvoTrial => ({
+					trialId: `${candidateId}-${seed}`,
+					experimentId: experiment.experimentId,
+					candidateId,
+					evaluationId: `evaluation-${candidateId}-${seed}`,
+					label: `${candidateId}/${seed}`,
+					seed,
+					conditionId: "suite",
+					status: "pass",
+					metrics: { score: candidateIndex * 10 + Number(seed) },
+					evidenceRefs: ["host:test"],
+					recordedAt: "2026-08-27T00:00:02.000Z",
+				}),
+			),
+		);
+		const outcome = deriveAvoExperimentOutcome(experiment, trials);
+		expect(outcome).toMatchObject({
+			stage: "screening",
+			decision: "inconclusive",
+			provisionalBestCandidateId: "challenger-b",
+			championCandidateId: undefined,
+			ranking: ["challenger-b", "challenger-a", "baseline"],
+		});
+		expect(outcome.reason).toContain("fresh two-candidate confirmation");
+	});
+
+	test("requires a preregistered meaningful effect for confirmatory promotion", () => {
+		const plan = normalizeAvoExperimentPlan(
+			{
+				stage: "confirmation",
+				candidateIds: ["baseline", "challenger"],
+				conditions: [{ conditionId: "suite", commandTemplate: "node candidate-benchmark.cjs --seed {{seed}}" }],
+				seeds: ["101", "102", "103", "104", "105"],
+				pairing: "paired",
+				primaryMetric: "score",
+				metricDirection: "maximize",
+				baselineCandidateId: "baseline",
+				confirmationOfExperimentId: "screening-source",
+				promotion: {
+					minimumPairedObservations: 5,
+					minimumAbsoluteEffect: 11,
+					minimumRelativeEffect: 0.05,
+				},
+			},
+			"coding",
+		);
+		const experiment: AvoExperiment = {
+			experimentId: "meaningful-effect-confirmation",
+			title: "Meaningful effect confirmation",
+			hypothesis: "The challenger improves score meaningfully.",
+			design: "Five fresh paired seeds.",
+			plan,
+			status: "running",
+			trialIds: [],
+			tags: [],
+			createdAt: "2026-08-27T00:00:00.000Z",
+			updatedAt: "2026-08-27T00:00:01.000Z",
+		};
+		const trials = plan.candidateIds.flatMap((candidateId) =>
+			plan.seeds.map(
+				(seed): AvoTrial => ({
+					trialId: `${candidateId}-${seed}`,
+					experimentId: experiment.experimentId,
+					candidateId,
+					evaluationId: `evaluation-${candidateId}-${seed}`,
+					label: `${candidateId}/${seed}`,
+					seed,
+					conditionId: "suite",
+					status: "pass",
+					metrics: { score: candidateId === "challenger" ? 110 : 100 },
+					evidenceRefs: ["host:test"],
+					recordedAt: "2026-08-27T00:00:02.000Z",
+				}),
+			),
+		);
+		const retained = deriveAvoExperimentOutcome(experiment, trials);
+		expect(retained).toMatchObject({
+			decision: "retain",
+			championCandidateId: "baseline",
+			requiredMinimumEffect: 11,
+		});
+		const promoted = deriveAvoExperimentOutcome(
+			{
+				...experiment,
+				plan: {
+					...plan,
+					promotion: { ...plan.promotion, minimumAbsoluteEffect: 9, minimumRelativeEffect: 0.05 },
+				},
+			},
+			trials,
+		);
+		expect(promoted).toMatchObject({
+			decision: "promote",
+			championCandidateId: "challenger",
+			requiredMinimumEffect: 9,
+		});
+		const zeroBaseline = deriveAvoExperimentOutcome(
+			{
+				...experiment,
+				plan: {
+					...plan,
+					promotion: { ...plan.promotion, minimumAbsoluteEffect: 0, minimumRelativeEffect: 0.05 },
+				},
+			},
+			trials.map((trial) => ({
+				...trial,
+				metrics: { score: trial.candidateId === "challenger" ? 1 : 0 },
+			})),
+		);
+		expect(zeroBaseline).toMatchObject({
+			decision: "retain",
+			championCandidateId: "baseline",
+			requiredMinimumEffect: 0,
+			reason: expect.stringContaining("resolves to zero"),
+		});
+		expect(() =>
+			normalizeAvoExperimentPlan(
+				{
+					stage: "confirmation",
+					candidateIds: ["baseline", "challenger"],
+					conditions: [{ conditionId: "suite", commandTemplate: "node candidate-benchmark.cjs --seed {{seed}}" }],
+					seeds: [1, 2, 3, 4, 5],
+					pairing: "paired",
+					primaryMetric: "score",
+					metricDirection: "maximize",
+					baselineCandidateId: "baseline",
+					confirmationOfExperimentId: "screening-source",
+					promotion: { minimumPairedObservations: 5 },
+				},
+				"coding",
+			),
+		).toThrow(/positive min_effect or min_relative_effect/);
 	});
 
 	test("adopts NOOA 0.0.9 taxonomy and reinforces exact duplicate memories", () => {
@@ -870,8 +1060,10 @@ describe("generic AVO core", () => {
 			scope: "project",
 			verificationState: "verified",
 		});
+		expect(completed.memory.memoryId).toMatch(/^episode:experiment:[a-f0-9]{64}$/);
+		expect(completed.memory.memoryId).not.toBe(`episode:experiment:${experiment.experimentId}`);
 		expect(JSON.parse(completed.memory.content)).toMatchObject({
-			record_type: "avo_experiment_episode_v3",
+			record_type: "avo_experiment_episode_v6",
 			declared_hypothesis: experiment.hypothesis,
 			observed_trials: [{ primary_metric: 12 }],
 			derived_statistics: { decision: "inconclusive" },
@@ -899,7 +1091,7 @@ describe("generic AVO core", () => {
 					expect.objectContaining({ label: "Latest plan coverage", value: "1/1 cells · paired" }),
 					expect.objectContaining({
 						label: "Experiment plan",
-						value: "passed_tests · maximize · paired",
+						value: "screening · passed_tests · maximize · paired",
 					}),
 					expect.objectContaining({
 						label: "Candidate candidate-parser-serialized",
@@ -911,7 +1103,7 @@ describe("generic AVO core", () => {
 					}),
 					expect.objectContaining({
 						label: "Statistical policy",
-						value: expect.stringContaining("Student-t 95% intervals · automatic promotion requires 5 pairs"),
+						value: expect.stringContaining("screening ranks only · provisional candidate-parser-serialized"),
 					}),
 					expect.objectContaining({
 						label: "Trial candidate-parser-serialized · parser-regression · seed fixed-suite-v1",
@@ -954,6 +1146,369 @@ describe("generic AVO core", () => {
 			}),
 		).toThrow(/already exists/);
 		runtime.dispose();
+	});
+
+	test("keeps distinct verified episodes when separate sessions reuse a human experiment ID", () => {
+		const project = artifactDir();
+		const memoryRoot = artifactDir();
+		const completeSessionExperiment = (sessionId: string, payload: string) => {
+			const store = new AvoStore(artifactDir(), sessionId, clock(), project, memoryRoot);
+			store.initialize(`Run shared experiment in ${sessionId}`);
+			const experiment = store.recordExperiment({
+				experimentId: "shared-human-id",
+				title: "Shared experiment",
+				hypothesis: "The candidate reaches score 10.",
+				design: "Run one fixed host-bound cell.",
+				plan: {
+					candidateIds: ["candidate"],
+					conditions: [{ conditionId: "suite", commandTemplate: "node bench.cjs --seed {{seed}}" }],
+					seeds: ["1"],
+					primaryMetric: "score",
+					metricDirection: "maximize",
+				},
+			});
+			const candidate = store.recordCandidate({
+				candidateId: "candidate",
+				kind: "answer",
+				summary: "Candidate",
+				payload,
+			});
+			const contract = store.prepareTrialExecution(experiment.experimentId, candidate.candidateId, "suite", "1");
+			const source = store.recordEvaluation(
+				{
+					evaluationId: "source-evaluation",
+					candidateId: candidate.candidateId,
+					evaluatorId: "runtime",
+					status: "pass",
+					authority: "environment",
+					evidenceRefs: ["host:test:shared"],
+					metrics: {
+						meaningful: true,
+						command_digest: contract.commandDigest,
+						candidate_payload_digest: candidate.payloadDigest,
+					},
+				},
+				"host",
+			);
+			const binding = store.recordEvaluation(
+				{
+					evaluationId: "cell-evaluation",
+					candidateId: candidate.candidateId,
+					evaluatorId: "experiment_trial",
+					status: "pass",
+					authority: "host",
+					evidenceRefs: [...source.evidenceRefs, `host:experiment-cell:${contract.cellDigest}`],
+					metrics: {
+						meaningful: true,
+						score: 10,
+						experiment_id: experiment.experimentId,
+						condition_id: contract.conditionId,
+						seed: contract.seed,
+						command_digest: contract.commandDigest,
+						cell_digest: contract.cellDigest,
+						source_evaluation_id: source.evaluationId,
+						source_evaluation_created_at: source.createdAt,
+						candidate_payload_digest: candidate.payloadDigest,
+					},
+				},
+				"host",
+			);
+			store.recordTrial({
+				trialId: "trial",
+				experimentId: experiment.experimentId,
+				candidateId: candidate.candidateId,
+				evaluationId: binding.evaluationId,
+				conditionId: contract.conditionId,
+				seed: contract.seed,
+			});
+			return store.completeExperiment(experiment.experimentId).memory;
+		};
+
+		const first = completeSessionExperiment("session-a", "candidate-payload-a");
+		const second = completeSessionExperiment("session-b", "candidate-payload-b");
+		const repeated = completeSessionExperiment("session-d", "candidate-payload-a");
+		expect(first.memoryId).not.toBe(second.memoryId);
+		expect(repeated.memoryId).toBe(first.memoryId);
+		const reopened = new AvoStore(artifactDir(), "session-c", clock(), project, memoryRoot).getState();
+		const sharedEpisodes = reopened.memories.filter(
+			(memory) => memory.type === "episode" && memory.references.some((ref) => ref.key === "shared-human-id"),
+		);
+		expect(sharedEpisodes).toHaveLength(2);
+		expect(sharedEpisodes.map((memory) => memory.memoryId).sort()).toEqual([first.memoryId, second.memoryId].sort());
+		expect(sharedEpisodes.every((memory) => memory.verificationState === "verified")).toBe(true);
+		expect(sharedEpisodes.find((memory) => memory.memoryId === first.memoryId)?.reinforcementCount).toBe(1);
+	});
+
+	test("does not apply experiment deduplication to ordinary JSON memories", () => {
+		const project = artifactDir();
+		const memoryRoot = artifactDir();
+		const content = JSON.stringify({ record_type: "ordinary_info", value: 1 });
+		const memoryId = `episode:experiment:${digestAvoExperimentValue(JSON.parse(content))}`;
+		const first = new AvoStore(artifactDir(), "ordinary-session-a", clock(), project, memoryRoot);
+		first.initialize("Record ordinary JSON");
+		first.rememberVerified({
+			memoryId,
+			namespace: "general",
+			type: "info",
+			scope: "project",
+			title: "Ordinary JSON A",
+			content,
+			importance: 5,
+		});
+		const second = new AvoStore(artifactDir(), "ordinary-session-b", clock(), project, memoryRoot);
+		second.initialize("Try to alias ordinary JSON");
+		expect(() =>
+			second.rememberVerified({
+				memoryId,
+				namespace: "general",
+				type: "info",
+				scope: "project",
+				title: "Ordinary JSON B",
+				content,
+				importance: 5,
+			}),
+		).toThrow(/already exists with different content/);
+	});
+
+	test("binds confirmation to screened candidate identities and direction-independent fresh seeds", () => {
+		const store = new AvoStore(undefined, "cross-task-confirmation", clock());
+		store.initialize("Screen a baseline and challenger");
+		const baseline = store.recordCandidate({
+			candidateId: "baseline",
+			kind: "answer",
+			summary: "Original baseline",
+			payload: "original baseline payload",
+		});
+		const challenger = store.recordCandidate({
+			candidateId: "challenger",
+			kind: "answer",
+			summary: "Original challenger",
+			payload: "original challenger payload",
+		});
+		const condition = {
+			conditionId: "suite",
+			commandTemplate: "node benchmark.cjs --candidate {{candidate_id}} --seed {{seed}}",
+		};
+		const screening = store.recordExperiment({
+			experimentId: "identity-screening",
+			title: "Identity screening",
+			hypothesis: "The challenger improves score.",
+			design: "One paired discovery seed.",
+			plan: {
+				stage: "screening",
+				candidateIds: [baseline.candidateId, challenger.candidateId],
+				conditions: [condition],
+				seeds: ["1"],
+				pairing: "paired",
+				primaryMetric: "score",
+				metricDirection: "maximize",
+				baselineCandidateId: baseline.candidateId,
+			},
+		});
+		for (const [candidate, score] of [
+			[baseline, 10],
+			[challenger, 20],
+		] as const) {
+			const contract = store.prepareTrialExecution(screening.experimentId, candidate.candidateId, "suite", "1");
+			const source = store.recordEvaluation(
+				{
+					evaluationId: `source-${candidate.candidateId}`,
+					candidateId: candidate.candidateId,
+					evaluatorId: "runtime",
+					status: "pass",
+					authority: "environment",
+					evidenceRefs: [`host:command:${contract.commandDigest}`],
+					metrics: {
+						meaningful: true,
+						command_digest: contract.commandDigest,
+						candidate_payload_digest: candidate.payloadDigest,
+					},
+				},
+				"host",
+			);
+			const binding = store.recordEvaluation(
+				{
+					evaluationId: `cell-${candidate.candidateId}`,
+					candidateId: candidate.candidateId,
+					evaluatorId: "experiment_trial",
+					status: "pass",
+					authority: "host",
+					evidenceRefs: [`host:experiment-cell:${contract.cellDigest}`],
+					metrics: {
+						meaningful: true,
+						score,
+						experiment_id: screening.experimentId,
+						condition_id: contract.conditionId,
+						seed: contract.seed,
+						command_digest: contract.commandDigest,
+						cell_digest: contract.cellDigest,
+						source_evaluation_id: source.evaluationId,
+						source_evaluation_created_at: source.createdAt,
+						candidate_payload_digest: candidate.payloadDigest,
+					},
+				},
+				"host",
+			);
+			store.recordTrial({
+				experimentId: screening.experimentId,
+				candidateId: candidate.candidateId,
+				evaluationId: binding.evaluationId,
+				conditionId: "suite",
+				seed: "1",
+			});
+		}
+		expect(store.completeExperiment(screening.experimentId).outcome).toMatchObject({
+			decision: "inconclusive",
+			provisionalBestCandidateId: challenger.candidateId,
+		});
+		const adapter = new GeneralAvoAdapter();
+		const legacyState = store.getState();
+		const sourceExperiment = legacyState.experiments.find(
+			(experiment) => experiment.experimentId === screening.experimentId,
+		)!;
+		legacyState.experiments.push({
+			...sourceExperiment,
+			experimentId: "legacy-identity-less-confirmation",
+			title: "Legacy identity-less confirmation",
+			plan: {
+				...sourceExperiment.plan!,
+				stage: "confirmation",
+				confirmationOfExperimentId: screening.experimentId,
+				promotion: {
+					minimumPairedObservations: 5,
+					minimumAbsoluteEffect: 1,
+					minimumRelativeEffect: 0,
+				},
+			},
+			outcome: {
+				...sourceExperiment.outcome!,
+				stage: "confirmation",
+				confirmationOfExperimentId: screening.experimentId,
+				decision: "promote",
+				championCandidateId: challenger.candidateId,
+				requiredMinimumEffect: 1,
+				minimumAbsoluteEffectForPromotion: 1,
+			},
+		});
+		const legacyChallenger = legacyState.candidates.find(
+			(candidate) => candidate.candidateId === challenger.candidateId,
+		)!;
+		expect(
+			adapter.deriveEvaluationState(
+				legacyChallenger,
+				legacyState.evaluations.filter((receipt) => receipt.candidateId === challenger.candidateId),
+				legacyState,
+			),
+		).toMatchObject({ status: "revise", canonical: false });
+		expect(adapter.dashboardProjection(legacyState).sections).toContainEqual(
+			expect.objectContaining({
+				id: "experiments",
+				items: expect.arrayContaining([
+					expect.objectContaining({
+						label: "Statistical policy",
+						value: expect.stringContaining("superseded confirmation"),
+						status: "watch",
+					}),
+					expect.objectContaining({
+						label: "Host experiment outcome",
+						value: expect.stringContaining("current-policy ineligible"),
+						status: "watch",
+					}),
+				]),
+			}),
+		);
+		store.recordExperiment({
+			experimentId: "single-candidate-shadow",
+			title: "Single candidate shadow",
+			hypothesis: "A later single-candidate plan must not erase screening lineage.",
+			design: "Leave the separate plan pending.",
+			plan: {
+				stage: "screening",
+				candidateIds: [challenger.candidateId],
+				conditions: [{ conditionId: "shadow", commandTemplate: "node shadow.cjs --seed {{seed}}" }],
+				seeds: ["shadow"],
+				pairing: "independent",
+				primaryMetric: "shadow_score",
+				metricDirection: "maximize",
+			},
+		});
+
+		const blockedCycle = store.completeCycle({ candidateId: challenger.candidateId }, (candidate, receipts) =>
+			adapter.deriveEvaluationState(candidate, receipts, store.getState()),
+		);
+		expect(blockedCycle.cycle).toMatchObject({ outcome: "revised" });
+		expect(blockedCycle.cycle.failureSignature).toBeUndefined();
+
+		store.recordExperiment({
+			experimentId: "opposite-direction-seed-reservation",
+			title: "Opposite direction reservation",
+			hypothesis: "Reserve fresh cells under another ranking direction.",
+			design: "The cells still consume seed novelty.",
+			plan: {
+				stage: "screening",
+				candidateIds: [baseline.candidateId, challenger.candidateId],
+				conditions: [condition],
+				seeds: ["2", "3", "4", "5", "6"],
+				pairing: "paired",
+				primaryMetric: "score",
+				metricDirection: "minimize",
+				baselineCandidateId: baseline.candidateId,
+			},
+		});
+		expect(() =>
+			store.recordExperiment({
+				experimentId: "reused-opposite-direction-confirmation",
+				title: "Invalid seed reuse",
+				hypothesis: "Direction does not make a seed fresh.",
+				design: "Reject cells already reserved for the pair and metric.",
+				plan: {
+					stage: "confirmation",
+					candidateIds: [baseline.candidateId, challenger.candidateId],
+					conditions: [condition],
+					seeds: ["2", "3", "4", "5", "6"],
+					pairing: "paired",
+					primaryMetric: "score",
+					metricDirection: "maximize",
+					baselineCandidateId: baseline.candidateId,
+					confirmationOfExperimentId: screening.experimentId,
+					promotion: { minimumPairedObservations: 5, minimumAbsoluteEffect: 1 },
+				},
+			}),
+		).toThrow(/confirmation seeds must be unused.*opposite-direction-seed-reservation/);
+
+		store.startTask("Confirm the screened implementation in a new task");
+		store.recordCandidate({
+			candidateId: baseline.candidateId,
+			kind: "answer",
+			summary: "Substituted baseline",
+			payload: "different baseline payload",
+		});
+		store.recordCandidate({
+			candidateId: challenger.candidateId,
+			kind: "answer",
+			summary: "Substituted challenger",
+			payload: "different challenger payload",
+		});
+		expect(() =>
+			store.recordExperiment({
+				experimentId: "substituted-identity-confirmation",
+				title: "Invalid identity substitution",
+				hypothesis: "Candidate IDs alone are insufficient provenance.",
+				design: "Reject different payloads under archived candidate IDs.",
+				plan: {
+					stage: "confirmation",
+					candidateIds: [baseline.candidateId, challenger.candidateId],
+					conditions: [condition],
+					seeds: ["7", "8", "9", "10", "11"],
+					pairing: "paired",
+					primaryMetric: "score",
+					metricDirection: "maximize",
+					baselineCandidateId: baseline.candidateId,
+					confirmationOfExperimentId: screening.experimentId,
+					promotion: { minimumPairedObservations: 5, minimumAbsoluteEffect: 1 },
+				},
+			}),
+		).toThrow(/does not match the exact candidate identity screened/);
 	});
 
 	test("rejects prospective trials whose source execution predates preregistration", () => {
@@ -1522,6 +2077,69 @@ describe("generic AVO core", () => {
 		expect(state.lineage.filter((item) => item.referenceId === "autoresearch:claim:claim-1")).toHaveLength(1);
 	});
 
+	test("keeps research experiment episodes distinct across candidate identities and sessions", () => {
+		const project = artifactDir();
+		const agentDir = artifactDir();
+		const stopGate = { passed: true, checks: {}, reasons: [] } as unknown as AutoresearchStopGate;
+		const syncSession = (sessionId: string, candidateId: string, statement: string) => {
+			const runtime = new AvoSessionRuntime(artifactDir(), sessionId, clock(), project, agentDir);
+			runtime.configure({ environment: "research", source: "user" });
+			const researchState = {
+				schemaVersion: 1,
+				objective: "Compare a shared research experiment",
+				updatedAt: "2026-08-26T00:00:00.000Z",
+				cycles: [
+					{
+						cycleId: "shared-cycle",
+						candidate: {
+							candidateId,
+							statement,
+							motivation: "Verified evidence",
+							mechanisticMotivation: "Mechanism",
+							closestPriorArt: "Paper A",
+							unresolvedQuestions: ["Does it hold?"],
+							falsifier: "No effect",
+							experimentDesign: "Controlled intervention",
+							baselinePlan: "Control",
+							broaderRelevance: "Research agents",
+							requirements: [],
+						},
+						outcome: "promoted",
+						reviewers: [],
+						searchReceiptIds: [],
+						preliminaryEvidenceExperimentIds: ["shared-research-experiment"],
+						canonicalPromotionIds: [],
+						papersAdded: 0,
+						fieldMapChanged: false,
+					},
+				],
+				experiments: [
+					{
+						experimentId: "shared-research-experiment",
+						status: "completed",
+						hypothesis: "The intervention helps.",
+						design: "One fixed experiment.",
+						artifactReceipts: [{ path: "results.json", sha256: "a".repeat(64), size: 42, verifiedAt: "now" }],
+						metrics: { score: 0.9 },
+					},
+				],
+			} as unknown as AutoresearchState;
+			runtime.syncResearchState(researchState, stopGate, "/tmp/autoresearch/state.json");
+			runtime.dispose();
+		};
+
+		syncSession("research-session-a", "candidate-a", "Candidate A research problem");
+		syncSession("research-session-b", "candidate-b", "Candidate B research problem");
+		const reopened = new AvoSessionRuntime(artifactDir(), "research-session-c", clock(), project, agentDir);
+		const episodes = reopened
+			.getState()
+			.memories.filter((memory) => memory.content.includes('"record_type": "avo_research_experiment_episode_v3"'));
+		expect(episodes).toHaveLength(2);
+		expect(new Set(episodes.map((memory) => memory.memoryId)).size).toBe(2);
+		expect(episodes.every((memory) => memory.verificationState === "verified")).toBe(true);
+		reopened.dispose();
+	});
+
 	test("lets authoritative failure override an apparent pass", () => {
 		const derived = deriveAvoEvaluation([
 			{
@@ -1866,17 +2484,71 @@ describe("generic AVO core", () => {
 			importance: 8,
 		});
 		store.rememberVerified({
-			memoryId: "episode:experiment:student-t-current",
+			memoryId: "episode:experiment:unbound-two-stage",
+			namespace: "coding",
+			type: "episode",
+			scope: "project",
+			title: "Unbound two-stage experiment",
+			content: JSON.stringify({
+				record_type: "avo_experiment_episode_v4",
+				declared_hypothesis: "The challenger improves score.",
+				observed_trials: [{ candidate_id: "challenger", seed: "1", primary_metric: 10 }],
+				derived_statistics: {
+					inferenceVersion: AVO_EXPERIMENT_INFERENCE_VERSION,
+					stage: "confirmation",
+					confirmationOfExperimentId: "screening-source",
+					decision: "promote",
+					requiredMinimumEffect: 1,
+					minimumAbsoluteEffectForPromotion: 1,
+					minimumRelativeEffectForPromotion: 0,
+					minimumPairedObservationsForPromotion: 5,
+				},
+			}),
+			importance: 8,
+		});
+		const currentEpisode = {
+			record_type: "avo_experiment_episode_v6",
+			declared_hypothesis: "The challenger improves score.",
+			plan: { candidateIds: ["challenger"] },
+			candidate_identity_digests: { challenger: "c".repeat(64) },
+			observed_trials: [{ candidate_id: "challenger", seed: "1", primary_metric: 10 }],
+			derived_statistics: {
+				inferenceVersion: AVO_EXPERIMENT_INFERENCE_VERSION,
+				stage: "screening",
+				decision: "inconclusive",
+			},
+		};
+		const currentEpisodeMemoryId = `episode:experiment:${digestAvoExperimentValue(currentEpisode)}`;
+		store.rememberVerified({
+			memoryId: currentEpisodeMemoryId,
 			namespace: "coding",
 			type: "episode",
 			scope: "project",
 			title: "Current Student-t experiment",
-			content: JSON.stringify({
-				record_type: "avo_experiment_episode_v3",
-				declared_hypothesis: "The challenger improves score.",
-				observed_trials: [{ candidate_id: "challenger", seed: "1", primary_metric: 10 }],
-				derived_statistics: { inferenceVersion: AVO_EXPERIMENT_INFERENCE_VERSION, decision: "retain" },
-			}),
+			content: JSON.stringify(currentEpisode),
+			importance: 8,
+		});
+		store.rememberVerified({
+			memoryId: "episode:experiment:human-keyed-current",
+			namespace: "coding",
+			type: "episode",
+			scope: "project",
+			title: "Human-keyed current-policy experiment",
+			content: JSON.stringify(currentEpisode),
+			importance: 8,
+		});
+		const malformedIdentityEpisode = {
+			...currentEpisode,
+			plan: { candidateIds: ["challenger", 7] },
+		};
+		const malformedIdentityMemoryId = `episode:experiment:${digestAvoExperimentValue(malformedIdentityEpisode)}`;
+		store.rememberVerified({
+			memoryId: malformedIdentityMemoryId,
+			namespace: "coding",
+			type: "episode",
+			scope: "project",
+			title: "Malformed candidate identity map",
+			content: JSON.stringify(malformedIdentityEpisode),
 			importance: 8,
 		});
 
@@ -1885,12 +2557,33 @@ describe("generic AVO core", () => {
 			expect.objectContaining({
 				memoryId: "episode:experiment:legacy-normal-ci",
 				verificationState: "contested",
+				tags: expect.arrayContaining(["legacy-experiment-memory-id"]),
+			}),
+		);
+		expect(migrated.memories).toContainEqual(
+			expect.objectContaining({
+				memoryId: "episode:experiment:unbound-two-stage",
+				verificationState: "contested",
+				tags: expect.arrayContaining(["legacy-experiment-memory-id"]),
+			}),
+		);
+		expect(migrated.memories).toContainEqual(
+			expect.objectContaining({
+				memoryId: "episode:experiment:human-keyed-current",
+				verificationState: "contested",
+				tags: expect.arrayContaining(["legacy-experiment-memory-id"]),
+			}),
+		);
+		expect(migrated.memories).toContainEqual(
+			expect.objectContaining({
+				memoryId: malformedIdentityMemoryId,
+				verificationState: "contested",
 				tags: expect.arrayContaining(["legacy-experiment-inference"]),
 			}),
 		);
 		expect(migrated.memories).toContainEqual(
 			expect.objectContaining({
-				memoryId: "episode:experiment:student-t-current",
+				memoryId: currentEpisodeMemoryId,
 				verificationState: "verified",
 			}),
 		);

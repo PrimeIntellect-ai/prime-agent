@@ -36,9 +36,10 @@ export const AVO_MEMORY_RECALL_CHANNELS = ["deliberate", "spontaneous"] as const
 export const AVO_EXPERIMENT_STATUSES = ["planned", "running", "completed"] as const;
 export const AVO_EXPERIMENT_MODES = ["prospective", "retrospective"] as const;
 export const AVO_EXPERIMENT_PAIRINGS = ["paired", "independent"] as const;
+export const AVO_EXPERIMENT_STAGES = ["screening", "confirmation"] as const;
 export const AVO_METRIC_DIRECTIONS = ["maximize", "minimize"] as const;
 export const AVO_EXPERIMENT_DECISIONS = ["promote", "retain", "inconclusive"] as const;
-export const AVO_EXPERIMENT_INFERENCE_VERSION = "student_t_95_min_pairs_5_v1";
+export const AVO_EXPERIMENT_INFERENCE_VERSION = "student_t_95_two_stage_min_effect_v2";
 export const AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION = 5;
 
 export type AvoEnvironment = (typeof AVO_ENVIRONMENTS)[number];
@@ -61,6 +62,7 @@ export type AvoMemoryRecallChannel = (typeof AVO_MEMORY_RECALL_CHANNELS)[number]
 export type AvoExperimentStatus = (typeof AVO_EXPERIMENT_STATUSES)[number];
 export type AvoExperimentMode = (typeof AVO_EXPERIMENT_MODES)[number];
 export type AvoExperimentPairing = (typeof AVO_EXPERIMENT_PAIRINGS)[number];
+export type AvoExperimentStage = (typeof AVO_EXPERIMENT_STAGES)[number];
 export type AvoMetricDirection = (typeof AVO_METRIC_DIRECTIONS)[number];
 export type AvoExperimentDecision = (typeof AVO_EXPERIMENT_DECISIONS)[number];
 
@@ -160,7 +162,14 @@ export interface AvoExperimentCondition {
 	commandTemplate: string;
 }
 
+export interface AvoExperimentPromotionPolicy {
+	minimumPairedObservations: number;
+	minimumAbsoluteEffect: number;
+	minimumRelativeEffect: number;
+}
+
 export interface AvoExperimentPlan {
+	stage: AvoExperimentStage;
 	mode: AvoExperimentMode;
 	candidateIds: string[];
 	conditions: AvoExperimentCondition[];
@@ -169,6 +178,9 @@ export interface AvoExperimentPlan {
 	primaryMetric: string;
 	metricDirection: AvoMetricDirection;
 	baselineCandidateId?: string;
+	confirmationOfExperimentId?: string;
+	confirmationCandidateIdentityDigests?: Record<string, string>;
+	promotion: AvoExperimentPromotionPolicy;
 	expectedTrials: number;
 }
 
@@ -214,7 +226,13 @@ export interface AvoConditionPairedComparison extends AvoPairedComparison {
 
 export interface AvoExperimentOutcome {
 	inferenceVersion: typeof AVO_EXPERIMENT_INFERENCE_VERSION;
-	minimumPairedObservationsForPromotion: typeof AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION;
+	stage: AvoExperimentStage;
+	confirmationOfExperimentId?: string;
+	confirmationCandidateIdentityDigests?: Record<string, string>;
+	minimumPairedObservationsForPromotion: number;
+	minimumAbsoluteEffectForPromotion: number;
+	minimumRelativeEffectForPromotion: number;
+	requiredMinimumEffect?: number;
 	primaryMetric: string;
 	metricDirection: AvoMetricDirection;
 	candidateAggregates: AvoCandidateAggregate[];
@@ -222,6 +240,7 @@ export interface AvoExperimentOutcome {
 	pairedComparisons: AvoPairedComparison[];
 	conditionPairedComparisons: AvoConditionPairedComparison[];
 	ranking: string[];
+	provisionalBestCandidateId?: string;
 	championCandidateId?: string;
 	decision: AvoExperimentDecision;
 	reason: string;
@@ -430,7 +449,14 @@ export interface AvoExperimentConditionInput {
 	commandTemplate: string;
 }
 
+export interface AvoExperimentPromotionPolicyInput {
+	minimumPairedObservations?: number;
+	minimumAbsoluteEffect?: number;
+	minimumRelativeEffect?: number;
+}
+
 export interface AvoExperimentPlanInput {
+	stage?: AvoExperimentStage;
 	mode?: AvoExperimentMode;
 	candidateIds: string[];
 	conditions: AvoExperimentConditionInput[];
@@ -439,6 +465,8 @@ export interface AvoExperimentPlanInput {
 	primaryMetric: string;
 	metricDirection: AvoMetricDirection;
 	baselineCandidateId?: string;
+	confirmationOfExperimentId?: string;
+	promotion?: AvoExperimentPromotionPolicyInput;
 }
 
 export interface AvoTrialInput {

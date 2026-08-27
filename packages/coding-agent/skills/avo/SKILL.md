@@ -91,7 +91,8 @@ Never pass or request an environment override.
 For repeatable comparisons in any adapter, call `record_experiment()` before
 executing trials with a structured `plan`: preregister candidate IDs,
 conditions and their command templates/parameters, seeds, pairing, a baseline
-candidate for multi-candidate comparisons, and the primary metric/direction.
+candidate for multi-candidate comparisons, the primary metric/direction, and
+whether the run is `screening` or `confirmation`.
 Seeds may be marker-safe strings or safe integers and are stored canonically as strings.
 The cross-product may contain at most 1,024 cells.
 The prospective mode is the default. Templates must bind `--seed {{seed}}` and
@@ -105,29 +106,78 @@ field is `metric_direction` (plain `direction` is invalid). `title`,
 
 ```python
 experiment = await avo.record_experiment({
-    "experiment_id": "batch-size-test",
-    "title": "Batch size comparison",
+    "experiment_id": "batch-size-screening",
+    "title": "Batch size screening",
     "hypothesis": "Batch size 8 improves score.",
-    "design": "Evaluate batch size 8 on three fixed seeds.",
+    "design": "Screen batch size 8 against batch size 4 on three paired development seeds.",
     "plan": {
+        "stage": "screening",
         "mode": "prospective",
-        "candidate_ids": ["batch-size-8"],
+        "candidate_ids": ["batch-size-4", "batch-size-8"],
         "conditions": [{
             "condition_id": "default",
             "command_template": "python benchmark.py --seed {{seed}}",
         }],
         "seeds": [1, 2, 3],
-        "pairing": "independent",
+        "pairing": "paired",
         "primary_metric": "score",
         "metric_direction": "maximize",
+        "baseline_candidate_id": "batch-size-4",
     },
 })
 ```
 
-For a paired multi-candidate plan, list every candidate, set
-`baseline_candidate_id` to the current champion, and use the same conditions
-and seeds for every candidate. In coding tasks, restore each candidate's exact
-workspace state before calling `run_trial()` for its cells.
+Screening is the default and may contain one or many challengers. For a paired
+multi-candidate screening, list every candidate, set `baseline_candidate_id`
+to the current champion, and use the same conditions and seeds for every
+candidate. Screening produces a host-derived ranking and
+`provisionalBestCandidateId`, but it never promotes a champion—even with only
+one challenger. This prevents exploratory winner selection from being reused
+as confirmatory evidence.
+
+To promote the selected challenger, preregister a new confirmation experiment.
+It must reference the completed screening, compare exactly its provisional
+winner with the same baseline, metric, direction, conditions, and command
+templates, and use seeds that have not appeared in an earlier experiment for
+that candidate pair and metric. Confirmation is prospective and paired. It
+also requires a positive meaningful-effect threshold; `min_effect` is in the
+primary metric's units and `min_relative_effect` is a fraction of the absolute
+baseline mean. The host applies the larger threshold. Candidate IDs are not
+enough: the host records and compares exact payload, claim, artifact, and
+workspace identity digests from screening, including when confirmation happens
+in a later task.
+
+```python
+confirmation = await avo.record_experiment({
+    "experiment_id": "batch-size-confirmation",
+    "title": "Confirm batch size 8",
+    "hypothesis": "Batch size 8 improves score by at least 5 points.",
+    "design": "Fresh paired confirmation on seeds 101-110.",
+    "plan": {
+        "stage": "confirmation",
+        "mode": "prospective",
+        "candidate_ids": ["batch-size-4", "batch-size-8"],
+        "conditions": [{
+            "condition_id": "default",
+            "command_template": "python benchmark.py --seed {{seed}}",
+        }],
+        "seeds": [101, 102, 103, 104, 105, 106, 107, 108, 109, 110],
+        "pairing": "paired",
+        "primary_metric": "score",
+        "metric_direction": "maximize",
+        "baseline_candidate_id": "batch-size-4",
+        "confirmation_of_experiment_id": "batch-size-screening",
+        "promotion": {
+            "min_pairs": 10,
+            "min_effect": 5,
+            "min_relative_effect": 0.01,
+        },
+    },
+})
+```
+
+In coding tasks, restore each candidate's exact workspace state before calling
+`run_trial()` for its cells.
 
 Call `run_trial(experiment_id, candidate_id, condition_id, seed)`. The host
 selects the preregistered cell, renders the direct command, binds its digest and
@@ -136,16 +186,22 @@ metric. `record_trial()` may bind an already existing matching host receipt.
 `complete_experiment()` requires every candidate × condition × seed cell once,
 then derives overall and per-condition candidate means, medians, sample
 variances, standard deviations, ranges, Student-t 95% confidence intervals,
-paired deltas, win/loss/tie counts, and win rates. In paired
-multi-candidate plans, the host issues a conservative `promote` or `retain`
-decision. Confidence intervals use two-sided Student-t critical values because
+paired deltas, win/loss/tie counts, and win rates. Screening remains
+`inconclusive` for promotion. Only a valid two-candidate confirmation may issue
+a conservative `promote` or `retain` decision. Confidence intervals use
+two-sided Student-t critical values because
 the host estimates variance from the observed sample; a single observation has
-no estimable interval. Automatic promotion requires at least five matched pairs
-and a favorable Student-t 95% lower bound above zero. The five-pair floor is a
-minimum safety gate, not a claim that five seeds are enough for every benchmark;
+no estimable interval. Automatic promotion requires at least five fresh matched
+pairs and a favorable Student-t 95% lower bound above the preregistered absolute
+or relative meaningful-effect threshold. Five pairs is only the hard host floor;
 use 10-20 or more paired seeds for consequential comparisons. The verified NOOA
 episode stores declared hypothesis/design separately from observed trials and
 derived statistics, so declarations are never treated as empirical findings.
+Experiment episodes embed the host-derived candidate identity digests and use
+an exact serialized-content digest as their durable memory ID, so reusing a
+human-readable experiment ID—or repeating identical metrics for a different
+candidate payload—in a later session cannot overwrite or alias earlier project
+evidence.
 
 Long runs bind a retained generic supervisor. Iterative runs bind one only when
 the host detects stagnation. Direct tasks never pay that cost.

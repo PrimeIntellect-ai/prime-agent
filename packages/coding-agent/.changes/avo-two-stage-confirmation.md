@@ -1,0 +1,3 @@
+- Split universal experiments into exploratory screening and host-authoritative confirmation: screening ranks candidates without promotion, while confirmation is limited to the selected challenger and baseline on unused paired seeds.
+- Added preregistered absolute/relative meaningful-effect thresholds and configurable paired-observation floors to Student-t champion decisions, dashboard traces, verified NOOA episodes, and the model-facing AVO contract.
+- Made universal and autoresearch experiment episodes candidate-bound and content-addressed so repeated human experiment IDs cannot collide across sessions; legacy non-addressed records are contested during memory hardening.

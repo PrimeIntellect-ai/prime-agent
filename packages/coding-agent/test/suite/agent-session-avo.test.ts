@@ -640,7 +640,7 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 	});
 
-	it("enforces the preregistered experiment grid and issues a host champion outcome", async () => {
+	it("screens candidates before a fresh host-confirmed champion outcome", async () => {
 		harness = await createHarness({ persistSession: true });
 		writeFileSync(
 			`${harness.tempDir}/candidate-benchmark.cjs`,
@@ -656,11 +656,12 @@ describe("AgentSession universal AVO runtime", () => {
 		await harness.session.prompt("Compare two optimization candidates with a host benchmark");
 		await harness.session.handleAvoHostRequest("avo.experiment.record", {
 			experiment: {
-				experiment_id: "optimizer-comparison",
-				title: "Optimizer candidate comparison",
+				experiment_id: "optimizer-screening",
+				title: "Optimizer candidate screening",
 				hypothesis: "The challenger improves the benchmark score.",
 				design: "Paired benchmark over five preregistered seeds.",
 				plan: {
+					stage: "screening",
 					mode: "prospective",
 					candidate_ids: ["baseline", "challenger"],
 					conditions: [
@@ -688,32 +689,114 @@ describe("AgentSession universal AVO runtime", () => {
 				},
 			});
 		}
-		const runCell = (candidateId: string, seed: string) =>
+		const runCell = (experimentId: string, candidateId: string, seed: string) =>
 			harness!.session.handleAvoHostRequest("avo.trial.run", {
 				trial: {
-					experiment_id: "optimizer-comparison",
+					experiment_id: experimentId,
 					candidate_id: candidateId,
 					condition_id: "frozen-suite",
 					seed,
 				},
 			});
-		for (const seed of ["1", "2", "3", "4", "5"]) await runCell("baseline", seed);
-		for (const seed of ["1", "2", "3", "4"]) await runCell("challenger", seed);
+		for (const seed of ["1", "2", "3", "4", "5"]) await runCell("optimizer-screening", "baseline", seed);
+		for (const seed of ["1", "2", "3", "4"]) await runCell("optimizer-screening", "challenger", seed);
 		await expect(
 			harness.session.handleAvoHostRequest("avo.experiment.complete", {
-				experiment_id: "optimizer-comparison",
+				experiment_id: "optimizer-screening",
 			}),
 		).rejects.toThrow(/expected=10, observed=9, missing=1/);
-		await expect(runCell("challenger", "1")).rejects.toThrow(/already recorded/);
-		await runCell("challenger", "5");
+		await expect(runCell("optimizer-screening", "challenger", "1")).rejects.toThrow(/already recorded/);
+		await runCell("optimizer-screening", "challenger", "5");
+		const screened = await harness.session.handleAvoHostRequest("avo.experiment.complete", {
+			experiment_id: "optimizer-screening",
+		});
+		expect(screened).toMatchObject({
+			outcome: {
+				stage: "screening",
+				decision: "inconclusive",
+				provisionalBestCandidateId: "challenger",
+				championCandidateId: undefined,
+			},
+		});
+		await expect(
+			harness.session.handleAvoHostRequest("avo.experiment.record", {
+				experiment: {
+					experiment_id: "optimizer-reused-confirmation",
+					title: "Invalid reused confirmation",
+					hypothesis: "The screened challenger improves score.",
+					design: "Attempt to reuse a screening seed.",
+					plan: {
+						stage: "confirmation",
+						mode: "prospective",
+						candidate_ids: ["baseline", "challenger"],
+						conditions: [
+							{
+								condition_id: "frozen-suite",
+								command_template:
+									"node candidate-benchmark.cjs --candidate {{candidate_id}} --condition {{condition_id}} --seed {{seed}}",
+							},
+						],
+						seeds: ["5", "6", "7", "8", "9"],
+						pairing: "paired",
+						primary_metric: "score",
+						metric_direction: "maximize",
+						baseline_candidate_id: "baseline",
+						confirmation_of_experiment_id: "optimizer-screening",
+						promotion: { min_pairs: 5, min_effect: 5 },
+					},
+				},
+			}),
+		).rejects.toThrow(/confirmation seeds must be unused.*optimizer-screening:5/);
+		await harness.session.handleAvoHostRequest("avo.experiment.record", {
+			experiment: {
+				experiment_id: "optimizer-confirmation",
+				title: "Optimizer candidate confirmation",
+				hypothesis: "The screened challenger improves score by at least five points.",
+				design: "Confirm the selected challenger on five unused paired seeds.",
+				plan: {
+					stage: "confirmation",
+					mode: "prospective",
+					candidate_ids: ["baseline", "challenger"],
+					conditions: [
+						{
+							condition_id: "frozen-suite",
+							command_template:
+								"node candidate-benchmark.cjs --candidate {{candidate_id}} --condition {{condition_id}} --seed {{seed}}",
+						},
+					],
+					seeds: ["6", "7", "8", "9", "10"],
+					pairing: "paired",
+					primary_metric: "score",
+					metric_direction: "maximize",
+					baseline_candidate_id: "baseline",
+					confirmation_of_experiment_id: "optimizer-screening",
+					promotion: {
+						min_pairs: 5,
+						min_effect: 5,
+						min_relative_effect: 0,
+					},
+				},
+			},
+		});
+		for (const candidateId of ["baseline", "challenger"]) {
+			for (const seed of ["6", "7", "8", "9", "10"]) {
+				await runCell("optimizer-confirmation", candidateId, seed);
+			}
+		}
 		const completed = await harness.session.handleAvoHostRequest("avo.experiment.complete", {
-			experiment_id: "optimizer-comparison",
+			experiment_id: "optimizer-confirmation",
 		});
 		expect(completed).toMatchObject({
 			experiment: {
 				status: "completed",
-				plan: { expectedTrials: 10 },
-				outcome: { decision: "promote", championCandidateId: "challenger" },
+				plan: {
+					expectedTrials: 10,
+					confirmationCandidateIdentityDigests: {
+						baseline: expect.stringMatching(/^[a-f0-9]{64}$/),
+						challenger: expect.stringMatching(/^[a-f0-9]{64}$/),
+					},
+				},
+				outcome: { stage: "confirmation", decision: "promote", championCandidateId: "challenger" },
 			},
 			evaluation: {
 				evaluatorId: "experiment_aggregate",
@@ -722,24 +805,28 @@ describe("AgentSession universal AVO runtime", () => {
 				metrics: {
 					expected_trials: 10,
 					observed_trials: 10,
-					inference_version: "student_t_95_min_pairs_5_v1",
+					inference_version: "student_t_95_two_stage_min_effect_v2",
+					experiment_stage: "confirmation",
 					minimum_paired_observations_for_promotion: 5,
+					minimum_effect_for_promotion: 5,
 					decision: "promote",
 				},
 			},
 			outcome: {
+				stage: "confirmation",
 				decision: "promote",
 				championCandidateId: "challenger",
-				inferenceVersion: "student_t_95_min_pairs_5_v1",
+				inferenceVersion: "student_t_95_two_stage_min_effect_v2",
 				minimumPairedObservationsForPromotion: 5,
+				requiredMinimumEffect: 5,
 				ranking: ["challenger", "baseline"],
 				candidateAggregates: [
-					{ candidateId: "baseline", metric: { count: 5, mean: 13 } },
-					{ candidateId: "challenger", metric: { count: 5, mean: 23 } },
+					{ candidateId: "baseline", metric: { count: 5, mean: 18 } },
+					{ candidateId: "challenger", metric: { count: 5, mean: 28 } },
 				],
 				conditionAggregates: [
-					{ conditionId: "frozen-suite", candidateId: "baseline", metric: { count: 5, mean: 13 } },
-					{ conditionId: "frozen-suite", candidateId: "challenger", metric: { count: 5, mean: 23 } },
+					{ conditionId: "frozen-suite", candidateId: "baseline", metric: { count: 5, mean: 18 } },
+					{ conditionId: "frozen-suite", candidateId: "challenger", metric: { count: 5, mean: 28 } },
 				],
 				pairedComparisons: [
 					{
@@ -776,27 +863,39 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 		const episode = JSON.parse((completed.memory as { content: string }).content);
 		expect(episode).toMatchObject({
-			record_type: "avo_experiment_episode_v3",
-			declared_hypothesis: "The challenger improves the benchmark score.",
+			record_type: "avo_experiment_episode_v6",
+			declared_hypothesis: "The screened challenger improves score by at least five points.",
 			observed_trials: expect.arrayContaining([
-				expect.objectContaining({ candidate_id: "challenger", seed: "5", primary_metric: 25 }),
+				expect.objectContaining({ candidate_id: "challenger", seed: "10", primary_metric: 30 }),
 			]),
-			derived_statistics: { decision: "promote", championCandidateId: "challenger" },
+			derived_statistics: { stage: "confirmation", decision: "promote", championCandidateId: "challenger" },
 		});
 		const dashboard = await harness.session.handleAvoHostRequest("avo.get");
 		expect(dashboard.state).toMatchObject({
-			experiments: [
+			experiments: expect.arrayContaining([
 				expect.objectContaining({
-					status: "completed",
+					experimentId: "optimizer-screening",
+					outcome: expect.objectContaining({ decision: "inconclusive" }),
+				}),
+				expect.objectContaining({
+					experimentId: "optimizer-confirmation",
 					outcome: expect.objectContaining({ decision: "promote" }),
 				}),
-			],
+			]),
 			trials: expect.arrayContaining([
 				expect.objectContaining({ conditionId: "frozen-suite", commandDigest: expect.any(String) }),
 			]),
 			lineage: expect.arrayContaining([
 				expect.objectContaining({ kind: "champion_promoted", referenceId: "challenger" }),
 			]),
+		});
+		expect(
+			await harness.session.handleAvoHostRequest("avo.cycle.complete", {
+				cycle: { candidate_id: "challenger" },
+			}),
+		).toMatchObject({ cycle: { outcome: "accepted" } });
+		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
+			stop_gate: { passed: true },
 		});
 	});
 
