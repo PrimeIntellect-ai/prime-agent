@@ -50,6 +50,14 @@ input.on("line", (line) => {
     return;
   }
   if (request.type === "restore") {
+    if (fs.existsSync(process.env.FAKE_REPL_CORRUPT_RESTORE)) {
+      process.stdout.write("BROKEN-RESTORE\\n");
+      return;
+    }
+    if (fs.existsSync(process.env.FAKE_REPL_FAIL_RESTORE)) {
+      emit({ event: "done", id: request.id, status: "error", reason: "restore refused" });
+      return;
+    }
     state = fs.existsSync(request.path) ? JSON.parse(fs.readFileSync(request.path, "utf8")) : {};
     emit({ event: "done", id: request.id, status: "ok", restored: Object.keys(state), failed: [] });
     return;
@@ -85,6 +93,8 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 		bootCorruptionPath: string;
 		countPath: string;
 		delayReadyPath: string;
+		restoreCorruptionPath: string;
+		restoreFailurePath: string;
 		snapshotCorruptionPath: string;
 		snapshotPath: string;
 	} {
@@ -92,6 +102,8 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 		const bootCorruptionPath = join(tempDir, "corrupt-boot");
 		const countPath = join(tempDir, "spawn-count");
 		const delayReadyPath = join(tempDir, "delay-ready");
+		const restoreCorruptionPath = join(tempDir, "corrupt-restore");
+		const restoreFailurePath = join(tempDir, "fail-restore");
 		const snapshotCorruptionPath = join(tempDir, "corrupt-snapshot");
 		const snapshotPath = join(tempDir, "state.json");
 		writeFakeRuntime(python);
@@ -101,8 +113,10 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 				cwd: tempDir,
 				env: {
 					FAKE_REPL_CORRUPT_BOOT: bootCorruptionPath,
+					FAKE_REPL_CORRUPT_RESTORE: restoreCorruptionPath,
 					FAKE_REPL_CORRUPT_SNAPSHOT: snapshotCorruptionPath,
 					FAKE_REPL_DELAY_READY: delayReadyPath,
+					FAKE_REPL_FAIL_RESTORE: restoreFailurePath,
 					FAKE_REPL_SPAWN_COUNT: countPath,
 				},
 				snapshot: options.snapshot
@@ -116,6 +130,8 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			bootCorruptionPath,
 			countPath,
 			delayReadyPath,
+			restoreCorruptionPath,
+			restoreFailurePath,
 			snapshotCorruptionPath,
 			snapshotPath,
 		};
@@ -134,6 +150,72 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			const result = await manager.execute("read");
 			expect(result).toMatchObject({ status: "ok", stdout: "persisted" });
 			expect(spawnCount(countPath)).toBe(2);
+		} finally {
+			await manager.dispose();
+		}
+	});
+
+	it("runs a queued execute only after the repair restores state", async () => {
+		const { manager, countPath, snapshotPath } = newManager({ snapshot: true });
+		try {
+			await manager.execute("seed");
+			await expect.poll(() => existsSync(snapshotPath)).toBe(true);
+
+			const corrupt = manager.execute("corrupt-active");
+			const queued = manager.execute("read");
+			await expect(corrupt).rejects.toThrow("Kernel protocol error");
+			await expect(queued).resolves.toMatchObject({ status: "ok", stdout: "persisted" });
+			expect(spawnCount(countPath)).toBe(2);
+		} finally {
+			await manager.dispose();
+		}
+	});
+
+	it("returns an aborted result promptly while the repair is still starting up", async () => {
+		const { manager, delayReadyPath } = newManager();
+		try {
+			await manager.start();
+			writeFileSync(delayReadyPath, "1");
+			await expect(manager.execute("corrupt-active")).rejects.toThrow("unparseable protocol line");
+
+			const controller = new AbortController();
+			const pending = manager.execute("read", { signal: controller.signal });
+			controller.abort();
+			await expect(pending).resolves.toMatchObject({ status: "aborted" });
+		} finally {
+			await manager.dispose();
+		}
+	});
+
+	it("gives up instead of respawn-looping when the replacement corrupts during restore", async () => {
+		const { manager, countPath, restoreCorruptionPath, snapshotPath } = newManager({ snapshot: true });
+		try {
+			await manager.execute("seed");
+			await expect.poll(() => existsSync(snapshotPath)).toBe(true);
+			writeFileSync(restoreCorruptionPath, "1");
+
+			await expect(manager.execute("corrupt-active")).rejects.toThrow("Kernel protocol error");
+			// The single replacement is discarded and no further children spawn.
+			await new Promise((r) => setTimeout(r, 400));
+			expect(spawnCount(countPath)).toBe(2);
+			// The next execute waits out the abandoned repair and starts a fresh kernel.
+			await expect(manager.execute("read")).resolves.toMatchObject({ status: "ok", stdout: "fresh" });
+			expect(spawnCount(countPath)).toBe(3);
+		} finally {
+			await manager.dispose();
+		}
+	});
+
+	it("discards the replacement kernel when the repair restore fails", async () => {
+		const { manager, countPath, restoreFailurePath, snapshotPath } = newManager({ snapshot: true });
+		try {
+			await manager.execute("seed");
+			await expect.poll(() => existsSync(snapshotPath)).toBe(true);
+			writeFileSync(restoreFailurePath, "1");
+
+			await expect(manager.execute("corrupt-active")).rejects.toThrow("Kernel protocol error");
+			await expect(manager.execute("read")).resolves.toMatchObject({ status: "ok", stdout: "fresh" });
+			expect(spawnCount(countPath)).toBe(3);
 		} finally {
 			await manager.dispose();
 		}

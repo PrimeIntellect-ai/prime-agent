@@ -149,6 +149,8 @@ export interface ExecuteOptions {
 	maxOutputChars?: number;
 	/** Synthetic host cell (snapshot/restore/list); excluded from lastCellCode attribution. */
 	internal?: boolean;
+	/** The protocol repair's own restore; exempt from waiting on the repair it belongs to. */
+	protocolRepair?: boolean;
 }
 
 /** MIME tag the `edit` skill emits diff payloads under. */

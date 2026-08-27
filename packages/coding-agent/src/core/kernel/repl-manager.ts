@@ -49,6 +49,7 @@ import {
 
 const REPL_PROTOCOL_VERSION = 2;
 const READY_TIMEOUT_MS = 30_000;
+const REPAIR_RESTORE_TIMEOUT_MS = 30_000;
 // Runtime-minted host-request ids never repeat; the bound only guards a
 // misbehaving runtime from growing the dedup set forever.
 const MAX_HANDLED_HOST_REQUEST_IDS = 1024;
@@ -311,7 +312,16 @@ export class ReplKernelManager {
 		this.rejectActiveExecution(error);
 		if (this.teardownInFlight > 0 || this.state !== "running") return;
 
-		if (this.protocolRepairOwner) this.protocolRepairOwner.superseded = true;
+		if (this.protocolRepairOwner) {
+			// A repair's own replacement child corrupted: discard it instead of respawn-looping.
+			this.appendKernelDiagnostic("replacement kernel corrupted during protocol repair; giving up");
+			this.protocolRepairOwner.superseded = true;
+			this.state = "shutdown";
+			liveKernels.delete(this);
+			this.cleanupResources("SIGKILL");
+			this.state = "idle";
+			return;
+		}
 		const owner = { superseded: false };
 		this.protocolRepairOwner = owner;
 		const repair = this.repairProtocolChild(child, owner);
@@ -349,7 +359,7 @@ export class ReplKernelManager {
 			return;
 		}
 
-		const restored = await this.restoreState();
+		const restored = await this.performRestore(true);
 		if (this.startStale(generation) || (this.state as string) !== "running") {
 			this.finishFailedProtocolRepair(owner);
 			return;
@@ -372,6 +382,27 @@ export class ReplKernelManager {
 
 	private supersedeProtocolRepair(): void {
 		if (this.protocolRepairOwner) this.protocolRepairOwner.superseded = true;
+	}
+
+	/** Wait until no protocol repair is pending; resolves early when the signal aborts. */
+	private async waitForProtocolRepair(signal?: AbortSignal): Promise<void> {
+		while (this.protocolRepairPromise && !signal?.aborted) {
+			const repair = this.protocolRepairPromise;
+			if (!signal) {
+				await repair;
+				continue;
+			}
+			let onAbort: () => void = () => {};
+			const aborted = new Promise<void>((resolve) => {
+				onAbort = resolve;
+				signal.addEventListener("abort", onAbort, { once: true });
+			});
+			try {
+				await Promise.race([repair, aborted]);
+			} finally {
+				signal.removeEventListener("abort", onAbort);
+			}
+		}
 	}
 
 	private async waitForReady(child: ChildProcess): Promise<number> {
@@ -512,7 +543,7 @@ export class ReplKernelManager {
 	}
 
 	async execute(code: string, opts: ExecuteOptions = {}): Promise<ExecuteResult> {
-		await this.protocolRepairPromise;
+		await this.waitForProtocolRepair(opts.signal);
 		const result = await this.enqueueExecute(code, opts);
 		// Refresh the on-disk snapshot after real work so a later resume (or a
 		// crash before graceful shutdown) revives the most recent namespace.
@@ -552,6 +583,14 @@ export class ReplKernelManager {
 			resolveNext = r;
 		});
 		await prev;
+
+		// A repair started while this request was queued: release the slot so the
+		// repair's own restore can run, then requeue behind the finished repair.
+		if (this.protocolRepairPromise && !opts.protocolRepair) {
+			resolveNext();
+			await this.waitForProtocolRepair(opts.signal);
+			return this.enqueueRequest(requestFields, code, opts, executionTimeoutMs);
+		}
 
 		const started = Date.now();
 		let executionTimeout: ReturnType<typeof globalThis.setTimeout> | undefined;
@@ -1137,12 +1176,24 @@ export class ReplKernelManager {
 	 * (rlm, skills) over anything restored. Never throws.
 	 */
 	async restoreState(): Promise<RestoreResult | null> {
+		return this.performRestore(false);
+	}
+
+	/** Repair restores bypass the repair gate and are bounded so a stalled kernel cannot wedge it. */
+	private async performRestore(protocolRepair: boolean): Promise<RestoreResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg) return null;
 		try {
-			const r = await this.enqueueRequest({ type: "restore", path: cfg.path }, "", { internal: true });
+			const r = await this.enqueueRequest(
+				{ type: "restore", path: cfg.path },
+				"",
+				{ internal: true, protocolRepair },
+				protocolRepair ? REPAIR_RESTORE_TIMEOUT_MS : undefined,
+			);
 			if (r.status !== "ok" || !r.doneFields) {
-				this.appendKernelDiagnostic(`state restore failed: ${r.error?.evalue ?? r.stderr}`);
+				this.appendKernelDiagnostic(
+					`state restore ${r.status === "aborted" ? "timed out" : "failed"}: ${r.error?.evalue ?? r.stderr}`,
+				);
 				return null;
 			}
 			return {
