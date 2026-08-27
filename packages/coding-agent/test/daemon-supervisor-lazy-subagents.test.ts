@@ -384,6 +384,38 @@ describe("daemon supervisor passive subagent topology", () => {
 		expect(launchWorker).toHaveBeenCalledOnce();
 	});
 
+	it("rejoins an open registered while reclaiming a stale worker registration", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-reclaim-rejoin-"));
+		tempDirs.push(directory);
+		const sessionPath = join(directory, "session.jsonl");
+		let releaseReclaim!: () => void;
+		const reclaimGate = new Promise<void>((resolve) => {
+			releaseReclaim = resolve;
+		});
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorInternals;
+		const stale = worker("stale");
+		stale.descriptor.createCommand = { config: { cwd: directory }, sessionPath };
+		supervisor.workers.set(stale.descriptor.workerId, stale);
+		const resident = worker("opened");
+		const launchWorker = vi.fn(async () => resident);
+		const reclaimStaleWorkerRegistration = vi.fn(async () => {
+			await reclaimGate;
+			supervisor.workers.delete(stale.descriptor.workerId);
+			return true;
+		});
+		Object.assign(supervisor, { launchWorker, reclaimStaleWorkerRegistration });
+
+		const create = { type: "create" as const, sessionPath };
+		const first = supervisor.createOrReuseWorker("client", create);
+		const second = supervisor.createOrReuseWorker("client", create);
+		releaseReclaim();
+		expect(await Promise.all([first, second])).toEqual([resident, resident]);
+		expect(launchWorker).toHaveBeenCalledOnce();
+	});
+
 	it("propagates an in-flight open failure to joiners", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-pending-failure-"));
 		tempDirs.push(directory);

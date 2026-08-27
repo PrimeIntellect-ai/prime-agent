@@ -2264,14 +2264,17 @@ export class DaemonSupervisor {
 			: `new:${command.id ? createCommandIdempotencyKey(clientId, command.id) : createActiveSessionId()}`;
 		const pending = this.openingWorkers.get(key);
 		if (pending) {
-			const worker = await pending;
-			this.assertWorkerCreateOwner(worker, ownerClientId, createCommand.sessionPath ?? key);
-			return worker;
+			return this.joinOpeningWorker(pending, ownerClientId, createCommand.sessionPath ?? key);
 		}
 		if (createCommand.sessionPath) {
 			const existing = this.findWorkerBySessionFile(createCommand.sessionPath);
 			if (existing && !(await this.reclaimStaleWorkerRegistration(existing, command.launchEnv !== undefined))) {
 				return this.reuseWorkerForCreate(existing, ownerClientId, createCommand.sessionPath);
+			}
+			// The reclaim await may have let a concurrent opener register; join it instead of double-launching.
+			const opened = this.openingWorkers.get(key);
+			if (opened) {
+				return this.joinOpeningWorker(opened, ownerClientId, createCommand.sessionPath);
 			}
 		}
 		const opening = (async () => {
@@ -2334,6 +2337,16 @@ export class DaemonSupervisor {
 			throw new Error(`Session "${sessionPath}" worker is ${this.effectiveWorkerState(current)}${detail}`);
 		}
 		return current;
+	}
+
+	private async joinOpeningWorker(
+		pending: Promise<ResidentWorker>,
+		ownerClientId: string | undefined,
+		sessionPath: string,
+	): Promise<ResidentWorker> {
+		const worker = await pending;
+		this.assertWorkerCreateOwner(worker, ownerClientId, sessionPath);
+		return worker;
 	}
 
 	private assertWorkerCreateOwner(
