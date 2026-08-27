@@ -16,7 +16,7 @@ flowchart LR
         runtime["AgentSessionRuntime"]
         root["Root AgentSession"]
         scheduler["Scheduler"]
-        kernel["Root IPython kernel"]
+        kernel["Root Python kernel"]
         children["RLM child runtimes<br/>session + optional kernel"]
 
         runtime --> root
@@ -44,7 +44,7 @@ flowchart LR
 - The supervisor owns discovery, routing, attachments, worker health, and cross-agent message delivery.
 - Each worker owns one root runtime, its scheduler, kernels, and all descendants below that root.
 - `AgentSession` owns provider calls, queues, tools, compaction, goals, child lifecycles, and transcript writes.
-- IPython is the model-facing control environment. Typed host requests return authoritative operations to the TypeScript session.
+- The Python REPL is the model-facing control environment. Typed host requests return authoritative operations to the TypeScript session.
 
 Workers and kernels are separate processes for lifecycle and failure containment, not security sandboxes. They normally run with the same operating-system permissions as the client.
 
@@ -58,7 +58,7 @@ sequenceDiagram
     participant W as Session worker
     participant A as AgentSession
     participant P as Model provider
-    participant K as IPython kernel
+    participant K as Python kernel
     participant D as Session storage
 
     U->>C: prompt, steer, or follow-up
@@ -66,8 +66,8 @@ sequenceDiagram
     S->>W: route to active session
     W->>A: enqueue prompt
     A->>P: stream model request
-    P-->>A: text or IPython tool call
-    opt IPython tool call
+    P-->>A: text or Python tool call
+    opt Python tool call
         A->>K: execute Python
         alt Typed host request
             K->>A: request host operation
@@ -89,5 +89,5 @@ From the session queue onward, the same execution and persistence path is used w
 
 - [Agent Connection Architecture](agent-connection.md) explains the client/runtime boundary, snapshots, replay, and reconnect behavior.
 - [Daemon Architecture](daemon.md) covers process ownership, leases, scheduling, backpressure, and crash recovery.
-- [RLM Runtime Architecture](rlm-runtime.md) follows IPython host requests and recursive child execution.
+- [RLM Runtime Architecture](rlm-runtime.md) follows kernel host requests and recursive child execution.
 - [Long-Running and Background Agents](long-running-agents.md) shows how detached sessions, messages, goals, and scheduled work share the worker runtime.
