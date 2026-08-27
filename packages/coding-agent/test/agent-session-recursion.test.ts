@@ -2223,9 +2223,8 @@ describe("AgentSession rlm recursion", () => {
 		}
 		const rootInternals = root as unknown as InspectableRlmSession;
 		await waitFor(() => !rootInternals._activeRlmChildRuns.has(childId));
-		const unsubscribe = root.releaseRlmChildSession(childId, child);
-		if (!unsubscribe) throw new Error("Failed to release retained child");
-		expect(root.registerRlmChildSession(childId, child, unsubscribe)).toBe(true);
+		const completeRelease = root.releaseRlmChildSession(childId, child);
+		if (!completeRelease) throw new Error("Failed to release retained child");
 
 		child.setCurrentRecap("retained recap");
 		child.setSessionName("renamed-worker");

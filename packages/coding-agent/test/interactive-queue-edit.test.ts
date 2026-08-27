@@ -42,6 +42,7 @@ type Harness = {
 		selected: { lane: "steering" | "followUp"; index: number; text: string },
 		index: number,
 	) => void;
+	refreshQueueSelectionFromState: () => void;
 	updateConnectionStateFromEvent: (event: AgentConnectionSessionEvent) => void;
 	patchConnectionState: (patch: Partial<Harness["connectionState"]>) => void;
 	setEditorTextFromQueueSelection: (text: string) => void;
@@ -90,6 +91,7 @@ function createHarness(queue: { steering: string[]; followUp: string[] }, mutate
 		moveQueueSelection: proto.moveQueueSelection,
 		getConnectionQueue: proto.getConnectionQueue,
 		refreshQueueSelectionAt: proto.refreshQueueSelectionAt,
+		refreshQueueSelectionFromState: proto.refreshQueueSelectionFromState,
 		updateConnectionStateFromEvent: proto.updateConnectionStateFromEvent,
 		patchConnectionState: () => {},
 		setEditorTextFromQueueSelection: proto.setEditorTextFromQueueSelection,
@@ -390,6 +392,21 @@ describe("interactive queued-message editing", () => {
 		harness.agentConnection.mutateQueuedMessage.mockImplementation(async () => {
 			emitQueueUpdate(harness, { steering: ["s1"], followUp: [] });
 			return "applied";
+		});
+		harness.editor.setText("draft");
+		harness.browseQueueSelection(-1);
+		harness.moveQueueSelection(-1);
+		await harness.queueMutationChain;
+
+		expect(harness.queueSelection.isBrowsing).toBe(false);
+		expect(harness.editor.getText()).toBe("draft");
+	});
+
+	it("refreshes selection after a failed move suppresses an external event", async () => {
+		const harness = createHarness({ steering: ["s1", "s2"], followUp: [] }, "rejected");
+		harness.agentConnection.mutateQueuedMessage.mockImplementation(async () => {
+			emitQueueUpdate(harness, { steering: ["s1"], followUp: [] });
+			return "rejected";
 		});
 		harness.editor.setText("draft");
 		harness.browseQueueSelection(-1);

@@ -1163,7 +1163,6 @@ export class AgentSession {
 	private _rlmSessionDir?: string;
 	private _rlmParentNodeId?: string;
 	private _rlmParentAgent?: string;
-	private _rlmParentRun?: RlmChildRun;
 	private _repliedToParentSinceTask: boolean | undefined;
 	private _parentReplyCount = 0;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
@@ -7677,6 +7676,11 @@ export class AgentSession {
 			await this.waitForRetry();
 			await this._waitForRefineIdle();
 			await this._waitForQueuedWorkResume(settlement);
+			const compactionOperation = this._compactionOperation;
+			if (compactionOperation) {
+				await Promise.race([compactionOperation, settlement.promise]);
+				continue;
+			}
 
 			const commitFence = await this._acquireSessionActionCommitFence();
 			let continuation: Promise<void> | undefined;
@@ -7691,7 +7695,7 @@ export class AgentSession {
 					return;
 				}
 
-				if (this._queuedWorkPauses.size > 0) {
+				if (this._queuedWorkPauses.size > 0 || this._compactionOperation) {
 					continue;
 				}
 
@@ -7741,7 +7745,7 @@ export class AgentSession {
 					}
 					continue;
 				}
-				if (code !== "nothing-to-continue") {
+				if (code !== "nothing-to-continue" && this._postCompactionContinuationSettlement === settlement) {
 					this._settlePostCompactionContinue(this._asError(error));
 				}
 				return;
@@ -9977,9 +9981,7 @@ export class AgentSession {
 			void session.disposeAsync().catch(() => undefined);
 			return false;
 		}
-		const run = this._activeRlmChildRuns.get(childId) ?? session._rlmParentRun;
-		if (run) session._rlmParentRun = run;
-		this._rlmChildSessions.set(childId, { session, run });
+		this._rlmChildSessions.set(childId, { session, run: this._activeRlmChildRuns.get(childId) });
 		if (unsubscribe) {
 			this._rlmChildUnsubscribes.set(childId, unsubscribe);
 		}
@@ -9990,15 +9992,19 @@ export class AgentSession {
 		const run = this._activeRlmChildRuns.get(childId);
 		if (run?.session === session && run.status === "done") {
 			const unsubscribe = run.unsubscribe ?? noopRlmChildEventUnsubscribe;
-			run.unsubscribe = undefined;
-			this._activeRlmChildRuns.delete(childId);
-			return unsubscribe;
+			return () => {
+				run.unsubscribe = undefined;
+				this._activeRlmChildRuns.delete(childId);
+				unsubscribe();
+			};
 		}
 		if (this._rlmChildSessions.get(childId)?.session !== session) return false;
 		const unsubscribe = this._rlmChildUnsubscribes.get(childId) ?? noopRlmChildEventUnsubscribe;
-		this._rlmChildUnsubscribes.delete(childId);
-		this._rlmChildSessions.delete(childId);
-		return unsubscribe;
+		return () => {
+			this._rlmChildUnsubscribes.delete(childId);
+			this._rlmChildSessions.delete(childId);
+			unsubscribe();
+		};
 	}
 
 	private _rlmChildSnapshotForRun(
