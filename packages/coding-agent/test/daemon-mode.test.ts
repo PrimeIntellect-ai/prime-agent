@@ -6928,7 +6928,7 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("re-adopts a resident child when its passivation close fails", async () => {
+	it("keeps ownership of a resident child until passivation succeeds", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passivation-close-failure-"));
 		let releaseAbort!: () => void;
 		const abortGate = new Promise<void>((resolve) => {
@@ -6952,7 +6952,6 @@ describe("daemon mode helpers", () => {
 			const childState = await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
 			const parentSession = parentState.runtime.session as unknown as {
 				releaseRlmChildSession: ReturnType<typeof vi.fn>;
-				registerRlmChildSession: ReturnType<typeof vi.fn>;
 			};
 			let parentOwnsChild = true;
 			let forwarderActive = true;
@@ -6965,16 +6964,11 @@ describe("daemon mode helpers", () => {
 			});
 			parentSession.releaseRlmChildSession = vi.fn(() => {
 				if (!parentOwnsChild) return false;
-				parentOwnsChild = false;
-				return unsubscribeForwarder;
+				return () => {
+					parentOwnsChild = false;
+					unsubscribeForwarder();
+				};
 			});
-			parentSession.registerRlmChildSession = vi.fn(
-				(_childId: string, _childSession: unknown, unsubscribe: () => void) => {
-					parentOwnsChild = true;
-					forwarderActive = unsubscribe === unsubscribeForwarder;
-					return true;
-				},
-			);
 			childState.unsubscribe = vi
 				.fn()
 				.mockImplementationOnce(() => {
@@ -7000,11 +6994,6 @@ describe("daemon mode helpers", () => {
 			await expect(delivery).resolves.toMatchObject({ deliveryStatus: "delivered" });
 			expect(internals.sessions.get(childState.activeSessionId)).toBe(childState);
 			expect(parentOwnsChild).toBe(true);
-			expect(parentSession.registerRlmChildSession).toHaveBeenCalledWith(
-				fixture.childId,
-				childState.runtime.session,
-				unsubscribeForwarder,
-			);
 			expect(unsubscribeForwarder).not.toHaveBeenCalled();
 			emitChildUpdate("recap after failed close");
 			expect(parentUpdates).toEqual(["recap after failed close"]);
@@ -10274,6 +10263,7 @@ function makeRuntimeSession(
 		},
 		setSubagentRuntimeHost: vi.fn(),
 		getRlmChildRunStatus: vi.fn(() => "running"),
+		getRlmChildSnapshots: vi.fn(() => []),
 		registerRlmChildSession: vi.fn(() => true),
 		releaseRlmChildSession: vi.fn(() => vi.fn()),
 		subscribe: vi.fn(() => vi.fn()),

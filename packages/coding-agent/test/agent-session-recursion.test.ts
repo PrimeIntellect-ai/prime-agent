@@ -18,7 +18,7 @@ import {
 	createAgentSessionMessage,
 	isAgentSessionMessage,
 } from "../src/core/agent-messages.js";
-import { AgentSession } from "../src/core/agent-session.js";
+import { AgentSession, type RlmChildAgentSnapshot } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { LoadExtensionsResult } from "../src/core/extensions/index.js";
 import { type HostRequestHandlers, ReplKernelManager } from "../src/core/kernel/index.js";
@@ -120,7 +120,7 @@ interface InspectableRlmSession {
 		}
 	>;
 	_rlmChildCleanupFailures: Map<string, Awaited<ReturnType<AgentSession["listRlmSubagents"]>>["subagents"][number]>;
-	_rlmChildSessions: Map<string, AgentSession>;
+	_rlmChildSessions: Map<string, { session: AgentSession; run?: InspectableRlmRun }>;
 	_rlmChildUnsubscribes: Map<string, () => void>;
 	_deletedRlmChildIds: Set<string>;
 	_rlmQuiescenceWaitAborts: Set<AbortController>;
@@ -523,6 +523,10 @@ describe("AgentSession rlm recursion", () => {
 		mkdirSync(childDir, { recursive: true });
 		const child = createSession({ rlmSessionDir: childDir });
 		child.setSessionName("restored-worker");
+		const restoredAnswer = assistantMessage("restored answer", usage(7, 3));
+		restoredAnswer.content.push({ type: "toolCall", id: "tool-1", name: "ipython", arguments: {} });
+		child.agent.state.messages.push(restoredAnswer);
+		child.setCurrentRecap("restored recap");
 		const disposeChild = vi.spyOn(child, "disposeAsync");
 		const root = createSession();
 		const childStatuses: string[] = [];
@@ -533,6 +537,15 @@ describe("AgentSession rlm recursion", () => {
 		});
 
 		expect(root.registerRlmChildSession(childId, child)).toBe(true);
+		expect(root.getRlmChildSnapshots()).toEqual([
+			expect.objectContaining({
+				id: childId,
+				answerPreview: "restored answer",
+				toolUseCount: 1,
+				tokenCount: 10,
+				recap: "restored recap",
+			}),
+		]);
 		expect((await root.listRlmSubagents()).subagents).toEqual([
 			expect.objectContaining({
 				rlm_child_id: childId,
@@ -651,9 +664,9 @@ describe("AgentSession rlm recursion", () => {
 				});
 				// The same child can be visible in both lifecycle registries while
 				// deletion settles; it must be traversed exactly once and remain hidden.
-				rootInternals._rlmChildSessions.set(id, parent);
+				rootInternals._rlmChildSessions.set(id, { session: parent });
 			} else {
-				rootInternals._rlmChildSessions.set(id, parent);
+				rootInternals._rlmChildSessions.set(id, { session: parent });
 				if (hiding === "deleted") {
 					rootInternals._deletedRlmChildIds.add(id);
 				} else {
@@ -745,6 +758,14 @@ describe("AgentSession rlm recursion", () => {
 		await waitFor(() => childUpdates.some((update) => update.status === "done"));
 		const doneUpdate = [...childUpdates].reverse().find((update) => update.status === "done");
 		expect(doneUpdate?.answerPreview).toBe("child answer: summarize shard 1");
+		expect(root.getRlmChildSnapshots()).toEqual([
+			expect.objectContaining({
+				id: result.rlm_child_id,
+				status: "done",
+				answerPreview: doneUpdate?.answerPreview,
+				durationMs: expect.any(Number),
+			}),
+		]);
 		const child = root.getRlmChildSession(result.rlm_child_id);
 		expect(child?.messages[0]).toMatchObject({
 			role: "custom",
@@ -842,6 +863,9 @@ describe("AgentSession rlm recursion", () => {
 			},
 		});
 		const spawned = await root.runRlmChild("pending task", { name: "pending-child" });
+		expect(root.getRlmChildSnapshots()).toEqual([
+			expect.objectContaining({ id: spawned.rlm_child_id, status: "queued" }),
+		]);
 		const handlers = (root as unknown as InspectableRlmSession)._createKernelHostHandlers();
 		const send = handlers["agent_message.send"];
 		if (!send) throw new Error("Missing agent_message.send host handler");
@@ -2196,14 +2220,33 @@ describe("AgentSession rlm recursion", () => {
 		if (!child) {
 			throw new Error("Missing retained child session");
 		}
+		const rootInternals = root as unknown as InspectableRlmSession;
+		await waitFor(() => !rootInternals._activeRlmChildRuns.has(childId));
+		const completeRelease = root.releaseRlmChildSession(childId, child);
+		if (!completeRelease) throw new Error("Failed to release retained child");
 
+		child.setCurrentRecap("retained recap");
 		child.setSessionName("renamed-worker");
 
 		const childUpdates = events.filter(
-			(event): event is { type: "rlm_child_update"; child: { sessionName?: string } } =>
+			(event): event is { type: "rlm_child_update"; child: RlmChildAgentSnapshot } =>
 				typeof event === "object" && event !== null && (event as { type?: string }).type === "rlm_child_update",
 		);
-		expect(childUpdates.at(-1)?.child.sessionName).toBe("renamed-worker");
+		expect(childUpdates.at(-1)?.child).toMatchObject({
+			sessionName: "renamed-worker",
+			durationMs: expect.any(Number),
+			tokenCount: 10,
+			recap: "retained recap",
+			repliedSinceTask: false,
+		});
+		expect(root.getRlmChildSnapshots()).toEqual([
+			expect.objectContaining({
+				sessionName: "renamed-worker",
+				durationMs: expect.any(Number),
+				tokenCount: 10,
+				recap: "retained recap",
+			}),
+		]);
 	});
 
 	it("surfaces a child's recap on its snapshot once the summarizer sets it", async () => {
