@@ -1671,6 +1671,64 @@ describe("InteractiveMode connection events", () => {
 		expect(fakeThis.renderInitialMessages).toHaveBeenCalledOnce();
 	});
 
+	test("exits stale queue browsing when a resync replaces the queue snapshot", async () => {
+		const queueSelection = new QueueSelection();
+		let editorText = "draft";
+		queueSelection.move({ steering: [], followUp: ["queued"] }, editorText, -1);
+		editorText = "queued";
+		const snapshot: AgentConnectionSnapshot = {
+			state: createConnectionState({
+				sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+			}),
+			messages: [],
+		};
+		const fakeThis = {
+			connectionState: createConnectionState({
+				sessionActions: { queuedCount: 1, steering: [], followUps: ["queued"] },
+			}),
+			queueSelection,
+			pendingQueueEdit: undefined,
+			pendingQueueMove: false,
+			isApplyingQueueSelectionText: false,
+			editor: {
+				getText: () => editorText,
+				setText: (text: string) => {
+					editorText = text;
+				},
+			},
+			isBashRunning: () => false,
+			applyConnectionStateSnapshot: vi.fn(),
+			restoreTurnStartFromMessages: vi.fn(),
+			replaceSubagentSummary: vi.fn(),
+			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
+				messages: [],
+				thinkingLevel: "medium",
+				model: null,
+			})),
+			renderSessionContext: vi.fn(async () => {}),
+			restoreStreamingMessageFromSnapshot: vi.fn(),
+			updatePendingMessagesDisplay: vi.fn(),
+			updateTerminalTitle: vi.fn(),
+			setGoalAnnouncementBaseline: vi.fn(),
+			syncGoalTray: vi.fn(),
+			syncWorkingLoader: vi.fn(),
+			getGoalState: () => emptyGoalState(),
+		};
+		fakeThis.applyConnectionStateSnapshot.mockImplementation((state: AgentConnectionState) => {
+			fakeThis.connectionState = state;
+		});
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+
+		await (
+			InteractiveMode.prototype as unknown as {
+				renderResyncedSession(this: unknown, value: AgentConnectionSnapshot): Promise<void>;
+			}
+		).renderResyncedSession.call(fakeThis, snapshot);
+
+		expect(queueSelection.isBrowsing).toBe(false);
+		expect(editorText).toBe("draft");
+	});
+
 	test("preserves client-local work while rendering a resynchronized snapshot", async () => {
 		const sideQuestion = { id: "side-1", status: "running" };
 		const extensionRequests = new Map([["request-1", { cancelLocal: vi.fn() }]]);
@@ -1704,6 +1762,7 @@ describe("InteractiveMode connection events", () => {
 			streamingComponent: {},
 			streamingMessage: {},
 			applyConnectionStateSnapshot: vi.fn(),
+			refreshQueueSelectionFromState: vi.fn(),
 			updateWorkingLoaderMessage: vi.fn(),
 			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
@@ -1760,6 +1819,7 @@ describe("InteractiveMode connection events", () => {
 			isAgentCompacting: () => true,
 			isBashRunning: () => true,
 			applyConnectionStateSnapshot: vi.fn(),
+			refreshQueueSelectionFromState: vi.fn(),
 			restoreTurnStartFromMessages: vi.fn(),
 			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
