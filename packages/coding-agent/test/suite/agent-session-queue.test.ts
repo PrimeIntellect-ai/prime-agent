@@ -353,6 +353,31 @@ describe("AgentSession queue characterization", () => {
 		expect(internals._postCompactionContinuationScheduled).toBe(false);
 	});
 
+	it("does not let a failed cancelled continuation reject its replacement", async () => {
+		const harness = await createAutoRefineHarness();
+		harnesses.push(harness);
+		const internals = harness.session as unknown as AutoRefineInternals;
+		const cancelledRun = createDeferred();
+		const replacementRun = createDeferred();
+		const continueAgent = vi
+			.spyOn(harness.session.agent, "continue")
+			.mockReturnValueOnce(cancelledRun.promise)
+			.mockReturnValueOnce(replacementRun.promise);
+
+		internals._schedulePostCompactionContinue();
+		await vi.waitFor(() => expect(continueAgent).toHaveBeenCalledTimes(1));
+		internals._cancelPostCompactionContinue();
+		internals._schedulePostCompactionContinue();
+		await vi.waitFor(() => expect(continueAgent).toHaveBeenCalledTimes(2));
+		const idle = harness.session.waitForHeadlessIdle();
+
+		cancelledRun.reject(new Error("cancelled continuation failed"));
+		await new Promise<void>(setImmediate);
+		replacementRun.resolve();
+
+		await expect(idle).resolves.toBeUndefined();
+	});
+
 	it("waits for a queued-work pause to release before post-compaction continuation", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);

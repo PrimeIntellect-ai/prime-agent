@@ -268,6 +268,51 @@ describe("AgentSession compaction characterization", () => {
 		}
 	});
 
+	it("waits for active manual compaction before continuing", async () => {
+		const compactionStarted = createDeferred();
+		const compactionRelease = createDeferred();
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						compactionStarted.resolve();
+						await compactionRelease.promise;
+						return {
+							compaction: {
+								summary: "summary from extension",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								details: { source: "extension" },
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const internals = harness.session as unknown as {
+			_schedulePostCompactionContinue(): void;
+		};
+		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+		await harness.session.prompt("first");
+		await harness.session.prompt("second");
+		const pause = harness.session.acquireQueuedWorkPause();
+		const continueAgent = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
+		internals._schedulePostCompactionContinue();
+
+		const compaction = harness.session.compact(undefined, { skipAbort: true });
+		await compactionStarted.promise;
+		pause.release();
+		await new Promise<void>(setImmediate);
+		expect(continueAgent).not.toHaveBeenCalled();
+
+		compactionRelease.resolve();
+		await compaction;
+		await harness.session.waitForHeadlessIdle();
+		expect(continueAgent).toHaveBeenCalledTimes(1);
+	});
+
 	it("treats session-owned queued inputs as queued work after compaction", async () => {
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 1 } },
