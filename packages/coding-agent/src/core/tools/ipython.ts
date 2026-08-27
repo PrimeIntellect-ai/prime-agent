@@ -287,8 +287,6 @@ export interface IpythonToolOptions {
 	/** Resolves before this kernel starts — e.g. the previous provisioner's dispose, so a
 	 * /reload's old-kernel snapshot flush can't race the new kernel's restore. */
 	readyGate?: Promise<unknown>;
-	/** Filled with the live kernel client after the first kernel start; cleared on construction. */
-	kernelManagerRef?: { current?: KernelClient };
 	/**
 	 * Fires once per kernel start when a previous session's namespace was revived
 	 * (some names restored or some failed), so the session can tell the model.
@@ -317,11 +315,7 @@ export class IpythonKernelProvisioner {
 	constructor(
 		private readonly cwd: string,
 		private readonly options?: Omit<IpythonToolOptions, "provisioner">,
-	) {
-		if (options?.kernelManagerRef) {
-			options.kernelManagerRef.current = undefined;
-		}
-	}
+	) {}
 
 	/** The kernel manager, once a startup has completed successfully. */
 	get manager(): KernelClient | undefined {
@@ -365,9 +359,6 @@ export class IpythonKernelProvisioner {
 		const pending = this.managerPromise;
 		this.managerPromise = undefined;
 		this.startedManager = undefined;
-		if (this.options?.kernelManagerRef) {
-			this.options.kernelManagerRef.current = undefined;
-		}
 		if (!pending) return;
 		try {
 			const m = await pending;
@@ -381,9 +372,6 @@ export class IpythonKernelProvisioner {
 		const pending = this.managerPromise;
 		this.managerPromise = undefined;
 		this.startedManager = undefined;
-		if (this.options?.kernelManagerRef) {
-			this.options.kernelManagerRef.current = undefined;
-		}
 		if (!pending) return;
 		try {
 			const m = await pending;
@@ -529,9 +517,6 @@ export class IpythonKernelProvisioner {
 			if (pendingRestore) {
 				this._lastRestore = pendingRestore;
 				this.options?.onRestore?.(pendingRestore);
-			}
-			if (this.options?.kernelManagerRef) {
-				this.options.kernelManagerRef.current = m;
 			}
 			return m;
 		} finally {
