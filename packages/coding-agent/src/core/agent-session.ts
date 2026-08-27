@@ -7658,6 +7658,11 @@ export class AgentSession {
 			await this.waitForRetry();
 			await this._waitForRefineIdle();
 			await this._waitForQueuedWorkResume(settlement);
+			const compactionOperation = this._compactionOperation;
+			if (compactionOperation) {
+				await Promise.race([compactionOperation, settlement.promise]);
+				continue;
+			}
 
 			const commitFence = await this._acquireSessionActionCommitFence();
 			let continuation: Promise<void> | undefined;
@@ -7672,7 +7677,7 @@ export class AgentSession {
 					return;
 				}
 
-				if (this._queuedWorkPauses.size > 0) {
+				if (this._queuedWorkPauses.size > 0 || this._compactionOperation) {
 					continue;
 				}
 
@@ -7722,7 +7727,7 @@ export class AgentSession {
 					}
 					continue;
 				}
-				if (code !== "nothing-to-continue") {
+				if (code !== "nothing-to-continue" && this._postCompactionContinuationSettlement === settlement) {
 					this._settlePostCompactionContinue(this._asError(error));
 				}
 				return;
