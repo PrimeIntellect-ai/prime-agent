@@ -2758,12 +2758,9 @@ export class AgentDaemon {
 			try {
 				await this.closeSession(state, "shutdown", true, false);
 			} catch (error) {
-				// A pre-removal close failure must not strand a resident child outside its
-				// parent's ownership map or disconnect its event forwarder.
 				if (
 					this.sessions.get(state.activeSessionId) === state &&
-					this.sessions.get(parentActiveSessionId) === parentState &&
-					parentState.runtime.session.registerRlmChildSession(childId, state.runtime.session, unsubscribeChild)
+					this.sessions.get(parentActiveSessionId) === parentState
 				) {
 					throw error;
 				}
