@@ -3,7 +3,12 @@ import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, unlinkSync } 
 import { basename, dirname, join, resolve } from "node:path";
 import chalk from "chalk";
 import { APP_NAME, getAgentDir, VERSION } from "../config.js";
-import { isOrphanProcessIdentityCurrent, readActiveOrphanProcesses } from "../core/orphan-process-journal.js";
+import {
+	isOrphanProcessIdentityCurrent,
+	killOrphanProcess,
+	readActiveOrphanProcesses,
+	shouldReapOrphanProcess,
+} from "../core/orphan-process-journal.js";
 import { getProcessStartId } from "../core/session-lease.js";
 import { DaemonClient } from "../modes/daemon/daemon-client.js";
 import {
@@ -938,7 +943,26 @@ async function forceStopTrackedWorkers(
 				failures.push(`could not read child process records for worker ${descriptor.workerId}: ${String(error)}`);
 			}
 			for (const orphan of orphans) {
+				// Pid-only records go through the platform predicate (stopTrackedProcess needs a startId).
+				if (orphan.processStartId === undefined) {
+					if (shouldReapOrphanProcess(orphan)) {
+						killOrphanProcess(orphan.pid);
+					}
+					continue;
+				}
 				if (!isOrphanProcessIdentityCurrent(orphan)) {
+					continue;
+				}
+				if (process.platform === "win32") {
+					// taskkill /T, like the sibling reapers: signalling only the shell pid leaves its descendants alive.
+					await assertAdmission();
+					if (isOrphanProcessIdentityCurrent(orphan)) {
+						killOrphanProcess(orphan.pid);
+						if (isProcessAlive(orphan.pid)) {
+							cleanupWorkerRecords = false;
+							failures.push(`could not stop child process ${orphan.pid} for worker ${descriptor.workerId}`);
+						}
+					}
 					continue;
 				}
 				if (!(await stopTrackedProcess(orphan.pid, orphan.processStartId, assertAdmission))) {

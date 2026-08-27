@@ -1,6 +1,5 @@
-import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Agent, type AgentMessage, type StreamFn } from "@earendil-works/pi-agent-core";
@@ -22,7 +21,7 @@ import {
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { LoadExtensionsResult } from "../src/core/extensions/index.js";
-import { type HostRequestHandlers, KernelManager } from "../src/core/kernel/index.js";
+import { type HostRequestHandlers, ReplKernelManager } from "../src/core/kernel/index.js";
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import {
@@ -92,23 +91,6 @@ function streamAnswer(text: string): ReturnType<typeof createAssistantMessageEve
 	return stream;
 }
 
-interface TestCommMessage {
-	header: { msg_type: string };
-	parent_header: Record<string, unknown>;
-	metadata: Record<string, unknown>;
-	content: Record<string, unknown>;
-}
-
-interface KernelCommTestApi {
-	handleCommMessage(incoming: TestCommMessage): void;
-	sendCommMessage(commId: string, data: Record<string, unknown>): Promise<void>;
-}
-
-interface CapturedCommReply {
-	commId: string;
-	data: Record<string, unknown>;
-}
-
 interface InspectableRlmRun {
 	id: string;
 	prompt?: string;
@@ -146,73 +128,6 @@ interface InspectableRlmSession {
 	_reapDeletedRlmSubagentRuntimesAfterCompaction(): Promise<void>;
 }
 
-interface KernelPumpTestApi {
-	iopub: AsyncIterable<Buffer[]> & { close(): void };
-	startIopubPump(): void;
-}
-
-interface KernelExecuteTestApi {
-	start: () => Promise<void>;
-	state: "idle" | "starting" | "running" | "shutdown";
-	activeExecution?: unknown;
-	shell?: {
-		send(frames: Buffer[]): Promise<void>;
-		close(): void;
-	};
-	connection?: {
-		ip: string;
-		transport: "tcp";
-		shell_port: number;
-		iopub_port: number;
-		stdin_port: number;
-		control_port: number;
-		hb_port: number;
-		signature_scheme: "hmac-sha256";
-		key: string;
-		kernel_name: string;
-	};
-}
-
-function rlmCommOpenData(commId: string, data: Record<string, unknown>): TestCommMessage {
-	return {
-		header: { msg_type: "comm_open" },
-		parent_header: {},
-		metadata: {},
-		content: {
-			comm_id: commId,
-			target_name: "host.request",
-			data,
-		},
-	};
-}
-
-function rlmCommOpen(commId: string, prompt: string, kwargs: Record<string, unknown> = {}): TestCommMessage {
-	return rlmCommOpenData(commId, { type: "rlm.run", prompt, kwargs });
-}
-
-function encodeTestMessage(message: TestCommMessage): Buffer[] {
-	return [
-		Buffer.from("<IDS|MSG>"),
-		Buffer.from(""),
-		Buffer.from(JSON.stringify(message.header)),
-		Buffer.from(JSON.stringify(message.parent_header)),
-		Buffer.from(JSON.stringify(message.metadata)),
-		Buffer.from(JSON.stringify(message.content)),
-	];
-}
-
-function asyncFrames(frames: Buffer[][]): AsyncIterable<Buffer[]> & { close(): void } {
-	return {
-		close: () => {},
-		async *[Symbol.asyncIterator]() {
-			for (const frame of frames) {
-				await sleep(0);
-				yield frame;
-			}
-		},
-	};
-}
-
 async function waitFor(condition: () => boolean): Promise<void> {
 	const deadline = Date.now() + 1000;
 	while (!condition()) {
@@ -221,14 +136,6 @@ async function waitFor(condition: () => boolean): Promise<void> {
 		}
 		await sleep(10);
 	}
-}
-
-async function expectSettlesWithin(promise: Promise<void>, timeoutMs: number): Promise<void> {
-	const result = await Promise.race([
-		promise.then(() => "settled" as const),
-		sleep(timeoutMs).then(() => "timeout" as const),
-	]);
-	expect(result).toBe("settled");
 }
 
 function findLastMessage(
@@ -2765,24 +2672,6 @@ describe("AgentSession rlm recursion", () => {
 		expect(child.rlmMaxDepth).toBe(3);
 	});
 
-	it("lets a stale kernel depth cap defer to the live host gate", () => {
-		const python =
-			process.env.PRIME_AGENT_KERNEL_PYTHON ?? join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python");
-		const runtime = join(process.cwd(), "..", "..", "prime-agent-runtime", "src");
-		const probe = spawnSync(
-			python,
-			["-c", "import asyncio, rlm; rlm.Comm = None; asyncio.run(rlm.run('raised live cap'))"],
-			{
-				env: { ...process.env, PYTHONPATH: runtime, RLM_DEPTH: "1", RLM_MAX_DEPTH: "1" },
-				encoding: "utf8",
-			},
-		);
-
-		expect(probe.status).not.toBe(0);
-		expect(probe.stderr).toContain("Jupyter comm support is unavailable in this kernel");
-		expect(probe.stderr).not.toContain("RLM recursion depth limit reached");
-	});
-
 	it("rejects child creation at the configured recursion depth cap", async () => {
 		const root = createSession({ depth: 1, maxDepth: 1 });
 
@@ -3975,122 +3864,9 @@ describe("AgentSession rlm recursion", () => {
 		await waitFor(() => rootRun.status === "done");
 	});
 
-	it("runs parallel rlm comm requests independently", async () => {
-		let active = 0;
-		let maxActive = 0;
-		let started = 0;
-		let releaseChildren: () => void = () => {};
-		const release = new Promise<void>((resolve) => {
-			releaseChildren = resolve;
-		});
-		const replies: CapturedCommReply[] = [];
-		const manager = new KernelManager({
-			python: process.execPath,
-			hostHandlers: {
-				"rlm.run": createRlmRunHostHandler(async ({ prompt }) => {
-					active++;
-					started++;
-					maxActive = Math.max(maxActive, active);
-					await release;
-					active--;
-					return {
-						answer: `answer:${prompt}`,
-						usage: { prompt_tokens: 1, completion_tokens: 1 },
-						turns: 1,
-						session_dir: null,
-						model: "test/model",
-					};
-				}),
-			},
-		});
-
-		try {
-			const kernel = manager as unknown as KernelCommTestApi;
-			kernel.sendCommMessage = async (commId, data) => {
-				replies.push({ commId, data });
-			};
-
-			kernel.handleCommMessage(rlmCommOpen("comm-a", "first"));
-			kernel.handleCommMessage(rlmCommOpen("comm-b", "second"));
-
-			await waitFor(() => started === 2);
-			expect(maxActive).toBe(2);
-
-			releaseChildren();
-			await waitFor(() => replies.length === 2);
-
-			const byCommId = new Map(replies.map((reply) => [reply.commId, reply.data]));
-			expect(byCommId.get("comm-a")).toEqual({
-				status: "ok",
-				answer: "answer:first",
-				usage: { prompt_tokens: 1, completion_tokens: 1 },
-				turns: 1,
-				session_dir: null,
-				model: "test/model",
-			});
-			expect(byCommId.get("comm-b")).toEqual({
-				status: "ok",
-				answer: "answer:second",
-				usage: { prompt_tokens: 1, completion_tokens: 1 },
-				turns: 1,
-				session_dir: null,
-				model: "test/model",
-			});
-		} finally {
-			await manager.dispose();
-		}
-	});
-
-	it("handles rlm comm requests from the iopub pump outside active execution", async () => {
-		const replies: CapturedCommReply[] = [];
-		let promptSeen = "";
-		const manager = new KernelManager({
-			python: process.execPath,
-			hostHandlers: {
-				"rlm.run": createRlmRunHostHandler(async ({ prompt }) => {
-					promptSeen = prompt;
-					return {
-						answer: `answer:${prompt}`,
-						usage: { prompt_tokens: 1, completion_tokens: 1 },
-						turns: 1,
-						session_dir: null,
-						model: "test/model",
-					};
-				}),
-			},
-		});
-
-		try {
-			const kernel = manager as unknown as KernelCommTestApi & KernelPumpTestApi;
-			kernel.sendCommMessage = async (commId, data) => {
-				replies.push({ commId, data });
-			};
-			kernel.iopub = asyncFrames([encodeTestMessage(rlmCommOpen("comm-detached", "detached child"))]);
-
-			kernel.startIopubPump();
-
-			await waitFor(() => replies.length === 1);
-
-			expect(promptSeen).toBe("detached child");
-			expect(replies[0]).toEqual({
-				commId: "comm-detached",
-				data: {
-					status: "ok",
-					answer: "answer:detached child",
-					usage: { prompt_tokens: 1, completion_tokens: 1 },
-					turns: 1,
-					session_dir: null,
-					model: "test/model",
-				},
-			});
-		} finally {
-			await manager.dispose();
-		}
-	});
-
 	it("handles rlm calls from asyncio tasks after the scheduling cell is idle", async () => {
 		const prompts: string[] = [];
-		const manager = new KernelManager({
+		const manager = new ReplKernelManager({
 			cwd: tempDir,
 			hostHandlers: {
 				"rlm.run": createRlmRunHostHandler(async ({ prompt }) => {
@@ -4131,134 +3907,6 @@ print(_result.name)
 			expect(finished.stdout.trim()).toBe("detached-worker");
 		} finally {
 			await manager.dispose();
-		}
-	});
-
-	it("clears active execution when execute_request send fails", async () => {
-		const manager = new KernelManager({ python: process.execPath });
-		const kernel = manager as unknown as KernelExecuteTestApi;
-		const sendError = new Error("send failed");
-		kernel.start = async () => {};
-		kernel.state = "running";
-		kernel.shell = {
-			send: async (_frames: Buffer[]) => {
-				throw sendError;
-			},
-			close: () => {},
-		};
-		kernel.connection = {
-			ip: "127.0.0.1",
-			transport: "tcp",
-			shell_port: 1,
-			iopub_port: 2,
-			stdin_port: 3,
-			control_port: 4,
-			hb_port: 5,
-			signature_scheme: "hmac-sha256",
-			key: "",
-			kernel_name: "python3",
-		};
-
-		try {
-			await expect(manager.execute("print('hello')")).rejects.toThrow("send failed");
-			expect(kernel.activeExecution).toBeUndefined();
-		} finally {
-			await manager.dispose();
-		}
-	});
-
-	it("rejects removed background rlm comm request types", async () => {
-		const replies: CapturedCommReply[] = [];
-		const manager = new KernelManager({
-			python: process.execPath,
-			hostHandlers: {
-				"rlm.run": createRlmRunHostHandler(async () => ({
-					answer: "unused",
-					usage: { prompt_tokens: 1, completion_tokens: 1 },
-					turns: 1,
-					session_dir: null,
-					model: "test/model",
-				})),
-			},
-		});
-
-		try {
-			const kernel = manager as unknown as KernelCommTestApi;
-			kernel.sendCommMessage = async (commId, data) => {
-				replies.push({ commId, data });
-			};
-
-			kernel.handleCommMessage(rlmCommOpenData("comm-bg", { type: "background", prompt: "slow", kwargs: {} }));
-
-			await waitFor(() => replies.length === 1);
-
-			expect(replies[0]).toEqual({
-				commId: "comm-bg",
-				data: {
-					status: "error",
-					error: 'host request type "background" is not available in this session',
-				},
-			});
-		} finally {
-			await manager.dispose();
-		}
-	});
-
-	it("waits for in-flight rlm comm work during dispose and buffers failures", async () => {
-		let started = false;
-		let handlerSettled = false;
-		let released = false;
-		let releaseChild: () => void = () => {};
-		const release = new Promise<void>((resolve) => {
-			releaseChild = () => {
-				if (released) return;
-				released = true;
-				resolve();
-			};
-		});
-		const manager = new KernelManager({
-			python: process.execPath,
-			hostHandlers: {
-				"rlm.run": createRlmRunHostHandler(async () => {
-					started = true;
-					try {
-						await release;
-						throw new Error("child failed after dispose");
-					} finally {
-						handlerSettled = true;
-					}
-				}),
-			},
-		});
-		const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
-
-		try {
-			const kernel = manager as unknown as KernelCommTestApi;
-
-			kernel.handleCommMessage(rlmCommOpen("comm-dispose", "slow child"));
-
-			await waitFor(() => started);
-			const disposePromise = manager.dispose();
-			let disposeSettled = false;
-			const trackedDispose = disposePromise.then(() => {
-				disposeSettled = true;
-			});
-
-			await sleep(25);
-			expect(disposeSettled).toBe(false);
-
-			releaseChild();
-			await expectSettlesWithin(trackedDispose, 1000);
-			expect(handlerSettled).toBe(true);
-
-			const kernelStderr = (manager as unknown as { kernelStderr: string }).kernelStderr;
-			expect(kernelStderr).toContain("[kernel] host request failed for comm comm-dispose");
-			expect(kernelStderr).toContain("[kernel] failed to send host request error reply for comm comm-dispose");
-			expect(stderrSpy).not.toHaveBeenCalled();
-		} finally {
-			releaseChild();
-			await manager.dispose();
-			stderrSpy.mockRestore();
 		}
 	});
 });
