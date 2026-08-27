@@ -47,7 +47,7 @@ import {
 	type SnapshotResult,
 } from "./state-snapshot.js";
 
-const REPL_PROTOCOL_VERSION = 2;
+const REPL_PROTOCOL_VERSION = 3;
 const READY_TIMEOUT_MS = 30_000;
 // Runtime-minted host-request ids never repeat; the bound only guards a
 // misbehaving runtime from growing the dedup set forever.
@@ -783,7 +783,7 @@ export class ReplKernelManager {
 			try {
 				const result = await this.handleHostRequest(data);
 				try {
-					await this.writeLine({ type: "host_reply", id: requestId, data: { status: "ok", ...result } });
+					await this.writeLine({ type: "host_reply", id: requestId, data: { status: "ok", result } });
 				} catch (replyError) {
 					this.appendKernelDiagnostic(
 						`failed to send host request ok reply for ${requestId}: ${errorMessage(replyError)}`,

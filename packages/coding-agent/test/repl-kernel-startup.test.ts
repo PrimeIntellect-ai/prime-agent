@@ -49,7 +49,7 @@ describe("ReplKernelManager startup", () => {
 		const manager = new ReplKernelManager({ python, cwd: tempDir });
 
 		try {
-			await expect(manager.execute("print(1)")).rejects.toThrow(/speaks protocol 1, expected 2/);
+			await expect(manager.execute("print(1)")).rejects.toThrow(/speaks protocol 1, expected 3/);
 		} finally {
 			errorSpy.mockRestore();
 			await manager.dispose();

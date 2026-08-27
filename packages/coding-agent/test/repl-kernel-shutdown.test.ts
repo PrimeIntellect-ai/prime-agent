@@ -117,7 +117,7 @@ describe("ReplKernelManager graceful shutdown", () => {
 			{
 				"test.slow": async () => {
 					await handlerBlocked;
-					return { answer: 42 };
+					return { answer: 42, status: "weird" };
 				},
 			},
 		);
@@ -130,7 +130,13 @@ describe("ReplKernelManager graceful shutdown", () => {
 		await dispose;
 
 		expect(internals.inFlightHostRequests.size).toBe(0);
-		expect(sentReplies).toEqual([{ type: "host_reply", id: "hr-1", data: { status: "ok", answer: 42 } }]);
+		expect(sentReplies).toEqual([
+			{
+				type: "host_reply",
+				id: "hr-1",
+				data: { status: "ok", result: { answer: 42, status: "weird" } },
+			},
+		]);
 		expect(internals.child).toBeUndefined();
 	});
 

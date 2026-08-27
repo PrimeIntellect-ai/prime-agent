@@ -117,7 +117,7 @@ class ReplTest(unittest.TestCase):
 
     def test_ready_handshake_and_startup_time(self):
         self.assertEqual(self.ready_event["event"], "ready")
-        self.assertEqual(self.ready_event["protocol"], 2)
+        self.assertEqual(self.ready_event["protocol"], 3)
         major, minor = sys.version_info[:2]
         self.assertTrue(self.ready_event["python"].startswith(f"{major}.{minor}."))
         # Loose bound for loaded CI machines; still catches an order-of-magnitude regression.
@@ -779,10 +779,74 @@ class ReplTest(unittest.TestCase):
         while request.get("event") != "host_request":
             request = self.repl.read_event()
         self.assertEqual(request["data"], {"type": "demo", "value": 7})
-        self.repl.send({"type": "host_reply", "id": request["id"], "data": {"status": "ok", "answer": 42}})
+        envelope = {"status": "ok", "result": {"status": "weird", "answer": 42}}
+        self.repl.send({"type": "host_reply", "id": request["id"], "data": envelope})
         events = self.repl.until_done("hr")
-        self.assertEqual(one(events, "result")["text"], "{'status': 'ok', 'answer': 42}")
+        self.assertEqual(one(events, "result")["text"], repr(envelope))
         self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_typed_host_request_unwraps_exact_handler_result(self):
+        code = "\n".join(
+            [
+                "from rlm import host_request",
+                "reply = await host_request('demo')",
+                "reply",
+            ]
+        )
+        self.repl.send({"type": "execute", "id": "typed-hr", "code": code})
+        request = self.repl.read_event()
+        while request.get("event") != "host_request":
+            request = self.repl.read_event()
+        handler_result = {"status": "weird", "answer": 42}
+        self.repl.send(
+            {
+                "type": "host_reply",
+                "id": request["id"],
+                "data": {"status": "ok", "result": handler_result},
+            }
+        )
+        events = self.repl.until_done("typed-hr")
+        self.assertEqual(one(events, "result")["text"], repr(handler_result))
+        self.assertEqual(one(events, "done")["status"], "ok")
+
+    def test_typed_host_request_raises_host_error(self):
+        code = "from rlm import host_request\nawait host_request('demo')"
+        self.repl.send({"type": "execute", "id": "typed-error", "code": code})
+        request = self.repl.read_event()
+        while request.get("event") != "host_request":
+            request = self.repl.read_event()
+        self.repl.send(
+            {
+                "type": "host_reply",
+                "id": request["id"],
+                "data": {"status": "error", "error": "handler exploded"},
+            }
+        )
+        events = self.repl.until_done("typed-error")
+        self.assertEqual(one(events, "error")["ename"], "RuntimeError")
+        self.assertEqual(one(events, "error")["evalue"], "handler exploded")
+        self.assertEqual(one(events, "done")["status"], "error")
+
+    def test_typed_host_request_rejects_unexpected_envelope_status(self):
+        code = "from rlm import host_request\nawait host_request('demo')"
+        self.repl.send({"type": "execute", "id": "typed-unexpected", "code": code})
+        request = self.repl.read_event()
+        while request.get("event") != "host_request":
+            request = self.repl.read_event()
+        self.repl.send(
+            {
+                "type": "host_reply",
+                "id": request["id"],
+                "data": {"status": "partial", "result": {}},
+            }
+        )
+        events = self.repl.until_done("typed-unexpected")
+        self.assertEqual(one(events, "error")["ename"], "RuntimeError")
+        self.assertEqual(
+            one(events, "error")["evalue"],
+            "host request demo returned unexpected status: 'partial'",
+        )
+        self.assertEqual(one(events, "done")["status"], "error")
 
     def test_host_reply_for_unknown_id_dropped(self):
         self.repl.send({"type": "host_reply", "id": "no-such-request", "data": {"status": "ok"}})
