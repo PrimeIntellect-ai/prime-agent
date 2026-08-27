@@ -14,6 +14,7 @@ import type {
 	AvoPairedComparison,
 	AvoTrial,
 } from "./types.js";
+import { AVO_EXPERIMENT_INFERENCE_VERSION, AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION } from "./types.js";
 
 const RESERVED_EXPERIMENT_METRICS = new Set([
 	"candidate_payload_digest",
@@ -27,6 +28,64 @@ const RESERVED_EXPERIMENT_METRICS = new Set([
 	"source_evaluation_created_at",
 	"source_evaluation_id",
 ]);
+
+// Two-sided 95% Student-t critical values for 1-30 degrees of freedom.
+// Above 30 df, a third-order Cornish-Fisher expansion is effectively exact
+// for the precision retained in experiment receipts and avoids a statistics
+// runtime dependency in the host authority path.
+const STUDENT_T_975_CRITICAL_VALUES = [
+	Number.NaN,
+	12.706204736432095,
+	4.302652729696142,
+	3.182446305284263,
+	2.7764451051977987,
+	2.570581835636314,
+	2.4469118487916806,
+	2.3646242515927844,
+	2.3060041350333704,
+	2.2621571628540993,
+	2.2281388519649385,
+	2.200985160091638,
+	2.1788128296634177,
+	2.1603686564610127,
+	2.1447866879169273,
+	2.131449545559323,
+	2.1199052992210112,
+	2.1098155778331806,
+	2.10092204024096,
+	2.093024054408263,
+	2.0859634472658364,
+	2.079613844727662,
+	2.0738730679040147,
+	2.0686576104190406,
+	2.0638985616280205,
+	2.059538552753294,
+	2.055529438642871,
+	2.0518305164802833,
+	2.048407141795244,
+	2.045229642132703,
+	2.0422724563012373,
+] as const;
+
+function studentT975CriticalValue(degreesOfFreedom: number): number {
+	if (!Number.isSafeInteger(degreesOfFreedom) || degreesOfFreedom < 1) {
+		throw new Error("Student-t confidence intervals require at least one degree of freedom");
+	}
+	const tabulated = STUDENT_T_975_CRITICAL_VALUES[degreesOfFreedom];
+	if (tabulated !== undefined) return tabulated;
+	const z = 1.959963984540054;
+	const inverseDf = 1 / degreesOfFreedom;
+	const z2 = z * z;
+	const z3 = z2 * z;
+	const z5 = z3 * z2;
+	const z7 = z5 * z2;
+	return (
+		z +
+		((z3 + z) * inverseDf) / 4 +
+		((5 * z5 + 16 * z3 + 3 * z) * inverseDf ** 2) / 96 +
+		((3 * z7 + 19 * z5 + 17 * z3 - 15 * z) * inverseDf ** 3) / 384
+	);
+}
 
 function markerSafe(value: string, label: string): string {
 	const normalized = value.trim();
@@ -293,7 +352,11 @@ function metricSummary(values: readonly number[]): AvoMetricSummary {
 	const variance =
 		values.length > 1 ? values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1) : 0;
 	const standardDeviation = Math.sqrt(variance);
-	const margin = 1.96 * (standardDeviation / Math.sqrt(values.length));
+	const ci95DegreesOfFreedom = values.length - 1;
+	const margin =
+		ci95DegreesOfFreedom > 0
+			? studentT975CriticalValue(ci95DegreesOfFreedom) * (standardDeviation / Math.sqrt(values.length))
+			: undefined;
 	return {
 		count: values.length,
 		mean,
@@ -302,8 +365,10 @@ function metricSummary(values: readonly number[]): AvoMetricSummary {
 		standardDeviation,
 		minimum: sorted[0]!,
 		maximum: sorted.at(-1)!,
-		ci95Low: mean - margin,
-		ci95High: mean + margin,
+		ci95Method: margin === undefined ? "not_estimable" : "student_t",
+		ci95DegreesOfFreedom,
+		ci95Low: margin === undefined ? null : mean - margin,
+		ci95High: margin === undefined ? null : mean + margin,
 	};
 }
 
@@ -378,8 +443,18 @@ export function deriveAvoExperimentOutcome(
 				baselineCandidateId,
 				delta,
 				favorableMean: direction * delta.mean,
-				favorableCi95Low: direction === 1 ? delta.ci95Low : -delta.ci95High,
-				favorableCi95High: direction === 1 ? delta.ci95High : -delta.ci95Low,
+				favorableCi95Low:
+					delta.ci95Low === null || delta.ci95High === null
+						? null
+						: direction === 1
+							? delta.ci95Low
+							: -delta.ci95High,
+				favorableCi95High:
+					delta.ci95Low === null || delta.ci95High === null
+						? null
+						: direction === 1
+							? delta.ci95High
+							: -delta.ci95Low,
 				wins,
 				losses,
 				ties: deltas.length - wins - losses,
@@ -405,8 +480,18 @@ export function deriveAvoExperimentOutcome(
 					baselineCandidateId,
 					delta: conditionDelta,
 					favorableMean: direction * conditionDelta.mean,
-					favorableCi95Low: direction === 1 ? conditionDelta.ci95Low : -conditionDelta.ci95High,
-					favorableCi95High: direction === 1 ? conditionDelta.ci95High : -conditionDelta.ci95Low,
+					favorableCi95Low:
+						conditionDelta.ci95Low === null || conditionDelta.ci95High === null
+							? null
+							: direction === 1
+								? conditionDelta.ci95Low
+								: -conditionDelta.ci95High,
+					favorableCi95High:
+						conditionDelta.ci95Low === null || conditionDelta.ci95High === null
+							? null
+							: direction === 1
+								? conditionDelta.ci95High
+								: -conditionDelta.ci95Low,
 					wins: conditionWins,
 					losses: conditionLosses,
 					ties: conditionDeltas.length - conditionWins - conditionLosses,
@@ -426,10 +511,15 @@ export function deriveAvoExperimentOutcome(
 			reason = "the preregistered baseline retained the best aggregate primary metric";
 		} else {
 			const comparison = pairedComparisons.find((item) => item.candidateId === top)!;
-			if (comparison.delta.count >= 2 && comparison.favorableCi95Low > 0) {
+			if (comparison.delta.count < AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION) {
+				championCandidateId = plan.baselineCandidateId;
+				decision = "retain";
+				reason = `the challenger has ${comparison.delta.count} paired observations; automatic promotion requires at least ${AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION}`;
+			} else if (comparison.favorableCi95Low !== null && comparison.favorableCi95Low > 0) {
 				championCandidateId = top;
 				decision = "promote";
-				reason = "the top challenger improved the paired primary metric with a positive 95% confidence interval";
+				reason =
+					"the top challenger improved the paired primary metric with a positive Student-t 95% confidence interval and sufficient paired evidence";
 			} else {
 				championCandidateId = plan.baselineCandidateId;
 				decision = "retain";
@@ -452,7 +542,9 @@ export function deriveAvoExperimentOutcome(
 				primaryMetric: trial.metrics[plan.primaryMetric],
 			})),
 	);
-	const withoutDigest = {
+	const withoutDigest: Omit<AvoExperimentOutcome, "aggregateDigest"> = {
+		inferenceVersion: AVO_EXPERIMENT_INFERENCE_VERSION,
+		minimumPairedObservationsForPromotion: AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION,
 		primaryMetric: plan.primaryMetric,
 		metricDirection: plan.metricDirection,
 		candidateAggregates,

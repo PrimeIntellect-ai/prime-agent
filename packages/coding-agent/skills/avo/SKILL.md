@@ -135,13 +135,17 @@ candidate payload to the receipt, and records only the declared finite numeric
 metric. `record_trial()` may bind an already existing matching host receipt.
 `complete_experiment()` requires every candidate × condition × seed cell once,
 then derives overall and per-condition candidate means, medians, sample
-variances, standard deviations, ranges, normal 95% confidence intervals,
+variances, standard deviations, ranges, Student-t 95% confidence intervals,
 paired deltas, win/loss/tie counts, and win rates. In paired
 multi-candidate plans, the host issues a conservative `promote` or `retain`
-decision; promotion requires at least two pairs and a favorable 95% confidence
-bound. The verified NOOA episode stores declared hypothesis/design separately
-from observed trials and derived statistics, so declarations are never treated
-as empirical findings.
+decision. Confidence intervals use two-sided Student-t critical values because
+the host estimates variance from the observed sample; a single observation has
+no estimable interval. Automatic promotion requires at least five matched pairs
+and a favorable Student-t 95% lower bound above zero. The five-pair floor is a
+minimum safety gate, not a claim that five seeds are enough for every benchmark;
+use 10-20 or more paired seeds for consequential comparisons. The verified NOOA
+episode stores declared hypothesis/design separately from observed trials and
+derived statistics, so declarations are never treated as empirical findings.
 
 Long runs bind a retained generic supervisor. Iterative runs bind one only when
 the host detects stagnation. Direct tasks never pay that cost.

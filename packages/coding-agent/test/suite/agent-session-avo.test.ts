@@ -659,7 +659,7 @@ describe("AgentSession universal AVO runtime", () => {
 				experiment_id: "optimizer-comparison",
 				title: "Optimizer candidate comparison",
 				hypothesis: "The challenger improves the benchmark score.",
-				design: "Paired benchmark over two preregistered seeds.",
+				design: "Paired benchmark over five preregistered seeds.",
 				plan: {
 					mode: "prospective",
 					candidate_ids: ["baseline", "challenger"],
@@ -670,7 +670,7 @@ describe("AgentSession universal AVO runtime", () => {
 								"node candidate-benchmark.cjs --candidate {{candidate_id}} --condition {{condition_id}} --seed {{seed}}",
 						},
 					],
-					seeds: ["1", "2"],
+					seeds: ["1", "2", "3", "4", "5"],
 					pairing: "paired",
 					primary_metric: "score",
 					metric_direction: "maximize",
@@ -697,49 +697,63 @@ describe("AgentSession universal AVO runtime", () => {
 					seed,
 				},
 			});
-		await runCell("baseline", "1");
-		await runCell("baseline", "2");
-		await runCell("challenger", "1");
+		for (const seed of ["1", "2", "3", "4", "5"]) await runCell("baseline", seed);
+		for (const seed of ["1", "2", "3", "4"]) await runCell("challenger", seed);
 		await expect(
 			harness.session.handleAvoHostRequest("avo.experiment.complete", {
 				experiment_id: "optimizer-comparison",
 			}),
-		).rejects.toThrow(/expected=4, observed=3, missing=1/);
+		).rejects.toThrow(/expected=10, observed=9, missing=1/);
 		await expect(runCell("challenger", "1")).rejects.toThrow(/already recorded/);
-		await runCell("challenger", "2");
+		await runCell("challenger", "5");
 		const completed = await harness.session.handleAvoHostRequest("avo.experiment.complete", {
 			experiment_id: "optimizer-comparison",
 		});
 		expect(completed).toMatchObject({
 			experiment: {
 				status: "completed",
-				plan: { expectedTrials: 4 },
+				plan: { expectedTrials: 10 },
 				outcome: { decision: "promote", championCandidateId: "challenger" },
 			},
 			evaluation: {
 				evaluatorId: "experiment_aggregate",
 				status: "pass",
 				issuedBy: "host",
-				metrics: { expected_trials: 4, observed_trials: 4, decision: "promote" },
+				metrics: {
+					expected_trials: 10,
+					observed_trials: 10,
+					inference_version: "student_t_95_min_pairs_5_v1",
+					minimum_paired_observations_for_promotion: 5,
+					decision: "promote",
+				},
 			},
 			outcome: {
 				decision: "promote",
 				championCandidateId: "challenger",
+				inferenceVersion: "student_t_95_min_pairs_5_v1",
+				minimumPairedObservationsForPromotion: 5,
 				ranking: ["challenger", "baseline"],
 				candidateAggregates: [
-					{ candidateId: "baseline", metric: { count: 2, mean: 11.5 } },
-					{ candidateId: "challenger", metric: { count: 2, mean: 21.5 } },
+					{ candidateId: "baseline", metric: { count: 5, mean: 13 } },
+					{ candidateId: "challenger", metric: { count: 5, mean: 23 } },
 				],
 				conditionAggregates: [
-					{ conditionId: "frozen-suite", candidateId: "baseline", metric: { count: 2, mean: 11.5 } },
-					{ conditionId: "frozen-suite", candidateId: "challenger", metric: { count: 2, mean: 21.5 } },
+					{ conditionId: "frozen-suite", candidateId: "baseline", metric: { count: 5, mean: 13 } },
+					{ conditionId: "frozen-suite", candidateId: "challenger", metric: { count: 5, mean: 23 } },
 				],
 				pairedComparisons: [
 					{
 						candidateId: "challenger",
 						baselineCandidateId: "baseline",
-						delta: { count: 2, mean: 10, ci95Low: 10, ci95High: 10 },
-						wins: 2,
+						delta: {
+							count: 5,
+							mean: 10,
+							ci95Method: "student_t",
+							ci95DegreesOfFreedom: 4,
+							ci95Low: 10,
+							ci95High: 10,
+						},
+						wins: 5,
 						losses: 0,
 						ties: 0,
 						winRate: 1,
@@ -750,8 +764,8 @@ describe("AgentSession universal AVO runtime", () => {
 						conditionId: "frozen-suite",
 						candidateId: "challenger",
 						baselineCandidateId: "baseline",
-						delta: { count: 2, mean: 10 },
-						wins: 2,
+						delta: { count: 5, mean: 10, ci95Method: "student_t", ci95DegreesOfFreedom: 4 },
+						wins: 5,
 						losses: 0,
 						ties: 0,
 						winRate: 1,
@@ -762,10 +776,10 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 		const episode = JSON.parse((completed.memory as { content: string }).content);
 		expect(episode).toMatchObject({
-			record_type: "avo_experiment_episode_v2",
+			record_type: "avo_experiment_episode_v3",
 			declared_hypothesis: "The challenger improves the benchmark score.",
 			observed_trials: expect.arrayContaining([
-				expect.objectContaining({ candidate_id: "challenger", seed: "2", primary_metric: 22 }),
+				expect.objectContaining({ candidate_id: "challenger", seed: "5", primary_metric: 25 }),
 			]),
 			derived_statistics: { decision: "promote", championCandidateId: "challenger" },
 		});

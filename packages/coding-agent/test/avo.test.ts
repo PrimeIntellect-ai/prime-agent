@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
 import type { AutoresearchState, AutoresearchStopGate } from "../src/core/autoresearch.js";
 import {
+	AVO_EXPERIMENT_INFERENCE_VERSION,
+	AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION,
 	AVO_NOOA_VERSION,
 	type AvoExperiment,
 	AvoSessionRuntime,
@@ -182,6 +184,8 @@ describe("generic AVO core", () => {
 			trial("challenger", "2", 1),
 		]);
 		expect(outcome).toMatchObject({
+			inferenceVersion: AVO_EXPERIMENT_INFERENCE_VERSION,
+			minimumPairedObservationsForPromotion: AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION,
 			decision: "retain",
 			championCandidateId: "baseline",
 			ranking: ["challenger", "baseline"],
@@ -190,6 +194,149 @@ describe("generic AVO core", () => {
 			],
 		});
 		expect(outcome.pairedComparisons[0]!.favorableCi95Low).toBeLessThan(0);
+	});
+
+	test("uses Student-t intervals for small samples and leaves one-observation intervals unavailable", () => {
+		const experiment: AvoExperiment = {
+			experimentId: "student-t-summary",
+			title: "Student-t summary",
+			hypothesis: "The candidate has a stable score.",
+			design: "Three independent fixed seeds.",
+			plan: {
+				mode: "prospective",
+				candidateIds: ["candidate"],
+				conditions: [
+					{ conditionId: "suite", label: "Suite", parameters: {}, commandTemplate: "node bench --seed {{seed}}" },
+				],
+				seeds: ["1", "2", "3"],
+				pairing: "independent",
+				primaryMetric: "score",
+				metricDirection: "maximize",
+				expectedTrials: 3,
+			},
+			status: "running",
+			trialIds: ["trial-1", "trial-2", "trial-3"],
+			tags: [],
+			createdAt: "2026-08-27T00:00:00.000Z",
+			updatedAt: "2026-08-27T00:00:01.000Z",
+		};
+		const scores = [1_000, 1_003, 999];
+		const trial = (seed: string, score: number): AvoTrial => ({
+			trialId: `trial-${seed}`,
+			experimentId: experiment.experimentId,
+			candidateId: "candidate",
+			evaluationId: `evaluation-${seed}`,
+			label: `candidate/${seed}`,
+			seed,
+			conditionId: "suite",
+			status: "pass",
+			metrics: { score },
+			evidenceRefs: ["host:test"],
+			recordedAt: "2026-08-27T00:00:02.000Z",
+		});
+		const outcome = deriveAvoExperimentOutcome(
+			experiment,
+			scores.map((score, index) => trial(String(index + 1), score)),
+		);
+		const metric = outcome.candidateAggregates[0]!.metric;
+		const expectedMean = scores.reduce((sum, value) => sum + value, 0) / scores.length;
+		const expectedVariance =
+			scores.reduce((sum, value) => sum + (value - expectedMean) ** 2, 0) / (scores.length - 1);
+		const expectedMargin = 4.302652729696142 * Math.sqrt(expectedVariance / scores.length);
+		expect(metric).toMatchObject({
+			count: 3,
+			ci95Method: "student_t",
+			ci95DegreesOfFreedom: 2,
+		});
+		expect(metric.ci95Low).toBeCloseTo(expectedMean - expectedMargin, 10);
+		expect(metric.ci95High).toBeCloseTo(expectedMean + expectedMargin, 10);
+
+		const oneObservation = deriveAvoExperimentOutcome(
+			{
+				...experiment,
+				plan: { ...experiment.plan!, seeds: ["1"], expectedTrials: 1 },
+				trialIds: ["trial-1"],
+			},
+			[trial("1", scores[0]!)],
+		).candidateAggregates[0]!.metric;
+		expect(oneObservation).toMatchObject({
+			count: 1,
+			ci95Method: "not_estimable",
+			ci95DegreesOfFreedom: 0,
+			ci95Low: null,
+			ci95High: null,
+		});
+	});
+
+	test("requires five matched pairs before automatically promoting a challenger", () => {
+		const outcomeForPairs = (pairCount: number) => {
+			const seeds = Array.from({ length: pairCount }, (_, index) => String(index + 1));
+			const experiment: AvoExperiment = {
+				experimentId: `promotion-floor-${pairCount}`,
+				title: "Promotion floor",
+				hypothesis: "The challenger improves score.",
+				design: `${pairCount} paired fixed seeds.`,
+				plan: {
+					mode: "prospective",
+					candidateIds: ["baseline", "challenger"],
+					conditions: [
+						{
+							conditionId: "suite",
+							label: "Suite",
+							parameters: {},
+							commandTemplate: "node bench --seed {{seed}}",
+						},
+					],
+					seeds,
+					pairing: "paired",
+					primaryMetric: "score",
+					metricDirection: "maximize",
+					baselineCandidateId: "baseline",
+					expectedTrials: pairCount * 2,
+				},
+				status: "running",
+				trialIds: [],
+				tags: [],
+				createdAt: "2026-08-27T00:00:00.000Z",
+				updatedAt: "2026-08-27T00:00:01.000Z",
+			};
+			const trials = ["baseline", "challenger"].flatMap((candidateId) =>
+				seeds.map(
+					(seed): AvoTrial => ({
+						trialId: `${candidateId}-${seed}`,
+						experimentId: experiment.experimentId,
+						candidateId,
+						evaluationId: `evaluation-${candidateId}-${seed}`,
+						label: `${candidateId}/${seed}`,
+						seed,
+						conditionId: "suite",
+						status: "pass",
+						metrics: { score: candidateId === "challenger" ? 10 : 0 },
+						evidenceRefs: ["host:test"],
+						recordedAt: "2026-08-27T00:00:02.000Z",
+					}),
+				),
+			);
+			return deriveAvoExperimentOutcome(experiment, trials);
+		};
+
+		const fourPairs = outcomeForPairs(4);
+		expect(fourPairs).toMatchObject({
+			decision: "retain",
+			championCandidateId: "baseline",
+			reason: expect.stringContaining("automatic promotion requires at least 5"),
+		});
+		expect(fourPairs.pairedComparisons[0]).toMatchObject({
+			favorableCi95Low: 10,
+			delta: { count: 4, ci95Method: "student_t", ci95DegreesOfFreedom: 3 },
+		});
+
+		const fivePairs = outcomeForPairs(5);
+		expect(fivePairs).toMatchObject({
+			decision: "promote",
+			championCandidateId: "challenger",
+			reason: expect.stringContaining("Student-t 95% confidence interval"),
+		});
 	});
 
 	test("adopts NOOA 0.0.9 taxonomy and reinforces exact duplicate memories", () => {
@@ -700,7 +847,18 @@ describe("generic AVO core", () => {
 		expect(completed.experiment).toMatchObject({ status: "completed", trialIds: [trial.trialId] });
 		expect(completed.outcome).toMatchObject({
 			decision: "inconclusive",
-			candidateAggregates: [{ candidateId: candidate.candidateId, metric: { count: 1, mean: 12 } }],
+			candidateAggregates: [
+				{
+					candidateId: candidate.candidateId,
+					metric: {
+						count: 1,
+						mean: 12,
+						ci95Method: "not_estimable",
+						ci95Low: null,
+						ci95High: null,
+					},
+				},
+			],
 		});
 		expect(completed.evaluation).toMatchObject({
 			evaluatorId: "experiment_aggregate",
@@ -713,7 +871,7 @@ describe("generic AVO core", () => {
 			verificationState: "verified",
 		});
 		expect(JSON.parse(completed.memory.content)).toMatchObject({
-			record_type: "avo_experiment_episode_v2",
+			record_type: "avo_experiment_episode_v3",
 			declared_hypothesis: experiment.hypothesis,
 			observed_trials: [{ primary_metric: 12 }],
 			derived_statistics: { decision: "inconclusive" },
@@ -745,11 +903,15 @@ describe("generic AVO core", () => {
 					}),
 					expect.objectContaining({
 						label: "Candidate candidate-parser-serialized",
-						value: expect.stringContaining("mean 12 · median 12 · 95% CI [12, 12] · min/max 12/12"),
+						value: expect.stringContaining("mean 12 · median 12 · 95% CI unavailable (n<2) · min/max 12/12"),
 					}),
 					expect.objectContaining({
 						label: "Host experiment outcome",
 						value: expect.stringContaining("inconclusive"),
+					}),
+					expect.objectContaining({
+						label: "Statistical policy",
+						value: expect.stringContaining("Student-t 95% intervals · automatic promotion requires 5 pairs"),
 					}),
 					expect.objectContaining({
 						label: "Trial candidate-parser-serialized · parser-regression · seed fixed-suite-v1",
@@ -1681,6 +1843,63 @@ describe("generic AVO core", () => {
 					tags: expect.arrayContaining(["legacy-unstructured-experiment"]),
 				}),
 			]),
+		);
+	});
+
+	test("contests universal experiment memories minted before Student-t inference", () => {
+		const dir = artifactDir();
+		const memoryRoot = artifactDir();
+		const store = new AvoStore(dir, "legacy-experiment-inference", clock(), process.cwd(), memoryRoot);
+		store.initialize("Continue an earlier optimization task");
+		store.rememberVerified({
+			memoryId: "episode:experiment:legacy-normal-ci",
+			namespace: "coding",
+			type: "episode",
+			scope: "project",
+			title: "Legacy normal-interval experiment",
+			content: JSON.stringify({
+				record_type: "avo_experiment_episode_v2",
+				declared_hypothesis: "The challenger improves score.",
+				observed_trials: [{ candidate_id: "challenger", seed: "1", primary_metric: 10 }],
+				derived_statistics: { decision: "promote", championCandidateId: "challenger" },
+			}),
+			importance: 8,
+		});
+		store.rememberVerified({
+			memoryId: "episode:experiment:student-t-current",
+			namespace: "coding",
+			type: "episode",
+			scope: "project",
+			title: "Current Student-t experiment",
+			content: JSON.stringify({
+				record_type: "avo_experiment_episode_v3",
+				declared_hypothesis: "The challenger improves score.",
+				observed_trials: [{ candidate_id: "challenger", seed: "1", primary_metric: 10 }],
+				derived_statistics: { inferenceVersion: AVO_EXPERIMENT_INFERENCE_VERSION, decision: "retain" },
+			}),
+			importance: 8,
+		});
+
+		const migrated = new AvoStore(dir, "legacy-experiment-inference", clock(), process.cwd(), memoryRoot).getState();
+		expect(migrated.memories).toContainEqual(
+			expect.objectContaining({
+				memoryId: "episode:experiment:legacy-normal-ci",
+				verificationState: "contested",
+				tags: expect.arrayContaining(["legacy-experiment-inference"]),
+			}),
+		);
+		expect(migrated.memories).toContainEqual(
+			expect.objectContaining({
+				memoryId: "episode:experiment:student-t-current",
+				verificationState: "verified",
+			}),
+		);
+		const reopened = new AvoStore(dir, "legacy-experiment-inference", clock(), process.cwd(), memoryRoot).getState();
+		expect(reopened.memories).toContainEqual(
+			expect.objectContaining({
+				memoryId: "episode:experiment:legacy-normal-ci",
+				verificationState: "contested",
+			}),
 		);
 	});
 

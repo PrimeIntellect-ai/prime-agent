@@ -1,0 +1,1 @@
+- Replaced fixed normal experiment intervals with small-sample Student-t inference, made one-observation intervals explicitly unavailable, and required at least five matched pairs before automatic champion promotion.

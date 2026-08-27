@@ -21,6 +21,7 @@ import {
 	AVO_ENVIRONMENTS,
 	AVO_EVALUATION_ISSUERS,
 	AVO_EVALUATION_STATUSES,
+	AVO_EXPERIMENT_INFERENCE_VERSION,
 	AVO_EXPERIMENT_MODES,
 	AVO_EXPERIMENT_PAIRINGS,
 	AVO_EXPERIMENT_STATUSES,
@@ -315,6 +316,13 @@ function projectIdentity(cwd: string): string {
 
 function memoryOwner(sessionId: string): string {
 	return `prime-root@${createHash("sha256").update(sessionId).digest("hex").slice(0, 16)}`;
+}
+
+function nextIsoTimestamp(now: string, previous: string): string {
+	if (now > previous) return now;
+	const previousMilliseconds = Date.parse(previous);
+	if (!Number.isFinite(previousMilliseconds)) return now;
+	return new Date(previousMilliseconds + 1).toISOString();
 }
 
 function isPathContained(root: string, candidate: string): boolean {
@@ -1171,7 +1179,8 @@ export class AvoStore {
 		}
 	}
 
-	private hardenLegacyExperimentMemories(): void {
+	private hardenLegacyExperimentMemories(): boolean {
+		let changed = false;
 		for (const memory of this.state.memories) {
 			if (
 				memory.type !== "episode" ||
@@ -1180,22 +1189,34 @@ export class AvoStore {
 			) {
 				continue;
 			}
-			let structured = false;
+			let currentStructuredEvidence = false;
+			let hardeningTag = "legacy-unstructured-experiment";
 			try {
 				const content = JSON.parse(memory.content) as unknown;
-				structured =
+				if (isRecord(content) && content.record_type === "avo_research_experiment_episode_v2") {
+					currentStructuredEvidence = true;
+				} else if (
 					isRecord(content) &&
 					(content.record_type === "avo_experiment_episode_v2" ||
-						content.record_type === "avo_research_experiment_episode_v2");
+						content.record_type === "avo_experiment_episode_v3")
+				) {
+					hardeningTag = "legacy-experiment-inference";
+					currentStructuredEvidence =
+						content.record_type === "avo_experiment_episode_v3" &&
+						isRecord(content.derived_statistics) &&
+						content.derived_statistics.inferenceVersion === AVO_EXPERIMENT_INFERENCE_VERSION;
+				}
 			} catch {
 				// Legacy prose mixed declarations with observations and must not remain verified evidence.
 			}
-			if (structured) continue;
+			if (currentStructuredEvidence) continue;
 			memory.verificationState = "contested";
-			memory.contestedAt = this.now();
+			memory.contestedAt = nextIsoTimestamp(this.now(), memory.updatedAt);
 			memory.updatedAt = memory.contestedAt;
-			memory.tags = [...new Set([...memory.tags, "legacy-unstructured-experiment"])];
+			memory.tags = [...new Set([...memory.tags, hardeningTag])];
+			changed = true;
 		}
+		return changed;
 	}
 
 	private readPersistentLedger(path: string | undefined, identity: string, scope: AvoMemoryScope): AvoMemory[] {
@@ -1313,8 +1334,10 @@ export class AvoStore {
 	refreshPersistentMemories(): boolean {
 		this.assertHealthy();
 		const changed = this.mergePersistentMemories();
-		if (changed && this.statePath) this.save();
-		return changed;
+		const hardened = this.hardenLegacyExperimentMemories();
+		if ((changed || hardened) && this.statePath) this.save();
+		if (hardened) this.savePersistentMemories();
+		return changed || hardened;
 	}
 
 	private load(sessionId: string): AvoRunState {
@@ -2087,6 +2110,8 @@ export class AvoStore {
 					condition_count: plan.conditions.length,
 					paired_comparison_count: outcome.pairedComparisons.length,
 					primary_metric: plan.primaryMetric,
+					inference_version: outcome.inferenceVersion,
+					minimum_paired_observations_for_promotion: outcome.minimumPairedObservationsForPromotion,
 					decision: outcome.decision,
 					...(outcome.championCandidateId ? { champion_candidate_id: outcome.championCandidateId } : {}),
 				},
@@ -2099,7 +2124,7 @@ export class AvoStore {
 		experiment.aggregateEvaluationId = evaluation.evaluationId;
 		experiment.outcome = outcome;
 		const episode = {
-			record_type: "avo_experiment_episode_v2",
+			record_type: "avo_experiment_episode_v3",
 			verification_semantics:
 				"declared_hypothesis and planned_design record preregistration, not empirical truth; only observed_trials and derived_statistics are host-verified evidence",
 			declared_hypothesis: experiment.hypothesis,

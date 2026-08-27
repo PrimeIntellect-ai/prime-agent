@@ -38,6 +38,8 @@ export const AVO_EXPERIMENT_MODES = ["prospective", "retrospective"] as const;
 export const AVO_EXPERIMENT_PAIRINGS = ["paired", "independent"] as const;
 export const AVO_METRIC_DIRECTIONS = ["maximize", "minimize"] as const;
 export const AVO_EXPERIMENT_DECISIONS = ["promote", "retain", "inconclusive"] as const;
+export const AVO_EXPERIMENT_INFERENCE_VERSION = "student_t_95_min_pairs_5_v1";
+export const AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION = 5;
 
 export type AvoEnvironment = (typeof AVO_ENVIRONMENTS)[number];
 export type AvoEnvironmentSelection = "auto" | AvoEnvironment;
@@ -178,8 +180,10 @@ export interface AvoMetricSummary {
 	standardDeviation: number;
 	minimum: number;
 	maximum: number;
-	ci95Low: number;
-	ci95High: number;
+	ci95Method: "student_t" | "not_estimable";
+	ci95DegreesOfFreedom: number;
+	ci95Low: number | null;
+	ci95High: number | null;
 }
 
 export interface AvoCandidateAggregate {
@@ -196,8 +200,8 @@ export interface AvoPairedComparison {
 	baselineCandidateId: string;
 	delta: AvoMetricSummary;
 	favorableMean: number;
-	favorableCi95Low: number;
-	favorableCi95High: number;
+	favorableCi95Low: number | null;
+	favorableCi95High: number | null;
 	wins: number;
 	losses: number;
 	ties: number;
@@ -209,6 +213,8 @@ export interface AvoConditionPairedComparison extends AvoPairedComparison {
 }
 
 export interface AvoExperimentOutcome {
+	inferenceVersion: typeof AVO_EXPERIMENT_INFERENCE_VERSION;
+	minimumPairedObservationsForPromotion: typeof AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION;
 	primaryMetric: string;
 	metricDirection: AvoMetricDirection;
 	candidateAggregates: AvoCandidateAggregate[];

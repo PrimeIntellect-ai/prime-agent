@@ -5,10 +5,12 @@ import type {
 	AvoDashboardProjection,
 	AvoEnvironment,
 	AvoEvaluationReceipt,
+	AvoMetricSummary,
 	AvoProgressSignals,
 	AvoRunState,
 	AvoStopGate,
 } from "./types.js";
+import { AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION } from "./types.js";
 
 export interface AvoEnvironmentAdapter<TAdapterState = unknown> {
 	id: AvoEnvironment;
@@ -113,6 +115,13 @@ function formatDashboardNumber(value: number): string {
 	return value.toFixed(digits).replace(/0+$/, "").replace(/\.$/, "");
 }
 
+function formatDashboardConfidenceInterval(metric: AvoMetricSummary): string {
+	if (metric.ci95Low === null || metric.ci95High === null) return "95% CI unavailable (n<2)";
+	const label =
+		metric.ci95Method === "student_t" ? `Student-t 95% CI (df=${metric.ci95DegreesOfFreedom})` : "legacy 95% CI";
+	return `${label} [${formatDashboardNumber(metric.ci95Low)}, ${formatDashboardNumber(metric.ci95High)}]`;
+}
+
 function shortDashboardReference(value: string | undefined): string {
 	if (!value) return "none";
 	return value.length > 16 ? `${value.slice(0, 12)}…` : value;
@@ -152,17 +161,29 @@ function experimentDashboardItems(
 		const metric = aggregate.metric;
 		items.push({
 			label: `Candidate ${aggregate.candidateId}`,
-			value: `n=${metric.count} · mean ${formatDashboardNumber(metric.mean)} · median ${formatDashboardNumber(metric.median)} · 95% CI [${formatDashboardNumber(metric.ci95Low)}, ${formatDashboardNumber(metric.ci95High)}] · min/max ${formatDashboardNumber(metric.minimum)}/${formatDashboardNumber(metric.maximum)}`,
+			value: `n=${metric.count} · mean ${formatDashboardNumber(metric.mean)} · median ${formatDashboardNumber(metric.median)} · ${formatDashboardConfidenceInterval(metric)} · min/max ${formatDashboardNumber(metric.minimum)}/${formatDashboardNumber(metric.maximum)}`,
 			status: "neutral",
 		});
 	}
 	for (const comparison of outcome?.pairedComparisons ?? []) {
 		items.push({
 			label: `Paired ${comparison.candidateId} vs ${comparison.baselineCandidateId}`,
-			value: `Δ mean ${formatDashboardNumber(comparison.delta.mean)} · 95% CI [${formatDashboardNumber(comparison.delta.ci95Low)}, ${formatDashboardNumber(comparison.delta.ci95High)}] · W/L/T ${comparison.wins}/${comparison.losses}/${comparison.ties} · win rate ${formatDashboardNumber(comparison.winRate * 100)}%`,
-			status: comparison.favorableCi95Low > 0 ? "ok" : "watch",
+			value: `Δ mean ${formatDashboardNumber(comparison.delta.mean)} · ${formatDashboardConfidenceInterval(comparison.delta)} · W/L/T ${comparison.wins}/${comparison.losses}/${comparison.ties} · win rate ${formatDashboardNumber(comparison.winRate * 100)}%`,
+			status:
+				comparison.delta.count >= AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION &&
+				comparison.favorableCi95Low !== null &&
+				comparison.favorableCi95Low > 0
+					? "ok"
+					: "watch",
 		});
 	}
+	items.push({
+		label: "Statistical policy",
+		value: outcome?.inferenceVersion
+			? `Student-t 95% intervals · automatic promotion requires ${outcome.minimumPairedObservationsForPromotion} pairs · ${outcome.inferenceVersion}`
+			: "Legacy interval policy · rerun to apply Student-t inference and the five-pair promotion floor",
+		status: outcome?.inferenceVersion ? "ok" : outcome ? "watch" : "neutral",
+	});
 	items.push({
 		label: "Host experiment outcome",
 		value: outcome
