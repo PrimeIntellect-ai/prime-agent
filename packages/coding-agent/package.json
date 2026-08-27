@@ -1,7 +1,7 @@
 {
 	"name": "@earendil-works/pi-coding-agent",
 	"version": "0.8.1",
-	"description": "Coding agent CLI with IPython-backed tools and session management",
+	"description": "Coding agent CLI with a persistent Python REPL kernel and session management",
 	"type": "module",
 	"piConfig": {
 		"name": "prime-agent",
@@ -44,7 +44,7 @@
 		"postinstall": "node postinstall.cjs",
 		"prepublishOnly": "npm run clean && npm run build",
 		"bundle": "node scripts/bundle.mjs",
-		"test:kernel": "vitest --run --no-file-parallelism --tagsFilter kernel-heavy test/acp-kernel-features.test.ts test/acp-cold-cli.test.ts test/kernel-goal-skill.test.ts test/kernel-state-roundtrip.test.ts test/kernel-mcp-shutdown.test.ts"
+		"test:kernel": "vitest --run --no-file-parallelism --tagsFilter kernel-heavy test/acp-kernel-features.test.ts test/acp-cold-cli.test.ts test/kernel-goal-skill.test.ts test/repl-kernel-state-roundtrip.test.ts test/repl-kernel-mcp-shutdown.test.ts"
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "^1.3.0",
@@ -68,8 +68,7 @@
 		"typebox": "^1.3.9",
 		"undici": "^7.29.0",
 		"uuid": "^14.0.0",
-		"yaml": "^2.9.0",
-		"zeromq": "^6.1.2"
+		"yaml": "^2.9.0"
 	},
 	"overrides": {
 		"rimraf": "6.1.2",
