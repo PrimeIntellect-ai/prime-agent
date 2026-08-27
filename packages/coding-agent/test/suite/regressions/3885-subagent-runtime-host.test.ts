@@ -102,6 +102,7 @@ describe("ENG-3885 subagent runtime host", () => {
 					scopedModels: sessionOptions?.scopedModels,
 					initialActiveToolNames: sessionOptions?.initialActiveToolNames,
 					allowedToolNames: sessionOptions?.allowedToolNames,
+					enforceAvoCompletion: false,
 					customTools: sessionOptions?.customTools,
 					includeGoals: sessionOptions?.includeGoals,
 					rlmDepth: sessionOptions?.rlmDepth,
@@ -223,6 +224,7 @@ describe("ENG-3885 subagent runtime host", () => {
 			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions")),
 			model: faux.getModel("faux-child"),
 			thinkingLevel: "off",
+			enforceAvoCompletion: false,
 		});
 		await session.bindExtensions({});
 
