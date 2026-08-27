@@ -28,6 +28,7 @@ describe("InteractiveMode startup hints", () => {
 				model: { name: "test-model", reasoning: true },
 				thinkingLevel: "high",
 				messageCount,
+				isStreaming: false,
 			},
 		};
 		Object.setPrototypeOf(mode, InteractiveMode.prototype);
@@ -81,6 +82,32 @@ describe("InteractiveMode startup hints", () => {
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
 		expect(stripAnsi(label)).toBe("test-model • high  ? for shortcuts");
+	});
+
+	it("keeps fresh-chat guidance hidden when a mid-turn snapshot still has no committed messages", () => {
+		const mode = createMode();
+		const patchConnectionState = (patch: Record<string, unknown>) => Object.assign(mode.connectionState, patch);
+		Object.assign(mode, {
+			patchConnectionState,
+			builtInHeader: { invalidate: vi.fn() },
+			subagentSummaryLine: { invalidate: vi.fn() },
+		});
+		const updateConnectionStateFromEvent = Reflect.get(
+			InteractiveMode.prototype,
+			"updateConnectionStateFromEvent",
+		) as (event: unknown) => void;
+		const getLabel = () => stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode));
+		const message = { role: "user", content: "hello", timestamp: 1 };
+
+		updateConnectionStateFromEvent.call(mode, { type: "agent_start" });
+		updateConnectionStateFromEvent.call(mode, { type: "message_start", message });
+		Object.assign(mode.connectionState, { messageCount: 0, isStreaming: true });
+
+		expect(getLabel()).not.toContain("for shortcuts");
+
+		updateConnectionStateFromEvent.call(mode, { type: "message_end", message });
+		updateConnectionStateFromEvent.call(mode, { type: "agent_end", messages: [message] });
+		expect(getLabel()).not.toContain("for shortcuts");
 	});
 
 	it("routes session-view requests through the existing agents-view return path", async () => {
