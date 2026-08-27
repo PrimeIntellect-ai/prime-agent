@@ -97,6 +97,40 @@ describe("daemon mode helpers", () => {
 		expect(setSessionName).toHaveBeenCalledOnce();
 	});
 
+	it("uses a supervisor-approved worker session name without validating it again", async () => {
+		const daemon = new AgentDaemon("/tmp/unused-worker.sock", {
+			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+			worker: { authenticationToken: "token" },
+		});
+		const setSessionName = vi.fn();
+		const state = makeState("active");
+		state.runtime = {
+			...state.runtime,
+			session: { setSessionName },
+		} as never;
+		const assertStateSessionNameAvailable = vi.fn(async () => {
+			throw new Error("stale peer name");
+		});
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			assertStateSessionNameAvailable: typeof assertStateSessionNameAvailable;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<DaemonOutbound | undefined>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		internals.assertStateSessionNameAvailable = assertStateSessionNameAvailable;
+
+		await expect(
+			internals.handleCommand(makeClient("supervisor", state.activeSessionId), {
+				type: "set_session_name",
+				activeSessionId: state.activeSessionId,
+				name: "approved",
+			}),
+		).resolves.toMatchObject({ success: true });
+		expect(assertStateSessionNameAvailable).not.toHaveBeenCalled();
+		expect(setSessionName).toHaveBeenCalledWith("approved");
+	});
+
 	it("treats a depth-zero fork as a sibling of another root", () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-fork-family.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
