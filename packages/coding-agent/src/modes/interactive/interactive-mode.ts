@@ -2637,6 +2637,13 @@ export class InteractiveMode {
 		this.patchConnectionState({ contextUsage: stats.contextUsage });
 	}
 
+	private refreshQueueSelectionFromState(): void {
+		const selected = this.queueSelection.selected;
+		if (selected && !this.pendingQueueEdit && !this.pendingQueueMove) {
+			this.refreshQueueSelectionAt(this.getConnectionQueue(), selected, selected.index);
+		}
+	}
+
 	private updateConnectionStateFromEvent(event: AgentConnectionSessionEvent): void {
 		if (!this.connectionState) {
 			return;
@@ -2648,14 +2655,10 @@ export class InteractiveMode {
 			case "agent_end":
 				this.patchConnectionState({ isStreaming: false, activeToolNames: [] });
 				break;
-			case "session_action_update": {
+			case "session_action_update":
 				this.patchConnectionState({ sessionActions: event.actions });
-				const selected = this.queueSelection.selected;
-				if (selected && !this.pendingQueueEdit && !this.pendingQueueMove) {
-					this.refreshQueueSelectionAt(this.getConnectionQueue(), selected, selected.index);
-				}
+				this.refreshQueueSelectionFromState();
 				break;
-			}
 			case "compaction_start":
 				this.patchConnectionState({ isCompacting: true });
 				break;
@@ -2895,6 +2898,7 @@ export class InteractiveMode {
 	private async renderResyncedSession(snapshot: AgentConnectionSnapshot): Promise<void> {
 		const bashFinished = this.isBashRunning() && !snapshot.state.isBashRunning;
 		this.applyConnectionStateSnapshot(snapshot.state);
+		this.refreshQueueSelectionFromState();
 		this.restoreTurnStartFromMessages(this.getSessionContextFromConnectionSnapshot(snapshot).messages);
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
@@ -7025,12 +7029,15 @@ export class InteractiveMode {
 					},
 				);
 				if (sessionGeneration !== this.sessionEventGeneration) return;
-				if (status === "applied") {
-					await this.sessionEventQueue;
-					if (sessionGeneration !== this.sessionEventGeneration) return;
-					this.refreshQueueSelectionAt(this.getConnectionQueue(), selected, selected.index + direction);
-					this.ui.requestRender();
-				} else if (status === "unsupported") this.showStatus("Queue editing requires a newer daemon");
+				await this.sessionEventQueue;
+				if (sessionGeneration !== this.sessionEventGeneration) return;
+				this.refreshQueueSelectionAt(
+					this.getConnectionQueue(),
+					selected,
+					status === "applied" ? selected.index + direction : selected.index,
+				);
+				if (status === "applied") this.ui.requestRender();
+				else if (status === "unsupported") this.showStatus("Queue editing requires a newer daemon");
 				else this.showStatus("Queue changed; reorder not applied");
 			} finally {
 				this.pendingQueueMove = false;
