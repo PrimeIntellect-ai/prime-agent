@@ -198,6 +198,30 @@ export interface GitStateEntry extends SessionEntryBase {
 	git: GitContext;
 }
 
+/**
+ * A tool execution reported by the host (e.g. via the extension
+ * recordToolExecution API) instead of driven by the agent loop. Mirrors the
+ * tool_execution_start agent event so stream consumers and the session file
+ * treat recorded and native executions alike.
+ */
+export interface ToolExecutionStartEntry extends SessionEntryBase {
+	type: "tool_execution_start";
+	toolCallId: string;
+	toolName: string;
+	args?: unknown;
+	/** Epoch ms when the execution started, when the reporter knows it. */
+	startedAt?: number;
+}
+
+export interface ToolExecutionEndEntry extends SessionEntryBase {
+	type: "tool_execution_end";
+	toolCallId: string;
+	toolName: string;
+	/** ToolResult-shaped payload: content blocks plus optional details. */
+	result?: { content: (TextContent | ImageContent)[]; details?: Record<string, unknown> };
+	isError?: boolean;
+}
+
 export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	type: "custom_message";
 	customType: string;
@@ -220,7 +244,9 @@ export type SessionEntry =
 	| SessionInfoEntry
 	| SessionStateEntry
 	| AgentStatusEntry
-	| GitStateEntry;
+	| GitStateEntry
+	| ToolExecutionStartEntry
+	| ToolExecutionEndEntry;
 
 export type FileEntry = SessionHeader | SessionEntry;
 
@@ -1526,6 +1552,41 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			state: { status: state.status },
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	appendToolExecutionStart(toolCallId: string, toolName: string, args?: unknown, startedAt?: number): string {
+		const entry: ToolExecutionStartEntry = {
+			type: "tool_execution_start",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			toolCallId,
+			toolName,
+			...(args !== undefined ? { args } : {}),
+			...(startedAt !== undefined ? { startedAt } : {}),
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	appendToolExecutionEnd(
+		toolCallId: string,
+		toolName: string,
+		result: { content: (TextContent | ImageContent)[]; details?: Record<string, unknown> },
+		isError: boolean,
+	): string {
+		const entry: ToolExecutionEndEntry = {
+			type: "tool_execution_end",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			toolCallId,
+			toolName,
+			result,
+			isError,
 		};
 		this._appendEntry(entry);
 		return entry.id;

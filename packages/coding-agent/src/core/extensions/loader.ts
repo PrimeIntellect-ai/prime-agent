@@ -140,6 +140,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		getThinkingLevel: notInitialized,
 		setThinkingLevel: notInitialized,
 		getIpythonKernel: notInitialized,
+		recordToolExecution: notInitialized,
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
 		assertActive,
@@ -308,6 +309,11 @@ function createExtensionAPI(
 		getIpythonKernel() {
 			runtime.assertActive();
 			return runtime.getIpythonKernel?.();
+		},
+
+		recordToolExecution(execution) {
+			runtime.assertActive();
+			runtime.recordToolExecution?.(execution);
 		},
 
 		registerProvider(name: string, config: ProviderConfig) {

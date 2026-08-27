@@ -239,6 +239,22 @@ export interface AgentConnectionGitStateEntry extends AgentConnectionSessionEntr
 	};
 }
 
+export interface AgentConnectionToolExecutionStartEntry extends AgentConnectionSessionEntryBase {
+	type: "tool_execution_start";
+	toolCallId: string;
+	toolName: string;
+	args?: unknown;
+	startedAt?: number;
+}
+
+export interface AgentConnectionToolExecutionEndEntry extends AgentConnectionSessionEntryBase {
+	type: "tool_execution_end";
+	toolCallId: string;
+	toolName: string;
+	result?: { content: (TextContent | ImageContent)[]; details?: Record<string, unknown> };
+	isError?: boolean;
+}
+
 export type AgentConnectionSessionEntry =
 	| AgentConnectionSessionMessageEntry
 	| AgentConnectionThinkingLevelChangeEntry
@@ -253,7 +269,9 @@ export type AgentConnectionSessionEntry =
 	| AgentConnectionSessionInfoEntry
 	| AgentConnectionSessionStateEntry
 	| AgentConnectionAgentStatusEntry
-	| AgentConnectionGitStateEntry;
+	| AgentConnectionGitStateEntry
+	| AgentConnectionToolExecutionStartEntry
+	| AgentConnectionToolExecutionEndEntry;
 
 export interface AgentConnectionSessionTreeFlatNode {
 	entry: AgentConnectionSessionEntry;

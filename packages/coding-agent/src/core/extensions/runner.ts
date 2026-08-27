@@ -31,6 +31,7 @@ import type {
 	ExtensionFlag,
 	ExtensionRuntime,
 	ExtensionShortcut,
+	ExtensionToolExecutionRecord,
 	ExtensionUIContext,
 	InputEvent,
 	InputEventResult,
@@ -251,6 +252,7 @@ export class ExtensionRunner {
 	private compactFn: (options?: CompactOptions) => void = () => {};
 	private getSystemPromptFn: () => string = () => "";
 	private getIpythonKernelFn: () => IpythonKernelProvisioner | undefined = () => undefined;
+	private recordToolExecutionFn: (execution: ExtensionToolExecutionRecord) => void = () => {};
 	private newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	private forkHandler: ForkHandler = async () => ({ cancelled: false });
 	private navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -313,6 +315,10 @@ export class ExtensionRunner {
 		// action) so either surface can reach the agent's own kernel.
 		this.getIpythonKernelFn = actions.getIpythonKernel ?? (() => undefined);
 		this.runtime.getIpythonKernel = this.getIpythonKernelFn;
+		// Extension-driven tool executions replay as native tool_execution_*
+		// events; hosts that do not bind the action drop them silently.
+		this.recordToolExecutionFn = actions.recordToolExecution ?? (() => {});
+		this.runtime.recordToolExecution = this.recordToolExecutionFn;
 
 		for (const { name, config, extensionPath } of this.runtime.pendingProviderRegistrations) {
 			try {

@@ -726,6 +726,34 @@ export interface ToolExecutionEndEvent {
 	result: any;
 	isError: boolean;
 }
+
+/**
+ * A completed tool execution reported by an extension via
+ * pi.recordToolExecution(). The host replays it as the same
+ * tool_execution_start + tool_execution_end records the agent loop emits for
+ * native tool calls, so stream consumers (JSON event log, daemon broadcast)
+ * observe extension-driven executions identically.
+ */
+export interface ExtensionToolExecutionRecord {
+	/** Tool name to attribute the execution to (e.g. "ipython"). */
+	toolName: string;
+	/** Call id correlating the start/end records; generated when omitted. */
+	toolCallId?: string;
+	/** Human-readable label for the execution. */
+	title?: string;
+	/** Tool input (e.g. { code }) — surfaced as the start record's args. */
+	input?: unknown;
+	/** Text output — surfaced as the end record's result content. */
+	output?: string;
+	/** Marks the end record as an error (defaults to exitCode !== 0). */
+	isError?: boolean;
+	/** Exit code, surfaced in result details and used to derive isError. */
+	exitCode?: number;
+	/** Epoch ms when the execution started. */
+	startedAt?: number;
+	/** Wall duration in ms, surfaced in result details. */
+	durationMs?: number;
+}
 export type ModelSelectSource = "set" | "cycle" | "restore";
 
 /** Fired when a new model is selected */
@@ -1126,6 +1154,15 @@ export interface ExtensionAPI {
 	 */
 	getIpythonKernel?(): IpythonKernelProvisioner | undefined;
 
+	/**
+	 * Record an extension-driven tool execution into the session event stream
+	 * as the same tool_execution_start + tool_execution_end events the agent
+	 * loop emits for native tool calls, and persist the pair to the session
+	 * file. Optional: hosts that do not support it expose no member, so
+	 * callers should optional-chain (pi.recordToolExecution?.(...)).
+	 */
+	recordToolExecution?(execution: ExtensionToolExecutionRecord): void;
+
 	/** Get available slash commands in the current session. */
 	getCommands(): SlashCommandInfo[];
 	/** Set the current model. Returns false if no API key available. */
@@ -1387,6 +1424,12 @@ export interface ExtensionActions {
 	 * an IPython kernel can still bind the core actions.
 	 */
 	getIpythonKernel?: () => IpythonKernelProvisioner | undefined;
+	/**
+	 * Record an extension-driven tool execution as native
+	 * tool_execution_start/end events. Optional so hosts without an event
+	 * stream can still bind the core actions (such hosts drop the records).
+	 */
+	recordToolExecution?: (execution: ExtensionToolExecutionRecord) => void;
 }
 
 /**

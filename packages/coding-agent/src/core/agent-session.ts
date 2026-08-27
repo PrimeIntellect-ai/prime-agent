@@ -119,6 +119,7 @@ import {
 	type ExtensionCommandContextActions,
 	type ExtensionErrorListener,
 	ExtensionRunner,
+	type ExtensionToolExecutionRecord,
 	type ExtensionUIContext,
 	type InputSource,
 	type MessageEndEvent,
@@ -1490,6 +1491,37 @@ export class AgentSession {
 				// receiving lifecycle and persistence events.
 			}
 		}
+	}
+
+	/**
+	 * Replay an extension-reported tool execution as the same
+	 * tool_execution_start/tool_execution_end records the agent loop emits for
+	 * native tool calls (packages/agent agent-loop.ts), so JSON-stream and
+	 * daemon consumers observe extension-driven executions identically. The
+	 * pair is also persisted to the session file; native executions are not
+	 * (they persist as toolResult message entries instead), but recorded ones
+	 * have no message to hang on, so the raw records are the durable trace.
+	 */
+	private _recordExtensionToolExecution(execution: ExtensionToolExecutionRecord): void {
+		const toolCallId =
+			execution.toolCallId ?? `recorded-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+		const args = execution.input;
+		this._emit({ type: "tool_execution_start", toolCallId, toolName: execution.toolName, args });
+		const content: TextContent[] = [{ type: "text", text: execution.output ?? "" }];
+		const details: Record<string, unknown> = {};
+		if (execution.title !== undefined) details.title = execution.title;
+		if (execution.exitCode !== undefined) details.exitCode = execution.exitCode;
+		if (execution.durationMs !== undefined) details.durationMs = execution.durationMs;
+		const isError = execution.isError ?? (execution.exitCode !== undefined ? execution.exitCode !== 0 : false);
+		this._emit({
+			type: "tool_execution_end",
+			toolCallId,
+			toolName: execution.toolName,
+			result: { content, details },
+			isError,
+		});
+		this.sessionManager.appendToolExecutionStart(toolCallId, execution.toolName, args, execution.startedAt);
+		this.sessionManager.appendToolExecutionEnd(toolCallId, execution.toolName, { content, details }, isError);
 	}
 
 	private _emitQueueUpdate(): void {
@@ -8788,6 +8820,9 @@ export class AgentSession {
 				setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
 				refreshTools: () => this._refreshToolRegistry(),
 				getIpythonKernel: () => this._ipythonKernelProvisioner,
+				recordToolExecution: (execution) => {
+					this._recordExtensionToolExecution(execution);
+				},
 				getCommands,
 				setModel: async (model) => {
 					if (!this.modelRegistry.hasConfiguredAuth(model)) return false;
