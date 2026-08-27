@@ -2172,7 +2172,6 @@ describe("InteractiveMode startup onboarding warnings", () => {
 describe("InteractiveMode model candidates", () => {
 	type ModelCandidatesHarness = {
 		agentConnection: { getModelCatalog: () => Promise<AgentConnectionModelCatalog> };
-		connectionModels: AgentConnectionModel[];
 		connectionModelCatalog: AgentConnectionModel[];
 		connectionConfiguredProviders: Set<string>;
 		connectionModelsFetchedAt: number;
@@ -2180,6 +2179,7 @@ describe("InteractiveMode model candidates", () => {
 		connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
 		getScopedModelState(): AgentConnectionState["scopedModels"];
 		applyConnectionModelCatalog(catalog: AgentConnectionModelCatalog): void;
+		getAvailableConnectionModels(): AgentConnectionModel[];
 		getConnectionAvailableModels(): Promise<AgentConnectionModel[]>;
 		getModelCandidates(): Promise<AgentConnectionModel[]>;
 		getScopedModelsFromModelIds(
@@ -2201,7 +2201,6 @@ describe("InteractiveMode model candidates", () => {
 		const getModelCatalog = vi.fn(async () => ({ models: [model], configuredProviders: [model.provider] }));
 		const fakeThis: ModelCandidatesHarness = {
 			agentConnection: { getModelCatalog },
-			connectionModels: [],
 			connectionModelCatalog: [],
 			connectionConfiguredProviders: new Set(),
 			connectionModelsFetchedAt: 0,
@@ -2209,6 +2208,7 @@ describe("InteractiveMode model candidates", () => {
 			connectionModelsRefreshInFlight: undefined,
 			getScopedModelState: () => [],
 			applyConnectionModelCatalog: prototype.applyConnectionModelCatalog,
+			getAvailableConnectionModels: prototype.getAvailableConnectionModels,
 			getConnectionAvailableModels: prototype.getConnectionAvailableModels,
 			getModelCandidates: prototype.getModelCandidates,
 			getScopedModelsFromModelIds: prototype.getScopedModelsFromModelIds,
@@ -2218,7 +2218,7 @@ describe("InteractiveMode model candidates", () => {
 
 		expect(result).toEqual([model]);
 		expect(getModelCatalog).toHaveBeenCalledTimes(1);
-		expect(fakeThis.connectionModels).toEqual([model]);
+		expect(fakeThis.getAvailableConnectionModels()).toEqual([model]);
 	});
 
 	test("uses connection state for scoped model candidates", async () => {
@@ -2229,7 +2229,6 @@ describe("InteractiveMode model candidates", () => {
 		});
 		const fakeThis: ModelCandidatesHarness = {
 			agentConnection: { getModelCatalog },
-			connectionModels: [],
 			connectionModelCatalog: [],
 			connectionConfiguredProviders: new Set(),
 			connectionModelsFetchedAt: 0,
@@ -2237,6 +2236,7 @@ describe("InteractiveMode model candidates", () => {
 			connectionModelsRefreshInFlight: undefined,
 			getScopedModelState: () => [{ model, thinkingLevel: "medium" }],
 			applyConnectionModelCatalog: prototype.applyConnectionModelCatalog,
+			getAvailableConnectionModels: prototype.getAvailableConnectionModels,
 			getConnectionAvailableModels: prototype.getConnectionAvailableModels,
 			getModelCandidates: prototype.getModelCandidates,
 			getScopedModelsFromModelIds: prototype.getScopedModelsFromModelIds,
@@ -2299,7 +2299,6 @@ describe("InteractiveMode model selection persistence", () => {
 			getModelCatalog(): Promise<AgentConnectionModelCatalog>;
 			setModel(provider: string, modelId: string): Promise<void>;
 		};
-		connectionModels: AgentConnectionModel[];
 		connectionModelCatalog: AgentConnectionModel[];
 		connectionConfiguredProviders: Set<string>;
 		connectionModelsFetchedAt: number;
@@ -2321,6 +2320,7 @@ describe("InteractiveMode model selection persistence", () => {
 		getScopedModelState(): AgentConnectionState["scopedModels"];
 		getCurrentModel(): AgentConnectionModel | undefined;
 		applyConnectionModelCatalog(catalog: AgentConnectionModelCatalog): void;
+		getAvailableConnectionModels(): AgentConnectionModel[];
 		findExactModelMatch(searchTerm: string): Promise<AgentConnectionModel | undefined>;
 		getConnectionAvailableModels(): Promise<AgentConnectionModel[]>;
 		getCachedModelCandidates(): AgentConnectionModel[];
@@ -2409,7 +2409,6 @@ describe("InteractiveMode model selection persistence", () => {
 				}),
 			setModel: vi.fn(async () => {}),
 		};
-		fakeThis.connectionModels = [...options.connectionModels];
 		fakeThis.connectionModelCatalog = catalogModels;
 		fakeThis.connectionConfiguredProviders = configuredProviders;
 		fakeThis.connectionModelsFetchedAt = options.connectionModelsFetchedAt ?? 0;
@@ -2947,7 +2946,6 @@ describe("InteractiveMode model selection persistence", () => {
 			getResourceSnapshot: vi.fn(async () => ({})),
 			setModel: vi.fn(async () => {}),
 		} as never;
-		fakeThis.connectionModels = [];
 		fakeThis.connectionModelCatalog = [];
 		fakeThis.connectionConfiguredProviders = new Set();
 		fakeThis.connectionModelsFetchedAt = 0;
@@ -2973,7 +2971,7 @@ describe("InteractiveMode model selection persistence", () => {
 
 		await expect(staleRefresh).resolves.toEqual([freshModel]);
 
-		expect(fakeThis.connectionModels).toEqual([freshModel]);
+		expect(fakeThis.getAvailableConnectionModels()).toEqual([freshModel]);
 	});
 
 	test("keeps the cached model catalog when a catalog refresh fails", async () => {
@@ -2997,7 +2995,6 @@ describe("InteractiveMode model selection persistence", () => {
 			getResourceSnapshot: vi.fn(async () => ({})),
 			setModel: vi.fn(async () => {}),
 		} as never;
-		fakeThis.connectionModels = [cachedModel];
 		fakeThis.connectionModelCatalog = [cachedModel];
 		fakeThis.connectionConfiguredProviders = new Set([cachedModel.provider]);
 		fakeThis.connectionModelsFetchedAt = Date.now();
@@ -3015,7 +3012,7 @@ describe("InteractiveMode model selection persistence", () => {
 		await expect(fakeThis.refreshConnectionCatalog()).resolves.toBeUndefined();
 
 		expect(fakeThis.connectionCommands).toEqual([]);
-		expect(fakeThis.connectionModels).toEqual([expect.objectContaining({ id: "fresh" })]);
+		expect(fakeThis.getAvailableConnectionModels()).toEqual([expect.objectContaining({ id: "fresh" })]);
 		expect(fakeThis.connectionModelsFetchedAt).toBeGreaterThan(0);
 	});
 
@@ -3223,7 +3220,6 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 	};
 	type OnboardingFake = OnboardingHarness & {
 		connectionState: AgentConnectionState;
-		connectionModels: AgentConnectionModel[];
 		agentConnection: {
 			getAvailableModels?: () => Promise<AgentConnectionModel[]>;
 			setModel?: (provider: string, modelId: string) => Promise<void>;
@@ -3898,7 +3894,6 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 	function createPrimeCliHarness(shown: boolean): OnboardingFake {
 		const fakeThis = Object.create(InteractiveMode.prototype) as OnboardingFake;
 		fakeThis.connectionState = createConnectionState({ model: primeModel });
-		fakeThis.connectionModels = [primeModel];
 		fakeThis.agentConnection = {
 			getAvailableModels: vi.fn(async () => [primeModel]),
 		};
