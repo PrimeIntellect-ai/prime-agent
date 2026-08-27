@@ -33,13 +33,7 @@ describe("ENG-4529 leading newline before %%bash", () => {
 	});
 
 	it("parses blank lines, indentation, arguments, and CRLF before the bash body", () => {
-		expect(parseIpythonBashCell(" \r\n\t\r\n  %%bash --noprofile\r\necho ok")).toEqual({
-			leadingWhitespace: " \r\n\t\r\n",
-			indent: "  ",
-			magicArguments: " --noprofile",
-			lineBreak: "\r\n",
-			body: "echo ok",
-		});
+		expect(parseIpythonBashCell(" \r\n\t\r\n  %%bash --noprofile\r\necho ok")).toEqual({ body: "echo ok" });
 		expect(parseIpythonBashCell("\nprint('python')")).toBeUndefined();
 	});
 

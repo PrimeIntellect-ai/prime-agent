@@ -7,7 +7,6 @@ import hashlib
 import io
 import os
 import re
-import sys
 import threading
 import time
 from contextlib import AsyncExitStack
@@ -657,27 +656,3 @@ def _seconds(value: Any, default: float) -> float:
 
 def _strings(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
-
-
-def install_shutdown_hook() -> None:
-    try:
-        kernel = get_ipython().kernel  # type: ignore[name-defined]
-    except (AttributeError, NameError):
-        return
-    if getattr(kernel, "_prime_agent_mcp_shutdown", False):
-        return
-    _registry.bind_owner()
-    original = kernel.do_shutdown
-
-    async def do_shutdown(restart: bool):
-        try:
-            await close()
-        except BaseException as exc:
-            print(f"Prime Agent MCP shutdown failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-        result = original(restart)
-        if hasattr(result, "__await__"):
-            return await result
-        return result
-
-    kernel.do_shutdown = do_shutdown
-    kernel._prime_agent_mcp_shutdown = True
