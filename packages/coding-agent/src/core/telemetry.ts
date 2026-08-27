@@ -212,9 +212,6 @@ export function isTelemetryEnabled(settingsManager: SettingsManager): boolean {
 	if (override !== undefined) {
 		return override;
 	}
-	if (process.env.NODE_ENV === "test") {
-		return false;
-	}
 	return settingsManager.getTelemetryEnabled();
 }
 
