@@ -466,6 +466,7 @@ export class IpythonKernelProvisioner {
 			// without bash, where the runtime's teaching error fires instead).
 			const shellPath = resolveKernelBashShell(this.options?.shellPath);
 			const commandPrefix = this.options?.commandPrefix;
+			const bootstrapCode = buildRlmBootstrapCode(this.options?.pythonSkills);
 			const m = new ReplKernelManager({
 				python: this.options?.python,
 				cwd: this.cwd,
@@ -482,6 +483,7 @@ export class IpythonKernelProvisioner {
 				snapshot: snapshotDir
 					? { path: snapshotPathIn(snapshotDir), manifestPath: manifestPathIn(snapshotDir) }
 					: undefined,
+				bootstrapCode,
 			});
 			let pendingRestore: RestoreResult | undefined;
 			try {
@@ -512,7 +514,7 @@ export class IpythonKernelProvisioner {
 					}
 				}
 				this.emitStartupProgress("Preparing Python runtime...");
-				const bootstrap = await m.execute(buildRlmBootstrapCode(this.options?.pythonSkills), {
+				const bootstrap = await m.execute(bootstrapCode, {
 					signal: startupSignal,
 				});
 				if (bootstrap.status !== "ok") {

@@ -16,6 +16,13 @@ const countPath = process.env.FAKE_REPL_SPAWN_COUNT;
 const count = fs.existsSync(countPath) ? Number(fs.readFileSync(countPath, "utf8")) + 1 : 1;
 fs.writeFileSync(countPath, String(count));
 let state = {};
+let boot = "missing";
+setInterval(() => {
+  if (fs.existsSync(process.env.FAKE_REPL_EMIT_GARBAGE)) {
+    fs.unlinkSync(process.env.FAKE_REPL_EMIT_GARBAGE);
+    process.stdout.write("BROKEN-SPONTANEOUS\\n");
+  }
+}, 25);
 const emit = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
 if (fs.existsSync(process.env.FAKE_REPL_CORRUPT_BOOT)) {
   process.stdout.write("BROKEN-BOOT\\n");
@@ -26,6 +33,12 @@ const input = readline.createInterface({ input: process.stdin });
 input.on("line", (line) => {
   const request = JSON.parse(line);
   if (request.type === "execute") {
+    if (request.code === "hang") {
+      emit({ event: "stdout", id: request.id, text: "hanging" });
+      return;
+    }
+    if (request.code === "bootstrap") boot = "live";
+    if (request.code === "read-boot") emit({ event: "stdout", id: request.id, text: boot });
     if (request.code === "seed") state.value = "persisted";
     if (request.code === "read") emit({ event: "stdout", id: request.id, text: state.value || "fresh" });
     if (request.code === "corrupt-active") {
@@ -88,11 +101,12 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 		}
 	});
 
-	function newManager(options: { snapshot?: boolean; debounceMs?: number } = {}): {
+	function newManager(options: { snapshot?: boolean; debounceMs?: number; bootstrapCode?: string } = {}): {
 		manager: ReplKernelManager;
 		bootCorruptionPath: string;
 		countPath: string;
 		delayReadyPath: string;
+		emitGarbagePath: string;
 		restoreCorruptionPath: string;
 		restoreFailurePath: string;
 		snapshotCorruptionPath: string;
@@ -102,6 +116,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 		const bootCorruptionPath = join(tempDir, "corrupt-boot");
 		const countPath = join(tempDir, "spawn-count");
 		const delayReadyPath = join(tempDir, "delay-ready");
+		const emitGarbagePath = join(tempDir, "emit-garbage");
 		const restoreCorruptionPath = join(tempDir, "corrupt-restore");
 		const restoreFailurePath = join(tempDir, "fail-restore");
 		const snapshotCorruptionPath = join(tempDir, "corrupt-snapshot");
@@ -116,6 +131,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 					FAKE_REPL_CORRUPT_RESTORE: restoreCorruptionPath,
 					FAKE_REPL_CORRUPT_SNAPSHOT: snapshotCorruptionPath,
 					FAKE_REPL_DELAY_READY: delayReadyPath,
+					FAKE_REPL_EMIT_GARBAGE: emitGarbagePath,
 					FAKE_REPL_FAIL_RESTORE: restoreFailurePath,
 					FAKE_REPL_SPAWN_COUNT: countPath,
 				},
@@ -126,10 +142,12 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 							debounceMs: options.debounceMs ?? 1,
 						}
 					: undefined,
+				bootstrapCode: options.bootstrapCode,
 			}),
 			bootCorruptionPath,
 			countPath,
 			delayReadyPath,
+			emitGarbagePath,
 			restoreCorruptionPath,
 			restoreFailurePath,
 			snapshotCorruptionPath,
@@ -216,6 +234,49 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			await expect(manager.execute("corrupt-active")).rejects.toThrow("Kernel protocol error");
 			await expect(manager.execute("read")).resolves.toMatchObject({ status: "ok", stdout: "fresh" });
 			expect(spawnCount(countPath)).toBe(3);
+		} finally {
+			await manager.dispose();
+		}
+	});
+
+	it("re-runs the runtime bootstrap on the repaired kernel", async () => {
+		const { manager, countPath, snapshotPath } = newManager({ snapshot: true, bootstrapCode: "bootstrap" });
+		try {
+			await manager.execute("bootstrap");
+			await manager.execute("seed");
+			await expect.poll(() => existsSync(snapshotPath)).toBe(true);
+
+			await expect(manager.execute("corrupt-active")).rejects.toThrow("Kernel protocol error");
+			await expect(manager.execute("read-boot")).resolves.toMatchObject({ status: "ok", stdout: "live" });
+			await expect(manager.execute("read")).resolves.toMatchObject({ status: "ok", stdout: "persisted" });
+			expect(spawnCount(countPath)).toBe(2);
+		} finally {
+			await manager.dispose();
+		}
+	});
+
+	it("requeues a cell that was busy-waiting on an interrupted cell when corruption arrived", async () => {
+		const { manager, countPath, emitGarbagePath, snapshotPath } = newManager({ snapshot: true });
+		try {
+			await manager.execute("seed");
+			await expect.poll(() => existsSync(snapshotPath)).toBe(true);
+
+			// An aborted hung cell stays active, so the next cell busy-waits on it.
+			const controller = new AbortController();
+			let onHanging: () => void = () => {};
+			const hanging = new Promise<void>((r) => {
+				onHanging = r;
+			});
+			const hung = manager.execute("hang", { signal: controller.signal, onStream: () => onHanging() });
+			await hanging;
+			controller.abort();
+			await expect(hung).resolves.toMatchObject({ status: "aborted" });
+
+			const queued = manager.execute("read");
+			await new Promise((r) => setTimeout(r, 100));
+			writeFileSync(emitGarbagePath, "1");
+			await expect(queued).resolves.toMatchObject({ status: "ok", stdout: "persisted" });
+			expect(spawnCount(countPath)).toBe(2);
 		} finally {
 			await manager.dispose();
 		}

@@ -133,6 +133,8 @@ export interface KernelManagerOptions {
 	pythonSkills?: readonly KernelPythonSkill[];
 	/** Persist/revive the user namespace across kernel restarts and session resume. */
 	snapshot?: KernelSnapshotConfig;
+	/** Runtime bootstrap re-run on a protocol-repaired kernel so live handles (rlm, bash, skills) exist again. */
+	bootstrapCode?: string;
 }
 
 export interface KernelStartOptions {

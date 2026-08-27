@@ -49,7 +49,7 @@ import {
 
 const REPL_PROTOCOL_VERSION = 2;
 const READY_TIMEOUT_MS = 30_000;
-const REPAIR_RESTORE_TIMEOUT_MS = 30_000;
+const REPAIR_STEP_TIMEOUT_MS = 30_000;
 // Runtime-minted host-request ids never repeat; the bound only guards a
 // misbehaving runtime from growing the dedup set forever.
 const MAX_HANDLED_HOST_REQUEST_IDS = 1024;
@@ -104,7 +104,7 @@ function asReasonArray(value: unknown): { name: string; reason: string }[] {
 export class ReplKernelManager {
 	private readonly options: Pick<
 		KernelManagerOptions,
-		"python" | "cwd" | "env" | "sessionId" | "hostHandlers" | "pythonSkills" | "snapshot"
+		"python" | "cwd" | "env" | "sessionId" | "hostHandlers" | "pythonSkills" | "snapshot" | "bootstrapCode"
 	>;
 	private readonly handledHostRequestIds = new Set<string>();
 	private child?: ChildProcess;
@@ -148,6 +148,7 @@ export class ReplKernelManager {
 			hostHandlers: options.hostHandlers,
 			pythonSkills: options.pythonSkills,
 			snapshot: options.snapshot,
+			bootstrapCode: options.bootstrapCode,
 		};
 	}
 
@@ -316,10 +317,7 @@ export class ReplKernelManager {
 			// A repair's own replacement child corrupted: discard it instead of respawn-looping.
 			this.appendKernelDiagnostic("replacement kernel corrupted during protocol repair; giving up");
 			this.protocolRepairOwner.superseded = true;
-			this.state = "shutdown";
-			liveKernels.delete(this);
-			this.cleanupResources("SIGKILL");
-			this.state = "idle";
+			this.killChildToIdle();
 			return;
 		}
 		const owner = { superseded: false };
@@ -341,10 +339,7 @@ export class ReplKernelManager {
 
 	private async repairProtocolChild(child: ChildProcess, owner: { superseded: boolean }): Promise<void> {
 		if (this.child !== child || this.state === "shutdown") return;
-		this.state = "shutdown";
-		liveKernels.delete(this);
-		this.cleanupResources("SIGKILL");
-		this.state = "idle";
+		this.killChildToIdle();
 
 		const start = this.start();
 		const generation = this.startGeneration;
@@ -367,11 +362,53 @@ export class ReplKernelManager {
 		if (this.options.snapshot && restored === null) {
 			if (owner.superseded || this.protocolRepairOwner !== owner) return;
 			this.appendKernelDiagnostic("protocol repair restore failed; discarding replacement kernel");
-			this.state = "shutdown";
-			liveKernels.delete(this);
-			this.cleanupResources("SIGKILL");
-			this.state = "idle";
+			this.killChildToIdle();
+			return;
 		}
+
+		// Restore revives only the user namespace; live handles (rlm, bash, skills)
+		// come from the runtime bootstrap, so a repaired kernel must re-run it.
+		if (!this.options.bootstrapCode) return;
+		const bootstrapped = await this.bootstrapRepairedKernel(this.options.bootstrapCode);
+		if (this.startStale(generation) || (this.state as string) !== "running") {
+			this.finishFailedProtocolRepair(owner);
+			return;
+		}
+		if (!bootstrapped) {
+			if (owner.superseded || this.protocolRepairOwner !== owner) return;
+			this.appendKernelDiagnostic("protocol repair bootstrap failed; discarding replacement kernel");
+			this.killChildToIdle();
+		}
+	}
+
+	/** Bounded bootstrap of a repaired kernel; false when it failed. Never throws. */
+	private async bootstrapRepairedKernel(code: string): Promise<boolean> {
+		try {
+			const r = await this.enqueueRequest(
+				{ type: "execute", code },
+				code,
+				{ internal: true, protocolRepair: true },
+				REPAIR_STEP_TIMEOUT_MS,
+			);
+			if (r.status !== "ok") {
+				this.appendKernelDiagnostic(
+					`protocol repair bootstrap ${r.status === "aborted" ? "timed out" : "failed"}: ${r.error?.evalue ?? r.stderr}`,
+				);
+				return false;
+			}
+			return true;
+		} catch (error) {
+			this.appendKernelDiagnostic(`protocol repair bootstrap error: ${errorMessage(error)}`);
+			return false;
+		}
+	}
+
+	/** Kill the current child and settle at clean idle, so the next start spawns fresh. */
+	private killChildToIdle(): void {
+		this.state = "shutdown";
+		liveKernels.delete(this);
+		this.cleanupResources("SIGKILL");
+		this.state = "idle";
 	}
 
 	private finishFailedProtocolRepair(owner: { superseded: boolean }, error?: unknown): void {
@@ -584,14 +621,6 @@ export class ReplKernelManager {
 		});
 		await prev;
 
-		// A repair started while this request was queued: release the slot so the
-		// repair's own restore can run, then requeue behind the finished repair.
-		if (this.protocolRepairPromise && !opts.protocolRepair) {
-			resolveNext();
-			await this.waitForProtocolRepair(opts.signal);
-			return this.enqueueRequest(requestFields, code, opts, executionTimeoutMs);
-		}
-
 		const started = Date.now();
 		let executionTimeout: ReturnType<typeof globalThis.setTimeout> | undefined;
 		try {
@@ -601,6 +630,13 @@ export class ReplKernelManager {
 			}
 			if ((this.state as string) === "shutdown") {
 				throw new Error("Kernel has been shut down");
+			}
+			// A repair started while this request was queued or busy-waiting: release
+			// the slot so the repair's own restore can run, then requeue behind it.
+			if (this.protocolRepairPromise && !opts.protocolRepair) {
+				resolveNext();
+				await this.waitForProtocolRepair(opts.signal);
+				return this.enqueueRequest(requestFields, code, opts, executionTimeoutMs);
 			}
 			if (executionTimeoutMs === undefined) {
 				return await this.executeInner(requestFields, code, opts, started);
@@ -1188,7 +1224,7 @@ export class ReplKernelManager {
 				{ type: "restore", path: cfg.path },
 				"",
 				{ internal: true, protocolRepair },
-				protocolRepair ? REPAIR_RESTORE_TIMEOUT_MS : undefined,
+				protocolRepair ? REPAIR_STEP_TIMEOUT_MS : undefined,
 			);
 			if (r.status !== "ok" || !r.doneFields) {
 				this.appendKernelDiagnostic(
