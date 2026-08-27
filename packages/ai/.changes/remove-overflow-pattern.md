@@ -1,0 +1,1 @@
+- Removed the unused overflow pattern helper from `utils/overflow.ts`.
