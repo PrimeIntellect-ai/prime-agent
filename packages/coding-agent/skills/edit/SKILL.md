@@ -1,6 +1,6 @@
 ---
 name: edit
-description: Replace an exact, unique string in an existing file. Use for targeted single-occurrence edits to files from the IPython kernel instead of rewriting the whole file.
+description: Replace an exact, unique string in an existing file. Use for targeted single-occurrence edits to files from the Python kernel instead of rewriting the whole file.
 ---
 
 # Edit

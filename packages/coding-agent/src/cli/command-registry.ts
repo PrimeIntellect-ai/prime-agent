@@ -312,7 +312,7 @@ export function formatTopLevelHelp(): string {
 	const commands = COMMAND_SPECS.filter((spec) => spec.path.length === 1);
 	const commandWidth = Math.max(...commands.map((spec) => spec.path[0]!.length));
 	const options = TOP_LEVEL_OPTION_GROUPS.map((group) => formatOptionGroup(group.heading, group.options)).join("\n\n");
-	return `${APP_NAME} - AI coding assistant with an IPython tool
+	return `${APP_NAME} - AI coding assistant with a Python REPL tool
 
 Usage:
   ${APP_NAME} [options] [@files...] [message...]

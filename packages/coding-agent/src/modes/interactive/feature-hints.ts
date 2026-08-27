@@ -76,7 +76,7 @@ export const FEATURE_HINTS: readonly FeatureHintDefinition[] = [
 	},
 	{
 		id: "persistent-ipython",
-		getText: () => "Compaction removes IPython variables over 16 MiB; smaller state persists.",
+		getText: () => "Compaction removes kernel variables over 16 MiB; smaller state persists.",
 	},
 	{
 		id: "context-usage",

@@ -1,6 +1,6 @@
 /**
  * Namespaced `_meta` payloads for prime-agent capabilities that ACP has no
- * native concept for (IPython cell semantics, RLM subagents, autonomous gates,
+ * native concept for (Python cell semantics, RLM subagents, autonomous gates,
  * goals, heartbeats, continual harness state).
  *
  * ACP reserves `_meta` on capability objects, notifications, tool calls, and
