@@ -1,0 +1,1 @@
+- Documented the daemon protocol clientId trust model: it is a same-user reconnection cookie, not authentication; unix socket permissions remain the security boundary.

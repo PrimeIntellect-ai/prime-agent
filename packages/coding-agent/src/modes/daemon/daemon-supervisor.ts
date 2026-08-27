@@ -625,6 +625,8 @@ export class DaemonSupervisor {
 	private readonly connectionIds = new WeakMap<DaemonSocketClient, string>();
 	private readonly sessionInputPauseEpochs = new WeakMap<DaemonSocketClient, number>();
 	private readonly detachingInputPauseSessions = new WeakMap<DaemonSocketClient, Set<string>>();
+	// Self-asserted same-user reconnection cookie, not auth: socket perms (0o700 dir/0o600 socket) are the boundary.
+	// ownerClientId checks derived from it are collision hygiene between cooperating clients, not access control.
 	private readonly protocolClientIds = new WeakMap<DaemonSocketClient, string>();
 	private readonly workers = new Map<string, ResidentWorker>();
 	private workerStopCounts?: Map<ResidentWorker, number>;
@@ -1378,6 +1380,7 @@ export class DaemonSupervisor {
 		}
 		const envelopeClientId = preParsed.envelopeClientId;
 		if (envelopeClientId) {
+			// Trust the asserted cookie: reconnects legitimately replay it on a new socket before the old one closes.
 			this.protocolClientIds.set(client, envelopeClientId);
 			client.id = envelopeClientId;
 		}
