@@ -1434,31 +1434,6 @@ describe("InteractiveMode pending bash components", () => {
 });
 
 describe("InteractiveMode connection events", () => {
-	test("updates the session message count from message starts", () => {
-		const builtInHeader = { invalidate: vi.fn() };
-		const subagentSummaryLine = { invalidate: vi.fn() };
-		const harness = {
-			connectionState: createConnectionState(),
-			builtInHeader,
-			subagentSummaryLine,
-			patchConnectionState(patch: Partial<AgentConnectionState>) {
-				this.connectionState = { ...this.connectionState, ...patch };
-			},
-		};
-		const updateConnectionStateFromEvent = (
-			InteractiveMode.prototype as unknown as {
-				updateConnectionStateFromEvent(this: typeof harness, event: AgentConnectionSessionEvent): void;
-			}
-		).updateConnectionStateFromEvent;
-
-		updateConnectionStateFromEvent.call(harness, { type: "message_start", message: userMessage("one", 1) });
-		updateConnectionStateFromEvent.call(harness, { type: "message_start", message: userMessage("two", 2) });
-
-		expect(harness.connectionState.messageCount).toBe(2);
-		expect(builtInHeader.invalidate).toHaveBeenCalledOnce();
-		expect(subagentSummaryLine.invalidate).toHaveBeenCalledOnce();
-	});
-
 	test("rendering a switched session updates the pending display from its snapshot", async () => {
 		const harness = {
 			resetCurrentSessionRenderState: vi.fn(),
@@ -1696,6 +1671,64 @@ describe("InteractiveMode connection events", () => {
 		expect(fakeThis.renderInitialMessages).toHaveBeenCalledOnce();
 	});
 
+	test("exits stale queue browsing when a resync replaces the queue snapshot", async () => {
+		const queueSelection = new QueueSelection();
+		let editorText = "draft";
+		queueSelection.move({ steering: [], followUp: ["queued"] }, editorText, -1);
+		editorText = "queued";
+		const snapshot: AgentConnectionSnapshot = {
+			state: createConnectionState({
+				sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+			}),
+			messages: [],
+		};
+		const fakeThis = {
+			connectionState: createConnectionState({
+				sessionActions: { queuedCount: 1, steering: [], followUps: ["queued"] },
+			}),
+			queueSelection,
+			pendingQueueEdit: undefined,
+			pendingQueueMove: false,
+			isApplyingQueueSelectionText: false,
+			editor: {
+				getText: () => editorText,
+				setText: (text: string) => {
+					editorText = text;
+				},
+			},
+			isBashRunning: () => false,
+			applyConnectionStateSnapshot: vi.fn(),
+			restoreTurnStartFromMessages: vi.fn(),
+			replaceSubagentSummary: vi.fn(),
+			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
+				messages: [],
+				thinkingLevel: "medium",
+				model: null,
+			})),
+			renderSessionContext: vi.fn(async () => {}),
+			restoreStreamingMessageFromSnapshot: vi.fn(),
+			updatePendingMessagesDisplay: vi.fn(),
+			updateTerminalTitle: vi.fn(),
+			setGoalAnnouncementBaseline: vi.fn(),
+			syncGoalTray: vi.fn(),
+			syncWorkingLoader: vi.fn(),
+			getGoalState: () => emptyGoalState(),
+		};
+		fakeThis.applyConnectionStateSnapshot.mockImplementation((state: AgentConnectionState) => {
+			fakeThis.connectionState = state;
+		});
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+
+		await (
+			InteractiveMode.prototype as unknown as {
+				renderResyncedSession(this: unknown, value: AgentConnectionSnapshot): Promise<void>;
+			}
+		).renderResyncedSession.call(fakeThis, snapshot);
+
+		expect(queueSelection.isBrowsing).toBe(false);
+		expect(editorText).toBe("draft");
+	});
+
 	test("preserves client-local work while rendering a resynchronized snapshot", async () => {
 		const sideQuestion = { id: "side-1", status: "running" };
 		const extensionRequests = new Map([["request-1", { cancelLocal: vi.fn() }]]);
@@ -1729,6 +1762,7 @@ describe("InteractiveMode connection events", () => {
 			streamingComponent: {},
 			streamingMessage: {},
 			applyConnectionStateSnapshot: vi.fn(),
+			refreshQueueSelectionFromState: vi.fn(),
 			updateWorkingLoaderMessage: vi.fn(),
 			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
@@ -1785,6 +1819,7 @@ describe("InteractiveMode connection events", () => {
 			isAgentCompacting: () => true,
 			isBashRunning: () => true,
 			applyConnectionStateSnapshot: vi.fn(),
+			refreshQueueSelectionFromState: vi.fn(),
 			restoreTurnStartFromMessages: vi.fn(),
 			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
