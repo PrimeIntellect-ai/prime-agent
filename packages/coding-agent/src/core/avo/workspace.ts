@@ -233,32 +233,81 @@ export function captureAvoCodingVerificationBaseline(
 		workspaceDigest: workspace.digest,
 		testFiles,
 		userAcceptanceCommands,
+		executions: [],
 		capturedAt: new Date().toISOString(),
 	};
+}
+
+export function captureAvoArtifactPathBaseline(
+	cwd: string,
+	options: { excludedRoots?: readonly string[] } = {},
+): string[] {
+	const root = resolve(cwd);
+	return treeFiles(root, options.excludedRoots ?? []).map((path) => resolve(root, path));
 }
 
 export interface AvoTestTrustAssessment {
 	trusted: boolean;
 	taskSpecific: boolean;
-	basis: "user_acceptance" | "baseline_target" | "baseline_suite" | "candidate_only" | "missing_baseline";
+	basis:
+		| "user_acceptance"
+		| "baseline_target"
+		| "baseline_suite"
+		| "candidate_only"
+		| "missing_baseline"
+		| "mutable_package_script"
+		| "narrowed_selection";
 	baselineTestCount: number;
 	unchangedBaselineTestCount: number;
 	explicitBaselineTargets: number;
+	observedBaselineTestFiles: string[];
+	executionProven: boolean;
 	narrowedSelection: boolean;
 }
 
 function explicitTestTargets(command: string): string[] {
-	return [
-		...command.matchAll(
-			/(?:^|\s)(["']?[^\s"']*(?:(?:\.test|\.spec)\.[a-z0-9]+|(?:^|\/)test_[^\s"']+\.py|_test\.(?:py|go|rs)|(?:test|tests)\.(?:java|kt|cs|swift))["']?)(?=\s|$)/gi,
-		),
-	].map((match) => match[1]!.replace(/^['"]|['"]$/g, ""));
+	const tokens = (command.match(/"[^"]*"|'[^']*'|\S+/g) ?? []).map((token) => token.replace(/^['"]|['"]$/g, ""));
+	const optionOperands = new Set([
+		"-c",
+		"--config",
+		"--dir",
+		"--globalSetup",
+		"--globalTeardown",
+		"--import",
+		"--loader",
+		"--project",
+		"--require",
+		"--reporter",
+		"--root",
+		"--setupFiles",
+		"--setupFilesAfterEnv",
+		"--test-reporter",
+		"--workspace",
+	]);
+	const target =
+		/(?:(?:^|\/)(?:test|tests|__tests__)\/[^\s"']+\.[a-z0-9]+|(?:\.test|\.spec)\.[a-z0-9]+|(?:^|\/)test_[^\s"']+\.py|_test\.(?:py|go|rs)|(?:test|tests)\.(?:java|kt|cs|swift))$/i;
+	const positionalBooleanOptions = new Set(["-q", "-v", "--run", "--runInBand", "--silent", "--test", "--verbose"]);
+	const paths: string[] = [];
+	for (let index = 0; index < tokens.length; index += 1) {
+		const token = tokens[index]!;
+		if (optionOperands.has(token)) {
+			index += 1;
+			continue;
+		}
+		if (!token.startsWith("-") && target.test(token)) {
+			const previous = tokens[index - 1];
+			if (previous?.startsWith("-") && previous !== "--" && !positionalBooleanOptions.has(previous)) continue;
+			paths.push(token);
+		}
+	}
+	return paths;
 }
 
 export function assessAvoTestTrust(
 	cwd: string,
 	command: string,
 	baseline: AvoVerificationBaseline | undefined,
+	_output = "",
 ): AvoTestTrustAssessment {
 	if (!baseline) {
 		return {
@@ -268,18 +317,23 @@ export function assessAvoTestTrust(
 			baselineTestCount: 0,
 			unchangedBaselineTestCount: 0,
 			explicitBaselineTargets: 0,
+			observedBaselineTestFiles: [],
+			executionProven: false,
 			narrowedSelection: false,
 		};
 	}
 	const normalizedCommand = command.trim().replace(/[ \t]+/g, " ");
+	const mutablePackageScript = /^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b/i.test(normalizedCommand);
 	if (baseline.userAcceptanceCommands.includes(normalizedCommand)) {
 		return {
-			trusted: true,
-			taskSpecific: true,
-			basis: "user_acceptance",
+			trusted: !mutablePackageScript,
+			taskSpecific: !mutablePackageScript,
+			basis: mutablePackageScript ? "mutable_package_script" : "user_acceptance",
 			baselineTestCount: baseline.testFiles.length,
 			unchangedBaselineTestCount: baseline.testFiles.length,
 			explicitBaselineTargets: 0,
+			observedBaselineTestFiles: [],
+			executionProven: !mutablePackageScript,
 			narrowedSelection: false,
 		};
 	}
@@ -296,20 +350,31 @@ export function assessAvoTestTrust(
 		return [relative(root, absolute).replaceAll(sep, "/")];
 	});
 	const explicitBaselineTargets = explicit.filter((target) => unchanged.has(target)).length;
+	const observedBaselineTestFiles = [...new Set(explicit.filter((target) => unchanged.has(target)))];
+	const selectionCommand = command.trim().replace(/^(?:python3?|uv run)\s+-m\s+pytest\b/i, "pytest");
 	const narrowedSelection =
-		/(?:^|\s)(?:-k|-m|-t|--grep|--test-name-pattern|--test-skip-pattern|--testNamePattern|--testPathPattern|--changed|--related|--deselect|--ignore|-run)(?:[=\s]|$)/i.test(
-			command,
+		/(?:^|\s)(?:-k|-m|-t|-c|-list|-skip|--config|--dir|--root|--workspace|--grep|--test-name-pattern|--test-skip-pattern|--testNamePattern|--testPathPattern|--testPathIgnorePatterns|--test-path-ignore-patterns|--changed|--related|--deselect|--ignore|--ignore-glob|--exclude|--shard|--splits?|--partition|--project|--last-failed|--lf|--failed-first|--ff|--stepwise|--sw|--globalSetup|--globalTeardown|--import|--loader|--require|--reporter|--setupFiles|--setupFilesAfterEnv|--test-reporter|-run)(?:[=\s]|$)/i.test(
+			selectionCommand,
 		) || /^cargo test\s+[^-\s][^\s]*/i.test(command.trim());
 	const basis =
 		explicit.length > 0 ? (explicitBaselineTargets > 0 ? "baseline_target" : "candidate_only") : "baseline_suite";
-	const trusted = explicit.length > 0 ? explicitBaselineTargets > 0 : unchanged.size > 0 && !narrowedSelection;
+	const trusted = explicitBaselineTargets > 0 && !narrowedSelection && !mutablePackageScript;
+	const executionProven = trusted;
 	return {
 		trusted,
 		taskSpecific: trusted,
-		basis: trusted ? basis : "candidate_only",
+		basis: trusted
+			? basis
+			: mutablePackageScript
+				? "mutable_package_script"
+				: narrowedSelection
+					? "narrowed_selection"
+					: "candidate_only",
 		baselineTestCount: baseline.testFiles.length,
 		unchangedBaselineTestCount: unchanged.size,
 		explicitBaselineTargets,
+		observedBaselineTestFiles,
+		executionProven,
 		narrowedSelection,
 	};
 }

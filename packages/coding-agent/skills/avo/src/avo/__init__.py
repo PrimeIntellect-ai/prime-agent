@@ -15,12 +15,22 @@ from rlm import host_request
 
 def execution_contract() -> dict[str, Any]:
     return {
-        "contract_version": 3,
+        "contract_version": 6,
         "forbid_runtime_introspection": True,
+        "host_enforces_completion_and_canonical_delivery": True,
         "environments": ["general", "coding", "research"],
         "horizons": ["direct", "iterative", "long"],
         "authorities": ["host", "environment", "external", "model_opinion"],
+        "verification_classes": [
+            "external_factual",
+            "deterministic_local",
+            "coding",
+            "research",
+            "artifact",
+            "subjective",
+        ],
         "sequence": [
+            "for coding only: run_coding_baseline before modifying the workspace",
             "add_candidate",
             (
                 "run_evaluation for host-observed executable checks, bind every factual "
@@ -32,10 +42,15 @@ def execution_contract() -> dict[str, Any]:
         "calls": {
             "resume": "state = (await avo.get_state())['state']",
             "candidate": "await avo.add_candidate(candidate_dict)",
+            "coding_baseline": "await avo.run_coding_baseline(command)",
             "host_evaluation": "await avo.run_evaluation(candidate_id, command)",
+            "deterministic_evaluation": "await avo.verify_deterministic_result(candidate_id)",
+            "artifact_evaluation": "await avo.verify_artifacts(candidate_id)",
             "external_evidence": (
                 "await avo.bind_tool_result(candidate_id, claim_id, tool_call_id, exact_quote)"
             ),
+            "external_source_fetch": "await avo.fetch_external_source(url)",
+            "external_url_evidence": "await avo.bind_url(candidate_id, claim_id, url, exact_quote)",
             "opinion": "await avo.record_evaluation(model_opinion_dict)",
             "cycle": "await avo.complete_cycle({'candidate_id': candidate_id})",
             "gate": "await avo.stop_gate()",
@@ -49,8 +64,11 @@ def execution_contract() -> dict[str, Any]:
             "host-classified supports receipt from a real external tool result"
         ),
         "coding_test_rule": (
-            "candidate-created tests cannot certify themselves without a trusted pre-task "
-            "test suite or exact user acceptance command"
+            "candidate-created tests cannot certify themselves; before editing, execute a trusted "
+            "direct test command that explicitly names an unchanged baseline file with "
+            "run_coding_baseline, then require the exact same command and baseline identities "
+            "to execute and pass after the candidate; mutable package scripts and output-printed "
+            "filenames are not identity proof"
         ),
     }
 
@@ -110,6 +128,33 @@ async def run_evaluation(candidate_id: str, command: str) -> dict[str, Any]:
     )
 
 
+async def verify_deterministic_result(candidate_id: str) -> dict[str, Any]:
+    if not isinstance(candidate_id, str) or not candidate_id.strip():
+        raise ValueError("candidate_id must be a non-empty string")
+    return await host_request(
+        "avo.evaluation.deterministic",
+        {"candidate_id": candidate_id},
+    )
+
+
+async def verify_artifacts(candidate_id: str) -> dict[str, Any]:
+    if not isinstance(candidate_id, str) or not candidate_id.strip():
+        raise ValueError("candidate_id must be a non-empty string")
+    return await host_request(
+        "avo.evaluation.artifacts",
+        {"candidate_id": candidate_id},
+    )
+
+
+async def run_coding_baseline(command: str) -> dict[str, Any]:
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("command must be a non-empty string")
+    return await host_request(
+        "avo.verification.baseline.run",
+        {"command": command},
+    )
+
+
 async def bind_tool_result(
     candidate_id: str,
     claim_id: str,
@@ -130,6 +175,37 @@ async def bind_tool_result(
             "candidate_id": candidate_id,
             "claim_id": claim_id,
             "tool_call_id": tool_call_id,
+            "exact_quote": exact_quote,
+        },
+    )
+
+
+async def fetch_external_source(url: str) -> dict[str, Any]:
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("url must be a non-empty string")
+    return await host_request("avo.external.fetch", {"url": url})
+
+
+async def bind_url(
+    candidate_id: str,
+    claim_id: str,
+    url: str,
+    exact_quote: str,
+) -> dict[str, Any]:
+    for value, label in (
+        (candidate_id, "candidate_id"),
+        (claim_id, "claim_id"),
+        (url, "url"),
+        (exact_quote, "exact_quote"),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{label} must be a non-empty string")
+    return await host_request(
+        "avo.evaluation.url",
+        {
+            "candidate_id": candidate_id,
+            "claim_id": claim_id,
+            "url": url,
             "exact_quote": exact_quote,
         },
     )
@@ -328,12 +404,14 @@ async def reflect_memory(trigger: str = "manual", *, cycle_id: str | None = None
 __all__ = [
     "add_candidate",
     "bind_tool_result",
+    "bind_url",
     "checkpoint",
     "collect_results",
     "complete",
     "complete_cycle",
     "configure",
     "execution_contract",
+    "fetch_external_source",
     "get_state",
     "initialize",
     "nooa_backend_status",
@@ -341,7 +419,11 @@ __all__ = [
     "record_evaluation",
     "reflect_memory",
     "remember",
+    "run_coding_baseline",
+    "run_evaluation",
     "spontaneous_recall",
     "stop_gate",
     "sync_nooa_memory",
+    "verify_artifacts",
+    "verify_deterministic_result",
 ]

@@ -64,15 +64,22 @@ function genericProgress(state: AvoRunState): AvoProgressSignals {
 	};
 }
 
-function requireTrajectoryVerification(state: AvoRunState, gate: AvoStopGate): AvoStopGate {
-	const latestCycle = state.cycles.at(-1);
-	const latestCheckpoint = state.checkpoints.at(-1);
+function requireTrajectoryVerification(
+	state: AvoRunState,
+	gate: AvoStopGate,
+	canonicalCycle: AvoRunState["cycles"][number] | undefined,
+): AvoStopGate {
+	const latestCheckpoint = canonicalCycle
+		? [...state.checkpoints].reverse().find((checkpoint) => checkpoint.cycleId === canonicalCycle.cycleId)
+		: undefined;
 	const required =
 		state.routing.horizon === "long" ||
 		(state.routing.horizon === "iterative" && latestCheckpoint?.interventionNeeded === true);
 	if (!required) return gate;
-	const review = latestCycle
-		? state.supervision.find((item) => item.cycleId === latestCycle.cycleId && item.source === "retained_supervisor")
+	const review = canonicalCycle
+		? state.supervision.find(
+				(item) => item.cycleId === canonicalCycle.cycleId && item.source === "retained_supervisor",
+			)
 		: undefined;
 	const passed = review?.status === "progressing";
 	const check = {
@@ -83,7 +90,9 @@ function requireTrajectoryVerification(state: AvoRunState, gate: AvoStopGate): A
 			? undefined
 			: review
 				? `the retained verifier reported ${review.status}: ${review.reason}`
-				: "the latest cycle has not been cleared by the retained verifier",
+				: canonicalCycle
+					? "the current canonical accepted cycle has not been cleared by the retained verifier"
+					: "no canonical accepted cycle is available for retained verification",
 	};
 	const checks = [...gate.checks, check];
 	const reasons = checks.flatMap((item) => (!item.passed && item.reason ? [item.reason] : []));
@@ -116,6 +125,7 @@ function genericProjection(
 		environment: state.routing.environment,
 		horizon: state.routing.horizon,
 		verificationPolicy: state.verificationPolicy,
+		verificationClass: state.verificationClass,
 		status: state.status,
 		phase: {
 			id: phases[active]!.id,
@@ -142,6 +152,7 @@ function genericProjection(
 					{ label: "Automatic adapter", value: state.routing.environment, status: "neutral" },
 					{ label: "Horizon", value: state.routing.horizon, status: "neutral" },
 					{ label: "Verification", value: state.verificationPolicy, status: "neutral" },
+					{ label: "Verification class", value: state.verificationClass, status: "neutral" },
 					{ label: "Decision", value: state.routing.reasons.join("; "), status: "neutral" },
 				],
 			},
@@ -201,8 +212,40 @@ abstract class BaseAdapter implements AvoEnvironmentAdapter {
 		};
 	}
 
+	private canonicalAcceptedCycle(state: AvoRunState): AvoRunState["cycles"][number] | undefined {
+		const acceptedCandidateIds = new Set(
+			state.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
+		);
+		const candidate = [...state.candidates].reverse().find(
+			(item) =>
+				acceptedCandidateIds.has(item.candidateId) &&
+				this.deriveEvaluationState(
+					item,
+					state.evaluations.filter((receipt) => receipt.candidateId === item.candidateId),
+					state,
+				).canonical,
+		);
+		if (!candidate) return undefined;
+		return [...state.cycles]
+			.reverse()
+			.find((cycle) => cycle.outcome === "accepted" && cycle.candidateId === candidate.candidateId);
+	}
+
+	protected finalizeStopCondition(state: AvoRunState, gate: AvoStopGate): AvoStopGate {
+		const canonicalCycle = this.canonicalAcceptedCycle(state);
+		const acceptedCycleCheck = {
+			id: "accepted_cycle",
+			label: "Accepted candidate cycle",
+			passed: canonicalCycle !== undefined,
+			reason: canonicalCycle ? undefined : "no accepted cycle currently satisfies the verification contract",
+		};
+		const checks = [...gate.checks.filter((check) => check.id !== acceptedCycleCheck.id), acceptedCycleCheck];
+		const reasons = checks.flatMap((check) => (!check.passed && check.reason ? [check.reason] : []));
+		return requireTrajectoryVerification(state, { passed: reasons.length === 0, checks, reasons }, canonicalCycle);
+	}
+
 	evaluateStopCondition(state: AvoRunState): AvoStopGate {
-		return requireTrajectoryVerification(state, evaluateGenericAvoStopGate(state.candidates, state.evaluations));
+		return this.finalizeStopCondition(state, evaluateGenericAvoStopGate(state.candidates, state.evaluations));
 	}
 
 	abstract dashboardProjection(state: AvoRunState): AvoDashboardProjection;
@@ -217,6 +260,13 @@ export class GeneralAvoAdapter extends BaseAdapter {
 		const policy = state.verificationPolicy;
 		const claims = candidate.claims ?? [];
 		const hasExternalReceipt = receipts.some((receipt) => receipt.authority === "external");
+		if (policy === "required" && state.verificationClass === "external_factual" && claims.length === 0) {
+			return {
+				status: "inconclusive" as const,
+				canonical: false,
+				reasons: ["required external factual verification needs explicit candidate claims"],
+			};
+		}
 		if (claims.length > 0 || hasExternalReceipt) {
 			if (claims.length === 0) {
 				return {
@@ -232,6 +282,8 @@ export class GeneralAvoAdapter extends BaseAdapter {
 					receipt.evaluatorId === "external_claim" &&
 					receipt.status === "pass" &&
 					receipt.metrics.semantic_relation === "supports" &&
+					receipt.metrics.independent_relation === "supports" &&
+					receipt.metrics.semantic_verifier === "host_bound_exact_claim_independent_rlm_v2" &&
 					receipt.metrics.candidate_payload_digest === candidate.payloadDigest &&
 					typeof receipt.metrics.claim_id === "string"
 						? [receipt.metrics.claim_id]
@@ -246,6 +298,43 @@ export class GeneralAvoAdapter extends BaseAdapter {
 					reasons: [
 						`candidate claims lack host-verified semantic support: ${unsupported.map((claim) => claim.claimId).join(", ")}`,
 					],
+				};
+			}
+		}
+		if (policy === "required" && state.verificationClass === "deterministic_local") {
+			const deterministic = receipts.some(
+				(receipt) =>
+					receipt.issuedBy === "host" &&
+					receipt.evaluatorId === "deterministic_result" &&
+					receipt.status === "pass" &&
+					receipt.metrics.meaningful === true &&
+					receipt.metrics.candidate_result_matches_objective === true &&
+					receipt.metrics.candidate_payload_digest === candidate.payloadDigest,
+			);
+			if (!deterministic) {
+				return {
+					status: "inconclusive" as const,
+					canonical: false,
+					reasons: ["deterministic verification requires a successful host-observed local calculation"],
+				};
+			}
+		}
+		if (policy === "required" && state.verificationClass === "artifact") {
+			const artifactVerified = receipts.some(
+				(receipt) =>
+					receipt.issuedBy === "host" &&
+					receipt.evaluatorId === "artifact_binding" &&
+					receipt.status === "pass" &&
+					receipt.metrics.meaningful === true &&
+					receipt.metrics.artifact_candidate_binding === true &&
+					receipt.metrics.artifact_target_digest === candidate.artifactTargetDigest &&
+					receipt.metrics.candidate_payload_digest === candidate.payloadDigest,
+			);
+			if (!artifactVerified) {
+				return {
+					status: "inconclusive" as const,
+					canonical: false,
+					reasons: ["artifact verification requires a successful host-observed artifact check"],
 				};
 			}
 		}
@@ -306,7 +395,7 @@ export class GeneralAvoAdapter extends BaseAdapter {
 			},
 		];
 		const reasons = checks.flatMap((check) => (!check.passed && check.reason ? [check.reason] : []));
-		return requireTrajectoryVerification(state, { passed: reasons.length === 0, checks, reasons });
+		return this.finalizeStopCondition(state, { passed: reasons.length === 0, checks, reasons });
 	}
 
 	buildSupervisorContext(state: AvoRunState): Record<string, unknown> {
@@ -341,7 +430,7 @@ export class GeneralAvoAdapter extends BaseAdapter {
 			items: [
 				{
 					label: "Verification policy",
-					value: `${state.verificationPolicy} · ${state.verificationReasons.join("; ")}`,
+					value: `${state.verificationClass} · ${state.verificationPolicy} · ${state.verificationReasons.join("; ")}`,
 					status: state.verificationPolicy === "required" ? "neutral" : "watch",
 				},
 				{
@@ -412,6 +501,36 @@ export class CodingAvoAdapter extends BaseAdapter {
 				canonical: false,
 				reasons: [
 					`${candidate.kind} candidates require a meaningful ${allowedEvaluators?.join(" or ") ?? "kind-specific"} receipt bound to the exact candidate workspace`,
+				],
+			};
+		}
+		const mutationKind = ["patch", "implementation", "configuration", "artifact"].includes(candidate.kind);
+		const preCandidateWorkspaceDigest =
+			state.verificationBaseline?.executions.at(-1)?.postWorkspaceDigest ??
+			state.verificationBaseline?.workspaceDigest;
+		const workspaceChanged = candidate.workspaceDigest !== preCandidateWorkspaceDigest;
+		if (mutationKind && !workspaceChanged) {
+			return {
+				status: "inconclusive" as const,
+				canonical: false,
+				reasons: [`${candidate.kind} candidates must contain a host-observed workspace change`],
+			};
+		}
+		const baselineRequired =
+			(mutationKind || workspaceChanged) &&
+			((state.verificationBaseline?.testFiles.length ?? 0) > 0 ||
+				(state.verificationBaseline?.userAcceptanceCommands.length ?? 0) > 0);
+		if (
+			baselineRequired &&
+			!executable.some(
+				(receipt) => receipt.evaluatorId === "test" && receipt.metrics.baseline_execution_matched === true,
+			)
+		) {
+			return {
+				status: "inconclusive" as const,
+				canonical: false,
+				reasons: [
+					"coding progress requires the same proven pre-candidate baseline test contract to pass afterward",
 				],
 			};
 		}
@@ -526,7 +645,8 @@ export class ResearchAvoAdapter extends BaseAdapter implements AvoEnvironmentAda
 	}
 
 	evaluateStopCondition(state: AvoRunState, adapterState?: ResearchAdapterState): AvoStopGate {
-		return researchStopGate(adapterState) ?? super.evaluateStopCondition(state);
+		const research = researchStopGate(adapterState);
+		return research ? this.finalizeStopCondition(state, research) : super.evaluateStopCondition(state);
 	}
 
 	dashboardProjection(state: AvoRunState, adapterState?: ResearchAdapterState): AvoDashboardProjection {

@@ -28,11 +28,7 @@ export class AvoSessionRuntime {
 	observeRootPrompt(prompt: string): AvoRunState {
 		const state = this.store.getState();
 		if (!state.objective) return this.store.initialize(prompt, prompt);
-		const gate = this.evaluateStopGate();
-		if (state.status === "active" && gate.passed) this.store.complete(gate);
-		if (state.status !== "active" || gate.passed) {
-			return this.store.startTask(prompt, prompt);
-		}
+		if (state.status !== "active") return this.store.startTask(prompt, prompt);
 		this.store.routePrompt(prompt);
 		return this.store.getState();
 	}
@@ -246,14 +242,14 @@ export class AvoSessionRuntime {
 export function buildAvoRuntimePrompt(state: AvoRunState): string {
 	return [
 		"AVO is Prime's default operating architecture for every root task. It is not a user-selected mode.",
-		`Active AVO task run=${state.runId}. The host automatically selected evaluation adapter=${state.routing.environment}, horizon=${state.routing.horizon}, and verification_policy=${state.verificationPolicy}.`,
+		`Active AVO task run=${state.runId}. The host automatically selected evaluation adapter=${state.routing.environment}, horizon=${state.routing.horizon}, verification_class=${state.verificationClass}, and verification_policy=${state.verificationPolicy}.`,
 		state.routing.reasons.length > 0 ? `Route evidence: ${state.routing.reasons.join("; ")}.` : undefined,
 		state.verificationReasons.length > 0
 			? `Verification policy evidence: ${state.verificationReasons.join("; ")}.`
 			: undefined,
 		"General, coding, and research are internal tool/evaluation adapters, not separate modes. Do not ask the user to choose one. Direct, iterative, and long only control how much AVO machinery is activated: direct uses one evaluated action without a retained supervisor; iterative retains candidate lineage and revises after feedback; long also activates namespaced memory, recovery, and retained trajectory supervision.",
 		"Environment routing is host-authoritative. Model calls cannot select general, coding, or research and may only escalate the current horizon to iterative or long.",
-		"Use the avo skill for the task's candidate/evaluation lifecycle. Callers may record only model_opinion. Factual candidates must declare verbatim claims and bind each claim to a real tool result; provenance without host-classified semantic support cannot pass. For executable evidence, use avo.run_evaluation so the host runs the check and issues the receipt from the observed result. Candidate-created coding tests cannot certify themselves without a trusted pre-task suite/target or exact user acceptance command. Never invent host, environment, or external authority. Required verification needs host-issued evidence; best_effort and not_applicable policies may use a transparent model-opinion review without pretending it is external. Finish only when the AVO stop gate passes. A later root task starts a fresh task run after the current gate passes, while namespaced memory survives across runs.",
+		"Use the avo skill for the task's candidate/evaluation lifecycle. The host will automatically continue the root task instead of accepting an answer that skipped AVO, failed its gate, changed a verified workspace/artifact, or differs from the accepted candidate's canonical delivery. Callers may record only model_opinion. Required external_factual candidates must declare verbatim claims and bind each claim to a host-trusted external source record; after Serper IPython or Vertex Google Search, use avo.fetch_external_source on a result URL and avo.bind_url with a visible quote exactly equal to the claim. Provenance without a host-bound independent entailment verdict cannot pass. Required deterministic arithmetic uses a payload exactly shaped as {result: number} and avo.verify_deterministic_result; required artifact candidates declare artifact_paths and use avo.verify_artifacts. An unrelated successful command cannot certify either class. Before changing a coding workspace, use avo.run_coding_baseline with a direct command that explicitly names an unchanged baseline test file, then run the exact same command after the candidate with avo.run_evaluation. Mutable package-script wrappers, output-printed filenames, no-op mutation candidates, and candidate-created tests cannot certify progress. Never invent host, environment, or external authority. Required verification needs host-issued evidence; best_effort and not_applicable policies may use a transparent model-opinion review without pretending it is external. Complete the candidate cycle, then return only its canonical delivery: general payload text, deterministic numeric result, or coding/research summary, with no preface or suffix. A later root task starts a fresh task run after the current gate and delivery pass, while namespaced memory survives across runs.",
 	]
 		.filter((line): line is string => line !== undefined)
 		.join("\n\n");

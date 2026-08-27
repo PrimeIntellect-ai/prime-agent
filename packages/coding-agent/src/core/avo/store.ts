@@ -1,8 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { AvoAdapterRegistry } from "./adapters.js";
 import { evaluateAvoCheckpoint } from "./checkpoint.js";
-import { deriveAvoEvaluation, evaluateGenericAvoStopGate } from "./evaluator.js";
+import {
+	deriveAvoDeterministicArithmeticContract,
+	deriveAvoEvaluation,
+	evaluateGenericAvoStopGate,
+} from "./evaluator.js";
 import {
 	AVO_AUTHORITIES,
 	AVO_ENVIRONMENTS,
@@ -11,8 +16,10 @@ import {
 	AVO_HORIZONS,
 	AVO_MEMORY_NAMESPACES,
 	AVO_STATE_VERSION,
+	AVO_VERIFICATION_CLASSES,
 	AVO_VERIFICATION_POLICIES,
 	type AvoAdapterStateRef,
+	type AvoBaselineExecution,
 	type AvoCandidate,
 	type AvoCandidateClaim,
 	type AvoCandidateInput,
@@ -34,6 +41,7 @@ import {
 	type AvoSupervisorBinding,
 	type AvoSupervisorReview,
 	type AvoVerificationBaseline,
+	type AvoVerificationClass,
 	type AvoVerificationPolicy,
 } from "./types.js";
 
@@ -116,7 +124,7 @@ function payloadText(value: unknown): string {
 }
 
 function normalizedText(value: string): string {
-	return value.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+	return value.normalize("NFKC").replace(/\s+/g, " ").trim();
 }
 
 function stableJson(value: unknown): string {
@@ -129,8 +137,25 @@ function stableJson(value: unknown): string {
 		.join(",")}}`;
 }
 
-function digestPayload(payload: unknown): string {
+export function digestAvoPayload(payload: unknown): string {
 	return createHash("sha256").update(stableJson(payload)).digest("hex");
+}
+
+export function digestAvoDeliveryText(text: string): string {
+	return createHash("sha256").update(text).digest("hex");
+}
+
+function deterministicResult(value: unknown): string | undefined {
+	if (!isRecord(value) || Object.keys(value).some((key) => key !== "result") || !("result" in value)) {
+		return undefined;
+	}
+	const result = value.result;
+	if (typeof result === "number" && Number.isFinite(result)) return Object.is(result, -0) ? "0" : String(result);
+	if (typeof result === "string" && /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(result.trim())) {
+		const numeric = Number(result.trim());
+		if (Number.isFinite(numeric)) return Object.is(numeric, -0) ? "0" : String(numeric);
+	}
+	return undefined;
 }
 
 function defaultRouting(now: string): AvoRoutingDecision {
@@ -154,6 +179,7 @@ function emptyState(sessionId: string, now: string): AvoRunState {
 		runId: taskRunId(sessionId, 1),
 		taskRuns: [],
 		verificationPolicy: "best_effort",
+		verificationClass: "external_factual",
 		verificationReasons: ["no task prompt has been routed yet"],
 		environmentSelection: "auto",
 		horizonSelection: "auto",
@@ -180,6 +206,7 @@ function isAvoState(value: unknown): value is AvoRunState {
 		typeof value.runId === "string" &&
 		Array.isArray(value.taskRuns) &&
 		AVO_VERIFICATION_POLICIES.includes(value.verificationPolicy as AvoVerificationPolicy) &&
+		AVO_VERIFICATION_CLASSES.includes(value.verificationClass as AvoVerificationClass) &&
 		Array.isArray(value.verificationReasons) &&
 		typeof value.createdAt === "string" &&
 		typeof value.updatedAt === "string" &&
@@ -199,7 +226,65 @@ function isAvoState(value: unknown): value is AvoRunState {
 	);
 }
 
-function isLegacyAvoState(value: unknown): value is JsonRecord {
+function isAvoV2State(value: unknown): value is JsonRecord {
+	if (!isRecord(value) || value.schemaVersion !== 2 || !isRecord(value.routing)) return false;
+	return (
+		typeof value.sessionId === "string" &&
+		typeof value.runId === "string" &&
+		Array.isArray(value.taskRuns) &&
+		AVO_VERIFICATION_POLICIES.includes(value.verificationPolicy as AvoVerificationPolicy) &&
+		Array.isArray(value.verificationReasons) &&
+		Array.isArray(value.candidates) &&
+		Array.isArray(value.evaluations) &&
+		Array.isArray(value.cycles) &&
+		Array.isArray(value.lineage) &&
+		Array.isArray(value.checkpoints) &&
+		Array.isArray(value.memories) &&
+		Array.isArray(value.memoryReflections) &&
+		Array.isArray(value.supervision) &&
+		AVO_ENVIRONMENTS.includes(value.routing.environment as AvoEnvironment) &&
+		AVO_HORIZONS.includes(value.routing.horizon as AvoHorizon)
+	);
+}
+
+function isAvoV3State(value: unknown): value is JsonRecord {
+	if (!isRecord(value) || value.schemaVersion !== 3 || !isRecord(value.routing)) return false;
+	return (
+		typeof value.sessionId === "string" &&
+		typeof value.runId === "string" &&
+		Array.isArray(value.taskRuns) &&
+		AVO_VERIFICATION_POLICIES.includes(value.verificationPolicy as AvoVerificationPolicy) &&
+		AVO_VERIFICATION_CLASSES.includes(value.verificationClass as AvoVerificationClass) &&
+		Array.isArray(value.verificationReasons) &&
+		Array.isArray(value.candidates) &&
+		Array.isArray(value.evaluations) &&
+		Array.isArray(value.cycles) &&
+		Array.isArray(value.lineage) &&
+		Array.isArray(value.checkpoints) &&
+		Array.isArray(value.memories) &&
+		Array.isArray(value.memoryReflections) &&
+		Array.isArray(value.supervision) &&
+		AVO_ENVIRONMENTS.includes(value.routing.environment as AvoEnvironment) &&
+		AVO_HORIZONS.includes(value.routing.horizon as AvoHorizon)
+	);
+}
+
+function isAvoV4State(value: unknown): value is JsonRecord {
+	if (!isRecord(value) || value.schemaVersion !== 4 || !isRecord(value.routing)) return false;
+	return (
+		typeof value.sessionId === "string" &&
+		typeof value.runId === "string" &&
+		Array.isArray(value.taskRuns) &&
+		AVO_VERIFICATION_POLICIES.includes(value.verificationPolicy as AvoVerificationPolicy) &&
+		AVO_VERIFICATION_CLASSES.includes(value.verificationClass as AvoVerificationClass) &&
+		Array.isArray(value.evaluations) &&
+		Array.isArray(value.candidates) &&
+		AVO_ENVIRONMENTS.includes(value.routing.environment as AvoEnvironment) &&
+		AVO_HORIZONS.includes(value.routing.horizon as AvoHorizon)
+	);
+}
+
+function isAvoV1State(value: unknown): value is JsonRecord {
 	if (!isRecord(value) || value.schemaVersion !== 1 || !isRecord(value.routing)) return false;
 	return (
 		typeof value.runId === "string" &&
@@ -218,17 +303,99 @@ function isLegacyAvoState(value: unknown): value is JsonRecord {
 	);
 }
 
-function migrateLegacyAvoState(value: JsonRecord): AvoRunState {
+function legacyVerificationClass(
+	objective: unknown,
+	environment: AvoEnvironment,
+	policy: AvoVerificationPolicy,
+): AvoVerificationClass {
+	if (environment === "coding" || environment === "research") return environment;
+	if (policy === "not_applicable") return "subjective";
+	return inferAvoVerificationPolicy(typeof objective === "string" ? objective : "", environment).verificationClass;
+}
+
+function migrateVerificationBaseline(
+	value: unknown,
+	options: { retainExecutions?: boolean } = {},
+): AvoVerificationBaseline | undefined {
+	if (!isRecord(value) || value.kind !== "coding") return undefined;
+	return {
+		...(value as unknown as Omit<AvoVerificationBaseline, "executions">),
+		executions:
+			options.retainExecutions && Array.isArray(value.executions)
+				? (value.executions as AvoBaselineExecution[])
+				: [],
+	};
+}
+
+function invalidateLegacyReceipts(value: unknown): AvoEvaluationReceipt[] {
+	if (!Array.isArray(value)) return [];
+	return (value as AvoEvaluationReceipt[]).map((receipt) => ({ ...receipt, issuedBy: "legacy_unverified" as const }));
+}
+
+function migrateAvoV4State(value: JsonRecord): AvoRunState {
+	return {
+		...(value as unknown as Omit<AvoRunState, "schemaVersion" | "verificationBaseline">),
+		schemaVersion: AVO_STATE_VERSION,
+		evaluations: invalidateLegacyReceipts(value.evaluations),
+		taskRuns: (value.taskRuns as JsonRecord[]).map((run) => ({
+			...(run as unknown as AvoRunState["taskRuns"][number]),
+			evaluations: invalidateLegacyReceipts(run.evaluations),
+			verificationBaseline: migrateVerificationBaseline(run.verificationBaseline),
+		})),
+		verificationBaseline: migrateVerificationBaseline(value.verificationBaseline),
+	};
+}
+
+function migrateAvoV3State(value: JsonRecord): AvoRunState {
+	return {
+		...(value as unknown as Omit<AvoRunState, "schemaVersion" | "verificationBaseline">),
+		schemaVersion: AVO_STATE_VERSION,
+		evaluations: invalidateLegacyReceipts(value.evaluations),
+		taskRuns: (value.taskRuns as JsonRecord[]).map((run) => ({
+			...(run as unknown as AvoRunState["taskRuns"][number]),
+			evaluations: invalidateLegacyReceipts(run.evaluations),
+			verificationBaseline: migrateVerificationBaseline(run.verificationBaseline),
+		})),
+		verificationBaseline: migrateVerificationBaseline(value.verificationBaseline),
+	};
+}
+
+function migrateAvoV2State(value: JsonRecord): AvoRunState {
+	const routing = value.routing as unknown as AvoRoutingDecision;
+	const policy = value.verificationPolicy as AvoVerificationPolicy;
+	return {
+		...(value as unknown as Omit<AvoRunState, "schemaVersion" | "verificationClass" | "verificationBaseline">),
+		schemaVersion: AVO_STATE_VERSION,
+		verificationClass: legacyVerificationClass(value.objective, routing.environment, policy),
+		evaluations: invalidateLegacyReceipts(value.evaluations),
+		taskRuns: (value.taskRuns as JsonRecord[]).map((run) => ({
+			...(run as unknown as AvoRunState["taskRuns"][number]),
+			verificationClass: legacyVerificationClass(
+				run.objective,
+				(run.routing as AvoRoutingDecision).environment,
+				run.verificationPolicy as AvoVerificationPolicy,
+			),
+			evaluations: invalidateLegacyReceipts(run.evaluations),
+			verificationBaseline: migrateVerificationBaseline(run.verificationBaseline),
+		})),
+		verificationBaseline: migrateVerificationBaseline(value.verificationBaseline),
+	};
+}
+
+function migrateAvoV1State(value: JsonRecord): AvoRunState {
 	const environment = (value.routing as AvoRoutingDecision).environment;
 	const sessionId = value.runId as string;
+	const verificationPolicy = environment === "general" ? "best_effort" : "required";
 	return {
 		...(value as unknown as Omit<AvoRunState, "schemaVersion" | "sessionId" | "runId" | "taskRuns">),
 		schemaVersion: AVO_STATE_VERSION,
 		sessionId,
 		runId: taskRunId(sessionId, 1),
 		taskRuns: [],
-		verificationPolicy: environment === "general" ? "best_effort" : "required",
+		verificationPolicy,
+		verificationClass: legacyVerificationClass(value.objective, environment, verificationPolicy),
 		verificationReasons: ["migrated from AVO v1; legacy authoritative receipts require fresh host verification"],
+		verificationBaseline: migrateVerificationBaseline(value.verificationBaseline),
 		evaluations: (value.evaluations as AvoEvaluationReceipt[]).map((receipt) => ({
 			...receipt,
 			issuedBy: "legacy_unverified" as const,
@@ -326,11 +493,86 @@ export function inferAvoEnvironment(prompt: string, cwd = ""): { environment: Av
 export function inferAvoVerificationPolicy(
 	prompt: string,
 	environment: AvoEnvironment,
-): { policy: AvoVerificationPolicy; reasons: string[] } {
+): { policy: AvoVerificationPolicy; verificationClass: AvoVerificationClass; reasons: string[] } {
 	if (environment === "coding" || environment === "research") {
-		return { policy: "required", reasons: [`${environment} work requires host-observed verification`] };
+		return {
+			policy: "required",
+			verificationClass: environment,
+			reasons: [`${environment} work requires host-observed verification`],
+		};
 	}
 	const normalized = prompt.toLowerCase();
+	const externalFactualSignals = matchingSignals(normalized, [
+		"check whether",
+		"look up",
+		"search",
+		"find out",
+		"latest",
+		"current",
+		"fact check",
+	]);
+	if (externalFactualSignals.length > 0) {
+		return {
+			policy: "required",
+			verificationClass: "external_factual",
+			reasons: [`external factual verification signals: ${externalFactualSignals.join(", ")}`],
+		};
+	}
+	const deterministicSignals = matchingSignals(normalized, ["calculate", "compute", "evaluate expression"]);
+	const bareExpression =
+		/\d/.test(normalized) && /[+\-*/×÷]/.test(normalized) && /^[\s\d,()+\-*/×÷]+$/.test(normalized);
+	let supportedArithmetic = false;
+	if (deterministicSignals.length > 0 || bareExpression) {
+		try {
+			deriveAvoDeterministicArithmeticContract(prompt);
+			supportedArithmetic = true;
+		} catch {
+			// Unsupported or ambiguous expressions are not assigned an impossible required contract.
+		}
+	}
+	if (supportedArithmetic) {
+		return {
+			policy: "required",
+			verificationClass: "deterministic_local",
+			reasons: [
+				deterministicSignals.length > 0
+					? `deterministic verification signals: ${deterministicSignals.join(", ")}`
+					: "deterministic expression requires a host-observed result",
+			],
+		};
+	}
+	if (deterministicSignals.length > 0 || bareExpression) {
+		return {
+			policy: "best_effort",
+			verificationClass: "deterministic_local",
+			reasons: ["the arithmetic request is ambiguous or outside the host's exact safe-integer subset"],
+		};
+	}
+	const artifactSignals = matchingSignals(normalized, [
+		"create a report",
+		"create a document",
+		"create a file",
+		"generate a report",
+		"generate a chart",
+		"render",
+		"export",
+		"save as",
+	]);
+	if (artifactSignals.length > 0) {
+		return {
+			policy: "required",
+			verificationClass: "artifact",
+			reasons: [`artifact verification signals: ${artifactSignals.join(", ")}`],
+		};
+	}
+	const requiredSignals = matchingSignals(normalized, ["verify", "exact"]);
+	if (requiredSignals.length > 0) {
+		return {
+			policy: "required",
+			verificationClass: "external_factual",
+			reasons: [`external factual verification signals: ${requiredSignals.join(", ")}`],
+		};
+	}
 	const subjectiveSignals = matchingSignals(normalized, [
 		"write a poem",
 		"write a story",
@@ -345,26 +587,13 @@ export function inferAvoVerificationPolicy(
 	if (subjectiveSignals.length > 0) {
 		return {
 			policy: "not_applicable",
+			verificationClass: "subjective",
 			reasons: [`subjective task signals: ${subjectiveSignals.join(", ")}`],
 		};
 	}
-	const requiredSignals = matchingSignals(normalized, [
-		"verify",
-		"check whether",
-		"calculate",
-		"compute",
-		"prove",
-		"look up",
-		"latest",
-		"current",
-		"exact",
-		"fact check",
-	]);
-	if (requiredSignals.length > 0) {
-		return { policy: "required", reasons: [`verification signals: ${requiredSignals.join(", ")}`] };
-	}
 	return {
 		policy: "best_effort",
+		verificationClass: "external_factual",
 		reasons: ["general task permits transparent best-effort evaluation when no external verifier exists"],
 	};
 }
@@ -416,6 +645,8 @@ export function parseAvoCandidateInput(value: unknown): AvoCandidateInput {
 		kind: requireIdentifier(value.kind, "candidate.kind"),
 		summary: requireString(value.summary, "candidate.summary"),
 		payload: value.payload,
+		artifactPaths:
+			value.artifact_paths === undefined ? undefined : stringArray(value.artifact_paths, "candidate.artifact_paths"),
 		claims: candidateClaims(value.claims),
 		parentCandidateId: optionalString(value.parent_candidate_id, "candidate.parent_candidate_id"),
 	};
@@ -490,7 +721,10 @@ export class AvoStore {
 		try {
 			const parsed = JSON.parse(readFileSync(this.statePath, "utf8")) as unknown;
 			if (isAvoState(parsed)) return parsed;
-			if (isLegacyAvoState(parsed)) return migrateLegacyAvoState(parsed);
+			if (isAvoV4State(parsed)) return migrateAvoV4State(parsed);
+			if (isAvoV3State(parsed)) return migrateAvoV3State(parsed);
+			if (isAvoV2State(parsed)) return migrateAvoV2State(parsed);
+			if (isAvoV1State(parsed)) return migrateAvoV1State(parsed);
 			throw new Error("state schema is invalid or unsupported");
 		} catch (error) {
 			this.loadError = error instanceof Error ? error.message : String(error);
@@ -540,6 +774,55 @@ export class AvoStore {
 		return this.getState();
 	}
 
+	setArtifactBaselinePaths(paths: readonly string[]): AvoRunState {
+		if (this.state.routing.environment !== "general" || this.state.verificationClass !== "artifact") {
+			throw new Error("an artifact path baseline can only be recorded for a host-routed artifact task");
+		}
+		const normalized = [...new Set(paths.map((path) => resolve(this.cwd, path)))].sort();
+		if (this.state.artifactBaselinePaths) {
+			if (JSON.stringify(this.state.artifactBaselinePaths) !== JSON.stringify(normalized)) {
+				throw new Error("the active task artifact path baseline is immutable");
+			}
+			return this.getState();
+		}
+		this.state.artifactBaselinePaths = normalized;
+		this.save();
+		return this.getState();
+	}
+
+	recordVerificationBaselineExecution(
+		execution: Omit<AvoBaselineExecution, "executionId" | "recordedAt">,
+	): AvoBaselineExecution {
+		const baseline = this.state.verificationBaseline;
+		if (this.state.routing.environment !== "coding" || !baseline) {
+			throw new Error("coding baseline execution requires a captured host verification baseline");
+		}
+		if (this.state.candidates.length > 0) {
+			throw new Error("coding baseline execution must run before the first candidate is recorded");
+		}
+		if (execution.workspaceDigest !== baseline.workspaceDigest) {
+			throw new Error("coding baseline execution workspace does not match the pre-task snapshot");
+		}
+		if (
+			!/^[a-f0-9]{64}$/.test(execution.commandDigest) ||
+			!/^[a-f0-9]{64}$/.test(execution.outputDigest) ||
+			!/^[a-f0-9]{64}$/.test(execution.postWorkspaceDigest)
+		) {
+			throw new Error("coding baseline execution digests must be SHA-256 values");
+		}
+		if (baseline.executions.some((item) => item.commandDigest === execution.commandDigest)) {
+			throw new Error("this coding baseline command has already been executed for the active task");
+		}
+		const recorded: AvoBaselineExecution = {
+			...structuredClone(execution),
+			executionId: `baseline-${randomUUID()}`,
+			recordedAt: this.now(),
+		};
+		baseline.executions.push(recorded);
+		this.save();
+		return structuredClone(recorded);
+	}
+
 	initialize(objective: string, prompt = objective): AvoRunState {
 		const normalizedObjective = requireString(objective, "objective");
 		if (!this.state.objective) {
@@ -551,7 +834,7 @@ export class AvoStore {
 				recordedAt: this.now(),
 			});
 		}
-		this.routePrompt(prompt);
+		this.routePrompt(prompt, false);
 		this.save();
 		return this.getState();
 	}
@@ -563,6 +846,7 @@ export class AvoStore {
 				runId: this.state.runId,
 				objective: this.state.objective,
 				verificationPolicy: this.state.verificationPolicy,
+				verificationClass: this.state.verificationClass,
 				verificationReasons: [...this.state.verificationReasons],
 				routing: structuredClone(this.state.routing),
 				status: this.state.status,
@@ -576,6 +860,7 @@ export class AvoStore {
 				verificationBaseline: this.state.verificationBaseline
 					? structuredClone(this.state.verificationBaseline)
 					: undefined,
+				artifactBaselinePaths: this.state.artifactBaselinePaths ? [...this.state.artifactBaselinePaths] : undefined,
 				createdAt: this.state.createdAt,
 				updatedAt: this.state.updatedAt,
 				archivedAt: this.now(),
@@ -603,19 +888,20 @@ export class AvoStore {
 		this.state.supervision = [];
 		this.state.adapterStateRef = undefined;
 		this.state.verificationBaseline = undefined;
+		this.state.artifactBaselinePaths = undefined;
 		this.state.createdAt = now;
-		this.routePrompt(prompt);
+		this.routePrompt(prompt, false);
 		this.save();
 		return this.getState();
 	}
 
-	routePrompt(prompt: string): AvoRoutingDecision {
+	routePrompt(prompt: string, preserveTaskConstraints = true): AvoRoutingDecision {
 		const normalized = requireString(prompt, "prompt");
 		const inferredEnvironment = inferAvoEnvironment(normalized, this.cwd);
 		const hasTrajectory = this.state.candidates.length > 0 || this.state.cycles.length > 0;
 		const environment =
 			this.state.environmentSelection === "auto"
-				? hasTrajectory
+				? preserveTaskConstraints || hasTrajectory
 					? this.state.routing.environment
 					: inferredEnvironment.environment
 				: this.state.environmentSelection;
@@ -635,7 +921,7 @@ export class AvoStore {
 				this.state.environmentSelection === "auto" && this.state.horizonSelection === "auto" ? "host_auto" : "user",
 			reasons: [
 				...(this.state.environmentSelection === "auto"
-					? hasTrajectory
+					? preserveTaskConstraints || hasTrajectory
 						? [`preserved active ${environment} trajectory`]
 						: inferredEnvironment.reasons
 					: [`environment overridden to ${environment}`]),
@@ -646,8 +932,36 @@ export class AvoStore {
 			decidedAt: this.now(),
 		};
 		this.state.routing = decision;
-		this.state.verificationPolicy = inferredVerification.policy;
-		this.state.verificationReasons = inferredVerification.reasons;
+		const policyRank: Record<AvoVerificationPolicy, number> = {
+			not_applicable: 0,
+			best_effort: 1,
+			required: 2,
+		};
+		const classRank: Record<AvoVerificationClass, number> = {
+			subjective: 0,
+			artifact: 1,
+			deterministic_local: 2,
+			external_factual: 3,
+			coding: 4,
+			research: 4,
+		};
+		const preserveExistingVerification =
+			preserveTaskConstraints &&
+			(policyRank[this.state.verificationPolicy] > policyRank[inferredVerification.policy] ||
+				(policyRank[this.state.verificationPolicy] === policyRank[inferredVerification.policy] &&
+					classRank[this.state.verificationClass] >= classRank[inferredVerification.verificationClass]));
+		if (preserveExistingVerification) {
+			this.state.verificationReasons = [
+				...new Set([
+					...this.state.verificationReasons,
+					`preserved active ${this.state.verificationClass}/${this.state.verificationPolicy} verification contract`,
+				]),
+			];
+		} else {
+			this.state.verificationPolicy = inferredVerification.policy;
+			this.state.verificationClass = inferredVerification.verificationClass;
+			this.state.verificationReasons = inferredVerification.reasons;
+		}
 		this.save();
 		return structuredClone(decision);
 	}
@@ -657,10 +971,10 @@ export class AvoStore {
 		this.state.environmentSelection = selection;
 		if (selection !== "auto") {
 			this.state.routing.environment = selection;
-			if (selection !== "general") {
-				this.state.verificationPolicy = "required";
-				this.state.verificationReasons = [`${selection} work requires host-observed verification`];
-			}
+			const verification = inferAvoVerificationPolicy(this.state.objective ?? "", selection);
+			this.state.verificationPolicy = verification.policy;
+			this.state.verificationClass = verification.verificationClass;
+			this.state.verificationReasons = verification.reasons;
 		}
 		this.recordRoutingChange(`Environment selection changed to ${selection}`, source);
 		return this.getState();
@@ -713,7 +1027,35 @@ export class AvoStore {
 		if (new Set(claims.map((claim) => claim.claimId)).size !== claims.length) {
 			throw new Error("candidate.claims claim_id values must be unique");
 		}
+		if ((input.artifactPaths?.length ?? 0) > 32) {
+			throw new Error("candidate.artifact_paths must contain at most 32 paths");
+		}
+		const requiredDeterministicResult = deterministicResult(input.payload);
+		if (
+			this.state.routing.environment === "general" &&
+			this.state.verificationClass === "deterministic_local" &&
+			this.state.verificationPolicy === "required" &&
+			requiredDeterministicResult === undefined
+		) {
+			throw new Error('a required deterministic candidate payload must be exactly {"result": <finite number>}');
+		}
+		if (
+			this.state.routing.environment === "general" &&
+			this.state.verificationClass === "artifact" &&
+			this.state.verificationPolicy === "required" &&
+			(input.artifactPaths?.length ?? 0) === 0
+		) {
+			throw new Error("a required artifact candidate must declare artifact_paths");
+		}
 		const normalizedPayload = normalizedText(payloadText(input.payload));
+		if (
+			this.state.routing.environment === "general" &&
+			this.state.verificationClass === "artifact" &&
+			this.state.verificationPolicy === "required" &&
+			payloadText(input.payload) !== (input.artifactPaths ?? []).join("\n")
+		) {
+			throw new Error("a required artifact candidate payload must contain exactly its artifact_paths");
+		}
 		for (const claim of claims) {
 			if (!normalizedPayload.includes(normalizedText(claim.claimText))) {
 				throw new Error(`candidate claim ${claim.claimId} must occur verbatim in candidate.payload`);
@@ -721,22 +1063,44 @@ export class AvoStore {
 		}
 		if (
 			this.state.routing.environment === "general" &&
+			this.state.verificationClass === "external_factual" &&
 			this.state.verificationPolicy === "required" &&
-			claims.length
+			claims.length === 0
+		) {
+			throw new Error("a required external factual candidate must declare at least one verbatim claim");
+		}
+		if (
+			this.state.routing.environment === "general" &&
+			this.state.verificationClass === "external_factual" &&
+			this.state.verificationPolicy === "required" &&
+			claims.length > 0
 		) {
 			const uncovered = claims.reduce(
 				(remaining, claim) => remaining.replaceAll(normalizedText(claim.claimText), " "),
 				normalizedPayload,
 			);
-			if (/[\p{L}\p{N}]{2,}/u.test(uncovered)) {
+			if (/[\p{L}\p{N}]/u.test(uncovered)) {
 				throw new Error("a required factual candidate payload cannot contain undeclared claim text");
 			}
 		}
+		const summary = requireString(input.summary, "candidate.summary");
+		const canonicalDeliveryText =
+			this.state.routing.environment === "coding" || this.state.routing.environment === "research"
+				? summary
+				: this.state.verificationClass === "deterministic_local" && requiredDeterministicResult !== undefined
+					? requiredDeterministicResult
+					: payloadText(input.payload).trim();
+		if (!canonicalDeliveryText) throw new Error("candidate payload must derive a non-empty canonical delivery");
 		const candidate: AvoCandidate = {
 			candidateId: requireIdentifier(candidateId, "candidate_id"),
 			kind: requireIdentifier(input.kind, "candidate.kind"),
-			summary: requireString(input.summary, "candidate.summary"),
-			payloadDigest: digestPayload({ payload: input.payload, claims }),
+			summary,
+			payloadDigest: digestAvoPayload({ payload: input.payload, claims }),
+			deliveryDigest: digestAvoDeliveryText(canonicalDeliveryText),
+			deterministicResult: requiredDeterministicResult,
+			artifactPaths: input.artifactPaths === undefined ? undefined : [...input.artifactPaths],
+			artifactTargetDigest:
+				input.artifactPaths === undefined ? undefined : digestAvoPayload([...input.artifactPaths].sort()),
 			claims: structuredClone(claims),
 			workspaceDigest: input.workspaceDigest,
 			workspaceHead: input.workspaceHead,
@@ -942,32 +1306,49 @@ export class AvoStore {
 		}
 		const sourceIds = input.sourceIds ?? [];
 		if (input.namespace === "shared") {
-			const runs = [
-				...this.state.taskRuns.map((run) => ({
-					environment: run.routing.environment,
-					candidates: run.candidates,
-					evaluations: run.evaluations,
-					cycles: run.cycles,
-					lineage: run.lineage,
-				})),
-				{
-					environment: this.state.routing.environment,
-					candidates: this.state.candidates,
-					evaluations: this.state.evaluations,
-					cycles: this.state.cycles,
-					lineage: this.state.lineage,
-				},
+			const runs: AvoRunState[] = [
+				...this.state.taskRuns.map(
+					(run) =>
+						({
+							...this.state,
+							...run,
+							taskRuns: [],
+						}) as AvoRunState,
+				),
+				this.state,
 			];
+			const adapters = new AvoAdapterRegistry();
 			const references = new Map<AvoEnvironment, Set<string>>(
 				AVO_ENVIRONMENTS.map((environment) => [environment, new Set<string>()]),
 			);
 			for (const run of runs) {
-				const acceptedCandidateIds = new Set(
-					run.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
+				const adapter = adapters.get(run.routing.environment);
+				const currentlyCanonicalCandidateIds = new Set(
+					run.candidates
+						.filter((candidate) => {
+							const evaluations = run.evaluations.filter(
+								(evaluation) => evaluation.candidateId === candidate.candidateId,
+							);
+							return (
+								deriveAvoEvaluation(evaluations).canonical &&
+								adapter.deriveEvaluationState(candidate, evaluations, run).canonical
+							);
+						})
+						.map((candidate) => candidate.candidateId),
 				);
-				const accepted = references.get(run.environment)!;
+				const acceptedCandidateIds = new Set(
+					run.cycles
+						.filter(
+							(cycle) => cycle.outcome === "accepted" && currentlyCanonicalCandidateIds.has(cycle.candidateId),
+						)
+						.map((cycle) => cycle.candidateId),
+				);
+				const accepted = references.get(run.routing.environment)!;
 				for (const candidateId of acceptedCandidateIds) accepted.add(candidateId);
-				for (const cycle of run.cycles) if (cycle.outcome === "accepted") accepted.add(cycle.cycleId);
+				for (const cycle of run.cycles) {
+					if (cycle.outcome === "accepted" && acceptedCandidateIds.has(cycle.candidateId))
+						accepted.add(cycle.cycleId);
+				}
 				for (const evaluation of run.evaluations) {
 					if (
 						evaluation.issuedBy === "host" &&
@@ -979,9 +1360,13 @@ export class AvoStore {
 					}
 				}
 				for (const lineage of run.lineage) {
-					if (lineage.kind === "candidate_accepted" || lineage.kind === "adapter_progress") {
+					if (
+						lineage.kind === "candidate_accepted" &&
+						lineage.referenceId &&
+						acceptedCandidateIds.has(lineage.referenceId)
+					) {
 						accepted.add(lineage.lineageId);
-						if (lineage.referenceId) accepted.add(lineage.referenceId);
+						accepted.add(lineage.referenceId);
 					}
 				}
 			}

@@ -1,4 +1,4 @@
-export const AVO_STATE_VERSION = 2;
+export const AVO_STATE_VERSION = 5;
 export const AVO_SKILL_NAME = "avo";
 
 export const AVO_ENVIRONMENTS = ["general", "coding", "research"] as const;
@@ -7,6 +7,14 @@ export const AVO_AUTHORITIES = ["host", "environment", "external", "model_opinio
 export const AVO_EVALUATION_STATUSES = ["pass", "fail", "revise", "inconclusive"] as const;
 export const AVO_EVALUATION_ISSUERS = ["host", "model", "legacy_unverified"] as const;
 export const AVO_VERIFICATION_POLICIES = ["required", "best_effort", "not_applicable"] as const;
+export const AVO_VERIFICATION_CLASSES = [
+	"external_factual",
+	"deterministic_local",
+	"coding",
+	"research",
+	"artifact",
+	"subjective",
+] as const;
 export const AVO_RUN_STATUSES = ["active", "completed", "blocked", "failed"] as const;
 export const AVO_CYCLE_OUTCOMES = ["accepted", "rejected", "revised", "inconclusive"] as const;
 export const AVO_MEMORY_NAMESPACES = ["shared", ...AVO_ENVIRONMENTS] as const;
@@ -19,6 +27,7 @@ export type AvoEvaluationAuthority = (typeof AVO_AUTHORITIES)[number];
 export type AvoEvaluationStatus = (typeof AVO_EVALUATION_STATUSES)[number];
 export type AvoEvaluationIssuer = (typeof AVO_EVALUATION_ISSUERS)[number];
 export type AvoVerificationPolicy = (typeof AVO_VERIFICATION_POLICIES)[number];
+export type AvoVerificationClass = (typeof AVO_VERIFICATION_CLASSES)[number];
 export type AvoRunStatus = (typeof AVO_RUN_STATUSES)[number];
 export type AvoCycleOutcome = (typeof AVO_CYCLE_OUTCOMES)[number];
 export type AvoMemoryNamespace = (typeof AVO_MEMORY_NAMESPACES)[number];
@@ -36,6 +45,10 @@ export interface AvoCandidate {
 	kind: string;
 	summary: string;
 	payloadDigest: string;
+	deliveryDigest?: string;
+	deterministicResult?: string;
+	artifactPaths?: string[];
+	artifactTargetDigest?: string;
 	claims?: AvoCandidateClaim[];
 	workspaceDigest?: string;
 	workspaceHead?: string;
@@ -60,7 +73,24 @@ export interface AvoVerificationBaseline {
 	workspaceDigest: string;
 	testFiles: AvoBaselineTestFile[];
 	userAcceptanceCommands: string[];
+	executions: AvoBaselineExecution[];
 	capturedAt: string;
+}
+
+export interface AvoBaselineExecution {
+	executionId: string;
+	command: string;
+	commandDigest: string;
+	outputDigest: string;
+	workspaceDigest: string;
+	postWorkspaceDigest: string;
+	status: AvoEvaluationStatus;
+	meaningful: boolean;
+	observedWorkUnits: number;
+	observedPassedWorkUnits: number;
+	observedBaselineTestFiles: string[];
+	testTrustBasis: string;
+	recordedAt: string;
 }
 
 export interface AvoEvaluationReceipt {
@@ -79,6 +109,7 @@ export interface AvoTaskRunArchive {
 	runId: string;
 	objective: string;
 	verificationPolicy: AvoVerificationPolicy;
+	verificationClass: AvoVerificationClass;
 	verificationReasons: string[];
 	routing: AvoRoutingDecision;
 	status: AvoRunStatus;
@@ -90,6 +121,7 @@ export interface AvoTaskRunArchive {
 	supervision: AvoSupervisorReview[];
 	adapterStateRef?: AvoAdapterStateRef;
 	verificationBaseline?: AvoVerificationBaseline;
+	artifactBaselinePaths?: string[];
 	createdAt: string;
 	updatedAt: string;
 	archivedAt: string;
@@ -186,6 +218,7 @@ export interface AvoCandidateInput {
 	kind: string;
 	summary: string;
 	payload: unknown;
+	artifactPaths?: string[];
 	claims?: AvoCandidateClaim[];
 	workspaceDigest?: string;
 	workspaceHead?: string;
@@ -235,6 +268,7 @@ export interface AvoRunState {
 	taskRuns: AvoTaskRunArchive[];
 	objective?: string;
 	verificationPolicy: AvoVerificationPolicy;
+	verificationClass: AvoVerificationClass;
 	verificationReasons: string[];
 	environmentSelection: AvoEnvironmentSelection;
 	horizonSelection: AvoHorizonSelection;
@@ -251,6 +285,7 @@ export interface AvoRunState {
 	supervision: AvoSupervisorReview[];
 	adapterStateRef?: AvoAdapterStateRef;
 	verificationBaseline?: AvoVerificationBaseline;
+	artifactBaselinePaths?: string[];
 	createdAt: string;
 	updatedAt: string;
 }
@@ -295,6 +330,7 @@ export interface AvoDashboardProjection {
 	environment: AvoEnvironment;
 	horizon: AvoHorizon;
 	verificationPolicy: AvoVerificationPolicy;
+	verificationClass: AvoVerificationClass;
 	status: AvoRunStatus;
 	phase: {
 		id: string;

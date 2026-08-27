@@ -1,10 +1,19 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import type { LookupFunction } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
 	Agent,
 	type AgentContext,
@@ -122,23 +131,36 @@ import {
 	parseAutoresearchPublicationInput,
 	parseAutoresearchSearchReceiptInput,
 	parseAutoresearchSupervisionInput,
+	visibleAutoresearchEvidenceText,
 } from "./autoresearch.js";
 import {
 	AVO_HORIZONS,
 	AVO_SKILL_NAME,
 	type AvoHorizonSelection,
+	type AvoIndependentClaimVerdict,
 	AvoSessionRuntime,
+	type AvoStopGate,
+	assertAvoClaimVerifierQuoteSafe,
+	assessAvoCandidateIntegrity,
 	assessAvoClaimEvidence,
 	assessAvoHostCommand,
 	assessAvoTestTrust,
+	avoClaimVerifierMarker,
+	buildAvoClaimVerifierPrompt,
 	buildAvoRuntimePrompt,
 	buildAvoSupervisorBootstrapPrompt,
 	buildAvoSupervisorPacket,
 	buildAvoSupervisorPrompt,
+	captureAvoArtifactPathBaseline,
 	captureAvoCodingVerificationBaseline,
 	captureAvoWorkspaceSnapshot,
 	classifyAvoHostEvaluationCommand,
+	combineAvoClaimEvidenceAssessments,
+	deriveAvoDeterministicArithmeticContract,
+	digestAvoDeliveryText,
+	digestAvoPayload,
 	parseAvoCandidateInput,
+	parseAvoClaimVerifierMessage,
 	parseAvoCycleInput,
 	parseAvoEvaluationInput,
 	parseAvoMemoryInput,
@@ -510,6 +532,8 @@ export interface AgentSessionConfig {
 	 * is 0 and no persisted thread_goal_state entry exists in the branch.
 	 */
 	initialGoal?: { objective: string; tokenBudget?: number };
+	/** Enforce the default AVO gate and canonical delivery at root turn completion. Default: true. */
+	enforceAvoCompletion?: boolean;
 }
 
 export interface ExtensionBindings {
@@ -1221,6 +1245,7 @@ export class AgentSession {
 	private _agentMessageController?: AgentSessionMessageController;
 	private _agentObserveController?: AgentObserveController;
 	private _avoRuntime?: AvoSessionRuntime;
+	private readonly _enforceAvoCompletion: boolean;
 	private _avoSupervisorBoundToRuntime = false;
 	private _autoresearchStore?: AutoresearchStore;
 	private _autoresearchSupervisorBoundToRuntime = false;
@@ -1362,6 +1387,7 @@ export class AgentSession {
 						this._cwd,
 					)
 				: undefined;
+		this._enforceAvoCompletion = config.enforceAvoCompletion ?? true;
 		this._autoresearchStore =
 			this._rlmDepth === 0
 				? new AutoresearchStore(this.sessionManager.getSessionArtifactDir(), undefined, this._cwd)
@@ -2308,7 +2334,10 @@ export class AgentSession {
 	}
 
 	private async _shouldStopAfterTurn(context: ShouldStopAfterTurnContext): Promise<boolean> {
-		if (this._stopGoalContinuationForTerminalMessage(context.message)) {
+		if (
+			this._stopGoalContinuationForTerminalMessage(context.message) &&
+			(!this._enforceAvoCompletion || this._avoRuntime?.getState().status !== "active")
+		) {
 			return true;
 		}
 		try {
@@ -3307,25 +3336,116 @@ export class AgentSession {
 		if (!call || !result) throw new Error(`AVO could not resolve completed tool call ${toolCallId}`);
 		if (result.toolName !== call.name) throw new Error("AVO tool call and result names do not match");
 		if (result.isError) throw new Error("AVO cannot bind an errored tool result as external evidence");
-		if (
-			!/^mcp__/i.test(call.name) &&
-			!/(?:^|[_:.-])(?:web|websearch|search|browser|fetch|http|api|google|vertex|connector|weather|finance|sports)(?:$|[_:.-])/i.test(
-				call.name,
-			)
-		) {
-			throw new Error(`tool ${call.name} is not an eligible external web/API/connector tool`);
+		const trustedNames = new Set([
+			"web_search",
+			"google_search",
+			"google_search_retrieval",
+			"browser_search",
+			"weather",
+			"finance",
+			"sports",
+		]);
+		const definitionEntry = this._toolDefinitions.get(call.name);
+		const isProviderNative = definitionEntry === undefined && trustedNames.has(call.name);
+		const isPrimeBuiltin =
+			this._baseToolsOverride === undefined &&
+			trustedNames.has(call.name) &&
+			definitionEntry?.sourceInfo.source === "builtin" &&
+			definitionEntry.sourceInfo.path === `<builtin:${call.name}>`;
+		if (!isProviderNative && !isPrimeBuiltin) {
+			throw new Error(`tool ${call.name} is not a host-trusted external evidence provider`);
+		}
+		if (result.timestamp < callTimestamp) {
+			throw new Error("AVO external tool result predates its tool call");
 		}
 		return { call, callTimestamp, result };
 	}
 
+	private _readRlmLastAssistantText(subagent: RlmSubagentRegistryEntry): string | undefined {
+		const liveSession =
+			this._activeRlmChildRuns.get(subagent.rlm_child_id)?.session ??
+			this._rlmChildSessions.get(subagent.rlm_child_id);
+		const liveText = liveSession?.getLastAssistantText();
+		if (liveText) return liveText;
+		try {
+			const descriptorPath = join(subagent.session_dir, "rlm-subagent.json");
+			const descriptor = JSON.parse(readFileSync(descriptorPath, "utf8")) as unknown;
+			if (!isObjectRecord(descriptor)) return undefined;
+			if (descriptor.childId !== subagent.rlm_child_id || descriptor.sessionName !== subagent.session_name) {
+				return undefined;
+			}
+			if (typeof descriptor.sessionFile !== "string") return undefined;
+			const sessionDir = resolve(subagent.session_dir);
+			const sessionFile = resolve(descriptor.sessionFile);
+			if (dirname(sessionFile) !== sessionDir || !existsSync(sessionFile)) return undefined;
+			const branch = [...SessionManager.open(sessionFile).getBranch()].reverse();
+			for (const entry of branch) {
+				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+				const text = entry.message.content
+					.filter((item): item is TextContent => item.type === "text")
+					.map((item) => item.text)
+					.join("\n");
+				if (text) return text;
+			}
+		} catch {
+			return undefined;
+		}
+		return undefined;
+	}
+
+	private async _verifyAvoClaimEvidenceIndependently(
+		candidateId: string,
+		claimId: string,
+		claimText: string,
+		exactQuote: string,
+	): Promise<{
+		verdict: AvoIndependentClaimVerdict;
+		verifierChildId?: string;
+		verifierModel?: string;
+		responseDigest?: string;
+		error?: string;
+	}> {
+		const marker = avoClaimVerifierMarker(candidateId, claimId);
+		try {
+			const suffix = randomUUID().replaceAll("-", "").slice(0, 10);
+			const handle = await this._startRlmChildRun(
+				buildAvoClaimVerifierPrompt(marker, claimText, exactQuote),
+				{ name: `avo-claim-verifier-${suffix}` },
+				undefined,
+				{ allowedToolNames: [] },
+			);
+			await this._awaitPendingRlmChildSettlement(handle.name);
+			const children = (await this.listRlmSubagents()).subagents;
+			const child =
+				children.find((item) => item.rlm_child_id === handle.rlm_child_id || item.session_name === handle.name) ??
+				this._persistedAutoresearchSubagent(handle.rlm_child_id, handle.name);
+			if (!child) throw new Error("claim verifier child was not retained for host inspection");
+			const response = this._readRlmLastAssistantText(child);
+			if (!response) throw new Error("claim verifier child produced no final text");
+			return {
+				verdict: parseAvoClaimVerifierMessage(response, marker),
+				verifierChildId: handle.rlm_child_id,
+				verifierModel: handle.model,
+				responseDigest: createHash("sha256").update(response).digest("hex"),
+			};
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			return {
+				verdict: { relation: "insufficient", reason: `independent verifier unavailable: ${reason}` },
+				error: reason,
+			};
+		}
+	}
+
 	private _formatAvoStatus(): string {
 		const state = this._requireAvoRuntime().getState();
-		const gate = this._requireAvoRuntime().evaluateStopGate();
+		const gate = this._evaluateAvoHostBoundStopGate();
 		return [
 			"AVO is active by default for this root task.",
 			`Task run: ${state.runId} (${state.taskRuns.length} archived in this session)`,
 			`Automatic evaluation adapter: ${state.routing.environment}`,
 			`AVO horizon: ${state.routing.horizon} (selection: ${state.horizonSelection})`,
+			`Verification class: ${state.verificationClass}`,
 			`Verification policy: ${state.verificationPolicy}`,
 			`Status: ${state.status}; cycles: ${state.cycles.length}; candidates: ${state.candidates.length}`,
 			`Final gate: ${gate.passed ? "passed" : `blocked — ${gate.reasons.join("; ")}`}`,
@@ -3346,6 +3466,73 @@ export class AgentSession {
 				excludedRoots: this._avoWorkspaceExcludedRoots(),
 			}),
 		);
+	}
+
+	private _ensureAvoArtifactVerificationBaseline(): void {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		if (
+			state.routing.environment !== "general" ||
+			state.verificationClass !== "artifact" ||
+			state.artifactBaselinePaths
+		) {
+			return;
+		}
+		runtime.store.setArtifactBaselinePaths(
+			captureAvoArtifactPathBaseline(this.sessionManager.getCwd(), {
+				excludedRoots: this._avoWorkspaceExcludedRoots(),
+			}),
+		);
+	}
+
+	private _recordAvoCandidateIntegrityFailure(candidateId: string): void {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		const candidate = state.candidates.find((item) => item.candidateId === candidateId);
+		if (!candidate) return;
+		const assessment = assessAvoCandidateIntegrity(
+			state,
+			candidate,
+			this.sessionManager.getCwd(),
+			this._avoWorkspaceExcludedRoots(),
+		);
+		if (assessment.passed) return;
+		const reason = assessment.reason ?? "candidate integrity changed";
+		const observedDigest = assessment.observedDigest;
+		const duplicate = state.evaluations.some(
+			(item) =>
+				item.candidateId === candidateId &&
+				item.evaluatorId === "candidate_integrity" &&
+				item.status === "revise" &&
+				item.metrics.observed_integrity_digest === (observedDigest ?? "unavailable"),
+		);
+		if (duplicate) return;
+		runtime.recordHostEvaluation({
+			candidateId,
+			evaluatorId: "candidate_integrity",
+			status: "revise",
+			authority: "host",
+			evidenceRefs: [`host:integrity:${observedDigest ?? "unavailable"}`],
+			metrics: {
+				meaningful: false,
+				candidate_payload_digest: candidate.payloadDigest,
+				observed_integrity_digest: observedDigest ?? "unavailable",
+				validation_reason: reason,
+			},
+		});
+	}
+
+	private _evaluateAvoHostBoundStopGate(): AvoStopGate {
+		const runtime = this._requireAvoRuntime();
+		for (const candidateId of new Set(
+			runtime
+				.getState()
+				.cycles.filter((cycle) => cycle.outcome === "accepted")
+				.map((cycle) => cycle.candidateId),
+		)) {
+			this._recordAvoCandidateIntegrityFailure(candidateId);
+		}
+		return runtime.evaluateStopGate();
 	}
 
 	private _handleAvoSlashCommand(command: SessionSlashCommand): string {
@@ -3561,6 +3748,241 @@ export class AgentSession {
 				}
 				return { evaluation: runtime.recordEvaluation(evaluation) };
 			}
+			case "avo.external.fetch": {
+				if (typeof payload.url !== "string" || payload.url.length > 4_096) {
+					throw new Error("avo.external.fetch url must contain 1 to 4096 characters");
+				}
+				const state = runtime.getState();
+				if (state.routing.environment !== "general" || state.verificationClass !== "external_factual") {
+					throw new Error("AVO external source fetching is available only for general external-factual tasks");
+				}
+				const source = await this._fetchAvoExternalSource(payload.url);
+				return {
+					source: {
+						url: source.url,
+						text: source.text,
+						body_digest: source.bodyDigest,
+						content_type: source.contentType,
+						truncated: source.truncated,
+						fetched_at: new Date().toISOString(),
+					},
+				};
+			}
+			case "avo.verification.baseline.run": {
+				if (typeof payload.command !== "string") {
+					throw new Error("avo.verification.baseline.run command must be a string");
+				}
+				if (classifyAvoHostEvaluationCommand(payload.command) !== "test") {
+					throw new Error("the coding verification baseline must be a recognized direct test command");
+				}
+				const state = runtime.getState();
+				if (state.routing.environment !== "coding" || !state.verificationBaseline) {
+					throw new Error("coding baseline execution is available only for a host-routed coding task");
+				}
+				if (state.candidates.length > 0) {
+					throw new Error("coding baseline execution must run before the first candidate is recorded");
+				}
+				const workspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+				});
+				if (workspace.digest !== state.verificationBaseline.workspaceDigest) {
+					throw new Error("the workspace changed before its immutable coding baseline was executed");
+				}
+				const result = await this.executeBash(payload.command);
+				const assessment = assessAvoHostCommand("test", {
+					exitCode: result.exitCode,
+					cancelled: result.cancelled,
+					truncated: result.truncated,
+					output: result.output,
+				});
+				const trust = assessAvoTestTrust(
+					this.sessionManager.getCwd(),
+					payload.command,
+					state.verificationBaseline,
+					result.output,
+				);
+				const observedWorkUnits =
+					typeof assessment.metrics.observed_work_units === "number" ? assessment.metrics.observed_work_units : 0;
+				const observedPassedWorkUnits =
+					typeof assessment.metrics.observed_passed_work_units === "number"
+						? assessment.metrics.observed_passed_work_units
+						: 0;
+				const meaningful =
+					assessment.metrics.meaningful === true &&
+					trust.trusted &&
+					trust.executionProven &&
+					observedWorkUnits > 0;
+				const commandDigest = createHash("sha256").update(payload.command).digest("hex");
+				const outputDigest = createHash("sha256").update(result.output).digest("hex");
+				const postWorkspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+				});
+				const execution = runtime.store.recordVerificationBaselineExecution({
+					command: payload.command,
+					commandDigest,
+					outputDigest,
+					workspaceDigest: workspace.digest,
+					postWorkspaceDigest: postWorkspace.digest,
+					status: assessment.status,
+					meaningful,
+					observedWorkUnits,
+					observedPassedWorkUnits,
+					observedBaselineTestFiles: trust.observedBaselineTestFiles,
+					testTrustBasis: trust.basis,
+				});
+				return {
+					execution,
+					assessment: {
+						status: assessment.status,
+						meaningful,
+						observed_work_units: observedWorkUnits,
+						observed_passed_work_units: observedPassedWorkUnits,
+						observed_baseline_test_files: trust.observedBaselineTestFiles,
+						test_trust_basis: trust.basis,
+						execution_proven: trust.executionProven,
+					},
+					output: result.output,
+					exit_code: result.exitCode ?? null,
+				};
+			}
+			case "avo.evaluation.deterministic": {
+				if (typeof payload.candidate_id !== "string") {
+					throw new Error("avo.evaluation.deterministic candidate_id must be a string");
+				}
+				const state = runtime.getState();
+				if (state.routing.environment !== "general" || state.verificationClass !== "deterministic_local") {
+					throw new Error("AVO deterministic evaluation is available only for deterministic-local tasks");
+				}
+				const candidate = state.candidates.find((item) => item.candidateId === payload.candidate_id);
+				if (!candidate) throw new Error(`evaluation references unknown candidate ${payload.candidate_id}`);
+				if (!state.objective) throw new Error("AVO deterministic evaluation requires an active objective");
+				const contract = deriveAvoDeterministicArithmeticContract(state.objective);
+				const matches = candidate.deterministicResult === contract.result;
+				const receiptDigest = digestAvoPayload({
+					candidateId: candidate.candidateId,
+					candidatePayloadDigest: candidate.payloadDigest,
+					objective: state.objective,
+					expression: contract.expression,
+					result: contract.result,
+					matches,
+				});
+				const evaluation = runtime.recordHostEvaluation({
+					candidateId: candidate.candidateId,
+					evaluatorId: "deterministic_result",
+					status: matches ? "pass" : "revise",
+					authority: "environment",
+					evidenceRefs: [`host:deterministic:${receiptDigest}`],
+					metrics: {
+						meaningful: matches,
+						candidate_result_matches_objective: matches,
+						candidate_payload_digest: candidate.payloadDigest,
+						objective_digest: createHash("sha256").update(state.objective).digest("hex"),
+						expression_digest: createHash("sha256").update(contract.expression).digest("hex"),
+						expected_result_digest: createHash("sha256").update(contract.result).digest("hex"),
+						validation_reason: matches
+							? "the candidate result equals the host-evaluated arithmetic objective"
+							: "the candidate result does not equal the host-evaluated arithmetic objective",
+					},
+				});
+				return { evaluation, contract: { expression: contract.expression, result: contract.result } };
+			}
+			case "avo.evaluation.artifacts": {
+				if (typeof payload.candidate_id !== "string") {
+					throw new Error("avo.evaluation.artifacts candidate_id must be a string");
+				}
+				const state = runtime.getState();
+				if (state.routing.environment !== "general" || state.verificationClass !== "artifact") {
+					throw new Error("AVO artifact evaluation is available only for artifact tasks");
+				}
+				const candidate = state.candidates.find((item) => item.candidateId === payload.candidate_id);
+				if (!candidate) throw new Error(`evaluation references unknown candidate ${payload.candidate_id}`);
+				if (!candidate.artifactPaths?.length || !candidate.artifactTargetDigest) {
+					throw new Error("artifact candidate has no host-recorded artifact_paths contract");
+				}
+				const allowedRoots = [resolve(this.sessionManager.getCwd())];
+				const forbiddenRoots = this._avoWorkspaceExcludedRoots().map((root) => resolve(root));
+				const taskStartedAt = Date.parse(state.createdAt);
+				const baselinePaths = new Set(state.artifactBaselinePaths ?? []);
+				const verified: Array<{ declaredPath: string; path: string; sha256: string; size: number }> = [];
+				const failures: string[] = [];
+				const resolvedArtifacts = new Set<string>();
+				for (const requestedPath of candidate.artifactPaths) {
+					try {
+						const absolute = isAbsolute(requestedPath)
+							? resolve(requestedPath)
+							: resolve(this.sessionManager.getCwd(), requestedPath);
+						if (lstatSync(absolute).isSymbolicLink()) throw new Error("symbolic-link artifacts are not accepted");
+						const resolvedPath = realpathSync(absolute);
+						if (resolvedArtifacts.has(resolvedPath)) {
+							throw new Error("artifact path aliases another declared artifact");
+						}
+						resolvedArtifacts.add(resolvedPath);
+						const insideAllowedRoot = allowedRoots.some((root) => {
+							const fromRoot = relative(root, resolvedPath);
+							return (
+								fromRoot === "" ||
+								(fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot))
+							);
+						});
+						if (!insideAllowedRoot) throw new Error("path is outside the active workspace");
+						if (
+							forbiddenRoots.some((root) => resolvedPath === root || resolvedPath.startsWith(`${root}${sep}`))
+						) {
+							throw new Error("path is inside host-owned session metadata");
+						}
+						if (baselinePaths.has(resolvedPath)) throw new Error("path already existed at task start");
+						const stats = statSync(resolvedPath);
+						if (!stats.isFile()) throw new Error("path is not a regular file");
+						if (stats.size === 0) throw new Error("file is empty");
+						if (stats.size > 128 * 1024 * 1024) throw new Error("file exceeds the 128 MiB verification limit");
+						if (
+							!Number.isFinite(stats.birthtimeMs) ||
+							stats.birthtimeMs <= 0 ||
+							(Number.isFinite(taskStartedAt) && stats.birthtimeMs < taskStartedAt)
+						) {
+							throw new Error("file was not created during the active task");
+						}
+						verified.push({
+							declaredPath: absolute,
+							path: resolvedPath,
+							sha256: createHash("sha256").update(readFileSync(resolvedPath)).digest("hex"),
+							size: stats.size,
+						});
+					} catch (error) {
+						failures.push(`${requestedPath}: ${error instanceof Error ? error.message : String(error)}`);
+					}
+				}
+				const passed = failures.length === 0 && verified.length === candidate.artifactPaths.length;
+				const receiptDigest = digestAvoPayload({
+					candidateId: candidate.candidateId,
+					candidatePayloadDigest: candidate.payloadDigest,
+					artifactTargetDigest: candidate.artifactTargetDigest,
+					verified,
+					failures,
+				});
+				const evaluation = runtime.recordHostEvaluation({
+					candidateId: candidate.candidateId,
+					evaluatorId: "artifact_binding",
+					status: passed ? "pass" : "revise",
+					authority: "environment",
+					evidenceRefs: [
+						`host:artifact:${receiptDigest}`,
+						...verified.map((artifact) => `artifact:${artifact.sha256}:${artifact.path}`),
+					],
+					metrics: {
+						meaningful: passed,
+						artifact_candidate_binding: passed,
+						artifact_target_digest: candidate.artifactTargetDigest,
+						candidate_payload_digest: candidate.payloadDigest,
+						artifact_target_count: candidate.artifactPaths.length,
+						artifact_verified_count: verified.length,
+						artifact_total_bytes: verified.reduce((total, artifact) => total + artifact.size, 0),
+						artifact_manifest: JSON.stringify(verified),
+						validation_reason: passed ? "every candidate-declared artifact was host-hashed" : failures.join("; "),
+					},
+				});
+				return { evaluation, artifacts: verified, failures };
+			}
 			case "avo.evaluation.run": {
 				if (typeof payload.candidate_id !== "string") {
 					throw new Error("avo.evaluation.run candidate_id must be a string");
@@ -3568,6 +3990,17 @@ export class AgentSession {
 				if (typeof payload.command !== "string") throw new Error("avo.evaluation.run command must be a string");
 				const evaluatorId = classifyAvoHostEvaluationCommand(payload.command);
 				const state = runtime.getState();
+				if (
+					state.routing.environment === "general" &&
+					state.verificationPolicy === "required" &&
+					(state.verificationClass === "deterministic_local" || state.verificationClass === "artifact")
+				) {
+					throw new Error(
+						state.verificationClass === "deterministic_local"
+							? "required deterministic tasks must use avo.evaluation.deterministic"
+							: "required artifact tasks must use avo.evaluation.artifacts",
+					);
+				}
 				const candidate = state.candidates.find((item) => item.candidateId === payload.candidate_id);
 				if (!candidate) throw new Error(`evaluation references unknown candidate ${payload.candidate_id}`);
 				const workspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
@@ -3612,29 +4045,83 @@ export class AgentSession {
 					truncated: result.truncated,
 					output: result.output,
 				});
+				const postWorkspace = requiresWorkspaceBinding
+					? captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+							excludedRoots: this._avoWorkspaceExcludedRoots(),
+						})
+					: workspace;
 				if (requiresWorkspaceBinding && evaluatorId === "test" && assessment.status === "pass") {
 					const trust = assessAvoTestTrust(
 						this.sessionManager.getCwd(),
 						payload.command,
 						state.verificationBaseline,
+						result.output,
 					);
+					const commandDigest = createHash("sha256").update(payload.command).digest("hex");
+					const baselineExecution = state.verificationBaseline?.executions.find(
+						(item) => item.commandDigest === commandDigest && item.meaningful,
+					);
+					const postWorkUnits =
+						typeof assessment.metrics.observed_work_units === "number"
+							? assessment.metrics.observed_work_units
+							: 0;
+					const postPassedWorkUnits =
+						typeof assessment.metrics.observed_passed_work_units === "number"
+							? assessment.metrics.observed_passed_work_units
+							: 0;
+					const identityMatched =
+						baselineExecution !== undefined &&
+						(baselineExecution.testTrustBasis === "user_acceptance" ||
+							(baselineExecution.observedBaselineTestFiles.length > 0 &&
+								baselineExecution.observedBaselineTestFiles.every((path) =>
+									trust.observedBaselineTestFiles.includes(path),
+								)));
+					const baselineExecutionMatched =
+						trust.trusted &&
+						trust.executionProven &&
+						identityMatched &&
+						postWorkUnits >= (baselineExecution?.observedWorkUnits ?? Number.POSITIVE_INFINITY) &&
+						postPassedWorkUnits >= (baselineExecution?.observedPassedWorkUnits ?? Number.POSITIVE_INFINITY) &&
+						postWorkUnits - postPassedWorkUnits <=
+							(baselineExecution
+								? baselineExecution.observedWorkUnits - baselineExecution.observedPassedWorkUnits
+								: Number.NEGATIVE_INFINITY);
+					const meaningful = trust.taskSpecific && baselineExecutionMatched;
 					assessment = {
-						status: trust.trusted && trust.taskSpecific ? "pass" : "inconclusive",
+						status: meaningful ? "pass" : "inconclusive",
 						metrics: {
 							...assessment.metrics,
-							meaningful: trust.trusted && trust.taskSpecific,
+							meaningful,
 							trusted_test: trust.trusted,
 							task_specific_test: trust.taskSpecific,
 							test_trust_basis: trust.basis,
+							test_execution_proven: trust.executionProven,
+							observed_baseline_test_files: trust.observedBaselineTestFiles.join(","),
+							baseline_execution_matched: baselineExecutionMatched,
+							baseline_execution_id: baselineExecution?.executionId ?? "missing",
+							baseline_pre_status: baselineExecution?.status ?? "missing",
+							baseline_observed_work_units: baselineExecution?.observedWorkUnits ?? 0,
+							baseline_observed_passed_work_units: baselineExecution?.observedPassedWorkUnits ?? 0,
 							baseline_contract_digest: state.verificationBaseline?.contractDigest ?? "missing",
 							baseline_test_count: trust.baselineTestCount,
 							unchanged_baseline_test_count: trust.unchangedBaselineTestCount,
 							explicit_baseline_targets: trust.explicitBaselineTargets,
 							narrowed_test_selection: trust.narrowedSelection,
-							validation_reason:
-								trust.trusted && trust.taskSpecific
-									? "test execution included a trusted pre-task suite, target, or user acceptance command"
-									: "candidate-created tests cannot independently certify their own coding change",
+							validation_reason: meaningful
+								? "the same immutable pre-candidate baseline test contract executed and passed afterward"
+								: "coding tests require a proven matching pre-candidate baseline execution",
+						},
+					};
+				}
+				if (requiresWorkspaceBinding && postWorkspace.digest !== candidate.workspaceDigest) {
+					assessment = {
+						status: "revise",
+						metrics: {
+							...assessment.metrics,
+							meaningful: false,
+							post_workspace_matches_candidate: false,
+							post_workspace_digest: postWorkspace.digest,
+							validation_reason: "the authoritative command changed the candidate workspace",
 						},
 					};
 				}
@@ -3648,6 +4135,7 @@ export class AgentSession {
 							output: result.output,
 							truncated: result.truncated,
 							workspaceDigest: workspace.digest,
+							postWorkspaceDigest: postWorkspace.digest,
 							candidatePayloadDigest: candidate.payloadDigest,
 						}),
 					)
@@ -3657,7 +4145,11 @@ export class AgentSession {
 					evaluatorId,
 					status: assessment.status,
 					authority: "environment",
-					evidenceRefs: [`host:command:${receiptDigest}`, `host:workspace:${workspace.digest}`],
+					evidenceRefs: [
+						`host:command:${receiptDigest}`,
+						`host:workspace:${workspace.digest}`,
+						`host:workspace-post:${postWorkspace.digest}`,
+					],
 					metrics: {
 						...assessment.metrics,
 						command_digest: createHash("sha256").update(payload.command).digest("hex"),
@@ -3667,6 +4159,8 @@ export class AgentSession {
 							? { workspace_matches_candidate: true }
 							: { workspace_binding: "not_required" }),
 						workspace_digest: workspace.digest,
+						post_workspace_digest: postWorkspace.digest,
+						post_workspace_matches_candidate: postWorkspace.digest === candidate.workspaceDigest,
 						workspace_head: workspace.head,
 						workspace_mode: workspace.mode,
 						workspace_changed_files: workspace.changedFileCount,
@@ -3684,6 +4178,127 @@ export class AgentSession {
 						truncated: result.truncated,
 						receipt_digest: receiptDigest,
 						workspace_digest: workspace.digest,
+					},
+				};
+			}
+			case "avo.evaluation.url": {
+				if (typeof payload.candidate_id !== "string") {
+					throw new Error("avo.evaluation.url candidate_id must be a string");
+				}
+				if (typeof payload.claim_id !== "string") {
+					throw new Error("avo.evaluation.url claim_id must be a string");
+				}
+				if (typeof payload.url !== "string" || payload.url.length > 4_096) {
+					throw new Error("avo.evaluation.url url must contain 1 to 4096 characters");
+				}
+				if (typeof payload.exact_quote !== "string" || payload.exact_quote.trim().length < 8) {
+					throw new Error("avo.evaluation.url exact_quote must contain at least 8 characters");
+				}
+				if (payload.exact_quote.length > 4_000) {
+					throw new Error("avo.evaluation.url exact_quote must not exceed 4000 characters");
+				}
+				const state = runtime.getState();
+				if (state.routing.environment !== "general" || state.verificationClass !== "external_factual") {
+					throw new Error("URL evidence is available only for general external-factual tasks");
+				}
+				const candidate = state.candidates.find((item) => item.candidateId === payload.candidate_id);
+				if (!candidate) throw new Error(`evaluation references unknown candidate ${payload.candidate_id}`);
+				const claim = candidate.claims?.find((item) => item.claimId === payload.claim_id);
+				if (!claim) throw new Error(`candidate ${candidate.candidateId} has no claim ${payload.claim_id}`);
+				const fetched = await this._fetchAvoExternalSource(payload.url);
+				const normalizeEvidence = (value: string) => value.normalize("NFKC").replace(/\s+/g, " ").trim();
+				const normalizedQuote = normalizeEvidence(payload.exact_quote);
+				const matchingRecords = fetched.text
+					.split("\n")
+					.map(normalizeEvidence)
+					.filter((record) => record.includes(normalizedQuote));
+				if (matchingRecords.length === 0) {
+					throw new Error("AVO exact_quote was not found in the host-fetched visible source text");
+				}
+				if (matchingRecords.length !== 1) {
+					throw new Error("AVO exact_quote matched multiple visible source records and is ambiguous");
+				}
+				const matchedRecord = matchingRecords[0]!;
+				const firstOccurrence = matchedRecord.indexOf(normalizedQuote);
+				if (matchedRecord.indexOf(normalizedQuote, firstOccurrence + normalizedQuote.length) >= 0) {
+					throw new Error("AVO exact_quote occurs multiple times in one visible source record and is ambiguous");
+				}
+				assertAvoClaimVerifierQuoteSafe(claim.claimText, payload.exact_quote);
+				const lexicalAssessment = assessAvoClaimEvidence(claim.claimText, payload.exact_quote);
+				const independentAssessment = await this._verifyAvoClaimEvidenceIndependently(
+					candidate.candidateId,
+					claim.claimId,
+					claim.claimText,
+					payload.exact_quote,
+				);
+				const semanticAssessment = combineAvoClaimEvidenceAssessments(
+					lexicalAssessment,
+					independentAssessment.verdict,
+				);
+				const receiptDigest = createHash("sha256")
+					.update(
+						JSON.stringify({
+							url: fetched.url,
+							bodyDigest: fetched.bodyDigest,
+							candidateId: candidate.candidateId,
+							candidatePayloadDigest: candidate.payloadDigest,
+							claimId: claim.claimId,
+							claimText: claim.claimText,
+							exactQuote: payload.exact_quote,
+							lexicalRelation: lexicalAssessment.relation,
+							independentRelation: independentAssessment.verdict.relation,
+							semanticRelation: semanticAssessment.relation,
+						}),
+					)
+					.digest("hex");
+				const evaluation = runtime.recordHostEvaluation({
+					candidateId: candidate.candidateId,
+					evaluatorId: "external_claim",
+					status:
+						semanticAssessment.relation === "supports"
+							? "pass"
+							: semanticAssessment.relation === "contradicts"
+								? "revise"
+								: "inconclusive",
+					authority: "external",
+					evidenceRefs: [`host:url:${receiptDigest}`, `source:${fetched.url}`],
+					metrics: {
+						meaningful: semanticAssessment.relation === "supports",
+						tool_name: "host_https_fetch",
+						claim_id: claim.claimId,
+						claim_text_digest: createHash("sha256").update(claim.claimText).digest("hex"),
+						semantic_relation: semanticAssessment.relation,
+						semantic_reason: semanticAssessment.reason,
+						semantic_verifier: "host_bound_exact_claim_independent_rlm_v2",
+						lexical_relation: lexicalAssessment.relation,
+						lexical_reason: lexicalAssessment.reason,
+						independent_relation: independentAssessment.verdict.relation,
+						independent_reason: independentAssessment.verdict.reason,
+						independent_verifier_child_id: independentAssessment.verifierChildId ?? "unavailable",
+						independent_verifier_model: independentAssessment.verifierModel ?? "unavailable",
+						independent_response_digest: independentAssessment.responseDigest ?? "unavailable",
+						independent_verifier_error: independentAssessment.error ?? "none",
+						claim_token_coverage: semanticAssessment.claimTokenCoverage,
+						exact_quote_digest: createHash("sha256").update(payload.exact_quote).digest("hex"),
+						candidate_payload_digest: candidate.payloadDigest,
+						source_count: 1,
+						source_url: fetched.url,
+						body_digest: fetched.bodyDigest,
+						content_type: fetched.contentType,
+						response_truncated: fetched.truncated,
+						fetched_at: new Date().toISOString(),
+					},
+				});
+				return {
+					evaluation,
+					source_receipt: {
+						receipt_digest: receiptDigest,
+						url: fetched.url,
+						body_digest: fetched.bodyDigest,
+						claim_id: claim.claimId,
+						semantic_relation: semanticAssessment.relation,
+						independent_relation: independentAssessment.verdict.relation,
+						verifier_child_id: independentAssessment.verifierChildId ?? null,
 					},
 				};
 			}
@@ -3712,30 +4327,45 @@ export class AgentSession {
 				if (callTimestamp < Date.parse(state.createdAt)) {
 					throw new Error("AVO external evidence must come from the active task run");
 				}
-				let details = "";
-				try {
-					details = result.details === undefined ? "" : JSON.stringify(result.details);
-				} catch {
-					throw new Error("AVO external tool result details are not serializable");
-				}
-				const content = result.content
-					.map((item) =>
-						item.type === "text"
-							? item.text
-							: `[image:${item.mimeType}:${createHash("sha256").update(item.data).digest("hex")}]`,
-					)
-					.join("\n");
-				const evidenceText = `${content}\n${details}`;
 				const normalizeEvidence = (value: string) => value.normalize("NFKC").replace(/\s+/g, " ").trim();
-				if (!normalizeEvidence(evidenceText).includes(normalizeEvidence(payload.exact_quote))) {
+				const normalizedQuote = normalizeEvidence(payload.exact_quote);
+				const matchingRecords = result.content.filter(
+					(item): item is TextContent =>
+						item.type === "text" && normalizeEvidence(item.text).includes(normalizedQuote),
+				);
+				if (matchingRecords.length === 0) {
 					throw new Error("AVO exact_quote was not found in the host-observed tool result");
 				}
-				const semanticAssessment = assessAvoClaimEvidence(claim.claimText, payload.exact_quote);
+				if (matchingRecords.length !== 1) {
+					throw new Error("AVO exact_quote matched multiple external source records and is ambiguous");
+				}
+				const evidenceRecord = matchingRecords[0].text;
+				const sourceIdentifiers = [
+					...new Set(
+						(evidenceRecord.match(/https?:\/\/[^\s<>"']+/g) ?? []).map((source) =>
+							source.replace(/[),.;!?]+$/g, ""),
+						),
+					),
+				];
+				if (sourceIdentifiers.length > 1) {
+					throw new Error("AVO external source record contains multiple source URLs and is ambiguous");
+				}
+				assertAvoClaimVerifierQuoteSafe(claim.claimText, payload.exact_quote);
+				const lexicalAssessment = assessAvoClaimEvidence(claim.claimText, payload.exact_quote);
+				const independentAssessment = await this._verifyAvoClaimEvidenceIndependently(
+					candidate.candidateId,
+					claim.claimId,
+					claim.claimText,
+					payload.exact_quote,
+				);
+				const semanticAssessment = combineAvoClaimEvidenceAssessments(
+					lexicalAssessment,
+					independentAssessment.verdict,
+				);
 				const argumentDigest = createHash("sha256").update(JSON.stringify(call.arguments)).digest("hex");
 				const resultDigest = createHash("sha256")
 					.update(JSON.stringify({ content: result.content, details: result.details, isError: result.isError }))
 					.digest("hex");
-				const sourceIdentifiers = [...new Set(evidenceText.match(/https?:\/\/[^\s<>"']+/g) ?? [])].slice(0, 16);
 				const receiptDigest = createHash("sha256")
 					.update(
 						JSON.stringify({
@@ -3747,6 +4377,8 @@ export class AgentSession {
 							candidatePayloadDigest: candidate.payloadDigest,
 							claimId: claim.claimId,
 							claimText: claim.claimText,
+							lexicalRelation: lexicalAssessment.relation,
+							independentRelation: independentAssessment.verdict.relation,
 							semanticRelation: semanticAssessment.relation,
 						}),
 					)
@@ -3770,7 +4402,15 @@ export class AgentSession {
 						claim_text_digest: createHash("sha256").update(claim.claimText).digest("hex"),
 						semantic_relation: semanticAssessment.relation,
 						semantic_reason: semanticAssessment.reason,
-						semantic_verifier: "host_deterministic_claim_evidence_v1",
+						semantic_verifier: "host_bound_exact_claim_independent_rlm_v2",
+						lexical_relation: lexicalAssessment.relation,
+						lexical_reason: lexicalAssessment.reason,
+						independent_relation: independentAssessment.verdict.relation,
+						independent_reason: independentAssessment.verdict.reason,
+						independent_verifier_child_id: independentAssessment.verifierChildId ?? "unavailable",
+						independent_verifier_model: independentAssessment.verifierModel ?? "unavailable",
+						independent_response_digest: independentAssessment.responseDigest ?? "unavailable",
+						independent_verifier_error: independentAssessment.error ?? "none",
 						claim_token_coverage: semanticAssessment.claimTokenCoverage,
 						argument_digest: argumentDigest,
 						result_digest: resultDigest,
@@ -3793,11 +4433,16 @@ export class AgentSession {
 						claim_id: claim.claimId,
 						semantic_relation: semanticAssessment.relation,
 						semantic_reason: semanticAssessment.reason,
+						lexical_relation: lexicalAssessment.relation,
+						independent_relation: independentAssessment.verdict.relation,
+						verifier_child_id: independentAssessment.verifierChildId ?? null,
 					},
 				};
 			}
 			case "avo.cycle.complete": {
-				const result = runtime.completeCycle(parseAvoCycleInput(payload.cycle));
+				const cycleInput = parseAvoCycleInput(payload.cycle);
+				this._recordAvoCandidateIntegrityFailure(cycleInput.candidateId);
+				const result = runtime.completeCycle(cycleInput);
 				if (!result.activateSupervisor) return result;
 				let supervisor: { rlmChildId: string; name: string };
 				try {
@@ -3862,10 +4507,16 @@ export class AgentSession {
 				return { checkpoint: runtime.getState().checkpoints.at(-1) ?? null };
 			case "avo.stop_gate":
 				await this._collectAvoSupervisorResults();
-				return { stop_gate: runtime.evaluateStopGate() };
-			case "avo.complete":
+				return { stop_gate: this._evaluateAvoHostBoundStopGate() };
+			case "avo.complete": {
 				await this._collectAvoSupervisorResults();
-				return { state: runtime.complete() };
+				const stopGate = this._evaluateAvoHostBoundStopGate();
+				return {
+					state: runtime.getState(),
+					stop_gate: stopGate,
+					completion_deferred_to_host_delivery: true,
+				};
+			}
 			default:
 				throw new Error(`unknown AVO request type "${type}"`);
 		}
@@ -4166,6 +4817,64 @@ export class AgentSession {
 			url = new URL(location, url);
 		}
 		throw new Error(`${label} exceeded five redirects`);
+	}
+
+	private async _fetchAvoExternalSource(initialUrl: string): Promise<{
+		url: string;
+		text: string;
+		bodyDigest: string;
+		contentType: string;
+		truncated: boolean;
+	}> {
+		let parsed: URL;
+		try {
+			parsed = new URL(initialUrl);
+		} catch {
+			throw new Error("AVO external source URL is invalid");
+		}
+		const fetched = await this._fetchPublicAutoresearchUrl(
+			parsed.toString(),
+			{
+				headers: {
+					Accept: "text/html, text/plain, application/json;q=0.9",
+					"User-Agent": "Prime-Agent-AVO/0.3",
+				},
+				signal: AbortSignal.timeout(30_000),
+			},
+			"AVO external source",
+		);
+		try {
+			if (!fetched.response.ok) {
+				throw new Error(`AVO external source fetch failed with HTTP ${fetched.response.status}`);
+			}
+			const contentType = fetched.response.headers.get("content-type")?.toLowerCase() ?? "";
+			if (
+				contentType &&
+				!contentType.includes("text/html") &&
+				!contentType.includes("text/plain") &&
+				!contentType.includes("application/json") &&
+				!contentType.includes("application/xhtml+xml")
+			) {
+				throw new Error(`AVO external source content type is not textual: ${contentType}`);
+			}
+			const body = await this._readBoundedAutoresearchEvidence(fetched.response);
+			const extracted =
+				contentType.includes("html") || /^\s*</.test(body)
+					? visibleAutoresearchEvidenceText(body, false)
+					: body.replace(/\r\n?/g, "\n").trim();
+			if (!extracted) throw new Error("AVO external source contained no visible textual evidence");
+			const maxCharacters = 120_000;
+			return {
+				url: fetched.url.toString(),
+				text: extracted.slice(0, maxCharacters),
+				bodyDigest: createHash("sha256").update(body).digest("hex"),
+				contentType,
+				truncated: extracted.length > maxCharacters,
+			};
+		} finally {
+			await fetched.response.body?.cancel().catch(() => undefined);
+			await fetched.dispatcher.close();
+		}
 	}
 
 	private _sameAutoresearchDocument(left: URL, right: URL): boolean {
@@ -4795,6 +5504,8 @@ export class AgentSession {
 		if (this.queuedActionCount > 0) {
 			return [];
 		}
+		const avoContinuation = await this._getAvoCompletionContinuation(context, signal);
+		if (avoContinuation) return [avoContinuation];
 		const arrivalEpoch = this._sessionInputArrivalEpoch;
 		const goalSnapshot = this._goalState;
 		const goalAccountingStartedAt = this._goalAccountingStartedAt;
@@ -4823,6 +5534,76 @@ export class AgentSession {
 			return [];
 		}
 		return autonomousMessage ? [autonomousMessage] : [];
+	}
+
+	private async _getAvoCompletionContinuation(
+		context: GetContinuationMessagesContext,
+		signal?: AbortSignal,
+	): Promise<AgentMessage | undefined> {
+		if (
+			!this._enforceAvoCompletion ||
+			!this._avoRuntime ||
+			this._rlmDepth !== 0 ||
+			signal?.aborted ||
+			context.message.stopReason === "error" ||
+			context.message.stopReason === "aborted"
+		) {
+			return undefined;
+		}
+		const initial = this._avoRuntime.getState();
+		if (!initial.objective || initial.status !== "active") return undefined;
+		await this._collectAvoSupervisorResults();
+		const gate = this._evaluateAvoHostBoundStopGate();
+		const state = this._avoRuntime.getState();
+		const acceptedCandidateIds = new Set(
+			state.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
+		);
+		const adapter = this._avoRuntime.adapters.get(state.routing.environment);
+		const acceptedCandidate = [...state.candidates].reverse().find(
+			(candidate) =>
+				acceptedCandidateIds.has(candidate.candidateId) &&
+				adapter.deriveEvaluationState(
+					candidate,
+					state.evaluations.filter((receipt) => receipt.candidateId === candidate.candidateId),
+					state,
+				).canonical,
+		);
+		const assistantDigest = digestAvoDeliveryText(readAssistantText(context.message));
+		const deliveryMatches =
+			gate.passed &&
+			acceptedCandidate?.deliveryDigest !== undefined &&
+			assistantDigest === acceptedCandidate.deliveryDigest;
+		if (deliveryMatches) {
+			this._avoRuntime.store.complete(gate);
+			return undefined;
+		}
+		const reasons = [
+			...gate.reasons,
+			...(acceptedCandidate ? [] : ["no accepted candidate currently satisfies the verification contract"]),
+			...(gate.passed && acceptedCandidate?.deliveryDigest === undefined
+				? ["the accepted candidate predates canonical-delivery binding; record and verify a fresh candidate"]
+				: []),
+			...(gate.passed && acceptedCandidate?.deliveryDigest && assistantDigest !== acceptedCandidate.deliveryDigest
+				? ["the assistant text does not exactly match the accepted candidate's canonical delivery"]
+				: []),
+		];
+		const content = [
+			"<avo_completion_required>",
+			"The host blocked task completion. Continue working now; do not ask the user to re-prompt you.",
+			`Task run: ${state.runId}`,
+			`Blocking conditions: ${reasons.join("; ") || "canonical delivery is incomplete"}`,
+			"Use the avo skill automatically to record a candidate, obtain the required host-issued evidence, complete its cycle, and inspect the stop gate.",
+			"Once the gate passes, return only the exact canonical delivery for the accepted candidate: general tasks use the candidate payload text, deterministic arithmetic uses the numeric result, and coding/research use the candidate summary. Do not add a preface, suffix, or unverified claim.",
+			"</avo_completion_required>",
+		].join("\n");
+		return {
+			role: "custom",
+			customType: "avo_completion_required",
+			content,
+			display: true,
+			details: { runId: state.runId, gatePassed: gate.passed, reasons },
+			timestamp: Date.now(),
+		};
 	}
 
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
@@ -6382,6 +7163,7 @@ export class AgentSession {
 				if (!isInternalPrompt && options?.skipPrePromptWork !== true && this._avoRuntime) {
 					this._avoRuntime.observeRootPrompt(normalized.text);
 					this._ensureAvoCodingVerificationBaseline();
+					this._ensureAvoArtifactVerificationBaseline();
 					this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 					this.agent.state.systemPrompt = this._baseSystemPrompt;
 				}
@@ -10692,7 +11474,12 @@ export class AgentSession {
 				"avo.configure",
 				"avo.candidate.add",
 				"avo.evaluation.record",
+				"avo.external.fetch",
+				"avo.verification.baseline.run",
+				"avo.evaluation.deterministic",
+				"avo.evaluation.artifacts",
 				"avo.evaluation.run",
+				"avo.evaluation.url",
 				"avo.evaluation.tool_result",
 				"avo.cycle.complete",
 				"avo.results.collect",
@@ -10862,6 +11649,7 @@ export class AgentSession {
 		sessionDir: string;
 		model: Model<any>;
 		thinkingLevel?: ThinkingLevel;
+		allowedToolNames?: string[];
 	}): CreateRlmSubagentRuntimeOptions {
 		return {
 			parentSession: this,
@@ -10877,7 +11665,8 @@ export class AgentSession {
 				this.serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : this.serviceTier,
 			scopedModels: [...this._scopedModels],
 			activeToolNames: this.getActiveToolNames(),
-			allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
+			allowedToolNames:
+				options.allowedToolNames ?? (this._allowedToolNames ? [...this._allowedToolNames] : undefined),
 			customTools: [...this._customTools],
 			includeGoals: this._includeGoals,
 			includeCompactSkill: this._includeCompactSkill,
@@ -11776,6 +12565,7 @@ export class AgentSession {
 		prompt: string,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
+		internalOptions: { allowedToolNames?: string[] } = {},
 	): Promise<RlmSpawnHandle> {
 		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
@@ -11890,6 +12680,7 @@ export class AgentSession {
 				sessionDir: childSessionDir,
 				model: modelSelection.model,
 				thinkingLevel: requestedThinkingLevel,
+				allowedToolNames: internalOptions.allowedToolNames,
 			}),
 			onSessionPublished: publishChildSession,
 		};

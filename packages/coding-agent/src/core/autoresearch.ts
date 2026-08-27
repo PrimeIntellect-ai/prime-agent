@@ -690,7 +690,7 @@ function autoresearchHtmlTagEnd(source: string, start: number): number {
 	return -1;
 }
 
-function visibleAutoresearchEvidenceText(source: string): string {
+export function visibleAutoresearchEvidenceText(source: string, lowercase = true): string {
 	const asciiLowerSource = source.replace(/[A-Z]/g, (character) => character.toLowerCase());
 	const suppressedTags = new Set(["script", "style"]);
 	const blockTags = new Set([
@@ -820,9 +820,8 @@ function visibleAutoresearchEvidenceText(source: string): string {
 		.replace(/[^\S\n]+/g, " ")
 		.replace(/ *\n */g, "\n")
 		.replace(/\n{2,}/g, "\n")
-		.trim()
-		.toLowerCase();
-	return visible;
+		.trim();
+	return lowercase ? visible.toLowerCase() : visible;
 }
 
 export function hasApplicablePeerReviewEvidence(documentText: string, exactQuote: string): boolean {

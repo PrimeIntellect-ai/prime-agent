@@ -26,6 +26,7 @@ class AvoSkillTest(unittest.TestCase):
         module = load_skill("avo_contract_test")
         contract = module.execution_contract()
         self.assertTrue(contract["forbid_runtime_introspection"])
+        self.assertTrue(contract["host_enforces_completion_and_canonical_delivery"])
         self.assertIn("callers may issue only model_opinion", contract["canonical_rule"])
         self.assertIn("every factual claim", contract["factual_claim_rule"])
         self.assertIn("cannot certify themselves", contract["coding_test_rule"])
@@ -42,7 +43,18 @@ class AvoSkillTest(unittest.TestCase):
             host.await_args_list[0].args[1],
             {"objective": "Fix the parser"},
         )
-        self.assertEqual(result["execution_contract"]["contract_version"], 3)
+        self.assertEqual(result["execution_contract"]["contract_version"], 6)
+
+    def test_coding_baseline_runs_through_the_host_before_candidate_work(self) -> None:
+        module = load_skill("avo_coding_baseline_test")
+        host = AsyncMock(return_value={"execution": {"meaningful": True}})
+        with patch.object(module, "host_request", host):
+            result = asyncio.run(module.run_coding_baseline("python -m pytest -q"))
+        self.assertTrue(result["execution"]["meaningful"])
+        self.assertEqual(
+            host.await_args.args,
+            ("avo.verification.baseline.run", {"command": "python -m pytest -q"}),
+        )
 
     def test_model_configure_can_only_escalate_horizon(self) -> None:
         module = load_skill("avo_configure_test")
@@ -101,6 +113,23 @@ class AvoSkillTest(unittest.TestCase):
                 )
             )
 
+    def test_deterministic_and_artifact_evaluations_use_dedicated_host_contracts(self) -> None:
+        module = load_skill("avo_bound_general_evaluations_test")
+        self.assertIn("verify_deterministic_result", module.__all__)
+        self.assertIn("verify_artifacts", module.__all__)
+        host = AsyncMock(side_effect=[{"evaluation": {"status": "pass"}}, {"evaluation": {"status": "pass"}}])
+        with patch.object(module, "host_request", host):
+            asyncio.run(module.verify_deterministic_result("calculation-1"))
+            asyncio.run(module.verify_artifacts("report-1"))
+        self.assertEqual(
+            host.await_args_list[0].args,
+            ("avo.evaluation.deterministic", {"candidate_id": "calculation-1"}),
+        )
+        self.assertEqual(
+            host.await_args_list[1].args,
+            ("avo.evaluation.artifacts", {"candidate_id": "report-1"}),
+        )
+
     def test_external_tool_binding_uses_a_host_resolved_tool_call(self) -> None:
         module = load_skill("avo_tool_receipt_test")
         host = AsyncMock(return_value={"evaluation": {"issuedBy": "host"}})
@@ -122,6 +151,40 @@ class AvoSkillTest(unittest.TestCase):
                     "candidate_id": "answer-1",
                     "claim_id": "version-claim",
                     "tool_call_id": "web-search-1",
+                    "exact_quote": "The current version is 1.2.3.",
+                },
+            ),
+        )
+
+    def test_external_url_fetch_and_binding_use_host_https_requests(self) -> None:
+        module = load_skill("avo_url_receipt_test")
+        host = AsyncMock(
+            side_effect=[
+                {"source": {"url": "https://example.com/source"}},
+                {"evaluation": {"issuedBy": "host"}},
+            ]
+        )
+        with patch.object(module, "host_request", host):
+            source = asyncio.run(module.fetch_external_source("https://example.com/source"))
+            receipt = asyncio.run(
+                module.bind_url(
+                    "answer-1",
+                    "version-claim",
+                    "https://example.com/source",
+                    "The current version is 1.2.3.",
+                )
+            )
+        self.assertEqual(source["source"]["url"], "https://example.com/source")
+        self.assertEqual(receipt["evaluation"]["issuedBy"], "host")
+        self.assertEqual(host.await_args_list[0].args[0], "avo.external.fetch")
+        self.assertEqual(
+            host.await_args_list[1].args,
+            (
+                "avo.evaluation.url",
+                {
+                    "candidate_id": "answer-1",
+                    "claim_id": "version-claim",
+                    "url": "https://example.com/source",
                     "exact_quote": "The current version is 1.2.3.",
                 },
             ),

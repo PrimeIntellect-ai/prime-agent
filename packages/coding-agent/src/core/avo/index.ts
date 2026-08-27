@@ -8,6 +8,14 @@ export {
 } from "./adapters.js";
 export { evaluateAvoCheckpoint } from "./checkpoint.js";
 export {
+	type AvoIndependentClaimVerdict,
+	assertAvoClaimVerifierQuoteSafe,
+	avoClaimVerifierMarker,
+	buildAvoClaimVerifierPrompt,
+	combineAvoClaimEvidenceAssessments,
+	parseAvoClaimVerifierMessage,
+} from "./claim-verifier.js";
+export {
 	AVO_HOST_COMMAND_EVALUATORS,
 	type AvoClaimEvidenceAssessment,
 	type AvoDerivedEvaluation,
@@ -17,13 +25,21 @@ export {
 	assessAvoClaimEvidence,
 	assessAvoHostCommand,
 	classifyAvoHostEvaluationCommand,
+	deriveAvoDeterministicArithmeticContract,
 	deriveAvoEvaluation,
 	evaluateGenericAvoStopGate,
 	isAuthoritativeAvoEvaluation,
 } from "./evaluator.js";
+export {
+	type AvoCandidateIntegrityAssessment,
+	assessAvoCandidateIntegrity,
+	reconcileAvoIntegrityForProjection,
+} from "./integrity.js";
 export { AvoSessionRuntime, buildAvoRuntimePrompt } from "./runtime.js";
 export {
 	AvoStore,
+	digestAvoDeliveryText,
+	digestAvoPayload,
 	inferAvoEnvironment,
 	inferAvoHorizon,
 	inferAvoVerificationPolicy,
@@ -44,6 +60,7 @@ export {
 	type AvoTestTrustAssessment,
 	type AvoWorkspaceSnapshot,
 	assessAvoTestTrust,
+	captureAvoArtifactPathBaseline,
 	captureAvoCodingVerificationBaseline,
 	captureAvoWorkspaceSnapshot,
 } from "./workspace.js";
