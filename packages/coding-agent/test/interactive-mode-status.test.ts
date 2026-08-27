@@ -1457,6 +1457,8 @@ describe("InteractiveMode connection events", () => {
 			InteractiveMode.prototype as unknown as { rebindCurrentSession(this: InteractiveMode): Promise<void> }
 		).rebindCurrentSession;
 		const updatePendingMessagesDisplay = vi.fn();
+		const subscribeToAgent = vi.fn();
+		const getState = vi.fn(async () => createConnectionState());
 		const harness = {
 			unsubscribe: undefined,
 			localSessionHost: undefined,
@@ -1464,7 +1466,10 @@ describe("InteractiveMode connection events", () => {
 			applyRuntimeSettings: vi.fn(),
 			bindLocalSessionExtensions: true,
 			bindCurrentSessionExtensions: vi.fn(async () => {}),
-			subscribeToAgent: vi.fn(),
+			subscribeToAgent,
+			agentConnection: { getState },
+			patchConnectionState: vi.fn(),
+			refreshQueueSelectionFromState: vi.fn(),
 			updatePendingMessagesDisplay,
 			refreshHeartbeatCatalog: vi.fn(async () => {
 				throw new Error("heartbeat unavailable");
@@ -1480,6 +1485,10 @@ describe("InteractiveMode connection events", () => {
 
 		await expect(rebindCurrentSession.call(harness)).resolves.toBeUndefined();
 		expect(updatePendingMessagesDisplay).toHaveBeenCalledOnce();
+		// The queue re-sync must run after subscribing, or updates in the gap are lost.
+		expect(getState.mock.invocationCallOrder[0]).toBeGreaterThan(
+			subscribeToAgent.mock.invocationCallOrder[0] as number,
+		);
 	});
 
 	test("restores in-flight assistant state on every session render", async () => {
@@ -3192,6 +3201,7 @@ describe("InteractiveMode session switch command catalog", () => {
 				resetExtensionUI: vi.fn(),
 				applyConnectionStateSnapshot: vi.fn(),
 				resetCurrentSessionRenderState: vi.fn(() => calls.push("reset")),
+				queueSelection: { selected: undefined },
 				setupAutocompleteProvider: vi.fn(() => calls.push("catalog")),
 				renderInitialMessages: vi.fn(async () => {
 					calls.push("render");

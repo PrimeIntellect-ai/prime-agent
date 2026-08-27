@@ -2799,6 +2799,9 @@ export class InteractiveMode {
 			this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 		}
 		this.subscribeToAgent();
+		// A session_action_update in the unsubscribed gap above is lost; re-sync the queue post-subscription.
+		this.patchConnectionState({ sessionActions: (await this.agentConnection.getState()).sessionActions });
+		this.refreshQueueSelectionFromState();
 		this.updatePendingMessagesDisplay();
 		await this.refreshHeartbeatCatalog().catch(() => undefined);
 		await this.updateAvailableProviderCount();
@@ -6993,7 +6996,7 @@ export class InteractiveMode {
 	}
 
 	private browseQueueSelection(direction: -1 | 1): void {
-		if (this.pendingQueueEdit) return;
+		if (this.pendingQueueEdit || this.pendingQueueMove) return;
 		const text = this.queueSelection.move(this.getConnectionQueue(), this.editor.getText(), direction);
 		if (text === undefined) return;
 		this.setEditorTextFromQueueSelection(text);
@@ -7018,6 +7021,7 @@ export class InteractiveMode {
 			const selected = this.queueSelection.selected;
 			if (!selected) return;
 			this.pendingQueueMove = true;
+			const actionsBefore = this.connectionState?.sessionActions;
 			try {
 				const status = await this.agentConnection.mutateQueuedMessage(
 					selected.lane,
@@ -7031,6 +7035,19 @@ export class InteractiveMode {
 				if (sessionGeneration !== this.sessionEventGeneration) return;
 				await this.sessionEventQueue;
 				if (sessionGeneration !== this.sessionEventGeneration) return;
+				// The move's event can land after the response; mirror it locally (events assign a fresh sessionActions).
+				if (status === "applied" && actionsBefore && this.connectionState?.sessionActions === actionsBefore) {
+					const queue = this.getConnectionQueue();
+					const lane = queue[selected.lane];
+					const target = selected.index + direction;
+					if (lane[selected.index] === selected.text && target >= 0 && target < lane.length) {
+						[lane[selected.index], lane[target]] = [lane[target] as string, selected.text];
+						this.patchConnectionState({
+							sessionActions: { ...actionsBefore, steering: queue.steering, followUps: queue.followUp },
+						});
+						this.updatePendingMessagesDisplay();
+					}
+				}
 				this.refreshQueueSelectionAt(
 					this.getConnectionQueue(),
 					selected,
@@ -7044,6 +7061,7 @@ export class InteractiveMode {
 			}
 		}).catch((error) => {
 			if (sessionGeneration === this.sessionEventGeneration) {
+				this.refreshQueueSelectionFromState();
 				this.showError(error instanceof Error ? error.message : String(error));
 			}
 		});
@@ -7134,7 +7152,11 @@ export class InteractiveMode {
 			this.ui.requestRender();
 			return true;
 		}).finally(() => {
-			if (this.pendingQueueEdit === pendingQueueEdit) this.pendingQueueEdit = undefined;
+			if (this.pendingQueueEdit === pendingQueueEdit) {
+				this.pendingQueueEdit = undefined;
+				// Queue events were not reconciled while the edit was pending; drop a now-stale selection.
+				this.refreshQueueSelectionFromState();
+			}
 		});
 	}
 

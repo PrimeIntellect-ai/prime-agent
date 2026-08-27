@@ -502,6 +502,91 @@ describe("interactive queued-message editing", () => {
 		});
 	});
 
+	it("ignores browse keys while a queue move is pending", async () => {
+		let resolveMutation: (status: string) => void = () => {};
+		const harness = createHarness({ steering: ["s1", "s2"], followUp: [] });
+		harness.agentConnection.mutateQueuedMessage.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					resolveMutation = resolve;
+				}),
+		);
+		harness.editor.setText("draft");
+		harness.browseQueueSelection(-1);
+		harness.moveQueueSelection(-1);
+		await vi.waitFor(() => expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenCalledOnce());
+
+		harness.browseQueueSelection(-1);
+		expect(harness.editor.getText()).toBe("s2");
+
+		resolveMutation("applied");
+		await harness.queueMutationChain;
+		expect(harness.queueSelection.selected).toEqual({ lane: "steering", index: 0, text: "s2" });
+	});
+
+	it("keeps the moved selection when the queue event lands after the response", async () => {
+		const harness = createHarness({ steering: ["s1", "s2"], followUp: [] });
+		harness.editor.setText("draft");
+		harness.browseQueueSelection(-1);
+		harness.moveQueueSelection(-1);
+		await harness.queueMutationChain;
+
+		expect(harness.getConnectionQueue()).toEqual({ steering: ["s2", "s1"], followUp: [] });
+		expect(harness.queueSelection.selected).toEqual({ lane: "steering", index: 0, text: "s2" });
+
+		emitQueueUpdate(harness, { steering: ["s2", "s1"], followUp: [] });
+		expect(harness.queueSelection.selected).toEqual({ lane: "steering", index: 0, text: "s2" });
+		expect(harness.editor.getText()).toBe("s2");
+	});
+
+	it("drops a stale selection after a rejected edit so enter returns to normal submission", async () => {
+		let resolveMutation: (status: string) => void = () => {};
+		const harness = createHarness({ steering: ["queued"], followUp: [] });
+		harness.agentConnection.mutateQueuedMessage.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					resolveMutation = resolve;
+				}),
+		);
+		harness.editor.setText("draft");
+		harness.browseQueueSelection(-1);
+		harness.editor.setText("");
+		const pending = harness.applyQueueSelection("edited", "steering");
+		await vi.waitFor(() => expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenCalledOnce());
+
+		// The item is consumed while the edit is pending; event reconciliation is suppressed.
+		emitQueueUpdate(harness, { steering: [], followUp: [] });
+		resolveMutation("rejected");
+		await pending;
+
+		expect(harness.queueSelection.isBrowsing).toBe(false);
+		expect(harness.editor.getText()).toBe("edited");
+		await expect(harness.applyQueueSelection("edited", "steering")).resolves.toBe(false);
+		expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenCalledOnce();
+	});
+
+	it("drops a stale selection when a move request fails after the item was consumed", async () => {
+		let rejectMutation: (error: Error) => void = () => {};
+		const harness = createHarness({ steering: ["s1", "s2"], followUp: [] });
+		harness.agentConnection.mutateQueuedMessage.mockImplementation(
+			() =>
+				new Promise((_resolve, reject) => {
+					rejectMutation = reject;
+				}),
+		);
+		harness.editor.setText("draft");
+		harness.browseQueueSelection(-1);
+		harness.moveQueueSelection(-1);
+		await vi.waitFor(() => expect(harness.agentConnection.mutateQueuedMessage).toHaveBeenCalledOnce());
+
+		emitQueueUpdate(harness, { steering: ["s1"], followUp: [] });
+		rejectMutation(new Error("connection lost"));
+		await vi.waitFor(() => expect(harness.showError).toHaveBeenCalledWith("connection lost"));
+
+		expect(harness.queueSelection.isBrowsing).toBe(false);
+		expect(harness.editor.getText()).toBe("draft");
+	});
+
 	it("deduplicates repeated image markers in a replace", () => {
 		const harness = createHarness({ steering: [], followUp: [] });
 		harness.pastedImages.set(1, { type: "image", data: "a", mimeType: "image/png" });
