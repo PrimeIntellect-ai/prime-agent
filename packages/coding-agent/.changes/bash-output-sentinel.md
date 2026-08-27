@@ -1,0 +1,1 @@
+- Fixed `bash()` to capture all foreground output before finalizing results by using an ordered per-command completion marker.
