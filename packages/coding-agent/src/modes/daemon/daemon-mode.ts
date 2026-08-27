@@ -4309,7 +4309,7 @@ export class AgentDaemon {
 					transient: command.transient,
 					runId: command.runId,
 				});
-				state.inFlightBash = bash.catch(() => undefined);
+				state.inFlightBash = Promise.allSettled([state.inFlightBash, bash]).then(() => undefined);
 				void bash.catch((error) => {
 					this.broadcastToSession(state, failure(undefined, "execute_bash", error, serializeDaemonError(error)));
 				});
@@ -4319,10 +4319,7 @@ export class AgentDaemon {
 			case "execute_bash_and_wait": {
 				const state = this.getSessionState(command.activeSessionId);
 				const bash = state.runtime.session.executeBash(command.command);
-				state.inFlightBash = bash.then(
-					() => undefined,
-					() => undefined,
-				);
+				state.inFlightBash = Promise.allSettled([state.inFlightBash, bash]).then(() => undefined);
 				return success(command.id, "execute_bash_and_wait", await bash);
 			}
 
