@@ -990,7 +990,6 @@ export class InteractiveMode {
 	private connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
 	private connectionState: AgentConnectionState | undefined;
 	private connectionResourceSnapshot: AgentConnectionResourceSnapshot | undefined;
-	private sessionHasMessages = false;
 	private heartbeatCatalog: AgentConnectionHeartbeat[] = [];
 	private heartbeats: AgentConnectionHeartbeat[] = [];
 	private heartbeatRefreshPromise: Promise<void> | undefined;
@@ -1610,7 +1609,7 @@ export class InteractiveMode {
 			// The agents view owns these for daemon sessions. When there is no agents view,
 			// show them once at the top of a fresh session, but never append them under a
 			// restored conversation where they read as disconnected clutter.
-			if (!ownsGlobalStartupNotices || this.sessionHasMessages) {
+			if (!ownsGlobalStartupNotices || !this.isNewChat()) {
 				return;
 			}
 
@@ -2657,9 +2656,24 @@ export class InteractiveMode {
 			return;
 		}
 		switch (event.type) {
-			case "agent_start":
+			case "agent_start": {
+				const wasNewChat = this.isNewChat();
 				this.patchConnectionState({ isStreaming: true, activeToolNames: [] });
+				if (wasNewChat) {
+					this.builtInHeader?.invalidate();
+					this.subagentSummaryLine.invalidate();
+				}
 				break;
+			}
+			case "message_end": {
+				const wasNewChat = this.isNewChat();
+				this.patchConnectionState({ messageCount: this.connectionState.messageCount + 1 });
+				if (wasNewChat) {
+					this.builtInHeader?.invalidate();
+					this.subagentSummaryLine.invalidate();
+				}
+				break;
+			}
 			case "agent_end":
 				this.patchConnectionState({ isStreaming: false, activeToolNames: [] });
 				break;
@@ -5331,7 +5345,6 @@ export class InteractiveMode {
 		}
 		if (event.type === "message_start" && (event.message.role === "user" || isAgentSessionMessage(event.message))) {
 			this.contextUsageTokenBaseline = 0;
-			this.setSessionHasMessages(true);
 			this.clearShortcutGuide();
 			this.agentRunFileChanges.clear();
 			this.renderRecap();
@@ -6050,16 +6063,7 @@ export class InteractiveMode {
 	}
 
 	private isNewChat(): boolean {
-		return !this.sessionHasMessages;
-	}
-
-	private setSessionHasMessages(hasMessages: boolean): void {
-		if (this.sessionHasMessages === hasMessages) {
-			return;
-		}
-		this.sessionHasMessages = hasMessages;
-		this.builtInHeader?.invalidate();
-		this.subagentSummaryLine.invalidate();
+		return (this.connectionState?.messageCount ?? 0) === 0 && this.connectionState?.isStreaming !== true;
 	}
 
 	private getModelTrayLabel(): string {
@@ -6579,7 +6583,6 @@ export class InteractiveMode {
 		const streamingMessage = snapshot.streamingMessage;
 		this.rlmNodeId = snapshot.parent?.childId;
 		this.seedSubagentSummary(snapshot.children);
-		this.setSessionHasMessages(context.messages.length > 0);
 		this.applyConnectionStateSnapshot(state);
 		this.restoreTurnStartFromMessages(context.messages);
 		await this.renderSessionContext(context, {

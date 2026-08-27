@@ -711,7 +711,6 @@ describe("InteractiveMode working timer", () => {
 				model: null,
 			})),
 			seedSubagentSummary: vi.fn(),
-			setSessionHasMessages: vi.fn(),
 			applyConnectionStateSnapshot: vi.fn((state: AgentConnectionState) => {
 				streaming = state.isStreaming;
 			}),
@@ -1524,7 +1523,6 @@ describe("InteractiveMode connection events", () => {
 				model: null,
 			})),
 			seedSubagentSummary: vi.fn(),
-			setSessionHasMessages: vi.fn(),
 			applyConnectionStateSnapshot: vi.fn(),
 			renderSessionContext: renderSessionContextMock,
 			restoreStreamingMessageFromSnapshot,
@@ -3285,7 +3283,7 @@ describe("InteractiveMode Prime CLI onboarding", () => {
 			showWarning: vi.fn(),
 			showError: vi.fn(),
 			getCurrentCwd: () => startupRunResult.source.cwd,
-			sessionHasMessages: false,
+			connectionState: { messageCount: 0 },
 			...overrides,
 		};
 	}
