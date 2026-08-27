@@ -279,6 +279,26 @@ describe("daemon mode helpers", () => {
 		expect(releaseAcpMcpServers).toHaveBeenLastCalledWith("other-token", ["other"]);
 	});
 
+	it("fails fast on unknown worker commands instead of dropping them", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-unknown-worker-command.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const internals = daemon as unknown as {
+			handleWorkerCommand(client: DaemonSocketClient, command: unknown): Promise<void>;
+			write: ReturnType<typeof vi.fn>;
+		};
+		internals.write = vi.fn();
+		const client = makeClient("legacy-supervisor", "active");
+
+		await internals.handleWorkerCommand(client, { id: "legacy-1", type: "worker_sync_agent_peers", peers: [] });
+
+		expect(internals.write).toHaveBeenCalledWith(
+			client,
+			expect.objectContaining({ id: "legacy-1", command: "worker_sync_agent_peers", success: false }),
+		);
+	});
+
 	it("cancels pending extension UI requests directly", () => {
 		const resolve = vi.fn();
 		const state = {

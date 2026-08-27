@@ -3598,6 +3598,12 @@ export class AgentDaemon {
 					this.writeWorkerSuccess(client, command);
 					return;
 				}
+				default: {
+					// Legacy commands from older supervisors (e.g. worker_sync_agent_peers) must fail fast, not time out.
+					const unknown = command as { id?: string; type: string };
+					this.write(client, failure(unknown.id, unknown.type, `Unknown worker command: ${unknown.type}`));
+					return;
+				}
 			}
 		} catch (error) {
 			this.write(client, failure(command.id, command.type, error, serializeDaemonError(error)));
