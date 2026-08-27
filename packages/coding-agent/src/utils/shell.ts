@@ -106,6 +106,34 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 	return { shell: "sh", args: ["-c"] };
 }
 
+// Hardcoded literals: ProgramFiles env vars are ambient attacker-influenceable
+// input, the same trust-laundering class as PATH.
+const WINDOWS_GIT_BASH_PATHS = ["C:\\Program Files\\Git\\bin\\bash.exe", "C:\\Program Files (x86)\\Git\\bin\\bash.exe"];
+
+/**
+ * Absolute default shell for the kernel's bash(): explicit shellPath wins; POSIX
+ * uses /bin/bash else /bin/sh (absolute, never PATH — the kernel inherits a
+ * user-influenced PATH); win32 uses only the canonical Git Bash install paths,
+ * never PATH (a repo-controlled PATH/where.exe must not pick the kernel shell).
+ * undefined = no shell found: kernel startup must not fail, bash() raises its
+ * teaching error.
+ */
+export function resolveKernelBashShell(customShellPath?: string): string | undefined {
+	const explicit = customShellPath?.trim();
+	if (explicit) {
+		return explicit;
+	}
+	if (process.platform !== "win32") {
+		return existsSync("/bin/bash") ? "/bin/bash" : "/bin/sh";
+	}
+	for (const path of WINDOWS_GIT_BASH_PATHS) {
+		if (existsSync(path)) {
+			return path;
+		}
+	}
+	return undefined;
+}
+
 export function getShellEnv(): NodeJS.ProcessEnv {
 	const binDir = getBinDir();
 	const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === "path") ?? "PATH";

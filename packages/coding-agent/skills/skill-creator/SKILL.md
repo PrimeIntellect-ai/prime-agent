@@ -1,6 +1,6 @@
 ---
 name: skill-creator
-description: Create, validate, and install Prime Agent skills - both markdown skills and Python-backed skills callable from the IPython kernel. Use when the user asks to create a skill, turn a workflow, script, or prompt into a reusable skill, add a Python skill the agent can call, or asks how to write a SKILL.md and where skills live.
+description: Create, validate, and install Prime Agent skills - both markdown skills and Python-backed skills callable from the Python kernel. Use when the user asks to create a skill, turn a workflow, script, or prompt into a reusable skill, add a Python skill the agent can call, or asks how to write a SKILL.md and where skills live.
 ---
 
 # Skill Creator
@@ -10,7 +10,7 @@ A skill is a directory with a `SKILL.md` file (YAML frontmatter + markdown instr
 | Kind | What it is | When to use |
 |---|---|---|
 | markdown | `SKILL.md` plus optional scripts, references, and assets | Workflows, CLI recipes, domain knowledge, multi-step instructions |
-| python | A markdown skill that also ships a Python package installed into the agent's persistent IPython kernel | Capabilities that are naturally one Python call: API wrappers, fetchers, converters, computations |
+| python | A markdown skill that also ships a Python package installed into the agent's persistent Python kernel | Capabilities that are naturally one Python call: API wrappers, fetchers, converters, computations |
 
 Before writing a Python-backed skill, read [references/python-skills.md](references/python-skills.md) for the package contract.
 
