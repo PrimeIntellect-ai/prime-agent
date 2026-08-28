@@ -6,9 +6,6 @@ export const DEFAULT_MAX_OUTPUT_CHARS = 65536;
 export const HOST_REQUEST_DISPOSE_TIMEOUT_MS = 5000;
 export const KERNEL_SHUTDOWN_TIMEOUT_MS = 5000;
 export const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
-// Cap how long a graceful dispose waits on the final snapshot; the debounced
-// on-disk copy is the fallback if this is exceeded.
-export const SNAPSHOT_DISPOSE_TIMEOUT_MS = 5000;
 export const SNAPSHOT_EXECUTION_TIMEOUT_MS = 5000;
 export const KERNEL_ABORT_GRACE_MS = 1000;
 export const KERNEL_BUSY_REUSE_WAIT_MS = 5000;

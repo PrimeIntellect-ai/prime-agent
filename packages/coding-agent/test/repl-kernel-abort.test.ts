@@ -216,7 +216,7 @@ describe("ReplKernelManager abort handling", () => {
 		manager.disposeSync();
 	});
 
-	it("starts the snapshot timeout after earlier kernel work finishes", async () => {
+	it("cancels a hung final snapshot execution before teardown", async () => {
 		vi.useFakeTimers();
 		const manager = new ReplKernelManager({
 			cwd: process.cwd(),
@@ -240,33 +240,156 @@ describe("ReplKernelManager abort handling", () => {
 					);
 				}),
 		);
+		const cleanupResources = vi.fn();
 		Object.assign(
 			manager as unknown as {
 				state: "running";
 				executionQueue: Promise<void>;
 				executeInner: typeof executeInner;
 				start: () => Promise<void>;
+				cleanupResources: () => void;
 			},
-			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {} },
+			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {}, cleanupResources },
 		);
 
-		const snapshot = (
-			manager as unknown as {
-				captureSnapshot: (options?: { executionTimeoutMs?: number }) => Promise<unknown>;
-			}
-		).captureSnapshot({ executionTimeoutMs: 5000 });
-		await vi.advanceTimersByTimeAsync(5000);
+		const disposal = manager.dispose();
 		expect(executeInner).not.toHaveBeenCalled();
-
 		releaseQueue();
 		await waitForCalls(executeInner, 1);
 		const signal = executeInner.mock.calls[0]?.[2].signal;
 		expect(signal?.aborted).toBe(false);
 		await vi.advanceTimersByTimeAsync(4999);
 		expect(signal?.aborted).toBe(false);
+		expect(cleanupResources).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(1);
+
 		expect(signal?.aborted).toBe(true);
-		await expect(snapshot).resolves.toBeNull();
+		await expect(disposal).resolves.toBeUndefined();
+		expect(cleanupResources).toHaveBeenCalledOnce();
+	});
+
+	it("tears down when the final snapshot is blocked behind a hung execution", async () => {
+		vi.useFakeTimers();
+		const manager = new ReplKernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+		});
+		const executeInner = vi.fn();
+		const interrupt = vi.fn(async () => {});
+		const cleanupResources = vi.fn();
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				executionQueue: Promise<void>;
+				activeExecution: object;
+				executeInner: typeof executeInner;
+				interrupt: typeof interrupt;
+				cleanupResources: () => void;
+			},
+			{
+				state: "running",
+				executionQueue: new Promise<void>(() => {}),
+				activeExecution: {},
+				executeInner,
+				interrupt,
+				cleanupResources,
+			},
+		);
+
+		const disposal = manager.dispose();
+		expect(interrupt).toHaveBeenCalledOnce();
+		await vi.advanceTimersByTimeAsync(4999);
+		expect(cleanupResources).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
+
+		await expect(disposal).resolves.toBeUndefined();
+		expect(executeInner).not.toHaveBeenCalled();
+		expect(cleanupResources).toHaveBeenCalledOnce();
+	});
+
+	it("rejects executions enqueued during the final snapshot flush so dispose stays bounded", async () => {
+		vi.useFakeTimers();
+		const manager = new ReplKernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+		});
+		let releaseQueue: () => void = () => {};
+		const previousExecution = new Promise<void>((resolve) => {
+			releaseQueue = resolve;
+		});
+		const executeInner = vi.fn(
+			async (
+				_requestFields: Record<string, unknown>,
+				_code: string,
+				opts: { signal?: AbortSignal },
+			): Promise<{ stdout: string; stderr: string; status: "aborted"; durationMs: number }> =>
+				await new Promise((resolve) => {
+					opts.signal?.addEventListener(
+						"abort",
+						() => resolve({ stdout: "", stderr: "", status: "aborted", durationMs: 5000 }),
+						{ once: true },
+					);
+				}),
+		);
+		const cleanupResources = vi.fn();
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				executionQueue: Promise<void>;
+				executeInner: typeof executeInner;
+				start: () => Promise<void>;
+				cleanupResources: () => void;
+			},
+			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {}, cleanupResources },
+		);
+
+		const disposal = manager.dispose();
+		// A cell arriving mid-flush must not splice ahead of the final snapshot.
+		await expect(manager.execute("1 + 1")).rejects.toThrow("Kernel is shutting down");
+		releaseQueue();
+		await waitForCalls(executeInner, 1);
+		expect(executeInner.mock.calls[0]?.[0].type).toBe("snapshot");
+		await vi.advanceTimersByTimeAsync(5000);
+
+		await expect(disposal).resolves.toBeUndefined();
+		expect(executeInner).toHaveBeenCalledOnce();
+		expect(cleanupResources).toHaveBeenCalledOnce();
+	});
+
+	it("joins concurrent teardowns into a single final snapshot flush", async () => {
+		const manager = new ReplKernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+		});
+		const executeInner = vi.fn(
+			async (
+				_requestFields: Record<string, unknown> & { type: string },
+			): Promise<{ stdout: string; stderr: string; status: "ok"; durationMs: number }> => ({
+				stdout: "",
+				stderr: "",
+				status: "ok",
+				durationMs: 0,
+			}),
+		);
+		const cleanupResources = vi.fn();
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				executionQueue: Promise<void>;
+				executeInner: typeof executeInner;
+				start: () => Promise<void>;
+				cleanupResources: () => void;
+			},
+			{ state: "running", executionQueue: Promise.resolve(), executeInner, start: async () => {}, cleanupResources },
+		);
+
+		// A session dispose racing a signal-handler shutdown must share one final
+		// flush instead of queueing a second snapshot behind the first.
+		await Promise.all([manager.dispose(), manager.shutdown({ snapshot: true })]);
+
+		const snapshotRequests = executeInner.mock.calls.filter((call) => call[0].type === "snapshot");
+		expect(snapshotRequests).toHaveLength(1);
+		expect(cleanupResources).toHaveBeenCalled();
 	});
 
 	it("routes null-id and stale-id stream events into backgroundOutput, not stdout", async () => {

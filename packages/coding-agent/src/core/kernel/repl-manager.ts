@@ -37,7 +37,6 @@ import {
 	parseDiffDisplay,
 	parseSentAgentMessage,
 	raceStartupWithAbort,
-	SNAPSHOT_DISPOSE_TIMEOUT_MS,
 	SNAPSHOT_EXECUTION_TIMEOUT_MS,
 } from "./shared.js";
 import {
@@ -162,6 +161,10 @@ export class ReplKernelManager {
 	private startPromise?: Promise<void>;
 	/** Pending debounced auto-snapshot, if one has been scheduled. */
 	private snapshotTimer?: ReturnType<typeof globalThis.setTimeout>;
+	/** While the final dispose snapshot is flushing, new external executions are rejected. */
+	private flushingSnapshotForDispose = false;
+	/** In-flight final snapshot flush; concurrent teardowns join it instead of re-flushing. */
+	private snapshotFlushForDispose?: Promise<void>;
 	/** Repairs a child whose dedicated protocol stream emitted an invalid frame. */
 	private protocolRepairPromise?: Promise<void>;
 	private protocolRepairOwner?: { superseded: boolean };
@@ -687,6 +690,9 @@ export class ReplKernelManager {
 		await this.start({ signal: opts.signal });
 		if ((this.state as string) === "shutdown") {
 			throw new Error("Kernel has been shut down");
+		}
+		if (this.flushingSnapshotForDispose && !opts.internal) {
+			throw new Error("Kernel is shutting down");
 		}
 		if (!opts.protocolRepair) await this.ensureKernelRebootstrapped(opts.signal);
 
@@ -1355,18 +1361,37 @@ export class ReplKernelManager {
 		}
 	}
 
-	/** Best-effort final snapshot before a graceful dispose, bounded by a timeout. */
-	private async flushSnapshotForDispose(): Promise<void> {
-		if (!this.options.snapshot || !this.isRunning) return;
-		let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
-		const guard = new Promise<void>((resolve) => {
-			timeout = globalThis.setTimeout(resolve, SNAPSHOT_DISPOSE_TIMEOUT_MS);
-			if (timeout && typeof timeout === "object" && "unref" in timeout) timeout.unref();
+	private flushSnapshotForDispose(): Promise<void> {
+		// Concurrent teardowns (dispose vs a signal-handler shutdown) join one flush:
+		// a second flusher would clear the execution guard while the first is still
+		// snapshotting and enqueue a duplicate final snapshot behind it.
+		this.snapshotFlushForDispose ??= this.runSnapshotFlushForDispose().finally(() => {
+			this.snapshotFlushForDispose = undefined;
 		});
+		return this.snapshotFlushForDispose;
+	}
+
+	private async runSnapshotFlushForDispose(): Promise<void> {
+		if (!this.options.snapshot || !this.isRunning) return;
+		// Block new external executions so none can splice ahead of the final snapshot and stall dispose.
+		this.flushingSnapshotForDispose = true;
 		try {
-			await Promise.race([this.snapshotState().then(() => undefined), guard]);
+			const pendingExecutions = this.executionQueue;
+			if (this.activeExecution) void this.interrupt().catch(() => undefined);
+			let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+			const queueSettled = await Promise.race([
+				pendingExecutions.then(() => true),
+				new Promise<false>((resolve) => {
+					timeout = globalThis.setTimeout(() => resolve(false), SNAPSHOT_EXECUTION_TIMEOUT_MS);
+					timeout.unref?.();
+				}),
+			]);
+			if (timeout) globalThis.clearTimeout(timeout);
+			if (!queueSettled) return;
+			await this.captureSnapshot({ executionTimeoutMs: SNAPSHOT_EXECUTION_TIMEOUT_MS });
 		} finally {
-			if (timeout) clearTimeout(timeout);
+			// Reset: a superseding start() can revive this kernel for new work.
+			this.flushingSnapshotForDispose = false;
 		}
 	}
 
