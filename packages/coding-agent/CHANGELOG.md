@@ -1,5 +1,45 @@
 # Changelog
 
+## [Unreleased]
+
+- Fixed background (unattributed) kernel output missing from the expanded IPython cell view: it is now surfaced in the tool details and rendered under a "background output (unattributed)" label after stdout/stderr/result.
+- Fixed a protocol interrupt during a REPL state restore leaving a mixed old/new namespace: names are now staged first and applied atomically with SIGINT parked across the apply, and an interrupt landing anywhere between a committed snapshot or restore and its request finishing is recovered instead of misreporting the completed operation as failed.
+- Fixed the REPL snapshot writer leaving a new payload beside a truncated manifest on mid-write failures: payload and manifest now commit via unique same-directory temp files and atomic renames with guaranteed cleanup, and an interrupt during cleanup can no longer misreport a completed destructive snapshot as failed.
+- Fixed the REPL runtime `list_names` request crashing the serve loop when the namespace held a non-string key; non-string keys are now skipped and every runtime request fails individually through the shared backstop instead of killing the loop.
+- Addressed REPL host-swap review findings: reworded stale IPython-specific busy/restart messages for the default kernel and stopped `restart()` from resurrecting a concurrently killed REPL kernel.
+- Fixed graceful REPL kernel `shutdown()` losing teardown ownership to its own child's exit handler, which made `restart()` misread the shutdown as superseded and never start the kernel again.
+- Fixed REPL kernel `start()` waiting out the full 30s ready timeout when the kernel process fails to spawn; the spawn error now rejects startup immediately.
+- Fixed a cell that rebound or ignored SIGINT (or a restored prior handler) permanently breaking protocol interrupts: the REPL runtime now re-asserts its SIGINT handler between cells.
+- Fixed the Python REPL runtime surviving its owning process's death while a non-yielding cell runs: an owner-watchdog thread now hard-exits the runtime (killing live bash children first) when the owner process dies.
+- Fixed an interrupt parked during a snapshot's prune window misreporting the completed destructive snapshot as failed; it is now consumed once the manifest is committed, and an interrupt landing just after a completed snapshot/restore request is consumed too instead of failing its done.
+- Fixed a REPL runtime interrupt gap where an interrupt landing during a cell's trailing-expression repr or output drain was dropped; the request now stays interruptible until its done event is emitted, so a slow user __repr__ can be cancelled.
+- Fixed two REPL runtime request-lifecycle bugs: a cell closing sys.stdout/sys.stderr no longer kills the serve loop (done still arrives and later cells run), and an untargeted interrupt parked for a request that fails to compile is consumed with that request instead of spuriously cancelling the next cell.
+- Fixed the REPL runtime leaking a finished cell's id onto late background-thread output: the current cell is now cleared right after the post-cell drain, so `done` stays the last event with that id and between-cell output carries a null id.
+- Fixed bash() cells failing under strict-POSIX shells (dash) when the status pipe landed on a multi-digit fd.
+- Fixed rlm.run outside a live kernel hanging forever instead of failing fast, which stalled CI shard 3 until timeout.
+- Fixed two bash() spawn races: status-channel fds no longer leak when pipe creation fails mid-setup, and a status-socket gate keeps the command from starting until its pid is journaled (a kernel kill in that window now stops the child instead of orphaning it past the reaper).
+- Fixed a compile-phase crash (e.g. RecursionError from a pathologically deep attribute chain) killing the REPL runtime instead of failing the one cell: any per-request failure now becomes error+done and the serve loop keeps running; rebinding sys.stdout/sys.stderr to flush-less objects no longer kills it either.
+- Fixed the REPL runtime hanging before done when a cell closes fd 1/2 and a later open() reclaims the number: drain sync tokens now go through a private dup of the capture pipe, with a pump-liveness backstop so a dead pump can no longer wedge the serve loop.
+- Fixed the Windows orphan reaper killing only the journaled bash() shell pid; it now uses taskkill /T so descendants die with the tree, matching the in-kernel bash() kill paths, and resolves taskkill via an absolute System32 path (with NoDefaultCurrentDirectoryInExePath) so a planted CWD taskkill.exe cannot hijack cleanup.
+- Fixed a snapshot request with identical `path` and `manifest_path` silently clobbering the just-written state payload; the runtime now rejects it as a failed request.
+- Fixed a snapshot request with a negative `max_bytes`/`max_variable_bytes` and `prune_oversized` writing an empty payload and then deleting every user variable; size caps must now be non-negative integers.
+- Fixed an interrupt landing mid-snapshot leaving prune deletions half-applied: once the snapshot manifest is committed, SIGINT is deferred until every oversized name is removed, so the namespace always matches the on-disk snapshot.
+- Hardened bash(): cancelling `await bash(cmd)` now kills the command's process group (background handles are unaffected), Windows helper binaries resolve via absolute System32 paths, kill() retries taskkill for already-reaped Windows trees, and orphan-journal enrollment fails closed when configured.
+- Fixed cross-cell output misattribution in the REPL runtime: stream events are attributed at write time via context, and raw fd or user-thread output is emitted with a null id instead of being credited to whichever cell is running.
+- REPL kernel: output from user threads, other cells' leftovers, and raw fd writes is no longer merged into the running cell's stdout; it is surfaced separately as unattributed background output.
+- Hardened bash() further: the host now injects an absolute default shell into the kernel (no PATH lookup; /bin/bash else /bin/sh on POSIX), macOS start-id lookup uses /bin/ps, and Windows worker-teardown orphan kills go through hardened taskkill /T.
+- Hardened Windows bash execution: the kernel shell is resolved only from trusted absolute paths (never PATH), and bash children are contained by kill-on-close job objects so a crashed kernel cannot leak process trees (taskkill remains only as a fallback when job creation fails).
+- Hardened Windows bash() containment: children are now created directly inside the kill-on-close job (PROC_THREAD_ATTRIBUTE_JOB_LIST at CreateProcessW time), so no window exists in which a kernel kill can leak a suspended, never-run process; handle inheritance is restricted to exactly the child's stdio handles (PROC_THREAD_ATTRIBUTE_HANDLE_LIST), so concurrent spawns cannot leak each other's handles; the journal start-id query still runs only while the job-contained child is suspended, and bash() still raises instead of falling back to jobless taskkill when containment fails.
+- Fixed a Windows bash() PID-reuse hazard: the child process handle is now retained through job cleanup and every taskkill-by-pid fallback (watch reap, kill(), cancel escalation, shutdown cleanup) and closed exactly once only after the handle is marked reaped, so a recycled pid can never be killed by the fallback.
+
+## [0.8.1] - 2026-08-26
+
+- Fixed syntax highlighting in the expanded python tool-call view: triple-quoted strings spanning multiple lines now keep their string color instead of only the first line.
+- Changed the default RLM maximum recursion depth for new sessions from 1 to 2.
+- Changed ACP prompt requests to resolve only after all causally admitted subagent and parent work has settled.
+- Changed the Cloudflare AI Gateway default model to claude-sonnet-4.5 after the catalog dropped the gateway's workers-ai mirror ids.
+- Fixed ACP assistant chunks to identify message boundaries across autonomous turns.
+
 ## [0.8.0] - 2026-08-21
 
 - Fixed an OAuth login that finishes after its server was retargeted arming the old-endpoint token against the new URL: credentials are endpoint-bound at issuance, and the host and kernel only use a token bound to the configured endpoint. **Breaking**: generic MCP OAuth credentials stored before this release lack the binding and require one `/mcp login <server>`.
