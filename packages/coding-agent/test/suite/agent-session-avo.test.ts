@@ -138,8 +138,8 @@ describe("AgentSession universal AVO runtime", () => {
 		harness = await createHarness({
 			persistSession: true,
 			enforceAvoCompletion: true,
-			settings: { compaction: { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1 } },
-			models: [{ id: "faux-1", contextWindow: 6_000 }],
+			settings: { compaction: { enabled: true, reserveTokens: 9_000, keepRecentTokens: 1 } },
+			models: [{ id: "faux-1", contextWindow: 10_000 }],
 		});
 		harness.setResponses([
 			async () => {
@@ -180,8 +180,8 @@ describe("AgentSession universal AVO runtime", () => {
 		harness = await createHarness({
 			persistSession: true,
 			enforceAvoCompletion: true,
-			settings: { compaction: { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1 } },
-			models: [{ id: "faux-1", contextWindow: 6_000 }],
+			settings: { compaction: { enabled: true, reserveTokens: 9_000, keepRecentTokens: 1 } },
+			models: [{ id: "faux-1", contextWindow: 10_000 }],
 		});
 		harness.setResponses([
 			async () => {
