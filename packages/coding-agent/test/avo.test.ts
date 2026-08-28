@@ -13,6 +13,7 @@ import {
 	AVO_NOOA_VERSION,
 	type AvoExperiment,
 	type AvoExperimentPlan,
+	AvoProgressWatchdog,
 	AvoSessionRuntime,
 	AvoStore,
 	type AvoTrial,
@@ -30,6 +31,7 @@ import {
 	deriveAvoExperimentAllocatedAlpha,
 	deriveAvoExperimentCumulativeAlpha,
 	deriveAvoExperimentOutcome,
+	deriveAvoProgressWatchdogSnapshot,
 	digestAvoDeliveryText,
 	digestAvoExperimentSelectionBinding,
 	digestAvoExperimentValue,
@@ -78,6 +80,79 @@ function hostReserveSelection(experiment: AvoExperiment, attemptIndex = 1): AvoE
 }
 
 describe("generic AVO core", () => {
+	test("detects repeated no-progress turns and resets only for host-observable progress", () => {
+		const store = new AvoStore(undefined, "run-progress-watchdog", clock());
+		store.initialize("Explain a short poem");
+		const watchdog = new AvoProgressWatchdog();
+		const empty = deriveAvoProgressWatchdogSnapshot(store.getState());
+		watchdog.prime(empty);
+		expect(watchdog.observe(empty)).toMatchObject({
+			action: "watch",
+			madeProgress: false,
+			consecutiveNoProgressTurns: 1,
+		});
+		expect(watchdog.observe(empty)).toMatchObject({
+			action: "intervene",
+			madeProgress: false,
+			consecutiveNoProgressTurns: 2,
+		});
+		store.recordCandidate({ kind: "answer", summary: "Concrete answer", payload: "A concrete answer." });
+		expect(watchdog.observe(deriveAvoProgressWatchdogSnapshot(store.getState()))).toMatchObject({
+			action: "progress",
+			madeProgress: true,
+			consecutiveNoProgressTurns: 0,
+			recoveredFromNoProgressTurns: 2,
+			progressIndicators: ["a fresh candidate was recorded"],
+		});
+		expect(
+			watchdog.observe(deriveAvoProgressWatchdogSnapshot(store.getState()), { deliveryReady: true }),
+		).toMatchObject({
+			action: "delivery",
+			consecutiveDeliveryMismatchTurns: 1,
+		});
+		expect(
+			watchdog.observe(deriveAvoProgressWatchdogSnapshot(store.getState()), { deliveryReady: true }),
+		).toMatchObject({
+			action: "delivery_intervene",
+			consecutiveDeliveryMismatchTurns: 2,
+		});
+		const reopenedAttempt = new AvoProgressWatchdog();
+		const existingCandidate = deriveAvoProgressWatchdogSnapshot(store.getState());
+		reopenedAttempt.prime(existingCandidate);
+		expect(reopenedAttempt.observe(existingCandidate)).toMatchObject({
+			action: "watch",
+			madeProgress: false,
+			consecutiveNoProgressTurns: 1,
+		});
+	});
+
+	test("escalates the automatic horizon when the anti-laziness watchdog observes persistent stagnation", () => {
+		const store = new AvoStore(undefined, "run-progress-escalation", clock());
+		store.initialize("Explain a short poem");
+		store.recordProgressWatchdogCheckpoint({
+			consecutiveNoProgressTurns: 1,
+			resumed: false,
+			reason: "No measurable progress.",
+		});
+		expect(store.getState().routing.horizon).toBe("iterative");
+		const intervention = store.recordProgressWatchdogCheckpoint({
+			consecutiveNoProgressTurns: 2,
+			resumed: false,
+			reason: "Repeated no measurable progress.",
+		});
+		expect(intervention).toMatchObject({
+			status: "intervene",
+			interventionNeeded: true,
+			triggeredHeuristics: expect.arrayContaining(["anti_laziness_intervention"]),
+		});
+		store.recordProgressWatchdogCheckpoint({
+			consecutiveNoProgressTurns: 3,
+			resumed: false,
+			reason: "Persistent no measurable progress.",
+		});
+		expect(store.getState().routing.horizon).toBe("long");
+	});
+
 	test("fails closed on ambiguous experiment plans and undeclared trial metrics", () => {
 		expect(() =>
 			parseAvoExperimentInput({

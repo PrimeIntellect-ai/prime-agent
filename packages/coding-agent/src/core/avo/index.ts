@@ -96,6 +96,13 @@ export {
 } from "./supervisor.js";
 export * from "./types.js";
 export {
+	AvoProgressWatchdog,
+	type AvoProgressWatchdogAction,
+	type AvoProgressWatchdogAssessment,
+	type AvoProgressWatchdogSnapshot,
+	deriveAvoProgressWatchdogSnapshot,
+} from "./watchdog.js";
+export {
 	type AvoTestTrustAssessment,
 	type AvoWorkspaceSnapshot,
 	assessAvoTestTrust,

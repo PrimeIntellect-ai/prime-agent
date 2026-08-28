@@ -140,6 +140,9 @@ import {
 	type AvoEvaluationReceipt,
 	type AvoHorizonSelection,
 	type AvoIndependentClaimVerdict,
+	AvoProgressWatchdog,
+	type AvoProgressWatchdogAssessment,
+	type AvoRunState,
 	AvoSessionRuntime,
 	type AvoStopGate,
 	assertAvoClaimSourceContextSafe,
@@ -164,6 +167,7 @@ import {
 	classifyAvoHostEvaluationCommand,
 	combineAvoClaimEvidenceAssessments,
 	deriveAvoDeterministicArithmeticContract,
+	deriveAvoProgressWatchdogSnapshot,
 	digestAvoDeliveryText,
 	digestAvoPayload,
 	parseAvoCandidateInput,
@@ -1264,6 +1268,12 @@ export class AgentSession {
 	private _avoRuntime?: AvoSessionRuntime;
 	private _avoMemoryContext = "";
 	private readonly _enforceAvoCompletion: boolean;
+	private readonly _avoProgressWatchdog = new AvoProgressWatchdog();
+	private readonly _avoProgressWatchdogAssessments = new WeakMap<object, AvoProgressWatchdogAssessment>();
+	private _avoToolProgressRunId?: string;
+	private _avoToolProgressToken?: string;
+	private _avoToolNoProgressBatches = 0;
+	private _avoToolInterventionQueued = false;
 	private _avoSupervisorBoundToRuntime = false;
 	private _autoresearchStore?: AutoresearchStore;
 	private _autoresearchSupervisorBoundToRuntime = false;
@@ -3806,6 +3816,103 @@ export class AgentSession {
 		);
 	}
 
+	private _captureAvoProgressWatchdogSnapshot(state: AvoRunState) {
+		let workspaceDigest: string | undefined;
+		if (state.routing.environment === "coding") {
+			try {
+				workspaceDigest = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+				}).digest;
+			} catch {
+				// An unavailable workspace cannot be counted as progress; the completion gate remains fail closed.
+			}
+		}
+		return deriveAvoProgressWatchdogSnapshot(state, workspaceDigest);
+	}
+
+	private _primeAvoProgressWatchdog(): void {
+		if (!this._avoRuntime) return;
+		const snapshot = this._captureAvoProgressWatchdogSnapshot(this._avoRuntime.getState());
+		this._avoProgressWatchdog.prime(snapshot);
+		if (this._avoToolProgressRunId !== snapshot.runId) {
+			this._avoToolProgressRunId = snapshot.runId;
+			this._avoToolProgressToken = snapshot.token;
+			this._avoToolNoProgressBatches = 0;
+			this._avoToolInterventionQueued = false;
+		}
+	}
+
+	private async _maybeInterveneAvoToolStagnation(toolResultCount: number): Promise<void> {
+		if (toolResultCount === 0 || !this._enforceAvoCompletion || !this._avoRuntime || this._rlmDepth !== 0) {
+			return;
+		}
+		const state = this._avoRuntime.getState();
+		if (!state.objective || state.status !== "active") return;
+		const snapshot = this._captureAvoProgressWatchdogSnapshot(state);
+		if (this._avoToolProgressRunId !== snapshot.runId || this._avoToolProgressToken === undefined) {
+			this._avoToolProgressRunId = snapshot.runId;
+			this._avoToolProgressToken = snapshot.token;
+			this._avoToolNoProgressBatches = 0;
+			this._avoToolInterventionQueued = false;
+			return;
+		}
+		if (snapshot.token !== this._avoToolProgressToken) {
+			const recoveredBatches = this._avoToolNoProgressBatches;
+			const recoveredFromIntervention = this._avoToolInterventionQueued;
+			this._avoToolProgressToken = snapshot.token;
+			this._avoToolNoProgressBatches = 0;
+			this._avoToolInterventionQueued = false;
+			if (recoveredFromIntervention) {
+				this._avoRuntime.store.recordProgressWatchdogCheckpoint({
+					consecutiveNoProgressTurns: 0,
+					resumed: true,
+					reason: `Host-observable progress resumed after ${recoveredBatches} stalled tool batches.`,
+					escalateHorizon: false,
+					unit: "tool_batch",
+				});
+			}
+			return;
+		}
+		this._avoToolNoProgressBatches += 1;
+		const threshold = 6;
+		if (this._avoToolNoProgressBatches < threshold || this._avoToolInterventionQueued) return;
+		this._avoToolInterventionQueued = true;
+		const reason = `Anti-laziness tool intervention: ${this._avoToolNoProgressBatches} consecutive tool batches produced no new workspace state, candidate, meaningful host pass, cycle, or experiment cell.`;
+		this._avoRuntime.store.recordProgressWatchdogCheckpoint({
+			consecutiveNoProgressTurns: this._avoToolNoProgressBatches,
+			resumed: false,
+			reason,
+			escalateHorizon: false,
+			unit: "tool_batch",
+		});
+		const message: CustomMessage = {
+			role: "custom",
+			customType: "avo_progress_intervention",
+			content: [
+				"<avo_progress_intervention>",
+				reason,
+				"Stop broad exploration and do not inspect Prime/AVO internals. Change approach now.",
+				state.routing.environment === "coding"
+					? "Work on the target files, make one concrete task-relevant workspace change, record a fresh candidate, and run one direct task-specific verifier."
+					: "Convert the evidence already gathered into a concrete candidate and run the verification class selected by the host.",
+				"Do not repeat a failed or unrelated command merely to keep the tool loop active.",
+				"</avo_progress_intervention>",
+			].join("\n"),
+			display: true,
+			details: {
+				runId: state.runId,
+				toolBatchesWithoutProgress: this._avoToolNoProgressBatches,
+				trigger: "anti_laziness_tool_intervention",
+			},
+			timestamp: Date.now(),
+		};
+		const normalized = normalizeMessageContent(message.content);
+		await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
+			message,
+			resumeIfIdle: true,
+		});
+	}
+
 	private async _refreshAvoMemoryContext(prompt: string): Promise<void> {
 		if (!this._avoRuntime || this._rlmDepth !== 0) {
 			this._avoMemoryContext = "";
@@ -6104,6 +6211,48 @@ export class AgentSession {
 		return { state, gate, acceptedCandidate, assistantDigest, deliveryMatches };
 	}
 
+	private _assessAvoProgressWatchdog(
+		message: object,
+		state: AvoRunState,
+		deliveryReady: boolean,
+	): AvoProgressWatchdogAssessment {
+		const cached = this._avoProgressWatchdogAssessments.get(message);
+		if (cached) return cached;
+		const assessment = this._avoProgressWatchdog.observe(this._captureAvoProgressWatchdogSnapshot(state), {
+			deliveryReady,
+		});
+		if (
+			assessment.action === "watch" ||
+			assessment.action === "intervene" ||
+			assessment.action === "delivery_intervene"
+		) {
+			const reason =
+				assessment.action === "watch"
+					? "Anti-laziness watch: this root turn produced no new workspace change, candidate, meaningful host pass, completed cycle, or experiment cell."
+					: assessment.action === "delivery_intervene"
+						? `Anti-laziness delivery intervention: ${assessment.consecutiveDeliveryMismatchTurns} consecutive root turns changed or decorated the verified candidate's exact canonical delivery.`
+						: `Anti-laziness intervention: ${assessment.consecutiveNoProgressTurns} consecutive root turns produced no new host-observable progress; the next turn must change approach.`;
+			this._requireAvoRuntime().store.recordProgressWatchdogCheckpoint({
+				consecutiveNoProgressTurns:
+					assessment.action === "delivery_intervene"
+						? assessment.consecutiveDeliveryMismatchTurns
+						: assessment.consecutiveNoProgressTurns,
+				resumed: false,
+				reason,
+				escalateHorizon: assessment.action !== "delivery_intervene",
+				unit: assessment.action === "delivery_intervene" ? "delivery" : "root_turn",
+			});
+		} else if (assessment.recoveredFromNoProgressTurns > 0) {
+			this._requireAvoRuntime().store.recordProgressWatchdogCheckpoint({
+				consecutiveNoProgressTurns: 0,
+				resumed: true,
+				reason: `Host-observable progress resumed after ${assessment.recoveredFromNoProgressTurns} stalled turn(s): ${assessment.progressIndicators.join("; ")}.`,
+			});
+		}
+		this._avoProgressWatchdogAssessments.set(message, assessment);
+		return assessment;
+	}
+
 	private async _completeAvoCanonicalDeliveryIfMatching(
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
@@ -6125,6 +6274,12 @@ export class AgentSession {
 			this._avoRuntime.store.complete(gate);
 			return undefined;
 		}
+		const watchdog = this._assessAvoProgressWatchdog(
+			context.message,
+			state,
+			gate.passed && acceptedCandidate !== undefined,
+		);
+		const continuationState = this._avoRuntime.getState();
 		const reasons = [
 			...gate.reasons,
 			...(acceptedCandidate ? [] : ["no accepted candidate currently satisfies the verification contract"]),
@@ -6136,15 +6291,24 @@ export class AgentSession {
 				: []),
 		];
 		await this._refreshAvoMemoryContext(
-			`${state.objective ?? "Active AVO task"}\nCurrent blocking conditions: ${reasons.join("; ")}`,
+			`${continuationState.objective ?? "Active AVO task"}\nCurrent blocking conditions: ${reasons.join("; ")}`,
 		);
 		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 		const content = [
 			"<avo_completion_required>",
 			"The host blocked task completion. Continue working now; do not ask the user to re-prompt you.",
-			`Task run: ${state.runId}`,
+			`Task run: ${continuationState.runId}`,
 			`Blocking conditions: ${reasons.join("; ") || "canonical delivery is incomplete"}`,
+			watchdog.action === "watch"
+				? "Anti-laziness watch: no new host-observable progress occurred in this turn. Stop narrating, stop probing Prime/AVO internals, and perform the next concrete task action now."
+				: watchdog.action === "intervene"
+					? `Anti-laziness intervention: ${watchdog.consecutiveNoProgressTurns} consecutive turns made no measurable progress. Do not repeat the same approach. Work on the target directly, produce a fresh candidate, and obtain a task-specific host check.`
+					: watchdog.action === "delivery_intervene"
+						? `Anti-laziness delivery intervention: ${watchdog.consecutiveDeliveryMismatchTurns} consecutive turns failed exact delivery. Return only the accepted candidate's canonical text now; do not paraphrase, explain, decorate, or append anything.`
+						: watchdog.action === "progress"
+							? `Progress watchdog observed: ${watchdog.progressIndicators.join("; ") || "host-observable task state changed"}. Continue from that progress and close the remaining verification gap.`
+							: "The verified candidate is ready. Return its exact canonical delivery without extra text.",
 			"Use the avo skill automatically to record a candidate, obtain the required host-issued evidence, complete its cycle, and inspect the stop gate.",
 			"Once the gate passes, return only the exact canonical delivery for the accepted candidate: general tasks use the candidate payload text, deterministic arithmetic uses the numeric result, and coding/research use the candidate summary. Do not add a preface, suffix, or unverified claim.",
 			"</avo_completion_required>",
@@ -6154,7 +6318,17 @@ export class AgentSession {
 			customType: "avo_completion_required",
 			content,
 			display: true,
-			details: { runId: state.runId, gatePassed: gate.passed, reasons },
+			details: {
+				runId: continuationState.runId,
+				gatePassed: gate.passed,
+				reasons,
+				watchdog: {
+					action: watchdog.action,
+					consecutiveNoProgressTurns: watchdog.consecutiveNoProgressTurns,
+					consecutiveDeliveryMismatchTurns: watchdog.consecutiveDeliveryMismatchTurns,
+					progressIndicators: watchdog.progressIndicators,
+				},
+			},
 			timestamp: Date.now(),
 		};
 	}
@@ -6402,6 +6576,10 @@ export class AgentSession {
 		this._addLoginGuidanceToAuthError(event);
 
 		this._emit(event);
+
+		if (event.type === "turn_end") {
+			await this._maybeInterveneAvoToolStagnation(event.toolResults.length);
+		}
 
 		if (event.type === "message_end") {
 			if (event.message.role === "custom") {
@@ -7731,6 +7909,7 @@ export class AgentSession {
 					avoObservedRunId = this._avoRuntime.getState().runId;
 					this._ensureAvoCodingVerificationBaseline();
 					this._ensureAvoArtifactVerificationBaseline();
+					this._primeAvoProgressWatchdog();
 					await this._refreshAvoMemoryContext(normalized.text);
 					this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 					this.agent.state.systemPrompt = this._baseSystemPrompt;
@@ -8754,6 +8933,7 @@ export class AgentSession {
 		if (!observed) return;
 		this._ensureAvoCodingVerificationBaseline();
 		this._ensureAvoArtifactVerificationBaseline();
+		this._primeAvoProgressWatchdog();
 		await this._refreshAvoMemoryContext(rootTurns.map((action) => action.payload.text).join("\n"));
 		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 		this.agent.state.systemPrompt = this._baseSystemPrompt;

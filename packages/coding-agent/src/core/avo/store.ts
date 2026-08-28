@@ -2987,6 +2987,85 @@ export class AvoStore {
 		return { cycle: structuredClone(cycle), checkpoint: structuredClone(checkpoint) };
 	}
 
+	recordProgressWatchdogCheckpoint(input: {
+		consecutiveNoProgressTurns: number;
+		resumed: boolean;
+		reason: string;
+		escalateHorizon?: boolean;
+		unit?: "root_turn" | "tool_batch" | "delivery";
+	}): AvoRunState["checkpoints"][number] {
+		if (!this.state.objective || this.state.status !== "active") {
+			throw new Error("the progress watchdog requires an active AVO task");
+		}
+		if (!Number.isInteger(input.consecutiveNoProgressTurns) || input.consecutiveNoProgressTurns < 0) {
+			throw new Error("progress watchdog consecutive turns must be a non-negative integer");
+		}
+		const recordedAt = this.now();
+		const status = input.resumed ? "progressing" : input.consecutiveNoProgressTurns >= 2 ? "intervene" : "watch";
+		const unit = input.unit ?? "root_turn";
+		const unitLabel =
+			unit === "root_turn"
+				? input.consecutiveNoProgressTurns === 1
+					? "turn"
+					: "turns"
+				: unit === "tool_batch"
+					? input.consecutiveNoProgressTurns === 1
+						? "tool_batch"
+						: "tool_batches"
+					: input.consecutiveNoProgressTurns === 1
+						? "delivery"
+						: "deliveries";
+		const checkpoint: AvoRunState["checkpoints"][number] = {
+			checkpointId: `checkpoint-${randomUUID()}`,
+			status,
+			reason: requireString(input.reason, "progress watchdog reason"),
+			interventionNeeded: status === "intervene",
+			triggeredHeuristics: input.resumed
+				? ["observable_progress_resumed"]
+				: [
+						`no_observable_progress_${input.consecutiveNoProgressTurns}_${unitLabel}`,
+						...(status === "intervene" ? ["anti_laziness_intervention"] : []),
+					],
+			progressIndicators: {
+				cyclesSinceAcceptedProgress: this.state.cycles.filter((cycle) => cycle.outcome !== "accepted").length,
+				repeatedFailureCount: 0,
+				repeatedTrajectoryCount: input.consecutiveNoProgressTurns,
+				repeatedCandidateKindCount: 0,
+			},
+			createdAt: recordedAt,
+		};
+		this.state.checkpoints.push(checkpoint);
+		if (!input.resumed && input.escalateHorizon !== false && this.state.horizonSelection === "auto") {
+			const previous = this.state.routing.horizon;
+			const next =
+				input.consecutiveNoProgressTurns >= 3
+					? "long"
+					: input.consecutiveNoProgressTurns >= 1 && previous === "direct"
+						? "iterative"
+						: previous;
+			if (next !== previous) {
+				this.state.routing = {
+					...this.state.routing,
+					horizon: next,
+					source: "host_auto",
+					reasons: [
+						`anti-laziness watchdog observed ${input.consecutiveNoProgressTurns} turn(s) without progress`,
+					],
+					decidedAt: recordedAt,
+				};
+				this.state.lineage.push({
+					lineageId: `lineage-${randomUUID()}`,
+					kind: "horizon_escalated",
+					summary: `Anti-laziness watchdog escalated horizon from ${previous} to ${next}`,
+					referenceId: checkpoint.checkpointId,
+					recordedAt,
+				});
+			}
+		}
+		this.save();
+		return structuredClone(checkpoint);
+	}
+
 	private linkMemoryRecallsToCycle(cycle: AvoCycle): void {
 		for (const recall of this.state.memoryRecalls) {
 			if (recall.runId !== this.state.runId || recall.cycleId) continue;

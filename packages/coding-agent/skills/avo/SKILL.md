@@ -80,9 +80,18 @@ Never pass or request an environment override.
    or external authority.
 6. Complete the cycle with `complete_cycle`. The host derives accept/reject/
    revise/inconclusive from receipts; callers cannot declare their own outcome.
-7. Inspect the checkpoint and revise. Direct automatically escalates to
-   iterative after a failed attempt. Repeated stagnation can escalate iterative
-   to long. Automatic routing never lowers an active horizon.
+7. Inspect the checkpoint and revise. A host anti-laziness watchdog also checks
+   every blocked root turn. Only a new workspace state, immutable baseline
+   execution, fresh candidate, meaningful host pass, completed cycle,
+   host-bound experiment cell, or completed experiment resets it. Reading,
+   narrating, repeating the same failed check, inspecting Prime internals, or
+   merely saying done does not. Six consecutive tool batches without a
+   milestone inject an immediate steering intervention. At blocked root-turn
+   boundaries, one empty turn triggers a corrective watch, two trigger
+   intervention, and three escalate an automatic horizon to long.
+   Repeatedly changing or decorating an already verified canonical delivery
+   triggers a separate delivery intervention without weakening its exact bind.
+   Automatic routing never lowers an active horizon.
 8. Finish only after `stop_gate()` passes. Model opinion alone cannot pass it.
 9. The host enforces this lifecycle at the root turn boundary. After an
    accepted cycle, return only its canonical delivery (general payload text,

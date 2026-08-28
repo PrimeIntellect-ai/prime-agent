@@ -94,6 +94,158 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 	});
 
+	it("intervenes after repeated lazy root turns and completes only after measurable progress", async () => {
+		harness = await createHarness({ persistSession: true, enforceAvoCompletion: true });
+		harness.setResponses([
+			fauxAssistantMessage("Done without doing anything."),
+			fauxAssistantMessage("Still done; no evidence needed."),
+			async () => {
+				await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+					candidate: {
+						candidate_id: "anti-lazy-poem",
+						kind: "answer",
+						summary: "Verified rain poem",
+						payload: "Rain wakes the quiet street.",
+					},
+				});
+				await harness!.session.handleAvoHostRequest("avo.evaluation.record", {
+					evaluation: {
+						candidate_id: "anti-lazy-poem",
+						evaluator_id: "subjective_review",
+						status: "pass",
+						authority: "model_opinion",
+						evidence_refs: [],
+						metrics: { reviewed: true },
+					},
+				});
+				await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
+					cycle: { candidate_id: "anti-lazy-poem" },
+				});
+				return fauxAssistantMessage("Rain wakes the quiet street.");
+			},
+		]);
+
+		await harness.session.prompt("Write a short poem about rain");
+
+		const continuations = harness.session.messages.filter(
+			(message) => message.role === "custom" && message.customType === "avo_completion_required",
+		) as Array<{
+			details?: {
+				watchdog?: {
+					action?: string;
+					consecutiveNoProgressTurns?: number;
+					consecutiveDeliveryMismatchTurns?: number;
+					progressIndicators?: string[];
+				};
+			};
+		}>;
+		expect(continuations.map((message) => message.details?.watchdog)).toEqual([
+			{
+				action: "watch",
+				consecutiveNoProgressTurns: 1,
+				consecutiveDeliveryMismatchTurns: 0,
+				progressIndicators: [],
+			},
+			{
+				action: "intervene",
+				consecutiveNoProgressTurns: 2,
+				consecutiveDeliveryMismatchTurns: 0,
+				progressIndicators: [],
+			},
+		]);
+		const state = (await harness.session.handleAvoHostRequest("avo.get")).state as AvoRunState;
+		expect(state).toMatchObject({
+			status: "completed",
+			routing: { horizon: "iterative" },
+			cycles: [{ candidateId: "anti-lazy-poem", outcome: "accepted" }],
+		});
+		expect(state.checkpoints).toContainEqual(
+			expect.objectContaining({
+				status: "intervene",
+				triggeredHeuristics: expect.arrayContaining(["anti_laziness_intervention"]),
+			}),
+		);
+	});
+
+	it("steers a long tool loop after six batches without measurable progress", async () => {
+		const probeTool: AgentTool = {
+			name: "probe",
+			label: "Probe",
+			description: "Returns an unchanged observation",
+			parameters: Type.Object({ index: Type.Number() }),
+			execute: async (_toolCallId, params) => ({
+				content: [{ type: "text", text: `unchanged-${String((params as { index: number }).index)}` }],
+				details: {},
+			}),
+		};
+		const finishTool: AgentTool = {
+			name: "finish",
+			label: "Finish",
+			description: "Records concrete verified progress",
+			parameters: Type.Object({}),
+			execute: async () => {
+				await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+					candidate: {
+						candidate_id: "tool-loop-recovery",
+						kind: "answer",
+						summary: "Recovered answer",
+						payload: "Rain wakes the quiet street.",
+					},
+				});
+				await harness!.session.handleAvoHostRequest("avo.evaluation.record", {
+					evaluation: {
+						candidate_id: "tool-loop-recovery",
+						evaluator_id: "subjective_review",
+						status: "pass",
+						authority: "model_opinion",
+						evidence_refs: [],
+						metrics: { reviewed: true },
+					},
+				});
+				await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
+					cycle: { candidate_id: "tool-loop-recovery" },
+				});
+				return { content: [{ type: "text", text: "verified" }], details: {} };
+			},
+		};
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			tools: [probeTool, finishTool],
+		});
+		harness.setResponses([
+			...Array.from({ length: 6 }, (_, index) =>
+				fauxAssistantMessage(fauxToolCall("probe", { index }), { stopReason: "toolUse" }),
+			),
+			fauxAssistantMessage(fauxToolCall("finish", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Rain wakes the quiet street."),
+		]);
+
+		await harness.session.prompt("Write a short poem about rain");
+
+		const interventions = harness.session.messages.filter(
+			(message) => message.role === "custom" && message.customType === "avo_progress_intervention",
+		);
+		expect(interventions).toHaveLength(1);
+		expect(interventions[0]).toMatchObject({
+			details: { toolBatchesWithoutProgress: 6, trigger: "anti_laziness_tool_intervention" },
+		});
+		const state = (await harness.session.handleAvoHostRequest("avo.get")).state as AvoRunState;
+		expect(state.status).toBe("completed");
+		expect(state.checkpoints).toContainEqual(
+			expect.objectContaining({
+				status: "intervene",
+				triggeredHeuristics: expect.arrayContaining(["no_observable_progress_6_tool_batches"]),
+			}),
+		);
+		expect(state.checkpoints).toContainEqual(
+			expect.objectContaining({
+				status: "progressing",
+				triggeredHeuristics: ["observable_progress_resumed"],
+			}),
+		);
+	});
+
 	it("stops autonomous continuation immediately after canonical AVO delivery", async () => {
 		harness = await createHarness({
 			persistSession: true,
