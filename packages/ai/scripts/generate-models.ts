@@ -232,7 +232,8 @@ function isPrimeInferenceRawVariant(modelId: string): boolean {
 }
 
 function isPrimeInferencePrivateModel(modelId: string): boolean {
-	return modelId.toLowerCase().startsWith("internal/");
+	const id = modelId.toLowerCase();
+	return id.startsWith("internal/") || id.startsWith("dev/");
 }
 
 const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
@@ -1324,11 +1325,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				// OpenCode Go endpoint behaviour. models.dev reports these models
 				// as @ai-sdk/anthropic, but the OpenCode Go endpoints either don't
 				// accept Anthropic SDK auth (MiniMax M2.7) or are served through
-				// the OpenAI-compatible /v1/chat/completions path (Qwen 3.5/3.6).
+				// the OpenAI-compatible /v1/chat/completions path (Qwen routes).
 				// Switch them to openai-completions so requests use Bearer auth
 				// and the standard /v1/chat/completions endpoint.
 				if (variant.provider === "opencode-go") {
-					if (modelId === "minimax-m2.7") {
+					if (modelId === "minimax-m2.7" || (npm === "@ai-sdk/anthropic" && modelId.startsWith("qwen"))) {
 						api = "openai-completions";
 						baseUrl = `${variant.basePath}/v1`;
 					}

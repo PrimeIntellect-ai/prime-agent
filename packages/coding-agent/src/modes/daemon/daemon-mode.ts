@@ -3988,7 +3988,7 @@ export class AgentDaemon {
 				if (!name) {
 					throw new Error("Session name cannot be empty");
 				}
-				await this.setStateSessionName(state, name);
+				await this.setStateSessionNameForCommand(state, name);
 				return success(command.id, "rename", summaryForActiveSession(state));
 			}
 
@@ -4002,7 +4002,7 @@ export class AgentDaemon {
 					throw new Error("Session name cannot be empty");
 				}
 				if (state) {
-					await this.setStateSessionName(state, name);
+					await this.setStateSessionNameForCommand(state, name);
 				} else {
 					const info = await readSessionInfo(command.sessionPath);
 					if (!info) throw new Error(`Session not found: ${command.sessionPath}`);
@@ -4898,7 +4898,7 @@ export class AgentDaemon {
 				if (!name) {
 					throw new Error("Session name cannot be empty");
 				}
-				await this.setStateSessionName(state, name);
+				await this.setStateSessionNameForCommand(state, name);
 				return success(command.id, "set_session_name");
 			}
 
@@ -5572,6 +5572,15 @@ export class AgentDaemon {
 		}
 	}
 
+	private setStateSessionNameForCommand(state: ActiveSessionState, name: string): Promise<void> {
+		return this.options.worker ? this.applyStateSessionName(state, name) : this.setStateSessionName(state, name);
+	}
+
+	private async applyStateSessionName(state: ActiveSessionState, name: string): Promise<void> {
+		state.runtime.session.setSessionName(name);
+		await this.appendRlmLedgerRenameForState(state, name);
+	}
+
 	private async setStateSessionName(state: ActiveSessionState, name: string): Promise<void> {
 		const normalizedName = name.trim();
 		if (!normalizedName) {
@@ -5594,8 +5603,7 @@ export class AgentDaemon {
 			},
 			async () => {
 				await this.assertStateSessionNameAvailable(state, normalizedName);
-				state.runtime.session.setSessionName(normalizedName);
-				await this.appendRlmLedgerRenameForState(state, normalizedName);
+				await this.applyStateSessionName(state, normalizedName);
 			},
 		);
 	}

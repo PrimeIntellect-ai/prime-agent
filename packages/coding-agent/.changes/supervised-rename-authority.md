@@ -1,0 +1,1 @@
+- Fixed supervised session renames failing after the supervisor approved an available name.
