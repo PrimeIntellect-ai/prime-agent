@@ -519,4 +519,58 @@ describe("AgentSession bash and persistence characterization", () => {
 		releaseExec?.();
 		await first;
 	});
+
+	it("keeps an earlier bash abortable after a concurrent later bash finishes", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const abortableOperations: BashOperations = {
+			exec: async (_command, _cwd, options) =>
+				await new Promise<{ exitCode: number | null }>((_resolve, reject) => {
+					options.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				}),
+		};
+		let releaseSecond: (() => void) | undefined;
+		const secondOperations: BashOperations = {
+			exec: async () => {
+				await new Promise<void>((resolve) => {
+					releaseSecond = resolve;
+				});
+				return { exitCode: 0 };
+			},
+		};
+
+		const first = harness.session.executeBash("first", undefined, { operations: abortableOperations });
+		const second = harness.session.executeBash("second", undefined, { operations: secondOperations });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		releaseSecond?.();
+		const secondResult = await second;
+		expect(secondResult.cancelled).toBe(false);
+
+		// The later command's completion must not clear the earlier command's abort state.
+		expect(harness.session.isBashRunning).toBe(true);
+		harness.session.abortBash();
+		const firstResult = await first;
+		expect(firstResult.cancelled).toBe(true);
+		expect(harness.session.isBashRunning).toBe(false);
+	});
+
+	it("aborts every in-flight bash command with abortBash", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const makeAbortableOperations = (): BashOperations => ({
+			exec: async (_command, _cwd, options) =>
+				await new Promise<{ exitCode: number | null }>((_resolve, reject) => {
+					options.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				}),
+		});
+
+		const first = harness.session.executeBash("first", undefined, { operations: makeAbortableOperations() });
+		const second = harness.session.executeBash("second", undefined, { operations: makeAbortableOperations() });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		harness.session.abortBash();
+		expect((await first).cancelled).toBe(true);
+		expect((await second).cancelled).toBe(true);
+	});
 });
