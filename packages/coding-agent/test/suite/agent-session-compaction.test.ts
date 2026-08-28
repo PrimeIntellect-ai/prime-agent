@@ -401,6 +401,49 @@ describe("AgentSession compaction characterization", () => {
 		}
 	});
 
+	it("releases the runner's suspended idle wait when the continuation is cancelled", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const session = harness.session;
+		const internals = session as unknown as {
+			_schedulePostCompactionContinue(): void;
+			_cancelPostCompactionContinue(): void;
+			_sessionInputCheckpointWaiters: Set<() => void>;
+			_sessionInputPumpSuspended: boolean;
+		};
+		// A queued follow-up held back by a pause, then a pump suspension (the
+		// requestAbort teardown state): the queue stays populated but undispatchable.
+		const pause = session.acquireQueuedWorkPause();
+		await session.followUp("queued across abort");
+		expect(session.queuedActionCount).toBe(1);
+		session.requestAbort();
+		pause.release();
+		expect(internals._sessionInputPumpSuspended).toBe(true);
+		expect(session.queuedActionCount).toBe(1);
+
+		// The runner passes its pre-dispatch guards (no pauses, agent idle) and
+		// parks in the session idle wait on a checkpoint waiter.
+		internals._schedulePostCompactionContinue();
+		await vi.waitFor(() => {
+			expect(internals._sessionInputCheckpointWaiters.size).toBeGreaterThan(0);
+		});
+		expect(session.hasPendingAdmissionWaiters).toBe(true);
+
+		// Cancelling the continuation must release that waiter: a stuck waiter
+		// keeps hasPendingAdmissionWaiters true and blocks daemon passivation.
+		// The settle's own notify empties the set for a moment; a leaked runner
+		// re-parks within a microtask, so settle real time before asserting.
+		internals._cancelPostCompactionContinue();
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		try {
+			expect(internals._sessionInputCheckpointWaiters.size).toBe(0);
+			expect(session.hasPendingAdmissionWaiters).toBe(false);
+		} finally {
+			session.clearQueue();
+			session.resumeQueuedWork();
+		}
+	});
+
 	it("defers post-compaction refine behind a preparing session action", async () => {
 		const preparationReached = vi.fn();
 		let releasePreparation = () => {};

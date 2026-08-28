@@ -6810,10 +6810,29 @@ export class AgentSession {
 	}
 
 	async waitForIdle(): Promise<void> {
-		while (true) {
+		await this._waitForIdleOrSettlement();
+	}
+
+	/**
+	 * {@link waitForIdle} loop; with a settlement, returns once that settlement is
+	 * superseded so a cancelled post-compaction runner cannot keep a checkpoint
+	 * waiter registered (a leaked waiter holds hasPendingAdmissionWaiters true and
+	 * blocks daemon passivation).
+	 */
+	private async _waitForIdleOrSettlement(settlement?: PostCompactionContinuationSettlement): Promise<void> {
+		while (settlement === undefined || this._postCompactionContinuationSettlement === settlement) {
 			if (this._actionStore.queuedActions().length > 0) {
 				if (this._sessionInputPumpSuspended || this._queuedWorkPauses.size > 0) {
-					await new Promise<void>((resolve) => this._sessionInputCheckpointWaiters.add(resolve));
+					let wake = () => {};
+					const changed = new Promise<void>((resolve) => {
+						wake = resolve;
+						this._sessionInputCheckpointWaiters.add(resolve);
+					});
+					try {
+						await (settlement ? Promise.race([changed, settlement.promise]) : changed);
+					} finally {
+						this._sessionInputCheckpointWaiters.delete(wake);
+					}
 					continue;
 				}
 				this._scheduleSessionInputPump();
@@ -7708,7 +7727,7 @@ export class AgentSession {
 			}
 
 			if (waitForSessionInput) {
-				await this.waitForIdle();
+				await this._waitForIdleOrSettlement(settlement);
 				if (this._postCompactionContinuationSettlement !== settlement) return;
 				const shouldContinue =
 					(settlement.continueAfterSessionInput && continuationMessages.length === 0) ||
