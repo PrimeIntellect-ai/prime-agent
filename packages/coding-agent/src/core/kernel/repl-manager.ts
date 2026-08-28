@@ -178,6 +178,8 @@ export class ReplKernelManager {
 	private startupProtocolError?: Error;
 	/** A repair discarded its kernel: the next fresh start must re-run the runtime bootstrap. */
 	private pendingRebootstrap = false;
+	/** Restore the saved namespace on that fresh start too (false when the snapshot itself is the declared culprit). */
+	private pendingRestore = false;
 	private rebootstrapPromise?: Promise<boolean>;
 	private teardownInFlight = 0;
 
@@ -371,6 +373,9 @@ export class ReplKernelManager {
 			this.appendKernelDiagnostic("replacement kernel corrupted during protocol repair; giving up");
 			this.protocolRepairOwner.superseded = true;
 			this.killChildToIdle();
+			// The repair's own restore is the prime corruption suspect: retrying
+			// the snapshot on the lazy path would re-trigger the loop.
+			this.pendingRestore = false;
 			return;
 		}
 		const owner = { superseded: false };
@@ -416,6 +421,8 @@ export class ReplKernelManager {
 			if (owner.superseded || this.protocolRepairOwner !== owner) return;
 			this.appendKernelDiagnostic("protocol repair restore failed; discarding replacement kernel");
 			this.killChildToIdle();
+			// The snapshot is the declared culprit; the lazy path must not retry it.
+			this.pendingRestore = false;
 			return;
 		}
 
@@ -459,20 +466,28 @@ export class ReplKernelManager {
 
 	/**
 	 * A fresh kernel started after a discarded repair has none of the runtime
-	 * bootstrap's live handles (rlm, bash, skills); re-run the bootstrap before
-	 * any user request. A failed re-bootstrap discards the kernel again instead
-	 * of serving user code on an unprovisioned namespace.
+	 * bootstrap's live handles (rlm, bash, skills) and an empty namespace:
+	 * reprovision (restore, then bootstrap) before any user request. A failed
+	 * re-bootstrap discards the kernel again instead of serving user code on an
+	 * unprovisioned namespace.
 	 */
 	private async ensureKernelRebootstrapped(signal?: AbortSignal): Promise<void> {
 		const code = this.options.bootstrapCode;
-		// An in-flight repair owns its kernel's restore/bootstrap sequence.
-		if (!code || !this.pendingRebootstrap || this.protocolRepairPromise || this.state !== "running") return;
+		const needsRestore = Boolean(this.options.snapshot) && this.pendingRestore;
+		const needsBootstrap = Boolean(code) && this.pendingRebootstrap;
+		// An in-flight repair owns its kernel's restore/bootstrap sequence, and
+		// a teardown's final snapshot must never trigger reprovisioning.
+		if (
+			(!needsRestore && !needsBootstrap) ||
+			this.protocolRepairPromise ||
+			this.teardownInFlight > 0 ||
+			this.state !== "running"
+		) {
+			return;
+		}
 		let task = this.rebootstrapPromise;
 		if (!task) {
-			const started = this.bootstrapRepairedKernel(code).then((ok) => {
-				if (!ok && this.state === "running") this.killChildToIdle();
-				return ok;
-			});
+			const started = this.reprovisionFreshKernel(code);
 			task = started;
 			this.rebootstrapPromise = started;
 			void started.finally(() => {
@@ -500,11 +515,28 @@ export class ReplKernelManager {
 		if (!ok) throw new Error("Kernel bootstrap failed after protocol repair");
 	}
 
+	/** Restore (one-shot, best-effort) then bootstrap the lazily started fresh kernel. */
+	private async reprovisionFreshKernel(code: string | undefined): Promise<boolean> {
+		if (this.options.snapshot && this.pendingRestore) {
+			// One attempt per discard: a clean restore failure falls back to an
+			// empty namespace (ordinary startup semantics), never a retry loop.
+			this.pendingRestore = false;
+			await this.performRestore(true);
+			// Corrupted during the restore: the spawned repair owns the kernel now.
+			if (this.protocolRepairPromise || this.state !== "running") return false;
+		}
+		if (!code || !this.pendingRebootstrap) return true;
+		const ok = await this.bootstrapRepairedKernel(code);
+		if (!ok && this.state === "running") this.killChildToIdle();
+		return ok;
+	}
+
 	/** Kill the current child and settle at clean idle, so the next start spawns fresh. */
 	private killChildToIdle(): void {
-		// The discarded kernel carried the runtime bootstrap; a lazily started
-		// replacement must re-run it before serving user code.
+		// The discarded kernel carried the runtime bootstrap and (possibly) the
+		// restored namespace; a lazily started replacement must reprovision both.
 		this.pendingRebootstrap = true;
+		this.pendingRestore = true;
 		this.state = "shutdown";
 		liveKernels.delete(this);
 		this.cleanupResources("SIGKILL");
@@ -1366,6 +1398,7 @@ export class ReplKernelManager {
 				);
 				return null;
 			}
+			this.pendingRestore = false;
 			return {
 				restored: asStringArray(r.doneFields.restored),
 				failed: asReasonArray(r.doneFields.failed),
