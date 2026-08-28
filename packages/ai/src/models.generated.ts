@@ -10226,9 +10226,9 @@ export const MODELS = {
 		"qwen3.8-flash": {
 			id: "qwen3.8-flash",
 			name: "Qwen3.8 Flash",
-			api: "anthropic-messages",
+			api: "openai-completions",
 			provider: "opencode-go",
-			baseUrl: "https://opencode.ai/zen/go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
 			reasoning: true,
 			input: ["text", "image"],
 			cost: {
@@ -10239,7 +10239,7 @@ export const MODELS = {
 			},
 			contextWindow: 1000000,
 			maxTokens: 131072,
-		} satisfies Model<"anthropic-messages">,
+		} satisfies Model<"openai-completions">,
 		"qwen3.8-max": {
 			id: "qwen3.8-max",
 			name: "Qwen3.8 Max",
@@ -15961,25 +15961,6 @@ export const MODELS = {
 			contextWindow: 1048576,
 			maxTokens: 384000,
 			featured: true,
-		} satisfies Model<"openai-completions">,
-		"dev/kimi-k3-high-throughput": {
-			id: "dev/kimi-k3-high-throughput",
-			name: "Kimi K3 High Throughput",
-			api: "openai-completions",
-			provider: "prime-inference",
-			baseUrl: "https://api.pinference.ai/api/v1",
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":true,"maxTokensField":"max_tokens","supportsStrictMode":false},
-			reasoning: false,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
-			input: ["text"],
-			cost: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-			},
-			contextWindow: 128000,
-			maxTokens: 8192,
 		} satisfies Model<"openai-completions">,
 		"google/gemini-2.5-flash": {
 			id: "google/gemini-2.5-flash",
