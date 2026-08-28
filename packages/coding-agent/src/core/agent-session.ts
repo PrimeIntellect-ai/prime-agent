@@ -9990,6 +9990,11 @@ export class AgentSession {
 			tokenCount: child._contextTokensForCurrentMessages(),
 			recap: child.getCurrentRecap(),
 			sessionDir: child._rlmSessionDir ?? child.sessionManager.getSessionDir(),
+			// No run exists (e.g. a child rehydrated after daemon recovery), so live
+			// session state is the only source for in-flight follow-up work. Mirror
+			// the run projection's convention: status stays "done" (the recorded task
+			// finished) and current work surfaces through activity.
+			activity: child.isSessionActive ? { kind: child.isStreaming ? "writing" : "waiting" } : undefined,
 			repliedSinceTask: child._repliedToParentSinceTask,
 		};
 	}

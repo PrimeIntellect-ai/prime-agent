@@ -562,6 +562,40 @@ describe("AgentSession rlm recursion", () => {
 		expect(childStatuses).toEqual(["cancelled"]);
 	});
 
+	it("projects live follow-up activity for a restored session-only child", async () => {
+		const childId = "restored-followup-child";
+		const childDir = join(tempDir, childId);
+		mkdirSync(childDir, { recursive: true });
+		const followUpGate = deferred<void>();
+		let followUpStarted = false;
+		const child = createSession({
+			rlmSessionDir: childDir,
+			streamFn: () => {
+				const stream = createAssistantMessageEventStream();
+				followUpStarted = true;
+				void followUpGate.promise.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage("follow-up answer") });
+				});
+				return stream;
+			},
+		});
+		const root = createSession();
+		expect(root.registerRlmChildSession(childId, child)).toBe(true);
+
+		const followUp = child.prompt("follow-up work");
+		await waitFor(() => followUpStarted);
+		const busy = root.getRlmChildSnapshots();
+		expect(busy).toEqual([expect.objectContaining({ id: childId, status: "done" })]);
+		expect(busy[0]?.activity).toBeDefined();
+
+		followUpGate.resolve();
+		await followUp;
+		await child.waitForIdle();
+		const idle = root.getRlmChildSnapshots();
+		expect(idle).toEqual([expect.objectContaining({ id: childId, status: "done" })]);
+		expect(idle[0]?.activity).toBeUndefined();
+	});
+
 	it("retries and releases failed retained child cleanup on the next compaction", async () => {
 		const childId = "retained-retry-child";
 		const childDir = join(tempDir, childId);
