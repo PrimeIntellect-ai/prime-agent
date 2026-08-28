@@ -14,7 +14,7 @@ import {
 	type OAuthLoginCallbacks,
 	type OAuthProviderId,
 } from "@earendil-works/pi-ai";
-import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@earendil-works/pi-ai/oauth";
+import { getOAuthProvider, getOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
@@ -779,6 +779,11 @@ export class AuthStorage {
 	/**
 	 * Refresh OAuth token with backend locking to prevent race conditions.
 	 * Multiple pi instances may try to refresh simultaneously when tokens expire.
+	 *
+	 * The provider refresh is a network round-trip, so it runs WITHOUT the lock
+	 * held; otherwise a slow provider would block every other process touching
+	 * auth.json. The lock is only held while reading and while persisting, and
+	 * the write is skipped when the stored credentials changed in the meantime.
 	 */
 	private async refreshOAuthTokenWithLock(
 		providerId: OAuthProviderId,
@@ -788,7 +793,40 @@ export class AuthStorage {
 			return null;
 		}
 
-		const result = await this.storage.withLockAsync(async (current) => {
+		type RefreshCheck = {
+			fresh: { apiKey: string; newCredentials: OAuthCredentials } | null;
+			expired: OAuthCredential | null;
+		};
+
+		const check = await this.storage.withLockAsync<RefreshCheck>(async (current) => {
+			const currentData = this.parseStorageData(current);
+			this.data = currentData;
+			this.loadError = null;
+
+			const cred = currentData[providerId];
+			if (cred?.type !== "oauth") {
+				return { result: { fresh: null, expired: null } };
+			}
+
+			if (Date.now() < cred.expires) {
+				return { result: { fresh: { apiKey: provider.getApiKey(cred), newCredentials: cred }, expired: null } };
+			}
+
+			return { result: { fresh: null, expired: cred } };
+		});
+
+		if (check.fresh) {
+			return check.fresh;
+		}
+		const snapshot = check.expired;
+		if (!snapshot) {
+			return null;
+		}
+
+		// Refresh tokens rotate on use, so a discarded duplicate result must never be written.
+		const newCredentials = await provider.refreshToken(snapshot);
+
+		return await this.storage.withLockAsync(async (current) => {
 			const currentData = this.parseStorageData(current);
 			this.data = currentData;
 			this.loadError = null;
@@ -798,32 +836,22 @@ export class AuthStorage {
 				return { result: null };
 			}
 
-			if (Date.now() < cred.expires) {
+			if (cred.refresh !== snapshot.refresh || cred.expires !== snapshot.expires) {
+				// Another process updated the credentials while we refreshed; drop our result.
 				return { result: { apiKey: provider.getApiKey(cred), newCredentials: cred } };
-			}
-
-			const oauthCreds: Record<string, OAuthCredentials> = {};
-			for (const [key, value] of Object.entries(currentData)) {
-				if (value.type === "oauth") {
-					oauthCreds[key] = value;
-				}
-			}
-
-			const refreshed = await getOAuthApiKey(providerId, oauthCreds);
-			if (!refreshed) {
-				return { result: null };
 			}
 
 			const merged: AuthStorageData = {
 				...currentData,
-				[providerId]: { type: "oauth", ...refreshed.newCredentials },
+				[providerId]: { type: "oauth", ...newCredentials },
 			};
 			this.data = merged;
 			this.loadError = null;
-			return { result: refreshed, next: JSON.stringify(merged, null, 2) };
+			return {
+				result: { apiKey: provider.getApiKey(newCredentials), newCredentials },
+				next: JSON.stringify(merged, null, 2),
+			};
 		});
-
-		return result;
 	}
 
 	/**
