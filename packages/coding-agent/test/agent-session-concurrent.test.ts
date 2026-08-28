@@ -464,6 +464,77 @@ describe("AgentSession concurrent prompt guard", () => {
 		await cronTurn.catch(() => undefined);
 	});
 
+	it("does not admit a cron prompt invalidated while async input handlers ran", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		let deliveredUserText: string | undefined;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model,
+				systemPrompt: "Test",
+				tools: [],
+			},
+			streamFn: (_model, context) => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					const user = context.messages.filter((message) => message.role === "user").at(-1);
+					if (user && typeof user.content !== "string") {
+						deliveredUserText = user.content
+							.filter(
+								(part): part is TextContent =>
+									typeof part === "object" && part !== null && part.type === "text",
+							)
+							.map((part) => part.text)
+							.join("\n");
+					}
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Delivered") });
+				});
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		let jobInvalidated = false;
+		const extensionsResult = await createTestExtensionsResult([
+			(pi) => {
+				pi.on("input", async () => {
+					jobInvalidated = true;
+					return undefined;
+				});
+			},
+		]);
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRegistry,
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+		});
+
+		// Mirrors the daemon cron path: admissionCommitted re-checks the job and
+		// throws when it was cancelled or updated before the prompt is admitted.
+		await expect(
+			session.promptUntilAccepted("stale cron prompt", {
+				streamingBehavior: "followUp",
+				source: "rpc",
+				admissionCommitted: () => {
+					if (jobInvalidated) throw new Error("Cron job became unrunnable before admission");
+				},
+			}),
+		).rejects.toThrow("Cron job became unrunnable before admission");
+
+		await session.agent.waitForIdle();
+		expect(deliveredUserText).toBeUndefined();
+		expect(session.isStreaming).toBe(false);
+	});
+
 	it("serializes concurrent agent messages", async () => {
 		createSession();
 		const dispositions = new Map<string, boolean | undefined>();

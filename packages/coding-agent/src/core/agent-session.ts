@@ -4863,6 +4863,10 @@ export class AgentSession {
 					expandPromptTemplates,
 				});
 				const normalized = normalizationResult instanceof Promise ? await normalizationResult : normalizationResult;
+				// Async input handlers ran between the admission check above and
+				// admission itself; re-check so content invalidated during that
+				// await (e.g. a cron job cancelled or updated) is not admitted.
+				if (normalizationResult instanceof Promise) options?.admissionCommitted?.();
 				if (normalized.kind === "extensionCommand") {
 					commitFence?.release();
 					reportPreflight(true);
