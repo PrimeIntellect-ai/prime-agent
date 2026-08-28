@@ -696,8 +696,21 @@ def _with_prefix(command: str) -> str:
     return f"{prefix}\n{command}" if prefix else command
 
 
+def _fence_printf() -> str:
+    # `\command -p printf` defeats alias expansion but not a user-defined shell
+    # function named `command`, which would swallow both fence frames and leave
+    # the await hanging until the shell dies (wedged behind background jobs). A
+    # slash-qualified command name bypasses function and alias lookup in every
+    # POSIX shell, so resolve printf on the system default utility PATH.
+    path = shutil.which("printf", path=os.confstr("CS_PATH") or os.defpath)
+    if path and "'" not in path:
+        return f"'{path}'"
+    return "\\command -p printf"
+
+
 def _status_script(command: str, completion_a: str, completion_b: str) -> str:
     # Closed control fds preserve background behavior; supported shells atomically write the frame.
+    emit = _fence_printf()
     return (
         f"exec {_STATUS_FD}>&0 {_OUTPUT_FD}>&1 0</dev/null\n"
         f"read -r _prime_agent_gate <&{_STATUS_FD} || exit 127\n"
@@ -706,9 +719,9 @@ def _status_script(command: str, completion_a: str, completion_b: str) -> str:
         f"}} {_OUTPUT_FD}>&- {_STATUS_FD}>&-\n"
         "__prime_status=$?\n"
         "\\set +x\n"
-        f"\\command -p printf '\\036prime-agent-complete:%s%s\\037' "
+        f"{emit} '\\036prime-agent-complete:%s%s\\037' "
         f"'{completion_a}' '{completion_b}' >&{_OUTPUT_FD} || exit \"$__prime_status\"\n"
-        f"\\command -p printf '%s\\n' \"$__prime_status\" >&{_STATUS_FD}\n"
+        f"{emit} '%s\\n' \"$__prime_status\" >&{_STATUS_FD}\n"
         f"exec {_OUTPUT_FD}>&- {_STATUS_FD}>&-\n"
         "wait\n"
         'exit "$__prime_status"\n'

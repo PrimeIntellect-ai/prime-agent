@@ -605,6 +605,19 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             handle.kill(signal.SIGKILL)
             await _poll_group_dead(handle.pid)
 
+    async def test_user_function_cannot_replace_completion_emitter(self):
+        # The backslash in `\command` defeats alias expansion only: a shell
+        # function named `command` would otherwise swallow both fence frames
+        # and wedge the await behind the background job until shell death.
+        handle = bash("command() { printf function-expanded; }; sleep 30 &")
+        try:
+            result = await asyncio.wait_for(handle, timeout=5)
+            self.assertEqual(result.exit_code, 0)
+            self.assertNotIn("function-expanded", result.output)
+        finally:
+            handle.kill(signal.SIGKILL)
+            await _poll_group_dead(handle.pid)
+
     async def test_shell_killed_before_sentinel_finalizes_from_exit(self):
         result = await asyncio.wait_for(
             bash("printf output-before-shell-kill; kill -KILL $$"), timeout=5
