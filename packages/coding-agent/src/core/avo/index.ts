@@ -78,6 +78,7 @@ export {
 	digestAvoPayload,
 	inferAvoEnvironment,
 	inferAvoHorizon,
+	inferAvoOnlineEvidencePolicy,
 	inferAvoVerificationPolicy,
 	parseAvoCandidateInput,
 	parseAvoCycleInput,

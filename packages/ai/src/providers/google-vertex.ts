@@ -448,7 +448,7 @@ function buildParams(
 ): GenerateContentParameters {
 	const contents = convertMessages(model, context);
 	const functionTools = context.tools && context.tools.length > 0 ? convertTools(context.tools) : undefined;
-	const googleSearchEnabled = resolveGoogleSearchEnabled(options);
+	const googleSearchEnabled = resolveGoogleSearchEnabled(options, context);
 	const tools = [...(functionTools ?? []), ...(googleSearchEnabled ? [{ googleSearch: {} }] : [])];
 
 	const generationConfig: GenerateContentConfig = {};
@@ -503,12 +503,13 @@ function buildParams(
 	return params;
 }
 
-function resolveGoogleSearchEnabled(options: GoogleVertexOptions): boolean {
+function resolveGoogleSearchEnabled(options: GoogleVertexOptions, context: Context): boolean {
 	if (options.googleSearch !== undefined) {
 		return options.googleSearch;
 	}
 	const value = process.env.GOOGLE_VERTEX_GOOGLE_SEARCH?.trim().toLowerCase();
-	return value === "1" || value === "true" || value === "yes" || value === "on";
+	if (value === "1" || value === "true" || value === "yes" || value === "on") return true;
+	return context.systemPrompt?.includes("AVO_ONLINE_EVIDENCE=required") === true;
 }
 
 function captureGoogleSearchGrounding(
@@ -559,7 +560,16 @@ function appendGoogleSearchGrounding(
 		lines.push(`Search queries: ${[...queries].join("; ")}`);
 	}
 
-	const block: TextContent = { type: "text", text: lines.join("\n") };
+	const block: TextContent = {
+		type: "text",
+		text: lines.join("\n"),
+		providerMetadata: {
+			googleSearchGrounding: {
+				queries: [...queries],
+				sources: [...sources].map(([url, title]) => ({ url, title })),
+			},
+		},
+	};
 	output.content.push(block);
 	const contentIndex = output.content.length - 1;
 	stream.push({ type: "text_start", contentIndex, partial: output });

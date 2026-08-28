@@ -1018,6 +1018,152 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 	});
 
+	it("requires host-observed online evidence independently of coding verification", async () => {
+		harness = await createHarness({ persistSession: true });
+		writeFileSync(`${harness.tempDir}/parser.cjs`, "module.exports = 1;\n");
+		writeFileSync(
+			`${harness.tempDir}/parser.test.cjs`,
+			"const test = require('node:test'); const assert = require('node:assert'); test('parser', () => assert.ok([1, 2].includes(require('./parser.cjs'))));\n",
+		);
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix this parser using the latest official documentation and run its test");
+		await harness.session.handleAvoHostRequest("avo.verification.baseline.run", {
+			command: "node --test parser.test.cjs",
+		});
+		writeFileSync(`${harness.tempDir}/parser.cjs`, "module.exports = 2;\n");
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "online-coding",
+				kind: "implementation",
+				summary: "Update parser from current documentation",
+				payload: { value: 2 },
+			},
+		});
+		await harness.session.handleAvoHostRequest("avo.evaluation.run", {
+			candidate_id: "online-coding",
+			command: "node --test parser.test.cjs",
+		});
+		await harness.session.handleAvoHostRequest("avo.cycle.complete", {
+			cycle: { candidate_id: "online-coding" },
+		});
+
+		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
+			stop_gate: {
+				passed: false,
+				reasons: expect.arrayContaining([expect.stringMatching(/no trusted search source was observed/)]),
+			},
+		});
+	});
+
+	it("accepts provider-authored Vertex grounding for a coding task that requires online evidence", async () => {
+		harness = await createHarness({ persistSession: true });
+		writeFileSync(`${harness.tempDir}/parser.cjs`, "module.exports = 1;\n");
+		writeFileSync(
+			`${harness.tempDir}/parser.test.cjs`,
+			"const test = require('node:test'); const assert = require('node:assert'); test('parser', () => assert.ok([1, 2].includes(require('./parser.cjs'))));\n",
+		);
+		const grounded = fauxAssistantMessage("working");
+		const text = grounded.content.find((item) => item.type === "text");
+		if (!text || text.type !== "text") throw new Error("faux response has no text block");
+		text.providerMetadata = {
+			googleSearchGrounding: {
+				queries: ["latest parser documentation"],
+				sources: [{ title: "Parser docs", url: "https://example.com/parser" }],
+			},
+		};
+		harness.setResponses([grounded]);
+		await harness.session.prompt("Fix this parser using the latest official documentation and run its test");
+		await harness.session.handleAvoHostRequest("avo.verification.baseline.run", {
+			command: "node --test parser.test.cjs",
+		});
+		writeFileSync(`${harness.tempDir}/parser.cjs`, "module.exports = 2;\n");
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "grounded-coding",
+				kind: "implementation",
+				summary: "Update grounded parser",
+				payload: { value: 2 },
+			},
+		});
+		await harness.session.handleAvoHostRequest("avo.evaluation.run", {
+			candidate_id: "grounded-coding",
+			command: "node --test parser.test.cjs",
+		});
+		await harness.session.handleAvoHostRequest("avo.cycle.complete", {
+			cycle: { candidate_id: "grounded-coding" },
+		});
+
+		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
+			stop_gate: { passed: true },
+		});
+		expect((await harness.session.handleAvoHostRequest("avo.get")).state).toMatchObject({
+			evaluations: expect.arrayContaining([
+				expect.objectContaining({
+					candidateId: "grounded-coding",
+					evaluatorId: "online_evidence",
+					issuedBy: "host",
+					status: "pass",
+				}),
+			]),
+		});
+	});
+
+	it("completes canonical delivery when Vertex appends a provider-owned grounding block", async () => {
+		harness = await createHarness({ persistSession: true, enforceAvoCompletion: true });
+		writeFileSync(`${harness.tempDir}/parser.cjs`, "module.exports = 1;\n");
+		writeFileSync(
+			`${harness.tempDir}/parser.test.cjs`,
+			"const test = require('node:test'); const assert = require('node:assert'); test('parser', () => assert.ok([1, 2].includes(require('./parser.cjs'))));\n",
+		);
+		harness.setResponses([
+			async () => {
+				await harness!.session.handleAvoHostRequest("avo.verification.baseline.run", {
+					command: "node --test parser.test.cjs",
+				});
+				writeFileSync(`${harness!.tempDir}/parser.cjs`, "module.exports = 2;\n");
+				await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+					candidate: {
+						candidate_id: "grounded-delivery",
+						kind: "implementation",
+						summary: "Update grounded parser",
+						payload: { value: 2 },
+					},
+				});
+				await harness!.session.handleAvoHostRequest("avo.evaluation.run", {
+					candidate_id: "grounded-delivery",
+					command: "node --test parser.test.cjs",
+				});
+				await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
+					cycle: { candidate_id: "grounded-delivery" },
+				});
+				const response = fauxAssistantMessage("Update grounded parser");
+				response.content.push({
+					type: "text",
+					text: "\n\nSources (Google Search):\n- [Parser docs](https://example.com/parser)",
+					providerMetadata: {
+						googleSearchGrounding: {
+							queries: ["latest parser documentation"],
+							sources: [{ title: "Parser docs", url: "https://example.com/parser" }],
+						},
+					},
+				});
+				return response;
+			},
+		]);
+
+		await harness.session.prompt("Fix this parser using the latest official documentation and run its test");
+
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
+			state: {
+				status: "completed",
+				evaluations: expect.arrayContaining([
+					expect.objectContaining({ candidateId: "grounded-delivery", evaluatorId: "online_evidence" }),
+				]),
+			},
+		});
+	});
+
 	it("screens candidates before a fresh host-confirmed champion outcome", async () => {
 		harness = await createHarness({ persistSession: true });
 		writeFileSync(

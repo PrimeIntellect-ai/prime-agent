@@ -495,9 +495,26 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			const state = JSON.parse(readFileSync(statePath, "utf8")) as {
 				candidates?: unknown[];
 				cycles?: unknown[];
+				checkpoints?: Array<{
+					status?: unknown;
+					triggeredHeuristics?: unknown;
+				}>;
 			};
 			summary.candidates = Math.max(summary.candidates, state.candidates?.length ?? 0);
 			summary.cycles = Math.max(summary.cycles, state.cycles?.length ?? 0);
+			const checkpoints = state.checkpoints ?? [];
+			const interventions = checkpoints.filter(
+				(checkpoint) =>
+					checkpoint.status === "intervene" ||
+					(Array.isArray(checkpoint.triggeredHeuristics) &&
+						checkpoint.triggeredHeuristics.includes("anti_laziness_intervention")),
+			).length;
+			const watches = checkpoints.filter((checkpoint) => checkpoint.status === "watch").length;
+			// The durable checkpoint ledger is authoritative. The same watchdog event
+			// can also appear in the transcript, so take the larger count instead of
+			// double-counting it when both representations are present.
+			summary.watchdogInterventions = Math.max(summary.watchdogInterventions, interventions);
+			summary.watchdogWatches = Math.max(summary.watchdogWatches, watches);
 		} catch {
 			// A damaged optional AVO artifact must not prevent the host from grading the workspace.
 		}

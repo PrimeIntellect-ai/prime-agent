@@ -586,7 +586,37 @@ abstract class BaseAdapter implements AvoEnvironmentAdapter {
 			passed: canonicalCycle !== undefined,
 			reason: canonicalCycle ? undefined : "no accepted cycle currently satisfies the verification contract",
 		};
-		const checks = [...gate.checks.filter((check) => check.id !== acceptedCycleCheck.id), acceptedCycleCheck];
+		const onlineEvidenceRequired = state.routing.reasons.some((reason) =>
+			reason.startsWith("online evidence required:"),
+		);
+		const canonicalCandidate = canonicalCycle
+			? state.candidates.find((candidate) => candidate.candidateId === canonicalCycle.candidateId)
+			: undefined;
+		const onlineEvidencePassed =
+			!onlineEvidenceRequired ||
+			(canonicalCandidate !== undefined &&
+				state.evaluations.some(
+					(receipt) =>
+						receipt.candidateId === canonicalCandidate.candidateId &&
+						receipt.issuedBy === "host" &&
+						receipt.evaluatorId === "online_evidence" &&
+						receipt.status === "pass" &&
+						receipt.metrics.meaningful === true &&
+						receipt.metrics.candidate_payload_digest === canonicalCandidate.payloadDigest,
+				));
+		const onlineEvidenceCheck = {
+			id: "online_evidence",
+			label: "Required online evidence",
+			passed: onlineEvidencePassed,
+			reason: onlineEvidencePassed
+				? undefined
+				: "the host required current or explicitly requested online evidence, but no trusted search source was observed",
+		};
+		const checks = [
+			...gate.checks.filter((check) => check.id !== acceptedCycleCheck.id && check.id !== onlineEvidenceCheck.id),
+			acceptedCycleCheck,
+			onlineEvidenceCheck,
+		];
 		const reasons = checks.flatMap((check) => (!check.passed && check.reason ? [check.reason] : []));
 		return requireTrajectoryVerification(state, { passed: reasons.length === 0, checks, reasons }, canonicalCycle);
 	}

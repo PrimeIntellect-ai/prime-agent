@@ -1086,6 +1086,17 @@ function readAssistantText(message: AssistantMessage): string {
 		.join("");
 }
 
+function readAvoAssistantDeliveryText(message: AssistantMessage): string {
+	return message.content
+		.filter((block) => {
+			if (block.type !== "text") return false;
+			if (!isObjectRecord(block.providerMetadata)) return true;
+			return !isObjectRecord(block.providerMetadata.googleSearchGrounding);
+		})
+		.map((block) => (block.type === "text" ? block.text : ""))
+		.join("");
+}
+
 export function extractMarkedPersistedAgentMessage(details: unknown, marker: string): string | undefined {
 	if (!isObjectRecord(details) || details.status !== "ok" || !Array.isArray(details.sentAgentMessages)) {
 		return undefined;
@@ -3963,6 +3974,114 @@ export class AgentSession {
 		});
 	}
 
+	private _observeAvoOnlineEvidence():
+		| { provider: string; sourceCount: number; queryCount: number; evidenceRefs: string[] }
+		| undefined {
+		const state = this._requireAvoRuntime().getState();
+		const taskStartedAt = Date.parse(state.createdAt);
+		const externalClaim = [...state.evaluations]
+			.reverse()
+			.find(
+				(receipt) =>
+					receipt.issuedBy === "host" &&
+					receipt.authority === "external" &&
+					receipt.evaluatorId === "external_claim" &&
+					receipt.status === "pass",
+			);
+		if (externalClaim) {
+			return {
+				provider: "host_bound_external_claim",
+				sourceCount: 1,
+				queryCount: 0,
+				evidenceRefs: [...externalClaim.evidenceRefs],
+			};
+		}
+
+		for (const message of [...this.messages].reverse()) {
+			if (message.role !== "assistant" || message.timestamp < taskStartedAt) continue;
+			for (const item of message.content) {
+				if (item.type !== "text" || !isObjectRecord(item.providerMetadata)) continue;
+				const grounding = item.providerMetadata.googleSearchGrounding;
+				if (!isObjectRecord(grounding) || !Array.isArray(grounding.sources)) continue;
+				const sources = grounding.sources.filter(
+					(source) => isObjectRecord(source) && typeof source.url === "string" && /^https?:\/\//i.test(source.url),
+				);
+				if (sources.length === 0) continue;
+				const queries = Array.isArray(grounding.queries)
+					? grounding.queries.filter(
+							(query): query is string => typeof query === "string" && query.trim().length > 0,
+						)
+					: [];
+				return {
+					provider: "google_vertex_native_search",
+					sourceCount: sources.length,
+					queryCount: queries.length,
+					evidenceRefs: sources.map((source) => `source:${String(source.url)}`),
+				};
+			}
+		}
+
+		const trustedNames = new Set([
+			"web_search",
+			"google_search",
+			"google_search_retrieval",
+			"browser_search",
+			"weather",
+			"finance",
+			"sports",
+		]);
+		for (const message of [...this.messages].reverse()) {
+			if (message.role !== "toolResult" || message.timestamp < taskStartedAt || message.isError) continue;
+			if (!trustedNames.has(message.toolName)) continue;
+			return {
+				provider: message.toolName,
+				sourceCount: 1,
+				queryCount: 1,
+				evidenceRefs: [`host:tool-result:${message.toolCallId}`],
+			};
+		}
+		return undefined;
+	}
+
+	private _recordAvoOnlineEvidence(): void {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		if (!state.routing.reasons.some((reason) => reason.startsWith("online evidence required:"))) return;
+		const observation = this._observeAvoOnlineEvidence();
+		if (!observation) return;
+		for (const candidateId of new Set(
+			state.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
+		)) {
+			const candidate = state.candidates.find((item) => item.candidateId === candidateId);
+			if (!candidate) continue;
+			if (
+				state.evaluations.some(
+					(receipt) =>
+						receipt.candidateId === candidateId &&
+						receipt.issuedBy === "host" &&
+						receipt.evaluatorId === "online_evidence" &&
+						receipt.status === "pass" &&
+						receipt.metrics.candidate_payload_digest === candidate.payloadDigest,
+				)
+			)
+				continue;
+			runtime.recordHostEvaluation({
+				candidateId,
+				evaluatorId: "online_evidence",
+				status: "pass",
+				authority: "external",
+				evidenceRefs: observation.evidenceRefs,
+				metrics: {
+					meaningful: true,
+					provider: observation.provider,
+					source_count: observation.sourceCount,
+					query_count: observation.queryCount,
+					candidate_payload_digest: candidate.payloadDigest,
+				},
+			});
+		}
+	}
+
 	private _evaluateAvoHostBoundStopGate(): AvoStopGate {
 		const runtime = this._requireAvoRuntime();
 		for (const candidateId of new Set(
@@ -3973,6 +4092,7 @@ export class AgentSession {
 		)) {
 			this._recordAvoCandidateIntegrityFailure(candidateId);
 		}
+		this._recordAvoOnlineEvidence();
 		return runtime.evaluateStopGate();
 	}
 
@@ -6203,7 +6323,10 @@ export class AgentSession {
 					state,
 				).canonical,
 		);
-		const assistantDigest = digestAvoDeliveryText(readAssistantText(context.message));
+		// Provider-authored search provenance is visible evidence, not model-authored
+		// candidate text. Keep it out of the exact canonical-delivery digest while
+		// retaining the structured block for the independent online-evidence gate.
+		const assistantDigest = digestAvoDeliveryText(readAvoAssistantDeliveryText(context.message));
 		const deliveryMatches =
 			gate.passed &&
 			acceptedCandidate?.deliveryDigest !== undefined &&

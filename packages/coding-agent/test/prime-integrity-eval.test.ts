@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { createPrimeIntegrityCatalog } from "../src/evals/prime-integrity/catalog.js";
-import { aggregatePrimeIntegrityResults, parsePrimeIntegrityArgs } from "../src/evals/prime-integrity/runner.js";
+import {
+	aggregatePrimeIntegrityResults,
+	parsePrimeIntegrityArgs,
+	summarizePrimeIntegrityTrace,
+} from "../src/evals/prime-integrity/runner.js";
 import type { PrimeIntegrityCaseResult } from "../src/evals/prime-integrity/types.js";
 
 const tempDirectories: string[] = [];
@@ -152,6 +156,33 @@ describe("Prime Integrity Eval", () => {
 			meanObligationCoverage: 0.75,
 			meanCandidatesPerTask: 1,
 			meanCyclesPerTask: 1,
+		});
+	});
+
+	test("reads anti-laziness checkpoints from the durable AVO trace", () => {
+		const root = tempDirectory();
+		const avoDirectory = join(root, "session", "avo");
+		mkdirSync(avoDirectory, { recursive: true });
+		writeFileSync(
+			join(avoDirectory, "state.json"),
+			JSON.stringify({
+				candidates: [{ candidateId: "candidate-1" }],
+				cycles: [{ cycleId: "cycle-1" }],
+				checkpoints: [
+					{ status: "watch", triggeredHeuristics: ["no_observable_progress_1_tool_batch"] },
+					{ status: "intervene", triggeredHeuristics: ["anti_laziness_intervention"] },
+					{ status: "progressing", triggeredHeuristics: ["observable_progress_resumed"] },
+					{ status: "intervene", triggeredHeuristics: ["anti_laziness_intervention"] },
+				],
+			}),
+			"utf8",
+		);
+
+		expect(summarizePrimeIntegrityTrace([], root)).toMatchObject({
+			candidates: 1,
+			cycles: 1,
+			watchdogInterventions: 2,
+			watchdogWatches: 1,
 		});
 	});
 });

@@ -38,6 +38,7 @@ import {
 	GeneralAvoAdapter,
 	inferAvoEnvironment,
 	inferAvoHorizon,
+	inferAvoOnlineEvidencePolicy,
 	inferAvoVerificationPolicy,
 	normalizeAvoExperimentPlan,
 	parseAvoClaimVerifierMessage,
@@ -3598,6 +3599,42 @@ describe("AVO routing and adapters", () => {
 		["Rewrite this email", "subjective", "not_applicable"],
 	] as const)("assigns verification class and policy for %s", (prompt, verificationClass, policy) => {
 		expect(inferAvoVerificationPolicy(prompt, "general")).toMatchObject({ verificationClass, policy });
+	});
+
+	test("routes online evidence independently from the coding adapter", () => {
+		expect(inferAvoOnlineEvidencePolicy("Fix this parser using the latest official documentation")).toMatchObject({
+			required: true,
+		});
+		expect(inferAvoOnlineEvidencePolicy("Search the repository for parser references")).toMatchObject({
+			required: false,
+		});
+		expect(inferAvoOnlineEvidencePolicy("Search for TODO markers in the local files")).toMatchObject({
+			required: false,
+		});
+		expect(inferAvoOnlineEvidencePolicy("Search for the best current CUDA release")).toMatchObject({
+			required: true,
+		});
+		expect(inferAvoOnlineEvidencePolicy("Do not search online; this task is self-contained")).toMatchObject({
+			required: false,
+		});
+		expect(inferAvoOnlineEvidencePolicy("Improve the current local implementation")).toMatchObject({
+			required: false,
+		});
+		expect(inferAvoOnlineEvidencePolicy("Find out why this test fails")).toMatchObject({ required: false });
+		expect(inferAvoOnlineEvidencePolicy("Who is the current president of France?")).toMatchObject({
+			required: true,
+		});
+		expect(inferAvoOnlineEvidencePolicy("Fix and test this local parser bug")).toMatchObject({ required: false });
+
+		const runtime = new AvoSessionRuntime(undefined, "run-online-coding-route", clock());
+		runtime.observeRootPrompt("Fix this parser using the latest official documentation");
+		expect(runtime.getState()).toMatchObject({
+			routing: {
+				environment: "coding",
+				reasons: expect.arrayContaining([expect.stringMatching(/^online evidence required:/)]),
+			},
+			verificationClass: "coding",
+		});
 	});
 
 	test("derives only one unambiguous host arithmetic contract", () => {

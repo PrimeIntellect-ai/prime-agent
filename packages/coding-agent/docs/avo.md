@@ -10,6 +10,19 @@ the candidate to the observed workspace and an unchanged pre-task test
 baseline. Factual work binds verbatim claims to host-observed external sources.
 Artifact and deterministic tasks use their own host checks.
 
+Online evidence is a separate host-routed obligation rather than an adapter.
+Explicit unnegated web-search requests, time-sensitive facts (latest releases,
+news, prices, schedules, public office holders), fact checks, citations, and
+current official documentation require a trusted online source even when the
+primary task is coding. Negated requests such as `do not search online` and
+local repository/file searches do not activate it. Stable, self-contained
+coding and explanation tasks keep native search disabled. For Vertex Gemini,
+AVO automatically exposes native Google Search only when that obligation is
+required. Provider-authored grounding metadata is retained as a host receipt,
+and the final gate rejects an otherwise passing candidate when no trusted
+source was observed. The provider-owned source appendix remains visible but is
+excluded from the model candidate's exact canonical-delivery digest.
+
 ## Integrity benchmark
 
 Prime Integrity Eval measures whether this architecture produces legitimate
@@ -18,6 +31,10 @@ test-tampering, zero-test, and shortcut traps. Its host-only graders run after
 Prime exits and are not copied into the task workspace. See
 [Prime Integrity Eval](prime-integrity-eval.md) for the threat model, metrics,
 and reproducible commands.
+
+For GPU-kernel optimization, the resumable [KernelBench AVO runner](kernelbench-avo.md)
+records official Level-1 correctness, static-integrity, runtime, `fast_0`, and
+`fast_1` alongside the complete AVO/model trace.
 
 ## Repeated experiment selection
 

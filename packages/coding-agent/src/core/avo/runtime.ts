@@ -459,6 +459,9 @@ export class AvoSessionRuntime {
 }
 
 export function buildAvoRuntimePrompt(state: AvoRunState, memoryContext = ""): string {
+	const onlineEvidenceRequired = state.routing.reasons.some((reason) =>
+		reason.startsWith("online evidence required:"),
+	);
 	return [
 		"AVO is Prime's default operating architecture for every root task. It is not a user-selected mode.",
 		`Active AVO task run=${state.runId}. The host automatically selected evaluation adapter=${state.routing.environment}, horizon=${state.routing.horizon}, verification_class=${state.verificationClass}, and verification_policy=${state.verificationPolicy}.`,
@@ -466,6 +469,9 @@ export function buildAvoRuntimePrompt(state: AvoRunState, memoryContext = ""): s
 		state.verificationReasons.length > 0
 			? `Verification policy evidence: ${state.verificationReasons.join("; ")}.`
 			: undefined,
+		onlineEvidenceRequired
+			? "AVO_ONLINE_EVIDENCE=required. The host has independently determined that this task needs current or explicitly requested online evidence. For Vertex Gemini, native Google Search is enabled automatically. Use it and ground the work in at least one returned source; the final gate will reject a locally verified result that skipped this separate obligation."
+			: "AVO_ONLINE_EVIDENCE=not_required. Native online search is not enabled automatically because the task is locally and temporally self-contained; use local evidence unless a later user instruction escalates the requirement.",
 		"General, coding, and research are internal tool/evaluation adapters, not separate modes. Do not ask the user to choose one. Direct, iterative, and long only control how much AVO machinery is activated: direct uses one evaluated action without a retained supervisor; iterative retains candidate lineage and revises after feedback; long also activates namespaced memory, recovery, and retained trajectory supervision.",
 		"Environment routing is host-authoritative. Model calls cannot select general, coding, or research and may only escalate the current horizon to iterative or long.",
 		"Prime automatically recalls NOOA memory before root turns. Proposed task memory may surface as a hypothesis; proposed project memory is deliberate-only and proposed global persistence is forbidden. Verified memories are host-cleared, and live references are re-resolved at recall time. Never treat recall alone as task evidence or authority.",

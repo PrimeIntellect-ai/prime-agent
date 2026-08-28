@@ -1191,6 +1191,69 @@ export function inferAvoVerificationPolicy(
 	};
 }
 
+export function inferAvoOnlineEvidencePolicy(prompt: string): {
+	required: boolean;
+	reasons: string[];
+} {
+	const normalized = prompt.toLowerCase();
+	const explicitOnlineSignals = matchingUnnegatedSignals(normalized, [
+		"search online",
+		"search the web",
+		"web search",
+		"google search",
+		"browse the web",
+		"browse online",
+		"look up online",
+		"find online",
+		"internet search",
+	]);
+	const localLookupRequest =
+		/\b(?:search(?:\s+for)?|look\s+up|find\s+out)\b[^.!?\n]{0,80}\b(?:repository|repo|codebase|workspace|source\s+code|local\s+(?:file|files|directory|folder))\b/i.test(
+			prompt,
+		);
+	const genericLookupSignals = localLookupRequest
+		? []
+		: matchingUnnegatedSignals(normalized, ["search for", "look up"]);
+	const unstableSignals = matchingUnnegatedSignals(normalized, [
+		"latest",
+		"today",
+		"right now",
+		"recent",
+		"news",
+		"weather",
+		"stock price",
+		"share price",
+		"exchange rate",
+		"schedule",
+		"standings",
+		"president of",
+		"prime minister of",
+		"ceo of",
+		"mayor of",
+		"fact check",
+		"current version",
+		"current release",
+		"current documentation",
+		"current docs",
+		"current law",
+		"current regulation",
+	]);
+	const sourceSignals = matchingUnnegatedSignals(normalized, [
+		"cite sources",
+		"provide sources",
+		"with citations",
+		"official documentation",
+		"official docs",
+	]);
+	const reasons = [
+		...(explicitOnlineSignals.length > 0 ? [`explicit online lookup: ${explicitOnlineSignals.join(", ")}`] : []),
+		...(genericLookupSignals.length > 0 ? [`external lookup request: ${genericLookupSignals.join(", ")}`] : []),
+		...(unstableSignals.length > 0 ? [`time-sensitive facts: ${unstableSignals.join(", ")}`] : []),
+		...(sourceSignals.length > 0 ? [`requested external sources: ${sourceSignals.join(", ")}`] : []),
+	];
+	return { required: reasons.length > 0, reasons };
+}
+
 export function inferAvoHorizon(
 	prompt: string,
 	environment: AvoEnvironment,
@@ -2247,6 +2310,10 @@ export class AvoStore {
 				: this.state.environmentSelection;
 		const inferredHorizon = inferAvoHorizon(normalized, environment);
 		const inferredVerification = inferAvoVerificationPolicy(normalized, environment);
+		const inferredOnlineEvidence = inferAvoOnlineEvidencePolicy(normalized);
+		const preserveOnlineEvidence =
+			preserveTaskConstraints &&
+			this.state.routing.reasons.some((reason) => reason.startsWith("online evidence required:"));
 		const horizonRank: Record<AvoHorizon, number> = { direct: 0, iterative: 1, long: 2 };
 		const horizon =
 			this.state.horizonSelection === "auto"
@@ -2268,6 +2335,11 @@ export class AvoStore {
 				...(this.state.horizonSelection === "auto"
 					? inferredHorizon.reasons
 					: [`horizon overridden to ${horizon}`]),
+				...(inferredOnlineEvidence.required
+					? [`online evidence required: ${inferredOnlineEvidence.reasons.join("; ")}`]
+					: preserveOnlineEvidence
+						? ["online evidence required: preserved active task requirement"]
+						: ["online evidence not required: task is locally or temporally self-contained"]),
 			],
 			decidedAt: this.now(),
 		};

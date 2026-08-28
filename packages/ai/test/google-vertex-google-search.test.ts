@@ -120,6 +120,32 @@ describe("Google Vertex native Google Search", () => {
 		expect(text).toContain("Sources (Google Search):");
 		expect(text).toContain("[Node.js \\[releases\\]](https://nodejs.org/en/about/previous-releases)");
 		expect(text).toContain("Search queries: current Node.js LTS");
+		const groundingBlock = result.content.find(
+			(block) => block.type === "text" && block.providerMetadata?.googleSearchGrounding,
+		);
+		expect(groundingBlock).toMatchObject({
+			providerMetadata: {
+				googleSearchGrounding: {
+					queries: ["current Node.js LTS"],
+					sources: [
+						{
+							title: "Node.js [releases]",
+							url: "https://nodejs.org/en/about/previous-releases",
+						},
+					],
+				},
+			},
+		});
+	});
+
+	it("automatically enables native search for a host-routed AVO online-evidence task", async () => {
+		await streamSimpleGoogleVertex(
+			model,
+			{ ...context, systemPrompt: "AVO_ONLINE_EVIDENCE=required" },
+			{ apiKey: "fake-key", reasoning: "off" },
+		).result();
+
+		expect(capturedTools()).toContainEqual({ googleSearch: {} });
 	});
 
 	it("allows a direct provider call to disable an enabled environment default", async () => {
