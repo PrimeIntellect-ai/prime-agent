@@ -219,4 +219,30 @@ describe("interactive heartbeat management", () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it("re-arms to an earlier deadline when a sooner heartbeat appears", async () => {
+		vi.useFakeTimers();
+		try {
+			vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+			const harness = Object.create(InteractiveMode.prototype) as HeartbeatRefreshHarness;
+			// Two minutes out, so the first schedule arms the capped 60s poll.
+			harness.heartbeatCatalog = [{ job: { ...heartbeat(), nextRunAt: "2026-01-01T00:02:00.000Z" } }];
+			harness.connectionState = { activeSessionId: "active-1", sessionId: "session-1" };
+			harness.subagentSnapshots = new Map();
+			harness.heartbeatManager = {};
+			harness.heartbeatManagerRefreshTimer = undefined;
+			harness.refreshHeartbeatCatalog = vi.fn(async () => {});
+
+			harness.scheduleHeartbeatManagerRefresh();
+			// A sooner heartbeat must pull the pending refresh forward, not sit
+			// behind the already-armed 60s poll.
+			harness.heartbeatCatalog = [{ job: { ...heartbeat(), nextRunAt: "2026-01-01T00:00:02.000Z" } }];
+			harness.scheduleHeartbeatManagerRefresh();
+			await vi.advanceTimersByTimeAsync(3_000);
+
+			expect(harness.refreshHeartbeatCatalog).toHaveBeenCalledOnce();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
