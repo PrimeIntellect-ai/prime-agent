@@ -498,7 +498,9 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			};
 			summary.candidates = Math.max(summary.candidates, state.candidates?.length ?? 0);
 			summary.cycles = Math.max(summary.cycles, state.cycles?.length ?? 0);
-		} catch {}
+		} catch {
+			// A damaged optional AVO artifact must not prevent the host from grading the workspace.
+		}
 	}
 	return summary;
 }
