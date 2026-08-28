@@ -493,24 +493,32 @@ abstract class BaseAdapter implements AvoEnvironmentAdapter {
 				item.plan?.candidateIds.includes(candidate.candidateId) === true &&
 				(!item.outcome || item.outcome.inferenceVersion === AVO_EXPERIMENT_INFERENCE_VERSION),
 		);
-		const latestConfirmation = [...experiments].reverse().find((item) => isCurrentPolicyConfirmation(item, state));
-		if (latestConfirmation?.outcome?.championCandidateId) {
-			return latestConfirmation.outcome.championCandidateId === candidate.candidateId
-				? undefined
-				: `host confirmation selected ${latestConfirmation.outcome.championCandidateId}, not ${candidate.candidateId}`;
+		const confirmations = experiments.filter((item) => isCurrentPolicyConfirmation(item, state));
+		const comparativeScreenings = experiments.filter(
+			(item) =>
+				item.plan?.stage === "screening" &&
+				item.plan.candidateIds.length > 1 &&
+				item.plan.baselineCandidateId !== candidate.candidateId,
+		);
+		for (const screening of comparativeScreenings) {
+			const resolvingConfirmation = [...confirmations]
+				.reverse()
+				.find((item) => item.plan?.confirmationOfExperimentId === screening.experimentId);
+			if (!resolvingConfirmation?.outcome?.championCandidateId) {
+				return screening.status === "completed"
+					? `screening ${screening.experimentId} leaves candidate ${candidate.candidateId} provisional; its own fresh completed confirmation must promote it`
+					: `screening ${screening.experimentId} candidate ${candidate.candidateId} cannot be canonical before screening and its own fresh confirmation complete`;
+			}
+			if (resolvingConfirmation.outcome.championCandidateId !== candidate.candidateId) {
+				return `host confirmation ${resolvingConfirmation.experimentId} selected ${resolvingConfirmation.outcome.championCandidateId}, not ${candidate.candidateId}`;
+			}
 		}
-		const comparativeScreening = [...experiments]
-			.reverse()
-			.find(
-				(item) =>
-					item.plan?.stage === "screening" &&
-					item.plan.candidateIds.length > 1 &&
-					item.plan.baselineCandidateId !== candidate.candidateId,
-			);
-		if (!comparativeScreening) return undefined;
-		return comparativeScreening.status === "completed"
-			? `screening candidate ${candidate.candidateId} is provisional only; a fresh completed confirmation must promote it`
-			: `screening candidate ${candidate.candidateId} cannot be canonical before screening and fresh confirmation complete`;
+		if (comparativeScreenings.length > 0) return undefined;
+		const latestConfirmation = [...confirmations].reverse().find((item) => item.outcome?.championCandidateId);
+		return latestConfirmation?.outcome?.championCandidateId !== undefined &&
+			latestConfirmation.outcome.championCandidateId !== candidate.candidateId
+			? `host confirmation ${latestConfirmation.experimentId} selected ${latestConfirmation.outcome.championCandidateId}, not ${candidate.candidateId}`
+			: undefined;
 	}
 
 	deriveEvaluationState(candidate: AvoCandidate, receipts: readonly AvoEvaluationReceipt[], state: AvoRunState) {

@@ -212,6 +212,127 @@ def main() -> None:
                 ]
             },
         )
+        task_scope_path = Path(directory) / "avo-task-scope.sqlite"
+        project_scope_path = Path(directory) / "avo-project-scope.sqlite"
+        task_scope_memories = [
+            {
+                "memoryId": f"task-note-{index}",
+                "type": "info",
+                "namespace": "general",
+                "scope": "task",
+                "verificationState": "proposed",
+                "title": f"Quasar parser note {index}",
+                "content": f"Quasar parser recovery scratch note {index}.",
+                "importance": 1,
+                "tags": ["quasar", "parser"],
+                "sourceIds": [],
+                "owner": "prime-root@behavior-eval",
+                "createdAt": "2026-08-25T00:00:00.000Z",
+            }
+            for index in range(5)
+        ]
+        project_scope_memories = [
+            {
+                "memoryId": "project-critical",
+                "type": "info",
+                "namespace": "general",
+                "scope": "project",
+                "verificationState": "verified",
+                "title": "Critical quasar parser recovery champion",
+                "content": "Critical verified quasar parser recovery procedure for this repository.",
+                "importance": 10,
+                "tags": ["critical", "quasar", "parser", "champion"],
+                "sourceIds": ["host:verified"],
+                "owner": "prime-root@behavior-eval",
+                "createdAt": "2026-08-25T00:00:00.000Z",
+            }
+        ]
+        cross_scope = AVO_SIDECAR_MODULE.run(
+            "sync_spontaneous",
+            task_scope_path,
+            {
+                "stores": [
+                    {
+                        "path": str(task_scope_path),
+                        "scope": "task",
+                        "owner": "prime-root@behavior-eval",
+                        "owner_role": "prime-root",
+                        "embedding": {"backend": "hashing"},
+                        "memories": task_scope_memories,
+                    },
+                    {
+                        "path": str(project_scope_path),
+                        "scope": "project",
+                        "owner": "prime-root@behavior-eval",
+                        "owner_role": "prime-root",
+                        "embedding": {"backend": "hashing"},
+                        "memories": project_scope_memories,
+                    },
+                ],
+                "query": "critical quasar parser recovery champion",
+                "limit": 5,
+                "max_chars": 1200,
+            },
+        )
+        importance_path = Path(directory) / "avo-importance-refresh.sqlite"
+        importance_memories = [
+            {
+                "memoryId": "importance-rising",
+                "type": "info",
+                "namespace": "general",
+                "scope": "project",
+                "verificationState": "verified",
+                "title": "Orion parser recovery evidence",
+                "content": "Verified Orion parser recovery evidence from the host.",
+                "importance": 1,
+                "tags": ["orion", "parser", "recovery"],
+                "sourceIds": ["host:first"],
+                "owner": "prime-root@behavior-eval",
+                "createdAt": "2026-08-25T00:00:00.000Z",
+            },
+            {
+                "memoryId": "importance-steady",
+                "type": "info",
+                "namespace": "general",
+                "scope": "project",
+                "verificationState": "verified",
+                "title": "Orion parser recovery evidence",
+                "content": "Verified Orion parser recovery evidence from the host.",
+                "importance": 5,
+                "tags": ["orion", "parser", "recovery"],
+                "sourceIds": ["host:second"],
+                "owner": "prime-root@behavior-eval",
+                "createdAt": "2026-08-25T00:00:00.000Z",
+            },
+        ]
+        importance_payload = {
+            "stores": [
+                {
+                    "path": str(importance_path),
+                    "scope": "project",
+                    "owner": "prime-root@behavior-eval",
+                    "owner_role": "prime-root",
+                    "embedding": {"backend": "hashing"},
+                    "memories": importance_memories,
+                }
+            ],
+            "query": "Orion parser recovery evidence",
+            "limit": 5,
+            "max_chars": 1200,
+        }
+        AVO_SIDECAR_MODULE.run("sync_spontaneous", importance_path, importance_payload)
+        importance_memories[0]["importance"] = 10
+        refreshed_importance = AVO_SIDECAR_MODULE.run(
+            "sync_spontaneous",
+            importance_path,
+            importance_payload,
+        )
+        importance_memories[0]["verificationState"] = "contested"
+        contested_recall = AVO_SIDECAR_MODULE.run(
+            "sync_spontaneous",
+            importance_path,
+            importance_payload,
+        )
 
         expected = {"relevant-stale-deps", "related-env-cache"}
         expected_agriculture = {"relevant-seasonal-sensor", "related-smallholder-transfer"}
@@ -235,6 +356,15 @@ def main() -> None:
                 == {"memory:parser-api-v2", "memory:parser-api-v3"}
                 for cluster in reconciliation.get("clusters", [])
             ),
+            "cross_scope_ranking_does_not_starve_verified_project_memory": (
+                "project-critical" in cross_scope.get("memory_ids", [])
+            ),
+            "canonical_importance_increase_refreshes_nooa_ranking": (
+                refreshed_importance.get("memory_ids", [None])[0] == "importance-rising"
+            ),
+            "contested_memory_is_not_recalled_by_nooa": (
+                "importance-rising" not in contested_recall.get("memory_ids", [])
+            ),
         }
         report = {
             "passed": all(checks.values()),
@@ -247,6 +377,9 @@ def main() -> None:
             "agriculture_recall": agriculture,
             "final_access": final_access,
             "reconciliation_candidates": reconciliation,
+            "cross_scope_recall": cross_scope,
+            "refreshed_importance_recall": refreshed_importance,
+            "contested_recall": contested_recall,
         }
         print(json.dumps(report, indent=2, sort_keys=True))
         if not report["passed"]:

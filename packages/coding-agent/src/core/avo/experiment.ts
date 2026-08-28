@@ -579,17 +579,37 @@ function metricSummary(values: readonly number[]): AvoMetricSummary {
 		throw new Error("experiment aggregate requires finite numeric observations");
 	}
 	const sorted = [...values].sort((left, right) => left - right);
-	const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+	let scale = 0;
+	for (const value of values) scale = Math.max(scale, Math.abs(value));
+	let scaledMean = 0;
+	let scaledSquaredDeviations = 0;
+	if (scale > 0) {
+		for (const [index, value] of values.entries()) {
+			const scaled = value / scale;
+			const delta = scaled - scaledMean;
+			scaledMean += delta / (index + 1);
+			scaledSquaredDeviations += delta * (scaled - scaledMean);
+		}
+	}
+	const mean = scale === 0 ? 0 : scaledMean * scale;
 	const middle = Math.floor(sorted.length / 2);
-	const median = sorted.length % 2 === 0 ? (sorted[middle - 1]! + sorted[middle]!) / 2 : sorted[middle]!;
-	const variance =
-		values.length > 1 ? values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (values.length - 1) : 0;
-	const standardDeviation = Math.sqrt(variance);
+	const median = sorted.length % 2 === 0 ? sorted[middle - 1]! / 2 + sorted[middle]! / 2 : sorted[middle]!;
+	const scaledVariance = values.length > 1 ? scaledSquaredDeviations / (values.length - 1) : 0;
+	const standardDeviation = scale === 0 ? 0 : scale * Math.sqrt(Math.max(0, scaledVariance));
+	const variance = standardDeviation * standardDeviation;
 	const ci95DegreesOfFreedom = values.length - 1;
 	const margin =
 		ci95DegreesOfFreedom > 0
 			? studentT975CriticalValue(ci95DegreesOfFreedom) * (standardDeviation / Math.sqrt(values.length))
 			: undefined;
+	const ci95Low = margin === undefined ? null : mean - margin;
+	const ci95High = margin === undefined ? null : mean + margin;
+	if (
+		![mean, median, variance, standardDeviation, sorted[0]!, sorted.at(-1)!].every(Number.isFinite) ||
+		(margin !== undefined && ![margin, ci95Low, ci95High].every(Number.isFinite))
+	) {
+		throw new Error("experiment metric summary exceeds the host finite numeric range");
+	}
 	return {
 		count: values.length,
 		mean,
@@ -600,8 +620,8 @@ function metricSummary(values: readonly number[]): AvoMetricSummary {
 		maximum: sorted.at(-1)!,
 		ci95Method: margin === undefined ? "not_estimable" : "student_t",
 		ci95DegreesOfFreedom,
-		ci95Low: margin === undefined ? null : mean - margin,
-		ci95High: margin === undefined ? null : mean + margin,
+		ci95Low,
+		ci95High,
 	};
 }
 
@@ -626,6 +646,9 @@ function deriveSelectionEvidence(
 	const criticalValue = studentTUpperCriticalValue(reservation.allocatedAlpha, comparison.delta.ci95DegreesOfFreedom);
 	const favorableLowerBound =
 		standardError === 0 ? comparison.favorableMean : comparison.favorableMean - criticalValue * standardError;
+	if (![standardError, oneSidedPValue, criticalValue, favorableLowerBound].every(Number.isFinite)) {
+		throw new Error("experiment selection evidence exceeds the host finite numeric range");
+	}
 	return {
 		...structuredClone(reservation),
 		candidateId: comparison.candidateId,
@@ -788,6 +811,9 @@ export function deriveAvoExperimentOutcome(
 			plan.promotion.minimumAbsoluteEffect,
 			Math.abs(baselineAggregate.metric.mean) * plan.promotion.minimumRelativeEffect,
 		);
+		if (!Number.isFinite(requiredMinimumEffect)) {
+			throw new Error("experiment promotion must derive a finite meaningful-effect threshold");
+		}
 		const challengerComparison = pairedComparisons.find(
 			(comparison) => comparison.candidateId !== plan.baselineCandidateId,
 		);

@@ -264,6 +264,10 @@ objective, environment, latest candidate, and latest failure. It asks NOOA for
 spontaneous recall and inserts a bounded context block before model reasoning.
 This uses NOOA's `touch=False` semantics: injected recall is logged but does not
 reinforce itself. `recall()` remains available for deliberate inspection.
+The block includes bounded memory content—not only titles—and labels it as
+historical data rather than instructions. Experiment episodes put host-derived
+outcomes and statistics first, and the formatter reserves space for every
+selected memory so one long record cannot hide the rest.
 
 The host automatically writes verified project episodes for completed cycles,
 generic experiments, research-adapter experiments, supervisor interventions,

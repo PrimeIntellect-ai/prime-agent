@@ -9,6 +9,7 @@ export {
 export { evaluateAvoCheckpoint } from "./checkpoint.js";
 export {
 	type AvoIndependentClaimVerdict,
+	assertAvoClaimSourceContextSafe,
 	assertAvoClaimVerifierQuoteSafe,
 	avoClaimVerifierMarker,
 	buildAvoClaimVerifierPrompt,

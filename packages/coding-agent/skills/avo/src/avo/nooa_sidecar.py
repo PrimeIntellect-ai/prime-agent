@@ -193,7 +193,7 @@ def _record(value: dict[str, Any]) -> Memory:
         "owner": str(value.get("owner", OWNER)),
         "references": references,
         "edges": edges,
-        "archived": bool(value.get("invalidatedAt")) or verification == "invalidated",
+        "archived": bool(value.get("invalidatedAt")) or verification in {"contested", "invalidated"},
     }
     if parsed_created_at is not None:
         kwargs["created_at"] = parsed_created_at
@@ -247,7 +247,9 @@ def _upsert(store: MemoryStore, embedder: Any, value: dict[str, Any]) -> None:
         record.confidence = existing.confidence
         record.strength = existing.strength
         record.reinforcement_count = existing.reinforcement_count
-        record.importance = existing.importance
+        # Preserve NOOA reflection rescores while still honoring a stronger
+        # canonical host importance assigned after the first mirror.
+        record.importance = max(existing.importance, record.importance)
         record.edges = existing.edges
         if str(value.get("verificationState", "proposed")) != "verified":
             record.archived = record.archived or existing.archived
@@ -266,6 +268,8 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{command} requires a non-empty stores array")
         results: list[dict[str, Any]] = []
         memory_ids: list[str] = []
+        ranked_memories: dict[str, tuple[int, float, int]] = {}
+        recall_rank = 0
         archived_ids: list[str] = []
         aggregate_report: dict[str, int | float | bool | str] = {}
         for item in stores:
@@ -287,6 +291,19 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 for memory_id in result.get("memory_ids", []):
                     if isinstance(memory_id, str) and memory_id not in memory_ids:
                         memory_ids.append(memory_id)
+                for ranking in result.get("rankings", []):
+                    if not isinstance(ranking, dict) or not isinstance(ranking.get("memory_id"), str):
+                        continue
+                    memory_id = ranking["memory_id"]
+                    precision = ranking.get("precision_score")
+                    importance = ranking.get("importance")
+                    if not isinstance(precision, int) or not isinstance(importance, (int, float)):
+                        continue
+                    candidate_rank = (precision, float(importance), -recall_rank)
+                    existing_rank = ranked_memories.get(memory_id)
+                    if existing_rank is None or candidate_rank > existing_rank:
+                        ranked_memories[memory_id] = candidate_rank
+                    recall_rank += 1
                 results.append({"scope": item.get("scope"), "sync": sync, "recall": result})
             elif command == "sync_reflect":
                 result = run(
@@ -314,7 +331,18 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
                         results.append({"scope": item.get("scope"), "sync": sync, "cluster": cluster})
         if command == "sync_spontaneous":
             limit = payload.get("limit", 5)
-            bounded = memory_ids[: limit if isinstance(limit, int) and limit > 0 else 5]
+            bounded_limit = limit if isinstance(limit, int) and limit > 0 else 5
+            bounded = (
+                [
+                    memory_id
+                    for memory_id, _rank in sorted(
+                        ranked_memories.items(),
+                        key=lambda item: (-item[1][0], -item[1][1], -item[1][2]),
+                    )[:bounded_limit]
+                ]
+                if ranked_memories
+                else memory_ids[:bounded_limit]
+            )
             return {
                 "ok": True,
                 "memory_ids": bounded,
@@ -399,6 +427,7 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
             owner_scope = str(payload.get("owner_role", payload.get("owner", OWNER)))
             candidates = engine.recall(query, k=candidate_limit, touch=False, owner=owner_scope)
             recalled = _high_precision_memories(candidates, query, limit)
+            query_terms = _cue_terms(query)
             lines = ["## Recalled AVO memories (associative)"]
             for memory in recalled:
                 head = (memory.title or memory.content).replace("\n", " ").strip()
@@ -420,6 +449,14 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
             return {
                 "ok": True,
                 "memory_ids": [memory.id for memory in recalled],
+                "rankings": [
+                    {
+                        "memory_id": memory.id,
+                        "precision_score": _precision_score(memory, query_terms),
+                        "importance": memory.importance,
+                    }
+                    for memory in recalled
+                ],
                 "context": context,
                 "chars": len(context),
                 "touch": False,

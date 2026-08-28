@@ -48,6 +48,58 @@ function hasMultipleSentenceContent(value: string): boolean {
 	return false;
 }
 
+function sourceSentenceSpans(value: string): string[] {
+	const spans: string[] = [];
+	let start = 0;
+	for (let index = 0; index < value.length; index++) {
+		const character = value[index];
+		if (character !== "." && character !== "!" && character !== "?") continue;
+		if (character === "." && isAbbreviationPeriod(value, index)) continue;
+		spans.push(value.slice(start, index + 1).trim());
+		start = index + 1;
+	}
+	const trailing = value.slice(start).trim();
+	if (trailing) spans.push(trailing);
+	return spans.filter(Boolean);
+}
+
+function trimSourceSentenceWrapper(value: string): string {
+	return value
+		.replace(/^[\s"'‘’“”({[•*]+/, "")
+		.replace(/[\s"'‘’“”)}\]]+$/, "")
+		.trim();
+}
+
+export function assertAvoClaimSourceContextSafe(claimText: string, exactQuote: string, sourceRecord: string): void {
+	const normalize = (value: string) => value.normalize("NFKC").replace(/\s+/g, " ").trim();
+	const claim = normalize(claimText);
+	const quote = normalize(exactQuote);
+	const record = normalize(sourceRecord);
+	if (quote !== claim) throw new Error("host-observed evidence must exactly equal the complete candidate claim");
+	const firstOccurrence = record.indexOf(quote);
+	if (firstOccurrence < 0) throw new Error("host-observed evidence was not found in its source record");
+	if (record.indexOf(quote, firstOccurrence + quote.length) >= 0) {
+		throw new Error("host-observed evidence occurs multiple times in its source record and is ambiguous");
+	}
+	const spans = sourceSentenceSpans(record);
+	const sentenceIndex = spans.findIndex((sentence) => sentence.includes(quote));
+	if (sentenceIndex < 0 || trimSourceSentenceWrapper(spans[sentenceIndex]!) !== quote) {
+		throw new Error("host-observed evidence must be one complete visible source sentence, not a cropped fragment");
+	}
+	const adjacent = [spans[sentenceIndex - 1], spans[sentenceIndex + 1]].filter(Boolean).join(" ");
+	const contextualDenial = [
+		/\b(?:following|preceding|previous|above|below|next)\s+(?:statement|claim|assertion|sentence)\b.{0,80}\b(?:false|incorrect|untrue|misleading|unsupported|unverified|disputed)\b/is,
+		/\b(?:this|that|it)(?:\s+(?:statement|claim|assertion|sentence))?\s+(?:is|was|remains)\s+(?:false|incorrect|untrue|misleading|unsupported|unverified|disputed)\b/is,
+		/\b(?:false|incorrect|untrue|misleading|unsupported|unverified|disputed)\b.{0,48}\b(?:statement|claim|assertion|sentence)\b/is,
+		/^\s*(?:false|incorrect|untrue|misleading|unsupported|unverified|disputed|not\s+true)[.!?]?\s*$/i,
+		/^\s*(?:rating|verdict|assessment|status|classification|fact[- ]?check)(?:\s+(?:is|was))?\s*:\s*(?:false|incorrect|untrue|misleading|unsupported|unverified|disputed|not\s+true)\b/is,
+		/^\s*(?:rated|marked|label(?:l)?ed)(?:\s+as)?\s+(?:false|incorrect|untrue|misleading|unsupported|unverified|disputed)\b/is,
+	];
+	if (contextualDenial.some((pattern) => pattern.test(adjacent))) {
+		throw new Error("host-observed evidence is negated or disputed by adjacent visible source context");
+	}
+}
+
 export function avoClaimVerifierMarker(candidateId: string, claimId: string): string {
 	return `AVO_CLAIM_VERDICT_JSON:${candidateId}:${claimId}`;
 }

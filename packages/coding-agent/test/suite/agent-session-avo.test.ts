@@ -134,6 +134,190 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 	});
 
+	it("credits canonical delivery before threshold compaction stops the turn", async () => {
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			settings: { compaction: { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1 } },
+			models: [{ id: "faux-1", contextWindow: 6_000 }],
+		});
+		harness.setResponses([
+			async () => {
+				await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+					candidate: { candidate_id: "rain-poem", kind: "answer", summary: "Rain poem", payload: "Rain sings." },
+				});
+				await harness!.session.handleAvoHostRequest("avo.evaluation.record", {
+					evaluation: {
+						candidate_id: "rain-poem",
+						evaluator_id: "subjective_review",
+						status: "pass",
+						authority: "model_opinion",
+						evidence_refs: [],
+						metrics: { reviewed: true },
+					},
+				});
+				await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
+					cycle: { candidate_id: "rain-poem" },
+				});
+				return fauxAssistantMessage("Rain sings.");
+			},
+			fauxAssistantMessage("Compacted conversation summary."),
+		]);
+
+		await harness.session.prompt("Write a poem about rain");
+
+		expect(harness.eventsOfType("compaction_start")).toEqual([expect.objectContaining({ reason: "threshold" })]);
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
+			state: { status: "completed" },
+		});
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			terminalEvidence: { kind: "avo_completion", runId: `${harness.session.sessionId}:task-1` },
+		});
+	});
+
+	it("resumes the AVO repair continuation after threshold compaction", async () => {
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			settings: { compaction: { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1 } },
+			models: [{ id: "faux-1", contextWindow: 6_000 }],
+		});
+		harness.setResponses([
+			async () => {
+				await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+					candidate: { candidate_id: "rain-poem", kind: "answer", summary: "Rain poem", payload: "Rain sings." },
+				});
+				await harness!.session.handleAvoHostRequest("avo.evaluation.record", {
+					evaluation: {
+						candidate_id: "rain-poem",
+						evaluator_id: "subjective_review",
+						status: "pass",
+						authority: "model_opinion",
+						evidence_refs: [],
+						metrics: { reviewed: true },
+					},
+				});
+				await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
+					cycle: { candidate_id: "rain-poem" },
+				});
+				return fauxAssistantMessage("A different, unbound answer.");
+			},
+			fauxAssistantMessage("Compacted conversation summary."),
+			fauxAssistantMessage("Rain sings."),
+		]);
+
+		await harness.session.prompt("Write a poem about rain");
+		await harness.session.waitForIdle();
+
+		expect(harness.eventsOfType("compaction_start")).toEqual([expect.objectContaining({ reason: "threshold" })]);
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
+			state: { status: "completed" },
+		});
+	});
+
+	it.each(["followUp", "steer"] as const)(
+		"credits canonical delivery before starting a queued %s root prompt in a fresh AVO run",
+		async (streamingBehavior) => {
+			harness = await createHarness({ persistSession: true, enforceAvoCompletion: true });
+			harness.setResponses([
+				async () => {
+					await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+						candidate: {
+							candidate_id: "rain-poem",
+							kind: "answer",
+							summary: "Rain poem",
+							payload: "Rain sings.",
+						},
+					});
+					await harness!.session.handleAvoHostRequest("avo.evaluation.record", {
+						evaluation: {
+							candidate_id: "rain-poem",
+							evaluator_id: "subjective_review",
+							status: "pass",
+							authority: "model_opinion",
+							evidence_refs: [],
+							metrics: { reviewed: true },
+						},
+					});
+					await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
+						cycle: { candidate_id: "rain-poem" },
+					});
+					await harness!.session.prompt("Calculate 2+2 exactly", { streamingBehavior });
+					return fauxAssistantMessage("Rain sings.");
+				},
+				async () => {
+					expect(await harness!.session.handleAvoHostRequest("avo.get")).toMatchObject({
+						state: {
+							runId: `${harness!.session.sessionId}:task-2`,
+							objective: "Calculate 2+2 exactly",
+							verificationClass: "deterministic_local",
+							verificationPolicy: "required",
+							status: "active",
+						},
+					});
+					await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+						candidate: { candidate_id: "sum", kind: "answer", summary: "Exact sum", payload: { result: 4 } },
+					});
+					await harness!.session.handleAvoHostRequest("avo.evaluation.deterministic", {
+						candidate_id: "sum",
+					});
+					await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
+						cycle: { candidate_id: "sum" },
+					});
+					return fauxAssistantMessage("4");
+				},
+			]);
+
+			await harness.session.prompt("Write a poem about rain");
+			await harness.session.waitForIdle();
+
+			expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
+				state: {
+					runId: `${harness.session.sessionId}:task-2`,
+					objective: "Calculate 2+2 exactly",
+					status: "completed",
+					taskRuns: [
+						{
+							runId: `${harness.session.sessionId}:task-1`,
+							objective: "Write a poem about rain",
+							status: "completed",
+						},
+					],
+				},
+			});
+			expect(harness.faux.state.callCount).toBe(2);
+		},
+	);
+
+	it("routes a public follow-up through the host verification policy before its model turn", async () => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([
+			async () => {
+				await harness!.session.followUp("Who is the president of France?", undefined, { resumeIfIdle: true });
+				return fauxAssistantMessage("Initial names.");
+			},
+			async (context) => {
+				expect(await harness!.session.handleAvoHostRequest("avo.get")).toMatchObject({
+					state: {
+						verificationClass: "external_factual",
+						verificationPolicy: "required",
+					},
+				});
+				expect(context.systemPrompt).toContain(
+					"verification_class=external_factual, and verification_policy=required",
+				);
+				return fauxAssistantMessage("Follow-up handled.");
+			},
+		]);
+
+		await harness.session.prompt("Brainstorm product names");
+		await harness.session.waitForIdle();
+
+		expect(harness.faux.state.callCount).toBe(2);
+	});
+
 	it("starts a clean task run after a policy-complete subjective task while retaining memory", async () => {
 		harness = await createHarness({ persistSession: true, enforceAvoCompletion: true });
 		harness.setResponses([
@@ -173,6 +357,7 @@ describe("AgentSession universal AVO runtime", () => {
 		harness.setResponses([
 			async (context) => {
 				expect(context.systemPrompt).not.toContain("Rain imagery");
+				expect(context.systemPrompt).toContain("Candidate: Rain poem");
 				await harness!.session.handleAvoHostRequest("avo.candidate.add", {
 					candidate: {
 						candidate_id: "rain-rewrite-1",
@@ -1294,6 +1479,73 @@ describe("AgentSession universal AVO runtime", () => {
 		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
 			stop_gate: { passed: true },
 		});
+	});
+
+	it("rejects a cropped factual quote whose visible source sentence denies the claim", async () => {
+		harness = await createHarness({ persistSession: true });
+		let sourceText = "The following statement is false: Company A revenue rose 40%.";
+		Object.defineProperty(harness.session, "_fetchAvoExternalSource", {
+			value: async () => ({
+				url: "https://official.example/correction",
+				text: sourceText,
+				bodyDigest: "b".repeat(64),
+				contentType: "text/html",
+				truncated: false,
+			}),
+		});
+		harness.setResponses([fauxAssistantMessage("searching")]);
+		await harness.session.prompt("Check the latest Company A revenue and verify it");
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "cropped-denial",
+				kind: "answer",
+				summary: "Cropped denial",
+				payload: "Company A revenue rose 40%.",
+				claims: [{ claim_id: "revenue", claim_text: "Company A revenue rose 40%." }],
+			},
+		});
+		harness.appendResponses([
+			fauxAssistantMessage(
+				'AVO_CLAIM_VERDICT_JSON:cropped-denial:revenue\n{"relation":"supports","reason":"The cropped quote states the claim."}',
+			),
+		]);
+
+		await expect(
+			harness.session.handleAvoHostRequest("avo.evaluation.url", {
+				candidate_id: "cropped-denial",
+				claim_id: "revenue",
+				url: "https://official.example/correction",
+				exact_quote: "Company A revenue rose 40%.",
+			}),
+		).rejects.toThrow(/complete visible source sentence/);
+		sourceText = "The following statement is false. Company A revenue rose 40%.";
+		await expect(
+			harness.session.handleAvoHostRequest("avo.evaluation.url", {
+				candidate_id: "cropped-denial",
+				claim_id: "revenue",
+				url: "https://official.example/correction",
+				exact_quote: "Company A revenue rose 40%.",
+			}),
+		).rejects.toThrow(/negated or disputed by adjacent/);
+		sourceText = "Not true. Company A revenue rose 40%.";
+		await expect(
+			harness.session.handleAvoHostRequest("avo.evaluation.url", {
+				candidate_id: "cropped-denial",
+				claim_id: "revenue",
+				url: "https://official.example/correction",
+				exact_quote: "Company A revenue rose 40%.",
+			}),
+		).rejects.toThrow(/negated or disputed by adjacent/);
+		sourceText = "Company A revenue rose 40%. Verdict: False.";
+		await expect(
+			harness.session.handleAvoHostRequest("avo.evaluation.url", {
+				candidate_id: "cropped-denial",
+				claim_id: "revenue",
+				url: "https://official.example/correction",
+				exact_quote: "Company A revenue rose 40%.",
+			}),
+		).rejects.toThrow(/negated or disputed by adjacent/);
+		expect(harness.getPendingResponseCount()).toBe(1);
 	});
 
 	it("binds a real external tool result and supported claim to a general candidate", async () => {

@@ -142,6 +142,7 @@ import {
 	type AvoIndependentClaimVerdict,
 	AvoSessionRuntime,
 	type AvoStopGate,
+	assertAvoClaimSourceContextSafe,
 	assertAvoClaimVerifierQuoteSafe,
 	assessAvoCandidateIntegrity,
 	assessAvoClaimEvidence,
@@ -690,6 +691,7 @@ interface PreparedTurnPayload extends SessionTurnPayload {
 	queueVisible: boolean;
 	acceptedAgentMessage: boolean;
 	acceptedBeforeCompletion: boolean;
+	avoObservedRunId?: string;
 	captureRunMessages?: Set<AgentMessage>;
 	cancelledDispatchEnded?: boolean;
 }
@@ -751,6 +753,7 @@ export type SessionActionRecoveryPayload =
 			queueVisible: boolean;
 			acceptedAgentMessage: boolean;
 			acceptedBeforeCompletion: boolean;
+			avoObservedRunId?: string;
 	  }
 	| {
 			kind: "session_command";
@@ -2380,6 +2383,7 @@ export class AgentSession {
 			await this._agentEventQueue;
 			await this._runSerializedRefineCheckpoint();
 		}
+		if (this._steeringStopPending) await this._completeAvoCanonicalDeliveryIfMatching(context);
 		if (await this._shouldStopForThresholdCompaction(context)) {
 			return true;
 		}
@@ -2390,14 +2394,46 @@ export class AgentSession {
 
 	private async _shouldStopForThresholdCompaction(context: ShouldStopAfterTurnContext): Promise<boolean> {
 		this._continueAfterThresholdCompaction = false;
-		if (this._pendingRequestedCompaction === undefined && !(await this._thresholdCompactionNeeded(context))) {
+		const thresholdNeeded =
+			this._pendingRequestedCompaction === undefined && (await this._thresholdCompactionNeeded(context));
+		if (this._pendingRequestedCompaction === undefined && !thresholdNeeded) {
 			return false;
+		}
+		if (thresholdNeeded) {
+			const avoDisposition = await this._queueAvoContinuationForThresholdCompaction(context);
+			if (avoDisposition === "queued") {
+				this._continueAfterThresholdCompaction = true;
+			} else if (
+				avoDisposition === "none" &&
+				(this._queueGoalContinuationForThresholdCompaction(context.message) ||
+					(await this._queueAutonomousContinuationForThresholdCompaction(context.message)))
+			) {
+				this._continueAfterThresholdCompaction = true;
+			}
 		}
 
 		const lastMessage = this.agent.state.messages[this.agent.state.messages.length - 1];
 		// A queued continuation disproves the assistant-last "task finished" heuristic, so preserve a true set above.
 		this._continueAfterThresholdCompaction ||= lastMessage !== undefined && lastMessage.role !== "assistant";
 		return true;
+	}
+
+	private async _queueAvoContinuationForThresholdCompaction(
+		context: ShouldStopAfterTurnContext,
+	): Promise<"queued" | "completed" | "none"> {
+		const continuation = await this._getAvoCompletionContinuation(context, this.agent.signal);
+		if (!continuation) {
+			return this._enforceAvoCompletion && this._avoRuntime?.getState().status === "completed"
+				? "completed"
+				: "none";
+		}
+		const normalized = normalizeMessageContent(continuation.content);
+		this._admitSessionInput(
+			this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
+				message: continuation,
+			}),
+		);
+		return "queued";
 	}
 
 	/**
@@ -2889,13 +2925,6 @@ export class AgentSession {
 		const contextTokens = this._getThresholdContextTokens(context.message, compactionTimestamp);
 		if (contextTokens === undefined || !shouldCompact(contextTokens, contextWindow, settings)) {
 			return false;
-		}
-
-		// Goal continuation takes exclusive priority over autonomous continuation, matching _getContinuationMessages.
-		if (this._queueGoalContinuationForThresholdCompaction(context.message)) {
-			this._continueAfterThresholdCompaction = true;
-		} else if (await this._queueAutonomousContinuationForThresholdCompaction(context.message)) {
-			this._continueAfterThresholdCompaction = true;
 		}
 		return true;
 	}
@@ -4613,6 +4642,7 @@ export class AgentSession {
 					throw new Error("AVO exact_quote occurs multiple times in one visible source record and is ambiguous");
 				}
 				assertAvoClaimVerifierQuoteSafe(claim.claimText, payload.exact_quote);
+				assertAvoClaimSourceContextSafe(claim.claimText, payload.exact_quote, matchedRecord);
 				const lexicalAssessment = assessAvoClaimEvidence(claim.claimText, payload.exact_quote);
 				const independentAssessment = await this._verifyAvoClaimEvidenceIndependently(
 					candidate.candidateId,
@@ -4740,6 +4770,7 @@ export class AgentSession {
 					throw new Error("AVO external source record contains multiple source URLs and is ambiguous");
 				}
 				assertAvoClaimVerifierQuoteSafe(claim.claimText, payload.exact_quote);
+				assertAvoClaimSourceContextSafe(claim.claimText, payload.exact_quote, evidenceRecord);
 				const lexicalAssessment = assessAvoClaimEvidence(claim.claimText, payload.exact_quote);
 				const independentAssessment = await this._verifyAvoClaimEvidenceIndependently(
 					candidate.candidateId,
@@ -5995,6 +6026,7 @@ export class AgentSession {
 		signal?: AbortSignal,
 	): Promise<AgentMessage[]> {
 		if (this.queuedActionCount > 0) {
+			await this._completeAvoCanonicalDeliveryIfMatching(context, signal);
 			return [];
 		}
 		const avoContinuation = await this._getAvoCompletionContinuation(context, signal);
@@ -6035,10 +6067,7 @@ export class AgentSession {
 		return autonomousMessage ? [autonomousMessage] : [];
 	}
 
-	private async _getAvoCompletionContinuation(
-		context: GetContinuationMessagesContext,
-		signal?: AbortSignal,
-	): Promise<AgentMessage | undefined> {
+	private async _assessAvoCanonicalDelivery(context: GetContinuationMessagesContext, signal?: AbortSignal) {
 		if (
 			!this._enforceAvoCompletion ||
 			!this._avoRuntime ||
@@ -6072,6 +6101,26 @@ export class AgentSession {
 			gate.passed &&
 			acceptedCandidate?.deliveryDigest !== undefined &&
 			assistantDigest === acceptedCandidate.deliveryDigest;
+		return { state, gate, acceptedCandidate, assistantDigest, deliveryMatches };
+	}
+
+	private async _completeAvoCanonicalDeliveryIfMatching(
+		context: GetContinuationMessagesContext,
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		const delivery = await this._assessAvoCanonicalDelivery(context, signal);
+		if (!delivery?.deliveryMatches || !this._avoRuntime) return false;
+		this._avoRuntime.store.complete(delivery.gate);
+		return true;
+	}
+
+	private async _getAvoCompletionContinuation(
+		context: GetContinuationMessagesContext,
+		signal?: AbortSignal,
+	): Promise<CustomMessage | undefined> {
+		const delivery = await this._assessAvoCanonicalDelivery(context, signal);
+		if (!delivery || !this._avoRuntime) return undefined;
+		const { state, gate, acceptedCandidate, assistantDigest, deliveryMatches } = delivery;
 		if (deliveryMatches) {
 			this._avoRuntime.store.complete(gate);
 			return undefined;
@@ -7676,8 +7725,10 @@ export class AgentSession {
 				}
 				const schedule = options?.streamingBehavior ?? "followUp";
 				const prefixMessages = visibleQueued ? this._takePendingNextTurnMessages() : undefined;
-				if (!isInternalPrompt && options?.skipPrePromptWork !== true && this._avoRuntime) {
+				let avoObservedRunId: string | undefined;
+				if (!visibleQueued && !isInternalPrompt && options?.skipPrePromptWork !== true && this._avoRuntime) {
 					this._avoRuntime.observeRootPrompt(normalized.text);
+					avoObservedRunId = this._avoRuntime.getState().runId;
 					this._ensureAvoCodingVerificationBaseline();
 					this._ensureAvoArtifactVerificationBaseline();
 					await this._refreshAvoMemoryContext(normalized.text);
@@ -7719,6 +7770,7 @@ export class AgentSession {
 					queueVisible: visibleQueued,
 					acceptedAgentMessage,
 					acceptedBeforeCompletion: options?.returnAfterAccepted === true,
+					avoObservedRunId,
 				});
 				if (action.suppressAutonomousContinuation) {
 					this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
@@ -7965,6 +8017,9 @@ export class AgentSession {
 							queueVisible: recovered.payload.queueVisible,
 							acceptedAgentMessage: recovered.payload.acceptedAgentMessage,
 							acceptedBeforeCompletion: recovered.payload.acceptedBeforeCompletion,
+							...(recovered.payload.avoObservedRunId
+								? { avoObservedRunId: recovered.payload.avoObservedRunId }
+								: {}),
 						}
 					: {
 							kind: "session_command",
@@ -8212,6 +8267,7 @@ export class AgentSession {
 			queueVisible?: boolean;
 			acceptedAgentMessage?: boolean;
 			acceptedBeforeCompletion?: boolean;
+			avoObservedRunId?: string;
 		},
 	): QueuedSessionAction {
 		const id = randomUUID();
@@ -8240,6 +8296,7 @@ export class AgentSession {
 			queueVisible: options.queueVisible ?? true,
 			acceptedAgentMessage: options.acceptedAgentMessage ?? false,
 			acceptedBeforeCompletion: options.acceptedBeforeCompletion ?? false,
+			...(options.avoObservedRunId ? { avoObservedRunId: options.avoObservedRunId } : {}),
 		};
 		return {
 			id,
@@ -8681,6 +8738,27 @@ export class AgentSession {
 		return false;
 	}
 
+	private async _prepareAvoQueuedRootTurns(actions: SessionAction<PreparedTurnPayload>[]): Promise<void> {
+		if (!this._avoRuntime || this._rlmDepth !== 0) return;
+		const rootTurns = actions.filter(
+			(action) => !action.payload.acceptedAgentMessage && primaryDeliveryRecord(action).message.role === "user",
+		);
+		let observed = false;
+		for (const action of rootTurns) {
+			const state = this._avoRuntime.getState();
+			if (state.status === "active" && action.payload.avoObservedRunId === state.runId) continue;
+			this._avoRuntime.observeRootPrompt(action.payload.text);
+			action.payload.avoObservedRunId = this._avoRuntime.getState().runId;
+			observed = true;
+		}
+		if (!observed) return;
+		this._ensureAvoCodingVerificationBaseline();
+		this._ensureAvoArtifactVerificationBaseline();
+		await this._refreshAvoMemoryContext(rootTurns.map((action) => action.payload.text).join("\n"));
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
+	}
+
 	private _surfaceSessionInputError(error: unknown): void {
 		const normalized = this._asError(error);
 		try {
@@ -8704,6 +8782,7 @@ export class AgentSession {
 			);
 		const firstTurn = activeTurns()[0];
 		if (!firstTurn) return;
+		await this._prepareAvoQueuedRootTurns(activeTurns());
 		const executionPolicy = firstTurn.payload.executionPolicy;
 		const restoreNextTurnContext = () => {
 			this._pendingNextTurnMessages.unshift(...nextTurnMessages);
@@ -9349,6 +9428,9 @@ export class AgentSession {
 								queueVisible: action.payload.queueVisible,
 								acceptedAgentMessage: action.payload.acceptedAgentMessage,
 								acceptedBeforeCompletion: action.payload.acceptedBeforeCompletion,
+								...(action.payload.avoObservedRunId
+									? { avoObservedRunId: action.payload.avoObservedRunId }
+									: {}),
 							}
 						: {
 								kind: "session_command",
@@ -11181,10 +11263,19 @@ export class AgentSession {
 		const contextTokens = this._getThresholdContextTokens(assistantMessage, compactionTimestamp);
 		if (contextTokens === undefined) return false;
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
-			if (queueAutonomousContinuation && this._queueGoalContinuationForThresholdCompaction(assistantMessage)) {
+			const canonicalAvoDeliveryCompleted =
+				this._enforceAvoCompletion && this._avoRuntime?.getState().status === "completed";
+			if (
+				queueAutonomousContinuation &&
+				!this._continueAfterThresholdCompaction &&
+				!canonicalAvoDeliveryCompleted &&
+				this._queueGoalContinuationForThresholdCompaction(assistantMessage)
+			) {
 				this._continueAfterThresholdCompaction = true;
 			} else if (
 				queueAutonomousContinuation &&
+				!this._continueAfterThresholdCompaction &&
+				!canonicalAvoDeliveryCompleted &&
 				(await this._queueAutonomousContinuationForThresholdCompaction(assistantMessage))
 			) {
 				this._continueAfterThresholdCompaction = true;

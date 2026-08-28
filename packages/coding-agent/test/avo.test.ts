@@ -304,6 +304,26 @@ describe("generic AVO core", () => {
 			ci95Low: null,
 			ci95High: null,
 		});
+
+		const stableLarge = deriveAvoExperimentOutcome(
+			{
+				...experiment,
+				plan: { ...experiment.plan!, seeds: ["1", "2"], expectedTrials: 2 },
+				trialIds: ["trial-1", "trial-2"],
+			},
+			[trial("1", 1e308), trial("2", 1e308)],
+		).candidateAggregates[0]!.metric;
+		expect(stableLarge).toMatchObject({ mean: 1e308, median: 1e308, variance: 0, standardDeviation: 0 });
+		expect(() =>
+			deriveAvoExperimentOutcome(
+				{
+					...experiment,
+					plan: { ...experiment.plan!, seeds: ["1", "2"], expectedTrials: 2 },
+					trialIds: ["trial-1", "trial-2"],
+				},
+				[trial("1", 1e308), trial("2", -1e308)],
+			),
+		).toThrow(/finite numeric range/);
 	});
 
 	test("requires five matched pairs before automatically promoting a challenger", () => {
@@ -545,6 +565,22 @@ describe("generic AVO core", () => {
 			reason: expect.stringContaining("resolves to zero"),
 		});
 		expect(() =>
+			deriveAvoExperimentOutcome(
+				hostReserveSelection({
+					...experiment,
+					plan: {
+						...plan,
+						selectionReservation: undefined,
+						promotion: { ...plan.promotion, minimumAbsoluteEffect: 0, minimumRelativeEffect: 1e308 },
+					},
+				}),
+				trials.map((trial) => ({
+					...trial,
+					metrics: { score: trial.candidateId === "challenger" ? 3 : 2 },
+				})),
+			),
+		).toThrow(/finite meaningful-effect threshold/);
+		expect(() =>
 			normalizeAvoExperimentPlan(
 				{
 					stage: "confirmation",
@@ -738,6 +774,48 @@ describe("generic AVO core", () => {
 		);
 	});
 
+	test("does not let an equal-timestamp stale session revive contested project memory", () => {
+		const root = artifactDir();
+		const project = join(root, "project");
+		const memoryRoot = join(root, "agent-memory");
+		mkdirSync(project, { recursive: true });
+		const frozenClock = () => "2026-08-26T00:00:00.000Z";
+		const open = (sessionId: string) =>
+			new AvoStore(join(root, sessionId), sessionId, frozenClock, project, memoryRoot);
+		open("seed").rememberVerified({
+			memoryId: "memory-contested",
+			namespace: "coding",
+			type: "info",
+			scope: "project",
+			title: "Contested project fact",
+			content: "This project fact was initially verified.",
+			importance: 7,
+			sourceIds: ["host:initial"],
+		});
+		const contestingSession = open("contesting");
+		const staleSession = open("stale");
+		contestingSession.contestMemory("memory-contested", "host:contradiction");
+		staleSession.rememberVerified({
+			memoryId: "memory-unrelated",
+			namespace: "coding",
+			type: "info",
+			scope: "project",
+			title: "Unrelated project fact",
+			content: "Saving this record must not rewrite stale memory state.",
+			importance: 5,
+			sourceIds: ["host:unrelated"],
+		});
+
+		expect(
+			open("reopened")
+				.getState()
+				.memories.find((memory) => memory.memoryId === "memory-contested"),
+		).toMatchObject({
+			verificationState: "contested",
+			sourceIds: expect.arrayContaining(["host:contradiction"]),
+		});
+	});
+
 	test("keeps proposed memory local to safe recall and persistence boundaries", async () => {
 		const root = artifactDir();
 		const project = join(root, "project");
@@ -893,6 +971,29 @@ describe("generic AVO core", () => {
 		expect(readFileSync(ledgerPath, "utf8")).toBe(corrupt);
 	});
 
+	test("delivers bounded content from every selected memory to root and supervisor prompts", () => {
+		const store = new AvoStore(undefined, "memory-content", clock());
+		store.initialize("Recall multiple verified parser lessons");
+		const memories = ["alpha", "beta", "gamma"].map((sentinel) =>
+			store.rememberVerified({
+				memoryId: `episode-${sentinel}`,
+				namespace: "general",
+				type: "episode",
+				scope: "project",
+				title: `Parser lesson ${sentinel}`,
+				content: `${sentinel.toUpperCase()}_RECOVERY_RULE must be available to the next reasoning turn.`,
+				importance: 8,
+			}),
+		);
+
+		const rootContext = store.formatMemoryContext(memories, 900);
+		const supervisorContext = store.formatSupervisorMemoryContext(memories, 900);
+		for (const sentinel of ["ALPHA", "BETA", "GAMMA"]) {
+			expect(rootContext).toContain(`${sentinel}_RECOVERY_RULE`);
+			expect(supervisorContext).toContain(`${sentinel}_RECOVERY_RULE`);
+		}
+	});
+
 	test("re-resolves live file references and records spontaneous recall outcomes", async () => {
 		const root = artifactDir();
 		const project = join(root, "project");
@@ -931,6 +1032,7 @@ describe("generic AVO core", () => {
 
 		const recalled = await runtime.recallMemory("parser recovery configuration", { spontaneous: true });
 		expect(recalled).toMatchObject({ backend: "nooa-memory", memories: [{ memoryId: memory.memoryId }] });
+		expect(recalled.context).toContain("The parser recovery behavior is controlled by its live configuration.");
 		expect(calls).toEqual(["sync_spontaneous"]);
 		const candidate = runtime.recordCandidate({ kind: "answer", summary: "Parser poem", payload: "Parser sings." });
 		runtime.recordEvaluation({
@@ -1161,6 +1263,7 @@ describe("generic AVO core", () => {
 		);
 		store.startTask("Use the completed parser experiment");
 		const archivedContext = store.formatMemoryContext([completed.memory]);
+		expect(archivedContext).toContain('"decision":"inconclusive"');
 		expect(archivedContext).toContain(`ref experiment:${experiment.experimentId} (LIVE)`);
 		expect(archivedContext).toContain(`ref trial:${trial.trialId} (LIVE)`);
 		expect(archivedContext).toContain(`ref evaluation:${binding.evaluationId} (LIVE)`);
@@ -1544,6 +1647,146 @@ describe("generic AVO core", () => {
 				},
 			}),
 		).toThrow(/does not match the exact candidate identity screened/);
+	});
+
+	test("requires confirmation for every comparative screening lineage before canonical promotion", () => {
+		const store = new AvoStore(undefined, "multiple-screening-lineage", clock());
+		store.initialize("Compare one challenger against multiple possible baselines");
+		const baselineA = store.recordCandidate({
+			candidateId: "baseline-a",
+			kind: "answer",
+			summary: "Baseline A",
+			payload: "baseline A payload",
+		});
+		const baselineB = store.recordCandidate({
+			candidateId: "baseline-b",
+			kind: "answer",
+			summary: "Baseline B",
+			payload: "baseline B payload",
+		});
+		const challenger = store.recordCandidate({
+			candidateId: "challenger",
+			kind: "answer",
+			summary: "Challenger",
+			payload: "challenger payload",
+		});
+		const condition = {
+			conditionId: "suite",
+			commandTemplate: "node benchmark.cjs --candidate {{candidate_id}} --seed {{seed}}",
+		};
+		const recordCell = (
+			experimentId: string,
+			candidate: typeof baselineA,
+			seed: string,
+			score: number,
+			prefix: string,
+		) => {
+			const contract = store.prepareTrialExecution(experimentId, candidate.candidateId, "suite", seed);
+			const source = store.recordEvaluation(
+				{
+					evaluationId: `source-${prefix}-${candidate.candidateId}-${seed}`,
+					candidateId: candidate.candidateId,
+					evaluatorId: "runtime",
+					status: "pass",
+					authority: "environment",
+					evidenceRefs: [`host:${prefix}:${seed}`],
+					metrics: {
+						meaningful: true,
+						command_digest: contract.commandDigest,
+						candidate_payload_digest: candidate.payloadDigest,
+					},
+				},
+				"host",
+			);
+			const binding = store.recordEvaluation(
+				{
+					evaluationId: `cell-${prefix}-${candidate.candidateId}-${seed}`,
+					candidateId: candidate.candidateId,
+					evaluatorId: "experiment_trial",
+					status: "pass",
+					authority: "host",
+					evidenceRefs: [`host:experiment-cell:${contract.cellDigest}`],
+					metrics: {
+						meaningful: true,
+						score,
+						experiment_id: experimentId,
+						condition_id: contract.conditionId,
+						seed: contract.seed,
+						command_digest: contract.commandDigest,
+						cell_digest: contract.cellDigest,
+						source_evaluation_id: source.evaluationId,
+						source_evaluation_created_at: source.createdAt,
+						candidate_payload_digest: candidate.payloadDigest,
+					},
+				},
+				"host",
+			);
+			store.recordTrial({
+				experimentId,
+				candidateId: candidate.candidateId,
+				evaluationId: binding.evaluationId,
+				conditionId: "suite",
+				seed,
+			});
+		};
+		const completeScreening = (experimentId: string, baseline: typeof baselineA) => {
+			store.recordExperiment({
+				experimentId,
+				title: experimentId,
+				hypothesis: "The challenger may improve the score.",
+				design: "One paired development seed.",
+				plan: {
+					stage: "screening",
+					candidateIds: [baseline.candidateId, challenger.candidateId],
+					conditions: [condition],
+					seeds: ["1"],
+					pairing: "paired",
+					primaryMetric: "score",
+					metricDirection: "maximize",
+					baselineCandidateId: baseline.candidateId,
+				},
+			});
+			recordCell(experimentId, baseline, "1", 0, experimentId);
+			recordCell(experimentId, challenger, "1", 100, experimentId);
+			store.completeExperiment(experimentId);
+		};
+		completeScreening("screen-a", baselineA);
+		completeScreening("screen-b", baselineB);
+		store.recordExperiment({
+			experimentId: "confirm-b",
+			title: "Confirm against baseline B",
+			hypothesis: "The challenger meaningfully improves on baseline B.",
+			design: "Five fresh paired confirmation seeds.",
+			plan: {
+				stage: "confirmation",
+				candidateIds: [baselineB.candidateId, challenger.candidateId],
+				conditions: [condition],
+				seeds: ["2", "3", "4", "5", "6"],
+				pairing: "paired",
+				primaryMetric: "score",
+				metricDirection: "maximize",
+				baselineCandidateId: baselineB.candidateId,
+				confirmationOfExperimentId: "screen-b",
+				promotion: { minimumPairedObservations: 5, minimumAbsoluteEffect: 1 },
+			},
+		});
+		for (const seed of ["2", "3", "4", "5", "6"]) {
+			recordCell("confirm-b", baselineB, seed, 0, "confirm-b");
+			recordCell("confirm-b", challenger, seed, 100, "confirm-b");
+		}
+		expect(store.completeExperiment("confirm-b").outcome).toMatchObject({
+			decision: "promote",
+			championCandidateId: challenger.candidateId,
+		});
+
+		const state = store.getState();
+		const derived = new GeneralAvoAdapter().deriveEvaluationState(
+			challenger,
+			state.evaluations.filter((receipt) => receipt.candidateId === challenger.candidateId),
+			state,
+		);
+		expect(derived).toMatchObject({ status: "revise", canonical: false });
+		expect(derived.reasons.join(" ")).toContain("screen-a");
 	});
 
 	test("persists one project-wide selection budget across fresh and stale sessions", () => {
@@ -3141,6 +3384,9 @@ describe("AVO routing and adapters", () => {
 
 	test.each([
 		["What's the latest NVIDIA driver?", "external_factual", "required"],
+		["Who is the president of France?", "external_factual", "required"],
+		["What is the weather in Kuala Lumpur?", "external_factual", "required"],
+		["What is NVIDIA's stock price?", "external_factual", "required"],
 		["928 × 73", "deterministic_local", "required"],
 		["Create a report and export it", "artifact", "required"],
 		["Create a report and verify the exported file", "artifact", "required"],
