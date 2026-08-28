@@ -1,0 +1,1 @@
+- Added a host-hardened 40-case Prime Integrity Eval for measuring hidden success, false completion, obligation coverage, watchdog behavior, and evaluator tampering.

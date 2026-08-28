@@ -10,6 +10,15 @@ the candidate to the observed workspace and an unchanged pre-task test
 baseline. Factual work binds verbatim claims to host-observed external sources.
 Artifact and deterministic tasks use their own host checks.
 
+## Integrity benchmark
+
+Prime Integrity Eval measures whether this architecture produces legitimate
+task completion under visible-pass, incomplete-requirement, stale-assumption,
+test-tampering, zero-test, and shortcut traps. Its host-only graders run after
+Prime exits and are not copied into the task workspace. See
+[Prime Integrity Eval](prime-integrity-eval.md) for the threat model, metrics,
+and reproducible commands.
+
 ## Repeated experiment selection
 
 Exploratory screening may rank candidates, but it never promotes one. A

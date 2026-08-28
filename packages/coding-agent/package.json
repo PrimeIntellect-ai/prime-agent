@@ -42,6 +42,7 @@
 		"test:nooa-behavior": "uv run --quiet --no-project --python 3.13 --with nooa-memory==0.0.9 python skills/autoresearch/evals/nooa_behavior_eval.py",
 		"test:process": "vitest --run test/daemon-supervisor-process.test.ts",
 		"test:process-stress": "vitest --run --tagsFilter process-stress test/daemon-supervisor-process.test.ts",
+		"eval:integrity": "tsx src/evals/prime-integrity/runner.ts",
 		"postinstall": "node postinstall.cjs",
 		"prepublishOnly": "npm run clean && npm run build",
 		"bundle": "node scripts/bundle.mjs",
