@@ -418,6 +418,58 @@ describe("ReplKernelManager abort handling", () => {
 		expect(calls).toEqual(["bootstrap", "snapshot"]);
 	});
 
+	it("settles an aborted execution promptly while the lazy re-bootstrap is still running", async () => {
+		const manager = new ReplKernelManager({ cwd: process.cwd(), bootstrapCode: "boot-code" });
+		let releaseBootstrap: () => void = () => {};
+		const bootstrapBlocked = new Promise<void>((resolve) => {
+			releaseBootstrap = resolve;
+		});
+		const ok = { stdout: "", stderr: "", status: "ok" as const, durationMs: 0 };
+		const executeInner = vi.fn(async (_requestFields: Record<string, unknown> & { type: string }, code: string) => {
+			if (code === "boot-code") {
+				await bootstrapBlocked;
+			}
+			return ok;
+		});
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				pendingRebootstrap: boolean;
+				executeInner: typeof executeInner;
+				start: () => Promise<void>;
+			},
+			{ state: "running", pendingRebootstrap: true, executeInner, start: async () => {} },
+		);
+
+		const controller = new AbortController();
+		const cell = manager.execute("user-cell", { signal: controller.signal });
+		await waitForCalls(executeInner, 1);
+
+		// Aborted mid-wait: the cell must not ride out the bootstrap bound.
+		controller.abort();
+		await expect(cell).resolves.toMatchObject({ status: "aborted" });
+		releaseBootstrap();
+	});
+
+	it("rejects restart() during the final snapshot flush instead of deadlocking the teardown", async () => {
+		const manager = new ReplKernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+		});
+		Object.assign(
+			manager as unknown as { state: "running"; flushingSnapshotForDispose: boolean; start: () => Promise<void> },
+			{
+				state: "running",
+				flushingSnapshotForDispose: true,
+				start: async () => {},
+			},
+		);
+
+		// Taking a queue slot here and joining the owning shutdown would leave the
+		// flush's snapshot parked behind the slot forever (mutual wait).
+		await expect(manager.restart()).rejects.toThrow("Kernel is shutting down");
+	});
+
 	it("joins concurrent teardowns into a single final snapshot flush", async () => {
 		const manager = new ReplKernelManager({
 			cwd: process.cwd(),

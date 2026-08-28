@@ -102,14 +102,18 @@ const PROTOCOL_EVENT_KINDS = new Set([
 
 /**
  * Reason a JSON object still isn't a valid protocol frame, or undefined.
- * `done` and `host_request` route strictly by string id; silently dropping an
- * id-less one would leave the awaiting request unsettled forever.
+ * `done` and `host_request` route strictly by non-empty string id (the runtime
+ * mints uuid hex ids and echoes the host's uuids); silently dropping an id-less
+ * one would leave the awaiting request unsettled forever.
  */
 function invalidProtocolFrameReason(event: Record<string, unknown>): string | undefined {
 	if (typeof event.event !== "string" || !PROTOCOL_EVENT_KINDS.has(event.event)) {
 		return "unknown protocol event";
 	}
-	if ((event.event === "done" || event.event === "host_request") && typeof event.id !== "string") {
+	if (
+		(event.event === "done" || event.event === "host_request") &&
+		(typeof event.id !== "string" || event.id === "")
+	) {
 		return `${event.event} frame without id`;
 	}
 	return undefined;
@@ -475,7 +479,23 @@ export class ReplKernelManager {
 				if (this.rebootstrapPromise === started) this.rebootstrapPromise = undefined;
 			});
 		}
-		if (signal?.aborted) return; // the aborted request never executes, so it may skip the wait
+		// An aborted request never executes, so it may skip the wait; race the
+		// signal like waitForProtocolRepair does instead of riding out the
+		// bootstrap bound after a mid-wait abort.
+		if (signal) {
+			if (signal.aborted) return;
+			let onAbort: () => void = () => {};
+			const aborted = new Promise<void>((resolve) => {
+				onAbort = resolve;
+				signal.addEventListener("abort", onAbort, { once: true });
+			});
+			try {
+				await Promise.race([task, aborted]);
+			} finally {
+				signal.removeEventListener("abort", onAbort);
+			}
+			if (signal.aborted) return;
+		}
 		const ok = await task; // bounded by REPAIR_STEP_TIMEOUT_MS
 		if (!ok) throw new Error("Kernel bootstrap failed after protocol repair");
 	}
@@ -697,6 +717,11 @@ export class ReplKernelManager {
 			throw new Error("Kernel is shutting down");
 		}
 		if (!opts.protocolRepair) await this.ensureKernelRebootstrapped(opts.signal);
+		// Aborted while waiting on the re-bootstrap: settle now instead of parking
+		// on the queue slot behind the still-running bootstrap.
+		if (opts.signal?.aborted) {
+			return { stdout: "", stderr: "", status: "aborted", durationMs: 0 };
+		}
 		// Re-check: a final flush may have started while this request awaited the
 		// lazy re-bootstrap; admitting it now would splice it between the flush's
 		// captured queue and the final snapshot, unbounding the teardown.
@@ -1232,6 +1257,12 @@ export class ReplKernelManager {
 	}
 
 	async restart(): Promise<void> {
+		// A final dispose flush owns the queue tail. Taking a slot now and joining
+		// the in-flight shutdown would deadlock: the flush's snapshot waits on our
+		// slot while we wait on the flush's shutdown.
+		if (this.flushingSnapshotForDispose) {
+			throw new Error("Kernel is shutting down");
+		}
 		const prev = this.executionQueue;
 		let resolveNext: () => void = () => {};
 		this.executionQueue = new Promise<void>((r) => {

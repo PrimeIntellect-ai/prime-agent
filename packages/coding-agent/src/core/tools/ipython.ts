@@ -522,8 +522,11 @@ export class IpythonKernelProvisioner {
 					throw new Error(`Failed to initialize rlm runtime in the Python kernel:\n${details}`);
 				}
 			} catch (error) {
-				// Never leak the kernel process if startup fails after spawn.
-				void m.shutdown({ snapshot: true, drainHostRequests: true });
+				// Never leak the kernel process if startup fails after spawn — and never
+				// surface the failure before the teardown (final snapshot flush included)
+				// finished, or a replacement provisioner gated on this dispose could
+				// race the still-flushing kernel over the same snapshot files.
+				await m.shutdown({ snapshot: true, drainHostRequests: true }).catch(() => undefined);
 				throw error;
 			}
 			// Only tell the model what was revived once the kernel is actually usable —

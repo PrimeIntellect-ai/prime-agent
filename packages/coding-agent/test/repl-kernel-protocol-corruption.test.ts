@@ -68,6 +68,10 @@ input.on("line", (line) => {
       emit({ event: "done", status: "ok" });
       return;
     }
+    if (request.code === "corrupt-empty-id-done") {
+      emit({ event: "done", id: "", status: "ok" });
+      return;
+    }
     emit({ event: "done", id: request.id, status: "ok" });
     return;
   }
@@ -322,6 +326,19 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 		const { manager, countPath } = newManager();
 		try {
 			await expect(manager.execute("corrupt-idless-done")).rejects.toThrow(
+				/Kernel protocol error: done frame without id/,
+			);
+			await expect(manager.execute("read")).resolves.toMatchObject({ status: "ok", stdout: "fresh" });
+			expect(spawnCount(countPath)).toBe(2);
+		} finally {
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+		}
+	});
+
+	it("repairs a done frame with an empty-string id instead of hanging the request", async () => {
+		const { manager, countPath } = newManager();
+		try {
+			await expect(manager.execute("corrupt-empty-id-done")).rejects.toThrow(
 				/Kernel protocol error: done frame without id/,
 			);
 			await expect(manager.execute("read")).resolves.toMatchObject({ status: "ok", stdout: "fresh" });
