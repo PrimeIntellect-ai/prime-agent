@@ -222,7 +222,7 @@ const PRIME_INFERENCE_DEFAULT_MAX_TOKENS = 8192;
 
 // Raw checkpoints and duplicate routes that would clutter the picker: BF16
 // exports, fine-tune outputs, zai-org/ and HF-cased twins of canonical ids.
-function isPrimeInferenceRawVariant(modelId: string): boolean {
+export function isPrimeInferenceRawVariant(modelId: string): boolean {
 	const id = modelId.toLowerCase();
 	if (id.endsWith("-bf16") || id.includes(":")) {
 		return true;
@@ -231,7 +231,7 @@ function isPrimeInferenceRawVariant(modelId: string): boolean {
 	return vendor === "zai-org" || vendor !== vendor.toLowerCase();
 }
 
-function isPrimeInferencePrivateModel(modelId: string): boolean {
+export function isPrimeInferencePrivateModel(modelId: string): boolean {
 	return modelId.toLowerCase().startsWith("internal/");
 }
 
@@ -442,7 +442,7 @@ function getExistingPrimeInferenceModels(): Model<"openai-completions">[] {
 		}));
 }
 
-function mergePrimeInferenceModels(
+export function mergePrimeInferenceModels(
 	snapshotModels: Model<"openai-completions">[],
 	catalogModels: Model<"openai-completions">[],
 ): Model<"openai-completions">[] {
@@ -561,7 +561,7 @@ function getPrimeInferenceCompat(modelId: string): OpenAICompletionsCompat {
 	return PRIME_INFERENCE_COMPAT;
 }
 
-function parsePrimeInferenceCatalog(data: unknown): PrimeInferenceCatalogEntry[] {
+export function parsePrimeInferenceCatalog(data: unknown): PrimeInferenceCatalogEntry[] {
 	if (!isRecord(data) || !Array.isArray(data.data)) {
 		return [];
 	}
@@ -601,7 +601,7 @@ interface PrimeInferenceOpenRouterMetadata {
 	supportsReasoningEffort?: boolean;
 }
 
-function buildPrimeInferenceOpenRouterIndex(catalog: unknown[]): Map<string, PrimeInferenceOpenRouterMetadata> {
+export function buildPrimeInferenceOpenRouterIndex(catalog: unknown[]): Map<string, PrimeInferenceOpenRouterMetadata> {
 	const index = new Map<string, PrimeInferenceOpenRouterMetadata>();
 	for (const item of catalog) {
 		if (!isRecord(item) || typeof item.id !== "string") {
@@ -688,7 +688,7 @@ async function fetchPrimeInferenceModels(): Promise<Model<"openai-completions">[
 	return models;
 }
 
-function createPrimeInferenceModel(
+export function createPrimeInferenceModel(
 	entry: PrimeInferenceCatalogEntry,
 	override: PrimeInferenceModelMetadata | undefined,
 	openRouter: PrimeInferenceOpenRouterMetadata | undefined,
@@ -742,7 +742,7 @@ function fetchOpenRouterCatalog(): Promise<any[]> {
 	openRouterCatalogPromise ??= (async () => {
 		console.log("Fetching models from OpenRouter API...");
 		const response = await fetch("https://openrouter.ai/api/v1/models");
-		const data = await response.json();
+		const data = (await response.json()) as any;
 		return Array.isArray(data?.data) ? data.data : [];
 	})();
 	return openRouterCatalogPromise;
@@ -816,7 +816,7 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 	try {
 		console.log("Fetching models from Vercel AI Gateway API...");
 		const response = await fetch(`${AI_GATEWAY_MODELS_URL}/models`);
-		const data = await response.json();
+		const data = (await response.json()) as any;
 		const models: Model<any>[] = [];
 
 		const toNumber = (value: string | number | undefined): number => {
@@ -875,7 +875,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 	try {
 		console.log("Fetching models from models.dev API...");
 		const response = await fetch("https://models.dev/api.json");
-		const data = await response.json();
+		const data = (await response.json()) as any;
 
 		const models: Model<any>[] = [];
 

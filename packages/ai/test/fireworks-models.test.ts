@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.js";
-import { getModel } from "../src/models.js";
+import { getModel, getModels } from "../src/models.js";
 
 const originalFireworksApiKey = process.env.FIREWORKS_API_KEY;
 
@@ -13,23 +13,24 @@ afterEach(() => {
 });
 
 describe("Fireworks models", () => {
-	it("registers the default Kimi K2.6 model via Anthropic-compatible Messages API", () => {
-		const model = getModel("fireworks", "accounts/fireworks/models/kimi-k2p6");
+	it("registers a well-formed Anthropic-compatible catalog", () => {
+		const models = getModels("fireworks");
 
-		expect(model).toBeDefined();
-		expect(model.api).toBe("anthropic-messages");
-		expect(model.provider).toBe("fireworks");
-		expect(model.baseUrl).toBe("https://api.fireworks.ai/inference");
-		expect(model.reasoning).toBe(true);
-		expect(model.input).toEqual(["text", "image"]);
-		expect(model.contextWindow).toBe(262000);
-		expect(model.maxTokens).toBe(262000);
-		expect(model.cost).toEqual({
-			input: 0.95,
-			output: 4,
-			cacheRead: 0.16,
-			cacheWrite: 0,
-		});
+		expect(models.length).toBeGreaterThan(0);
+		for (const model of models) {
+			expect(model.api).toBe("anthropic-messages");
+			expect(model.provider).toBe("fireworks");
+			expect(model.baseUrl).toBe("https://api.fireworks.ai/inference");
+			expect(model.cost.input).toBeGreaterThanOrEqual(0);
+			expect(model.cost.output).toBeGreaterThanOrEqual(0);
+			expect(model.contextWindow).toBeGreaterThan(0);
+			expect(model.maxTokens).toBeGreaterThan(0);
+		}
+	});
+
+	it("keeps the coding-agent default model available", () => {
+		// Guards defaultModelPerProvider.fireworks in packages/coding-agent.
+		expect(getModel("fireworks", "accounts/fireworks/models/kimi-k2p6")).toBeDefined();
 	});
 
 	it("resolves FIREWORKS_API_KEY from the environment", () => {

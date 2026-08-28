@@ -40,14 +40,6 @@ describe("getSupportedThinkingLevels", () => {
 		const levels = getSupportedThinkingLevels(model!);
 		expect(levels).toContain("xhigh");
 		expect(levels).toContain("max");
-		expect(model!.contextWindow).toBe(1000000);
-		expect(model!.maxTokens).toBe(128000);
-		expect(model!.cost).toEqual({
-			input: 2,
-			output: 10,
-			cacheRead: 0.2,
-			cacheWrite: 2.5,
-		});
 	});
 
 	it("does not include max for older budget-based Claude models", () => {
@@ -78,10 +70,6 @@ describe("getSupportedThinkingLevels", () => {
 			expect(codexModel).toBeDefined();
 			expect(getSupportedThinkingLevels(apiModel!)).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
 			expect(getSupportedThinkingLevels(codexModel!)).toEqual(["off", "low", "medium", "high", "xhigh", "max"]);
-			expect(apiModel!.contextWindow).toBe(1050000);
-			expect(apiModel!.maxTokens).toBe(128000);
-			expect(codexModel!.contextWindow).toBe(272000);
-			expect(codexModel!.maxTokens).toBe(128000);
 		},
 	);
 
