@@ -185,7 +185,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			expect(result).toMatchObject({ status: "ok", stdout: "persisted" });
 			expect(spawnCount(countPath)).toBe(2);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -201,7 +201,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			await expect(queued).resolves.toMatchObject({ status: "ok", stdout: "persisted" });
 			expect(spawnCount(countPath)).toBe(2);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -217,7 +217,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			controller.abort();
 			await expect(pending).resolves.toMatchObject({ status: "aborted" });
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -236,7 +236,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			await expect(manager.execute("read")).resolves.toMatchObject({ status: "ok", stdout: "fresh" });
 			expect(spawnCount(countPath)).toBe(3);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -251,7 +251,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			await expect(manager.execute("read")).resolves.toMatchObject({ status: "ok", stdout: "fresh" });
 			expect(spawnCount(countPath)).toBe(3);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -267,7 +267,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			await expect(manager.execute("read")).resolves.toMatchObject({ status: "ok", stdout: "persisted" });
 			expect(spawnCount(countPath)).toBe(2);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -294,7 +294,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			await expect(queued).resolves.toMatchObject({ status: "ok", stdout: "persisted" });
 			expect(spawnCount(countPath)).toBe(2);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -307,7 +307,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			await expect(manager.execute("read")).resolves.toMatchObject({ status: "ok", stdout: "fresh" });
 			expect(spawnCount(countPath)).toBe(2);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -320,7 +320,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			await expect(manager.execute("read")).resolves.toMatchObject({ status: "ok", stdout: "fresh" });
 			expect(spawnCount(countPath)).toBe(2);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -337,7 +337,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			expect(manager.isRunning).toBe(true);
 			expect(spawnCount(countPath)).toBe(2);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -358,7 +358,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			await expect(manager.execute("read-boot")).resolves.toMatchObject({ status: "ok", stdout: "live" });
 			expect(spawnCount(countPath)).toBe(3);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -369,7 +369,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			await expect(manager.execute("read")).resolves.toMatchObject({ status: "ok", stdout: "fresh" });
 			expect(spawnCount(countPath)).toBe(2);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -384,7 +384,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			await expect(manager.start()).resolves.toBeUndefined();
 			expect(spawnCount(countPath)).toBe(2);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -396,7 +396,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 		await manager.start();
 		writeFileSync(snapshotCorruptionPath, "1");
 
-		await manager.dispose();
+		await manager.shutdown({ snapshot: true, drainHostRequests: true });
 
 		expect(manager.isRunning).toBe(false);
 		expect(spawnCount(countPath)).toBe(1);
@@ -414,7 +414,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 			expect(spawnCount(countPath)).toBe(2);
 			await expect(manager.execute("read")).rejects.toThrow("Kernel has been shut down");
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 });

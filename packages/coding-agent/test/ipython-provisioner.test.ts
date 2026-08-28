@@ -352,7 +352,7 @@ describe("ReplKernelManager session cleanup during startup", () => {
 			await expect(startup).rejects.toThrow(/Kernel exited before ready|disposed during startup/);
 			expect(manager.isRunning).toBe(false);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 });

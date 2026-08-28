@@ -277,6 +277,6 @@ background_send = asyncio.create_task(send_later())`,
 		expect(host.lateSentAgentMessageHandlers.size).toBe(256);
 		expect(host.lateSentAgentMessageHandlers.has("request-0")).toBe(false);
 		expect(host.lateSentAgentMessageHandlers.has("request-299")).toBe(true);
-		await manager.dispose();
+		await manager.shutdown({ snapshot: true, drainHostRequests: true });
 	});
 });

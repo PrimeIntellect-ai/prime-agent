@@ -3,7 +3,7 @@ import type { KernelBootstrapProgressHandler, KernelPythonSkill } from "./bootst
 import type { RestoreResult, SnapshotResult } from "./state-snapshot.js";
 
 export const DEFAULT_MAX_OUTPUT_CHARS = 65536;
-export const HOST_REQUEST_DISPOSE_TIMEOUT_MS = 5000;
+export const HOST_REQUEST_SHUTDOWN_TIMEOUT_MS = 5000;
 export const KERNEL_SHUTDOWN_TIMEOUT_MS = 5000;
 export const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
 export const SNAPSHOT_EXECUTION_TIMEOUT_MS = 5000;
@@ -345,16 +345,20 @@ export function createDeferred<T>(): Deferred<T> {
 	return { promise, resolve, reject };
 }
 
+export interface KernelShutdownOptions {
+	snapshot?: boolean;
+	drainHostRequests?: boolean;
+}
+
 /** Public surface every kernel client exposes to the provisioner and session layer. */
 export interface KernelClient {
 	readonly ownerSessionId: string | undefined;
 	readonly isRunning: boolean;
 	start(options?: KernelStartOptions): Promise<void>;
 	execute(code: string, opts?: ExecuteOptions): Promise<ExecuteResult>;
-	shutdown(opts?: { snapshot?: boolean }): Promise<boolean>;
+	shutdown(opts?: KernelShutdownOptions): Promise<boolean>;
 	restart(): Promise<void>;
 	kill(): Promise<void>;
-	dispose(): Promise<void>;
 	disposeSync(): void;
 	snapshotState(): Promise<SnapshotResult | null>;
 	pruneOversizedVariables(): Promise<SnapshotResult | null>;
@@ -370,7 +374,7 @@ let signalHandlersInstalled = false;
 registerSessionResourceCleanup((sessionId) => {
 	for (const k of liveKernels) {
 		if (!sessionId || k.ownerSessionId === sessionId) {
-			void k.dispose();
+			void k.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	}
 });

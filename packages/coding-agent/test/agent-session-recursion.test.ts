@@ -3906,7 +3906,7 @@ print(_result.name)
 			expect(finished.status).toBe("ok");
 			expect(finished.stdout.trim()).toBe("detached-worker");
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 });

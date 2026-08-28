@@ -93,7 +93,7 @@ describeIfKernel("RLM bootstrap (real kernel)", () => {
 			expect(envResult.status).toBe("ok");
 			expect(envResult.stdout.trim()).toBe("1");
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	}, 60_000);
 
@@ -135,7 +135,7 @@ describeIfKernel("RLM bootstrap (real kernel)", () => {
 			expect(second.diffs?.[0]?.path).toBe(realpathSync(join(secondDir, "same.txt")));
 			expect(first.diffs?.[0]?.path).not.toBe(second.diffs?.[0]?.path);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	}, 60_000);
 });

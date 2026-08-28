@@ -371,7 +371,7 @@ export class IpythonKernelProvisioner {
 		if (!pending) return;
 		try {
 			const m = await pending;
-			await m.dispose();
+			await m.shutdown({ snapshot: true, drainHostRequests: true });
 		} catch {
 			// a failed startup already cleaned up after itself
 		}
@@ -523,7 +523,7 @@ export class IpythonKernelProvisioner {
 				}
 			} catch (error) {
 				// Never leak the kernel process if startup fails after spawn.
-				void m.dispose();
+				void m.shutdown({ snapshot: true, drainHostRequests: true });
 				throw error;
 			}
 			// Only tell the model what was revived once the kernel is actually usable —

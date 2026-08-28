@@ -17,7 +17,7 @@ import {
 	type ExecuteOptions,
 	type ExecuteResult,
 	errorMessage,
-	HOST_REQUEST_DISPOSE_TIMEOUT_MS,
+	HOST_REQUEST_SHUTDOWN_TIMEOUT_MS,
 	installSignalHandlersOnce,
 	isRecord,
 	KERNEL_ABORT_GRACE_MS,
@@ -29,6 +29,7 @@ import {
 	type KernelDiffDisplay,
 	type KernelManagerOptions,
 	type KernelSentAgentMessage,
+	type KernelShutdownOptions,
 	type KernelStartOptions,
 	liveKernels,
 	MAX_ATTACHMENT_DATA_CHARS,
@@ -157,6 +158,7 @@ export class ReplKernelManager {
 	private startGeneration = 0;
 	/** Generation whose graceful shutdown() owns the teardown, so the exit handler must not run it. */
 	private gracefulShutdownGeneration?: number;
+	private gracefulShutdownPromise?: Promise<boolean>;
 	/** Memoized so concurrent callers all await the same in-flight startup. */
 	private startPromise?: Promise<void>;
 	/** Pending debounced auto-snapshot, if one has been scheduled. */
@@ -1126,23 +1128,32 @@ export class ReplKernelManager {
 		}
 		if (result === "timeout") {
 			this.appendKernelDiagnostic(
-				`timed out waiting ${timeoutMs}ms for ${tasks.length} host request task(s) during dispose`,
+				`timed out waiting ${timeoutMs}ms for ${tasks.length} host request task(s) during shutdown`,
 			);
 		}
 	}
 
-	/** Resolves true when this call performed the cleanup (false: a concurrent teardown won). */
-	async shutdown(opts: { snapshot?: boolean } = {}): Promise<boolean> {
+	/** Resolves true when this call performed the cleanup (false: a concurrent teardown won; a joiner's options are ignored - the first caller's policy wins). */
+	async shutdown(opts: KernelShutdownOptions = {}): Promise<boolean> {
+		const inFlightShutdown = this.gracefulShutdownPromise;
+		if (inFlightShutdown) {
+			await inFlightShutdown;
+			return false;
+		}
+
 		this.teardownInFlight++;
 		this.supersedeProtocolRepair();
+		const operation = this.performShutdown(opts);
+		this.gracefulShutdownPromise = operation;
 		try {
-			return await this.performShutdown(opts);
+			return await operation;
 		} finally {
 			this.teardownInFlight--;
+			if (this.gracefulShutdownPromise === operation) this.gracefulShutdownPromise = undefined;
 		}
 	}
 
-	private async performShutdown(opts: { snapshot?: boolean }): Promise<boolean> {
+	private async performShutdown(opts: KernelShutdownOptions): Promise<boolean> {
 		if (this.state === "shutdown") {
 			liveKernels.delete(this);
 			if (this.gracefulShutdownGeneration === this.startGeneration) return false;
@@ -1151,42 +1162,48 @@ export class ReplKernelManager {
 		}
 		// Captured before any await: teardowns and newer starts bump the counter.
 		const generation = this.startGeneration;
-		// Best-effort final flush (bounded) before teardown — used by signal handlers
-		// so a SIGINT/SIGTERM exit doesn't lose work the debounced snapshot hasn't saved.
 		if (opts.snapshot) {
 			await this.flushSnapshotForDispose();
-			if (this.startStale(generation)) return false; // superseded mid-flush: the newer owner already cleaned this kernel
+			if (this.startStale(generation)) return false;
 		}
+		// Protocol shutdown first: the runtime closes MCP servers and kills live bash() process groups a bare hard-kill would leak.
+		const protocolShutdownAvailable = this.state === "running";
 		this.state = "shutdown";
 		liveKernels.delete(this);
-		// Claim the teardown: our own child's exit handler must not run cleanupResources
-		// (which bumps the generation and would misread this call as superseded). A
-		// concurrent kill()/dispose() still bumps the generation and supersedes us.
 		this.gracefulShutdownGeneration = generation;
 
 		let shutdownTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
 		let doneWaiterId: string | undefined;
 		let performedCleanup = false;
-		const shutdownDeadline = new Promise<never>((_resolve, reject) => {
-			shutdownTimer = globalThis.setTimeout(
-				() => reject(new Error(`Kernel did not shut down within ${KERNEL_SHUTDOWN_TIMEOUT_MS}ms`)),
-				KERNEL_SHUTDOWN_TIMEOUT_MS,
-			);
-			shutdownTimer.unref?.();
-		});
 		try {
-			if (this.child?.stdin && !this.child.stdin.destroyed) {
+			if (opts.drainHostRequests) {
+				const inFlightHostRequests = [...this.inFlightHostRequests];
+				if (inFlightHostRequests.length > 0) {
+					await this.waitForHostRequestsToSettle(inFlightHostRequests, HOST_REQUEST_SHUTDOWN_TIMEOUT_MS);
+				}
+			}
+			if (
+				protocolShutdownAvailable &&
+				!this.startStale(generation) &&
+				this.child?.stdin &&
+				!this.child.stdin.destroyed
+			) {
 				const requestId = uuid();
 				doneWaiterId = requestId;
 				const doneReply = new Promise<void>((resolve) => {
 					this.pendingDoneWaiters.set(requestId, resolve);
 				});
+				const shutdownDeadline = new Promise<never>((_resolve, reject) => {
+					shutdownTimer = globalThis.setTimeout(
+						() => reject(new Error(`Kernel did not shut down within ${KERNEL_SHUTDOWN_TIMEOUT_MS}ms`)),
+						KERNEL_SHUTDOWN_TIMEOUT_MS,
+					);
+					shutdownTimer.unref?.();
+				});
 				const send = this.writeLine({ type: "shutdown", id: requestId });
 				send.catch(() => undefined);
-				// A kernel that exits without delivering its shutdown done must not stall the deadline.
 				const kernelExit = this.waitForKernelExit();
 				const gracefulReply = Promise.all([send, doneReply]);
-				// Abandoned by the race, a late send failure must not reject unhandled.
 				gracefulReply.catch(() => undefined);
 				await Promise.race([gracefulReply, kernelExit, shutdownDeadline]);
 				await Promise.race([kernelExit, shutdownDeadline]);
@@ -1199,8 +1216,6 @@ export class ReplKernelManager {
 			if (shutdownTimer) globalThis.clearTimeout(shutdownTimer);
 			if (doneWaiterId) this.pendingDoneWaiters.delete(doneWaiterId);
 			if (this.gracefulShutdownGeneration === generation) this.gracefulShutdownGeneration = undefined;
-			// A superseded shutdown must not tear down the newer start's kernel. Ownership is decided
-			// here, before cleanupResources bumps the generation and would misread this call as superseded.
 			if (!this.startStale(generation)) {
 				this.cleanupResources();
 				performedCleanup = true;
@@ -1392,71 +1407,6 @@ export class ReplKernelManager {
 		} finally {
 			// Reset: a superseding start() can revive this kernel for new work.
 			this.flushingSnapshotForDispose = false;
-		}
-	}
-
-	/** Graceful cleanup. Waits briefly for in-flight host request handlers before killing the child. */
-	dispose(): Promise<void> {
-		this.teardownInFlight++;
-		this.supersedeProtocolRepair();
-		const dispose = (async () => {
-			// Captured before any await: teardowns and newer starts bump the counter.
-			const generation = this.startGeneration;
-			// Final namespace flush while the kernel is still live (session end / reload).
-			await this.flushSnapshotForDispose();
-			if (this.startStale(generation)) return; // superseded mid-flush: the newer owner already cleaned this kernel
-			this.state = "shutdown";
-			liveKernels.delete(this);
-			// Claim the teardown so the child's exit handler does not run
-			// cleanupResources mid-dispose (same contract as shutdown()).
-			this.gracefulShutdownGeneration = generation;
-			const inFlightHostRequests = [...this.inFlightHostRequests];
-			try {
-				if (inFlightHostRequests.length > 0) {
-					await this.waitForHostRequestsToSettle(inFlightHostRequests, HOST_REQUEST_DISPOSE_TIMEOUT_MS);
-				}
-				if (!this.startStale(generation)) {
-					// Bounded protocol shutdown first: the runtime's shutdown branch
-					// closes MCP servers and kills live bash() process groups, which
-					// a bare hard-kill would leak until the orphan reaper runs.
-					await this.requestProtocolShutdown(KERNEL_SHUTDOWN_TIMEOUT_MS);
-				}
-			} finally {
-				if (this.gracefulShutdownGeneration === generation) this.gracefulShutdownGeneration = undefined;
-				if (!this.startStale(generation)) this.cleanupResources(); // else: superseded, the newer owner already cleaned
-			}
-		})();
-		return dispose.finally(() => {
-			this.teardownInFlight--;
-		});
-	}
-
-	/** Best-effort bounded protocol shutdown; the caller's hard kill remains the backstop. */
-	private async requestProtocolShutdown(timeoutMs: number): Promise<void> {
-		const stdin = this.child?.stdin;
-		if (!stdin || stdin.destroyed) return;
-		const requestId = uuid();
-		let timer: ReturnType<typeof globalThis.setTimeout> | undefined;
-		try {
-			const doneReply = new Promise<void>((resolve) => {
-				this.pendingDoneWaiters.set(requestId, resolve);
-			});
-			const send = this.writeLine({ type: "shutdown", id: requestId });
-			send.catch(() => undefined);
-			const kernelExit = this.waitForKernelExit();
-			const deadline = new Promise<void>((resolve) => {
-				timer = globalThis.setTimeout(resolve, timeoutMs);
-				timer.unref?.();
-			});
-			const gracefulReply = Promise.all([send, doneReply]).then(() => undefined);
-			gracefulReply.catch(() => undefined);
-			await Promise.race([gracefulReply, kernelExit, deadline]);
-			await Promise.race([kernelExit, deadline]);
-		} catch {
-			// Best-effort: cleanupResources still hard-kills the child.
-		} finally {
-			if (timer) globalThis.clearTimeout(timer);
-			this.pendingDoneWaiters.delete(requestId);
 		}
 	}
 

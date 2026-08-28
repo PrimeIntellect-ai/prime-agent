@@ -35,7 +35,7 @@ describe("ReplKernelManager startup", () => {
 			);
 		} finally {
 			errorSpy.mockRestore();
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -52,7 +52,7 @@ describe("ReplKernelManager startup", () => {
 			await expect(manager.execute("print(1)")).rejects.toThrow(/speaks protocol 1, expected 2/);
 		} finally {
 			errorSpy.mockRestore();
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -66,7 +66,7 @@ describe("ReplKernelManager startup", () => {
 			await expect(manager.start()).rejects.toThrow(/ENOENT/);
 		} finally {
 			errorSpy.mockRestore();
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -87,7 +87,7 @@ describe("ReplKernelManager startup", () => {
 		} finally {
 			vi.useRealTimers();
 			errorSpy.mockRestore();
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 });

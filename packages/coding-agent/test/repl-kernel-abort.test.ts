@@ -252,7 +252,7 @@ describe("ReplKernelManager abort handling", () => {
 			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {}, cleanupResources },
 		);
 
-		const disposal = manager.dispose();
+		const disposal = manager.shutdown({ snapshot: true, drainHostRequests: true });
 		expect(executeInner).not.toHaveBeenCalled();
 		releaseQueue();
 		await waitForCalls(executeInner, 1);
@@ -264,7 +264,7 @@ describe("ReplKernelManager abort handling", () => {
 		await vi.advanceTimersByTimeAsync(1);
 
 		expect(signal?.aborted).toBe(true);
-		await expect(disposal).resolves.toBeUndefined();
+		await expect(disposal).resolves.toBe(true);
 		expect(cleanupResources).toHaveBeenCalledOnce();
 	});
 
@@ -296,13 +296,13 @@ describe("ReplKernelManager abort handling", () => {
 			},
 		);
 
-		const disposal = manager.dispose();
+		const disposal = manager.shutdown({ snapshot: true, drainHostRequests: true });
 		expect(interrupt).toHaveBeenCalledOnce();
 		await vi.advanceTimersByTimeAsync(4999);
 		expect(cleanupResources).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(1);
 
-		await expect(disposal).resolves.toBeUndefined();
+		await expect(disposal).resolves.toBe(true);
 		expect(executeInner).not.toHaveBeenCalled();
 		expect(cleanupResources).toHaveBeenCalledOnce();
 	});
@@ -343,7 +343,7 @@ describe("ReplKernelManager abort handling", () => {
 			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {}, cleanupResources },
 		);
 
-		const disposal = manager.dispose();
+		const disposal = manager.shutdown({ snapshot: true, drainHostRequests: true });
 		// A cell arriving mid-flush must not splice ahead of the final snapshot.
 		await expect(manager.execute("1 + 1")).rejects.toThrow("Kernel is shutting down");
 		releaseQueue();
@@ -351,7 +351,7 @@ describe("ReplKernelManager abort handling", () => {
 		expect(executeInner.mock.calls[0]?.[0].type).toBe("snapshot");
 		await vi.advanceTimersByTimeAsync(5000);
 
-		await expect(disposal).resolves.toBeUndefined();
+		await expect(disposal).resolves.toBe(true);
 		expect(executeInner).toHaveBeenCalledOnce();
 		expect(cleanupResources).toHaveBeenCalledOnce();
 	});
@@ -385,7 +385,10 @@ describe("ReplKernelManager abort handling", () => {
 
 		// A session dispose racing a signal-handler shutdown must share one final
 		// flush instead of queueing a second snapshot behind the first.
-		await Promise.all([manager.dispose(), manager.shutdown({ snapshot: true })]);
+		await Promise.all([
+			manager.shutdown({ snapshot: true, drainHostRequests: true }),
+			manager.shutdown({ snapshot: true }),
+		]);
 
 		const snapshotRequests = executeInner.mock.calls.filter((call) => call[0].type === "snapshot");
 		expect(snapshotRequests).toHaveLength(1);
@@ -451,7 +454,7 @@ describe("ReplKernelManager abort handling", () => {
 			stdin: { destroyed: false, destroy: () => undefined },
 		};
 
-		await manager.dispose();
+		await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		const types = writeLine.mock.calls.map((call) => (call[0] as { type?: string }).type);
 		expect(types).toContain("shutdown");
 		expect(killSignals).toContain("SIGTERM");
