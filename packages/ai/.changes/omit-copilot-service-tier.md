@@ -1,0 +1,1 @@
+- Fixed OpenAI Responses requests for providers that do not support the `service_tier` parameter, including GitHub Copilot.

@@ -91,6 +91,69 @@ describe("openai-responses provider defaults", () => {
 		});
 	});
 
+	it("omits service tier for GitHub Copilot Responses requests", async () => {
+		const model = getModel("github-copilot", "gpt-5-mini");
+		let capturedPayload: unknown;
+
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response("data: [DONE]\\n\\n", {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+		);
+
+		const stream = streamOpenAIResponses(
+			model,
+			{
+				systemPrompt: "sys",
+				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+			},
+			{
+				apiKey: "test-key",
+				serviceTier: "default",
+				onPayload: (payload) => {
+					capturedPayload = payload;
+				},
+			},
+		);
+
+		await stream.result();
+
+		expect(capturedPayload).toBeDefined();
+		expect(capturedPayload).not.toHaveProperty("service_tier");
+	});
+
+	it("preserves service tier for OpenAI Responses requests", async () => {
+		const model = getModel("openai", "gpt-5.4");
+		let capturedPayload: unknown;
+
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response("data: [DONE]\\n\\n", {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+		);
+
+		const stream = streamOpenAIResponses(
+			model,
+			{
+				systemPrompt: "sys",
+				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+			},
+			{
+				apiKey: "test-key",
+				serviceTier: "default",
+				onPayload: (payload) => {
+					capturedPayload = payload;
+				},
+			},
+		);
+
+		await stream.result();
+
+		expect(capturedPayload).toMatchObject({ service_tier: "default" });
+	});
+
 	it.each(["gpt-5.1", "gpt-5.2", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5"] as const)(
 		"sends none reasoning effort for OpenAI %s when no reasoning is requested",
 		async (modelId) => {
