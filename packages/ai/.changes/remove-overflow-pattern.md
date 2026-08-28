@@ -1,1 +1,1 @@
-- Removed the unused overflow pattern helper from `utils/overflow.ts`.
+- Removed the `getOverflowPatterns()` test helper export from `utils/overflow.ts`; use `isContextOverflow()` directly.

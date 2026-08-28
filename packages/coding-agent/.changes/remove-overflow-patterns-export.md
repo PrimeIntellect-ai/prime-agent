@@ -1,1 +1,0 @@
-- Removed the unused `getOverflowPatterns` public API.
