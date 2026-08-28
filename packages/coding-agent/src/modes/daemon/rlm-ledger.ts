@@ -149,14 +149,20 @@ export async function readLegacyRlmSubagentRegistry(
 				typeof entry.sessionName !== "string" ||
 				typeof entry.sessionFile !== "string" ||
 				(entry.status !== "running" && entry.status !== "completed" && entry.status !== "deleted") ||
-				(entry.rlmDepth !== undefined && (!Number.isSafeInteger(entry.rlmDepth) || entry.rlmDepth < 0)) ||
-				(entry.rlmMaxDepth !== undefined && (!Number.isSafeInteger(entry.rlmMaxDepth) || entry.rlmMaxDepth < 0))
+				(entry.rlmDepth !== undefined && (!Number.isSafeInteger(entry.rlmDepth) || entry.rlmDepth < 0))
 			) {
 				continue;
 			}
 			latest.set(entry.childId, {
 				...entry,
 				sessionDir: typeof entry.sessionDir === "string" ? entry.sessionDir : dirname(entry.sessionFile),
+				// rlmMaxDepth is optional hydration metadata the ledger seeder never
+				// reads; a damaged value must not discard the child's topology edge,
+				// so it is dropped instead of rejecting the whole entry.
+				rlmMaxDepth:
+					entry.rlmMaxDepth !== undefined && Number.isSafeInteger(entry.rlmMaxDepth) && entry.rlmMaxDepth >= 0
+						? entry.rlmMaxDepth
+						: undefined,
 			} as LegacyRlmSubagentRegistryEntry);
 		} catch (error) {
 			options.log?.(
