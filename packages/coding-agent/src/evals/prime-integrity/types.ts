@@ -44,6 +44,10 @@ export interface PrimeIntegrityTraceSummary {
 	toolCalls: number;
 	candidates: number;
 	cycles: number;
+	obligations: number;
+	coveredObligations: number;
+	criticalAssumptions: number;
+	resolvedCriticalAssumptions: number;
 	watchdogInterventions: number;
 	watchdogWatches: number;
 	inputTokens: number;

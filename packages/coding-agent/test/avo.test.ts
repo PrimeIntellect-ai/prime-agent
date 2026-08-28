@@ -31,7 +31,9 @@ import {
 	deriveAvoExperimentAllocatedAlpha,
 	deriveAvoExperimentCumulativeAlpha,
 	deriveAvoExperimentOutcome,
+	deriveAvoObligationCoverage,
 	deriveAvoProgressWatchdogSnapshot,
+	deriveAvoWorkspaceImpactPaths,
 	digestAvoDeliveryText,
 	digestAvoExperimentSelectionBinding,
 	digestAvoExperimentValue,
@@ -99,11 +101,31 @@ describe("generic AVO core", () => {
 		});
 		store.recordCandidate({ kind: "answer", summary: "Concrete answer", payload: "A concrete answer." });
 		expect(watchdog.observe(deriveAvoProgressWatchdogSnapshot(store.getState()))).toMatchObject({
+			action: "intervene",
+			madeProgress: false,
+			consecutiveNoProgressTurns: 3,
+		});
+		const candidate = store.getState().candidates[0]!;
+		store.recordEvaluation(
+			{
+				candidateId: candidate.candidateId,
+				evaluatorId: "runtime",
+				status: "pass",
+				authority: "host",
+				evidenceRefs: ["host:runtime"],
+				metrics: { meaningful: true },
+			},
+			"host",
+		);
+		expect(watchdog.observe(deriveAvoProgressWatchdogSnapshot(store.getState()))).toMatchObject({
 			action: "progress",
 			madeProgress: true,
 			consecutiveNoProgressTurns: 0,
-			recoveredFromNoProgressTurns: 2,
-			progressIndicators: ["a fresh candidate was recorded"],
+			recoveredFromNoProgressTurns: 3,
+			progressIndicators: [
+				"new meaningful host evidence passed",
+				"a preregistered obligation gained host-bound coverage",
+			],
 		});
 		expect(
 			watchdog.observe(deriveAvoProgressWatchdogSnapshot(store.getState()), { deliveryReady: true }),
@@ -152,6 +174,236 @@ describe("generic AVO core", () => {
 			reason: "Persistent no measurable progress.",
 		});
 		expect(store.getState().routing.horizon).toBe("long");
+	});
+
+	test("blocks canonical completion until every preregistered obligation has host-bound coverage", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-obligation-ledger", clock());
+		runtime.store.initialize("Make a local decision");
+		const obligation = runtime.registerObligations([
+			{
+				obligationId: "compatibility-check",
+				description: "Preserve compatibility with the existing runtime",
+				kind: "compatibility",
+				requiredEvidence: ["runtime"],
+			},
+		])[0]!;
+		const omitted = runtime.recordCandidate({ kind: "answer", summary: "First", payload: "First answer" });
+		runtime.recordHostEvaluation({
+			candidateId: omitted.candidateId,
+			evaluatorId: "runtime",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:runtime:first"],
+			metrics: { meaningful: true },
+		});
+		expect(runtime.completeCycle({ candidateId: omitted.candidateId }).cycle.outcome).toBe("revised");
+
+		const candidate = runtime.recordCandidate({
+			kind: "answer",
+			summary: "Covered",
+			payload: "Covered answer",
+			obligationIds: [obligation.obligationId],
+		});
+		const evaluation = runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "runtime",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:runtime:covered"],
+			metrics: { meaningful: true },
+		});
+		runtime.recordObligationCoverage({
+			obligationId: obligation.obligationId,
+			candidateId: candidate.candidateId,
+			evaluationIds: [evaluation.evaluationId],
+		});
+		expect(runtime.completeCycle({ candidateId: candidate.candidateId }).cycle.outcome).toBe("accepted");
+		expect(runtime.evaluateStopGate().checks).toContainEqual(
+			expect.objectContaining({ id: `obligation:${obligation.obligationId}`, passed: true }),
+		);
+	});
+
+	test("requires critical assumptions to be tested and records falsification outcomes separately", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-assumption-ledger", clock());
+		runtime.store.initialize("Make a local decision");
+		expect(() =>
+			runtime.registerCriticalAssumptions([
+				{
+					assumptionId: "assumption-vague",
+					statement: "The answer is probably fine",
+					falsificationPlan: "Accept any authoritative receipt",
+					requiredEvidence: ["authoritative"],
+				},
+			]),
+		).toThrow(/concrete falsification kind/);
+		const assumption = runtime.registerCriticalAssumptions([
+			{
+				assumptionId: "runtime-available",
+				statement: "The target runtime is available",
+				falsificationPlan: "Run the target runtime directly and require exit zero",
+				requiredEvidence: ["runtime"],
+			},
+		])[0]!;
+		const candidate = runtime.recordCandidate({ kind: "answer", summary: "Decision", payload: "Decision" });
+		const evaluation = runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "runtime",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:runtime:available"],
+			metrics: { meaningful: true },
+		});
+		expect(runtime.evaluateStopGate().checks).toContainEqual(
+			expect.objectContaining({ id: `assumption:${assumption.assumptionId}`, passed: false }),
+		);
+		expect(
+			runtime.resolveCriticalAssumption({
+				assumptionId: assumption.assumptionId,
+				candidateId: candidate.candidateId,
+				evaluationIds: [evaluation.evaluationId],
+			}),
+		).toMatchObject({ status: "supported", candidateId: candidate.candidateId });
+		expect(runtime.completeCycle({ candidateId: candidate.candidateId }).cycle.outcome).toBe("accepted");
+
+		const replacement = runtime.recordCandidate({
+			kind: "answer",
+			summary: "Replacement decision",
+			payload: "Replacement decision",
+		});
+		const replacementEvaluation = runtime.recordHostEvaluation({
+			candidateId: replacement.candidateId,
+			evaluatorId: "runtime",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:runtime:replacement"],
+			metrics: { meaningful: true },
+		});
+		expect(
+			new GeneralAvoAdapter().deriveEvaluationState(replacement, [replacementEvaluation], runtime.getState()),
+		).toMatchObject({ status: "revise", canonical: false });
+		expect(
+			runtime.resolveCriticalAssumption({
+				assumptionId: assumption.assumptionId,
+				candidateId: replacement.candidateId,
+				evaluationIds: [replacementEvaluation.evaluationId],
+			}),
+		).toMatchObject({ status: "supported", candidateId: replacement.candidateId });
+		expect(runtime.completeCycle({ candidateId: replacement.candidateId }).cycle.outcome).toBe("accepted");
+	});
+
+	test("derives separate host obligations from explicit objective checklist items", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-objective-checklist", clock());
+		runtime.configure({ environment: "coding", horizon: "direct", source: "user" });
+		runtime.store.initialize("Implement the parser:\n- Preserve escaped strings\n- Reject trailing bytes");
+		const obligations = runtime.getState().obligations;
+		expect(obligations.map((item) => item.description)).toEqual([
+			"Implement the parser:\n- Preserve escaped strings\n- Reject trailing bytes",
+			"Preserve escaped strings",
+			"Reject trailing bytes",
+		]);
+		const candidate = runtime.recordCandidate({
+			kind: "implementation",
+			summary: "Parser implementation",
+			payload: { change: "parser" },
+			workspaceDigest: "8".repeat(64),
+			workspaceHead: "head-checklist",
+			workspaceMode: "git",
+		});
+		const evaluation = runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "test",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:test:parser"],
+			metrics: { meaningful: true, workspace_matches_candidate: true },
+		});
+		expect(runtime.getState().obligationCoverage).toHaveLength(1);
+		expect(new CodingAvoAdapter().deriveEvaluationState(candidate, [evaluation], runtime.getState())).toMatchObject({
+			status: "revise",
+			canonical: false,
+		});
+		for (const obligation of obligations.slice(1)) {
+			runtime.recordObligationCoverage({
+				obligationId: obligation.obligationId,
+				candidateId: candidate.candidateId,
+				evaluationIds: [evaluation.evaluationId],
+			});
+		}
+		expect(deriveAvoObligationCoverage(runtime.getState(), candidate).every((item) => item.satisfied)).toBe(true);
+	});
+
+	test("requires distinct host evidence for changed source and documentation impact surfaces", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-impact-ledger", clock());
+		runtime.configure({ environment: "coding", horizon: "direct", source: "user" });
+		runtime.store.initialize("Implement the parser and update README.md");
+		const candidate = runtime.recordCandidate({
+			kind: "implementation",
+			summary: "Parser and documentation update",
+			payload: { change: "parser and docs" },
+			workspaceDigest: "9".repeat(64),
+			workspaceHead: "head-impact",
+			workspaceMode: "git",
+			workspaceChangedPaths: ["src/parser.ts", "README.md"],
+		});
+		expect(candidate.impactSurfaces).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ kind: "source", requiredEvidenceGroups: [["test"]] }),
+				expect.objectContaining({ kind: "documentation", requiredEvidenceGroups: [["filesystem"]] }),
+			]),
+		);
+		const testReceipt = runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "test",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:test:parser"],
+			metrics: {
+				meaningful: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		expect(new CodingAvoAdapter().deriveEvaluationState(candidate, [testReceipt], runtime.getState())).toMatchObject({
+			status: "revise",
+			canonical: false,
+		});
+		runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "filesystem",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:filesystem:README.md"],
+			metrics: {
+				meaningful: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		expect(runtime.completeCycle({ candidateId: candidate.candidateId }).cycle.outcome).toBe("accepted");
+	});
+
+	test("derives impact paths against the task baseline instead of Git HEAD", () => {
+		const project = artifactDir();
+		mkdirSync(join(project, "src"), { recursive: true });
+		writeFileSync(join(project, "src", "parser.ts"), "export const parse = () => 1;\n", "utf8");
+		writeFileSync(join(project, "README.md"), "original\n", "utf8");
+		execFileSync("git", ["init", "-q"], { cwd: project });
+		execFileSync("git", ["config", "user.email", "avo@example.test"], { cwd: project });
+		execFileSync("git", ["config", "user.name", "AVO Test"], { cwd: project });
+		execFileSync("git", ["add", "."], { cwd: project });
+		execFileSync("git", ["commit", "-qm", "baseline"], { cwd: project });
+
+		writeFileSync(join(project, "README.md"), "pre-existing user edit\n", "utf8");
+		const baseline = captureAvoCodingVerificationBaseline(project, "Fix the parser");
+		writeFileSync(join(project, "src", "parser.ts"), "export const parse = () => 2;\n", "utf8");
+		const candidate = captureAvoWorkspaceSnapshot(project);
+		expect(deriveAvoWorkspaceImpactPaths(baseline, candidate)).toEqual(["src/parser.ts"]);
+
+		writeFileSync(join(project, "README.md"), "candidate also changed this\n", "utf8");
+		expect(deriveAvoWorkspaceImpactPaths(baseline, captureAvoWorkspaceSnapshot(project))).toEqual([
+			"README.md",
+			"src/parser.ts",
+		]);
 	});
 
 	test("fails closed on ambiguous experiment plans and undeclared trial metrics", () => {
@@ -2493,7 +2745,9 @@ describe("generic AVO core", () => {
 			verificationState: "proposed",
 		});
 		expect(state.memories.find((memory) => memory.title === "Completed AVO task")).toMatchObject({
-			content: expect.stringContaining("Result: First rain poem"),
+			content: expect.stringContaining(
+				"Accepted candidate summary (model-authored; not empirical evidence): First rain poem",
+			),
 			sourceIds: expect.arrayContaining([first.candidateId, firstCycle.cycleId]),
 		});
 		expect(
@@ -2538,6 +2792,46 @@ describe("generic AVO core", () => {
 			"Verified deterministic result: 4",
 		);
 		expect(memories.every((memory) => !memory.content.includes("The answer is 5"))).toBe(true);
+	});
+
+	test("separates model-authored coding claims from host-observed evidence in verified memories", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-coding-epistemic-memory", clock());
+		runtime.configure({ environment: "coding", horizon: "direct", source: "user" });
+		runtime.store.initialize("Fix the JSON parser");
+		const candidate = runtime.recordCandidate({
+			kind: "patch",
+			summary: "Implemented full RFC support with no remaining edge cases",
+			payload: { diff: "sha256:json-parser" },
+			workspaceDigest: "e".repeat(64),
+			workspaceHead: "head-json-parser",
+			workspaceMode: "git",
+		});
+		runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "test",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:test:visible-json-parser"],
+			metrics: {
+				meaningful: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		const cycle = runtime.completeCycle({ candidateId: candidate.candidateId }).cycle;
+		runtime.complete();
+
+		const state = runtime.getState();
+		const cycleMemory = state.memories.find((memory) => memory.memoryId === `episode:${cycle.cycleId}`)!;
+		const taskMemory = state.memories.find((memory) => memory.title === "Completed AVO task")!;
+		for (const memory of [cycleMemory, taskMemory]) {
+			expect(memory.tags).toContain("epistemic-separated-v2");
+			expect(memory.content).toContain("model-authored; not empirical evidence");
+			expect(memory.content).toContain("not a verified fact or proof of untested completeness");
+			expect(memory.content).not.toContain("Result: Implemented full RFC support");
+		}
+		expect(cycleMemory.content).toContain("Observed host evaluations: test=pass");
+		expect(taskMemory.content).toContain("Verification contract: coding/required");
 	});
 
 	test("keeps repeated accepted cycles distinct until each task delivers canonically", () => {
@@ -2592,7 +2886,7 @@ describe("generic AVO core", () => {
 			evidenceRefs: ["review:looks-good"],
 			metrics: {},
 		});
-		expect(runtime.completeCycle({ candidateId: candidate.candidateId }).cycle.outcome).toBe("inconclusive");
+		expect(runtime.completeCycle({ candidateId: candidate.candidateId }).cycle.outcome).toBe("revised");
 		expect(runtime.evaluateStopGate().passed).toBe(false);
 	});
 
@@ -2620,7 +2914,7 @@ describe("generic AVO core", () => {
 				candidate_payload_digest: candidate.payloadDigest,
 			},
 		});
-		expect(runtime.completeCycle({ candidateId: candidate.candidateId }).cycle.outcome).toBe("inconclusive");
+		expect(runtime.completeCycle({ candidateId: candidate.candidateId }).cycle.outcome).toBe("revised");
 		expect(runtime.evaluateStopGate().passed).toBe(false);
 	});
 
@@ -3008,7 +3302,7 @@ describe("generic AVO core", () => {
 		const migratedStore = new AvoStore(dir, "legacy-session", clock());
 		const migrated = migratedStore.getState();
 		expect(migrated).toMatchObject({
-			schemaVersion: 8,
+			schemaVersion: 9,
 			sessionId: "legacy-session",
 			runId: "legacy-session:task-1",
 			objective: "Legacy objective",
@@ -3045,7 +3339,7 @@ describe("generic AVO core", () => {
 		delete previous.trials;
 		writeFileSync(statePath, JSON.stringify(previous), "utf8");
 		const migrated = new AvoStore(dir, "v6-session", clock()).getState();
-		expect(migrated).toMatchObject({ schemaVersion: 8, experiments: [], trials: [] });
+		expect(migrated).toMatchObject({ schemaVersion: 9, experiments: [], trials: [] });
 	});
 
 	test("preserves v7 memory while contesting legacy unstructured experiment episodes", () => {
@@ -3075,7 +3369,7 @@ describe("generic AVO core", () => {
 		previous.schemaVersion = 7;
 		writeFileSync(statePath, JSON.stringify(previous), "utf8");
 		const migrated = new AvoStore(dir, "v7-session", clock()).getState();
-		expect(migrated.schemaVersion).toBe(8);
+		expect(migrated.schemaVersion).toBe(9);
 		expect(migrated.memories).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({ memoryId: "info:v7-preserved", verificationState: "verified" }),
@@ -3275,7 +3569,7 @@ describe("generic AVO core", () => {
 		writeFileSync(statePath, JSON.stringify({ ...previous, schemaVersion: 2 }), "utf8");
 		const migrated = new AvoStore(dir, "v2-session", clock()).getState();
 		expect(migrated).toMatchObject({
-			schemaVersion: 8,
+			schemaVersion: 9,
 			sessionId: "v2-session",
 			verificationClass: "external_factual",
 			verificationPolicy: "required",
@@ -3300,7 +3594,7 @@ describe("generic AVO core", () => {
 		};
 		writeFileSync(statePath, JSON.stringify(previous), "utf8");
 		const migrated = new AvoStore(dir, "v3-session", clock()).getState();
-		expect(migrated.schemaVersion).toBe(8);
+		expect(migrated.schemaVersion).toBe(9);
 		expect(migrated.verificationBaseline?.executions).toEqual([]);
 	});
 
@@ -3326,7 +3620,7 @@ describe("generic AVO core", () => {
 		previous.schemaVersion = 4;
 		writeFileSync(statePath, JSON.stringify(previous), "utf8");
 		const migrated = new AvoStore(dir, "v4-session", clock()).getState();
-		expect(migrated.schemaVersion).toBe(8);
+		expect(migrated.schemaVersion).toBe(9);
 		expect(migrated.evaluations).toContainEqual(
 			expect.objectContaining({ issuedBy: "legacy_unverified", evaluatorId: "external_claim" }),
 		);

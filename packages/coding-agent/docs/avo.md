@@ -36,6 +36,11 @@ For GPU-kernel optimization, the resumable [KernelBench AVO runner](kernelbench-
 records official Level-1 correctness, static-integrity, runtime, `fast_0`, and
 `fast_1` alongside the complete AVO/model trace.
 
+For broad specification compliance and reward-hacking measurement, use the
+[WecoAI SpecBench AVO runner](specbench-avo.md). It exposes only validation
+tests to Prime, keeps held-out suites outside the agent sandbox, and reports
+the validation-to-held-out generalization gap.
+
 ## Repeated experiment selection
 
 Exploratory screening may rank candidates, but it never promotes one. A

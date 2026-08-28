@@ -28,6 +28,8 @@ export interface AvoWorkspaceSnapshot {
 	head: string;
 	changedFileCount: number;
 	totalBytes: number;
+	changedPaths: string[];
+	pathDigests: Record<string, string>;
 }
 
 function git(cwd: string, args: readonly string[]): Buffer | undefined {
@@ -55,6 +57,24 @@ function hashPath(hash: ReturnType<typeof createHash>, root: string, relativePat
 	if (!metadata.isFile()) return 0;
 	hash.update(readFileSync(absolutePath));
 	return statSync(absolutePath).size;
+}
+
+function pathStateDigest(root: string, relativePath: string): string {
+	const absolutePath = resolve(root, relativePath);
+	if (absolutePath !== root && !absolutePath.startsWith(`${root}${sep}`)) {
+		throw new Error(`workspace path escapes its root: ${relativePath}`);
+	}
+	try {
+		const metadata = lstatSync(absolutePath);
+		const hash = createHash("sha256");
+		hash.update(`prime-avo-path-v1\0${relativePath}\0${metadata.mode}\0${metadata.size}\0`);
+		if (metadata.isSymbolicLink()) hash.update(readlinkSync(absolutePath));
+		else if (metadata.isFile()) hash.update(readFileSync(absolutePath));
+		else hash.update("non-file");
+		return hash.digest("hex");
+	} catch {
+		return createHash("sha256").update(`prime-avo-path-v1\0${relativePath}\0missing`).digest("hex");
+	}
 }
 
 function excludedPathspecs(root: string, excludedRoots: readonly string[]): string[] {
@@ -89,6 +109,15 @@ function gitSnapshot(cwd: string, excludedRoots: readonly string[]): AvoWorkspac
 		.split("\0")
 		.filter((path) => path.length > 0)
 		.sort();
+	const changedOutput =
+		head === "UNBORN"
+			? git(root, ["diff", "--cached", "--name-only", "-z", ...pathspecs])
+			: git(root, ["diff", "--name-only", "-z", "HEAD", ...pathspecs]);
+	if (!changedOutput) throw new Error("failed to enumerate changed workspace paths");
+	const changedPaths = [
+		...new Set([...changedOutput.toString("utf8").split("\0").filter(Boolean), ...untracked]),
+	].sort();
+	const pathDigests = Object.fromEntries(changedPaths.map((path) => [path, pathStateDigest(root, path)]));
 	if (untracked.length > MAX_SNAPSHOT_FILES) throw new Error("workspace has too many untracked files to fingerprint");
 	const hash = createHash("sha256");
 	hash.update("prime-avo-workspace-v1\0git\0");
@@ -102,7 +131,7 @@ function gitSnapshot(cwd: string, excludedRoots: readonly string[]): AvoWorkspac
 		if (totalBytes > MAX_SNAPSHOT_BYTES) throw new Error("workspace changes are too large to fingerprint");
 	}
 	const changedFileCount = status.toString("utf8").split("\0").filter(Boolean).length;
-	return { digest: hash.digest("hex"), mode: "git", head, changedFileCount, totalBytes };
+	return { digest: hash.digest("hex"), mode: "git", head, changedFileCount, totalBytes, changedPaths, pathDigests };
 }
 
 function treeFiles(root: string, excludedRoots: readonly string[]): string[] {
@@ -140,6 +169,8 @@ function treeSnapshot(cwd: string, excludedRoots: readonly string[]): AvoWorkspa
 		head: "NO_GIT_HEAD",
 		changedFileCount: files.length,
 		totalBytes,
+		changedPaths: files,
+		pathDigests: Object.fromEntries(files.map((path) => [path, pathStateDigest(root, path)])),
 	};
 }
 
@@ -231,11 +262,29 @@ export function captureAvoCodingVerificationBaseline(
 		kind: "coding",
 		contractDigest,
 		workspaceDigest: workspace.digest,
+		workspaceMode: workspace.mode,
+		workspaceHead: workspace.head,
+		workspacePathDigests: workspace.pathDigests,
 		testFiles,
 		userAcceptanceCommands,
 		executions: [],
 		capturedAt: new Date().toISOString(),
 	};
+}
+
+export function deriveAvoWorkspaceImpactPaths(
+	baseline: AvoVerificationBaseline | undefined,
+	current: AvoWorkspaceSnapshot,
+): string[] {
+	if (
+		!baseline?.workspacePathDigests ||
+		baseline.workspaceMode !== current.mode ||
+		baseline.workspaceHead !== current.head
+	) {
+		return [...current.changedPaths];
+	}
+	const paths = new Set([...Object.keys(baseline.workspacePathDigests), ...Object.keys(current.pathDigests)]);
+	return [...paths].filter((path) => baseline.workspacePathDigests?.[path] !== current.pathDigests[path]).sort();
 }
 
 export function captureAvoArtifactPathBaseline(

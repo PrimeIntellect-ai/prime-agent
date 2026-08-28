@@ -45,7 +45,7 @@ class AvoSkillTest(unittest.TestCase):
             host.await_args_list[0].args[1],
             {"objective": "Fix the parser"},
         )
-        self.assertEqual(result["execution_contract"]["contract_version"], 9)
+        self.assertEqual(result["execution_contract"]["contract_version"], 10)
         self.assertIn("unused seeds", result["execution_contract"]["experiment_rule"])
 
     def test_coding_baseline_runs_through_the_host_before_candidate_work(self) -> None:
@@ -99,6 +99,55 @@ class AvoSkillTest(unittest.TestCase):
         )
         self.assertEqual(host.await_args_list[2].args[0], "avo.cycle.complete")
         self.assertEqual(result["cycle"]["cycleId"], "cycle-1")
+
+    def test_obligation_and_assumption_helpers_use_host_owned_ledgers(self) -> None:
+        module = load_skill("avo_obligation_test")
+        for helper in (
+            "register_obligations",
+            "cover_obligation",
+            "register_critical_assumptions",
+            "resolve_critical_assumption",
+        ):
+            self.assertIn(helper, module.__all__)
+        host = AsyncMock(return_value={"ok": True})
+        with patch.object(module, "host_request", host):
+            asyncio.run(
+                module.register_obligations(
+                    [{"obligation_id": "compat", "required_evidence": ["test"]}]
+                )
+            )
+            asyncio.run(
+                module.cover_obligation(
+                    {
+                        "obligation_id": "compat",
+                        "candidate_id": "candidate-1",
+                        "evaluation_ids": ["test-1"],
+                    }
+                )
+            )
+            asyncio.run(
+                module.register_critical_assumptions(
+                    [{"assumption_id": "runtime", "required_evidence": ["runtime"]}]
+                )
+            )
+            asyncio.run(
+                module.resolve_critical_assumption(
+                    {
+                        "assumption_id": "runtime",
+                        "candidate_id": "candidate-1",
+                        "evaluation_ids": ["runtime-1"],
+                    }
+                )
+            )
+        self.assertEqual(
+            [call.args[0] for call in host.await_args_list],
+            [
+                "avo.obligations.register",
+                "avo.obligations.cover",
+                "avo.assumptions.register",
+                "avo.assumptions.resolve",
+            ],
+        )
 
     def test_model_cannot_claim_authoritative_evaluation(self) -> None:
         module = load_skill("avo_authority_boundary_test")

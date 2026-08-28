@@ -23,6 +23,12 @@ import {
 	normalizeAvoExperimentPlan,
 } from "./experiment.js";
 import {
+	avoEvaluationSatisfiesObligation,
+	avoEvaluatorMatchesRequiredEvidence,
+	deriveAvoCandidateImpactSurfaces,
+	deriveAvoObjectiveObligations,
+} from "./obligations.js";
+import {
 	AVO_AUTHORITIES,
 	AVO_ENVIRONMENTS,
 	AVO_EVALUATION_ISSUERS,
@@ -42,14 +48,19 @@ import {
 	AVO_MEMORY_TYPES,
 	AVO_MEMORY_VERIFICATION_STATES,
 	AVO_METRIC_DIRECTIONS,
+	AVO_OBLIGATION_EVIDENCE_KINDS,
+	AVO_OBLIGATION_KINDS,
 	AVO_STATE_VERSION,
 	AVO_VERIFICATION_CLASSES,
 	AVO_VERIFICATION_POLICIES,
 	type AvoAdapterStateRef,
+	type AvoAssumptionResolutionInput,
 	type AvoBaselineExecution,
 	type AvoCandidate,
 	type AvoCandidateClaim,
 	type AvoCandidateInput,
+	type AvoCriticalAssumption,
+	type AvoCriticalAssumptionInput,
 	type AvoCycle,
 	type AvoCycleInput,
 	type AvoEnvironment,
@@ -72,6 +83,10 @@ import {
 	type AvoMemoryReferenceKind,
 	type AvoMemoryReflection,
 	type AvoMemoryScope,
+	type AvoObligation,
+	type AvoObligationCoverage,
+	type AvoObligationCoverageInput,
+	type AvoObligationInput,
 	type AvoRoutingDecision,
 	type AvoRunState,
 	type AvoStopGate,
@@ -513,6 +528,9 @@ function emptyState(sessionId: string, now: string): AvoRunState {
 		evaluations: [],
 		experiments: [],
 		trials: [],
+		obligations: [],
+		obligationCoverage: [],
+		criticalAssumptions: [],
 		cycles: [],
 		lineage: [],
 		checkpoints: [],
@@ -575,7 +593,10 @@ function isAvoState(value: unknown): value is AvoRunState {
 				Array.isArray(run.experiments) &&
 				run.experiments.every(isAvoExperiment) &&
 				Array.isArray(run.trials) &&
-				run.trials.every(isAvoTrial),
+				run.trials.every(isAvoTrial) &&
+				Array.isArray(run.obligations) &&
+				Array.isArray(run.obligationCoverage) &&
+				Array.isArray(run.criticalAssumptions),
 		) &&
 		AVO_VERIFICATION_POLICIES.includes(value.verificationPolicy as AvoVerificationPolicy) &&
 		AVO_VERIFICATION_CLASSES.includes(value.verificationClass as AvoVerificationClass) &&
@@ -591,6 +612,9 @@ function isAvoState(value: unknown): value is AvoRunState {
 		value.experiments.every(isAvoExperiment) &&
 		Array.isArray(value.trials) &&
 		value.trials.every(isAvoTrial) &&
+		Array.isArray(value.obligations) &&
+		Array.isArray(value.obligationCoverage) &&
+		Array.isArray(value.criticalAssumptions) &&
 		Array.isArray(value.cycles) &&
 		Array.isArray(value.lineage) &&
 		Array.isArray(value.checkpoints) &&
@@ -601,6 +625,50 @@ function isAvoState(value: unknown): value is AvoRunState {
 		AVO_ENVIRONMENTS.includes(value.routing.environment as AvoEnvironment) &&
 		AVO_HORIZONS.includes(value.routing.horizon as AvoHorizon)
 	);
+}
+
+function isAvoV8State(value: unknown): value is JsonRecord {
+	return (
+		isRecord(value) &&
+		value.schemaVersion === 8 &&
+		isRecord(value.routing) &&
+		typeof value.sessionId === "string" &&
+		typeof value.runId === "string" &&
+		Array.isArray(value.taskRuns) &&
+		Array.isArray(value.candidates) &&
+		Array.isArray(value.evaluations) &&
+		Array.isArray(value.experiments) &&
+		Array.isArray(value.trials)
+	);
+}
+
+function migrateAvoV8State(value: JsonRecord): AvoRunState {
+	const migrateCandidates = (candidates: unknown): AvoCandidate[] =>
+		Array.isArray(candidates)
+			? (candidates as AvoCandidate[]).map((candidate) => ({
+					...candidate,
+					obligationIds: [],
+					workspaceChangedPaths: candidate.workspaceChangedPaths ?? [],
+					impactSurfaces: candidate.impactSurfaces ?? [],
+				}))
+			: [];
+	return {
+		...(value as unknown as AvoRunState),
+		schemaVersion: AVO_STATE_VERSION,
+		candidates: migrateCandidates(value.candidates),
+		obligations: [],
+		obligationCoverage: [],
+		criticalAssumptions: [],
+		taskRuns: Array.isArray(value.taskRuns)
+			? (value.taskRuns as JsonRecord[]).map((run) => ({
+					...(run as unknown as AvoRunState["taskRuns"][number]),
+					candidates: migrateCandidates(run.candidates),
+					obligations: [],
+					obligationCoverage: [],
+					criticalAssumptions: [],
+				}))
+			: [],
+	};
 }
 
 function isAvoV7State(value: unknown): value is JsonRecord {
@@ -691,7 +759,7 @@ function migrateLegacyMemory(value: unknown, state: AvoRunState): AvoMemory | un
 function migrateMemoryState(value: JsonRecord): AvoRunState {
 	const state = {
 		...(value as unknown as AvoRunState),
-		schemaVersion: AVO_STATE_VERSION,
+		schemaVersion: 8,
 		experiments: Array.isArray(value.experiments) ? (value.experiments as AvoExperiment[]) : [],
 		trials: Array.isArray(value.trials) ? (value.trials as AvoTrial[]) : [],
 		taskRuns: Array.isArray(value.taskRuns)
@@ -702,21 +770,21 @@ function migrateMemoryState(value: JsonRecord): AvoRunState {
 				}))
 			: [],
 		memoryRecalls: Array.isArray(value.memoryRecalls) ? (value.memoryRecalls as AvoMemoryRecall[]) : [],
-	} satisfies AvoRunState;
+	} as unknown as AvoRunState;
 	state.memories = Array.isArray(value.memories)
 		? value.memories.flatMap((memory) => {
 				const migrated = migrateLegacyMemory(memory, state);
 				return migrated ? [migrated] : [];
 			})
 		: [];
-	return state;
+	return migrateAvoV8State(state as unknown as JsonRecord);
 }
 
 function migrateAvoV7State(value: JsonRecord): AvoRunState {
-	return {
+	return migrateAvoV8State({
 		...(value as unknown as AvoRunState),
-		schemaVersion: AVO_STATE_VERSION,
-	};
+		schemaVersion: 8,
+	} as unknown as JsonRecord);
 }
 
 function isAvoV2State(value: unknown): value is JsonRecord {
@@ -1305,6 +1373,72 @@ export function parseAvoCandidateInput(value: unknown): AvoCandidateInput {
 			value.artifact_paths === undefined ? undefined : stringArray(value.artifact_paths, "candidate.artifact_paths"),
 		claims: candidateClaims(value.claims),
 		parentCandidateId: optionalString(value.parent_candidate_id, "candidate.parent_candidate_id"),
+		obligationIds:
+			value.obligation_ids === undefined
+				? undefined
+				: stringArray(value.obligation_ids, "candidate.obligation_ids").map((item, index) =>
+						requireIdentifier(item, `candidate.obligation_ids[${index}]`),
+					),
+	};
+}
+
+export function parseAvoObligationInput(value: unknown): AvoObligationInput {
+	if (!isRecord(value)) throw new Error("obligation must be an object");
+	const requiredEvidence = Array.isArray(value.required_evidence)
+		? value.required_evidence.map((item, index) =>
+				enumValue(item, AVO_OBLIGATION_EVIDENCE_KINDS, `obligation.required_evidence[${index}]`),
+			)
+		: (() => {
+				throw new Error("obligation.required_evidence must be a non-empty array");
+			})();
+	if (requiredEvidence.length === 0) throw new Error("obligation.required_evidence must be a non-empty array");
+	return {
+		obligationId: requireIdentifier(value.obligation_id, "obligation.obligation_id"),
+		description: requireString(value.description, "obligation.description"),
+		kind: enumValue(value.kind, AVO_OBLIGATION_KINDS, "obligation.kind"),
+		critical: value.critical === undefined ? true : value.critical === true,
+		requiredEvidence,
+	};
+}
+
+export function parseAvoObligationCoverageInput(value: unknown): AvoObligationCoverageInput {
+	if (!isRecord(value)) throw new Error("obligation coverage must be an object");
+	return {
+		obligationId: requireIdentifier(value.obligation_id, "coverage.obligation_id"),
+		candidateId: requireIdentifier(value.candidate_id, "coverage.candidate_id"),
+		evaluationIds: stringArray(value.evaluation_ids, "coverage.evaluation_ids").map((item, index) =>
+			requireIdentifier(item, `coverage.evaluation_ids[${index}]`),
+		),
+	};
+}
+
+export function parseAvoCriticalAssumptionInput(value: unknown): AvoCriticalAssumptionInput {
+	if (!isRecord(value)) throw new Error("critical assumption must be an object");
+	const requiredEvidence = Array.isArray(value.required_evidence)
+		? value.required_evidence.map((item, index) =>
+				enumValue(item, AVO_OBLIGATION_EVIDENCE_KINDS, `assumption.required_evidence[${index}]`),
+			)
+		: (() => {
+				throw new Error("assumption.required_evidence must be a non-empty array");
+			})();
+	if (requiredEvidence.length === 0) throw new Error("assumption.required_evidence must be a non-empty array");
+	return {
+		assumptionId: requireIdentifier(value.assumption_id, "assumption.assumption_id"),
+		statement: requireString(value.statement, "assumption.statement"),
+		falsificationPlan: requireString(value.falsification_plan, "assumption.falsification_plan"),
+		requiredEvidence,
+		critical: value.critical === undefined ? true : value.critical === true,
+	};
+}
+
+export function parseAvoAssumptionResolutionInput(value: unknown): AvoAssumptionResolutionInput {
+	if (!isRecord(value)) throw new Error("assumption resolution must be an object");
+	return {
+		assumptionId: requireIdentifier(value.assumption_id, "resolution.assumption_id"),
+		candidateId: requireIdentifier(value.candidate_id, "resolution.candidate_id"),
+		evaluationIds: stringArray(value.evaluation_ids, "resolution.evaluation_ids").map((item, index) =>
+			requireIdentifier(item, `resolution.evaluation_ids[${index}]`),
+		),
 	};
 }
 
@@ -1979,6 +2113,7 @@ export class AvoStore {
 		try {
 			const parsed = JSON.parse(readFileSync(this.statePath, "utf8")) as unknown;
 			if (isAvoState(parsed)) return parsed;
+			if (isAvoV8State(parsed)) return migrateAvoV8State(parsed);
 			if (isAvoV7State(parsed)) return migrateAvoV7State(parsed);
 			if (isAvoV6State(parsed)) return migrateMemoryState(parsed);
 			if (isAvoV5State(parsed)) return migrateMemoryState(parsed);
@@ -2227,6 +2362,14 @@ export class AvoStore {
 			});
 		}
 		this.routePrompt(prompt, false);
+		if (this.state.obligations.length === 0) {
+			this.state.obligations = deriveAvoObjectiveObligations(
+				this.state.objective!,
+				this.state.verificationClass,
+				this.state.verificationPolicy,
+				this.now(),
+			);
+		}
 		this.save();
 		return this.getState();
 	}
@@ -2246,6 +2389,9 @@ export class AvoStore {
 				evaluations: structuredClone(this.state.evaluations),
 				experiments: structuredClone(this.state.experiments),
 				trials: structuredClone(this.state.trials),
+				obligations: structuredClone(this.state.obligations),
+				obligationCoverage: structuredClone(this.state.obligationCoverage),
+				criticalAssumptions: structuredClone(this.state.criticalAssumptions),
 				cycles: structuredClone(this.state.cycles),
 				lineage: structuredClone(this.state.lineage),
 				checkpoints: structuredClone(this.state.checkpoints),
@@ -2278,6 +2424,9 @@ export class AvoStore {
 		this.state.evaluations = [];
 		this.state.experiments = [];
 		this.state.trials = [];
+		this.state.obligations = [];
+		this.state.obligationCoverage = [];
+		this.state.criticalAssumptions = [];
 		this.state.cycles = [];
 		this.state.lineage = [
 			{
@@ -2294,6 +2443,12 @@ export class AvoStore {
 		this.state.artifactBaselinePaths = undefined;
 		this.state.createdAt = now;
 		this.routePrompt(prompt, false);
+		this.state.obligations = deriveAvoObjectiveObligations(
+			normalizedObjective,
+			this.state.verificationClass,
+			this.state.verificationPolicy,
+			this.now(),
+		);
 		this.save();
 		return this.getState();
 	}
@@ -2411,6 +2566,141 @@ export class AvoStore {
 		this.save();
 	}
 
+	registerObligations(inputs: readonly AvoObligationInput[]): AvoObligation[] {
+		if (this.state.candidates.length > 0 || this.state.evaluations.length > 0) {
+			throw new Error("obligations must be preregistered before candidate evaluation begins");
+		}
+		if (inputs.length === 0 || inputs.length > 64) throw new Error("register 1 to 64 obligations at a time");
+		const existing = new Set(this.state.obligations.map((item) => item.obligationId));
+		const createdAt = this.now();
+		const records = inputs.map((input) => {
+			const obligationId = requireIdentifier(input.obligationId, "obligation.obligation_id");
+			if (existing.has(obligationId)) throw new Error(`obligation ${obligationId} already exists`);
+			if (input.requiredEvidence.length === 0) {
+				throw new Error(`obligation ${obligationId} requires at least one evidence kind`);
+			}
+			existing.add(obligationId);
+			return {
+				obligationId,
+				description: requireString(input.description, "obligation.description"),
+				kind: input.kind,
+				critical: input.critical ?? true,
+				requiredEvidence: [...new Set(input.requiredEvidence)],
+				source: "model_preregistered" as const,
+				createdAt,
+			};
+		});
+		this.state.obligations.push(...records);
+		this.save();
+		return structuredClone(records);
+	}
+
+	recordObligationCoverage(input: AvoObligationCoverageInput): AvoObligationCoverage {
+		const obligation = this.state.obligations.find((item) => item.obligationId === input.obligationId);
+		const candidate = this.state.candidates.find((item) => item.candidateId === input.candidateId);
+		if (!obligation) throw new Error(`unknown obligation ${input.obligationId}`);
+		if (!candidate) throw new Error(`unknown candidate ${input.candidateId}`);
+		if (!candidate.obligationIds.includes(obligation.obligationId)) {
+			throw new Error(`candidate ${candidate.candidateId} did not declare obligation ${obligation.obligationId}`);
+		}
+		if (
+			this.state.obligationCoverage.some(
+				(item) => item.obligationId === input.obligationId && item.candidateId === input.candidateId,
+			)
+		) {
+			throw new Error(`obligation ${input.obligationId} already has coverage for ${input.candidateId}`);
+		}
+		if (input.evaluationIds.length === 0) throw new Error("obligation coverage requires at least one evaluation");
+		const evaluations = input.evaluationIds.map((evaluationId) => {
+			const receipt = this.state.evaluations.find(
+				(item) => item.evaluationId === evaluationId && item.candidateId === candidate.candidateId,
+			);
+			if (!receipt) throw new Error(`evaluation ${evaluationId} is not bound to candidate ${candidate.candidateId}`);
+			if (!avoEvaluationSatisfiesObligation(receipt, obligation)) {
+				throw new Error(`evaluation ${evaluationId} is not passing host evidence of the required kind`);
+			}
+			return receipt;
+		});
+		const coverage: AvoObligationCoverage = {
+			coverageId: `coverage-${randomUUID()}`,
+			obligationId: obligation.obligationId,
+			candidateId: candidate.candidateId,
+			evaluationIds: evaluations.map((item) => item.evaluationId),
+			evidenceRefs: [...new Set(evaluations.flatMap((item) => item.evidenceRefs))],
+			candidatePayloadDigest: candidate.payloadDigest,
+			recordedAt: this.now(),
+		};
+		this.state.obligationCoverage.push(coverage);
+		this.save();
+		return structuredClone(coverage);
+	}
+
+	registerCriticalAssumptions(inputs: readonly AvoCriticalAssumptionInput[]): AvoCriticalAssumption[] {
+		if (this.state.candidates.length > 0 || this.state.evaluations.length > 0) {
+			throw new Error("critical assumptions must be preregistered before candidate evaluation begins");
+		}
+		if (inputs.length === 0 || inputs.length > 32) throw new Error("register 1 to 32 critical assumptions at a time");
+		const existing = new Set(this.state.criticalAssumptions.map((item) => item.assumptionId));
+		const createdAt = this.now();
+		const assumptions = inputs.map((input) => {
+			const assumptionId = requireIdentifier(input.assumptionId, "assumption.assumption_id");
+			if (existing.has(assumptionId)) throw new Error(`assumption ${assumptionId} already exists`);
+			if (input.requiredEvidence.length === 0) {
+				throw new Error(`assumption ${assumptionId} requires at least one evidence kind`);
+			}
+			if (input.requiredEvidence.some((kind) => kind === "authoritative" || kind === "opinion")) {
+				throw new Error(
+					`assumption ${assumptionId} requires a concrete falsification kind, not authoritative/opinion`,
+				);
+			}
+			existing.add(assumptionId);
+			return {
+				assumptionId,
+				statement: requireString(input.statement, "assumption.statement"),
+				falsificationPlan: requireString(input.falsificationPlan, "assumption.falsification_plan"),
+				requiredEvidence: [...new Set(input.requiredEvidence)],
+				critical: input.critical ?? true,
+				status: "open" as const,
+				evaluationIds: [],
+				evidenceRefs: [],
+				createdAt,
+			};
+		});
+		this.state.criticalAssumptions.push(...assumptions);
+		this.save();
+		return structuredClone(assumptions);
+	}
+
+	resolveCriticalAssumption(input: AvoAssumptionResolutionInput): AvoCriticalAssumption {
+		const assumption = this.state.criticalAssumptions.find((item) => item.assumptionId === input.assumptionId);
+		const candidate = this.state.candidates.find((item) => item.candidateId === input.candidateId);
+		if (!assumption) throw new Error(`unknown assumption ${input.assumptionId}`);
+		if (!candidate) throw new Error(`unknown candidate ${input.candidateId}`);
+		if (assumption.status !== "open" && assumption.candidateId === candidate.candidateId) {
+			throw new Error(`assumption ${assumption.assumptionId} is already resolved for ${candidate.candidateId}`);
+		}
+		if (input.evaluationIds.length === 0) throw new Error("assumption resolution requires at least one evaluation");
+		const evaluations = input.evaluationIds.map((evaluationId) => {
+			const receipt = this.state.evaluations.find(
+				(item) => item.evaluationId === evaluationId && item.candidateId === candidate.candidateId,
+			);
+			if (!receipt) throw new Error(`evaluation ${evaluationId} is not bound to candidate ${candidate.candidateId}`);
+			if (!avoEvaluatorMatchesRequiredEvidence(receipt, assumption.requiredEvidence)) {
+				throw new Error(`evaluation ${evaluationId} is not host evidence of the preregistered falsification kind`);
+			}
+			if (receipt.status === "inconclusive") throw new Error(`evaluation ${evaluationId} is inconclusive`);
+			return receipt;
+		});
+		assumption.status = evaluations.every((item) => item.status === "pass") ? "supported" : "refuted";
+		assumption.candidateId = candidate.candidateId;
+		assumption.candidatePayloadDigest = candidate.payloadDigest;
+		assumption.evaluationIds = evaluations.map((item) => item.evaluationId);
+		assumption.evidenceRefs = [...new Set(evaluations.flatMap((item) => item.evidenceRefs))];
+		assumption.resolvedAt = this.now();
+		this.save();
+		return structuredClone(assumption);
+	}
+
 	recordCandidate(input: AvoCandidateInput): AvoCandidate {
 		const candidateId = input.candidateId ?? `candidate-${randomUUID()}`;
 		if (this.state.candidates.some((candidate) => candidate.candidateId === candidateId)) {
@@ -2496,6 +2786,20 @@ export class AvoStore {
 			}
 		}
 		const summary = requireString(input.summary, "candidate.summary");
+		const knownObligations = new Set(this.state.obligations.map((item) => item.obligationId));
+		const requestedObligations = input.obligationIds ?? [];
+		for (const obligationId of requestedObligations) {
+			if (!knownObligations.has(obligationId))
+				throw new Error(`candidate references unknown obligation ${obligationId}`);
+		}
+		const obligationIds = [
+			...new Set([
+				...this.state.obligations
+					.filter((obligation) => obligation.source === "host_objective")
+					.map((obligation) => obligation.obligationId),
+				...requestedObligations,
+			]),
+		];
 		const canonicalDeliveryText =
 			this.state.routing.environment === "coding" || this.state.routing.environment === "research"
 				? summary
@@ -2517,9 +2821,12 @@ export class AvoStore {
 			workspaceDigest: input.workspaceDigest,
 			workspaceHead: input.workspaceHead,
 			workspaceMode: input.workspaceMode,
+			workspaceChangedPaths: input.workspaceChangedPaths ? [...input.workspaceChangedPaths] : undefined,
 			parentCandidateId: input.parentCandidateId,
+			obligationIds,
 			createdAt: this.now(),
 		};
+		candidate.impactSurfaces = deriveAvoCandidateImpactSurfaces(candidate);
 		this.state.candidates.push(candidate);
 		this.state.lineage.push({
 			lineageId: `lineage-${randomUUID()}`,
@@ -2573,6 +2880,33 @@ export class AvoStore {
 			createdAt: this.now(),
 		};
 		this.state.evaluations.push(receipt);
+		if (issuedBy === "host") {
+			const candidate = this.state.candidates.find((item) => item.candidateId === receipt.candidateId)!;
+			for (const obligation of this.state.obligations.filter(
+				(item) =>
+					item.source === "host_objective" &&
+					item.kind === "outcome" &&
+					candidate.obligationIds.includes(item.obligationId) &&
+					avoEvaluationSatisfiesObligation(receipt, item),
+			)) {
+				if (
+					this.state.obligationCoverage.some(
+						(item) => item.obligationId === obligation.obligationId && item.candidateId === candidate.candidateId,
+					)
+				) {
+					continue;
+				}
+				this.state.obligationCoverage.push({
+					coverageId: `coverage-${randomUUID()}`,
+					obligationId: obligation.obligationId,
+					candidateId: candidate.candidateId,
+					evaluationIds: [receipt.evaluationId],
+					evidenceRefs: [...receipt.evidenceRefs],
+					candidatePayloadDigest: candidate.payloadDigest,
+					recordedAt: receipt.createdAt,
+				});
+			}
+		}
 		this.state.lineage.push({
 			lineageId: `lineage-${randomUUID()}`,
 			kind: "evaluation_recorded",
@@ -3151,7 +3485,9 @@ export class AvoStore {
 		candidate: AvoCandidate,
 		evaluations: readonly AvoEvaluationReceipt[],
 	): void {
-		const evidence = evaluations.flatMap((evaluation) => evaluation.evidenceRefs).slice(0, 24);
+		const hostEvaluations = evaluations.filter((evaluation) => evaluation.issuedBy === "host");
+		const modelEvaluations = evaluations.filter((evaluation) => evaluation.issuedBy === "model");
+		const evidence = hostEvaluations.flatMap((evaluation) => evaluation.evidenceRefs).slice(0, 24);
 		const artifactReferences = (candidate.artifactPaths ?? []).slice(0, 8).flatMap((path) => {
 			const key = isAbsolute(path) ? relative(resolve(this.cwd), resolve(path)) : path;
 			return !isAbsolute(key) && isPathContained(resolve(this.cwd), resolve(this.cwd, key))
@@ -3159,14 +3495,27 @@ export class AvoStore {
 				: [];
 		});
 		const candidateResult = this.candidateMemoryResult(candidate, false);
+		const coveredObligations = this.state.obligationCoverage.filter(
+			(coverage) => coverage.candidateId === candidate.candidateId,
+		);
+		const resolvedAssumptions = this.state.criticalAssumptions.filter(
+			(assumption) =>
+				assumption.candidateId === candidate.candidateId &&
+				(assumption.status === "supported" || assumption.status === "refuted"),
+		);
 		const content = [
+			"Record type: avo_cycle_episode_v2",
 			`Cycle: ${cycle.cycleId}`,
-			`Objective: ${this.state.objective ?? "Unspecified"}`,
+			`Declared objective: ${this.state.objective ?? "Unspecified"}`,
 			candidateResult,
-			`Outcome: ${cycle.outcome}`,
-			`Evaluations: ${evaluations.map((evaluation) => `${evaluation.evaluatorId}=${evaluation.status}`).join(", ") || "none"}`,
+			`Observed cycle outcome: ${cycle.outcome}`,
+			`Observed host evaluations: ${hostEvaluations.map((evaluation) => `${evaluation.evaluatorId}=${evaluation.status}`).join(", ") || "none"}`,
+			`Recorded model-opinion evaluations (not host evidence): ${modelEvaluations.map((evaluation) => `${evaluation.evaluatorId}=${evaluation.status}`).join(", ") || "none"}`,
+			`Observed obligation coverage: ${coveredObligations.map((coverage) => coverage.obligationId).join(", ") || "none"}`,
+			`Observed critical-assumption resolutions: ${resolvedAssumptions.map((assumption) => `${assumption.assumptionId}=${assumption.status}`).join(", ") || "none"}`,
+			`Verification scope: ${this.candidateMemoryVerificationScope(candidate)}`,
 			...(cycle.failureSignature ? [`Failure or significant observation: ${cycle.failureSignature}`] : []),
-			...(evidence.length > 0 ? [`Evidence: ${evidence.join(", ")}`] : []),
+			...(evidence.length > 0 ? [`Observed evidence references: ${evidence.join(", ")}`] : []),
 		].join("\n");
 		this.recordMemory(
 			{
@@ -3176,7 +3525,7 @@ export class AvoStore {
 				scope: "project",
 				title: `${cycle.outcome[0]!.toUpperCase()}${cycle.outcome.slice(1)} ${this.state.routing.environment} cycle`,
 				content,
-				tags: [this.state.routing.environment, cycle.outcome, candidate.kind],
+				tags: [this.state.routing.environment, cycle.outcome, candidate.kind, "epistemic-separated-v2"],
 				importance: cycle.outcome === "accepted" ? 7 : 6,
 				sourceIds: [candidate.candidateId, cycle.cycleId, ...cycle.evaluationIds],
 				references: [
@@ -3202,12 +3551,22 @@ export class AvoStore {
 			return `${evidenceLabel} factual claims: ${candidate.claims!.map((claim) => claim.claimText).join(" ")}`;
 		}
 		if ((candidate.artifactPaths?.length ?? 0) > 0) {
-			return `${evidenceLabel} artifacts: ${candidate.artifactPaths!.join(", ")}`;
+			return `${evidenceLabel} artifact paths: ${candidate.artifactPaths!.join(", ")}`;
 		}
-		if (this.state.routing.environment === "coding" || this.state.routing.environment === "research") {
-			return `Candidate: ${candidate.summary}`;
+		return `${canonicalDelivery ? "Accepted" : "Declared"} candidate summary (model-authored; not empirical evidence): ${candidate.summary}`;
+	}
+
+	private candidateMemoryVerificationScope(candidate: AvoCandidate): string {
+		if (candidate.deterministicResult !== undefined) {
+			return "the host-derived deterministic result above; no broader model-authored conclusion is implied";
 		}
-		return `Candidate: ${candidate.summary} (model-authored summary; not empirical evidence)`;
+		if ((candidate.claims?.length ?? 0) > 0) {
+			return "only the separately bound factual claims and their authoritative source/verifier receipts";
+		}
+		if ((candidate.artifactPaths?.length ?? 0) > 0) {
+			return "artifact identity and digest plus the listed receipts; artifact prose or semantic completeness is not implied";
+		}
+		return "only the listed host receipts, obligation coverage, and resolved assumptions; the declared candidate summary is not a verified fact or proof of untested completeness";
 	}
 
 	private canonicalAcceptedCycle(): { candidate: AvoCandidate; cycle: AvoCycle } | undefined {
@@ -4002,7 +4361,20 @@ export class AvoStore {
 		} else if (cycleMemory.verificationState !== "verified") {
 			throw new Error("AVO completion is blocked: canonical accepted-cycle memory is not verifiable");
 		}
-		const result = this.candidateMemoryResult(acceptedCandidate, true).replace(/^Candidate: /, "Result: ");
+		const result = this.candidateMemoryResult(acceptedCandidate, true);
+		const acceptedEvaluations = this.state.evaluations.filter((evaluation) =>
+			acceptedCycle.evaluationIds.includes(evaluation.evaluationId),
+		);
+		const acceptedHostEvaluations = acceptedEvaluations.filter((evaluation) => evaluation.issuedBy === "host");
+		const acceptedModelEvaluations = acceptedEvaluations.filter((evaluation) => evaluation.issuedBy === "model");
+		const coveredObligations = this.state.obligationCoverage.filter(
+			(coverage) => coverage.candidateId === acceptedCandidate.candidateId,
+		);
+		const resolvedAssumptions = this.state.criticalAssumptions.filter(
+			(assumption) =>
+				assumption.candidateId === acceptedCandidate.candidateId &&
+				(assumption.status === "supported" || assumption.status === "refuted"),
+		);
 		this.recordMemory(
 			{
 				memoryId: `episode:task:${this.state.runId}`,
@@ -4011,14 +4383,21 @@ export class AvoStore {
 				scope: "project",
 				title: "Completed AVO task",
 				content: [
+					"Record type: avo_task_episode_v2",
 					`Task run: ${this.state.runId}`,
-					`Objective: ${this.state.objective ?? "Unspecified"}`,
+					`Declared objective: ${this.state.objective ?? "Unspecified"}`,
 					result,
-					`Cycles: ${this.state.cycles.length}`,
-					`Verification: ${this.state.verificationClass}/${this.state.verificationPolicy}`,
+					`Observed accepted cycle: ${acceptedCycle.cycleId}`,
+					`Observed host evaluations: ${acceptedHostEvaluations.map((evaluation) => `${evaluation.evaluatorId}=${evaluation.status}`).join(", ") || "none"}`,
+					`Recorded model-opinion evaluations (not host evidence): ${acceptedModelEvaluations.map((evaluation) => `${evaluation.evaluatorId}=${evaluation.status}`).join(", ") || "none"}`,
+					`Observed obligation coverage: ${coveredObligations.map((coverage) => coverage.obligationId).join(", ") || "none"}`,
+					`Observed critical-assumption resolutions: ${resolvedAssumptions.map((assumption) => `${assumption.assumptionId}=${assumption.status}`).join(", ") || "none"}`,
+					`Verification contract: ${this.state.verificationClass}/${this.state.verificationPolicy}`,
+					`Verification scope: ${this.candidateMemoryVerificationScope(acceptedCandidate)}`,
+					`Observed cycle count: ${this.state.cycles.length}`,
 					`Canonical delivery digest: ${acceptedCandidate.deliveryDigest}`,
 				].join("\n"),
-				tags: [this.state.routing.environment, "task-completed"],
+				tags: [this.state.routing.environment, "task-completed", "epistemic-separated-v2"],
 				importance: 7,
 				sourceIds: [acceptedCandidate.candidateId, acceptedCycle.cycleId, ...acceptedCycle.evaluationIds],
 				references: [

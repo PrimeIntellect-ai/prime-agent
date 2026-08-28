@@ -71,6 +71,16 @@ export {
 	parseAvoMemoryReconciliationVerifierMessage,
 	parseAvoMemoryVerifierMessage,
 } from "./memory-reasoner.js";
+export {
+	avoEvaluationEvidenceKinds,
+	avoEvaluationSatisfiesObligation,
+	avoEvaluatorMatchesRequiredEvidence,
+	deriveAvoCandidateImpactChecks,
+	deriveAvoCandidateImpactSurfaces,
+	deriveAvoCriticalAssumptionChecks,
+	deriveAvoObjectiveObligations,
+	deriveAvoObligationCoverage,
+} from "./obligations.js";
 export { AvoSessionRuntime, buildAvoRuntimePrompt } from "./runtime.js";
 export {
 	AvoStore,
@@ -80,11 +90,15 @@ export {
 	inferAvoHorizon,
 	inferAvoOnlineEvidencePolicy,
 	inferAvoVerificationPolicy,
+	parseAvoAssumptionResolutionInput,
 	parseAvoCandidateInput,
+	parseAvoCriticalAssumptionInput,
 	parseAvoCycleInput,
 	parseAvoEvaluationInput,
 	parseAvoExperimentInput,
 	parseAvoMemoryInput,
+	parseAvoObligationCoverageInput,
+	parseAvoObligationInput,
 	parseAvoTrialInput,
 	parseAvoTrialRunInput,
 } from "./store.js";
@@ -110,4 +124,5 @@ export {
 	captureAvoArtifactPathBaseline,
 	captureAvoCodingVerificationBaseline,
 	captureAvoWorkspaceSnapshot,
+	deriveAvoWorkspaceImpactPaths,
 } from "./workspace.js";

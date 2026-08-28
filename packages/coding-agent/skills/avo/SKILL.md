@@ -31,14 +31,35 @@ Never pass or request an environment override.
 
 ## Required iterative loop
 
-1. Read `verificationClass` and `verificationPolicy` from host state. For a
+1. Read `verificationClass`, `verificationPolicy`, and the host-derived
+   `obligations` from state. Before candidate work, decompose any additional
+   multi-part specification into immutable obligations with
+   `register_obligations()`. Each obligation declares the evidence kind that
+   can satisfy it (`test`, `build`, `lint`, `benchmark`, `runtime`,
+   `filesystem`, `git`, `artifact`, `external`, or `deterministic`). The host
+   already retains the full objective and every explicit checklist item, so do
+   not delete, merge away, or silently omit requirements. List every additional
+   obligation the candidate addresses in `candidate.obligation_ids`. After its
+   host evaluation passes, bind the exact receipt with
+   `cover_obligation({"obligation_id": ..., "candidate_id": ...,
+   "evaluation_ids": [...]})`. An uncovered critical obligation blocks both
+   cycle acceptance and canonical delivery.
+
+   If the approach depends on a fragile critical assumption, preregister its
+   statement, falsification plan, and evidence kind with
+   `register_critical_assumptions()` before candidate work. Run the falsification
+   check and call `resolve_critical_assumption()` with the host receipt. Open or
+   refuted critical assumptions block completion; declarations are stored
+   separately from observed results and are never treated as verified facts.
+
+2. For a
    coding task, before modifying the workspace or recording a candidate, call
    `run_coding_baseline(command)` with a recognized direct test command that
    explicitly names an unchanged baseline test file. Mutable package-script
    wrappers such as `npm test` and output-printed filenames are not identity
    proof. The host binds the explicit test identities, result, command digest,
    and original workspace to the immutable pre-candidate contract.
-2. Record a candidate with `add_candidate`. A candidate may be an answer,
+3. Record a candidate with `add_candidate`. A candidate may be an answer,
    action, artifact, patch, implementation, plan, or hypothesis. The host
    stores a digest rather than trusting a model-supplied hash. Factual answers
    must declare each verifiable statement in `claims` as
@@ -49,7 +70,14 @@ Never pass or request an environment override.
 	exponents, non-integral division, and unsafe integers fail closed. For
 	file-producing tasks, declare every intended output in `artifact_paths` and
 	make the candidate payload contain exactly those paths.
-3. For an executable check, call `run_evaluation(candidate_id, command)`. The
+   For coding candidates, the host records the exact changed paths and derives
+   `impactSurfaces`. Source changes require a trusted test; public API/schema
+   changes require both test and build evidence; configuration changes require
+   test plus build or runtime evidence; documentation changes require a direct
+   filesystem check. Inspect these surfaces in the returned candidate/state
+   and run every required evidence class. One parser test cannot certify an
+   unrelated README, schema, or configuration change.
+4. For an executable check, call `run_evaluation(candidate_id, command)`. The
    host runs one recognized direct test/build/lint/benchmark/runtime/filesystem/
    git command and creates the immutable environment receipt from its actual
    exit status and output. Shell composition is rejected. A coding test created
@@ -60,7 +88,7 @@ Never pass or request an environment override.
    proof: call `verify_deterministic_result(candidate_id)` so the host evaluates
    the expression from the active objective, or `verify_artifacts(candidate_id)`
    so the host hashes every candidate-declared, task-created artifact.
-4. For Serper `websearch` in IPython or Vertex native Google Search, take a
+5. For Serper `websearch` in IPython or Vertex native Google Search, take a
    result URL, call `fetch_external_source(url)` to inspect the host-fetched
    visible page text, then call
    `bind_url(candidate_id, claim_id, url, exact_quote)`. The host re-fetches the
@@ -75,15 +103,17 @@ Never pass or request an environment override.
    insufficient text. The host binds argument, result, source, timestamp, claim, and
    candidate digests into an external receipt. Every declared claim must have a
    `supports` receipt before a factual candidate is canonical.
-5. Use `record_evaluation` only for subjective self/reviewer judgment. It only
+6. Use `record_evaluation` only for subjective self/reviewer judgment. It only
    accepts `authority="model_opinion"`; callers cannot mint host, environment,
    or external authority.
-6. Complete the cycle with `complete_cycle`. The host derives accept/reject/
+7. Complete the cycle with `complete_cycle`. The host derives accept/reject/
    revise/inconclusive from receipts; callers cannot declare their own outcome.
-7. Inspect the checkpoint and revise. A host anti-laziness watchdog also checks
-   every blocked root turn. Only a new workspace state, immutable baseline
-   execution, fresh candidate, meaningful host pass, completed cycle,
-   host-bound experiment cell, or completed experiment resets it. Reading,
+8. Inspect the checkpoint and revise. A host anti-laziness watchdog also checks
+   every blocked root turn. Only an immutable baseline execution, meaningful
+   host pass, completed cycle, host-bound experiment cell, completed experiment,
+   newly covered obligation, or tested critical assumption resets it. A
+   workspace edit or fresh candidate by itself no longer counts as qualified
+   progress. Reading,
    narrating, repeating the same failed check, inspecting Prime internals, or
    merely saying done does not. Six consecutive tool batches without a
    milestone inject an immediate steering intervention. At blocked root-turn
@@ -92,8 +122,8 @@ Never pass or request an environment override.
    Repeatedly changing or decorating an already verified canonical delivery
    triggers a separate delivery intervention without weakening its exact bind.
    Automatic routing never lowers an active horizon.
-8. Finish only after `stop_gate()` passes. Model opinion alone cannot pass it.
-9. The host enforces this lifecycle at the root turn boundary. After an
+9. Finish only after `stop_gate()` passes. Model opinion alone cannot pass it.
+10. The host enforces this lifecycle at the root turn boundary. After an
    accepted cycle, return only its canonical delivery (general payload text,
    deterministic numeric result, or coding/research candidate summary), with
    no preface/suffix. A skipped gate or different final answer is automatically

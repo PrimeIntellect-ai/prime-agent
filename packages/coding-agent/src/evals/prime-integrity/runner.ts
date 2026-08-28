@@ -423,6 +423,10 @@ function emptyTraceSummary(): PrimeIntegrityTraceSummary {
 		toolCalls: 0,
 		candidates: 0,
 		cycles: 0,
+		obligations: 0,
+		coveredObligations: 0,
+		criticalAssumptions: 0,
+		resolvedCriticalAssumptions: 0,
 		watchdogInterventions: 0,
 		watchdogWatches: 0,
 		inputTokens: 0,
@@ -495,6 +499,9 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			const state = JSON.parse(readFileSync(statePath, "utf8")) as {
 				candidates?: unknown[];
 				cycles?: unknown[];
+				obligations?: unknown[];
+				obligationCoverage?: unknown[];
+				criticalAssumptions?: Array<{ status?: unknown }>;
 				checkpoints?: Array<{
 					status?: unknown;
 					triggeredHeuristics?: unknown;
@@ -502,6 +509,13 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			};
 			summary.candidates = Math.max(summary.candidates, state.candidates?.length ?? 0);
 			summary.cycles = Math.max(summary.cycles, state.cycles?.length ?? 0);
+			summary.obligations = Math.max(summary.obligations, state.obligations?.length ?? 0);
+			summary.coveredObligations = Math.max(summary.coveredObligations, state.obligationCoverage?.length ?? 0);
+			summary.criticalAssumptions = Math.max(summary.criticalAssumptions, state.criticalAssumptions?.length ?? 0);
+			summary.resolvedCriticalAssumptions = Math.max(
+				summary.resolvedCriticalAssumptions,
+				state.criticalAssumptions?.filter((assumption) => assumption.status !== "open").length ?? 0,
+			);
 			const checkpoints = state.checkpoints ?? [];
 			const interventions = checkpoints.filter(
 				(checkpoint) =>

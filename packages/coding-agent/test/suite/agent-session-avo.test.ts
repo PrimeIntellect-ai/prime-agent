@@ -3,10 +3,21 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { type AvoRunState, GeneralAvoAdapter } from "../../src/core/avo/index.js";
+import { AVO_HOST_REQUEST_TYPES, type AvoRunState, GeneralAvoAdapter } from "../../src/core/avo/index.js";
 import { createHarness, type Harness } from "./harness.js";
 
 describe("AgentSession universal AVO runtime", () => {
+	it("advertises every obligation and assumption bridge to the Python kernel", () => {
+		for (const type of [
+			"avo.obligations.register",
+			"avo.obligations.cover",
+			"avo.assumptions.register",
+			"avo.assumptions.resolve",
+		]) {
+			expect(AVO_HOST_REQUEST_TYPES).toContain(type);
+		}
+	});
+
 	let harness: Harness | undefined;
 
 	afterEach(() => {
@@ -509,7 +520,9 @@ describe("AgentSession universal AVO runtime", () => {
 		harness.setResponses([
 			async (context) => {
 				expect(context.systemPrompt).not.toContain("Rain imagery");
-				expect(context.systemPrompt).toContain("Candidate: Rain poem");
+				expect(context.systemPrompt).toContain(
+					"Declared candidate summary (model-authored; not empirical evidence): Rain poem",
+				);
 				await harness!.session.handleAvoHostRequest("avo.candidate.add", {
 					candidate: {
 						candidate_id: "rain-rewrite-1",
@@ -1562,7 +1575,7 @@ describe("AgentSession universal AVO runtime", () => {
 			await harness.session.handleAvoHostRequest("avo.cycle.complete", {
 				cycle: { candidate_id: "self-certifying-patch" },
 			}),
-		).toMatchObject({ cycle: { outcome: "inconclusive" } });
+		).toMatchObject({ cycle: { outcome: "revised" } });
 		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
 			stop_gate: { passed: false },
 		});
@@ -1599,7 +1612,7 @@ describe("AgentSession universal AVO runtime", () => {
 			await harness.session.handleAvoHostRequest("avo.cycle.complete", {
 				cycle: { candidate_id: "kind-bypass-diagnosis" },
 			}),
-		).toMatchObject({ cycle: { outcome: "inconclusive" } });
+		).toMatchObject({ cycle: { outcome: "revised" } });
 		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
 			stop_gate: { passed: false },
 		});
@@ -1665,7 +1678,7 @@ describe("AgentSession universal AVO runtime", () => {
 			await harness.session.handleAvoHostRequest("avo.cycle.complete", {
 				cycle: { candidate_id: "no-op-implementation" },
 			}),
-		).toMatchObject({ cycle: { outcome: "inconclusive" } });
+		).toMatchObject({ cycle: { outcome: "revised" } });
 		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
 			stop_gate: { passed: false },
 		});
@@ -1710,7 +1723,7 @@ describe("AgentSession universal AVO runtime", () => {
 			await harness.session.handleAvoHostRequest("avo.cycle.complete", {
 				cycle: { candidate_id: "revenue-answer" },
 			}),
-		).toMatchObject({ cycle: { outcome: "inconclusive" } });
+		).toMatchObject({ cycle: { outcome: "revised" } });
 		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
 			stop_gate: { passed: false },
 		});

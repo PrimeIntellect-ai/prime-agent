@@ -6,6 +6,11 @@ import {
 	digestAvoExperimentValue,
 	isAvoExperimentSelectionReservationCurrent,
 } from "./experiment.js";
+import {
+	deriveAvoCandidateImpactChecks,
+	deriveAvoCriticalAssumptionChecks,
+	deriveAvoObligationCoverage,
+} from "./obligations.js";
 import type {
 	AvoCandidate,
 	AvoDashboardProjection,
@@ -364,6 +369,11 @@ function genericProjection(
 					? 1
 					: 0;
 	const progress = genericProgress(state);
+	const latestCandidate = state.candidates.at(-1);
+	const obligationCoverage = latestCandidate ? deriveAvoObligationCoverage(state, latestCandidate) : [];
+	const coveredObligations = obligationCoverage.filter((item) => item.satisfied).length;
+	const criticalAssumptions = deriveAvoCriticalAssumptionChecks(state, latestCandidate);
+	const impactChecks = latestCandidate ? deriveAvoCandidateImpactChecks(state, latestCandidate) : [];
 	return {
 		runId: state.runId,
 		taskRunCount: state.taskRuns.length + 1,
@@ -392,6 +402,15 @@ function genericProjection(
 			},
 			{ label: "Trials", value: state.trials.length },
 			{ label: "Authoritative evals", value: progress.authoritativeEvaluations },
+			{ label: "Obligations", value: `${coveredObligations}/${state.obligations.length}` },
+			{
+				label: "Impact surfaces",
+				value: `${impactChecks.filter((item) => item.passed).length}/${impactChecks.length}`,
+			},
+			{
+				label: "Critical assumptions",
+				value: `${criticalAssumptions.filter((item) => item.passed).length}/${criticalAssumptions.length}`,
+			},
 			{
 				label: "Verified memories",
 				value: state.memories.filter((memory) => !memory.invalidatedAt && memory.verificationState === "verified")
@@ -407,11 +426,50 @@ function genericProjection(
 				id: "routing",
 				title: "Routing",
 				items: [
+					...impactChecks.map((impact) => ({
+						label: `Changed ${impact.surface.kind}`,
+						value: impact.passed
+							? `covered · ${impact.surface.paths.join(", ")} · ${impact.evidenceIds.join(", ")}`
+							: `missing ${impact.missingGroups.join(" and ")} · ${impact.surface.paths.join(", ")}`,
+						status: impact.passed ? ("ok" as const) : ("fail" as const),
+					})),
 					{ label: "Automatic adapter", value: state.routing.environment, status: "neutral" },
 					{ label: "Horizon", value: state.routing.horizon, status: "neutral" },
 					{ label: "Verification", value: state.verificationPolicy, status: "neutral" },
 					{ label: "Verification class", value: state.verificationClass, status: "neutral" },
 					{ label: "Decision", value: state.routing.reasons.join("; "), status: "neutral" },
+				],
+			},
+			{
+				id: "obligations",
+				title: "Obligations & assumptions",
+				items: [
+					...state.obligations.map((obligation) => {
+						const coverage = obligationCoverage.find(
+							(item) => item.obligation.obligationId === obligation.obligationId,
+						);
+						return {
+							label: obligation.description,
+							value: coverage?.satisfied
+								? `covered · ${coverage.evidenceIds.join(", ")}`
+								: `${obligation.source} · needs ${obligation.requiredEvidence.join(" or ")}`,
+							status: coverage?.satisfied
+								? ("ok" as const)
+								: obligation.critical
+									? ("fail" as const)
+									: ("watch" as const),
+						};
+					}),
+					...state.criticalAssumptions.map((assumption) => ({
+						label: `Assumption: ${assumption.statement}`,
+						value: `${assumption.status} · falsify with ${assumption.requiredEvidence.join(" or ")} · ${assumption.falsificationPlan}`,
+						status:
+							assumption.status === "supported"
+								? ("ok" as const)
+								: assumption.status === "refuted"
+									? ("fail" as const)
+									: ("watch" as const),
+					})),
 				],
 			},
 			{
@@ -522,6 +580,40 @@ abstract class BaseAdapter implements AvoEnvironmentAdapter {
 	}
 
 	deriveEvaluationState(candidate: AvoCandidate, receipts: readonly AvoEvaluationReceipt[], state: AvoRunState) {
+		const missingImpacts = deriveAvoCandidateImpactChecks(state, candidate).filter((item) => !item.passed);
+		if (missingImpacts.length > 0) {
+			return {
+				status: "revise" as const,
+				canonical: false,
+				reasons: missingImpacts.map(
+					(item) =>
+						`${item.surface.kind} impact is missing ${item.missingGroups.join(" and ")} evidence for ${item.surface.paths.join(", ")}`,
+				),
+			};
+		}
+		const missingObligations = deriveAvoObligationCoverage(state, candidate).filter(
+			(item) => item.obligation.critical && !item.satisfied,
+		);
+		if (missingObligations.length > 0) {
+			return {
+				status: "revise" as const,
+				canonical: false,
+				reasons: missingObligations.map(
+					(item) =>
+						`obligation ${item.obligation.obligationId} is uncovered: ${item.reason ?? "missing evidence"}`,
+				),
+			};
+		}
+		const unresolvedAssumptions = deriveAvoCriticalAssumptionChecks(state, candidate).filter((item) => !item.passed);
+		if (unresolvedAssumptions.length > 0) {
+			return {
+				status: "revise" as const,
+				canonical: false,
+				reasons: unresolvedAssumptions.map(
+					(item) => `critical assumption ${item.assumption.assumptionId}: ${item.reason ?? "unresolved"}`,
+				),
+			};
+		}
 		const experimentConstraint = this.experimentDecisionConstraint(candidate, state);
 		if (experimentConstraint) {
 			return { status: "revise" as const, canonical: false, reasons: [experimentConstraint] };
@@ -542,6 +634,9 @@ abstract class BaseAdapter implements AvoEnvironmentAdapter {
 			horizon: state.routing.horizon,
 			recent_cycles: state.cycles.slice(-8),
 			recent_evaluations: state.evaluations.slice(-16),
+			obligations: state.obligations,
+			obligation_coverage: state.obligationCoverage,
+			critical_assumptions: state.criticalAssumptions,
 			latest_checkpoint: state.checkpoints.at(-1),
 			experiments: state.experiments.slice(-8),
 			trials: state.trials.slice(-16),
@@ -612,10 +707,46 @@ abstract class BaseAdapter implements AvoEnvironmentAdapter {
 				? undefined
 				: "the host required current or explicitly requested online evidence, but no trusted search source was observed",
 		};
+		const obligationChecks = canonicalCandidate
+			? deriveAvoObligationCoverage(state, canonicalCandidate)
+					.filter((item) => item.obligation.critical)
+					.map((item) => ({
+						id: `obligation:${item.obligation.obligationId}`,
+						label: item.obligation.description,
+						passed: item.satisfied,
+						reason: item.satisfied ? undefined : item.reason,
+					}))
+			: state.obligations
+					.filter((item) => item.critical)
+					.map((item) => ({
+						id: `obligation:${item.obligationId}`,
+						label: item.description,
+						passed: false,
+						reason: "no canonical candidate covers this obligation",
+					}));
+		const assumptionChecks = deriveAvoCriticalAssumptionChecks(state, canonicalCandidate).map((item) => ({
+			id: `assumption:${item.assumption.assumptionId}`,
+			label: item.assumption.statement,
+			passed: item.passed,
+			reason: item.reason,
+		}));
+		const impactChecks = canonicalCandidate
+			? deriveAvoCandidateImpactChecks(state, canonicalCandidate).map((item) => ({
+					id: `impact:${item.surface.surfaceId}`,
+					label: `${item.surface.kind} impact verification`,
+					passed: item.passed,
+					reason: item.passed
+						? undefined
+						: `missing ${item.missingGroups.join(" and ")} evidence for ${item.surface.paths.join(", ")}`,
+				}))
+			: [];
 		const checks = [
 			...gate.checks.filter((check) => check.id !== acceptedCycleCheck.id && check.id !== onlineEvidenceCheck.id),
 			acceptedCycleCheck,
 			onlineEvidenceCheck,
+			...obligationChecks,
+			...assumptionChecks,
+			...impactChecks,
 		];
 		const reasons = checks.flatMap((check) => (!check.passed && check.reason ? [check.reason] : []));
 		return requireTrajectoryVerification(state, { passed: reasons.length === 0, checks, reasons }, canonicalCycle);

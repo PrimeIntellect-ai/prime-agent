@@ -1,5 +1,37 @@
-export const AVO_STATE_VERSION = 8;
+export const AVO_STATE_VERSION = 9;
 export const AVO_SKILL_NAME = "avo";
+export const AVO_HOST_REQUEST_TYPES = [
+	"avo.initialize",
+	"avo.get",
+	"avo.configure",
+	"avo.obligations.register",
+	"avo.obligations.cover",
+	"avo.assumptions.register",
+	"avo.assumptions.resolve",
+	"avo.candidate.add",
+	"avo.evaluation.record",
+	"avo.external.fetch",
+	"avo.verification.baseline.run",
+	"avo.evaluation.deterministic",
+	"avo.evaluation.artifacts",
+	"avo.evaluation.run",
+	"avo.evaluation.url",
+	"avo.evaluation.tool_result",
+	"avo.cycle.complete",
+	"avo.experiment.record",
+	"avo.trial.run",
+	"avo.trial.record",
+	"avo.experiment.complete",
+	"avo.results.collect",
+	"avo.memory.remember",
+	"avo.memory.recall",
+	"avo.memory.spontaneous",
+	"avo.memory.reflect",
+	"avo.memory.reflection.record",
+	"avo.checkpoint",
+	"avo.stop_gate",
+	"avo.complete",
+] as const;
 
 export const AVO_ENVIRONMENTS = ["general", "coding", "research"] as const;
 export const AVO_HORIZONS = ["direct", "iterative", "long"] as const;
@@ -39,6 +71,30 @@ export const AVO_EXPERIMENT_PAIRINGS = ["paired", "independent"] as const;
 export const AVO_EXPERIMENT_STAGES = ["screening", "confirmation"] as const;
 export const AVO_METRIC_DIRECTIONS = ["maximize", "minimize"] as const;
 export const AVO_EXPERIMENT_DECISIONS = ["promote", "retain", "inconclusive"] as const;
+export const AVO_OBLIGATION_KINDS = [
+	"outcome",
+	"functional",
+	"constraint",
+	"compatibility",
+	"documentation",
+	"verification",
+] as const;
+export const AVO_OBLIGATION_EVIDENCE_KINDS = [
+	"authoritative",
+	"test",
+	"build",
+	"lint",
+	"benchmark",
+	"runtime",
+	"filesystem",
+	"git",
+	"artifact",
+	"external",
+	"deterministic",
+	"opinion",
+] as const;
+export const AVO_OBLIGATION_SOURCES = ["host_objective", "model_preregistered"] as const;
+export const AVO_ASSUMPTION_STATUSES = ["open", "supported", "refuted"] as const;
 export const AVO_EXPERIMENT_INFERENCE_VERSION = "student_t_95_two_stage_min_effect_v2";
 export const AVO_EXPERIMENT_SELECTION_POLICY_VERSION = "project_fwer_online_bonferroni_v1";
 export const AVO_EXPERIMENT_FAMILYWISE_ALPHA = 0.05;
@@ -67,6 +123,10 @@ export type AvoExperimentPairing = (typeof AVO_EXPERIMENT_PAIRINGS)[number];
 export type AvoExperimentStage = (typeof AVO_EXPERIMENT_STAGES)[number];
 export type AvoMetricDirection = (typeof AVO_METRIC_DIRECTIONS)[number];
 export type AvoExperimentDecision = (typeof AVO_EXPERIMENT_DECISIONS)[number];
+export type AvoObligationKind = (typeof AVO_OBLIGATION_KINDS)[number];
+export type AvoObligationEvidenceKind = (typeof AVO_OBLIGATION_EVIDENCE_KINDS)[number];
+export type AvoObligationSource = (typeof AVO_OBLIGATION_SOURCES)[number];
+export type AvoAssumptionStatus = (typeof AVO_ASSUMPTION_STATUSES)[number];
 
 export interface AvoRoutingDecision {
 	environment: AvoEnvironment;
@@ -89,8 +149,53 @@ export interface AvoCandidate {
 	workspaceDigest?: string;
 	workspaceHead?: string;
 	workspaceMode?: "git" | "tree";
+	workspaceChangedPaths?: string[];
+	impactSurfaces?: AvoImpactSurface[];
 	parentCandidateId?: string;
+	obligationIds: string[];
 	createdAt: string;
+}
+
+export interface AvoImpactSurface {
+	surfaceId: string;
+	kind: "source" | "public_api" | "configuration" | "documentation";
+	paths: string[];
+	requiredEvidenceGroups: AvoObligationEvidenceKind[][];
+}
+
+export interface AvoObligation {
+	obligationId: string;
+	description: string;
+	kind: AvoObligationKind;
+	critical: boolean;
+	requiredEvidence: AvoObligationEvidenceKind[];
+	source: AvoObligationSource;
+	createdAt: string;
+}
+
+export interface AvoObligationCoverage {
+	coverageId: string;
+	obligationId: string;
+	candidateId: string;
+	evaluationIds: string[];
+	evidenceRefs: string[];
+	candidatePayloadDigest: string;
+	recordedAt: string;
+}
+
+export interface AvoCriticalAssumption {
+	assumptionId: string;
+	statement: string;
+	falsificationPlan: string;
+	requiredEvidence: AvoObligationEvidenceKind[];
+	critical: boolean;
+	status: AvoAssumptionStatus;
+	candidateId?: string;
+	candidatePayloadDigest?: string;
+	evaluationIds: string[];
+	evidenceRefs: string[];
+	createdAt: string;
+	resolvedAt?: string;
 }
 
 export interface AvoCandidateClaim {
@@ -107,6 +212,9 @@ export interface AvoVerificationBaseline {
 	kind: "coding";
 	contractDigest: string;
 	workspaceDigest: string;
+	workspaceMode?: "git" | "tree";
+	workspaceHead?: string;
+	workspacePathDigests?: Record<string, string>;
 	testFiles: AvoBaselineTestFile[];
 	userAcceptanceCommands: string[];
 	executions: AvoBaselineExecution[];
@@ -302,6 +410,9 @@ export interface AvoTaskRunArchive {
 	evaluations: AvoEvaluationReceipt[];
 	experiments: AvoExperiment[];
 	trials: AvoTrial[];
+	obligations: AvoObligation[];
+	obligationCoverage: AvoObligationCoverage[];
+	criticalAssumptions: AvoCriticalAssumption[];
 	cycles: AvoCycle[];
 	lineage: AvoLineageEntry[];
 	checkpoints: AvoCheckpoint[];
@@ -444,7 +555,37 @@ export interface AvoCandidateInput {
 	workspaceDigest?: string;
 	workspaceHead?: string;
 	workspaceMode?: "git" | "tree";
+	workspaceChangedPaths?: string[];
 	parentCandidateId?: string;
+	obligationIds?: string[];
+}
+
+export interface AvoObligationInput {
+	obligationId: string;
+	description: string;
+	kind: AvoObligationKind;
+	critical?: boolean;
+	requiredEvidence: AvoObligationEvidenceKind[];
+}
+
+export interface AvoObligationCoverageInput {
+	obligationId: string;
+	candidateId: string;
+	evaluationIds: string[];
+}
+
+export interface AvoCriticalAssumptionInput {
+	assumptionId: string;
+	statement: string;
+	falsificationPlan: string;
+	requiredEvidence: AvoObligationEvidenceKind[];
+	critical?: boolean;
+}
+
+export interface AvoAssumptionResolutionInput {
+	assumptionId: string;
+	candidateId: string;
+	evaluationIds: string[];
 }
 
 export interface AvoEvaluationInput {
@@ -553,6 +694,9 @@ export interface AvoRunState {
 	evaluations: AvoEvaluationReceipt[];
 	experiments: AvoExperiment[];
 	trials: AvoTrial[];
+	obligations: AvoObligation[];
+	obligationCoverage: AvoObligationCoverage[];
+	criticalAssumptions: AvoCriticalAssumption[];
 	cycles: AvoCycle[];
 	lineage: AvoLineageEntry[];
 	checkpoints: AvoCheckpoint[];

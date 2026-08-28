@@ -15,6 +15,8 @@ export interface AvoProgressWatchdogSnapshot {
 	cycleCount: number;
 	trialCount: number;
 	completedExperimentCount: number;
+	coveredObligationCount: number;
+	resolvedCriticalAssumptionCount: number;
 }
 
 export interface AvoProgressWatchdogAssessment {
@@ -64,24 +66,31 @@ export function deriveAvoProgressWatchdogSnapshot(
 		.filter((experiment) => experiment.status === "completed")
 		.map((experiment) => `${experiment.experimentId}:${experiment.aggregateEvaluationId ?? ""}`)
 		.sort();
+	const coveredObligationIds = state.obligationCoverage
+		.map((coverage) => `${coverage.candidateId}:${coverage.obligationId}:${coverage.candidatePayloadDigest}`)
+		.sort();
+	const resolvedCriticalAssumptionIds = state.criticalAssumptions
+		.filter((assumption) => assumption.status !== "open")
+		.map((assumption) => `${assumption.assumptionId}:${assumption.status}:${assumption.candidateId ?? ""}`)
+		.sort();
 	const hasObservableProgress =
-		workspaceChanged ||
 		baselineExecutionIds.length > 0 ||
-		candidateIdentities.length > 0 ||
 		meaningfulHostPasses.length > 0 ||
 		cycleIdentities.length > 0 ||
 		trialIdentities.length > 0 ||
-		completedExperimentIds.length > 0;
+		completedExperimentIds.length > 0 ||
+		coveredObligationIds.length > 0 ||
+		resolvedCriticalAssumptionIds.length > 0;
 	return {
 		runId: state.runId,
 		token: stableToken({
-			workspaceDigest: workspaceChanged ? observedWorkspaceDigest : undefined,
 			baselineExecutionIds,
-			candidateIdentities,
 			meaningfulHostPasses,
 			cycleIdentities,
 			trialIdentities,
 			completedExperimentIds,
+			coveredObligationIds,
+			resolvedCriticalAssumptionIds,
 		}),
 		hasObservableProgress,
 		workspaceChanged,
@@ -92,6 +101,8 @@ export function deriveAvoProgressWatchdogSnapshot(
 		cycleCount: cycleIdentities.length,
 		trialCount: trialIdentities.length,
 		completedExperimentCount: completedExperimentIds.length,
+		coveredObligationCount: coveredObligationIds.length,
+		resolvedCriticalAssumptionCount: resolvedCriticalAssumptionIds.length,
 	};
 }
 
@@ -100,16 +111,9 @@ function progressIndicators(
 	previous: AvoProgressWatchdogSnapshot | undefined,
 ): string[] {
 	const indicators: string[] = [];
-	if (
-		current.workspaceChanged &&
-		(!previous?.workspaceChanged || current.workspaceDigest !== previous.workspaceDigest)
-	) {
-		indicators.push("workspace changed from the host baseline");
-	}
 	if (current.baselineExecutionCount > (previous?.baselineExecutionCount ?? 0)) {
 		indicators.push("a meaningful immutable baseline check ran");
 	}
-	if (current.candidateCount > (previous?.candidateCount ?? 0)) indicators.push("a fresh candidate was recorded");
 	if (current.meaningfulHostPassCount > (previous?.meaningfulHostPassCount ?? 0)) {
 		indicators.push("new meaningful host evidence passed");
 	}
@@ -117,6 +121,12 @@ function progressIndicators(
 	if (current.trialCount > (previous?.trialCount ?? 0)) indicators.push("a host-bound experiment cell completed");
 	if (current.completedExperimentCount > (previous?.completedExperimentCount ?? 0)) {
 		indicators.push("a preregistered experiment completed");
+	}
+	if (current.coveredObligationCount > (previous?.coveredObligationCount ?? 0)) {
+		indicators.push("a preregistered obligation gained host-bound coverage");
+	}
+	if (current.resolvedCriticalAssumptionCount > (previous?.resolvedCriticalAssumptionCount ?? 0)) {
+		indicators.push("a critical assumption was tested against host evidence");
 	}
 	if (indicators.length === 0 && previous && current.token !== previous.token) {
 		indicators.push("host-observable task state changed");

@@ -136,6 +136,7 @@ import {
 } from "./autoresearch.js";
 import {
 	AVO_HORIZONS,
+	AVO_HOST_REQUEST_TYPES,
 	AVO_SKILL_NAME,
 	type AvoEvaluationReceipt,
 	type AvoHorizonSelection,
@@ -168,10 +169,13 @@ import {
 	combineAvoClaimEvidenceAssessments,
 	deriveAvoDeterministicArithmeticContract,
 	deriveAvoProgressWatchdogSnapshot,
+	deriveAvoWorkspaceImpactPaths,
 	digestAvoDeliveryText,
 	digestAvoPayload,
+	parseAvoAssumptionResolutionInput,
 	parseAvoCandidateInput,
 	parseAvoClaimVerifierMessage,
+	parseAvoCriticalAssumptionInput,
 	parseAvoCycleInput,
 	parseAvoEvaluationInput,
 	parseAvoExperimentInput,
@@ -180,6 +184,8 @@ import {
 	parseAvoMemoryReconcilerMessage,
 	parseAvoMemoryReconciliationVerifierMessage,
 	parseAvoMemoryVerifierMessage,
+	parseAvoObligationCoverageInput,
+	parseAvoObligationInput,
 	parseAvoSupervisorMessage,
 	parseAvoTrialInput,
 	parseAvoTrialMetricsOutput,
@@ -3790,6 +3796,7 @@ export class AgentSession {
 			`Verification class: ${state.verificationClass}`,
 			`Verification policy: ${state.verificationPolicy}`,
 			`Status: ${state.status}; cycles: ${state.cycles.length}; candidates: ${state.candidates.length}`,
+			`Obligations: ${state.obligationCoverage.length} bound coverage receipts across ${state.obligations.length} requirements; critical assumptions: ${state.criticalAssumptions.filter((item) => item.status === "supported").length}/${state.criticalAssumptions.filter((item) => item.critical).length} supported`,
 			`Final gate: ${gate.passed ? "passed" : `blocked — ${gate.reasons.join("; ")}`}`,
 		].join("\n");
 	}
@@ -3888,7 +3895,7 @@ export class AgentSession {
 		const threshold = 6;
 		if (this._avoToolNoProgressBatches < threshold || this._avoToolInterventionQueued) return;
 		this._avoToolInterventionQueued = true;
-		const reason = `Anti-laziness tool intervention: ${this._avoToolNoProgressBatches} consecutive tool batches produced no new workspace state, candidate, meaningful host pass, cycle, or experiment cell.`;
+		const reason = `Anti-laziness tool intervention: ${this._avoToolNoProgressBatches} consecutive tool batches produced no meaningful host pass, obligation coverage, tested critical assumption, completed cycle, or experiment cell.`;
 		this._avoRuntime.store.recordProgressWatchdogCheckpoint({
 			consecutiveNoProgressTurns: this._avoToolNoProgressBatches,
 			resumed: false,
@@ -4354,6 +4361,26 @@ export class AgentSession {
 			}
 			case "avo.get":
 				return { state: runtime.getState() };
+			case "avo.obligations.register": {
+				if (!Array.isArray(payload.obligations)) throw new Error("avo.obligations.register requires an array");
+				return {
+					obligations: runtime.registerObligations(payload.obligations.map(parseAvoObligationInput)),
+				};
+			}
+			case "avo.obligations.cover":
+				return { coverage: runtime.recordObligationCoverage(parseAvoObligationCoverageInput(payload.coverage)) };
+			case "avo.assumptions.register": {
+				if (!Array.isArray(payload.assumptions)) throw new Error("avo.assumptions.register requires an array");
+				return {
+					assumptions: runtime.registerCriticalAssumptions(
+						payload.assumptions.map(parseAvoCriticalAssumptionInput),
+					),
+				};
+			}
+			case "avo.assumptions.resolve":
+				return {
+					assumption: runtime.resolveCriticalAssumption(parseAvoAssumptionResolutionInput(payload.resolution)),
+				};
 			case "avo.configure": {
 				const environment = payload.environment;
 				const horizon = payload.horizon;
@@ -4375,12 +4402,14 @@ export class AgentSession {
 			case "avo.candidate.add": {
 				const candidate = parseAvoCandidateInput(payload.candidate);
 				if (runtime.getState().routing.environment === "coding") {
+					const state = runtime.getState();
 					const workspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
 						excludedRoots: this._avoWorkspaceExcludedRoots(),
 					});
 					candidate.workspaceDigest = workspace.digest;
 					candidate.workspaceHead = workspace.head;
 					candidate.workspaceMode = workspace.mode;
+					candidate.workspaceChangedPaths = deriveAvoWorkspaceImpactPaths(state.verificationBaseline, workspace);
 				}
 				return { candidate: runtime.recordCandidate(candidate) };
 			}
@@ -6351,7 +6380,7 @@ export class AgentSession {
 		) {
 			const reason =
 				assessment.action === "watch"
-					? "Anti-laziness watch: this root turn produced no new workspace change, candidate, meaningful host pass, completed cycle, or experiment cell."
+					? "Anti-laziness watch: this root turn produced no meaningful host pass, obligation coverage, tested critical assumption, completed cycle, or experiment cell."
 					: assessment.action === "delivery_intervene"
 						? `Anti-laziness delivery intervention: ${assessment.consecutiveDeliveryMismatchTurns} consecutive root turns changed or decorated the verified candidate's exact canonical delivery.`
 						: `Anti-laziness intervention: ${assessment.consecutiveNoProgressTurns} consecutive root turns produced no new host-observable progress; the next turn must change approach.`;
@@ -12379,34 +12408,7 @@ export class AgentSession {
 			}
 		}
 		if (visibleKernelSkillNames.has(AVO_SKILL_NAME)) {
-			for (const type of [
-				"avo.initialize",
-				"avo.get",
-				"avo.configure",
-				"avo.candidate.add",
-				"avo.evaluation.record",
-				"avo.external.fetch",
-				"avo.verification.baseline.run",
-				"avo.evaluation.deterministic",
-				"avo.evaluation.artifacts",
-				"avo.evaluation.run",
-				"avo.evaluation.url",
-				"avo.evaluation.tool_result",
-				"avo.cycle.complete",
-				"avo.experiment.record",
-				"avo.trial.run",
-				"avo.trial.record",
-				"avo.experiment.complete",
-				"avo.results.collect",
-				"avo.memory.remember",
-				"avo.memory.recall",
-				"avo.memory.spontaneous",
-				"avo.memory.reflect",
-				"avo.memory.reflection.record",
-				"avo.checkpoint",
-				"avo.stop_gate",
-				"avo.complete",
-			]) {
+			for (const type of AVO_HOST_REQUEST_TYPES) {
 				handlers[type] = async (payload) => this.handleAvoHostRequest(type, payload);
 			}
 		}

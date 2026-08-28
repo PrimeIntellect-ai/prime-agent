@@ -10,7 +10,7 @@ from rlm import host_request
 
 def execution_contract() -> dict[str, Any]:
     return {
-        "contract_version": 9,
+        "contract_version": 10,
         "forbid_runtime_introspection": True,
         "host_enforces_completion_and_canonical_delivery": True,
         "environments": ["general", "coding", "research"],
@@ -25,6 +25,7 @@ def execution_contract() -> dict[str, Any]:
             "subjective",
         ],
         "sequence": [
+            "preregister_obligations and critical assumptions before candidate work",
             "for coding only: run_coding_baseline before modifying the workspace",
             "add_candidate",
             (
@@ -37,6 +38,10 @@ def execution_contract() -> dict[str, Any]:
         "calls": {
             "resume": "state = (await avo.get_state())['state']",
             "candidate": "await avo.add_candidate(candidate_dict)",
+            "obligations": "await avo.register_obligations(obligation_list)",
+            "coverage": "await avo.cover_obligation(coverage_dict)",
+            "assumptions": "await avo.register_critical_assumptions(assumption_list)",
+            "assumption_resolution": "await avo.resolve_critical_assumption(resolution_dict)",
             "coding_baseline": "await avo.run_coding_baseline(command)",
             "host_evaluation": "await avo.run_evaluation(candidate_id, command)",
             "deterministic_evaluation": "await avo.verify_deterministic_result(candidate_id)",
@@ -107,6 +112,38 @@ async def get_state() -> dict[str, Any]:
 
 async def add_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     return await host_request("avo.candidate.add", {"candidate": _object(candidate, "candidate")})
+
+
+async def register_obligations(obligations: list[dict[str, Any]]) -> dict[str, Any]:
+    if not isinstance(obligations, list) or not obligations:
+        raise ValueError("obligations must be a non-empty list")
+    return await host_request(
+        "avo.obligations.register",
+        {"obligations": [_object(item, "obligation") for item in obligations]},
+    )
+
+
+async def cover_obligation(coverage: dict[str, Any]) -> dict[str, Any]:
+    return await host_request(
+        "avo.obligations.cover",
+        {"coverage": _object(coverage, "coverage")},
+    )
+
+
+async def register_critical_assumptions(assumptions: list[dict[str, Any]]) -> dict[str, Any]:
+    if not isinstance(assumptions, list) or not assumptions:
+        raise ValueError("assumptions must be a non-empty list")
+    return await host_request(
+        "avo.assumptions.register",
+        {"assumptions": [_object(item, "assumption") for item in assumptions]},
+    )
+
+
+async def resolve_critical_assumption(resolution: dict[str, Any]) -> dict[str, Any]:
+    return await host_request(
+        "avo.assumptions.resolve",
+        {"resolution": _object(resolution, "resolution")},
+    )
 
 
 async def record_evaluation(evaluation: dict[str, Any]) -> dict[str, Any]:
@@ -381,6 +418,7 @@ __all__ = [
     "complete",
     "complete_cycle",
     "complete_experiment",
+	"cover_obligation",
     "configure",
     "execution_contract",
     "fetch_external_source",
@@ -391,11 +429,14 @@ __all__ = [
     "record_evaluation",
     "record_experiment",
     "record_trial",
+	"register_critical_assumptions",
+	"register_obligations",
     "reflect_memory",
     "remember",
     "run_coding_baseline",
     "run_evaluation",
     "run_trial",
+	"resolve_critical_assumption",
     "spontaneous_recall",
     "stop_gate",
     "sync_nooa_memory",
