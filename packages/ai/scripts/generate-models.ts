@@ -24,6 +24,18 @@ import { MODELS as EXISTING_MODELS } from "../src/models.generated.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const packageRoot = join(__dirname, "..");
+const generatedModelsPath = join(packageRoot, "src/models.generated.ts");
+
+type ModelCatalogMode = "live" | "snapshot" | "live-check";
+
+function getModelCatalogMode(): ModelCatalogMode {
+	if (process.argv.includes("--check-live")) return "live-check";
+	const configured = process.env.PRIME_AGENT_MODEL_CATALOG_MODE?.trim() || "live";
+	if (configured === "live" || configured === "snapshot" || configured === "live-check") return configured;
+	throw new Error(
+		`Unknown PRIME_AGENT_MODEL_CATALOG_MODE=${JSON.stringify(configured)}; expected live, snapshot, or live-check`,
+	);
+}
 
 interface ModelsDevModel {
 	id: string;
@@ -1575,6 +1587,16 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 }
 
 async function generateModels() {
+	const catalogMode = getModelCatalogMode();
+	if (catalogMode === "snapshot") {
+		const snapshot = readFileSync(generatedModelsPath, "utf8");
+		if (!snapshot.includes("export const MODELS =")) {
+			throw new Error(`Committed model catalog snapshot ${generatedModelsPath} is invalid`);
+		}
+		console.log("Using committed src/models.generated.ts snapshot");
+		return;
+	}
+
 	// Fetch models from both sources
 	// models.dev: Anthropic, Google, OpenAI, Groq, Cerebras
 	// OpenRouter: xAI and other providers (excluding Anthropic, Google, OpenAI)
@@ -2428,9 +2450,15 @@ export const MODELS = {
 	output += `} as const;
 `;
 
-	// Write file
-	writeFileSync(join(packageRoot, "src/models.generated.ts"), output);
-	console.log("Generated src/models.generated.ts");
+	if (catalogMode === "live-check") {
+		if (readFileSync(generatedModelsPath, "utf8") !== output) {
+			throw new Error("Live provider catalogs differ from the committed src/models.generated.ts snapshot");
+		}
+		console.log("Live provider catalogs match the committed src/models.generated.ts snapshot");
+	} else {
+		writeFileSync(generatedModelsPath, output);
+		console.log("Generated src/models.generated.ts");
+	}
 
 	// Print statistics
 	const totalModels = allModels.length;
@@ -2446,4 +2474,7 @@ export const MODELS = {
 }
 
 // Run the generator
-generateModels().catch(console.error);
+generateModels().catch((error) => {
+	console.error(error);
+	process.exitCode = 1;
+});

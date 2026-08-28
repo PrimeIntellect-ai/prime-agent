@@ -64,6 +64,7 @@
 	],
 	"scripts": {
 		"clean": "shx rm -rf dist",
+		"check:models-live": "npx tsx scripts/generate-models.ts --check-live",
 		"generate-models": "npx tsx scripts/generate-models.ts",
 		"build": "npm run generate-models && tsgo -p tsconfig.build.json",
 		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
