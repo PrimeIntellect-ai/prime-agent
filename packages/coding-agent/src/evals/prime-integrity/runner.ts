@@ -428,6 +428,10 @@ function emptyTraceSummary(): PrimeIntegrityTraceSummary {
 		coveredObligations: 0,
 		obligationCoverageEvaluationCount: 0,
 		maxObligationsPerCoverageEvaluation: 0,
+		acceptedCandidateCoveredObligations: 0,
+		acceptedCandidateObligationEvidenceReceiptCount: 0,
+		acceptedCandidateMeanObligationsPerEvidenceReceipt: 0,
+		acceptedCandidateMaxObligationsPerEvidenceReceipt: 0,
 		criticalAssumptions: 0,
 		resolvedCriticalAssumptions: 0,
 		watchdogInterventions: 0,
@@ -503,9 +507,13 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 				status?: unknown;
 				taskRuns?: Array<{ status?: unknown }>;
 				candidates?: unknown[];
-				cycles?: unknown[];
+				cycles?: Array<{ candidateId?: unknown; outcome?: unknown }>;
 				obligations?: unknown[];
-				obligationCoverage?: Array<{ evaluationIds?: unknown }>;
+				obligationCoverage?: Array<{
+					candidateId?: unknown;
+					obligationId?: unknown;
+					evaluationIds?: unknown;
+				}>;
 				criticalAssumptions?: Array<{ status?: unknown }>;
 				checkpoints?: Array<{
 					status?: unknown;
@@ -537,6 +545,41 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 				summary.maxObligationsPerCoverageEvaluation,
 				...coverageByEvaluation.values(),
 			);
+			const acceptedCandidateId = state.cycles
+				?.slice()
+				.reverse()
+				.find((cycle) => cycle.outcome === "accepted" && typeof cycle.candidateId === "string")?.candidateId;
+			if (typeof acceptedCandidateId === "string") {
+				const acceptedCoverage = (state.obligationCoverage ?? []).filter(
+					(coverage) => coverage.candidateId === acceptedCandidateId,
+				);
+				const acceptedObligationIds = new Set(
+					acceptedCoverage.flatMap((coverage) =>
+						typeof coverage.obligationId === "string" ? [coverage.obligationId] : [],
+					),
+				);
+				const acceptedObligationsByEvaluation = new Map<string, Set<string>>();
+				for (const coverage of acceptedCoverage) {
+					if (typeof coverage.obligationId !== "string" || !Array.isArray(coverage.evaluationIds)) continue;
+					for (const evaluationId of coverage.evaluationIds) {
+						if (typeof evaluationId !== "string") continue;
+						const obligationIds = acceptedObligationsByEvaluation.get(evaluationId) ?? new Set<string>();
+						obligationIds.add(coverage.obligationId);
+						acceptedObligationsByEvaluation.set(evaluationId, obligationIds);
+					}
+				}
+				const receiptLoads = [...acceptedObligationsByEvaluation.values()].map(
+					(obligationIds) => obligationIds.size,
+				);
+				const bindingCount = receiptLoads.reduce((total, count) => total + count, 0);
+				if (acceptedObligationIds.size >= summary.acceptedCandidateCoveredObligations) {
+					summary.acceptedCandidateCoveredObligations = acceptedObligationIds.size;
+					summary.acceptedCandidateObligationEvidenceReceiptCount = acceptedObligationsByEvaluation.size;
+					summary.acceptedCandidateMeanObligationsPerEvidenceReceipt =
+						acceptedObligationsByEvaluation.size === 0 ? 0 : bindingCount / acceptedObligationsByEvaluation.size;
+					summary.acceptedCandidateMaxObligationsPerEvidenceReceipt = Math.max(0, ...receiptLoads);
+				}
+			}
 			summary.criticalAssumptions = Math.max(summary.criticalAssumptions, state.criticalAssumptions?.length ?? 0);
 			summary.resolvedCriticalAssumptions = Math.max(
 				summary.resolvedCriticalAssumptions,

@@ -106,8 +106,13 @@ use multiple repetitions and avoid causal claims from one pair.
 `report.json` and `report.md` compare validation success, held-out success,
 validation-to-held-out gap, completed-but-hidden-failing outcomes, tokens,
 model/tool calls, duration, cost, held-out delta against full AVO, and hidden
-benefit per extra dollar where the denominator is positive. Use
-`--condition full,no-obligations` for a smaller targeted comparison.
+benefit per extra dollar where the denominator is positive. They also report
+the accepted candidate's obligation count, unique evidence-receipt count, mean
+obligations per receipt, and maximum obligations bound to one receipt. These
+evidence-concentration values are diagnostic only: one integration receipt can
+legitimately cover several requirements, so concentration does not change the
+acceptance gate. Use `--condition full,no-obligations` for a smaller targeted
+comparison.
 
 The NOOA condition disables retrieval, injection, the sidecar, and generative
 memory reflection/reconciliation. Host episode recording remains enabled so
@@ -134,12 +139,28 @@ estimable from one pair. Full AVO created 27 obligations and 54 coverage
 records, while the ablated state contained zero of each, confirming that the
 switch changed the host path rather than only relabeling the prompt.
 
+For the accepted full-AVO candidate, the evidence-concentration trace was:
+
+| Diagnostic | Value |
+| --- | ---: |
+| Obligations | 27 |
+| Unique evidence receipts | 1 |
+| Mean obligations per receipt | 27 |
+| Maximum obligations on one receipt | 27 |
+
 The trace also exposes a limitation to test next: one broad public-suite
 receipt was reused across all 27 obligations. The ledger forced explicit
 completion accounting and additional revision cycles, but this run does not
 show that such broad receipt binding adds hidden correctness. Do not claim an
 obligation benefit until repeated multi-task pairs show a positive held-out
 delta that justifies the observed token, call, time, and cost overhead.
+
+The next obligation study should use requirement-dense, compositional tasks:
+5–10 tasks, three paired repetitions each, and only `full` versus
+`no-obligations`. Compare evidence concentration with held-out failures before
+adding a semantic receipt-to-obligation verifier. A verifier is justified only
+if repeated results show that concentrated evidence predicts missed
+requirements.
 
 ## Validated Level 1 example
 

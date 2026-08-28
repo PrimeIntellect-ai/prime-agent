@@ -148,7 +148,10 @@ export interface SpecBenchConditionSummary {
 	meanTokens: number;
 	meanModelCalls: number;
 	meanToolCalls: number;
-	meanMaxObligationsPerCoverageEvaluation: number;
+	meanObligations: number;
+	meanAcceptedCandidateObligationEvidenceReceipts: number;
+	meanAcceptedCandidateObligationsPerEvidenceReceipt: number;
+	meanAcceptedCandidateMaxObligationsPerEvidenceReceipt: number;
 	meanDurationMs: number;
 	meanCostUsd: number;
 	deltaHeldOutVsFull: number;
@@ -849,8 +852,15 @@ export function aggregateSpecBenchConditions(results: readonly SpecBenchResult[]
 			meanTokens: mean(selected.map((item) => item.trace.totalTokens)),
 			meanModelCalls: mean(selected.map((item) => item.trace.modelCalls)),
 			meanToolCalls: mean(selected.map((item) => item.trace.toolCalls)),
-			meanMaxObligationsPerCoverageEvaluation: mean(
-				selected.map((item) => item.trace.maxObligationsPerCoverageEvaluation),
+			meanObligations: mean(selected.map((item) => item.trace.obligations)),
+			meanAcceptedCandidateObligationEvidenceReceipts: mean(
+				selected.map((item) => item.trace.acceptedCandidateObligationEvidenceReceiptCount),
+			),
+			meanAcceptedCandidateObligationsPerEvidenceReceipt: mean(
+				selected.map((item) => item.trace.acceptedCandidateMeanObligationsPerEvidenceReceipt),
+			),
+			meanAcceptedCandidateMaxObligationsPerEvidenceReceipt: mean(
+				selected.map((item) => item.trace.acceptedCandidateMaxObligationsPerEvidenceReceipt),
 			),
 			meanDurationMs: mean(selected.map((item) => item.durationMs)),
 			meanCostUsd: cost,
@@ -872,7 +882,7 @@ function writeReport(
 ): void {
 	const conditions = aggregateSpecBenchConditions(results);
 	const report = {
-		schemaVersion: 2,
+		schemaVersion: 3,
 		benchmark: "WecoAI SpecBench via Prime AVO",
 		specbenchRevision,
 		provider: options.provider,
@@ -902,7 +912,7 @@ function writeReport(
 	const rows = results
 		.map(
 			(item) =>
-				`| ${item.conditionId} | ${item.repetition} | ${item.taskId} | ${(item.public.passRate * 100).toFixed(1)}% | ${(item.private.passRate * 100).toFixed(1)}% | ${(item.rewardHackingGap * 100).toFixed(1)} pp | ${item.falseCompletion ? "yes" : "no"} | ${item.trace.totalTokens.toFixed(0)} | $${item.trace.costUsd.toFixed(3)} |`,
+				`| ${item.conditionId} | ${item.repetition} | ${item.taskId} | ${(item.public.passRate * 100).toFixed(1)}% | ${(item.private.passRate * 100).toFixed(1)}% | ${(item.rewardHackingGap * 100).toFixed(1)} pp | ${item.falseCompletion ? "yes" : "no"} | ${item.trace.obligations} | ${item.trace.acceptedCandidateObligationEvidenceReceiptCount} | ${item.trace.acceptedCandidateMeanObligationsPerEvidenceReceipt.toFixed(1)} | ${item.trace.acceptedCandidateMaxObligationsPerEvidenceReceipt} | ${item.trace.totalTokens.toFixed(0)} | $${item.trace.costUsd.toFixed(3)} |`,
 		)
 		.join("\n");
 	const conditionRows = conditions
@@ -911,12 +921,12 @@ function writeReport(
 				condition.deltaHeldOutCi95Low === null || condition.deltaHeldOutCi95High === null
 					? "not estimable"
 					: `[${(condition.deltaHeldOutCi95Low * 100).toFixed(1)}, ${(condition.deltaHeldOutCi95High * 100).toFixed(1)}] pp`;
-			return `| ${condition.conditionId} | ${condition.runCount} | ${condition.pairedRunCount} | ${(condition.meanValidationPassRate * 100).toFixed(1)}% | ${(condition.meanHeldOutPassRate * 100).toFixed(1)}% | ${(condition.meanRewardHackingGap * 100).toFixed(1)} pp | ${(condition.falseCompletionRate * 100).toFixed(1)}% | ${condition.meanTokens.toFixed(0)} | ${condition.meanModelCalls.toFixed(1)} | ${condition.meanMaxObligationsPerCoverageEvaluation.toFixed(1)} | ${(condition.meanDurationMs / 1000).toFixed(1)} s | $${condition.meanCostUsd.toFixed(3)} | ${(condition.deltaHeldOutVsFull * 100).toFixed(1)} pp | ${confidence} |`;
+			return `| ${condition.conditionId} | ${condition.runCount} | ${condition.pairedRunCount} | ${(condition.meanValidationPassRate * 100).toFixed(1)}% | ${(condition.meanHeldOutPassRate * 100).toFixed(1)}% | ${(condition.meanRewardHackingGap * 100).toFixed(1)} pp | ${(condition.falseCompletionRate * 100).toFixed(1)}% | ${condition.meanTokens.toFixed(0)} | ${condition.meanModelCalls.toFixed(1)} | ${condition.meanObligations.toFixed(1)} | ${condition.meanAcceptedCandidateObligationEvidenceReceipts.toFixed(1)} | ${condition.meanAcceptedCandidateObligationsPerEvidenceReceipt.toFixed(1)} | ${condition.meanAcceptedCandidateMaxObligationsPerEvidenceReceipt.toFixed(1)} | ${(condition.meanDurationMs / 1000).toFixed(1)} s | $${condition.meanCostUsd.toFixed(3)} | ${(condition.deltaHeldOutVsFull * 100).toFixed(1)} pp | ${confidence} |`;
 		})
 		.join("\n");
 	writeFileSync(
 		join(options.outputDir, "report.md"),
-		`# WecoAI SpecBench via Prime AVO\n\nUpstream revision: \`${specbenchRevision}\`\n\nExecution-order seed: \`${options.experimentSeed}\`. Provider sampling can remain stochastic; use multiple repetitions before causal claims. Deltas use only task/repetition pairs present in both the condition and full AVO.\n\n## Conditions\n\n| Condition | Runs | Paired | Validation | Held-out | Gap | False completion | Tokens | Model calls | Max obligations/receipt | Time | Cost | Held-out Δ vs full | Student-t 95% CI |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n${conditionRows}\n\n## Runs\n\n| Condition | Rep | Task | Validation | Held-out | Gap | False completion | Tokens | Cost |\n| --- | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: |\n${rows}\n`,
+		`# WecoAI SpecBench via Prime AVO\n\nUpstream revision: \`${specbenchRevision}\`\n\nExecution-order seed: \`${options.experimentSeed}\`. Provider sampling can remain stochastic; use multiple repetitions before causal claims. Deltas use only task/repetition pairs present in both the condition and full AVO. Obligation evidence columns are scoped to the candidate in the latest accepted cycle; they are diagnostics, not an additional acceptance gate.\n\n## Conditions\n\n| Condition | Runs | Paired | Validation | Held-out | Gap | False completion | Tokens | Model calls | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | Time | Cost | Held-out Δ vs full | Student-t 95% CI |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n${conditionRows}\n\n## Runs\n\n| Condition | Rep | Task | Validation | Held-out | Gap | False completion | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | Tokens | Cost |\n| --- | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows}\n`,
 	);
 }
 

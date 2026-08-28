@@ -123,6 +123,10 @@ describe("Prime Integrity Eval", () => {
 				coveredObligations: 2,
 				obligationCoverageEvaluationCount: 1,
 				maxObligationsPerCoverageEvaluation: 2,
+				acceptedCandidateCoveredObligations: 2,
+				acceptedCandidateObligationEvidenceReceiptCount: 1,
+				acceptedCandidateMeanObligationsPerEvidenceReceipt: 2,
+				acceptedCandidateMaxObligationsPerEvidenceReceipt: 2,
 				criticalAssumptions: 0,
 				resolvedCriticalAssumptions: 0,
 				watchdogInterventions: 0,
@@ -163,6 +167,37 @@ describe("Prime Integrity Eval", () => {
 			meanObligationCoverage: 0.75,
 			meanCandidatesPerTask: 1,
 			meanCyclesPerTask: 1,
+		});
+	});
+
+	test("measures evidence concentration for the latest accepted candidate", () => {
+		const root = tempDirectory();
+		const avoDirectory = join(root, "session", "avo");
+		mkdirSync(avoDirectory, { recursive: true });
+		writeFileSync(
+			join(avoDirectory, "state.json"),
+			JSON.stringify({
+				obligations: [{}, {}, {}],
+				cycles: [
+					{ candidateId: "candidate-old", outcome: "revised" },
+					{ candidateId: "candidate-final", outcome: "accepted" },
+				],
+				obligationCoverage: [
+					{ candidateId: "candidate-old", obligationId: "o1", evaluationIds: ["old-receipt"] },
+					{ candidateId: "candidate-final", obligationId: "o1", evaluationIds: ["public-suite", "focused"] },
+					{ candidateId: "candidate-final", obligationId: "o2", evaluationIds: ["public-suite"] },
+					{ candidateId: "candidate-final", obligationId: "o3", evaluationIds: ["public-suite"] },
+				],
+			}),
+			"utf8",
+		);
+
+		expect(summarizePrimeIntegrityTrace([], root)).toMatchObject({
+			obligations: 3,
+			acceptedCandidateCoveredObligations: 3,
+			acceptedCandidateObligationEvidenceReceiptCount: 2,
+			acceptedCandidateMeanObligationsPerEvidenceReceipt: 2,
+			acceptedCandidateMaxObligationsPerEvidenceReceipt: 3,
 		});
 	});
 

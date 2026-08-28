@@ -49,6 +49,10 @@ export interface PrimeIntegrityTraceSummary {
 	coveredObligations: number;
 	obligationCoverageEvaluationCount: number;
 	maxObligationsPerCoverageEvaluation: number;
+	acceptedCandidateCoveredObligations: number;
+	acceptedCandidateObligationEvidenceReceiptCount: number;
+	acceptedCandidateMeanObligationsPerEvidenceReceipt: number;
+	acceptedCandidateMaxObligationsPerEvidenceReceipt: number;
 	criticalAssumptions: number;
 	resolvedCriticalAssumptions: number;
 	watchdogInterventions: number;
