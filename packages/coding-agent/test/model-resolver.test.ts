@@ -1,5 +1,5 @@
 import type { Model } from "@earendil-works/pi-ai";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
 	defaultModelPerProvider,
 	findInitialModel,
@@ -96,10 +96,39 @@ describe("resolveModelScopeFromModels", () => {
 		expect(result).toEqual([{ model: mockOpenRouterModels[0], thinkingLevel: "high" }]);
 	});
 
-	test("keeps the model and drops an invalid thinking suffix", () => {
-		const result = resolveModelScopeFromModels(["sonnet:random"], allModels);
+	test("keeps the model, warns, and drops an invalid thinking suffix", () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const result = resolveModelScopeFromModels(["sonnet:random"], allModels);
 
-		expect(result).toEqual([{ model: mockModels[0], thinkingLevel: undefined }]);
+			expect(result).toEqual([{ model: mockModels[0], thinkingLevel: undefined }]);
+			expect(warn).toHaveBeenCalledWith(expect.stringContaining('Invalid thinking level "random"'));
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	test("preserves provider-qualified selections when model names overlap", () => {
+		const primeInferenceModel: Model<"anthropic-messages"> = {
+			...mockModels[0]!,
+			id: "z-ai/glm-5.2",
+			name: "GLM 5.2",
+			provider: "prime-inference",
+			baseUrl: "https://api.pinference.ai/api/v1",
+		};
+		const huggingFaceModel: Model<"anthropic-messages"> = {
+			...primeInferenceModel,
+			id: "zai-org/GLM-5.2",
+			provider: "huggingface",
+			baseUrl: "https://router.huggingface.co/v1",
+		};
+
+		const result = resolveModelScopeFromModels(
+			["huggingface/zai-org/GLM-5.2"],
+			[primeInferenceModel, huggingFaceModel],
+		);
+
+		expect(result).toEqual([{ model: huggingFaceModel, thinkingLevel: undefined }]);
 	});
 });
 
