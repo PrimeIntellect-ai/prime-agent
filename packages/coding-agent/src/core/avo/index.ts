@@ -32,8 +32,12 @@ export {
 } from "./evaluator.js";
 export {
 	type AvoExperimentCellContract,
+	avoStudentTUpperTailProbability,
+	deriveAvoExperimentAllocatedAlpha,
 	deriveAvoExperimentCellContract,
+	deriveAvoExperimentCumulativeAlpha,
 	deriveAvoExperimentOutcome,
+	digestAvoExperimentSelectionBinding,
 	digestAvoExperimentValue,
 	normalizeAvoExperimentPlan,
 	parseAvoTrialMetricsOutput,

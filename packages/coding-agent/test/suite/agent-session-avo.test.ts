@@ -3,6 +3,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { type AvoRunState, GeneralAvoAdapter } from "../../src/core/avo/index.js";
 import { createHarness, type Harness } from "./harness.js";
 
 describe("AgentSession universal AVO runtime", () => {
@@ -791,6 +792,13 @@ describe("AgentSession universal AVO runtime", () => {
 				status: "completed",
 				plan: {
 					expectedTrials: 10,
+					selectionReservation: {
+						policyVersion: "project_fwer_online_bonferroni_v1",
+						attemptIndex: 1,
+						familywiseAlpha: 0.05,
+						allocatedAlpha: 0.025,
+						cumulativeAlpha: 0.025,
+					},
 					confirmationCandidateIdentityDigests: {
 						baseline: expect.stringMatching(/^[a-f0-9]{64}$/),
 						challenger: expect.stringMatching(/^[a-f0-9]{64}$/),
@@ -809,6 +817,13 @@ describe("AgentSession universal AVO runtime", () => {
 					experiment_stage: "confirmation",
 					minimum_paired_observations_for_promotion: 5,
 					minimum_effect_for_promotion: 5,
+					selection_policy_version: "project_fwer_online_bonferroni_v1",
+					selection_attempt_index: 1,
+					selection_familywise_alpha: 0.05,
+					selection_allocated_alpha: 0.025,
+					selection_cumulative_alpha: 0.025,
+					selection_one_sided_p_value: 0,
+					selection_passed: true,
 					decision: "promote",
 				},
 			},
@@ -819,6 +834,13 @@ describe("AgentSession universal AVO runtime", () => {
 				inferenceVersion: "student_t_95_two_stage_min_effect_v2",
 				minimumPairedObservationsForPromotion: 5,
 				requiredMinimumEffect: 5,
+				selectionEvidence: {
+					policyVersion: "project_fwer_online_bonferroni_v1",
+					attemptIndex: 1,
+					allocatedAlpha: 0.025,
+					oneSidedPValue: 0,
+					passed: true,
+				},
 				ranking: ["challenger", "baseline"],
 				candidateAggregates: [
 					{ candidateId: "baseline", metric: { count: 5, mean: 18 } },
@@ -863,7 +885,8 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 		const episode = JSON.parse((completed.memory as { content: string }).content);
 		expect(episode).toMatchObject({
-			record_type: "avo_experiment_episode_v6",
+			record_type: "avo_experiment_episode_v7",
+			experiment_id: "optimizer-confirmation",
 			declared_hypothesis: "The screened challenger improves score by at least five points.",
 			observed_trials: expect.arrayContaining([
 				expect.objectContaining({ candidate_id: "challenger", seed: "10", primary_metric: 30 }),
@@ -889,6 +912,18 @@ describe("AgentSession universal AVO runtime", () => {
 				expect.objectContaining({ kind: "champion_promoted", referenceId: "challenger" }),
 			]),
 		});
+		expect(new GeneralAvoAdapter().dashboardProjection(dashboard.state as AvoRunState).sections).toContainEqual(
+			expect.objectContaining({
+				id: "experiments",
+				items: expect.arrayContaining([
+					expect.objectContaining({
+						label: "Project selection error budget",
+						value: expect.stringContaining("attempt 1 · allocated α=0.025"),
+						status: "ok",
+					}),
+				]),
+			}),
+		);
 		expect(
 			await harness.session.handleAvoHostRequest("avo.cycle.complete", {
 				cycle: { candidate_id: "challenger" },

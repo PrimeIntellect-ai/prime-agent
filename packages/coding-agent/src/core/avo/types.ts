@@ -40,6 +40,8 @@ export const AVO_EXPERIMENT_STAGES = ["screening", "confirmation"] as const;
 export const AVO_METRIC_DIRECTIONS = ["maximize", "minimize"] as const;
 export const AVO_EXPERIMENT_DECISIONS = ["promote", "retain", "inconclusive"] as const;
 export const AVO_EXPERIMENT_INFERENCE_VERSION = "student_t_95_two_stage_min_effect_v2";
+export const AVO_EXPERIMENT_SELECTION_POLICY_VERSION = "project_fwer_online_bonferroni_v1";
+export const AVO_EXPERIMENT_FAMILYWISE_ALPHA = 0.05;
 export const AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION = 5;
 
 export type AvoEnvironment = (typeof AVO_ENVIRONMENTS)[number];
@@ -168,6 +170,26 @@ export interface AvoExperimentPromotionPolicy {
 	minimumRelativeEffect: number;
 }
 
+export interface AvoExperimentSelectionReservation {
+	policyVersion: typeof AVO_EXPERIMENT_SELECTION_POLICY_VERSION;
+	familyId: string;
+	reservationId: string;
+	bindingDigest: string;
+	attemptIndex: number;
+	familywiseAlpha: number;
+	allocatedAlpha: number;
+	cumulativeAlpha: number;
+	reservedAt: string;
+}
+
+export interface AvoExperimentSelectionEvidence extends AvoExperimentSelectionReservation {
+	candidateId: string;
+	oneSidedPValue: number;
+	oneSidedConfidenceLevel: number;
+	favorableLowerBound: number;
+	passed: boolean;
+}
+
 export interface AvoExperimentPlan {
 	stage: AvoExperimentStage;
 	mode: AvoExperimentMode;
@@ -180,6 +202,7 @@ export interface AvoExperimentPlan {
 	baselineCandidateId?: string;
 	confirmationOfExperimentId?: string;
 	confirmationCandidateIdentityDigests?: Record<string, string>;
+	selectionReservation?: AvoExperimentSelectionReservation;
 	promotion: AvoExperimentPromotionPolicy;
 	expectedTrials: number;
 }
@@ -233,6 +256,7 @@ export interface AvoExperimentOutcome {
 	minimumAbsoluteEffectForPromotion: number;
 	minimumRelativeEffectForPromotion: number;
 	requiredMinimumEffect?: number;
+	selectionEvidence?: AvoExperimentSelectionEvidence;
 	primaryMetric: string;
 	metricDirection: AvoMetricDirection;
 	candidateAggregates: AvoCandidateAggregate[];

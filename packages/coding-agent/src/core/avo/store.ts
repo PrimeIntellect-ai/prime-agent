@@ -12,10 +12,14 @@ import {
 } from "./evaluator.js";
 import {
 	type AvoExperimentCellContract,
+	deriveAvoExperimentAllocatedAlpha,
 	deriveAvoExperimentCellContract,
+	deriveAvoExperimentCumulativeAlpha,
 	deriveAvoExperimentOutcome,
 	digestAvoExperimentCandidateIdentity,
+	digestAvoExperimentSelectionBinding,
 	digestAvoExperimentValue,
+	isAvoExperimentSelectionReservationCurrent,
 	normalizeAvoExperimentPlan,
 } from "./experiment.js";
 import {
@@ -23,9 +27,11 @@ import {
 	AVO_ENVIRONMENTS,
 	AVO_EVALUATION_ISSUERS,
 	AVO_EVALUATION_STATUSES,
+	AVO_EXPERIMENT_FAMILYWISE_ALPHA,
 	AVO_EXPERIMENT_INFERENCE_VERSION,
 	AVO_EXPERIMENT_MODES,
 	AVO_EXPERIMENT_PAIRINGS,
+	AVO_EXPERIMENT_SELECTION_POLICY_VERSION,
 	AVO_EXPERIMENT_STAGES,
 	AVO_EXPERIMENT_STATUSES,
 	AVO_HORIZONS,
@@ -53,7 +59,9 @@ import {
 	type AvoEvaluationReceipt,
 	type AvoExperiment,
 	type AvoExperimentInput,
+	type AvoExperimentPlan,
 	type AvoExperimentPlanInput,
+	type AvoExperimentSelectionReservation,
 	type AvoHorizon,
 	type AvoHorizonSelection,
 	type AvoMemory,
@@ -83,6 +91,52 @@ interface AvoPersistentMemoryLedger {
 	schemaVersion: 1;
 	identity: string;
 	memories: AvoMemory[];
+}
+
+interface AvoPersistentPromotionReservation extends AvoExperimentSelectionReservation {
+	sessionId: string;
+	runId: string;
+	experimentId: string;
+}
+
+interface AvoPersistentPromotionLedger {
+	schemaVersion: 1;
+	identity: string;
+	policyVersion: typeof AVO_EXPERIMENT_SELECTION_POLICY_VERSION;
+	familywiseAlpha: number;
+	reservations: AvoPersistentPromotionReservation[];
+}
+
+function promotionReservationIdentity(
+	reservation: Omit<AvoPersistentPromotionReservation, "reservationId">,
+): Omit<AvoPersistentPromotionReservation, "reservationId"> {
+	return {
+		policyVersion: reservation.policyVersion,
+		familyId: reservation.familyId,
+		bindingDigest: reservation.bindingDigest,
+		attemptIndex: reservation.attemptIndex,
+		familywiseAlpha: reservation.familywiseAlpha,
+		allocatedAlpha: reservation.allocatedAlpha,
+		cumulativeAlpha: reservation.cumulativeAlpha,
+		reservedAt: reservation.reservedAt,
+		sessionId: reservation.sessionId,
+		runId: reservation.runId,
+		experimentId: reservation.experimentId,
+	};
+}
+
+function publicPromotionReservation(reservation: AvoPersistentPromotionReservation): AvoExperimentSelectionReservation {
+	return {
+		policyVersion: reservation.policyVersion,
+		familyId: reservation.familyId,
+		reservationId: reservation.reservationId,
+		bindingDigest: reservation.bindingDigest,
+		attemptIndex: reservation.attemptIndex,
+		familywiseAlpha: reservation.familywiseAlpha,
+		allocatedAlpha: reservation.allocatedAlpha,
+		cumulativeAlpha: reservation.cumulativeAlpha,
+		reservedAt: reservation.reservedAt,
+	};
 }
 
 const memoryLedgerLockWait = new Int32Array(new SharedArrayBuffer(4));
@@ -1176,6 +1230,7 @@ export class AvoStore {
 	private readonly projectKey: string;
 	private readonly legacyProjectKey: string;
 	private readonly projectMemoryLedgerPath?: string;
+	private readonly projectPromotionLedgerPath?: string;
 	private readonly legacyProjectMemoryLedgerPath?: string;
 	private readonly globalMemoryLedgerPath?: string;
 	private readonly sessionMemoryDatabasePath?: string;
@@ -1200,6 +1255,9 @@ export class AvoStore {
 		this.projectMemoryLedgerPath = memoryRoot
 			? join(memoryRoot, "projects", this.projectKey, "canonical.json")
 			: undefined;
+		this.projectPromotionLedgerPath = memoryRoot
+			? join(memoryRoot, "projects", this.projectKey, "promotion-policy.json")
+			: undefined;
 		this.legacyProjectMemoryLedgerPath =
 			memoryRoot && this.legacyProjectKey !== this.projectKey
 				? join(memoryRoot, "projects", this.legacyProjectKey, "canonical.json")
@@ -1211,11 +1269,201 @@ export class AvoStore {
 			: undefined;
 		this.globalMemoryDatabasePath = memoryRoot ? join(memoryRoot, "global", "nooa-memory.sqlite") : undefined;
 		this.state = this.load(sessionId);
+		if (this.projectPromotionLedgerPath && existsSync(this.projectPromotionLedgerPath)) {
+			this.readPromotionLedger(this.projectPromotionLedgerPath);
+		}
 		this.mergePersistentMemories(true);
 		this.hardenLegacyExperimentMemories();
 		if (!this.loadError) {
 			this.savePersistentMemories();
 			if (this.statePath) this.save();
+		}
+	}
+
+	private readPromotionLedger(path: string): AvoPersistentPromotionLedger {
+		if (!existsSync(path)) {
+			return {
+				schemaVersion: 1,
+				identity: this.projectKey,
+				policyVersion: AVO_EXPERIMENT_SELECTION_POLICY_VERSION,
+				familywiseAlpha: AVO_EXPERIMENT_FAMILYWISE_ALPHA,
+				reservations: [],
+			};
+		}
+		try {
+			const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+			if (
+				!isRecord(parsed) ||
+				parsed.schemaVersion !== 1 ||
+				parsed.identity !== this.projectKey ||
+				parsed.policyVersion !== AVO_EXPERIMENT_SELECTION_POLICY_VERSION ||
+				parsed.familywiseAlpha !== AVO_EXPERIMENT_FAMILYWISE_ALPHA ||
+				!Array.isArray(parsed.reservations)
+			) {
+				throw new Error("schema, project identity, or selection policy does not match");
+			}
+			const reservations: AvoPersistentPromotionReservation[] = [];
+			const reservationIds = new Set<string>();
+			const taskExperimentKeys = new Set<string>();
+			for (const [index, value] of parsed.reservations.entries()) {
+				if (!isRecord(value)) throw new Error(`reservation ${index + 1} is not an object`);
+				const reservation = value as unknown as AvoPersistentPromotionReservation;
+				const attemptIndex = index + 1;
+				if (
+					reservation.policyVersion !== AVO_EXPERIMENT_SELECTION_POLICY_VERSION ||
+					reservation.familyId !== this.projectKey ||
+					reservation.attemptIndex !== attemptIndex ||
+					reservation.familywiseAlpha !== AVO_EXPERIMENT_FAMILYWISE_ALPHA ||
+					reservation.allocatedAlpha !== deriveAvoExperimentAllocatedAlpha(attemptIndex) ||
+					reservation.cumulativeAlpha !== deriveAvoExperimentCumulativeAlpha(attemptIndex) ||
+					!/^[a-f0-9]{64}$/.test(reservation.bindingDigest) ||
+					!/^[a-f0-9]{64}$/.test(reservation.reservationId) ||
+					typeof reservation.reservedAt !== "string" ||
+					reservation.reservedAt.length === 0 ||
+					typeof reservation.sessionId !== "string" ||
+					reservation.sessionId.length === 0 ||
+					typeof reservation.runId !== "string" ||
+					reservation.runId.length === 0 ||
+					typeof reservation.experimentId !== "string" ||
+					reservation.experimentId.length === 0
+				) {
+					throw new Error(`reservation ${attemptIndex} violates the immutable selection schedule`);
+				}
+				const { reservationId: _reservationId, ...withoutReservationId } = reservation;
+				void _reservationId;
+				if (
+					reservation.reservationId !==
+					digestAvoExperimentValue(promotionReservationIdentity(withoutReservationId))
+				) {
+					throw new Error(`reservation ${attemptIndex} has an invalid content digest`);
+				}
+				const taskExperimentKey = `${reservation.sessionId}\0${reservation.runId}\0${reservation.experimentId}`;
+				if (reservationIds.has(reservation.reservationId) || taskExperimentKeys.has(taskExperimentKey)) {
+					throw new Error(`reservation ${attemptIndex} duplicates an earlier project selection attempt`);
+				}
+				reservationIds.add(reservation.reservationId);
+				taskExperimentKeys.add(taskExperimentKey);
+				reservations.push(structuredClone(reservation));
+			}
+			return {
+				schemaVersion: 1,
+				identity: this.projectKey,
+				policyVersion: AVO_EXPERIMENT_SELECTION_POLICY_VERSION,
+				familywiseAlpha: AVO_EXPERIMENT_FAMILYWISE_ALPHA,
+				reservations,
+			};
+		} catch (error) {
+			throw new Error(
+				`AVO project selection ledger ${path} is invalid and was preserved: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	private writePromotionLedger(path: string, ledger: AvoPersistentPromotionLedger): void {
+		const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+		writeFileSync(temporaryPath, `${JSON.stringify(ledger, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+		renameSync(temporaryPath, path);
+	}
+
+	private reserveConfirmationSelection(
+		experimentId: string,
+		plan: NonNullable<AvoExperiment["plan"]>,
+		reservedAt: string,
+	): AvoExperimentSelectionReservation {
+		const bindingDigest = digestAvoExperimentSelectionBinding(experimentId, plan);
+		if (!this.projectPromotionLedgerPath) {
+			const attemptIndex =
+				this.allCurrentAndArchivedExperiments().filter(
+					(experiment) => experiment.plan?.stage === "confirmation" && experiment.plan.selectionReservation,
+				).length + 1;
+			const identity = promotionReservationIdentity({
+				policyVersion: AVO_EXPERIMENT_SELECTION_POLICY_VERSION,
+				familyId: digestAvoExperimentValue({ scope: "session", sessionId: this.state.sessionId }),
+				bindingDigest,
+				attemptIndex,
+				familywiseAlpha: AVO_EXPERIMENT_FAMILYWISE_ALPHA,
+				allocatedAlpha: deriveAvoExperimentAllocatedAlpha(attemptIndex),
+				cumulativeAlpha: deriveAvoExperimentCumulativeAlpha(attemptIndex),
+				reservedAt,
+				sessionId: this.state.sessionId,
+				runId: this.state.runId,
+				experimentId,
+			});
+			return publicPromotionReservation({
+				...identity,
+				reservationId: digestAvoExperimentValue(identity),
+			});
+		}
+		const path = this.projectPromotionLedgerPath;
+		mkdirSync(dirname(path), { recursive: true });
+		const release = lockMemoryLedger(path);
+		try {
+			const ledger = this.readPromotionLedger(path);
+			const existing = ledger.reservations.find(
+				(reservation) =>
+					reservation.sessionId === this.state.sessionId &&
+					reservation.runId === this.state.runId &&
+					reservation.experimentId === experimentId,
+			);
+			if (existing) {
+				if (existing.bindingDigest !== bindingDigest) {
+					throw new Error(
+						`selection attempt ${existing.attemptIndex} is already reserved for a different ${experimentId} plan`,
+					);
+				}
+				return publicPromotionReservation(existing);
+			}
+			const attemptIndex = ledger.reservations.length + 1;
+			const identity = promotionReservationIdentity({
+				policyVersion: AVO_EXPERIMENT_SELECTION_POLICY_VERSION,
+				familyId: this.projectKey,
+				bindingDigest,
+				attemptIndex,
+				familywiseAlpha: AVO_EXPERIMENT_FAMILYWISE_ALPHA,
+				allocatedAlpha: deriveAvoExperimentAllocatedAlpha(attemptIndex),
+				cumulativeAlpha: deriveAvoExperimentCumulativeAlpha(attemptIndex),
+				reservedAt,
+				sessionId: this.state.sessionId,
+				runId: this.state.runId,
+				experimentId,
+			});
+			const reservation: AvoPersistentPromotionReservation = {
+				...identity,
+				reservationId: digestAvoExperimentValue(identity),
+			};
+			ledger.reservations.push(reservation);
+			this.writePromotionLedger(path, ledger);
+			return publicPromotionReservation(reservation);
+		} finally {
+			release();
+		}
+	}
+
+	private assertConfirmationSelectionReservation(experiment: AvoExperiment): void {
+		const plan = experiment.plan;
+		if (!plan || !isAvoExperimentSelectionReservationCurrent(experiment.experimentId, plan)) {
+			throw new Error(
+				`experiment ${experiment.experimentId} lacks a current host-reserved project selection error budget`,
+			);
+		}
+		if (!this.projectPromotionLedgerPath) return;
+		const release = lockMemoryLedger(this.projectPromotionLedgerPath);
+		try {
+			const ledger = this.readPromotionLedger(this.projectPromotionLedgerPath);
+			const persisted = ledger.reservations.find(
+				(reservation) => reservation.reservationId === plan.selectionReservation!.reservationId,
+			);
+			if (
+				!persisted ||
+				digestAvoExperimentValue(publicPromotionReservation(persisted)) !==
+					digestAvoExperimentValue(plan.selectionReservation)
+			) {
+				throw new Error(
+					`experiment ${experiment.experimentId} selection reservation is absent from the canonical project ledger`,
+				);
+			}
+		} finally {
+			release();
 		}
 	}
 
@@ -1253,7 +1501,8 @@ export class AvoStore {
 						content.record_type === "avo_experiment_episode_v3" ||
 						content.record_type === "avo_experiment_episode_v4" ||
 						content.record_type === "avo_experiment_episode_v5" ||
-						content.record_type === "avo_experiment_episode_v6")
+						content.record_type === "avo_experiment_episode_v6" ||
+						content.record_type === "avo_experiment_episode_v7")
 				) {
 					hardeningTag = contentAddressed ? "legacy-experiment-inference" : "legacy-experiment-memory-id";
 					const statistics = isRecord(content.derived_statistics) ? content.derived_statistics : undefined;
@@ -1281,10 +1530,56 @@ export class AvoStore {
 					const confirmationIdentities = isRecord(statistics?.confirmationCandidateIdentityDigests)
 						? statistics.confirmationCandidateIdentityDigests
 						: undefined;
+					const selectionEvidence = isRecord(statistics?.selectionEvidence)
+						? statistics.selectionEvidence
+						: undefined;
+					const selectionReservation = isRecord(episodePlan?.selectionReservation)
+						? episodePlan.selectionReservation
+						: undefined;
+					const selectionReservationKeys = [
+						"policyVersion",
+						"familyId",
+						"reservationId",
+						"bindingDigest",
+						"attemptIndex",
+						"familywiseAlpha",
+						"allocatedAlpha",
+						"cumulativeAlpha",
+						"reservedAt",
+					] as const;
+					const selectionEvidenceReservation = selectionEvidence
+						? Object.fromEntries(selectionReservationKeys.map((key) => [key, selectionEvidence[key]]))
+						: undefined;
+					const confirmationSelectionCurrent =
+						content.record_type === "avo_experiment_episode_v7" &&
+						typeof content.experiment_id === "string" &&
+						selectionReservation !== undefined &&
+						selectionEvidence !== undefined &&
+						isAvoExperimentSelectionReservationCurrent(
+							content.experiment_id,
+							episodePlan as unknown as AvoExperimentPlan,
+						) &&
+						digestAvoExperimentValue(selectionEvidenceReservation) ===
+							digestAvoExperimentValue(selectionReservation) &&
+						selectionEvidence.policyVersion === AVO_EXPERIMENT_SELECTION_POLICY_VERSION &&
+						typeof selectionEvidence.candidateId === "string" &&
+						typeof selectionEvidence.oneSidedPValue === "number" &&
+						selectionEvidence.oneSidedPValue >= 0 &&
+						selectionEvidence.oneSidedPValue <= 1 &&
+						typeof selectionEvidence.oneSidedConfidenceLevel === "number" &&
+						typeof selectionEvidence.favorableLowerBound === "number" &&
+						typeof selectionEvidence.passed === "boolean" &&
+						(statistics?.decision !== "promote" ||
+							(selectionEvidence.passed === true &&
+								statistics.championCandidateId === selectionEvidence.candidateId));
 					const stageContractCurrent =
 						statistics?.stage === "screening"
-							? statistics.decision === "inconclusive" && statistics.championCandidateId === undefined
+							? (content.record_type === "avo_experiment_episode_v6" ||
+									content.record_type === "avo_experiment_episode_v7") &&
+								statistics.decision === "inconclusive" &&
+								statistics.championCandidateId === undefined
 							: statistics?.stage === "confirmation" &&
+								confirmationSelectionCurrent &&
 								(statistics.decision === "promote" || statistics.decision === "retain") &&
 								typeof statistics.confirmationOfExperimentId === "string" &&
 								typeof statistics.requiredMinimumEffect === "number" &&
@@ -1304,7 +1599,6 @@ export class AvoStore {
 								digestAvoExperimentValue(confirmationIdentities) ===
 									digestAvoExperimentValue(candidateIdentities);
 					currentStructuredEvidence =
-						content.record_type === "avo_experiment_episode_v6" &&
 						contentAddressed &&
 						candidateIdentitiesCurrent &&
 						statistics?.inferenceVersion === AVO_EXPERIMENT_INFERENCE_VERSION &&
@@ -2058,13 +2352,19 @@ export class AvoStore {
 			throw new Error(`experiment ${experimentId} already exists`);
 		}
 		const createdAt = this.now();
+		const title = requireString(input.title, "experiment.title");
+		const hypothesis = requireString(input.hypothesis, "experiment.hypothesis");
+		const design = requireString(input.design, "experiment.design");
 		const plan = normalizeAvoExperimentPlan(input.plan, this.state.routing.environment);
 		this.validateConfirmationPlan(plan);
+		if (plan.stage === "confirmation") {
+			plan.selectionReservation = this.reserveConfirmationSelection(experimentId, plan, createdAt);
+		}
 		const experiment: AvoExperiment = {
 			experimentId,
-			title: requireString(input.title, "experiment.title"),
-			hypothesis: requireString(input.hypothesis, "experiment.hypothesis"),
-			design: requireString(input.design, "experiment.design"),
+			title,
+			hypothesis,
+			design,
 			plan,
 			status: "planned",
 			trialIds: [],
@@ -2278,6 +2578,7 @@ export class AvoStore {
 				`experiment ${normalizedId} lacks host-bound screening candidate identities; record a new confirmation experiment`,
 			);
 		}
+		if (plan.stage === "confirmation") this.assertConfirmationSelectionReservation(experiment);
 		const expectedCells = new Map<string, AvoExperimentCellContract>();
 		for (const candidateId of plan.candidateIds) {
 			for (const condition of plan.conditions) {
@@ -2335,6 +2636,18 @@ export class AvoStore {
 					minimum_paired_observations_for_promotion: outcome.minimumPairedObservationsForPromotion,
 					minimum_effect_for_promotion: outcome.requiredMinimumEffect ?? 0,
 					decision: outcome.decision,
+					...(outcome.selectionEvidence
+						? {
+								selection_policy_version: outcome.selectionEvidence.policyVersion,
+								selection_attempt_index: outcome.selectionEvidence.attemptIndex,
+								selection_familywise_alpha: outcome.selectionEvidence.familywiseAlpha,
+								selection_allocated_alpha: outcome.selectionEvidence.allocatedAlpha,
+								selection_cumulative_alpha: outcome.selectionEvidence.cumulativeAlpha,
+								selection_one_sided_p_value: outcome.selectionEvidence.oneSidedPValue,
+								selection_favorable_lower_bound: outcome.selectionEvidence.favorableLowerBound,
+								selection_passed: outcome.selectionEvidence.passed,
+							}
+						: {}),
 					...(outcome.provisionalBestCandidateId
 						? { provisional_best_candidate_id: outcome.provisionalBestCandidateId }
 						: {}),
@@ -2356,7 +2669,8 @@ export class AvoStore {
 			}),
 		);
 		const episode = {
-			record_type: "avo_experiment_episode_v6",
+			record_type: "avo_experiment_episode_v7",
+			experiment_id: experiment.experimentId,
 			verification_semantics:
 				"declared_hypothesis and planned_design record preregistration, not empirical truth; only observed_trials and derived_statistics are host-verified evidence",
 			declared_hypothesis: experiment.hypothesis,
@@ -2879,6 +3193,7 @@ export class AvoStore {
 				const currentExperimentEpisode =
 					isRecord(parsedContent) &&
 					(parsedContent.record_type === "avo_experiment_episode_v6" ||
+						parsedContent.record_type === "avo_experiment_episode_v7" ||
 						parsedContent.record_type === "avo_research_experiment_episode_v3");
 				exactContentAddressedExperiment =
 					verificationState === "verified" &&

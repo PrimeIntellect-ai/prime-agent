@@ -1,0 +1,1 @@
+- Added a host-owned project-wide online-Bonferroni error budget for prospective AVO confirmation promotions, with durable cross-session reservations, one-sided paired Student-t decisions, dashboard trace fields, migration hardening, and long-run null simulations.

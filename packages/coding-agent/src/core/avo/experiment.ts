@@ -11,11 +11,17 @@ import type {
 	AvoExperimentOutcome,
 	AvoExperimentPlan,
 	AvoExperimentPlanInput,
+	AvoExperimentSelectionEvidence,
 	AvoMetricSummary,
 	AvoPairedComparison,
 	AvoTrial,
 } from "./types.js";
-import { AVO_EXPERIMENT_INFERENCE_VERSION, AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION } from "./types.js";
+import {
+	AVO_EXPERIMENT_FAMILYWISE_ALPHA,
+	AVO_EXPERIMENT_INFERENCE_VERSION,
+	AVO_EXPERIMENT_SELECTION_POLICY_VERSION,
+	AVO_MIN_PAIRED_OBSERVATIONS_FOR_PROMOTION,
+} from "./types.js";
 
 const RESERVED_EXPERIMENT_METRICS = new Set([
 	"candidate_payload_digest",
@@ -88,6 +94,125 @@ function studentT975CriticalValue(degreesOfFreedom: number): number {
 	);
 }
 
+function logGamma(value: number): number {
+	const coefficients = [
+		0.9999999999998099, 676.5203681218851, -1259.1392167224028, 771.3234287776531, -176.6150291621406,
+		12.507343278686905, -0.13857109526572012, 9.984369578019572e-6, 1.5056327351493116e-7,
+	] as const;
+	if (!Number.isFinite(value) || value <= 0) throw new Error("log-gamma requires a positive finite value");
+	if (value < 0.5) return Math.log(Math.PI) - Math.log(Math.sin(Math.PI * value)) - logGamma(1 - value);
+	const shifted = value - 1;
+	let series = coefficients[0];
+	for (let index = 1; index < coefficients.length; index++) {
+		series += coefficients[index]! / (shifted + index);
+	}
+	const base = shifted + coefficients.length - 1.5;
+	return 0.5 * Math.log(2 * Math.PI) + (shifted + 0.5) * Math.log(base) - base + Math.log(series);
+}
+
+function betaContinuedFraction(firstShape: number, secondShape: number, value: number): number {
+	const maximumIterations = 240;
+	const epsilon = 3e-14;
+	const floor = 1e-300;
+	const sum = firstShape + secondShape;
+	const firstPlusOne = firstShape + 1;
+	const firstMinusOne = firstShape - 1;
+	let c = 1;
+	let d = 1 - (sum * value) / firstPlusOne;
+	if (Math.abs(d) < floor) d = floor;
+	d = 1 / d;
+	let fraction = d;
+	for (let iteration = 1; iteration <= maximumIterations; iteration++) {
+		const doubled = 2 * iteration;
+		let coefficient =
+			(iteration * (secondShape - iteration) * value) / ((firstMinusOne + doubled) * (firstShape + doubled));
+		d = 1 + coefficient * d;
+		if (Math.abs(d) < floor) d = floor;
+		c = 1 + coefficient / c;
+		if (Math.abs(c) < floor) c = floor;
+		d = 1 / d;
+		fraction *= d * c;
+		coefficient =
+			-((firstShape + iteration) * (sum + iteration) * value) / ((firstShape + doubled) * (firstPlusOne + doubled));
+		d = 1 + coefficient * d;
+		if (Math.abs(d) < floor) d = floor;
+		c = 1 + coefficient / c;
+		if (Math.abs(c) < floor) c = floor;
+		d = 1 / d;
+		const delta = d * c;
+		fraction *= delta;
+		if (Math.abs(delta - 1) <= epsilon) return fraction;
+	}
+	throw new Error("Student-t probability calculation did not converge");
+}
+
+function regularizedIncompleteBeta(value: number, firstShape: number, secondShape: number): number {
+	if (value <= 0) return 0;
+	if (value >= 1) return 1;
+	const scale = Math.exp(
+		logGamma(firstShape + secondShape) -
+			logGamma(firstShape) -
+			logGamma(secondShape) +
+			firstShape * Math.log(value) +
+			secondShape * Math.log1p(-value),
+	);
+	const result =
+		value < (firstShape + 1) / (firstShape + secondShape + 2)
+			? (scale * betaContinuedFraction(firstShape, secondShape, value)) / firstShape
+			: 1 - (scale * betaContinuedFraction(secondShape, firstShape, 1 - value)) / secondShape;
+	return Math.min(1, Math.max(0, result));
+}
+
+export function avoStudentTUpperTailProbability(tStatistic: number, degreesOfFreedom: number): number {
+	if (!Number.isFinite(tStatistic)) {
+		if (tStatistic === Number.POSITIVE_INFINITY) return 0;
+		if (tStatistic === Number.NEGATIVE_INFINITY) return 1;
+		throw new Error("Student-t probability requires a numeric test statistic");
+	}
+	if (!Number.isSafeInteger(degreesOfFreedom) || degreesOfFreedom < 1) {
+		throw new Error("Student-t probability requires at least one degree of freedom");
+	}
+	if (tStatistic === 0) return 0.5;
+	const beta = regularizedIncompleteBeta(
+		degreesOfFreedom / (degreesOfFreedom + tStatistic * tStatistic),
+		degreesOfFreedom / 2,
+		0.5,
+	);
+	return tStatistic > 0 ? beta / 2 : 1 - beta / 2;
+}
+
+function studentTUpperCriticalValue(alpha: number, degreesOfFreedom: number): number {
+	if (!Number.isFinite(alpha) || alpha <= 0 || alpha >= 0.5) {
+		throw new Error("Student-t upper critical value requires alpha between zero and one half");
+	}
+	let lower = 0;
+	let upper = 1;
+	while (avoStudentTUpperTailProbability(upper, degreesOfFreedom) > alpha) {
+		upper *= 2;
+		if (!Number.isFinite(upper)) throw new Error("Student-t upper critical value could not be bounded");
+	}
+	for (let iteration = 0; iteration < 96; iteration++) {
+		const middle = (lower + upper) / 2;
+		if (avoStudentTUpperTailProbability(middle, degreesOfFreedom) > alpha) lower = middle;
+		else upper = middle;
+	}
+	return (lower + upper) / 2;
+}
+
+export function deriveAvoExperimentAllocatedAlpha(attemptIndex: number): number {
+	if (!Number.isSafeInteger(attemptIndex) || attemptIndex < 1) {
+		throw new Error("experiment selection attempt index must be a positive safe integer");
+	}
+	return AVO_EXPERIMENT_FAMILYWISE_ALPHA / (attemptIndex * (attemptIndex + 1));
+}
+
+export function deriveAvoExperimentCumulativeAlpha(attemptIndex: number): number {
+	if (!Number.isSafeInteger(attemptIndex) || attemptIndex < 1) {
+		throw new Error("experiment selection attempt index must be a positive safe integer");
+	}
+	return AVO_EXPERIMENT_FAMILYWISE_ALPHA * (attemptIndex / (attemptIndex + 1));
+}
+
 function markerSafe(value: string, label: string): string {
 	const normalized = value.trim();
 	if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(normalized)) {
@@ -133,6 +258,35 @@ function stableJson(value: unknown): string {
 
 export function digestAvoExperimentValue(value: unknown): string {
 	return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+export function digestAvoExperimentSelectionBinding(experimentId: string, plan: AvoExperimentPlan): string {
+	const { selectionReservation, ...boundPlan } = plan;
+	void selectionReservation;
+	return digestAvoExperimentValue({ experimentId, plan: boundPlan });
+}
+
+function approximatelyEqual(left: number, right: number): boolean {
+	return Math.abs(left - right) <= Number.EPSILON * 16 * Math.max(1, Math.abs(left), Math.abs(right));
+}
+
+export function isAvoExperimentSelectionReservationCurrent(experimentId: string, plan: AvoExperimentPlan): boolean {
+	const reservation = plan.selectionReservation;
+	if (!reservation) return false;
+	return (
+		reservation.policyVersion === AVO_EXPERIMENT_SELECTION_POLICY_VERSION &&
+		/^[a-f0-9]{64}$/.test(reservation.familyId) &&
+		/^[a-f0-9]{64}$/.test(reservation.reservationId) &&
+		/^[a-f0-9]{64}$/.test(reservation.bindingDigest) &&
+		Number.isSafeInteger(reservation.attemptIndex) &&
+		reservation.attemptIndex >= 1 &&
+		approximatelyEqual(reservation.familywiseAlpha, AVO_EXPERIMENT_FAMILYWISE_ALPHA) &&
+		approximatelyEqual(reservation.allocatedAlpha, deriveAvoExperimentAllocatedAlpha(reservation.attemptIndex)) &&
+		approximatelyEqual(reservation.cumulativeAlpha, deriveAvoExperimentCumulativeAlpha(reservation.attemptIndex)) &&
+		reservation.bindingDigest === digestAvoExperimentSelectionBinding(experimentId, plan) &&
+		typeof reservation.reservedAt === "string" &&
+		reservation.reservedAt.length > 0
+	);
 }
 
 export function digestAvoExperimentCandidateIdentity(candidate: AvoCandidate): string {
@@ -455,12 +609,45 @@ function observationKey(candidateId: string, conditionId: string | undefined, se
 	return digestAvoExperimentValue([candidateId, conditionId ?? null, seed ?? null]);
 }
 
+function deriveSelectionEvidence(
+	comparison: AvoPairedComparison,
+	requiredMinimumEffect: number,
+	plan: AvoExperimentPlan,
+): AvoExperimentSelectionEvidence {
+	const reservation = plan.selectionReservation!;
+	const standardError = comparison.delta.standardDeviation / Math.sqrt(comparison.delta.count);
+	const testStatistic =
+		standardError === 0
+			? comparison.favorableMean > requiredMinimumEffect
+				? Number.POSITIVE_INFINITY
+				: Number.NEGATIVE_INFINITY
+			: (comparison.favorableMean - requiredMinimumEffect) / standardError;
+	const oneSidedPValue = avoStudentTUpperTailProbability(testStatistic, comparison.delta.ci95DegreesOfFreedom);
+	const criticalValue = studentTUpperCriticalValue(reservation.allocatedAlpha, comparison.delta.ci95DegreesOfFreedom);
+	const favorableLowerBound =
+		standardError === 0 ? comparison.favorableMean : comparison.favorableMean - criticalValue * standardError;
+	return {
+		...structuredClone(reservation),
+		candidateId: comparison.candidateId,
+		oneSidedPValue,
+		oneSidedConfidenceLevel: 1 - reservation.allocatedAlpha,
+		favorableLowerBound,
+		passed:
+			comparison.delta.count >= plan.promotion.minimumPairedObservations &&
+			oneSidedPValue <= reservation.allocatedAlpha &&
+			favorableLowerBound > requiredMinimumEffect,
+	};
+}
+
 export function deriveAvoExperimentOutcome(
 	experiment: AvoExperiment,
 	trials: readonly AvoTrial[],
 ): AvoExperimentOutcome {
 	const plan = experiment.plan;
 	if (!plan) throw new Error(`experiment ${experiment.experimentId} has no structured plan`);
+	if (plan.stage === "confirmation" && !isAvoExperimentSelectionReservationCurrent(experiment.experimentId, plan)) {
+		throw new Error("confirmation experiment lacks a current host-reserved project selection error budget");
+	}
 	const valuesByCandidate = new Map<string, number[]>();
 	for (const candidateId of plan.candidateIds) valuesByCandidate.set(candidateId, []);
 	for (const trial of trials) {
@@ -587,6 +774,7 @@ export function deriveAvoExperimentOutcome(
 			? "screening ranked a provisional best candidate; host promotion requires a fresh two-candidate confirmation experiment"
 			: "a single-candidate screening experiment cannot issue a champion decision";
 	let requiredMinimumEffect: number | undefined;
+	let selectionEvidence: AvoExperimentSelectionEvidence | undefined;
 	if (
 		plan.stage === "confirmation" &&
 		plan.candidateIds.length === 2 &&
@@ -600,6 +788,11 @@ export function deriveAvoExperimentOutcome(
 			plan.promotion.minimumAbsoluteEffect,
 			Math.abs(baselineAggregate.metric.mean) * plan.promotion.minimumRelativeEffect,
 		);
+		const challengerComparison = pairedComparisons.find(
+			(comparison) => comparison.candidateId !== plan.baselineCandidateId,
+		);
+		if (!challengerComparison) throw new Error("confirmation experiment lacks its paired challenger comparison");
+		selectionEvidence = deriveSelectionEvidence(challengerComparison, requiredMinimumEffect, plan);
 		const top = ranking[0]!;
 		if (top === plan.baselineCandidateId) {
 			championCandidateId = plan.baselineCandidateId;
@@ -616,14 +809,14 @@ export function deriveAvoExperimentOutcome(
 				championCandidateId = plan.baselineCandidateId;
 				decision = "retain";
 				reason = `the challenger has ${comparison.delta.count} paired observations; automatic promotion requires at least ${plan.promotion.minimumPairedObservations}`;
-			} else if (comparison.favorableCi95Low !== null && comparison.favorableCi95Low > requiredMinimumEffect) {
+			} else if (selectionEvidence.passed) {
 				championCandidateId = top;
 				decision = "promote";
-				reason = `the preregistered challenger cleared the Student-t 95% lower bound, ${plan.promotion.minimumPairedObservations}-pair floor, and meaningful-effect threshold ${requiredMinimumEffect}`;
+				reason = `the preregistered challenger cleared project selection attempt ${selectionEvidence.attemptIndex} at one-sided p=${selectionEvidence.oneSidedPValue} <= allocated alpha ${selectionEvidence.allocatedAlpha}, the ${plan.promotion.minimumPairedObservations}-pair floor, and meaningful-effect threshold ${requiredMinimumEffect}`;
 			} else {
 				championCandidateId = plan.baselineCandidateId;
 				decision = "retain";
-				reason = `the challenger did not clear the paired Student-t 95% lower bound above the meaningful-effect threshold ${requiredMinimumEffect}`;
+				reason = `the challenger did not clear project selection attempt ${selectionEvidence.attemptIndex}: one-sided p=${selectionEvidence.oneSidedPValue}, allocated alpha=${selectionEvidence.allocatedAlpha}, lower bound=${selectionEvidence.favorableLowerBound}, meaningful-effect threshold=${requiredMinimumEffect}`;
 			}
 		}
 	}
@@ -653,6 +846,7 @@ export function deriveAvoExperimentOutcome(
 		minimumAbsoluteEffectForPromotion: plan.promotion.minimumAbsoluteEffect,
 		minimumRelativeEffectForPromotion: plan.promotion.minimumRelativeEffect,
 		requiredMinimumEffect,
+		selectionEvidence,
 		primaryMetric: plan.primaryMetric,
 		metricDirection: plan.metricDirection,
 		candidateAggregates,

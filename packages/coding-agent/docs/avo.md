@@ -10,6 +10,23 @@ the candidate to the observed workspace and an unchanged pre-task test
 baseline. Factual work binds verbatim claims to host-observed external sources.
 Artifact and deterministic tasks use their own host checks.
 
+## Repeated experiment selection
+
+Exploratory screening may rank candidates, but it never promotes one. A
+prospective paired confirmation is the only experiment that can issue a host
+champion decision. Each confirmation reserves its project selection threshold
+before its results exist using the online-Bonferroni schedule
+`alpha_i = 0.05 / (i * (i + 1))`. The schedule sums to 0.05 over an unlimited
+number of attempts, so a new session or concurrent agent cannot repeatedly
+reuse a fresh 95% decision boundary. The host compares the paired one-sided
+Student-t p-value against the reserved alpha and still enforces the minimum
+paired-observation and meaningful-effect thresholds.
+
+This is a familywise error control for the host's stream of confirmatory
+promotion tests, not a claim that a fixed benchmark represents all future
+tasks. General-performance claims still require held-out tasks, varied task
+families, and valid paired-test assumptions.
+
 ## Live phase graph
 
 Run this in another terminal while Prime Agent is working:
@@ -67,6 +84,7 @@ under Prime's agent data directory:
 ```text
 memory/projects/<repository-sha256>/canonical.json
 memory/projects/<repository-sha256>/nooa-memory.sqlite
+memory/projects/<repository-sha256>/promotion-policy.json
 memory/global/canonical.json
 memory/global/nooa-memory.sqlite
 ```

@@ -191,10 +191,27 @@ paired deltas, win/loss/tie counts, and win rates. Screening remains
 a conservative `promote` or `retain` decision. Confidence intervals use
 two-sided Student-t critical values because
 the host estimates variance from the observed sample; a single observation has
-no estimable interval. Automatic promotion requires at least five fresh matched
-pairs and a favorable Student-t 95% lower bound above the preregistered absolute
-or relative meaningful-effect threshold. Five pairs is only the hard host floor;
-use 10-20 or more paired seeds for consequential comparisons. The verified NOOA
+no estimable interval.
+
+Automatic promotion additionally uses one project-wide online-Bonferroni
+selection budget. The host preregisters confirmation attempt `i` before any of
+its results are visible and assigns `alpha_i = 0.05 / (i * (i + 1))`; the
+infinite schedule sums to 0.05. Attempt 1 therefore preserves the former
+one-sided alpha 0.025 threshold, attempt 2 receives about 0.00833, and later
+selection becomes progressively stricter. A restart, a new Prime session, a
+renamed experiment, or a second concurrent agent does not reset the project
+counter. An abandoned confirmation still spends its reserved alpha so the model
+cannot inspect results and selectively register only a favorable attempt. The
+host promotes only when the paired one-sided Student-t p-value clears the
+reserved alpha, its corresponding lower confidence bound exceeds the
+preregistered absolute or relative meaningful-effect threshold, and the plan
+has at least five fresh matched pairs. Five pairs is only the hard host floor;
+use 10-20 or more paired seeds for consequential comparisons.
+
+This controls the host's repeated confirmation-selection false-positive budget
+under the validity assumptions of the paired tests. It does not prove global
+optimality, benchmark representativeness, independence, or memory quality. Use
+held-out tasks and varied task families when claiming general improvement. The verified NOOA
 episode stores declared hypothesis/design separately from observed trials and
 derived statistics, so declarations are never treated as empirical findings.
 Experiment episodes embed the host-derived candidate identity digests and use
@@ -255,6 +272,8 @@ are reinforced instead of copied. Project and global canonical ledgers live
 under Prime's agent data directory at
 `memory/projects/<git-identity-sha256>/canonical.json` and
 `memory/global/canonical.json`; matching NOOA SQLite indexes sit beside them.
+The non-resettable project confirmation schedule is stored under the same
+project identity in `memory/projects/<git-identity-sha256>/promotion-policy.json`.
 Task memory remains in the session artifact directory. Git subdirectories share
 one project identity; a normalized origin remote, or the repository root commit
 when no remote exists, keeps that identity stable when a repository moves.

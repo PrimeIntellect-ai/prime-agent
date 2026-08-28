@@ -4,6 +4,7 @@ import {
 	deriveAvoExperimentOutcome,
 	digestAvoExperimentCandidateIdentity,
 	digestAvoExperimentValue,
+	isAvoExperimentSelectionReservationCurrent,
 } from "./experiment.js";
 import type {
 	AvoCandidate,
@@ -96,6 +97,8 @@ function isCurrentPolicyConfirmation(experiment: AvoRunState["experiments"][numb
 		!plan.confirmationOfExperimentId ||
 		!plan.confirmationCandidateIdentityDigests ||
 		!outcome.confirmationCandidateIdentityDigests ||
+		!isAvoExperimentSelectionReservationCurrent(experiment.experimentId, plan) ||
+		!outcome.selectionEvidence ||
 		plan.candidateIds.length !== 2
 	) {
 		return false;
@@ -275,27 +278,31 @@ function experimentDashboardItems(
 		});
 	}
 	for (const comparison of outcome?.pairedComparisons ?? []) {
+		const selectionEvidence =
+			outcome?.selectionEvidence?.candidateId === comparison.candidateId ? outcome.selectionEvidence : undefined;
 		items.push({
 			label: `Paired ${comparison.candidateId} vs ${comparison.baselineCandidateId}`,
 			value: `Δ mean ${formatDashboardNumber(comparison.delta.mean)} · ${formatDashboardConfidenceInterval(comparison.delta)} · W/L/T ${comparison.wins}/${comparison.losses}/${comparison.ties} · win rate ${formatDashboardNumber(comparison.winRate * 100)}%`,
 			status:
-				outcome?.stage === "confirmation" &&
-				currentPolicyEligible &&
-				comparison.delta.count >= outcome.minimumPairedObservationsForPromotion &&
-				comparison.favorableCi95Low !== null &&
-				comparison.favorableCi95Low > (outcome.requiredMinimumEffect ?? 0)
-					? "ok"
-					: "watch",
+				outcome?.stage === "confirmation" && currentPolicyEligible && selectionEvidence?.passed ? "ok" : "watch",
+		});
+	}
+	if (outcome?.selectionEvidence) {
+		const selection = outcome.selectionEvidence;
+		items.push({
+			label: "Project selection error budget",
+			value: `attempt ${selection.attemptIndex} · allocated α=${formatDashboardNumber(selection.allocatedAlpha)} · cumulative α=${formatDashboardNumber(selection.cumulativeAlpha)}/${formatDashboardNumber(selection.familywiseAlpha)} · one-sided p=${formatDashboardNumber(selection.oneSidedPValue)} · ${(selection.oneSidedConfidenceLevel * 100).toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}% lower bound ${formatDashboardNumber(selection.favorableLowerBound)}`,
+			status: currentPolicyEligible && selection.passed ? "ok" : "watch",
 		});
 	}
 	items.push({
 		label: "Statistical policy",
 		value: !currentPolicyEligible
-			? "superseded confirmation · missing or inconsistent current-policy candidate identity / aggregate binding"
+			? "superseded confirmation · missing or inconsistent current-policy candidate identity / aggregate / project selection-budget binding"
 			: outcome?.stage === "screening"
-				? `screening ranks only · provisional ${outcome.provisionalBestCandidateId ?? "none"} · fresh confirmation required · ${outcome.inferenceVersion}`
+				? `screening ranks only · provisional ${outcome.provisionalBestCandidateId ?? "none"} · fresh confirmation required · no project alpha spent · ${outcome.inferenceVersion}`
 				: outcome?.stage === "confirmation"
-					? `Student-t 95% lower bound must exceed ${formatDashboardNumber(outcome.requiredMinimumEffect ?? 0)} · ≥${outcome.minimumPairedObservationsForPromotion} fresh pairs · absolute ${formatDashboardNumber(outcome.minimumAbsoluteEffectForPromotion)} · relative ${formatDashboardNumber(outcome.minimumRelativeEffectForPromotion * 100)}% · ${outcome.inferenceVersion}`
+					? `project-wide online-Bonferroni selection must clear allocated α ${formatDashboardNumber(outcome.selectionEvidence?.allocatedAlpha ?? 0)} above effect ${formatDashboardNumber(outcome.requiredMinimumEffect ?? 0)} · ≥${outcome.minimumPairedObservationsForPromotion} fresh pairs · absolute ${formatDashboardNumber(outcome.minimumAbsoluteEffectForPromotion)} · relative ${formatDashboardNumber(outcome.minimumRelativeEffectForPromotion * 100)}% · ${outcome.selectionEvidence?.policyVersion ?? "missing policy"} · ${outcome.inferenceVersion}`
 					: "Legacy interval policy · rerun with a screening stage and fresh confirmatory promotion",
 		status: !currentPolicyEligible ? "watch" : outcome?.stage ? "ok" : outcome ? "watch" : "neutral",
 	});
