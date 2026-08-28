@@ -192,4 +192,31 @@ describe("interactive heartbeat management", () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it("keeps the overdue refresh deadline when subagent updates re-derive the schedule", async () => {
+		vi.useFakeTimers();
+		try {
+			// nextRunAt (00:05) is already in the past, so the 5s overdue fallback applies.
+			vi.setSystemTime(new Date("2026-01-01T00:10:00.000Z"));
+			const harness = Object.create(InteractiveMode.prototype) as HeartbeatRefreshHarness;
+			harness.heartbeatCatalog = [{ job: heartbeat() }];
+			harness.connectionState = { activeSessionId: "active-1", sessionId: "session-1" };
+			harness.subagentSnapshots = new Map();
+			harness.heartbeatManager = {};
+			harness.heartbeatManagerRefreshTimer = undefined;
+			harness.refreshHeartbeatCatalog = vi.fn(async () => {});
+
+			harness.scheduleHeartbeatManagerRefresh();
+			// Subagent snapshot updates re-derive the schedule more often than
+			// every 5s; they must not postpone the pending overdue refresh.
+			for (let i = 0; i < 5; i++) {
+				await vi.advanceTimersByTimeAsync(1_000);
+				harness.scheduleHeartbeatManagerRefresh();
+			}
+
+			expect(harness.refreshHeartbeatCatalog).toHaveBeenCalledOnce();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });

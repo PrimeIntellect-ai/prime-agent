@@ -997,6 +997,7 @@ export class InteractiveMode {
 	private heartbeatManager: HeartbeatManagerComponent | undefined;
 	private heartbeatManagerHandle: OverlayHandle | undefined;
 	private heartbeatManagerRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+	private heartbeatManagerRefreshAt: number | undefined;
 
 	// Registry of images pasted this session, keyed by the `[image #N]` marker
 	// shown to the user. Insertion-ordered; the bytes persist (bounded by
@@ -9588,10 +9589,7 @@ export class InteractiveMode {
 	}
 
 	private closeHeartbeatManager(): void {
-		if (this.heartbeatManagerRefreshTimer) {
-			clearTimeout(this.heartbeatManagerRefreshTimer);
-			this.heartbeatManagerRefreshTimer = undefined;
-		}
+		this.clearHeartbeatManagerRefreshTimer();
 		this.heartbeatManagerHandle?.hide();
 		this.heartbeatManagerHandle = undefined;
 		this.heartbeatManager = undefined;
@@ -9599,11 +9597,8 @@ export class InteractiveMode {
 	}
 
 	private scheduleHeartbeatManagerRefresh(): void {
-		if (this.heartbeatManagerRefreshTimer) {
-			clearTimeout(this.heartbeatManagerRefreshTimer);
-			this.heartbeatManagerRefreshTimer = undefined;
-		}
 		if (!this.heartbeatManager) {
+			this.clearHeartbeatManagerRefreshTimer();
 			return;
 		}
 		const nextRunAt = this.getScopedHeartbeats()
@@ -9612,18 +9607,41 @@ export class InteractiveMode {
 			.filter(Number.isFinite)
 			.sort((left, right) => left - right)[0];
 		if (nextRunAt === undefined) {
+			this.clearHeartbeatManagerRefreshTimer();
 			return;
 		}
 		const untilNextRun = nextRunAt - Date.now();
 		const delay = untilNextRun > 0 ? Math.min(60_000, untilNextRun + 250) : 5_000;
+		const refreshAt = Date.now() + delay;
+		// Subagent snapshots re-derive this schedule constantly; keep an earlier
+		// pending refresh instead of re-arming, or an overdue heartbeat's 5s
+		// fallback would be postponed for as long as children stay busy.
+		if (
+			this.heartbeatManagerRefreshTimer &&
+			this.heartbeatManagerRefreshAt !== undefined &&
+			this.heartbeatManagerRefreshAt <= refreshAt
+		) {
+			return;
+		}
+		this.clearHeartbeatManagerRefreshTimer();
+		this.heartbeatManagerRefreshAt = refreshAt;
 		this.heartbeatManagerRefreshTimer = setTimeout(() => {
 			this.heartbeatManagerRefreshTimer = undefined;
+			this.heartbeatManagerRefreshAt = undefined;
 			if (!this.heartbeatManager) {
 				return;
 			}
 			void this.refreshHeartbeatCatalog().catch(() => this.scheduleHeartbeatManagerRefresh());
 		}, delay);
 		this.heartbeatManagerRefreshTimer.unref?.();
+	}
+
+	private clearHeartbeatManagerRefreshTimer(): void {
+		if (this.heartbeatManagerRefreshTimer) {
+			clearTimeout(this.heartbeatManagerRefreshTimer);
+			this.heartbeatManagerRefreshTimer = undefined;
+		}
+		this.heartbeatManagerRefreshAt = undefined;
 	}
 
 	private async manageHeartbeat(
