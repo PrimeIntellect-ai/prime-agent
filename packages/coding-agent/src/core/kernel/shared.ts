@@ -27,9 +27,6 @@ export class KernelBusyAfterInterruptError extends Error {
 /**
  * Handles one typed request from Python code running in the kernel.
  * The returned record is delivered verbatim to the Python caller.
- *
- * The unary form is the dispatcher and registration contract; context-aware
- * handlers are declared separately below.
  */
 export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
