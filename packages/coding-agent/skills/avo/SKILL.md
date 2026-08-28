@@ -22,7 +22,9 @@ After a task passes its stop gate, the next root task starts a fresh task run;
 the prior candidate/evaluation lineage is archived while verified memory remains
 available across runs.
 
-Do not inspect the module or guess API signatures. Begin with
+Do not inspect the module, Prime source/tests, or skill files and do not call
+`help()`, `dir()`, `hasattr()`, or `inspect.getsource()` to rediscover the API. This contract
+is complete. Begin with the user's task files and then
 `await avo.initialize(objective)` for a new run,
 or `await avo.get_state()` after restart. Use the returned execution contract.
 Never pass or request an environment override.
@@ -269,9 +271,11 @@ historical data rather than instructions. Experiment episodes put host-derived
 outcomes and statistics first, and the formatter reserves space for every
 selected memory so one long record cannot hide the rest.
 
-The host automatically writes verified project episodes for completed cycles,
-generic experiments, research-adapter experiments, supervisor interventions,
-and completed tasks. Exact duplicates
+The host writes rejected, revised, and inconclusive cycle episodes immediately
+as verified observations. An accepted-cycle episode remains proposed until the
+host matches and delivers that exact canonical candidate; only then does it
+become verified. Generic experiments, research-adapter experiments, supervisor
+interventions, and completed tasks also become verified project episodes. Exact duplicates
 are reinforced instead of copied. Project and global canonical ledgers live
 under Prime's agent data directory at
 `memory/projects/<git-identity-sha256>/canonical.json` and

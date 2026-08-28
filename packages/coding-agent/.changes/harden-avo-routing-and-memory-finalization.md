@@ -1,0 +1,1 @@
+- Routed common non-negated repository-edit prompts through required coding verification, kept accepted-cycle memory provisional until canonical delivery, bound verified task memory to the currently canonical host-verified result, and discouraged weak-model AVO source introspection with a direct execution recipe.

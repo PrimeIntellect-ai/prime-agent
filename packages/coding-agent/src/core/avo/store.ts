@@ -919,6 +919,26 @@ function matchingSignals(value: string, signals: readonly string[]): string[] {
 	return signals.filter((signal) => containsSignal(value, signal));
 }
 
+function matchingUnnegatedSignals(value: string, signals: readonly string[]): string[] {
+	return signals.filter((signal) => {
+		const words = signal.toLowerCase().match(/[a-z0-9]+/g);
+		if (!words || words.length === 0) return false;
+		const pattern = new RegExp(`(?:^|[^a-z0-9])${words.join("[^a-z0-9]+")}(?:$|[^a-z0-9])`, "gi");
+		for (const match of value.matchAll(pattern)) {
+			const signalOffset = match.index + (/^[^a-z0-9]/i.test(match[0]) ? 1 : 0);
+			const prefix = value.slice(Math.max(0, signalOffset - 48), signalOffset);
+			if (
+				!/(?:\bdo\s+not|\bdon't|\bnever|\bavoid|\bwithout|\bnot\s+to|\bno\s+need\s+to)\s+(?:[a-z0-9]+\s+){0,2}$/i.test(
+					prefix,
+				)
+			) {
+				return true;
+			}
+		}
+		return false;
+	});
+}
+
 export function inferAvoEnvironment(prompt: string, cwd = ""): { environment: AvoEnvironment; reasons: string[] } {
 	const normalized = prompt.toLowerCase();
 	const researchSignals = matchingSignals(normalized, [
@@ -945,7 +965,32 @@ export function inferAvoEnvironment(prompt: string, cwd = ""): { environment: Av
 		"unit test",
 		"integration test",
 	]);
-	const codingActions = matchingSignals(normalized, ["implement", "fix", "debug", "test", "build", "refactor"]);
+	const codingActions = matchingUnnegatedSignals(normalized, [
+		"implement",
+		"fix",
+		"debug",
+		"test",
+		"build",
+		"refactor",
+	]);
+	const codingMutationActions = matchingUnnegatedSignals(normalized, [
+		"add",
+		"create",
+		"generate",
+		"update",
+		"change",
+		"modify",
+		"edit",
+		"remove",
+		"delete",
+		"rename",
+		"replace",
+		"upgrade",
+		"migrate",
+		"install",
+		"configure",
+		"document",
+	]);
 	const codingObjects = matchingSignals(normalized, [
 		"parser",
 		"function",
@@ -962,9 +1007,45 @@ export function inferAvoEnvironment(prompt: string, cwd = ""): { environment: Av
 		"software",
 		"test suite",
 	]);
+	const codingMutationObjects = matchingSignals(normalized, [
+		"readme",
+		"dashboard",
+		"dark mode",
+		"user interface",
+		"ui",
+		"button",
+		"component",
+		"endpoint",
+		"variable",
+		"method",
+		"interface",
+		"dependency",
+		"dependencies",
+		"package",
+		"web route",
+		"api route",
+		"web page",
+		"website",
+		"frontend",
+		"backend",
+		"database",
+		"schema",
+		"css",
+		"html",
+		"style",
+		"layout",
+		"configuration",
+		"config",
+		"lint",
+		"continuous integration",
+		"ci",
+	]);
 	const codingSignals = [
 		...strongCodingSignals,
 		...(codingActions.length > 0 && codingObjects.length > 0 ? [...codingActions, ...codingObjects] : []),
+		...(codingMutationActions.length > 0 && codingMutationObjects.length > 0
+			? [...codingMutationActions, ...codingMutationObjects]
+			: []),
 	];
 	const artifactSignals = normalized.match(
 		/(?:^|[\s`'"(])(?:[\w./-]+\.(?:c|cc|cpp|cs|go|java|js|jsx|kt|php|py|rb|rs|sh|sql|swift|ts|tsx|vue)|package\.json|pyproject\.toml|cargo\.toml)(?:$|[\s`'"),:])/g,
@@ -2926,9 +3007,11 @@ export class AvoStore {
 				? [{ kind: "artifact" as const, key }]
 				: [];
 		});
+		const candidateResult = this.candidateMemoryResult(candidate, false);
 		const content = [
+			`Cycle: ${cycle.cycleId}`,
 			`Objective: ${this.state.objective ?? "Unspecified"}`,
-			`Candidate: ${candidate.summary}`,
+			candidateResult,
 			`Outcome: ${cycle.outcome}`,
 			`Evaluations: ${evaluations.map((evaluation) => `${evaluation.evaluatorId}=${evaluation.status}`).join(", ") || "none"}`,
 			...(cycle.failureSignature ? [`Failure or significant observation: ${cycle.failureSignature}`] : []),
@@ -2955,8 +3038,46 @@ export class AvoStore {
 					...artifactReferences,
 				],
 			},
-			"verified",
+			cycle.outcome === "accepted" ? "proposed" : "verified",
 		);
+	}
+
+	private candidateMemoryResult(candidate: AvoCandidate, canonicalDelivery: boolean): string {
+		const evidenceLabel = canonicalDelivery ? "Verified" : "Candidate";
+		if (candidate.deterministicResult !== undefined) {
+			return `${evidenceLabel} deterministic result: ${candidate.deterministicResult}`;
+		}
+		if ((candidate.claims?.length ?? 0) > 0) {
+			return `${evidenceLabel} factual claims: ${candidate.claims!.map((claim) => claim.claimText).join(" ")}`;
+		}
+		if ((candidate.artifactPaths?.length ?? 0) > 0) {
+			return `${evidenceLabel} artifacts: ${candidate.artifactPaths!.join(", ")}`;
+		}
+		if (this.state.routing.environment === "coding" || this.state.routing.environment === "research") {
+			return `Candidate: ${candidate.summary}`;
+		}
+		return `Candidate: ${candidate.summary} (model-authored summary; not empirical evidence)`;
+	}
+
+	private canonicalAcceptedCycle(): { candidate: AvoCandidate; cycle: AvoCycle } | undefined {
+		const acceptedCandidateIds = new Set(
+			this.state.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
+		);
+		const adapter = new AvoAdapterRegistry().get(this.state.routing.environment);
+		const candidate = [...this.state.candidates].reverse().find(
+			(item) =>
+				acceptedCandidateIds.has(item.candidateId) &&
+				adapter.deriveEvaluationState(
+					item,
+					this.state.evaluations.filter((receipt) => receipt.candidateId === item.candidateId),
+					this.state,
+				).canonical,
+		);
+		if (!candidate) return undefined;
+		const cycle = [...this.state.cycles]
+			.reverse()
+			.find((item) => item.outcome === "accepted" && item.candidateId === candidate.candidateId);
+		return cycle ? { candidate, cycle } : undefined;
 	}
 
 	private applyAutomaticEscalation(cycle: AvoCycle, checkpoint: ReturnType<typeof evaluateAvoCheckpoint>): void {
@@ -3716,10 +3837,21 @@ export class AvoStore {
 
 	complete(gate: AvoStopGate = this.evaluateStopGate()): AvoRunState {
 		if (!gate.passed) throw new Error(`AVO completion is blocked: ${gate.reasons.join("; ")}`);
-		const acceptedCycle = [...this.state.cycles].reverse().find((cycle) => cycle.outcome === "accepted");
-		const acceptedCandidate = acceptedCycle
-			? this.state.candidates.find((candidate) => candidate.candidateId === acceptedCycle.candidateId)
-			: undefined;
+		const canonical = this.canonicalAcceptedCycle();
+		if (!canonical) {
+			throw new Error("AVO completion is blocked: no accepted cycle currently satisfies the verification contract");
+		}
+		const { candidate: acceptedCandidate, cycle: acceptedCycle } = canonical;
+		const cycleMemory = this.state.memories.find(
+			(memory) => memory.memoryId === `episode:${acceptedCycle.cycleId}` && !memory.invalidatedAt,
+		);
+		if (!cycleMemory) throw new Error("AVO completion is blocked: canonical accepted-cycle memory is missing");
+		if (cycleMemory.verificationState === "proposed") {
+			this.verifyProposedMemory(cycleMemory.memoryId, `canonical-delivery:${acceptedCandidate.deliveryDigest}`);
+		} else if (cycleMemory.verificationState !== "verified") {
+			throw new Error("AVO completion is blocked: canonical accepted-cycle memory is not verifiable");
+		}
+		const result = this.candidateMemoryResult(acceptedCandidate, true).replace(/^Candidate: /, "Result: ");
 		this.recordMemory(
 			{
 				memoryId: `episode:task:${this.state.runId}`,
@@ -3728,20 +3860,19 @@ export class AvoStore {
 				scope: "project",
 				title: "Completed AVO task",
 				content: [
+					`Task run: ${this.state.runId}`,
 					`Objective: ${this.state.objective ?? "Unspecified"}`,
-					`Result: ${acceptedCandidate?.summary ?? "The authoritative gate passed."}`,
+					result,
 					`Cycles: ${this.state.cycles.length}`,
 					`Verification: ${this.state.verificationClass}/${this.state.verificationPolicy}`,
+					`Canonical delivery digest: ${acceptedCandidate.deliveryDigest}`,
 				].join("\n"),
 				tags: [this.state.routing.environment, "task-completed"],
 				importance: 7,
-				sourceIds: [
-					...(acceptedCandidate ? [acceptedCandidate.candidateId] : []),
-					...(acceptedCycle ? [acceptedCycle.cycleId, ...acceptedCycle.evaluationIds] : []),
-				],
+				sourceIds: [acceptedCandidate.candidateId, acceptedCycle.cycleId, ...acceptedCycle.evaluationIds],
 				references: [
 					{ kind: "task", key: this.state.runId },
-					...(acceptedCycle ? [{ kind: "cycle" as const, key: acceptedCycle.cycleId }] : []),
+					{ kind: "cycle", key: acceptedCycle.cycleId },
 				],
 			},
 			"verified",

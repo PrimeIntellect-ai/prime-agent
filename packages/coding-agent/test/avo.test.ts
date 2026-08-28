@@ -2359,6 +2359,9 @@ describe("generic AVO core", () => {
 		});
 		runtime.completeCycle({ candidateId: candidate.candidateId });
 		expect(runtime.evaluateStopGate().passed).toBe(true);
+		expect(runtime.getState().memories).toContainEqual(
+			expect.objectContaining({ title: "Accepted general cycle", verificationState: "proposed" }),
+		);
 
 		runtime.observeRootPrompt("Explain photosynthesis");
 		expect(runtime.getState()).toMatchObject({
@@ -2366,6 +2369,131 @@ describe("generic AVO core", () => {
 			objective: "Write a poem about rain",
 			taskRuns: [],
 		});
+	});
+
+	test("verifies only the accepted cycle that remains canonical at delivery", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-canonical-cycle-memory", clock());
+		runtime.observeRootPrompt("Write a poem about rain");
+		const first = runtime.recordCandidate({ kind: "answer", summary: "First rain poem", payload: "Rain sings." });
+		runtime.recordEvaluation({
+			candidateId: first.candidateId,
+			evaluatorId: "subjective_review",
+			status: "pass",
+			authority: "model_opinion",
+			evidenceRefs: [],
+			metrics: { reviewed: true },
+		});
+		const firstCycle = runtime.completeCycle({ candidateId: first.candidateId }).cycle;
+		const second = runtime.recordCandidate({
+			kind: "answer",
+			summary: "Second rain poem",
+			payload: "Rain dances.",
+		});
+		runtime.recordEvaluation({
+			candidateId: second.candidateId,
+			evaluatorId: "subjective_review",
+			status: "pass",
+			authority: "model_opinion",
+			evidenceRefs: [],
+			metrics: { reviewed: true },
+		});
+		const secondCycle = runtime.completeCycle({ candidateId: second.candidateId }).cycle;
+		runtime.recordHostEvaluation({
+			candidateId: second.candidateId,
+			evaluatorId: "candidate_integrity",
+			status: "revise",
+			authority: "host",
+			evidenceRefs: ["host:integrity:changed"],
+			metrics: { meaningful: false, candidate_payload_digest: second.payloadDigest },
+		});
+
+		expect(runtime.evaluateStopGate().passed).toBe(true);
+		runtime.complete();
+		const state = runtime.getState();
+		expect(state.memories.find((memory) => memory.memoryId === `episode:${firstCycle.cycleId}`)).toMatchObject({
+			verificationState: "verified",
+		});
+		expect(state.memories.find((memory) => memory.memoryId === `episode:${secondCycle.cycleId}`)).toMatchObject({
+			verificationState: "proposed",
+		});
+		expect(state.memories.find((memory) => memory.title === "Completed AVO task")).toMatchObject({
+			content: expect.stringContaining("Result: First rain poem"),
+			sourceIds: expect.arrayContaining([first.candidateId, firstCycle.cycleId]),
+		});
+		expect(
+			runtime.store
+				.recall("second rain poem", ["general"], 8, { channel: "spontaneous" })
+				.map((memory) => memory.memoryId),
+		).not.toContain(`episode:${secondCycle.cycleId}`);
+	});
+
+	test("stores the host-verified deterministic result instead of a model summary", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-deterministic-memory", clock());
+		runtime.observeRootPrompt("Calculate 2+2 exactly");
+		const candidate = runtime.recordCandidate({
+			kind: "answer",
+			summary: "The answer is 5",
+			payload: { result: 4 },
+		});
+		runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "deterministic_result",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:deterministic:2+2=4"],
+			metrics: {
+				meaningful: true,
+				candidate_result_matches_objective: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		const cycle = runtime.completeCycle({ candidateId: candidate.candidateId }).cycle;
+		runtime.complete();
+		const memories = runtime
+			.getState()
+			.memories.filter(
+				(memory) => memory.memoryId === `episode:${cycle.cycleId}` || memory.title === "Completed AVO task",
+			);
+		expect(memories).toHaveLength(2);
+		expect(memories.find((memory) => memory.memoryId === `episode:${cycle.cycleId}`)?.content).toContain(
+			"Candidate deterministic result: 4",
+		);
+		expect(memories.find((memory) => memory.title === "Completed AVO task")?.content).toContain(
+			"Verified deterministic result: 4",
+		);
+		expect(memories.every((memory) => !memory.content.includes("The answer is 5"))).toBe(true);
+	});
+
+	test("keeps repeated accepted cycles distinct until each task delivers canonically", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-repeated-cycle-memory", clock());
+		const completePoemTask = () => {
+			const candidate = runtime.recordCandidate({ kind: "answer", summary: "Rain poem", payload: "Rain sings." });
+			runtime.recordEvaluation({
+				candidateId: candidate.candidateId,
+				evaluatorId: "subjective_review",
+				status: "pass",
+				authority: "model_opinion",
+				evidenceRefs: [],
+				metrics: { reviewed: true },
+			});
+			const cycle = runtime.completeCycle({ candidateId: candidate.candidateId }).cycle;
+			runtime.complete();
+			return cycle;
+		};
+
+		runtime.observeRootPrompt("Write a poem about rain");
+		const firstCycle = completePoemTask();
+		runtime.store.startTask("Write a poem about rain");
+		const secondCycle = completePoemTask();
+		const state = runtime.getState();
+		expect(firstCycle.cycleId).not.toBe(secondCycle.cycleId);
+		expect(state.memories).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ memoryId: `episode:${firstCycle.cycleId}`, verificationState: "verified" }),
+				expect.objectContaining({ memoryId: `episode:${secondCycle.cycleId}`, verificationState: "verified" }),
+			]),
+		);
+		expect(state.memories.filter((memory) => memory.title === "Completed AVO task")).toHaveLength(2);
 	});
 
 	test("requires executable feedback before a coding candidate becomes canonical", () => {
@@ -3470,8 +3598,30 @@ describe("AVO routing and adapters", () => {
 		["Implement the school policy", "general"],
 		["Fix the parser module", "coding"],
 		["Test the API implementation", "coding"],
+		["Add dark mode to the dashboard", "coding"],
+		["Add dark mode to the dashboard, but do not edit anything", "coding"],
+		["Update the README", "coding"],
+		["Change the button color", "coding"],
+		["Remove the deprecated endpoint", "coding"],
+		["Rename this variable", "coding"],
+		["Explain this dashboard; do not edit it", "general"],
+		["Discuss the package; don't update it", "general"],
+		["Do not test the API; explain it conceptually", "general"],
 	] as const)("routes boundary-sensitive prompt %s to %s", (prompt, environment) => {
 		expect(inferAvoEnvironment(prompt).environment).toBe(environment);
+	});
+
+	test("does not let a common coding request complete through subjective self-approval", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-common-coding-route", clock());
+		runtime.observeRootPrompt("Add dark mode to the dashboard");
+		expect(runtime.getState()).toMatchObject({
+			routing: { environment: "coding" },
+			verificationClass: "coding",
+			verificationPolicy: "required",
+		});
+		expect(() => runtime.recordCandidate({ kind: "answer", summary: "Done", payload: "Done" })).toThrow(
+			/coding candidates/,
+		);
 	});
 
 	test("classifies only direct host-verifiable evaluation commands", () => {
