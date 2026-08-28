@@ -127,6 +127,8 @@ describe("Prime Integrity Eval", () => {
 				acceptedCandidateObligationEvidenceReceiptCount: 1,
 				acceptedCandidateMeanObligationsPerEvidenceReceipt: 2,
 				acceptedCandidateMaxObligationsPerEvidenceReceipt: 2,
+				acceptedCandidateEvidenceDiversity: 0.5,
+				acceptedCandidateMaxEvidenceConcentration: 1,
 				criticalAssumptions: 0,
 				resolvedCriticalAssumptions: 0,
 				watchdogInterventions: 0,
@@ -135,6 +137,16 @@ describe("Prime Integrity Eval", () => {
 				outputTokens: 50,
 				totalTokens: 150,
 				costUsd: 0.01,
+				tokenUsageByStage: {
+					setup: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+					implementation: { modelCalls: 2, inputTokens: 100, outputTokens: 50, totalTokens: 150, costUsd: 0.01 },
+					candidate_evaluation: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+					obligation_coverage: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+					completion: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+					completion_repair: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+					memory: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+					other: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+				},
 				commands: [],
 			},
 			transcriptPath: "/tmp/transcript",
@@ -198,6 +210,60 @@ describe("Prime Integrity Eval", () => {
 			acceptedCandidateObligationEvidenceReceiptCount: 2,
 			acceptedCandidateMeanObligationsPerEvidenceReceipt: 2,
 			acceptedCandidateMaxObligationsPerEvidenceReceipt: 3,
+			acceptedCandidateEvidenceDiversity: 2 / 3,
+			acceptedCandidateMaxEvidenceConcentration: 1,
+		});
+	});
+
+	test("attributes billed model usage to observable AVO stages", () => {
+		const root = tempDirectory();
+		const sessionPath = join(root, "session.jsonl");
+		const assistant = (code: string | undefined, totalTokens: number) =>
+			JSON.stringify({
+				type: "message",
+				message: {
+					role: "assistant",
+					content: code
+						? [{ type: "toolCall", name: "ipython", arguments: { code } }]
+						: [{ type: "text", text: "done" }],
+					usage: {
+						input: totalTokens - 1,
+						output: 1,
+						totalTokens,
+						cost: { total: totalTokens / 1_000 },
+					},
+				},
+			});
+		writeFileSync(
+			sessionPath,
+			[
+				assistant("await avo.initialize('task'); await avo.run_coding_baseline('test')", 10),
+				assistant("write_code()", 20),
+				assistant("await avo.add_candidate({}); await avo.run_evaluation('c', 'test')", 30),
+				assistant("await avo.complete_cycle({'candidate_id': 'c'})", 40),
+				assistant("repair_code()", 50),
+				assistant("await avo.cover_obligation({})", 60),
+				assistant("await avo.recall('prior evidence')", 70),
+				assistant(undefined, 80),
+			].join("\n"),
+			"utf8",
+		);
+
+		const trace = summarizePrimeIntegrityTrace([sessionPath], root);
+		expect(trace.totalTokens).toBe(360);
+		expect(
+			Object.fromEntries(
+				Object.entries(trace.tokenUsageByStage).map(([stage, usage]) => [stage, usage.totalTokens]),
+			),
+		).toEqual({
+			setup: 10,
+			implementation: 20,
+			candidate_evaluation: 30,
+			obligation_coverage: 60,
+			completion: 40,
+			completion_repair: 50,
+			memory: 70,
+			other: 80,
 		});
 	});
 

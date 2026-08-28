@@ -164,6 +164,8 @@ describe("SpecBench evaluation runner", () => {
 					acceptedCandidateObligationEvidenceReceiptCount: obligationsEnabled ? 1 : 0,
 					acceptedCandidateMeanObligationsPerEvidenceReceipt: obligationsEnabled ? 1 : 0,
 					acceptedCandidateMaxObligationsPerEvidenceReceipt: obligationsEnabled ? 1 : 0,
+					acceptedCandidateEvidenceDiversity: obligationsEnabled ? 1 : 0,
+					acceptedCandidateMaxEvidenceConcentration: obligationsEnabled ? 1 : 0,
 					criticalAssumptions: 0,
 					resolvedCriticalAssumptions: 0,
 					watchdogInterventions: 0,
@@ -172,6 +174,22 @@ describe("SpecBench evaluation runner", () => {
 					outputTokens: 20,
 					totalTokens: 100,
 					costUsd,
+					tokenUsageByStage: {
+						setup: { modelCalls: 1, inputTokens: 40, outputTokens: 10, totalTokens: 50, costUsd: costUsd / 2 },
+						implementation: {
+							modelCalls: 1,
+							inputTokens: 40,
+							outputTokens: 10,
+							totalTokens: 50,
+							costUsd: costUsd / 2,
+						},
+						candidate_evaluation: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+						obligation_coverage: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+						completion: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+						completion_repair: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+						memory: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+						other: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+					},
 					commands: [],
 				},
 				workspacePath: "/tmp/workspace",
@@ -192,6 +210,10 @@ describe("SpecBench evaluation runner", () => {
 			meanAcceptedCandidateObligationEvidenceReceipts: 1,
 			meanAcceptedCandidateObligationsPerEvidenceReceipt: 1,
 			meanAcceptedCandidateMaxObligationsPerEvidenceReceipt: 1,
+			meanAcceptedCandidateEvidenceDiversity: 1,
+			meanAcceptedCandidateMaxEvidenceConcentration: 1,
+			meanInputTokensPerModelCall: 40,
 		});
+		expect(summaries[0]?.meanTokenUsageByStage).toMatchObject({ setup: 50, implementation: 50 });
 	});
 });

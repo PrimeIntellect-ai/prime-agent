@@ -23,8 +23,11 @@ import type {
 	PrimeIntegrityCaseResult,
 	PrimeIntegrityCommand,
 	PrimeIntegrityCommandResult,
+	PrimeIntegrityModelUsageSummary,
+	PrimeIntegrityTokenStage,
 	PrimeIntegrityTraceSummary,
 } from "./types.js";
+import { PRIME_INTEGRITY_TOKEN_STAGES } from "./types.js";
 
 const SOURCE_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_GIT_DIR = resolve(SOURCE_DIR, "..", "..", "..", "..", "..", ".git");
@@ -417,6 +420,9 @@ function findFiles(root: string, suffix: string): string[] {
 }
 
 function emptyTraceSummary(): PrimeIntegrityTraceSummary {
+	const tokenUsageByStage = Object.fromEntries(
+		PRIME_INTEGRITY_TOKEN_STAGES.map((stage) => [stage, emptyModelUsageSummary()]),
+	) as Record<PrimeIntegrityTokenStage, PrimeIntegrityModelUsageSummary>;
 	return {
 		completedRuns: 0,
 		assistantTurns: 0,
@@ -432,6 +438,8 @@ function emptyTraceSummary(): PrimeIntegrityTraceSummary {
 		acceptedCandidateObligationEvidenceReceiptCount: 0,
 		acceptedCandidateMeanObligationsPerEvidenceReceipt: 0,
 		acceptedCandidateMaxObligationsPerEvidenceReceipt: 0,
+		acceptedCandidateEvidenceDiversity: 0,
+		acceptedCandidateMaxEvidenceConcentration: 0,
 		criticalAssumptions: 0,
 		resolvedCriticalAssumptions: 0,
 		watchdogInterventions: 0,
@@ -440,8 +448,55 @@ function emptyTraceSummary(): PrimeIntegrityTraceSummary {
 		outputTokens: 0,
 		totalTokens: 0,
 		costUsd: 0,
+		tokenUsageByStage,
 		commands: [],
 	};
+}
+
+function emptyModelUsageSummary(): PrimeIntegrityModelUsageSummary {
+	return { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 };
+}
+
+function assistantToolText(content: unknown): string {
+	if (!Array.isArray(content)) return "";
+	return content
+		.flatMap((part) => {
+			if (!part || typeof part !== "object" || !("type" in part) || part.type !== "toolCall") return [];
+			const toolCall = part as Record<string, unknown>;
+			const argumentsValue = toolCall.arguments;
+			const argumentsRecord =
+				argumentsValue && typeof argumentsValue === "object" ? (argumentsValue as Record<string, unknown>) : {};
+			return [
+				typeof toolCall.name === "string" ? toolCall.name : "",
+				typeof toolCall.toolName === "string" ? toolCall.toolName : "",
+				typeof argumentsRecord.code === "string" ? argumentsRecord.code : "",
+				typeof argumentsRecord.command === "string" ? argumentsRecord.command : "",
+			];
+		})
+		.join("\n");
+}
+
+function tokenStageForAssistant(toolText: string, seenCompletionAttempt: boolean): PrimeIntegrityTokenStage {
+	if (/\bavo\.(?:recall|spontaneous_recall|remember|reflect_memory|sync_nooa_memory)\s*\(/.test(toolText)) {
+		return "memory";
+	}
+	if (/\bavo\.cover_obligation\s*\(/.test(toolText)) return "obligation_coverage";
+	if (/\bavo\.(?:complete_cycle|stop_gate|complete)\s*\(/.test(toolText)) return "completion";
+	if (!toolText) return "other";
+	if (seenCompletionAttempt) return "completion_repair";
+	if (
+		/\bavo\.(?:add_candidate|run_evaluation|record_evaluation|verify_artifacts|verify_deterministic_result)\s*\(/.test(
+			toolText,
+		)
+	) {
+		return "candidate_evaluation";
+	}
+	if (
+		/\bavo\.(?:initialize|run_coding_baseline|register_obligations|register_critical_assumptions)\s*\(/.test(toolText)
+	) {
+		return "setup";
+	}
+	return "implementation";
 }
 
 function messageText(content: unknown): string {
@@ -458,6 +513,7 @@ function messageText(content: unknown): string {
 export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoot: string): PrimeIntegrityTraceSummary {
 	const summary = emptyTraceSummary();
 	for (const path of sessionPaths) {
+		let seenCompletionAttempt = false;
 		for (const line of readFileSync(path, "utf8").split("\n")) {
 			if (!line.trim()) continue;
 			let entry: Record<string, unknown>;
@@ -470,16 +526,28 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			const message = entry.message as Record<string, unknown>;
 			const text = messageText(message.content);
 			if (message.role === "assistant") {
+				const toolText = assistantToolText(message.content);
+				const tokenStage = tokenStageForAssistant(toolText, seenCompletionAttempt);
+				const stageUsage = summary.tokenUsageByStage[tokenStage];
 				summary.assistantTurns += 1;
 				summary.modelCalls += 1;
+				stageUsage.modelCalls += 1;
 				if (message.usage && typeof message.usage === "object") {
 					const usage = message.usage as Record<string, unknown>;
-					summary.inputTokens += typeof usage.input === "number" ? usage.input : 0;
-					summary.outputTokens += typeof usage.output === "number" ? usage.output : 0;
-					summary.totalTokens += typeof usage.totalTokens === "number" ? usage.totalTokens : 0;
+					const inputTokens = typeof usage.input === "number" ? usage.input : 0;
+					const outputTokens = typeof usage.output === "number" ? usage.output : 0;
+					const totalTokens = typeof usage.totalTokens === "number" ? usage.totalTokens : 0;
+					summary.inputTokens += inputTokens;
+					summary.outputTokens += outputTokens;
+					summary.totalTokens += totalTokens;
+					stageUsage.inputTokens += inputTokens;
+					stageUsage.outputTokens += outputTokens;
+					stageUsage.totalTokens += totalTokens;
 					if (usage.cost && typeof usage.cost === "object") {
 						const cost = usage.cost as Record<string, unknown>;
-						summary.costUsd += typeof cost.total === "number" ? cost.total : 0;
+						const costUsd = typeof cost.total === "number" ? cost.total : 0;
+						summary.costUsd += costUsd;
+						stageUsage.costUsd += costUsd;
 					}
 				}
 				if (Array.isArray(message.content)) {
@@ -494,6 +562,7 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 						}
 					}
 				}
+				if (/\bavo\.(?:complete_cycle|stop_gate|complete)\s*\(/.test(toolText)) seenCompletionAttempt = true;
 			}
 			if (text.includes("Anti-laziness intervention") || text.includes("<avo_progress_intervention>")) {
 				summary.watchdogInterventions += 1;
@@ -578,6 +647,12 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 					summary.acceptedCandidateMeanObligationsPerEvidenceReceipt =
 						acceptedObligationsByEvaluation.size === 0 ? 0 : bindingCount / acceptedObligationsByEvaluation.size;
 					summary.acceptedCandidateMaxObligationsPerEvidenceReceipt = Math.max(0, ...receiptLoads);
+					summary.acceptedCandidateEvidenceDiversity =
+						acceptedObligationIds.size === 0
+							? 0
+							: acceptedObligationsByEvaluation.size / acceptedObligationIds.size;
+					summary.acceptedCandidateMaxEvidenceConcentration =
+						acceptedObligationIds.size === 0 ? 0 : Math.max(0, ...receiptLoads) / acceptedObligationIds.size;
 				}
 			}
 			summary.criticalAssumptions = Math.max(summary.criticalAssumptions, state.criticalAssumptions?.length ?? 0);

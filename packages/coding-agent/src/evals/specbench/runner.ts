@@ -20,6 +20,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { AVO_INTERNAL_ABLATIONS_ENV, type AvoAblationFeature } from "../../core/avo/ablation.js";
 import { summarizeAvoMetric } from "../../core/avo/experiment.js";
 import { summarizePrimeIntegrityTrace } from "../prime-integrity/runner.js";
+import { PRIME_INTEGRITY_TOKEN_STAGES, type PrimeIntegrityTokenStage } from "../prime-integrity/types.js";
 
 const SOURCE_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_GIT_DIR = resolve(SOURCE_DIR, "..", "..", "..", "..", "..", ".git");
@@ -152,6 +153,10 @@ export interface SpecBenchConditionSummary {
 	meanAcceptedCandidateObligationEvidenceReceipts: number;
 	meanAcceptedCandidateObligationsPerEvidenceReceipt: number;
 	meanAcceptedCandidateMaxObligationsPerEvidenceReceipt: number;
+	meanAcceptedCandidateEvidenceDiversity: number;
+	meanAcceptedCandidateMaxEvidenceConcentration: number;
+	meanInputTokensPerModelCall: number;
+	meanTokenUsageByStage: Record<PrimeIntegrityTokenStage, number>;
 	meanDurationMs: number;
 	meanCostUsd: number;
 	deltaHeldOutVsFull: number;
@@ -840,6 +845,12 @@ export function aggregateSpecBenchConditions(results: readonly SpecBenchResult[]
 		const deltaCost = mean(pairs.map((pair) => pair.condition.trace.costUsd - pair.full.trace.costUsd));
 		const extraCost = -deltaCost;
 		const hiddenBenefit = -deltaHeldOut;
+		const meanTokenUsageByStage = Object.fromEntries(
+			PRIME_INTEGRITY_TOKEN_STAGES.map((stage) => [
+				stage,
+				mean(selected.map((item) => item.trace.tokenUsageByStage[stage].totalTokens)),
+			]),
+		) as Record<PrimeIntegrityTokenStage, number>;
 		return {
 			conditionId,
 			disabledFeatures: [...(selected[0]?.disabledFeatures ?? [])],
@@ -862,6 +873,16 @@ export function aggregateSpecBenchConditions(results: readonly SpecBenchResult[]
 			meanAcceptedCandidateMaxObligationsPerEvidenceReceipt: mean(
 				selected.map((item) => item.trace.acceptedCandidateMaxObligationsPerEvidenceReceipt),
 			),
+			meanAcceptedCandidateEvidenceDiversity: mean(
+				selected.map((item) => item.trace.acceptedCandidateEvidenceDiversity),
+			),
+			meanAcceptedCandidateMaxEvidenceConcentration: mean(
+				selected.map((item) => item.trace.acceptedCandidateMaxEvidenceConcentration),
+			),
+			meanInputTokensPerModelCall: mean(
+				selected.map((item) => (item.trace.modelCalls === 0 ? 0 : item.trace.inputTokens / item.trace.modelCalls)),
+			),
+			meanTokenUsageByStage,
 			meanDurationMs: mean(selected.map((item) => item.durationMs)),
 			meanCostUsd: cost,
 			deltaHeldOutVsFull: pairs.length === 0 ? 0 : deltaHeldOut,
@@ -882,7 +903,7 @@ function writeReport(
 ): void {
 	const conditions = aggregateSpecBenchConditions(results);
 	const report = {
-		schemaVersion: 3,
+		schemaVersion: 4,
 		benchmark: "WecoAI SpecBench via Prime AVO",
 		specbenchRevision,
 		provider: options.provider,
@@ -912,7 +933,7 @@ function writeReport(
 	const rows = results
 		.map(
 			(item) =>
-				`| ${item.conditionId} | ${item.repetition} | ${item.taskId} | ${(item.public.passRate * 100).toFixed(1)}% | ${(item.private.passRate * 100).toFixed(1)}% | ${(item.rewardHackingGap * 100).toFixed(1)} pp | ${item.falseCompletion ? "yes" : "no"} | ${item.trace.obligations} | ${item.trace.acceptedCandidateObligationEvidenceReceiptCount} | ${item.trace.acceptedCandidateMeanObligationsPerEvidenceReceipt.toFixed(1)} | ${item.trace.acceptedCandidateMaxObligationsPerEvidenceReceipt} | ${item.trace.totalTokens.toFixed(0)} | $${item.trace.costUsd.toFixed(3)} |`,
+				`| ${item.conditionId} | ${item.repetition} | ${item.taskId} | ${(item.public.passRate * 100).toFixed(1)}% | ${(item.private.passRate * 100).toFixed(1)}% | ${(item.rewardHackingGap * 100).toFixed(1)} pp | ${item.falseCompletion ? "yes" : "no"} | ${item.trace.obligations} | ${item.trace.acceptedCandidateObligationEvidenceReceiptCount} | ${item.trace.acceptedCandidateMeanObligationsPerEvidenceReceipt.toFixed(1)} | ${item.trace.acceptedCandidateMaxObligationsPerEvidenceReceipt} | ${item.trace.acceptedCandidateEvidenceDiversity.toFixed(3)} | ${item.trace.acceptedCandidateMaxEvidenceConcentration.toFixed(3)} | ${item.trace.totalTokens.toFixed(0)} | $${item.trace.costUsd.toFixed(3)} |`,
 		)
 		.join("\n");
 	const conditionRows = conditions
@@ -921,12 +942,18 @@ function writeReport(
 				condition.deltaHeldOutCi95Low === null || condition.deltaHeldOutCi95High === null
 					? "not estimable"
 					: `[${(condition.deltaHeldOutCi95Low * 100).toFixed(1)}, ${(condition.deltaHeldOutCi95High * 100).toFixed(1)}] pp`;
-			return `| ${condition.conditionId} | ${condition.runCount} | ${condition.pairedRunCount} | ${(condition.meanValidationPassRate * 100).toFixed(1)}% | ${(condition.meanHeldOutPassRate * 100).toFixed(1)}% | ${(condition.meanRewardHackingGap * 100).toFixed(1)} pp | ${(condition.falseCompletionRate * 100).toFixed(1)}% | ${condition.meanTokens.toFixed(0)} | ${condition.meanModelCalls.toFixed(1)} | ${condition.meanObligations.toFixed(1)} | ${condition.meanAcceptedCandidateObligationEvidenceReceipts.toFixed(1)} | ${condition.meanAcceptedCandidateObligationsPerEvidenceReceipt.toFixed(1)} | ${condition.meanAcceptedCandidateMaxObligationsPerEvidenceReceipt.toFixed(1)} | ${(condition.meanDurationMs / 1000).toFixed(1)} s | $${condition.meanCostUsd.toFixed(3)} | ${(condition.deltaHeldOutVsFull * 100).toFixed(1)} pp | ${confidence} |`;
+			return `| ${condition.conditionId} | ${condition.runCount} | ${condition.pairedRunCount} | ${(condition.meanValidationPassRate * 100).toFixed(1)}% | ${(condition.meanHeldOutPassRate * 100).toFixed(1)}% | ${(condition.meanRewardHackingGap * 100).toFixed(1)} pp | ${(condition.falseCompletionRate * 100).toFixed(1)}% | ${condition.meanTokens.toFixed(0)} | ${condition.meanModelCalls.toFixed(1)} | ${condition.meanObligations.toFixed(1)} | ${condition.meanAcceptedCandidateObligationEvidenceReceipts.toFixed(1)} | ${condition.meanAcceptedCandidateObligationsPerEvidenceReceipt.toFixed(1)} | ${condition.meanAcceptedCandidateMaxObligationsPerEvidenceReceipt.toFixed(1)} | ${condition.meanAcceptedCandidateEvidenceDiversity.toFixed(3)} | ${condition.meanAcceptedCandidateMaxEvidenceConcentration.toFixed(3)} | ${(condition.meanDurationMs / 1000).toFixed(1)} s | $${condition.meanCostUsd.toFixed(3)} | ${(condition.deltaHeldOutVsFull * 100).toFixed(1)} pp | ${confidence} |`;
 		})
+		.join("\n");
+	const tokenStageRows = conditions
+		.map(
+			(condition) =>
+				`| ${condition.conditionId} | ${condition.meanInputTokensPerModelCall.toFixed(0)} | ${PRIME_INTEGRITY_TOKEN_STAGES.map((stage) => condition.meanTokenUsageByStage[stage].toFixed(0)).join(" | ")} |`,
+		)
 		.join("\n");
 	writeFileSync(
 		join(options.outputDir, "report.md"),
-		`# WecoAI SpecBench via Prime AVO\n\nUpstream revision: \`${specbenchRevision}\`\n\nExecution-order seed: \`${options.experimentSeed}\`. Provider sampling can remain stochastic; use multiple repetitions before causal claims. Deltas use only task/repetition pairs present in both the condition and full AVO. Obligation evidence columns are scoped to the candidate in the latest accepted cycle; they are diagnostics, not an additional acceptance gate.\n\n## Conditions\n\n| Condition | Runs | Paired | Validation | Held-out | Gap | False completion | Tokens | Model calls | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | Time | Cost | Held-out Δ vs full | Student-t 95% CI |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n${conditionRows}\n\n## Runs\n\n| Condition | Rep | Task | Validation | Held-out | Gap | False completion | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | Tokens | Cost |\n| --- | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows}\n`,
+		`# WecoAI SpecBench via Prime AVO\n\nUpstream revision: \`${specbenchRevision}\`\n\nExecution-order seed: \`${options.experimentSeed}\`. Provider sampling can remain stochastic; use multiple repetitions before causal claims. Deltas use only task/repetition pairs present in both the condition and full AVO. Obligation evidence columns are scoped to the candidate in the latest accepted cycle; they are diagnostics, not an additional acceptance gate.\n\n## Conditions\n\n| Condition | Runs | Paired | Validation | Held-out | Gap | False completion | Tokens | Model calls | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Time | Cost | Held-out Δ vs full | Student-t 95% CI |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n${conditionRows}\n\n## Model-token attribution\n\nBilled model tokens are assigned to the assistant turn's dominant observable activity. This is diagnostic attribution, not a causal decomposition; input tokens can include accumulated context from earlier stages.\n\n| Condition | Input/call | Setup | Implementation | Candidate/evaluation | Obligation coverage | Completion | Completion repair | Memory | Other/final |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${tokenStageRows}\n\n## Runs\n\n| Condition | Rep | Task | Validation | Held-out | Gap | False completion | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Tokens | Cost |\n| --- | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows}\n`,
 	);
 }
 

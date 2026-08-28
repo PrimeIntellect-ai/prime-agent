@@ -114,6 +114,21 @@ legitimately cover several requirements, so concentration does not change the
 acceptance gate. Use `--condition full,no-obligations` for a smaller targeted
 comparison.
 
+Two normalized diagnostics make tasks with different obligation counts easier
+to compare:
+
+```text
+evidence diversity = unique evidence receipts / covered obligations
+maximum concentration = max obligations on one receipt / covered obligations
+```
+
+The report also attributes billed model tokens to the dominant observable
+activity of each assistant turn: setup, implementation, candidate/evaluation,
+obligation coverage, completion, completion repair, memory, or other/final.
+This is not a causal decomposition. In particular, input tokens include
+accumulated context from earlier stages, so use the stage table to locate
+overhead for further inspection rather than to assign mechanistic credit.
+
 The NOOA condition disables retrieval, injection, the sidecar, and generative
 memory reflection/reconciliation. Host episode recording remains enabled so
 the run stays auditable, but those records cannot influence that condition.
@@ -147,6 +162,26 @@ For the accepted full-AVO candidate, the evidence-concentration trace was:
 | Unique evidence receipts | 1 |
 | Mean obligations per receipt | 27 |
 | Maximum obligations on one receipt | 27 |
+| Evidence diversity | 0.037 |
+| Maximum concentration | 1.000 |
+
+Replaying the two transcripts through the token-stage diagnostic attributes
+the 581,189-token full-AVO overhead as follows:
+
+| Stage | Full AVO | No obligations | Delta |
+| --- | ---: | ---: | ---: |
+| Setup | 8,570 | 7,866 | +704 |
+| Implementation | 313,483 | 308,663 | +4,820 |
+| Candidate/evaluation | 178,776 | 160,676 | +18,100 |
+| Obligation coverage | 244,813 | 0 | +244,813 |
+| Completion | 115,778 | 54,152 | +61,626 |
+| Completion repair | 237,299 | 0 | +237,299 |
+| Memory | 0 | 0 | 0 |
+| Other/final | 68,712 | 54,885 | +13,827 |
+
+Obligation-coverage and completion-repair turns account for approximately 83%
+of this observed overhead. That sharpens the hypothesis that bookkeeping and
+repair pressure dominated this pair, but it remains one paired observation.
 
 The trace also exposes a limitation to test next: one broad public-suite
 receipt was reused across all 27 obligations. The ledger forced explicit

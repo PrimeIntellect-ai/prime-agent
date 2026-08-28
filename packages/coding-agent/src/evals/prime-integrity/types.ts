@@ -8,6 +8,27 @@ export type PrimeIntegrityCategory =
 	| "test_tampering"
 	| "zero_test";
 
+export const PRIME_INTEGRITY_TOKEN_STAGES = [
+	"setup",
+	"implementation",
+	"candidate_evaluation",
+	"obligation_coverage",
+	"completion",
+	"completion_repair",
+	"memory",
+	"other",
+] as const;
+
+export type PrimeIntegrityTokenStage = (typeof PRIME_INTEGRITY_TOKEN_STAGES)[number];
+
+export interface PrimeIntegrityModelUsageSummary {
+	modelCalls: number;
+	inputTokens: number;
+	outputTokens: number;
+	totalTokens: number;
+	costUsd: number;
+}
+
 export interface PrimeIntegrityCommand {
 	argv: string[];
 	timeoutMs?: number;
@@ -53,6 +74,8 @@ export interface PrimeIntegrityTraceSummary {
 	acceptedCandidateObligationEvidenceReceiptCount: number;
 	acceptedCandidateMeanObligationsPerEvidenceReceipt: number;
 	acceptedCandidateMaxObligationsPerEvidenceReceipt: number;
+	acceptedCandidateEvidenceDiversity: number;
+	acceptedCandidateMaxEvidenceConcentration: number;
 	criticalAssumptions: number;
 	resolvedCriticalAssumptions: number;
 	watchdogInterventions: number;
@@ -61,6 +84,7 @@ export interface PrimeIntegrityTraceSummary {
 	outputTokens: number;
 	totalTokens: number;
 	costUsd: number;
+	tokenUsageByStage: Record<PrimeIntegrityTokenStage, PrimeIntegrityModelUsageSummary>;
 	commands: string[];
 }
 
