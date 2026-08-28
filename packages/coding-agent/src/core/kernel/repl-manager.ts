@@ -87,6 +87,34 @@ interface ActiveExecution {
 	reject: (error: Error) => void;
 }
 
+// Complete event vocabulary of protocol version 2 (see prime-agent-runtime/src/rlm/repl.md).
+// The version handshake is exact, so an unknown kind is corruption, not a newer runtime.
+const PROTOCOL_EVENT_KINDS = new Set([
+	"ready",
+	"stdout",
+	"stderr",
+	"result",
+	"display",
+	"host_request",
+	"error",
+	"done",
+]);
+
+/**
+ * Reason a JSON object still isn't a valid protocol frame, or undefined.
+ * `done` and `host_request` route strictly by string id; silently dropping an
+ * id-less one would leave the awaiting request unsettled forever.
+ */
+function invalidProtocolFrameReason(event: Record<string, unknown>): string | undefined {
+	if (typeof event.event !== "string" || !PROTOCOL_EVENT_KINDS.has(event.event)) {
+		return "unknown protocol event";
+	}
+	if ((event.event === "done" || event.event === "host_request") && typeof event.id !== "string") {
+		return `${event.event} frame without id`;
+	}
+	return undefined;
+}
+
 function asStringArray(value: unknown): string[] {
 	return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
@@ -137,6 +165,11 @@ export class ReplKernelManager {
 	/** Repairs a child whose dedicated protocol stream emitted an invalid frame. */
 	private protocolRepairPromise?: Promise<void>;
 	private protocolRepairOwner?: { superseded: boolean };
+	/** Corruption seen while still "starting" (e.g. ready and garbage in one chunk) fails that start. */
+	private startupProtocolError?: Error;
+	/** A repair discarded its kernel: the next fresh start must re-run the runtime bootstrap. */
+	private pendingRebootstrap = false;
+	private rebootstrapPromise?: Promise<boolean>;
 	private teardownInFlight = 0;
 
 	constructor(options: KernelManagerOptions) {
@@ -219,11 +252,16 @@ export class ReplKernelManager {
 		this.child = child;
 		if (child.pid !== undefined) recordOrphanProcessState(child.pid, true);
 		this.readyDeferred = createDeferred<number>();
+		this.startupProtocolError = undefined;
 		this.wireChild(child);
 
 		try {
 			const protocol = await this.waitForReady(child);
 			if (this.startStale(generation)) throw new Error("Kernel start superseded");
+			// Ready and a corrupt frame can share one stdout chunk: ready resolved the
+			// deferred synchronously before the corruption was parsed, so the rejection
+			// in failProtocolFrame was a no-op. Never mark such a child running.
+			if (this.startupProtocolError) throw this.startupProtocolError;
 			if (protocol !== REPL_PROTOCOL_VERSION) {
 				throw new Error(
 					`Kernel runtime speaks protocol ${protocol}, expected ${REPL_PROTOCOL_VERSION}. ` +
@@ -270,6 +308,11 @@ export class ReplKernelManager {
 					this.failProtocolFrame(child, `non-object protocol line: ${line.slice(0, 200)}`);
 					return;
 				}
+				const invalidReason = invalidProtocolFrameReason(event);
+				if (invalidReason) {
+					this.failProtocolFrame(child, `${invalidReason}: ${line.slice(0, 200)}`);
+					return;
+				}
 				this.handleEvent(event);
 			}
 		});
@@ -309,6 +352,7 @@ export class ReplKernelManager {
 		if (this.child !== child) return;
 		this.appendKernelDiagnostic(diagnostic);
 		const error = new Error(`Kernel protocol error: ${diagnostic}`);
+		if (this.state === "starting") this.startupProtocolError = error;
 		this.readyDeferred?.reject(error);
 		this.rejectActiveExecution(error);
 		if (this.teardownInFlight > 0 || this.state !== "running") return;
@@ -396,6 +440,7 @@ export class ReplKernelManager {
 				);
 				return false;
 			}
+			this.pendingRebootstrap = false;
 			return true;
 		} catch (error) {
 			this.appendKernelDiagnostic(`protocol repair bootstrap error: ${errorMessage(error)}`);
@@ -403,8 +448,38 @@ export class ReplKernelManager {
 		}
 	}
 
+	/**
+	 * A fresh kernel started after a discarded repair has none of the runtime
+	 * bootstrap's live handles (rlm, bash, skills); re-run the bootstrap before
+	 * any user request. A failed re-bootstrap discards the kernel again instead
+	 * of serving user code on an unprovisioned namespace.
+	 */
+	private async ensureKernelRebootstrapped(signal?: AbortSignal): Promise<void> {
+		const code = this.options.bootstrapCode;
+		// An in-flight repair owns its kernel's restore/bootstrap sequence.
+		if (!code || !this.pendingRebootstrap || this.protocolRepairPromise || this.state !== "running") return;
+		let task = this.rebootstrapPromise;
+		if (!task) {
+			const started = this.bootstrapRepairedKernel(code).then((ok) => {
+				if (!ok && this.state === "running") this.killChildToIdle();
+				return ok;
+			});
+			task = started;
+			this.rebootstrapPromise = started;
+			void started.finally(() => {
+				if (this.rebootstrapPromise === started) this.rebootstrapPromise = undefined;
+			});
+		}
+		if (signal?.aborted) return; // the aborted request never executes, so it may skip the wait
+		const ok = await task; // bounded by REPAIR_STEP_TIMEOUT_MS
+		if (!ok) throw new Error("Kernel bootstrap failed after protocol repair");
+	}
+
 	/** Kill the current child and settle at clean idle, so the next start spawns fresh. */
 	private killChildToIdle(): void {
+		// The discarded kernel carried the runtime bootstrap; a lazily started
+		// replacement must re-run it before serving user code.
+		this.pendingRebootstrap = true;
 		this.state = "shutdown";
 		liveKernels.delete(this);
 		this.cleanupResources("SIGKILL");
@@ -613,6 +688,7 @@ export class ReplKernelManager {
 		if ((this.state as string) === "shutdown") {
 			throw new Error("Kernel has been shut down");
 		}
+		if (!opts.protocolRepair) await this.ensureKernelRebootstrapped(opts.signal);
 
 		const prev = this.executionQueue;
 		let resolveNext: () => void = () => {};
