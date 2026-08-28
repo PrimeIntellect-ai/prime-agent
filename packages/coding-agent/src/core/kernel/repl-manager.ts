@@ -697,6 +697,12 @@ export class ReplKernelManager {
 			throw new Error("Kernel is shutting down");
 		}
 		if (!opts.protocolRepair) await this.ensureKernelRebootstrapped(opts.signal);
+		// Re-check: a final flush may have started while this request awaited the
+		// lazy re-bootstrap; admitting it now would splice it between the flush's
+		// captured queue and the final snapshot, unbounding the teardown.
+		if (this.flushingSnapshotForDispose && !opts.internal) {
+			throw new Error("Kernel is shutting down");
+		}
 
 		const prev = this.executionQueue;
 		let resolveNext: () => void = () => {};

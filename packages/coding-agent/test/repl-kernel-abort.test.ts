@@ -356,6 +356,68 @@ describe("ReplKernelManager abort handling", () => {
 		expect(cleanupResources).toHaveBeenCalledOnce();
 	});
 
+	it("rejects an execution whose re-bootstrap wait crossed the start of the final flush", async () => {
+		const manager = new ReplKernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+			bootstrapCode: "boot-code",
+		});
+		let releaseBootstrap: () => void = () => {};
+		const bootstrapBlocked = new Promise<void>((resolve) => {
+			releaseBootstrap = resolve;
+		});
+		let releaseSnapshot: () => void = () => {};
+		const snapshotBlocked = new Promise<void>((resolve) => {
+			releaseSnapshot = resolve;
+		});
+		const calls: string[] = [];
+		const ok = { stdout: "", stderr: "", status: "ok" as const, durationMs: 0 };
+		const executeInner = vi.fn(async (requestFields: Record<string, unknown> & { type: string }, code: string) => {
+			if (requestFields.type === "snapshot") {
+				calls.push("snapshot");
+				await snapshotBlocked;
+				return { ...ok, doneFields: { saved: [], skipped: [], bytes: 0 } };
+			}
+			if (code === "boot-code") {
+				calls.push("bootstrap");
+				await bootstrapBlocked;
+				return ok;
+			}
+			calls.push("cell");
+			return ok;
+		});
+		const cleanupResources = vi.fn();
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				pendingRebootstrap: boolean;
+				executeInner: typeof executeInner;
+				start: () => Promise<void>;
+				cleanupResources: () => void;
+			},
+			{ state: "running", pendingRebootstrap: true, executeInner, start: async () => {}, cleanupResources },
+		);
+
+		// Admitted before the flush: passes the first guard, then parks on the
+		// in-flight lazy re-bootstrap.
+		const cell = manager.execute("user-cell");
+		cell.catch(() => undefined);
+		await waitForCalls(executeInner, 1);
+		expect(calls).toEqual(["bootstrap"]);
+
+		// The teardown's final flush starts while the cell is still parked.
+		const teardown = manager.shutdown({ snapshot: true });
+		await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+		releaseBootstrap();
+
+		// Un-bootstrapped no more, the cell must NOT splice between the flush's
+		// captured queue and the final snapshot; the guard re-check rejects it.
+		await expect(cell).rejects.toThrow("Kernel is shutting down");
+		releaseSnapshot();
+		await expect(teardown).resolves.toBe(true);
+		expect(calls).toEqual(["bootstrap", "snapshot"]);
+	});
+
 	it("joins concurrent teardowns into a single final snapshot flush", async () => {
 		const manager = new ReplKernelManager({
 			cwd: process.cwd(),

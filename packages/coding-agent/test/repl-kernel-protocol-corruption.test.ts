@@ -386,6 +386,9 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 		const pending = manager.execute("read-boot");
 		pending.catch(() => undefined);
 		await expect.poll(() => spawnCount(countPath)).toBe(3);
+		// The fake journals its spawn before ready: wait for "running" so the
+		// teardown deterministically races the re-bootstrap, not the boot.
+		await expect.poll(() => manager.isRunning).toBe(true);
 		await expect(manager.shutdown({ snapshot: true, drainHostRequests: true })).resolves.toBe(true);
 
 		expect(manager.isRunning).toBe(false);
