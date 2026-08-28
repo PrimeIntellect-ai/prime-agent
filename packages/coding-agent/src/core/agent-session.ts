@@ -5999,6 +5999,12 @@ export class AgentSession {
 		}
 		const avoContinuation = await this._getAvoCompletionContinuation(context, signal);
 		if (avoContinuation) return [avoContinuation];
+		// Canonical AVO delivery is terminal evidence. _getAvoCompletionContinuation()
+		// may have completed the run while handling this exact assistant message, so
+		// do not fall through and enqueue a generic autonomous continuation.
+		if (this._enforceAvoCompletion && this._avoRuntime?.getState().status === "completed") {
+			return [];
+		}
 		const arrivalEpoch = this._sessionInputArrivalEpoch;
 		const goalSnapshot = this._goalState;
 		const goalAccountingStartedAt = this._goalAccountingStartedAt;

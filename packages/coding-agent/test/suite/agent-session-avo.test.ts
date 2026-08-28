@@ -94,6 +94,46 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 	});
 
+	it("stops autonomous continuation immediately after canonical AVO delivery", async () => {
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			autonomous: { enabled: true, maxContinuations: 3 },
+		});
+		harness.setResponses([
+			async () => {
+				await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+					candidate: { candidate_id: "rain-poem", kind: "answer", summary: "Rain poem", payload: "Rain sings." },
+				});
+				await harness!.session.handleAvoHostRequest("avo.evaluation.record", {
+					evaluation: {
+						candidate_id: "rain-poem",
+						evaluator_id: "subjective_review",
+						status: "pass",
+						authority: "model_opinion",
+						evidence_refs: [],
+						metrics: { reviewed: true },
+					},
+				});
+				await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
+					cycle: { candidate_id: "rain-poem" },
+				});
+				return fauxAssistantMessage("Rain sings.");
+			},
+		]);
+
+		await harness.session.prompt("Write a poem about rain");
+
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			continuationsUsed: 0,
+			terminalEvidence: { kind: "avo_completion", runId: `${harness.session.sessionId}:task-1` },
+		});
+		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
+			state: { status: "completed" },
+		});
+	});
+
 	it("starts a clean task run after a policy-complete subjective task while retaining memory", async () => {
 		harness = await createHarness({ persistSession: true, enforceAvoCompletion: true });
 		harness.setResponses([
