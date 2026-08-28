@@ -372,10 +372,15 @@ export class ReplKernelManager {
 			// A repair's own replacement child corrupted: discard it instead of respawn-looping.
 			this.appendKernelDiagnostic("replacement kernel corrupted during protocol repair; giving up");
 			this.protocolRepairOwner.superseded = true;
+			// performRestore clears pendingRestore, so it still being set means the
+			// corruption struck at or before the restore phase: the snapshot stays
+			// the prime suspect (ambiguous attribution, loop-safe — retrying it
+			// would re-trigger the corruption). Corruption strictly after a
+			// successful restore never implicates the snapshot; keeping the flag
+			// costs at most one bounded restore per later attempt.
+			const snapshotSuspect = this.pendingRestore;
 			this.killChildToIdle();
-			// The repair's own restore is the prime corruption suspect: retrying
-			// the snapshot on the lazy path would re-trigger the loop.
-			this.pendingRestore = false;
+			if (snapshotSuspect) this.pendingRestore = false;
 			return;
 		}
 		const owner = { superseded: false };
@@ -518,12 +523,12 @@ export class ReplKernelManager {
 	/** Restore (one-shot, best-effort) then bootstrap the lazily started fresh kernel. */
 	private async reprovisionFreshKernel(code: string | undefined): Promise<boolean> {
 		if (this.options.snapshot && this.pendingRestore) {
+			await this.performRestore(true); // clears pendingRestore on success
+			// Corrupted during the restore: the spawned repair owns the kernel now.
+			if (this.protocolRepairPromise || this.state !== "running") return false;
 			// One attempt per discard: a clean restore failure falls back to an
 			// empty namespace (ordinary startup semantics), never a retry loop.
 			this.pendingRestore = false;
-			await this.performRestore(true);
-			// Corrupted during the restore: the spawned repair owns the kernel now.
-			if (this.protocolRepairPromise || this.state !== "running") return false;
 		}
 		if (!code || !this.pendingRebootstrap) return true;
 		const ok = await this.bootstrapRepairedKernel(code);
@@ -1458,6 +1463,9 @@ export class ReplKernelManager {
 
 	private async runSnapshotFlushForDispose(): Promise<void> {
 		if (!this.options.snapshot || !this.isRunning) return;
+		// A kernel that never restored the saved namespace must not overwrite it:
+		// the on-disk snapshot is strictly fresher than this namespace.
+		if (this.pendingRestore) return;
 		// Block new external executions so none can splice ahead of the final snapshot and stall dispose.
 		this.flushingSnapshotForDispose = true;
 		try {

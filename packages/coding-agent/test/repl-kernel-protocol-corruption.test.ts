@@ -45,6 +45,11 @@ input.on("line", (line) => {
       emit({ event: "stdout", id: request.id, text: "hanging" });
       return;
     }
+    if (request.code === "bootstrap" && fs.existsSync(process.env.FAKE_REPL_CORRUPT_BOOTSTRAP)) {
+      fs.unlinkSync(process.env.FAKE_REPL_CORRUPT_BOOTSTRAP);
+      process.stdout.write("BROKEN-BOOTSTRAP\\n");
+      return;
+    }
     if (request.code === "bootstrap" && fs.existsSync(process.env.FAKE_REPL_FAIL_BOOTSTRAP)) {
       emit({ event: "error", id: request.id, ename: "RuntimeError", evalue: "bootstrap refused", traceback: [] });
       emit({ event: "done", id: request.id, status: "error" });
@@ -145,6 +150,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 	function newManager(options: { snapshot?: boolean; debounceMs?: number; bootstrapCode?: string } = {}): {
 		manager: ReplKernelManager;
 		bootCorruptionPath: string;
+		bootstrapCorruptionPath: string;
 		bootstrapFailurePath: string;
 		countPath: string;
 		delayReadyPath: string;
@@ -159,6 +165,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 	} {
 		const python = join(tempDir, "python");
 		const bootCorruptionPath = join(tempDir, "corrupt-boot");
+		const bootstrapCorruptionPath = join(tempDir, "corrupt-bootstrap");
 		const bootstrapFailurePath = join(tempDir, "fail-bootstrap");
 		const countPath = join(tempDir, "spawn-count");
 		const delayReadyPath = join(tempDir, "delay-ready");
@@ -177,6 +184,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 				cwd: tempDir,
 				env: {
 					FAKE_REPL_CORRUPT_BOOT: bootCorruptionPath,
+					FAKE_REPL_CORRUPT_BOOTSTRAP: bootstrapCorruptionPath,
 					FAKE_REPL_DIE_ON_BOOT: dieOnBootPath,
 					FAKE_REPL_FAIL_BOOTSTRAP: bootstrapFailurePath,
 					FAKE_REPL_CORRUPT_RESTORE: restoreCorruptionPath,
@@ -198,6 +206,7 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 				bootstrapCode: options.bootstrapCode,
 			}),
 			bootCorruptionPath,
+			bootstrapCorruptionPath,
 			bootstrapFailurePath,
 			countPath,
 			delayReadyPath,
@@ -460,6 +469,52 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 		} finally {
 			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
+	});
+
+	it("keeps the namespace restorable when corruption strikes after the repair's restore succeeded", async () => {
+		const { manager, bootstrapCorruptionPath, countPath, restoreLogPath, snapshotPath } = newManager({
+			snapshot: true,
+			bootstrapCode: "bootstrap",
+		});
+		try {
+			await manager.execute("bootstrap");
+			await manager.execute("seed");
+			await expect.poll(() => existsSync(snapshotPath)).toBe(true);
+			writeFileSync(bootstrapCorruptionPath, "1");
+
+			// Kernel 2 restores cleanly, then corrupts (one-shot) during the
+			// repair's bootstrap: the snapshot was never implicated.
+			await expect(manager.execute("corrupt-active")).rejects.toThrow("Kernel protocol error");
+
+			await expect(manager.execute("read")).resolves.toMatchObject({ status: "ok", stdout: "persisted" });
+			await expect(manager.execute("read-boot")).resolves.toMatchObject({ status: "ok", stdout: "live" });
+			expect(spawnCount(countPath)).toBe(3);
+			expect(restoreCount(restoreLogPath)).toBe(2);
+		} finally {
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+		}
+	});
+
+	it("final flush never overwrites the saved snapshot with an unrestored namespace", async () => {
+		const { manager, dieOnBootPath, snapshotPath } = newManager({ snapshot: true });
+		try {
+			await manager.execute("seed");
+			await expect.poll(() => existsSync(snapshotPath)).toBe(true);
+			writeFileSync(dieOnBootPath, "1");
+
+			// Repair-start failure leaves the namespace pending restore.
+			await expect(manager.execute("corrupt-active")).rejects.toThrow("Kernel protocol error");
+			await expect.poll(() => existsSync(`${dieOnBootPath}-died`)).toBe(true);
+			rmSync(dieOnBootPath);
+
+			// restart() resurrects a running kernel without ever reprovisioning it;
+			// the teardown's final flush must not snapshot that empty namespace
+			// over the strictly fresher saved one.
+			await manager.restart();
+		} finally {
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+		}
+		expect(JSON.parse(readFileSync(snapshotPath, "utf8"))).toEqual({ value: "persisted" });
 	});
 
 	it("re-runs the bootstrap on the fresh kernel after a discarded repair", async () => {
