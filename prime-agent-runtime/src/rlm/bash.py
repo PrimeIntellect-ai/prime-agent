@@ -700,8 +700,8 @@ def _fence_printf() -> str:
     # `\command -p printf` defeats alias expansion but not a user-defined shell
     # function named `command`, which would swallow both fence frames and leave
     # the await hanging until the shell dies (wedged behind background jobs). A
-    # slash-qualified command name bypasses function and alias lookup in every
-    # POSIX shell, so resolve printf on the system default utility PATH.
+    # slash-qualified command name bypasses function and alias lookup for
+    # ordinary command names, so resolve printf on the system default utility PATH.
     path = shutil.which("printf", path=os.confstr("CS_PATH") or os.defpath)
     if path and "'" not in path:
         return f"'{path}'"
