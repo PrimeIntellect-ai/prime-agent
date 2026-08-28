@@ -64,7 +64,10 @@ describe("ReplKernelManager graceful shutdown", () => {
 		vi.useFakeTimers();
 		try {
 			const { manager, internals } = configuredManager(() => new Promise<void>(() => {}), undefined, true);
-			vi.spyOn(manager, "snapshotState").mockResolvedValue(null);
+			// The final flush snapshots through the private captureSnapshot (bounded, prune-free).
+			vi.spyOn(manager as unknown as { captureSnapshot: () => Promise<null> }, "captureSnapshot").mockResolvedValue(
+				null,
+			);
 			const shutdown = manager.shutdown(options);
 			await vi.advanceTimersByTimeAsync(5_000);
 			await expect(shutdown).resolves.toBe(true);
@@ -138,7 +141,9 @@ describe("ReplKernelManager graceful shutdown", () => {
 			},
 			true,
 		);
-		const snapshot = vi.spyOn(manager, "snapshotState").mockResolvedValue(null);
+		const snapshot = vi
+			.spyOn(manager as unknown as { captureSnapshot: () => Promise<null> }, "captureSnapshot")
+			.mockResolvedValue(null);
 
 		internals.handleEvent({ event: "host_request", id: "hr-1", data: { type: "test.slow" } });
 		const shutdown = manager.shutdown({ snapshot: true, drainHostRequests: true });
@@ -174,7 +179,9 @@ describe("ReplKernelManager graceful shutdown", () => {
 			},
 			true,
 		);
-		const snapshot = vi.spyOn(manager, "snapshotState").mockResolvedValue(null);
+		const snapshot = vi
+			.spyOn(manager as unknown as { captureSnapshot: () => Promise<null> }, "captureSnapshot")
+			.mockResolvedValue(null);
 
 		internals.handleEvent({ event: "host_request", id: "hr-1", data: { type: "test.slow" } });
 		const tracked = [...internals.inFlightHostRequests];
@@ -216,7 +223,9 @@ describe("ReplKernelManager graceful shutdown", () => {
 			releaseSnapshot = () => resolve(null);
 		});
 		const { manager, internals } = configuredManager(() => undefined, undefined, true);
-		vi.spyOn(manager, "snapshotState").mockReturnValue(snapshotBlocked);
+		vi.spyOn(manager as unknown as { captureSnapshot: () => Promise<null> }, "captureSnapshot").mockReturnValue(
+			snapshotBlocked,
+		);
 		const child = internals.child;
 
 		const shutdown = manager.shutdown({ snapshot: true });

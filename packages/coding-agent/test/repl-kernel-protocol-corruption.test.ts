@@ -53,6 +53,13 @@ input.on("line", (line) => {
       process.stdout.write(JSON.stringify({ event: "done", id: request.id, status: "ok" }) + "\\n42\\n");
       return;
     }
+    if (request.code === "slow-bootstrap") {
+      setTimeout(() => {
+        boot = "live";
+        emit({ event: "done", id: request.id, status: "ok" });
+      }, 250);
+      return;
+    }
     if (request.code === "corrupt-unknown-kind") {
       emit({ event: "bogus", id: request.id });
       return;
@@ -362,6 +369,36 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 		}
 	});
 
+	it("stays bounded when a teardown races the lazy re-bootstrap of a fresh kernel", async () => {
+		const { manager, countPath, restoreFailurePath, snapshotPath } = newManager({
+			snapshot: true,
+			bootstrapCode: "slow-bootstrap",
+		});
+		await manager.execute("slow-bootstrap");
+		await manager.execute("seed");
+		await expect.poll(() => existsSync(snapshotPath)).toBe(true);
+		writeFileSync(restoreFailurePath, "1");
+		await expect(manager.execute("corrupt-active")).rejects.toThrow("Kernel protocol error");
+
+		// The fresh kernel's re-bootstrap (internal + protocolRepair) is in flight
+		// when the teardown starts: it must pass the final-flush execution guard,
+		// so the flush's queue wait settles and the shutdown stays bounded.
+		const pending = manager.execute("read-boot");
+		pending.catch(() => undefined);
+		await expect.poll(() => spawnCount(countPath)).toBe(3);
+		await expect(manager.shutdown({ snapshot: true, drainHostRequests: true })).resolves.toBe(true);
+
+		expect(manager.isRunning).toBe(false);
+		expect(spawnCount(countPath)).toBe(3);
+		// The raced cell must settle either way — served before the teardown or
+		// rejected by it — never hang.
+		const outcome = await pending.then(
+			(r) => `${r.status}:${r.stdout}`,
+			(e) => String(e),
+		);
+		expect(outcome).toMatch(/ok:live|shut down|shutting down/);
+	});
+
 	it("repairs a non-object frame received while idle", async () => {
 		const { manager, countPath } = newManager();
 		try {
@@ -411,8 +448,14 @@ describe("ReplKernelManager corrupt protocol repair", () => {
 
 			await expect(manager.shutdown()).resolves.toBe(true);
 			expect(manager.isRunning).toBe(false);
-			expect(spawnCount(countPath)).toBe(2);
+			// The superseded repair's booting replacement is hard-killed (it never
+			// reached "running", so no graceful protocol shutdown); it may die
+			// before it journals its spawn. Nothing new may spawn afterwards.
+			const spawnsAfterShutdown = spawnCount(countPath);
+			expect(spawnsAfterShutdown).toBeLessThanOrEqual(2);
 			await expect(manager.execute("read")).rejects.toThrow("Kernel has been shut down");
+			await new Promise((r) => setTimeout(r, 200));
+			expect(spawnCount(countPath)).toBe(spawnsAfterShutdown);
 		} finally {
 			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
