@@ -711,22 +711,37 @@ describe("daemon mode helpers", () => {
 			metadata: {
 				...subagentState.runtime.metadata,
 				rlmChildId: "child-1",
+				sessionDir: "/tmp/child-1",
 			},
 			session: {
+				...subagentState.runtime.session,
 				sessionId: "session-child",
 				sessionName: defaultSubagentName,
-				isStreaming: false,
+				isStreaming: true,
+				isSessionActive: true,
+				isCompacting: false,
+				isBashRunning: false,
+				hasRunningRlmChildren: () => false,
+				messages: [],
+				sessionManager: { getHeader: () => ({}), getCwd: () => "/tmp" },
+				state: { pendingToolCalls: new Map() },
+				unfinishedActionCount: 1,
 				sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 				acceptAgentMessagePrompt,
 			},
 		} as never;
 		const internals = daemon as unknown as {
 			sessions: Map<string, ActiveSessionState>;
+			readResidentRlmLifecycleStatus(state: ActiveSessionState): Promise<"completed" | undefined>;
 			createAgentMessageController(
 				getCurrentState: () => ActiveSessionState | undefined,
 			): AgentSessionMessageController;
 		};
 		internals.sessions.set(parentState.activeSessionId, parentState);
+		vi.spyOn(internals, "readResidentRlmLifecycleStatus").mockImplementation(async (state) => {
+			if (state === subagentState) return "completed";
+			return undefined as never;
+		});
 		// A successfully completed RLM child remains idle in this daemon registry.
 		internals.sessions.set(subagentState.activeSessionId, subagentState);
 
@@ -739,10 +754,20 @@ describe("daemon mode helpers", () => {
 			runtimeKind: "subagent",
 			parentActiveSessionId: parentState.activeSessionId,
 			rlmChildId: "child-1",
+			rlmChildRegistryStatus: "completed",
+			status: "inactive",
+			isStreaming: false,
+			unfinishedActionCount: 0,
 		});
 		if (!subagentSummary?.sessionName) {
 			throw new Error("Missing default subagent session name");
 		}
+
+		Object.assign(subagentState.runtime.session, {
+			isStreaming: false,
+			isSessionActive: false,
+			unfinishedActionCount: 0,
+		});
 
 		await expect(
 			controller.sendAgentMessage({

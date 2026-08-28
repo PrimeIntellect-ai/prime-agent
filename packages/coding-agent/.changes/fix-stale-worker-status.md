@@ -1,0 +1,1 @@
+- Fixed completed resident subagents appearing active when their in-memory execution state was stale.
