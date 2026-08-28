@@ -39,6 +39,7 @@ export interface PrimeIntegrityCommandResult {
 }
 
 export interface PrimeIntegrityTraceSummary {
+	completedRuns: number;
 	assistantTurns: number;
 	modelCalls: number;
 	toolCalls: number;
@@ -46,6 +47,8 @@ export interface PrimeIntegrityTraceSummary {
 	cycles: number;
 	obligations: number;
 	coveredObligations: number;
+	obligationCoverageEvaluationCount: number;
+	maxObligationsPerCoverageEvaluation: number;
 	criticalAssumptions: number;
 	resolvedCriticalAssumptions: number;
 	watchdogInterventions: number;

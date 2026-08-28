@@ -172,6 +172,7 @@ import {
 	deriveAvoWorkspaceImpactPaths,
 	digestAvoDeliveryText,
 	digestAvoPayload,
+	isAvoFeatureAblated,
 	parseAvoAssumptionResolutionInput,
 	parseAvoCandidateInput,
 	parseAvoClaimVerifierMessage,
@@ -3537,6 +3538,7 @@ export class AgentSession {
 		cycleId: string,
 		trigger: "five_cycles" | "candidate_acceptance" | "supervisor_intervention",
 	): Promise<Record<string, unknown>> {
+		if (isAvoFeatureAblated("nooa")) return { ok: false, reason: "NOOA disabled by benchmark ablation" };
 		const runtime = this._requireAvoRuntime();
 		const state = runtime.getState();
 		if (
@@ -3675,6 +3677,7 @@ export class AgentSession {
 	}
 
 	private async _runAvoGenerativeMemoryReconciliation(cycleId: string): Promise<Record<string, unknown>> {
+		if (isAvoFeatureAblated("nooa")) return { ok: false, reason: "NOOA disabled by benchmark ablation" };
 		const runtime = this._requireAvoRuntime();
 		const proposedClusters = await runtime.reconciliationCandidates();
 		const memories = runtime.getState().memories;
@@ -3861,7 +3864,13 @@ export class AgentSession {
 	}
 
 	private async _maybeInterveneAvoToolStagnation(toolResultCount: number): Promise<void> {
-		if (toolResultCount === 0 || !this._enforceAvoCompletion || !this._avoRuntime || this._rlmDepth !== 0) {
+		if (
+			isAvoFeatureAblated("qualified_watchdog") ||
+			toolResultCount === 0 ||
+			!this._enforceAvoCompletion ||
+			!this._avoRuntime ||
+			this._rlmDepth !== 0
+		) {
 			return;
 		}
 		const state = this._avoRuntime.getState();
@@ -4362,14 +4371,17 @@ export class AgentSession {
 			case "avo.get":
 				return { state: runtime.getState() };
 			case "avo.obligations.register": {
+				if (isAvoFeatureAblated("obligations")) return { obligations: [], disabled: true };
 				if (!Array.isArray(payload.obligations)) throw new Error("avo.obligations.register requires an array");
 				return {
 					obligations: runtime.registerObligations(payload.obligations.map(parseAvoObligationInput)),
 				};
 			}
 			case "avo.obligations.cover":
+				if (isAvoFeatureAblated("obligations")) return { coverage: null, disabled: true };
 				return { coverage: runtime.recordObligationCoverage(parseAvoObligationCoverageInput(payload.coverage)) };
 			case "avo.assumptions.register": {
+				if (isAvoFeatureAblated("critical_assumptions")) return { assumptions: [], disabled: true };
 				if (!Array.isArray(payload.assumptions)) throw new Error("avo.assumptions.register requires an array");
 				return {
 					assumptions: runtime.registerCriticalAssumptions(
@@ -4378,6 +4390,7 @@ export class AgentSession {
 				};
 			}
 			case "avo.assumptions.resolve":
+				if (isAvoFeatureAblated("critical_assumptions")) return { assumption: null, disabled: true };
 				return {
 					assumption: runtime.resolveCriticalAssumption(parseAvoAssumptionResolutionInput(payload.resolution)),
 				};
@@ -6370,6 +6383,18 @@ export class AgentSession {
 	): AvoProgressWatchdogAssessment {
 		const cached = this._avoProgressWatchdogAssessments.get(message);
 		if (cached) return cached;
+		if (isAvoFeatureAblated("qualified_watchdog")) {
+			const disabled: AvoProgressWatchdogAssessment = {
+				action: "disabled",
+				madeProgress: false,
+				consecutiveNoProgressTurns: 0,
+				consecutiveDeliveryMismatchTurns: 0,
+				recoveredFromNoProgressTurns: 0,
+				progressIndicators: [],
+			};
+			this._avoProgressWatchdogAssessments.set(message, disabled);
+			return disabled;
+		}
 		const assessment = this._avoProgressWatchdog.observe(this._captureAvoProgressWatchdogSnapshot(state), {
 			deliveryReady,
 		});
@@ -6460,7 +6485,9 @@ export class AgentSession {
 						? `Anti-laziness delivery intervention: ${watchdog.consecutiveDeliveryMismatchTurns} consecutive turns failed exact delivery. Return only the accepted candidate's canonical text now; do not paraphrase, explain, decorate, or append anything.`
 						: watchdog.action === "progress"
 							? `Progress watchdog observed: ${watchdog.progressIndicators.join("; ") || "host-observable task state changed"}. Continue from that progress and close the remaining verification gap.`
-							: "The verified candidate is ready. Return its exact canonical delivery without extra text.",
+							: watchdog.action === "disabled"
+								? "Continue working on the blocking conditions and produce the required host evidence."
+								: "The verified candidate is ready. Return its exact canonical delivery without extra text.",
 			"Use the avo skill automatically to record a candidate, obtain the required host-issued evidence, complete its cycle, and inspect the stop gate.",
 			"Once the gate passes, return only the exact canonical delivery for the accepted candidate: general tasks use the candidate payload text, deterministic arithmetic uses the numeric result, and coding/research use the candidate summary. Do not add a preface, suffix, or unverified claim.",
 			"</avo_completion_required>",

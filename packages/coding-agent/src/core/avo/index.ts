@@ -1,4 +1,12 @@
 export {
+	AVO_ABLATION_FEATURES,
+	AVO_INTERNAL_ABLATIONS_ENV,
+	type AvoAblationFeature,
+	activeAvoAblations,
+	isAvoFeatureAblated,
+	parseAvoAblations,
+} from "./ablation.js";
+export {
 	AvoAdapterRegistry,
 	type AvoEnvironmentAdapter,
 	CodingAvoAdapter,
@@ -42,6 +50,7 @@ export {
 	digestAvoExperimentValue,
 	normalizeAvoExperimentPlan,
 	parseAvoTrialMetricsOutput,
+	summarizeAvoMetric,
 } from "./experiment.js";
 export {
 	type AvoCandidateIntegrityAssessment,

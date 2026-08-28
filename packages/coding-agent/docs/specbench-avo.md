@@ -16,7 +16,11 @@ Python, or repository traversal.
 
 The official checkout must have no tracked modifications. Every task result and
 aggregate report records its exact 40-character upstream Git revision, and
-`--resume` refuses to mix results produced from another revision.
+`--resume` refuses to mix results produced from another revision. Ablation
+results additionally bind the provider, model, thinking level, budgets,
+hardening, behavioral settings/models digest, agent executable, Prime Git
+revision, and the exact coding-agent working-tree digest. Resume fails when any
+of that execution provenance changes.
 
 The immutable `test_specbench_contract.py` supports red-green tasks without
 weakening AVO's baseline identity. It passes only for the exact starter-file
@@ -69,6 +73,73 @@ npm run eval:specbench -- \
 Each task writes `result.json`, separate public/id-private/private grade logs,
 the final workspace, transcript, and durable Prime trace. Aggregate
 `report.json` and `report.md` are rewritten after every task.
+
+## Controlled ablations
+
+A single successful trace validates the enforcement path, but it does not show
+which mechanism caused better held-out performance. Run the one-feature-off
+matrix with identical tasks, model, thinking level, turn limit, timeout, and
+hardening configuration:
+
+```bash
+npm run eval:specbench -- \
+  --task json_parser \
+  --ablation-matrix \
+  --repetitions 3 \
+  --experiment-seed json-parser-ablation-v1 \
+  --specbench-root /path/to/SpecBench \
+  --output ~/.cache/prime-agent/specbench/json-parser-ablation-v1 \
+  --provider google-vertex \
+  --model gemini-3.7-flash
+```
+
+The six conditions are `full`, `no-obligations`, `no-assumptions`,
+`no-watchdog`, `no-impact`, and `no-nooa`. Each no-* condition disables the
+corresponding host gate, intervention, or memory retrieval path; it is not a
+prompt-only label. The runner removes obligation-specific task guidance when
+that ledger is disabled and does not disclose condition names in the model
+prompt. It uses the experiment seed to deterministically interleave
+condition/task/repetition order and places workspaces under opaque run IDs so
+the current condition is not exposed through `pwd`. Provider sampling can still be stochastic, so
+use multiple repetitions and avoid causal claims from one pair.
+
+`report.json` and `report.md` compare validation success, held-out success,
+validation-to-held-out gap, completed-but-hidden-failing outcomes, tokens,
+model/tool calls, duration, cost, held-out delta against full AVO, and hidden
+benefit per extra dollar where the denominator is positive. Use
+`--condition full,no-obligations` for a smaller targeted comparison.
+
+The NOOA condition disables retrieval, injection, the sidecar, and generative
+memory reflection/reconciliation. Host episode recording remains enabled so
+the run stays auditable, but those records cannot influence that condition.
+SpecBench tasks use isolated repositories, so NOOA benefit may be most visible
+in within-task revision/supervision. A separate repeated-task or same-project
+sequence is still required to measure cross-task memory value.
+
+### Obligation pilot result
+
+One real paired Vertex `gemini-3.7-flash` pilot on `json_parser` used execution
+seed `json-parser-obligation-pilot-v1`. This is a pipeline validation and a
+single paired observation, not evidence of a population-level causal effect.
+
+| Condition | Visible | Held-out | Model/tool calls | Tokens | Time | Cost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Full AVO | 45/45 | 173/178 | 28/27 | 1,167,431 | 492.6 s | $0.574 |
+| No obligations | 45/45 | 173/178 | 18/17 | 586,242 | 318.8 s | $0.393 |
+
+Both independently generated implementations missed the same five private
+checks. The strict completed-but-hidden-failing rate was therefore 100% in
+both conditions, and the held-out delta was zero. A Student-t interval is not
+estimable from one pair. Full AVO created 27 obligations and 54 coverage
+records, while the ablated state contained zero of each, confirming that the
+switch changed the host path rather than only relabeling the prompt.
+
+The trace also exposes a limitation to test next: one broad public-suite
+receipt was reused across all 27 obligations. The ledger forced explicit
+completion accounting and additional revision cycles, but this run does not
+show that such broad receipt binding adds hidden correctness. Do not claim an
+obligation benefit until repeated multi-task pairs show a positive held-out
+delta that justifies the observed token, call, time, and cost overhead.
 
 ## Validated Level 1 example
 

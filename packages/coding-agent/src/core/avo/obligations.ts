@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isAvoFeatureAblated } from "./ablation.js";
 import type {
 	AvoCandidate,
 	AvoCriticalAssumption,
@@ -50,6 +51,7 @@ export function deriveAvoObjectiveObligations(
 	verificationPolicy: AvoVerificationPolicy,
 	createdAt: string,
 ): AvoObligation[] {
+	if (isAvoFeatureAblated("obligations")) return [];
 	const normalized = objective.trim().replace(/\r\n?/g, "\n");
 	const evidence = objectiveEvidence(verificationClass, verificationPolicy);
 	const descriptions = [normalized];
@@ -125,6 +127,7 @@ export function deriveAvoObligationCoverage(
 	state: AvoRunState,
 	candidate: AvoCandidate,
 ): Array<{ obligation: AvoObligation; satisfied: boolean; evidenceIds: string[]; reason?: string }> {
+	if (isAvoFeatureAblated("obligations")) return [];
 	const receipts = state.evaluations.filter((receipt) => receipt.candidateId === candidate.candidateId);
 	return state.obligations.map((obligation) => {
 		if (!candidate.obligationIds.includes(obligation.obligationId)) {
@@ -162,6 +165,7 @@ export function deriveAvoCriticalAssumptionChecks(
 	passed: boolean;
 	reason?: string;
 }> {
+	if (isAvoFeatureAblated("critical_assumptions")) return [];
 	return state.criticalAssumptions
 		.filter((assumption) => assumption.critical)
 		.map((assumption) => {
@@ -207,6 +211,7 @@ function impactKind(path: string): AvoImpactSurface["kind"] | undefined {
 }
 
 export function deriveAvoCandidateImpactSurfaces(candidate: AvoCandidate): AvoImpactSurface[] {
+	if (isAvoFeatureAblated("impact_verification")) return [];
 	const grouped = new Map<AvoImpactSurface["kind"], string[]>();
 	for (const path of candidate.workspaceChangedPaths ?? []) {
 		const kind = impactKind(path);
@@ -232,6 +237,7 @@ export function deriveAvoCandidateImpactChecks(
 	state: AvoRunState,
 	candidate: AvoCandidate,
 ): Array<{ surface: AvoImpactSurface; passed: boolean; evidenceIds: string[]; missingGroups: string[] }> {
+	if (isAvoFeatureAblated("impact_verification")) return [];
 	const receipts = state.evaluations.filter((receipt) => receipt.candidateId === candidate.candidateId);
 	return (candidate.impactSurfaces ?? deriveAvoCandidateImpactSurfaces(candidate)).map((surface) => {
 		const evidenceIds = new Set<string>();

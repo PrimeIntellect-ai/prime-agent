@@ -574,7 +574,7 @@ export function parseAvoTrialMetricsOutput(
 	return metrics;
 }
 
-function metricSummary(values: readonly number[]): AvoMetricSummary {
+export function summarizeAvoMetric(values: readonly number[]): AvoMetricSummary {
 	if (values.length === 0 || values.some((value) => !Number.isFinite(value))) {
 		throw new Error("experiment aggregate requires finite numeric observations");
 	}
@@ -682,13 +682,13 @@ export function deriveAvoExperimentOutcome(
 	}
 	const candidateAggregates: AvoCandidateAggregate[] = plan.candidateIds.map((candidateId) => ({
 		candidateId,
-		metric: metricSummary(valuesByCandidate.get(candidateId) ?? []),
+		metric: summarizeAvoMetric(valuesByCandidate.get(candidateId) ?? []),
 	}));
 	const conditionAggregates: AvoConditionAggregate[] = plan.conditions.flatMap((condition) =>
 		plan.candidateIds.map((candidateId) => ({
 			conditionId: condition.conditionId,
 			candidateId,
-			metric: metricSummary(
+			metric: summarizeAvoMetric(
 				trials
 					.filter((trial) => trial.conditionId === condition.conditionId && trial.candidateId === candidateId)
 					.map((trial) => trial.metrics[plan.primaryMetric] as number),
@@ -724,7 +724,7 @@ export function deriveAvoExperimentOutcome(
 					deltas.push(candidateValue - baselineValue);
 				}
 			}
-			const delta = metricSummary(deltas);
+			const delta = summarizeAvoMetric(deltas);
 			const wins = deltas.filter((value) => direction * value > 0).length;
 			const losses = deltas.filter((value) => direction * value < 0).length;
 			pairedComparisons.push({
@@ -760,7 +760,7 @@ export function deriveAvoExperimentOutcome(
 					}
 					return candidateValue - baselineValue;
 				});
-				const conditionDelta = metricSummary(conditionDeltas);
+				const conditionDelta = summarizeAvoMetric(conditionDeltas);
 				const conditionWins = conditionDeltas.filter((value) => direction * value > 0).length;
 				const conditionLosses = conditionDeltas.filter((value) => direction * value < 0).length;
 				conditionPairedComparisons.push({

@@ -418,6 +418,7 @@ function findFiles(root: string, suffix: string): string[] {
 
 function emptyTraceSummary(): PrimeIntegrityTraceSummary {
 	return {
+		completedRuns: 0,
 		assistantTurns: 0,
 		modelCalls: 0,
 		toolCalls: 0,
@@ -425,6 +426,8 @@ function emptyTraceSummary(): PrimeIntegrityTraceSummary {
 		cycles: 0,
 		obligations: 0,
 		coveredObligations: 0,
+		obligationCoverageEvaluationCount: 0,
+		maxObligationsPerCoverageEvaluation: 0,
 		criticalAssumptions: 0,
 		resolvedCriticalAssumptions: 0,
 		watchdogInterventions: 0,
@@ -497,20 +500,43 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 	for (const statePath of findFiles(artifactRoot, `${sep}avo${sep}state.json`)) {
 		try {
 			const state = JSON.parse(readFileSync(statePath, "utf8")) as {
+				status?: unknown;
+				taskRuns?: Array<{ status?: unknown }>;
 				candidates?: unknown[];
 				cycles?: unknown[];
 				obligations?: unknown[];
-				obligationCoverage?: unknown[];
+				obligationCoverage?: Array<{ evaluationIds?: unknown }>;
 				criticalAssumptions?: Array<{ status?: unknown }>;
 				checkpoints?: Array<{
 					status?: unknown;
 					triggeredHeuristics?: unknown;
 				}>;
 			};
+			summary.completedRuns = Math.max(
+				summary.completedRuns,
+				Number(state.status === "completed") +
+					(state.taskRuns?.filter((run) => run.status === "completed").length ?? 0),
+			);
 			summary.candidates = Math.max(summary.candidates, state.candidates?.length ?? 0);
 			summary.cycles = Math.max(summary.cycles, state.cycles?.length ?? 0);
 			summary.obligations = Math.max(summary.obligations, state.obligations?.length ?? 0);
 			summary.coveredObligations = Math.max(summary.coveredObligations, state.obligationCoverage?.length ?? 0);
+			const coverageByEvaluation = new Map<string, number>();
+			for (const coverage of state.obligationCoverage ?? []) {
+				if (!Array.isArray(coverage.evaluationIds)) continue;
+				for (const evaluationId of coverage.evaluationIds) {
+					if (typeof evaluationId !== "string") continue;
+					coverageByEvaluation.set(evaluationId, (coverageByEvaluation.get(evaluationId) ?? 0) + 1);
+				}
+			}
+			summary.obligationCoverageEvaluationCount = Math.max(
+				summary.obligationCoverageEvaluationCount,
+				coverageByEvaluation.size,
+			);
+			summary.maxObligationsPerCoverageEvaluation = Math.max(
+				summary.maxObligationsPerCoverageEvaluation,
+				...coverageByEvaluation.values(),
+			);
 			summary.criticalAssumptions = Math.max(summary.criticalAssumptions, state.criticalAssumptions?.length ?? 0);
 			summary.resolvedCriticalAssumptions = Math.max(
 				summary.resolvedCriticalAssumptions,

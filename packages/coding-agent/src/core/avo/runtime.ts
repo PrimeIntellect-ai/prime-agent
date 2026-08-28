@@ -1,6 +1,7 @@
 import { dirname, join } from "node:path";
 import { getBundledSkillsDir } from "../../config.js";
 import type { AutoresearchState, AutoresearchStopGate } from "../autoresearch.js";
+import { activeAvoAblations, isAvoFeatureAblated } from "./ablation.js";
 import { AvoAdapterRegistry, CODING_AVO_CANDIDATE_KINDS, type ResearchAdapterState } from "./adapters.js";
 import { digestAvoExperimentCandidateIdentity, digestAvoExperimentValue } from "./experiment.js";
 import { AvoNooaMemoryBridge, type AvoNooaRunner } from "./memory.js";
@@ -39,7 +40,7 @@ export class AvoSessionRuntime {
 		this.store = new AvoStore(artifactDir, runId, now, cwd, agentDir ? join(agentDir, "memory") : undefined);
 		this.adapters = new AvoAdapterRegistry();
 		const backend = this.store.getMemoryBackendConfig();
-		if (Object.values(backend.paths).some((path) => path !== undefined)) {
+		if (!isAvoFeatureAblated("nooa") && Object.values(backend.paths).some((path) => path !== undefined)) {
 			this.memoryBridge = new AvoNooaMemoryBridge(
 				backend,
 				join(getBundledSkillsDir(), "avo", "src", "avo", "nooa_sidecar.py"),
@@ -82,6 +83,14 @@ export class AvoSessionRuntime {
 		backend: "nooa-memory" | "host-fallback";
 		reason?: string;
 	}> {
+		if (isAvoFeatureAblated("nooa")) {
+			return {
+				memories: [],
+				context: "",
+				backend: "host-fallback",
+				reason: "NOOA retrieval disabled by an internal benchmark ablation",
+			};
+		}
 		this.store.refreshPersistentMemories();
 		const limit = options.limit ?? (options.spontaneous ? 5 : 8);
 		const maxChars = options.maxChars ?? 2_000;
@@ -479,6 +488,7 @@ export class AvoSessionRuntime {
 }
 
 export function buildAvoRuntimePrompt(state: AvoRunState, memoryContext = ""): string {
+	const ablations = activeAvoAblations();
 	const onlineEvidenceRequired = state.routing.reasons.some((reason) =>
 		reason.startsWith("online evidence required:"),
 	);
@@ -494,11 +504,17 @@ export function buildAvoRuntimePrompt(state: AvoRunState, memoryContext = ""): s
 			: "AVO_ONLINE_EVIDENCE=not_required. Native online search is not enabled automatically because the task is locally and temporally self-contained; use local evidence unless a later user instruction escalates the requirement.",
 		"General, coding, and research are internal tool/evaluation adapters, not separate modes. Do not ask the user to choose one. Direct, iterative, and long only control how much AVO machinery is activated: direct uses one evaluated action without a retained supervisor; iterative retains candidate lineage and revises after feedback; long also activates namespaced memory, recovery, and retained trajectory supervision.",
 		"Environment routing is host-authoritative. Model calls cannot select general, coding, or research and may only escalate the current horizon to iterative or long.",
-		"Prime automatically recalls NOOA memory before root turns. Proposed task memory may surface as a hypothesis; proposed project memory is deliberate-only and proposed global persistence is forbidden. Verified memories are host-cleared, and live references are re-resolved at recall time. Never treat recall alone as task evidence or authority.",
-		memoryContext || undefined,
+		ablations.has("nooa")
+			? undefined
+			: "Prime automatically recalls NOOA memory before root turns. Proposed task memory may surface as a hypothesis; proposed project memory is deliberate-only and proposed global persistence is forbidden. Verified memories are host-cleared, and live references are re-resolved at recall time. Never treat recall alone as task evidence or authority.",
+		ablations.has("nooa") ? undefined : memoryContext || undefined,
 		'The contract below is complete: do not inspect Prime\'s AVO source, tests, skill files, or Python implementation, and do not call help(), dir(), hasattr(), or inspect.getsource() to rediscover it. Start with the user\'s task files. For ordinary coding work: inspect the relevant workspace; make the change; call `candidate = await avo.add_candidate({"kind": "implementation", "summary": "exact final response", "payload": {"change": "brief description"}})`; take `candidate["candidate"]["candidateId"]`; run a direct meaningful check with `await avo.run_evaluation(candidate_id, command)`; call `await avo.complete_cycle({"candidate_id": candidate_id})`; inspect `await avo.stop_gate()`; then return the exact candidate summary. Choose patch/implementation/configuration for source changes and artifact for a static deliverable; the candidate kind determines which test/build/lint/benchmark/runtime evidence can count. Use avo.run_coding_baseline before editing only when the host captured unchanged baseline tests or the user supplied an acceptance command. If the workspace has no suitable verifier, fail closed and report that missing contract instead of probing unrelated commands or claiming success.',
-		"For coding candidates, the host derives changed source, public-API/schema, configuration, and documentation impact surfaces. Source requires test evidence; public API/schema requires test and build; configuration requires test plus build or runtime; documentation requires a direct filesystem check. Uncovered impact surfaces block the cycle and final gate.",
-		"The host also runs a default anti-laziness watchdog. A turn counts as progress only when it records a meaningful host pass, covers a preregistered obligation, tests a critical assumption, completes a cycle, completes a host-bound experiment cell, or completes an experiment. A workspace edit or fresh candidate alone does not count. Reading, narrating, repeating the same failed check, inspecting Prime internals, or merely saying done does not reset it. Six consecutive tool batches without one of those milestones inject an immediate steering intervention. At blocked root-turn boundaries, one empty turn triggers a corrective watch, two trigger an intervention, and three automatically escalate the horizon to long. Repeatedly paraphrasing or decorating an already verified canonical delivery triggers a separate delivery intervention. Resume from the latest concrete milestone and change approach when intervened.",
+		ablations.has("impact_verification")
+			? undefined
+			: "For coding candidates, the host derives changed source, public-API/schema, configuration, and documentation impact surfaces. Source requires test evidence; public API/schema requires test and build; configuration requires test plus build or runtime; documentation requires a direct filesystem check. Uncovered impact surfaces block the cycle and final gate.",
+		ablations.has("qualified_watchdog")
+			? undefined
+			: "The host also runs a default anti-laziness watchdog. A turn counts as progress only when it records a meaningful host pass, covers a preregistered obligation, tests a critical assumption, completes a cycle, completes a host-bound experiment cell, or completes an experiment. A workspace edit or fresh candidate alone does not count. Reading, narrating, repeating the same failed check, inspecting Prime internals, or merely saying done does not reset it. Six consecutive tool batches without one of those milestones inject an immediate steering intervention. At blocked root-turn boundaries, one empty turn triggers a corrective watch, two trigger an intervention, and three automatically escalate the horizon to long. Repeatedly paraphrasing or decorating an already verified canonical delivery triggers a separate delivery intervention. Resume from the latest concrete milestone and change approach when intervened.",
 		"Use the avo skill for the task's candidate/evaluation lifecycle. The host will automatically continue the root task instead of accepting an answer that skipped AVO, failed its gate, changed a verified workspace/artifact, or differs from the accepted candidate's canonical delivery. Callers may record only model_opinion. Required external_factual candidates must declare verbatim claims and bind each claim to a host-trusted external source record; after Serper IPython or Vertex Google Search, use avo.fetch_external_source on a result URL and avo.bind_url with a visible quote exactly equal to the claim. Provenance without a host-bound independent entailment verdict cannot pass. Required deterministic arithmetic uses a payload exactly shaped as {result: number} and avo.verify_deterministic_result; required artifact candidates declare artifact_paths and use avo.verify_artifacts. An unrelated successful command cannot certify either class. Before changing a coding workspace, use avo.run_coding_baseline with a direct command that explicitly names an unchanged baseline test file, then run the exact same command after the candidate with avo.run_evaluation. Mutable package-script wrappers, output-printed filenames, no-op mutation candidates, and candidate-created tests cannot certify progress. For repeatable comparisons in any adapter, preregister a structured candidate/condition/seed screening plan with avo.record_experiment, run each exact cell through avo.run_trial, and call avo.complete_experiment only after the full grid. Screening only ranks a provisional candidate. Promotion requires a separate prospective confirmation that compares exactly that challenger with the same baseline and conditions on unused seeds, declares at least five pairs, and preregisters a positive absolute or relative meaningful-effect threshold. The host renders and hashes cell commands, derives aggregate statistics and paired Student-t confidence bounds, issues confirmatory promote/retain outcomes, and stores declarations separately from empirical observations in NOOA. Never invent host, environment, or external authority. Required verification needs host-issued evidence; best_effort and not_applicable policies may use a transparent model-opinion review without pretending it is external. Complete the candidate cycle, then return only its canonical delivery: general payload text, deterministic numeric result, or coding/research summary, with no preface or suffix. A later root task starts a fresh task run after the current gate and delivery pass, while namespaced memory survives across runs.",
 	]
 		.filter((line): line is string => line !== undefined)

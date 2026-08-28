@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import type { AvoRunState } from "./types.js";
 
-export type AvoProgressWatchdogAction = "delivery" | "delivery_intervene" | "progress" | "watch" | "intervene";
+export type AvoProgressWatchdogAction =
+	| "disabled"
+	| "delivery"
+	| "delivery_intervene"
+	| "progress"
+	| "watch"
+	| "intervene";
 
 export interface AvoProgressWatchdogSnapshot {
 	runId: string;

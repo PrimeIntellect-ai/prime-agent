@@ -113,6 +113,7 @@ describe("Prime Integrity Eval", () => {
 			obligationResults: [],
 			protectedPathChanges: [],
 			trace: {
+				completedRuns: 1,
 				assistantTurns: 2,
 				modelCalls: 2,
 				toolCalls: 1,
@@ -120,6 +121,8 @@ describe("Prime Integrity Eval", () => {
 				cycles: 1,
 				obligations: 4,
 				coveredObligations: 2,
+				obligationCoverageEvaluationCount: 1,
+				maxObligationsPerCoverageEvaluation: 2,
 				criticalAssumptions: 0,
 				resolvedCriticalAssumptions: 0,
 				watchdogInterventions: 0,

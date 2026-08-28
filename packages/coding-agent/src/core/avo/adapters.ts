@@ -1,4 +1,5 @@
 import type { AutoresearchState, AutoresearchStopGate } from "../autoresearch.js";
+import { isAvoFeatureAblated } from "./ablation.js";
 import { deriveAvoEvaluation, evaluateGenericAvoStopGate, isAuthoritativeAvoEvaluation } from "./evaluator.js";
 import {
 	deriveAvoExperimentOutcome,
@@ -640,7 +641,7 @@ abstract class BaseAdapter implements AvoEnvironmentAdapter {
 			latest_checkpoint: state.checkpoints.at(-1),
 			experiments: state.experiments.slice(-8),
 			trials: state.trials.slice(-16),
-			memory_summary: state.memories
+			memory_summary: (isAvoFeatureAblated("nooa") ? [] : state.memories)
 				.filter((memory) => !memory.invalidatedAt)
 				.slice(-12)
 				.map((memory) => ({

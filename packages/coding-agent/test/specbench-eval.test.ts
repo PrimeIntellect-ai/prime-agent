@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
+	aggregateSpecBenchConditions,
 	listSpecBenchTasks,
 	parseSpecBenchArgs,
 	parseSpecBenchGrade,
+	type SpecBenchResult,
 	specBenchTaskPrompt,
 } from "../src/evals/specbench/runner.js";
 
@@ -22,6 +24,19 @@ describe("SpecBench evaluation runner", () => {
 		expect(parsed.tasks).toEqual(["json_parser", "http_server"]);
 		expect(parsed.maxTurns).toBe(18);
 		expect(parsed.hardening).toBe(true);
+	});
+
+	test("parses a repeated one-feature-at-a-time ablation matrix", () => {
+		const parsed = parseSpecBenchArgs(["--task", "json_parser", "--ablation-matrix", "--repetitions", "3"]);
+		expect(parsed.conditions).toEqual([
+			"full",
+			"no-obligations",
+			"no-assumptions",
+			"no-watchdog",
+			"no-impact",
+			"no-nooa",
+		]);
+		expect(parsed.repetitions).toBe(3);
 	});
 
 	test("discovers only official task-shaped directories", () => {
@@ -47,6 +62,18 @@ describe("SpecBench evaluation runner", () => {
 		expect(prompt).not.toContain("tests/private");
 	});
 
+	test("removes obligation-specific task guidance only for its ablation", () => {
+		const task = {
+			taskId: "json_parser",
+			displayName: "JSON Parser",
+			specDocument: "Support strings and numbers.",
+		};
+		expect(specBenchTaskPrompt(task)).toContain("as an obligation");
+		const ablated = specBenchTaskPrompt(task, ["obligations"]);
+		expect(ablated).not.toContain("as an obligation");
+		expect(ablated).toContain("Implement every requirement and constraint");
+	});
+
 	test("derives pass rate from host pytest output", () => {
 		expect(
 			parseSpecBenchGrade({
@@ -69,5 +96,89 @@ describe("SpecBench evaluation runner", () => {
 				stderr: "",
 			}),
 		).toMatchObject({ total: 10, passed: 7, failed: 3, passRate: 0.7 });
+	});
+
+	test("reports marginal held-out value and cost for each condition", () => {
+		const result = (
+			conditionId: SpecBenchResult["conditionId"],
+			heldOut: number,
+			costUsd: number,
+			repetition: number,
+		): SpecBenchResult => ({
+			specbenchRevision: "a".repeat(40),
+			conditionId,
+			disabledFeatures: conditionId === "full" ? [] : ["obligations"],
+			repetition,
+			orderIndex: 1,
+			experimentSeed: "test",
+			runConfigurationDigest: "b".repeat(64),
+			primeRevision: "c".repeat(40),
+			primeWorkspaceDigest: "d".repeat(64),
+			configBehaviorDigest: "e".repeat(64),
+			taskId: "json_parser",
+			displayName: "JSON Parser",
+			language: "python",
+			public: {
+				total: 10,
+				passed: 10,
+				failed: 0,
+				errors: 0,
+				skipped: 0,
+				passRate: 1,
+				exitCode: 0,
+				timedOut: false,
+				durationMs: 1,
+			},
+			private: {
+				total: 10,
+				passed: Math.round(heldOut * 10),
+				failed: Math.round((1 - heldOut) * 10),
+				errors: 0,
+				skipped: 0,
+				passRate: heldOut,
+				exitCode: heldOut === 1 ? 0 : 1,
+				timedOut: false,
+				durationMs: 1,
+			},
+			rewardHackingGap: 1 - heldOut,
+			specCompliant: heldOut === 1,
+			agentExitCode: 0,
+			agentTimedOut: false,
+			protectedChanges: [],
+			durationMs: 1_000,
+			falseCompletion: heldOut < 1,
+			trace: {
+				completedRuns: 1,
+				assistantTurns: 2,
+				modelCalls: 2,
+				toolCalls: 3,
+				candidates: 1,
+				cycles: 1,
+				obligations: 1,
+				coveredObligations: 1,
+				obligationCoverageEvaluationCount: 1,
+				maxObligationsPerCoverageEvaluation: 1,
+				criticalAssumptions: 0,
+				resolvedCriticalAssumptions: 0,
+				watchdogInterventions: 0,
+				watchdogWatches: 0,
+				inputTokens: 80,
+				outputTokens: 20,
+				totalTokens: 100,
+				costUsd,
+				commands: [],
+			},
+			workspacePath: "/tmp/workspace",
+			transcriptPath: "/tmp/transcript",
+		});
+		const summaries = aggregateSpecBenchConditions([
+			result("full", 0.9, 1, 1),
+			result("full", 0.9, 1, 2),
+			result("no-obligations", 0.7, 0.5, 1),
+			result("no-obligations", 0.7, 0.5, 2),
+		]);
+		expect(summaries[1]).toMatchObject({ conditionId: "no-obligations", deltaCostVsFull: -0.5 });
+		expect(summaries[1]?.deltaHeldOutVsFull).toBeCloseTo(-0.2);
+		expect(summaries[1]?.hiddenBenefitPerExtraDollar).toBeCloseTo(0.4);
 	});
 });
