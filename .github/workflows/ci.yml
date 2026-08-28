@@ -13,6 +13,10 @@ concurrency:
 permissions:
   contents: read
 
+# Build from the committed model catalogue so CI does not depend on live vendor data.
+env:
+  PI_SKIP_MODEL_GENERATION: "1"
+
 jobs:
   trust:
     name: Contributor trust

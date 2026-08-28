@@ -1,0 +1,1 @@
+- Refreshed the generated model catalogue and made CI build/test against the committed catalogue instead of live vendor data (set `PI_SKIP_MODEL_GENERATION` to skip regeneration).

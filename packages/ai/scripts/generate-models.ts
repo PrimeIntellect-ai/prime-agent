@@ -2445,5 +2445,9 @@ export const MODELS = {
 	}
 }
 
-// Run the generator
-generateModels().catch(console.error);
+// Run the generator; CI sets the env var to build from the committed catalogue
+if (process.env.PI_SKIP_MODEL_GENERATION) {
+	console.log("PI_SKIP_MODEL_GENERATION set; keeping committed src/models.generated.ts");
+} else {
+	generateModels().catch(console.error);
+}
