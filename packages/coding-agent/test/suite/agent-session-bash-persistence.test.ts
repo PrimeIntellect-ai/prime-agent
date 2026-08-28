@@ -547,12 +547,42 @@ describe("AgentSession bash and persistence characterization", () => {
 		const secondResult = await second;
 		expect(secondResult.cancelled).toBe(false);
 
-		// The later command's completion must not clear the earlier command's abort state.
+		// The earlier command stays running and abortable on its own controller.
 		expect(harness.session.isBashRunning).toBe(true);
 		harness.session.abortBash();
 		const firstResult = await first;
 		expect(firstResult.cancelled).toBe(true);
 		expect(harness.session.isBashRunning).toBe(false);
+	});
+
+	it("cancels a pending user bash when abortBash arrives while another bash is in flight", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const operations: BashOperations = {
+			exec: async (_command, _cwd, options) =>
+				await new Promise<{ exitCode: number | null }>((_resolve, reject) => {
+					options.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				}),
+		};
+
+		// The user bash claims its slot first, then a concurrent wait-style
+		// command (unguarded executeBash path) occupies the controller set while
+		// the user bash is still in extension dispatch.
+		const run = harness.session.runUserBash("echo should-not-run");
+		const waitBash = harness.session.executeBash("wait", undefined, { operations });
+		harness.session.abortBash();
+		await run;
+		expect((await waitBash).cancelled).toBe(true);
+
+		const userBashMessage = harness.session.messages
+			.slice()
+			.reverse()
+			.find((message) => message.role === "bashExecution" && message.command === "echo should-not-run");
+		expect(userBashMessage?.role).toBe("bashExecution");
+		if (userBashMessage?.role === "bashExecution") {
+			expect(userBashMessage.cancelled).toBe(true);
+			expect(userBashMessage.output).toBe("");
+		}
 	});
 
 	it("aborts every in-flight bash command with abortBash", async () => {

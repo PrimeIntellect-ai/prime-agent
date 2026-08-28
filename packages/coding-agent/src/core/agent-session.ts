@@ -10918,9 +10918,7 @@ export class AgentSession {
 			transient?: boolean;
 		},
 	): Promise<BashResult> {
-		// Per-invocation controller: concurrent commands (e.g. two daemon
-		// execute_bash_and_wait requests) must not share abort state, or the
-		// first finisher would clear the controller of a still-running command.
+		// Each invocation owns its controller so abortBash reaches every in-flight command.
 		const abortController = new AbortController();
 		this._bashAbortControllers.add(abortController);
 
@@ -11113,7 +11111,8 @@ export class AgentSession {
 	abortBash(): void {
 		// A user bash command may not have spawned yet (extension dispatch in
 		// progress); flag the request so runUserBash cancels before executing.
-		if (this._userBashRunning && this._bashAbortControllers.size === 0) {
+		// runUserBash clears the flag at each start, so a stale flag is harmless.
+		if (this._userBashRunning) {
 			this._userBashAbortRequested = true;
 		}
 		for (const controller of this._bashAbortControllers) {
