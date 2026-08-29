@@ -4137,11 +4137,12 @@ export class DaemonSupervisor {
 		assertAgentSessionNameAvailable(
 			siblings.map((info) => {
 				const summary = summaryForInactiveSession(info);
+				const ledgerRow = this.roster().bySessionFile(canonicalSessionPath(info.path));
 				return {
 					id: summary.sessionId,
 					...(summary.sessionName ? { name: summary.sessionName } : {}),
 					depth: setDepth,
-					status: summary.rosterStatus ?? classifySessionRosterStatus(summary),
+					status: ledgerRow?.status ?? classifySessionRosterStatus(summary),
 					...(summary.parentSessionPath
 						? { parentSessionPath: canonicalSessionPath(summary.parentSessionPath) }
 						: {}),

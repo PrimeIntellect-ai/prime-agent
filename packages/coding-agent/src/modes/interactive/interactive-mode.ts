@@ -5937,12 +5937,15 @@ export class InteractiveMode {
 	private updateSubagentSummary(child: AgentConnectionRlmChildAgentSnapshot): void {
 		const previous = this.subagentSnapshots.get(child.id);
 		const terminal = child.status === "done" || child.status === "error";
-		const everBound = hasSubagentSessionEvidence(previous) || hasSubagentSessionEvidence(child);
+		// Bound-ness is sticky: merges clear display fields, so repeated terminal projections stay idempotent.
+		const everBound =
+			previous?.everBound === true || hasSubagentSessionEvidence(previous) || hasSubagentSessionEvidence(child);
 		// The roster's rule: a terminal run that never bound a session leaves no row anywhere.
 		if (child.status === "cancelled" || (terminal && !everBound)) {
 			this.removeSubagentSnapshot(child.id);
 		} else {
-			this.subagentSnapshots.set(child.id, previous ? mergeSubagentSnapshot(previous, child) : child);
+			const merged = previous ? mergeSubagentSnapshot(previous, child) : child;
+			this.subagentSnapshots.set(child.id, everBound ? { ...merged, everBound: true } : merged);
 		}
 		this.refreshSubagentSummary();
 	}

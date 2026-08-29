@@ -389,6 +389,10 @@ describe("bar and view lifecycle equality", () => {
 		feed({ id: "c-passive", status: "done", tokenCount: 42 });
 		// recovering: still resident; its worker state is a label, not a status change.
 		feed({ id: "c-recovering", status: "running", activeSessionId: "r-active" });
+		// bound -> evidence-free terminal, projected TWICE: sticky bound-ness keeps the transcript row.
+		feed({ id: "c-evicted", status: "running", activeSessionId: "e-active" });
+		feed({ id: "c-evicted", status: "done" });
+		feed({ id: "c-evicted", status: "done" });
 
 		const barCounts = countDirectSubagentStatuses(
 			bar.subagentSnapshots.values(),
@@ -428,6 +432,10 @@ describe("bar and view lifecycle equality", () => {
 				{ status: "inactive" },
 			),
 			ledgerEntry(
+				{ id: "e-session", sessionId: "e-session", runtimeKind: "subagent", rlmChildId: "c-evicted" },
+				{ status: "inactive" },
+			),
+			ledgerEntry(
 				{
 					id: "r-active",
 					sessionId: "r-session",
@@ -445,7 +453,8 @@ describe("bar and view lifecycle equality", () => {
 		}
 
 		expect(bar.subagentSnapshots.has("c-unbound")).toBe(false);
-		expect(barCounts).toEqual({ total: 5, ...viewCounts });
+		expect(bar.subagentSnapshots.has("c-evicted")).toBe(true);
+		expect(barCounts).toEqual({ total: 6, ...viewCounts });
 	});
 });
 
