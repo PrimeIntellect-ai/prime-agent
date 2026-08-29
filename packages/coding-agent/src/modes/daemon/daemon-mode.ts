@@ -4262,7 +4262,12 @@ export class AgentDaemon {
 				const state = this.getSessionState(command.activeSessionId);
 				const bash = state.runtime.session.executeBash(command.command);
 				state.inFlightBash = Promise.allSettled([state.inFlightBash, bash]).then(() => undefined);
-				return success(command.id, "execute_bash_and_wait", await bash);
+				try {
+					return success(command.id, "execute_bash_and_wait", await bash);
+				} finally {
+					// executeBash appends transcript messages without bash_* events; flush the roster projection here.
+					this.scheduleRosterFlush();
+				}
 			}
 
 			case "abort_bash": {
@@ -6175,10 +6180,11 @@ export class AgentDaemon {
 	}
 
 	private findActiveSessionByFile(sessionPath: string): ActiveSessionState | undefined {
-		const resolvedSessionPath = resolve(sessionPath);
+		// Symlink-resolving canonicalization: guards compare the same path the tombstone/removal side uses.
+		const canonicalPath = canonicalSessionPath(sessionPath);
 		for (const state of this.sessions.values()) {
 			const sessionFile = state.runtime.session.sessionFile;
-			if (sessionFile && resolve(sessionFile) === resolvedSessionPath) {
+			if (sessionFile && canonicalSessionPath(sessionFile) === canonicalPath) {
 				return state;
 			}
 		}

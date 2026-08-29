@@ -2124,10 +2124,8 @@ export class DaemonSupervisor {
 					if (entry?.summary.activeSessionId !== undefined) {
 						throw new Error("Cannot delete the currently active session");
 					}
-					// Descriptor paths cover owners whose rows are not claimed yet (startup, adoption, recovery).
-					const owner =
-						(entry?.workerId !== undefined ? this.workers.get(entry.workerId) : undefined) ??
-						this.findWorkerBySessionFile(command.sessionPath);
+					// Descriptor and summary paths cover owners whose rows are not flushed yet (startup, adoption, fresh children).
+					const owner = this.findWorkerBySessionFile(command.sessionPath);
 					if (owner) {
 						// The owning worker deletes its own passivated files and publishes the removal itself.
 						if (owner.client && !this.isWorkerStopping(owner)) {
@@ -3091,11 +3089,25 @@ export class DaemonSupervisor {
 		if (worker.descriptor.processStartId === undefined && observedProcessStartId !== undefined) {
 			worker.descriptor.processStartId = observedProcessStartId;
 		}
-		const safeToKill =
-			isProcessAlive(worker.descriptor.pid) &&
-			worker.descriptor.processStartId !== undefined &&
-			getProcessStartId(worker.descriptor.pid) === worker.descriptor.processStartId;
-		await this.recoverUncertainWorkerOperations(worker, safeToKill);
+		const identity = () => this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
+		const initialIdentity = identity();
+		await this.recoverUncertainWorkerOperations(worker, initialIdentity === "current");
+		if (initialIdentity === "current") {
+			// SIGKILL is uninterceptable; this wait only covers kernel teardown of the old process and socket.
+			const killDeadline = Date.now() + 1000;
+			while (identity() === "current" && Date.now() < killDeadline) {
+				await delay(25);
+			}
+		}
+		// A replacement authenticates against the old socket unless the old process is confirmed stopped.
+		if (initialIdentity === "unknown" || identity() === "current") {
+			worker.descriptor.lifecycle = "failed";
+			worker.descriptor.lastError = `Pre-roster worker process ${worker.descriptor.pid} is still running and cannot be replaced safely`;
+			this.persistWorker(worker);
+			this.markWorkerRosterEntries(worker, "failed");
+			this.log(`Kept pre-roster worker ${worker.descriptor.workerId} failed: ${worker.descriptor.lastError}`);
+			return;
+		}
 		if (this.isWorkerRecoveryCancelled(worker)) {
 			return;
 		}
@@ -3600,7 +3612,7 @@ export class DaemonSupervisor {
 		}
 		const epochAtStart = worker.rosterEpoch ?? 0;
 		const response = await worker.client.request({ type: "list" }, 5000);
-		// A frame applied mid-pull can remove rows this stale pull would resurrect; re-pull once, then skip the fill.
+		// A frame received mid-pull can remove rows this stale pull would resurrect; re-pull once, then skip the fill.
 		if (fillGaps && (worker.rosterEpoch ?? 0) !== epochAtStart && !retried) {
 			return this.refreshWorkerSummaries(worker, recovery, fillGaps, true);
 		}
@@ -3612,7 +3624,12 @@ export class DaemonSupervisor {
 		}
 		worker.summaries = nextSummaries;
 		// Launch and recovery pulls carry registry children no delta composes; fill their missing rows.
-		if (fillGaps && (worker.rosterEpoch ?? 0) === epochAtStart) this.fillRosterGapsFromWorkerSummaries(worker);
+		// The fill queues behind in-flight frame applies and re-checks the epoch there, so it never treats an unapplied snapshot as stable.
+		if (fillGaps) {
+			await this.chainWorkerRosterApply(worker, () => {
+				if ((worker.rosterEpoch ?? 0) === epochAtStart) this.fillRosterGapsFromWorkerSummaries(worker);
+			});
+		}
 		for (const summary of summaries) {
 			const activeSessionId = summary.activeSessionId ?? summary.id;
 			if (summary.streamingMessage?.role === "assistant") {
@@ -3766,29 +3783,35 @@ export class DaemonSupervisor {
 			return;
 		}
 		if (delta.type !== "roster_delta" || !Array.isArray(delta.entries)) return;
+		// The epoch bumps at frame receipt, before any async apply work, so an in-flight pull sees this frame.
+		worker.rosterEpoch = (worker.rosterEpoch ?? 0) + 1;
 		if (delta.snapshot !== true && worker.rosterApplyChain === undefined) {
 			this.applyWorkerRosterDelta(worker, delta);
 			return;
 		}
-		// Snapshots pre-read the ledger, so later frames queue behind them to keep per-worker order.
+		this.chainWorkerRosterApply(worker, () =>
+			delta.snapshot === true
+				? this.applyWorkerRosterSnapshot(worker, delta)
+				: this.applyWorkerRosterDelta(worker, delta),
+		);
+	}
+
+	/** One per-worker serialization for every roster write: frames and pull fills apply in receipt order. */
+	private chainWorkerRosterApply(worker: ResidentWorker, apply: () => void | Promise<void>): Promise<void> {
 		const chained = (worker.rosterApplyChain ?? Promise.resolve())
-			.then(() =>
-				delta.snapshot === true
-					? this.applyWorkerRosterSnapshot(worker, delta)
-					: this.applyWorkerRosterDelta(worker, delta),
-			)
+			.then(apply)
 			.catch((error: unknown) => this.log(`could not apply a roster frame: ${String(error)}`));
 		worker.rosterApplyChain = chained;
 		void chained.finally(() => {
 			if (worker.rosterApplyChain === chained) worker.rosterApplyChain = undefined;
 		});
+		return chained;
 	}
 
 	private applyWorkerRosterDelta(
 		worker: ResidentWorker,
 		delta: Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>,
 	): void {
-		worker.rosterEpoch = (worker.rosterEpoch ?? 0) + 1;
 		for (const entry of delta.entries) {
 			this.writeRosterEntry(entry, worker);
 			this.syncRootDescriptorFromRosterEntry(worker, entry);
@@ -3809,7 +3832,6 @@ export class DaemonSupervisor {
 				this.log(`Could not read the spawn ledger during a snapshot apply: ${String(error)}`);
 				return [] as RlmLedgerEdge[];
 			});
-		worker.rosterEpoch = (worker.rosterEpoch ?? 0) + 1;
 		// A live worker's snapshot carries its passivated rows too; absence means removal, disk backs the rest.
 		const sent = new Set(delta.entries.map((entry) => entry.agentId));
 		for (const entry of this.workerRosterEntries(worker)) {
@@ -4170,12 +4192,17 @@ export class DaemonSupervisor {
 		});
 	}
 
+	/** The one owner resolution by session file: claimed roster rows, pulled summaries, then descriptor paths. */
 	private findWorkerBySessionFile(sessionFile: string): ResidentWorker | undefined {
 		const target = canonicalSessionPath(sessionFile);
 		const targetEntry = this.roster().bySessionFile(target);
 		const matches = new Set<ResidentWorker>();
 		for (const worker of this.workers.values()) {
-			const summaryMatches = targetEntry?.workerId === worker.descriptor.workerId;
+			const summaryMatches =
+				targetEntry?.workerId === worker.descriptor.workerId ||
+				[...worker.summaries.values()].some(
+					(summary) => summary.sessionFile !== undefined && canonicalSessionPath(summary.sessionFile) === target,
+				);
 			const descriptorPath = worker.descriptor.sessionFile
 				? canonicalSessionPath(worker.descriptor.sessionFile)
 				: undefined;
