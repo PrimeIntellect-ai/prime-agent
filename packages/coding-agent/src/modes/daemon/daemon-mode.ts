@@ -552,6 +552,7 @@ export class AgentDaemon {
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
 	private readonly rosterReporter: WorkerRosterReporterState = {
 		lastComposed: new Map(),
+		lastComposedJson: new Map(),
 		queuedChildren: new Map(),
 		removedAgentIds: new Set(),
 		snapshotPending: false,
@@ -6694,14 +6695,17 @@ export class AgentDaemon {
 			}
 		}
 		// Deltas are best-effort freshness hints; any miss escalates to one full replacing snapshot.
+		// Cached serializations keep churny flushes at one stringify per current row.
 		const changed: WorkerRosterEntry[] = [];
+		const nextJson = new Map<string, string>();
 		for (const entry of entries.values()) {
-			if (JSON.stringify(reporter.lastComposed.get(entry.agentId) ?? null) !== JSON.stringify(entry)) {
-				changed.push(entry);
-			}
+			const json = JSON.stringify(entry);
+			nextJson.set(entry.agentId, json);
+			if (reporter.lastComposedJson.get(entry.agentId) !== json) changed.push(entry);
 		}
 		const removedAgentIds = [...reporter.removedAgentIds];
 		reporter.lastComposed = new Map(entries);
+		reporter.lastComposedJson = nextJson;
 		if (!this.hasAuthenticatedSupervisorClient()) {
 			// Undelivered removals stay pending; they ride the first delivered frame.
 			if (changed.length > 0 || removedAgentIds.length > 0) reporter.snapshotPending = true;
@@ -7138,6 +7142,8 @@ const ROSTER_HEARTBEAT_INTERVAL_MS = 15_000;
 interface WorkerRosterReporterState {
 	/** Last composed roster, delivered or not; the source for passivated flips and change hints. */
 	lastComposed: Map<string, WorkerRosterEntry>;
+	/** Serialized form of lastComposed, reused for change detection across flushes. */
+	lastComposedJson: Map<string, string>;
 	/** Admitted child runs whose sessions have not materialized yet, keyed by agentId. */
 	queuedChildren: Map<string, WorkerRosterEntry>;
 	removedAgentIds: Set<string>;

@@ -41,6 +41,7 @@ interface WorkerReporterFixture {
 		flushRoster(): void;
 		rosterReporter: {
 			lastComposed: Map<string, WorkerRosterEntry>;
+			lastComposedJson: Map<string, string>;
 			queuedChildren: Map<string, WorkerRosterEntry>;
 			removedAgentIds: Set<string>;
 			snapshotPending: boolean;
@@ -59,6 +60,7 @@ function makeWorkerReporter(connected = true): WorkerReporterFixture {
 		cronStore: { list: () => [] },
 		rosterReporter: {
 			lastComposed: new Map<string, WorkerRosterEntry>(),
+			lastComposedJson: new Map<string, string>(),
 			queuedChildren: new Map<string, WorkerRosterEntry>(),
 			removedAgentIds: new Set<string>(),
 			snapshotPending: false,
@@ -318,6 +320,7 @@ describe("worker roster reporter", () => {
 			supervisorClaims: new Map([[client, {}]]),
 			rosterReporter: {
 				lastComposed: new Map(),
+				lastComposedJson: new Map(),
 				queuedChildren: new Map(),
 				removedAgentIds: new Set(["deleted-agent"]),
 				snapshotPending: false,
