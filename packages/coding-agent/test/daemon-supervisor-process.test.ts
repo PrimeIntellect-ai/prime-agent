@@ -400,17 +400,11 @@ describe("daemon supervisor resident workers", () => {
 		if (!parentSummary.workerPid) throw new Error("Parent worker did not expose its pid");
 		workerPids.add(parentSummary.workerPid);
 
-		const beforeAttach = await client.request({ type: "list", all: true });
+		const beforeAttach = await client.request({ type: "list" });
 		expect(beforeAttach.success).toBe(true);
 		const passiveSummary = requireSessionList(beforeAttach.success ? beforeAttach.data : undefined).find(
 			(summary) => summary.sessionFile === child.sessionFile,
 		);
-		const beforeAttachResident = await client.request({ type: "list" });
-		expect(
-			requireSessionList(beforeAttachResident.success ? beforeAttachResident.data : undefined).every(
-				(summary) => summary.activeSessionId !== undefined,
-			),
-		).toBe(true);
 		expect(passiveSummary).toMatchObject({
 			sessionId: child.manager.getSessionId(),
 			sessionName: "passive-child-worker",

@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { getLogger } from "@earendil-works/pi-ai";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
@@ -2265,14 +2265,11 @@ export class DaemonSupervisor {
 		const inactive: SessionSummary[] = [];
 		let busyClientOwnedSessionCount = 0;
 		for (const entry of this.roster().values()) {
-			// Sessionless queued-child rows stay ledger-internal until a push protocol can carry their label.
+			// Sessionless queued-child rows are ledger-internal; no list form serves them.
 			if (entry.queuedChild) continue;
 			const worker = entry.workerId !== undefined ? this.workers.get(entry.workerId) : undefined;
-			if (worker === undefined || entry.summary.activeSessionId === undefined) {
-				if (command.all) {
-					const base = sessionSummaryFromRosterEntry(entry);
-					inactive.push(worker ? this.publicSummary(worker, base) : base);
-				}
+			if (worker === undefined) {
+				if (command.all) inactive.push(sessionSummaryFromRosterEntry(entry));
 				continue;
 			}
 			const summary = this.publicSummary(worker, sessionSummaryFromRosterEntry(entry));
@@ -2301,13 +2298,18 @@ export class DaemonSupervisor {
 		return success(command.id, "list", { ...data, sessions: [...saved, ...active] });
 	}
 
-	// A session belongs to a sessions dir directly or through the dir's sibling session-artifacts tree.
+	// An artifact-dir child belongs to the sessions dir of its owning root session.
 	private matchesListSessionDir(summary: SessionSummary, sessionDir: string | undefined): boolean {
 		if (sessionDir === undefined) return true;
 		if (!summary.sessionFile) return false;
-		const dir = resolve(sessionDir);
-		const file = resolve(summary.sessionFile);
-		return file.startsWith(`${dir}${sep}`) || file.startsWith(`${join(dirname(dir), "session-artifacts")}${sep}`);
+		let file = resolve(summary.sessionFile);
+		let parentSessionPath = summary.parentSessionPath;
+		for (let hops = 0; parentSessionPath !== undefined && hops < 32; hops++) {
+			file = resolve(parentSessionPath);
+			parentSessionPath = this.roster().bySessionFile(canonicalSessionPath(parentSessionPath))?.summary
+				.parentSessionPath;
+		}
+		return dirname(file) === resolve(sessionDir);
 	}
 
 	private async handleSavedSessionList(
