@@ -2088,14 +2088,14 @@ describe("daemon worker supervisor monitoring", () => {
 			handleList(
 				client: object,
 				command: { id: string; type: "list" },
-			): {
+			): Promise<{
 				success: boolean;
 				data?: { sessions: Array<{ activeSessionId?: string; id: string; workerState?: string }> };
-			};
+			}>;
 		};
 		seedSupervisorRoster(supervisor, liveWorker, stoppingWorker);
 
-		const response = supervisor.handleList({}, { id: "list-1", type: "list" });
+		const response = await supervisor.handleList({}, { id: "list-1", type: "list" });
 
 		expect(response.success).toBe(true);
 		const sessions = response.data?.sessions ?? [];

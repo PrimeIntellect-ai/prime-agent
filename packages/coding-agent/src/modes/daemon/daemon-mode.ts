@@ -124,7 +124,13 @@ import {
 	type DaemonSocketClient,
 	resolveActiveSessionState,
 } from "./active-session-state.js";
-import { passivatedWorkerRosterEntry, type WorkerRosterEntry, workerRosterEntryFromSummary } from "./agent-roster.js";
+import {
+	passivatedWorkerRosterEntry,
+	type RosterSessionSummary,
+	rosterAgentIdForSummary,
+	type WorkerRosterEntry,
+	workerRosterEntryFromSummary,
+} from "./agent-roster.js";
 import { createCompactAssistantDelta } from "./compact-session-stream.js";
 import { DaemonClient } from "./daemon-client.js";
 import { filterClientEnv, withClientEnv } from "./daemon-client-env.js";
@@ -3221,6 +3227,8 @@ export class AgentDaemon {
 		socket.on("error", cleanup);
 		socket.on("drain", () => {
 			client.backpressured = false;
+			// Undelivered roster state stayed uncommitted; the drained socket can take it now.
+			this.scheduleRosterFlush();
 			if (!client.snapshotStreaming) {
 				void this.catchUpBackpressuredClient(client).catch((error) =>
 					this.log(`could not catch up snapshot client ${client.id}: ${String(error)}`),
@@ -3901,15 +3909,43 @@ export class AgentDaemon {
 				if (this.findActiveSessionByFile(command.sessionPath)) {
 					throw new Error("Cannot delete the currently active session");
 				}
+				const deletedPath = canonicalSessionPath(command.sessionPath);
 				const deletedInfo = await readSessionInfo(command.sessionPath).catch(() => undefined);
+				const ledgerEdge = (
+					await this.rlmSpawnLedger()
+						.edges()
+						.catch(() => [])
+				).find((edge) => canonicalSessionPath(edge.child) === deletedPath);
 				const result = await this.deleteSavedSessionFile(command.sessionPath, {
 					afterFileRemoved: () => {
 						this.cancelScheduledJobsForSessionFile(command.sessionPath);
 					},
 				});
-				if (deletedInfo) {
-					this.rosterReporter.removedAgentIds.add(deletedInfo.id);
-					this.scheduleRosterFlush();
+				// A file that still exists keeps its roster row; only a real deletion is published.
+				if (result.ok) {
+					if (ledgerEdge) {
+						await this.rlmSpawnLedger()
+							.appendDelete({ childId: ledgerEdge.childId, child: command.sessionPath, reason: "user" })
+							.catch((error) => {
+								this.log(
+									`failed to append RLM ledger delete: ${error instanceof Error ? error.message : String(error)}`,
+								);
+							});
+					}
+					const removedAgentId =
+						this.rosterAgentIdForSessionPath(deletedPath) ??
+						(ledgerEdge
+							? rosterAgentIdForSummary({
+									runtimeKind: "subagent",
+									rlmChildId: ledgerEdge.childId,
+									sessionId: deletedInfo?.id ?? ledgerEdge.childId,
+									parentSessionPath: ledgerEdge.parent,
+								})
+							: deletedInfo?.id);
+					if (removedAgentId) {
+						this.rosterReporter.removedAgentIds.add(removedAgentId);
+						this.scheduleRosterFlush();
+					}
 				}
 				return success(command.id, "delete_saved_session", result);
 			}
@@ -6524,6 +6560,15 @@ export class AgentDaemon {
 		}
 	}
 
+	private rosterAgentIdForSessionPath(canonicalPath: string): string | undefined {
+		for (const entry of this.rosterReporter.lastComposed.values()) {
+			if (entry.summary.sessionFile && canonicalSessionPath(entry.summary.sessionFile) === canonicalPath) {
+				return entry.agentId;
+			}
+		}
+		return undefined;
+	}
+
 	private rosterAgentIdForState(state: ActiveSessionState): string {
 		const session = state.runtime.session;
 		const metadata = state.runtime.metadata;
@@ -6550,18 +6595,22 @@ export class AgentDaemon {
 
 	private observeRosterChildUpdate(state: ActiveSessionState, child: AgentConnectionRlmChildAgentSnapshot): void {
 		// The one supersession point: a run with a bound session never has a queued row.
-		const bound = child.activeSessionId !== undefined || this.hasSessionForRlmChild(child.id);
+		const bound = child.activeSessionId !== undefined || this.hasSessionForRlmChild(state, child.id);
+		const entry = this.queuedChildRosterEntry(state, child);
 		if (!bound && (child.status === "queued" || child.status === "running")) {
-			this.rosterReporter.queuedChildren.set(child.id, this.queuedChildRosterEntry(state, child));
+			this.rosterReporter.queuedChildren.set(entry.agentId, entry);
 		} else {
-			this.rosterReporter.queuedChildren.delete(child.id);
+			this.rosterReporter.queuedChildren.delete(entry.agentId);
 		}
 		this.scheduleRosterFlush();
 	}
 
-	private hasSessionForRlmChild(childId: string): boolean {
+	private hasSessionForRlmChild(parentState: ActiveSessionState, childId: string): boolean {
 		for (const candidate of this.sessions.values()) {
-			if (candidate.runtime.metadata.rlmChildId === childId) return true;
+			const metadata = candidate.runtime.metadata;
+			if (metadata.rlmChildId === childId && metadata.parentActiveSessionId === parentState.activeSessionId) {
+				return true;
+			}
 		}
 		return false;
 	}
@@ -6571,30 +6620,27 @@ export class AgentDaemon {
 		child: AgentConnectionRlmChildAgentSnapshot,
 	): WorkerRosterEntry {
 		const parentSession = state.runtime.session;
-		return {
-			agentId: child.id,
-			queuedChild: true,
-			summary: {
-				id: child.id,
-				lifecycle: "live",
-				activity: "idle",
-				isSessionActive: false,
-				runtimeKind: "subagent",
-				rlmDepth: (parentSession.rlmDepth ?? 0) + 1,
-				sessionId: child.id,
-				sessionName: child.sessionName,
-				cwd: parentSession.sessionManager.getCwd(),
-				isStreaming: false,
-				isCompacting: false,
-				attachedClients: 0,
-				messageCount: 0,
-				firstMessage: child.label,
-				parentActiveSessionId: state.activeSessionId,
-				parentSessionId: parentSession.sessionId,
-				parentSessionPath: parentSession.sessionFile,
-				rlmChildId: child.id,
-			},
+		const summary: RosterSessionSummary = {
+			id: child.id,
+			lifecycle: "live",
+			activity: "idle",
+			isSessionActive: false,
+			runtimeKind: "subagent",
+			rlmDepth: (parentSession.rlmDepth ?? 0) + 1,
+			sessionId: child.id,
+			sessionName: child.sessionName,
+			cwd: parentSession.sessionManager.getCwd(),
+			isStreaming: false,
+			isCompacting: false,
+			attachedClients: 0,
+			messageCount: 0,
+			firstMessage: child.label,
+			parentActiveSessionId: state.activeSessionId,
+			parentSessionId: parentSession.sessionId,
+			parentSessionPath: parentSession.sessionFile,
+			rlmChildId: child.id,
 		};
+		return { agentId: rosterAgentIdForSummary(summary), queuedChild: true, summary };
 	}
 
 	private scheduleRosterFlush(): void {
@@ -6620,6 +6666,10 @@ export class AgentDaemon {
 		// Disjoint from session rows by the observeRosterChildUpdate lifecycle guard; insertion order is free.
 		for (const [childId, queued] of reporter.queuedChildren) {
 			entries.set(childId, queued);
+		}
+		// A terminal unbound child run owns no transcript: it is a removal, never a passivated row.
+		for (const [agentId, previous] of reporter.lastComposed) {
+			if (previous.queuedChild === true && !entries.has(agentId)) reporter.removedAgentIds.add(agentId);
 		}
 		for (const agentId of reporter.removedAgentIds) {
 			entries.delete(agentId);
@@ -6690,13 +6740,18 @@ export class AgentDaemon {
 			if (client.transport !== "private-framed" || client.authenticated !== true || client.socket.destroyed) {
 				continue;
 			}
+			// A non-drained socket gets nothing; uncommitted state re-flushes on drain.
+			if (client.backpressured === true) {
+				continue;
+			}
 			const accepted = client.socket.write(
 				encodePrivateFrame<DaemonWorkerFrameHeader>({ kind: "outbound", outboundType: message.type }, payload),
 			);
-			delivered = true;
 			if (!accepted) {
 				client.backpressured = true;
+				continue;
 			}
+			delivered = true;
 		}
 		return delivered;
 	}

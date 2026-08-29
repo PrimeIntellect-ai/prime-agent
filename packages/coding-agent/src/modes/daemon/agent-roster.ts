@@ -1,3 +1,4 @@
+import { canonicalSessionPath } from "../../core/session-lease.js";
 import type { SessionSummary } from "./daemon-session-list.js";
 
 // One status formula shared by every agent surface; surfaces adapt their inputs and never reimplement it.
@@ -27,6 +28,8 @@ export interface WorkerRosterEntry {
 	agentId: string;
 	/** Admitted child run whose session has not materialized yet. */
 	queuedChild?: true;
+	/** Supervisor seed marker: the cwd is synthetic until one transcript-header read. */
+	seededCwd?: true;
 	summary: RosterSessionSummary;
 }
 
@@ -40,10 +43,16 @@ export interface AgentRosterEntry extends WorkerRosterEntry {
 	workerId?: string;
 }
 
+// Child ids are only unique per parent (32-bit, mkdir-checked); the parent path qualifies them daemon-wide.
 export function rosterAgentIdForSummary(
-	summary: Pick<SessionSummary, "runtimeKind" | "rlmChildId" | "sessionId">,
+	summary: Pick<SessionSummary, "runtimeKind" | "rlmChildId" | "sessionId" | "parentSessionPath">,
 ): string {
-	return summary.runtimeKind === "subagent" && summary.rlmChildId ? summary.rlmChildId : summary.sessionId;
+	if (summary.runtimeKind === "subagent" && summary.rlmChildId) {
+		return summary.parentSessionPath
+			? `${canonicalSessionPath(summary.parentSessionPath)}#${summary.rlmChildId}`
+			: summary.rlmChildId;
+	}
+	return summary.sessionId;
 }
 
 export function workerRosterEntryFromSummary(summary: SessionSummary): WorkerRosterEntry {

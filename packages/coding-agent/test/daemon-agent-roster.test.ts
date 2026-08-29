@@ -80,8 +80,10 @@ function makeWorkerReporter(connected = true): WorkerReporterFixture {
 function makeState(options: {
 	activeSessionId: string;
 	sessionId?: string;
+	sessionFile?: string;
 	kind?: "top-level" | "subagent";
 	rlmChildId?: string;
+	parentActiveSessionId?: string;
 	messages?: AgentMessage[];
 	isStreaming?: boolean;
 }): ActiveSessionState {
@@ -94,12 +96,14 @@ function makeState(options: {
 				kind: options.kind ?? "top-level",
 				createdAt: 1,
 				...(options.rlmChildId ? { rlmChildId: options.rlmChildId } : {}),
+				...(options.parentActiveSessionId ? { parentActiveSessionId: options.parentActiveSessionId } : {}),
 			},
 			diagnostics: [],
 			session: {
 				thinkingLevel: "off",
 				isStreaming: options.isStreaming ?? false,
 				isCompacting: false,
+				sessionFile: options.sessionFile,
 				sessionId: options.sessionId ?? `session-${options.activeSessionId}`,
 				rlmDepth: options.kind === "subagent" ? 1 : 0,
 				sessionName: `name-${options.activeSessionId}`,
@@ -156,6 +160,7 @@ describe("worker roster reporter", () => {
 			activeSessionId: "child-active",
 			kind: "subagent",
 			rlmChildId: "child-1",
+			parentActiveSessionId: "parent-active",
 			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
 		});
 		daemon.sessions.set(childState.activeSessionId, childState);
@@ -188,6 +193,7 @@ describe("worker roster reporter", () => {
 			activeSessionId: "child-active",
 			kind: "subagent",
 			rlmChildId: "child-1",
+			parentActiveSessionId: "parent-active",
 			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
 		});
 		daemon.sessions.set(childState.activeSessionId, childState);
@@ -277,6 +283,7 @@ describe("worker roster reporter", () => {
 			activeSessionId: "child-active",
 			kind: "subagent",
 			rlmChildId: "child-1",
+			parentActiveSessionId: "parent-active",
 			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
 		});
 		daemon.sessions.set(childState.activeSessionId, childState);
@@ -308,6 +315,7 @@ describe("worker roster reporter", () => {
 			activeSessionId: "child-active",
 			kind: "subagent",
 			rlmChildId: "child-1",
+			parentActiveSessionId: "parent-active",
 			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
 		});
 		daemon.sessions.set(childState.activeSessionId, childState);
@@ -406,6 +414,8 @@ function makeSupervisor(workers: WorkerFixture[], extra: Record<string, unknown>
 	return Object.assign(Object.create(DaemonSupervisor.prototype), {
 		workers: new Map(workers.map((worker) => [worker.descriptor.workerId, worker])),
 		clients: new Set(),
+		defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+		catalog: { list: vi.fn(async () => []) },
 		refreshWorkerSummaries: vi.fn(async () => {}),
 		persistWorker: vi.fn(),
 		invalidateWorkerSessionInputPauses: vi.fn(),
@@ -430,7 +440,7 @@ function rosterDelta(entries: WorkerRosterEntry[], removedAgentIds?: string[], s
 }
 
 describe("supervisor roster ledger", () => {
-	it("keeps queued child rows ledger-internal and lists them once their session materializes", () => {
+	it("keeps queued child rows ledger-internal and lists them once their session materializes", async () => {
 		const worker = makeWorker("worker-1");
 		const supervisor = makeSupervisor([worker]);
 
@@ -450,8 +460,8 @@ describe("supervisor roster ledger", () => {
 			]),
 		);
 
-		expect(supervisor.handleList({}, { type: "list" }).data?.sessions).toEqual([]);
-		expect(supervisor.handleList({}, { type: "list", all: true }).data?.sessions).toEqual([]);
+		expect((await supervisor.handleList({}, { type: "list" })).data?.sessions).toEqual([]);
+		expect((await supervisor.handleList({}, { type: "list", all: true })).data?.sessions).toEqual([]);
 		expect(supervisor.workerRosterEntries(worker)[0]).toMatchObject({ status: "running", statusLabel: "queued" });
 
 		supervisor.consumeWorkerRosterDelta(
@@ -471,14 +481,14 @@ describe("supervisor roster ledger", () => {
 			]),
 		);
 
-		const listed = supervisor.handleList({}, { type: "list" });
+		const listed = await supervisor.handleList({}, { type: "list" });
 		expect(listed.data?.sessions).toHaveLength(1);
 		expect(listed.data?.sessions[0]).toMatchObject({ activeSessionId: "child-active", workerState: "ready" });
 		expect(supervisor.workerRosterEntries(worker)[0]).toMatchObject({ status: "running" });
 		expect(supervisor.workerRosterEntries(worker)[0]?.statusLabel).toBeUndefined();
 	});
 
-	it("keeps passivated children of a live worker in the resident list, seeded rows in list all only", () => {
+	it("keeps passivated children of a live worker in the resident list, seeded rows in list all only", async () => {
 		const worker = makeWorker("worker-1");
 		const supervisor = makeSupervisor([worker]);
 		supervisor.writeRosterEntry(
@@ -503,13 +513,13 @@ describe("supervisor roster ledger", () => {
 			workerRosterEntryFromSummary(summary({ id: "seeded", sessionId: "seeded", sessionFile: "/tmp/seeded.jsonl" })),
 		);
 
-		const resident = supervisor.handleList({}, { type: "list" });
+		const resident = await supervisor.handleList({}, { type: "list" });
 		expect(resident.data?.sessions.map((session) => session.sessionId).sort()).toEqual(["child-session", "root"]);
 		const child = resident.data?.sessions.find((session) => session.rlmChildId === "child-1");
 		expect(child).toMatchObject({ workerPid: 1234 });
 		expect(child?.activeSessionId).toBeUndefined();
 
-		const all = supervisor.handleList({}, { type: "list", all: true });
+		const all = await supervisor.handleList({}, { type: "list", all: true });
 		expect(all.data?.sessions.map((session) => session.sessionId).sort()).toEqual([
 			"child-session",
 			"root",
@@ -517,7 +527,7 @@ describe("supervisor roster ledger", () => {
 		]);
 	});
 
-	it("serves list from the ledger with zero worker round-trips and exact busy counts", () => {
+	it("serves list from the ledger with zero worker round-trips and exact busy counts", async () => {
 		const visible = makeWorker("visible");
 		const owned = makeWorker("owned", {
 			descriptor: {
@@ -542,7 +552,7 @@ describe("supervisor roster ledger", () => {
 			owned,
 		);
 
-		const listed = supervisor.handleList({}, { type: "list", includeClientOwned: true });
+		const listed = await supervisor.handleList({}, { type: "list", includeClientOwned: true });
 
 		expect(listed.success).toBe(true);
 		expect(listed.data?.busyClientOwnedSessionCount).toBe(1);
@@ -734,32 +744,38 @@ describe("supervisor roster ledger", () => {
 		});
 		await supervisor.seedRosterLedger();
 
-		const listed = supervisor.handleList({}, { type: "list", all: true });
+		const listed = await supervisor.handleList({}, { type: "list", all: true });
 		const ids = listed.data?.sessions.map((session) => session.sessionId).sort();
 		expect(ids).toEqual(["live-child", "saved-root"]);
 		expect(listed.data?.sessions.every((session) => session.activeSessionId === undefined)).toBe(true);
-		expect(supervisor.handleList({}, { type: "list" }).data?.sessions).toEqual([]);
+		expect((await supervisor.handleList({}, { type: "list" })).data?.sessions).toEqual([]);
 
 		// An evicted worker leaves its rows behind as inactive instead of dropping them.
 		const worker = makeWorker("worker-1");
 		supervisor.workers.set("worker-1", worker);
 		supervisor.writeRosterEntry(
 			workerRosterEntryFromSummary(
-				summary({ id: "e-active", sessionId: "evicted", activeSessionId: "e-active", isSessionActive: true }),
+				summary({
+					id: "e-active",
+					sessionId: "evicted",
+					activeSessionId: "e-active",
+					sessionFile: join(sessionsDir, "evicted.jsonl"),
+					isSessionActive: true,
+				}),
 			),
 			worker,
 		);
 		supervisor.workers.delete("worker-1");
 		supervisor.flipWorkerRosterEntriesInactive(worker);
 
-		const afterEvict = supervisor.handleList({}, { type: "list", all: true });
+		const afterEvict = await supervisor.handleList({}, { type: "list", all: true });
 		const evicted = afterEvict.data?.sessions.find((session) => session.sessionId === "evicted");
 		expect(evicted).toBeDefined();
 		expect(evicted?.activeSessionId).toBeUndefined();
 		expect(afterEvict.data?.sessions.some((session) => session.sessionId === "deleted-child")).toBe(false);
 	});
 
-	it("scopes list all by sessions dir through owning topology, not the shared artifacts tree", () => {
+	it("scopes list all by sessions dir through owning topology, not the shared artifacts tree", async () => {
 		const supervisor = makeSupervisor([]);
 		const base = "/tmp/agent-homes";
 		const dirA = join(base, "a", "sessions");
@@ -799,14 +815,13 @@ describe("supervisor roster ledger", () => {
 			),
 		);
 
-		const listDir = (sessionDir: string) =>
-			supervisor
-				.handleList({}, { type: "list", all: true, sessionDir })
-				.data?.sessions.map((session) => session.sessionId)
+		const listDir = async (sessionDir: string) =>
+			(await supervisor.handleList({}, { type: "list", all: true, sessionDir })).data?.sessions
+				.map((session) => session.sessionId)
 				.sort();
 
-		expect(listDir(dirA)).toEqual(["child-a", "root-a"]);
-		expect(listDir(dirB)).toEqual(["child-b", "root-b"]);
+		expect(await listDir(dirA)).toEqual(["child-a", "root-a"]);
+		expect(await listDir(dirB)).toEqual(["child-b", "root-b"]);
 	});
 
 	it("updates the roster on offline saved-session renames", async () => {
@@ -846,27 +861,52 @@ describe("supervisor roster ledger", () => {
 		expect(supervisor.roster().get("saved-1")?.summary.sessionName).toBe("new-name");
 	});
 
-	it("removes the roster row on offline saved-session deletes", async () => {
+	it("removes the roster row on offline deletes, tombstones subagents, and never reseeds them", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-offline-delete-"));
 		tempDirs.push(directory);
-		const sessionPath = join(directory, "saved.jsonl");
+		const sessionsDir = join(directory, "sessions");
+		const parentPath = join(sessionsDir, "root.jsonl");
+		const childPath = join(directory, "artifacts", "child.jsonl");
 		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			defaultSessionConfig: { agentDir: directory, cwd: directory, sessionDir: sessionsDir },
 			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorFixture & { handleCommand(client: object, command: object): Promise<unknown> };
+		}) as unknown as SupervisorFixture & {
+			handleCommand(client: object, command: object): Promise<unknown>;
+			rlmSpawnLedger(): RlmSpawnLedger;
+		};
 		Object.assign(supervisor, {
-			catalog: { delete: vi.fn(async () => ({ deleted: true })) },
+			catalog: { delete: vi.fn(async () => ({ ok: true, method: "unlink" })), list: vi.fn(async () => []) },
 		});
-		supervisor.writeRosterEntry(
-			workerRosterEntryFromSummary(summary({ id: "saved-1", sessionId: "saved-1", sessionFile: sessionPath })),
+		await supervisor
+			.rlmSpawnLedger()
+			.appendSpawn({ childId: "child-1", parent: parentPath, child: childPath, depth: 1, name: "child" });
+		const childEntry = workerRosterEntryFromSummary(
+			summary({
+				id: "child-1",
+				sessionId: "child-1",
+				sessionFile: childPath,
+				runtimeKind: "subagent",
+				rlmChildId: "child-1",
+				parentSessionPath: parentPath,
+			}),
 		);
+		supervisor.writeRosterEntry(childEntry);
 
 		await supervisor.handleCommand(
 			{ id: "client", attachedActiveSessionIds: new Set<string>() },
-			{ type: "delete_saved_session", sessionPath },
+			{ type: "delete_saved_session", sessionPath: childPath },
 		);
 
-		expect(supervisor.roster().has("saved-1")).toBe(false);
+		expect(supervisor.roster().has(childEntry.agentId)).toBe(false);
+		await expect(supervisor.rlmSpawnLedger().edges()).resolves.toEqual([]);
+
+		// A fresh supervisor over the same agent dir must not reseed the tombstoned child.
+		const reseeded = makeSupervisor([], {
+			rlmSpawnLedger: () => supervisor.rlmSpawnLedger(),
+			catalog: { list: vi.fn(async () => []) },
+		});
+		await reseeded.seedRosterLedger();
+		expect([...reseeded.roster().values()]).toEqual([]);
 	});
 });
 
@@ -946,5 +986,253 @@ describe("roster entry projection", () => {
 		});
 		const roundTripped = sessionSummaryFromRosterEntry(workerRosterEntryFromSummary(source));
 		expect(roundTripped.modelFallbackMessage).toBe("No models available");
+	});
+});
+
+describe("bot-round regressions", () => {
+	it("removes a child run that terminates before binding instead of passivating a phantom", () => {
+		const { daemon, sentDeltas } = makeWorkerReporter();
+		const parent = makeState({ activeSessionId: "parent-active" });
+		daemon.sessions.set(parent.activeSessionId, parent);
+		daemon.observeRosterEvent(
+			parent,
+			childUpdate(parent, { id: "child-1", label: "task", status: "queued", sessionDir: "/tmp/c" }),
+		);
+		daemon.flushRoster();
+
+		daemon.observeRosterEvent(
+			parent,
+			childUpdate(parent, { id: "child-1", label: "task", status: "cancelled", sessionDir: "/tmp/c" }),
+		);
+		daemon.flushRoster();
+		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual(["child-1"]);
+		expect(sentDeltas.at(-1)?.entries.some((entry) => entry.agentId === "child-1")).toBe(false);
+
+		daemon.rosterReporter.snapshotPending = true;
+		daemon.flushRoster();
+		expect(sentDeltas.at(-1)?.snapshot).toBe(true);
+		expect(sentDeltas.at(-1)?.entries.some((entry) => entry.agentId === "child-1")).toBe(false);
+	});
+
+	it("qualifies colliding child ids from different parents by parent path", () => {
+		const { daemon, sentDeltas } = makeWorkerReporter();
+		const parentA = makeState({ activeSessionId: "parent-a", sessionFile: "/tmp/a.jsonl" });
+		const parentB = makeState({ activeSessionId: "parent-b", sessionFile: "/tmp/b.jsonl" });
+		daemon.sessions.set(parentA.activeSessionId, parentA);
+		daemon.sessions.set(parentB.activeSessionId, parentB);
+
+		daemon.observeRosterEvent(
+			parentA,
+			childUpdate(parentA, { id: "sub-1234", label: "a", status: "queued", sessionDir: "/tmp/a" }),
+		);
+		daemon.observeRosterEvent(
+			parentB,
+			childUpdate(parentB, { id: "sub-1234", label: "b", status: "queued", sessionDir: "/tmp/b" }),
+		);
+		daemon.flushRoster();
+
+		const queuedRows = sentDeltas.at(-1)?.entries.filter((entry) => entry.summary.rlmChildId === "sub-1234") ?? [];
+		expect(queuedRows).toHaveLength(2);
+		expect(new Set(queuedRows.map((entry) => entry.agentId)).size).toBe(2);
+	});
+
+	it("keeps roster state uncommitted until a frame reaches a drained socket", () => {
+		const write = vi.fn(() => false);
+		const socket = { destroyed: false, write };
+		const client = {
+			transport: "private-framed",
+			authenticated: true,
+			backpressured: undefined as boolean | undefined,
+			socket,
+		};
+		const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
+			options: { worker: { authenticationToken: "token" } },
+			sessions: new Map(),
+			cronStore: { list: () => [] },
+			clients: new Set([client]),
+			rosterReporter: {
+				lastSent: new Map(),
+				lastComposed: new Map(),
+				queuedChildren: new Map(),
+				removedAgentIds: new Set(["deleted-agent"]),
+				snapshotPending: false,
+			},
+			rosterFlushScheduled: false,
+			shuttingDown: false,
+			log: vi.fn(),
+		}) as {
+			flushRoster(): void;
+			rosterReporter: { removedAgentIds: Set<string>; lastSent: Map<string, unknown> };
+		};
+
+		daemon.flushRoster();
+		// write() returned false: the frame is not delivered; nothing commits.
+		expect(daemon.rosterReporter.removedAgentIds.has("deleted-agent")).toBe(true);
+		expect(daemon.rosterReporter.lastSent.size).toBe(0);
+		expect(client.backpressured).toBe(true);
+
+		// A backpressured socket gets no further writes until it drains.
+		daemon.flushRoster();
+		expect(write).toHaveBeenCalledTimes(1);
+
+		client.backpressured = false;
+		write.mockReturnValue(true);
+		daemon.flushRoster();
+		expect(daemon.rosterReporter.removedAgentIds.size).toBe(0);
+	});
+
+	it("merges the per-call disk scan with ledger rows, preferring the ledger for known files", async () => {
+		const worker = makeWorker("worker-1");
+		const supervisor = makeSupervisor([worker], {
+			catalog: {
+				list: vi.fn(async () => [
+					{
+						id: "external",
+						path: "/tmp/external.jsonl",
+						cwd: "/tmp/project",
+						created: new Date(0),
+						modified: new Date(0),
+						messageCount: 1,
+						firstMessage: "made after startup",
+						allMessagesText: "",
+					},
+					{
+						id: "known",
+						path: "/tmp/known.jsonl",
+						cwd: "/tmp/project",
+						created: new Date(0),
+						modified: new Date(0),
+						messageCount: 1,
+						firstMessage: "",
+						allMessagesText: "",
+					},
+				]),
+			},
+		});
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({ id: "known", sessionId: "known", sessionFile: "/tmp/known.jsonl", sessionName: "renamed" }),
+			),
+		);
+
+		const listed = await supervisor.handleList({}, { type: "list", all: true });
+		const ids = listed.data?.sessions.map((session) => session.sessionId).sort();
+		expect(ids).toEqual(["external", "known"]);
+		expect(listed.data?.sessions.find((session) => session.sessionId === "known")?.sessionName).toBe("renamed");
+	});
+
+	it("forwards passive-child deletes to the owning worker instead of rejecting them", async () => {
+		const worker = makeWorker("worker-1");
+		worker.client = {
+			request: vi.fn(async () => ({ type: "response", command: "delete_saved_session", success: true })),
+		};
+		Object.assign(worker.descriptor, { lifecycle: "ready" });
+		const catalogDelete = vi.fn();
+		const supervisor = makeSupervisor([worker], {
+			catalog: { list: vi.fn(async () => []), delete: catalogDelete },
+			mutationDrain: { begin: vi.fn(), end: vi.fn() },
+		});
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({
+					id: "child-session",
+					sessionId: "child-session",
+					sessionFile: "/tmp/artifacts/child.jsonl",
+					runtimeKind: "subagent",
+					rlmChildId: "child-1",
+				}),
+			),
+			worker,
+		);
+		const internals = supervisor as unknown as {
+			handleCommand(client: object, command: object): Promise<unknown>;
+		};
+
+		await internals.handleCommand(
+			{ id: "client", attachedActiveSessionIds: new Set<string>() },
+			{ type: "delete_saved_session", sessionPath: "/tmp/artifacts/child.jsonl" },
+		);
+
+		expect(worker.client.request).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "delete_saved_session", sessionPath: "/tmp/artifacts/child.jsonl" }),
+			expect.any(Number),
+		);
+		expect(catalogDelete).not.toHaveBeenCalled();
+	});
+
+	it("keeps the roster row when a delete fails on disk", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-failed-delete-"));
+		tempDirs.push(directory);
+		const sessionPath = join(directory, "saved.jsonl");
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorFixture & { handleCommand(client: object, command: object): Promise<unknown> };
+		Object.assign(supervisor, {
+			catalog: { delete: vi.fn(async () => ({ ok: false, error: "busy file" })), list: vi.fn(async () => []) },
+		});
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(summary({ id: "saved-1", sessionId: "saved-1", sessionFile: sessionPath })),
+		);
+
+		await supervisor.handleCommand(
+			{ id: "client", attachedActiveSessionIds: new Set<string>() },
+			{ type: "delete_saved_session", sessionPath },
+		);
+
+		expect(supervisor.roster().has("saved-1")).toBe(true);
+	});
+
+	it("routes a just-bound session through the miss-path refresh", async () => {
+		const target = summary({ id: "target-active", sessionId: "target", activeSessionId: "target-active" });
+		const worker = makeWorker("worker-1", { rosterCapable: true });
+		worker.client = {
+			request: vi.fn(async () => ({
+				type: "response",
+				command: "list",
+				success: true,
+				data: { sessions: [target] },
+			})),
+		};
+		const supervisor = makeSupervisor([worker], {
+			refreshWorkerSummaries: DaemonSupervisor.prototype["refreshWorkerSummaries" as never],
+			syncWorkerSummariesIntoRoster: DaemonSupervisor.prototype["syncWorkerSummariesIntoRoster" as never],
+			streamReconstructor: { seed: vi.fn(), clear: vi.fn() },
+		});
+		const internals = supervisor as unknown as {
+			findWorker(selector: string): Promise<{ summary: SessionSummary }>;
+		};
+
+		const match = await internals.findWorker("target-active");
+		expect(match.summary.sessionId).toBe("target");
+	});
+
+	it("does not let a summaries refresh overwrite a newer roster delta", async () => {
+		const worker = makeWorker("worker-1", { rosterCapable: true });
+		const stale = summary({ id: "s-active", sessionId: "s", activeSessionId: "s-active", sessionName: "stale" });
+		const supervisor = makeSupervisor([worker], {
+			refreshWorkerSummaries: DaemonSupervisor.prototype["refreshWorkerSummaries" as never],
+			syncWorkerSummariesIntoRoster: DaemonSupervisor.prototype["syncWorkerSummariesIntoRoster" as never],
+			streamReconstructor: { seed: vi.fn(), clear: vi.fn() },
+		});
+		worker.client = {
+			request: vi.fn(async () => {
+				supervisor.consumeWorkerRosterDelta(
+					worker,
+					rosterDelta([
+						workerRosterEntryFromSummary(
+							summary({ id: "s-active", sessionId: "s", activeSessionId: "s-active", sessionName: "fresh" }),
+						),
+					]),
+				);
+				return { type: "response", command: "list", success: true, data: { sessions: [stale] } };
+			}),
+		};
+
+		await (
+			supervisor as unknown as { refreshWorkerSummaries(worker: WorkerFixture): Promise<void> }
+		).refreshWorkerSummaries(worker);
+
+		expect(supervisor.roster().get("s")?.summary.sessionName).toBe("fresh");
 	});
 });

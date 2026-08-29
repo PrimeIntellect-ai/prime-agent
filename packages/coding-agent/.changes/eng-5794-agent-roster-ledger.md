@@ -1,3 +1,3 @@
 - Made the daemon supervisor own an event-driven agent roster: workers push roster deltas on session events, `list` is served from the supervisor's ledger with zero worker round-trips, and stale cached summaries can no longer be returned.
-- Made admitted subagent runs visible in `list` before their session exists, and kept passivated or evicted agents listed as inactive rows instead of disappearing.
+- Tracked admitted subagent runs in the supervisor roster from the moment they are queued (they appear in `list` once their session exists), and kept passivated or evicted agents listed as inactive rows instead of disappearing.
 - Marked sessions of a dead worker "recovering" the moment its socket closes, and stamped a last-heard-from time on rows of silent workers instead of guessing.
