@@ -43,7 +43,6 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { spawn, spawnSync } from "child_process";
-import type { SessionSummary } from "../daemon/daemon-session-list.js";
 import {
 	buildDaemonUpdateRestartReport,
 	launchDaemonUpdateRestartCoordinator,
@@ -167,6 +166,7 @@ import type {
 	AgentConnectionToolDefinition,
 } from "../agent-connection/index.js";
 import { AgentConnectionPromptAdmissionError } from "../agent-connection/index.js";
+import type { SessionSummary } from "../daemon/daemon-session-list.js";
 import { getModelArgumentCompletions } from "../model-autocomplete.js";
 import {
 	checkForPackageUpdates,
@@ -223,7 +223,11 @@ import {
 	styleSlashCommandText,
 } from "./components/slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./components/slash-command-result-message.js";
-import { countDirectSubagentStatuses, countRosterSubagentStatuses, SubagentSummaryLine } from "./components/subagent-summary-line.js";
+import {
+	countDirectSubagentStatuses,
+	countRosterSubagentStatuses,
+	SubagentSummaryLine,
+} from "./components/subagent-summary-line.js";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.js";
 import {
 	selectLatestToolExpandHint,

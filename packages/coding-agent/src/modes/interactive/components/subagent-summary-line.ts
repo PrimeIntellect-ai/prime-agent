@@ -1,6 +1,6 @@
 import { type Component, type Focusable, getKeybindings, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import type { AgentConnectionRlmChildAgentSnapshot } from "../../agent-connection/index.js";
 import { canonicalSessionPath } from "../../../core/session-lease.js";
+import type { AgentConnectionRlmChildAgentSnapshot } from "../../agent-connection/index.js";
 import { type AgentRosterStatus, classifyAgentStatus } from "../../daemon/agent-roster.js";
 import { classifySessionRosterStatus, type SessionSummary } from "../../daemon/daemon-session-list.js";
 import { theme } from "../theme/theme.js";

@@ -20,6 +20,7 @@ import type { RefinementResult } from "../../core/refinement/index.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
 import type { SessionStats } from "../../core/session-stats.js";
+import { AgentsViewRosterStore } from "../agents-view/roster-store.js";
 import {
 	DaemonCapabilityUnavailableError,
 	type DaemonClient,
@@ -39,7 +40,6 @@ import {
 	isUnknownDaemonCommandError,
 } from "../daemon/daemon-protocol.js";
 import type { SessionSummary } from "../daemon/daemon-session-list.js";
-import { AgentsViewRosterStore } from "../agents-view/roster-store.js";
 import { listDaemonHeartbeats } from "../daemon/heartbeat-catalog.js";
 import {
 	deleteDaemonSavedSession,
@@ -384,7 +384,9 @@ export class DaemonAgentConnection implements AgentConnection {
 	}
 
 	/** Push-fed subagent counts share the agents view's roster mirror; one store per connection. */
-	async subscribeAgentRoster(listener: () => void): Promise<{ summaries(): SessionSummary[]; dispose(): Promise<void> }> {
+	async subscribeAgentRoster(
+		listener: () => void,
+	): Promise<{ summaries(): SessionSummary[]; dispose(): Promise<void> }> {
 		this.rosterStore ??= new AgentsViewRosterStore();
 		const store = this.rosterStore;
 		if (!(await store.attach(this.client))) {

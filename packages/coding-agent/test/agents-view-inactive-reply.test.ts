@@ -195,7 +195,7 @@ describe("agents view reply on inactive sessions", () => {
 		expect(self.replyTarget).toBe(newTarget);
 		expect(editor.getText()).toBe("new reply");
 		expect(self.setReplyTarget).not.toHaveBeenCalled();
-		expect(self.refreshSessions).toHaveBeenCalledWith({ preserveStatusOnError: true });
+		expect(self.refreshSessions).toHaveBeenCalledWith();
 	});
 
 	it("preserves new text entered while the same reply succeeds", async () => {
@@ -266,7 +266,7 @@ describe("agents view reply on inactive sessions", () => {
 		expect(inactiveAgentIdentities.has("file:/tmp/sessions/saved-1.jsonl")).toBe(remainsInactive);
 		expect(self.refreshSessions).toHaveBeenCalledTimes(remainsInactive ? 0 : 1);
 		if (!remainsInactive) {
-			expect(self.refreshSessions).toHaveBeenCalledWith({ preserveStatusOnError: true });
+			expect(self.refreshSessions).toHaveBeenCalledWith();
 		}
 	});
 
@@ -605,7 +605,7 @@ describe("agents view slash commands", () => {
 		expect(openSelected).toHaveBeenCalledTimes(2);
 	});
 
-	it("renames a live target via the rename RPC and refreshes both catalogs", async () => {
+	it("renames a live target via the rename RPC and reapplies the pushed roster", async () => {
 		const live = summary({ activeSessionId: "active-1", lifecycle: "live" });
 		const request = vi.fn(async () => ({ success: true, data: {} }));
 		const editor = editorWithText("/name Fresh Name");
@@ -629,8 +629,9 @@ describe("agents view slash commands", () => {
 		);
 
 		expect(request).toHaveBeenCalledWith({ type: "rename", activeSessionId: "active-1", name: "Fresh Name" });
-		expect(self.refreshSessions).toHaveBeenCalledWith({ preserveStatusOnError: true });
-		expect(self.refreshSavedSessions).toHaveBeenCalledWith({ preserveStatusOnError: true });
+		// The push carries renames server-side; one local reapply covers both catalogs.
+		expect(self.refreshSessions).toHaveBeenCalledWith();
+		expect(self.refreshSavedSessions).not.toHaveBeenCalled();
 	});
 
 	it("kills a live target and disarms the composer", async () => {

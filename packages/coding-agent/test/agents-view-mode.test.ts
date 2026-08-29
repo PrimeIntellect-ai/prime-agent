@@ -97,6 +97,7 @@ describe("AgentsViewMode", () => {
 		const self = {
 			editor: { getText: () => "matching query" },
 			persistentState: { query: "" },
+			savedSearchFetchStarted: true,
 			selectedIndex: 4,
 			rebuildRows: vi.fn(),
 			syncSelectedRowState: vi.fn(),
@@ -665,7 +666,7 @@ afterEach(() => {
 });
 
 describe("AgentsViewMode persistent catalog state", () => {
-	it("keeps an initial handoff scope when the first live poll fails after both catalogs settle", async () => {
+	it("applies an initial handoff scope from the first pushed roster refresh", async () => {
 		const root = summary();
 		const scope = { sessionId: root.sessionId, activeSessionId: root.activeSessionId };
 		const persistentState = createInitialAgentsViewPersistentState({
@@ -674,17 +675,12 @@ describe("AgentsViewMode persistent catalog state", () => {
 		});
 		persistentState.lastSuccessfulSavedSessions = [];
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
-		Reflect.set(view, "client", {
-			isConnected: true,
-			request: vi.fn(async () => {
-				throw new Error("transient list failure");
-			}),
-		});
+		Reflect.set(view, "rosterStore", { summaries: () => [root] });
+		Reflect.set(view, "savedCatalogReady", true);
 
 		try {
-			await expect(invoke("refreshSessions", view, { preserveStatusOnError: true })).resolves.toBe(false);
+			await expect(invoke("refreshSessions", view)).resolves.toBe(true);
 			expect(Reflect.get(view, "liveCatalogReady")).toBe(true);
-			expect(Reflect.get(view, "savedCatalogReady")).toBe(true);
 			expect(persistentState.scopeFrames).toEqual([{ scope, returnChat: root }]);
 			expect(persistentState.lastSuccessfulLiveSummaries).toEqual([root]);
 		} finally {
@@ -747,10 +743,8 @@ describe("AgentsViewMode persistent catalog state", () => {
 			expect(persistentState.scopeFrames).toEqual([frame]);
 			expect(Reflect.get(view, "lastListedSummaries")).toEqual([root]);
 
-			Reflect.set(view, "client", {
-				isConnected: true,
-				request: vi.fn(async () => ({ success: true, data: { sessions: [] } })),
-			});
+			Reflect.set(view, "client", { isConnected: true });
+			Reflect.set(view, "rosterStore", { summaries: () => [] });
 			await expect(invoke("refreshSessions", view)).resolves.toBe(true);
 			expect(persistentState.scopeFrames).toEqual([]);
 		} finally {
