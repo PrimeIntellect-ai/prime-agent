@@ -6,6 +6,7 @@ import { setKeybindings } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../src/modes/agent-connection/types.js";
 import { AgentsViewMode } from "../src/modes/agents-view/agents-view-mode.js";
 import { buildAgentsViewRows, classifyAgentsViewSession } from "../src/modes/agents-view/agents-view-state.js";
@@ -21,10 +22,8 @@ import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import type { DaemonOutbound } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
-import {
-	countDirectSubagentStatuses,
-	countRosterSubagentStatuses,
-} from "../src/modes/interactive/components/subagent-summary-line.js";
+import { RlmSpawnLedger } from "../src/modes/daemon/rlm-ledger.js";
+import { countDirectSubagentStatuses } from "../src/modes/interactive/components/subagent-summary-line.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 
 const tempDirs: string[] = [];
@@ -288,11 +287,10 @@ describe("roster-driven agents view instance", () => {
 
 		const internals = view as unknown as {
 			refreshSessions(): Promise<boolean>;
-			refreshBothCatalogs(): Promise<boolean>;
 			rows: Array<{ summary: SessionSummary }>;
 		};
 		await expect(internals.refreshSessions()).resolves.toBe(true);
-		await expect(internals.refreshBothCatalogs()).resolves.toBe(true);
+		await expect(internals.refreshSessions()).resolves.toBe(true);
 
 		expect(client.request).not.toHaveBeenCalled();
 		expect(internals.rows.some((row) => row.summary.sessionId === "a")).toBe(true);
@@ -458,17 +456,6 @@ describe("bar and view lifecycle equality", () => {
 		expect(bar.subagentSnapshots.has("c-unbound")).toBe(false);
 		expect(bar.subagentSnapshots.has("c-evicted")).toBe(true);
 		expect(barCounts).toEqual({ total: 6, ...viewCounts });
-
-		// The daemon-mode bar consumes the same pushed rows and must land on the same counts.
-		const pushedCounts = countRosterSubagentStatuses(
-			rosterRows.map((entry) => ({
-				...sessionSummaryFromRosterEntry(entry),
-				parentActiveSessionId: "parent-active",
-			})),
-			{ activeSessionId: "parent-active" },
-			new Set(["hb-active"]),
-		);
-		expect(pushedCounts).toEqual({ total: 6, ...viewCounts });
 	});
 });
 
@@ -529,6 +516,12 @@ describe("subscriber push transitions", () => {
 		await settle();
 		expect(pushes.at(-1)?.changed[0]?.lastHeardFromAt).toBe(new Date(now - 60_000).toISOString());
 
+		// Already-stale workers are not re-stamped: repeat sweeps emit zero mutations.
+		const stampedPushes = pushes.length;
+		supervisor.sweepRosterStaleness(now + 1000);
+		await settle();
+		expect(pushes.length).toBe(stampedPushes);
+
 		worker.lastFrameAt = now;
 		supervisor.sweepRosterStaleness(now);
 		await settle();
@@ -558,6 +551,50 @@ describe("subscriber push transitions", () => {
 		await supervisor.promoteOwnedWorker({ id: "owner-1" }, owned);
 		await settle();
 		expect(pushes.at(-1)?.changed.map((changedEntry) => changedEntry.agentId)).toEqual([entry.agentId]);
+	});
+
+	it("never surfaces a live edge as a transient removal during a snapshot apply", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-flicker-"));
+		tempDirs.push(directory);
+		const sessionsDir = join(directory, "sessions");
+		const ledger = new RlmSpawnLedger(directory, sessionsDir);
+		const parentPath = join(sessionsDir, "root.jsonl");
+		const childPath = join(directory, "artifacts", "live-child.jsonl");
+		await ledger.appendSpawn({ childId: "live-child", parent: parentPath, child: childPath, depth: 1, name: "c" });
+		const { supervisor, pushes, settle } = makePushSupervisor({
+			rlmSpawnLedger: () => ledger,
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+		});
+		const worker = pushWorker("w1");
+		supervisor.workers.set("w1", worker);
+		const childEntry = workerRosterEntryFromSummary(
+			summary({
+				id: "live-child",
+				sessionId: "live-child",
+				sessionFile: childPath,
+				runtimeKind: "subagent",
+				rlmChildId: "live-child",
+				parentSessionPath: parentPath,
+			}),
+		);
+		supervisor.writeRosterEntry(childEntry, worker);
+		await settle();
+		pushes.length = 0;
+
+		const internals = supervisor as unknown as {
+			consumeWorkerRosterDelta(worker: object, payload: Buffer): void;
+		};
+		internals.consumeWorkerRosterDelta(
+			worker,
+			Buffer.from(JSON.stringify({ type: "roster_delta", entries: [], snapshot: true })),
+		);
+		await vi.waitFor(() => expect(pushes.length).toBeGreaterThan(0));
+		await settle();
+
+		// The absentee deletion and the ledger reseed land in one apply: no push ever removes the live edge.
+		expect(pushes.some((push) => push.removed?.includes(childEntry.agentId))).toBe(false);
+		const reseeded = pushes.flatMap((push) => push.changed).find((entry) => entry.agentId === childEntry.agentId);
+		expect(reseeded).toBeDefined();
 	});
 
 	it("sends one drain resync per loss gap even when the write reports backpressure", async () => {
@@ -592,6 +629,97 @@ describe("subscriber push transitions", () => {
 
 		socket.emit("drain");
 		expect(pushes.filter((push) => push.resync)).toHaveLength(1);
+	});
+});
+
+describe("push-fed subagents bar", () => {
+	it("feeds the daemon-mode bar from the pushed roster, not stale snapshots", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-bar-"));
+		tempDirs.push(directory);
+		const socketPath = join(directory, "daemon.sock");
+		const supervisor = new DaemonSupervisor(socketPath, {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		});
+		const internals = supervisor as unknown as {
+			start(): Promise<void>;
+			cleanupSupervisorResources(): Promise<void>;
+			writeRosterEntry(entry: WorkerRosterEntry): AgentRosterEntry;
+		};
+		vi.spyOn(DaemonCatalogClient.prototype, "start").mockResolvedValue();
+		const client = new DaemonClient(socketPath);
+		try {
+			await internals.start();
+			internals.writeRosterEntry(
+				workerRosterEntryFromSummary(
+					summary({
+						id: "child-a-active",
+						sessionId: "child-a",
+						activeSessionId: "child-a-active",
+						runtimeKind: "subagent",
+						rlmChildId: "child-a",
+						parentActiveSessionId: "parent-active",
+						isSessionActive: true,
+					}),
+				),
+			);
+			internals.writeRosterEntry(
+				workerRosterEntryFromSummary(
+					summary({
+						id: "child-b",
+						sessionId: "child-b",
+						sessionFile: "/tmp/child-b.jsonl",
+						runtimeKind: "subagent",
+						rlmChildId: "child-b",
+						parentActiveSessionId: "parent-active",
+					}),
+				),
+			);
+			await client.connect();
+			await client.waitForHello();
+			const connection = new DaemonAgentConnection(client, "parent-active");
+			const setSubagentCounts = vi.fn();
+			const bar = Object.assign(Object.create(InteractiveMode.prototype), {
+				agentConnection: connection,
+				connectionState: { activeSessionId: "parent-active" },
+				// A stale snapshot claims one lone running child; the pushed roster must win.
+				subagentSnapshots: new Map([
+					["stale", { id: "stale", label: "stale", status: "running", sessionDir: "/tmp" }],
+				]),
+				rlmNodeId: undefined,
+				heartbeatCatalog: [],
+				subagentSummaryLine: { setSubagentCounts, isSelectable: () => false, focused: false },
+				scheduleHeartbeatManagerRefresh: vi.fn(),
+				updateWorkingPulse: vi.fn(),
+				syncWorkingLoader: vi.fn(),
+				updateWorkingLoaderMessage: vi.fn(),
+				ui: { requestRender: vi.fn() },
+			}) as unknown as { subscribeToRosterBar(): Promise<void> };
+
+			await bar.subscribeToRosterBar();
+			expect(setSubagentCounts).toHaveBeenLastCalledWith({ total: 2, running: 1, idle: 0, inactive: 1 });
+
+			// A pushed change reaches the bar without any snapshot traffic.
+			internals.writeRosterEntry(
+				workerRosterEntryFromSummary(
+					summary({
+						id: "child-c",
+						sessionId: "child-c",
+						sessionFile: "/tmp/child-c.jsonl",
+						runtimeKind: "subagent",
+						rlmChildId: "child-c",
+						parentSessionPath: "/tmp/parents/root.jsonl",
+						parentActiveSessionId: "parent-active",
+					}),
+				),
+			);
+			await vi.waitFor(() =>
+				expect(setSubagentCounts).toHaveBeenLastCalledWith({ total: 3, running: 1, idle: 0, inactive: 2 }),
+			);
+		} finally {
+			client.close();
+			await internals.cleanupSupervisorResources();
+		}
 	});
 });
 

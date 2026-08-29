@@ -1032,8 +1032,7 @@ export class AgentsViewMode implements Component, Focusable {
 		void promise
 			.then((notices) => {
 				this.persistentState.startupNotices = notices;
-				// Best-effort immediate paint; a re-entered instance also picks this up on
-				// its next poll tick since render reads persistentState directly.
+				// Best-effort immediate paint; a re-entered instance also reads persistentState directly on render.
 				this.ui.requestRender();
 			})
 			.catch(() => {});
@@ -1654,7 +1653,7 @@ export class AgentsViewMode implements Component, Focusable {
 				this.setStatusMessage("This session cannot be renamed", { tone: "warning" });
 				return false;
 			}
-			const refreshed = await this.refreshBothCatalogs();
+			const refreshed = await this.refreshSessions();
 			this.setStatusMessage(refreshed ? `Renamed to ${name}` : `Renamed to ${name}; refresh failed`);
 			return true;
 		} catch (error) {
@@ -1821,7 +1820,7 @@ export class AgentsViewMode implements Component, Focusable {
 					}
 					disarmIfUnchanged();
 					this.setStatusMessage("Agent stopped");
-					await this.refreshBothCatalogs();
+					await this.refreshSessions();
 					return true;
 				}
 			}
@@ -2163,11 +2162,6 @@ export class AgentsViewMode implements Component, Focusable {
 		this.ui.requestRender();
 	}
 
-	/** Mutations reach the ledger server-side and arrive by push; one local reapply suffices. */
-	private async refreshBothCatalogs(): Promise<boolean> {
-		return this.refreshSessions();
-	}
-
 	private async refreshSavedSessions(
 		options: { duringReconnect?: boolean; preserveStatusOnError?: boolean } = {},
 	): Promise<boolean> {
@@ -2268,7 +2262,7 @@ export class AgentsViewMode implements Component, Focusable {
 		if (!this.selectionAnchorPending || this.savedCatalogRefreshPending) {
 			return;
 		}
-		// Unblock the fallback row, but keep the anchor identities: a later poll
+		// Unblock the fallback row, but keep the anchor identities: a later push
 		// can still deliver the intended session and re-anchor selection to it.
 		this.selectionAnchorPending = false;
 		const row = this.rows[this.selectedIndex];

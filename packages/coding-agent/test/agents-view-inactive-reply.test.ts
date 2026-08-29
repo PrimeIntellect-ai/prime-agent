@@ -619,9 +619,6 @@ describe("agents view slash commands", () => {
 			renameSession(s: unknown, n: string) {
 				return invoke("renameSession", self, s, n);
 			},
-			refreshBothCatalogs() {
-				return invoke("refreshBothCatalogs", self);
-			},
 		};
 
 		await expect(invoke("runAgentsViewCommand", self, { name: "name", args: "Fresh Name" }, live)).resolves.toBe(
@@ -644,14 +641,14 @@ describe("agents view slash commands", () => {
 			setStatusMessage: vi.fn(),
 			setReplyTarget,
 			replyTarget: { key: "active-1", summary: live },
-			refreshBothCatalogs: vi.fn(async () => true),
+			refreshSessions: vi.fn(async () => true),
 		};
 
 		await invoke("runAgentsViewCommand", self, { name: "kill", args: "" }, live);
 
 		expect(request).toHaveBeenCalledWith({ type: "kill", activeSessionId: "active-1" });
 		expect(setReplyTarget).toHaveBeenCalledWith(undefined);
-		expect(self.refreshBothCatalogs).toHaveBeenCalled();
+		expect(self.refreshSessions).toHaveBeenCalled();
 
 		// An agent that finished before the RPC still counts as stopped.
 		self.request = undefined;
@@ -678,7 +675,7 @@ describe("agents view slash commands", () => {
 			setStatusMessage: vi.fn(),
 			setReplyTarget,
 			replyTarget: originalTarget,
-			refreshBothCatalogs: vi.fn(async () => true),
+			refreshSessions: vi.fn(async () => true),
 		};
 
 		await invoke("runAgentsViewCommand", self, { name: "kill", args: "" }, live);

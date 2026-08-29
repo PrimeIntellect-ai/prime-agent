@@ -75,41 +75,29 @@ function privateMethod<T>(name: string): T {
 }
 
 describe("#502 unified session view regressions", () => {
-	test.each(["live", "heartbeat"] as const)(
-		"an older overlapping %s poll cannot overwrite the newer response",
-		async (kind) => {
-			const old = deferred<unknown>();
-			const newer = kind === "live" ? summary("new") : { job: { id: "new" } };
-			const client = {
-				isConnected: true,
-				hello: { protocol: { version: 3 } },
-				supportsServerCapability: () => true,
-				request: vi
-					.fn()
-					.mockReturnValueOnce(old.promise)
-					.mockResolvedValueOnce({
-						success: true,
-						data: kind === "live" ? { sessions: [newer] } : { heartbeats: [newer] },
-					}),
-			};
-			const harness = { ...refreshHarness(), requireClient: () => client };
-			const refresh = privateMethod<(this: typeof harness) => Promise<unknown>>(
-				kind === "live" ? "refreshSessions" : "refreshHeartbeats",
-			);
+	test("an older overlapping heartbeat poll cannot overwrite the newer response", async () => {
+		const old = deferred<unknown>();
+		const newer = { job: { id: "new" } };
+		const client = {
+			isConnected: true,
+			hello: { protocol: { version: 3 } },
+			supportsServerCapability: () => true,
+			request: vi
+				.fn()
+				.mockReturnValueOnce(old.promise)
+				.mockResolvedValueOnce({ success: true, data: { heartbeats: [newer] } }),
+		};
+		const harness = { ...refreshHarness(), requireClient: () => client };
+		const refresh = privateMethod<(this: typeof harness) => Promise<unknown>>("refreshHeartbeats");
 
-			const oldPoll = refresh.call(harness);
-			await refresh.call(harness);
-			old.resolve({
-				success: true,
-				data: kind === "live" ? { sessions: [summary("old")] } : { heartbeats: [{ job: { id: "old" } }] },
-			});
-			await oldPoll;
+		const oldPoll = refresh.call(harness);
+		await refresh.call(harness);
+		old.resolve({ success: true, data: { heartbeats: [{ job: { id: "old" } }] } });
+		await oldPoll;
 
-			if (kind === "live") expect(harness.applySessionList).toHaveBeenCalledWith([newer], true);
-			else expect(harness.heartbeats).toEqual([newer]);
-			expect(kind === "live" ? harness.applySessionList : harness.reconcileCatalogs).toHaveBeenCalledOnce();
-		},
-	);
+		expect(harness.heartbeats).toEqual([newer]);
+		expect(harness.reconcileCatalogs).toHaveBeenCalledOnce();
+	});
 
 	test("overlapping saved scans retain the last complete catalog after the newest scan fails", async () => {
 		const previous = [savedSession("previous")];
@@ -249,6 +237,7 @@ describe("#502 unified session view regressions", () => {
 				client,
 				options: { reconnectTimeoutMs: 10_000 },
 				requireClient: () => client,
+				rosterStore: { attach: vi.fn(async () => true), summaries: () => [summary("live")] },
 				refreshSavedSessions: vi.fn(async () => true),
 				refreshHeartbeats: vi.fn(async (_options?: { duringReconnect?: boolean }) => false),
 				reconnectClient: vi.fn(async (_reconnectingClient: typeof client, _error: unknown) => {}),
@@ -348,7 +337,7 @@ describe("#502 unified session view regressions", () => {
 			rows: [],
 			exitRenameMode: vi.fn(),
 			setStatusMessage: vi.fn(),
-			refreshBothCatalogs: vi.fn(async () => true),
+			refreshSessions: vi.fn(async () => true),
 			requireClient: () => ({ request }),
 			renameSession: Reflect.get(AgentsViewMode.prototype, "renameSession"),
 		};
@@ -377,22 +366,6 @@ describe("#502 unified session view regressions", () => {
 				"withPendingDeleteSession",
 			).call(harness, []),
 		).toEqual([]);
-	});
-
-	test("slow live polls are coalesced instead of repeatedly superseded", async () => {
-		const slow = deferred<boolean>();
-		const refreshSessions = vi.fn(() => slow.promise);
-		const harness = { liveCatalogPollPromise: undefined, refreshSessions };
-		const poll = privateMethod<(this: typeof harness) => void>("pollSessions");
-
-		poll.call(harness);
-		poll.call(harness);
-		expect(refreshSessions).toHaveBeenCalledOnce();
-		slow.resolve(true);
-		await slow.promise;
-		await Promise.resolve();
-		poll.call(harness);
-		expect(refreshSessions).toHaveBeenCalledTimes(2);
 	});
 
 	test.each([

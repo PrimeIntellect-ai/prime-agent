@@ -380,7 +380,9 @@ export class DaemonAgentConnection implements AgentConnection {
 			this.latestSnapshotIsFresh = false;
 		}
 		// A fresh transport lost any server-side roster subscription; re-establish it with the attach.
-		if (this.rosterStore) await this.rosterStore.attach(this.client, { force: true });
+		if (this.rosterStore && !(await this.rosterStore.attach(this.client, { force: true }))) {
+			throw new Error("Daemon is stale: it does not advertise the agent_roster capability; restart the daemon");
+		}
 	}
 
 	/** Push-fed subagent counts share the agents view's roster mirror; one store per connection. */

@@ -1218,7 +1218,7 @@ export class DaemonSupervisor {
 		socket.on("error", cleanup);
 		socket.on("drain", () => {
 			client.backpressured = false;
-			if (client.rosterResyncPending) {
+			if (client.rosterResyncPending && client.rosterSubscribed === true) {
 				// socket.write queues even under backpressure: one resync per loss gap, never one per drain.
 				client.rosterResyncPending = false;
 				this.write(client, { type: "roster_update", changed: this.rosterEntriesForClient(), resync: true });
@@ -1648,6 +1648,7 @@ export class DaemonSupervisor {
 				return success(command.id, command.type, { roster: this.rosterEntriesForClient() });
 			case "roster_unsubscribe":
 				client.rosterSubscribed = false;
+				client.rosterResyncPending = false;
 				return success(command.id, command.type);
 			case "list_agent_peers": {
 				const requester = [...this.workers.values()].find(
@@ -4037,6 +4038,8 @@ export class DaemonSupervisor {
 				continue;
 			}
 			if (now - worker.lastFrameAt > ROSTER_STALE_AFTER_MS) {
+				// Stamp only on the transition into stale; repeat sweeps of a stale worker emit nothing.
+				if (worker.rosterStale) continue;
 				const lastHeardFromAt = new Date(worker.lastFrameAt).toISOString();
 				for (const entry of this.workerRosterEntries(worker)) {
 					entry.lastHeardFromAt = lastHeardFromAt;

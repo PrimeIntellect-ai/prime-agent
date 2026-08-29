@@ -2821,6 +2821,7 @@ export class InteractiveMode {
 			this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 		}
 		this.subscribeToAgent();
+		await this.subscribeToRosterBar();
 		// A session_action_update in the unsubscribed gap above is lost; re-sync the queue post-subscription.
 		this.patchConnectionState({ sessionActions: (await this.agentConnection.getState()).sessionActions });
 		this.refreshQueueSelectionFromState();
@@ -5096,14 +5097,14 @@ export class InteractiveMode {
 		};
 	}
 
+	/** Daemon sessions feed the bar from the pushed roster; a daemon that cannot stream it is stale. */
+	private async subscribeToRosterBar(): Promise<void> {
+		if (!this.agentConnection.subscribeAgentRoster) return;
+		this.rosterBar = await this.agentConnection.subscribeAgentRoster(() => this.updateSubagentSummaryLine());
+		this.updateSubagentSummaryLine();
+	}
+
 	private subscribeToAgent(): void {
-		void this.agentConnection
-			.subscribeAgentRoster?.(() => this.updateSubagentSummaryLine())
-			.then((store) => {
-				this.rosterBar = store;
-				this.updateSubagentSummaryLine();
-			})
-			.catch((error: unknown) => this.showError(`Subagent roster unavailable: ${String(error)}`));
 		this.unsubscribe = this.agentConnection.subscribe(async (event) => {
 			try {
 				if (event.type === "session_event") {

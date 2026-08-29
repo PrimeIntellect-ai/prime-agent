@@ -1,4 +1,6 @@
 // Roster push soak: a real supervisor socket under thousands of churning sessions.
+// Covers the supervisor push path only; the worker->supervisor frame path has its own
+// integration pin in test/daemon-agent-roster.test.ts (real backpressured worker socket).
 // Run: NODE_OPTIONS=--expose-gc npx tsx scripts/roster-soak.ts (env: SOAK_SESSIONS, SOAK_ROUNDS)
 import { mkdtempSync, rmSync } from "node:fs";
 import { connect } from "node:net";
@@ -6,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentsViewRosterStore } from "../src/modes/agents-view/roster-store.js";
 import type { AgentRosterEntry, WorkerRosterEntry } from "../src/modes/daemon/agent-roster.js";
-import { workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
+import { sessionSummaryFromRosterEntry, workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import { DaemonCatalogClient } from "../src/modes/daemon/daemon-catalog-process.js";
 import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import { createDaemonCommandEnvelope } from "../src/modes/daemon/daemon-protocol.js";
@@ -220,11 +222,14 @@ async function main(): Promise<void> {
 	const listStarted = Date.now();
 	const listed = await client.request({ type: "list" });
 	const listLatencyMs = Date.now() - listStarted;
-	check(listed.success === true, "list answers after churn");
+	check(listed.success === true && listLatencyMs < 2000, `list answers after churn (${listLatencyMs}ms)`);
 	const listAllStarted = Date.now();
 	const listedAll = await client.request({ type: "list", all: true, sessionDir: "/tmp/soak/sessions" });
 	const listAllLatencyMs = Date.now() - listAllStarted;
-	check(listedAll.success === true, "list all answers over deep chains");
+	check(
+		listedAll.success === true && listAllLatencyMs < 2000,
+		`list all answers over deep chains (${listAllLatencyMs}ms)`,
+	);
 
 	// Ledger size equals the fed truth.
 	const expectedIds = new Set<string>();
@@ -235,13 +240,16 @@ async function main(): Promise<void> {
 		`ledger matches live truth (${ledgerIds.size} rows)`,
 	);
 
-	// The live subscriber converged to the exact final state.
+	// The live subscriber converged to the exact final payloads, not just statuses.
 	await sleep(300);
-	const wanted = new Map(internals.rosterEntriesForClient().map((entry) => [entry.summary.sessionId, entry.status]));
-	const got = new Map(store.summaries().map((row) => [row.sessionId, row.rosterStatus]));
-	let storeExact = wanted.size === got.size;
-	for (const [agentId, status] of wanted) if (got.get(agentId) !== status) storeExact = false;
-	check(storeExact, `store subscriber converges exactly (${got.size} rows)`);
+	const finalEntries = internals.rosterEntriesForClient();
+	const wantedSummaries = new Map(
+		finalEntries.map((entry) => [entry.summary.sessionId, JSON.stringify(sessionSummaryFromRosterEntry(entry))]),
+	);
+	const got = new Map(store.summaries().map((row) => [row.sessionId, JSON.stringify(row)]));
+	let storeExact = wantedSummaries.size === got.size;
+	for (const [sessionId, payload] of wantedSummaries) if (got.get(sessionId) !== payload) storeExact = false;
+	check(storeExact, `store subscriber converges to exact payloads (${got.size} rows)`);
 
 	// The slow subscriber drains to the exact final state through one coalesced resync.
 	slow.resume();
@@ -273,11 +281,15 @@ async function main(): Promise<void> {
 		for (const entry of message.changed ?? []) slowRows.set(entry.agentId, entry);
 		for (const agentId of message.removed ?? []) slowRows.delete(agentId);
 	}
-	const slowBydSession = new Map([...slowRows.values()].map((entry) => [entry.summary.sessionId, entry.status]));
-	let slowExact = wanted.size === slowBydSession.size;
-	for (const [sessionId, status] of wanted) if (slowBydSession.get(sessionId) !== status) slowExact = false;
-	check(slowExact, `slow subscriber converges exactly (${slowBydSession.size} rows, ${resyncs} resyncs)`);
-	check(resyncs <= 3, `resyncs stay coalesced (${resyncs} over the whole run)`);
+	const slowBySession = new Map(
+		[...slowRows.values()].map((entry) => [entry.summary.sessionId, JSON.stringify(entry)]),
+	);
+	const wantedEntries = new Map(finalEntries.map((entry) => [entry.summary.sessionId, JSON.stringify(entry)]));
+	let slowExact = wantedEntries.size === slowBySession.size;
+	for (const [sessionId, payload] of wantedEntries) if (slowBySession.get(sessionId) !== payload) slowExact = false;
+	check(slowExact, `slow subscriber converges to exact payloads (${slowBySession.size} rows, ${resyncs} resyncs)`);
+	// The paused socket guarantees at least one loss gap, and gaps must coalesce, never loop.
+	check(resyncs >= 1 && resyncs <= 3, `resyncs cover the induced gap and stay coalesced (${resyncs})`);
 	check(biggestNonResync <= SESSIONS, "no accidental full-roster deltas outside resync");
 
 	const rssStart = rssSamples[1] ?? rssSamples[0] ?? 1;
