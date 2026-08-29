@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "eventType",
+    "taskId",
+    "actor",
+    "bindingNonce"
+  ],
+  "properties": {
+    "kind": {
+      "const": "composed-contract-gate-task-event"
+    },
+    "eventType": {
+      "type": "string"
+    },
+    "taskId": {
+      "type": "string"
+    },
+    "actor": {
+      "type": "string"
+    },
+    "bindingNonce": {
+      "type": "string"
+    }
+  }
+}

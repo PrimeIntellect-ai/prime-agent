@@ -1,0 +1,835 @@
+{
+  "DashboardProcessObservation": {
+    "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/G7-DASHBOARD-PROCESS-SNAPSHOT.json",
+    "payloadAggregate": "sha256:c6207c3e5fa3618ac8a0d5004bda017dec335b61db0630ac29c0e70ae5ced11d",
+    "rawSha256": "sha256:42e9657ccc7c4d1e93fc040eb11cc06ad7607997d715d97feeea5f5c5188680b"
+  },
+  "P10EffectAddendumDraft": {
+    "addendumId": "ccg-p10-loopback-effect-r4",
+    "changes": {
+      "addAllowedEffects": [
+        "runtime_read",
+        "service_read",
+        "service_mutation"
+      ],
+      "endpoint": "http://127.0.0.1:60243/refresh",
+      "sourceRawSha256": "sha256:06b3bb2c8592e8ba96c55d4b3d1f7c58ff21cfeec42e274edc86d9c424bbb871",
+      "staleRule": "At P10 preflight, any PID/start/argv/executable/source/listener/host/port mismatch or absent listener is BLOCK. Do not discover or choose another port. Require a new Owner addendum bound to a newly frozen process receipt."
+    },
+    "claimCeiling": "derived_candidate_only",
+    "issuerRole": "Owner required",
+    "kind": "owner_reauthorization",
+    "newGeneration": 4,
+    "parentEnvelopePriorAggregate": "sha256:7a902a826759a8824a35168550771ff263f6c252775dfe0140b1e980c7cc1bdd",
+    "payloadAggregate": "sha256:953e4bec610f6114853f2dc276ba17bf47c53199469b7f82be4e528277870ab8",
+    "schemaVersion": 1,
+    "status": "proposed_non_effective",
+    "targetTaskId": "P10"
+  },
+  "P10EffectScope": {
+    "allowedEffects": [
+      "source_read",
+      "project_read",
+      "test_execution",
+      "temp_write",
+      "project_write",
+      "git_read",
+      "git_mutation",
+      "message_receipt",
+      "runtime_effect",
+      "runtime_read",
+      "service_read",
+      "service_mutation"
+    ],
+    "deniedEffects": [
+      "business_data_mutation",
+      "business_data_read",
+      "credential_mutation",
+      "credential_read",
+      "deployment_mutation",
+      "deployment_read",
+      "git_push",
+      "thread_read"
+    ],
+    "endpointProcessBinding": {
+      "bindingAuthority": {
+        "diagnosis": "current live Dashboard is 127.0.0.1:60243; no 8790 listener",
+        "r4ReviewPath": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/RLM-DRAFT-REVIEW-R4.json",
+        "r4ReviewRawSha256": "sha256:71df789ccfe86eb186cfa1083a821287c11c03d5b72579c0dce81348df6ac3f8"
+      },
+      "endpoint": {
+        "healthRead": "same loopback process only",
+        "host": "127.0.0.1",
+        "mutationMethod": "POST",
+        "mutationPath": "/refresh",
+        "port": 60243,
+        "scheme": "http"
+      },
+      "interpreterObservation": {
+        "observedArgv": [
+          "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+          "-u",
+          "/Users/ZGH/.prime/agent/harness/assets/multi-thread-coordination/dashboard-generator.py",
+          "serve",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "60243"
+        ],
+        "observedExecutable": "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/G7-DASHBOARD-PROCESS-SNAPSHOT.json",
+        "pythonCommandResolution": {
+          "python": null,
+          "python3": "/opt/homebrew/bin/python3"
+        },
+        "rawSha256": "sha256:42e9657ccc7c4d1e93fc040eb11cc06ad7607997d715d97feeea5f5c5188680b"
+      },
+      "processIdentityReceipt": {
+        "path": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/evidence/composed-contract-gate/P10-dashboard-process-identity.json",
+        "requiredFields": [
+          "pid",
+          "pidStartTime",
+          "argvRawSha256",
+          "executablePath",
+          "executableRawSha256",
+          "sourcePath",
+          "sourceRawSha256",
+          "listenerHost",
+          "listenerPort",
+          "listenerSocketIdentity",
+          "observedAt",
+          "payloadAggregate",
+          "invokedArgv",
+          "invokedArgvRawSha256",
+          "resolvedExecutablePath",
+          "resolvedExecutableRawSha256"
+        ]
+      },
+      "sourceIdentity": {
+        "path": "/Users/ZGH/.prime/agent/harness/assets/multi-thread-coordination/dashboard-generator.py",
+        "rawSha256": "sha256:06b3bb2c8592e8ba96c55d4b3d1f7c58ff21cfeec42e274edc86d9c424bbb871"
+      },
+      "staleRule": "At P10 preflight, any PID/start/argv/executable/source/listener/host/port mismatch or absent listener is BLOCK. Do not discover or choose another port. Require a new Owner addendum bound to a newly frozen process receipt."
+    },
+    "executionConstraints": {
+      "allowedCommands": [
+        [
+          "/opt/homebrew/bin/python3",
+          "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/.ccg-staging/gates/P10-activation-close-gate.py",
+          "--full-bound-activation",
+          "--owner-request",
+          "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/plans/2026-08-23-composed-contract-gate-authorization-request.rlm-draft.json",
+          "--owner-decision-receipt",
+          "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/OWNER-DECISION-G8.json",
+          "--p9-gate-decision-receipt",
+          "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/evidence/composed-contract-gate/P9-controller-gate-decision.json",
+          "--accepted-manifest",
+          "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/.ccg-staging/release/ccg-v1-manifest.json",
+          "--pre-process-receipt",
+          "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/evidence/composed-contract-gate/P10-dashboard-process-identity.json",
+          "--post-final-process-receipt",
+          "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/evidence/composed-contract-gate/P10-dashboard-process-identity-final.json",
+          "--endpoint",
+          "http://127.0.0.1:60243/refresh"
+        ]
+      ],
+      "allowedTools": [
+        "exec_command"
+      ]
+    },
+    "interpreterRestartBinding": {
+      "checks": [
+        "sole wrapper argv[0] exact existing /opt/homebrew/bin/python3",
+        "wrapper receipt compares invoked path and resolved executable",
+        "restart/rollback/final invoked argv equals observed Homebrew executable + -u + script + serve + host + port",
+        "no --out",
+        "process receipts compare invoked argv and resolved executable"
+      ],
+      "observation": {
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/G7-DASHBOARD-PROCESS-SNAPSHOT.json",
+        "rawSha256": "sha256:42e9657ccc7c4d1e93fc040eb11cc06ad7607997d715d97feeea5f5c5188680b"
+      },
+      "redTests": [
+        "python command alias",
+        "/usr/bin/python3",
+        "missing -u",
+        "invented --out",
+        "different script/host/port",
+        "invoked argv match without resolved executable match"
+      ],
+      "resolvedExecutable": "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+      "restartArgv": [
+        "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "-u",
+        "/Users/ZGH/.prime/agent/harness/assets/multi-thread-coordination/dashboard-generator.py",
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "60243"
+      ],
+      "wrapperInterpreter": "/opt/homebrew/bin/python3"
+    },
+    "ownerAuthorityBinding": {
+      "P9GateDecisionReceipt": {
+        "path": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/evidence/composed-contract-gate/P9-controller-gate-decision.json",
+        "requiredFields": [
+          "decision",
+          "workClass",
+          "reviewVerdictRawSha256",
+          "candidateManifestRawSha256",
+          "candidateManifestPayloadAggregate",
+          "packagePayloadAggregate",
+          "parentEnvelopePayloadAggregate",
+          "rolePolicyRawSha256",
+          "controllerIdentity",
+          "bindingNonce",
+          "decidedAt",
+          "payloadAggregate"
+        ]
+      },
+      "failClosed": "Missing, stale, changed or mismatched G8 request/receipt/P9 decision is BLOCK before effects.",
+      "futureOwnerReceipt": {
+        "mustNotExistAtDraft": true,
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/OWNER-DECISION-G8.json",
+        "requiredDecision": "APPROVE",
+        "requiredFields": [
+          "schemaVersion",
+          "kind",
+          "closed",
+          "decision",
+          "requestId",
+          "generation",
+          "requestRawSha256",
+          "requestPayloadAggregate",
+          "packageRawSha256",
+          "packagePayloadAggregate",
+          "parentEnvelopePayloadAggregate",
+          "P10EffectAddendumPayloadAggregate",
+          "endpointProcessBindingAggregate",
+          "ownerIdentity",
+          "decidedAt",
+          "bindingNonce",
+          "payloadAggregate"
+        ]
+      },
+      "request": {
+        "generation": 8,
+        "path": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/plans/2026-08-23-composed-contract-gate-authorization-request.rlm-draft.json",
+        "requestId": "ccg-owner-auth-request-2026-08-23-r8",
+        "resolution": "At P10 compute generation-8 request raw SHA/payload from frozen bytes and require future G8 Owner receipt exact equality. Stale prior-to-G8 rejects."
+      }
+    },
+    "postFinalProcessBinding": {
+      "path": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/evidence/composed-contract-gate/P10-dashboard-process-identity-final.json",
+      "phase": "P10-post-final-active",
+      "requiredFields": [
+        "phase",
+        "pid",
+        "pidStartTime",
+        "argv",
+        "argvRawSha256",
+        "executablePath",
+        "executableRawSha256",
+        "loadedSourcePath",
+        "loadedSourceRawSha256",
+        "acceptedManifestRawSha256",
+        "acceptedDashboardArtifactRawSha256",
+        "listenerHost",
+        "listenerPort",
+        "listenerSocketIdentity",
+        "refreshProofRawSha256",
+        "observedAt",
+        "actor",
+        "bindingNonce",
+        "payloadAggregate",
+        "invokedArgv",
+        "invokedArgvRawSha256",
+        "resolvedExecutablePath",
+        "resolvedExecutableRawSha256"
+      ],
+      "requirements": [
+        "new/live PID start occurs after final accepted-byte activation",
+        "invokedArgv equals exact observed Homebrew argv and resolvedExecutablePath equals observed Homebrew executable",
+        "loadedSourceRawSha256 equals P9 accepted Dashboard artifact",
+        "listener is 127.0.0.1:60243",
+        "refresh and steady-state proof are from that same PID/socket/source",
+        "invokedArgv contains -u and no --out; script/serve/host/port exactly match process observation"
+      ]
+    },
+    "restrictions": {
+      "denied": [
+        "non-loopback host",
+        "any port except 60243",
+        "any path except /refresh for mutation",
+        "credentials",
+        "external service",
+        "deployment",
+        "production",
+        "business data",
+        "git push"
+      ],
+      "runtime_effect": [
+        "exact local activation targets in P10 allowedPaths only"
+      ],
+      "runtime_read": [
+        "exact local composed-gate processes/files named in P10 scope",
+        "loopback dashboard steady-state health only"
+      ],
+      "service_mutation": [
+        "HTTP POST http://127.0.0.1:60243/refresh only"
+      ],
+      "service_read": [
+        "HTTP response/health metadata from the exact bound Dashboard process at 127.0.0.1:60243 only"
+      ],
+      "staleEndpoint": "BLOCK and require new Owner addendum; no port discovery/fallback"
+    }
+  },
+  "P10EndpointProcessBinding": {
+    "bindingAuthority": {
+      "diagnosis": "current live Dashboard is 127.0.0.1:60243; no 8790 listener",
+      "r4ReviewPath": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/RLM-DRAFT-REVIEW-R4.json",
+      "r4ReviewRawSha256": "sha256:71df789ccfe86eb186cfa1083a821287c11c03d5b72579c0dce81348df6ac3f8"
+    },
+    "endpoint": {
+      "healthRead": "same loopback process only",
+      "host": "127.0.0.1",
+      "mutationMethod": "POST",
+      "mutationPath": "/refresh",
+      "port": 60243,
+      "scheme": "http"
+    },
+    "interpreterObservation": {
+      "observedArgv": [
+        "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "-u",
+        "/Users/ZGH/.prime/agent/harness/assets/multi-thread-coordination/dashboard-generator.py",
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "60243"
+      ],
+      "observedExecutable": "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+      "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/G7-DASHBOARD-PROCESS-SNAPSHOT.json",
+      "pythonCommandResolution": {
+        "python": null,
+        "python3": "/opt/homebrew/bin/python3"
+      },
+      "rawSha256": "sha256:42e9657ccc7c4d1e93fc040eb11cc06ad7607997d715d97feeea5f5c5188680b"
+    },
+    "processIdentityReceipt": {
+      "path": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/evidence/composed-contract-gate/P10-dashboard-process-identity.json",
+      "requiredFields": [
+        "pid",
+        "pidStartTime",
+        "argvRawSha256",
+        "executablePath",
+        "executableRawSha256",
+        "sourcePath",
+        "sourceRawSha256",
+        "listenerHost",
+        "listenerPort",
+        "listenerSocketIdentity",
+        "observedAt",
+        "payloadAggregate",
+        "invokedArgv",
+        "invokedArgvRawSha256",
+        "resolvedExecutablePath",
+        "resolvedExecutableRawSha256"
+      ]
+    },
+    "sourceIdentity": {
+      "path": "/Users/ZGH/.prime/agent/harness/assets/multi-thread-coordination/dashboard-generator.py",
+      "rawSha256": "sha256:06b3bb2c8592e8ba96c55d4b3d1f7c58ff21cfeec42e274edc86d9c424bbb871"
+    },
+    "staleRule": "At P10 preflight, any PID/start/argv/executable/source/listener/host/port mismatch or absent listener is BLOCK. Do not discover or choose another port. Require a new Owner addendum bound to a newly frozen process receipt."
+  },
+  "P10ExactBoundWrapper": {
+    "argv": [
+      "/opt/homebrew/bin/python3",
+      "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/.ccg-staging/gates/P10-activation-close-gate.py",
+      "--full-bound-activation",
+      "--owner-request",
+      "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/plans/2026-08-23-composed-contract-gate-authorization-request.rlm-draft.json",
+      "--owner-decision-receipt",
+      "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/OWNER-DECISION-G8.json",
+      "--p9-gate-decision-receipt",
+      "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/evidence/composed-contract-gate/P9-controller-gate-decision.json",
+      "--accepted-manifest",
+      "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/.ccg-staging/release/ccg-v1-manifest.json",
+      "--pre-process-receipt",
+      "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/evidence/composed-contract-gate/P10-dashboard-process-identity.json",
+      "--post-final-process-receipt",
+      "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/evidence/composed-contract-gate/P10-dashboard-process-identity-final.json",
+      "--endpoint",
+      "http://127.0.0.1:60243/refresh"
+    ],
+    "interpreterBinding": {
+      "invokedPath": "/opt/homebrew/bin/python3",
+      "mustExist": true,
+      "observationPath": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/G7-DASHBOARD-PROCESS-SNAPSHOT.json",
+      "observationRawSha256": "sha256:42e9657ccc7c4d1e93fc040eb11cc06ad7607997d715d97feeea5f5c5188680b",
+      "observedResolution": "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python"
+    },
+    "rawCurlAuthorized": false,
+    "rule": "Only exact argv permitted. Receipt compares invoked interpreter path and resolved executable before wrapper work."
+  },
+  "P10OwnerAuthorityBinding": {
+    "P9GateDecisionReceipt": {
+      "path": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/evidence/composed-contract-gate/P9-controller-gate-decision.json",
+      "requiredFields": [
+        "decision",
+        "workClass",
+        "reviewVerdictRawSha256",
+        "candidateManifestRawSha256",
+        "candidateManifestPayloadAggregate",
+        "packagePayloadAggregate",
+        "parentEnvelopePayloadAggregate",
+        "rolePolicyRawSha256",
+        "controllerIdentity",
+        "bindingNonce",
+        "decidedAt",
+        "payloadAggregate"
+      ]
+    },
+    "failClosed": "Missing, stale, changed or mismatched G8 request/receipt/P9 decision is BLOCK before effects.",
+    "futureOwnerReceipt": {
+      "mustNotExistAtDraft": true,
+      "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/OWNER-DECISION-G8.json",
+      "requiredDecision": "APPROVE",
+      "requiredFields": [
+        "schemaVersion",
+        "kind",
+        "closed",
+        "decision",
+        "requestId",
+        "generation",
+        "requestRawSha256",
+        "requestPayloadAggregate",
+        "packageRawSha256",
+        "packagePayloadAggregate",
+        "parentEnvelopePayloadAggregate",
+        "P10EffectAddendumPayloadAggregate",
+        "endpointProcessBindingAggregate",
+        "ownerIdentity",
+        "decidedAt",
+        "bindingNonce",
+        "payloadAggregate"
+      ]
+    },
+    "request": {
+      "generation": 8,
+      "path": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/plans/2026-08-23-composed-contract-gate-authorization-request.rlm-draft.json",
+      "requestId": "ccg-owner-auth-request-2026-08-23-r8",
+      "resolution": "At P10 compute generation-8 request raw SHA/payload from frozen bytes and require future G8 Owner receipt exact equality. Stale prior-to-G8 rejects."
+    }
+  },
+  "P10ReloadTransition": {
+    "acceptedSourceRule": "Every first/final accepted restart invokes exact observed Homebrew executable with -u, script, serve, host 127.0.0.1 and port 60243; no --out. Live source must equal P9 accepted artifact.",
+    "invokedExecutable": "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+    "mode": "exact_supervised_restart_inside_bound_wrapper",
+    "observation": {
+      "invokedShape": [
+        "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+        "-u",
+        "/Users/ZGH/.prime/agent/harness/assets/multi-thread-coordination/dashboard-generator.py",
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "60243"
+      ],
+      "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/G7-DASHBOARD-PROCESS-SNAPSHOT.json",
+      "pidObserved": 20848,
+      "rawSha256": "sha256:42e9657ccc7c4d1e93fc040eb11cc06ad7607997d715d97feeea5f5c5188680b"
+    },
+    "postFinalReceipt": {
+      "path": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/evidence/composed-contract-gate/P10-dashboard-process-identity-final.json",
+      "phase": "P10-post-final-active",
+      "requiredFields": [
+        "phase",
+        "pid",
+        "pidStartTime",
+        "argv",
+        "argvRawSha256",
+        "executablePath",
+        "executableRawSha256",
+        "loadedSourcePath",
+        "loadedSourceRawSha256",
+        "acceptedManifestRawSha256",
+        "acceptedDashboardArtifactRawSha256",
+        "listenerHost",
+        "listenerPort",
+        "listenerSocketIdentity",
+        "refreshProofRawSha256",
+        "observedAt",
+        "actor",
+        "bindingNonce",
+        "payloadAggregate",
+        "invokedArgv",
+        "invokedArgvRawSha256",
+        "resolvedExecutablePath",
+        "resolvedExecutableRawSha256"
+      ],
+      "requirements": [
+        "new/live PID start occurs after final accepted-byte activation",
+        "invokedArgv equals exact observed Homebrew argv and resolvedExecutablePath equals observed Homebrew executable",
+        "loadedSourceRawSha256 equals P9 accepted Dashboard artifact",
+        "listener is 127.0.0.1:60243",
+        "refresh and steady-state proof are from that same PID/socket/source",
+        "invokedArgv contains -u and no --out; script/serve/host/port exactly match process observation"
+      ]
+    },
+    "precondition": "fresh pre-process receipt matches current PID/start/argv/executable/source/listener 127.0.0.1:60243",
+    "resolvedExecutable": "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+    "rollbackStartRule": "Rollback invokes the same exact observed Homebrew executable argv after restoring original source; no --out.",
+    "startArgv": [
+      "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+      "-u",
+      "/Users/ZGH/.prime/agent/harness/assets/multi-thread-coordination/dashboard-generator.py",
+      "serve",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "60243"
+    ],
+    "stop": {
+      "requirePortReleased": true,
+      "signal": "SIGTERM",
+      "target": "only exact PID+pidStartTime from fresh pre-process receipt",
+      "timeoutSeconds": 10
+    }
+  },
+  "P9GateDecision": {
+    "ControllerWorkClass": "gate_decision",
+    "acceptanceClaim": false,
+    "activationTask": "P10",
+    "forbidden": [
+      "functional_implementation",
+      "candidate_authoring",
+      "detailed_testing",
+      "independent_review",
+      "acceptance"
+    ],
+    "outputEnum": [
+      "PASS",
+      "BLOCK"
+    ],
+    "preconditions": [
+      "ccg-p9-reviewer review_verdict PASS",
+      "frozen candidate raw SHA-256 and payload aggregate",
+      "P0=0",
+      "P1=0",
+      "role-post ownership RELEASED",
+      "package/staging/evidence/mirror/dashboard aggregates"
+    ],
+    "reviewActionId": "ccg-p9-reviewer",
+    "roleBoundaryPolicyRawSha256": "sha256:b09da998e7527fc870d8d01e1730337dadbb72b613ba3b9d6537bda7371922cc"
+  },
+  "actionContractRequirement": {
+    "compile": "24/24 plus exact /opt/homebrew/bin/python3 wrapper and observed restart argv lint",
+    "count": 24
+  },
+  "activationSuccess": {
+    "failure": "restore original state before BLOCK",
+    "sequence": [
+      "verify exact G8 Owner receipt/request and P9 gate-decision/accepted manifest",
+      "verify fresh pre-process PID/start/argv/executable/source/listener",
+      "snapshot original state",
+      "first activate accepted bytes and exact observed-Homebrew restart",
+      "canary and wrapper-internal POST /refresh",
+      "rollback drill: restore original bytes and exact observed-Homebrew restart",
+      "verify original raw/semantic/process restoration",
+      "final activate accepted bytes and exact observed-Homebrew restart",
+      "freeze post-final process receipt bound to accepted Dashboard artifact and 127.0.0.1:60243 listener",
+      "steady-state proof from same post-final process",
+      "emit active terminal and RELEASED ownership"
+    ],
+    "terminalState": "active_on_exact_accepted_dashboard_process_steady_state_proved"
+  },
+  "actualParentContainment": {
+    "actionProjectionCount": 24,
+    "parentEnvelopePayloadAggregate": "sha256:28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+    "rule": {
+      "P10Rule": "P10 wrapper interpreter, G8 Owner binding, endpoint, exact observed restart argv, invoked/resolved executable receipts, effects and post-final accepted-source proof repeat identically across Parent/projection/binding/child/package/request.",
+      "allActionEffectRule": "Every action and embedded parentBinding allowed effect is a subset of actual Parent allowed effects; every actual Parent denied effect remains denied; claim level does not exceed actual Parent claim.",
+      "allActionPathRule": "For all 24 actions, resolve child/parentBinding paths against their scopeRoot, then require every result inside at least one actual ParentEnvelopeDraft allowed path resolved against Parent scopeRoot. Dot/root authority is forbidden unless explicitly present in actual Parent (it is not).",
+      "bootstrapRule": "ccg-p0-bootstrap-preflight allowedPaths is exactly the package draft path; git status is read-only observation and does not enlarge dispatch change surface.",
+      "failClosed": true,
+      "greenMarker": "COMPOSED_ACTUAL_PARENT_CONTAINMENT_GREEN",
+      "machineRule": "For every action, embedded parentBinding.parentEnvelopeSha256 must equal this Parent payload aggregate; parentBinding.scope/executionConstraints/claimCeiling must equal actionParentProjections[actionId] exactly. Then child containment is checked.",
+      "mutableDbRule": "Actual Parent/package/request bind the mutable DB profile aggregate and seam receipt schema, never a stable DB raw hash; P10 fresh rollback receipt still binds raw bytes."
+    }
+  },
+  "approvalAuthority": "Owner only",
+  "approvalBinding": {
+    "requiredFields": [
+      "schemaVersion",
+      "kind",
+      "closed",
+      "decision",
+      "requestId",
+      "generation",
+      "requestRawSha256",
+      "requestPayloadAggregate",
+      "packageRawSha256",
+      "packagePayloadAggregate",
+      "parentEnvelopePayloadAggregate",
+      "P10EffectAddendumPayloadAggregate",
+      "endpointProcessBindingAggregate",
+      "ownerIdentity",
+      "decidedAt",
+      "bindingNonce",
+      "payloadAggregate"
+    ],
+    "rule": "Owner writes separate G8 receipt after freeze; mismatch cannot authorize."
+  },
+  "budgetCeilings": {
+    "calendarDays": 14,
+    "children": 14,
+    "toolCalls": 700,
+    "turns": 160,
+    "usd": 65,
+    "workTokens": 1000000
+  },
+  "claimCeiling": "derived_candidate_only",
+  "closed": true,
+  "draftedBy": {
+    "activeSessionId": "b6fa7f9e2ce8",
+    "repairAdmissionRawSha256": "sha256:d6d816af5ac3c84ff20b8fcee8e36dda6b8a41a5165ed6a418a92f95be0354eb",
+    "repairAuthorizationRawSha256": "sha256:68151712b01d7afbbac3c8836747ffd3310c3a18e47956ff47814e7f9081542d",
+    "rlmChildId": "sub-5e832c3b",
+    "role": "ControllerInternalRLM",
+    "sessionId": "01a02d57-9145-77d2-89d9-1726dcd414bc"
+  },
+  "exclusions": [
+    "unresolved python alias",
+    "/usr/bin/python3",
+    "missing -u",
+    "--out",
+    "different restart argv/resolved executable",
+    "raw curl",
+    "stale G3-G7 Owner receipt",
+    "external service/other port",
+    "deployment",
+    "production",
+    "git push"
+  ],
+  "futureOwnerDecisionReceipt": {
+    "mustNotExistAtDraft": true,
+    "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/OWNER-DECISION-G8.json",
+    "requiredDecision": "APPROVE",
+    "requiredFields": [
+      "schemaVersion",
+      "kind",
+      "closed",
+      "decision",
+      "requestId",
+      "generation",
+      "requestRawSha256",
+      "requestPayloadAggregate",
+      "packageRawSha256",
+      "packagePayloadAggregate",
+      "parentEnvelopePayloadAggregate",
+      "P10EffectAddendumPayloadAggregate",
+      "endpointProcessBindingAggregate",
+      "ownerIdentity",
+      "decidedAt",
+      "bindingNonce",
+      "payloadAggregate"
+    ]
+  },
+  "generation": 8,
+  "generationRule": "generation=8 is Owner authority; repairRound=10 is non-authority drafting metadata",
+  "issuedAt": "2026-08-23T08:44:57.366292+00:00",
+  "kind": "composed-contract-gate-owner-authorization-request-rlm-draft",
+  "lineageId": "ccg-2026-08-23-owner-package-v1",
+  "mutableDbSeamReceiptPhases": {
+    "P0": [
+      {
+        "phase": "P0-baseline",
+        "transition": "establish baseline; schema/engine resolve to stable code; semantic rows internally consistent"
+      }
+    ],
+    "P10": [
+      {
+        "phase": "P10-pre-activation",
+        "transition": "link P8 post; authorized monotonic evolution only; freeze exact raw bytes for rollback"
+      },
+      {
+        "phase": "P10-post-drill-restore",
+        "transition": "raw SHA, semantic aggregate, schemas, counts and heads exactly equal P10 pre-activation"
+      },
+      {
+        "phase": "P10-final-active",
+        "transition": "accepted activation/mirror events only; schema/authority unchanged; counts/heads match final accepted transition plan"
+      }
+    ],
+    "P8": [
+      {
+        "phase": "P8-pre-integration",
+        "transition": "link P0; live schema/authority unchanged; only authorized TaskEvent/mirror evolution"
+      },
+      {
+        "phase": "P8-post-replay",
+        "transition": "live source still authorized; staged replay aggregates/counts reconcile; no forged closure"
+      }
+    ]
+  },
+  "mutableTaskKanbanDbProfile": {
+    "actorRule": "Controller evidence_aggregation only; receipt binds activeSessionId/sessionId/role and fresh nonce",
+    "authority": "Append-only TaskEvent/dispatch registry evidence is authoritative; DB projection is derived and rebuildable; DB raw bytes are not a long-lived package invariant.",
+    "canonicalSemanticAggregate": {
+      "algorithm": "sha256 canonical JSON",
+      "fields": [
+        "dbPath",
+        "sqliteMagic",
+        "pragmaUserVersion",
+        "schemaVersion",
+        "engineVersion",
+        "tableSchemaAggregates",
+        "taskEventHeadSequence",
+        "taskEventHeadAggregate",
+        "projectionHeadSequence",
+        "projectionHeadAggregate",
+        "pendingHeadAggregate",
+        "rowCounts",
+        "authorityProfileAggregate"
+      ],
+      "rowOrdering": "primary-key ascending per table; normalize INTEGER/TEXT/NULL; exclude SQLite page layout, freelist, journal and timestamps not in semantic rows"
+    },
+    "dbPath": "/Users/ZGH/.prime/agent/harness/assets/multi-thread-coordination/kanban-engine.db",
+    "freshness": "Receipt is generated at its named seam and expires when its process/source/engine/schema/ledger-head binding changes. A raw hash is evidence for that observation only.",
+    "longLivedRawHashForbidden": true,
+    "payloadAggregate": "sha256:02c060f0713b43bcf68e423b4b2f723d599593e4dafa6d5adee3b85a1ec21b2d",
+    "profileId": "taskkanban-live-db-v1",
+    "receiptRequiredFields": [
+      "schemaVersion",
+      "kind",
+      "phase",
+      "dbPath",
+      "authorityProfileAggregate",
+      "rawSha256",
+      "canonicalSemanticAggregate",
+      "sqliteMagic",
+      "pragmaUserVersion",
+      "schemaVersionObserved",
+      "engineVersionObserved",
+      "tableSchemaAggregates",
+      "taskEventHeadSequence",
+      "taskEventHeadAggregate",
+      "projectionHeadSequence",
+      "projectionHeadAggregate",
+      "pendingHeadAggregate",
+      "rowCounts",
+      "observedAt",
+      "actor",
+      "bindingNonce",
+      "priorReceiptAggregate",
+      "transitionClass",
+      "allowedTransitionCheck",
+      "payloadAggregate"
+    ],
+    "requiredIdentity": {
+      "engineVersion": "must resolve to stable kanban-engine.py binding",
+      "pathExact": "/Users/ZGH/.prime/agent/harness/assets/multi-thread-coordination/kanban-engine.db",
+      "schemaVersion": "must equal accepted engine schema at observation",
+      "sqliteMagic": "SQLite format 3"
+    },
+    "storageType": "SQLite mutable projection state"
+  },
+  "objective": "Compose G0-G9 into a fail-closed task-contract lifecycle and package all implementation tasks sequentially under one bounded Parent authorization request.",
+  "packageRef": {
+    "parentEnvelopePayloadAggregate": "sha256:28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+    "path": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/plans/2026-08-23-composed-contract-gate-task-package.rlm-draft.json",
+    "payloadAggregate": "sha256:d18a5c59106cd092e9913e6f2597bfbec6aa232cd9d531b3ac8526298ff6cfa0",
+    "rawSha256": "sha256:57ead530b75570a5a114e323e35edea9c6ba58c9289df3714f3804edad167c33"
+  },
+  "payloadAggregate": "sha256:b478b8794a88d4e20db4cf0cfcaddda6bbd2fc27493cd6b5a7553098c50ac4fb",
+  "planRef": {
+    "path": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/plans/2026-08-23-composed-contract-gate-program-plan.rlm-draft.md",
+    "rawSha256": "sha256:dc0ce23e991b9740004861b4ad219adc8bf04aed56204d8e76edb36b2bc9d28b"
+  },
+  "r10RepairRef": {
+    "repairAuthorizationRawSha256": "sha256:86b4a1cd4667f48962d0cd045629e4d13a97e373be0ad38d6c6b75e24bb3307f",
+    "resolved": [
+      "P1-1"
+    ],
+    "reviewRawSha256": "sha256:185173919f97b2d870716b31d422ce63f01515068129f6cf94a4bd48474cc267",
+    "roleAdmissionRawSha256": "sha256:e9c74f38208bc105f100108e00e67a0a3a2037bba203eef919121f36f13a18f7"
+  },
+  "r8ReviewRef": {
+    "findingsResolved": [
+      "P1-1",
+      "P1-2"
+    ],
+    "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/RLM-DRAFT-REVIEW-R8.json",
+    "processObservationRawSha256": "sha256:42e9657ccc7c4d1e93fc040eb11cc06ad7607997d715d97feeea5f5c5188680b",
+    "rawSha256": "sha256:f23a5d2b0b2bc6c4463694ac56d3dfdda59458300106fe23a0af942a0f9e1de2"
+  },
+  "r9RepairRef": {
+    "formalDispositionRawSha256": "sha256:6a73040fc147419d38ca49f8cf3bedb9f88018af296ae492349da0abd757be0c",
+    "repairAuthorizationRawSha256": "sha256:7dc20c599d6c6d139a2eabc5da5eaa4319338b49c5a84f1a4ab13c2d68eb2018",
+    "resolved": [
+      "P1-1"
+    ],
+    "roleAdmissionRawSha256": "sha256:14ba3a9181e3d6d88be267982c671cdf00765f7720891290506e716789c1d132"
+  },
+  "receiptBindingRule": "G8 Owner receipt binds these repaired request bytes and current package/Parent/addendum. Any authority generation lower than 8 rejects.",
+  "repairRound": 10,
+  "requestId": "ccg-owner-auth-request-2026-08-23-r8",
+  "requestedBy": {
+    "activeSessionId": "c69c0cf2a10d",
+    "role": "Parent Controller",
+    "sessionId": "01a01acd-32d6-711c-ba3f-15b1aab84c10"
+  },
+  "requestedDecision": {
+    "amend": "Interpreter, executable, argv, source, process, endpoint or package drift requires new generation.",
+    "approve": "Approve the exact repaired G8 request bytes bound to repair-generation-9 package/Parent; P10 accepts only G8 Owner receipt semantics.",
+    "reject": "No implementation or effect."
+  },
+  "rollback": "All restart phases use exact observed Homebrew executable argv. Receipts compare invoked argv and resolved executable. Any mismatch restores original state and BLOCKs.",
+  "schemaVersion": 1,
+  "stableCodeBindings": {
+    "/Users/ZGH/.prime/agent/harness/assets/dispatch-gates/kanban-mirror.py": "sha256:c97498a5214617e2c439df5ad6e55ffcadae9a72c0e9e3a6923fb4747e736720",
+    "/Users/ZGH/.prime/agent/harness/assets/multi-thread-coordination/dashboard-generator.py": "sha256:06b3bb2c8592e8ba96c55d4b3d1f7c58ff21cfeec42e274edc86d9c424bbb871",
+    "/Users/ZGH/.prime/agent/harness/assets/multi-thread-coordination/kanban-engine.py": "sha256:d5462566fff640071936ac2edab4e1784e8dd8a07507314f50765018082d445f",
+    "/Users/ZGH/.prime/agent/harness/assets/multi-thread-coordination/taskkanban.py": "sha256:62e779107ef5d5f3a95fa7211ba7f0fd42fb389b4750597c0c8aca9f15264f4d",
+    "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/AGENTS.md": "sha256:a2cf78e2cdc68d3418e54bb3ce2c5237ff3ca56e82214027ae25d7f1418a92dc"
+  },
+  "status": "owner_decision_required_non_effective",
+  "supersedesRepairBytes": {
+    "candidateGeneration": 8,
+    "priorPayloadAggregate": "sha256:55c782bea39ba5b4e20dafe890017b7e83c29c7980df0803d58962e2e0b59b89",
+    "priorRawSha256": "sha256:1c4221644b5bcd804591658f298bf01463b97a9cf50edce0d12f327f593d9870",
+    "repairRound": 9
+  },
+  "supersedesRequest": {
+    "generation": 7,
+    "payloadAggregate": "sha256:93736ed0e08ecb37b4b8e45c0419ba8f79a4994ce88281a533c83a60b46c76b8",
+    "rawSha256": "sha256:67f4e4f687df3ff02673af9f7092a0990737b1e9f07da03d7439569985db5b7c"
+  },
+  "taskId": "composed-contract-gate-program",
+  "threadBudget": {
+    "actionContractCount": 24,
+    "childrenMeaning": "maximum distinct admitted functional thread identities created, not number of ActionContracts or action dispatches",
+    "conditionalIdentities": [
+      "RvB-Red",
+      "RvB-Blue"
+    ],
+    "finalIdentity": "ActivationOperator",
+    "maximumSimultaneousIdentities": 6,
+    "maximumTotalAdmittedIdentities": 14,
+    "normalUniqueIdentities": 4,
+    "plannedTotalNewIdentities": 6,
+    "replacementRule": "Remaining eight slots are only for terminally reclaimed replacements and never increase simultaneous maximum.",
+    "reuseRule": "24 sequential ActionContracts reuse visible identities with fresh role-pre nonces; Controller evidence aggregation and gate_decision are control-plane work, not children or ActionContracts.",
+    "staticReusedIdentities": [
+      "Executor",
+      "Reviewer",
+      "Monitor"
+    ]
+  },
+  "validUntil": "2026-09-06T06:55:45.469567+00:00"
+}

@@ -1,0 +1,64 @@
+{
+  "stageId": "P7",
+  "terminal": "review_policy_compiled",
+  "claimLevel": "derived_candidate_only",
+  "accepted": false,
+  "proofCommand": "python3 .ccg-staging/gates/P7-review-policy-gate.py --verify-draft-inputs",
+  "predecessor": {
+    "stageId": "P6",
+    "marker": "COMPOSED_P6_G6_TERMINAL_GREEN"
+  },
+  "sourceSha256": {
+    ".ccg-staging/gates/P7-review-policy-gate.py": "ff5ab7664655b2463e67cc293fb6ae0142d48be93ad6b7f1f7ac18475dffde60"
+  },
+  "contractSha256": {
+    "worker": "5e44e06e93576c9534fc37500c75219bfbfff3b3fe21e70f942d0b62a2ad9c74",
+    "reviewer": "c15292a944b2579a97f2d490f738da886961d3e3dcc7cd86f478877041b4c586"
+  },
+  "policy": {
+    "reviewerAdmission": {
+      "identityBindings": [
+        "actor",
+        "session",
+        "workspace",
+        "model",
+        "role",
+        "independence"
+      ],
+      "readOnly": true,
+      "reviewerNever": [
+        "implement",
+        "accept"
+      ]
+    },
+    "findings": {
+      "appendOnly": true,
+      "unresolvedP0P1BlocksAcceptance": true
+    },
+    "rvb": {
+      "invocation": "conditional_only",
+      "triggers": [
+        "disputed_finding"
+      ],
+      "notInvokedFor": [
+        "no_disputed_finding"
+      ]
+    },
+    "controllerAcceptance": {
+      "actor": "Controller",
+      "action": "gate_decision_only",
+      "requires": [
+        "reviewer_PASS",
+        "unresolved_P0_P1_zero"
+      ],
+      "reviewerMayAccept": false
+    }
+  },
+  "p1Repair": {
+    "findingId": "P1-4",
+    "status": "preserved",
+    "subject": "hash_bound_post_reload_restart_dashboard_listener_process_identity_receipt"
+  },
+  "payloadAggregate": "b634ba7373adda7a16768f451090213da933681d0951e3aed3b5f076d0e0dd38",
+  "reviewerAdmissionReceiptSha256": "3fecbf2fc7f1d04a0ee3afa1ba9233759d8b9b834f8dfabf2abeaab44b59464e"
+}

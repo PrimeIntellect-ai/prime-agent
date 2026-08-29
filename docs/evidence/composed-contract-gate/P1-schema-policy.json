@@ -1,0 +1,60 @@
+{
+  "stageId": "P1",
+  "terminal": "schema_policy_compiled",
+  "claimLevel": "derived_candidate_only",
+  "proofCommand": "python3 .ccg-staging/gates/P1-schema-policy-gate.py --verify-draft-inputs",
+  "sourceSha256": {
+    ".ccg-staging/schemas/parent-envelope.schema.json": "7fb1edb6ba47efc5ac0fa891fc15b4cad0dfe019398df4d048effef327ca3b58",
+    ".ccg-staging/schemas/task-contract.schema.json": "11a6372151a278021a19bd315dd0bacf7feab2e1e7faf27938afe78e0aabe8e9",
+    ".ccg-staging/schemas/addendum.schema.json": "f551ecd36ed21ca6b7fea5792796f9c723ed01cfc4bcdbf0a6704fdc8ed1d04d",
+    ".ccg-staging/schemas/task-event.schema.json": "3c70301e70b10f95fb9df24d0671f65c88b10d88a4044db932d3545d1c44ae47",
+    ".ccg-staging/policy/project-policy-profile.json": "e7aa7e2b570c8b21e9d2604a9a2bf0762686a36e16f5d76ca2f4b4e1753d7cb2",
+    ".ccg-staging/gates/P1-schema-policy-gate.py": "2b89a3f6b525313f32fb655b46d642a00fae1c23939677e85e535903044f3058"
+  },
+  "acceptanceMarkers": {
+    "agents": "COMPOSED_P1_AGENTS_POLICY_MATRIX_GREEN",
+    "parent": "COMPOSED_P1_ACTUAL_PARENT_CONTAINMENT_GREEN",
+    "db": "COMPOSED_P1_MUTABLE_DB_PROFILE_GREEN",
+    "all24": "COMPOSED_P1_ALL_24_ACTUAL_PARENT_CONTAINED_GREEN",
+    "wrapper": "COMPOSED_P1_P10_WRAPPER_AUTHORITY_GREEN",
+    "interpreter": "COMPOSED_P1_P10_INTERPRETER_RESTART_GREEN"
+  },
+  "acceptanceBindings": {
+    "agents": {
+      "agentsPolicySha256": "66a17646a3cb576ea237d072b20d15a998eb9d82c1d057822d8000cd4522249d",
+      "ruleIds": [
+        "command_prohibitions",
+        "development_rules",
+        "no_inline_imports",
+        "parallel_git_safety"
+      ]
+    },
+    "actualParent": {
+      "parentEnvelopePayloadAggregate": "sha256:28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+      "actionContracts": 24
+    },
+    "mutableDb": {
+      "profileId": "taskkanban-live-db-v1",
+      "profileAggregate": "sha256:02c060f0713b43bcf68e423b4b2f723d599593e4dafa6d5adee3b85a1ec21b2d"
+    },
+    "all24": {
+      "parentEnvelopePayloadAggregate": "sha256:28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+      "actionContracts": 24
+    },
+    "p10Wrapper": {
+      "wrapperArgvSha256": "e433af07fd9b732ff060c55f4cc2e78a7a9678590eb970a5091868b2963eda87",
+      "ownerRequestGeneration": 8
+    },
+    "p10Interpreter": {
+      "interpreter": "/opt/homebrew/Cellar/python@3.14/3.14.6/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python",
+      "argvSha256": "ee374e919eb2d2062ead36ca1d74aa5e95518beec53752c1d8ab3a4c36c5dabc"
+    }
+  },
+  "repairs": [
+    "command_allowlist_enforced",
+    "raw_post_requires_preflight",
+    "stale_r3_owner_authority_rejected",
+    "dashboard_post_final_process_identity_required"
+  ],
+  "payloadAggregate": "3566b1d950ea33b6cd882fd002b3c8d23a757e6015143568b0cf52a4a71a1ed0"
+}

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "kind": "independent-review-acceptance-receipt",
+  "closed": true,
+  "taskId": "composed-contract-gate-package-independent-review-g8-r3",
+  "candidateGeneration": 8,
+  "candidateRevision": 2,
+  "reviewRound": 3,
+  "decision": "PASS",
+  "counts": {
+    "p0": 0,
+    "p1": 0,
+    "p2": 0
+  },
+  "reviewHandoffRawSha256": "sha256:88404562ed403ea36829dbaa58c6a2f482c9ea9028a011efa5d1c52fdc54206d",
+  "reviewHandoffPayloadAggregate": "sha256:abbfe10886b16e7cbf524573e58e78c4f3868bf83dc23cc26fd1b66561730b73",
+  "reviewInputManifestRawSha256": "sha256:a12f9dfd0f5f2a53da64579a500dd8ffd6543f2ca0df8d7d3b8260fa645c2eee",
+  "formalCandidateManifestRawSha256": "sha256:61f240ee451bffe81ee9019ecf2b27c94793b6a1ea270ca5d5a259e6d21459ed",
+  "rolePostDecision": "PASS",
+  "dispatchPostDecision": "PASS",
+  "actualEffects": false,
+  "ownership": "RELEASED",
+  "acceptedAt": "2026-08-23T10:01:12.318706+00:00",
+  "claimCeiling": "Independent review acceptance only; no program execution or activation authority",
+  "payloadAggregate": "sha256:f408c399350f204d1838ecce790a56f5bd66d449a55bc2ad370e7f8a398f9245"
+}

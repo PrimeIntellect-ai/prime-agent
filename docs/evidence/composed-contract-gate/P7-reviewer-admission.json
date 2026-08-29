@@ -1,0 +1,70 @@
+{
+  "stageId": "P7",
+  "kind": "reviewer_admission_identity_receipt",
+  "claimLevel": "derived_candidate_only",
+  "parentEnvelopeSha256": "sha256:28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+  "identityFactSource": "controller_daemon_observation",
+  "actualBindings": {
+    "worker": {
+      "actor": "p7-g7-review-policy-goal-executor",
+      "sessionName": "p7-g7-review-policy-goal-executor",
+      "activeSessionId": "621679c63601",
+      "sessionId": "01a04b28-89b7-723a-ae5d-19dc25ba216b",
+      "actionId": "ccg-p7-worker",
+      "model": "openai-codex/gpt-5.6-terra",
+      "role": "worker",
+      "scopeSha256": "35237c69b11f3ba973cf0b5d699794f748d864179d15d075d514bfd9c1bad7bf",
+      "actionContractSha256": "5e44e06e93576c9534fc37500c75219bfbfff3b3fe21e70f942d0b62a2ad9c74",
+      "writeSurface": [
+        ".ccg-staging/review/review-escalation-policy.json",
+        ".ccg-staging/review/review-admission.py",
+        ".ccg-staging/review/rvb-escalation.py",
+        ".ccg-staging/review/acceptor-gate.py",
+        ".ccg-staging/gates/P7-review-policy-gate.py",
+        "docs/evidence/composed-contract-gate/P7-review-policy.json"
+      ],
+      "workspaceName": "composed-contract-gate-plan",
+      "daemonCwd": "/Users/ZGH/projects/PA-AGI",
+      "contractScopeRoot": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan",
+      "provenance": {
+        "daemonCwd": "controller_daemon_observation",
+        "contractScopeRoot": "action_contract"
+      }
+    },
+    "reviewer": {
+      "actor": "p7-g7-independent-reviewer",
+      "sessionName": "p7-g7-independent-reviewer",
+      "activeSessionId": "fdfd0f257419",
+      "sessionId": "01a04b2f-0729-75f8-887f-2d9879be6d48",
+      "actionId": "ccg-p7-reviewer",
+      "model": "openai-codex/gpt-5.6-terra",
+      "role": "reviewer",
+      "scopeSha256": "dbeb3b16e2c60c278af826bbceeb24f8fcb9989078bfa2dd2211a8b312aa3a0d",
+      "actionContractSha256": "c15292a944b2579a97f2d490f738da886961d3e3dcc7cd86f478877041b4c586",
+      "writeSurface": [],
+      "workspaceName": "composed-contract-gate-plan",
+      "daemonCwd": "/Users/ZGH/projects/PA-AGI",
+      "contractScopeRoot": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan",
+      "provenance": {
+        "daemonCwd": "controller_daemon_observation",
+        "contractScopeRoot": "action_contract"
+      }
+    }
+  },
+  "sharedFactsPermission": {
+    "shared": {
+      "model": "openai-codex/gpt-5.6-terra",
+      "workspace": "composed-contract-gate-plan"
+    },
+    "permittedOnlyBecause": {
+      "reviewerReadOnly": true,
+      "reviewerWriteSurface": [],
+      "distinct": [
+        "actor",
+        "activeSessionId",
+        "sessionId"
+      ]
+    }
+  },
+  "payloadAggregate": "6fe1f97bef8af145a4e9983d21963c619ecaf9455417d107cc29c7f5375d0865"
+}

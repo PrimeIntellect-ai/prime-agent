@@ -1,0 +1,24 @@
+{
+  "claimLevel": "derived_candidate_only",
+  "payloadAggregate": "6e831b2d09feaff682d752d47c45d9b0c67eced51d6d2fad03a66ac44fee7382",
+  "proofCommand": "python3 .ccg-staging/gates/P5-runtime-gate.py --verify-draft-inputs",
+  "sourceSha256": {
+    ".ccg-staging/gates/P5-runtime-gate.py": "d13dc84440c66c1cbb83727aa79680b552948199ea6957d32d8857c43ba6fcb0",
+    ".ccg-staging/runtime/executor-prework.py": "babb48a4cc3da268aaa2c5106c1a7e7c4c3be6981aa7c1dc57fc307d6c2de55d",
+    ".ccg-staging/runtime/executor-watchdog.py": "851ebccb64eee3516a540b7b014883cc9b3dc4216c541eecd79da43946092483",
+    ".ccg-staging/runtime/runtime-monitor.py": "6c30bf2988e52a2f3535045410cce595b12042dae1b17fb9729d0c4a408ba1e5"
+  },
+  "stageId": "P5",
+  "terminal": "runtime_containment_compiled",
+  "tests": [
+    "valid_prework_and_contained_runtime",
+    "mutated_contract_rejected",
+    "out_of_scope_path_detected",
+    "denied_effect_detected",
+    "expired_deadline_detected",
+    "budget_burn_detected",
+    "kanban_gap_detected",
+    "B4_overdue_detected",
+    "B2_stalled_detected"
+  ]
+}
