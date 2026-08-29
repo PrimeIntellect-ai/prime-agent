@@ -614,8 +614,12 @@ describe("agents view slash commands", () => {
 			requireClient: () => ({ request }),
 			editor,
 			setStatusMessage: vi.fn(),
+			savedSearchFetchStarted: false,
 			refreshSessions: vi.fn(async () => true),
 			refreshSavedSessions: vi.fn(async () => true),
+			refreshSavedSessionsIfLoaded() {
+				return invoke("refreshSavedSessionsIfLoaded", self);
+			},
 			renameSession(s: unknown, n: string) {
 				return invoke("renameSession", self, s, n);
 			},
@@ -626,9 +630,13 @@ describe("agents view slash commands", () => {
 		);
 
 		expect(request).toHaveBeenCalledWith({ type: "rename", activeSessionId: "active-1", name: "Fresh Name" });
-		// The push carries renames server-side; one local reapply covers both catalogs.
+		// The push carries renames to the live catalog; the saved catalog refreshes only once a search loaded it.
 		expect(self.refreshSessions).toHaveBeenCalledWith();
 		expect(self.refreshSavedSessions).not.toHaveBeenCalled();
+
+		self.savedSearchFetchStarted = true;
+		await expect(invoke("renameSession", self, live, "Fresher Name")).resolves.toBe(true);
+		expect(self.refreshSavedSessions).toHaveBeenCalledTimes(1);
 	});
 
 	it("kills a live target and disarms the composer", async () => {
