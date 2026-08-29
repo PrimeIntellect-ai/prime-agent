@@ -173,6 +173,14 @@ export interface SpecBenchConditionSummary {
 	meanTokens: number;
 	meanModelCalls: number;
 	meanToolCalls: number;
+	meanCandidates: number;
+	meanCycles: number;
+	meanAcceptedCycles: number;
+	meanRevisedCycles: number;
+	meanWatchdogInterventions: number;
+	meanWatchdogWatches: number;
+	meanToolProbationActivations: number;
+	meanToolProbationBlockedCalls: number;
 	meanObligations: number;
 	meanAcceptedCandidateObligationEvidenceReceipts: number;
 	meanAcceptedCandidateObligationsPerEvidenceReceipt: number;
@@ -980,6 +988,14 @@ export function aggregateSpecBenchConditions(results: readonly SpecBenchResult[]
 			meanTokens: mean(selected.map((item) => item.trace.totalTokens)),
 			meanModelCalls: mean(selected.map((item) => item.trace.modelCalls)),
 			meanToolCalls: mean(selected.map((item) => item.trace.toolCalls)),
+			meanCandidates: mean(selected.map((item) => item.trace.candidates)),
+			meanCycles: mean(selected.map((item) => item.trace.cycles)),
+			meanAcceptedCycles: mean(selected.map((item) => item.trace.acceptedCycles)),
+			meanRevisedCycles: mean(selected.map((item) => item.trace.revisedCycles)),
+			meanWatchdogInterventions: mean(selected.map((item) => item.trace.watchdogInterventions)),
+			meanWatchdogWatches: mean(selected.map((item) => item.trace.watchdogWatches)),
+			meanToolProbationActivations: mean(selected.map((item) => item.trace.toolProbationActivations)),
+			meanToolProbationBlockedCalls: mean(selected.map((item) => item.trace.toolProbationBlockedCalls)),
 			meanObligations: mean(selected.map((item) => item.trace.obligations)),
 			meanAcceptedCandidateObligationEvidenceReceipts: mean(
 				selected.map((item) => item.trace.acceptedCandidateObligationEvidenceReceiptCount),
@@ -1049,7 +1065,7 @@ function writeReport(
 ): void {
 	const conditions = aggregateSpecBenchConditions(results);
 	const report = {
-		schemaVersion: 7,
+		schemaVersion: 8,
 		benchmark: "WecoAI SpecBench via Prime AVO",
 		specbenchRevision,
 		provider: options.provider,
@@ -1123,6 +1139,18 @@ function writeReport(
 			return `| ${item.conditionId} | ${item.repetition} | ${item.taskId} | ${firstReady} | ${item.trace.completionAttemptCount} | ${item.trace.failedCompletionAttemptCount} | ${item.trace.completionRepairTurns} | ${item.trace.inputTokensAfterFirstCompletionAttempt} | ${item.trace.cacheReadTokensAfterFirstCompletionAttempt} | ${item.trace.outputTokensAfterFirstCompletionAttempt} | ${item.trace.tokensAfterFirstCompletionAttempt} | ${(item.trace.completionRepairAmplification * 100).toFixed(1)}% | ${item.trace.uniqueCompletionBlockerCount} | ${item.trace.repeatedCompletionBlockerCount} | ${item.trace.sameBlockerConsecutiveRepeatCount} | ${repair.modelCalls} | ${repair.inputTokens} | ${repair.cacheReadTokens} | ${repair.outputTokens} |`;
 		})
 		.join("\n");
+	const antiLazinessRows = conditions
+		.map(
+			(condition) =>
+				`| ${condition.conditionId} | ${condition.meanCandidates.toFixed(1)} | ${condition.meanCycles.toFixed(1)} | ${condition.meanAcceptedCycles.toFixed(1)} | ${condition.meanRevisedCycles.toFixed(1)} | ${condition.meanWatchdogInterventions.toFixed(1)} | ${condition.meanWatchdogWatches.toFixed(1)} | ${condition.meanToolProbationActivations.toFixed(1)} | ${condition.meanToolProbationBlockedCalls.toFixed(1)} | ${condition.meanModelCalls.toFixed(1)} | ${condition.meanToolCalls.toFixed(1)} |`,
+		)
+		.join("\n");
+	const antiLazinessRunRows = results
+		.map(
+			(item) =>
+				`| ${item.conditionId} | ${item.repetition} | ${item.taskId} | ${item.trace.candidates} | ${item.trace.cycles} | ${item.trace.acceptedCycles} | ${item.trace.revisedCycles} | ${item.trace.watchdogInterventions} | ${item.trace.watchdogWatches} | ${item.trace.toolProbationActivations} | ${item.trace.toolProbationBlockedCalls} | ${item.trace.modelCalls} | ${item.trace.toolCalls} |`,
+		)
+		.join("\n");
 	const completionBlockerRows = results
 		.flatMap((item) =>
 			item.trace.completionBlockers.map((blocker) => {
@@ -1133,7 +1161,7 @@ function writeReport(
 		.join("\n");
 	writeFileSync(
 		join(options.outputDir, "report.md"),
-		`# WecoAI SpecBench via Prime AVO\n\nUpstream revision: \`${specbenchRevision}\`\n\nExecution-order seed: \`${options.experimentSeed}\`. Provider sampling can remain stochastic; use multiple repetitions before causal claims. Deltas use only task/repetition pairs present in both the condition and full AVO. Obligation evidence columns are scoped to the candidate in the latest accepted cycle; they are diagnostics, not an additional acceptance gate. Identity-private is hidden in-distribution coverage; held-out is the benchmark's compositional private suite. Spec compliance requires both hidden suites when identity-private is present.\n\n## Conditions\n\n| Condition | Runs | Paired | Validation | ID-private | Held-out | Gap | Canonical completion | False completion | Nonzero exit | Timeout | Tokens | Model calls | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Time | Cost | Held-out Δ vs full | Student-t 95% CI |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n${conditionRows}\n\n## Model-token attribution\n\nBilled model tokens are assigned to the assistant turn's dominant observable activity. This is diagnostic attribution, not a causal decomposition; uncached input and cache-read tokens can both contain accumulated context from earlier stages.\n\n| Condition | Uncached input/call | Cached input/call | Setup | Implementation | Candidate/evaluation | Obligation coverage | Completion | Completion repair | Post-ready work | Memory | Other/final |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${tokenStageRows}\n\n## Completion-loop diagnostics\n\nA completion attempt is an explicit stop-gate/complete call or a host-blocked root delivery. “After first” includes all later model work. “Completion repair” contains otherwise-unclassified tool turns after a non-passing attempt; post-ready work separately captures unnecessary tool work after a passing gate. Repair amplification is zero when the first attempt passes; raw after-first counters remain visible so canonical-delivery/context cost is not hidden. Blocker-clearance token counts can overlap when one turn clears multiple blockers.\n\n| Condition | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output | Repair uncached/call | Repair cached/call | Repair output/call |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRows}\n\n### Completion runs\n\n| Condition | Rep | Task | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output |\n| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRunRows}\n\n### Completion blockers\n\n| Condition | Rep | Task | Blocker | Attempts seen | Occurrences | Cleared at | Turns to clear | Tokens to clear | Latest reason |\n| --- | ---: | --- | --- | --- | ---: | --- | ---: | ---: | --- |\n${completionBlockerRows || "| _none_ |  |  |  |  | 0 |  |  |  | No failed completion blockers observed. |"}\n\n## Runs\n\n| Condition | Rep | Task | Validation | ID-private | Held-out | Gap | Canonical completion | Exit | Timeout | False completion | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Tokens | Cost |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows}\n`,
+		`# WecoAI SpecBench via Prime AVO\n\nUpstream revision: \`${specbenchRevision}\`\n\nExecution-order seed: \`${options.experimentSeed}\`. Provider sampling can remain stochastic; use multiple repetitions before causal claims. Deltas use only task/repetition pairs present in both the condition and full AVO. Obligation evidence columns are scoped to the candidate in the latest accepted cycle; they are diagnostics, not an additional acceptance gate. Identity-private is hidden in-distribution coverage; held-out is the benchmark's compositional private suite. Spec compliance requires both hidden suites when identity-private is present.\n\n## Conditions\n\n| Condition | Runs | Paired | Validation | ID-private | Held-out | Gap | Canonical completion | False completion | Nonzero exit | Timeout | Tokens | Model calls | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Time | Cost | Held-out Δ vs full | Student-t 95% CI |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n${conditionRows}\n\n## Model-token attribution\n\nBilled model tokens are assigned to the assistant turn's dominant observable activity. This is diagnostic attribution, not a causal decomposition; uncached input and cache-read tokens can both contain accumulated context from earlier stages.\n\n| Condition | Uncached input/call | Cached input/call | Setup | Implementation | Candidate/evaluation | Obligation coverage | Completion | Completion repair | Post-ready work | Memory | Other/final |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${tokenStageRows}\n\n## Anti-laziness diagnostics\n\nTool probation activates on the fourth ignored coding-loop intervention. A blocked-call count of zero can still mean probation worked: the model may respond to the activation by making its next cell milestone-capable.\n\n| Condition | Candidates | Cycles | Accepted | Revised | Watchdog interventions | Watches | Probation activations | Blocked calls | Model calls | Tool calls |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${antiLazinessRows}\n\n### Anti-laziness runs\n\n| Condition | Rep | Task | Candidates | Cycles | Accepted | Revised | Watchdog interventions | Watches | Probation activations | Blocked calls | Model calls | Tool calls |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${antiLazinessRunRows}\n\n## Completion-loop diagnostics\n\nA completion attempt is an explicit stop-gate/complete call or a host-blocked root delivery. “After first” includes all later model work. “Completion repair” contains otherwise-unclassified tool turns after a non-passing attempt; post-ready work separately captures unnecessary tool work after a passing gate. Repair amplification is zero when the first attempt passes; raw after-first counters remain visible so canonical-delivery/context cost is not hidden. Blocker-clearance token counts can overlap when one turn clears multiple blockers.\n\n| Condition | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output | Repair uncached/call | Repair cached/call | Repair output/call |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRows}\n\n### Completion runs\n\n| Condition | Rep | Task | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output |\n| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRunRows}\n\n### Completion blockers\n\n| Condition | Rep | Task | Blocker | Attempts seen | Occurrences | Cleared at | Turns to clear | Tokens to clear | Latest reason |\n| --- | ---: | --- | --- | --- | ---: | --- | ---: | ---: | --- |\n${completionBlockerRows || "| _none_ |  |  |  |  | 0 |  |  |  | No failed completion blockers observed. |"}\n\n## Runs\n\n| Condition | Rep | Task | Validation | ID-private | Held-out | Gap | Canonical completion | Exit | Timeout | False completion | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Tokens | Cost |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows}\n`,
 	);
 }
 

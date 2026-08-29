@@ -432,6 +432,8 @@ function emptyTraceSummary(): PrimeIntegrityTraceSummary {
 		toolCalls: 0,
 		candidates: 0,
 		cycles: 0,
+		acceptedCycles: 0,
+		revisedCycles: 0,
 		obligations: 0,
 		coveredObligations: 0,
 		obligationCoverageEvaluationCount: 0,
@@ -446,6 +448,8 @@ function emptyTraceSummary(): PrimeIntegrityTraceSummary {
 		resolvedCriticalAssumptions: 0,
 		watchdogInterventions: 0,
 		watchdogWatches: 0,
+		toolProbationActivations: 0,
+		toolProbationBlockedCalls: 0,
 		completionAttemptCount: 0,
 		failedCompletionAttemptCount: 0,
 		successfulCompletionAttemptCount: 0,
@@ -812,6 +816,11 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			};
 			completionTrackingBySession.set(path, tracking);
 		}
+		if (entry.type === "custom_message" && entry.customType === "avo_progress_intervention") {
+			const details =
+				entry.details && typeof entry.details === "object" ? (entry.details as Record<string, unknown>) : {};
+			if (details.escalationLevel === 4) summary.toolProbationActivations += 1;
+		}
 		const customAttempt = customCompletionAttempt(entry, summary.assistantTurns);
 		if (customAttempt) {
 			summary.completionAttempts.push({ attempt: summary.completionAttempts.length + 1, ...customAttempt });
@@ -890,6 +899,9 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			if (isCompletionGateAttempt(toolText)) tracking.seenCompletionAttempt = true;
 		}
 		if (message.role === "toolResult" && typeof message.toolCallId === "string") {
+			if (text.includes("AVO host tool probation blocked another non-milestone IPython call")) {
+				summary.toolProbationBlockedCalls += 1;
+			}
 			const pending = tracking.pendingCompletionAttempts.get(message.toolCallId);
 			if (pending) {
 				const observedAttempt = {
@@ -923,6 +935,7 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 				criticalAssumptions?: Array<{ status?: unknown }>;
 				checkpoints?: Array<{
 					status?: unknown;
+					reason?: unknown;
 					triggeredHeuristics?: unknown;
 				}>;
 			};
@@ -933,6 +946,14 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			);
 			summary.candidates = Math.max(summary.candidates, state.candidates?.length ?? 0);
 			summary.cycles = Math.max(summary.cycles, state.cycles?.length ?? 0);
+			summary.acceptedCycles = Math.max(
+				summary.acceptedCycles,
+				state.cycles?.filter((cycle) => cycle.outcome === "accepted").length ?? 0,
+			);
+			summary.revisedCycles = Math.max(
+				summary.revisedCycles,
+				state.cycles?.filter((cycle) => cycle.outcome === "revised").length ?? 0,
+			);
 			summary.obligations = Math.max(summary.obligations, state.obligations?.length ?? 0);
 			summary.coveredObligations = Math.max(summary.coveredObligations, state.obligationCoverage?.length ?? 0);
 			const coverageByEvaluation = new Map<string, number>();
@@ -1005,11 +1026,17 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 						checkpoint.triggeredHeuristics.includes("anti_laziness_intervention")),
 			).length;
 			const watches = checkpoints.filter((checkpoint) => checkpoint.status === "watch").length;
+			const probationActivations = checkpoints.filter(
+				(checkpoint) =>
+					typeof checkpoint.reason === "string" &&
+					/^Anti-laziness (?:timeout )?escalation 4:/.test(checkpoint.reason),
+			).length;
 			// The durable checkpoint ledger is authoritative. The same watchdog event
 			// can also appear in the transcript, so take the larger count instead of
 			// double-counting it when both representations are present.
 			summary.watchdogInterventions = Math.max(summary.watchdogInterventions, interventions);
 			summary.watchdogWatches = Math.max(summary.watchdogWatches, watches);
+			summary.toolProbationActivations = Math.max(summary.toolProbationActivations, probationActivations);
 		} catch {
 			// A damaged optional AVO artifact must not prevent the host from grading the workspace.
 		}

@@ -119,6 +119,8 @@ describe("Prime Integrity Eval", () => {
 				toolCalls: 1,
 				candidates: 1,
 				cycles: 1,
+				acceptedCycles: 1,
+				revisedCycles: 0,
 				obligations: 4,
 				coveredObligations: 2,
 				obligationCoverageEvaluationCount: 1,
@@ -133,6 +135,8 @@ describe("Prime Integrity Eval", () => {
 				resolvedCriticalAssumptions: 0,
 				watchdogInterventions: 0,
 				watchdogWatches: 0,
+				toolProbationActivations: 0,
+				toolProbationBlockedCalls: 0,
 				completionAttemptCount: 0,
 				failedCompletionAttemptCount: 0,
 				successfulCompletionAttemptCount: 0,
@@ -508,15 +512,47 @@ describe("Prime Integrity Eval", () => {
 	test("reads anti-laziness checkpoints from the durable AVO trace", () => {
 		const root = tempDirectory();
 		const avoDirectory = join(root, "session", "avo");
+		const sessionPath = join(root, "session.jsonl");
 		mkdirSync(avoDirectory, { recursive: true });
+		writeFileSync(
+			sessionPath,
+			[
+				JSON.stringify({
+					type: "custom_message",
+					customType: "avo_progress_intervention",
+					details: { escalationLevel: 4 },
+				}),
+				JSON.stringify({
+					type: "message",
+					message: {
+						role: "toolResult",
+						toolCallId: "blocked-probe",
+						content: [
+							{
+								type: "text",
+								text: "AVO host tool probation blocked another non-milestone IPython call",
+							},
+						],
+					},
+				}),
+			].join("\n"),
+			"utf8",
+		);
 		writeFileSync(
 			join(avoDirectory, "state.json"),
 			JSON.stringify({
 				candidates: [{ candidateId: "candidate-1" }],
-				cycles: [{ cycleId: "cycle-1" }],
+				cycles: [
+					{ cycleId: "cycle-1", outcome: "revised" },
+					{ cycleId: "cycle-2", outcome: "accepted" },
+				],
 				checkpoints: [
 					{ status: "watch", triggeredHeuristics: ["no_observable_progress_1_tool_batch"] },
-					{ status: "intervene", triggeredHeuristics: ["anti_laziness_intervention"] },
+					{
+						status: "intervene",
+						reason: "Anti-laziness escalation 4: probation active",
+						triggeredHeuristics: ["anti_laziness_intervention"],
+					},
 					{ status: "progressing", triggeredHeuristics: ["observable_progress_resumed"] },
 					{ status: "intervene", triggeredHeuristics: ["anti_laziness_intervention"] },
 				],
@@ -524,11 +560,15 @@ describe("Prime Integrity Eval", () => {
 			"utf8",
 		);
 
-		expect(summarizePrimeIntegrityTrace([], root)).toMatchObject({
+		expect(summarizePrimeIntegrityTrace([sessionPath], root)).toMatchObject({
 			candidates: 1,
-			cycles: 1,
+			cycles: 2,
+			acceptedCycles: 1,
+			revisedCycles: 1,
 			watchdogInterventions: 2,
 			watchdogWatches: 1,
+			toolProbationActivations: 1,
+			toolProbationBlockedCalls: 1,
 		});
 	});
 });

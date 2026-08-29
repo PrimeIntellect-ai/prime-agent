@@ -337,6 +337,47 @@ after the fourth ignored coding-loop intervention, denying more read-only
 IPython probes until the model invokes an AVO action capable of producing a
 host-observable verification milestone.
 
+### Three-task obligation diagnostic
+
+The completed six-run diagnostic combines the `markdown_renderer` pair above
+with one `http_server` pair and one `regex_engine` pair on Prime revision
+`34cbb6897ef736fa652d88ea5340cb15f6d34e07`. The latter four runs used
+execution seed `obligation-diagnostic-batch-v1` and schema version 7; schema
+version 8 adds explicit revised/accepted-cycle and tool-probation counters for
+future runs and offline trace replay.
+
+| Condition | Validation | ID-private | Held-out | Calls | Tokens | Time | Cost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Full AVO | 120 / 120 | 101 / 102 | 368 / 394 | 60 | 2,088,922 | 727.4 s | $1.009 |
+| No obligations | 120 / 120 | 101 / 102 | 374 / 394 | 93 | 4,404,251 | 993.4 s | $1.338 |
+
+Full AVO used 2,315,329 fewer tokens, 33 fewer model calls, 265.9 fewer
+seconds, and about $0.329 less provider cost across these particular samples.
+That aggregate is dominated by the unusually long no-obligations Markdown run;
+at the task level Full was cheaper on Markdown and HTTP but more expensive on
+Regex. Provider stochasticity prevents treating the aggregate as a causal cost
+estimate.
+
+No-obligations passed six more compositional hidden checks overall: the two
+Markdown implementations tied, while no-obligations passed 2 more HTTP checks
+and 4 more Regex checks. With one pair per task, this is not a population claim,
+but it does not provide evidence that the current obligation ledger improves
+hidden correctness. Every full run again attached all task obligations to one
+broad receipt: 127 obligations, three receipts, combined evidence diversity
+3/127 = 0.024, and per-task maximum concentration 1.000.
+
+All six trajectories passed their first genuine completion attempt. There were
+no failed attempts, completion blockers, completion-repair turns, or post-ready
+tool calls. The current completion protocol is therefore not the efficiency
+bottleneck in this batch. Watchdog interventions occurred eight times in Full
+and seven times without obligations. Full Regex reached the fourth escalation;
+the next Gemini cell combined a concrete rewrite, fresh candidate, and host
+evaluation, so probation activated but did not need to block the call.
+
+The next paid expansion should be narrow: repeat the `regex_engine` pair, where
+the observed hidden difference and probation activation were largest. Do not
+expand the full catalog or impose receipt-count gates from these six samples.
+
 ## Validated Level 1 example
 
 A single real Vertex `gemini-3.7-flash` run on 2026-08-28 used official

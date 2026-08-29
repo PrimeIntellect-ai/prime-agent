@@ -91,6 +91,8 @@ export interface PrimeIntegrityTraceSummary {
 	toolCalls: number;
 	candidates: number;
 	cycles: number;
+	acceptedCycles: number;
+	revisedCycles: number;
 	obligations: number;
 	coveredObligations: number;
 	obligationCoverageEvaluationCount: number;
@@ -105,6 +107,8 @@ export interface PrimeIntegrityTraceSummary {
 	resolvedCriticalAssumptions: number;
 	watchdogInterventions: number;
 	watchdogWatches: number;
+	toolProbationActivations: number;
+	toolProbationBlockedCalls: number;
 	completionAttemptCount: number;
 	failedCompletionAttemptCount: number;
 	successfulCompletionAttemptCount: number;
