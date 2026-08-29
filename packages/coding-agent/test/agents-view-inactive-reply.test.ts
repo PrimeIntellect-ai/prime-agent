@@ -682,7 +682,7 @@ describe("agents view slash commands", () => {
 
 		// Before any load, mutations never fetch the catalog.
 		const coldView = makeCatalogSelf(persistentState, () => catalog);
-		coldView.refreshSavedSessionsIfLoaded();
+		(coldView.refreshSavedSessionsIfLoaded as () => void)();
 		expect(coldView.refreshSavedSessions).not.toHaveBeenCalled();
 
 		// View A loads the catalog once for search; the flag persists beyond the instance.
@@ -695,7 +695,7 @@ describe("agents view slash commands", () => {
 		// A remounted view B deletes a session; the mutation refresh drops the stale row.
 		catalog = [wireSaved("kept")];
 		const viewB = makeCatalogSelf(persistentState, () => catalog);
-		viewB.refreshSavedSessionsIfLoaded();
+		(viewB.refreshSavedSessionsIfLoaded as () => void)();
 		expect(viewB.refreshSavedSessions).toHaveBeenCalledTimes(1);
 		await (viewB.refreshSavedSessions as ReturnType<typeof vi.fn>).mock.results[0]?.value;
 
@@ -705,7 +705,17 @@ describe("agents view slash commands", () => {
 	});
 
 	it("keeps the persistent catalog gate when a superseded fetch settles after a newer success", async () => {
-		const wire = { path: "/tmp/sessions/kept.jsonl", id: "kept", cwd: "/tmp/project", rlmDepth: 0, created: 1, modified: 1, messageCount: 1, firstMessage: "kept", allMessagesText: "kept" };
+		const wire = {
+			path: "/tmp/sessions/kept.jsonl",
+			id: "kept",
+			cwd: "/tmp/project",
+			rlmDepth: 0,
+			created: 1,
+			modified: 1,
+			messageCount: 1,
+			firstMessage: "kept",
+			allMessagesText: "kept",
+		};
 		let releaseFirst: (response: unknown) => void = () => {};
 		const firstResponse = new Promise((resolveFirst) => {
 			releaseFirst = resolveFirst;
