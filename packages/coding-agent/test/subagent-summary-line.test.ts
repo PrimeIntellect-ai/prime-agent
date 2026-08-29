@@ -31,7 +31,7 @@ describe("SubagentSummaryLine", () => {
 		line.setSubagentCounts({ total: 1, running: 1, idle: 0, inactive: 0 });
 		let rendered = line.render(120).map(stripAnsi);
 		expect(rendered).toHaveLength(3);
-		expect(rendered[0]).toContain("╭─ agents ─");
+		expect(rendered[0]).toContain("╭─ subagents ─");
 		expect(rendered[1]).toContain("● 1 running   ◐ 0 idle   ○ 0 inactive");
 
 		line.setSubagentCounts({ total: 2, running: 1, idle: 1, inactive: 0 });
@@ -206,7 +206,7 @@ describe("SubagentSummaryLine", () => {
 		Reflect.set(mode, "rlmNodeId", "me");
 		seed.call(mode, [worker]);
 
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("╭─ agents ─");
+		expect(stripAnsi(line.render(100).join("\n"))).toContain("╭─ subagents ─");
 	});
 
 	it("clears a resident session id when a terminal update reports an evicted child", () => {

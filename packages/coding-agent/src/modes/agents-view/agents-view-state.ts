@@ -103,12 +103,12 @@ export function classifyUnifiedSession(record: Pick<UnifiedSessionRecord, "daemo
 	return classifyAgentsViewSession(record.daemon);
 }
 
-// Live sessions only; drafts and archived stay out.
+// Live sessions only; drafts and archived stay out (a non-ready worker renders as a label, never hides).
 export function shouldShowAgentsViewSession(summary: SessionSummary, manuallyInactive = false): boolean {
 	if (manuallyInactive) {
 		return false;
 	}
-	return summary.lifecycle === "live" && (summary.workerState === undefined || summary.workerState === "ready");
+	return summary.lifecycle === "live";
 }
 
 export function sectionTitle(section: AgentsViewSection): string {
@@ -960,6 +960,10 @@ function getSessionSubtitle(summary: SessionSummary): string {
 }
 
 function getSessionStatusLabel(summary: SessionSummary, hasActiveHeartbeat = summary.hasActiveHeartbeat): string {
+	// A non-ready worker cannot report fresh runtime flags; its state is the row's story.
+	if (summary.workerState !== undefined && summary.workerState !== "ready") {
+		return summary.workerState;
+	}
 	if (summary.isCompacting) {
 		return "compacting";
 	}
