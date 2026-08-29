@@ -89,6 +89,11 @@ the host escalates again after three more stagnant batches, up to three
 interventions. Workspace edits alone are not enough: the model must convert
 them into host-observable verification progress.
 
+A host-bounded tool timeout bypasses those ordinary thresholds. Prime
+immediately interrupts the current chain and tells the model not to retry the
+same long-running cell or algorithm: reduce it to a bounded reproducer, remove
+the nontermination, and rerun the direct verifier.
+
 ## Controlled ablations
 
 A single successful trace validates the enforcement path, but it does not show

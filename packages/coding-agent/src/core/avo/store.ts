@@ -3420,6 +3420,7 @@ export class AvoStore {
 		resumed: boolean;
 		reason: string;
 		escalateHorizon?: boolean;
+		forceIntervene?: boolean;
 		unit?: "root_turn" | "tool_batch" | "delivery";
 	}): AvoRunState["checkpoints"][number] {
 		if (!this.state.objective || this.state.status !== "active") {
@@ -3429,7 +3430,11 @@ export class AvoStore {
 			throw new Error("progress watchdog consecutive turns must be a non-negative integer");
 		}
 		const recordedAt = this.now();
-		const status = input.resumed ? "progressing" : input.consecutiveNoProgressTurns >= 2 ? "intervene" : "watch";
+		const status = input.resumed
+			? "progressing"
+			: input.forceIntervene || input.consecutiveNoProgressTurns >= 2
+				? "intervene"
+				: "watch";
 		const unit = input.unit ?? "root_turn";
 		const unitLabel =
 			unit === "root_turn"

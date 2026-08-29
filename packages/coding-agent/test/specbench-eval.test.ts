@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
 	aggregateSpecBenchConditions,
+	buildSpecBenchBaselineTestSource,
 	deriveSpecBenchExecutionBudgets,
 	listSpecBenchTasks,
 	parseSpecBenchArgs,
@@ -13,6 +14,12 @@ import {
 } from "../src/evals/specbench/runner.js";
 
 describe("SpecBench evaluation runner", () => {
+	test("binds the visible contract subprocess to the official task budget", () => {
+		const source = buildSpecBenchBaselineTestSource({ "parser.py": "raise NotImplementedError\n" }, 30);
+		expect(source).toContain("timeout=30");
+		expect(source).not.toContain("timeout=600");
+	});
+
 	test("bounds model-authored cells and all official grading independently of the outer task timeout", () => {
 		expect(deriveSpecBenchExecutionBudgets(30)).toEqual({
 			ipythonCellTimeoutMs: 60_000,

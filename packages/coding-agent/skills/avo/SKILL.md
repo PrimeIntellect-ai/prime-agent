@@ -121,7 +121,9 @@ Never pass or request an environment override.
    progress. Reading,
    narrating, repeating the same failed check, inspecting Prime internals, or
    merely saying done does not. Six consecutive tool batches without a
-   milestone inject an immediate steering intervention. At blocked root-turn
+   milestone inject an immediate steering intervention. A host-bounded tool
+   timeout intervenes immediately without waiting for six batches and requires
+   a bounded reproducer plus a nontermination fix before retrying. At blocked root-turn
    boundaries, one empty turn triggers a corrective watch, two trigger
    intervention, and three escalate an automatic horizon to long.
    Repeatedly changing or decorating an already verified canonical delivery

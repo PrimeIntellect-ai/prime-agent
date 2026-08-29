@@ -189,47 +189,15 @@ describe("AgentSession universal AVO runtime", () => {
 				details: {},
 			}),
 		};
-		const finishTool: AgentTool = {
-			name: "finish",
-			label: "Finish",
-			description: "Records concrete verified progress",
-			parameters: Type.Object({}),
-			execute: async () => {
-				await harness!.session.handleAvoHostRequest("avo.candidate.add", {
-					candidate: {
-						candidate_id: "tool-loop-recovery",
-						kind: "answer",
-						summary: "Recovered answer",
-						payload: "Rain wakes the quiet street.",
-					},
-				});
-				await harness!.session.handleAvoHostRequest("avo.evaluation.record", {
-					evaluation: {
-						candidate_id: "tool-loop-recovery",
-						evaluator_id: "subjective_review",
-						status: "pass",
-						authority: "model_opinion",
-						evidence_refs: [],
-						metrics: { reviewed: true },
-					},
-				});
-				await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
-					cycle: { candidate_id: "tool-loop-recovery" },
-				});
-				return { content: [{ type: "text", text: "verified" }], details: {} };
-			},
-		};
 		harness = await createHarness({
 			persistSession: true,
 			enforceAvoCompletion: true,
-			tools: [probeTool, finishTool],
+			tools: [probeTool],
 		});
 		harness.setResponses([
 			...Array.from({ length: 9 }, (_, index) =>
 				fauxAssistantMessage(fauxToolCall("probe", { index }), { stopReason: "toolUse" }),
 			),
-			fauxAssistantMessage(fauxToolCall("finish", {}), { stopReason: "toolUse" }),
-			fauxAssistantMessage("Rain wakes the quiet street."),
 		]);
 
 		await harness.session.prompt("Write a short poem about rain");
@@ -264,6 +232,47 @@ describe("AgentSession universal AVO runtime", () => {
 			expect.objectContaining({
 				status: "intervene",
 				triggeredHeuristics: expect.arrayContaining(["no_observable_progress_9_tool_batches"]),
+			}),
+		);
+	});
+
+	it("interrupts a timed-out tool chain with an immediate targeted intervention", async () => {
+		const timeoutTool: AgentTool = {
+			name: "timeout",
+			label: "Timeout",
+			description: "Returns a host-bounded timeout result",
+			parameters: Type.Object({}),
+			execute: async () => ({
+				content: [{ type: "text", text: "cell timed out" }],
+				details: { timedOut: true },
+			}),
+		};
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			tools: [timeoutTool],
+		});
+		harness.setResponses([fauxAssistantMessage(fauxToolCall("timeout", {}), { stopReason: "toolUse" })]);
+
+		await harness.session.prompt("Write a short poem about rain");
+
+		const interventions = harness.session.messages.filter(
+			(message) => message.role === "custom" && message.customType === "avo_progress_intervention",
+		);
+		expect(interventions).toHaveLength(1);
+		expect(interventions[0]).toMatchObject({
+			details: {
+				toolBatchesWithoutProgress: 1,
+				escalationLevel: 1,
+				trigger: "anti_laziness_tool_timeout",
+			},
+		});
+		const state = (await harness.session.handleAvoHostRequest("avo.get")).state as AvoRunState;
+		expect(state.status).toBe("active");
+		expect(state.checkpoints).toContainEqual(
+			expect.objectContaining({
+				status: "intervene",
+				triggeredHeuristics: expect.arrayContaining(["no_observable_progress_1_tool_batch"]),
 			}),
 		);
 	});

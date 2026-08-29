@@ -3867,10 +3867,66 @@ export class AgentSession {
 		}
 	}
 
-	private async _maybeInterveneAvoToolStagnation(toolResultCount: number): Promise<void> {
+	private async _queueAvoToolStagnationIntervention(
+		state: AvoRunState,
+		input: {
+			reason: string;
+			escalationLevel: number;
+			trigger: string;
+			instruction?: string;
+			forceIntervene?: boolean;
+		},
+	): Promise<void> {
+		this._avoRuntime?.store.recordProgressWatchdogCheckpoint({
+			consecutiveNoProgressTurns: this._avoToolNoProgressBatches,
+			resumed: false,
+			reason: input.reason,
+			escalateHorizon: input.escalationLevel > 1,
+			forceIntervene: input.forceIntervene,
+			unit: "tool_batch",
+		});
+		const message: CustomMessage = {
+			role: "custom",
+			customType: "avo_progress_intervention",
+			content: [
+				"<avo_progress_intervention>",
+				input.reason,
+				input.instruction ??
+					(input.escalationLevel === 1
+						? "Stop broad exploration and do not inspect Prime/AVO internals. Change approach now."
+						: "The previous intervention was ignored. Do at most one bounded diagnostic call, then produce and verify concrete task work now."),
+				state.routing.environment === "coding"
+					? "Work on the target files, make one concrete task-relevant workspace change, record a fresh candidate, and run one direct task-specific verifier."
+					: "Convert the evidence already gathered into a concrete candidate and run the verification class selected by the host.",
+				"Do not repeat a failed or unrelated command merely to keep the tool loop active.",
+				"</avo_progress_intervention>",
+			].join("\n"),
+			display: true,
+			details: {
+				runId: state.runId,
+				toolBatchesWithoutProgress: this._avoToolNoProgressBatches,
+				escalationLevel: input.escalationLevel,
+				trigger: input.trigger,
+			},
+			timestamp: Date.now(),
+		};
+		const normalized = normalizeMessageContent(message.content);
+		await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
+			message,
+			resumeIfIdle: true,
+		});
+	}
+
+	private async _maybeInterveneAvoToolStagnation(toolResults: readonly ToolResultMessage[]): Promise<void> {
+		const timedOutTool = toolResults.find((result) => {
+			const details = result.details;
+			return (
+				typeof details === "object" && details !== null && (details as { timedOut?: unknown }).timedOut === true
+			);
+		});
 		if (
 			isAvoFeatureAblated("qualified_watchdog") ||
-			toolResultCount === 0 ||
+			toolResults.length === 0 ||
 			!this._enforceAvoCompletion ||
 			!this._avoRuntime ||
 			this._rlmDepth !== 0
@@ -3887,7 +3943,7 @@ export class AgentSession {
 			this._avoToolInterventionQueued = false;
 			this._avoToolInterventionCount = 0;
 			this._avoToolLastInterventionBatch = 0;
-			return;
+			if (!timedOutTool) return;
 		}
 		if (snapshot.token !== this._avoToolProgressToken) {
 			const recoveredBatches = this._avoToolNoProgressBatches;
@@ -3906,6 +3962,23 @@ export class AgentSession {
 					unit: "tool_batch",
 				});
 			}
+			if (!timedOutTool) return;
+		}
+		if (timedOutTool) {
+			this._avoToolNoProgressBatches += 1;
+			this._avoToolInterventionQueued = true;
+			this._avoToolInterventionCount = Math.min(3, this._avoToolInterventionCount + 1);
+			this._avoToolLastInterventionBatch = this._avoToolNoProgressBatches;
+			const escalationLevel = this._avoToolInterventionCount;
+			const reason = `Anti-laziness timeout escalation ${escalationLevel}: the host terminated a ${timedOutTool.toolName} call after its execution ceiling without host-observable verification progress.`;
+			await this._queueAvoToolStagnationIntervention(state, {
+				reason,
+				escalationLevel,
+				trigger: "anti_laziness_tool_timeout",
+				forceIntervene: true,
+				instruction:
+					"Do not retry the same long-running cell or algorithm. Use a small bounded reproducer to remove the nontermination, split the work, then run the direct verifier again.",
+			});
 			return;
 		}
 		this._avoToolNoProgressBatches += 1;
@@ -3916,41 +3989,10 @@ export class AgentSession {
 		this._avoToolLastInterventionBatch = this._avoToolNoProgressBatches;
 		const escalationLevel = this._avoToolInterventionCount;
 		const reason = `${escalationLevel === 1 ? "Anti-laziness tool intervention" : `Anti-laziness escalation ${escalationLevel}`}: ${this._avoToolNoProgressBatches} consecutive tool batches produced no meaningful host pass, obligation coverage, tested critical assumption, completed cycle, or experiment cell.`;
-		this._avoRuntime.store.recordProgressWatchdogCheckpoint({
-			consecutiveNoProgressTurns: this._avoToolNoProgressBatches,
-			resumed: false,
+		await this._queueAvoToolStagnationIntervention(state, {
 			reason,
-			escalateHorizon: escalationLevel > 1,
-			unit: "tool_batch",
-		});
-		const message: CustomMessage = {
-			role: "custom",
-			customType: "avo_progress_intervention",
-			content: [
-				"<avo_progress_intervention>",
-				reason,
-				escalationLevel === 1
-					? "Stop broad exploration and do not inspect Prime/AVO internals. Change approach now."
-					: "The previous intervention was ignored. Do at most one bounded diagnostic call, then produce and verify concrete task work now.",
-				state.routing.environment === "coding"
-					? "Work on the target files, make one concrete task-relevant workspace change, record a fresh candidate, and run one direct task-specific verifier."
-					: "Convert the evidence already gathered into a concrete candidate and run the verification class selected by the host.",
-				"Do not repeat a failed or unrelated command merely to keep the tool loop active.",
-				"</avo_progress_intervention>",
-			].join("\n"),
-			display: true,
-			details: {
-				runId: state.runId,
-				toolBatchesWithoutProgress: this._avoToolNoProgressBatches,
-				escalationLevel,
-				trigger: escalationLevel === 1 ? "anti_laziness_tool_intervention" : "anti_laziness_tool_escalation",
-			},
-			timestamp: Date.now(),
-		};
-		const normalized = normalizeMessageContent(message.content);
-		await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
-			message,
-			resumeIfIdle: true,
+			escalationLevel,
+			trigger: escalationLevel === 1 ? "anti_laziness_tool_intervention" : "anti_laziness_tool_escalation",
 		});
 	}
 
@@ -6772,7 +6814,7 @@ export class AgentSession {
 		this._emit(event);
 
 		if (event.type === "turn_end") {
-			await this._maybeInterveneAvoToolStagnation(event.toolResults.length);
+			await this._maybeInterveneAvoToolStagnation(event.toolResults);
 		}
 
 		if (event.type === "message_end") {

@@ -4,4 +4,6 @@
 
 Bound model-authored IPython cells and SpecBench grading, retire timed-out
 kernels, and repeatedly escalate AVO tool-loop stagnation when a model ignores
-the first anti-laziness intervention.
+the first anti-laziness intervention. A host-bounded tool timeout now interrupts
+the chain immediately with a targeted nontermination-repair instruction instead
+of waiting for the next ordinary stagnation threshold.

@@ -557,7 +557,10 @@ function findJsonl(root: string): string[] {
 	return output;
 }
 
-function baselineTestSource(starterCode: Record<string, string>): string {
+export function buildSpecBenchBaselineTestSource(starterCode: Record<string, string>, timeoutSeconds: number): string {
+	if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds <= 0) {
+		throw new Error("SpecBench baseline timeoutSeconds must be a positive integer");
+	}
 	const manifest = Object.fromEntries(
 		Object.entries(starterCode).map(([path, content]) => [path, createHash("sha256").update(content).digest("hex")]),
 	);
@@ -597,7 +600,7 @@ def test_specbench_public_contract():
         text=True,
         capture_output=True,
         env=env,
-        timeout=600,
+        timeout=${Math.max(10, Math.min(120, timeoutSeconds))},
     )
     print(result.stdout)
     print(result.stderr)
@@ -763,7 +766,10 @@ async function runTask(
 	cpSync(task.publicTestDir, join(visibleRoot, "public"), { recursive: true });
 	const sharedConftest = join(dirname(task.publicTestDir), "conftest.py");
 	if (existsSync(sharedConftest)) cpSync(sharedConftest, join(visibleRoot, "conftest.py"));
-	writeFileSync(join(workspace, "test_specbench_contract.py"), baselineTestSource(task.starterCode));
+	writeFileSync(
+		join(workspace, "test_specbench_contract.py"),
+		buildSpecBenchBaselineTestSource(task.starterCode, task.timeoutSeconds),
+	);
 	writeFileSync(join(workspace, "TASK.md"), `${specBenchTaskPrompt(task, condition.disabledFeatures)}\n`);
 	writeFileSync(join(workspace, "pytest.ini"), "[pytest]\naddopts = --import-mode=importlib\n");
 	writeFileSync(join(workspace, ".gitignore"), "__pycache__/\n*.pyc\n.pytest_cache/\n");
