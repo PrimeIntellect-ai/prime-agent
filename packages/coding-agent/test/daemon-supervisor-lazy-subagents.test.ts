@@ -8,6 +8,7 @@ import {
 	sessionNameReservationKey,
 } from "../src/core/agent-messages.js";
 import { readSessionInfo, SessionManager } from "../src/core/session-manager.js";
+import { workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import { DaemonCatalogClient } from "../src/modes/daemon/daemon-catalog-process.js";
 import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import { success } from "../src/modes/daemon/daemon-protocol.js";
@@ -33,7 +34,7 @@ interface SupervisorInternals {
 	familyCatalogEntry(summary: SessionSummary): AgentFamilyCatalogEntry;
 	handleCommand(client: object, command: Record<string, unknown>): Promise<unknown>;
 	seedRosterLedger(): Promise<void>;
-	syncWorkerSummariesIntoRoster(worker: WorkerFixture): void;
+	writeRosterEntry(entry: ReturnType<typeof workerRosterEntryFromSummary>, worker?: WorkerFixture): unknown;
 }
 
 interface WorkerFixture {
@@ -76,7 +77,11 @@ function summary(overrides: Partial<SessionSummary> & Pick<SessionSummary, "id" 
 }
 
 function seedRoster(supervisor: SupervisorInternals, ...workers: WorkerFixture[]): void {
-	for (const target of workers) supervisor.syncWorkerSummariesIntoRoster(target);
+	for (const target of workers) {
+		for (const entry of target.summaries.values()) {
+			supervisor.writeRosterEntry(workerRosterEntryFromSummary(entry), target);
+		}
+	}
 }
 
 function worker(workerId: string, summaries: SessionSummary[] = []): WorkerFixture {

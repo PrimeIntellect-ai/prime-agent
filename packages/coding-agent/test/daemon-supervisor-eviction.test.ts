@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import { success } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor, idleEvictionSweepIntervalMs } from "../src/modes/daemon/daemon-supervisor.js";
@@ -89,8 +90,14 @@ function makeWorker(id: string, summaries: SessionSummary[]): WorkerFixture {
 }
 
 function seedSupervisorRoster(supervisor: SupervisorInternals, ...workers: WorkerFixture[]): void {
-	const internals = supervisor as unknown as { syncWorkerSummariesIntoRoster(worker: WorkerFixture): void };
-	for (const worker of workers) internals.syncWorkerSummariesIntoRoster(worker);
+	const internals = supervisor as unknown as {
+		writeRosterEntry(entry: ReturnType<typeof workerRosterEntryFromSummary>, worker?: WorkerFixture): unknown;
+	};
+	for (const worker of workers) {
+		for (const summary of worker.summaries.values()) {
+			internals.writeRosterEntry(workerRosterEntryFromSummary(summary), worker);
+		}
+	}
 }
 
 function makeSupervisor(idleEvictionMinutes: number | "off" = 90): SupervisorInternals {
@@ -128,6 +135,7 @@ describe("daemon supervisor whole-tree eviction", () => {
 		for (const worker of [idle, active, heartbeat, cron, attached]) {
 			supervisor.workers.set(worker.descriptor.workerId, worker);
 		}
+		seedSupervisorRoster(supervisor, idle, active, heartbeat, cron, attached);
 		supervisor.clients.add({ id: "viewer", attachedActiveSessionIds: new Set(["attached-root"]) });
 
 		await supervisor.runIdleEvictionSweep(now);
@@ -156,6 +164,7 @@ describe("daemon supervisor whole-tree eviction", () => {
 		});
 		supervisor.workers.set("active", active);
 		supervisor.workers.set("wholly-idle", whollyIdle);
+		seedSupervisorRoster(supervisor, active, whollyIdle);
 
 		await supervisor.runIdleEvictionSweep(now);
 
@@ -220,6 +229,7 @@ describe("daemon supervisor whole-tree eviction", () => {
 		]);
 		supervisor.workers.set("paused", paused);
 		supervisor.workers.set("active-heartbeat", active);
+		seedSupervisorRoster(supervisor, paused, active);
 
 		await supervisor.runIdleEvictionSweep(now);
 

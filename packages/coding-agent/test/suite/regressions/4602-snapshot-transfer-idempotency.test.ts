@@ -3,6 +3,7 @@ import { PassThrough } from "node:stream";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { describe, expect, it, vi } from "vitest";
 import type { ActiveSessionState, DaemonSocketClient } from "../../../src/modes/daemon/active-session-state.js";
+import { workerRosterEntryFromSummary } from "../../../src/modes/daemon/agent-roster.js";
 import { AgentDaemon } from "../../../src/modes/daemon/daemon-mode.js";
 import {
 	DAEMON_PROTOCOL_INFO,
@@ -350,9 +351,12 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		};
 		internals.clients.add(client);
 		internals.workers.set(worker.descriptor.workerId, worker);
-		(
-			supervisor as unknown as { syncWorkerSummariesIntoRoster(worker: WorkerHarness): void }
-		).syncWorkerSummariesIntoRoster(worker);
+		const seeder = supervisor as unknown as {
+			writeRosterEntry(entry: ReturnType<typeof workerRosterEntryFromSummary>, worker?: WorkerHarness): unknown;
+		};
+		for (const summary of worker.summaries.values()) {
+			seeder.writeRosterEntry(workerRosterEntryFromSummary(summary), worker);
+		}
 		internals.syncWorkerExtensionUi = vi.fn(async () => {});
 		internals.streamSnapshot = streamSnapshot;
 		const messages: AgentMessage[] = [{ role: "user", content: "stable", timestamp: 1 }];
@@ -437,9 +441,12 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		};
 		internals.clients.add(client);
 		internals.workers.set(worker.descriptor.workerId, worker);
-		(
-			supervisor as unknown as { syncWorkerSummariesIntoRoster(worker: WorkerHarness): void }
-		).syncWorkerSummariesIntoRoster(worker);
+		const seeder = supervisor as unknown as {
+			writeRosterEntry(entry: ReturnType<typeof workerRosterEntryFromSummary>, worker?: WorkerHarness): unknown;
+		};
+		for (const summary of worker.summaries.values()) {
+			seeder.writeRosterEntry(workerRosterEntryFromSummary(summary), worker);
+		}
 		internals.streamSnapshot = streamSnapshot;
 		const frames = snapshotFrames([{ role: "user", content: "stable", timestamp: 1 }]);
 		for (const message of [frames.begin, frames.chunk, frames.end]) {
@@ -507,9 +514,12 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		};
 		internals.clients.add(client);
 		internals.workers.set(worker.descriptor.workerId, worker);
-		(
-			supervisor as unknown as { syncWorkerSummariesIntoRoster(worker: WorkerHarness): void }
-		).syncWorkerSummariesIntoRoster(worker);
+		const seeder = supervisor as unknown as {
+			writeRosterEntry(entry: ReturnType<typeof workerRosterEntryFromSummary>, worker?: WorkerHarness): unknown;
+		};
+		for (const summary of worker.summaries.values()) {
+			seeder.writeRosterEntry(workerRosterEntryFromSummary(summary), worker);
+		}
 		internals.shuttingDown = true;
 		internals.streamSnapshot = streamSnapshot;
 		internals.persistWorker = persistWorker;

@@ -307,15 +307,12 @@ interface ResidentWorker {
 	promotedOwnerClientId?: string;
 	updateRestartPrepareClient?: DaemonWorkerClient;
 	/** True once the worker advertised or used the roster-delta protocol. */
-	rosterCapable?: boolean;
 	/** Wall-clock time of the last frame received from this worker. */
 	lastFrameAt?: number;
 	/** True while the watchdog has stamped this worker's entries as stale. */
 	rosterStale?: boolean;
 	/** In-flight replacement connection during authentication; an allowed frame source alongside client. */
 	pendingClient?: DaemonWorkerClient;
-	/** Bumped per consumed roster delta; a summaries refresh must not overwrite newer deltas. */
-	rosterDeltaGeneration?: number;
 }
 
 interface SnapshotDuplicateValidation {
@@ -1656,7 +1653,6 @@ export class DaemonSupervisor {
 					const response = await this.forwardToWorker(worker, withoutSupervisorCreateFields(command));
 					if (response.success && isSessionSummary(response.data)) {
 						this.writeRosterEntry(workerRosterEntryFromSummary(response.data), worker);
-						if (worker.rosterCapable !== true) await this.refreshWorkerSummaries(worker);
 						return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
 					}
 					return responseWithId(response, command.id);
@@ -2965,7 +2961,10 @@ export class DaemonSupervisor {
 						1000,
 					);
 					await this.assertRecoveryAllowed();
-					worker.rosterCapable = worker.rosterCapable === true || workerAuthAdvertisesRoster(authResponse.data);
+					// Pre-roster workers are restarted on adoption; sessions reload idle and resume on the next prompt.
+					if (!workerAuthAdvertisesRoster(authResponse.data)) {
+						throw new Error("Session worker predates the roster protocol and must be restarted");
+					}
 					worker.lastFrameAt = Date.now();
 					worker.client?.close();
 					worker.client = client;
@@ -3547,20 +3546,15 @@ export class DaemonSupervisor {
 		);
 	}
 
-	private async refreshWorkerSummaries(worker: ResidentWorker, recovery = false, retried = false): Promise<void> {
+	/** Pulled summaries feed recovery seeding and eviction checks; deltas own the roster itself. */
+	private async refreshWorkerSummaries(worker: ResidentWorker, recovery = false): Promise<void> {
 		if (this.isWorkerStopping(worker)) {
 			throw new Error("Session worker is stopping");
 		}
 		if (!worker.client) {
 			throw new Error("Session worker is not connected");
 		}
-		const deltaGenerationAtStart = worker.rosterDeltaGeneration ?? 0;
 		const response = await worker.client.request({ type: "list" }, 5000);
-		// A delta that landed mid-refresh is newer than this response; discard it and retry once.
-		if ((worker.rosterDeltaGeneration ?? 0) !== deltaGenerationAtStart) {
-			if (!retried) return this.refreshWorkerSummaries(worker, recovery, true);
-			return;
-		}
 		const summaries = sessionSummariesFromResponse(response);
 		const nextSummaries = new Map(summaries.map((summary) => [summary.activeSessionId ?? summary.id, summary]));
 		const root = nextSummaries.get(worker.descriptor.rootActiveSessionId);
@@ -3568,6 +3562,8 @@ export class DaemonSupervisor {
 			throw new Error(`Session worker omitted its root session during recovery`);
 		}
 		worker.summaries = nextSummaries;
+		// Launch and recovery pulls carry registry children no delta composes; fill their missing rows.
+		if (recovery) this.fillRosterGapsFromWorkerSummaries(worker);
 		for (const summary of summaries) {
 			const activeSessionId = summary.activeSessionId ?? summary.id;
 			if (summary.streamingMessage?.role === "assistant") {
@@ -3576,7 +3572,6 @@ export class DaemonSupervisor {
 				this.streamReconstructor.clear(activeSessionId);
 			}
 		}
-		this.syncWorkerSummariesIntoRoster(worker);
 		if (root) {
 			if (recovery) {
 				await this.assertRecoveryAllowed();
@@ -3713,8 +3708,6 @@ export class DaemonSupervisor {
 			return;
 		}
 		if (delta.type !== "roster_delta" || !Array.isArray(delta.entries)) return;
-		worker.rosterCapable = true;
-		worker.rosterDeltaGeneration = (worker.rosterDeltaGeneration ?? 0) + 1;
 		if (delta.snapshot === true) {
 			// A live worker's snapshot carries its passivated rows too; absence means removal, disk backs the rest.
 			const sent = new Set(delta.entries.map((entry) => entry.agentId));
@@ -3753,17 +3746,12 @@ export class DaemonSupervisor {
 		this.persistWorker(worker);
 	}
 
-	private syncWorkerSummariesIntoRoster(worker: ResidentWorker): void {
-		const seen = new Set<string>();
+	/** Pulled rows fill gaps and claim workerless seeded rows; delta-fed rows are never overwritten. */
+	private fillRosterGapsFromWorkerSummaries(worker: ResidentWorker): void {
 		for (const summary of worker.summaries.values()) {
 			const entry = workerRosterEntryFromSummary(summary);
-			seen.add(entry.agentId);
-			this.writeRosterEntry(entry, worker);
-		}
-		for (const entry of this.workerRosterEntries(worker)) {
-			if (seen.has(entry.agentId)) continue;
-			if (entry.queuedChild) continue;
-			this.writeRosterEntry(passivatedWorkerRosterEntry(entry), worker);
+			const existing = this.roster().get(entry.agentId);
+			if (existing === undefined || existing.workerId === undefined) this.writeRosterEntry(entry, worker);
 		}
 	}
 
@@ -3784,7 +3772,7 @@ export class DaemonSupervisor {
 
 	private sweepRosterStaleness(now = Date.now()): void {
 		for (const worker of this.workers.values()) {
-			if (worker.client === undefined || worker.lastFrameAt === undefined || worker.rosterCapable !== true) {
+			if (worker.client === undefined || worker.lastFrameAt === undefined) {
 				continue;
 			}
 			if (now - worker.lastFrameAt > ROSTER_STALE_AFTER_MS) {
@@ -3997,9 +3985,13 @@ export class DaemonSupervisor {
 	): Promise<WorkerMatch> {
 		let matches = this.matchWorkers(selector, includeWorker);
 		if (matches.length === 0) {
-			// Miss path only: one bounded refresh closes the just-bound-but-unflushed routing window.
+			// Miss path only: one bounded pull closes the just-bound-but-unflushed routing window.
 			await Promise.all(
-				[...this.workers.values()].map((worker) => this.refreshWorkerSummaries(worker).catch(() => undefined)),
+				[...this.workers.values()].map((worker) =>
+					this.refreshWorkerSummaries(worker)
+						.then(() => this.fillRosterGapsFromWorkerSummaries(worker))
+						.catch(() => undefined),
+				),
 			);
 			matches = this.matchWorkers(selector, includeWorker);
 		}
@@ -4111,7 +4103,6 @@ export class DaemonSupervisor {
 		}
 		if (command.type === "rename" && response.success && isSessionSummary(response.data)) {
 			this.writeRosterEntry(workerRosterEntryFromSummary(response.data), worker);
-			if (worker.rosterCapable !== true) await this.refreshWorkerSummaries(worker);
 			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
 		}
 		return responseWithId(response, command.id);
@@ -5023,17 +5014,6 @@ export class DaemonSupervisor {
 				continue;
 			}
 			this.writeSerialized(client, publicPayload);
-		}
-		if (
-			worker.rosterCapable !== true &&
-			(outboundType === "session_replaced" ||
-				outboundType === "session_closed" ||
-				sessionEventType === "turn_start" ||
-				sessionEventType === "turn_end" ||
-				sessionEventType === "rlm_child_update")
-		) {
-			// A legacy worker sends no roster deltas; refreshing keeps its ledger rows fresh.
-			void this.refreshWorkerSummaries(worker).catch(() => undefined);
 		}
 		if (
 			decodedOutbound?.type === "session_closed" &&

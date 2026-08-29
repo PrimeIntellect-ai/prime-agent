@@ -701,30 +701,6 @@ describe("supervisor roster ledger", () => {
 		expect(supervisor.workerRosterEntries(worker)[0]?.lastHeardFromAt).toBeUndefined();
 	});
 
-	it("refreshes summaries on events only for workers without the roster capability", () => {
-		const legacy = makeWorker("legacy");
-		const modern = makeWorker("modern", { rosterCapable: true });
-		const supervisor = makeSupervisor([legacy, modern], {
-			streamReconstructor: { observe: vi.fn(), seed: vi.fn(), clear: vi.fn() },
-		});
-		const frame = (activeSessionId: string) => ({
-			header: {
-				kind: "outbound",
-				outboundType: "session_event",
-				activeSessionId,
-				sessionEventType: "turn_end",
-				payloadEncoding: "jsonl",
-			},
-			payload: Buffer.from(JSON.stringify({ type: "session_event", activeSessionId, event: { type: "turn_end" } })),
-		});
-
-		supervisor.handleWorkerFrame(legacy, frame("legacy-active"));
-		supervisor.handleWorkerFrame(modern, frame("modern-active"));
-
-		expect(supervisor.refreshWorkerSummaries).toHaveBeenCalledTimes(1);
-		expect(supervisor.refreshWorkerSummaries).toHaveBeenCalledWith(legacy);
-	});
-
 	it("seeds from the spawn ledger, skips tombstones, and keeps evicted rows inactive", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-seed-"));
 		tempDirs.push(directory);
@@ -1313,6 +1289,35 @@ describe("review-round regressions", () => {
 		expect(match.summary.rlmChildId).toBe("sub-abc");
 	});
 
+	it("restarts a pre-roster worker on adoption instead of adopting it", async () => {
+		const worker = makeWorker("legacy-worker");
+		worker.client = undefined;
+		// A live pid routes adoption to the capability check instead of the dead-process branch.
+		Object.assign(worker.descriptor, { lifecycle: "recovering", pid: process.pid });
+		const recoverWorker = vi.fn(async (target: object) => {
+			Object.assign((target as WorkerFixture).descriptor, { lifecycle: "ready" });
+		});
+		const subscribeWorker = vi.fn();
+		const supervisor = makeSupervisor([worker], {
+			assertRecoveryAllowed: vi.fn(async () => {}),
+			connectWorker: vi.fn(async () => {
+				throw new Error("Session worker predates the roster protocol and must be restarted");
+			}),
+			subscribeWorker,
+			recoverWorker,
+			persistWorker: vi.fn(),
+			broadcastHeartbeatsChanged: vi.fn(),
+		});
+		const internals = supervisor as unknown as { adoptOrRecoverWorker(worker: object): Promise<void> };
+
+		await internals.adoptOrRecoverWorker(worker);
+
+		// The old process is never adopted; the existing recovery machinery restarts it from the current binary.
+		expect(recoverWorker).toHaveBeenCalledWith(worker);
+		expect(subscribeWorker).not.toHaveBeenCalled();
+		expect(worker.descriptor.lifecycle).toBe("ready");
+	});
+
 	it("routes a just-bound session through the miss-path refresh", async () => {
 		const target = summary({ id: "target-active", sessionId: "target", activeSessionId: "target-active" });
 		const worker = makeWorker("worker-1", { rosterCapable: true });
@@ -1326,7 +1331,6 @@ describe("review-round regressions", () => {
 		};
 		const supervisor = makeSupervisor([worker], {
 			refreshWorkerSummaries: DaemonSupervisor.prototype["refreshWorkerSummaries" as never],
-			syncWorkerSummariesIntoRoster: DaemonSupervisor.prototype["syncWorkerSummariesIntoRoster" as never],
 			streamReconstructor: { seed: vi.fn(), clear: vi.fn() },
 		});
 		const internals = supervisor as unknown as {
@@ -1335,35 +1339,6 @@ describe("review-round regressions", () => {
 
 		const match = await internals.findWorker("target-active");
 		expect(match.summary.sessionId).toBe("target");
-	});
-
-	it("does not let a summaries refresh overwrite a newer roster delta", async () => {
-		const worker = makeWorker("worker-1", { rosterCapable: true });
-		const stale = summary({ id: "s-active", sessionId: "s", activeSessionId: "s-active", sessionName: "stale" });
-		const supervisor = makeSupervisor([worker], {
-			refreshWorkerSummaries: DaemonSupervisor.prototype["refreshWorkerSummaries" as never],
-			syncWorkerSummariesIntoRoster: DaemonSupervisor.prototype["syncWorkerSummariesIntoRoster" as never],
-			streamReconstructor: { seed: vi.fn(), clear: vi.fn() },
-		});
-		worker.client = {
-			request: vi.fn(async () => {
-				supervisor.consumeWorkerRosterDelta(
-					worker,
-					rosterDelta([
-						workerRosterEntryFromSummary(
-							summary({ id: "s-active", sessionId: "s", activeSessionId: "s-active", sessionName: "fresh" }),
-						),
-					]),
-				);
-				return { type: "response", command: "list", success: true, data: { sessions: [stale] } };
-			}),
-		};
-
-		await (
-			supervisor as unknown as { refreshWorkerSummaries(worker: WorkerFixture): Promise<void> }
-		).refreshWorkerSummaries(worker);
-
-		expect(supervisor.roster().get("s")?.summary.sessionName).toBe("fresh");
 	});
 
 	it("publishes qualified removal ids from the rlm subagent deletion path", async () => {
@@ -1433,39 +1408,6 @@ describe("review-round regressions", () => {
 
 		expect(removalId).toBe(composedId);
 		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual([composedId]);
-	});
-
-	it("keeps a busy worker unevicted when the refresh response is staler than a delta", async () => {
-		const worker = makeWorker("worker-1", { rosterCapable: true });
-		const supervisor = makeSupervisor([worker], {
-			refreshWorkerSummaries: DaemonSupervisor.prototype["refreshWorkerSummaries" as never],
-			syncWorkerSummariesIntoRoster: DaemonSupervisor.prototype["syncWorkerSummariesIntoRoster" as never],
-			streamReconstructor: { seed: vi.fn(), clear: vi.fn() },
-		});
-		const staleIdle = summary({ id: "s-active", sessionId: "s", activeSessionId: "s-active" });
-		worker.client = {
-			request: vi.fn(async () => {
-				supervisor.consumeWorkerRosterDelta(
-					worker,
-					rosterDelta([
-						workerRosterEntryFromSummary(
-							summary({ id: "s-active", sessionId: "s", activeSessionId: "s-active", isSessionActive: true }),
-						),
-					]),
-				);
-				return { type: "response", command: "list", success: true, data: { sessions: [staleIdle] } };
-			}),
-		};
-		const internals = supervisor as unknown as {
-			refreshWorkerSummaries(worker: WorkerFixture): Promise<void>;
-			workerEvictionSnapshot(worker: WorkerFixture): { sessions: Array<{ isSessionActive: boolean }> };
-		};
-
-		await internals.refreshWorkerSummaries(worker);
-
-		const snapshot = internals.workerEvictionSnapshot(worker);
-		expect(snapshot.sessions).toHaveLength(1);
-		expect(snapshot.sessions[0]?.isSessionActive).toBe(true);
 	});
 });
 
