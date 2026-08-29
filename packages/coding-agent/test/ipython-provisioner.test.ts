@@ -65,6 +65,45 @@ function createBusyKernelContext(
 	return { ctx, setWorkingMessage };
 }
 
+function writeFakeReplRuntime(markerPath: string): string {
+	const python = join(tempDir, "python-repl");
+	writeFileSync(
+		python,
+		`#!/usr/bin/env node
+const fs = require("node:fs");
+const readline = require("node:readline");
+const emit = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
+emit({ event: "ready", protocol: 2, python: process.version });
+const input = readline.createInterface({ input: process.stdin });
+input.on("line", (line) => {
+	const request = JSON.parse(line);
+	if (request.type === "restore") {
+		emit({ event: "done", id: request.id, status: "ok", restored: [], failed: [] });
+		return;
+	}
+	if (request.type === "snapshot") {
+		setTimeout(() => {
+			fs.writeFileSync(${JSON.stringify(markerPath)}, "1");
+			emit({ event: "done", id: request.id, status: "ok", saved: [], skipped: [], bytes: 0 });
+		}, 150);
+		return;
+	}
+	if (request.type === "execute") {
+		emit({ event: "error", id: request.id, ename: "RuntimeError", evalue: "bootstrap refused", traceback: [] });
+		emit({ event: "done", id: request.id, status: "error" });
+		return;
+	}
+	if (request.type === "shutdown") {
+		emit({ event: "done", id: request.id, status: "ok" });
+		process.exit(0);
+	}
+});
+`,
+	);
+	chmodSync(python, 0o755);
+	return python;
+}
+
 describe("IpythonKernelProvisioner", () => {
 	beforeEach(() => {
 		tempDir = mkdtempSync(join(tmpdir(), "prime-agent-provisioner-"));
@@ -74,6 +113,23 @@ describe("IpythonKernelProvisioner", () => {
 		if (tempDir) {
 			rmSync(tempDir, { recursive: true, force: true });
 			tempDir = "";
+		}
+	});
+
+	it("does not surface a failed startup before the kernel's final snapshot flush finished", async () => {
+		const marker = join(tempDir, "snapshot-flushed");
+		const snapshotDir = join(tempDir, "snapshots");
+		mkdirSync(snapshotDir, { recursive: true });
+		const python = writeFakeReplRuntime(marker);
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python, snapshotDir });
+		try {
+			await expect(provisioner.ensure()).rejects.toThrow(/Failed to initialize rlm runtime/);
+			// The failed kernel's teardown (final snapshot flush included) completed
+			// before the failure surfaced, so a replacement provisioner gated on this
+			// one cannot race the still-flushing kernel over the same snapshot files.
+			expect(existsSync(marker)).toBe(true);
+		} finally {
+			await provisioner.dispose();
 		}
 	});
 
@@ -352,7 +408,7 @@ describe("ReplKernelManager session cleanup during startup", () => {
 			await expect(startup).rejects.toThrow(/Kernel exited before ready|disposed during startup/);
 			expect(manager.isRunning).toBe(false);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 });

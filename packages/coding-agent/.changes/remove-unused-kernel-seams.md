@@ -1,0 +1,1 @@
+- Removed unused host-request capability helpers and the `kernelManagerRef` option from `IpythonToolOptions`.

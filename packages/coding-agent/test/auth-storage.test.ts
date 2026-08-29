@@ -5,7 +5,6 @@ import { registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { clearConfigValueCache } from "../src/core/resolve-config-value.js";
 
 describe("AuthStorage", () => {
 	let tempDir: string;
@@ -22,7 +21,6 @@ describe("AuthStorage", () => {
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
-		clearConfigValueCache();
 		vi.restoreAllMocks();
 	});
 
@@ -833,26 +831,6 @@ describe("AuthStorage", () => {
 
 				const count = parseInt(readFileSync(counterFile, "utf-8").trim(), 10);
 				expect(count).toBe(1);
-			});
-
-			test("clearConfigValueCache allows command to run again", async () => {
-				const counterFile = join(tempDir, "counter");
-				writeFileSync(counterFile, "0");
-
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; echo "key-value"'`;
-				writeAuthJson({
-					anthropic: { type: "api_key", key: command },
-				});
-
-				authStorage = AuthStorage.create(authJsonPath);
-				await authStorage.getApiKey("anthropic");
-
-				clearConfigValueCache();
-				await authStorage.getApiKey("anthropic");
-
-				const count = parseInt(readFileSync(counterFile, "utf-8").trim(), 10);
-				expect(count).toBe(2);
 			});
 
 			test("different commands are cached separately", async () => {

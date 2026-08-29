@@ -3,12 +3,9 @@ import type { KernelBootstrapProgressHandler, KernelPythonSkill } from "./bootst
 import type { RestoreResult, SnapshotResult } from "./state-snapshot.js";
 
 export const DEFAULT_MAX_OUTPUT_CHARS = 65536;
-export const HOST_REQUEST_DISPOSE_TIMEOUT_MS = 5000;
+export const HOST_REQUEST_SHUTDOWN_TIMEOUT_MS = 5000;
 export const KERNEL_SHUTDOWN_TIMEOUT_MS = 5000;
 export const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
-// Cap how long a graceful dispose waits on the final snapshot; the debounced
-// on-disk copy is the fallback if this is exceeded.
-export const SNAPSHOT_DISPOSE_TIMEOUT_MS = 5000;
 export const SNAPSHOT_EXECUTION_TIMEOUT_MS = 5000;
 export const KERNEL_ABORT_GRACE_MS = 1000;
 export const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
@@ -26,85 +23,9 @@ export class KernelBusyAfterInterruptError extends Error {
 
 /**
  * Handles one typed request from Python code running in the kernel.
- * The returned record is sent back verbatim as the reply payload.
- *
- * The unary form is the dispatcher and registration contract; context-aware
- * handlers are declared separately below.
+ * The returned record is delivered verbatim to the Python caller.
  */
 export type HostRequestHandler = (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
-
-/**
- * Per-call authority supplied by the host-request dispatcher.
- * `requestId` is an opaque host-minted correlation token and `isCurrent()`
- * lets an implementation reject work after its authority is revoked.
- */
-export interface HostRequestContext {
-	readonly requestId: string;
-	readonly generation: number;
-	readonly signal: AbortSignal;
-	isCurrent(): boolean;
-}
-
-const hostRequestHandlerBrand = Symbol("hostRequestHandler");
-
-/** A context-aware implementation that must receive dispatcher authority. */
-export type HostRequestHandlerImplementation = (
-	payload: Record<string, unknown>,
-	context: HostRequestContext,
-) => Promise<Record<string, unknown>>;
-
-/** A factory-minted, context-aware host-request handler capability. */
-type HostRequestHandlerCapability = HostRequestHandlerImplementation & { readonly [hostRequestHandlerBrand]: true };
-
-/** Runtime provenance cannot be recreated by copying the nominal symbol property. */
-const factoryCreatedHostRequestHandlers = new WeakSet<object>();
-
-function assertGenuineHostRequestContext(context: unknown): asserts context is HostRequestContext {
-	if (
-		typeof context !== "object" ||
-		context === null ||
-		typeof (context as HostRequestContext).requestId !== "string" ||
-		!(context as HostRequestContext).requestId ||
-		!Number.isSafeInteger((context as HostRequestContext).generation) ||
-		typeof (context as HostRequestContext).isCurrent !== "function" ||
-		typeof (context as HostRequestContext).signal !== "object" ||
-		(context as HostRequestContext).signal === null ||
-		typeof (context as HostRequestContext).signal.aborted !== "boolean" ||
-		typeof (context as HostRequestContext).signal.addEventListener !== "function"
-	) {
-		throw new Error("host request context is invalid");
-	}
-}
-
-/**
- * Creates a branded wrapper rather than mutating its implementation. Both its
- * generic shape and runtime arity reject unary callbacks before they can run.
- */
-export function createHostRequestHandler<T extends HostRequestHandlerImplementation>(
-	implementation: T,
-	..._unaryRejection: Parameters<T> extends [unknown, unknown, ...unknown[]]
-		? []
-		: ["host request handlers must accept payload and context"]
-): HostRequestHandlerCapability {
-	if (implementation.length < 2) throw new Error("host request handlers must accept payload and context");
-	const handler = async (payload: Record<string, unknown>, context: HostRequestContext) => {
-		assertGenuineHostRequestContext(context);
-		return implementation(payload, context);
-	};
-	factoryCreatedHostRequestHandlers.add(handler);
-	return Object.defineProperty(handler, hostRequestHandlerBrand, { value: true }) as HostRequestHandlerCapability;
-}
-
-/** Reject copied-symbol and raw-function forgeries before they observe authenticated payloads. */
-export function assertHostRequestHandler(value: unknown): asserts value is HostRequestHandlerCapability {
-	if (
-		typeof value !== "function" ||
-		(value as Partial<HostRequestHandlerCapability>)[hostRequestHandlerBrand] !== true ||
-		!factoryCreatedHostRequestHandlers.has(value)
-	) {
-		throw new Error("host request handler is not a dispatcher-created capability");
-	}
-}
 
 /** Host request handlers keyed by request type (e.g. "rlm.run", "goal.complete"). */
 export type HostRequestHandlers = Record<string, HostRequestHandler>;
@@ -133,6 +54,8 @@ export interface KernelManagerOptions {
 	pythonSkills?: readonly KernelPythonSkill[];
 	/** Persist/revive the user namespace across kernel restarts and session resume. */
 	snapshot?: KernelSnapshotConfig;
+	/** Runtime bootstrap re-run on a protocol-repaired kernel so live handles (rlm, bash, skills) exist again. */
+	bootstrapCode?: string;
 }
 
 export interface KernelStartOptions {
@@ -149,6 +72,8 @@ export interface ExecuteOptions {
 	maxOutputChars?: number;
 	/** Synthetic host cell (snapshot/restore/list); excluded from lastCellCode attribution. */
 	internal?: boolean;
+	/** The protocol repair's own restore; exempt from waiting on the repair it belongs to. */
+	protocolRepair?: boolean;
 }
 
 /** MIME tag the `edit` skill emits diff payloads under. */
@@ -344,16 +269,20 @@ export function createDeferred<T>(): Deferred<T> {
 	return { promise, resolve, reject };
 }
 
+export interface KernelShutdownOptions {
+	snapshot?: boolean;
+	drainHostRequests?: boolean;
+}
+
 /** Public surface every kernel client exposes to the provisioner and session layer. */
 export interface KernelClient {
 	readonly ownerSessionId: string | undefined;
 	readonly isRunning: boolean;
 	start(options?: KernelStartOptions): Promise<void>;
 	execute(code: string, opts?: ExecuteOptions): Promise<ExecuteResult>;
-	shutdown(opts?: { snapshot?: boolean }): Promise<boolean>;
+	shutdown(opts?: KernelShutdownOptions): Promise<boolean>;
 	restart(): Promise<void>;
 	kill(): Promise<void>;
-	dispose(): Promise<void>;
 	disposeSync(): void;
 	snapshotState(): Promise<SnapshotResult | null>;
 	pruneOversizedVariables(): Promise<SnapshotResult | null>;
@@ -369,7 +298,7 @@ let signalHandlersInstalled = false;
 registerSessionResourceCleanup((sessionId) => {
 	for (const k of liveKernels) {
 		if (!sessionId || k.ownerSessionId === sessionId) {
-			void k.dispose();
+			void k.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	}
 });

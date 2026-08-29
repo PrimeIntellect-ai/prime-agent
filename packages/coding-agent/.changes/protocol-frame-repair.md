@@ -1,0 +1,1 @@
+- Fixed invalid kernel protocol frames hanging requests by rejecting the affected request and replacing the kernel from its latest state snapshot.

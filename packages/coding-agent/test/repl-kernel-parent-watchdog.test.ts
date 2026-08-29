@@ -65,7 +65,7 @@ describe("repl kernel parent watchdog", () => {
 			await expect(manager.execute("x")).rejects.toThrow(/Kernel exited before ready/);
 		} finally {
 			errorSpy.mockRestore();
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 
 		expect(readFileSync(envDump, "utf8")).toMatch(new RegExp(`^PRIME_AGENT_KERNEL_OWNER_PID=${process.pid}$`, "m"));
@@ -95,7 +95,7 @@ describe("repl kernel parent watchdog", () => {
 			const records = existsSync(journalPath) ? readJournalRecords(journalPath) : [];
 			expect(records.some((r) => r.pid === 999999 && !r.active)).toBe(false);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -115,7 +115,7 @@ describe("repl kernel parent watchdog", () => {
 			const records = readJournalRecords(journalPath);
 			expect(records.some((r) => r.pid === 999999 && !r.active)).toBe(true);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -160,7 +160,7 @@ describe("repl kernel parent watchdog", () => {
 		} finally {
 			internals.child = undefined;
 			internals.state = "idle";
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
@@ -173,7 +173,7 @@ describe("repl kernel parent watchdog", () => {
 			shutdown(): Promise<boolean>;
 			kill(): Promise<void>;
 		};
-		internals.state = "starting";
+		internals.state = "running";
 		// A live child handle keeps waitForKernelExit parked so the send actually blocks the shutdown.
 		const child = Object.assign(new EventEmitter(), {
 			exitCode: null,
@@ -267,7 +267,7 @@ describe("repl kernel parent watchdog", () => {
 			internals.child = undefined;
 			internals.startPromise = undefined;
 			internals.state = "idle";
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 });

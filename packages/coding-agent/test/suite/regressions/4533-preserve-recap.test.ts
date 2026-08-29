@@ -21,7 +21,6 @@ type MessageStartMode = {
 	footer: { invalidate: () => void };
 	updateConnectionStateFromEvent: (event: unknown) => void;
 	contextUsageTokenBaseline: number;
-	setSessionHasMessages: (hasMessages: boolean) => void;
 	clearShortcutGuide: () => void;
 	activityTracker: { handleEvent: (event: unknown) => void };
 	updateWorkingLoaderMessage: () => void;
@@ -56,7 +55,6 @@ function createMessageStartMode(): MessageStartMode {
 		footer: { invalidate: vi.fn() },
 		updateConnectionStateFromEvent: vi.fn(),
 		contextUsageTokenBaseline: 12,
-		setSessionHasMessages: vi.fn(),
 		clearShortcutGuide: vi.fn(),
 		activityTracker: { handleEvent: vi.fn() },
 		updateWorkingLoaderMessage: vi.fn(),

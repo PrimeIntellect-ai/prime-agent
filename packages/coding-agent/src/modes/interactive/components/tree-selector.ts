@@ -1198,10 +1198,6 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		this.addChild(this.labelInputContainer);
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
-
-		if (tree.length === 0) {
-			setTimeout(() => onCancel(), 100);
-		}
 	}
 
 	private showLabelInput(entryId: string, currentLabel: string | undefined): void {

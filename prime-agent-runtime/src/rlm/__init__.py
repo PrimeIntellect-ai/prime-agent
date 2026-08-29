@@ -57,7 +57,7 @@ def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
 def _parse_host_reply(request_type: str, reply: dict[str, Any]) -> dict[str, Any]:
     status = reply.get("status")
     if status == "ok":
-        return {k: v for k, v in reply.items() if k != "status"}
+        return reply["result"]
     if status == "error":
         raise RuntimeError(str(reply.get("error") or f"host request {request_type} failed"))
     raise RuntimeError(f"host request {request_type} returned unexpected status: {status!r}")

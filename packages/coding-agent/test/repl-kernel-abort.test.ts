@@ -216,7 +216,7 @@ describe("ReplKernelManager abort handling", () => {
 		manager.disposeSync();
 	});
 
-	it("starts the snapshot timeout after earlier kernel work finishes", async () => {
+	it("cancels a hung final snapshot execution before teardown", async () => {
 		vi.useFakeTimers();
 		const manager = new ReplKernelManager({
 			cwd: process.cwd(),
@@ -240,33 +240,273 @@ describe("ReplKernelManager abort handling", () => {
 					);
 				}),
 		);
+		const cleanupResources = vi.fn();
 		Object.assign(
 			manager as unknown as {
 				state: "running";
 				executionQueue: Promise<void>;
 				executeInner: typeof executeInner;
 				start: () => Promise<void>;
+				cleanupResources: () => void;
 			},
-			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {} },
+			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {}, cleanupResources },
 		);
 
-		const snapshot = (
-			manager as unknown as {
-				captureSnapshot: (options?: { executionTimeoutMs?: number }) => Promise<unknown>;
-			}
-		).captureSnapshot({ executionTimeoutMs: 5000 });
-		await vi.advanceTimersByTimeAsync(5000);
+		const disposal = manager.shutdown({ snapshot: true, drainHostRequests: true });
 		expect(executeInner).not.toHaveBeenCalled();
-
 		releaseQueue();
 		await waitForCalls(executeInner, 1);
 		const signal = executeInner.mock.calls[0]?.[2].signal;
 		expect(signal?.aborted).toBe(false);
 		await vi.advanceTimersByTimeAsync(4999);
 		expect(signal?.aborted).toBe(false);
+		expect(cleanupResources).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(1);
+
 		expect(signal?.aborted).toBe(true);
-		await expect(snapshot).resolves.toBeNull();
+		await expect(disposal).resolves.toBe(true);
+		expect(cleanupResources).toHaveBeenCalledOnce();
+	});
+
+	it("tears down when the final snapshot is blocked behind a hung execution", async () => {
+		vi.useFakeTimers();
+		const manager = new ReplKernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+		});
+		const executeInner = vi.fn();
+		const interrupt = vi.fn(async () => {});
+		const cleanupResources = vi.fn();
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				executionQueue: Promise<void>;
+				activeExecution: object;
+				executeInner: typeof executeInner;
+				interrupt: typeof interrupt;
+				cleanupResources: () => void;
+			},
+			{
+				state: "running",
+				executionQueue: new Promise<void>(() => {}),
+				activeExecution: {},
+				executeInner,
+				interrupt,
+				cleanupResources,
+			},
+		);
+
+		const disposal = manager.shutdown({ snapshot: true, drainHostRequests: true });
+		expect(interrupt).toHaveBeenCalledOnce();
+		await vi.advanceTimersByTimeAsync(4999);
+		expect(cleanupResources).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1);
+
+		await expect(disposal).resolves.toBe(true);
+		expect(executeInner).not.toHaveBeenCalled();
+		expect(cleanupResources).toHaveBeenCalledOnce();
+	});
+
+	it("rejects executions enqueued during the final snapshot flush so dispose stays bounded", async () => {
+		vi.useFakeTimers();
+		const manager = new ReplKernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+		});
+		let releaseQueue: () => void = () => {};
+		const previousExecution = new Promise<void>((resolve) => {
+			releaseQueue = resolve;
+		});
+		const executeInner = vi.fn(
+			async (
+				_requestFields: Record<string, unknown>,
+				_code: string,
+				opts: { signal?: AbortSignal },
+			): Promise<{ stdout: string; stderr: string; status: "aborted"; durationMs: number }> =>
+				await new Promise((resolve) => {
+					opts.signal?.addEventListener(
+						"abort",
+						() => resolve({ stdout: "", stderr: "", status: "aborted", durationMs: 5000 }),
+						{ once: true },
+					);
+				}),
+		);
+		const cleanupResources = vi.fn();
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				executionQueue: Promise<void>;
+				executeInner: typeof executeInner;
+				start: () => Promise<void>;
+				cleanupResources: () => void;
+			},
+			{ state: "running", executionQueue: previousExecution, executeInner, start: async () => {}, cleanupResources },
+		);
+
+		const disposal = manager.shutdown({ snapshot: true, drainHostRequests: true });
+		// A cell arriving mid-flush must not splice ahead of the final snapshot.
+		await expect(manager.execute("1 + 1")).rejects.toThrow("Kernel is shutting down");
+		releaseQueue();
+		await waitForCalls(executeInner, 1);
+		expect(executeInner.mock.calls[0]?.[0].type).toBe("snapshot");
+		await vi.advanceTimersByTimeAsync(5000);
+
+		await expect(disposal).resolves.toBe(true);
+		expect(executeInner).toHaveBeenCalledOnce();
+		expect(cleanupResources).toHaveBeenCalledOnce();
+	});
+
+	it("rejects an execution whose re-bootstrap wait crossed the start of the final flush", async () => {
+		const manager = new ReplKernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+			bootstrapCode: "boot-code",
+		});
+		let releaseBootstrap: () => void = () => {};
+		const bootstrapBlocked = new Promise<void>((resolve) => {
+			releaseBootstrap = resolve;
+		});
+		let releaseSnapshot: () => void = () => {};
+		const snapshotBlocked = new Promise<void>((resolve) => {
+			releaseSnapshot = resolve;
+		});
+		const calls: string[] = [];
+		const ok = { stdout: "", stderr: "", status: "ok" as const, durationMs: 0 };
+		const executeInner = vi.fn(async (requestFields: Record<string, unknown> & { type: string }, code: string) => {
+			if (requestFields.type === "snapshot") {
+				calls.push("snapshot");
+				await snapshotBlocked;
+				return { ...ok, doneFields: { saved: [], skipped: [], bytes: 0 } };
+			}
+			if (code === "boot-code") {
+				calls.push("bootstrap");
+				await bootstrapBlocked;
+				return ok;
+			}
+			calls.push("cell");
+			return ok;
+		});
+		const cleanupResources = vi.fn();
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				pendingRebootstrap: boolean;
+				executeInner: typeof executeInner;
+				start: () => Promise<void>;
+				cleanupResources: () => void;
+			},
+			{ state: "running", pendingRebootstrap: true, executeInner, start: async () => {}, cleanupResources },
+		);
+
+		// Admitted before the flush: passes the first guard, then parks on the
+		// in-flight lazy re-bootstrap.
+		const cell = manager.execute("user-cell");
+		cell.catch(() => undefined);
+		await waitForCalls(executeInner, 1);
+		expect(calls).toEqual(["bootstrap"]);
+
+		// The teardown's final flush starts while the cell is still parked.
+		const teardown = manager.shutdown({ snapshot: true });
+		await new Promise((resolve) => globalThis.setTimeout(resolve, 0));
+		releaseBootstrap();
+
+		// Un-bootstrapped no more, the cell must NOT splice between the flush's
+		// captured queue and the final snapshot; the guard re-check rejects it.
+		await expect(cell).rejects.toThrow("Kernel is shutting down");
+		releaseSnapshot();
+		await expect(teardown).resolves.toBe(true);
+		expect(calls).toEqual(["bootstrap", "snapshot"]);
+	});
+
+	it("settles an aborted execution promptly while the lazy re-bootstrap is still running", async () => {
+		const manager = new ReplKernelManager({ cwd: process.cwd(), bootstrapCode: "boot-code" });
+		let releaseBootstrap: () => void = () => {};
+		const bootstrapBlocked = new Promise<void>((resolve) => {
+			releaseBootstrap = resolve;
+		});
+		const ok = { stdout: "", stderr: "", status: "ok" as const, durationMs: 0 };
+		const executeInner = vi.fn(async (_requestFields: Record<string, unknown> & { type: string }, code: string) => {
+			if (code === "boot-code") {
+				await bootstrapBlocked;
+			}
+			return ok;
+		});
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				pendingRebootstrap: boolean;
+				executeInner: typeof executeInner;
+				start: () => Promise<void>;
+			},
+			{ state: "running", pendingRebootstrap: true, executeInner, start: async () => {} },
+		);
+
+		const controller = new AbortController();
+		const cell = manager.execute("user-cell", { signal: controller.signal });
+		await waitForCalls(executeInner, 1);
+
+		// Aborted mid-wait: the cell must not ride out the bootstrap bound.
+		controller.abort();
+		await expect(cell).resolves.toMatchObject({ status: "aborted" });
+		releaseBootstrap();
+	});
+
+	it("rejects restart() during the final snapshot flush instead of deadlocking the teardown", async () => {
+		const manager = new ReplKernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+		});
+		Object.assign(
+			manager as unknown as { state: "running"; flushingSnapshotForDispose: boolean; start: () => Promise<void> },
+			{
+				state: "running",
+				flushingSnapshotForDispose: true,
+				start: async () => {},
+			},
+		);
+
+		// Taking a queue slot here and joining the owning shutdown would leave the
+		// flush's snapshot parked behind the slot forever (mutual wait).
+		await expect(manager.restart()).rejects.toThrow("Kernel is shutting down");
+	});
+
+	it("joins concurrent teardowns into a single final snapshot flush", async () => {
+		const manager = new ReplKernelManager({
+			cwd: process.cwd(),
+			snapshot: { path: "/tmp/test-state.dill", manifestPath: "/tmp/test-state.json" },
+		});
+		const executeInner = vi.fn(
+			async (
+				_requestFields: Record<string, unknown> & { type: string },
+			): Promise<{ stdout: string; stderr: string; status: "ok"; durationMs: number }> => ({
+				stdout: "",
+				stderr: "",
+				status: "ok",
+				durationMs: 0,
+			}),
+		);
+		const cleanupResources = vi.fn();
+		Object.assign(
+			manager as unknown as {
+				state: "running";
+				executionQueue: Promise<void>;
+				executeInner: typeof executeInner;
+				start: () => Promise<void>;
+				cleanupResources: () => void;
+			},
+			{ state: "running", executionQueue: Promise.resolve(), executeInner, start: async () => {}, cleanupResources },
+		);
+
+		// A session dispose racing a signal-handler shutdown must share one final
+		// flush instead of queueing a second snapshot behind the first.
+		await Promise.all([
+			manager.shutdown({ snapshot: true, drainHostRequests: true }),
+			manager.shutdown({ snapshot: true }),
+		]);
+
+		const snapshotRequests = executeInner.mock.calls.filter((call) => call[0].type === "snapshot");
+		expect(snapshotRequests).toHaveLength(1);
+		expect(cleanupResources).toHaveBeenCalled();
 	});
 
 	it("routes null-id and stale-id stream events into backgroundOutput, not stdout", async () => {
@@ -328,7 +568,7 @@ describe("ReplKernelManager abort handling", () => {
 			stdin: { destroyed: false, destroy: () => undefined },
 		};
 
-		await manager.dispose();
+		await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		const types = writeLine.mock.calls.map((call) => (call[0] as { type?: string }).type);
 		expect(types).toContain("shutdown");
 		expect(killSignals).toContain("SIGTERM");
