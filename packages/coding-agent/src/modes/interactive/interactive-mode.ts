@@ -382,6 +382,14 @@ export function formatSplashCwd(cwd: string): string {
 	return normalized;
 }
 
+// Session evidence: a daemon session id, live session state, or session-derived token accounting.
+function hasSubagentSessionEvidence(snapshot: AgentConnectionRlmChildAgentSnapshot | undefined): boolean {
+	if (!snapshot) return false;
+	return (
+		snapshot.activeSessionId !== undefined || snapshot.activity !== undefined || snapshot.tokenCount !== undefined
+	);
+}
+
 function mergeSubagentSnapshot(
 	previous: AgentConnectionRlmChildAgentSnapshot,
 	incoming: AgentConnectionRlmChildAgentSnapshot,
@@ -5927,10 +5935,13 @@ export class InteractiveMode {
 	}
 
 	private updateSubagentSummary(child: AgentConnectionRlmChildAgentSnapshot): void {
-		if (child.status === "cancelled") {
+		const previous = this.subagentSnapshots.get(child.id);
+		const terminal = child.status === "done" || child.status === "error";
+		const everBound = hasSubagentSessionEvidence(previous) || hasSubagentSessionEvidence(child);
+		// The roster's rule: a terminal run that never bound a session leaves no row anywhere.
+		if (child.status === "cancelled" || (terminal && !everBound)) {
 			this.removeSubagentSnapshot(child.id);
 		} else {
-			const previous = this.subagentSnapshots.get(child.id);
 			this.subagentSnapshots.set(child.id, previous ? mergeSubagentSnapshot(previous, child) : child);
 		}
 		this.refreshSubagentSummary();

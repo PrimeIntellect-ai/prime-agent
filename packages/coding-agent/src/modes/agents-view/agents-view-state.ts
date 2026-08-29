@@ -1,6 +1,7 @@
 import { basename, resolve } from "node:path";
 import { canonicalizePath } from "../../utils/paths.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/index.js";
+import { rosterAgentIdForSummary } from "../daemon/agent-roster.js";
 import { classifySessionRosterStatus, type SessionSummary } from "../daemon/daemon-session-list.js";
 
 export type AgentsViewSection = "running" | "idle" | "inactive";
@@ -141,6 +142,9 @@ function fileIdentity(path: string): string {
 
 function summaryIdentityAliases(summary: SessionSummary): string[] {
 	return [
+		summary.runtimeKind === "subagent" && summary.rlmChildId
+			? `agent:${rosterAgentIdForSummary(summary)}`
+			: undefined,
 		summary.sessionFile ? fileIdentity(summary.sessionFile) : undefined,
 		`session:${summary.sessionId}`,
 		summary.activeSessionId ? `active:${summary.activeSessionId}` : undefined,
@@ -552,6 +556,10 @@ function getParentKeys(summary: SessionSummary): string[] {
 }
 
 export function getAgentsViewSummaryIdentity(summary: SessionSummary): string {
+	// The roster agent id is stable across queued -> bound -> passivated, so selection survives the bind push.
+	if (summary.runtimeKind === "subagent" && summary.rlmChildId) {
+		return `agent:${rosterAgentIdForSummary(summary)}`;
+	}
 	if (summary.sessionFile) {
 		return fileIdentity(summary.sessionFile);
 	}

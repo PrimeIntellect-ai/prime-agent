@@ -1220,7 +1220,10 @@ export class DaemonSupervisor {
 			client.backpressured = false;
 			if (client.rosterResyncPending) {
 				client.rosterResyncPending = false;
-				this.write(client, { type: "roster_update", changed: this.rosterEntriesForClient(), resync: true });
+				// A refused resync write re-arms the flag; the next drain retries it.
+				if (!this.write(client, { type: "roster_update", changed: this.rosterEntriesForClient(), resync: true })) {
+					client.rosterResyncPending = true;
+				}
 			}
 			if (!client.snapshotStreaming) {
 				void this.catchUpClient(client).catch((error) =>
@@ -2674,6 +2677,10 @@ export class DaemonSupervisor {
 			throw error;
 		}
 		worker.promotedOwnerClientId = clientId;
+		// Promotion makes the worker's rows visible; re-enqueue them for subscribers.
+		for (const entry of this.workerRosterEntries(worker)) {
+			this.onRosterMutation({ type: "write", agentId: entry.agentId });
+		}
 		if (worker.ownerCleanupTimer) {
 			clearTimeout(worker.ownerCleanupTimer);
 			worker.ownerCleanupTimer = undefined;
@@ -3730,11 +3737,14 @@ export class DaemonSupervisor {
 
 	private flushRosterUpdates(): void {
 		const changed: AgentRosterEntry[] = [];
+		const removed = [...this.pendingRosterRemoved];
 		for (const agentId of this.pendingRosterChanged) {
 			const entry = this.roster().get(agentId);
-			if (entry && this.isRosterEntryVisibleToClients(entry)) changed.push(entry);
+			if (!entry) continue;
+			// A row that turned client-owned leaves the subscriber surface like a deletion.
+			if (this.isRosterEntryVisibleToClients(entry)) changed.push(entry);
+			else removed.push(agentId);
 		}
-		const removed = [...this.pendingRosterRemoved];
 		this.pendingRosterChanged.clear();
 		this.pendingRosterRemoved.clear();
 		if (changed.length === 0 && removed.length === 0) return;
@@ -4131,7 +4141,7 @@ export class DaemonSupervisor {
 					id: summary.sessionId,
 					...(summary.sessionName ? { name: summary.sessionName } : {}),
 					depth: setDepth,
-					status: classifySessionRosterStatus(summary),
+					status: summary.rosterStatus ?? classifySessionRosterStatus(summary),
 					...(summary.parentSessionPath
 						? { parentSessionPath: canonicalSessionPath(summary.parentSessionPath) }
 						: {}),
