@@ -8,7 +8,6 @@ import {
 	getReplyComposerCommandRejection,
 	parseAgentsViewCommand,
 } from "../src/modes/agents-view/agents-view-mode.js";
-import { reconcileUnifiedSessions } from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 
 function summary(overrides: Partial<SessionSummary>): SessionSummary {
@@ -640,68 +639,62 @@ describe("agents view slash commands", () => {
 		expect(self.refreshSavedSessions).toHaveBeenCalledTimes(1);
 	});
 
-	it("gates mutation refreshes on the persistent catalog flag across view remounts", async () => {
-		const wireSaved = (id: string) => ({
-			path: `/tmp/sessions/${id}.jsonl`,
-			id,
-			cwd: "/tmp/project",
-			rlmDepth: 0,
-			created: 1,
-			modified: 1,
-			messageCount: 1,
-			firstMessage: id,
-			allMessagesText: id,
+	it("keeps the search latch armed when a superseded fetch settles before the pending newer one", async () => {
+		let releaseFirst: (error: Error) => void = () => {};
+		const firstResponse = new Promise((_resolveFirst, rejectFirst) => {
+			releaseFirst = rejectFirst;
 		});
-		const makeCatalogSelf = (persistentState: Record<string, unknown>, sessions: () => unknown[]) => {
-			const self: Record<string, unknown> = {
-				persistentState,
-				reconnectPromise: undefined,
-				daemonShutdownReceived: false,
-				savedCatalogGeneration: (persistentState.savedCatalogGeneration as number) ?? 0,
-				savedCatalogRefreshPending: false,
-				savedCatalogReady: false,
-				savedSessions: [],
-				lastSuccessfulSavedSessions: [],
-				savedSearchFetchStarted: false,
-				reconcileCatalogs: vi.fn(),
-				resolveMissingSelectionAnchor: vi.fn(),
-				requireClient: () => ({
-					request: vi.fn(async () => ({ success: true, data: { sessions: sessions() } })),
-				}),
-				getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
-				refreshSavedSessions: vi.fn((options?: unknown) => invoke("refreshSavedSessions", self, options)),
-				refreshSavedSessionsIfLoaded() {
-					return invoke("refreshSavedSessionsIfLoaded", self);
-				},
-			};
-			return self;
+		let releaseSecond: (error: Error) => void = () => {};
+		const secondResponse = new Promise((_resolveSecond, rejectSecond) => {
+			releaseSecond = rejectSecond;
+		});
+		const responses: unknown[] = [firstResponse, secondResponse];
+		const request = vi.fn(async () => responses.shift());
+		const persistentState: Record<string, unknown> = {};
+		const self: Record<string, unknown> = {
+			persistentState,
+			reconnectPromise: undefined,
+			daemonShutdownReceived: false,
+			savedCatalogGeneration: 0,
+			savedCatalogRefreshPending: false,
+			savedCatalogReady: false,
+			savedSessions: [],
+			lastSuccessfulSavedSessions: [],
+			savedSearchFetchStarted: false,
+			selectionAnchorPending: false,
+			reconcileCatalogs: vi.fn(),
+			resolveMissingSelectionAnchor: vi.fn(),
+			rebuildRows: vi.fn(),
+			syncSelectedRowState: vi.fn(),
+			ui: { requestRender: vi.fn() },
+			editor: editorWithText("deep search text"),
+			requireClient: () => ({ request }),
+			getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
+			refreshSavedSessions: vi.fn((options?: unknown) => invoke("refreshSavedSessions", self, options)),
+			rearmSavedSearchFetch() {
+				return invoke("rearmSavedSearchFetch", self);
+			},
 		};
 
-		const persistentState: Record<string, unknown> = {};
-		let catalog = [wireSaved("kept"), wireSaved("doomed")];
+		invoke("queryChanged", self);
+		expect(self.savedSearchFetchStarted).toBe(true);
+		const older = (self.refreshSavedSessions as ReturnType<typeof vi.fn>).mock.results[0]?.value as Promise<boolean>;
+		const newer = (self.refreshSavedSessions as (options?: unknown) => Promise<boolean>)({
+			preserveStatusOnError: true,
+		});
 
-		// Before any load, mutations never fetch the catalog.
-		const coldView = makeCatalogSelf(persistentState, () => catalog);
-		(coldView.refreshSavedSessionsIfLoaded as () => void)();
-		expect(coldView.refreshSavedSessions).not.toHaveBeenCalled();
+		// The superseded fetch settles first; it may neither disarm the latch nor spawn a third fetch.
+		releaseFirst(new Error("gen1 failed"));
+		await expect(older).resolves.toBe(false);
+		expect(self.savedSearchFetchStarted).toBe(true);
+		invoke("queryChanged", self);
+		expect(request).toHaveBeenCalledTimes(2);
 
-		// View A loads the catalog once for search; the flag persists beyond the instance.
-		const viewA = makeCatalogSelf(persistentState, () => catalog);
-		await expect(
-			(viewA.refreshSavedSessions as (options?: unknown) => Promise<boolean>)({ preserveStatusOnError: true }),
-		).resolves.toBe(true);
-		expect(persistentState.savedCatalogLoaded).toBe(true);
-
-		// A remounted view B deletes a session; the mutation refresh drops the stale row.
-		catalog = [wireSaved("kept")];
-		const viewB = makeCatalogSelf(persistentState, () => catalog);
-		(viewB.refreshSavedSessionsIfLoaded as () => void)();
-		expect(viewB.refreshSavedSessions).toHaveBeenCalledTimes(1);
-		await (viewB.refreshSavedSessions as ReturnType<typeof vi.fn>).mock.results[0]?.value;
-
-		const records = reconcileUnifiedSessions([], persistentState.savedSessions as never, []);
-		expect(records.some((record) => record.identity === "file:/tmp/sessions/doomed.jsonl")).toBe(false);
-		expect(records.some((record) => record.identity === "file:/tmp/sessions/kept.jsonl")).toBe(true);
+		// The current fetch failing without a catalog re-arms the latch for the next keystroke.
+		releaseSecond(new Error("gen2 failed"));
+		await expect(newer).resolves.toBe(false);
+		expect(self.savedSearchFetchStarted).toBe(false);
+		expect(persistentState.savedCatalogLoaded).toBeUndefined();
 	});
 
 	it("keeps the persistent catalog gate when a superseded fetch settles after a newer success", async () => {
@@ -743,6 +736,9 @@ describe("agents view slash commands", () => {
 			requireClient: () => ({ request }),
 			getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
 			refreshSavedSessions: vi.fn((options?: unknown) => invoke("refreshSavedSessions", self, options)),
+			rearmSavedSearchFetch() {
+				return invoke("rearmSavedSearchFetch", self);
+			},
 		};
 
 		// The search kicks off the first (hanging) fetch and arms the per-instance flag.

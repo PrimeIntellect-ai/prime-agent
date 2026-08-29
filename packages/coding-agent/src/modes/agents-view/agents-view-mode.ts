@@ -1257,11 +1257,9 @@ export class AgentsViewMode implements Component, Focusable {
 		this.persistentState.query = this.editor.getText();
 		if (!this.savedSearchFetchStarted && this.editor.getText().trim().length > 0) {
 			// Deep search over message text needs the saved catalog; one live fetch per instance.
+			// refreshSavedSessions re-arms this latch itself when the current fetch fails without a catalog.
 			this.savedSearchFetchStarted = true;
-			void this.refreshSavedSessions({ preserveStatusOnError: true }).then((refreshed) => {
-				// Re-arm only while no catalog exists at all; a superseded return must not force refetches.
-				if (!refreshed && this.persistentState.savedCatalogLoaded !== true) this.savedSearchFetchStarted = false;
-			});
+			void this.refreshSavedSessions({ preserveStatusOnError: true });
 		}
 		this.rebuildRows();
 		// Typing must not claim the visible fallback row while the restored
@@ -2176,10 +2174,18 @@ export class AgentsViewMode implements Component, Focusable {
 		this.ui.requestRender();
 	}
 
+	/** The search's one-fetch-per-instance latch re-arms only while no catalog exists at all. */
+	private rearmSavedSearchFetch(): void {
+		if (this.persistentState.savedCatalogLoaded !== true) this.savedSearchFetchStarted = false;
+	}
+
 	private async refreshSavedSessions(
 		options: { duringReconnect?: boolean; preserveStatusOnError?: boolean } = {},
 	): Promise<boolean> {
-		if ((!options.duringReconnect && this.reconnectPromise) || this.daemonShutdownReceived) return false;
+		if ((!options.duringReconnect && this.reconnectPromise) || this.daemonShutdownReceived) {
+			this.rearmSavedSearchFetch();
+			return false;
+		}
 		const generation = ++this.savedCatalogGeneration;
 		this.persistentState.savedCatalogGeneration = generation;
 		this.savedCatalogRefreshPending = true;
@@ -2219,6 +2225,8 @@ export class AgentsViewMode implements Component, Focusable {
 				this.persistentState.savedSessions = successfulSessions;
 				// Treat a terminal failure as settled so scope fallback cannot soft-lock.
 				this.savedCatalogReady = true;
+				// Only the current fetch may re-arm; a superseded settle must not act while a newer one is pending.
+				this.rearmSavedSearchFetch();
 				this.reconcileCatalogs();
 				if (!options.preserveStatusOnError && !this.reconnectPromise && !this.daemonShutdownReceived) {
 					this.setStatusMessage(formatError("Failed to load saved sessions", error));
