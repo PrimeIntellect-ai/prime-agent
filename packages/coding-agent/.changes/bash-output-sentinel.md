@@ -1,0 +1,1 @@
+- Fixed `bash()` to capture all foreground command output before finalizing results by using an ordered per-command completion marker; output written after the marker (e.g. by `EXIT` traps or background jobs) is not in the awaited result but stays visible via `handle.output()`/`tail()`.

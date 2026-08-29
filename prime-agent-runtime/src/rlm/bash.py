@@ -6,6 +6,7 @@ import asyncio
 import atexit
 import json
 import os
+import secrets
 import selectors
 import shutil
 import signal
@@ -35,6 +36,9 @@ _READ_CHUNK = 65536
 # Fixed child-side fd for the status channel; POSIX shells (notably dash) only
 # guarantee single-digit fds in redirection syntax.
 _STATUS_FD = 9
+_OUTPUT_FD = 8
+_COMPLETION_PREFIX = b"\x1eprime-agent-complete:"
+_COMPLETION_SUFFIX = b"\x1f"
 # Cancelled one-shot awaits: TERM grace before the group KILL, then the bounded
 # wait for a confirmed group exit before CancelledError propagates.
 _CANCEL_TERM_GRACE = 0.5
@@ -116,6 +120,10 @@ class BashHandle:
         self._buffer = _BoundedBuffer()
         self._done = threading.Event()
         self._eof = threading.Event()
+        self._completion_terminal = threading.Event()
+        self._completion_output: str | None = None
+        self._completion_lock = threading.Lock()
+        self._completion_pending = b""
         self._status: int | None = None
         self._status_known = threading.Event()
         self._reaped = False
@@ -133,6 +141,7 @@ class BashHandle:
         # True only while the pump moves a chunk from the pipe into the buffer.
         self._pump_transfer = False
         self._job: int | None = None
+        self._completion_marker: bytes | None = None
         status_write = -1
         if _IS_POSIX:
             # Full-duplex status channel: the child end rides in as stdin (fd 0)
@@ -150,9 +159,19 @@ class BashHandle:
                 os.close(self._status_read)
                 os.close(status_write)
                 raise
-            script = _status_script(_with_prefix(command))
+            completion_token = secrets.token_hex(32)
+            # Halves stop passive echoes; a deliberate forgery freezes only this call while later bytes stay live.
+            token_midpoint = len(completion_token) // 2
+            self._completion_marker = (
+                _COMPLETION_PREFIX + completion_token.encode("ascii") + _COMPLETION_SUFFIX
+            )
+            script = _status_script(
+                _with_prefix(command),
+                completion_token[:token_midpoint],
+                completion_token[token_midpoint:],
+            )
         else:
-            # Windows: the child is created suspended, atomically inside the kill-on-close job.
+            # Windows lacks a foreground-status channel, so its exit drain stays best-effort.
             script = _with_prefix(command)
             self._job = _winjob.create_job()
             if self._job is None:
@@ -274,8 +293,6 @@ class BashHandle:
         stdout = self._proc.stdout
         assert stdout is not None
         if not _IS_POSIX:
-            # Windows: no FIONREAD fence; the drain keeps its quiescence
-            # heuristic (best-effort parity).
             try:
                 while chunk := stdout.read1(_READ_CHUNK):
                     self._buffer.write(chunk)
@@ -284,9 +301,6 @@ class BashHandle:
             stdout.close()
             self._eof.set()
             return
-        # POSIX: select-gate the read and flag the read->commit window, so the
-        # drain fence never sees "pipe empty + buffer quiescent" while a chunk
-        # is in flight between the pipe read and the buffer commit.
         fd = stdout.fileno()
         try:
             with selectors.DefaultSelector() as sel:
@@ -298,16 +312,53 @@ class BashHandle:
                         chunk = os.read(fd, _READ_CHUNK)
                         if not chunk:
                             break
-                        self._buffer.write(chunk)
+                        self._consume_output(chunk)
                     finally:
                         self._pump_transfer = False
         except (OSError, ValueError):
             pass
+        self._abandon_completion()
         try:
             stdout.close()
         except OSError:
             pass
         self._eof.set()
+
+    def _consume_output(self, chunk: bytes) -> None:
+        marker = self._completion_marker
+        assert marker is not None
+        with self._completion_lock:
+            if self._completion_terminal.is_set():
+                self._buffer.write(chunk)
+                return
+            data = self._completion_pending + chunk
+            marker_at = data.find(marker)
+            if marker_at >= 0:
+                self._buffer.write(data[:marker_at])
+                self._completion_pending = b""
+                self._completion_output = self._buffer.text()
+                self._completion_terminal.set()
+                self._buffer.write(data[marker_at + len(marker) :])
+                return
+            retained = 0
+            for size in range(min(len(data), len(marker) - 1), 0, -1):
+                if data.endswith(marker[:size]):
+                    retained = size
+                    break
+            self._buffer.write(data[:-retained] if retained else data)
+            self._completion_pending = data[-retained:] if retained else b""
+
+    def _abandon_completion(self) -> None:
+        with self._completion_lock:
+            if self._completion_terminal.is_set():
+                return
+            self._buffer.write(self._completion_pending)
+            self._completion_pending = b""
+            self._completion_terminal.set()
+
+    def _wait_for_completion(self) -> str | None:
+        self._completion_terminal.wait()
+        return self._completion_output
 
     def _report(self) -> None:
         # Finalize at foreground completion (status channel), not EOF, so
@@ -325,8 +376,10 @@ class BashHandle:
             # (parsed status, EOF, garbage, exception) must set it.
             self._status_known.set()
         if status is not None:
-            self._drain_grace()
-            self._finalize(status)
+            output = self._wait_for_completion()
+            if output is None:
+                self._drain_grace()
+            self._finalize(status, output)
 
     def _watch(self) -> None:
         # Observe shell death independently of the status socket: an early
@@ -347,6 +400,7 @@ class BashHandle:
         with self._callback_lock:
             delivered = self._status
         if delivered is None and not self._done.is_set():
+            self._abandon_completion()
             self._drain_grace()
             self._finalize(exit_code)
         with self._kill_lock:
@@ -409,10 +463,7 @@ class BashHandle:
             os.close(self._wake_read)
 
     def _drain_grace(self) -> None:
-        # Bounded wait so the result includes foreground output still in the pipe:
-        # EOF arrives immediately without background jobs, otherwise stop once the
-        # buffer is quiescent for one tick AND the pipe holds no unread bytes (a
-        # slow pump must not lose output the shell wrote before its status).
+        # Best-effort fallback when process exit/EOF arrives without a sentinel.
         deadline = time.monotonic() + 0.5
         size = self._buffer.size()
         while time.monotonic() < deadline:
@@ -442,13 +493,13 @@ class BashHandle:
             return False
         return pending > 0
 
-    def _finalize(self, exit_code: int) -> None:
+    def _finalize(self, exit_code: int, output: str | None = None) -> None:
         with self._callback_lock:
             if self._done.is_set():
                 return
             self._result = BashResult(
                 exit_code=exit_code,
-                output=self._buffer.text(),
+                output=self._buffer.text() if output is None else output,
                 duration=time.monotonic() - self._started,
             )
             self._done.set()
@@ -609,6 +660,9 @@ def bash(command: str) -> BashHandle:
     POSIX; a kill-on-close job object on Windows entered while the child is
     still suspended, so no descendant can escape it and kill()/crash cleanup
     are unconditional -- bash() raises if containment cannot be established.
+    Output written after the completion fence (e.g. by an EXIT trap or a
+    background job) is not in BashResult.output but stays visible via
+    handle.output()/tail().
     """
     if not isinstance(command, str) or not command:
         raise TypeError("command must be a non-empty str")
@@ -642,24 +696,33 @@ def _with_prefix(command: str) -> str:
     return f"{prefix}\n{command}" if prefix else command
 
 
-def _status_script(command: str) -> str:
-    # The status socket arrives as stdin (fd 0); the prologue dups it to the
-    # single-digit _STATUS_FD (dash rejects multi-digit fds in redirections at
-    # parse time) and points stdin at /dev/null, so no other copy remains. The
-    # gate read blocks until the parent has journaled the pid; EOF (parent died
-    # first) exits without running the command. The brace group runs the command
-    # with the status fd closed so `&` children do not inherit it; the trailing
-    # `wait` keeps the shell alive as group leader until its own jobs exit
-    # (double-forked daemons stay out of scope).
+def _fence_printf() -> str:
+    # `\command -p printf` defeats alias expansion but not a user-defined shell
+    # function named `command`, which would swallow both fence frames and leave
+    # the await hanging until the shell dies (wedged behind background jobs). A
+    # slash-qualified command name bypasses function and alias lookup for
+    # ordinary command names, so resolve printf on the system default utility PATH.
+    path = shutil.which("printf", path=os.confstr("CS_PATH") or os.defpath)
+    if path and "'" not in path:
+        return f"'{path}'"
+    return "\\command -p printf"
+
+
+def _status_script(command: str, completion_a: str, completion_b: str) -> str:
+    # Closed control fds preserve background behavior; supported shells atomically write the frame.
+    emit = _fence_printf()
     return (
-        f"exec {_STATUS_FD}>&0 0</dev/null\n"
+        f"exec {_STATUS_FD}>&0 {_OUTPUT_FD}>&1 0</dev/null\n"
         f"read -r _prime_agent_gate <&{_STATUS_FD} || exit 127\n"
         "{\n"
         f"{command}\n"
-        f"}} {_STATUS_FD}>&-\n"
+        f"}} {_OUTPUT_FD}>&- {_STATUS_FD}>&-\n"
         "__prime_status=$?\n"
-        f"printf '%s\\n' \"$__prime_status\" >&{_STATUS_FD}\n"
-        f"exec {_STATUS_FD}>&-\n"
+        "\\set +x\n"
+        f"{emit} '\\036prime-agent-complete:%s%s\\037' "
+        f"'{completion_a}' '{completion_b}' >&{_OUTPUT_FD} || exit \"$__prime_status\"\n"
+        f"{emit} '%s\\n' \"$__prime_status\" >&{_STATUS_FD}\n"
+        f"exec {_OUTPUT_FD}>&- {_STATUS_FD}>&-\n"
         "wait\n"
         'exit "$__prime_status"\n'
     )

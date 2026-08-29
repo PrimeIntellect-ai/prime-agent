@@ -1,0 +1,1 @@
+- Fixed kernel teardown so session cleanup and signal handling share one bounded graceful shutdown path.

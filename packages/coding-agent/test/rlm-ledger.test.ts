@@ -45,6 +45,7 @@ import {
 	RLM_LEDGER_MAX_RECORDS,
 	type RlmLedgerDeleteReason,
 	RlmSpawnLedger,
+	readLegacyRlmSubagentRegistry,
 	rlmLedgerPath,
 } from "../src/modes/daemon/rlm-ledger.js";
 
@@ -776,6 +777,40 @@ describe("rlm spawn ledger daemon wiring", () => {
 
 			const siblings = await internals.rlmSpawnLedger().siblings(child.file);
 			expect(siblings.map((row) => row.name).sort()).toEqual(["seed-worker", "zero-depth-worker"]);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps a registry entry whose optional rlmMaxDepth is damaged, dropping only the field", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-damaged-maxdepth-"));
+		try {
+			const registryPath = join(tempDir, "rlm-subagents.jsonl");
+			const entry = (childId: string, overrides: Record<string, unknown>) => ({
+				type: "rlm_subagent",
+				childId,
+				sessionName: `${childId}-worker`,
+				sessionDir: join(tempDir, childId),
+				sessionFile: join(tempDir, childId, "session.jsonl"),
+				status: "completed",
+				rlmDepth: 1,
+				rlmMaxDepth: 4,
+				createdAt: 1,
+				updatedAt: "2026-01-01T00:00:00.000Z",
+				...overrides,
+			});
+			writeFileSync(
+				registryPath,
+				`${[
+					JSON.stringify(entry("sub-11111111", {})),
+					JSON.stringify(entry("sub-22222222", { rlmMaxDepth: "corrupt" })),
+				].join("\n")}\n`,
+			);
+
+			const entries = await readLegacyRlmSubagentRegistry(registryPath);
+			expect(entries.map((item) => item.childId).sort()).toEqual(["sub-11111111", "sub-22222222"]);
+			expect(entries.find((item) => item.childId === "sub-11111111")?.rlmMaxDepth).toBe(4);
+			expect(entries.find((item) => item.childId === "sub-22222222")?.rlmMaxDepth).toBeUndefined();
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

@@ -14,6 +14,7 @@ const HEARTBEAT_SCROLL_INDICATOR_ROWS = 1;
 type HeartbeatManagerMode = { type: "list" } | { type: "actions"; heartbeatId: string; selectedIndex: number };
 
 export interface HeartbeatManagerOptions {
+	getHeartbeats: () => readonly AgentConnectionHeartbeat[];
 	getRows: () => number;
 	onAction: (heartbeat: AgentConnectionHeartbeat, action: AgentHeartbeatManagementAction) => Promise<void>;
 	onClose: () => void;
@@ -21,19 +22,13 @@ export interface HeartbeatManagerOptions {
 }
 
 export class HeartbeatManagerComponent implements Component, Focusable {
-	private heartbeats: AgentConnectionHeartbeat[] = [];
-	private selectedIndex = 0;
+	private selectedHeartbeatId: string | undefined;
 	private mode: HeartbeatManagerMode = { type: "list" };
 	private busy = false;
 	private error: string | undefined;
 	private _focused = false;
 
-	constructor(
-		heartbeats: readonly AgentConnectionHeartbeat[],
-		private readonly options: HeartbeatManagerOptions,
-	) {
-		this.setHeartbeats(heartbeats);
-	}
+	constructor(private readonly options: HeartbeatManagerOptions) {}
 
 	get focused(): boolean {
 		return this._focused;
@@ -45,22 +40,13 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 
 	invalidate(): void {}
 
-	setHeartbeats(heartbeats: readonly AgentConnectionHeartbeat[]): void {
-		const selectedId = this.heartbeats[this.selectedIndex]?.job.id;
-		this.heartbeats = [...heartbeats].sort((left, right) => {
+	private get heartbeats(): AgentConnectionHeartbeat[] {
+		return [...this.options.getHeartbeats()].sort((left, right) => {
 			const sessionOrder = this.sessionLabel(left).localeCompare(this.sessionLabel(right));
 			if (sessionOrder !== 0) return sessionOrder;
 			if (left.job.source !== right.job.source) return left.job.source === "heartbeat" ? -1 : 1;
 			return left.job.createdAt.localeCompare(right.job.createdAt);
 		});
-		const nextIndex = selectedId
-			? this.heartbeats.findIndex((heartbeat) => heartbeat.job.id === selectedId)
-			: this.selectedIndex;
-		this.selectedIndex = Math.max(0, Math.min(nextIndex < 0 ? 0 : nextIndex, this.heartbeats.length - 1));
-		if (this.mode.type !== "list" && !this.findHeartbeat(this.mode.heartbeatId)) {
-			this.mode = { type: "list" };
-		}
-		this.options.requestRender();
 	}
 
 	handleInput(data: string): void {
@@ -98,6 +84,14 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		const heartbeats = this.heartbeats;
+		if (!heartbeats.some((heartbeat) => heartbeat.job.id === this.selectedHeartbeatId)) {
+			this.selectedHeartbeatId = heartbeats[0]?.job.id;
+		}
+		if (this.mode.type !== "list") {
+			const heartbeatId = this.mode.heartbeatId;
+			if (!heartbeats.some((heartbeat) => heartbeat.job.id === heartbeatId)) this.mode = { type: "list" };
+		}
 		const panel = this.mode.type === "list" ? this.createHeartbeatListPanel() : this.createActionPanel(this.mode);
 		const safeWidth = Math.max(1, width);
 		const panelWidth = Math.min(safeWidth, HEARTBEAT_PANEL_MAX_WIDTH);
@@ -127,19 +121,21 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 	}
 
 	private populateHeartbeatList(list: MenuList): void {
-		if (this.heartbeats.length === 0) {
+		const heartbeats = this.heartbeats;
+		if (heartbeats.length === 0) {
 			list.addChild(new TruncatedText(theme.fg("muted", "No running or paused heartbeats"), 1, 0));
 			return;
 		}
+		const selectedIndex = this.getSelectedIndex(heartbeats);
 		const visibleItems = this.getListLayout().visibleItems;
 		const startIndex = Math.max(
 			0,
-			Math.min(this.selectedIndex - Math.floor(visibleItems / 2), this.heartbeats.length - visibleItems),
+			Math.min(selectedIndex - Math.floor(visibleItems / 2), heartbeats.length - visibleItems),
 		);
-		const endIndex = Math.min(startIndex + visibleItems, this.heartbeats.length);
+		const endIndex = Math.min(startIndex + visibleItems, heartbeats.length);
 
 		for (let index = startIndex; index < endIndex; index++) {
-			const heartbeat = this.heartbeats[index];
+			const heartbeat = heartbeats[index];
 			if (!heartbeat) continue;
 			const source = this.sourceLabel(heartbeat);
 			const label = heartbeat.job.label?.trim();
@@ -152,15 +148,13 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 					primary: label || this.singleLine(heartbeat.job.prompt) || this.defaultHeartbeatName(heartbeat),
 					secondary: details,
 					meta: this.formatStatus(heartbeat),
-					selected: index === this.selectedIndex,
+					selected: index === selectedIndex,
 				}),
 			);
 		}
 
-		if (startIndex > 0 || endIndex < this.heartbeats.length) {
-			list.addChild(
-				new TruncatedText(theme.fg("muted", `  (${this.selectedIndex + 1}/${this.heartbeats.length})`), 1, 0),
-			);
+		if (startIndex > 0 || endIndex < heartbeats.length) {
+			list.addChild(new TruncatedText(theme.fg("muted", `  (${selectedIndex + 1}/${heartbeats.length})`), 1, 0));
 		}
 	}
 
@@ -198,8 +192,11 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 
 	private moveSelection(delta: number): void {
 		if (this.mode.type === "list") {
-			if (this.heartbeats.length === 0) return;
-			this.selectedIndex = Math.max(0, Math.min(this.selectedIndex + delta, this.heartbeats.length - 1));
+			const heartbeats = this.heartbeats;
+			if (heartbeats.length === 0) return;
+			const selectedIndex = this.getSelectedIndex(heartbeats);
+			const nextIndex = Math.max(0, Math.min(selectedIndex + delta, heartbeats.length - 1));
+			this.selectedHeartbeatId = heartbeats[nextIndex]?.job.id;
 		} else {
 			const count = this.availableActions(this.findHeartbeat(this.mode.heartbeatId)).length;
 			this.mode = { ...this.mode, selectedIndex: Math.max(0, Math.min(this.mode.selectedIndex + delta, count - 1)) };
@@ -209,7 +206,8 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 
 	private async confirmSelection(): Promise<void> {
 		if (this.mode.type === "list") {
-			const heartbeat = this.heartbeats[this.selectedIndex];
+			const heartbeats = this.heartbeats;
+			const heartbeat = heartbeats[this.getSelectedIndex(heartbeats)];
 			if (heartbeat) {
 				this.mode = { type: "actions", heartbeatId: heartbeat.job.id, selectedIndex: 0 };
 				this.options.requestRender();
@@ -252,6 +250,11 @@ export class HeartbeatManagerComponent implements Component, Focusable {
 				: { label: "Pause heartbeat", action: "pause" },
 			{ label: "Stop heartbeat", action: "stop" },
 		];
+	}
+
+	private getSelectedIndex(heartbeats: readonly AgentConnectionHeartbeat[]): number {
+		const index = heartbeats.findIndex((heartbeat) => heartbeat.job.id === this.selectedHeartbeatId);
+		return index < 0 ? 0 : index;
 	}
 
 	private findHeartbeat(id: string): AgentConnectionHeartbeat | undefined {

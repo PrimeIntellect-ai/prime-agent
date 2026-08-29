@@ -60,7 +60,7 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 			expect(existsSync(snapshotPath)).toBe(true);
 			expect(existsSync(manifestPath)).toBe(true);
 		} finally {
-			await writer.dispose();
+			await writer.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 
 		const reader = newManager();
@@ -72,7 +72,7 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 			const echo = await reader.execute("print(x, double(x), sum(df))");
 			expect(echo.stdout.trim()).toBe("42 84 6");
 		} finally {
-			await reader.dispose();
+			await reader.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	}, 60_000);
 
@@ -87,7 +87,7 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 			const restore = await manager.restoreState();
 			expect(restore).toEqual({ restored: [], failed: [], path: join(freshDir, "missing.dill") });
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 			rmSync(freshDir, { recursive: true, force: true });
 		}
 	}, 60_000);
@@ -125,7 +125,7 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 			const echo = await manager.execute("print(kept_number + 1, kept_text, 'In' in dir(), 'Out' in dir())");
 			expect(echo.stdout.trim()).toBe("42 hello False False");
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 			rmSync(ipythonArtifactDir, { recursive: true, force: true });
 		}
 	}, 60_000);
@@ -141,7 +141,7 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 			expect(names).not.toContain("_hidden");
 			expect(names).not.toContain("rlm");
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 			rmSync(listDir, { recursive: true, force: true });
 		}
 	}, 60_000);
@@ -170,7 +170,7 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 			expect(remaining).toContain("small_text");
 			expect(remaining).not.toContain("large_text");
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 			rmSync(boundedDir, { recursive: true, force: true });
 		}
 	}, 60_000);
@@ -187,7 +187,7 @@ describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags:
 			await manager.execute("auto_var = 'persisted'");
 			await expect.poll(() => existsSync(autoPath), { timeout: 10_000 }).toBe(true);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 			rmSync(autoDir, { recursive: true, force: true });
 		}
 	}, 60_000);
