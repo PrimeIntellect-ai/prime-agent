@@ -4,6 +4,7 @@
 
 export type { SlashCommandInfo, SlashCommandSource } from "../slash-commands.js";
 export type { SourceInfo } from "../source-info.js";
+export { createDatadogTokensExtension, createDogStatsDClient } from "./builtin/datadog-tokens.js";
 export {
 	createHerdrAgentStateExtension,
 	hasFileBasedHerdrIntegration,
