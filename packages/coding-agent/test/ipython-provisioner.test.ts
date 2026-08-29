@@ -73,7 +73,7 @@ function writeFakeReplRuntime(markerPath: string): string {
 const fs = require("node:fs");
 const readline = require("node:readline");
 const emit = (event) => process.stdout.write(JSON.stringify(event) + "\\n");
-emit({ event: "ready", protocol: 2, python: process.version });
+emit({ event: "ready", protocol: 3, python: process.version });
 const input = readline.createInterface({ input: process.stdin });
 input.on("line", (line) => {
 	const request = JSON.parse(line);

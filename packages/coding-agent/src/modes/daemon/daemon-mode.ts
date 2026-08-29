@@ -4178,28 +4178,23 @@ export class AgentDaemon {
 				}
 				// Respond before completion (bash can outlive the client request
 				// timeout); output and completion stream via bash_* session events.
-				void state.runtime.session
-					.runUserBash(command.command, {
-						excludeFromContext: command.excludeFromContext,
-						transient: command.transient,
-						runId: command.runId,
-					})
-					.catch((error) => {
-						this.broadcastToSession(
-							state,
-							failure(undefined, "execute_bash", error, serializeDaemonError(error)),
-						);
-					});
+				const bash = state.runtime.session.runUserBash(command.command, {
+					excludeFromContext: command.excludeFromContext,
+					transient: command.transient,
+					runId: command.runId,
+				});
+				state.inFlightBash = Promise.allSettled([state.inFlightBash, bash]).then(() => undefined);
+				void bash.catch((error) => {
+					this.broadcastToSession(state, failure(undefined, "execute_bash", error, serializeDaemonError(error)));
+				});
 				return success(command.id, "execute_bash");
 			}
 
 			case "execute_bash_and_wait": {
 				const state = this.getSessionState(command.activeSessionId);
-				return success(
-					command.id,
-					"execute_bash_and_wait",
-					await state.runtime.session.executeBash(command.command),
-				);
+				const bash = state.runtime.session.executeBash(command.command);
+				state.inFlightBash = Promise.allSettled([state.inFlightBash, bash]).then(() => undefined);
+				return success(command.id, "execute_bash_and_wait", await bash);
 			}
 
 			case "abort_bash": {
@@ -6230,14 +6225,12 @@ export class AgentDaemon {
 	}
 
 	private async abortBashForClose(state: ActiveSessionState): Promise<void> {
-		if (!state.runtime.session.isBashRunning) {
+		const session = state.runtime.session;
+		if (!session.isBashRunning) {
 			return;
 		}
-		state.runtime.session.abortBash();
-		const deadline = Date.now() + UPDATE_RESTART_ABORT_BASH_TIMEOUT_MS;
-		while (state.runtime.session.isBashRunning && Date.now() < deadline) {
-			await delay(50);
-		}
+		session.abortBash();
+		await Promise.race([state.inFlightBash ?? Promise.resolve(), delay(UPDATE_RESTART_ABORT_BASH_TIMEOUT_MS)]);
 	}
 
 	private async closeSessionOnce(

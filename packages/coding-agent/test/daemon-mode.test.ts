@@ -70,6 +70,103 @@ describe("daemon mode helpers", () => {
 		expect(client.id).toBe("public-client");
 	});
 
+	it("waits for overlapping Bash commands with a bounded close deadline", async () => {
+		vi.useFakeTimers();
+		try {
+			const daemon = new AgentDaemon("/tmp/unused-daemon.sock", {
+				defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+				createRuntime: vi.fn(),
+			});
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<DaemonOutbound | undefined>;
+				abortBashForClose(state: ActiveSessionState): Promise<void>;
+			};
+
+			let resolveFirstBash!: () => void;
+			let resolveSecondBash!: () => void;
+			const firstBash = new Promise<void>((resolve) => {
+				resolveFirstBash = resolve;
+			});
+			const secondBash = new Promise<void>((resolve) => {
+				resolveSecondBash = resolve;
+			});
+			let isBashRunning = false;
+			const abortBash = vi.fn();
+			const state = makeState("active");
+			state.runtime = {
+				...state.runtime,
+				session: {
+					get isBashRunning() {
+						return isBashRunning;
+					},
+					runUserBash: vi.fn(() => {
+						isBashRunning = true;
+						return firstBash;
+					}),
+					executeBash: vi.fn(() => secondBash),
+					abortBash,
+				},
+			} as never;
+			internals.sessions.set(state.activeSessionId, state);
+			const client = makeClient("client", state.activeSessionId);
+
+			await internals.handleCommand(client, {
+				id: "first",
+				type: "execute_bash",
+				activeSessionId: state.activeSessionId,
+				command: "first",
+			});
+			const secondResponse = internals.handleCommand(client, {
+				id: "second",
+				type: "execute_bash_and_wait",
+				activeSessionId: state.activeSessionId,
+				command: "second",
+			});
+			resolveSecondBash();
+			await secondResponse;
+
+			const closing = internals.abortBashForClose(state);
+			expect(await Promise.race([closing.then(() => "done"), Promise.resolve("pending")])).toBe("pending");
+			resolveFirstBash();
+			await expect(closing).resolves.toBeUndefined();
+			expect(abortBash).toHaveBeenCalledOnce();
+
+			let isStalledBashRunning = false;
+			const abortStalledBash = vi.fn();
+			const stalledState = makeState("stalled");
+			stalledState.runtime = {
+				...stalledState.runtime,
+				session: {
+					get isBashRunning() {
+						return isStalledBashRunning;
+					},
+					runUserBash: vi.fn(() => {
+						isStalledBashRunning = true;
+						return new Promise<void>(() => {});
+					}),
+					abortBash: abortStalledBash,
+				},
+			} as never;
+			internals.sessions.set(stalledState.activeSessionId, stalledState);
+			await internals.handleCommand(makeClient("stalled-client", stalledState.activeSessionId), {
+				id: "stalled",
+				type: "execute_bash",
+				activeSessionId: stalledState.activeSessionId,
+				command: "stalled",
+			});
+
+			const stalledClose = internals.abortBashForClose(stalledState);
+			await vi.advanceTimersByTimeAsync(4999);
+			expect(await Promise.race([stalledClose.then(() => "done"), Promise.resolve("pending")])).toBe("pending");
+			await vi.advanceTimersByTimeAsync(1);
+			await expect(stalledClose).resolves.toBeUndefined();
+			expect(abortStalledBash).toHaveBeenCalledOnce();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("normalizes daemon session names before validation and persistence", async () => {
 		const daemon = new AgentDaemon("/tmp/unused-daemon.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
