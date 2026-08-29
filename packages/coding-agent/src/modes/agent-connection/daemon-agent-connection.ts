@@ -39,6 +39,7 @@ import {
 	isUnknownDaemonCommandError,
 } from "../daemon/daemon-protocol.js";
 import type { SessionSummary } from "../daemon/daemon-session-list.js";
+import { AgentsViewRosterStore } from "../agents-view/roster-store.js";
 import { listDaemonHeartbeats } from "../daemon/heartbeat-catalog.js";
 import {
 	deleteDaemonSavedSession,
@@ -239,6 +240,7 @@ export class DaemonAgentConnection implements AgentConnection {
 	private readonly pendingReattachActiveSessionIds = new Set<string>();
 	private readonly snapshotRecoveryPromises = new Map<string, Promise<void>>();
 	private readonly ignoredSnapshotIds = new Set<string>();
+	private rosterStore: AgentsViewRosterStore | undefined;
 	private reconnectPromise?: Promise<void>;
 	private readonly definitiveRequestErrors = new WeakSet<Error>();
 	private disposing = false;
@@ -377,6 +379,22 @@ export class DaemonAgentConnection implements AgentConnection {
 			this.latestSnapshot = undefined;
 			this.latestSnapshotIsFresh = false;
 		}
+		// A fresh transport lost any server-side roster subscription; re-establish it with the attach.
+		if (this.rosterStore) await this.rosterStore.attach(this.client, { force: true });
+	}
+
+	/** Push-fed subagent counts share the agents view's roster mirror; one store per connection. */
+	async subscribeAgentRoster(listener: () => void): Promise<{ summaries(): SessionSummary[]; dispose(): Promise<void> }> {
+		this.rosterStore ??= new AgentsViewRosterStore();
+		const store = this.rosterStore;
+		if (!(await store.attach(this.client))) {
+			throw new Error("Daemon is stale: it does not advertise the agent_roster capability; restart the daemon");
+		}
+		const unsubscribe = store.onUpdate(listener);
+		return {
+			summaries: () => store.summaries(),
+			dispose: async () => unsubscribe(),
+		};
 	}
 
 	subscribe(listener: AgentConnectionEventListener): () => void {
@@ -1447,6 +1465,8 @@ export class DaemonAgentConnection implements AgentConnection {
 		this.disposed = true;
 		this.updateRestartPending = false;
 		await Promise.allSettled([...this.activeSideQuestionIds].map((id) => this.abortSideQuestion(id)));
+		await this.rosterStore?.dispose().catch(() => undefined);
+		this.rosterStore = undefined;
 		this.unsubscribeDaemonMessages();
 		this.unsubscribeDaemonClose();
 		if (this.options.ownedSession) {

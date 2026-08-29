@@ -21,7 +21,10 @@ import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import type { DaemonOutbound } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
-import { countDirectSubagentStatuses } from "../src/modes/interactive/components/subagent-summary-line.js";
+import {
+	countDirectSubagentStatuses,
+	countRosterSubagentStatuses,
+} from "../src/modes/interactive/components/subagent-summary-line.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 
 const tempDirs: string[] = [];
@@ -99,7 +102,7 @@ describe("agents-view roster store", () => {
 		expect(client.request).toHaveBeenCalledTimes(1);
 	});
 
-	it("reports an unsupported daemon so the view can keep the legacy poll path", async () => {
+	it("reports an unsupported daemon so the view can hard-error instead of polling", async () => {
 		const store = new AgentsViewRosterStore();
 		const client = fakeRosterClient([], false);
 		await expect(store.attach(client as never)).resolves.toBe(false);
@@ -455,6 +458,17 @@ describe("bar and view lifecycle equality", () => {
 		expect(bar.subagentSnapshots.has("c-unbound")).toBe(false);
 		expect(bar.subagentSnapshots.has("c-evicted")).toBe(true);
 		expect(barCounts).toEqual({ total: 6, ...viewCounts });
+
+		// The daemon-mode bar consumes the same pushed rows and must land on the same counts.
+		const pushedCounts = countRosterSubagentStatuses(
+			rosterRows.map((entry) => ({
+				...sessionSummaryFromRosterEntry(entry),
+				parentActiveSessionId: "parent-active",
+			})),
+			{ activeSessionId: "parent-active" },
+			new Set(["hb-active"]),
+		);
+		expect(pushedCounts).toEqual({ total: 6, ...viewCounts });
 	});
 });
 
@@ -546,7 +560,7 @@ describe("subscriber push transitions", () => {
 		expect(pushes.at(-1)?.changed.map((changedEntry) => changedEntry.agentId)).toEqual([entry.agentId]);
 	});
 
-	it("retries a refused drain resync on the next drain", async () => {
+	it("sends one drain resync per loss gap even when the write reports backpressure", async () => {
 		const { supervisor, pushes, subscriber } = makePushSupervisor({
 			connectionIds: new Map(),
 			sessionInputPauseEpochs: new Map(),
@@ -572,12 +586,12 @@ describe("subscriber push transitions", () => {
 			return false;
 		});
 		socket.emit("drain");
-		expect(client.rosterResyncPending).toBe(true);
+		// socket.write queues the resync even when it reports backpressure; the flag must not re-arm.
+		expect(client.rosterResyncPending).toBe(false);
 		expect(pushes.filter((push) => push.resync)).toHaveLength(1);
 
 		socket.emit("drain");
-		expect(client.rosterResyncPending).toBe(false);
-		expect(pushes.filter((push) => push.resync)).toHaveLength(2);
+		expect(pushes.filter((push) => push.resync)).toHaveLength(1);
 	});
 });
 

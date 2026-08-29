@@ -43,6 +43,7 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { spawn, spawnSync } from "child_process";
+import type { SessionSummary } from "../daemon/daemon-session-list.js";
 import {
 	buildDaemonUpdateRestartReport,
 	launchDaemonUpdateRestartCoordinator,
@@ -222,7 +223,7 @@ import {
 	styleSlashCommandText,
 } from "./components/slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./components/slash-command-result-message.js";
-import { countDirectSubagentStatuses, SubagentSummaryLine } from "./components/subagent-summary-line.js";
+import { countDirectSubagentStatuses, countRosterSubagentStatuses, SubagentSummaryLine } from "./components/subagent-summary-line.js";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.js";
 import {
 	selectLatestToolExpandHint,
@@ -982,6 +983,8 @@ export class InteractiveMode {
 	private subagentSummaryLine: SubagentSummaryLine;
 	private subagentSnapshots = new Map<string, AgentConnectionRlmChildAgentSnapshot>();
 	private rlmNodeId: string | undefined;
+	/** Pushed supervisor roster feeding the bar; in-process connections keep the sanctioned snapshot path. */
+	private rosterBar: { summaries(): SessionSummary[]; dispose(): Promise<void> } | undefined;
 
 	private toolOutputExpanded = false;
 	private agentMessagesExpanded = false;
@@ -2798,6 +2801,8 @@ export class InteractiveMode {
 	private async rebindCurrentSession(): Promise<void> {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		void this.rosterBar?.dispose();
+		this.rosterBar = undefined;
 		if (this.localSessionHost) {
 			this.uiServices = this.localSessionHost.createUiServices();
 		}
@@ -5088,6 +5093,13 @@ export class InteractiveMode {
 	}
 
 	private subscribeToAgent(): void {
+		void this.agentConnection
+			.subscribeAgentRoster?.(() => this.updateSubagentSummaryLine())
+			.then((store) => {
+				this.rosterBar = store;
+				this.updateSubagentSummaryLine();
+			})
+			.catch((error: unknown) => this.showError(`Subagent roster unavailable: ${String(error)}`));
 		this.unsubscribe = this.agentConnection.subscribe(async (event) => {
 			try {
 				if (event.type === "session_event") {
@@ -5966,7 +5978,16 @@ export class InteractiveMode {
 				.map((heartbeat) => heartbeat.job.activeSessionId),
 		);
 		this.subagentSummaryLine.setSubagentCounts(
-			countDirectSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId, activeHeartbeatSessionIds),
+			this.rosterBar
+				? countRosterSubagentStatuses(
+						this.rosterBar.summaries(),
+						{
+							activeSessionId: this.connectionState?.activeSessionId,
+							sessionFile: this.connectionState?.sessionFile,
+						},
+						activeHeartbeatSessionIds,
+					)
+				: countDirectSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId, activeHeartbeatSessionIds),
 		);
 		if (!this.subagentSummaryLine.isSelectable() && this.subagentSummaryLine.focused) this.focusEditor();
 	}
@@ -10037,6 +10058,8 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 		if (this.unsubscribe) {
 			this.unsubscribe();
 		}
+		void this.rosterBar?.dispose();
+		this.rosterBar = undefined;
 		if (this.isInitialized) {
 			this.ui.stop({
 				preserveAltScreen: options.preserveAltScreen,

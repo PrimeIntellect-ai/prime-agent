@@ -1,6 +1,8 @@
 import { type Component, type Focusable, getKeybindings, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../../agent-connection/index.js";
+import { canonicalSessionPath } from "../../../core/session-lease.js";
 import { type AgentRosterStatus, classifyAgentStatus } from "../../daemon/agent-roster.js";
+import { classifySessionRosterStatus, type SessionSummary } from "../../daemon/daemon-session-list.js";
 import { theme } from "../theme/theme.js";
 import { keyText } from "./keybinding-hints.js";
 
@@ -36,6 +38,32 @@ export function countDirectSubagentStatuses(
 		if (child.parentId !== parentId || child.status === "cancelled") continue;
 		counts.total += 1;
 		counts[classifySubagentSnapshotStatus(child, activeHeartbeatSessionIds)] += 1;
+	}
+	return counts;
+}
+
+/** Push-fed daemon-mode counts: the pushed roster rows classify exactly like the agents view. */
+export function countRosterSubagentStatuses(
+	summaries: Iterable<SessionSummary>,
+	parent: { activeSessionId?: string; sessionFile?: string },
+	activeHeartbeatSessionIds: ReadonlySet<string>,
+): SubagentSummaryCounts {
+	const counts: SubagentSummaryCounts = { total: 0, running: 0, idle: 0, inactive: 0 };
+	const parentFile = parent.sessionFile ? canonicalSessionPath(parent.sessionFile) : undefined;
+	for (const child of summaries) {
+		if (child.runtimeKind !== "subagent" || child.lifecycle !== "live") continue;
+		const direct =
+			(child.parentActiveSessionId !== undefined && child.parentActiveSessionId === parent.activeSessionId) ||
+			(parentFile !== undefined &&
+				child.parentSessionPath !== undefined &&
+				canonicalSessionPath(child.parentSessionPath) === parentFile);
+		if (!direct) continue;
+		counts.total += 1;
+		const status =
+			child.activeSessionId !== undefined && activeHeartbeatSessionIds.has(child.activeSessionId)
+				? "running"
+				: (child.rosterStatus ?? classifySessionRosterStatus(child));
+		counts[status] += 1;
 	}
 	return counts;
 }

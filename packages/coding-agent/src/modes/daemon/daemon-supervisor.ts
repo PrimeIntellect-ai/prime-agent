@@ -1219,11 +1219,9 @@ export class DaemonSupervisor {
 		socket.on("drain", () => {
 			client.backpressured = false;
 			if (client.rosterResyncPending) {
+				// socket.write queues even under backpressure: one resync per loss gap, never one per drain.
 				client.rosterResyncPending = false;
-				// A refused resync write re-arms the flag; the next drain retries it.
-				if (!this.write(client, { type: "roster_update", changed: this.rosterEntriesForClient(), resync: true })) {
-					client.rosterResyncPending = true;
-				}
+				this.write(client, { type: "roster_update", changed: this.rosterEntriesForClient(), resync: true });
 			}
 			if (!client.snapshotStreaming) {
 				void this.catchUpClient(client).catch((error) =>
