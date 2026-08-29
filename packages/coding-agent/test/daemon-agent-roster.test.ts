@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -1472,5 +1472,74 @@ describe("bot-round two regressions", () => {
 		).rejects.toThrow("ledger unwritable");
 		expect(catalogDelete).not.toHaveBeenCalled();
 		expect(supervisor.roster().has(childEntry.agentId)).toBe(true);
+	});
+});
+
+describe("worker delete tombstone durability", () => {
+	function makeDeleteDaemon(directory: string, ledgerEdges: () => Promise<never[]>) {
+		const daemon = new AgentDaemon(join(directory, "worker.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory, sessionDir: join(directory, "sessions") },
+			worker: { authenticationToken: "token" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		} as never);
+		Object.assign(daemon, { rlmSpawnLedger: () => ({ edges: ledgerEdges }) });
+		return daemon as unknown as {
+			handleCommand(client: object, command: object): Promise<unknown>;
+			rosterReporter: { removedAgentIds: Set<string> };
+		};
+	}
+
+	it("aborts a child delete when the spawn ledger cannot be read", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-ledger-read-fail-"));
+		tempDirs.push(directory);
+		const sessionsDir = join(directory, "sessions");
+		const parentManager = SessionManager.create(directory, sessionsDir);
+		parentManager.appendMessage({ role: "user", content: "parent", timestamp: 1 });
+		parentManager.flushNow();
+		const parentFile = parentManager.getSessionFile();
+		if (!parentFile) throw new Error("Fixture parent did not persist");
+		const childManager = SessionManager.create(directory, join(directory, "artifacts"));
+		childManager.newSession({ parentSession: parentFile });
+		childManager.appendMessage({ role: "user", content: "child", timestamp: 2 });
+		childManager.flushNow();
+		const childFile = childManager.getSessionFile();
+		if (!childFile) throw new Error("Fixture child did not persist");
+		const daemon = makeDeleteDaemon(directory, async () => {
+			throw new Error("ledger unreadable");
+		});
+
+		await expect(
+			daemon.handleCommand(
+				{ id: "client", attachedActiveSessionIds: new Set<string>() },
+				{ type: "delete_saved_session", sessionPath: childFile },
+			),
+		).rejects.toThrow("ledger unreadable");
+
+		expect(existsSync(childFile)).toBe(true);
+		expect(daemon.rosterReporter.removedAgentIds.size).toBe(0);
+	});
+
+	it("deletes a top-level saved session without touching the spawn ledger", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-toplevel-delete-"));
+		tempDirs.push(directory);
+		const sessionsDir = join(directory, "sessions");
+		const manager = SessionManager.create(directory, sessionsDir);
+		manager.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		manager.flushNow();
+		const sessionPath = manager.getSessionFile();
+		if (!sessionPath) throw new Error("Fixture session did not persist");
+		const daemon = makeDeleteDaemon(directory, async () => {
+			throw new Error("ledger unreadable");
+		});
+
+		await daemon.handleCommand(
+			{ id: "client", attachedActiveSessionIds: new Set<string>() },
+			{ type: "delete_saved_session", sessionPath },
+		);
+
+		expect(existsSync(sessionPath)).toBe(false);
+		expect(daemon.rosterReporter.removedAgentIds.size).toBe(1);
 	});
 });

@@ -3915,18 +3915,25 @@ export class AgentDaemon {
 				}
 				const deletedPath = canonicalSessionPath(command.sessionPath);
 				const deletedInfo = await readSessionInfo(command.sessionPath).catch(() => undefined);
-				const ledgerEdge = (
-					await this.rlmSpawnLedger()
-						.edges()
-						.catch(() => [])
-				).find((edge) => canonicalSessionPath(edge.child) === deletedPath);
-				// Tombstone first: a failed append aborts; a tombstoned-but-undeleted file is the accepted orphan of a failed delete.
-				if (ledgerEdge) {
-					await this.rlmSpawnLedger().appendDelete({
-						childId: ledgerEdge.childId,
-						child: command.sessionPath,
-						reason: "user",
-					});
+				const composedEntry = this.rosterEntryForSessionPath(deletedPath);
+				// Child-ness comes from worker-held state, never from a ledger read that can fail.
+				const isChild =
+					composedEntry?.summary.runtimeKind === "subagent" ||
+					deletedInfo?.parentSessionPath !== undefined ||
+					(deletedInfo?.rlmDepth ?? 0) > 0;
+				let ledgerEdge: RlmLedgerEdge | undefined;
+				if (isChild) {
+					// An unreadable ledger aborts a child deletion: without the tombstone the child reseeds.
+					const edges = await this.rlmSpawnLedger().edges();
+					ledgerEdge = edges.find((edge) => canonicalSessionPath(edge.child) === deletedPath);
+					// Tombstone first: a failed append aborts; a tombstoned-but-undeleted file is the accepted orphan of a failed delete.
+					if (ledgerEdge) {
+						await this.rlmSpawnLedger().appendDelete({
+							childId: ledgerEdge.childId,
+							child: command.sessionPath,
+							reason: "user",
+						});
+					}
 				}
 				const result = await this.deleteSavedSessionFile(command.sessionPath, {
 					afterFileRemoved: () => {
@@ -3936,7 +3943,7 @@ export class AgentDaemon {
 				// A file that still exists keeps its roster row; only a real deletion is published.
 				if (result.ok) {
 					const removedAgentId =
-						this.rosterAgentIdForSessionPath(deletedPath) ??
+						composedEntry?.agentId ??
 						(ledgerEdge ? this.rosterAgentIdForRlmChild(ledgerEdge.childId, ledgerEdge.parent) : deletedInfo?.id);
 					if (removedAgentId) {
 						this.rosterReporter.removedAgentIds.add(removedAgentId);
@@ -6556,10 +6563,10 @@ export class AgentDaemon {
 		}
 	}
 
-	private rosterAgentIdForSessionPath(canonicalPath: string): string | undefined {
+	private rosterEntryForSessionPath(canonicalPath: string): WorkerRosterEntry | undefined {
 		for (const entry of this.rosterReporter.lastComposed.values()) {
 			if (entry.summary.sessionFile && canonicalSessionPath(entry.summary.sessionFile) === canonicalPath) {
-				return entry.agentId;
+				return entry;
 			}
 		}
 		return undefined;
