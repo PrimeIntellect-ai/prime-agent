@@ -32,10 +32,10 @@ if (fs.existsSync(process.env.FAKE_REPL_CORRUPT_BOOT)) {
   process.stdout.write("BROKEN-BOOT\\n");
 } else if (fs.existsSync(process.env.FAKE_REPL_READY_WITH_GARBAGE)) {
   process.stdout.write(
-    JSON.stringify({ event: "ready", protocol: 2, python: process.version }) + "\\nBROKEN-WITH-READY\\n",
+    JSON.stringify({ event: "ready", protocol: 3, python: process.version }) + "\\nBROKEN-WITH-READY\\n",
   );
 } else if (!(count > 1 && fs.existsSync(process.env.FAKE_REPL_DELAY_READY))) {
-  emit({ event: "ready", protocol: 2, python: process.version });
+  emit({ event: "ready", protocol: 3, python: process.version });
 }
 const input = readline.createInterface({ input: process.stdin });
 input.on("line", (line) => {
