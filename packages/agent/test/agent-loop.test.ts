@@ -2119,6 +2119,57 @@ describe("empty assistant turn retry", () => {
 		expect(assistants).toEqual([toolMessage, goodMessage]);
 	});
 
+	it("does not retry an empty length-stop turn", async () => {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const message = createAssistantMessage([{ type: "thinking", thinking: "..." }], "length");
+		const { streamFn, requests } = streamFnReturning([message]);
+		const events: AgentEvent[] = [];
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			(event) => {
+				events.push(event);
+			},
+			undefined,
+			streamFn,
+		);
+
+		expect(requests.length).toBe(1);
+		const assistant = messages.find((m) => m.role === "assistant") as AssistantMessage;
+		expect(assistant.stopReason).toBe("length");
+		expect(assistant.errorMessage).toBeUndefined();
+		expect(events.some((event) => event.type === "message_end" && event.message === assistant)).toBe(true);
+	});
+
+	it("does not retry a silent context-overflow turn so compaction recovery can see it", async () => {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const message = createAssistantMessage([{ type: "text", text: "" }]);
+		// z.ai-style silent overflow: normal stop, empty content, input past the window.
+		message.usage.input = createModel().contextWindow + 1;
+		const { streamFn, requests } = streamFnReturning([message]);
+		const events: AgentEvent[] = [];
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			(event) => {
+				events.push(event);
+			},
+			undefined,
+			streamFn,
+		);
+
+		expect(requests.length).toBe(1);
+		const assistant = messages.find((m) => m.role === "assistant") as AssistantMessage;
+		expect(assistant).toBe(message);
+		expect(assistant.stopReason).toBe("stop");
+		expect(assistant.errorMessage).toBeUndefined();
+		expect(events.some((event) => event.type === "message_end" && event.message === assistant)).toBe(true);
+	});
+
 	it("does not retry an aborted empty turn", async () => {
 		const controller = new AbortController();
 		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
