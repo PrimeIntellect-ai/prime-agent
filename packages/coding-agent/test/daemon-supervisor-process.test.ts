@@ -52,6 +52,8 @@ afterEach(async () => {
 			child.kill("SIGTERM");
 		}
 	}
+	// Await owned exits before rmSync: a dying worker's log writer otherwise races it into ENOTEMPTY.
+	await Promise.all([...children].map((child) => waitForExit(child).catch(() => undefined)));
 	children.clear();
 	for (const pid of workerPids) {
 		try {
@@ -69,9 +71,10 @@ afterEach(async () => {
 			}
 		}
 	}
+	await Promise.all([...workerPids].map((pid) => waitForProcessGone(pid).catch(() => undefined)));
 	workerPids.clear();
 	for (const directory of tempDirs.splice(0)) {
-		rmSync(directory, { recursive: true, force: true });
+		rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 	}
 });
 
