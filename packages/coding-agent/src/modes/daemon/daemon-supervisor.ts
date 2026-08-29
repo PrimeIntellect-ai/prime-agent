@@ -312,6 +312,8 @@ interface ResidentWorker {
 	lastFrameAt?: number;
 	/** True while the watchdog has stamped this worker's entries as stale. */
 	rosterStale?: boolean;
+	/** In-flight replacement connection during authentication; an allowed frame source alongside client. */
+	pendingClient?: DaemonWorkerClient;
 	/** Bumped per consumed roster delta; a summaries refresh must not overwrite newer deltas. */
 	rosterDeltaGeneration?: number;
 	/** Last worker frame generation consumed; acked back on (re)auth for tombstone replay. */
@@ -2131,10 +2133,12 @@ export class DaemonSupervisor {
 						if (owner.client && !this.isWorkerStopping(owner)) {
 							return this.forwardToWorker(owner, command);
 						}
-						// Never delete under a live-but-unreachable owner; the caller retries after recovery.
-						throw new Error(
-							`Session worker is ${this.effectiveWorkerState(owner)}; retry the delete once it is reachable`,
-						);
+						// A failed registration with a dead process is reclaimed; anything else retries after recovery.
+						if (!(await this.reclaimStaleWorkerRegistration(owner))) {
+							throw new Error(
+								`Session worker is ${this.effectiveWorkerState(owner)}; retry the delete once it is reachable`,
+							);
+						}
 					}
 					const deletedInfo = (await readSessionInfo(command.sessionPath).catch(() => null)) ?? undefined;
 					// Roster/disk state classifies first; only a readable no-parent transcript is positively top-level.
@@ -2955,20 +2959,27 @@ export class DaemonSupervisor {
 				// Listen before authenticating: the worker flushes its roster snapshot right after auth succeeds.
 				client.onFrame((frame) => this.handleWorkerFrame(worker, frame, client));
 				client.onClose((error) => void this.handleWorkerClose(worker, client, error));
-				const authResponse = await client.authenticateWorker(
-					worker.descriptor.authenticationToken,
-					{
-						...this.supervisorAuthenticationClaim(),
-						...(worker.rosterAckGeneration !== undefined ? { rosterGeneration: worker.rosterAckGeneration } : {}),
-					},
-					1000,
-				);
-				await this.assertRecoveryAllowed();
-				worker.rosterCapable = worker.rosterCapable === true || workerAuthAdvertisesRoster(authResponse.data);
-				worker.lastFrameAt = Date.now();
-				worker.client?.close();
-				worker.client = client;
-				return client;
+				worker.pendingClient = client;
+				try {
+					const authResponse = await client.authenticateWorker(
+						worker.descriptor.authenticationToken,
+						{
+							...this.supervisorAuthenticationClaim(),
+							...(worker.rosterAckGeneration !== undefined
+								? { rosterGeneration: worker.rosterAckGeneration }
+								: {}),
+						},
+						1000,
+					);
+					await this.assertRecoveryAllowed();
+					worker.rosterCapable = worker.rosterCapable === true || workerAuthAdvertisesRoster(authResponse.data);
+					worker.lastFrameAt = Date.now();
+					worker.client?.close();
+					worker.client = client;
+					return client;
+				} finally {
+					if (worker.pendingClient === client) worker.pendingClient = undefined;
+				}
 			} catch (error) {
 				lastError = error;
 				client.close();
@@ -4620,8 +4631,8 @@ export class DaemonSupervisor {
 		if (frame.header.kind !== "outbound") {
 			return;
 		}
-		// A superseded connection's buffered frames must not outlive its replacement.
-		if (source !== undefined && worker.client !== undefined && source !== worker.client) {
+		// Exactly the current client and the in-flight replacement are trusted sources.
+		if (source !== undefined && source !== worker.client && source !== worker.pendingClient) {
 			return;
 		}
 		worker.lastFrameAt = Date.now();

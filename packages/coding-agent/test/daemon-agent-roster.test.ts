@@ -1297,6 +1297,150 @@ describe("bot-round regressions", () => {
 		expect(supervisor.roster().has("ghost")).toBe(false);
 	});
 
+	it("accepts frames from the in-flight replacement connection and drops rolled-back sources", () => {
+		const worker = makeWorker("worker-1", { rosterCapable: true });
+		const supervisor = makeSupervisor([worker], {
+			streamReconstructor: { observe: vi.fn(), seed: vi.fn(), clear: vi.fn() },
+		});
+		const replacement = { request: vi.fn() };
+		const frame = (sessionId: string) => ({
+			header: { kind: "outbound", outboundType: "roster_delta" },
+			payload: rosterDelta([workerRosterEntryFromSummary(summary({ id: sessionId, sessionId }))]),
+		});
+		const internals = supervisor as unknown as {
+			handleWorkerFrame(w: object, f: object, source?: object): void;
+		};
+
+		(worker as unknown as { pendingClient?: object }).pendingClient = replacement;
+		internals.handleWorkerFrame(worker, frame("mid-auth"), replacement);
+		expect(supervisor.roster().has("mid-auth")).toBe(true);
+
+		// Failed auth rolls the pending source back; its buffered frames are dropped.
+		(worker as unknown as { pendingClient?: object }).pendingClient = undefined;
+		internals.handleWorkerFrame(worker, frame("rolled-back"), replacement);
+		expect(supervisor.roster().has("rolled-back")).toBe(false);
+	});
+
+	it("reclaims a dead failed owner before an offline delete but keeps recovering owners rejecting", async () => {
+		const failed = makeWorker("w-failed");
+		Object.assign(failed.descriptor, {
+			sessionFile: "/tmp/owned-failed.jsonl",
+			createCommand: { type: "create" },
+			lifecycle: "failed",
+		});
+		failed.client = undefined;
+		const recovering = makeWorker("w-recovering");
+		Object.assign(recovering.descriptor, {
+			sessionFile: "/tmp/owned-recovering.jsonl",
+			createCommand: { type: "create" },
+			lifecycle: "recovering",
+		});
+		recovering.client = undefined;
+		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" }));
+		const reclaimStaleWorkerRegistration = vi.fn(
+			async (worker: { descriptor: { lifecycle: string; workerId: string } }) => {
+				if (worker.descriptor.lifecycle !== "failed") return false;
+				supervisor.workers.delete(worker.descriptor.workerId);
+				return true;
+			},
+		);
+		const supervisor = makeSupervisor([failed, recovering], {
+			catalog: { delete: catalogDelete, list: vi.fn(async () => []) },
+			mutationDrain: { begin: vi.fn(), end: vi.fn() },
+			reclaimStaleWorkerRegistration,
+			rlmSpawnLedger: () => ({ edges: vi.fn(async () => []) }),
+		});
+		const internals = supervisor as unknown as { handleCommand(client: object, command: object): Promise<unknown> };
+		const client = { id: "client", attachedActiveSessionIds: new Set<string>() };
+
+		await internals.handleCommand(client, { type: "delete_saved_session", sessionPath: "/tmp/owned-failed.jsonl" });
+		expect(reclaimStaleWorkerRegistration).toHaveBeenCalledWith(failed);
+		expect(catalogDelete).toHaveBeenCalledWith("/tmp/owned-failed.jsonl");
+
+		await expect(
+			internals.handleCommand(client, { type: "delete_saved_session", sessionPath: "/tmp/owned-recovering.jsonl" }),
+		).rejects.toThrow(/retry the delete/);
+	});
+
+	it("walks parent chains beyond thirty-two hops and terminates on cycles", async () => {
+		const supervisor = makeSupervisor([]);
+		const base = "/tmp/deep-home";
+		const dir = join(base, "sessions");
+		let parentPath = join(dir, "root.jsonl");
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(summary({ id: "root", sessionId: "root", sessionFile: parentPath })),
+		);
+		for (let depth = 1; depth <= 33; depth++) {
+			const childPath = join(base, "session-artifacts", `d${depth}.jsonl`);
+			supervisor.writeRosterEntry(
+				workerRosterEntryFromSummary(
+					summary({
+						id: `d${depth}`,
+						sessionId: `d${depth}`,
+						sessionFile: childPath,
+						runtimeKind: "subagent",
+						rlmChildId: `d${depth}`,
+						rlmDepth: depth,
+						parentSessionPath: parentPath,
+					}),
+				),
+			);
+			parentPath = childPath;
+		}
+		const listed = await supervisor.handleList({}, { type: "list", all: true, sessionDir: dir });
+		expect(listed.data?.sessions.some((session) => session.sessionId === "d33")).toBe(true);
+
+		// A cycle terminates instead of hanging; the cyclic row simply does not match the dir.
+		const cyclic = makeSupervisor([]);
+		cyclic.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({
+					id: "loop",
+					sessionId: "loop",
+					sessionFile: join(base, "session-artifacts", "loop.jsonl"),
+					runtimeKind: "subagent",
+					rlmChildId: "loop",
+					rlmDepth: 1,
+					parentSessionPath: join(base, "session-artifacts", "loop.jsonl"),
+				}),
+			),
+		);
+		const cyclicListed = await cyclic.handleList({}, { type: "list", all: true, sessionDir: dir });
+		expect(cyclicListed.data?.sessions.some((session) => session.sessionId === "loop")).toBe(false);
+	});
+
+	it("resolves seeded artifact children by their persisted session id before any delta", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-seed-id-"));
+		tempDirs.push(directory);
+		const sessionsDir = join(directory, "sessions");
+		const ledger = new RlmSpawnLedger(directory, sessionsDir);
+		const persistedId = "0a1b2c3d4e5f0a1b2c3d4e5f";
+		const childPath = join(directory, "artifacts", `${persistedId}.jsonl`);
+		await ledger.appendSpawn({
+			childId: "sub-abc",
+			parent: join(sessionsDir, "root.jsonl"),
+			child: childPath,
+			depth: 1,
+			name: "child",
+		});
+		const worker = makeWorker("worker-1");
+		const supervisor = makeSupervisor([worker], {
+			rlmSpawnLedger: () => ledger,
+			catalog: { list: vi.fn(async () => []) },
+		});
+		await supervisor.seedRosterLedger();
+		// Claim the seeded row for a worker so selector matching can route to it.
+		const seeded = [...supervisor.roster().values()][0];
+		if (!seeded) throw new Error("Missing seeded row");
+		supervisor.writeRosterEntry(seeded, worker);
+		const internals = supervisor as unknown as {
+			findWorker(selector: string): Promise<{ summary: SessionSummary }>;
+		};
+
+		const match = await internals.findWorker(persistedId);
+		expect(match.summary.rlmChildId).toBe("sub-abc");
+	});
+
 	it("routes a just-bound session through the miss-path refresh", async () => {
 		const target = summary({ id: "target-active", sessionId: "target", activeSessionId: "target-active" });
 		const worker = makeWorker("worker-1", { rosterCapable: true });
