@@ -486,6 +486,7 @@ describe("daemon worker supervisor monitoring", () => {
 		const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
 			options: { worker: { authenticationToken: "token" } },
 			supervisorClaims: new Map(),
+			clients: new Set(),
 			shuttingDown: false,
 			clearSupervisorAvailabilityCheck: vi.fn(),
 			scheduleSupervisorFenceCheck: vi.fn(),
@@ -1729,6 +1730,7 @@ describe("daemon worker supervisor monitoring", () => {
 		worker.descriptor.lifecycle = "ready";
 		worker.client = {};
 		worker.summaries.set(root.activeSessionId, root as SessionSummary);
+		seedSupervisorRoster(supervisor, worker);
 		recovery.resolve();
 
 		await expect(reused).resolves.toBe(worker);
@@ -1750,6 +1752,7 @@ describe("daemon worker supervisor monitoring", () => {
 			worker.descriptor.lifecycle = "ready";
 			worker.client = {};
 			worker.summaries.set(root.activeSessionId, root as SessionSummary);
+			seedSupervisorRoster(supervisor, worker);
 		});
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
@@ -1793,6 +1796,7 @@ describe("daemon worker supervisor monitoring", () => {
 				sessionPath: string,
 			): Promise<typeof worker>;
 		};
+		seedSupervisorRoster(supervisor, worker);
 
 		await expect(supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/session.jsonl")).resolves.toBe(worker);
 		expect(recoverWorker).toHaveBeenCalledOnce();

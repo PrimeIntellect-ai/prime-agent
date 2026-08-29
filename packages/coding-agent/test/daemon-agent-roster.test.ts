@@ -1,19 +1,26 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
+import { SessionManager } from "../src/core/session-manager.js";
+import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import {
 	type AgentRosterEntry,
+	sessionSummaryFromRosterEntry,
 	type WorkerRosterEntry,
 	workerRosterEntryFromSummary,
 } from "../src/modes/daemon/agent-roster.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
-import type { DaemonWorkerRosterOutbound } from "../src/modes/daemon/daemon-worker-protocol.js";
+import {
+	type DaemonWorkerRosterOutbound,
+	isDaemonWorkerFrameHeader,
+} from "../src/modes/daemon/daemon-worker-protocol.js";
 import { RlmSpawnLedger } from "../src/modes/daemon/rlm-ledger.js";
+import { PrivateFrameDecoder } from "../src/modes/session-worker/private-framing.js";
 
 type RosterDelta = Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>;
 
@@ -32,24 +39,34 @@ interface WorkerReporterFixture {
 		sessions: Map<string, ActiveSessionState>;
 		observeRosterEvent(state: ActiveSessionState, message: unknown): void;
 		flushRoster(): void;
-		rosterRemovedAgentIds: Set<string>;
+		rosterReporterState: {
+			lastSent: Map<string, { json: string; entry: WorkerRosterEntry }>;
+			queuedChildren: Map<string, WorkerRosterEntry>;
+			removedAgentIds: Set<string>;
+			snapshotPending: boolean;
+		};
 	};
 	sentDeltas: RosterDelta[];
 }
 
-function makeWorkerReporter(): WorkerReporterFixture {
+function makeWorkerReporter(connected = true): WorkerReporterFixture {
 	const sentDeltas: RosterDelta[] = [];
 	const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
 		options: { worker: { authenticationToken: "token" } },
 		sessions: new Map<string, ActiveSessionState>(),
 		cronStore: { list: () => [] },
-		rosterLastSent: new Map<string, { json: string; entry: WorkerRosterEntry }>(),
-		rosterQueuedChildren: new Map<string, WorkerRosterEntry>(),
-		rosterRemovedAgentIds: new Set<string>(),
+		rosterReporterState: {
+			lastSent: new Map<string, { json: string; entry: WorkerRosterEntry }>(),
+			queuedChildren: new Map<string, WorkerRosterEntry>(),
+			removedAgentIds: new Set<string>(),
+			snapshotPending: false,
+		},
 		rosterFlushScheduled: false,
 		shuttingDown: false,
+		hasAuthenticatedSupervisorClient: () => connected,
 		broadcastRosterFrame: (message: DaemonWorkerRosterOutbound) => {
 			if (message.type === "roster_delta") sentDeltas.push(message);
+			return connected;
 		},
 		log: vi.fn(),
 	}) as WorkerReporterFixture["daemon"];
@@ -155,6 +172,36 @@ describe("worker roster reporter", () => {
 		expect(merged[0]?.queuedChild).toBeUndefined();
 	});
 
+	it("keeps a superseded child run out of the roster after its session closes", () => {
+		const { daemon, sentDeltas } = makeWorkerReporter();
+		const parent = makeState({ activeSessionId: "parent-active" });
+		daemon.sessions.set(parent.activeSessionId, parent);
+		daemon.observeRosterEvent(
+			parent,
+			childUpdate(parent, { id: "child-1", label: "task", status: "queued", sessionDir: "/tmp/c" }),
+		);
+		const childState = makeState({
+			activeSessionId: "child-active",
+			kind: "subagent",
+			rlmChildId: "child-1",
+			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
+		});
+		daemon.sessions.set(childState.activeSessionId, childState);
+		daemon.observeRosterEvent(
+			parent,
+			childUpdate(parent, { id: "child-1", label: "task", status: "running", activeSessionId: "child-active" }),
+		);
+		daemon.flushRoster();
+
+		daemon.sessions.delete(childState.activeSessionId);
+		daemon.flushRoster();
+
+		const final = sentDeltas.at(-1)?.entries.find((entry) => entry.agentId === "child-1");
+		expect(final?.queuedChild).toBeUndefined();
+		expect(final?.summary.activeSessionId).toBeUndefined();
+		expect(final?.summary.id).toBe("session-child-active");
+	});
+
 	it("sends deltas only on change and flips closed sessions to non-resident instead of dropping them", () => {
 		const { daemon, sentDeltas } = makeWorkerReporter();
 		const state = makeState({
@@ -175,18 +222,40 @@ describe("worker roster reporter", () => {
 		expect(sentDeltas.at(-1)?.removedAgentIds).toBeUndefined();
 	});
 
-	it("removes discarded and deleted agents explicitly", () => {
+	it("retains pending state until a frame reaches an authenticated supervisor", () => {
+		const { daemon, sentDeltas } = makeWorkerReporter(false);
+		const state = makeState({ activeSessionId: "root-active" });
+		daemon.sessions.set(state.activeSessionId, state);
+		daemon.rosterReporterState.removedAgentIds.add("gone-agent");
+
+		daemon.flushRoster();
+
+		expect(sentDeltas).toHaveLength(0);
+		expect(daemon.rosterReporterState.lastSent.size).toBe(0);
+		expect(daemon.rosterReporterState.removedAgentIds.has("gone-agent")).toBe(true);
+	});
+
+	it("sends a replacing snapshot after supervisor (re)authentication and drops pending removals", () => {
 		const { daemon, sentDeltas } = makeWorkerReporter();
-		const draft = makeState({ activeSessionId: "draft-active" });
-		daemon.sessions.set(draft.activeSessionId, draft);
+		const state = makeState({
+			activeSessionId: "root-active",
+			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
+		});
+		daemon.sessions.set(state.activeSessionId, state);
+		daemon.rosterReporterState.removedAgentIds.add("stale-agent");
+		daemon.rosterReporterState.snapshotPending = true;
+
 		daemon.flushRoster();
 
-		daemon.sessions.delete(draft.activeSessionId);
-		daemon.rosterRemovedAgentIds.add("session-draft-active");
-		daemon.flushRoster();
+		expect(sentDeltas).toHaveLength(1);
+		expect(sentDeltas[0]?.snapshot).toBe(true);
+		expect(sentDeltas[0]?.removedAgentIds).toBeUndefined();
+		expect(sentDeltas[0]?.entries.map((entry) => entry.agentId)).toEqual(["session-root-active"]);
+		expect(daemon.rosterReporterState.snapshotPending).toBe(false);
+		expect(daemon.rosterReporterState.removedAgentIds.size).toBe(0);
 
-		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual(["session-draft-active"]);
-		expect(sentDeltas.at(-1)?.entries).toHaveLength(0);
+		daemon.flushRoster();
+		expect(sentDeltas).toHaveLength(1);
 	});
 });
 
@@ -257,6 +326,11 @@ interface SupervisorFixture {
 	workerRosterEntries(worker: WorkerFixture): AgentRosterEntry[];
 	flipWorkerRosterEntriesInactive(worker: WorkerFixture): void;
 	seedRosterLedger(): Promise<void>;
+	roster(): {
+		get(agentId: string): AgentRosterEntry | undefined;
+		has(agentId: string): boolean;
+		values(): IterableIterator<AgentRosterEntry>;
+	};
 	refreshWorkerSummaries: ReturnType<typeof vi.fn>;
 }
 
@@ -276,14 +350,19 @@ function makeSupervisor(workers: WorkerFixture[], extra: Record<string, unknown>
 	}) as SupervisorFixture;
 }
 
-function rosterDelta(entries: WorkerRosterEntry[], removedAgentIds?: string[]): Buffer {
+function rosterDelta(entries: WorkerRosterEntry[], removedAgentIds?: string[], snapshot?: true): Buffer {
 	return Buffer.from(
-		JSON.stringify({ type: "roster_delta", entries, ...(removedAgentIds ? { removedAgentIds } : {}) }),
+		JSON.stringify({
+			type: "roster_delta",
+			entries,
+			...(removedAgentIds ? { removedAgentIds } : {}),
+			...(snapshot ? { snapshot } : {}),
+		}),
 	);
 }
 
 describe("supervisor roster ledger", () => {
-	it("classifies at write, labels queued children, and merges them into their session row", () => {
+	it("keeps queued child rows ledger-internal and lists them once their session materializes", () => {
 		const worker = makeWorker("worker-1");
 		const supervisor = makeSupervisor([worker]);
 
@@ -303,8 +382,8 @@ describe("supervisor roster ledger", () => {
 			]),
 		);
 
-		let listed = supervisor.handleList({}, { type: "list" });
-		expect(listed.data?.sessions.map((session) => session.sessionId)).toEqual(["child-1"]);
+		expect(supervisor.handleList({}, { type: "list" }).data?.sessions).toEqual([]);
+		expect(supervisor.handleList({}, { type: "list", all: true }).data?.sessions).toEqual([]);
 		expect(supervisor.workerRosterEntries(worker)[0]).toMatchObject({ status: "running", statusLabel: "queued" });
 
 		supervisor.consumeWorkerRosterDelta(
@@ -324,11 +403,42 @@ describe("supervisor roster ledger", () => {
 			]),
 		);
 
-		listed = supervisor.handleList({}, { type: "list" });
+		const listed = supervisor.handleList({}, { type: "list" });
 		expect(listed.data?.sessions).toHaveLength(1);
 		expect(listed.data?.sessions[0]).toMatchObject({ activeSessionId: "child-active", workerState: "ready" });
 		expect(supervisor.workerRosterEntries(worker)[0]).toMatchObject({ status: "running" });
 		expect(supervisor.workerRosterEntries(worker)[0]?.statusLabel).toBeUndefined();
+	});
+
+	it("keeps passivated children of a live worker out of the resident list but in list all", () => {
+		const worker = makeWorker("worker-1");
+		const supervisor = makeSupervisor([worker]);
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({ id: "root-active", sessionId: "root", activeSessionId: "root-active" }),
+			),
+			worker,
+		);
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({
+					id: "child-session",
+					sessionId: "child-session",
+					sessionFile: "/tmp/artifacts/child.jsonl",
+					runtimeKind: "subagent",
+					rlmChildId: "child-1",
+				}),
+			),
+			worker,
+		);
+
+		const resident = supervisor.handleList({}, { type: "list" });
+		expect(resident.data?.sessions.map((session) => session.sessionId)).toEqual(["root"]);
+
+		const all = supervisor.handleList({}, { type: "list", all: true });
+		const child = all.data?.sessions.find((session) => session.rlmChildId === "child-1");
+		expect(child).toMatchObject({ workerPid: 1234 });
+		expect(child?.activeSessionId).toBeUndefined();
 	});
 
 	it("serves list from the ledger with zero worker round-trips and exact busy counts", () => {
@@ -365,6 +475,72 @@ describe("supervisor roster ledger", () => {
 		expect(visible.client?.request).not.toHaveBeenCalled();
 		expect(owned.client?.request).not.toHaveBeenCalled();
 		expect(supervisor.refreshWorkerSummaries).not.toHaveBeenCalled();
+	});
+
+	it("replaces a worker's rows from a snapshot frame", () => {
+		const worker = makeWorker("worker-1");
+		const supervisor = makeSupervisor([worker]);
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({
+					id: "kept-active",
+					sessionId: "kept",
+					activeSessionId: "kept-active",
+					sessionFile: "/tmp/kept.jsonl",
+				}),
+			),
+			worker,
+		);
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({
+					id: "gone-active",
+					sessionId: "gone",
+					activeSessionId: "gone-active",
+					sessionFile: "/tmp/gone.jsonl",
+				}),
+			),
+			worker,
+		);
+		supervisor.consumeWorkerRosterDelta(
+			worker,
+			rosterDelta(
+				[
+					{
+						agentId: "sessionless",
+						queuedChild: true,
+						summary: summary({ id: "sessionless", sessionId: "sessionless", runtimeKind: "subagent" }),
+					},
+				],
+				undefined,
+			),
+		);
+
+		supervisor.consumeWorkerRosterDelta(
+			worker,
+			rosterDelta(
+				[
+					workerRosterEntryFromSummary(
+						summary({
+							id: "kept-active",
+							sessionId: "kept",
+							activeSessionId: "kept-active",
+							sessionFile: "/tmp/kept.jsonl",
+							isSessionActive: true,
+						}),
+					),
+				],
+				undefined,
+				true,
+			),
+		);
+
+		expect(supervisor.roster().get("kept")).toMatchObject({ status: "running" });
+		// Absent rows with a transcript passivate; the sessionless queued row vanishes with its run.
+		const gone = supervisor.roster().get("gone");
+		expect(gone?.summary.activeSessionId).toBeUndefined();
+		expect(gone?.status).toBe("inactive");
+		expect(supervisor.roster().has("sessionless")).toBe(false);
 	});
 
 	it("marks a dead worker's rows recovering natively on socket close", async () => {
@@ -488,5 +664,144 @@ describe("supervisor roster ledger", () => {
 		expect(evicted).toBeDefined();
 		expect(evicted?.activeSessionId).toBeUndefined();
 		expect(afterEvict.data?.sessions.some((session) => session.sessionId === "deleted-child")).toBe(false);
+	});
+
+	it("updates the roster on offline saved-session renames", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-offline-rename-"));
+		tempDirs.push(directory);
+		const sessionPath = join(directory, "saved.jsonl");
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorFixture & { handleCommand(client: object, command: object): Promise<unknown> };
+		Object.assign(supervisor, {
+			catalog: { rename: vi.fn(async () => {}), list: vi.fn(async () => []) },
+			rlmLedgerSiblings: vi.fn(async () => [
+				{
+					id: "saved-1",
+					path: sessionPath,
+					cwd: directory,
+					created: new Date(0),
+					modified: new Date(0),
+					messageCount: 1,
+					firstMessage: "",
+					allMessagesText: "",
+				},
+			]),
+		});
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({ id: "saved-1", sessionId: "saved-1", sessionFile: sessionPath, sessionName: "old-name" }),
+			),
+		);
+
+		await supervisor.handleCommand(
+			{ id: "client", attachedActiveSessionIds: new Set<string>() },
+			{ type: "rename_saved_session", sessionPath, name: "new-name" },
+		);
+
+		expect(supervisor.roster().get("saved-1")?.summary.sessionName).toBe("new-name");
+	});
+
+	it("removes the roster row on offline saved-session deletes", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-offline-delete-"));
+		tempDirs.push(directory);
+		const sessionPath = join(directory, "saved.jsonl");
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorFixture & { handleCommand(client: object, command: object): Promise<unknown> };
+		Object.assign(supervisor, {
+			catalog: { delete: vi.fn(async () => ({ deleted: true })) },
+		});
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(summary({ id: "saved-1", sessionId: "saved-1", sessionFile: sessionPath })),
+		);
+
+		await supervisor.handleCommand(
+			{ id: "client", attachedActiveSessionIds: new Set<string>() },
+			{ type: "delete_saved_session", sessionPath },
+		);
+
+		expect(supervisor.roster().has("saved-1")).toBe(false);
+	});
+});
+
+describe("worker saved-session deletion reaches the supervisor roster", () => {
+	it("removes the deleted session's ledger row end-to-end", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-worker-delete-"));
+		tempDirs.push(directory);
+		const sessionsDir = join(directory, "sessions");
+		const manager = SessionManager.create(directory, sessionsDir);
+		manager.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		manager.flushNow();
+		const sessionPath = manager.getSessionFile();
+		const sessionId = manager.getSessionId();
+		if (!sessionPath) throw new Error("Fixture session did not persist");
+
+		const daemon = new AgentDaemon(join(directory, "worker.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory, sessionDir: sessionsDir },
+			worker: {
+				authenticationToken: "token",
+				workerId: "worker-1",
+				rootActiveSessionId: "root-active",
+			} as never,
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		} as never);
+		const socket = new PassThrough();
+		const written: Buffer[] = [];
+		socket.on("data", (chunk: Buffer) => written.push(Buffer.from(chunk)));
+		const supervisorClient = {
+			id: "supervisor",
+			socket,
+			transport: "private-framed",
+			authenticated: true,
+			attachedActiveSessionIds: new Set<string>(),
+			detachInput: () => {},
+			supportsExtensionUi: false,
+			capabilities: new Set<string>(),
+		} as unknown as DaemonSocketClient;
+		const internals = daemon as unknown as {
+			clients: Set<DaemonSocketClient>;
+			handleCommand(client: DaemonSocketClient, command: object): Promise<unknown>;
+			flushRoster(): void;
+		};
+		internals.clients.add(supervisorClient);
+
+		await internals.handleCommand(supervisorClient, { type: "delete_saved_session", sessionPath });
+		internals.flushRoster();
+
+		const decoder = new PrivateFrameDecoder(isDaemonWorkerFrameHeader);
+		const frames = decoder.push(Buffer.concat(written));
+		const deltaFrame = frames.find(
+			(frame) => frame.header.kind === "outbound" && frame.header.outboundType === "roster_delta",
+		);
+		if (!deltaFrame) throw new Error("Worker did not publish a roster delta");
+		const delta = JSON.parse(deltaFrame.payload.toString("utf8")) as RosterDelta;
+		expect(delta.removedAgentIds).toEqual([sessionId]);
+
+		const worker = makeWorker("worker-1", { rosterCapable: true });
+		const supervisor = makeSupervisor([worker]);
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(summary({ id: sessionId, sessionId, sessionFile: sessionPath })),
+			worker,
+		);
+		supervisor.consumeWorkerRosterDelta(worker, deltaFrame.payload);
+		expect(supervisor.roster().has(sessionId)).toBe(false);
+	});
+});
+
+describe("roster entry projection", () => {
+	it("carries modelFallbackMessage through the roster round-trip", () => {
+		const source = summary({
+			id: "m-active",
+			sessionId: "m",
+			activeSessionId: "m-active",
+			modelFallbackMessage: "No models available",
+		});
+		const roundTripped = sessionSummaryFromRosterEntry(workerRosterEntryFromSummary(source));
+		expect(roundTripped.modelFallbackMessage).toBe("No models available");
 	});
 });

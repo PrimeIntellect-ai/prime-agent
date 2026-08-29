@@ -333,8 +333,12 @@ describe("daemon supervisor whole-tree eviction", () => {
 			data: { deliveryStatus: "delivered" },
 		});
 		supervisor.workers.set("source", source);
+		seedSupervisorRoster(supervisor, source);
 		supervisor.catalog.resolve = vi.fn(async () => "/tmp/target.jsonl");
-		supervisor.createOrReuseWorker = vi.fn(async () => target);
+		supervisor.createOrReuseWorker = vi.fn(async () => {
+			seedSupervisorRoster(supervisor, target);
+			return target;
+		});
 		const client = { id: "sender", attachedActiveSessionIds: new Set<string>() };
 
 		const response = await supervisor.handleCommand(client, {

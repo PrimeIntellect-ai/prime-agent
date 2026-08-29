@@ -544,11 +544,7 @@ export class AgentDaemon {
 		},
 	);
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
-	/** Last roster entry sent per agentId; deltas go out only on change. */
-	private readonly rosterLastSent = new Map<string, { json: string; entry: WorkerRosterEntry }>();
-	/** Admitted child runs whose sessions have not materialized yet, keyed by childId. */
-	private readonly rosterQueuedChildren = new Map<string, WorkerRosterEntry>();
-	private readonly rosterRemovedAgentIds = new Set<string>();
+	private rosterReporterState?: WorkerRosterReporterState;
 	private rosterFlushScheduled = false;
 	private rosterHeartbeatTimer?: ReturnType<typeof setInterval>;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
@@ -1123,7 +1119,7 @@ export class AgentDaemon {
 		// dual-write era it has no other writer to fall back on, so a failed
 		// append is a failed deletion.
 		await this.rlmSpawnLedger().appendDelete({ childId, child: entry.sessionFile, reason });
-		this.rosterRemovedAgentIds.add(childId);
+		this.rosterReporter().removedAgentIds.add(childId);
 		this.scheduleRosterFlush();
 		// Deletion boundary: transcript + display tombstone are the durable
 		// record and stay; the nested artifact dir is a runtime cache and goes.
@@ -3349,8 +3345,8 @@ export class AgentDaemon {
 					success: true,
 					data: { capabilities: [DAEMON_WORKER_ROSTER_CAPABILITY] },
 				});
-				// A (re)connected supervisor has no delta history; resend the full roster.
-				this.rosterLastSent.clear();
+				// A (re)connected supervisor has no delta history; the next flush sends a replacing snapshot.
+				this.rosterReporter().snapshotPending = true;
 				this.scheduleRosterFlush();
 				return;
 			}
@@ -3899,11 +3895,16 @@ export class AgentDaemon {
 				if (this.findActiveSessionByFile(command.sessionPath)) {
 					throw new Error("Cannot delete the currently active session");
 				}
+				const deletedInfo = await readSessionInfo(command.sessionPath).catch(() => undefined);
 				const result = await this.deleteSavedSessionFile(command.sessionPath, {
 					afterFileRemoved: () => {
 						this.cancelScheduledJobsForSessionFile(command.sessionPath);
 					},
 				});
+				if (deletedInfo) {
+					this.rosterReporter().removedAgentIds.add(deletedInfo.id);
+					this.scheduleRosterFlush();
+				}
 				return success(command.id, "delete_saved_session", result);
 			}
 
@@ -6330,7 +6331,7 @@ export class AgentDaemon {
 		this.acpMcpOwners.delete(state.activeSessionId);
 		this.sessions.delete(state.activeSessionId);
 		// A discarded draft leaves no transcript, so its roster row goes with it.
-		if (isEmptyDraftSession) this.rosterRemovedAgentIds.add(this.rosterAgentIdForState(state));
+		if (isEmptyDraftSession) this.rosterReporter().removedAgentIds.add(this.rosterAgentIdForState(state));
 		this.scheduleRosterFlush();
 		if (isEmptyDraftSession) {
 			const sessionFile = state.runtime.session.sessionFile;
@@ -6517,6 +6518,16 @@ export class AgentDaemon {
 		}
 	}
 
+	private rosterReporter(): WorkerRosterReporterState {
+		this.rosterReporterState ??= {
+			lastSent: new Map(),
+			queuedChildren: new Map(),
+			removedAgentIds: new Set(),
+			snapshotPending: false,
+		};
+		return this.rosterReporterState;
+	}
+
 	private rosterAgentIdForState(state: ActiveSessionState): string {
 		const session = state.runtime.session;
 		const metadata = state.runtime.metadata;
@@ -6543,9 +6554,9 @@ export class AgentDaemon {
 
 	private observeRosterChildUpdate(state: ActiveSessionState, child: AgentConnectionRlmChildAgentSnapshot): void {
 		if (child.activeSessionId === undefined && (child.status === "queued" || child.status === "running")) {
-			this.rosterQueuedChildren.set(child.id, this.queuedChildRosterEntry(state, child));
+			this.rosterReporter().queuedChildren.set(child.id, this.queuedChildRosterEntry(state, child));
 		} else {
-			this.rosterQueuedChildren.delete(child.id);
+			this.rosterReporter().queuedChildren.delete(child.id);
 		}
 		this.scheduleRosterFlush();
 	}
@@ -6595,43 +6606,75 @@ export class AgentDaemon {
 	}
 
 	private flushRoster(): void {
+		// Without a connected supervisor, pending state stays queued; auth triggers a replacing snapshot.
+		if (!this.hasAuthenticatedSupervisorClient()) return;
+		const reporter = this.rosterReporter();
 		const entries = new Map<string, WorkerRosterEntry>();
+		for (const [childId, queued] of reporter.queuedChildren) {
+			entries.set(childId, queued);
+		}
+		// A materialized session row supersedes its queued-run row: same agentId, later insertion wins.
 		for (const summary of buildSessionList([...this.sessions.values()], [], this.cronStore.list())) {
 			const entry = workerRosterEntryFromSummary(summary);
 			entries.set(entry.agentId, entry);
 		}
-		for (const [childId, queued] of this.rosterQueuedChildren) {
-			if (!entries.has(childId)) entries.set(childId, queued);
-		}
-		const removedAgentIds: string[] = [];
-		for (const agentId of this.rosterRemovedAgentIds) {
+		const removedAgentIds = [...reporter.removedAgentIds];
+		for (const agentId of removedAgentIds) {
 			entries.delete(agentId);
-			this.rosterLastSent.delete(agentId);
-			this.rosterQueuedChildren.delete(agentId);
-			removedAgentIds.push(agentId);
+			reporter.queuedChildren.delete(agentId);
 		}
-		this.rosterRemovedAgentIds.clear();
-		for (const [agentId, previous] of this.rosterLastSent) {
+		if (reporter.snapshotPending) {
+			if (!this.broadcastRosterFrame({ type: "roster_delta", snapshot: true, entries: [...entries.values()] })) {
+				return;
+			}
+			reporter.snapshotPending = false;
+			reporter.removedAgentIds.clear();
+			reporter.lastSent.clear();
+			for (const [agentId, entry] of entries) {
+				reporter.lastSent.set(agentId, { json: JSON.stringify(entry), entry });
+			}
+			return;
+		}
+		for (const [agentId, previous] of reporter.lastSent) {
 			// The runtime left memory (close or passivation): flip the row, never drop it.
-			if (!entries.has(agentId)) entries.set(agentId, passivatedWorkerRosterEntry(previous.entry));
+			if (!entries.has(agentId) && !reporter.removedAgentIds.has(agentId)) {
+				entries.set(agentId, passivatedWorkerRosterEntry(previous.entry));
+			}
 		}
-		const changed: WorkerRosterEntry[] = [];
+		const changed: Array<{ agentId: string; json: string; entry: WorkerRosterEntry }> = [];
 		for (const [agentId, entry] of entries) {
 			const json = JSON.stringify(entry);
-			if (this.rosterLastSent.get(agentId)?.json === json) continue;
-			this.rosterLastSent.set(agentId, { json, entry });
-			changed.push(entry);
+			if (reporter.lastSent.get(agentId)?.json === json) continue;
+			changed.push({ agentId, json, entry });
 		}
 		if (changed.length === 0 && removedAgentIds.length === 0) return;
-		this.broadcastRosterFrame({
+		const delivered = this.broadcastRosterFrame({
 			type: "roster_delta",
-			entries: changed,
+			entries: changed.map(({ entry }) => entry),
 			...(removedAgentIds.length > 0 ? { removedAgentIds } : {}),
 		});
+		if (!delivered) return;
+		for (const { agentId, json, entry } of changed) {
+			reporter.lastSent.set(agentId, { json, entry });
+		}
+		for (const agentId of removedAgentIds) {
+			reporter.lastSent.delete(agentId);
+			reporter.removedAgentIds.delete(agentId);
+		}
 	}
 
-	private broadcastRosterFrame(message: DaemonWorkerRosterOutbound): void {
+	private hasAuthenticatedSupervisorClient(): boolean {
+		for (const client of this.clients) {
+			if (client.transport === "private-framed" && client.authenticated === true && !client.socket.destroyed) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private broadcastRosterFrame(message: DaemonWorkerRosterOutbound): boolean {
 		const payload = Buffer.from(serializeJsonLine(message));
+		let delivered = false;
 		for (const client of this.clients) {
 			if (client.transport !== "private-framed" || client.authenticated !== true || client.socket.destroyed) {
 				continue;
@@ -6639,10 +6682,12 @@ export class AgentDaemon {
 			const accepted = client.socket.write(
 				encodePrivateFrame<DaemonWorkerFrameHeader>({ kind: "outbound", outboundType: message.type }, payload),
 			);
+			delivered = true;
 			if (!accepted) {
 				client.backpressured = true;
 			}
 		}
+		return delivered;
 	}
 
 	private recordWorkerRecoveryState(state: ActiveSessionState, operation: string, busyOverride?: boolean): void {
@@ -7016,6 +7061,15 @@ export class AgentDaemon {
 }
 
 const ROSTER_HEARTBEAT_INTERVAL_MS = 15_000;
+
+interface WorkerRosterReporterState {
+	/** Last entry sent per agentId; deltas go out only on change. */
+	lastSent: Map<string, { json: string; entry: WorkerRosterEntry }>;
+	/** Admitted child runs whose sessions have not materialized yet, keyed by childId. */
+	queuedChildren: Map<string, WorkerRosterEntry>;
+	removedAgentIds: Set<string>;
+	snapshotPending: boolean;
+}
 
 // Session events that can change an agent's roster projection (status, activity, name, recap).
 const ROSTER_SESSION_EVENT_TRIGGERS = new Set([

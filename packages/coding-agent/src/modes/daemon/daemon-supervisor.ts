@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { Writable } from "node:stream";
 import { getLogger } from "@earendil-works/pi-ai";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
@@ -636,7 +636,6 @@ export class DaemonSupervisor {
 	private readonly pendingSessionNames = new Set<string>();
 	private readonly catalog: DaemonCatalogClient;
 	private readonly settingsManager: SettingsManager;
-	/** Supervisor-owned agent roster; every list/selector read is served from here. */
 	private rosterStore?: AgentRosterLedger;
 	private rosterWatchdogTimer?: ReturnType<typeof setInterval>;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
@@ -1647,7 +1646,8 @@ export class DaemonSupervisor {
 					// A create forwarded to a recovering worker still surfaces an opaque lifecycle error.
 					const response = await this.forwardToWorker(worker, withoutSupervisorCreateFields(command));
 					if (response.success && isSessionSummary(response.data)) {
-						await this.refreshWorkerSummaries(worker);
+						this.writeRosterEntry(workerRosterEntryFromSummary(response.data), worker);
+						if (worker.rosterCapable !== true) await this.refreshWorkerSummaries(worker);
 						return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
 					}
 					return responseWithId(response, command.id);
@@ -2093,6 +2093,10 @@ export class DaemonSupervisor {
 									`failed to append RLM ledger rename: ${error instanceof Error ? error.message : String(error)}`,
 								);
 							});
+						const entry = this.roster().bySessionFile(canonicalSessionPath(command.sessionPath));
+						if (entry) {
+							this.writeRosterEntry({ ...entry, summary: { ...entry.summary, sessionName: target.name } });
+						}
 						return success(command.id, command.type);
 					}
 					const match = await this.findWorkerForClient(client, command.activeSessionId);
@@ -2109,6 +2113,8 @@ export class DaemonSupervisor {
 						throw new Error("Cannot delete the currently active session");
 					}
 					const result = await this.catalog.delete(command.sessionPath);
+					const entry = this.roster().bySessionFile(canonicalSessionPath(command.sessionPath));
+					if (entry) this.roster().delete(entry.agentId);
 					return success(command.id, command.type, result);
 				}
 				break;
@@ -2153,9 +2159,10 @@ export class DaemonSupervisor {
 					sessionPath,
 					continueRecent: false,
 				});
+				const root = this.roster().byActiveSessionId(worker.descriptor.rootActiveSessionId);
 				const summary =
 					this.findSummaryInWorker(worker, sessionPath) ??
-					worker.summaries.get(worker.descriptor.rootActiveSessionId);
+					(root ? sessionSummaryFromRosterEntry(root) : undefined);
 				if (!summary) throw new Error("Woken session worker has no target session");
 				target = { worker, summary };
 			}
@@ -2258,14 +2265,18 @@ export class DaemonSupervisor {
 		const inactive: SessionSummary[] = [];
 		let busyClientOwnedSessionCount = 0;
 		for (const entry of this.roster().values()) {
+			// Sessionless queued-child rows stay ledger-internal until a push protocol can carry their label.
+			if (entry.queuedChild) continue;
 			const worker = entry.workerId !== undefined ? this.workers.get(entry.workerId) : undefined;
-			if (!worker) {
-				if (command.all) inactive.push(sessionSummaryFromRosterEntry(entry));
+			if (worker === undefined || entry.summary.activeSessionId === undefined) {
+				if (command.all) {
+					const base = sessionSummaryFromRosterEntry(entry);
+					inactive.push(worker ? this.publicSummary(worker, base) : base);
+				}
 				continue;
 			}
 			const summary = this.publicSummary(worker, sessionSummaryFromRosterEntry(entry));
-			// Stopping workers stay listed (with an honest workerState) because this
-			// list also feeds busy-daemon safety checks in daemon-launch.
+			// Stopping workers stay listed with an honest workerState; daemon-launch busy checks read this list.
 			if (this.isVisibleWorker(worker)) {
 				active.push(summary);
 				continue;
@@ -2283,10 +2294,20 @@ export class DaemonSupervisor {
 			return success(command.id, "list", data);
 		}
 		const cwd = command.cwd ? resolve(command.cwd) : undefined;
-		const saved = (cwd ? inactive.filter((summary) => resolve(summary.cwd) === cwd) : inactive).sort(
-			(a, b) => Date.parse(b.modified ?? "") - Date.parse(a.modified ?? ""),
-		);
+		const saved = inactive
+			.filter((summary) => cwd === undefined || resolve(summary.cwd) === cwd)
+			.filter((summary) => this.matchesListSessionDir(summary, command.sessionDir))
+			.sort((a, b) => Date.parse(b.modified ?? "") - Date.parse(a.modified ?? ""));
 		return success(command.id, "list", { ...data, sessions: [...saved, ...active] });
+	}
+
+	// A session belongs to a sessions dir directly or through the dir's sibling session-artifacts tree.
+	private matchesListSessionDir(summary: SessionSummary, sessionDir: string | undefined): boolean {
+		if (sessionDir === undefined) return true;
+		if (!summary.sessionFile) return false;
+		const dir = resolve(sessionDir);
+		const file = resolve(summary.sessionFile);
+		return file.startsWith(`${dir}${sep}`) || file.startsWith(`${join(dirname(dir), "session-artifacts")}${sep}`);
 	}
 
 	private async handleSavedSessionList(
@@ -2432,7 +2453,7 @@ export class DaemonSupervisor {
 		}
 		this.assertWorkerCreateOwner(current, ownerClientId, sessionPath);
 		if (!this.isWorkerReadyForCreate(current)) {
-			if (!current.summaries.has(current.descriptor.rootActiveSessionId)) {
+			if (!this.workerHasRosterRoot(current)) {
 				throw new Error(
 					`Session "${sessionPath}" worker is unavailable for reuse: assigned root session is missing`,
 				);
@@ -2467,8 +2488,14 @@ export class DaemonSupervisor {
 		return (
 			worker.descriptor.lifecycle === "ready" &&
 			worker.client !== undefined &&
-			worker.summaries.has(worker.descriptor.rootActiveSessionId) &&
+			this.workerHasRosterRoot(worker) &&
 			!this.isWorkerStopping(worker)
+		);
+	}
+
+	private workerHasRosterRoot(worker: ResidentWorker): boolean {
+		return (
+			this.roster().byActiveSessionId(worker.descriptor.rootActiveSessionId)?.workerId === worker.descriptor.workerId
 		);
 	}
 
@@ -2739,7 +2766,6 @@ export class DaemonSupervisor {
 			if ((summary.activeSessionId ?? summary.id) !== rootActiveSessionId) {
 				throw new Error("Session worker did not preserve its assigned active session id");
 			}
-			worker.summaries.set(rootActiveSessionId, summary);
 			this.writeRosterEntry(workerRosterEntryFromSummary(summary), worker);
 			worker.descriptor.rootSessionId = summary.sessionId;
 			worker.descriptor.sessionFile = summary.sessionFile;
@@ -2830,16 +2856,17 @@ export class DaemonSupervisor {
 			try {
 				await client.connect(Math.min(500, Math.max(50, deadline - Date.now())));
 				await client.waitForHello(1000);
+				// Listen before authenticating: the worker flushes its roster snapshot right after auth succeeds.
+				client.onFrame((frame) => this.handleWorkerFrame(worker, frame));
+				client.onClose((error) => void this.handleWorkerClose(worker, client, error));
 				const authResponse = await client.authenticateWorker(
 					worker.descriptor.authenticationToken,
 					this.supervisorAuthenticationClaim(),
 					1000,
 				);
 				await this.assertRecoveryAllowed();
-				worker.rosterCapable = workerAuthAdvertisesRoster(authResponse.data);
+				worker.rosterCapable = worker.rosterCapable === true || workerAuthAdvertisesRoster(authResponse.data);
 				worker.lastFrameAt = Date.now();
-				client.onFrame((frame) => this.handleWorkerFrame(worker, frame));
-				client.onClose((error) => void this.handleWorkerClose(worker, client, error));
 				worker.client?.close();
 				worker.client = client;
 				return client;
@@ -3489,13 +3516,7 @@ export class DaemonSupervisor {
 		});
 	}
 
-	// ---------------------------------------------------------------------
-	// Agent roster ledger: the single supervisor-side projection every list
-	// and selector read is served from. Writes go through writeRosterEntry so
-	// status is classified exactly once, at write time.
-	// ---------------------------------------------------------------------
-
-	/** Lazily created so long-lived test fixtures over the prototype get a roster too. */
+	// The agent roster: the single supervisor-side projection every list and selector read is served from.
 	private roster(): AgentRosterLedger {
 		this.rosterStore ??= new AgentRosterLedger(canonicalSessionPath);
 		return this.rosterStore;
@@ -3529,8 +3550,7 @@ export class DaemonSupervisor {
 			this.log(`Could not seed the agent roster from the session catalog: ${String(error)}`);
 		}
 		try {
-			// Ledger edges cover subagents whose transcripts live in artifact dirs
-			// the catalog scan never sees; tombstoned edges stay out.
+			// Ledger edges cover subagents in artifact dirs the catalog never scans; tombstones stay out.
 			for (const edge of await this.rlmSpawnLedger().edges()) {
 				if (this.roster().has(edge.childId)) continue;
 				if (this.roster().hasSessionFile(canonicalSessionPath(edge.child))) continue;
@@ -3575,6 +3595,15 @@ export class DaemonSupervisor {
 		}
 		if (delta.type !== "roster_delta" || !Array.isArray(delta.entries)) return;
 		worker.rosterCapable = true;
+		if (delta.snapshot === true) {
+			// Snapshot replacement: absent rows with a durable transcript passivate, sessionless rows go.
+			const sent = new Set(delta.entries.map((entry) => entry.agentId));
+			for (const entry of this.workerRosterEntries(worker)) {
+				if (sent.has(entry.agentId)) continue;
+				if (entry.summary.sessionFile) this.writeRosterEntry(passivatedWorkerRosterEntry(entry), worker);
+				else this.roster().delete(entry.agentId);
+			}
+		}
 		for (const entry of delta.entries) {
 			this.writeRosterEntry(entry, worker);
 			this.syncRootDescriptorFromRosterEntry(worker, entry);
@@ -3584,7 +3613,7 @@ export class DaemonSupervisor {
 		}
 	}
 
-	/** Keeps the durable root pointers fresh now that event-driven summary refreshes are gone. */
+	/** Root roster deltas maintain the persisted descriptor pointers (rootSessionId, sessionFile). */
 	private syncRootDescriptorFromRosterEntry(worker: ResidentWorker, entry: WorkerRosterEntry): void {
 		const summary = entry.summary;
 		if (summary.activeSessionId !== worker.descriptor.rootActiveSessionId) return;
@@ -3963,7 +3992,8 @@ export class DaemonSupervisor {
 			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
 		}
 		if (command.type === "rename" && response.success && isSessionSummary(response.data)) {
-			await this.refreshWorkerSummaries(worker);
+			this.writeRosterEntry(workerRosterEntryFromSummary(response.data), worker);
+			if (worker.rosterCapable !== true) await this.refreshWorkerSummaries(worker);
 			return { ...response, id: command.id, data: this.publicSummary(worker, response.data) };
 		}
 		return responseWithId(response, command.id);
@@ -4876,7 +4906,7 @@ export class DaemonSupervisor {
 				sessionEventType === "turn_end" ||
 				sessionEventType === "rlm_child_update")
 		) {
-			// Legacy workers predate roster deltas; refreshing keeps their ledger rows fresh until they are replaced.
+			// A legacy worker sends no roster deltas; refreshing keeps its ledger rows fresh.
 			void this.refreshWorkerSummaries(worker).catch(() => undefined);
 		}
 		if (

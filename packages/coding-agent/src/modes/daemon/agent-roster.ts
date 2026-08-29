@@ -19,12 +19,8 @@ export function classifyAgentStatus(input: AgentStatusInput): AgentRosterStatus 
 	return input.busy || input.hasActiveHeartbeat ? "running" : "idle";
 }
 
-// The wire and ledger shapes below carry a session summary stripped of its
-// heavyweight per-event fields; `list` responses re-add an empty sessionActions.
-export type RosterSessionSummary = Omit<
-	SessionSummary,
-	"streamingMessage" | "sessionActions" | "diagnostics" | "modelFallbackMessage"
->;
+// A session summary without its heavyweight per-event fields; `list` re-adds an empty sessionActions.
+export type RosterSessionSummary = Omit<SessionSummary, "streamingMessage" | "sessionActions" | "diagnostics">;
 
 export interface WorkerRosterEntry {
 	/** rlmChildId for subagents (stable queued->running->passivated), sessionId otherwise. */
@@ -51,7 +47,7 @@ export function rosterAgentIdForSummary(
 }
 
 export function workerRosterEntryFromSummary(summary: SessionSummary): WorkerRosterEntry {
-	const { streamingMessage, sessionActions, diagnostics, modelFallbackMessage, ...slim } = summary;
+	const { streamingMessage, sessionActions, diagnostics, ...slim } = summary;
 	return { agentId: rosterAgentIdForSummary(summary), summary: slim };
 }
 
@@ -97,11 +93,7 @@ export function sessionSummaryFromRosterEntry(entry: WorkerRosterEntry): Session
 	return { ...entry.summary, sessionActions: { queuedCount: 0, steering: [], followUps: [] } };
 }
 
-/**
- * Supervisor-owned roster store. Every write funnels through write() so the
- * status is classified exactly once, and the session-file index converges
- * catalog-seeded rows (keyed by sessionId) with worker rows (keyed by childId).
- */
+// Supervisor-owned roster store; write() classifies once and its file index converges seed and worker keys.
 export class AgentRosterLedger {
 	private readonly entries = new Map<string, AgentRosterEntry>();
 	private readonly agentIdByActiveSessionId = new Map<string, string>();

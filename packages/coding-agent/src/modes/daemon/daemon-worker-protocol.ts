@@ -16,10 +16,9 @@ export const DAEMON_WORKER_STARTUP_GATE_FD_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WO
 export const DAEMON_WORKER_STARTUP_GATE_COMMIT = "start\n";
 export type DaemonWorkerLifecycle = "starting" | "ready" | "recovering" | "stopping" | "failed";
 
-// Worker->supervisor roster frames; never forwarded to TUI clients, so they
-// live outside the client-facing DaemonOutbound schema.
+// Worker->supervisor roster frames live outside the client-facing DaemonOutbound schema.
 export type DaemonWorkerRosterOutbound =
-	| { type: "roster_delta"; entries: WorkerRosterEntry[]; removedAgentIds?: string[] }
+	| { type: "roster_delta"; entries: WorkerRosterEntry[]; removedAgentIds?: string[]; snapshot?: true }
 	| { type: "roster_heartbeat" };
 
 /** Advertised by new workers in the worker_auth response; absent on legacy workers. */
