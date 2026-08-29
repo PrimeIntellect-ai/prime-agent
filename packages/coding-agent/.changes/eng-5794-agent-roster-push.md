@@ -1,0 +1,2 @@
+- Replaced the agents view's 1-second polling with a subscription to the daemon's agent roster: the supervisor pushes coalesced roster updates, scope transitions reuse one shared connection and store without refetching, and rows render the ledger's statuses and lifecycle labels (queued, recovering, failed, last-heard-from staleness). Daemons without the capability keep the old poll path.
+- Loaded the saved-session catalog only when a search query needs deep message text, once per view, instead of on every navigation.

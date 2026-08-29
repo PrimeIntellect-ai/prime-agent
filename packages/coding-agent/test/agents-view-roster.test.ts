@@ -1,7 +1,9 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setKeybindings } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { KeybindingsManager } from "../src/core/keybindings.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../src/modes/agent-connection/types.js";
 import { AgentsViewMode } from "../src/modes/agents-view/agents-view-mode.js";
@@ -336,6 +338,22 @@ describe("roster-driven agents view instance", () => {
 		internals.editor.setText("needle two");
 		internals.queryChanged();
 		expect(refreshSavedSessions).toHaveBeenCalledTimes(1);
+	});
+
+	it("navigates rows without issuing any daemon requests", async () => {
+		setKeybindings(new KeybindingsManager());
+		const { view, store, client } = makeView([
+			ledgerEntry({ id: "a-active", sessionId: "a", activeSessionId: "a-active" }, { status: "running" }),
+			ledgerEntry({ id: "b-active", sessionId: "b", activeSessionId: "b-active" }, { status: "idle" }),
+		]);
+		await store.attach(client as never);
+		(view as unknown as { onRosterUpdate(): void }).onRosterUpdate();
+		client.request.mockClear();
+
+		view.handleInput("\u001b[B");
+		view.handleInput("\u001b[A");
+
+		expect(client.request).not.toHaveBeenCalled();
 	});
 
 	it("reconciles once per pushed batch", async () => {

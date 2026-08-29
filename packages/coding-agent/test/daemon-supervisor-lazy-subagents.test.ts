@@ -110,7 +110,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		const resident = worker("first", [child]);
 		seedSupervisorRoster(supervisor, resident);
 
-		expect(supervisor.findSummaryInWorker(resident, "88889999cccc")).toEqual(child);
+		expect(supervisor.findSummaryInWorker(resident, "88889999cccc")).toEqual({ ...child, rosterStatus: "idle" });
 	});
 
 	it("rejects an explicit root name that collides with a saved root", async () => {

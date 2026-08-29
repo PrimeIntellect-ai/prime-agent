@@ -853,14 +853,16 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	async run(): Promise<AgentsViewRunResult> {
-		const client = (this.persistentState.rosterClient ??= new DaemonClient(this.requireSocketPath()));
+		this.persistentState.rosterClient ??= new DaemonClient(this.requireSocketPath());
+		const client = this.persistentState.rosterClient;
 		this.client = client;
 		if (!client.isConnected) await client.reconnect();
 		this.subscribeToClientClose(client);
 		this.unsubscribeClientMessage = client.onMessage((message) => {
 			if (message.type === "heartbeats_changed") void this.refreshHeartbeats();
 		});
-		this.rosterStore = this.persistentState.rosterStore ??= new AgentsViewRosterStore();
+		this.persistentState.rosterStore ??= new AgentsViewRosterStore();
+		this.rosterStore = this.persistentState.rosterStore;
 		this.rosterSupported = await this.rosterStore.attach(client);
 
 		this.ui.addChild(this);

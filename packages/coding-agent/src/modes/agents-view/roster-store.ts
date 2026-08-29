@@ -3,11 +3,7 @@ import { sessionSummaryFromRosterEntry } from "../daemon/agent-roster.js";
 import type { DaemonClient } from "../daemon/daemon-client.js";
 import type { SessionSummary } from "../daemon/daemon-session-list.js";
 
-/**
- * Client-side mirror of the supervisor's agent roster. One roster_subscribe
- * seeds it; coalesced roster_update pushes keep it current. It outlives
- * individual agents-view instances so scope transitions never refetch.
- */
+// Client-side roster mirror: one subscribe seeds it, pushes keep it current, and it outlives view instances.
 export class AgentsViewRosterStore {
 	private readonly entries = new Map<string, AgentRosterEntry>();
 	private readonly listeners = new Set<() => void>();
