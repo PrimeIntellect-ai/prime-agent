@@ -387,7 +387,9 @@ interface WorkerFixture {
 		workerId: string;
 		pid: number;
 		rootActiveSessionId: string;
-		lifecycle: "ready";
+		lifecycle: "ready" | "failed";
+		processStartId?: string;
+		lastError?: string;
 		ownerClientId?: string;
 	};
 	client?: { request: ReturnType<typeof vi.fn> };
@@ -1389,6 +1391,77 @@ describe("review-round regressions", () => {
 			const rows = decodeDeltas().flatMap((delta) => delta.entries);
 			expect(rows.at(-1)?.summary.sessionName).toBe("renamed-by-worker");
 		});
+	});
+
+	it("re-claims rows a concurrent snapshot reseeds instead of leaving them workerless", async () => {
+		const worker = makeWorker("worker-1");
+		Object.assign(worker.descriptor, { createCommand: { type: "create" } });
+		const child = summary({
+			id: "x-session",
+			sessionId: "x-session",
+			sessionFile: "/tmp/artifacts/x.jsonl",
+			runtimeKind: "subagent",
+			rlmChildId: "x",
+			parentSessionPath: "/tmp/sessions/root.jsonl",
+		});
+		const childEntry = workerRosterEntryFromSummary(child);
+		let releaseEdges: (edges: unknown[]) => void = () => {};
+		const edgesPromise = new Promise<unknown[]>((resolveEdges) => {
+			releaseEdges = resolveEdges;
+		});
+		const supervisor = makeSupervisor([worker], {
+			refreshWorkerSummaries: DaemonSupervisor.prototype["refreshWorkerSummaries" as never],
+			streamReconstructor: { seed: vi.fn(), clear: vi.fn() },
+			rlmSpawnLedger: () => ({ edges: () => edgesPromise }),
+		});
+		supervisor.writeRosterEntry(childEntry, worker);
+		const root = summary({ id: "worker-1-root-active", sessionId: "root", activeSessionId: "worker-1-root-active" });
+		worker.client = {
+			request: vi.fn(async () => ({
+				type: "response",
+				command: "list",
+				success: true,
+				data: { sessions: [root, child] },
+			})),
+		};
+
+		// A snapshot without the child arrives while its spawn-ledger pre-read is still in flight.
+		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([workerRosterEntryFromSummary(root)], undefined, true));
+		const refresh = (
+			supervisor as unknown as {
+				refreshWorkerSummaries(worker: WorkerFixture, recovery: boolean, fillGaps: boolean): Promise<void>;
+			}
+		).refreshWorkerSummaries(worker, false, true);
+		releaseEdges([
+			{ childId: "x", parent: "/tmp/sessions/root.jsonl", child: "/tmp/artifacts/x.jsonl", depth: 1, name: "x" },
+		]);
+		await refresh;
+		// Settle any apply work a broken serialization would leave dangling past the pull.
+		await new Promise((resolveSettle) => setImmediate(resolveSettle));
+
+		expect(supervisor.roster().get(childEntry.agentId)?.workerId).toBe("worker-1");
+	});
+
+	it("keeps an unverifiable live pre-roster worker failed instead of launching a replacement", async () => {
+		const worker = makeWorker("worker-1");
+		Object.assign(worker.descriptor, { pid: process.pid, processStartId: undefined });
+		const launchWorker = vi.fn();
+		const recoverUncertainWorkerOperations = vi.fn(async () => {});
+		const supervisor = makeSupervisor([worker], {
+			assertRecoveryAllowed: vi.fn(async () => {}),
+			recoverUncertainWorkerOperations,
+			launchWorker,
+		});
+
+		await (
+			supervisor as unknown as {
+				restartPreRosterWorker(worker: WorkerFixture, observedProcessStartId?: string): Promise<void>;
+			}
+		).restartPreRosterWorker(worker, undefined);
+
+		expect(recoverUncertainWorkerOperations).toHaveBeenCalledWith(worker, false);
+		expect(launchWorker).not.toHaveBeenCalled();
+		expect(worker.descriptor.lifecycle).toBe("failed");
 	});
 
 	it("skips the gap fill when a roster frame lands mid-pull", async () => {
