@@ -133,19 +133,112 @@ describe("Prime Integrity Eval", () => {
 				resolvedCriticalAssumptions: 0,
 				watchdogInterventions: 0,
 				watchdogWatches: 0,
+				completionAttemptCount: 0,
+				failedCompletionAttemptCount: 0,
+				successfulCompletionAttemptCount: 0,
+				inconclusiveCompletionAttemptCount: 0,
+				firstCompletionAttemptPassed: null,
+				completionRepairTurns: 0,
+				inputTokensAfterFirstCompletionAttempt: 0,
+				cacheReadTokensAfterFirstCompletionAttempt: 0,
+				cacheWriteTokensAfterFirstCompletionAttempt: 0,
+				outputTokensAfterFirstCompletionAttempt: 0,
+				tokensAfterFirstCompletionAttempt: 0,
+				costUsdAfterFirstCompletionAttempt: 0,
+				completionRepairAmplification: 0,
+				uniqueCompletionBlockerCount: 0,
+				repeatedCompletionBlockerCount: 0,
+				sameBlockerConsecutiveRepeatCount: 0,
+				completionAttempts: [],
+				completionBlockers: [],
 				inputTokens: 100,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
 				outputTokens: 50,
 				totalTokens: 150,
 				costUsd: 0.01,
 				tokenUsageByStage: {
-					setup: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
-					implementation: { modelCalls: 2, inputTokens: 100, outputTokens: 50, totalTokens: 150, costUsd: 0.01 },
-					candidate_evaluation: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
-					obligation_coverage: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
-					completion: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
-					completion_repair: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
-					memory: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
-					other: { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 },
+					setup: {
+						modelCalls: 0,
+						inputTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						outputTokens: 0,
+						totalTokens: 0,
+						costUsd: 0,
+					},
+					implementation: {
+						modelCalls: 2,
+						inputTokens: 100,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						outputTokens: 50,
+						totalTokens: 150,
+						costUsd: 0.01,
+					},
+					candidate_evaluation: {
+						modelCalls: 0,
+						inputTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						outputTokens: 0,
+						totalTokens: 0,
+						costUsd: 0,
+					},
+					obligation_coverage: {
+						modelCalls: 0,
+						inputTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						outputTokens: 0,
+						totalTokens: 0,
+						costUsd: 0,
+					},
+					completion: {
+						modelCalls: 0,
+						inputTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						outputTokens: 0,
+						totalTokens: 0,
+						costUsd: 0,
+					},
+					completion_repair: {
+						modelCalls: 0,
+						inputTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						outputTokens: 0,
+						totalTokens: 0,
+						costUsd: 0,
+					},
+					post_ready_work: {
+						modelCalls: 0,
+						inputTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						outputTokens: 0,
+						totalTokens: 0,
+						costUsd: 0,
+					},
+					memory: {
+						modelCalls: 0,
+						inputTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						outputTokens: 0,
+						totalTokens: 0,
+						costUsd: 0,
+					},
+					other: {
+						modelCalls: 0,
+						inputTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						outputTokens: 0,
+						totalTokens: 0,
+						costUsd: 0,
+					},
 				},
 				commands: [],
 			},
@@ -240,7 +333,7 @@ describe("Prime Integrity Eval", () => {
 				assistant("await avo.initialize('task'); await avo.run_coding_baseline('test')", 10),
 				assistant("write_code()", 20),
 				assistant("await avo.add_candidate({}); await avo.run_evaluation('c', 'test')", 30),
-				assistant("await avo.complete_cycle({'candidate_id': 'c'})", 40),
+				assistant("await avo.stop_gate()", 40),
 				assistant("repair_code()", 50),
 				assistant("await avo.cover_obligation({})", 60),
 				assistant("await avo.recall('prior evidence')", 70),
@@ -262,9 +355,94 @@ describe("Prime Integrity Eval", () => {
 			obligation_coverage: 60,
 			completion: 40,
 			completion_repair: 50,
+			post_ready_work: 0,
 			memory: 70,
 			other: 80,
 		});
+	});
+
+	test("traces first-attempt readiness and repeated completion blockers", () => {
+		const root = tempDirectory();
+		const sessionPath = join(root, "session.jsonl");
+		const assistant = (code: string, totalTokens: number, id?: string) =>
+			JSON.stringify({
+				type: "message",
+				timestamp: `2026-08-29T00:00:${String(totalTokens).padStart(2, "0")}.000Z`,
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id, name: "ipython", arguments: { code } }],
+					usage: {
+						input: totalTokens - 1,
+						output: 1,
+						totalTokens,
+						cost: { total: totalTokens / 1_000 },
+					},
+				},
+			});
+		const gateResult = (id: string, passed: boolean) =>
+			JSON.stringify({
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: id,
+					content: [
+						{
+							type: "text",
+							text: passed
+								? "{'stop_gate': {'passed': True, 'checks': [], 'reasons': []}}"
+								: "{'stop_gate': {'passed': False, 'checks': [{'id': 'online_evidence', 'passed': False, 'reason': 'trusted search source missing'}], 'reasons': ['trusted search source missing']}}",
+						},
+					],
+				},
+			});
+		writeFileSync(
+			sessionPath,
+			[
+				assistant("implement()", 10),
+				assistant("await avo.stop_gate()", 20, "gate-1"),
+				gateResult("gate-1", false),
+				assistant("inspect_and_fix()", 100),
+				assistant("await avo.stop_gate()", 30, "gate-2"),
+				gateResult("gate-2", false),
+				assistant("repair_again()", 200),
+				assistant("await avo.stop_gate()", 40, "gate-3"),
+				gateResult("gate-3", true),
+				assistant("inspect_after_success()", 50),
+			].join("\n"),
+			"utf8",
+		);
+
+		const trace = summarizePrimeIntegrityTrace([sessionPath], root);
+		expect(trace).toMatchObject({
+			completionAttemptCount: 3,
+			failedCompletionAttemptCount: 2,
+			successfulCompletionAttemptCount: 1,
+			firstCompletionAttemptPassed: false,
+			completionRepairTurns: 2,
+			inputTokensAfterFirstCompletionAttempt: 415,
+			cacheReadTokensAfterFirstCompletionAttempt: 0,
+			cacheWriteTokensAfterFirstCompletionAttempt: 0,
+			outputTokensAfterFirstCompletionAttempt: 5,
+			tokensAfterFirstCompletionAttempt: 420,
+			completionRepairAmplification: 420 / 450,
+			uniqueCompletionBlockerCount: 1,
+			repeatedCompletionBlockerCount: 1,
+			sameBlockerConsecutiveRepeatCount: 1,
+		});
+		expect(trace.tokenUsageByStage.completion_repair.totalTokens).toBe(300);
+		expect(trace.tokenUsageByStage.post_ready_work.totalTokens).toBe(50);
+		expect(trace.completionBlockers).toEqual([
+			{
+				blockerId: "online_evidence",
+				reason: "trusted search source missing",
+				occurrences: 2,
+				firstAttempt: 1,
+				lastAttempt: 2,
+				clearedAtAttempt: 3,
+				assistantTurnsToFirstClearance: 4,
+				tokensToFirstClearance: 370,
+			},
+		]);
 	});
 
 	test("reads anti-laziness checkpoints from the durable AVO trace", () => {

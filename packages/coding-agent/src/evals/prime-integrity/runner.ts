@@ -23,6 +23,8 @@ import type {
 	PrimeIntegrityCaseResult,
 	PrimeIntegrityCommand,
 	PrimeIntegrityCommandResult,
+	PrimeIntegrityCompletionAttempt,
+	PrimeIntegrityCompletionBlockerSummary,
 	PrimeIntegrityModelUsageSummary,
 	PrimeIntegrityTokenStage,
 	PrimeIntegrityTraceSummary,
@@ -444,7 +446,27 @@ function emptyTraceSummary(): PrimeIntegrityTraceSummary {
 		resolvedCriticalAssumptions: 0,
 		watchdogInterventions: 0,
 		watchdogWatches: 0,
+		completionAttemptCount: 0,
+		failedCompletionAttemptCount: 0,
+		successfulCompletionAttemptCount: 0,
+		inconclusiveCompletionAttemptCount: 0,
+		firstCompletionAttemptPassed: null,
+		completionRepairTurns: 0,
+		inputTokensAfterFirstCompletionAttempt: 0,
+		cacheReadTokensAfterFirstCompletionAttempt: 0,
+		cacheWriteTokensAfterFirstCompletionAttempt: 0,
+		outputTokensAfterFirstCompletionAttempt: 0,
+		tokensAfterFirstCompletionAttempt: 0,
+		costUsdAfterFirstCompletionAttempt: 0,
+		completionRepairAmplification: 0,
+		uniqueCompletionBlockerCount: 0,
+		repeatedCompletionBlockerCount: 0,
+		sameBlockerConsecutiveRepeatCount: 0,
+		completionAttempts: [],
+		completionBlockers: [],
 		inputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
 		outputTokens: 0,
 		totalTokens: 0,
 		costUsd: 0,
@@ -454,7 +476,15 @@ function emptyTraceSummary(): PrimeIntegrityTraceSummary {
 }
 
 function emptyModelUsageSummary(): PrimeIntegrityModelUsageSummary {
-	return { modelCalls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUsd: 0 };
+	return {
+		modelCalls: 0,
+		inputTokens: 0,
+		cacheReadTokens: 0,
+		cacheWriteTokens: 0,
+		outputTokens: 0,
+		totalTokens: 0,
+		costUsd: 0,
+	};
 }
 
 function assistantToolText(content: unknown): string {
@@ -476,14 +506,21 @@ function assistantToolText(content: unknown): string {
 		.join("\n");
 }
 
-function tokenStageForAssistant(toolText: string, seenCompletionAttempt: boolean): PrimeIntegrityTokenStage {
+function isCompletionGateAttempt(toolText: string): boolean {
+	return /\bavo\.(?:stop_gate|complete)\s*\(/.test(toolText);
+}
+
+function tokenStageForAssistant(
+	toolText: string,
+	seenCompletionAttempt: boolean,
+	latestCompletionAttemptPassed: boolean | null,
+): PrimeIntegrityTokenStage {
 	if (/\bavo\.(?:recall|spontaneous_recall|remember|reflect_memory|sync_nooa_memory)\s*\(/.test(toolText)) {
 		return "memory";
 	}
-	if (/\bavo\.cover_obligation\s*\(/.test(toolText)) return "obligation_coverage";
+	if (/\bavo\.cover_obligations?\s*\(/.test(toolText)) return "obligation_coverage";
 	if (/\bavo\.(?:complete_cycle|stop_gate|complete)\s*\(/.test(toolText)) return "completion";
 	if (!toolText) return "other";
-	if (seenCompletionAttempt) return "completion_repair";
 	if (
 		/\bavo\.(?:add_candidate|run_evaluation|record_evaluation|verify_artifacts|verify_deterministic_result)\s*\(/.test(
 			toolText,
@@ -496,7 +533,214 @@ function tokenStageForAssistant(toolText: string, seenCompletionAttempt: boolean
 	) {
 		return "setup";
 	}
+	if (latestCompletionAttemptPassed === true) return "post_ready_work";
+	if (seenCompletionAttempt) return "completion_repair";
 	return "implementation";
+}
+
+function completionToolCalls(content: unknown): Array<{ toolCallId: string; source: "explicit_stop_gate" }> {
+	if (!Array.isArray(content)) return [];
+	return content.flatMap((part) => {
+		if (!part || typeof part !== "object" || !("type" in part) || part.type !== "toolCall") return [];
+		const toolCall = part as Record<string, unknown>;
+		const argumentsValue = toolCall.arguments;
+		const args =
+			argumentsValue && typeof argumentsValue === "object" ? (argumentsValue as Record<string, unknown>) : {};
+		const toolText = [
+			typeof args.code === "string" ? args.code : "",
+			typeof args.command === "string" ? args.command : "",
+		].join("\n");
+		if (!isCompletionGateAttempt(toolText)) return [];
+		const toolCallId = typeof toolCall.id === "string" ? toolCall.id : undefined;
+		return toolCallId ? [{ toolCallId, source: "explicit_stop_gate" as const }] : [];
+	});
+}
+
+function quotedStrings(value: string): string[] {
+	return [...value.matchAll(/(['"])((?:\\.|(?!\1).)*)\1/g)].map((match) =>
+		match[2].replaceAll("\\'", "'").replaceAll('\\"', '"'),
+	);
+}
+
+function blockerIdForReason(reason: string): string {
+	return `reason:${createHash("sha256").update(reason.trim().toLowerCase()).digest("hex").slice(0, 16)}`;
+}
+
+function parseCompletionGateText(
+	text: string,
+): Pick<PrimeIntegrityCompletionAttempt, "passed" | "blockerIds" | "blockerReasons" | "reasons"> {
+	const passedMatch = text.match(/['"]passed['"]\s*:\s*(true|false)/i);
+	const passed = passedMatch ? passedMatch[1].toLowerCase() === "true" : null;
+	const blockerIds: string[] = [];
+	const blockerReasons: Record<string, string> = {};
+	const checkMatches = [
+		...text.matchAll(/['"]id['"]\s*:\s*['"]([a-z0-9:._/-]+)['"]\s*,\s*['"](?:label|passed)['"]/gi),
+	];
+	for (const [index, match] of checkMatches.entries()) {
+		const block = text.slice(match.index, checkMatches[index + 1]?.index ?? text.length);
+		if (!/['"]passed['"]\s*:\s*false/i.test(block)) continue;
+		const blockerId = match[1];
+		blockerIds.push(blockerId);
+		const reasonMatch = block.match(/['"]reason['"]\s*:\s*(['"])(.*?)\1/);
+		if (reasonMatch?.[2]) blockerReasons[blockerId] = reasonMatch[2];
+	}
+	const reasonsMatch = text.match(/['"]reasons['"]\s*:\s*\[([^\]]*)\]/);
+	const reasons = reasonsMatch ? quotedStrings(reasonsMatch[1]) : Object.values(blockerReasons);
+	if (blockerIds.length === 0) {
+		for (const reason of reasons) {
+			const blockerId = blockerIdForReason(reason);
+			blockerIds.push(blockerId);
+			blockerReasons[blockerId] = reason;
+		}
+	}
+	return { passed, blockerIds: [...new Set(blockerIds)], blockerReasons, reasons: [...new Set(reasons)] };
+}
+
+function customCompletionAttempt(
+	entry: Record<string, unknown>,
+	assistantTurn: number,
+): Omit<PrimeIntegrityCompletionAttempt, "attempt"> | undefined {
+	if (entry.type !== "custom_message" || entry.customType !== "avo_completion_required") return undefined;
+	const details = entry.details && typeof entry.details === "object" ? (entry.details as Record<string, unknown>) : {};
+	const reasons = Array.isArray(details.reasons)
+		? details.reasons.filter((reason): reason is string => typeof reason === "string")
+		: [];
+	const checks = Array.isArray(details.checks) ? details.checks : [];
+	const blockerIds = checks.flatMap((check) => {
+		if (!check || typeof check !== "object") return [];
+		const record = check as Record<string, unknown>;
+		return record.passed === false && typeof record.id === "string" ? [record.id] : [];
+	});
+	const blockerReasons = Object.fromEntries(
+		checks.flatMap((check) => {
+			if (!check || typeof check !== "object") return [];
+			const record = check as Record<string, unknown>;
+			return record.passed === false && typeof record.id === "string" && typeof record.reason === "string"
+				? [[record.id, record.reason]]
+				: [];
+		}),
+	);
+	if (blockerIds.length === 0) {
+		for (const reason of reasons) {
+			const blockerId = blockerIdForReason(reason);
+			blockerIds.push(blockerId);
+			blockerReasons[blockerId] = reason;
+		}
+	}
+	return {
+		source: "host_completion",
+		assistantTurn,
+		...(typeof entry.timestamp === "string" ? { timestamp: entry.timestamp } : {}),
+		passed: typeof details.gatePassed === "boolean" ? details.gatePassed : false,
+		blockerIds: [...new Set(blockerIds)],
+		blockerReasons,
+		reasons: [...new Set(reasons)],
+	};
+}
+
+function finalizeCompletionDiagnostics(
+	summary: PrimeIntegrityTraceSummary,
+	turnUsage: Array<PrimeIntegrityModelUsageSummary & { assistantTurn: number }>,
+): void {
+	const attempts = summary.completionAttempts;
+	summary.completionAttemptCount = attempts.length;
+	summary.failedCompletionAttemptCount = attempts.filter((attempt) => attempt.passed === false).length;
+	summary.successfulCompletionAttemptCount = attempts.filter((attempt) => attempt.passed === true).length;
+	summary.inconclusiveCompletionAttemptCount = attempts.filter((attempt) => attempt.passed === null).length;
+	summary.firstCompletionAttemptPassed = attempts[0]?.passed ?? null;
+	summary.completionRepairTurns = summary.tokenUsageByStage.completion_repair.modelCalls;
+	const firstAttemptTurn = attempts[0]?.assistantTurn;
+	if (firstAttemptTurn !== undefined) {
+		const afterFirstAttempt = turnUsage.filter((turn) => turn.assistantTurn > firstAttemptTurn);
+		summary.inputTokensAfterFirstCompletionAttempt = afterFirstAttempt.reduce(
+			(total, turn) => total + turn.inputTokens,
+			0,
+		);
+		summary.cacheReadTokensAfterFirstCompletionAttempt = afterFirstAttempt.reduce(
+			(total, turn) => total + turn.cacheReadTokens,
+			0,
+		);
+		summary.cacheWriteTokensAfterFirstCompletionAttempt = afterFirstAttempt.reduce(
+			(total, turn) => total + turn.cacheWriteTokens,
+			0,
+		);
+		summary.outputTokensAfterFirstCompletionAttempt = afterFirstAttempt.reduce(
+			(total, turn) => total + turn.outputTokens,
+			0,
+		);
+		summary.tokensAfterFirstCompletionAttempt = afterFirstAttempt.reduce(
+			(total, turn) => total + turn.totalTokens,
+			0,
+		);
+		summary.costUsdAfterFirstCompletionAttempt = afterFirstAttempt.reduce((total, turn) => total + turn.costUsd, 0);
+	}
+	summary.completionRepairAmplification =
+		summary.totalTokens === 0 ? 0 : summary.tokensAfterFirstCompletionAttempt / summary.totalTokens;
+
+	const explicitBlockerIdByReason = new Map<string, string>();
+	for (const attempt of attempts) {
+		const explicitIds = attempt.blockerIds.filter((id) => !id.startsWith("reason:"));
+		if (explicitIds.length !== 1) continue;
+		for (const reason of attempt.reasons) explicitBlockerIdByReason.set(reason, explicitIds[0]);
+	}
+	for (const attempt of attempts) {
+		const reasonAliases = new Map(attempt.reasons.map((reason) => [blockerIdForReason(reason), reason]));
+		attempt.blockerIds = [
+			...new Set(
+				attempt.blockerIds.map((blockerId) => {
+					const reason = reasonAliases.get(blockerId);
+					return reason ? (explicitBlockerIdByReason.get(reason) ?? blockerId) : blockerId;
+				}),
+			),
+		];
+		attempt.blockerReasons = Object.fromEntries(
+			Object.entries(attempt.blockerReasons).map(([blockerId, reason]) => [
+				explicitBlockerIdByReason.get(reason) ?? blockerId,
+				reason,
+			]),
+		);
+	}
+	const blockerIds = new Set(attempts.flatMap((attempt) => attempt.blockerIds));
+	summary.uniqueCompletionBlockerCount = blockerIds.size;
+	const blockers: PrimeIntegrityCompletionBlockerSummary[] = [];
+	for (const blockerId of blockerIds) {
+		const observed = attempts.filter((attempt) => attempt.blockerIds.includes(blockerId));
+		const first = observed[0];
+		const last = observed.at(-1);
+		if (!first || !last) continue;
+		const cleared = attempts.find(
+			(attempt) =>
+				attempt.attempt > first.attempt && attempt.passed !== null && !attempt.blockerIds.includes(blockerId),
+		);
+		const clearanceTurns = cleared ? cleared.assistantTurn - first.assistantTurn : null;
+		const clearanceTokens = cleared
+			? turnUsage
+					.filter(
+						(turn) => turn.assistantTurn > first.assistantTurn && turn.assistantTurn <= cleared.assistantTurn,
+					)
+					.reduce((total, turn) => total + turn.totalTokens, 0)
+			: null;
+		const reason = observed.map((attempt) => attempt.blockerReasons[blockerId]).find(Boolean);
+		blockers.push({
+			blockerId,
+			...(reason ? { reason } : {}),
+			occurrences: observed.length,
+			firstAttempt: first.attempt,
+			lastAttempt: last.attempt,
+			clearedAtAttempt: cleared?.attempt ?? null,
+			assistantTurnsToFirstClearance: clearanceTurns,
+			tokensToFirstClearance: clearanceTokens,
+		});
+	}
+	summary.completionBlockers = blockers.sort((left, right) => left.firstAttempt - right.firstAttempt);
+	summary.repeatedCompletionBlockerCount = blockers.reduce(
+		(total, blocker) => total + Math.max(0, blocker.occurrences - 1),
+		0,
+	);
+	for (let index = 1; index < attempts.length; index += 1) {
+		const previous = new Set(attempts[index - 1].blockerIds);
+		summary.sameBlockerConsecutiveRepeatCount += attempts[index].blockerIds.filter((id) => previous.has(id)).length;
+	}
 }
 
 function messageText(content: unknown): string {
@@ -512,8 +756,14 @@ function messageText(content: unknown): string {
 
 export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoot: string): PrimeIntegrityTraceSummary {
 	const summary = emptyTraceSummary();
+	const turnUsage: Array<PrimeIntegrityModelUsageSummary & { assistantTurn: number }> = [];
 	for (const path of sessionPaths) {
 		let seenCompletionAttempt = false;
+		let latestCompletionAttemptPassed: boolean | null = null;
+		const pendingCompletionAttempts = new Map<
+			string,
+			Omit<PrimeIntegrityCompletionAttempt, "attempt" | "passed" | "blockerIds" | "blockerReasons" | "reasons">
+		>();
 		for (const line of readFileSync(path, "utf8").split("\n")) {
 			if (!line.trim()) continue;
 			let entry: Record<string, unknown>;
@@ -522,33 +772,64 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			} catch {
 				continue;
 			}
+			const customAttempt = customCompletionAttempt(entry, summary.assistantTurns);
+			if (customAttempt) {
+				summary.completionAttempts.push({ attempt: summary.completionAttempts.length + 1, ...customAttempt });
+				seenCompletionAttempt = true;
+				latestCompletionAttemptPassed = customAttempt.passed;
+			}
 			if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") continue;
 			const message = entry.message as Record<string, unknown>;
 			const text = messageText(message.content);
 			if (message.role === "assistant") {
 				const toolText = assistantToolText(message.content);
-				const tokenStage = tokenStageForAssistant(toolText, seenCompletionAttempt);
+				const tokenStage = tokenStageForAssistant(toolText, seenCompletionAttempt, latestCompletionAttemptPassed);
 				const stageUsage = summary.tokenUsageByStage[tokenStage];
 				summary.assistantTurns += 1;
 				summary.modelCalls += 1;
 				stageUsage.modelCalls += 1;
+				const observedUsage = {
+					assistantTurn: summary.assistantTurns,
+					...emptyModelUsageSummary(),
+				};
+				observedUsage.modelCalls = 1;
 				if (message.usage && typeof message.usage === "object") {
 					const usage = message.usage as Record<string, unknown>;
 					const inputTokens = typeof usage.input === "number" ? usage.input : 0;
+					const cacheReadTokens = typeof usage.cacheRead === "number" ? usage.cacheRead : 0;
+					const cacheWriteTokens = typeof usage.cacheWrite === "number" ? usage.cacheWrite : 0;
 					const outputTokens = typeof usage.output === "number" ? usage.output : 0;
 					const totalTokens = typeof usage.totalTokens === "number" ? usage.totalTokens : 0;
 					summary.inputTokens += inputTokens;
+					summary.cacheReadTokens += cacheReadTokens;
+					summary.cacheWriteTokens += cacheWriteTokens;
 					summary.outputTokens += outputTokens;
 					summary.totalTokens += totalTokens;
 					stageUsage.inputTokens += inputTokens;
+					stageUsage.cacheReadTokens += cacheReadTokens;
+					stageUsage.cacheWriteTokens += cacheWriteTokens;
 					stageUsage.outputTokens += outputTokens;
 					stageUsage.totalTokens += totalTokens;
+					observedUsage.inputTokens = inputTokens;
+					observedUsage.cacheReadTokens = cacheReadTokens;
+					observedUsage.cacheWriteTokens = cacheWriteTokens;
+					observedUsage.outputTokens = outputTokens;
+					observedUsage.totalTokens = totalTokens;
 					if (usage.cost && typeof usage.cost === "object") {
 						const cost = usage.cost as Record<string, unknown>;
 						const costUsd = typeof cost.total === "number" ? cost.total : 0;
 						summary.costUsd += costUsd;
 						stageUsage.costUsd += costUsd;
+						observedUsage.costUsd = costUsd;
 					}
+				}
+				turnUsage.push(observedUsage);
+				for (const completionCall of completionToolCalls(message.content)) {
+					pendingCompletionAttempts.set(completionCall.toolCallId, {
+						source: completionCall.source,
+						assistantTurn: summary.assistantTurns,
+						...(typeof entry.timestamp === "string" ? { timestamp: entry.timestamp } : {}),
+					});
 				}
 				if (Array.isArray(message.content)) {
 					for (const part of message.content) {
@@ -562,7 +843,20 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 						}
 					}
 				}
-				if (/\bavo\.(?:complete_cycle|stop_gate|complete)\s*\(/.test(toolText)) seenCompletionAttempt = true;
+				if (isCompletionGateAttempt(toolText)) seenCompletionAttempt = true;
+			}
+			if (message.role === "toolResult" && typeof message.toolCallId === "string") {
+				const pending = pendingCompletionAttempts.get(message.toolCallId);
+				if (pending) {
+					const observedAttempt = {
+						attempt: summary.completionAttempts.length + 1,
+						...pending,
+						...parseCompletionGateText(text),
+					};
+					summary.completionAttempts.push(observedAttempt);
+					latestCompletionAttemptPassed = observedAttempt.passed;
+					pendingCompletionAttempts.delete(message.toolCallId);
+				}
 			}
 			if (text.includes("Anti-laziness intervention") || text.includes("<avo_progress_intervention>")) {
 				summary.watchdogInterventions += 1;
@@ -677,6 +971,7 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			// A damaged optional AVO artifact must not prevent the host from grading the workspace.
 		}
 	}
+	finalizeCompletionDiagnostics(summary, turnUsage);
 	return summary;
 }
 

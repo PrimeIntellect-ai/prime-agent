@@ -124,7 +124,11 @@ maximum concentration = max obligations on one receipt / covered obligations
 
 The report also attributes billed model tokens to the dominant observable
 activity of each assistant turn: setup, implementation, candidate/evaluation,
-obligation coverage, completion, completion repair, memory, or other/final.
+obligation coverage, completion, completion repair, post-ready work, memory, or
+other/final. Completion repair begins only after a non-passing completion
+attempt. Post-ready work records otherwise-unclassified tool activity after a
+passing gate, so model overwork is not incorrectly attributed to a verifier
+blocker.
 This is not a causal decomposition. In particular, input tokens include
 accumulated context from earlier stages, so use the stage table to locate
 overhead for further inspection rather than to assign mechanistic credit.
@@ -190,12 +194,75 @@ show that such broad receipt binding adds hidden correctness. Do not claim an
 obligation benefit until repeated multi-task pairs show a positive held-out
 delta that justifies the observed token, call, time, and cost overhead.
 
-The next obligation study should use requirement-dense, compositional tasks:
-5–10 tasks, three paired repetitions each, and only `full` versus
-`no-obligations`. Compare evidence concentration with held-out failures before
-adding a semantic receipt-to-obligation verifier. A verifier is justified only
-if repeated results show that concentrated evidence predicts missed
-requirements.
+### Completion-loop diagnostic and repaired pair
+
+The first `package_resolver` diagnostic exposed a host-routing error rather
+than useful verification pressure. The task's instruction to prefer the
+"latest" compatible package version was interpreted as a request for current
+online information. A no-obligations run then failed the same
+`online_evidence` check on all nine completion attempts. After its first
+attempt, 1,675,145 of 2,402,484 billed tokens (69.7%) were spent replaying and
+repairing context around that one impossible blocker. The trace split was
+711,814 uncached input, 1,645,763 cache-read input, and 44,907 output tokens, so
+the total must not be described as 2.4 million tokens of new model reasoning.
+
+Online-evidence inference now lets explicit offline/self-contained constraints
+win and treats "latest" as online only in contextual current-information
+requests. SpecBench prompts explicitly identify their bundled task as
+self-contained. Replaying the original objective now produces no online
+evidence requirement.
+
+A second intermediate full-AVO run showed a separate interface problem: the
+model registered 26 obligations but did not know that every obligation needed
+an explicit candidate/evaluation binding. The host correctly refused canonical
+completion. AVO contract version 11 therefore adds the idempotent
+`cover_obligations(...)` batch helper and gives the model an exact one-call
+recipe without weakening the host's per-obligation validation.
+
+The repaired real Vertex `gemini-3.7-flash` pair used the same
+`package_resolver` task. Both conditions completed canonically with exit code
+zero, passed all visible checks, and scored 96% on the hidden suite:
+
+| Condition | Hidden | Canonical | Calls | Tokens | Time | Cost |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| Full AVO | 96% | yes | 22 | 841,884 | 459.7 s | $0.351 |
+| No obligations | 96% | yes | 17 | 554,613 | 286.5 s | $0.261 |
+
+In this one stochastic pair, full AVO added 287,271 tokens (+51.8%), about
+$0.090 (+34.5%), and 173.3 seconds (+60.5%) without changing hidden success.
+It covered all 26 obligations, but all were bound to one host receipt:
+evidence diversity was 1/26 = 0.038 and maximum concentration was 26/26 =
+1.000. These remain diagnostics, not an acceptance rule.
+
+Replaying the paid traces through schema version 6 gives the corrected stage
+attribution:
+
+| Stage | Full AVO | No obligations | Delta |
+| --- | ---: | ---: | ---: |
+| Setup | 8,830 | 8,830 | 0 |
+| Implementation | 591,897 | 182,413 | +409,484 |
+| Candidate/evaluation | 111,313 | 82,282 | +29,031 |
+| Obligation coverage | 57,616 | 0 | +57,616 |
+| Completion | 0 | 91,120 | -91,120 |
+| Completion repair | 0 | 0 | 0 |
+| Post-ready work | 0 | 141,332 | -141,332 |
+| Memory | 0 | 0 | 0 |
+| Other/final | 72,228 | 48,636 | +23,592 |
+
+The result does not support the earlier hypothesis that completion repair
+caused this pair's full-AVO overhead: both repaired runs were ready on the
+first observed gate and recorded zero repair turns. It instead shows one
+obligation-binding turn, a much longer full-AVO implementation trajectory, and
+unnecessary post-ready work in the ablated run. Because provider sampling is
+stochastic, those differences are not causal estimates.
+
+The next obligation study is deliberately small: three strategically different
+tasks (requirement-dense/compositional, multi-surface, and ordinary/coherent),
+one paired `full` versus `no-obligations` run each, for six paid runs total.
+Compare hidden score, token/cost/time, obligation and receipt concentration,
+revision/watchdog counts, and stage attribution. Expand repetitions only where
+a meaningful pattern appears. Do not add an LLM semantic receipt mapper until
+repeated results show that evidence concentration predicts hidden failures.
 
 ## Validated Level 1 example
 

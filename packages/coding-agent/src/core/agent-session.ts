@@ -6500,6 +6500,7 @@ export class AgentSession {
 			details: {
 				runId: continuationState.runId,
 				gatePassed: gate.passed,
+				checks: gate.checks,
 				reasons,
 				watchdog: {
 					action: watchdog.action,

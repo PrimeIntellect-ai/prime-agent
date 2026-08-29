@@ -15,6 +15,7 @@ export const PRIME_INTEGRITY_TOKEN_STAGES = [
 	"obligation_coverage",
 	"completion",
 	"completion_repair",
+	"post_ready_work",
 	"memory",
 	"other",
 ] as const;
@@ -24,9 +25,33 @@ export type PrimeIntegrityTokenStage = (typeof PRIME_INTEGRITY_TOKEN_STAGES)[num
 export interface PrimeIntegrityModelUsageSummary {
 	modelCalls: number;
 	inputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
 	outputTokens: number;
 	totalTokens: number;
 	costUsd: number;
+}
+
+export interface PrimeIntegrityCompletionAttempt {
+	attempt: number;
+	source: "explicit_stop_gate" | "host_completion";
+	assistantTurn: number;
+	timestamp?: string;
+	passed: boolean | null;
+	blockerIds: string[];
+	blockerReasons: Record<string, string>;
+	reasons: string[];
+}
+
+export interface PrimeIntegrityCompletionBlockerSummary {
+	blockerId: string;
+	reason?: string;
+	occurrences: number;
+	firstAttempt: number;
+	lastAttempt: number;
+	clearedAtAttempt: number | null;
+	assistantTurnsToFirstClearance: number | null;
+	tokensToFirstClearance: number | null;
 }
 
 export interface PrimeIntegrityCommand {
@@ -80,7 +105,27 @@ export interface PrimeIntegrityTraceSummary {
 	resolvedCriticalAssumptions: number;
 	watchdogInterventions: number;
 	watchdogWatches: number;
+	completionAttemptCount: number;
+	failedCompletionAttemptCount: number;
+	successfulCompletionAttemptCount: number;
+	inconclusiveCompletionAttemptCount: number;
+	firstCompletionAttemptPassed: boolean | null;
+	completionRepairTurns: number;
+	inputTokensAfterFirstCompletionAttempt: number;
+	cacheReadTokensAfterFirstCompletionAttempt: number;
+	cacheWriteTokensAfterFirstCompletionAttempt: number;
+	outputTokensAfterFirstCompletionAttempt: number;
+	tokensAfterFirstCompletionAttempt: number;
+	costUsdAfterFirstCompletionAttempt: number;
+	completionRepairAmplification: number;
+	uniqueCompletionBlockerCount: number;
+	repeatedCompletionBlockerCount: number;
+	sameBlockerConsecutiveRepeatCount: number;
+	completionAttempts: PrimeIntegrityCompletionAttempt[];
+	completionBlockers: PrimeIntegrityCompletionBlockerSummary[];
 	inputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
 	outputTokens: number;
 	totalTokens: number;
 	costUsd: number;

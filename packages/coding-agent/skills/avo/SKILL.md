@@ -44,6 +44,11 @@ Never pass or request an environment override.
    `cover_obligation({"obligation_id": ..., "candidate_id": ...,
    "evaluation_ids": [...]})`. An uncovered critical obligation blocks both
    cycle acceptance and canonical delivery.
+   For a candidate with many obligations, bind them in one idempotent model turn
+   with `cover_obligations(candidate_id, [evaluation_id],
+   candidate["candidate"]["obligationIds"])`; the host still validates every
+   individual obligation/receipt pair. Do this before `complete_cycle()` or
+   `stop_gate()`.
 
    If the approach depends on a fragile critical assumption, preregister its
    statement, falsification plan, and evidence kind with

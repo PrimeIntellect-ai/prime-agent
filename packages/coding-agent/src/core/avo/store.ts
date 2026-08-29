@@ -1264,6 +1264,22 @@ export function inferAvoOnlineEvidencePolicy(prompt: string): {
 	reasons: string[];
 } {
 	const normalized = prompt.toLowerCase();
+	const explicitOfflineSignals = matchingSignals(normalized, [
+		"do not search online",
+		"do not search the web",
+		"do not browse online",
+		"do not browse the web",
+		"must not search online",
+		"must not browse online",
+		"external facts are not required",
+		"external documentation is not required",
+	]);
+	if (explicitOfflineSignals.length > 0) {
+		return {
+			required: false,
+			reasons: [`explicit offline constraint: ${explicitOfflineSignals.join(", ")}`],
+		};
+	}
 	const explicitOnlineSignals = matchingUnnegatedSignals(normalized, [
 		"search online",
 		"search the web",
@@ -1283,10 +1299,8 @@ export function inferAvoOnlineEvidencePolicy(prompt: string): {
 		? []
 		: matchingUnnegatedSignals(normalized, ["search for", "look up"]);
 	const unstableSignals = matchingUnnegatedSignals(normalized, [
-		"latest",
 		"today",
 		"right now",
-		"recent",
 		"news",
 		"weather",
 		"stock price",
@@ -1306,6 +1320,13 @@ export function inferAvoOnlineEvidencePolicy(prompt: string): {
 		"current law",
 		"current regulation",
 	]);
+	const contextualLatestSignal =
+		/\b(?:what(?:'s|\s+is)?|which|who|when|where|tell\s+me|check|find\s+out|look\s+up)\b[^.!?\n]{0,96}\b(?:latest|recent)\b/i.test(
+			prompt,
+		) ||
+		/\b(?:latest|recent)\b[^.!?\n]{0,64}\b(?:news|driver|release|documentation|docs|law|regulation|price|schedule|standings|weather|research|paper|statistics|data|model|product|api|software)\b/i.test(
+			prompt,
+		);
 	const sourceSignals = matchingUnnegatedSignals(normalized, [
 		"cite sources",
 		"provide sources",
@@ -1317,6 +1338,7 @@ export function inferAvoOnlineEvidencePolicy(prompt: string): {
 		...(explicitOnlineSignals.length > 0 ? [`explicit online lookup: ${explicitOnlineSignals.join(", ")}`] : []),
 		...(genericLookupSignals.length > 0 ? [`external lookup request: ${genericLookupSignals.join(", ")}`] : []),
 		...(unstableSignals.length > 0 ? [`time-sensitive facts: ${unstableSignals.join(", ")}`] : []),
+		...(contextualLatestSignal ? ["time-sensitive facts: contextual latest/recent request"] : []),
 		...(sourceSignals.length > 0 ? [`requested external sources: ${sourceSignals.join(", ")}`] : []),
 	];
 	return { required: reasons.length > 0, reasons };

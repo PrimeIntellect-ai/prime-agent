@@ -10,7 +10,7 @@ from rlm import host_request
 
 def execution_contract() -> dict[str, Any]:
     return {
-        "contract_version": 10,
+        "contract_version": 11,
         "forbid_runtime_introspection": True,
         "host_enforces_completion_and_canonical_delivery": True,
         "environments": ["general", "coding", "research"],
@@ -32,6 +32,7 @@ def execution_contract() -> dict[str, Any]:
                 "run_evaluation for host-observed executable checks, bind every factual "
                 "claim to external evidence, or record model_opinion"
             ),
+            "cover every declared candidate obligation with directly relevant host receipts",
             "complete_cycle",
             "inspect checkpoint and stop_gate",
         ],
@@ -44,6 +45,9 @@ def execution_contract() -> dict[str, Any]:
             "assumption_resolution": "await avo.resolve_critical_assumption(resolution_dict)",
             "coding_baseline": "await avo.run_coding_baseline(command)",
             "host_evaluation": "await avo.run_evaluation(candidate_id, command)",
+            "coverage_batch": (
+                "await avo.cover_obligations(candidate_id, evaluation_ids, obligation_ids)"
+            ),
             "deterministic_evaluation": "await avo.verify_deterministic_result(candidate_id)",
             "artifact_evaluation": "await avo.verify_artifacts(candidate_id)",
             "external_evidence": (
@@ -128,6 +132,47 @@ async def cover_obligation(coverage: dict[str, Any]) -> dict[str, Any]:
         "avo.obligations.cover",
         {"coverage": _object(coverage, "coverage")},
     )
+
+
+async def cover_obligations(
+    candidate_id: str,
+    evaluation_ids: list[str],
+    obligation_ids: list[str],
+) -> dict[str, Any]:
+    """Bind explicit candidate obligations to host receipts in one idempotent call."""
+    if not isinstance(candidate_id, str) or not candidate_id.strip():
+        raise ValueError("candidate_id must be a non-empty string")
+    if not isinstance(evaluation_ids, list) or not evaluation_ids or not all(
+        isinstance(value, str) and value.strip() for value in evaluation_ids
+    ):
+        raise ValueError("evaluation_ids must be a non-empty list of strings")
+    if not isinstance(obligation_ids, list) or not obligation_ids or not all(
+        isinstance(value, str) and value.strip() for value in obligation_ids
+    ):
+        raise ValueError("obligation_ids must be a non-empty list of strings")
+    if len(obligation_ids) > 64:
+        raise ValueError("obligation_ids may contain at most 64 entries")
+    state = (await get_state()).get("state", {})
+    existing = {
+        (item.get("candidateId"), item.get("obligationId"))
+        for item in state.get("obligationCoverage", [])
+        if isinstance(item, dict)
+    }
+    covered: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    for obligation_id in dict.fromkeys(obligation_ids):
+        if (candidate_id, obligation_id) in existing:
+            skipped.append(obligation_id)
+            continue
+        result = await cover_obligation(
+            {
+                "obligation_id": obligation_id,
+                "candidate_id": candidate_id,
+                "evaluation_ids": evaluation_ids,
+            }
+        )
+        covered.append(result)
+    return {"covered": covered, "skipped_obligation_ids": skipped}
 
 
 async def register_critical_assumptions(assumptions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -419,6 +464,7 @@ __all__ = [
     "complete_cycle",
     "complete_experiment",
 	"cover_obligation",
+	"cover_obligations",
     "configure",
     "execution_contract",
     "fetch_external_source",

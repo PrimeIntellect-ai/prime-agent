@@ -3919,6 +3919,21 @@ describe("AVO routing and adapters", () => {
 			required: true,
 		});
 		expect(inferAvoOnlineEvidencePolicy("Fix and test this local parser bug")).toMatchObject({ required: false });
+		expect(
+			inferAvoOnlineEvidencePolicy(
+				"Implement a package resolver that prefers the latest compatible version from its in-memory registry",
+			),
+		).toMatchObject({ required: false });
+		expect(
+			inferAvoOnlineEvidencePolicy(
+				"Do not search online; external documentation is not required. Prefer the latest compatible package version.",
+			),
+		).toMatchObject({
+			required: false,
+			reasons: expect.arrayContaining([expect.stringMatching(/^explicit offline constraint:/)]),
+		});
+		expect(inferAvoOnlineEvidencePolicy("What's the latest NVIDIA driver?")).toMatchObject({ required: true });
+		expect(inferAvoOnlineEvidencePolicy("Use the latest OpenAI model")).toMatchObject({ required: true });
 
 		const runtime = new AvoSessionRuntime(undefined, "run-online-coding-route", clock());
 		runtime.observeRootPrompt("Fix this parser using the latest official documentation");

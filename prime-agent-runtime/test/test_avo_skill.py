@@ -45,7 +45,7 @@ class AvoSkillTest(unittest.TestCase):
             host.await_args_list[0].args[1],
             {"objective": "Fix the parser"},
         )
-        self.assertEqual(result["execution_contract"]["contract_version"], 10)
+        self.assertEqual(result["execution_contract"]["contract_version"], 11)
         self.assertIn("unused seeds", result["execution_contract"]["experiment_rule"])
 
     def test_coding_baseline_runs_through_the_host_before_candidate_work(self) -> None:
@@ -105,6 +105,7 @@ class AvoSkillTest(unittest.TestCase):
         for helper in (
             "register_obligations",
             "cover_obligation",
+            "cover_obligations",
             "register_critical_assumptions",
             "resolve_critical_assumption",
         ):
@@ -147,6 +148,45 @@ class AvoSkillTest(unittest.TestCase):
                 "avo.assumptions.register",
                 "avo.assumptions.resolve",
             ],
+        )
+
+    def test_batch_obligation_coverage_is_idempotent_and_explicit(self) -> None:
+        module = load_skill("avo_obligation_batch_test")
+        host = AsyncMock(
+            side_effect=[
+                {
+                    "state": {
+                        "obligationCoverage": [
+                            {"candidateId": "candidate-1", "obligationId": "already-covered"}
+                        ]
+                    }
+                },
+                {"coverage": {"coverageId": "coverage-new"}},
+            ]
+        )
+        with patch.object(module, "host_request", host):
+            result = asyncio.run(
+                module.cover_obligations(
+                    "candidate-1",
+                    ["evaluation-1"],
+                    ["already-covered", "new-requirement", "new-requirement"],
+                )
+            )
+        self.assertEqual(result["skipped_obligation_ids"], ["already-covered"])
+        self.assertEqual(len(result["covered"]), 1)
+        self.assertEqual(host.await_args_list[0].args, ("avo.get",))
+        self.assertEqual(
+            host.await_args_list[1].args,
+            (
+                "avo.obligations.cover",
+                {
+                    "coverage": {
+                        "obligation_id": "new-requirement",
+                        "candidate_id": "candidate-1",
+                        "evaluation_ids": ["evaluation-1"],
+                    }
+                },
+            ),
         )
 
     def test_model_cannot_claim_authoritative_evaluation(self) -> None:

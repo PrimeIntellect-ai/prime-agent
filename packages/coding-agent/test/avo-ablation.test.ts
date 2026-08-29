@@ -54,6 +54,21 @@ describe.sequential("AVO benchmark ablations", () => {
 		expect(prompt).not.toContain("explicit obligation ledger");
 	});
 
+	test("gives Gemini one explicit pre-completion obligation coverage action", () => {
+		const state = {
+			runId: "run",
+			routing: { environment: "coding", horizon: "iterative", reasons: [], source: "host_auto", decidedAt: "now" },
+			verificationClass: "coding",
+			verificationPolicy: "required",
+			verificationReasons: [],
+			obligations: [{ obligationId: "requirement-1" }, { obligationId: "requirement-2" }],
+		} as unknown as AvoRunState;
+		const prompt = buildAvoRuntimePrompt(state);
+		expect(prompt).toContain("AVO_OBLIGATIONS=required (2 host-derived requirements)");
+		expect(prompt).toContain("await avo.cover_obligations");
+		expect(prompt).toContain("Do not call complete_cycle or stop_gate until");
+	});
+
 	test("disables both NOOA and host-fallback recall", async () => {
 		vi.stubEnv(AVO_INTERNAL_ABLATIONS_ENV, "nooa");
 		const root = mkdtempSync(join(tmpdir(), "avo-nooa-ablation-"));
