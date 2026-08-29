@@ -3099,8 +3099,9 @@ export class DaemonSupervisor {
 				await delay(25);
 			}
 		}
-		// A replacement authenticates against the old socket unless the old process is confirmed stopped.
-		if (initialIdentity === "unknown" || identity() === "current") {
+		// Launch only against a confirmed-stopped predecessor; "unknown" may still hold the old socket.
+		const finalIdentity = identity();
+		if (finalIdentity !== "gone" && finalIdentity !== "replaced") {
 			worker.descriptor.lifecycle = "failed";
 			worker.descriptor.lastError = `Pre-roster worker process ${worker.descriptor.pid} is still running and cannot be replaced safely`;
 			this.persistWorker(worker);
@@ -3796,16 +3797,29 @@ export class DaemonSupervisor {
 		);
 	}
 
-	/** One per-worker serialization for every roster write: frames and pull fills apply in receipt order. */
+	/** Queued frames and pull fills apply in receipt order and abort once the registration is gone; synchronous lifecycle writes need no queue. */
 	private chainWorkerRosterApply(worker: ResidentWorker, apply: () => void | Promise<void>): Promise<void> {
 		const chained = (worker.rosterApplyChain ?? Promise.resolve())
-			.then(apply)
-			.catch((error: unknown) => this.log(`could not apply a roster frame: ${String(error)}`));
+			.then(() => {
+				if (!this.isWorkerRosterApplyCurrent(worker)) return;
+				return apply();
+			})
+			.catch((error: unknown) => {
+				// A partial apply may have deleted rows it never rewrote; one gap-fill pull repairs the ledger.
+				this.log(`could not apply a roster frame: ${String(error)}`);
+				if (this.isWorkerRosterApplyCurrent(worker) && worker.client) {
+					void this.refreshWorkerSummaries(worker, false, true).catch(() => undefined);
+				}
+			});
 		worker.rosterApplyChain = chained;
 		void chained.finally(() => {
 			if (worker.rosterApplyChain === chained) worker.rosterApplyChain = undefined;
 		});
 		return chained;
+	}
+
+	private isWorkerRosterApplyCurrent(worker: ResidentWorker): boolean {
+		return this.workers.get(worker.descriptor.workerId) === worker;
 	}
 
 	private applyWorkerRosterDelta(
@@ -3832,6 +3846,8 @@ export class DaemonSupervisor {
 				this.log(`Could not read the spawn ledger during a snapshot apply: ${String(error)}`);
 				return [] as RlmLedgerEdge[];
 			});
+		// A stop during the pre-read unregisters the worker and flips its rows inactive; applying now would resurrect them.
+		if (!this.isWorkerRosterApplyCurrent(worker)) return;
 		// A live worker's snapshot carries its passivated rows too; absence means removal, disk backs the rest.
 		const sent = new Set(delta.entries.map((entry) => entry.agentId));
 		for (const entry of this.workerRosterEntries(worker)) {

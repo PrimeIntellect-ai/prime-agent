@@ -1442,6 +1442,35 @@ describe("review-round regressions", () => {
 		expect(supervisor.roster().get(childEntry.agentId)?.workerId).toBe("worker-1");
 	});
 
+	it("aborts queued roster applies when the worker stops during the snapshot ledger pre-read", async () => {
+		const worker = makeWorker("worker-1");
+		const root = summary({
+			id: "worker-1-root-active",
+			sessionId: "root",
+			activeSessionId: "worker-1-root-active",
+			sessionFile: "/tmp/sessions/root.jsonl",
+		});
+		const rootEntry = workerRosterEntryFromSummary(root);
+		let releaseEdges: (edges: unknown[]) => void = () => {};
+		const edgesPromise = new Promise<unknown[]>((resolveEdges) => {
+			releaseEdges = resolveEdges;
+		});
+		const supervisor = makeSupervisor([worker], { rlmSpawnLedger: () => ({ edges: () => edgesPromise }) });
+		supervisor.writeRosterEntry(rootEntry, worker);
+
+		// A snapshot is mid pre-read and a delta is queued behind it when the stop lands.
+		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([rootEntry], undefined, true));
+		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([rootEntry]));
+		supervisor.workers.delete("worker-1");
+		supervisor.flipWorkerRosterEntriesInactive(worker);
+		releaseEdges([]);
+		await new Promise((resolveSettle) => setImmediate(resolveSettle));
+
+		const entry = supervisor.roster().get(rootEntry.agentId);
+		expect(entry?.workerId).toBeUndefined();
+		expect(entry?.summary.activeSessionId).toBeUndefined();
+	});
+
 	it("keeps an unverifiable live pre-roster worker failed instead of launching a replacement", async () => {
 		const worker = makeWorker("worker-1");
 		Object.assign(worker.descriptor, { pid: process.pid, processStartId: undefined });
@@ -1460,6 +1489,28 @@ describe("review-round regressions", () => {
 		).restartPreRosterWorker(worker, undefined);
 
 		expect(recoverUncertainWorkerOperations).toHaveBeenCalledWith(worker, false);
+		expect(launchWorker).not.toHaveBeenCalled();
+		expect(worker.descriptor.lifecycle).toBe("failed");
+	});
+
+	it("keeps a pre-roster worker failed when its identity turns unknown after the kill wait", async () => {
+		const worker = makeWorker("worker-1");
+		const launchWorker = vi.fn();
+		// The pid stays alive but its identity becomes unobservable right after the SIGKILL.
+		const processIdentity = vi.fn().mockReturnValueOnce("current").mockReturnValue("unknown");
+		const supervisor = makeSupervisor([worker], {
+			assertRecoveryAllowed: vi.fn(async () => {}),
+			recoverUncertainWorkerOperations: vi.fn(async () => {}),
+			processIdentity,
+			launchWorker,
+		});
+
+		await (
+			supervisor as unknown as {
+				restartPreRosterWorker(worker: WorkerFixture, observedProcessStartId?: string): Promise<void>;
+			}
+		).restartPreRosterWorker(worker, "start-id-1");
+
 		expect(launchWorker).not.toHaveBeenCalled();
 		expect(worker.descriptor.lifecycle).toBe("failed");
 	});
