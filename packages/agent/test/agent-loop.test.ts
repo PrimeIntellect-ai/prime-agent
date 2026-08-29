@@ -1964,3 +1964,186 @@ describe("agentLoopContinue with AgentMessage", () => {
 		expect(messages[0].role).toBe("assistant");
 	});
 });
+
+describe("empty assistant turn retry", () => {
+	function emptyTurnConfig(): AgentLoopConfig {
+		return {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+	}
+
+	function streamFnReturning(messages: AssistantMessage[]) {
+		const requests: Message[][] = [];
+		let call = 0;
+		const streamFn = ((_model: unknown, llmContext: { messages: Message[] }) => {
+			requests.push(llmContext.messages.slice());
+			const message = messages[Math.min(call, messages.length - 1)];
+			call += 1;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		}) as unknown as Parameters<typeof runAgentLoop>[5];
+		return { streamFn, requests };
+	}
+
+	it("silently retries a thinking-only final turn and keeps the transcript clean", async () => {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const emptyMessage = createAssistantMessage([{ type: "thinking", thinking: "pondering..." }]);
+		const goodMessage = createAssistantMessage([{ type: "text", text: "done" }]);
+		const { streamFn, requests } = streamFnReturning([emptyMessage, goodMessage]);
+		const events: AgentEvent[] = [];
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			(event) => {
+				events.push(event);
+			},
+			undefined,
+			streamFn,
+		);
+
+		expect(requests.length).toBe(2);
+		// The empty attempt must not be resent to the provider.
+		expect(requests[1].filter((message) => message.role === "assistant")).toEqual([]);
+		// The empty attempt must not become a transcript turn.
+		const assistants = messages.filter((message) => message.role === "assistant");
+		expect(assistants).toEqual([goodMessage]);
+		const assistantEnds = events.filter(
+			(event) => event.type === "message_end" && event.message.role === "assistant",
+		);
+		expect(assistantEnds.length).toBe(1);
+	});
+
+	it("retries a whitespace-only text turn", async () => {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const emptyMessage = createAssistantMessage([{ type: "text", text: "  \n" }]);
+		const goodMessage = createAssistantMessage([{ type: "text", text: "done" }]);
+		const { streamFn, requests } = streamFnReturning([emptyMessage, goodMessage]);
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			() => {},
+			undefined,
+			streamFn,
+		);
+
+		expect(requests.length).toBe(2);
+		const assistants = messages.filter((message) => message.role === "assistant");
+		expect(assistants).toEqual([goodMessage]);
+	});
+
+	it("surfaces an error after three consecutive empty turns", async () => {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const emptyMessage = createAssistantMessage([{ type: "thinking", thinking: "..." }]);
+		const { streamFn, requests } = streamFnReturning([emptyMessage]);
+		const events: AgentEvent[] = [];
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			(event) => {
+				events.push(event);
+			},
+			undefined,
+			streamFn,
+		);
+
+		expect(requests.length).toBe(3);
+		const assistants = messages.filter((message) => message.role === "assistant");
+		expect(assistants.length).toBe(1);
+		const finalMessage = assistants[0] as AssistantMessage;
+		expect(finalMessage.stopReason).toBe("error");
+		expect(finalMessage.errorMessage).toMatch(/empty response/i);
+		expect(events.at(-1)?.type).toBe("agent_end");
+	});
+
+	it("does not retry when non-thinking content exists", async () => {
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const message = createAssistantMessage([
+			{ type: "thinking", thinking: "..." },
+			{ type: "text", text: "partial but visible" },
+		]);
+		const { streamFn, requests } = streamFnReturning([message]);
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			() => {},
+			undefined,
+			streamFn,
+		);
+
+		expect(requests.length).toBe(1);
+		const assistant = messages.find((m) => m.role === "assistant") as AssistantMessage;
+		expect(assistant.stopReason).toBe("stop");
+	});
+
+	it("does not retry when the turn has tool calls but no text", async () => {
+		const toolSchema = Type.Object({});
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "work",
+			label: "Work",
+			description: "Work",
+			parameters: toolSchema,
+			execute: async () => ({ content: [{ type: "text", text: "tool output" }], details: {} }),
+		};
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [tool] };
+		const toolMessage = createAssistantMessage(
+			[{ type: "toolCall", id: "tool_1", name: "work", arguments: {} }],
+			"toolUse",
+		);
+		const goodMessage = createAssistantMessage([{ type: "text", text: "done" }]);
+		const { streamFn, requests } = streamFnReturning([toolMessage, goodMessage]);
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			emptyTurnConfig(),
+			() => {},
+			undefined,
+			streamFn,
+		);
+
+		expect(requests.length).toBe(2);
+		expect(messages.filter((m) => m.role === "toolResult").length).toBe(1);
+		const assistants = messages.filter((m) => m.role === "assistant");
+		expect(assistants).toEqual([toolMessage, goodMessage]);
+	});
+
+	it("does not retry an aborted empty turn", async () => {
+		const controller = new AbortController();
+		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
+		const config = emptyTurnConfig();
+		let calls = 0;
+		const streamFn = (() => {
+			calls += 1;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				controller.abort();
+			});
+			return stream;
+		}) as unknown as Parameters<typeof runAgentLoop>[5];
+
+		const messages = await runAgentLoop(
+			[createUserMessage("Hello")],
+			context,
+			config,
+			() => {},
+			controller.signal,
+			streamFn,
+		);
+
+		expect(calls).toBe(1);
+		const assistant = messages.find((m) => m.role === "assistant") as AssistantMessage;
+		expect(assistant.stopReason).toBe("aborted");
+	});
+});

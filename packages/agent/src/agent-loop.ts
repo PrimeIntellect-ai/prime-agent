@@ -448,7 +448,48 @@ async function runLoop(
 	await emit({ type: "agent_end", messages: newMessages });
 }
 
+const MAX_EMPTY_TURN_ATTEMPTS = 3;
+
+/**
+ * A final turn with no tool calls and no non-thinking content. Providers occasionally
+ * end a stream like this with a normal stop reason; treating it as completion would
+ * silently abandon the task, so it is retried instead.
+ */
+function isEmptyAssistantTurn(message: AssistantMessage): boolean {
+	if (message.stopReason === "error" || message.stopReason === "aborted") {
+		return false;
+	}
+	return !message.content.some(
+		(part) => part.type === "toolCall" || (part.type === "text" && part.text.trim().length > 0),
+	);
+}
+
 async function streamAssistantResponse(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	streamFn?: StreamFn,
+): Promise<AssistantMessage> {
+	for (let attempt = 1; ; attempt++) {
+		const message = await streamAssistantResponseAttempt(context, config, signal, emit, streamFn);
+		if (isEmptyAssistantTurn(message)) {
+			if (attempt < MAX_EMPTY_TURN_ATTEMPTS) {
+				// Drop the empty attempt so it is neither resent to the provider nor
+				// finalized as a transcript turn (message_end is what makes it durable).
+				context.messages.pop();
+				continue;
+			}
+			message.stopReason = "error";
+			message.errorMessage = `Model returned an empty response (no output content or tool calls) ${MAX_EMPTY_TURN_ATTEMPTS} times in a row`;
+		}
+		await emit({ type: "message_end", message });
+		return message;
+	}
+}
+
+/** Runs one assistant stream and places the final message in context, without emitting message_end. */
+async function streamAssistantResponseAttempt(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
@@ -465,7 +506,6 @@ async function streamAssistantResponse(
 			context.messages.push(finalMessage);
 			await emit({ type: "message_start", message: { ...finalMessage } });
 		}
-		await emit({ type: "message_end", message: finalMessage });
 		return finalMessage;
 	};
 
@@ -559,7 +599,6 @@ async function streamAssistantResponse(
 					if (!addedPartial) {
 						await emit({ type: "message_start", message: { ...finalMessage } });
 					}
-					await emit({ type: "message_end", message: finalMessage });
 					return finalMessage;
 				}
 			}
@@ -572,7 +611,6 @@ async function streamAssistantResponse(
 			context.messages.push(finalMessage);
 			await emit({ type: "message_start", message: { ...finalMessage } });
 		}
-		await emit({ type: "message_end", message: finalMessage });
 		return finalMessage;
 	} catch (error) {
 		if (signal?.aborted && isAbortError(error)) {
