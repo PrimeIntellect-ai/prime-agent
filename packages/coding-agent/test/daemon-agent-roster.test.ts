@@ -1458,9 +1458,11 @@ describe("review-round regressions", () => {
 		const supervisor = makeSupervisor([worker], { rlmSpawnLedger: () => ({ edges: () => edgesPromise }) });
 		supervisor.writeRosterEntry(rootEntry, worker);
 
-		// A snapshot is mid pre-read and a delta is queued behind it when the stop lands.
+		// The snapshot apply starts and blocks on the ledger pre-read; a delta queues behind it.
 		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([rootEntry], undefined, true));
+		await Promise.resolve();
 		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([rootEntry]));
+		// The stop lands mid pre-read: registration gone, rows flipped inactive.
 		supervisor.workers.delete("worker-1");
 		supervisor.flipWorkerRosterEntriesInactive(worker);
 		releaseEdges([]);
