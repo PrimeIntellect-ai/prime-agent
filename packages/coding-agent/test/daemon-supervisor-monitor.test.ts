@@ -292,6 +292,14 @@ function createHarness(canConnect: () => Promise<boolean>): SupervisorMonitorHar
 	}) as SupervisorMonitorHarness;
 }
 
+function seedSupervisorRoster(
+	supervisor: object,
+	...workers: Array<{ descriptor: { workerId: string }; summaries: Map<string, SessionSummary> }>
+): void {
+	const internals = supervisor as { syncWorkerSummariesIntoRoster(worker: object): void };
+	for (const worker of workers) internals.syncWorkerSummariesIntoRoster(worker);
+}
+
 describe("daemon worker supervisor monitoring", () => {
 	afterEach(async () => {
 		for (const { child } of workerLaunchTestState.spawned) {
@@ -2067,13 +2075,14 @@ describe("daemon worker supervisor monitoring", () => {
 			handleList(
 				client: object,
 				command: { id: string; type: "list" },
-			): Promise<{
+			): {
 				success: boolean;
 				data?: { sessions: Array<{ activeSessionId?: string; id: string; workerState?: string }> };
-			}>;
+			};
 		};
+		seedSupervisorRoster(supervisor, liveWorker, stoppingWorker);
 
-		const response = await supervisor.handleList({}, { id: "list-1", type: "list" });
+		const response = supervisor.handleList({}, { id: "list-1", type: "list" });
 
 		expect(response.success).toBe(true);
 		const sessions = response.data?.sessions ?? [];
@@ -3410,6 +3419,7 @@ describe("daemon worker supervisor monitoring", () => {
 				command: { type: "attach"; activeSessionId: string },
 			): Promise<unknown>;
 		};
+		seedSupervisorRoster(supervisor, worker);
 
 		await supervisor.attachClient(client, { type: "attach", activeSessionId });
 
@@ -3523,6 +3533,7 @@ describe("daemon worker supervisor monitoring", () => {
 				command: { type: "attach"; activeSessionId: string; telemetryDisabled?: true },
 			): Promise<unknown>;
 		};
+		seedSupervisorRoster(supervisor, worker);
 
 		await expect(
 			supervisor.attachClient(client, { type: "attach", activeSessionId, telemetryDisabled: true }),
@@ -3687,6 +3698,7 @@ describe("daemon worker supervisor monitoring", () => {
 		}) as {
 			attachClient(client: AttachClient, command: { type: "attach"; activeSessionId: string }): Promise<unknown>;
 		};
+		seedSupervisorRoster(supervisor, worker);
 
 		await expect(supervisor.attachClient(client, { type: "attach", activeSessionId })).rejects.toThrow(
 			"snapshot failed",

@@ -116,11 +116,16 @@ export class DaemonWorkerClient {
 		return this.requestWire(command, timeoutMs);
 	}
 
-	async authenticateWorker(token: string, owner: DaemonWorkerAuthentication, timeoutMs = 3000): Promise<void> {
+	async authenticateWorker(
+		token: string,
+		owner: DaemonWorkerAuthentication,
+		timeoutMs = 3000,
+	): Promise<Extract<DaemonResponse, { success: true }>> {
 		const response = await this.requestWorker({ type: "worker_auth", token, ...owner }, timeoutMs);
 		if (!response.success) {
 			throw new Error(response.error);
 		}
+		return response;
 	}
 
 	close(): void {

@@ -350,6 +350,9 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		};
 		internals.clients.add(client);
 		internals.workers.set(worker.descriptor.workerId, worker);
+		(
+			supervisor as unknown as { syncWorkerSummariesIntoRoster(worker: WorkerHarness): void }
+		).syncWorkerSummariesIntoRoster(worker);
 		internals.syncWorkerExtensionUi = vi.fn(async () => {});
 		internals.streamSnapshot = streamSnapshot;
 		const messages: AgentMessage[] = [{ role: "user", content: "stable", timestamp: 1 }];
@@ -434,6 +437,9 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		};
 		internals.clients.add(client);
 		internals.workers.set(worker.descriptor.workerId, worker);
+		(
+			supervisor as unknown as { syncWorkerSummariesIntoRoster(worker: WorkerHarness): void }
+		).syncWorkerSummariesIntoRoster(worker);
 		internals.streamSnapshot = streamSnapshot;
 		const frames = snapshotFrames([{ role: "user", content: "stable", timestamp: 1 }]);
 		for (const message of [frames.begin, frames.chunk, frames.end]) {
@@ -501,6 +507,9 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		};
 		internals.clients.add(client);
 		internals.workers.set(worker.descriptor.workerId, worker);
+		(
+			supervisor as unknown as { syncWorkerSummariesIntoRoster(worker: WorkerHarness): void }
+		).syncWorkerSummariesIntoRoster(worker);
 		internals.shuttingDown = true;
 		internals.streamSnapshot = streamSnapshot;
 		internals.persistWorker = persistWorker;

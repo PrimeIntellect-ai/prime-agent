@@ -32,6 +32,8 @@ interface SupervisorInternals {
 	): void;
 	familyCatalogEntry(summary: SessionSummary): AgentFamilyCatalogEntry;
 	handleCommand(client: object, command: Record<string, unknown>): Promise<unknown>;
+	seedRosterLedger(): Promise<void>;
+	syncWorkerSummariesIntoRoster(worker: WorkerFixture): void;
 }
 
 interface WorkerFixture {
@@ -73,6 +75,10 @@ function summary(overrides: Partial<SessionSummary> & Pick<SessionSummary, "id" 
 	};
 }
 
+function seedRoster(supervisor: SupervisorInternals, ...workers: WorkerFixture[]): void {
+	for (const target of workers) supervisor.syncWorkerSummariesIntoRoster(target);
+}
+
 function worker(workerId: string, summaries: SessionSummary[] = []): WorkerFixture {
 	return {
 		descriptor: {
@@ -106,8 +112,9 @@ describe("daemon supervisor passive subagent topology", () => {
 			sessionId: "aaaa6666777788889999dddd",
 		});
 		const resident = worker("first", [child]);
+		seedRoster(supervisor, resident);
 
-		expect(supervisor.findSummaryInWorker(resident, "88889999cccc")).toBe(child);
+		expect(supervisor.findSummaryInWorker(resident, "88889999cccc")).toEqual(child);
 	});
 
 	it("rejects an explicit root name that collides with a saved root", async () => {
@@ -136,6 +143,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			},
 			launchWorker,
 		});
+		await supervisor.seedRosterLedger();
 
 		await expect(
 			supervisor.createOrReuseWorker("client", { type: "create", name: "duplicate-root" }),
@@ -179,6 +187,7 @@ describe("daemon supervisor passive subagent topology", () => {
 				]),
 			},
 		});
+		await supervisor.seedRosterLedger();
 
 		await expect(supervisor.assertSupervisorSavedSessionNameAvailable(forkedPath, "duplicate-root")).rejects.toThrow(
 			"an agent of that name already exists at depth 0 under this parent",
@@ -211,6 +220,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			},
 			launchWorker,
 		});
+		await supervisor.seedRosterLedger();
 
 		await expect(
 			supervisor.createOrReuseWorker("client", { type: "create", name: "  duplicate-root  " }),
@@ -247,6 +257,7 @@ describe("daemon supervisor passive subagent topology", () => {
 				list: vi.fn(async () => [target, duplicate]),
 			},
 		});
+		await supervisor.seedRosterLedger();
 
 		await expect(supervisor.assertSupervisorSavedSessionNameAvailable(targetPath, "taken")).rejects.toThrow(
 			"an agent of that name already exists at depth 0 under this parent",
@@ -496,6 +507,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		}) as unknown as SupervisorInternals;
 		supervisor.workers.set("first", firstWorker);
 		supervisor.workers.set("second", secondWorker);
+		seedRoster(supervisor, firstWorker, secondWorker);
 		Object.assign(supervisor, { catalog: { list: vi.fn(async () => []) } });
 		const client = { id: "client", attachedActiveSessionIds: new Set<string>() };
 
@@ -539,6 +551,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			descriptorDir: join(directory, "workers"),
 		}) as unknown as SupervisorInternals;
 		supervisor.workers.set("owned", ownedWorker);
+		seedRoster(supervisor, ownedWorker);
 		Object.assign(supervisor, { catalog: { list: vi.fn(async () => []) } });
 		const workerClient = { id: "daemon-client:worker", attachedActiveSessionIds: new Set<string>() };
 
@@ -611,6 +624,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		}) as unknown as SupervisorInternals;
 		supervisor.workers.set("first", firstWorker);
 		supervisor.workers.set("second", secondWorker);
+		seedRoster(supervisor, firstWorker, secondWorker);
 		Object.assign(supervisor, {
 			catalog: {
 				siblings: vi.fn(async () => []),
@@ -798,6 +812,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			supervisor.workers.set("first", first);
 			supervisor.workers.set("second", second);
 			supervisor.workers.set("disconnected", disconnected);
+			seedRoster(supervisor, first, second, disconnected);
 			await client.connect();
 
 			await expect(

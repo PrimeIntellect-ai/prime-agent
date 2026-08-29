@@ -124,6 +124,7 @@ import {
 	type DaemonSocketClient,
 	resolveActiveSessionState,
 } from "./active-session-state.js";
+import { passivatedWorkerRosterEntry, type WorkerRosterEntry, workerRosterEntryFromSummary } from "./agent-roster.js";
 import { createCompactAssistantDelta } from "./compact-session-stream.js";
 import { DaemonClient } from "./daemon-client.js";
 import { filterClientEnv, withClientEnv } from "./daemon-client-env.js";
@@ -182,10 +183,12 @@ import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
 	DAEMON_WORKER_ROLE_ENV,
+	DAEMON_WORKER_ROSTER_CAPABILITY,
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 	DAEMON_WORKER_TOKEN_ENV,
 	type DaemonWorkerCommand,
 	type DaemonWorkerFrameHeader,
+	type DaemonWorkerRosterOutbound,
 	isDaemonWorkerFrameHeader,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
@@ -541,6 +544,13 @@ export class AgentDaemon {
 		},
 	);
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
+	/** Last roster entry sent per agentId; deltas go out only on change. */
+	private readonly rosterLastSent = new Map<string, { json: string; entry: WorkerRosterEntry }>();
+	/** Admitted child runs whose sessions have not materialized yet, keyed by childId. */
+	private readonly rosterQueuedChildren = new Map<string, WorkerRosterEntry>();
+	private readonly rosterRemovedAgentIds = new Set<string>();
+	private rosterFlushScheduled = false;
+	private rosterHeartbeatTimer?: ReturnType<typeof setInterval>;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
 	/** In-flight admission spawn appends, awaited (and consumed) by createRlmSubagentRuntime. */
 	private readonly pendingRlmSpawnAppends = new Map<string, Promise<void>>();
@@ -571,7 +581,10 @@ export class AgentDaemon {
 				this.log(`Cron job ${job.id} failed: ${error instanceof Error ? error.message : String(error)}`);
 			},
 		});
-		this.cronStore.onHeartbeatChange(() => this.broadcastGlobal({ type: "heartbeats_changed" }));
+		this.cronStore.onHeartbeatChange(() => {
+			this.broadcastGlobal({ type: "heartbeats_changed" });
+			this.scheduleRosterFlush();
+		});
 	}
 
 	// The daemon runs detached with no terminal, so route its diagnostics to its
@@ -645,6 +658,13 @@ export class AgentDaemon {
 		// No startup restore: on-disk sessions return only via --resume or the agents view.
 		if (!this.shuttingDown) {
 			this.cronScheduler.start();
+		}
+		if (this.options.worker) {
+			this.rosterHeartbeatTimer = setInterval(
+				() => this.broadcastRosterFrame({ type: "roster_heartbeat" }),
+				ROSTER_HEARTBEAT_INTERVAL_MS,
+			);
+			this.rosterHeartbeatTimer.unref();
 		}
 		this.startSupervisorMonitor();
 	}
@@ -1103,6 +1123,8 @@ export class AgentDaemon {
 		// dual-write era it has no other writer to fall back on, so a failed
 		// append is a failed deletion.
 		await this.rlmSpawnLedger().appendDelete({ childId, child: entry.sessionFile, reason });
+		this.rosterRemovedAgentIds.add(childId);
+		this.scheduleRosterFlush();
 		// Deletion boundary: transcript + display tombstone are the durable
 		// record and stay; the nested artifact dir is a runtime cache and goes.
 		await this.deleteRlmSubagentArtifacts(childId, entry.sessionFile);
@@ -1409,6 +1431,7 @@ export class AgentDaemon {
 				}
 			}
 			onStateBound?.(state);
+			this.scheduleRosterFlush();
 		} catch (error) {
 			state.unsubscribe?.();
 			this.sessions.delete(state.activeSessionId);
@@ -3324,7 +3347,11 @@ export class AgentDaemon {
 					type: "response",
 					command: "worker_auth",
 					success: true,
+					data: { capabilities: [DAEMON_WORKER_ROSTER_CAPABILITY] },
 				});
+				// A (re)connected supervisor has no delta history; resend the full roster.
+				this.rosterLastSent.clear();
+				this.scheduleRosterFlush();
 				return;
 			}
 			if (this.options.worker) {
@@ -6302,6 +6329,9 @@ export class AgentDaemon {
 		state.clients.clear();
 		this.acpMcpOwners.delete(state.activeSessionId);
 		this.sessions.delete(state.activeSessionId);
+		// A discarded draft leaves no transcript, so its roster row goes with it.
+		if (isEmptyDraftSession) this.rosterRemovedAgentIds.add(this.rosterAgentIdForState(state));
+		this.scheduleRosterFlush();
 		if (isEmptyDraftSession) {
 			const sessionFile = state.runtime.session.sessionFile;
 			if (sessionFile) {
@@ -6358,6 +6388,7 @@ export class AgentDaemon {
 			}
 		}
 		this.stampRlmChildActiveSessionId(message);
+		this.observeRosterEvent(state, message);
 		const sequencedMessage = this.addSessionEventMeta(state, message);
 		let serialized: string | undefined;
 		for (const client of state.clients) {
@@ -6483,6 +6514,134 @@ export class AgentDaemon {
 	private broadcastGlobal(message: DaemonOutbound): void {
 		for (const client of this.clients) {
 			this.write(client, message);
+		}
+	}
+
+	private rosterAgentIdForState(state: ActiveSessionState): string {
+		const session = state.runtime.session;
+		const metadata = state.runtime.metadata;
+		return metadata.kind === "subagent" && metadata.rlmChildId ? metadata.rlmChildId : session.sessionId;
+	}
+
+	private observeRosterEvent(state: ActiveSessionState, message: DaemonOutbound): void {
+		if (!this.options.worker) return;
+		if (message.type === "session_event") {
+			if (message.event.type === "rlm_child_update") {
+				this.observeRosterChildUpdate(state, message.event.child);
+				return;
+			}
+			if (!ROSTER_SESSION_EVENT_TRIGGERS.has(message.event.type)) return;
+		} else if (
+			message.type !== "session_status" &&
+			message.type !== "session_closed" &&
+			message.type !== "session_replaced"
+		) {
+			return;
+		}
+		this.scheduleRosterFlush();
+	}
+
+	private observeRosterChildUpdate(state: ActiveSessionState, child: AgentConnectionRlmChildAgentSnapshot): void {
+		if (child.activeSessionId === undefined && (child.status === "queued" || child.status === "running")) {
+			this.rosterQueuedChildren.set(child.id, this.queuedChildRosterEntry(state, child));
+		} else {
+			this.rosterQueuedChildren.delete(child.id);
+		}
+		this.scheduleRosterFlush();
+	}
+
+	private queuedChildRosterEntry(
+		state: ActiveSessionState,
+		child: AgentConnectionRlmChildAgentSnapshot,
+	): WorkerRosterEntry {
+		const parentSession = state.runtime.session;
+		return {
+			agentId: child.id,
+			queuedChild: true,
+			summary: {
+				id: child.id,
+				lifecycle: "live",
+				activity: "idle",
+				isSessionActive: false,
+				runtimeKind: "subagent",
+				rlmDepth: (parentSession.rlmDepth ?? 0) + 1,
+				sessionId: child.id,
+				sessionName: child.sessionName,
+				cwd: parentSession.sessionManager.getCwd(),
+				isStreaming: false,
+				isCompacting: false,
+				attachedClients: 0,
+				messageCount: 0,
+				firstMessage: child.label,
+				parentActiveSessionId: state.activeSessionId,
+				parentSessionId: parentSession.sessionId,
+				parentSessionPath: parentSession.sessionFile,
+				rlmChildId: child.id,
+			},
+		};
+	}
+
+	private scheduleRosterFlush(): void {
+		if (!this.options.worker || this.rosterFlushScheduled || this.shuttingDown) return;
+		this.rosterFlushScheduled = true;
+		setImmediate(() => {
+			this.rosterFlushScheduled = false;
+			try {
+				this.flushRoster();
+			} catch (error) {
+				this.log(`could not publish roster delta: ${String(error)}`);
+			}
+		});
+	}
+
+	private flushRoster(): void {
+		const entries = new Map<string, WorkerRosterEntry>();
+		for (const summary of buildSessionList([...this.sessions.values()], [], this.cronStore.list())) {
+			const entry = workerRosterEntryFromSummary(summary);
+			entries.set(entry.agentId, entry);
+		}
+		for (const [childId, queued] of this.rosterQueuedChildren) {
+			if (!entries.has(childId)) entries.set(childId, queued);
+		}
+		const removedAgentIds: string[] = [];
+		for (const agentId of this.rosterRemovedAgentIds) {
+			entries.delete(agentId);
+			this.rosterLastSent.delete(agentId);
+			this.rosterQueuedChildren.delete(agentId);
+			removedAgentIds.push(agentId);
+		}
+		this.rosterRemovedAgentIds.clear();
+		for (const [agentId, previous] of this.rosterLastSent) {
+			// The runtime left memory (close or passivation): flip the row, never drop it.
+			if (!entries.has(agentId)) entries.set(agentId, passivatedWorkerRosterEntry(previous.entry));
+		}
+		const changed: WorkerRosterEntry[] = [];
+		for (const [agentId, entry] of entries) {
+			const json = JSON.stringify(entry);
+			if (this.rosterLastSent.get(agentId)?.json === json) continue;
+			this.rosterLastSent.set(agentId, { json, entry });
+			changed.push(entry);
+		}
+		if (changed.length === 0 && removedAgentIds.length === 0) return;
+		this.broadcastRosterFrame({
+			type: "roster_delta",
+			entries: changed,
+			...(removedAgentIds.length > 0 ? { removedAgentIds } : {}),
+		});
+	}
+
+	private broadcastRosterFrame(message: DaemonWorkerRosterOutbound): void {
+		const payload = Buffer.from(serializeJsonLine(message));
+		for (const client of this.clients) {
+			if (client.transport !== "private-framed" || client.authenticated !== true || client.socket.destroyed) {
+				continue;
+			}
+			const accepted = client.socket.write(
+				encodePrivateFrame<DaemonWorkerFrameHeader>({ kind: "outbound", outboundType: message.type }, payload),
+			);
+			if (!accepted) {
+				client.backpressured = true;
+			}
 		}
 	}
 
@@ -6821,6 +6980,10 @@ export class AgentDaemon {
 			clearTimeout(this.supervisorFenceTimer);
 			this.supervisorFenceTimer = undefined;
 		}
+		if (this.rosterHeartbeatTimer) {
+			clearInterval(this.rosterHeartbeatTimer);
+			this.rosterHeartbeatTimer = undefined;
+		}
 		this.log(`shutting down (exit ${exitCode}); closing ${this.sessions.size} active session(s)`);
 		const closingReason = this.getShutdownClosingReason();
 		for (const client of this.clients) {
@@ -6851,6 +7014,21 @@ export class AgentDaemon {
 		process.exit(exitCode);
 	}
 }
+
+const ROSTER_HEARTBEAT_INTERVAL_MS = 15_000;
+
+// Session events that can change an agent's roster projection (status, activity, name, recap).
+const ROSTER_SESSION_EVENT_TRIGGERS = new Set([
+	"turn_start",
+	"turn_end",
+	"bash_start",
+	"bash_end",
+	"compaction_start",
+	"compaction_end",
+	"message_end",
+	"session_action_update",
+	"session_info_changed",
+]);
 
 function hasDaemonOutboundActiveSessionId(
 	message: DaemonOutbound,

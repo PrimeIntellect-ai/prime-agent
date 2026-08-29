@@ -306,6 +306,9 @@ describe("ENG-4677 snapshot catch-up replacement", () => {
 			handleWorkerFrame(worker: WorkerHarness, frame: PrivateFrame<DaemonWorkerFrameHeader>): void;
 		};
 		internals.workers.set(worker.descriptor.workerId, worker);
+		(
+			supervisor as unknown as { syncWorkerSummariesIntoRoster(worker: WorkerHarness): void }
+		).syncWorkerSummariesIntoRoster(worker);
 		const attaching = internals.attachClient(client, {
 			type: "attach",
 			activeSessionId,
@@ -434,6 +437,9 @@ describe("ENG-4677 snapshot catch-up replacement", () => {
 			handleWorkerFrame(worker: WorkerHarness, frame: PrivateFrame<DaemonWorkerFrameHeader>): void;
 		};
 		internals.workers.set(worker.descriptor.workerId, worker);
+		(
+			supervisor as unknown as { syncWorkerSummariesIntoRoster(worker: WorkerHarness): void }
+		).syncWorkerSummariesIntoRoster(worker);
 		const { messages: _firstMessages, ...firstSnapshot } = firstResult.snapshot;
 		const firstBegin = {
 			type: "session_snapshot_begin",
@@ -697,6 +703,9 @@ describe("ENG-4677 snapshot catch-up replacement", () => {
 
 		internals.clients.add(client);
 		internals.workers.set(worker.descriptor.workerId, worker);
+		(
+			supervisor as unknown as { syncWorkerSummariesIntoRoster(worker: WorkerHarness): void }
+		).syncWorkerSummariesIntoRoster(worker);
 		internals.queueCatchup(client, activeSessionId, "replacement");
 		await internals.catchUpClient(client);
 
