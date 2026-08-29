@@ -3914,16 +3914,17 @@ export class AgentDaemon {
 					throw new Error("Cannot delete the currently active session");
 				}
 				const deletedPath = canonicalSessionPath(command.sessionPath);
-				const deletedInfo = await readSessionInfo(command.sessionPath).catch(() => undefined);
+				const deletedInfo = (await readSessionInfo(command.sessionPath).catch(() => null)) ?? undefined;
 				const composedEntry = this.rosterEntryForSessionPath(deletedPath);
-				// Child-ness comes from worker-held state, never from a ledger read that can fail.
-				const isChild =
+				// Worker-held state classifies first; only a readable no-parent transcript is positively top-level.
+				const knownChild =
 					composedEntry?.summary.runtimeKind === "subagent" ||
 					deletedInfo?.parentSessionPath !== undefined ||
 					(deletedInfo?.rlmDepth ?? 0) > 0;
+				const positivelyTopLevel = !knownChild && (composedEntry !== undefined || deletedInfo !== undefined);
 				let ledgerEdge: RlmLedgerEdge | undefined;
-				if (isChild) {
-					// An unreadable ledger aborts a child deletion: without the tombstone the child reseeds.
+				if (!positivelyTopLevel) {
+					// Children and unknown targets classify via the ledger; an unreadable ledger aborts, else the child reseeds.
 					const edges = await this.rlmSpawnLedger().edges();
 					ledgerEdge = edges.find((edge) => canonicalSessionPath(edge.child) === deletedPath);
 					// Tombstone first: a failed append aborts; a tombstoned-but-undeleted file is the accepted orphan of a failed delete.

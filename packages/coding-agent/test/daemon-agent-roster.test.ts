@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1541,5 +1541,72 @@ describe("worker delete tombstone durability", () => {
 
 		expect(existsSync(sessionPath)).toBe(false);
 		expect(daemon.rosterReporter.removedAgentIds.size).toBe(1);
+	});
+	it("classifies an unreadable delete target through the ledger", async () => {
+		const setup = () => {
+			const directory = mkdtempSync(join(tmpdir(), "prime-roster-unknown-delete-"));
+			tempDirs.push(directory);
+			const garbled = join(directory, "artifacts", "garbled.jsonl");
+			mkdirSync(dirname(garbled), { recursive: true });
+			writeFileSync(garbled, "not a session header\n");
+			return { directory, garbled };
+		};
+
+		// (a) A live edge classifies the unknown target as a child: tombstone first, then delete.
+		const withEdge = setup();
+		const daemonWithEdge = new AgentDaemon(join(withEdge.directory, "worker.sock"), {
+			defaultSessionConfig: { agentDir: withEdge.directory, cwd: withEdge.directory },
+			worker: { authenticationToken: "token" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		} as never) as unknown as {
+			rlmSpawnLedger(): RlmSpawnLedger;
+			handleCommand(client: object, command: object): Promise<unknown>;
+			rosterReporter: { removedAgentIds: Set<string> };
+		};
+		await daemonWithEdge.rlmSpawnLedger().appendSpawn({
+			childId: "sub-9",
+			parent: join(withEdge.directory, "sessions", "root.jsonl"),
+			child: withEdge.garbled,
+			depth: 1,
+			name: "garbled",
+		});
+		await daemonWithEdge.handleCommand(
+			{ id: "client", attachedActiveSessionIds: new Set<string>() },
+			{ type: "delete_saved_session", sessionPath: withEdge.garbled },
+		);
+		expect(existsSync(withEdge.garbled)).toBe(false);
+		await expect(daemonWithEdge.rlmSpawnLedger().edges()).resolves.toEqual([]);
+		expect(daemonWithEdge.rosterReporter.removedAgentIds.size).toBe(1);
+
+		// (b) An unreadable ledger aborts the unknown target's deletion.
+		const withFailure = setup();
+		const daemonWithFailure = makeDeleteDaemon(withFailure.directory, async () => {
+			throw new Error("ledger unreadable");
+		});
+		await expect(
+			daemonWithFailure.handleCommand(
+				{ id: "client", attachedActiveSessionIds: new Set<string>() },
+				{ type: "delete_saved_session", sessionPath: withFailure.garbled },
+			),
+		).rejects.toThrow("ledger unreadable");
+		expect(existsSync(withFailure.garbled)).toBe(true);
+		expect(daemonWithFailure.rosterReporter.removedAgentIds.size).toBe(0);
+
+		// (c) No edge: the unknown target deletes as a top-level session.
+		const withoutEdge = setup();
+		const daemonWithoutEdge = new AgentDaemon(join(withoutEdge.directory, "worker.sock"), {
+			defaultSessionConfig: { agentDir: withoutEdge.directory, cwd: withoutEdge.directory },
+			worker: { authenticationToken: "token" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		} as never) as unknown as { handleCommand(client: object, command: object): Promise<unknown> };
+		await daemonWithoutEdge.handleCommand(
+			{ id: "client", attachedActiveSessionIds: new Set<string>() },
+			{ type: "delete_saved_session", sessionPath: withoutEdge.garbled },
+		);
+		expect(existsSync(withoutEdge.garbled)).toBe(false);
 	});
 });
