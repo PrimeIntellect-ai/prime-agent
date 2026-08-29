@@ -353,6 +353,9 @@ describe("daemon protocol helpers", () => {
 	it("keeps attachment routing out of the durable mutation journal", () => {
 		expect(isDaemonMutatingCommand({ type: "attach" })).toBe(false);
 		expect(isDaemonMutatingCommand({ type: "reattach" })).toBe(false);
+		// Journal replays after a reconnect would skip re-subscribing the new socket.
+		expect(isDaemonMutatingCommand({ type: "roster_subscribe" })).toBe(false);
+		expect(isDaemonMutatingCommand({ type: "roster_unsubscribe" })).toBe(false);
 		expect(isDaemonMutatingCommand({ type: "wait_for_headless_completion" })).toBe(true);
 		expect(isDaemonMutatingCommand({ type: "switch_session" })).toBe(true);
 	});

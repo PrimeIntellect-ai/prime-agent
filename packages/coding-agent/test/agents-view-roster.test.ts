@@ -59,6 +59,7 @@ function ledgerEntry(
 type FakeClient = {
 	supportsServerCapability: (capability: string) => boolean;
 	isConnected: boolean;
+	hello: object;
 	onMessage: (listener: (message: DaemonOutbound) => void) => () => void;
 	request: ReturnType<typeof vi.fn>;
 	emit: (message: DaemonOutbound) => void;
@@ -69,6 +70,7 @@ function fakeRosterClient(roster: AgentRosterEntry[], supported = true): FakeCli
 	return {
 		supportsServerCapability: () => supported,
 		isConnected: true,
+		hello: { type: "daemon_hello" },
 		onMessage: (listener) => {
 			listeners.add(listener);
 			return () => listeners.delete(listener);
@@ -130,6 +132,25 @@ describe("agents-view roster store", () => {
 
 		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "c", sessionId: "c" })], resync: true });
 		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["c"]);
+	});
+
+	it("replays pushes that raced the subscribe reply after the snapshot resync", async () => {
+		const client = fakeRosterClient([ledgerEntry({ id: "a", sessionId: "a" })]);
+		const store = new AgentsViewRosterStore();
+		client.request.mockImplementationOnce(async (command: { type: string }) => {
+			// Newer pushes land while the subscribe reply is still in flight.
+			client.emit({ type: "roster_update", changed: [], removed: ["a"] });
+			client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "b", sessionId: "b" })] });
+			return {
+				type: "response",
+				command: command.type,
+				success: true,
+				data: { roster: [ledgerEntry({ id: "a", sessionId: "a" })] },
+			};
+		});
+
+		await expect(store.attach(client as never)).resolves.toBe(true);
+		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["b"]);
 	});
 
 	it("emits one listener call for several updates arriving in the same tick", async () => {
