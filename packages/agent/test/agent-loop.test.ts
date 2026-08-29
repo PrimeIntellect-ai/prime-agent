@@ -1989,13 +1989,10 @@ describe("empty assistant turn retry", () => {
 		return { streamFn, requests };
 	}
 
-	it("silently retries a thinking-only final turn and keeps the transcript clean", async () => {
+	async function runOnce(message: AssistantMessage) {
 		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
-		const emptyMessage = createAssistantMessage([{ type: "thinking", thinking: "pondering..." }]);
-		const goodMessage = createAssistantMessage([{ type: "text", text: "done" }]);
-		const { streamFn, requests } = streamFnReturning([emptyMessage, goodMessage]);
+		const { streamFn, requests } = streamFnReturning([message]);
 		const events: AgentEvent[] = [];
-
 		const messages = await runAgentLoop(
 			[createUserMessage("Hello")],
 			context,
@@ -2006,43 +2003,15 @@ describe("empty assistant turn retry", () => {
 			undefined,
 			streamFn,
 		);
+		return { requests, events, assistant: messages.find((m) => m.role === "assistant") as AssistantMessage };
+	}
 
-		expect(requests.length).toBe(2);
-		// The empty attempt must not be resent to the provider.
-		expect(requests[1].filter((message) => message.role === "assistant")).toEqual([]);
-		// The empty attempt must not become a transcript turn.
-		const assistants = messages.filter((message) => message.role === "assistant");
-		expect(assistants).toEqual([goodMessage]);
-		const assistantEnds = events.filter(
-			(event) => event.type === "message_end" && event.message.role === "assistant",
-		);
-		expect(assistantEnds.length).toBe(1);
-	});
-
-	it("retries a whitespace-only text turn", async () => {
+	it("silently retries empty turns and keeps the transcript clean", async () => {
 		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
-		const emptyMessage = createAssistantMessage([{ type: "text", text: "  \n" }]);
+		const thinkingOnly = createAssistantMessage([{ type: "thinking", thinking: "pondering..." }]);
+		const whitespaceOnly = createAssistantMessage([{ type: "text", text: "  \n" }]);
 		const goodMessage = createAssistantMessage([{ type: "text", text: "done" }]);
-		const { streamFn, requests } = streamFnReturning([emptyMessage, goodMessage]);
-
-		const messages = await runAgentLoop(
-			[createUserMessage("Hello")],
-			context,
-			emptyTurnConfig(),
-			() => {},
-			undefined,
-			streamFn,
-		);
-
-		expect(requests.length).toBe(2);
-		const assistants = messages.filter((message) => message.role === "assistant");
-		expect(assistants).toEqual([goodMessage]);
-	});
-
-	it("surfaces an error after three consecutive empty turns", async () => {
-		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
-		const emptyMessage = createAssistantMessage([{ type: "thinking", thinking: "..." }]);
-		const { streamFn, requests } = streamFnReturning([emptyMessage]);
+		const { streamFn, requests } = streamFnReturning([thinkingOnly, whitespaceOnly, goodMessage]);
 		const events: AgentEvent[] = [];
 
 		const messages = await runAgentLoop(
@@ -2057,117 +2026,54 @@ describe("empty assistant turn retry", () => {
 		);
 
 		expect(requests.length).toBe(3);
-		const assistants = messages.filter((message) => message.role === "assistant");
-		expect(assistants.length).toBe(1);
-		const finalMessage = assistants[0] as AssistantMessage;
-		expect(finalMessage.stopReason).toBe("error");
-		expect(finalMessage.errorMessage).toMatch(/empty response/i);
+		// Discarded attempts are neither resent to the provider nor kept as transcript turns.
+		expect(requests[1].filter((message) => message.role === "assistant")).toEqual([]);
+		expect(requests[2].filter((message) => message.role === "assistant")).toEqual([]);
+		expect(messages.filter((message) => message.role === "assistant")).toEqual([goodMessage]);
+		const assistantEnds = events.filter(
+			(event) => event.type === "message_end" && event.message.role === "assistant",
+		);
+		expect(assistantEnds.length).toBe(1);
+	});
+
+	it("surfaces an error after three consecutive empty turns", async () => {
+		const { requests, events, assistant } = await runOnce(
+			createAssistantMessage([{ type: "thinking", thinking: "..." }]),
+		);
+
+		expect(requests.length).toBe(3);
+		expect(assistant.stopReason).toBe("error");
+		expect(assistant.errorMessage).toMatch(/empty response/i);
 		expect(events.at(-1)?.type).toBe("agent_end");
 	});
 
-	it("does not retry when non-thinking content exists", async () => {
-		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
-		const message = createAssistantMessage([
-			{ type: "thinking", thinking: "..." },
-			{ type: "text", text: "partial but visible" },
-		]);
-		const { streamFn, requests } = streamFnReturning([message]);
-
-		const messages = await runAgentLoop(
-			[createUserMessage("Hello")],
-			context,
-			emptyTurnConfig(),
-			() => {},
-			undefined,
-			streamFn,
+	it("does not retry turns with visible content, a length stop, or a silent overflow", async () => {
+		const visible = await runOnce(
+			createAssistantMessage([
+				{ type: "thinking", thinking: "..." },
+				{ type: "text", text: "partial but visible" },
+			]),
 		);
+		expect(visible.requests.length).toBe(1);
+		expect(visible.assistant.stopReason).toBe("stop");
 
-		expect(requests.length).toBe(1);
-		const assistant = messages.find((m) => m.role === "assistant") as AssistantMessage;
-		expect(assistant.stopReason).toBe("stop");
-	});
+		const lengthStop = await runOnce(createAssistantMessage([{ type: "thinking", thinking: "..." }], "length"));
+		expect(lengthStop.requests.length).toBe(1);
+		expect(lengthStop.assistant.stopReason).toBe("length");
+		expect(lengthStop.assistant.errorMessage).toBeUndefined();
 
-	it("does not retry when the turn has tool calls but no text", async () => {
-		const toolSchema = Type.Object({});
-		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
-			name: "work",
-			label: "Work",
-			description: "Work",
-			parameters: toolSchema,
-			execute: async () => ({ content: [{ type: "text", text: "tool output" }], details: {} }),
-		};
-		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [tool] };
-		const toolMessage = createAssistantMessage(
-			[{ type: "toolCall", id: "tool_1", name: "work", arguments: {} }],
-			"toolUse",
-		);
-		const goodMessage = createAssistantMessage([{ type: "text", text: "done" }]);
-		const { streamFn, requests } = streamFnReturning([toolMessage, goodMessage]);
-
-		const messages = await runAgentLoop(
-			[createUserMessage("Hello")],
-			context,
-			emptyTurnConfig(),
-			() => {},
-			undefined,
-			streamFn,
-		);
-
-		expect(requests.length).toBe(2);
-		expect(messages.filter((m) => m.role === "toolResult").length).toBe(1);
-		const assistants = messages.filter((m) => m.role === "assistant");
-		expect(assistants).toEqual([toolMessage, goodMessage]);
-	});
-
-	it("does not retry an empty length-stop turn", async () => {
-		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
-		const message = createAssistantMessage([{ type: "thinking", thinking: "..." }], "length");
-		const { streamFn, requests } = streamFnReturning([message]);
-		const events: AgentEvent[] = [];
-
-		const messages = await runAgentLoop(
-			[createUserMessage("Hello")],
-			context,
-			emptyTurnConfig(),
-			(event) => {
-				events.push(event);
-			},
-			undefined,
-			streamFn,
-		);
-
-		expect(requests.length).toBe(1);
-		const assistant = messages.find((m) => m.role === "assistant") as AssistantMessage;
-		expect(assistant.stopReason).toBe("length");
-		expect(assistant.errorMessage).toBeUndefined();
-		expect(events.some((event) => event.type === "message_end" && event.message === assistant)).toBe(true);
-	});
-
-	it("does not retry a silent context-overflow turn so compaction recovery can see it", async () => {
-		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
-		const message = createAssistantMessage([{ type: "text", text: "" }]);
 		// z.ai-style silent overflow: normal stop, empty content, input past the window.
-		message.usage.input = createModel().contextWindow + 1;
-		const { streamFn, requests } = streamFnReturning([message]);
-		const events: AgentEvent[] = [];
-
-		const messages = await runAgentLoop(
-			[createUserMessage("Hello")],
-			context,
-			emptyTurnConfig(),
-			(event) => {
-				events.push(event);
-			},
-			undefined,
-			streamFn,
+		// It must reach message_end untouched so compaction recovery can see it.
+		const overflowMessage = createAssistantMessage([{ type: "text", text: "" }]);
+		overflowMessage.usage.input = createModel().contextWindow + 1;
+		const overflow = await runOnce(overflowMessage);
+		expect(overflow.requests.length).toBe(1);
+		expect(overflow.assistant).toBe(overflowMessage);
+		expect(overflow.assistant.stopReason).toBe("stop");
+		expect(overflow.assistant.errorMessage).toBeUndefined();
+		expect(overflow.events.some((event) => event.type === "message_end" && event.message === overflowMessage)).toBe(
+			true,
 		);
-
-		expect(requests.length).toBe(1);
-		const assistant = messages.find((m) => m.role === "assistant") as AssistantMessage;
-		expect(assistant).toBe(message);
-		expect(assistant.stopReason).toBe("stop");
-		expect(assistant.errorMessage).toBeUndefined();
-		expect(events.some((event) => event.type === "message_end" && event.message === assistant)).toBe(true);
 	});
 
 	it("does not retry an aborted empty turn", async () => {
