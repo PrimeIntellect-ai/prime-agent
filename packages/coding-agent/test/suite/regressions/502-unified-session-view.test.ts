@@ -57,12 +57,14 @@ function refreshHarness() {
 		liveCatalogRefreshPending: false,
 		savedCatalogRefreshPending: false,
 		heartbeats: [] as unknown[],
+		savedSearchFetchStarted: false,
 		persistentState,
 		applySessionList,
 		reconcileCatalogs,
 		resolveMissingSelectionAnchor: vi.fn(),
 		setStatusMessage: vi.fn(),
 		startClientReconnect: vi.fn(),
+		rearmSavedSearchFetch: privateMethod<(this: unknown) => void>("rearmSavedSearchFetch"),
 	};
 }
 
