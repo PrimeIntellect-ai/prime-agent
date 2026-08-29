@@ -94,6 +94,12 @@ immediately interrupts the current chain and tells the model not to retry the
 same long-running cell or algorithm: reduce it to a bounded reproducer, remove
 the nontermination, and rerun the direct verifier.
 
+Once a streamed stop-gate call passes, Prime interrupts the current tool chain
+and requests the accepted candidate's exact canonical delivery. The model must
+not clean verifier helpers, inspect state, or call the gate again. This keeps
+post-ready context replay observable in the benchmark while preventing it from
+silently consuming the rest of the autonomous budget.
+
 ## Controlled ablations
 
 A single successful trace validates the enforcement path, but it does not show

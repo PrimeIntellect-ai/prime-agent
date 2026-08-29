@@ -105,6 +105,69 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 	});
 
+	it("interrupts a post-ready tool chain and requests canonical delivery immediately", async () => {
+		const readyTool: AgentTool = {
+			name: "ready",
+			label: "Ready",
+			description: "Records a verified candidate and passes the stop gate",
+			parameters: Type.Object({}),
+			execute: async () => {
+				await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+					candidate: {
+						candidate_id: "ready-poem",
+						kind: "answer",
+						summary: "Rain poem",
+						payload: "Rain wakes the quiet street.",
+					},
+				});
+				await harness!.session.handleAvoHostRequest("avo.evaluation.record", {
+					evaluation: {
+						candidate_id: "ready-poem",
+						evaluator_id: "subjective_review",
+						status: "pass",
+						authority: "model_opinion",
+						evidence_refs: [],
+						metrics: { reviewed: true },
+					},
+				});
+				await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
+					cycle: { candidate_id: "ready-poem" },
+				});
+				const gate = await harness!.session.handleAvoHostRequest("avo.stop_gate");
+				return { content: [{ type: "text", text: JSON.stringify(gate) }], details: {} };
+			},
+		};
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			tools: [readyTool],
+		});
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("ready", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Rain wakes the quiet street."),
+		]);
+
+		await harness.session.prompt("Write a short poem about rain");
+
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(
+			harness.session.messages.filter(
+				(message) => message.role === "custom" && message.customType === "avo_canonical_delivery_required",
+			),
+		).toContainEqual(
+			expect.objectContaining({
+				details: expect.objectContaining({
+					candidateId: "ready-poem",
+					gatePassed: true,
+					trigger: "post_ready_canonical_delivery",
+				}),
+			}),
+		);
+		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
+			state: { status: "completed" },
+		});
+	});
+
 	it("intervenes after repeated lazy root turns and completes only after measurable progress", async () => {
 		harness = await createHarness({ persistSession: true, enforceAvoCompletion: true });
 		harness.setResponses([

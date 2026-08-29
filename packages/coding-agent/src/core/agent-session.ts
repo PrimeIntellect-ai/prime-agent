@@ -1294,6 +1294,7 @@ export class AgentSession {
 	private _avoToolInterventionQueued = false;
 	private _avoToolInterventionCount = 0;
 	private _avoToolLastInterventionBatch = 0;
+	private _avoCanonicalDeliveryQueuedRunId?: string;
 	private _avoSupervisorBoundToRuntime = false;
 	private _autoresearchStore?: AutoresearchStore;
 	private _autoresearchSupervisorBoundToRuntime = false;
@@ -3917,6 +3918,71 @@ export class AgentSession {
 		});
 	}
 
+	private async _queueAvoCanonicalDeliveryAfterPassingGate(gate: AvoStopGate): Promise<void> {
+		if (
+			!gate.passed ||
+			!this._enforceAvoCompletion ||
+			!this._avoRuntime ||
+			this._rlmDepth !== 0 ||
+			!this.isStreaming
+		) {
+			return;
+		}
+		const state = this._avoRuntime.getState();
+		if (!state.objective || state.status !== "active" || this._avoCanonicalDeliveryQueuedRunId === state.runId) {
+			return;
+		}
+		const acceptedCandidateIds = new Set(
+			state.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
+		);
+		const adapter = this._avoRuntime.adapters.get(state.routing.environment);
+		const acceptedCandidate = [...state.candidates].reverse().find(
+			(candidate) =>
+				acceptedCandidateIds.has(candidate.candidateId) &&
+				adapter.deriveEvaluationState(
+					candidate,
+					state.evaluations.filter((receipt) => receipt.candidateId === candidate.candidateId),
+					state,
+				).canonical,
+		);
+		if (!acceptedCandidate?.deliveryDigest) return;
+		this._avoCanonicalDeliveryQueuedRunId = state.runId;
+		const exactCodingDelivery =
+			state.routing.environment === "coding" || state.routing.environment === "research"
+				? ` The exact recorded delivery is the decoded value of ${JSON.stringify(acceptedCandidate.summary)}; output it without JSON quotes.`
+				: "";
+		const message: CustomMessage = {
+			role: "custom",
+			customType: "avo_canonical_delivery_required",
+			content: [
+				"<avo_canonical_delivery_required>",
+				`The host stop gate passed for candidate ${acceptedCandidate.candidateId}.`,
+				"End tool use now. Do not clean up verifier helpers, inspect state, call the stop gate again, or perform additional work.",
+				`Return only the accepted candidate's exact canonical delivery with no preface, suffix, explanation, or decoration.${exactCodingDelivery}`,
+				"</avo_canonical_delivery_required>",
+			].join("\n"),
+			display: true,
+			details: {
+				runId: state.runId,
+				candidateId: acceptedCandidate.candidateId,
+				gatePassed: true,
+				trigger: "post_ready_canonical_delivery",
+			},
+			timestamp: Date.now(),
+		};
+		const normalized = normalizeMessageContent(message.content);
+		try {
+			await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
+				message,
+				resumeIfIdle: true,
+			});
+		} catch {
+			if (this._avoCanonicalDeliveryQueuedRunId === state.runId) {
+				this._avoCanonicalDeliveryQueuedRunId = undefined;
+			}
+		}
+	}
+
 	private async _maybeInterveneAvoToolStagnation(toolResults: readonly ToolResultMessage[]): Promise<void> {
 		const timedOutTool = toolResults.find((result) => {
 			const details = result.details;
@@ -5356,10 +5422,15 @@ export class AgentSession {
 				return { checkpoint: runtime.getState().checkpoints.at(-1) ?? null };
 			case "avo.stop_gate":
 				await this._collectAvoSupervisorResults();
-				return { stop_gate: this._evaluateAvoHostBoundStopGate() };
+				{
+					const stopGate = this._evaluateAvoHostBoundStopGate();
+					await this._queueAvoCanonicalDeliveryAfterPassingGate(stopGate);
+					return { stop_gate: stopGate };
+				}
 			case "avo.complete": {
 				await this._collectAvoSupervisorResults();
 				const stopGate = this._evaluateAvoHostBoundStopGate();
+				await this._queueAvoCanonicalDeliveryAfterPassingGate(stopGate);
 				return {
 					state: runtime.getState(),
 					stop_gate: stopGate,

@@ -130,6 +130,9 @@ Never pass or request an environment override.
    triggers a separate delivery intervention without weakening its exact bind.
    Automatic routing never lowers an active horizon.
 9. Finish only after `stop_gate()` passes. Model opinion alone cannot pass it.
+   When it passes, stop tool use immediately and return the exact canonical
+   delivery requested by the host. Do not clean verifier helpers, inspect
+   state, or call the gate a second time.
 10. The host enforces this lifecycle at the root turn boundary. After an
    accepted cycle, return only its canonical delivery (general payload text,
    deterministic numeric result, or coding/research candidate summary), with
