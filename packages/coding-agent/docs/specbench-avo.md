@@ -155,6 +155,10 @@ other/final. Completion repair begins only after a non-passing completion
 attempt. Post-ready work records otherwise-unclassified tool activity after a
 passing gate, so model overwork is not incorrectly attributed to a verifier
 blocker.
+Events from the root and retained verifier sessions are merged chronologically
+before this attribution. Once the host gate passes, queued AVO-supervisor
+prompts are superseded by the exact canonical-delivery request; ordinary user
+follow-ups and unrelated agent messages remain queued normally.
 This is not a causal decomposition. In particular, input tokens include
 accumulated context from earlier stages, so use the stage table to locate
 overhead for further inspection rather than to assign mechanistic credit.

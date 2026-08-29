@@ -445,6 +445,66 @@ describe("Prime Integrity Eval", () => {
 		]);
 	});
 
+	test("merges root and verifier sessions chronologically for completion amplification", () => {
+		const root = tempDirectory();
+		const rootSessionPath = join(root, "root.jsonl");
+		const verifierSessionPath = join(root, "verifier.jsonl");
+		const assistant = (timestamp: string, totalTokens: number, code?: string, id?: string) =>
+			JSON.stringify({
+				type: "message",
+				timestamp,
+				message: {
+					role: "assistant",
+					content: code
+						? [{ type: "toolCall", id, name: "ipython", arguments: { code } }]
+						: [{ type: "text", text: "done" }],
+					usage: {
+						input: totalTokens - 1,
+						output: 1,
+						totalTokens,
+						cost: { total: totalTokens / 1_000 },
+					},
+				},
+			});
+		writeFileSync(
+			rootSessionPath,
+			[
+				assistant("2026-08-29T00:00:02.000Z", 10, "implement()"),
+				assistant("2026-08-29T00:00:10.000Z", 20, "await avo.stop_gate()", "gate"),
+				JSON.stringify({
+					type: "message",
+					timestamp: "2026-08-29T00:00:11.000Z",
+					message: {
+						role: "toolResult",
+						toolCallId: "gate",
+						content: [{ type: "text", text: "{'stop_gate': {'passed': True, 'checks': [], 'reasons': []}}" }],
+					},
+				}),
+				assistant("2026-08-29T00:00:30.000Z", 30),
+			].join("\n"),
+			"utf8",
+		);
+		writeFileSync(
+			verifierSessionPath,
+			[
+				assistant("2026-08-29T00:00:05.000Z", 40, "verify_before_gate()"),
+				assistant("2026-08-29T00:00:20.000Z", 50, "verify_after_gate()"),
+			].join("\n"),
+			"utf8",
+		);
+
+		const trace = summarizePrimeIntegrityTrace([rootSessionPath, verifierSessionPath], root);
+		expect(trace).toMatchObject({
+			totalTokens: 150,
+			completionAttemptCount: 1,
+			firstCompletionAttemptPassed: true,
+			tokensAfterFirstCompletionAttempt: 80,
+			inputTokensAfterFirstCompletionAttempt: 78,
+			outputTokensAfterFirstCompletionAttempt: 2,
+			completionRepairAmplification: 80 / 150,
+		});
+	});
+
 	test("reads anti-laziness checkpoints from the durable AVO trace", () => {
 		const root = tempDirectory();
 		const avoDirectory = join(root, "session", "avo");

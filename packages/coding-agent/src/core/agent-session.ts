@@ -3946,6 +3946,7 @@ export class AgentSession {
 				).canonical,
 		);
 		if (!acceptedCandidate?.deliveryDigest) return;
+		this._discardObsoleteAvoCompletionInputs(state);
 		this._avoCanonicalDeliveryQueuedRunId = state.runId;
 		const exactCodingDelivery =
 			state.routing.environment === "coding" || state.routing.environment === "research"
@@ -3975,12 +3976,50 @@ export class AgentSession {
 			await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
 				message,
 				resumeIfIdle: true,
+				front: true,
 			});
 		} catch {
 			if (this._avoCanonicalDeliveryQueuedRunId === state.runId) {
 				this._avoCanonicalDeliveryQueuedRunId = undefined;
 			}
 		}
+	}
+
+	private _isObsoleteAvoCompletionMessage(
+		message: CustomMessage,
+		state: AvoRunState,
+		includeCanonicalDelivery: boolean,
+	): boolean {
+		if (includeCanonicalDelivery && message.customType === "avo_canonical_delivery_required") return true;
+		if (!isAgentSessionMessage(message) || message.details.fromRelationship !== "child") return false;
+		const senderName = message.details.from?.sessionName;
+		return (
+			typeof senderName === "string" &&
+			(senderName === state.supervisor?.name ||
+				(senderName.startsWith("avo-supervisor-") &&
+					(message.details.message.includes("AVO_SUPERVISOR_READY") ||
+						message.details.message.includes("AVO_SUPERVISION_JSON:"))))
+		);
+	}
+
+	private _discardObsoleteAvoCompletionInputs(
+		state: AvoRunState,
+		options: { includeCanonicalDelivery?: boolean } = {},
+	): void {
+		const includeCanonicalDelivery = options.includeCanonicalDelivery ?? true;
+		const isObsolete = (message: CustomMessage) =>
+			this._isObsoleteAvoCompletionMessage(message, state, includeCanonicalDelivery);
+		this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter((message) => !isObsolete(message));
+		this._cancelSessionActions(
+			(action) =>
+				action.payload.kind === "turn" &&
+				(action.lifecycle.state === "queued" ||
+					action.lifecycle.state === "selected" ||
+					action.lifecycle.state === "preparing") &&
+				action.payload.customMessage !== undefined &&
+				isObsolete(action.payload.customMessage),
+			new Error("Queued AVO supervisor work was superseded by canonical delivery."),
+		);
 	}
 
 	private async _maybeInterveneAvoToolStagnation(toolResults: readonly ToolResultMessage[]): Promise<void> {
@@ -6564,6 +6603,7 @@ export class AgentSession {
 		const delivery = await this._assessAvoCanonicalDelivery(context, signal);
 		if (!delivery?.deliveryMatches || !this._avoRuntime) return false;
 		this._avoRuntime.store.complete(delivery.gate);
+		this._discardObsoleteAvoCompletionInputs(delivery.state, { includeCanonicalDelivery: false });
 		return true;
 	}
 
@@ -6576,6 +6616,7 @@ export class AgentSession {
 		const { state, gate, acceptedCandidate, assistantDigest, deliveryMatches } = delivery;
 		if (deliveryMatches) {
 			this._avoRuntime.store.complete(gate);
+			this._discardObsoleteAvoCompletionInputs(state, { includeCanonicalDelivery: false });
 			return undefined;
 		}
 		const watchdog = this._assessAvoProgressWatchdog(
@@ -8922,13 +8963,14 @@ export class AgentSession {
 			suppressAutonomousContinuation?: boolean;
 			resumeIfIdle?: boolean;
 			source?: InputSource | "internal";
+			front?: boolean;
 		} = {},
 	): Promise<boolean> {
 		const action = this._createPreparedTurnAction(schedule, text, images, options);
 		if (action.suppressAutonomousContinuation) {
 			this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
 		}
-		return this._admitSessionInput(action).accepted;
+		return this._admitSessionInput(action, { front: options.front }).accepted;
 	}
 
 	private _runtimeActivity(): RuntimeActivity {

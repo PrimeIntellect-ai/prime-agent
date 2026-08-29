@@ -757,112 +757,150 @@ function messageText(content: unknown): string {
 export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoot: string): PrimeIntegrityTraceSummary {
 	const summary = emptyTraceSummary();
 	const turnUsage: Array<PrimeIntegrityModelUsageSummary & { assistantTurn: number }> = [];
-	for (const path of sessionPaths) {
-		let seenCompletionAttempt = false;
-		let latestCompletionAttemptPassed: boolean | null = null;
-		const pendingCompletionAttempts = new Map<
+	const sessionEvents = sessionPaths
+		.flatMap((path, pathIndex) => {
+			let lastTimestamp = Number.NaN;
+			return readFileSync(path, "utf8")
+				.split("\n")
+				.flatMap((line, lineIndex) => {
+					if (!line.trim()) return [];
+					try {
+						const entry = JSON.parse(line) as Record<string, unknown>;
+						const message =
+							entry.message && typeof entry.message === "object"
+								? (entry.message as Record<string, unknown>)
+								: undefined;
+						const entryTimestamp = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+						const messageTimestamp = typeof message?.timestamp === "number" ? message.timestamp : Number.NaN;
+						const observedTimestamp = Number.isFinite(entryTimestamp) ? entryTimestamp : messageTimestamp;
+						if (Number.isFinite(observedTimestamp)) lastTimestamp = observedTimestamp;
+						const parsedTimestamp = Number.isFinite(observedTimestamp) ? observedTimestamp : lastTimestamp;
+						return [{ path, pathIndex, lineIndex, entry, parsedTimestamp }];
+					} catch {
+						return [];
+					}
+				});
+		})
+		.sort((left, right) => {
+			const leftTimestamp = Number.isFinite(left.parsedTimestamp) ? left.parsedTimestamp : Number.MAX_SAFE_INTEGER;
+			const rightTimestamp = Number.isFinite(right.parsedTimestamp)
+				? right.parsedTimestamp
+				: Number.MAX_SAFE_INTEGER;
+			return leftTimestamp - rightTimestamp || left.pathIndex - right.pathIndex || left.lineIndex - right.lineIndex;
+		});
+	type SessionCompletionTracking = {
+		seenCompletionAttempt: boolean;
+		latestCompletionAttemptPassed: boolean | null;
+		pendingCompletionAttempts: Map<
 			string,
 			Omit<PrimeIntegrityCompletionAttempt, "attempt" | "passed" | "blockerIds" | "blockerReasons" | "reasons">
-		>();
-		for (const line of readFileSync(path, "utf8").split("\n")) {
-			if (!line.trim()) continue;
-			let entry: Record<string, unknown>;
-			try {
-				entry = JSON.parse(line) as Record<string, unknown>;
-			} catch {
-				continue;
+		>;
+	};
+	const completionTrackingBySession = new Map<string, SessionCompletionTracking>();
+	for (const { path, entry } of sessionEvents) {
+		let tracking = completionTrackingBySession.get(path);
+		if (!tracking) {
+			tracking = {
+				seenCompletionAttempt: false,
+				latestCompletionAttemptPassed: null,
+				pendingCompletionAttempts: new Map(),
+			};
+			completionTrackingBySession.set(path, tracking);
+		}
+		const customAttempt = customCompletionAttempt(entry, summary.assistantTurns);
+		if (customAttempt) {
+			summary.completionAttempts.push({ attempt: summary.completionAttempts.length + 1, ...customAttempt });
+			tracking.seenCompletionAttempt = true;
+			tracking.latestCompletionAttemptPassed = customAttempt.passed;
+		}
+		if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") continue;
+		const message = entry.message as Record<string, unknown>;
+		const text = messageText(message.content);
+		if (message.role === "assistant") {
+			const toolText = assistantToolText(message.content);
+			const tokenStage = tokenStageForAssistant(
+				toolText,
+				tracking.seenCompletionAttempt,
+				tracking.latestCompletionAttemptPassed,
+			);
+			const stageUsage = summary.tokenUsageByStage[tokenStage];
+			summary.assistantTurns += 1;
+			summary.modelCalls += 1;
+			stageUsage.modelCalls += 1;
+			const observedUsage = {
+				assistantTurn: summary.assistantTurns,
+				...emptyModelUsageSummary(),
+			};
+			observedUsage.modelCalls = 1;
+			if (message.usage && typeof message.usage === "object") {
+				const usage = message.usage as Record<string, unknown>;
+				const inputTokens = typeof usage.input === "number" ? usage.input : 0;
+				const cacheReadTokens = typeof usage.cacheRead === "number" ? usage.cacheRead : 0;
+				const cacheWriteTokens = typeof usage.cacheWrite === "number" ? usage.cacheWrite : 0;
+				const outputTokens = typeof usage.output === "number" ? usage.output : 0;
+				const totalTokens = typeof usage.totalTokens === "number" ? usage.totalTokens : 0;
+				summary.inputTokens += inputTokens;
+				summary.cacheReadTokens += cacheReadTokens;
+				summary.cacheWriteTokens += cacheWriteTokens;
+				summary.outputTokens += outputTokens;
+				summary.totalTokens += totalTokens;
+				stageUsage.inputTokens += inputTokens;
+				stageUsage.cacheReadTokens += cacheReadTokens;
+				stageUsage.cacheWriteTokens += cacheWriteTokens;
+				stageUsage.outputTokens += outputTokens;
+				stageUsage.totalTokens += totalTokens;
+				observedUsage.inputTokens = inputTokens;
+				observedUsage.cacheReadTokens = cacheReadTokens;
+				observedUsage.cacheWriteTokens = cacheWriteTokens;
+				observedUsage.outputTokens = outputTokens;
+				observedUsage.totalTokens = totalTokens;
+				if (usage.cost && typeof usage.cost === "object") {
+					const cost = usage.cost as Record<string, unknown>;
+					const costUsd = typeof cost.total === "number" ? cost.total : 0;
+					summary.costUsd += costUsd;
+					stageUsage.costUsd += costUsd;
+					observedUsage.costUsd = costUsd;
+				}
 			}
-			const customAttempt = customCompletionAttempt(entry, summary.assistantTurns);
-			if (customAttempt) {
-				summary.completionAttempts.push({ attempt: summary.completionAttempts.length + 1, ...customAttempt });
-				seenCompletionAttempt = true;
-				latestCompletionAttemptPassed = customAttempt.passed;
-			}
-			if (entry.type !== "message" || !entry.message || typeof entry.message !== "object") continue;
-			const message = entry.message as Record<string, unknown>;
-			const text = messageText(message.content);
-			if (message.role === "assistant") {
-				const toolText = assistantToolText(message.content);
-				const tokenStage = tokenStageForAssistant(toolText, seenCompletionAttempt, latestCompletionAttemptPassed);
-				const stageUsage = summary.tokenUsageByStage[tokenStage];
-				summary.assistantTurns += 1;
-				summary.modelCalls += 1;
-				stageUsage.modelCalls += 1;
-				const observedUsage = {
+			turnUsage.push(observedUsage);
+			for (const completionCall of completionToolCalls(message.content)) {
+				tracking.pendingCompletionAttempts.set(completionCall.toolCallId, {
+					source: completionCall.source,
 					assistantTurn: summary.assistantTurns,
-					...emptyModelUsageSummary(),
-				};
-				observedUsage.modelCalls = 1;
-				if (message.usage && typeof message.usage === "object") {
-					const usage = message.usage as Record<string, unknown>;
-					const inputTokens = typeof usage.input === "number" ? usage.input : 0;
-					const cacheReadTokens = typeof usage.cacheRead === "number" ? usage.cacheRead : 0;
-					const cacheWriteTokens = typeof usage.cacheWrite === "number" ? usage.cacheWrite : 0;
-					const outputTokens = typeof usage.output === "number" ? usage.output : 0;
-					const totalTokens = typeof usage.totalTokens === "number" ? usage.totalTokens : 0;
-					summary.inputTokens += inputTokens;
-					summary.cacheReadTokens += cacheReadTokens;
-					summary.cacheWriteTokens += cacheWriteTokens;
-					summary.outputTokens += outputTokens;
-					summary.totalTokens += totalTokens;
-					stageUsage.inputTokens += inputTokens;
-					stageUsage.cacheReadTokens += cacheReadTokens;
-					stageUsage.cacheWriteTokens += cacheWriteTokens;
-					stageUsage.outputTokens += outputTokens;
-					stageUsage.totalTokens += totalTokens;
-					observedUsage.inputTokens = inputTokens;
-					observedUsage.cacheReadTokens = cacheReadTokens;
-					observedUsage.cacheWriteTokens = cacheWriteTokens;
-					observedUsage.outputTokens = outputTokens;
-					observedUsage.totalTokens = totalTokens;
-					if (usage.cost && typeof usage.cost === "object") {
-						const cost = usage.cost as Record<string, unknown>;
-						const costUsd = typeof cost.total === "number" ? cost.total : 0;
-						summary.costUsd += costUsd;
-						stageUsage.costUsd += costUsd;
-						observedUsage.costUsd = costUsd;
-					}
-				}
-				turnUsage.push(observedUsage);
-				for (const completionCall of completionToolCalls(message.content)) {
-					pendingCompletionAttempts.set(completionCall.toolCallId, {
-						source: completionCall.source,
-						assistantTurn: summary.assistantTurns,
-						...(typeof entry.timestamp === "string" ? { timestamp: entry.timestamp } : {}),
-					});
-				}
-				if (Array.isArray(message.content)) {
-					for (const part of message.content) {
-						if (!part || typeof part !== "object" || !("type" in part) || part.type !== "toolCall") continue;
-						summary.toolCalls += 1;
-						if ("arguments" in part && part.arguments && typeof part.arguments === "object") {
-							const args = part.arguments as Record<string, unknown>;
-							for (const key of ["code", "command"]) {
-								if (typeof args[key] === "string") summary.commands.push(args[key]);
-							}
+					...(typeof entry.timestamp === "string" ? { timestamp: entry.timestamp } : {}),
+				});
+			}
+			if (Array.isArray(message.content)) {
+				for (const part of message.content) {
+					if (!part || typeof part !== "object" || !("type" in part) || part.type !== "toolCall") continue;
+					summary.toolCalls += 1;
+					if ("arguments" in part && part.arguments && typeof part.arguments === "object") {
+						const args = part.arguments as Record<string, unknown>;
+						for (const key of ["code", "command"]) {
+							if (typeof args[key] === "string") summary.commands.push(args[key]);
 						}
 					}
 				}
-				if (isCompletionGateAttempt(toolText)) seenCompletionAttempt = true;
 			}
-			if (message.role === "toolResult" && typeof message.toolCallId === "string") {
-				const pending = pendingCompletionAttempts.get(message.toolCallId);
-				if (pending) {
-					const observedAttempt = {
-						attempt: summary.completionAttempts.length + 1,
-						...pending,
-						...parseCompletionGateText(text),
-					};
-					summary.completionAttempts.push(observedAttempt);
-					latestCompletionAttemptPassed = observedAttempt.passed;
-					pendingCompletionAttempts.delete(message.toolCallId);
-				}
-			}
-			if (text.includes("Anti-laziness intervention") || text.includes("<avo_progress_intervention>")) {
-				summary.watchdogInterventions += 1;
-			}
-			if (text.includes("Anti-laziness watch:")) summary.watchdogWatches += 1;
+			if (isCompletionGateAttempt(toolText)) tracking.seenCompletionAttempt = true;
 		}
+		if (message.role === "toolResult" && typeof message.toolCallId === "string") {
+			const pending = tracking.pendingCompletionAttempts.get(message.toolCallId);
+			if (pending) {
+				const observedAttempt = {
+					attempt: summary.completionAttempts.length + 1,
+					...pending,
+					...parseCompletionGateText(text),
+				};
+				summary.completionAttempts.push(observedAttempt);
+				tracking.latestCompletionAttemptPassed = observedAttempt.passed;
+				tracking.pendingCompletionAttempts.delete(message.toolCallId);
+			}
+		}
+		if (text.includes("Anti-laziness intervention") || text.includes("<avo_progress_intervention>")) {
+			summary.watchdogInterventions += 1;
+		}
+		if (text.includes("Anti-laziness watch:")) summary.watchdogWatches += 1;
 	}
 	for (const statePath of findFiles(artifactRoot, `${sep}avo${sep}state.json`)) {
 		try {

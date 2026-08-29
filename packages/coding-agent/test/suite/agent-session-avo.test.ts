@@ -3,6 +3,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { AGENT_MESSAGE_SOURCE, createAgentSessionMessage } from "../../src/core/agent-messages.js";
 import { AVO_HOST_REQUEST_TYPES, type AvoRunState, GeneralAvoAdapter } from "../../src/core/avo/index.js";
 import { createHarness, type Harness } from "./harness.js";
 
@@ -105,7 +106,7 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 	});
 
-	it("interrupts a post-ready tool chain and requests canonical delivery immediately", async () => {
+	it("discards queued AVO supervisor prompts and requests canonical delivery immediately", async () => {
 		const readyTool: AgentTool = {
 			name: "ready",
 			label: "Ready",
@@ -133,6 +134,20 @@ describe("AgentSession universal AVO runtime", () => {
 				await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
 					cycle: { candidate_id: "ready-poem" },
 				});
+				for (const [id, message] of [
+					["ready", "AVO_SUPERVISOR_READY"],
+					["review", 'AVO_SUPERVISION_JSON:cycle-ready\n{"status":"progressing"}'],
+				] as const) {
+					const supervisorMessage = createAgentSessionMessage({
+						id: `avo-supervisor-${id}`,
+						source: AGENT_MESSAGE_SOURCE,
+						message,
+						from: { sessionName: "avo-supervisor-test" },
+						fromRelationship: "child",
+						target: { activeSessionId: "root-active", sessionId: harness!.session.sessionId },
+					});
+					await harness!.session.queueAgentMessagePrompt(supervisorMessage.content, "steer", supervisorMessage);
+				}
 				const gate = await harness!.session.handleAvoHostRequest("avo.stop_gate");
 				return { content: [{ type: "text", text: JSON.stringify(gate) }], details: {} };
 			},
@@ -148,7 +163,6 @@ describe("AgentSession universal AVO runtime", () => {
 		]);
 
 		await harness.session.prompt("Write a short poem about rain");
-
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(
 			harness.session.messages.filter(
