@@ -2,7 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { Writable } from "node:stream";
 import { getLogger } from "@earendil-works/pi-ai";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
@@ -2117,22 +2117,44 @@ export class DaemonSupervisor {
 			}
 			case "delete_saved_session":
 				if (!command.activeSessionId) {
-					const entry = this.roster().bySessionFile(canonicalSessionPath(command.sessionPath));
+					const deletedPath = canonicalSessionPath(command.sessionPath);
+					const entry = this.roster().bySessionFile(deletedPath);
 					if (entry?.summary.activeSessionId !== undefined) {
 						throw new Error("Cannot delete the currently active session");
 					}
-					const owner = entry?.workerId !== undefined ? this.workers.get(entry.workerId) : undefined;
-					// The owning worker deletes its own passivated files and publishes the removal itself.
-					if (owner?.client && !this.isWorkerStopping(owner)) {
-						return this.forwardToWorker(owner, command);
+					// Descriptor paths cover owners whose rows are not claimed yet (startup, adoption, recovery).
+					const owner =
+						(entry?.workerId !== undefined ? this.workers.get(entry.workerId) : undefined) ??
+						this.findWorkerBySessionFile(command.sessionPath);
+					if (owner) {
+						// The owning worker deletes its own passivated files and publishes the removal itself.
+						if (owner.client && !this.isWorkerStopping(owner)) {
+							return this.forwardToWorker(owner, command);
+						}
+						// Never delete under a live-but-unreachable owner; the caller retries after recovery.
+						throw new Error(
+							`Session worker is ${this.effectiveWorkerState(owner)}; retry the delete once it is reachable`,
+						);
 					}
-					// Tombstone first: a failed append aborts; a tombstoned-but-undeleted file is the accepted orphan of a failed delete.
-					if (entry?.summary.rlmChildId) {
-						await this.rlmSpawnLedger().appendDelete({
-							childId: entry.summary.rlmChildId,
-							child: command.sessionPath,
-							reason: "user",
-						});
+					const deletedInfo = (await readSessionInfo(command.sessionPath).catch(() => null)) ?? undefined;
+					// Roster/disk state classifies first; only a readable no-parent transcript is positively top-level.
+					const knownChild =
+						entry?.summary.runtimeKind === "subagent" ||
+						deletedInfo?.parentSessionPath !== undefined ||
+						(deletedInfo?.rlmDepth ?? 0) > 0;
+					const positivelyTopLevel = !knownChild && (entry !== undefined || deletedInfo !== undefined);
+					if (!positivelyTopLevel) {
+						// Children and unknown targets classify via the ledger; an unreadable ledger aborts, else the child reseeds.
+						const edges = await this.rlmSpawnLedger().edges();
+						const edge = edges.find((candidate) => canonicalSessionPath(candidate.child) === deletedPath);
+						// Tombstone first: a failed append aborts; a tombstoned-but-undeleted file is the accepted orphan of a failed delete.
+						if (edge) {
+							await this.rlmSpawnLedger().appendDelete({
+								childId: edge.childId,
+								child: command.sessionPath,
+								reason: "user",
+							});
+						}
 					}
 					const result = await this.catalog.delete(command.sessionPath);
 					if (result.ok && entry) this.roster().delete(entry.agentId);
@@ -2286,20 +2308,21 @@ export class DaemonSupervisor {
 		command: Extract<DaemonCommand, { type: "list" }>,
 	): Promise<DaemonResponse> {
 		const active: SessionSummary[] = [];
-		const workerOwnedFiles = new Set<string>();
+		const activeByFile = new Map<string, SessionSummary>();
 		let busyClientOwnedSessionCount = 0;
 		for (const entry of this.roster().values()) {
 			// Sessionless queued-child rows are ledger-internal; no list form serves them.
 			if (entry.queuedChild) continue;
 			const worker = entry.workerId !== undefined ? this.workers.get(entry.workerId) : undefined;
 			if (worker === undefined) continue;
-			if (entry.summary.sessionFile) workerOwnedFiles.add(canonicalSessionPath(entry.summary.sessionFile));
 			const summary = this.publicSummary(worker, sessionSummaryFromRosterEntry(entry));
 			// Stopping workers stay listed with an honest workerState; daemon-launch busy checks read this list.
 			if (this.isVisibleWorker(worker)) {
 				active.push(summary);
+				if (summary.sessionFile) activeByFile.set(canonicalSessionPath(summary.sessionFile), summary);
 				continue;
 			}
+			if (summary.sessionFile) activeByFile.set(canonicalSessionPath(summary.sessionFile), summary);
 			if (isSessionSummaryBusy(summary)) busyClientOwnedSessionCount += 1;
 			if (command.includeClientOwned === true && this.isWorkerAccessibleToClient(client, worker)) {
 				active.push(summary);
@@ -2312,34 +2335,44 @@ export class DaemonSupervisor {
 		if (!command.all) {
 			return success(command.id, "list", data);
 		}
-		// Disk owns saved state (external processes write session files); the ledger wins for rows it knows.
+		// Disk is authoritative for non-resident rows; a failed scan must fail the list, not shrink it.
 		const sessionDir = command.sessionDir ?? this.defaultSessionConfig.sessionDir;
-		const scanned = await this.catalog
-			.list(command.cwd ? resolve(command.cwd) : undefined, sessionDir)
-			.catch(() => []);
+		const scanned = await this.catalog.list(command.cwd ? resolve(command.cwd) : undefined, sessionDir);
 		const cwd = command.cwd ? resolve(command.cwd) : undefined;
-		const saved: SessionSummary[] = [];
-		const savedFiles = new Set<string>();
+		// Worker rows replace their scanned files in place so the newest-first catalog order survives.
+		const merged: SessionSummary[] = [];
+		const mergedActiveFiles = new Set<string>();
+		const scannedFiles = new Set<string>();
 		for (const info of scanned) {
 			const file = canonicalSessionPath(info.path);
-			savedFiles.add(file);
-			if (workerOwnedFiles.has(file)) continue;
-			const entry = this.roster().bySessionFile(file);
-			saved.push(entry ? sessionSummaryFromRosterEntry(entry) : summaryForInactiveSession(info));
+			scannedFiles.add(file);
+			const workerRow = activeByFile.get(file);
+			if (workerRow) {
+				if (active.includes(workerRow)) {
+					merged.push(workerRow);
+					mergedActiveFiles.add(file);
+				}
+				continue;
+			}
+			merged.push(summaryForInactiveSession(info));
 		}
 		for (const entry of this.roster().values()) {
 			// Ledger-only offline rows (artifact-dir children, flipped residents) ride along with the scan.
 			if (entry.queuedChild || entry.summary.activeSessionId !== undefined) continue;
 			if (entry.workerId !== undefined && this.workers.has(entry.workerId)) continue;
 			const file = entry.summary.sessionFile ? canonicalSessionPath(entry.summary.sessionFile) : undefined;
-			if (file === undefined || savedFiles.has(file) || workerOwnedFiles.has(file)) continue;
+			if (file === undefined || scannedFiles.has(file) || activeByFile.has(file)) continue;
 			const summary = sessionSummaryFromRosterEntry(await this.hydrateSeededEntry(entry));
 			if (cwd !== undefined && resolve(summary.cwd) !== cwd) continue;
 			if (!this.matchesListSessionDir(summary, sessionDir)) continue;
-			saved.push(summary);
+			merged.push(summary);
 		}
-		saved.sort((a, b) => Date.parse(b.modified ?? "") - Date.parse(a.modified ?? ""));
-		return success(command.id, "list", { ...data, sessions: [...saved, ...active] });
+		for (const summary of active) {
+			const file = summary.sessionFile ? canonicalSessionPath(summary.sessionFile) : undefined;
+			if (file !== undefined && mergedActiveFiles.has(file)) continue;
+			merged.push(summary);
+		}
+		return success(command.id, "list", { ...data, sessions: merged });
 	}
 
 	// Seeded artifact-dir rows carry a synthetic cwd until their transcript header is read once.
@@ -2361,10 +2394,14 @@ export class DaemonSupervisor {
 		if (!summary.sessionFile) return false;
 		let file = resolve(summary.sessionFile);
 		let parentSessionPath = summary.parentSessionPath;
-		for (let hops = 0; parentSessionPath !== undefined && hops < 32; hops++) {
+		// A visited set terminates cycles without capping legitimate depth.
+		const visited = new Set<string>();
+		while (parentSessionPath !== undefined) {
+			const canonical = canonicalSessionPath(parentSessionPath);
+			if (visited.has(canonical)) break;
+			visited.add(canonical);
 			file = resolve(parentSessionPath);
-			parentSessionPath = this.roster().bySessionFile(canonicalSessionPath(parentSessionPath))?.summary
-				.parentSessionPath;
+			parentSessionPath = this.roster().bySessionFile(canonical)?.summary.parentSessionPath;
 		}
 		return dirname(file) === resolve(sessionDir);
 	}
@@ -2916,7 +2953,7 @@ export class DaemonSupervisor {
 				await client.connect(Math.min(500, Math.max(50, deadline - Date.now())));
 				await client.waitForHello(1000);
 				// Listen before authenticating: the worker flushes its roster snapshot right after auth succeeds.
-				client.onFrame((frame) => this.handleWorkerFrame(worker, frame));
+				client.onFrame((frame) => this.handleWorkerFrame(worker, frame, client));
 				client.onClose((error) => void this.handleWorkerClose(worker, client, error));
 				const authResponse = await client.authenticateWorker(
 					worker.descriptor.authenticationToken,
@@ -3648,14 +3685,16 @@ export class DaemonSupervisor {
 	}
 
 	private rosterEntryForSpawnLedgerEdge(edge: RlmLedgerEdge): WorkerRosterEntry {
+		// The persisted session id is the transcript's filename; edge.childId stays the child identifier.
+		const persistedSessionId = basename(edge.child, ".jsonl");
 		const summary: WorkerRosterEntry["summary"] = {
-			id: edge.childId,
+			id: persistedSessionId,
 			lifecycle: "live",
 			activity: "idle",
 			isSessionActive: false,
 			runtimeKind: "subagent",
 			rlmDepth: edge.depth,
-			sessionId: edge.childId,
+			sessionId: persistedSessionId,
 			sessionFile: edge.child,
 			sessionName: edge.name,
 			// The ledger records topology only; display fields hydrate lazily on open.
@@ -4573,8 +4612,16 @@ export class DaemonSupervisor {
 		);
 	}
 
-	private handleWorkerFrame(worker: ResidentWorker, frame: PrivateFrame<DaemonWorkerFrameHeader>): void {
+	private handleWorkerFrame(
+		worker: ResidentWorker,
+		frame: PrivateFrame<DaemonWorkerFrameHeader>,
+		source?: DaemonWorkerClient,
+	): void {
 		if (frame.header.kind !== "outbound") {
+			return;
+		}
+		// A superseded connection's buffered frames must not outlive its replacement.
+		if (source !== undefined && worker.client !== undefined && source !== worker.client) {
 			return;
 		}
 		worker.lastFrameAt = Date.now();

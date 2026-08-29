@@ -1092,7 +1092,7 @@ describe("bot-round regressions", () => {
 		expect(daemon.rosterReporter.removedAgentIds.size).toBe(0);
 	});
 
-	it("merges the per-call disk scan with ledger rows, preferring the ledger for known files", async () => {
+	it("merges the per-call disk scan newest-first with disk authoritative for non-resident rows", async () => {
 		const worker = makeWorker("worker-1");
 		const supervisor = makeSupervisor([worker], {
 			catalog: {
@@ -1122,14 +1122,31 @@ describe("bot-round regressions", () => {
 		});
 		supervisor.writeRosterEntry(
 			workerRosterEntryFromSummary(
-				summary({ id: "known", sessionId: "known", sessionFile: "/tmp/known.jsonl", sessionName: "renamed" }),
+				summary({
+					id: "known",
+					sessionId: "known",
+					sessionFile: "/tmp/known.jsonl",
+					sessionName: "stale-ledger-name",
+				}),
 			),
+		);
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({
+					id: "res-active",
+					sessionId: "resident",
+					sessionFile: "/tmp/external.jsonl",
+					activeSessionId: "res-active",
+				}),
+			),
+			worker,
 		);
 
 		const listed = await supervisor.handleList({}, { type: "list", all: true });
-		const ids = listed.data?.sessions.map((session) => session.sessionId).sort();
-		expect(ids).toEqual(["external", "known"]);
-		expect(listed.data?.sessions.find((session) => session.sessionId === "known")?.sessionName).toBe("renamed");
+		// Newest-first catalog order with the resident row replacing its scanned file in place.
+		expect(listed.data?.sessions.map((session) => session.sessionId)).toEqual(["resident", "known"]);
+		// Disk is authoritative for non-resident rows; the stale ledger name loses.
+		expect(listed.data?.sessions.find((session) => session.sessionId === "known")?.sessionName).toBeUndefined();
 	});
 
 	it("forwards passive-child deletes to the owning worker instead of rejecting them", async () => {
@@ -1192,6 +1209,92 @@ describe("bot-round regressions", () => {
 		);
 
 		expect(supervisor.roster().has("saved-1")).toBe(true);
+	});
+
+	it("rejects offline deletes owned via descriptor or an unreachable worker, forwards reachable owners", async () => {
+		const reachable = makeWorker("w-reach");
+		Object.assign(reachable.descriptor, { sessionFile: "/tmp/owned-reach.jsonl", createCommand: { type: "create" } });
+		reachable.client = {
+			request: vi.fn(async () => ({ type: "response", command: "delete_saved_session", success: true })),
+		};
+		const unreachable = makeWorker("w-down");
+		Object.assign(unreachable.descriptor, {
+			sessionFile: "/tmp/owned-down.jsonl",
+			createCommand: { type: "create" },
+		});
+		unreachable.client = undefined;
+		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" }));
+		const supervisor = makeSupervisor([reachable, unreachable], {
+			catalog: { delete: catalogDelete, list: vi.fn(async () => []) },
+			mutationDrain: { begin: vi.fn(), end: vi.fn() },
+		});
+		const internals = supervisor as unknown as { handleCommand(client: object, command: object): Promise<unknown> };
+		const client = { id: "client", attachedActiveSessionIds: new Set<string>() };
+
+		// Descriptor ownership with a live socket forwards, roster row or not.
+		await internals.handleCommand(client, { type: "delete_saved_session", sessionPath: "/tmp/owned-reach.jsonl" });
+		expect(reachable.client.request).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "delete_saved_session" }),
+			expect.any(Number),
+		);
+
+		// A live-but-disconnected owner rejects instead of deleting underneath the worker.
+		await expect(
+			internals.handleCommand(client, { type: "delete_saved_session", sessionPath: "/tmp/owned-down.jsonl" }),
+		).rejects.toThrow(/retry the delete/);
+		expect(catalogDelete).not.toHaveBeenCalled();
+	});
+
+	it("classifies unknown offline delete targets through the ledger", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-offline-unknown-"));
+		tempDirs.push(directory);
+		const garbled = join(directory, "artifacts", "garbled.jsonl");
+		mkdirSync(dirname(garbled), { recursive: true });
+		writeFileSync(garbled, "not a session header\n");
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorFixture & {
+			handleCommand(client: object, command: object): Promise<unknown>;
+			rlmSpawnLedger(): RlmSpawnLedger;
+		};
+		Object.assign(supervisor, {
+			catalog: { delete: vi.fn(async () => ({ ok: true, method: "unlink" })), list: vi.fn(async () => []) },
+		});
+		await supervisor.rlmSpawnLedger().appendSpawn({
+			childId: "sub-9",
+			parent: join(directory, "sessions", "r.jsonl"),
+			child: garbled,
+			depth: 1,
+			name: "g",
+		});
+
+		await supervisor.handleCommand(
+			{ id: "client", attachedActiveSessionIds: new Set<string>() },
+			{ type: "delete_saved_session", sessionPath: garbled },
+		);
+
+		await expect(supervisor.rlmSpawnLedger().edges()).resolves.toEqual([]);
+	});
+
+	it("ignores buffered roster frames from a superseded worker connection", () => {
+		const worker = makeWorker("worker-1", { rosterCapable: true });
+		const supervisor = makeSupervisor([worker], {
+			streamReconstructor: { observe: vi.fn(), seed: vi.fn(), clear: vi.fn() },
+		});
+		const staleClient = { request: vi.fn() };
+		const frame = {
+			header: { kind: "outbound", outboundType: "roster_delta" },
+			payload: rosterDelta([workerRosterEntryFromSummary(summary({ id: "ghost", sessionId: "ghost" }))]),
+		};
+
+		(supervisor as unknown as { handleWorkerFrame(w: object, f: object, source?: object): void }).handleWorkerFrame(
+			worker,
+			frame,
+			staleClient,
+		);
+
+		expect(supervisor.roster().has("ghost")).toBe(false);
 	});
 
 	it("routes a just-bound session through the miss-path refresh", async () => {
@@ -1447,6 +1550,15 @@ describe("bot-round two regressions", () => {
 		Object.assign(supervisor, {
 			catalog: { delete: catalogDelete, list: vi.fn(async () => []) },
 			rlmSpawnLedger: () => ({
+				edges: vi.fn(async () => [
+					{
+						childId: "child-1",
+						child: childPath,
+						parent: join(directory, "sessions", "root.jsonl"),
+						depth: 1,
+						name: "c",
+					},
+				]),
 				appendDelete: vi.fn(async () => {
 					throw new Error("ledger unwritable");
 				}),
