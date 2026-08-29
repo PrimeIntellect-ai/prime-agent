@@ -119,8 +119,8 @@ npm run eval:specbench -- \
   --model gemini-3.7-flash
 ```
 
-The six conditions are `full`, `no-obligations`, `no-assumptions`,
-`no-watchdog`, `no-impact`, and `no-nooa`. Each no-* condition disables the
+The seven conditions are `full`, `no-obligations`, `no-assumptions`,
+`no-watchdog`, `no-adversarial-supervision`, `no-impact`, and `no-nooa`. Each no-* condition disables the
 corresponding host gate, intervention, or memory retrieval path; it is not a
 prompt-only label. The runner removes obligation-specific task guidance when
 that ledger is disabled and does not disclose condition names in the model
@@ -377,6 +377,46 @@ evaluation, so probation activated but did not need to block the call.
 The next paid expansion should be narrow: repeat the `regex_engine` pair, where
 the observed hidden difference and probation activation were largest. Do not
 expand the full catalog or impose receipt-count gates from these six samples.
+
+### Adversarial acceptance-review pilot
+
+The repeated Regex diagnostic exposed a second kind of laziness: a retained
+supervisor can rubber-stamp an accepted candidate after restating its plan.
+Requirement-dense iterative coding cycles now receive a tool-free,
+host-bounded acceptance audit. A positive verdict must cite actual packet
+source paths and requirement IDs and give concrete counterexample, expected
+behavior, and code-path analysis. Dense reviews require three distinct
+boundaries and at least one cross-requirement interaction. Generic positive
+responses are downgraded to `watch`; negative reviews remain vetoes. The stop
+gate includes bounded follow-up actions so the root model can repair a real
+finding instead of guessing what the reviewer meant.
+
+The first live implementation failed operationally: a 16,384-character
+retained-message limit rejected every review packet, so the root model created
+six accepted cycles without obtaining a review. Packet version 2 removes
+duplicated objective/lineage data, bounds source excerpts, and compactly
+represents all critical requirements. A 40-requirement regression now checks
+the complete message limit rather than only the prompt header.
+
+Two later real Vertex `gemini-3.7-flash` runs demonstrate correct dispatch and
+calibration but not a hidden-score gain:
+
+| Run | Held-out | Calls | Tokens | Time | Cost | Accepted review |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Bound counterexamples | 119 / 125 | 19 | 779,230 | 320.3 s | $0.347 | 3 source/requirement cases |
+| All requirements + cross-interaction | 119 / 125 | 22 | 751,033 | 270.2 s | $0.308 | 3 distinct cases, 1 cross-interaction |
+| No-adversarial control (earlier stochastic run) | 119 / 125 | 16 | 508,085 | 271.2 s | $0.281 | not required |
+
+All six misses in both calibrated runs involved capture-group return semantics
+inside `findall()`. The first packet exposed only the beginning of the
+requirement ledger. The second exposed every requirement and caused the
+reviewer to inspect `findall()` with a nullable quantifier, but it still chose
+that interaction instead of `findall()` with capture groups. This is negative
+evidence against claiming that structured model review guarantees semantic
+correctness. It demonstrably rejects generic laziness and improves auditability;
+it remains a veto/prioritization layer, not a substitute for independent
+executable tests. The `no-adversarial-supervision` condition exists so repeated
+multi-task runs can measure whether the additional review justifies its cost.
 
 ## Validated Level 1 example
 

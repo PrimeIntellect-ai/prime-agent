@@ -12,6 +12,7 @@ import {
 	deriveAvoCriticalAssumptionChecks,
 	deriveAvoObligationCoverage,
 } from "./obligations.js";
+import { requiresAvoAdversarialReview } from "./supervisor.js";
 import type {
 	AvoCandidate,
 	AvoDashboardProjection,
@@ -179,6 +180,7 @@ function requireTrajectoryVerification(
 		: undefined;
 	const required =
 		state.routing.horizon === "long" ||
+		requiresAvoAdversarialReview(state, canonicalCycle?.cycleId) ||
 		(state.routing.horizon === "iterative" && latestCheckpoint?.interventionNeeded === true);
 	if (!required) return gate;
 	const review = canonicalCycle
@@ -187,6 +189,10 @@ function requireTrajectoryVerification(
 			)
 		: undefined;
 	const passed = review?.status === "progressing";
+	const boundedFollowUp = review?.recommendedActions
+		.slice(0, 3)
+		.map((action) => action.slice(0, 500))
+		.join(" | ");
 	const check = {
 		id: "trajectory_verifier",
 		label: "Independent trajectory verifier",
@@ -194,7 +200,7 @@ function requireTrajectoryVerification(
 		reason: passed
 			? undefined
 			: review
-				? `the retained verifier reported ${review.status}: ${review.reason}`
+				? `the retained verifier reported ${review.status}: ${review.reason}${boundedFollowUp ? `; required follow-up: ${boundedFollowUp}` : ""}`
 				: canonicalCycle
 					? "the current canonical accepted cycle has not been cleared by the retained verifier"
 					: "no canonical accepted cycle is available for retained verification",
@@ -634,6 +640,15 @@ abstract class BaseAdapter implements AvoEnvironmentAdapter {
 			environment: state.routing.environment,
 			horizon: state.routing.horizon,
 			recent_cycles: state.cycles.slice(-8),
+			recent_candidates: state.candidates.slice(-4).map((candidate) => ({
+				candidate_id: candidate.candidateId,
+				kind: candidate.kind,
+				summary: candidate.summary,
+				payload_digest: candidate.payloadDigest,
+				changed_paths: candidate.workspaceChangedPaths,
+				obligation_ids: candidate.obligationIds,
+				impact_surfaces: candidate.impactSurfaces,
+			})),
 			recent_evaluations: state.evaluations.slice(-16),
 			obligations: state.obligations,
 			obligation_coverage: state.obligationCoverage,

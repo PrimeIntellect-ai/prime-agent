@@ -448,6 +448,10 @@ function emptyTraceSummary(): PrimeIntegrityTraceSummary {
 		resolvedCriticalAssumptions: 0,
 		watchdogInterventions: 0,
 		watchdogWatches: 0,
+		supervisorReviews: 0,
+		supervisorProgressingReviews: 0,
+		supervisorWatchReviews: 0,
+		supervisorInterventions: 0,
 		toolProbationActivations: 0,
 		toolProbationBlockedCalls: 0,
 		completionAttemptCount: 0,
@@ -933,6 +937,7 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 					evaluationIds?: unknown;
 				}>;
 				criticalAssumptions?: Array<{ status?: unknown }>;
+				supervision?: Array<{ status?: unknown }>;
 				checkpoints?: Array<{
 					status?: unknown;
 					reason?: unknown;
@@ -1017,6 +1022,20 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			summary.resolvedCriticalAssumptions = Math.max(
 				summary.resolvedCriticalAssumptions,
 				state.criticalAssumptions?.filter((assumption) => assumption.status !== "open").length ?? 0,
+			);
+			const supervision = state.supervision ?? [];
+			summary.supervisorReviews = Math.max(summary.supervisorReviews, supervision.length);
+			summary.supervisorProgressingReviews = Math.max(
+				summary.supervisorProgressingReviews,
+				supervision.filter((review) => review.status === "progressing").length,
+			);
+			summary.supervisorWatchReviews = Math.max(
+				summary.supervisorWatchReviews,
+				supervision.filter((review) => review.status === "watch").length,
+			);
+			summary.supervisorInterventions = Math.max(
+				summary.supervisorInterventions,
+				supervision.filter((review) => review.status === "intervene").length,
 			);
 			const checkpoints = state.checkpoints ?? [];
 			const interventions = checkpoints.filter(

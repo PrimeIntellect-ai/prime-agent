@@ -271,8 +271,13 @@ human-readable experiment ID—or repeating identical metrics for a different
 candidate payload—in a later session cannot overwrite or alias earlier project
 evidence.
 
-Long runs bind a retained generic supervisor. Iterative runs bind one only when
-the host detects stagnation. Direct tasks never pay that cost.
+Long runs bind a retained supervisor. For required coding work it performs a
+bounded read-only adversarial acceptance audit after an accepted cycle: it
+inspects the implementation and existing tests, challenges up to three
+high-risk specification boundaries, and may veto but never upgrade host
+evidence. Requirement-dense iterative work receives the same audit; other
+iterative runs bind a supervisor only when the host detects stagnation. Direct
+tasks never pay that cost.
 
 ## Example
 

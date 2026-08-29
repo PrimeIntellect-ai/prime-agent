@@ -113,9 +113,12 @@ export {
 } from "./store.js";
 export {
 	buildAvoSupervisorBootstrapPrompt,
+	buildAvoSupervisorMessage,
 	buildAvoSupervisorPacket,
 	buildAvoSupervisorPrompt,
+	findAvoSupervisorResponseText,
 	parseAvoSupervisorMessage,
+	requiresAvoAdversarialReview,
 	shouldActivateAvoSupervisor,
 } from "./supervisor.js";
 export * from "./types.js";

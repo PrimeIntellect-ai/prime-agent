@@ -36,6 +36,7 @@ export const SPECBENCH_ABLATION_CONDITIONS = [
 	{ conditionId: "no-obligations", disabledFeatures: ["obligations"] },
 	{ conditionId: "no-assumptions", disabledFeatures: ["critical_assumptions"] },
 	{ conditionId: "no-watchdog", disabledFeatures: ["qualified_watchdog"] },
+	{ conditionId: "no-adversarial-supervision", disabledFeatures: ["adversarial_supervision"] },
 	{ conditionId: "no-impact", disabledFeatures: ["impact_verification"] },
 	{ conditionId: "no-nooa", disabledFeatures: ["nooa"] },
 ] as const satisfies readonly {
@@ -179,6 +180,10 @@ export interface SpecBenchConditionSummary {
 	meanRevisedCycles: number;
 	meanWatchdogInterventions: number;
 	meanWatchdogWatches: number;
+	meanSupervisorReviews: number;
+	meanSupervisorProgressingReviews: number;
+	meanSupervisorWatchReviews: number;
+	meanSupervisorInterventions: number;
 	meanToolProbationActivations: number;
 	meanToolProbationBlockedCalls: number;
 	meanObligations: number;
@@ -994,6 +999,10 @@ export function aggregateSpecBenchConditions(results: readonly SpecBenchResult[]
 			meanRevisedCycles: mean(selected.map((item) => item.trace.revisedCycles)),
 			meanWatchdogInterventions: mean(selected.map((item) => item.trace.watchdogInterventions)),
 			meanWatchdogWatches: mean(selected.map((item) => item.trace.watchdogWatches)),
+			meanSupervisorReviews: mean(selected.map((item) => item.trace.supervisorReviews)),
+			meanSupervisorProgressingReviews: mean(selected.map((item) => item.trace.supervisorProgressingReviews)),
+			meanSupervisorWatchReviews: mean(selected.map((item) => item.trace.supervisorWatchReviews)),
+			meanSupervisorInterventions: mean(selected.map((item) => item.trace.supervisorInterventions)),
 			meanToolProbationActivations: mean(selected.map((item) => item.trace.toolProbationActivations)),
 			meanToolProbationBlockedCalls: mean(selected.map((item) => item.trace.toolProbationBlockedCalls)),
 			meanObligations: mean(selected.map((item) => item.trace.obligations)),
@@ -1065,7 +1074,7 @@ function writeReport(
 ): void {
 	const conditions = aggregateSpecBenchConditions(results);
 	const report = {
-		schemaVersion: 8,
+		schemaVersion: 9,
 		benchmark: "WecoAI SpecBench via Prime AVO",
 		specbenchRevision,
 		provider: options.provider,

@@ -107,6 +107,10 @@ export interface PrimeIntegrityTraceSummary {
 	resolvedCriticalAssumptions: number;
 	watchdogInterventions: number;
 	watchdogWatches: number;
+	supervisorReviews: number;
+	supervisorProgressingReviews: number;
+	supervisorWatchReviews: number;
+	supervisorInterventions: number;
 	toolProbationActivations: number;
 	toolProbationBlockedCalls: number;
 	completionAttemptCount: number;

@@ -2,6 +2,7 @@ export const AVO_ABLATION_FEATURES = [
 	"obligations",
 	"critical_assumptions",
 	"qualified_watchdog",
+	"adversarial_supervision",
 	"impact_verification",
 	"nooa",
 ] as const;

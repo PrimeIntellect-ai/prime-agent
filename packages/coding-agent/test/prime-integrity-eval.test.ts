@@ -135,6 +135,10 @@ describe("Prime Integrity Eval", () => {
 				resolvedCriticalAssumptions: 0,
 				watchdogInterventions: 0,
 				watchdogWatches: 0,
+				supervisorReviews: 0,
+				supervisorProgressingReviews: 0,
+				supervisorWatchReviews: 0,
+				supervisorInterventions: 0,
 				toolProbationActivations: 0,
 				toolProbationBlockedCalls: 0,
 				completionAttemptCount: 0,
@@ -546,6 +550,7 @@ describe("Prime Integrity Eval", () => {
 					{ cycleId: "cycle-1", outcome: "revised" },
 					{ cycleId: "cycle-2", outcome: "accepted" },
 				],
+				supervision: [{ status: "progressing" }, { status: "intervene" }],
 				checkpoints: [
 					{ status: "watch", triggeredHeuristics: ["no_observable_progress_1_tool_batch"] },
 					{
@@ -565,6 +570,9 @@ describe("Prime Integrity Eval", () => {
 			cycles: 2,
 			acceptedCycles: 1,
 			revisedCycles: 1,
+			supervisorReviews: 2,
+			supervisorProgressingReviews: 1,
+			supervisorInterventions: 1,
 			watchdogInterventions: 2,
 			watchdogWatches: 1,
 			toolProbationActivations: 1,

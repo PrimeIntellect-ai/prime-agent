@@ -160,8 +160,8 @@ import {
 	buildAvoMemoryVerifierPrompt,
 	buildAvoRuntimePrompt,
 	buildAvoSupervisorBootstrapPrompt,
+	buildAvoSupervisorMessage,
 	buildAvoSupervisorPacket,
-	buildAvoSupervisorPrompt,
 	captureAvoArtifactPathBaseline,
 	captureAvoCodingVerificationBaseline,
 	captureAvoWorkspaceSnapshot,
@@ -172,6 +172,7 @@ import {
 	deriveAvoWorkspaceImpactPaths,
 	digestAvoDeliveryText,
 	digestAvoPayload,
+	findAvoSupervisorResponseText,
 	isAvoFeatureAblated,
 	parseAvoAssumptionResolutionInput,
 	parseAvoCandidateInput,
@@ -191,6 +192,7 @@ import {
 	parseAvoTrialInput,
 	parseAvoTrialMetricsOutput,
 	parseAvoTrialRunInput,
+	requiresAvoAdversarialReview,
 } from "./avo/index.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 import {
@@ -4363,10 +4365,34 @@ export class AgentSession {
 		const name = children.some((child) => child.session_name === preferredName)
 			? `${preferredName}-${randomUUID().slice(0, 8)}`
 			: preferredName;
-		const handle = await this.runRlmChild(buildAvoSupervisorBootstrapPrompt(), { name });
+		const handle = await this._startRlmChildRun(buildAvoSupervisorBootstrapPrompt(), { name }, undefined, {
+			allowedToolNames: [],
+		});
 		runtime.store.setSupervisor({ rlmChildId: handle.rlm_child_id, name: handle.name });
 		this._avoSupervisorBoundToRuntime = true;
 		return { rlmChildId: handle.rlm_child_id, name: handle.name };
+	}
+
+	private _avoAdversarialReviewPaths(
+		state: AvoRunState,
+		candidate: AvoRunState["candidates"][number] | undefined,
+	): string[] {
+		const baselinePaths =
+			state.verificationBaseline?.kind === "coding"
+				? state.verificationBaseline.testFiles.map((item) => item.path)
+				: [];
+		return [...new Set([...(candidate?.workspaceChangedPaths ?? []), ...baselinePaths])]
+			.slice(0, 4)
+			.flatMap((path) => {
+				const absolute = resolve(this._cwd, path);
+				const relativePath = relative(this._cwd, absolute);
+				if (!relativePath || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) return [];
+				if (!existsSync(absolute)) return [];
+				const stats = lstatSync(absolute);
+				if (!stats.isFile() || stats.size > 1_000_000) return [];
+				if (readFileSync(absolute).includes(0)) return [];
+				return [relativePath];
+			});
 	}
 
 	private async _dispatchAvoCheckpoint(
@@ -4377,6 +4403,7 @@ export class AgentSession {
 			await this._awaitPendingRlmChildSettlement(supervisor.name);
 			const runtime = this._requireAvoRuntime();
 			const state = runtime.getState();
+			const adversarialReview = requiresAvoAdversarialReview(state, cycleId);
 			const supervisorMemory = await runtime.recallSupervisorMemory(
 				[
 					`Review trajectory for cycle ${cycleId}.`,
@@ -4389,22 +4416,130 @@ export class AgentSession {
 					.join("\n"),
 			);
 			const adapter = runtime.adapters.get(state.routing.environment);
-			const rawContext = adapter.buildSupervisorContext(state);
+			let rawContext = adapter.buildSupervisorContext(state);
+			let compactAdversarialContext: Record<string, unknown> | undefined;
+			if (adversarialReview) {
+				const cycle = state.cycles.find((item) => item.cycleId === cycleId);
+				const candidate = cycle
+					? state.candidates.find((item) => item.candidateId === cycle.candidateId)
+					: undefined;
+				const reviewPaths = this._avoAdversarialReviewPaths(state, candidate);
+				let remainingFileChars = 3_000;
+				const reviewFiles: Array<{ path: string; excerpt: string; truncated: boolean }> = [];
+				for (const path of reviewPaths) {
+					if (remainingFileChars <= 0) break;
+					const absolute = resolve(this._cwd, path);
+					const text = readFileSync(absolute, "utf8");
+					const budget = Math.min(remainingFileChars, reviewFiles.length === 0 ? 2_400 : 600);
+					const truncated = text.length > budget;
+					const headChars = Math.ceil(budget * 0.7);
+					const excerpt = truncated
+						? `${text.slice(0, headChars)}\n\n[... host truncated ${text.length - budget} characters ...]\n\n${text.slice(-(budget - headChars))}`
+						: text;
+					reviewFiles.push({ path, excerpt, truncated });
+					remainingFileChars -= excerpt.length;
+				}
+				const reviewObligations = state.obligations.filter((item) => item.critical && item.kind !== "outcome");
+				const requirementExcerpts: Array<{ requirement_id: string; description: string }> = [];
+				const requirementDescriptionBudget = 2_400;
+				const perRequirementBudget = Math.max(
+					48,
+					Math.floor(requirementDescriptionBudget / Math.max(1, reviewObligations.length)),
+				);
+				for (const obligation of reviewObligations) {
+					const description = obligation.description.slice(0, perRequirementBudget);
+					requirementExcerpts.push({ requirement_id: obligation.obligationId, description });
+				}
+				const acceptedCandidate = candidate
+					? {
+							candidate_id: candidate.candidateId,
+							kind: candidate.kind,
+							summary: candidate.summary.slice(0, 500),
+							changed_paths: (candidate.workspaceChangedPaths ?? []).slice(0, 4),
+							impact_surfaces: (candidate.impactSurfaces ?? []).slice(0, 4),
+						}
+					: undefined;
+				const authoritativeReceipts = state.evaluations
+					.filter((item) => item.candidateId === candidate?.candidateId)
+					.slice(-4)
+					.map((item) => ({
+						evaluation_id: item.evaluationId,
+						evaluator: item.evaluatorId,
+						status: item.status,
+						validation_reason:
+							typeof item.metrics.validation_reason === "string"
+								? item.metrics.validation_reason.slice(0, 300)
+								: item.metrics.validation_reason,
+					}));
+				const criticalAssumptions = state.criticalAssumptions.slice(-3).map((item) => ({
+					assumption_id: item.assumptionId,
+					statement: item.statement.slice(0, 240),
+					falsification_plan: item.falsificationPlan.slice(0, 240),
+					status: item.status,
+				}));
+				const obligationCoverageReceiptCount = new Set(
+					state.obligationCoverage
+						.filter((item) => item.candidateId === candidate?.candidateId)
+						.flatMap((item) => item.evaluationIds),
+				).size;
+				rawContext = {
+					run_id: state.runId,
+					accepted_candidate: acceptedCandidate,
+					authoritative_receipts: authoritativeReceipts,
+					critical_requirement_count: state.obligations.filter((item) => item.critical).length,
+					critical_requirement_excerpts: requirementExcerpts,
+					obligation_coverage_receipt_count: obligationCoverageReceiptCount,
+					critical_assumptions: criticalAssumptions,
+					review_files: reviewFiles,
+				};
+				const sampledRequirements =
+					requirementExcerpts.length <= 24
+						? requirementExcerpts
+						: Array.from(
+								{ length: 24 },
+								(_, index) => requirementExcerpts[Math.floor((index * (requirementExcerpts.length - 1)) / 23)],
+							);
+				compactAdversarialContext = {
+					truncated: true,
+					run_id: state.runId,
+					accepted_candidate: acceptedCandidate
+						? { ...acceptedCandidate, summary: acceptedCandidate.summary.slice(0, 240) }
+						: undefined,
+					authoritative_receipts: authoritativeReceipts.slice(-2),
+					critical_requirement_count: state.obligations.filter((item) => item.critical).length,
+					critical_requirement_excerpts: sampledRequirements.map((item) => ({
+						...item,
+						description: item.description.slice(0, 64),
+					})),
+					obligation_coverage_receipt_count: obligationCoverageReceiptCount,
+					critical_assumptions: criticalAssumptions.slice(-1),
+					review_files: reviewFiles.slice(0, 2).map((item, index) => ({
+						...item,
+						excerpt: item.excerpt.slice(0, index === 0 ? 1_800 : 400),
+						truncated: true,
+					})),
+				};
+			}
 			const rawContextJson = JSON.stringify(rawContext);
 			const context =
-				rawContextJson.length <= 3_500
+				rawContextJson.length <= (adversarialReview ? 8_000 : 3_500)
 					? rawContext
-					: {
-							truncated: true,
-							sha256: createHash("sha256").update(rawContextJson).digest("hex"),
-							contextPrefix: rawContextJson.slice(0, 3_000),
-						};
-			const packet = buildAvoSupervisorPacket(state, context, supervisorMemory.context);
+					: adversarialReview && compactAdversarialContext
+						? {
+								...compactAdversarialContext,
+								sha256: createHash("sha256").update(rawContextJson).digest("hex"),
+							}
+						: {
+								truncated: true,
+								sha256: createHash("sha256").update(rawContextJson).digest("hex"),
+								contextPrefix: rawContextJson.slice(0, 3_000),
+							};
+			const packet = buildAvoSupervisorPacket(state, context, adversarialReview ? "" : supervisorMemory.context);
 			const serialized = JSON.stringify(packet);
-			const boundedPacket =
-				serialized.length <= 7_000
-					? serialized
-					: JSON.stringify({
+			const boundedPacket: Record<string, unknown> =
+				serialized.length <= (adversarialReview ? 12_000 : 7_000)
+					? packet
+					: {
 							packet_version: 1,
 							truncated: true,
 							sha256: createHash("sha256").update(serialized).digest("hex"),
@@ -4414,8 +4549,14 @@ export class AgentSession {
 							horizon: state.routing.horizon,
 							latest_checkpoint: state.checkpoints.at(-1),
 							adapter_context: context,
-						});
-			const prompt = `${buildAvoSupervisorPrompt(state, cycleId, context, supervisorMemory.context)}\n\n[host packet]\n${boundedPacket}`;
+						};
+			const prompt = buildAvoSupervisorMessage(
+				state,
+				cycleId,
+				context,
+				adversarialReview ? "" : supervisorMemory.context,
+				adversarialReview ? undefined : boundedPacket,
+			);
 			if (prompt.length > 16_384) throw new Error("AVO supervisor prompt exceeds the retained-message limit");
 			const receipt = await this._agentMessageController!.sendAgentMessage({
 				target: assertDirectAgentMessageTarget(supervisor.name),
@@ -4461,6 +4602,17 @@ export class AgentSession {
 				);
 			let text = message && isAgentSessionMessage(message) ? message.details.message : undefined;
 			if (!text) {
+				const retainedSession = this.getRlmChildSession(supervisor.rlmChildId);
+				if (retainedSession) {
+					text = findAvoSupervisorResponseText(
+						retainedSession.messages.flatMap((item) =>
+							item.role === "assistant" ? [readAssistantText(item)] : [],
+						),
+						cycle.cycleId,
+					);
+				}
+			}
+			if (!text) {
 				const children = (await this.listRlmSubagents()).subagents;
 				const child =
 					children.find(
@@ -4472,7 +4624,24 @@ export class AgentSession {
 			}
 			if (!text) continue;
 			try {
-				const parsed = parseAvoSupervisorMessage(text, cycle.cycleId);
+				const currentState = runtime.getState();
+				const candidate = currentState.candidates.find((item) => item.candidateId === cycle.candidateId);
+				const adversarialBindings = requiresAvoAdversarialReview(currentState, cycle.cycleId)
+					? {
+							sourcePaths: this._avoAdversarialReviewPaths(currentState, candidate),
+							requirementIds: currentState.obligations
+								.filter((item) => item.critical && item.kind !== "outcome")
+								.map((item) => item.obligationId),
+							minimumAnalyses:
+								currentState.obligations.filter((item) => item.critical && item.kind !== "outcome").length >= 16
+									? 3
+									: 1,
+							requireCrossRequirement:
+								currentState.obligations.filter((item) => item.critical && item.kind !== "outcome").length >=
+								16,
+						}
+					: undefined;
+				const parsed = parseAvoSupervisorMessage(text, cycle.cycleId, adversarialBindings);
 				runtime.store.recordSupervision({ ...parsed, source: "retained_supervisor" });
 				if (parsed.status === "intervene" && runtime.getState().routing.horizon === "long") {
 					await this._runAvoGenerativeMemoryReflection(cycle.cycleId, "supervisor_intervention");
