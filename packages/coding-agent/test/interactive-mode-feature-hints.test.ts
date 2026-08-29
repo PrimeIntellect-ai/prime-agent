@@ -92,7 +92,7 @@ describe("feature hint deck", () => {
 		expect(textById.get("agent-messaging")).toContain("message each other");
 		expect(textById.get("goal")).toContain("/goal");
 		expect(textById.get("refine")).toContain("/refine");
-		expect(textById.get("persistent-ipython")).toContain("IPython");
+		expect(textById.get("persistent-ipython")).toContain("kernel variables");
 		expect(textById.get("context-usage")).toContain("/context");
 		expect(textById.get("session-fork")).toContain("/fork");
 		expect(textById.get("compaction")).toContain("/compact");

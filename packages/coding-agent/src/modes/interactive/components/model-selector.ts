@@ -3,7 +3,7 @@ import {
 	type Component,
 	Container,
 	type Focusable,
-	fuzzyFilterScored,
+	fuzzyMatch,
 	getKeybindings,
 	Spacer,
 	Text,
@@ -31,6 +31,77 @@ interface ModelItem {
 interface ScopedModelItem {
 	model: Model<any>;
 	thinkingLevel?: string;
+}
+
+enum ModelSearchMatchQuality {
+	ExactShortId,
+	ExactFullId,
+	PrefixOrToken,
+	Fuzzy,
+}
+
+interface ModelSearchMatch {
+	quality: ModelSearchMatchQuality;
+	score: number;
+}
+
+function normalizeModelSearchText(value: string): string {
+	return value.toLowerCase().replace(/[\s\-_.:/]+/g, "");
+}
+
+function getModelSearchFields(item: ModelItem): { shortId: string; fullIds: string[]; all: string[] } {
+	const shortId = item.id.slice(item.id.lastIndexOf("/") + 1);
+	const fullIds = [item.id, `${item.provider}/${item.id}`];
+	return {
+		shortId,
+		fullIds,
+		all: [shortId, ...fullIds, item.model.name, item.provider],
+	};
+}
+
+function getBestFuzzyScore(queryTokens: string[], fields: string[]): number | null {
+	let total = 0;
+	for (const token of queryTokens) {
+		let best = Number.POSITIVE_INFINITY;
+		for (const field of fields) {
+			const match = fuzzyMatch(token, field);
+			if (match.matches) best = Math.min(best, match.score);
+		}
+		if (!Number.isFinite(best)) return null;
+		total += best;
+	}
+	return total;
+}
+
+function scoreModelSearch(item: ModelItem, query: string): ModelSearchMatch | null {
+	const queryTokens = query.trim().split(/\s+/);
+	const normalizedQuery = normalizeModelSearchText(query);
+	const normalizedTokens = queryTokens.map(normalizeModelSearchText).filter(Boolean);
+	if (!normalizedQuery || normalizedTokens.length === 0) return null;
+
+	const fields = getModelSearchFields(item);
+	if (normalizeModelSearchText(fields.shortId) === normalizedQuery) {
+		return { quality: ModelSearchMatchQuality.ExactShortId, score: 0 };
+	}
+	if (fields.fullIds.some((field) => normalizeModelSearchText(field) === normalizedQuery)) {
+		return { quality: ModelSearchMatchQuality.ExactFullId, score: 0 };
+	}
+
+	const normalizedFields = fields.all.map(normalizeModelSearchText);
+	const fieldTokens = fields.all
+		.flatMap((field) => field.split(/[\s/_-]+/))
+		.map(normalizeModelSearchText)
+		.filter(Boolean);
+	const fuzzyScore = getBestFuzzyScore(normalizedTokens, normalizedFields);
+	const isPrefixOrToken = normalizedTokens.every(
+		(token) =>
+			normalizedFields.some((field) => field.startsWith(token)) ||
+			fieldTokens.some((field) => field.startsWith(token)),
+	);
+	if (isPrefixOrToken && fuzzyScore !== null) {
+		return { quality: ModelSearchMatchQuality.PrefixOrToken, score: fuzzyScore };
+	}
+	return fuzzyScore === null ? null : { quality: ModelSearchMatchQuality.Fuzzy, score: fuzzyScore };
 }
 
 export interface ModelSelectorOptions {
@@ -321,18 +392,21 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		const queryChanged = query !== this.searchQuery;
 		this.searchQuery = query;
 		if (query.trim()) {
-			const scored = fuzzyFilterScored(
-				this.activeModels,
-				query,
-				({ id, provider }) => `${id} ${provider} ${provider}/${id} ${provider} ${id}`,
-			);
-			scored.sort(
+			const matches = this.activeModels.flatMap((item) => {
+				const match = scoreModelSearch(item, query);
+				return match ? [{ item, ...match }] : [];
+			});
+			matches.sort(
 				(a, b) =>
+					a.quality - b.quality ||
 					a.score - b.score ||
 					Number(this.isProviderConfigured(b.item)) - Number(this.isProviderConfigured(a.item)) ||
-					this.recentRankOf(a.item) - this.recentRankOf(b.item),
+					Number(modelsAreEqual(this.currentModel, b.item.model)) -
+						Number(modelsAreEqual(this.currentModel, a.item.model)) ||
+					this.recentRankOf(a.item) - this.recentRankOf(b.item) ||
+					this.getModelKey(a.item).localeCompare(this.getModelKey(b.item), undefined, { numeric: true }),
 			);
-			this.filteredModels = scored.map((r) => r.item);
+			this.filteredModels = matches.map(({ item }) => item);
 		} else {
 			this.filteredModels = this.activeModels;
 		}

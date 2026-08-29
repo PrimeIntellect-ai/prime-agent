@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "kind": "controller-owner-request-wording-repair-audit",
+  "closed": true,
+  "decision": "PASS_CANDIDATE_FREEZE",
+  "candidateGeneration": 8,
+  "candidateRevision": 3,
+  "candidateRepairRound": 10,
+  "wordingRepairRound": 11,
+  "issuedAt": "2026-08-23T10:06:40.931184+00:00",
+  "priorFormalManifestRawSha256": "sha256:61f240ee451bffe81ee9019ecf2b27c94793b6a1ea270ca5d5a259e6d21459ed",
+  "priorIndependentAcceptanceRawSha256": "sha256:8deed97e8897115601a8a717c7ac07673f75d80415911d393047ad509b976933",
+  "R11PostReceiptRawSha256": "sha256:d94cf80ee885a899a9fee6fe767be79f2205824e7fc0a19f8433c48701f161b7",
+  "checks": {
+    "identity": true,
+    "nonce": true,
+    "authorization": true,
+    "admission": true,
+    "requestRaw": true,
+    "requestPayload": true,
+    "oneField": true,
+    "exactWording": true,
+    "planUnchanged": true,
+    "packageUnchanged": true,
+    "noEffects": true,
+    "writesExact": true,
+    "handoffPayload": true,
+    "released": true
+  },
+  "request": {
+    "rawSha256": "sha256:9ba5b1e4bb4754fefa72df8cfd6dae0cb0ce30311a6c941c250b4e20bb269724",
+    "payloadAggregate": "sha256:c45a2e6344e1287eaffabe40652f312cea0230585d7f8dcd8c0f3d0737c0faca",
+    "requestId": "ccg-owner-auth-request-2026-08-23-r8",
+    "generation": 8,
+    "repairRound": 10,
+    "approvedWording": "Approve the exact repaired G8 request bytes bound to candidate generation 8 revision 2 / repairRound 10 package and Parent; P10 accepts only G8 Owner receipt semantics."
+  },
+  "unchanged": {
+    "planRawSha256": "sha256:dc0ce23e991b9740004861b4ad219adc8bf04aed56204d8e76edb36b2bc9d28b",
+    "packageRawSha256": "sha256:57ead530b75570a5a114e323e35edea9c6ba58c9289df3714f3804edad167c33",
+    "packagePayloadAggregate": "sha256:d18a5c59106cd092e9913e6f2597bfbec6aa232cd9d531b3ac8526298ff6cfa0",
+    "parentEnvelopePayloadAggregate": "sha256:28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+    "actionContracts": 24
+  },
+  "findings": {
+    "p0": 0,
+    "p1": 0,
+    "p2": 0
+  },
+  "claimCeiling": "Controller exact-byte request audit only; independent review and Owner approval required",
+  "payloadAggregate": "sha256:d21dd5aa19f661de4846f5e31d38207de0e8a718635e9eabca83241fc56fd73d"
+}

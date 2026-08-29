@@ -1,0 +1,56 @@
+{
+  "stageId": "P6",
+  "terminal": "terminal_chain_compiled",
+  "claimLevel": "derived_candidate_only",
+  "p5GateMarker": "COMPOSED_P5_G4_G5_RUNTIME_GREEN",
+  "p1GateMarker": "COMPOSED_P1_G0_SCHEMA_GREEN",
+  "preimageSha256": {
+    ".ccg-staging/gates/P5-runtime-gate.py": "d13dc84440c66c1cbb83727aa79680b552948199ea6957d32d8857c43ba6fcb0",
+    ".ccg-staging/runtime/executor-prework.py": "babb48a4cc3da268aaa2c5106c1a7e7c4c3be6981aa7c1dc57fc307d6c2de55d",
+    ".ccg-staging/runtime/runtime-monitor.py": "6c30bf2988e52a2f3535045410cce595b12042dae1b17fb9729d0c4a408ba1e5",
+    ".ccg-staging/runtime/executor-watchdog.py": "851ebccb64eee3516a540b7b014883cc9b3dc4216c541eecd79da43946092483",
+    "docs/evidence/composed-contract-gate/P5-runtime.json": "48661773bafc4cdbf94ddf928e3ee7a52b038f4d88bfa7bf6db1da3b602dcf89",
+    ".ccg-staging/schemas/parent-envelope.schema.json": "7fb1edb6ba47efc5ac0fa891fc15b4cad0dfe019398df4d048effef327ca3b58",
+    ".ccg-staging/schemas/task-contract.schema.json": "11a6372151a278021a19bd315dd0bacf7feab2e1e7faf27938afe78e0aabe8e9",
+    ".ccg-staging/schemas/addendum.schema.json": "f551ecd36ed21ca6b7fea5792796f9c723ed01cfc4bcdbf0a6704fdc8ed1d04d",
+    ".ccg-staging/schemas/task-event.schema.json": "3c70301e70b10f95fb9df24d0671f65c88b10d88a4044db932d3545d1c44ae47",
+    ".ccg-staging/gates/P1-schema-policy-gate.py": "2b89a3f6b525313f32fb655b46d642a00fae1c23939677e85e535903044f3058",
+    ".ccg-staging/policy/project-policy-profile.json": "e7aa7e2b570c8b21e9d2604a9a2bf0762686a36e16f5d76ca2f4b4e1753d7cb2",
+    "docs/evidence/composed-contract-gate/P1-schema-policy.json": "320f04e303a08bfa8a6ceae3b5e46b972eba75bc7c361c350259433544b17ec8"
+  },
+  "sourceSha256": {
+    ".ccg-staging/gates/P6-terminal-gate.py": "6066712ace74a3e2c583a50d53f57daa514e4ec22c5d41ba84f6294d39555a22"
+  },
+  "selfReview": {
+    "actor": "ccg-p6-worker",
+    "status": "PASS"
+  },
+  "changeSurface": {
+    "actualPaths": [
+      ".ccg-staging/gates/P6-terminal-gate.py",
+      "docs/evidence/composed-contract-gate/P6-terminal.json"
+    ],
+    "allowedPaths": [
+      ".ccg-staging/gates/P6-terminal-gate.py",
+      "docs/evidence/composed-contract-gate/P6-terminal.json"
+    ],
+    "status": "PASS"
+  },
+  "rolePost": {
+    "ownership": "RELEASED",
+    "role": "worker",
+    "status": "PASS"
+  },
+  "terminalSequence": [
+    "preimages_frozen",
+    "executor_self_review_pass",
+    "change_surface_proof_pass",
+    "role_post_pass",
+    "ownership_released",
+    "terminal_emitted"
+  ],
+  "accepted": false,
+  "proofCommand": "python3 .ccg-staging/gates/P6-terminal-gate.py --verify-draft-inputs",
+  "preimageAggregate": "8f4b91994e0a699cc612b6d6ec0253130c2159cd0116adb3b688da369f7e148e",
+  "payloadAggregate": "b3a829677a062e6e64ad55ec8509c4d1fb658964d664c9a518a444fd260b3bc9"
+}

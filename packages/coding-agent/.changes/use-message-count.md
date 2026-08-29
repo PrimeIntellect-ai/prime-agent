@@ -1,0 +1,1 @@
+- Fixed new-chat hints to use the session message count.

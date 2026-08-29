@@ -1,0 +1,323 @@
+{
+  "schemaVersion": 1,
+  "kind": "composed-contract-gate-formal-candidate-manifest",
+  "closed": true,
+  "status": "FROZEN_PENDING_NARROW_INDEPENDENT_REVIEW_AND_OWNER_APPROVAL",
+  "generation": 8,
+  "revision": 3,
+  "repairRound": 10,
+  "wordingRepairRound": 11,
+  "lineageId": "ccg-2026-08-23-owner-package-v1",
+  "taskId": "composed-contract-gate-program",
+  "frozenAt": "2026-08-23T10:07:02.084281+00:00",
+  "artifacts": {
+    "plan": {
+      "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/COMPOSED-CONTRACT-GATE-PROGRAM-PLAN.frozen.md",
+      "rawSha256": "sha256:dc0ce23e991b9740004861b4ad219adc8bf04aed56204d8e76edb36b2bc9d28b"
+    },
+    "package": {
+      "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/COMPOSED-CONTRACT-GATE-TASK-PACKAGE.frozen.json",
+      "rawSha256": "sha256:57ead530b75570a5a114e323e35edea9c6ba58c9289df3714f3804edad167c33",
+      "payloadAggregate": "sha256:d18a5c59106cd092e9913e6f2597bfbec6aa232cd9d531b3ac8526298ff6cfa0"
+    },
+    "ownerAuthorizationRequest": {
+      "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/COMPOSED-CONTRACT-GATE-OWNER-AUTHORIZATION-REQUEST.frozen.json",
+      "rawSha256": "sha256:9ba5b1e4bb4754fefa72df8cfd6dae0cb0ce30311a6c941c250b4e20bb269724",
+      "payloadAggregate": "sha256:c45a2e6344e1287eaffabe40652f312cea0230585d7f8dcd8c0f3d0737c0faca"
+    },
+    "parentEnvelope": {
+      "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/PARENT-ENVELOPE.candidate.json",
+      "rawSha256": "sha256:c8d6692d4d41039892e9d3c22fa7c70c61e558038a3dd912dda42edcd1577c15",
+      "payloadAggregate": "sha256:28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d"
+    },
+    "actionContracts": [
+      {
+        "taskId": "P0",
+        "action": "bootstrapPreflight",
+        "actionId": "ccg-p0-bootstrap-preflight",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P0-bootstrapPreflight.compiled.json",
+        "rawSha256": "sha256:2610f4216983b2068173246ced8dd57e601c6fc1ba78a64a7c6905e1a917f480",
+        "actionContractSha256": "79cc8a7c72b2b17ffd5821bb2bf5ef0940e239ab44126b5479032e19899586f0",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P0",
+        "action": "implementation",
+        "actionId": "ccg-p0-worker",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P0-implementation.compiled.json",
+        "rawSha256": "sha256:45dace77fb9d7ef34dea32502e4304f5d88da806e635f0e1bc9cdf8eb1aadd64",
+        "actionContractSha256": "bf8a92256be5765064366dd594e001865145bd44359f2b2ece25e574940d4c43",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P0",
+        "action": "review",
+        "actionId": "ccg-p0-reviewer",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P0-review.compiled.json",
+        "rawSha256": "sha256:7c293eaa6a92797b6d1173582578faeb83b028d3fd84f5b62520617abe662346",
+        "actionContractSha256": "704175693137acd688c8860ba47f6384286ad4167c524b3ae93458fb3946a877",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P1",
+        "action": "implementation",
+        "actionId": "ccg-p1-worker",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P1-implementation.compiled.json",
+        "rawSha256": "sha256:293bbd471cb11fc68edff01b7826296d5c9adcea6226206851ad26280c4df7ca",
+        "actionContractSha256": "e5520ae1672e9ff190a4cb642e4fcd41ad9e9f60cbf9c4e6f9ef2ac61ff3e1b7",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P1",
+        "action": "review",
+        "actionId": "ccg-p1-reviewer",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P1-review.compiled.json",
+        "rawSha256": "sha256:01648e2334c3fa111f545d75c3fc0fba6993094369923583a63de1f5c7fad318",
+        "actionContractSha256": "a62504a36cfdc4edae0e5268891474cba0afffa23f4662ea2310649e06f08415",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P1",
+        "action": "sourceCapture",
+        "actionId": "ccg-p1-policy-source",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P1-sourceCapture.compiled.json",
+        "rawSha256": "sha256:fe648580589100046e0829724de52d77a8598dcc20fe2f08158267695a255c5d",
+        "actionContractSha256": "219bc1274fa4ce23d29c6124f3f8fe7c0c849eebcafdde4b908c009c1f35ee14",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P2",
+        "action": "implementation",
+        "actionId": "ccg-p2-worker",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P2-implementation.compiled.json",
+        "rawSha256": "sha256:553a5807bd922b42b40f264f94286a59fd6bf27370c4762886d8dad41f2ea275",
+        "actionContractSha256": "f17c9d63828b9cdd8bae70d2c84873e82eb29b50ed2582d21b4a800b254ba1b4",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P2",
+        "action": "review",
+        "actionId": "ccg-p2-reviewer",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P2-review.compiled.json",
+        "rawSha256": "sha256:1cfaa099fc04c638b1ba50fb01e7766d6bccc4185e2189ad43404c8ebd23dea5",
+        "actionContractSha256": "cedbb35e8e449bc2b0699fac591de548fc5bb6aad369cffe6a2cb6ae806a7c7f",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P3",
+        "action": "implementation",
+        "actionId": "ccg-p3-worker",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P3-implementation.compiled.json",
+        "rawSha256": "sha256:da609a8cea1e02edd3df76e302b8090bccf50332a20ebd9a2721b46f033a0da6",
+        "actionContractSha256": "713c90b94f670d05e2e45def2ed08a0ed97336f672de36a3ef6d7ee6e3868d38",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P3",
+        "action": "review",
+        "actionId": "ccg-p3-reviewer",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P3-review.compiled.json",
+        "rawSha256": "sha256:e5d647f48781fac582284eb48a1a24e98efef7ff5496e99338f9c8dac1c38b50",
+        "actionContractSha256": "bb4fea8388a66c9ac4690af59d50d12c0cc633cc81387b5b712936d4f05d0d23",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P4",
+        "action": "implementation",
+        "actionId": "ccg-p4-worker",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P4-implementation.compiled.json",
+        "rawSha256": "sha256:65378f5fc0c934cdf05058d462b0b1451c8be4ec6bff549a75fdc12e342d6586",
+        "actionContractSha256": "f98ba1beaa4725745b903bf90fb840a2c5703648881c10f3791359f01ee338e4",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P4",
+        "action": "review",
+        "actionId": "ccg-p4-reviewer",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P4-review.compiled.json",
+        "rawSha256": "sha256:6c7938825ada2e164b5fabdba21855b4a0c9b795e1c0a7a4b7b75fe2f3c75f81",
+        "actionContractSha256": "0eafab5fcfb2e9f3c15a5498f0baa660e91558c4c5262015be17dc2c5fbd683d",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P5",
+        "action": "implementation",
+        "actionId": "ccg-p5-worker",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P5-implementation.compiled.json",
+        "rawSha256": "sha256:e7c8292b81a36504095c01ccc387c23e1229030c8d2b4deab7f001b7ae7b8a04",
+        "actionContractSha256": "70b513d476c22350816125286876e440ea5ba85cb9daaa7e38a1a335fdb04b03",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P5",
+        "action": "review",
+        "actionId": "ccg-p5-reviewer",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P5-review.compiled.json",
+        "rawSha256": "sha256:9b56a014ef7760442ff6c123763f93681cdd45548cf38181ba7e2e84f737b2fd",
+        "actionContractSha256": "166d6660a00b3d9bebae502d396a6d3b6611757c7969c819c68d4dcdfa8a4635",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P6",
+        "action": "implementation",
+        "actionId": "ccg-p6-worker",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P6-implementation.compiled.json",
+        "rawSha256": "sha256:06a19d4117e031d9c5081592377550d6df9562c31280efff2dbdddc1622ee090",
+        "actionContractSha256": "8014fc13b6e847a9de6fbf1ea8765a73cc4f36e0dfa7032834842d7c2b0e35ef",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P6",
+        "action": "review",
+        "actionId": "ccg-p6-reviewer",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P6-review.compiled.json",
+        "rawSha256": "sha256:0c935dd2e2159c2e59b89058ede805f2827c39e1e06b22c3970996ad6ef70e4f",
+        "actionContractSha256": "42e8df0847a9eee0c053b6e42353286e97bdeae3d9ab7158adcecd3842ed7014",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P7",
+        "action": "implementation",
+        "actionId": "ccg-p7-worker",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P7-implementation.compiled.json",
+        "rawSha256": "sha256:cc79d950c614a486dae4b052f0b64755d1d16edf4968daaf1c6db7e14605ca08",
+        "actionContractSha256": "5e44e06e93576c9534fc37500c75219bfbfff3b3fe21e70f942d0b62a2ad9c74",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P7",
+        "action": "review",
+        "actionId": "ccg-p7-reviewer",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P7-review.compiled.json",
+        "rawSha256": "sha256:036eb8cd19e5f8388434cd8b85c7884b615658174c77126855c0e4d5f934a7d9",
+        "actionContractSha256": "c15292a944b2579a97f2d490f738da886961d3e3dcc7cd86f478877041b4c586",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P8",
+        "action": "implementation",
+        "actionId": "ccg-p8-worker",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P8-implementation.compiled.json",
+        "rawSha256": "sha256:56a9753eade0f29e88777ac668891a665fec5af53d416760e247653e8d3b5362",
+        "actionContractSha256": "386d083a18372760252b37fedf53909b297e13c1e5e279bd9c9b264beb2ec510",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P8",
+        "action": "review",
+        "actionId": "ccg-p8-reviewer",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P8-review.compiled.json",
+        "rawSha256": "sha256:5beae5abec0bf7f494153139cd7b70aa531dd83e2d1c45cfe20de60a2976a032",
+        "actionContractSha256": "87e26031e404048aba11ca46472b39b6da49a7ef9fd54b0b72cd03622bcb05dc",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P9",
+        "action": "implementation",
+        "actionId": "ccg-p9-worker",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P9-implementation.compiled.json",
+        "rawSha256": "sha256:563502a8043bacfee2e2e1973462c023eb30bd54ba7691518cb8c0940cfa35ee",
+        "actionContractSha256": "17ccb38fc9410a73b95bc8b0efd53b21e3e9696f858a3409b98906f19d60d887",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P9",
+        "action": "review",
+        "actionId": "ccg-p9-reviewer",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P9-review.compiled.json",
+        "rawSha256": "sha256:7d705ef33aa84bd011ae41b8ca43a21ff9159e475b701aec1b792f769e1e3339",
+        "actionContractSha256": "ab19904703ebd3decd8b03613bdb02d34cf6ca9534766caf5c9a1477e4d0a4b2",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P10",
+        "action": "implementation",
+        "actionId": "ccg-p10-worker",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P10-implementation.compiled.json",
+        "rawSha256": "sha256:368348e5de425fe86a940c7b70ce2448922894cba06198c81c634e3c54a09b05",
+        "actionContractSha256": "9fca9ad56af90f405568bd0845001ecf75c75ce45cd64bb4c2d824798e691779",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      },
+      {
+        "taskId": "P10",
+        "action": "review",
+        "actionId": "ccg-p10-reviewer",
+        "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/formal-generation-8-revision-3/action-contracts/P10-review.compiled.json",
+        "rawSha256": "sha256:9a8d9127e0484016181316242764555c15417ab4566c7a5bedcaf2625d206245",
+        "actionContractSha256": "2dc1deff2c8c5e738799e74a4f0bcf8df046534b206692bf612622429fe5af57",
+        "parentEnvelopeSha256": "28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+        "parentContainedByCompiler": true,
+        "actualParentContainedByController": true
+      }
+    ],
+    "controllerAudit": {
+      "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/CONTROLLER-R11-OWNER-REQUEST-AUDIT.json",
+      "rawSha256": "sha256:ca28616f35fa5bf21e9d0798483ed4ffb40115a5e15629d57857a235b7ea1152",
+      "payloadAggregate": "sha256:d21dd5aa19f661de4846f5e31d38207de0e8a718635e9eabca83241fc56fd73d"
+    },
+    "rlmPostReceipt": {
+      "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/RLM-DRAFT-REPAIR-R11-POST-RECEIPT.json",
+      "rawSha256": "sha256:d94cf80ee885a899a9fee6fe767be79f2205824e7fc0a19f8433c48701f161b7"
+    },
+    "rlmHandoff": {
+      "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/sub-5e832c3b/COMPOSED-GATE-DRAFT-HANDOFF.json",
+      "rawSha256": "sha256:7506c68bf2c19dd6cc23bf3d4054dea4ec41eb877590d6e3c8cf1f17c15fc9a0",
+      "payloadAggregate": "sha256:6c7a68c16decac8dd143edc5855279af7fbc3d6ae18d2b31e873a7b74f2e6396"
+    }
+  },
+  "checks": {
+    "planPackageParentActionContractsUnchanged": true,
+    "exactOneFieldRequestRepair": true,
+    "controllerP0P1Zero": true,
+    "nonEffective": true,
+    "actionContractsCompiled": true
+  },
+  "claimCeiling": "Frozen G8 revision 3 exact request candidate only; independent review and Owner approval required",
+  "payloadAggregate": "sha256:9eaea873da805a47b819dd39a2e7d367ecb178f84b35619f0ca4d23d401fdbcd"
+}

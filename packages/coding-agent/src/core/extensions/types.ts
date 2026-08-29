@@ -49,6 +49,7 @@ import type { ReadonlyFooterDataProvider } from "../footer-data-provider.js";
 import type { KeybindingsManager } from "../keybindings.js";
 import type { CustomMessage } from "../messages.js";
 import type { ModelRegistry } from "../model-registry.js";
+import type { HarnessState, RefinementProposal, RefinementResult } from "../refinement/index.js";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -517,6 +518,36 @@ export interface SessionBeforeCompactEvent {
 	signal: AbortSignal;
 }
 
+/** Planning inputs for a refinement round. */
+export interface RefinePreparation {
+	/** Whether refinement was requested explicitly (/refine) or by auto-refine. */
+	trigger: "manual" | "auto";
+	/** Instructions passed to /refine or derived from the auto-refine review. */
+	instructions?: string;
+	/** Whether the round targets the global or the session-local harness. */
+	scope: "global" | "local";
+	/** Harness state the planner would see (global overlaid with local for local scope). */
+	planningState: HarnessState;
+	/** Prior refinement results, newest last. */
+	history: RefinementResult[];
+	/** Serialized conversation text the built-in planner would consume. */
+	conversationText: string;
+}
+
+/** Fired before refinement planning (can be skipped or replaced). Rollbacks bypass this event. */
+export interface SessionBeforeRefineEvent {
+	type: "session_before_refine";
+	preparation: RefinePreparation;
+	signal: AbortSignal;
+}
+
+export interface SessionBeforeRefineResult {
+	/** Skip this refinement round entirely. */
+	skip?: boolean;
+	/** Replace the built-in planner. Edits are still validated at apply time. */
+	proposal?: RefinementProposal;
+}
+
 /** Fired after context compaction */
 export interface SessionCompactEvent {
 	type: "session_compact";
@@ -569,6 +600,7 @@ export type SessionEvent =
 	| SessionBeforeForkEvent
 	| SessionBeforeCompactEvent
 	| SessionCompactEvent
+	| SessionBeforeRefineEvent
 	| SessionShutdownEvent
 	| SessionBeforeTreeEvent
 	| SessionTreeEvent;
@@ -970,6 +1002,10 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,
 	): void;
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): void;
+	on(
+		event: "session_before_refine",
+		handler: ExtensionHandler<SessionBeforeRefineEvent, SessionBeforeRefineResult>,
+	): void;
 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): void;
 	on(event: "session_before_tree", handler: ExtensionHandler<SessionBeforeTreeEvent, SessionBeforeTreeResult>): void;
 	on(event: "session_tree", handler: ExtensionHandler<SessionTreeEvent>): void;

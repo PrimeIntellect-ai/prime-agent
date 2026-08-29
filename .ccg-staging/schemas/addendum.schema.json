@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "addendumId",
+    "parentEnvelopePayloadAggregate"
+  ],
+  "properties": {
+    "kind": {
+      "const": "composed-contract-gate-addendum"
+    },
+    "addendumId": {
+      "type": "string"
+    },
+    "parentEnvelopePayloadAggregate": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}

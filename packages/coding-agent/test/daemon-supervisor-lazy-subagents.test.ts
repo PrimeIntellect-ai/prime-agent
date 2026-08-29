@@ -4,19 +4,21 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type AgentFamilyCatalogEntry,
-	type AgentSessionMessageAgentSummary,
 	assertAgentFamilyReach,
 	sessionNameReservationKey,
 } from "../src/core/agent-messages.js";
 import { readSessionInfo, SessionManager } from "../src/core/session-manager.js";
+import { DaemonCatalogClient } from "../src/modes/daemon/daemon-catalog-process.js";
+import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import { success } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 
 interface SupervisorInternals {
 	workers: Map<string, WorkerFixture>;
+	start(): Promise<void>;
+	cleanupSupervisorResources(): Promise<void>;
 	refreshWorkerSummaries(worker: WorkerFixture): Promise<void>;
-	syncAgentPeers(): Promise<void>;
 	findSummaryInWorker(worker: WorkerFixture, selector: string): SessionSummary | undefined;
 	createOrReuseWorker(
 		clientId: string,
@@ -84,7 +86,7 @@ function worker(workerId: string, summaries: SessionSummary[] = []): WorkerFixtu
 		},
 		client: {
 			request: vi.fn(),
-			requestWorker: vi.fn(async () => ({ type: "response", command: "worker_sync_agent_peers", success: true })),
+			requestWorker: vi.fn(),
 		},
 		summaries: new Map(summaries.map((entry) => [entry.activeSessionId ?? entry.id, entry])),
 	};
@@ -645,13 +647,16 @@ describe("daemon supervisor passive subagent topology", () => {
 		await expect(first).resolves.toBe(launched);
 	});
 
-	it("retains passive worker summaries but syncs only roots to cross-worker peer maps", async () => {
+	it("dispatches authenticated peer queries and excludes disconnected workers", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-passive-peers-"));
 		tempDirs.push(directory);
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+		const socketPath = join(directory, "daemon.sock");
+		const supervisor = new DaemonSupervisor(socketPath, {
 			defaultSessionConfig: { agentDir: directory, cwd: directory },
 			descriptorDir: join(directory, "workers"),
 		}) as unknown as SupervisorInternals;
+		const client = new DaemonClient(socketPath);
+		vi.spyOn(DaemonCatalogClient.prototype, "start").mockResolvedValue();
 
 		const passive = summary({
 			id: "passive-session",
@@ -667,36 +672,54 @@ describe("daemon supervisor passive subagent topology", () => {
 			sessionId: "first-root-session",
 			runtimeKind: "top-level",
 		});
-		const first = worker("first");
-		first.client.request.mockResolvedValue(success(undefined, "list", { sessions: [passive] }));
 		const secondRoot = summary({
 			id: "second-root-active",
 			activeSessionId: "second-root-active",
 			sessionId: "second-root-session",
 		});
-		const second = worker("second", [secondRoot]);
-		supervisor.workers.set("first", first);
-		supervisor.workers.set("second", second);
-
-		await supervisor.refreshWorkerSummaries(first);
-		expect(first.client.request).toHaveBeenCalledWith({ type: "list" }, 5000);
-		expect(first.summaries.get("passive-session")).toMatchObject({
-			sessionFile: passive.sessionFile,
-			runtimeKind: "subagent",
-			rlmChildId: "passive-child",
+		const disconnectedRoot = summary({
+			id: "disconnected-root-active",
+			activeSessionId: "disconnected-root-active",
+			sessionId: "disconnected-root-session",
 		});
-		first.summaries.set(first.descriptor.rootActiveSessionId, firstRoot);
+		const first = worker("first", [firstRoot, passive]);
+		const second = worker("second", [secondRoot]);
+		const disconnected = worker("disconnected", [disconnectedRoot]);
+		Object.assign(disconnected, { client: undefined });
 
-		await supervisor.syncAgentPeers();
-		const secondPeerCommand = second.client.requestWorker.mock.calls[0]?.[0] as
-			| { peers: AgentSessionMessageAgentSummary[] }
-			| undefined;
-		expect(secondPeerCommand?.peers).toEqual([
-			expect.objectContaining({
-				activeSessionId: "first-root-active",
-				sessionId: "first-root-session",
-				runtimeKind: "top-level",
-			}),
-		]);
+		try {
+			await supervisor.start();
+			supervisor.workers.set("first", first);
+			supervisor.workers.set("second", second);
+			supervisor.workers.set("disconnected", disconnected);
+			await client.connect();
+
+			await expect(
+				client.request({ type: "list_agent_peers", workerToken: "invalid-token" }),
+			).resolves.toMatchObject({
+				success: false,
+				error: "Worker authentication failed",
+			});
+			const response = await client.request({
+				type: "list_agent_peers",
+				workerToken: second.descriptor.authenticationToken,
+			});
+			expect(response).toMatchObject({
+				success: true,
+				data: {
+					peers: [
+						expect.objectContaining({
+							activeSessionId: "first-root-active",
+							sessionId: "first-root-session",
+							runtimeKind: "top-level",
+						}),
+					],
+				},
+			});
+		} finally {
+			client.close();
+			supervisor.workers.clear();
+			await supervisor.cleanupSupervisorResources();
+		}
 	});
 });

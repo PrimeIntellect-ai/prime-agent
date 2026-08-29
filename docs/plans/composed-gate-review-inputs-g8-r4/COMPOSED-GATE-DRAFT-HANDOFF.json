@@ -1,0 +1,120 @@
+{
+  "actualEffects": {
+    "activation": false,
+    "credentialAccess": false,
+    "effectClasses": [
+      "source_read",
+      "project_read",
+      "project_write",
+      "message_receipt"
+    ],
+    "gitMutation": false,
+    "implementation": false,
+    "packageWrite": false,
+    "planWrite": false,
+    "review": false,
+    "runtimeEffect": false,
+    "serviceEffect": false,
+    "testExecution": false,
+    "writes": [
+      "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/plans/2026-08-23-composed-contract-gate-authorization-request.rlm-draft.json",
+      "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/sub-5e832c3b/COMPOSED-GATE-DRAFT-HANDOFF.json"
+    ]
+  },
+  "bindingNonce": "594700e9f3aba4402232407c2a9c0b23375aacbc5b9984bc",
+  "claimCeiling": "Non-effective wording repair only; no functional effect.",
+  "closed": true,
+  "generation": 8,
+  "generationRule": "candidate generation 8 revision 2 / repairRound 10; wordingRepairRound 11 is non-authority workflow metadata",
+  "identity": {
+    "activeSessionId": "b6fa7f9e2ce8",
+    "parentActiveSessionId": "c69c0cf2a10d",
+    "parentSessionId": "01a01acd-32d6-711c-ba3f-15b1aab84c10",
+    "relationship": "direct_child",
+    "rlmChildId": "sub-5e832c3b",
+    "runtimeKind": "subagent",
+    "sessionId": "01a02d57-9145-77d2-89d9-1726dcd414bc"
+  },
+  "issuedAt": "2026-08-23T10:04:56.641973+00:00",
+  "kind": "composed-contract-gate-rlm-draft-terminal-handoff",
+  "ownership": "RELEASED",
+  "payloadAggregate": "sha256:6c7a68c16decac8dd143edc5855279af7fbc3d6ae18d2b31e873a7b74f2e6396",
+  "priorIndependentAcceptance": {
+    "decision": "PASS",
+    "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/INDEPENDENT-REVIEW-G8-R3-ACCEPTANCE-RECEIPT.json",
+    "rawSha256": "sha256:8deed97e8897115601a8a717c7ac07673f75d80415911d393047ad509b976933"
+  },
+  "repairAuthorization": {
+    "authorityCeiling": "Draft only. Cannot create effective authority, modify the approved scope/effects/budget ceiling, implement, test, review, accept, deploy, or activate.",
+    "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/RLM-DRAFT-REPAIR-R11-AUTHORIZATION.json",
+    "rawSha256": "sha256:acc38fc19113574f6c5ed0049f32f081f404c90bc2ef9034e5fa3f9658b9129c"
+  },
+  "repairRound": 10,
+  "repairedArtifact": {
+    "exactChangedPath": "$.requestedDecision.approve",
+    "kind": "authorization_G8_revision2_repairRound10",
+    "newValue": "Approve the exact repaired G8 request bytes bound to candidate generation 8 revision 2 / repairRound 10 package and Parent; P10 accepts only G8 Owner receipt semantics.",
+    "nonEffective": true,
+    "path": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/plans/2026-08-23-composed-contract-gate-authorization-request.rlm-draft.json",
+    "payloadAggregate": "sha256:c45a2e6344e1287eaffabe40652f312cea0230585d7f8dcd8c0f3d0737c0faca",
+    "priorRawSha256": "sha256:bfd75fcf3eac57f829ddcbbb721875e9f0496c59eddc7221f7f1658dba3dae6e",
+    "rawSha256": "sha256:9ba5b1e4bb4754fefa72df8cfd6dae0cb0ce30311a6c941c250b4e20bb269724"
+  },
+  "reviewInput": {
+    "p0": 0,
+    "p1": 1,
+    "p2": 0,
+    "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/RLM-DRAFT-REVIEW-R11.json",
+    "rawSha256": "sha256:ccb29bf9f9c1b38e5ba03d69cf3051287e7de49e85e14971bbb670375c21e2d0"
+  },
+  "revision": 2,
+  "role": "ControllerInternalRLM",
+  "roleAdmission": {
+    "decision": "PASS",
+    "path": "/Users/ZGH/.prime/agent/session-artifacts/01a01acd-32d6-711c-ba3f-15b1aab84c10/token-optimization/composed-contract-gate/RLM-REPAIR-R11-ROLE-ADMISSION-RECEIPT.json",
+    "rawSha256": "sha256:0c3f9a87eded2f316df4fdf9542965b3159dfe8c1d6ddfc54bc818184fdc5ef5"
+  },
+  "schemaVersion": 1,
+  "selfCheck": {
+    "allPassed": true,
+    "count": 12,
+    "kind": "exact_one_field_wording_repair_not_project_test",
+    "notes": [
+      "Only requestedDecision.approve changed, excluding recomputed payloadAggregate.",
+      "Plan/package/Parent bytes and hashes unchanged.",
+      "Candidate generation 8 revision 2 / repairRound 10 exact.",
+      "No project compiler/tests executed."
+    ],
+    "results": {
+      "acceptance_prior": true,
+      "admission": true,
+      "approve_exact": true,
+      "auth": true,
+      "candidate_metadata": true,
+      "one_field_only": true,
+      "package_binding_preserved": true,
+      "package_unchanged": true,
+      "parent_unchanged": true,
+      "plan_unchanged": true,
+      "request_aggregate": true,
+      "review": true
+    }
+  },
+  "status": "TERMINAL_R11_WORDING_REPAIR_HANDOFF",
+  "taskId": "composed-contract-gate-owner-request-wording-repair-r11",
+  "unchangedArtifacts": [
+    {
+      "kind": "plan",
+      "path": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/plans/2026-08-23-composed-contract-gate-program-plan.rlm-draft.md",
+      "rawSha256": "sha256:dc0ce23e991b9740004861b4ad219adc8bf04aed56204d8e76edb36b2bc9d28b"
+    },
+    {
+      "kind": "package",
+      "parentEnvelopePayloadAggregate": "sha256:28d4d0be4c2be8daa75a837bbed88cbe49c5de50b683389780533d3f4290896d",
+      "path": "/Users/ZGH/projects/PA-AGI/worktrees/prime-agent/composed-contract-gate-plan/docs/plans/2026-08-23-composed-contract-gate-task-package.rlm-draft.json",
+      "payloadAggregate": "sha256:d18a5c59106cd092e9913e6f2597bfbec6aa232cd9d531b3ac8526298ff6cfa0",
+      "rawSha256": "sha256:57ead530b75570a5a114e323e35edea9c6ba58c9289df3714f3804edad167c33"
+    }
+  ],
+  "wordingRepairRound": 11
+}

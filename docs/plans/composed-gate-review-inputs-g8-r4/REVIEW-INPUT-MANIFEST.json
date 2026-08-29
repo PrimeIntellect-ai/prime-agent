@@ -1,0 +1,171 @@
+{
+  "schemaVersion": 1,
+  "kind": "independent-review-input-manifest",
+  "closed": true,
+  "generation": 8,
+  "revision": 3,
+  "reviewRound": 4,
+  "repairRound": 10,
+  "wordingRepairRound": 11,
+  "taskId": "composed-contract-gate-package-independent-review-g8-r4",
+  "files": [
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/COMPOSED-CONTRACT-GATE-OWNER-AUTHORIZATION-REQUEST.frozen.json",
+      "rawSha256": "sha256:9ba5b1e4bb4754fefa72df8cfd6dae0cb0ce30311a6c941c250b4e20bb269724"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/COMPOSED-CONTRACT-GATE-PROGRAM-PLAN.frozen.md",
+      "rawSha256": "sha256:dc0ce23e991b9740004861b4ad219adc8bf04aed56204d8e76edb36b2bc9d28b"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/COMPOSED-CONTRACT-GATE-TASK-PACKAGE.frozen.json",
+      "rawSha256": "sha256:57ead530b75570a5a114e323e35edea9c6ba58c9289df3714f3804edad167c33"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/COMPOSED-GATE-DRAFT-HANDOFF.json",
+      "rawSha256": "sha256:7506c68bf2c19dd6cc23bf3d4054dea4ec41eb877590d6e3c8cf1f17c15fc9a0"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/CONTROLLER-R11-OWNER-REQUEST-AUDIT.json",
+      "rawSha256": "sha256:ca28616f35fa5bf21e9d0798483ed4ffb40115a5e15629d57857a235b7ea1152"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/FORMAL-CANDIDATE-MANIFEST.json",
+      "rawSha256": "sha256:47a3c5b23d32fc289d179631009afdb11ac324ae203728bc32fcf80ab5595c1b"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/INDEPENDENT-REVIEW-G8-R3-ACCEPTANCE-RECEIPT.json",
+      "rawSha256": "sha256:8deed97e8897115601a8a717c7ac07673f75d80415911d393047ad509b976933"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/PARENT-ENVELOPE.candidate.json",
+      "rawSha256": "sha256:c8d6692d4d41039892e9d3c22fa7c70c61e558038a3dd912dda42edcd1577c15"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/PRIOR-OWNER-AUTHORIZATION-REQUEST.revision-2.json",
+      "rawSha256": "sha256:bfd75fcf3eac57f829ddcbbb721875e9f0496c59eddc7221f7f1658dba3dae6e"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/RLM-DRAFT-REPAIR-R11-POST-RECEIPT.json",
+      "rawSha256": "sha256:d94cf80ee885a899a9fee6fe767be79f2205824e7fc0a19f8433c48701f161b7"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/RLM-DRAFT-REVIEW-R11.json",
+      "rawSha256": "sha256:ccb29bf9f9c1b38e5ba03d69cf3051287e7de49e85e14971bbb670375c21e2d0"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P0-bootstrapPreflight.compiled.json",
+      "rawSha256": "sha256:2610f4216983b2068173246ced8dd57e601c6fc1ba78a64a7c6905e1a917f480"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P0-implementation.compiled.json",
+      "rawSha256": "sha256:45dace77fb9d7ef34dea32502e4304f5d88da806e635f0e1bc9cdf8eb1aadd64"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P0-review.compiled.json",
+      "rawSha256": "sha256:7c293eaa6a92797b6d1173582578faeb83b028d3fd84f5b62520617abe662346"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P1-implementation.compiled.json",
+      "rawSha256": "sha256:293bbd471cb11fc68edff01b7826296d5c9adcea6226206851ad26280c4df7ca"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P1-review.compiled.json",
+      "rawSha256": "sha256:01648e2334c3fa111f545d75c3fc0fba6993094369923583a63de1f5c7fad318"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P1-sourceCapture.compiled.json",
+      "rawSha256": "sha256:fe648580589100046e0829724de52d77a8598dcc20fe2f08158267695a255c5d"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P10-implementation.compiled.json",
+      "rawSha256": "sha256:368348e5de425fe86a940c7b70ce2448922894cba06198c81c634e3c54a09b05"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P10-review.compiled.json",
+      "rawSha256": "sha256:9a8d9127e0484016181316242764555c15417ab4566c7a5bedcaf2625d206245"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P2-implementation.compiled.json",
+      "rawSha256": "sha256:553a5807bd922b42b40f264f94286a59fd6bf27370c4762886d8dad41f2ea275"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P2-review.compiled.json",
+      "rawSha256": "sha256:1cfaa099fc04c638b1ba50fb01e7766d6bccc4185e2189ad43404c8ebd23dea5"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P3-implementation.compiled.json",
+      "rawSha256": "sha256:da609a8cea1e02edd3df76e302b8090bccf50332a20ebd9a2721b46f033a0da6"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P3-review.compiled.json",
+      "rawSha256": "sha256:e5d647f48781fac582284eb48a1a24e98efef7ff5496e99338f9c8dac1c38b50"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P4-implementation.compiled.json",
+      "rawSha256": "sha256:65378f5fc0c934cdf05058d462b0b1451c8be4ec6bff549a75fdc12e342d6586"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P4-review.compiled.json",
+      "rawSha256": "sha256:6c7938825ada2e164b5fabdba21855b4a0c9b795e1c0a7a4b7b75fe2f3c75f81"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P5-implementation.compiled.json",
+      "rawSha256": "sha256:e7c8292b81a36504095c01ccc387c23e1229030c8d2b4deab7f001b7ae7b8a04"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P5-review.compiled.json",
+      "rawSha256": "sha256:9b56a014ef7760442ff6c123763f93681cdd45548cf38181ba7e2e84f737b2fd"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P6-implementation.compiled.json",
+      "rawSha256": "sha256:06a19d4117e031d9c5081592377550d6df9562c31280efff2dbdddc1622ee090"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P6-review.compiled.json",
+      "rawSha256": "sha256:0c935dd2e2159c2e59b89058ede805f2827c39e1e06b22c3970996ad6ef70e4f"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P7-implementation.compiled.json",
+      "rawSha256": "sha256:cc79d950c614a486dae4b052f0b64755d1d16edf4968daaf1c6db7e14605ca08"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P7-review.compiled.json",
+      "rawSha256": "sha256:036eb8cd19e5f8388434cd8b85c7884b615658174c77126855c0e4d5f934a7d9"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P8-implementation.compiled.json",
+      "rawSha256": "sha256:56a9753eade0f29e88777ac668891a665fec5af53d416760e247653e8d3b5362"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P8-review.compiled.json",
+      "rawSha256": "sha256:5beae5abec0bf7f494153139cd7b70aa531dd83e2d1c45cfe20de60a2976a032"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P9-implementation.compiled.json",
+      "rawSha256": "sha256:563502a8043bacfee2e2e1973462c023eb30bd54ba7691518cb8c0940cfa35ee"
+    },
+    {
+      "path": "docs/plans/composed-gate-review-inputs-g8-r4/action-contracts/P9-review.compiled.json",
+      "rawSha256": "sha256:7d705ef33aa84bd011ae41b8ca43a21ff9159e475b701aec1b792f769e1e3339"
+    }
+  ],
+  "formalCandidateManifest": {
+    "rawSha256": "sha256:47a3c5b23d32fc289d179631009afdb11ac324ae203728bc32fcf80ab5595c1b",
+    "payloadAggregate": "sha256:9eaea873da805a47b819dd39a2e7d367ecb178f84b35619f0ca4d23d401fdbcd"
+  },
+  "currentRequest": {
+    "rawSha256": "sha256:9ba5b1e4bb4754fefa72df8cfd6dae0cb0ce30311a6c941c250b4e20bb269724",
+    "payloadAggregate": "sha256:c45a2e6344e1287eaffabe40652f312cea0230585d7f8dcd8c0f3d0737c0faca"
+  },
+  "priorRequest": {
+    "rawSha256": "sha256:bfd75fcf3eac57f829ddcbbb721875e9f0496c59eddc7221f7f1658dba3dae6e",
+    "allowedDiffPaths": [
+      "$.requestedDecision.approve",
+      "$.payloadAggregate"
+    ]
+  },
+  "expectedActionContracts": 24,
+  "claimCeiling": "G8 revision 3 narrow wording review only",
+  "payloadAggregate": "sha256:c83902e483d261f93d73bfce30129be10dac82f7e2e203d779bdc303a1878e9b"
+}

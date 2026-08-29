@@ -158,7 +158,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Ensure MCP providers are registered and built-in MCP skills are gated by
 	// auth even on the bare SDK path (not just the CLI's createAgentSessionServices).
 	const mcpManager =
-		options.mcpManager ?? new McpManager({ authStorage, getUserServers: () => settingsManager.getMcpServers() });
+		options.mcpManager ??
+		new McpManager({ authStorage, getUserServers: () => settingsManager.getGlobalMcpServers() });
 	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerUserProviders());
 
 	if (!resourceLoader) {

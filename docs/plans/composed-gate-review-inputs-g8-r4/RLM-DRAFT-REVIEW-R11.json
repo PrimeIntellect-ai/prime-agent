@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "kind": "controller-draft-review",
+  "status": "REJECT",
+  "round": 11,
+  "candidateGeneration": 8,
+  "candidateRevision": 2,
+  "taskId": "composed-contract-gate-owner-request-wording-repair",
+  "reviewedOwnerRequestRawSha256": "sha256:bfd75fcf3eac57f829ddcbbb721875e9f0496c59eddc7221f7f1658dba3dae6e",
+  "independentG8R3AcceptanceRawSha256": "sha256:8deed97e8897115601a8a717c7ac07673f75d80415911d393047ad509b976933",
+  "p0": 0,
+  "p1": 1,
+  "p2": 0,
+  "findings": [
+    {
+      "id": "P1-1",
+      "title": "Owner requestedDecision contains stale repair-generation-9 wording",
+      "path": "$.requestedDecision.approve",
+      "actual": "Approve the exact repaired G8 request bytes bound to repair-generation-9 package/Parent; P10 accepts only G8 Owner receipt semantics.",
+      "required": "Approve the exact repaired G8 request bytes bound to candidate generation 8 revision 2 / repairRound 10 package and Parent; P10 accepts only G8 Owner receipt semantics.",
+      "impact": "The exact Owner decision text conflicts with the frozen candidate metadata and can create ambiguous authority even though machine fields are generation 8."
+    }
+  ],
+  "requiredRepair": [
+    "Change only the stale requestedDecision.approve wording and values/hashes transitively required by that request-byte change.",
+    "Keep plan, package, Parent, 24 ActionContracts, budgets, P10 bindings and candidate generation 8/repairRound 10 unchanged.",
+    "Recompute request payload/raw, handoff and bindings. Draft only."
+  ],
+  "claimCeiling": "Controller exact-byte wording adjudication only",
+  "issuedAt": "2026-08-23T10:02:51.399188+00:00",
+  "payloadAggregate": "sha256:7e48ca0ed93b2b4a9009493f97cdc05d92bf990eefbbb27ac8ababe4ef9cda07"
+}

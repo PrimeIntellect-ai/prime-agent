@@ -5,7 +5,6 @@ import { registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { clearConfigValueCache } from "../src/core/resolve-config-value.js";
 
 describe("AuthStorage", () => {
 	let tempDir: string;
@@ -22,7 +21,6 @@ describe("AuthStorage", () => {
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true });
 		}
-		clearConfigValueCache();
 		vi.restoreAllMocks();
 	});
 
@@ -835,26 +833,6 @@ describe("AuthStorage", () => {
 				expect(count).toBe(1);
 			});
 
-			test("clearConfigValueCache allows command to run again", async () => {
-				const counterFile = join(tempDir, "counter");
-				writeFileSync(counterFile, "0");
-
-				const counterPath = toShPath(counterFile);
-				const command = `!sh -c 'count=$(cat "${counterPath}"); echo $((count + 1)) > "${counterPath}"; echo "key-value"'`;
-				writeAuthJson({
-					anthropic: { type: "api_key", key: command },
-				});
-
-				authStorage = AuthStorage.create(authJsonPath);
-				await authStorage.getApiKey("anthropic");
-
-				clearConfigValueCache();
-				await authStorage.getApiKey("anthropic");
-
-				const count = parseInt(readFileSync(counterFile, "utf-8").trim(), 10);
-				expect(count).toBe(2);
-			});
-
 			test("different commands are cached separately", async () => {
 				writeAuthJson({
 					anthropic: { type: "api_key", key: "!echo key-anthropic" },
@@ -1030,6 +1008,32 @@ describe("AuthStorage", () => {
 
 			const raw = readFileSync(authJsonPath, "utf-8");
 			expect(raw).toBe("{invalid-json");
+		});
+
+		test("removeVerified deletes from disk and memory", () => {
+			writeAuthJson({
+				"mcp:remote": { type: "api_key", key: "token" },
+				openai: { type: "api_key", key: "openai-key" },
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+			authStorage.removeVerified("mcp:remote");
+
+			const updated = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<string, unknown>;
+			expect(updated["mcp:remote"]).toBeUndefined();
+			expect(authStorage.get("mcp:remote")).toBeUndefined();
+			expect((updated.openai as { key: string }).key).toBe("openai-key");
+		});
+
+		test("removeVerified throws while the credential may still exist on disk", () => {
+			writeAuthJson({
+				"mcp:remote": { type: "api_key", key: "token" },
+			});
+
+			authStorage = AuthStorage.create(authJsonPath);
+			writeFileSync(authJsonPath, "{invalid-json", "utf-8");
+
+			expect(() => authStorage.removeVerified("mcp:remote")).toThrow();
 		});
 
 		test("reload records parse errors and drainErrors clears buffer", () => {

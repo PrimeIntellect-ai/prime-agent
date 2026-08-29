@@ -5,7 +5,7 @@ Connect external services (Linear, Notion, …) to Prime Agent over the
 
 Consistent with Prime Agent's single-tool design, MCP integrations are **not**
 exposed as new agent tools. Each integration is a [Python-backed skill](skills.md)
-that the model imports and calls from the IPython kernel:
+that the model imports and calls from the Python kernel:
 
 ```python
 import linear
@@ -33,7 +33,7 @@ credentials in `auth.json`.
 Built-in integrations (Linear, Notion) ship **disabled**. Logging in enables them:
 
 - Open `/login`, switch to **MCP Connections**, pick the integration, and
-  complete OAuth in the browser. `/mcp login <name>` does the same from the CLI.
+  complete OAuth in the browser. `/mcp login <name>` does the same from the TUI command line.
 - Once connected, the integration's skill becomes visible to the model and is
   auto-imported into the kernel.
 - `/mcp` lists integrations and connection status; `/mcp logout <name>`
@@ -70,136 +70,91 @@ result = await linear.list_issues(team="Engineering")
 - A call against an integration with no credentials raises `NotEnabled` (telling
   the user to `/mcp login`); a tool that returns an error raises `McpToolError`.
 
-## Authoring your own integration
+## Generic MCP servers
 
-An integration is a [Python skill package](skills.md#python-backed-skills) whose
-module subclasses `McpIntegration`. The built-in `linear` / `notion` packages are
-the reference implementations.
+Manage generic servers from either the shell (which exits without starting an
+agent) or the TUI. Both surfaces update only `~/.prime/agent/settings.json`:
 
-### 1. Declare the server
+```bash
+prime-agent mcp add remote --url https://mcp.example.com/mcp --bearer-token-env-var EXAMPLE_TOKEN
+prime-agent mcp add local --cwd /absolute/path --env TOKEN=EXAMPLE_TOKEN -- node server.js --stdio
+prime-agent mcp list
+prime-agent mcp get remote
+prime-agent mcp remove remote
+```
 
-Add it under `mcpServers` in `~/.prime/agent/settings.json` (or project
-`.prime/agent/settings.json`):
+Use the same forms after `/mcp` in the TUI. Add `--oauth` for the existing OAuth
+login flow and then use `/mcp login <name>`; use `--force` to replace a complete
+existing entry. Static secret values are not accepted: bearer and stdio secrets
+are environment-variable references. Project `.prime/agent/settings.json` MCP
+entries are ignored for execution, so a repository cannot start a local process
+or shadow a user server.
+
+Built-in integration names (`linear`, `notion`, ...) are reserved: `mcp add`
+rejects them, and a hand-edited `mcpServers` entry with such a name disables the
+built-in skill instead of reconfiguring it. Earlier releases documented a
+catalog-name override (custom `url` plus `bearerTokenEnvVar` under a built-in
+name); that override no longer works — rename the entry (for example
+`linear-proxy`) to reach a custom endpoint through the generic runtime.
+
+Advanced runtime options may still be written directly
+to the user settings file:
 
 ```jsonc
-// ~/.prime/agent/settings.json
 {
   "mcpServers": {
-    "acme": {
+    "remote": {
       "type": "http",
-      "url": "https://mcp.acme.com/mcp",
-      "oauth": true
+      "url": "https://mcp.example.com/mcp",
+      "bearerTokenEnvVar": "EXAMPLE_TOKEN",
+      "enabledTools": ["search"],
+      "disabledTools": ["delete"]
+    },
+    "local": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/absolute/path/server.js", "--stdio"],
+      "cwd": "/absolute/path",
+      "env": { "TOKEN": { "env": "EXAMPLE_TOKEN" } },
+      "startupTimeoutMs": 20000,
+      "callTimeoutMs": 60000
     }
   }
 }
 ```
 
-Currently only remote `"http"` servers are supported by `McpIntegration`. HTTP
-server fields:
-
-| Field | Meaning |
-|-------|---------|
-| `type` | Must be `"http"` |
-| `url` | The MCP endpoint |
-| `oauth` | `true` to use the browser OAuth flow (requires the server to support dynamic client registration) |
-| `bearerTokenEnvVar` | Name of an env var holding a static bearer token, instead of OAuth |
-| `headers` | Extra static HTTP headers sent on every request |
-| `enabled` | Set `false` to force-disable even when credentials exist |
-
-> `stdio` (local-subprocess) servers are not yet wired through to the kernel —
-> the host drops non-HTTP entries — so an integration must target an HTTP endpoint.
-
-### 2. Ship the skill package
-
-Create a skill directory (any [skills location](skills.md#locations), e.g.
-`~/.prime/agent/skills/acme/`) with the standard Python-skill layout:
-
-```
-acme/
-  SKILL.md
-  pyproject.toml
-  src/acme/__init__.py
-```
-
-`pyproject.toml` (depends on `mcp`, `httpx`, and `prime-agent-runtime`):
-
-```toml
-[project]
-name = "prime-agent-skill-acme"
-version = "0.1.0"
-requires-python = ">=3.10"
-dependencies = ["mcp", "httpx", "prime-agent-runtime"]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/acme"]
-```
-
-`src/acme/__init__.py`:
+The generic `mcp` module is pre-imported in the Python REPL. Server and tool names are
+passed through unchanged:
 
 ```python
-from rlm import McpIntegration
-
-class Acme(McpIntegration):
-    server = "acme"                      # matches the mcpServers key / auth.json `mcp:acme`
-    url = "https://mcp.acme.com/mcp"
-
-acme = Acme()
-
-# Forward bare module access (`import acme; await acme.<tool>(...)`) to the
-# instance, but NOT the names the kernel bootstrap probes — forwarding `run`
-# would make it treat the module as a callable skill and break tool dispatch.
-_RESERVED = {"run", "__wrapped__", "__call__"}
-
-def __getattr__(name):
-    if name.startswith("_") or name in _RESERVED:
-        raise AttributeError(name)
-    return getattr(acme, name)
+tools = await mcp.list_tools("remote")
+result = await mcp.call_tool("remote", "search", {"query": "example"})
 ```
 
-The base class connects with the `mcp` SDK, resolves the URL/headers from the host
-(honoring the `mcpServers` config), injects the bearer token from `auth.json`
-(refreshing when expired), and binds the server's tools as async methods. Authoring
-is a few lines — the package above is the whole integration.
+HTTP servers may be anonymous, use static `headers`, use a token named by
+`bearerTokenEnvVar`, or opt into the existing OAuth login with `oauth: true`.
+For stdio, `command` and `args` are executed directly without a shell. `env`
+accepts only tagged references to existing environment variables; literal
+secrets are not supported. The runtime passes a small ambient environment plus
+those references. `enabledTools` is applied first and `disabledTools` second at
+both discovery and dispatch. `enabled: false` disables a server.
 
-### Authentication
+A connection is initialized and its tools discovered on first use, then reused
+by that kernel. Configuration changes replace the connection on the next call;
+`await mcp.reload()` closes all current connections immediately. Startup and
+calls have separate bounded timeouts, and kernel shutdown closes HTTP sessions
+and terminates stdio children.
 
-- **OAuth** (`"oauth": true`): the user runs `/login` → MCP Connections → your server (or
-  `/mcp login acme`). Works when the server supports OAuth 2.1 dynamic client
-  registration (RFC 7591); login discovers the auth server, registers a client,
-  and runs PKCE. Servers requiring a pre-registered client id are not yet
-  supported via `mcpServers`.
-- **Static bearer token** (`"bearerTokenEnvVar": "ACME_TOKEN"`): no login needed;
-  the integration is "connected" whenever that env var is set. Set the matching
-  `bearer_token_env = "ACME_TOKEN"` on the subclass.
+Authored Linear and Notion skills remain available as optional typed wrappers.
+They use the same existing login and credential behavior.
 
-## The `McpIntegration` API
+## Authored wrapper API
 
-Imported from `rlm` (`from rlm import McpIntegration`).
-
-Class attributes to set on your subclass:
-
-- `server: str` — required; the `mcpServers` key and `auth.json` credential id.
-- `url: str | None` — the remote endpoint (required unless you override
-  `_open_session` for a non-HTTP transport).
-- `bearer_token_env: str | None` — optional env var holding a static bearer token.
-
-Methods:
-
-- `await list_tools() -> list[dict]` — the server's tools as
-  `[{name, description, inputSchema}]`. Also populates the docstrings shown by
-  `help(integration.<tool>)`.
-- `await call_tool(name, arguments={}) -> Any` — explicit call; the escape hatch
-  for non-identifier tool names.
-- `integration.<tool>(**kwargs)` — auto-bound async method for any discovered tool.
-
-Exceptions (both importable from `rlm`):
-
-- `NotEnabled` — raised when no usable credentials exist (not logged in).
-- `McpToolError` — raised when a tool call returns a result flagged as an error.
+Built-in wrappers subclass `rlm.McpIntegration` and expose `list_tools()`,
+`call_tool(name, arguments)`, and Python methods for identifier-safe tool names.
+They raise `NotEnabled` when credentials are unavailable and `McpToolError` when
+a service returns a tool error. Generic servers do not need a wrapper and should
+use the pre-imported `mcp` API above.
 
 ## Enable-by-login lifecycle
 
@@ -216,35 +171,12 @@ This auth-gating applies to the **built-in** integrations (Linear, Notion):
 If you log in mid-turn, the reload is deferred — run `/reload` after the turn to
 activate the integration.
 
-**User-authored integrations are not auth-gated this way.** A skill you drop into
-a skills directory is loaded like any other skill — visible to the model and
-imported into the kernel immediately, regardless of `auth.json`. It simply fails
-at call time with `NotEnabled` until credentials exist. So make the skill's
-`SKILL.md` tell the model how to connect when a call raises `NotEnabled`, matching
-the auth mode you configured:
-
-- **OAuth** (`"oauth": true`): instruct the user to run `/mcp login <server>` (or
-  `/login` → MCP Connections). `/mcp login` only works for OAuth servers.
-- **Bearer token** (`bearerTokenEnvVar`): instruct the user to set that env var —
-  do *not* point them at `/mcp login`, which has no provider for a bearer-only
-  server and reports "Unknown MCP integration".
-
 ## Caveats
 
-- **Discover before assuming.** Tool names and argument schemas come from the
-  server and can change; call `list_tools()` / `help()` rather than hardcoding.
-- **Custom kernel + name collisions.** The kernel import name is the `server`
-  value. On a custom `PRIME_AGENT_KERNEL_PYTHON` that already has an unrelated PyPI
-  package of the same name (e.g. `notion`), `import <name>` may resolve to that
-  package instead. Use the default managed kernel venv to avoid this.
-- **Overriding a built-in name.** Declaring an `mcpServers` entry whose key matches
-  a built-in (e.g. `linear`) with a custom `url` points the integration at your
-  URL. A previously stored official credential is *not* reused for the override, to
-  avoid sending the official token to your endpoint. Authenticate such an override
-  via `bearerTokenEnvVar` only — OAuth credentials are not honored for a
-  catalog-name override. (Use a name that isn't a built-in to get OAuth.)
-- **Multi-session daemon.** OAuth provider registration is process-global; a
-  user-declared server unique to one daemon session is re-registered on that
-  session's next reload.
+- Discover before assuming tool names or argument schemas.
+- Generic MCP connections are kernel-local. Separate Prime Agent sessions use
+  separate connections even when they reference the same user setting.
+- A custom `PRIME_AGENT_KERNEL_PYTHON` must include the current
+  `prime-agent-runtime` dependencies.
 
 See also: [Skills](skills.md), [Settings](settings.md).

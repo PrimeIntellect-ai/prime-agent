@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "taskId",
+    "stageId",
+    "scope"
+  ],
+  "properties": {
+    "kind": {
+      "const": "goal-task-action-contract"
+    },
+    "taskId": {
+      "type": "string"
+    },
+    "stageId": {
+      "type": "string"
+    },
+    "scope": {
+      "type": "object"
+    }
+  }
+}

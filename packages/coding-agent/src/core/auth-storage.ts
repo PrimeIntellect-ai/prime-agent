@@ -687,6 +687,25 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Remove a provider's credential with the disk write verified: throws on any
+	 * load or write failure instead of recording it, so callers can refuse to
+	 * proceed while the credential may still exist on disk. Disk-authoritative
+	 * and idempotent — in-memory state is only updated after the write succeeds.
+	 */
+	removeVerified(provider: string): void {
+		this.storage.withLock((current) => {
+			const currentData = this.parseStorageData(current);
+			if (!(provider in currentData)) return { result: undefined };
+			const merged: AuthStorageData = { ...currentData };
+			delete merged[provider];
+			return { result: undefined, next: JSON.stringify(merged, null, 2) };
+		});
+		delete this.data[provider];
+		// Post-success only: a failed removal must not make a stale-marked credential selectable again.
+		this.clearStaleAuthSource(provider, "stored");
+	}
+
+	/**
 	 * List all providers with credentials.
 	 */
 	list(): string[] {

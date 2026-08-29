@@ -159,6 +159,9 @@ const PRIME_INFERENCE_MODEL_METADATA: Record<string, PrimeInferenceModelMetadata
 	"qwen/qwen3-30b-a3b-instruct-2507": { contextWindow: 262144 },
 	// OpenRouter has no max_completion_tokens for the rest of these.
 	"moonshotai/kimi-k2.5": { maxTokens: 65535 },
+	"minimax/minimax-m2.7": { maxTokens: 131072 },
+	// models.dev (moonshotai + openrouter) both list output = context for k2.6.
+	"moonshotai/kimi-k2.6": { maxTokens: 262144 },
 	"moonshotai/kimi-k3": { maxTokens: 1048576 },
 	"openai/gpt-4.1": { maxTokens: 32768 },
 	"openai/gpt-5-nano": { maxTokens: 128000 },
@@ -229,7 +232,8 @@ function isPrimeInferenceRawVariant(modelId: string): boolean {
 }
 
 function isPrimeInferencePrivateModel(modelId: string): boolean {
-	return modelId.toLowerCase().startsWith("internal/");
+	const id = modelId.toLowerCase();
+	return id.startsWith("internal/") || id.startsWith("dev/");
 }
 
 const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
@@ -1321,11 +1325,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				// OpenCode Go endpoint behaviour. models.dev reports these models
 				// as @ai-sdk/anthropic, but the OpenCode Go endpoints either don't
 				// accept Anthropic SDK auth (MiniMax M2.7) or are served through
-				// the OpenAI-compatible /v1/chat/completions path (Qwen 3.5/3.6).
+				// the OpenAI-compatible /v1/chat/completions path (Qwen routes).
 				// Switch them to openai-completions so requests use Bearer auth
 				// and the standard /v1/chat/completions endpoint.
 				if (variant.provider === "opencode-go") {
-					if (modelId === "minimax-m2.7") {
+					if (modelId === "minimax-m2.7" || (npm === "@ai-sdk/anthropic" && modelId.startsWith("qwen"))) {
 						api = "openai-completions";
 						baseUrl = `${variant.basePath}/v1`;
 					}

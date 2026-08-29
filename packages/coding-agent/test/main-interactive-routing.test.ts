@@ -11,6 +11,7 @@ import {
 	findActiveDaemonSessionSummaryForInteractiveStartup,
 	findActiveDaemonSessionSummaryForSessionFile,
 	type InteractiveDaemonStartupDecision,
+	isClientOwnedDaemonSession,
 	parseAgentsViewCommand,
 	resolveRuntimeSessionOptions,
 	shouldEnsureDaemonBeforeActiveSessionLookup,
@@ -26,6 +27,15 @@ import {
 import type { SessionSummary } from "../src/modes/index.js";
 
 describe("interactive startup routing", () => {
+	test.each([
+		["acp", false, false],
+		["acp", true, true],
+		["rpc", false, true],
+		["print", false, true],
+	] as const)("classifies %s noSession=%s ownership", (appMode, noSession, expected) => {
+		expect(isClientOwnedDaemonSession(appMode, noSession)).toBe(expected);
+	});
+
 	test.each(["interactive", "print", "json", "rpc"] as const)(
 		"uses the daemon runtime for the %s client",
 		(appMode) => {

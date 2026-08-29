@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "taskId",
+    "lineageId",
+    "generation",
+    "scope"
+  ],
+  "properties": {
+    "kind": {
+      "const": "composed-contract-gate-parent-envelope-draft"
+    },
+    "taskId": {
+      "type": "string"
+    },
+    "lineageId": {
+      "type": "string"
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "scope": {
+      "type": "object"
+    }
+  }
+}

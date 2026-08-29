@@ -1,0 +1,52 @@
+{
+  "commandAllowlist": [
+    [
+      "--policy",
+      "/private/tmp/prime-composed-gate-publish/AGENTS.md",
+      "--require-all-current-rules"
+    ],
+    [
+      "--actual-parent-containment",
+      "--all-action-bindings"
+    ],
+    [
+      "--mutable-db-profile",
+      "--reject-long-lived-db-raw"
+    ],
+    [
+      "--actual-parent-path-effect-claim-containment",
+      "--count",
+      "24"
+    ],
+    [
+      "--p10-single-wrapper-owner-reload"
+    ],
+    [
+      "--p10-interpreter-restart-argv"
+    ]
+  ],
+  "agentsPolicySha256": "66a17646a3cb576ea237d072b20d15a998eb9d82c1d057822d8000cd4522249d",
+  "agentsPolicyRules": {
+    "development_rules": "# Development Rules",
+    "no_inline_imports": "NEVER use inline imports",
+    "command_prohibitions": "NEVER run: `npm run dev`, `npm run build`, `npm test`",
+    "parallel_git_safety": "NEVER use `git add -A` or `git add .`"
+  },
+  "postPreflight": {
+    "requiredBeforePost": true,
+    "rejectRawPost": true
+  },
+  "ownerAuthority": {
+    "generation": 8,
+    "requestId": "ccg-owner-auth-request-2026-08-23-r8"
+  },
+  "dashboardPostFinalReceipt": {
+    "phase": "post_final",
+    "status": "PASS",
+    "processIdentity": {
+      "processId": "dashboard-staging-policy",
+      "startedAt": "2026-08-23T00:00:00Z",
+      "commandSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  }
+}
