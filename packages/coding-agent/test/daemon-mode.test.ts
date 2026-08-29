@@ -3209,7 +3209,7 @@ describe("daemon mode helpers", () => {
 		expect(client.catchupActiveSessionIds).not.toContain(state.activeSessionId);
 	});
 
-	it("catches up on drain only after events are skipped behind a backpressured write", async () => {
+	it("preserves recovery checkpoints while catching up skipped backpressured events", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
 			createRuntime: async () => {
@@ -3229,16 +3229,7 @@ describe("daemon mode helpers", () => {
 			sessions: Map<string, ActiveSessionState>;
 			handleConnection(socket: Socket): void;
 			createAttachResult(client: DaemonSocketClient, state: ActiveSessionState): DaemonAttachResult;
-			broadcastToSession(
-				state: ActiveSessionState,
-				message: {
-					type: "extension_error";
-					activeSessionId: string;
-					extensionPath: string;
-					event: string;
-					error: string;
-				},
-			): void;
+			broadcastToSession(state: ActiveSessionState, message: DaemonOutbound): void;
 		};
 		internals.handleConnection(socket);
 		const client = [...internals.clients][0]!;
@@ -3265,6 +3256,24 @@ describe("daemon mode helpers", () => {
 		expect(writes).toHaveLength(2);
 		expect(writes[1]).toContain('"error":"first"');
 
+		client.snapshotActiveSessionIds?.add(state.activeSessionId);
+		internals.broadcastToSession(state, {
+			type: "session_event",
+			activeSessionId: state.activeSessionId,
+			event: {
+				type: "tool_execution_end",
+				toolCallId: "tool-1",
+				toolName: "ipython",
+				result: {},
+				isError: false,
+			},
+		});
+
+		expect(writes).toHaveLength(3);
+		expect(writes[2]).toContain('"type":"tool_execution_end"');
+		expect(client.catchupActiveSessionIds).toEqual(new Set());
+
+		client.snapshotActiveSessionIds?.delete(state.activeSessionId);
 		internals.broadcastToSession(state, {
 			type: "extension_error",
 			activeSessionId: state.activeSessionId,
@@ -3273,7 +3282,7 @@ describe("daemon mode helpers", () => {
 			error: "skipped",
 		});
 
-		expect(writes).toHaveLength(2);
+		expect(writes).toHaveLength(3);
 		expect(client.catchupActiveSessionIds).toEqual(new Set([state.activeSessionId]));
 
 		write.mockImplementation((data: unknown) => {
@@ -3281,13 +3290,13 @@ describe("daemon mode helpers", () => {
 			return true;
 		});
 		socket.emit("drain");
-		await vi.waitFor(() => expect(writes).toHaveLength(3));
+		await vi.waitFor(() => expect(writes).toHaveLength(4));
 
-		expect(JSON.parse(writes[2] ?? "{}")).toMatchObject({
+		expect(JSON.parse(writes[3] ?? "{}")).toMatchObject({
 			type: "session_resynced",
 			activeSessionId: state.activeSessionId,
-			meta: { sequence: 2, cursor: { generation: "generation-1", sequence: 2 } },
-			snapshot: { lastEventSequence: 2 },
+			meta: { sequence: 3, cursor: { generation: "generation-1", sequence: 3 } },
+			snapshot: { lastEventSequence: 3 },
 		});
 		expect(client.catchupActiveSessionIds).toEqual(new Set());
 	});

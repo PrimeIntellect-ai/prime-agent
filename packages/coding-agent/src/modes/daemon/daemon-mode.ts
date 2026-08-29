@@ -6370,7 +6370,9 @@ export class AgentDaemon {
 				this.write(client, sequencedMessage);
 				continue;
 			}
-			if (client.snapshotActiveSessionIds?.has(state.activeSessionId)) {
+			const losslessCheckpoint =
+				sequencedMessage.type === "session_event" && RECOVERY_CHECKPOINT_EVENTS.has(sequencedMessage.event.type);
+			if (client.snapshotActiveSessionIds?.has(state.activeSessionId) && !losslessCheckpoint) {
 				this.queueClientCatchup(
 					client,
 					state.activeSessionId,
@@ -6378,7 +6380,7 @@ export class AgentDaemon {
 				);
 				continue;
 			}
-			if (client.backpressured === true) {
+			if (client.backpressured === true && !losslessCheckpoint) {
 				this.queueClientCatchup(
 					client,
 					state.activeSessionId,

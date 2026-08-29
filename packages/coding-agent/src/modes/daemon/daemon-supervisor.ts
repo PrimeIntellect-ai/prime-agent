@@ -4577,11 +4577,12 @@ export class DaemonSupervisor {
 			if (outboundType === "extension_ui_request" && !client.supportsExtensionUi) {
 				continue;
 			}
-			if (client.snapshotActiveSessionIds?.has(activeSessionId)) {
+			const losslessTerminalToolEvent = sessionEventType === "tool_execution_end";
+			if (client.snapshotActiveSessionIds?.has(activeSessionId) && !losslessTerminalToolEvent) {
 				this.queueCatchup(client, activeSessionId, outboundType === "session_replaced" ? "replacement" : "resync");
 				continue;
 			}
-			if (client.backpressured === true) {
+			if (client.backpressured === true && !losslessTerminalToolEvent) {
 				this.queueCatchup(client, activeSessionId, outboundType === "session_replaced" ? "replacement" : "resync");
 				continue;
 			}

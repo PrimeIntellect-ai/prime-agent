@@ -3511,7 +3511,7 @@ describe("daemon worker supervisor monitoring", () => {
 		).rejects.toThrow(`Unknown active session: ${activeSessionId}`);
 	});
 
-	it("catches up only after worker events are skipped behind a backpressured write", async () => {
+	it("preserves terminal tool events while catching up skipped worker events", async () => {
 		const activeSessionId = "active-backpressure";
 		const writes: string[] = [];
 		const write = vi.fn((data: unknown) => {
@@ -3549,6 +3549,27 @@ describe("daemon worker supervisor monitoring", () => {
 				`${JSON.stringify({ type: "extension_error", activeSessionId, extensionPath, event: "load", error })}\n`,
 			),
 		});
+		const terminalFrame: PrivateFrame<DaemonWorkerFrameHeader> = {
+			header: {
+				kind: "outbound",
+				outboundType: "session_event",
+				activeSessionId,
+				sessionEventType: "tool_execution_end",
+			},
+			payload: Buffer.from(
+				`${JSON.stringify({
+					type: "session_event",
+					activeSessionId,
+					event: {
+						type: "tool_execution_end",
+						toolCallId: "tool-1",
+						toolName: "ipython",
+						result: {},
+						isError: false,
+					},
+				})}\n`,
+			),
+		};
 
 		supervisor.handleWorkerFrame(worker, frame("first", "x".repeat(1024 * 1024)));
 
@@ -3557,9 +3578,17 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(writes).toHaveLength(1);
 		expect(writes[0]).toContain('"error":"first"');
 
+		client.snapshotActiveSessionIds = new Set([activeSessionId]);
+		supervisor.handleWorkerFrame(worker, terminalFrame);
+
+		expect(writes).toHaveLength(2);
+		expect(writes[1]).toContain('"type":"tool_execution_end"');
+		expect(client.catchupActiveSessionIds).toEqual(new Set());
+
+		client.snapshotActiveSessionIds.delete(activeSessionId);
 		supervisor.handleWorkerFrame(worker, frame("skipped", "/tmp/extension.ts"));
 
-		expect(writes).toHaveLength(1);
+		expect(writes).toHaveLength(2);
 		expect(client.catchupActiveSessionIds).toEqual(new Set([activeSessionId]));
 		expect(catchUpClient).not.toHaveBeenCalled();
 	});

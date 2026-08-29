@@ -1,0 +1,1 @@
+- Fixed daemon backpressure catch-up dropping terminal tool events after large tool results.
