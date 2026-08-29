@@ -316,8 +316,6 @@ interface ResidentWorker {
 	pendingClient?: DaemonWorkerClient;
 	/** Bumped per consumed roster delta; a summaries refresh must not overwrite newer deltas. */
 	rosterDeltaGeneration?: number;
-	/** Last worker frame generation consumed; acked back on (re)auth for tombstone replay. */
-	rosterAckGeneration?: number;
 }
 
 interface SnapshotDuplicateValidation {
@@ -2963,12 +2961,7 @@ export class DaemonSupervisor {
 				try {
 					const authResponse = await client.authenticateWorker(
 						worker.descriptor.authenticationToken,
-						{
-							...this.supervisorAuthenticationClaim(),
-							...(worker.rosterAckGeneration !== undefined
-								? { rosterGeneration: worker.rosterAckGeneration }
-								: {}),
-						},
+						this.supervisorAuthenticationClaim(),
 						1000,
 					);
 					await this.assertRecoveryAllowed();
@@ -3675,15 +3668,7 @@ export class DaemonSupervisor {
 	// Seeds selector resolution, name checks, and liveness; list all rescans the disk per call.
 	private async seedRosterLedger(): Promise<void> {
 		try {
-			for (const info of await this.catalog.list(undefined, this.defaultSessionConfig.sessionDir)) {
-				const entry = workerRosterEntryFromSummary(summaryForInactiveSession(info));
-				if (!this.roster().has(entry.agentId)) this.writeRosterEntry(entry);
-			}
-		} catch (error) {
-			this.log(`Could not seed the agent roster from the session catalog: ${String(error)}`);
-		}
-		try {
-			// Ledger edges cover subagents in artifact dirs the catalog never scans; tombstones stay out.
+			// Ledger edges cover subagents the catalog never scans; top-level rows read disk per call instead.
 			for (const edge of await this.rlmSpawnLedger().edges()) {
 				const entry = this.rosterEntryForSpawnLedgerEdge(edge);
 				if (this.roster().has(entry.agentId)) continue;
@@ -3730,14 +3715,11 @@ export class DaemonSupervisor {
 		if (delta.type !== "roster_delta" || !Array.isArray(delta.entries)) return;
 		worker.rosterCapable = true;
 		worker.rosterDeltaGeneration = (worker.rosterDeltaGeneration ?? 0) + 1;
-		if (typeof delta.generation === "number") worker.rosterAckGeneration = delta.generation;
 		if (delta.snapshot === true) {
-			// Snapshot replacement: absent rows with a durable transcript passivate, sessionless rows go.
+			// A live worker's snapshot carries its passivated rows too; absence means removal, disk backs the rest.
 			const sent = new Set(delta.entries.map((entry) => entry.agentId));
 			for (const entry of this.workerRosterEntries(worker)) {
-				if (sent.has(entry.agentId)) continue;
-				if (entry.summary.sessionFile) this.writeRosterEntry(passivatedWorkerRosterEntry(entry), worker);
-				else this.roster().delete(entry.agentId);
+				if (!sent.has(entry.agentId)) this.roster().delete(entry.agentId);
 			}
 		}
 		for (const entry of delta.entries) {
@@ -3747,6 +3729,8 @@ export class DaemonSupervisor {
 		for (const agentId of delta.removedAgentIds ?? []) {
 			this.roster().delete(agentId);
 		}
+		// Deleted absentees with surviving transcripts reseed from the spawn ledger, tombstone-filtered.
+		if (delta.snapshot === true) void this.seedRosterLedger();
 	}
 
 	/** Root roster deltas maintain the persisted descriptor pointers (rootSessionId, sessionFile). */

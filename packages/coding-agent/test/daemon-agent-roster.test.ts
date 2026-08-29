@@ -40,12 +40,9 @@ interface WorkerReporterFixture {
 		observeRosterEvent(state: ActiveSessionState, message: unknown): void;
 		flushRoster(): void;
 		rosterReporter: {
-			lastSent: Map<string, { json: string; entry: WorkerRosterEntry }>;
 			lastComposed: Map<string, WorkerRosterEntry>;
 			queuedChildren: Map<string, WorkerRosterEntry>;
 			removedAgentIds: Set<string>;
-			tombstones: Map<string, number>;
-			generation: number;
 			snapshotPending: boolean;
 		};
 	};
@@ -61,12 +58,9 @@ function makeWorkerReporter(connected = true): WorkerReporterFixture {
 		sessions: new Map<string, ActiveSessionState>(),
 		cronStore: { list: () => [] },
 		rosterReporter: {
-			lastSent: new Map<string, { json: string; entry: WorkerRosterEntry }>(),
 			lastComposed: new Map<string, WorkerRosterEntry>(),
 			queuedChildren: new Map<string, WorkerRosterEntry>(),
 			removedAgentIds: new Set<string>(),
-			tombstones: new Map<string, number>(),
-			generation: 0,
 			snapshotPending: false,
 		},
 		rosterFlushScheduled: false,
@@ -143,7 +137,7 @@ function childUpdate(state: ActiveSessionState, child: Record<string, unknown>) 
 }
 
 describe("worker roster reporter", () => {
-	it("publishes an admitted child run before its session exists and merges it on session bind", () => {
+	it("carries an admitted run from queued through bind, late updates, supersede, and terminal-unbound removal", () => {
 		const { daemon, sentDeltas } = makeWorkerReporter();
 		const parent = makeState({ activeSessionId: "parent-active" });
 		daemon.sessions.set(parent.activeSessionId, parent);
@@ -153,10 +147,7 @@ describe("worker roster reporter", () => {
 			childUpdate(parent, { id: "child-1", label: "review the API", status: "queued", sessionDir: "/tmp/c" }),
 		);
 		daemon.flushRoster();
-
-		const queued = sentDeltas[0]?.entries.find((entry) => entry.agentId === "child-1");
-		expect(queued).toMatchObject({
-			agentId: "child-1",
+		expect(sentDeltas[0]?.entries.find((entry) => entry.agentId === "child-1")).toMatchObject({
 			queuedChild: true,
 			summary: { runtimeKind: "subagent", parentActiveSessionId: "parent-active", firstMessage: "review the API" },
 		});
@@ -180,42 +171,61 @@ describe("worker roster reporter", () => {
 			}),
 		);
 		daemon.flushRoster();
-
 		const merged = sentDeltas.at(-1)?.entries.filter((entry) => entry.agentId === "child-1") ?? [];
 		expect(merged).toHaveLength(1);
 		expect(merged[0]).toMatchObject({ summary: { activeSessionId: "child-active", lifecycle: "live" } });
 		expect(merged[0]?.queuedChild).toBeUndefined();
-	});
 
-	it("keeps a superseded child run out of the roster after its session closes", () => {
-		const { daemon, sentDeltas } = makeWorkerReporter();
-		const parent = makeState({ activeSessionId: "parent-active" });
-		daemon.sessions.set(parent.activeSessionId, parent);
+		// Crafted without activeSessionId: the lifecycle guard, not event stamping, must reject the late update.
 		daemon.observeRosterEvent(
 			parent,
 			childUpdate(parent, { id: "child-1", label: "task", status: "queued", sessionDir: "/tmp/c" }),
 		);
-		const childState = makeState({
-			activeSessionId: "child-active",
-			kind: "subagent",
-			rlmChildId: "child-1",
-			parentActiveSessionId: "parent-active",
-			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
-		});
-		daemon.sessions.set(childState.activeSessionId, childState);
+		daemon.sessions.delete(childState.activeSessionId);
+		daemon.flushRoster();
+		const superseded = sentDeltas.at(-1)?.entries.find((entry) => entry.agentId === "child-1");
+		expect(superseded?.queuedChild).toBeUndefined();
+		expect(superseded?.summary.id).toBe("session-child-active");
+		expect(superseded?.summary.activeSessionId).toBeUndefined();
+
+		// A run that terminates before binding is a removal, never a passivated phantom.
 		daemon.observeRosterEvent(
 			parent,
-			childUpdate(parent, { id: "child-1", label: "task", status: "running", activeSessionId: "child-active" }),
+			childUpdate(parent, { id: "child-2", label: "task", status: "queued", sessionDir: "/tmp/c" }),
+		);
+		daemon.flushRoster();
+		daemon.observeRosterEvent(
+			parent,
+			childUpdate(parent, { id: "child-2", label: "task", status: "cancelled", sessionDir: "/tmp/c" }),
+		);
+		daemon.flushRoster();
+		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual(["child-2"]);
+		daemon.rosterReporter.snapshotPending = true;
+		daemon.flushRoster();
+		expect(sentDeltas.at(-1)?.snapshot).toBe(true);
+		expect(sentDeltas.at(-1)?.entries.some((entry) => entry.agentId === "child-2")).toBe(false);
+	});
+
+	it("qualifies colliding child ids from different parents by parent path", () => {
+		const { daemon, sentDeltas } = makeWorkerReporter();
+		const parentA = makeState({ activeSessionId: "parent-a", sessionFile: "/tmp/a.jsonl" });
+		const parentB = makeState({ activeSessionId: "parent-b", sessionFile: "/tmp/b.jsonl" });
+		daemon.sessions.set(parentA.activeSessionId, parentA);
+		daemon.sessions.set(parentB.activeSessionId, parentB);
+
+		daemon.observeRosterEvent(
+			parentA,
+			childUpdate(parentA, { id: "sub-1234", label: "a", status: "queued", sessionDir: "/tmp/a" }),
+		);
+		daemon.observeRosterEvent(
+			parentB,
+			childUpdate(parentB, { id: "sub-1234", label: "b", status: "queued", sessionDir: "/tmp/b" }),
 		);
 		daemon.flushRoster();
 
-		daemon.sessions.delete(childState.activeSessionId);
-		daemon.flushRoster();
-
-		const final = sentDeltas.at(-1)?.entries.find((entry) => entry.agentId === "child-1");
-		expect(final?.queuedChild).toBeUndefined();
-		expect(final?.summary.activeSessionId).toBeUndefined();
-		expect(final?.summary.id).toBe("session-child-active");
+		const queuedRows = sentDeltas.at(-1)?.entries.filter((entry) => entry.summary.rlmChildId === "sub-1234") ?? [];
+		expect(queuedRows).toHaveLength(2);
+		expect(new Set(queuedRows.map((entry) => entry.agentId)).size).toBe(2);
 	});
 
 	it("sends deltas only on change and flips closed sessions to non-resident instead of dropping them", () => {
@@ -238,43 +248,7 @@ describe("worker roster reporter", () => {
 		expect(sentDeltas.at(-1)?.removedAgentIds).toBeUndefined();
 	});
 
-	it("retains pending state until a frame reaches an authenticated supervisor", () => {
-		const { daemon, sentDeltas } = makeWorkerReporter(false);
-		const state = makeState({ activeSessionId: "root-active" });
-		daemon.sessions.set(state.activeSessionId, state);
-		daemon.rosterReporter.removedAgentIds.add("gone-agent");
-
-		daemon.flushRoster();
-
-		expect(sentDeltas).toHaveLength(0);
-		expect(daemon.rosterReporter.lastSent.size).toBe(0);
-		expect(daemon.rosterReporter.removedAgentIds.has("gone-agent")).toBe(true);
-	});
-
-	it("sends a replacing snapshot after supervisor (re)authentication that carries pending removals", () => {
-		const { daemon, sentDeltas } = makeWorkerReporter();
-		const state = makeState({
-			activeSessionId: "root-active",
-			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
-		});
-		daemon.sessions.set(state.activeSessionId, state);
-		daemon.rosterReporter.removedAgentIds.add("deleted-agent");
-		daemon.rosterReporter.snapshotPending = true;
-
-		daemon.flushRoster();
-
-		expect(sentDeltas).toHaveLength(1);
-		expect(sentDeltas[0]?.snapshot).toBe(true);
-		expect(sentDeltas[0]?.removedAgentIds).toEqual(["deleted-agent"]);
-		expect(sentDeltas[0]?.entries.map((entry) => entry.agentId)).toEqual(["session-root-active"]);
-		expect(daemon.rosterReporter.snapshotPending).toBe(false);
-		expect(daemon.rosterReporter.removedAgentIds.size).toBe(0);
-
-		daemon.flushRoster();
-		expect(sentDeltas).toHaveLength(1);
-	});
-
-	it("keeps a session that lived and died while disconnected as a durable row in the reauth snapshot", () => {
+	it("escalates undelivered changes to one replacing snapshot", () => {
 		const { daemon, sentDeltas, connection } = makeWorkerReporter();
 		const parent = makeState({ activeSessionId: "parent-active" });
 		daemon.sessions.set(parent.activeSessionId, parent);
@@ -283,7 +257,9 @@ describe("worker roster reporter", () => {
 			childUpdate(parent, { id: "child-1", label: "task", status: "queued", sessionDir: "/tmp/c" }),
 		);
 		daemon.flushRoster();
+		const sentWhileConnected = sentDeltas.length;
 
+		// The channel drops; the child binds and dies while disconnected.
 		connection.connected = false;
 		const childState = makeState({
 			activeSessionId: "child-active",
@@ -298,46 +274,75 @@ describe("worker roster reporter", () => {
 			childUpdate(parent, { id: "child-1", label: "task", status: "running", activeSessionId: "child-active" }),
 		);
 		daemon.flushRoster();
+		expect(sentDeltas.length).toBe(sentWhileConnected);
+		expect(daemon.rosterReporter.snapshotPending).toBe(true);
 		daemon.sessions.delete(childState.activeSessionId);
 		daemon.flushRoster();
 
+		// Reauthentication: one full replacing snapshot carries the durable row; absence conveys removals.
 		connection.connected = true;
-		daemon.rosterReporter.snapshotPending = true;
 		daemon.flushRoster();
-
+		expect(sentDeltas.length).toBe(sentWhileConnected + 1);
 		const snapshot = sentDeltas.at(-1);
 		expect(snapshot?.snapshot).toBe(true);
+		expect(snapshot?.removedAgentIds).toBeUndefined();
 		const childRow = snapshot?.entries.find((entry) => entry.agentId === "child-1");
 		expect(childRow?.queuedChild).toBeUndefined();
 		expect(childRow?.summary.id).toBe("session-child-active");
 		expect(childRow?.summary.activeSessionId).toBeUndefined();
+
+		daemon.flushRoster();
+		expect(sentDeltas.length).toBe(sentWhileConnected + 1);
 	});
 
-	it("ignores a late queued update for a child whose session is already bound", () => {
-		const { daemon, sentDeltas } = makeWorkerReporter();
-		const parent = makeState({ activeSessionId: "parent-active" });
-		daemon.sessions.set(parent.activeSessionId, parent);
-		const childState = makeState({
-			activeSessionId: "child-active",
-			kind: "subagent",
-			rlmChildId: "child-1",
-			parentActiveSessionId: "parent-active",
-			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
-		});
-		daemon.sessions.set(childState.activeSessionId, childState);
-		daemon.flushRoster();
+	it("delivers only through the live drained supervisor claim and escalates refusals to a snapshot", () => {
+		const oldWrite = vi.fn(() => true);
+		const write = vi.fn(() => false);
+		const oldClient = {
+			transport: "private-framed",
+			authenticated: true,
+			backpressured: undefined as boolean | undefined,
+			socket: { destroyed: false, write: oldWrite },
+		};
+		const client = {
+			transport: "private-framed",
+			authenticated: true,
+			backpressured: undefined as boolean | undefined,
+			socket: { destroyed: false, write },
+		};
+		const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
+			options: { worker: { authenticationToken: "token" } },
+			sessions: new Map(),
+			cronStore: { list: () => [] },
+			clients: new Set([oldClient, client]),
+			supervisorClaims: new Map([[client, {}]]),
+			rosterReporter: {
+				lastComposed: new Map(),
+				queuedChildren: new Map(),
+				removedAgentIds: new Set(["deleted-agent"]),
+				snapshotPending: false,
+			},
+			rosterFlushScheduled: false,
+			shuttingDown: false,
+			log: vi.fn(),
+		}) as { flushRoster(): void; rosterReporter: { snapshotPending: boolean } };
 
-		// Crafted without activeSessionId: the lifecycle guard, not event stamping, must reject it.
-		daemon.observeRosterEvent(
-			parent,
-			childUpdate(parent, { id: "child-1", label: "task", status: "queued", sessionDir: "/tmp/c" }),
-		);
-		daemon.sessions.delete(childState.activeSessionId);
 		daemon.flushRoster();
+		// The refused write commits nothing; the claimed socket is backpressured and a snapshot is owed.
+		expect(oldWrite).not.toHaveBeenCalled();
+		expect(client.backpressured).toBe(true);
+		expect(daemon.rosterReporter.snapshotPending).toBe(true);
 
-		const final = sentDeltas.at(-1)?.entries.find((entry) => entry.agentId === "child-1");
-		expect(final?.queuedChild).toBeUndefined();
-		expect(final?.summary.id).toBe("session-child-active");
+		// A backpressured socket gets no further writes until it drains.
+		daemon.flushRoster();
+		expect(write).toHaveBeenCalledTimes(1);
+
+		client.backpressured = false;
+		write.mockReturnValue(true);
+		daemon.flushRoster();
+		expect(write).toHaveBeenCalledTimes(2);
+		expect(daemon.rosterReporter.snapshotPending).toBe(false);
+		expect(oldWrite).not.toHaveBeenCalled();
 	});
 });
 
@@ -569,9 +574,31 @@ describe("supervisor roster ledger", () => {
 		expect(supervisor.refreshWorkerSummaries).not.toHaveBeenCalled();
 	});
 
-	it("replaces a worker's rows from a snapshot frame", () => {
+	it("replaces a worker's rows from a snapshot, deletes absentees, and reseeds only live ledger edges", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-snapshot-reseed-"));
+		tempDirs.push(directory);
+		const sessionsDir = join(directory, "sessions");
+		const ledger = new RlmSpawnLedger(directory, sessionsDir);
+		const parentPath = join(sessionsDir, "root.jsonl");
+		const passivatedPath = join(directory, "artifacts", "passivated-child.jsonl");
+		const deletedPath = join(directory, "artifacts", "deleted-child.jsonl");
+		await ledger.appendSpawn({
+			childId: "passivated-child",
+			parent: parentPath,
+			child: passivatedPath,
+			depth: 1,
+			name: "passivated",
+		});
+		await ledger.appendSpawn({
+			childId: "deleted-child",
+			parent: parentPath,
+			child: deletedPath,
+			depth: 1,
+			name: "deleted",
+		});
+		await ledger.appendDelete({ childId: "deleted-child", child: deletedPath, reason: "user" });
 		const worker = makeWorker("worker-1");
-		const supervisor = makeSupervisor([worker]);
+		const supervisor = makeSupervisor([worker], { rlmSpawnLedger: () => ledger });
 		supervisor.writeRosterEntry(
 			workerRosterEntryFromSummary(
 				summary({
@@ -586,28 +613,28 @@ describe("supervisor roster ledger", () => {
 		supervisor.writeRosterEntry(
 			workerRosterEntryFromSummary(
 				summary({
-					id: "gone-active",
-					sessionId: "gone",
-					activeSessionId: "gone-active",
-					sessionFile: "/tmp/gone.jsonl",
+					id: "passivated-child",
+					sessionId: "passivated-child",
+					sessionFile: passivatedPath,
+					runtimeKind: "subagent",
+					rlmChildId: "passivated-child",
+					parentSessionPath: parentPath,
 				}),
 			),
 			worker,
 		);
 		supervisor.consumeWorkerRosterDelta(
 			worker,
-			rosterDelta(
-				[
-					{
-						agentId: "sessionless",
-						queuedChild: true,
-						summary: summary({ id: "sessionless", sessionId: "sessionless", runtimeKind: "subagent" }),
-					},
-				],
-				undefined,
-			),
+			rosterDelta([
+				{
+					agentId: "sessionless",
+					queuedChild: true,
+					summary: summary({ id: "sessionless", sessionId: "sessionless", runtimeKind: "subagent" }),
+				},
+			]),
 		);
 
+		// The restarted worker's replacing snapshot names only the row it still holds.
 		supervisor.consumeWorkerRosterDelta(
 			worker,
 			rosterDelta(
@@ -626,29 +653,16 @@ describe("supervisor roster ledger", () => {
 				true,
 			),
 		);
+		await new Promise((resolveTick) => setImmediate(resolveTick));
 
 		expect(supervisor.roster().get("kept")).toMatchObject({ status: "running" });
-		// Absent rows with a transcript passivate; the sessionless queued row vanishes with its run.
-		const gone = supervisor.roster().get("gone");
-		expect(gone?.summary.activeSessionId).toBeUndefined();
-		expect(gone?.status).toBe("inactive");
 		expect(supervisor.roster().has("sessionless")).toBe(false);
-	});
-
-	it("applies snapshot removals after replacement so deletions survive a disconnect", () => {
-		const worker = makeWorker("worker-1");
-		const supervisor = makeSupervisor([worker]);
-		supervisor.writeRosterEntry(
-			workerRosterEntryFromSummary(
-				summary({ id: "deleted", sessionId: "deleted", sessionFile: "/tmp/deleted.jsonl" }),
-			),
-			worker,
-		);
-
-		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([], ["deleted"], true));
-
-		// Without the removal, the absent-with-transcript rule would revive the row as a ghost.
-		expect(supervisor.roster().has("deleted")).toBe(false);
+		// The deleted-while-disconnected child stays out; the surviving one reseeds from its live edge.
+		const entries = [...supervisor.roster().values()];
+		const reseeded = entries.find((entry) => entry.summary.rlmChildId === "passivated-child");
+		expect(reseeded).toBeDefined();
+		expect(reseeded?.summary.activeSessionId).toBeUndefined();
+		expect(entries.some((entry) => entry.summary.rlmChildId === "deleted-child")).toBe(false);
 	});
 
 	it("marks a dead worker's rows recovering natively on socket close", async () => {
@@ -708,7 +722,7 @@ describe("supervisor roster ledger", () => {
 		expect(supervisor.refreshWorkerSummaries).toHaveBeenCalledWith(legacy);
 	});
 
-	it("seeds from the session catalog and spawn ledger, skips tombstones, and keeps evicted rows inactive", async () => {
+	it("seeds from the spawn ledger, skips tombstones, and keeps evicted rows inactive", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-seed-"));
 		tempDirs.push(directory);
 		const sessionsDir = join(directory, "sessions");
@@ -916,7 +930,7 @@ describe("supervisor roster ledger", () => {
 	});
 });
 
-describe("worker saved-session deletion reaches the supervisor roster", () => {
+describe("saved-session delete paths", () => {
 	it("removes the deleted session's ledger row end-to-end", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-worker-delete-"));
 		tempDirs.push(directory);
@@ -982,6 +996,187 @@ describe("worker saved-session deletion reaches the supervisor roster", () => {
 		supervisor.consumeWorkerRosterDelta(worker, deltaFrame.payload);
 		expect(supervisor.roster().has(sessionId)).toBe(false);
 	});
+
+	it("routes offline deletes by owner reachability: forward, retryable reject, or reclaim", async () => {
+		const reachableRoster = makeWorker("w-roster");
+		Object.assign(reachableRoster.descriptor, { createCommand: { type: "create" } });
+		reachableRoster.client = {
+			request: vi.fn(async () => ({ type: "response", command: "delete_saved_session", success: true })),
+		};
+		const reachableDescriptor = makeWorker("w-desc");
+		Object.assign(reachableDescriptor.descriptor, {
+			sessionFile: "/tmp/owned-desc.jsonl",
+			createCommand: { type: "create" },
+		});
+		reachableDescriptor.client = {
+			request: vi.fn(async () => ({ type: "response", command: "delete_saved_session", success: true })),
+		};
+		const unreachable = makeWorker("w-down");
+		Object.assign(unreachable.descriptor, {
+			sessionFile: "/tmp/owned-down.jsonl",
+			createCommand: { type: "create" },
+		});
+		unreachable.client = undefined;
+		const failed = makeWorker("w-failed");
+		Object.assign(failed.descriptor, {
+			sessionFile: "/tmp/owned-failed.jsonl",
+			createCommand: { type: "create" },
+			lifecycle: "failed",
+		});
+		failed.client = undefined;
+		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" }));
+		const reclaimStaleWorkerRegistration = vi.fn(
+			async (worker: { descriptor: { lifecycle: string; workerId: string } }) => {
+				if (worker.descriptor.lifecycle !== "failed") return false;
+				supervisor.workers.delete(worker.descriptor.workerId);
+				return true;
+			},
+		);
+		const supervisor = makeSupervisor([reachableRoster, reachableDescriptor, unreachable, failed], {
+			catalog: { delete: catalogDelete, list: vi.fn(async () => []) },
+			mutationDrain: { begin: vi.fn(), end: vi.fn() },
+			reclaimStaleWorkerRegistration,
+			rlmSpawnLedger: () => ({ edges: vi.fn(async () => []) }),
+		});
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({
+					id: "roster-owned",
+					sessionId: "roster-owned",
+					sessionFile: "/tmp/owned-roster.jsonl",
+					runtimeKind: "subagent",
+					rlmChildId: "child-1",
+				}),
+			),
+			reachableRoster,
+		);
+		const internals = supervisor as unknown as { handleCommand(client: object, command: object): Promise<unknown> };
+		const client = { id: "client", attachedActiveSessionIds: new Set<string>() };
+
+		// Roster and descriptor ownership both forward to a reachable owner instead of rejecting.
+		await internals.handleCommand(client, { type: "delete_saved_session", sessionPath: "/tmp/owned-roster.jsonl" });
+		expect(reachableRoster.client.request).toHaveBeenCalledWith(
+			expect.objectContaining({ type: "delete_saved_session", sessionPath: "/tmp/owned-roster.jsonl" }),
+			expect.any(Number),
+		);
+		await internals.handleCommand(client, { type: "delete_saved_session", sessionPath: "/tmp/owned-desc.jsonl" });
+		expect(reachableDescriptor.client.request).toHaveBeenCalled();
+		expect(catalogDelete).not.toHaveBeenCalled();
+
+		// A live-but-disconnected owner rejects instead of deleting underneath the worker.
+		await expect(
+			internals.handleCommand(client, { type: "delete_saved_session", sessionPath: "/tmp/owned-down.jsonl" }),
+		).rejects.toThrow(/retry the delete/);
+		expect(catalogDelete).not.toHaveBeenCalled();
+
+		// A dead failed registration is reclaimed, then the offline delete proceeds.
+		await internals.handleCommand(client, { type: "delete_saved_session", sessionPath: "/tmp/owned-failed.jsonl" });
+		expect(reclaimStaleWorkerRegistration).toHaveBeenCalledWith(failed);
+		expect(catalogDelete).toHaveBeenCalledWith("/tmp/owned-failed.jsonl");
+	});
+
+	it("classifies unknown offline delete targets through the ledger", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-offline-unknown-"));
+		tempDirs.push(directory);
+		const garbled = join(directory, "artifacts", "garbled.jsonl");
+		mkdirSync(dirname(garbled), { recursive: true });
+		writeFileSync(garbled, "not a session header\n");
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorFixture & {
+			handleCommand(client: object, command: object): Promise<unknown>;
+			rlmSpawnLedger(): RlmSpawnLedger;
+		};
+		Object.assign(supervisor, {
+			catalog: { delete: vi.fn(async () => ({ ok: true, method: "unlink" })), list: vi.fn(async () => []) },
+		});
+		await supervisor.rlmSpawnLedger().appendSpawn({
+			childId: "sub-9",
+			parent: join(directory, "sessions", "r.jsonl"),
+			child: garbled,
+			depth: 1,
+			name: "g",
+		});
+
+		await supervisor.handleCommand(
+			{ id: "client", attachedActiveSessionIds: new Set<string>() },
+			{ type: "delete_saved_session", sessionPath: garbled },
+		);
+
+		await expect(supervisor.rlmSpawnLedger().edges()).resolves.toEqual([]);
+	});
+
+	it("keeps the roster row when a delete fails on disk", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-failed-delete-"));
+		tempDirs.push(directory);
+		const sessionPath = join(directory, "saved.jsonl");
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorFixture & { handleCommand(client: object, command: object): Promise<unknown> };
+		Object.assign(supervisor, {
+			catalog: { delete: vi.fn(async () => ({ ok: false, error: "busy file" })), list: vi.fn(async () => []) },
+		});
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(summary({ id: "saved-1", sessionId: "saved-1", sessionFile: sessionPath })),
+		);
+
+		await supervisor.handleCommand(
+			{ id: "client", attachedActiveSessionIds: new Set<string>() },
+			{ type: "delete_saved_session", sessionPath },
+		);
+
+		expect(supervisor.roster().has("saved-1")).toBe(true);
+	});
+
+	it("aborts a saved-child delete when the tombstone append fails", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-tombstone-fail-"));
+		tempDirs.push(directory);
+		const childPath = join(directory, "artifacts", "child.jsonl");
+		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" }));
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorFixture & { handleCommand(client: object, command: object): Promise<unknown> };
+		Object.assign(supervisor, {
+			catalog: { delete: catalogDelete, list: vi.fn(async () => []) },
+			rlmSpawnLedger: () => ({
+				edges: vi.fn(async () => [
+					{
+						childId: "child-1",
+						child: childPath,
+						parent: join(directory, "sessions", "root.jsonl"),
+						depth: 1,
+						name: "c",
+					},
+				]),
+				appendDelete: vi.fn(async () => {
+					throw new Error("ledger unwritable");
+				}),
+			}),
+		});
+		const childEntry = workerRosterEntryFromSummary(
+			summary({
+				id: "child-1",
+				sessionId: "child-1",
+				sessionFile: childPath,
+				runtimeKind: "subagent",
+				rlmChildId: "child-1",
+				parentSessionPath: join(directory, "sessions", "root.jsonl"),
+			}),
+		);
+		supervisor.writeRosterEntry(childEntry);
+
+		await expect(
+			supervisor.handleCommand(
+				{ id: "client", attachedActiveSessionIds: new Set<string>() },
+				{ type: "delete_saved_session", sessionPath: childPath },
+			),
+		).rejects.toThrow("ledger unwritable");
+		expect(catalogDelete).not.toHaveBeenCalled();
+		expect(supervisor.roster().has(childEntry.agentId)).toBe(true);
+	});
 });
 
 describe("roster entry projection", () => {
@@ -997,101 +1192,7 @@ describe("roster entry projection", () => {
 	});
 });
 
-describe("bot-round regressions", () => {
-	it("removes a child run that terminates before binding instead of passivating a phantom", () => {
-		const { daemon, sentDeltas } = makeWorkerReporter();
-		const parent = makeState({ activeSessionId: "parent-active" });
-		daemon.sessions.set(parent.activeSessionId, parent);
-		daemon.observeRosterEvent(
-			parent,
-			childUpdate(parent, { id: "child-1", label: "task", status: "queued", sessionDir: "/tmp/c" }),
-		);
-		daemon.flushRoster();
-
-		daemon.observeRosterEvent(
-			parent,
-			childUpdate(parent, { id: "child-1", label: "task", status: "cancelled", sessionDir: "/tmp/c" }),
-		);
-		daemon.flushRoster();
-		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual(["child-1"]);
-		expect(sentDeltas.at(-1)?.entries.some((entry) => entry.agentId === "child-1")).toBe(false);
-
-		daemon.rosterReporter.snapshotPending = true;
-		daemon.flushRoster();
-		expect(sentDeltas.at(-1)?.snapshot).toBe(true);
-		expect(sentDeltas.at(-1)?.entries.some((entry) => entry.agentId === "child-1")).toBe(false);
-	});
-
-	it("qualifies colliding child ids from different parents by parent path", () => {
-		const { daemon, sentDeltas } = makeWorkerReporter();
-		const parentA = makeState({ activeSessionId: "parent-a", sessionFile: "/tmp/a.jsonl" });
-		const parentB = makeState({ activeSessionId: "parent-b", sessionFile: "/tmp/b.jsonl" });
-		daemon.sessions.set(parentA.activeSessionId, parentA);
-		daemon.sessions.set(parentB.activeSessionId, parentB);
-
-		daemon.observeRosterEvent(
-			parentA,
-			childUpdate(parentA, { id: "sub-1234", label: "a", status: "queued", sessionDir: "/tmp/a" }),
-		);
-		daemon.observeRosterEvent(
-			parentB,
-			childUpdate(parentB, { id: "sub-1234", label: "b", status: "queued", sessionDir: "/tmp/b" }),
-		);
-		daemon.flushRoster();
-
-		const queuedRows = sentDeltas.at(-1)?.entries.filter((entry) => entry.summary.rlmChildId === "sub-1234") ?? [];
-		expect(queuedRows).toHaveLength(2);
-		expect(new Set(queuedRows.map((entry) => entry.agentId)).size).toBe(2);
-	});
-
-	it("keeps roster state uncommitted until a frame reaches a drained socket", () => {
-		const write = vi.fn(() => false);
-		const socket = { destroyed: false, write };
-		const client = {
-			transport: "private-framed",
-			authenticated: true,
-			backpressured: undefined as boolean | undefined,
-			socket,
-		};
-		const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
-			options: { worker: { authenticationToken: "token" } },
-			sessions: new Map(),
-			cronStore: { list: () => [] },
-			clients: new Set([client]),
-			supervisorClaims: new Map([[client, {}]]),
-			rosterReporter: {
-				lastSent: new Map(),
-				lastComposed: new Map(),
-				queuedChildren: new Map(),
-				removedAgentIds: new Set(["deleted-agent"]),
-				tombstones: new Map(),
-				generation: 0,
-				snapshotPending: false,
-			},
-			rosterFlushScheduled: false,
-			shuttingDown: false,
-			log: vi.fn(),
-		}) as {
-			flushRoster(): void;
-			rosterReporter: { removedAgentIds: Set<string>; lastSent: Map<string, unknown> };
-		};
-
-		daemon.flushRoster();
-		// write() returned false: the frame is not delivered; nothing commits.
-		expect(daemon.rosterReporter.removedAgentIds.has("deleted-agent")).toBe(true);
-		expect(daemon.rosterReporter.lastSent.size).toBe(0);
-		expect(client.backpressured).toBe(true);
-
-		// A backpressured socket gets no further writes until it drains.
-		daemon.flushRoster();
-		expect(write).toHaveBeenCalledTimes(1);
-
-		client.backpressured = false;
-		write.mockReturnValue(true);
-		daemon.flushRoster();
-		expect(daemon.rosterReporter.removedAgentIds.size).toBe(0);
-	});
-
+describe("review-round regressions", () => {
 	it("merges the per-call disk scan newest-first with disk authoritative for non-resident rows", async () => {
 		const worker = makeWorker("worker-1");
 		const supervisor = makeSupervisor([worker], {
@@ -1149,160 +1250,11 @@ describe("bot-round regressions", () => {
 		expect(listed.data?.sessions.find((session) => session.sessionId === "known")?.sessionName).toBeUndefined();
 	});
 
-	it("forwards passive-child deletes to the owning worker instead of rejecting them", async () => {
-		const worker = makeWorker("worker-1");
-		worker.client = {
-			request: vi.fn(async () => ({ type: "response", command: "delete_saved_session", success: true })),
-		};
-		Object.assign(worker.descriptor, { lifecycle: "ready" });
-		const catalogDelete = vi.fn();
-		const supervisor = makeSupervisor([worker], {
-			catalog: { list: vi.fn(async () => []), delete: catalogDelete },
-			mutationDrain: { begin: vi.fn(), end: vi.fn() },
-		});
-		supervisor.writeRosterEntry(
-			workerRosterEntryFromSummary(
-				summary({
-					id: "child-session",
-					sessionId: "child-session",
-					sessionFile: "/tmp/artifacts/child.jsonl",
-					runtimeKind: "subagent",
-					rlmChildId: "child-1",
-				}),
-			),
-			worker,
-		);
-		const internals = supervisor as unknown as {
-			handleCommand(client: object, command: object): Promise<unknown>;
-		};
-
-		await internals.handleCommand(
-			{ id: "client", attachedActiveSessionIds: new Set<string>() },
-			{ type: "delete_saved_session", sessionPath: "/tmp/artifacts/child.jsonl" },
-		);
-
-		expect(worker.client.request).toHaveBeenCalledWith(
-			expect.objectContaining({ type: "delete_saved_session", sessionPath: "/tmp/artifacts/child.jsonl" }),
-			expect.any(Number),
-		);
-		expect(catalogDelete).not.toHaveBeenCalled();
-	});
-
-	it("keeps the roster row when a delete fails on disk", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "prime-roster-failed-delete-"));
-		tempDirs.push(directory);
-		const sessionPath = join(directory, "saved.jsonl");
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorFixture & { handleCommand(client: object, command: object): Promise<unknown> };
-		Object.assign(supervisor, {
-			catalog: { delete: vi.fn(async () => ({ ok: false, error: "busy file" })), list: vi.fn(async () => []) },
-		});
-		supervisor.writeRosterEntry(
-			workerRosterEntryFromSummary(summary({ id: "saved-1", sessionId: "saved-1", sessionFile: sessionPath })),
-		);
-
-		await supervisor.handleCommand(
-			{ id: "client", attachedActiveSessionIds: new Set<string>() },
-			{ type: "delete_saved_session", sessionPath },
-		);
-
-		expect(supervisor.roster().has("saved-1")).toBe(true);
-	});
-
-	it("rejects offline deletes owned via descriptor or an unreachable worker, forwards reachable owners", async () => {
-		const reachable = makeWorker("w-reach");
-		Object.assign(reachable.descriptor, { sessionFile: "/tmp/owned-reach.jsonl", createCommand: { type: "create" } });
-		reachable.client = {
-			request: vi.fn(async () => ({ type: "response", command: "delete_saved_session", success: true })),
-		};
-		const unreachable = makeWorker("w-down");
-		Object.assign(unreachable.descriptor, {
-			sessionFile: "/tmp/owned-down.jsonl",
-			createCommand: { type: "create" },
-		});
-		unreachable.client = undefined;
-		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" }));
-		const supervisor = makeSupervisor([reachable, unreachable], {
-			catalog: { delete: catalogDelete, list: vi.fn(async () => []) },
-			mutationDrain: { begin: vi.fn(), end: vi.fn() },
-		});
-		const internals = supervisor as unknown as { handleCommand(client: object, command: object): Promise<unknown> };
-		const client = { id: "client", attachedActiveSessionIds: new Set<string>() };
-
-		// Descriptor ownership with a live socket forwards, roster row or not.
-		await internals.handleCommand(client, { type: "delete_saved_session", sessionPath: "/tmp/owned-reach.jsonl" });
-		expect(reachable.client.request).toHaveBeenCalledWith(
-			expect.objectContaining({ type: "delete_saved_session" }),
-			expect.any(Number),
-		);
-
-		// A live-but-disconnected owner rejects instead of deleting underneath the worker.
-		await expect(
-			internals.handleCommand(client, { type: "delete_saved_session", sessionPath: "/tmp/owned-down.jsonl" }),
-		).rejects.toThrow(/retry the delete/);
-		expect(catalogDelete).not.toHaveBeenCalled();
-	});
-
-	it("classifies unknown offline delete targets through the ledger", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "prime-roster-offline-unknown-"));
-		tempDirs.push(directory);
-		const garbled = join(directory, "artifacts", "garbled.jsonl");
-		mkdirSync(dirname(garbled), { recursive: true });
-		writeFileSync(garbled, "not a session header\n");
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorFixture & {
-			handleCommand(client: object, command: object): Promise<unknown>;
-			rlmSpawnLedger(): RlmSpawnLedger;
-		};
-		Object.assign(supervisor, {
-			catalog: { delete: vi.fn(async () => ({ ok: true, method: "unlink" })), list: vi.fn(async () => []) },
-		});
-		await supervisor.rlmSpawnLedger().appendSpawn({
-			childId: "sub-9",
-			parent: join(directory, "sessions", "r.jsonl"),
-			child: garbled,
-			depth: 1,
-			name: "g",
-		});
-
-		await supervisor.handleCommand(
-			{ id: "client", attachedActiveSessionIds: new Set<string>() },
-			{ type: "delete_saved_session", sessionPath: garbled },
-		);
-
-		await expect(supervisor.rlmSpawnLedger().edges()).resolves.toEqual([]);
-	});
-
-	it("ignores buffered roster frames from a superseded worker connection", () => {
+	it("trusts frames only from the current and in-flight replacement connections", () => {
 		const worker = makeWorker("worker-1", { rosterCapable: true });
 		const supervisor = makeSupervisor([worker], {
 			streamReconstructor: { observe: vi.fn(), seed: vi.fn(), clear: vi.fn() },
 		});
-		const staleClient = { request: vi.fn() };
-		const frame = {
-			header: { kind: "outbound", outboundType: "roster_delta" },
-			payload: rosterDelta([workerRosterEntryFromSummary(summary({ id: "ghost", sessionId: "ghost" }))]),
-		};
-
-		(supervisor as unknown as { handleWorkerFrame(w: object, f: object, source?: object): void }).handleWorkerFrame(
-			worker,
-			frame,
-			staleClient,
-		);
-
-		expect(supervisor.roster().has("ghost")).toBe(false);
-	});
-
-	it("accepts frames from the in-flight replacement connection and drops rolled-back sources", () => {
-		const worker = makeWorker("worker-1", { rosterCapable: true });
-		const supervisor = makeSupervisor([worker], {
-			streamReconstructor: { observe: vi.fn(), seed: vi.fn(), clear: vi.fn() },
-		});
-		const replacement = { request: vi.fn() };
 		const frame = (sessionId: string) => ({
 			header: { kind: "outbound", outboundType: "roster_delta" },
 			payload: rosterDelta([workerRosterEntryFromSummary(summary({ id: sessionId, sessionId }))]),
@@ -1310,6 +1262,11 @@ describe("bot-round regressions", () => {
 		const internals = supervisor as unknown as {
 			handleWorkerFrame(w: object, f: object, source?: object): void;
 		};
+		const stale = { request: vi.fn() };
+		const replacement = { request: vi.fn() };
+
+		internals.handleWorkerFrame(worker, frame("ghost"), stale);
+		expect(supervisor.roster().has("ghost")).toBe(false);
 
 		(worker as unknown as { pendingClient?: object }).pendingClient = replacement;
 		internals.handleWorkerFrame(worker, frame("mid-auth"), replacement);
@@ -1319,94 +1276,6 @@ describe("bot-round regressions", () => {
 		(worker as unknown as { pendingClient?: object }).pendingClient = undefined;
 		internals.handleWorkerFrame(worker, frame("rolled-back"), replacement);
 		expect(supervisor.roster().has("rolled-back")).toBe(false);
-	});
-
-	it("reclaims a dead failed owner before an offline delete but keeps recovering owners rejecting", async () => {
-		const failed = makeWorker("w-failed");
-		Object.assign(failed.descriptor, {
-			sessionFile: "/tmp/owned-failed.jsonl",
-			createCommand: { type: "create" },
-			lifecycle: "failed",
-		});
-		failed.client = undefined;
-		const recovering = makeWorker("w-recovering");
-		Object.assign(recovering.descriptor, {
-			sessionFile: "/tmp/owned-recovering.jsonl",
-			createCommand: { type: "create" },
-			lifecycle: "recovering",
-		});
-		recovering.client = undefined;
-		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" }));
-		const reclaimStaleWorkerRegistration = vi.fn(
-			async (worker: { descriptor: { lifecycle: string; workerId: string } }) => {
-				if (worker.descriptor.lifecycle !== "failed") return false;
-				supervisor.workers.delete(worker.descriptor.workerId);
-				return true;
-			},
-		);
-		const supervisor = makeSupervisor([failed, recovering], {
-			catalog: { delete: catalogDelete, list: vi.fn(async () => []) },
-			mutationDrain: { begin: vi.fn(), end: vi.fn() },
-			reclaimStaleWorkerRegistration,
-			rlmSpawnLedger: () => ({ edges: vi.fn(async () => []) }),
-		});
-		const internals = supervisor as unknown as { handleCommand(client: object, command: object): Promise<unknown> };
-		const client = { id: "client", attachedActiveSessionIds: new Set<string>() };
-
-		await internals.handleCommand(client, { type: "delete_saved_session", sessionPath: "/tmp/owned-failed.jsonl" });
-		expect(reclaimStaleWorkerRegistration).toHaveBeenCalledWith(failed);
-		expect(catalogDelete).toHaveBeenCalledWith("/tmp/owned-failed.jsonl");
-
-		await expect(
-			internals.handleCommand(client, { type: "delete_saved_session", sessionPath: "/tmp/owned-recovering.jsonl" }),
-		).rejects.toThrow(/retry the delete/);
-	});
-
-	it("walks parent chains beyond thirty-two hops and terminates on cycles", async () => {
-		const supervisor = makeSupervisor([]);
-		const base = "/tmp/deep-home";
-		const dir = join(base, "sessions");
-		let parentPath = join(dir, "root.jsonl");
-		supervisor.writeRosterEntry(
-			workerRosterEntryFromSummary(summary({ id: "root", sessionId: "root", sessionFile: parentPath })),
-		);
-		for (let depth = 1; depth <= 33; depth++) {
-			const childPath = join(base, "session-artifacts", `d${depth}.jsonl`);
-			supervisor.writeRosterEntry(
-				workerRosterEntryFromSummary(
-					summary({
-						id: `d${depth}`,
-						sessionId: `d${depth}`,
-						sessionFile: childPath,
-						runtimeKind: "subagent",
-						rlmChildId: `d${depth}`,
-						rlmDepth: depth,
-						parentSessionPath: parentPath,
-					}),
-				),
-			);
-			parentPath = childPath;
-		}
-		const listed = await supervisor.handleList({}, { type: "list", all: true, sessionDir: dir });
-		expect(listed.data?.sessions.some((session) => session.sessionId === "d33")).toBe(true);
-
-		// A cycle terminates instead of hanging; the cyclic row simply does not match the dir.
-		const cyclic = makeSupervisor([]);
-		cyclic.writeRosterEntry(
-			workerRosterEntryFromSummary(
-				summary({
-					id: "loop",
-					sessionId: "loop",
-					sessionFile: join(base, "session-artifacts", "loop.jsonl"),
-					runtimeKind: "subagent",
-					rlmChildId: "loop",
-					rlmDepth: 1,
-					parentSessionPath: join(base, "session-artifacts", "loop.jsonl"),
-				}),
-			),
-		);
-		const cyclicListed = await cyclic.handleList({}, { type: "list", all: true, sessionDir: dir });
-		expect(cyclicListed.data?.sessions.some((session) => session.sessionId === "loop")).toBe(false);
 	});
 
 	it("resolves seeded artifact children by their persisted session id before any delta", async () => {
@@ -1493,9 +1362,7 @@ describe("bot-round regressions", () => {
 
 		expect(supervisor.roster().get("s")?.summary.sessionName).toBe("fresh");
 	});
-});
 
-describe("bot-round two regressions", () => {
 	it("publishes qualified removal ids from the rlm subagent deletion path", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-rlm-delete-"));
 		tempDirs.push(directory);
@@ -1565,90 +1432,6 @@ describe("bot-round two regressions", () => {
 		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual([composedId]);
 	});
 
-	it("delivers only through the live supervisor claim, never a revoked socket", () => {
-		const oldWrite = vi.fn(() => true);
-		const newWrite = vi.fn(() => true);
-		const oldClient = {
-			transport: "private-framed",
-			authenticated: true,
-			backpressured: undefined as boolean | undefined,
-			socket: { destroyed: false, write: oldWrite },
-		};
-		const newClient = {
-			transport: "private-framed",
-			authenticated: true,
-			backpressured: true as boolean | undefined,
-			socket: { destroyed: false, write: newWrite },
-		};
-		const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
-			options: { worker: { authenticationToken: "token" } },
-			sessions: new Map(),
-			cronStore: { list: () => [] },
-			clients: new Set([oldClient, newClient]),
-			supervisorClaims: new Map([[newClient, {}]]),
-			rosterReporter: {
-				lastSent: new Map(),
-				lastComposed: new Map(),
-				queuedChildren: new Map(),
-				removedAgentIds: new Set(["deleted-agent"]),
-				tombstones: new Map(),
-				generation: 0,
-				snapshotPending: true,
-			},
-			rosterFlushScheduled: false,
-			shuttingDown: false,
-			log: vi.fn(),
-		}) as {
-			flushRoster(): void;
-			rosterReporter: { removedAgentIds: Set<string>; snapshotPending: boolean };
-		};
-
-		daemon.flushRoster();
-		expect(oldWrite).not.toHaveBeenCalled();
-		expect(daemon.rosterReporter.removedAgentIds.has("deleted-agent")).toBe(true);
-		expect(daemon.rosterReporter.snapshotPending).toBe(true);
-
-		newClient.backpressured = false;
-		daemon.flushRoster();
-		expect(oldWrite).not.toHaveBeenCalled();
-		expect(newWrite).toHaveBeenCalledTimes(1);
-		expect(daemon.rosterReporter.snapshotPending).toBe(false);
-	});
-
-	it("replays delivered removals to supervisors behind the acked generation and prunes on ack", () => {
-		const { daemon, sentDeltas } = makeWorkerReporter();
-		const state = makeState({
-			activeSessionId: "root-active",
-			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
-		});
-		daemon.sessions.set(state.activeSessionId, state);
-		daemon.flushRoster();
-		daemon.sessions.delete(state.activeSessionId);
-		daemon.rosterReporter.removedAgentIds.add("session-root-active");
-		daemon.rosterReporter.lastComposed.clear();
-		daemon.flushRoster();
-		const removalGeneration = daemon.rosterReporter.tombstones.get("session-root-active");
-		expect(removalGeneration).toBeGreaterThan(0);
-
-		const internals = daemon as unknown as { prepareRosterSnapshot(acked: number): void };
-		// A supervisor that never consumed the removal gets it replayed on the snapshot.
-		internals.prepareRosterSnapshot((removalGeneration ?? 1) - 1);
-		daemon.flushRoster();
-		expect(sentDeltas.at(-1)?.snapshot).toBe(true);
-		expect(sentDeltas.at(-1)?.removedAgentIds).toContain("session-root-active");
-
-		// A supervisor that acked the removal prunes the tombstone; nothing replays.
-		internals.prepareRosterSnapshot(daemon.rosterReporter.generation);
-		daemon.flushRoster();
-		expect(daemon.rosterReporter.tombstones.size).toBe(0);
-		expect(sentDeltas.at(-1)?.removedAgentIds).toBeUndefined();
-
-		// A fresh supervisor (ack 0) would have replayed everything; the tombstone map is already pruned.
-		internals.prepareRosterSnapshot(0);
-		daemon.flushRoster();
-		expect(sentDeltas.at(-1)?.removedAgentIds).toBeUndefined();
-	});
-
 	it("keeps a busy worker unevicted when the refresh response is staler than a delta", async () => {
 		const worker = makeWorker("worker-1", { rosterCapable: true });
 		const supervisor = makeSupervisor([worker], {
@@ -1680,54 +1463,6 @@ describe("bot-round two regressions", () => {
 		const snapshot = internals.workerEvictionSnapshot(worker);
 		expect(snapshot.sessions).toHaveLength(1);
 		expect(snapshot.sessions[0]?.isSessionActive).toBe(true);
-	});
-
-	it("aborts a saved-child delete when the tombstone append fails", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "prime-roster-tombstone-fail-"));
-		tempDirs.push(directory);
-		const childPath = join(directory, "artifacts", "child.jsonl");
-		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" }));
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorFixture & { handleCommand(client: object, command: object): Promise<unknown> };
-		Object.assign(supervisor, {
-			catalog: { delete: catalogDelete, list: vi.fn(async () => []) },
-			rlmSpawnLedger: () => ({
-				edges: vi.fn(async () => [
-					{
-						childId: "child-1",
-						child: childPath,
-						parent: join(directory, "sessions", "root.jsonl"),
-						depth: 1,
-						name: "c",
-					},
-				]),
-				appendDelete: vi.fn(async () => {
-					throw new Error("ledger unwritable");
-				}),
-			}),
-		});
-		const childEntry = workerRosterEntryFromSummary(
-			summary({
-				id: "child-1",
-				sessionId: "child-1",
-				sessionFile: childPath,
-				runtimeKind: "subagent",
-				rlmChildId: "child-1",
-				parentSessionPath: join(directory, "sessions", "root.jsonl"),
-			}),
-		);
-		supervisor.writeRosterEntry(childEntry);
-
-		await expect(
-			supervisor.handleCommand(
-				{ id: "client", attachedActiveSessionIds: new Set<string>() },
-				{ type: "delete_saved_session", sessionPath: childPath },
-			),
-		).rejects.toThrow("ledger unwritable");
-		expect(catalogDelete).not.toHaveBeenCalled();
-		expect(supervisor.roster().has(childEntry.agentId)).toBe(true);
 	});
 });
 

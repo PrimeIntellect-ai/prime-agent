@@ -23,8 +23,6 @@ export type DaemonWorkerRosterOutbound =
 			entries: WorkerRosterEntry[];
 			removedAgentIds?: string[];
 			snapshot?: true;
-			/** Monotonic per-worker frame counter; the supervisor acks it back on (re)auth. */
-			generation?: number;
 	  }
 	| { type: "roster_heartbeat" };
 
@@ -73,8 +71,6 @@ export type DaemonWorkerCommand =
 			supervisorPid: number;
 			supervisorProcessStartId?: string;
 			supervisorSocketPath: string;
-			/** Last consumed roster generation for this worker; absent for a fresh supervisor. */
-			rosterGeneration?: number;
 	  }
 	| {
 			id?: string;

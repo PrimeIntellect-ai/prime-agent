@@ -551,12 +551,9 @@ export class AgentDaemon {
 	);
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
 	private readonly rosterReporter: WorkerRosterReporterState = {
-		lastSent: new Map(),
 		lastComposed: new Map(),
 		queuedChildren: new Map(),
 		removedAgentIds: new Set(),
-		tombstones: new Map(),
-		generation: 0,
 		snapshotPending: false,
 	};
 	private rosterFlushScheduled = false;
@@ -3289,7 +3286,6 @@ export class AgentDaemon {
 				supervisorPid?: unknown;
 				supervisorProcessStartId?: unknown;
 				supervisorSocketPath?: unknown;
-				rosterGeneration?: unknown;
 				activeSessionId?: unknown;
 				admissionId?: unknown;
 				capabilities?: unknown;
@@ -3322,7 +3318,6 @@ export class AgentDaemon {
 					!Number.isInteger(parsed.supervisorPid) ||
 					(parsed.supervisorPid as number) <= 0 ||
 					(parsed.supervisorProcessStartId !== undefined && typeof parsed.supervisorProcessStartId !== "string") ||
-					(parsed.rosterGeneration !== undefined && typeof parsed.rosterGeneration !== "number") ||
 					typeof parsed.supervisorSocketPath !== "string"
 				) {
 					clearParsedAdmission();
@@ -3363,8 +3358,8 @@ export class AgentDaemon {
 					success: true,
 					data: { capabilities: [DAEMON_WORKER_ROSTER_CAPABILITY] },
 				});
-				// A (re)connected supervisor replays from its acked generation; the next flush sends a replacing snapshot.
-				this.prepareRosterSnapshot(typeof parsed.rosterGeneration === "number" ? parsed.rosterGeneration : 0);
+				// A (re)connected supervisor gets one full replacing snapshot; disk is the durable truth behind it.
+				this.rosterReporter.snapshotPending = true;
 				this.scheduleRosterFlush();
 				return;
 			}
@@ -6660,14 +6655,6 @@ export class AgentDaemon {
 		return { agentId: rosterAgentIdForSummary(summary), queuedChild: true, summary };
 	}
 
-	private prepareRosterSnapshot(ackedGeneration: number): void {
-		const reporter = this.rosterReporter;
-		for (const [agentId, generation] of reporter.tombstones) {
-			if (generation <= ackedGeneration) reporter.tombstones.delete(agentId);
-		}
-		reporter.snapshotPending = true;
-	}
-
 	private scheduleRosterFlush(): void {
 		if (!this.options.worker || this.rosterFlushScheduled || this.shuttingDown) return;
 		this.rosterFlushScheduled = true;
@@ -6706,59 +6693,41 @@ export class AgentDaemon {
 				entries.set(agentId, passivatedWorkerRosterEntry(previous));
 			}
 		}
-		// An agent recreated after deletion outlives its old tombstone.
-		for (const agentId of entries.keys()) {
-			reporter.tombstones.delete(agentId);
+		// Deltas are best-effort freshness hints; any miss escalates to one full replacing snapshot.
+		const changed: WorkerRosterEntry[] = [];
+		for (const entry of entries.values()) {
+			if (JSON.stringify(reporter.lastComposed.get(entry.agentId) ?? null) !== JSON.stringify(entry)) {
+				changed.push(entry);
+			}
 		}
-		reporter.lastComposed = new Map(entries);
-		if (!this.hasAuthenticatedSupervisorClient()) return;
 		const removedAgentIds = [...reporter.removedAgentIds];
-		const generation = reporter.generation + 1;
+		reporter.lastComposed = new Map(entries);
+		if (!this.hasAuthenticatedSupervisorClient()) {
+			// Undelivered removals stay pending; they ride the first delivered frame.
+			if (changed.length > 0 || removedAgentIds.length > 0) reporter.snapshotPending = true;
+			return;
+		}
 		if (reporter.snapshotPending) {
-			const replayedRemovals = [...new Set([...removedAgentIds, ...reporter.tombstones.keys()])];
 			const delivered = this.broadcastRosterFrame({
 				type: "roster_delta",
 				snapshot: true,
-				generation,
 				entries: [...entries.values()],
-				...(replayedRemovals.length > 0 ? { removedAgentIds: replayedRemovals } : {}),
+				...(removedAgentIds.length > 0 ? { removedAgentIds } : {}),
 			});
-			if (!delivered) return;
-			reporter.generation = generation;
-			reporter.snapshotPending = false;
-			for (const agentId of removedAgentIds) {
-				reporter.tombstones.set(agentId, generation);
-				reporter.removedAgentIds.delete(agentId);
-			}
-			reporter.lastSent.clear();
-			for (const [agentId, entry] of entries) {
-				reporter.lastSent.set(agentId, { json: JSON.stringify(entry), entry });
+			if (delivered) {
+				reporter.snapshotPending = false;
+				reporter.removedAgentIds.clear();
 			}
 			return;
-		}
-		const changed: Array<{ agentId: string; json: string; entry: WorkerRosterEntry }> = [];
-		for (const [agentId, entry] of entries) {
-			const json = JSON.stringify(entry);
-			if (reporter.lastSent.get(agentId)?.json === json) continue;
-			changed.push({ agentId, json, entry });
 		}
 		if (changed.length === 0 && removedAgentIds.length === 0) return;
 		const delivered = this.broadcastRosterFrame({
 			type: "roster_delta",
-			generation,
-			entries: changed.map(({ entry }) => entry),
+			entries: changed,
 			...(removedAgentIds.length > 0 ? { removedAgentIds } : {}),
 		});
-		if (!delivered) return;
-		reporter.generation = generation;
-		for (const { agentId, json, entry } of changed) {
-			reporter.lastSent.set(agentId, { json, entry });
-		}
-		for (const agentId of removedAgentIds) {
-			reporter.tombstones.set(agentId, generation);
-			reporter.lastSent.delete(agentId);
-			reporter.removedAgentIds.delete(agentId);
-		}
+		if (delivered) reporter.removedAgentIds.clear();
+		else reporter.snapshotPending = true;
 	}
 
 	// The live supervisor claim is the single delivery authority; revoked sockets cannot satisfy it.
@@ -7167,17 +7136,12 @@ export class AgentDaemon {
 const ROSTER_HEARTBEAT_INTERVAL_MS = 15_000;
 
 interface WorkerRosterReporterState {
-	/** Last entry sent per agentId; deltas go out only on change. */
-	lastSent: Map<string, { json: string; entry: WorkerRosterEntry }>;
-	/** Last composed roster, delivered or not; the source for passivated flips. */
+	/** Last composed roster, delivered or not; the source for passivated flips and change hints. */
 	lastComposed: Map<string, WorkerRosterEntry>;
 	/** Admitted child runs whose sessions have not materialized yet, keyed by agentId. */
 	queuedChildren: Map<string, WorkerRosterEntry>;
 	removedAgentIds: Set<string>;
-	/** Delivered removals by frame generation, replayed to supervisors that never consumed them. */
-	tombstones: Map<string, number>;
-	/** Monotonic frame counter, bumped per delivered frame. */
-	generation: number;
+	/** Set on any undelivered change; the next flush sends one full replacing snapshot. */
 	snapshotPending: boolean;
 }
 
