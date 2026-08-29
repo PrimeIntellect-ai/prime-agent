@@ -260,8 +260,47 @@ describe("IpythonKernelProvisioner", () => {
 
 		expect(execute).toHaveBeenCalledWith(
 			"\n \r\n\t%%script /custom/bash\r\nexport TEST_PREFIX=1\necho body",
-			expect.objectContaining({ signal: undefined, onStream: expect.any(Function) }),
+			expect.objectContaining({ signal: expect.any(AbortSignal), onStream: expect.any(Function) }),
 		);
+	});
+
+	it("interrupts and retires a kernel when a model-authored cell exceeds its host limit", async () => {
+		vi.useFakeTimers();
+		try {
+			const execute = vi.fn<KernelManager["execute"]>(
+				async (_code, options) =>
+					await new Promise<ExecuteResult>((resolve) => {
+						options?.signal?.addEventListener(
+							"abort",
+							() => resolve({ stdout: "", stderr: "", status: "aborted", durationMs: 25 }),
+							{ once: true },
+						);
+					}),
+			);
+			const manager = { execute } as unknown as KernelManager;
+			const ensure = vi.fn(async () => manager);
+			const kill = vi.fn(async () => {});
+			const provisioner = { ensure, kill } as unknown as IpythonKernelProvisioner;
+			const tool = createIpythonToolDefinition(tempDir, { provisioner, executionTimeoutMs: 25 });
+
+			const resultPromise = tool.execute(
+				"tool-call",
+				{ code: "while True: pass" },
+				undefined,
+				undefined,
+				{} as ExtensionContext,
+			);
+			await vi.advanceTimersByTimeAsync(25);
+			const result = await resultPromise;
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+			expect(result.details).toMatchObject({ status: "aborted", timedOut: true, kernelRestarted: true });
+			expect(text).toContain("IPython cell exceeded the host limit of 25ms");
+			expect(text).toContain("<ipython_kernel_reset>");
+			expect(kill).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("lets the user wait when an interrupted kernel is still busy", async () => {
@@ -287,7 +326,7 @@ describe("IpythonKernelProvisioner", () => {
 			expect.stringContaining("previous cell has not stopped"),
 			["Wait and preserve state", "Kill kernel and restart"],
 			{
-				signal: undefined,
+				signal: expect.any(AbortSignal),
 			},
 		);
 		expect(setWorkingMessage).toHaveBeenCalledWith("Waiting for IPython kernel...");
@@ -320,7 +359,10 @@ describe("IpythonKernelProvisioner", () => {
 		expect(text).toContain("ok");
 		expect(ensure).toHaveBeenCalledTimes(2);
 		expect(kill).toHaveBeenCalledTimes(1);
-		expect(freshManager.execute).toHaveBeenCalledWith("x = 1", expect.objectContaining({ signal: undefined }));
+		expect(freshManager.execute).toHaveBeenCalledWith(
+			"x = 1",
+			expect.objectContaining({ signal: expect.any(AbortSignal) }),
+		);
 		expect(setWorkingMessage).toHaveBeenCalledWith("Restarting IPython kernel...");
 		expect(setWorkingMessage).toHaveBeenLastCalledWith(undefined);
 	});

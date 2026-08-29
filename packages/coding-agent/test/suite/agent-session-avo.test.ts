@@ -178,7 +178,7 @@ describe("AgentSession universal AVO runtime", () => {
 		);
 	});
 
-	it("steers a long tool loop after six batches without measurable progress", async () => {
+	it("repeatedly escalates a long tool loop that ignores its first intervention", async () => {
 		const probeTool: AgentTool = {
 			name: "probe",
 			label: "Probe",
@@ -225,7 +225,7 @@ describe("AgentSession universal AVO runtime", () => {
 			tools: [probeTool, finishTool],
 		});
 		harness.setResponses([
-			...Array.from({ length: 6 }, (_, index) =>
+			...Array.from({ length: 9 }, (_, index) =>
 				fauxAssistantMessage(fauxToolCall("probe", { index }), { stopReason: "toolUse" }),
 			),
 			fauxAssistantMessage(fauxToolCall("finish", {}), { stopReason: "toolUse" }),
@@ -237,12 +237,23 @@ describe("AgentSession universal AVO runtime", () => {
 		const interventions = harness.session.messages.filter(
 			(message) => message.role === "custom" && message.customType === "avo_progress_intervention",
 		);
-		expect(interventions).toHaveLength(1);
+		expect(interventions).toHaveLength(2);
 		expect(interventions[0]).toMatchObject({
-			details: { toolBatchesWithoutProgress: 6, trigger: "anti_laziness_tool_intervention" },
+			details: {
+				toolBatchesWithoutProgress: 6,
+				escalationLevel: 1,
+				trigger: "anti_laziness_tool_intervention",
+			},
+		});
+		expect(interventions[1]).toMatchObject({
+			details: {
+				toolBatchesWithoutProgress: 9,
+				escalationLevel: 2,
+				trigger: "anti_laziness_tool_escalation",
+			},
 		});
 		const state = (await harness.session.handleAvoHostRequest("avo.get")).state as AvoRunState;
-		expect(state.status).toBe("completed");
+		expect(state.status).toBe("active");
 		expect(state.checkpoints).toContainEqual(
 			expect.objectContaining({
 				status: "intervene",
@@ -251,8 +262,8 @@ describe("AgentSession universal AVO runtime", () => {
 		);
 		expect(state.checkpoints).toContainEqual(
 			expect.objectContaining({
-				status: "progressing",
-				triggeredHeuristics: ["observable_progress_resumed"],
+				status: "intervene",
+				triggeredHeuristics: expect.arrayContaining(["no_observable_progress_9_tool_batches"]),
 			}),
 		);
 	});

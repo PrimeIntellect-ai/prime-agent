@@ -111,6 +111,22 @@ export interface SpecBenchGrade {
 	durationMs: number;
 }
 
+export function deriveSpecBenchExecutionBudgets(timeoutSeconds: number): {
+	ipythonCellTimeoutMs: number;
+	gradeSuiteTimeoutMs: number;
+	gradeTotalTimeoutMs: number;
+} {
+	if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
+		throw new Error("SpecBench timeoutSeconds must be positive");
+	}
+	const gradeSuiteTimeoutMs = Math.max(30_000, Math.min(120_000, timeoutSeconds * 1_000));
+	return {
+		ipythonCellTimeoutMs: Math.max(60_000, Math.min(120_000, timeoutSeconds * 2_000)),
+		gradeSuiteTimeoutMs,
+		gradeTotalTimeoutMs: Math.min(3 * 60 * 1000, gradeSuiteTimeoutMs * 3),
+	};
+}
+
 export interface SpecBenchResult {
 	specbenchRevision: string;
 	conditionId: SpecBenchAblationConditionId;
@@ -653,6 +669,31 @@ async function gradeSuite(
 	return parseSpecBenchGrade(result);
 }
 
+async function gradeSuiteWithinBudget(
+	testDir: string,
+	workspace: string,
+	perSuiteTimeoutMs: number,
+	deadline: number,
+	logPath: string,
+): Promise<SpecBenchGrade> {
+	const remainingMs = deadline - Date.now();
+	if (remainingMs <= 0) {
+		writeFileSync(logPath, "Official grading skipped: the per-task grading budget was exhausted.\n");
+		return {
+			total: 0,
+			passed: 0,
+			failed: 0,
+			errors: 0,
+			skipped: 0,
+			passRate: 0,
+			exitCode: null,
+			timedOut: true,
+			durationMs: 0,
+		};
+	}
+	return gradeSuite(testDir, workspace, Math.max(1, Math.min(perSuiteTimeoutMs, remainingMs)), logPath);
+}
+
 function sandboxArgs(
 	executable: string,
 	args: string[],
@@ -777,6 +818,11 @@ async function runTask(
 		PRIME_AGENT_SESSION_DIR: sessionDir,
 		PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: supervisorDir,
 		PRIME_AGENT_KERNEL_PYTHON: join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python"),
+		// Official tasks publish their own execution budget. Give a model-authored
+		// notebook test at most two such windows before the host retires the kernel.
+		PRIME_AGENT_IPYTHON_EXECUTION_TIMEOUT_MS: String(
+			deriveSpecBenchExecutionBudgets(task.timeoutSeconds).ipythonCellTimeoutMs,
+		),
 	};
 	const startedAt = Date.now();
 	const agent = await runCommand(
@@ -786,21 +832,31 @@ async function runTask(
 		{ cwd: workspace, env: environment, timeoutMs: options.timeoutMs + 30_000 },
 	);
 	writeFileSync(transcriptPath, `# stdout\n${agent.stdout}\n# stderr\n${agent.stderr}\n`);
-	const gradeTimeout = Math.max(60_000, Math.min(15 * 60 * 1000, task.timeoutSeconds * 20_000));
-	const publicGrade = await gradeSuite(
+	const gradeBudgets = deriveSpecBenchExecutionBudgets(task.timeoutSeconds);
+	const gradeTimeout = gradeBudgets.gradeSuiteTimeoutMs;
+	const gradeDeadline = Date.now() + gradeBudgets.gradeTotalTimeoutMs;
+	const publicGrade = await gradeSuiteWithinBudget(
 		task.publicTestDir,
 		workspace,
 		gradeTimeout,
+		gradeDeadline,
 		join(caseRoot, "public-grade.log"),
 	);
 	const idPrivateGrade =
 		task.idPrivateTestDir && existsSync(task.idPrivateTestDir)
-			? await gradeSuite(task.idPrivateTestDir, workspace, gradeTimeout, join(caseRoot, "id-private-grade.log"))
+			? await gradeSuiteWithinBudget(
+					task.idPrivateTestDir,
+					workspace,
+					gradeTimeout,
+					gradeDeadline,
+					join(caseRoot, "id-private-grade.log"),
+				)
 			: undefined;
-	const privateGrade = await gradeSuite(
+	const privateGrade = await gradeSuiteWithinBudget(
 		task.privateTestDir,
 		workspace,
 		gradeTimeout,
+		gradeDeadline,
 		join(caseRoot, "private-grade.log"),
 	);
 	const protectedChanges = [...protectedBefore].flatMap(([path, digest]) =>

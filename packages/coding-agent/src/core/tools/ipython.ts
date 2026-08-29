@@ -249,6 +249,7 @@ export type IpythonToolInput = Static<typeof ipythonSchema>;
 export interface IpythonToolDetails {
 	durationMs?: number;
 	status?: "ok" | "error" | "aborted" | "starting";
+	timedOut?: boolean;
 	errorEname?: string;
 	stdout?: string;
 	stderr?: string;
@@ -276,6 +277,8 @@ export interface IpythonToolOptions {
 	commandPrefix?: string;
 	/** Optional explicit shell path for bare %%bash cells. */
 	shellPath?: string;
+	/** Host-owned ceiling for one model-authored cell. Default: 5 minutes. */
+	executionTimeoutMs?: number;
 	sessionId?: string;
 	/** Typed host request handlers for the kernel↔host bridge (rlm.run, goal.*, …). */
 	hostHandlers?: HostRequestHandlers;
@@ -295,6 +298,18 @@ export interface IpythonToolOptions {
 	onLateSentAgentMessage?: (toolCallId: string, message: KernelSentAgentMessage) => void;
 	/** Shared provisioner owning the kernel lifecycle. When provided, the remaining options are ignored. */
 	provisioner?: IpythonKernelProvisioner;
+}
+
+const DEFAULT_IPYTHON_EXECUTION_TIMEOUT_MS = 5 * 60 * 1000;
+
+function resolveIpythonExecutionTimeoutMs(options: IpythonToolOptions | undefined): number {
+	const configured =
+		options?.executionTimeoutMs ?? Number(process.env.PRIME_AGENT_IPYTHON_EXECUTION_TIMEOUT_MS || NaN);
+	if (Number.isSafeInteger(configured) && configured > 0) return configured;
+	if (process.env.PRIME_AGENT_IPYTHON_EXECUTION_TIMEOUT_MS) {
+		throw new Error("PRIME_AGENT_IPYTHON_EXECUTION_TIMEOUT_MS must be a positive integer");
+	}
+	return DEFAULT_IPYTHON_EXECUTION_TIMEOUT_MS;
 }
 
 function quoteScriptMagicArgument(value: string): string {
@@ -629,18 +644,33 @@ export function createIpythonToolDefinition(
 	options?: IpythonToolOptions,
 ): ToolDefinition<typeof ipythonSchema, IpythonToolDetails> {
 	const provisioner = options?.provisioner ?? new IpythonKernelProvisioner(cwd, options);
+	const executionTimeoutMs = resolveIpythonExecutionTimeoutMs(options);
 
 	return {
 		name: "ipython",
 		label: "ipython",
 		description:
-			"Execute Python scratchpad code and `%%bash` shell cells in a persistent IPython kernel. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
+			"Execute Python scratchpad code and `%%bash` shell cells in a persistent IPython kernel. Variables, imports, and loaded data persist across calls, and are revived on a best-effort basis when a session is resumed (objects that cannot be serialized are dropped and reported). Each cell has a host-enforced execution ceiling, so keep diagnostics bounded. Project imports, tests, scripts, CLIs, and dependency checks should run through the target project's own environment.",
 		promptSnippet: "ipython - persistent agent notebook for Python scratchpad code and %%bash orchestration",
 		// The kernel is single-threaded — pi must not run two ipython calls in parallel within a batch.
 		executionMode: "sequential",
 		parameters: ipythonSchema,
 		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
 			let hasWorkingMessage = false;
+			let timedOut = false;
+			let timeoutKill: Promise<void> | undefined;
+			const timeoutController = new AbortController();
+			const executionSignal = signal
+				? AbortSignal.any([signal, timeoutController.signal])
+				: timeoutController.signal;
+			const executionTimeout = globalThis.setTimeout(() => {
+				timedOut = true;
+				timeoutController.abort();
+				// A timed-out cell may ignore an interrupt or leave a child process behind.
+				// Retire the whole kernel so the next call starts from a known-idle process.
+				timeoutKill = provisioner.kill();
+			}, executionTimeoutMs);
+			executionTimeout.unref?.();
 			const setToolWorkingMessage = (message?: string) => {
 				setWorkingMessage(ctx, message);
 				hasWorkingMessage = message !== undefined;
@@ -655,28 +685,49 @@ export function createIpythonToolDefinition(
 
 			try {
 				const code = applyShellSettingsToBashMagicCell(params.code, options);
-				const { result: r, kernelRestarted } = await executeWithBusyKernelChoice(
-					provisioner,
-					reportStartupProgress,
-					toolCallId,
-					code,
-					signal,
-					(chunk) => {
-						onUpdate?.({
-							content: [{ type: "text", text: chunk }],
-							details: { status: "ok" },
-						});
-					},
-					setToolWorkingMessage,
-					options?.onLateSentAgentMessage,
-					ctx,
-				);
+				let execution: { result: ExecuteResult; kernelRestarted: boolean };
+				try {
+					execution = await executeWithBusyKernelChoice(
+						provisioner,
+						reportStartupProgress,
+						toolCallId,
+						code,
+						executionSignal,
+						(chunk) => {
+							onUpdate?.({
+								content: [{ type: "text", text: chunk }],
+								details: { status: "ok" },
+							});
+						},
+						setToolWorkingMessage,
+						options?.onLateSentAgentMessage,
+						ctx,
+					);
+				} catch (error) {
+					if (!timedOut) throw error;
+					execution = {
+						result: {
+							stdout: "",
+							stderr: `IPython cell exceeded the host limit of ${executionTimeoutMs}ms and was terminated.`,
+							status: "aborted",
+							durationMs: executionTimeoutMs,
+						},
+						kernelRestarted: true,
+					};
+				}
+				if (timeoutKill) await timeoutKill;
+				const r = execution.result;
+				const kernelRestarted = execution.kernelRestarted || timedOut;
 
 				let text = r.stdout;
 				if (r.stderr) text += (text ? "\n" : "") + r.stderr;
 				if (r.result) text += (text ? "\n" : "") + r.result;
 				if (r.status === "error" && r.error) {
 					text += (text ? "\n" : "") + r.error.traceback.join("\n");
+				}
+				const timeoutNotice = `IPython cell exceeded the host limit of ${executionTimeoutMs}ms and was terminated.`;
+				if (timedOut && !text.includes(timeoutNotice)) {
+					text += (text ? "\n" : "") + timeoutNotice;
 				}
 				if (kernelRestarted) {
 					text = text ? `${KERNEL_RESTART_NOTICE}\n\n${text}` : KERNEL_RESTART_NOTICE;
@@ -690,6 +741,7 @@ export function createIpythonToolDefinition(
 					details: {
 						durationMs: r.durationMs,
 						status: r.status,
+						timedOut,
 						errorEname: r.error?.ename,
 						stdout: r.stdout,
 						stderr: r.stderr,
@@ -703,6 +755,8 @@ export function createIpythonToolDefinition(
 					isError: r.status === "error" || r.status === "aborted",
 				};
 			} finally {
+				globalThis.clearTimeout(executionTimeout);
+				if (timeoutKill) await timeoutKill.catch(() => undefined);
 				if (hasWorkingMessage) {
 					setToolWorkingMessage();
 				}

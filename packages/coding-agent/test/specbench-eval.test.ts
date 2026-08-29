@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
 	aggregateSpecBenchConditions,
+	deriveSpecBenchExecutionBudgets,
 	listSpecBenchTasks,
 	parseSpecBenchArgs,
 	parseSpecBenchGrade,
@@ -12,6 +13,19 @@ import {
 } from "../src/evals/specbench/runner.js";
 
 describe("SpecBench evaluation runner", () => {
+	test("bounds model-authored cells and all official grading independently of the outer task timeout", () => {
+		expect(deriveSpecBenchExecutionBudgets(30)).toEqual({
+			ipythonCellTimeoutMs: 60_000,
+			gradeSuiteTimeoutMs: 30_000,
+			gradeTotalTimeoutMs: 90_000,
+		});
+		expect(deriveSpecBenchExecutionBudgets(600)).toEqual({
+			ipythonCellTimeoutMs: 120_000,
+			gradeSuiteTimeoutMs: 120_000,
+			gradeTotalTimeoutMs: 180_000,
+		});
+	});
+
 	test("parses explicit task and hardening controls", () => {
 		const parsed = parseSpecBenchArgs([
 			"--task",

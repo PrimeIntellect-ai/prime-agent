@@ -1292,6 +1292,8 @@ export class AgentSession {
 	private _avoToolProgressToken?: string;
 	private _avoToolNoProgressBatches = 0;
 	private _avoToolInterventionQueued = false;
+	private _avoToolInterventionCount = 0;
+	private _avoToolLastInterventionBatch = 0;
 	private _avoSupervisorBoundToRuntime = false;
 	private _autoresearchStore?: AutoresearchStore;
 	private _autoresearchSupervisorBoundToRuntime = false;
@@ -3860,6 +3862,8 @@ export class AgentSession {
 			this._avoToolProgressToken = snapshot.token;
 			this._avoToolNoProgressBatches = 0;
 			this._avoToolInterventionQueued = false;
+			this._avoToolInterventionCount = 0;
+			this._avoToolLastInterventionBatch = 0;
 		}
 	}
 
@@ -3881,6 +3885,8 @@ export class AgentSession {
 			this._avoToolProgressToken = snapshot.token;
 			this._avoToolNoProgressBatches = 0;
 			this._avoToolInterventionQueued = false;
+			this._avoToolInterventionCount = 0;
+			this._avoToolLastInterventionBatch = 0;
 			return;
 		}
 		if (snapshot.token !== this._avoToolProgressToken) {
@@ -3889,6 +3895,8 @@ export class AgentSession {
 			this._avoToolProgressToken = snapshot.token;
 			this._avoToolNoProgressBatches = 0;
 			this._avoToolInterventionQueued = false;
+			this._avoToolInterventionCount = 0;
+			this._avoToolLastInterventionBatch = 0;
 			if (recoveredFromIntervention) {
 				this._avoRuntime.store.recordProgressWatchdogCheckpoint({
 					consecutiveNoProgressTurns: 0,
@@ -3901,15 +3909,18 @@ export class AgentSession {
 			return;
 		}
 		this._avoToolNoProgressBatches += 1;
-		const threshold = 6;
-		if (this._avoToolNoProgressBatches < threshold || this._avoToolInterventionQueued) return;
+		const threshold = this._avoToolInterventionCount === 0 ? 6 : this._avoToolLastInterventionBatch + 3;
+		if (this._avoToolNoProgressBatches < threshold || this._avoToolInterventionCount >= 3) return;
 		this._avoToolInterventionQueued = true;
-		const reason = `Anti-laziness tool intervention: ${this._avoToolNoProgressBatches} consecutive tool batches produced no meaningful host pass, obligation coverage, tested critical assumption, completed cycle, or experiment cell.`;
+		this._avoToolInterventionCount += 1;
+		this._avoToolLastInterventionBatch = this._avoToolNoProgressBatches;
+		const escalationLevel = this._avoToolInterventionCount;
+		const reason = `${escalationLevel === 1 ? "Anti-laziness tool intervention" : `Anti-laziness escalation ${escalationLevel}`}: ${this._avoToolNoProgressBatches} consecutive tool batches produced no meaningful host pass, obligation coverage, tested critical assumption, completed cycle, or experiment cell.`;
 		this._avoRuntime.store.recordProgressWatchdogCheckpoint({
 			consecutiveNoProgressTurns: this._avoToolNoProgressBatches,
 			resumed: false,
 			reason,
-			escalateHorizon: false,
+			escalateHorizon: escalationLevel > 1,
 			unit: "tool_batch",
 		});
 		const message: CustomMessage = {
@@ -3918,7 +3929,9 @@ export class AgentSession {
 			content: [
 				"<avo_progress_intervention>",
 				reason,
-				"Stop broad exploration and do not inspect Prime/AVO internals. Change approach now.",
+				escalationLevel === 1
+					? "Stop broad exploration and do not inspect Prime/AVO internals. Change approach now."
+					: "The previous intervention was ignored. Do at most one bounded diagnostic call, then produce and verify concrete task work now.",
 				state.routing.environment === "coding"
 					? "Work on the target files, make one concrete task-relevant workspace change, record a fresh candidate, and run one direct task-specific verifier."
 					: "Convert the evidence already gathered into a concrete candidate and run the verification class selected by the host.",
@@ -3929,7 +3942,8 @@ export class AgentSession {
 			details: {
 				runId: state.runId,
 				toolBatchesWithoutProgress: this._avoToolNoProgressBatches,
-				trigger: "anti_laziness_tool_intervention",
+				escalationLevel,
+				trigger: escalationLevel === 1 ? "anti_laziness_tool_intervention" : "anti_laziness_tool_escalation",
 			},
 			timestamp: Date.now(),
 		};
