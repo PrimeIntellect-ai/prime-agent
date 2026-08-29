@@ -1473,6 +1473,43 @@ describe("review-round regressions", () => {
 		expect(entry?.summary.activeSessionId).toBeUndefined();
 	});
 
+	it("repairs failed roster applies with one single-flight pull that never respawns itself", async () => {
+		const worker = makeWorker("worker-1");
+		let repairs = 0;
+		const supervisor = makeSupervisor([worker], {
+			applyWorkerRosterSnapshot: vi.fn(async () => {
+				throw new Error("apply exploded");
+			}),
+			refreshWorkerSummaries: vi.fn(() => {
+				repairs += 1;
+				return new Promise<void>(() => {});
+			}),
+		});
+
+		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([], undefined, true));
+		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([], undefined, true));
+		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([], undefined, true));
+		await new Promise((resolveSettle) => setImmediate(resolveSettle));
+		expect(repairs).toBe(1);
+
+		// A repair that itself fails logs the worker and does not spawn another pull.
+		const failingWorker = makeWorker("worker-2");
+		const log = vi.fn();
+		const failingSupervisor = makeSupervisor([failingWorker], {
+			applyWorkerRosterSnapshot: vi.fn(async () => {
+				throw new Error("apply exploded");
+			}),
+			refreshWorkerSummaries: vi.fn(async () => {
+				throw new Error("repair pull failed");
+			}),
+			log,
+		});
+		failingSupervisor.consumeWorkerRosterDelta(failingWorker, rosterDelta([], undefined, true));
+		await new Promise((resolveSettle) => setImmediate(resolveSettle));
+		expect(failingSupervisor.refreshWorkerSummaries).toHaveBeenCalledTimes(1);
+		expect(log).toHaveBeenCalledWith(expect.stringContaining("Roster repair pull failed for worker worker-2"));
+	});
+
 	it("keeps an unverifiable live pre-roster worker failed instead of launching a replacement", async () => {
 		const worker = makeWorker("worker-1");
 		Object.assign(worker.descriptor, { pid: process.pid, processStartId: undefined });

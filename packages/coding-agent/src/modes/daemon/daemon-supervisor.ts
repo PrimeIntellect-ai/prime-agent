@@ -316,6 +316,8 @@ interface ResidentWorker {
 	rosterEpoch?: number;
 	/** Serializes snapshot applications (and any deltas behind them) per worker. */
 	rosterApplyChain?: Promise<void>;
+	/** Single-flight marker for the gap-fill pull that repairs a failed roster apply. */
+	rosterRepairPull?: Promise<void>;
 }
 
 interface SnapshotDuplicateValidation {
@@ -3805,11 +3807,8 @@ export class DaemonSupervisor {
 				return apply();
 			})
 			.catch((error: unknown) => {
-				// A partial apply may have deleted rows it never rewrote; one gap-fill pull repairs the ledger.
 				this.log(`could not apply a roster frame: ${String(error)}`);
-				if (this.isWorkerRosterApplyCurrent(worker) && worker.client) {
-					void this.refreshWorkerSummaries(worker, false, true).catch(() => undefined);
-				}
+				this.scheduleRosterRepairPull(worker);
 			});
 		worker.rosterApplyChain = chained;
 		void chained.finally(() => {
@@ -3820,6 +3819,19 @@ export class DaemonSupervisor {
 
 	private isWorkerRosterApplyCurrent(worker: ResidentWorker): boolean {
 		return this.workers.get(worker.descriptor.workerId) === worker;
+	}
+
+	/** A partial apply may have deleted rows it never rewrote; one single-flight gap-fill pull repairs the ledger. */
+	private scheduleRosterRepairPull(worker: ResidentWorker): void {
+		if (worker.rosterRepairPull || !this.isWorkerRosterApplyCurrent(worker) || !worker.client) return;
+		// The marker stays set while the repair's own fill applies, so a failing repair never respawns itself.
+		worker.rosterRepairPull = this.refreshWorkerSummaries(worker, false, true)
+			.catch((error: unknown) =>
+				this.log(`Roster repair pull failed for worker ${worker.descriptor.workerId}: ${String(error)}`),
+			)
+			.finally(() => {
+				worker.rosterRepairPull = undefined;
+			});
 	}
 
 	private applyWorkerRosterDelta(
