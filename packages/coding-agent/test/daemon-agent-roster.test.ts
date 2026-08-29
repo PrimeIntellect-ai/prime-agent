@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -44,6 +44,8 @@ interface WorkerReporterFixture {
 			lastComposed: Map<string, WorkerRosterEntry>;
 			queuedChildren: Map<string, WorkerRosterEntry>;
 			removedAgentIds: Set<string>;
+			tombstones: Map<string, number>;
+			generation: number;
 			snapshotPending: boolean;
 		};
 	};
@@ -63,6 +65,8 @@ function makeWorkerReporter(connected = true): WorkerReporterFixture {
 			lastComposed: new Map<string, WorkerRosterEntry>(),
 			queuedChildren: new Map<string, WorkerRosterEntry>(),
 			removedAgentIds: new Set<string>(),
+			tombstones: new Map<string, number>(),
+			generation: 0,
 			snapshotPending: false,
 		},
 		rosterFlushScheduled: false,
@@ -84,6 +88,7 @@ function makeState(options: {
 	kind?: "top-level" | "subagent";
 	rlmChildId?: string;
 	parentActiveSessionId?: string;
+	parentSessionFile?: string;
 	messages?: AgentMessage[];
 	isStreaming?: boolean;
 }): ActiveSessionState {
@@ -97,6 +102,7 @@ function makeState(options: {
 				createdAt: 1,
 				...(options.rlmChildId ? { rlmChildId: options.rlmChildId } : {}),
 				...(options.parentActiveSessionId ? { parentActiveSessionId: options.parentActiveSessionId } : {}),
+				...(options.parentSessionFile ? { parentSessionFile: options.parentSessionFile } : {}),
 			},
 			diagnostics: [],
 			session: {
@@ -948,10 +954,12 @@ describe("worker saved-session deletion reaches the supervisor roster", () => {
 		} as unknown as DaemonSocketClient;
 		const internals = daemon as unknown as {
 			clients: Set<DaemonSocketClient>;
+			supervisorClaims: Map<DaemonSocketClient, object>;
 			handleCommand(client: DaemonSocketClient, command: object): Promise<unknown>;
 			flushRoster(): void;
 		};
 		internals.clients.add(supervisorClient);
+		internals.supervisorClaims.set(supervisorClient, {});
 
 		await internals.handleCommand(supervisorClient, { type: "delete_saved_session", sessionPath });
 		internals.flushRoster();
@@ -1050,11 +1058,14 @@ describe("bot-round regressions", () => {
 			sessions: new Map(),
 			cronStore: { list: () => [] },
 			clients: new Set([client]),
+			supervisorClaims: new Map([[client, {}]]),
 			rosterReporter: {
 				lastSent: new Map(),
 				lastComposed: new Map(),
 				queuedChildren: new Map(),
 				removedAgentIds: new Set(["deleted-agent"]),
+				tombstones: new Map(),
+				generation: 0,
 				snapshotPending: false,
 			},
 			rosterFlushScheduled: false,
@@ -1234,5 +1245,232 @@ describe("bot-round regressions", () => {
 		).refreshWorkerSummaries(worker);
 
 		expect(supervisor.roster().get("s")?.summary.sessionName).toBe("fresh");
+	});
+});
+
+describe("bot-round two regressions", () => {
+	it("publishes qualified removal ids from the rlm subagent deletion path", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-rlm-delete-"));
+		tempDirs.push(directory);
+		const sessionsDir = join(directory, "sessions");
+		const manager = SessionManager.create(directory, sessionsDir);
+		manager.appendMessage({ role: "user", content: "parent", timestamp: 1 });
+		manager.flushNow();
+		const parentFile = manager.getSessionFile();
+		if (!parentFile) throw new Error("Fixture parent did not persist");
+		const childDir = join(directory, "artifacts", "sub-1");
+		mkdirSync(childDir, { recursive: true });
+		const childFile = join(childDir, "child.jsonl");
+		const daemon = new AgentDaemon(join(directory, "worker.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory, sessionDir: sessionsDir },
+			worker: { authenticationToken: "token" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		} as never);
+		const internals = daemon as unknown as {
+			rlmSpawnLedger(): RlmSpawnLedger;
+			recordRlmSubagentDeletion(parentState: ActiveSessionState, childId: string): Promise<void>;
+			rosterReporter: { removedAgentIds: Set<string> };
+		};
+		await internals
+			.rlmSpawnLedger()
+			.appendSpawn({ childId: "sub-1", parent: parentFile, child: childFile, depth: 1, name: "child" });
+		const parentState = makeState({ activeSessionId: "parent-active", sessionFile: parentFile });
+
+		await internals.recordRlmSubagentDeletion(parentState, "sub-1");
+
+		const expected = workerRosterEntryFromSummary(
+			summary({
+				id: "sub-1",
+				sessionId: "sub-1",
+				runtimeKind: "subagent",
+				rlmChildId: "sub-1",
+				parentSessionPath: parentFile,
+			}),
+		).agentId;
+		expect(internals.rosterReporter.removedAgentIds.has(expected)).toBe(true);
+		expect(internals.rosterReporter.removedAgentIds.has("sub-1")).toBe(false);
+	});
+
+	it("publishes qualified removal ids for discarded bound-child drafts", () => {
+		const { daemon, sentDeltas } = makeWorkerReporter();
+		const childState = makeState({
+			activeSessionId: "child-active",
+			kind: "subagent",
+			rlmChildId: "sub-1",
+			parentActiveSessionId: "parent-active",
+			parentSessionFile: "/tmp/parents/root.jsonl",
+		});
+		daemon.sessions.set(childState.activeSessionId, childState);
+		daemon.flushRoster();
+		const composedId = sentDeltas[0]?.entries.find((entry) => entry.summary.rlmChildId === "sub-1")?.agentId;
+		if (!composedId) throw new Error("Missing composed child row");
+
+		daemon.sessions.delete(childState.activeSessionId);
+		const removalId = (
+			daemon as unknown as { rosterAgentIdForState(state: ActiveSessionState): string }
+		).rosterAgentIdForState(childState);
+		daemon.rosterReporter.removedAgentIds.add(removalId);
+		daemon.flushRoster();
+
+		expect(removalId).toBe(composedId);
+		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual([composedId]);
+	});
+
+	it("delivers only through the live supervisor claim, never a revoked socket", () => {
+		const oldWrite = vi.fn(() => true);
+		const newWrite = vi.fn(() => true);
+		const oldClient = {
+			transport: "private-framed",
+			authenticated: true,
+			backpressured: undefined as boolean | undefined,
+			socket: { destroyed: false, write: oldWrite },
+		};
+		const newClient = {
+			transport: "private-framed",
+			authenticated: true,
+			backpressured: true as boolean | undefined,
+			socket: { destroyed: false, write: newWrite },
+		};
+		const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
+			options: { worker: { authenticationToken: "token" } },
+			sessions: new Map(),
+			cronStore: { list: () => [] },
+			clients: new Set([oldClient, newClient]),
+			supervisorClaims: new Map([[newClient, {}]]),
+			rosterReporter: {
+				lastSent: new Map(),
+				lastComposed: new Map(),
+				queuedChildren: new Map(),
+				removedAgentIds: new Set(["deleted-agent"]),
+				tombstones: new Map(),
+				generation: 0,
+				snapshotPending: true,
+			},
+			rosterFlushScheduled: false,
+			shuttingDown: false,
+			log: vi.fn(),
+		}) as {
+			flushRoster(): void;
+			rosterReporter: { removedAgentIds: Set<string>; snapshotPending: boolean };
+		};
+
+		daemon.flushRoster();
+		expect(oldWrite).not.toHaveBeenCalled();
+		expect(daemon.rosterReporter.removedAgentIds.has("deleted-agent")).toBe(true);
+		expect(daemon.rosterReporter.snapshotPending).toBe(true);
+
+		newClient.backpressured = false;
+		daemon.flushRoster();
+		expect(oldWrite).not.toHaveBeenCalled();
+		expect(newWrite).toHaveBeenCalledTimes(1);
+		expect(daemon.rosterReporter.snapshotPending).toBe(false);
+	});
+
+	it("replays delivered removals to supervisors behind the acked generation and prunes on ack", () => {
+		const { daemon, sentDeltas } = makeWorkerReporter();
+		const state = makeState({
+			activeSessionId: "root-active",
+			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
+		});
+		daemon.sessions.set(state.activeSessionId, state);
+		daemon.flushRoster();
+		daemon.sessions.delete(state.activeSessionId);
+		daemon.rosterReporter.removedAgentIds.add("session-root-active");
+		daemon.rosterReporter.lastComposed.clear();
+		daemon.flushRoster();
+		const removalGeneration = daemon.rosterReporter.tombstones.get("session-root-active");
+		expect(removalGeneration).toBeGreaterThan(0);
+
+		const internals = daemon as unknown as { prepareRosterSnapshot(acked: number): void };
+		// A supervisor that never consumed the removal gets it replayed on the snapshot.
+		internals.prepareRosterSnapshot((removalGeneration ?? 1) - 1);
+		daemon.flushRoster();
+		expect(sentDeltas.at(-1)?.snapshot).toBe(true);
+		expect(sentDeltas.at(-1)?.removedAgentIds).toContain("session-root-active");
+
+		// A supervisor that acked the removal prunes the tombstone; nothing replays.
+		internals.prepareRosterSnapshot(daemon.rosterReporter.generation);
+		daemon.flushRoster();
+		expect(daemon.rosterReporter.tombstones.size).toBe(0);
+		expect(sentDeltas.at(-1)?.removedAgentIds).toBeUndefined();
+
+		// A fresh supervisor (ack 0) would have replayed everything; the tombstone map is already pruned.
+		internals.prepareRosterSnapshot(0);
+		daemon.flushRoster();
+		expect(sentDeltas.at(-1)?.removedAgentIds).toBeUndefined();
+	});
+
+	it("keeps a busy worker unevicted when the refresh response is staler than a delta", async () => {
+		const worker = makeWorker("worker-1", { rosterCapable: true });
+		const supervisor = makeSupervisor([worker], {
+			refreshWorkerSummaries: DaemonSupervisor.prototype["refreshWorkerSummaries" as never],
+			syncWorkerSummariesIntoRoster: DaemonSupervisor.prototype["syncWorkerSummariesIntoRoster" as never],
+			streamReconstructor: { seed: vi.fn(), clear: vi.fn() },
+		});
+		const staleIdle = summary({ id: "s-active", sessionId: "s", activeSessionId: "s-active" });
+		worker.client = {
+			request: vi.fn(async () => {
+				supervisor.consumeWorkerRosterDelta(
+					worker,
+					rosterDelta([
+						workerRosterEntryFromSummary(
+							summary({ id: "s-active", sessionId: "s", activeSessionId: "s-active", isSessionActive: true }),
+						),
+					]),
+				);
+				return { type: "response", command: "list", success: true, data: { sessions: [staleIdle] } };
+			}),
+		};
+		const internals = supervisor as unknown as {
+			refreshWorkerSummaries(worker: WorkerFixture): Promise<void>;
+			workerEvictionSnapshot(worker: WorkerFixture): { sessions: Array<{ isSessionActive: boolean }> };
+		};
+
+		await internals.refreshWorkerSummaries(worker);
+
+		const snapshot = internals.workerEvictionSnapshot(worker);
+		expect(snapshot.sessions).toHaveLength(1);
+		expect(snapshot.sessions[0]?.isSessionActive).toBe(true);
+	});
+
+	it("aborts a saved-child delete when the tombstone append fails", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-tombstone-fail-"));
+		tempDirs.push(directory);
+		const childPath = join(directory, "artifacts", "child.jsonl");
+		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" }));
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorFixture & { handleCommand(client: object, command: object): Promise<unknown> };
+		Object.assign(supervisor, {
+			catalog: { delete: catalogDelete, list: vi.fn(async () => []) },
+			rlmSpawnLedger: () => ({
+				appendDelete: vi.fn(async () => {
+					throw new Error("ledger unwritable");
+				}),
+			}),
+		});
+		const childEntry = workerRosterEntryFromSummary(
+			summary({
+				id: "child-1",
+				sessionId: "child-1",
+				sessionFile: childPath,
+				runtimeKind: "subagent",
+				rlmChildId: "child-1",
+				parentSessionPath: join(directory, "sessions", "root.jsonl"),
+			}),
+		);
+		supervisor.writeRosterEntry(childEntry);
+
+		await expect(
+			supervisor.handleCommand(
+				{ id: "client", attachedActiveSessionIds: new Set<string>() },
+				{ type: "delete_saved_session", sessionPath: childPath },
+			),
+		).rejects.toThrow("ledger unwritable");
+		expect(catalogDelete).not.toHaveBeenCalled();
+		expect(supervisor.roster().has(childEntry.agentId)).toBe(true);
 	});
 });

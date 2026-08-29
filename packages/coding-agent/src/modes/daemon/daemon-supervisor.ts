@@ -314,6 +314,8 @@ interface ResidentWorker {
 	rosterStale?: boolean;
 	/** Bumped per consumed roster delta; a summaries refresh must not overwrite newer deltas. */
 	rosterDeltaGeneration?: number;
+	/** Last worker frame generation consumed; acked back on (re)auth for tombstone replay. */
+	rosterAckGeneration?: number;
 }
 
 interface SnapshotDuplicateValidation {
@@ -813,20 +815,24 @@ export class DaemonSupervisor {
 			hasOwnerClient: worker.descriptor.ownerClientId !== undefined,
 			isPreparingUpdateRestart:
 				this.updateRestartPhase !== undefined || worker.updateRestartPrepareClient !== undefined,
-			sessions: [...worker.summaries.values()].map((summary) => {
-				const activeSessionId = summary.activeSessionId ?? summary.id;
-				return {
-					// Use the canonical busy projection: a parent remains active for
-					// residency purposes while any of its RLM descendants is running.
-					isSessionActive: isSessionSummaryBusy(summary),
-					attachedClients: [...this.clients].filter((client) =>
-						client.attachedActiveSessionIds.has(activeSessionId),
-					).length,
-					hasRegisteredHeartbeat: summary.hasRegisteredHeartbeat === true,
-					hasRegisteredCronJob: summary.hasRegisteredCronJob === true,
-					lastActivityAt: Date.parse(summary.lastActivityAt ?? ""),
-				};
-			}),
+			// The roster carries deltas newer than any discarded refresh response; eviction must see them.
+			sessions: this.workerRosterEntries(worker)
+				.filter((entry) => !entry.queuedChild)
+				.map(sessionSummaryFromRosterEntry)
+				.map((summary) => {
+					const activeSessionId = summary.activeSessionId ?? summary.id;
+					return {
+						// Use the canonical busy projection: a parent remains active for
+						// residency purposes while any of its RLM descendants is running.
+						isSessionActive: isSessionSummaryBusy(summary),
+						attachedClients: [...this.clients].filter((client) =>
+							client.attachedActiveSessionIds.has(activeSessionId),
+						).length,
+						hasRegisteredHeartbeat: summary.hasRegisteredHeartbeat === true,
+						hasRegisteredCronJob: summary.hasRegisteredCronJob === true,
+						lastActivityAt: Date.parse(summary.lastActivityAt ?? ""),
+					};
+				}),
 		};
 	}
 
@@ -2120,19 +2126,16 @@ export class DaemonSupervisor {
 					if (owner?.client && !this.isWorkerStopping(owner)) {
 						return this.forwardToWorker(owner, command);
 					}
-					const result = await this.catalog.delete(command.sessionPath);
-					if (result.ok) {
-						if (entry?.summary.rlmChildId) {
-							await this.rlmSpawnLedger()
-								.appendDelete({ childId: entry.summary.rlmChildId, child: command.sessionPath, reason: "user" })
-								.catch((error) => {
-									this.log(
-										`failed to append RLM ledger delete: ${error instanceof Error ? error.message : String(error)}`,
-									);
-								});
-						}
-						if (entry) this.roster().delete(entry.agentId);
+					// Tombstone first: a failed append aborts; a tombstoned-but-undeleted file is the accepted orphan of a failed delete.
+					if (entry?.summary.rlmChildId) {
+						await this.rlmSpawnLedger().appendDelete({
+							childId: entry.summary.rlmChildId,
+							child: command.sessionPath,
+							reason: "user",
+						});
 					}
+					const result = await this.catalog.delete(command.sessionPath);
+					if (result.ok && entry) this.roster().delete(entry.agentId);
 					return success(command.id, command.type, result);
 				}
 				break;
@@ -2917,7 +2920,10 @@ export class DaemonSupervisor {
 				client.onClose((error) => void this.handleWorkerClose(worker, client, error));
 				const authResponse = await client.authenticateWorker(
 					worker.descriptor.authenticationToken,
-					this.supervisorAuthenticationClaim(),
+					{
+						...this.supervisorAuthenticationClaim(),
+						...(worker.rosterAckGeneration !== undefined ? { rosterGeneration: worker.rosterAckGeneration } : {}),
+					},
 					1000,
 				);
 				await this.assertRecoveryAllowed();
@@ -3500,7 +3506,7 @@ export class DaemonSupervisor {
 		);
 	}
 
-	private async refreshWorkerSummaries(worker: ResidentWorker, recovery = false): Promise<void> {
+	private async refreshWorkerSummaries(worker: ResidentWorker, recovery = false, retried = false): Promise<void> {
 		if (this.isWorkerStopping(worker)) {
 			throw new Error("Session worker is stopping");
 		}
@@ -3509,6 +3515,11 @@ export class DaemonSupervisor {
 		}
 		const deltaGenerationAtStart = worker.rosterDeltaGeneration ?? 0;
 		const response = await worker.client.request({ type: "list" }, 5000);
+		// A delta that landed mid-refresh is newer than this response; discard it and retry once.
+		if ((worker.rosterDeltaGeneration ?? 0) !== deltaGenerationAtStart) {
+			if (!retried) return this.refreshWorkerSummaries(worker, recovery, true);
+			return;
+		}
 		const summaries = sessionSummariesFromResponse(response);
 		const nextSummaries = new Map(summaries.map((summary) => [summary.activeSessionId ?? summary.id, summary]));
 		const root = nextSummaries.get(worker.descriptor.rootActiveSessionId);
@@ -3524,10 +3535,7 @@ export class DaemonSupervisor {
 				this.streamReconstructor.clear(activeSessionId);
 			}
 		}
-		// A delta that landed mid-refresh is newer than this list; it must not be overwritten.
-		if ((worker.rosterDeltaGeneration ?? 0) === deltaGenerationAtStart) {
-			this.syncWorkerSummariesIntoRoster(worker);
-		}
+		this.syncWorkerSummariesIntoRoster(worker);
 		if (root) {
 			if (recovery) {
 				await this.assertRecoveryAllowed();
@@ -3672,6 +3680,7 @@ export class DaemonSupervisor {
 		if (delta.type !== "roster_delta" || !Array.isArray(delta.entries)) return;
 		worker.rosterCapable = true;
 		worker.rosterDeltaGeneration = (worker.rosterDeltaGeneration ?? 0) + 1;
+		if (typeof delta.generation === "number") worker.rosterAckGeneration = delta.generation;
 		if (delta.snapshot === true) {
 			// Snapshot replacement: absent rows with a durable transcript passivate, sessionless rows go.
 			const sent = new Set(delta.entries.map((entry) => entry.agentId));

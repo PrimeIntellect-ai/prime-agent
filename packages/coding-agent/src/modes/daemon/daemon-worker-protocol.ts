@@ -18,7 +18,14 @@ export type DaemonWorkerLifecycle = "starting" | "ready" | "recovering" | "stopp
 
 // Worker->supervisor roster frames live outside the client-facing DaemonOutbound schema.
 export type DaemonWorkerRosterOutbound =
-	| { type: "roster_delta"; entries: WorkerRosterEntry[]; removedAgentIds?: string[]; snapshot?: true }
+	| {
+			type: "roster_delta";
+			entries: WorkerRosterEntry[];
+			removedAgentIds?: string[];
+			snapshot?: true;
+			/** Monotonic per-worker frame counter; the supervisor acks it back on (re)auth. */
+			generation?: number;
+	  }
 	| { type: "roster_heartbeat" };
 
 /** Advertised by new workers in the worker_auth response; absent on legacy workers. */
@@ -66,6 +73,8 @@ export type DaemonWorkerCommand =
 			supervisorPid: number;
 			supervisorProcessStartId?: string;
 			supervisorSocketPath: string;
+			/** Last consumed roster generation for this worker; absent for a fresh supervisor. */
+			rosterGeneration?: number;
 	  }
 	| {
 			id?: string;

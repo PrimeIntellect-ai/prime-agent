@@ -555,6 +555,8 @@ export class AgentDaemon {
 		lastComposed: new Map(),
 		queuedChildren: new Map(),
 		removedAgentIds: new Set(),
+		tombstones: new Map(),
+		generation: 0,
 		snapshotPending: false,
 	};
 	private rosterFlushScheduled = false;
@@ -1131,7 +1133,7 @@ export class AgentDaemon {
 		// dual-write era it has no other writer to fall back on, so a failed
 		// append is a failed deletion.
 		await this.rlmSpawnLedger().appendDelete({ childId, child: entry.sessionFile, reason });
-		this.rosterReporter.removedAgentIds.add(childId);
+		this.rosterReporter.removedAgentIds.add(this.rosterAgentIdForRlmChild(childId, entry.parentSessionFile));
 		this.scheduleRosterFlush();
 		// Deletion boundary: transcript + display tombstone are the durable
 		// record and stay; the nested artifact dir is a runtime cache and goes.
@@ -3287,6 +3289,7 @@ export class AgentDaemon {
 				supervisorPid?: unknown;
 				supervisorProcessStartId?: unknown;
 				supervisorSocketPath?: unknown;
+				rosterGeneration?: unknown;
 				activeSessionId?: unknown;
 				admissionId?: unknown;
 				capabilities?: unknown;
@@ -3319,6 +3322,7 @@ export class AgentDaemon {
 					!Number.isInteger(parsed.supervisorPid) ||
 					(parsed.supervisorPid as number) <= 0 ||
 					(parsed.supervisorProcessStartId !== undefined && typeof parsed.supervisorProcessStartId !== "string") ||
+					(parsed.rosterGeneration !== undefined && typeof parsed.rosterGeneration !== "number") ||
 					typeof parsed.supervisorSocketPath !== "string"
 				) {
 					clearParsedAdmission();
@@ -3359,8 +3363,8 @@ export class AgentDaemon {
 					success: true,
 					data: { capabilities: [DAEMON_WORKER_ROSTER_CAPABILITY] },
 				});
-				// A (re)connected supervisor has no delta history; the next flush sends a replacing snapshot.
-				this.rosterReporter.snapshotPending = true;
+				// A (re)connected supervisor replays from its acked generation; the next flush sends a replacing snapshot.
+				this.prepareRosterSnapshot(typeof parsed.rosterGeneration === "number" ? parsed.rosterGeneration : 0);
 				this.scheduleRosterFlush();
 				return;
 			}
@@ -3916,6 +3920,14 @@ export class AgentDaemon {
 						.edges()
 						.catch(() => [])
 				).find((edge) => canonicalSessionPath(edge.child) === deletedPath);
+				// Tombstone first: a failed append aborts; a tombstoned-but-undeleted file is the accepted orphan of a failed delete.
+				if (ledgerEdge) {
+					await this.rlmSpawnLedger().appendDelete({
+						childId: ledgerEdge.childId,
+						child: command.sessionPath,
+						reason: "user",
+					});
+				}
 				const result = await this.deleteSavedSessionFile(command.sessionPath, {
 					afterFileRemoved: () => {
 						this.cancelScheduledJobsForSessionFile(command.sessionPath);
@@ -3923,25 +3935,9 @@ export class AgentDaemon {
 				});
 				// A file that still exists keeps its roster row; only a real deletion is published.
 				if (result.ok) {
-					if (ledgerEdge) {
-						await this.rlmSpawnLedger()
-							.appendDelete({ childId: ledgerEdge.childId, child: command.sessionPath, reason: "user" })
-							.catch((error) => {
-								this.log(
-									`failed to append RLM ledger delete: ${error instanceof Error ? error.message : String(error)}`,
-								);
-							});
-					}
 					const removedAgentId =
 						this.rosterAgentIdForSessionPath(deletedPath) ??
-						(ledgerEdge
-							? rosterAgentIdForSummary({
-									runtimeKind: "subagent",
-									rlmChildId: ledgerEdge.childId,
-									sessionId: deletedInfo?.id ?? ledgerEdge.childId,
-									parentSessionPath: ledgerEdge.parent,
-								})
-							: deletedInfo?.id);
+						(ledgerEdge ? this.rosterAgentIdForRlmChild(ledgerEdge.childId, ledgerEdge.parent) : deletedInfo?.id);
 					if (removedAgentId) {
 						this.rosterReporter.removedAgentIds.add(removedAgentId);
 						this.scheduleRosterFlush();
@@ -6572,7 +6568,20 @@ export class AgentDaemon {
 	private rosterAgentIdForState(state: ActiveSessionState): string {
 		const session = state.runtime.session;
 		const metadata = state.runtime.metadata;
-		return metadata.kind === "subagent" && metadata.rlmChildId ? metadata.rlmChildId : session.sessionId;
+		if (metadata.kind === "subagent" && metadata.rlmChildId) {
+			return this.rosterAgentIdForRlmChild(metadata.rlmChildId, metadata.parentSessionFile);
+		}
+		return session.sessionId;
+	}
+
+	/** The one resolution for subagent roster ids: childId qualified by its parent's session path. */
+	private rosterAgentIdForRlmChild(childId: string, parentSessionPath: string | undefined): string {
+		return rosterAgentIdForSummary({
+			runtimeKind: "subagent",
+			rlmChildId: childId,
+			sessionId: childId,
+			parentSessionPath,
+		});
 	}
 
 	private observeRosterEvent(state: ActiveSessionState, message: DaemonOutbound): void {
@@ -6643,6 +6652,14 @@ export class AgentDaemon {
 		return { agentId: rosterAgentIdForSummary(summary), queuedChild: true, summary };
 	}
 
+	private prepareRosterSnapshot(ackedGeneration: number): void {
+		const reporter = this.rosterReporter;
+		for (const [agentId, generation] of reporter.tombstones) {
+			if (generation <= ackedGeneration) reporter.tombstones.delete(agentId);
+		}
+		reporter.snapshotPending = true;
+	}
+
 	private scheduleRosterFlush(): void {
 		if (!this.options.worker || this.rosterFlushScheduled || this.shuttingDown) return;
 		this.rosterFlushScheduled = true;
@@ -6681,24 +6698,33 @@ export class AgentDaemon {
 				entries.set(agentId, passivatedWorkerRosterEntry(previous));
 			}
 		}
+		// An agent recreated after deletion outlives its old tombstone.
+		for (const agentId of entries.keys()) {
+			reporter.tombstones.delete(agentId);
+		}
 		reporter.lastComposed = new Map(entries);
 		if (!this.hasAuthenticatedSupervisorClient()) return;
 		const removedAgentIds = [...reporter.removedAgentIds];
+		const generation = reporter.generation + 1;
 		if (reporter.snapshotPending) {
+			const replayedRemovals = [...new Set([...removedAgentIds, ...reporter.tombstones.keys()])];
 			const delivered = this.broadcastRosterFrame({
 				type: "roster_delta",
 				snapshot: true,
+				generation,
 				entries: [...entries.values()],
-				...(removedAgentIds.length > 0 ? { removedAgentIds } : {}),
+				...(replayedRemovals.length > 0 ? { removedAgentIds: replayedRemovals } : {}),
 			});
 			if (!delivered) return;
+			reporter.generation = generation;
 			reporter.snapshotPending = false;
+			for (const agentId of removedAgentIds) {
+				reporter.tombstones.set(agentId, generation);
+				reporter.removedAgentIds.delete(agentId);
+			}
 			reporter.lastSent.clear();
 			for (const [agentId, entry] of entries) {
 				reporter.lastSent.set(agentId, { json: JSON.stringify(entry), entry });
-			}
-			for (const agentId of removedAgentIds) {
-				reporter.removedAgentIds.delete(agentId);
 			}
 			return;
 		}
@@ -6711,22 +6737,26 @@ export class AgentDaemon {
 		if (changed.length === 0 && removedAgentIds.length === 0) return;
 		const delivered = this.broadcastRosterFrame({
 			type: "roster_delta",
+			generation,
 			entries: changed.map(({ entry }) => entry),
 			...(removedAgentIds.length > 0 ? { removedAgentIds } : {}),
 		});
 		if (!delivered) return;
+		reporter.generation = generation;
 		for (const { agentId, json, entry } of changed) {
 			reporter.lastSent.set(agentId, { json, entry });
 		}
 		for (const agentId of removedAgentIds) {
+			reporter.tombstones.set(agentId, generation);
 			reporter.lastSent.delete(agentId);
 			reporter.removedAgentIds.delete(agentId);
 		}
 	}
 
+	// The live supervisor claim is the single delivery authority; revoked sockets cannot satisfy it.
 	private hasAuthenticatedSupervisorClient(): boolean {
 		for (const client of this.clients) {
-			if (client.transport === "private-framed" && client.authenticated === true && !client.socket.destroyed) {
+			if (this.supervisorClaims.has(client) && !client.socket.destroyed) {
 				return true;
 			}
 		}
@@ -6737,7 +6767,7 @@ export class AgentDaemon {
 		const payload = Buffer.from(serializeJsonLine(message));
 		let delivered = false;
 		for (const client of this.clients) {
-			if (client.transport !== "private-framed" || client.authenticated !== true || client.socket.destroyed) {
+			if (!this.supervisorClaims.has(client) || client.socket.destroyed) {
 				continue;
 			}
 			// A non-drained socket gets nothing; uncommitted state re-flushes on drain.
@@ -7133,9 +7163,13 @@ interface WorkerRosterReporterState {
 	lastSent: Map<string, { json: string; entry: WorkerRosterEntry }>;
 	/** Last composed roster, delivered or not; the source for passivated flips. */
 	lastComposed: Map<string, WorkerRosterEntry>;
-	/** Admitted child runs whose sessions have not materialized yet, keyed by childId. */
+	/** Admitted child runs whose sessions have not materialized yet, keyed by agentId. */
 	queuedChildren: Map<string, WorkerRosterEntry>;
 	removedAgentIds: Set<string>;
+	/** Delivered removals by frame generation, replayed to supervisors that never consumed them. */
+	tombstones: Map<string, number>;
+	/** Monotonic frame counter, bumped per delivered frame. */
+	generation: number;
 	snapshotPending: boolean;
 }
 
