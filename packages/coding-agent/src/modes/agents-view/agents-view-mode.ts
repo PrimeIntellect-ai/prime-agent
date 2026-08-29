@@ -170,6 +170,8 @@ export type AgentsViewPersistentState = {
 	rosterStore?: AgentsViewRosterStore;
 	savedSessions?: AgentConnectionSavedSessionInfo[];
 	lastSuccessfulSavedSessions?: AgentConnectionSavedSessionInfo[];
+	/** True once any instance fully loaded the saved catalog; mutations then keep the shared copy fresh. */
+	savedCatalogLoaded?: boolean;
 	lastSuccessfulLiveSummaries?: SessionSummary[];
 	savedCatalogGeneration?: number;
 	heartbeats?: AgentConnectionHeartbeat[];
@@ -1254,11 +1256,11 @@ export class AgentsViewMode implements Component, Focusable {
 	private queryChanged(): void {
 		this.persistentState.query = this.editor.getText();
 		if (!this.savedSearchFetchStarted && this.editor.getText().trim().length > 0) {
-			// Deep search over message text needs the saved catalog; one live fetch at a time.
+			// Deep search over message text needs the saved catalog; one live fetch per instance.
 			this.savedSearchFetchStarted = true;
 			void this.refreshSavedSessions({ preserveStatusOnError: true }).then((refreshed) => {
-				// A failed fetch re-arms the lazy load so the next keystroke retries.
-				if (!refreshed) this.savedSearchFetchStarted = false;
+				// Re-arm only while no catalog exists at all; a superseded return must not force refetches.
+				if (!refreshed && this.persistentState.savedCatalogLoaded !== true) this.savedSearchFetchStarted = false;
 			});
 		}
 		this.rebuildRows();
@@ -1895,7 +1897,8 @@ export class AgentsViewMode implements Component, Focusable {
 					}
 					this.pendingDeleteAgent = undefined;
 					const refreshed =
-						!this.savedSearchFetchStarted || (await this.refreshSavedSessions({ preserveStatusOnError: true }));
+						!this.persistentState.savedCatalogLoaded ||
+						(await this.refreshSavedSessions({ preserveStatusOnError: true }));
 					const success = result.method === "trash" ? "Session moved to trash" : "Session deleted";
 					this.setStatusMessage(refreshed ? success : `${success}; refresh failed`);
 				} catch (error) {
@@ -2119,9 +2122,9 @@ export class AgentsViewMode implements Component, Focusable {
 		this.applySessionList(this.rosterStore.summaries(), true);
 	}
 
-	/** Renames and deactivations invalidate the lazily loaded saved catalog; refresh only when a search loaded it. */
+	/** Renames and deactivations invalidate the lazily loaded saved catalog; refresh only when some view loaded it. */
 	private refreshSavedSessionsIfLoaded(): void {
-		if (this.savedSearchFetchStarted) void this.refreshSavedSessions({ preserveStatusOnError: true });
+		if (this.persistentState.savedCatalogLoaded) void this.refreshSavedSessions({ preserveStatusOnError: true });
 	}
 
 	/** The pushed roster is the live catalog; a refresh is one local reapply of the store's rows. */
@@ -2207,6 +2210,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.savedCatalogReady = true;
 			this.persistentState.lastSuccessfulSavedSessions = sessions;
 			this.persistentState.savedSessions = sessions;
+			this.persistentState.savedCatalogLoaded = true;
 			this.reconcileCatalogs();
 			return true;
 		} catch (error) {
@@ -2427,7 +2431,7 @@ export class AgentsViewMode implements Component, Focusable {
 		}
 		if (!this.stopped && !this.daemonShutdownReceived && client === this.client) {
 			this.reconnectTimedOut = true;
-			this.setStatusMessage(formatError("Daemon unavailable; retrying", lastError), {
+			this.setStatusMessage(formatError("Daemon unavailable; reconnect stopped, restart Prime Agent", lastError), {
 				tone: "error",
 				sticky: true,
 				render: false,

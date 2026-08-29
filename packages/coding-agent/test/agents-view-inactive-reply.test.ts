@@ -8,6 +8,7 @@ import {
 	getReplyComposerCommandRejection,
 	parseAgentsViewCommand,
 } from "../src/modes/agents-view/agents-view-mode.js";
+import { reconcileUnifiedSessions } from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 
 function summary(overrides: Partial<SessionSummary>): SessionSummary {
@@ -614,7 +615,7 @@ describe("agents view slash commands", () => {
 			requireClient: () => ({ request }),
 			editor,
 			setStatusMessage: vi.fn(),
-			savedSearchFetchStarted: false,
+			persistentState: {},
 			refreshSessions: vi.fn(async () => true),
 			refreshSavedSessions: vi.fn(async () => true),
 			refreshSavedSessionsIfLoaded() {
@@ -630,13 +631,128 @@ describe("agents view slash commands", () => {
 		);
 
 		expect(request).toHaveBeenCalledWith({ type: "rename", activeSessionId: "active-1", name: "Fresh Name" });
-		// The push carries renames to the live catalog; the saved catalog refreshes only once a search loaded it.
+		// The push carries renames to the live catalog; the saved catalog refreshes only once it has loaded.
 		expect(self.refreshSessions).toHaveBeenCalledWith();
 		expect(self.refreshSavedSessions).not.toHaveBeenCalled();
 
-		self.savedSearchFetchStarted = true;
+		(self.persistentState as { savedCatalogLoaded?: boolean }).savedCatalogLoaded = true;
 		await expect(invoke("renameSession", self, live, "Fresher Name")).resolves.toBe(true);
 		expect(self.refreshSavedSessions).toHaveBeenCalledTimes(1);
+	});
+
+	it("gates mutation refreshes on the persistent catalog flag across view remounts", async () => {
+		const wireSaved = (id: string) => ({
+			path: `/tmp/sessions/${id}.jsonl`,
+			id,
+			cwd: "/tmp/project",
+			rlmDepth: 0,
+			created: 1,
+			modified: 1,
+			messageCount: 1,
+			firstMessage: id,
+			allMessagesText: id,
+		});
+		const makeCatalogSelf = (persistentState: Record<string, unknown>, sessions: () => unknown[]) => {
+			const self: Record<string, unknown> = {
+				persistentState,
+				reconnectPromise: undefined,
+				daemonShutdownReceived: false,
+				savedCatalogGeneration: (persistentState.savedCatalogGeneration as number) ?? 0,
+				savedCatalogRefreshPending: false,
+				savedCatalogReady: false,
+				savedSessions: [],
+				lastSuccessfulSavedSessions: [],
+				savedSearchFetchStarted: false,
+				reconcileCatalogs: vi.fn(),
+				resolveMissingSelectionAnchor: vi.fn(),
+				requireClient: () => ({
+					request: vi.fn(async () => ({ success: true, data: { sessions: sessions() } })),
+				}),
+				getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
+				refreshSavedSessions: vi.fn((options?: unknown) => invoke("refreshSavedSessions", self, options)),
+				refreshSavedSessionsIfLoaded() {
+					return invoke("refreshSavedSessionsIfLoaded", self);
+				},
+			};
+			return self;
+		};
+
+		const persistentState: Record<string, unknown> = {};
+		let catalog = [wireSaved("kept"), wireSaved("doomed")];
+
+		// Before any load, mutations never fetch the catalog.
+		const coldView = makeCatalogSelf(persistentState, () => catalog);
+		coldView.refreshSavedSessionsIfLoaded();
+		expect(coldView.refreshSavedSessions).not.toHaveBeenCalled();
+
+		// View A loads the catalog once for search; the flag persists beyond the instance.
+		const viewA = makeCatalogSelf(persistentState, () => catalog);
+		await expect(
+			(viewA.refreshSavedSessions as (options?: unknown) => Promise<boolean>)({ preserveStatusOnError: true }),
+		).resolves.toBe(true);
+		expect(persistentState.savedCatalogLoaded).toBe(true);
+
+		// A remounted view B deletes a session; the mutation refresh drops the stale row.
+		catalog = [wireSaved("kept")];
+		const viewB = makeCatalogSelf(persistentState, () => catalog);
+		viewB.refreshSavedSessionsIfLoaded();
+		expect(viewB.refreshSavedSessions).toHaveBeenCalledTimes(1);
+		await (viewB.refreshSavedSessions as ReturnType<typeof vi.fn>).mock.results[0]?.value;
+
+		const records = reconcileUnifiedSessions([], persistentState.savedSessions as never, []);
+		expect(records.some((record) => record.identity === "file:/tmp/sessions/doomed.jsonl")).toBe(false);
+		expect(records.some((record) => record.identity === "file:/tmp/sessions/kept.jsonl")).toBe(true);
+	});
+
+	it("keeps the persistent catalog gate when a superseded fetch settles after a newer success", async () => {
+		const wire = { path: "/tmp/sessions/kept.jsonl", id: "kept", cwd: "/tmp/project", rlmDepth: 0, created: 1, modified: 1, messageCount: 1, firstMessage: "kept", allMessagesText: "kept" };
+		let releaseFirst: (response: unknown) => void = () => {};
+		const firstResponse = new Promise((resolveFirst) => {
+			releaseFirst = resolveFirst;
+		});
+		const responses: unknown[] = [firstResponse, { success: true, data: { sessions: [wire] } }];
+		const request = vi.fn(async () => responses.shift());
+		const persistentState: Record<string, unknown> = {};
+		const self: Record<string, unknown> = {
+			persistentState,
+			reconnectPromise: undefined,
+			daemonShutdownReceived: false,
+			savedCatalogGeneration: 0,
+			savedCatalogRefreshPending: false,
+			savedCatalogReady: false,
+			savedSessions: [],
+			lastSuccessfulSavedSessions: [],
+			savedSearchFetchStarted: false,
+			selectionAnchorPending: false,
+			reconcileCatalogs: vi.fn(),
+			resolveMissingSelectionAnchor: vi.fn(),
+			rebuildRows: vi.fn(),
+			syncSelectedRowState: vi.fn(),
+			ui: { requestRender: vi.fn() },
+			editor: editorWithText("deep search text"),
+			requireClient: () => ({ request }),
+			getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
+			refreshSavedSessions: vi.fn((options?: unknown) => invoke("refreshSavedSessions", self, options)),
+		};
+
+		// The search kicks off the first (hanging) fetch and arms the per-instance flag.
+		invoke("queryChanged", self);
+		expect(self.savedSearchFetchStarted).toBe(true);
+		const older = (self.refreshSavedSessions as ReturnType<typeof vi.fn>).mock.results[0]?.value as Promise<boolean>;
+
+		// A mutation refresh supersedes it and succeeds.
+		const newer = (self.refreshSavedSessions as (options?: unknown) => Promise<boolean>)({
+			preserveStatusOnError: true,
+		});
+		await expect(newer).resolves.toBe(true);
+		expect(persistentState.savedCatalogLoaded).toBe(true);
+
+		// The stale continuation settles false but can clear neither the gate nor the fresh data.
+		releaseFirst({ success: true, data: { sessions: [] } });
+		await expect(older).resolves.toBe(false);
+		expect(persistentState.savedCatalogLoaded).toBe(true);
+		expect(persistentState.savedSessions).toHaveLength(1);
+		expect(self.savedSearchFetchStarted).toBe(true);
 	});
 
 	it("kills a live target and disarms the composer", async () => {
