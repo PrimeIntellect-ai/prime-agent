@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,7 +17,12 @@ import { readSessionInfo, SessionManager } from "../src/core/session-manager.js"
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import { DaemonClient, getDaemonSocketCloseReason } from "../src/modes/daemon/daemon-client.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
-import type { DaemonWorkerDescriptor } from "../src/modes/daemon/daemon-worker-protocol.js";
+import {
+	type DaemonWorkerDescriptor,
+	type DaemonWorkerFrameHeader,
+	isDaemonWorkerFrameHeader,
+} from "../src/modes/daemon/daemon-worker-protocol.js";
+import { encodePrivateFrame, PrivateFrameDecoder } from "../src/modes/session-worker/private-framing.js";
 
 const cliPath = resolve(__dirname, "../src/cli.ts");
 const tsxPath = resolve(__dirname, "../../../node_modules/tsx/dist/cli.mjs");
@@ -335,6 +341,133 @@ describe("daemon supervisor resident workers", () => {
 		workerPids.delete(summary.workerPid);
 		await waitForSocketGone(socketPath);
 	}, 60_000);
+
+	it("restarts an adopted pre-roster worker from the current binary", async () => {
+		const directory = tempDir();
+		const agentDir = join(directory, "agent");
+		const projectDir = join(directory, "project");
+		const sessionDir = join(agentDir, "sessions");
+		mkdirSync(projectDir, { recursive: true });
+		const manager = SessionManager.create(projectDir, sessionDir);
+		manager.appendMessage({ role: "user", content: "pre-roster fixture", timestamp: 1 });
+		manager.flushNow();
+		const sessionPath = manager.getSessionFile();
+		const sessionId = manager.getSessionId();
+		if (!sessionPath) throw new Error("Fixture session did not persist");
+
+		// A long-lived stand-in process plays the pre-roster worker's pid.
+		const legacyProcess = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], { stdio: "ignore" });
+		children.add(legacyProcess);
+		if (!legacyProcess.pid) throw new Error("Missing legacy process pid");
+
+		// A fake worker socket that authenticates without advertising the roster capability.
+		const workerSocketPath = join(directory, "legacy-worker.sock");
+		const fakeWorker = createServer((socket) => {
+			const decoder = new PrivateFrameDecoder(isDaemonWorkerFrameHeader);
+			socket.write(
+				encodePrivateFrame<DaemonWorkerFrameHeader>(
+					{ kind: "outbound", outboundType: "daemon_hello" },
+					Buffer.from(`${JSON.stringify({ type: "daemon_hello" })}\n`),
+				),
+			);
+			socket.on("data", (chunk: Buffer) => {
+				for (const frame of decoder.push(chunk)) {
+					if (frame.header.kind !== "command") continue;
+					const command = JSON.parse(frame.payload.toString("utf8")) as { id: string; type: string };
+					const data =
+						command.type === "list"
+							? {
+									sessions: [
+										{
+											id: "legacy-root-active",
+											activeSessionId: "legacy-root-active",
+											sessionId,
+											sessionFile: sessionPath,
+											lifecycle: "live",
+											activity: "idle",
+											isSessionActive: false,
+											cwd: projectDir,
+											isStreaming: false,
+											isCompacting: false,
+											attachedClients: 0,
+											messageCount: 1,
+											sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+										},
+									],
+								}
+							: {};
+					socket.write(
+						encodePrivateFrame<DaemonWorkerFrameHeader>(
+							{ kind: "outbound", outboundType: "response", requestId: frame.header.requestId },
+							Buffer.from(
+								`${JSON.stringify({ id: command.id, type: "response", command: command.type, success: true, data })}\n`,
+							),
+						),
+					);
+				}
+			});
+		});
+		const socketPath = join(directory, "daemon.sock");
+		await new Promise<void>((resolveListen) => fakeWorker.listen(workerSocketPath, resolveListen));
+		const descriptorDir = join(
+			agentDir,
+			"daemon-workers",
+			createHash("sha256").update(socketPath).digest("hex").slice(0, 12),
+		);
+		mkdirSync(descriptorDir, { recursive: true });
+		const now = new Date().toISOString();
+		writeFileSync(
+			join(descriptorDir, "legacy-worker.json"),
+			`${JSON.stringify({
+				version: 2,
+				workerId: "legacy-worker",
+				pid: legacyProcess.pid,
+				socketPath: workerSocketPath,
+				recoveryJournalPath: join(descriptorDir, "legacy-worker.recovery.jsonl"),
+				supervisorSocketPath: socketPath,
+				authenticationToken: "legacy-token",
+				rootActiveSessionId: "legacy-root-active",
+				rootSessionId: sessionId,
+				sessionFile: sessionPath,
+				sessionDir,
+				createdAt: now,
+				updatedAt: now,
+				lifecycle: "ready",
+				createCommand: { type: "create", sessionPath },
+				consecutiveFailures: 0,
+			})}\n`,
+		);
+
+		// Once the supervisor kills the old pid, its socket goes quiet exactly like a dead worker's.
+		legacyProcess.once("exit", () => {
+			fakeWorker.close();
+			rmSync(workerSocketPath, { force: true });
+		});
+		const supervisor = spawnSupervisor(agentDir, socketPath, projectDir);
+		const client = await connectEventually(socketPath, supervisor);
+		let restarted: SessionSummary | undefined;
+		const deadline = Date.now() + 30_000;
+		while (Date.now() < deadline) {
+			const listed = await client.request({ type: "list" });
+			restarted = requireSessionList(listed.success ? listed.data : undefined).find(
+				(candidate) => candidate.sessionId === sessionId,
+			);
+			if (restarted?.workerState === "ready" && restarted.workerPid !== undefined) break;
+			restarted = undefined;
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+		}
+		if (!restarted?.workerPid) {
+			throw new Error(`Pre-roster worker was not restarted:\n${readDaemonLogs(agentDir)}`);
+		}
+		workerPids.add(restarted.workerPid);
+		// A fresh current-binary worker owns the reloaded idle session; the fake pre-roster pid was not adopted.
+		expect(restarted.workerPid).not.toBe(legacyProcess.pid);
+		expect(restarted.isSessionActive).toBe(false);
+		expect(restarted.messageCount).toBe(1);
+		await waitForProcessGone(legacyProcess.pid);
+		fakeWorker.close();
+		client.close();
+	}, 90_000);
 
 	it("lists, creates, and attaches passive children through their owning worker", async () => {
 		const root = tempDir();

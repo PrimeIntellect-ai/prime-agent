@@ -3227,8 +3227,6 @@ export class AgentDaemon {
 		socket.on("error", cleanup);
 		socket.on("drain", () => {
 			client.backpressured = false;
-			// Undelivered roster state stayed uncommitted; the drained socket can take it now.
-			this.scheduleRosterFlush();
 			if (!client.snapshotStreaming) {
 				void this.catchUpBackpressuredClient(client).catch((error) =>
 					this.log(`could not catch up snapshot client ${client.id}: ${String(error)}`),
@@ -4614,6 +4612,7 @@ export class AgentDaemon {
 				await session.setModel(model, {
 					waitForExtensions: !(session.isStreaming || session.isCompacting),
 				});
+				this.scheduleRosterFlush();
 				return success(command.id, "set_model", model);
 			}
 
@@ -4623,6 +4622,7 @@ export class AgentDaemon {
 				const result = await session.cycleModel(command.direction, {
 					waitForExtensions: !(session.isStreaming || session.isCompacting),
 				});
+				this.scheduleRosterFlush();
 				return success(command.id, "cycle_model", result ?? null);
 			}
 
@@ -4635,6 +4635,7 @@ export class AgentDaemon {
 			case "set_thinking_level": {
 				const state = this.getSessionState(command.activeSessionId);
 				state.runtime.session.setThinkingLevel(command.level);
+				this.scheduleRosterFlush();
 				return success(command.id, "set_thinking_level");
 			}
 
@@ -4647,6 +4648,7 @@ export class AgentDaemon {
 			case "cycle_thinking_level": {
 				const state = this.getSessionState(command.activeSessionId);
 				const level = state.runtime.session.cycleThinkingLevel();
+				this.scheduleRosterFlush();
 				return success(command.id, "cycle_thinking_level", level ? { level } : null);
 			}
 
@@ -6751,17 +6753,10 @@ export class AgentDaemon {
 			if (!this.supervisorClaims.has(client) || client.socket.destroyed) {
 				continue;
 			}
-			// A non-drained socket gets nothing; uncommitted state re-flushes on drain.
-			if (client.backpressured === true) {
-				continue;
-			}
-			const accepted = client.socket.write(
+			// socket.write queues under backpressure, so a queued frame is delivered, never a loss gap.
+			client.socket.write(
 				encodePrivateFrame<DaemonWorkerFrameHeader>({ kind: "outbound", outboundType: message.type }, payload),
 			);
-			if (!accepted) {
-				client.backpressured = true;
-				continue;
-			}
 			delivered = true;
 		}
 		return delivered;
@@ -7162,6 +7157,7 @@ const ROSTER_SESSION_EVENT_TRIGGERS = new Set([
 	"message_end",
 	"session_action_update",
 	"session_info_changed",
+	"thinking_level_changed",
 ]);
 
 function hasDaemonOutboundActiveSessionId(

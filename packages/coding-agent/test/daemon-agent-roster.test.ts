@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -297,9 +298,14 @@ describe("worker roster reporter", () => {
 		expect(sentDeltas.length).toBe(sentWhileConnected + 1);
 	});
 
-	it("delivers only through the live drained supervisor claim and escalates refusals to a snapshot", () => {
+	it("treats queued writes as delivered and snapshots only across loss gaps", () => {
+		const written: Buffer[] = [];
+		const write = vi.fn((chunk: Buffer) => {
+			written.push(Buffer.from(chunk));
+			// Backpressure: the frame is queued in the socket, not refused.
+			return false;
+		});
 		const oldWrite = vi.fn(() => true);
-		const write = vi.fn(() => false);
 		const oldClient = {
 			transport: "private-framed",
 			authenticated: true,
@@ -328,24 +334,32 @@ describe("worker roster reporter", () => {
 			rosterFlushScheduled: false,
 			shuttingDown: false,
 			log: vi.fn(),
-		}) as { flushRoster(): void; rosterReporter: { snapshotPending: boolean } };
+		}) as { flushRoster(): void; rosterReporter: { snapshotPending: boolean; removedAgentIds: Set<string> } };
 
 		daemon.flushRoster();
-		// The refused write commits nothing; the claimed socket is backpressured and a snapshot is owed.
+		// The queued write IS delivered: nothing stays pending and only the claimed socket was written.
+		expect(write).toHaveBeenCalledTimes(1);
 		expect(oldWrite).not.toHaveBeenCalled();
-		expect(client.backpressured).toBe(true);
-		expect(daemon.rosterReporter.snapshotPending).toBe(true);
+		expect(daemon.rosterReporter.snapshotPending).toBe(false);
+		expect(daemon.rosterReporter.removedAgentIds.size).toBe(0);
 
-		// A backpressured socket gets no further writes until it drains.
+		// A destroyed claim socket is an actual loss gap: the change marks one pending snapshot.
+		client.socket.destroyed = true;
+		daemon.rosterReporter.removedAgentIds.add("lost-agent");
 		daemon.flushRoster();
 		expect(write).toHaveBeenCalledTimes(1);
+		expect(daemon.rosterReporter.snapshotPending).toBe(true);
 
-		client.backpressured = false;
-		write.mockReturnValue(true);
+		// The gap closes with one replacing snapshot; drains never resend queued frames.
+		client.socket.destroyed = false;
+		daemon.flushRoster();
 		daemon.flushRoster();
 		expect(write).toHaveBeenCalledTimes(2);
-		expect(daemon.rosterReporter.snapshotPending).toBe(false);
-		expect(oldWrite).not.toHaveBeenCalled();
+		const decoder = new PrivateFrameDecoder(isDaemonWorkerFrameHeader);
+		const frames = decoder.push(Buffer.concat(written));
+		const messages = frames.map((frame) => JSON.parse(frame.payload.toString("utf8")) as RosterDelta);
+		expect(messages[1]?.snapshot).toBe(true);
+		expect(messages[1]?.removedAgentIds).toEqual(["lost-agent"]);
 	});
 });
 
@@ -656,9 +670,7 @@ describe("supervisor roster ledger", () => {
 				true,
 			),
 		);
-		await new Promise((resolveTick) => setImmediate(resolveTick));
-
-		expect(supervisor.roster().get("kept")).toMatchObject({ status: "running" });
+		await vi.waitFor(() => expect(supervisor.roster().get("kept")).toMatchObject({ status: "running" }));
 		expect(supervisor.roster().has("sessionless")).toBe(false);
 		// The deleted-while-disconnected child stays out; the surviving one reseeds from its live edge.
 		const entries = [...supervisor.roster().values()];
@@ -701,7 +713,7 @@ describe("supervisor roster ledger", () => {
 		expect(supervisor.workerRosterEntries(worker)[0]?.lastHeardFromAt).toBeUndefined();
 	});
 
-	it("seeds from the spawn ledger, skips tombstones, and keeps evicted rows inactive", async () => {
+	it("seeds catalog and spawn-ledger rows, skips tombstones, and keeps evicted rows inactive", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-seed-"));
 		tempDirs.push(directory);
 		const sessionsDir = join(directory, "sessions");
@@ -743,6 +755,8 @@ describe("supervisor roster ledger", () => {
 		});
 		await supervisor.seedRosterLedger();
 
+		// A push-only view needs saved top-level rows in the ledger itself, not only in list-all rescans.
+		expect(supervisor.roster().has("saved-root")).toBe(true);
 		const listed = await supervisor.handleList({}, { type: "list", all: true });
 		const ids = listed.data?.sessions.map((session) => session.sessionId).sort();
 		expect(ids).toEqual(["live-child", "saved-root"]);
@@ -1289,33 +1303,199 @@ describe("review-round regressions", () => {
 		expect(match.summary.rlmChildId).toBe("sub-abc");
 	});
 
-	it("restarts a pre-roster worker on adoption instead of adopting it", async () => {
-		const worker = makeWorker("legacy-worker");
-		worker.client = undefined;
-		// A live pid routes adoption to the capability check instead of the dead-process branch.
-		Object.assign(worker.descriptor, { lifecycle: "recovering", pid: process.pid });
-		const recoverWorker = vi.fn(async (target: object) => {
-			Object.assign((target as WorkerFixture).descriptor, { lifecycle: "ready" });
+	it("publishes model and name changes to the supervisor", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-model-"));
+		tempDirs.push(directory);
+		const daemon = new AgentDaemon(join(directory, "worker.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			worker: {
+				authenticationToken: "token",
+				workerId: "worker-1",
+				rootActiveSessionId: "root-active",
+			} as never,
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		} as never);
+		const socket = new PassThrough();
+		const written: Buffer[] = [];
+		socket.on("data", (chunk: Buffer) => written.push(Buffer.from(chunk)));
+		const supervisorClient = {
+			id: "supervisor",
+			socket,
+			transport: "private-framed",
+			authenticated: true,
+			attachedActiveSessionIds: new Set<string>(),
+			detachInput: () => {},
+			supportsExtensionUi: false,
+			capabilities: new Set<string>(),
+		} as unknown as DaemonSocketClient;
+		const internals = daemon as unknown as {
+			clients: Set<DaemonSocketClient>;
+			supervisorClaims: Map<DaemonSocketClient, object>;
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: object): Promise<unknown>;
+		};
+		internals.clients.add(supervisorClient);
+		internals.supervisorClaims.set(supervisorClient, {});
+		const state = makeState({
+			activeSessionId: "root-active",
+			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
 		});
-		const subscribeWorker = vi.fn();
+		const session = state.runtime.session as unknown as Record<string, unknown>;
+		session.model = { provider: "prov", id: "m1" };
+		session.modelRegistry = {
+			refreshAvailableModels: async () => [{ provider: "prov", id: "m2" }],
+		};
+		session.setModel = async (model: unknown) => {
+			session.model = model;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+
+		const decodeDeltas = () =>
+			new PrivateFrameDecoder(isDaemonWorkerFrameHeader)
+				.push(Buffer.concat(written))
+				.filter((frame) => frame.header.kind === "outbound" && frame.header.outboundType === "roster_delta")
+				.map((frame) => JSON.parse(frame.payload.toString("utf8")) as RosterDelta);
+
+		await internals.handleCommand(supervisorClient, {
+			type: "set_model",
+			activeSessionId: "root-active",
+			provider: "prov",
+			modelId: "m2",
+		});
+		await vi.waitFor(() => {
+			const rows = decodeDeltas().flatMap((delta) => delta.entries);
+			expect(rows.at(-1)?.summary.model).toMatchObject({ id: "m2" });
+		});
+
+		// Rename: the handler updates the session and the runtime's info event triggers the flush.
+		session.setSessionName = (name: string) => {
+			session.sessionName = name;
+		};
+		await internals.handleCommand(supervisorClient, {
+			type: "rename",
+			activeSessionId: "root-active",
+			name: "renamed-by-worker",
+		});
+		(
+			daemon as unknown as { observeRosterEvent(state: ActiveSessionState, message: unknown): void }
+		).observeRosterEvent(state, {
+			type: "session_event",
+			activeSessionId: "root-active",
+			event: { type: "session_info_changed", name: "renamed-by-worker" },
+		});
+		await vi.waitFor(() => {
+			const rows = decodeDeltas().flatMap((delta) => delta.entries);
+			expect(rows.at(-1)?.summary.sessionName).toBe("renamed-by-worker");
+		});
+	});
+
+	it("skips the gap fill when a roster frame lands mid-pull", async () => {
+		const worker = makeWorker("worker-1");
+		Object.assign(worker.descriptor, { createCommand: { type: "create" } });
+		const staleChild = summary({
+			id: "x-session",
+			sessionId: "x-session",
+			sessionFile: "/tmp/artifacts/x.jsonl",
+			runtimeKind: "subagent",
+			rlmChildId: "x",
+		});
+		const staleEntry = workerRosterEntryFromSummary(staleChild);
 		const supervisor = makeSupervisor([worker], {
 			assertRecoveryAllowed: vi.fn(async () => {}),
-			connectWorker: vi.fn(async () => {
-				throw new Error("Session worker predates the roster protocol and must be restarted");
-			}),
-			subscribeWorker,
-			recoverWorker,
 			persistWorker: vi.fn(),
-			broadcastHeartbeatsChanged: vi.fn(),
+			refreshWorkerSummaries: DaemonSupervisor.prototype["refreshWorkerSummaries" as never],
+			streamReconstructor: { seed: vi.fn(), clear: vi.fn() },
 		});
-		const internals = supervisor as unknown as { adoptOrRecoverWorker(worker: object): Promise<void> };
+		supervisor.writeRosterEntry(staleEntry, worker);
+		const root = summary({ id: "worker-1-root-active", sessionId: "root", activeSessionId: "worker-1-root-active" });
+		let pulls = 0;
+		worker.client = {
+			request: vi.fn(async () => {
+				pulls += 1;
+				// Every pull straddles a frame: deletions keep landing while stale responses still carry the child.
+				supervisor.consumeWorkerRosterDelta(worker, rosterDelta([], [staleEntry.agentId]));
+				return { type: "response", command: "list", success: true, data: { sessions: [root, staleChild] } };
+			}),
+		};
 
-		await internals.adoptOrRecoverWorker(worker);
+		await (
+			supervisor as unknown as { refreshWorkerSummaries(worker: WorkerFixture, recovery: boolean): Promise<void> }
+		).refreshWorkerSummaries(worker, true);
 
-		// The old process is never adopted; the existing recovery machinery restarts it from the current binary.
-		expect(recoverWorker).toHaveBeenCalledWith(worker);
-		expect(subscribeWorker).not.toHaveBeenCalled();
-		expect(worker.descriptor.lifecycle).toBe("ready");
+		expect(pulls).toBe(2);
+		expect(supervisor.roster().has(staleEntry.agentId)).toBe(false);
+	});
+
+	it("delivers one queued snapshot through a real backpressured worker socket", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-socket-"));
+		tempDirs.push(directory);
+		const socketPath = join(directory, "worker.sock");
+		const received: Buffer[] = [];
+		let connected: (socket: import("node:net").Socket) => void = () => {};
+		const connection = new Promise<import("node:net").Socket>((resolveSocket) => {
+			connected = resolveSocket;
+		});
+		const server = createServer((socket) => {
+			socket.on("data", (chunk: Buffer) => received.push(Buffer.from(chunk)));
+			connected(socket);
+		});
+		await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
+		const clientSocket = connect(socketPath);
+		await new Promise<void>((resolveConnect) => clientSocket.once("connect", () => resolveConnect()));
+		await connection;
+
+		const client = { transport: "private-framed", authenticated: true, socket: clientSocket };
+		const reporter = {
+			lastComposed: new Map<string, WorkerRosterEntry>(),
+			lastComposedJson: new Map<string, string>(),
+			queuedChildren: new Map<string, WorkerRosterEntry>(),
+			removedAgentIds: new Set<string>(),
+			snapshotPending: true,
+		};
+		for (let index = 0; index < 3000; index++) {
+			const entry: WorkerRosterEntry = {
+				agentId: `child-${index}`,
+				queuedChild: true,
+				summary: summary({
+					id: `child-${index}`,
+					sessionId: `child-${index}`,
+					runtimeKind: "subagent",
+					rlmChildId: `child-${index}`,
+					firstMessage: "x".repeat(512),
+				}),
+			};
+			reporter.queuedChildren.set(entry.agentId, entry);
+		}
+		const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
+			options: { worker: { authenticationToken: "token" } },
+			sessions: new Map(),
+			cronStore: { list: () => [] },
+			clients: new Set([client]),
+			supervisorClaims: new Map([[client, {}]]),
+			rosterReporter: reporter,
+			rosterFlushScheduled: false,
+			shuttingDown: false,
+			log: vi.fn(),
+		}) as { flushRoster(): void };
+
+		daemon.flushRoster();
+		daemon.flushRoster();
+		await vi.waitFor(() => {
+			const frames = new PrivateFrameDecoder(isDaemonWorkerFrameHeader).push(Buffer.concat(received));
+			expect(frames.length).toBeGreaterThan(0);
+		});
+		// One multi-megabyte snapshot: queued past the high-water mark, delivered once, never resent.
+		await new Promise((resolveDelay) => setTimeout(resolveDelay, 150));
+		const frames = new PrivateFrameDecoder(isDaemonWorkerFrameHeader).push(Buffer.concat(received));
+		expect(frames).toHaveLength(1);
+		const worker = makeWorker("worker-1");
+		const supervisor = makeSupervisor([worker], { rlmSpawnLedger: () => ({ edges: vi.fn(async () => []) }) });
+		supervisor.consumeWorkerRosterDelta(worker, frames[0]?.payload as Buffer);
+		await vi.waitFor(() => expect(supervisor.workerRosterEntries(worker)).toHaveLength(3000));
+		clientSocket.destroy();
+		server.close();
 	});
 
 	it("routes a just-bound session through the miss-path refresh", async () => {
