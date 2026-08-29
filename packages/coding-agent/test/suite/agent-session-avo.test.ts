@@ -313,6 +313,63 @@ describe("AgentSession universal AVO runtime", () => {
 		);
 	});
 
+	it("blocks non-milestone coding probes after four ignored tool-loop interventions", async () => {
+		let executions = 0;
+		const ipythonTool: AgentTool = {
+			name: "ipython",
+			label: "Python",
+			description: "Executes a synthetic Python cell",
+			parameters: Type.Object({ code: Type.String() }),
+			execute: async (_toolCallId, params) => {
+				executions += 1;
+				return {
+					content: [{ type: "text", text: `executed:${String((params as { code: string }).code)}` }],
+					details: {},
+				};
+			},
+		};
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			tools: [ipythonTool],
+		});
+		harness.setResponses([
+			...Array.from({ length: 16 }, () =>
+				fauxAssistantMessage(fauxToolCall("ipython", { code: "print('still inspecting')" }), {
+					stopReason: "toolUse",
+				}),
+			),
+			fauxAssistantMessage(
+				fauxToolCall("ipython", {
+					code: 'candidate = await avo.add_candidate({"candidate_id":"real-work","kind":"implementation","summary":"work","payload":"work"})',
+				}),
+				{ stopReason: "toolUse" },
+			),
+		]);
+
+		await harness.session.prompt("Fix and test the parser implementation");
+
+		const interventions = harness.session.messages.filter(
+			(message) => message.role === "custom" && message.customType === "avo_progress_intervention",
+		);
+		expect(interventions).toHaveLength(4);
+		expect(interventions[3]).toMatchObject({
+			details: {
+				toolBatchesWithoutProgress: 15,
+				escalationLevel: 4,
+				trigger: "anti_laziness_tool_escalation",
+			},
+		});
+		// Calls 1–15 execute, call 16 is blocked, and the explicit AVO milestone-shaped
+		// call is admitted so the model can escape probation.
+		expect(executions).toBe(16);
+		expect(
+			harness.session.messages.some(
+				(message) => message.role === "toolResult" && JSON.stringify(message).includes("tool probation blocked"),
+			),
+		).toBe(true);
+	});
+
 	it("interrupts a timed-out tool chain with an immediate targeted intervention", async () => {
 		const timeoutTool: AgentTool = {
 			name: "timeout",

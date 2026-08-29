@@ -501,7 +501,7 @@ describe("Prime Integrity Eval", () => {
 			tokensAfterFirstCompletionAttempt: 80,
 			inputTokensAfterFirstCompletionAttempt: 78,
 			outputTokensAfterFirstCompletionAttempt: 2,
-			completionRepairAmplification: 80 / 150,
+			completionRepairAmplification: 0,
 		});
 	});
 

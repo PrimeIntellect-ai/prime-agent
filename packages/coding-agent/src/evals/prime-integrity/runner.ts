@@ -674,8 +674,13 @@ function finalizeCompletionDiagnostics(
 		);
 		summary.costUsdAfterFirstCompletionAttempt = afterFirstAttempt.reduce((total, turn) => total + turn.costUsd, 0);
 	}
+	// A successful first attempt has no repair loop. Keep the raw after-first
+	// counters above for context/canonical-delivery diagnostics, but do not label
+	// those later tokens as repair amplification.
 	summary.completionRepairAmplification =
-		summary.totalTokens === 0 ? 0 : summary.tokensAfterFirstCompletionAttempt / summary.totalTokens;
+		summary.firstCompletionAttemptPassed === true || summary.totalTokens === 0
+			? 0
+			: summary.tokensAfterFirstCompletionAttempt / summary.totalTokens;
 
 	const explicitBlockerIdByReason = new Map<string, string>();
 	for (const attempt of attempts) {

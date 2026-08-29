@@ -1610,12 +1610,14 @@ export class AgentSession {
 	 */
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+			await this._agentEventQueue;
+			const probationReason = this._avoToolProbationReason(toolCall.name, args);
+			if (probationReason) return { block: true, reason: probationReason };
+
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_call")) {
 				return undefined;
 			}
-
-			await this._agentEventQueue;
 
 			try {
 				return await runner.emitToolCall({
@@ -3868,6 +3870,32 @@ export class AgentSession {
 		}
 	}
 
+	private _avoToolProbationReason(toolName: string, args: unknown): string | undefined {
+		if (
+			isAvoFeatureAblated("qualified_watchdog") ||
+			!this._enforceAvoCompletion ||
+			!this._avoRuntime ||
+			this._rlmDepth !== 0 ||
+			this._avoToolInterventionCount < 4 ||
+			toolName !== "ipython"
+		) {
+			return undefined;
+		}
+		const state = this._avoRuntime.getState();
+		if (!state.objective || state.status !== "active" || state.routing.environment !== "coding") {
+			return undefined;
+		}
+		const code = isObjectRecord(args) && typeof args.code === "string" ? args.code : "";
+		const milestoneCall =
+			/\bawait\s+(?:avo\s*\.\s*)?(?:run_coding_baseline|add_candidate|register_obligations|cover_obligation|cover_obligations|register_critical_assumptions|resolve_critical_assumption|record_evaluation|record_experiment|record_trial|run_trial|complete_experiment|run_evaluation|verify_deterministic_result|verify_artifacts|bind_tool_result|fetch_external_source|bind_url|complete_cycle|stop_gate|complete)\s*\(/;
+		if (milestoneCall.test(code)) return undefined;
+		return [
+			`AVO host tool probation blocked another non-milestone IPython call after ${this._avoToolNoProgressBatches} stalled tool batches and ${this._avoToolInterventionCount} ignored interventions.`,
+			"Read-only probing is temporarily denied. In one bounded cell, combine any final task-file change with an awaited AVO action that can create host-observable progress, such as add_candidate followed by run_evaluation, cover_obligations, or complete_cycle.",
+			"Probation clears automatically when the host observes a meaningful verification milestone.",
+		].join(" ");
+	}
+
 	private async _queueAvoToolStagnationIntervention(
 		state: AvoRunState,
 		input: {
@@ -4072,7 +4100,7 @@ export class AgentSession {
 		if (timedOutTool) {
 			this._avoToolNoProgressBatches += 1;
 			this._avoToolInterventionQueued = true;
-			this._avoToolInterventionCount = Math.min(3, this._avoToolInterventionCount + 1);
+			this._avoToolInterventionCount += 1;
 			this._avoToolLastInterventionBatch = this._avoToolNoProgressBatches;
 			const escalationLevel = this._avoToolInterventionCount;
 			const reason = `Anti-laziness timeout escalation ${escalationLevel}: the host terminated a ${timedOutTool.toolName} call after its execution ceiling without host-observable verification progress.`;
@@ -4088,7 +4116,7 @@ export class AgentSession {
 		}
 		this._avoToolNoProgressBatches += 1;
 		const threshold = this._avoToolInterventionCount === 0 ? 6 : this._avoToolLastInterventionBatch + 3;
-		if (this._avoToolNoProgressBatches < threshold || this._avoToolInterventionCount >= 3) return;
+		if (this._avoToolNoProgressBatches < threshold) return;
 		this._avoToolInterventionQueued = true;
 		this._avoToolInterventionCount += 1;
 		this._avoToolLastInterventionBatch = this._avoToolNoProgressBatches;
@@ -4098,6 +4126,13 @@ export class AgentSession {
 			reason,
 			escalationLevel,
 			trigger: escalationLevel === 1 ? "anti_laziness_tool_intervention" : "anti_laziness_tool_escalation",
+			...(escalationLevel >= 4
+				? {
+						forceIntervene: true,
+						instruction:
+							"Host tool probation is now active. Read-only IPython calls will be denied until one bounded cell invokes an AVO action that can create a verification milestone.",
+					}
+				: {}),
 		});
 	}
 

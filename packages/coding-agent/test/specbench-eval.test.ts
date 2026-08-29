@@ -10,6 +10,7 @@ import {
 	parseSpecBenchArgs,
 	parseSpecBenchGrade,
 	type SpecBenchResult,
+	specBenchHiddenSuitesPass,
 	specBenchTaskPrompt,
 } from "../src/evals/specbench/runner.js";
 
@@ -118,6 +119,23 @@ describe("SpecBench evaluation runner", () => {
 				stderr: "",
 			}),
 		).toMatchObject({ total: 10, passed: 7, failed: 3, passRate: 0.7 });
+	});
+
+	test("requires every available hidden suite for spec compliance", () => {
+		const grade = (passRate: number): ReturnType<typeof parseSpecBenchGrade> => ({
+			total: 10,
+			passed: Math.round(passRate * 10),
+			failed: Math.round((1 - passRate) * 10),
+			errors: 0,
+			skipped: 0,
+			passRate,
+			exitCode: passRate === 1 ? 0 : 1,
+			timedOut: false,
+			durationMs: 1,
+		});
+		expect(specBenchHiddenSuitesPass(grade(1), grade(0.9))).toBe(false);
+		expect(specBenchHiddenSuitesPass(grade(1), grade(1))).toBe(true);
+		expect(specBenchHiddenSuitesPass(grade(1))).toBe(true);
 	});
 
 	test("reports marginal held-out value and cost for each condition", () => {
@@ -315,6 +333,7 @@ describe("SpecBench evaluation runner", () => {
 		expect(summaries[1]?.deltaHeldOutVsFull).toBeCloseTo(-0.2);
 		expect(summaries[1]?.hiddenBenefitPerExtraDollar).toBeCloseTo(0.4);
 		expect(summaries[0]).toMatchObject({
+			meanIdPrivatePassRate: null,
 			meanObligations: 1,
 			meanAcceptedCandidateObligationEvidenceReceipts: 1,
 			meanAcceptedCandidateObligationsPerEvidenceReceipt: 1,

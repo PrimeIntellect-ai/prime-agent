@@ -129,8 +129,9 @@ condition/task/repetition order and places workspaces under opaque run IDs so
 the current condition is not exposed through `pwd`. Provider sampling can still be stochastic, so
 use multiple repetitions and avoid causal claims from one pair.
 
-`report.json` and `report.md` compare validation success, held-out success,
-validation-to-held-out gap, completed-but-hidden-failing outcomes, tokens,
+`report.json` and `report.md` compare validation success, hidden in-distribution
+success, compositional held-out success, validation-to-held-out gap,
+completed-but-any-hidden-suite-failing outcomes, tokens,
 model/tool calls, duration, cost, held-out delta against full AVO, and hidden
 benefit per extra dollar where the denominator is positive. They also report
 the accepted candidate's obligation count, unique evidence-receipt count, mean
@@ -159,6 +160,13 @@ Events from the root and retained verifier sessions are merged chronologically
 before this attribution. Once the host gate passes, queued AVO-supervisor
 prompts are superseded by the exact canonical-delivery request; ordinary user
 follow-ups and unrelated agent messages remain queued normally.
+Each failed completion attempt retains its exact host gate blockers, repeat
+count, first-clearance attempt, turns to clearance, and tokens to clearance.
+First-attempt readiness reports whether the first genuine gate attempt passed.
+Repair amplification is zero when that first attempt passes; raw after-first
+input/cache/output totals remain available to expose canonical-delivery and
+context replay costs without mislabelling them as repair.
+
 This is not a causal decomposition. In particular, input tokens include
 accumulated context from earlier stages, so use the stage table to locate
 overhead for further inspection rather than to assign mechanistic credit.
@@ -293,6 +301,41 @@ Compare hidden score, token/cost/time, obligation and receipt concentration,
 revision/watchdog counts, and stage attribution. Expand repetitions only where
 a meaningful pattern appears. Do not add an LLM semantic receipt mapper until
 repeated results show that evidence concentration predicts hidden failures.
+
+### Markdown renderer diagnostic pair
+
+A later real Vertex `gemini-3.7-flash` pair on exact Prime revision
+`82c82bca6f04d6e4cd994871d2a1432a310f019f` used `markdown_renderer` and
+execution seed `markdown-obligation-diagnostic-v4`:
+
+| Condition | Validation | ID-private | Held-out | Calls | Tokens | Time | Cost |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Full AVO | 49 / 49 | 45 / 46 | 125 / 125 | 22 | 929,337 | 315.3 s | $0.427 |
+| No obligations | 49 / 49 | 45 / 46 | 125 / 125 | 54 | 3,199,014 | 522.6 s | $0.770 |
+
+Both implementations missed the same backslash-escape identity-private case,
+so schema version 7 marks both noncompliant and records canonical completion as
+false completion even though the compositional held-out suite was perfect.
+The compositional held-out score remains a separate upstream-comparable metric.
+
+Both conditions passed their first genuine stop-gate attempt. They had zero
+failed attempts, zero completion-repair turns, and no completion blockers. The
+100,129 and 102,307 raw tokens after the passing attempts were canonical
+delivery/context work, not repair amplification; schema version 7 therefore
+reports repair amplification as zero for both.
+
+In this pair full AVO used 2,269,677 fewer billed tokens, 32 fewer model calls,
+207.3 fewer seconds, and about $0.343 less provider cost without changing any
+test score. This reverses the direction of the earlier one-pair cost results,
+so no obligation-cost conclusion is justified yet. Full AVO still bound all 49
+obligations to one receipt (evidence diversity 1/49 and maximum concentration
+49/49), confirming that concentration remains diagnostic rather than a gate.
+
+Both trajectories ignored watchdog interventions after 6, 9, and 12 stalled
+tool batches. Prime now continues escalation and activates host tool probation
+after the fourth ignored coding-loop intervention, denying more read-only
+IPython probes until the model invokes an AVO action capable of producing a
+host-observable verification milestone.
 
 ## Validated Level 1 example
 
