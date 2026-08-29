@@ -90,7 +90,8 @@ export interface AgentsViewRow {
 }
 
 export function classifyAgentsViewSession(summary: SessionSummary): AgentsViewSection {
-	return classifySessionRosterStatus(summary);
+	// rosterStatus is the ledger's classify-once verdict; the local formula only covers legacy daemons.
+	return summary.rosterStatus ?? classifySessionRosterStatus(summary);
 }
 
 export function classifyUnifiedSession(record: Pick<UnifiedSessionRecord, "daemon" | "heartbeat">): AgentsViewSection {
@@ -123,6 +124,11 @@ export function sectionTitle(section: AgentsViewSection): string {
 			return _exhaustive;
 		}
 	}
+}
+
+function formatAgeLabel(timestamp: string): string {
+	const seconds = Math.max(0, Math.round((Date.now() - Date.parse(timestamp)) / 1000));
+	return seconds < 120 ? `${seconds}s ago` : `${Math.round(seconds / 60)}m ago`;
 }
 
 function canonicalSessionPath(path: string): string {
@@ -959,6 +965,13 @@ function getSessionSubtitle(summary: SessionSummary): string {
 }
 
 function getSessionStatusLabel(summary: SessionSummary, hasActiveHeartbeat = summary.hasActiveHeartbeat): string {
+	// The ledger's lifecycle label (queued/recovering/failed) outranks locally derived labels.
+	if (summary.statusLabel !== undefined) {
+		return summary.statusLabel;
+	}
+	if (summary.lastHeardFromAt !== undefined) {
+		return `last heard ${formatAgeLabel(summary.lastHeardFromAt)}`;
+	}
 	// A non-ready worker cannot report fresh runtime flags; its state is the row's story.
 	if (summary.workerState !== undefined && summary.workerState !== "ready") {
 		return summary.workerState;

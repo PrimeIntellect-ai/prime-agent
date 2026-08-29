@@ -39,6 +39,7 @@ import type {
 	AgentConnectionSideQuestionTurn,
 	AgentConnectionState,
 } from "../agent-connection/types.js";
+import type { AgentRosterEntry } from "./agent-roster.js";
 import type { SessionSummary } from "./daemon-session-list.js";
 
 /**
@@ -67,8 +68,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 20 lets cancellation target a prompt the session owns but has not started.
 // Revision 21 adds capability-gated, session-scoped ACP MCP server replacement.
 // Revision 23 lets workers query the supervisor agent roster on demand.
-export const DAEMON_SCHEMA_REVISION = 23;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-23-649fe649d15e";
+// Revision 24 adds the capability-gated agent-roster subscription and push.
+export const DAEMON_SCHEMA_REVISION = 24;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-24-75f88f1a91df";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -105,6 +107,7 @@ export type DaemonServerCapability =
 	// carry the transient marker and echoed runId so clients correlate runs by
 	// identity). Clients must check before sending.
 	| "transient_bash"
+	| "agent_roster"
 	| "session_input_admission"
 	| "prompt_admission_cancellation"
 	| "queue_message_mutation"
@@ -378,6 +381,8 @@ export type DaemonCommand =
 	  }
 	| DaemonSavedSessionListCommand
 	| { id?: string; type: "list_agent_peers"; workerToken: string }
+	| { id?: string; type: "roster_subscribe" }
+	| { id?: string; type: "roster_unsubscribe" }
 	| ({
 			id?: string;
 			type: "create";
@@ -771,6 +776,8 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	release_session_input_pause: SESSION_INPUT_PAUSE_COMMAND,
 	cron_list: LEGACY_DAEMON_COMMAND,
 	heartbeats_list: { minProtocol: 7, capability: "heartbeat_catalog" },
+	roster_subscribe: { minProtocol: 7, capability: "agent_roster" },
+	roster_unsubscribe: { minProtocol: 7, capability: "agent_roster" },
 	heartbeat_manage: { minProtocol: 7, capability: "heartbeat_management" },
 	cron_add: LEGACY_DAEMON_COMMAND,
 	cron_cancel: LEGACY_DAEMON_COMMAND,
@@ -949,6 +956,7 @@ export type DaemonOutbound =
 	  }
 	| { type: "daemon_closing"; reason: DaemonClosingReason }
 	| { type: "heartbeats_changed" }
+	| { type: "roster_update"; changed: AgentRosterEntry[]; removed?: string[]; resync?: true }
 	| { type: "session_event"; activeSessionId: string; event: AgentConnectionSessionEvent; meta?: DaemonEventMeta }
 	| { type: "side_question_event"; activeSessionId: string; event: AgentConnectionSideQuestionEvent }
 	| { type: "session_status"; activeSessionId: string; recap?: string; meta?: DaemonEventMeta }
@@ -1031,6 +1039,7 @@ export const DAEMON_OUTBOUND_COMPATIBILITY = {
 	daemon_hello: LEGACY_DAEMON_COMMAND,
 	daemon_closing: LEGACY_DAEMON_COMMAND,
 	heartbeats_changed: { minProtocol: 7, capability: "heartbeat_catalog" },
+	roster_update: { minProtocol: 7, capability: "agent_roster" },
 	session_event: LEGACY_DAEMON_COMMAND,
 	side_question_event: LEGACY_DAEMON_COMMAND,
 	session_status: LEGACY_DAEMON_COMMAND,

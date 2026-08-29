@@ -78,6 +78,12 @@ export interface SessionSummary {
 	summary?: string;
 	/** Completion verdict for an idle session; absent while working or unjudged. */
 	taskState?: AgentTaskState;
+	/** Ledger status computed by the supervisor at roster-write time. */
+	rosterStatus?: AgentRosterStatus;
+	/** Roster lifecycle label; renders on the row, never hides it. */
+	statusLabel?: "queued" | "recovering" | "failed";
+	/** Set while the owning worker has been silent past the staleness threshold. */
+	lastHeardFromAt?: string;
 	/** Resident session-host process state, populated by the global supervisor. */
 	workerState?: "starting" | "ready" | "recovering" | "stopping" | "failed";
 	/** Diagnostic process identity; clients must not use this as a stable session identifier. */

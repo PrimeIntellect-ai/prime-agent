@@ -115,16 +115,29 @@ export function passivatedWorkerRosterEntry(
 	};
 }
 
-export function sessionSummaryFromRosterEntry(entry: WorkerRosterEntry): SessionSummary {
-	return { ...entry.summary, sessionActions: { queuedCount: 0, steering: [], followUps: [] } };
+export function sessionSummaryFromRosterEntry(entry: WorkerRosterEntry | AgentRosterEntry): SessionSummary {
+	const ledger = "status" in entry ? entry : undefined;
+	return {
+		...entry.summary,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+		...(ledger ? { rosterStatus: ledger.status } : {}),
+		...(ledger?.statusLabel ? { statusLabel: ledger.statusLabel } : {}),
+		...(ledger?.lastHeardFromAt ? { lastHeardFromAt: ledger.lastHeardFromAt } : {}),
+	};
 }
 
+export type AgentRosterMutation = { type: "write"; agentId: string } | { type: "delete"; agentId: string };
+
+// Supervisor-owned roster store; write() classifies once and its file index converges seed and worker keys.
 export class AgentRoster {
 	private readonly entries = new Map<string, AgentRosterEntry>();
 	private readonly agentIdByActiveSessionId = new Map<string, string>();
 	private readonly agentIdBySessionFile = new Map<string, string>();
 
-	constructor(private readonly canonicalPath: (path: string) => string) {}
+	constructor(
+		private readonly canonicalPath: (path: string) => string,
+		private readonly onMutation: (mutation: AgentRosterMutation) => void = () => {},
+	) {}
 
 	values(): IterableIterator<AgentRosterEntry> {
 		return this.entries.values();
@@ -177,6 +190,7 @@ export class AgentRoster {
 			this.agentIdByActiveSessionId.set(stored.summary.activeSessionId, entry.agentId);
 		}
 		this.entries.set(entry.agentId, stored);
+		this.onMutation({ type: "write", agentId: entry.agentId });
 		return stored;
 	}
 
@@ -185,6 +199,7 @@ export class AgentRoster {
 		if (!entry) return;
 		this.dropIndexes(entry);
 		this.entries.delete(agentId);
+		this.onMutation({ type: "delete", agentId });
 	}
 
 	private dropIndexes(entry: AgentRosterEntry): void {

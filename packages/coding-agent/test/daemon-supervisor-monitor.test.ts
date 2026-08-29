@@ -293,6 +293,28 @@ function createHarness(canConnect: () => Promise<boolean>): SupervisorMonitorHar
 	}) as SupervisorMonitorHarness;
 }
 
+function seedSupervisorRoster(
+	supervisor: object,
+	...workers: Array<{ descriptor: { workerId: string }; summaries: Map<string, SessionSummary> }>
+): void {
+	const internals = supervisor as {
+		writeRosterEntry(entry: ReturnType<typeof workerRosterEntryFromSummary>, worker?: object): unknown;
+		clients?: Set<unknown>;
+	};
+	// Prototype-based fixtures skip field initializers; give the push buffers real containers.
+	Object.assign(internals, {
+		pendingRosterChanged: new Set(),
+		pendingRosterRemoved: new Set(),
+		rosterPushScheduled: false,
+		clients: internals.clients ?? new Set(),
+	});
+	for (const worker of workers) {
+		for (const summary of worker.summaries.values()) {
+			internals.writeRosterEntry(workerRosterEntryFromSummary(summary), worker);
+		}
+	}
+}
+
 describe("daemon worker supervisor monitoring", () => {
 	afterEach(async () => {
 		for (const { child } of workerLaunchTestState.spawned) {
