@@ -1,6 +1,7 @@
 import type { AgentRosterEntry } from "../daemon/agent-roster.js";
 import { sessionSummaryFromRosterEntry } from "../daemon/agent-roster.js";
 import type { DaemonClient } from "../daemon/daemon-client.js";
+import type { DaemonOutbound } from "../daemon/daemon-protocol.js";
 import type { SessionSummary } from "../daemon/daemon-session-list.js";
 
 // Client-side roster mirror: one subscribe seeds it, pushes keep it current, and it outlives view instances.
@@ -14,6 +15,8 @@ export class AgentsViewRosterStore {
 
 	/** Subscribes once per client connection; re-entry with a live subscription is a no-op. */
 	async attach(client: DaemonClient, options: { force?: boolean } = {}): Promise<boolean> {
+		// connect() resolves at socket connect; the capability verdict needs the parsed daemon_hello.
+		if (client.isConnected && client.hello === undefined) await client.waitForHello();
 		if (!client.supportsServerCapability("agent_roster")) {
 			this.detachFromClient();
 			return false;
@@ -21,8 +24,12 @@ export class AgentsViewRosterStore {
 		if (!options.force && this.subscribed && this.client === client && client.isConnected) return true;
 		this.detachFromClient();
 		this.client = client;
+		// Updates racing the subscribe reply buffer until the snapshot lands, so the resync cannot erase them.
+		let pendingUpdates: Extract<DaemonOutbound, { type: "roster_update" }>[] | undefined = [];
 		this.unsubscribeMessage = client.onMessage((message) => {
-			if (message.type === "roster_update") this.applyUpdate(message.changed, message.removed, message.resync);
+			if (message.type !== "roster_update") return;
+			if (pendingUpdates) pendingUpdates.push(message);
+			else this.applyUpdate(message.changed, message.removed, message.resync);
 		});
 		const response = await client.request({ type: "roster_subscribe" });
 		if (!response.success || typeof response.data !== "object" || response.data === null) {
@@ -31,6 +38,10 @@ export class AgentsViewRosterStore {
 		}
 		const roster = (response.data as { roster?: AgentRosterEntry[] }).roster ?? [];
 		this.applyUpdate(roster, undefined, true);
+		for (const update of pendingUpdates ?? []) {
+			this.applyUpdate(update.changed, update.removed, update.resync);
+		}
+		pendingUpdates = undefined;
 		this.subscribed = true;
 		return true;
 	}

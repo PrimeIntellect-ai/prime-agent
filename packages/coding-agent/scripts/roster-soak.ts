@@ -3,7 +3,7 @@
 // integration pin in test/daemon-agent-roster.test.ts (real backpressured worker socket).
 // Run: NODE_OPTIONS=--expose-gc npx tsx scripts/roster-soak.ts (env: SOAK_SESSIONS, SOAK_ROUNDS)
 import { mkdtempSync, rmSync } from "node:fs";
-import { connect } from "node:net";
+import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentsViewRosterStore } from "../src/modes/agents-view/roster-store.js";
@@ -88,7 +88,33 @@ async function main(): Promise<void> {
 		descriptorDir: join(directory, "workers"),
 	});
 	const internals = supervisor as unknown as SupervisorInternals;
-	await internals.start();
+	let client: DaemonClient | undefined;
+	let slow: Socket | undefined;
+	try {
+		await internals.start();
+		await run(internals, socketPath, (created) => {
+			client = created.client;
+			slow = created.slow;
+		});
+	} finally {
+		client?.close();
+		slow?.destroy();
+		await internals.cleanupSupervisorResources().catch(() => undefined);
+		rmSync(directory, { recursive: true, force: true });
+	}
+	if (failures.length > 0) {
+		console.error(`SOAK FAILED: ${failures.join("; ")}`);
+		process.exit(1);
+	}
+	console.log("SOAK PASSED");
+	process.exit(0);
+}
+
+async function run(
+	internals: SupervisorInternals,
+	socketPath: string,
+	onSockets: (created: { client: DaemonClient; slow: Socket }) => void,
+): Promise<void> {
 	internals.catalog = { list: async () => [], stop: async () => {} };
 
 	const workers: Array<{ descriptor: object; lastFrameAt: number }> = [];
@@ -130,6 +156,7 @@ async function main(): Promise<void> {
 
 	// Deliberately slow subscriber: subscribes, then stops reading until the churn ends.
 	const slow = connect(socketPath);
+	onSockets({ client, slow });
 	await new Promise((resolve) => slow.once("connect", resolve));
 	slow.write(`${JSON.stringify(createDaemonCommandEnvelope({ type: "roster_subscribe" }, "slow-1"))}\n`);
 
@@ -317,17 +344,9 @@ async function main(): Promise<void> {
 			1,
 		),
 	);
-
-	client.close();
-	slow.destroy();
-	await internals.cleanupSupervisorResources();
-	rmSync(directory, { recursive: true, force: true });
-	if (failures.length > 0) {
-		console.error(`SOAK FAILED: ${failures.join("; ")}`);
-		process.exit(1);
-	}
-	console.log("SOAK PASSED");
-	process.exit(0);
 }
 
-void main();
+main().catch((error: unknown) => {
+	console.error("SOAK FAILED:", error);
+	process.exit(1);
+});

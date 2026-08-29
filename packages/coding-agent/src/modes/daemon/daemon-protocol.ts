@@ -1121,6 +1121,8 @@ const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"list_agent_peers",
 	"attach",
 	"reattach",
+	"roster_subscribe",
+	"roster_unsubscribe",
 	"agent_messages_status",
 	"wait_for_idle",
 	"get_session_header",

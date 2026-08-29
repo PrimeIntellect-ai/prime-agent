@@ -1254,9 +1254,12 @@ export class AgentsViewMode implements Component, Focusable {
 	private queryChanged(): void {
 		this.persistentState.query = this.editor.getText();
 		if (!this.savedSearchFetchStarted && this.editor.getText().trim().length > 0) {
-			// Deep search over message text needs the saved catalog exactly once per view instance.
+			// Deep search over message text needs the saved catalog; one live fetch at a time.
 			this.savedSearchFetchStarted = true;
-			void this.refreshSavedSessions({ preserveStatusOnError: true });
+			void this.refreshSavedSessions({ preserveStatusOnError: true }).then((refreshed) => {
+				// A failed fetch re-arms the lazy load so the next keystroke retries.
+				if (!refreshed) this.savedSearchFetchStarted = false;
+			});
 		}
 		this.rebuildRows();
 		// Typing must not claim the visible fallback row while the restored
@@ -1654,6 +1657,7 @@ export class AgentsViewMode implements Component, Focusable {
 				return false;
 			}
 			const refreshed = await this.refreshSessions();
+			this.refreshSavedSessionsIfLoaded();
 			this.setStatusMessage(refreshed ? `Renamed to ${name}` : `Renamed to ${name}; refresh failed`);
 			return true;
 		} catch (error) {
@@ -1890,7 +1894,8 @@ export class AgentsViewMode implements Component, Focusable {
 						return;
 					}
 					this.pendingDeleteAgent = undefined;
-					const refreshed = await this.refreshSavedSessions({ preserveStatusOnError: true });
+					const refreshed =
+						!this.savedSearchFetchStarted || (await this.refreshSavedSessions({ preserveStatusOnError: true }));
 					const success = result.method === "trash" ? "Session moved to trash" : "Session deleted";
 					this.setStatusMessage(refreshed ? success : `${success}; refresh failed`);
 				} catch (error) {
@@ -2076,6 +2081,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.selectedActiveSessionId = undefined;
 			this.setStatusMessage("Agent inactive", { render: false });
 			await this.refreshSessions();
+			this.refreshSavedSessionsIfLoaded();
 		} catch (error) {
 			this.setStatusMessage(formatError("Failed to deactivate agent", error));
 		}
@@ -2111,6 +2117,11 @@ export class AgentsViewMode implements Component, Focusable {
 	private onRosterUpdate(): void {
 		if (this.stopped || !this.rosterStore) return;
 		this.applySessionList(this.rosterStore.summaries(), true);
+	}
+
+	/** Renames and deactivations invalidate the lazily loaded saved catalog; refresh only when a search loaded it. */
+	private refreshSavedSessionsIfLoaded(): void {
+		if (this.savedSearchFetchStarted) void this.refreshSavedSessions({ preserveStatusOnError: true });
 	}
 
 	/** The pushed roster is the live catalog; a refresh is one local reapply of the store's rows. */
