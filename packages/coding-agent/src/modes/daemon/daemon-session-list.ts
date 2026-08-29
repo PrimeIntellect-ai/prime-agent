@@ -19,7 +19,6 @@ export type SessionLifecycle = "draft" | "live" | "archived";
 // Heuristic activity of a live session. Classification-in-flight counts as
 // "working" so the view never sees an unlabeled idle session.
 export type SessionActivity = "working" | "idle";
-export type SessionRosterStatus = AgentRosterStatus;
 
 // Upper bound on the spawn-code source carried in a session summary. Generous
 // enough for real spawn cells while keeping the daemon wire payload bounded.
@@ -101,7 +100,7 @@ export function resolveAttachModelFallbackMessage(
 	return summary.model ? undefined : startupModelFallbackMessage;
 }
 
-export function classifySessionRosterStatus(summary: SessionSummary): SessionRosterStatus {
+export function classifySessionRosterStatus(summary: SessionSummary): AgentRosterStatus {
 	return classifyAgentStatus({
 		resident: !!summary.activeSessionId,
 		queuedChild: false,

@@ -103,7 +103,6 @@ export function classifyUnifiedSession(record: Pick<UnifiedSessionRecord, "daemo
 	return classifyAgentsViewSession(record.daemon);
 }
 
-// Live sessions only; drafts and archived stay out (a non-ready worker renders as a label, never hides).
 export function shouldShowAgentsViewSession(summary: SessionSummary, manuallyInactive = false): boolean {
 	if (manuallyInactive) {
 		return false;
