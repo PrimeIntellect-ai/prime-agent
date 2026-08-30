@@ -63,6 +63,8 @@ Never pass or request an environment override.
    integration assumption tested by a runtime check. Generic duplicates such
    as "the code works" are rejected. The host binds preregistration to the
    original workspace and will not accept assumptions invented after editing.
+   Resolve each mandatory assumption with its own host receipt from a distinct
+   check; one broad receipt or repeated command cannot discharge both plans.
 
 2. For a
    coding task, before modifying the workspace or recording a candidate, call

@@ -2722,11 +2722,41 @@ export class AvoStore {
 			throw new Error(`assumption ${assumption.assumptionId} is already resolved for ${candidate.candidateId}`);
 		}
 		if (input.evaluationIds.length === 0) throw new Error("assumption resolution requires at least one evaluation");
+		const distinctPremortemEvidenceRequired =
+			requiredAvoPremortemAssumptionCount(this.state) > 0 && assumption.critical;
+		const priorCriticalResolutions = distinctPremortemEvidenceRequired
+			? this.state.criticalAssumptions.filter(
+					(item) =>
+						item.assumptionId !== assumption.assumptionId &&
+						item.critical &&
+						item.candidateId === candidate.candidateId &&
+						item.candidatePayloadDigest === candidate.payloadDigest,
+				)
+			: [];
+		const reusedEvaluationIds = new Set(priorCriticalResolutions.flatMap((item) => item.evaluationIds));
+		const reusedCommandDigests = new Set(
+			priorCriticalResolutions.flatMap((item) =>
+				item.evaluationIds.flatMap((evaluationId) => {
+					const commandDigest = this.state.evaluations.find((receipt) => receipt.evaluationId === evaluationId)
+						?.metrics.command_digest;
+					return typeof commandDigest === "string" && commandDigest.length > 0 ? [commandDigest] : [];
+				}),
+			),
+		);
 		const evaluations = input.evaluationIds.map((evaluationId) => {
 			const receipt = this.state.evaluations.find(
 				(item) => item.evaluationId === evaluationId && item.candidateId === candidate.candidateId,
 			);
 			if (!receipt) throw new Error(`evaluation ${evaluationId} is not bound to candidate ${candidate.candidateId}`);
+			if (reusedEvaluationIds.has(evaluationId)) {
+				throw new Error(`evaluation ${evaluationId} already resolved another critical pre-mortem assumption`);
+			}
+			const commandDigest = receipt.metrics.command_digest;
+			if (typeof commandDigest === "string" && reusedCommandDigests.has(commandDigest)) {
+				throw new Error(
+					`evaluation ${evaluationId} repeats the host command used to resolve another critical pre-mortem assumption`,
+				);
+			}
 			if (!avoEvaluatorMatchesRequiredEvidence(receipt, assumption.requiredEvidence)) {
 				throw new Error(`evaluation ${evaluationId} is not host evidence of the preregistered falsification kind`);
 			}

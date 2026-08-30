@@ -331,7 +331,57 @@ describe("generic AVO core", () => {
 				requiredEvidence: ["runtime"],
 			},
 		]);
-		expect(runtime.recordCandidate(candidateInput)).toMatchObject({ kind: "implementation" });
+		const candidate = runtime.recordCandidate(candidateInput);
+		const boundaryEvaluation = runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "test",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:test:boundary"],
+			metrics: { meaningful: true, command_digest: "boundary-command" },
+		});
+		runtime.resolveCriticalAssumption({
+			assumptionId: "boundary-contract",
+			candidateId: candidate.candidateId,
+			evaluationIds: [boundaryEvaluation.evaluationId],
+		});
+		expect(() =>
+			runtime.resolveCriticalAssumption({
+				assumptionId: "integration-contract",
+				candidateId: candidate.candidateId,
+				evaluationIds: [boundaryEvaluation.evaluationId],
+			}),
+		).toThrow(/already resolved another critical pre-mortem assumption/);
+		const repeatedCommandEvaluation = runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "runtime",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:runtime:integration"],
+			metrics: { meaningful: true, command_digest: "boundary-command" },
+		});
+		expect(() =>
+			runtime.resolveCriticalAssumption({
+				assumptionId: "integration-contract",
+				candidateId: candidate.candidateId,
+				evaluationIds: [repeatedCommandEvaluation.evaluationId],
+			}),
+		).toThrow(/repeats the host command/);
+		const integrationEvaluation = runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "runtime",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:runtime:integration-distinct"],
+			metrics: { meaningful: true, command_digest: "integration-command" },
+		});
+		expect(
+			runtime.resolveCriticalAssumption({
+				assumptionId: "integration-contract",
+				candidateId: candidate.candidateId,
+				evaluationIds: [integrationEvaluation.evaluationId],
+			}),
+		).toMatchObject({ status: "supported" });
 	});
 
 	test("derives separate host obligations from explicit objective checklist items", () => {
