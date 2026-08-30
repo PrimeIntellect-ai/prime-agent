@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -6,17 +7,31 @@ import { describe, expect, test } from "vitest";
 import {
 	AVO_SPEC_GATES,
 	type AvoSpecRequirementDefinition,
+	applyAvoSpecContractStopGate,
+	assertAvoSpecReceiptTrustConfiguration,
+	captureAvoSpecContractBaseline,
 	deriveAvoSpecRequirementImpacts,
 	digestAvoSpecRequirement,
 	digestAvoSpecSources,
 	loadAndValidateAvoSpecContract,
+	loadAvoSpecReceiptOverlay,
 	signAvoSpecReceipt,
 	validateAvoSpecContract,
 } from "../src/core/avo/spec-contract.js";
-import { loadAvoSpecReceiptOverlay, parseAvoSpecRunnerArgs } from "../src/evals/spec-contract/runner.js";
+import { AvoStore } from "../src/core/avo/store.js";
+import { captureAvoCodingVerificationBaseline, captureAvoWorkspaceSnapshot } from "../src/core/avo/workspace.js";
+import { parseAvoSpecRunnerArgs } from "../src/evals/spec-contract/runner.js";
 
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
-const RECEIPT_KEY = "host-only-test-key-material-that-is-longer-than-thirty-two-bytes";
+const RECEIPT_KEY_PAIR = generateKeyPairSync("ed25519");
+const WRONG_RECEIPT_KEY_PAIR = generateKeyPairSync("ed25519");
+const RECEIPT_PUBLIC_KEY = RECEIPT_KEY_PAIR.publicKey.export({ type: "spki", format: "pem" }).toString();
+const WRONG_RECEIPT_PUBLIC_KEY = WRONG_RECEIPT_KEY_PAIR.publicKey.export({ type: "spki", format: "pem" }).toString();
+const RECEIPT_BINDING = {
+	runId: "spec-test-run",
+	workspaceDigest: "a".repeat(64),
+	contractDigest: "b".repeat(64),
+};
 
 function fixtureRoot(): string {
 	return mkdtempSync(join(tmpdir(), "prime-avo-spec-contract-"));
@@ -49,6 +64,7 @@ function completeObservedContract(root: string): Record<string, unknown> {
 		const receipt: Record<string, unknown> = {
 			schemaVersion: 1,
 			receiptId: `receipt-${index + 1}`,
+			...RECEIPT_BINDING,
 			requirementId,
 			evidenceId,
 			gate,
@@ -72,7 +88,7 @@ function completeObservedContract(root: string): Record<string, unknown> {
 			},
 			...(runtime ? { events: [{ event: "behavior_observed", satisfies: [requirementId] }] } : {}),
 		};
-		receipt.signature = signAvoSpecReceipt(receipt, RECEIPT_KEY);
+		receipt.signature = signAvoSpecReceipt(receipt, RECEIPT_KEY_PAIR.privateKey);
 		writeFileSync(join(root, receiptPath), `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
 		return { evidenceId, gate, state: "observed", mechanism, path, anchor, receiptPath };
 	});
@@ -107,13 +123,26 @@ function completeObservedContract(root: string): Record<string, unknown> {
 		const receiptPath = join(root, `evidence/receipts/receipt-${index + 1}.json`);
 		const receipt = JSON.parse(readFileSync(receiptPath, "utf8")) as Record<string, unknown>;
 		receipt.sourceDigest = requirementDigest;
-		receipt.signature = signAvoSpecReceipt(receipt, RECEIPT_KEY);
+		receipt.signature = signAvoSpecReceipt(receipt, RECEIPT_KEY_PAIR.privateKey);
 		writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
 	}
 	return contract;
 }
 
 describe("AVO executable behavioral contract", () => {
+	test("[AUTH-001] accepts only public-key verification and rejects the retired shared-secret trust root", () => {
+		const receipt: Record<string, unknown> = { evidenceId: "AUTH-001:test", status: "pass" };
+		expect(signAvoSpecReceipt(receipt, RECEIPT_KEY_PAIR.privateKey)).toMatch(/^ed25519:[A-Za-z0-9_-]{86}$/);
+		expect(() =>
+			assertAvoSpecReceiptTrustConfiguration({ PRIME_AGENT_AVO_SPEC_RECEIPT_KEY: "same-user-secret" }),
+		).toThrow(/insecure with model-controlled same-user tools/);
+		expect(() =>
+			assertAvoSpecReceiptTrustConfiguration({
+				PRIME_AGENT_AVO_SPEC_RECEIPT_PUBLIC_KEY: "public material is not a signing secret",
+			}),
+		).not.toThrow();
+	});
+
 	test("keeps the repository contract honest about currently unobserved gates", () => {
 		const report = loadAndValidateAvoSpecContract("packages/coding-agent/spec/requirements.json", REPOSITORY_ROOT);
 		expect(report.valid).toBe(true);
@@ -121,10 +150,119 @@ describe("AVO executable behavioral contract", () => {
 		expect(report.requirements.every((requirement) => requirement.missingObservedGates.length === 6)).toBe(true);
 	});
 
+	test("[SPEC-001] captures an immutable task-start contract before candidate edits", () => {
+		const root = fixtureRoot();
+		mkdirSync(join(root, "spec"), { recursive: true });
+		const contract = completeObservedContract(root);
+		for (const requirement of contract.requirements as AvoSpecRequirementDefinition[]) {
+			requirement.declaredStatus = "partial";
+			for (const evidence of requirement.evidence) {
+				evidence.state = "linked";
+				delete evidence.receiptPath;
+			}
+		}
+		const contractPath = join(root, "spec/requirements.json");
+		const originalContent = `${JSON.stringify(contract, null, 2)}\n`;
+		writeFileSync(contractPath, originalContent, "utf8");
+
+		const baseline = captureAvoSpecContractBaseline(root, "2026-08-30T00:00:00.000Z");
+		expect(baseline).toMatchObject({
+			contractPath: "spec/requirements.json",
+			contractContent: originalContent,
+			capturedAt: "2026-08-30T00:00:00.000Z",
+		});
+		expect(baseline?.contractDigest).toMatch(/^[a-f0-9]{64}$/);
+
+		writeFileSync(contractPath, `${JSON.stringify({ ...contract, contractId: "candidate-weakened" })}\n`, "utf8");
+		expect(baseline?.contractContent).toBe(originalContent);
+	});
+
+	test("[SPEC-001] passes the live gate only for the exact signed task, workspace, and contract", () => {
+		const root = fixtureRoot();
+		mkdirSync(join(root, "spec"), { recursive: true });
+		const contract = completeObservedContract(root);
+		const requirement = (contract.requirements as AvoSpecRequirementDefinition[])[0]!;
+		requirement.declaredStatus = "partial";
+		for (const evidence of requirement.evidence) {
+			evidence.state = "linked";
+			delete evidence.receiptPath;
+		}
+		writeFileSync(join(root, "spec/requirements.json"), `${JSON.stringify(contract, null, 2)}\n`, "utf8");
+		const baseline = captureAvoCodingVerificationBaseline(root, "Improve source behavior");
+		baseline.specContract = captureAvoSpecContractBaseline(root, baseline.capturedAt, {
+			receiptPublicKey: RECEIPT_PUBLIC_KEY,
+		});
+		expect(baseline.specContract).toBeDefined();
+		expect(baseline.specContract?.receiptPublicKeyDigest).toMatch(/^[a-f0-9]{64}$/);
+
+		const store = new AvoStore(undefined, "live-spec-session", () => "2026-08-30T00:00:00.000Z", root);
+		store.initialize("Improve source behavior");
+		store.setEnvironment("coding");
+		store.setVerificationBaseline(baseline);
+		writeFileSync(join(root, "source.ts"), "export const behavior = 'improved';\n", "utf8");
+		const workspace = captureAvoWorkspaceSnapshot(root);
+		const binding = {
+			runId: store.getState().runId,
+			workspaceDigest: workspace.digest,
+			contractDigest: baseline.specContract!.contractDigest,
+		};
+		const overlayDir = fixtureRoot();
+		const sourceDigest = digestAvoSpecRequirement(root, requirement);
+		for (let index = 0; index < requirement.evidence.length; index += 1) {
+			const original = JSON.parse(
+				readFileSync(join(root, `evidence/receipts/receipt-${index + 1}.json`), "utf8"),
+			) as Record<string, unknown>;
+			const receipt: Record<string, unknown> = { ...original, ...binding, sourceDigest };
+			receipt.signature = signAvoSpecReceipt(receipt, RECEIPT_KEY_PAIR.privateKey);
+			writeFileSync(join(overlayDir, `receipt-${index + 1}.json`), `${JSON.stringify(receipt)}\n`, "utf8");
+		}
+
+		const gate = applyAvoSpecContractStopGate(
+			store.getState(),
+			{ passed: true, checks: [], reasons: [] },
+			{
+				cwd: root,
+				receiptDirectory: overlayDir,
+				receiptPublicKey: RECEIPT_PUBLIC_KEY,
+			},
+		);
+		expect(gate).toMatchObject({
+			passed: true,
+			checks: expect.arrayContaining([
+				expect.objectContaining({ id: "spec_trust_root", passed: true }),
+				expect.objectContaining({ id: "spec_requirement:TEST-001", passed: true }),
+				expect.objectContaining({ id: "spec_workspace_stability", passed: true }),
+			]),
+		});
+
+		const substitutedVerifierGate = applyAvoSpecContractStopGate(
+			store.getState(),
+			{ passed: true, checks: [], reasons: [] },
+			{
+				cwd: root,
+				receiptDirectory: overlayDir,
+				receiptPublicKey: WRONG_RECEIPT_PUBLIC_KEY,
+			},
+		);
+		expect(substitutedVerifierGate.passed).toBe(false);
+		expect(substitutedVerifierGate.checks).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					id: "spec_trust_root",
+					passed: false,
+					reason: expect.stringContaining("changed after task start"),
+				}),
+			]),
+		);
+	});
+
 	test("[SPEC-001] accepts verified only with six current receipts, a host trace, and independent review", () => {
 		const root = fixtureRoot();
 		const contract = completeObservedContract(root);
-		const report = validateAvoSpecContract(contract, root, { receiptHmacKey: RECEIPT_KEY });
+		const report = validateAvoSpecContract(contract, root, {
+			receiptPublicKey: RECEIPT_PUBLIC_KEY,
+			receiptBinding: RECEIPT_BINDING,
+		});
 		expect(report.errors).toEqual([]);
 		expect(report.summary).toEqual({ total: 1, unproven: 0, partial: 0, verified: 1 });
 		expect(report.requirements[0]).toMatchObject({
@@ -145,10 +283,11 @@ describe("AVO executable behavioral contract", () => {
 			identity: "candidate-generator",
 			independentFromCandidateGenerator: false,
 		};
-		forged.signature = signAvoSpecReceipt(forged, RECEIPT_KEY);
+		forged.signature = signAvoSpecReceipt(forged, RECEIPT_KEY_PAIR.privateKey);
 		writeFileSync(selfReviewReceipt, `${JSON.stringify(forged, null, 2)}\n`, "utf8");
 		const selfReviewReport = validateAvoSpecContract(selfReviewed, selfReviewRoot, {
-			receiptHmacKey: RECEIPT_KEY,
+			receiptPublicKey: RECEIPT_PUBLIC_KEY,
+			receiptBinding: RECEIPT_BINDING,
 		});
 		expect(selfReviewReport.valid).toBe(false);
 		expect(selfReviewReport.errors).toEqual(
@@ -161,29 +300,53 @@ describe("AVO executable behavioral contract", () => {
 		const staleRoot = fixtureRoot();
 		const stale = completeObservedContract(staleRoot);
 		writeFileSync(join(staleRoot, "source.ts"), "export const behavior = false;\n", "utf8");
-		const staleReport = validateAvoSpecContract(stale, staleRoot, { receiptHmacKey: RECEIPT_KEY });
+		const staleReport = validateAvoSpecContract(stale, staleRoot, {
+			receiptPublicKey: RECEIPT_PUBLIC_KEY,
+			receiptBinding: RECEIPT_BINDING,
+		});
 		expect(staleReport.valid).toBe(false);
 		expect(staleReport.errors).toEqual(expect.arrayContaining([expect.stringContaining("receipt is stale")]));
 
 		const weakenedRoot = fixtureRoot();
 		const weakened = completeObservedContract(weakenedRoot);
 		(weakened.requirements as Array<Record<string, unknown>>)[0]!.statement = "Any result is acceptable.";
-		const weakenedReport = validateAvoSpecContract(weakened, weakenedRoot, { receiptHmacKey: RECEIPT_KEY });
+		const weakenedReport = validateAvoSpecContract(weakened, weakenedRoot, {
+			receiptPublicKey: RECEIPT_PUBLIC_KEY,
+			receiptBinding: RECEIPT_BINDING,
+		});
 		expect(weakenedReport.valid).toBe(false);
 		expect(weakenedReport.errors).toEqual(expect.arrayContaining([expect.stringContaining("receipt is stale")]));
 
 		const root = fixtureRoot();
 		const contract = completeObservedContract(root);
-		const withoutHostKey = validateAvoSpecContract(contract, root);
+		const withoutHostKey = validateAvoSpecContract(contract, root, { receiptBinding: RECEIPT_BINDING });
 		expect(withoutHostKey.valid).toBe(false);
 		expect(withoutHostKey.summary.verified).toBe(0);
 		expect(withoutHostKey.errors).toEqual(
-			expect.arrayContaining([expect.stringContaining("cannot be trusted without the host spec-receipt HMAC key")]),
+			expect.arrayContaining([
+				expect.stringContaining("cannot be trusted without the independent spec-receipt public key"),
+			]),
 		);
 
-		const wrongHostKey = validateAvoSpecContract(contract, root, { receiptHmacKey: "x".repeat(64) });
+		const wrongHostKey = validateAvoSpecContract(contract, root, {
+			receiptPublicKey: WRONG_RECEIPT_PUBLIC_KEY,
+			receiptBinding: RECEIPT_BINDING,
+		});
 		expect(wrongHostKey.valid).toBe(false);
-		expect(wrongHostKey.errors).toEqual(expect.arrayContaining([expect.stringContaining("invalid host signature")]));
+		expect(wrongHostKey.errors).toEqual(
+			expect.arrayContaining([expect.stringContaining("invalid independent signature")]),
+		);
+
+		const replayRoot = fixtureRoot();
+		const replayed = completeObservedContract(replayRoot);
+		const replayReport = validateAvoSpecContract(replayed, replayRoot, {
+			receiptPublicKey: RECEIPT_PUBLIC_KEY,
+			receiptBinding: { ...RECEIPT_BINDING, runId: "different-task-run" },
+		});
+		expect(replayReport.valid).toBe(false);
+		expect(replayReport.errors).toEqual(
+			expect.arrayContaining([expect.stringContaining("bound to a different task or workspace")]),
+		);
 
 		const symlinkRoot = fixtureRoot();
 		const symlinkContract = completeObservedContract(symlinkRoot);
@@ -194,7 +357,10 @@ describe("AVO executable behavioral contract", () => {
 		unlinkSync(unitPath);
 		symlinkSync(outside, unitPath);
 
-		const symlinkReport = validateAvoSpecContract(symlinkContract, symlinkRoot, { receiptHmacKey: RECEIPT_KEY });
+		const symlinkReport = validateAvoSpecContract(symlinkContract, symlinkRoot, {
+			receiptPublicKey: RECEIPT_PUBLIC_KEY,
+			receiptBinding: RECEIPT_BINDING,
+		});
 		expect(symlinkReport.valid).toBe(false);
 		expect(symlinkReport.summary.verified).toBe(0);
 		expect(symlinkReport.errors).toEqual(
@@ -214,16 +380,20 @@ describe("AVO executable behavioral contract", () => {
 		}
 
 		const report = validateAvoSpecContract(contract, root, {
-			receiptHmacKey: RECEIPT_KEY,
+			receiptPublicKey: RECEIPT_PUBLIC_KEY,
 			receipts,
+			receiptBinding: RECEIPT_BINDING,
 		});
 		expect(report.valid).toBe(true);
 		expect(report.summary.verified).toBe(1);
 		const loaded = loadAvoSpecReceiptOverlay(join(root, "evidence/receipts"));
 		expect(loaded.errors).toEqual([]);
 		expect(Object.keys(loaded.receipts)).toHaveLength(6);
-		expect(parseAvoSpecRunnerArgs(["--changed", "a.ts,b.ts", "--changed", "c.ts", "--enforce"])).toMatchObject({
+		expect(
+			parseAvoSpecRunnerArgs(["--changed", "a.ts,b.ts", "--changed", "c.ts", "--run-id", "task-7", "--enforce"]),
+		).toMatchObject({
 			changedPaths: ["a.ts", "b.ts", "c.ts"],
+			runId: "task-7",
 			enforce: true,
 		});
 		expect(() => parseAvoSpecRunnerArgs(["--enforce"])).toThrow(/requires at least one --changed path/);

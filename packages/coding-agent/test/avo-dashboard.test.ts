@@ -5,10 +5,64 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { loadAvoDashboardPayload, parseAvoDashboardArgs } from "../src/cli/avo-dashboard.js";
 import { AutoresearchStore } from "../src/core/autoresearch.js";
-import { AvoStore } from "../src/core/avo/index.js";
+import {
+	AvoStore,
+	captureAvoCodingVerificationBaseline,
+	captureAvoSpecContractBaseline,
+	captureAvoWorkspaceSnapshot,
+	deriveAvoWorkspaceImpactPaths,
+} from "../src/core/avo/index.js";
 
 function agentDir(): string {
 	return mkdtempSync(join(tmpdir(), "prime-avo-dashboard-"));
+}
+
+function writeDashboardSpecContract(workspace: string): void {
+	mkdirSync(join(workspace, "spec"), { recursive: true });
+	const mechanisms = [
+		["static", "compiler"],
+		["unit", "deterministic_unit_test"],
+		["integration", "deterministic_integration_test"],
+		["behavioral", "runtime_trace"],
+		["adversarial", "adversarial_test"],
+		["independent_review", "independent_review"],
+	] as const;
+	writeFileSync(
+		join(workspace, "spec/requirements.json"),
+		`${JSON.stringify({
+			schemaVersion: 1,
+			contractId: "dashboard-contract",
+			protectedRoots: ["parser.cjs"],
+			gateOrder: mechanisms.map(([gate]) => gate),
+			requirements: [
+				{
+					id: "TEST-001",
+					domain: "test",
+					title: "Parser is proven independently",
+					statement: "A parser change requires heterogeneous host proof.",
+					critical: true,
+					behaviors: {
+						normal: "All gates pass.",
+						failure: "Missing proof blocks.",
+						ordering: "Capture precedes edits.",
+						authority: "The host owns proof.",
+						persistence: "Proof binds to source.",
+					},
+					sourcePaths: ["parser.cjs"],
+					requiredGates: mechanisms.map(([gate]) => gate),
+					requiresRuntimeTrace: true,
+					declaredStatus: "unproven",
+					evidence: mechanisms.map(([gate, mechanism]) => ({
+						evidenceId: `TEST-001:${gate}`,
+						gate,
+						state: "planned",
+						mechanism,
+						plan: `Run ${gate}.`,
+					})),
+				},
+			],
+		})}\n`,
+	);
 }
 
 describe("universal AVO dashboard", () => {
@@ -94,6 +148,69 @@ describe("universal AVO dashboard", () => {
 		expect(payload).toMatchObject({ status: "blocked", stopGate: { passed: false } });
 		expect(payload.phase.id).not.toBe("final_gate");
 		expect(payload.phase.progressPercent).toBeLessThan(100);
+	});
+
+	test("[SYNC-001] shows missing behavioral proof instead of a stale successful coding gate", () => {
+		const root = agentDir();
+		const workspace = join(root, "workspace");
+		const artifact = join(root, "session-artifacts", "spec-session");
+		mkdirSync(workspace, { recursive: true });
+		mkdirSync(artifact, { recursive: true });
+		mkdirSync(join(root, "sessions"), { recursive: true });
+		writeFileSync(
+			join(root, "sessions", "spec-session.jsonl"),
+			`${JSON.stringify({ type: "session", version: 3, id: "spec-session", cwd: workspace })}\n`,
+		);
+		writeFileSync(join(workspace, "parser.cjs"), "module.exports = 1;\n");
+		writeDashboardSpecContract(workspace);
+
+		const store = new AvoStore(artifact, "spec-session", () => "2026-08-30T00:00:00.000Z", workspace);
+		store.initialize("Fix the parser implementation");
+		store.setEnvironment("coding");
+		const baseline = captureAvoCodingVerificationBaseline(workspace, "Fix the parser implementation");
+		baseline.specContract = captureAvoSpecContractBaseline(workspace, baseline.capturedAt);
+		store.setVerificationBaseline(baseline);
+
+		writeFileSync(join(workspace, "parser.cjs"), "module.exports = 2;\n");
+		const current = captureAvoWorkspaceSnapshot(workspace);
+		const candidate = store.recordCandidate({
+			candidateId: "parser-2",
+			kind: "implementation",
+			summary: "Parser value two",
+			payload: { value: 2 },
+			workspaceDigest: current.digest,
+			workspaceHead: current.head,
+			workspaceMode: current.mode,
+			workspaceChangedPaths: deriveAvoWorkspaceImpactPaths(baseline, current),
+		});
+		store.recordEvaluation(
+			{
+				candidateId: candidate.candidateId,
+				evaluatorId: "test",
+				status: "pass",
+				authority: "host",
+				evidenceRefs: ["host:test:parser"],
+				metrics: {
+					meaningful: true,
+					workspace_matches_candidate: true,
+					candidate_payload_digest: candidate.payloadDigest,
+				},
+			},
+			"host",
+		);
+		store.completeCycle({ candidateId: candidate.candidateId });
+
+		const payload = loadAvoDashboardPayload(root, "spec-session");
+		expect(payload.stopGate).toMatchObject({
+			passed: false,
+			checks: expect.arrayContaining([expect.objectContaining({ id: "spec_requirement:TEST-001", passed: false })]),
+		});
+		expect(payload.phase).toMatchObject({ id: "test", progressPercent: 40 });
+		expect(payload.sections.find((section) => section.id === "spec_contract")?.items).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ label: expect.stringContaining("TEST-001"), status: "fail" }),
+			]),
+		);
 	});
 
 	test("preserves the hardened research projection as a compatibility adapter", () => {

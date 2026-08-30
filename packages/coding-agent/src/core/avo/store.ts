@@ -2314,6 +2314,24 @@ export class AvoStore {
 		if (!/^[a-f0-9]{64}$/.test(baseline.contractDigest) || !/^[a-f0-9]{64}$/.test(baseline.workspaceDigest)) {
 			throw new Error("verification baseline digests must be SHA-256 values");
 		}
+		if (baseline.workspaceRoot !== undefined && !isAbsolute(baseline.workspaceRoot)) {
+			throw new Error("verification baseline workspaceRoot must be absolute when present");
+		}
+		if (baseline.specContract) {
+			const spec = baseline.specContract;
+			const normalizedPath = spec.contractPath.replaceAll("\\", "/");
+			if (
+				isAbsolute(spec.contractPath) ||
+				!normalizedPath ||
+				normalizedPath.split("/").some((part) => part === "..") ||
+				!/^([a-f0-9]{64})$/.test(spec.contractDigest) ||
+				(spec.receiptPublicKeyDigest !== undefined && !/^[a-f0-9]{64}$/.test(spec.receiptPublicKeyDigest)) ||
+				createHash("sha256").update(spec.contractContent).digest("hex") !== spec.contractDigest ||
+				spec.capturedAt !== baseline.capturedAt
+			) {
+				throw new Error("verification baseline spec contract is malformed or not bound to its task-start capture");
+			}
+		}
 		if (this.state.verificationBaseline) {
 			if (this.state.verificationBaseline.contractDigest !== baseline.contractDigest) {
 				throw new Error("the active task verification baseline is immutable");

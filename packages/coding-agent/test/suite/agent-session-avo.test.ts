@@ -1,4 +1,4 @@
-import { symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -6,6 +6,60 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AGENT_MESSAGE_SOURCE, createAgentSessionMessage } from "../../src/core/agent-messages.js";
 import { AVO_HOST_REQUEST_TYPES, type AvoRunState, GeneralAvoAdapter } from "../../src/core/avo/index.js";
 import { createHarness, type Harness } from "./harness.js";
+
+function writeExecutableSpecFixture(root: string): void {
+	mkdirSync(`${root}/spec`, { recursive: true });
+	const requirementId = "TEST-001";
+	const mechanisms = [
+		["static", "compiler"],
+		["unit", "deterministic_unit_test"],
+		["integration", "deterministic_integration_test"],
+		["behavioral", "runtime_trace"],
+		["adversarial", "adversarial_test"],
+		["independent_review", "independent_review"],
+	] as const;
+	writeFileSync(
+		`${root}/spec/requirements.json`,
+		`${JSON.stringify(
+			{
+				schemaVersion: 1,
+				contractId: "test-behavior-contract",
+				protectedRoots: ["parser.cjs", "spec"],
+				gateOrder: mechanisms.map(([gate]) => gate),
+				requirements: [
+					{
+						id: requirementId,
+						domain: "test",
+						title: "Parser behavior is independently verified",
+						statement: "A parser change cannot be accepted from its implementation-authored test alone.",
+						critical: true,
+						behaviors: {
+							normal: "The parser change passes all independent gates.",
+							failure: "Missing host proof blocks canonical completion.",
+							ordering: "The contract is captured before the candidate changes.",
+							authority: "The host and independent reviewer own verification.",
+							persistence: "Receipts remain bound to the exact parser source.",
+						},
+						sourcePaths: ["parser.cjs"],
+						requiredGates: mechanisms.map(([gate]) => gate),
+						requiresRuntimeTrace: true,
+						declaredStatus: "unproven",
+						evidence: mechanisms.map(([gate, mechanism]) => ({
+							evidenceId: `${requirementId}:${gate}`,
+							gate,
+							state: "planned",
+							mechanism,
+							plan: `Independently execute the ${gate} gate.`,
+						})),
+					},
+				],
+			},
+			null,
+			2,
+		)}\n`,
+		"utf8",
+	);
+}
 
 describe("AgentSession universal AVO runtime", () => {
 	it("advertises every obligation and assumption bridge to the Python kernel", () => {
@@ -1069,6 +1123,60 @@ describe("AgentSession universal AVO runtime", () => {
 				cycle: { candidate_id: "mutated-by-test" },
 			}),
 		).toMatchObject({ cycle: { outcome: "revised" } });
+	});
+
+	it("[SPEC-001] blocks ordinary test success without affected invariant receipts and rejects contract weakening", async () => {
+		harness = await createHarness({ persistSession: true });
+		writeFileSync(`${harness.tempDir}/parser.cjs`, "module.exports = 1;\n");
+		writeFileSync(
+			`${harness.tempDir}/parser.test.cjs`,
+			"const test = require('node:test'); const assert = require('node:assert'); test('parser', () => assert.ok([1, 2].includes(require('./parser.cjs'))));\n",
+		);
+		writeExecutableSpecFixture(harness.tempDir);
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix the parser implementation and prove every affected behavioral invariant");
+		await harness.session.handleAvoHostRequest("avo.verification.baseline.run", {
+			command: "node --test parser.test.cjs",
+		});
+		writeFileSync(`${harness.tempDir}/parser.cjs`, "module.exports = 2;\n");
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "spec-unproven-parser",
+				kind: "implementation",
+				summary: "Parser value two",
+				payload: { value: 2 },
+			},
+		});
+		const evaluation = await harness.session.handleAvoHostRequest("avo.evaluation.run", {
+			candidate_id: "spec-unproven-parser",
+			command: "node --test parser.test.cjs",
+		});
+		expect(evaluation).toMatchObject({ evaluation: { status: "pass", issuedBy: "host" } });
+		expect(
+			await harness.session.handleAvoHostRequest("avo.cycle.complete", {
+				cycle: { candidate_id: "spec-unproven-parser" },
+			}),
+		).toMatchObject({ cycle: { outcome: "accepted" } });
+
+		const unprovenGate = await harness.session.handleAvoHostRequest("avo.stop_gate");
+		expect(unprovenGate).toMatchObject({
+			stop_gate: {
+				passed: false,
+				checks: expect.arrayContaining([
+					expect.objectContaining({ id: "spec_contract_integrity", passed: true }),
+					expect.objectContaining({ id: "spec_requirement:TEST-001", passed: false }),
+				]),
+			},
+		});
+
+		writeFileSync(`${harness.tempDir}/spec/requirements.json`, "{}\n", "utf8");
+		const weakenedGate = await harness.session.handleAvoHostRequest("avo.stop_gate");
+		expect(weakenedGate).toMatchObject({
+			stop_gate: {
+				passed: false,
+				checks: expect.arrayContaining([expect.objectContaining({ id: "spec_contract_integrity", passed: false })]),
+			},
+		});
 	});
 
 	it("rejects a post-candidate suite that replaces a baseline pass with a skip", async () => {

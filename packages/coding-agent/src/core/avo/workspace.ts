@@ -23,6 +23,7 @@ const TREE_EXCLUDES = new Set([
 ]);
 
 export interface AvoWorkspaceSnapshot {
+	root: string;
 	digest: string;
 	mode: "git" | "tree";
 	head: string;
@@ -131,7 +132,16 @@ function gitSnapshot(cwd: string, excludedRoots: readonly string[]): AvoWorkspac
 		if (totalBytes > MAX_SNAPSHOT_BYTES) throw new Error("workspace changes are too large to fingerprint");
 	}
 	const changedFileCount = status.toString("utf8").split("\0").filter(Boolean).length;
-	return { digest: hash.digest("hex"), mode: "git", head, changedFileCount, totalBytes, changedPaths, pathDigests };
+	return {
+		root,
+		digest: hash.digest("hex"),
+		mode: "git",
+		head,
+		changedFileCount,
+		totalBytes,
+		changedPaths,
+		pathDigests,
+	};
 }
 
 function treeFiles(root: string, excludedRoots: readonly string[]): string[] {
@@ -164,6 +174,7 @@ function treeSnapshot(cwd: string, excludedRoots: readonly string[]): AvoWorkspa
 		if (totalBytes > MAX_SNAPSHOT_BYTES) throw new Error("workspace is too large to fingerprint");
 	}
 	return {
+		root,
 		digest: hash.digest("hex"),
 		mode: "tree",
 		head: "NO_GIT_HEAD",
@@ -261,6 +272,7 @@ export function captureAvoCodingVerificationBaseline(
 	return {
 		kind: "coding",
 		contractDigest,
+		workspaceRoot: root,
 		workspaceDigest: workspace.digest,
 		workspaceMode: workspace.mode,
 		workspaceHead: workspace.head,
@@ -278,6 +290,7 @@ export function deriveAvoWorkspaceImpactPaths(
 ): string[] {
 	if (
 		!baseline?.workspacePathDigests ||
+		(baseline.workspaceRoot !== undefined && resolve(baseline.workspaceRoot) !== current.root) ||
 		baseline.workspaceMode !== current.mode ||
 		baseline.workspaceHead !== current.head
 	) {

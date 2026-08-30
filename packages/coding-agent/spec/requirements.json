@@ -23,19 +23,22 @@
       "id": "AUTH-001",
       "domain": "authority",
       "title": "Only host-observed evidence can mint authoritative progress",
-      "statement": "Model claims, model-written metrics, and model-opinion receipts must never satisfy a host-required verification gate.",
+      "statement": "Model claims, model-written metrics, model-opinion receipts, and model-controlled child processes must never mint or obtain authority reserved for the host.",
       "critical": true,
       "behaviors": {
         "normal": "A candidate becomes canonical only after an applicable host-issued receipt passes.",
         "failure": "Missing, model-minted, inconclusive, or semantically unrelated evidence leaves the cycle blocked or revised.",
         "ordering": "The host issues and binds the receipt before cycle acceptance and canonical delivery.",
-        "authority": "The model proposes a candidate; the host owns authoritative evaluation and stop-gate decisions.",
+        "authority": "The model proposes a candidate; the host owns authoritative evaluation, signing secrets, and stop-gate decisions.",
         "persistence": "Reopening state must preserve receipt issuer and authority without upgrading legacy or model evidence."
       },
       "sourcePaths": [
+        "packages/coding-agent/src/core/agent-session.ts",
         "packages/coding-agent/src/core/avo/adapters.ts",
         "packages/coding-agent/src/core/avo/evaluator.ts",
-        "packages/coding-agent/src/core/avo/store.ts"
+        "packages/coding-agent/src/core/avo/spec-contract.ts",
+        "packages/coding-agent/src/core/avo/store.ts",
+        "packages/coding-agent/src/evals/spec-contract/runner.ts"
       ],
       "requiredGates": [
         "static",
@@ -63,6 +66,14 @@
           "mechanism": "deterministic_unit_test",
           "path": "packages/coding-agent/test/avo.test.ts",
           "anchor": "[AUTH-001] does not promote model opinion into canonical progress"
+        },
+        {
+          "evidenceId": "AUTH-001:asymmetric-trust-unit",
+          "gate": "unit",
+          "state": "linked",
+          "mechanism": "deterministic_unit_test",
+          "path": "packages/coding-agent/test/avo-spec-contract.test.ts",
+          "anchor": "[AUTH-001] accepts only public-key verification and rejects the retired shared-secret trust root"
         },
         {
           "evidenceId": "AUTH-001:host-session-integration",
@@ -487,7 +498,8 @@
       "sourcePaths": [
         "packages/coding-agent/src/cli/avo-dashboard.ts",
         "packages/coding-agent/src/core/avo/adapters.ts",
-        "packages/coding-agent/src/core/avo/integrity.ts"
+        "packages/coding-agent/src/core/avo/integrity.ts",
+        "packages/coding-agent/src/core/avo/spec-contract.ts"
       ],
       "requiredGates": [
         "static",
@@ -519,9 +531,10 @@
         {
           "evidenceId": "SYNC-001:disk-dashboard-integration",
           "gate": "integration",
-          "state": "planned",
+          "state": "linked",
           "mechanism": "deterministic_integration_test",
-          "plan": "Compare fresh disk-backed dashboard payload against live host stop gate before and after corruption."
+          "path": "packages/coding-agent/test/avo-dashboard.test.ts",
+          "anchor": "[SYNC-001] shows missing behavioral proof instead of a stale successful coding gate"
         },
         {
           "evidenceId": "SYNC-001:projection-trace",
@@ -702,21 +715,24 @@
       "id": "SPEC-001",
       "domain": "specification",
       "title": "Behavioral proof cannot be overstated or forged",
-      "statement": "The executable contract must reject missing, stale, self-issued, replayed, path-escaping, or cryptographically untrusted evidence and must expose protected implementation changes without a mapped invariant.",
+      "statement": "The executable contract must reject missing, stale, self-issued, cross-task replayed, path-escaping, or cryptographically untrusted evidence and must expose protected implementation changes without a mapped invariant.",
       "critical": true,
       "behaviors": {
-        "normal": "Current host-signed receipts from six heterogeneous gates derive verified status for the unchanged requirement and source digest.",
-        "failure": "Untrusted or stale receipts, weakened semantics, reused IDs, unsafe paths, and unmapped protected changes fail closed.",
+        "normal": "Current independently signed receipts from six heterogeneous gates derive verified status for the exact task, workspace, contract, requirement, and source digest.",
+        "failure": "Untrusted or stale receipts, wrong task or workspace bindings, weakened semantics, reused IDs, unsafe paths, and unmapped protected changes fail closed.",
         "ordering": "The host captures the contract, maps candidate changes, verifies receipts, and only then permits canonical acceptance.",
-        "authority": "The coding model can edit candidates and linked tests but cannot mint the host HMAC or independent-review role.",
-        "persistence": "External receipts remain valid only while the requirement definition and all mapped sources retain the signed digest."
+        "authority": "The coding model can edit candidates and linked tests but has only the Ed25519 public key, so it cannot mint the independent verifier's signature or role.",
+        "persistence": "External receipts remain valid only for the signed task run, candidate workspace, captured contract, requirement definition, and mapped source digest."
       },
       "sourcePaths": [
         "package.json",
         "packages/coding-agent/package.json",
         "packages/coding-agent/spec/requirements.json",
+        "packages/coding-agent/src/core/agent-session.ts",
         "packages/coding-agent/src/core/avo/index.ts",
         "packages/coding-agent/src/core/avo/spec-contract.ts",
+        "packages/coding-agent/src/core/avo/types.ts",
+        "packages/coding-agent/src/core/avo/workspace.ts",
         "packages/coding-agent/src/evals/spec-contract/runner.ts"
       ],
       "requiredGates": [
@@ -751,8 +767,8 @@
           "gate": "integration",
           "state": "linked",
           "mechanism": "deterministic_integration_test",
-          "path": "packages/coding-agent/test/avo-spec-contract.test.ts",
-          "anchor": "[SPEC-001] promotes linked evidence only through a trusted external receipt overlay"
+          "path": "packages/coding-agent/test/suite/agent-session-avo.test.ts",
+          "anchor": "[SPEC-001] blocks ordinary test success without affected invariant receipts and rejects contract weakening"
         },
         {
           "evidenceId": "SPEC-001:acceptance-trace",

@@ -120,6 +120,7 @@ export {
 } from "./probe.js";
 export { AvoSessionRuntime, buildAvoRuntimePrompt } from "./runtime.js";
 export {
+	AVO_SPEC_CONTRACT_PATHS,
 	AVO_SPEC_GATES,
 	AVO_SPEC_MECHANISMS,
 	type AvoSpecEvidenceDefinition,
@@ -127,15 +128,23 @@ export {
 	type AvoSpecGate,
 	type AvoSpecImpactReport,
 	type AvoSpecMechanism,
+	type AvoSpecReceiptBinding,
+	type AvoSpecReceiptOverlay,
 	type AvoSpecRequirementCoverage,
 	type AvoSpecRequirementDefinition,
 	type AvoSpecRequirementStatus,
+	type AvoSpecStopGateOptions,
 	type AvoSpecValidationOptions,
 	type AvoSpecValidationReport,
+	applyAvoSpecContractStopGate,
+	assertAvoSpecReceiptTrustConfiguration,
+	captureAvoSpecContractBaseline,
 	deriveAvoSpecRequirementImpacts,
+	digestAvoSpecReceiptPublicKey,
 	digestAvoSpecRequirement,
 	digestAvoSpecSources,
 	loadAndValidateAvoSpecContract,
+	loadAvoSpecReceiptOverlay,
 	signAvoSpecReceipt,
 	validateAvoSpecContract,
 } from "./spec-contract.js";

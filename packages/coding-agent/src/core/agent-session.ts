@@ -149,8 +149,10 @@ import {
 	type AvoRunState,
 	AvoSessionRuntime,
 	type AvoStopGate,
+	applyAvoSpecContractStopGate,
 	assertAvoClaimSourceContextSafe,
 	assertAvoClaimVerifierQuoteSafe,
+	assertAvoSpecReceiptTrustConfiguration,
 	assessAvoCandidateIntegrity,
 	assessAvoClaimEvidence,
 	assessAvoHostCommand,
@@ -169,6 +171,7 @@ import {
 	canExecuteAvoPythonProbe,
 	captureAvoArtifactPathBaseline,
 	captureAvoCodingVerificationBaseline,
+	captureAvoSpecContractBaseline,
 	captureAvoWorkspaceSnapshot,
 	classifyAvoHostEvaluationCommand,
 	combineAvoClaimEvidenceAssessments,
@@ -1404,6 +1407,7 @@ export class AgentSession {
 	};
 
 	constructor(config: AgentSessionConfig) {
+		assertAvoSpecReceiptTrustConfiguration(process.env);
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
@@ -3827,11 +3831,14 @@ export class AgentSession {
 		const runtime = this._requireAvoRuntime();
 		const state = runtime.getState();
 		if (state.routing.environment !== "coding" || state.verificationBaseline || !state.objective) return;
-		runtime.store.setVerificationBaseline(
-			captureAvoCodingVerificationBaseline(this.sessionManager.getCwd(), state.objective, {
-				excludedRoots: this._avoWorkspaceExcludedRoots(),
-			}),
-		);
+		const cwd = this.sessionManager.getCwd();
+		const baseline = captureAvoCodingVerificationBaseline(cwd, state.objective, {
+			excludedRoots: this._avoWorkspaceExcludedRoots(),
+		});
+		baseline.specContract = captureAvoSpecContractBaseline(baseline.workspaceRoot ?? cwd, baseline.capturedAt, {
+			receiptPublicKey: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_PUBLIC_KEY,
+		});
+		runtime.store.setVerificationBaseline(baseline);
 	}
 
 	private _ensureAvoArtifactVerificationBaseline(): void {
@@ -4334,7 +4341,16 @@ export class AgentSession {
 			this._recordAvoCandidateIntegrityFailure(candidateId);
 		}
 		this._recordAvoOnlineEvidence();
-		return runtime.evaluateStopGate();
+		return this._applyAvoSpecContractStopGate(runtime.evaluateStopGate());
+	}
+
+	private _applyAvoSpecContractStopGate(baseGate: AvoStopGate): AvoStopGate {
+		return applyAvoSpecContractStopGate(this._requireAvoRuntime().getState(), baseGate, {
+			cwd: this.sessionManager.getCwd(),
+			excludedRoots: this._avoWorkspaceExcludedRoots(),
+			receiptDirectory: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_DIR,
+			receiptPublicKey: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_PUBLIC_KEY,
+		});
 	}
 
 	private _handleAvoSlashCommand(command: SessionSlashCommand): string {

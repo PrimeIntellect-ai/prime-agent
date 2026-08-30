@@ -1,0 +1,1 @@
+- Added task-start behavioral-contract enforcement that blocks protected coding changes until every affected invariant has current independently signed proof.

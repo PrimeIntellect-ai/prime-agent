@@ -8,6 +8,7 @@ import {
 	type AvoDashboardProjection,
 	AvoSessionRuntime,
 	type AvoStopGate,
+	applyAvoSpecContractStopGate,
 	reconcileAvoIntegrityForProjection,
 } from "../core/avo/index.js";
 import { deriveAutoresearchDashboardPayload } from "./autoresearch-dashboard.js";
@@ -224,6 +225,46 @@ function researchDashboardPayload(selected: AvoStateFile): AvoDashboardPayload {
 	};
 }
 
+function projectHostBoundStopGate(projection: AvoDashboardProjection, stopGate: AvoStopGate): AvoDashboardProjection {
+	const specChecks = stopGate.checks.filter((check) => check.id.startsWith("spec_"));
+	const sections =
+		specChecks.length === 0
+			? projection.sections
+			: [
+					...projection.sections,
+					{
+						id: "spec_contract",
+						title: "Executable behavioral contract",
+						items: specChecks.map((check) => ({
+							label: check.label,
+							value: check.passed ? "host proof current" : (check.reason ?? "proof missing"),
+							status: check.passed ? ("ok" as const) : ("fail" as const),
+						})),
+					},
+				];
+	if (stopGate.passed || !projection.stopGate.passed) return { ...projection, sections, stopGate };
+	let active = projection.phases.findIndex((phase) => phase.id === "test");
+	if (active < 0) active = projection.phases.findIndex((phase) => phase.id === "evaluate");
+	if (active < 0) active = Math.max(0, projection.phases.length - 2);
+	const selected = projection.phases[active]!;
+	return {
+		...projection,
+		status: projection.status === "completed" ? "blocked" : projection.status,
+		phase: {
+			id: selected.id,
+			title: selected.title,
+			detail: stopGate.reasons.slice(0, 3).join("; "),
+			progressPercent: Math.round((active / Math.max(1, projection.phases.length - 1)) * 100),
+		},
+		phases: projection.phases.map((phase, index) => ({
+			...phase,
+			status: index < active ? ("complete" as const) : index === active ? ("active" as const) : ("pending" as const),
+		})),
+		sections,
+		stopGate,
+	};
+}
+
 export function loadAvoDashboardPayload(agentDir: string, sessionId?: string): AvoDashboardPayload {
 	const selected = selectAvoStateFile(agentDir, sessionId);
 	if (!selected.avoStatePath && selected.autoresearchStatePath) return researchDashboardPayload(selected);
@@ -235,11 +276,39 @@ export function loadAvoDashboardPayload(agentDir: string, sessionId?: string): A
 	const dashboardState = cwd
 		? reconcileAvoIntegrityForProjection(state, cwd, [join(agentDir, "sessions"), selected.artifactDir])
 		: state;
+	const projection = runtime.adapters.get(dashboardState.routing.environment).dashboardProjection(dashboardState);
+	let hostBoundGate = projection.stopGate;
+	if (dashboardState.routing.environment === "coding" && dashboardState.verificationBaseline?.specContract) {
+		hostBoundGate = cwd
+			? applyAvoSpecContractStopGate(dashboardState, projection.stopGate, {
+					cwd,
+					excludedRoots: [join(agentDir, "sessions"), selected.artifactDir],
+					receiptDirectory: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_DIR,
+					receiptPublicKey: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_PUBLIC_KEY,
+				})
+			: {
+					passed: false,
+					checks: [
+						...projection.stopGate.checks,
+						{
+							id: "spec_dashboard_workspace",
+							label: "live behavioral contract workspace is available",
+							passed: false,
+							reason: "the dashboard could not resolve the session workspace for live spec verification",
+						},
+					],
+					reasons: [
+						...projection.stopGate.reasons,
+						"the dashboard could not resolve the session workspace for live spec verification",
+					],
+				};
+	}
+	const hostProjection = projectHostBoundStopGate(projection, hostBoundGate);
 	return {
 		sessionId: selected.sessionId,
 		objective: dashboardState.objective,
 		updatedAt: dashboardState.updatedAt,
-		...runtime.adapters.get(dashboardState.routing.environment).dashboardProjection(dashboardState),
+		...hostProjection,
 	};
 }
 

@@ -211,6 +211,7 @@ export interface AvoBaselineTestFile {
 export interface AvoVerificationBaseline {
 	kind: "coding";
 	contractDigest: string;
+	workspaceRoot?: string;
 	workspaceDigest: string;
 	workspaceMode?: "git" | "tree";
 	workspaceHead?: string;
@@ -218,6 +219,13 @@ export interface AvoVerificationBaseline {
 	testFiles: AvoBaselineTestFile[];
 	userAcceptanceCommands: string[];
 	executions: AvoBaselineExecution[];
+	specContract?: {
+		contractPath: string;
+		contractContent: string;
+		contractDigest: string;
+		receiptPublicKeyDigest?: string;
+		capturedAt: string;
+	};
 	capturedAt: string;
 }
 

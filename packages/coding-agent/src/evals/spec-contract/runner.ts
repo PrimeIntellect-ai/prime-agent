@@ -1,24 +1,28 @@
 #!/usr/bin/env node
 
-import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	type AvoSpecImpactReport,
+	assertAvoSpecReceiptTrustConfiguration,
 	deriveAvoSpecRequirementImpacts,
 	loadAndValidateAvoSpecContract,
+	loadAvoSpecReceiptOverlay,
 } from "../../core/avo/spec-contract.js";
+import { captureAvoWorkspaceSnapshot } from "../../core/avo/workspace.js";
 
 const SOURCE_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SOURCE_DIR, "..", "..", "..", "..", "..");
 const CONTRACT_PATH = "packages/coding-agent/spec/requirements.json";
-const MAX_RECEIPT_BYTES = 1_000_000;
 
 interface RunnerOptions {
 	changedPaths: string[];
 	enforce: boolean;
 	json: boolean;
 	receiptDir?: string;
+	runId?: string;
 	help: boolean;
 }
 
@@ -31,14 +35,16 @@ Usage:
 
 Options:
   --changed <path[,path...]>  Map candidate-changed files to protected requirements
-  --receipt-dir <directory>   Load host-signed receipts outside the candidate workspace
+  --receipt-dir <directory>   Load independently signed receipts outside the candidate workspace
+  --run-id <task-run-id>      Bind receipts to the active AVO task run
   --enforce                   Fail if an affected requirement is not verified or a protected path is unmapped
   --json                      Emit the report and impact data as JSON
   --help                      Show this help
 
 Environment:
-  PRIME_AGENT_AVO_SPEC_RECEIPT_KEY  Host-held HMAC key (at least 32 bytes)
+  PRIME_AGENT_AVO_SPEC_RECEIPT_PUBLIC_KEY  Ed25519 public key used to verify independent receipts
   PRIME_AGENT_AVO_SPEC_RECEIPT_DIR  Default external receipt directory
+  PRIME_AGENT_AVO_SPEC_RUN_ID       Default active AVO task run ID
 `;
 }
 
@@ -64,6 +70,12 @@ export function parseAvoSpecRunnerArgs(argv: readonly string[]): RunnerOptions {
 				options.receiptDir = resolve(value);
 				break;
 			}
+			case "--run-id": {
+				const value = argv[++index];
+				if (!value) throw new Error("--run-id requires an active AVO task run ID");
+				options.runId = value;
+				break;
+			}
 			case "--enforce":
 				options.enforce = true;
 				break;
@@ -82,49 +94,6 @@ export function parseAvoSpecRunnerArgs(argv: readonly string[]): RunnerOptions {
 		throw new Error("--enforce requires at least one --changed path");
 	}
 	return options;
-}
-
-export function loadAvoSpecReceiptOverlay(directory: string | undefined): {
-	receipts: Record<string, unknown>;
-	errors: string[];
-} {
-	if (!directory) return { receipts: {}, errors: [] };
-	const errors: string[] = [];
-	const receipts: Record<string, unknown> = {};
-	if (!existsSync(directory) || !statSync(directory).isDirectory() || lstatSync(directory).isSymbolicLink()) {
-		return { receipts, errors: [`receipt directory is missing, unsafe, or not a directory: ${directory}`] };
-	}
-	for (const name of readdirSync(directory)
-		.filter((item) => item.endsWith(".json"))
-		.sort()) {
-		const path = join(directory, name);
-		try {
-			const stat = lstatSync(path);
-			if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_RECEIPT_BYTES) {
-				errors.push(`receipt file is unsafe or too large: ${path}`);
-				continue;
-			}
-			const value = JSON.parse(readFileSync(path, "utf8")) as unknown;
-			if (
-				typeof value !== "object" ||
-				value === null ||
-				Array.isArray(value) ||
-				typeof (value as { evidenceId?: unknown }).evidenceId !== "string"
-			) {
-				errors.push(`receipt file has no evidenceId: ${path}`);
-				continue;
-			}
-			const evidenceId = (value as { evidenceId: string }).evidenceId;
-			if (Object.hasOwn(receipts, evidenceId)) {
-				errors.push(`duplicate external receipt for ${evidenceId}`);
-				continue;
-			}
-			receipts[evidenceId] = value;
-		} catch (error) {
-			errors.push(`could not load receipt ${path}: ${String(error)}`);
-		}
-	}
-	return { receipts, errors };
 }
 
 export function formatAvoSpecContractReport(report: ReturnType<typeof loadAndValidateAvoSpecContract>): string {
@@ -173,12 +142,28 @@ export function runAvoSpecContract(argv: readonly string[]): number {
 		return 0;
 	}
 	const receiptDir = options.receiptDir ?? process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_DIR;
+	try {
+		assertAvoSpecReceiptTrustConfiguration(process.env);
+	} catch (error) {
+		process.stderr.write(`${String(error)}\n`);
+		return 1;
+	}
 	const overlay = loadAvoSpecReceiptOverlay(receiptDir ? resolve(receiptDir) : undefined);
+	const contractContent = readFileSync(resolve(REPOSITORY_ROOT, CONTRACT_PATH), "utf8");
+	const receiptRunId = options.runId ?? process.env.PRIME_AGENT_AVO_SPEC_RUN_ID;
+	const workspace = captureAvoWorkspaceSnapshot(REPOSITORY_ROOT);
 	const report = loadAndValidateAvoSpecContract(CONTRACT_PATH, REPOSITORY_ROOT, {
-		receiptHmacKey: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_KEY,
+		receiptPublicKey: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_PUBLIC_KEY,
 		receipts: overlay.receipts,
+		receiptBinding: receiptRunId
+			? {
+					runId: receiptRunId,
+					workspaceDigest: workspace.digest,
+					contractDigest: createHash("sha256").update(contractContent).digest("hex"),
+				}
+			: undefined,
 	});
-	const contractValue = JSON.parse(readFileSync(resolve(REPOSITORY_ROOT, CONTRACT_PATH), "utf8")) as unknown;
+	const contractValue = JSON.parse(contractContent) as unknown;
 	const impact = deriveAvoSpecRequirementImpacts(contractValue, options.changedPaths);
 	const affectedStatuses = new Map(
 		report.requirements.map((requirement) => [requirement.id, requirement.derivedStatus]),

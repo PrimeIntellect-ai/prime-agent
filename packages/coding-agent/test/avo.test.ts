@@ -533,7 +533,8 @@ describe("generic AVO core", () => {
 		execFileSync("git", ["commit", "-qm", "baseline"], { cwd: project });
 
 		writeFileSync(join(project, "README.md"), "pre-existing user edit\n", "utf8");
-		const baseline = captureAvoCodingVerificationBaseline(project, "Fix the parser");
+		const baseline = captureAvoCodingVerificationBaseline(join(project, "src"), "Fix the parser");
+		expect(baseline.workspaceRoot).toBe(project);
 		writeFileSync(join(project, "src", "parser.ts"), "export const parse = () => 2;\n", "utf8");
 		const candidate = captureAvoWorkspaceSnapshot(project);
 		expect(deriveAvoWorkspaceImpactPaths(baseline, candidate)).toEqual(["src/parser.ts"]);
