@@ -754,6 +754,16 @@ describe("supervisor roster ledger", () => {
 		expect(passiveChild).toMatchObject({ workerPid: 1234 });
 		expect(passiveChild?.activeSessionId).toBeUndefined();
 
+		// One list-all serves resident worker rows and workerless seeded rows side by side.
+		const liveAll = await supervisor.handleList({}, { type: "list", all: true });
+		expect(liveAll.data?.sessions.map((session) => session.sessionId).sort()).toEqual([
+			"child-session",
+			"evicted",
+			"live-child",
+			"saved-root",
+		]);
+		expect(liveAll.data?.sessions.some((session) => session.sessionId === "deleted-child")).toBe(false);
+
 		// Eviction leaves the worker's rows behind as inactive instead of dropping them.
 		supervisor.workers.delete("worker-1");
 		supervisor.flipWorkerRosterEntriesInactive(worker);
