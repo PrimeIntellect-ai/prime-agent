@@ -417,6 +417,9 @@ function extractBashSkillCommand(code: string): string | undefined {
 	const start = match?.[0].length ?? 0;
 	const end = code.indexOf(quote, start);
 	if (end < 0) return undefined;
+	// A backslash before the close quote means an escaped quote inside the literal;
+	// extracting the mis-cut prefix would preview a wrong command, so fall back.
+	if (quote.length === 1 && code[end - 1] === "\\") return undefined;
 	const rest = code.slice(end + quote.length).trimStart();
 	// Require a plain literal first argument; concatenation or other expressions fall back.
 	if (!rest.startsWith(",") && !rest.startsWith(")")) return undefined;

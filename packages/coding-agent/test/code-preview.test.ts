@@ -161,6 +161,8 @@ git add packages/foo.ts
 			language: "python",
 			text: "r = await bash('echo can\\'t stop')",
 		});
+		// Escaped quote directly before the close quote: a mis-cut here would preview a wrong command.
+		expect(previewIpythonCode('r = await bash("grep -n \\")\\" src.c")').language).toBe("python");
 	});
 
 	it("previews the bash-skill call when the scorer picks it among other lines", () => {
