@@ -13,6 +13,7 @@ const PYTHON_DEFINITION_PATTERN = /^\s*(?:async\s+def|def|class)\s+/;
 const PYTHON_MAIN_PATTERN = /^\s*if\s+__name__\s*==\s*['"]__main__['"]\s*:/;
 const PYTHON_CONTROL_PATTERN = /^\s*(?:if|elif|else|for|while|with|try|except|finally)\b.*:\s*$/;
 const PYTHON_CALL_PATTERN = /^\s*(?:await\s+)?[A-Za-z_][A-Za-z0-9_.]*\s*\(/;
+const BASH_SKILL_CALL_PATTERN = /^\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*=\s*)?(?:await\s+)?bash\s*\(\s*[rR]?("""|'''|"|')/;
 const PYTHON_LOW_SIGNAL_CALL_PATTERN = /^\s*(?:await\s+)?(?:print|len|str|repr|int|float|list|dict|set|tuple)\s*\(/;
 const PYTHON_ASSIGNMENT_CALL_PATTERN =
 	/^\s*[A-Za-z_][A-Za-z0-9_]*(?:\s*:\s*[^=]+)?\s*=\s*(?:await\s+)?[A-Za-z_][A-Za-z0-9_.]*\s*\(/;
@@ -409,6 +410,19 @@ function pythonPreviewIndex(lines: readonly string[], index: number): number {
 	return childIndex === undefined ? index : pythonPreviewIndex(lines, childIndex);
 }
 
+function extractBashSkillCommand(code: string): string | undefined {
+	const match = code.match(BASH_SKILL_CALL_PATTERN);
+	const quote = match?.[1];
+	if (!quote) return undefined;
+	const start = match?.[0].length ?? 0;
+	const end = code.indexOf(quote, start);
+	if (end < 0) return undefined;
+	const rest = code.slice(end + quote.length).trimStart();
+	// Require a plain literal first argument; concatenation or other expressions fall back.
+	if (!rest.startsWith(",") && !rest.startsWith(")")) return undefined;
+	return code.slice(start, end);
+}
+
 export function previewPythonCode(code: string): CodePreview {
 	const lines = code.split("\n");
 	const paths = pythonPathVars(lines);
@@ -425,6 +439,11 @@ export function previewPythonCode(code: string): CodePreview {
 
 	if (bestIndex !== undefined && bestScore >= 0) {
 		const previewIndex = pythonPreviewIndex(lines, bestIndex);
+		// The literal may span lines below the chosen one, so extract from the full tail.
+		const bashCommand = extractBashSkillCommand(lines.slice(previewIndex).join("\n"));
+		if (bashCommand) {
+			return previewBashCommand(bashCommand);
+		}
 		return {
 			language: "python",
 			text: descriptor(pythonPreviewLine(lines, previewIndex, paths)),

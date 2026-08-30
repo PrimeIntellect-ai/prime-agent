@@ -125,6 +125,40 @@ EOF`;
 		expect(previewBashCommand(command)).toEqual({ language: "bash", text: "hello world" });
 	});
 
+	it("routes bash-skill calls with literal commands to the bash preview", () => {
+		expect(previewIpythonCode("r = await bash('git status --porcelain')")).toEqual({
+			language: "bash",
+			text: "git status --porcelain",
+		});
+		const longCommand = `git log --oneline -- ${Array.from({ length: 8 }, (_, i) => `packages/coding-agent/src/dir-${i}`).join(" ")}`;
+		const longPreview = previewIpythonCode(`result = await bash("${longCommand}", timeout=120)`);
+		expect(longPreview.language).toBe("bash");
+		expect(longPreview.text.startsWith("git log --oneline")).toBe(true);
+	});
+
+	it("passes triple-quoted bash-skill bodies through like %%bash cells", () => {
+		const code = `r = await bash('''
+set -e
+git add packages/foo.ts
+''')`;
+		expect(previewIpythonCode(code)).toEqual({ language: "bash", text: "git add packages/foo.ts" });
+	});
+
+	it("keeps the python preview for non-literal bash-skill arguments", () => {
+		expect(previewIpythonCode("r = await bash(cmd)")).toEqual({ language: "python", text: "r = await bash(cmd)" });
+		expect(previewIpythonCode('r = await bash(f"git checkout {branch}")')).toEqual({
+			language: "python",
+			text: 'r = await bash(f"git checkout {branch}")',
+		});
+	});
+
+	it("previews the bash-skill call when the scorer picks it among other lines", () => {
+		const code = `import json
+r = await bash('git diff --stat')
+print(r)`;
+		expect(previewIpythonCode(code)).toEqual({ language: "bash", text: "git diff --stat" });
+	});
+
 	it("prefers a later meaningful heredoc over an earlier generic one", () => {
 		const command = `cat <<'CFG'
 key=value
