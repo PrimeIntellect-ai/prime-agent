@@ -110,10 +110,12 @@ describe("agents-view roster store", () => {
 		expect(client.request).not.toHaveBeenCalled();
 	});
 
-	it("applies pushed updates, removals, and full resyncs", async () => {
+	it("applies pushed updates, removals, and full resyncs with one listener emission per tick", async () => {
 		const client = fakeRosterClient([ledgerEntry({ id: "a", sessionId: "a" })]);
 		const store = new AgentsViewRosterStore();
 		await store.attach(client as never);
+		const listener = vi.fn();
+		store.onUpdate(listener);
 
 		client.emit({
 			type: "roster_update",
@@ -132,6 +134,9 @@ describe("agents-view roster store", () => {
 
 		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "c", sessionId: "c" })], resync: true });
 		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["c"]);
+
+		await Promise.resolve();
+		expect(listener).toHaveBeenCalledTimes(1);
 	});
 
 	it("replays pushes that raced the subscribe reply after the snapshot resync", async () => {
@@ -153,25 +158,10 @@ describe("agents-view roster store", () => {
 		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["b"]);
 	});
 
-	it("emits one listener call for several updates arriving in the same tick", async () => {
-		const client = fakeRosterClient([]);
-		const store = new AgentsViewRosterStore();
-		await store.attach(client as never);
-		const listener = vi.fn();
-		store.onUpdate(listener);
-
-		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "a", sessionId: "a" })] });
-		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "b", sessionId: "b" })] });
-		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "c", sessionId: "c" })] });
-		await Promise.resolve();
-
-		expect(listener).toHaveBeenCalledTimes(1);
-		expect(store.summaries()).toHaveLength(3);
-	});
 });
 
 describe("roster-driven agents view rows", () => {
-	it("shows a queued child with its ledger label before any session exists", () => {
+	it("labels queued, recovering, and stale rows from ledger state instead of hiding them", () => {
 		const queued = ledgerEntry(
 			{
 				id: "child-1",
@@ -188,20 +178,6 @@ describe("roster-driven agents view rows", () => {
 			{ id: "root-active", sessionId: "root-session", activeSessionId: "root-active" },
 			{ status: "idle" },
 		);
-
-		const summaries = [root, queued].map((entry) => sessionSummaryFromRosterEntry(entry));
-		const rootIdentity = buildAgentsViewRows(summaries).find(
-			(row) => row.summary.sessionId === "root-session",
-		)?.identity;
-		if (!rootIdentity) throw new Error("Missing root row");
-		const rows = buildAgentsViewRows(summaries, new Set([rootIdentity]));
-		const queuedRow = rows.find((row) => row.summary.rlmChildId === "child-1");
-		expect(queuedRow).toBeDefined();
-		expect(queuedRow?.section).toBe("running");
-		expect(queuedRow?.statusLabel).toBe("queued");
-	});
-
-	it("labels recovering and stale rows from ledger state instead of hiding them", () => {
 		const recovering = ledgerEntry(
 			{ id: "r-active", sessionId: "r", activeSessionId: "r-active" },
 			{ status: "running", statusLabel: "recovering" },
@@ -211,8 +187,14 @@ describe("roster-driven agents view rows", () => {
 			{ status: "idle", lastHeardFromAt: new Date(Date.now() - 60_000).toISOString() },
 		);
 
-		const rows = buildAgentsViewRows([recovering, stale].map((entry) => sessionSummaryFromRosterEntry(entry)));
-		expect(rows).toHaveLength(2);
+		const summaries = [root, queued, recovering, stale].map((entry) => sessionSummaryFromRosterEntry(entry));
+		const rootIdentity = buildAgentsViewRows(summaries).find(
+			(row) => row.summary.sessionId === "root-session",
+		)?.identity;
+		if (!rootIdentity) throw new Error("Missing root row");
+		const rows = buildAgentsViewRows(summaries, new Set([rootIdentity]));
+		const queuedRow = rows.find((row) => row.summary.rlmChildId === "child-1");
+		expect(queuedRow).toMatchObject({ section: "running", statusLabel: "queued" });
 		expect(rows.find((row) => row.summary.sessionId === "r")?.statusLabel).toBe("recovering");
 		expect(rows.find((row) => row.summary.sessionId === "s")?.statusLabel).toMatch(/^last heard \d+(s|m) ago$/);
 	});
@@ -299,19 +281,25 @@ describe("roster-driven agents view instance", () => {
 		return { view, store, client };
 	}
 
-	it("serves navigation refreshes from the store with zero catalog requests", async () => {
+	it("serves refreshes and row navigation from the store with zero daemon requests", async () => {
+		setKeybindings(new KeybindingsManager());
 		const { view, store, client } = makeView([
 			ledgerEntry({ id: "a-active", sessionId: "a", activeSessionId: "a-active" }, { status: "running" }),
+			ledgerEntry({ id: "b-active", sessionId: "b", activeSessionId: "b-active" }, { status: "idle" }),
 		]);
 		await store.attach(client as never);
 		client.request.mockClear();
 
 		const internals = view as unknown as {
 			refreshSessions(): Promise<boolean>;
+			onRosterUpdate(): void;
 			rows: Array<{ summary: SessionSummary }>;
 		};
 		await expect(internals.refreshSessions()).resolves.toBe(true);
 		await expect(internals.refreshSessions()).resolves.toBe(true);
+		internals.onRosterUpdate();
+		view.handleInput("\u001b[B");
+		view.handleInput("\u001b[A");
 
 		expect(client.request).not.toHaveBeenCalled();
 		expect(internals.rows.some((row) => row.summary.sessionId === "a")).toBe(true);
@@ -334,22 +322,6 @@ describe("roster-driven agents view instance", () => {
 		internals.editor.setText("needle two");
 		internals.queryChanged();
 		expect(refreshSavedSessions).toHaveBeenCalledTimes(1);
-	});
-
-	it("navigates rows without issuing any daemon requests", async () => {
-		setKeybindings(new KeybindingsManager());
-		const { view, store, client } = makeView([
-			ledgerEntry({ id: "a-active", sessionId: "a", activeSessionId: "a-active" }, { status: "running" }),
-			ledgerEntry({ id: "b-active", sessionId: "b", activeSessionId: "b-active" }, { status: "idle" }),
-		]);
-		await store.attach(client as never);
-		(view as unknown as { onRosterUpdate(): void }).onRosterUpdate();
-		client.request.mockClear();
-
-		view.handleInput("\u001b[B");
-		view.handleInput("\u001b[A");
-
-		expect(client.request).not.toHaveBeenCalled();
 	});
 
 	it("reconciles once per pushed batch", async () => {
