@@ -333,7 +333,6 @@ describe("roster-driven agents view instance", () => {
 		internals.queryChanged();
 		expect(refreshSavedSessions).toHaveBeenCalledTimes(1);
 	});
-
 });
 
 describe("subscriber push transitions", () => {

@@ -252,7 +252,7 @@ describe("SubagentSummaryLine", () => {
 			this: typeof mode,
 			value: AgentConnectionRlmChildAgentSnapshot,
 		) => void;
-		const snapshots = mode.subagentSnapshots as Map<string, AgentConnectionRlmChildAgentSnapshot>;
+		const snapshots = Reflect.get(mode, "subagentSnapshots") as Map<string, AgentConnectionRlmChildAgentSnapshot>;
 
 		// A queued run that errors before any session existed is a removal, never an inactive phantom.
 		update.call(mode, child("never-bound", "queued"));
