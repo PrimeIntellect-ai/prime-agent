@@ -509,6 +509,7 @@ function resolveGoogleSearchEnabled(options: GoogleVertexOptions, context: Conte
 	}
 	const value = process.env.GOOGLE_VERTEX_GOOGLE_SEARCH?.trim().toLowerCase();
 	if (value === "1" || value === "true" || value === "yes" || value === "on") return true;
+	if (value === "0" || value === "false" || value === "no" || value === "off") return false;
 	return context.systemPrompt?.includes("AVO_ONLINE_EVIDENCE=required") === true;
 }
 

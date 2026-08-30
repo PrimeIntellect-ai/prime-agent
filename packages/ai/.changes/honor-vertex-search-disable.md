@@ -1,0 +1,1 @@
+- Allowed Google Vertex Google Search to be explicitly disabled even when an AVO prompt requests online evidence.

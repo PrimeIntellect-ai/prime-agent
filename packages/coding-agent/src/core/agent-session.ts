@@ -139,6 +139,7 @@ import {
 	AVO_HOST_REQUEST_TYPES,
 	AVO_PYTHON_PROBE_MAX_CASES,
 	AVO_SKILL_NAME,
+	AVO_VERIFICATION_BROKER_PYTHON_AUTHORITY_ENV,
 	type AvoEvaluationReceipt,
 	type AvoHorizonSelection,
 	type AvoIndependentClaimVerdict,
@@ -152,6 +153,7 @@ import {
 	type AvoRunState,
 	AvoSessionRuntime,
 	type AvoStopGate,
+	type AvoVerificationBrokerReceipt,
 	applyAvoSpecContractStopGate,
 	assertAvoClaimSourceContextSafe,
 	assertAvoClaimVerifierQuoteSafe,
@@ -162,6 +164,8 @@ import {
 	assessAvoPythonProbeAdequacy,
 	assessAvoTestTrust,
 	avoClaimVerifierMarker,
+	avoVerificationBrokerGrantsPythonSemanticAuthority,
+	avoVerificationBrokerReceiptMatchesWorkspace,
 	buildAvoClaimVerifierPrompt,
 	buildAvoMemoryReasonerPrompt,
 	buildAvoMemoryReconcilerPrompt,
@@ -179,6 +183,7 @@ import {
 	captureAvoWorkspaceSnapshot,
 	classifyAvoHostEvaluationCommand,
 	combineAvoClaimEvidenceAssessments,
+	createAvoVerificationBrokerBashOperations,
 	deriveAvoDeterministicArithmeticContract,
 	deriveAvoObservedTestIdentities,
 	deriveAvoProgressWatchdogSnapshot,
@@ -5919,7 +5924,17 @@ export class AgentSession {
 					verificationHarnessBefore.supported &&
 					verificationHarnessAfter?.supported === true &&
 					verificationHarnessBefore.digest === verificationHarnessAfter.digest;
+				const verificationBrokerTimedOut =
+					result.verificationMode === "host_broker" && result.verificationBrokerReceipt?.timedOut === true;
+				const verificationBrokerWorkspaceMatched = avoVerificationBrokerReceiptMatchesWorkspace(
+					payload.command,
+					result.verificationMode,
+					result.verificationBrokerReceipt,
+					workspace.digest,
+				);
 				const meaningful =
+					!verificationBrokerTimedOut &&
+					verificationBrokerWorkspaceMatched &&
 					assessment.metrics.meaningful === true &&
 					trust.trusted &&
 					trust.executionProven &&
@@ -5956,6 +5971,13 @@ export class AgentSession {
 						verification_harness_supported: verificationHarnessBefore.supported,
 						verification_harness_stable: harnessStable,
 						verification_harness_digest: verificationHarnessBefore.digest,
+						verification_execution_mode: result.verificationMode,
+						verification_broker_timed_out: verificationBrokerTimedOut,
+						verification_broker_workspace_matches_baseline: verificationBrokerWorkspaceMatched,
+						verification_broker_workspace_digest: result.verificationBrokerReceipt?.workspaceDigest ?? "missing",
+						verification_broker_post_workspace_digest:
+							result.verificationBrokerReceipt?.postWorkspaceDigest ?? "missing",
+						verification_broker_receipt_digest: result.verificationBrokerReceipt?.receiptDigest ?? "missing",
 					},
 					output: result.output,
 					exit_code: result.exitCode ?? null,
@@ -6169,6 +6191,14 @@ export class AgentSession {
 					requiresWorkspaceBinding && evaluatorId === "test"
 						? await this._executeAvoVerificationBash(payload.command)
 						: await this.executeBash(payload.command);
+				const verificationBrokerReceipt =
+					"verificationBrokerReceipt" in result
+						? (result.verificationBrokerReceipt as AvoVerificationBrokerReceipt | undefined)
+						: undefined;
+				const verificationExecutionMode =
+					"verificationMode" in result && typeof result.verificationMode === "string"
+						? result.verificationMode
+						: "ordinary";
 				const durationMs = Date.now() - startedAt;
 				let assessment = assessAvoHostCommand(evaluatorId, {
 					exitCode: result.exitCode,
@@ -6181,6 +6211,12 @@ export class AgentSession {
 							excludedRoots: this._avoWorkspaceExcludedRoots(),
 						})
 					: workspace;
+				const verificationBrokerWorkspaceMatched = avoVerificationBrokerReceiptMatchesWorkspace(
+					payload.command,
+					verificationExecutionMode,
+					verificationBrokerReceipt,
+					candidate.workspaceDigest ?? "",
+				);
 				if (requiresWorkspaceBinding && evaluatorId === "test") {
 					const commandPassed = assessment.status === "pass";
 					const trust = assessAvoTestTrust(
@@ -6213,9 +6249,17 @@ export class AgentSession {
 						baselineExecution.verificationHarness.commandDigest === commandDigest &&
 						baselineExecution.verificationHarness.digest === verificationHarnessBefore.digest &&
 						verificationHarnessBefore.digest === trust.verificationHarness.digest;
+					const brokerPythonSemanticAuthority =
+						verificationBrokerWorkspaceMatched &&
+						avoVerificationBrokerGrantsPythonSemanticAuthority(
+							payload.command,
+							verificationExecutionMode,
+							verificationBrokerReceipt,
+						);
 					const pythonInProcessVerifier =
 						verificationHarnessBefore?.runnerFamily === "pytest" &&
-						candidate.workspaceChangedPaths?.some((path) => path.endsWith(".py")) === true;
+						candidate.workspaceChangedPaths?.some((path) => path.endsWith(".py")) === true &&
+						!brokerPythonSemanticAuthority;
 					const pythonInProcessSelfCertification = commandPassed && pythonInProcessVerifier;
 					const baselineExecutionObservedMatched =
 						trust.trusted &&
@@ -6262,6 +6306,11 @@ export class AgentSession {
 							narrowed_test_selection: trust.narrowedSelection,
 							python_in_process_self_certification: pythonInProcessSelfCertification,
 							python_test_semantic_authority: !pythonInProcessVerifier,
+							verification_execution_mode: verificationExecutionMode,
+							verification_broker_python_authority_enabled:
+								process.env[AVO_VERIFICATION_BROKER_PYTHON_AUTHORITY_ENV] === "1",
+							verification_broker_semantic_authority: brokerPythonSemanticAuthority,
+							verification_broker_receipt_digest: verificationBrokerReceipt?.receiptDigest ?? "missing",
 							validation_reason: meaningful
 								? "the same immutable pre-candidate baseline test contract executed and passed afterward"
 								: pythonInProcessSelfCertification
@@ -6271,6 +6320,35 @@ export class AgentSession {
 										: typeof assessment.metrics.validation_reason === "string"
 											? assessment.metrics.validation_reason
 											: "the coding test command did not produce a passing authoritative result",
+						},
+					};
+				}
+				if (requiresWorkspaceBinding && !verificationBrokerWorkspaceMatched) {
+					assessment = {
+						status: "revise",
+						metrics: {
+							...assessment.metrics,
+							meaningful: false,
+							verification_broker_workspace_matches_candidate: false,
+							verification_broker_workspace_digest: verificationBrokerReceipt?.workspaceDigest ?? "missing",
+							verification_broker_post_workspace_digest:
+								verificationBrokerReceipt?.postWorkspaceDigest ?? "missing",
+							validation_reason:
+								"the host verification broker receipt is not bound to the evaluated candidate workspace",
+						},
+					};
+				}
+				const verificationBrokerTimedOut =
+					verificationExecutionMode === "host_broker" && verificationBrokerReceipt?.timedOut === true;
+				if (verificationBrokerTimedOut) {
+					assessment = {
+						status: "revise",
+						metrics: {
+							...assessment.metrics,
+							meaningful: false,
+							verification_broker_timed_out: true,
+							validation_reason:
+								"the host verification broker timed out before completing authoritative verification",
 						},
 					};
 				}
@@ -6298,6 +6376,7 @@ export class AgentSession {
 							workspaceDigest: workspace.digest,
 							postWorkspaceDigest: postWorkspace.digest,
 							candidatePayloadDigest: candidate.payloadDigest,
+							verificationBrokerReceiptDigest: verificationBrokerReceipt?.receiptDigest ?? null,
 						}),
 					)
 					.digest("hex");
@@ -6310,6 +6389,9 @@ export class AgentSession {
 						`host:command:${receiptDigest}`,
 						`host:workspace:${workspace.digest}`,
 						`host:workspace-post:${postWorkspace.digest}`,
+						...(verificationBrokerReceipt
+							? [`host:verification-broker:${verificationBrokerReceipt.receiptDigest}`]
+							: []),
 					],
 					metrics: {
 						...assessment.metrics,
@@ -6317,7 +6399,7 @@ export class AgentSession {
 						output_digest: createHash("sha256").update(result.output).digest("hex"),
 						duration_ms: durationMs,
 						...(requiresWorkspaceBinding
-							? { workspace_matches_candidate: true }
+							? { workspace_matches_candidate: verificationBrokerWorkspaceMatched }
 							: { workspace_binding: "not_required" }),
 						workspace_digest: workspace.digest,
 						post_workspace_digest: postWorkspace.digest,
@@ -6327,6 +6409,13 @@ export class AgentSession {
 						workspace_changed_files: workspace.changedFileCount,
 						workspace_snapshot_bytes: workspace.totalBytes,
 						candidate_payload_digest: candidate.payloadDigest,
+						verification_execution_mode: verificationExecutionMode,
+						verification_broker_timed_out: verificationBrokerTimedOut,
+						verification_broker_workspace_matches_candidate: verificationBrokerWorkspaceMatched,
+						verification_broker_workspace_digest: verificationBrokerReceipt?.workspaceDigest ?? "missing",
+						verification_broker_post_workspace_digest:
+							verificationBrokerReceipt?.postWorkspaceDigest ?? "missing",
+						verification_broker_receipt_digest: verificationBrokerReceipt?.receiptDigest ?? "missing",
 					},
 				});
 				return {
@@ -15774,20 +15863,33 @@ export class AgentSession {
 		}
 	}
 
-	private async _executeAvoVerificationBash(command: string): Promise<BashResult> {
-		const operations = createReadOnlyVerificationBashOperations();
+	private async _executeAvoVerificationBash(command: string): Promise<
+		BashResult & {
+			verificationMode: "host_broker" | "local_sandbox" | "unavailable";
+			verificationBrokerReceipt?: AvoVerificationBrokerReceipt;
+		}
+	> {
+		const brokerOperations = createAvoVerificationBrokerBashOperations();
+		const operations = brokerOperations ?? createReadOnlyVerificationBashOperations();
 		if (!operations) {
 			return {
 				output: "AVO read-only verification sandbox unavailable; command was not executed.\n",
 				exitCode: undefined,
 				cancelled: false,
 				truncated: false,
+				verificationMode: "unavailable",
 			};
 		}
-		return this.executeBash(command, undefined, {
+		const result = await this.executeBash(command, undefined, {
 			operations,
 			ignoreConfiguredPrefix: true,
 		});
+		const verificationBrokerReceipt = brokerOperations?.lastReceipt();
+		return {
+			...result,
+			verificationMode: brokerOperations ? "host_broker" : "local_sandbox",
+			...(verificationBrokerReceipt ? { verificationBrokerReceipt } : {}),
+		};
 	}
 
 	/**

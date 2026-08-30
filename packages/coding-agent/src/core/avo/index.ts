@@ -194,6 +194,22 @@ export {
 } from "./supervisor.js";
 export * from "./types.js";
 export {
+	AVO_VERIFICATION_BROKER_PYTHON_AUTHORITY_ENV,
+	AVO_VERIFICATION_BROKER_SOCKET_ENV,
+	AVO_VERIFICATION_BROKER_TOKEN_ENV,
+	type AvoVerificationBrokerBashOperations,
+	type AvoVerificationBrokerExecution,
+	type AvoVerificationBrokerHandle,
+	type AvoVerificationBrokerHostFixture,
+	type AvoVerificationBrokerOptions,
+	type AvoVerificationBrokerReceipt,
+	avoVerificationBrokerClientTimeoutMs,
+	avoVerificationBrokerGrantsPythonSemanticAuthority,
+	avoVerificationBrokerReceiptMatchesWorkspace,
+	createAvoVerificationBrokerBashOperations,
+	startAvoVerificationBroker,
+} from "./verification-broker.js";
+export {
 	AVO_UNBOUND_VERIFICATION_ENVIRONMENT_KEYS,
 	sanitizeAvoVerificationEnvironment,
 	unboundAvoVerificationEnvironmentKeys,

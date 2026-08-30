@@ -1,11 +1,56 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AGENT_MESSAGE_SOURCE, createAgentSessionMessage } from "../../src/core/agent-messages.js";
-import { AVO_HOST_REQUEST_TYPES, type AvoRunState, GeneralAvoAdapter } from "../../src/core/avo/index.js";
+import {
+	AVO_HOST_REQUEST_TYPES,
+	AVO_VERIFICATION_BROKER_PYTHON_AUTHORITY_ENV,
+	type AvoRunState,
+	type AvoVerificationBrokerReceipt,
+	GeneralAvoAdapter,
+} from "../../src/core/avo/index.js";
 import { createHarness, type Harness } from "./harness.js";
+
+function testVerificationBrokerReceipt(
+	command: string,
+	output: string,
+	workspaceDigest: string,
+): AvoVerificationBrokerReceipt {
+	const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+	const opaqueDigest = digest("test verification broker fixture");
+	const payload: Omit<AvoVerificationBrokerReceipt, "receiptDigest"> = {
+		protocolVersion: 1,
+		brokerId: `broker-${"a".repeat(32)}`,
+		requestId: "b".repeat(32),
+		commandDigest: digest(command),
+		controlDigest: opaqueDigest,
+		hostFixtureDigest: opaqueDigest,
+		postHostFixtureDigest: opaqueDigest,
+		hostFixtureCount: 0,
+		environmentDigest: opaqueDigest,
+		workspaceDigest,
+		postWorkspaceDigest: workspaceDigest,
+		sourceDigest: opaqueDigest,
+		postSourceDigest: opaqueDigest,
+		exitCode: 0,
+		outputDigest: digest(output),
+		durationMs: 10,
+		timedOut: false,
+		sourceWorkspaceImmutable: true,
+		disposableWorkspace: true,
+		networkIsolated: true,
+		homeIsolated: true,
+		hostFixturesImmutable: true,
+		pythonSemanticAuthority: true,
+	};
+	return {
+		...payload,
+		receiptDigest: digest(JSON.stringify(payload)),
+	};
+}
 
 function writeExecutableSpecFixture(root: string): void {
 	mkdirSync(`${root}/spec`, { recursive: true });
@@ -1127,6 +1172,192 @@ describe("AgentSession universal AVO runtime", () => {
 			}),
 		).toMatchObject({ cycle: { outcome: "revised" } });
 	});
+
+	it.each([
+		{
+			candidatePath: "subject.cjs",
+			baselineSource: "module.exports = 1;\n",
+			candidateSource: "module.exports = 2;\n",
+			testSource:
+				"from pathlib import Path\n\ndef test_subject():\n    assert Path('subject.cjs').read_text() in {'module.exports = 1;\\n', 'module.exports = 2;\\n'}\n",
+		},
+		{
+			candidatePath: "subject.py",
+			baselineSource: "def value():\n    return 1\n",
+			candidateSource: "def value():\n    return 2\n",
+			testSource: "from subject import value\n\ndef test_subject():\n    assert value() in {1, 2}\n",
+		},
+	])(
+		"rejects a timed-out host-broker receipt for $candidatePath even when its copied test output passes",
+		async ({ candidatePath, baselineSource, candidateSource, testSource }) => {
+			vi.stubEnv("PYTHONDONTWRITEBYTECODE", "1");
+			vi.stubEnv("PYTEST_ADDOPTS", "-p no:cacheprovider");
+			harness = await createHarness({ persistSession: true });
+			writeFileSync(`${harness.tempDir}/${candidatePath}`, baselineSource);
+			writeFileSync(`${harness.tempDir}/test_subject.py`, testSource);
+			harness.setResponses([fauxAssistantMessage("working")]);
+			await harness.session.prompt("Fix the parser implementation and run its test");
+			const command = "python3 -m pytest test_subject.py -vv";
+			const baseline = await harness.session.handleAvoHostRequest("avo.verification.baseline.run", { command });
+			expect(baseline).toMatchObject({
+				execution: { meaningful: true, observedTestIdentities: ["pytest:1:test_subject.py::test_subject"] },
+			});
+			if (typeof baseline.output !== "string") throw new Error("expected baseline verification output");
+			const baselineOutput = baseline.output;
+
+			writeFileSync(`${harness.tempDir}/${candidatePath}`, candidateSource);
+			const candidateId = `timed-out-${candidatePath.replace(".", "-")}`;
+			await harness.session.handleAvoHostRequest("avo.candidate.add", {
+				candidate: {
+					candidate_id: candidateId,
+					kind: "implementation",
+					summary: `Changed ${candidatePath}`,
+					payload: { candidatePath },
+				},
+			});
+
+			const digest = "0".repeat(64);
+			const timedOutReceipt: AvoVerificationBrokerReceipt = {
+				protocolVersion: 1,
+				brokerId: `broker-${"a".repeat(32)}`,
+				requestId: "b".repeat(32),
+				commandDigest: digest,
+				controlDigest: digest,
+				hostFixtureDigest: digest,
+				postHostFixtureDigest: digest,
+				hostFixtureCount: 0,
+				environmentDigest: digest,
+				workspaceDigest: digest,
+				postWorkspaceDigest: digest,
+				sourceDigest: digest,
+				postSourceDigest: digest,
+				exitCode: 0,
+				outputDigest: digest,
+				durationMs: 900_000,
+				timedOut: true,
+				sourceWorkspaceImmutable: true,
+				disposableWorkspace: true,
+				networkIsolated: true,
+				homeIsolated: true,
+				hostFixturesImmutable: true,
+				pythonSemanticAuthority: true,
+				receiptDigest: digest,
+			};
+			const sessionInternals = harness.session as unknown as {
+				_executeAvoVerificationBash(command: string): Promise<{
+					output: string;
+					exitCode: number | undefined;
+					cancelled: boolean;
+					truncated: boolean;
+					verificationMode: "host_broker";
+					verificationBrokerReceipt: AvoVerificationBrokerReceipt;
+				}>;
+			};
+			sessionInternals._executeAvoVerificationBash = async () => ({
+				output: baselineOutput,
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				verificationMode: "host_broker",
+				verificationBrokerReceipt: timedOutReceipt,
+			});
+
+			const post = await harness.session.handleAvoHostRequest("avo.evaluation.run", {
+				candidate_id: candidateId,
+				command,
+			});
+			expect(post.evaluation).toMatchObject({
+				status: "revise",
+				issuedBy: "host",
+				metrics: {
+					meaningful: false,
+					verification_execution_mode: "host_broker",
+					verification_broker_timed_out: true,
+					validation_reason: "the host verification broker timed out before completing authoritative verification",
+				},
+			});
+		},
+		20_000,
+	);
+
+	it.each([
+		{ receiptMatchesCandidate: true, expectedStatus: "pass", expectedMeaningful: true },
+		{ receiptMatchesCandidate: false, expectedStatus: "revise", expectedMeaningful: false },
+	])(
+		"binds a passing host-broker receipt to the exact candidate workspace ($receiptMatchesCandidate)",
+		async ({ receiptMatchesCandidate, expectedStatus, expectedMeaningful }) => {
+			vi.stubEnv("PYTHONDONTWRITEBYTECODE", "1");
+			vi.stubEnv("PYTEST_ADDOPTS", "-p no:cacheprovider");
+			vi.stubEnv(AVO_VERIFICATION_BROKER_PYTHON_AUTHORITY_ENV, "1");
+			harness = await createHarness({ persistSession: true });
+			writeFileSync(`${harness.tempDir}/subject.py`, "def value():\n    return 1\n");
+			writeFileSync(
+				`${harness.tempDir}/test_subject.py`,
+				"from subject import value\n\ndef test_subject():\n    assert value() in {1, 2}\n",
+			);
+			harness.setResponses([fauxAssistantMessage("working")]);
+			await harness.session.prompt("Fix subject.py value() and prove its Python behavior");
+			const command = "python3 -m pytest test_subject.py -vv";
+			const baseline = await harness.session.handleAvoHostRequest("avo.verification.baseline.run", { command });
+			if (typeof baseline.output !== "string") throw new Error("expected baseline verification output");
+			const baselineOutput = baseline.output;
+
+			writeFileSync(`${harness.tempDir}/subject.py`, "def value():\n    return 2\n");
+			const candidateResult = await harness.session.handleAvoHostRequest("avo.candidate.add", {
+				candidate: {
+					candidate_id: "broker-bound-python",
+					kind: "implementation",
+					summary: "Changed subject.py value",
+					payload: { value: 2 },
+				},
+			});
+			const candidate = candidateResult.candidate as { workspaceDigest?: string };
+			if (!candidate.workspaceDigest) throw new Error("expected a candidate workspace digest");
+			const receiptWorkspaceDigest = receiptMatchesCandidate ? candidate.workspaceDigest : "f".repeat(64);
+			const receipt = testVerificationBrokerReceipt(command, baselineOutput, receiptWorkspaceDigest);
+			const sessionInternals = harness.session as unknown as {
+				_executeAvoVerificationBash(command: string): Promise<{
+					output: string;
+					exitCode: number | undefined;
+					cancelled: boolean;
+					truncated: boolean;
+					verificationMode: "host_broker";
+					verificationBrokerReceipt: AvoVerificationBrokerReceipt;
+				}>;
+			};
+			sessionInternals._executeAvoVerificationBash = async () => ({
+				output: baselineOutput,
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				verificationMode: "host_broker",
+				verificationBrokerReceipt: receipt,
+			});
+
+			const post = await harness.session.handleAvoHostRequest("avo.evaluation.run", {
+				candidate_id: "broker-bound-python",
+				command,
+			});
+			expect(post.evaluation).toMatchObject({
+				status: expectedStatus,
+				issuedBy: "host",
+				metrics: {
+					meaningful: expectedMeaningful,
+					workspace_matches_candidate: receiptMatchesCandidate,
+					verification_broker_workspace_matches_candidate: receiptMatchesCandidate,
+					verification_broker_workspace_digest: receiptWorkspaceDigest,
+					verification_broker_post_workspace_digest: receiptWorkspaceDigest,
+				},
+			});
+			if (!receiptMatchesCandidate) {
+				const evaluation = post.evaluation as { metrics: Record<string, unknown> };
+				expect(evaluation.metrics.validation_reason).toBe(
+					"the host verification broker receipt is not bound to the evaluated candidate workspace",
+				);
+			}
+		},
+		20_000,
+	);
 
 	it("rejects a passing Python test when the candidate rewrites its verification fixture", async () => {
 		vi.stubEnv("PYTHONDONTWRITEBYTECODE", "1");

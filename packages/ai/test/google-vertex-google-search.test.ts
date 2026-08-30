@@ -148,6 +148,19 @@ describe("Google Vertex native Google Search", () => {
 		expect(capturedTools()).toContainEqual({ googleSearch: {} });
 	});
 
+	it("honors an explicit disabled environment setting for benchmark isolation", async () => {
+		process.env.GOOGLE_VERTEX_GOOGLE_SEARCH = "0";
+
+		await streamSimpleGoogleVertex(
+			model,
+			{ ...context, systemPrompt: "AVO_ONLINE_EVIDENCE=required" },
+			{ apiKey: "fake-key", reasoning: "off" },
+		).result();
+
+		expect(capturedTools()).toHaveLength(1);
+		expect(capturedTools()[0]?.googleSearch).toBeUndefined();
+	});
+
 	it("allows a direct provider call to disable an enabled environment default", async () => {
 		process.env.GOOGLE_VERTEX_GOOGLE_SEARCH = "true";
 
