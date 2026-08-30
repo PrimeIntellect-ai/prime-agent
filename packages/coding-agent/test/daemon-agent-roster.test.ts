@@ -1596,7 +1596,6 @@ describe("review-round regressions", () => {
 		expect(internals.rosterReporter.removedAgentIds.has(expected)).toBe(true);
 		expect(internals.rosterReporter.removedAgentIds.has("sub-1")).toBe(false);
 	});
-
 });
 
 describe("worker delete tombstone durability", () => {
