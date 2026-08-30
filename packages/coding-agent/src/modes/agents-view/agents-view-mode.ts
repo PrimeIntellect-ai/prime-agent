@@ -2285,8 +2285,7 @@ export class AgentsViewMode implements Component, Focusable {
 		if (!this.selectionAnchorPending || this.savedCatalogRefreshPending) {
 			return;
 		}
-		// Unblock the fallback row, but keep the anchor identities: a later push
-		// can still deliver the intended session and re-anchor selection to it.
+		// Unblock the fallback row but keep the anchor identities: a later push can still re-anchor the intended session.
 		this.selectionAnchorPending = false;
 		const row = this.rows[this.selectedIndex];
 		this.selectedActiveSessionId = row?.selectable ? (row.summary.activeSessionId ?? row.summary.id) : undefined;

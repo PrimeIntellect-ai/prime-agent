@@ -1,6 +1,5 @@
 // Roster push soak: a real supervisor socket under thousands of churning sessions.
-// Covers the supervisor push path only; the worker->supervisor frame path has its own
-// integration pin in test/daemon-agent-roster.test.ts (real backpressured worker socket).
+// Covers the supervisor push path only; the worker frame path is pinned by the real-socket test in daemon-agent-roster.test.ts.
 // Run: NODE_OPTIONS=--expose-gc npx tsx scripts/roster-soak.ts (env: SOAK_SESSIONS, SOAK_ROUNDS)
 import { mkdtempSync, rmSync } from "node:fs";
 import { connect, type Socket } from "node:net";
@@ -124,7 +123,6 @@ async function run(
 			client: { close: () => {} },
 			summaries: new Map(),
 			intentionalStop: false,
-			rosterCapable: true,
 			lastFrameAt: Date.now(),
 			snapshotCache: new Map(),
 			transcriptCaches: new Map(),
@@ -267,7 +265,7 @@ async function run(
 		`ledger matches live truth (${ledgerIds.size} rows)`,
 	);
 
-	// The live subscriber converged to the exact final payloads, not just statuses.
+	// The live subscriber converges to the exact final payloads, not just statuses.
 	await sleep(300);
 	const finalEntries = internals.rosterEntriesForClient();
 	const wantedSummaries = new Map(

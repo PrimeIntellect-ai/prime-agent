@@ -372,7 +372,6 @@ describe("subscriber push transitions", () => {
 			descriptor: { workerId, pid: 1, rootActiveSessionId: `${workerId}-root`, lifecycle: "ready", ownerClientId },
 			client: {},
 			intentionalStop: false,
-			rosterCapable: true,
 		};
 	}
 
