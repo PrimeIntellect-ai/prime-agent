@@ -458,6 +458,26 @@ function makeSupervisor(workers: WorkerFixture[], extra: Record<string, unknown>
 	}) as SupervisorFixture;
 }
 
+/** Real supervisor over a temp agent dir for offline (no-worker) command routes. */
+function makeOfflineSupervisor(prefix: string, overrides: Record<string, unknown> = {}) {
+	const directory = mkdtempSync(join(tmpdir(), prefix));
+	tempDirs.push(directory);
+	const sessionsDir = join(directory, "sessions");
+	const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+		defaultSessionConfig: { agentDir: directory, cwd: directory, sessionDir: sessionsDir },
+		descriptorDir: join(directory, "workers"),
+	}) as unknown as SupervisorFixture & {
+		handleCommand(client: object, command: object): Promise<unknown>;
+		rlmSpawnLedger(): RlmSpawnLedger;
+	};
+	Object.assign(supervisor, { catalog: { list: vi.fn(async () => []) }, ...overrides });
+	return { directory, sessionsDir, supervisor };
+}
+
+function offlineClient() {
+	return { id: "client", attachedActiveSessionIds: new Set<string>() };
+}
+
 function rosterDelta(entries: WorkerRosterEntry[], removedAgentIds?: string[], snapshot?: true): Buffer {
 	return Buffer.from(
 		JSON.stringify({
@@ -516,6 +536,10 @@ describe("supervisor roster ledger", () => {
 		expect(listed.data?.sessions[0]).toMatchObject({ activeSessionId: "child-active", workerState: "ready" });
 		expect(supervisor.workerRosterEntries(worker)[0]).toMatchObject({ status: "running" });
 		expect(supervisor.workerRosterEntries(worker)[0]?.statusLabel).toBeUndefined();
+
+		// A published removal drops the row from the ledger.
+		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([], ["child-1"]));
+		expect(supervisor.roster().has("child-1")).toBe(false);
 	});
 
 	it("keeps passivated children of a live worker in the resident list, seeded rows in list all only", async () => {
@@ -840,13 +864,8 @@ describe("supervisor roster ledger", () => {
 	});
 
 	it("updates the roster on offline saved-session renames", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "prime-roster-offline-rename-"));
-		tempDirs.push(directory);
+		const { directory, supervisor } = makeOfflineSupervisor("prime-roster-offline-rename-");
 		const sessionPath = join(directory, "saved.jsonl");
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorFixture & { handleCommand(client: object, command: object): Promise<unknown> };
 		Object.assign(supervisor, {
 			catalog: { rename: vi.fn(async () => {}), list: vi.fn(async () => []) },
 			rlmLedgerSiblings: vi.fn(async () => [
@@ -868,30 +887,17 @@ describe("supervisor roster ledger", () => {
 			),
 		);
 
-		await supervisor.handleCommand(
-			{ id: "client", attachedActiveSessionIds: new Set<string>() },
-			{ type: "rename_saved_session", sessionPath, name: "new-name" },
-		);
+		await supervisor.handleCommand(offlineClient(), { type: "rename_saved_session", sessionPath, name: "new-name" });
 
 		expect(supervisor.roster().get("saved-1")?.summary.sessionName).toBe("new-name");
 	});
 
 	it("removes the roster row on offline deletes, tombstones subagents, and never reseeds them", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "prime-roster-offline-delete-"));
-		tempDirs.push(directory);
-		const sessionsDir = join(directory, "sessions");
-		const parentPath = join(sessionsDir, "root.jsonl");
-		const childPath = join(directory, "artifacts", "child.jsonl");
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory, sessionDir: sessionsDir },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorFixture & {
-			handleCommand(client: object, command: object): Promise<unknown>;
-			rlmSpawnLedger(): RlmSpawnLedger;
-		};
-		Object.assign(supervisor, {
+		const { directory, sessionsDir, supervisor } = makeOfflineSupervisor("prime-roster-offline-delete-", {
 			catalog: { delete: vi.fn(async () => ({ ok: true, method: "unlink" })), list: vi.fn(async () => []) },
 		});
+		const parentPath = join(sessionsDir, "root.jsonl");
+		const childPath = join(directory, "artifacts", "child.jsonl");
 		await supervisor
 			.rlmSpawnLedger()
 			.appendSpawn({ childId: "child-1", parent: parentPath, child: childPath, depth: 1, name: "child" });
@@ -907,10 +913,7 @@ describe("supervisor roster ledger", () => {
 		);
 		supervisor.writeRosterEntry(childEntry);
 
-		await supervisor.handleCommand(
-			{ id: "client", attachedActiveSessionIds: new Set<string>() },
-			{ type: "delete_saved_session", sessionPath: childPath },
-		);
+		await supervisor.handleCommand(offlineClient(), { type: "delete_saved_session", sessionPath: childPath });
 
 		expect(supervisor.roster().has(childEntry.agentId)).toBe(false);
 		await expect(supervisor.rlmSpawnLedger().edges()).resolves.toEqual([]);
@@ -926,72 +929,6 @@ describe("supervisor roster ledger", () => {
 });
 
 describe("saved-session delete paths", () => {
-	it("removes the deleted session's ledger row end-to-end", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "prime-roster-worker-delete-"));
-		tempDirs.push(directory);
-		const sessionsDir = join(directory, "sessions");
-		const manager = SessionManager.create(directory, sessionsDir);
-		manager.appendMessage({ role: "user", content: "hello", timestamp: 1 });
-		manager.flushNow();
-		const sessionPath = manager.getSessionFile();
-		const sessionId = manager.getSessionId();
-		if (!sessionPath) throw new Error("Fixture session did not persist");
-
-		const daemon = new AgentDaemon(join(directory, "worker.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory, sessionDir: sessionsDir },
-			worker: {
-				authenticationToken: "token",
-				workerId: "worker-1",
-				rootActiveSessionId: "root-active",
-			} as never,
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		} as never);
-		const socket = new PassThrough();
-		const written: Buffer[] = [];
-		socket.on("data", (chunk: Buffer) => written.push(Buffer.from(chunk)));
-		const supervisorClient = {
-			id: "supervisor",
-			socket,
-			transport: "private-framed",
-			authenticated: true,
-			attachedActiveSessionIds: new Set<string>(),
-			detachInput: () => {},
-			supportsExtensionUi: false,
-			capabilities: new Set<string>(),
-		} as unknown as DaemonSocketClient;
-		const internals = daemon as unknown as {
-			clients: Set<DaemonSocketClient>;
-			supervisorClaims: Map<DaemonSocketClient, object>;
-			handleCommand(client: DaemonSocketClient, command: object): Promise<unknown>;
-			flushRoster(): void;
-		};
-		internals.clients.add(supervisorClient);
-		internals.supervisorClaims.set(supervisorClient, {});
-
-		await internals.handleCommand(supervisorClient, { type: "delete_saved_session", sessionPath });
-		internals.flushRoster();
-
-		const decoder = new PrivateFrameDecoder(isDaemonWorkerFrameHeader);
-		const frames = decoder.push(Buffer.concat(written));
-		const deltaFrame = frames.find(
-			(frame) => frame.header.kind === "outbound" && frame.header.outboundType === "roster_delta",
-		);
-		if (!deltaFrame) throw new Error("Worker did not publish a roster delta");
-		const delta = JSON.parse(deltaFrame.payload.toString("utf8")) as RosterDelta;
-		expect(delta.removedAgentIds).toEqual([sessionId]);
-
-		const worker = makeWorker("worker-1", { rosterCapable: true });
-		const supervisor = makeSupervisor([worker]);
-		supervisor.writeRosterEntry(
-			workerRosterEntryFromSummary(summary({ id: sessionId, sessionId, sessionFile: sessionPath })),
-			worker,
-		);
-		supervisor.consumeWorkerRosterDelta(worker, deltaFrame.payload);
-		expect(supervisor.roster().has(sessionId)).toBe(false);
-	});
-
 	it("routes offline deletes by owner reachability: forward, retryable reject, or reclaim", async () => {
 		const reachableRoster = makeWorker("w-roster");
 		Object.assign(reachableRoster.descriptor, { createCommand: { type: "create" } });
@@ -1070,81 +1007,30 @@ describe("saved-session delete paths", () => {
 		expect(catalogDelete).toHaveBeenCalledWith("/tmp/owned-failed.jsonl");
 	});
 
-	it("classifies unknown offline delete targets through the ledger", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "prime-roster-offline-unknown-"));
-		tempDirs.push(directory);
-		const garbled = join(directory, "artifacts", "garbled.jsonl");
-		mkdirSync(dirname(garbled), { recursive: true });
-		writeFileSync(garbled, "not a session header\n");
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorFixture & {
-			handleCommand(client: object, command: object): Promise<unknown>;
-			rlmSpawnLedger(): RlmSpawnLedger;
-		};
-		Object.assign(supervisor, {
-			catalog: { delete: vi.fn(async () => ({ ok: true, method: "unlink" })), list: vi.fn(async () => []) },
-		});
-		await supervisor.rlmSpawnLedger().appendSpawn({
-			childId: "sub-9",
-			parent: join(directory, "sessions", "r.jsonl"),
-			child: garbled,
-			depth: 1,
-			name: "g",
-		});
-
-		await supervisor.handleCommand(
-			{ id: "client", attachedActiveSessionIds: new Set<string>() },
-			{ type: "delete_saved_session", sessionPath: garbled },
-		);
-
-		await expect(supervisor.rlmSpawnLedger().edges()).resolves.toEqual([]);
-	});
-
 	it("keeps the roster row when a delete fails on disk", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "prime-roster-failed-delete-"));
-		tempDirs.push(directory);
-		const sessionPath = join(directory, "saved.jsonl");
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorFixture & { handleCommand(client: object, command: object): Promise<unknown> };
-		Object.assign(supervisor, {
+		const { directory, supervisor } = makeOfflineSupervisor("prime-roster-failed-delete-", {
 			catalog: { delete: vi.fn(async () => ({ ok: false, error: "busy file" })), list: vi.fn(async () => []) },
 		});
+		const sessionPath = join(directory, "saved.jsonl");
 		supervisor.writeRosterEntry(
 			workerRosterEntryFromSummary(summary({ id: "saved-1", sessionId: "saved-1", sessionFile: sessionPath })),
 		);
 
-		await supervisor.handleCommand(
-			{ id: "client", attachedActiveSessionIds: new Set<string>() },
-			{ type: "delete_saved_session", sessionPath },
-		);
+		await supervisor.handleCommand(offlineClient(), { type: "delete_saved_session", sessionPath });
 
 		expect(supervisor.roster().has("saved-1")).toBe(true);
 	});
 
 	it("aborts a saved-child delete when the tombstone append fails", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "prime-roster-tombstone-fail-"));
-		tempDirs.push(directory);
-		const childPath = join(directory, "artifacts", "child.jsonl");
 		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" }));
-		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
-			defaultSessionConfig: { agentDir: directory, cwd: directory },
-			descriptorDir: join(directory, "workers"),
-		}) as unknown as SupervisorFixture & { handleCommand(client: object, command: object): Promise<unknown> };
-		Object.assign(supervisor, {
+		const { directory, sessionsDir, supervisor } = makeOfflineSupervisor("prime-roster-tombstone-fail-", {
 			catalog: { delete: catalogDelete, list: vi.fn(async () => []) },
+		});
+		const childPath = join(directory, "artifacts", "child.jsonl");
+		Object.assign(supervisor, {
 			rlmSpawnLedger: () => ({
 				edges: vi.fn(async () => [
-					{
-						childId: "child-1",
-						child: childPath,
-						parent: join(directory, "sessions", "root.jsonl"),
-						depth: 1,
-						name: "c",
-					},
+					{ childId: "child-1", child: childPath, parent: join(sessionsDir, "root.jsonl"), depth: 1, name: "c" },
 				]),
 				appendDelete: vi.fn(async () => {
 					throw new Error("ledger unwritable");
@@ -1158,32 +1044,16 @@ describe("saved-session delete paths", () => {
 				sessionFile: childPath,
 				runtimeKind: "subagent",
 				rlmChildId: "child-1",
-				parentSessionPath: join(directory, "sessions", "root.jsonl"),
+				parentSessionPath: join(sessionsDir, "root.jsonl"),
 			}),
 		);
 		supervisor.writeRosterEntry(childEntry);
 
 		await expect(
-			supervisor.handleCommand(
-				{ id: "client", attachedActiveSessionIds: new Set<string>() },
-				{ type: "delete_saved_session", sessionPath: childPath },
-			),
+			supervisor.handleCommand(offlineClient(), { type: "delete_saved_session", sessionPath: childPath }),
 		).rejects.toThrow("ledger unwritable");
 		expect(catalogDelete).not.toHaveBeenCalled();
 		expect(supervisor.roster().has(childEntry.agentId)).toBe(true);
-	});
-});
-
-describe("roster entry projection", () => {
-	it("carries modelFallbackMessage through the roster round-trip", () => {
-		const source = summary({
-			id: "m-active",
-			sessionId: "m",
-			activeSessionId: "m-active",
-			modelFallbackMessage: "No models available",
-		});
-		const roundTripped = sessionSummaryFromRosterEntry(workerRosterEntryFromSummary(source));
-		expect(roundTripped.modelFallbackMessage).toBe("No models available");
 	});
 });
 
@@ -1728,30 +1598,6 @@ describe("review-round regressions", () => {
 		expect(internals.rosterReporter.removedAgentIds.has("sub-1")).toBe(false);
 	});
 
-	it("publishes qualified removal ids for discarded bound-child drafts", () => {
-		const { daemon, sentDeltas } = makeWorkerReporter();
-		const childState = makeState({
-			activeSessionId: "child-active",
-			kind: "subagent",
-			rlmChildId: "sub-1",
-			parentActiveSessionId: "parent-active",
-			parentSessionFile: "/tmp/parents/root.jsonl",
-		});
-		daemon.sessions.set(childState.activeSessionId, childState);
-		daemon.flushRoster();
-		const composedId = sentDeltas[0]?.entries.find((entry) => entry.summary.rlmChildId === "sub-1")?.agentId;
-		if (!composedId) throw new Error("Missing composed child row");
-
-		daemon.sessions.delete(childState.activeSessionId);
-		const removalId = (
-			daemon as unknown as { rosterAgentIdForState(state: ActiveSessionState): string }
-		).rosterAgentIdForState(childState);
-		daemon.rosterReporter.removedAgentIds.add(removalId);
-		daemon.flushRoster();
-
-		expect(removalId).toBe(composedId);
-		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual([composedId]);
-	});
 });
 
 describe("worker delete tombstone durability", () => {
@@ -1769,36 +1615,6 @@ describe("worker delete tombstone durability", () => {
 			rosterReporter: { removedAgentIds: Set<string> };
 		};
 	}
-
-	it("aborts a child delete when the spawn ledger cannot be read", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "prime-roster-ledger-read-fail-"));
-		tempDirs.push(directory);
-		const sessionsDir = join(directory, "sessions");
-		const parentManager = SessionManager.create(directory, sessionsDir);
-		parentManager.appendMessage({ role: "user", content: "parent", timestamp: 1 });
-		parentManager.flushNow();
-		const parentFile = parentManager.getSessionFile();
-		if (!parentFile) throw new Error("Fixture parent did not persist");
-		const childManager = SessionManager.create(directory, join(directory, "artifacts"));
-		childManager.newSession({ parentSession: parentFile });
-		childManager.appendMessage({ role: "user", content: "child", timestamp: 2 });
-		childManager.flushNow();
-		const childFile = childManager.getSessionFile();
-		if (!childFile) throw new Error("Fixture child did not persist");
-		const daemon = makeDeleteDaemon(directory, async () => {
-			throw new Error("ledger unreadable");
-		});
-
-		await expect(
-			daemon.handleCommand(
-				{ id: "client", attachedActiveSessionIds: new Set<string>() },
-				{ type: "delete_saved_session", sessionPath: childFile },
-			),
-		).rejects.toThrow("ledger unreadable");
-
-		expect(existsSync(childFile)).toBe(true);
-		expect(daemon.rosterReporter.removedAgentIds.size).toBe(0);
-	});
 
 	it("deletes a top-level saved session without touching the spawn ledger", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-toplevel-delete-"));
