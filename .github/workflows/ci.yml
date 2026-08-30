@@ -57,6 +57,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bubblewrap libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
           sudo ln -s $(which fdfind) /usr/local/bin/fd
+          if sudo sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net --unshare-pid --new-session --die-with-parent --cap-drop ALL -- /bin/true
 
       - name: Install dependencies
         run: npm ci
@@ -139,6 +143,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bubblewrap libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
           sudo ln -s $(which fdfind) /usr/local/bin/fd
+          if sudo sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net --unshare-pid --new-session --die-with-parent --cap-drop ALL -- /bin/true
 
       - name: Install dependencies
         run: npm ci
