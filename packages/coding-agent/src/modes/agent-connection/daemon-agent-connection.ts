@@ -318,37 +318,41 @@ export class DaemonAgentConnection implements AgentConnection {
 		}
 	}
 
-	async attach(): Promise<void> {
+	async attach(options?: { recoverable?: boolean }): Promise<void> {
 		const supportsExtensionUi = this.options.supportsExtensionUi !== false;
-		const result = await this.requestData<SessionSummary | DaemonAttachResult>({
-			type: "attach",
-			activeSessionId: this.activeSessionId,
-			supportsExtensionUi,
-			clientId: this.clientId,
-			capabilities: [
-				"attach_snapshot",
-				"event_sequence",
-				...(supportsExtensionUi ? (["extension_ui"] as const) : []),
-				"slim_attach",
-				"chunked_snapshot",
-				...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
-			],
-			env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
-			launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
-			...(this.options.ownedSession &&
-			this.options.ownedSessionRecoveryConfig &&
-			this.client.supportsServerCapability("owned_session_recovery_context")
-				? { recoveryConfig: this.options.ownedSessionRecoveryConfig }
-				: {}),
-			telemetryDisabled: this.options.telemetryDisabled,
-			resumeCursor:
-				this.lastEventCursor === undefined
-					? undefined
-					: {
-							activeSessionId: this.activeSessionId,
-							...this.lastEventCursor,
-						},
-		});
+		const result = await this.requestData<SessionSummary | DaemonAttachResult>(
+			{
+				type: "attach",
+				activeSessionId: this.activeSessionId,
+				supportsExtensionUi,
+				clientId: this.clientId,
+				capabilities: [
+					"attach_snapshot",
+					"event_sequence",
+					...(supportsExtensionUi ? (["extension_ui"] as const) : []),
+					"slim_attach",
+					"chunked_snapshot",
+					...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
+				],
+				env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
+				launchEnv: this.options.ownedSession ? collectDaemonLaunchEnv() : undefined,
+				...(this.options.ownedSession &&
+				this.options.ownedSessionRecoveryConfig &&
+				this.client.supportsServerCapability("owned_session_recovery_context")
+					? { recoveryConfig: this.options.ownedSessionRecoveryConfig }
+					: {}),
+				telemetryDisabled: this.options.telemetryDisabled,
+				resumeCursor:
+					this.lastEventCursor === undefined
+						? undefined
+						: {
+								activeSessionId: this.activeSessionId,
+								...this.lastEventCursor,
+							},
+			},
+			undefined,
+			options,
+		);
 		this.activeSessionId = getAttachActiveSessionId(result);
 		const summary = "snapshot" in result ? result.snapshot.summary : result;
 		this.attachedSessionId = summary.sessionId;
@@ -421,7 +425,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		});
 	}
 
-	async getInitialSnapshot(): Promise<AgentConnectionSnapshot> {
+	async getInitialSnapshot(options?: { recoverable?: boolean }): Promise<AgentConnectionSnapshot> {
 		if (this.latestSnapshotIsFresh && this.latestSnapshot) {
 			return this.latestSnapshot;
 		}
@@ -431,18 +435,21 @@ export class DaemonAgentConnection implements AgentConnection {
 		const snapshotCursor = this.lastEventCursor;
 		const snapshotSequence = this.lastEventSequence;
 		const [state, messagesData, sessionContextData] = await Promise.all([
-			this.requestData<AgentConnectionState>({
-				type: "get_connection_state",
-				activeSessionId: this.activeSessionId,
-			}),
-			this.requestData<{ messages: AgentMessage[] }>({
-				type: "get_messages",
-				activeSessionId: this.activeSessionId,
-			}),
-			this.requestData<{ context: AgentConnectionSessionContext }>({
-				type: "get_session_context",
-				activeSessionId: this.activeSessionId,
-			}),
+			this.requestData<AgentConnectionState>(
+				{ type: "get_connection_state", activeSessionId: this.activeSessionId },
+				undefined,
+				options,
+			),
+			this.requestData<{ messages: AgentMessage[] }>(
+				{ type: "get_messages", activeSessionId: this.activeSessionId },
+				undefined,
+				options,
+			),
+			this.requestData<{ context: AgentConnectionSessionContext }>(
+				{ type: "get_session_context", activeSessionId: this.activeSessionId },
+				undefined,
+				options,
+			),
 		]);
 		const children = this.latestSnapshot?.children;
 		const streamingMessage = this.latestSnapshot?.streamingMessage;
@@ -1525,9 +1532,10 @@ export class DaemonAgentConnection implements AgentConnection {
 					}
 					await this.client.connect(1000);
 					await this.client.waitForHello(3000);
-					await this.attach();
+					// This loop owns the retry: a socket close must reject these instead of parking them behind a hello it can never produce.
+					await this.attach({ recoverable: false });
 					if (!this.disposed) {
-						const snapshot = await this.getInitialSnapshot();
+						const snapshot = await this.getInitialSnapshot({ recoverable: false });
 						void this.emit({ type: "session_resynced", snapshot });
 						void this.emit({ type: "connection_status", status: "connected" });
 					}
@@ -1825,7 +1833,8 @@ export class DaemonAgentConnection implements AgentConnection {
 				if (this.disposed) {
 					return;
 				}
-				const response = await this.client.request({ type: "list" }, 30000);
+				// This loop owns the retry: a socket close must reject these instead of parking them behind a hello it can never produce.
+				const response = await this.client.request({ type: "list" }, 30000, { recoverable: false });
 				if (this.disposed) {
 					return;
 				}
@@ -1847,11 +1856,11 @@ export class DaemonAgentConnection implements AgentConnection {
 					this.lastEventSequence = undefined;
 					this.lastEventCursor = undefined;
 					this.retiredEventGenerations.clear();
-					await this.attach();
+					await this.attach({ recoverable: false });
 					if (this.disposed) {
 						return;
 					}
-					const snapshot = await this.getInitialSnapshot();
+					const snapshot = await this.getInitialSnapshot({ recoverable: false });
 					if (this.disposed) {
 						return;
 					}
