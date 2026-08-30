@@ -93,6 +93,14 @@ interface AvoSpecReceipt {
 
 export interface AvoSpecValidationOptions {
 	receiptHmacKey?: string | Uint8Array;
+	receipts?: Readonly<Record<string, unknown>>;
+}
+
+export interface AvoSpecImpactReport {
+	affectedRequirementIds: string[];
+	unmappedProtectedPaths: string[];
+	protectedRoots: string[];
+	errors: string[];
 }
 
 export interface AvoSpecRequirementCoverage {
@@ -199,6 +207,18 @@ function isAvoSpecEvidenceState(value: unknown): value is AvoSpecEvidenceState {
 
 function isAvoSpecRequirementStatus(value: unknown): value is AvoSpecRequirementStatus {
 	return value === "unproven" || value === "partial" || value === "verified";
+}
+
+function normalizedRepositoryPath(value: string): string | undefined {
+	const normalized = value.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/+$/, "");
+	if (!normalized || normalized.startsWith("/") || normalized.split("/").some((part) => part === "..")) {
+		return undefined;
+	}
+	return normalized;
+}
+
+function pathIsProtected(path: string, protectedRoot: string): boolean {
+	return path === protectedRoot || path.startsWith(`${protectedRoot}/`);
 }
 
 function safeRepositoryFile(repositoryRoot: string, path: string): string | undefined {
@@ -457,14 +477,20 @@ function validateObservedEvidence(
 	options: AvoSpecValidationOptions,
 	errors: string[],
 ): boolean {
-	if (evidence.state !== "observed" || !evidence.receiptPath || !sourceDigest) return false;
+	const externalReceipt =
+		options.receipts && Object.hasOwn(options.receipts, evidence.evidenceId)
+			? options.receipts[evidence.evidenceId]
+			: undefined;
+	if (externalReceipt === undefined && (evidence.state !== "observed" || !evidence.receiptPath)) return false;
+	if (!sourceDigest) return false;
+	const receiptLabel = externalReceipt === undefined ? evidence.receiptPath! : `trusted:${evidence.evidenceId}`;
 	const receipt = parseReceipt(
-		readJsonFile(repositoryRoot, evidence.receiptPath, errors),
-		evidence.receiptPath,
+		externalReceipt === undefined ? readJsonFile(repositoryRoot, evidence.receiptPath!, errors) : externalReceipt,
+		receiptLabel,
 		errors,
 	);
 	if (!receipt) return false;
-	if (!receiptSignatureMatches(receipt, options.receiptHmacKey, evidence.receiptPath, errors)) return false;
+	if (!receiptSignatureMatches(receipt, options.receiptHmacKey, receiptLabel, errors)) return false;
 	if (
 		receipt.requirementId !== requirement.id ||
 		receipt.evidenceId !== evidence.evidenceId ||
@@ -527,6 +553,18 @@ export function validateAvoSpecContract(
 	}
 	if (value.schemaVersion !== 1) errors.push("schemaVersion must be 1");
 	if (!nonEmptyString(value.contractId)) errors.push("contractId must be a non-empty string");
+	const protectedRoots = Array.isArray(value.protectedRoots)
+		? value.protectedRoots.filter(nonEmptyString).map(normalizedRepositoryPath)
+		: [];
+	if (
+		!Array.isArray(value.protectedRoots) ||
+		protectedRoots.length === 0 ||
+		protectedRoots.some((path) => path === undefined) ||
+		new Set(protectedRoots).size !== protectedRoots.length
+	) {
+		errors.push("protectedRoots must contain unique safe repository-relative paths");
+	}
+	const validProtectedRoots = protectedRoots.filter((path): path is string => path !== undefined);
 	const gateOrder = Array.isArray(value.gateOrder) ? value.gateOrder.filter(isAvoSpecGate) : [];
 	if (gateOrder.length !== AVO_SPEC_GATES.length || gateOrder.some((gate, index) => gate !== AVO_SPEC_GATES[index])) {
 		errors.push(`gateOrder must be exactly ${AVO_SPEC_GATES.join(" -> ")}`);
@@ -551,6 +589,12 @@ export function validateAvoSpecContract(
 			errors.push(`${requirement.id} must require all six gates in canonical order`);
 		}
 		if (!requirement.requiresRuntimeTrace) errors.push(`${requirement.id} must require a runtime trace`);
+		for (const sourcePath of requirement.sourcePaths) {
+			const normalized = normalizedRepositoryPath(sourcePath);
+			if (!normalized || !validProtectedRoots.some((root) => pathIsProtected(normalized, root))) {
+				errors.push(`${requirement.id} source path is outside protectedRoots: ${sourcePath}`);
+			}
+		}
 		let sourceDigest: string | undefined;
 		try {
 			sourceDigest = digestAvoSpecRequirement(repositoryRoot, requirement);
@@ -610,9 +654,10 @@ export function validateAvoSpecContract(
 			: requirement.evidence.some((evidence) => evidence.state !== "planned")
 				? "partial"
 				: "unproven";
-		if (requirement.declaredStatus !== derivedStatus) {
+		const statusRank: Record<AvoSpecRequirementStatus, number> = { unproven: 0, partial: 1, verified: 2 };
+		if (statusRank[requirement.declaredStatus] > statusRank[derivedStatus]) {
 			errors.push(
-				`${requirement.id} declares ${requirement.declaredStatus} but current evidence derives ${derivedStatus}`,
+				`${requirement.id} overstates ${requirement.declaredStatus} but current evidence derives ${derivedStatus}`,
 			);
 		}
 		if (derivedStatus !== "verified") {
@@ -645,6 +690,62 @@ export function validateAvoSpecContract(
 		warnings,
 		requirements: coverage,
 		summary,
+	};
+}
+
+export function deriveAvoSpecRequirementImpacts(value: unknown, changedPaths: readonly string[]): AvoSpecImpactReport {
+	const errors: string[] = [];
+	if (!isObject(value)) {
+		return {
+			affectedRequirementIds: [],
+			unmappedProtectedPaths: [],
+			protectedRoots: [],
+			errors: ["invalid contract"],
+		};
+	}
+	const protectedRoots = Array.isArray(value.protectedRoots)
+		? value.protectedRoots.flatMap((path) => {
+				const normalized = nonEmptyString(path) ? normalizedRepositoryPath(path) : undefined;
+				return normalized ? [normalized] : [];
+			})
+		: [];
+	const requirements = Array.isArray(value.requirements)
+		? value.requirements.flatMap((item, index) => {
+				const parsed = parseRequirement(item, `requirements[${index}]`, errors);
+				return parsed ? [parsed] : [];
+			})
+		: [];
+	const normalizedChanges = unique(
+		changedPaths.flatMap((path) => {
+			const normalized = normalizedRepositoryPath(path);
+			if (!normalized) {
+				errors.push(`unsafe changed path: ${path}`);
+				return [];
+			}
+			return [normalized];
+		}),
+	);
+	const affectedRequirementIds = requirements
+		.filter((requirement) =>
+			requirement.sourcePaths.some((sourcePath) => {
+				const normalizedSource = normalizedRepositoryPath(sourcePath);
+				return normalizedSource !== undefined && normalizedChanges.includes(normalizedSource);
+			}),
+		)
+		.map((requirement) => requirement.id);
+	const mappedSources = new Set(
+		requirements.flatMap((requirement) =>
+			requirement.sourcePaths.flatMap((path) => normalizedRepositoryPath(path) ?? []),
+		),
+	);
+	const unmappedProtectedPaths = normalizedChanges.filter(
+		(path) => protectedRoots.some((root) => pathIsProtected(path, root)) && !mappedSources.has(path),
+	);
+	return {
+		affectedRequirementIds: unique(affectedRequirementIds).sort(),
+		unmappedProtectedPaths: unmappedProtectedPaths.sort(),
+		protectedRoots: unique(protectedRoots).sort(),
+		errors,
 	};
 }
 

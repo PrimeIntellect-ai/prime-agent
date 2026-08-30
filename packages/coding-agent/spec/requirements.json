@@ -1,6 +1,15 @@
 {
   "schemaVersion": 1,
   "contractId": "prime-avo-behavior-v1",
+  "protectedRoots": [
+    "package.json",
+    "packages/coding-agent/package.json",
+    "packages/coding-agent/spec",
+    "packages/coding-agent/src/cli/avo-dashboard.ts",
+    "packages/coding-agent/src/core/agent-session.ts",
+    "packages/coding-agent/src/core/avo",
+    "packages/coding-agent/src/evals/spec-contract"
+  ],
   "gateOrder": [
     "static",
     "unit",
@@ -686,6 +695,86 @@
           "state": "planned",
           "mechanism": "independent_review",
           "plan": "An independent reviewer audits every state transition and idempotency key across restart."
+        }
+      ]
+    },
+    {
+      "id": "SPEC-001",
+      "domain": "specification",
+      "title": "Behavioral proof cannot be overstated or forged",
+      "statement": "The executable contract must reject missing, stale, self-issued, replayed, path-escaping, or cryptographically untrusted evidence and must expose protected implementation changes without a mapped invariant.",
+      "critical": true,
+      "behaviors": {
+        "normal": "Current host-signed receipts from six heterogeneous gates derive verified status for the unchanged requirement and source digest.",
+        "failure": "Untrusted or stale receipts, weakened semantics, reused IDs, unsafe paths, and unmapped protected changes fail closed.",
+        "ordering": "The host captures the contract, maps candidate changes, verifies receipts, and only then permits canonical acceptance.",
+        "authority": "The coding model can edit candidates and linked tests but cannot mint the host HMAC or independent-review role.",
+        "persistence": "External receipts remain valid only while the requirement definition and all mapped sources retain the signed digest."
+      },
+      "sourcePaths": [
+        "package.json",
+        "packages/coding-agent/package.json",
+        "packages/coding-agent/spec/requirements.json",
+        "packages/coding-agent/src/core/avo/index.ts",
+        "packages/coding-agent/src/core/avo/spec-contract.ts",
+        "packages/coding-agent/src/evals/spec-contract/runner.ts"
+      ],
+      "requiredGates": [
+        "static",
+        "unit",
+        "integration",
+        "behavioral",
+        "adversarial",
+        "independent_review"
+      ],
+      "requiresRuntimeTrace": true,
+      "declaredStatus": "partial",
+      "evidence": [
+        {
+          "evidenceId": "SPEC-001:static-types",
+          "gate": "static",
+          "state": "linked",
+          "mechanism": "compiler",
+          "path": "tsconfig.json",
+          "anchor": "\"noEmit\": true"
+        },
+        {
+          "evidenceId": "SPEC-001:receipt-validator-unit",
+          "gate": "unit",
+          "state": "linked",
+          "mechanism": "deterministic_unit_test",
+          "path": "packages/coding-agent/test/avo-spec-contract.test.ts",
+          "anchor": "[SPEC-001] accepts verified only with six current receipts"
+        },
+        {
+          "evidenceId": "SPEC-001:host-overlay-integration",
+          "gate": "integration",
+          "state": "linked",
+          "mechanism": "deterministic_integration_test",
+          "path": "packages/coding-agent/test/avo-spec-contract.test.ts",
+          "anchor": "[SPEC-001] promotes linked evidence only through a trusted external receipt overlay"
+        },
+        {
+          "evidenceId": "SPEC-001:acceptance-trace",
+          "gate": "behavioral",
+          "state": "planned",
+          "mechanism": "runtime_trace",
+          "plan": "Trace baseline contract capture, changed-path mapping, receipt verification, and final candidate decision."
+        },
+        {
+          "evidenceId": "SPEC-001:verifier-adversary",
+          "gate": "adversarial",
+          "state": "linked",
+          "mechanism": "adversarial_test",
+          "path": "packages/coding-agent/test/avo-spec-contract.test.ts",
+          "anchor": "[SPEC-001] rejects self-review, stale semantics, forged receipts, and path escapes"
+        },
+        {
+          "evidenceId": "SPEC-001:independent-review",
+          "gate": "independent_review",
+          "state": "planned",
+          "mechanism": "independent_review",
+          "plan": "An independent reviewer attempts to falsify the checker, trust root, impact mapping, and host acceptance integration."
         }
       ]
     }

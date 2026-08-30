@@ -1,0 +1,1 @@
+- Added protected-path requirement impact mapping and external host-signed receipt overlays with an enforceable AVO specification coverage command.

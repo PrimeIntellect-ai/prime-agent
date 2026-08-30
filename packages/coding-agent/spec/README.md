@@ -19,6 +19,18 @@ Run the structural checker from the repository root:
 npm run check:spec-contract
 ```
 
+Map a candidate's changed files and enforce current external receipts with:
+
+```bash
+PRIME_AGENT_AVO_SPEC_RECEIPT_KEY="<host-held secret>" \
+PRIME_AGENT_AVO_SPEC_RECEIPT_DIR="/host/outside/the/candidate/workspace" \
+npm --prefix packages/coding-agent run eval:spec-contract -- \
+  --changed packages/coding-agent/src/core/avo/store.ts \
+  --enforce
+```
+
+The receipt directory is loaded as a read-only overlay. Signed receipts can promote linked evidence for the current run without modifying the candidate-owned manifest. A changed file under `protectedRoots` that has no requirement mapping fails enforcement rather than disappearing from coverage.
+
 The checker fails on malformed contracts, missing files or anchors, duplicate IDs, reused receipts, stale source digests, fake independent reviews, and any attempt to declare a requirement more proven than its evidence permits. Missing proof remains visible as `partial` or `unproven` without pretending that the repository is broken merely because an independent run has not yet been performed.
 
 Runtime trace events must include a `satisfies` array, for example:

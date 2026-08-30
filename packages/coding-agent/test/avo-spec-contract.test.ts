@@ -6,12 +6,14 @@ import { describe, expect, test } from "vitest";
 import {
 	AVO_SPEC_GATES,
 	type AvoSpecRequirementDefinition,
+	deriveAvoSpecRequirementImpacts,
 	digestAvoSpecRequirement,
 	digestAvoSpecSources,
 	loadAndValidateAvoSpecContract,
 	signAvoSpecReceipt,
 	validateAvoSpecContract,
 } from "../src/core/avo/spec-contract.js";
+import { loadAvoSpecReceiptOverlay, parseAvoSpecRunnerArgs } from "../src/evals/spec-contract/runner.js";
 
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const RECEIPT_KEY = "host-only-test-key-material-that-is-longer-than-thirty-two-bytes";
@@ -96,6 +98,7 @@ function completeObservedContract(root: string): Record<string, unknown> {
 	const contract = {
 		schemaVersion: 1,
 		contractId: "test-contract",
+		protectedRoots: ["source.ts"],
 		gateOrder: [...AVO_SPEC_GATES],
 		requirements: [requirement],
 	};
@@ -114,11 +117,11 @@ describe("AVO executable behavioral contract", () => {
 	test("keeps the repository contract honest about currently unobserved gates", () => {
 		const report = loadAndValidateAvoSpecContract("packages/coding-agent/spec/requirements.json", REPOSITORY_ROOT);
 		expect(report.valid).toBe(true);
-		expect(report.summary).toMatchObject({ total: 9, verified: 0, partial: 9, unproven: 0 });
+		expect(report.summary).toMatchObject({ total: 10, verified: 0, partial: 10, unproven: 0 });
 		expect(report.requirements.every((requirement) => requirement.missingObservedGates.length === 6)).toBe(true);
 	});
 
-	test("accepts verified only with six current receipts, a host trace, and independent review", () => {
+	test("[SPEC-001] accepts verified only with six current receipts, a host trace, and independent review", () => {
 		const root = fixtureRoot();
 		const contract = completeObservedContract(root);
 		const report = validateAvoSpecContract(contract, root, { receiptHmacKey: RECEIPT_KEY });
@@ -132,7 +135,7 @@ describe("AVO executable behavioral contract", () => {
 		});
 	});
 
-	test("rejects self-review and stale receipts even when the manifest declares verified", () => {
+	test("[SPEC-001] rejects self-review, stale semantics, forged receipts, and path escapes", () => {
 		const selfReviewRoot = fixtureRoot();
 		const selfReviewed = completeObservedContract(selfReviewRoot);
 		const selfReviewReceipt = join(selfReviewRoot, "evidence/receipts/receipt-6.json");
@@ -151,7 +154,7 @@ describe("AVO executable behavioral contract", () => {
 		expect(selfReviewReport.errors).toEqual(
 			expect.arrayContaining([
 				expect.stringContaining("review is not independent"),
-				expect.stringContaining("declares verified but current evidence derives partial"),
+				expect.stringContaining("overstates verified but current evidence derives partial"),
 			]),
 		);
 
@@ -168,9 +171,7 @@ describe("AVO executable behavioral contract", () => {
 		const weakenedReport = validateAvoSpecContract(weakened, weakenedRoot, { receiptHmacKey: RECEIPT_KEY });
 		expect(weakenedReport.valid).toBe(false);
 		expect(weakenedReport.errors).toEqual(expect.arrayContaining([expect.stringContaining("receipt is stale")]));
-	});
 
-	test("rejects a model-forged observed receipt without the host trust root", () => {
 		const root = fixtureRoot();
 		const contract = completeObservedContract(root);
 		const withoutHostKey = validateAvoSpecContract(contract, root);
@@ -183,23 +184,68 @@ describe("AVO executable behavioral contract", () => {
 		const wrongHostKey = validateAvoSpecContract(contract, root, { receiptHmacKey: "x".repeat(64) });
 		expect(wrongHostKey.valid).toBe(false);
 		expect(wrongHostKey.errors).toEqual(expect.arrayContaining([expect.stringContaining("invalid host signature")]));
-	});
 
-	test("rejects evidence paths that escape through symlinks", () => {
-		const root = fixtureRoot();
-		const contract = completeObservedContract(root);
+		const symlinkRoot = fixtureRoot();
+		const symlinkContract = completeObservedContract(symlinkRoot);
 		const outsideRoot = fixtureRoot();
 		const outside = join(outsideRoot, "forged-unit.test.ts");
 		writeFileSync(outside, "[TEST-001] unit\n", "utf8");
-		const unitPath = join(root, "evidence/unit.test.ts");
+		const unitPath = join(symlinkRoot, "evidence/unit.test.ts");
 		unlinkSync(unitPath);
 		symlinkSync(outside, unitPath);
 
-		const report = validateAvoSpecContract(contract, root, { receiptHmacKey: RECEIPT_KEY });
-		expect(report.valid).toBe(false);
-		expect(report.summary.verified).toBe(0);
-		expect(report.errors).toEqual(
+		const symlinkReport = validateAvoSpecContract(symlinkContract, symlinkRoot, { receiptHmacKey: RECEIPT_KEY });
+		expect(symlinkReport.valid).toBe(false);
+		expect(symlinkReport.summary.verified).toBe(0);
+		expect(symlinkReport.errors).toEqual(
 			expect.arrayContaining([expect.stringContaining("references missing or unsafe file evidence/unit.test.ts")]),
 		);
+	});
+
+	test("[SPEC-001] promotes linked evidence only through a trusted external receipt overlay", () => {
+		const root = fixtureRoot();
+		const contract = completeObservedContract(root);
+		const receipts: Record<string, unknown> = {};
+		const requirement = (contract.requirements as AvoSpecRequirementDefinition[])[0]!;
+		for (const evidence of requirement.evidence) {
+			receipts[evidence.evidenceId] = JSON.parse(readFileSync(join(root, evidence.receiptPath!), "utf8"));
+			evidence.state = "linked";
+			delete evidence.receiptPath;
+		}
+
+		const report = validateAvoSpecContract(contract, root, {
+			receiptHmacKey: RECEIPT_KEY,
+			receipts,
+		});
+		expect(report.valid).toBe(true);
+		expect(report.summary.verified).toBe(1);
+		const loaded = loadAvoSpecReceiptOverlay(join(root, "evidence/receipts"));
+		expect(loaded.errors).toEqual([]);
+		expect(Object.keys(loaded.receipts)).toHaveLength(6);
+		expect(parseAvoSpecRunnerArgs(["--changed", "a.ts,b.ts", "--changed", "c.ts", "--enforce"])).toMatchObject({
+			changedPaths: ["a.ts", "b.ts", "c.ts"],
+			enforce: true,
+		});
+		expect(() => parseAvoSpecRunnerArgs(["--enforce"])).toThrow(/requires at least one --changed path/);
+	});
+
+	test("maps changed protected files to requirements and exposes unmapped implementation paths", () => {
+		const contract = JSON.parse(
+			readFileSync(join(REPOSITORY_ROOT, "packages/coding-agent/spec/requirements.json"), "utf8"),
+		) as unknown;
+		const impact = deriveAvoSpecRequirementImpacts(contract, [
+			"packages/coding-agent/src/core/avo/store.ts",
+			"packages/coding-agent/src/core/avo/spec-contract.ts",
+			"packages/coding-agent/src/core/avo/obligations.ts",
+			"README.md",
+		]);
+		expect(impact.errors).toEqual([]);
+		expect(impact.affectedRequirementIds).toEqual(
+			expect.arrayContaining(["AUTH-001", "MEM-001", "MEM-002", "LIFE-001", "SPEC-001"]),
+		);
+		expect(impact.unmappedProtectedPaths).toEqual(["packages/coding-agent/src/core/avo/obligations.ts"]);
+		expect(deriveAvoSpecRequirementImpacts(contract, ["../escaped.ts"]).errors).toEqual([
+			"unsafe changed path: ../escaped.ts",
+		]);
 	});
 });
