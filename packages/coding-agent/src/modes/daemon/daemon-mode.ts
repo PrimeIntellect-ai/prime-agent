@@ -7160,6 +7160,11 @@ const ROSTER_SESSION_EVENT_TRIGGERS = new Set([
 	"bash_end",
 	"compaction_start",
 	"compaction_end",
+	// Retry transitions flip isSessionActive/activity; tool transitions flip isRunningTools.
+	"auto_retry_start",
+	"auto_retry_end",
+	"tool_execution_start",
+	"tool_execution_end",
 	"message_end",
 	"session_action_update",
 	"session_info_changed",

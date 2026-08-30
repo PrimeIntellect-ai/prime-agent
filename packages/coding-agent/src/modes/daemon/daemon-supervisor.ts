@@ -3644,14 +3644,18 @@ export class DaemonSupervisor {
 			if (recovery) {
 				await this.assertRecoveryAllowed();
 			}
-			worker.descriptor.rootSessionId = root.sessionId;
-			worker.descriptor.sessionFile = root.sessionFile;
-			worker.descriptor.createCommand = durableDaemonCreateCommand({
-				type: "create",
-				sessionPath: root.sessionFile,
-				noSession: worker.descriptor.createCommand.noSession,
+			// The pulled root persists through the same chain and epoch guard; a frame since the pull owns fresher pointers.
+			await this.chainWorkerRosterApply(worker, () => {
+				if ((worker.rosterEpoch ?? 0) !== epochAtStart) return;
+				worker.descriptor.rootSessionId = root.sessionId;
+				worker.descriptor.sessionFile = root.sessionFile;
+				worker.descriptor.createCommand = durableDaemonCreateCommand({
+					type: "create",
+					sessionPath: root.sessionFile,
+					noSession: worker.descriptor.createCommand.noSession,
+				});
+				this.persistWorker(worker);
 			});
-			this.persistWorker(worker);
 		}
 	}
 

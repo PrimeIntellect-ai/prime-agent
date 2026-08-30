@@ -218,6 +218,30 @@ describe("worker roster reporter", () => {
 		expect(sentDeltas.at(-1)?.entries.some((entry) => entry.agentId === "child-2")).toBe(false);
 	});
 
+	it("schedules a republish for retry and tool-execution transitions", () => {
+		const { daemon } = makeWorkerReporter();
+		const state = makeState({ activeSessionId: "root-active" });
+		daemon.sessions.set(state.activeSessionId, state);
+		const reporter = daemon as unknown as { rosterFlushScheduled: boolean };
+		for (const type of ["auto_retry_start", "auto_retry_end", "tool_execution_start", "tool_execution_end"]) {
+			reporter.rosterFlushScheduled = false;
+			daemon.observeRosterEvent(state, {
+				type: "session_event",
+				activeSessionId: state.activeSessionId,
+				event: { type },
+			});
+			expect(reporter.rosterFlushScheduled, type).toBe(true);
+		}
+		// Events with no roster-visible field stay out of the trigger set.
+		reporter.rosterFlushScheduled = false;
+		daemon.observeRosterEvent(state, {
+			type: "session_event",
+			activeSessionId: state.activeSessionId,
+			event: { type: "message_start" },
+		});
+		expect(reporter.rosterFlushScheduled).toBe(false);
+	});
+
 	it("sends deltas only on change and flips closed sessions to non-resident instead of dropping them", () => {
 		const { daemon, sentDeltas } = makeWorkerReporter();
 		const state = makeState({
@@ -376,6 +400,8 @@ interface WorkerFixture {
 		processStartId?: string;
 		lastError?: string;
 		ownerClientId?: string;
+		rootSessionId?: string;
+		sessionFile?: string;
 	};
 	client?: { request: ReturnType<typeof vi.fn> };
 	summaries: Map<string, SessionSummary>;
@@ -1216,6 +1242,42 @@ describe("review-round regressions", () => {
 			const rows = decodeDeltas().flatMap((delta) => delta.entries);
 			expect(rows.at(-1)?.summary.sessionName).toBe("renamed-by-worker");
 		});
+	});
+
+	it("keeps frame-updated root pointers when a stale summaries pull lands", async () => {
+		const worker = makeWorker("worker-1");
+		Object.assign(worker.descriptor, { createCommand: { type: "create" } });
+		let releaseList: (response: unknown) => void = () => {};
+		worker.client = {
+			request: vi.fn(
+				() =>
+					new Promise((resolveList) => {
+						releaseList = resolveList;
+					}),
+			),
+		};
+		const supervisor = makeSupervisor([worker], {
+			refreshWorkerSummaries: DaemonSupervisor.prototype["refreshWorkerSummaries" as never],
+			streamReconstructor: { seed: vi.fn(), clear: vi.fn() },
+		});
+		const staleRoot = summary({
+			id: "worker-1-root-active",
+			sessionId: "root",
+			activeSessionId: "worker-1-root-active",
+			sessionFile: "/tmp/sessions/old.jsonl",
+		});
+		const freshRoot = { ...staleRoot, sessionFile: "/tmp/sessions/new.jsonl" };
+
+		const refresh = (
+			supervisor as unknown as { refreshWorkerSummaries(worker: WorkerFixture, recovery: boolean): Promise<void> }
+		).refreshWorkerSummaries(worker, false);
+		// A frame updates the root pointers while the pull is still in flight.
+		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([workerRosterEntryFromSummary(freshRoot)]));
+		expect(worker.descriptor.sessionFile).toBe("/tmp/sessions/new.jsonl");
+		releaseList({ type: "response", command: "list", success: true, data: { sessions: [staleRoot] } });
+		await refresh;
+
+		expect(worker.descriptor.sessionFile).toBe("/tmp/sessions/new.jsonl");
 	});
 
 	it("re-claims rows a concurrent snapshot reseeds instead of leaving them workerless", async () => {
