@@ -1,6 +1,6 @@
 import type { AgentRosterEntry } from "../daemon/agent-roster.js";
 import { sessionSummaryFromRosterEntry } from "../daemon/agent-roster.js";
-import type { DaemonClient } from "../daemon/daemon-client.js";
+import type { DaemonClient, DaemonHello } from "../daemon/daemon-client.js";
 import type { DaemonOutbound } from "../daemon/daemon-protocol.js";
 import type { SessionSummary } from "../daemon/daemon-session-list.js";
 
@@ -12,25 +12,30 @@ export class AgentsViewRosterStore {
 	private unsubscribeMessage: (() => void) | undefined;
 	private emitScheduled = false;
 	private subscribed = false;
+	/** The hello of the connection the live subscription binds; a new hello means a new socket. */
+	private subscribedHello: DaemonHello | undefined;
 	private attachChain: Promise<unknown> = Promise.resolve();
 
-	/** Subscribes once per client connection; re-entry with a live subscription is a no-op. */
-	async attach(client: DaemonClient, options: { force?: boolean } = {}): Promise<boolean> {
+	/** Subscribes once per connection; a re-attach on the same hello is a no-op, a new hello re-subscribes. */
+	async attach(client: DaemonClient): Promise<boolean> {
 		// Attaches serialize: a stale attempt settling late can never detach a newer subscription's listener.
-		const run = () => this.attachToClient(client, options);
+		const run = () => this.attachToClient(client);
 		const chained = this.attachChain.then(run, run);
 		this.attachChain = chained;
 		return chained;
 	}
 
-	private async attachToClient(client: DaemonClient, options: { force?: boolean }): Promise<boolean> {
+	private async attachToClient(client: DaemonClient): Promise<boolean> {
 		// connect() resolves at socket connect; the capability verdict needs the parsed daemon_hello.
 		if (client.isConnected && client.hello === undefined) await client.waitForHello();
 		if (!client.supportsServerCapability("agent_roster")) {
 			this.detachFromClient();
 			return false;
 		}
-		if (!options.force && this.subscribed && this.client === client && client.isConnected) return true;
+		const hello = client.hello;
+		if (this.subscribed && this.client === client && client.isConnected && hello === this.subscribedHello) {
+			return true;
+		}
 		this.detachFromClient();
 		this.client = client;
 		// Updates racing the subscribe reply buffer until the snapshot lands, so the resync cannot erase them.
@@ -42,7 +47,8 @@ export class AgentsViewRosterStore {
 		});
 		let response: Awaited<ReturnType<DaemonClient["request"]>>;
 		try {
-			response = await client.request({ type: "roster_subscribe" });
+			// Not parkable behind request recovery: the reconnect loop awaiting this must see a close as a rejection.
+			response = await client.request({ type: "roster_subscribe" }, 30000, { recoverable: false });
 		} catch (error) {
 			// A transient transport failure detaches this attempt's listener and throws for the caller's retry loop.
 			this.detachFromClient();
@@ -62,6 +68,7 @@ export class AgentsViewRosterStore {
 		}
 		pendingUpdates = undefined;
 		this.subscribed = true;
+		this.subscribedHello = hello;
 		return true;
 	}
 
@@ -101,6 +108,7 @@ export class AgentsViewRosterStore {
 		this.unsubscribeMessage?.();
 		this.unsubscribeMessage = undefined;
 		this.subscribed = false;
+		this.subscribedHello = undefined;
 		this.client = undefined;
 	}
 

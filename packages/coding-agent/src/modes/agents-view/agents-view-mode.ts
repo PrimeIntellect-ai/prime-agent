@@ -2430,7 +2430,7 @@ export class AgentsViewMode implements Component, Focusable {
 			try {
 				await this.options.recoverDaemon?.();
 				await client.reconnect(1000);
-				if (!this.rosterStore || !(await this.rosterStore.attach(client, { force: true }))) {
+				if (!this.rosterStore || !(await this.rosterStore.attach(client))) {
 					throw new Error("Daemon lost the agent_roster capability during reconnect");
 				}
 				const sessions = this.rosterStore.summaries();

@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -106,6 +107,47 @@ describe("agents-view roster store", () => {
 		expect(client.request).not.toHaveBeenCalled();
 	});
 
+	it("re-subscribes on a reconnected client instead of trusting the stale subscribed flag", async () => {
+		const client = fakeRosterClient([ledgerEntry({ id: "a", sessionId: "a" })]);
+		const store = new AgentsViewRosterStore();
+		await expect(store.attach(client as never)).resolves.toBe(true);
+		expect(client.request).toHaveBeenCalledTimes(1);
+
+		// The same hello is a no-op re-attach; scope transitions stay request-free.
+		await expect(store.attach(client as never)).resolves.toBe(true);
+		expect(client.request).toHaveBeenCalledTimes(1);
+
+		// A reconnect mints a new hello: the surviving flag must not mask the dead server-side subscription.
+		client.hello = { type: "daemon_hello" };
+		await expect(store.attach(client as never)).resolves.toBe(true);
+		expect(client.request).toHaveBeenCalledTimes(2);
+	});
+
+	it("rejects a roster subscribe cut off mid-flight instead of parking it behind request recovery", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-park-"));
+		tempDirs.push(directory);
+		const socketPath = join(directory, "park.sock");
+		const server = createServer((socket) => {
+			socket.write(
+				`${JSON.stringify({ type: "daemon_hello", protocol: { version: 7 }, serverCapabilities: ["agent_roster"] })}\n`,
+			);
+			// The connection dies while the subscribe is in flight instead of ever replying.
+			socket.on("data", () => socket.destroy());
+		});
+		await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
+		const client = new DaemonClient(socketPath);
+		client.enableRequestRecovery();
+		try {
+			await client.connect();
+			await client.waitForHello();
+			const store = new AgentsViewRosterStore();
+			await expect(store.attach(client)).rejects.toThrow();
+		} finally {
+			client.close();
+			server.close();
+		}
+	});
+
 	it("resumes the roster bar after a transient subscribe failure during reconnect", async () => {
 		const listeners = new Set<(message: DaemonOutbound) => void>();
 		const responses: unknown[] = [
@@ -149,6 +191,8 @@ describe("agents-view roster store", () => {
 
 		await expect(store.attach(client as never)).resolves.toBe(true);
 
+		// The reconnect replaced the transport: a fresh hello invalidates the old subscription.
+		client.hello = { type: "daemon_hello" };
 		// The transient failure throws into the bounded reconnect retry instead of leaving a dead subscription.
 		await expect(connection.attach()).rejects.toThrow("roster_subscribe failed");
 		await connection.attach();
@@ -191,8 +235,8 @@ describe("agents-view roster store", () => {
 		};
 		const store = new AgentsViewRosterStore();
 
-		const first = store.attach(client as never, { force: true });
-		const second = store.attach(client as never, { force: true });
+		const first = store.attach(client as never);
+		const second = store.attach(client as never);
 		releaseFirst({ success: false, error: "stale socket" });
 		await expect(first).rejects.toThrow("roster_subscribe failed");
 		await expect(second).resolves.toBe(true);
