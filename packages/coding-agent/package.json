@@ -86,7 +86,7 @@
 		"@types/ms": "^2.1.0",
 		"@types/node": "^24.3.0",
 		"@types/proper-lockfile": "^4.1.4",
-		"esbuild": "^0.28.1",
+		"esbuild": "^0.28.2",
 		"shx": "^0.4.0",
 		"typescript": "^7.0.2",
 		"vitest": "^4.1.10"
