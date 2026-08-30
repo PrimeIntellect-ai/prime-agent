@@ -5444,6 +5444,14 @@ describe("AVO routing and adapters", () => {
 
 		writeFileSync(join(dir, "api.py"), "def evaluate(left, right): return left - right\n", "utf8");
 		expect(captureAvoVerificationHarnessManifest(dir, command, baseline).digest).toBe(original.digest);
+		writeFileSync(
+			join(dir, "api.py"),
+			"import math\ndef evaluate(left, right): return math.floor(left) - right\n",
+			"utf8",
+		);
+		const applicationImport = captureAvoVerificationHarnessManifest(dir, command, baseline);
+		expect(applicationImport.runnerIdentityDigest).toBe(original.runnerIdentityDigest);
+		expect(applicationImport.digest).toBe(original.digest);
 
 		const controls = [
 			["tests/fixture_values.py", "def adjustment(): return -4\n"],
@@ -5563,6 +5571,17 @@ describe("AVO routing and adapters", () => {
 		expect(namedOriginal.entries).not.toContainEqual(expect.objectContaining({ path: "subject.cjs" }));
 		writeFileSync(join(dir, "subject.cjs"), "module.exports = (left, right) => left - right;\n", "utf8");
 		expect(captureAvoVerificationHarnessManifest(dir, command, namedBaseline).digest).toBe(namedOriginal.digest);
+		writeFileSync(
+			join(dir, "subject.cjs"),
+			"require('candidate-only-package'); module.exports = (left, right) => left - right;\n",
+			"utf8",
+		);
+		const applicationImport = captureAvoVerificationHarnessManifest(dir, command, namedBaseline);
+		expect(applicationImport).toMatchObject({
+			supported: true,
+			runnerIdentityDigest: namedOriginal.runnerIdentityDigest,
+			digest: namedOriginal.digest,
+		});
 		writeFileSync(join(dir, "expected.cjs"), "module.exports = -1;\n", "utf8");
 		expect(captureAvoVerificationHarnessManifest(dir, command, namedBaseline).digest).not.toBe(namedOriginal.digest);
 	});

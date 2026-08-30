@@ -926,12 +926,6 @@ export function captureAvoVerificationHarnessManifest(
 	}
 	const externalPythonModules = new Set<string>();
 	const inferredApplicationPaths = new Set<string>();
-	const applicationPythonPaths = new Set<string>(
-		[...taskSourcePaths].filter((path) => path.endsWith(".py") && availableFiles.has(path)),
-	);
-	const applicationNodePaths = new Set<string>(
-		[...taskSourcePaths].filter((path) => /\.(?:[cm]?[jt]sx?)$/.test(path) && availableFiles.has(path)),
-	);
 	const controls = new Map<string, AvoVerificationHarnessEntry["role"]>();
 	const pendingControls: string[] = [];
 	const addControl = (path: string, role: AvoVerificationHarnessEntry["role"]): void => {
@@ -1071,7 +1065,6 @@ export function captureAvoVerificationHarnessManifest(
 						taskSourcePaths.has(importedPath) ||
 						(!strictTaskSourcePaths && !isTestFile(importedPath) && !isInsideNamedTestDirectory(importedPath));
 					if (applicationPath) {
-						applicationPythonPaths.add(importedPath);
 						if (!taskSourcePaths.has(importedPath)) inferredApplicationPaths.add(importedPath);
 					} else addControl(importedPath, "fixture");
 				}
@@ -1091,70 +1084,16 @@ export function captureAvoVerificationHarnessManifest(
 						taskSourcePaths.has(importedPath) ||
 						(!strictTaskSourcePaths && !isTestFile(importedPath) && !isInsideNamedTestDirectory(importedPath));
 					if (applicationPath) {
-						applicationNodePaths.add(importedPath);
 						if (!taskSourcePaths.has(importedPath)) inferredApplicationPaths.add(importedPath);
 					} else addControl(importedPath, "fixture");
 				}
 			}
 		}
 	}
-
-	const scannedApplicationPython = new Set<string>();
-	const pendingApplicationPython = [...applicationPythonPaths];
-	while (pendingApplicationPython.length > 0) {
-		const path = pendingApplicationPython.shift()!;
-		if (scannedApplicationPython.has(path)) continue;
-		scannedApplicationPython.add(path);
-		let source: string;
-		try {
-			source = readFileSync(resolve(root, path), "utf8");
-		} catch {
-			unsupportedReasons.push(`application Python dependency could not be read: ${path}`);
-			continue;
-		}
-		if (/\b(?:__import__|importlib\.import_module)\s*\(/.test(source)) {
-			unsupportedReasons.push(`dynamic Python application imports do not have a closed verifier surface: ${path}`);
-		}
-		for (const imported of staticPythonImports(source)) {
-			const localPaths = localPythonModulePaths(path, imported.moduleName, imported.importedNames, availableFiles, [
-				...pythonSearchRoots,
-				dirname(path).replaceAll("\\", "/"),
-			]);
-			if (localPaths.length === 0 && !imported.moduleName.startsWith(".")) {
-				externalPythonModules.add(imported.moduleName.split(".")[0]!);
-			}
-			for (const importedPath of localPaths) {
-				if (!scannedApplicationPython.has(importedPath)) pendingApplicationPython.push(importedPath);
-			}
-		}
-	}
-
-	const scannedApplicationNode = new Set<string>();
-	const pendingApplicationNode = [...applicationNodePaths];
-	while (pendingApplicationNode.length > 0) {
-		const path = pendingApplicationNode.shift()!;
-		if (scannedApplicationNode.has(path)) continue;
-		scannedApplicationNode.add(path);
-		let source: string;
-		try {
-			source = readFileSync(resolve(root, path), "utf8");
-		} catch {
-			unsupportedReasons.push(`application Node dependency could not be read: ${path}`);
-			continue;
-		}
-		if (/\bimport\s*\(|\brequire\s*\([^"']/.test(source)) {
-			unsupportedReasons.push(`dynamic Node application imports do not have a closed verifier surface: ${path}`);
-		}
-		for (const specifier of staticNodeImports(source)) {
-			const localPaths = localNodeModulePaths(path, specifier, availableFiles);
-			if (localPaths.length === 0 && !specifier.startsWith(".") && !isNodeBuiltinModule(specifier)) {
-				unsupportedReasons.push(`external Node application dependency is not content-bound: ${specifier}`);
-			}
-			for (const importedPath of localPaths) {
-				if (!scannedApplicationNode.has(importedPath)) pendingApplicationNode.push(importedPath);
-			}
-		}
-	}
+	// Candidate application code and its dependency choices are already bound by
+	// the semantic workspace digest. They must not mutate the immutable verifier
+	// identity; only imports reachable from test/config/plugin controls belong to
+	// the verification harness closure above.
 	if (!strictTaskSourcePaths && taskSourcePaths.size === 0 && inferredApplicationPaths.size > 1) {
 		unsupportedReasons.push(
 			`ambiguous application and verifier dependencies (${[...inferredApplicationPaths].sort().join(", ")}); declare specification sourcePaths`,

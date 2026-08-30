@@ -1,1 +1,1 @@
-- Hardened AVO SpecBench execution with host-bound verification, isolated official grading, resumable failure accounting, and auditable trace provenance.
+- Hardened AVO SpecBench execution with host-bound verification, stable verifier identity, bounded completion repair, isolated official grading, resumable failure accounting, and auditable trace provenance.

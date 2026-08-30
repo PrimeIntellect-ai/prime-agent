@@ -307,6 +307,32 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 	});
 
+	it("stops a blocked AVO completion-repair loop at the autonomous turn limit", async () => {
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			autonomous: { enabled: true, maxContinuations: 99, maxTurns: 2 },
+		});
+		harness.setResponses(Array.from({ length: 5 }, () => fauxAssistantMessage("Done without host evidence.")));
+
+		await harness.session.prompt("Write a poem about rain");
+
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.getPendingResponseCount()).toBe(3);
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			turnsUsed: 2,
+			continuationsUsed: 0,
+		});
+		expect(
+			harness.session.messages.filter(
+				(message) => message.role === "custom" && message.customType === "avo_completion_required",
+			),
+		).toHaveLength(1);
+		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
+			state: { status: "active" },
+		});
+	});
+
 	it("discards queued AVO supervisor prompts and requests canonical delivery immediately", async () => {
 		const readyTool: AgentTool = {
 			name: "ready",
@@ -616,7 +642,7 @@ describe("AgentSession universal AVO runtime", () => {
 		harness = await createHarness({
 			persistSession: true,
 			enforceAvoCompletion: true,
-			autonomous: { enabled: true, maxContinuations: 3 },
+			autonomous: { enabled: true, maxContinuations: 3, maxTurns: 1 },
 		});
 		harness.setResponses([
 			async () => {
@@ -645,6 +671,7 @@ describe("AgentSession universal AVO runtime", () => {
 		expect(harness.faux.state.callCount).toBe(1);
 		expect(harness.session.getAutonomousStatus()).toMatchObject({
 			continuationsUsed: 0,
+			turnsUsed: 1,
 			terminalEvidence: { kind: "avo_completion", runId: `${harness.session.sessionId}:task-1` },
 		});
 		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({

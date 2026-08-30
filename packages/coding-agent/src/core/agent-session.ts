@@ -103,6 +103,7 @@ import {
 	type AutonomousRuntimeState,
 	addAutonomousContinuation,
 	addAutonomousUsage,
+	autonomousLimitReason,
 	autonomousStatus,
 	createAutonomousRuntimeState,
 	nextAutonomousContinuation,
@@ -8045,6 +8046,13 @@ export class AgentSession {
 		if (deliveryMatches) {
 			this._avoRuntime.store.complete(gate);
 			this._discardObsoleteAvoCompletionInputs(state, { includeCanonicalDelivery: false });
+			return undefined;
+		}
+		// AVO completion repair is an autonomous continuation path too. It runs
+		// before the generic autonomous continuation policy, so enforce the shared
+		// hard budget here after first giving this in-flight assistant message a
+		// chance to provide canonical terminal evidence.
+		if (this._autonomousState.enabled && autonomousLimitReason(this._autonomousState)) {
 			return undefined;
 		}
 		const watchdog = this._assessAvoProgressWatchdog(
