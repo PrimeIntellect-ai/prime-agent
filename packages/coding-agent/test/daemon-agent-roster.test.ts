@@ -30,9 +30,7 @@ afterEach(() => {
 	for (const directory of tempDirs.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-// ------------------------------------------------------------------
-// Worker-side roster reporter (daemon-mode)
-// ------------------------------------------------------------------
+// --- Worker-side roster reporter (daemon-mode) ---
 
 interface WorkerReporterFixture {
 	daemon: {
@@ -326,7 +324,7 @@ describe("worker roster reporter", () => {
 		}) as { flushRoster(): void; rosterReporter: { snapshotPending: boolean; removedAgentIds: Set<string> } };
 
 		daemon.flushRoster();
-		// The queued write IS delivered: nothing stays pending and only the claimed socket was written.
+		// The queued write IS delivered: nothing stays pending and only the claimed socket receives the write.
 		expect(write).toHaveBeenCalledTimes(1);
 		expect(oldWrite).not.toHaveBeenCalled();
 		expect(daemon.rosterReporter.snapshotPending).toBe(false);
@@ -352,9 +350,7 @@ describe("worker roster reporter", () => {
 	});
 });
 
-// ------------------------------------------------------------------
-// Supervisor-side roster ledger
-// ------------------------------------------------------------------
+// --- Supervisor-side roster ledger ---
 
 function summary(overrides: Partial<SessionSummary> & Pick<SessionSummary, "id" | "sessionId">): SessionSummary {
 	return {
@@ -384,9 +380,6 @@ interface WorkerFixture {
 	client?: { request: ReturnType<typeof vi.fn> };
 	summaries: Map<string, SessionSummary>;
 	intentionalStop: boolean;
-	rosterCapable?: boolean;
-	lastFrameAt?: number;
-	rosterStale?: boolean;
 	snapshotCache: Map<string, unknown>;
 	transcriptCaches: Map<string, unknown>;
 	snapshotGenerations: Map<string, unknown>;
@@ -1078,7 +1071,7 @@ describe("review-round regressions", () => {
 	});
 
 	it("trusts frames only from the current and in-flight replacement connections", () => {
-		const worker = makeWorker("worker-1", { rosterCapable: true });
+		const worker = makeWorker("worker-1");
 		const supervisor = makeSupervisor([worker], {
 			streamReconstructor: { observe: vi.fn(), seed: vi.fn(), clear: vi.fn() },
 		});
@@ -1478,7 +1471,7 @@ describe("review-round regressions", () => {
 
 	it("routes a just-bound session through the miss-path refresh", async () => {
 		const target = summary({ id: "target-active", sessionId: "target", activeSessionId: "target-active" });
-		const worker = makeWorker("worker-1", { rosterCapable: true });
+		const worker = makeWorker("worker-1");
 		worker.client = {
 			request: vi.fn(async () => ({
 				type: "response",

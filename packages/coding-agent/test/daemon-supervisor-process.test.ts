@@ -463,7 +463,7 @@ describe("daemon supervisor resident workers", () => {
 			throw new Error(`Pre-roster worker was not restarted:\n${readDaemonLogs(agentDir)}`);
 		}
 		workerPids.add(restarted.workerPid);
-		// A fresh current-binary worker owns the reloaded idle session; the fake pre-roster pid was not adopted.
+		// A fresh current-binary worker owns the reloaded idle session; the fake pre-roster pid is not adopted.
 		expect(restarted.workerPid).not.toBe(legacyProcess.pid);
 		expect(restarted.isSessionActive).toBe(false);
 		expect(restarted.messageCount).toBe(1);

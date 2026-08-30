@@ -827,8 +827,7 @@ export class DaemonSupervisor {
 				.map((summary) => {
 					const activeSessionId = summary.activeSessionId ?? summary.id;
 					return {
-						// Use the canonical busy projection: a parent remains active for
-						// residency purposes while any of its RLM descendants is running.
+						// The canonical busy projection: a parent stays active for residency while any RLM descendant runs.
 						isSessionActive: isSessionSummaryBusy(summary),
 						attachedClients: [...this.clients].filter((client) =>
 							client.attachedActiveSessionIds.has(activeSessionId),
