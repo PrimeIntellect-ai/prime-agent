@@ -9,7 +9,6 @@ import { SessionManager } from "../src/core/session-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import {
 	type AgentRosterEntry,
-	sessionSummaryFromRosterEntry,
 	type WorkerRosterEntry,
 	workerRosterEntryFromSummary,
 } from "../src/modes/daemon/agent-roster.js";
