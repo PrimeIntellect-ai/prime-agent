@@ -120,6 +120,21 @@ export {
 } from "./probe.js";
 export { AvoSessionRuntime, buildAvoRuntimePrompt } from "./runtime.js";
 export {
+	AVO_SPEC_GATES,
+	AVO_SPEC_MECHANISMS,
+	type AvoSpecEvidenceState,
+	type AvoSpecGate,
+	type AvoSpecMechanism,
+	type AvoSpecRequirementCoverage,
+	type AvoSpecRequirementStatus,
+	type AvoSpecValidationOptions,
+	type AvoSpecValidationReport,
+	digestAvoSpecSources,
+	loadAndValidateAvoSpecContract,
+	signAvoSpecReceipt,
+	validateAvoSpecContract,
+} from "./spec-contract.js";
+export {
 	AvoStore,
 	digestAvoDeliveryText,
 	digestAvoPayload,

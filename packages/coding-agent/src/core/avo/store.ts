@@ -4265,12 +4265,26 @@ export class AvoStore {
 		memoryIds: readonly string[],
 		channel: AvoMemoryRecallChannel,
 		contextChars: number,
+		details: {
+			backend: AvoMemoryRecall["backend"];
+			status: AvoMemoryRecall["status"];
+			reason?: string;
+			retrieval?: string;
+			satisfies?: readonly string[];
+		},
 	): AvoMemoryRecall {
 		if (!AVO_MEMORY_RECALL_CHANNELS.includes(channel)) throw new Error("invalid memory recall channel");
+		const bounded = (value: string | undefined) => value?.replace(/\s+/g, " ").trim().slice(0, 1_000) || undefined;
 		const recall: AvoMemoryRecall = {
 			recallId: `memory-recall-${randomUUID()}`,
 			runId: this.state.runId,
+			event: "memory_recall",
+			satisfies: [...new Set(details.satisfies ?? [])],
 			channel,
+			backend: details.backend,
+			status: details.status,
+			reason: bounded(details.reason),
+			retrieval: bounded(details.retrieval),
 			queryDigest: createHash("sha256").update(requireString(query, "memory recall query")).digest("hex"),
 			memoryIds: [...new Set(memoryIds)].filter((memoryId) =>
 				this.state.memories.some((memory) => memory.memoryId === memoryId),

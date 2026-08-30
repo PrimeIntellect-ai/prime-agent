@@ -525,7 +525,13 @@ export interface AvoMemoryReference {
 export interface AvoMemoryRecall {
 	recallId: string;
 	runId: string;
+	event: "memory_recall";
+	satisfies: string[];
 	channel: AvoMemoryRecallChannel;
+	backend: "nooa-memory" | "host-fallback";
+	status: "ok" | "fallback" | "failed";
+	reason?: string;
+	retrieval?: string;
 	queryDigest: string;
 	memoryIds: string[];
 	contextChars: number;

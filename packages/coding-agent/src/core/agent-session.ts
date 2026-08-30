@@ -4152,9 +4152,29 @@ export class AgentSession {
 		}
 		try {
 			const recalled = await this._avoRuntime.recallMemory(prompt, { spontaneous: true, limit: 5, maxChars: 2_000 });
-			this._avoMemoryContext = recalled.context;
-		} catch {
-			this._avoMemoryContext = "";
+			const backendNotice =
+				recalled.backend === "host-fallback"
+					? `AVO_MEMORY_RECALL_STATUS=fallback. NOOA did not provide this recall; the host fallback was used${recalled.reason ? ` because ${recalled.reason.replace(/\s+/g, " ").trim().slice(0, 500)}` : ""}. Do not claim that NOOA memory influenced this turn.`
+					: undefined;
+			this._avoMemoryContext = [backendNotice, recalled.context]
+				.filter((value): value is string => Boolean(value))
+				.join("\n\n");
+		} catch (error) {
+			const reason = (error instanceof Error ? error.message : String(error))
+				.replace(/\s+/g, " ")
+				.trim()
+				.slice(0, 500);
+			try {
+				this._avoRuntime.store.recordMemoryRecall(prompt, [], "spontaneous", 0, {
+					backend: "host-fallback",
+					status: "failed",
+					reason,
+					satisfies: ["ORDER-001", "FALLBACK-001"],
+				});
+			} catch {
+				// The prompt still exposes the failure if the state store itself is unavailable.
+			}
+			this._avoMemoryContext = `AVO_MEMORY_RECALL_STATUS=failed. Automatic memory recall failed before this turn: ${reason || "unknown host error"}. No recalled memory was injected; do not claim that NOOA or remembered experience influenced this turn.`;
 		}
 	}
 

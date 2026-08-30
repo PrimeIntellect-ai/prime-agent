@@ -60,6 +60,76 @@ describe("AgentSession universal AVO runtime", () => {
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
+	it("[FALLBACK-001] exposes an unexpected recall failure before the root model turn", async () => {
+		harness = await createHarness({ persistSession: true });
+		const internals = harness.session as unknown as {
+			_avoRuntime: {
+				recallMemory: () => Promise<never>;
+			};
+		};
+		internals._avoRuntime.recallMemory = async () => {
+			throw new Error("forced recall crash");
+		};
+		harness.setResponses([
+			async (context) => {
+				expect(context.systemPrompt).toContain("AVO_MEMORY_RECALL_STATUS=failed");
+				expect(context.systemPrompt).toContain("forced recall crash");
+				expect(context.systemPrompt).toContain("do not claim that NOOA or remembered experience influenced");
+				return fauxAssistantMessage("Failure was explicit.");
+			},
+		]);
+
+		await harness.session.prompt("Explain parser recovery");
+		const state = (await harness.session.handleAvoHostRequest("avo.get")).state as AvoRunState;
+		expect(state.memoryRecalls).toContainEqual(
+			expect.objectContaining({
+				event: "memory_recall",
+				backend: "host-fallback",
+				status: "failed",
+				reason: "forced recall crash",
+				satisfies: ["ORDER-001", "FALLBACK-001"],
+			}),
+		);
+	});
+
+	it("[ORDER-001] injects automatic recall before the first candidate-producing model turn", async () => {
+		harness = await createHarness({ persistSession: true });
+		const internals = harness.session as unknown as {
+			_avoRuntime: {
+				store: {
+					rememberVerified(input: Record<string, unknown>): unknown;
+					getState(): AvoRunState;
+				};
+			};
+		};
+		internals._avoRuntime.store.rememberVerified({
+			memoryId: "order-memory",
+			namespace: "general",
+			type: "info",
+			scope: "project",
+			title: "Parser recovery ordering",
+			content: "ORDER_SENTINEL must be present before the model proposes a parser candidate.",
+			importance: 9,
+			sourceIds: ["host:order-fixture"],
+		});
+		harness.setResponses([
+			async (context) => {
+				const stateBeforeModelAction = internals._avoRuntime.store.getState();
+				expect(stateBeforeModelAction.candidates).toEqual([]);
+				expect(stateBeforeModelAction.memoryRecalls.at(-1)).toMatchObject({
+					event: "memory_recall",
+					channel: "spontaneous",
+					satisfies: expect.arrayContaining(["ORDER-001"]),
+				});
+				expect(context.systemPrompt).toContain("ORDER_SENTINEL");
+				return fauxAssistantMessage("The remembered ordering rule is visible.");
+			},
+		]);
+
+		await harness.session.prompt("Use the parser recovery ordering lesson");
+		expect(harness.faux.state.callCount).toBe(1);
+	});
+
 	it("rejects long-horizon pre-mortem assumptions invented after workspace edits", async () => {
 		harness = await createHarness({ persistSession: true });
 		harness.setResponses([fauxAssistantMessage("working")]);
@@ -965,7 +1035,7 @@ describe("AgentSession universal AVO runtime", () => {
 		).toMatchObject({ cycle: { outcome: "accepted" } });
 	});
 
-	it("rejects a coding test that mutates the evaluated workspace while it passes", async () => {
+	it("[STATE-001] rejects a coding test that mutates the evaluated workspace while it passes", async () => {
 		harness = await createHarness({ persistSession: true });
 		writeFileSync(`${harness.tempDir}/parser.cjs`, "module.exports = 1;\n");
 		writeFileSync(
@@ -1038,7 +1108,7 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 	});
 
-	it("binds final delivery to the candidate that currently satisfies a fallback gate", async () => {
+	it("[ID-001] binds final delivery to the candidate that currently satisfies a fallback gate", async () => {
 		harness = await createHarness({ persistSession: true });
 		writeFileSync(`${harness.tempDir}/parser.cjs`, "module.exports = 1;\n");
 		writeFileSync(
@@ -1693,7 +1763,7 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 	});
 
-	it("refuses to run a coding receipt after the workspace diverges from its candidate", async () => {
+	it("[ID-001] refuses to run a coding receipt after the workspace diverges from its candidate", async () => {
 		harness = await createHarness({ persistSession: true });
 		harness.setResponses([fauxAssistantMessage("working")]);
 		await harness.session.prompt("Fix the parser module and test it");

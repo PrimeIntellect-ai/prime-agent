@@ -127,6 +127,13 @@ export class AvoSessionRuntime {
 			recalled.map((memory) => memory.memoryId),
 			channel,
 			context.length,
+			{
+				backend: nooa.ok ? "nooa-memory" : "host-fallback",
+				status: nooa.ok ? "ok" : "fallback",
+				reason: nooa.reason,
+				retrieval: nooa.retrieval,
+				satisfies: nooa.ok ? ["ORDER-001"] : ["ORDER-001", "FALLBACK-001"],
+			},
 		);
 		return {
 			memories: recalled,

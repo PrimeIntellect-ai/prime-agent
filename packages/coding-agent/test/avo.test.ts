@@ -1165,7 +1165,7 @@ describe("generic AVO core", () => {
 		);
 	});
 
-	test("persists project and global memory independently of session scratch memory", () => {
+	test("[MEM-001] persists project and global memory independently of session scratch memory", () => {
 		const root = artifactDir();
 		const project = join(root, "project-a");
 		const otherProject = join(root, "project-b");
@@ -1241,7 +1241,7 @@ describe("generic AVO core", () => {
 		);
 	});
 
-	test("does not let an equal-timestamp stale session revive contested project memory", () => {
+	test("[MEM-002] does not let an equal-timestamp stale session revive contested project memory", () => {
 		const root = artifactDir();
 		const project = join(root, "project");
 		const memoryRoot = join(root, "agent-memory");
@@ -1461,7 +1461,7 @@ describe("generic AVO core", () => {
 		}
 	});
 
-	test("re-resolves live file references and records spontaneous recall outcomes", async () => {
+	test("[ORDER-001] re-resolves live file references and records spontaneous recall outcomes", async () => {
 		const root = artifactDir();
 		const project = join(root, "project");
 		const agentDir = join(root, "agent");
@@ -1529,6 +1529,66 @@ describe("generic AVO core", () => {
 		expect(runtime.dashboardProjection().metrics).toEqual(
 			expect.arrayContaining([expect.objectContaining({ label: "Spontaneous recalls", value: 1 })]),
 		);
+		runtime.dispose();
+	});
+
+	test("[FALLBACK-001] records host fallback without claiming NOOA retrieval", async () => {
+		const root = artifactDir();
+		const project = join(root, "project");
+		const agentDir = join(root, "agent");
+		mkdirSync(project, { recursive: true });
+		const runtime = new AvoSessionRuntime(
+			join(root, "session"),
+			"memory-fallback-session",
+			clock(),
+			project,
+			agentDir,
+			async () => ({ ok: false, reason: "forced NOOA outage" }),
+		);
+		runtime.observeRootPrompt("Recall the parser fallback rule");
+		const memory = runtime.store.rememberVerified({
+			namespace: "general",
+			type: "info",
+			scope: "project",
+			title: "Parser fallback rule",
+			content: "Use the bounded parser recovery path.",
+			importance: 8,
+		});
+
+		const recalled = await runtime.recallMemory("parser fallback rule", { spontaneous: true });
+		expect(recalled).toMatchObject({
+			backend: "host-fallback",
+			reason: "forced NOOA outage",
+			memories: [{ memoryId: memory.memoryId }],
+		});
+		expect(runtime.getState().memoryRecalls.at(-1)).toMatchObject({
+			event: "memory_recall",
+			backend: "host-fallback",
+			status: "fallback",
+			reason: "forced NOOA outage",
+			satisfies: ["ORDER-001", "FALLBACK-001"],
+		});
+		expect(runtime.dashboardProjection().sections).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					id: "memory",
+					items: expect.arrayContaining([
+						expect.objectContaining({
+							label: "Latest recall backend",
+							value: expect.stringContaining("host-fallback · fallback · forced NOOA outage"),
+							status: "watch",
+						}),
+					]),
+				}),
+			]),
+		);
+		const reopened = new AvoStore(join(root, "session"), "memory-fallback-session", clock(), project);
+		expect(reopened.getState().memoryRecalls.at(-1)).toMatchObject({
+			backend: "host-fallback",
+			status: "fallback",
+			reason: "forced NOOA outage",
+			satisfies: ["ORDER-001", "FALLBACK-001"],
+		});
 		runtime.dispose();
 	});
 
@@ -2728,7 +2788,7 @@ describe("generic AVO core", () => {
 		).toEqual([{ clusterId: "cluster-1", verdict: "supports", reason: "Same fact; newer evidence." }]);
 	});
 
-	test("persists a host-authoritative accepted lineage across restart", () => {
+	test("[LIFE-001] persists a host-authoritative accepted lineage across restart", () => {
 		const dir = artifactDir();
 		const runtime = new AvoSessionRuntime(dir, "run-1", clock(), "/workspace/repo");
 		runtime.configure({ environment: "coding", horizon: "iterative", source: "user" });
@@ -2766,7 +2826,7 @@ describe("generic AVO core", () => {
 		expect(reopened.evaluateStopGate().passed).toBe(true);
 	});
 
-	test("does not promote model opinion into canonical progress", () => {
+	test("[AUTH-001] does not promote model opinion into canonical progress", () => {
 		const store = new AvoStore(undefined, "run-opinion", clock());
 		store.initialize("Write a pleasing answer");
 		const candidate = store.recordCandidate({ kind: "answer", summary: "Draft answer", payload: "draft" });
@@ -3381,7 +3441,7 @@ describe("generic AVO core", () => {
 		);
 	});
 
-	test("does not show the dashboard final gate before a candidate cycle is accepted", () => {
+	test("[SYNC-001] does not show the dashboard final gate before a candidate cycle is accepted", () => {
 		const runtime = new AvoSessionRuntime(undefined, "run-dashboard-cycle", clock());
 		runtime.observeRootPrompt("Write a poem about rain");
 		const candidate = runtime.recordCandidate({ kind: "answer", summary: "Rain poem", payload: "Rain sings." });
@@ -4521,7 +4581,7 @@ describe("AVO routing and adapters", () => {
 		});
 	});
 
-	test("changes the host workspace digest when a candidate file changes", () => {
+	test("[ID-001] changes the host workspace digest when a candidate file changes", () => {
 		const dir = artifactDir();
 		writeFileSync(join(dir, "parser.ts"), "export const value = 1;\n", "utf8");
 		const first = captureAvoWorkspaceSnapshot(dir);

@@ -385,6 +385,8 @@ function genericProjection(
 	const requiredPremortemAssumptions = requiredAvoPremortemAssumptionCount(state);
 	const codingPivots = deriveAvoCodingPivotSummary(state);
 	const impactChecks = latestCandidate ? deriveAvoCandidateImpactChecks(state, latestCandidate) : [];
+	const latestMemoryRecall = state.memoryRecalls.at(-1);
+	const memoryFallbacks = state.memoryRecalls.filter((recall) => recall.status !== "ok").length;
 	return {
 		runId: state.runId,
 		taskRunCount: state.taskRuns.length + 1,
@@ -432,6 +434,7 @@ function genericProjection(
 				label: "Spontaneous recalls",
 				value: state.memoryRecalls.filter((recall) => recall.channel === "spontaneous").length,
 			},
+			{ label: "Memory fallbacks", value: memoryFallbacks },
 		],
 		sections: [
 			{
@@ -530,6 +533,18 @@ function genericProjection(
 							).length,
 						),
 						status: "neutral",
+					},
+					{
+						label: "Latest recall backend",
+						value: latestMemoryRecall
+							? `${latestMemoryRecall.backend ?? "legacy-untraced"} · ${latestMemoryRecall.status ?? "unknown"}${latestMemoryRecall.reason ? ` · ${latestMemoryRecall.reason}` : ""}`
+							: "No recall recorded",
+						status:
+							latestMemoryRecall?.status === "failed"
+								? "fail"
+								: latestMemoryRecall?.status === "ok" || !latestMemoryRecall
+									? "neutral"
+									: "watch",
 					},
 					{
 						label: "Contested or invalidated",

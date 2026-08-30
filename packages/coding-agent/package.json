@@ -44,6 +44,7 @@
 		"test:process-stress": "vitest --run --tagsFilter process-stress test/daemon-supervisor-process.test.ts",
 		"eval:integrity": "tsx src/evals/prime-integrity/runner.ts",
 		"eval:kernelbench": "tsx src/evals/kernelbench/runner.ts",
+		"eval:spec-contract": "tsx src/evals/spec-contract/runner.ts",
 		"eval:specbench": "tsx src/evals/specbench/runner.ts",
 		"postinstall": "node postinstall.cjs",
 		"prepublishOnly": "npm run clean && npm run build",

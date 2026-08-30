@@ -1,0 +1,1 @@
+- Added a fail-closed executable AVO behavioral contract with host-signed six-gate evidence, and made NOOA recall failures and host fallback explicit in traces, prompts, persistence, and the dashboard.
