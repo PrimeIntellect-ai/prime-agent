@@ -19,6 +19,11 @@ import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AVO_INTERNAL_ABLATIONS_ENV, type AvoAblationFeature } from "../../core/avo/ablation.js";
 import { summarizeAvoMetric } from "../../core/avo/experiment.js";
+import {
+	AVO_PYTHON_PROBE_BROKER_SOCKET_ENV,
+	AVO_PYTHON_PROBE_BROKER_TOKEN_ENV,
+	startAvoPythonProbeBroker,
+} from "../../core/avo/probe.js";
 import { summarizePrimeIntegrityTrace } from "../prime-integrity/runner.js";
 import {
 	PRIME_INTEGRITY_TOKEN_STAGES,
@@ -184,6 +189,16 @@ export interface SpecBenchConditionSummary {
 	meanSupervisorProgressingReviews: number;
 	meanSupervisorWatchReviews: number;
 	meanSupervisorInterventions: number;
+	meanAdversarialProbeEvaluations: number;
+	meanAdversarialProbePasses: number;
+	meanAdversarialProbeRevisions: number;
+	meanAdversarialProbeInconclusive: number;
+	meanAdversarialProbeCases: number;
+	meanAdversarialProbePassedCases: number;
+	meanAdversarialProbeFailedCases: number;
+	meanAdversarialProbeEnvironmentUnsupported: number;
+	adversarialProbeCallables: string[];
+	adversarialProbeRequiredCallables: string[];
 	meanToolProbationActivations: number;
 	meanToolProbationBlockedCalls: number;
 	meanObligations: number;
@@ -809,6 +824,7 @@ async function runTask(
 	];
 	const protectedBefore = new Map(protectedPaths.map((path) => [path, protectedPathDigest(path)]));
 	copyConfig(options.configSource, agentDir);
+	const probeBroker = options.hardening ? await startAvoPythonProbeBroker(workspace) : undefined;
 	const agentArgs = [
 		"--daemon-socket",
 		`/tmp/prime-specbench-${taskId}.sock`,
@@ -841,6 +857,12 @@ async function runTask(
 		PRIME_AGENT_CODING_AGENT_DIR: agentDir,
 		PRIME_AGENT_SESSION_DIR: sessionDir,
 		PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: supervisorDir,
+		...(probeBroker
+			? {
+					[AVO_PYTHON_PROBE_BROKER_SOCKET_ENV]: probeBroker.socketPath,
+					[AVO_PYTHON_PROBE_BROKER_TOKEN_ENV]: probeBroker.token,
+				}
+			: {}),
 		PRIME_AGENT_KERNEL_PYTHON: join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python"),
 		// Official tasks publish their own execution budget. Give a model-authored
 		// notebook test at most two such windows before the host retires the kernel.
@@ -849,12 +871,17 @@ async function runTask(
 		),
 	};
 	const startedAt = Date.now();
-	const agent = await runCommand(
-		options.hardening
-			? sandboxArgs(agentExecutable, agentArgs, caseRoot, workspace, options.specbenchRoot, protectedPaths)
-			: [agentExecutable, ...agentArgs],
-		{ cwd: workspace, env: environment, timeoutMs: options.timeoutMs + 30_000 },
-	);
+	let agent: CommandResult;
+	try {
+		agent = await runCommand(
+			options.hardening
+				? sandboxArgs(agentExecutable, agentArgs, caseRoot, workspace, options.specbenchRoot, protectedPaths)
+				: [agentExecutable, ...agentArgs],
+			{ cwd: workspace, env: environment, timeoutMs: options.timeoutMs + 30_000 },
+		);
+	} finally {
+		await probeBroker?.close();
+	}
 	writeFileSync(transcriptPath, `# stdout\n${agent.stdout}\n# stderr\n${agent.stderr}\n`);
 	const gradeBudgets = deriveSpecBenchExecutionBudgets(task.timeoutSeconds);
 	const gradeTimeout = gradeBudgets.gradeSuiteTimeoutMs;
@@ -1003,6 +1030,22 @@ export function aggregateSpecBenchConditions(results: readonly SpecBenchResult[]
 			meanSupervisorProgressingReviews: mean(selected.map((item) => item.trace.supervisorProgressingReviews)),
 			meanSupervisorWatchReviews: mean(selected.map((item) => item.trace.supervisorWatchReviews)),
 			meanSupervisorInterventions: mean(selected.map((item) => item.trace.supervisorInterventions)),
+			meanAdversarialProbeEvaluations: mean(selected.map((item) => item.trace.adversarialProbeEvaluations)),
+			meanAdversarialProbePasses: mean(selected.map((item) => item.trace.adversarialProbePasses)),
+			meanAdversarialProbeRevisions: mean(selected.map((item) => item.trace.adversarialProbeRevisions)),
+			meanAdversarialProbeInconclusive: mean(selected.map((item) => item.trace.adversarialProbeInconclusive)),
+			meanAdversarialProbeCases: mean(selected.map((item) => item.trace.adversarialProbeCases)),
+			meanAdversarialProbePassedCases: mean(selected.map((item) => item.trace.adversarialProbePassedCases)),
+			meanAdversarialProbeFailedCases: mean(selected.map((item) => item.trace.adversarialProbeFailedCases)),
+			meanAdversarialProbeEnvironmentUnsupported: mean(
+				selected.map((item) => item.trace.adversarialProbeEnvironmentUnsupported),
+			),
+			adversarialProbeCallables: [
+				...new Set(selected.flatMap((item) => item.trace.adversarialProbeCallables)),
+			].sort(),
+			adversarialProbeRequiredCallables: [
+				...new Set(selected.flatMap((item) => item.trace.adversarialProbeRequiredCallables)),
+			].sort(),
 			meanToolProbationActivations: mean(selected.map((item) => item.trace.toolProbationActivations)),
 			meanToolProbationBlockedCalls: mean(selected.map((item) => item.trace.toolProbationBlockedCalls)),
 			meanObligations: mean(selected.map((item) => item.trace.obligations)),
@@ -1074,7 +1117,7 @@ function writeReport(
 ): void {
 	const conditions = aggregateSpecBenchConditions(results);
 	const report = {
-		schemaVersion: 9,
+		schemaVersion: 10,
 		benchmark: "WecoAI SpecBench via Prime AVO",
 		specbenchRevision,
 		provider: options.provider,
@@ -1160,6 +1203,18 @@ function writeReport(
 				`| ${item.conditionId} | ${item.repetition} | ${item.taskId} | ${item.trace.candidates} | ${item.trace.cycles} | ${item.trace.acceptedCycles} | ${item.trace.revisedCycles} | ${item.trace.watchdogInterventions} | ${item.trace.watchdogWatches} | ${item.trace.toolProbationActivations} | ${item.trace.toolProbationBlockedCalls} | ${item.trace.modelCalls} | ${item.trace.toolCalls} |`,
 		)
 		.join("\n");
+	const adversarialProbeRows = conditions
+		.map(
+			(condition) =>
+				`| ${condition.conditionId} | ${condition.meanAdversarialProbeEvaluations.toFixed(1)} | ${condition.meanAdversarialProbePasses.toFixed(1)} | ${condition.meanAdversarialProbeRevisions.toFixed(1)} | ${condition.meanAdversarialProbeInconclusive.toFixed(1)} | ${condition.meanAdversarialProbeCases.toFixed(1)} | ${condition.meanAdversarialProbePassedCases.toFixed(1)} | ${condition.meanAdversarialProbeFailedCases.toFixed(1)} | ${condition.meanAdversarialProbeEnvironmentUnsupported.toFixed(1)} | ${condition.adversarialProbeRequiredCallables.join(", ") || "none"} | ${condition.adversarialProbeCallables.join(", ") || "none"} |`,
+		)
+		.join("\n");
+	const adversarialProbeRunRows = results
+		.map(
+			(item) =>
+				`| ${item.conditionId} | ${item.repetition} | ${item.taskId} | ${item.trace.adversarialProbeEvaluations} | ${item.trace.adversarialProbePasses} | ${item.trace.adversarialProbeRevisions} | ${item.trace.adversarialProbeInconclusive} | ${item.trace.adversarialProbeCases} | ${item.trace.adversarialProbePassedCases} | ${item.trace.adversarialProbeFailedCases} | ${item.trace.adversarialProbeEnvironmentUnsupported} | ${item.trace.adversarialProbeRequiredCallables.join(", ") || "none"} | ${item.trace.adversarialProbeCallables.join(", ") || "none"} |`,
+		)
+		.join("\n");
 	const completionBlockerRows = results
 		.flatMap((item) =>
 			item.trace.completionBlockers.map((blocker) => {
@@ -1168,10 +1223,32 @@ function writeReport(
 			}),
 		)
 		.join("\n");
+	const adversarialProbeSection = `### Host-executed adversarial probes
+
+For eligible Python candidates, the independent reviewer must submit bounded JSON-only function calls. The host executes them in a read-only, network-isolated workspace. A mismatch records an authoritative revision; an invalid plan cannot retain a progressing verdict. Dependency imports unavailable to the isolated system Python are reported separately and fall back to the semantic adversarial review.
+
+| Condition | Probe receipts | Pass | Revise | Inconclusive | Cases | Case pass | Case fail | Environment unsupported | Required APIs | Called APIs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+${adversarialProbeRows}
+
+#### Probe runs
+
+| Condition | Rep | Task | Probe receipts | Pass | Revise | Inconclusive | Cases | Case pass | Case fail | Environment unsupported | Required APIs | Called APIs |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+${adversarialProbeRunRows}`;
 	writeFileSync(
 		join(options.outputDir, "report.md"),
-		`# WecoAI SpecBench via Prime AVO\n\nUpstream revision: \`${specbenchRevision}\`\n\nExecution-order seed: \`${options.experimentSeed}\`. Provider sampling can remain stochastic; use multiple repetitions before causal claims. Deltas use only task/repetition pairs present in both the condition and full AVO. Obligation evidence columns are scoped to the candidate in the latest accepted cycle; they are diagnostics, not an additional acceptance gate. Identity-private is hidden in-distribution coverage; held-out is the benchmark's compositional private suite. Spec compliance requires both hidden suites when identity-private is present.\n\n## Conditions\n\n| Condition | Runs | Paired | Validation | ID-private | Held-out | Gap | Canonical completion | False completion | Nonzero exit | Timeout | Tokens | Model calls | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Time | Cost | Held-out Δ vs full | Student-t 95% CI |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n${conditionRows}\n\n## Model-token attribution\n\nBilled model tokens are assigned to the assistant turn's dominant observable activity. This is diagnostic attribution, not a causal decomposition; uncached input and cache-read tokens can both contain accumulated context from earlier stages.\n\n| Condition | Uncached input/call | Cached input/call | Setup | Implementation | Candidate/evaluation | Obligation coverage | Completion | Completion repair | Post-ready work | Memory | Other/final |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${tokenStageRows}\n\n## Anti-laziness diagnostics\n\nTool probation activates on the fourth ignored coding-loop intervention. A blocked-call count of zero can still mean probation worked: the model may respond to the activation by making its next cell milestone-capable.\n\n| Condition | Candidates | Cycles | Accepted | Revised | Watchdog interventions | Watches | Probation activations | Blocked calls | Model calls | Tool calls |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${antiLazinessRows}\n\n### Anti-laziness runs\n\n| Condition | Rep | Task | Candidates | Cycles | Accepted | Revised | Watchdog interventions | Watches | Probation activations | Blocked calls | Model calls | Tool calls |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${antiLazinessRunRows}\n\n## Completion-loop diagnostics\n\nA completion attempt is an explicit stop-gate/complete call or a host-blocked root delivery. “After first” includes all later model work. “Completion repair” contains otherwise-unclassified tool turns after a non-passing attempt; post-ready work separately captures unnecessary tool work after a passing gate. Repair amplification is zero when the first attempt passes; raw after-first counters remain visible so canonical-delivery/context cost is not hidden. Blocker-clearance token counts can overlap when one turn clears multiple blockers.\n\n| Condition | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output | Repair uncached/call | Repair cached/call | Repair output/call |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRows}\n\n### Completion runs\n\n| Condition | Rep | Task | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output |\n| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRunRows}\n\n### Completion blockers\n\n| Condition | Rep | Task | Blocker | Attempts seen | Occurrences | Cleared at | Turns to clear | Tokens to clear | Latest reason |\n| --- | ---: | --- | --- | --- | ---: | --- | ---: | ---: | --- |\n${completionBlockerRows || "| _none_ |  |  |  |  | 0 |  |  |  | No failed completion blockers observed. |"}\n\n## Runs\n\n| Condition | Rep | Task | Validation | ID-private | Held-out | Gap | Canonical completion | Exit | Timeout | False completion | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Tokens | Cost |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows}\n`,
+		insertSpecBenchReportSection(
+			`# WecoAI SpecBench via Prime AVO\n\nUpstream revision: \`${specbenchRevision}\`\n\nExecution-order seed: \`${options.experimentSeed}\`. Provider sampling can remain stochastic; use multiple repetitions before causal claims. Deltas use only task/repetition pairs present in both the condition and full AVO. Obligation evidence columns are scoped to the candidate in the latest accepted cycle; they are diagnostics, not an additional acceptance gate. Identity-private is hidden in-distribution coverage; held-out is the benchmark's compositional private suite. Spec compliance requires both hidden suites when identity-private is present.\n\n## Conditions\n\n| Condition | Runs | Paired | Validation | ID-private | Held-out | Gap | Canonical completion | False completion | Nonzero exit | Timeout | Tokens | Model calls | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Time | Cost | Held-out Δ vs full | Student-t 95% CI |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n${conditionRows}\n\n## Model-token attribution\n\nBilled model tokens are assigned to the assistant turn's dominant observable activity. This is diagnostic attribution, not a causal decomposition; uncached input and cache-read tokens can both contain accumulated context from earlier stages.\n\n| Condition | Uncached input/call | Cached input/call | Setup | Implementation | Candidate/evaluation | Obligation coverage | Completion | Completion repair | Post-ready work | Memory | Other/final |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${tokenStageRows}\n\n## Anti-laziness diagnostics\n\nTool probation activates on the fourth ignored coding-loop intervention. A blocked-call count of zero can still mean probation worked: the model may respond to the activation by making its next cell milestone-capable.\n\n| Condition | Candidates | Cycles | Accepted | Revised | Watchdog interventions | Watches | Probation activations | Blocked calls | Model calls | Tool calls |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${antiLazinessRows}\n\n### Anti-laziness runs\n\n| Condition | Rep | Task | Candidates | Cycles | Accepted | Revised | Watchdog interventions | Watches | Probation activations | Blocked calls | Model calls | Tool calls |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${antiLazinessRunRows}\n\n## Completion-loop diagnostics\n\nA completion attempt is an explicit stop-gate/complete call or a host-blocked root delivery. “After first” includes all later model work. “Completion repair” contains otherwise-unclassified tool turns after a non-passing attempt; post-ready work separately captures unnecessary tool work after a passing gate. Repair amplification is zero when the first attempt passes; raw after-first counters remain visible so canonical-delivery/context cost is not hidden. Blocker-clearance token counts can overlap when one turn clears multiple blockers.\n\n| Condition | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output | Repair uncached/call | Repair cached/call | Repair output/call |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRows}\n\n### Completion runs\n\n| Condition | Rep | Task | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output |\n| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRunRows}\n\n### Completion blockers\n\n| Condition | Rep | Task | Blocker | Attempts seen | Occurrences | Cleared at | Turns to clear | Tokens to clear | Latest reason |\n| --- | ---: | --- | --- | --- | ---: | --- | ---: | ---: | --- |\n${completionBlockerRows || "| _none_ |  |  |  |  | 0 |  |  |  | No failed completion blockers observed. |"}\n\n## Runs\n\n| Condition | Rep | Task | Validation | ID-private | Held-out | Gap | Canonical completion | Exit | Timeout | False completion | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Tokens | Cost |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows}\n`,
+			adversarialProbeSection,
+		),
 	);
+}
+
+function insertSpecBenchReportSection(markdown: string, section: string): string {
+	const marker = "\n\n## Completion-loop diagnostics";
+	if (!markdown.includes(marker)) throw new Error("SpecBench report completion section marker is missing");
+	return markdown.replace(marker, `\n\n${section}${marker}`);
 }
 
 interface SpecBenchJob {

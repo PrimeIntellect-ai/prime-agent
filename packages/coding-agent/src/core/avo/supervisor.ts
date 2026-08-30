@@ -7,6 +7,17 @@ function isRecord(value: unknown): value is JsonRecord {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+export function parseAvoSupervisorPayload(message: string, expectedCycleId: string): Record<string, unknown> {
+	const marker = `AVO_SUPERVISION_JSON:${expectedCycleId}`;
+	const markerIndex = message.indexOf(marker);
+	if (markerIndex < 0) throw new Error(`supervisor response omitted ${marker}`);
+	const jsonText = message.slice(markerIndex + marker.length).trim();
+	const parsed = JSON.parse(jsonText) as unknown;
+	if (!isRecord(parsed)) throw new Error("AVO supervisor response must be a JSON object");
+	if (parsed.cycle_id !== expectedCycleId) throw new Error("AVO supervisor response references another cycle");
+	return parsed;
+}
+
 function stringArray(value: unknown, label: string): string[] {
 	if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.trim().length > 0)) {
 		throw new Error(`${label} must be an array of non-empty strings`);
@@ -65,6 +76,9 @@ export function buildAvoSupervisorPrompt(
 			: "Detect repetition, identical failures, ignored negative feedback, candidate-family collapse, unproductive tools, and unsupported assumptions.",
 		adversarialReview
 			? `A single broad receipt covering many obligations is a prioritization signal, not automatic failure. Return progressing only after the adversarial audit finds no concrete blocking defect. For progressing, recommended_actions must contain ${minimumAnalyses === 3 ? "exactly 3" : "1-3"} strings formatted exactly as "source=<host packet review_files path>; requirement=<host packet requirement_id>; related_requirement=<a different host packet requirement_id when testing an interaction>; counterexample=<specific input>; expected=<specific behavior>; analysis=<why the shown code handles it>". Use distinct primary requirement IDs. For a dense review, at least one analysis must combine two requirements using related_requirement; prioritize cross-surface behavior, output-shape/error contracts, empty boundaries, and feature interactions over simple happy paths. Generic assurances are invalid. Return watch when the audit could not establish readiness, and intervene when you find a reproducible defect, ignored requirement, or unsupported critical assumption. Your review may veto; it cannot create host evidence or declare success.`
+			: undefined,
+		adversarialReview
+			? 'When the host packet contains python_probe_contract, a progressing response must also include probe_plan. Copy its probe_version, runtime, and exposed Python module_path. Obey its exact minimum_cases, maximum_cases, minimum_cross_requirement_cases, minimum_distinct_requirements, required_callables, and require_cross_requirement_case_per_required_callable values. Each JSON-only function-call case needs case_id, callable, requirement_ids, args, kwargs, and expect. expect is {"kind":"return","value":<JSON>} or {"kind":"raises","error":"ValueError"}. These cases run automatically in a read-only, network-isolated workspace; do not provide source code, shell, imports, paths outside the exposed module, or private callables.'
 			: undefined,
 		"In structured experiment memory, declared_hypothesis, planned_design, reported_results, and reported_interpretation are declarations; only observed_* fields and derived_statistics are empirical evidence.",
 		"You may recommend a redirect, but you cannot mutate canonical state or declare success. Host/environment receipts remain authoritative.",
@@ -126,13 +140,7 @@ export function parseAvoSupervisorMessage(
 		requireCrossRequirement?: boolean;
 	},
 ): Omit<AvoSupervisorReview, "reviewId" | "recordedAt" | "source"> {
-	const marker = `AVO_SUPERVISION_JSON:${expectedCycleId}`;
-	const markerIndex = message.indexOf(marker);
-	if (markerIndex < 0) throw new Error(`supervisor response omitted ${marker}`);
-	const jsonText = message.slice(markerIndex + marker.length).trim();
-	const parsed = JSON.parse(jsonText) as unknown;
-	if (!isRecord(parsed)) throw new Error("AVO supervisor response must be a JSON object");
-	if (parsed.cycle_id !== expectedCycleId) throw new Error("AVO supervisor response references another cycle");
+	const parsed = parseAvoSupervisorPayload(message, expectedCycleId);
 	if (parsed.status !== "progressing" && parsed.status !== "watch" && parsed.status !== "intervene") {
 		throw new Error("AVO supervisor status must be progressing, watch, or intervene");
 	}

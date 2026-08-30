@@ -361,7 +361,7 @@ async def complete_cycle(
     cycle: dict[str, Any],
     *,
     await_supervisor: bool = True,
-    timeout: float = 300,
+    timeout: float = 45,
     poll_interval: float = 2,
 ) -> dict[str, Any]:
     response = await host_request("avo.cycle.complete", {"cycle": _object(cycle, "cycle")})
@@ -377,7 +377,11 @@ async def complete_cycle(
     ):
         return response
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + max(0.0, timeout)
+    # Prime's persistent IPython cells have a 60-second execution ceiling. Keep
+    # the retained-review wait below it so provider backoff cannot reset the
+    # kernel and erase the caller's local variables. The cycle itself is already
+    # durable; collect_results()/stop_gate() can observe the queued review later.
+    deadline = loop.time() + min(45.0, max(0.0, timeout))
     while loop.time() < deadline:
         collected = await collect_results()
         review = next(
@@ -392,7 +396,10 @@ async def complete_cycle(
             response["supervision"] = review
             return response
         await asyncio.sleep(poll_interval)
-    raise TimeoutError(f"timed out waiting for AVO supervisor response for {cycle_id}")
+    raise TimeoutError(
+        f"AVO supervisor response is still pending for {cycle_id}; "
+        "the cycle is durable, so call collect_results() or stop_gate() again"
+    )
 
 
 async def checkpoint() -> dict[str, Any]:

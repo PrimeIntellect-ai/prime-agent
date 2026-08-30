@@ -1,0 +1,1 @@
+- Added host-executed, sandboxed Python counterexample probes with required API-surface coverage to requirement-dense AVO acceptance reviews, exposed their outcomes in the dashboard and SpecBench trace, and kept slow supervisor bootstrap turns from blocking cycle recording.

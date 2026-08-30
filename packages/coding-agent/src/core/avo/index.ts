@@ -90,6 +90,26 @@ export {
 	deriveAvoObjectiveObligations,
 	deriveAvoObligationCoverage,
 } from "./obligations.js";
+export {
+	AVO_PYTHON_PROBE_BROKER_SOCKET_ENV,
+	AVO_PYTHON_PROBE_BROKER_TOKEN_ENV,
+	AVO_PYTHON_PROBE_RESULT_MARKER,
+	AVO_PYTHON_PROBE_RUNNER,
+	type AvoProbeJsonValue,
+	type AvoPythonProbeBindings,
+	type AvoPythonProbeBrokerHandle,
+	type AvoPythonProbeCase,
+	type AvoPythonProbeCaseResult,
+	type AvoPythonProbeExecution,
+	type AvoPythonProbeExpectation,
+	type AvoPythonProbePlan,
+	type AvoPythonProbeReport,
+	canExecuteAvoPythonProbe,
+	executeAvoPythonProbeSandbox,
+	parseAvoPythonProbePlan,
+	parseAvoPythonProbeReport,
+	startAvoPythonProbeBroker,
+} from "./probe.js";
 export { AvoSessionRuntime, buildAvoRuntimePrompt } from "./runtime.js";
 export {
 	AvoStore,

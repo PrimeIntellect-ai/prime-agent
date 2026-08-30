@@ -111,6 +111,16 @@ export interface PrimeIntegrityTraceSummary {
 	supervisorProgressingReviews: number;
 	supervisorWatchReviews: number;
 	supervisorInterventions: number;
+	adversarialProbeEvaluations: number;
+	adversarialProbePasses: number;
+	adversarialProbeRevisions: number;
+	adversarialProbeInconclusive: number;
+	adversarialProbeCases: number;
+	adversarialProbePassedCases: number;
+	adversarialProbeFailedCases: number;
+	adversarialProbeEnvironmentUnsupported: number;
+	adversarialProbeCallables: string[];
+	adversarialProbeRequiredCallables: string[];
 	toolProbationActivations: number;
 	toolProbationBlockedCalls: number;
 	completionAttemptCount: number;

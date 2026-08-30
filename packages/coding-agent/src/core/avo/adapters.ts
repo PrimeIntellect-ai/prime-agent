@@ -1088,9 +1088,17 @@ export class CodingAvoAdapter extends BaseAdapter {
 			{ id: "final_gate", title: "Final gate", short: "Executable feedback passed" },
 		]);
 		const executable = state.evaluations.filter((receipt) =>
-			["test", "build", "lint", "benchmark", "runtime", "filesystem", "git", "experiment_trial"].includes(
-				receipt.evaluatorId,
-			),
+			[
+				"test",
+				"build",
+				"lint",
+				"benchmark",
+				"runtime",
+				"filesystem",
+				"git",
+				"experiment_trial",
+				"adversarial_probe",
+			].includes(receipt.evaluatorId),
 		);
 		const item = (evaluatorIds: readonly string[]) =>
 			[...executable].reverse().find((receipt) => evaluatorIds.includes(receipt.evaluatorId));
@@ -1115,6 +1123,7 @@ export class CodingAvoAdapter extends BaseAdapter {
 				receiptItem("Latest build", "build"),
 				receiptItem("Latest lint", "lint"),
 				receiptItem("Latest benchmark", "benchmark", "experiment_trial"),
+				receiptItem("Latest adversarial probes", "adversarial_probe"),
 				{
 					label: "Current failure",
 					value:

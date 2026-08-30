@@ -16,6 +16,11 @@ import {
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+	AVO_PYTHON_PROBE_BROKER_SOCKET_ENV,
+	AVO_PYTHON_PROBE_BROKER_TOKEN_ENV,
+	startAvoPythonProbeBroker,
+} from "../../core/avo/probe.js";
 import { createPrimeIntegrityCatalog } from "./catalog.js";
 import type {
 	PrimeIntegrityAggregate,
@@ -452,6 +457,16 @@ function emptyTraceSummary(): PrimeIntegrityTraceSummary {
 		supervisorProgressingReviews: 0,
 		supervisorWatchReviews: 0,
 		supervisorInterventions: 0,
+		adversarialProbeEvaluations: 0,
+		adversarialProbePasses: 0,
+		adversarialProbeRevisions: 0,
+		adversarialProbeInconclusive: 0,
+		adversarialProbeCases: 0,
+		adversarialProbePassedCases: 0,
+		adversarialProbeFailedCases: 0,
+		adversarialProbeEnvironmentUnsupported: 0,
+		adversarialProbeCallables: [],
+		adversarialProbeRequiredCallables: [],
 		toolProbationActivations: 0,
 		toolProbationBlockedCalls: 0,
 		completionAttemptCount: 0,
@@ -937,6 +952,11 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 					evaluationIds?: unknown;
 				}>;
 				criticalAssumptions?: Array<{ status?: unknown }>;
+				evaluations?: Array<{
+					evaluatorId?: unknown;
+					status?: unknown;
+					metrics?: Record<string, unknown>;
+				}>;
 				supervision?: Array<{ status?: unknown }>;
 				checkpoints?: Array<{
 					status?: unknown;
@@ -1023,6 +1043,78 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 				summary.resolvedCriticalAssumptions,
 				state.criticalAssumptions?.filter((assumption) => assumption.status !== "open").length ?? 0,
 			);
+			const adversarialProbes = (state.evaluations ?? []).filter(
+				(evaluation) => evaluation.evaluatorId === "adversarial_probe",
+			);
+			summary.adversarialProbeEvaluations = Math.max(summary.adversarialProbeEvaluations, adversarialProbes.length);
+			summary.adversarialProbePasses = Math.max(
+				summary.adversarialProbePasses,
+				adversarialProbes.filter((evaluation) => evaluation.status === "pass").length,
+			);
+			summary.adversarialProbeRevisions = Math.max(
+				summary.adversarialProbeRevisions,
+				adversarialProbes.filter((evaluation) => evaluation.status === "revise" || evaluation.status === "fail")
+					.length,
+			);
+			summary.adversarialProbeInconclusive = Math.max(
+				summary.adversarialProbeInconclusive,
+				adversarialProbes.filter((evaluation) => evaluation.status === "inconclusive").length,
+			);
+			summary.adversarialProbeCases = Math.max(
+				summary.adversarialProbeCases,
+				adversarialProbes.reduce(
+					(total, evaluation) =>
+						total +
+						(typeof evaluation.metrics?.probe_case_count === "number" ? evaluation.metrics.probe_case_count : 0),
+					0,
+				),
+			);
+			summary.adversarialProbePassedCases = Math.max(
+				summary.adversarialProbePassedCases,
+				adversarialProbes.reduce(
+					(total, evaluation) =>
+						total +
+						(typeof evaluation.metrics?.probe_passed_case_count === "number"
+							? evaluation.metrics.probe_passed_case_count
+							: 0),
+					0,
+				),
+			);
+			summary.adversarialProbeFailedCases = Math.max(
+				summary.adversarialProbeFailedCases,
+				adversarialProbes.reduce(
+					(total, evaluation) =>
+						total +
+						(typeof evaluation.metrics?.probe_failed_case_count === "number"
+							? evaluation.metrics.probe_failed_case_count
+							: 0),
+					0,
+				),
+			);
+			summary.adversarialProbeEnvironmentUnsupported = Math.max(
+				summary.adversarialProbeEnvironmentUnsupported,
+				adversarialProbes.filter((evaluation) => evaluation.metrics?.probe_environment_unsupported === true).length,
+			);
+			summary.adversarialProbeCallables = [
+				...new Set([
+					...summary.adversarialProbeCallables,
+					...adversarialProbes.flatMap((evaluation) =>
+						typeof evaluation.metrics?.probe_callables === "string"
+							? evaluation.metrics.probe_callables.split(",").filter(Boolean)
+							: [],
+					),
+				]),
+			].sort();
+			summary.adversarialProbeRequiredCallables = [
+				...new Set([
+					...summary.adversarialProbeRequiredCallables,
+					...adversarialProbes.flatMap((evaluation) =>
+						typeof evaluation.metrics?.probe_required_callables === "string"
+							? evaluation.metrics.probe_required_callables.split(",").filter(Boolean)
+							: [],
+					),
+				]),
+			].sort();
 			const supervision = state.supervision ?? [];
 			summary.supervisorReviews = Math.max(summary.supervisorReviews, supervision.length);
 			summary.supervisorProgressingReviews = Math.max(
@@ -1119,6 +1211,7 @@ async function runAgentCase(
 	mkdirSync(hiddenDir, { recursive: true });
 	writeCaseWorkspace(testCase, workspace);
 	copyAgentConfig(options.configSource, agentDir);
+	const probeBroker = options.hardening ? await startAvoPythonProbeBroker(workspace) : undefined;
 	const protectedBefore = protectedSnapshot(testCase, workspace);
 	const agentArgs = [
 		"--daemon-socket",
@@ -1151,6 +1244,12 @@ async function runAgentCase(
 		PRIME_AGENT_CODING_AGENT_DIR: agentDir,
 		PRIME_AGENT_SESSION_DIR: sessionDir,
 		PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: supervisorRegistryDir,
+		...(probeBroker
+			? {
+					[AVO_PYTHON_PROBE_BROKER_SOCKET_ENV]: probeBroker.socketPath,
+					[AVO_PYTHON_PROBE_BROKER_TOKEN_ENV]: probeBroker.token,
+				}
+			: {}),
 		...(process.env.PRIME_AGENT_KERNEL_PYTHON
 			? { PRIME_AGENT_KERNEL_PYTHON: process.env.PRIME_AGENT_KERNEL_PYTHON }
 			: existsSync(join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python"))
@@ -1173,7 +1272,12 @@ async function runAgentCase(
 				timeoutMs: options.timeoutMs + 30_000,
 			}
 		: { argv: [agentExecutable, ...agentArgs], timeoutMs: options.timeoutMs + 30_000 };
-	const agent = await runCommand(agentCommand, { cwd: workspace, env: environment, outputLimit: 10_000_000 });
+	let agent: SpawnResult;
+	try {
+		agent = await runCommand(agentCommand, { cwd: workspace, env: environment, outputLimit: 10_000_000 });
+	} finally {
+		await probeBroker?.close();
+	}
 	writeFileSync(
 		transcriptPath,
 		`# stdout\n${agent.stdout}\n# stderr\n${agent.stderr}\n# output_truncated=${agent.outputTruncated}\n`,

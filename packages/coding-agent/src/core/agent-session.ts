@@ -143,6 +143,9 @@ import {
 	type AvoIndependentClaimVerdict,
 	AvoProgressWatchdog,
 	type AvoProgressWatchdogAssessment,
+	type AvoPythonProbeBindings,
+	type AvoPythonProbePlan,
+	type AvoPythonProbeReport,
 	type AvoRunState,
 	AvoSessionRuntime,
 	type AvoStopGate,
@@ -162,6 +165,7 @@ import {
 	buildAvoSupervisorBootstrapPrompt,
 	buildAvoSupervisorMessage,
 	buildAvoSupervisorPacket,
+	canExecuteAvoPythonProbe,
 	captureAvoArtifactPathBaseline,
 	captureAvoCodingVerificationBaseline,
 	captureAvoWorkspaceSnapshot,
@@ -172,6 +176,7 @@ import {
 	deriveAvoWorkspaceImpactPaths,
 	digestAvoDeliveryText,
 	digestAvoPayload,
+	executeAvoPythonProbeSandbox,
 	findAvoSupervisorResponseText,
 	isAvoFeatureAblated,
 	parseAvoAssumptionResolutionInput,
@@ -188,6 +193,7 @@ import {
 	parseAvoMemoryVerifierMessage,
 	parseAvoObligationCoverageInput,
 	parseAvoObligationInput,
+	parseAvoPythonProbePlan,
 	parseAvoSupervisorMessage,
 	parseAvoTrialInput,
 	parseAvoTrialMetricsOutput,
@@ -4395,12 +4401,115 @@ export class AgentSession {
 			});
 	}
 
+	private _avoPythonProbeBindings(
+		state: AvoRunState,
+		candidate: AvoRunState["candidates"][number] | undefined,
+		reviewPaths = this._avoAdversarialReviewPaths(state, candidate),
+	): AvoPythonProbeBindings | undefined {
+		if (!canExecuteAvoPythonProbe()) return undefined;
+		const changedPaths = new Set(
+			(candidate?.workspaceChangedPaths ?? []).flatMap((path) => {
+				const absolute = resolve(this._cwd, path);
+				const relativePath = relative(this._cwd, absolute);
+				return relativePath && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath)
+					? [relativePath]
+					: [];
+			}),
+		);
+		const pythonModulePaths = reviewPaths.filter((path) => path.endsWith(".py") && changedPaths.has(path));
+		if (pythonModulePaths.length === 0) return undefined;
+		const specificationText = [state.objective, ...state.obligations.map((item) => item.description)]
+			.filter((item): item is string => typeof item === "string")
+			.join("\n");
+		const modules = pythonModulePaths.map((modulePath) => {
+			const source = readFileSync(resolve(this._cwd, modulePath), "utf8");
+			const publicTopLevelCallables = [...source.matchAll(/^(?:async\s+)?def\s+([A-Za-z][A-Za-z0-9_]*)\s*\(/gm)]
+				.map((match) => match[1])
+				.filter((name) => !name.startsWith("_"));
+			const requiredCallables = [...new Set(publicTopLevelCallables)].filter((name) => {
+				const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+				return new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}(?:$|[^A-Za-z0-9_])`).test(specificationText);
+			});
+			return { modulePath, requiredCallables };
+		});
+		modules.sort(
+			(left, right) =>
+				right.requiredCallables.length - left.requiredCallables.length ||
+				left.modulePath.localeCompare(right.modulePath),
+		);
+		const selectedModule = modules[0];
+		if (!selectedModule) return undefined;
+		const requiredCallables = selectedModule.requiredCallables.slice(0, 8);
+		const requirementIds = state.obligations
+			.filter((item) => item.critical && item.kind !== "outcome")
+			.map((item) => item.obligationId);
+		if (requirementIds.length === 0) return undefined;
+		return {
+			// The host chooses one relevant changed module; the reviewer cannot cherry-pick an easier file.
+			modulePaths: [selectedModule.modulePath],
+			requiredCallables,
+			requirementIds,
+			minimumCases: 6,
+			maximumCases: 8,
+			minimumCrossRequirementCases: requirementIds.length >= 2 ? 3 : 0,
+			minimumDistinctRequirements: Math.min(4, requirementIds.length),
+		};
+	}
+
+	private async _runAvoPythonProbe(
+		candidate: AvoRunState["candidates"][number],
+		plan: AvoPythonProbePlan,
+	): Promise<{
+		report?: AvoPythonProbeReport;
+		exitCode: number | null;
+		timedOut: boolean;
+		truncated: boolean;
+		stdout: string;
+		stderr: string;
+		durationMs: number;
+		workspaceDigest: string;
+		postWorkspaceDigest: string;
+		error?: string;
+	}> {
+		const cwd = this.sessionManager.getCwd();
+		const before = captureAvoWorkspaceSnapshot(cwd, { excludedRoots: this._avoWorkspaceExcludedRoots() });
+		if (!candidate.workspaceDigest || before.digest !== candidate.workspaceDigest) {
+			return {
+				exitCode: null,
+				timedOut: false,
+				truncated: false,
+				stdout: "",
+				stderr: "",
+				durationMs: 0,
+				workspaceDigest: before.digest,
+				postWorkspaceDigest: before.digest,
+				error: "workspace changed after candidate creation",
+			};
+		}
+		const execution = await executeAvoPythonProbeSandbox(cwd, plan);
+		const post = captureAvoWorkspaceSnapshot(cwd, { excludedRoots: this._avoWorkspaceExcludedRoots() });
+		const executionError =
+			post.digest !== candidate.workspaceDigest
+				? "probe execution changed the candidate workspace"
+				: execution.error;
+		return {
+			...execution,
+			workspaceDigest: before.digest,
+			postWorkspaceDigest: post.digest,
+			error: executionError,
+		};
+	}
+
 	private async _dispatchAvoCheckpoint(
 		supervisor: { rlmChildId: string; name: string },
 		cycleId: string,
 	): Promise<{ receipt?: AgentSessionMessageReceipt; error?: string }> {
 		try {
-			await this._awaitPendingRlmChildSettlement(supervisor.name);
+			// Publication is sufficient: daemon messaging queues a follow-up behind a
+			// still-running bootstrap turn. Waiting for full model settlement here can
+			// exceed the IPython cell deadline during provider backoff, even though the
+			// accepted cycle is already durable.
+			await this._awaitPendingRlmChildPublication(supervisor.name);
 			const runtime = this._requireAvoRuntime();
 			const state = runtime.getState();
 			const adversarialReview = requiresAvoAdversarialReview(state, cycleId);
@@ -4424,6 +4533,7 @@ export class AgentSession {
 					? state.candidates.find((item) => item.candidateId === cycle.candidateId)
 					: undefined;
 				const reviewPaths = this._avoAdversarialReviewPaths(state, candidate);
+				const pythonProbeBindings = this._avoPythonProbeBindings(state, candidate, reviewPaths);
 				let remainingFileChars = 3_000;
 				const reviewFiles: Array<{ path: string; excerpt: string; truncated: boolean }> = [];
 				for (const path of reviewPaths) {
@@ -4491,6 +4601,20 @@ export class AgentSession {
 					obligation_coverage_receipt_count: obligationCoverageReceiptCount,
 					critical_assumptions: criticalAssumptions,
 					review_files: reviewFiles,
+					python_probe_contract: pythonProbeBindings
+						? {
+								probe_version: 1,
+								runtime: "python_call_v1",
+								module_paths: pythonProbeBindings.modulePaths,
+								required_callables: pythonProbeBindings.requiredCallables,
+								minimum_cases: pythonProbeBindings.minimumCases,
+								maximum_cases: pythonProbeBindings.maximumCases,
+								minimum_cross_requirement_cases: pythonProbeBindings.minimumCrossRequirementCases,
+								minimum_distinct_requirements: pythonProbeBindings.minimumDistinctRequirements,
+								require_cross_requirement_case_per_required_callable:
+									pythonProbeBindings.minimumCrossRequirementCases > 0,
+							}
+						: undefined,
 				};
 				const sampledRequirements =
 					requirementExcerpts.length <= 24
@@ -4513,6 +4637,20 @@ export class AgentSession {
 					})),
 					obligation_coverage_receipt_count: obligationCoverageReceiptCount,
 					critical_assumptions: criticalAssumptions.slice(-1),
+					python_probe_contract: pythonProbeBindings
+						? {
+								probe_version: 1,
+								runtime: "python_call_v1",
+								module_paths: pythonProbeBindings.modulePaths,
+								required_callables: pythonProbeBindings.requiredCallables,
+								minimum_cases: pythonProbeBindings.minimumCases,
+								maximum_cases: pythonProbeBindings.maximumCases,
+								minimum_cross_requirement_cases: pythonProbeBindings.minimumCrossRequirementCases,
+								minimum_distinct_requirements: pythonProbeBindings.minimumDistinctRequirements,
+								require_cross_requirement_case_per_required_callable:
+									pythonProbeBindings.minimumCrossRequirementCases > 0,
+							}
+						: undefined,
 					review_files: reviewFiles.slice(0, 2).map((item, index) => ({
 						...item,
 						excerpt: item.excerpt.slice(0, index === 0 ? 1_800 : 400),
@@ -4566,6 +4704,188 @@ export class AgentSession {
 		} catch (error) {
 			return { error: error instanceof Error ? error.message : String(error) };
 		}
+	}
+
+	private async _bindAvoPythonProbeReview(
+		runtime: AvoSessionRuntime,
+		cycle: AvoRunState["cycles"][number],
+		candidate: AvoRunState["candidates"][number],
+		message: string,
+		bindings: AvoPythonProbeBindings,
+		parsed: ReturnType<typeof parseAvoSupervisorMessage>,
+	): Promise<ReturnType<typeof parseAvoSupervisorMessage>> {
+		if (parsed.status !== "progressing") return parsed;
+		const existing = runtime
+			.getState()
+			.evaluations.find(
+				(item) =>
+					item.candidateId === candidate.candidateId &&
+					item.evaluatorId === "adversarial_probe" &&
+					item.metrics.supervisor_cycle_id === cycle.cycleId,
+			);
+		if (existing) {
+			const reason =
+				typeof existing.metrics.validation_reason === "string"
+					? existing.metrics.validation_reason
+					: "the existing immutable adversarial probe receipt has no validation reason";
+			if (existing.status === "pass") {
+				return {
+					...parsed,
+					reason: `${parsed.reason.trim()} Host-sandboxed adversarial probes: ${reason}.`,
+					detectedPatterns: [...parsed.detectedPatterns, "host_executed_adversarial_probes_passed"],
+				};
+			}
+			if (existing.status === "inconclusive" && existing.metrics.probe_environment_unsupported === true) {
+				return {
+					...parsed,
+					reason: `${parsed.reason.trim()} Host probes were unavailable: ${reason}.`,
+					detectedPatterns: [...parsed.detectedPatterns, "adversarial_probe_environment_unsupported"],
+				};
+			}
+			return {
+				...parsed,
+				status: existing.status === "revise" || existing.status === "fail" ? "intervene" : "watch",
+				reason,
+				detectedPatterns: [
+					...parsed.detectedPatterns,
+					existing.status === "revise" || existing.status === "fail"
+						? "adversarial_probe_failure"
+						: "invalid_adversarial_probe_plan",
+				],
+				recommendedActions: [
+					"Revise the candidate or provide a valid requirement-linked probe plan.",
+					...parsed.recommendedActions,
+				].slice(0, 3),
+			};
+		}
+		let plan: AvoPythonProbePlan | undefined;
+		let execution: Awaited<ReturnType<AgentSession["_runAvoPythonProbe"]>> | undefined;
+		let validationError: string | undefined;
+		try {
+			plan = parseAvoPythonProbePlan(message, cycle.cycleId, bindings);
+			execution = await this._runAvoPythonProbe(candidate, plan);
+			validationError = execution.error;
+		} catch (error) {
+			validationError = error instanceof Error ? error.message : String(error);
+		}
+		const passed =
+			plan !== undefined &&
+			execution?.report?.passed === true &&
+			execution.exitCode === 0 &&
+			!execution.timedOut &&
+			!execution.truncated &&
+			!validationError;
+		const failedResults = execution?.report?.results.filter((item) => item.status === "fail") ?? [];
+		const probeEnvironmentUnsupported =
+			failedResults.length > 0 &&
+			failedResults.length === execution?.report?.results.length &&
+			failedResults.every((item) =>
+				/^module import failed: (?:ModuleNotFoundError|ImportError):/.test(item.error ?? ""),
+			);
+		const planDigest = digestAvoPayload(
+			plan ?? {
+				cycleId: cycle.cycleId,
+				invalidProbeMessageDigest: createHash("sha256").update(message).digest("hex"),
+			},
+		);
+		const reportDigest = digestAvoPayload(
+			execution?.report ?? { error: validationError ?? "probe produced no report" },
+		);
+		const receiptDigest = digestAvoPayload({
+			cycleId: cycle.cycleId,
+			candidateId: candidate.candidateId,
+			candidatePayloadDigest: candidate.payloadDigest,
+			candidateWorkspaceDigest: candidate.workspaceDigest,
+			planDigest,
+			reportDigest,
+			exitCode: execution?.exitCode ?? null,
+			timedOut: execution?.timedOut ?? false,
+			truncated: execution?.truncated ?? false,
+			validationError,
+		});
+		const executionDiagnostic = execution?.stderr.trim() || execution?.stdout.trim() || "";
+		const validationReason = passed
+			? `${execution!.report!.results.length} independent host-sandboxed adversarial probe cases passed`
+			: probeEnvironmentUnsupported
+				? "the isolated system Python could not import a candidate dependency; semantic adversarial review remains authoritative"
+				: validationError
+					? `adversarial probe was not executable: ${validationError}${executionDiagnostic ? `; runner=${executionDiagnostic.slice(0, 500)}` : ""}`
+					: `${failedResults.length} of ${execution?.report?.results.length ?? 0} adversarial probe cases failed`;
+		runtime.recordHostEvaluation({
+			evaluationId: `evaluation-adversarial-probe-${createHash("sha256")
+				.update(`${runtime.getState().runId}\0${cycle.cycleId}\0${candidate.candidateId}`)
+				.digest("hex")}`,
+			candidateId: candidate.candidateId,
+			evaluatorId: "adversarial_probe",
+			status: passed
+				? "pass"
+				: probeEnvironmentUnsupported
+					? "inconclusive"
+					: execution?.report
+						? "revise"
+						: "inconclusive",
+			authority: "environment",
+			evidenceRefs: [`host:adversarial-probe:${receiptDigest}`],
+			metrics: {
+				meaningful: passed,
+				candidate_payload_digest: candidate.payloadDigest,
+				candidate_workspace_digest: candidate.workspaceDigest ?? "missing",
+				workspace_matches_candidate:
+					execution !== undefined && execution.postWorkspaceDigest === candidate.workspaceDigest,
+				supervisor_cycle_id: cycle.cycleId,
+				probe_runtime: plan?.runtime ?? "invalid",
+				probe_plan_digest: planDigest,
+				probe_report_digest: reportDigest,
+				probe_plan: JSON.stringify(plan ?? { error: validationError ?? "missing plan" }).slice(0, 12_000),
+				probe_callables: [...new Set(plan?.cases.map((item) => item.callable) ?? [])].sort().join(","),
+				probe_required_callables: [...bindings.requiredCallables].sort().join(","),
+				probe_case_count: plan?.cases.length ?? 0,
+				probe_passed_case_count: execution?.report?.results.filter((item) => item.status === "pass").length ?? 0,
+				probe_failed_case_count: failedResults.length,
+				probe_environment_unsupported: probeEnvironmentUnsupported,
+				exit_code: execution?.exitCode ?? -1,
+				timed_out: execution?.timedOut ?? false,
+				truncated: execution?.truncated ?? false,
+				duration_ms: execution?.durationMs ?? 0,
+				probe_report: JSON.stringify(execution?.report ?? { error: validationError ?? "missing report" }).slice(
+					0,
+					8_000,
+				),
+				probe_stdout: execution?.stdout.slice(0, 2_000) ?? "",
+				probe_stderr: execution?.stderr.slice(0, 2_000) ?? "",
+				validation_reason: validationReason,
+			},
+		});
+		if (passed) {
+			return {
+				...parsed,
+				reason: `${parsed.reason.trim()} Host-sandboxed adversarial probes: ${validationReason}.`,
+				detectedPatterns: [...parsed.detectedPatterns, "host_executed_adversarial_probes_passed"],
+			};
+		}
+		if (probeEnvironmentUnsupported) {
+			return {
+				...parsed,
+				reason: `${parsed.reason.trim()} Host probes were unavailable: ${validationReason}.`,
+				detectedPatterns: [...parsed.detectedPatterns, "adversarial_probe_environment_unsupported"],
+			};
+		}
+		const failureActions = failedResults
+			.slice(0, 3)
+			.map(
+				(item) =>
+					`probe_case=${item.caseId}; actual=${JSON.stringify(item.actual ?? item.error ?? null).slice(0, 300)}; expected=${JSON.stringify(item.expected ?? null).slice(0, 300)}`,
+			);
+		return {
+			...parsed,
+			status: execution?.report ? "intervene" : "watch",
+			reason: validationReason,
+			detectedPatterns: [
+				...parsed.detectedPatterns,
+				execution?.report ? "adversarial_probe_failure" : "invalid_adversarial_probe_plan",
+			],
+			recommendedActions: [...failureActions, ...parsed.recommendedActions].slice(0, 3),
+		};
 	}
 
 	private async _collectAvoSupervisorResults(): Promise<{
@@ -4641,7 +4961,18 @@ export class AgentSession {
 								16,
 						}
 					: undefined;
-				const parsed = parseAvoSupervisorMessage(text, cycle.cycleId, adversarialBindings);
+				let parsed = parseAvoSupervisorMessage(text, cycle.cycleId, adversarialBindings);
+				const pythonProbeBindings = this._avoPythonProbeBindings(currentState, candidate);
+				if (candidate && pythonProbeBindings) {
+					parsed = await this._bindAvoPythonProbeReview(
+						runtime,
+						cycle,
+						candidate,
+						text,
+						pythonProbeBindings,
+						parsed,
+					);
+				}
 				runtime.store.recordSupervision({ ...parsed, source: "retained_supervisor" });
 				if (parsed.status === "intervene" && runtime.getState().routing.horizon === "long") {
 					await this._runAvoGenerativeMemoryReflection(cycle.cycleId, "supervisor_intervention");

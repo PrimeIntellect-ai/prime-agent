@@ -100,6 +100,39 @@ class AvoSkillTest(unittest.TestCase):
         self.assertEqual(host.await_args_list[2].args[0], "avo.cycle.complete")
         self.assertEqual(result["cycle"]["cycleId"], "cycle-1")
 
+    def test_supervisor_wait_stays_below_the_kernel_cell_deadline(self) -> None:
+        module = load_skill("avo_supervisor_deadline_test")
+        host = AsyncMock(
+            return_value={
+                "cycle": {"cycleId": "cycle-slow"},
+                "supervisor": {"name": "avo-supervisor"},
+                "delivery": {"receipt": {"deliveryStatus": "queued"}},
+            }
+        )
+
+        class FakeLoop:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def time(self) -> float:
+                self.calls += 1
+                return 0.0 if self.calls == 1 else 46.0
+
+        collect = AsyncMock(return_value={"supervision": []})
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(module, "collect_results", collect),
+            patch.object(module.asyncio, "get_running_loop", return_value=FakeLoop()),
+        ):
+            with self.assertRaisesRegex(TimeoutError, "cycle is durable"):
+                asyncio.run(
+                    module.complete_cycle(
+                        {"candidate_id": "candidate-slow"},
+                        timeout=300,
+                    )
+                )
+        collect.assert_not_awaited()
+
     def test_obligation_and_assumption_helpers_use_host_owned_ledgers(self) -> None:
         module = load_skill("avo_obligation_test")
         for helper in (

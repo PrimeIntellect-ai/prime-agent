@@ -418,6 +418,87 @@ it remains a veto/prioritization layer, not a substitute for independent
 executable tests. The `no-adversarial-supervision` condition exists so repeated
 multi-task runs can measure whether the additional review justifies its cost.
 
+The next iteration closes part of that remaining gap for eligible Python
+candidates. A progressing independent review must include six to eight bounded
+JSON-only calls into one host-exposed changed Python module. For tasks with at
+least four eligible requirements, it must cover four and include three
+cross-requirement cases; smaller ledgers scale those minima to the requirements
+that actually exist. Prime—not the
+reviewer—executes the calls in a read-only, network-isolated bubblewrap sandbox
+with the agent home masked. The reviewer cannot submit source code, shell,
+imports, private callables, or paths outside the host-selected module. A value
+or exception mismatch records an immutable host `revise` receipt and changes
+the review to `intervene`; an invalid or absent plan changes it to `watch`.
+Prime selects the changed module instead of letting the reviewer cherry-pick an
+easy file. For top-level public Python functions named by the objective or
+requirement ledger, the plan must exercise every host-exposed callable and give
+each callable at least one cross-requirement case when the ledger exposes two or
+more eligible requirements.
+Because hardened SpecBench already places the entire Prime process inside one
+bubblewrap namespace, its outside benchmark controller provides a private
+token-bound Unix-socket broker and executes the same probe sandbox as a sibling
+host process. This avoids unsupported nested namespaces without moving probe
+execution into Gemini's process or exposing held-out tests.
+
+The SpecBench trace reports probe receipts, pass/revise/inconclusive outcomes,
+case totals, failed cases, and dependency-import fallbacks separately. This is
+still an adversarial diagnostic rather than a complete oracle: the independent
+model chooses both inputs and expected values from the specification and code,
+so the host proves that those declared counterexamples execute as claimed, not
+that every omitted behavior is correct.
+
+The first real integration attempt exposed an infrastructure defect rather
+than a candidate result. SpecBench already ran Prime inside bubblewrap, and the
+probe tried to create a nested namespace, which this kernel forbids. The host
+broker above was added after reproducing the exact nested invocation. Direct,
+brokered, and broker-from-an-outer-bubblewrap regressions now all execute the
+same read-only probe successfully.
+
+A second real Vertex `gemini-3.7-flash` run used execution seed
+`regex-executable-probe-v2` on Prime revision
+`d24a5d7370427adeb56b03d12ef200a9afa91760`:
+
+| Measurement | Result |
+| --- | ---: |
+| Visible validation | 40 / 40 |
+| Identity-private | 32 / 32 |
+| Compositional held-out | 119 / 125 |
+| Candidate / accepted cycles | 4 / 2 |
+| Supervisor reviews | 2 (1 watch, 1 progressing) |
+| Probe receipts | 2 (1 inconclusive, 1 pass) |
+| Executed probe cases | 7 / 7 passed on the canonical cycle |
+| First completion attempt | passed |
+| Model / tool calls | 29 / 22 |
+| Tokens / cost / time | 1,263,138 / $0.507 / 609.4 s |
+
+The first accepted-cycle probe failed closed because Gemini changed the
+workspace again before the delayed review could bind to that candidate. The
+second cycle executed seven cases through the host broker and retained a
+`progressing` review. The plan exercised `match`, `search`, and `findall`, but
+its four `findall` cases covered digits, alternation, whitespace, and greedy
+character ranges. It did not combine `findall` with capture groups, so the same
+six held-out checks failed.
+
+That unchanged hidden score is not clean evidence of model laziness. The public
+task declares `findall(pattern, text) -> list[str]` and says to return all
+non-overlapping matches; it never states that capture groups replace the full
+match in the returned list. The hidden suite requires that additional
+Python-`re.findall`-like projection (and has internally inconsistent comments
+about multiple groups). A specification-bounded reviewer should not invent an
+unstated hidden oracle. This run therefore validates brokered execution,
+candidate/workspace binding, and fail-closed review handling, but it does not
+demonstrate a hidden-score improvement.
+
+The run also exposed a completion-latency bug: `complete_cycle` waited for the
+retained supervisor's bootstrap model turn and exceeded the 60-second IPython
+cell limit during Vertex backoff, resetting the kernel after the cycle had
+already become durable. AVO checkpoint dispatch now waits only for child
+publication and queues the review behind an in-flight bootstrap turn, matching
+the daemon's normal follow-up semantics. The Python helper also caps its
+default supervisor wait at 45 seconds and returns an actionable timeout while
+preserving the kernel; the durable review can then be collected by
+`collect_results()` or the next `stop_gate()` call.
+
 ## Validated Level 1 example
 
 A single real Vertex `gemini-3.7-flash` run on 2026-08-28 used official
