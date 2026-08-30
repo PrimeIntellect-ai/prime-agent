@@ -1,10 +1,12 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "vitest";
 import {
 	AVO_SPEC_GATES,
+	type AvoSpecRequirementDefinition,
+	digestAvoSpecRequirement,
 	digestAvoSpecSources,
 	loadAndValidateAvoSpecContract,
 	signAvoSpecReceipt,
@@ -72,32 +74,40 @@ function completeObservedContract(root: string): Record<string, unknown> {
 		writeFileSync(join(root, receiptPath), `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
 		return { evidenceId, gate, state: "observed", mechanism, path, anchor, receiptPath };
 	});
-	return {
+	const requirement = {
+		id: requirementId,
+		domain: "test",
+		title: "Complete observed behavior",
+		statement: "The host proves a behavior through heterogeneous evidence.",
+		critical: true,
+		behaviors: {
+			normal: "The behavior succeeds.",
+			failure: "The behavior fails closed.",
+			ordering: "Verification precedes acceptance.",
+			authority: "The host owns the verdict.",
+			persistence: "The receipt binds to current sources.",
+		},
+		sourcePaths: ["source.ts"],
+		requiredGates: [...AVO_SPEC_GATES],
+		requiresRuntimeTrace: true,
+		declaredStatus: "verified",
+		evidence,
+	} as AvoSpecRequirementDefinition;
+	const contract = {
 		schemaVersion: 1,
 		contractId: "test-contract",
 		gateOrder: [...AVO_SPEC_GATES],
-		requirements: [
-			{
-				id: requirementId,
-				domain: "test",
-				title: "Complete observed behavior",
-				statement: "The host proves a behavior through heterogeneous evidence.",
-				critical: true,
-				behaviors: {
-					normal: "The behavior succeeds.",
-					failure: "The behavior fails closed.",
-					ordering: "Verification precedes acceptance.",
-					authority: "The host owns the verdict.",
-					persistence: "The receipt binds to current sources.",
-				},
-				sourcePaths: ["source.ts"],
-				requiredGates: [...AVO_SPEC_GATES],
-				requiresRuntimeTrace: true,
-				declaredStatus: "verified",
-				evidence,
-			},
-		],
+		requirements: [requirement],
 	};
+	const requirementDigest = digestAvoSpecRequirement(root, requirement);
+	for (let index = 0; index < declarations.length; index += 1) {
+		const receiptPath = join(root, `evidence/receipts/receipt-${index + 1}.json`);
+		const receipt = JSON.parse(readFileSync(receiptPath, "utf8")) as Record<string, unknown>;
+		receipt.sourceDigest = requirementDigest;
+		receipt.signature = signAvoSpecReceipt(receipt, RECEIPT_KEY);
+		writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+	}
+	return contract;
 }
 
 describe("AVO executable behavioral contract", () => {
@@ -151,6 +161,13 @@ describe("AVO executable behavioral contract", () => {
 		const staleReport = validateAvoSpecContract(stale, staleRoot, { receiptHmacKey: RECEIPT_KEY });
 		expect(staleReport.valid).toBe(false);
 		expect(staleReport.errors).toEqual(expect.arrayContaining([expect.stringContaining("receipt is stale")]));
+
+		const weakenedRoot = fixtureRoot();
+		const weakened = completeObservedContract(weakenedRoot);
+		(weakened.requirements as Array<Record<string, unknown>>)[0]!.statement = "Any result is acceptable.";
+		const weakenedReport = validateAvoSpecContract(weakened, weakenedRoot, { receiptHmacKey: RECEIPT_KEY });
+		expect(weakenedReport.valid).toBe(false);
+		expect(weakenedReport.errors).toEqual(expect.arrayContaining([expect.stringContaining("receipt is stale")]));
 	});
 
 	test("rejects a model-forged observed receipt without the host trust root", () => {
@@ -166,5 +183,23 @@ describe("AVO executable behavioral contract", () => {
 		const wrongHostKey = validateAvoSpecContract(contract, root, { receiptHmacKey: "x".repeat(64) });
 		expect(wrongHostKey.valid).toBe(false);
 		expect(wrongHostKey.errors).toEqual(expect.arrayContaining([expect.stringContaining("invalid host signature")]));
+	});
+
+	test("rejects evidence paths that escape through symlinks", () => {
+		const root = fixtureRoot();
+		const contract = completeObservedContract(root);
+		const outsideRoot = fixtureRoot();
+		const outside = join(outsideRoot, "forged-unit.test.ts");
+		writeFileSync(outside, "[TEST-001] unit\n", "utf8");
+		const unitPath = join(root, "evidence/unit.test.ts");
+		unlinkSync(unitPath);
+		symlinkSync(outside, unitPath);
+
+		const report = validateAvoSpecContract(contract, root, { receiptHmacKey: RECEIPT_KEY });
+		expect(report.valid).toBe(false);
+		expect(report.summary.verified).toBe(0);
+		expect(report.errors).toEqual(
+			expect.arrayContaining([expect.stringContaining("references missing or unsafe file evidence/unit.test.ts")]),
+		);
 	});
 });

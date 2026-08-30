@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
 export const AVO_SPEC_GATES = [
@@ -38,7 +38,7 @@ const MECHANISMS_BY_GATE: Record<AvoSpecGate, readonly AvoSpecMechanism[]> = {
 	independent_review: ["independent_review"],
 };
 
-interface AvoSpecEvidence {
+export interface AvoSpecEvidenceDefinition {
 	evidenceId: string;
 	gate: AvoSpecGate;
 	state: AvoSpecEvidenceState;
@@ -49,7 +49,7 @@ interface AvoSpecEvidence {
 	receiptPath?: string;
 }
 
-interface AvoSpecRequirement {
+export interface AvoSpecRequirementDefinition {
 	id: string;
 	domain: string;
 	title: string;
@@ -66,7 +66,7 @@ interface AvoSpecRequirement {
 	requiredGates: AvoSpecGate[];
 	requiresRuntimeTrace: boolean;
 	declaredStatus: AvoSpecRequirementStatus;
-	evidence: AvoSpecEvidence[];
+	evidence: AvoSpecEvidenceDefinition[];
 }
 
 interface AvoSpecReceipt {
@@ -142,7 +142,7 @@ function canonicalAvoSpecJson(value: unknown): string {
 	if (Array.isArray(value)) return `[${value.map(canonicalAvoSpecJson).join(",")}]`;
 	if (!isObject(value)) throw new Error("spec receipt contains a non-JSON value");
 	return `{${Object.keys(value)
-		.filter((key) => key !== "signature")
+		.filter((key) => key !== "signature" && value[key] !== undefined)
 		.sort()
 		.map((key) => `${JSON.stringify(key)}:${canonicalAvoSpecJson(value[key])}`)
 		.join(",")}}`;
@@ -203,10 +203,21 @@ function isAvoSpecRequirementStatus(value: unknown): value is AvoSpecRequirement
 
 function safeRepositoryFile(repositoryRoot: string, path: string): string | undefined {
 	if (isAbsolute(path)) return undefined;
-	const absolute = resolve(repositoryRoot, path);
-	const fromRoot = relative(resolve(repositoryRoot), absolute);
+	const root = resolve(repositoryRoot);
+	const absolute = resolve(root, path);
+	const fromRoot = relative(root, absolute);
 	if (fromRoot.startsWith("..") || isAbsolute(fromRoot)) return undefined;
-	return absolute;
+	if (!existsSync(absolute)) return absolute;
+	try {
+		if (lstatSync(absolute).isSymbolicLink()) return undefined;
+		const canonicalRoot = realpathSync(root);
+		const canonical = realpathSync(absolute);
+		const canonicalFromRoot = relative(canonicalRoot, canonical);
+		if (canonicalFromRoot.startsWith("..") || isAbsolute(canonicalFromRoot)) return undefined;
+		return canonical;
+	} catch {
+		return undefined;
+	}
 }
 
 export function digestAvoSpecSources(repositoryRoot: string, sourcePaths: readonly string[]): string {
@@ -222,6 +233,36 @@ export function digestAvoSpecSources(repositoryRoot: string, sourcePaths: readon
 		hash.update("\0");
 	}
 	return hash.digest("hex");
+}
+
+export function digestAvoSpecRequirement(repositoryRoot: string, requirement: AvoSpecRequirementDefinition): string {
+	const definition = {
+		id: requirement.id,
+		domain: requirement.domain,
+		title: requirement.title,
+		statement: requirement.statement,
+		critical: requirement.critical,
+		behaviors: requirement.behaviors,
+		sourcePaths: requirement.sourcePaths,
+		requiredGates: requirement.requiredGates,
+		requiresRuntimeTrace: requirement.requiresRuntimeTrace,
+		evidence: requirement.evidence.map((evidence) => ({
+			evidenceId: evidence.evidenceId,
+			gate: evidence.gate,
+			mechanism: evidence.mechanism,
+			path: evidence.path,
+			anchor: evidence.anchor,
+			plan: evidence.plan,
+		})),
+	};
+	return createHash("sha256")
+		.update(
+			canonicalAvoSpecJson({
+				definition,
+				sourceDigest: digestAvoSpecSources(repositoryRoot, requirement.sourcePaths),
+			}),
+		)
+		.digest("hex");
 }
 
 function parseReceipt(value: unknown, path: string, errors: string[]): AvoSpecReceipt | undefined {
@@ -284,7 +325,7 @@ function parseReceipt(value: unknown, path: string, errors: string[]): AvoSpecRe
 	return value as unknown as AvoSpecReceipt;
 }
 
-function parseEvidence(value: unknown, path: string, errors: string[]): AvoSpecEvidence | undefined {
+function parseEvidence(value: unknown, path: string, errors: string[]): AvoSpecEvidenceDefinition | undefined {
 	if (!isObject(value)) {
 		errors.push(`${path} must be an object`);
 		return undefined;
@@ -310,10 +351,10 @@ function parseEvidence(value: unknown, path: string, errors: string[]): AvoSpecE
 			errors.push(`${path}.receiptPath is required for observed evidence`);
 		}
 	}
-	return value as unknown as AvoSpecEvidence;
+	return value as unknown as AvoSpecEvidenceDefinition;
 }
 
-function parseRequirement(value: unknown, path: string, errors: string[]): AvoSpecRequirement | undefined {
+function parseRequirement(value: unknown, path: string, errors: string[]): AvoSpecRequirementDefinition | undefined {
 	if (!isObject(value)) {
 		errors.push(`${path} must be an object`);
 		return undefined;
@@ -352,7 +393,7 @@ function parseRequirement(value: unknown, path: string, errors: string[]): AvoSp
 		return undefined;
 	}
 	return {
-		...(value as unknown as AvoSpecRequirement),
+		...(value as unknown as AvoSpecRequirementDefinition),
 		requiredGates,
 		evidence,
 	};
@@ -378,19 +419,22 @@ function readJsonFile(repositoryRoot: string, path: string, errors: string[]): u
 
 function validateLinkedEvidence(
 	repositoryRoot: string,
-	requirement: AvoSpecRequirement,
-	evidence: AvoSpecEvidence,
+	requirement: AvoSpecRequirementDefinition,
+	evidence: AvoSpecEvidenceDefinition,
 	errors: string[],
-): void {
-	if (evidence.state === "planned" || !evidence.path || !evidence.anchor) return;
+): boolean {
+	if (evidence.state === "planned") return true;
+	if (!evidence.path || !evidence.anchor) return false;
 	const absolute = safeRepositoryFile(repositoryRoot, evidence.path);
 	if (!absolute || !existsSync(absolute) || !statSync(absolute).isFile()) {
 		errors.push(`${requirement.id}/${evidence.evidenceId} references missing or unsafe file ${evidence.path}`);
-		return;
+		return false;
 	}
 	const contents = readFileSync(absolute, "utf8");
+	let valid = true;
 	if (!contents.includes(evidence.anchor)) {
 		errors.push(`${requirement.id}/${evidence.evidenceId} anchor was not found in ${evidence.path}`);
+		valid = false;
 	}
 	if (
 		["deterministic_unit_test", "deterministic_integration_test", "invariant_test", "adversarial_test"].includes(
@@ -399,13 +443,15 @@ function validateLinkedEvidence(
 		!evidence.anchor.includes(requirement.id)
 	) {
 		errors.push(`${requirement.id}/${evidence.evidenceId} test anchor must include its stable requirement ID`);
+		valid = false;
 	}
+	return valid;
 }
 
 function validateObservedEvidence(
 	repositoryRoot: string,
-	requirement: AvoSpecRequirement,
-	evidence: AvoSpecEvidence,
+	requirement: AvoSpecRequirementDefinition,
+	evidence: AvoSpecEvidenceDefinition,
 	sourceDigest: string | undefined,
 	usedReceiptIds: Set<string>,
 	options: AvoSpecValidationOptions,
@@ -507,7 +553,7 @@ export function validateAvoSpecContract(
 		if (!requirement.requiresRuntimeTrace) errors.push(`${requirement.id} must require a runtime trace`);
 		let sourceDigest: string | undefined;
 		try {
-			sourceDigest = digestAvoSpecSources(repositoryRoot, requirement.sourcePaths);
+			sourceDigest = digestAvoSpecRequirement(repositoryRoot, requirement);
 		} catch (error) {
 			errors.push(`${requirement.id}: ${String(error)}`);
 		}
@@ -524,8 +570,9 @@ export function validateAvoSpecContract(
 				errors.push(`${requirement.id} evidence ID must start with ${requirement.id}:`);
 			}
 			mappedGates.push(evidence.gate);
-			validateLinkedEvidence(repositoryRoot, requirement, evidence, errors);
+			const linkedEvidenceValid = validateLinkedEvidence(repositoryRoot, requirement, evidence, errors);
 			if (
+				linkedEvidenceValid &&
 				validateObservedEvidence(
 					repositoryRoot,
 					requirement,
