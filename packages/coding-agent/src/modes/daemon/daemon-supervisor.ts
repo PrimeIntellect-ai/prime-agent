@@ -57,8 +57,8 @@ import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import type { PrivateFrame } from "../session-worker/private-framing.js";
 import { createActiveSessionId, type DaemonSocketClient } from "./active-session-state.js";
 import {
+	AgentRoster,
 	type AgentRosterEntry,
-	AgentRosterLedger,
 	passivatedWorkerRosterEntry,
 	rosterAgentIdForSummary,
 	sessionSummaryFromRosterEntry,
@@ -646,7 +646,7 @@ export class DaemonSupervisor {
 	private readonly pendingSessionNames = new Set<string>();
 	private readonly catalog: DaemonCatalogClient;
 	private readonly settingsManager: SettingsManager;
-	private rosterStore?: AgentRosterLedger;
+	private rosterStore?: AgentRoster;
 	private rosterWatchdogTimer?: ReturnType<typeof setInterval>;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
 	private idleEvictionTimer?: ReturnType<typeof setTimeout>;
@@ -3709,8 +3709,8 @@ export class DaemonSupervisor {
 	}
 
 	// The agent roster: the single supervisor-side projection every list and selector read is served from.
-	private roster(): AgentRosterLedger {
-		this.rosterStore ??= new AgentRosterLedger(canonicalSessionPath);
+	private roster(): AgentRoster {
+		this.rosterStore ??= new AgentRoster(canonicalSessionPath);
 		return this.rosterStore;
 	}
 
