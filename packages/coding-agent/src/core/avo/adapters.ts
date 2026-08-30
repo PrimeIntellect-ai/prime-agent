@@ -13,6 +13,7 @@ import {
 	deriveAvoObligationCoverage,
 	requiredAvoPremortemAssumptionCount,
 } from "./obligations.js";
+import { deriveAvoCodingPivotSummary } from "./pivot.js";
 import { requiresAvoAdversarialReview } from "./supervisor.js";
 import type {
 	AvoCandidate,
@@ -382,6 +383,7 @@ function genericProjection(
 	const coveredObligations = obligationCoverage.filter((item) => item.satisfied).length;
 	const criticalAssumptions = deriveAvoCriticalAssumptionChecks(state, latestCandidate);
 	const requiredPremortemAssumptions = requiredAvoPremortemAssumptionCount(state);
+	const codingPivots = deriveAvoCodingPivotSummary(state);
 	const impactChecks = latestCandidate ? deriveAvoCandidateImpactChecks(state, latestCandidate) : [];
 	return {
 		runId: state.runId,
@@ -420,6 +422,7 @@ function genericProjection(
 				label: "Critical assumptions",
 				value: `${criticalAssumptions.filter((item) => item.passed).length}/${Math.max(criticalAssumptions.length, requiredPremortemAssumptions)}`,
 			},
+			{ label: "Material pivots", value: `${codingPivots.material}/${codingPivots.required}` },
 			{
 				label: "Verified memories",
 				value: state.memories.filter((memory) => !memory.invalidatedAt && memory.verificationState === "verified")

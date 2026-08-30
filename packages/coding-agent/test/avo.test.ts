@@ -26,6 +26,7 @@ import {
 	captureAvoWorkspaceSnapshot,
 	classifyAvoHostEvaluationCommand,
 	combineAvoClaimEvidenceAssessments,
+	deriveAvoCodingPivotSummary,
 	deriveAvoDeterministicArithmeticContract,
 	deriveAvoEvaluation,
 	deriveAvoExperimentAllocatedAlpha,
@@ -382,6 +383,51 @@ describe("generic AVO core", () => {
 				evaluationIds: [integrationEvaluation.evaluationId],
 			}),
 		).toMatchObject({ status: "supported" });
+	});
+
+	test("requires a material parent-linked coding pivot after host revision", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-material-pivot", clock());
+		runtime.store.initialize("Fix the parser after host feedback");
+		runtime.configure({ environment: "coding", horizon: "iterative", source: "user" });
+		const first = runtime.recordCandidate({
+			candidateId: "attempt-a",
+			kind: "implementation",
+			summary: "First parser attempt",
+			payload: { change: "first parser attempt" },
+			workspaceDigest: "a".repeat(64),
+			workspaceMode: "tree",
+			workspaceChangedPaths: ["parser.py"],
+		});
+		runtime.recordHostEvaluation({
+			candidateId: first.candidateId,
+			evaluatorId: "test",
+			status: "revise",
+			authority: "host",
+			evidenceRefs: ["host:test:parser-failure"],
+			metrics: { meaningful: true, candidate_payload_digest: first.payloadDigest },
+		});
+		expect(deriveAvoCodingPivotSummary(runtime.getState())).toEqual({ required: 1, material: 0, pending: 1 });
+		const successor = {
+			candidateId: "attempt-b",
+			kind: "implementation",
+			summary: "Corrected parser attempt",
+			payload: { change: "corrected parser attempt" },
+			workspaceDigest: "a".repeat(64),
+			workspaceMode: "tree" as const,
+			workspaceChangedPaths: ["parser.py"],
+		};
+		expect(() => runtime.recordCandidate(successor)).toThrow(/parent_candidate_id=attempt-a/);
+		expect(() => runtime.recordCandidate({ ...successor, parentCandidateId: first.candidateId })).toThrow(
+			/material workspace change/,
+		);
+		const corrected = runtime.recordCandidate({
+			...successor,
+			parentCandidateId: first.candidateId,
+			workspaceDigest: "b".repeat(64),
+		});
+		expect(corrected).toMatchObject({ parentCandidateId: first.candidateId });
+		expect(deriveAvoCodingPivotSummary(runtime.getState())).toEqual({ required: 1, material: 1, pending: 0 });
+		expect(runtime.dashboardProjection().metrics).toContainEqual({ label: "Material pivots", value: "1/1" });
 	});
 
 	test("derives separate host obligations from explicit objective checklist items", () => {

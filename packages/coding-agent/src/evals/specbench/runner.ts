@@ -183,6 +183,9 @@ export interface SpecBenchConditionSummary {
 	meanCycles: number;
 	meanAcceptedCycles: number;
 	meanRevisedCycles: number;
+	meanRequiredCodingPivots: number;
+	meanMaterialCodingPivots: number;
+	meanPendingCodingPivots: number;
 	meanWatchdogInterventions: number;
 	meanWatchdogWatches: number;
 	meanSupervisorReviews: number;
@@ -1028,6 +1031,9 @@ export function aggregateSpecBenchConditions(results: readonly SpecBenchResult[]
 			meanCycles: mean(selected.map((item) => item.trace.cycles)),
 			meanAcceptedCycles: mean(selected.map((item) => item.trace.acceptedCycles)),
 			meanRevisedCycles: mean(selected.map((item) => item.trace.revisedCycles)),
+			meanRequiredCodingPivots: mean(selected.map((item) => item.trace.requiredCodingPivots)),
+			meanMaterialCodingPivots: mean(selected.map((item) => item.trace.materialCodingPivots)),
+			meanPendingCodingPivots: mean(selected.map((item) => item.trace.pendingCodingPivots)),
 			meanWatchdogInterventions: mean(selected.map((item) => item.trace.watchdogInterventions)),
 			meanWatchdogWatches: mean(selected.map((item) => item.trace.watchdogWatches)),
 			meanSupervisorReviews: mean(selected.map((item) => item.trace.supervisorReviews)),
@@ -1129,7 +1135,7 @@ function writeReport(
 ): void {
 	const conditions = aggregateSpecBenchConditions(results);
 	const report = {
-		schemaVersion: 12,
+		schemaVersion: 13,
 		benchmark: "WecoAI SpecBench via Prime AVO",
 		specbenchRevision,
 		provider: options.provider,
@@ -1215,6 +1221,18 @@ function writeReport(
 				`| ${item.conditionId} | ${item.repetition} | ${item.taskId} | ${item.trace.candidates} | ${item.trace.cycles} | ${item.trace.acceptedCycles} | ${item.trace.revisedCycles} | ${item.trace.criticalAssumptions} | ${item.trace.resolvedCriticalAssumptions} | ${item.trace.watchdogInterventions} | ${item.trace.watchdogWatches} | ${item.trace.toolProbationActivations} | ${item.trace.toolProbationBlockedCalls} | ${item.trace.modelCalls} | ${item.trace.toolCalls} |`,
 		)
 		.join("\n");
+	const codingPivotRows = conditions
+		.map(
+			(condition) =>
+				`| ${condition.conditionId} | ${condition.meanMaterialCodingPivots.toFixed(1)} / ${condition.meanRequiredCodingPivots.toFixed(1)} | ${condition.meanPendingCodingPivots.toFixed(1)} |`,
+		)
+		.join("\n");
+	const codingPivotRunRows = results
+		.map(
+			(item) =>
+				`| ${item.conditionId} | ${item.repetition} | ${item.taskId} | ${item.trace.materialCodingPivots} / ${item.trace.requiredCodingPivots} | ${item.trace.pendingCodingPivots} |`,
+		)
+		.join("\n");
 	const adversarialProbeRows = conditions
 		.map(
 			(condition) =>
@@ -1235,6 +1253,21 @@ function writeReport(
 			}),
 		)
 		.join("\n");
+	const codingPivotSection = `### Host-enforced coding pivots
+
+A host-revised or failed coding candidate must be followed by an immediate parent-linked successor whose host-observed workspace digest differs. This rejects relabelling the same implementation as a new attempt; it does not claim the changed code is correct without the normal independent gates.
+
+| Condition | Material / required | Pending |
+| --- | ---: | ---: |
+${codingPivotRows}
+
+#### Pivot runs
+
+| Condition | Rep | Task | Material / required | Pending |
+| --- | ---: | --- | ---: | ---: |
+${codingPivotRunRows}
+
+`;
 	const adversarialProbeSection = `### Host-executed adversarial probes
 
 For eligible Python candidates, the independent reviewer must submit bounded JSON-only function calls. The host executes them in a read-only, network-isolated workspace. A mismatch records an authoritative revision; an invalid plan cannot retain a progressing verdict. Dependency imports unavailable to the isolated system Python are reported separately and fall back to the semantic adversarial review.
@@ -1252,7 +1285,7 @@ ${adversarialProbeRunRows}`;
 		join(options.outputDir, "report.md"),
 		insertSpecBenchReportSection(
 			`# WecoAI SpecBench via Prime AVO\n\nUpstream revision: \`${specbenchRevision}\`\n\nExecution-order seed: \`${options.experimentSeed}\`. Provider sampling can remain stochastic; use multiple repetitions before causal claims. Deltas use only task/repetition pairs present in both the condition and full AVO. Obligation evidence columns are scoped to the candidate in the latest accepted cycle; they are diagnostics, not an additional acceptance gate. Identity-private is hidden in-distribution coverage; held-out is the benchmark's compositional private suite. Spec compliance requires both hidden suites when identity-private is present.\n\n## Conditions\n\n| Condition | Runs | Paired | Validation | ID-private | Held-out | Gap | Canonical completion | False completion | Nonzero exit | Timeout | Tokens | Model calls | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Time | Cost | Held-out Δ vs full | Student-t 95% CI |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n${conditionRows}\n\n## Model-token attribution\n\nBilled model tokens are assigned to the assistant turn's dominant observable activity. This is diagnostic attribution, not a causal decomposition; uncached input and cache-read tokens can both contain accumulated context from earlier stages.\n\n| Condition | Uncached input/call | Cached input/call | Setup | Implementation | Candidate/evaluation | Obligation coverage | Completion | Completion repair | Post-ready work | Memory | Other/final |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${tokenStageRows}\n\n## Anti-laziness diagnostics\n\nTool probation activates on the fourth ignored coding-loop intervention. A blocked-call count of zero can still mean probation worked: the model may respond to the activation by making its next cell milestone-capable. Long-horizon coding also requires at least two distinct pre-mortem assumptions before the first workspace change; each remains unresolved until candidate-bound host evidence addresses it.\n\n| Condition | Candidates | Cycles | Accepted | Revised | Pre-mortem assumptions | Resolved assumptions | Watchdog interventions | Watches | Probation activations | Blocked calls | Model calls | Tool calls |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${antiLazinessRows}\n\n### Anti-laziness runs\n\n| Condition | Rep | Task | Candidates | Cycles | Accepted | Revised | Pre-mortem assumptions | Resolved assumptions | Watchdog interventions | Watches | Probation activations | Blocked calls | Model calls | Tool calls |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${antiLazinessRunRows}\n\n## Completion-loop diagnostics\n\nA completion attempt is an explicit stop-gate/complete call or a host-blocked root delivery. “After first” includes all later model work. “Completion repair” contains otherwise-unclassified tool turns after a non-passing attempt; post-ready work separately captures unnecessary tool work after a passing gate. Repair amplification is zero when the first attempt passes; raw after-first counters remain visible so canonical-delivery/context cost is not hidden. Blocker-clearance token counts can overlap when one turn clears multiple blockers.\n\n| Condition | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output | Repair uncached/call | Repair cached/call | Repair output/call |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRows}\n\n### Completion runs\n\n| Condition | Rep | Task | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output |\n| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRunRows}\n\n### Completion blockers\n\n| Condition | Rep | Task | Blocker | Attempts seen | Occurrences | Cleared at | Turns to clear | Tokens to clear | Latest reason |\n| --- | ---: | --- | --- | --- | ---: | --- | ---: | ---: | --- |\n${completionBlockerRows || "| _none_ |  |  |  |  | 0 |  |  |  | No failed completion blockers observed. |"}\n\n## Runs\n\n| Condition | Rep | Task | Validation | ID-private | Held-out | Gap | Canonical completion | Exit | Timeout | False completion | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Tokens | Cost |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows}\n`,
-			adversarialProbeSection,
+			`${codingPivotSection}${adversarialProbeSection}`,
 		),
 	);
 }

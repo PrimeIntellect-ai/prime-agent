@@ -92,6 +92,11 @@ export {
 	requiredAvoPremortemAssumptionCount,
 } from "./obligations.js";
 export {
+	type AvoCodingPivotSummary,
+	deriveAvoCodingPivotSummary,
+	requiredAvoCodingPivotParent,
+} from "./pivot.js";
+export {
 	AVO_PYTHON_PROBE_BROKER_SOCKET_ENV,
 	AVO_PYTHON_PROBE_BROKER_TOKEN_ENV,
 	AVO_PYTHON_PROBE_RESULT_MARKER,

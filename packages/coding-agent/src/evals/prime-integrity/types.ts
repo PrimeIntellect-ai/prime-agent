@@ -93,6 +93,9 @@ export interface PrimeIntegrityTraceSummary {
 	cycles: number;
 	acceptedCycles: number;
 	revisedCycles: number;
+	requiredCodingPivots: number;
+	materialCodingPivots: number;
+	pendingCodingPivots: number;
 	obligations: number;
 	coveredObligations: number;
 	obligationCoverageEvaluationCount: number;

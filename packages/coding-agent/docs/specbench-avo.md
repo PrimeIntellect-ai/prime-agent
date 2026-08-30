@@ -163,10 +163,16 @@ assumptions with concrete falsification plans. They must describe competing
 ways the implementation could be wrong rather than restating implementation
 steps. Each assumption remains unresolved until candidate-bound host evidence
 from its own distinct check addresses it; one broad receipt or repeated command
-cannot resolve multiple mandatory assumptions. Schema version 12 reports both
+cannot resolve multiple mandatory assumptions. Schema version 13 reports both
 registered and resolved counts in the anti-laziness tables. These counts measure
 protocol compliance, not the semantic quality of the hypotheses; benchmark results are still needed to show
 whether the pre-mortem improves hidden correctness.
+
+Schema version 13 also records required, material, and pending coding pivots. A
+host-revised candidate counts as materially pivoted only when its immediate
+successor names it as the parent and has a different host-observed workspace
+digest. This prevents a model from relabelling unchanged code; the successor
+still needs every ordinary static, behavioral, adversarial, and runtime gate.
 Events from the root and retained verifier sessions are merged chronologically
 before this attribution. Once the host gate passes, queued AVO-supervisor
 prompts are superseded by the exact canonical-delivery request; ordinary user

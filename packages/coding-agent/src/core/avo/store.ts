@@ -29,6 +29,7 @@ import {
 	deriveAvoObjectiveObligations,
 	requiredAvoPremortemAssumptionCount,
 } from "./obligations.js";
+import { requiredAvoCodingPivotParent } from "./pivot.js";
 import {
 	AVO_AUTHORITIES,
 	AVO_ENVIRONMENTS,
@@ -2781,6 +2782,20 @@ export class AvoStore {
 		if (registeredPremortemAssumptions < requiredPremortemAssumptions) {
 			throw new Error(
 				`long-horizon coding requires at least ${requiredPremortemAssumptions} distinct critical assumptions with concrete falsification plans before the first candidate; found ${registeredPremortemAssumptions}`,
+			);
+		}
+		const requiredPivotParent = requiredAvoCodingPivotParent(this.state);
+		if (requiredPivotParent && input.parentCandidateId !== requiredPivotParent.candidateId) {
+			throw new Error(
+				`host-revised coding candidate ${requiredPivotParent.candidateId} requires the next candidate to declare parent_candidate_id=${requiredPivotParent.candidateId}`,
+			);
+		}
+		if (
+			requiredPivotParent &&
+			(!input.workspaceDigest || input.workspaceDigest === requiredPivotParent.workspaceDigest)
+		) {
+			throw new Error(
+				`successor to host-revised coding candidate ${requiredPivotParent.candidateId} must contain a host-observed material workspace change`,
 			);
 		}
 		if (this.state.candidates.some((candidate) => candidate.candidateId === candidateId)) {

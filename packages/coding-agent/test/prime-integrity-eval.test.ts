@@ -121,6 +121,9 @@ describe("Prime Integrity Eval", () => {
 				cycles: 1,
 				acceptedCycles: 1,
 				revisedCycles: 0,
+				requiredCodingPivots: 0,
+				materialCodingPivots: 0,
+				pendingCodingPivots: 0,
 				obligations: 4,
 				coveredObligations: 2,
 				obligationCoverageEvaluationCount: 1,
@@ -325,6 +328,48 @@ describe("Prime Integrity Eval", () => {
 			acceptedCandidateMaxObligationsPerEvidenceReceipt: 3,
 			acceptedCandidateEvidenceDiversity: 2 / 3,
 			acceptedCandidateMaxEvidenceConcentration: 1,
+		});
+	});
+
+	test("traces material coding pivots after authoritative revision", () => {
+		const root = tempDirectory();
+		const avoDirectory = join(root, "session", "avo");
+		mkdirSync(avoDirectory, { recursive: true });
+		writeFileSync(
+			join(avoDirectory, "state.json"),
+			JSON.stringify({
+				routing: { environment: "coding" },
+				candidates: [
+					{ candidateId: "attempt-a", workspaceDigest: "a".repeat(64) },
+					{
+						candidateId: "attempt-b",
+						parentCandidateId: "attempt-a",
+						workspaceDigest: "b".repeat(64),
+					},
+					{ candidateId: "attempt-c", workspaceDigest: "c".repeat(64) },
+				],
+				evaluations: [
+					{
+						candidateId: "attempt-a",
+						status: "revise",
+						authority: "host",
+						issuedBy: "host",
+					},
+					{
+						candidateId: "attempt-c",
+						status: "fail",
+						authority: "environment",
+						issuedBy: "host",
+					},
+				],
+			}),
+			"utf8",
+		);
+
+		expect(summarizePrimeIntegrityTrace([], root)).toMatchObject({
+			requiredCodingPivots: 2,
+			materialCodingPivots: 1,
+			pendingCodingPivots: 1,
 		});
 	});
 

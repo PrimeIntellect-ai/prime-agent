@@ -91,6 +91,10 @@ Never pass or request an environment override.
    filesystem check. Inspect these surfaces in the returned candidate/state
    and run every required evidence class. One parser test cannot certify an
    unrelated README, schema, or configuration change.
+   If host evidence revises or fails a coding candidate, the next candidate is
+   a correction, not a relabel: set `parent_candidate_id` to that failed
+   candidate and materially change the workspace. The host rejects an unlinked
+   successor or an identical workspace digest.
 4. For an executable check, call `run_evaluation(candidate_id, command)`. The
    host runs one recognized direct test/build/lint/benchmark/runtime/filesystem/
    git command and creates the immutable environment receipt from its actual

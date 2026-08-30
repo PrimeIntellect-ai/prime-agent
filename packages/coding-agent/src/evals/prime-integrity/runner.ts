@@ -439,6 +439,9 @@ function emptyTraceSummary(): PrimeIntegrityTraceSummary {
 		cycles: 0,
 		acceptedCycles: 0,
 		revisedCycles: 0,
+		requiredCodingPivots: 0,
+		materialCodingPivots: 0,
+		pendingCodingPivots: 0,
 		obligations: 0,
 		coveredObligations: 0,
 		obligationCoverageEvaluationCount: 0,
@@ -944,8 +947,13 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 		try {
 			const state = JSON.parse(readFileSync(statePath, "utf8")) as {
 				status?: unknown;
+				routing?: { environment?: unknown };
 				taskRuns?: Array<{ status?: unknown }>;
-				candidates?: unknown[];
+				candidates?: Array<{
+					candidateId?: unknown;
+					parentCandidateId?: unknown;
+					workspaceDigest?: unknown;
+				}>;
 				cycles?: Array<{ candidateId?: unknown; outcome?: unknown }>;
 				obligations?: unknown[];
 				obligationCoverage?: Array<{
@@ -955,8 +963,11 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 				}>;
 				criticalAssumptions?: Array<{ status?: unknown }>;
 				evaluations?: Array<{
+					candidateId?: unknown;
 					evaluatorId?: unknown;
 					status?: unknown;
+					authority?: unknown;
+					issuedBy?: unknown;
 					metrics?: Record<string, unknown>;
 				}>;
 				supervision?: Array<{ status?: unknown }>;
@@ -980,6 +991,39 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			summary.revisedCycles = Math.max(
 				summary.revisedCycles,
 				state.cycles?.filter((cycle) => cycle.outcome === "revised").length ?? 0,
+			);
+			const authoritativeRevisionCandidateIds = new Set(
+				(state.routing?.environment === "coding" ? (state.evaluations ?? []) : []).flatMap((evaluation) =>
+					evaluation.issuedBy === "host" &&
+					evaluation.authority !== "model_opinion" &&
+					(evaluation.status === "fail" || evaluation.status === "revise") &&
+					typeof evaluation.candidateId === "string"
+						? [evaluation.candidateId]
+						: [],
+				),
+			);
+			const candidatesById = new Map(
+				(state.candidates ?? []).flatMap((candidate) =>
+					typeof candidate.candidateId === "string" ? [[candidate.candidateId, candidate] as const] : [],
+				),
+			);
+			const materialCodingPivots = new Set(
+				(state.candidates ?? []).flatMap((candidate) => {
+					if (typeof candidate.parentCandidateId !== "string") return [];
+					const parent = candidatesById.get(candidate.parentCandidateId);
+					return authoritativeRevisionCandidateIds.has(candidate.parentCandidateId) &&
+						typeof parent?.workspaceDigest === "string" &&
+						typeof candidate.workspaceDigest === "string" &&
+						parent.workspaceDigest !== candidate.workspaceDigest
+						? [candidate.parentCandidateId]
+						: [];
+				}),
+			);
+			summary.requiredCodingPivots = Math.max(summary.requiredCodingPivots, authoritativeRevisionCandidateIds.size);
+			summary.materialCodingPivots = Math.max(summary.materialCodingPivots, materialCodingPivots.size);
+			summary.pendingCodingPivots = Math.max(
+				summary.pendingCodingPivots,
+				authoritativeRevisionCandidateIds.size - materialCodingPivots.size,
 			);
 			summary.obligations = Math.max(summary.obligations, state.obligations?.length ?? 0);
 			summary.coveredObligations = Math.max(summary.coveredObligations, state.obligationCoverage?.length ?? 0);
