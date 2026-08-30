@@ -361,6 +361,8 @@ describe("SpecBench evaluation runner", () => {
 			meanRevisedCycles: 0,
 			meanToolProbationActivations: 0,
 			meanToolProbationBlockedCalls: 0,
+			meanCriticalAssumptions: 0,
+			meanResolvedCriticalAssumptions: 0,
 			meanSupervisorReviews: 1,
 			meanSupervisorProgressingReviews: 1,
 			meanAdversarialProbeEvaluations: 1,

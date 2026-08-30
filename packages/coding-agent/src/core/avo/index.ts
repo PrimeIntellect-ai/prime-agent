@@ -89,6 +89,7 @@ export {
 	deriveAvoCriticalAssumptionChecks,
 	deriveAvoObjectiveObligations,
 	deriveAvoObligationCoverage,
+	requiredAvoPremortemAssumptionCount,
 } from "./obligations.js";
 export {
 	AVO_PYTHON_PROBE_BROKER_SOCKET_ENV,

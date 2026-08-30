@@ -35,6 +35,15 @@ function objectiveEvidence(
 	}
 }
 
+export function requiredAvoPremortemAssumptionCount(state: AvoRunState): number {
+	if (isAvoFeatureAblated("critical_assumptions")) return 0;
+	return state.routing.environment === "coding" &&
+		state.routing.horizon === "long" &&
+		state.verificationPolicy === "required"
+		? 2
+		: 0;
+}
+
 function obligationId(prefix: string, description: string): string {
 	return `${prefix}-${createHash("sha256").update(description).digest("hex").slice(0, 16)}`;
 }

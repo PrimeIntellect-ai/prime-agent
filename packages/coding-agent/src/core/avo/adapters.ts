@@ -11,6 +11,7 @@ import {
 	deriveAvoCandidateImpactChecks,
 	deriveAvoCriticalAssumptionChecks,
 	deriveAvoObligationCoverage,
+	requiredAvoPremortemAssumptionCount,
 } from "./obligations.js";
 import { requiresAvoAdversarialReview } from "./supervisor.js";
 import type {
@@ -380,6 +381,7 @@ function genericProjection(
 	const obligationCoverage = latestCandidate ? deriveAvoObligationCoverage(state, latestCandidate) : [];
 	const coveredObligations = obligationCoverage.filter((item) => item.satisfied).length;
 	const criticalAssumptions = deriveAvoCriticalAssumptionChecks(state, latestCandidate);
+	const requiredPremortemAssumptions = requiredAvoPremortemAssumptionCount(state);
 	const impactChecks = latestCandidate ? deriveAvoCandidateImpactChecks(state, latestCandidate) : [];
 	return {
 		runId: state.runId,
@@ -416,7 +418,7 @@ function genericProjection(
 			},
 			{
 				label: "Critical assumptions",
-				value: `${criticalAssumptions.filter((item) => item.passed).length}/${criticalAssumptions.length}`,
+				value: `${criticalAssumptions.filter((item) => item.passed).length}/${Math.max(criticalAssumptions.length, requiredPremortemAssumptions)}`,
 			},
 			{
 				label: "Verified memories",

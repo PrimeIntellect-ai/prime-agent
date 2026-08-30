@@ -291,6 +291,49 @@ describe("generic AVO core", () => {
 		expect(runtime.completeCycle({ candidateId: replacement.candidateId }).cycle.outcome).toBe("accepted");
 	});
 
+	test("requires a falsifiable pre-mortem before long-horizon coding candidates", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-long-premortem", clock());
+		runtime.store.initialize("Implement an exhaustive multi-stage parser correction");
+		runtime.configure({ environment: "coding", horizon: "long", source: "user" });
+		const candidateInput = {
+			kind: "implementation",
+			summary: "Implement the parser correction",
+			payload: { change: "parser correction" },
+			workspaceDigest: "a".repeat(64),
+			workspaceMode: "tree" as const,
+			workspaceChangedPaths: ["parser.py"],
+		};
+		expect(() => runtime.recordCandidate(candidateInput)).toThrow(/at least 2 distinct critical assumptions/);
+		runtime.registerCriticalAssumptions([
+			{
+				assumptionId: "boundary-contract",
+				statement: "The parser preserves empty boundary fields",
+				falsificationPlan: "Run a direct regression with leading and trailing empty fields",
+				requiredEvidence: ["test"],
+			},
+		]);
+		expect(() =>
+			runtime.registerCriticalAssumptions([
+				{
+					assumptionId: "duplicate-plan",
+					statement: "The parser accepts escaped boundary delimiters",
+					falsificationPlan: "Run a direct regression with leading and trailing empty fields",
+					requiredEvidence: ["test"],
+				},
+			]),
+		).toThrow(/repeats a falsification plan/);
+		expect(() => runtime.recordCandidate(candidateInput)).toThrow(/found 1/);
+		runtime.registerCriticalAssumptions([
+			{
+				assumptionId: "integration-contract",
+				statement: "Escaped delimiters compose with empty fields",
+				falsificationPlan: "Execute a composed runtime example containing both behaviors",
+				requiredEvidence: ["runtime"],
+			},
+		]);
+		expect(runtime.recordCandidate(candidateInput)).toMatchObject({ kind: "implementation" });
+	});
+
 	test("derives separate host obligations from explicit objective checklist items", () => {
 		const runtime = new AvoSessionRuntime(undefined, "run-objective-checklist", clock());
 		runtime.configure({ environment: "coding", horizon: "direct", source: "user" });

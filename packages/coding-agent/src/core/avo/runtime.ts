@@ -5,6 +5,7 @@ import { activeAvoAblations, isAvoFeatureAblated } from "./ablation.js";
 import { AvoAdapterRegistry, CODING_AVO_CANDIDATE_KINDS, type ResearchAdapterState } from "./adapters.js";
 import { digestAvoExperimentCandidateIdentity, digestAvoExperimentValue } from "./experiment.js";
 import { AvoNooaMemoryBridge, type AvoNooaRunner } from "./memory.js";
+import { requiredAvoPremortemAssumptionCount } from "./obligations.js";
 import { AvoStore } from "./store.js";
 import { shouldActivateAvoSupervisor } from "./supervisor.js";
 import type {
@@ -493,6 +494,7 @@ export function buildAvoRuntimePrompt(state: AvoRunState, memoryContext = ""): s
 		reason.startsWith("online evidence required:"),
 	);
 	const obligationCoverageRequired = !ablations.has("obligations") && state.obligations.length > 0;
+	const requiredPremortemAssumptions = requiredAvoPremortemAssumptionCount(state);
 	return [
 		"AVO is Prime's default operating architecture for every root task. It is not a user-selected mode.",
 		`Active AVO task run=${state.runId}. The host automatically selected evaluation adapter=${state.routing.environment}, horizon=${state.routing.horizon}, verification_class=${state.verificationClass}, and verification_policy=${state.verificationPolicy}.`,
@@ -509,6 +511,9 @@ export function buildAvoRuntimePrompt(state: AvoRunState, memoryContext = ""): s
 			? undefined
 			: "Prime automatically recalls NOOA memory before root turns. Proposed task memory may surface as a hypothesis; proposed project memory is deliberate-only and proposed global persistence is forbidden. Verified memories are host-cleared, and live references are re-resolved at recall time. Never treat recall alone as task evidence or authority.",
 		ablations.has("nooa") ? undefined : memoryContext || undefined,
+		requiredPremortemAssumptions > 0
+			? `AVO_PREMORTEM=required. Before any task workspace change or first candidate, register at least ${requiredPremortemAssumptions} distinct critical assumptions with concrete, non-duplicated falsification plans and direct evidence kinds using avo.register_critical_assumptions. These are competing ways the intended solution could fail, not generic implementation steps. After recording the candidate and host checks, resolve every assumption with candidate-bound evidence; open or refuted assumptions block completion.`
+			: "AVO_PREMORTEM=not_required for this task horizon; register critical assumptions only when a genuinely fragile premise needs explicit falsification.",
 		'The contract below is complete: do not inspect Prime\'s AVO source, tests, skill files, or Python implementation, and do not call help(), dir(), hasattr(), or inspect.getsource() to rediscover it. Start with the user\'s task files. For ordinary coding work: inspect the relevant workspace; make the change; call `candidate = await avo.add_candidate({"kind": "implementation", "summary": "exact final response", "payload": {"change": "brief description"}})`; take `candidate["candidate"]["candidateId"]`; run a direct meaningful check with `await avo.run_evaluation(candidate_id, command)`; call `await avo.complete_cycle({"candidate_id": candidate_id})`; inspect `await avo.stop_gate()`; then return the exact candidate summary. Choose patch/implementation/configuration for source changes and artifact for a static deliverable; the candidate kind determines which test/build/lint/benchmark/runtime evidence can count. Use avo.run_coding_baseline before editing only when the host captured unchanged baseline tests or the user supplied an acceptance command. If the workspace has no suitable verifier, fail closed and report that missing contract instead of probing unrelated commands or claiming success.',
 		obligationCoverageRequired
 			? `AVO_OBLIGATIONS=required (${state.obligations.length} host-derived requirements). Do not call complete_cycle or stop_gate until the candidate's declared obligations have host coverage. After a passing evaluation, use exactly: \`candidate_id = candidate["candidate"]["candidateId"]\`; \`evaluation_id = evaluation["evaluation"]["evaluationId"]\`; \`await avo.cover_obligations(candidate_id, [evaluation_id], candidate["candidate"]["obligationIds"])\`. Use only receipts whose evidence kind directly satisfies those obligations. This helper is idempotent and closes already-declared obligations in one model turn; the host still validates every individual binding.`

@@ -11,6 +11,7 @@ import {
 	deriveAvoCriticalAssumptionChecks,
 	deriveAvoObjectiveObligations,
 	parseAvoAblations,
+	requiredAvoPremortemAssumptionCount,
 } from "../src/core/avo/index.js";
 import type { AvoCandidate, AvoRunState } from "../src/core/avo/types.js";
 
@@ -37,6 +38,28 @@ describe.sequential("AVO benchmark ablations", () => {
 			criticalAssumptions: [{ critical: true, status: "open" }],
 		} as unknown as AvoRunState;
 		expect(deriveAvoCriticalAssumptionChecks(state)).toEqual([]);
+		expect(
+			requiredAvoPremortemAssumptionCount({
+				...state,
+				routing: { environment: "coding", horizon: "long" },
+				verificationPolicy: "required",
+			} as AvoRunState),
+		).toBe(0);
+	});
+
+	test("tells long-horizon Gemini to run a falsifiable pre-mortem before editing", () => {
+		const state = {
+			runId: "run",
+			routing: { environment: "coding", horizon: "long", reasons: [], source: "host_auto", decidedAt: "now" },
+			verificationClass: "coding",
+			verificationPolicy: "required",
+			verificationReasons: [],
+			obligations: [],
+		} as unknown as AvoRunState;
+		const prompt = buildAvoRuntimePrompt(state);
+		expect(prompt).toContain("AVO_PREMORTEM=required");
+		expect(prompt).toContain("Before any task workspace change");
+		expect(prompt).toContain("at least 2 distinct critical assumptions");
 	});
 
 	test("does not disclose the active condition in the model prompt", () => {

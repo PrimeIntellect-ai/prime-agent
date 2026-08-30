@@ -56,6 +56,13 @@ Never pass or request an environment override.
    check and call `resolve_critical_assumption()` with the host receipt. Open or
    refuted critical assumptions block completion; declarations are stored
    separately from observed results and are never treated as verified facts.
+   For host-routed long-horizon coding, this pre-mortem is mandatory before any
+   task workspace change: register at least two distinct critical assumptions.
+   Use concrete statements and different falsification plans, for example one
+   boundary-contract assumption tested by a direct regression and one
+   integration assumption tested by a runtime check. Generic duplicates such
+   as "the code works" are rejected. The host binds preregistration to the
+   original workspace and will not accept assumptions invented after editing.
 
 2. For a
    coding task, before modifying the workspace or recording a candidate, call

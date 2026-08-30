@@ -60,6 +60,37 @@ describe("AgentSession universal AVO runtime", () => {
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
+	it("rejects long-horizon pre-mortem assumptions invented after workspace edits", async () => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Implement an exhaustive multi-stage parser migration");
+		expect((await harness.session.handleAvoHostRequest("avo.get")).state).toMatchObject({
+			routing: { environment: "coding", horizon: "long" },
+		});
+		writeFileSync(`${harness.tempDir}/parser.py`, "def parse(value):\n    return value\n");
+		await expect(
+			harness.session.handleAvoHostRequest("avo.assumptions.register", {
+				assumptions: [
+					{
+						assumption_id: "boundary-contract",
+						statement: "The parser preserves empty boundary values",
+						falsification_plan: "Run a direct regression using empty leading and trailing values",
+						required_evidence: ["test"],
+					},
+					{
+						assumption_id: "integration-contract",
+						statement: "Escaped delimiters compose with empty values",
+						falsification_plan: "Execute a runtime example that combines escaping and empty values",
+						required_evidence: ["runtime"],
+					},
+				],
+			}),
+		).rejects.toThrow(/before task workspace changes/);
+		expect(
+			((await harness.session.handleAvoHostRequest("avo.get")).state as AvoRunState).criticalAssumptions,
+		).toEqual([]);
+	});
+
 	it("automatically continues a lazy final answer and binds delivery to the accepted candidate", async () => {
 		harness = await createHarness({ persistSession: true, enforceAvoCompletion: true });
 		harness.setResponses([

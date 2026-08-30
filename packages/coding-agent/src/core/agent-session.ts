@@ -5088,6 +5088,20 @@ export class AgentSession {
 			case "avo.assumptions.register": {
 				if (isAvoFeatureAblated("critical_assumptions")) return { assumptions: [], disabled: true };
 				if (!Array.isArray(payload.assumptions)) throw new Error("avo.assumptions.register requires an array");
+				const state = runtime.getState();
+				if (state.routing.environment === "coding" && state.verificationBaseline) {
+					const workspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+						excludedRoots: this._avoWorkspaceExcludedRoots(),
+					});
+					const preregistrationDigest =
+						state.verificationBaseline.executions.at(-1)?.postWorkspaceDigest ??
+						state.verificationBaseline.workspaceDigest;
+					if (workspace.digest !== preregistrationDigest) {
+						throw new Error(
+							"critical assumptions must be preregistered before task workspace changes; restore or start a fresh task run",
+						);
+					}
+				}
 				return {
 					assumptions: runtime.registerCriticalAssumptions(
 						payload.assumptions.map(parseAvoCriticalAssumptionInput),

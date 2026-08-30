@@ -156,6 +156,16 @@ other/final. Completion repair begins only after a non-passing completion
 attempt. Post-ready work records otherwise-unclassified tool activity after a
 passing gate, so model overwork is not incorrectly attributed to a verifier
 blocker.
+
+For host-routed long-horizon coding tasks, full AVO also requires a pre-mortem
+before the first workspace change or candidate: at least two distinct critical
+assumptions with concrete falsification plans. They must describe competing
+ways the implementation could be wrong rather than restating implementation
+steps. Each assumption remains unresolved until candidate-bound host evidence
+addresses it. Schema version 12 reports both registered and resolved counts in
+the anti-laziness tables. These counts measure protocol compliance, not the
+semantic quality of the hypotheses; benchmark results are still needed to show
+whether the pre-mortem improves hidden correctness.
 Events from the root and retained verifier sessions are merged chronologically
 before this attribution. Once the host gate passes, queued AVO-supervisor
 prompts are superseded by the exact canonical-delivery request; ordinary user

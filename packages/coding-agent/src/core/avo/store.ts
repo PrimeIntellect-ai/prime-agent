@@ -27,6 +27,7 @@ import {
 	avoEvaluatorMatchesRequiredEvidence,
 	deriveAvoCandidateImpactSurfaces,
 	deriveAvoObjectiveObligations,
+	requiredAvoPremortemAssumptionCount,
 } from "./obligations.js";
 import {
 	AVO_AUTHORITIES,
@@ -2663,6 +2664,12 @@ export class AvoStore {
 		}
 		if (inputs.length === 0 || inputs.length > 32) throw new Error("register 1 to 32 critical assumptions at a time");
 		const existing = new Set(this.state.criticalAssumptions.map((item) => item.assumptionId));
+		const existingStatements = new Set(
+			this.state.criticalAssumptions.map((item) => normalizedText(item.statement).toLowerCase()),
+		);
+		const existingPlans = new Set(
+			this.state.criticalAssumptions.map((item) => normalizedText(item.falsificationPlan).toLowerCase()),
+		);
 		const createdAt = this.now();
 		const assumptions = inputs.map((input) => {
 			const assumptionId = requireIdentifier(input.assumptionId, "assumption.assumption_id");
@@ -2675,11 +2682,24 @@ export class AvoStore {
 					`assumption ${assumptionId} requires a concrete falsification kind, not authoritative/opinion`,
 				);
 			}
+			const statement = requireString(input.statement, "assumption.statement");
+			const falsificationPlan = requireString(input.falsificationPlan, "assumption.falsification_plan");
+			if (statement.length < 16)
+				throw new Error(`assumption ${assumptionId} statement must contain at least 16 characters`);
+			if (falsificationPlan.length < 24) {
+				throw new Error(`assumption ${assumptionId} falsification_plan must contain at least 24 characters`);
+			}
+			const statementKey = normalizedText(statement).toLowerCase();
+			const planKey = normalizedText(falsificationPlan).toLowerCase();
+			if (existingStatements.has(statementKey)) throw new Error(`assumption ${assumptionId} repeats a statement`);
+			if (existingPlans.has(planKey)) throw new Error(`assumption ${assumptionId} repeats a falsification plan`);
 			existing.add(assumptionId);
+			existingStatements.add(statementKey);
+			existingPlans.add(planKey);
 			return {
 				assumptionId,
-				statement: requireString(input.statement, "assumption.statement"),
-				falsificationPlan: requireString(input.falsificationPlan, "assumption.falsification_plan"),
+				statement,
+				falsificationPlan,
 				requiredEvidence: [...new Set(input.requiredEvidence)],
 				critical: input.critical ?? true,
 				status: "open" as const,
@@ -2725,6 +2745,14 @@ export class AvoStore {
 
 	recordCandidate(input: AvoCandidateInput): AvoCandidate {
 		const candidateId = input.candidateId ?? `candidate-${randomUUID()}`;
+		const requiredPremortemAssumptions =
+			this.state.candidates.length === 0 ? requiredAvoPremortemAssumptionCount(this.state) : 0;
+		const registeredPremortemAssumptions = this.state.criticalAssumptions.filter((item) => item.critical).length;
+		if (registeredPremortemAssumptions < requiredPremortemAssumptions) {
+			throw new Error(
+				`long-horizon coding requires at least ${requiredPremortemAssumptions} distinct critical assumptions with concrete falsification plans before the first candidate; found ${registeredPremortemAssumptions}`,
+			);
+		}
 		if (this.state.candidates.some((candidate) => candidate.candidateId === candidateId)) {
 			throw new Error(`candidate ${candidateId} already exists`);
 		}
