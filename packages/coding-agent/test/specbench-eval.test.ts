@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { parseArgs } from "../src/cli/args.js";
 import {
@@ -11,6 +11,7 @@ import {
 	buildSpecBenchBaselineTestSource,
 	buildSpecBenchGradeArgs,
 	buildSpecBenchGradeSandboxArgs,
+	buildSpecBenchResolverSandboxArgs,
 	buildSpecBenchSandboxArgs,
 	deriveSpecBenchExecutionBudgets,
 	ensureSpecBenchGraderPython,
@@ -23,6 +24,7 @@ import {
 	primeImplementationProvenance,
 	type SpecBenchResult,
 	specBenchAgentEnvironment,
+	specBenchAgentInfrastructureErrorFromSessionJsonl,
 	specBenchCatalogDigest,
 	specBenchFalseCompletion,
 	specBenchGradeEnvironment,
@@ -424,6 +426,90 @@ def get_task(): return Task()
 		).toEqual(["tool:mcp__websearch__search_query"]);
 	});
 
+	test("classifies provider-only assistant failures as retryable agent infrastructure", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-specbench-provider-errors-"));
+		try {
+			const sessionPath = join(root, "session.jsonl");
+			writeFileSync(
+				sessionPath,
+				[
+					{ type: "session", id: "session-1" },
+					{ type: "message", message: { role: "user", content: [{ type: "text", text: "implement" }] } },
+					...Array.from({ length: 4 }, (_, index) => ({
+						type: "message",
+						id: `error-${index}`,
+						message: {
+							role: "assistant",
+							stopReason: "error",
+							errorMessage: "fetch failed",
+							usage: { input: 0, output: 0, totalTokens: 0 },
+							content: [],
+						},
+					})),
+				]
+					.map((entry) => JSON.stringify(entry))
+					.join("\n"),
+			);
+
+			expect(specBenchAgentInfrastructureErrorFromSessionJsonl([sessionPath])).toBe(
+				"agent provider/runtime failed before any successful assistant response (4 error responses): fetch failed",
+			);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("does not relabel a genuine model attempt, turn limit, or bare nonzero-exit session as infrastructure", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-specbench-provider-negative-"));
+		try {
+			const attemptedPath = join(root, "attempted.jsonl");
+			writeFileSync(
+				attemptedPath,
+				[
+					{
+						type: "message",
+						message: {
+							role: "assistant",
+							stopReason: "toolUse",
+							usage: { output: 12 },
+							content: [{ type: "toolCall", name: "ipython", arguments: { code: "print(1)" } }],
+						},
+					},
+					{
+						type: "message",
+						message: { role: "assistant", stopReason: "error", errorMessage: "fetch failed", content: [] },
+					},
+				]
+					.map((entry) => JSON.stringify(entry))
+					.join("\n"),
+			);
+			const turnLimitPath = join(root, "turn-limit.jsonl");
+			writeFileSync(
+				turnLimitPath,
+				`${JSON.stringify({
+					type: "message",
+					message: {
+						role: "assistant",
+						stopReason: "length",
+						usage: { output: 1 },
+						content: [{ type: "text", text: "partial implementation" }],
+					},
+				})}\n`,
+			);
+			const bareExitPath = join(root, "bare-exit.jsonl");
+			writeFileSync(
+				bareExitPath,
+				`${JSON.stringify({ type: "message", message: { role: "user", content: [] } })}\n`,
+			);
+
+			expect(specBenchAgentInfrastructureErrorFromSessionJsonl([attemptedPath])).toBeUndefined();
+			expect(specBenchAgentInfrastructureErrorFromSessionJsonl([turnLimitPath])).toBeUndefined();
+			expect(specBenchAgentInfrastructureErrorFromSessionJsonl([bareExitPath])).toBeUndefined();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	test("does not pass private-home or current-run ancestors to the verification broker", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-specbench-hidden-"));
 		try {
@@ -531,6 +617,40 @@ def get_task(): return Task()
 		expect(args).toContain("/run/user/1000/prime-probe.sock");
 		expect(args).toContain("/run/user/1000/prime-verification.sock");
 		expect(args).not.toContain("/run/docker.sock");
+		const runMaskIndex = args.findIndex((value, index) => value === "--tmpfs" && args[index + 1] === "/run");
+		const resolverArguments = buildSpecBenchResolverSandboxArgs();
+		expect(args.slice(runMaskIndex + 2, runMaskIndex + 2 + resolverArguments.length)).toEqual(resolverArguments);
+	});
+
+	test("restores only a regular resolver target beneath the masked runtime root", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-specbench-resolver-"));
+		try {
+			const resolvConf = join(root, "etc", "resolv.conf");
+			const runtimeRoot = join(root, "run");
+			const resolverTarget = join(runtimeRoot, "systemd", "resolve", "stub-resolv.conf");
+			mkdirSync(dirname(resolvConf), { recursive: true });
+			mkdirSync(dirname(resolverTarget), { recursive: true });
+			writeFileSync(resolverTarget, "nameserver 127.0.0.53\n");
+			symlinkSync("../run/systemd/resolve/stub-resolv.conf", resolvConf);
+
+			expect(buildSpecBenchResolverSandboxArgs(resolvConf, runtimeRoot)).toEqual([
+				"--dir",
+				join(runtimeRoot, "systemd"),
+				"--dir",
+				join(runtimeRoot, "systemd", "resolve"),
+				"--ro-bind",
+				resolverTarget,
+				resolverTarget,
+			]);
+
+			rmSync(resolvConf);
+			const outsideTarget = join(root, "outside-resolv.conf");
+			writeFileSync(outsideTarget, "nameserver 203.0.113.1\n");
+			symlinkSync("../outside-resolv.conf", resolvConf);
+			expect(buildSpecBenchResolverSandboxArgs(resolvConf, runtimeRoot)).toEqual([]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	test("closes an acquired verification broker when probe startup fails", async () => {

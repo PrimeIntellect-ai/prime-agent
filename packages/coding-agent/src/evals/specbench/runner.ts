@@ -490,6 +490,77 @@ function specBenchNetworkToolViolationsFromJsonl(paths: readonly string[]): stri
 	);
 }
 
+function specBenchAssistantHasModelWork(message: Record<string, unknown>): boolean {
+	const usage = message.usage && typeof message.usage === "object" ? (message.usage as Record<string, unknown>) : {};
+	if (
+		[usage.output, usage.outputTokens].some(
+			(value) => typeof value === "number" && Number.isFinite(value) && value > 0,
+		)
+	) {
+		return true;
+	}
+	if (!Array.isArray(message.content)) return false;
+	return message.content.some((part) => {
+		if (!part || typeof part !== "object") return false;
+		const content = part as Record<string, unknown>;
+		if (content.type === "text") return typeof content.text === "string" && content.text.trim().length > 0;
+		if (content.type === "thinking")
+			return typeof content.thinking === "string" && content.thinking.trim().length > 0;
+		return content.type !== undefined;
+	});
+}
+
+function specBenchSessionErrorMessage(value: Record<string, unknown>): string {
+	const nested = value.data && typeof value.data === "object" ? (value.data as Record<string, unknown>) : {};
+	const message = [value.errorMessage, value.error, value.message, nested.errorMessage, nested.error].find(
+		(item): item is string => typeof item === "string" && item.trim().length > 0,
+	);
+	return (message ?? "provider/runtime request failed").replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
+export function specBenchAgentInfrastructureErrorFromSessionJsonl(paths: readonly string[]): string | undefined {
+	const assistantMessages: Array<Record<string, unknown>> = [];
+	const directProviderErrors: string[] = [];
+	let observedModelWork = false;
+	for (const path of paths) {
+		for (const line of readFileSync(path, "utf8").split("\n")) {
+			if (!line.trim()) continue;
+			let entry: Record<string, unknown>;
+			try {
+				const parsed = JSON.parse(line) as unknown;
+				if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+				entry = parsed as Record<string, unknown>;
+			} catch {
+				continue;
+			}
+			const message =
+				entry.message && typeof entry.message === "object" && !Array.isArray(entry.message)
+					? (entry.message as Record<string, unknown>)
+					: undefined;
+			if (message?.role === "assistant") {
+				assistantMessages.push(message);
+				if (specBenchAssistantHasModelWork(message)) observedModelWork = true;
+				continue;
+			}
+			if (message?.role === "toolResult" || message?.role === "bashExecution") observedModelWork = true;
+			if (["provider_error", "model_error", "runtime_error"].includes(String(entry.type))) {
+				directProviderErrors.push(specBenchSessionErrorMessage(entry));
+			}
+		}
+	}
+	if (observedModelWork) return undefined;
+	if (assistantMessages.length > 0) {
+		const providerErrors = assistantMessages.filter((message) => message.stopReason === "error");
+		if (providerErrors.length !== assistantMessages.length) return undefined;
+		const messages = [...new Set(providerErrors.map(specBenchSessionErrorMessage))];
+		return `agent provider/runtime failed before any successful assistant response (${providerErrors.length} error response${providerErrors.length === 1 ? "" : "s"}): ${messages.join("; ")}`;
+	}
+	if (directProviderErrors.length > 0) {
+		return `agent provider/runtime failed before any successful assistant response (${directProviderErrors.length} error event${directProviderErrors.length === 1 ? "" : "s"}): ${[...new Set(directProviderErrors)].join("; ")}`;
+	}
+	return undefined;
+}
+
 function specBenchPathsOverlap(left: string, right: string): boolean {
 	return left === right || left.startsWith(`${right}${sep}`) || right.startsWith(`${left}${sep}`);
 }
@@ -2091,6 +2162,7 @@ export function buildSpecBenchSandboxArgs(
 	protectedPaths: string[],
 	brokerSocketPaths: string[] = [],
 ): string[] {
+	const resolverArguments = buildSpecBenchResolverSandboxArgs();
 	const argv = [
 		"bwrap",
 		"--ro-bind",
@@ -2105,6 +2177,7 @@ export function buildSpecBenchSandboxArgs(
 		"/tmp",
 		"--tmpfs",
 		"/run",
+		...resolverArguments,
 		"--tmpfs",
 		REPOSITORY_GIT_DIR,
 		"--tmpfs",
@@ -2144,6 +2217,36 @@ export function buildSpecBenchSandboxArgs(
 	for (const path of protectedPaths) argv.push("--ro-bind", path, path);
 	argv.push("--", executable, ...args);
 	return argv;
+}
+
+export function buildSpecBenchResolverSandboxArgs(resolvConfPath = "/etc/resolv.conf", runtimeRoot = "/run"): string[] {
+	const normalizedResolvConf = resolve(resolvConfPath);
+	const normalizedRuntimeRoot = resolve(runtimeRoot);
+	try {
+		if (!lstatSync(normalizedResolvConf).isSymbolicLink()) return [];
+		const linkedTarget = resolve(dirname(normalizedResolvConf), readlinkSync(normalizedResolvConf));
+		const canonicalTarget = realpathSync(linkedTarget);
+		if (canonicalTarget !== linkedTarget || !canonicalTarget.startsWith(`${normalizedRuntimeRoot}${sep}`)) return [];
+		if (!lstatSync(canonicalTarget).isFile()) return [];
+
+		const directories: string[] = [];
+		for (
+			let directory = dirname(canonicalTarget);
+			directory !== normalizedRuntimeRoot;
+			directory = dirname(directory)
+		) {
+			if (!directory.startsWith(`${normalizedRuntimeRoot}${sep}`)) return [];
+			directories.push(directory);
+		}
+		return [
+			...directories.reverse().flatMap((directory) => ["--dir", directory]),
+			"--ro-bind",
+			canonicalTarget,
+			canonicalTarget,
+		];
+	} catch {
+		return [];
+	}
 }
 
 export async function withSpecBenchBrokerLifecycle<
@@ -2394,6 +2497,7 @@ async function runTask(
 	const hiddenSuitesPass = specBenchHiddenSuitesPass(privateGrade, idPrivateGrade);
 	const sessionJsonlPaths = findJsonl(sessionDir);
 	const trace = summarizePrimeIntegrityTrace(sessionJsonlPaths, artifactRoot);
+	const agentInfrastructureError = specBenchAgentInfrastructureErrorFromSessionJsonl(sessionJsonlPaths);
 	const networkPolicyViolations = [
 		...specBenchNetworkPolicyViolations(trace.commands),
 		...specBenchNetworkToolViolationsFromJsonl(sessionJsonlPaths),
@@ -2402,7 +2506,7 @@ async function runTask(
 		networkPolicyViolations.length > 0
 			? `benchmark network policy was violated by ${networkPolicyViolations.length} model-authored command(s)`
 			: undefined;
-	const infrastructureError = specBenchInfrastructureError(officialGrades);
+	const infrastructureError = agentInfrastructureError ?? specBenchInfrastructureError(officialGrades);
 	const result: SpecBenchResult = {
 		specbenchRevision,
 		conditionId: condition.conditionId,
