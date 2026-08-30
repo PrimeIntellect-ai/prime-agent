@@ -152,6 +152,17 @@ git add packages/foo.ts
 		});
 	});
 
+	it("keeps the python preview when the literal is not the whole first argument", () => {
+		expect(previewIpythonCode("r = await bash('echo ' + name)")).toEqual({
+			language: "python",
+			text: "r = await bash('echo ' + name)",
+		});
+		expect(previewIpythonCode("r = await bash('echo can\\'t stop')")).toEqual({
+			language: "python",
+			text: "r = await bash('echo can\\'t stop')",
+		});
+	});
+
 	it("previews the bash-skill call when the scorer picks it among other lines", () => {
 		const code = `import json
 r = await bash('git diff --stat')
