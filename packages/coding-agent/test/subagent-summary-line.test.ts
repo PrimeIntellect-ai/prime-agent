@@ -267,6 +267,34 @@ describe("SubagentSummaryLine", () => {
 		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 0 idle   ○ 1 inactive");
 	});
 
+	it("keeps chat alive with the snapshot-fed bar when the roster subscribe fails", async () => {
+		const line = new SubagentSummaryLine();
+		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;
+		Object.assign(mode, {
+			agentConnection: {
+				subscribeAgentRoster: vi.fn(async () => {
+					throw new Error("Daemon is stale");
+				}),
+			},
+			subagentSnapshots: new Map<string, AgentConnectionRlmChildAgentSnapshot>(),
+			rlmNodeId: undefined,
+			heartbeatCatalog: [],
+			subagentSummaryLine: line,
+			connectionState: undefined,
+			scheduleHeartbeatManagerRefresh: vi.fn(),
+			updateWorkingPulse: vi.fn(),
+			syncWorkingLoader: vi.fn(),
+			updateWorkingLoaderMessage: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		});
+		const subscribe = Reflect.get(InteractiveMode.prototype, "subscribeToRosterBar") as (
+			this: typeof mode,
+		) => Promise<void>;
+
+		await expect(subscribe.call(mode)).resolves.toBeUndefined();
+		expect(Reflect.get(mode, "rosterBar")).toBeUndefined();
+	});
+
 	it("turns a selection into the scoped agents-view run result", async () => {
 		const returnToAgentsView = vi.fn(async () => undefined);
 		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;

@@ -12,9 +12,18 @@ export class AgentsViewRosterStore {
 	private unsubscribeMessage: (() => void) | undefined;
 	private emitScheduled = false;
 	private subscribed = false;
+	private attachChain: Promise<unknown> = Promise.resolve();
 
 	/** Subscribes once per client connection; re-entry with a live subscription is a no-op. */
 	async attach(client: DaemonClient, options: { force?: boolean } = {}): Promise<boolean> {
+		// Attaches serialize: a stale attempt settling late can never detach a newer subscription's listener.
+		const run = () => this.attachToClient(client, options);
+		const chained = this.attachChain.then(run, run);
+		this.attachChain = chained;
+		return chained;
+	}
+
+	private async attachToClient(client: DaemonClient, options: { force?: boolean }): Promise<boolean> {
 		// connect() resolves at socket connect; the capability verdict needs the parsed daemon_hello.
 		if (client.isConnected && client.hello === undefined) await client.waitForHello();
 		if (!client.supportsServerCapability("agent_roster")) {

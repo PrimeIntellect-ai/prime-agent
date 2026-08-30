@@ -106,6 +106,9 @@ describe("AgentsViewMode", () => {
 			rebuildRows: vi.fn(),
 			syncSelectedRowState: vi.fn(),
 			ui: { requestRender: vi.fn() },
+			armSavedSearchFetch(): void {
+				invoke("armSavedSearchFetch", self);
+			},
 		};
 
 		invoke("queryChanged", self);
@@ -687,6 +690,31 @@ describe("AgentsViewMode persistent catalog state", () => {
 			expect(Reflect.get(view, "liveCatalogReady")).toBe(true);
 			expect(persistentState.scopeFrames).toEqual([{ scope, returnChat: root }]);
 			expect(persistentState.lastSuccessfulLiveSummaries).toEqual([root]);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("exits a failed roster handshake without arming the close-driven reconnect", async () => {
+		const persistentState = createInitialAgentsViewPersistentState({});
+		const onClose = vi.fn(() => () => {});
+		persistentState.rosterClient = {
+			isConnected: true,
+			hello: { type: "daemon_hello" },
+			supportsServerCapability: () => true,
+			onMessage: () => () => {},
+			onClose,
+			request: vi.fn(async () => {
+				throw new Error("socket closed during handshake");
+			}),
+		} as never;
+		const view = new AgentsViewMode(
+			{ config: {}, uiServices: createUiServices(), socketPath: "/tmp/unused.sock" },
+			persistentState,
+		);
+		try {
+			await expect(view.run()).rejects.toThrow("socket closed during handshake");
+			expect(onClose).not.toHaveBeenCalled();
 		} finally {
 			stopThemeWatcher();
 		}

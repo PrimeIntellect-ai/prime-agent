@@ -106,6 +106,50 @@ describe("agents-view roster store", () => {
 		expect(client.request).not.toHaveBeenCalled();
 	});
 
+	it("serializes overlapping attaches so a stale failure cannot drop the live subscription", async () => {
+		const listeners = new Set<(message: DaemonOutbound) => void>();
+		let releaseFirst: (response: unknown) => void = () => {};
+		const responses: unknown[] = [
+			new Promise((resolveFirst) => {
+				releaseFirst = resolveFirst;
+			}),
+			{
+				type: "response",
+				command: "roster_subscribe",
+				success: true,
+				data: { roster: [ledgerEntry({ id: "a", sessionId: "a" })] },
+			},
+		];
+		const client = {
+			supportsServerCapability: () => true,
+			isConnected: true,
+			hello: { type: "daemon_hello" },
+			onMessage: (listener: (message: DaemonOutbound) => void) => {
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			},
+			request: vi.fn(async () => responses.shift()),
+			emit: (message: DaemonOutbound) => {
+				for (const listener of listeners) listener(message);
+			},
+		};
+		const store = new AgentsViewRosterStore();
+
+		const first = store.attach(client as never, { force: true });
+		const second = store.attach(client as never, { force: true });
+		releaseFirst({ success: false });
+		await expect(first).resolves.toBe(false);
+		await expect(second).resolves.toBe(true);
+
+		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "b", sessionId: "b" })] });
+		expect(
+			store
+				.summaries()
+				.map((entry) => entry.sessionId)
+				.sort(),
+		).toEqual(["a", "b"]);
+	});
+
 	it("applies pushed updates, removals, and full resyncs with one listener emission per tick", async () => {
 		const client = fakeRosterClient([ledgerEntry({ id: "a", sessionId: "a" })]);
 		const store = new AgentsViewRosterStore();

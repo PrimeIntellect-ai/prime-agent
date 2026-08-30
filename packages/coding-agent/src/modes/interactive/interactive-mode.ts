@@ -5097,10 +5097,15 @@ export class InteractiveMode {
 		};
 	}
 
-	/** Daemon sessions feed the bar from the pushed roster; a daemon that cannot stream it is stale. */
+	/** Daemon sessions feed the bar from the pushed roster; a bar that cannot subscribe degrades to child snapshots. */
 	private async subscribeToRosterBar(): Promise<void> {
 		if (!this.agentConnection.subscribeAgentRoster) return;
-		this.rosterBar = await this.agentConnection.subscribeAgentRoster(() => this.updateSubagentSummaryLine());
+		try {
+			this.rosterBar = await this.agentConnection.subscribeAgentRoster(() => this.updateSubagentSummaryLine());
+		} catch {
+			// Only the agents view hard-errors on a missing roster; chat keeps its snapshot-fed bar.
+			this.rosterBar = undefined;
+		}
 		this.updateSubagentSummaryLine();
 	}
 

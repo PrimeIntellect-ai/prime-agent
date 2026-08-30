@@ -853,7 +853,6 @@ export class AgentsViewMode implements Component, Focusable {
 		const client = this.persistentState.rosterClient;
 		this.client = client;
 		if (!client.isConnected) await client.reconnect();
-		this.subscribeToClientClose(client);
 		this.unsubscribeClientMessage = client.onMessage((message) => {
 			if (message.type === "heartbeats_changed") void this.refreshHeartbeats();
 		});
@@ -862,6 +861,8 @@ export class AgentsViewMode implements Component, Focusable {
 		if (!(await this.rosterStore.attach(client))) {
 			throw new Error("Daemon is stale: it does not advertise the agent_roster capability; restart the daemon");
 		}
+		// Armed only after a successful attach: a handshake failure exits cleanly instead of racing a reconnect loop.
+		this.subscribeToClientClose(client);
 
 		this.ui.addChild(this);
 		this.ui.setFocus(this);
@@ -891,6 +892,8 @@ export class AgentsViewMode implements Component, Focusable {
 		this.savedCatalogReady = true;
 		this.unsubscribeRosterUpdate = this.rosterStore.onUpdate(() => this.onRosterUpdate());
 		this.applySessionList(this.rosterStore.summaries(), true);
+		// A restored non-empty query needs the saved catalog just like a typed one.
+		this.armSavedSearchFetch();
 		void this.refreshHeartbeats();
 		this.loadStartupNotices();
 		this.heartbeatPollTimer = setInterval(() => void this.refreshHeartbeats(), HEARTBEAT_POLL_INTERVAL_MS);
@@ -1253,14 +1256,17 @@ export class AgentsViewMode implements Component, Focusable {
 		this.queryChanged();
 	}
 
+	/** Deep search over message text needs the saved catalog; one live fetch per instance, restored queries included. */
+	private armSavedSearchFetch(): void {
+		if (this.savedSearchFetchStarted || this.editor.getText().trim().length === 0) return;
+		// refreshSavedSessions re-arms this latch itself when the current fetch fails without a catalog.
+		this.savedSearchFetchStarted = true;
+		void this.refreshSavedSessions({ preserveStatusOnError: true });
+	}
+
 	private queryChanged(): void {
 		this.persistentState.query = this.editor.getText();
-		if (!this.savedSearchFetchStarted && this.editor.getText().trim().length > 0) {
-			// Deep search over message text needs the saved catalog; one live fetch per instance.
-			// refreshSavedSessions re-arms this latch itself when the current fetch fails without a catalog.
-			this.savedSearchFetchStarted = true;
-			void this.refreshSavedSessions({ preserveStatusOnError: true });
-		}
+		this.armSavedSearchFetch();
 		this.rebuildRows();
 		// Typing must not claim the visible fallback row while the restored
 		// anchor is still waiting for its catalog row.

@@ -639,6 +639,30 @@ describe("agents view slash commands", () => {
 		expect(self.refreshSavedSessions).toHaveBeenCalledTimes(1);
 	});
 
+	it("arms the saved-catalog fetch once for restored and typed queries alike", () => {
+		const refreshSavedSessions = vi.fn(async () => true);
+		const self: Record<string, unknown> = {
+			savedSearchFetchStarted: false,
+			editor: editorWithText("restored needle"),
+			refreshSavedSessions,
+		};
+
+		// run() arms the latch for a restored query; a later queryChanged cannot double-fetch.
+		invoke("armSavedSearchFetch", self);
+		expect(self.savedSearchFetchStarted).toBe(true);
+		invoke("armSavedSearchFetch", self);
+		expect(refreshSavedSessions).toHaveBeenCalledTimes(1);
+
+		// An empty editor never arms the latch.
+		const idle: Record<string, unknown> = {
+			savedSearchFetchStarted: false,
+			editor: editorWithText("   "),
+			refreshSavedSessions: vi.fn(),
+		};
+		invoke("armSavedSearchFetch", idle);
+		expect(idle.savedSearchFetchStarted).toBe(false);
+	});
+
 	it("keeps the search latch armed when a superseded fetch settles before the pending newer one", async () => {
 		let releaseFirst: (error: Error) => void = () => {};
 		const firstResponse = new Promise((_resolveFirst, rejectFirst) => {
@@ -673,6 +697,9 @@ describe("agents view slash commands", () => {
 			refreshSavedSessions: vi.fn((options?: unknown) => invoke("refreshSavedSessions", self, options)),
 			rearmSavedSearchFetch() {
 				return invoke("rearmSavedSearchFetch", self);
+			},
+			armSavedSearchFetch() {
+				return invoke("armSavedSearchFetch", self);
 			},
 		};
 
@@ -738,6 +765,9 @@ describe("agents view slash commands", () => {
 			refreshSavedSessions: vi.fn((options?: unknown) => invoke("refreshSavedSessions", self, options)),
 			rearmSavedSearchFetch() {
 				return invoke("rearmSavedSearchFetch", self);
+			},
+			armSavedSearchFetch() {
+				return invoke("armSavedSearchFetch", self);
 			},
 		};
 
