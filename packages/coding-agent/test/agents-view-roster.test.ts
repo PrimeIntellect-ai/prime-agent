@@ -106,6 +106,62 @@ describe("agents-view roster store", () => {
 		expect(client.request).not.toHaveBeenCalled();
 	});
 
+	it("resumes the roster bar after a transient subscribe failure during reconnect", async () => {
+		const listeners = new Set<(message: DaemonOutbound) => void>();
+		const responses: unknown[] = [
+			{
+				type: "response",
+				command: "roster_subscribe",
+				success: true,
+				data: { roster: [ledgerEntry({ id: "a", sessionId: "a" })] },
+			},
+			{ type: "response", command: "roster_subscribe", success: false, error: "worker busy" },
+			{
+				type: "response",
+				command: "roster_subscribe",
+				success: true,
+				data: { roster: [ledgerEntry({ id: "a", sessionId: "a" })] },
+			},
+		];
+		const client = {
+			supportsServerCapability: () => true,
+			isConnected: true,
+			hello: { type: "daemon_hello" },
+			onMessage: (listener: (message: DaemonOutbound) => void) => {
+				listeners.add(listener);
+				return () => listeners.delete(listener);
+			},
+			request: vi.fn(async () => responses.shift()),
+			emit: (message: DaemonOutbound) => {
+				for (const listener of listeners) listener(message);
+			},
+		};
+		const store = new AgentsViewRosterStore();
+		const connection = Object.assign(Object.create(DaemonAgentConnection.prototype), {
+			options: {},
+			client,
+			rosterStore: store,
+			activeSessionId: "root-active",
+			lastEventSequence: undefined,
+			lastEventCursor: undefined,
+			requestData: vi.fn(async () => ({ id: "root-active", sessionId: "root", activeSessionId: "root-active" })),
+		}) as DaemonAgentConnection;
+
+		await expect(store.attach(client as never)).resolves.toBe(true);
+
+		// The transient failure throws into the bounded reconnect retry instead of leaving a dead subscription.
+		await expect(connection.attach()).rejects.toThrow("roster_subscribe failed");
+		await connection.attach();
+
+		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "b", sessionId: "b" })] });
+		expect(
+			store
+				.summaries()
+				.map((entry) => entry.sessionId)
+				.sort(),
+		).toEqual(["a", "b"]);
+	});
+
 	it("serializes overlapping attaches so a stale failure cannot drop the live subscription", async () => {
 		const listeners = new Set<(message: DaemonOutbound) => void>();
 		let releaseFirst: (response: unknown) => void = () => {};
@@ -137,8 +193,8 @@ describe("agents-view roster store", () => {
 
 		const first = store.attach(client as never, { force: true });
 		const second = store.attach(client as never, { force: true });
-		releaseFirst({ success: false });
-		await expect(first).resolves.toBe(false);
+		releaseFirst({ success: false, error: "stale socket" });
+		await expect(first).rejects.toThrow("roster_subscribe failed");
 		await expect(second).resolves.toBe(true);
 
 		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "b", sessionId: "b" })] });

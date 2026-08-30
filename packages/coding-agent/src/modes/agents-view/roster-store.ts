@@ -40,10 +40,20 @@ export class AgentsViewRosterStore {
 			if (pendingUpdates) pendingUpdates.push(message);
 			else this.applyUpdate(message.changed, message.removed, message.resync);
 		});
-		const response = await client.request({ type: "roster_subscribe" });
+		let response: Awaited<ReturnType<DaemonClient["request"]>>;
+		try {
+			response = await client.request({ type: "roster_subscribe" });
+		} catch (error) {
+			// A transient transport failure detaches this attempt's listener and throws for the caller's retry loop.
+			this.detachFromClient();
+			throw error;
+		}
 		if (!response.success || typeof response.data !== "object" || response.data === null) {
 			this.detachFromClient();
-			return false;
+			// Only a missing capability returns false; a failed subscribe is transient and throws.
+			throw new Error(
+				`roster_subscribe failed: ${response.success ? "invalid roster payload" : (response.error ?? "unknown error")}`,
+			);
 		}
 		const roster = (response.data as { roster?: AgentRosterEntry[] }).roster ?? [];
 		this.applyUpdate(roster, undefined, true);

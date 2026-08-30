@@ -1258,7 +1258,14 @@ export class AgentsViewMode implements Component, Focusable {
 
 	/** Deep search over message text needs the saved catalog; one live fetch per instance, restored queries included. */
 	private armSavedSearchFetch(): void {
-		if (this.savedSearchFetchStarted || this.editor.getText().trim().length === 0) return;
+		// An already-loaded shared catalog never refetches; mutations keep it fresh across remounts.
+		if (
+			this.savedSearchFetchStarted ||
+			this.persistentState.savedCatalogLoaded === true ||
+			this.editor.getText().trim().length === 0
+		) {
+			return;
+		}
 		// refreshSavedSessions re-arms this latch itself when the current fetch fails without a catalog.
 		this.savedSearchFetchStarted = true;
 		void this.refreshSavedSessions({ preserveStatusOnError: true });

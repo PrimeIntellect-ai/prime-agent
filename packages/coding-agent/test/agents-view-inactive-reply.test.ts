@@ -641,8 +641,10 @@ describe("agents view slash commands", () => {
 
 	it("arms the saved-catalog fetch once for restored and typed queries alike", () => {
 		const refreshSavedSessions = vi.fn(async () => true);
+		const persistentState: Record<string, unknown> = {};
 		const self: Record<string, unknown> = {
 			savedSearchFetchStarted: false,
+			persistentState,
 			editor: editorWithText("restored needle"),
 			refreshSavedSessions,
 		};
@@ -656,11 +658,24 @@ describe("agents view slash commands", () => {
 		// An empty editor never arms the latch.
 		const idle: Record<string, unknown> = {
 			savedSearchFetchStarted: false,
+			persistentState: {},
 			editor: editorWithText("   "),
 			refreshSavedSessions: vi.fn(),
 		};
 		invoke("armSavedSearchFetch", idle);
 		expect(idle.savedSearchFetchStarted).toBe(false);
+
+		// A remounted view over an already-loaded shared catalog never refetches; mutations keep it fresh.
+		const loadedRefresh = vi.fn(async () => true);
+		const loaded: Record<string, unknown> = {
+			savedSearchFetchStarted: false,
+			persistentState: { savedCatalogLoaded: true },
+			editor: editorWithText("restored needle"),
+			refreshSavedSessions: loadedRefresh,
+		};
+		invoke("armSavedSearchFetch", loaded);
+		expect(loadedRefresh).not.toHaveBeenCalled();
+		expect(loaded.savedSearchFetchStarted).toBe(false);
 	});
 
 	it("keeps the search latch armed when a superseded fetch settles before the pending newer one", async () => {
