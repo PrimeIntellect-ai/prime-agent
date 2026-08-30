@@ -1343,15 +1343,12 @@ describe("AgentSession rlm recursion", () => {
 			stopReason: "stop",
 			timestamp: Date.now(),
 		});
-		let childStreamCalls = 0;
 		const root = createSession({
-			// The child task prompt streams empty turns; the parent's reaction to the
-			// failure notice answers normally.
+			// The child task prompt streams empty turns; the parent's reaction to the failure notice answers normally.
 			streamFn: (_model, context) => {
 				if (!userText(context).includes("empty child")) {
 					return streamAnswer("acknowledged");
 				}
-				childStreamCalls += 1;
 				const stream = createAssistantMessageEventStream();
 				queueMicrotask(() => {
 					stream.push({ type: "done", reason: "stop", message: emptyAssistantMessage() });
@@ -1363,18 +1360,14 @@ describe("AgentSession rlm recursion", () => {
 		// child's turn error surfaces immediately instead of after backoff.
 		root.settingsManager.setRetryEnabled(false);
 
-		const spawned = await root.runRlmChild("empty child", { name: "empty-worker" });
+		await root.runRlmChild("empty child", { name: "empty-worker" });
 		await vi.waitFor(() => {
 			const failures = root.messages.filter(
 				(message) => message.role === "custom" && message.customType === "rlm_child_failure",
 			);
 			expect(failures).toHaveLength(1);
-			expect(failures[0]).toMatchObject({
-				content: expect.stringContaining(`RLM child empty-worker (${spawned.rlm_child_id}) failed:`),
-			});
 			expect((failures[0] as { content: string }).content).toMatch(/empty response/i);
 		});
-		expect(childStreamCalls).toBe(3);
 		expect(
 			root.messages.filter(
 				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",

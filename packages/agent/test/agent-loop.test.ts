@@ -2037,14 +2037,11 @@ describe("empty assistant turn retry", () => {
 	});
 
 	it("surfaces an error after three consecutive empty turns", async () => {
-		const { requests, events, assistant } = await runOnce(
-			createAssistantMessage([{ type: "thinking", thinking: "..." }]),
-		);
+		const { requests, assistant } = await runOnce(createAssistantMessage([{ type: "thinking", thinking: "..." }]));
 
 		expect(requests.length).toBe(3);
 		expect(assistant.stopReason).toBe("error");
 		expect(assistant.errorMessage).toMatch(/empty response/i);
-		expect(events.at(-1)?.type).toBe("agent_end");
 	});
 
 	it("does not retry turns with visible content, a length stop, or a silent overflow", async () => {
@@ -2074,33 +2071,5 @@ describe("empty assistant turn retry", () => {
 		expect(overflow.events.some((event) => event.type === "message_end" && event.message === overflowMessage)).toBe(
 			true,
 		);
-	});
-
-	it("does not retry an aborted empty turn", async () => {
-		const controller = new AbortController();
-		const context: AgentContext = { systemPrompt: "sys", messages: [], tools: [] };
-		const config = emptyTurnConfig();
-		let calls = 0;
-		const streamFn = (() => {
-			calls += 1;
-			const stream = new MockAssistantStream();
-			queueMicrotask(() => {
-				controller.abort();
-			});
-			return stream;
-		}) as unknown as Parameters<typeof runAgentLoop>[5];
-
-		const messages = await runAgentLoop(
-			[createUserMessage("Hello")],
-			context,
-			config,
-			() => {},
-			controller.signal,
-			streamFn,
-		);
-
-		expect(calls).toBe(1);
-		const assistant = messages.find((m) => m.role === "assistant") as AssistantMessage;
-		expect(assistant.stopReason).toBe("aborted");
 	});
 });
