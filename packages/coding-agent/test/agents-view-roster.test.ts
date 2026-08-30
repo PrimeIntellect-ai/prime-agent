@@ -157,7 +157,6 @@ describe("agents-view roster store", () => {
 		await expect(store.attach(client as never)).resolves.toBe(true);
 		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["b"]);
 	});
-
 });
 
 describe("roster-driven agents view rows", () => {
