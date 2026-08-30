@@ -235,6 +235,38 @@ describe("SubagentSummaryLine", () => {
 		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 0 idle   ○ 1 inactive");
 	});
 
+	it("drops a never-bound run on terminal error and keeps one inactive child through repeated evidence-free dones", () => {
+		const line = new SubagentSummaryLine();
+		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;
+		Object.assign(mode, {
+			subagentSnapshots: new Map<string, AgentConnectionRlmChildAgentSnapshot>(),
+			rlmNodeId: undefined,
+			heartbeatCatalog: [],
+			subagentSummaryLine: line,
+			updateWorkingPulse: vi.fn(),
+			syncWorkingLoader: vi.fn(),
+			updateWorkingLoaderMessage: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		});
+		const update = Reflect.get(InteractiveMode.prototype, "updateSubagentSummary") as (
+			this: typeof mode,
+			value: AgentConnectionRlmChildAgentSnapshot,
+		) => void;
+		const snapshots = mode.subagentSnapshots as Map<string, AgentConnectionRlmChildAgentSnapshot>;
+
+		// A queued run that errors before any session existed is a removal, never an inactive phantom.
+		update.call(mode, child("never-bound", "queued"));
+		update.call(mode, child("never-bound", "error", { error: "boom" }));
+		expect(snapshots.has("never-bound")).toBe(false);
+
+		// Sticky bound-ness: repeated evidence-free terminal updates keep the one transcript-backed row.
+		update.call(mode, child("worker", "running", { activeSessionId: "resident-worker" }));
+		update.call(mode, child("worker", "done"));
+		update.call(mode, child("worker", "done"));
+		expect(snapshots.has("worker")).toBe(true);
+		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 0 idle   ○ 1 inactive");
+	});
+
 	it("turns a selection into the scoped agents-view run result", async () => {
 		const returnToAgentsView = vi.fn(async () => undefined);
 		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;

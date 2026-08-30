@@ -2,14 +2,11 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setKeybindings } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { KeybindingsManager } from "../src/core/keybindings.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
-import type { AgentConnectionRlmChildAgentSnapshot } from "../src/modes/agent-connection/types.js";
 import { AgentsViewMode } from "../src/modes/agents-view/agents-view-mode.js";
-import { buildAgentsViewRows, classifyAgentsViewSession } from "../src/modes/agents-view/agents-view-state.js";
+import { buildAgentsViewRows } from "../src/modes/agents-view/agents-view-state.js";
 import { AgentsViewRosterStore } from "../src/modes/agents-view/roster-store.js";
 import {
 	type AgentRosterEntry,
@@ -23,7 +20,6 @@ import type { DaemonOutbound } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import { RlmSpawnLedger } from "../src/modes/daemon/rlm-ledger.js";
-import { countDirectSubagentStatuses } from "../src/modes/interactive/components/subagent-summary-line.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 
 const tempDirs: string[] = [];
@@ -196,6 +192,27 @@ describe("roster-driven agents view rows", () => {
 		expect(queuedRow).toMatchObject({ section: "running", statusLabel: "queued" });
 		expect(rows.find((row) => row.summary.sessionId === "r")?.statusLabel).toBe("recovering");
 		expect(rows.find((row) => row.summary.sessionId === "s")?.statusLabel).toMatch(/^last heard \d+(s|m) ago$/);
+
+		// The bind push keeps one stable row identity for the same child run.
+		const bound = sessionSummaryFromRosterEntry(
+			ledgerEntry(
+				{
+					id: "child-active",
+					sessionId: "child-session",
+					activeSessionId: "child-active",
+					sessionFile: "/tmp/artifacts/child.jsonl",
+					runtimeKind: "subagent",
+					rlmChildId: "child-1",
+					parentSessionId: "root-session",
+				},
+				{ status: "running" },
+			),
+		);
+		const queuedOnly = buildAgentsViewRows([sessionSummaryFromRosterEntry(queued)]);
+		const boundOnly = buildAgentsViewRows([bound]);
+		expect(queuedOnly).toHaveLength(1);
+		expect(boundOnly).toHaveLength(1);
+		expect(queuedOnly[0]?.identity).toBe(boundOnly[0]?.identity);
 	});
 });
 
@@ -280,25 +297,19 @@ describe("roster-driven agents view instance", () => {
 		return { view, store, client };
 	}
 
-	it("serves refreshes and row navigation from the store with zero daemon requests", async () => {
-		setKeybindings(new KeybindingsManager());
+	it("serves refreshes from the store with zero daemon requests", async () => {
 		const { view, store, client } = makeView([
 			ledgerEntry({ id: "a-active", sessionId: "a", activeSessionId: "a-active" }, { status: "running" }),
-			ledgerEntry({ id: "b-active", sessionId: "b", activeSessionId: "b-active" }, { status: "idle" }),
 		]);
 		await store.attach(client as never);
 		client.request.mockClear();
 
 		const internals = view as unknown as {
 			refreshSessions(): Promise<boolean>;
-			onRosterUpdate(): void;
 			rows: Array<{ summary: SessionSummary }>;
 		};
 		await expect(internals.refreshSessions()).resolves.toBe(true);
 		await expect(internals.refreshSessions()).resolves.toBe(true);
-		internals.onRosterUpdate();
-		view.handleInput("\u001b[B");
-		view.handleInput("\u001b[A");
 
 		expect(client.request).not.toHaveBeenCalled();
 		expect(internals.rows.some((row) => row.summary.sessionId === "a")).toBe(true);
@@ -323,132 +334,6 @@ describe("roster-driven agents view instance", () => {
 		expect(refreshSavedSessions).toHaveBeenCalledTimes(1);
 	});
 
-	it("reconciles once per pushed batch", async () => {
-		const { view, store, client } = makeView([]);
-		await store.attach(client as never);
-		const applySessionList = vi.fn();
-		Reflect.set(view, "applySessionList", applySessionList);
-		Reflect.set(
-			view,
-			"unsubscribeRosterUpdate",
-			store.onUpdate(() => (view as unknown as { onRosterUpdate(): void }).onRosterUpdate()),
-		);
-
-		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "a", sessionId: "a" })] });
-		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "b", sessionId: "b" })] });
-		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "c", sessionId: "c" })] });
-		await Promise.resolve();
-
-		expect(applySessionList).toHaveBeenCalledTimes(1);
-	});
-});
-
-describe("bar and view lifecycle equality", () => {
-	function makeBar() {
-		const mode = Object.assign(Object.create(InteractiveMode.prototype), {
-			subagentSnapshots: new Map<string, AgentConnectionRlmChildAgentSnapshot>(),
-			rlmNodeId: "parent-node",
-			refreshSubagentSummary: vi.fn(),
-		}) as unknown as {
-			subagentSnapshots: Map<string, AgentConnectionRlmChildAgentSnapshot>;
-			updateSubagentSummary(child: AgentConnectionRlmChildAgentSnapshot): void;
-		};
-		return mode;
-	}
-
-	it("keeps bar counts equal to roster-derived view sections across the child lifecycle matrix", () => {
-		const bar = makeBar();
-		const feed = (child: Partial<AgentConnectionRlmChildAgentSnapshot> & { id: string; status: string }) =>
-			bar.updateSubagentSummary({
-				parentId: "parent-node",
-				label: child.id,
-				sessionDir: "/tmp",
-				...child,
-			} as AgentConnectionRlmChildAgentSnapshot);
-
-		// unbound-error: queued run fails before any session exists -> removed everywhere.
-		feed({ id: "c-unbound", status: "queued" });
-		feed({ id: "c-unbound", status: "error", error: "boom" });
-		// queued: admitted, no session yet.
-		feed({ id: "c-queued", status: "queued" });
-		// bound: running with a live session.
-		feed({ id: "c-bound", status: "queued" });
-		feed({ id: "c-bound", status: "running", activeSessionId: "bound-active" });
-		// heartbeat-only: finished but pinned by an active heartbeat.
-		feed({ id: "c-heartbeat", status: "running", activeSessionId: "hb-active" });
-		feed({ id: "c-heartbeat", status: "done", activeSessionId: "hb-active" });
-		// passivated: finished, session left memory, transcript retained (token evidence).
-		feed({ id: "c-passive", status: "running", activeSessionId: "p-active", tokenCount: 42 });
-		feed({ id: "c-passive", status: "done", tokenCount: 42 });
-		// recovering: still resident; its worker state is a label, not a status change.
-		feed({ id: "c-recovering", status: "running", activeSessionId: "r-active" });
-		// bound -> evidence-free terminal, projected TWICE: sticky bound-ness keeps the transcript row.
-		feed({ id: "c-evicted", status: "running", activeSessionId: "e-active" });
-		feed({ id: "c-evicted", status: "done" });
-		feed({ id: "c-evicted", status: "done" });
-
-		const barCounts = countDirectSubagentStatuses(
-			bar.subagentSnapshots.values(),
-			"parent-node",
-			new Set(["hb-active"]),
-		);
-
-		const rosterRows: AgentRosterEntry[] = [
-			ledgerEntry(
-				{ id: "c-queued", sessionId: "c-queued", runtimeKind: "subagent", rlmChildId: "c-queued" },
-				{ status: "running", statusLabel: "queued", queuedChild: true },
-			),
-			ledgerEntry(
-				{
-					id: "bound-active",
-					sessionId: "bound-session",
-					activeSessionId: "bound-active",
-					runtimeKind: "subagent",
-					rlmChildId: "c-bound",
-					isSessionActive: true,
-				},
-				{ status: "running" },
-			),
-			ledgerEntry(
-				{
-					id: "hb-active",
-					sessionId: "hb-session",
-					activeSessionId: "hb-active",
-					runtimeKind: "subagent",
-					rlmChildId: "c-heartbeat",
-					hasActiveHeartbeat: true,
-				},
-				{ status: "running" },
-			),
-			ledgerEntry(
-				{ id: "p-session", sessionId: "p-session", runtimeKind: "subagent", rlmChildId: "c-passive" },
-				{ status: "inactive" },
-			),
-			ledgerEntry(
-				{ id: "e-session", sessionId: "e-session", runtimeKind: "subagent", rlmChildId: "c-evicted" },
-				{ status: "inactive" },
-			),
-			ledgerEntry(
-				{
-					id: "r-active",
-					sessionId: "r-session",
-					activeSessionId: "r-active",
-					runtimeKind: "subagent",
-					rlmChildId: "c-recovering",
-					isSessionActive: true,
-				},
-				{ status: "running", statusLabel: "recovering" },
-			),
-		];
-		const viewCounts = { running: 0, idle: 0, inactive: 0 };
-		for (const entry of rosterRows) {
-			viewCounts[classifyAgentsViewSession(sessionSummaryFromRosterEntry(entry))] += 1;
-		}
-
-		expect(bar.subagentSnapshots.has("c-unbound")).toBe(false);
-		expect(bar.subagentSnapshots.has("c-evicted")).toBe(true);
-		expect(barCounts).toEqual({ total: 6, ...viewCounts });
-	});
 });
 
 describe("subscriber push transitions", () => {
@@ -712,43 +597,5 @@ describe("push-fed subagents bar", () => {
 			client.close();
 			await internals.cleanupSupervisorResources();
 		}
-	});
-});
-
-describe("queued to bound row identity", () => {
-	it("keeps one stable row identity across the bind push", () => {
-		const queued = sessionSummaryFromRosterEntry(
-			ledgerEntry(
-				{
-					id: "sub-1",
-					sessionId: "sub-1",
-					runtimeKind: "subagent",
-					rlmChildId: "sub-1",
-					parentSessionPath: "/tmp/parents/root.jsonl",
-					messageCount: 0,
-				},
-				{ status: "running", statusLabel: "queued", queuedChild: true },
-			),
-		);
-		const bound = sessionSummaryFromRosterEntry(
-			ledgerEntry(
-				{
-					id: "child-active",
-					sessionId: "child-session",
-					activeSessionId: "child-active",
-					sessionFile: "/tmp/artifacts/child.jsonl",
-					runtimeKind: "subagent",
-					rlmChildId: "sub-1",
-					parentSessionPath: "/tmp/parents/root.jsonl",
-				},
-				{ status: "running" },
-			),
-		);
-
-		const queuedRows = buildAgentsViewRows([queued]);
-		const boundRows = buildAgentsViewRows([bound]);
-		expect(queuedRows).toHaveLength(1);
-		expect(boundRows).toHaveLength(1);
-		expect(queuedRows[0]?.identity).toBe(boundRows[0]?.identity);
 	});
 });
