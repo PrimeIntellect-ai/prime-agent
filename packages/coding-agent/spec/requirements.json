@@ -8,6 +8,7 @@
     "packages/coding-agent/src/cli/avo-dashboard.ts",
     "packages/coding-agent/src/core/agent-session.ts",
     "packages/coding-agent/src/core/avo",
+		"packages/coding-agent/src/core/tools/bash.ts",
     "packages/coding-agent/src/evals/spec-contract"
   ],
   "gateOrder": [
@@ -36,8 +37,13 @@
         "packages/coding-agent/src/core/agent-session.ts",
         "packages/coding-agent/src/core/avo/adapters.ts",
         "packages/coding-agent/src/core/avo/evaluator.ts",
+        "packages/coding-agent/src/core/avo/probe.ts",
         "packages/coding-agent/src/core/avo/spec-contract.ts",
         "packages/coding-agent/src/core/avo/store.ts",
+        "packages/coding-agent/src/core/avo/supervisor.ts",
+				"packages/coding-agent/src/core/avo/verification-environment.ts",
+        "packages/coding-agent/src/core/avo/workspace.ts",
+        "packages/coding-agent/src/core/tools/bash.ts",
         "packages/coding-agent/src/evals/spec-contract/runner.ts"
       ],
       "requiredGates": [
@@ -74,6 +80,14 @@
           "mechanism": "deterministic_unit_test",
           "path": "packages/coding-agent/test/avo-spec-contract.test.ts",
           "anchor": "[AUTH-001] accepts only public-key verification and rejects the retired shared-secret trust root"
+        },
+        {
+          "evidenceId": "AUTH-001:closed-verifier-unit",
+          "gate": "adversarial",
+          "state": "linked",
+          "mechanism": "adversarial_test",
+          "path": "packages/coding-agent/test/avo.test.ts",
+          "anchor": "[AUTH-001] binds helpers, configuration, plugins, and runner shadows into the verifier manifest"
         },
         {
           "evidenceId": "AUTH-001:host-session-integration",
@@ -423,7 +437,8 @@
       "sourcePaths": [
         "packages/coding-agent/src/core/agent-session.ts",
         "packages/coding-agent/src/core/avo/integrity.ts",
-        "packages/coding-agent/src/core/avo/workspace.ts"
+        "packages/coding-agent/src/core/avo/workspace.ts",
+        "packages/coding-agent/src/core/tools/bash.ts"
       ],
       "requiredGates": [
         "static",
@@ -457,7 +472,7 @@
           "state": "linked",
           "mechanism": "deterministic_integration_test",
           "path": "packages/coding-agent/test/suite/agent-session-avo.test.ts",
-          "anchor": "[STATE-001] rejects a coding test that mutates the evaluated workspace while it passes"
+          "anchor": "[STATE-001] denies a coding test that attempts to mutate the evaluated workspace"
         },
         {
           "evidenceId": "STATE-001:post-command-trace",
@@ -730,9 +745,12 @@
         "packages/coding-agent/spec/requirements.json",
         "packages/coding-agent/src/core/agent-session.ts",
         "packages/coding-agent/src/core/avo/index.ts",
+        "packages/coding-agent/src/core/avo/probe.ts",
         "packages/coding-agent/src/core/avo/spec-contract.ts",
+        "packages/coding-agent/src/core/avo/supervisor.ts",
         "packages/coding-agent/src/core/avo/types.ts",
         "packages/coding-agent/src/core/avo/workspace.ts",
+        "packages/coding-agent/src/core/tools/bash.ts",
         "packages/coding-agent/src/evals/spec-contract/runner.ts"
       ],
       "requiredGates": [

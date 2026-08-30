@@ -102,6 +102,13 @@ Never pass or request an environment override.
    during the task cannot certify itself alone: the exact trusted command must
    have run before the candidate and must explicitly target the same unchanged
    baseline tests afterward.
+	A passing pytest run is diagnostic rather than semantic authority when the
+	candidate changes Python code, because candidate code shares pytest's process
+	and can tamper with its result channel. Use an out-of-process verifier (for
+	example, an immutable Node test that launches the Python program as a child and
+	asserts its structured response) or an independently verified exact spec proof.
+	Pytest failures still provide useful negative evidence but cannot promote a
+	changed Python candidate.
    Deterministic arithmetic and artifact tasks do not use a generic command as
    proof: call `verify_deterministic_result(candidate_id)` so the host evaluates
    the expression from the active objective, or `verify_artifacts(candidate_id)`
@@ -301,7 +308,7 @@ await avo.initialize(
     "Fix the parser race without regressions",
 )
 await avo.run_coding_baseline(
-    "python -m pytest -q tests/test_parser_race.py",
+    "node --test tests/parser-race.test.cjs",
 )
 candidate = await avo.add_candidate({
     "candidate_id": "patch-parser-lock",
@@ -311,7 +318,7 @@ candidate = await avo.add_candidate({
 })
 await avo.run_evaluation(
     candidate["candidate"]["candidateId"],
-    "python -m pytest -q tests/test_parser_race.py",
+    "node --test tests/parser-race.test.cjs",
 )
 await avo.complete_cycle({"candidate_id": "patch-parser-lock"})
 await avo.stop_gate()

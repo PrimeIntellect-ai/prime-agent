@@ -11,6 +11,7 @@ import {
 	assertAvoSpecReceiptTrustConfiguration,
 	captureAvoSpecContractBaseline,
 	deriveAvoSpecRequirementImpacts,
+	deriveAvoSpecSemanticCoverage,
 	digestAvoSpecRequirement,
 	digestAvoSpecSources,
 	loadAndValidateAvoSpecContract,
@@ -62,7 +63,7 @@ function completeObservedContract(root: string): Record<string, unknown> {
 		const runtime = mechanism === "runtime_trace";
 		const review = mechanism === "independent_review";
 		const receipt: Record<string, unknown> = {
-			schemaVersion: 1,
+			schemaVersion: 2,
 			receiptId: `receipt-${index + 1}`,
 			...RECEIPT_BINDING,
 			requirementId,
@@ -127,6 +128,21 @@ function completeObservedContract(root: string): Record<string, unknown> {
 		writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
 	}
 	return contract;
+}
+
+function refreshFixtureReceipts(root: string, requirement: AvoSpecRequirementDefinition): Record<string, unknown> {
+	const receipts: Record<string, unknown> = {};
+	const sourceDigest = digestAvoSpecRequirement(root, requirement);
+	for (let index = 0; index < requirement.evidence.length; index += 1) {
+		const evidence = requirement.evidence[index]!;
+		const receiptPath = join(root, `evidence/receipts/receipt-${index + 1}.json`);
+		const receipt = JSON.parse(readFileSync(receiptPath, "utf8")) as Record<string, unknown>;
+		receipt.sourceDigest = sourceDigest;
+		receipt.signature = signAvoSpecReceipt(receipt, RECEIPT_KEY_PAIR.privateKey);
+		writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+		receipts[evidence.evidenceId] = receipt;
+	}
+	return receipts;
 }
 
 describe("AVO executable behavioral contract", () => {
@@ -292,7 +308,7 @@ describe("AVO executable behavioral contract", () => {
 		expect(selfReviewReport.valid).toBe(false);
 		expect(selfReviewReport.errors).toEqual(
 			expect.arrayContaining([
-				expect.stringContaining("review is not independent"),
+				expect.stringContaining("cannot issue independent_review evidence"),
 				expect.stringContaining("overstates verified but current evidence derives partial"),
 			]),
 		);
@@ -399,6 +415,85 @@ describe("AVO executable behavioral contract", () => {
 		expect(() => parseAvoSpecRunnerArgs(["--enforce"])).toThrow(/requires at least one --changed path/);
 	});
 
+	test("[SPEC-001] invalidates signed receipts when linked evidence content changes but its anchor remains", () => {
+		const root = fixtureRoot();
+		const contract = completeObservedContract(root);
+		writeFileSync(
+			join(root, "evidence/unit.test.ts"),
+			"[TEST-001] unit\nexport const weakenedAssertion = true;\n",
+			"utf8",
+		);
+
+		const report = validateAvoSpecContract(contract, root, {
+			receiptPublicKey: RECEIPT_PUBLIC_KEY,
+			receiptBinding: RECEIPT_BINDING,
+		});
+		expect(report.valid).toBe(false);
+		expect(report.summary.verified).toBe(0);
+		expect(report.errors).toEqual(expect.arrayContaining([expect.stringContaining("receipt is stale")]));
+	});
+
+	test("[SPEC-001] does not promote a prose-only planned declaration through an external receipt", () => {
+		const root = fixtureRoot();
+		const contract = completeObservedContract(root);
+		const requirement = (contract.requirements as AvoSpecRequirementDefinition[])[0]!;
+		requirement.declaredStatus = "partial";
+		for (const evidence of requirement.evidence) {
+			evidence.state = "linked";
+			delete evidence.receiptPath;
+		}
+		const planned = requirement.evidence.find((evidence) => evidence.gate === "integration")!;
+		planned.state = "planned";
+		planned.plan = "A future independent integration verifier must exercise this boundary.";
+		delete planned.path;
+		delete planned.anchor;
+		const receipts = refreshFixtureReceipts(root, requirement);
+
+		const report = validateAvoSpecContract(contract, root, {
+			receiptPublicKey: RECEIPT_PUBLIC_KEY,
+			receipts,
+			receiptBinding: RECEIPT_BINDING,
+		});
+		expect(report.valid).toBe(false);
+		expect(report.errors).toEqual(
+			expect.arrayContaining([expect.stringContaining("cannot be promoted by a receipt")]),
+		);
+		expect(report.summary).toEqual({ total: 1, unproven: 0, partial: 1, verified: 0 });
+		expect(report.requirements[0]).toMatchObject({
+			observedGates: expect.not.arrayContaining(["integration"]),
+			missingObservedGates: expect.arrayContaining(["integration"]),
+		});
+	});
+
+	test("[SPEC-001] permits heterogeneous six-gate proof colocated in three content-bound files", () => {
+		const root = fixtureRoot();
+		const contract = completeObservedContract(root);
+		const requirement = (contract.requirements as AvoSpecRequirementDefinition[])[0]!;
+		const proofPaths = ["evidence/proof-a.txt", "evidence/proof-b.txt", "evidence/proof-c.txt"];
+		const proofContents = new Map(proofPaths.map((path) => [path, [] as string[]]));
+		for (let index = 0; index < requirement.evidence.length; index += 1) {
+			const evidence = requirement.evidence[index]!;
+			const path = proofPaths[Math.floor(index / 2)]!;
+			const anchor = `[TEST-001] ${evidence.gate} proof`;
+			evidence.path = path;
+			evidence.anchor = anchor;
+			proofContents.get(path)!.push(anchor);
+		}
+		for (const [path, anchors] of proofContents) {
+			writeFileSync(join(root, path), `${anchors.join("\n")}\n`, "utf8");
+		}
+		refreshFixtureReceipts(root, requirement);
+
+		const report = validateAvoSpecContract(contract, root, {
+			receiptPublicKey: RECEIPT_PUBLIC_KEY,
+			receiptBinding: RECEIPT_BINDING,
+		});
+		expect(new Set(requirement.evidence.map((evidence) => evidence.mechanism)).size).toBeGreaterThanOrEqual(5);
+		expect(new Set(requirement.evidence.map((evidence) => evidence.path)).size).toBe(3);
+		expect(report.errors).toEqual([]);
+		expect(report.summary).toEqual({ total: 1, unproven: 0, partial: 0, verified: 1 });
+	});
+
 	test("maps changed protected files to requirements and exposes unmapped implementation paths", () => {
 		const contract = JSON.parse(
 			readFileSync(join(REPOSITORY_ROOT, "packages/coding-agent/spec/requirements.json"), "utf8"),
@@ -417,5 +512,90 @@ describe("AVO executable behavioral contract", () => {
 		expect(deriveAvoSpecRequirementImpacts(contract, ["../escaped.ts"]).errors).toEqual([
 			"unsafe changed path: ../escaped.ts",
 		]);
+	});
+
+	test("[SPEC-001] covers Python semantics only when every path is protected and exactly mapped", () => {
+		const root = fixtureRoot();
+		const contract = completeObservedContract(root);
+		contract.protectedRoots = ["src"];
+		const requirement = (contract.requirements as AvoSpecRequirementDefinition[])[0]!;
+		requirement.sourcePaths = ["src/mapped.py"];
+
+		expect(deriveAvoSpecSemanticCoverage(contract, ["outside.py"])).toMatchObject({
+			affectedRequirementIds: [],
+			coveredPaths: [],
+			uncoveredPaths: ["outside.py"],
+			errors: [],
+		});
+		expect(deriveAvoSpecSemanticCoverage(contract, ["src/unmapped.py"])).toMatchObject({
+			affectedRequirementIds: [],
+			coveredPaths: [],
+			uncoveredPaths: ["src/unmapped.py"],
+			errors: [],
+		});
+		expect(deriveAvoSpecSemanticCoverage(contract, ["src/mapped.py"])).toMatchObject({
+			affectedRequirementIds: ["TEST-001"],
+			coveredPaths: ["src/mapped.py"],
+			uncoveredPaths: [],
+			errors: [],
+		});
+		expect(deriveAvoSpecSemanticCoverage(contract, ["outside.py", "src/mapped.py"])).toMatchObject({
+			affectedRequirementIds: ["TEST-001"],
+			coveredPaths: ["src/mapped.py"],
+			uncoveredPaths: ["outside.py"],
+			errors: [],
+		});
+	});
+
+	test("[SPEC-001] fails the live gate for the exact uncovered Python path in a mixed change", () => {
+		const root = fixtureRoot();
+		mkdirSync(join(root, "spec"), { recursive: true });
+		mkdirSync(join(root, "src"), { recursive: true });
+		writeFileSync(join(root, "src/mapped.py"), "VALUE = 1\n", "utf8");
+		writeFileSync(join(root, "outside.py"), "VALUE = 1\n", "utf8");
+		const contract = completeObservedContract(root);
+		contract.protectedRoots = ["src"];
+		const requirement = (contract.requirements as AvoSpecRequirementDefinition[])[0]!;
+		requirement.sourcePaths = ["src/mapped.py"];
+		requirement.declaredStatus = "partial";
+		for (const evidence of requirement.evidence) {
+			evidence.state = "linked";
+			delete evidence.receiptPath;
+		}
+		writeFileSync(join(root, "spec/requirements.json"), `${JSON.stringify(contract, null, 2)}\n`, "utf8");
+
+		const baseline = captureAvoCodingVerificationBaseline(root, "Improve the mapped Python behavior");
+		baseline.specContract = captureAvoSpecContractBaseline(root, baseline.capturedAt);
+		const store = new AvoStore(undefined, "mixed-python-spec-session", () => "2026-08-30T00:00:00.000Z", root);
+		store.initialize("Improve the mapped Python behavior");
+		store.setEnvironment("coding");
+		store.setVerificationBaseline(baseline);
+		writeFileSync(join(root, "src/mapped.py"), "VALUE = 2\n", "utf8");
+		writeFileSync(join(root, "outside.py"), "VALUE = 2\n", "utf8");
+
+		const gate = applyAvoSpecContractStopGate(
+			store.getState(),
+			{ passed: true, checks: [], reasons: [] },
+			{ cwd: root },
+		);
+		expect(gate.passed).toBe(false);
+		expect(gate.checks).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					id: expect.stringMatching(/^spec_uncovered_python:/),
+					passed: false,
+					reason:
+						"changed Python path is outside the protected contract or is not mapped to an executable invariant: outside.py",
+				}),
+			]),
+		);
+		expect(gate.checks).not.toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					id: expect.stringMatching(/^spec_uncovered_python:/),
+					reason: expect.stringContaining("src/mapped.py"),
+				}),
+			]),
+		);
 	});
 });

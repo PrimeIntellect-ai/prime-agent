@@ -23,6 +23,7 @@ import {
 	assessAvoTestTrust,
 	CodingAvoAdapter,
 	captureAvoCodingVerificationBaseline,
+	captureAvoVerificationHarnessManifest,
 	captureAvoWorkspaceSnapshot,
 	classifyAvoHostEvaluationCommand,
 	combineAvoClaimEvidenceAssessments,
@@ -33,16 +34,19 @@ import {
 	deriveAvoExperimentCumulativeAlpha,
 	deriveAvoExperimentOutcome,
 	deriveAvoObligationCoverage,
+	deriveAvoObservedTestIdentities,
 	deriveAvoProgressWatchdogSnapshot,
 	deriveAvoWorkspaceImpactPaths,
 	digestAvoDeliveryText,
 	digestAvoExperimentSelectionBinding,
 	digestAvoExperimentValue,
+	digestAvoPythonProbeApplicability,
 	GeneralAvoAdapter,
 	inferAvoEnvironment,
 	inferAvoHorizon,
 	inferAvoOnlineEvidencePolicy,
 	inferAvoVerificationPolicy,
+	isAuthoritativeAvoEvaluation,
 	normalizeAvoExperimentPlan,
 	parseAvoClaimVerifierMessage,
 	parseAvoExperimentInput,
@@ -54,6 +58,7 @@ import {
 	parseAvoSupervisorMessage,
 	parseAvoTrialMetricsOutput,
 	ResearchAvoAdapter,
+	sanitizeAvoVerificationEnvironment,
 	shouldActivateAvoSupervisor,
 } from "../src/core/avo/index.js";
 
@@ -544,6 +549,27 @@ describe("generic AVO core", () => {
 			"README.md",
 			"src/parser.ts",
 		]);
+	});
+
+	test("retains protected impact when a candidate commits its changes and leaves a clean workspace", () => {
+		const project = artifactDir();
+		mkdirSync(join(project, "src"), { recursive: true });
+		writeFileSync(join(project, "src", "parser.ts"), "export const parse = () => 1;\n", "utf8");
+		execFileSync("git", ["init", "-q"], { cwd: project });
+		execFileSync("git", ["config", "user.email", "avo@example.test"], { cwd: project });
+		execFileSync("git", ["config", "user.name", "AVO Test"], { cwd: project });
+		execFileSync("git", ["add", "src/parser.ts"], { cwd: project });
+		execFileSync("git", ["commit", "-qm", "baseline"], { cwd: project });
+
+		const baseline = captureAvoCodingVerificationBaseline(project, "Fix the parser");
+		writeFileSync(join(project, "src", "parser.ts"), "export const parse = () => 2;\n", "utf8");
+		execFileSync("git", ["add", "src/parser.ts"], { cwd: project });
+		execFileSync("git", ["commit", "-qm", "candidate"], { cwd: project });
+
+		const candidate = captureAvoWorkspaceSnapshot(project);
+		expect(candidate.changedPaths).toEqual([]);
+		expect(candidate.head).not.toBe(baseline.workspaceHead);
+		expect(deriveAvoWorkspaceImpactPaths(baseline, candidate)).toEqual(["src/parser.ts"]);
 	});
 
 	test("fails closed on ambiguous experiment plans and undeclared trial metrics", () => {
@@ -2995,16 +3021,20 @@ describe("generic AVO core", () => {
 	});
 
 	test("separates model-authored coding claims from host-observed evidence in verified memories", () => {
-		const runtime = new AvoSessionRuntime(undefined, "run-coding-epistemic-memory", clock());
+		const project = artifactDir();
+		writeFileSync(join(project, "parser.ts"), "export const parse = (value: string) => value;\n", "utf8");
+		const workspace = captureAvoWorkspaceSnapshot(project);
+		const runtime = new AvoSessionRuntime(undefined, "run-coding-epistemic-memory", clock(), project);
 		runtime.configure({ environment: "coding", horizon: "direct", source: "user" });
 		runtime.store.initialize("Fix the JSON parser");
 		const candidate = runtime.recordCandidate({
 			kind: "patch",
 			summary: "Implemented full RFC support with no remaining edge cases",
 			payload: { diff: "sha256:json-parser" },
-			workspaceDigest: "e".repeat(64),
-			workspaceHead: "head-json-parser",
-			workspaceMode: "git",
+			workspaceDigest: workspace.digest,
+			workspaceHead: workspace.head,
+			workspaceMode: workspace.mode,
+			workspaceChangedPaths: ["parser.ts"],
 		});
 		runtime.recordHostEvaluation({
 			candidateId: candidate.candidateId,
@@ -3032,6 +3062,51 @@ describe("generic AVO core", () => {
 		}
 		expect(cycleMemory.content).toContain("Observed host evaluations: test=pass");
 		expect(taskMemory.content).toContain("Verification contract: coding/required");
+	});
+
+	test("[ID-001] direct runtime completion rechecks the live coding workspace", () => {
+		const project = artifactDir();
+		writeFileSync(join(project, "parser.ts"), "export const value = 1;\n", "utf8");
+		const workspace = captureAvoWorkspaceSnapshot(project);
+		const runtime = new AvoSessionRuntime(undefined, "run-runtime-live-integrity", clock(), project);
+		runtime.configure({ environment: "coding", horizon: "direct", source: "user" });
+		runtime.store.initialize("Fix parser.ts and verify the live result");
+		const candidate = runtime.recordCandidate({
+			kind: "implementation",
+			summary: "Verified parser value one",
+			payload: { value: 1 },
+			workspaceDigest: workspace.digest,
+			workspaceHead: workspace.head,
+			workspaceMode: workspace.mode,
+			workspaceChangedPaths: ["parser.ts"],
+		});
+		runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "test",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:test:runtime-live-integrity"],
+			metrics: {
+				meaningful: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		runtime.completeCycle({ candidateId: candidate.candidateId });
+		writeFileSync(join(project, "parser.ts"), "export const value = 2;\n", "utf8");
+
+		const gate = runtime.evaluateStopGate();
+		expect(gate).toMatchObject({ passed: false });
+		expect(gate.reasons).toContain("no accepted cycle currently satisfies the verification contract");
+		expect(() => runtime.complete()).toThrow(/AVO completion is blocked/);
+		expect(runtime.getState().evaluations).toContainEqual(
+			expect.objectContaining({
+				candidateId: candidate.candidateId,
+				evaluatorId: "candidate_integrity",
+				status: "revise",
+				issuedBy: "host",
+			}),
+		);
 	});
 
 	test("keeps repeated accepted cycles distinct until each task delivers canonically", () => {
@@ -3369,15 +3444,349 @@ describe("generic AVO core", () => {
 		const pendingGate = runtime.evaluateStopGate();
 		expect(pendingGate.passed).toBe(false);
 		expect(pendingGate.checks).toContainEqual(expect.objectContaining({ id: "trajectory_verifier", passed: false }));
-		runtime.store.recordSupervision({
+		const watch = runtime.store.recordSupervision({
 			cycleId: result.cycle.cycleId,
-			status: "progressing",
-			reason: "The evidence changed and the candidate passed an external check.",
+			attemptIndex: 0,
+			inputDigest: "a".repeat(64),
+			status: "watch",
+			reason: "The verifier is temporarily unavailable.",
 			detectedPatterns: [],
 			recommendedActions: [],
 			source: "retained_supervisor",
 		});
+		expect(runtime.evaluateStopGate().passed).toBe(false);
+		runtime.store.recordSupervision({
+			cycleId: result.cycle.cycleId,
+			attemptIndex: 1,
+			inputDigest: "b".repeat(64),
+			supersedesReviewId: watch.reviewId,
+			status: "progressing",
+			reason: "The recovered verifier cleared the candidate.",
+			detectedPatterns: [],
+			recommendedActions: [],
+			source: "retained_supervisor",
+		});
+		expect(runtime.getState().supervision).toHaveLength(2);
 		expect(runtime.evaluateStopGate().passed).toBe(true);
+	});
+
+	test("blocks a progressing Python review until the canonical cycle has a passing host probe", () => {
+		const project = artifactDir();
+		mkdirSync(join(project, "tests"));
+		writeFileSync(join(project, "api.py"), "def match(pattern, text): return False\n", "utf8");
+		writeFileSync(join(project, "tests", "test_api.py"), "def test_match(): assert True\n", "utf8");
+		const baselineWorkspace = captureAvoWorkspaceSnapshot(project);
+		const runtime = new AvoSessionRuntime(undefined, "run-python-probe-gate", clock(), project);
+		runtime.configure({ environment: "coding", horizon: "long", source: "user" });
+		runtime.store.initialize("Implement and test api.py match(pattern, text)");
+		runtime.store.setVerificationBaseline({
+			kind: "coding",
+			contractDigest: "5".repeat(64),
+			workspaceDigest: baselineWorkspace.digest,
+			workspaceMode: baselineWorkspace.mode,
+			workspaceHead: baselineWorkspace.head,
+			testFiles: [{ path: "tests/test_api.py", sha256: "4".repeat(64) }],
+			userAcceptanceCommands: [],
+			executions: [],
+			capturedAt: "2026-08-26T00:00:00.000Z",
+		});
+		const assumptions = runtime.registerCriticalAssumptions([
+			{
+				assumptionId: "match-empty-input",
+				statement: "match handles empty input without false positives",
+				falsificationPlan: "Run a direct empty-pattern and empty-text regression",
+				requiredEvidence: ["test"],
+			},
+			{
+				assumptionId: "match-boundary-input",
+				statement: "match preserves start and end boundary semantics",
+				falsificationPlan: "Run a direct regression matrix over start and end anchors",
+				requiredEvidence: ["test"],
+			},
+		]);
+		writeFileSync(join(project, "api.py"), "def match(pattern, text): return pattern in text\n", "utf8");
+		const candidateWorkspace = captureAvoWorkspaceSnapshot(project);
+		const candidate = runtime.recordCandidate({
+			kind: "implementation",
+			summary: "Implement match",
+			payload: { change: "match" },
+			workspaceDigest: candidateWorkspace.digest,
+			workspaceHead: candidateWorkspace.head,
+			workspaceMode: candidateWorkspace.mode,
+			workspaceChangedPaths: ["api.py"],
+			pythonProbeBundleDigest: "8".repeat(64),
+		});
+		const testEvaluation = runtime.recordHostEvaluation({
+			evaluationId: "evaluation-match-empty",
+			candidateId: candidate.candidateId,
+			evaluatorId: "test",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:test:api"],
+			metrics: {
+				meaningful: true,
+				baseline_execution_matched: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		const boundaryEvaluation = runtime.recordHostEvaluation({
+			evaluationId: "evaluation-match-boundary",
+			candidateId: candidate.candidateId,
+			evaluatorId: "test",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:test:api-boundary"],
+			metrics: {
+				meaningful: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		runtime.recordHostEvaluation({
+			evaluationId: "evaluation-match-build",
+			candidateId: candidate.candidateId,
+			evaluatorId: "build",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:build:api"],
+			metrics: {
+				meaningful: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		for (const [index, assumption] of assumptions.entries()) {
+			runtime.resolveCriticalAssumption({
+				assumptionId: assumption.assumptionId,
+				candidateId: candidate.candidateId,
+				evaluationIds: [index === 0 ? testEvaluation.evaluationId : boundaryEvaluation.evaluationId],
+			});
+		}
+		const derivedBeforeCycle = new CodingAvoAdapter().deriveEvaluationState(
+			candidate,
+			runtime.getState().evaluations.filter((receipt) => receipt.candidateId === candidate.candidateId),
+			runtime.getState(),
+		);
+		expect(derivedBeforeCycle.canonical, JSON.stringify(derivedBeforeCycle)).toBe(true);
+		const cycle = runtime.completeCycle({ candidateId: candidate.candidateId }).cycle;
+		expect(cycle.outcome, JSON.stringify(runtime.getState())).toBe("accepted");
+		runtime.store.recordSupervision({
+			cycleId: cycle.cycleId,
+			status: "progressing",
+			reason: "The semantic review found no defect.",
+			detectedPatterns: [],
+			recommendedActions: [],
+			source: "retained_supervisor",
+		});
+		const contractDigest = digestAvoPythonProbeApplicability(runtime.getState(), candidate);
+		const probeMetrics = {
+			meaningful: false,
+			probe_execution_observed: true,
+			probe_oracle_source: "retained_supervisor",
+			probe_semantic_authority: false,
+			probe_adequacy_policy: "host_signature_contrast_model_oracle_v4",
+			supervisor_cycle_id: cycle.cycleId,
+			probe_contract_digest: contractDigest,
+			probe_contract_registered: true,
+			workspace_matches_candidate: true,
+			candidate_payload_digest: candidate.payloadDigest,
+			candidate_workspace_digest: candidate.workspaceDigest!,
+			candidate_python_bundle_digest: candidate.pythonProbeBundleDigest!,
+		};
+		// A receipt cannot be made prospective by predicting the future contract ID.
+		runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "adversarial_probe",
+			status: "pass",
+			authority: "environment",
+			evidenceRefs: ["host:probe:precontract"],
+			metrics: {
+				...probeMetrics,
+				probe_contract_evaluation_id: "evaluation-probe-contract-current",
+			},
+		});
+		const contractReceipt = runtime.recordHostEvaluation({
+			evaluationId: "evaluation-probe-contract-current",
+			candidateId: candidate.candidateId,
+			evaluatorId: "adversarial_probe_contract",
+			status: "inconclusive",
+			authority: "environment",
+			evidenceRefs: ["host:probe-contract"],
+			metrics: {
+				meaningful: false,
+				probe_required: true,
+				probe_surface_supported: true,
+				probe_contract_digest: contractDigest,
+				candidate_payload_digest: candidate.payloadDigest,
+				candidate_workspace_digest: candidate.workspaceDigest!,
+				candidate_python_bundle_digest: candidate.pythonProbeBundleDigest!,
+				workspace_matches_candidate: true,
+				python_bundle_matches_candidate: true,
+			},
+		});
+		const derivedAfterContract = new CodingAvoAdapter().deriveEvaluationState(
+			candidate,
+			runtime.getState().evaluations.filter((receipt) => receipt.candidateId === candidate.candidateId),
+			runtime.getState(),
+		);
+		expect(derivedAfterContract.canonical, JSON.stringify(derivedAfterContract)).toBe(true);
+		const blocked = runtime.evaluateStopGate();
+		expect(blocked.passed).toBe(false);
+		expect(blocked.checks).toContainEqual(
+			expect.objectContaining({ id: "adversarial_probe_execution", passed: false }),
+		);
+		runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "adversarial_probe",
+			status: "pass",
+			authority: "environment",
+			evidenceRefs: ["host:probe:legacy-policy"],
+			metrics: {
+				...probeMetrics,
+				probe_adequacy_policy: "host_signature_contrast_v2",
+				probe_contract_evaluation_id: contractReceipt.evaluationId,
+			},
+		});
+		expect(runtime.evaluateStopGate().checks).toContainEqual(
+			expect.objectContaining({ id: "adversarial_probe_execution", passed: false }),
+		);
+		runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "adversarial_probe",
+			status: "pass",
+			authority: "environment",
+			evidenceRefs: ["host:probe:wrong-contract"],
+			metrics: { ...probeMetrics, probe_contract_evaluation_id: "evaluation-probe-contract-wrong" },
+		});
+		expect(runtime.evaluateStopGate().checks).toContainEqual(
+			expect.objectContaining({ id: "adversarial_probe_execution", passed: false }),
+		);
+
+		runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "adversarial_probe",
+			status: "pass",
+			authority: "model_opinion",
+			evidenceRefs: ["host:probe:api"],
+			metrics: {
+				...probeMetrics,
+				probe_contract_evaluation_id: contractReceipt.evaluationId,
+			},
+		});
+		expect(runtime.evaluateStopGate()).toMatchObject({
+			passed: true,
+			checks: expect.arrayContaining([expect.objectContaining({ id: "adversarial_probe_execution", passed: true })]),
+		});
+		runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "adversarial_probe",
+			status: "inconclusive",
+			authority: "model_opinion",
+			evidenceRefs: ["host:probe:later-counterexample"],
+			metrics: {
+				...probeMetrics,
+				probe_contract_evaluation_id: contractReceipt.evaluationId,
+			},
+		});
+		expect(runtime.evaluateStopGate()).toMatchObject({
+			passed: false,
+			checks: expect.arrayContaining([
+				expect.objectContaining({ id: "adversarial_probe_execution", passed: false }),
+			]),
+		});
+	});
+
+	test("does not treat a matching supervisor oracle as semantic proof for Python code", () => {
+		const runtime = new AvoSessionRuntime(undefined, "run-python-model-oracle", clock());
+		runtime.configure({ environment: "coding", horizon: "iterative", source: "user" });
+		runtime.store.initialize("Implement api.py add(left, right) correctly and verify it");
+		runtime.store.setVerificationBaseline({
+			kind: "coding",
+			contractDigest: "1".repeat(64),
+			workspaceDigest: "2".repeat(64),
+			workspaceMode: "git",
+			workspaceHead: "head-before-wrong-python",
+			testFiles: [],
+			userAcceptanceCommands: [],
+			executions: [],
+			capturedAt: "2026-08-26T00:00:00.000Z",
+		});
+		const candidate = runtime.recordCandidate({
+			kind: "implementation",
+			summary: "Implement add using subtraction",
+			payload: { change: "return left - right" },
+			workspaceDigest: "3".repeat(64),
+			workspaceHead: "head-wrong-python",
+			workspaceMode: "git",
+			workspaceChangedPaths: ["api.py"],
+			pythonProbeBundleDigest: "4".repeat(64),
+		});
+		runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "build",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:build:wrong-python"],
+			metrics: {
+				meaningful: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "test",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:test:candidate-authored-self-test"],
+			metrics: {
+				meaningful: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		const modelOracle = runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "adversarial_probe",
+			status: "pass",
+			authority: "model_opinion",
+			evidenceRefs: ["host:probe:matching-subtraction-oracle"],
+			metrics: {
+				meaningful: false,
+				probe_execution_observed: true,
+				probe_oracle_source: "retained_supervisor",
+				probe_semantic_authority: false,
+				probe_adequacy_policy: "host_signature_contrast_model_oracle_v4",
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		expect(isAuthoritativeAvoEvaluation(modelOracle)).toBe(false);
+		const adapter = new CodingAvoAdapter();
+		const blocked = adapter.deriveEvaluationState(candidate, runtime.getState().evaluations, runtime.getState());
+		expect(blocked).toMatchObject({
+			canonical: false,
+			status: "inconclusive",
+			reasons: expect.arrayContaining([expect.stringContaining("supervisor-written probe expectations")]),
+		});
+
+		runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "test",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:test:immutable-acceptance"],
+			metrics: {
+				meaningful: true,
+				baseline_execution_matched: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		expect(
+			adapter.deriveEvaluationState(candidate, runtime.getState().evaluations, runtime.getState()).canonical,
+		).toBe(true);
 	});
 
 	test("binds long-horizon supervision to the currently canonical accepted cycle", () => {
@@ -3502,7 +3911,7 @@ describe("generic AVO core", () => {
 		const migratedStore = new AvoStore(dir, "legacy-session", clock());
 		const migrated = migratedStore.getState();
 		expect(migrated).toMatchObject({
-			schemaVersion: 9,
+			schemaVersion: 13,
 			sessionId: "legacy-session",
 			runId: "legacy-session:task-1",
 			objective: "Legacy objective",
@@ -3539,7 +3948,403 @@ describe("generic AVO core", () => {
 		delete previous.trials;
 		writeFileSync(statePath, JSON.stringify(previous), "utf8");
 		const migrated = new AvoStore(dir, "v6-session", clock()).getState();
-		expect(migrated).toMatchObject({ schemaVersion: 9, experiments: [], trials: [] });
+		expect(migrated).toMatchObject({ schemaVersion: 13, experiments: [], trials: [] });
+	});
+
+	test.each([8, 9, 10, 11, 12] as const)(
+		"migrates v%s Python sessions into a fresh policy-v4 verification path",
+		(version) => {
+			const dir = artifactDir();
+			const statePath = join(dir, "avo", "state.json");
+			const runtime = new AvoSessionRuntime(dir, `v${version}-python-session`, clock());
+			runtime.configure({ environment: "coding", horizon: "iterative", source: "user" });
+			runtime.store.initialize("Fix and verify api.py evaluate(left, right)");
+			runtime.store.setVerificationBaseline({
+				kind: "coding",
+				contractDigest: "c".repeat(64),
+				workspaceDigest: "d".repeat(64),
+				workspaceMode: "git",
+				workspaceHead: "legacy-baseline",
+				testFiles: [{ path: "tests/test_api.py", sha256: "e".repeat(64) }],
+				userAcceptanceCommands: [],
+				executions: [],
+				capturedAt: "2026-08-26T00:00:00.000Z",
+			});
+			const candidate = runtime.recordCandidate({
+				kind: "implementation",
+				summary: "Legacy Python candidate",
+				payload: { module: "api.py" },
+				workspaceDigest: "a".repeat(64),
+				workspaceMode: "git",
+				workspaceHead: "legacy-head",
+				workspaceChangedPaths: ["api.py"],
+				pythonProbeBundleDigest: "b".repeat(64),
+			});
+			runtime.recordHostEvaluation({
+				candidateId: candidate.candidateId,
+				evaluatorId: "test",
+				status: "pass",
+				authority: "host",
+				evidenceRefs: ["host:test:legacy-python"],
+				metrics: {
+					meaningful: true,
+					baseline_execution_matched: true,
+					workspace_matches_candidate: true,
+					candidate_payload_digest: candidate.payloadDigest,
+				},
+			});
+			const cycle = runtime.completeCycle({ candidateId: candidate.candidateId }).cycle;
+			runtime.store.recordSupervision({
+				cycleId: cycle.cycleId,
+				status: "progressing",
+				reason: "Legacy verifier cleared the candidate.",
+				detectedPatterns: [],
+				recommendedActions: [],
+				source: "retained_supervisor",
+			});
+			runtime.recordHostEvaluation({
+				candidateId: candidate.candidateId,
+				evaluatorId: "adversarial_probe",
+				status: "pass",
+				authority: "environment",
+				evidenceRefs: ["host:probe:legacy-v2"],
+				metrics: { meaningful: true, probe_adequacy_policy: "host_signature_contrast_v2" },
+			});
+			const previous = structuredClone(runtime.getState()) as unknown as Record<string, unknown>;
+			previous.schemaVersion = version;
+			previous.status = "completed";
+			(previous.cycles as Array<{ cycleId: string; outcome: string }>).find(
+				(item) => item.cycleId === cycle.cycleId,
+			)!.outcome = "accepted";
+			(previous.verificationBaseline as { executions: unknown[] }).executions = [
+				{
+					executionId: "legacy-baseline-without-test-identities",
+					command: "python3 -m pytest -vv tests/test_api.py",
+					commandDigest: "1".repeat(64),
+					outputDigest: "2".repeat(64),
+					workspaceDigest: "d".repeat(64),
+					postWorkspaceDigest: "d".repeat(64),
+					status: "pass",
+					meaningful: true,
+					observedWorkUnits: 1,
+					observedPassedWorkUnits: 1,
+					observedBaselineTestFiles: ["tests/test_api.py"],
+					testTrustBasis: "baseline_target",
+					recordedAt: "2026-08-26T00:00:00.000Z",
+				},
+			];
+			writeFileSync(statePath, JSON.stringify(previous), "utf8");
+
+			const migrated = new AvoStore(dir, `v${version}-python-session`, clock()).getState();
+			expect(migrated.schemaVersion).toBe(13);
+			expect(migrated.status).toBe("active");
+			expect(migrated.verificationBaseline?.executions).toEqual([]);
+			expect(migrated.evaluations.find((item) => item.evaluatorId === "adversarial_probe")?.issuedBy).toBe(
+				"legacy_unverified",
+			);
+			expect(migrated.supervision.at(-1)).toMatchObject({
+				cycleId: cycle.cycleId,
+				status: "watch",
+				detectedPatterns: expect.arrayContaining(["python_probe_policy_upgrade"]),
+			});
+			expect(migrated.memories.find((memory) => memory.sourceIds.includes(cycle.cycleId))).toMatchObject({
+				verificationState: "contested",
+				tags: expect.arrayContaining(["python-probe-policy-v4-migration"]),
+			});
+			if (version === 12) {
+				const reopened = new AvoStore(dir, `v${version}-python-session`, clock()).getState();
+				expect(reopened.memories.find((memory) => memory.sourceIds.includes(cycle.cycleId))).toMatchObject({
+					verificationState: "contested",
+				});
+			}
+		},
+	);
+
+	test.each([11, 12])(
+		"[AUTH-001] reopens and contests v%s coding authority that lacks a verification-harness binding",
+		(version) => {
+			const dir = artifactDir();
+			const agentDir = artifactDir();
+			const statePath = join(dir, "avo", "state.json");
+			const runId = `v${version}-unsafe-test-harness`;
+			const memoryId = `episode:task:${runId}`;
+			const runtime = new AvoSessionRuntime(dir, runId, clock(), process.cwd(), agentDir);
+			runtime.configure({ environment: "coding", horizon: "iterative", source: "user" });
+			runtime.store.initialize("Fix and verify api.ts evaluate(left, right)");
+			runtime.store.setVerificationBaseline({
+				kind: "coding",
+				contractDigest: "1".repeat(64),
+				workspaceDigest: "2".repeat(64),
+				workspaceMode: "git",
+				workspaceHead: "legacy-baseline",
+				testFiles: [{ path: "tests/api.test.ts", sha256: "3".repeat(64) }],
+				userAcceptanceCommands: [],
+				executions: [],
+				capturedAt: "2026-08-26T00:00:00.000Z",
+			});
+			const candidate = runtime.recordCandidate({
+				kind: "implementation",
+				summary: "Legacy TypeScript implementation",
+				payload: { module: "api.ts" },
+				workspaceDigest: "4".repeat(64),
+				workspaceMode: "git",
+				workspaceHead: "legacy-candidate",
+				workspaceChangedPaths: ["api.ts"],
+			});
+			const testReceipt = runtime.recordHostEvaluation({
+				candidateId: candidate.candidateId,
+				evaluatorId: "test",
+				status: "pass",
+				authority: "host",
+				evidenceRefs: ["host:test:legacy-unbound-harness"],
+				metrics: {
+					meaningful: true,
+					baseline_execution_matched: true,
+					workspace_matches_candidate: true,
+					candidate_payload_digest: candidate.payloadDigest,
+				},
+			});
+			const cycle = runtime.completeCycle({ candidateId: candidate.candidateId }).cycle;
+			runtime.store.rememberVerified({
+				memoryId,
+				namespace: "coding",
+				type: "episode",
+				scope: "project",
+				title: "Legacy accepted coding result",
+				content: "The TypeScript candidate was accepted using the old unbound test harness.",
+				importance: 8,
+			});
+
+			const previous = structuredClone(runtime.getState()) as unknown as Record<string, unknown>;
+			previous.schemaVersion = version;
+			previous.status = "completed";
+			(previous.cycles as Array<{ cycleId: string; outcome: string }>).find(
+				(item) => item.cycleId === cycle.cycleId,
+			)!.outcome = "accepted";
+			(previous.verificationBaseline as { executions: unknown[] }).executions = [
+				{
+					executionId: "baseline-legacy-unbound-harness",
+					command: "node --test tests/api.test.ts",
+					commandDigest: "6".repeat(64),
+					outputDigest: "7".repeat(64),
+					workspaceDigest: "2".repeat(64),
+					postWorkspaceDigest: "2".repeat(64),
+					status: "pass",
+					meaningful: true,
+					observedWorkUnits: 1,
+					observedPassedWorkUnits: 1,
+					observedBaselineTestFiles: ["tests/api.test.ts"],
+					testTrustBasis: "baseline_target",
+					recordedAt: "2026-08-26T00:00:01.000Z",
+				},
+			];
+			writeFileSync(statePath, JSON.stringify(previous), "utf8");
+
+			const migrated = new AvoStore(dir, runId, clock(), process.cwd(), join(agentDir, "memory")).getState();
+			expect(migrated).toMatchObject({ schemaVersion: 13, status: "active" });
+			expect(migrated.verificationBaseline?.executions).toEqual([]);
+			expect(
+				migrated.evaluations.find((receipt) => receipt.evaluationId === testReceipt.evaluationId),
+			).toMatchObject({
+				issuedBy: "legacy_unverified",
+			});
+			expect(migrated.memories).toContainEqual(
+				expect.objectContaining({
+					memoryId,
+					verificationState: "contested",
+					tags: expect.arrayContaining(["verification-harness-policy-v1-migration"]),
+				}),
+			);
+			const reopened = new AvoStore(dir, runId, clock(), process.cwd(), join(agentDir, "memory")).getState();
+			expect(reopened.memories).toContainEqual(
+				expect.objectContaining({
+					memoryId,
+					verificationState: "contested",
+				}),
+			);
+		},
+	);
+
+	test("[AUTH-001] contests torn-active v11 memory and ignores a forged harness digest", () => {
+		const dir = artifactDir();
+		const agentDir = artifactDir();
+		const memoryRoot = join(agentDir, "memory");
+		const statePath = join(dir, "avo", "state.json");
+		const runtime = new AvoSessionRuntime(dir, "v11-torn-active-harness", clock(), process.cwd(), agentDir);
+		runtime.configure({ environment: "coding", horizon: "iterative", source: "user" });
+		runtime.store.initialize("Fix and verify api.ts");
+		const candidate = runtime.recordCandidate({
+			kind: "implementation",
+			summary: "Torn active TypeScript candidate",
+			payload: { module: "api.ts" },
+			workspaceDigest: "1".repeat(64),
+			workspaceMode: "git",
+			workspaceHead: "legacy-candidate",
+			workspaceChangedPaths: ["api.ts"],
+		});
+		const receipt = runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "test",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:test:torn-active"],
+			metrics: {
+				meaningful: true,
+				baseline_execution_matched: true,
+				baseline_verification_harness_digest: "f".repeat(64),
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		const cycle = runtime.completeCycle({ candidateId: candidate.candidateId }).cycle;
+		runtime.store.rememberVerified({
+			memoryId: "episode:task:v11-torn-active-harness",
+			namespace: "coding",
+			type: "episode",
+			scope: "project",
+			title: "Torn active accepted result",
+			content: "The candidate was provisionally accepted using the old test authority.",
+			importance: 8,
+		});
+		const previous = structuredClone(runtime.getState()) as unknown as Record<string, unknown>;
+		previous.schemaVersion = 11;
+		previous.status = "active";
+		(previous.cycles as Array<{ cycleId: string; outcome: string }>).find(
+			(item) => item.cycleId === cycle.cycleId,
+		)!.outcome = "accepted";
+		writeFileSync(statePath, JSON.stringify(previous), "utf8");
+
+		const migrated = new AvoStore(dir, "v11-torn-active-harness", clock(), process.cwd(), memoryRoot).getState();
+		expect(migrated).toMatchObject({ schemaVersion: 13, status: "active" });
+		expect(migrated.evaluations.find((item) => item.evaluationId === receipt.evaluationId)).toMatchObject({
+			issuedBy: "legacy_unverified",
+		});
+		expect(migrated.memories).toContainEqual(
+			expect.objectContaining({
+				memoryId: "episode:task:v11-torn-active-harness",
+				verificationState: "contested",
+			}),
+		);
+		const reopened = new AvoStore(dir, "v11-torn-active-harness", clock(), process.cwd(), memoryRoot).getState();
+		expect(reopened.memories).toContainEqual(
+			expect.objectContaining({
+				memoryId: "episode:task:v11-torn-active-harness",
+				verificationState: "contested",
+			}),
+		);
+	});
+
+	test("does not reopen v11 completion for a nonauthoritative failed test receipt", () => {
+		const dir = artifactDir();
+		const statePath = join(dir, "avo", "state.json");
+		const runtime = new AvoSessionRuntime(dir, "v11-model-test-failure", clock());
+		runtime.configure({ environment: "coding", horizon: "iterative", source: "user" });
+		runtime.store.initialize("Inspect api.ts");
+		const candidate = runtime.recordCandidate({
+			kind: "implementation",
+			summary: "Legacy candidate with only model testimony",
+			payload: { module: "api.ts" },
+			workspaceDigest: "2".repeat(64),
+			workspaceMode: "git",
+			workspaceHead: "legacy-candidate",
+			workspaceChangedPaths: ["api.ts"],
+		});
+		const receipt = runtime.recordEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "test",
+			status: "fail",
+			authority: "model_opinion",
+			evidenceRefs: ["model:claim"],
+			metrics: { meaningful: true, baseline_execution_matched: true },
+		});
+		const cycle = runtime.completeCycle({ candidateId: candidate.candidateId }).cycle;
+		const previous = structuredClone(runtime.getState()) as unknown as Record<string, unknown>;
+		previous.schemaVersion = 11;
+		previous.status = "completed";
+		(previous.cycles as Array<{ cycleId: string; outcome: string }>).find(
+			(item) => item.cycleId === cycle.cycleId,
+		)!.outcome = "accepted";
+		writeFileSync(statePath, JSON.stringify(previous), "utf8");
+
+		const migrated = new AvoStore(dir, "v11-model-test-failure", clock()).getState();
+		expect(migrated).toMatchObject({ schemaVersion: 13, status: "completed" });
+		expect(migrated.evaluations.find((item) => item.evaluationId === receipt.evaluationId)).toMatchObject({
+			issuedBy: "legacy_unverified",
+		});
+	});
+
+	test("keeps a completed non-Python canonical cycle closed when an earlier Python candidate was revised", () => {
+		const dir = artifactDir();
+		const statePath = join(dir, "avo", "state.json");
+		const runtime = new AvoSessionRuntime(dir, "v11-non-python-canonical", clock());
+		runtime.configure({ environment: "coding", horizon: "iterative", source: "user" });
+		runtime.store.initialize("Repair the implementation and verify the canonical result");
+
+		const rejectedPython = runtime.recordCandidate({
+			kind: "implementation",
+			summary: "Rejected Python attempt",
+			payload: { module: "api.py" },
+			workspaceDigest: "8".repeat(64),
+			workspaceMode: "git",
+			workspaceHead: "python-attempt",
+			workspaceChangedPaths: ["api.py"],
+			pythonProbeBundleDigest: "9".repeat(64),
+		});
+		runtime.recordHostEvaluation({
+			candidateId: rejectedPython.candidateId,
+			evaluatorId: "test",
+			status: "fail",
+			authority: "host",
+			evidenceRefs: ["host:test:python-failure"],
+			metrics: {
+				meaningful: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: rejectedPython.payloadDigest,
+			},
+		});
+		expect(runtime.completeCycle({ candidateId: rejectedPython.candidateId }).cycle.outcome).not.toBe("accepted");
+
+		const canonicalTypeScript = runtime.recordCandidate({
+			kind: "implementation",
+			summary: "Canonical TypeScript repair",
+			payload: { module: "api.ts" },
+			parentCandidateId: rejectedPython.candidateId,
+			workspaceDigest: "a".repeat(64),
+			workspaceMode: "git",
+			workspaceHead: "typescript-canonical",
+			workspaceChangedPaths: ["api.ts"],
+		});
+		runtime.recordHostEvaluation({
+			candidateId: canonicalTypeScript.candidateId,
+			evaluatorId: "build",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: ["host:build:typescript-canonical"],
+			metrics: {
+				meaningful: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: canonicalTypeScript.payloadDigest,
+			},
+		});
+		const canonicalCycle = runtime.completeCycle({ candidateId: canonicalTypeScript.candidateId }).cycle;
+
+		const previous = structuredClone(runtime.getState()) as unknown as Record<string, unknown>;
+		previous.schemaVersion = 11;
+		previous.status = "completed";
+		(previous.cycles as Array<{ cycleId: string; outcome: string }>).find(
+			(item) => item.cycleId === canonicalCycle.cycleId,
+		)!.outcome = "accepted";
+		writeFileSync(statePath, JSON.stringify(previous), "utf8");
+
+		const migrated = new AvoStore(dir, "v11-non-python-canonical", clock()).getState();
+		expect(migrated).toMatchObject({ schemaVersion: 13, status: "completed" });
+		expect(migrated.cycles.at(-1)).toMatchObject({
+			candidateId: canonicalTypeScript.candidateId,
+			outcome: "accepted",
+		});
+		expect(migrated.verificationReasons).not.toContain(
+			`policy-v4 migration invalidated Python lineage for run ${migrated.runId}`,
+		);
 	});
 
 	test("preserves v7 memory while contesting legacy unstructured experiment episodes", () => {
@@ -3569,7 +4374,7 @@ describe("generic AVO core", () => {
 		previous.schemaVersion = 7;
 		writeFileSync(statePath, JSON.stringify(previous), "utf8");
 		const migrated = new AvoStore(dir, "v7-session", clock()).getState();
-		expect(migrated.schemaVersion).toBe(9);
+		expect(migrated.schemaVersion).toBe(13);
 		expect(migrated.memories).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({ memoryId: "info:v7-preserved", verificationState: "verified" }),
@@ -3769,7 +4574,7 @@ describe("generic AVO core", () => {
 		writeFileSync(statePath, JSON.stringify({ ...previous, schemaVersion: 2 }), "utf8");
 		const migrated = new AvoStore(dir, "v2-session", clock()).getState();
 		expect(migrated).toMatchObject({
-			schemaVersion: 9,
+			schemaVersion: 13,
 			sessionId: "v2-session",
 			verificationClass: "external_factual",
 			verificationPolicy: "required",
@@ -3794,7 +4599,7 @@ describe("generic AVO core", () => {
 		};
 		writeFileSync(statePath, JSON.stringify(previous), "utf8");
 		const migrated = new AvoStore(dir, "v3-session", clock()).getState();
-		expect(migrated.schemaVersion).toBe(9);
+		expect(migrated.schemaVersion).toBe(13);
 		expect(migrated.verificationBaseline?.executions).toEqual([]);
 	});
 
@@ -3820,7 +4625,7 @@ describe("generic AVO core", () => {
 		previous.schemaVersion = 4;
 		writeFileSync(statePath, JSON.stringify(previous), "utf8");
 		const migrated = new AvoStore(dir, "v4-session", clock()).getState();
-		expect(migrated.schemaVersion).toBe(9);
+		expect(migrated.schemaVersion).toBe(13);
 		expect(migrated.evaluations).toContainEqual(
 			expect.objectContaining({ issuedBy: "legacy_unverified", evaluatorId: "external_claim" }),
 		);
@@ -3883,7 +4688,8 @@ describe("generic AVO core", () => {
 			"host",
 		);
 		store.completeCycle({ candidateId: coding.candidateId });
-		store.complete();
+		expect(() => store.complete()).toThrow(/explicit host-bound stop gate/);
+		store.complete(store.evaluateStopGate());
 
 		store.startTask("Explain TCP");
 		store.setEnvironment("general");
@@ -3949,7 +4755,7 @@ describe("generic AVO core", () => {
 			"host",
 		);
 		store.completeCycle({ candidateId: codingCandidate.candidateId });
-		store.complete();
+		store.complete(store.evaluateStopGate());
 		store.startTask("Find a research gap");
 		store.setEnvironment("research");
 		const researchCandidate = store.recordCandidate({
@@ -4263,6 +5069,11 @@ describe("AVO routing and adapters", () => {
 
 	test("requires observed test execution instead of exit zero alone", () => {
 		expect(
+			deriveAvoObservedTestIdentities(
+				"# Subtest: calculator\n    # Subtest: duplicate\n    # Subtest: duplicate\n# tests 2\n# pass 2\n",
+			),
+		).toEqual(["node:1:calculator", "node:2:calculator > duplicate", "node:3:calculator > duplicate"]);
+		expect(
 			assessAvoHostCommand("test", {
 				exitCode: 0,
 				cancelled: false,
@@ -4286,9 +5097,19 @@ describe("AVO routing and adapters", () => {
 				exitCode: 0,
 				cancelled: false,
 				truncated: false,
-				output: "# tests 2\n# pass 2\n# fail 0\n",
+				output:
+					"# Subtest: parser accepts valid input\n# Subtest: parser rejects invalid input\n# tests 2\n# pass 2\n# fail 0\n",
 			}),
 		).toMatchObject({ status: "pass", metrics: { meaningful: true, observed_work_units: 2 } });
+		expect(
+			assessAvoHostCommand("test", {
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				output:
+					"TAP version 13\n# Subtest: /repo/subject.test.cjs\nok 1 - /repo/subject.test.cjs\n# tests 1\n# pass 1\n# fail 0\n",
+			}),
+		).toMatchObject({ status: "inconclusive", metrics: { meaningful: false, observed_work_units: 0 } });
 		expect(
 			assessAvoHostCommand("test", {
 				exitCode: 0,
@@ -4515,8 +5336,10 @@ describe("AVO routing and adapters", () => {
 			narrowedSelection: true,
 		});
 		expect(assessAvoTestTrust(dir, "go test -v pkg/parser_test.go", baseline)).toMatchObject({
-			trusted: true,
-			executionProven: true,
+			trusted: false,
+			executionProven: false,
+			basis: "unsupported_verification_harness",
+			verificationHarnessSupported: false,
 			observedBaselineTestFiles: ["pkg/parser_test.go"],
 		});
 		writeFileSync(join(dir, "other", "parser.test.cjs"), "candidate alternate root\n", "utf8");
@@ -4580,6 +5403,342 @@ describe("AVO routing and adapters", () => {
 			narrowedSelection: true,
 			observedBaselineTestFiles: [],
 		});
+	});
+
+	test("[AUTH-001] binds helpers, configuration, plugins, and runner shadows into the verifier manifest", () => {
+		const dir = artifactDir();
+		mkdirSync(join(dir, "tests"));
+		writeFileSync(join(dir, "api.py"), "def evaluate(left, right): return left + right\n", "utf8");
+		writeFileSync(
+			join(dir, "tests", "test_api.py"),
+			"from api import evaluate\nfrom oracle import expected\nfrom tests.fixture_values import adjustment\ndef test_api(): assert evaluate(1, 2) == expected() + adjustment()\n",
+			"utf8",
+		);
+		writeFileSync(join(dir, "tests", "fixture_values.py"), "def adjustment(): return 0\n", "utf8");
+		writeFileSync(join(dir, "oracle.py"), "def expected(): return 3\n", "utf8");
+		writeFileSync(join(dir, "plugin_guard.py"), "def pytest_configure(config): pass\n", "utf8");
+		writeFileSync(join(dir, "conftest.py"), 'pytest_plugins = ["plugin_guard"]\n', "utf8");
+		writeFileSync(join(dir, "pytest.ini"), "[pytest]\ntestpaths = tests\n", "utf8");
+		mkdirSync(join(dir, "spec"));
+		writeFileSync(
+			join(dir, "spec", "requirements.json"),
+			JSON.stringify({ requirements: [{ id: "API-001", sourcePaths: ["api.py"] }] }),
+			"utf8",
+		);
+		const baseline = captureAvoCodingVerificationBaseline(dir, "Fix and verify api.py");
+		const command = "python3 -m pytest -vv tests/test_api.py";
+		const original = captureAvoVerificationHarnessManifest(dir, command, baseline);
+		expect(original).toMatchObject({
+			supported: true,
+			runnerFamily: "pytest",
+			absentControlPaths: expect.arrayContaining(["pytest.py", "sitecustomize.py"]),
+			entries: expect.arrayContaining([
+				expect.objectContaining({ path: "tests/test_api.py", role: "test" }),
+				expect.objectContaining({ path: "tests/fixture_values.py" }),
+				expect.objectContaining({ path: "oracle.py", role: "fixture" }),
+				expect.objectContaining({ path: "conftest.py", role: "plugin" }),
+				expect.objectContaining({ path: "plugin_guard.py", role: "plugin" }),
+				expect.objectContaining({ path: "pytest.ini", role: "config" }),
+			]),
+		});
+
+		writeFileSync(join(dir, "api.py"), "def evaluate(left, right): return left - right\n", "utf8");
+		expect(captureAvoVerificationHarnessManifest(dir, command, baseline).digest).toBe(original.digest);
+
+		const controls = [
+			["tests/fixture_values.py", "def adjustment(): return -4\n"],
+			["oracle.py", "def expected(): return -1\n"],
+			["plugin_guard.py", "def pytest_collection_modifyitems(items): items.clear()\n"],
+			["conftest.py", 'pytest_plugins = ["plugin_guard"]\n# changed\n'],
+			["pytest.ini", "[pytest]\naddopts = --ignore=tests\n"],
+		] as const;
+		for (const [path, contents] of controls) {
+			const absolute = join(dir, path);
+			const before = readFileSync(absolute, "utf8");
+			writeFileSync(absolute, contents, "utf8");
+			expect(captureAvoVerificationHarnessManifest(dir, command, baseline).digest, path).not.toBe(original.digest);
+			writeFileSync(absolute, before, "utf8");
+		}
+
+		writeFileSync(join(dir, "pytest.py"), "print('1 passed')\n", "utf8");
+		const shadowed = captureAvoVerificationHarnessManifest(dir, command, baseline);
+		expect(shadowed.digest).not.toBe(original.digest);
+		expect(shadowed.absentControlPaths).not.toContain("pytest.py");
+		expect(shadowed.entries).toContainEqual(expect.objectContaining({ path: "pytest.py", role: "plugin" }));
+	});
+
+	test("[AUTH-001] rejects and strips unbound verification environment hooks", () => {
+		const dir = artifactDir();
+		writeFileSync(join(dir, "subject.cjs"), "module.exports = 1;\n", "utf8");
+		writeFileSync(
+			join(dir, "subject.test.cjs"),
+			"const test = require('node:test'); const assert = require('node:assert'); test('subject', () => assert.equal(require('./subject.cjs'), 1));\n",
+			"utf8",
+		);
+		writeFileSync(join(dir, "api.py"), "def value(): return 1\n", "utf8");
+		writeFileSync(join(dir, "test_api.py"), "from api import value\ndef test_value(): assert value() == 1\n", "utf8");
+		writeFileSync(join(dir, "hook.cjs"), "require('node:assert').equal = () => {};\n", "utf8");
+		writeFileSync(join(dir, ".coveragerc"), "[run]\nbranch = true\n", "utf8");
+		const nodeBaseline = captureAvoCodingVerificationBaseline(dir, "Fix subject.cjs");
+		const pythonBaseline = captureAvoCodingVerificationBaseline(dir, "Fix api.py");
+		const previous = {
+			COVERAGE_PROCESS_START: process.env.COVERAGE_PROCESS_START,
+			NODE_OPTIONS: process.env.NODE_OPTIONS,
+			NODE_PATH: process.env.NODE_PATH,
+			PYTHONHOME: process.env.PYTHONHOME,
+			PYTHONPATH: process.env.PYTHONPATH,
+		};
+		try {
+			process.env.NODE_OPTIONS = "--require ./hook.cjs";
+			process.env.NODE_PATH = ".";
+			const nodeManifest = captureAvoVerificationHarnessManifest(dir, "node --test subject.test.cjs", nodeBaseline);
+			expect(nodeManifest).toMatchObject({
+				supported: false,
+				unsupportedReasons: expect.arrayContaining([
+					expect.stringContaining("NODE_OPTIONS must be empty"),
+					expect.stringContaining("NODE_PATH must be empty"),
+				]),
+			});
+
+			process.env.PYTHONPATH = ".";
+			process.env.PYTHONHOME = dir;
+			process.env.COVERAGE_PROCESS_START = ".coveragerc";
+			const pythonManifest = captureAvoVerificationHarnessManifest(
+				dir,
+				"python3 -m pytest -vv test_api.py",
+				pythonBaseline,
+			);
+			expect(pythonManifest).toMatchObject({
+				supported: false,
+				unsupportedReasons: expect.arrayContaining([
+					expect.stringContaining("COVERAGE_PROCESS_START must be empty"),
+					expect.stringContaining("PYTHONHOME must be empty"),
+					expect.stringContaining("PYTHONPATH must be empty"),
+				]),
+			});
+
+			const sanitized = sanitizeAvoVerificationEnvironment({
+				PATH: "/usr/bin:/bin",
+				NODE_OPTIONS: "--require ./hook.cjs",
+				NODE_PATH: ".",
+				PYTHONHOME: dir,
+				PYTHONPATH: ".",
+				COVERAGE_PROCESS_START: ".coveragerc",
+			});
+			expect(sanitized).toEqual({ PATH: "/usr/bin:/bin" });
+		} finally {
+			for (const [key, value] of Object.entries(previous)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
+	test("[AUTH-001] treats ordinary imported source as application code without filename hints", () => {
+		const dir = artifactDir();
+		writeFileSync(join(dir, "subject.cjs"), "module.exports = (left, right) => left + right;\n", "utf8");
+		writeFileSync(join(dir, "expected.cjs"), "module.exports = 1;\n", "utf8");
+		writeFileSync(
+			join(dir, "subject.test.cjs"),
+			"const test = require('node:test'); const assert = require('node:assert'); const subtract = require('./subject.cjs'); const expected = require('./expected.cjs'); test('subtracts', () => assert.equal(subtract(4, 3), expected));\n",
+			"utf8",
+		);
+		const baseline = captureAvoCodingVerificationBaseline(dir, "Fix subtraction behavior");
+		expect(baseline.taskSourcePaths).toEqual([]);
+		expect(baseline.strictTaskSourcePaths).toBe(false);
+		const command = "node --test subject.test.cjs";
+		const original = captureAvoVerificationHarnessManifest(dir, command, baseline);
+		expect(original).toMatchObject({
+			supported: false,
+			unsupportedReasons: expect.arrayContaining([
+				expect.stringMatching(/ambiguous application and verifier dependencies/),
+			]),
+		});
+		const namedBaseline = captureAvoCodingVerificationBaseline(dir, "Fix subject.cjs subtraction behavior");
+		const namedOriginal = captureAvoVerificationHarnessManifest(dir, command, namedBaseline);
+		expect(namedOriginal).toMatchObject({
+			supported: true,
+			entries: expect.arrayContaining([expect.objectContaining({ path: "expected.cjs", role: "fixture" })]),
+		});
+		expect(namedOriginal.entries).not.toContainEqual(expect.objectContaining({ path: "subject.cjs" }));
+		writeFileSync(join(dir, "subject.cjs"), "module.exports = (left, right) => left - right;\n", "utf8");
+		expect(captureAvoVerificationHarnessManifest(dir, command, namedBaseline).digest).toBe(namedOriginal.digest);
+		writeFileSync(join(dir, "expected.cjs"), "module.exports = -1;\n", "utf8");
+		expect(captureAvoVerificationHarnessManifest(dir, command, namedBaseline).digest).not.toBe(namedOriginal.digest);
+	});
+
+	test("[AUTH-001] rejects pytest output modes that candidate code can directly spoof", () => {
+		const dir = artifactDir();
+		writeFileSync(join(dir, "api.py"), "def value(): return 1\n", "utf8");
+		writeFileSync(join(dir, "test_api.py"), "def test_api(): assert True\n", "utf8");
+		const baseline = captureAvoCodingVerificationBaseline(dir, "Fix api.py");
+		for (const command of [
+			"python3 -m pytest -s test_api.py",
+			"python3 -m pytest -qs test_api.py",
+			"python3 -m pytest --capture=no test_api.py",
+			"python3 -m pytest --capture sys test_api.py",
+			"python3 -m pytest --capture=tee-sys test_api.py",
+		]) {
+			expect(captureAvoVerificationHarnessManifest(dir, command, baseline), command).toMatchObject({
+				supported: false,
+				unsupportedReasons: expect.arrayContaining([expect.stringMatching(/capture must remain fd-bound/)]),
+			});
+		}
+		expect(
+			captureAvoVerificationHarnessManifest(dir, "python3 -m pytest -vv --capture=fd test_api.py", baseline),
+		).toMatchObject({ supported: true });
+		expect(captureAvoVerificationHarnessManifest(dir, "python3 -m pytest test_api.py", baseline)).toMatchObject({
+			supported: false,
+			unsupportedReasons: expect.arrayContaining([expect.stringMatching(/bind executed test identities/)]),
+		});
+		writeFileSync(join(dir, "pytest.ini"), "[pytest]\naddopts = -s\n", "utf8");
+		expect(captureAvoVerificationHarnessManifest(dir, "python3 -m pytest test_api.py", baseline)).toMatchObject({
+			supported: false,
+			unsupportedReasons: expect.arrayContaining([expect.stringMatching(/configuration disables fd-bound/)]),
+		});
+	});
+
+	test("[AUTH-001] binds command and environment pytest plugins", () => {
+		const dir = artifactDir();
+		writeFileSync(join(dir, "api.py"), "def value(): return 1\n", "utf8");
+		writeFileSync(join(dir, "test_api.py"), "def test_api(): assert True\n", "utf8");
+		writeFileSync(join(dir, "plugin_guard.py"), "def pytest_configure(config): pass\n", "utf8");
+		const baseline = captureAvoCodingVerificationBaseline(dir, "Fix api.py");
+		const command = "python3 -m pytest -vv -p plugin_guard test_api.py";
+		const original = captureAvoVerificationHarnessManifest(dir, command, baseline);
+		expect(original).toMatchObject({
+			supported: true,
+			entries: expect.arrayContaining([expect.objectContaining({ path: "plugin_guard.py", role: "plugin" })]),
+		});
+		writeFileSync(join(dir, "plugin_guard.py"), "def pytest_collection_modifyitems(items): items.clear()\n", "utf8");
+		expect(captureAvoVerificationHarnessManifest(dir, command, baseline).digest).not.toBe(original.digest);
+		writeFileSync(join(dir, "plugin_guard.py"), "def pytest_configure(config): pass\n", "utf8");
+
+		const previousPlugins = process.env.PYTEST_PLUGINS;
+		try {
+			process.env.PYTEST_PLUGINS = "plugin_guard";
+			expect(
+				captureAvoVerificationHarnessManifest(dir, "python3 -m pytest -vv test_api.py", baseline),
+			).toMatchObject({
+				supported: true,
+				entries: expect.arrayContaining([expect.objectContaining({ path: "plugin_guard.py", role: "plugin" })]),
+			});
+		} finally {
+			if (previousPlugins === undefined) delete process.env.PYTEST_PLUGINS;
+			else process.env.PYTEST_PLUGINS = previousPlugins;
+		}
+		expect(captureAvoVerificationHarnessManifest(dir, "python3 -m pytest -p", baseline)).toMatchObject({
+			supported: false,
+			unsupportedReasons: expect.arrayContaining([expect.stringMatching(/invalid module name/)]),
+		});
+		writeFileSync(
+			join(dir, "pyproject.toml"),
+			'[tool.pytest.ini_options]\naddopts = ["-p", "plugin_guard"]\n',
+			"utf8",
+		);
+		const configured = captureAvoVerificationHarnessManifest(dir, "python3 -m pytest -vv test_api.py", baseline);
+		expect(configured).toMatchObject({
+			supported: true,
+			entries: expect.arrayContaining([expect.objectContaining({ path: "plugin_guard.py", role: "plugin" })]),
+		});
+		writeFileSync(join(dir, "plugin_guard.py"), "def pytest_collection_modifyitems(items): items.clear()\n", "utf8");
+		expect(captureAvoVerificationHarnessManifest(dir, "python3 -m pytest -vv test_api.py", baseline).digest).not.toBe(
+			configured.digest,
+		);
+	});
+
+	test("[AUTH-001] binds submodules named by multiline Python imports", () => {
+		const dir = artifactDir();
+		mkdirSync(join(dir, "support"));
+		writeFileSync(join(dir, "api.py"), "def value(): return 1\n", "utf8");
+		writeFileSync(join(dir, "support", "__init__.py"), "# package\n", "utf8");
+		writeFileSync(join(dir, "support", "expected.py"), "VALUE = 1\n", "utf8");
+		writeFileSync(
+			join(dir, "test_api.py"),
+			"from api import value\nfrom support import (\n    expected,\n)\ndef test_api(): assert value() == expected.VALUE\n",
+			"utf8",
+		);
+		const baseline = captureAvoCodingVerificationBaseline(dir, "Fix api.py");
+		const command = "python3 -m pytest -vv test_api.py";
+		const original = captureAvoVerificationHarnessManifest(dir, command, baseline);
+		expect(original).toMatchObject({
+			supported: true,
+			entries: expect.arrayContaining([
+				expect.objectContaining({ path: "support/__init__.py", role: "fixture" }),
+				expect.objectContaining({ path: "support/expected.py", role: "fixture" }),
+			]),
+		});
+		writeFileSync(join(dir, "support", "expected.py"), "VALUE = 2\n", "utf8");
+		expect(captureAvoVerificationHarnessManifest(dir, command, baseline).digest).not.toBe(original.digest);
+	});
+
+	test("[AUTH-001] fails closed when a pytest plugin declaration cannot be resolved statically", () => {
+		const dir = artifactDir();
+		mkdirSync(join(dir, "tests"));
+		writeFileSync(join(dir, "api.py"), "def evaluate(left, right): return left + right\n", "utf8");
+		writeFileSync(join(dir, "tests", "test_api.py"), "def test_api(): assert True\n", "utf8");
+		writeFileSync(join(dir, "conftest.py"), "pytest_plugins = choose_plugins()\n", "utf8");
+		const baseline = captureAvoCodingVerificationBaseline(dir, "Fix and verify api.py");
+		const command = "python3 -m pytest -vv tests/test_api.py";
+		const harness = captureAvoVerificationHarnessManifest(dir, command, baseline);
+		expect(harness).toMatchObject({
+			supported: false,
+			unsupportedReasons: expect.arrayContaining([expect.stringMatching(/dynamic pytest plugin declaration/)]),
+		});
+		expect(assessAvoTestTrust(dir, command, baseline)).toMatchObject({
+			trusted: false,
+			executionProven: false,
+			basis: "unsupported_verification_harness",
+			verificationHarnessSupported: false,
+		});
+	});
+
+	test("[AUTH-001] rejects wrapper runners and binds Python shadows relative to the command cwd", () => {
+		const dir = artifactDir();
+		mkdirSync(join(dir, "tests"));
+		mkdirSync(join(dir, "pkg"));
+		writeFileSync(join(dir, "api.py"), "def evaluate(): return 1\n", "utf8");
+		writeFileSync(join(dir, "pkg", "helper.py"), "VALUE = 1\n", "utf8");
+		writeFileSync(
+			join(dir, "tests", "test_api.py"),
+			"import helper\ndef test_api(): assert helper.VALUE == 1\n",
+			"utf8",
+		);
+		mkdirSync(join(dir, "spec"));
+		writeFileSync(
+			join(dir, "spec", "requirements.json"),
+			JSON.stringify({ requirements: [{ id: "API-001", sourcePaths: ["api.py"] }] }),
+			"utf8",
+		);
+		const baseline = captureAvoCodingVerificationBaseline(dir, "Fix api.py");
+		for (const command of [
+			"uv run pytest tests/test_api.py",
+			"pytest tests/test_api.py",
+			"npx vitest --run tests/test_api.py",
+		]) {
+			expect(captureAvoVerificationHarnessManifest(dir, command, baseline), command).toMatchObject({
+				supported: false,
+				unsupportedReasons: expect.arrayContaining([expect.stringMatching(/directly resolved closed runner/)]),
+			});
+		}
+
+		const command = "python3 -m pytest -vv ../tests/test_api.py";
+		const original = captureAvoVerificationHarnessManifest(join(dir, "pkg"), command, baseline);
+		expect(original).toMatchObject({
+			supported: true,
+			absentControlPaths: expect.arrayContaining(["pkg/pytest.py", "pkg/sitecustomize.py"]),
+			entries: expect.arrayContaining([expect.objectContaining({ path: "pkg/helper.py", role: "fixture" })]),
+		});
+		writeFileSync(join(dir, "pkg", "helper.py"), "VALUE = 2\n", "utf8");
+		expect(captureAvoVerificationHarnessManifest(join(dir, "pkg"), command, baseline).digest).not.toBe(
+			original.digest,
+		);
+		writeFileSync(join(dir, "pkg", "helper.py"), "VALUE = 1\n", "utf8");
+		writeFileSync(join(dir, "pkg", "pytest.py"), "raise RuntimeError('shadowed')\n", "utf8");
+		const shadowed = captureAvoVerificationHarnessManifest(join(dir, "pkg"), command, baseline);
+		expect(shadowed.digest).not.toBe(original.digest);
+		expect(shadowed.absentControlPaths).not.toContain("pkg/pytest.py");
+		expect(shadowed.entries).toContainEqual(expect.objectContaining({ path: "pkg/pytest.py", role: "plugin" }));
 	});
 
 	test("[ID-001] changes the host workspace digest when a candidate file changes", () => {

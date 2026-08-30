@@ -1,4 +1,4 @@
-export const AVO_STATE_VERSION = 9;
+export const AVO_STATE_VERSION = 13;
 export const AVO_SKILL_NAME = "avo";
 export const AVO_HOST_REQUEST_TYPES = [
 	"avo.initialize",
@@ -150,6 +150,7 @@ export interface AvoCandidate {
 	workspaceHead?: string;
 	workspaceMode?: "git" | "tree";
 	workspaceChangedPaths?: string[];
+	pythonProbeBundleDigest?: string;
 	impactSurfaces?: AvoImpactSurface[];
 	parentCandidateId?: string;
 	obligationIds: string[];
@@ -208,6 +209,25 @@ export interface AvoBaselineTestFile {
 	sha256: string;
 }
 
+export interface AvoVerificationHarnessEntry {
+	path: string;
+	sha256: string;
+	role: "test" | "fixture" | "config" | "plugin" | "runner";
+}
+
+export interface AvoVerificationHarnessManifest {
+	policyVersion: 1;
+	runnerFamily: "pytest" | "node_test" | "other";
+	commandDigest: string;
+	runnerIdentityDigest: string;
+	environmentDigest: string;
+	entries: AvoVerificationHarnessEntry[];
+	absentControlPaths: string[];
+	supported: boolean;
+	unsupportedReasons: string[];
+	digest: string;
+}
+
 export interface AvoVerificationBaseline {
 	kind: "coding";
 	contractDigest: string;
@@ -216,6 +236,12 @@ export interface AvoVerificationBaseline {
 	workspaceMode?: "git" | "tree";
 	workspaceHead?: string;
 	workspacePathDigests?: Record<string, string>;
+	pythonCallableDimensions?: Record<string, Record<string, string[]>>;
+	pythonCallableSignatureDigests?: Record<string, Record<string, string>>;
+	pythonUninspectableCallables?: Record<string, string[]>;
+	pythonUnsafePaths?: string[];
+	taskSourcePaths?: string[];
+	strictTaskSourcePaths?: boolean;
 	testFiles: AvoBaselineTestFile[];
 	userAcceptanceCommands: string[];
 	executions: AvoBaselineExecution[];
@@ -240,8 +266,10 @@ export interface AvoBaselineExecution {
 	meaningful: boolean;
 	observedWorkUnits: number;
 	observedPassedWorkUnits: number;
+	observedTestIdentities: string[];
 	observedBaselineTestFiles: string[];
 	testTrustBasis: string;
+	verificationHarness: AvoVerificationHarnessManifest;
 	recordedAt: string;
 }
 
@@ -476,6 +504,9 @@ export interface AvoSupervisorBinding {
 export interface AvoSupervisorReview {
 	reviewId: string;
 	cycleId: string;
+	attemptIndex?: number;
+	inputDigest?: string;
+	supersedesReviewId?: string;
 	status: "progressing" | "watch" | "intervene";
 	reason: string;
 	detectedPatterns: string[];
@@ -570,6 +601,7 @@ export interface AvoCandidateInput {
 	workspaceHead?: string;
 	workspaceMode?: "git" | "tree";
 	workspaceChangedPaths?: string[];
+	pythonProbeBundleDigest?: string;
 	parentCandidateId?: string;
 	obligationIds?: string[];
 }

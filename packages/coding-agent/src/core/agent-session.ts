@@ -137,6 +137,7 @@ import {
 import {
 	AVO_HORIZONS,
 	AVO_HOST_REQUEST_TYPES,
+	AVO_PYTHON_PROBE_MAX_CASES,
 	AVO_SKILL_NAME,
 	type AvoEvaluationReceipt,
 	type AvoHorizonSelection,
@@ -144,6 +145,8 @@ import {
 	AvoProgressWatchdog,
 	type AvoProgressWatchdogAssessment,
 	type AvoPythonProbeBindings,
+	type AvoPythonProbeBundle,
+	type AvoPythonProbeExecutorAvailability,
 	type AvoPythonProbePlan,
 	type AvoPythonProbeReport,
 	type AvoRunState,
@@ -168,20 +171,26 @@ import {
 	buildAvoSupervisorBootstrapPrompt,
 	buildAvoSupervisorMessage,
 	buildAvoSupervisorPacket,
-	canExecuteAvoPythonProbe,
 	captureAvoArtifactPathBaseline,
 	captureAvoCodingVerificationBaseline,
+	captureAvoPythonProbeBundle,
 	captureAvoSpecContractBaseline,
+	captureAvoVerificationHarnessManifest,
 	captureAvoWorkspaceSnapshot,
 	classifyAvoHostEvaluationCommand,
 	combineAvoClaimEvidenceAssessments,
 	deriveAvoDeterministicArithmeticContract,
+	deriveAvoObservedTestIdentities,
 	deriveAvoProgressWatchdogSnapshot,
+	deriveAvoSpecSemanticCoverage,
 	deriveAvoWorkspaceImpactPaths,
 	digestAvoDeliveryText,
 	digestAvoPayload,
+	digestAvoPythonProbeApplicability,
 	executeAvoPythonProbeSandbox,
 	findAvoSupervisorResponseText,
+	getAvoPythonProbeExecutorAvailability,
+	inspectAvoPythonPublicCallables,
 	isAvoFeatureAblated,
 	parseAvoAssumptionResolutionInput,
 	parseAvoCandidateInput,
@@ -382,7 +391,11 @@ import {
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
-import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
+import {
+	type BashOperations,
+	createLocalBashOperations,
+	createReadOnlyVerificationBashOperations,
+} from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
 import { IpythonKernelProvisioner } from "./tools/ipython.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
@@ -1448,6 +1461,8 @@ export class AgentSession {
 						undefined,
 						this._cwd,
 						this._agentDir ?? getAgentDir(),
+						undefined,
+						this._avoWorkspaceExcludedRoots(),
 					)
 				: undefined;
 		this._enforceAvoCompletion = config.enforceAvoCompletion ?? true;
@@ -4330,6 +4345,193 @@ export class AgentSession {
 		}
 	}
 
+	private _recordAvoPythonProbeApplicability(): void {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		if (state.routing.environment !== "coding") return;
+		for (const candidateId of new Set(
+			state.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
+		)) {
+			const candidate = state.candidates.find((item) => item.candidateId === candidateId);
+			if (!candidate?.workspaceChangedPaths?.some((path) => path.endsWith(".py"))) continue;
+			const contractDigest = digestAvoPythonProbeApplicability(state, candidate);
+			if (
+				state.evaluations.some(
+					(receipt) =>
+						receipt.candidateId === candidateId &&
+						receipt.evaluatorId === "adversarial_probe_contract" &&
+						receipt.issuedBy === "host" &&
+						receipt.metrics.probe_contract_digest === contractDigest &&
+						receipt.metrics.candidate_payload_digest === candidate.payloadDigest &&
+						receipt.metrics.candidate_workspace_digest === candidate.workspaceDigest &&
+						receipt.metrics.candidate_python_bundle_digest === candidate.pythonProbeBundleDigest &&
+						receipt.metrics.workspace_matches_candidate === true &&
+						receipt.metrics.python_bundle_matches_candidate === true,
+				)
+			) {
+				continue;
+			}
+			let workspaceMatchesCandidate = false;
+			let bundleMatchesCandidate = false;
+			let integrityError: string | undefined;
+			let capturedBundle: AvoPythonProbeBundle | undefined;
+			try {
+				const snapshot = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+				});
+				capturedBundle = captureAvoPythonProbeBundle(this.sessionManager.getCwd(), {
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+				});
+				workspaceMatchesCandidate = snapshot.digest === candidate.workspaceDigest;
+				bundleMatchesCandidate = capturedBundle.digest === candidate.pythonProbeBundleDigest;
+			} catch (error) {
+				integrityError = error instanceof Error ? error.message : String(error);
+			}
+			const candidateIntegrityCurrent = workspaceMatchesCandidate && bundleMatchesCandidate;
+			const bindings = candidateIntegrityCurrent
+				? this._avoPythonProbeBindings(state, candidate, candidate.workspaceChangedPaths, capturedBundle)
+				: undefined;
+			const probeRequired = candidateIntegrityCurrent ? bindings !== undefined : true;
+			const receiptDigest = digestAvoPayload({
+				runId: state.runId,
+				candidateId,
+				contractDigest,
+				bindings,
+				probeRequired,
+				workspaceMatchesCandidate,
+				bundleMatchesCandidate,
+			});
+			const evaluationId = `evaluation-adversarial-probe-contract-${receiptDigest}`;
+			if (runtime.getState().evaluations.some((receipt) => receipt.evaluationId === evaluationId)) continue;
+			runtime.recordHostEvaluation({
+				evaluationId,
+				candidateId,
+				evaluatorId: "adversarial_probe_contract",
+				status: "inconclusive",
+				authority: "environment",
+				evidenceRefs: [`host:adversarial-probe-contract:${receiptDigest}`],
+				metrics: {
+					meaningful: false,
+					probe_required: probeRequired,
+					probe_surface_supported: candidateIntegrityCurrent && bindings?.surfaceError === undefined,
+					probe_contract_digest: contractDigest,
+					probe_module_paths: JSON.stringify(bindings?.modulePaths ?? []),
+					probe_required_callables: JSON.stringify(bindings?.requiredCallables ?? []),
+					probe_callable_input_dimensions: JSON.stringify(bindings?.callableInputDimensions ?? {}),
+					candidate_payload_digest: candidate.payloadDigest,
+					candidate_workspace_digest: candidate.workspaceDigest ?? "missing",
+					candidate_python_bundle_digest: candidate.pythonProbeBundleDigest ?? "missing",
+					workspace_matches_candidate: workspaceMatchesCandidate,
+					python_bundle_matches_candidate: bundleMatchesCandidate,
+					validation_reason: !candidateIntegrityCurrent
+						? `cannot derive probe applicability from non-candidate source state${integrityError ? `: ${integrityError}` : ""}`
+						: bindings
+							? (bindings.surfaceError ?? "host-derived Python adversarial probe is required")
+							: "no specification-named public Python callable requires a function probe",
+				},
+			});
+		}
+	}
+
+	private _recordAvoSpecSemanticEvidence(candidateId: string): AvoEvaluationReceipt | undefined {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		const candidate = state.candidates.find((item) => item.candidateId === candidateId);
+		const spec = state.verificationBaseline?.specContract;
+		const pythonPaths = [...new Set(candidate?.workspaceChangedPaths?.filter((path) => path.endsWith(".py")) ?? [])]
+			.map((path) => path.replaceAll("\\", "/"))
+			.sort();
+		if (!candidate || pythonPaths.length === 0 || !spec) return undefined;
+
+		let workspaceMatchesCandidate = false;
+		let contractValue: unknown;
+		let coverage = {
+			affectedRequirementIds: [] as string[],
+			coveredPaths: [] as string[],
+			uncoveredPaths: [...pythonPaths],
+			impactDigest: digestAvoPayload({ pythonPaths, error: "contract-unavailable" }),
+			errors: [] as string[],
+		};
+		let specGate: AvoStopGate = { passed: false, checks: [], reasons: ["spec evidence was not evaluated"] };
+		const failures: string[] = [];
+		try {
+			const workspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+				excludedRoots: this._avoWorkspaceExcludedRoots(),
+			});
+			workspaceMatchesCandidate = workspace.digest === candidate.workspaceDigest;
+			if (!workspaceMatchesCandidate) failures.push("current workspace does not match the candidate");
+			contractValue = JSON.parse(spec.contractContent) as unknown;
+			coverage = deriveAvoSpecSemanticCoverage(contractValue, pythonPaths);
+			specGate = applyAvoSpecContractStopGate(
+				state,
+				{ passed: true, checks: [], reasons: [] },
+				{
+					cwd: this.sessionManager.getCwd(),
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+					receiptDirectory: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_DIR,
+					receiptPublicKey: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_PUBLIC_KEY,
+				},
+			);
+		} catch (error) {
+			failures.push(error instanceof Error ? error.message : String(error));
+		}
+		if (coverage.errors.length > 0) failures.push(...coverage.errors);
+		if (coverage.uncoveredPaths.length > 0) {
+			failures.push(`uncovered Python paths: ${coverage.uncoveredPaths.join(", ")}`);
+		}
+		if (coverage.affectedRequirementIds.length === 0) failures.push("no affected behavioral requirements");
+		if (!specGate.passed) failures.push(...specGate.reasons);
+		const passed =
+			workspaceMatchesCandidate &&
+			coverage.coveredPaths.length === pythonPaths.length &&
+			coverage.uncoveredPaths.length === 0 &&
+			coverage.affectedRequirementIds.length > 0 &&
+			coverage.errors.length === 0 &&
+			specGate.passed;
+		const gateDigest = digestAvoPayload({ checks: specGate.checks, reasons: specGate.reasons });
+		const receiptDigest = digestAvoPayload({
+			runId: state.runId,
+			candidateId: candidate.candidateId,
+			candidatePayloadDigest: candidate.payloadDigest,
+			candidateWorkspaceDigest: candidate.workspaceDigest,
+			contractDigest: spec.contractDigest,
+			pythonPaths,
+			coverage,
+			gateDigest,
+			passed,
+		});
+		const evaluationId = `evaluation-spec-contract-${receiptDigest}`;
+		const existing = runtime.getState().evaluations.find((receipt) => receipt.evaluationId === evaluationId);
+		if (existing) return existing;
+		return runtime.recordHostEvaluation({
+			evaluationId,
+			candidateId: candidate.candidateId,
+			evaluatorId: "spec_contract",
+			status: passed ? "pass" : "inconclusive",
+			authority: "host",
+			evidenceRefs: [
+				`host:spec-contract:${receiptDigest}`,
+				...coverage.affectedRequirementIds.map((requirementId) => `spec-requirement:${requirementId}`),
+			],
+			metrics: {
+				meaningful: passed,
+				spec_semantic_evidence: passed,
+				workspace_matches_candidate: workspaceMatchesCandidate,
+				candidate_payload_digest: candidate.payloadDigest,
+				candidate_workspace_digest: candidate.workspaceDigest ?? "missing",
+				spec_contract_digest: spec.contractDigest,
+				spec_impact_digest: coverage.impactDigest,
+				spec_gate_digest: gateDigest,
+				spec_covered_python_paths: JSON.stringify(coverage.coveredPaths),
+				spec_uncovered_python_paths: JSON.stringify(coverage.uncoveredPaths),
+				spec_affected_requirements: JSON.stringify(coverage.affectedRequirementIds),
+				validation_reason: passed
+					? "every changed Python path is exactly mapped to current independently verified behavioral requirements"
+					: [...new Set(failures)].join("; ").slice(0, 4_000),
+			},
+		});
+	}
+
 	private _evaluateAvoHostBoundStopGate(): AvoStopGate {
 		const runtime = this._requireAvoRuntime();
 		for (const candidateId of new Set(
@@ -4340,17 +4542,9 @@ export class AgentSession {
 		)) {
 			this._recordAvoCandidateIntegrityFailure(candidateId);
 		}
+		this._recordAvoPythonProbeApplicability();
 		this._recordAvoOnlineEvidence();
-		return this._applyAvoSpecContractStopGate(runtime.evaluateStopGate());
-	}
-
-	private _applyAvoSpecContractStopGate(baseGate: AvoStopGate): AvoStopGate {
-		return applyAvoSpecContractStopGate(this._requireAvoRuntime().getState(), baseGate, {
-			cwd: this.sessionManager.getCwd(),
-			excludedRoots: this._avoWorkspaceExcludedRoots(),
-			receiptDirectory: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_DIR,
-			receiptPublicKey: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_PUBLIC_KEY,
-		});
+		return runtime.evaluateStopGate();
 	}
 
 	private _handleAvoSlashCommand(command: SessionSlashCommand): string {
@@ -4424,9 +4618,8 @@ export class AgentSession {
 			state.verificationBaseline?.kind === "coding"
 				? state.verificationBaseline.testFiles.map((item) => item.path)
 				: [];
-		return [...new Set([...(candidate?.workspaceChangedPaths ?? []), ...baselinePaths])]
-			.slice(0, 4)
-			.flatMap((path) => {
+		const safePaths = (paths: readonly string[]): string[] =>
+			[...new Set(paths)].flatMap((path) => {
 				const absolute = resolve(this._cwd, path);
 				const relativePath = relative(this._cwd, absolute);
 				if (!relativePath || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) return [];
@@ -4436,14 +4629,85 @@ export class AgentSession {
 				if (readFileSync(absolute).includes(0)) return [];
 				return [relativePath];
 			});
+		const changedPaths = safePaths(candidate?.workspaceChangedPaths ?? []);
+		const changed = new Set(changedPaths);
+		return [
+			...changedPaths,
+			...safePaths(baselinePaths)
+				.filter((path) => !changed.has(path))
+				.slice(0, 4),
+		];
 	}
 
 	private _avoPythonProbeBindings(
 		state: AvoRunState,
 		candidate: AvoRunState["candidates"][number] | undefined,
-		reviewPaths = this._avoAdversarialReviewPaths(state, candidate),
+		probePaths = candidate?.workspaceChangedPaths ?? [],
+		probeBundle?: AvoPythonProbeBundle,
 	): AvoPythonProbeBindings | undefined {
-		if (!canExecuteAvoPythonProbe()) return undefined;
+		const requirementIds = state.obligations
+			.filter((item) => item.critical && item.kind !== "outcome")
+			.map((item) => item.obligationId);
+		if (requirementIds.length === 0) return undefined;
+		if (!candidate?.workspaceChangedPaths?.some((path) => path.endsWith(".py"))) return undefined;
+		let boundBundle = probeBundle;
+		let bundleError: string | undefined;
+		if (!boundBundle) {
+			try {
+				boundBundle = captureAvoPythonProbeBundle(this.sessionManager.getCwd(), {
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+				});
+			} catch (error) {
+				bundleError = error instanceof Error ? error.message : String(error);
+			}
+		}
+		if (boundBundle && boundBundle.digest !== candidate.pythonProbeBundleDigest) {
+			bundleError = "current Python source bundle does not match the host-captured candidate bundle";
+		}
+		const bundleSources = boundBundle
+			? new Map(boundBundle.files.map((file) => [file.path, Buffer.from(file.contentBase64, "base64")]))
+			: undefined;
+		const signatureAuthorityText = [state.objective, state.verificationBaseline?.specContract?.contractContent]
+			.filter((item): item is string => typeof item === "string")
+			.join("\n");
+		const specificationText = [signatureAuthorityText, ...state.obligations.map((item) => item.description)]
+			.filter((item): item is string => typeof item === "string")
+			.join("\n");
+		// The root objective and task-start spec contract are host captured.
+		// Obligation descriptions may be proposed by the model, so they can identify
+		// relevant APIs but cannot manufacture a trusted signature for a new API.
+		const specificationReferences = (name: string): boolean => {
+			const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			return new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}(?:$|[^A-Za-z0-9_])`).test(specificationText);
+		};
+		const specificationDeclaredSignature = (
+			name: string,
+		): { inputDimensions: string[]; signatureDigest: string; fullSignatureDeclared: boolean } | undefined => {
+			const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			const match = new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}\\s*\\(([^()\\r\\n]{0,500})\\)`).exec(
+				signatureAuthorityText,
+			);
+			if (!match) return undefined;
+			const parameters = match[1]!.trim()
+				? match[1]!
+						.split(",")
+						.map((item) => item.trim())
+						.filter(Boolean)
+				: [];
+			if (!parameters.every((item) => /^\*{0,2}[A-Za-z_][A-Za-z0-9_]*(?:\s*[:=].*)?$/.test(item))) {
+				return undefined;
+			}
+			const inspection = inspectAvoPythonPublicCallables(`def ${name}(${match[1]!}):\n    pass\n`);
+			const callable = inspection.callables.find((item) => item.name === name);
+			const declaresAnnotationOrDefault = parameters.some((parameter) => /[:=]/.test(parameter));
+			return callable
+				? {
+						inputDimensions: callable.inputDimensions,
+						signatureDigest: declaresAnnotationOrDefault ? callable.signatureDigest : callable.structuralDigest,
+						fullSignatureDeclared: declaresAnnotationOrDefault,
+					}
+				: undefined;
+		};
 		const changedPaths = new Set(
 			(candidate?.workspaceChangedPaths ?? []).flatMap((path) => {
 				const absolute = resolve(this._cwd, path);
@@ -4453,44 +4717,239 @@ export class AgentSession {
 					: [];
 			}),
 		);
-		const pythonModulePaths = reviewPaths.filter((path) => path.endsWith(".py") && changedPaths.has(path));
-		if (pythonModulePaths.length === 0) return undefined;
-		const specificationText = [state.objective, ...state.obligations.map((item) => item.description)]
-			.filter((item): item is string => typeof item === "string")
-			.join("\n");
-		const modules = pythonModulePaths.map((modulePath) => {
-			const source = readFileSync(resolve(this._cwd, modulePath), "utf8");
-			const publicTopLevelCallables = [...source.matchAll(/^(?:async\s+)?def\s+([A-Za-z][A-Za-z0-9_]*)\s*\(/gm)]
-				.map((match) => match[1])
-				.filter((name) => !name.startsWith("_"));
-			const requiredCallables = [...new Set(publicTopLevelCallables)].filter((name) => {
-				const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-				return new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}(?:$|[^A-Za-z0-9_])`).test(specificationText);
-			});
-			return { modulePath, requiredCallables };
+		const baselineEntrypointPaths = [
+			...new Set([
+				...Object.entries(state.verificationBaseline?.pythonCallableDimensions ?? {})
+					.filter(([, callables]) => Object.keys(callables).some(specificationReferences))
+					.map(([path]) => path),
+				...Object.entries(state.verificationBaseline?.pythonUninspectableCallables ?? {})
+					.filter(([, names]) => names.some((name) => name === "*" || specificationReferences(name)))
+					.map(([path]) => path),
+			]),
+		];
+		const baselineEntrypointPathSet = new Set(baselineEntrypointPaths);
+		const requestedPythonPaths = [
+			...new Set([...probePaths.filter((path) => path.endsWith(".py")), ...baselineEntrypointPaths]),
+		];
+		if (requestedPythonPaths.length === 0) return undefined;
+		const readableModules: Array<{ modulePath: string; source: string }> = [];
+		const inspectedModulePaths: string[] = [];
+		const surfaceErrors: string[] = (state.verificationBaseline?.pythonUnsafePaths ?? []).map(
+			(path) => `task-start Python source was unsafe or unreadable: ${path}`,
+		);
+		let candidateSurfaceInvalid = false;
+		const invalidateCandidateSurface = (reason: string): void => {
+			candidateSurfaceInvalid = true;
+			surfaceErrors.push(reason);
+		};
+		if (bundleError) surfaceErrors.push(bundleError);
+		for (const path of requestedPythonPaths) {
+			const absolute = resolve(this._cwd, path);
+			const relativePath = relative(this._cwd, absolute);
+			if (!relativePath || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+				invalidateCandidateSurface(`required Python path is outside the workspace: ${path.slice(0, 300)}`);
+				continue;
+			}
+			if (!changedPaths.has(relativePath) && !baselineEntrypointPathSet.has(relativePath)) continue;
+			inspectedModulePaths.push(relativePath);
+			try {
+				const bundledContents = bundleSources?.get(relativePath.replaceAll(sep, "/"));
+				if (bundleSources) {
+					if (!bundledContents) {
+						invalidateCandidateSurface(
+							`required Python module is missing from the candidate bundle: ${relativePath}`,
+						);
+						continue;
+					}
+					if (bundledContents.byteLength > 1_000_000) {
+						invalidateCandidateSurface(
+							`required Python module exceeds the 1000000-byte probe inspection limit: ${relativePath}`,
+						);
+						continue;
+					}
+					const source = bundledContents.toString("utf8");
+					if (bundledContents.includes(0) || source.includes("\uFFFD")) {
+						invalidateCandidateSurface(`required Python module is not inspectable UTF-8 source: ${relativePath}`);
+						continue;
+					}
+					readableModules.push({ modulePath: relativePath, source });
+					continue;
+				}
+				if (!existsSync(absolute)) {
+					invalidateCandidateSurface(`required Python module is missing or deleted: ${relativePath}`);
+					continue;
+				}
+				const stats = lstatSync(absolute);
+				if (!stats.isFile()) {
+					invalidateCandidateSurface(`required Python module is not a regular file: ${relativePath}`);
+					continue;
+				}
+				if (stats.size > 1_000_000) {
+					invalidateCandidateSurface(
+						`required Python module exceeds the 1000000-byte probe inspection limit: ${relativePath}`,
+					);
+					continue;
+				}
+				const contents = readFileSync(absolute);
+				const source = contents.toString("utf8");
+				if (contents.includes(0) || source.includes("\uFFFD")) {
+					invalidateCandidateSurface(`required Python module is not inspectable UTF-8 source: ${relativePath}`);
+					continue;
+				}
+				readableModules.push({ modulePath: relativePath, source });
+			} catch (error) {
+				invalidateCandidateSurface(
+					`required Python module could not be inspected: ${relativePath}: ${String(error)}`,
+				);
+			}
+		}
+		if (inspectedModulePaths.length === 0 && surfaceErrors.length === 0) return undefined;
+		const modules = readableModules.map(({ modulePath, source }) => {
+			const inspection = inspectAvoPythonPublicCallables(source);
+			const baselineCallables = state.verificationBaseline?.pythonCallableDimensions?.[modulePath];
+			const callableInputDimensions = Object.fromEntries(
+				inspection.callables
+					.filter((callable) => specificationReferences(callable.name))
+					.map((callable) => {
+						const baselineDimensions = baselineCallables?.[callable.name];
+						const declaredSignature = specificationDeclaredSignature(callable.name);
+						if (!baselineDimensions && declaredSignature === undefined) {
+							surfaceErrors.push(
+								`${modulePath}: new callable ${callable.name} has no task-start or explicit specification signature`,
+							);
+						}
+						const baselineSignature =
+							state.verificationBaseline?.pythonCallableSignatureDigests?.[modulePath]?.[callable.name];
+						if (baselineDimensions && baselineSignature !== callable.signatureDigest) {
+							invalidateCandidateSurface(
+								`${modulePath}: baseline callable ${callable.name} changed its public parameter contract`,
+							);
+						}
+						if (
+							declaredSignature &&
+							declaredSignature.signatureDigest !==
+								(declaredSignature.fullSignatureDeclared ? callable.signatureDigest : callable.structuralDigest)
+						) {
+							invalidateCandidateSurface(
+								`${modulePath}: callable ${callable.name} does not match its host-declared public parameter contract`,
+							);
+						}
+						return [
+							callable.name,
+							[
+								...new Set([
+									...(baselineDimensions ?? []),
+									...(declaredSignature?.inputDimensions ?? []),
+									...callable.inputDimensions,
+								]),
+							],
+						];
+					}),
+			);
+			for (const error of inspection.errors.filter(
+				(item) => item.name === "*" || specificationReferences(item.name),
+			)) {
+				invalidateCandidateSurface(`${modulePath}: ${error.reason}`);
+			}
+			if (baselineCallables) {
+				for (const name of Object.keys(baselineCallables).filter(specificationReferences)) {
+					if (!Object.hasOwn(callableInputDimensions, name)) {
+						invalidateCandidateSurface(
+							`specification-named baseline callable ${name} is missing from ${modulePath}`,
+						);
+					}
+				}
+			}
+			for (const name of (state.verificationBaseline?.pythonUninspectableCallables?.[modulePath] ?? []).filter(
+				(item) => item === "*" || specificationReferences(item),
+			)) {
+				surfaceErrors.push(
+					`specification-named baseline callable ${name} was not safely inspectable in ${modulePath}`,
+				);
+			}
+			return { modulePath, callableInputDimensions, requiredCallables: Object.keys(callableInputDimensions) };
 		});
 		modules.sort(
 			(left, right) =>
 				right.requiredCallables.length - left.requiredCallables.length ||
 				left.modulePath.localeCompare(right.modulePath),
 		);
-		const selectedModule = modules[0];
-		if (!selectedModule) return undefined;
-		const requiredCallables = selectedModule.requiredCallables.slice(0, 8);
-		const requirementIds = state.obligations
-			.filter((item) => item.critical && item.kind !== "outcome")
-			.map((item) => item.obligationId);
-		if (requirementIds.length === 0) return undefined;
+		const relevantModules = modules.filter((item) => item.requiredCallables.length > 0);
+		if (state.verificationBaseline?.pythonCallableDimensions === undefined) {
+			surfaceErrors.push(
+				"task-start Python callable manifest is unavailable, so signature weakening or removal of a specification-named API cannot be excluded",
+			);
+		}
+		if (!candidate.pythonProbeBundleDigest) {
+			surfaceErrors.push("candidate has no host-captured Python source-bundle digest");
+		}
+		if (relevantModules.length === 0 && surfaceErrors.length === 0) return undefined;
+		const requiredCallables = [...new Set(relevantModules.flatMap((item) => item.requiredCallables))];
+		const callableInputDimensions = Object.fromEntries(
+			relevantModules.flatMap((item) => Object.entries(item.callableInputDimensions)),
+		);
+		const requiredCaseCount = requiredCallables.reduce(
+			(total, callable) => total + Math.max(1, (callableInputDimensions[callable]?.length ?? 0) + 1),
+			0,
+		);
+		const maximumInputDimensionCount = Math.max(
+			0,
+			...Object.values(callableInputDimensions).map((dimensions) => dimensions.length),
+		);
+		if (maximumInputDimensionCount > 16) {
+			surfaceErrors.push(
+				`a required public API exposes ${maximumInputDimensionCount} inputs, above the host probe limit of 16`,
+			);
+		}
+		for (const [callable, dimensions] of Object.entries(callableInputDimensions)) {
+			const positionalCount = dimensions.filter((dimension) => dimension.startsWith("arg:")).length;
+			const keywordCount = dimensions.filter((dimension) => dimension.startsWith("kwarg:")).length;
+			if (positionalCount > 8 || keywordCount > 8) {
+				surfaceErrors.push(
+					`required public API ${callable} exposes ${positionalCount} positional and ${keywordCount} keyword-only inputs, above the host per-kind limit of 8`,
+				);
+			}
+		}
+		if (
+			requiredCallables.length > 0 &&
+			requiredCallables.every((callable) => (callableInputDimensions[callable]?.length ?? 0) === 0) &&
+			requiredCallables.length < 6
+		) {
+			surfaceErrors.push(
+				`${requiredCallables.length} zero-input public APIs cannot supply the six distinct host probe inputs required by policy`,
+			);
+		}
+		if (relevantModules.length > 1) {
+			surfaceErrors.push(
+				`required public APIs span ${relevantModules.length} Python entrypoint modules; one host probe plan cannot bind all modules atomically`,
+			);
+		}
+		if (requiredCaseCount > AVO_PYTHON_PROBE_MAX_CASES) {
+			surfaceErrors.push(
+				`${requiredCallables.length} required public APIs need at least ${requiredCaseCount} contrast cases, above the host limit of ${AVO_PYTHON_PROBE_MAX_CASES}`,
+			);
+		}
 		return {
-			// The host chooses one relevant changed module; the reviewer cannot cherry-pick an easier file.
-			modulePaths: [selectedModule.modulePath],
+			modulePaths: [
+				...new Set(
+					relevantModules.length > 0 ? relevantModules.map((item) => item.modulePath) : inspectedModulePaths,
+				),
+			],
 			requiredCallables,
+			callableInputDimensions,
+			surfaceError: surfaceErrors.length > 0 ? surfaceErrors.join("; ") : undefined,
+			surfaceErrorDisposition:
+				surfaceErrors.length > 0
+					? candidateSurfaceInvalid
+						? "candidate_invalid"
+						: "environment_unsupported"
+					: undefined,
 			requirementIds,
 			minimumCases: 6,
-			maximumCases: Math.max(8, Math.min(24, requiredCallables.length * 3)),
+			maximumCases: Math.max(8, Math.min(AVO_PYTHON_PROBE_MAX_CASES, requiredCaseCount)),
 			minimumCrossRequirementCases: requirementIds.length >= 2 ? 3 : 0,
 			minimumDistinctRequirements: Math.min(4, requirementIds.length),
-			minimumContrastedInputDimensions: 2,
+			minimumContrastedInputDimensions: maximumInputDimensionCount,
 		};
 	}
 
@@ -4524,10 +4983,25 @@ export class AgentSession {
 				error: "workspace changed after candidate creation",
 			};
 		}
-		const execution = await executeAvoPythonProbeSandbox(cwd, plan);
+		const bundle = captureAvoPythonProbeBundle(cwd, { excludedRoots: this._avoWorkspaceExcludedRoots() });
+		if (!candidate.pythonProbeBundleDigest || bundle.digest !== candidate.pythonProbeBundleDigest) {
+			return {
+				exitCode: null,
+				timedOut: false,
+				truncated: false,
+				stdout: "",
+				stderr: "",
+				durationMs: 0,
+				workspaceDigest: before.digest,
+				postWorkspaceDigest: before.digest,
+				error: "Python source bundle does not match the host-captured candidate bundle",
+			};
+		}
+		const execution = await executeAvoPythonProbeSandbox(cwd, plan, bundle);
 		const post = captureAvoWorkspaceSnapshot(cwd, { excludedRoots: this._avoWorkspaceExcludedRoots() });
+		const postBundle = captureAvoPythonProbeBundle(cwd, { excludedRoots: this._avoWorkspaceExcludedRoots() });
 		const executionError =
-			post.digest !== candidate.workspaceDigest
+			post.digest !== candidate.workspaceDigest || postBundle.digest !== candidate.pythonProbeBundleDigest
 				? "probe execution changed the candidate workspace"
 				: execution.error;
 		return {
@@ -4541,6 +5015,7 @@ export class AgentSession {
 	private async _dispatchAvoCheckpoint(
 		supervisor: { rlmChildId: string; name: string },
 		cycleId: string,
+		probeValidationFeedback?: string,
 	): Promise<{ receipt?: AgentSessionMessageReceipt; error?: string }> {
 		try {
 			// Publication is sufficient: daemon messaging queues a follow-up behind a
@@ -4549,6 +5024,7 @@ export class AgentSession {
 			// accepted cycle is already durable.
 			await this._awaitPendingRlmChildPublication(supervisor.name);
 			const runtime = this._requireAvoRuntime();
+			this._recordAvoPythonProbeApplicability();
 			const state = runtime.getState();
 			const adversarialReview = requiresAvoAdversarialReview(state, cycleId);
 			const supervisorMemory = await runtime.recallSupervisorMemory(
@@ -4571,21 +5047,34 @@ export class AgentSession {
 					? state.candidates.find((item) => item.candidateId === cycle.candidateId)
 					: undefined;
 				const reviewPaths = this._avoAdversarialReviewPaths(state, candidate);
-				const pythonProbeBindings = this._avoPythonProbeBindings(state, candidate, reviewPaths);
-				let remainingFileChars = 3_000;
+				const requiredPythonPaths = [
+					...new Set(candidate?.workspaceChangedPaths?.filter((path) => path.endsWith(".py")) ?? []),
+				]
+					.map((path) => relative(this._cwd, resolve(this._cwd, path)))
+					.filter((path) => path && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+				const missingRequiredReviewPaths = requiredPythonPaths.filter((path) => !reviewPaths.includes(path));
+				if (missingRequiredReviewPaths.length > 0) {
+					throw new Error(
+						`retained review cannot safely bind required Python paths: ${missingRequiredReviewPaths.join(", ")}`,
+					);
+				}
+				if (requiredPythonPaths.length > 24) {
+					throw new Error("retained review supports at most 24 changed Python paths per accepted candidate");
+				}
+				const pythonProbeBindings = this._avoPythonProbeBindings(state, candidate);
+				const reviewFileBudget = 5_000;
+				const perFileBudget = Math.max(128, Math.min(2_400, Math.floor(reviewFileBudget / reviewPaths.length)));
 				const reviewFiles: Array<{ path: string; excerpt: string; truncated: boolean }> = [];
 				for (const path of reviewPaths) {
-					if (remainingFileChars <= 0) break;
 					const absolute = resolve(this._cwd, path);
 					const text = readFileSync(absolute, "utf8");
-					const budget = Math.min(remainingFileChars, reviewFiles.length === 0 ? 2_400 : 600);
+					const budget = perFileBudget;
 					const truncated = text.length > budget;
 					const headChars = Math.ceil(budget * 0.7);
 					const excerpt = truncated
 						? `${text.slice(0, headChars)}\n\n[... host truncated ${text.length - budget} characters ...]\n\n${text.slice(-(budget - headChars))}`
 						: text;
 					reviewFiles.push({ path, excerpt, truncated });
-					remainingFileChars -= excerpt.length;
 				}
 				const reviewObligations = state.obligations.filter((item) => item.critical && item.kind !== "outcome");
 				const requirementExcerpts: Array<{ requirement_id: string; description: string }> = [];
@@ -4603,7 +5092,7 @@ export class AgentSession {
 							candidate_id: candidate.candidateId,
 							kind: candidate.kind,
 							summary: candidate.summary.slice(0, 500),
-							changed_paths: (candidate.workspaceChangedPaths ?? []).slice(0, 4),
+							changed_paths: candidate.workspaceChangedPaths ?? [],
 							impact_surfaces: (candidate.impactSurfaces ?? []).slice(0, 4),
 						}
 					: undefined;
@@ -4643,8 +5132,13 @@ export class AgentSession {
 						? {
 								probe_version: 1,
 								runtime: "python_call_v1",
-								module_paths: pythonProbeBindings.modulePaths,
+								module_path:
+									pythonProbeBindings.modulePaths.length === 1
+										? pythonProbeBindings.modulePaths[0]
+										: undefined,
 								required_callables: pythonProbeBindings.requiredCallables,
+								callable_input_dimensions: pythonProbeBindings.callableInputDimensions,
+								surface_error: pythonProbeBindings.surfaceError,
 								minimum_cases: pythonProbeBindings.minimumCases,
 								maximum_cases: pythonProbeBindings.maximumCases,
 								minimum_cross_requirement_cases: pythonProbeBindings.minimumCrossRequirementCases,
@@ -4680,8 +5174,13 @@ export class AgentSession {
 						? {
 								probe_version: 1,
 								runtime: "python_call_v1",
-								module_paths: pythonProbeBindings.modulePaths,
+								module_path:
+									pythonProbeBindings.modulePaths.length === 1
+										? pythonProbeBindings.modulePaths[0]
+										: undefined,
 								required_callables: pythonProbeBindings.requiredCallables,
+								callable_input_dimensions: pythonProbeBindings.callableInputDimensions,
+								surface_error: pythonProbeBindings.surfaceError,
 								minimum_cases: pythonProbeBindings.minimumCases,
 								maximum_cases: pythonProbeBindings.maximumCases,
 								minimum_cross_requirement_cases: pythonProbeBindings.minimumCrossRequirementCases,
@@ -4691,9 +5190,9 @@ export class AgentSession {
 									pythonProbeBindings.minimumCrossRequirementCases > 0,
 							}
 						: undefined,
-					review_files: reviewFiles.slice(0, 2).map((item, index) => ({
+					review_files: reviewFiles.map((item) => ({
 						...item,
-						excerpt: item.excerpt.slice(0, index === 0 ? 1_800 : 400),
+						excerpt: item.excerpt.slice(0, 128),
 						truncated: true,
 					})),
 				};
@@ -4728,13 +5227,16 @@ export class AgentSession {
 							latest_checkpoint: state.checkpoints.at(-1),
 							adapter_context: context,
 						};
-			const prompt = buildAvoSupervisorMessage(
+			let prompt = buildAvoSupervisorMessage(
 				state,
 				cycleId,
 				context,
 				adversarialReview ? "" : supervisorMemory.context,
 				adversarialReview ? undefined : boundedPacket,
 			);
+			if (probeValidationFeedback) {
+				prompt = `${prompt}\n\n[HOST PROBE VALIDATION]\nYour previous probe_plan was rejected: ${probeValidationFeedback.slice(0, 1_000)}\nReturn one corrected complete AVO_SUPERVISION_JSON response for this same cycle. This is the only automatic schema-repair turn.`;
+			}
 			if (prompt.length > 16_384) throw new Error("AVO supervisor prompt exceeds the retained-message limit");
 			const receipt = await this._agentMessageController!.sendAgentMessage({
 				target: assertDirectAgentMessageTarget(supervisor.name),
@@ -4753,62 +5255,115 @@ export class AgentSession {
 		message: string,
 		bindings: AvoPythonProbeBindings,
 		parsed: ReturnType<typeof parseAvoSupervisorMessage>,
+		executorAvailability: AvoPythonProbeExecutorAvailability = getAvoPythonProbeExecutorAvailability(),
 	): Promise<ReturnType<typeof parseAvoSupervisorMessage>> {
 		if (parsed.status !== "progressing") return parsed;
-		const existing = runtime
-			.getState()
-			.evaluations.find(
+		const currentState = runtime.getState();
+		const probeContractDigest = digestAvoPythonProbeApplicability(currentState, candidate);
+		const prospectiveContract = [...currentState.evaluations]
+			.reverse()
+			.find(
 				(item) =>
 					item.candidateId === candidate.candidateId &&
-					item.evaluatorId === "adversarial_probe" &&
-					item.metrics.supervisor_cycle_id === cycle.cycleId,
+					item.evaluatorId === "adversarial_probe_contract" &&
+					item.issuedBy === "host" &&
+					item.metrics.probe_contract_digest === probeContractDigest &&
+					item.metrics.probe_required === true &&
+					item.metrics.workspace_matches_candidate === true &&
+					item.metrics.python_bundle_matches_candidate === true &&
+					item.metrics.candidate_payload_digest === candidate.payloadDigest &&
+					item.metrics.candidate_workspace_digest === candidate.workspaceDigest &&
+					item.metrics.candidate_python_bundle_digest === candidate.pythonProbeBundleDigest,
 			);
+		const supervisorMessageDigest = createHash("sha256").update(message).digest("hex");
+		const existingAttempts = currentState.evaluations.filter(
+			(item) =>
+				item.candidateId === candidate.candidateId &&
+				item.evaluatorId === "adversarial_probe" &&
+				item.metrics.supervisor_cycle_id === cycle.cycleId &&
+				item.metrics.probe_contract_digest === probeContractDigest,
+		);
+		const existing = existingAttempts.at(-1);
 		if (existing) {
 			const reason =
 				typeof existing.metrics.validation_reason === "string"
 					? existing.metrics.validation_reason
 					: "the existing immutable adversarial probe receipt has no validation reason";
-			if (existing.status === "pass") {
+			const exactRegisteredContract =
+				prospectiveContract !== undefined &&
+				existing.metrics.probe_contract_registered === true &&
+				existing.metrics.probe_contract_evaluation_id === prospectiveContract.evaluationId;
+			if (existing.status === "pass" && exactRegisteredContract) {
 				return {
 					...parsed,
-					reason: `${parsed.reason.trim()} Host-sandboxed adversarial probes: ${reason}.`,
-					detectedPatterns: [...parsed.detectedPatterns, "host_executed_adversarial_probes_passed"],
+					reason: `${parsed.reason.trim()} Host-executed supervisor challenges: ${reason}.`,
+					detectedPatterns: [...parsed.detectedPatterns, "host_executed_model_oracle_matched"],
 				};
 			}
-			if (existing.status === "inconclusive" && existing.metrics.probe_environment_unsupported === true) {
+			if (existing.status === "revise" || existing.status === "fail") {
 				return {
 					...parsed,
-					reason: `${parsed.reason.trim()} Host probes were unavailable: ${reason}.`,
-					detectedPatterns: [...parsed.detectedPatterns, "adversarial_probe_environment_unsupported"],
+					status: "intervene",
+					reason,
+					detectedPatterns: [...parsed.detectedPatterns, "adversarial_probe_failure"],
+					recommendedActions: [
+						"Revise the candidate or provide a valid requirement-linked probe plan.",
+						...parsed.recommendedActions,
+					].slice(0, 3),
 				};
 			}
-			return {
-				...parsed,
-				status: existing.status === "revise" || existing.status === "fail" ? "intervene" : "watch",
-				reason,
-				detectedPatterns: [
-					...parsed.detectedPatterns,
-					existing.status === "revise" || existing.status === "fail"
-						? "adversarial_probe_failure"
-						: "invalid_adversarial_probe_plan",
-				],
-				recommendedActions: [
-					"Revise the candidate or provide a valid requirement-linked probe plan.",
-					...parsed.recommendedActions,
-				].slice(0, 3),
-			};
+			const sameMessage = existing.metrics.probe_supervisor_message_digest === supervisorMessageDigest;
+			const contractWasRepaired = !exactRegisteredContract && prospectiveContract !== undefined;
+			const environmentMayHaveRecovered =
+				existing.metrics.probe_environment_unsupported === true &&
+				prospectiveContract !== undefined &&
+				!bindings.surfaceError &&
+				executorAvailability.available &&
+				(existing.metrics.probe_executor_available !== true ||
+					existing.metrics.probe_surface_unsupported === true ||
+					!sameMessage);
+			const correctedPlan =
+				existing.metrics.probe_environment_unsupported !== true &&
+				!bindings.surfaceError &&
+				executorAvailability.available &&
+				!sameMessage;
+			if (!contractWasRepaired && !environmentMayHaveRecovered && !correctedPlan) {
+				return {
+					...parsed,
+					status: "watch",
+					reason:
+						existing.metrics.probe_environment_unsupported === true
+							? `${parsed.reason.trim()} Host probes were unavailable: ${reason}.`
+							: reason,
+					detectedPatterns: [
+						...parsed.detectedPatterns,
+						existing.metrics.probe_environment_unsupported === true
+							? "adversarial_probe_environment_unsupported"
+							: "invalid_adversarial_probe_plan",
+					],
+				};
+			}
 		}
+		const attemptIndex = existingAttempts.length;
 		let plan: AvoPythonProbePlan | undefined;
 		let adequacy: ReturnType<typeof assessAvoPythonProbeAdequacy> | undefined;
 		let execution: Awaited<ReturnType<AgentSession["_runAvoPythonProbe"]>> | undefined;
 		let validationError: string | undefined;
-		try {
-			plan = parseAvoPythonProbePlan(message, cycle.cycleId, bindings);
-			adequacy = assessAvoPythonProbeAdequacy(plan, bindings);
-			execution = await this._runAvoPythonProbe(candidate, plan);
-			validationError = execution.error;
-		} catch (error) {
-			validationError = error instanceof Error ? error.message : String(error);
+		if (!prospectiveContract) {
+			validationError = "the host did not preregister this Python probe contract before supervisor review";
+		} else if (bindings.surfaceError) {
+			validationError = bindings.surfaceError;
+		} else if (!executorAvailability.available) {
+			validationError = executorAvailability.reason ?? "the host has no isolated Python probe executor";
+		} else {
+			try {
+				plan = parseAvoPythonProbePlan(message, cycle.cycleId, bindings);
+				adequacy = assessAvoPythonProbeAdequacy(plan, bindings);
+				execution = await this._runAvoPythonProbe(candidate, plan);
+				validationError = execution.error;
+			} catch (error) {
+				validationError = error instanceof Error ? error.message : String(error);
+			}
 		}
 		const passed =
 			plan !== undefined &&
@@ -4818,12 +5373,21 @@ export class AgentSession {
 			!execution.truncated &&
 			!validationError;
 		const failedResults = execution?.report?.results.filter((item) => item.status === "fail") ?? [];
+		const brokerUnavailable = /^host probe broker (?:connection failed|timed out|closed without a result)/.test(
+			validationError ?? "",
+		);
+		const candidateSurfaceInvalid =
+			Boolean(bindings.surfaceError) && bindings.surfaceErrorDisposition === "candidate_invalid";
 		const probeEnvironmentUnsupported =
-			failedResults.length > 0 &&
-			failedResults.length === execution?.report?.results.length &&
-			failedResults.every((item) =>
-				/^module import failed: (?:ModuleNotFoundError|ImportError):/.test(item.error ?? ""),
-			);
+			!prospectiveContract ||
+			(Boolean(bindings.surfaceError) && !candidateSurfaceInvalid) ||
+			!executorAvailability.available ||
+			brokerUnavailable ||
+			(failedResults.length > 0 &&
+				failedResults.length === execution?.report?.results.length &&
+				failedResults.every((item) =>
+					/^module import failed: (?:ModuleNotFoundError|ImportError):/.test(item.error ?? ""),
+				));
 		const planDigest = digestAvoPayload(
 			plan ?? {
 				cycleId: cycle.cycleId,
@@ -4834,10 +5398,14 @@ export class AgentSession {
 			execution?.report ?? { error: validationError ?? "probe produced no report" },
 		);
 		const receiptDigest = digestAvoPayload({
+			attemptIndex,
 			cycleId: cycle.cycleId,
 			candidateId: candidate.candidateId,
 			candidatePayloadDigest: candidate.payloadDigest,
 			candidateWorkspaceDigest: candidate.workspaceDigest,
+			candidatePythonBundleDigest: candidate.pythonProbeBundleDigest,
+			probeContractDigest,
+			probeContractEvaluationId: prospectiveContract?.evaluationId ?? "missing",
 			planDigest,
 			reportDigest,
 			exitCode: execution?.exitCode ?? null,
@@ -4847,47 +5415,68 @@ export class AgentSession {
 		});
 		const executionDiagnostic = execution?.stderr.trim() || execution?.stdout.trim() || "";
 		const validationReason = passed
-			? `${execution!.report!.results.length} independent host-sandboxed adversarial probe cases passed; ${adequacy?.contrastedInputDimensions ?? 0}/${adequacy?.requiredInputDimensions ?? 0} host-required input contrasts proved`
+			? `${execution!.report!.results.length} distinct fresh-process host-sandboxed supervisor challenges matched the retained model oracle; ${adequacy?.contrastedInputDimensions ?? 0}/${adequacy?.requiredInputDimensions ?? 0} host-required input contrasts executed; this is diagnostic and not semantic proof`
 			: probeEnvironmentUnsupported
-				? "the isolated system Python could not import a candidate dependency; semantic adversarial review remains authoritative"
+				? (bindings.surfaceError ??
+					executorAvailability.reason ??
+					validationError ??
+					"the isolated system Python could not import a candidate dependency; executable adversarial proof remains unavailable")
 				: validationError
 					? `adversarial probe was not executable: ${validationError}${executionDiagnostic ? `; runner=${executionDiagnostic.slice(0, 500)}` : ""}`
 					: `${failedResults.length} of ${execution?.report?.results.length ?? 0} adversarial probe cases failed`;
 		runtime.recordHostEvaluation({
 			evaluationId: `evaluation-adversarial-probe-${createHash("sha256")
-				.update(`${runtime.getState().runId}\0${cycle.cycleId}\0${candidate.candidateId}`)
+				.update(
+					`${runtime.getState().runId}\0${cycle.cycleId}\0${candidate.candidateId}\0${probeContractDigest}\0${prospectiveContract?.evaluationId ?? "missing"}\0${attemptIndex}\0${supervisorMessageDigest}`,
+				)
 				.digest("hex")}`,
 			candidateId: candidate.candidateId,
 			evaluatorId: "adversarial_probe",
 			status: passed
 				? "pass"
-				: probeEnvironmentUnsupported
-					? "inconclusive"
-					: execution?.report
-						? "revise"
-						: "inconclusive",
-			authority: "environment",
+				: candidateSurfaceInvalid
+					? "revise"
+					: probeEnvironmentUnsupported
+						? "inconclusive"
+						: execution?.report
+							? "revise"
+							: "inconclusive",
+			authority: "model_opinion",
 			evidenceRefs: [`host:adversarial-probe:${receiptDigest}`],
 			metrics: {
-				meaningful: passed,
+				meaningful: false,
+				probe_execution_observed: execution?.report !== undefined,
+				probe_oracle_source: "retained_supervisor",
+				probe_semantic_authority: false,
+				probe_attempt_index: attemptIndex,
+				probe_supervisor_message_digest: supervisorMessageDigest,
 				candidate_payload_digest: candidate.payloadDigest,
 				candidate_workspace_digest: candidate.workspaceDigest ?? "missing",
+				candidate_python_bundle_digest: candidate.pythonProbeBundleDigest ?? "missing",
 				workspace_matches_candidate:
 					execution !== undefined && execution.postWorkspaceDigest === candidate.workspaceDigest,
 				supervisor_cycle_id: cycle.cycleId,
+				probe_contract_digest: probeContractDigest,
+				probe_contract_evaluation_id: prospectiveContract?.evaluationId ?? "missing",
+				probe_contract_registered: prospectiveContract !== undefined,
 				probe_runtime: plan?.runtime ?? "invalid",
 				probe_plan_digest: planDigest,
 				probe_report_digest: reportDigest,
 				probe_plan: JSON.stringify(plan ?? { error: validationError ?? "missing plan" }).slice(0, 32_000),
 				probe_callables: [...new Set(plan?.cases.map((item) => item.callable) ?? [])].sort().join(","),
 				probe_required_callables: [...bindings.requiredCallables].sort().join(","),
-				probe_adequacy_policy: "required_callable_contrast_v1",
+				probe_adequacy_policy: "host_signature_contrast_model_oracle_v4",
 				probe_required_contrast_dimension_count: adequacy?.requiredInputDimensions ?? 0,
 				probe_contrasted_input_dimension_count: adequacy?.contrastedInputDimensions ?? 0,
 				probe_case_count: plan?.cases.length ?? 0,
+				probe_unique_input_count: plan?.cases.length ?? 0,
 				probe_passed_case_count: execution?.report?.results.filter((item) => item.status === "pass").length ?? 0,
 				probe_failed_case_count: failedResults.length,
 				probe_environment_unsupported: probeEnvironmentUnsupported,
+				probe_surface_unsupported: Boolean(bindings.surfaceError),
+				probe_surface_disposition: bindings.surfaceErrorDisposition ?? "supported",
+				probe_executor_available: executorAvailability.available,
+				probe_executor_mode: executorAvailability.mode,
 				exit_code: execution?.exitCode ?? -1,
 				timed_out: execution?.timedOut ?? false,
 				truncated: execution?.truncated ?? false,
@@ -4904,13 +5493,14 @@ export class AgentSession {
 		if (passed) {
 			return {
 				...parsed,
-				reason: `${parsed.reason.trim()} Host-sandboxed adversarial probes: ${validationReason}.`,
-				detectedPatterns: [...parsed.detectedPatterns, "host_executed_adversarial_probes_passed"],
+				reason: `${parsed.reason.trim()} Host-executed supervisor challenges: ${validationReason}.`,
+				detectedPatterns: [...parsed.detectedPatterns, "host_executed_model_oracle_matched"],
 			};
 		}
 		if (probeEnvironmentUnsupported) {
 			return {
 				...parsed,
+				status: "watch",
 				reason: `${parsed.reason.trim()} Host probes were unavailable: ${validationReason}.`,
 				detectedPatterns: [...parsed.detectedPatterns, "adversarial_probe_environment_unsupported"],
 			};
@@ -4923,13 +5513,23 @@ export class AgentSession {
 			);
 		return {
 			...parsed,
-			status: execution?.report ? "intervene" : "watch",
+			status: candidateSurfaceInvalid || execution?.report ? "intervene" : "watch",
 			reason: validationReason,
 			detectedPatterns: [
 				...parsed.detectedPatterns,
-				execution?.report ? "adversarial_probe_failure" : "invalid_adversarial_probe_plan",
+				candidateSurfaceInvalid
+					? "adversarial_probe_surface_invalid"
+					: execution?.report
+						? "adversarial_probe_failure"
+						: "invalid_adversarial_probe_plan",
 			],
-			recommendedActions: [...failureActions, ...parsed.recommendedActions].slice(0, 3),
+			recommendedActions: [
+				...(candidateSurfaceInvalid
+					? [`Revise the candidate to restore the required Python surface: ${validationReason}`]
+					: []),
+				...failureActions,
+				...parsed.recommendedActions,
+			].slice(0, 3),
 		};
 	}
 
@@ -4949,12 +5549,12 @@ export class AgentSession {
 			if (action.payload.kind === "turn" && action.payload.customMessage)
 				messages.push(action.payload.customMessage);
 		}
-		const pendingCycles = state.cycles.filter(
-			(cycle) =>
-				!state.supervision.some(
-					(review) => review.cycleId === cycle.cycleId && review.source === "retained_supervisor",
-				),
-		);
+		const pendingCycles = state.cycles.filter((cycle) => {
+			const latest = [...state.supervision]
+				.reverse()
+				.find((review) => review.cycleId === cycle.cycleId && review.source === "retained_supervisor");
+			return !latest || latest.status === "watch";
+		});
 		for (const cycle of pendingCycles) {
 			const marker = `AVO_SUPERVISION_JSON:${cycle.cycleId}`;
 			const message = [...messages]
@@ -4990,8 +5590,16 @@ export class AgentSession {
 			if (!text) continue;
 			try {
 				const currentState = runtime.getState();
+				const priorReview = [...currentState.supervision]
+					.reverse()
+					.find((review) => review.cycleId === cycle.cycleId && review.source === "retained_supervisor");
+				const inputDigest = createHash("sha256").update(text).digest("hex");
+				const priorProbeAttemptCount = currentState.evaluations.filter(
+					(item) => item.evaluatorId === "adversarial_probe" && item.metrics.supervisor_cycle_id === cycle.cycleId,
+				).length;
 				const candidate = currentState.candidates.find((item) => item.candidateId === cycle.candidateId);
-				const adversarialBindings = requiresAvoAdversarialReview(currentState, cycle.cycleId)
+				const trajectoryVerificationRequired = requiresAvoAdversarialReview(currentState, cycle.cycleId);
+				const adversarialBindings = trajectoryVerificationRequired
 					? {
 							sourcePaths: this._avoAdversarialReviewPaths(currentState, candidate),
 							requirementIds: currentState.obligations
@@ -5007,7 +5615,9 @@ export class AgentSession {
 						}
 					: undefined;
 				let parsed = parseAvoSupervisorMessage(text, cycle.cycleId, adversarialBindings);
-				const pythonProbeBindings = this._avoPythonProbeBindings(currentState, candidate);
+				const pythonProbeBindings = trajectoryVerificationRequired
+					? this._avoPythonProbeBindings(currentState, candidate)
+					: undefined;
 				if (candidate && pythonProbeBindings) {
 					parsed = await this._bindAvoPythonProbeReview(
 						runtime,
@@ -5018,7 +5628,46 @@ export class AgentSession {
 						parsed,
 					);
 				}
-				runtime.store.recordSupervision({ ...parsed, source: "retained_supervisor" });
+				const probeAttemptCount = runtime
+					.getState()
+					.evaluations.filter(
+						(item) =>
+							item.evaluatorId === "adversarial_probe" && item.metrics.supervisor_cycle_id === cycle.cycleId,
+					).length;
+				if (
+					priorReview &&
+					priorReview.inputDigest === inputDigest &&
+					probeAttemptCount === priorProbeAttemptCount
+				) {
+					continue;
+				}
+				const attemptIndex = priorReview ? (priorReview.attemptIndex ?? 0) + 1 : 0;
+				runtime.store.recordSupervision({
+					...parsed,
+					source: "retained_supervisor",
+					attemptIndex,
+					inputDigest,
+					supersedesReviewId: priorReview?.reviewId,
+				});
+				if (
+					attemptIndex === 0 &&
+					parsed.status === "watch" &&
+					parsed.detectedPatterns.includes("invalid_adversarial_probe_plan")
+				) {
+					const validationReason = runtime
+						.getState()
+						.evaluations.filter(
+							(item) =>
+								item.evaluatorId === "adversarial_probe" && item.metrics.supervisor_cycle_id === cycle.cycleId,
+						)
+						.at(-1)?.metrics.validation_reason;
+					const correction = await this._dispatchAvoCheckpoint(
+						supervisor,
+						cycle.cycleId,
+						typeof validationReason === "string" ? validationReason : parsed.reason,
+					);
+					if (correction.error) errors.push(correction.error);
+				}
 				if (parsed.status === "intervene" && runtime.getState().routing.horizon === "long") {
 					await this._runAvoGenerativeMemoryReflection(cycle.cycleId, "supervisor_intervention");
 					await this._runAvoGenerativeMemoryReconciliation(cycle.cycleId);
@@ -5178,6 +5827,11 @@ export class AgentSession {
 					candidate.workspaceHead = workspace.head;
 					candidate.workspaceMode = workspace.mode;
 					candidate.workspaceChangedPaths = deriveAvoWorkspaceImpactPaths(state.verificationBaseline, workspace);
+					if (candidate.workspaceChangedPaths.some((path) => path.endsWith(".py"))) {
+						candidate.pythonProbeBundleDigest = captureAvoPythonProbeBundle(this.sessionManager.getCwd(), {
+							excludedRoots: this._avoWorkspaceExcludedRoots(),
+						}).digest;
+					}
 				}
 				return { candidate: runtime.recordCandidate(candidate) };
 			}
@@ -5230,7 +5884,12 @@ export class AgentSession {
 				if (workspace.digest !== state.verificationBaseline.workspaceDigest) {
 					throw new Error("the workspace changed before its immutable coding baseline was executed");
 				}
-				const result = await this.executeBash(payload.command);
+				const verificationHarnessBefore = captureAvoVerificationHarnessManifest(
+					this.sessionManager.getCwd(),
+					payload.command,
+					state.verificationBaseline,
+				);
+				const result = await this._executeAvoVerificationBash(payload.command);
 				const assessment = assessAvoHostCommand("test", {
 					exitCode: result.exitCode,
 					cancelled: result.cancelled,
@@ -5249,16 +5908,25 @@ export class AgentSession {
 					typeof assessment.metrics.observed_passed_work_units === "number"
 						? assessment.metrics.observed_passed_work_units
 						: 0;
-				const meaningful =
-					assessment.metrics.meaningful === true &&
-					trust.trusted &&
-					trust.executionProven &&
-					observedWorkUnits > 0;
+				const observedTestIdentities = deriveAvoObservedTestIdentities(result.output);
 				const commandDigest = createHash("sha256").update(payload.command).digest("hex");
 				const outputDigest = createHash("sha256").update(result.output).digest("hex");
 				const postWorkspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
 					excludedRoots: this._avoWorkspaceExcludedRoots(),
 				});
+				const verificationHarnessAfter = trust.verificationHarness;
+				const harnessStable =
+					verificationHarnessBefore.supported &&
+					verificationHarnessAfter?.supported === true &&
+					verificationHarnessBefore.digest === verificationHarnessAfter.digest;
+				const meaningful =
+					assessment.metrics.meaningful === true &&
+					trust.trusted &&
+					trust.executionProven &&
+					harnessStable &&
+					postWorkspace.digest === workspace.digest &&
+					observedWorkUnits > 0 &&
+					observedTestIdentities.length > 0;
 				const execution = runtime.store.recordVerificationBaselineExecution({
 					command: payload.command,
 					commandDigest,
@@ -5269,8 +5937,10 @@ export class AgentSession {
 					meaningful,
 					observedWorkUnits,
 					observedPassedWorkUnits,
+					observedTestIdentities,
 					observedBaselineTestFiles: trust.observedBaselineTestFiles,
 					testTrustBasis: trust.basis,
+					verificationHarness: verificationHarnessBefore,
 				});
 				return {
 					execution,
@@ -5279,9 +5949,13 @@ export class AgentSession {
 						meaningful,
 						observed_work_units: observedWorkUnits,
 						observed_passed_work_units: observedPassedWorkUnits,
+						observed_test_identities: observedTestIdentities,
 						observed_baseline_test_files: trust.observedBaselineTestFiles,
 						test_trust_basis: trust.basis,
 						execution_proven: trust.executionProven,
+						verification_harness_supported: verificationHarnessBefore.supported,
+						verification_harness_stable: harnessStable,
+						verification_harness_digest: verificationHarnessBefore.digest,
 					},
 					output: result.output,
 					exit_code: result.exitCode ?? null,
@@ -5478,8 +6152,23 @@ export class AgentSession {
 						},
 					};
 				}
+				const commandDigest = createHash("sha256").update(payload.command).digest("hex");
+				const baselineExecution = state.verificationBaseline?.executions.find(
+					(item) => item.commandDigest === commandDigest && item.meaningful,
+				);
+				const verificationHarnessBefore =
+					requiresWorkspaceBinding && evaluatorId === "test" && state.verificationBaseline
+						? captureAvoVerificationHarnessManifest(
+								this.sessionManager.getCwd(),
+								payload.command,
+								state.verificationBaseline,
+							)
+						: undefined;
 				const startedAt = Date.now();
-				const result = await this.executeBash(payload.command);
+				const result =
+					requiresWorkspaceBinding && evaluatorId === "test"
+						? await this._executeAvoVerificationBash(payload.command)
+						: await this.executeBash(payload.command);
 				const durationMs = Date.now() - startedAt;
 				let assessment = assessAvoHostCommand(evaluatorId, {
 					exitCode: result.exitCode,
@@ -5492,16 +6181,13 @@ export class AgentSession {
 							excludedRoots: this._avoWorkspaceExcludedRoots(),
 						})
 					: workspace;
-				if (requiresWorkspaceBinding && evaluatorId === "test" && assessment.status === "pass") {
+				if (requiresWorkspaceBinding && evaluatorId === "test") {
+					const commandPassed = assessment.status === "pass";
 					const trust = assessAvoTestTrust(
 						this.sessionManager.getCwd(),
 						payload.command,
 						state.verificationBaseline,
 						result.output,
-					);
-					const commandDigest = createHash("sha256").update(payload.command).digest("hex");
-					const baselineExecution = state.verificationBaseline?.executions.find(
-						(item) => item.commandDigest === commandDigest && item.meaningful,
 					);
 					const postWorkUnits =
 						typeof assessment.metrics.observed_work_units === "number"
@@ -5511,16 +6197,30 @@ export class AgentSession {
 						typeof assessment.metrics.observed_passed_work_units === "number"
 							? assessment.metrics.observed_passed_work_units
 							: 0;
+					const postTestIdentities = deriveAvoObservedTestIdentities(result.output);
 					const identityMatched =
 						baselineExecution !== undefined &&
+						JSON.stringify(postTestIdentities) === JSON.stringify(baselineExecution.observedTestIdentities) &&
 						(baselineExecution.testTrustBasis === "user_acceptance" ||
 							(baselineExecution.observedBaselineTestFiles.length > 0 &&
 								baselineExecution.observedBaselineTestFiles.every((path) =>
 									trust.observedBaselineTestFiles.includes(path),
 								)));
-					const baselineExecutionMatched =
+					const verificationHarnessMatched =
+						baselineExecution?.verificationHarness?.supported === true &&
+						verificationHarnessBefore?.supported === true &&
+						trust.verificationHarness?.supported === true &&
+						baselineExecution.verificationHarness.commandDigest === commandDigest &&
+						baselineExecution.verificationHarness.digest === verificationHarnessBefore.digest &&
+						verificationHarnessBefore.digest === trust.verificationHarness.digest;
+					const pythonInProcessVerifier =
+						verificationHarnessBefore?.runnerFamily === "pytest" &&
+						candidate.workspaceChangedPaths?.some((path) => path.endsWith(".py")) === true;
+					const pythonInProcessSelfCertification = commandPassed && pythonInProcessVerifier;
+					const baselineExecutionObservedMatched =
 						trust.trusted &&
 						trust.executionProven &&
+						verificationHarnessMatched &&
 						identityMatched &&
 						postWorkUnits >= (baselineExecution?.observedWorkUnits ?? Number.POSITIVE_INFINITY) &&
 						postPassedWorkUnits >= (baselineExecution?.observedPassedWorkUnits ?? Number.POSITIVE_INFINITY) &&
@@ -5528,9 +6228,12 @@ export class AgentSession {
 							(baselineExecution
 								? baselineExecution.observedWorkUnits - baselineExecution.observedPassedWorkUnits
 								: Number.NEGATIVE_INFINITY);
-					const meaningful = trust.taskSpecific && baselineExecutionMatched;
+					const baselineExecutionMatched = baselineExecutionObservedMatched && !pythonInProcessSelfCertification;
+					const meaningful = commandPassed
+						? trust.taskSpecific && baselineExecutionMatched
+						: assessment.metrics.meaningful === true;
 					assessment = {
-						status: meaningful ? "pass" : "inconclusive",
+						status: commandPassed ? (meaningful ? "pass" : "inconclusive") : assessment.status,
 						metrics: {
 							...assessment.metrics,
 							meaningful,
@@ -5540,18 +6243,34 @@ export class AgentSession {
 							test_execution_proven: trust.executionProven,
 							observed_baseline_test_files: trust.observedBaselineTestFiles.join(","),
 							baseline_execution_matched: baselineExecutionMatched,
+							baseline_execution_observed_matched: baselineExecutionObservedMatched,
 							baseline_execution_id: baselineExecution?.executionId ?? "missing",
 							baseline_pre_status: baselineExecution?.status ?? "missing",
 							baseline_observed_work_units: baselineExecution?.observedWorkUnits ?? 0,
 							baseline_observed_passed_work_units: baselineExecution?.observedPassedWorkUnits ?? 0,
+							baseline_observed_test_identities: JSON.stringify(baselineExecution?.observedTestIdentities ?? []),
+							observed_test_identities: JSON.stringify(postTestIdentities),
+							test_identity_matched: identityMatched,
 							baseline_contract_digest: state.verificationBaseline?.contractDigest ?? "missing",
+							baseline_verification_harness_digest: baselineExecution?.verificationHarness?.digest ?? "missing",
+							observed_verification_harness_digest: trust.verificationHarness?.digest ?? "missing",
+							verification_harness_supported: trust.verificationHarnessSupported,
+							verification_harness_matched: verificationHarnessMatched,
 							baseline_test_count: trust.baselineTestCount,
 							unchanged_baseline_test_count: trust.unchangedBaselineTestCount,
 							explicit_baseline_targets: trust.explicitBaselineTargets,
 							narrowed_test_selection: trust.narrowedSelection,
+							python_in_process_self_certification: pythonInProcessSelfCertification,
+							python_test_semantic_authority: !pythonInProcessVerifier,
 							validation_reason: meaningful
 								? "the same immutable pre-candidate baseline test contract executed and passed afterward"
-								: "coding tests require a proven matching pre-candidate baseline execution",
+								: pythonInProcessSelfCertification
+									? "in-process pytest output cannot certify changed Python code; use an out-of-process verifier or independently verified specification proof"
+									: commandPassed
+										? "coding tests require a proven matching pre-candidate baseline execution"
+										: typeof assessment.metrics.validation_reason === "string"
+											? assessment.metrics.validation_reason
+											: "the coding test command did not produce a passing authoritative result",
 						},
 					};
 				}
@@ -5885,6 +6604,32 @@ export class AgentSession {
 			}
 			case "avo.cycle.complete": {
 				const cycleInput = parseAvoCycleInput(payload.cycle);
+				const preflightState = runtime.getState();
+				const preflightCandidate = preflightState.candidates.find(
+					(item) => item.candidateId === cycleInput.candidateId,
+				);
+				const requiresIndependentPythonSemantics =
+					preflightState.verificationPolicy === "required" &&
+					preflightCandidate !== undefined &&
+					["patch", "implementation", "configuration", "artifact"].includes(preflightCandidate.kind) &&
+					preflightCandidate.workspaceChangedPaths?.some((path) => path.endsWith(".py")) === true;
+				const hasImmutableSemanticTest = preflightState.evaluations.some(
+					(receipt) =>
+						receipt.candidateId === cycleInput.candidateId &&
+						receipt.issuedBy === "host" &&
+						receipt.evaluatorId === "test" &&
+						receipt.status === "pass" &&
+						receipt.metrics.meaningful === true &&
+						receipt.metrics.baseline_execution_matched === true,
+				);
+				if (requiresIndependentPythonSemantics && !hasImmutableSemanticTest) {
+					const specProof = this._recordAvoSpecSemanticEvidence(cycleInput.candidateId);
+					if (specProof?.status !== "pass" || specProof.metrics.spec_semantic_evidence !== true) {
+						throw new Error(
+							`AVO Python cycle is blocked before completion: ${String(specProof?.metrics.validation_reason ?? "no immutable baseline test or exact independently verified spec proof is available")}`,
+						);
+					}
+				}
 				this._recordAvoCandidateIntegrityFailure(cycleInput.candidateId);
 				const result = runtime.completeCycle(cycleInput);
 				const stateAfterCycle = runtime.getState();
@@ -15000,13 +15745,14 @@ export class AgentSession {
 			excludeFromContext?: boolean;
 			operations?: BashOperations;
 			transient?: boolean;
+			ignoreConfiguredPrefix?: boolean;
 		},
 	): Promise<BashResult> {
 		this._bashAbortController = new AbortController();
 
 		const prefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
-		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
+		const resolvedCommand = prefix && !options?.ignoreConfiguredPrefix ? `${prefix}\n${command}` : command;
 
 		try {
 			const result = await executeBashWithOperations(
@@ -15026,6 +15772,22 @@ export class AgentSession {
 		} finally {
 			this._bashAbortController = undefined;
 		}
+	}
+
+	private async _executeAvoVerificationBash(command: string): Promise<BashResult> {
+		const operations = createReadOnlyVerificationBashOperations();
+		if (!operations) {
+			return {
+				output: "AVO read-only verification sandbox unavailable; command was not executed.\n",
+				exitCode: undefined,
+				cancelled: false,
+				truncated: false,
+			};
+		}
+		return this.executeBash(command, undefined, {
+			operations,
+			ignoreConfiguredPrefix: true,
+		});
 	}
 
 	/**

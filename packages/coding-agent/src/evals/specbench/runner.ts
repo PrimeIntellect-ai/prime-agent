@@ -661,7 +661,7 @@ Implement the complete specification in TASK.md. This is an official SpecBench t
 This benchmark is fully self-contained. Do not search online or browse the web; external facts and external documentation are not required. Interpret words such as “latest” only inside the supplied algorithmic specification.
 
 Mandatory verification procedure:
-1. Before editing, initialize AVO and run exactly \`python3 -m pytest -q test_specbench_contract.py\` with \`avo.run_coding_baseline\`.
+1. Before editing, initialize AVO and run exactly \`python3 -m pytest -vv test_specbench_contract.py\` with \`avo.run_coding_baseline\`.
 ${obligationProcedure}
 3. Implement the task. The visible validation suite is in \`.specbench-visible/public\`; held-out suites are host-only and unavailable to you.
 4. Record a coding implementation candidate, run the exact baseline command again with \`avo.run_evaluation\`, complete the cycle, and inspect the stop gate.

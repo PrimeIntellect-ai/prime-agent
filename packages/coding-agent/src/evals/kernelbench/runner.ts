@@ -397,7 +397,7 @@ Optimize solution.py for the local NVIDIA GeForce RTX 3050 Laptop GPU (Ampere, 4
 - Preserve FP32 correctness on randomized KernelBench inputs.
 - Target speedup > 1.0 over PyTorch eager. Do not call a slower result optimized.
 - Never modify reference.py, test_kernel.py, kernel_eval.py, sitecustomize.py, pytest.ini, or evaluator behavior.
-- Before editing, call avo.run_coding_baseline with exactly: python3 -m pytest -q -s -p no:cacheprovider test_kernel.py
+- Before editing, call avo.run_coding_baseline with exactly: python3 -m pytest -vv -rP --capture=fd -p no:cacheprovider test_kernel.py
 - Use that identical command for every AVO candidate evaluation. Inspect KERNELBENCH_RESULT_JSON and iterate when correct but slow.
 - Complete the AVO candidate, host evaluation, cycle, and stop gate; return the exact accepted candidate summary only.
 

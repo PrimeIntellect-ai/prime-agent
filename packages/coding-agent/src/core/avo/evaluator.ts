@@ -285,10 +285,38 @@ export function classifyAvoHostEvaluationCommand(command: string): AvoHostComman
 	);
 }
 
+function nodeFileOnlySubtest(name: string): boolean {
+	return /(?:^|[/\\])(?:test_[^/\\]+|[^/\\]+(?:\.test|\.spec))\.[A-Za-z0-9]+$/i.test(name);
+}
+
+export function deriveAvoObservedTestIdentities(output: string): string[] {
+	const normalized = output.replaceAll("\r", "");
+	const nodeIdentities: string[] = [];
+	const nodeStack: Array<{ indentation: number; name: string }> = [];
+	for (const line of normalized.split("\n")) {
+		const match = /^(\s*)# Subtest:\s+(.+)$/.exec(line);
+		if (!match) continue;
+		const indentation = match[1]!.replaceAll("\t", "    ").length;
+		const name = match[2]!.trim();
+		while (nodeStack.at(-1) && nodeStack.at(-1)!.indentation >= indentation) nodeStack.pop();
+		const hierarchy = [...nodeStack.map((item) => item.name), name].join(" > ");
+		if (!nodeFileOnlySubtest(name)) nodeIdentities.push(`node:${nodeIdentities.length + 1}:${hierarchy}`);
+		nodeStack.push({ indentation, name });
+	}
+	const pytestIdentities = [
+		...normalized.matchAll(/^(.+?::.+?)\s+(?:PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b/gm),
+	].map((match, index) => `pytest:${index + 1}:${match[1]!.trim()}`);
+	const identities = [...nodeIdentities, ...pytestIdentities];
+	if (identities.length > 10_000 || identities.some((identity) => identity.length > 2_000)) return [];
+	return identities;
+}
+
 function observedTestSummary(output: string): { units: number; passed: number; parser: string } | undefined {
 	const normalized = output.replaceAll("\r", "");
 	const nodeTotal = /^# tests\s+(\d+)\s*$/im.exec(normalized)?.[1];
 	if (nodeTotal) {
+		const subtests = [...normalized.matchAll(/^# Subtest:\s+(.+)$/gm)].map((match) => match[1]!.trim());
+		if (subtests.length === 0 || subtests.every(nodeFileOnlySubtest)) return undefined;
 		const passed = /^# pass\s+(\d+)\s*$/im.exec(normalized)?.[1] ?? "0";
 		return { units: Number.parseInt(nodeTotal, 10), passed: Number.parseInt(passed, 10), parser: "node_tap" };
 	}

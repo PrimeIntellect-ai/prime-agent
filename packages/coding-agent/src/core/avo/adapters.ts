@@ -14,7 +14,8 @@ import {
 	requiredAvoPremortemAssumptionCount,
 } from "./obligations.js";
 import { deriveAvoCodingPivotSummary } from "./pivot.js";
-import { requiresAvoAdversarialReview } from "./supervisor.js";
+import { digestAvoPythonProbeApplicability } from "./probe.js";
+import { requiresAvoAdversarialReview, requiresAvoTrajectoryVerification } from "./supervisor.js";
 import type {
 	AvoCandidate,
 	AvoDashboardProjection,
@@ -177,18 +178,12 @@ function requireTrajectoryVerification(
 	gate: AvoStopGate,
 	canonicalCycle: AvoRunState["cycles"][number] | undefined,
 ): AvoStopGate {
-	const latestCheckpoint = canonicalCycle
-		? [...state.checkpoints].reverse().find((checkpoint) => checkpoint.cycleId === canonicalCycle.cycleId)
-		: undefined;
-	const required =
-		state.routing.horizon === "long" ||
-		requiresAvoAdversarialReview(state, canonicalCycle?.cycleId) ||
-		(state.routing.horizon === "iterative" && latestCheckpoint?.interventionNeeded === true);
+	const required = requiresAvoTrajectoryVerification(state, canonicalCycle?.cycleId);
 	if (!required) return gate;
 	const review = canonicalCycle
-		? state.supervision.find(
-				(item) => item.cycleId === canonicalCycle.cycleId && item.source === "retained_supervisor",
-			)
+		? [...state.supervision]
+				.reverse()
+				.find((item) => item.cycleId === canonicalCycle.cycleId && item.source === "retained_supervisor")
 		: undefined;
 	const passed = review?.status === "progressing";
 	const boundedFollowUp = review?.recommendedActions
@@ -207,7 +202,96 @@ function requireTrajectoryVerification(
 					? "the current canonical accepted cycle has not been cleared by the retained verifier"
 					: "no canonical accepted cycle is available for retained verification",
 	};
-	const checks = [...gate.checks, check];
+	const canonicalCandidate = canonicalCycle
+		? state.candidates.find((candidate) => candidate.candidateId === canonicalCycle.candidateId)
+		: undefined;
+	const pythonChanged = canonicalCandidate?.workspaceChangedPaths?.some((path) => path.endsWith(".py")) === true;
+	const probeChecks: AvoStopGate["checks"] = [];
+	if (
+		requiresAvoAdversarialReview(state, canonicalCycle?.cycleId) &&
+		pythonChanged &&
+		canonicalCandidate &&
+		canonicalCycle
+	) {
+		const expectedContractDigest = digestAvoPythonProbeApplicability(state, canonicalCandidate);
+		const contract = [...state.evaluations]
+			.reverse()
+			.find(
+				(receipt) =>
+					receipt.candidateId === canonicalCandidate.candidateId &&
+					receipt.evaluatorId === "adversarial_probe_contract" &&
+					receipt.issuedBy === "host" &&
+					receipt.metrics.probe_contract_digest === expectedContractDigest &&
+					receipt.metrics.candidate_payload_digest === canonicalCandidate.payloadDigest &&
+					receipt.metrics.candidate_workspace_digest === canonicalCandidate.workspaceDigest &&
+					receipt.metrics.candidate_python_bundle_digest === canonicalCandidate.pythonProbeBundleDigest &&
+					receipt.metrics.workspace_matches_candidate === true &&
+					receipt.metrics.python_bundle_matches_candidate === true,
+			);
+		const applicabilityCurrent = contract !== undefined;
+		const probeRequired = contract?.metrics.probe_required === true;
+		const surfaceSupported = !probeRequired || contract?.metrics.probe_surface_supported === true;
+		const latestProbe =
+			probeRequired && surfaceSupported
+				? [...state.evaluations]
+						.reverse()
+						.find(
+							(receipt) =>
+								receipt.candidateId === canonicalCandidate.candidateId &&
+								receipt.evaluatorId === "adversarial_probe" &&
+								receipt.issuedBy === "host" &&
+								receipt.authority === "model_opinion" &&
+								receipt.metrics.probe_adequacy_policy === "host_signature_contrast_model_oracle_v4" &&
+								receipt.metrics.supervisor_cycle_id === canonicalCycle.cycleId &&
+								receipt.metrics.probe_contract_digest === expectedContractDigest &&
+								receipt.metrics.probe_contract_registered === true &&
+								receipt.metrics.probe_contract_evaluation_id === contract.evaluationId &&
+								Date.parse(receipt.createdAt) >= Date.parse(contract.createdAt) &&
+								receipt.metrics.candidate_payload_digest === canonicalCandidate.payloadDigest &&
+								receipt.metrics.candidate_workspace_digest === canonicalCandidate.workspaceDigest &&
+								receipt.metrics.candidate_python_bundle_digest === canonicalCandidate.pythonProbeBundleDigest &&
+								receipt.metrics.workspace_matches_candidate === true &&
+								receipt.metrics.probe_execution_observed === true &&
+								receipt.metrics.probe_oracle_source === "retained_supervisor" &&
+								receipt.metrics.probe_semantic_authority === false &&
+								receipt.metrics.meaningful === false,
+						)
+				: undefined;
+		const passingProbe = latestProbe?.status === "pass";
+		probeChecks.push(
+			{
+				id: "adversarial_probe_applicability",
+				label: "Host-derived Python probe applicability",
+				passed: applicabilityCurrent,
+				reason: applicabilityCurrent
+					? undefined
+					: "the canonical Python candidate has no current host-derived adversarial probe contract",
+			},
+			{
+				id: "adversarial_probe_surface",
+				label: "Python probe surface is executable without omission",
+				passed: applicabilityCurrent && surfaceSupported,
+				reason:
+					applicabilityCurrent && !surfaceSupported
+						? String(contract?.metrics.validation_reason ?? "the required Python probe surface is unsupported")
+						: applicabilityCurrent
+							? undefined
+							: "probe surface support cannot be established without a current applicability contract",
+			},
+			{
+				id: "adversarial_probe_execution",
+				label: "Required host-executed supervisor challenge",
+				passed: applicabilityCurrent && (!probeRequired || (surfaceSupported && passingProbe)),
+				reason:
+					applicabilityCurrent && !probeRequired
+						? undefined
+						: passingProbe
+							? undefined
+							: "the canonical Python candidate lacks a current host-executed model-oracle challenge receipt for its retained review cycle",
+			},
+		);
+	}
+	const checks = [...gate.checks, check, ...probeChecks];
 	const reasons = checks.flatMap((item) => (!item.passed && item.reason ? [item.reason] : []));
 	return { passed: reasons.length === 0, checks, reasons };
 }
@@ -1078,6 +1162,37 @@ export class CodingAvoAdapter extends BaseAdapter {
 				],
 			};
 		}
+		const pythonMutation =
+			state.verificationPolicy === "required" &&
+			mutationKind &&
+			workspaceChanged &&
+			candidate.workspaceChangedPaths?.some((path) => path.endsWith(".py")) === true;
+		const immutableSemanticTest = executable.some(
+			(receipt) => receipt.evaluatorId === "test" && receipt.metrics.baseline_execution_matched === true,
+		);
+		const exactSpecProof = receipts.some(
+			(receipt) =>
+				isAuthoritativeAvoEvaluation(receipt) &&
+				receipt.evaluatorId === "spec_contract" &&
+				receipt.status === "pass" &&
+				receipt.metrics.meaningful === true &&
+				receipt.metrics.spec_semantic_evidence === true &&
+				receipt.metrics.workspace_matches_candidate === true &&
+				receipt.metrics.candidate_payload_digest === candidate.payloadDigest &&
+				receipt.metrics.candidate_workspace_digest === candidate.workspaceDigest &&
+				receipt.metrics.spec_contract_digest === state.verificationBaseline?.specContract?.contractDigest &&
+				typeof receipt.metrics.spec_impact_digest === "string" &&
+				/^[a-f0-9]{64}$/.test(receipt.metrics.spec_impact_digest),
+		);
+		if (pythonMutation && !immutableSemanticTest && !exactSpecProof) {
+			return {
+				status: "inconclusive" as const,
+				canonical: false,
+				reasons: [
+					"required Python changes need an immutable pre-candidate test or an exact candidate-bound independently verified spec proof; a captured contract alone and supervisor-written probe expectations are not semantic evidence",
+				],
+			};
+		}
 		return derived;
 	}
 
@@ -1137,16 +1252,12 @@ export class CodingAvoAdapter extends BaseAdapter {
 		};
 		const latestProbe = item(["adversarial_probe"]);
 		const probeItem = {
-			label: "Latest adversarial probes",
+			label: "Supervisor challenge probes",
 			value: latestProbe
-				? `${latestProbe.status} · cases ${String(latestProbe.metrics.probe_passed_case_count ?? 0)}/${String(latestProbe.metrics.probe_case_count ?? 0)} · input contrasts ${String(latestProbe.metrics.probe_contrasted_input_dimension_count ?? 0)}/${String(latestProbe.metrics.probe_required_contrast_dimension_count ?? 0)} · required APIs ${String(latestProbe.metrics.probe_required_callables || "none")} · called APIs ${String(latestProbe.metrics.probe_callables || "none")}`
+				? `${latestProbe.status} · host executed · model oracle ${latestProbe.status === "pass" ? "matched" : "did not clear"} · cases ${String(latestProbe.metrics.probe_passed_case_count ?? 0)}/${String(latestProbe.metrics.probe_case_count ?? 0)} · input contrasts ${String(latestProbe.metrics.probe_contrasted_input_dimension_count ?? 0)}/${String(latestProbe.metrics.probe_required_contrast_dimension_count ?? 0)} · required APIs ${String(latestProbe.metrics.probe_required_callables || "none")} · called APIs ${String(latestProbe.metrics.probe_callables || "none")}`
 				: "No receipt yet",
 			status:
-				latestProbe?.status === "pass"
-					? ("ok" as const)
-					: latestProbe?.status === "fail" || latestProbe?.status === "revise"
-						? ("fail" as const)
-						: ("watch" as const),
+				latestProbe?.status === "fail" || latestProbe?.status === "revise" ? ("fail" as const) : ("watch" as const),
 		};
 		projection.sections.push({
 			id: "coding_feedback",

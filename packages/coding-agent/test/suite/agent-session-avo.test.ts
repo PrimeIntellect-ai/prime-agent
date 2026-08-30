@@ -1,8 +1,8 @@
-import { mkdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AGENT_MESSAGE_SOURCE, createAgentSessionMessage } from "../../src/core/agent-messages.js";
 import { AVO_HOST_REQUEST_TYPES, type AvoRunState, GeneralAvoAdapter } from "../../src/core/avo/index.js";
 import { createHarness, type Harness } from "./harness.js";
@@ -78,6 +78,7 @@ describe("AgentSession universal AVO runtime", () => {
 	afterEach(() => {
 		harness?.cleanup();
 		harness = undefined;
+		vi.unstubAllEnvs();
 	});
 
 	it("uses one default AVO substrate and automatically selects its internal adapter", async () => {
@@ -1089,7 +1090,7 @@ describe("AgentSession universal AVO runtime", () => {
 		).toMatchObject({ cycle: { outcome: "accepted" } });
 	});
 
-	it("[STATE-001] rejects a coding test that mutates the evaluated workspace while it passes", async () => {
+	it("[STATE-001] denies a coding test that attempts to mutate the evaluated workspace", async () => {
 		harness = await createHarness({ persistSession: true });
 		writeFileSync(`${harness.tempDir}/parser.cjs`, "module.exports = 1;\n");
 		writeFileSync(
@@ -1115,14 +1116,123 @@ describe("AgentSession universal AVO runtime", () => {
 			command: "node --test parser.test.cjs",
 		});
 		expect(result.evaluation).toMatchObject({
-			status: "revise",
-			metrics: { meaningful: false, post_workspace_matches_candidate: false },
+			status: "fail",
+			metrics: { meaningful: true, post_workspace_matches_candidate: true },
 		});
+		expect(result.execution).toMatchObject({ output: expect.stringMatching(/read-only|EROFS/i) });
+		expect(readFileSync(`${harness.tempDir}/parser.cjs`, "utf8")).toBe("module.exports = 2;\n");
 		expect(
 			await harness.session.handleAvoHostRequest("avo.cycle.complete", {
 				cycle: { candidate_id: "mutated-by-test" },
 			}),
 		).toMatchObject({ cycle: { outcome: "revised" } });
+	});
+
+	it("rejects a passing Python test when the candidate rewrites its verification fixture", async () => {
+		vi.stubEnv("PYTHONDONTWRITEBYTECODE", "1");
+		vi.stubEnv("PYTEST_ADDOPTS", "-p no:cacheprovider");
+		harness = await createHarness({ persistSession: true });
+		mkdirSync(`${harness.tempDir}/tests`, { recursive: true });
+		writeFileSync(`${harness.tempDir}/subject.py`, "def evaluate(left, right):\n    return left + right\n");
+		writeFileSync(`${harness.tempDir}/tests/conftest.py`, "# immutable baseline fixture\n");
+		writeFileSync(
+			`${harness.tempDir}/tests/test_subject.py`,
+			"import subject\n\ndef test_evaluate():\n    assert subject.evaluate(2, 3) == 5\n",
+		);
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix subject.py evaluate(left, right) and prove the Python behavior");
+		const baseline = await harness.session.handleAvoHostRequest("avo.verification.baseline.run", {
+			command: "python3 -m pytest tests/test_subject.py -vv",
+		});
+		expect(baseline).toMatchObject({
+			execution: {
+				meaningful: true,
+				verificationHarness: { supported: true, digest: expect.any(String) },
+			},
+		});
+
+		writeFileSync(`${harness.tempDir}/subject.py`, "def evaluate(left, right):\n    return left - right\n");
+		writeFileSync(
+			`${harness.tempDir}/tests/conftest.py`,
+			"import subject\n\ndef pytest_runtest_setup(item):\n    subject.evaluate = lambda left, right: left + right\n",
+		);
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "fixture-bypass",
+				kind: "implementation",
+				summary: "Incorrect subtraction hidden by a fixture rewrite",
+				payload: { implementation: "subtraction", fixture: "oracle replacement" },
+			},
+		});
+		const post = await harness.session.handleAvoHostRequest("avo.evaluation.run", {
+			candidate_id: "fixture-bypass",
+			command: "python3 -m pytest tests/test_subject.py -vv",
+		});
+		expect(post.evaluation).toMatchObject({
+			status: "inconclusive",
+			issuedBy: "host",
+			metrics: {
+				meaningful: false,
+				trusted_test: true,
+				verification_harness_supported: true,
+				verification_harness_matched: false,
+				baseline_execution_matched: false,
+			},
+		});
+		expect(post.execution).toMatchObject({ output: expect.stringContaining("1 passed") });
+	});
+
+	it("[STATE-001] blocks transient fixture rewrites even when candidate code registers a restore", async () => {
+		vi.stubEnv("PYTHONDONTWRITEBYTECODE", "1");
+		vi.stubEnv("PYTEST_ADDOPTS", "-p no:cacheprovider");
+		harness = await createHarness({ persistSession: true });
+		mkdirSync(`${harness.tempDir}/tests`, { recursive: true });
+		writeFileSync(`${harness.tempDir}/subject.py`, "def evaluate(left, right):\n    return left + right\n");
+		writeFileSync(`${harness.tempDir}/tests/__init__.py`, "");
+		writeFileSync(`${harness.tempDir}/tests/expected_value.py`, "EXPECTED = 5\n");
+		writeFileSync(
+			`${harness.tempDir}/tests/test_subject.py`,
+			"import subject\nfrom tests.expected_value import EXPECTED\n\ndef test_evaluate():\n    assert subject.evaluate(2, 3) == EXPECTED\n",
+		);
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix subject.py evaluate(left, right) and prove the Python behavior");
+		await harness.session.handleAvoHostRequest("avo.verification.baseline.run", {
+			command: "python3 -m pytest tests/test_subject.py -vv",
+		});
+
+		writeFileSync(
+			`${harness.tempDir}/subject.py`,
+			[
+				"import atexit",
+				"from pathlib import Path",
+				"_fixture = Path(__file__).with_name('tests') / 'expected_value.py'",
+				"_original = _fixture.read_text()",
+				"_fixture.write_text('EXPECTED = -1\\n')",
+				"atexit.register(lambda: _fixture.write_text(_original))",
+				"def evaluate(left, right):",
+				"    return left - right",
+				"",
+			].join("\n"),
+		);
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "transient-fixture-bypass",
+				kind: "implementation",
+				summary: "Incorrect subtraction with transient fixture replacement",
+				payload: { implementation: "subtraction", restoration: "atexit" },
+			},
+		});
+		const post = await harness.session.handleAvoHostRequest("avo.evaluation.run", {
+			candidate_id: "transient-fixture-bypass",
+			command: "python3 -m pytest tests/test_subject.py -vv",
+		});
+		expect(post.evaluation).toMatchObject({
+			status: "fail",
+			issuedBy: "host",
+			metrics: { meaningful: true, post_workspace_matches_candidate: true },
+		});
+		expect(post.execution).toMatchObject({ output: expect.stringMatching(/read-only|EROFS/i) });
+		expect(readFileSync(`${harness.tempDir}/tests/expected_value.py`, "utf8")).toBe("EXPECTED = 5\n");
 	});
 
 	it("[SPEC-001] blocks ordinary test success without affected invariant receipts and rejects contract weakening", async () => {
@@ -1212,6 +1322,150 @@ describe("AgentSession universal AVO runtime", () => {
 				baseline_execution_matched: false,
 				baseline_observed_passed_work_units: 2,
 				observed_passed_work_units: 1,
+			},
+		});
+	});
+
+	it("rejects a candidate that changes the immutable test's generated execution identities", async () => {
+		harness = await createHarness({ persistSession: true });
+		writeFileSync(
+			`${harness.tempDir}/api.cjs`,
+			"module.exports = { calculate: (left, right) => left - right, CASES: [[1, 2]] };\n",
+		);
+		writeFileSync(
+			`${harness.tempDir}/api.test.cjs`,
+			"const test = require('node:test'); const assert = require('node:assert'); const api = require('./api.cjs'); for (const [left, right] of api.CASES) test('subtract ' + left + ',' + right, () => assert.equal(api.calculate(left, right), left - right));\n",
+		);
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix api.cjs subtraction behavior and run its test");
+		const baseline = await harness.session.handleAvoHostRequest("avo.verification.baseline.run", {
+			command: "node --test api.test.cjs",
+		});
+		expect(baseline).toMatchObject({
+			execution: { meaningful: true, observedTestIdentities: ["node:1:subtract 1,2"] },
+		});
+
+		writeFileSync(
+			`${harness.tempDir}/api.cjs`,
+			"module.exports = { calculate: (left, right) => left + right, CASES: [[0, 0]] };\n",
+		);
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "generated-case-bypass",
+				kind: "implementation",
+				summary: "Wrong addition with an easier generated case",
+				payload: { implementation: "addition", cases: [[0, 0]] },
+			},
+		});
+		const post = await harness.session.handleAvoHostRequest("avo.evaluation.run", {
+			candidate_id: "generated-case-bypass",
+			command: "node --test api.test.cjs",
+		});
+		expect(post.evaluation).toMatchObject({
+			status: "inconclusive",
+			metrics: {
+				meaningful: false,
+				baseline_execution_matched: false,
+				test_identity_matched: false,
+				baseline_observed_test_identities: JSON.stringify(["node:1:subtract 1,2"]),
+				observed_test_identities: JSON.stringify(["node:1:subtract 0,0"]),
+			},
+		});
+	});
+
+	it("rejects a candidate that exits a Node test process before the immutable test executes", async () => {
+		harness = await createHarness({ persistSession: true });
+		writeFileSync(`${harness.tempDir}/api.cjs`, "module.exports = { calculate: () => 2 };\n");
+		writeFileSync(
+			`${harness.tempDir}/api.test.cjs`,
+			"const test = require('node:test'); const assert = require('node:assert'); test('returns two', () => assert.equal(require('./api.cjs').calculate(), 2));\n",
+		);
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix api.cjs and run its immutable test");
+		const baseline = await harness.session.handleAvoHostRequest("avo.verification.baseline.run", {
+			command: "node --test api.test.cjs",
+		});
+		expect(baseline).toMatchObject({
+			execution: { meaningful: true, observedTestIdentities: ["node:1:returns two"] },
+		});
+
+		writeFileSync(`${harness.tempDir}/api.cjs`, "process.exit(0);\n");
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "early-exit-bypass",
+				kind: "implementation",
+				summary: "Exit before the test assertion",
+				payload: { implementation: "early exit" },
+			},
+		});
+		const post = await harness.session.handleAvoHostRequest("avo.evaluation.run", {
+			candidate_id: "early-exit-bypass",
+			command: "node --test api.test.cjs",
+		});
+		expect(post.evaluation).toMatchObject({
+			status: "inconclusive",
+			metrics: {
+				meaningful: false,
+				baseline_execution_matched: false,
+				test_identity_matched: false,
+				baseline_observed_test_identities: JSON.stringify(["node:1:returns two"]),
+				observed_test_identities: JSON.stringify([]),
+			},
+		});
+	});
+
+	it("rejects forged pytest identities and summaries emitted by changed Python code", async () => {
+		vi.stubEnv("PYTHONDONTWRITEBYTECODE", "1");
+		harness = await createHarness({ persistSession: true });
+		writeFileSync(`${harness.tempDir}/subject.py`, "def value():\n    return 1\n");
+		writeFileSync(
+			`${harness.tempDir}/test_subject.py`,
+			"from subject import value\n\ndef test_subject():\n    assert value() == 1\n",
+		);
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix subject.py value() and run the immutable Python test");
+		const command = "python3 -m pytest test_subject.py -vv -p no:cacheprovider";
+		const baseline = await harness.session.handleAvoHostRequest("avo.verification.baseline.run", { command });
+		expect(baseline).toMatchObject({
+			execution: { meaningful: true, observedTestIdentities: ["pytest:1:test_subject.py::test_subject"] },
+		});
+
+		writeFileSync(
+			`${harness.tempDir}/subject.py`,
+			[
+				"import gc",
+				"import os",
+				"_fake = (b'collected 1 item\\n\\n' b'test_subject.py::test_subject PASSED [100%]\\n\\n' b'============================== 1 passed in 0.01s ===============================\\n')",
+				"for _item in gc.get_objects():",
+				"    if _item.__class__.__name__ == 'FDCapture' and getattr(_item, 'targetfd', None) == 1:",
+				"        os.write(_item.targetfd_save, _fake)",
+				"        break",
+				"os._exit(0)",
+				"def value():",
+				"    return -1",
+				"",
+			].join("\n"),
+		);
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "pytest-output-forgery",
+				kind: "implementation",
+				summary: "Incorrect Python result with forged pytest output",
+				payload: { implementation: "forged pytest output" },
+			},
+		});
+		const post = await harness.session.handleAvoHostRequest("avo.evaluation.run", {
+			candidate_id: "pytest-output-forgery",
+			command,
+		});
+		expect(post.evaluation).toMatchObject({
+			status: "inconclusive",
+			metrics: {
+				meaningful: false,
+				baseline_execution_matched: false,
+				test_identity_matched: true,
+				python_in_process_self_certification: true,
+				python_test_semantic_authority: false,
 			},
 		});
 	});

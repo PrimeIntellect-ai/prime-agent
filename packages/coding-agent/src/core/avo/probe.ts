@@ -1,13 +1,17 @@
-import { spawn } from "node:child_process";
-import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { parseAvoSupervisorPayload } from "./supervisor.js";
+import type { AvoCandidate, AvoRunState } from "./types.js";
 
 export const AVO_PYTHON_PROBE_BROKER_SOCKET_ENV = "PRIME_AGENT_INTERNAL_AVO_PROBE_BROKER_SOCKET";
 export const AVO_PYTHON_PROBE_BROKER_TOKEN_ENV = "PRIME_AGENT_INTERNAL_AVO_PROBE_BROKER_TOKEN";
+export const AVO_PYTHON_PROBE_MAX_CASES = 64;
+export const AVO_PYTHON_PROBE_POLICY_VERSION = 4;
+const AVO_PYTHON_PROBE_BROKER_PROTOCOL_VERSION = 3;
 
 export type AvoProbeJsonValue =
 	| null
@@ -21,6 +25,7 @@ export interface AvoPythonProbeExpectation {
 	kind: "return" | "raises";
 	value?: AvoProbeJsonValue;
 	error?: string;
+	message?: string;
 }
 
 export interface AvoPythonProbeCase {
@@ -42,6 +47,9 @@ export interface AvoPythonProbePlan {
 export interface AvoPythonProbeBindings {
 	modulePaths: readonly string[];
 	requiredCallables: readonly string[];
+	callableInputDimensions: Readonly<Record<string, readonly string[]>>;
+	surfaceError?: string;
+	surfaceErrorDisposition?: "candidate_invalid" | "environment_unsupported";
 	requirementIds: readonly string[];
 	minimumCases: number;
 	maximumCases: number;
@@ -50,8 +58,89 @@ export interface AvoPythonProbeBindings {
 	minimumContrastedInputDimensions: number;
 }
 
+export interface AvoPythonProbeBundleFile {
+	path: string;
+	contentBase64: string;
+}
+
+export interface AvoPythonProbeBundle {
+	digest: string;
+	fileCount: number;
+	totalBytes: number;
+	files: AvoPythonProbeBundleFile[];
+}
+
+export function createAvoPythonProbeBundle(files: readonly AvoPythonProbeBundleFile[]): AvoPythonProbeBundle {
+	const hash = createHash("sha256");
+	hash.update("prime-avo-python-bundle-v1\0");
+	let totalBytes = 0;
+	const normalized = [...files]
+		.map((file) => ({ path: file.path.replaceAll("\\", "/"), contentBase64: file.contentBase64 }))
+		.sort((left, right) => left.path.localeCompare(right.path));
+	if (normalized.length > 10_000) throw new Error("Python probe bundle exceeds 10000 source files");
+	for (const file of normalized) {
+		if (
+			!file.path ||
+			file.path.startsWith("/") ||
+			file.path.split("/").some((part) => !part || part === "." || part === "..") ||
+			!file.path.endsWith(".py")
+		) {
+			throw new Error(`Python probe bundle contains an unsafe source path: ${file.path}`);
+		}
+		const contents = Buffer.from(file.contentBase64, "base64");
+		if (contents.toString("base64") !== file.contentBase64) {
+			throw new Error(`Python probe bundle contains malformed base64 for ${file.path}`);
+		}
+		totalBytes += contents.byteLength;
+		if (totalBytes > 16 * 1024 * 1024) throw new Error("Python probe bundle exceeds 16777216 bytes");
+		hash.update(file.path);
+		hash.update("\0");
+		hash.update(String(contents.byteLength));
+		hash.update("\0");
+		hash.update(contents);
+		hash.update("\0");
+	}
+	if (new Set(normalized.map((file) => file.path)).size !== normalized.length) {
+		throw new Error("Python probe bundle contains duplicate source paths");
+	}
+	return {
+		digest: hash.digest("hex"),
+		fileCount: normalized.length,
+		totalBytes,
+		files: normalized,
+	};
+}
+
+export function digestAvoPythonProbeApplicability(
+	state: Pick<AvoRunState, "objective" | "obligations">,
+	candidate: Pick<
+		AvoCandidate,
+		"candidateId" | "payloadDigest" | "workspaceDigest" | "workspaceChangedPaths" | "pythonProbeBundleDigest"
+	>,
+): string {
+	return createHash("sha256")
+		.update(
+			JSON.stringify({
+				probePolicyVersion: AVO_PYTHON_PROBE_POLICY_VERSION,
+				objective: state.objective,
+				obligations: state.obligations.map((item) => ({
+					obligationId: item.obligationId,
+					description: item.description,
+					kind: item.kind,
+					critical: item.critical,
+				})),
+				candidateId: candidate.candidateId,
+				payloadDigest: candidate.payloadDigest,
+				workspaceDigest: candidate.workspaceDigest,
+				workspaceChangedPaths: candidate.workspaceChangedPaths,
+				pythonProbeBundleDigest: candidate.pythonProbeBundleDigest,
+			}),
+		)
+		.digest("hex");
+}
+
 export interface AvoPythonProbeAdequacy {
-	policyVersion: 1;
+	policyVersion: 3;
 	requiredInputDimensions: number;
 	contrastedInputDimensions: number;
 	callables: Array<{
@@ -59,6 +148,11 @@ export interface AvoPythonProbeAdequacy {
 		requiredDimensions: string[];
 		contrastedDimensions: string[];
 	}>;
+}
+
+export interface AvoPythonCallableInspection {
+	callables: Array<{ name: string; inputDimensions: string[]; signatureDigest: string; structuralDigest: string }>;
+	errors: Array<{ name: string; reason: string }>;
 }
 
 export interface AvoPythonProbeCaseResult {
@@ -86,6 +180,12 @@ export interface AvoPythonProbeExecution {
 	error?: string;
 }
 
+export interface AvoPythonProbeExecutorAvailability {
+	available: boolean;
+	mode: "broker" | "local_sandbox" | "unavailable";
+	reason?: string;
+}
+
 export interface AvoPythonProbeBrokerHandle {
 	socketPath: string;
 	token: string;
@@ -111,6 +211,12 @@ function requiredString(value: unknown, label: string, pattern?: RegExp): string
 	return normalized;
 }
 
+function exactErrorMessage(value: unknown, label: string): string {
+	if (typeof value !== "string") throw new Error(`${label} must be a string`);
+	if (value.length > 500) throw new Error(`${label} exceeds 500 characters`);
+	return value;
+}
+
 function parseJsonValue(value: unknown, label: string, depth = 0): AvoProbeJsonValue {
 	if (depth > 8) throw new Error(`${label} exceeds the JSON nesting limit`);
 	if (value === null || typeof value === "boolean" || typeof value === "string") {
@@ -119,6 +225,9 @@ function parseJsonValue(value: unknown, label: string, depth = 0): AvoProbeJsonV
 	}
 	if (typeof value === "number") {
 		if (!Number.isFinite(value)) throw new Error(`${label} numbers must be finite`);
+		if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+			throw new Error(`${label} integers must be within the JSON safe-integer range`);
+		}
 		return value;
 	}
 	if (Array.isArray(value)) {
@@ -152,7 +261,11 @@ function canonicalJson(value: AvoProbeJsonValue): string {
 function expectationIdentity(expectation: AvoPythonProbeExpectation): string {
 	return expectation.kind === "return"
 		? `return:${canonicalJson(expectation.value ?? null)}`
-		: `raises:${expectation.error ?? ""}`;
+		: `raises:${expectation.error ?? ""}:${JSON.stringify(expectation.message ?? "")}`;
+}
+
+function probeInputIdentity(probeCase: Pick<AvoPythonProbeCase, "callable" | "args" | "kwargs">): string {
+	return `${probeCase.callable}:${canonicalJson({ args: probeCase.args, kwargs: probeCase.kwargs })}`;
 }
 
 function inputIdentityWithoutDimension(probeCase: AvoPythonProbeCase, dimension: string): string {
@@ -166,6 +279,267 @@ function inputIdentityWithoutDimension(probeCase: AvoPythonProbeCase, dimension:
 	return canonicalJson({ args, kwargs });
 }
 
+const AVO_PYTHON_SIGNATURE_INSPECTOR = `
+import ast
+import hashlib
+import json
+import sys
+
+def bound_names(statement):
+    names = set()
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {statement.name}
+    if isinstance(statement, (ast.Import, ast.ImportFrom)):
+        for alias in statement.names:
+            names.add("*" if alias.name == "*" else (alias.asname or alias.name.split(".")[0]))
+        return names
+    targets = []
+    if isinstance(statement, ast.Assign):
+        targets = statement.targets
+    elif isinstance(statement, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+        targets = [statement.target]
+    for target in targets:
+      for node in ast.walk(target):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            names.add(node.id)
+    return names
+
+def inspect_source(source):
+    try:
+        tree = ast.parse(source, mode="exec")
+    except SyntaxError as exc:
+        return {"callables": [], "errors": [{"name": "*", "reason": f"Python syntax is not inspectable: {exc.msg}"}]}
+    direct = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_")]
+    callables = []
+    errors = []
+    direct_names = {node.name for node in direct}
+    uncertain_names = set()
+    for statement in tree.body:
+        if isinstance(statement, ast.Import):
+            uncertain_names.update(alias.asname or alias.name.split(".")[0] for alias in statement.names)
+        elif isinstance(statement, ast.ImportFrom):
+            for alias in statement.names:
+                if alias.name == "*":
+                    uncertain_names.add("*")
+                else:
+                    uncertain_names.add(alias.asname or alias.name)
+        elif isinstance(statement, ast.ClassDef):
+            uncertain_names.add(statement.name)
+        elif isinstance(statement, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            uncertain_names.update(bound_names(statement))
+    for name in sorted(name for name in uncertain_names if name == "*" or (not name.startswith("_") and name not in direct_names)):
+        errors.append({"name": name, "reason": f"public binding {name} may be callable but is not a directly inspectable function definition"})
+
+    def shape(node):
+        return None if node is None else ast.dump(node, annotate_fields=True, include_attributes=False)
+
+    binding_records = {}
+    function_bindings = {}
+
+    def referenced_binding_records(node, available):
+        if node is None:
+            return {}
+        return {
+            name: available[name]
+            for name in sorted({item.id for item in ast.walk(node) if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load)})
+            if name in available
+        }
+
+    for statement in tree.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            function_bindings[id(statement)] = dict(binding_records)
+            binding_records[statement.name] = {"function": shape(statement), "bindings": referenced_binding_records(statement, binding_records)}
+        elif isinstance(statement, (ast.Import, ast.ImportFrom)):
+            for bound_name in bound_names(statement):
+                binding_records[bound_name] = {"import": shape(statement), "unresolved": True}
+        elif isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    binding_records[target.id] = {"expression": shape(statement.value), "bindings": referenced_binding_records(statement.value, binding_records)}
+        elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+            binding_records[statement.target.id] = {"expression": shape(statement.value), "bindings": referenced_binding_records(statement.value, binding_records)}
+
+    def binding_closure(nodes, available):
+        names = set()
+        for root in nodes:
+            if root is not None:
+                names.update(node.id for node in ast.walk(root) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load))
+        return {name: available[name] for name in sorted(names) if name in available}
+
+    def contains_unresolved(record):
+        if isinstance(record, dict):
+            return record.get("unresolved") is True or any(contains_unresolved(value) for value in record.values())
+        if isinstance(record, list):
+            return any(contains_unresolved(value) for value in record)
+        return False
+
+    for name in dict.fromkeys(node.name for node in direct):
+        definitions = [node for node in direct if node.name == name]
+        ambiguous = len(definitions) != 1
+        for statement in tree.body:
+            if statement in definitions:
+                continue
+            if name in bound_names(statement):
+                ambiguous = True
+        node = definitions[-1]
+        if ambiguous:
+            errors.append({"name": name, "reason": f"public callable {name} has ambiguous module-level bindings"})
+            continue
+        if node.decorator_list:
+            errors.append({"name": name, "reason": f"public callable {name} is decorated, so its runtime signature is not statically authoritative"})
+            continue
+        available_bindings = function_bindings[id(node)]
+        default_nodes = [*node.args.defaults, *(item for item in node.args.kw_defaults if item is not None)]
+        default_names = {
+            item.id
+            for root in default_nodes
+            for item in ast.walk(root)
+            if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Load)
+        }
+        unresolved_defaults = sorted(
+            name for name in default_names
+            if name not in available_bindings or contains_unresolved(available_bindings[name])
+        )
+        if unresolved_defaults:
+            errors.append({"name": name, "reason": f"public callable {name} has defaults with unresolved bindings: {', '.join(unresolved_defaults)}"})
+            continue
+        positional = [(item, "positional_only") for item in node.args.posonlyargs] + [(item, "positional_or_keyword") for item in node.args.args]
+        positional_defaults = [None] * (len(positional) - len(node.args.defaults)) + list(node.args.defaults)
+        signature = [
+            {"name": item.arg, "kind": kind, "required": positional_defaults[index] is None, "annotation": shape(item.annotation), "default": shape(positional_defaults[index])}
+            for index, (item, kind) in enumerate(positional)
+        ]
+        if node.args.vararg is not None:
+            signature.append({"name": node.args.vararg.arg, "kind": "var_positional", "required": False, "annotation": shape(node.args.vararg.annotation), "default": None})
+        signature.extend(
+            {"name": item.arg, "kind": "keyword_only", "required": node.args.kw_defaults[index] is None, "annotation": shape(item.annotation), "default": shape(node.args.kw_defaults[index])}
+            for index, item in enumerate(node.args.kwonlyargs)
+        )
+        if node.args.kwarg is not None:
+            signature.append({"name": node.args.kwarg.arg, "kind": "var_keyword", "required": False, "annotation": shape(node.args.kwarg.annotation), "default": None})
+        dimensions = []
+        positional_index = 0
+        for item in signature:
+            if item["kind"] in ("positional_only", "positional_or_keyword"):
+                dimensions.append(f"arg:{positional_index}")
+                positional_index += 1
+            elif item["kind"] == "keyword_only":
+                dimensions.append(f"kwarg:{item['name']}")
+        if not dimensions and any(item["kind"].startswith("var_") for item in signature):
+            errors.append({"name": name, "reason": f"public callable {name} has only variadic inputs and cannot be contrasted deterministically"})
+            continue
+        signature_nodes = [*node.args.defaults, *node.args.kw_defaults, node.returns]
+        signature_nodes.extend(item.annotation for item in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs] if item.annotation is not None)
+        if node.args.vararg is not None:
+            signature_nodes.append(node.args.vararg.annotation)
+        if node.args.kwarg is not None:
+            signature_nodes.append(node.args.kwarg.annotation)
+        signature_record = {"parameters": signature, "returns": shape(node.returns), "type_comment": node.type_comment, "async": isinstance(node, ast.AsyncFunctionDef), "bindings": binding_closure(signature_nodes, available_bindings)}
+        encoded = json.dumps(signature_record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        structural = [{"name": item["name"], "kind": item["kind"], "required": item["required"]} for item in signature]
+        structural_encoded = json.dumps({"parameters": structural, "async": isinstance(node, ast.AsyncFunctionDef)}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        callables.append({"name": name, "inputDimensions": dimensions, "signatureDigest": hashlib.sha256(encoded).hexdigest(), "structuralDigest": hashlib.sha256(structural_encoded).hexdigest()})
+    return {"callables": callables, "errors": errors}
+
+def main():
+    sources = json.load(sys.stdin)
+    print(json.dumps({"results": {item["key"]: inspect_source(item["source"]) for item in sources}}, separators=(",", ":")))
+
+main()
+`.trim();
+
+function parseAvoPythonCallableInspection(value: unknown): AvoPythonCallableInspection {
+	if (!isRecord(value) || !Array.isArray(value.callables) || !Array.isArray(value.errors)) {
+		throw new Error("AST inspector returned an invalid inspection envelope");
+	}
+	const callables = value.callables.map((item): AvoPythonCallableInspection["callables"][number] => {
+		if (
+			!isRecord(item) ||
+			typeof item.name !== "string" ||
+			!Array.isArray(item.inputDimensions) ||
+			!item.inputDimensions.every((dimension) => typeof dimension === "string") ||
+			typeof item.signatureDigest !== "string" ||
+			!/^[a-f0-9]{64}$/.test(item.signatureDigest) ||
+			typeof item.structuralDigest !== "string" ||
+			!/^[a-f0-9]{64}$/.test(item.structuralDigest)
+		) {
+			throw new Error("AST inspector returned an invalid callable");
+		}
+		return {
+			name: item.name,
+			inputDimensions: item.inputDimensions,
+			signatureDigest: item.signatureDigest,
+			structuralDigest: item.structuralDigest,
+		};
+	});
+	const errors = value.errors.map((item): AvoPythonCallableInspection["errors"][number] => {
+		if (!isRecord(item) || typeof item.name !== "string" || typeof item.reason !== "string") {
+			throw new Error("AST inspector returned an invalid error");
+		}
+		return { name: item.name, reason: item.reason };
+	});
+	return { callables, errors };
+}
+
+export function inspectAvoPythonPublicCallableSources(
+	sources: Readonly<Record<string, string>>,
+): Record<string, AvoPythonCallableInspection> {
+	const entries = Object.entries(sources);
+	if (entries.length === 0) return {};
+	if (entries.length > 20_000) throw new Error("Python AST inspection exceeds the 20000-file limit");
+	let totalBytes = 0;
+	const oversized = new Set<string>();
+	const inspectable = entries.flatMap(([key, source]) => {
+		const bytes = Buffer.byteLength(source);
+		totalBytes += bytes;
+		if (bytes > 1_000_000) {
+			oversized.add(key);
+			return [];
+		}
+		return [{ key, source }];
+	});
+	if (totalBytes > 128 * 1024 * 1024) throw new Error("Python AST inspection exceeds the aggregate byte limit");
+	const python = existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3";
+	const result = spawnSync(python, ["-I", "-B", "-c", AVO_PYTHON_SIGNATURE_INSPECTOR], {
+		input: JSON.stringify(inspectable),
+		encoding: "utf8",
+		timeout: 15_000,
+		maxBuffer: 32 * 1024 * 1024,
+		env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+	});
+	if (result.status !== 0 || result.error) {
+		throw new Error(
+			`Python AST inspection failed: ${result.error?.message ?? (result.stderr.trim() || `exit ${result.status}`)}`,
+		);
+	}
+	try {
+		const parsed = JSON.parse(result.stdout) as unknown;
+		if (!isRecord(parsed) || !isRecord(parsed.results)) {
+			throw new Error("AST inspector returned an invalid envelope");
+		}
+		const inspections: Record<string, AvoPythonCallableInspection> = {};
+		for (const [key] of entries) {
+			inspections[key] = oversized.has(key)
+				? { callables: [], errors: [{ name: "*", reason: "Python source exceeds the AST inspection limit" }] }
+				: parseAvoPythonCallableInspection(parsed.results[key]);
+		}
+		return inspections;
+	} catch (error) {
+		throw new Error(error instanceof Error ? error.message : String(error));
+	}
+}
+
+export function inspectAvoPythonPublicCallables(source: string): AvoPythonCallableInspection {
+	try {
+		return inspectAvoPythonPublicCallableSources({ source }).source!;
+	} catch (error) {
+		return {
+			callables: [],
+			errors: [{ name: "*", reason: error instanceof Error ? error.message : String(error) }],
+		};
+	}
+}
+
 function dimensionValue(probeCase: AvoPythonProbeCase, dimension: string): AvoProbeJsonValue | undefined {
 	return dimension.startsWith("arg:")
 		? probeCase.args[Number(dimension.slice(4))]
@@ -174,22 +548,18 @@ function dimensionValue(probeCase: AvoPythonProbeCase, dimension: string): AvoPr
 
 export function assessAvoPythonProbeAdequacy(
 	plan: AvoPythonProbePlan,
-	bindings: Pick<AvoPythonProbeBindings, "requiredCallables" | "minimumContrastedInputDimensions">,
+	bindings: Pick<
+		AvoPythonProbeBindings,
+		"requiredCallables" | "callableInputDimensions" | "minimumContrastedInputDimensions"
+	>,
 ): AvoPythonProbeAdequacy {
 	const summaries: AvoPythonProbeAdequacy["callables"] = [];
 	for (const callable of bindings.requiredCallables) {
 		const cases = plan.cases.filter((item) => item.callable === callable);
 		if (cases.length === 0) throw new Error(`probe_plan must exercise host-required callable ${callable}`);
-		const maximumArgumentCount = Math.max(0, ...cases.map((item) => item.args.length));
-		const positionalDimensions = Array.from(
-			{ length: Math.min(bindings.minimumContrastedInputDimensions, maximumArgumentCount) },
-			(_, index) => `arg:${index}`,
-		);
-		const keywordDimensions = [...new Set(cases.flatMap((item) => Object.keys(item.kwargs)))]
-			.sort()
-			.slice(0, Math.max(0, bindings.minimumContrastedInputDimensions - positionalDimensions.length))
-			.map((key) => `kwarg:${key}`);
-		const requiredDimensions = [...positionalDimensions, ...keywordDimensions];
+		const hostDimensions = bindings.callableInputDimensions[callable];
+		if (!hostDimensions) throw new Error(`host has no trusted input signature for required callable ${callable}`);
+		const requiredDimensions = hostDimensions.slice(0, bindings.minimumContrastedInputDimensions);
 		const contrastedDimensions = requiredDimensions.filter((dimension) =>
 			cases.some((left, leftIndex) =>
 				cases.slice(leftIndex + 1).some((right) => {
@@ -214,7 +584,7 @@ export function assessAvoPythonProbeAdequacy(
 		summaries.push({ callable, requiredDimensions, contrastedDimensions });
 	}
 	return {
-		policyVersion: 1,
+		policyVersion: 3,
 		requiredInputDimensions: summaries.reduce((total, item) => total + item.requiredDimensions.length, 0),
 		contrastedInputDimensions: summaries.reduce((total, item) => total + item.contrastedDimensions.length, 0),
 		callables: summaries,
@@ -235,8 +605,8 @@ function parseBrokerPlan(value: unknown): AvoPythonProbePlan {
 	) {
 		throw new Error("probe broker plan.modulePath must be a bounded relative Python path");
 	}
-	if (!Array.isArray(value.cases) || value.cases.length < 1 || value.cases.length > 24) {
-		throw new Error("probe broker plan.cases must contain 1-24 cases");
+	if (!Array.isArray(value.cases) || value.cases.length < 1 || value.cases.length > AVO_PYTHON_PROBE_MAX_CASES) {
+		throw new Error(`probe broker plan.cases must contain 1-${AVO_PYTHON_PROBE_MAX_CASES} cases`);
 	}
 	const cases = value.cases.map((item, index): AvoPythonProbeCase => {
 		if (!isRecord(item)) throw new Error(`probe broker plan.cases[${index}] must be an object`);
@@ -292,6 +662,10 @@ function parseBrokerPlan(value: unknown): AvoPythonProbePlan {
 								`probe broker plan.cases[${index}].expect.error`,
 								/^[A-Za-z][A-Za-z0-9_]{0,63}$/,
 							),
+							message: exactErrorMessage(
+								expectValue.message,
+								`probe broker plan.cases[${index}].expect.message`,
+							),
 						}
 					: (() => {
 							throw new Error(`probe broker plan.cases[${index}].expect.kind is invalid`);
@@ -300,6 +674,9 @@ function parseBrokerPlan(value: unknown): AvoPythonProbePlan {
 	});
 	if (new Set(cases.map((item) => item.caseId)).size !== cases.length) {
 		throw new Error("probe broker plan contains duplicate case IDs");
+	}
+	if (new Set(cases.map(probeInputIdentity)).size !== cases.length) {
+		throw new Error("probe broker plan contains duplicate callable inputs");
 	}
 	return { probeVersion: 1, runtime: "python_call_v1", modulePath, cases };
 }
@@ -323,9 +700,11 @@ export function parseAvoPythonProbePlan(
 	if (
 		!Array.isArray(value.cases) ||
 		value.cases.length < bindings.minimumCases ||
-		value.cases.length > bindings.maximumCases
+		value.cases.length > Math.min(bindings.maximumCases, AVO_PYTHON_PROBE_MAX_CASES)
 	) {
-		throw new Error(`probe_plan.cases must contain ${bindings.minimumCases}-${bindings.maximumCases} cases`);
+		throw new Error(
+			`probe_plan.cases must contain ${bindings.minimumCases}-${Math.min(bindings.maximumCases, AVO_PYTHON_PROBE_MAX_CASES)} cases`,
+		);
 	}
 	const caseIds = new Set<string>();
 	const coveredRequirements = new Set<string>();
@@ -349,6 +728,9 @@ export function parseAvoPythonProbePlan(
 			`probe_plan.cases[${index}].callable`,
 			/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*){0,3}$/,
 		);
+		if (!bindings.requiredCallables.includes(callable)) {
+			throw new Error(`probe_plan.cases[${index}].callable must be a host-required callable`);
+		}
 		if (
 			!Array.isArray(rawCase.requirement_ids) ||
 			rawCase.requirement_ids.length < 1 ||
@@ -401,7 +783,7 @@ export function parseAvoPythonProbePlan(
 			};
 		}
 		if (rawExpect.kind === "raises") {
-			assertKnownKeys(rawExpect, ["kind", "error"], `probe_plan.cases[${index}].expect`);
+			assertKnownKeys(rawExpect, ["kind", "error", "message"], `probe_plan.cases[${index}].expect`);
 			return {
 				caseId,
 				callable,
@@ -415,11 +797,15 @@ export function parseAvoPythonProbePlan(
 						`probe_plan.cases[${index}].expect.error`,
 						/^[A-Za-z][A-Za-z0-9_]{0,63}$/,
 					),
+					message: exactErrorMessage(rawExpect.message, `probe_plan.cases[${index}].expect.message`),
 				},
 			};
 		}
 		throw new Error(`probe_plan.cases[${index}].expect.kind must be return or raises`);
 	});
+	if (new Set(cases.map(probeInputIdentity)).size !== cases.length) {
+		throw new Error("probe_plan cases must use distinct callable inputs");
+	}
 	if (crossRequirementCases < bindings.minimumCrossRequirementCases) {
 		throw new Error(`probe_plan requires at least ${bindings.minimumCrossRequirementCases} cross-requirement cases`);
 	}
@@ -477,29 +863,46 @@ export function parseAvoPythonProbeReport(stdout: string, expectedCaseIds: reado
 }
 
 export const AVO_PYTHON_PROBE_RUNNER = `
+import base64
 import contextlib
+import hashlib
+import importlib
 import importlib.util
+import inspect
+import asyncio
 import io
 import json
 import math
+import os
 import pathlib
+import resource
 import sys
 
-MARKER = "AVO_PYTHON_PROBE_RESULT:"
+MARKER = "AVO_PYTHON_PROBE_RAW:"
 WORKSPACE = pathlib.Path("/tmp/workspace").resolve()
+MAX_SAFE_INTEGER = 9007199254740991
+
+class UnsupportedReturn(Exception):
+    pass
 
 def normalize(value, depth=0):
     if depth > 8:
-        return {"__unsupported__": "depth"}
-    if value is None or isinstance(value, (bool, int, str)):
+        raise UnsupportedReturn("return value exceeds the JSON nesting limit")
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, int):
+        if abs(value) > MAX_SAFE_INTEGER:
+            raise UnsupportedReturn("return integer exceeds the JSON safe-integer range")
         return value
     if isinstance(value, float):
-        return value if math.isfinite(value) else {"__unsupported__": "non_finite_float"}
-    if isinstance(value, (list, tuple)):
+        if not math.isfinite(value):
+            raise UnsupportedReturn("return value is a non-finite float")
+        return value
+    if isinstance(value, list):
         return [normalize(item, depth + 1) for item in value]
     if isinstance(value, dict) and all(isinstance(key, str) for key in value):
         return {key: normalize(item, depth + 1) for key, item in value.items()}
-    return {"__unsupported__": type(value).__name__, "repr": repr(value)[:500]}
+    raise UnsupportedReturn(f"unsupported return type {type(value).__name__}")
 
 def resolve_callable(module, dotted_name):
     target = module
@@ -511,65 +914,109 @@ def resolve_callable(module, dotted_name):
         raise TypeError("probe target is not callable")
     return target
 
+def emit(value):
+    encoded = (MARKER + json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")) + "\\n").encode("utf-8")
+    os.write(1, encoded)
+
 def main():
-    plan_path = pathlib.Path(sys.argv[1])
-    plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    module_path = (WORKSPACE / plan["modulePath"]).resolve(strict=True)
+    resource.setrlimit(resource.RLIMIT_CPU, (2, 2))
+    resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (8 * 1024 * 1024, 8 * 1024 * 1024))
+    resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
+    resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
+    envelope = json.load(sys.stdin)
+    request = envelope["request"]
+    bundle = envelope["bundle"]
+    digest = hashlib.sha256()
+    digest.update(b"prime-avo-python-bundle-v1\\0")
+    for item in sorted(bundle["files"], key=lambda value: value["path"]):
+        relative_path = pathlib.PurePosixPath(item["path"])
+        if relative_path.is_absolute() or any(part in ("", ".", "..") for part in relative_path.parts) or relative_path.suffix != ".py":
+            raise ValueError("unsafe Python bundle path")
+        contents = base64.b64decode(item["contentBase64"], validate=True)
+        digest.update(item["path"].encode("utf-8"))
+        digest.update(b"\\0")
+        digest.update(str(len(contents)).encode("ascii"))
+        digest.update(b"\\0")
+        digest.update(contents)
+        digest.update(b"\\0")
+        destination = (WORKSPACE / relative_path).resolve()
+        destination.relative_to(WORKSPACE)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(contents)
+    if digest.hexdigest() != bundle["digest"]:
+        raise ValueError("Python bundle digest mismatch")
+    module_path = (WORKSPACE / request["modulePath"]).resolve(strict=True)
     module_path.relative_to(WORKSPACE)
+    relative_module_path = pathlib.PurePosixPath(request["modulePath"])
+    package_directories = list(relative_module_path.parts[:-1])
+    package_start = len(package_directories)
+    while package_start > 0 and (WORKSPACE.joinpath(*package_directories[:package_start]) / "__init__.py").is_file():
+        package_start -= 1
+    if package_start == len(package_directories) and package_directories:
+        package_start = 1 if package_directories[0] in ("src", "lib") and len(package_directories) > 1 else 0
+    sys.path.insert(0, str(WORKSPACE.joinpath(*package_directories[:package_start])))
     sys.path.insert(0, str(WORKSPACE))
     captured = io.StringIO()
     try:
         with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-            spec = importlib.util.spec_from_file_location("avo_candidate_probe_module", module_path)
-            if spec is None or spec.loader is None:
-                raise ImportError("could not load candidate module")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-    except BaseException as exc:
-        results = [
-            {"case_id": case["caseId"], "status": "fail", "error": f"module import failed: {type(exc).__name__}: {exc}"[:500]}
-            for case in plan["cases"]
-        ]
-        print(MARKER + json.dumps({"report_version": 1, "passed": False, "results": results}, ensure_ascii=False, allow_nan=False, separators=(",", ":")))
-        return 1
-    results = []
-    for case in plan["cases"]:
-        expected = case["expect"]
-        try:
-            target = resolve_callable(module, case["callable"])
-            with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
-                actual = target(*case["args"], **case["kwargs"])
-            normalized = normalize(actual)
-            if expected["kind"] == "return":
-                wanted = expected.get("value")
-                passed = normalized == wanted
-                results.append({"case_id": case["caseId"], "status": "pass" if passed else "fail", "actual": normalized, "expected": wanted})
+            if package_start < len(package_directories):
+                dotted_name = ".".join([*package_directories[package_start:], relative_module_path.stem])
+                module = importlib.import_module(dotted_name)
             else:
-                results.append({"case_id": case["caseId"], "status": "fail", "actual": normalized, "error": f"expected {expected.get('error')}"})
-        except BaseException as exc:
-            passed = expected["kind"] == "raises" and type(exc).__name__ == expected.get("error")
-            results.append({"case_id": case["caseId"], "status": "pass" if passed else "fail", "error": f"{type(exc).__name__}: {exc}"[:500], "expected": expected.get("error")})
-    passed = all(item["status"] == "pass" for item in results)
-    print(MARKER + json.dumps({"report_version": 1, "passed": passed, "results": results}, ensure_ascii=False, allow_nan=False, separators=(",", ":")))
-    return 0 if passed else 1
+                spec = importlib.util.spec_from_file_location("avo_candidate_probe_module", module_path)
+                if spec is None or spec.loader is None:
+                    raise ImportError("could not load candidate module")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+    except BaseException as exc:
+        emit({"kind": "import_error", "error": type(exc).__name__, "detail": f"{type(exc).__name__}: {exc}"[:500]})
+        return 0
+    try:
+        target = resolve_callable(module, request["callable"])
+        with contextlib.redirect_stdout(captured), contextlib.redirect_stderr(captured):
+            actual = target(*request["args"], **request["kwargs"])
+            if inspect.isawaitable(actual):
+                actual = asyncio.run(actual)
+    except BaseException as exc:
+        emit({"kind": "raises", "error": type(exc).__name__, "message": str(exc)[:500], "detail": f"{type(exc).__name__}: {exc}"[:500]})
+        return 0
+    try:
+        normalized = normalize(actual)
+    except UnsupportedReturn as exc:
+        emit({"kind": "unsupported_return", "detail": str(exc)[:500]})
+        return 0
+    emit({"kind": "return", "actual": normalized})
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())
 `.trim();
 
-export function canExecuteAvoPythonProbe(): boolean {
+export function getAvoPythonProbeExecutorAvailability(): AvoPythonProbeExecutorAvailability {
 	const brokerConfigured =
 		Boolean(process.env[AVO_PYTHON_PROBE_BROKER_SOCKET_ENV]) &&
 		Boolean(process.env[AVO_PYTHON_PROBE_BROKER_TOKEN_ENV]);
-	return (
-		brokerConfigured ||
-		(process.platform === "linux" && existsSync("/usr/bin/bwrap") && existsSync("/usr/bin/python3"))
-	);
+	if (brokerConfigured) return { available: true, mode: "broker" };
+	if (process.platform === "linux" && existsSync("/usr/bin/bwrap") && existsSync("/usr/bin/python3")) {
+		return { available: true, mode: "local_sandbox" };
+	}
+	return {
+		available: false,
+		mode: "unavailable",
+		reason:
+			"isolated Python probe execution requires a configured host broker or Linux with /usr/bin/bwrap and /usr/bin/python3",
+	};
+}
+
+export function canExecuteAvoPythonProbe(): boolean {
+	return getAvoPythonProbeExecutorAvailability().available;
 }
 
 async function executeAvoPythonProbeLocalSandbox(
 	workspace: string,
 	plan: AvoPythonProbePlan,
+	bundle: AvoPythonProbeBundle,
 ): Promise<AvoPythonProbeExecution> {
 	if (process.platform !== "linux" || !existsSync("/usr/bin/bwrap") || !existsSync("/usr/bin/python3")) {
 		return {
@@ -582,69 +1029,76 @@ async function executeAvoPythonProbeLocalSandbox(
 			error: "isolated Python probe execution requires Linux, /usr/bin/bwrap, and /usr/bin/python3",
 		};
 	}
-	const temporaryRoot = mkdtempSync(join(tmpdir(), "prime-avo-probe-"));
-	const planPath = join(temporaryRoot, "plan.json");
-	const runnerPath = join(temporaryRoot, "runner.py");
-	writeFileSync(planPath, JSON.stringify(plan), { encoding: "utf8", mode: 0o600 });
-	writeFileSync(runnerPath, AVO_PYTHON_PROBE_RUNNER, { encoding: "utf8", mode: 0o500 });
 	const startedAt = Date.now();
-	let stdout = "";
 	let stderr = "";
 	let timedOut = false;
 	let truncated = false;
 	let executionError: string | undefined;
-	let exitCode: number | null = null;
-	try {
-		const args = [
-			"--ro-bind",
-			"/",
-			"/",
-			"--dev-bind",
-			"/dev",
-			"/dev",
-			"--proc",
-			"/proc",
-			"--tmpfs",
-			"/tmp",
-			"--tmpfs",
-			homedir(),
-			"--dir",
-			"/tmp/workspace",
-			"--ro-bind",
-			workspace,
-			"/tmp/workspace",
-			"--dir",
-			"/tmp/probe",
-			"--ro-bind",
-			runnerPath,
-			"/tmp/probe/runner.py",
-			"--ro-bind",
-			planPath,
-			"/tmp/probe/plan.json",
-			"--unshare-net",
-			"--unshare-pid",
-			"--die-with-parent",
-			"--clearenv",
-			"--setenv",
-			"HOME",
-			"/tmp",
-			"--setenv",
-			"PATH",
-			"/usr/bin:/bin",
-			"--chdir",
-			"/tmp/workspace",
-			"--",
-			"/usr/bin/python3",
-			"-I",
-			"-B",
-			"/tmp/probe/runner.py",
-			"/tmp/probe/plan.json",
-		];
+	const args = [
+		"--tmpfs",
+		"/",
+		...(["/usr", "/lib", "/lib64"] as const).flatMap((path) => (existsSync(path) ? ["--ro-bind", path, path] : [])),
+		"--dev",
+		"/dev",
+		"--proc",
+		"/proc",
+		"--tmpfs",
+		"/tmp",
+		"--dir",
+		"/tmp/workspace",
+		"--unshare-net",
+		"--unshare-pid",
+		"--die-with-parent",
+		"--clearenv",
+		"--setenv",
+		"HOME",
+		"/tmp",
+		"--setenv",
+		"PATH",
+		"/usr/bin:/bin",
+		"--chdir",
+		"/tmp/workspace",
+		"--",
+		"/usr/bin/python3",
+		"-I",
+		"-B",
+		"-c",
+		AVO_PYTHON_PROBE_RUNNER,
+	];
+	const results: AvoPythonProbeCaseResult[] = [];
+	const aggregateDeadline = startedAt + 10_000;
+	for (let caseIndex = 0; caseIndex < plan.cases.length; caseIndex += 1) {
+		const probeCase = plan.cases[caseIndex]!;
+		const remainingMs = aggregateDeadline - Date.now();
+		if (remainingMs <= 0) {
+			timedOut = true;
+			for (const skipped of plan.cases.slice(caseIndex)) {
+				results.push({
+					caseId: skipped.caseId,
+					status: "fail",
+					error: "TimeoutError: aggregate probe deadline exhausted before this case ran",
+				});
+			}
+			break;
+		}
+		const envelope = JSON.stringify({
+			request: {
+				modulePath: plan.modulePath,
+				callable: probeCase.callable,
+				args: probeCase.args,
+				kwargs: probeCase.kwargs,
+			},
+			bundle,
+		});
+		let caseStdout = "";
+		let caseStderr = "";
+		let caseTimedOut = false;
+		let caseTruncated = false;
 		const processResult = await new Promise<{ exitCode: number | null; error?: string }>((resolveResult) => {
 			const child = spawn("/usr/bin/bwrap", args, {
 				cwd: workspace,
 				env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
-				stdio: ["ignore", "pipe", "pipe"],
+				stdio: ["pipe", "pipe", "pipe"],
 			});
 			let settled = false;
 			let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -655,47 +1109,126 @@ async function executeAvoPythonProbeLocalSandbox(
 				resolveResult(result);
 			};
 			const append = (target: "stdout" | "stderr", chunk: Buffer) => {
-				const current = target === "stdout" ? stdout : stderr;
-				if (current.length >= 64_000) return;
+				const current = target === "stdout" ? caseStdout : caseStderr;
 				const next = `${current}${chunk.toString("utf8")}`;
-				if (next.length > 64_000) {
-					truncated = true;
-					if (target === "stdout") stdout = next.slice(0, 64_000);
-					else stderr = next.slice(0, 64_000);
+				if (next.length > 16_000) {
+					caseTruncated = true;
+					if (target === "stdout") caseStdout = next.slice(0, 16_000);
+					else caseStderr = next.slice(0, 16_000);
 					child.kill("SIGKILL");
 					return;
 				}
-				if (target === "stdout") stdout = next;
-				else stderr = next;
+				if (target === "stdout") caseStdout = next;
+				else caseStderr = next;
 			};
 			child.stdout.on("data", (chunk: Buffer) => append("stdout", chunk));
 			child.stderr.on("data", (chunk: Buffer) => append("stderr", chunk));
+			child.stdin.on("error", (error) => finish({ exitCode: null, error: error.message }));
+			child.stdin.end(envelope);
 			child.once("error", (error) => finish({ exitCode: null, error: error.message }));
 			child.once("close", (code) => finish({ exitCode: code }));
-			timeout = setTimeout(() => {
-				timedOut = true;
-				child.kill("SIGKILL");
-			}, 10_000);
-		});
-		exitCode = processResult.exitCode;
-		executionError = processResult.error;
-	} finally {
-		rmSync(temporaryRoot, { recursive: true, force: true });
-	}
-	let report: AvoPythonProbeReport | undefined;
-	if (!executionError && !timedOut && !truncated) {
-		try {
-			report = parseAvoPythonProbeReport(
-				stdout,
-				plan.cases.map((item) => item.caseId),
+			timeout = setTimeout(
+				() => {
+					caseTimedOut = true;
+					child.kill("SIGKILL");
+				},
+				Math.max(1, Math.min(3_000, remainingMs)),
 			);
-		} catch (error) {
-			executionError = error instanceof Error ? error.message : String(error);
+		});
+		timedOut ||= caseTimedOut;
+		truncated ||= caseTruncated;
+		if (caseStderr.trim()) stderr = `${stderr}${probeCase.caseId}: ${caseStderr.trim()}\n`.slice(0, 64_000);
+		if (processResult.error) {
+			executionError = processResult.error;
+			break;
 		}
+		const rawMarker = "AVO_PYTHON_PROBE_RAW:";
+		const envelopes = caseStdout.split(/\r?\n/).filter((line) => line.startsWith(rawMarker));
+		let result: AvoPythonProbeCaseResult;
+		if (caseTimedOut) {
+			result = { caseId: probeCase.caseId, status: "fail", error: "TimeoutError: probe case exceeded 3 seconds" };
+		} else if (caseTruncated || processResult.exitCode !== 0 || envelopes.length !== 1) {
+			result = {
+				caseId: probeCase.caseId,
+				status: "fail",
+				error: `probe worker returned code ${processResult.exitCode ?? "none"} with ${envelopes.length} raw result envelopes`,
+			};
+		} else {
+			try {
+				const observed = JSON.parse(envelopes[0]!.slice(rawMarker.length)) as unknown;
+				if (
+					!isRecord(observed) ||
+					!["return", "raises", "import_error", "unsupported_return"].includes(String(observed.kind))
+				) {
+					throw new Error("probe worker returned an invalid raw outcome");
+				}
+				if (observed.kind === "return") {
+					const actual = parseJsonValue(observed.actual, `${probeCase.caseId}.actual`);
+					const expected = probeCase.expect.value ?? null;
+					const passed = probeCase.expect.kind === "return" && canonicalJson(actual) === canonicalJson(expected);
+					result = { caseId: probeCase.caseId, status: passed ? "pass" : "fail", actual, expected };
+				} else if (observed.kind === "raises") {
+					const errorName = requiredString(observed.error, `${probeCase.caseId}.error`);
+					const errorMessage = exactErrorMessage(observed.message, `${probeCase.caseId}.message`);
+					const passed =
+						probeCase.expect.kind === "raises" &&
+						errorName === probeCase.expect.error &&
+						errorMessage === probeCase.expect.message;
+					result = {
+						caseId: probeCase.caseId,
+						status: passed ? "pass" : "fail",
+						error: typeof observed.detail === "string" ? observed.detail.slice(0, 500) : errorName,
+						expected:
+							probeCase.expect.kind === "raises"
+								? `${probeCase.expect.error}: ${probeCase.expect.message}`
+								: probeCase.expect.value,
+					};
+				} else if (observed.kind === "import_error") {
+					result = {
+						caseId: probeCase.caseId,
+						status: "fail",
+						error: `module import failed: ${String(observed.detail ?? observed.error).slice(0, 500)}`,
+					};
+				} else {
+					result = {
+						caseId: probeCase.caseId,
+						status: "fail",
+						error: `unsupported return: ${String(observed.detail ?? "candidate returned a non-JSON value").slice(0, 500)}`,
+					};
+				}
+			} catch (error) {
+				result = {
+					caseId: probeCase.caseId,
+					status: "fail",
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+		}
+		results.push(result);
 	}
+	const report = executionError
+		? undefined
+		: {
+				reportVersion: 1 as const,
+				passed: results.length === plan.cases.length && results.every((item) => item.status === "pass"),
+				results,
+			};
+	const stdout = report
+		? `${AVO_PYTHON_PROBE_RESULT_MARKER}${JSON.stringify({
+				report_version: 1,
+				passed: report.passed,
+				results: report.results.map((item) => ({
+					case_id: item.caseId,
+					status: item.status,
+					actual: item.actual,
+					expected: item.expected,
+					error: item.error,
+				})),
+			})}\n`
+		: "";
 	return {
 		report,
-		exitCode,
+		exitCode: executionError ? null : report?.passed ? 0 : 1,
 		timedOut,
 		truncated,
 		stdout,
@@ -735,10 +1268,30 @@ function parseBrokerExecution(value: unknown, plan: AvoPythonProbePlan): AvoPyth
 	return { report, exitCode, timedOut, truncated, stdout, stderr, durationMs, error };
 }
 
+function parseBrokerBundle(value: unknown): AvoPythonProbeBundle {
+	if (!isRecord(value) || !Array.isArray(value.files)) throw new Error("probe broker bundle must be an object");
+	const files = value.files.map((item, index) => {
+		if (!isRecord(item) || typeof item.path !== "string" || typeof item.contentBase64 !== "string") {
+			throw new Error(`probe broker bundle.files[${index}] is invalid`);
+		}
+		return { path: item.path, contentBase64: item.contentBase64 };
+	});
+	const bundle = createAvoPythonProbeBundle(files);
+	if (
+		value.digest !== bundle.digest ||
+		value.fileCount !== bundle.fileCount ||
+		value.totalBytes !== bundle.totalBytes
+	) {
+		throw new Error("probe broker bundle metadata does not match its source bytes");
+	}
+	return bundle;
+}
+
 async function executeAvoPythonProbeViaBroker(
 	socketPath: string,
 	token: string,
 	plan: AvoPythonProbePlan,
+	bundle: AvoPythonProbeBundle,
 ): Promise<AvoPythonProbeExecution> {
 	return new Promise((resolveExecution) => {
 		let settled = false;
@@ -764,7 +1317,9 @@ async function executeAvoPythonProbeViaBroker(
 		const timeout = setTimeout(() => fail("host probe broker timed out"), 15_000);
 		socket.setEncoding("utf8");
 		socket.once("connect", () => {
-			socket.write(`${JSON.stringify({ protocolVersion: 1, token, plan })}\n`);
+			socket.write(
+				`${JSON.stringify({ protocolVersion: AVO_PYTHON_PROBE_BROKER_PROTOCOL_VERSION, token, plan, bundle })}\n`,
+			);
 		});
 		socket.on("data", (chunk: string) => {
 			response += chunk;
@@ -776,7 +1331,7 @@ async function executeAvoPythonProbeViaBroker(
 			if (newline < 0) return;
 			try {
 				const parsed = JSON.parse(response.slice(0, newline)) as unknown;
-				if (!isRecord(parsed) || parsed.protocolVersion !== 1) {
+				if (!isRecord(parsed) || parsed.protocolVersion !== AVO_PYTHON_PROBE_BROKER_PROTOCOL_VERSION) {
 					fail("host probe broker returned an invalid protocol envelope");
 					return;
 				}
@@ -799,11 +1354,12 @@ async function executeAvoPythonProbeViaBroker(
 export async function executeAvoPythonProbeSandbox(
 	workspace: string,
 	plan: AvoPythonProbePlan,
+	bundle: AvoPythonProbeBundle,
 ): Promise<AvoPythonProbeExecution> {
 	const socketPath = process.env[AVO_PYTHON_PROBE_BROKER_SOCKET_ENV];
 	const token = process.env[AVO_PYTHON_PROBE_BROKER_TOKEN_ENV];
-	if (socketPath && token) return executeAvoPythonProbeViaBroker(socketPath, token, plan);
-	return executeAvoPythonProbeLocalSandbox(workspace, plan);
+	if (socketPath && token) return executeAvoPythonProbeViaBroker(socketPath, token, plan, bundle);
+	return executeAvoPythonProbeLocalSandbox(workspace, plan, bundle);
 }
 
 function brokerSocketDirectory(): string {
@@ -844,15 +1400,15 @@ export async function startAvoPythonProbeBroker(workspace: string): Promise<AvoP
 		let handled = false;
 		const respond = (value: Record<string, unknown>) => {
 			if (socket.destroyed) return;
-			socket.end(`${JSON.stringify({ protocolVersion: 1, ...value })}\n`);
+			socket.end(`${JSON.stringify({ protocolVersion: AVO_PYTHON_PROBE_BROKER_PROTOCOL_VERSION, ...value })}\n`);
 		};
 		socket.setEncoding("utf8");
 		socket.on("data", (chunk: string) => {
 			if (handled) return;
 			requestText += chunk;
-			if (requestText.length > 64_000) {
+			if (requestText.length > 24_000_000) {
 				handled = true;
-				respond({ error: "request exceeded 64000 characters" });
+				respond({ error: "request exceeded 24000000 characters" });
 				return;
 			}
 			const newline = requestText.indexOf("\n");
@@ -861,11 +1417,16 @@ export async function startAvoPythonProbeBroker(workspace: string): Promise<AvoP
 			void (async () => {
 				try {
 					const request = JSON.parse(requestText.slice(0, newline)) as unknown;
-					if (!isRecord(request) || request.protocolVersion !== 1 || !brokerTokenMatches(token, request.token)) {
+					if (
+						!isRecord(request) ||
+						request.protocolVersion !== AVO_PYTHON_PROBE_BROKER_PROTOCOL_VERSION ||
+						!brokerTokenMatches(token, request.token)
+					) {
 						throw new Error("unauthorized or invalid broker request");
 					}
 					const plan = parseBrokerPlan(request.plan);
-					const execution = await executeAvoPythonProbeLocalSandbox(workspace, plan);
+					const bundle = parseBrokerBundle(request.bundle);
+					const execution = await executeAvoPythonProbeLocalSandbox(workspace, plan, bundle);
 					respond({ execution });
 				} catch (error) {
 					respond({

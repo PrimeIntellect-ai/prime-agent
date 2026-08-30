@@ -1,11 +1,13 @@
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { getBundledSkillsDir } from "../../config.js";
 import type { AutoresearchState, AutoresearchStopGate } from "../autoresearch.js";
 import { activeAvoAblations, isAvoFeatureAblated } from "./ablation.js";
 import { AvoAdapterRegistry, CODING_AVO_CANDIDATE_KINDS, type ResearchAdapterState } from "./adapters.js";
 import { digestAvoExperimentCandidateIdentity, digestAvoExperimentValue } from "./experiment.js";
+import { assessAvoCandidateIntegrity } from "./integrity.js";
 import { AvoNooaMemoryBridge, type AvoNooaRunner } from "./memory.js";
 import { requiredAvoPremortemAssumptionCount } from "./obligations.js";
+import { applyAvoSpecContractStopGate } from "./spec-contract.js";
 import { AvoStore } from "./store.js";
 import { shouldActivateAvoSupervisor } from "./supervisor.js";
 import type {
@@ -29,6 +31,8 @@ export class AvoSessionRuntime {
 	readonly store: AvoStore;
 	readonly adapters: AvoAdapterRegistry;
 	readonly memoryBridge?: AvoNooaMemoryBridge;
+	private readonly workspaceCwd: string;
+	private readonly workspaceExcludedRoots: string[];
 
 	constructor(
 		artifactDir?: string,
@@ -37,7 +41,12 @@ export class AvoSessionRuntime {
 		cwd = process.cwd(),
 		agentDir?: string,
 		memoryRunner?: AvoNooaRunner,
+		workspaceExcludedRoots?: readonly string[],
 	) {
+		this.workspaceCwd = resolve(cwd);
+		this.workspaceExcludedRoots = (workspaceExcludedRoots ?? (artifactDir ? [artifactDir] : [])).map((path) =>
+			resolve(path),
+		);
 		this.store = new AvoStore(artifactDir, runId, now, cwd, agentDir ? join(agentDir, "memory") : undefined);
 		this.adapters = new AvoAdapterRegistry();
 		const backend = this.store.getMemoryBackendConfig();
@@ -269,9 +278,58 @@ export class AvoSessionRuntime {
 		};
 	}
 
-	evaluateStopGate() {
+	private reconcileAcceptedCandidateIntegrity(): void {
 		const state = this.store.getState();
-		return this.adapters.get(state.routing.environment).evaluateStopCondition(state);
+		const acceptedCandidateIds = new Set(
+			state.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
+		);
+		for (const candidate of state.candidates) {
+			if (!acceptedCandidateIds.has(candidate.candidateId)) continue;
+			const assessment = assessAvoCandidateIntegrity(
+				state,
+				candidate,
+				this.workspaceCwd,
+				this.workspaceExcludedRoots,
+			);
+			if (assessment.passed) continue;
+			const observedDigest = assessment.observedDigest ?? "unavailable";
+			if (
+				state.evaluations.some(
+					(item) =>
+						item.candidateId === candidate.candidateId &&
+						item.evaluatorId === "candidate_integrity" &&
+						item.status === "revise" &&
+						item.metrics.observed_integrity_digest === observedDigest,
+				)
+			) {
+				continue;
+			}
+			this.recordHostEvaluation({
+				candidateId: candidate.candidateId,
+				evaluatorId: "candidate_integrity",
+				status: "revise",
+				authority: "host",
+				evidenceRefs: [`host:integrity:${observedDigest}`],
+				metrics: {
+					meaningful: false,
+					candidate_payload_digest: candidate.payloadDigest,
+					observed_integrity_digest: observedDigest,
+					validation_reason: assessment.reason ?? "candidate integrity changed",
+				},
+			});
+		}
+	}
+
+	evaluateStopGate() {
+		this.reconcileAcceptedCandidateIntegrity();
+		const state = this.store.getState();
+		const gate = this.adapters.get(state.routing.environment).evaluateStopCondition(state);
+		return applyAvoSpecContractStopGate(state, gate, {
+			cwd: this.workspaceCwd,
+			excludedRoots: this.workspaceExcludedRoots,
+			receiptDirectory: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_DIR,
+			receiptPublicKey: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_PUBLIC_KEY,
+		});
 	}
 
 	complete(): AvoRunState {
@@ -535,7 +593,7 @@ export function buildAvoRuntimePrompt(state: AvoRunState, memoryContext = ""): s
 			? undefined
 			: "For required coding work at long horizon, and requirement-dense iterative work, the retained verifier performs a bounded read-only adversarial acceptance audit after an accepted cycle. It inspects the implementation and existing tests, challenges up to three high-risk specification boundaries, and may veto but never upgrade host evidence. A broad test receipt is a review-prioritization signal rather than an automatic failure.",
 		"When a coding candidate receives a host revise/fail receipt, do not relabel or resubmit the same workspace. Make a material correction and pass the failed candidate as parent_candidate_id on the immediate successor. The host rejects an unlinked successor or an unchanged workspace digest.",
-		"Use the avo skill for the task's candidate/evaluation lifecycle. The host will automatically continue the root task instead of accepting an answer that skipped AVO, failed its gate, changed a verified workspace/artifact, or differs from the accepted candidate's canonical delivery. Callers may record only model_opinion. Required external_factual candidates must declare verbatim claims and bind each claim to a host-trusted external source record; after Serper IPython or Vertex Google Search, use avo.fetch_external_source on a result URL and avo.bind_url with a visible quote exactly equal to the claim. Provenance without a host-bound independent entailment verdict cannot pass. Required deterministic arithmetic uses a payload exactly shaped as {result: number} and avo.verify_deterministic_result; required artifact candidates declare artifact_paths and use avo.verify_artifacts. An unrelated successful command cannot certify either class. Before changing a coding workspace, use avo.run_coding_baseline with a direct command that explicitly names an unchanged baseline test file, then run the exact same command after the candidate with avo.run_evaluation. Mutable package-script wrappers, output-printed filenames, no-op mutation candidates, and candidate-created tests cannot certify progress. For repeatable comparisons in any adapter, preregister a structured candidate/condition/seed screening plan with avo.record_experiment, run each exact cell through avo.run_trial, and call avo.complete_experiment only after the full grid. Screening only ranks a provisional candidate. Promotion requires a separate prospective confirmation that compares exactly that challenger with the same baseline and conditions on unused seeds, declares at least five pairs, and preregisters a positive absolute or relative meaningful-effect threshold. The host renders and hashes cell commands, derives aggregate statistics and paired Student-t confidence bounds, issues confirmatory promote/retain outcomes, and stores declarations separately from empirical observations in NOOA. Never invent host, environment, or external authority. Required verification needs host-issued evidence; best_effort and not_applicable policies may use a transparent model-opinion review without pretending it is external. Complete the candidate cycle, then return only its canonical delivery: general payload text, deterministic numeric result, or coding/research summary, with no preface or suffix. A later root task starts a fresh task run after the current gate and delivery pass, while namespaced memory survives across runs.",
+		"Use the avo skill for the task's candidate/evaluation lifecycle. The host will automatically continue the root task instead of accepting an answer that skipped AVO, failed its gate, changed a verified workspace/artifact, or differs from the accepted candidate's canonical delivery. Callers may record only model_opinion. Required external_factual candidates must declare verbatim claims and bind each claim to a host-trusted external source record; after Serper IPython or Vertex Google Search, use avo.fetch_external_source on a result URL and avo.bind_url with a visible quote exactly equal to the claim. Provenance without a host-bound independent entailment verdict cannot pass. Required deterministic arithmetic uses a payload exactly shaped as {result: number} and avo.verify_deterministic_result; required artifact candidates declare artifact_paths and use avo.verify_artifacts. An unrelated successful command cannot certify either class. Before changing a coding workspace, use avo.run_coding_baseline with a direct command that explicitly names an unchanged baseline test file, then run the exact same command after the candidate with avo.run_evaluation. Mutable package-script wrappers, output-printed filenames, no-op mutation candidates, and candidate-created tests cannot certify progress. Passing in-process pytest output cannot certify changed Python code; use an immutable out-of-process verifier or independently verified exact spec proof. For repeatable comparisons in any adapter, preregister a structured candidate/condition/seed screening plan with avo.record_experiment, run each exact cell through avo.run_trial, and call avo.complete_experiment only after the full grid. Screening only ranks a provisional candidate. Promotion requires a separate prospective confirmation that compares exactly that challenger with the same baseline and conditions on unused seeds, declares at least five pairs, and preregisters a positive absolute or relative meaningful-effect threshold. The host renders and hashes cell commands, derives aggregate statistics and paired Student-t confidence bounds, issues confirmatory promote/retain outcomes, and stores declarations separately from empirical observations in NOOA. Never invent host, environment, or external authority. Required verification needs host-issued evidence; best_effort and not_applicable policies may use a transparent model-opinion review without pretending it is external. Complete the candidate cycle, then return only its canonical delivery: general payload text, deterministic numeric result, or coding/research summary, with no preface or suffix. A later root task starts a fresh task run after the current gate and delivery pass, while namespaced memory survives across runs.",
 	]
 		.filter((line): line is string => line !== undefined)
 		.join("\n\n");

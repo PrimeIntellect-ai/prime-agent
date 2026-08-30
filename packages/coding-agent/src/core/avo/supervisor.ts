@@ -25,27 +25,41 @@ function stringArray(value: unknown, label: string): string[] {
 	return value.map((item) => item.trim());
 }
 
-export function requiresAvoAdversarialReview(state: AvoRunState, cycleId?: string): boolean {
+export function requiresAvoTrajectoryVerification(state: AvoRunState, cycleId?: string): boolean {
 	if (isAvoFeatureAblated("adversarial_supervision")) return false;
-	if (
-		state.routing.environment !== "coding" ||
-		state.routing.horizon === "direct" ||
-		state.verificationPolicy !== "required"
-	) {
-		return false;
-	}
 	const cycle = cycleId
 		? state.cycles.find((item) => item.cycleId === cycleId)
 		: [...state.cycles].reverse().find((item) => item.outcome === "accepted");
 	if (cycle?.outcome !== "accepted") return false;
+	const candidate = (state.candidates ?? []).find((item) => item.candidateId === cycle.candidateId);
+	const requiredPythonReview =
+		state.routing.environment === "coding" &&
+		state.verificationPolicy === "required" &&
+		(candidate?.workspaceChangedPaths ?? []).some((path) => path.toLowerCase().endsWith(".py"));
+	if (requiredPythonReview) return true;
+	if (state.routing.horizon === "direct") return false;
 	const criticalObligations = state.obligations.filter((item) => item.critical).length;
-	return state.routing.horizon === "long" || criticalObligations >= 8;
+	const checkpoint = [...state.checkpoints].reverse().find((item) => item.cycleId === cycle.cycleId);
+	if (state.routing.horizon === "long") return true;
+	if (state.verificationPolicy !== "required") return false;
+	return (
+		(state.routing.environment === "coding" && criticalObligations >= 8) ||
+		(state.routing.horizon === "iterative" && checkpoint?.interventionNeeded === true)
+	);
+}
+
+export function requiresAvoAdversarialReview(state: AvoRunState, cycleId?: string): boolean {
+	return (
+		state.routing.environment === "coding" &&
+		state.verificationPolicy === "required" &&
+		requiresAvoTrajectoryVerification(state, cycleId)
+	);
 }
 
 export function shouldActivateAvoSupervisor(state: AvoRunState, checkpoint?: AvoCheckpoint): boolean {
+	if (requiresAvoAdversarialReview(state, checkpoint?.cycleId)) return true;
 	if (state.routing.horizon === "direct") return false;
 	if (state.routing.horizon === "long") return true;
-	if (requiresAvoAdversarialReview(state, checkpoint?.cycleId)) return true;
 	return checkpoint?.interventionNeeded === true;
 }
 
@@ -78,7 +92,7 @@ export function buildAvoSupervisorPrompt(
 			? `A single broad receipt covering many obligations is a prioritization signal, not automatic failure. Return progressing only after the adversarial audit finds no concrete blocking defect. For progressing, recommended_actions must contain ${minimumAnalyses === 3 ? "exactly 3" : "1-3"} strings formatted exactly as "source=<host packet review_files path>; requirement=<host packet requirement_id>; related_requirement=<a different host packet requirement_id when testing an interaction>; counterexample=<specific input>; expected=<specific behavior>; analysis=<why the shown code handles it>". Use distinct primary requirement IDs. For a dense review, at least one analysis must combine two requirements using related_requirement; prioritize cross-surface behavior, output-shape/error contracts, empty boundaries, and feature interactions over simple happy paths. Generic assurances are invalid. Return watch when the audit could not establish readiness, and intervene when you find a reproducible defect, ignored requirement, or unsupported critical assumption. Your review may veto; it cannot create host evidence or declare success.`
 			: undefined,
 		adversarialReview
-			? 'When the host packet contains python_probe_contract, a progressing response must also include probe_plan. Copy its probe_version, runtime, and exposed Python module_path. Obey its exact minimum_cases, maximum_cases, minimum_cross_requirement_cases, minimum_distinct_requirements, required_callables, and require_cross_requirement_case_per_required_callable values. Each JSON-only function-call case needs case_id, callable, requirement_ids, args, kwargs, and expect. expect is {"kind":"return","value":<JSON>} or {"kind":"raises","error":"ValueError"}. For every required callable, provide discriminating contrast pairs for the first minimum_contrasted_input_dimensions available positional inputs (then sorted keyword inputs): within each pair change only that input and make the expected observation differ. This prevents easy cases that merely preserve a faulty implementation. These cases run automatically in a read-only, network-isolated workspace; do not provide source code, shell, imports, paths outside the exposed module, or private callables.'
+			? 'When the host packet contains python_probe_contract, a progressing response must also include probe_plan. Copy its probe_version, runtime, and singular module_path. Obey its exact minimum_cases, maximum_cases, minimum_cross_requirement_cases, minimum_distinct_requirements, required_callables, callable_input_dimensions, and require_cross_requirement_case_per_required_callable values. Each JSON-only function-call case needs case_id, callable, requirement_ids, args, kwargs, and expect. expect is {"kind":"return","value":<JSON>} or {"kind":"raises","error":"ValueError","message":"exact message"}. For every required callable, provide discriminating contrast pairs for every host-declared callable_input_dimension: within each pair change only that input and make the expected observation differ. Zero-argument or deliberately invalid calls cannot substitute for a declared dimension. This prevents easy cases that merely preserve a faulty implementation. These cases run automatically in a disposable content-addressed, network-isolated source bundle; writes can affect only the ephemeral copy. The host authenticates execution and candidate binding only: your expect values remain a model-proposed oracle, may veto on mismatch, and can never become host semantic evidence. Do not provide source code, shell, imports, paths outside the exposed module, or private callables.'
 			: undefined,
 		"In structured experiment memory, declared_hypothesis, planned_design, reported_results, and reported_interpretation are declarations; only observed_* fields and derived_statistics are empirical evidence.",
 		"You may recommend a redirect, but you cannot mutate canonical state or declare success. Host/environment receipts remain authoritative.",

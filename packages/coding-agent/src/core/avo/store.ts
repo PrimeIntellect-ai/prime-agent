@@ -52,6 +52,7 @@ import {
 	AVO_METRIC_DIRECTIONS,
 	AVO_OBLIGATION_EVIDENCE_KINDS,
 	AVO_OBLIGATION_KINDS,
+	AVO_RUN_STATUSES,
 	AVO_STATE_VERSION,
 	AVO_VERIFICATION_CLASSES,
 	AVO_VERIFICATION_POLICIES,
@@ -629,6 +630,194 @@ function isAvoState(value: unknown): value is AvoRunState {
 	);
 }
 
+function isLegacyPythonProbeState(value: unknown, schemaVersion: 9 | 10 | 11 | 12): value is JsonRecord {
+	return (
+		isRecord(value) &&
+		value.schemaVersion === schemaVersion &&
+		isRecord(value.routing) &&
+		typeof value.sessionId === "string" &&
+		typeof value.runId === "string" &&
+		AVO_RUN_STATUSES.includes(value.status as AvoRunState["status"]) &&
+		Array.isArray(value.taskRuns) &&
+		Array.isArray(value.candidates) &&
+		Array.isArray(value.evaluations) &&
+		Array.isArray(value.cycles) &&
+		Array.isArray(value.supervision)
+	);
+}
+
+const LEGACY_PYTHON_POLICY_MEMORY_TAG = "python-probe-policy-v4-migration";
+const LEGACY_PYTHON_POLICY_RUN_PREFIX = "policy-v4 migration invalidated Python lineage for run ";
+const LEGACY_VERIFICATION_HARNESS_MEMORY_TAG = "verification-harness-policy-v1-migration";
+const LEGACY_VERIFICATION_HARNESS_RUN_PREFIX = "verification-harness migration invalidated coding lineage for run ";
+
+function isLegacyUnboundTestReceipt(receipt: AvoEvaluationReceipt): boolean {
+	return receipt.evaluatorId === "test" && receipt.metrics.baseline_execution_matched === true;
+}
+
+function isLegacyAuthoritativeUnboundTestReceipt(receipt: AvoEvaluationReceipt): boolean {
+	return (
+		isLegacyUnboundTestReceipt(receipt) &&
+		receipt.issuedBy === "host" &&
+		receipt.status === "pass" &&
+		receipt.authority !== "model_opinion" &&
+		receipt.metrics.meaningful === true
+	);
+}
+
+function invalidateLegacyPythonProbeReceipts(receipts: unknown): AvoEvaluationReceipt[] {
+	return Array.isArray(receipts)
+		? (receipts as AvoEvaluationReceipt[]).map((receipt) =>
+				["adversarial_probe", "adversarial_probe_contract"].includes(receipt.evaluatorId) ||
+				isLegacyUnboundTestReceipt(receipt)
+					? { ...receipt, issuedBy: "legacy_unverified" as const }
+					: receipt,
+			)
+		: [];
+}
+
+function canonicalAcceptedCycle(
+	candidates: readonly AvoCandidate[],
+	cycles: readonly AvoRunState["cycles"][number][],
+): AvoRunState["cycles"][number] | undefined {
+	const acceptedCandidateIds = new Set(
+		cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
+	);
+	const candidate = [...candidates].reverse().find((item) => acceptedCandidateIds.has(item.candidateId));
+	if (!candidate) return undefined;
+	return [...cycles]
+		.reverse()
+		.find((cycle) => cycle.outcome === "accepted" && cycle.candidateId === candidate.candidateId);
+}
+
+function canonicalAcceptedPythonCycle(
+	candidates: readonly AvoCandidate[],
+	cycles: readonly AvoRunState["cycles"][number][],
+): AvoRunState["cycles"][number] | undefined {
+	const cycle = canonicalAcceptedCycle(candidates, cycles);
+	const candidate = cycle ? candidates.find((item) => item.candidateId === cycle.candidateId) : undefined;
+	if (!candidate?.workspaceChangedPaths?.some((path) => path.endsWith(".py"))) return undefined;
+	return cycle;
+}
+
+function canonicalUnsafeTestHarnessCycle(
+	candidates: readonly AvoCandidate[],
+	cycles: readonly AvoRunState["cycles"][number][],
+	evaluations: readonly AvoEvaluationReceipt[],
+): AvoRunState["cycles"][number] | undefined {
+	const cycle = canonicalAcceptedCycle(candidates, cycles);
+	if (!cycle) return undefined;
+	return evaluations.some(
+		(receipt) => receipt.candidateId === cycle.candidateId && isLegacyAuthoritativeUnboundTestReceipt(receipt),
+	)
+		? cycle
+		: undefined;
+}
+
+function migrateLegacyPythonRun<T extends AvoRunState | AvoRunState["taskRuns"][number]>(
+	run: T,
+	schemaVersion: 8 | 9 | 10 | 11 | 12,
+	reopen: boolean,
+): T {
+	const acceptedPythonCycleIds = new Set(
+		run.cycles.flatMap((cycle) => {
+			const candidate = run.candidates.find((item) => item.candidateId === cycle.candidateId);
+			return cycle.outcome === "accepted" && candidate?.workspaceChangedPaths?.some((path) => path.endsWith(".py"))
+				? [cycle.cycleId]
+				: [];
+		}),
+	);
+	const unsafeTestCandidateIds = new Set(
+		run.evaluations.filter(isLegacyAuthoritativeUnboundTestReceipt).map((receipt) => receipt.candidateId),
+	);
+	const unsafeTestCycleIds = new Set(
+		run.cycles
+			.filter((cycle) => cycle.outcome === "accepted" && unsafeTestCandidateIds.has(cycle.candidateId))
+			.map((cycle) => cycle.cycleId),
+	);
+	const affectedReviewCycleIds = new Set([...acceptedPythonCycleIds, ...unsafeTestCycleIds]);
+	const canonicalPythonCycle = canonicalAcceptedPythonCycle(run.candidates, run.cycles);
+	const canonicalUnsafeTestCycle = canonicalUnsafeTestHarnessCycle(run.candidates, run.cycles, run.evaluations);
+	const migrationReasons = [
+		...run.verificationReasons,
+		`migrated from AVO v${schemaVersion}; superseded Python-probe and test-harness evidence requires fresh candidate-bound verification`,
+		...(canonicalPythonCycle ? [`${LEGACY_PYTHON_POLICY_RUN_PREFIX}${run.runId}`] : []),
+		...(canonicalUnsafeTestCycle ? [`${LEGACY_VERIFICATION_HARNESS_RUN_PREFIX}${run.runId}`] : []),
+	];
+	return {
+		...run,
+		...(reopen && run.status === "completed" && (canonicalPythonCycle || canonicalUnsafeTestCycle)
+			? { status: "active" as const }
+			: {}),
+		verificationReasons: [...new Set(migrationReasons)],
+		evaluations: invalidateLegacyPythonProbeReceipts(run.evaluations),
+		verificationBaseline: run.verificationBaseline ? { ...run.verificationBaseline, executions: [] } : undefined,
+		supervision: run.supervision.map((review) =>
+			affectedReviewCycleIds.has(review.cycleId) &&
+			review.source === "retained_supervisor" &&
+			review.status === "progressing"
+				? {
+						...review,
+						status: "watch" as const,
+						reason: `Verification-policy migration requires fresh candidate-bound executable and semantic evidence. ${review.reason}`,
+						detectedPatterns: [
+							...new Set([
+								...review.detectedPatterns,
+								...(acceptedPythonCycleIds.has(review.cycleId) ? ["python_probe_policy_upgrade"] : []),
+								...(unsafeTestCycleIds.has(review.cycleId) ? ["verification_harness_policy_upgrade"] : []),
+							]),
+						],
+						recommendedActions: [
+							"Re-run the retained review against the current candidate-bound verification policy.",
+							...review.recommendedActions,
+						].slice(0, 3),
+					}
+				: review,
+		),
+	} as T;
+}
+
+function migrateLegacyPythonProbeState(value: JsonRecord, schemaVersion: 8 | 9 | 10 | 11 | 12): AvoRunState {
+	const state = value as unknown as AvoRunState;
+	return {
+		...migrateLegacyPythonRun(state, schemaVersion, true),
+		schemaVersion: AVO_STATE_VERSION,
+		taskRuns: state.taskRuns.map((run) => migrateLegacyPythonRun(run, schemaVersion, false)),
+	};
+}
+
+function isAvoV12State(value: unknown): value is JsonRecord {
+	return isLegacyPythonProbeState(value, 12);
+}
+
+function migrateAvoV12State(value: JsonRecord): AvoRunState {
+	return migrateLegacyPythonProbeState(value, 12);
+}
+
+function isAvoV11State(value: unknown): value is JsonRecord {
+	return isLegacyPythonProbeState(value, 11);
+}
+
+function migrateAvoV11State(value: JsonRecord): AvoRunState {
+	return migrateLegacyPythonProbeState(value, 11);
+}
+
+function isAvoV10State(value: unknown): value is JsonRecord {
+	return isLegacyPythonProbeState(value, 10);
+}
+
+function migrateAvoV10State(value: JsonRecord): AvoRunState {
+	return migrateLegacyPythonProbeState(value, 10);
+}
+
+function isAvoV9State(value: unknown): value is JsonRecord {
+	return isLegacyPythonProbeState(value, 9);
+}
+
+function migrateAvoV9State(value: JsonRecord): AvoRunState {
+	return migrateLegacyPythonProbeState(value, 9);
+}
+
 function isAvoV8State(value: unknown): value is JsonRecord {
 	return (
 		isRecord(value) &&
@@ -654,9 +843,9 @@ function migrateAvoV8State(value: JsonRecord): AvoRunState {
 					impactSurfaces: candidate.impactSurfaces ?? [],
 				}))
 			: [];
-	return {
+	const migrated = {
 		...(value as unknown as AvoRunState),
-		schemaVersion: AVO_STATE_VERSION,
+		schemaVersion: 8,
 		candidates: migrateCandidates(value.candidates),
 		obligations: [],
 		obligationCoverage: [],
@@ -670,7 +859,8 @@ function migrateAvoV8State(value: JsonRecord): AvoRunState {
 					criticalAssumptions: [],
 				}))
 			: [],
-	};
+	} as unknown as JsonRecord;
+	return migrateLegacyPythonProbeState(migrated, 8);
 }
 
 function isAvoV7State(value: unknown): value is JsonRecord {
@@ -1666,6 +1856,7 @@ export class AvoStore {
 			this.readPromotionLedger(this.projectPromotionLedgerPath);
 		}
 		this.mergePersistentMemories(true);
+		this.hardenLegacyVerificationPolicyMemories();
 		this.hardenLegacyExperimentMemories();
 		if (!this.loadError) {
 			this.savePersistentMemories();
@@ -2010,6 +2201,50 @@ export class AvoStore {
 		return changed;
 	}
 
+	private hardenLegacyVerificationPolicyMemories(): boolean {
+		const affectedRunTags = new Map<string, Set<string>>();
+		const collect = (runId: string, reasons: readonly string[]): void => {
+			const tags = affectedRunTags.get(runId) ?? new Set<string>();
+			if (reasons.includes(`${LEGACY_PYTHON_POLICY_RUN_PREFIX}${runId}`)) {
+				tags.add(LEGACY_PYTHON_POLICY_MEMORY_TAG);
+			}
+			if (reasons.includes(`${LEGACY_VERIFICATION_HARNESS_RUN_PREFIX}${runId}`)) {
+				tags.add(LEGACY_VERIFICATION_HARNESS_MEMORY_TAG);
+			}
+			if (tags.size > 0) affectedRunTags.set(runId, tags);
+		};
+		collect(this.state.runId, this.state.verificationReasons);
+		for (const run of this.state.taskRuns) collect(run.runId, run.verificationReasons);
+		if (affectedRunTags.size === 0) return false;
+		let changed = false;
+		for (const memory of this.state.memories) {
+			const migrationTags = affectedRunTags.get(memory.taskRunId);
+			if (!migrationTags || memory.invalidatedAt || memory.verificationState === "invalidated") {
+				continue;
+			}
+			const alreadyHardened =
+				memory.verificationState === "contested" && [...migrationTags].every((tag) => memory.tags.includes(tag));
+			if (alreadyHardened) continue;
+			memory.verificationState = "contested";
+			memory.contestedAt = nextIsoTimestamp(this.now(), memory.updatedAt);
+			memory.updatedAt = memory.contestedAt;
+			memory.tags = [...new Set([...memory.tags, ...migrationTags])];
+			memory.sourceIds = [
+				...new Set([
+					...memory.sourceIds,
+					...(migrationTags.has(LEGACY_PYTHON_POLICY_MEMORY_TAG)
+						? [`${LEGACY_PYTHON_POLICY_RUN_PREFIX}${memory.taskRunId}`]
+						: []),
+					...(migrationTags.has(LEGACY_VERIFICATION_HARNESS_MEMORY_TAG)
+						? [`${LEGACY_VERIFICATION_HARNESS_RUN_PREFIX}${memory.taskRunId}`]
+						: []),
+				]),
+			];
+			changed = true;
+		}
+		return changed;
+	}
+
 	private readPersistentLedger(path: string | undefined, identity: string, scope: AvoMemoryScope): AvoMemory[] {
 		if (!path || !existsSync(path)) return [];
 		try {
@@ -2125,7 +2360,8 @@ export class AvoStore {
 	refreshPersistentMemories(): boolean {
 		this.assertHealthy();
 		const changed = this.mergePersistentMemories();
-		const hardened = this.hardenLegacyExperimentMemories();
+		const hardenedPython = this.hardenLegacyVerificationPolicyMemories();
+		const hardened = this.hardenLegacyExperimentMemories() || hardenedPython;
 		if ((changed || hardened) && this.statePath) this.save();
 		if (hardened) this.savePersistentMemories();
 		return changed || hardened;
@@ -2137,6 +2373,10 @@ export class AvoStore {
 		try {
 			const parsed = JSON.parse(readFileSync(this.statePath, "utf8")) as unknown;
 			if (isAvoState(parsed)) return parsed;
+			if (isAvoV12State(parsed)) return migrateAvoV12State(parsed);
+			if (isAvoV11State(parsed)) return migrateAvoV11State(parsed);
+			if (isAvoV10State(parsed)) return migrateAvoV10State(parsed);
+			if (isAvoV9State(parsed)) return migrateAvoV9State(parsed);
 			if (isAvoV8State(parsed)) return migrateAvoV8State(parsed);
 			if (isAvoV7State(parsed)) return migrateAvoV7State(parsed);
 			if (isAvoV6State(parsed)) return migrateMemoryState(parsed);
@@ -2378,6 +2618,62 @@ export class AvoStore {
 			!/^[a-f0-9]{64}$/.test(execution.postWorkspaceDigest)
 		) {
 			throw new Error("coding baseline execution digests must be SHA-256 values");
+		}
+		const harness = execution.verificationHarness;
+		const harnessEntries = harness?.entries ?? [];
+		const harnessPaths = harnessEntries.map((entry) => entry.path);
+		const normalizedHarnessPaths = harnessPaths.map((path) => path.replaceAll("\\", "/"));
+		const harnessPayload = harness
+			? {
+					policyVersion: harness.policyVersion,
+					runnerFamily: harness.runnerFamily,
+					commandDigest: harness.commandDigest,
+					runnerIdentityDigest: harness.runnerIdentityDigest,
+					environmentDigest: harness.environmentDigest,
+					entries: harness.entries,
+					absentControlPaths: harness.absentControlPaths,
+					supported: harness.supported,
+					unsupportedReasons: harness.unsupportedReasons,
+				}
+			: undefined;
+		if (
+			!harness ||
+			!Array.isArray(execution.observedTestIdentities) ||
+			execution.observedTestIdentities.some(
+				(identity) => typeof identity !== "string" || identity.length === 0 || identity.length > 2_000,
+			) ||
+			new Set(execution.observedTestIdentities).size !== execution.observedTestIdentities.length ||
+			(execution.meaningful && execution.observedTestIdentities.length === 0) ||
+			harness.policyVersion !== 1 ||
+			harness.commandDigest !== execution.commandDigest ||
+			!(["pytest", "node_test", "other"] as const).includes(harness.runnerFamily) ||
+			![harness.runnerIdentityDigest, harness.environmentDigest, harness.digest].every((digest) =>
+				/^[a-f0-9]{64}$/.test(digest),
+			) ||
+			harnessPaths.some(
+				(path, index) =>
+					path !== normalizedHarnessPaths[index] ||
+					!path ||
+					path === ".." ||
+					path.startsWith("../") ||
+					isAbsolute(path),
+			) ||
+			new Set(harnessPaths).size !== harnessPaths.length ||
+			harnessEntries.some(
+				(entry) =>
+					!/^[a-f0-9]{64}$/.test(entry.sha256) ||
+					!(["test", "fixture", "config", "plugin", "runner"] as const).includes(entry.role),
+			) ||
+			JSON.stringify([...harnessPaths].sort()) !== JSON.stringify(harnessPaths) ||
+			new Set(harness.absentControlPaths).size !== harness.absentControlPaths.length ||
+			harness.absentControlPaths.some(
+				(path) => !path || path === ".." || path.startsWith("../") || isAbsolute(path) || path.includes("\\"),
+			) ||
+			JSON.stringify([...harness.absentControlPaths].sort()) !== JSON.stringify(harness.absentControlPaths) ||
+			createHash("sha256").update(JSON.stringify(harnessPayload)).digest("hex") !== harness.digest ||
+			(execution.meaningful && !harness.supported)
+		) {
+			throw new Error("coding baseline execution verification harness is invalid or not command-bound");
 		}
 		if (baseline.executions.some((item) => item.commandDigest === execution.commandDigest)) {
 			throw new Error("this coding baseline command has already been executed for the active task");
@@ -2828,6 +3124,9 @@ export class AvoStore {
 		if (input.workspaceDigest !== undefined && !/^[a-f0-9]{64}$/.test(input.workspaceDigest)) {
 			throw new Error("candidate workspace digest must be a SHA-256 digest");
 		}
+		if (input.pythonProbeBundleDigest !== undefined && !/^[a-f0-9]{64}$/.test(input.pythonProbeBundleDigest)) {
+			throw new Error("candidate Python probe bundle digest must be a SHA-256 digest");
+		}
 		if ((input.claims?.length ?? 0) > 64) throw new Error("candidate.claims must contain at most 64 claims");
 		const claims = (input.claims ?? []).map((claim, index) => {
 			const claimText = requireString(claim.claimText, `candidate.claims[${index}].claim_text`);
@@ -2935,6 +3234,7 @@ export class AvoStore {
 			workspaceHead: input.workspaceHead,
 			workspaceMode: input.workspaceMode,
 			workspaceChangedPaths: input.workspaceChangedPaths ? [...input.workspaceChangedPaths] : undefined,
+			pythonProbeBundleDigest: input.pythonProbeBundleDigest,
 			parentCandidateId: input.parentCandidateId,
 			obligationIds,
 			createdAt: this.now(),
@@ -3744,8 +4044,26 @@ export class AvoStore {
 		if (!this.state.cycles.some((cycle) => cycle.cycleId === review.cycleId)) {
 			throw new Error(`supervision references unknown cycle ${review.cycleId}`);
 		}
-		if (this.state.supervision.some((item) => item.cycleId === review.cycleId && item.source === review.source)) {
-			throw new Error(`cycle ${review.cycleId} already has ${review.source} supervision`);
+		if (review.attemptIndex !== undefined && (!Number.isInteger(review.attemptIndex) || review.attemptIndex < 0)) {
+			throw new Error("supervision attemptIndex must be a non-negative integer");
+		}
+		if (review.inputDigest !== undefined && !/^[a-f0-9]{64}$/.test(review.inputDigest)) {
+			throw new Error("supervision inputDigest must be a SHA-256 digest");
+		}
+		const previous = [...this.state.supervision]
+			.reverse()
+			.find((item) => item.cycleId === review.cycleId && item.source === review.source);
+		if (previous) {
+			if (
+				review.source !== "retained_supervisor" ||
+				previous.status !== "watch" ||
+				review.supersedesReviewId !== previous.reviewId ||
+				review.attemptIndex !== (previous.attemptIndex ?? 0) + 1
+			) {
+				throw new Error(`cycle ${review.cycleId} already has current ${review.source} supervision`);
+			}
+		} else if (review.supersedesReviewId !== undefined || (review.attemptIndex ?? 0) !== 0) {
+			throw new Error(`cycle ${review.cycleId} supervision cannot supersede a missing review`);
 		}
 		const recorded: AvoSupervisorReview = {
 			...review,
@@ -4477,7 +4795,12 @@ export class AvoStore {
 		return evaluateGenericAvoStopGate(this.state.candidates, this.state.evaluations);
 	}
 
-	complete(gate: AvoStopGate = this.evaluateStopGate()): AvoRunState {
+	complete(gate?: AvoStopGate): AvoRunState {
+		if (!gate) {
+			throw new Error(
+				"AVO completion requires an explicit host-bound stop gate; use AvoSessionRuntime.complete() or the AgentSession completion path",
+			);
+		}
 		if (!gate.passed) throw new Error(`AVO completion is blocked: ${gate.reasons.join("; ")}`);
 		const canonical = this.canonicalAcceptedCycle();
 		if (!canonical) {

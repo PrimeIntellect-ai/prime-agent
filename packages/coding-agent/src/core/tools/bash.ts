@@ -1,4 +1,6 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { spawn } from "child_process";
@@ -14,6 +16,7 @@ import {
 	trackDetachedChildPid,
 	untrackDetachedChildPid,
 } from "../../utils/shell.js";
+import { sanitizeAvoVerificationEnvironment } from "../avo/verification-environment.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
 import { previewBashCommand } from "./code-preview.js";
 import { OutputAccumulator } from "./output-accumulator.js";
@@ -118,6 +121,107 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 						if (timeoutHandle) clearTimeout(timeoutHandle);
 						if (signal) signal.removeEventListener("abort", onAbort);
 						reject(err);
+					});
+			});
+		},
+	};
+}
+
+/**
+ * Create the closed execution boundary used for authoritative AVO verification.
+ * The candidate workspace and test harness are visible but read-only, networking is
+ * unavailable, and temporary writes are confined to a fresh in-memory /tmp.
+ */
+export function createReadOnlyVerificationBashOperations(): BashOperations | undefined {
+	const sandboxPath = "/usr/bin/bwrap";
+	if (process.platform !== "linux" || !existsSync(sandboxPath)) return undefined;
+	return {
+		exec: (command, cwd, { onData, signal, timeout, env }) => {
+			return new Promise((resolve, reject) => {
+				if (!existsSync(cwd)) {
+					reject(new Error(`Working directory does not exist: ${cwd}\nCannot execute verification command.`));
+					return;
+				}
+				const writableTemp = mkdtempSync(join(tmpdir(), "prime-avo-verifier-"));
+				const sandboxTemp = writableTemp;
+				const child = spawn(
+					sandboxPath,
+					[
+						"--ro-bind",
+						"/",
+						"/",
+						"--dev",
+						"/dev",
+						"--proc",
+						"/proc",
+						"--bind",
+						writableTemp,
+						sandboxTemp,
+						"--unshare-net",
+						"--unshare-pid",
+						"--new-session",
+						"--die-with-parent",
+						"--cap-drop",
+						"ALL",
+						"--chdir",
+						cwd,
+						"--",
+						"/bin/sh",
+						"-c",
+						command,
+					],
+					{
+						cwd,
+						detached: true,
+						env: {
+							...sanitizeAvoVerificationEnvironment(env ?? process.env),
+							TMPDIR: sandboxTemp,
+							TMP: sandboxTemp,
+							TEMP: sandboxTemp,
+						},
+						stdio: ["ignore", "pipe", "pipe"],
+					},
+				);
+				if (child.pid) trackDetachedChildPid(child.pid);
+				let timedOut = false;
+				let timeoutHandle: NodeJS.Timeout | undefined;
+				if (timeout !== undefined && timeout > 0) {
+					timeoutHandle = setTimeout(() => {
+						timedOut = true;
+						if (child.pid) killProcessTree(child.pid);
+					}, timeout * 1000);
+				}
+				child.stdout?.on("data", onData);
+				child.stderr?.on("data", onData);
+				const onAbort = () => {
+					if (child.pid) killProcessTree(child.pid);
+				};
+				if (signal) {
+					if (signal.aborted) onAbort();
+					else signal.addEventListener("abort", onAbort, { once: true });
+				}
+				waitForChildProcess(child)
+					.then((code) => {
+						if (child.pid) untrackDetachedChildPid(child.pid);
+						if (timeoutHandle) clearTimeout(timeoutHandle);
+						if (signal) signal.removeEventListener("abort", onAbort);
+						rmSync(writableTemp, { recursive: true, force: true });
+						if (signal?.aborted) {
+							reject(new Error("aborted"));
+							return;
+						}
+						if (timedOut) {
+							reject(new Error(`timeout:${timeout}`));
+							return;
+						}
+						resolve({ exitCode: code });
+					})
+					.catch((error) => {
+						if (child.pid) untrackDetachedChildPid(child.pid);
+						if (timeoutHandle) clearTimeout(timeoutHandle);
+						if (signal) signal.removeEventListener("abort", onAbort);
+						rmSync(writableTemp, { recursive: true, force: true });
+						reject(error);
 					});
 			});
 		},
