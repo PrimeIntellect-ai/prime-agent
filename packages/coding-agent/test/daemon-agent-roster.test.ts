@@ -749,10 +749,7 @@ describe("supervisor roster ledger", () => {
 			worker,
 		);
 		const resident = await supervisor.handleList({}, { type: "list" });
-		expect(resident.data?.sessions.map((session) => session.sessionId).sort()).toEqual([
-			"child-session",
-			"evicted",
-		]);
+		expect(resident.data?.sessions.map((session) => session.sessionId).sort()).toEqual(["child-session", "evicted"]);
 		const passiveChild = resident.data?.sessions.find((session) => session.rlmChildId === "passive-child");
 		expect(passiveChild).toMatchObject({ workerPid: 1234 });
 		expect(passiveChild?.activeSessionId).toBeUndefined();
