@@ -119,6 +119,8 @@ export interface PrimeIntegrityTraceSummary {
 	adversarialProbePassedCases: number;
 	adversarialProbeFailedCases: number;
 	adversarialProbeEnvironmentUnsupported: number;
+	adversarialProbeRequiredContrastDimensions: number;
+	adversarialProbeContrastedInputDimensions: number;
 	adversarialProbeCallables: string[];
 	adversarialProbeRequiredCallables: string[];
 	toolProbationActivations: number;

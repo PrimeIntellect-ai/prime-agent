@@ -154,6 +154,7 @@ import {
 	assessAvoCandidateIntegrity,
 	assessAvoClaimEvidence,
 	assessAvoHostCommand,
+	assessAvoPythonProbeAdequacy,
 	assessAvoTestTrust,
 	avoClaimVerifierMarker,
 	buildAvoClaimVerifierPrompt,
@@ -4450,9 +4451,10 @@ export class AgentSession {
 			requiredCallables,
 			requirementIds,
 			minimumCases: 6,
-			maximumCases: 8,
+			maximumCases: Math.max(8, Math.min(24, requiredCallables.length * 3)),
 			minimumCrossRequirementCases: requirementIds.length >= 2 ? 3 : 0,
 			minimumDistinctRequirements: Math.min(4, requirementIds.length),
+			minimumContrastedInputDimensions: 2,
 		};
 	}
 
@@ -4611,6 +4613,7 @@ export class AgentSession {
 								maximum_cases: pythonProbeBindings.maximumCases,
 								minimum_cross_requirement_cases: pythonProbeBindings.minimumCrossRequirementCases,
 								minimum_distinct_requirements: pythonProbeBindings.minimumDistinctRequirements,
+								minimum_contrasted_input_dimensions: pythonProbeBindings.minimumContrastedInputDimensions,
 								require_cross_requirement_case_per_required_callable:
 									pythonProbeBindings.minimumCrossRequirementCases > 0,
 							}
@@ -4647,6 +4650,7 @@ export class AgentSession {
 								maximum_cases: pythonProbeBindings.maximumCases,
 								minimum_cross_requirement_cases: pythonProbeBindings.minimumCrossRequirementCases,
 								minimum_distinct_requirements: pythonProbeBindings.minimumDistinctRequirements,
+								minimum_contrasted_input_dimensions: pythonProbeBindings.minimumContrastedInputDimensions,
 								require_cross_requirement_case_per_required_callable:
 									pythonProbeBindings.minimumCrossRequirementCases > 0,
 							}
@@ -4759,10 +4763,12 @@ export class AgentSession {
 			};
 		}
 		let plan: AvoPythonProbePlan | undefined;
+		let adequacy: ReturnType<typeof assessAvoPythonProbeAdequacy> | undefined;
 		let execution: Awaited<ReturnType<AgentSession["_runAvoPythonProbe"]>> | undefined;
 		let validationError: string | undefined;
 		try {
 			plan = parseAvoPythonProbePlan(message, cycle.cycleId, bindings);
+			adequacy = assessAvoPythonProbeAdequacy(plan, bindings);
 			execution = await this._runAvoPythonProbe(candidate, plan);
 			validationError = execution.error;
 		} catch (error) {
@@ -4805,7 +4811,7 @@ export class AgentSession {
 		});
 		const executionDiagnostic = execution?.stderr.trim() || execution?.stdout.trim() || "";
 		const validationReason = passed
-			? `${execution!.report!.results.length} independent host-sandboxed adversarial probe cases passed`
+			? `${execution!.report!.results.length} independent host-sandboxed adversarial probe cases passed; ${adequacy?.contrastedInputDimensions ?? 0}/${adequacy?.requiredInputDimensions ?? 0} host-required input contrasts proved`
 			: probeEnvironmentUnsupported
 				? "the isolated system Python could not import a candidate dependency; semantic adversarial review remains authoritative"
 				: validationError
@@ -4836,9 +4842,12 @@ export class AgentSession {
 				probe_runtime: plan?.runtime ?? "invalid",
 				probe_plan_digest: planDigest,
 				probe_report_digest: reportDigest,
-				probe_plan: JSON.stringify(plan ?? { error: validationError ?? "missing plan" }).slice(0, 12_000),
+				probe_plan: JSON.stringify(plan ?? { error: validationError ?? "missing plan" }).slice(0, 32_000),
 				probe_callables: [...new Set(plan?.cases.map((item) => item.callable) ?? [])].sort().join(","),
 				probe_required_callables: [...bindings.requiredCallables].sort().join(","),
+				probe_adequacy_policy: "required_callable_contrast_v1",
+				probe_required_contrast_dimension_count: adequacy?.requiredInputDimensions ?? 0,
+				probe_contrasted_input_dimension_count: adequacy?.contrastedInputDimensions ?? 0,
 				probe_case_count: plan?.cases.length ?? 0,
 				probe_passed_case_count: execution?.report?.results.filter((item) => item.status === "pass").length ?? 0,
 				probe_failed_case_count: failedResults.length,

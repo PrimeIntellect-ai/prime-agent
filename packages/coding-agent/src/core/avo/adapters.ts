@@ -1115,6 +1115,19 @@ export class CodingAvoAdapter extends BaseAdapter {
 							: ("watch" as const),
 			};
 		};
+		const latestProbe = item(["adversarial_probe"]);
+		const probeItem = {
+			label: "Latest adversarial probes",
+			value: latestProbe
+				? `${latestProbe.status} · cases ${String(latestProbe.metrics.probe_passed_case_count ?? 0)}/${String(latestProbe.metrics.probe_case_count ?? 0)} · input contrasts ${String(latestProbe.metrics.probe_contrasted_input_dimension_count ?? 0)}/${String(latestProbe.metrics.probe_required_contrast_dimension_count ?? 0)} · required APIs ${String(latestProbe.metrics.probe_required_callables || "none")} · called APIs ${String(latestProbe.metrics.probe_callables || "none")}`
+				: "No receipt yet",
+			status:
+				latestProbe?.status === "pass"
+					? ("ok" as const)
+					: latestProbe?.status === "fail" || latestProbe?.status === "revise"
+						? ("fail" as const)
+						: ("watch" as const),
+		};
 		projection.sections.push({
 			id: "coding_feedback",
 			title: "Executable feedback",
@@ -1123,7 +1136,7 @@ export class CodingAvoAdapter extends BaseAdapter {
 				receiptItem("Latest build", "build"),
 				receiptItem("Latest lint", "lint"),
 				receiptItem("Latest benchmark", "benchmark", "experiment_trial"),
-				receiptItem("Latest adversarial probes", "adversarial_probe"),
+				probeItem,
 				{
 					label: "Current failure",
 					value:

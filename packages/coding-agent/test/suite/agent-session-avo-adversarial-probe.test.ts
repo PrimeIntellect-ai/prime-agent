@@ -17,7 +17,17 @@ import {
 } from "../../src/core/avo/index.js";
 import { createHarness, type Harness } from "./harness.js";
 
-function supervisorMessage(cycleId: string, expectedFirstValue: number, includePlan = true): string {
+function supervisorMessage(cycleId: string, expectedFirstValue: number, includePlan = true, shallow = false): string {
+	const contrastInputs = shallow
+		? Array.from({ length: 6 }, (_, index) => ({ args: [index, 0], expected: index }))
+		: [
+				{ args: [0, 1], expected: expectedFirstValue },
+				{ args: [1, 1], expected: 2 },
+				{ args: [0, 2], expected: 2 },
+				{ args: [2, 3], expected: 5 },
+				{ args: [-1, 2], expected: 1 },
+				{ args: [5, -3], expected: 2 },
+			];
 	return `AVO_SUPERVISION_JSON:${cycleId}\n${JSON.stringify({
 		cycle_id: cycleId,
 		status: "progressing",
@@ -29,13 +39,13 @@ function supervisorMessage(cycleId: string, expectedFirstValue: number, includeP
 					probe_version: 1,
 					runtime: "python_call_v1",
 					module_path: "subject.py",
-					cases: Array.from({ length: 6 }, (_, index) => ({
+					cases: contrastInputs.map((input, index) => ({
 						case_id: `case-${index}`,
 						callable: "evaluate",
 						requirement_ids: [`requirement-${index % 4}`, `requirement-${(index + 1) % 4}`],
-						args: [index, 1],
+						args: input.args,
 						kwargs: {},
-						expect: { kind: "return", value: index === 0 ? expectedFirstValue : index + 1 },
+						expect: { kind: "return", value: input.expected },
 					})),
 				}
 			: undefined,
@@ -108,6 +118,7 @@ describe("AgentSession AVO adversarial probes", () => {
 			maximumCases: 8,
 			minimumCrossRequirementCases: 3,
 			minimumDistinctRequirements: 4,
+			minimumContrastedInputDimensions: 2,
 		});
 		expect(
 			internals._avoPythonProbeBindings(
@@ -125,6 +136,7 @@ describe("AgentSession AVO adversarial probes", () => {
 			requirementIds: ["requirement-0"],
 			minimumCrossRequirementCases: 0,
 			minimumDistinctRequirements: 1,
+			minimumContrastedInputDimensions: 2,
 		});
 		if (!bindings) throw new Error("Python probe bindings were not exposed");
 		const cycle = (cycleId: string): AvoRunState["cycles"][number] => ({
@@ -135,8 +147,8 @@ describe("AgentSession AVO adversarial probes", () => {
 			outcome: "accepted",
 			completedAt: new Date().toISOString(),
 		});
-		const bind = async (cycleId: string, expectedFirstValue: number, includePlan = true) => {
-			const message = supervisorMessage(cycleId, expectedFirstValue, includePlan);
+		const bind = async (cycleId: string, expectedFirstValue: number, includePlan = true, shallow = false) => {
+			const message = supervisorMessage(cycleId, expectedFirstValue, includePlan, shallow);
 			return internals._bindAvoPythonProbeReview(
 				runtime,
 				cycle(cycleId),
@@ -164,6 +176,9 @@ describe("AgentSession AVO adversarial probes", () => {
 					probe_callables: "evaluate",
 					probe_required_callables: "evaluate",
 					probe_plan: expect.stringContaining('"callable":"evaluate"'),
+					probe_adequacy_policy: "required_callable_contrast_v1",
+					probe_required_contrast_dimension_count: 2,
+					probe_contrasted_input_dimension_count: 2,
 				}),
 			}),
 		);
@@ -193,9 +208,25 @@ describe("AgentSession AVO adversarial probes", () => {
 				items: expect.arrayContaining([
 					expect.objectContaining({
 						label: "Latest adversarial probes",
-						value: expect.stringContaining("revise"),
+						value: expect.stringMatching(/revise.*input contrasts 2\/2.*required APIs evaluate/),
 					}),
 				]),
+			}),
+		);
+
+		await expect(bind("cycle-shallow", 0, true, true)).resolves.toMatchObject({
+			status: "watch",
+			detectedPatterns: expect.arrayContaining(["invalid_adversarial_probe_plan"]),
+		});
+		expect(runtime.getState().evaluations).toContainEqual(
+			expect.objectContaining({
+				evaluatorId: "adversarial_probe",
+				status: "inconclusive",
+				metrics: expect.objectContaining({
+					supervisor_cycle_id: "cycle-shallow",
+					probe_case_count: 0,
+					validation_reason: expect.stringContaining("discriminating contrast pair"),
+				}),
 			}),
 		);
 

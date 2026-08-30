@@ -197,6 +197,8 @@ export interface SpecBenchConditionSummary {
 	meanAdversarialProbePassedCases: number;
 	meanAdversarialProbeFailedCases: number;
 	meanAdversarialProbeEnvironmentUnsupported: number;
+	meanAdversarialProbeRequiredContrastDimensions: number;
+	meanAdversarialProbeContrastedInputDimensions: number;
 	adversarialProbeCallables: string[];
 	adversarialProbeRequiredCallables: string[];
 	meanToolProbationActivations: number;
@@ -1040,6 +1042,12 @@ export function aggregateSpecBenchConditions(results: readonly SpecBenchResult[]
 			meanAdversarialProbeEnvironmentUnsupported: mean(
 				selected.map((item) => item.trace.adversarialProbeEnvironmentUnsupported),
 			),
+			meanAdversarialProbeRequiredContrastDimensions: mean(
+				selected.map((item) => item.trace.adversarialProbeRequiredContrastDimensions),
+			),
+			meanAdversarialProbeContrastedInputDimensions: mean(
+				selected.map((item) => item.trace.adversarialProbeContrastedInputDimensions),
+			),
 			adversarialProbeCallables: [
 				...new Set(selected.flatMap((item) => item.trace.adversarialProbeCallables)),
 			].sort(),
@@ -1117,7 +1125,7 @@ function writeReport(
 ): void {
 	const conditions = aggregateSpecBenchConditions(results);
 	const report = {
-		schemaVersion: 10,
+		schemaVersion: 11,
 		benchmark: "WecoAI SpecBench via Prime AVO",
 		specbenchRevision,
 		provider: options.provider,
@@ -1206,13 +1214,13 @@ function writeReport(
 	const adversarialProbeRows = conditions
 		.map(
 			(condition) =>
-				`| ${condition.conditionId} | ${condition.meanAdversarialProbeEvaluations.toFixed(1)} | ${condition.meanAdversarialProbePasses.toFixed(1)} | ${condition.meanAdversarialProbeRevisions.toFixed(1)} | ${condition.meanAdversarialProbeInconclusive.toFixed(1)} | ${condition.meanAdversarialProbeCases.toFixed(1)} | ${condition.meanAdversarialProbePassedCases.toFixed(1)} | ${condition.meanAdversarialProbeFailedCases.toFixed(1)} | ${condition.meanAdversarialProbeEnvironmentUnsupported.toFixed(1)} | ${condition.adversarialProbeRequiredCallables.join(", ") || "none"} | ${condition.adversarialProbeCallables.join(", ") || "none"} |`,
+				`| ${condition.conditionId} | ${condition.meanAdversarialProbeEvaluations.toFixed(1)} | ${condition.meanAdversarialProbePasses.toFixed(1)} | ${condition.meanAdversarialProbeRevisions.toFixed(1)} | ${condition.meanAdversarialProbeInconclusive.toFixed(1)} | ${condition.meanAdversarialProbeCases.toFixed(1)} | ${condition.meanAdversarialProbePassedCases.toFixed(1)} | ${condition.meanAdversarialProbeFailedCases.toFixed(1)} | ${condition.meanAdversarialProbeEnvironmentUnsupported.toFixed(1)} | ${condition.meanAdversarialProbeContrastedInputDimensions.toFixed(1)} / ${condition.meanAdversarialProbeRequiredContrastDimensions.toFixed(1)} | ${condition.adversarialProbeRequiredCallables.join(", ") || "none"} | ${condition.adversarialProbeCallables.join(", ") || "none"} |`,
 		)
 		.join("\n");
 	const adversarialProbeRunRows = results
 		.map(
 			(item) =>
-				`| ${item.conditionId} | ${item.repetition} | ${item.taskId} | ${item.trace.adversarialProbeEvaluations} | ${item.trace.adversarialProbePasses} | ${item.trace.adversarialProbeRevisions} | ${item.trace.adversarialProbeInconclusive} | ${item.trace.adversarialProbeCases} | ${item.trace.adversarialProbePassedCases} | ${item.trace.adversarialProbeFailedCases} | ${item.trace.adversarialProbeEnvironmentUnsupported} | ${item.trace.adversarialProbeRequiredCallables.join(", ") || "none"} | ${item.trace.adversarialProbeCallables.join(", ") || "none"} |`,
+				`| ${item.conditionId} | ${item.repetition} | ${item.taskId} | ${item.trace.adversarialProbeEvaluations} | ${item.trace.adversarialProbePasses} | ${item.trace.adversarialProbeRevisions} | ${item.trace.adversarialProbeInconclusive} | ${item.trace.adversarialProbeCases} | ${item.trace.adversarialProbePassedCases} | ${item.trace.adversarialProbeFailedCases} | ${item.trace.adversarialProbeEnvironmentUnsupported} | ${item.trace.adversarialProbeContrastedInputDimensions} / ${item.trace.adversarialProbeRequiredContrastDimensions} | ${item.trace.adversarialProbeRequiredCallables.join(", ") || "none"} | ${item.trace.adversarialProbeCallables.join(", ") || "none"} |`,
 		)
 		.join("\n");
 	const completionBlockerRows = results
@@ -1227,14 +1235,14 @@ function writeReport(
 
 For eligible Python candidates, the independent reviewer must submit bounded JSON-only function calls. The host executes them in a read-only, network-isolated workspace. A mismatch records an authoritative revision; an invalid plan cannot retain a progressing verdict. Dependency imports unavailable to the isolated system Python are reported separately and fall back to the semantic adversarial review.
 
-| Condition | Probe receipts | Pass | Revise | Inconclusive | Cases | Case pass | Case fail | Environment unsupported | Required APIs | Called APIs |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| Condition | Probe receipts | Pass | Revise | Inconclusive | Cases | Case pass | Case fail | Environment unsupported | Input contrasts | Required APIs | Called APIs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
 ${adversarialProbeRows}
 
 #### Probe runs
 
-| Condition | Rep | Task | Probe receipts | Pass | Revise | Inconclusive | Cases | Case pass | Case fail | Environment unsupported | Required APIs | Called APIs |
-| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| Condition | Rep | Task | Probe receipts | Pass | Revise | Inconclusive | Cases | Case pass | Case fail | Environment unsupported | Input contrasts | Required APIs | Called APIs |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
 ${adversarialProbeRunRows}`;
 	writeFileSync(
 		join(options.outputDir, "report.md"),

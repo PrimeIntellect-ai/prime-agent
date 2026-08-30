@@ -465,6 +465,8 @@ function emptyTraceSummary(): PrimeIntegrityTraceSummary {
 		adversarialProbePassedCases: 0,
 		adversarialProbeFailedCases: 0,
 		adversarialProbeEnvironmentUnsupported: 0,
+		adversarialProbeRequiredContrastDimensions: 0,
+		adversarialProbeContrastedInputDimensions: 0,
 		adversarialProbeCallables: [],
 		adversarialProbeRequiredCallables: [],
 		toolProbationActivations: 0,
@@ -1094,6 +1096,28 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			summary.adversarialProbeEnvironmentUnsupported = Math.max(
 				summary.adversarialProbeEnvironmentUnsupported,
 				adversarialProbes.filter((evaluation) => evaluation.metrics?.probe_environment_unsupported === true).length,
+			);
+			summary.adversarialProbeRequiredContrastDimensions = Math.max(
+				summary.adversarialProbeRequiredContrastDimensions,
+				adversarialProbes.reduce(
+					(total, evaluation) =>
+						total +
+						(typeof evaluation.metrics?.probe_required_contrast_dimension_count === "number"
+							? evaluation.metrics.probe_required_contrast_dimension_count
+							: 0),
+					0,
+				),
+			);
+			summary.adversarialProbeContrastedInputDimensions = Math.max(
+				summary.adversarialProbeContrastedInputDimensions,
+				adversarialProbes.reduce(
+					(total, evaluation) =>
+						total +
+						(typeof evaluation.metrics?.probe_contrasted_input_dimension_count === "number"
+							? evaluation.metrics.probe_contrasted_input_dimension_count
+							: 0),
+					0,
+				),
 			);
 			summary.adversarialProbeCallables = [
 				...new Set([

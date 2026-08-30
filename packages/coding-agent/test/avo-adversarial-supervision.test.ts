@@ -199,13 +199,21 @@ describe.sequential("AVO adversarial acceptance supervision", () => {
 	});
 
 	test("accepts only bounded host-referenced Python call probe plans", () => {
-		const cases = Array.from({ length: 6 }, (_, index) => ({
+		const contrastInputs = [
+			{ args: [0, 1], expected: 1 },
+			{ args: [1, 1], expected: 2 },
+			{ args: [0, 2], expected: 2 },
+			{ args: [2, 3], expected: 5 },
+			{ args: [-1, 2], expected: 1 },
+			{ args: [5, -3], expected: 2 },
+		];
+		const cases = contrastInputs.map((input, index) => ({
 			case_id: `case-${index}`,
 			callable: "evaluate",
 			requirement_ids: [`requirement-${index % 4}`, `requirement-${(index + 1) % 4}`],
-			args: [index, 1],
+			args: input.args,
 			kwargs: {},
-			expect: { kind: "return", value: index + 1 },
+			expect: { kind: "return", value: input.expected },
 		}));
 		const response = (probePlan: Record<string, unknown>) =>
 			`AVO_SUPERVISION_JSON:cycle\n${JSON.stringify({
@@ -224,6 +232,7 @@ describe.sequential("AVO adversarial acceptance supervision", () => {
 			maximumCases: 8,
 			minimumCrossRequirementCases: 3,
 			minimumDistinctRequirements: 4,
+			minimumContrastedInputDimensions: 2,
 		};
 		const validPlan = { probe_version: 1, runtime: "python_call_v1", module_path: "subject.py", cases };
 		expect(parseAvoPythonProbePlan(response(validPlan), "cycle", bindings)).toMatchObject({
@@ -241,6 +250,14 @@ describe.sequential("AVO adversarial acceptance supervision", () => {
 				minimumDistinctRequirements: 1,
 			}),
 		).toMatchObject({ cases: expect.arrayContaining([expect.objectContaining({ callable: "evaluate" })]) });
+		const shallowCases = cases.map((item, index) => ({
+			...item,
+			args: [index, 0],
+			expect: { kind: "return", value: index },
+		}));
+		expect(() => parseAvoPythonProbePlan(response({ ...validPlan, cases: shallowCases }), "cycle", bindings)).toThrow(
+			/discriminating contrast pair for callable evaluate input arg:1/,
+		);
 		expect(() => parseAvoPythonProbePlan(response({ ...validPlan, runtime: "shell" }), "cycle", bindings)).toThrow(
 			/runtime must be python_call_v1/,
 		);

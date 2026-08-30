@@ -419,8 +419,9 @@ executable tests. The `no-adversarial-supervision` condition exists so repeated
 multi-task runs can measure whether the additional review justifies its cost.
 
 The next iteration closes part of that remaining gap for eligible Python
-candidates. A progressing independent review must include six to eight bounded
-JSON-only calls into one host-exposed changed Python module. For tasks with at
+candidates. A progressing independent review must include at least six bounded
+JSON-only calls into one host-exposed changed Python module, with a host-capped
+maximum that scales up to 24 when several required APIs need coverage. For tasks with at
 least four eligible requirements, it must cover four and include three
 cross-requirement cases; smaller ledgers scale those minima to the requirements
 that actually exist. Prime—not the
@@ -433,7 +434,11 @@ Prime selects the changed module instead of letting the reviewer cherry-pick an
 easy file. For top-level public Python functions named by the objective or
 requirement ledger, the plan must exercise every host-exposed callable and give
 each callable at least one cross-requirement case when the ledger exposes two or
-more eligible requirements.
+more eligible requirements. It must also provide discriminating paired cases
+for the first two available input dimensions of every required callable: only
+that input may change within the pair, and the expected observation must change.
+This rejects superficially diverse plans such as testing a broken two-argument
+addition implementation only with a zero second argument.
 Because hardened SpecBench already places the entire Prime process inside one
 bubblewrap namespace, its outside benchmark controller provides a private
 token-bound Unix-socket broker and executes the same probe sandbox as a sibling
@@ -478,6 +483,15 @@ second cycle executed seven cases through the host broker and retained a
 its four `findall` cases covered digits, alternation, whitespace, and greedy
 character ranges. It did not combine `findall` with capture groups, so the same
 six held-out checks failed.
+
+That paid run used the initial API-surface policy and predates the contrastive
+input policy. A local adversarial reproduction then showed that a broken
+`evaluate(left, right)` implementation returning only `left` could pass six
+cases when every case used `right = 0`. The current host rejects that plan
+before execution because it cannot supply a paired `arg:1` contrast whose
+expected observation changes. Trace schema v11 records contrasted versus
+required input dimensions, so future paid runs can distinguish case count from
+actual discriminating coverage.
 
 That unchanged hidden score is not clean evidence of model laziness. The public
 task declares `findall(pattern, text) -> list[str]` and says to return all

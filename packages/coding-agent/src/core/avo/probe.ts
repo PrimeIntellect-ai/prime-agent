@@ -47,6 +47,18 @@ export interface AvoPythonProbeBindings {
 	maximumCases: number;
 	minimumCrossRequirementCases: number;
 	minimumDistinctRequirements: number;
+	minimumContrastedInputDimensions: number;
+}
+
+export interface AvoPythonProbeAdequacy {
+	policyVersion: 1;
+	requiredInputDimensions: number;
+	contrastedInputDimensions: number;
+	callables: Array<{
+		callable: string;
+		requiredDimensions: string[];
+		contrastedDimensions: string[];
+	}>;
 }
 
 export interface AvoPythonProbeCaseResult {
@@ -128,6 +140,87 @@ function parseJsonValue(value: unknown, label: string, depth = 0): AvoProbeJsonV
 	throw new Error(`${label} must be JSON-compatible`);
 }
 
+function canonicalJson(value: AvoProbeJsonValue): string {
+	if (value === null || typeof value !== "object") return JSON.stringify(value);
+	if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+	return `{${Object.keys(value)
+		.sort()
+		.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key]!)}`)
+		.join(",")}}`;
+}
+
+function expectationIdentity(expectation: AvoPythonProbeExpectation): string {
+	return expectation.kind === "return"
+		? `return:${canonicalJson(expectation.value ?? null)}`
+		: `raises:${expectation.error ?? ""}`;
+}
+
+function inputIdentityWithoutDimension(probeCase: AvoPythonProbeCase, dimension: string): string {
+	const args = [...probeCase.args];
+	const kwargs = { ...probeCase.kwargs };
+	if (dimension.startsWith("arg:")) {
+		args[Number(dimension.slice(4))] = { __avo_contrast_dimension__: dimension };
+	} else {
+		kwargs[dimension.slice(7)] = { __avo_contrast_dimension__: dimension };
+	}
+	return canonicalJson({ args, kwargs });
+}
+
+function dimensionValue(probeCase: AvoPythonProbeCase, dimension: string): AvoProbeJsonValue | undefined {
+	return dimension.startsWith("arg:")
+		? probeCase.args[Number(dimension.slice(4))]
+		: probeCase.kwargs[dimension.slice(7)];
+}
+
+export function assessAvoPythonProbeAdequacy(
+	plan: AvoPythonProbePlan,
+	bindings: Pick<AvoPythonProbeBindings, "requiredCallables" | "minimumContrastedInputDimensions">,
+): AvoPythonProbeAdequacy {
+	const summaries: AvoPythonProbeAdequacy["callables"] = [];
+	for (const callable of bindings.requiredCallables) {
+		const cases = plan.cases.filter((item) => item.callable === callable);
+		if (cases.length === 0) throw new Error(`probe_plan must exercise host-required callable ${callable}`);
+		const maximumArgumentCount = Math.max(0, ...cases.map((item) => item.args.length));
+		const positionalDimensions = Array.from(
+			{ length: Math.min(bindings.minimumContrastedInputDimensions, maximumArgumentCount) },
+			(_, index) => `arg:${index}`,
+		);
+		const keywordDimensions = [...new Set(cases.flatMap((item) => Object.keys(item.kwargs)))]
+			.sort()
+			.slice(0, Math.max(0, bindings.minimumContrastedInputDimensions - positionalDimensions.length))
+			.map((key) => `kwarg:${key}`);
+		const requiredDimensions = [...positionalDimensions, ...keywordDimensions];
+		const contrastedDimensions = requiredDimensions.filter((dimension) =>
+			cases.some((left, leftIndex) =>
+				cases.slice(leftIndex + 1).some((right) => {
+					const leftValue = dimensionValue(left, dimension);
+					const rightValue = dimensionValue(right, dimension);
+					return (
+						leftValue !== undefined &&
+						rightValue !== undefined &&
+						canonicalJson(leftValue) !== canonicalJson(rightValue) &&
+						inputIdentityWithoutDimension(left, dimension) === inputIdentityWithoutDimension(right, dimension) &&
+						expectationIdentity(left.expect) !== expectationIdentity(right.expect)
+					);
+				}),
+			),
+		);
+		const missingDimension = requiredDimensions.find((dimension) => !contrastedDimensions.includes(dimension));
+		if (missingDimension) {
+			throw new Error(
+				`probe_plan requires a discriminating contrast pair for callable ${callable} input ${missingDimension}`,
+			);
+		}
+		summaries.push({ callable, requiredDimensions, contrastedDimensions });
+	}
+	return {
+		policyVersion: 1,
+		requiredInputDimensions: summaries.reduce((total, item) => total + item.requiredDimensions.length, 0),
+		contrastedInputDimensions: summaries.reduce((total, item) => total + item.contrastedDimensions.length, 0),
+		callables: summaries,
+	};
+}
+
 function parseBrokerPlan(value: unknown): AvoPythonProbePlan {
 	if (!isRecord(value)) throw new Error("probe broker plan must be an object");
 	assertKnownKeys(value, ["probeVersion", "runtime", "modulePath", "cases"], "probe broker plan");
@@ -142,8 +235,8 @@ function parseBrokerPlan(value: unknown): AvoPythonProbePlan {
 	) {
 		throw new Error("probe broker plan.modulePath must be a bounded relative Python path");
 	}
-	if (!Array.isArray(value.cases) || value.cases.length < 1 || value.cases.length > 8) {
-		throw new Error("probe broker plan.cases must contain 1-8 cases");
+	if (!Array.isArray(value.cases) || value.cases.length < 1 || value.cases.length > 24) {
+		throw new Error("probe broker plan.cases must contain 1-24 cases");
 	}
 	const cases = value.cases.map((item, index): AvoPythonProbeCase => {
 		if (!isRecord(item)) throw new Error(`probe broker plan.cases[${index}] must be an object`);
@@ -219,7 +312,7 @@ export function parseAvoPythonProbePlan(
 	const payload = parseAvoSupervisorPayload(message, expectedCycleId);
 	if (!isRecord(payload.probe_plan)) throw new Error("supervisor response omitted probe_plan");
 	const value = payload.probe_plan;
-	if (JSON.stringify(value).length > 12_000) throw new Error("probe_plan exceeds 12000 serialized characters");
+	if (JSON.stringify(value).length > 32_000) throw new Error("probe_plan exceeds 32000 serialized characters");
 	assertKnownKeys(value, ["probe_version", "runtime", "module_path", "cases"], "probe_plan");
 	if (value.probe_version !== 1) throw new Error("probe_plan.probe_version must be 1");
 	if (value.runtime !== "python_call_v1") throw new Error("probe_plan.runtime must be python_call_v1");
@@ -342,7 +435,9 @@ export function parseAvoPythonProbePlan(
 			throw new Error(`probe_plan requires a cross-requirement case for callable ${requiredCallable}`);
 		}
 	}
-	return { probeVersion: 1, runtime: "python_call_v1", modulePath, cases };
+	const plan = { probeVersion: 1 as const, runtime: "python_call_v1" as const, modulePath, cases };
+	assessAvoPythonProbeAdequacy(plan, bindings);
+	return plan;
 }
 
 export const AVO_PYTHON_PROBE_RESULT_MARKER = "AVO_PYTHON_PROBE_RESULT:";
