@@ -102,6 +102,10 @@ class ResumeDaemonClient {
 		throw new Error(`Unexpected command: ${command.type}`);
 	}
 
+	supportsServerCapability(): boolean {
+		return false;
+	}
+
 	onMessage(listener: DaemonClientMessageListener): () => void {
 		this.messageListeners.add(listener);
 		return () => this.messageListeners.delete(listener);

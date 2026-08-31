@@ -355,6 +355,7 @@ describe("daemon worker supervisor monitoring", () => {
 			internals.handleConnection(socket);
 			const client = [...internals.clients][0]!;
 			client.authenticated = true;
+			client.authenticationRole = "supervisor";
 			internals.supervisorClaims.set(client, {
 				claim: {},
 				ownerFingerprint: "old",
@@ -442,6 +443,7 @@ describe("daemon worker supervisor monitoring", () => {
 		const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
 			options: { worker: { authenticationToken: "token" } },
 			supervisorClaims: new Map([[client, oldClaim]]),
+			peerClaims: new Map(),
 			updateRestart: transaction,
 			handleWorkerCommand: vi.fn(async () => undefined),
 			assertSupervisorClaimCurrent: vi.fn(async () => {
@@ -483,6 +485,7 @@ describe("daemon worker supervisor monitoring", () => {
 		const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
 			options: { worker: { authenticationToken: "token" } },
 			supervisorClaims: new Map(),
+			peerClaims: new Map(),
 			clients: new Set(),
 			sessions: new Map(),
 			cronStore: { list: () => [] },

@@ -3248,7 +3248,8 @@ export class AgentDaemon {
 			client.detachInput();
 			this.clients.delete(client);
 			this.peerClaims.delete(client);
-			const wasSupervisor = this.supervisorClaims.has(client);
+			// The fence check revokes a stale claim before ending the socket; the role survives.
+			const wasSupervisor = client.authenticationRole === "supervisor";
 			this.revokeSupervisorClaim(client);
 			const supervisorSocketPath = this.supervisorSocketPathFromEnv();
 			if (this.options.worker && wasSupervisor && supervisorSocketPath) {
@@ -3356,7 +3357,6 @@ export class AgentDaemon {
 					const expiresAt = grant ? Date.parse(grant.expiresAt) : Number.NaN;
 					if (
 						this.peerAdmissionsFenced ||
-						this.shuttingDown ||
 						!grant ||
 						!presentedTokenHash ||
 						!expectedTokenHash ||
