@@ -644,107 +644,77 @@ describe("agents view slash commands", () => {
 		expect(self.refreshSavedSessions).toHaveBeenCalledTimes(1);
 	});
 
-	it("arms the saved-catalog fetch once for restored and typed queries alike", () => {
-		const refreshSavedSessions = vi.fn(async () => true);
-		const persistentState: Record<string, unknown> = {};
-		const self: Record<string, unknown> = {
-			savedSearchFetchStarted: false,
-			persistentState,
-			editor: editorWithText("restored needle"),
-			refreshSavedSessions,
+	it("arms the saved-search fetch once and guards latch and gate against superseded settles", async () => {
+		const latchHarness = (text: string, responses: unknown[]) => {
+			const request = vi.fn(async () => responses.shift());
+			const persistentState: Record<string, unknown> = {};
+			const self: Record<string, unknown> = {
+				persistentState,
+				reconnectPromise: undefined,
+				daemonShutdownReceived: false,
+				savedCatalogGeneration: 0,
+				savedCatalogRefreshPending: false,
+				savedCatalogReady: false,
+				savedSessions: [],
+				lastSuccessfulSavedSessions: [],
+				savedSearchFetchStarted: false,
+				selectionAnchorPending: false,
+				reconcileCatalogs: vi.fn(),
+				resolveMissingSelectionAnchor: vi.fn(),
+				rebuildRows: vi.fn(),
+				syncSelectedRowState: vi.fn(),
+				ui: { requestRender: vi.fn() },
+				editor: editorWithText(text),
+				requireClient: () => ({ request }),
+				getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
+				refreshSavedSessions: vi.fn((options?: unknown) => invoke("refreshSavedSessions", self, options)),
+				rearmSavedSearchFetch() {
+					return invoke("rearmSavedSearchFetch", self);
+				},
+				armSavedSearchFetch() {
+					return invoke("armSavedSearchFetch", self);
+				},
+			};
+			const supersede = () =>
+				(self.refreshSavedSessions as (options?: unknown) => Promise<boolean>)({ preserveStatusOnError: true });
+			return { self, persistentState, request, supersede };
 		};
 
-		// run() arms the latch for a restored query; a later queryChanged cannot double-fetch.
-		invoke("armSavedSearchFetch", self);
-		expect(self.savedSearchFetchStarted).toBe(true);
-		invoke("armSavedSearchFetch", self);
-		expect(refreshSavedSessions).toHaveBeenCalledTimes(1);
+		// An empty query never arms; an already-loaded shared catalog never refetches.
+		const idle = latchHarness("   ", []);
+		invoke("armSavedSearchFetch", idle.self);
+		expect(idle.self.savedSearchFetchStarted).toBe(false);
+		const loaded = latchHarness("needle", []);
+		(loaded.persistentState as { savedCatalogLoaded?: boolean }).savedCatalogLoaded = true;
+		invoke("armSavedSearchFetch", loaded.self);
+		expect(loaded.request).not.toHaveBeenCalled();
 
-		// An empty editor never arms the latch.
-		const idle: Record<string, unknown> = {
-			savedSearchFetchStarted: false,
-			persistentState: {},
-			editor: editorWithText("   "),
-			refreshSavedSessions: vi.fn(),
-		};
-		invoke("armSavedSearchFetch", idle);
-		expect(idle.savedSearchFetchStarted).toBe(false);
+		// Failure ordering: a superseded settle may not disarm; only the current fetch re-arms.
+		let rejectFirst: (error: Error) => void = () => {};
+		let rejectSecond: (error: Error) => void = () => {};
+		const failing = latchHarness("deep search text", [
+			new Promise((_resolve, reject) => {
+				rejectFirst = reject;
+			}),
+			new Promise((_resolve, reject) => {
+				rejectSecond = reject;
+			}),
+		]);
+		invoke("queryChanged", failing.self);
+		invoke("queryChanged", failing.self);
+		expect(failing.request).toHaveBeenCalledTimes(1);
+		const olderFailure = (failing.self.refreshSavedSessions as ReturnType<typeof vi.fn>).mock.results[0]
+			?.value as Promise<boolean>;
+		const newerFailure = failing.supersede();
+		rejectFirst(new Error("gen1 failed"));
+		await expect(olderFailure).resolves.toBe(false);
+		expect(failing.self.savedSearchFetchStarted).toBe(true);
+		rejectSecond(new Error("gen2 failed"));
+		await expect(newerFailure).resolves.toBe(false);
+		expect(failing.self.savedSearchFetchStarted).toBe(false);
+		expect(failing.persistentState.savedCatalogLoaded).toBeUndefined();
 
-		// A remounted view over an already-loaded shared catalog never refetches; mutations keep it fresh.
-		const loadedRefresh = vi.fn(async () => true);
-		const loaded: Record<string, unknown> = {
-			savedSearchFetchStarted: false,
-			persistentState: { savedCatalogLoaded: true },
-			editor: editorWithText("restored needle"),
-			refreshSavedSessions: loadedRefresh,
-		};
-		invoke("armSavedSearchFetch", loaded);
-		expect(loadedRefresh).not.toHaveBeenCalled();
-		expect(loaded.savedSearchFetchStarted).toBe(false);
-	});
-
-	it("keeps the search latch armed when a superseded fetch settles before the pending newer one", async () => {
-		let releaseFirst: (error: Error) => void = () => {};
-		const firstResponse = new Promise((_resolveFirst, rejectFirst) => {
-			releaseFirst = rejectFirst;
-		});
-		let releaseSecond: (error: Error) => void = () => {};
-		const secondResponse = new Promise((_resolveSecond, rejectSecond) => {
-			releaseSecond = rejectSecond;
-		});
-		const responses: unknown[] = [firstResponse, secondResponse];
-		const request = vi.fn(async () => responses.shift());
-		const persistentState: Record<string, unknown> = {};
-		const self: Record<string, unknown> = {
-			persistentState,
-			reconnectPromise: undefined,
-			daemonShutdownReceived: false,
-			savedCatalogGeneration: 0,
-			savedCatalogRefreshPending: false,
-			savedCatalogReady: false,
-			savedSessions: [],
-			lastSuccessfulSavedSessions: [],
-			savedSearchFetchStarted: false,
-			selectionAnchorPending: false,
-			reconcileCatalogs: vi.fn(),
-			resolveMissingSelectionAnchor: vi.fn(),
-			rebuildRows: vi.fn(),
-			syncSelectedRowState: vi.fn(),
-			ui: { requestRender: vi.fn() },
-			editor: editorWithText("deep search text"),
-			requireClient: () => ({ request }),
-			getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
-			refreshSavedSessions: vi.fn((options?: unknown) => invoke("refreshSavedSessions", self, options)),
-			rearmSavedSearchFetch() {
-				return invoke("rearmSavedSearchFetch", self);
-			},
-			armSavedSearchFetch() {
-				return invoke("armSavedSearchFetch", self);
-			},
-		};
-
-		invoke("queryChanged", self);
-		expect(self.savedSearchFetchStarted).toBe(true);
-		const older = (self.refreshSavedSessions as ReturnType<typeof vi.fn>).mock.results[0]?.value as Promise<boolean>;
-		const newer = (self.refreshSavedSessions as (options?: unknown) => Promise<boolean>)({
-			preserveStatusOnError: true,
-		});
-
-		// The superseded fetch settles first; it may neither disarm the latch nor spawn a third fetch.
-		releaseFirst(new Error("gen1 failed"));
-		await expect(older).resolves.toBe(false);
-		expect(self.savedSearchFetchStarted).toBe(true);
-		invoke("queryChanged", self);
-		expect(request).toHaveBeenCalledTimes(2);
-
-		// The current fetch failing without a catalog re-arms the latch for the next keystroke.
-		releaseSecond(new Error("gen2 failed"));
-		await expect(newer).resolves.toBe(false);
-		expect(self.savedSearchFetchStarted).toBe(false);
-		expect(persistentState.savedCatalogLoaded).toBeUndefined();
-	});
-
-	it("keeps the persistent catalog gate when a superseded fetch settles after a newer success", async () => {
+		// Success ordering: a stale settle can clear neither the gate nor the fresh data.
 		const wire = {
 			path: "/tmp/sessions/kept.jsonl",
 			id: "kept",
@@ -756,59 +726,22 @@ describe("agents view slash commands", () => {
 			firstMessage: "kept",
 			allMessagesText: "kept",
 		};
-		let releaseFirst: (response: unknown) => void = () => {};
-		const firstResponse = new Promise((resolveFirst) => {
-			releaseFirst = resolveFirst;
-		});
-		const responses: unknown[] = [firstResponse, { success: true, data: { sessions: [wire] } }];
-		const request = vi.fn(async () => responses.shift());
-		const persistentState: Record<string, unknown> = {};
-		const self: Record<string, unknown> = {
-			persistentState,
-			reconnectPromise: undefined,
-			daemonShutdownReceived: false,
-			savedCatalogGeneration: 0,
-			savedCatalogRefreshPending: false,
-			savedCatalogReady: false,
-			savedSessions: [],
-			lastSuccessfulSavedSessions: [],
-			savedSearchFetchStarted: false,
-			selectionAnchorPending: false,
-			reconcileCatalogs: vi.fn(),
-			resolveMissingSelectionAnchor: vi.fn(),
-			rebuildRows: vi.fn(),
-			syncSelectedRowState: vi.fn(),
-			ui: { requestRender: vi.fn() },
-			editor: editorWithText("deep search text"),
-			requireClient: () => ({ request }),
-			getSavedSessionCatalogContext: () => ({ cwd: "/tmp/project" }),
-			refreshSavedSessions: vi.fn((options?: unknown) => invoke("refreshSavedSessions", self, options)),
-			rearmSavedSearchFetch() {
-				return invoke("rearmSavedSearchFetch", self);
-			},
-			armSavedSearchFetch() {
-				return invoke("armSavedSearchFetch", self);
-			},
-		};
-
-		// The search kicks off the first (hanging) fetch and arms the per-instance flag.
-		invoke("queryChanged", self);
-		expect(self.savedSearchFetchStarted).toBe(true);
-		const older = (self.refreshSavedSessions as ReturnType<typeof vi.fn>).mock.results[0]?.value as Promise<boolean>;
-
-		// A mutation refresh supersedes it and succeeds.
-		const newer = (self.refreshSavedSessions as (options?: unknown) => Promise<boolean>)({
-			preserveStatusOnError: true,
-		});
-		await expect(newer).resolves.toBe(true);
-		expect(persistentState.savedCatalogLoaded).toBe(true);
-
-		// The stale continuation settles false but can clear neither the gate nor the fresh data.
-		releaseFirst({ success: true, data: { sessions: [] } });
-		await expect(older).resolves.toBe(false);
-		expect(persistentState.savedCatalogLoaded).toBe(true);
-		expect(persistentState.savedSessions).toHaveLength(1);
-		expect(self.savedSearchFetchStarted).toBe(true);
+		let resolveFirst: (response: unknown) => void = () => {};
+		const succeeding = latchHarness("deep search text", [
+			new Promise((resolve) => {
+				resolveFirst = resolve;
+			}),
+			{ success: true, data: { sessions: [wire] } },
+		]);
+		invoke("queryChanged", succeeding.self);
+		const olderSuccess = (succeeding.self.refreshSavedSessions as ReturnType<typeof vi.fn>).mock.results[0]
+			?.value as Promise<boolean>;
+		await expect(succeeding.supersede()).resolves.toBe(true);
+		expect(succeeding.persistentState.savedCatalogLoaded).toBe(true);
+		resolveFirst({ success: true, data: { sessions: [] } });
+		await expect(olderSuccess).resolves.toBe(false);
+		expect(succeeding.persistentState.savedCatalogLoaded).toBe(true);
+		expect(succeeding.persistentState.savedSessions).toHaveLength(1);
 	});
 
 	it("kills a live target and disarms the composer", async () => {

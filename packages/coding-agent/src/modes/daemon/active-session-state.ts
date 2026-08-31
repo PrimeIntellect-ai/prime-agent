@@ -18,7 +18,6 @@ export interface DaemonSocketClient {
 	/** Delayed retry after transient catch-up snapshot preparation failure. */
 	catchupRetryTimer?: NodeJS.Timeout;
 	backpressured?: boolean;
-	/** Receives coalesced roster_update pushes; cleared natively on disconnect. */
 	rosterSubscribed?: boolean;
 	/** A push hit backpressure; one full-roster resync goes out on drain. */
 	rosterResyncPending?: boolean;

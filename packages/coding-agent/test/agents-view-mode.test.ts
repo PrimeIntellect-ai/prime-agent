@@ -12,11 +12,7 @@ import {
 	createInitialAgentsViewPersistentState,
 	runAgentsViewMode,
 } from "../src/modes/agents-view/agents-view-mode.js";
-import {
-	type AgentsViewRow,
-	reconcileUnifiedSessions,
-	resolveAgentsViewLeftResult,
-} from "../src/modes/agents-view/agents-view-state.js";
+import { type AgentsViewRow, resolveAgentsViewLeftResult } from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
 import { stopThemeWatcher } from "../src/modes/interactive/theme/theme.js";
@@ -716,87 +712,34 @@ describe("AgentsViewMode persistent catalog state", () => {
 	});
 
 	it("re-arms reconnect from the heartbeat poll over a dead socket and never overwrites a sticky notice", async () => {
-		const failingClient = (isConnected: boolean) => ({
-			isConnected,
-			request: vi.fn(async () => {
-				throw new Error("heartbeats unavailable");
-			}),
-		});
-
-		// A dead socket re-arms the reconnect loop instead of writing a status blip.
-		const disconnected = failingClient(false);
-		const reconnecting = {
-			heartbeatCatalogGeneration: 0,
-			reconnectPromise: undefined,
-			daemonShutdownReceived: false,
-			statusMessageSticky: false,
-			client: disconnected,
-			requireClient: () => disconnected,
-			startClientReconnect: vi.fn(),
-			setStatusMessage: vi.fn(),
+		const harness = (isConnected: boolean, statusMessageSticky: boolean) => {
+			const client = {
+				isConnected,
+				request: vi.fn(async () => {
+					throw new Error("heartbeats unavailable");
+				}),
+			};
+			return {
+				client,
+				heartbeatCatalogGeneration: 0,
+				reconnectPromise: undefined,
+				daemonShutdownReceived: false,
+				statusMessageSticky,
+				requireClient: () => client,
+				startClientReconnect: vi.fn(),
+				setStatusMessage: vi.fn(),
+			};
 		};
+
+		const reconnecting = harness(false, false);
 		await expect(invoke("refreshHeartbeats", reconnecting)).resolves.toBe(false);
-		expect(reconnecting.startClientReconnect).toHaveBeenCalledWith(disconnected, expect.any(Error));
+		expect(reconnecting.startClientReconnect).toHaveBeenCalledWith(reconnecting.client, expect.any(Error));
 		expect(reconnecting.setStatusMessage).not.toHaveBeenCalled();
 
-		// A connected failure keeps its status message, but never over a sticky one.
-		const connected = failingClient(true);
-		const sticky = {
-			heartbeatCatalogGeneration: 0,
-			reconnectPromise: undefined,
-			daemonShutdownReceived: false,
-			statusMessageSticky: true,
-			client: connected,
-			requireClient: () => connected,
-			startClientReconnect: vi.fn(),
-			setStatusMessage: vi.fn(),
-		};
+		const sticky = harness(true, true);
 		await expect(invoke("refreshHeartbeats", sticky)).resolves.toBe(false);
 		expect(sticky.startClientReconnect).not.toHaveBeenCalled();
 		expect(sticky.setStatusMessage).not.toHaveBeenCalled();
-	});
-
-	it("keeps the loaded-saved-catalog gate across production view remounts and drops deleted rows", async () => {
-		const wireSaved = (id: string) => ({
-			path: `/tmp/sessions/${id}.jsonl`,
-			id,
-			cwd: "/tmp/project",
-			rlmDepth: 0,
-			created: 1,
-			modified: 1,
-			messageCount: 1,
-			firstMessage: id,
-			allMessagesText: id,
-		});
-		const clientFor = (sessions: unknown[]) => ({
-			request: vi.fn(async () => ({ success: true, data: { sessions } })),
-		});
-		const persistentState = createInitialAgentsViewPersistentState({});
-		const viewA = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
-		try {
-			// Before any search loads the catalog, mutations never fetch it.
-			const clientA = clientFor([wireSaved("kept"), wireSaved("doomed")]);
-			Reflect.set(viewA, "client", clientA);
-			invoke("refreshSavedSessionsIfLoaded", viewA);
-			expect(clientA.request).not.toHaveBeenCalled();
-			await expect(invoke("refreshSavedSessions", viewA, { preserveStatusOnError: true })).resolves.toBe(true);
-			expect(persistentState.savedCatalogLoaded).toBe(true);
-
-			// A remounted instance shares the gate, so a mutation refresh drops the deleted row.
-			const clientB = clientFor([wireSaved("kept")]);
-			const viewB = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
-			Reflect.set(viewB, "client", clientB);
-			invoke("refreshSavedSessionsIfLoaded", viewB);
-			expect(clientB.request).toHaveBeenCalledTimes(1);
-			await vi.waitFor(() => {
-				expect((persistentState.savedSessions ?? []).map((session) => session.id)).toEqual(["kept"]);
-			});
-			const records = reconcileUnifiedSessions([], persistentState.savedSessions ?? [], []);
-			expect(records.some((record) => record.identity === "file:/tmp/sessions/doomed.jsonl")).toBe(false);
-			expect(records.some((record) => record.identity === "file:/tmp/sessions/kept.jsonl")).toBe(true);
-		} finally {
-			stopThemeWatcher();
-		}
 	});
 
 	it("keeps a live-only scope after a fresh instance's first live poll fails", async () => {

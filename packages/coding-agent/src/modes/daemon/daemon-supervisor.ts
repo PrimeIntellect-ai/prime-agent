@@ -161,7 +161,6 @@ const structuredLog = getLogger("coding-agent.daemon-supervisor");
 const WORKER_CONNECT_TIMEOUT_MS = 30_000;
 const ROSTER_WATCHDOG_INTERVAL_MS = 15_000;
 const ROSTER_STALE_AFTER_MS = 3 * ROSTER_HEARTBEAT_INTERVAL_MS;
-// The roster subscription is supervisor-only; plain daemon-mode hellos keep the default list.
 const SUPERVISOR_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
 	...DAEMON_DEFAULT_SERVER_CAPABILITIES,
 	"agent_roster",
@@ -659,7 +658,7 @@ export class DaemonSupervisor {
 	private rosterStore?: AgentRoster;
 	private readonly pendingRosterChanged = new Set<string>();
 	private readonly pendingRosterRemoved = new Set<string>();
-	/** Ids the push surface has declared to subscribers; gates each removal to fire at most once. */
+	/** Ids declared to subscribers: gates removals to once and keeps owned-only row ids private. */
 	private readonly publishedRosterIds = new Set<string>();
 	private rosterPushScheduled = false;
 	private rosterWatchdogTimer?: ReturnType<typeof setInterval>;
@@ -1221,7 +1220,7 @@ export class DaemonSupervisor {
 		socket.on("drain", () => {
 			client.backpressured = false;
 			if (client.rosterResyncPending && client.rosterSubscribed === true) {
-				// socket.write queues even under backpressure: one resync per loss gap, never one per drain.
+				// socket.write queues even when it reports backpressure: one resync per loss gap.
 				client.rosterResyncPending = false;
 				this.write(client, { type: "roster_update", changed: this.rosterEntriesForClient(), resync: true });
 			}
@@ -2678,7 +2677,6 @@ export class DaemonSupervisor {
 			throw error;
 		}
 		worker.promotedOwnerClientId = clientId;
-		// Promotion makes the worker's rows visible; an empty amend re-publishes them to subscribers.
 		for (const entry of this.workerRosterEntries(worker)) {
 			this.roster().amend(entry.agentId, {});
 		}
@@ -3739,7 +3737,6 @@ export class DaemonSupervisor {
 	private flushRosterUpdates(): void {
 		const changed: AgentRosterEntry[] = [];
 		const removed: string[] = [];
-		// Removals reference only ids the surface has declared, at most once each.
 		for (const agentId of this.pendingRosterRemoved) {
 			if (this.publishedRosterIds.delete(agentId)) removed.push(agentId);
 		}
@@ -3750,9 +3747,6 @@ export class DaemonSupervisor {
 				changed.push(entry);
 				this.publishedRosterIds.add(agentId);
 			} else if (this.publishedRosterIds.delete(agentId)) {
-				// A published row claimed by a client-owned worker leaves the surface like a
-				// deletion. Rows born owned were never published: their writes emit nothing,
-				// and promotion re-publishes them through the empty amend.
 				removed.push(agentId);
 			}
 		}
@@ -3775,12 +3769,10 @@ export class DaemonSupervisor {
 
 	private rosterEntriesForClient(): AgentRosterEntry[] {
 		const entries = [...this.roster().values()].filter((entry) => this.isRosterEntryVisibleToClients(entry));
-		// Seeds and resyncs are declarations too: their ids must be removable later.
 		for (const entry of entries) this.publishedRosterIds.add(entry.agentId);
 		return entries;
 	}
 
-	// Client-owned workers stay hidden from the roster surface, mirroring plain list.
 	private isRosterEntryVisibleToClients(entry: AgentRosterEntry): boolean {
 		const worker = entry.workerId !== undefined ? this.workers.get(entry.workerId) : undefined;
 		return worker === undefined || this.isVisibleWorker(worker);
@@ -4051,7 +4043,6 @@ export class DaemonSupervisor {
 				continue;
 			}
 			if (now - worker.lastFrameAt > ROSTER_STALE_AFTER_MS) {
-				// Stamp only on the transition into stale; repeat sweeps of a stale worker emit nothing.
 				if (worker.rosterStale) continue;
 				const lastHeardFromAt = new Date(worker.lastFrameAt).toISOString();
 				for (const entry of this.workerRosterEntries(worker)) {

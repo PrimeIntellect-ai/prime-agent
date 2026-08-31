@@ -165,12 +165,10 @@ export type AgentsViewPersistentState = {
 	startupNotices?: StartupNotices;
 	startupNoticesPromise?: Promise<StartupNotices>;
 	query?: string;
-	/** Shared daemon connection + roster mirror; they outlive view instances and scope transitions. */
 	rosterClient?: DaemonClient;
 	rosterStore?: AgentsViewRosterStore;
 	savedSessions?: AgentConnectionSavedSessionInfo[];
 	lastSuccessfulSavedSessions?: AgentConnectionSavedSessionInfo[];
-	/** True once any instance fully loaded the saved catalog; mutations then keep the shared copy fresh. */
 	savedCatalogLoaded?: boolean;
 	lastSuccessfulLiveSummaries?: SessionSummary[];
 	savedCatalogGeneration?: number;
@@ -427,8 +425,7 @@ export async function runAgentsViewMode(options: AgentsViewModeOptions): Promise
 	try {
 		await runAgentsViewLoop(options, persistentState, promptStashStore);
 	} finally {
-		// Close first: the supervisor drops the subscription with the socket, so a
-		// wedged daemon cannot hold the exit hostage for an unsubscribe ack.
+		// Close first: the supervisor drops the subscription with the socket.
 		persistentState.rosterClient?.close();
 		await persistentState.rosterStore?.dispose();
 		persistentState.rosterStore = undefined;
@@ -861,7 +858,6 @@ export class AgentsViewMode implements Component, Focusable {
 		if (!(await this.rosterStore.attach(client))) {
 			throw new Error(STALE_ROSTER_DAEMON_MESSAGE);
 		}
-		// Armed only after a successful attach: a handshake failure exits cleanly instead of racing a reconnect loop.
 		this.subscribeToClientClose(client);
 
 		this.ui.addChild(this);
@@ -1039,7 +1035,6 @@ export class AgentsViewMode implements Component, Focusable {
 		void promise
 			.then((notices) => {
 				this.persistentState.startupNotices = notices;
-				// Best-effort immediate paint; a re-entered instance also reads persistentState directly on render.
 				this.ui.requestRender();
 			})
 			.catch(() => {});
@@ -1258,9 +1253,7 @@ export class AgentsViewMode implements Component, Focusable {
 		this.queryChanged();
 	}
 
-	/** Deep search over message text needs the saved catalog; one live fetch per instance, restored queries included. */
 	private armSavedSearchFetch(options: { duringReconnect?: boolean } = {}): void {
-		// An already-loaded shared catalog never refetches; mutations keep it fresh across remounts.
 		if (
 			this.savedSearchFetchStarted ||
 			this.persistentState.savedCatalogLoaded === true ||
@@ -1268,7 +1261,6 @@ export class AgentsViewMode implements Component, Focusable {
 		) {
 			return;
 		}
-		// refreshSavedSessions re-arms this latch itself when the current fetch fails without a catalog.
 		this.savedSearchFetchStarted = true;
 		void this.refreshSavedSessions({ ...options, preserveStatusOnError: true });
 	}
@@ -1823,7 +1815,6 @@ export class AgentsViewMode implements Component, Focusable {
 						return false;
 					}
 					const renamed = await this.renameSession(target, name);
-					// As in /kill: a completed command returns the composer to the list.
 					if (renamed) disarmIfUnchanged();
 					return renamed;
 				}
@@ -1889,10 +1880,7 @@ export class AgentsViewMode implements Component, Focusable {
 			if (this.pendingDeleteAgent?.identity === identity && this.isDeleteConfirmationVisible()) {
 				this.clearDeleteConfirmation({ render: false });
 				try {
-					// Deliberate RPC before a destructive action: the daemon answers with the
-					// authoritative liveness verdict instead of the pushed mirror's last state.
-					// The verdict stays local: plain list is a narrower surface (no queued,
-					// passivated, or seeded rows), so it must never become what the view renders.
+					// Authoritative liveness check; its narrower plain-list verdict stays local.
 					const latest = expectSessionList(
 						requireDaemonData(await this.requireClient().request(createAgentsViewListCommand())),
 					);
@@ -2139,17 +2127,13 @@ export class AgentsViewMode implements Component, Focusable {
 	private onRosterUpdate(): void {
 		if (this.stopped || !this.rosterStore) return;
 		this.applySessionList(this.rosterStore.summaries(), true);
-		// Rebuilds re-arm the pending anchor while its row is missing; with no 1s poll
-		// left, each push must settle it (the guard still defers to a live saved fetch).
 		this.resolveMissingSelectionAnchor();
 	}
 
-	/** Renames and deactivations invalidate the lazily loaded saved catalog; refresh only when some view loaded it. */
 	private refreshSavedSessionsIfLoaded(): void {
 		if (this.persistentState.savedCatalogLoaded) void this.refreshSavedSessions({ preserveStatusOnError: true });
 	}
 
-	/** The pushed roster is the live catalog; a refresh is one local reapply of the store's rows. */
 	private async refreshSessions(): Promise<void> {
 		if (this.reconnectPromise || this.daemonShutdownReceived || !this.rosterStore) return;
 		this.applySessionList(this.rosterStore.summaries(), true);
@@ -2196,7 +2180,6 @@ export class AgentsViewMode implements Component, Focusable {
 		this.ui.requestRender();
 	}
 
-	/** The search's one-fetch-per-instance latch re-arms only while no catalog exists at all. */
 	private rearmSavedSearchFetch(): void {
 		if (this.persistentState.savedCatalogLoaded !== true) this.savedSearchFetchStarted = false;
 	}
@@ -2247,7 +2230,6 @@ export class AgentsViewMode implements Component, Focusable {
 				this.persistentState.savedSessions = successfulSessions;
 				// Treat a terminal failure as settled so scope fallback cannot soft-lock.
 				this.savedCatalogReady = true;
-				// Only the current fetch may re-arm; a superseded settle must not act while a newer one is pending.
 				this.rearmSavedSearchFetch();
 				this.reconcileCatalogs();
 				if (!options.preserveStatusOnError && !this.reconnectPromise && !this.daemonShutdownReceived) {
@@ -2277,11 +2259,8 @@ export class AgentsViewMode implements Component, Focusable {
 			if (generation === this.heartbeatCatalogGeneration && !this.reconnectPromise) {
 				const client = this.client;
 				if (client && !client.isConnected) {
-					// With no live poll left, this 15s tick is what re-arms reconnect after a
-					// timed-out loop; pushes cannot restart it over a dead socket.
 					this.startClientReconnect(client, error);
 				} else if (!this.statusMessageSticky) {
-					// Never replace a sticky notice (e.g. the reconnect error) with a poll blip.
 					this.setStatusMessage(formatError("Failed to refresh heartbeats", error));
 				}
 			}
@@ -2315,7 +2294,6 @@ export class AgentsViewMode implements Component, Focusable {
 		if (!this.selectionAnchorPending || this.savedCatalogRefreshPending) {
 			return;
 		}
-		// Unblock the fallback row but keep the anchor identities: a later push can still re-anchor the intended session.
 		this.selectionAnchorPending = false;
 		const row = this.rows[this.selectedIndex];
 		this.selectedActiveSessionId = row?.selectable ? (row.summary.activeSessionId ?? row.summary.id) : undefined;
@@ -2395,7 +2373,6 @@ export class AgentsViewMode implements Component, Focusable {
 		this.unsubscribeClientMessage = undefined;
 		this.unsubscribeRosterUpdate?.();
 		this.unsubscribeRosterUpdate = undefined;
-		// The client and roster store are shared across view instances; runAgentsViewMode disposes them on exit.
 		this.client = undefined;
 		this.resolveRun?.(result);
 		this.resolveRun = undefined;
@@ -2457,8 +2434,6 @@ export class AgentsViewMode implements Component, Focusable {
 				this.reconnectTimedOut = false;
 				this.setStatusMessage("Daemon reconnected", { render: false });
 				this.applySessionList(sessions, true);
-				// A fetch the outage failed left the latch re-armed but nothing to pull it;
-				// a still-nonempty query re-fetches through the one arm predicate.
 				this.armSavedSearchFetch({ duringReconnect: true });
 				return;
 			} catch (error) {

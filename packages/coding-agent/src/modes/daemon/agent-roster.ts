@@ -202,7 +202,7 @@ export class AgentRoster {
 		this.onMutation({ type: "delete", agentId });
 	}
 
-	/** In-place patch for the supervisor's label/staleness stamps; only present keys apply, undefined clears. */
+	/** Patches only the keys present; undefined clears a key. */
 	amend(
 		agentId: string,
 		marks: { statusLabel?: AgentRosterEntry["statusLabel"] | undefined; lastHeardFromAt?: string | undefined },

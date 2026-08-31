@@ -4,11 +4,9 @@ import type { DaemonClient, DaemonHello } from "../daemon/daemon-client.js";
 import type { DaemonOutbound } from "../daemon/daemon-protocol.js";
 import type { SessionSummary } from "../daemon/daemon-session-list.js";
 
-/** The one user-facing message for a daemon that predates the roster capability. */
 export const STALE_ROSTER_DAEMON_MESSAGE =
 	"Daemon is stale: it does not advertise the agent_roster capability; restart the daemon";
 
-// Client-side roster mirror: one subscribe seeds it, pushes keep it current, and it outlives view instances.
 export class AgentsViewRosterStore {
 	private readonly entries = new Map<string, AgentRosterEntry>();
 	private readonly listeners = new Set<() => void>();
@@ -16,13 +14,12 @@ export class AgentsViewRosterStore {
 	private unsubscribeMessage: (() => void) | undefined;
 	private emitScheduled = false;
 	private subscribed = false;
-	/** The hello of the connection the live subscription binds; a new hello means a new socket. */
+	/** A new hello means a new socket; the live subscription is keyed to it. */
 	private subscribedHello: DaemonHello | undefined;
 	private attachChain: Promise<unknown> = Promise.resolve();
 
-	/** Subscribes once per connection; a re-attach on the same hello is a no-op, a new hello re-subscribes. */
 	async attach(client: DaemonClient): Promise<boolean> {
-		// Attaches serialize: a stale attempt settling late can never detach a newer subscription's listener.
+		// Serialized: a stale attempt settling late must not detach a newer subscription's listener.
 		const run = () => this.attachToClient(client);
 		const chained = this.attachChain.then(run, run);
 		this.attachChain = chained;
@@ -30,7 +27,6 @@ export class AgentsViewRosterStore {
 	}
 
 	private async attachToClient(client: DaemonClient): Promise<boolean> {
-		// connect() resolves at socket connect; the capability verdict needs the parsed daemon_hello.
 		if (client.isConnected && client.hello === undefined) await client.waitForHello();
 		if (!client.supportsServerCapability("agent_roster")) {
 			this.detachFromClient();
@@ -42,7 +38,7 @@ export class AgentsViewRosterStore {
 		}
 		this.detachFromClient();
 		this.client = client;
-		// Updates racing the subscribe reply buffer until the snapshot lands, so the resync cannot erase them.
+		// Pushes racing the subscribe reply buffer until the snapshot lands.
 		let pendingUpdates: Extract<DaemonOutbound, { type: "roster_update" }>[] | undefined = [];
 		this.unsubscribeMessage = client.onMessage((message) => {
 			if (message.type !== "roster_update") return;
@@ -51,16 +47,14 @@ export class AgentsViewRosterStore {
 		});
 		let response: Awaited<ReturnType<DaemonClient["request"]>>;
 		try {
-			// Not parkable behind request recovery: the reconnect loop awaiting this must see a close as a rejection.
+			// Not parkable: the awaiting reconnect loop must see a close as a rejection.
 			response = await client.request({ type: "roster_subscribe" }, 30000, { recoverable: false });
 		} catch (error) {
-			// A transient transport failure detaches this attempt's listener and throws for the caller's retry loop.
 			this.detachFromClient();
 			throw error;
 		}
 		if (!response.success || typeof response.data !== "object" || response.data === null) {
 			this.detachFromClient();
-			// Only a missing capability returns false; a failed subscribe is transient and throws.
 			throw new Error(
 				`roster_subscribe failed: ${response.success ? "invalid roster payload" : (response.error ?? "unknown error")}`,
 			);
@@ -96,7 +90,6 @@ export class AgentsViewRosterStore {
 		return () => this.listeners.delete(listener);
 	}
 
-	/** One listener emission per pushed batch, even when several arrive in one tick. */
 	private scheduleEmit(): void {
 		if (this.emitScheduled) return;
 		this.emitScheduled = true;
@@ -116,7 +109,6 @@ export class AgentsViewRosterStore {
 		this.client = undefined;
 	}
 
-	/** Serialized behind attach: an in-flight attach settles first, so its listener cannot outlive this detach. */
 	async dispose(): Promise<void> {
 		const run = () => this.disposeNow();
 		const chained = this.attachChain.then(run, run);
@@ -128,8 +120,7 @@ export class AgentsViewRosterStore {
 		const client = this.client;
 		this.detachFromClient();
 		this.listeners.clear();
-		// Best-effort courtesy on a still-open client: nobody needs the ack, and a
-		// closed socket already dropped the server-side subscription with the client.
+		// Fire-and-forget: nobody needs the ack, and a closed socket already unsubscribed.
 		if (client?.isConnected) {
 			void client.request({ type: "roster_unsubscribe" }).catch(() => undefined);
 		}

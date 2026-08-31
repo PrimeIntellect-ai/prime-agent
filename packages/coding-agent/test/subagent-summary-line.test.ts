@@ -257,13 +257,11 @@ describe("SubagentSummaryLine", () => {
 		) => void;
 		const snapshots = Reflect.get(mode, "subagentSnapshots") as Map<string, AgentConnectionRlmChildAgentSnapshot>;
 
-		// A run that fails before any session bound arrives as cancelled (the
-		// producer's removal signal): the queued row goes, never an inactive phantom.
+		// A pre-bind failure arrives as cancelled: the queued row goes, never an inactive phantom.
 		update.call(mode, child("never-bound", "queued"));
 		update.call(mode, child("never-bound", "cancelled", { error: "boom" }));
 		expect(snapshots.has("never-bound")).toBe(false);
 
-		// Repeated terminal projections stay idempotent for a transcript-backed row.
 		update.call(mode, child("worker", "running", { activeSessionId: "resident-worker" }));
 		update.call(mode, child("worker", "done"));
 		update.call(mode, child("worker", "done"));

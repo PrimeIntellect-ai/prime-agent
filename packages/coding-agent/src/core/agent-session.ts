@@ -10136,7 +10136,6 @@ export class AgentSession {
 		};
 	}
 
-	/** A run whose lifecycle ended without ever binding a session; it owns no transcript. */
 	private _isUnboundTerminalRlmChildRun(run: RlmChildRun): boolean {
 		if (run.session !== undefined || this._rlmChildSessions.has(run.id)) return false;
 		return run.status === "done" || run.status === "error" || run.status === "cancelled";
@@ -10148,7 +10147,6 @@ export class AgentSession {
 		const recorded = new Set<string>();
 		const traversed = new Set<string>();
 		for (const run of this._activeRlmChildRuns.values()) {
-			// The roster rule: a terminal run that never bound a session leaves no row anywhere.
 			const hidden =
 				run.detachedDeletion ||
 				this._deletingRlmChildren.has(run.id) ||
@@ -10675,10 +10673,7 @@ export class AgentSession {
 				run.durationMs = Date.now() - startedAt;
 				run.activity = undefined;
 				if (run.status === "error" && childSession === undefined) {
-					// A failure before any session bound leaves no row: "cancelled" is the
-					// wire's removal signal (see _emitRlmSubagentRemoval). The failure itself
-					// reaches the parent as the rlm_child_failure message below, and the run
-					// stays listed with its true error status in listRlmSubagents.
+					// A pre-bind failure leaves no row: "cancelled" is the wire's removal signal.
 					this._emit({
 						type: "rlm_child_update",
 						child: { ...this._rlmChildSnapshotForRun(run), status: "cancelled" },

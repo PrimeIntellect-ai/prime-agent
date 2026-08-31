@@ -91,7 +91,6 @@ export interface AgentsViewRow {
 }
 
 export function classifyAgentsViewSession(summary: SessionSummary): AgentsViewSection {
-	// rosterStatus is the ledger's classify-once verdict; the local formula only covers legacy daemons.
 	return summary.rosterStatus ?? classifySessionRosterStatus(summary);
 }
 
@@ -308,7 +307,6 @@ export function resolveAgentsViewLeftResult(
 	};
 }
 
-// The pushed roster is always current once the view runs; only the saved catalog still settles.
 export function shouldApplyScopeResolution(droppedFrames: number, savedCatalogReady: boolean): boolean {
 	return droppedFrames === 0 || savedCatalogReady;
 }
@@ -982,7 +980,6 @@ function getSessionSubtitle(summary: SessionSummary): string {
 }
 
 function getSessionStatusLabel(summary: SessionSummary, hasActiveHeartbeat = summary.hasActiveHeartbeat): string {
-	// The ledger's lifecycle label (queued/recovering/failed) outranks locally derived labels.
 	if (summary.statusLabel !== undefined) {
 		return summary.statusLabel;
 	}

@@ -379,12 +379,9 @@ export class DaemonAgentConnection implements AgentConnection {
 			this.latestSnapshot = undefined;
 			this.latestSnapshotIsFresh = false;
 		}
-		// A fresh transport lost any server-side roster subscription; re-establish it with the attach.
-		// Capability-miss degrades the bar; a transient subscribe failure throws so the reconnect loop retries the rebind.
 		if (this.rosterStore) await this.rosterStore.attach(this.client);
 	}
 
-	/** Push-fed subagent counts share the agents view's roster mirror; one store per connection. */
 	async subscribeAgentRoster(
 		listener: () => void,
 	): Promise<{ summaries(): SessionSummary[]; dispose(): Promise<void> }> {

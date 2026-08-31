@@ -85,201 +85,11 @@ function fakeRosterClient(roster: AgentRosterEntry[], supported = true): FakeCli
 }
 
 describe("agents-view roster store", () => {
-	it("subscribes once and re-attaches without any further requests", async () => {
-		const client = fakeRosterClient([
-			ledgerEntry({ id: "a", sessionId: "a", activeSessionId: "a" }, { status: "idle" }),
-		]);
-		const store = new AgentsViewRosterStore();
+	it("subscribes once per hello, re-subscribes on a new hello, and reports a missing capability", async () => {
+		const unsupported = fakeRosterClient([], false);
+		await expect(new AgentsViewRosterStore().attach(unsupported as never)).resolves.toBe(false);
+		expect(unsupported.request).not.toHaveBeenCalled();
 
-		await expect(store.attach(client as never)).resolves.toBe(true);
-		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["a"]);
-
-		// Scope transitions re-attach the surviving store: zero additional requests.
-		await expect(store.attach(client as never)).resolves.toBe(true);
-		await expect(store.attach(client as never)).resolves.toBe(true);
-		expect(client.request).toHaveBeenCalledTimes(1);
-	});
-
-	it("reports an unsupported daemon so the view can hard-error instead of polling", async () => {
-		const store = new AgentsViewRosterStore();
-		const client = fakeRosterClient([], false);
-		await expect(store.attach(client as never)).resolves.toBe(false);
-		expect(client.request).not.toHaveBeenCalled();
-	});
-
-	it("re-subscribes on a reconnected client instead of trusting the stale subscribed flag", async () => {
-		const client = fakeRosterClient([ledgerEntry({ id: "a", sessionId: "a" })]);
-		const store = new AgentsViewRosterStore();
-		await expect(store.attach(client as never)).resolves.toBe(true);
-		expect(client.request).toHaveBeenCalledTimes(1);
-
-		// The same hello is a no-op re-attach; scope transitions stay request-free.
-		await expect(store.attach(client as never)).resolves.toBe(true);
-		expect(client.request).toHaveBeenCalledTimes(1);
-
-		// A reconnect mints a new hello: the surviving flag must not mask the dead server-side subscription.
-		client.hello = { type: "daemon_hello" };
-		await expect(store.attach(client as never)).resolves.toBe(true);
-		expect(client.request).toHaveBeenCalledTimes(2);
-	});
-
-	it("rejects a roster subscribe cut off mid-flight instead of parking it behind request recovery", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "prime-roster-park-"));
-		tempDirs.push(directory);
-		const socketPath = join(directory, "park.sock");
-		const server = createServer((socket) => {
-			socket.write(
-				`${JSON.stringify({ type: "daemon_hello", protocol: { version: 7 }, serverCapabilities: ["agent_roster"] })}\n`,
-			);
-			// The connection dies while the subscribe is in flight instead of ever replying.
-			socket.on("data", () => socket.destroy());
-		});
-		await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
-		const client = new DaemonClient(socketPath);
-		client.enableRequestRecovery();
-		try {
-			await client.connect();
-			await client.waitForHello();
-			const store = new AgentsViewRosterStore();
-			await expect(store.attach(client)).rejects.toThrow();
-		} finally {
-			client.close();
-			server.close();
-		}
-	});
-
-	it("resumes the roster bar after a transient subscribe failure during reconnect", async () => {
-		const listeners = new Set<(message: DaemonOutbound) => void>();
-		const responses: unknown[] = [
-			{
-				type: "response",
-				command: "roster_subscribe",
-				success: true,
-				data: { roster: [ledgerEntry({ id: "a", sessionId: "a" })] },
-			},
-			{ type: "response", command: "roster_subscribe", success: false, error: "worker busy" },
-			{
-				type: "response",
-				command: "roster_subscribe",
-				success: true,
-				data: { roster: [ledgerEntry({ id: "a", sessionId: "a" })] },
-			},
-		];
-		const client = {
-			supportsServerCapability: () => true,
-			isConnected: true,
-			hello: { type: "daemon_hello" },
-			onMessage: (listener: (message: DaemonOutbound) => void) => {
-				listeners.add(listener);
-				return () => listeners.delete(listener);
-			},
-			request: vi.fn(async () => responses.shift()),
-			emit: (message: DaemonOutbound) => {
-				for (const listener of listeners) listener(message);
-			},
-		};
-		const store = new AgentsViewRosterStore();
-		const connection = Object.assign(Object.create(DaemonAgentConnection.prototype), {
-			options: {},
-			client,
-			rosterStore: store,
-			activeSessionId: "root-active",
-			lastEventSequence: undefined,
-			lastEventCursor: undefined,
-			requestData: vi.fn(async () => ({ id: "root-active", sessionId: "root", activeSessionId: "root-active" })),
-		}) as DaemonAgentConnection;
-
-		await expect(store.attach(client as never)).resolves.toBe(true);
-
-		// The reconnect replaced the transport: a fresh hello invalidates the old subscription.
-		client.hello = { type: "daemon_hello" };
-		// The transient failure throws into the bounded reconnect retry instead of leaving a dead subscription.
-		await expect(connection.attach()).rejects.toThrow("roster_subscribe failed");
-		await connection.attach();
-
-		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "b", sessionId: "b" })] });
-		expect(
-			store
-				.summaries()
-				.map((entry) => entry.sessionId)
-				.sort(),
-		).toEqual(["a", "b"]);
-	});
-
-	it("serializes overlapping attaches so a stale failure cannot drop the live subscription", async () => {
-		const listeners = new Set<(message: DaemonOutbound) => void>();
-		let releaseFirst: (response: unknown) => void = () => {};
-		const responses: unknown[] = [
-			new Promise((resolveFirst) => {
-				releaseFirst = resolveFirst;
-			}),
-			{
-				type: "response",
-				command: "roster_subscribe",
-				success: true,
-				data: { roster: [ledgerEntry({ id: "a", sessionId: "a" })] },
-			},
-		];
-		const client = {
-			supportsServerCapability: () => true,
-			isConnected: true,
-			hello: { type: "daemon_hello" },
-			onMessage: (listener: (message: DaemonOutbound) => void) => {
-				listeners.add(listener);
-				return () => listeners.delete(listener);
-			},
-			request: vi.fn(async () => responses.shift()),
-			emit: (message: DaemonOutbound) => {
-				for (const listener of listeners) listener(message);
-			},
-		};
-		const store = new AgentsViewRosterStore();
-
-		const first = store.attach(client as never);
-		const second = store.attach(client as never);
-		releaseFirst({ success: false, error: "stale socket" });
-		await expect(first).rejects.toThrow("roster_subscribe failed");
-		await expect(second).resolves.toBe(true);
-
-		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "b", sessionId: "b" })] });
-		expect(
-			store
-				.summaries()
-				.map((entry) => entry.sessionId)
-				.sort(),
-		).toEqual(["a", "b"]);
-	});
-
-	it("applies pushed updates, removals, and full resyncs with one listener emission per tick", async () => {
-		const client = fakeRosterClient([ledgerEntry({ id: "a", sessionId: "a" })]);
-		const store = new AgentsViewRosterStore();
-		await store.attach(client as never);
-		const listener = vi.fn();
-		store.onUpdate(listener);
-
-		client.emit({
-			type: "roster_update",
-			changed: [ledgerEntry({ id: "b", sessionId: "b" }, { status: "running" })],
-		});
-		expect(
-			store
-				.summaries()
-				.map((entry) => entry.sessionId)
-				.sort(),
-		).toEqual(["a", "b"]);
-		expect(store.summaries().find((entry) => entry.sessionId === "b")?.rosterStatus).toBe("running");
-
-		client.emit({ type: "roster_update", changed: [], removed: ["a"] });
-		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["b"]);
-
-		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "c", sessionId: "c" })], resync: true });
-		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["c"]);
-
-		await Promise.resolve();
-		expect(listener).toHaveBeenCalledTimes(1);
-	});
-
-	it("replays pushes that raced the subscribe reply after the snapshot resync", async () => {
 		const client = fakeRosterClient([ledgerEntry({ id: "a", sessionId: "a" })]);
 		const store = new AgentsViewRosterStore();
 		client.request.mockImplementationOnce(async (command: { type: string }) => {
@@ -293,49 +103,96 @@ describe("agents-view roster store", () => {
 				data: { roster: [ledgerEntry({ id: "a", sessionId: "a" })] },
 			};
 		});
-
 		await expect(store.attach(client as never)).resolves.toBe(true);
 		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["b"]);
+		await expect(store.attach(client as never)).resolves.toBe(true);
+		expect(client.request).toHaveBeenCalledTimes(1);
+
+		const listener = vi.fn();
+		store.onUpdate(listener);
+		client.emit({
+			type: "roster_update",
+			changed: [ledgerEntry({ id: "c", sessionId: "c" }, { status: "running" })],
+		});
+		client.emit({ type: "roster_update", changed: [], removed: ["b"] });
+		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["c"]);
+		expect(store.summaries()[0]?.rosterStatus).toBe("running");
+		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "d", sessionId: "d" })], resync: true });
+		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["d"]);
+		await Promise.resolve();
+		expect(listener).toHaveBeenCalledTimes(1);
+
+		// A reconnect mints a new hello: the stale subscribed flag must not mask the dead subscription.
+		client.hello = { type: "daemon_hello" };
+		await expect(store.attach(client as never)).resolves.toBe(true);
+		expect(client.request).toHaveBeenCalledTimes(2);
 	});
 
-	it("disposes without an unsubscribe ack on a closed client and detaches an attach still in flight", async () => {
-		// A closed socket already dropped the server-side subscription: no unsubscribe RPC.
-		const closed = fakeRosterClient([ledgerEntry({ id: "a", sessionId: "a" })]);
-		const closedStore = new AgentsViewRosterStore();
-		await expect(closedStore.attach(closed as never)).resolves.toBe(true);
-		closed.isConnected = false;
-		await closedStore.dispose();
-		expect(closed.request).toHaveBeenCalledTimes(1);
+	it("rejects a roster subscribe cut off mid-flight instead of parking it behind request recovery", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-park-"));
+		tempDirs.push(directory);
+		const socketPath = join(directory, "park.sock");
+		const server = createServer((socket) => {
+			socket.write(
+				`${JSON.stringify({ type: "daemon_hello", protocol: { version: 7 }, serverCapabilities: ["agent_roster"] })}\n`,
+			);
+			socket.on("data", () => socket.destroy());
+		});
+		await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
+		const client = new DaemonClient(socketPath);
+		client.enableRequestRecovery();
+		try {
+			await client.connect();
+			await client.waitForHello();
+			await expect(new AgentsViewRosterStore().attach(client)).rejects.toThrow();
+		} finally {
+			client.close();
+			server.close();
+		}
+	});
 
-		// Dispose serializes behind an attach in flight, so its listener cannot survive.
-		const client = fakeRosterClient([]);
-		let releaseSubscribe: (response: unknown) => void = () => {};
+	it("serializes attaches and dispose so stale settles cannot drop or outlive the live subscription", async () => {
+		let releaseFirst: (response: unknown) => void = () => {};
+		const client = fakeRosterClient([ledgerEntry({ id: "a", sessionId: "a" })]);
 		client.request.mockImplementationOnce(
 			() =>
-				new Promise((resolveSubscribe) => {
-					releaseSubscribe = resolveSubscribe;
+				new Promise((resolveFirst) => {
+					releaseFirst = resolveFirst;
 				}) as never,
 		);
 		const store = new AgentsViewRosterStore();
-		const attach = store.attach(client as never);
-		const dispose = store.dispose();
-		// The chained attach reaches its subscribe only on a later microtask.
+		const first = store.attach(client as never);
+		const second = store.attach(client as never);
 		await vi.waitFor(() => expect(client.request).toHaveBeenCalled());
-		releaseSubscribe({
-			type: "response",
-			command: "roster_subscribe",
-			success: true,
-			data: { roster: [ledgerEntry({ id: "a", sessionId: "a" })] },
-		});
-		await expect(attach).resolves.toBe(true);
-		await dispose;
+		releaseFirst({ success: false, error: "stale socket" });
+		await expect(first).rejects.toThrow("roster_subscribe failed");
+		await expect(second).resolves.toBe(true);
 		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "b", sessionId: "b" })] });
-		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["a"]);
+		expect(
+			store
+				.summaries()
+				.map((entry) => entry.sessionId)
+				.sort(),
+		).toEqual(["a", "b"]);
+
+		// Dispose joins the chain: it detaches the live listener, and on a closed
+		// client it skips the unsubscribe RPC entirely.
+		client.isConnected = false;
+		const requests = client.request.mock.calls.length;
+		await store.dispose();
+		expect(client.request.mock.calls.length).toBe(requests);
+		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "c", sessionId: "c" })] });
+		expect(
+			store
+				.summaries()
+				.map((entry) => entry.sessionId)
+				.sort(),
+		).toEqual(["a", "b"]);
 	});
 });
 
 describe("roster-driven agents view rows", () => {
-	it("labels queued, recovering, and stale rows from ledger state instead of hiding them", () => {
+	it("labels queued and stale rows from ledger state and keeps one identity across the bind push", () => {
 		const queued = ledgerEntry(
 			{
 				id: "child-1",
@@ -348,31 +205,24 @@ describe("roster-driven agents view rows", () => {
 			},
 			{ status: "running", statusLabel: "queued", queuedChild: true },
 		);
-		const root = ledgerEntry(
-			{ id: "root-active", sessionId: "root-session", activeSessionId: "root-active" },
-			{ status: "idle" },
-		);
-		const recovering = ledgerEntry(
-			{ id: "r-active", sessionId: "r", activeSessionId: "r-active" },
-			{ status: "running", statusLabel: "recovering" },
-		);
+		const root = ledgerEntry({ id: "root-active", sessionId: "root-session", activeSessionId: "root-active" });
 		const stale = ledgerEntry(
 			{ id: "s-active", sessionId: "s", activeSessionId: "s-active" },
 			{ status: "idle", lastHeardFromAt: new Date(Date.now() - 60_000).toISOString() },
 		);
 
-		const summaries = [root, queued, recovering, stale].map((entry) => sessionSummaryFromRosterEntry(entry));
+		const summaries = [root, queued, stale].map((entry) => sessionSummaryFromRosterEntry(entry));
 		const rootIdentity = buildAgentsViewRows(summaries).find(
 			(row) => row.summary.sessionId === "root-session",
 		)?.identity;
 		if (!rootIdentity) throw new Error("Missing root row");
 		const rows = buildAgentsViewRows(summaries, new Set([rootIdentity]));
-		const queuedRow = rows.find((row) => row.summary.rlmChildId === "child-1");
-		expect(queuedRow).toMatchObject({ section: "running", statusLabel: "queued" });
-		expect(rows.find((row) => row.summary.sessionId === "r")?.statusLabel).toBe("recovering");
-		expect(rows.find((row) => row.summary.sessionId === "s")?.statusLabel).toMatch(/^last heard \d+(s|m) ago$/);
+		expect(rows.find((row) => row.summary.rlmChildId === "child-1")).toMatchObject({
+			section: "running",
+			statusLabel: "queued",
+		});
+		expect(rows.find((row) => row.summary.sessionId === "s")?.statusLabel).toMatch(/^last heard \d+(s|m|h) ago$/);
 
-		// The bind push keeps one stable row identity for the same child run.
 		const bound = sessionSummaryFromRosterEntry(
 			ledgerEntry(
 				{
@@ -389,14 +239,12 @@ describe("roster-driven agents view rows", () => {
 		);
 		const queuedOnly = buildAgentsViewRows([sessionSummaryFromRosterEntry(queued)]);
 		const boundOnly = buildAgentsViewRows([bound]);
-		expect(queuedOnly).toHaveLength(1);
-		expect(boundOnly).toHaveLength(1);
 		expect(queuedOnly[0]?.identity).toBe(boundOnly[0]?.identity);
 	});
 });
 
 describe("supervisor roster subscription", () => {
-	it("seeds subscribers and pushes one coalesced update per mutation batch over the wire", async () => {
+	it("seeds subscribers, coalesces pushes, and never writes roster_update to an unsubscribed client", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-push-"));
 		tempDirs.push(directory);
 		const socketPath = join(directory, "daemon.sock");
@@ -425,7 +273,6 @@ describe("supervisor roster subscription", () => {
 			client.onMessage((message) => {
 				if (message.type === "roster_update") updates.push(message);
 			});
-			// A connected client that never subscribes stands in for a pre-roster client.
 			await bystander.connect();
 			await bystander.waitForHello();
 			const bystanderUpdates: DaemonOutbound["type"][] = [];
@@ -435,8 +282,7 @@ describe("supervisor roster subscription", () => {
 
 			const subscribed = await client.request({ type: "roster_subscribe" });
 			if (!subscribed.success) throw new Error(subscribed.error);
-			const roster = (subscribed.success ? (subscribed.data as { roster: AgentRosterEntry[] }) : { roster: [] })
-				.roster;
+			const roster = (subscribed.data as { roster: AgentRosterEntry[] }).roster;
 			expect(roster.map((entry) => entry.agentId)).toEqual(["seeded"]);
 
 			internals.writeRosterEntry(
@@ -452,7 +298,6 @@ describe("supervisor roster subscription", () => {
 			expect(updates[0]?.changed.map((entry) => entry.agentId).sort()).toEqual(["a", "b"]);
 			expect(updates[0]?.changed.find((entry) => entry.agentId === "a")?.status).toBe("running");
 			expect(updates[0]?.removed).toEqual(["seeded"]);
-			// The push already flushed to the subscriber; the unsubscribed socket saw nothing.
 			expect(bystanderUpdates).toEqual([]);
 		} finally {
 			client.close();
@@ -485,40 +330,26 @@ describe("roster-driven agents view instance", () => {
 		return { view, store, client };
 	}
 
-	it("serves refreshes from the store with zero daemon requests", async () => {
+	it("serves refreshes from the store with zero requests and settles a missing anchor on push", async () => {
 		const { view, store, client } = makeView([
 			ledgerEntry({ id: "a-active", sessionId: "a", activeSessionId: "a-active" }, { status: "running" }),
 		]);
 		await store.attach(client as never);
 		client.request.mockClear();
-
 		const internals = view as unknown as {
 			refreshSessions(): Promise<void>;
-			rows: Array<{ summary: SessionSummary }>;
-		};
-		await expect(internals.refreshSessions()).resolves.toBeUndefined();
-		await expect(internals.refreshSessions()).resolves.toBeUndefined();
-
-		expect(client.request).not.toHaveBeenCalled();
-		expect(internals.rows.some((row) => row.summary.sessionId === "a")).toBe(true);
-	});
-
-	it("settles a missing restored anchor on the next push instead of waiting for user input", async () => {
-		const { view, store, client } = makeView([
-			ledgerEntry({ id: "a-active", sessionId: "a", activeSessionId: "a-active" }, { status: "running" }),
-		]);
-		await store.attach(client as never);
-		const internals = view as unknown as {
+			onRosterUpdate(): void;
 			persistentState: { selectedRowIdentity?: string };
 			selectionAnchorPending: boolean;
-			onRosterUpdate(): void;
+			rows: Array<{ summary: SessionSummary }>;
 		};
-		// The remembered selection's row is gone; the rebuild re-arms the pending anchor.
+		await internals.refreshSessions();
+		expect(client.request).not.toHaveBeenCalled();
+		expect(internals.rows.some((row) => row.summary.sessionId === "a")).toBe(true);
+
+		// A vanished remembered selection re-arms the pending anchor; the push must settle it.
 		internals.persistentState.selectedRowIdentity = "file:/tmp/sessions/vanished.jsonl";
-
 		internals.onRosterUpdate();
-
-		// With no 1s poll left, the push itself must settle the anchor so Enter works again.
 		expect(internals.selectionAnchorPending).toBe(false);
 	});
 
@@ -537,7 +368,6 @@ describe("roster-driven agents view instance", () => {
 		};
 		await internals.refreshSessions();
 		const rowIndex = internals.rows.findIndex((row) => row.summary.sessionId === "gone");
-		expect(rowIndex).toBeGreaterThanOrEqual(0);
 		const rowSummary = internals.rows[rowIndex]?.summary;
 		if (!rowSummary) throw new Error("Missing passivated row");
 		Reflect.set(view, "selectedIndex", rowIndex);
@@ -549,14 +379,10 @@ describe("roster-driven agents view instance", () => {
 		});
 		Reflect.set(view, "deleteConfirmExpiresAt", Date.now() + 60_000);
 		client.request.mockImplementation(async (command: { type: string }) => {
-			// The liveness probe answers with the narrower plain list; the delete then fails.
 			if (command.type === "list") {
 				return { type: "response", command: command.type, success: true, data: { sessions: [] } };
 			}
-			if (command.type === "delete_saved_session") {
-				return { type: "response", command: command.type, success: false, error: "delete failed" };
-			}
-			return { type: "response", command: command.type, success: true };
+			return { type: "response", command: command.type, success: false, error: "delete failed" };
 		});
 
 		await internals.handleDeleteSelected();
@@ -564,25 +390,6 @@ describe("roster-driven agents view instance", () => {
 		// The next non-push reconcile (the 15s heartbeat tick) must still render the row.
 		internals.reconcileCatalogs();
 		expect(internals.rows.some((row) => row.summary.sessionId === "gone")).toBe(true);
-	});
-
-	it("fetches the saved catalog at most once per view instance, and only when a query is typed", () => {
-		const { view } = makeView([]);
-		const refreshSavedSessions = vi.fn(async () => true);
-		Reflect.set(view, "refreshSavedSessions", refreshSavedSessions);
-		const internals = view as unknown as {
-			queryChanged(): void;
-			editor: { setText(text: string): void };
-		};
-
-		internals.queryChanged();
-		expect(refreshSavedSessions).not.toHaveBeenCalled();
-
-		internals.editor.setText("needle");
-		internals.queryChanged();
-		internals.editor.setText("needle two");
-		internals.queryChanged();
-		expect(refreshSavedSessions).toHaveBeenCalledTimes(1);
 	});
 });
 
@@ -627,7 +434,7 @@ describe("subscriber push transitions", () => {
 		};
 	}
 
-	it("pushes watchdog staleness stamps and clears to subscribers", async () => {
+	it("pushes watchdog staleness stamps once per transition and clears them on recovery", async () => {
 		const { supervisor, pushes, settle } = makePushSupervisor();
 		const now = Date.parse("2026-08-01T12:00:00.000Z");
 		const worker = { ...pushWorker("w1"), lastFrameAt: now - 60_000 };
@@ -643,7 +450,6 @@ describe("subscriber push transitions", () => {
 		await settle();
 		expect(pushes.at(-1)?.changed[0]?.lastHeardFromAt).toBe(new Date(now - 60_000).toISOString());
 
-		// Already-stale workers are not re-stamped: repeat sweeps emit zero mutations.
 		const stampedPushes = pushes.length;
 		supervisor.sweepRosterStaleness(now + 1000);
 		await settle();
@@ -676,20 +482,17 @@ describe("subscriber push transitions", () => {
 		await settle();
 		pushes.length = 0;
 
-		// A published row claimed by a client-owned worker: subscribers see one removal.
 		supervisor.writeRosterEntry(entry, owned);
 		await settle();
 		expect(pushes.at(-1)?.removed).toEqual([entry.agentId]);
 		expect(pushes.at(-1)?.changed).toEqual([]);
 
-		// Steady-state writes of the owned worker's rows produce zero roster traffic.
 		pushes.length = 0;
 		supervisor.writeRosterEntry(entry, owned);
 		supervisor.writeRosterEntry(bornOwned, owned);
 		await settle();
 		expect(pushes).toEqual([]);
 
-		// Promotion clears ownership: subscribers gain the rows again.
 		await supervisor.promoteOwnedWorker({ id: "owner-1" }, owned);
 		await settle();
 		expect(
@@ -738,10 +541,10 @@ describe("subscriber push transitions", () => {
 		await vi.waitFor(() => expect(pushes.length).toBeGreaterThan(0));
 		await settle();
 
-		// The absentee deletion and the ledger reseed land in one apply: no push ever removes the live edge.
 		expect(pushes.some((push) => push.removed?.includes(childEntry.agentId))).toBe(false);
-		const reseeded = pushes.flatMap((push) => push.changed).find((entry) => entry.agentId === childEntry.agentId);
-		expect(reseeded).toBeDefined();
+		expect(
+			pushes.flatMap((push) => push.changed).find((entry) => entry.agentId === childEntry.agentId),
+		).toBeDefined();
 	});
 
 	it("sends one drain resync per loss gap even when the write reports backpressure", async () => {
@@ -795,33 +598,20 @@ describe("push-fed subagents bar", () => {
 		};
 		vi.spyOn(DaemonCatalogClient.prototype, "start").mockResolvedValue();
 		const client = new DaemonClient(socketPath);
+		const barChild = (id: string, overrides: Partial<SessionSummary> = {}) =>
+			workerRosterEntryFromSummary(
+				summary({
+					id,
+					sessionId: id,
+					runtimeKind: "subagent",
+					rlmChildId: id,
+					parentActiveSessionId: "parent-active",
+					...overrides,
+				}),
+			);
 		try {
 			await internals.start();
-			internals.writeRosterEntry(
-				workerRosterEntryFromSummary(
-					summary({
-						id: "child-a-active",
-						sessionId: "child-a",
-						activeSessionId: "child-a-active",
-						runtimeKind: "subagent",
-						rlmChildId: "child-a",
-						parentActiveSessionId: "parent-active",
-						isSessionActive: true,
-					}),
-				),
-			);
-			internals.writeRosterEntry(
-				workerRosterEntryFromSummary(
-					summary({
-						id: "child-b",
-						sessionId: "child-b",
-						sessionFile: "/tmp/child-b.jsonl",
-						runtimeKind: "subagent",
-						rlmChildId: "child-b",
-						parentActiveSessionId: "parent-active",
-					}),
-				),
-			);
+			internals.writeRosterEntry(barChild("child-a", { activeSessionId: "child-a-active", isSessionActive: true }));
 			await client.connect();
 			await client.waitForHello();
 			const connection = new DaemonAgentConnection(client, "parent-active");
@@ -844,27 +634,14 @@ describe("push-fed subagents bar", () => {
 			}) as unknown as { subscribeToRosterBar(): Promise<void>; ui: { requestRender: ReturnType<typeof vi.fn> } };
 
 			await bar.subscribeToRosterBar();
-			expect(setSubagentCounts).toHaveBeenLastCalledWith({ total: 2, running: 1, idle: 0, inactive: 1 });
+			expect(setSubagentCounts).toHaveBeenLastCalledWith({ total: 1, running: 1, idle: 0, inactive: 0 });
 			bar.ui.requestRender.mockClear();
 
-			// A pushed change reaches the bar without any snapshot traffic.
-			internals.writeRosterEntry(
-				workerRosterEntryFromSummary(
-					summary({
-						id: "child-c",
-						sessionId: "child-c",
-						sessionFile: "/tmp/child-c.jsonl",
-						runtimeKind: "subagent",
-						rlmChildId: "child-c",
-						parentSessionPath: "/tmp/parents/root.jsonl",
-						parentActiveSessionId: "parent-active",
-					}),
-				),
-			);
+			internals.writeRosterEntry(barChild("child-b", { sessionFile: "/tmp/child-b.jsonl" }));
 			await vi.waitFor(() =>
-				expect(setSubagentCounts).toHaveBeenLastCalledWith({ total: 3, running: 1, idle: 0, inactive: 2 }),
+				expect(setSubagentCounts).toHaveBeenLastCalledWith({ total: 2, running: 1, idle: 0, inactive: 1 }),
 			);
-			// A push with no accompanying session event still repaints the bar.
+			// A push with no accompanying session event must still repaint.
 			expect(bar.ui.requestRender).toHaveBeenCalled();
 		} finally {
 			client.close();

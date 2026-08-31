@@ -979,7 +979,6 @@ export class InteractiveMode {
 	private subagentSummaryLine: SubagentSummaryLine;
 	private subagentSnapshots = new Map<string, AgentConnectionRlmChildAgentSnapshot>();
 	private rlmNodeId: string | undefined;
-	/** Pushed supervisor roster feeding the bar; in-process connections keep the sanctioned snapshot path. */
 	private rosterBar: { summaries(): SessionSummary[]; dispose(): Promise<void> } | undefined;
 
 	private toolOutputExpanded = false;
@@ -5089,17 +5088,14 @@ export class InteractiveMode {
 		};
 	}
 
-	/** Daemon sessions feed the bar from the pushed roster; a bar that cannot subscribe degrades to child snapshots. */
 	private async subscribeToRosterBar(): Promise<void> {
 		if (!this.agentConnection.subscribeAgentRoster) return;
 		try {
 			this.rosterBar = await this.agentConnection.subscribeAgentRoster(() => {
-				// A push can arrive with no accompanying session event; paint the new counts now.
 				this.updateSubagentSummaryLine();
 				this.ui.requestRender();
 			});
 		} catch {
-			// Only the agents view hard-errors on a missing roster; chat keeps its snapshot-fed bar.
 			this.rosterBar = undefined;
 		}
 		this.updateSubagentSummaryLine();
@@ -5953,9 +5949,7 @@ export class InteractiveMode {
 	}
 
 	private updateSubagentSummary(child: AgentConnectionRlmChildAgentSnapshot): void {
-		// "cancelled" is the producer's removal signal; it also covers terminal runs
-		// that never bound a session (AgentSession owns that rule and emits them as
-		// cancelled), so no row-drop logic is duplicated here.
+		// "cancelled" also covers never-bound terminal runs; AgentSession owns that rule.
 		if (child.status === "cancelled") {
 			this.removeSubagentSnapshot(child.id);
 		} else {
