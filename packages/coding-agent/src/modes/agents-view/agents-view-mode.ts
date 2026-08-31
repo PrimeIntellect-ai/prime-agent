@@ -887,22 +887,22 @@ export class AgentsViewMode implements Component, Focusable {
 		const runPromise = new Promise<AgentsViewRunResult>((resolve) => {
 			this.resolveRun = resolve;
 		});
-		// Saved sessions load lazily on the first search query; the roster carries the nav rows.
 		this.savedCatalogReady = true;
 		this.unsubscribeRosterUpdate = this.rosterStore.onUpdate(() => this.onRosterUpdate());
 		this.applySessionList(this.rosterStore.summaries(), true);
-		// A restored non-empty query needs the saved catalog just like a typed one.
 		this.armSavedSearchFetch();
-		// After the arm: a just-started saved fetch keeps a missing restored anchor
-		// pending until it settles; otherwise the initial paint settles it now.
 		this.resolveMissingSelectionAnchor();
 		void this.refreshHeartbeats();
 		this.loadStartupNotices();
 		this.heartbeatPollTimer = setInterval(() => void this.refreshHeartbeats(), HEARTBEAT_POLL_INTERVAL_MS);
 		this.heartbeatPollTimer.unref?.();
 		this.animationTimer = setInterval(() => {
-			if (!this.rows.some((row) => row.section === "running")) return;
-			this.workingIconFrame += 1;
+			const hasRunning = this.rows.some((row) => row.section === "running");
+			const hasStaleAge = this.rows.some((row) => row.summary.lastHeardFromAt !== undefined);
+			if (!hasRunning && !hasStaleAge) return;
+			// Age labels are baked into rows at build time; ticking them needs a rebuild.
+			if (hasStaleAge) this.rebuildRows();
+			if (hasRunning) this.workingIconFrame += 1;
 			this.ui.requestRender();
 		}, WORKING_ICON_INTERVAL_MS);
 		this.animationTimer.unref?.();

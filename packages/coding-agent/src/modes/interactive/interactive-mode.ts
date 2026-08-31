@@ -5986,6 +5986,7 @@ export class InteractiveMode {
 						this.rosterBar.summaries(),
 						{
 							activeSessionId: this.connectionState?.activeSessionId,
+							sessionId: this.connectionState?.sessionId,
 							sessionFile: this.connectionState?.sessionFile,
 						},
 						activeHeartbeatSessionIds,

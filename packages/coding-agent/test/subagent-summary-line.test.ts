@@ -3,8 +3,11 @@ import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../src/modes/agent-connection/types.js";
+import { isDirectAgentChild } from "../src/modes/agents-view/agents-view-state.js";
+import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import {
 	countDirectSubagentStatuses,
+	countRosterSubagentStatuses,
 	SubagentSummaryLine,
 } from "../src/modes/interactive/components/subagent-summary-line.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
@@ -266,6 +269,33 @@ describe("SubagentSummaryLine", () => {
 		update.call(mode, child("worker", "done"));
 		expect(snapshots.has("worker")).toBe(true);
 		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 0 idle   ○ 1 inactive");
+	});
+
+	it("counts parentSessionId-only roster children exactly like the agents view", () => {
+		const rosterChild: SessionSummary = {
+			id: "c1",
+			sessionId: "c1",
+			lifecycle: "live",
+			activity: "idle",
+			isSessionActive: false,
+			cwd: "/tmp",
+			isStreaming: false,
+			isCompacting: false,
+			attachedClients: 0,
+			messageCount: 0,
+			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+			runtimeKind: "subagent",
+			rlmChildId: "c1",
+			parentSessionId: "root-session",
+			rosterStatus: "idle",
+		};
+		expect(isDirectAgentChild(rosterChild, { sessionId: "root-session" })).toBe(true);
+		expect(countRosterSubagentStatuses([rosterChild], { sessionId: "root-session" }, new Set())).toEqual({
+			total: 1,
+			running: 0,
+			idle: 1,
+			inactive: 0,
+		});
 	});
 
 	it("keeps chat alive with the snapshot-fed bar when the roster subscribe fails", async () => {

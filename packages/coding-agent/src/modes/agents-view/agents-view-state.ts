@@ -554,8 +554,18 @@ function getParentKeys(summary: SessionSummary): string[] {
 	].filter((key): key is string => key !== undefined);
 }
 
+/** Direct-child linkage over getParentKeys, shared by the view tree and the chat subagents bar. */
+export function isDirectAgentChild(
+	child: SessionSummary,
+	parent: { activeSessionId?: string | undefined; sessionId?: string | undefined; sessionFile?: string | undefined },
+): boolean {
+	const parentKeys = new Set(getParentKeys(child));
+	if (parent.activeSessionId !== undefined && parentKeys.has(`active:${parent.activeSessionId}`)) return true;
+	if (parent.sessionId !== undefined && parentKeys.has(`session:${parent.sessionId}`)) return true;
+	return parent.sessionFile !== undefined && parentKeys.has(fileIdentity(parent.sessionFile));
+}
+
 export function getAgentsViewSummaryIdentity(summary: SessionSummary): string {
-	// The roster agent id is stable across queued -> bound -> passivated, so selection survives the bind push.
 	if (summary.runtimeKind === "subagent" && summary.rlmChildId) {
 		return `agent:${rosterAgentIdForSummary(summary)}`;
 	}
