@@ -521,6 +521,7 @@ describe("subscriber push transitions", () => {
 			workers: new Map(),
 			clients: new Set([subscriber]),
 			pendingRosterChanged: new Set(),
+			publishedRosterIds: new Set(),
 			pendingRosterRemoved: new Set(),
 			rosterPushScheduled: false,
 			persistWorker: vi.fn(),
@@ -577,12 +578,20 @@ describe("subscriber push transitions", () => {
 		expect(pushes.at(-1)?.changed[0]?.lastHeardFromAt).toBeUndefined();
 	});
 
-	it("removes rows that turn client-owned and re-publishes them on promotion", async () => {
+	it("removes a claimed row once, stays silent for owned-worker writes, and re-publishes on promotion", async () => {
 		const { supervisor, pushes, settle } = makePushSupervisor({
 			protocolClientIds: new WeakMap(),
 		});
 		const owned = pushWorker("w1", "owner-1");
 		supervisor.workers.set("w1", owned);
+		// A row born to a client-owned worker is never published: no push, no id leak.
+		const bornOwned = workerRosterEntryFromSummary(
+			summary({ id: "p-active", sessionId: "p", activeSessionId: "p-active", sessionFile: "/tmp/p.jsonl" }),
+		);
+		supervisor.writeRosterEntry(bornOwned, owned);
+		await settle();
+		expect(pushes).toEqual([]);
+
 		const entry = workerRosterEntryFromSummary(
 			summary({ id: "o-active", sessionId: "o", activeSessionId: "o-active", sessionFile: "/tmp/o.jsonl" }),
 		);
@@ -590,16 +599,28 @@ describe("subscriber push transitions", () => {
 		await settle();
 		pushes.length = 0;
 
-		// The row is claimed by a client-owned worker: subscribers see a removal.
+		// A published row claimed by a client-owned worker: subscribers see one removal.
 		supervisor.writeRosterEntry(entry, owned);
 		await settle();
 		expect(pushes.at(-1)?.removed).toEqual([entry.agentId]);
 		expect(pushes.at(-1)?.changed).toEqual([]);
 
+		// Steady-state writes of the owned worker's rows produce zero roster traffic.
+		pushes.length = 0;
+		supervisor.writeRosterEntry(entry, owned);
+		supervisor.writeRosterEntry(bornOwned, owned);
+		await settle();
+		expect(pushes).toEqual([]);
+
 		// Promotion clears ownership: subscribers gain the rows again.
 		await supervisor.promoteOwnedWorker({ id: "owner-1" }, owned);
 		await settle();
-		expect(pushes.at(-1)?.changed.map((changedEntry) => changedEntry.agentId)).toEqual([entry.agentId]);
+		expect(
+			pushes
+				.at(-1)
+				?.changed.map((changedEntry) => changedEntry.agentId)
+				.sort(),
+		).toEqual([bornOwned.agentId, entry.agentId].sort());
 	});
 
 	it("never surfaces a live edge as a transient removal during a snapshot apply", async () => {

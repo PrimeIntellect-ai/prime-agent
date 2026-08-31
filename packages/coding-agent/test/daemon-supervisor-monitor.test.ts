@@ -242,6 +242,7 @@ function createSupervisorSnapshotState() {
 		sessionInputPauses: new Map(),
 		pendingReplacementSnapshots: new WeakMap<object, Map<string, unknown>>(),
 		pendingRosterChanged: new Set<string>(),
+		publishedRosterIds: new Set<string>(),
 		pendingRosterRemoved: new Set<string>(),
 		rosterPushScheduled: false,
 	};
@@ -308,6 +309,7 @@ function seedSupervisorRoster(
 	Object.assign(internals, {
 		pendingRosterChanged: new Set(),
 		pendingRosterRemoved: new Set(),
+		publishedRosterIds: new Set(),
 		rosterPushScheduled: false,
 		clients: internals.clients ?? new Set(),
 	});

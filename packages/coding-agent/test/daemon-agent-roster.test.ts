@@ -540,6 +540,7 @@ function makeSupervisor(workers: WorkerFixture[], extra: Record<string, unknown>
 		defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 		catalog: { list: vi.fn(async () => []) },
 		pendingRosterChanged: new Set(),
+		publishedRosterIds: new Set(),
 		pendingRosterRemoved: new Set(),
 		rosterPushScheduled: false,
 		refreshWorkerSummaries: vi.fn(async () => {}),

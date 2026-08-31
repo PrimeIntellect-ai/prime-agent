@@ -659,6 +659,8 @@ export class DaemonSupervisor {
 	private rosterStore?: AgentRoster;
 	private readonly pendingRosterChanged = new Set<string>();
 	private readonly pendingRosterRemoved = new Set<string>();
+	/** Ids the push surface has declared to subscribers; gates each removal to fire at most once. */
+	private readonly publishedRosterIds = new Set<string>();
 	private rosterPushScheduled = false;
 	private rosterWatchdogTimer?: ReturnType<typeof setInterval>;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
@@ -3736,13 +3738,23 @@ export class DaemonSupervisor {
 
 	private flushRosterUpdates(): void {
 		const changed: AgentRosterEntry[] = [];
-		const removed = [...this.pendingRosterRemoved];
+		const removed: string[] = [];
+		// Removals reference only ids the surface has declared, at most once each.
+		for (const agentId of this.pendingRosterRemoved) {
+			if (this.publishedRosterIds.delete(agentId)) removed.push(agentId);
+		}
 		for (const agentId of this.pendingRosterChanged) {
 			const entry = this.roster().get(agentId);
 			if (!entry) continue;
-			// A row that turned client-owned leaves the subscriber surface like a deletion.
-			if (this.isRosterEntryVisibleToClients(entry)) changed.push(entry);
-			else removed.push(agentId);
+			if (this.isRosterEntryVisibleToClients(entry)) {
+				changed.push(entry);
+				this.publishedRosterIds.add(agentId);
+			} else if (this.publishedRosterIds.delete(agentId)) {
+				// A published row claimed by a client-owned worker leaves the surface like a
+				// deletion. Rows born owned were never published: their writes emit nothing,
+				// and promotion re-publishes them through the empty amend.
+				removed.push(agentId);
+			}
 		}
 		this.pendingRosterChanged.clear();
 		this.pendingRosterRemoved.clear();
@@ -3762,7 +3774,10 @@ export class DaemonSupervisor {
 	}
 
 	private rosterEntriesForClient(): AgentRosterEntry[] {
-		return [...this.roster().values()].filter((entry) => this.isRosterEntryVisibleToClients(entry));
+		const entries = [...this.roster().values()].filter((entry) => this.isRosterEntryVisibleToClients(entry));
+		// Seeds and resyncs are declarations too: their ids must be removable later.
+		for (const entry of entries) this.publishedRosterIds.add(entry.agentId);
+		return entries;
 	}
 
 	// Client-owned workers stay hidden from the roster surface, mirroring plain list.
