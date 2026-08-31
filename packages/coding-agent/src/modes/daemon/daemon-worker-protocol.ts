@@ -9,6 +9,7 @@ import type { DaemonClientCapability, DaemonCommand, DaemonOutbound } from "./da
 
 export const DAEMON_WORKER_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WORKER";
 export const DAEMON_WORKER_TOKEN_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN";
+export const DAEMON_WORKER_INSTANCE_ID_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_INSTANCE_ID";
 export const DAEMON_WORKER_ACTIVE_SESSION_ID_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID";
 export const DAEMON_WORKER_SUPERVISOR_SOCKET_ENV = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET";
 export const DAEMON_WORKER_RECOVERY_JOURNAL_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL";
@@ -28,6 +29,9 @@ export type DaemonWorkerRosterOutbound =
 
 /** Advertised by new workers in the worker_auth response; absent on legacy workers. */
 export const DAEMON_WORKER_ROSTER_CAPABILITY = "agent_roster";
+
+/** Advertised in the worker_auth response by workers that accept peer transport grants. */
+export const DAEMON_WORKER_PEER_TRANSPORT_CAPABILITY = "peer_transport";
 
 /** Idle keepalive cadence for worker->supervisor roster frames; the supervisor staleness threshold derives from it. */
 export const ROSTER_HEARTBEAT_INTERVAL_MS = 15_000;
@@ -65,11 +69,39 @@ export function durableDaemonCreateCommand(command: DaemonCreateCommand): Durabl
 	};
 }
 
+/**
+ * A supervisor-registered admission for one direct peer connection. Held in
+ * worker memory only, single-use (deleted before its token is checked), and
+ * scoped to exactly one session of one worker process incarnation.
+ */
+export interface DaemonWorkerPeerGrant {
+	grantId: string;
+	token: string;
+	expiresAt: string;
+	purpose: "session_client";
+	workerInstanceId: string;
+	activeSessionId: string;
+	issuerGeneration: string;
+}
+
+/** Commands a direct peer may send before it holds an authenticated session role. */
+export type DaemonPeerCommand = {
+	id?: string;
+	type: "peer_auth";
+	grantId: string;
+	token: string;
+	workerInstanceId: string;
+	purpose: "session_client";
+};
+
+export type DaemonPeerCommandBody = Omit<DaemonPeerCommand, "id">;
+
 export type DaemonWorkerCommand =
 	| {
 			id?: string;
 			type: "worker_auth";
 			token: string;
+			workerInstanceId?: string;
 			supervisorGeneration: string;
 			supervisorPid: number;
 			supervisorProcessStartId?: string;
@@ -83,6 +115,7 @@ export type DaemonWorkerCommand =
 			supportsExtensionUi?: boolean;
 	  }
 	| { id?: string; type: "worker_unsubscribe"; activeSessionId: string }
+	| { id?: string; type: "worker_register_peer_transport"; grant: DaemonWorkerPeerGrant }
 	| { id?: string; type: "worker_archive_and_shutdown" }
 	| {
 			id?: string;
@@ -119,6 +152,8 @@ export interface DaemonWorkerDescriptor {
 	orphanProcessJournalPath?: string;
 	supervisorSocketPath: string;
 	authenticationToken: string;
+	/** Fresh random identity for this exact worker process incarnation. */
+	workerInstanceId?: string;
 	rootActiveSessionId: string;
 	/** Stable protocol client that owns this worker. Omitted for resident sessions. */
 	ownerClientId?: string;
@@ -163,6 +198,7 @@ export function durableDaemonWorkerDescriptor(descriptor: DaemonWorkerDescriptor
 			: {}),
 		supervisorSocketPath: descriptor.supervisorSocketPath,
 		authenticationToken: descriptor.authenticationToken,
+		...(descriptor.workerInstanceId !== undefined ? { workerInstanceId: descriptor.workerInstanceId } : {}),
 		rootActiveSessionId: descriptor.rootActiveSessionId,
 		...(descriptor.ownerClientId !== undefined ? { ownerClientId: descriptor.ownerClientId } : {}),
 		...(descriptor.rootSessionId !== undefined ? { rootSessionId: descriptor.rootSessionId } : {}),
@@ -204,6 +240,10 @@ export function waitForDaemonWorkerStartupGate(environment: NodeJS.ProcessEnv = 
 	if (marker !== DAEMON_WORKER_STARTUP_GATE_COMMIT) {
 		throw new Error("Daemon session worker startup was cancelled");
 	}
+}
+
+export function daemonWorkerInstanceId(environment: NodeJS.ProcessEnv = process.env): string | undefined {
+	return environment[DAEMON_WORKER_INSTANCE_ID_ENV] || undefined;
 }
 
 export function requireDaemonWorkerAuthenticationToken(environment: NodeJS.ProcessEnv = process.env): string {
