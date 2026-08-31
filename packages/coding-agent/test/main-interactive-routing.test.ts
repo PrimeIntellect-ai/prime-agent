@@ -8,16 +8,16 @@ import {
 	type AppMode,
 	type DaemonInteractiveSessionManagerDecision,
 	daemonServerDefaultSessionConfig,
-	findActiveDaemonSessionSummaryForInteractiveStartup,
 	findActiveDaemonSessionSummaryForSessionFile,
 	type InteractiveDaemonStartupDecision,
+	isClientOwnedDaemonSession,
 	parseAgentsViewCommand,
 	resolveRuntimeSessionOptions,
 	shouldEnsureDaemonBeforeActiveSessionLookup,
 	shouldEnsureInteractiveDaemonForStartup,
 	shouldOpenAgentsViewForDaemonInteractive,
-	shouldRejectBareResume,
 	shouldRejectNonInteractiveAttach,
+	shouldRejectNonInteractiveBareResume,
 	shouldUseDaemonClient,
 	shouldUseDaemonClientRuntime,
 	shouldUseDaemonInteractive,
@@ -26,6 +26,15 @@ import {
 import type { SessionSummary } from "../src/modes/index.js";
 
 describe("interactive startup routing", () => {
+	test.each([
+		["acp", false, false],
+		["acp", true, true],
+		["rpc", false, true],
+		["print", false, true],
+	] as const)("classifies %s noSession=%s ownership", (appMode, noSession, expected) => {
+		expect(isClientOwnedDaemonSession(appMode, noSession)).toBe(expected);
+	});
+
 	test.each(["interactive", "print", "json", "rpc"] as const)(
 		"uses the daemon runtime for the %s client",
 		(appMode) => {
@@ -127,9 +136,10 @@ describe("interactive startup routing", () => {
 		expect(shouldRejectNonInteractiveAttach("worker", "print")).toBe(true);
 		expect(shouldRejectNonInteractiveAttach("worker", "interactive")).toBe(false);
 		expect(shouldRejectNonInteractiveAttach(undefined, "print")).toBe(false);
-		expect(shouldRejectBareResume(true)).toBe(true);
-		expect(shouldRejectBareResume("session-id")).toBe(false);
-		expect(shouldRejectBareResume(undefined)).toBe(false);
+		expect(shouldRejectNonInteractiveBareResume(true, "print")).toBe(true);
+		expect(shouldRejectNonInteractiveBareResume(true, "rpc")).toBe(true);
+		expect(shouldRejectNonInteractiveBareResume("session-id", "print")).toBe(false);
+		expect(shouldRejectNonInteractiveBareResume(true, "interactive")).toBe(false);
 	});
 
 	test("does not start the daemon for attach", () => {
@@ -183,14 +193,14 @@ describe("daemon-backed interactive session manager routing", () => {
 		expect(shouldOpenAgentsViewForDaemonInteractive(decision)).toBe(false);
 	});
 
-	test("bare --resume no longer routes to the agents view (it is rejected at startup)", () => {
+	test.each([false, true])("opens the agents view for bare --resume (onboarding=%s)", (needsOnboarding) => {
 		expect(
 			shouldOpenAgentsViewForDaemonInteractive({
 				useDaemonInteractive: true,
-				needsOnboarding: false,
+				needsOnboarding,
 				resume: true,
 			}),
-		).toBe(false);
+		).toBe(true);
 	});
 
 	test("ensures daemon is available before probing non-path session selectors", () => {
@@ -221,48 +231,6 @@ describe("daemon-backed interactive session manager routing", () => {
 		).toBe(false);
 	});
 
-	test("falls back to local session lookup when daemon active-session probing fails", async () => {
-		await expect(
-			findActiveDaemonSessionSummaryForInteractiveStartup("/tmp/prime.sock", "saved-session-id", {
-				lookup: async () => {
-					throw new Error("Daemon returned an invalid active session summary");
-				},
-			}),
-		).resolves.toBeUndefined();
-	});
-
-	test("propagates active-session lookup failures for explicit attach", async () => {
-		await expect(
-			findActiveDaemonSessionSummaryForInteractiveStartup("/tmp/prime.sock", "active-1", {
-				fallbackOnError: false,
-				lookup: async () => {
-					throw new Error("protocol mismatch");
-				},
-			}),
-		).rejects.toThrow("protocol mismatch");
-	});
-
-	test("uses daemon active-session summary when probing succeeds", async () => {
-		await expect(
-			findActiveDaemonSessionSummaryForInteractiveStartup("/tmp/prime.sock", "active-1", {
-				lookup: async () => ({
-					id: "active-1",
-					activeSessionId: "active-1",
-					lifecycle: "draft",
-					activity: "idle",
-					isSessionActive: false,
-					sessionId: "session-1",
-					cwd: "/tmp/project",
-					isStreaming: false,
-					isCompacting: false,
-					attachedClients: 0,
-					messageCount: 0,
-					sessionActions: { queuedCount: 0, steering: [], followUps: [] },
-				}),
-			}),
-		).resolves.toMatchObject({ activeSessionId: "active-1" });
-	});
-
 	test("uses an ephemeral local session manager for fresh daemon-owned sessions", () => {
 		expect(shouldUseEphemeralSessionManagerForDaemonInteractive({})).toBe(true);
 	});
@@ -278,8 +246,8 @@ describe("daemon-backed interactive session manager routing", () => {
 		expect(shouldUseEphemeralSessionManagerForDaemonInteractive(decision)).toBe(false);
 	});
 
-	test("keeps bare --resume off the ephemeral local session manager", () => {
-		expect(shouldUseEphemeralSessionManagerForDaemonInteractive({ resume: true })).toBe(false);
+	test("uses an ephemeral local session manager for bare --resume", () => {
+		expect(shouldUseEphemeralSessionManagerForDaemonInteractive({ resume: true })).toBe(true);
 	});
 
 	test("finds an active daemon session by resolved session file", () => {

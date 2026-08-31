@@ -5,7 +5,6 @@ import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 type CellState = ConstructorParameters<typeof IPythonCellComponent>[0];
 
-// True when `line` ends with a foreground color still open (a leak into the padding).
 function foregroundLeftOpen(line: string): boolean {
 	let fg = false;
 	for (const match of line.matchAll(/\x1b\[([0-9;]*)m/g)) {
@@ -15,7 +14,6 @@ function foregroundLeftOpen(line: string): boolean {
 			if (code === 0 || code === 39) {
 				fg = false;
 			} else if (code === 38) {
-				// Skip the color data of 38;5;n / 38;2;r;g;b so a component isn't read as a code.
 				fg = true;
 				const mode = Number(params[i + 1]);
 				i += mode === 2 ? 4 : mode === 5 ? 2 : 1;

@@ -1,9 +1,10 @@
 import { appendFileSync } from "node:fs";
-import type { AgentMessage, ShouldStopAfterTurnContext } from "@earendil-works/pi-agent-core";
+import { AgentContinueError, type AgentMessage, type ShouldStopAfterTurnContext } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, fauxAssistantMessage, type Model, type ToolResultMessage } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
+import { createDeferred } from "./scheduling.js";
 
 type SessionWithCompactionInternals = {
 	_checkCompaction: (
@@ -94,9 +95,35 @@ describe("AgentSession compaction characterization", () => {
 		await harness.session.prompt("one");
 		await harness.session.prompt("two");
 
-		const result = await harness.session.compact();
+		const pruneOversizedVariables = vi.fn(async () => ["large_text"]);
+		const listNamespaceNames = vi.fn(async () => ["small_value"]);
+		const internals = harness.session as unknown as { _ipythonKernelProvisioner?: unknown };
+		const previousProvisioner = internals._ipythonKernelProvisioner;
+		internals._ipythonKernelProvisioner = {
+			hasRunningKernel: true,
+			pruneOversizedVariables,
+			listNamespaceNames,
+		};
+		let result!: Awaited<ReturnType<typeof harness.session.compact>>;
+		try {
+			result = await harness.session.compact();
+		} finally {
+			internals._ipythonKernelProvisioner = previousProvisioner;
+		}
 		const compactionEntries = harness.sessionManager.getEntries().filter((entry) => entry.type === "compaction");
 
+		expect(pruneOversizedVariables).toHaveBeenCalledOnce();
+		expect(listNamespaceNames).toHaveBeenCalledOnce();
+		expect(pruneOversizedVariables.mock.invocationCallOrder[0] as number).toBeLessThan(
+			listNamespaceNames.mock.invocationCallOrder[0] as number,
+		);
+		expect(harness.session.messages).toContainEqual(
+			expect.objectContaining({
+				role: "custom",
+				customType: "ipython_state",
+				content: expect.stringContaining("were removed: large_text"),
+			}),
+		);
 		expect(result.summary).toBe("summary from extension");
 		expect(compactionEntries).toHaveLength(1);
 		expect(harness.session.messages[0]?.role).toBe("compactionSummary");
@@ -241,6 +268,96 @@ describe("AgentSession compaction characterization", () => {
 		}
 	});
 
+	it("waits for active manual compaction before continuing", async () => {
+		const compactionStarted = createDeferred();
+		const compactionRelease = createDeferred();
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						compactionStarted.resolve();
+						await compactionRelease.promise;
+						return {
+							compaction: {
+								summary: "summary from extension",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								details: { source: "extension" },
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const internals = harness.session as unknown as {
+			_schedulePostCompactionContinue(): void;
+		};
+		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+		await harness.session.prompt("first");
+		await harness.session.prompt("second");
+		const pause = harness.session.acquireQueuedWorkPause();
+		const continueAgent = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
+		internals._schedulePostCompactionContinue();
+
+		const compaction = harness.session.compact(undefined, { skipAbort: true });
+		await compactionStarted.promise;
+		pause.release();
+		await new Promise<void>(setImmediate);
+		expect(continueAgent).not.toHaveBeenCalled();
+
+		compactionRelease.resolve();
+		await compaction;
+		await harness.session.waitForHeadlessIdle();
+		expect(continueAgent).toHaveBeenCalledTimes(1);
+	});
+
+	it("waits for active auto-compaction before continuing", async () => {
+		const compactionStarted = createDeferred();
+		const compactionRelease = createDeferred();
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						compactionStarted.resolve();
+						await compactionRelease.promise;
+						return {
+							compaction: {
+								summary: "summary from extension",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								details: { source: "extension" },
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const internals = harness.session as unknown as SessionWithCompactionInternals & {
+			_schedulePostCompactionContinue(): void;
+		};
+		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+		await harness.session.prompt("first");
+		await harness.session.prompt("second");
+		const pause = harness.session.acquireQueuedWorkPause();
+		const continueAgent = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
+		internals._schedulePostCompactionContinue();
+
+		const compaction = internals._runAutoCompaction("threshold", false);
+		await compactionStarted.promise;
+		pause.release();
+		await new Promise<void>(setImmediate);
+		expect(continueAgent).not.toHaveBeenCalled();
+
+		compactionRelease.resolve();
+		await compaction;
+		await harness.session.waitForHeadlessIdle();
+		expect(continueAgent).toHaveBeenCalledTimes(1);
+	});
+
 	it("treats session-owned queued inputs as queued work after compaction", async () => {
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 1 } },
@@ -281,6 +398,49 @@ describe("AgentSession compaction characterization", () => {
 		} finally {
 			harness.session.clearQueue();
 			internals._cancelPostCompactionContinue();
+		}
+	});
+
+	it("releases the runner's suspended idle wait when the continuation is cancelled", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const session = harness.session;
+		const internals = session as unknown as {
+			_schedulePostCompactionContinue(): void;
+			_cancelPostCompactionContinue(): void;
+			_sessionInputCheckpointWaiters: Set<() => void>;
+			_sessionInputPumpSuspended: boolean;
+		};
+		// A queued follow-up held back by a pause, then a pump suspension (the
+		// requestAbort teardown state): the queue stays populated but undispatchable.
+		const pause = session.acquireQueuedWorkPause();
+		await session.followUp("queued across abort");
+		expect(session.queuedActionCount).toBe(1);
+		session.requestAbort();
+		pause.release();
+		expect(internals._sessionInputPumpSuspended).toBe(true);
+		expect(session.queuedActionCount).toBe(1);
+
+		// The runner passes its pre-dispatch guards (no pauses, agent idle) and
+		// parks in the session idle wait on a checkpoint waiter.
+		internals._schedulePostCompactionContinue();
+		await vi.waitFor(() => {
+			expect(internals._sessionInputCheckpointWaiters.size).toBeGreaterThan(0);
+		});
+		expect(session.hasPendingAdmissionWaiters).toBe(true);
+
+		// Cancelling the continuation must release that waiter: a stuck waiter
+		// keeps hasPendingAdmissionWaiters true and blocks daemon passivation.
+		// The settle's own notify empties the set for a moment; a leaked runner
+		// re-parks within a microtask, so settle real time before asserting.
+		internals._cancelPostCompactionContinue();
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		try {
+			expect(internals._sessionInputCheckpointWaiters.size).toBe(0);
+			expect(session.hasPendingAdmissionWaiters).toBe(false);
+		} finally {
+			session.clearQueue();
+			session.resumeQueuedWork();
 		}
 	});
 
@@ -849,12 +1009,19 @@ describe("AgentSession compaction characterization", () => {
 			response: "continuation handled",
 			tracked: true,
 		},
-	])("does not continue again after the session pump handles $name", async ({ text, response, tracked }) => {
+		{
+			name: "an empty resume request",
+			text: "concurrent input",
+			response: "concurrent input handled",
+			tracked: false,
+			continueAfterSessionInput: true,
+		},
+	])("settles $name after the session pump runs", async ({ text, response, tracked, continueAfterSessionInput }) => {
 		vi.useFakeTimers();
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as {
-			_schedulePostCompactionContinue(): void;
+			_schedulePostCompactionContinue(continueAfterSessionInput?: boolean): void;
 			_postCompactionContinuationMessages: AgentMessage[];
 			_postCompactionContinuationScheduled: boolean;
 			_createPreparedTurnAction(
@@ -880,10 +1047,10 @@ describe("AgentSession compaction characterization", () => {
 		);
 		const continueSpy = vi.spyOn(harness.session.agent, "continue");
 
-		sessionInternals._schedulePostCompactionContinue();
+		sessionInternals._schedulePostCompactionContinue(continueAfterSessionInput);
 		await vi.advanceTimersByTimeAsync(200);
 
-		expect(continueSpy).not.toHaveBeenCalled();
+		expect(continueSpy).toHaveBeenCalledTimes(continueAfterSessionInput ? 1 : 0);
 		expect(sessionInternals._postCompactionContinuationScheduled).toBe(false);
 		expect(sessionInternals._postCompactionContinuationMessages).toEqual([]);
 		expect(harness.session.messages.at(-1)).toMatchObject({
@@ -893,7 +1060,6 @@ describe("AgentSession compaction characterization", () => {
 	});
 
 	it("keeps autonomous threshold continuations when post-compaction continue must retry", async () => {
-		vi.useFakeTimers();
 		const harness = await createHarness({
 			autonomous: {
 				enabled: true,
@@ -907,6 +1073,7 @@ describe("AgentSession compaction characterization", () => {
 		harnesses.push(harness);
 		const sessionInternals = harness.session as unknown as {
 			_schedulePostCompactionContinue(): void;
+			_cancelPostCompactionContinue(): void;
 			_postCompactionContinuationMessages: AgentMessage[];
 			_postCompactionContinuationScheduled: boolean;
 		};
@@ -919,16 +1086,82 @@ describe("AgentSession compaction characterization", () => {
 		harness.session.agent.state.messages = [
 			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 1000 },
 		];
+		const activeRunSettled = createDeferred();
 		const continueSpy = vi
 			.spyOn(harness.session.agent, "continue")
-			.mockRejectedValueOnce(new Error("already processing"));
+			.mockRejectedValueOnce(new AgentContinueError("busy", "already processing"));
+		vi.spyOn(harness.session.agent, "waitForIdle").mockImplementation(() =>
+			continueSpy.mock.calls.length === 0 ? Promise.resolve() : activeRunSettled.promise,
+		);
 
 		sessionInternals._schedulePostCompactionContinue();
-		await vi.advanceTimersByTimeAsync(100);
+		await vi.waitFor(() => expect(continueSpy).toHaveBeenCalledTimes(1));
 
-		expect(continueSpy).toHaveBeenCalledTimes(1);
 		expect(sessionInternals._postCompactionContinuationMessages).toEqual([queuedMessage]);
 		expect(sessionInternals._postCompactionContinuationScheduled).toBe(true);
+		sessionInternals._cancelPostCompactionContinue();
+		activeRunSettled.resolve();
+	});
+
+	it("keeps replacement continuation messages when a cancelled continue settles late", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as {
+			_schedulePostCompactionContinue(): void;
+			_cancelPostCompactionContinue(): void;
+			_postCompactionContinuationMessages: AgentMessage[];
+		};
+		const queuedMessage = {
+			role: "user",
+			content: [{ type: "text", text: "autonomous follow-up" }],
+			timestamp: Date.now(),
+		} satisfies AgentMessage;
+		sessionInternals._postCompactionContinuationMessages = [queuedMessage];
+		const staleRun = createDeferred();
+		const replacementRun = createDeferred();
+		const continueSpy = vi
+			.spyOn(harness.session.agent, "continue")
+			.mockReturnValueOnce(staleRun.promise)
+			.mockReturnValueOnce(replacementRun.promise);
+
+		sessionInternals._schedulePostCompactionContinue();
+		await vi.waitFor(() => expect(continueSpy).toHaveBeenCalledTimes(1));
+		sessionInternals._cancelPostCompactionContinue();
+		sessionInternals._schedulePostCompactionContinue();
+		await vi.waitFor(() => expect(continueSpy).toHaveBeenCalledTimes(2));
+
+		staleRun.resolve();
+		await new Promise<void>(setImmediate);
+		expect(sessionInternals._postCompactionContinuationMessages).toEqual([queuedMessage]);
+
+		replacementRun.resolve();
+		await harness.session.waitForHeadlessIdle();
+		expect(sessionInternals._postCompactionContinuationMessages).toEqual([]);
+	});
+
+	it("waits for an in-flight refine application before continuing", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const sessionInternals = harness.session as unknown as {
+			_schedulePostCompactionContinue(): void;
+			_refineInFlight: Promise<void> | undefined;
+		};
+		const continueSpy = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
+		const pause = harness.session.acquireQueuedWorkPause();
+		sessionInternals._schedulePostCompactionContinue();
+		await new Promise<void>(setImmediate);
+
+		// Refine enters its apply phase while the runner waits out the pause.
+		const refineApply = createDeferred();
+		sessionInternals._refineInFlight = refineApply.promise;
+		pause.release();
+		await new Promise<void>(setImmediate);
+		expect(continueSpy).not.toHaveBeenCalled();
+
+		sessionInternals._refineInFlight = undefined;
+		refineApply.resolve();
+		await harness.session.waitForHeadlessIdle();
+		expect(continueSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("clears queued autonomous threshold continuations when autonomous mode is disabled", async () => {

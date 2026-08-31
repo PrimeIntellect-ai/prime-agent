@@ -27,7 +27,7 @@ import { dirname, join } from "path";
 import { type Static, type TProperties, Type } from "typebox";
 import type { Validator } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
-import { getAgentDir, VERSION } from "../config.js";
+import { getAgentDir } from "../config.js";
 import type { AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
 import {
@@ -37,13 +37,11 @@ import {
 } from "./prime-inference-models.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.js";
 import {
-	clearConfigValueCache,
 	resolveConfigValueOrThrow,
 	resolveConfigValueUncached,
 	resolveHeadersOrThrow,
 } from "./resolve-config-value.js";
 
-// Schema for OpenRouter routing preferences
 const PercentileCutoffsSchema = Type.Object({
 	p50: Type.Optional(Type.Number()),
 	p75: Type.Optional(Type.Number()),
@@ -83,13 +81,11 @@ const OpenRouterRoutingSchema = Type.Object({
 	preferred_max_latency: Type.Optional(Type.Union([Type.Number(), PercentileCutoffsSchema])),
 });
 
-// Schema for Vercel AI Gateway routing preferences
 const VercelGatewayRoutingSchema = Type.Object({
 	only: Type.Optional(Type.Array(Type.String())),
 	order: Type.Optional(Type.Array(Type.String())),
 });
 
-// Schema for thinking level support and provider-specific values
 const ThinkingLevelMapValueSchema = Type.Union([Type.String(), Type.Null()]);
 const ThinkingLevelMapSchema = Type.Object({
 	off: Type.Optional(ThinkingLevelMapValueSchema),
@@ -144,7 +140,6 @@ const ProviderCompatSchema = Type.Union([
 	AnthropicMessagesCompatSchema,
 ]);
 
-// Schema for custom model definition
 // Most fields are optional with sensible defaults for local models (Ollama, LM Studio, etc.)
 const ModelDefinitionSchema = Type.Object({
 	id: Type.String({ minLength: 1 }),
@@ -168,7 +163,6 @@ const ModelDefinitionSchema = Type.Object({
 	compat: Type.Optional(ProviderCompatSchema),
 });
 
-// Schema for per-model overrides (all fields optional, merged with built-in model)
 const ModelOverrideSchema = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1 })),
 	reasoning: Type.Optional(Type.Boolean()),
@@ -331,7 +325,6 @@ function mergeCompat(
 function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<Api> {
 	const result = { ...model };
 
-	// Simple field overrides
 	if (override.name !== undefined) result.name = override.name;
 	if (override.reasoning !== undefined) result.reasoning = override.reasoning;
 	if (override.thinkingLevelMap !== undefined) {
@@ -341,7 +334,6 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 	if (override.contextWindow !== undefined) result.contextWindow = override.contextWindow;
 	if (override.maxTokens !== undefined) result.maxTokens = override.maxTokens;
 
-	// Merge cost (partial override)
 	if (override.cost) {
 		result.cost = {
 			input: override.cost.input ?? model.cost.input,
@@ -351,14 +343,10 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 		};
 	}
 
-	// Deep merge compat
 	result.compat = mergeCompat(model.compat, override.compat);
 
 	return result;
 }
-
-/** Clear the config value command cache. Exported for testing. */
-export const clearApiKeyCache = clearConfigValueCache;
 
 function readOpenAICodexAccountId(token: string): string | undefined {
 	try {
@@ -372,6 +360,27 @@ function readOpenAICodexAccountId(token: string): string | undefined {
 	}
 }
 
+/**
+ * The Codex backend gates its model catalog on the reported client version: it answers HTTP 200 with a
+ * catalog that grows as the version rises, so a low version yields a silently empty or partial list rather
+ * than an error. Prime Agent's own package version is far below the Codex CLI's version line, so it must
+ * report a supported Codex client version here instead.
+ *
+ * Shipping a new Codex model takes two edits, and both are required:
+ * 1. Add the model to `codexModels` in `packages/ai/scripts/generate-models.ts` and regenerate. That list is
+ *    explicit, not fetched, so an unlisted model does not exist for Prime Agent at all.
+ * 2. Raise this constant to a Codex CLI release whose catalog includes that model. `getExecutableModels()`
+ *    below intersects the registry with the discovered catalog, so a listed model the catalog omits is
+ *    dropped.
+ *
+ * Skipping step 2 fails silently and asymmetrically: `rlm` subagent delegation and `find_models()` resolve
+ * through `getExecutableModels()` and lose the model, while `/model` reads the unfiltered `getAvailable()`
+ * and keeps offering it.
+ *
+ * Catalog behaviour measured 2026-08-13; see #702.
+ */
+const OPENAI_CODEX_CLIENT_VERSION = "0.147.0";
+
 function openAICodexModelsUrl(baseUrl: string): string {
 	const normalized = baseUrl.replace(/\/+$/, "");
 	let path: string;
@@ -383,7 +392,7 @@ function openAICodexModelsUrl(baseUrl: string): string {
 		path = `${normalized}/codex/models`;
 	}
 	const url = new URL(path);
-	url.searchParams.set("client_version", VERSION);
+	url.searchParams.set("client_version", OPENAI_CODEX_CLIENT_VERSION);
 	return url.toString();
 }
 
@@ -475,8 +484,6 @@ export class ModelRegistry {
 		// Credentials may have been written by another process (e.g. the UI
 		// process saving a login while the session lives in the daemon).
 		this.authStorage.reload();
-
-		// Ensure dynamic API/OAuth registrations are rebuilt from current provider state.
 		resetApiProviders();
 		resetOAuthProviders();
 		// reset drops everything but model-provider built-ins; re-add MCP integrations
@@ -504,7 +511,6 @@ export class ModelRegistry {
 	}
 
 	private loadModels(): void {
-		// Load custom models and overrides from models.json
 		const {
 			models: customModels,
 			overrides,
@@ -514,7 +520,6 @@ export class ModelRegistry {
 
 		if (error) {
 			this.loadError = error;
-			// Keep built-in models even if custom models failed to load
 		}
 
 		this.explicitPrivatePrimeInferenceModelIds = new Set(
@@ -523,7 +528,6 @@ export class ModelRegistry {
 		const builtInModels = [...this.loadBuiltInModels(overrides, modelOverrides), ...getPrivatePrimeInferenceModels()];
 		let combined = this.mergeCustomModels(builtInModels, customModels);
 
-		// Let OAuth providers modify their models (e.g., update baseUrl)
 		for (const oauthProvider of this.authStorage.getOAuthProviders()) {
 			const cred = this.authStorage.get(oauthProvider.id);
 			if (cred?.type === "oauth" && oauthProvider.modifyModels) {
@@ -547,7 +551,6 @@ export class ModelRegistry {
 			return models.map((m) => {
 				let model = m;
 
-				// Apply provider-level baseUrl/headers/compat override
 				if (providerOverride) {
 					model = {
 						...model,
@@ -556,7 +559,6 @@ export class ModelRegistry {
 					};
 				}
 
-				// Apply per-model override
 				const modelOverride = perModelOverrides?.get(m.id);
 				if (modelOverride) {
 					model = applyModelOverride(model, modelOverride);
@@ -615,7 +617,6 @@ export class ModelRegistry {
 
 			const config = parsed as ModelsConfig;
 
-			// Additional validation
 			this.validateConfig(config);
 
 			const overrides = new Map<string, ProviderOverride>();
@@ -661,14 +662,12 @@ export class ModelRegistry {
 				providerConfig.modelOverrides && Object.keys(providerConfig.modelOverrides).length > 0;
 
 			if (models.length === 0) {
-				// Override-only config: needs baseUrl, headers, compat, modelOverrides, or some combination.
 				if (!providerConfig.baseUrl && !providerConfig.headers && !providerConfig.compat && !hasModelOverrides) {
 					throw new Error(
 						`Provider ${providerName}: must specify "baseUrl", "headers", "compat", "modelOverrides", or "models".`,
 					);
 				}
 			} else if (!isBuiltIn) {
-				// Non-built-in providers with custom models require endpoint + auth.
 				if (!providerConfig.baseUrl) {
 					throw new Error(`Provider ${providerName}: "baseUrl" is required when defining custom models.`);
 				}
@@ -676,7 +675,6 @@ export class ModelRegistry {
 					throw new Error(`Provider ${providerName}: "apiKey" is required when defining custom models.`);
 				}
 			}
-			// Built-in providers with custom models: baseUrl/apiKey/api are optional,
 			// inherited from built-in models. Auth comes from env vars / auth storage.
 
 			for (const modelDef of models) {
@@ -687,10 +685,8 @@ export class ModelRegistry {
 						`Provider ${providerName}, model ${modelDef.id}: no "api" specified. Set at provider or model level.`,
 					);
 				}
-				// For built-in providers, api is optional — inherited from built-in models.
 
 				if (!modelDef.id) throw new Error(`Provider ${providerName}: model missing "id"`);
-				// Validate contextWindow/maxTokens only if provided (they have defaults)
 				if (modelDef.contextWindow !== undefined && modelDef.contextWindow <= 0)
 					throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid contextWindow`);
 				if (modelDef.maxTokens !== undefined && modelDef.maxTokens <= 0)
@@ -703,7 +699,6 @@ export class ModelRegistry {
 		const models: Model<Api>[] = [];
 		const builtInProviders = new Set<string>(getProviders());
 
-		// Cache built-in defaults (api, baseUrl) per provider, extracted from first model.
 		const builtInDefaultsCache = new Map<string, { api: string; baseUrl: string }>();
 		const getBuiltInDefaults = (providerName: string): { api: string; baseUrl: string } | undefined => {
 			if (!builtInProviders.has(providerName)) return undefined;
@@ -873,7 +868,7 @@ export class ModelRegistry {
 				this.authorizedPrivatePrimeInferenceTeamId = teamId;
 				this.writePrivatePrimeAuthorizationCache({ fingerprint, modelIds: authorizedIds, refreshedAt: Date.now() });
 			} catch {
-				// Keep the cached ids.
+				// Keep the cached authorization.
 			}
 		};
 		const pending = this.backgroundPrivatePrimeAuthorization?.promise;
@@ -935,7 +930,7 @@ export class ModelRegistry {
 			writeFileSync(tmpPath, JSON.stringify({ ...cache, modelIds: [...cache.modelIds] }), { mode: 0o600 });
 			renameSync(tmpPath, cachePath);
 		} catch {
-			// Caching is best effort; a failed write just means the next startup refetches.
+			// A failed cache write only requires a later refetch.
 		}
 	}
 
@@ -1505,9 +1500,7 @@ export class ModelRegistry {
 	}
 
 	private applyProviderConfig(providerName: string, config: ProviderConfigInput): void {
-		// Register OAuth provider if provided
 		if (config.oauth) {
-			// Ensure the OAuth provider ID matches the provider name
 			const oauthProvider: OAuthProviderInterface = {
 				...config.oauth,
 				id: providerName,
@@ -1530,10 +1523,8 @@ export class ModelRegistry {
 		this.storeProviderRequestConfig(providerName, config);
 
 		if (config.models && config.models.length > 0) {
-			// Full replacement: remove existing models for this provider
 			this.models = this.models.filter((m) => m.provider !== providerName);
 
-			// Parse and add new models
 			for (const modelDef of config.models) {
 				const api = modelDef.api || config.api;
 				this.storeModelHeaders(providerName, modelDef.id, modelDef.headers);
@@ -1554,8 +1545,6 @@ export class ModelRegistry {
 					compat: modelDef.compat,
 				} as Model<Api>);
 			}
-
-			// Apply OAuth modifyModels if credentials exist (e.g., to update baseUrl)
 			if (config.oauth?.modifyModels) {
 				const cred = this.authStorage.get(providerName);
 				if (cred?.type === "oauth") {
@@ -1563,7 +1552,6 @@ export class ModelRegistry {
 				}
 			}
 		} else if (config.baseUrl || config.headers) {
-			// Override-only: update baseUrl for existing models. Request headers are resolved per request.
 			this.models = this.models.map((m) => {
 				if (m.provider !== providerName) return m;
 				return {

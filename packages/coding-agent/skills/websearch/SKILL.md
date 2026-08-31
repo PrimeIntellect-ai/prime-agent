@@ -19,7 +19,7 @@ Optional overrides (environment variables):
 
 ## Usage
 
-Call the prepared `websearch` import directly in the IPython kernel:
+Call the prepared `websearch` import directly in the Python kernel:
 
 ```python
 print(await websearch("latest Prime Agent release"))

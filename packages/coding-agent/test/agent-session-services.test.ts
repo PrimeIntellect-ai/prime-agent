@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerFauxProvider } from "@earendil-works/pi-ai";
@@ -29,6 +29,7 @@ describe("createAgentSessionFromServices", () => {
 	});
 
 	it("shows the telemetry disclosure independently of the Herdr reporter", async () => {
+		vi.stubEnv("DO_NOT_TRACK", "0");
 		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
 		const tempDir = join(tmpdir(), `pi-session-telemetry-notice-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
@@ -50,6 +51,7 @@ describe("createAgentSessionFromServices", () => {
 	});
 
 	it("honors an explicit daemon-carried telemetry opt-out", async () => {
+		vi.stubEnv("DO_NOT_TRACK", "0");
 		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
 		const tempDir = join(tmpdir(), `pi-session-daemon-telemetry-opt-out-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
@@ -81,6 +83,7 @@ describe("createAgentSessionFromServices", () => {
 	});
 
 	it("does not install top-level telemetry for a resumed child session", async () => {
+		vi.stubEnv("DO_NOT_TRACK", "0");
 		vi.stubEnv("PRIME_AGENT_TELEMETRY", "1");
 		const tempDir = join(tmpdir(), `pi-session-child-telemetry-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
@@ -98,6 +101,117 @@ describe("createAgentSessionFromServices", () => {
 		try {
 			expect(session.rlmDepth).toBe(1);
 			expect(existsSync(join(tempDir, "telemetry.json"))).toBe(false);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("advertises enabled generic MCP servers and refreshes the prompt on reload", async () => {
+		const tempDir = join(tmpdir(), `pi-session-mcp-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const projectDir = join(tempDir, "project");
+		const agentDir = join(tempDir, "agent");
+		mkdirSync(join(projectDir, ".prime", "agent"), { recursive: true });
+		mkdirSync(agentDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({
+				mcpServers: {
+					zebra: { type: "http", url: "https://secret.example/mcp", headers: { Authorization: "secret" } },
+					filesystem: {
+						type: "stdio",
+						command: "/secret/bin/filesystem",
+						args: ["/private/data"],
+						cwd: "/secret/cwd",
+						env: { TOKEN: { env: "FILESYSTEM_SECRET" } },
+					},
+					disabled: { type: "stdio", command: "disabled-secret", enabled: false },
+					linear: { type: "stdio", command: "reserved-secret" },
+				},
+			}),
+		);
+		writeFileSync(
+			join(projectDir, ".prime", "agent", "settings.json"),
+			JSON.stringify({ mcpServers: { projectOnly: { type: "stdio", command: "project-secret" } } }),
+		);
+
+		const settingsManager = SettingsManager.create(projectDir, agentDir);
+		const services = await createAgentSessionServices({
+			cwd: projectDir,
+			agentDir,
+			settingsManager,
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+		const { session } = await createAgentSessionFromServices({
+			services,
+			sessionManager: SessionManager.create(projectDir, join(tempDir, "sessions")),
+		});
+
+		try {
+			const initialPrompt = session.systemPrompt;
+			expect(initialPrompt).toContain(
+				"Generic MCP connections are accessed through the pre-imported Python `mcp` object in the Python REPL, not as top-level native tool namespaces or installed Python skills.",
+			);
+			expect(initialPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
+			expect(initialPrompt).toContain('await mcp.list_tools("filesystem")');
+			expect(initialPrompt).toContain('await mcp.call_tool("filesystem", "<tool>", arguments)');
+			for (const hidden of [
+				"disabled",
+				"projectOnly",
+				"https://secret.example/mcp",
+				"Authorization",
+				"/secret/bin/filesystem",
+				"/private/data",
+				"/secret/cwd",
+				"FILESYSTEM_SECRET",
+				"reserved-secret",
+			]) {
+				expect(initialPrompt).not.toContain(hidden);
+			}
+			expect(initialPrompt).not.toContain("Enabled generic MCP servers: `linear`");
+
+			const rebuildRuntime = vi.spyOn(
+				session as unknown as { _rebuildRuntimeForAcpMcpServers(): void },
+				"_rebuildRuntimeForAcpMcpServers",
+			);
+			session.replaceAcpMcpServers(
+				[
+					{
+						name: "task",
+						type: "http",
+						url: "https://task-secret.example/mcp",
+						headers: { Authorization: "Bearer task-secret" },
+					},
+				],
+				"owner-a",
+			);
+			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `task`, `zebra`.");
+			expect(session.systemPrompt).not.toContain("task-secret");
+			rebuildRuntime.mockClear();
+			const waitForIdle = vi.spyOn(session.agent, "waitForIdle");
+			await session.releaseAcpMcpServers("unknown-owner", ["task"]);
+			expect(waitForIdle).not.toHaveBeenCalled();
+			const originalProvisioner = Reflect.get(session, "_ipythonKernelProvisioner");
+			const execute = vi.fn(async (_code: string) => ({ status: "ok" }));
+			Reflect.set(session, "_ipythonKernelProvisioner", { manager: { isRunning: true, execute } });
+			await session.releaseAcpMcpServers("owner-a", ["task"]);
+			Reflect.set(session, "_ipythonKernelProvisioner", originalProvisioner);
+			expect(rebuildRuntime).not.toHaveBeenCalled();
+			expect(execute).toHaveBeenCalledOnce();
+			expect(execute.mock.calls[0]?.[0]).toContain("await _prime_mcp.reload(_prime_mcp_name)");
+			expect(execute.mock.calls[0]?.[0]).toContain('["task"]');
+			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `filesystem`, `zebra`.");
+
+			settingsManager.setGlobalMcpServer("added", { type: "stdio", command: "new-secret" });
+			settingsManager.removeGlobalMcpServer("filesystem");
+			await settingsManager.flush();
+			await session.reload();
+
+			expect(session.systemPrompt).toContain("Enabled generic MCP servers: `added`, `zebra`.");
+			expect(session.systemPrompt).toContain('await mcp.list_tools("added")');
+			expect(session.systemPrompt).not.toContain('await mcp.list_tools("filesystem")');
+			expect(session.systemPrompt).not.toContain("new-secret");
 		} finally {
 			session.dispose();
 		}

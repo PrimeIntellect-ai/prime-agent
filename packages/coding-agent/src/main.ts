@@ -94,6 +94,7 @@ import {
 	defaultDaemonSocketPath,
 	InProcessAgentConnection,
 	InteractiveMode,
+	normalizeSocketPath,
 	resolveAttachModelFallbackMessage,
 	runAcpMode,
 	runAcpModeWithConnection,
@@ -166,8 +167,8 @@ export function shouldRejectNonInteractiveAttach(attachAgent: string | undefined
 	return attachAgent !== undefined && appMode !== "interactive";
 }
 
-export function shouldRejectBareResume(resume: true | string | undefined): boolean {
-	return resume === true;
+export function shouldRejectNonInteractiveBareResume(resume: true | string | undefined, appMode: AppMode): boolean {
+	return resume === true && appMode !== "interactive";
 }
 
 function resolveAppMode(parsed: Args, stdinIsTTY: boolean): AppMode {
@@ -191,6 +192,10 @@ function resolveAppMode(parsed: Args, stdinIsTTY: boolean): AppMode {
 
 function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc" | "acp" | "daemon"> {
 	return appMode === "json" ? "json" : "text";
+}
+
+export function isClientOwnedDaemonSession(appMode: AppMode, noSession?: boolean): boolean {
+	return appMode !== "acp" || noSession === true;
 }
 
 // `prime-agent agents` opens the agents view directly.
@@ -253,13 +258,12 @@ export interface AgentsViewStartupDecision {
 }
 
 export function shouldOpenAgentsViewForDaemonInteractive(options: AgentsViewStartupDecision): boolean {
+	const bareResume = options.resume === true;
+	const requestsAgentsView = bareResume || (options.explicitAgentsView && !options.needsOnboarding);
 	return (
 		options.useDaemonInteractive &&
-		// `prime-agent` opens a new chat by default; the unified agents view is reached via
-		// left-arrow from a session or requested explicitly (`agents`).
-		!!options.explicitAgentsView &&
-		!options.needsOnboarding &&
-		// A resume selector resolves and opens its target directly.
+		// A selector, continuation, or fork must open its target directly rather than the agents view.
+		!!requestsAgentsView &&
 		typeof options.resume !== "string" &&
 		!options.continue &&
 		!options.fork
@@ -276,7 +280,12 @@ export interface DaemonInteractiveSessionManagerDecision {
 export function shouldUseEphemeralSessionManagerForDaemonInteractive(
 	options: DaemonInteractiveSessionManagerDecision,
 ): boolean {
-	return !options.hasActiveDaemonSession && options.resume === undefined && !options.continue && !options.fork;
+	return (
+		!options.hasActiveDaemonSession &&
+		(options.resume === undefined || options.resume === true) &&
+		!options.continue &&
+		!options.fork
+	);
 }
 
 export interface DaemonActiveSessionLookupDecision {
@@ -293,20 +302,17 @@ export function shouldEnsureDaemonBeforeActiveSessionLookup(options: DaemonActiv
 	);
 }
 
-type ActiveDaemonSessionSummaryLookup = (socketPath: string, selector: string) => Promise<SessionSummary | undefined>;
-
 interface ActiveDaemonSessionSummaryLookupOptions {
 	fallbackOnError?: boolean;
-	lookup?: ActiveDaemonSessionSummaryLookup;
 }
 
-export async function findActiveDaemonSessionSummaryForInteractiveStartup(
+async function findActiveDaemonSessionSummaryForInteractiveStartup(
 	socketPath: string,
 	selector: string,
 	options: ActiveDaemonSessionSummaryLookupOptions = {},
 ): Promise<SessionSummary | undefined> {
 	try {
-		return await (options.lookup ?? findActiveDaemonSessionSummary)(socketPath, selector);
+		return await findActiveDaemonSessionSummary(socketPath, selector);
 	} catch (error) {
 		if (options.fallbackOnError === false) {
 			throw error;
@@ -960,6 +966,7 @@ async function createDaemonClientConnection(options: {
 				closeClientOnDispose: true,
 				sendClientEnv: true,
 				ownedSession: options.clientOwned,
+				ownedSessionRecoveryConfig: options.clientOwned ? options.config : undefined,
 				supportsExtensionUi: options.supportsExtensionUi,
 				recoverDaemon: () => ensureInteractiveDaemonRunning(options.socketPath),
 				telemetryDisabled: options.config.telemetryDisabled,
@@ -977,7 +984,7 @@ async function createDaemonClientConnection(options: {
 				await listActiveDaemonSessionSummaries(client),
 				options.sessionPath,
 			);
-			if (activeSummary) {
+			if (activeSummary && activeSummary.workerState !== "failed") {
 				return await attach(activeSummary);
 			}
 		}
@@ -996,7 +1003,7 @@ async function createDaemonClientConnection(options: {
 			noSession: options.noSession,
 			env: collectDaemonClientEnv(),
 			lifecycle: options.clientOwned ? "client_owned" : "resident",
-			launchEnv: options.clientOwned ? collectDaemonLaunchEnv() : undefined,
+			launchEnv: collectDaemonLaunchEnv(),
 		});
 		if (!response.success) {
 			throw deserializeDaemonError(response);
@@ -1077,10 +1084,8 @@ export async function main(args: string[], options?: MainOptions) {
 		console.error(chalk.red("Error: attach requires an interactive terminal"));
 		process.exit(1);
 	}
-	if (shouldRejectBareResume(parsed.resume)) {
-		console.error(
-			chalk.red("Error: --resume requires a session id or path; browse sessions with left-arrow from a chat"),
-		);
+	if (shouldRejectNonInteractiveBareResume(parsed.resume, appMode)) {
+		console.error(chalk.red("Error: --resume without a session selector requires an interactive terminal"));
 		process.exit(1);
 	}
 	setLogContext({ mode: appMode });
@@ -1128,6 +1133,10 @@ export async function main(args: string[], options?: MainOptions) {
 			console.error(chalk.red(`Error: Cannot use cwd ${cwd}: ${message}`));
 			process.exit(1);
 		}
+	}
+	if (parsed.daemonSocket) {
+		// After --cwd so a relative socket path resolves against the requested directory.
+		parsed.daemonSocket = normalizeSocketPath(parsed.daemonSocket);
 	}
 
 	// Run migrations (pass cwd for project-local migrations)
@@ -1530,7 +1539,7 @@ export async function main(args: string[], options?: MainOptions) {
 				config: defaultSessionConfig,
 				sessionPath: parsed.noSession ? undefined : sessionManager.getSessionFile(),
 				continueRecent: parsed.continue,
-				clientOwned: true,
+				clientOwned: isClientOwnedDaemonSession(appMode, parsed.noSession),
 				noSession: parsed.noSession,
 				supportsExtensionUi: appMode === "rpc",
 			}));
@@ -1640,7 +1649,7 @@ export async function main(args: string[], options?: MainOptions) {
 		printTimings();
 		await runAcpMode(runtime);
 	} else if (appMode === "interactive") {
-		if (explicitAgentsView) {
+		if (explicitAgentsView || parsed.resume === true) {
 			console.error(chalk.yellow("Warning: the agents view needs the daemon; opening a normal chat instead"));
 		}
 		if (scopedModels.length > 0 && (parsed.verbose || !settingsManager.getQuietStartup())) {

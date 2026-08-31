@@ -54,7 +54,7 @@ export function createAgentConnectionState(
 		})),
 		activeToolNames: session.getActiveToolNames(),
 		contextUsage: session.getContextUsage(),
-		// Baseline recap; the daemon overlays the live summary on attach.
+		// Baseline recap; the daemon overlays the live summary when attaching.
 		recap: persistedRecap(sessionManager),
 	};
 }
@@ -74,6 +74,7 @@ export function createAgentConnectionSnapshot(
 			tree: sessionManager.getTree(),
 			leafId: sessionManager.getLeafId(),
 		},
+		children: session.getRlmChildSnapshots(),
 	};
 }
 

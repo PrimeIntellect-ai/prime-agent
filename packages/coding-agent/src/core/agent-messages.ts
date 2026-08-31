@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { HostRequestHandler } from "./kernel/index.js";
 import type { CustomMessage } from "./messages.js";
+import { HEARTBEAT_PROMPT_CUSTOM_TYPE } from "./messages.js";
 import { canonicalSessionPath } from "./session-lease.js";
 
 export const AGENT_MESSAGE_CUSTOM_TYPE = "agent_message";
@@ -141,9 +142,9 @@ export interface AgentSessionMessageReceipt {
 	message: string;
 	// Not named "status": the kernel host bridge envelope reserves that key.
 	deliveryStatus: AgentSessionMessageDeliveryStatus;
-	/** Present when deliveryStatus is "delivered": the message reached the target's context. */
+	/** Present only for delivered messages: when the target context received it. */
 	deliveredAt?: string;
-	/** Present when deliveryStatus is "queued": the message waits behind the target's current work. */
+	/** Present only for queued messages: when it was placed behind current work. */
 	queuedAt?: string;
 	deliveryMode?: "steer";
 }
@@ -434,6 +435,15 @@ export function isAgentSessionMessage(message: AgentMessage): message is AgentSe
 		details !== null &&
 		typeof (details as { id?: unknown }).id === "string" &&
 		typeof (details as { message?: unknown }).message === "string"
+	);
+}
+
+// A message that starts a new agent run (prompt-turn boundary).
+export function startsAgentRun(message: AgentMessage): boolean {
+	return (
+		message.role === "user" ||
+		isAgentSessionMessage(message) ||
+		(message.role === "custom" && message.customType === HEARTBEAT_PROMPT_CUSTOM_TYPE)
 	);
 }
 

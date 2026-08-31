@@ -71,8 +71,12 @@ export const FEATURE_HINTS: readonly FeatureHintDefinition[] = [
 		getText: () => "Use /refine to turn useful lessons into reusable skills, memory, and prompts.",
 	},
 	{
+		id: "trace-sharing",
+		getText: () => "Share traces with Prime Intellect using /traces on to train open-source LLMs.",
+	},
+	{
 		id: "persistent-ipython",
-		getText: () => "Prime Agent keeps IPython variables and helpers between turns and compactions.",
+		getText: () => "Compaction removes kernel variables over 16 MiB; smaller state persists.",
 	},
 	{
 		id: "context-usage",
@@ -105,8 +109,6 @@ export class FeatureHintDeck {
 	private remaining: FeatureHint[] = [];
 	private previousId: string | undefined;
 
-	constructor(private readonly random: () => number = Math.random) {}
-
 	next(context: FeatureHintContext): FeatureHint | undefined {
 		if (this.remaining.length === 0) {
 			this.refill(context);
@@ -124,8 +126,7 @@ export class FeatureHintDeck {
 			return text ? [{ id: hint.id, text }] : [];
 		});
 		for (let index = hints.length - 1; index > 0; index--) {
-			const random = Math.min(0.999999999, Math.max(0, this.random()));
-			const target = Math.floor(random * (index + 1));
+			const target = Math.floor(Math.random() * (index + 1));
 			[hints[index], hints[target]] = [hints[target]!, hints[index]!];
 		}
 		if (hints.length > 1 && hints[hints.length - 1]?.id === this.previousId) {

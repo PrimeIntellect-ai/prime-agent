@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 
+export { normalizeSocketPath } from "../../utils/daemon-socket-path.js";
+
 const DAEMON_SOCKET_MODE = 0o600;
 const DAEMON_SOCKET_DIR_MODE = 0o700;
 const DAEMON_SOCKET_RELEASE_GRACE_MS = 1000;

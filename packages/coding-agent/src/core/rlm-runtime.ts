@@ -3,11 +3,12 @@ import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
+import { THINKING_LEVELS } from "./thinking-levels.js";
 
+/** Request emitted by `rlm.run`; cellSourceCode preserves the spawning cell for display. */
 export interface RlmRunRequest {
 	prompt: string;
 	kwargs: Record<string, unknown>;
-	/** Source of the IPython cell that issued this rlm.run call, when available. */
 	cellSourceCode?: string;
 }
 
@@ -58,7 +59,6 @@ const RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH = 64;
 export const DEFAULT_RLM_MODEL_SEARCH_LIMIT = 8;
 export const MAX_RLM_MODEL_SEARCH_LIMIT = 20;
 
-/** Validate and normalize an orchestrator-supplied subagent session name. */
 export function normalizeRequestedRlmSubagentSessionName(value: unknown): string | undefined {
 	if (value === undefined) {
 		return undefined;
@@ -76,7 +76,20 @@ export function normalizeRequestedRlmSubagentSessionName(value: unknown): string
 	return name;
 }
 
-/** Validate and normalize an orchestrator-supplied subagent model reference. */
+export function normalizeRequestedRlmSubagentThinkingLevel(value: unknown): ThinkingLevel | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (typeof value !== "string") {
+		throw new Error("rlm.run thinking must be a string");
+	}
+	const level = value.trim().toLowerCase();
+	if (!THINKING_LEVELS.includes(level as ThinkingLevel)) {
+		throw new Error(`rlm.run thinking must be one of: ${THINKING_LEVELS.join(", ")}`);
+	}
+	return level as ThinkingLevel;
+}
+
 export function normalizeRequestedRlmSubagentModel(value: unknown): string | undefined {
 	if (value === undefined) {
 		return undefined;
@@ -148,7 +161,7 @@ export function findRlmModelMatches(query: string, models: Model<Api>[], limit: 
 		}));
 }
 
-/** Adapt an RlmRunHandler into the typed "rlm.run" handler for the kernel host bridge. */
+/** Adapt an RlmRunHandler into the typed `rlm.run` kernel host handler. */
 export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHandler {
 	return async (payload) => {
 		if (typeof payload.prompt !== "string") {
@@ -179,7 +192,7 @@ export function createRlmFindModelsHostHandler(handler: RlmFindModelsHandler): H
 	};
 }
 
-/** Expose the current parent session's RLM child registry to its kernel. */
+/** Expose the current parent session's direct RLM child registry to its kernel. */
 export function createRlmListSubagentsHostHandler(handler: RlmListSubagentsHandler): HostRequestHandler {
 	return async () => {
 		const { subagents } = await handler();
@@ -220,7 +233,7 @@ export interface CreateRlmSubagentRuntimeOptions {
 	rlmDepth: number;
 	rlmMaxDepth: number;
 	rlmParentNodeId: string;
-	/** Source of the IPython cell that spawned this subagent, for display. */
+	/** Source of the Python cell that spawned this subagent, for display. */
 	spawnCode?: string;
 	/** Publish the session to the parent before a host makes the runtime addressable. */
 	onSessionPublished?: (session: AgentSession) => void;

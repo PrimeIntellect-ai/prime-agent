@@ -11,7 +11,6 @@ import { createHarness, type Harness } from "../harness.js";
 
 interface ConnectionAuthRefreshHarness {
 	agentConnection: { getModelCatalog(): Promise<AgentConnectionModelCatalog> };
-	connectionModels: AgentConnectionModel[];
 	connectionModelCatalog: AgentConnectionModel[];
 	connectionConfiguredProviders: Set<string>;
 	connectionModelsFetchedAt: number;
@@ -19,6 +18,7 @@ interface ConnectionAuthRefreshHarness {
 	connectionModelsRefreshInFlight: { version: number; promise: Promise<AgentConnectionModel[]> } | undefined;
 	invalidateConnectionModels(): void;
 	applyConnectionModelCatalog(catalog: AgentConnectionModelCatalog): void;
+	getAvailableConnectionModels(): AgentConnectionModel[];
 	getConnectionAvailableModels(): Promise<AgentConnectionModel[]>;
 	getConnectionModelCatalog(): Promise<AgentConnectionModel[]>;
 	refreshConnectionModelsAfterAuthChange(): Promise<void>;
@@ -124,7 +124,6 @@ describe("ENG-4575 model authentication", () => {
 		const getModelCatalog = vi.fn(async () => ({ models: [model], configuredProviders: [] }));
 		const fakeThis = Object.create(InteractiveMode.prototype) as ConnectionAuthRefreshHarness;
 		fakeThis.agentConnection = { getModelCatalog };
-		fakeThis.connectionModels = [model];
 		fakeThis.connectionModelCatalog = [model];
 		fakeThis.connectionConfiguredProviders = new Set([model.provider]);
 		fakeThis.connectionModelsFetchedAt = Date.now();
@@ -135,7 +134,7 @@ describe("ENG-4575 model authentication", () => {
 
 		expect(getModelCatalog).toHaveBeenCalledOnce();
 		expect(fakeThis.connectionConfiguredProviders).toEqual(new Set());
-		expect(fakeThis.connectionModels).toEqual([]);
+		expect(fakeThis.getAvailableConnectionModels()).toEqual([]);
 		expect(fakeThis.connectionModelCatalog).toEqual([model]);
 	});
 
@@ -147,7 +146,6 @@ describe("ENG-4575 model authentication", () => {
 		fakeThis.agentConnection = {
 			getModelCatalog: vi.fn(async () => ({ models: [model], configuredProviders: [] })),
 		};
-		fakeThis.connectionModels = [];
 		fakeThis.connectionModelCatalog = [];
 		fakeThis.connectionConfiguredProviders = new Set();
 		fakeThis.connectionModelsFetchedAt = 0;
@@ -155,7 +153,7 @@ describe("ENG-4575 model authentication", () => {
 		fakeThis.connectionModelsRefreshInFlight = undefined;
 
 		await expect(fakeThis.getConnectionModelCatalog()).resolves.toEqual([model]);
-		expect(fakeThis.connectionModels).toEqual([]);
+		expect(fakeThis.getAvailableConnectionModels()).toEqual([]);
 	});
 
 	test("uses the full public catalog for scoped-session model autocomplete", async () => {

@@ -2,12 +2,14 @@
 name = "prime-agent-runtime"
 version = "0.1.0"
 description = "Kernel-side runtime shim for Prime Agent recursion"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-  "ipykernel",
-  "nest-asyncio",
+  "mcp>=2,<3",
   "tyro",
 ]
+
+[dependency-groups]
+dev = ["dill"]
 
 [build-system]
 requires = ["hatchling"]

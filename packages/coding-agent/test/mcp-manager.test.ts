@@ -77,8 +77,6 @@ describe("McpManager", () => {
 		const handlers = manager.hostHandlers();
 		expect(Object.keys(handlers).sort()).toEqual(["mcp.config", "mcp.refresh"]);
 
-		// refresh with no credentials fails (so the kernel reports a refresh error,
-		// not a false success), and a missing server arg is rejected.
 		await expect(handlers["mcp.refresh"]({ server: "linear" })).rejects.toThrow("Could not refresh");
 		await expect(handlers["mcp.refresh"]({})).rejects.toThrow("requires a server");
 	});
@@ -97,7 +95,7 @@ describe("McpManager", () => {
 		expect(called).toBe("linear");
 	});
 
-	it("mcp.config returns the resolved URL + headers, honoring a user override of a catalog name", async () => {
+	it("mcp.config keeps catalog names reserved from generic overrides", async () => {
 		const manager = new McpManager({
 			authStorage,
 			getUserServers: () => ({
@@ -105,15 +103,12 @@ describe("McpManager", () => {
 			}),
 		});
 		const handlers = manager.hostHandlers();
-		expect(await handlers["mcp.config"]({ server: "linear" })).toEqual({
-			url: "https://proxy.test/mcp",
-			headers: { "X-Extra": "1" },
-		});
-		expect(await handlers["mcp.config"]({ server: "notion" })).toEqual({ url: "https://mcp.notion.com/mcp" });
+		expect(await handlers["mcp.config"]({ server: "linear" })).toEqual({});
+		// Catalog-only entries are reserved for their authored skills, not the generic API.
+		expect(await handlers["mcp.config"]({ server: "notion" })).toEqual({});
 	});
 
 	it("does not treat an oauth override of a catalog name as authed via the official stored cred", () => {
-		// Pre-existing official Linear cred from a prior login.
 		authStorage.set("mcp:linear", {
 			type: "oauth",
 			access: "official",
@@ -124,8 +119,33 @@ describe("McpManager", () => {
 			authStorage,
 			getUserServers: () => ({ linear: { type: "http", url: "https://proxy.test/mcp", oauth: true } }),
 		});
-		// Must NOT be enabled — else the official token would be sent to the override URL.
 		expect(manager.listStatus().find((s) => s.server === "linear")?.enabled).toBe(false);
+	});
+
+	it("does not enable a server from a credential bound to a different endpoint or unbound", () => {
+		authStorage.set("mcp:unbound", {
+			type: "oauth",
+			access: "unbound-token",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+		});
+		authStorage.set("mcp:remote", {
+			type: "oauth",
+			access: "old-token",
+			refresh: "r",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://old.test/mcp",
+		} as never);
+		const manager = new McpManager({
+			authStorage,
+			getUserServers: () => ({
+				remote: { type: "http", url: "https://new.test/mcp", oauth: true },
+				unbound: { type: "http", url: "https://srv.test/mcp", oauth: true },
+			}),
+		});
+		expect(manager.listStatus().find((s) => s.server === "remote")?.enabled).toBe(false);
+		expect(manager.listStatus().find((s) => s.server === "unbound")?.enabled).toBe(false);
+		expect(manager.getEnabledGenericServers()).toEqual([]);
 	});
 
 	it("honors a bearer-token env var for user-declared servers", () => {
@@ -144,6 +164,20 @@ describe("McpManager", () => {
 		}
 	});
 
+	it("lists only enabled non-catalog user servers in deterministic order", () => {
+		const manager = new McpManager({
+			authStorage,
+			getUserServers: () => ({
+				zebra: { type: "stdio", command: "z" },
+				disabled: { type: "stdio", command: "off", enabled: false },
+				linear: { type: "stdio", command: "reserved" },
+				alpha: { type: "http", url: "https://alpha.test/mcp" },
+			}),
+		});
+
+		expect(manager.getEnabledGenericServers()).toEqual(["alpha", "zebra"]);
+	});
+
 	it("picks up mcpServers added after construction on refresh()", () => {
 		let servers: Record<string, McpServerConfig> = {};
 		const manager = new McpManager({ authStorage, getUserServers: () => servers });
@@ -155,14 +189,15 @@ describe("McpManager", () => {
 		expect(getOAuthProvider("mcp:acme")).toBeDefined();
 	});
 
-	it("drops the built-in provider when a catalog name is overridden without oauth", () => {
-		const manager = new McpManager({
+	it("keeps the built-in provider when a user server uses a reserved catalog name", () => {
+		new McpManager({
 			authStorage,
-			getUserServers: () => ({ linear: { type: "http", url: "https://proxy.test/mcp" } }),
+			getUserServers: () => ({
+				linear: { type: "http", url: "https://proxy.test/mcp", oauth: true },
+			}),
 		});
-		void manager;
-		// Built-in linear provider must be gone so we don't send the official token to the override URL.
-		expect(getOAuthProvider("mcp:linear")).toBeUndefined();
+		const provider = getOAuthProvider("mcp:linear");
+		expect(provider?.name).toBe("Linear");
 	});
 
 	it("unregisters a user server's OAuth provider when it's removed on refresh()", () => {
@@ -175,5 +210,83 @@ describe("McpManager", () => {
 		servers = {};
 		manager.refresh();
 		expect(getOAuthProvider("mcp:acme")).toBeUndefined();
+	});
+	it("serves user stdio configuration without resolving tagged environment values", async () => {
+		const config: McpServerConfig = {
+			type: "stdio",
+			command: "node",
+			args: ["server.js", "--raw"],
+			cwd: "/tmp/work",
+			env: { TOKEN: { env: "MCP_TOKEN" } },
+			enabledTools: ["raw.tool/name"],
+		};
+		const manager = new McpManager({ authStorage, getUserServers: () => ({ local: config }) });
+		expect(await manager.hostHandlers()["mcp.config"]({ server: "local" })).toEqual(config);
+		expect(manager.listStatus().find((status) => status.server === "local")?.enabled).toBe(true);
+	});
+
+	it("does not enable an authored catalog skill when a generic server shadows its name", () => {
+		for (const config of [
+			{ type: "stdio", command: "node" },
+			{ type: "http", url: "https://proxy.test/mcp" },
+		] satisfies McpServerConfig[]) {
+			const manager = new McpManager({ authStorage, getUserServers: () => ({ linear: config }) });
+			expect(manager.getDisabledBuiltinSkillOverrides()).toContain("-linear/SKILL.md");
+		}
+	});
+	it("keeps ACP credentials session-scoped and isolated from stored OAuth", async () => {
+		authStorage.set("mcp:task", {
+			type: "oauth",
+			access: "stored-oauth-token",
+			refresh: "refresh",
+			expires: Date.now() + 3600_000,
+			endpoint: "https://user.example/mcp",
+		});
+		const manager = new McpManager({
+			authStorage,
+			getUserServers: () => ({ task: { type: "http", url: "https://user.example/mcp", oauth: true } }),
+		});
+		expect(
+			manager.replaceAcpServers(
+				[
+					{
+						name: "task",
+						type: "http",
+						url: "https://task.example/mcp",
+						headers: { Authorization: "Bearer task-token" },
+					},
+				],
+				"owner-a",
+			),
+		).toBe(true);
+		const handlers = manager.hostHandlers();
+		expect(await handlers["mcp.config"]({ server: "task" })).toEqual({
+			type: "http",
+			url: "https://task.example/mcp",
+			headers: { Authorization: "Bearer task-token" },
+			credentialSource: "acp",
+		});
+		await expect(handlers["mcp.refresh"]({ server: "task" })).rejects.toThrow("does not use host OAuth");
+		expect(manager.getEnabledGenericServers()).toContain("task");
+
+		expect(manager.replaceAcpServers([], "owner-b")).toBe(false);
+		expect(() =>
+			manager.replaceAcpServers(
+				[{ name: "other", type: "http", url: "https://other.example/mcp", headers: {} }],
+				"owner-b",
+			),
+		).toThrow("owned by another client");
+		expect(await handlers["mcp.config"]({ server: "task" })).toMatchObject({
+			url: "https://task.example/mcp",
+			credentialSource: "acp",
+		});
+
+		expect(manager.replaceAcpServers([], "owner-a")).toBe(true);
+		expect(await handlers["mcp.config"]({ server: "task" })).toEqual({
+			type: "http",
+			url: "https://user.example/mcp",
+			oauth: true,
+		});
+		expect(authStorage.get("mcp:task")).toMatchObject({ access: "stored-oauth-token" });
 	});
 });

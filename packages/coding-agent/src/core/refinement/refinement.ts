@@ -129,7 +129,7 @@ The continual harness is the persistent, editable set of prompt notes, memories,
 skills, and subagent specs that lets Prime Agent improve reusable behavior
 outside the token history.
 Use "continual harness" for that persistent artifact layer; keep "RLM" for the
-runtime, IPython kernel, and native call interface that executes those artifacts.
+runtime, Python REPL kernel, and native call interface that executes those artifacts.
 
 Continual harness components:
 - prompt: supplemental prompt notes only. The base system prompt is immutable and MUST NOT be rewritten.
@@ -455,10 +455,10 @@ export function formatHarnessStateForPrompt(
 			: "When to refine the continual harness: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep continual harness edits small and evidence-backed.",
 		"",
 		includeIpythonExamples
-			? "Call contract: read each installed Python skill's SKILL.md and call its documented module function in IPython; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm('sub-task')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries."
+			? "Call contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm('sub-task')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries."
 			: options.includeShellExamples
-				? "Call contract: use installed skills as shell commands when available (for example `<skill_import> ...`). Continual harness entries are routing/context hints only in sessions without IPython; do not use Python `await`, `asyncio`, or `rlm` examples unless the prompt also documents an IPython kernel."
-				: "Call contract: continual harness entries are routing/context hints only in sessions without IPython or shell access; do not use Python `await`, `asyncio`, `rlm`, or shell skill commands unless the prompt also documents those interfaces.",
+				? "Call contract: use installed skills as shell commands when available (for example `<skill_import> ...`). Continual harness entries are routing/context hints only in sessions without the Python REPL; do not use Python `await`, `asyncio`, or `rlm` examples unless the prompt also documents a Python kernel."
+				: "Call contract: continual harness entries are routing/context hints only in sessions without the Python REPL or shell access; do not use Python `await`, `asyncio`, `rlm`, or shell skill commands unless the prompt also documents those interfaces.",
 		"",
 	];
 
@@ -470,7 +470,7 @@ export function formatHarnessStateForPrompt(
 		totalEntries += entries.length;
 		// Render subagent specs as a task-shaped roster the model can match against — the
 		// analogue of Claude Code's agent-type menu — rather than a bare count. In
-		// IPython sessions, include the native `rlm` invocation hint.
+		// REPL sessions, include the native `rlm` invocation hint.
 		if (kind === "subagent" && entries.length > 0 && includeIpythonExamples) {
 			lines.push(
 				`${kind}: ${entries.length} (invoke a spec by turning it into a concise task prompt and spawning with \`await rlm('<task>')\`; admission returns a child handle, never the answer)`,
@@ -630,12 +630,13 @@ function extractJsonObject(text: string): unknown {
 	throw new Error("Refiner did not return a JSON object");
 }
 
-function parseProposal(text: string): RefinementProposal {
-	const value = extractJsonObject(text);
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		throw new Error("Refiner JSON must be an object");
-	}
-	const record = value as Record<string, unknown>;
+/**
+ * Normalizes an untrusted refinement proposal while preserving invalid edit
+ * fields for apply-time validation.
+ */
+export function normalizeRefinementProposal(value: unknown): RefinementProposal {
+	const record =
+		typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 	const edits = Array.isArray(record.edits) ? record.edits : [];
 	return {
 		summary: typeof record.summary === "string" ? record.summary : "Refined continual harness state",
@@ -659,6 +660,14 @@ function parseProposal(text: string): RefinementProposal {
 				reason: typeof edit.reason === "string" ? edit.reason : undefined,
 			})),
 	};
+}
+
+function parseProposal(text: string): RefinementProposal {
+	const value = extractJsonObject(text);
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new Error("Refiner JSON must be an object");
+	}
+	return normalizeRefinementProposal(value);
 }
 
 function validateEdit(edit: RefinementEdit, computedId?: string): string | undefined {
@@ -860,6 +869,14 @@ export interface RefinementPlan {
  * here can take many seconds, during which the kernel or another session may write
  * the shared `harness_state.json`.
  */
+/** Mint a refinement id in the canonical `refine_<timestamp>` format. */
+export function generateRefinementId(): string {
+	return `refine_${new Date()
+		.toISOString()
+		.replace(/[^0-9]/g, "")
+		.slice(0, 17)}`;
+}
+
 export async function planRefinement(
 	messages: AgentMessage[],
 	state: HarnessState,
@@ -871,10 +888,7 @@ export async function planRefinement(
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
 ): Promise<RefinementPlan> {
-	const id = `refine_${new Date()
-		.toISOString()
-		.replace(/[^0-9]/g, "")
-		.slice(0, 17)}`;
+	const id = generateRefinementId();
 	if (options.rollbackId) {
 		const target = history.find((item) => item.id === options.rollbackId);
 		if (!target) {

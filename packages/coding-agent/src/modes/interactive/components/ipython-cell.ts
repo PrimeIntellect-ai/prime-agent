@@ -1,4 +1,3 @@
-import { isAbsolute, relative } from "node:path";
 import {
 	type Component,
 	truncateToWidth,
@@ -10,12 +9,12 @@ import { formatAgentMessageParticipant } from "../../../core/agent-messages.js";
 import { previewIpythonCode } from "../../../core/tools/code-preview.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
 import { parseIpythonBashCell } from "../../../core/tools/ipython-cell-code.js";
-import { shortenPath } from "../../../core/tools/render-utils.js";
 import { getLanguageFromPath, highlightCode, theme } from "../theme/theme.js";
 import { getWorkingPulseFrame, WORKING_ICON_FRAMES, workingIconFrame } from "../theme/working-icon.js";
 import { agentMessageBodyLines, agentMessagePreview, agentMessageSummaryLine } from "./agent-message.js";
 import { normalizeErrorDetails, summarizeErrorDetails } from "./collapsible-error.js";
 import { renderDiffSeparator, renderRichDiff } from "./diff.js";
+import { countChangedLines, FILE_CHANGE_DIFF_INDENT, formatFileChangeSummaryLine } from "./edit-summary.js";
 import { expandCollapseHint } from "./keybinding-hints.js";
 
 export interface IPythonCellContentBlock {
@@ -32,6 +31,8 @@ export interface IPythonCellState {
 	isPartial?: boolean;
 	isError?: boolean;
 	expanded?: boolean;
+	agentMessagesExpanded?: boolean;
+	editDiffsExpanded?: boolean;
 	showExpandHint?: boolean;
 	executionStarted?: boolean;
 	argsComplete?: boolean;
@@ -66,6 +67,7 @@ interface IpythonDetails {
 	stdout?: string;
 	stderr?: string;
 	result?: string;
+	backgroundOutput?: string;
 	diffs?: DiffDisplay[];
 	sentAgentMessages?: SentAgentMessageDisplay[];
 	error?: IpythonErrorDetails;
@@ -146,6 +148,7 @@ function readDetails(details: unknown): IpythonDetails {
 		stdout: typeof record.stdout === "string" ? record.stdout : undefined,
 		stderr: typeof record.stderr === "string" ? record.stderr : undefined,
 		result: typeof record.result === "string" ? record.result : undefined,
+		backgroundOutput: typeof record.backgroundOutput === "string" ? record.backgroundOutput : undefined,
 		diffs: readDiffDisplays(record.diffs),
 		sentAgentMessages: readSentAgentMessages(record.sentAgentMessages),
 		error,
@@ -283,18 +286,6 @@ function formatDuration(durationMs: number | undefined): string | undefined {
 	return `${(durationMs / 1000).toFixed(1)}s`;
 }
 
-// Relative to the session cwd when nested under it, else the absolute path.
-function displayEditPath(path: string, cwd: string | undefined): string {
-	if (cwd && isAbsolute(path)) {
-		const rel = relative(cwd, path);
-		if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
-			return rel;
-		}
-		return shortenPath(path);
-	}
-	return path;
-}
-
 function isImageBlock(block: IPythonCellContentBlock): boolean {
 	return block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string";
 }
@@ -382,8 +373,8 @@ export class IPythonCellComponent implements Component {
 		const lines = [truncateToWidth(` ${this.collapsedLine(details)}`, safeWidth, "")];
 
 		const hasCode = this.state.expanded ? this.renderCode(lines, safeWidth) : false;
-		if ((details.diffs?.length ?? 0) > 0 && this.state.expanded) {
-			this.renderDiffs(lines, safeWidth, details.diffs ?? [], this.marker(details));
+		if ((details.diffs?.length ?? 0) > 0) {
+			this.renderDiffs(lines, safeWidth, details.diffs ?? [], hasCode);
 		}
 		if ((details.sentAgentMessages?.length ?? 0) > 0) {
 			this.renderSentAgentMessages(lines, safeWidth, details.sentAgentMessages ?? []);
@@ -457,7 +448,7 @@ export class IPythonCellComponent implements Component {
 		const hasDiffs = (details.diffs?.length ?? 0) > 0;
 		const sentMessages = details.sentAgentMessages ?? [];
 		const result = isAgentMessageReceipt(details.result, sentMessages) ? undefined : details.result;
-		const structured = [details.stdout, details.stderr, result]
+		const structured = [details.stdout, details.stderr, result, details.backgroundOutput]
 			.filter((value): value is string => typeof value === "string" && value.trim().length > 0)
 			.join("\n");
 		const blocksText = textFromBlocks(this.state.content);
@@ -518,9 +509,14 @@ export class IPythonCellComponent implements Component {
 		this.addBlank(lines, width);
 		const isBashCell = parseIpythonBashCell(code) !== undefined;
 		const rawLines = code.split("\n");
+		// Highlight the whole cell at once so multi-line strings keep their color.
+		const highlightedLines = isBashCell ? [] : highlightCode(code, "python");
 		for (const [index, rawLine] of rawLines.entries()) {
 			const prefix = index === 0 ? theme.fg("dim", "› ") : theme.fg("dim", "  ");
-			const highlighted = this.highlightInputLine(rawLine, isBashCell);
+			const highlighted =
+				isBashCell || MAGIC_LINE_PATTERN.test(rawLine) || parseIpythonBashCell(rawLine) !== undefined
+					? theme.fg("bashMode", rawLine)
+					: (highlightedLines[index] ?? theme.fg("mdCodeBlock", rawLine));
 			this.addWrapped(lines, prefix, highlighted || " ", width);
 		}
 
@@ -597,6 +593,14 @@ export class IPythonCellComponent implements Component {
 			this.renderOutputText(lines, width, normalizeErrorDetails(text), this.state.isError ? "err" : "out");
 		}
 
+		// Without structured fields the fallback content text above already contains the appended background block.
+		const backgroundOutput =
+			hasStructuredOutput && details.backgroundOutput?.trim() ? details.backgroundOutput : undefined;
+		if (backgroundOutput) {
+			// Suppresses the placeholders below when background output is the cell's only output; rendered after the traceback to match the model-facing order.
+			renderedTextOutput = true;
+		}
+
 		if (!renderedTextOutput && this.state.isPartial) {
 			startOutput();
 			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", "waiting for output..."), width);
@@ -628,6 +632,12 @@ export class IPythonCellComponent implements Component {
 			this.renderTraceback(lines, width, traceback.traceback);
 		}
 
+		if (backgroundOutput) {
+			startOutput();
+			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", "background output (unattributed)"), width);
+			this.renderOutputText(lines, width, normalizeErrorDetails(backgroundOutput), "err");
+		}
+
 		if (imageCount > 0) {
 			startOutput();
 			const text = this.state.showImages
@@ -643,7 +653,7 @@ export class IPythonCellComponent implements Component {
 		for (const message of messages) {
 			const label = message.deliveryStatus === "delivered" ? "Agent message sent" : "Agent message queued";
 			const recipient = formatAgentMessageParticipant("sent", message.receiverRole, message.target);
-			if (this.state.expanded) {
+			if (this.state.agentMessagesExpanded) {
 				this.addBlank(lines, width);
 				this.addPlain(
 					lines,
@@ -663,16 +673,22 @@ export class IPythonCellComponent implements Component {
 		}
 	}
 
-	private renderDiffs(lines: string[], width: number, diffs: readonly DiffDisplay[], marker: string): void {
+	// The `╰─ <path> +N -M` summary line renders in both states; ctrl+j only
+	// attaches or removes the indented diff rows underneath it.
+	private renderDiffs(lines: string[], width: number, diffs: readonly DiffDisplay[], hasCode: boolean): void {
 		const diffsByPath = new Map<string, DiffDisplay[]>();
 		for (const diff of diffs) {
 			const existing = diffsByPath.get(diff.path);
 			if (existing) existing.push(diff);
 			else diffsByPath.set(diff.path, [diff]);
 		}
-		for (const [path, edits] of diffsByPath) {
+		if (hasCode) {
 			this.addPlain(lines, "");
-			this.renderFileDiff(lines, width, path, edits, marker);
+		}
+		let index = 0;
+		for (const [path, edits] of diffsByPath) {
+			index += 1;
+			this.renderFileDiff(lines, width, path, edits, index === diffsByPath.size);
 		}
 	}
 
@@ -681,33 +697,37 @@ export class IPythonCellComponent implements Component {
 		width: number,
 		path: string,
 		edits: readonly DiffDisplay[],
-		marker: string,
+		showHint: boolean,
 	): void {
 		const language = getLanguageFromPath(path);
+		// Diff rows align with the summary line's text column (after the `╰─ ` gutter).
+		const indent = FILE_CHANGE_DIFF_INDENT.slice(0, Math.max(0, width - 1));
+		const contentWidth = Math.max(1, width - indent.length);
 		let added = 0;
 		let removed = 0;
 		const rows: string[] = [];
 		edits.forEach((edit, index) => {
 			const { diff: diffText } = generateDiffString(edit.oldStr, edit.newStr, 4, edit.startLine ?? 1);
-			for (const row of diffText.split("\n")) {
-				if (row.startsWith("+")) added++;
-				else if (row.startsWith("-")) removed++;
+			const counts = countChangedLines(diffText);
+			added += counts.added;
+			removed += counts.removed;
+			if (!this.state.editDiffsExpanded) {
+				return;
 			}
 			if (index > 0) {
-				rows.push(renderDiffSeparator(width));
+				rows.push(`${indent}${renderDiffSeparator(contentWidth)}`);
 			}
 			// Append, not spread: a huge edit's diff can exceed the JS arg-count limit.
-			for (const row of renderRichDiff(diffText, width, { language })) {
-				rows.push(row);
+			for (const row of renderRichDiff(diffText, contentWidth, { language })) {
+				rows.push(`${indent}${row}`);
 			}
 		});
 
-		const counts = `${theme.fg("toolDiffAdded", `+${added}`)} ${theme.fg("toolDiffRemoved", `-${removed}`)}`;
-		const displayPath = displayEditPath(path, this.state.cwd);
-		// Truncate the path (not the counts) so it can't push the header past width.
-		const fixed = visibleWidth(marker) + 1 + 2 + visibleWidth(counts);
-		const shownPath = truncateToWidth(displayPath, Math.max(1, width - 1 - fixed), "…");
-		this.addPlain(lines, `${marker} ${shownPath}  ${counts}`);
+		// Unlike the ctrl+o hint (latest tool row only), the ctrl+j hint renders on
+		// every tool row, matching the thinking and agent-message hints. Within a
+		// row it renders once, on the last file's summary line (showHint).
+		const hint = showHint ? this.state.editDiffsExpanded === true : undefined;
+		lines.push(formatFileChangeSummaryLine(path, this.state.cwd, { added, removed }, hint, width));
 
 		for (const row of rows) {
 			lines.push(row);

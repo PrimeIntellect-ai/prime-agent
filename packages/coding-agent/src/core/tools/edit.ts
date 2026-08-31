@@ -1,10 +1,14 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { Box, type Component, Container, Spacer, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.js";
-import { expandCollapseHint } from "../../modes/interactive/components/keybinding-hints.js";
+import {
+	countChangedLines,
+	FILE_CHANGE_DIFF_INDENT,
+	formatFileChangeSummaryLine,
+} from "../../modes/interactive/components/edit-summary.js";
 import type { ToolDefinition } from "../extensions/types.js";
 import {
 	applyEditsToNormalizedContent,
@@ -101,7 +105,7 @@ function prepareEditArguments(input: unknown): EditToolInput {
 			const parsed = JSON.parse(args.edits);
 			if (Array.isArray(parsed)) args.edits = parsed;
 		} catch {
-			// Not JSON: leave as-is for schema validation to reject.
+			// Leave non-JSON input for schema validation to reject.
 		}
 	}
 
@@ -236,16 +240,42 @@ function getEditHeaderBg(
 	settledError: boolean | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.js").theme,
 ): (text: string) => string {
-	if (preview) {
-		if ("error" in preview) {
-			return (text: string) => theme.bg("toolErrorBg", text);
-		}
-		return (text: string) => theme.bg("toolSuccessBg", text);
-	}
-	if (settledError) {
+	if (settledError || (preview && "error" in preview)) {
 		return (text: string) => theme.bg("toolErrorBg", text);
 	}
+	if (preview) {
+		return (text: string) => theme.bg("toolSuccessBg", text);
+	}
 	return (text: string) => theme.bg("toolPendingBg", text);
+}
+
+// Width-aware `╰─ <path> +N -M` summary plus optional indented diff rows: the
+// summary truncates to one row and wrapped diff lines keep the indent column.
+class EditChangeSummaryComponent implements Component {
+	constructor(
+		private readonly rawPath: string,
+		private readonly cwd: string,
+		private readonly change: { added: number; removed: number },
+		private readonly diffsExpanded: boolean | undefined,
+		private readonly diffLines: readonly string[] | undefined,
+	) {}
+
+	render(width: number): string[] {
+		const safeWidth = Math.max(1, width);
+		const lines = [formatFileChangeSummaryLine(this.rawPath, this.cwd, this.change, this.diffsExpanded, safeWidth)];
+		if (this.diffLines !== undefined) {
+			const indent = FILE_CHANGE_DIFF_INDENT.slice(0, Math.max(0, safeWidth - 1));
+			const contentWidth = Math.max(1, safeWidth - indent.length);
+			for (const line of this.diffLines) {
+				for (const row of wrapTextWithAnsi(line, contentWidth)) {
+					lines.push(`${indent}${row}`);
+				}
+			}
+		}
+		return lines;
+	}
+
+	invalidate(): void {}
 }
 
 function buildEditCallComponent(
@@ -253,26 +283,39 @@ function buildEditCallComponent(
 	args: RenderableEditArgs | undefined,
 	theme: typeof import("../../modes/interactive/theme/theme.js").theme,
 	expanded: boolean,
-	showExpandHint: boolean,
+	cwd: string,
 ): EditCallRenderComponent {
 	component.setBgFn(getEditHeaderBg(component.preview, component.settledError, theme));
 	component.clear();
-	const canExpand = component.preview !== undefined && !("error" in component.preview);
-	const expandHint =
-		canExpand && showExpandHint ? `${theme.fg("dim", " · ")}${expandCollapseHint("app.tools.expand", expanded)}` : "";
-	component.addChild(new Text(`${formatEditCall(args, theme)}${expandHint}`, 0, 0));
+	component.addChild(new Text(formatEditCall(args, theme), 0, 0));
 
-	const body =
-		component.preview &&
-		("error" in component.preview
-			? theme.fg("error", component.preview.error)
-			: expanded
-				? renderDiff(component.preview.diff)
-				: undefined);
-	if (body) {
+	if (component.preview && "error" in component.preview) {
 		component.addChild(new Spacer(1));
-		component.addChild(new Text(body, 0, 0));
+		component.addChild(new Text(theme.fg("error", component.preview.error), 0, 0));
+		return component;
 	}
+	// A failed execution must not present the predicted diff as applied changes.
+	if (!component.preview || component.settledError) {
+		return component;
+	}
+
+	// The `╰─ <path> +N -M` summary line renders in both states; ctrl+j only
+	// attaches or removes the indented diff lines underneath it.
+	const rawPath = str(args?.file_path ?? args?.path);
+	const change = countChangedLines(component.preview.diff);
+	component.addChild(new Spacer(1));
+	component.addChild(
+		new EditChangeSummaryComponent(
+			rawPath ?? "...",
+			cwd,
+			change,
+			// The ctrl+j hint renders on every edit summary row (unlike the ctrl+o
+			// hint, which the latest tool row owns), matching thinking and
+			// agent-message hints.
+			expanded,
+			expanded ? renderDiff(component.preview.diff).split("\n") : undefined,
+		),
+	);
 	return component;
 }
 
@@ -322,7 +365,6 @@ export function createEditToolDefinition(
 						content: Array<{ type: "text"; text: string }>;
 						details: EditToolDetails | undefined;
 					}>((resolve, reject) => {
-						// Check if already aborted.
 						if (signal?.aborted) {
 							reject(new Error("Operation aborted"));
 							return;
@@ -330,7 +372,6 @@ export function createEditToolDefinition(
 
 						let aborted = false;
 
-						// Set up abort handler.
 						const onAbort = () => {
 							aborted = true;
 							reject(new Error("Operation aborted"));
@@ -340,10 +381,8 @@ export function createEditToolDefinition(
 							signal.addEventListener("abort", onAbort, { once: true });
 						}
 
-						// Perform the edit operation.
 						void (async () => {
 							try {
-								// Check if file exists.
 								try {
 									await ops.access(absolutePath);
 								} catch (error: unknown) {
@@ -356,16 +395,13 @@ export function createEditToolDefinition(
 									return;
 								}
 
-								// Check if aborted before reading.
 								if (aborted) {
 									return;
 								}
 
-								// Read the file.
 								const buffer = await ops.readFile(absolutePath);
 								const rawContent = buffer.toString("utf-8");
 
-								// Check if aborted after reading.
 								if (aborted) {
 									return;
 								}
@@ -380,7 +416,6 @@ export function createEditToolDefinition(
 									path,
 								);
 
-								// Check if aborted before writing.
 								if (aborted) {
 									return;
 								}
@@ -388,12 +423,10 @@ export function createEditToolDefinition(
 								const finalContent = bom + restoreLineEndings(newContent, originalEnding);
 								await ops.writeFile(absolutePath, finalContent);
 
-								// Check if aborted after writing.
 								if (aborted) {
 									return;
 								}
 
-								// Clean up abort handler.
 								if (signal) {
 									signal.removeEventListener("abort", onAbort);
 								}
@@ -409,7 +442,6 @@ export function createEditToolDefinition(
 									details: { diff: diffResult.diff, firstChangedLine: diffResult.firstChangedLine },
 								});
 							} catch (error: unknown) {
-								// Clean up abort handler.
 								if (signal) {
 									signal.removeEventListener("abort", onAbort);
 								}
@@ -447,7 +479,7 @@ export function createEditToolDefinition(
 				});
 			}
 
-			return buildEditCallComponent(component, args, theme, context.expanded, context.showExpandHint !== false);
+			return buildEditCallComponent(component, args, theme, context.expanded, context.cwd);
 		},
 		renderResult(result, _options, theme, context) {
 			const callComponent = context.state.callComponent;
@@ -477,7 +509,7 @@ export function createEditToolDefinition(
 						context.args as RenderableEditArgs | undefined,
 						theme,
 						context.expanded,
-						context.showExpandHint !== false,
+						context.cwd,
 					);
 				}
 			}

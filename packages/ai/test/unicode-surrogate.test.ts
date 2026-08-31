@@ -10,13 +10,11 @@ type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
 import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.js";
 import { hasBedrockCredentials } from "./bedrock-utils.js";
-import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.js";
+import { hasCloudflareWorkersAICredentials } from "./cloudflare-utils.js";
 import { resolveApiKey } from "./oauth.js";
 
-// Empty schema for test tools - must be proper OBJECT type for Cloud Code Assist
 const emptySchema = Type.Object({});
 
-// Resolve OAuth tokens at module level (async, runs before tests)
 const oauthTokens = await Promise.all([
 	resolveApiKey("anthropic"),
 	resolveApiKey("github-copilot"),
@@ -24,20 +22,8 @@ const oauthTokens = await Promise.all([
 ]);
 const [anthropicOAuthToken, githubCopilotToken, openaiCodexToken] = oauthTokens;
 
-/**
- * Test for Unicode surrogate pair handling in tool results.
- *
- * Issue: When tool results contain emoji or other characters outside the Basic Multilingual Plane,
- * they may be incorrectly serialized as unpaired surrogates, causing "no low surrogate in string"
- * errors when sent to the API provider.
- *
- * Example error from Anthropic:
- * "The request body is not valid JSON: no low surrogate in string: line 1 column 197667"
- */
-
 async function testEmojiInToolResults<TApi extends Api>(llm: Model<TApi>, options: StreamOptionsWithExtras = {}) {
 	const toolCallId = llm.provider === "mistral" ? "testtool1" : "test_1";
-	// Simulate a tool that returns emoji
 	const context: Context = {
 		systemPrompt: "You are a helpful assistant.",
 		messages: [
@@ -80,7 +66,6 @@ async function testEmojiInToolResults<TApi extends Api>(llm: Model<TApi>, option
 		],
 	};
 
-	// Add tool result with various problematic Unicode characters
 	const toolResult: ToolResultMessage = {
 		role: "toolResult",
 		toolCallId: toolCallId,
@@ -107,14 +92,12 @@ async function testEmojiInToolResults<TApi extends Api>(llm: Model<TApi>, option
 
 	context.messages.push(toolResult);
 
-	// Add follow-up user message
 	context.messages.push({
 		role: "user",
 		content: "Summarize the tool result briefly.",
 		timestamp: Date.now(),
 	});
 
-	// This should not throw a surrogate pair error
 	const response = await complete(llm, context, options);
 
 	expect(response.stopReason).not.toBe("error");
@@ -166,7 +149,6 @@ async function testRealWorldLinkedInData<TApi extends Api>(llm: Model<TApi>, opt
 		],
 	};
 
-	// Real-world tool result from LinkedIn with emoji
 	const toolResult: ToolResultMessage = {
 		role: "toolResult",
 		toolCallId: toolCallId,
@@ -203,7 +185,6 @@ Unanswered Comments: 2
 		timestamp: Date.now(),
 	});
 
-	// This should not throw a surrogate pair error
 	const response = await complete(llm, context, options);
 
 	expect(response.stopReason).not.toBe("error");
@@ -255,8 +236,6 @@ async function testUnpairedHighSurrogate<TApi extends Api>(llm: Model<TApi>, opt
 		],
 	};
 
-	// Construct a string with an intentionally unpaired high surrogate
-	// This simulates what might happen if text processing corrupts emoji
 	const unpairedSurrogate = String.fromCharCode(0xd83d); // High surrogate without low surrogate
 
 	const toolResult: ToolResultMessage = {
@@ -276,8 +255,6 @@ async function testUnpairedHighSurrogate<TApi extends Api>(llm: Model<TApi>, opt
 		timestamp: Date.now(),
 	});
 
-	// This should not throw a surrogate pair error
-	// The unpaired surrogate should be sanitized before sending to API
 	const response = await complete(llm, context, options);
 
 	expect(response.stopReason).not.toBe("error");
@@ -367,10 +344,6 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 			await testUnpairedHighSurrogate(llm);
 		});
 	});
-
-	// =========================================================================
-	// OAuth-based providers (credentials from ~/.pi/agent/oauth.json)
-	// =========================================================================
 
 	describe("Anthropic OAuth Provider Unicode Handling", () => {
 		const llm = getModel("anthropic", "claude-haiku-4-5");
@@ -502,22 +475,6 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 
 	describe.skipIf(!hasCloudflareWorkersAICredentials())("Cloudflare Workers AI Provider Unicode Handling", () => {
 		const llm = getModel("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.6");
-
-		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
-			await testEmojiInToolResults(llm);
-		});
-
-		it("should handle real-world LinkedIn comment data with emoji", { retry: 3, timeout: 30000 }, async () => {
-			await testRealWorldLinkedInData(llm);
-		});
-
-		it("should handle unpaired high surrogate (0xD83D) in tool results", { retry: 3, timeout: 30000 }, async () => {
-			await testUnpairedHighSurrogate(llm);
-		});
-	});
-
-	describe.skipIf(!hasCloudflareAiGatewayCredentials())("Cloudflare AI Gateway Provider Unicode Handling", () => {
-		const llm = getModel("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
 			await testEmojiInToolResults(llm);

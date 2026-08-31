@@ -20,6 +20,8 @@ export interface InteractiveModeUiServices {
 	getInitialCwd(): string;
 	getInitialSessionName(): string | undefined;
 	getThemes(): Theme[];
+	/** Refreshes MCP providers after a client-side MCP settings mutation. */
+	refreshMcpProviders?(): void;
 }
 
 type LocalExtensionNewSessionOptions = Parameters<ExtensionCommandContext["newSession"]>[0];
@@ -60,6 +62,7 @@ export function createInteractiveModeUiServices(session: AgentSession): Interact
 		getInitialCwd: () => session.sessionManager.getCwd(),
 		getInitialSessionName: () => session.sessionManager.getSessionName(),
 		getThemes: () => session.resourceLoader.getThemes().themes,
+		refreshMcpProviders: () => session.refreshMcpProviders(),
 	};
 }
 
@@ -75,6 +78,7 @@ export function createInteractiveModeUiServicesFromServices(options: {
 		getInitialCwd: () => sessionManager.getCwd(),
 		getInitialSessionName: () => sessionManager.getSessionName(),
 		getThemes: () => services.resourceLoader.getThemes().themes,
+		refreshMcpProviders: () => services.mcpManager.refresh(),
 	};
 }
 

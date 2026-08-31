@@ -1,7 +1,3 @@
-/**
- * Tests for AgentSession concurrent prompt guard.
- */
-
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,15 +12,17 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createAgentSessionMessage } from "../src/core/agent-messages.js";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import type { CompactionResult } from "../src/core/compaction/index.js";
+import type { AgentCronJob } from "../src/core/cron-jobs.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { BuildSystemPromptOptions } from "../src/core/system-prompt.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
 
-// Mock stream that mimics AssistantMessageEventStream
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
 	constructor() {
 		super(
@@ -82,7 +80,6 @@ describe("AgentSession concurrent prompt guard", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let abortSignal: AbortSignal | undefined;
 
-		// Use a stream function that responds to abort
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
@@ -112,7 +109,6 @@ describe("AgentSession concurrent prompt guard", () => {
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
-		// Set a runtime API key so validation passes
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 
 		session = new AgentSession({
@@ -195,37 +191,27 @@ describe("AgentSession concurrent prompt guard", () => {
 	it("should throw when prompt() called while streaming", async () => {
 		createSession();
 
-		// Start first prompt (don't await, it will block until abort)
 		const firstPrompt = session.prompt("First message");
-
-		// Wait a tick for isStreaming to be set
 		await new Promise((resolve) => setTimeout(resolve, 10));
-
-		// Verify we're streaming
 		expect(session.isStreaming).toBe(true);
 
-		// Second prompt should reject
 		await expect(session.prompt("Second message")).rejects.toThrow(
 			"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 		);
 
-		// Cleanup
 		await session.abort();
-		await firstPrompt.catch(() => {}); // Ignore abort error
+		await firstPrompt.catch(() => {});
 	});
 
 	it("should allow steer() while streaming", async () => {
 		createSession();
 
-		// Start first prompt
 		const firstPrompt = session.prompt("First message");
 		await new Promise((resolve) => setTimeout(resolve, 10));
 
-		// steer should work while streaming
 		expect(() => session.steer("Steering message")).not.toThrow();
 		expect(session.queuedActionCount).toBe(1);
 
-		// Cleanup
 		await session.abort();
 		await firstPrompt.catch(() => {});
 	});
@@ -233,15 +219,12 @@ describe("AgentSession concurrent prompt guard", () => {
 	it("should allow followUp() while streaming", async () => {
 		createSession();
 
-		// Start first prompt
 		const firstPrompt = session.prompt("First message");
 		await new Promise((resolve) => setTimeout(resolve, 10));
 
-		// followUp should work while streaming
 		expect(() => session.followUp("Follow-up message")).not.toThrow();
 		expect(session.queuedActionCount).toBe(1);
 
-		// Cleanup
 		await session.abort();
 		await firstPrompt.catch(() => {});
 	});
@@ -425,6 +408,308 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(receivedUserText).toBe("agent-to-agent payload");
 	});
 
+	it("queues an agent message behind an active turn", async () => {
+		createSession();
+		const activeTurn = session.prompt("active turn");
+		await vi.waitFor(() => expect(session.isStreaming).toBe(true));
+		let queued: boolean | undefined;
+
+		await session.acceptAgentMessagePrompt("message during turn", {
+			queueIfBusy: true,
+			streamingBehavior: "steer",
+			preflightResult: (accepted, didQueue) => {
+				expect(accepted).toBe(true);
+				queued = didQueue;
+			},
+		});
+
+		expect(queued).toBe(true);
+		expect(session.getSessionActionSnapshot().steering).toContain("message during turn");
+		await session.abort();
+		await activeTurn.catch(() => undefined);
+	});
+
+	it("serializes an agent message behind cron admission", async () => {
+		createSession();
+		const now = new Date().toISOString();
+		const job: AgentCronJob = {
+			id: "cron-overlap",
+			status: "active",
+			source: "cron",
+			activeSessionId: "active-1",
+			sessionId: session.sessionId,
+			sessionFile: "/tmp/session.jsonl",
+			cwd: tempDir,
+			prompt: "cron prompt",
+			schedule: { kind: "interval", expression: "every 5m", intervalMs: 300_000 },
+			createdAt: now,
+			updatedAt: now,
+			runCount: 0,
+		};
+		const cronTurn = session.promptHeartbeat(job, { streamingBehavior: "followUp", source: "rpc" });
+		let queued: boolean | undefined;
+
+		await session.acceptAgentMessagePrompt("message during cron admission", {
+			queueIfBusy: true,
+			streamingBehavior: "steer",
+			preflightResult: (accepted, didQueue) => {
+				expect(accepted).toBe(true);
+				queued = didQueue;
+			},
+		});
+
+		expect(queued).toBe(true);
+		expect(session.getSessionActionSnapshot().steering).toContain("message during cron admission");
+		await session.abort();
+		await cronTurn.catch(() => undefined);
+	});
+
+	it("does not admit a cron prompt invalidated while async input handlers ran", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		let deliveredUserText: string | undefined;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model,
+				systemPrompt: "Test",
+				tools: [],
+			},
+			streamFn: (_model, context) => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					const user = context.messages.filter((message) => message.role === "user").at(-1);
+					if (user && typeof user.content !== "string") {
+						deliveredUserText = user.content
+							.filter(
+								(part): part is TextContent =>
+									typeof part === "object" && part !== null && part.type === "text",
+							)
+							.map((part) => part.text)
+							.join("\n");
+					}
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Delivered") });
+				});
+				return stream;
+			},
+		});
+
+		const sessionManager = SessionManager.inMemory();
+		const settingsManager = SettingsManager.create(tempDir, tempDir);
+		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
+		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		let jobInvalidated = false;
+		const extensionsResult = await createTestExtensionsResult([
+			(pi) => {
+				pi.on("input", async () => {
+					jobInvalidated = true;
+					return undefined;
+				});
+			},
+		]);
+
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			cwd: tempDir,
+			modelRegistry,
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
+		});
+
+		// Mirrors the daemon cron path: admissionCommitted re-checks the job and
+		// throws when it was cancelled or updated before the prompt is admitted.
+		await expect(
+			session.promptUntilAccepted("stale cron prompt", {
+				streamingBehavior: "followUp",
+				source: "rpc",
+				admissionCommitted: () => {
+					if (jobInvalidated) throw new Error("Cron job became unrunnable before admission");
+				},
+			}),
+		).rejects.toThrow("Cron job became unrunnable before admission");
+
+		await session.agent.waitForIdle();
+		expect(deliveredUserText).toBeUndefined();
+		expect(session.isStreaming).toBe(false);
+	});
+
+	it("serializes concurrent agent messages", async () => {
+		createSession();
+		const dispositions = new Map<string, boolean | undefined>();
+		const accept = (message: string) =>
+			session.acceptAgentMessagePrompt(message, {
+				queueIfBusy: true,
+				streamingBehavior: "steer",
+				preflightResult: (accepted, queued) => {
+					expect(accepted).toBe(true);
+					dispositions.set(message, queued);
+				},
+			});
+
+		await Promise.all([accept("first concurrent message"), accept("second concurrent message")]);
+
+		expect(dispositions.get("first concurrent message")).toBe(false);
+		expect(dispositions.get("second concurrent message")).toBe(true);
+		expect(session.getSessionActionSnapshot().steering).toContain("second concurrent message");
+		await session.abort();
+	});
+
+	it("enforces the agent message queue cap inside core admission", async () => {
+		createSession();
+		const accept = (index: number) => {
+			const message = createAgentSessionMessage({
+				id: `agentmsg-${index}`,
+				source: "agent_message",
+				message: `message ${index}`,
+				from: { clientId: "test" },
+				target: {
+					activeSessionId: "target",
+					sessionId: session.sessionId,
+					runtimeKind: "subagent",
+				},
+			});
+			return session.queueAgentMessagePrompt(message.content, "steer", message);
+		};
+
+		for (let index = 0; index < 20; index++) {
+			await accept(index);
+		}
+		await expect(accept(20)).rejects.toThrow("Target session has too many pending messages");
+		expect(session.unfinishedActionCount).toBe(20);
+		const snapshot = session.getSessionActionRecoverySnapshot();
+		session.dispose();
+
+		createSession();
+		await expect(session.restoreSessionActions(snapshot)).resolves.toBe(20);
+		expect(session.unfinishedActionCount).toBe(20);
+	});
+
+	it("rejects an agent message when clear wins core admission", async () => {
+		createSession();
+		const internals = session as unknown as {
+			_acquireSessionActionCommitFence(): Promise<{ release(): void }>;
+		};
+		const fence = await internals._acquireSessionActionCommitFence();
+		const message = createAgentSessionMessage({
+			id: "agentmsg-clear-race",
+			source: "agent_message",
+			message: "clear race",
+			from: { clientId: "test" },
+			target: {
+				activeSessionId: "target",
+				sessionId: session.sessionId,
+				runtimeKind: "subagent",
+			},
+		});
+		const accepted = session.acceptAgentMessagePrompt(message.content, {
+			customMessage: message,
+			queueIfBusy: true,
+			streamingBehavior: "steer",
+		});
+		await Promise.resolve();
+
+		session.clearQueuedAgentMessages();
+		fence.release();
+
+		await expect(accepted).rejects.toThrow("Agent message was cleared before admission");
+		expect(session.unfinishedActionCount).toBe(0);
+	});
+
+	it("accepts agent messages during and after direct compaction", async () => {
+		createSession();
+		let releaseCompaction: (result: CompactionResult) => void = () => {};
+		const compactionGate = new Promise<CompactionResult>((resolve) => {
+			releaseCompaction = resolve;
+		});
+		const internals = session as unknown as {
+			_performCompaction: () => Promise<CompactionResult>;
+		};
+		vi.spyOn(internals, "_performCompaction").mockImplementation(() => compactionGate);
+		const compaction = session.compact();
+		await vi.waitFor(() => expect(session.isCompacting).toBe(true));
+		let queued: boolean | undefined;
+
+		await session.acceptAgentMessagePrompt("message during direct compaction", {
+			queueIfBusy: true,
+			streamingBehavior: "steer",
+			preflightResult: (accepted, didQueue) => {
+				expect(accepted).toBe(true);
+				queued = didQueue;
+			},
+		});
+
+		expect(queued).toBe(true);
+		expect(session.getSessionActionSnapshot().steering).toContain("message during direct compaction");
+		releaseCompaction({ summary: "compacted", firstKeptEntryId: "entry-1", tokensBefore: 1 });
+		await compaction;
+		let postCompactionQueued: boolean | undefined;
+		await session.acceptAgentMessagePrompt("message after direct compaction", {
+			queueIfBusy: true,
+			streamingBehavior: "steer",
+			preflightResult: (accepted, didQueue) => {
+				expect(accepted).toBe(true);
+				postCompactionQueued = didQueue;
+			},
+		});
+		expect(postCompactionQueued).toBe(true);
+		const deliveryCount = (text: string) =>
+			session.messages.filter(
+				(message) =>
+					message.role === "user" &&
+					typeof message.content !== "string" &&
+					message.content.some((part) => part.type === "text" && part.text === text),
+			).length;
+		expect(deliveryCount("message during direct compaction")).toBe(0);
+		expect(deliveryCount("message after direct compaction")).toBe(0);
+
+		session.resumeQueuedWork();
+		await vi.waitFor(() => expect(deliveryCount("message during direct compaction")).toBe(1));
+		expect(session.getSessionActionSnapshot().steering).toContain("message after direct compaction");
+	});
+
+	it("delivers an accepted agent message once after scheduler-owned compaction", async () => {
+		createSession();
+		let releaseCompaction: (result: CompactionResult) => void = () => {};
+		const compactionGate = new Promise<CompactionResult>((resolve) => {
+			releaseCompaction = resolve;
+		});
+		const internals = session as unknown as {
+			_performCompaction: () => Promise<CompactionResult>;
+		};
+		vi.spyOn(internals, "_performCompaction").mockImplementation(() => compactionGate);
+		const compaction = session.compact(undefined, { skipAbort: true });
+		await vi.waitFor(() => expect(session.isCompacting).toBe(true));
+		let queued: boolean | undefined;
+
+		await session.acceptAgentMessagePrompt("message during scheduled compaction", {
+			queueIfBusy: true,
+			streamingBehavior: "steer",
+			preflightResult: (accepted, didQueue) => {
+				expect(accepted).toBe(true);
+				queued = didQueue;
+			},
+		});
+
+		expect(queued).toBe(true);
+		expect(session.getSessionActionSnapshot().steering).toContain("message during scheduled compaction");
+		releaseCompaction({ summary: "compacted", firstKeptEntryId: "entry-1", tokensBefore: 1 });
+		await compaction;
+		const deliveryCount = () =>
+			session.messages.filter(
+				(message) =>
+					message.role === "user" &&
+					typeof message.content !== "string" &&
+					message.content.some(
+						(part) => part.type === "text" && part.text === "message during scheduled compaction",
+					),
+			).length;
+
+		await vi.waitFor(() => expect(deliveryCount()).toBe(1));
+		expect(deliveryCount()).toBe(1);
+	});
+
 	it("delivers internal prompts without extension input interception", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let inputCalls = 0;
@@ -488,7 +773,6 @@ describe("AgentSession concurrent prompt guard", () => {
 	});
 
 	it("should allow prompt() after previous completes", async () => {
-		// Create session with a stream that completes immediately
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -522,13 +806,8 @@ describe("AgentSession concurrent prompt guard", () => {
 			resourceLoader: createTestResourceLoader(),
 		});
 
-		// First prompt completes
 		await session.prompt("First message");
-
-		// Should not be streaming anymore
 		expect(session.isStreaming).toBe(false);
-
-		// Second prompt should work
 		await expect(session.prompt("Second message")).resolves.not.toThrow();
 	});
 

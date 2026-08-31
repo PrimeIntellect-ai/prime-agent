@@ -1,7 +1,3 @@
-/**
- * Default themes for TUI tests using chalk
- */
-
 import { Chalk } from "chalk";
 import type { EditorTheme, MarkdownTheme, SelectListTheme } from "../src/index.js";
 

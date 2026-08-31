@@ -1,0 +1,1 @@
+- Stopped treating `NODE_ENV=test` as an implicit telemetry opt-out.

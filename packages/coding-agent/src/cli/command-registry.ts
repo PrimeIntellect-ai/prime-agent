@@ -93,6 +93,32 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		options: ["--force  Skip confirmation and kill unresponsive processes", "--json   Print JSON"],
 	},
 	{
+		path: ["mcp"],
+		usage: "mcp <add|list|get|remove>",
+		summary: "Manage user MCP servers",
+	},
+	{
+		path: ["mcp", "add"],
+		usage: "mcp add <name> --url <url> [--bearer-token-env-var <env>|--oauth] [--force]",
+		summary: "Add an HTTP or stdio MCP server",
+		description: "For stdio, use: mcp add <name> [--cwd <dir>] [--env CHILD=SOURCE] -- <command> [args...]",
+	},
+	{
+		path: ["mcp", "list"],
+		usage: "mcp list",
+		summary: "List user MCP servers",
+	},
+	{
+		path: ["mcp", "get"],
+		usage: "mcp get <name>",
+		summary: "Show a user MCP server",
+	},
+	{
+		path: ["mcp", "remove"],
+		usage: "mcp remove <name>",
+		summary: "Remove a user MCP server",
+	},
+	{
 		path: ["package"],
 		usage: "package <install|remove|list|update>",
 		summary: "Manage capability packages",
@@ -186,7 +212,7 @@ const TOP_LEVEL_OPTION_GROUPS: ReadonlyArray<{ heading: string; options: readonl
 		heading: "Session options",
 		options: [
 			["-c, --continue", "Continue the previous session"],
-			["-r, --resume <path|id>", "Resume a saved session"],
+			["-r, --resume [path|id]", "Open the agents view, or resume a saved session"],
 			["--fork <path|id>", "Fork a saved session into a new session"],
 			["--session-dir <dir>", "Use a custom session directory"],
 			["--no-session", "Do not save the session"],
@@ -286,7 +312,7 @@ export function formatTopLevelHelp(): string {
 	const commands = COMMAND_SPECS.filter((spec) => spec.path.length === 1);
 	const commandWidth = Math.max(...commands.map((spec) => spec.path[0]!.length));
 	const options = TOP_LEVEL_OPTION_GROUPS.map((group) => formatOptionGroup(group.heading, group.options)).join("\n\n");
-	return `${APP_NAME} - AI coding assistant with an IPython tool
+	return `${APP_NAME} - AI coding assistant with a Python REPL tool
 
 Usage:
   ${APP_NAME} [options] [@files...] [message...]

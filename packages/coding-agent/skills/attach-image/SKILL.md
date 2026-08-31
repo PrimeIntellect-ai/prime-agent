@@ -26,7 +26,7 @@ That path does not put the image in the model's context; it only lets you comput
 
 ## Usage
 
-Call the prepared `attach_image` import directly in the IPython kernel:
+Call the prepared `attach_image` import directly in the Python kernel:
 
 ```python
 print(await attach_image("diagram.png"))

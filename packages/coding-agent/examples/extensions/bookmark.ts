@@ -15,7 +15,6 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const label = args.trim() || `bookmark-${Date.now()}`;
 
-			// Find the last assistant message entry
 			const entries = ctx.sessionManager.getEntries();
 			for (let i = entries.length - 1; i >= 0; i--) {
 				const entry = entries[i];
@@ -30,7 +29,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// Remove bookmark
 	pi.registerCommand("unbookmark", {
 		description: "Remove bookmark from last labeled entry",
 		handler: async (_args, ctx) => {

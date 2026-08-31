@@ -21,8 +21,59 @@ import {
 	isDaemonMutatingCommand,
 	salvageDaemonCommandId,
 } from "../src/modes/daemon/daemon-protocol.js";
+import {
+	type DaemonWorkerDescriptor,
+	durableDaemonWorkerDescriptor,
+} from "../src/modes/daemon/daemon-worker-protocol.js";
 
 describe("daemon protocol helpers", () => {
+	it("serializes worker descriptors as identity-only version 2 state", () => {
+		const descriptor = {
+			version: 1,
+			workerId: "worker",
+			pid: 123,
+			processStartId: "process-start",
+			socketPath: "/tmp/worker.sock",
+			recoveryJournalPath: "/state/recovery.jsonl",
+			orphanProcessJournalPath: "/state/orphans.jsonl",
+			supervisorSocketPath: "/tmp/supervisor.sock",
+			authenticationToken: "local-worker-token",
+			rootActiveSessionId: "active",
+			sessionFile: "/sessions/root.jsonl",
+			createdAt: "2026-01-01T00:00:00.000Z",
+			updatedAt: "2026-01-01T00:00:00.000Z",
+			lifecycle: "ready",
+			createCommand: {
+				type: "create",
+				sessionPath: "/sessions/root.jsonl",
+				config: {
+					sessionDir: "/legacy/sessions",
+					telemetryDisabled: true,
+					apiKey: "secret-api-key",
+					extensionFlagValues: { providerSecretKey: "secret-extension" },
+				},
+				env: { PROVIDER_TOKEN: "secret-client-env" },
+				launchEnv: { PROVIDER_TOKEN: "secret-launch-env" },
+				runtimeMetadata: { parentActiveSessionId: "secret-runtime" },
+			},
+			launchEnv: { PROVIDER_TOKEN: "secret-top-level-env" },
+			consecutiveFailures: 0,
+			lastError: "secret-error",
+		} as unknown as DaemonWorkerDescriptor;
+
+		const durable = durableDaemonWorkerDescriptor(descriptor);
+
+		expect(durable.version).toBe(2);
+		expect(durable.createCommand).toEqual({ type: "create", sessionPath: "/sessions/root.jsonl" });
+		expect(durable).toMatchObject({
+			workerId: "worker",
+			sessionFile: "/sessions/root.jsonl",
+			sessionDir: "/legacy/sessions",
+			telemetryDisabled: true,
+		});
+		expect(JSON.stringify(durable)).not.toContain("secret-");
+	});
+
 	it("keeps the advertised schema identity synchronized with wire type shapes", () => {
 		const source = readFileSync(resolve(__dirname, "../src/modes/daemon/daemon-protocol.ts"), "utf8");
 		const commandSource = source.slice(
@@ -76,6 +127,15 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("delete_rlm_subagent");
 	});
 
+	it("capability- and schema-gates ACP MCP server replacement", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.replace_acp_mcp_servers).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 22,
+			capability: "acp_mcp_servers",
+		});
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("acp_mcp_servers");
+	});
+
 	it("capability-gates the optional model catalog surface", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.get_model_catalog).toEqual({
 			minProtocol: 7,
@@ -121,6 +181,59 @@ describe("daemon protocol helpers", () => {
 		).toEqual([{ minProtocol: 7, minSchemaRevision: 14 }, { minProtocol: 7 }]);
 	});
 
+	it("capability-gates authoritative rosters and transient owned-session recovery context", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.get_rlm_children).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 17,
+			capability: "authoritative_child_roster",
+		});
+		expect(
+			getDaemonCommandCompatibilities({
+				type: "attach",
+				activeSessionId: "active-1",
+				recoveryConfig: { cwd: "/tmp/fresh-owner" },
+			}),
+		).toEqual([
+			{ minProtocol: 7, minSchemaRevision: 17, capability: "owned_session_recovery_context" },
+			{ minProtocol: 7 },
+		]);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toEqual(
+			expect.arrayContaining([
+				"authoritative_child_roster",
+				"owned_session_recovery_context",
+				"rlm_quiescence_barrier",
+			]),
+		);
+	});
+
+	it("gates the opt-in RLM quiescence wire field", () => {
+		expect(
+			getDaemonCommandCompatibilities({
+				type: "wait_for_headless_completion",
+				activeSessionId: "active-1",
+				waitForRlmQuiescence: true,
+			}),
+		).toEqual([{ minProtocol: 7, minSchemaRevision: 18, capability: "rlm_quiescence_barrier" }, { minProtocol: 7 }]);
+		expect(
+			getDaemonCommandCompatibilities({
+				type: "wait_for_headless_completion",
+				activeSessionId: "active-1",
+			}),
+		).toEqual([{ minProtocol: 7 }]);
+	});
+
+	it("capability- and schema-gates session input pause leases", () => {
+		expect(DAEMON_COMMAND_COMPATIBILITY.acquire_session_input_pause).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 19,
+			capability: "session_input_pause",
+		});
+		expect(DAEMON_COMMAND_COMPATIBILITY.release_session_input_pause).toEqual(
+			DAEMON_COMMAND_COMPATIBILITY.acquire_session_input_pause,
+		);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("session_input_pause");
+	});
+
 	it("version- and capability-gates prompt admission cancellation", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission).toEqual({
 			minProtocol: 7,
@@ -128,6 +241,16 @@ describe("daemon protocol helpers", () => {
 			capability: "prompt_admission_cancellation",
 		});
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("prompt_admission_cancellation");
+	});
+
+	it("capability-gates cancellation after prompt ownership", () => {
+		const legacy = { type: "cancel_prompt_admission", activeSessionId: "active-1", admissionId: "a-1" } as const;
+		expect(getDaemonCommandCompatibilities(legacy)).toEqual([DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission]);
+		expect(getDaemonCommandCompatibilities({ ...legacy, cancelOwned: true })).toEqual([
+			{ minProtocol: 7, minSchemaRevision: 20, capability: "owned_prompt_cancellation" },
+			DAEMON_COMMAND_COMPATIBILITY.cancel_prompt_admission,
+		]);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("owned_prompt_cancellation");
 	});
 
 	it("gates honest worker-state reporting at its introducing schema revision", () => {

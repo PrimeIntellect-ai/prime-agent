@@ -4,7 +4,7 @@ name: notion description: Search Notion and read/create/update pages and databas
 
 # Notion
 
-Talk to Notion through its official hosted MCP server from the IPython kernel.
+Talk to Notion through its official hosted MCP server from the Python kernel.
 
 ## Setup
 

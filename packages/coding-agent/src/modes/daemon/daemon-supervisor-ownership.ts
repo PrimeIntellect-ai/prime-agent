@@ -9,10 +9,11 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { getProcessStartId } from "../../core/session-lease.js";
-import { defaultDaemonSocketDir } from "./daemon-socket.js";
+import { defaultDaemonSocketDir, normalizeSocketPath } from "./daemon-socket.js";
 
 const DAEMON_SUPERVISOR_REGISTRY_DIR_ENV = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
 
@@ -103,8 +104,16 @@ class DaemonSupervisorAlreadyRunningError extends Error {
 class DaemonSupervisorOwnershipLostError extends Error {
 	readonly code = "supervisor_generation_stale" as const;
 
-	constructor(generation: string) {
-		super(`Daemon supervisor generation ${generation} no longer owns its registry entry`);
+	constructor(generation: string, details: { socketPath?: string; registryDir?: string } = {}) {
+		const context = [
+			details.socketPath ? `socket: ${details.socketPath}` : undefined,
+			details.registryDir ? `registry: ${details.registryDir}` : undefined,
+		].filter((part) => part !== undefined);
+		super(
+			`Daemon supervisor generation ${generation} no longer owns its registry entry ` +
+				`(record on disk is missing or was replaced)${context.length > 0 ? `; ${context.join("; ")}` : ""}; ` +
+				"restart the daemon to recover — sessions are preserved",
+		);
 		this.name = "DaemonSupervisorOwnershipLostError";
 	}
 }
@@ -115,6 +124,62 @@ class DaemonShutdownAdmissionError extends Error {
 	constructor(message = "Daemon shutdown is in progress") {
 		super(message);
 		this.name = "DaemonShutdownAdmissionError";
+	}
+}
+
+/**
+ * Owns a lease-renew loop safely: the unref()'d interval, single-flight
+ * refresh dedup shared by timer-fired and direct calls, and lost-state fencing.
+ */
+class RenewableRegistryRecord {
+	private stopped = false;
+	private lost = false;
+	private refreshPromise?: Promise<void>;
+	private readonly refreshTimer: ReturnType<typeof setInterval>;
+
+	constructor(
+		private readonly registryDir: string,
+		refreshMs: number,
+		private readonly renewUnderGuard: () => void,
+		private readonly createLostError: () => Error,
+	) {
+		this.refreshTimer = setInterval(() => {
+			void this.assertOrRenew().catch(() => undefined);
+		}, refreshMs);
+		this.refreshTimer.unref();
+	}
+
+	async assertOrRenew(): Promise<void> {
+		if (this.stopped || this.lost) {
+			throw this.createLostError();
+		}
+		this.refreshPromise ??= this.performRenew().finally(() => {
+			this.refreshPromise = undefined;
+		});
+		await this.refreshPromise;
+	}
+
+	private async performRenew(): Promise<void> {
+		try {
+			await withDaemonSupervisorRegistryGuard(this.registryDir, () => {
+				// stop() may have completed while this call waited on the guard;
+				// a stopped record must never be rewritten to disk.
+				if (this.stopped || this.lost) {
+					throw this.createLostError();
+				}
+				this.renewUnderGuard();
+			});
+		} catch (error) {
+			this.lost = true;
+			clearInterval(this.refreshTimer);
+			throw error;
+		}
+	}
+
+	async stop(): Promise<void> {
+		this.stopped = true;
+		clearInterval(this.refreshTimer);
+		await this.refreshPromise?.catch(() => undefined);
 	}
 }
 
@@ -129,12 +194,19 @@ class DaemonSupervisorOwnership {
 
 	async assertCurrent(): Promise<void> {
 		if (this.released) {
-			throw new DaemonSupervisorOwnershipLostError(this.record.generation);
+			throw this.ownershipLostError();
 		}
 		const current = readOwnerRecord(this.ownerDirectory);
 		if (!current || !sameOwnerRecord(current, this.record)) {
-			throw new DaemonSupervisorOwnershipLostError(this.record.generation);
+			throw this.ownershipLostError();
 		}
+	}
+
+	private ownershipLostError(): DaemonSupervisorOwnershipLostError {
+		return new DaemonSupervisorOwnershipLostError(this.record.generation, {
+			socketPath: this.record.socketPath,
+			registryDir: this.registryDir,
+		});
 	}
 
 	async updatePhase(phase: DaemonSupervisorOwnerPhase): Promise<void> {
@@ -181,52 +253,44 @@ class DaemonSupervisorOwnership {
 
 class DaemonShutdownAdmission {
 	private released = false;
-	private lost = false;
-	private refreshPromise?: Promise<void>;
-	private readonly refreshTimer: ReturnType<typeof setInterval>;
+	private readonly renewal: RenewableRegistryRecord;
 
 	constructor(
 		private readonly record: DaemonShutdownAdmissionRecord,
 		private readonly registryDir: string,
 	) {
-		this.refreshTimer = setInterval(() => {
-			this.refreshPromise ??= this.assertOrRenew()
-				.catch(() => undefined)
-				.finally(() => {
-					this.refreshPromise = undefined;
-				});
-		}, SHUTDOWN_ADMISSION_REFRESH_MS);
-		this.refreshTimer.unref();
+		this.renewal = new RenewableRegistryRecord(
+			registryDir,
+			SHUTDOWN_ADMISSION_REFRESH_MS,
+			() => this.renewUnderGuard(),
+			() => new DaemonShutdownAdmissionError("Daemon shutdown admission was lost"),
+		);
 	}
 
 	async assertOrRenew(): Promise<void> {
-		if (this.released || this.lost) {
+		if (this.released) {
 			throw new DaemonShutdownAdmissionError("Daemon shutdown admission was lost");
 		}
-		try {
-			await withDaemonSupervisorRegistryGuard(this.registryDir, () => {
-				const path = shutdownAdmissionPath(this.registryDir);
-				const current = readShutdownAdmission(path);
-				if (
-					!current ||
-					current.token !== this.record.token ||
-					current.pid !== this.record.pid ||
-					current.processStartId !== this.record.processStartId ||
-					Date.parse(current.expiresAt) <= Date.now() ||
-					!matchesExactProcessIdentity(this.record)
-				) {
-					throw new DaemonShutdownAdmissionError("Daemon shutdown admission was lost");
-				}
-				const now = Date.now();
-				this.record.updatedAt = new Date(now).toISOString();
-				this.record.expiresAt = new Date(now + SHUTDOWN_ADMISSION_LEASE_MS).toISOString();
-				writeJsonAtomically(path, this.record);
-			});
-		} catch (error) {
-			this.lost = true;
-			clearInterval(this.refreshTimer);
-			throw error;
+		await this.renewal.assertOrRenew();
+	}
+
+	private renewUnderGuard(): void {
+		const path = shutdownAdmissionPath(this.registryDir);
+		const current = readShutdownAdmission(path);
+		if (
+			!current ||
+			current.token !== this.record.token ||
+			current.pid !== this.record.pid ||
+			current.processStartId !== this.record.processStartId ||
+			Date.parse(current.expiresAt) <= Date.now() ||
+			!matchesExactProcessIdentity(this.record)
+		) {
+			throw new DaemonShutdownAdmissionError("Daemon shutdown admission was lost");
 		}
+		const now = Date.now();
+		this.record.updatedAt = new Date(now).toISOString();
+		this.record.expiresAt = new Date(now + SHUTDOWN_ADMISSION_LEASE_MS).toISOString();
+		writeJsonAtomically(path, this.record);
 	}
 
 	async release(): Promise<void> {
@@ -234,8 +298,7 @@ class DaemonShutdownAdmission {
 			return;
 		}
 		this.released = true;
-		clearInterval(this.refreshTimer);
-		await this.refreshPromise;
+		await this.renewal.stop();
 		await withDaemonSupervisorRegistryGuard(this.registryDir, () => {
 			const path = shutdownAdmissionPath(this.registryDir);
 			const current = readShutdownAdmission(path);
@@ -246,8 +309,49 @@ class DaemonShutdownAdmission {
 	}
 }
 
+/**
+ * The registry is durable authority state and must be global per user so
+ * ownerConflicts sees every daemon on the box; it deliberately lives outside
+ * $TMPDIR (whose files macOS dirhelper deletes after 3 days) and outside the
+ * per-invocation agent dir.
+ */
 function defaultDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string {
-	return environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV] ?? resolve(defaultDaemonSocketDir(), "supervisor-owners");
+	return environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV] ?? join(homedir(), ".prime", "supervisor-owners");
+}
+
+/** Read-only legacy registry location, disabled when the registry is overridden. */
+/**
+ * Pre-move registry location under $TMPDIR, consulted READ-ONLY while daemons
+ * from before the ~/.prime move may still be running; gated off whenever the
+ * registry is overridden. Remove after one release.
+ */
+function legacyDaemonSupervisorRegistryDir(environment: NodeJS.ProcessEnv = process.env): string | undefined {
+	return environment[DAEMON_SUPERVISOR_REGISTRY_DIR_ENV]
+		? undefined
+		: resolve(defaultDaemonSocketDir(), "supervisor-owners");
+}
+
+/**
+ * Non-mutating legacy scan: never reclaims abandoned directories (old-build
+ * daemons own that location's lifecycle) and runs without the legacy guard —
+ * best-effort is acceptable because records are written rename-atomically.
+ */
+function readLegacyOwnersForSocket(
+	legacyRegistryDir: string,
+	normalizedSocketPath: string,
+): DaemonSupervisorOwnerRecord[] {
+	let entries: string[];
+	try {
+		entries = readdirSync(legacyRegistryDir);
+	} catch {
+		return [];
+	}
+	return entries
+		.filter((name) => name.endsWith(".owner"))
+		.flatMap((name) => {
+			const owner = readOwnerRecord(resolve(legacyRegistryDir, name));
+			return owner && owner.socketPath === normalizedSocketPath ? [owner] : [];
+		});
 }
 
 async function withDaemonSupervisorRegistryGuard<T>(registryDir: string, action: () => T | Promise<T>): Promise<T> {
@@ -370,9 +474,13 @@ export async function assertDaemonSupervisorOwnerCurrent(
 		socketPath: string;
 	},
 	validatedFingerprint?: string,
+	registryDir?: string,
+	legacyRegistryDir: string | undefined = registryDir === undefined ? legacyDaemonSupervisorRegistryDir() : undefined,
 ): Promise<string> {
-	const registryDir = defaultDaemonSupervisorRegistryDir();
-	const current = readOwnerRecord(ownerDirectoryPath(registryDir, owner.generation));
+	registryDir ??= defaultDaemonSupervisorRegistryDir();
+	const current =
+		readOwnerRecord(ownerDirectoryPath(registryDir, owner.generation)) ??
+		(legacyRegistryDir ? readOwnerRecord(ownerDirectoryPath(legacyRegistryDir, owner.generation)) : undefined);
 	if (
 		!current ||
 		current.pid !== owner.pid ||
@@ -380,11 +488,11 @@ export async function assertDaemonSupervisorOwnerCurrent(
 		current.socketPath !== normalizeSocketPath(owner.socketPath) ||
 		!isProcessAlive(current.pid)
 	) {
-		throw new DaemonSupervisorOwnershipLostError(owner.generation);
+		throw new DaemonSupervisorOwnershipLostError(owner.generation, { socketPath: owner.socketPath, registryDir });
 	}
 	const fingerprint = ownerRecordFingerprint(current);
 	if (fingerprint !== validatedFingerprint && !isProcessIdentityAlive(current)) {
-		throw new DaemonSupervisorOwnershipLostError(owner.generation);
+		throw new DaemonSupervisorOwnershipLostError(owner.generation, { socketPath: owner.socketPath, registryDir });
 	}
 	return fingerprint;
 }
@@ -425,8 +533,10 @@ export async function isDaemonShutdownAdmissionActive(): Promise<boolean> {
 export async function persistDaemonStartupFenceFromOwner(
 	socketPath: string,
 	hello: DaemonSupervisorHelloIdentity,
-	registryDir: string = defaultDaemonSupervisorRegistryDir(),
+	registryDir?: string,
+	legacyRegistryDir: string | undefined = registryDir === undefined ? legacyDaemonSupervisorRegistryDir() : undefined,
 ): Promise<void> {
+	registryDir ??= defaultDaemonSupervisorRegistryDir();
 	mkdirSync(registryDir, { recursive: true, mode: 0o700 });
 	const fenceDirectory = resolve(registryDir, "startup-fences");
 	mkdirSync(fenceDirectory, { recursive: true, mode: 0o700 });
@@ -437,7 +547,14 @@ export async function persistDaemonStartupFenceFromOwner(
 			const owner = readOwnerRecordForScope(directory, (scope) => scope.socketPath === normalizedSocketPath);
 			return owner ? [owner] : [];
 		});
-		const matchingOwners = owners.filter((owner) => owner.socketPath === normalizedSocketPath);
+		let matchingOwners = owners.filter((owner) => owner.socketPath === normalizedSocketPath);
+		if (matchingOwners.length === 0 && legacyRegistryDir) {
+			// Stale legacy leftovers are expected; keep only records matching the
+			// identity the caller already holds.
+			matchingOwners = readLegacyOwnersForSocket(legacyRegistryDir, normalizedSocketPath).filter(
+				(owner) => owner.token === hello.supervisorOwnerToken && owner.pid === hello.supervisorPid,
+			);
+		}
 		if (matchingOwners.length === 0) {
 			throw new Error(`Daemon supervisor owner does not match ${socketPath}`);
 		}
@@ -543,13 +660,6 @@ function isProcessAlive(pid: number): boolean {
 		return (error as NodeJS.ErrnoException).code !== "ESRCH";
 	}
 	return true;
-}
-
-function normalizeSocketPath(socketPath: string): string {
-	if (process.platform === "win32") {
-		return socketPath.toLowerCase();
-	}
-	return resolve(socketPath);
 }
 
 function canonicalizeFilesystemPath(path: string): string {

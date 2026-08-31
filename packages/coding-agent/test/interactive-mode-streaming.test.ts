@@ -6,6 +6,7 @@ import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/
 import { AgentActivityTracker } from "../src/modes/interactive/agent-activity.js";
 import type { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
 import type { FileChangeSummary } from "../src/modes/interactive/components/edit-summary.js";
+import { createMermaidMarkdownTransform } from "../src/modes/interactive/components/mermaid.js";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -51,7 +52,6 @@ type HandleEventThis = {
 	checkShutdownRequested(): Promise<void>;
 	applyOptimisticContextUsage(): void;
 	refreshConnectionContextUsage(): Promise<void>;
-	setSessionHasMessages(hasMessages: boolean): void;
 	clearShortcutGuide(): void;
 	addMessageToChat(): void;
 };
@@ -102,7 +102,6 @@ function createFakeInteractiveModeThis(): HandleEventThis {
 		checkShutdownRequested: vi.fn(async () => {}),
 		applyOptimisticContextUsage: vi.fn(),
 		refreshConnectionContextUsage: vi.fn(async () => {}),
-		setSessionHasMessages: vi.fn(),
 		clearShortcutGuide: vi.fn(),
 		addMessageToChat: vi.fn(),
 	};
@@ -208,6 +207,35 @@ describe("InteractiveMode streaming events", () => {
 		expect(renderChat(fakeThis.chatContainer)).toContain("partial response");
 		expect(fakeThis.streamingComponent).toBeUndefined();
 		expect(fakeThis.streamingMessage).toBeUndefined();
+	});
+
+	test("defers mermaid rendering to message_end in final mode", async () => {
+		const fakeThis = createFakeInteractiveModeThis() as HandleEventThis & {
+			mermaidMarkdownTransform?: ReturnType<typeof createMermaidMarkdownTransform>;
+		};
+		fakeThis.mermaidMarkdownTransform = createMermaidMarkdownTransform({ getMode: () => "final" });
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+		const mermaidText = "```mermaid\nflowchart LR\n  A[Start] --> B[Done]\n```";
+
+		await handleEvent.call(fakeThis, {
+			type: "message_update",
+			message: createAssistantMessage(mermaidText),
+			assistantMessageEvent: {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: mermaidText,
+				partial: createAssistantMessage(mermaidText),
+			},
+		});
+
+		expect(renderChat(fakeThis.chatContainer)).not.toContain("───▶");
+
+		await handleEvent.call(fakeThis, {
+			type: "message_end",
+			message: createAssistantMessage(mermaidText),
+		});
+
+		expect(renderChat(fakeThis.chatContainer)).toContain("───▶");
 	});
 
 	test("renders one agent-run edit total only when files changed", async () => {

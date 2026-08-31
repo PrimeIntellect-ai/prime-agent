@@ -463,6 +463,7 @@ describe("AgentSession prompt characterization", () => {
 		const responseGate = createDeferred();
 		const harness = await createHarness({
 			rlmDepth: 1,
+			rlmMaxDepth: 1,
 			extensionFactories: [
 				(pi) => {
 					pi.on("before_agent_start", async (event) => ({

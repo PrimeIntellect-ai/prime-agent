@@ -581,19 +581,16 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		});
 		const recoverWorker = vi.fn(async () => {});
 		const persistWorker = vi.fn();
-		const syncAgentPeers = vi.fn(async () => {});
 		const assertRecoveryAllowed = vi.fn(async () => {});
 		const internals = supervisor as unknown as {
 			workers: Map<string, WorkerHarness>;
 			recoverWorker: typeof recoverWorker;
 			persistWorker: typeof persistWorker;
-			syncAgentPeers: typeof syncAgentPeers;
 			assertRecoveryAllowed: typeof assertRecoveryAllowed;
 			handleWorkerFrame(worker: WorkerHarness, frame: PrivateFrame<DaemonWorkerFrameHeader>): void;
 		};
 		internals.recoverWorker = recoverWorker;
 		internals.persistWorker = persistWorker;
-		internals.syncAgentPeers = syncAgentPeers;
 		internals.assertRecoveryAllowed = assertRecoveryAllowed;
 		const frames = snapshotFrames([{ role: "user", content: "stable", timestamp: 1 }]);
 

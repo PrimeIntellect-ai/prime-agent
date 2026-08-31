@@ -206,7 +206,6 @@ describe("SessionManager.flushNow", () => {
 	it("is a no-op for in-memory (non-persisted) sessions", () => {
 		const mgr = SessionManager.inMemory("/tmp");
 		mgr.appendCustomEntry("thread_goal_state", { active: true });
-		// Should not throw
 		mgr.flushNow();
 		expect(mgr.getSessionFile()).toBeUndefined();
 	});
@@ -250,7 +249,6 @@ describe("SessionManager.flushNow", () => {
 			timestamp: Date.now(),
 		});
 
-		// File should contain exactly: header, custom(goal), user, assistant
 		const content = readFileSync(file, "utf8");
 		const lines = content.trim().split("\n");
 		expect(lines.length).toBe(4);
@@ -270,8 +268,6 @@ describe("SessionManager.flushNow", () => {
 		expect(assistantMsg.type).toBe("message");
 		expect(assistantMsg.message.role).toBe("assistant");
 
-		// Verify valid parent chain: custom(null) -> user(custom) -> assistant(user)
-		// (session header is not part of the entry parent chain)
 		expect(custom.parentId).toBeNull();
 		expect(userMsg.parentId).toBe(custom.id);
 		expect(assistantMsg.parentId).toBe(userMsg.id);
@@ -403,7 +399,6 @@ describe("SessionManager.appendCustomMessageEntryWithRollback", () => {
 		const file = mgr.getSessionFile()!;
 		const before = readFileSync(file, "utf8");
 
-		// Simulate a partial append: the fs write tears the file, then throws.
 		const internals = mgr as unknown as { _persist(entry: unknown): void };
 		const originalPersist = internals._persist.bind(mgr);
 		internals._persist = () => {

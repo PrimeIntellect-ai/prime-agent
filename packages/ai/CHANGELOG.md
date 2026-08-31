@@ -1,6 +1,24 @@
 # Changelog
 
-## [Unreleased]
+## [0.8.1] - 2026-08-26
+
+- Refreshed the generated model catalog from live provider catalogs: added GLM 5.3 (OpenRouter, Prime Inference), DeepSeek V4 Flash Vision Exp, and Inkling free routes; followed the Vercel AI Gateway `xai/` to `spacexai/` grok rename; picked up repricing for gpt-5.6-sol, Gemini 3.6 Flash, and others.
+- Fixed OpenAI-compatible Chat Completions replay dropping opaque `reasoning_details` between turns.
+- Refreshed the generated model catalog from live provider catalogs: models.dev rescoped `cloudflare-ai-gateway` to proxied third-party models (the `workers-ai/@cf/...` mirrors and legacy OpenAI ids are gone; Cloudflare-hosted models remain under `cloudflare-workers-ai`); added devstral-2512 and MiniMax M2.7/M3 free routes; picked up repricing for gpt-5.6/gpt-5.6-sol (5/30 -> 4/20), kimi-k2.6, glm-5.1/5.2, and deepseek-v4-pro.
+
+## [0.8.0] - 2026-08-21
+
+- Added endpoint binding to MCP OAuth credentials: tokens record the URL they were issued for, and refreshes carry the original binding forward without ever inferring one for unbound legacy credentials.
+- Added Fast mode (service_tier `priority`) support for OpenAI API-key models GPT-5.4/GPT-5.5/GPT-5.6, and corrected the GPT-5.6 fast-pricing multiplier from 2.5x to 2x per OpenAI's pricing table ([#1595](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1595)).
+- Fixed path-scoped protected-resource discovery and resource-bound refresh for MCP OAuth servers.
+
+## [0.7.4] - 2026-08-19
+
+## [0.7.3] - 2026-08-17
+
+- Added provider-derived reasoning levels for OpenRouter and Prime Inference models, including sparse, mandatory, toggle-only, and explicit-off capabilities.
+- Added Qwen 3.8 Max to the featured Prime Inference catalog ([#1247](https://github.com/PrimeIntellect-ai/prime-agent/pull/1247) by [@eliebak](https://github.com/eliebak)).
+- Refreshed generated provider catalogs, removed retired routes, and aligned provider defaults and cross-provider handoff fixtures with models currently served.
 
 ## [0.7.2] - 2026-08-11
 

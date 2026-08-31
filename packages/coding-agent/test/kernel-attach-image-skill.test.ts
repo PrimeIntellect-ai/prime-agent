@@ -6,7 +6,6 @@ import { getBundledSkillsDir } from "../src/config.js";
 import type { PythonSkillRuntimeInfo } from "../src/core/skills.js";
 import { IpythonKernelProvisioner, imageBlocksFromAttachments } from "../src/core/tools/ipython.js";
 
-// 1x1 transparent PNG.
 const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
 function bundledAttachImageSkill(): PythonSkillRuntimeInfo {
@@ -263,10 +262,9 @@ except ValueError as error:
 	it("fails the cell loudly when an emitted attachment exceeds the size cap", async () => {
 		provisioner = new IpythonKernelProvisioner(tempDir, { pythonSkills: [] });
 		const manager = await provisioner.ensure();
-		// Emit an oversized attachment directly, bypassing the skill's own cap.
 		const result = await manager.execute(`
-from IPython.display import display
-display({"application/vnd.prime-agent.attachment+json": {"mime_type": "image/png", "data": "A" * 10_000_001}}, raw=True)
+from rlm import emit
+emit({"application/vnd.prime-agent.attachment+json": {"mime_type": "image/png", "data": "A" * 10_000_001}})
 print("done")
 `);
 

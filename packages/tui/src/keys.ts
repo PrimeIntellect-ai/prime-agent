@@ -18,10 +18,6 @@
  * - isKittyProtocolActive() - Query global Kitty protocol state
  */
 
-// =============================================================================
-// Global Kitty Protocol State
-// =============================================================================
-
 let _kittyProtocolActive = false;
 
 /**
@@ -38,10 +34,6 @@ export function setKittyProtocolActive(active: boolean): void {
 export function isKittyProtocolActive(): boolean {
 	return _kittyProtocolActive;
 }
-
-// =============================================================================
-// Type-Safe Key Identifiers
-// =============================================================================
 
 type Letter =
 	| "a"
@@ -161,7 +153,6 @@ export type KeyId = BaseKey | ModifiedKeyId<BaseKey>;
  * - Key.ctrlShift("p"), Key.ctrlAlt("x"), Key.ctrlSuper("k") for combined modifiers
  */
 export const Key = {
-	// Special keys
 	escape: "escape" as const,
 	esc: "esc" as const,
 	enter: "enter" as const,
@@ -193,7 +184,6 @@ export const Key = {
 	f11: "f11" as const,
 	f12: "f12" as const,
 
-	// Symbol keys
 	backtick: "`" as const,
 	hyphen: "-" as const,
 	equals: "=" as const,
@@ -226,13 +216,11 @@ export const Key = {
 	greaterthan: ">" as const,
 	question: "?" as const,
 
-	// Single modifiers
 	ctrl: <K extends BaseKey>(key: K): `ctrl+${K}` => `ctrl+${key}`,
 	shift: <K extends BaseKey>(key: K): `shift+${K}` => `shift+${key}`,
 	alt: <K extends BaseKey>(key: K): `alt+${K}` => `alt+${key}`,
 	super: <K extends BaseKey>(key: K): `super+${K}` => `super+${key}`,
 
-	// Combined modifiers
 	ctrlShift: <K extends BaseKey>(key: K): `ctrl+shift+${K}` => `ctrl+shift+${key}`,
 	shiftCtrl: <K extends BaseKey>(key: K): `shift+ctrl+${K}` => `shift+ctrl+${key}`,
 	ctrlAlt: <K extends BaseKey>(key: K): `ctrl+alt+${K}` => `ctrl+alt+${key}`,
@@ -246,14 +234,9 @@ export const Key = {
 	altSuper: <K extends BaseKey>(key: K): `alt+super+${K}` => `alt+super+${key}`,
 	superAlt: <K extends BaseKey>(key: K): `super+alt+${K}` => `super+alt+${key}`,
 
-	// Triple modifiers
 	ctrlShiftAlt: <K extends BaseKey>(key: K): `ctrl+shift+alt+${K}` => `ctrl+shift+alt+${key}`,
 	ctrlShiftSuper: <K extends BaseKey>(key: K): `ctrl+shift+super+${K}` => `ctrl+shift+super+${key}`,
 } as const;
-
-// =============================================================================
-// Constants
-// =============================================================================
 
 const SYMBOL_KEYS = new Set([
 	"`",
@@ -494,10 +477,6 @@ const matchesLegacyModifierSequence = (data: string, key: LegacyModifierKey, mod
 	return false;
 };
 
-// =============================================================================
-// Kitty Protocol Parsing
-// =============================================================================
-
 /**
  * Event types from Kitty keyboard protocol (flag 2)
  * 1 = key press, 2 = key repeat, 3 = key release
@@ -517,7 +496,6 @@ interface ParsedModifyOtherKeysSequence {
 	modifier: number;
 }
 
-// Store the last parsed event type for isKeyRelease() to query
 let _lastEventType: KeyEventType = "press";
 
 /**
@@ -533,8 +511,6 @@ export function isKeyRelease(data: string): boolean {
 		return false;
 	}
 
-	// Quick check: release events with flag 2 contain ":3"
-	// Format: \x1b[<codepoint>;<modifier>:3u
 	if (
 		data.includes(":3u") ||
 		data.includes(":3~") ||
@@ -606,7 +582,6 @@ function parseKittySequence(data: string): ParsedKittySequence | null {
 		return { codepoint, shiftedKey, baseLayoutKey, modifier: modValue - 1, eventType };
 	}
 
-	// Arrow keys with modifier: \x1b[1;<mod>A/B/C/D or \x1b[1;<mod>:<event>A/B/C/D
 	const arrowMatch = data.match(/^\x1b\[1;(\d+)(?::(\d+))?([ABCD])$/);
 	if (arrowMatch) {
 		const modValue = parseInt(arrowMatch[1]!, 10);
@@ -656,7 +631,6 @@ function matchesKittySequence(data: string, expectedCodepoint: number, expectedM
 	const actualMod = parsed.modifier & ~LOCK_MASK;
 	const expectedMod = expectedModifier & ~LOCK_MASK;
 
-	// Check if modifiers match
 	if (actualMod !== expectedMod) return false;
 
 	const normalizedCodepoint = normalizeShiftedLetterIdentityCodepoint(
@@ -668,7 +642,6 @@ function matchesKittySequence(data: string, expectedCodepoint: number, expectedM
 		expectedModifier,
 	);
 
-	// Primary match: codepoint matches directly after normalizing functional keys
 	if (normalizedCodepoint === normalizedExpectedCodepoint) return true;
 
 	// Alternate match: use base layout key for non-Latin keyboard layouts.
@@ -733,10 +706,6 @@ function matchesRawBackspace(data: string, expectedModifier: number): boolean {
 	return isWindowsTerminalSession() ? expectedModifier === MODIFIERS.ctrl : expectedModifier === 0;
 }
 
-// =============================================================================
-// Generic Key Matching
-// =============================================================================
-
 /**
  * Get the control character for a key.
  * Uses the universal formula: code & 0x1f (mask to lower 5 bits)
@@ -752,7 +721,6 @@ function rawCtrlChar(key: string): string | null {
 	if ((code >= 97 && code <= 122) || char === "[" || char === "\\" || char === "]" || char === "_") {
 		return String.fromCharCode(code & 0x1f);
 	}
-	// Handle - as _ (same physical key on US keyboards)
 	if (char === "-") {
 		return String.fromCharCode(31); // Same as Ctrl+_
 	}
@@ -1165,7 +1133,6 @@ export function matchesKey(data: string, keyId: KeyId): boolean {
 		}
 	}
 
-	// Handle single letter/digit keys and symbols
 	if (key.length === 1 && ((key >= "a" && key <= "z") || isDigitKey(key) || SYMBOL_KEYS.has(key))) {
 		const codepoint = key.charCodeAt(0);
 		const rawCtrl = rawCtrlChar(key);
@@ -1216,7 +1183,6 @@ export function matchesKey(data: string, keyId: KeyId): boolean {
 			);
 		}
 
-		// Check both raw char and Kitty sequence (needed for release events)
 		return data === key || matchesKittySequence(data, codepoint, 0);
 	}
 
@@ -1331,7 +1297,6 @@ export function parseKey(data: string): string | undefined {
 	if (data === "\x1b[5~") return "pageUp";
 	if (data === "\x1b[6~") return "pageDown";
 
-	// Raw Ctrl+letter
 	if (data.length === 1) {
 		const code = data.charCodeAt(0);
 		if (code >= 1 && code <= 26) {
@@ -1344,10 +1309,6 @@ export function parseKey(data: string): string | undefined {
 
 	return undefined;
 }
-
-// =============================================================================
-// Kitty CSI-u Printable Decoding
-// =============================================================================
 
 const KITTY_CSI_U_REGEX = /^\x1b\[(\d+)(?::(\d*))?(?::(\d+))?(?:;(\d+))?(?::(\d+))?u$/;
 const KITTY_PRINTABLE_ALLOWED_MODIFIERS = MODIFIERS.shift | LOCK_MASK;
