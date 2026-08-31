@@ -89,6 +89,7 @@ import { getDaemonRuntimeIdentity } from "./daemon-runtime-identity.js";
 import { matchesSessionIdSuffix } from "./daemon-session-id.js";
 import {
 	classifySessionRosterStatus,
+	isEvictableEmptySessionSummary,
 	isSessionSummaryBusy,
 	type SessionSummary,
 	summaryForInactiveSession,
@@ -914,6 +915,59 @@ export class DaemonSupervisor {
 		}
 	}
 
+	/**
+	 * Passivate an abandoned empty draft as soon as its last client lets go
+	 * instead of parking the worker for the idle sweep. Same passivation as idle
+	 * eviction: the on-disk session (if any) survives and is classified draft by
+	 * inactiveLifecycleForSession. Action-driven only; never rejects.
+	 */
+	private async evictEmptySessionOnLastDetach(activeSessionId: string): Promise<void> {
+		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
+		const worker = this.matchWorkers(activeSessionId)[0]?.worker;
+		if (
+			!worker ||
+			worker.descriptor.lifecycle !== "ready" ||
+			!worker.client ||
+			// Client-owned workers have their own disconnect cleanup with a grace period.
+			worker.descriptor.ownerClientId !== undefined ||
+			this.isWorkerStopping(worker)
+		) {
+			return;
+		}
+		try {
+			// Refresh so the busy check sees an admitted first turn that has not
+			// persisted a message yet.
+			await this.refreshWorkerSummaries(worker);
+		} catch {
+			return; // A stopping or disconnected worker is never a candidate.
+		}
+		if (
+			this.shuttingDown ||
+			this.updateRestartPhase !== undefined ||
+			this.workers.get(worker.descriptor.workerId) !== worker ||
+			this.isWorkerStopping(worker)
+		) {
+			return;
+		}
+		const summaries = [...worker.summaries.values()];
+		const hasAttachedClient = summaries.some((summary) => {
+			const summaryActiveSessionId = summary.activeSessionId ?? summary.id;
+			return [...this.clients].some((client) => client.attachedActiveSessionIds.has(summaryActiveSessionId));
+		});
+		if (summaries.length === 0 || hasAttachedClient || !summaries.every(isEvictableEmptySessionSummary)) {
+			return;
+		}
+		try {
+			await this.stopWorker(worker, true);
+		} catch (error) {
+			this.log(`Empty-session eviction failed for worker ${worker.descriptor.workerId}: ${String(error)}`);
+			return;
+		}
+		this.log(
+			`Evicted empty session worker ${worker.descriptor.workerId} root=${worker.descriptor.rootSessionId ?? worker.descriptor.rootActiveSessionId} on last client detach`,
+		);
+	}
+
 	private async assertCurrentOwnership(): Promise<void> {
 		const ownership = this.ownership;
 		if (!ownership) {
@@ -1106,6 +1160,7 @@ export class DaemonSupervisor {
 			for (const activeSessionId of [...client.attachedActiveSessionIds]) {
 				client.attachedActiveSessionIds.delete(activeSessionId);
 				void this.syncWorkerExtensionUi(activeSessionId);
+				void this.evictEmptySessionOnLastDetach(activeSessionId);
 			}
 			this.scheduleOwnedWorkerCleanupForClient(this.protocolClientId(client));
 		};
@@ -4174,6 +4229,7 @@ export class DaemonSupervisor {
 			client.catchupPurposes?.delete(resolvedId);
 			this.write(client, { type: "session_detached", activeSessionId: resolvedId });
 			void this.syncWorkerExtensionUi(resolvedId);
+			void this.evictEmptySessionOnLastDetach(resolvedId);
 		}
 	}
 

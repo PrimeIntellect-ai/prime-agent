@@ -110,6 +110,23 @@ export function isSessionSummaryBusy(summary: SessionSummary): boolean {
 	return summary.isSessionActive || summary.hasRunningRlmChildren === true;
 }
 
+/**
+ * An abandoned draft: no messages, no user-assigned name, nothing in flight or
+ * queued (isSessionActive covers unfinished actions), and no schedule pin.
+ * Safe to passivate as soon as its last client detaches instead of parking the
+ * worker for the idle sweep. Naming a session signals intent to return, so
+ * named sessions are exempt even when empty.
+ */
+export function isEvictableEmptySessionSummary(summary: SessionSummary): boolean {
+	return (
+		summary.messageCount === 0 &&
+		!summary.sessionName &&
+		!isSessionSummaryBusy(summary) &&
+		summary.hasRegisteredHeartbeat !== true &&
+		summary.hasRegisteredCronJob !== true
+	);
+}
+
 export function buildSessionList(
 	activeSessions: readonly ActiveSessionState[],
 	savedSessions: readonly SessionInfo[],

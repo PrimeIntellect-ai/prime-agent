@@ -1,0 +1,1 @@
+- Evict an empty, unnamed session's worker as soon as its last client disconnects, instead of parking it for the idle sweep; the on-disk draft session is preserved.
