@@ -1,0 +1,1 @@
+- Added automatic session names derived from the first startup prompt when no name was provided.

@@ -1039,6 +1039,61 @@ function attributeChildUsage(parentUsage: Usage, childUsage: Usage): void {
 	parentUsage.totalTokens = parentContextTokens;
 }
 
+const AUTO_SESSION_NAME_PROMPT = `You are a title generator. You output ONLY a thread title. Nothing else.
+
+<task>
+Generate a brief title that would help the user find this conversation later.
+
+Follow all rules in <rules>
+Use the <examples> so you know what a good title looks like.
+Your output must be:
+- A single line
+- <=50 characters
+- No explanations
+</task>
+
+<rules>
+- You MUST use the same language as the user message you are summarizing
+- Title must be grammatically correct and read naturally - no word salad
+- Never include tool names in the title (e.g. "read tool", "bash tool", "edit tool")
+- Focus on the main topic or question the user needs to retrieve
+- Vary your phrasing - avoid repetitive patterns like always starting with "Analyzing"
+- When a file is mentioned, focus on WHAT the user wants to do WITH the file, not just that they shared it
+- Keep exact: technical terms, numbers, filenames, HTTP codes
+- Remove: the, this, my, a, an
+- Never assume tech stack
+- Never use tools
+- NEVER respond to questions, just generate a title for the conversation
+- The title should NEVER include "summarizing" or "generating" when generating a title
+- DO NOT SAY YOU CANNOT GENERATE A TITLE OR COMPLAIN ABOUT THE INPUT
+- Always output something meaningful, even if the input is minimal.
+- If the user message is short or conversational (e.g. "hello", "lol", "what's up", "hey"):
+  -> create a title that reflects the user's tone or intent (such as Greeting, Quick check-in, Light chat, Intro message, etc.)
+</rules>
+
+<examples>
+"debug 500 errors in production" -> Debugging production 500 errors
+"refactor user service" -> Refactoring user service
+"why is app.js failing" -> app.js failure investigation
+"implement rate limiting" -> Rate limiting implementation
+"how do I connect postgres to my API" -> Postgres API connection
+"best practices for React hooks" -> React hooks best practices
+"@src/auth.ts can you add refresh token support" -> Auth refresh token support
+"@utils/parser.ts this is broken" -> Parser bug fix
+"look at @config.json" -> Config review
+"@App.tsx add dark mode toggle" -> Dark mode toggle in App
+</examples>`;
+
+export function sanitizeAutoSessionName(raw: string): string | undefined {
+	const text = raw.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+	const line = text
+		.split("\n")
+		.map((value) => value.trim().replace(/^['"]|['"]$/g, ""))
+		.find(Boolean);
+	if (!line) return undefined;
+	return line.length > 100 ? `${line.slice(0, 97).trimEnd()}...` : line;
+}
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -1122,6 +1177,8 @@ export class AgentSession {
 	private _extensionRunner!: ExtensionRunner;
 	private _execEnvProvider?: () => Record<string, string | undefined> | undefined;
 	private _turnIndex = 0;
+	private _autoTitleStarted = false;
+	private _autoTitleAbortController?: AbortController;
 	private _modelSelectEmitQueue: Promise<void> = Promise.resolve();
 	private _modelSelectEmitQueueIdle = true;
 	private _modelSelectEmitContext = new AsyncLocalStorage<boolean>();
@@ -4098,6 +4155,7 @@ export class AgentSession {
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._sessionActionCommitDisposeAbortController.abort();
+		this._autoTitleAbortController?.abort();
 		try {
 			// Invalidate scheduled timers and abort any in-flight review so a late
 			// resolution cannot write harness state or re-subscribe handlers.
@@ -4984,6 +5042,16 @@ export class AgentSession {
 					if (prefixMessages) this._pendingNextTurnMessages.unshift(...prefixMessages);
 					reportPreflight(false, false);
 					return;
+				}
+				// Wait until delivery so a rejected or cancelled first prompt cannot name the session.
+				if (
+					primaryMessage.role === "user" &&
+					!this.agent.state.messages.some((message) => message.role === "user")
+				) {
+					void result.ticket.delivered.then(
+						() => this._startAutoSessionName(primaryMessage),
+						() => undefined,
+					);
 				}
 				if (result.disposition === "queued") {
 					reportPreflight(true, true);
@@ -6978,6 +7046,7 @@ export class AgentSession {
 			new Error("Prompt aborted before delivery."),
 		);
 		this._cancelPostCompactionContinue();
+		this._autoTitleAbortController?.abort();
 		this.abortRetry();
 		this.abortCompaction();
 		this.abortBranchSummary();
@@ -7015,6 +7084,7 @@ export class AgentSession {
 		this._sessionInputPumpSuspended = true;
 		this._sessionInputSuspendedForUpdateRestart = true;
 		this._cancelPostCompactionContinue();
+		this._autoTitleAbortController?.abort();
 		this.abortRetry();
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._cancelActiveRlmChildRuns("Parent session aborted for update restart");
@@ -11349,6 +11419,59 @@ export class AgentSession {
 			globalSaved: options.global === true && globalError === undefined,
 			...(globalError ? { globalError } : {}),
 		};
+	}
+
+	private _startAutoSessionName(message: UserMessage): void {
+		if (this._autoTitleStarted || this._disposed || this.sessionManager.getSessionName()) {
+			return;
+		}
+		const model = this.model;
+		if (!model) return;
+		this._autoTitleStarted = true;
+		const controller = new AbortController();
+		this._autoTitleAbortController = controller;
+		void this._generateAutoSessionName(message, controller.signal).finally(() => {
+			if (this._autoTitleAbortController === controller) this._autoTitleAbortController = undefined;
+		});
+	}
+
+	private async _generateAutoSessionName(message: UserMessage, signal: AbortSignal): Promise<void> {
+		const model = this.model;
+		if (!model) return;
+		try {
+			const promptText =
+				typeof message.content === "string"
+					? message.content
+					: message.content
+							.filter((part): part is TextContent => part.type === "text")
+							.map((part) => part.text)
+							.join(" ");
+			const stream = await this.agent.streamFn(
+				model,
+				{
+					systemPrompt: AUTO_SESSION_NAME_PROMPT,
+					messages: [
+						{
+							role: "user",
+							content: `Generate a title for this conversation:\n${promptText}`,
+							timestamp: Date.now(),
+						},
+					],
+					tools: [],
+				},
+				{ signal },
+			);
+			const result = await stream.result();
+			const text = result.content
+				.filter((part): part is TextContent => part.type === "text")
+				.map((part) => part.text)
+				.join(" ");
+			const name = sanitizeAutoSessionName(text);
+			if (!name) return;
+			if (!this.sessionManager.getSessionName()) this.setSessionName(name);
+		} catch {
+			// Auto-naming is best effort and must not affect the active turn.
+		}
 	}
 
 	setSessionName(name: string): void {
