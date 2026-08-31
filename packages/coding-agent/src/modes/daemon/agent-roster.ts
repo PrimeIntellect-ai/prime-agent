@@ -202,6 +202,24 @@ export class AgentRoster {
 		this.onMutation({ type: "delete", agentId });
 	}
 
+	/** In-place patch for the supervisor's label/staleness stamps; only present keys apply, undefined clears. */
+	amend(
+		agentId: string,
+		marks: { statusLabel?: AgentRosterEntry["statusLabel"] | undefined; lastHeardFromAt?: string | undefined },
+	): void {
+		const entry = this.entries.get(agentId);
+		if (!entry) return;
+		if ("statusLabel" in marks) {
+			if (marks.statusLabel === undefined) delete entry.statusLabel;
+			else entry.statusLabel = marks.statusLabel;
+		}
+		if ("lastHeardFromAt" in marks) {
+			if (marks.lastHeardFromAt === undefined) delete entry.lastHeardFromAt;
+			else entry.lastHeardFromAt = marks.lastHeardFromAt;
+		}
+		this.onMutation({ type: "write", agentId });
+	}
+
 	private dropIndexes(entry: AgentRosterEntry): void {
 		if (
 			entry.summary.activeSessionId &&

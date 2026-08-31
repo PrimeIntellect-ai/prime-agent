@@ -2676,9 +2676,9 @@ export class DaemonSupervisor {
 			throw error;
 		}
 		worker.promotedOwnerClientId = clientId;
-		// Promotion makes the worker's rows visible; re-enqueue them for subscribers.
+		// Promotion makes the worker's rows visible; an empty amend re-publishes them to subscribers.
 		for (const entry of this.workerRosterEntries(worker)) {
-			this.onRosterMutation({ type: "write", agentId: entry.agentId });
+			this.roster().amend(entry.agentId, {});
 		}
 		if (worker.ownerCleanupTimer) {
 			clearTimeout(worker.ownerCleanupTimer);
@@ -4014,9 +4014,7 @@ export class DaemonSupervisor {
 	private markWorkerRosterEntries(worker: ResidentWorker, statusLabel: "recovering" | "failed" | undefined): void {
 		for (const entry of this.workerRosterEntries(worker)) {
 			if (!entry.queuedChild && entry.summary.activeSessionId === undefined) continue;
-			if (statusLabel === undefined) delete entry.statusLabel;
-			else entry.statusLabel = statusLabel;
-			this.onRosterMutation({ type: "write", agentId: entry.agentId });
+			this.roster().amend(entry.agentId, { statusLabel });
 		}
 	}
 
@@ -4042,8 +4040,7 @@ export class DaemonSupervisor {
 				if (worker.rosterStale) continue;
 				const lastHeardFromAt = new Date(worker.lastFrameAt).toISOString();
 				for (const entry of this.workerRosterEntries(worker)) {
-					entry.lastHeardFromAt = lastHeardFromAt;
-					this.onRosterMutation({ type: "write", agentId: entry.agentId });
+					this.roster().amend(entry.agentId, { lastHeardFromAt });
 				}
 				worker.rosterStale = true;
 			} else if (worker.rosterStale) {
@@ -4056,8 +4053,7 @@ export class DaemonSupervisor {
 		if (!worker.rosterStale) return;
 		worker.rosterStale = false;
 		for (const entry of this.workerRosterEntries(worker)) {
-			delete entry.lastHeardFromAt;
-			this.onRosterMutation({ type: "write", agentId: entry.agentId });
+			this.roster().amend(entry.agentId, { lastHeardFromAt: undefined });
 		}
 	}
 
