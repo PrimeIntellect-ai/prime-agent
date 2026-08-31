@@ -6,6 +6,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
+import { createModelCatalog } from "./model-catalog-format.js";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
@@ -2432,6 +2433,17 @@ export const MODELS = {
 	// Write file
 	writeFileSync(join(packageRoot, "src/models.generated.ts"), output);
 	console.log("Generated src/models.generated.ts");
+
+	const catalogOutputPath = process.env.PRIME_AGENT_MODEL_CATALOG_OUTPUT?.trim();
+	if (catalogOutputPath) {
+		const uniqueModels = sortedProviderIds.flatMap((providerId) =>
+			Object.keys(providers[providerId])
+				.sort()
+				.map((modelId) => providers[providerId][modelId]),
+		);
+		writeFileSync(catalogOutputPath, `${JSON.stringify(createModelCatalog(uniqueModels), null, 2)}\n`);
+		console.log(`Generated ${catalogOutputPath}`);
+	}
 
 	// Print statistics
 	const totalModels = allModels.length;

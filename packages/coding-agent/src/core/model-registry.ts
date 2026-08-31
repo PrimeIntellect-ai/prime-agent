@@ -37,6 +37,11 @@ import {
 } from "./prime-inference-models.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.js";
 import {
+	mergeRemoteModelCatalog,
+	readCachedRemoteModelCatalog,
+	refreshRemoteModelCatalog,
+} from "./remote-model-catalog.js";
+import {
 	resolveConfigValueOrThrow,
 	resolveConfigValueUncached,
 	resolveHeadersOrThrow,
@@ -445,6 +450,7 @@ export class ModelRegistry {
 	private explicitPrivatePrimeInferenceModelIds = new Set<string>();
 	private openAICodexModelsCache: { authFingerprint: string; modelIds: Set<string>; refreshedAt: number } | undefined;
 	private backgroundPrivatePrimeAuthorization: { fingerprint: string; promise: Promise<void> } | undefined;
+	private remoteCatalogModels: Model<Api>[] | undefined;
 	private loadError: string | undefined = undefined;
 
 	/** Re-register dynamic OAuth providers (e.g. user MCP servers) after refresh() resets the registry. */
@@ -479,6 +485,7 @@ export class ModelRegistry {
 		this.authorizedPrivatePrimeInferenceModelIds.clear();
 		this.authorizedPrivatePrimeInferenceTeamId = undefined;
 		this.explicitPrivatePrimeInferenceModelIds.clear();
+		this.remoteCatalogModels = undefined;
 		this.loadError = undefined;
 
 		// Credentials may have been written by another process (e.g. the UI
@@ -498,6 +505,10 @@ export class ModelRegistry {
 
 		this.loadModels();
 
+		this.reapplyRegisteredProviders();
+	}
+
+	private reapplyRegisteredProviders(): void {
 		for (const [providerName, config] of this.registeredProviders.entries()) {
 			this.applyProviderConfig(providerName, config);
 		}
@@ -508,6 +519,10 @@ export class ModelRegistry {
 	 */
 	getError(): string | undefined {
 		return this.loadError;
+	}
+
+	private remoteModelCatalogCachePath(): string | undefined {
+		return this.modelsJsonPath ? join(dirname(this.modelsJsonPath), "model-catalog-cache.json") : undefined;
 	}
 
 	private loadModels(): void {
@@ -525,7 +540,13 @@ export class ModelRegistry {
 		this.explicitPrivatePrimeInferenceModelIds = new Set(
 			customModels.filter(isPrivatePrimeInferenceModel).map((model) => model.id),
 		);
-		const builtInModels = [...this.loadBuiltInModels(overrides, modelOverrides), ...getPrivatePrimeInferenceModels()];
+		const cachePath = this.remoteModelCatalogCachePath();
+		const remoteModels =
+			this.remoteCatalogModels ?? (cachePath ? readCachedRemoteModelCatalog(cachePath) : undefined);
+		const builtInModels = [
+			...this.loadBuiltInModels(overrides, modelOverrides, remoteModels),
+			...getPrivatePrimeInferenceModels(),
+		];
 		let combined = this.mergeCustomModels(builtInModels, customModels);
 
 		for (const oauthProvider of this.authStorage.getOAuthProviders()) {
@@ -542,30 +563,26 @@ export class ModelRegistry {
 	private loadBuiltInModels(
 		overrides: Map<string, ProviderOverride>,
 		modelOverrides: Map<string, Map<string, ModelOverride>>,
+		remoteModels?: Model<Api>[],
 	): Model<Api>[] {
-		return getProviders().flatMap((provider) => {
-			const models = getModels(provider as KnownProvider) as Model<Api>[];
-			const providerOverride = overrides.get(provider);
-			const perModelOverrides = modelOverrides.get(provider);
+		const bundledModels = getProviders().flatMap((provider) => getModels(provider as KnownProvider) as Model<Api>[]);
+		const catalogModels = mergeRemoteModelCatalog(bundledModels, remoteModels);
+		return catalogModels.map((m) => {
+			const providerOverride = overrides.get(m.provider);
+			const perModelOverrides = modelOverrides.get(m.provider);
+			let model = m;
 
-			return models.map((m) => {
-				let model = m;
+			if (providerOverride) {
+				model = {
+					...model,
+					baseUrl: providerOverride.baseUrl ?? model.baseUrl,
+					compat: mergeCompat(model.compat, providerOverride.compat),
+				};
+			}
 
-				if (providerOverride) {
-					model = {
-						...model,
-						baseUrl: providerOverride.baseUrl ?? model.baseUrl,
-						compat: mergeCompat(model.compat, providerOverride.compat),
-					};
-				}
-
-				const modelOverride = perModelOverrides?.get(m.id);
-				if (modelOverride) {
-					model = applyModelOverride(model, modelOverride);
-				}
-
-				return model;
-			});
+			const modelOverride = perModelOverrides?.get(m.id);
+			if (modelOverride) model = applyModelOverride(model, modelOverride);
+			return model;
 		});
 	}
 
@@ -777,6 +794,12 @@ export class ModelRegistry {
 		const previousPrivateModelIds = new Set(this.authorizedPrivatePrimeInferenceModelIds);
 		const previousTeamId = this.authorizedPrivatePrimeInferenceTeamId;
 		this.refresh();
+		const cachePath = this.remoteModelCatalogCachePath();
+		if (cachePath) {
+			this.remoteCatalogModels = await refreshRemoteModelCatalog(cachePath);
+			this.loadModels();
+			this.reapplyRegisteredProviders();
+		}
 		await this.refreshPrivatePrimeInferenceAuthorization(previousPrivateModelIds, previousTeamId);
 		return this.getAvailable();
 	}
