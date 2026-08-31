@@ -10,9 +10,7 @@ import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js"
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import type { ActiveSessionState } from "./active-session-state.js";
 
-
 import { type AgentRosterStatus, isSessionSummaryBusy } from "./agent-roster.js";
-
 
 export { classifySessionRosterStatus, isSessionSummaryBusy } from "./agent-roster.js";
 
