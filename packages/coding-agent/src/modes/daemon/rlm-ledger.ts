@@ -842,14 +842,9 @@ export class RlmSpawnLedger {
 	}
 }
 
-/**
- * One delete-classification policy for user deletes of saved sessions, shared
- * by the worker and supervisor delete routes. In-memory state classifies
- * first; only a readable no-parent transcript is positively top-level.
- * Children and unknown targets classify via the ledger: an unreadable ledger
- * aborts, and the tombstone appends before the file delete — a
- * tombstoned-but-undeleted file is the accepted orphan of a failed delete.
- */
+// Shared user-delete policy: only a readable no-parent transcript is positively top-level; children and
+// unknown targets tombstone via the ledger BEFORE the file delete (a tombstoned-but-undeleted file is
+// the accepted orphan of a failed delete).
 export async function tombstoneSavedSessionDelete(
 	ledger: RlmSpawnLedger,
 	sessionPath: string,

@@ -1134,7 +1134,6 @@ export class AgentDaemon {
 		// dual-write era it has no other writer to fall back on, so a failed
 		// append is a failed deletion.
 		await this.rlmSpawnLedger().appendDelete({ childId, child: entry.sessionFile, reason });
-		// Only worker daemons flush removals; a non-worker daemon must not grow the set unbounded.
 		if (this.options.worker) {
 			this.rosterReporter.removedAgentIds.set(
 				this.rosterAgentIdForRlmChild(childId, entry.parentSessionFile),
@@ -3366,7 +3365,6 @@ export class AgentDaemon {
 					success: true,
 					data: { capabilities: [DAEMON_WORKER_ROSTER_CAPABILITY] },
 				});
-				// A (re)connected supervisor gets one full replacing snapshot; disk is the durable truth behind it.
 				this.rosterReporter.snapshotPending = true;
 				this.scheduleRosterFlush();
 				return;
@@ -3927,8 +3925,6 @@ export class AgentDaemon {
 						this.cancelScheduledJobsForSessionFile(command.sessionPath);
 					},
 				});
-				// A file that still exists keeps its roster row; only a real deletion is published.
-				// Only worker daemons flush removals; a non-worker daemon must not grow the set unbounded.
 				if (result.ok && this.options.worker) {
 					const removedAgentId =
 						composedEntry?.agentId ??
@@ -4261,7 +4257,6 @@ export class AgentDaemon {
 				try {
 					return success(command.id, "execute_bash_and_wait", await bash);
 				} finally {
-					// executeBash appends transcript messages without bash_* events; flush the roster projection here.
 					this.scheduleRosterFlush();
 				}
 			}
@@ -4561,7 +4556,6 @@ export class AgentDaemon {
 			case "cron_add": {
 				const state = this.getSessionState(command.activeSessionId);
 				const job = this.createCronJobForState(state, command.schedule, command.prompt);
-				// Plain cron jobs fire no heartbeat-change or session event; flush hasRegisteredCronJob here.
 				this.scheduleRosterFlush();
 				return success(command.id, "cron_add", { job });
 			}
@@ -4576,7 +4570,6 @@ export class AgentDaemon {
 					this.removeQueuedHeartbeatFollowUp(state, job);
 				}
 				this.cronScheduler.wake();
-				// Plain cron jobs fire no heartbeat-change or session event; flush hasRegisteredCronJob here.
 				this.scheduleRosterFlush();
 				return success(command.id, "cron_cancel", { job });
 			}
@@ -4639,7 +4632,6 @@ export class AgentDaemon {
 
 			case "set_thinking_level": {
 				const state = this.getSessionState(command.activeSessionId);
-				// An actual change emits thinking_level_changed, which is a roster trigger already.
 				state.runtime.session.setThinkingLevel(command.level);
 				return success(command.id, "set_thinking_level");
 			}
@@ -4652,7 +4644,6 @@ export class AgentDaemon {
 
 			case "cycle_thinking_level": {
 				const state = this.getSessionState(command.activeSessionId);
-				// An actual change emits thinking_level_changed, which is a roster trigger already.
 				const level = state.runtime.session.cycleThinkingLevel();
 				return success(command.id, "cycle_thinking_level", level ? { level } : null);
 			}
@@ -6180,7 +6171,6 @@ export class AgentDaemon {
 	}
 
 	private findActiveSessionByFile(sessionPath: string): ActiveSessionState | undefined {
-		// Symlink-resolving canonicalization: guards compare the same path the tombstone/removal side uses.
 		const canonicalPath = canonicalSessionPath(sessionPath);
 		for (const state of this.sessions.values()) {
 			const sessionFile = state.runtime.session.sessionFile;
@@ -6380,7 +6370,6 @@ export class AgentDaemon {
 		state.clients.clear();
 		this.acpMcpOwners.delete(state.activeSessionId);
 		this.sessions.delete(state.activeSessionId);
-		// A discarded draft leaves no transcript, so its roster row goes with it.
 		if (isEmptyDraftSession && this.options.worker) {
 			this.rosterReporter.removedAgentIds.set(this.rosterAgentIdForState(state), state.runtime.session.sessionId);
 		}
@@ -6588,7 +6577,6 @@ export class AgentDaemon {
 		return session.sessionId;
 	}
 
-	/** The one resolution for subagent roster ids: childId qualified by its parent's session path. */
 	private rosterAgentIdForRlmChild(childId: string, parentSessionPath: string | undefined): string {
 		return rosterAgentIdForSummary({
 			runtimeKind: "subagent",
@@ -6617,7 +6605,6 @@ export class AgentDaemon {
 	}
 
 	private observeRosterChildUpdate(state: ActiveSessionState, child: AgentConnectionRlmChildAgentSnapshot): void {
-		// The one supersession point: a run with a bound session never has a queued row.
 		const bound = child.activeSessionId !== undefined || this.hasSessionForRlmChild(state, child.id);
 		const entry = this.queuedChildRosterEntry(state, child);
 		if (!bound && (child.status === "queued" || child.status === "running")) {
@@ -6687,8 +6674,7 @@ export class AgentDaemon {
 			const entry = workerRosterEntryFromSummary(summary);
 			entries.set(entry.agentId, entry);
 		}
-		// Session rows win: a run whose session already composed is bound, and the rlm_child_update
-		// that clears the queued marker can trail the session's own first events.
+		// The rlm_child_update that clears a queued marker can trail the bound session's own first events.
 		for (const [agentId, queued] of reporter.queuedChildren) {
 			if (entries.has(agentId)) {
 				reporter.queuedChildren.delete(agentId);
@@ -6704,8 +6690,7 @@ export class AgentDaemon {
 		}
 		for (const [agentId, targetSessionId] of reporter.removedAgentIds) {
 			const composed = entries.get(agentId);
-			// A new incarnation of the id cancels the stale pending removal; the removed incarnation
-			// itself (same sessionId, mid-teardown) stays suppressed so it cannot ghost as passivated.
+			// A new incarnation cancels the stale removal; the removed one stays suppressed mid-teardown.
 			if (composed && (composed.queuedChild === true || composed.summary.sessionId !== targetSessionId)) {
 				reporter.removedAgentIds.delete(agentId);
 				continue;
@@ -6713,8 +6698,6 @@ export class AgentDaemon {
 			entries.delete(agentId);
 			reporter.queuedChildren.delete(agentId);
 		}
-		// Rows whose runtime left memory flip to passivated and stay known, delivered or not.
-		// Their registration flags come fresh from the cron store per flush; frozen flags would pin eviction.
 		const registrations = scheduledJobRegistrations(scheduledJobs);
 		for (const [agentId, previous] of reporter.lastComposed) {
 			if (!entries.has(agentId) && !reporter.removedAgentIds.has(agentId)) {
@@ -6728,8 +6711,6 @@ export class AgentDaemon {
 				);
 			}
 		}
-		// Deltas are best-effort freshness hints; any miss escalates to one full replacing snapshot.
-		// Cached serializations keep churny flushes at one stringify per current row.
 		const changed: WorkerRosterEntry[] = [];
 		const nextJson = new Map<string, string>();
 		for (const entry of entries.values()) {
@@ -6741,7 +6722,6 @@ export class AgentDaemon {
 		reporter.lastComposed = new Map(entries);
 		reporter.lastComposedJson = nextJson;
 		if (!this.hasAuthenticatedSupervisorClient()) {
-			// Undelivered removals stay pending; they ride the first delivered frame.
 			if (changed.length > 0 || removedAgentIds.length > 0) reporter.snapshotPending = true;
 			return;
 		}
@@ -6768,7 +6748,6 @@ export class AgentDaemon {
 		else reporter.snapshotPending = true;
 	}
 
-	// The live supervisor claim is the single delivery authority; revoked sockets cannot satisfy it.
 	private hasAuthenticatedSupervisorClient(): boolean {
 		for (const client of this.clients) {
 			if (this.supervisorClaims.has(client) && !client.socket.destroyed) {
@@ -7165,20 +7144,14 @@ export class AgentDaemon {
 }
 
 interface WorkerRosterReporterState {
-	/** Last composed roster, delivered or not; the source for passivated flips and change hints. */
 	lastComposed: Map<string, WorkerRosterEntry>;
-	/** Serialized form of lastComposed, reused for change detection across flushes. */
 	lastComposedJson: Map<string, string>;
-	/** Admitted child runs whose sessions have not materialized yet, keyed by agentId. */
 	queuedChildren: Map<string, WorkerRosterEntry>;
-	/** Pending removals: agentId -> the sessionId being removed. A row composed again with a
-	 * different sessionId (or a re-admitted run) is a new incarnation and cancels the removal. */
+	/** Pending removals: agentId -> removed sessionId; a new incarnation of the id cancels it. */
 	removedAgentIds: Map<string, string | undefined>;
-	/** Set on any undelivered change; the next flush sends one full replacing snapshot. */
 	snapshotPending: boolean;
 }
 
-// Session events that can change an agent's roster projection (status, activity, name, recap).
 const ROSTER_SESSION_EVENT_TRIGGERS = new Set([
 	"turn_start",
 	"turn_end",
@@ -7186,7 +7159,6 @@ const ROSTER_SESSION_EVENT_TRIGGERS = new Set([
 	"bash_end",
 	"compaction_start",
 	"compaction_end",
-	// Retry transitions flip isSessionActive/activity; tool transitions flip isRunningTools.
 	"auto_retry_start",
 	"auto_retry_end",
 	"tool_execution_start",

@@ -20,14 +20,12 @@ export function classifyAgentStatus(input: AgentStatusInput): AgentRosterStatus 
 	return input.busy || input.hasActiveHeartbeat ? "running" : "idle";
 }
 
-/** The one busy predicate over session summaries; every surface (list, roster, launch checks) derives from it. */
 export function isSessionSummaryBusy(
 	summary: Pick<SessionSummary, "isSessionActive" | "hasRunningRlmChildren">,
 ): boolean {
 	return summary.isSessionActive || summary.hasRunningRlmChildren === true;
 }
 
-/** The one summary-shaped adapter over classifyAgentStatus; roster rows add only their queuedChild bit. */
 export function classifySessionRosterStatus(
 	summary: Pick<
 		SessionSummary,
@@ -43,26 +41,19 @@ export function classifySessionRosterStatus(
 	});
 }
 
-// A session summary without its heavyweight per-event fields; `list` re-adds an empty sessionActions.
 export type RosterSessionSummary = Omit<SessionSummary, "streamingMessage" | "sessionActions" | "diagnostics">;
 
 export interface WorkerRosterEntry {
-	/** rlmChildId for subagents (stable queued->running->passivated), sessionId otherwise. */
 	agentId: string;
-	/** Admitted child run whose session has not materialized yet. */
 	queuedChild?: true;
-	/** Supervisor seed marker: the cwd is synthetic until one transcript-header read. */
 	seededCwd?: true;
 	summary: RosterSessionSummary;
 }
 
-/** Supervisor-owned roster row: a worker entry plus supervisor-only state. */
 export interface AgentRosterEntry extends WorkerRosterEntry {
 	status: AgentRosterStatus;
 	statusLabel?: "queued" | "recovering" | "failed";
-	/** Staleness marker set by the supervisor watchdog while the owning worker is silent. */
 	lastHeardFromAt?: string;
-	/** Owning resident worker; absent for seeded entries no worker has claimed. */
 	workerId?: string;
 }
 
@@ -83,15 +74,12 @@ export function workerRosterEntryFromSummary(summary: SessionSummary): WorkerRos
 	return { agentId: rosterAgentIdForSummary(summary), summary: slim };
 }
 
-/** The roster half of the classifier input; the queuedChild bit rides the entry itself. */
 export function classifyWorkerRosterEntry(entry: WorkerRosterEntry): AgentRosterStatus {
 	return classifySessionRosterStatus(entry.summary, entry.queuedChild === true);
 }
 
-/** Final entry for an agent whose runtime left memory; identity and display fields survive. */
 export function passivatedWorkerRosterEntry(
 	entry: WorkerRosterEntry,
-	// Registration flags never freeze: callers with a cron store pass fresh values, others strip them.
 	registrations?: { hasRegisteredHeartbeat: boolean; hasRegisteredCronJob: boolean },
 ): WorkerRosterEntry {
 	const {
@@ -110,7 +98,6 @@ export function passivatedWorkerRosterEntry(
 		agentId: entry.agentId,
 		summary: {
 			...summary,
-			// Inactive rows are keyed by their durable session id, like catalog rows.
 			id: summary.sessionId,
 			activity: "idle",
 			isSessionActive: false,
@@ -127,7 +114,6 @@ export function sessionSummaryFromRosterEntry(entry: WorkerRosterEntry): Session
 	return { ...entry.summary, sessionActions: { queuedCount: 0, steering: [], followUps: [] } };
 }
 
-// Supervisor-owned roster store; write() classifies once and its file index converges seed and worker keys.
 export class AgentRoster {
 	private readonly entries = new Map<string, AgentRosterEntry>();
 	private readonly agentIdByActiveSessionId = new Map<string, string>();

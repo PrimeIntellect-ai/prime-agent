@@ -102,7 +102,6 @@ export function resolveAttachModelFallbackMessage(
 	return summary.model ? undefined : startupModelFallbackMessage;
 }
 
-/** The one registration index over scheduled jobs; summaries and passivated roster flips both read it. */
 export function scheduledJobRegistrations(scheduledJobs: readonly AgentCronJob[]): {
 	activeHeartbeatSessionIds: Set<string>;
 	heartbeatSessionIds: Set<string>;
