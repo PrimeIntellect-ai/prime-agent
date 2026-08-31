@@ -161,6 +161,19 @@ git add packages/foo.ts
 		});
 	});
 
+	it("keeps backslashes in raw bash-skill literals", () => {
+		// python: r'grep \'x\' f' stays open at the escaped quote and the backslash stays in the value.
+		expect(previewIpythonCode("r = await bash(r'grep \\'x\\' f')")).toEqual({
+			language: "bash",
+			text: "grep \\'x\\' f",
+		});
+	});
+
+	it("keeps the python preview when the literal never closes", () => {
+		// python: a raw newline inside a single-quoted literal is a syntax error, so no bash ran.
+		expect(previewIpythonCode("r = await bash('echo hi\n)").language).toBe("python");
+	});
+
 	it("evaluates escapes in bash-skill literals instead of previewing source text", () => {
 		// \n in the source is a real newline in the executed command; salience follows the evaluated text.
 		expect(previewIpythonCode("r = await bash('printf \"a\\nb\"\\ngit add -A')")).toEqual({
@@ -181,6 +194,11 @@ git add packages/foo.ts
 		expect(previewIpythonCode('doc = """\nbash("git status")\n"""')).toEqual({
 			language: "python",
 			text: 'bash("git status")',
+		});
+		// A triple-quoted string that closed above is code again: extraction must still work.
+		expect(previewIpythonCode('doc = """usage"""\nr = await bash(\'git status\')')).toEqual({
+			language: "bash",
+			text: "git status",
 		});
 	});
 
