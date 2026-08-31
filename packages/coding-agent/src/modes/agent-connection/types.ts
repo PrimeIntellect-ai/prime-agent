@@ -566,8 +566,6 @@ export interface AgentConnectionRlmChildAgentSnapshot {
 	sessionDir: string;
 	activity?: AgentConnectionRlmChildAgentActivity;
 	error?: string;
-	/** Sticky local marker: session evidence was observed for this child at least once. */
-	everBound?: true;
 }
 
 export type AgentConnectionSessionEvent =

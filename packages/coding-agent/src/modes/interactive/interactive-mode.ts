@@ -387,14 +387,6 @@ export function formatSplashCwd(cwd: string): string {
 	return normalized;
 }
 
-// Session evidence: a daemon session id, live session state, or session-derived token accounting.
-function hasSubagentSessionEvidence(snapshot: AgentConnectionRlmChildAgentSnapshot | undefined): boolean {
-	if (!snapshot) return false;
-	return (
-		snapshot.activeSessionId !== undefined || snapshot.activity !== undefined || snapshot.tokenCount !== undefined
-	);
-}
-
 function mergeSubagentSnapshot(
 	previous: AgentConnectionRlmChildAgentSnapshot,
 	incoming: AgentConnectionRlmChildAgentSnapshot,
@@ -5957,17 +5949,14 @@ export class InteractiveMode {
 	}
 
 	private updateSubagentSummary(child: AgentConnectionRlmChildAgentSnapshot): void {
-		const previous = this.subagentSnapshots.get(child.id);
-		const terminal = child.status === "done" || child.status === "error";
-		// Bound-ness is sticky: merges clear display fields, so repeated terminal projections stay idempotent.
-		const everBound =
-			previous?.everBound === true || hasSubagentSessionEvidence(previous) || hasSubagentSessionEvidence(child);
-		// The roster's rule: a terminal run that never bound a session leaves no row anywhere.
-		if (child.status === "cancelled" || (terminal && !everBound)) {
+		// "cancelled" is the producer's removal signal; it also covers terminal runs
+		// that never bound a session (AgentSession owns that rule and emits them as
+		// cancelled), so no row-drop logic is duplicated here.
+		if (child.status === "cancelled") {
 			this.removeSubagentSnapshot(child.id);
 		} else {
-			const merged = previous ? mergeSubagentSnapshot(previous, child) : child;
-			this.subagentSnapshots.set(child.id, everBound ? { ...merged, everBound: true } : merged);
+			const previous = this.subagentSnapshots.get(child.id);
+			this.subagentSnapshots.set(child.id, previous ? mergeSubagentSnapshot(previous, child) : child);
 		}
 		this.refreshSubagentSummary();
 	}

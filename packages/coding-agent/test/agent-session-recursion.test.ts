@@ -1255,6 +1255,12 @@ describe("AgentSession rlm recursion", () => {
 				deleteRlmSubagentRuntime: async () => {},
 			},
 		});
+		const childUpdates: Array<{ status: string; error?: string }> = [];
+		root.subscribe((event) => {
+			if (event.type === "rlm_child_update") {
+				childUpdates.push({ status: event.child.status, error: event.child.error });
+			}
+		});
 
 		const spawned = await root.runRlmChild("start failing child", { name: "failing-worker" });
 		await vi.waitFor(async () => {
@@ -1274,6 +1280,10 @@ describe("AgentSession rlm recursion", () => {
 				expect.objectContaining({ content: expect.stringContaining("kernel startup failed") }),
 			);
 		});
+		// A terminal run that never bound a session leaves no row anywhere: the
+		// terminal update is the cancelled removal signal and snapshots skip the run.
+		expect(childUpdates.at(-1)).toEqual({ status: "cancelled", error: "kernel startup failed" });
+		expect(root.getRlmChildSnapshots()).toEqual([]);
 	});
 
 	it("injects exactly one cancellation notice when a child run is cancelled", async () => {
