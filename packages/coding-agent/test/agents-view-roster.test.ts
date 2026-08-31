@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -456,6 +456,10 @@ describe("subscriber push transitions", () => {
 		const ledger = new RlmSpawnLedger(directory, sessionsDir);
 		const parentPath = join(sessionsDir, "root.jsonl");
 		const childPath = join(directory, "artifacts", "live-child.jsonl");
+		mkdirSync(sessionsDir, { recursive: true });
+		mkdirSync(join(directory, "artifacts"), { recursive: true });
+		writeFileSync(parentPath, "");
+		writeFileSync(childPath, "");
 		await ledger.appendSpawn({ childId: "live-child", parent: parentPath, child: childPath, depth: 1, name: "c" });
 		const { supervisor, pushes, settle } = makePushSupervisor({
 			rlmSpawnLedger: () => ledger,
