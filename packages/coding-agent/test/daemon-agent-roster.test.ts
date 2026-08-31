@@ -297,6 +297,45 @@ describe("worker roster reporter", () => {
 		expect(daemon.rosterReporter.lastComposed.has("parent-active#child-2")).toBe(false);
 	});
 
+	it("publishes a removal when an in-place session swap renames the row", () => {
+		const { daemon, sentDeltas, connection } = makeWorkerReporter();
+		const state = makeState({
+			activeSessionId: "root-active",
+			sessionId: "old-session",
+			sessionFile: "/tmp/sessions/old.jsonl",
+			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
+		});
+		daemon.sessions.set(state.activeSessionId, state);
+		daemon.flushRoster();
+
+		// switch_session/new_session/fork swap the runtime in place: same state, new sessionId.
+		const swapped = state.runtime.session as unknown as { sessionId: string; sessionFile: string };
+		swapped.sessionId = "new-session";
+		swapped.sessionFile = "/tmp/sessions/new.jsonl";
+		daemon.flushRoster();
+
+		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual(["old-session"]);
+		expect(sentDeltas.at(-1)?.entries.some((entry) => entry.agentId === "new-session")).toBe(true);
+		expect(daemon.rosterReporter.lastComposed.has("old-session")).toBe(false);
+
+		// Swapping away and back while disconnected revives the old row (its pending removal cancels);
+		// the abandoned interim row is removed instead.
+		connection.connected = false;
+		swapped.sessionId = "interim-session";
+		swapped.sessionFile = "/tmp/sessions/interim.jsonl";
+		daemon.flushRoster();
+		swapped.sessionId = "new-session";
+		swapped.sessionFile = "/tmp/sessions/new.jsonl";
+		daemon.flushRoster();
+		connection.connected = true;
+		daemon.flushRoster();
+		const snapshot = sentDeltas.at(-1);
+		expect(snapshot?.snapshot).toBe(true);
+		expect(snapshot?.removedAgentIds).toEqual(["interim-session"]);
+		expect(snapshot?.entries.some((entry) => entry.agentId === "new-session")).toBe(true);
+		expect(snapshot?.entries.some((entry) => entry.agentId === "interim-session")).toBe(false);
+	});
+
 	it("scopes pending spawn appends by parent so equal child ids cannot cross wires", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-spawn-key-"));
 		tempDirs.push(directory);

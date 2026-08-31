@@ -6690,15 +6690,27 @@ export class AgentDaemon {
 			entries.set(agentId, queued);
 		}
 		// A terminal unbound child run owns no transcript: it is a removal, never a passivated row.
+		// A vanished row whose state lives on under a new sessionId was swapped in place
+		// (new_session/switch/fork): also a removal — plain list never served the old transcript.
+		const composedActiveIds = new Set<string>();
+		for (const entry of entries.values()) {
+			if (entry.summary.activeSessionId !== undefined) composedActiveIds.add(entry.summary.activeSessionId);
+		}
 		for (const [agentId, previous] of reporter.lastComposed) {
-			if (previous.queuedChild === true && !entries.has(agentId)) {
+			if (entries.has(agentId)) continue;
+			const swapped =
+				previous.summary.activeSessionId !== undefined && composedActiveIds.has(previous.summary.activeSessionId);
+			if (previous.queuedChild === true || swapped) {
 				reporter.removedAgentIds.set(agentId, previous.summary.sessionId);
 			}
 		}
 		for (const [agentId, targetSessionId] of reporter.removedAgentIds) {
 			const composed = entries.get(agentId);
-			// A new incarnation cancels the stale removal; the removed one stays suppressed mid-teardown.
-			if (composed && (composed.queuedChild === true || composed.summary.sessionId !== targetSessionId)) {
+			// A new incarnation cancels the stale removal, as does a revived resident top-level row
+			// (switch-back, resume-after-archive); a resident subagent row with the removed sessionId
+			// is the mid-teardown race and stays suppressed.
+			const revived = composed?.summary.activeSessionId !== undefined && composed.summary.runtimeKind !== "subagent";
+			if (composed && (composed.queuedChild === true || composed.summary.sessionId !== targetSessionId || revived)) {
 				reporter.removedAgentIds.delete(agentId);
 				continue;
 			}
