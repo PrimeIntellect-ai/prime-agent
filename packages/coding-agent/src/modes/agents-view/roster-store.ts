@@ -94,8 +94,12 @@ export class AgentsViewRosterStore {
 		this.emitScheduled = true;
 		queueMicrotask(() => {
 			this.emitScheduled = false;
-			for (const listener of this.listeners) {
-				listener();
+			for (const listener of [...this.listeners]) {
+				try {
+					listener();
+				} catch {
+					// One consumer must not interrupt delivery to the others.
+				}
 			}
 		});
 	}

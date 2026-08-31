@@ -4043,10 +4043,10 @@ export class DaemonSupervisor {
 				continue;
 			}
 			if (now - worker.lastFrameAt > ROSTER_STALE_AFTER_MS) {
-				if (worker.rosterStale) continue;
 				const lastHeardFromAt = new Date(worker.lastFrameAt).toISOString();
 				for (const entry of this.workerRosterEntries(worker)) {
-					this.roster().amend(entry.agentId, { lastHeardFromAt });
+					// write() rebuilds rows without the mark; the sweep owns it and restamps only those.
+					if (entry.lastHeardFromAt !== lastHeardFromAt) this.roster().amend(entry.agentId, { lastHeardFromAt });
 				}
 				worker.rosterStale = true;
 			} else if (worker.rosterStale) {

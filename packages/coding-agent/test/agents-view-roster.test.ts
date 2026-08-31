@@ -112,6 +112,10 @@ describe("agents-view roster store", () => {
 		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["a"]);
 
 		const listener = vi.fn();
+		// A throwing consumer must not break delivery to the others (or the process).
+		store.onUpdate(() => {
+			throw new Error("consumer exploded");
+		});
 		store.onUpdate(listener);
 		client.emit({
 			type: "roster_update",
@@ -368,6 +372,40 @@ describe("subscriber push transitions", () => {
 			intentionalStop: false,
 		};
 	}
+
+	it("restamps last-heard marks that a row-rebuilding write dropped, and clears them on recovery", async () => {
+		const { supervisor, pushes, settle } = makePushSupervisor();
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const worker = { ...pushWorker("w1"), lastFrameAt: now - 60_000 };
+		supervisor.workers.set("w1", worker);
+		const entry = workerRosterEntryFromSummary(
+			summary({ id: "s-active", sessionId: "s", activeSessionId: "s-active" }),
+		);
+		supervisor.writeRosterEntry(entry, worker);
+		supervisor.sweepRosterStaleness(now);
+		await settle();
+		const stamp = new Date(now - 60_000).toISOString();
+		expect(pushes.at(-1)?.changed[0]?.lastHeardFromAt).toBe(stamp);
+
+		// A repeat sweep of an already-stamped row emits nothing.
+		pushes.length = 0;
+		supervisor.sweepRosterStaleness(now + 1000);
+		await settle();
+		expect(pushes).toEqual([]);
+
+		// A gap-fill write rebuilds the row without the mark; the next sweep restamps it.
+		supervisor.writeRosterEntry(entry, worker);
+		await settle();
+		expect(pushes.at(-1)?.changed[0]?.lastHeardFromAt).toBeUndefined();
+		supervisor.sweepRosterStaleness(now + 2000);
+		await settle();
+		expect(pushes.at(-1)?.changed[0]?.lastHeardFromAt).toBe(stamp);
+
+		worker.lastFrameAt = now;
+		supervisor.sweepRosterStaleness(now);
+		await settle();
+		expect(pushes.at(-1)?.changed[0]?.lastHeardFromAt).toBeUndefined();
+	});
 
 	it("removes a claimed row once, stays silent for owned-worker writes, and re-publishes on promotion", async () => {
 		const { supervisor, pushes, settle } = makePushSupervisor({
