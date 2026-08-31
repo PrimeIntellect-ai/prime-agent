@@ -495,6 +495,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		for (const worker of [empty, ...exempt]) {
 			supervisor.workers.set(worker.descriptor.workerId, worker);
 		}
+		seedSupervisorRoster(supervisor, empty, ...exempt);
 		const first = makeDetachClient("first", ["empty-root"]);
 		const viewer = makeDetachClient("viewer", [
 			"empty-root",
@@ -539,6 +540,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 				}),
 		);
 		supervisor.workers.set("swap", worker);
+		seedSupervisorRoster(supervisor, worker);
 		const client = makeDetachClient("viewer", ["swap-root"]);
 		supervisor.clients.add(client);
 
@@ -568,6 +570,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 				}),
 		);
 		supervisor.workers.set("gap", worker);
+		seedSupervisorRoster(supervisor, worker);
 		const client = makeDetachClient("viewer", ["gap-root"]);
 		supervisor.clients.add(client);
 
@@ -596,6 +599,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		const draftB = makeWorker("draft-b", [makeSummary("draft-b-root", now, { messageCount: 0 })]);
 		supervisor.workers.set("draft-a", draftA);
 		supervisor.workers.set("draft-b", draftB);
+		seedSupervisorRoster(supervisor, draftA, draftB);
 		const client = makeDetachClient("viewer", ["draft-a-root", "draft-b-root"]);
 		supervisor.clients.add(client);
 
@@ -630,6 +634,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 					}),
 			);
 		supervisor.workers.set("gap", worker);
+		seedSupervisorRoster(supervisor, worker);
 		const client = makeDetachClient("viewer", ["gap-root"]);
 		supervisor.clients.add(client);
 

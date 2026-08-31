@@ -952,13 +952,15 @@ export class DaemonSupervisor {
 		}
 	}
 
-	/** Re-validates one worker on fresh summaries under the caller's fence, then passivates it. */
+	/** Re-validates one worker on a fresh pull under the caller's fence, then passivates it. */
 	private async passivateWorkerIfStillEligible(
 		worker: ResidentWorker,
 		isStillEligible: () => boolean,
 		describeEvicted: () => string,
 	): Promise<void> {
-		await this.refreshWorkerSummaries(worker);
+		// Responsiveness gate and write-through: the eligibility re-read serves from the roster rows
+		// this pull refreshes, so a mutation drained just before it cannot be missed.
+		await this.refreshWorkerSummaries(worker, false, true);
 		if (!isStillEligible()) return;
 		await this.stopWorker(worker, true);
 		this.log(describeEvicted());
@@ -977,7 +979,8 @@ export class DaemonSupervisor {
 			return;
 		}
 		try {
-			await this.refreshWorkerSummaries(worker);
+			// Responsiveness gate and write-through: the candidate check reads the roster rows this pull refreshes.
+			await this.refreshWorkerSummaries(worker, false, true);
 		} catch {
 			return;
 		}
@@ -1006,7 +1009,10 @@ export class DaemonSupervisor {
 		) {
 			return false;
 		}
-		const summaries = [...worker.summaries.values()];
+		// One decision source: the delta-fed roster, freshened by this path's write-through pulls.
+		const summaries = this.workerRosterEntries(worker)
+			.filter((entry) => !entry.queuedChild)
+			.map(sessionSummaryFromRosterEntry);
 		const hasAttachedClient = summaries.some((summary) => {
 			const summaryActiveSessionId = summary.activeSessionId ?? summary.id;
 			return [...this.clients].some((client) => client.attachedActiveSessionIds.has(summaryActiveSessionId));
@@ -3636,7 +3642,7 @@ export class DaemonSupervisor {
 		// The fill queues behind in-flight frame applies and re-checks the epoch there, so it never treats an unapplied snapshot as stable.
 		if (fillGaps) {
 			await this.chainWorkerRosterApply(worker, () => {
-				if ((worker.rosterEpoch ?? 0) === epochAtStart) this.fillRosterGapsFromWorkerSummaries(worker);
+				if ((worker.rosterEpoch ?? 0) === epochAtStart) this.syncRosterFromWorkerSummaries(worker);
 			});
 		}
 		for (const summary of summaries) {
@@ -3931,14 +3937,18 @@ export class DaemonSupervisor {
 		this.persistWorker(worker);
 	}
 
-	/** Pulled rows fill gaps, claim workerless rows, and flesh out synthetic seeds; delta-fed rows are never overwritten. */
-	private fillRosterGapsFromWorkerSummaries(worker: ResidentWorker): void {
+	/**
+	 * Pulled rows write through to the roster: gaps fill, workerless and seeded rows claim, and this
+	 * worker's own rows take the pull's fields. Every call sits behind the pull-epoch guard, so no
+	 * frame has landed since the pull started and the pull is never staler than the row it replaces.
+	 * Rows claimed by another worker are never stolen.
+	 */
+	private syncRosterFromWorkerSummaries(worker: ResidentWorker): void {
 		for (const summary of worker.summaries.values()) {
 			const entry = workerRosterEntryFromSummary(summary);
 			const existing = this.roster().get(entry.agentId);
-			if (existing === undefined || existing.workerId === undefined || existing.seededCwd === true) {
-				this.writeRosterEntry(entry, worker);
-			}
+			if (existing?.workerId !== undefined && existing.workerId !== worker.descriptor.workerId) continue;
+			this.writeRosterEntry(entry, worker);
 		}
 	}
 

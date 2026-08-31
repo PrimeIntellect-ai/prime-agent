@@ -884,8 +884,8 @@ describe("supervisor roster ledger", () => {
 		worker.summaries.set("worker-1-root-active", root);
 		worker.summaries.set("p-session", passive);
 		(
-			supervisor as unknown as { fillRosterGapsFromWorkerSummaries(worker: WorkerFixture): void }
-		).fillRosterGapsFromWorkerSummaries(worker);
+			supervisor as unknown as { syncRosterFromWorkerSummaries(worker: WorkerFixture): void }
+		).syncRosterFromWorkerSummaries(worker);
 
 		// A snapshot composes only live sessions; the passive registry child must not flap off the worker.
 		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([workerRosterEntryFromSummary(root)], undefined, true));
