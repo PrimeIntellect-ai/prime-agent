@@ -38,6 +38,7 @@ const workerLaunchTestState = vi.hoisted(() => ({
 	gateMarkerPath: "",
 	tsxCliPath: "",
 	cliEntrypoint: "",
+	spawnFailureCode: undefined as string | undefined,
 	spawned: [] as Array<{ child: ChildProcess; args: readonly string[] }>,
 }));
 
@@ -48,6 +49,25 @@ vi.mock("node:child_process", async (importOriginal) => {
 	return {
 		...actual,
 		spawn(command: string, args: readonly string[], options: SpawnOptions): ChildProcess {
+			const failureCode = workerLaunchTestState.spawnFailureCode;
+			if (failureCode) {
+				// Mirror Node's fd-exhaustion spawn failure: no pid, stdio undefined,
+				// "error" emitted before "close".
+				const failing = Object.assign(new EventEmitter(), {
+					pid: undefined,
+					stdio: undefined,
+					stderr: undefined,
+					unref: () => {},
+				}) as unknown as ChildProcess;
+				process.nextTick(() => {
+					failing.emit(
+						"error",
+						Object.assign(new Error(`spawn ${command} ${failureCode}`), { code: failureCode }),
+					);
+					failing.emit("close", null, null);
+				});
+				return failing;
+			}
 			const child = actual.spawn(command, args, options);
 			if (workerLaunchTestState.capture) {
 				workerLaunchTestState.spawned.push({ child, args });
@@ -288,6 +308,7 @@ describe("daemon worker supervisor monitoring", () => {
 		workerLaunchTestState.gateMarkerPath = "";
 		workerLaunchTestState.tsxCliPath = "";
 		workerLaunchTestState.cliEntrypoint = "";
+		workerLaunchTestState.spawnFailureCode = undefined;
 		workerLaunchTestState.spawned.length = 0;
 		vi.useRealTimers();
 		for (const registryDir of supervisorRegistryDirs) {
@@ -633,6 +654,31 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(readdirSync(descriptorDir).filter((name) => name.endsWith(".json"))).toEqual([]);
 		const child = workerLaunchTestState.spawned.at(-1)?.child;
 		expect(child?.exitCode !== null || child?.signalCode !== null).toBe(true);
+	});
+
+	it("fails the create with the spawn error when the worker process cannot be spawned", async () => {
+		workerLaunchTestState.spawnFailureCode = "EMFILE";
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-spawn-failure-test-"));
+		const descriptorDir = join(root, "descriptors");
+		mkdirSync(descriptorDir, { recursive: true });
+		supervisorRegistryDirs.add(root);
+		const workers = new Map<string, unknown>();
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			...createSupervisorSnapshotState(),
+			defaultSessionConfig: { cwd: root, agentDir: root },
+			descriptorDir,
+			socketPath: join(root, "supervisor.sock"),
+			workers,
+			assertRecoveryAllowed: vi.fn(async () => {}),
+			log: vi.fn(),
+		}) as {
+			launchWorker(command: { type: "create"; config: { cwd: string; agentDir: string } }): Promise<unknown>;
+		};
+
+		await expect(supervisor.launchWorker({ type: "create", config: { cwd: root, agentDir: root } })).rejects.toThrow(
+			/EMFILE.*resident session workers.*ulimit -n/s,
+		);
+		expect(workers.size).toBe(0);
 	});
 
 	it("commits the startup marker after durable worker publication", async () => {
