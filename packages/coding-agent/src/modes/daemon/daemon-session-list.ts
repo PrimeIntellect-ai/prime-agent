@@ -110,7 +110,7 @@ export function isSessionSummaryBusy(summary: SessionSummary): boolean {
 	return summary.isSessionActive || summary.hasRunningRlmChildren === true;
 }
 
-/** An abandoned draft, safe to passivate on last detach. Naming signals intent to return, so named sessions are exempt. */
+/** Naming signals intent to return, so named sessions are exempt even when empty. */
 export function isEvictableEmptySessionSummary(summary: SessionSummary): boolean {
 	return (
 		summary.messageCount === 0 &&

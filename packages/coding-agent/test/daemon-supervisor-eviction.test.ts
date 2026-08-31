@@ -484,7 +484,6 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		supervisor.clients.add(first);
 		supervisor.clients.add(viewer);
 
-		// Not the last client of empty-root: nothing evicted.
 		await supervisor.handleCommand(first, { id: "detach-1", type: "detach", activeSessionId: "empty-root" });
 		await settle();
 		expect(supervisor.stopWorker).not.toHaveBeenCalled();

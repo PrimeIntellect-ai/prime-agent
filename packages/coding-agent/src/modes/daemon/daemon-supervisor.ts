@@ -915,7 +915,6 @@ export class DaemonSupervisor {
 		}
 	}
 
-	/** Passivates an abandoned empty draft on last detach - same passivation as the idle sweep; never rejects. */
 	private async evictEmptySessionOnLastDetach(activeSessionId: string): Promise<void> {
 		if (this.shuttingDown || this.updateRestartPhase !== undefined || this.idleEvictionFence) return;
 		const worker = this.matchWorkers(activeSessionId)[0]?.worker;
@@ -929,14 +928,12 @@ export class DaemonSupervisor {
 			return;
 		}
 		try {
-			// Fresh summaries, so an admitted-but-unpersisted first turn reads busy.
 			await this.refreshWorkerSummaries(worker);
 		} catch {
 			return;
 		}
 		if (!this.isEmptyDetachEvictionCandidate(worker) || this.idleEvictionFence) return;
-		// Same coordination as the idle sweep: fence new mutations, drain admitted
-		// ones, then re-read so the final decision reflects them.
+		// Idle-sweep coordination: fence new mutations, drain admitted ones, re-read before deciding.
 		let releaseFence: () => void = () => {};
 		const fence = new Promise<void>((resolveFence) => {
 			releaseFence = resolveFence;
