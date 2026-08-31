@@ -851,6 +851,10 @@ describe("DaemonAgentConnection", () => {
 		} as unknown as DaemonWorkerClient;
 		const routed = new DaemonRoutedClient(asDaemonClient(supervisor), direct);
 		const connection = await DaemonAgentConnection.attach(routed, "active-1");
+		const events: AgentConnectionEvent[] = [];
+		connection.subscribe(async (event) => {
+			events.push(event);
+		});
 		let helloAttempts = 0;
 		supervisor.waitForHello = vi.fn(async () => {
 			helloAttempts++;
@@ -860,10 +864,15 @@ describe("DaemonAgentConnection", () => {
 		supervisor.connected = false;
 		supervisor.emitClose(new Error("supervisor socket closed"));
 
-		await vi.waitFor(() => expect(supervisor.reconnectCount).toBe(2));
+		await vi.waitFor(() =>
+			expect(events.some((event) => event.type === "connection_status" && event.status === "connected")).toBe(true),
+		);
 
+		expect(supervisor.reconnectCount).toBe(2);
 		expect(supervisor.resetTransportCount).toBe(1);
 		expect(routed.hasDirectTransport).toBe(true);
+		// The direct link streamed state throughout, so control-plane recovery must not flash a resync.
+		expect(events.filter((event) => event.type === "session_resynced")).toHaveLength(0);
 		await connection.dispose();
 	});
 
@@ -2396,9 +2405,13 @@ describe("DaemonAgentConnection", () => {
 			reconnectTimeoutMs: 2000,
 		});
 		const statuses: string[] = [];
+		let resyncs = 0;
 		connection.subscribe((event) => {
 			if (event.type === "connection_status") {
 				statuses.push(event.status);
+			}
+			if (event.type === "session_resynced") {
+				resyncs++;
 			}
 		});
 		await connection.attach();
@@ -2412,6 +2425,7 @@ describe("DaemonAgentConnection", () => {
 		expect(fakeClient.reconnectCount).toBe(2);
 		expect(fakeClient.resetTransportCount).toBe(1);
 		expect(fakeClient.requests.filter((request) => request.type === "attach")).toHaveLength(3);
+		expect(resyncs).toBe(1);
 	});
 
 	it("does not reconnect after disposal while daemon recovery is pending", async () => {

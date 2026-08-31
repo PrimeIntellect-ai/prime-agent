@@ -1585,8 +1585,12 @@ export class DaemonAgentConnection implements AgentConnection {
 					// This loop owns the retry: a socket close must reject these instead of parking them behind a hello it can never produce.
 					await this.attach({ recoverable: false });
 					if (!this.disposed) {
-						const snapshot = await this.getInitialSnapshot({ recoverable: false });
-						void this.emit({ type: "session_resynced", snapshot });
+						// A held direct link streamed session state throughout; only a supervisor re-attach resyncs.
+						const directSessionHeld = this.client instanceof DaemonRoutedClient && this.client.hasDirectTransport;
+						if (!directSessionHeld) {
+							const snapshot = await this.getInitialSnapshot({ recoverable: false });
+							void this.emit({ type: "session_resynced", snapshot });
+						}
 						void this.emit({ type: "connection_status", status: "connected" });
 					}
 					return;
