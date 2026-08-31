@@ -41,7 +41,7 @@ interface WorkerReporterFixture {
 			lastComposed: Map<string, WorkerRosterEntry>;
 			lastComposedJson: Map<string, string>;
 			queuedChildren: Map<string, WorkerRosterEntry>;
-			removedAgentIds: Set<string>;
+			removedAgentIds: Map<string, string | undefined>;
 			snapshotPending: boolean;
 		};
 	};
@@ -60,7 +60,7 @@ function makeWorkerReporter(connected = true): WorkerReporterFixture {
 			lastComposed: new Map<string, WorkerRosterEntry>(),
 			lastComposedJson: new Map<string, string>(),
 			queuedChildren: new Map<string, WorkerRosterEntry>(),
-			removedAgentIds: new Set<string>(),
+			removedAgentIds: new Map<string, string | undefined>(),
 			snapshotPending: false,
 		},
 		rosterFlushScheduled: false,
@@ -245,6 +245,46 @@ describe("worker roster reporter", () => {
 		expect(daemon.rosterReporter.queuedChildren.size).toBe(0);
 	});
 
+	it("cancels pending removals for reincarnated ids but keeps the removed incarnation suppressed", () => {
+		const { daemon, sentDeltas, connection } = makeWorkerReporter();
+		const parent = makeState({ activeSessionId: "parent-active" });
+		daemon.sessions.set(parent.activeSessionId, parent);
+
+		// A deletion while disconnected leaves the removal pending; the id is then reused by a new admission.
+		connection.connected = false;
+		daemon.rosterReporter.removedAgentIds.set("child-1", "old-session");
+		daemon.flushRoster();
+		daemon.observeRosterEvent(
+			parent,
+			childUpdate(parent, { id: "child-1", label: "again", status: "queued", sessionDir: "/tmp/c" }),
+		);
+		daemon.flushRoster();
+		connection.connected = true;
+		daemon.flushRoster();
+		const snapshot = sentDeltas.at(-1);
+		expect(snapshot?.snapshot).toBe(true);
+		expect(snapshot?.removedAgentIds).toBeUndefined();
+		expect(snapshot?.entries.some((entry) => entry.agentId === "child-1" && entry.queuedChild === true)).toBe(true);
+
+		// The removed incarnation itself (same sessionId, mid-teardown) stays suppressed and never ghosts.
+		daemon.rosterReporter.queuedChildren.clear();
+		const dying = makeState({
+			activeSessionId: "child-active",
+			kind: "subagent",
+			rlmChildId: "child-2",
+			parentActiveSessionId: "parent-active",
+			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
+		});
+		daemon.sessions.set(dying.activeSessionId, dying);
+		daemon.flushRoster();
+		daemon.rosterReporter.removedAgentIds.set("child-2", "session-child-active");
+		daemon.flushRoster();
+		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual(["child-2"]);
+		daemon.sessions.delete(dying.activeSessionId);
+		daemon.flushRoster();
+		expect(daemon.rosterReporter.lastComposed.has("child-2")).toBe(false);
+	});
+
 	it("flushes hasRegisteredCronJob on cron_add and cron_cancel without any session event", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-cron-flush-"));
 		tempDirs.push(directory);
@@ -415,13 +455,16 @@ describe("worker roster reporter", () => {
 				lastComposed: new Map(),
 				lastComposedJson: new Map(),
 				queuedChildren: new Map(),
-				removedAgentIds: new Set(["deleted-agent"]),
+				removedAgentIds: new Map([["deleted-agent", undefined]]),
 				snapshotPending: false,
 			},
 			rosterFlushScheduled: false,
 			shuttingDown: false,
 			log: vi.fn(),
-		}) as { flushRoster(): void; rosterReporter: { snapshotPending: boolean; removedAgentIds: Set<string> } };
+		}) as {
+			flushRoster(): void;
+			rosterReporter: { snapshotPending: boolean; removedAgentIds: Map<string, string | undefined> };
+		};
 
 		daemon.flushRoster();
 		// The queued write IS delivered: nothing stays pending and only the claimed socket receives the write.
@@ -432,7 +475,7 @@ describe("worker roster reporter", () => {
 
 		// A destroyed claim socket is an actual loss gap: the change marks one pending snapshot.
 		client.socket.destroyed = true;
-		daemon.rosterReporter.removedAgentIds.add("lost-agent");
+		daemon.rosterReporter.removedAgentIds.set("lost-agent", undefined);
 		daemon.flushRoster();
 		expect(write).toHaveBeenCalledTimes(1);
 		expect(daemon.rosterReporter.snapshotPending).toBe(true);
@@ -1716,6 +1759,28 @@ describe("review-round regressions", () => {
 		const entry = supervisor.roster().get(rootEntry.agentId);
 		expect(entry?.workerId).toBeUndefined();
 		expect(entry?.summary.activeSessionId).toBeUndefined();
+
+		// A socket close (registration intact) equally stales queued applies: recovering labels survive.
+		const closed = makeWorker("worker-2");
+		const closedEntry = workerRosterEntryFromSummary(
+			summary({ id: "worker-2-root-active", sessionId: "root-2", activeSessionId: "worker-2-root-active" }),
+		);
+		let releaseClosedEdges: (edges: unknown[]) => void = () => {};
+		const closedSupervisor = makeSupervisor([closed], {
+			rlmSpawnLedger: () => ({
+				edges: () =>
+					new Promise<unknown[]>((resolveEdges) => {
+						releaseClosedEdges = resolveEdges;
+					}),
+			}),
+		});
+		closedSupervisor.writeRosterEntry(closedEntry, closed);
+		closedSupervisor.consumeWorkerRosterDelta(closed, rosterDelta([closedEntry], undefined, true));
+		await closedSupervisor.handleWorkerClose(closed, closed.client as object, new Error("worker died"));
+		releaseClosedEdges([]);
+		await new Promise((resolveSettle) => setImmediate(resolveSettle));
+
+		expect(closedSupervisor.workerRosterEntries(closed)[0]).toMatchObject({ statusLabel: "recovering" });
 	});
 
 	it("repairs failed roster applies with one single-flight pull that never respawns itself", async () => {
@@ -1843,7 +1908,7 @@ describe("review-round regressions", () => {
 			lastComposed: new Map<string, WorkerRosterEntry>(),
 			lastComposedJson: new Map<string, string>(),
 			queuedChildren: new Map<string, WorkerRosterEntry>(),
-			removedAgentIds: new Set<string>(),
+			removedAgentIds: new Map<string, string | undefined>(),
 			snapshotPending: true,
 		};
 		for (let index = 0; index < 3000; index++) {
@@ -1934,7 +1999,7 @@ describe("review-round regressions", () => {
 		const internals = daemon as unknown as {
 			rlmSpawnLedger(): RlmSpawnLedger;
 			recordRlmSubagentDeletion(parentState: ActiveSessionState, childId: string): Promise<void>;
-			rosterReporter: { removedAgentIds: Set<string> };
+			rosterReporter: { removedAgentIds: Map<string, string | undefined> };
 		};
 		await internals
 			.rlmSpawnLedger()
@@ -1969,7 +2034,7 @@ describe("worker delete tombstone durability", () => {
 		Object.assign(daemon, { rlmSpawnLedger: () => ({ edges: ledgerEdges }) });
 		return daemon as unknown as {
 			handleCommand(client: object, command: object): Promise<unknown>;
-			rosterReporter: { removedAgentIds: Set<string> };
+			rosterReporter: { removedAgentIds: Map<string, string | undefined> };
 		};
 	}
 
@@ -1992,7 +2057,7 @@ describe("worker delete tombstone durability", () => {
 		);
 
 		expect(existsSync(sessionPath)).toBe(false);
-		expect([...daemon.rosterReporter.removedAgentIds]).toEqual([manager.getSessionId()]);
+		expect([...daemon.rosterReporter.removedAgentIds.keys()]).toEqual([manager.getSessionId()]);
 	});
 	it("classifies an unreadable delete target through the ledger", async () => {
 		const setup = () => {
@@ -2015,7 +2080,7 @@ describe("worker delete tombstone durability", () => {
 		} as never) as unknown as {
 			rlmSpawnLedger(): RlmSpawnLedger;
 			handleCommand(client: object, command: object): Promise<unknown>;
-			rosterReporter: { removedAgentIds: Set<string> };
+			rosterReporter: { removedAgentIds: Map<string, string | undefined> };
 		};
 		await daemonWithEdge.rlmSpawnLedger().appendSpawn({
 			childId: "sub-9",

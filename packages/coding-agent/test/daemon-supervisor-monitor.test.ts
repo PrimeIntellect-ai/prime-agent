@@ -500,7 +500,7 @@ describe("daemon worker supervisor monitoring", () => {
 				lastComposed: new Map(),
 				lastComposedJson: new Map(),
 				queuedChildren: new Map(),
-				removedAgentIds: new Set(),
+				removedAgentIds: new Map(),
 				snapshotPending: false,
 			},
 			shuttingDown: false,

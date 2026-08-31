@@ -11,7 +11,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { type Api, getLogger, type Model } from "@earendil-works/pi-ai";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
@@ -557,7 +557,7 @@ export class AgentDaemon {
 		lastComposed: new Map(),
 		lastComposedJson: new Map(),
 		queuedChildren: new Map(),
-		removedAgentIds: new Set(),
+		removedAgentIds: new Map(),
 		snapshotPending: false,
 	};
 	private rosterFlushScheduled = false;
@@ -1136,7 +1136,10 @@ export class AgentDaemon {
 		await this.rlmSpawnLedger().appendDelete({ childId, child: entry.sessionFile, reason });
 		// Only worker daemons flush removals; a non-worker daemon must not grow the set unbounded.
 		if (this.options.worker) {
-			this.rosterReporter.removedAgentIds.add(this.rosterAgentIdForRlmChild(childId, entry.parentSessionFile));
+			this.rosterReporter.removedAgentIds.set(
+				this.rosterAgentIdForRlmChild(childId, entry.parentSessionFile),
+				basename(entry.sessionFile, ".jsonl"),
+			);
 			this.scheduleRosterFlush();
 		}
 		// Deletion boundary: transcript + display tombstone are the durable
@@ -3931,7 +3934,10 @@ export class AgentDaemon {
 						composedEntry?.agentId ??
 						(ledgerEdge ? this.rosterAgentIdForRlmChild(ledgerEdge.childId, ledgerEdge.parent) : deletedInfo?.id);
 					if (removedAgentId) {
-						this.rosterReporter.removedAgentIds.add(removedAgentId);
+						this.rosterReporter.removedAgentIds.set(
+							removedAgentId,
+							composedEntry?.summary.sessionId ?? deletedInfo?.id,
+						);
 						this.scheduleRosterFlush();
 					}
 				}
@@ -6375,7 +6381,9 @@ export class AgentDaemon {
 		this.acpMcpOwners.delete(state.activeSessionId);
 		this.sessions.delete(state.activeSessionId);
 		// A discarded draft leaves no transcript, so its roster row goes with it.
-		if (isEmptyDraftSession) this.rosterReporter.removedAgentIds.add(this.rosterAgentIdForState(state));
+		if (isEmptyDraftSession && this.options.worker) {
+			this.rosterReporter.removedAgentIds.set(this.rosterAgentIdForState(state), state.runtime.session.sessionId);
+		}
 		this.scheduleRosterFlush();
 		if (isEmptyDraftSession) {
 			const sessionFile = state.runtime.session.sessionFile;
@@ -6690,9 +6698,18 @@ export class AgentDaemon {
 		}
 		// A terminal unbound child run owns no transcript: it is a removal, never a passivated row.
 		for (const [agentId, previous] of reporter.lastComposed) {
-			if (previous.queuedChild === true && !entries.has(agentId)) reporter.removedAgentIds.add(agentId);
+			if (previous.queuedChild === true && !entries.has(agentId)) {
+				reporter.removedAgentIds.set(agentId, previous.summary.sessionId);
+			}
 		}
-		for (const agentId of reporter.removedAgentIds) {
+		for (const [agentId, targetSessionId] of reporter.removedAgentIds) {
+			const composed = entries.get(agentId);
+			// A new incarnation of the id cancels the stale pending removal; the removed incarnation
+			// itself (same sessionId, mid-teardown) stays suppressed so it cannot ghost as passivated.
+			if (composed && (composed.queuedChild === true || composed.summary.sessionId !== targetSessionId)) {
+				reporter.removedAgentIds.delete(agentId);
+				continue;
+			}
 			entries.delete(agentId);
 			reporter.queuedChildren.delete(agentId);
 		}
@@ -6720,7 +6737,7 @@ export class AgentDaemon {
 			nextJson.set(entry.agentId, json);
 			if (reporter.lastComposedJson.get(entry.agentId) !== json) changed.push(entry);
 		}
-		const removedAgentIds = [...reporter.removedAgentIds];
+		const removedAgentIds = [...reporter.removedAgentIds.keys()];
 		reporter.lastComposed = new Map(entries);
 		reporter.lastComposedJson = nextJson;
 		if (!this.hasAuthenticatedSupervisorClient()) {
@@ -7154,7 +7171,9 @@ interface WorkerRosterReporterState {
 	lastComposedJson: Map<string, string>;
 	/** Admitted child runs whose sessions have not materialized yet, keyed by agentId. */
 	queuedChildren: Map<string, WorkerRosterEntry>;
-	removedAgentIds: Set<string>;
+	/** Pending removals: agentId -> the sessionId being removed. A row composed again with a
+	 * different sessionId (or a re-admitted run) is a new incarnation and cancels the removal. */
+	removedAgentIds: Map<string, string | undefined>;
 	/** Set on any undelivered change; the next flush sends one full replacing snapshot. */
 	snapshotPending: boolean;
 }

@@ -3836,7 +3836,12 @@ export class DaemonSupervisor {
 	}
 
 	private isWorkerRosterApplyCurrent(worker: ResidentWorker): boolean {
-		return this.workers.get(worker.descriptor.workerId) === worker;
+		// A closed connection stales its queued applies: rows marked "recovering" on socket close must
+		// not be rewritten by an apply the dead connection left behind. Reconnection resumes applies.
+		return (
+			this.workers.get(worker.descriptor.workerId) === worker &&
+			(worker.client ?? worker.pendingClient) !== undefined
+		);
 	}
 
 	/** A partial apply may have deleted rows it never rewrote; one single-flight gap-fill pull repairs the ledger. */
