@@ -3947,9 +3947,13 @@ export class DaemonSupervisor {
 
 	/** A stopped or evicted worker leaves inactive rows behind, never gaps. */
 	private flipWorkerRosterEntriesInactive(worker: ResidentWorker): void {
+		// Client-owned workers are ephemeral (normal completion removes them without archiving) and
+		// their rows are private to the owner; passivating would strip the workerId and turn them into
+		// public inactive rows. The public disk scan still lists whatever files actually persist.
+		const ephemeral = worker.descriptor.ownerClientId !== undefined;
 		for (const entry of this.workerRosterEntries(worker)) {
 			// A terminal unbound child run owns no transcript: it is a removal, never a passivated row.
-			if (entry.queuedChild) {
+			if (ephemeral || entry.queuedChild) {
 				this.roster().delete(entry.agentId);
 				continue;
 			}

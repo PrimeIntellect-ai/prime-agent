@@ -717,6 +717,46 @@ describe("supervisor roster ledger", () => {
 		expect(entry?.summary.activeSessionId).toBe("r-active");
 	});
 
+	it("drops a client-owned worker's rows on unregistration instead of leaking public inactive rows", async () => {
+		const owned = makeWorker("w-owned");
+		Object.assign(owned.descriptor, { ownerClientId: "owner-client" });
+		const supervisor = makeSupervisor([owned], { catalog: { list: vi.fn(async () => []) } });
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({
+					id: "o-active",
+					sessionId: "o",
+					activeSessionId: "o-active",
+					sessionFile: "/tmp/sessions/owned.jsonl",
+				}),
+			),
+			owned,
+		);
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({
+					id: "oc",
+					sessionId: "oc",
+					sessionFile: "/tmp/artifacts/oc.jsonl",
+					runtimeKind: "subagent",
+					rlmChildId: "oc",
+					parentSessionPath: "/tmp/sessions/owned.jsonl",
+				}),
+			),
+			owned,
+		);
+
+		supervisor.flipWorkerRosterEntriesInactive(owned);
+		supervisor.workers.delete("w-owned");
+
+		expect([...supervisor.roster().values()]).toHaveLength(0);
+		const listed = await supervisor.handleList(
+			{ id: "intruder", attachedActiveSessionIds: new Set<string>() },
+			{ type: "list", all: true },
+		);
+		expect(listed.data?.sessions).toEqual([]);
+	});
+
 	it("removes queued rows on worker unregistration instead of passivating unlistable ghosts", () => {
 		const worker = makeWorker("worker-1");
 		const supervisor = makeSupervisor([worker]);
