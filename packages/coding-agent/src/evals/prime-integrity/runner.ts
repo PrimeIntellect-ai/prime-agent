@@ -21,6 +21,7 @@ import {
 	AVO_PYTHON_PROBE_BROKER_TOKEN_ENV,
 	startAvoPythonProbeBroker,
 } from "../../core/avo/probe.js";
+import { sanitizeAvoVerificationEnvironment } from "../../core/avo/verification-environment.js";
 import { createPrimeIntegrityCatalog } from "./catalog.js";
 import type {
 	PrimeIntegrityAggregate,
@@ -40,6 +41,70 @@ const SOURCE_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_GIT_DIR = resolve(SOURCE_DIR, "..", "..", "..", "..", "..", ".git");
 const DEFAULT_TIMEOUT_MS = 12 * 60 * 1000;
 const DEFAULT_MAX_TURNS = 12;
+const PRIME_INTEGRITY_CREDENTIAL_HOME_PATHS = [
+	".aws",
+	".azure",
+	".codex",
+	join(".config", "gcloud"),
+	join(".config", "gh"),
+	join(".config", "glab"),
+	".docker",
+	".git-credentials",
+	".gnupg",
+	".kube",
+	".netrc",
+	".npmrc",
+	".pypirc",
+	join(".prime", "agent-avo"),
+	".ssh",
+	".terraform.d",
+] as const;
+const PRIME_INTEGRITY_CREDENTIAL_PATH_ENVIRONMENT_KEYS = [
+	"AWS_CONFIG_FILE",
+	"AWS_SHARED_CREDENTIALS_FILE",
+	"CODEX_HOME",
+	"DOCKER_CONFIG",
+	"GOOGLE_APPLICATION_CREDENTIALS",
+	"KUBECONFIG",
+	"NETRC",
+	"NPM_CONFIG_USERCONFIG",
+	"PRIME_AGENT_AVO_CONFIG_DIR",
+	"PRIME_AGENT_CODING_AGENT_DIR",
+] as const;
+const PRIME_INTEGRITY_RUNTIME_SOCKET_PATHS = [
+	"/run/containerd",
+	"/run/crio",
+	"/run/docker.sock",
+	"/run/podman",
+	"/run/user",
+	"/var/run/docker.sock",
+] as const;
+const PRIME_INTEGRITY_ENVIRONMENT_ALLOWLIST = new Set([
+	"CI",
+	"COLORTERM",
+	"FORCE_COLOR",
+	"LANG",
+	"LOGNAME",
+	"NODE_EXTRA_CA_CERTS",
+	"NO_COLOR",
+	"PATH",
+	"PRIME_AGENT_MAX_CONCURRENT_KERNEL_BOOTS",
+	"RLM_MAX_DEPTH",
+	"SHELL",
+	"SSL_CERT_DIR",
+	"SSL_CERT_FILE",
+	"TERM",
+	"TZ",
+	"USER",
+]);
+
+export interface PrimeIntegritySandboxPaths {
+	runRoot: string;
+	workspace: string;
+	hiddenDir: string;
+	agentDir: string;
+	privateHome: string;
+}
 
 interface RunnerOptions {
 	all: boolean;
@@ -306,51 +371,276 @@ async function runCommand(
 	};
 }
 
-function copyAgentConfig(source: string, destination: string): void {
-	mkdirSync(destination, { recursive: true, mode: 0o700 });
-	for (const filename of ["auth.json", "models.json", "settings.json", "telemetry.json"]) {
-		const sourcePath = join(source, filename);
-		if (!existsSync(sourcePath)) continue;
-		const destinationPath = join(destination, filename);
-		cpSync(sourcePath, destinationPath, { force: false, errorOnExist: true });
-		chmodSync(destinationPath, 0o600);
+function readJsonObject(path: string): Record<string, unknown> {
+	const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error(`Prime Integrity configuration must contain a JSON object: ${path}`);
 	}
+	return parsed as Record<string, unknown>;
+}
+
+function copyAgentConfig(source: string, destination: string, providerOverride?: string): void {
+	mkdirSync(destination, { recursive: true, mode: 0o700 });
+	const settingsPath = join(source, "settings.json");
+	const sourceSettings = existsSync(settingsPath) ? readJsonObject(settingsPath) : {};
+	const settingsKeys = [
+		"defaultProvider",
+		"defaultModel",
+		"defaultServiceTier",
+		"rlmMaxDepth",
+		"transport",
+		"thinkingBudgets",
+	] as const;
+	const benchmarkSettings = Object.fromEntries(
+		settingsKeys.flatMap((key) => (sourceSettings[key] === undefined ? [] : [[key, sourceSettings[key]]])),
+	);
+	const settingsOutput = join(destination, "settings.json");
+	writeFileSync(
+		settingsOutput,
+		`${JSON.stringify(
+			{
+				...benchmarkSettings,
+				mcpServers: {},
+				bundledSkills: { websearch: false },
+				telemetry: { enabled: false },
+			},
+			null,
+			2,
+		)}\n`,
+	);
+	chmodSync(settingsOutput, 0o600);
+
+	const selectedProvider =
+		providerOverride ??
+		(typeof sourceSettings.defaultProvider === "string" ? sourceSettings.defaultProvider : undefined);
+	const authPath = join(source, "auth.json");
+	if (existsSync(authPath)) {
+		const sourceAuth = readJsonObject(authPath);
+		const selectedAuth = selectedProvider ? sourceAuth[selectedProvider] : undefined;
+		const providerAuth = selectedProvider
+			? selectedAuth === undefined
+				? {}
+				: { [selectedProvider]: selectedAuth }
+			: Object.fromEntries(Object.entries(sourceAuth).filter(([key]) => !key.startsWith("mcp:")));
+		const authOutput = join(destination, "auth.json");
+		writeFileSync(authOutput, `${JSON.stringify(providerAuth, null, 2)}\n`);
+		chmodSync(authOutput, 0o600);
+	}
+
+	const modelsPath = join(source, "models.json");
+	if (existsSync(modelsPath)) {
+		const modelsOutput = join(destination, "models.json");
+		cpSync(modelsPath, modelsOutput, { force: false, errorOnExist: true });
+		chmodSync(modelsOutput, 0o600);
+	}
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+	return left === right || left.startsWith(`${right}${sep}`) || right.startsWith(`${left}${sep}`);
+}
+
+function maskedPathMountArgs(candidates: string[], writableRoot: string): string[] {
+	const canonicalWritableRoot = realpathSync(writableRoot);
+	const selected: Array<{ path: string; directory: boolean }> = [];
+	for (const candidate of [...new Set(candidates.map((path) => resolve(path)))].sort()) {
+		if (!existsSync(candidate)) continue;
+		const path = realpathSync(candidate);
+		if (pathsOverlap(path, canonicalWritableRoot)) {
+			throw new Error(`Prime Integrity credential path overlaps the writable run root: ${path}`);
+		}
+		if (selected.some((entry) => entry.directory && path.startsWith(`${entry.path}${sep}`))) continue;
+		selected.push({ path, directory: statSync(path).isDirectory() });
+	}
+	return selected.flatMap(({ path, directory }) => (directory ? ["--tmpfs", path] : ["--ro-bind", "/dev/null", path]));
+}
+
+function primeIntegritySensitiveMountArgs(
+	runRoot: string,
+	configSource: string,
+	environment: NodeJS.ProcessEnv,
+): string[] {
+	return maskedPathMountArgs(
+		[
+			...PRIME_INTEGRITY_CREDENTIAL_HOME_PATHS.map((path) => join(homedir(), path)),
+			...PRIME_INTEGRITY_CREDENTIAL_PATH_ENVIRONMENT_KEYS.flatMap((key) => {
+				const value = environment[key]?.trim();
+				return value ? [value] : [];
+			}),
+			...PRIME_INTEGRITY_RUNTIME_SOCKET_PATHS,
+			configSource,
+		],
+		runRoot,
+	);
+}
+
+function shellQuote(value: string): string {
+	return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function resolvePrimeIntegrityKernelPython(environment: NodeJS.ProcessEnv): string {
+	const configured = environment.PRIME_AGENT_KERNEL_PYTHON?.trim();
+	const candidate = configured
+		? resolve(configured)
+		: join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python");
+	if (!existsSync(candidate)) {
+		throw new Error(
+			"Prime Integrity hardening requires PRIME_AGENT_KERNEL_PYTHON or an existing ~/.prime/agent/kernel-venv/bin/python",
+		);
+	}
+	return candidate;
+}
+
+const LANDLOCK_READ_EXECUTE_ACCESS = "execute,read-file,read-dir";
+const LANDLOCK_READ_WRITE_ACCESS =
+	"execute,write-file,read-file,read-dir,remove-dir,remove-file,make-dir,make-reg,make-sock,make-fifo,make-sym,refer,truncate";
+
+function landlockRule(access: string, path: string): string[] {
+	if (!existsSync(path)) return [];
+	const supportedAccess = statSync(path).isDirectory()
+		? access
+		: access
+				.split(",")
+				.filter((right) => ["execute", "read-file", "write-file", "truncate"].includes(right))
+				.join(",");
+	return supportedAccess ? ["--landlock-rule", `path-beneath:${supportedAccess}:${path}`] : [];
+}
+
+export function writePrimeIntegrityKernelSandboxLauncher(
+	paths: PrimeIntegritySandboxPaths,
+	realPython: string,
+): string {
+	const launcherPath = join(dirname(paths.agentDir), "prime-integrity-kernel-python");
+	const pythonEnvironmentRoot = dirname(dirname(realPython));
+	const pythonRuntimeRoot = dirname(dirname(realpathSync(realPython)));
+	const readOnlyPaths = [
+		"/bin",
+		"/lib",
+		"/lib64",
+		"/sbin",
+		"/usr",
+		"/etc/ca-certificates",
+		"/etc/group",
+		"/etc/hosts",
+		"/etc/localtime",
+		"/etc/nsswitch.conf",
+		"/etc/passwd",
+		"/etc/pki",
+		"/etc/resolv.conf",
+		"/etc/ssl",
+		"/sys/devices/system/cpu",
+		pythonEnvironmentRoot,
+		pythonRuntimeRoot,
+	];
+	const writablePaths = [paths.workspace, paths.privateHome];
+	const argv = [
+		"/usr/bin/setpriv",
+		"--no-new-privs",
+		"--landlock-access",
+		"fs",
+		...readOnlyPaths.flatMap((path) => landlockRule(LANDLOCK_READ_EXECUTE_ACCESS, path)),
+		...landlockRule("read-file,read-dir,write-file", "/dev"),
+		...writablePaths.flatMap((path) => landlockRule(LANDLOCK_READ_WRITE_ACCESS, path)),
+		"--",
+		realPython,
+	];
+	writeFileSync(
+		launcherPath,
+		`#!/bin/sh\nunset ${AVO_PYTHON_PROBE_BROKER_SOCKET_ENV} ${AVO_PYTHON_PROBE_BROKER_TOKEN_ENV}\nexec ${argv.map(shellQuote).join(" \\\n  ")} "$@"\n`,
+		{ mode: 0o700 },
+	);
+	chmodSync(launcherPath, 0o700);
+	return launcherPath;
+}
+
+export function createPrimeIntegrityAgentEnvironment(
+	hostEnvironment: NodeJS.ProcessEnv,
+	paths: PrimeIntegritySandboxPaths,
+	kernelPython: string,
+	probeBroker?: { socketPath: string; token: string },
+): NodeJS.ProcessEnv {
+	const sanitized = sanitizeAvoVerificationEnvironment(hostEnvironment);
+	const privateTemp = join(paths.privateHome, "tmp");
+	mkdirSync(privateTemp, { recursive: true, mode: 0o700 });
+	const environment = Object.fromEntries(
+		Object.entries(sanitized).filter(
+			([key, value]) =>
+				value !== undefined && (PRIME_INTEGRITY_ENVIRONMENT_ALLOWLIST.has(key) || key.startsWith("LC_")),
+		),
+	);
+	return {
+		...environment,
+		HOME: paths.privateHome,
+		XDG_CACHE_HOME: join(paths.privateHome, ".cache"),
+		XDG_CONFIG_HOME: join(paths.privateHome, ".config"),
+		XDG_DATA_HOME: join(paths.privateHome, ".local", "share"),
+		XDG_STATE_HOME: join(paths.privateHome, ".local", "state"),
+		PRIME_AGENT_AVO_CONFIG_DIR: paths.agentDir,
+		PRIME_AGENT_CODING_AGENT_DIR: paths.agentDir,
+		PRIME_AGENT_KERNEL_FORKSERVER: "0",
+		PRIME_AGENT_KERNEL_PYTHON: kernelPython,
+		...(probeBroker
+			? {
+					[AVO_PYTHON_PROBE_BROKER_SOCKET_ENV]: probeBroker.socketPath,
+					[AVO_PYTHON_PROBE_BROKER_TOKEN_ENV]: probeBroker.token,
+				}
+			: {}),
+		TMPDIR: privateTemp,
+		TMP: privateTemp,
+		TEMP: privateTemp,
+	};
 }
 
 function sandboxArgv(
 	agentExecutable: string,
 	agentArgs: string[],
-	paths: { runRoot: string; workspace: string; hiddenDir: string },
+	paths: PrimeIntegritySandboxPaths,
+	configSource: string,
+	hostEnvironment: NodeJS.ProcessEnv,
 	protectedPaths: string[],
+	probeSocketPath?: string,
 ): string[] {
-	const argv = [
+	return [
+		"/usr/bin/bwrap",
 		"--ro-bind",
 		"/",
 		"/",
-		"--dev-bind",
-		"/dev",
+		"--dev",
 		"/dev",
 		"--proc",
 		"/proc",
+		...primeIntegritySensitiveMountArgs(paths.runRoot, configSource, hostEnvironment),
 		"--tmpfs",
 		"/tmp",
 		"--bind",
 		paths.runRoot,
 		paths.runRoot,
+		...(agentExecutable.startsWith(`/run${sep}`) || agentExecutable.startsWith(`/tmp${sep}`)
+			? [...createDirectoryMounts(dirname(agentExecutable)), "--ro-bind", agentExecutable, agentExecutable]
+			: []),
+		...(probeSocketPath?.startsWith(`/run${sep}`) || probeSocketPath?.startsWith(`/tmp${sep}`)
+			? [...createDirectoryMounts(dirname(probeSocketPath)), "--ro-bind", probeSocketPath, probeSocketPath]
+			: []),
 		"--tmpfs",
 		paths.hiddenDir,
 		"--tmpfs",
 		SOURCE_DIR,
 		"--tmpfs",
 		REPOSITORY_GIT_DIR,
+		...protectedPaths.flatMap((path) => ["--ro-bind", path, path]),
 		"--unshare-pid",
+		"--new-session",
 		"--die-with-parent",
+		"--cap-drop",
+		"ALL",
 		"--chdir",
 		paths.workspace,
+		"--setenv",
+		"HOME",
+		paths.privateHome,
+		"--",
+		agentExecutable,
+		...agentArgs,
 	];
-	for (const path of protectedPaths) argv.push("--ro-bind", path, path);
-	argv.push("--", agentExecutable, ...agentArgs);
-	return argv;
 }
 
 function nodeRuntimeRoot(): string {
@@ -410,6 +700,32 @@ function graderSandboxCommand(command: PrimeIntegrityCommand, workspace: string)
 		],
 		timeoutMs: command.timeoutMs,
 	};
+}
+
+function assertPrimeIntegrityHardeningAvailable(): void {
+	if (!existsSync("/usr/bin/bwrap") || !existsSync("/usr/bin/setpriv")) {
+		throw new Error(
+			"hardening requires bubblewrap (/usr/bin/bwrap) and util-linux setpriv (/usr/bin/setpriv); use --hardening off only for explicit A/B evaluation",
+		);
+	}
+	const landlockProbe = spawnSync(
+		"/usr/bin/setpriv",
+		[
+			"--no-new-privs",
+			"--landlock-access",
+			"fs",
+			"--landlock-rule",
+			"path-beneath:execute,read-file,read-dir:/usr",
+			"--",
+			"/bin/true",
+		],
+		{ encoding: "utf8" },
+	);
+	if (landlockProbe.status !== 0) {
+		throw new Error(
+			`hardening requires a working Landlock-enabled setpriv: ${(landlockProbe.stderr || landlockProbe.stdout || "probe failed").trim()}`,
+		);
+	}
 }
 
 function findFiles(root: string, suffix: string): string[] {
@@ -1266,20 +1582,46 @@ async function runAgentCase(
 	agentExecutable: string,
 ): Promise<PrimeIntegrityCaseResult> {
 	const caseRoot = join(options.outputDir, "cases", testCase.id);
+	if (existsSync(caseRoot)) {
+		throw new Error(`Prime Integrity case directory already exists; refusing unsafe reuse: ${caseRoot}`);
+	}
 	const workspace = join(caseRoot, "workspace");
 	const runtimeRoot = join(caseRoot, "runtime");
 	const agentDir = join(runtimeRoot, "agent");
+	const privateHome = join(runtimeRoot, "home");
 	const sessionDir = join(runtimeRoot, "sessions");
 	const artifactRoot = join(runtimeRoot, "session-artifacts");
 	const supervisorRegistryDir = join(runtimeRoot, "supervisor-owners");
 	const hiddenDir = join(caseRoot, "host-only-grader");
 	const transcriptPath = join(caseRoot, "transcript.log");
+	const hostEnvironment = { ...process.env };
 	mkdirSync(sessionDir, { recursive: true });
+	mkdirSync(artifactRoot, { recursive: true });
 	mkdirSync(supervisorRegistryDir, { recursive: true });
 	mkdirSync(hiddenDir, { recursive: true });
+	mkdirSync(privateHome, { recursive: true, mode: 0o700 });
 	writeCaseWorkspace(testCase, workspace);
-	copyAgentConfig(options.configSource, agentDir);
-	const probeBroker = options.hardening ? await startAvoPythonProbeBroker(workspace) : undefined;
+	copyAgentConfig(options.configSource, agentDir, options.provider);
+	const protectedAbsolute = testCase.protectedPaths.map((path) => safeWorkspacePath(workspace, path));
+	const sandboxPaths: PrimeIntegritySandboxPaths = {
+		runRoot: caseRoot,
+		workspace,
+		hiddenDir,
+		agentDir,
+		privateHome,
+	};
+	const probeBroker = options.hardening
+		? await startAvoPythonProbeBroker(workspace, { socketDirectory: "/tmp" })
+		: undefined;
+	let kernelPython: string | undefined;
+	try {
+		kernelPython = options.hardening
+			? writePrimeIntegrityKernelSandboxLauncher(sandboxPaths, resolvePrimeIntegrityKernelPython(hostEnvironment))
+			: hostEnvironment.PRIME_AGENT_KERNEL_PYTHON;
+	} catch (error) {
+		await probeBroker?.close();
+		throw error;
+	}
 	const protectedBefore = protectedSnapshot(testCase, workspace);
 	const agentArgs = [
 		"--daemon-socket",
@@ -1294,6 +1636,7 @@ async function runAgentCase(
 		String(options.maxTurns),
 		"--autonomous-timeout-ms",
 		String(options.timeoutMs),
+		...(options.hardening ? ["--no-env"] : []),
 		"--session-dir",
 		sessionDir,
 		"--offline",
@@ -1307,39 +1650,34 @@ async function runAgentCase(
 		testCase.prompt,
 	];
 	const environment = {
-		...process.env,
+		...(options.hardening
+			? createPrimeIntegrityAgentEnvironment(hostEnvironment, sandboxPaths, kernelPython!, probeBroker)
+			: hostEnvironment),
 		PRIME_AGENT_AVO_CONFIG_DIR: agentDir,
 		PRIME_AGENT_CODING_AGENT_DIR: agentDir,
 		PRIME_AGENT_SESSION_DIR: sessionDir,
 		PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: supervisorRegistryDir,
-		...(probeBroker
-			? {
-					[AVO_PYTHON_PROBE_BROKER_SOCKET_ENV]: probeBroker.socketPath,
-					[AVO_PYTHON_PROBE_BROKER_TOKEN_ENV]: probeBroker.token,
-				}
-			: {}),
-		...(process.env.PRIME_AGENT_KERNEL_PYTHON
-			? { PRIME_AGENT_KERNEL_PYTHON: process.env.PRIME_AGENT_KERNEL_PYTHON }
+		...(kernelPython
+			? { PRIME_AGENT_KERNEL_PYTHON: kernelPython }
 			: existsSync(join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python"))
 				? { PRIME_AGENT_KERNEL_PYTHON: join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python") }
 				: {}),
-		TMPDIR: "/tmp",
+		TMPDIR: options.hardening ? join(privateHome, "tmp") : "/tmp",
 	};
-	const protectedAbsolute = testCase.protectedPaths.map((path) => safeWorkspacePath(workspace, path));
-	const agentCommand: PrimeIntegrityCommand = options.hardening
-		? {
-				argv: [
-					"bwrap",
-					...sandboxArgv(
-						agentExecutable,
-						agentArgs,
-						{ runRoot: options.outputDir, workspace, hiddenDir },
-						protectedAbsolute,
-					),
-				],
-				timeoutMs: options.timeoutMs + 30_000,
-			}
-		: { argv: [agentExecutable, ...agentArgs], timeoutMs: options.timeoutMs + 30_000 };
+	const agentCommand: PrimeIntegrityCommand = {
+		argv: options.hardening
+			? sandboxArgv(
+					agentExecutable,
+					agentArgs,
+					sandboxPaths,
+					options.configSource,
+					hostEnvironment,
+					protectedAbsolute,
+					probeBroker?.socketPath,
+				)
+			: [agentExecutable, ...agentArgs],
+		timeoutMs: options.timeoutMs + 30_000,
+	};
 	let agent: SpawnResult;
 	try {
 		agent = await runCommand(agentCommand, { cwd: workspace, env: environment, outputLimit: 10_000_000 });
@@ -1505,9 +1843,7 @@ async function main(): Promise<void> {
 		);
 		return;
 	}
-	if (options.hardening && !existsSync("/usr/bin/bwrap")) {
-		throw new Error("hardening requires bubblewrap (bwrap); use --hardening off only for explicit A/B evaluation");
-	}
+	if (options.hardening) assertPrimeIntegrityHardeningAvailable();
 	if (!existsSync(options.configSource)) throw new Error(`config source does not exist: ${options.configSource}`);
 	const agentExecutable = resolveExecutable(options.agentCommand);
 	const startedAt = new Date().toISOString();

@@ -3,7 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { parseAvoSupervisorPayload } from "./supervisor.js";
 import type { AvoCandidate, AvoRunState } from "./types.js";
 
@@ -1362,7 +1362,12 @@ export async function executeAvoPythonProbeSandbox(
 	return executeAvoPythonProbeLocalSandbox(workspace, plan, bundle);
 }
 
-function brokerSocketDirectory(): string {
+function brokerSocketDirectory(preferredDirectory?: string): string {
+	if (preferredDirectory) {
+		const directory = resolve(preferredDirectory);
+		mkdirSync(directory, { recursive: true, mode: 0o700 });
+		return directory;
+	}
 	const runtimeDirectory = process.env.XDG_RUNTIME_DIR;
 	if (runtimeDirectory && isAbsolute(runtimeDirectory) && existsSync(runtimeDirectory)) return runtimeDirectory;
 	const fallback = join(homedir(), ".cache", "prime-agent", "probe-brokers");
@@ -1386,13 +1391,16 @@ async function listenOnSocket(server: Server, socketPath: string): Promise<void>
 	});
 }
 
-export async function startAvoPythonProbeBroker(workspace: string): Promise<AvoPythonProbeBrokerHandle> {
+export async function startAvoPythonProbeBroker(
+	workspace: string,
+	options: { socketDirectory?: string } = {},
+): Promise<AvoPythonProbeBrokerHandle> {
 	if (process.platform !== "linux" || !existsSync("/usr/bin/bwrap") || !existsSync("/usr/bin/python3")) {
 		throw new Error("the host probe broker requires Linux, /usr/bin/bwrap, and /usr/bin/python3");
 	}
 	const token = randomBytes(32).toString("hex");
 	const socketPath = join(
-		brokerSocketDirectory(),
+		brokerSocketDirectory(options.socketDirectory),
 		`prime-avo-probe-${process.pid}-${randomBytes(8).toString("hex")}.sock`,
 	);
 	const server = createServer((socket) => {
