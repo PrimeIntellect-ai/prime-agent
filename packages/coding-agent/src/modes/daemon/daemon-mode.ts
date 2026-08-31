@@ -6370,7 +6370,9 @@ export class AgentDaemon {
 		state.clients.clear();
 		this.acpMcpOwners.delete(state.activeSessionId);
 		this.sessions.delete(state.activeSessionId);
-		if (isEmptyDraftSession && this.options.worker) {
+		// An archived or discarded top-level session leaves the worker's list; only the disk scan serves
+		// it now. Subagent rows stay passivated to mirror the registry's completed children.
+		if (!keepsResumeEntry && state.runtime.metadata.kind !== "subagent" && this.options.worker) {
 			this.rosterReporter.removedAgentIds.set(this.rosterAgentIdForState(state), state.runtime.session.sessionId);
 		}
 		this.scheduleRosterFlush();
@@ -6572,7 +6574,13 @@ export class AgentDaemon {
 		const session = state.runtime.session;
 		const metadata = state.runtime.metadata;
 		if (metadata.kind === "subagent" && metadata.rlmChildId) {
-			return this.rosterAgentIdForRlmChild(metadata.rlmChildId, metadata.parentSessionFile);
+			return rosterAgentIdForSummary({
+				runtimeKind: "subagent",
+				rlmChildId: metadata.rlmChildId,
+				sessionId: metadata.rlmChildId,
+				parentSessionPath: metadata.parentSessionFile,
+				parentActiveSessionId: metadata.parentActiveSessionId,
+			});
 		}
 		return session.sessionId;
 	}

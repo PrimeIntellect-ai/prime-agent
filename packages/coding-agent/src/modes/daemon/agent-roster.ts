@@ -59,12 +59,17 @@ export interface AgentRosterEntry extends WorkerRosterEntry {
 
 // Child ids are only unique per parent (32-bit, mkdir-checked); the parent path qualifies them daemon-wide.
 export function rosterAgentIdForSummary(
-	summary: Pick<SessionSummary, "runtimeKind" | "rlmChildId" | "sessionId" | "parentSessionPath">,
+	summary: Pick<
+		SessionSummary,
+		"runtimeKind" | "rlmChildId" | "sessionId" | "parentSessionPath" | "parentActiveSessionId"
+	>,
 ): string {
 	if (summary.runtimeKind === "subagent" && summary.rlmChildId) {
-		return summary.parentSessionPath
-			? `${canonicalSessionPath(summary.parentSessionPath)}#${summary.rlmChildId}`
-			: summary.rlmChildId;
+		// No-session parents have no path (and no ledger edge); their live parent id still disambiguates.
+		const parentKey = summary.parentSessionPath
+			? canonicalSessionPath(summary.parentSessionPath)
+			: summary.parentActiveSessionId;
+		return parentKey ? `${parentKey}#${summary.rlmChildId}` : summary.rlmChildId;
 	}
 	return summary.sessionId;
 }

@@ -2140,7 +2140,10 @@ export class DaemonSupervisor {
 					}
 					await tombstoneSavedSessionDelete(this.rlmSpawnLedger(), command.sessionPath, entry?.summary);
 					const result = await this.catalog.delete(command.sessionPath);
-					if (result.ok && entry) this.roster().delete(entry.agentId);
+					// A write during the awaits replaces the row object; only the observed row may be deleted.
+					if (result.ok && entry && this.roster().get(entry.agentId) === entry) {
+						this.roster().delete(entry.agentId);
+					}
 					return success(command.id, command.type, result);
 				}
 				break;
@@ -3590,8 +3593,9 @@ export class DaemonSupervisor {
 		if (!worker.client) {
 			throw new Error("Session worker is not connected");
 		}
+		const pullSource = worker.client;
 		const epochAtStart = worker.rosterEpoch ?? 0;
-		const response = await worker.client.request({ type: "list" }, 5000);
+		const response = await pullSource.request({ type: "list" }, 5000);
 		// A frame received mid-pull can remove rows this stale pull would resurrect; re-pull once, then skip the fill.
 		if (fillGaps && (worker.rosterEpoch ?? 0) !== epochAtStart && !retried) {
 			return this.refreshWorkerSummaries(worker, recovery, fillGaps, true);
@@ -3604,7 +3608,7 @@ export class DaemonSupervisor {
 		}
 		worker.summaries = nextSummaries;
 		if (fillGaps) {
-			await this.chainWorkerRosterApply(worker, () => {
+			await this.chainWorkerRosterApply(worker, pullSource, () => {
 				if ((worker.rosterEpoch ?? 0) === epochAtStart) this.syncRosterFromWorkerSummaries(worker);
 			});
 		}
@@ -3620,7 +3624,7 @@ export class DaemonSupervisor {
 			if (recovery) {
 				await this.assertRecoveryAllowed();
 			}
-			await this.chainWorkerRosterApply(worker, () => {
+			await this.chainWorkerRosterApply(worker, pullSource, () => {
 				if ((worker.rosterEpoch ?? 0) !== epochAtStart) return;
 				worker.descriptor.rootSessionId = root.sessionId;
 				worker.descriptor.sessionFile = root.sessionFile;
@@ -3747,7 +3751,7 @@ export class DaemonSupervisor {
 		return { agentId: rosterAgentIdForSummary(summary), summary };
 	}
 
-	private consumeWorkerRosterDelta(worker: ResidentWorker, payload: Buffer): void {
+	private consumeWorkerRosterDelta(worker: ResidentWorker, payload: Buffer, source?: DaemonWorkerClient): void {
 		let delta: Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>;
 		try {
 			delta = JSON.parse(payload.toString("utf8")) as Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>;
@@ -3756,22 +3760,27 @@ export class DaemonSupervisor {
 		}
 		if (delta.type !== "roster_delta" || !Array.isArray(delta.entries)) return;
 		worker.rosterEpoch = (worker.rosterEpoch ?? 0) + 1;
-		if (!this.isWorkerRosterApplyCurrent(worker)) return;
+		const applySource = source ?? worker.client ?? worker.pendingClient;
+		if (!this.isWorkerRosterApplyCurrent(worker, applySource)) return;
 		if (delta.snapshot !== true && worker.rosterApplyChain === undefined) {
 			this.applyWorkerRosterDelta(worker, delta);
 			return;
 		}
-		this.chainWorkerRosterApply(worker, () =>
+		this.chainWorkerRosterApply(worker, applySource, () =>
 			delta.snapshot === true
-				? this.applyWorkerRosterSnapshot(worker, delta)
+				? this.applyWorkerRosterSnapshot(worker, delta, applySource)
 				: this.applyWorkerRosterDelta(worker, delta),
 		);
 	}
 
-	private chainWorkerRosterApply(worker: ResidentWorker, apply: () => void | Promise<void>): Promise<void> {
+	private chainWorkerRosterApply(
+		worker: ResidentWorker,
+		source: DaemonWorkerClient | undefined,
+		apply: () => void | Promise<void>,
+	): Promise<void> {
 		const chained = (worker.rosterApplyChain ?? Promise.resolve())
 			.then(() => {
-				if (!this.isWorkerRosterApplyCurrent(worker)) return;
+				if (!this.isWorkerRosterApplyCurrent(worker, source)) return;
 				return apply();
 			})
 			.catch((error: unknown) => {
@@ -3785,16 +3794,18 @@ export class DaemonSupervisor {
 		return chained;
 	}
 
-	private isWorkerRosterApplyCurrent(worker: ResidentWorker): boolean {
-		// A closed connection stales its queued applies; reconnection (pendingClient) resumes them.
+	// An apply is valid only while its own source connection is still the current or authenticating
+	// one: a dead connection's parked applies must not resume during (or after) a reconnect.
+	private isWorkerRosterApplyCurrent(worker: ResidentWorker, source: DaemonWorkerClient | undefined): boolean {
 		return (
 			this.workers.get(worker.descriptor.workerId) === worker &&
-			(worker.client ?? worker.pendingClient) !== undefined
+			source !== undefined &&
+			(source === worker.client || source === worker.pendingClient)
 		);
 	}
 
 	private scheduleRosterRepairPull(worker: ResidentWorker): void {
-		if (worker.rosterRepairPull || !this.isWorkerRosterApplyCurrent(worker) || !worker.client) return;
+		if (worker.rosterRepairPull || !this.isWorkerRosterApplyCurrent(worker, worker.client)) return;
 		// The marker stays set while the repair's own fill applies, so a failing repair never respawns itself.
 		worker.rosterRepairPull = this.refreshWorkerSummaries(worker, false, true)
 			.catch((error: unknown) =>
@@ -3821,6 +3832,7 @@ export class DaemonSupervisor {
 	private async applyWorkerRosterSnapshot(
 		worker: ResidentWorker,
 		delta: Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>,
+		source?: DaemonWorkerClient,
 	): Promise<void> {
 		// Live edges are read before any deletion, so a reseeded child never surfaces as a transient removal.
 		let edgesFailed = false;
@@ -3831,7 +3843,7 @@ export class DaemonSupervisor {
 				edgesFailed = true;
 				return [] as RlmLedgerEdge[];
 			});
-		if (!this.isWorkerRosterApplyCurrent(worker)) return;
+		if (!this.isWorkerRosterApplyCurrent(worker, source ?? worker.client ?? worker.pendingClient)) return;
 		// Unreadable edges: skip the absentee sweep (it cannot tell registry children from stale rows) and repair by pull.
 		const sent = new Set(delta.entries.map((entry) => entry.agentId));
 		const unclaimed = new Map<string, AgentRosterEntry>();
@@ -4772,7 +4784,7 @@ export class DaemonSupervisor {
 			snapshotPurpose,
 		} = frame.header;
 		if (outboundType === "roster_delta") {
-			this.consumeWorkerRosterDelta(worker, frame.payload);
+			this.consumeWorkerRosterDelta(worker, frame.payload, source);
 			return;
 		}
 		if (outboundType === "roster_heartbeat") {

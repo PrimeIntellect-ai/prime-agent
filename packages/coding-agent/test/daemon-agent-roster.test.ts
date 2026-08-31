@@ -49,7 +49,9 @@ function makeWorkerReporter(connected = true): WorkerReporterFixture {
 	const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
 		options: { worker: { authenticationToken: "token" } },
 		sessions: new Map<string, ActiveSessionState>(),
-		cronStore: { list: () => [] },
+		cronStore: { list: () => [], cancelJobsForSession: () => [] },
+		summarizer: { forget: () => {} },
+		acpMcpOwners: new Map(),
 		rosterReporter: {
 			lastComposed: new Map<string, WorkerRosterEntry>(),
 			lastComposedJson: new Map<string, string>(),
@@ -83,8 +85,10 @@ function makeState(options: {
 	return {
 		activeSessionId: options.activeSessionId,
 		clients: new Set(),
+		extensionUiRequests: new Map(),
 		lastEventSequence: 0,
 		runtime: {
+			dispose: async () => {},
 			metadata: {
 				kind: options.kind ?? "top-level",
 				createdAt: 1,
@@ -106,12 +110,14 @@ function makeState(options: {
 					getHeader: () => ({ timestamp: "2026-05-01T00:00:00.000Z" }),
 					getSessionDir: () => "/tmp/sessions",
 					hasUserContent: () => false,
+					appendSessionState: () => {},
 				},
 				messages: options.messages ?? [],
 				getRlmChildSnapshots: () => [],
 				hasRunningRlmChildren: () => false,
 				hasAcceptedPromptInFlight: false,
 				unfinishedActionCount: 0,
+				abort: async () => {},
 				isSessionActive: options.isStreaming === true,
 				getCurrentRecap: () => undefined,
 				_contextTokensForCurrentMessages: () => undefined,
@@ -141,12 +147,34 @@ describe("worker roster reporter", () => {
 			childUpdate(parent, { id: "child-1", label: "review the API", status: "queued", sessionDir: "/tmp/c" }),
 		);
 		daemon.flushRoster();
-		expect(sentDeltas[0]?.entries.find((entry) => entry.agentId === "child-1")).toMatchObject({
+		expect(sentDeltas[0]?.entries.find((entry) => entry.agentId === "parent-active#child-1")).toMatchObject({
 			queuedChild: true,
 			summary: { runtimeKind: "subagent", parentActiveSessionId: "parent-active", firstMessage: "review the API" },
 		});
 
-		// The same child id from a second parent stays a distinct row, qualified by parent path.
+		// The same child id from a second parent stays a distinct row, qualified by parent path
+		// (or by the live parent id when a no-session parent has no path).
+		expect(
+			workerRosterEntryFromSummary(
+				summary({
+					id: "c",
+					sessionId: "c",
+					runtimeKind: "subagent",
+					rlmChildId: "c",
+					parentActiveSessionId: "pa-1",
+				}),
+			).agentId,
+		).not.toBe(
+			workerRosterEntryFromSummary(
+				summary({
+					id: "c",
+					sessionId: "c",
+					runtimeKind: "subagent",
+					rlmChildId: "c",
+					parentActiveSessionId: "pa-2",
+				}),
+			).agentId,
+		);
 		const parentB = makeState({ activeSessionId: "parent-b", sessionFile: "/tmp/parents/b.jsonl" });
 		daemon.sessions.set(parentB.activeSessionId, parentB);
 		daemon.observeRosterEvent(
@@ -156,7 +184,7 @@ describe("worker roster reporter", () => {
 		daemon.flushRoster();
 		const collided = sentDeltas.at(-1)?.entries.find((entry) => entry.summary.rlmChildId === "child-1");
 		expect(collided?.queuedChild).toBe(true);
-		expect(collided?.agentId).not.toBe("child-1");
+		expect(collided?.agentId).not.toBe("parent-active#child-1");
 
 		// The child session materializes: same agentId, one resident row, no queued marker.
 		const childState = makeState({
@@ -177,7 +205,7 @@ describe("worker roster reporter", () => {
 			}),
 		);
 		daemon.flushRoster();
-		const merged = sentDeltas.at(-1)?.entries.filter((entry) => entry.agentId === "child-1") ?? [];
+		const merged = sentDeltas.at(-1)?.entries.filter((entry) => entry.agentId === "parent-active#child-1") ?? [];
 		expect(merged).toHaveLength(1);
 		expect(merged[0]).toMatchObject({ summary: { activeSessionId: "child-active", lifecycle: "live" } });
 		expect(merged[0]?.queuedChild).toBeUndefined();
@@ -189,7 +217,7 @@ describe("worker roster reporter", () => {
 		);
 		daemon.sessions.delete(childState.activeSessionId);
 		daemon.flushRoster();
-		const superseded = sentDeltas.at(-1)?.entries.find((entry) => entry.agentId === "child-1");
+		const superseded = sentDeltas.at(-1)?.entries.find((entry) => entry.agentId === "parent-active#child-1");
 		expect(superseded?.queuedChild).toBeUndefined();
 		expect(superseded?.summary.id).toBe("session-child-active");
 		expect(superseded?.summary.activeSessionId).toBeUndefined();
@@ -205,11 +233,11 @@ describe("worker roster reporter", () => {
 			childUpdate(parent, { id: "child-2", label: "task", status: "cancelled", sessionDir: "/tmp/c" }),
 		);
 		daemon.flushRoster();
-		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual(["child-2"]);
+		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual(["parent-active#child-2"]);
 		daemon.rosterReporter.snapshotPending = true;
 		daemon.flushRoster();
 		expect(sentDeltas.at(-1)?.snapshot).toBe(true);
-		expect(sentDeltas.at(-1)?.entries.some((entry) => entry.agentId === "child-2")).toBe(false);
+		expect(sentDeltas.at(-1)?.entries.some((entry) => entry.agentId === "parent-active#child-2")).toBe(false);
 
 		// Bind window: the child session registers before any rlm_child_update reports the bind.
 		daemon.observeRosterEvent(
@@ -226,10 +254,10 @@ describe("worker roster reporter", () => {
 		});
 		daemon.sessions.set(boundState.activeSessionId, boundState);
 		daemon.flushRoster();
-		const bound = sentDeltas.at(-1)?.entries.find((entry) => entry.agentId === "child-3");
+		const bound = sentDeltas.at(-1)?.entries.find((entry) => entry.agentId === "parent-active#child-3");
 		expect(bound?.queuedChild).toBeUndefined();
 		expect(bound?.summary.activeSessionId).toBe("child-3-active");
-		expect(daemon.rosterReporter.queuedChildren.has("child-3")).toBe(false);
+		expect(daemon.rosterReporter.queuedChildren.has("parent-active#child-3")).toBe(false);
 	});
 
 	it("cancels pending removals for reincarnated ids but keeps the removed incarnation suppressed", () => {
@@ -239,7 +267,7 @@ describe("worker roster reporter", () => {
 
 		// A deletion while disconnected leaves the removal pending; the id is then reused by a new admission.
 		connection.connected = false;
-		daemon.rosterReporter.removedAgentIds.set("child-1", "old-session");
+		daemon.rosterReporter.removedAgentIds.set("parent-active#child-1", "old-session");
 		daemon.flushRoster();
 		daemon.observeRosterEvent(
 			parent,
@@ -251,7 +279,9 @@ describe("worker roster reporter", () => {
 		const snapshot = sentDeltas.at(-1);
 		expect(snapshot?.snapshot).toBe(true);
 		expect(snapshot?.removedAgentIds).toBeUndefined();
-		expect(snapshot?.entries.some((entry) => entry.agentId === "child-1" && entry.queuedChild === true)).toBe(true);
+		expect(
+			snapshot?.entries.some((entry) => entry.agentId === "parent-active#child-1" && entry.queuedChild === true),
+		).toBe(true);
 
 		// The removed incarnation itself (same sessionId, mid-teardown) stays suppressed and never ghosts.
 		daemon.rosterReporter.queuedChildren.clear();
@@ -264,12 +294,40 @@ describe("worker roster reporter", () => {
 		});
 		daemon.sessions.set(dying.activeSessionId, dying);
 		daemon.flushRoster();
-		daemon.rosterReporter.removedAgentIds.set("child-2", "session-child-active");
+		daemon.rosterReporter.removedAgentIds.set("parent-active#child-2", "session-child-active");
 		daemon.flushRoster();
-		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual(["child-2"]);
+		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual(["parent-active#child-2"]);
 		daemon.sessions.delete(dying.activeSessionId);
 		daemon.flushRoster();
-		expect(daemon.rosterReporter.lastComposed.has("child-2")).toBe(false);
+		expect(daemon.rosterReporter.lastComposed.has("parent-active#child-2")).toBe(false);
+	});
+
+	it("publishes a removal when an archived top-level close leaves the worker's list", async () => {
+		const { daemon, sentDeltas } = makeWorkerReporter();
+		const state = makeState({
+			activeSessionId: "root-active",
+			sessionFile: "/tmp/sessions/root.jsonl",
+			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
+		});
+		daemon.sessions.set(state.activeSessionId, state);
+		daemon.flushRoster();
+
+		await (
+			daemon as unknown as {
+				closeSessionOnce(
+					state: ActiveSessionState,
+					reason: string,
+					waitForAbort: boolean,
+					cascadeChildren: boolean,
+					descendants: Set<ActiveSessionState>,
+				): Promise<void>;
+			}
+		).closeSessionOnce(state, "killed", false, false, new Set());
+		daemon.flushRoster();
+
+		// Archived by the kill: no passivated ghost, the disk scan is the only remaining source.
+		expect(sentDeltas.at(-1)?.removedAgentIds).toEqual(["session-root-active"]);
+		expect(daemon.rosterReporter.lastComposed.has("session-root-active")).toBe(false);
 	});
 
 	it("flushes cron and model changes that have no session-event carrier", async () => {
@@ -1010,6 +1068,33 @@ describe("saved-session delete paths", () => {
 		expect(owned.client.request).toHaveBeenCalled();
 	});
 
+	it("keeps a row rewritten during the delete's own await", async () => {
+		const { directory, supervisor } = makeOfflineSupervisor("prime-roster-delete-race-");
+		const sessionPath = join(directory, "saved.jsonl");
+		const stale = supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(summary({ id: "saved-1", sessionId: "saved-1", sessionFile: sessionPath })),
+		);
+		Object.assign(supervisor, {
+			catalog: {
+				delete: vi.fn(async () => {
+					// A frame rewrites the row while the unlink is in flight.
+					supervisor.writeRosterEntry(
+						workerRosterEntryFromSummary(
+							summary({ id: "saved-1", sessionId: "saved-1", sessionFile: sessionPath }),
+						),
+					);
+					return { ok: true, method: "unlink" };
+				}),
+				list: vi.fn(async () => []),
+			},
+		});
+
+		await supervisor.handleCommand(offlineClient(), { type: "delete_saved_session", sessionPath });
+
+		expect(supervisor.roster().get("saved-1")).toBeDefined();
+		expect(supervisor.roster().get("saved-1")).not.toBe(stale);
+	});
+
 	it("aborts a saved-child delete when the tombstone append fails", async () => {
 		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" }));
 		const { directory, sessionsDir, supervisor } = makeOfflineSupervisor("prime-roster-tombstone-fail-", {
@@ -1292,6 +1377,8 @@ describe("review-round regressions", () => {
 		closedSupervisor.writeRosterEntry(closedEntry, closed);
 		closedSupervisor.consumeWorkerRosterDelta(closed, rosterDelta([closedEntry], undefined, true));
 		await closedSupervisor.handleWorkerClose(closed, closed.client as object, new Error("worker died"));
+		// A reconnect starts authenticating before the parked apply resumes; the apply's source is dead.
+		(closed as unknown as { pendingClient: object }).pendingClient = {};
 		releaseClosedEdges([]);
 		await new Promise((resolveSettle) => setImmediate(resolveSettle));
 
