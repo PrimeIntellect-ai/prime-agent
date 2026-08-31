@@ -3792,6 +3792,9 @@ export class DaemonSupervisor {
 		if (delta.type !== "roster_delta" || !Array.isArray(delta.entries)) return;
 		// The epoch bumps at frame receipt, before any async apply work, so an in-flight pull sees this frame.
 		worker.rosterEpoch = (worker.rosterEpoch ?? 0) + 1;
+		// The same currency rule chained applies re-check at apply time: a frame from an unregistered
+		// or replaced registration must never resurrect its rows.
+		if (!this.isWorkerRosterApplyCurrent(worker)) return;
 		if (delta.snapshot !== true && worker.rosterApplyChain === undefined) {
 			this.applyWorkerRosterDelta(worker, delta);
 			return;
@@ -3856,21 +3859,27 @@ export class DaemonSupervisor {
 		delta: Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>,
 	): Promise<void> {
 		// Live edges are read before any deletion, so a reseeded child never surfaces as a transient removal.
+		let edgesFailed = false;
 		const edges = await this.rlmSpawnLedger()
 			.edges()
 			.catch((error: unknown) => {
 				this.log(`Could not read the spawn ledger during a snapshot apply: ${String(error)}`);
+				edgesFailed = true;
 				return [] as RlmLedgerEdge[];
 			});
 		// A stop during the pre-read unregisters the worker and flips its rows inactive; applying now would resurrect them.
 		if (!this.isWorkerRosterApplyCurrent(worker)) return;
 		// A live worker's snapshot carries its passivated rows too; absence means removal, disk backs the rest.
+		// Without readable edges the absentee sweep cannot tell registry children from stale rows, so the
+		// destructive half is skipped: rows survive and the single-flight repair pull refreshes them.
 		const sent = new Set(delta.entries.map((entry) => entry.agentId));
 		const unclaimed = new Set<string>();
-		for (const entry of this.workerRosterEntries(worker)) {
-			if (sent.has(entry.agentId)) continue;
-			unclaimed.add(entry.agentId);
-			this.roster().delete(entry.agentId);
+		if (!edgesFailed) {
+			for (const entry of this.workerRosterEntries(worker)) {
+				if (sent.has(entry.agentId)) continue;
+				unclaimed.add(entry.agentId);
+				this.roster().delete(entry.agentId);
+			}
 		}
 		for (const entry of delta.entries) {
 			this.writeRosterEntry(entry, worker);
@@ -3878,6 +3887,10 @@ export class DaemonSupervisor {
 		}
 		for (const agentId of delta.removedAgentIds ?? []) {
 			this.roster().delete(agentId);
+		}
+		if (edgesFailed) {
+			this.scheduleRosterRepairPull(worker);
+			return;
 		}
 		// Deleted absentees with surviving transcripts reseed from the pre-read edges, tombstone-filtered.
 		// A reseed keeps its previous claim: passive registry children list and attach through their live

@@ -1539,6 +1539,57 @@ describe("review-round regressions", () => {
 		expect(restored?.seededCwd).toBeUndefined();
 	});
 
+	it("drops unchained deltas from an unregistered worker registration", () => {
+		const worker = makeWorker("worker-1");
+		const supervisor = makeSupervisor([]);
+
+		supervisor.consumeWorkerRosterDelta(
+			worker,
+			rosterDelta([
+				workerRosterEntryFromSummary(summary({ id: "z-active", sessionId: "z", activeSessionId: "z-active" })),
+			]),
+		);
+
+		expect(supervisor.roster().has("z")).toBe(false);
+	});
+
+	it("keeps passive rows and repairs by pull when a snapshot's ledger pre-read fails", async () => {
+		const worker = makeWorker("worker-1");
+		Object.assign(worker.descriptor, { createCommand: { type: "create" } });
+		const refreshWorkerSummaries = vi.fn(async () => {});
+		const supervisor = makeSupervisor([worker], {
+			refreshWorkerSummaries,
+			rlmSpawnLedger: () => ({
+				edges: vi.fn(async () => {
+					throw new Error("ledger unreadable");
+				}),
+			}),
+		});
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({
+					id: "p-session",
+					sessionId: "p-session",
+					sessionFile: "/tmp/artifacts/p.jsonl",
+					runtimeKind: "subagent",
+					rlmChildId: "p",
+					parentSessionPath: "/tmp/sessions/root.jsonl",
+				}),
+			),
+			worker,
+		);
+		const root = summary({ id: "worker-1-root-active", sessionId: "root", activeSessionId: "worker-1-root-active" });
+
+		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([workerRosterEntryFromSummary(root)], undefined, true));
+		await new Promise((resolveSettle) => setImmediate(resolveSettle));
+
+		// Without readable edges the absentee sweep cannot run; the passive child survives, claimed.
+		const passiveRow = [...supervisor.roster().values()].find((entry) => entry.summary.rlmChildId === "p");
+		expect(passiveRow?.workerId).toBe("worker-1");
+		expect(supervisor.roster().get("root")?.workerId).toBe("worker-1");
+		expect(refreshWorkerSummaries).toHaveBeenCalledTimes(1);
+	});
+
 	it("aborts queued roster applies when the worker stops during the snapshot ledger pre-read", async () => {
 		const worker = makeWorker("worker-1");
 		const root = summary({
