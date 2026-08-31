@@ -2,7 +2,7 @@ import { Type } from "typebox";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.js";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.js";
-import type { AssistantMessage, Model } from "../src/types.js";
+import type { AssistantMessage, Context, Model, Usage } from "../src/types.js";
 
 interface CacheControl {
 	type: "ephemeral";
@@ -31,6 +31,15 @@ interface CapturedParams {
 const mockState = vi.hoisted(() => ({
 	lastParams: undefined as CapturedParams | undefined,
 }));
+
+const emptyUsage: Usage = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
 
 vi.mock("openai", () => {
 	class FakeOpenAI {
@@ -78,6 +87,7 @@ vi.mock("openai", () => {
 async function runCompletion(
 	model: Model<"openai-completions">,
 	options?: { cacheRetention?: "none" | "short" | "long" },
+	messages?: Context["messages"],
 ): Promise<{ params: CapturedParams; result: AssistantMessage }> {
 	const timestamp = Date.now();
 
@@ -85,7 +95,7 @@ async function runCompletion(
 		model,
 		{
 			systemPrompt: "System prompt",
-			messages: [{ role: "user", content: "Hello", timestamp }],
+			messages: messages ?? [{ role: "user", content: "Hello", timestamp }],
 			tools: [
 				{
 					name: "read",
@@ -167,6 +177,61 @@ describe("openai-completions cacheControlFormat", () => {
 		const { params, result } = await runCompletion(model);
 		expectAnthropicCacheMarkers(params);
 		expect(result.usage.cost.cacheWrite).toBeCloseTo((80 * model.cost.cacheWrite) / 1_000_000);
+	});
+
+	it("advances the Anthropic cache marker to the latest tool result", async () => {
+		const model = getModel("prime-inference", "anthropic/claude-fable-5");
+		const now = Date.now();
+		const firstAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "text", text: "Starting the first read." },
+				{ type: "toolCall", id: "tool-1", name: "read", arguments: { path: "first.txt" } },
+			],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: emptyUsage,
+			stopReason: "toolUse",
+			timestamp: now + 1,
+		};
+		const secondAssistant: AssistantMessage = {
+			...firstAssistant,
+			content: [{ type: "toolCall", id: "tool-2", name: "read", arguments: { path: "second.txt" } }],
+			timestamp: now + 3,
+		};
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Read both files", timestamp: now },
+			firstAssistant,
+			{
+				role: "toolResult",
+				toolCallId: "tool-1",
+				toolName: "read",
+				content: [{ type: "text", text: "first result" }],
+				isError: false,
+				timestamp: now + 2,
+			},
+			secondAssistant,
+			{
+				role: "toolResult",
+				toolCallId: "tool-2",
+				toolName: "read",
+				content: [{ type: "text", text: "second result" }],
+				isError: false,
+				timestamp: now + 4,
+			},
+		];
+
+		const { params } = await runCompletion(model, undefined, messages);
+		const lastMessage = params.messages[params.messages.length - 1];
+		expect(lastMessage.role).toBe("tool");
+		expect(Array.isArray(lastMessage.content)).toBe(true);
+		expect((lastMessage.content as TextPart[])[0]?.cache_control).toEqual({ type: "ephemeral" });
+
+		const firstAssistantPayload = params.messages.find(
+			(message) => message.role === "assistant" && message.content !== null,
+		);
+		expect(typeof firstAssistantPayload?.content).toBe("string");
 	});
 
 	it("preserves Anthropic-style cache markers for OpenRouter Anthropic models", async () => {
