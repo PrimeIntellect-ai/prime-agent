@@ -491,4 +491,54 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		expect(supervisor.stopWorker).not.toHaveBeenCalled();
 		expect([...supervisor.workers.keys()].sort()).toEqual(["busy", "named", "one-message"]);
 	});
+
+	it("keeps schedule-pinned and client-owned empty sessions resident when their last client detaches", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeSupervisor();
+		const heartbeat = makeWorker("heartbeat", [
+			makeSummary("heartbeat-root", now, { messageCount: 0, hasRegisteredHeartbeat: true }),
+		]);
+		const cron = makeWorker("cron", [makeSummary("cron-root", now, { messageCount: 0, hasRegisteredCronJob: true })]);
+		// Client-owned workers keep their own disconnect cleanup path.
+		const owned = makeWorker("owned", [makeSummary("owned-root", now, { messageCount: 0 })]);
+		owned.descriptor.ownerClientId = "owner";
+		for (const worker of [heartbeat, cron, owned]) {
+			supervisor.workers.set(worker.descriptor.workerId, worker);
+		}
+		const client = makeDetachClient("viewer", ["heartbeat-root", "cron-root", "owned-root"]);
+		supervisor.clients.add(client);
+
+		await supervisor.handleCommand(client, { id: "detach-all", type: "detach" });
+		await settle();
+
+		expect(supervisor.stopWorker).not.toHaveBeenCalled();
+		expect([...supervisor.workers.keys()].sort()).toEqual(["cron", "heartbeat", "owned"]);
+	});
+
+	it("does not stop a worker that was replaced while its summary refresh was in flight", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeSupervisor();
+		const worker = makeWorker("swap", [makeSummary("swap-root", now, { messageCount: 0 })]);
+		let releaseList!: () => void;
+		worker.client!.request.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					releaseList = () => resolve(success(undefined, "list", { sessions: [...worker.summaries.values()] }));
+				}),
+		);
+		supervisor.workers.set("swap", worker);
+		const client = makeDetachClient("viewer", ["swap-root"]);
+		supervisor.clients.add(client);
+
+		await supervisor.handleCommand(client, { id: "detach", type: "detach", activeSessionId: "swap-root" });
+		await vi.waitFor(() => expect(worker.client!.request).toHaveBeenCalled());
+		// The worker is stopped and relaunched under a successor registration mid-refresh.
+		const successor = makeWorker("swap", [makeSummary("swap-root", now, { messageCount: 0 })]);
+		supervisor.workers.set("swap", successor);
+		releaseList();
+		await settle();
+
+		expect(supervisor.stopWorker).not.toHaveBeenCalled();
+		expect(supervisor.workers.get("swap")).toBe(successor);
+	});
 });
