@@ -424,6 +424,8 @@ interface PythonStringScan {
 	value: string;
 	end: number;
 	closed: boolean;
+	/** A cooked escape (\x, \u, octal, \a…) whose value the preview does not compute. */
+	unsupportedEscape: boolean;
 }
 
 // Walks a python string-literal body starting just after the opening delimiter.
@@ -433,16 +435,22 @@ interface PythonStringScan {
 function scanPythonStringLiteral(code: string, start: number, quote: string, raw: boolean): PythonStringScan {
 	let value = "";
 	let i = start;
+	let unsupportedEscape = false;
 	while (i < code.length) {
 		const char = code[i] ?? "";
 		if (char === "\\" && i + 1 < code.length) {
 			const next = code[i + 1] ?? "";
+			if (!raw && /[xuUN0-7abfv]/.test(next)) {
+				// \x41, \u…, octal, \a\b\f\v change the value; showing the source
+				// form would preview a command that differs from what ran.
+				unsupportedEscape = true;
+			}
 			value += raw ? char + next : (PYTHON_ESCAPES[next] ?? char + next);
 			i += 2;
 			continue;
 		}
 		if (code.startsWith(quote, i)) {
-			return { value, end: i + quote.length, closed: true };
+			return { value, end: i + quote.length, closed: true, unsupportedEscape };
 		}
 		if (quote.length === 1 && char === "\n") {
 			break; // single-quoted literals cannot span lines
@@ -450,7 +458,7 @@ function scanPythonStringLiteral(code: string, start: number, quote: string, raw
 		value += char;
 		i += 1;
 	}
-	return { value, end: i, closed: false };
+	return { value, end: i, closed: false, unsupportedEscape };
 }
 
 // True when the lines end inside an unterminated triple-quoted string, meaning
@@ -487,7 +495,7 @@ function extractBashSkillCommand(code: string): string | undefined {
 	const start = match[0].length;
 	const prefixChar = match[0][start - quote.length - 1];
 	const scan = scanPythonStringLiteral(code, start, quote, prefixChar === "r" || prefixChar === "R");
-	if (!scan.closed) return undefined;
+	if (!scan.closed || scan.unsupportedEscape) return undefined;
 	const rest = code.slice(scan.end).trimStart();
 	// Require a plain literal first argument; concatenation or other expressions fall back.
 	if (!rest.startsWith(",") && !rest.startsWith(")")) return undefined;

@@ -174,6 +174,12 @@ git add packages/foo.ts
 		expect(previewIpythonCode("r = await bash('echo hi\n)").language).toBe("python");
 	});
 
+	it("keeps the python preview for value-changing escapes it does not compute", () => {
+		// '\x41' executes as 'A'; previewing the source form would show a command that never ran.
+		expect(previewIpythonCode("r = await bash('echo \\x41')").language).toBe("python");
+		expect(previewIpythonCode("r = await bash('grep \\bword\\b f')").language).toBe("python");
+	});
+
 	it("evaluates escapes in bash-skill literals instead of previewing source text", () => {
 		// \n in the source is a real newline in the executed command; salience follows the evaluated text.
 		expect(previewIpythonCode("r = await bash('printf \"a\\nb\"\\ngit add -A')")).toEqual({
