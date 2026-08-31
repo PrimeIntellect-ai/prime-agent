@@ -3894,6 +3894,8 @@ export class AgentDaemon {
 				}
 				state.clients.add(client);
 				client.attachedActiveSessionIds.add(state.activeSessionId);
+				// Carrier-less mutation: a direct viewer changes directAttachedClients with no session event.
+				if (client.authenticationRole === "session_client") this.scheduleRosterFlush();
 				if (deferClientEnv && clientEnv) {
 					this.updateRestart?.deferredClientEnv.push({
 						client,
@@ -5984,6 +5986,7 @@ export class AgentDaemon {
 		this.abortSideQuestionsFor(client, state.activeSessionId);
 		abortClientSnapshotStreaming(client, state.activeSessionId);
 		detachClientFromActiveSession(client, state);
+		if (client.authenticationRole === "session_client") this.scheduleRosterFlush();
 		this.write(client, {
 			type: "session_detached",
 			activeSessionId: state.activeSessionId,

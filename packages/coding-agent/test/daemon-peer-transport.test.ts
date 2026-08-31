@@ -301,6 +301,46 @@ describe("daemon worker peer transport", () => {
 		expect(staleSupervisor.responses.at(-1)).toMatchObject({ success: false });
 		expect(staleSupervisor.endMock).toHaveBeenCalled();
 	});
+
+	it("flushes the roster when a direct viewer attaches or detaches without other session activity", async () => {
+		const internals = makeWorkerDaemon() as WorkerInternals & {
+			scheduleRosterFlush: ReturnType<typeof vi.fn>;
+			createAttachResult: ReturnType<typeof vi.fn>;
+			handleCommand(
+				client: DaemonSocketClient,
+				command: { type: string; activeSessionId: string },
+			): Promise<unknown>;
+			detachClientFromSession(client: DaemonSocketClient, state: ActiveSessionState): void;
+		};
+		internals.scheduleRosterFlush = vi.fn();
+		internals.createAttachResult = vi.fn(async () => ({
+			activeSessionId: "active-1",
+			snapshot: {},
+			lastEventSequence: 0,
+		}));
+		const state = {
+			activeSessionId: "active-1",
+			clients: new Set(),
+			pendingAttaches: 0,
+			lastEventSequence: 0,
+			extensionUiRequests: new Map(),
+			runtime: { metadata: { kind: "top-level", createdAt: 1 } },
+		} as unknown as ActiveSessionState;
+		internals.sessions.set("active-1", state);
+		const peer = makeSocketClient("peer-1", true);
+		peer.client.authenticationRole = "session_client";
+
+		await internals.handleCommand(peer.client, { type: "attach", activeSessionId: "active-1" });
+		expect(internals.scheduleRosterFlush).toHaveBeenCalledTimes(1);
+
+		internals.detachClientFromSession(peer.client, state);
+		expect(internals.scheduleRosterFlush).toHaveBeenCalledTimes(2);
+
+		// Supervisor-relayed viewers keep their event-driven cadence; only direct peers are carrier-less.
+		const relayed = makeSocketClient("relayed-1", true);
+		await internals.handleCommand(relayed.client, { type: "attach", activeSessionId: "active-1" });
+		expect(internals.scheduleRosterFlush).toHaveBeenCalledTimes(2);
+	});
 });
 
 describe("supervisor direct transport issuance", () => {
