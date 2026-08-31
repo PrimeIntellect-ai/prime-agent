@@ -27,10 +27,7 @@ export class DaemonSessionCreateError extends Error {
 	}
 }
 
-/**
- * Create failures without a dedicated typed error are wrapped so the CLI can
- * surface them as a clean one-line error instead of an unhandled throw.
- */
+/** Wraps untyped create failures so the CLI prints one line instead of rethrowing. */
 export function deserializeDaemonCreateError(response: Extract<DaemonResponse, { success: false }>): Error {
 	const error = deserializeDaemonError(response);
 	if (response.errorInfo) return error;

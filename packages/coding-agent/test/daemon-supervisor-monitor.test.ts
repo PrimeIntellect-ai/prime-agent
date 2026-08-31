@@ -51,8 +51,7 @@ vi.mock("node:child_process", async (importOriginal) => {
 		spawn(command: string, args: readonly string[], options: SpawnOptions): ChildProcess {
 			const failureCode = workerLaunchTestState.spawnFailureCode;
 			if (failureCode) {
-				// Mirror Node's fd-exhaustion spawn failure: no pid, stdio undefined,
-				// "error" emitted before "close".
+				// Node's failed-spawn shape: no pid, stdio undefined, "error" then "close".
 				const failing = Object.assign(new EventEmitter(), {
 					pid: undefined,
 					stdio: undefined,

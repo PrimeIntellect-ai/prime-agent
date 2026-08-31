@@ -2556,8 +2556,6 @@ export class DaemonSupervisor {
 		let childProcessStartId: string | undefined;
 		let worker: ResidentWorker;
 		try {
-			// A spawn failure must fail the create with the spawn error, never a
-			// TypeError from the missing stdio pipes.
 			await spawnSettled;
 			if (spawnFailure) {
 				throw this.describeWorkerSpawnFailure(spawnFailure);
