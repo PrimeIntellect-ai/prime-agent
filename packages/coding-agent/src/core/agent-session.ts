@@ -1187,6 +1187,11 @@ function waitForPromiseOrAbort<T>(
 	});
 }
 
+/** Maximum time graceful disposal waits for an in-flight refinement before aborting it. */
+export const REFINEMENT_DISPOSAL_GRACE_MS = 5_000;
+/** Hard upper bound for disposeAsync(); expiry forces synchronous teardown and rejects. */
+export const SESSION_DISPOSAL_TIMEOUT_MS = 30_000;
+
 const DEFAULT_AUTORESEARCH_SUPERVISOR_TIMEOUT_MS = 60_000;
 const MAX_AUTORESEARCH_SUPERVISOR_TIMEOUT_MS = 300_000;
 
@@ -8636,26 +8641,85 @@ export class AgentSession {
 	 * the latest state reaches disk instead of racing process exit.
 	 */
 	async disposeAsync(): Promise<void> {
-		if (this._disposed) {
-			return this._disposeCallbacksPromise;
-		}
 		// Concurrent callers await the same in-flight teardown so none resolves before
 		// the kernel snapshot flush finishes.
 		if (this._disposeAsyncPromise) {
 			return this._disposeAsyncPromise;
 		}
-		this._disposeAsyncPromise = (async () => {
-			// Drain before marking _disposing so a refine triggered at the final
-			// agent_end completes instead of being aborted by dispose().
-			await this._drainPendingRefinementForDisposal();
-			if (this._disposed) {
-				return this._disposeCallbacksPromise;
-			}
-			this._disposing = true;
-			this._sessionActionCommitDisposeAbortController.abort();
-			await this._disposeAsyncOnce();
-		})();
+		this._disposeAsyncPromise = this._disposeWithinDeadline();
 		return this._disposeAsyncPromise;
+	}
+
+	private async _disposeWithinDeadline(): Promise<void> {
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const deadline = new Promise<never>((_, reject) => {
+			timeout = setTimeout(() => {
+				try {
+					this._disposing = true;
+					this._abortPendingRefinementForDisposal();
+					this._sessionActionCommitDisposeAbortController.abort();
+					this.dispose();
+				} catch {
+					// The deadline still rejects even if best-effort synchronous teardown fails.
+				}
+				reject(new Error(`Session disposal exceeded ${SESSION_DISPOSAL_TIMEOUT_MS}ms`));
+			}, SESSION_DISPOSAL_TIMEOUT_MS);
+		});
+
+		try {
+			await Promise.race([this._disposeGracefully(), deadline]);
+		} finally {
+			if (timeout) clearTimeout(timeout);
+		}
+	}
+
+	private async _disposeGracefully(): Promise<void> {
+		if (this._disposed) {
+			return this._disposeCallbacksPromise;
+		}
+		// Drain before marking _disposing so a refine triggered at the final
+		// agent_end can complete during the bounded grace period.
+		await this._drainPendingRefinementForDisposalWithinGrace();
+		if (this._disposed) {
+			return this._disposeCallbacksPromise;
+		}
+		this._disposing = true;
+		this._sessionActionCommitDisposeAbortController.abort();
+		await this._disposeAsyncOnce();
+	}
+
+	private async _drainPendingRefinementForDisposalWithinGrace(): Promise<void> {
+		const drain = this._drainPendingRefinementForDisposal();
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const graceExpired = new Promise<"expired">((resolve) => {
+			timeout = setTimeout(() => resolve("expired"), REFINEMENT_DISPOSAL_GRACE_MS);
+		});
+		try {
+			const outcome = await Promise.race([drain.then(() => "drained" as const), graceExpired]);
+			if (outcome === "drained") return;
+
+			// Stop late plans from applying even when a provider or extension ignores
+			// the abort signal. The abandoned drain remains observed to avoid an
+			// unhandled rejection if it eventually settles.
+			this._disposing = true;
+			this._abortPendingRefinementForDisposal();
+			void drain.catch(() => undefined);
+		} finally {
+			if (timeout) clearTimeout(timeout);
+		}
+	}
+
+	private _abortPendingRefinementForDisposal(): void {
+		for (const timer of this._scheduledAutoRefineTimers) {
+			clearTimeout(timer);
+		}
+		this._scheduledAutoRefineTimers.clear();
+		this._pendingRequestedRefine = undefined;
+		this._serializedExplicitRefineOptions = undefined;
+		this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+		this._autoRefineBranchVersion++;
+		this._autoRefineReviewAbort?.abort();
+		this._refineAbortController?.abort();
 	}
 
 	/**
