@@ -5974,17 +5974,22 @@ export class InteractiveMode {
 				.filter((heartbeat) => heartbeat.job.status === "active")
 				.map((heartbeat) => heartbeat.job.activeSessionId),
 		);
+		const rosterCounts = this.rosterBar
+			? countRosterSubagentStatuses(
+					this.rosterBar.summaries(),
+					{
+						activeSessionId: this.connectionState?.activeSessionId,
+						sessionId: this.connectionState?.sessionId,
+						sessionFile: this.connectionState?.sessionFile,
+					},
+					activeHeartbeatSessionIds,
+				)
+			: undefined;
+		// A client-owned session's rows are invisible to the public roster; when it has
+		// no direct children for this parent, the connection snapshots are the truth.
 		this.subagentSummaryLine.setSubagentCounts(
-			this.rosterBar
-				? countRosterSubagentStatuses(
-						this.rosterBar.summaries(),
-						{
-							activeSessionId: this.connectionState?.activeSessionId,
-							sessionId: this.connectionState?.sessionId,
-							sessionFile: this.connectionState?.sessionFile,
-						},
-						activeHeartbeatSessionIds,
-					)
+			rosterCounts && rosterCounts.total > 0
+				? rosterCounts
 				: countDirectSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId, activeHeartbeatSessionIds),
 		);
 		if (!this.subagentSummaryLine.isSelectable() && this.subagentSummaryLine.focused) this.focusEditor();

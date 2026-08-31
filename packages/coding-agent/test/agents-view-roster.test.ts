@@ -643,6 +643,11 @@ describe("push-fed subagents bar", () => {
 			);
 			// A push with no accompanying session event must still repaint.
 			expect(bar.ui.requestRender).toHaveBeenCalled();
+
+			// A client-owned session has no public roster rows: the bar falls back to snapshots.
+			(bar as unknown as { connectionState: object }).connectionState = { activeSessionId: "owned-active" };
+			(bar as unknown as { updateSubagentSummaryLine(): void }).updateSubagentSummaryLine();
+			expect(setSubagentCounts).toHaveBeenLastCalledWith({ total: 1, running: 1, idle: 0, inactive: 0 });
 		} finally {
 			client.close();
 			await internals.cleanupSupervisorResources();
