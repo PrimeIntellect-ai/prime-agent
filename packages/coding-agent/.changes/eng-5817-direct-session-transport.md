@@ -1,1 +1,2 @@
 - Added a direct session transport: the TUI now talks to its session's worker over a supervisor-issued single-use ticket, falls back to supervisor routing on any direct-path failure, and keeps the session streaming while a lost supervisor socket reconnects in the background.
+- Workers bind their identity to a fresh per-process instance id, enforced only when the authenticating supervisor presents one, so a downgraded supervisor can still adopt live workers.

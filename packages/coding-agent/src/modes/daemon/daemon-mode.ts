@@ -753,11 +753,13 @@ export class AgentDaemon {
 	}
 
 	/** Burn every outstanding grant and end direct peers; admissions stay fenced until an update cancel. */
-	private fencePeerTransports(): void {
+	private fencePeerTransports(closingReason?: DaemonClosingReason): void {
 		this.peerAdmissionsFenced = true;
 		this.peerGrants.clear();
 		for (const client of [...this.peerClaims.keys()]) {
 			this.peerClaims.delete(client);
+			// The reason reaches the client before FIN so its close maps to shutdown/update, not a transport loss.
+			if (closingReason) this.write(client, { type: "daemon_closing", reason: closingReason });
 			client.socket.end();
 		}
 	}
@@ -3363,7 +3365,6 @@ export class AgentDaemon {
 						!timingSafeEqual(presentedTokenHash, expectedTokenHash) ||
 						parsed.workerInstanceId !== grant.workerInstanceId ||
 						parsed.purpose !== grant.purpose ||
-						this.options.worker.workerInstanceId !== grant.workerInstanceId ||
 						!Number.isFinite(expiresAt) ||
 						expiresAt <= Date.now()
 					) {
@@ -3391,7 +3392,8 @@ export class AgentDaemon {
 				if (
 					parsed.type !== "worker_auth" ||
 					parsed.token !== this.options.worker.authenticationToken ||
-					(this.options.worker.workerInstanceId !== undefined &&
+					// Enforced only when presented: a downgraded (pre-instance-id) supervisor must still adopt live workers.
+					(parsed.workerInstanceId !== undefined &&
 						parsed.workerInstanceId !== this.options.worker.workerInstanceId) ||
 					typeof parsed.supervisorGeneration !== "string" ||
 					!Number.isInteger(parsed.supervisorPid) ||
@@ -3453,7 +3455,8 @@ export class AgentDaemon {
 			if (peerClaim) {
 				const commandId = typeof parsed.id === "string" ? parsed.id : undefined;
 				const commandName = typeof parsed.type === "string" ? parsed.type : "unknown";
-				if (this.peerAdmissionsFenced || this.updateRestart) {
+				// Reachable only through shutdown, which fences admissions without ending live peers.
+				if (this.peerAdmissionsFenced) {
 					clearParsedAdmission();
 					this.write(client, failure(commandId, commandName, "Direct peer transport is fenced"));
 					return;
@@ -3660,10 +3663,11 @@ export class AgentDaemon {
 					return;
 				}
 				case "worker_archive_and_shutdown": {
-					this.fencePeerTransports();
+					// Close sessions first so direct peers read session_closed "killed", not a daemon shutdown.
 					for (const state of [...this.sessions.values()]) {
 						await this.closeSession(state, "killed");
 					}
+					this.fencePeerTransports();
 					this.writeWorkerSuccess(client, command);
 					setImmediate(() => void this.shutdown(0));
 					return;
@@ -3685,7 +3689,7 @@ export class AgentDaemon {
 					return;
 				}
 				case "worker_prepare_update": {
-					this.fencePeerTransports();
+					this.fencePeerTransports("update");
 					const transaction = this.beginUpdateRestartTransaction(client);
 					const manifest = await this.runUpdateRestartPreparation(transaction);
 					this.writeWorkerSuccess(client, command, manifest);

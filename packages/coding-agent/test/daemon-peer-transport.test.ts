@@ -18,12 +18,14 @@ interface WorkerInternals {
 	peerGrants: Map<string, DaemonWorkerPeerGrant>;
 	peerClaims: Map<DaemonSocketClient, DaemonWorkerPeerGrant>;
 	sessions: Map<string, ActiveSessionState>;
-	fencePeerTransports(): void;
+	fencePeerTransports(closingReason?: "shutdown" | "update"): void;
+	closeSession(state: ActiveSessionState, reason: string): Promise<void>;
+	shutdown(exitCode: number): Promise<never>;
 }
 
 interface FakePeerSocket {
 	client: DaemonSocketClient;
-	responses: { command: string; success: boolean; error?: string }[];
+	responses: { type?: string; reason?: string; command?: string; success?: boolean; error?: string }[];
 	endMock: ReturnType<typeof vi.fn>;
 }
 
@@ -82,7 +84,7 @@ async function registerGrant(
 	internals: WorkerInternals,
 	supervisor: FakePeerSocket,
 	grant: DaemonWorkerPeerGrant,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success?: boolean; error?: string }> {
 	await internals.handleWorkerCommand(supervisor.client, {
 		id: `register-${grant.grantId}`,
 		type: "worker_register_peer_transport",
@@ -105,7 +107,7 @@ async function authenticatePeer(
 	internals: WorkerInternals,
 	peer: FakePeerSocket,
 	overrides: Record<string, unknown> = {},
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success?: boolean; error?: string }> {
 	await internals.handleLine(
 		peer.client,
 		JSON.stringify({
@@ -172,9 +174,9 @@ describe("daemon worker peer transport", () => {
 		expect(internals.peerGrants.size).toBe(0);
 	});
 
-	it("rejects peer_auth for a different worker incarnation", async () => {
+	it("rejects a peer_auth whose presented instance id does not match the grant", async () => {
 		const internals = makeWorkerDaemon();
-		internals.peerGrants.set("grant-1", makeGrant({ workerInstanceId: "instance-2" }));
+		internals.peerGrants.set("grant-1", makeGrant());
 
 		const peer = makeSocketClient("peer-1", false);
 		expect(await authenticatePeer(internals, peer, { workerInstanceId: "instance-2" })).toMatchObject({
@@ -229,9 +231,11 @@ describe("daemon worker peer transport", () => {
 		const peer = makeSocketClient("peer-1", false);
 		expect(await authenticatePeer(internals, peer)).toMatchObject({ success: true });
 
-		internals.fencePeerTransports();
+		internals.fencePeerTransports("update");
 
 		expect(peer.endMock).toHaveBeenCalled();
+		// The update reason reaches the peer before FIN so its close never looks like a transport loss.
+		expect(peer.responses.at(-1)).toMatchObject({ type: "daemon_closing", reason: "update" });
 		expect(internals.peerClaims.size).toBe(0);
 		expect(await registerGrant(internals, supervisor, makeGrant({ grantId: "grant-2" }))).toMatchObject({
 			success: false,
@@ -242,6 +246,60 @@ describe("daemon worker peer transport", () => {
 		expect(await registerGrant(internals, supervisor, makeGrant({ grantId: "grant-3" }))).toMatchObject({
 			success: true,
 		});
+	});
+
+	it("delivers session_closed to direct peers before the archive shutdown ends their sockets", async () => {
+		const internals = makeWorkerDaemon();
+		const supervisor = makeSupervisor(internals);
+		internals.sessions.set("active-1", {} as ActiveSessionState);
+		internals.peerGrants.set("grant-1", makeGrant());
+		const peer = makeSocketClient("peer-1", false);
+		expect(await authenticatePeer(internals, peer)).toMatchObject({ success: true });
+		let peerEndedWhenSessionClosed: boolean | undefined;
+		(internals as { closeSession: unknown }).closeSession = vi.fn(async () => {
+			peerEndedWhenSessionClosed = peer.endMock.mock.calls.length > 0;
+		});
+		(internals as { shutdown: unknown }).shutdown = vi.fn(async () => undefined);
+
+		await internals.handleWorkerCommand(supervisor.client, { id: "archive-1", type: "worker_archive_and_shutdown" });
+
+		expect(peerEndedWhenSessionClosed).toBe(false);
+		expect(peer.endMock).toHaveBeenCalled();
+	});
+
+	it("authenticates a downgraded supervisor that presents no worker instance id", async () => {
+		const makeAuthDaemon = () =>
+			Object.assign(Object.create(AgentDaemon.prototype), {
+				options: { worker: { authenticationToken: "worker-token", workerInstanceId: "instance-1" } },
+				supervisorClaims: new Map(),
+				peerClaims: new Map(),
+				peerGrants: new Map(),
+				clearSupervisorAvailabilityCheck: vi.fn(),
+				scheduleSupervisorFenceCheck: vi.fn(),
+				scheduleRosterFlush: vi.fn(),
+				rosterReporter: { snapshotPending: false },
+				assertSupervisorClaimCurrent: vi.fn(async () => "fingerprint"),
+			}) as unknown as WorkerInternals;
+		const auth = (workerInstanceId?: string) =>
+			JSON.stringify({
+				id: "auth-1",
+				type: "worker_auth",
+				token: "worker-token",
+				...(workerInstanceId !== undefined ? { workerInstanceId } : {}),
+				supervisorGeneration: "gen-1",
+				supervisorPid: 123,
+				supervisorSocketPath: "/tmp/supervisor.sock",
+			});
+
+		const legacySupervisor = makeSocketClient("legacy", false);
+		await makeAuthDaemon().handleLine(legacySupervisor.client, auth());
+		expect(legacySupervisor.responses.at(-1)).toMatchObject({ success: true });
+		expect(legacySupervisor.client.authenticationRole).toBe("supervisor");
+
+		const staleSupervisor = makeSocketClient("stale", false);
+		await makeAuthDaemon().handleLine(staleSupervisor.client, auth("instance-0"));
+		expect(staleSupervisor.responses.at(-1)).toMatchObject({ success: false });
+		expect(staleSupervisor.endMock).toHaveBeenCalled();
 	});
 });
 

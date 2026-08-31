@@ -306,10 +306,8 @@ export class DaemonAgentConnection implements AgentConnection {
 				});
 				return;
 			}
-			if (directSessionSurvives) {
-				void this.reconnect(error);
-				return;
-			}
+			// An authoritative shutdown/update reason outranks the surviving direct link:
+			// a clean daemon stop must stay terminal instead of degrading into a reconnect.
 			const closeReason = getDaemonSocketCloseReason(error);
 			if (closeReason === "shutdown") {
 				this.terminalCloseEmitted = true;
@@ -321,7 +319,7 @@ export class DaemonAgentConnection implements AgentConnection {
 				void this.reconnectAfterUpdate();
 				return;
 			}
-			if (this.options.recoverDaemon) {
+			if (directSessionSurvives || this.options.recoverDaemon) {
 				void this.reconnect(error);
 				return;
 			}

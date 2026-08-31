@@ -856,9 +856,7 @@ export class DaemonSupervisor {
 					const activeSessionId = summary.activeSessionId ?? summary.id;
 					return {
 						isSessionActive: isSessionSummaryBusy(summary),
-						attachedClients:
-							(summary.directAttachedClients ?? 0) +
-							[...this.clients].filter((client) => client.attachedActiveSessionIds.has(activeSessionId)).length,
+						attachedClients: this.attachedClientCount(summary, activeSessionId),
 						hasRegisteredHeartbeat: summary.hasRegisteredHeartbeat === true,
 						hasRegisteredCronJob: summary.hasRegisteredCronJob === true,
 						lastActivityAt: Date.parse(summary.lastActivityAt ?? ""),
@@ -4366,13 +4364,19 @@ export class DaemonSupervisor {
 		};
 	}
 
+	/** Worker-reported direct attachments plus this supervisor's own attached clients. */
+	private attachedClientCount(summary: SessionSummary, activeSessionId: string): number {
+		return (
+			(summary.directAttachedClients ?? 0) +
+			[...this.clients].filter((client) => client.attachedActiveSessionIds.has(activeSessionId)).length
+		);
+	}
+
 	private publicSummary(worker: ResidentWorker, summary: SessionSummary): SessionSummary {
 		const activeSessionId = summary.activeSessionId ?? summary.id;
 		return {
 			...summary,
-			attachedClients:
-				(summary.directAttachedClients ?? 0) +
-				[...this.clients].filter((client) => client.attachedActiveSessionIds.has(activeSessionId)).length,
+			attachedClients: this.attachedClientCount(summary, activeSessionId),
 			workerState: this.effectiveWorkerState(worker),
 			workerPid: worker.descriptor.pid,
 		};

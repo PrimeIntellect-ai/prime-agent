@@ -147,6 +147,7 @@ export class DaemonWorkerClient {
 	request(
 		command: DaemonCommandBody,
 		timeoutMs = 30_000,
+		// Progress/recovery options are supervisor-transport features; a direct request fails fast instead of replaying (no double execution).
 		_options: DaemonClientRequestOptions = {},
 	): Promise<DaemonResponse> {
 		return this.requestWire(command, timeoutMs);
