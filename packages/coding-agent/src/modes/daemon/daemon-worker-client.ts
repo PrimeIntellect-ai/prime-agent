@@ -1,8 +1,22 @@
 import { createConnection, type Socket } from "node:net";
 import { serializeJsonLine } from "../rpc/jsonl.js";
 import { type PrivateFrame, PrivateFramedChannel } from "../session-worker/private-framing.js";
-import type { DaemonCommand, DaemonOutbound, DaemonResponse } from "./daemon-protocol.js";
 import {
+	type DaemonClientMessageListener,
+	type DaemonClientRequestOptions,
+	DaemonSocketClosedError,
+} from "./daemon-client.js";
+import type {
+	DaemonClosingReason,
+	DaemonCommand,
+	DaemonOutbound,
+	DaemonPeerTransportTicket,
+	DaemonResponse,
+	DaemonServerCapability,
+} from "./daemon-protocol.js";
+import {
+	type DaemonPeerCommand,
+	type DaemonPeerCommandBody,
 	type DaemonWorkerCommand,
 	type DaemonWorkerCommandBody,
 	type DaemonWorkerFrameHeader,
@@ -11,8 +25,8 @@ import {
 
 type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
-type DaemonWorkerWireCommandBody = DaemonCommandBody | DaemonWorkerCommandBody;
-type DaemonWorkerWireCommand = DaemonCommand | DaemonWorkerCommand;
+type DaemonWorkerWireCommandBody = DaemonCommandBody | DaemonWorkerCommandBody | DaemonPeerCommandBody;
+type DaemonWorkerWireCommand = DaemonCommand | DaemonWorkerCommand | DaemonPeerCommand;
 type DaemonWorkerAuthentication = Omit<Extract<DaemonWorkerCommand, { type: "worker_auth" }>, "id" | "type" | "token">;
 
 export type DaemonWorkerFrameListener = (frame: PrivateFrame<DaemonWorkerFrameHeader>) => void;
@@ -23,6 +37,7 @@ export class DaemonWorkerClient {
 	private socket?: Socket;
 	private channel?: PrivateFramedChannel<DaemonWorkerFrameHeader>;
 	private readonly frameListeners = new Set<DaemonWorkerFrameListener>();
+	private readonly messageListeners = new Set<DaemonClientMessageListener>();
 	private readonly closeListeners = new Set<DaemonWorkerCloseListener>();
 	private readonly pending = new Map<
 		string,
@@ -33,7 +48,9 @@ export class DaemonWorkerClient {
 		}
 	>();
 	private requestId = 0;
-	private hello?: DaemonHello;
+	private helloMessage?: DaemonHello;
+	private directPeer = false;
+	private directClosingReason?: DaemonClosingReason;
 	private readonly helloWaiters = new Set<{
 		resolve: (hello: DaemonHello) => void;
 		reject: (error: Error) => void;
@@ -41,6 +58,18 @@ export class DaemonWorkerClient {
 	}>();
 
 	constructor(private readonly socketPath: string) {}
+
+	get hello(): DaemonHello | undefined {
+		return this.helloMessage;
+	}
+
+	get isConnected(): boolean {
+		return this.socket !== undefined && !this.socket.destroyed;
+	}
+
+	supportsServerCapability(capability: DaemonServerCapability): boolean {
+		return this.helloMessage?.serverCapabilities?.includes(capability) === true;
+	}
 
 	async connect(timeoutMs = 3000): Promise<void> {
 		if (this.socket) {
@@ -74,13 +103,15 @@ export class DaemonWorkerClient {
 			socket.once("error", onError);
 		});
 
-		socket.on("error", (error) => this.notifyClosed(socket, error));
-		socket.on("close", () => this.notifyClosed(socket, new Error("Daemon worker socket closed")));
+		socket.on("error", (error) => this.notifyClosed(socket, this.directCloseError(error)));
+		socket.on("close", () =>
+			this.notifyClosed(socket, this.directCloseError(new Error("Daemon worker socket closed"))),
+		);
 	}
 
 	waitForHello(timeoutMs = 3000): Promise<DaemonHello> {
-		if (this.hello) {
-			return Promise.resolve(this.hello);
+		if (this.helloMessage) {
+			return Promise.resolve(this.helloMessage);
 		}
 		if (!this.socket || this.socket.destroyed) {
 			return Promise.reject(new Error("Daemon worker client is not connected"));
@@ -103,12 +134,21 @@ export class DaemonWorkerClient {
 		return () => this.frameListeners.delete(listener);
 	}
 
+	onMessage(listener: DaemonClientMessageListener): () => void {
+		this.messageListeners.add(listener);
+		return () => this.messageListeners.delete(listener);
+	}
+
 	onClose(listener: DaemonWorkerCloseListener): () => void {
 		this.closeListeners.add(listener);
 		return () => this.closeListeners.delete(listener);
 	}
 
-	request(command: DaemonCommandBody, timeoutMs = 30_000): Promise<DaemonResponse> {
+	request(
+		command: DaemonCommandBody,
+		timeoutMs = 30_000,
+		_options: DaemonClientRequestOptions = {},
+	): Promise<DaemonResponse> {
 		return this.requestWire(command, timeoutMs);
 	}
 
@@ -128,12 +168,32 @@ export class DaemonWorkerClient {
 		return response;
 	}
 
+	/** Redeem a supervisor-issued single-use ticket; success flips this client into a direct session transport. */
+	async authenticatePeer(ticket: DaemonPeerTransportTicket, timeoutMs = 3000): Promise<void> {
+		const response = await this.requestWire(
+			{
+				type: "peer_auth",
+				grantId: ticket.grantId,
+				token: ticket.token,
+				workerInstanceId: ticket.workerInstanceId,
+				purpose: ticket.purpose,
+			},
+			timeoutMs,
+		);
+		if (!response.success) {
+			throw new Error(response.error);
+		}
+		this.directPeer = true;
+	}
+
 	close(): void {
 		this.rejectAll(new Error("Daemon worker client closed"));
 		this.channel?.close();
 		this.channel = undefined;
 		this.socket?.destroy();
 		this.socket = undefined;
+		this.directPeer = false;
+		this.directClosingReason = undefined;
 	}
 
 	private async requestWire(command: DaemonWorkerWireCommandBody, timeoutMs: number): Promise<DaemonResponse> {
@@ -193,7 +253,7 @@ export class DaemonWorkerClient {
 			try {
 				const parsed = JSON.parse(frame.payload.toString("utf8")) as DaemonOutbound;
 				if (parsed.type === "daemon_hello") {
-					this.hello = parsed;
+					this.helloMessage = parsed;
 					for (const waiter of [...this.helloWaiters]) {
 						clearTimeout(waiter.timeout);
 						this.helloWaiters.delete(waiter);
@@ -207,6 +267,49 @@ export class DaemonWorkerClient {
 		for (const listener of this.frameListeners) {
 			listener(frame);
 		}
+		if (this.directPeer && frame.header.outboundType !== "daemon_hello" && frame.header.outboundType !== "response") {
+			this.emitDirectOutbound(frame);
+		}
+	}
+
+	/**
+	 * A malformed outbound frame closes the direct link instead of surfacing a
+	 * decode error to consumers: the routed client then falls back to the
+	 * supervisor transport.
+	 */
+	private emitDirectOutbound(frame: PrivateFrame<DaemonWorkerFrameHeader>): void {
+		if (frame.header.kind !== "outbound") return;
+		let message: DaemonOutbound;
+		try {
+			if (frame.header.payloadEncoding !== undefined && frame.header.payloadEncoding !== "jsonl") {
+				throw new Error(`Direct worker sent an unsupported payload encoding: ${frame.header.payloadEncoding}`);
+			}
+			const parsed = JSON.parse(frame.payload.toString("utf8")) as unknown;
+			if (!parsed || typeof parsed !== "object" || typeof (parsed as { type?: unknown }).type !== "string") {
+				throw new Error("Direct worker sent an invalid outbound payload");
+			}
+			message = parsed as DaemonOutbound;
+		} catch (error) {
+			const socket = this.socket;
+			const directError = this.directCloseError(error instanceof Error ? error : new Error(String(error)));
+			if (socket) {
+				this.notifyClosed(socket, directError);
+				socket.destroy(directError);
+			}
+			return;
+		}
+		if (message.type === "daemon_closing") {
+			this.directClosingReason = message.reason;
+		}
+		for (const listener of [...this.messageListeners]) {
+			listener(message);
+		}
+	}
+
+	private directCloseError(cause: Error): Error {
+		return this.directPeer
+			? new DaemonSocketClosedError(this.socketPath, this.directClosingReason, cause.message)
+			: cause;
 	}
 
 	private rejectAll(error: Error): void {
@@ -228,6 +331,8 @@ export class DaemonWorkerClient {
 		}
 		this.socket = undefined;
 		this.channel = undefined;
+		this.directPeer = false;
+		this.directClosingReason = undefined;
 		this.rejectAll(error);
 		for (const listener of [...this.closeListeners]) {
 			listener(error);

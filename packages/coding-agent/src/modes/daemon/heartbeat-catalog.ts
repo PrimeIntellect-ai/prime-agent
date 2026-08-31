@@ -1,10 +1,10 @@
 import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
-import type { DaemonClient } from "./daemon-client.js";
+import type { DaemonTransportClient } from "./daemon-client.js";
 import { deserializeDaemonError } from "./daemon-errors.js";
 import { isUnknownDaemonCommandError } from "./daemon-protocol.js";
 
 export async function listDaemonHeartbeats(
-	client: DaemonClient,
+	client: DaemonTransportClient,
 	activeSessionId?: string,
 ): Promise<AgentConnectionHeartbeat[]> {
 	if (!client.hello) await client.waitForHello();
