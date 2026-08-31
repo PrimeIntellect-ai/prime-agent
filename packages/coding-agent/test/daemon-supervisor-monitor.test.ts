@@ -679,6 +679,14 @@ describe("daemon worker supervisor monitoring", () => {
 			/EMFILE.*resident session workers.*ulimit -n/s,
 		);
 		expect(workers.size).toBe(0);
+
+		workerLaunchTestState.spawnFailureCode = "ENOENT";
+		const enoentFailure = await supervisor
+			.launchWorker({ type: "create", config: { cwd: root, agentDir: root } })
+			.then(() => undefined)
+			.catch((error: Error) => error);
+		expect(enoentFailure?.message).toContain("ENOENT");
+		expect(enoentFailure?.message).not.toContain("ulimit");
 	});
 
 	it("commits the startup marker after durable worker publication", async () => {
