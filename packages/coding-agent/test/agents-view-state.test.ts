@@ -1384,11 +1384,10 @@ describe("agents view state", () => {
 			expect(resolveAgentsViewScopeFrames([], frames)).toEqual({ frames: [], droppedFrames: 2 });
 		});
 
-		test("settles vanished scopes only after both catalog attempts finish", () => {
-			expect(shouldApplyScopeResolution(0, false, false)).toBe(true);
-			expect(shouldApplyScopeResolution(1, true, false)).toBe(false);
-			expect(shouldApplyScopeResolution(1, false, true)).toBe(false);
-			expect(shouldApplyScopeResolution(1, true, true)).toBe(true);
+		test("settles vanished scopes only after the saved catalog attempt finishes", () => {
+			expect(shouldApplyScopeResolution(0, false)).toBe(true);
+			expect(shouldApplyScopeResolution(1, false)).toBe(false);
+			expect(shouldApplyScopeResolution(1, true)).toBe(true);
 		});
 	});
 

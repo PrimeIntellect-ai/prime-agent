@@ -479,10 +479,8 @@ describe("roster-driven agents view instance", () => {
 			},
 			{},
 		) as AgentsViewMode & Record<string, unknown>;
-		Reflect.set(view, "rosterSupported", true);
 		Reflect.set(view, "rosterStore", store);
 		Reflect.set(view, "client", client);
-		Reflect.set(view, "liveCatalogReady", true);
 		Reflect.set(view, "savedCatalogReady", true);
 		return { view, store, client };
 	}

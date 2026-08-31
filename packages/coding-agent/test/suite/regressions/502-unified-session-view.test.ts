@@ -51,10 +51,8 @@ function refreshHarness() {
 		reconnectPromise: undefined,
 		daemonShutdownReceived: false,
 		options: {},
-		liveCatalogGeneration: 0,
 		savedCatalogGeneration: 0,
 		heartbeatCatalogGeneration: 0,
-		liveCatalogRefreshPending: false,
 		savedCatalogRefreshPending: false,
 		heartbeats: [] as unknown[],
 		savedSearchFetchStarted: false,
@@ -311,7 +309,6 @@ describe("#502 unified session view regressions", () => {
 		const fallback = summary("fallback");
 		const harness = {
 			selectionAnchorPending: true,
-			liveCatalogRefreshPending: false,
 			savedCatalogRefreshPending: true,
 			selectedIndex: 0,
 			selectedActiveSessionId: undefined as string | undefined,

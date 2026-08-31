@@ -439,8 +439,6 @@ describe("AgentsViewMode", () => {
 			heartbeats: [],
 			inactiveAgentIdentities: new Set(),
 			pendingDeleteAgent: undefined,
-			liveCatalogReady: true,
-			liveCatalogRefreshPending: false,
 			scopeKey: persistentState.scopeFrames?.[0]?.scope,
 			expandedSubagentParents: new Set(),
 			programShownParents: new Set(),
@@ -494,7 +492,6 @@ describe("AgentsViewMode", () => {
 			heartbeats: [],
 			inactiveAgentIdentities: new Set(),
 			pendingDeleteAgent: undefined,
-			liveCatalogReady: true,
 			savedCatalogReady: true,
 			scopeKey: persistentState.scopeFrames?.[0]?.scope,
 			expandedSubagentParents: new Set(),
@@ -582,7 +579,6 @@ describe("AgentsViewMode", () => {
 				heartbeats: [],
 				inactiveAgentIdentities: new Set(),
 				pendingDeleteAgent: undefined,
-				liveCatalogReady: true,
 				savedCatalogReady: true,
 				expandedSubagentParents,
 				programShownParents: new Set(),
@@ -687,7 +683,6 @@ describe("AgentsViewMode persistent catalog state", () => {
 
 		try {
 			await expect(invoke("refreshSessions", view)).resolves.toBeUndefined();
-			expect(Reflect.get(view, "liveCatalogReady")).toBe(true);
 			expect(persistentState.scopeFrames).toEqual([{ scope, returnChat: root }]);
 			expect(persistentState.lastSuccessfulLiveSummaries).toEqual([root]);
 		} finally {
@@ -851,7 +846,6 @@ describe("AgentsViewMode persistent catalog state", () => {
 		);
 		const client = { isConnected: false, reconnect: vi.fn() };
 		Reflect.set(view, "client", client);
-		Reflect.set(view, "liveCatalogReady", true);
 		Reflect.set(view, "savedCatalogReady", true);
 
 		try {

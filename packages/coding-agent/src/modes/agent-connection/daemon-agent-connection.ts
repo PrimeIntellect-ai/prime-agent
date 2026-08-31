@@ -20,7 +20,7 @@ import type { RefinementResult } from "../../core/refinement/index.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
 import type { SessionStats } from "../../core/session-stats.js";
-import { AgentsViewRosterStore } from "../agents-view/roster-store.js";
+import { AgentsViewRosterStore, STALE_ROSTER_DAEMON_MESSAGE } from "../agents-view/roster-store.js";
 import {
 	DaemonCapabilityUnavailableError,
 	type DaemonClient,
@@ -391,7 +391,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		this.rosterStore ??= new AgentsViewRosterStore();
 		const store = this.rosterStore;
 		if (!(await store.attach(this.client))) {
-			throw new Error("Daemon is stale: it does not advertise the agent_roster capability; restart the daemon");
+			throw new Error(STALE_ROSTER_DAEMON_MESSAGE);
 		}
 		const unsubscribe = store.onUpdate(listener);
 		return {

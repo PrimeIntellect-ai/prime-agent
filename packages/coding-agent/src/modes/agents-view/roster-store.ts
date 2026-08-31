@@ -4,6 +4,10 @@ import type { DaemonClient, DaemonHello } from "../daemon/daemon-client.js";
 import type { DaemonOutbound } from "../daemon/daemon-protocol.js";
 import type { SessionSummary } from "../daemon/daemon-session-list.js";
 
+/** The one user-facing message for a daemon that predates the roster capability. */
+export const STALE_ROSTER_DAEMON_MESSAGE =
+	"Daemon is stale: it does not advertise the agent_roster capability; restart the daemon";
+
 // Client-side roster mirror: one subscribe seeds it, pushes keep it current, and it outlives view instances.
 export class AgentsViewRosterStore {
 	private readonly entries = new Map<string, AgentRosterEntry>();

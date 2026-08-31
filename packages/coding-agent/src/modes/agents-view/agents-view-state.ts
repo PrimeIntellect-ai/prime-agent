@@ -308,12 +308,9 @@ export function resolveAgentsViewLeftResult(
 	};
 }
 
-export function shouldApplyScopeResolution(
-	droppedFrames: number,
-	liveCatalogReady: boolean,
-	savedCatalogReady: boolean,
-): boolean {
-	return droppedFrames === 0 || (liveCatalogReady && savedCatalogReady);
+// The pushed roster is always current once the view runs; only the saved catalog still settles.
+export function shouldApplyScopeResolution(droppedFrames: number, savedCatalogReady: boolean): boolean {
+	return droppedFrames === 0 || savedCatalogReady;
 }
 
 export function createUnattachableChildOpenResult(

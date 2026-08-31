@@ -96,7 +96,7 @@ import {
 	type UnifiedSessionIndex,
 	type UnifiedSessionRecord,
 } from "./agents-view-state.js";
-import { AgentsViewRosterStore } from "./roster-store.js";
+import { AgentsViewRosterStore, STALE_ROSTER_DAEMON_MESSAGE } from "./roster-store.js";
 import { matchesSearchText } from "./session-view-search.js";
 
 const HEARTBEAT_POLL_INTERVAL_MS = 15000;
@@ -669,7 +669,6 @@ export class AgentsViewMode implements Component, Focusable {
 	private scopedRecords: UnifiedSessionRecord[] = [];
 	private scopeKey: AgentsViewScopeKey | undefined;
 	private scopeRootSummary: SessionSummary | undefined;
-	private liveCatalogReady = false;
 	private savedCatalogReady = false;
 	private savedCatalogGeneration = 0;
 	private heartbeatCatalogGeneration = 0;
@@ -725,7 +724,6 @@ export class AgentsViewMode implements Component, Focusable {
 		this.lastListedSummaries = persistentState.lastSuccessfulLiveSummaries ?? [];
 		this.savedSessions = persistentState.savedSessions ?? [];
 		this.lastSuccessfulSavedSessions = persistentState.lastSuccessfulSavedSessions ?? this.savedSessions;
-		this.savedCatalogReady = persistentState.lastSuccessfulSavedSessions !== undefined;
 		this.heartbeats = persistentState.heartbeats ?? [];
 		this.savedCatalogGeneration = persistentState.savedCatalogGeneration ?? 0;
 		this.expandedSubagentParents = persistentState.expandedSubagentParents ?? new Set();
@@ -861,7 +859,7 @@ export class AgentsViewMode implements Component, Focusable {
 		this.persistentState.rosterStore ??= new AgentsViewRosterStore();
 		this.rosterStore = this.persistentState.rosterStore;
 		if (!(await this.rosterStore.attach(client))) {
-			throw new Error("Daemon is stale: it does not advertise the agent_roster capability; restart the daemon");
+			throw new Error(STALE_ROSTER_DAEMON_MESSAGE);
 		}
 		// Armed only after a successful attach: a handshake failure exits cleanly instead of racing a reconnect loop.
 		this.subscribeToClientClose(client);
@@ -889,7 +887,6 @@ export class AgentsViewMode implements Component, Focusable {
 		const runPromise = new Promise<AgentsViewRunResult>((resolve) => {
 			this.resolveRun = resolve;
 		});
-		this.liveCatalogReady = true;
 		// Saved sessions load lazily on the first search query; the roster carries the nav rows.
 		this.savedCatalogReady = true;
 		this.unsubscribeRosterUpdate = this.rosterStore.onUpdate(() => this.onRosterUpdate());
@@ -2155,7 +2152,6 @@ export class AgentsViewMode implements Component, Focusable {
 	/** The pushed roster is the live catalog; a refresh is one local reapply of the store's rows. */
 	private async refreshSessions(): Promise<void> {
 		if (this.reconnectPromise || this.daemonShutdownReceived || !this.rosterStore) return;
-		this.liveCatalogReady = true;
 		this.applySessionList(this.rosterStore.summaries(), true);
 		this.resolveMissingSelectionAnchor();
 	}
@@ -2178,7 +2174,7 @@ export class AgentsViewMode implements Component, Focusable {
 
 		const frames = this.persistentState.scopeFrames ?? [];
 		const resolution = resolveAgentsViewScopeFrames(this.unifiedRecords, frames, this.unifiedIndex);
-		if (shouldApplyScopeResolution(resolution.droppedFrames, this.liveCatalogReady, this.savedCatalogReady)) {
+		if (shouldApplyScopeResolution(resolution.droppedFrames, this.savedCatalogReady)) {
 			this.persistentState.scopeFrames = resolution.frames;
 			this.scopeKey = resolution.frames.at(-1)?.scope;
 			this.scopeRootSummary = resolution.root ? summaryForUnifiedRecord(resolution.root) : undefined;
