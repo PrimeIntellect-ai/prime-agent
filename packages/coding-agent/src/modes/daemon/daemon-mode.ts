@@ -7,7 +7,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
@@ -160,6 +160,7 @@ import {
 	isDaemonCommandEnvelope,
 	isDaemonDialogExtensionUiRequest,
 	isDaemonMutatingCommand,
+	isSessionPlaneDaemonCommand,
 	salvageDaemonCommandId,
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
@@ -188,6 +189,7 @@ import {
 import { assertDaemonSupervisorOwnerCurrent, isDaemonShutdownAdmissionActive } from "./daemon-supervisor-ownership.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
+	DAEMON_WORKER_PEER_TRANSPORT_CAPABILITY,
 	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
 	DAEMON_WORKER_ROLE_ENV,
 	DAEMON_WORKER_ROSTER_CAPABILITY,
@@ -195,6 +197,7 @@ import {
 	DAEMON_WORKER_TOKEN_ENV,
 	type DaemonWorkerCommand,
 	type DaemonWorkerFrameHeader,
+	type DaemonWorkerPeerGrant,
 	type DaemonWorkerRosterOutbound,
 	isDaemonWorkerFrameHeader,
 	ROSTER_HEARTBEAT_INTERVAL_MS,
@@ -230,6 +233,8 @@ export interface DaemonModeOptions {
 	createRuntime: CreateAgentSessionRuntimeFactory;
 	worker?: {
 		authenticationToken: string;
+		/** Fresh per-process identity that peer transport grants bind to. Absent under pre-peer supervisors. */
+		workerInstanceId?: string;
 		restoreActiveSessionId?: string;
 	};
 }
@@ -392,6 +397,10 @@ interface BoundSupervisorGenerationClaim {
 	ownerFingerprint: string;
 }
 
+const PEER_GRANT_TTL_LIMIT_MS = 30_000;
+// Only the supervisor registers grants, so the cap is a tripwire, never an eviction policy.
+const PEER_GRANT_LIMIT = 1024;
+
 const RLM_SUBAGENT_REGISTRY_FILE = "rlm-subagents.jsonl";
 
 /**
@@ -536,6 +545,9 @@ export class AgentDaemon {
 	private supervisorFenceTimer?: ReturnType<typeof setTimeout>;
 	private supervisorLaunchInProgress = false;
 	private readonly supervisorClaims = new Map<DaemonSocketClient, BoundSupervisorGenerationClaim>();
+	private readonly peerGrants = new Map<string, DaemonWorkerPeerGrant>();
+	private readonly peerClaims = new Map<DaemonSocketClient, DaemonWorkerPeerGrant>();
+	private peerAdmissionsFenced = false;
 	private agentMessagesPaused = false;
 	private readonly summarizer = new DaemonSessionSummarizer(
 		() => [...this.sessions.values()],
@@ -738,6 +750,16 @@ export class AgentDaemon {
 			this.cancelPreparedUpdateRestart(this.updateRestart.id);
 		}
 		return true;
+	}
+
+	/** Burn every outstanding grant and end direct peers; admissions stay fenced until an update cancel. */
+	private fencePeerTransports(): void {
+		this.peerAdmissionsFenced = true;
+		this.peerGrants.clear();
+		for (const client of [...this.peerClaims.keys()]) {
+			this.peerClaims.delete(client);
+			client.socket.end();
+		}
 	}
 
 	private clearSupervisorAvailabilityCheck(): void {
@@ -3225,10 +3247,11 @@ export class AgentDaemon {
 			this.detachClient(client);
 			client.detachInput();
 			this.clients.delete(client);
-			const wasAuthenticated = client.authenticated === true;
+			this.peerClaims.delete(client);
+			const wasSupervisor = this.supervisorClaims.has(client);
 			this.revokeSupervisorClaim(client);
 			const supervisorSocketPath = this.supervisorSocketPathFromEnv();
-			if (this.options.worker && wasAuthenticated && supervisorSocketPath) {
+			if (this.options.worker && wasSupervisor && supervisorSocketPath) {
 				this.scheduleSupervisorAvailabilityCheck(supervisorSocketPath, 100);
 			}
 		};
@@ -3290,6 +3313,9 @@ export class AgentDaemon {
 				id?: unknown;
 				type?: unknown;
 				token?: unknown;
+				grantId?: unknown;
+				workerInstanceId?: unknown;
+				purpose?: unknown;
 				supervisorGeneration?: unknown;
 				supervisorPid?: unknown;
 				supervisorProcessStartId?: unknown;
@@ -3319,9 +3345,54 @@ export class AgentDaemon {
 			// Public supervisor authentication has already bound this socket's identity.
 			if (this.options.worker && client.authenticated !== true) {
 				const commandId = typeof parsed.id === "string" ? parsed.id : undefined;
+				// A pre-auth socket may only authenticate; any failure or other command ends it.
+				if (parsed.type === "peer_auth") {
+					// Single use: the grant is burned before its token is checked.
+					const grant = typeof parsed.grantId === "string" ? this.peerGrants.get(parsed.grantId) : undefined;
+					if (typeof parsed.grantId === "string") this.peerGrants.delete(parsed.grantId);
+					const presentedTokenHash =
+						typeof parsed.token === "string" ? createHash("sha256").update(parsed.token).digest() : undefined;
+					const expectedTokenHash = grant ? createHash("sha256").update(grant.token).digest() : undefined;
+					const expiresAt = grant ? Date.parse(grant.expiresAt) : Number.NaN;
+					if (
+						this.peerAdmissionsFenced ||
+						this.shuttingDown ||
+						!grant ||
+						!presentedTokenHash ||
+						!expectedTokenHash ||
+						!timingSafeEqual(presentedTokenHash, expectedTokenHash) ||
+						parsed.workerInstanceId !== grant.workerInstanceId ||
+						parsed.purpose !== grant.purpose ||
+						this.options.worker.workerInstanceId !== grant.workerInstanceId ||
+						!Number.isFinite(expiresAt) ||
+						expiresAt <= Date.now()
+					) {
+						clearParsedAdmission();
+						this.write(client, failure(commandId, "peer_auth", "Peer authentication failed"));
+						client.socket.end();
+						return;
+					}
+					client.authenticated = true;
+					client.authenticationRole = "session_client";
+					this.peerClaims.set(client, grant);
+					this.write(client, {
+						id: commandId,
+						type: "response",
+						command: "peer_auth",
+						success: true,
+						data: {
+							workerInstanceId: grant.workerInstanceId,
+							activeSessionId: grant.activeSessionId,
+							purpose: grant.purpose,
+						},
+					});
+					return;
+				}
 				if (
 					parsed.type !== "worker_auth" ||
 					parsed.token !== this.options.worker.authenticationToken ||
+					(this.options.worker.workerInstanceId !== undefined &&
+						parsed.workerInstanceId !== this.options.worker.workerInstanceId) ||
 					typeof parsed.supervisorGeneration !== "string" ||
 					!Number.isInteger(parsed.supervisorPid) ||
 					(parsed.supervisorPid as number) <= 0 ||
@@ -3356,6 +3427,7 @@ export class AgentDaemon {
 					}
 				}
 				client.authenticated = true;
+				client.authenticationRole = "supervisor";
 				this.supervisorClaims.set(client, { claim, ownerFingerprint });
 				this.clearSupervisorAvailabilityCheck();
 				this.scheduleSupervisorFenceCheck();
@@ -3364,13 +3436,44 @@ export class AgentDaemon {
 					type: "response",
 					command: "worker_auth",
 					success: true,
-					data: { capabilities: [DAEMON_WORKER_ROSTER_CAPABILITY] },
+					data: {
+						capabilities: [
+							DAEMON_WORKER_ROSTER_CAPABILITY,
+							...(this.options.worker.workerInstanceId !== undefined
+								? [DAEMON_WORKER_PEER_TRANSPORT_CAPABILITY]
+								: []),
+						],
+					},
 				});
 				this.rosterReporter.snapshotPending = true;
 				this.scheduleRosterFlush();
 				return;
 			}
-			if (this.options.worker) {
+			const peerClaim = this.options.worker ? this.peerClaims.get(client) : undefined;
+			if (peerClaim) {
+				const commandId = typeof parsed.id === "string" ? parsed.id : undefined;
+				const commandName = typeof parsed.type === "string" ? parsed.type : "unknown";
+				if (this.peerAdmissionsFenced || this.updateRestart) {
+					clearParsedAdmission();
+					this.write(client, failure(commandId, commandName, "Direct peer transport is fenced"));
+					return;
+				}
+				// Direct peers get exactly the session plane of their granted session; worker_*
+				// control commands and every other session are rejected here, and unknown
+				// command types never classify as session-plane.
+				if (
+					typeof parsed.type !== "string" ||
+					!isSessionPlaneDaemonCommand(parsed.type) ||
+					parsed.activeSessionId !== peerClaim.activeSessionId
+				) {
+					clearParsedAdmission();
+					this.write(
+						client,
+						failure(commandId, commandName, "Command is not allowed on this direct peer transport"),
+					);
+					return;
+				}
+			} else if (this.options.worker) {
 				const boundClaim = this.supervisorClaims.get(client);
 				if (!boundClaim) {
 					clearParsedAdmission();
@@ -3509,6 +3612,35 @@ export class AgentDaemon {
 				case "worker_auth":
 					this.write(client, failure(command.id, command.type, "Worker is already authenticated"));
 					return;
+				case "worker_register_peer_transport": {
+					const grant = command.grant;
+					const boundClaim = this.supervisorClaims.get(client);
+					const expiresAt = Date.parse(grant.expiresAt);
+					const now = Date.now();
+					for (const [grantId, pending] of this.peerGrants) {
+						if (Date.parse(pending.expiresAt) < now) this.peerGrants.delete(grantId);
+					}
+					if (
+						this.peerAdmissionsFenced ||
+						!boundClaim ||
+						grant.issuerGeneration !== boundClaim.claim.supervisorGeneration ||
+						grant.purpose !== "session_client" ||
+						!grant.grantId ||
+						!grant.token ||
+						grant.workerInstanceId !== this.options.worker?.workerInstanceId ||
+						!this.sessions.has(grant.activeSessionId) ||
+						this.peerGrants.size >= PEER_GRANT_LIMIT ||
+						!Number.isFinite(expiresAt) ||
+						expiresAt <= now ||
+						expiresAt - now > PEER_GRANT_TTL_LIMIT_MS
+					) {
+						this.write(client, failure(command.id, command.type, "Peer transport grant is invalid"));
+						return;
+					}
+					this.peerGrants.set(grant.grantId, grant);
+					this.writeWorkerSuccess(client, command);
+					return;
+				}
 				case "worker_subscribe": {
 					const state = this.getBoundSessionState(command.activeSessionId);
 					setDaemonClientSessionCapabilities(
@@ -3528,6 +3660,7 @@ export class AgentDaemon {
 					return;
 				}
 				case "worker_archive_and_shutdown": {
+					this.fencePeerTransports();
 					for (const state of [...this.sessions.values()]) {
 						await this.closeSession(state, "killed");
 					}
@@ -3552,6 +3685,7 @@ export class AgentDaemon {
 					return;
 				}
 				case "worker_prepare_update": {
+					this.fencePeerTransports();
 					const transaction = this.beginUpdateRestartTransaction(client);
 					const manifest = await this.runUpdateRestartPreparation(transaction);
 					this.writeWorkerSuccess(client, command, manifest);
@@ -3593,6 +3727,7 @@ export class AgentDaemon {
 						throw new Error("Daemon update checkpoint is already committing");
 					}
 					if (transaction) this.cancelPreparedUpdateRestart(transaction.id);
+					this.peerAdmissionsFenced = false;
 					this.writeWorkerSuccess(client, command);
 					return;
 				}
@@ -6131,7 +6266,10 @@ export class AgentDaemon {
 		transaction.deferredClientEnv.length = 0;
 		for (const pause of this.updateRestartQueuePauses.values()) pause.release();
 		this.updateRestartQueuePauses.clear();
-		if (!this.shuttingDown) this.cronScheduler.start();
+		if (!this.shuttingDown) {
+			this.peerAdmissionsFenced = false;
+			this.cronScheduler.start();
+		}
 	}
 
 	private async prepareUpdateRestart(): Promise<DaemonUpdateRestartManifest> {
@@ -7028,7 +7166,11 @@ export class AgentDaemon {
 	}
 
 	private write(client: DaemonSocketClient, message: DaemonOutbound): boolean {
-		const compactDelta = client.transport === "private-framed" ? createCompactAssistantDelta(message) : undefined;
+		// Direct session peers decode plain jsonl payloads only; compact deltas are a supervisor optimization.
+		const compactDelta =
+			client.transport === "private-framed" && client.authenticationRole !== "session_client"
+				? createCompactAssistantDelta(message)
+				: undefined;
 		return this.writeSerialized(
 			client,
 			serializeJsonLine(compactDelta ?? message),
@@ -7119,6 +7261,8 @@ export class AgentDaemon {
 			process.exit(exitCode);
 		}
 		this.shuttingDown = true;
+		this.peerAdmissionsFenced = true;
+		this.peerGrants.clear();
 		if (this.supervisorMonitorTimer) {
 			clearTimeout(this.supervisorMonitorTimer);
 			this.supervisorMonitorTimer = undefined;

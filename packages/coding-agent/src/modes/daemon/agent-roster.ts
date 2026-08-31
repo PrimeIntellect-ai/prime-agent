@@ -89,6 +89,7 @@ export function passivatedWorkerRosterEntry(
 ): WorkerRosterEntry {
 	const {
 		activeSessionId,
+		directAttachedClients,
 		hasActiveHeartbeat,
 		hasRegisteredHeartbeat,
 		hasRegisteredCronJob,

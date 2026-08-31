@@ -58,6 +58,8 @@ export interface SessionSummary {
 	/** True while the agent is streaming with tool calls pending; drives the "running tools" label. */
 	isRunningTools?: boolean;
 	attachedClients: number;
+	/** Clients attached over the direct worker transport; the supervisor adds these to its own count. */
+	directAttachedClients?: number;
 	messageCount: number;
 	unfinishedActionCount?: number;
 	sessionActions: SessionActionSnapshot;
@@ -231,6 +233,9 @@ export function summaryForActiveSession(
 		}
 	}
 
+	const directAttachedClients = [...activeSession.clients].filter(
+		(client) => client.authenticationRole === "session_client",
+	).length;
 	return {
 		id: activeSession.activeSessionId,
 		lifecycle: activeLifecycleForSession(activeSession),
@@ -256,6 +261,7 @@ export function summaryForActiveSession(
 		hasRunningRlmChildren: session.hasRunningRlmChildren(),
 		isRunningTools: session.isStreaming && session.state.pendingToolCalls.size > 0,
 		attachedClients: activeSession.clients.size,
+		...(directAttachedClients > 0 ? { directAttachedClients } : {}),
 		messageCount: session.messages.length,
 		unfinishedActionCount: session.unfinishedActionCount,
 		sessionActions: session.getSessionActionSnapshot(),

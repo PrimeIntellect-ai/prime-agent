@@ -5,6 +5,7 @@ import type { RlmChildAgentSnapshot } from "../src/core/agent-session.js";
 import type { AgentCronJob } from "../src/core/cron-jobs.js";
 import type { SessionInfo } from "../src/core/session-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
+import { passivatedWorkerRosterEntry, workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import {
 	buildRlmChildSnapshots,
 	buildSessionList,
@@ -55,6 +56,20 @@ describe("buildSessionList", () => {
 			["needs-user", "live", "idle"],
 			["done", "live", "idle"],
 		]);
+	});
+
+	it("counts direct peers separately so the supervisor can add them to its own attachment count", () => {
+		const state = makeState({ activeSessionId: "direct", sessionFile: "/tmp/direct.jsonl" });
+		state.clients.add({ id: "supervisor", authenticationRole: "supervisor" } as unknown as DaemonSocketClient);
+		state.clients.add({ id: "peer", authenticationRole: "session_client" } as unknown as DaemonSocketClient);
+
+		const [summary] = buildSessionList([state], []);
+
+		expect(summary).toMatchObject({ attachedClients: 2, directAttachedClients: 1 });
+		// Passivated roster rows describe a session without a runtime; the live-only count must not survive.
+		expect(
+			passivatedWorkerRosterEntry(workerRosterEntryFromSummary(summary!)).summary.directAttachedClients,
+		).toBeUndefined();
 	});
 
 	it("uses the stable session header time for active rows without a saved catalog entry", () => {
