@@ -245,6 +245,55 @@ describe("worker roster reporter", () => {
 		expect(daemon.rosterReporter.queuedChildren.size).toBe(0);
 	});
 
+	it("flushes hasRegisteredCronJob on cron_add and cron_cancel without any session event", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-cron-flush-"));
+		tempDirs.push(directory);
+		const daemon = new AgentDaemon(join(directory, "worker.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			worker: { authenticationToken: "token" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		} as never);
+		const state = makeState({
+			activeSessionId: "root-active",
+			sessionFile: join(directory, "sessions", "root.jsonl"),
+		});
+		Object.assign(state.runtime, { cwd: directory });
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			cronStore: { registerSessionArtifact(sessionId: string, artifactDir: string): boolean };
+			handleCommand(client: object, command: object): Promise<{ success: boolean; data?: { job?: { id: string } } }>;
+			rosterReporter: { lastComposed: Map<string, WorkerRosterEntry> };
+		};
+		internals.cronStore.registerSessionArtifact("session-root-active", join(directory, "sessions", "root"));
+		internals.sessions.set(state.activeSessionId, state);
+		const client = { id: "client", attachedActiveSessionIds: new Set<string>() };
+
+		const added = await internals.handleCommand(client, {
+			id: "cron-1",
+			type: "cron_add",
+			activeSessionId: "root-active",
+			schedule: "every 1h",
+			prompt: "check status",
+		});
+		expect(added.success).toBe(true);
+		await new Promise((resolveSettle) => setImmediate(resolveSettle));
+		const agentId = "session-root-active";
+		expect(internals.rosterReporter.lastComposed.get(agentId)?.summary.hasRegisteredCronJob).toBe(true);
+
+		const jobId = added.data?.job?.id;
+		if (!jobId) throw new Error("cron_add returned no job id");
+		await internals.handleCommand(client, {
+			id: "cron-2",
+			type: "cron_cancel",
+			activeSessionId: "root-active",
+			jobId,
+		});
+		await new Promise((resolveSettle) => setImmediate(resolveSettle));
+		expect(internals.rosterReporter.lastComposed.get(agentId)?.summary.hasRegisteredCronJob).toBeUndefined();
+	});
+
 	it("schedules a republish for retry and tool-execution transitions", () => {
 		const { daemon } = makeWorkerReporter();
 		const state = makeState({ activeSessionId: "root-active" });

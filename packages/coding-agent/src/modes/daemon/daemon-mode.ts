@@ -4551,6 +4551,8 @@ export class AgentDaemon {
 			case "cron_add": {
 				const state = this.getSessionState(command.activeSessionId);
 				const job = this.createCronJobForState(state, command.schedule, command.prompt);
+				// Plain cron jobs fire no heartbeat-change or session event; flush hasRegisteredCronJob here.
+				this.scheduleRosterFlush();
 				return success(command.id, "cron_add", { job });
 			}
 
@@ -4564,6 +4566,8 @@ export class AgentDaemon {
 					this.removeQueuedHeartbeatFollowUp(state, job);
 				}
 				this.cronScheduler.wake();
+				// Plain cron jobs fire no heartbeat-change or session event; flush hasRegisteredCronJob here.
+				this.scheduleRosterFlush();
 				return success(command.id, "cron_cancel", { job });
 			}
 
