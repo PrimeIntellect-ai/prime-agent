@@ -870,13 +870,7 @@ export class DaemonSupervisor {
 		);
 		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
 
-		const releaseFence = await this.acquireIdleEvictionFence();
-		try {
-			await this.mutationDrain.waitForDrain(
-				0,
-				AbortSignal.timeout(IDLE_EVICTION_DRAIN_TIMEOUT_MS),
-				"Timed out draining daemon mutations for idle eviction",
-			);
+		await this.withEvictionFence("Timed out draining daemon mutations for idle eviction", async () => {
 			if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
 			await Promise.all(
 				candidates.map((worker) => this.refreshWorkerSummaries(worker).catch(() => refreshed.delete(worker))),
@@ -905,9 +899,7 @@ export class DaemonSupervisor {
 					);
 				}),
 			);
-		} finally {
-			releaseFence();
-		}
+		});
 	}
 
 	/** Waits for any held eviction fence, then takes the slot; release clears it only if still ours. */
@@ -922,6 +914,29 @@ export class DaemonSupervisor {
 			if (this.idleEvictionFence === fence) this.idleEvictionFence = undefined;
 			releaseFence();
 		};
+	}
+
+	/** Runs a passivation decision under the eviction fence after draining admitted mutations. */
+	private async withEvictionFence(drainMessage: string, action: () => Promise<void>): Promise<void> {
+		const releaseFence = await this.acquireIdleEvictionFence();
+		try {
+			await this.mutationDrain.waitForDrain(0, AbortSignal.timeout(IDLE_EVICTION_DRAIN_TIMEOUT_MS), drainMessage);
+			await action();
+		} finally {
+			releaseFence();
+		}
+	}
+
+	/** Re-validates one worker on fresh summaries under the caller's fence, then passivates it. */
+	private async passivateWorkerIfStillEligible(
+		worker: ResidentWorker,
+		isStillEligible: () => boolean,
+		describeEvicted: () => string,
+	): Promise<void> {
+		await this.refreshWorkerSummaries(worker);
+		if (!isStillEligible()) return;
+		await this.stopWorker(worker, true);
+		this.log(describeEvicted());
 	}
 
 	private async evictEmptySessionOnLastDetach(activeSessionId: string): Promise<void> {
@@ -942,24 +957,18 @@ export class DaemonSupervisor {
 			return;
 		}
 		if (!this.isEmptyDetachEvictionCandidate(worker)) return;
-		// Idle-sweep coordination: fence new mutations, drain admitted ones, re-read before deciding.
-		const releaseFence = await this.acquireIdleEvictionFence();
 		try {
-			await this.mutationDrain.waitForDrain(
-				0,
-				AbortSignal.timeout(IDLE_EVICTION_DRAIN_TIMEOUT_MS),
-				"Timed out draining daemon mutations for empty-session eviction",
-			);
-			await this.refreshWorkerSummaries(worker);
-			if (!this.isEmptyDetachEvictionCandidate(worker)) return;
-			await this.stopWorker(worker, true);
-			this.log(
-				`Evicted empty session worker ${worker.descriptor.workerId} root=${worker.descriptor.rootSessionId ?? worker.descriptor.rootActiveSessionId} on last client detach`,
+			// Idle-sweep coordination: fence new mutations, drain admitted ones, re-read before deciding.
+			await this.withEvictionFence("Timed out draining daemon mutations for empty-session eviction", () =>
+				this.passivateWorkerIfStillEligible(
+					worker,
+					() => this.isEmptyDetachEvictionCandidate(worker),
+					() =>
+						`Evicted empty session worker ${worker.descriptor.workerId} root=${worker.descriptor.rootSessionId ?? worker.descriptor.rootActiveSessionId} on last client detach`,
+				),
 			);
 		} catch (error) {
 			this.log(`Empty-session eviction failed for worker ${worker.descriptor.workerId}: ${String(error)}`);
-		} finally {
-			releaseFence();
 		}
 	}
 
