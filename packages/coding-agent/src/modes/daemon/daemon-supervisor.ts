@@ -2140,7 +2140,6 @@ export class DaemonSupervisor {
 					}
 					await tombstoneSavedSessionDelete(this.rlmSpawnLedger(), command.sessionPath, entry?.summary);
 					const result = await this.catalog.delete(command.sessionPath);
-					// A write during the awaits replaces the row object; only the observed row may be deleted.
 					if (result.ok && entry && this.roster().get(entry.agentId) === entry) {
 						this.roster().delete(entry.agentId);
 					}
@@ -2363,7 +2362,6 @@ export class DaemonSupervisor {
 		if (entry.seededCwd !== true || !entry.summary.sessionFile) return entry;
 		const info = await readSessionInfo(entry.summary.sessionFile).catch(() => undefined);
 		if (!info) return entry;
-		// A frame can rewrite this agentId while the header read is in flight; never clobber the fresher row.
 		const current = this.roster().get(entry.agentId);
 		if (current !== entry) return current ?? entry;
 		const { seededCwd, ...rest } = entry;
@@ -3507,8 +3505,7 @@ export class DaemonSupervisor {
 
 	private async recoverUncertainWorkerOperations(worker: ResidentWorker, killWorkerProcess = true): Promise<void> {
 		await this.assertRecoveryAllowed();
-		// Callers verify identity before awaiting their way here, so re-check at the last
-		// synchronous moment: the old process can exit in that gap and the PID can recycle.
+		// Re-check at the last synchronous moment: the process can exit in the await gap and the PID recycle.
 		if (
 			killWorkerProcess &&
 			this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId) === "current"
@@ -3794,8 +3791,7 @@ export class DaemonSupervisor {
 		return chained;
 	}
 
-	// An apply is valid only while its own source connection is still the current or authenticating
-	// one: a dead connection's parked applies must not resume during (or after) a reconnect.
+	// An apply is valid only while its own source connection is current: dead connections' parked applies abort.
 	private isWorkerRosterApplyCurrent(worker: ResidentWorker, source: DaemonWorkerClient | undefined): boolean {
 		return (
 			this.workers.get(worker.descriptor.workerId) === worker &&

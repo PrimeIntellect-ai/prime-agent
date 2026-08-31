@@ -6370,8 +6370,7 @@ export class AgentDaemon {
 		state.clients.clear();
 		this.acpMcpOwners.delete(state.activeSessionId);
 		this.sessions.delete(state.activeSessionId);
-		// An archived or discarded top-level session leaves the worker's list; only the disk scan serves
-		// it now. Subagent rows stay passivated to mirror the registry's completed children.
+		// Archived top-level sessions leave the worker's list; subagent rows mirror the registry and stay.
 		if (!keepsResumeEntry && state.runtime.metadata.kind !== "subagent" && this.options.worker) {
 			this.rosterReporter.removedAgentIds.set(this.rosterAgentIdForState(state), state.runtime.session.sessionId);
 		}
@@ -6682,7 +6681,6 @@ export class AgentDaemon {
 			const entry = workerRosterEntryFromSummary(summary);
 			entries.set(entry.agentId, entry);
 		}
-		// The rlm_child_update that clears a queued marker can trail the bound session's own first events.
 		for (const [agentId, queued] of reporter.queuedChildren) {
 			if (entries.has(agentId)) {
 				reporter.queuedChildren.delete(agentId);

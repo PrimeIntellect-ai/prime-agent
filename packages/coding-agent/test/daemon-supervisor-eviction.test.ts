@@ -2,10 +2,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import { success } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor, idleEvictionSweepIntervalMs } from "../src/modes/daemon/daemon-supervisor.js";
+import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
 
 interface WorkerFixture {
 	descriptor: {
@@ -87,17 +87,6 @@ function makeWorker(id: string, summaries: SessionSummary[]): WorkerFixture {
 		summaries: new Map(summaries.map((summary) => [summary.activeSessionId ?? summary.id, summary])),
 		intentionalStop: false,
 	};
-}
-
-function seedSupervisorRoster(supervisor: SupervisorInternals, ...workers: WorkerFixture[]): void {
-	const internals = supervisor as unknown as {
-		writeRosterEntry(entry: ReturnType<typeof workerRosterEntryFromSummary>, worker?: WorkerFixture): unknown;
-	};
-	for (const worker of workers) {
-		for (const summary of worker.summaries.values()) {
-			internals.writeRosterEntry(workerRosterEntryFromSummary(summary), worker);
-		}
-	}
 }
 
 function makeSupervisor(idleEvictionMinutes: number | "off" = 90): SupervisorInternals {

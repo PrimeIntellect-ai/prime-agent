@@ -8,7 +8,6 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getProcessStartId } from "../src/core/session-lease.js";
 import type { DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
-import { workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import { CommandRecoveryJournal } from "../src/modes/daemon/command-recovery-journal.js";
 import { DaemonCatalogClient } from "../src/modes/daemon/daemon-catalog-process.js";
 import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
@@ -30,6 +29,7 @@ import { MutationDrainLatch } from "../src/modes/daemon/mutation-drain-latch.js"
 import { WorkerRecoveryJournal } from "../src/modes/daemon/worker-recovery-journal.js";
 import type { PrivateFrame } from "../src/modes/session-worker/private-framing.js";
 import * as childProcessModule from "../src/utils/child-process.js";
+import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
 import { createDeferred } from "./suite/scheduling.js";
 
 const workerLaunchTestState = vi.hoisted(() => ({
@@ -291,20 +291,6 @@ function createHarness(canConnect: () => Promise<boolean>): SupervisorMonitorHar
 		canConnectToSupervisor: vi.fn(canConnect),
 		launchReplacementSupervisor: vi.fn(async () => undefined),
 	}) as SupervisorMonitorHarness;
-}
-
-function seedSupervisorRoster(
-	supervisor: object,
-	...workers: Array<{ descriptor: { workerId: string }; summaries: Map<string, SessionSummary> }>
-): void {
-	const internals = supervisor as {
-		writeRosterEntry(entry: ReturnType<typeof workerRosterEntryFromSummary>, worker?: object): unknown;
-	};
-	for (const worker of workers) {
-		for (const summary of worker.summaries.values()) {
-			internals.writeRosterEntry(workerRosterEntryFromSummary(summary), worker);
-		}
-	}
 }
 
 describe("daemon worker supervisor monitoring", () => {

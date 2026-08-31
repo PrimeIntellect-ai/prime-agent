@@ -8,12 +8,12 @@ import {
 	sessionNameReservationKey,
 } from "../src/core/agent-messages.js";
 import { readSessionInfo, SessionManager } from "../src/core/session-manager.js";
-import { workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import { DaemonCatalogClient } from "../src/modes/daemon/daemon-catalog-process.js";
 import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
 import { success } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
 
 interface SupervisorInternals {
 	workers: Map<string, WorkerFixture>;
@@ -34,7 +34,6 @@ interface SupervisorInternals {
 	familyCatalogEntry(summary: SessionSummary): AgentFamilyCatalogEntry;
 	handleCommand(client: object, command: Record<string, unknown>): Promise<unknown>;
 	seedRosterLedger(): Promise<void>;
-	writeRosterEntry(entry: ReturnType<typeof workerRosterEntryFromSummary>, worker?: WorkerFixture): unknown;
 }
 
 interface WorkerFixture {
@@ -76,14 +75,6 @@ function summary(overrides: Partial<SessionSummary> & Pick<SessionSummary, "id" 
 	};
 }
 
-function seedRoster(supervisor: SupervisorInternals, ...workers: WorkerFixture[]): void {
-	for (const target of workers) {
-		for (const entry of target.summaries.values()) {
-			supervisor.writeRosterEntry(workerRosterEntryFromSummary(entry), target);
-		}
-	}
-}
-
 function worker(workerId: string, summaries: SessionSummary[] = []): WorkerFixture {
 	return {
 		descriptor: {
@@ -117,7 +108,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			sessionId: "aaaa6666777788889999dddd",
 		});
 		const resident = worker("first", [child]);
-		seedRoster(supervisor, resident);
+		seedSupervisorRoster(supervisor, resident);
 
 		expect(supervisor.findSummaryInWorker(resident, "88889999cccc")).toEqual(child);
 	});
@@ -512,7 +503,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		}) as unknown as SupervisorInternals;
 		supervisor.workers.set("first", firstWorker);
 		supervisor.workers.set("second", secondWorker);
-		seedRoster(supervisor, firstWorker, secondWorker);
+		seedSupervisorRoster(supervisor, firstWorker, secondWorker);
 		Object.assign(supervisor, { catalog: { list: vi.fn(async () => []) } });
 		const client = { id: "client", attachedActiveSessionIds: new Set<string>() };
 
@@ -556,7 +547,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			descriptorDir: join(directory, "workers"),
 		}) as unknown as SupervisorInternals;
 		supervisor.workers.set("owned", ownedWorker);
-		seedRoster(supervisor, ownedWorker);
+		seedSupervisorRoster(supervisor, ownedWorker);
 		Object.assign(supervisor, { catalog: { list: vi.fn(async () => []) } });
 		const workerClient = { id: "daemon-client:worker", attachedActiveSessionIds: new Set<string>() };
 
@@ -629,7 +620,7 @@ describe("daemon supervisor passive subagent topology", () => {
 		}) as unknown as SupervisorInternals;
 		supervisor.workers.set("first", firstWorker);
 		supervisor.workers.set("second", secondWorker);
-		seedRoster(supervisor, firstWorker, secondWorker);
+		seedSupervisorRoster(supervisor, firstWorker, secondWorker);
 		Object.assign(supervisor, {
 			catalog: {
 				siblings: vi.fn(async () => []),
@@ -817,7 +808,7 @@ describe("daemon supervisor passive subagent topology", () => {
 			supervisor.workers.set("first", first);
 			supervisor.workers.set("second", second);
 			supervisor.workers.set("disconnected", disconnected);
-			seedRoster(supervisor, first, second, disconnected);
+			seedSupervisorRoster(supervisor, first, second, disconnected);
 			await client.connect();
 
 			await expect(

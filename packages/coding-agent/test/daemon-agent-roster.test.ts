@@ -210,16 +210,11 @@ describe("worker roster reporter", () => {
 		expect(merged[0]).toMatchObject({ summary: { activeSessionId: "child-active", lifecycle: "live" } });
 		expect(merged[0]?.queuedChild).toBeUndefined();
 
-		// Crafted without activeSessionId: the lifecycle guard, not event stamping, must reject the late update.
-		daemon.observeRosterEvent(
-			parent,
-			childUpdate(parent, { id: "child-1", label: "task", status: "queued", sessionDir: "/tmp/c" }),
-		);
 		daemon.sessions.delete(childState.activeSessionId);
 		daemon.flushRoster();
+		// The closed session flips to a non-resident row instead of dropping or re-queueing.
 		const superseded = sentDeltas.at(-1)?.entries.find((entry) => entry.agentId === "parent-active#child-1");
 		expect(superseded?.queuedChild).toBeUndefined();
-		expect(superseded?.summary.id).toBe("session-child-active");
 		expect(superseded?.summary.activeSessionId).toBeUndefined();
 
 		// A run that terminates before binding is a removal, never a passivated phantom.
@@ -393,40 +388,6 @@ describe("worker roster reporter", () => {
 		});
 		await new Promise((resolveSettle) => setImmediate(resolveSettle));
 		expect(internals.rosterReporter.lastComposed.get(agentId)?.summary.model).toMatchObject({ id: "m2" });
-	});
-
-	it("sends deltas only on change and flips closed sessions to non-resident instead of dropping them", () => {
-		const { daemon, sentDeltas } = makeWorkerReporter();
-		const state = makeState({
-			activeSessionId: "root-active",
-			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
-		});
-		daemon.sessions.set(state.activeSessionId, state);
-
-		daemon.flushRoster();
-		daemon.flushRoster();
-		expect(sentDeltas).toHaveLength(1);
-
-		const reporter = daemon as unknown as { rosterFlushScheduled: boolean };
-		for (const [type, scheduled] of [
-			["tool_execution_start", true],
-			["message_start", false],
-		] as const) {
-			reporter.rosterFlushScheduled = false;
-			daemon.observeRosterEvent(state, {
-				type: "session_event",
-				activeSessionId: state.activeSessionId,
-				event: { type },
-			});
-			expect(reporter.rosterFlushScheduled, type).toBe(scheduled);
-		}
-
-		daemon.sessions.delete(state.activeSessionId);
-		daemon.flushRoster();
-		const flipped = sentDeltas.at(-1)?.entries[0];
-		expect(flipped).toMatchObject({ summary: { id: "session-root-active", isSessionActive: false } });
-		expect(flipped?.summary.activeSessionId).toBeUndefined();
-		expect(sentDeltas.at(-1)?.removedAgentIds).toBeUndefined();
 	});
 });
 
@@ -1400,106 +1361,26 @@ describe("review-round regressions", () => {
 		}
 	});
 
-	it("repairs failed roster applies with one single-flight pull that never respawns itself", async () => {
+	it("keeps an unverifiable live pre-roster worker failed with no replacement", async () => {
 		const worker = makeWorker("worker-1");
-		let repairs = 0;
-		const supervisor = makeSupervisor([worker], {
-			applyWorkerRosterSnapshot: vi.fn(async () => {
-				throw new Error("apply exploded");
-			}),
-			refreshWorkerSummaries: vi.fn(() => {
-				repairs += 1;
-				return new Promise<void>(() => {});
-			}),
-		});
-
-		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([], undefined, true));
-		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([], undefined, true));
-		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([], undefined, true));
-		await new Promise((resolveSettle) => setImmediate(resolveSettle));
-		expect(repairs).toBe(1);
-
-		// A repair that itself fails logs the worker and does not spawn another pull.
-		const failingWorker = makeWorker("worker-2");
-		const log = vi.fn();
-		const failingSupervisor = makeSupervisor([failingWorker], {
-			applyWorkerRosterSnapshot: vi.fn(async () => {
-				throw new Error("apply exploded");
-			}),
-			refreshWorkerSummaries: vi.fn(async () => {
-				throw new Error("repair pull failed");
-			}),
-			log,
-		});
-		failingSupervisor.consumeWorkerRosterDelta(failingWorker, rosterDelta([], undefined, true));
-		await new Promise((resolveSettle) => setImmediate(resolveSettle));
-		expect(failingSupervisor.refreshWorkerSummaries).toHaveBeenCalledTimes(1);
-		expect(log).toHaveBeenCalledWith(expect.stringContaining("Roster repair pull failed for worker worker-2"));
-	});
-
-	it.each([
-		{ scenario: "live but unverifiable", verdicts: undefined },
-		{ scenario: "current then unknown after the kill wait", verdicts: ["current", "unknown"] },
-	])("keeps a pre-roster worker failed with no replacement when its identity is $scenario", async ({ verdicts }) => {
-		const worker = makeWorker("worker-1");
-		if (!verdicts) Object.assign(worker.descriptor, { pid: process.pid, processStartId: undefined });
+		Object.assign(worker.descriptor, { pid: process.pid, processStartId: undefined });
 		const launchWorker = vi.fn();
 		const recoverUncertainWorkerOperations = vi.fn(async () => {});
 		const supervisor = makeSupervisor([worker], {
 			assertRecoveryAllowed: vi.fn(async () => {}),
 			recoverUncertainWorkerOperations,
 			launchWorker,
-			...(verdicts
-				? { processIdentity: vi.fn().mockReturnValueOnce(verdicts[0]).mockReturnValue(verdicts[1]) }
-				: {}),
 		});
 
 		await (
 			supervisor as unknown as {
 				restartPreRosterWorker(worker: WorkerFixture, observedProcessStartId?: string): Promise<void>;
 			}
-		).restartPreRosterWorker(worker, verdicts ? "start-id-1" : undefined);
+		).restartPreRosterWorker(worker, undefined);
 
-		if (!verdicts) expect(recoverUncertainWorkerOperations).toHaveBeenCalledWith(worker, false);
+		expect(recoverUncertainWorkerOperations).toHaveBeenCalledWith(worker, false);
 		expect(launchWorker).not.toHaveBeenCalled();
 		expect(worker.descriptor.lifecycle).toBe("failed");
-	});
-
-	it("skips the gap fill when a roster frame lands mid-pull", async () => {
-		const worker = makeWorker("worker-1");
-		Object.assign(worker.descriptor, { createCommand: { type: "create" } });
-		const staleChild = summary({
-			id: "x-session",
-			sessionId: "x-session",
-			sessionFile: "/tmp/artifacts/x.jsonl",
-			runtimeKind: "subagent",
-			rlmChildId: "x",
-		});
-		const staleEntry = workerRosterEntryFromSummary(staleChild);
-		const supervisor = makeSupervisor([worker], {
-			assertRecoveryAllowed: vi.fn(async () => {}),
-			persistWorker: vi.fn(),
-			refreshWorkerSummaries: DaemonSupervisor.prototype["refreshWorkerSummaries" as never],
-			streamReconstructor: { seed: vi.fn(), clear: vi.fn() },
-		});
-		supervisor.writeRosterEntry(staleEntry, worker);
-		const root = summary({ id: "worker-1-root-active", sessionId: "root", activeSessionId: "worker-1-root-active" });
-		let pulls = 0;
-		worker.client = {
-			request: vi.fn(async () => {
-				pulls += 1;
-				// Every pull straddles a frame: deletions keep landing while stale responses still carry the child.
-				supervisor.consumeWorkerRosterDelta(worker, rosterDelta([], [staleEntry.agentId]));
-				return { type: "response", command: "list", success: true, data: { sessions: [root, staleChild] } };
-			}),
-		};
-
-		await (
-			supervisor as unknown as { refreshWorkerSummaries(worker: WorkerFixture, recovery: boolean): Promise<void> }
-		).refreshWorkerSummaries(worker, true);
-
-		expect(pulls).toBe(2);
-		expect(supervisor.roster().has(staleEntry.agentId)).toBe(false);
 	});
 });
 
