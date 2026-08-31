@@ -1134,8 +1134,11 @@ export class AgentDaemon {
 		// dual-write era it has no other writer to fall back on, so a failed
 		// append is a failed deletion.
 		await this.rlmSpawnLedger().appendDelete({ childId, child: entry.sessionFile, reason });
-		this.rosterReporter.removedAgentIds.add(this.rosterAgentIdForRlmChild(childId, entry.parentSessionFile));
-		this.scheduleRosterFlush();
+		// Only worker daemons flush removals; a non-worker daemon must not grow the set unbounded.
+		if (this.options.worker) {
+			this.rosterReporter.removedAgentIds.add(this.rosterAgentIdForRlmChild(childId, entry.parentSessionFile));
+			this.scheduleRosterFlush();
+		}
 		// Deletion boundary: transcript + display tombstone are the durable
 		// record and stay; the nested artifact dir is a runtime cache and goes.
 		await this.deleteRlmSubagentArtifacts(childId, entry.sessionFile);
@@ -3922,7 +3925,8 @@ export class AgentDaemon {
 					},
 				});
 				// A file that still exists keeps its roster row; only a real deletion is published.
-				if (result.ok) {
+				// Only worker daemons flush removals; a non-worker daemon must not grow the set unbounded.
+				if (result.ok && this.options.worker) {
 					const removedAgentId =
 						composedEntry?.agentId ??
 						(ledgerEdge ? this.rosterAgentIdForRlmChild(ledgerEdge.childId, ledgerEdge.parent) : deletedInfo?.id);
@@ -4629,8 +4633,8 @@ export class AgentDaemon {
 
 			case "set_thinking_level": {
 				const state = this.getSessionState(command.activeSessionId);
+				// An actual change emits thinking_level_changed, which is a roster trigger already.
 				state.runtime.session.setThinkingLevel(command.level);
-				this.scheduleRosterFlush();
 				return success(command.id, "set_thinking_level");
 			}
 
@@ -4642,8 +4646,8 @@ export class AgentDaemon {
 
 			case "cycle_thinking_level": {
 				const state = this.getSessionState(command.activeSessionId);
+				// An actual change emits thinking_level_changed, which is a roster trigger already.
 				const level = state.runtime.session.cycleThinkingLevel();
-				this.scheduleRosterFlush();
 				return success(command.id, "cycle_thinking_level", level ? { level } : null);
 			}
 
@@ -6677,12 +6681,12 @@ export class AgentDaemon {
 		}
 		// Session rows win: a run whose session already composed is bound, and the rlm_child_update
 		// that clears the queued marker can trail the session's own first events.
-		for (const [childId, queued] of reporter.queuedChildren) {
-			if (entries.has(childId)) {
-				reporter.queuedChildren.delete(childId);
+		for (const [agentId, queued] of reporter.queuedChildren) {
+			if (entries.has(agentId)) {
+				reporter.queuedChildren.delete(agentId);
 				continue;
 			}
-			entries.set(childId, queued);
+			entries.set(agentId, queued);
 		}
 		// A terminal unbound child run owns no transcript: it is a removal, never a passivated row.
 		for (const [agentId, previous] of reporter.lastComposed) {
