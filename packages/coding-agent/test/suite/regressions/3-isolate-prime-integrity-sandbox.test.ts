@@ -20,12 +20,7 @@ describe("issue #3 Prime Integrity sandbox", () => {
 	});
 
 	it("keeps provider config in the parent while hiding it from model-executed kernels", async () => {
-		if (
-			process.platform !== "linux" ||
-			!existsSync("/usr/bin/bwrap") ||
-			!existsSync("/usr/bin/python3") ||
-			!existsSync("/usr/bin/setpriv")
-		) {
+		if (process.platform !== "linux" || !existsSync("/usr/bin/bwrap") || !existsSync("/usr/bin/python3")) {
 			return;
 		}
 		harness = await createHarness();

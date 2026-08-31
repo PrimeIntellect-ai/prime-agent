@@ -473,10 +473,6 @@ function primeIntegritySensitiveMountArgs(
 	);
 }
 
-function shellQuote(value: string): string {
-	return `'${value.replaceAll("'", `'"'"'`)}'`;
-}
-
 function resolvePrimeIntegrityKernelPython(environment: NodeJS.ProcessEnv): string {
 	const configured = environment.PRIME_AGENT_KERNEL_PYTHON?.trim();
 	const candidate = configured
@@ -494,15 +490,145 @@ const LANDLOCK_READ_EXECUTE_ACCESS = "execute,read-file,read-dir";
 const LANDLOCK_READ_WRITE_ACCESS =
 	"execute,write-file,read-file,read-dir,remove-dir,remove-file,make-dir,make-reg,make-sock,make-fifo,make-sym,refer,truncate";
 
-function landlockRule(access: string, path: string): string[] {
+interface LandlockPathRule {
+	path: string;
+	access: string[];
+}
+
+function landlockRule(access: string, path: string): LandlockPathRule[] {
 	if (!existsSync(path)) return [];
 	const supportedAccess = statSync(path).isDirectory()
-		? access
-		: access
-				.split(",")
-				.filter((right) => ["execute", "read-file", "write-file", "truncate"].includes(right))
-				.join(",");
-	return supportedAccess ? ["--landlock-rule", `path-beneath:${supportedAccess}:${path}`] : [];
+		? access.split(",")
+		: access.split(",").filter((right) => ["execute", "read-file", "write-file", "truncate"].includes(right));
+	return supportedAccess.length > 0 ? [{ path, access: supportedAccess }] : [];
+}
+
+const LANDLOCK_ABI_PROBE = `
+import ctypes, sys
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+abi = libc.syscall(444, ctypes.c_void_p(), ctypes.c_size_t(0), ctypes.c_uint32(1))
+sys.exit(0 if abi >= 1 else 1)
+`;
+
+function landlockLauncherSource(realPython: string, rules: LandlockPathRule[]): string {
+	return `#!/usr/bin/python3
+import ctypes
+import json
+import os
+import sys
+
+LANDLOCK_CREATE_RULESET_VERSION = 1
+LANDLOCK_RULE_PATH_BENEATH = 1
+PR_SET_NO_NEW_PRIVS = 38
+SYS_LANDLOCK_CREATE_RULESET = 444
+SYS_LANDLOCK_ADD_RULE = 445
+SYS_LANDLOCK_RESTRICT_SELF = 446
+RIGHTS = {
+    "execute": 1 << 0,
+    "write-file": 1 << 1,
+    "read-file": 1 << 2,
+    "read-dir": 1 << 3,
+    "remove-dir": 1 << 4,
+    "remove-file": 1 << 5,
+    "make-char": 1 << 6,
+    "make-dir": 1 << 7,
+    "make-reg": 1 << 8,
+    "make-sock": 1 << 9,
+    "make-fifo": 1 << 10,
+    "make-block": 1 << 11,
+    "make-sym": 1 << 12,
+    "refer": 1 << 13,
+    "truncate": 1 << 14,
+}
+RULES = json.loads(${JSON.stringify(JSON.stringify(rules))})
+REAL_PYTHON = ${JSON.stringify(realPython)}
+
+class RulesetAttr(ctypes.Structure):
+    _fields_ = [("handled_access_fs", ctypes.c_uint64)]
+
+class PathBeneathAttr(ctypes.Structure):
+    _fields_ = [
+        ("allowed_access", ctypes.c_uint64),
+        ("parent_fd", ctypes.c_int32),
+        ("reserved", ctypes.c_uint32),
+    ]
+
+def fail(message):
+    print(f"Prime Integrity Landlock setup failed: {message}", file=sys.stderr)
+    raise SystemExit(126)
+
+libc = ctypes.CDLL(None, use_errno=True)
+libc.syscall.restype = ctypes.c_long
+abi = libc.syscall(
+    SYS_LANDLOCK_CREATE_RULESET,
+    ctypes.c_void_p(),
+    ctypes.c_size_t(0),
+    ctypes.c_uint32(LANDLOCK_CREATE_RULESET_VERSION),
+)
+if abi < 1:
+    fail(f"kernel ABI unavailable (errno={ctypes.get_errno()})")
+
+handled_names = [
+    "execute", "write-file", "read-file", "read-dir", "remove-dir", "remove-file",
+    "make-char", "make-dir", "make-reg", "make-sock", "make-fifo", "make-block", "make-sym",
+]
+if abi >= 2:
+    handled_names.append("refer")
+if abi >= 3:
+    handled_names.append("truncate")
+handled_access = sum(RIGHTS[name] for name in handled_names)
+ruleset_attr = RulesetAttr(handled_access_fs=handled_access)
+ruleset_fd = libc.syscall(
+    SYS_LANDLOCK_CREATE_RULESET,
+    ctypes.byref(ruleset_attr),
+    ctypes.sizeof(ruleset_attr),
+    ctypes.c_uint32(0),
+)
+if ruleset_fd < 0:
+    fail(f"could not create ruleset (errno={ctypes.get_errno()})")
+
+try:
+    for rule in RULES:
+        allowed_access = sum(
+            RIGHTS[name]
+            for name in rule["access"]
+            if name in handled_names
+        )
+        if allowed_access == 0:
+            continue
+        try:
+            parent_fd = os.open(rule["path"], os.O_PATH | os.O_CLOEXEC)
+        except OSError as error:
+            fail(f"could not open {rule['path']}: {error}")
+        try:
+            path_attr = PathBeneathAttr(
+                allowed_access=allowed_access,
+                parent_fd=parent_fd,
+                reserved=0,
+            )
+            result = libc.syscall(
+                SYS_LANDLOCK_ADD_RULE,
+                ruleset_fd,
+                LANDLOCK_RULE_PATH_BENEATH,
+                ctypes.byref(path_attr),
+                ctypes.c_uint32(0),
+            )
+            if result != 0:
+                fail(f"could not add {rule['path']} (errno={ctypes.get_errno()})")
+        finally:
+            os.close(parent_fd)
+    if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
+        fail(f"could not set no-new-privileges (errno={ctypes.get_errno()})")
+    if libc.syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, ctypes.c_uint32(0)) != 0:
+        fail(f"could not restrict process (errno={ctypes.get_errno()})")
+finally:
+    os.close(ruleset_fd)
+
+os.environ.pop(${JSON.stringify(AVO_PYTHON_PROBE_BROKER_SOCKET_ENV)}, None)
+os.environ.pop(${JSON.stringify(AVO_PYTHON_PROBE_BROKER_TOKEN_ENV)}, None)
+os.execv(REAL_PYTHON, [REAL_PYTHON, *sys.argv[1:]])
+`;
 }
 
 export function writePrimeIntegrityKernelSandboxLauncher(
@@ -532,22 +658,12 @@ export function writePrimeIntegrityKernelSandboxLauncher(
 		pythonRuntimeRoot,
 	];
 	const writablePaths = [paths.workspace, paths.privateHome];
-	const argv = [
-		"/usr/bin/setpriv",
-		"--no-new-privs",
-		"--landlock-access",
-		"fs",
+	const rules = [
 		...readOnlyPaths.flatMap((path) => landlockRule(LANDLOCK_READ_EXECUTE_ACCESS, path)),
 		...landlockRule("read-file,read-dir,write-file", "/dev"),
 		...writablePaths.flatMap((path) => landlockRule(LANDLOCK_READ_WRITE_ACCESS, path)),
-		"--",
-		realPython,
 	];
-	writeFileSync(
-		launcherPath,
-		`#!/bin/sh\nunset ${AVO_PYTHON_PROBE_BROKER_SOCKET_ENV} ${AVO_PYTHON_PROBE_BROKER_TOKEN_ENV}\nexec ${argv.map(shellQuote).join(" \\\n  ")} "$@"\n`,
-		{ mode: 0o700 },
-	);
+	writeFileSync(launcherPath, landlockLauncherSource(realPython, rules), { mode: 0o700 });
 	chmodSync(launcherPath, 0o700);
 	return launcherPath;
 }
@@ -703,27 +819,15 @@ function graderSandboxCommand(command: PrimeIntegrityCommand, workspace: string)
 }
 
 function assertPrimeIntegrityHardeningAvailable(): void {
-	if (!existsSync("/usr/bin/bwrap") || !existsSync("/usr/bin/setpriv")) {
+	if (!existsSync("/usr/bin/bwrap") || !existsSync("/usr/bin/python3")) {
 		throw new Error(
-			"hardening requires bubblewrap (/usr/bin/bwrap) and util-linux setpriv (/usr/bin/setpriv); use --hardening off only for explicit A/B evaluation",
+			"hardening requires bubblewrap (/usr/bin/bwrap) and Python (/usr/bin/python3); use --hardening off only for explicit A/B evaluation",
 		);
 	}
-	const landlockProbe = spawnSync(
-		"/usr/bin/setpriv",
-		[
-			"--no-new-privs",
-			"--landlock-access",
-			"fs",
-			"--landlock-rule",
-			"path-beneath:execute,read-file,read-dir:/usr",
-			"--",
-			"/bin/true",
-		],
-		{ encoding: "utf8" },
-	);
+	const landlockProbe = spawnSync("/usr/bin/python3", ["-c", LANDLOCK_ABI_PROBE], { encoding: "utf8" });
 	if (landlockProbe.status !== 0) {
 		throw new Error(
-			`hardening requires a working Landlock-enabled setpriv: ${(landlockProbe.stderr || landlockProbe.stdout || "probe failed").trim()}`,
+			`hardening requires Linux Landlock support: ${(landlockProbe.stderr || landlockProbe.stdout || "kernel ABI probe failed").trim()}`,
 		);
 	}
 }
