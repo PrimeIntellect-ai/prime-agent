@@ -1257,7 +1257,7 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	/** Deep search over message text needs the saved catalog; one live fetch per instance, restored queries included. */
-	private armSavedSearchFetch(): void {
+	private armSavedSearchFetch(options: { duringReconnect?: boolean } = {}): void {
 		// An already-loaded shared catalog never refetches; mutations keep it fresh across remounts.
 		if (
 			this.savedSearchFetchStarted ||
@@ -1268,7 +1268,7 @@ export class AgentsViewMode implements Component, Focusable {
 		}
 		// refreshSavedSessions re-arms this latch itself when the current fetch fails without a catalog.
 		this.savedSearchFetchStarted = true;
-		void this.refreshSavedSessions({ preserveStatusOnError: true });
+		void this.refreshSavedSessions({ ...options, preserveStatusOnError: true });
 	}
 
 	private queryChanged(): void {
@@ -2266,7 +2266,15 @@ export class AgentsViewMode implements Component, Focusable {
 			return true;
 		} catch (error) {
 			if (generation === this.heartbeatCatalogGeneration && !this.reconnectPromise) {
-				this.setStatusMessage(formatError("Failed to refresh heartbeats", error));
+				const client = this.client;
+				if (client && !client.isConnected) {
+					// With no live poll left, this 15s tick is what re-arms reconnect after a
+					// timed-out loop; pushes cannot restart it over a dead socket.
+					this.startClientReconnect(client, error);
+				} else if (!this.statusMessageSticky) {
+					// Never replace a sticky notice (e.g. the reconnect error) with a poll blip.
+					this.setStatusMessage(formatError("Failed to refresh heartbeats", error));
+				}
 			}
 			return false;
 		}
@@ -2440,6 +2448,9 @@ export class AgentsViewMode implements Component, Focusable {
 				this.reconnectTimedOut = false;
 				this.setStatusMessage("Daemon reconnected", { render: false });
 				this.applySessionList(sessions, true);
+				// A fetch the outage failed left the latch re-armed but nothing to pull it;
+				// a still-nonempty query re-fetches through the one arm predicate.
+				this.armSavedSearchFetch({ duringReconnect: true });
 				return;
 			} catch (error) {
 				lastError = error;
@@ -2451,7 +2462,7 @@ export class AgentsViewMode implements Component, Focusable {
 		}
 		if (!this.stopped && !this.daemonShutdownReceived && client === this.client) {
 			this.reconnectTimedOut = true;
-			this.setStatusMessage(formatError("Daemon unavailable; reconnect stopped, restart Prime Agent", lastError), {
+			this.setStatusMessage(formatError("Daemon unavailable; retrying", lastError), {
 				tone: "error",
 				sticky: true,
 				render: false,

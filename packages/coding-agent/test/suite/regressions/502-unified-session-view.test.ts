@@ -242,6 +242,7 @@ describe("#502 unified session view regressions", () => {
 				rosterStore: { attach: vi.fn(async () => true), summaries: () => [summary("live")] },
 				refreshSavedSessions: vi.fn(async () => true),
 				refreshHeartbeats: vi.fn(async (_options?: { duringReconnect?: boolean }) => false),
+				armSavedSearchFetch: vi.fn(),
 				reconnectClient: vi.fn(async (_reconnectingClient: typeof client, _error: unknown) => {}),
 			};
 			const refreshHeartbeats =
@@ -274,6 +275,8 @@ describe("#502 unified session view regressions", () => {
 			expect(client.reconnect).toHaveBeenCalledTimes(2);
 			expect(harness.applySessionList).toHaveBeenCalledWith([summary("live")], true);
 			expect(harness.heartbeats).toEqual([{ job: { id: "healthy" } }]);
+			// A query that outlived the outage re-fetches the saved catalog through the one arm predicate.
+			expect(harness.armSavedSearchFetch).toHaveBeenCalledWith({ duringReconnect: true });
 			expect(harness.reconnectPromise).toBeUndefined();
 		} finally {
 			vi.useRealTimers();

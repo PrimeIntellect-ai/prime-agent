@@ -720,6 +720,47 @@ describe("AgentsViewMode persistent catalog state", () => {
 		}
 	});
 
+	it("re-arms reconnect from the heartbeat poll over a dead socket and never overwrites a sticky notice", async () => {
+		const failingClient = (isConnected: boolean) => ({
+			isConnected,
+			request: vi.fn(async () => {
+				throw new Error("heartbeats unavailable");
+			}),
+		});
+
+		// A dead socket re-arms the reconnect loop instead of writing a status blip.
+		const disconnected = failingClient(false);
+		const reconnecting = {
+			heartbeatCatalogGeneration: 0,
+			reconnectPromise: undefined,
+			daemonShutdownReceived: false,
+			statusMessageSticky: false,
+			client: disconnected,
+			requireClient: () => disconnected,
+			startClientReconnect: vi.fn(),
+			setStatusMessage: vi.fn(),
+		};
+		await expect(invoke("refreshHeartbeats", reconnecting)).resolves.toBe(false);
+		expect(reconnecting.startClientReconnect).toHaveBeenCalledWith(disconnected, expect.any(Error));
+		expect(reconnecting.setStatusMessage).not.toHaveBeenCalled();
+
+		// A connected failure keeps its status message, but never over a sticky one.
+		const connected = failingClient(true);
+		const sticky = {
+			heartbeatCatalogGeneration: 0,
+			reconnectPromise: undefined,
+			daemonShutdownReceived: false,
+			statusMessageSticky: true,
+			client: connected,
+			requireClient: () => connected,
+			startClientReconnect: vi.fn(),
+			setStatusMessage: vi.fn(),
+		};
+		await expect(invoke("refreshHeartbeats", sticky)).resolves.toBe(false);
+		expect(sticky.startClientReconnect).not.toHaveBeenCalled();
+		expect(sticky.setStatusMessage).not.toHaveBeenCalled();
+	});
+
 	it("keeps the loaded-saved-catalog gate across production view remounts and drops deleted rows", async () => {
 		const wireSaved = (id: string) => ({
 			path: `/tmp/sessions/${id}.jsonl`,
