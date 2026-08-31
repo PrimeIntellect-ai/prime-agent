@@ -180,7 +180,7 @@ describe("openai-completions cacheControlFormat", () => {
 	});
 
 	it("advances the Anthropic cache marker to a tool result", async () => {
-		const model = getModel("prime-inference", "anthropic/claude-fable-5");
+		const model = getModel("prime-inference", "anthropic/claude-haiku-4.5");
 		const now = Date.now();
 		const messages: Context["messages"] = [
 			{ role: "user", content: "Read the file", timestamp: now },
