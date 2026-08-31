@@ -775,6 +775,52 @@ describe("supervisor roster ledger", () => {
 		expect(supervisor.roster().get("raced")?.summary.activeSessionId).toBe("raced-active");
 	});
 
+	it("lists a client-owned worker's file as a plain inactive row for other clients", async () => {
+		const owned = makeWorker("w-owned");
+		Object.assign(owned.descriptor, { ownerClientId: "owner-client", createCommand: { type: "create" } });
+		const ownedPath = "/tmp/sessions/owned.jsonl";
+		const supervisor = makeSupervisor([owned], {
+			protocolClientIds: new Map(),
+			catalog: {
+				list: vi.fn(async () => [
+					{
+						id: "owned-session",
+						path: ownedPath,
+						cwd: "/tmp/project",
+						created: new Date(0),
+						modified: new Date(0),
+						messageCount: 2,
+						firstMessage: "private work",
+						allMessagesText: "",
+					},
+				]),
+			},
+		});
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({
+					id: "owned-active",
+					sessionId: "owned-session",
+					activeSessionId: "owned-active",
+					sessionFile: ownedPath,
+					isSessionActive: true,
+				}),
+			),
+			owned,
+		);
+
+		const listed = await supervisor.handleList(
+			{ id: "intruder", attachedActiveSessionIds: new Set<string>() },
+			{ type: "list", all: true },
+		);
+
+		// The live row stays private; the public on-disk scan still lists the file as inactive.
+		expect(listed.data?.sessions).toHaveLength(1);
+		expect(listed.data?.sessions[0]).toMatchObject({ sessionId: "owned-session" });
+		expect(listed.data?.sessions[0]?.activeSessionId).toBeUndefined();
+		expect(listed.data?.sessions[0]?.workerPid).toBeUndefined();
+	});
+
 	it("keeps claimed passive children in the non-all list across snapshots that omit them", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-claim-stability-"));
 		tempDirs.push(directory);

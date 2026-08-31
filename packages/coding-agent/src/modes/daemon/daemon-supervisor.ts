@@ -2342,13 +2342,13 @@ export class DaemonSupervisor {
 			const file = canonicalSessionPath(info.path);
 			scannedFiles.add(file);
 			const workerRow = activeByFile.get(file);
-			if (workerRow) {
-				if (servedRows.has(workerRow)) {
-					merged.push(workerRow);
-					mergedActiveFiles.add(file);
-				}
+			if (workerRow && servedRows.has(workerRow)) {
+				merged.push(workerRow);
+				mergedActiveFiles.add(file);
 				continue;
 			}
+			// A worker row this client is not served (client-owned, no includeClientOwned) hides the live
+			// metadata only: the on-disk scan is public, so the file still lists as a plain inactive row.
 			merged.push(summaryForInactiveSession(info));
 		}
 		const offlineRows: AgentRosterEntry[] = [];
