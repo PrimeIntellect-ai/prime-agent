@@ -929,6 +929,8 @@ describe("supervisor roster ledger", () => {
 			runtimeKind: "subagent",
 			rlmChildId: "p",
 			parentSessionPath: parentPath,
+			messageCount: 4,
+			lastActivityAt: "2026-08-01T10:00:00.000Z",
 		});
 		worker.summaries.set("worker-1-root-active", root);
 		worker.summaries.set("p-session", passive);
@@ -942,6 +944,12 @@ describe("supervisor roster ledger", () => {
 
 		const passiveRow = [...supervisor.roster().values()].find((entry) => entry.summary.rlmChildId === "p");
 		expect(passiveRow?.workerId).toBe("worker-1");
+		// The reseed keeps the hydrated summary: a synthetic seed would drop lastActivityAt (NaN pins
+		// canEvictWorker false forever) and degrade list output to messageCount 0 with a synthetic cwd.
+		expect(passiveRow?.summary.lastActivityAt).toBe("2026-08-01T10:00:00.000Z");
+		expect(passiveRow?.summary.messageCount).toBe(4);
+		expect(passiveRow?.summary.cwd).toBe("/tmp/project");
+		expect(passiveRow?.seededCwd).toBeUndefined();
 		const listed = await supervisor.handleList({}, { type: "list" });
 		expect(listed.data?.sessions.map((session) => session.sessionId).sort()).toEqual([
 			passiveRow?.summary.sessionId,

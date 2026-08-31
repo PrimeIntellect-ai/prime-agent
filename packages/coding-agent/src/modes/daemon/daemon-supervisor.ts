@@ -3884,11 +3884,11 @@ export class DaemonSupervisor {
 		// Without readable edges the absentee sweep cannot tell registry children from stale rows, so the
 		// destructive half is skipped: rows survive and the single-flight repair pull refreshes them.
 		const sent = new Set(delta.entries.map((entry) => entry.agentId));
-		const unclaimed = new Set<string>();
+		const unclaimed = new Map<string, AgentRosterEntry>();
 		if (!edgesFailed) {
 			for (const entry of this.workerRosterEntries(worker)) {
 				if (sent.has(entry.agentId)) continue;
-				unclaimed.add(entry.agentId);
+				unclaimed.set(entry.agentId, entry);
 				this.roster().delete(entry.agentId);
 			}
 		}
@@ -3904,16 +3904,20 @@ export class DaemonSupervisor {
 			return;
 		}
 		// Deleted absentees with surviving transcripts reseed from the pre-read edges, tombstone-filtered.
-		// A reseed keeps its previous claim: passive registry children list and attach through their live
-		// owner, and snapshots (which never compose them) must not flap that claim off.
+		// A reseed keeps its previous claim AND its hydrated summary: passive registry children list and
+		// attach through their live owner, snapshots (which never compose them) must not flap that claim
+		// off, and a synthetic seed would drop lastActivityAt and pin canEvictWorker on NaN.
 		for (const edge of edges) {
 			const entry = this.rosterEntryForSpawnLedgerEdge(edge);
 			if (this.roster().has(entry.agentId)) continue;
 			if (this.roster().hasSessionFile(canonicalSessionPath(edge.child))) continue;
-			this.roster().write(
-				{ ...entry, seededCwd: true },
-				unclaimed.has(entry.agentId) ? worker.descriptor.workerId : undefined,
-			);
+			const previous = unclaimed.get(entry.agentId);
+			if (previous) {
+				const { status, statusLabel, lastHeardFromAt, workerId, ...rest } = previous;
+				this.writeRosterEntry(rest, worker);
+				continue;
+			}
+			this.roster().write({ ...entry, seededCwd: true });
 		}
 	}
 
