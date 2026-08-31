@@ -3795,6 +3795,35 @@ describe("daemon worker supervisor monitoring", () => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	it("skips the recovery SIGKILL when the pid identity is no longer current", async () => {
+		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+		const makeSupervisorFixture = (identity: "current" | "replaced") =>
+			Object.assign(Object.create(DaemonSupervisor.prototype), {
+				log: vi.fn(),
+				assertRecoveryAllowed: vi.fn(async () => {}),
+				// The verdict a caller computed before awaiting its way in can go stale;
+				// the signal must re-check identity at the last moment (PIDs recycle).
+				processIdentity: vi.fn(() => identity),
+			}) as {
+				recoverUncertainWorkerOperations(
+					worker: { descriptor: { workerId: string; pid: number; recoveryJournalPath: string } },
+					killWorkerProcess: boolean,
+				): Promise<void>;
+			};
+		const worker = {
+			descriptor: { workerId: "worker-1", pid: 987_654, recoveryJournalPath: join(tmpdir(), "absent.jsonl") },
+		};
+
+		try {
+			await makeSupervisorFixture("replaced").recoverUncertainWorkerOperations(worker, true);
+			expect(kill).not.toHaveBeenCalled();
+			await makeSupervisorFixture("current").recoverUncertainWorkerOperations(worker, true);
+			expect(kill).toHaveBeenCalled();
+		} finally {
+			kill.mockRestore();
+		}
+	});
 	it.each([
 		{ name: "malformed data", data: undefined, error: /invalid update manifest/ },
 		{

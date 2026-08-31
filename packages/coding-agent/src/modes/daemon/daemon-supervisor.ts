@@ -3532,7 +3532,12 @@ export class DaemonSupervisor {
 
 	private async recoverUncertainWorkerOperations(worker: ResidentWorker, killWorkerProcess = true): Promise<void> {
 		await this.assertRecoveryAllowed();
-		if (killWorkerProcess) {
+		// Callers verify identity before awaiting their way here, so re-check at the last
+		// synchronous moment: the old process can exit in that gap and the PID can recycle.
+		if (
+			killWorkerProcess &&
+			this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId) === "current"
+		) {
 			signalProcessGroupOrProcess(worker.descriptor.pid, "SIGKILL");
 		}
 		const orphanProcessJournalPath = worker.descriptor.orphanProcessJournalPath;
