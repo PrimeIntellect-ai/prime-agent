@@ -894,6 +894,9 @@ export class AgentsViewMode implements Component, Focusable {
 		this.applySessionList(this.rosterStore.summaries(), true);
 		// A restored non-empty query needs the saved catalog just like a typed one.
 		this.armSavedSearchFetch();
+		// After the arm: a just-started saved fetch keeps a missing restored anchor
+		// pending until it settles; otherwise the initial paint settles it now.
+		this.resolveMissingSelectionAnchor();
 		void this.refreshHeartbeats();
 		this.loadStartupNotices();
 		this.heartbeatPollTimer = setInterval(() => void this.refreshHeartbeats(), HEARTBEAT_POLL_INTERVAL_MS);
@@ -1669,9 +1672,9 @@ export class AgentsViewMode implements Component, Focusable {
 				this.setStatusMessage("This session cannot be renamed", { tone: "warning" });
 				return false;
 			}
-			const refreshed = await this.refreshSessions();
+			await this.refreshSessions();
 			this.refreshSavedSessionsIfLoaded();
-			this.setStatusMessage(refreshed ? `Renamed to ${name}` : `Renamed to ${name}; refresh failed`);
+			this.setStatusMessage(`Renamed to ${name}`);
 			return true;
 		} catch (error) {
 			this.setStatusMessage(
@@ -1820,7 +1823,10 @@ export class AgentsViewMode implements Component, Focusable {
 						this.setStatusMessage("Usage: /name <session name>", { tone: "warning" });
 						return false;
 					}
-					return await this.renameSession(target, name);
+					const renamed = await this.renameSession(target, name);
+					// As in /kill: a completed command returns the composer to the list.
+					if (renamed) disarmIfUnchanged();
+					return renamed;
 				}
 				case "kill": {
 					if (!target.activeSessionId) {
@@ -1884,6 +1890,8 @@ export class AgentsViewMode implements Component, Focusable {
 			if (this.pendingDeleteAgent?.identity === identity && this.isDeleteConfirmationVisible()) {
 				this.clearDeleteConfirmation({ render: false });
 				try {
+					// Deliberate RPC before a destructive action: the daemon answers with the
+					// authoritative liveness verdict instead of the pushed mirror's last state.
 					const latest = expectSessionList(
 						requireDaemonData(await this.requireClient().request(createAgentsViewListCommand())),
 					);
@@ -2131,6 +2139,9 @@ export class AgentsViewMode implements Component, Focusable {
 	private onRosterUpdate(): void {
 		if (this.stopped || !this.rosterStore) return;
 		this.applySessionList(this.rosterStore.summaries(), true);
+		// Rebuilds re-arm the pending anchor while its row is missing; with no 1s poll
+		// left, each push must settle it (the guard still defers to a live saved fetch).
+		this.resolveMissingSelectionAnchor();
 	}
 
 	/** Renames and deactivations invalidate the lazily loaded saved catalog; refresh only when some view loaded it. */
@@ -2139,12 +2150,11 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	/** The pushed roster is the live catalog; a refresh is one local reapply of the store's rows. */
-	private async refreshSessions(): Promise<boolean> {
-		if (this.reconnectPromise || this.daemonShutdownReceived || !this.rosterStore) return false;
+	private async refreshSessions(): Promise<void> {
+		if (this.reconnectPromise || this.daemonShutdownReceived || !this.rosterStore) return;
 		this.liveCatalogReady = true;
 		this.applySessionList(this.rosterStore.summaries(), true);
 		this.resolveMissingSelectionAnchor();
-		return true;
 	}
 
 	private applySessionList(sessions: SessionSummary[], successful = false): void {

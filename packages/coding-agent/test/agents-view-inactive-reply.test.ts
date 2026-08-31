@@ -609,11 +609,13 @@ describe("agents view slash commands", () => {
 		const live = summary({ activeSessionId: "active-1", lifecycle: "live" });
 		const request = vi.fn(async () => ({ success: true, data: {} }));
 		const editor = editorWithText("/name Fresh Name");
+		const setReplyTarget = vi.fn();
 		const self: Record<string, unknown> = {
 			options: {},
 			requireClient: () => ({ request }),
 			editor,
 			setStatusMessage: vi.fn(),
+			setReplyTarget,
 			persistentState: {},
 			refreshSessions: vi.fn(async () => true),
 			refreshSavedSessions: vi.fn(async () => true),
@@ -624,12 +626,15 @@ describe("agents view slash commands", () => {
 				return invoke("renameSession", self, s, n);
 			},
 		};
+		self.replyTarget = { key: "active-1", summary: live };
 
 		await expect(invoke("runAgentsViewCommand", self, { name: "name", args: "Fresh Name" }, live)).resolves.toBe(
 			true,
 		);
 
 		expect(request).toHaveBeenCalledWith({ type: "rename", activeSessionId: "active-1", name: "Fresh Name" });
+		// As in /kill: the completed command returns the composer to the list.
+		expect(setReplyTarget).toHaveBeenCalledWith(undefined);
 		// The push carries renames to the live catalog; the saved catalog refreshes only once it has loaded.
 		expect(self.refreshSessions).toHaveBeenCalledWith();
 		expect(self.refreshSavedSessions).not.toHaveBeenCalled();

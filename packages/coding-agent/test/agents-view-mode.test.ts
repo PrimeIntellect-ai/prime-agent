@@ -686,7 +686,7 @@ describe("AgentsViewMode persistent catalog state", () => {
 		Reflect.set(view, "savedCatalogReady", true);
 
 		try {
-			await expect(invoke("refreshSessions", view)).resolves.toBe(true);
+			await expect(invoke("refreshSessions", view)).resolves.toBeUndefined();
 			expect(Reflect.get(view, "liveCatalogReady")).toBe(true);
 			expect(persistentState.scopeFrames).toEqual([{ scope, returnChat: root }]);
 			expect(persistentState.lastSuccessfulLiveSummaries).toEqual([root]);
@@ -827,7 +827,7 @@ describe("AgentsViewMode persistent catalog state", () => {
 		});
 
 		try {
-			await expect(invoke("refreshSessions", view, { preserveStatusOnError: true })).resolves.toBe(false);
+			await expect(invoke("refreshSessions", view, { preserveStatusOnError: true })).resolves.toBeUndefined();
 			expect(persistentState.scopeFrames).toEqual([
 				{ scope: { sessionId: root.sessionId, activeSessionId: root.activeSessionId } },
 			]);
@@ -861,7 +861,7 @@ describe("AgentsViewMode persistent catalog state", () => {
 
 			Reflect.set(view, "client", { isConnected: true });
 			Reflect.set(view, "rosterStore", { summaries: () => [] });
-			await expect(invoke("refreshSessions", view)).resolves.toBe(true);
+			await expect(invoke("refreshSessions", view)).resolves.toBeUndefined();
 			expect(persistentState.scopeFrames).toEqual([]);
 		} finally {
 			vi.useRealTimers();
@@ -890,7 +890,7 @@ describe("AgentsViewMode persistent catalog state", () => {
 					throw new Error("transient list failure");
 				}),
 			});
-			await expect(invoke("refreshSessions", this, { preserveStatusOnError: true })).resolves.toBe(false);
+			await expect(invoke("refreshSessions", this, { preserveStatusOnError: true })).resolves.toBeUndefined();
 			expect(persistentState.scopeFrames).toEqual([{ scope, returnChat: returnedRoot }]);
 			return { type: "exit" };
 		});

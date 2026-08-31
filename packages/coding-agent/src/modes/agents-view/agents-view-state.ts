@@ -129,7 +129,9 @@ export function sectionTitle(section: AgentsViewSection): string {
 
 function formatAgeLabel(timestamp: string): string {
 	const seconds = Math.max(0, Math.round((Date.now() - Date.parse(timestamp)) / 1000));
-	return seconds < 120 ? `${seconds}s ago` : `${Math.round(seconds / 60)}m ago`;
+	if (seconds < 120) return `${seconds}s ago`;
+	const minutes = Math.round(seconds / 60);
+	return minutes < 120 ? `${minutes}m ago` : `${Math.round(minutes / 60)}h ago`;
 }
 
 function canonicalSessionPath(path: string): string {

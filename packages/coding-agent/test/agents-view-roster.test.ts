@@ -460,14 +460,33 @@ describe("roster-driven agents view instance", () => {
 		client.request.mockClear();
 
 		const internals = view as unknown as {
-			refreshSessions(): Promise<boolean>;
+			refreshSessions(): Promise<void>;
 			rows: Array<{ summary: SessionSummary }>;
 		};
-		await expect(internals.refreshSessions()).resolves.toBe(true);
-		await expect(internals.refreshSessions()).resolves.toBe(true);
+		await expect(internals.refreshSessions()).resolves.toBeUndefined();
+		await expect(internals.refreshSessions()).resolves.toBeUndefined();
 
 		expect(client.request).not.toHaveBeenCalled();
 		expect(internals.rows.some((row) => row.summary.sessionId === "a")).toBe(true);
+	});
+
+	it("settles a missing restored anchor on the next push instead of waiting for user input", async () => {
+		const { view, store, client } = makeView([
+			ledgerEntry({ id: "a-active", sessionId: "a", activeSessionId: "a-active" }, { status: "running" }),
+		]);
+		await store.attach(client as never);
+		const internals = view as unknown as {
+			persistentState: { selectedRowIdentity?: string };
+			selectionAnchorPending: boolean;
+			onRosterUpdate(): void;
+		};
+		// The remembered selection's row is gone; the rebuild re-arms the pending anchor.
+		internals.persistentState.selectedRowIdentity = "file:/tmp/sessions/vanished.jsonl";
+
+		internals.onRosterUpdate();
+
+		// With no 1s poll left, the push itself must settle the anchor so Enter works again.
+		expect(internals.selectionAnchorPending).toBe(false);
 	});
 
 	it("fetches the saved catalog at most once per view instance, and only when a query is typed", () => {
