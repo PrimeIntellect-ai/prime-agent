@@ -58,6 +58,7 @@ function redactNoise(text: string): string {
 			/\b((?=\w*(?:token|key|secret|password))[A-Za-z_]\w*)\s*=\s*(?!<redacted>)(?!["'])\S+/gi,
 			"$1=<redacted>",
 		)
+		.replace(/\b(authorization:\s*(?:bearer\s+)?)[^\s"']+/gi, "$1<redacted>")
 		.replace(/(["'])sk-[^"']+\1/g, "$1<redacted>$1")
 		.replace(/(["']).{160,}\1/g, "$1…$1");
 }
@@ -424,14 +425,12 @@ interface PythonStringScan {
 	value: string;
 	end: number;
 	closed: boolean;
-	/** A cooked escape (\x, \u, octal, \a…) whose value the preview does not compute. */
+	/** Saw a cooked escape (\x, \u, octal, \a…) whose value is not computed here. */
 	unsupportedEscape: boolean;
 }
 
-// Walks a python string-literal body starting just after the opening delimiter.
-// In both raw and cooked strings a backslash consumes the next char (python's
-// raw-string rule: backslash-quote never closes the literal); only cooked
-// strings unescape, and unknown escapes keep the backslash, matching python.
+// Walks a python string-literal body from just after the opening delimiter,
+// following python's escape rules (in raw strings backslash-quote never closes).
 function scanPythonStringLiteral(code: string, start: number, quote: string, raw: boolean): PythonStringScan {
 	let value = "";
 	let i = start;
@@ -441,8 +440,6 @@ function scanPythonStringLiteral(code: string, start: number, quote: string, raw
 		if (char === "\\" && i + 1 < code.length) {
 			const next = code[i + 1] ?? "";
 			if (!raw && /[xuUN0-7abfv]/.test(next)) {
-				// \x41, \u…, octal, \a\b\f\v change the value; showing the source
-				// form would preview a command that differs from what ran.
 				unsupportedEscape = true;
 			}
 			value += raw ? char + next : (PYTHON_ESCAPES[next] ?? char + next);
@@ -461,8 +458,7 @@ function scanPythonStringLiteral(code: string, start: number, quote: string, raw
 	return { value, end: i, closed: false, unsupportedEscape };
 }
 
-// True when the lines end inside an unterminated triple-quoted string, meaning
-// the following line is string text rather than code.
+// True when the lines end inside an unterminated triple-quoted string.
 function endsInsideMultilineString(lines: readonly string[]): boolean {
 	const text = lines.join("\n");
 	let i = 0;
@@ -518,8 +514,7 @@ export function previewPythonCode(code: string): CodePreview {
 
 	if (bestIndex !== undefined && bestScore >= 0) {
 		const previewIndex = pythonPreviewIndex(lines, bestIndex);
-		// The literal may span lines below the chosen one, so extract from the full tail.
-		// A line inside a multiline string is text, not a bash-skill call: no bash ran.
+		// Extract from the full tail (literals may span lines), unless the chosen line is string text.
 		const bashCommand = endsInsideMultilineString(lines.slice(0, previewIndex))
 			? undefined
 			: extractBashSkillCommand(lines.slice(previewIndex).join("\n"));

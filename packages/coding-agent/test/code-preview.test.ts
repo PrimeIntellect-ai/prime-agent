@@ -134,54 +134,22 @@ EOF`;
 		const longPreview = previewIpythonCode(`result = await bash("${longCommand}", timeout=120)`);
 		expect(longPreview.language).toBe("bash");
 		expect(longPreview.text.startsWith("git log --oneline")).toBe(true);
+		const scorer = `import json
+r = await bash('git diff --stat')
+print(r)`;
+		expect(previewIpythonCode(scorer)).toEqual({ language: "bash", text: "git diff --stat" });
+		expect(
+			previewIpythonCode(`r = await bash('curl -H "Authorization: Bearer sec-abc123" https://api.example.com')`)
+				.text,
+		).not.toContain("sec-abc123");
 	});
 
-	it("passes triple-quoted bash-skill bodies through like %%bash cells", () => {
-		const code = `r = await bash('''
+	it("evaluates bash-skill literals the way python does", () => {
+		const tripleBody = `r = await bash('''
 set -e
 git add packages/foo.ts
 ''')`;
-		expect(previewIpythonCode(code)).toEqual({ language: "bash", text: "git add packages/foo.ts" });
-		// Escaped quote adjacent to the closing delimiter: the full evaluated command, never a mis-cut prefix.
-		expect(previewIpythonCode("r = await bash('''echo it\\'''')")).toEqual({ language: "bash", text: "echo it'" });
-	});
-
-	it("keeps the python preview for non-literal bash-skill arguments", () => {
-		expect(previewIpythonCode("r = await bash(cmd)")).toEqual({ language: "python", text: "r = await bash(cmd)" });
-		expect(previewIpythonCode('r = await bash(f"git checkout {branch}")')).toEqual({
-			language: "python",
-			text: 'r = await bash(f"git checkout {branch}")',
-		});
-	});
-
-	it("keeps the python preview when the literal is not the whole first argument", () => {
-		expect(previewIpythonCode("r = await bash('echo ' + name)")).toEqual({
-			language: "python",
-			text: "r = await bash('echo ' + name)",
-		});
-	});
-
-	it("keeps backslashes in raw bash-skill literals", () => {
-		// python: r'grep \'x\' f' stays open at the escaped quote and the backslash stays in the value.
-		expect(previewIpythonCode("r = await bash(r'grep \\'x\\' f')")).toEqual({
-			language: "bash",
-			text: "grep \\'x\\' f",
-		});
-	});
-
-	it("keeps the python preview when the literal never closes", () => {
-		// python: a raw newline inside a single-quoted literal is a syntax error, so no bash ran.
-		expect(previewIpythonCode("r = await bash('echo hi\n)").language).toBe("python");
-	});
-
-	it("keeps the python preview for value-changing escapes it does not compute", () => {
-		// '\x41' executes as 'A'; previewing the source form would show a command that never ran.
-		expect(previewIpythonCode("r = await bash('echo \\x41')").language).toBe("python");
-		expect(previewIpythonCode("r = await bash('grep \\bword\\b f')").language).toBe("python");
-	});
-
-	it("evaluates escapes in bash-skill literals instead of previewing source text", () => {
-		// \n in the source is a real newline in the executed command; salience follows the evaluated text.
+		expect(previewIpythonCode(tripleBody)).toEqual({ language: "bash", text: "git add packages/foo.ts" });
 		expect(previewIpythonCode("r = await bash('printf \"a\\nb\"\\ngit add -A')")).toEqual({
 			language: "bash",
 			text: "git add -A",
@@ -194,6 +162,24 @@ git add packages/foo.ts
 			language: "bash",
 			text: 'grep -n ")" src.c',
 		});
+		expect(previewIpythonCode("r = await bash('''echo it\\'''')")).toEqual({ language: "bash", text: "echo it'" });
+		expect(previewIpythonCode("r = await bash(r'grep \\'x\\' f')")).toEqual({
+			language: "bash",
+			text: "grep \\'x\\' f",
+		});
+	});
+
+	it("keeps the python preview when the exact command cannot be known", () => {
+		for (const code of [
+			"r = await bash(cmd)",
+			'r = await bash(f"git checkout {branch}")',
+			"r = await bash('echo ' + name)",
+			"r = await bash('echo hi\n)", // unterminated literal: python syntax error
+			"r = await bash('echo \\x41')", // value-changing escape not computed here
+			"r = await bash('grep \\bword\\b f')",
+		]) {
+			expect(previewIpythonCode(code).language).toBe("python");
+		}
 	});
 
 	it("keeps the python preview for bash-looking text inside a multiline string", () => {
@@ -201,18 +187,10 @@ git add packages/foo.ts
 			language: "python",
 			text: 'bash("git status")',
 		});
-		// A triple-quoted string that closed above is code again: extraction must still work.
-		expect(previewIpythonCode('doc = """usage"""\nr = await bash(\'git status\')')).toEqual({
+		expect(previewIpythonCode(`doc = """usage"""\nr = await bash('git status')`)).toEqual({
 			language: "bash",
 			text: "git status",
 		});
-	});
-
-	it("previews the bash-skill call when the scorer picks it among other lines", () => {
-		const code = `import json
-r = await bash('git diff --stat')
-print(r)`;
-		expect(previewIpythonCode(code)).toEqual({ language: "bash", text: "git diff --stat" });
 	});
 
 	it("prefers a later meaningful heredoc over an earlier generic one", () => {
