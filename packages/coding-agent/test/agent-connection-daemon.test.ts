@@ -990,6 +990,82 @@ describe("DaemonAgentConnection", () => {
 		await connection.dispose();
 	});
 
+	it("falls back to the supervisor when the direct socket dies mid-session without recoverDaemon", async () => {
+		const supervisor = new FakeDaemonClient();
+		const closeListeners = new Set<(error: Error) => void>();
+		let directConnected = true;
+		const direct = {
+			get isConnected() {
+				return directConnected;
+			},
+			hello: supervisor.hello,
+			supportsServerCapability: (capability: string) => supervisor.supportsServerCapability(capability),
+			onMessage: () => () => {},
+			onClose: (listener: (error: Error) => void) => {
+				closeListeners.add(listener);
+				return () => closeListeners.delete(listener);
+			},
+			request: async (command: Extract<DaemonCommand, { type: "attach" }>) => ({
+				type: "response" as const,
+				command: "attach" as const,
+				success: true as const,
+				data: createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12),
+			}),
+			close: () => {
+				directConnected = false;
+			},
+		} as unknown as DaemonWorkerClient;
+		const routed = new DaemonRoutedClient(asDaemonClient(supervisor), direct);
+		const connection = await DaemonAgentConnection.attach(routed, "active-1");
+		const events: AgentConnectionEvent[] = [];
+		connection.subscribe(async (event) => {
+			events.push(event);
+		});
+
+		directConnected = false;
+		for (const listener of [...closeListeners]) listener(new Error("direct worker socket died"));
+
+		await vi.waitFor(() => expect(events.filter((event) => event.type === "session_resynced")).toHaveLength(1));
+		expect(events.some((event) => event.type === "closed")).toBe(false);
+		expect(supervisor.requests.filter((request) => request.type === "attach")).toHaveLength(1);
+		await connection.dispose();
+	});
+
+	it("keeps a shutdown during initial direct attach terminal instead of respawning the daemon", async () => {
+		const supervisor = new FakeDaemonClient();
+		const recoverDaemon = vi.fn(async () => {});
+		let closeSent = false;
+		const direct = {
+			isConnected: true,
+			hello: supervisor.hello,
+			supportsServerCapability: (capability: string) => supervisor.supportsServerCapability(capability),
+			onMessage: () => () => {},
+			onClose: () => () => {},
+			request: async (command: Extract<DaemonCommand, { type: "attach" }>) => {
+				if (!closeSent) {
+					closeSent = true;
+					supervisor.connected = false;
+					supervisor.emitClose(new DaemonSocketClosedError("/tmp/prime-agent.sock", "shutdown"));
+				}
+				return {
+					type: "response" as const,
+					command: "attach" as const,
+					success: true as const,
+					data: createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12),
+				};
+			},
+			close: () => {},
+		} as unknown as DaemonWorkerClient;
+		const routed = new DaemonRoutedClient(asDaemonClient(supervisor), direct);
+
+		const connection = await DaemonAgentConnection.attach(routed, "active-1", { recoverDaemon });
+		await new Promise((resolveSettle) => setImmediate(resolveSettle));
+
+		expect(recoverDaemon).not.toHaveBeenCalled();
+		expect(supervisor.reconnectCount).toBe(0);
+		await connection.dispose();
+	});
+
 	it("keeps the source direct socket when a cross-worker reattach is rejected", async () => {
 		const supervisor = new FakeDaemonClient();
 		supervisor.request = vi.fn(async (command: DaemonCommand) => ({

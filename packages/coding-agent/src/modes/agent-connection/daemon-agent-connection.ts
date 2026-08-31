@@ -277,53 +277,56 @@ export class DaemonAgentConnection implements AgentConnection {
 			});
 		});
 		this.captureDaemonLogPath();
-		this.unsubscribeDaemonClose = this.client.onClose((error) => {
-			// Pauses, snapshots, and events live on a healthy direct link; only its loss invalidates them.
-			const directSessionSurvives =
-				this.client instanceof DaemonRoutedClient &&
-				this.client.hasDirectTransport &&
-				!(error instanceof DaemonDirectTransportClosedError);
-			const invalidatedInputPause = !directSessionSurvives && this.sessionInputPauses.size > 0;
-			if (!directSessionSurvives) {
-				this.sessionInputPauses.clear();
-				this.sessionInputPauseGeneration++;
-				this.rejectSnapshotAssemblies(error);
-			}
-			if (this.initialAttachPending) {
-				// attach() owns failure handling until the initial attach settles.
-				if (directSessionSurvives) this.initialControlPlaneClose = error;
-				return;
-			}
-			if (this.disposed || this.terminalCloseEmitted) {
-				return;
-			}
-			if (invalidatedInputPause) {
-				this.terminalCloseEmitted = true;
-				void this.emit({
-					type: "closed",
-					error: "Daemon connection closed while session input was paused; the fence was invalidated.",
-				});
-				return;
-			}
-			// An authoritative shutdown/update reason outranks the surviving direct link.
-			const closeReason = getDaemonSocketCloseReason(error);
-			if (closeReason === "shutdown") {
-				this.terminalCloseEmitted = true;
-				void this.emit({ type: "closed", error: this.formatDaemonSessionClosedError("shutdown") });
-				return;
-			}
-			if ((this.updateRestartPending || closeReason === "update") && !this.updateReconnectFailed) {
-				this.updateRestartPending = true;
-				void this.reconnectAfterUpdate();
-				return;
-			}
-			if (directSessionSurvives || this.options.recoverDaemon) {
-				void this.reconnect(error);
-				return;
-			}
+		this.unsubscribeDaemonClose = this.client.onClose((error) => this.handleTransportClose(error));
+	}
+
+	private handleTransportClose(error: Error): void {
+		// Pauses, snapshots, and events live on a healthy direct link; only its loss invalidates them.
+		const directSessionSurvives =
+			this.client instanceof DaemonRoutedClient &&
+			this.client.hasDirectTransport &&
+			!(error instanceof DaemonDirectTransportClosedError);
+		const invalidatedInputPause = !directSessionSurvives && this.sessionInputPauses.size > 0;
+		if (!directSessionSurvives) {
+			this.sessionInputPauses.clear();
+			this.sessionInputPauseGeneration++;
+			this.rejectSnapshotAssemblies(error);
+		}
+		if (this.initialAttachPending) {
+			// attach() owns failure handling until the initial attach settles.
+			if (directSessionSurvives) this.initialControlPlaneClose = error;
+			return;
+		}
+		if (this.disposed || this.terminalCloseEmitted) {
+			return;
+		}
+		if (invalidatedInputPause) {
 			this.terminalCloseEmitted = true;
-			void this.emit({ type: "closed", error: this.formatDaemonConnectionClosedError(error) });
-		});
+			void this.emit({
+				type: "closed",
+				error: "Daemon connection closed while session input was paused; the fence was invalidated.",
+			});
+			return;
+		}
+		// An authoritative shutdown/update reason outranks the surviving direct link.
+		const closeReason = getDaemonSocketCloseReason(error);
+		if (closeReason === "shutdown") {
+			this.terminalCloseEmitted = true;
+			void this.emit({ type: "closed", error: this.formatDaemonSessionClosedError("shutdown") });
+			return;
+		}
+		if ((this.updateRestartPending || closeReason === "update") && !this.updateReconnectFailed) {
+			this.updateRestartPending = true;
+			void this.reconnectAfterUpdate();
+			return;
+		}
+		// A direct-transport loss is never itself a session loss: fall back through a supervisor re-attach.
+		if (directSessionSurvives || error instanceof DaemonDirectTransportClosedError || this.options.recoverDaemon) {
+			void this.reconnect(error);
+			return;
+		}
+		this.terminalCloseEmitted = true;
+		void this.emit({ type: "closed", error: this.formatDaemonConnectionClosedError(error) });
 	}
 
 	static async attach(
@@ -349,7 +352,8 @@ export class DaemonAgentConnection implements AgentConnection {
 			connection.initialAttachPending = false;
 			const initialControlPlaneClose = connection.initialControlPlaneClose;
 			connection.initialControlPlaneClose = undefined;
-			if (initialControlPlaneClose) void connection.reconnect(initialControlPlaneClose);
+			// Replay through the one close handler so reasoned closes stay terminal here too.
+			if (initialControlPlaneClose) connection.handleTransportClose(initialControlPlaneClose);
 			return connection;
 		} catch (error) {
 			connection.initialAttachPending = false;
