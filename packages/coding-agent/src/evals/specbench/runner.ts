@@ -175,6 +175,7 @@ interface SpecBenchAblationCondition {
 
 export interface SpecBenchRunProvenance {
 	runConfigurationDigest: string;
+	uvCacheRoot: string;
 	primeRevision: string;
 	primeWorkspaceDigest: string;
 	agentExecutableDigest: string;
@@ -763,7 +764,9 @@ export function specBenchToolchainProvenance(
 	| "toolchainManifestPath"
 	| "toolchainManifestDigest"
 	| "toolchainManifestVerified"
+	| "uvCacheRoot"
 > {
+	const uvCacheRoot = resolveSpecBenchUvCacheRoot(environment);
 	const toolchainEnvironment = {
 		PATH: environment.PATH ?? null,
 		GOROOT: environment.GOROOT ?? null,
@@ -791,10 +794,51 @@ export function specBenchToolchainProvenance(
 	return {
 		toolchainEnvironment,
 		toolchainEnvironmentDigest: hashParts([JSON.stringify(toolchainEnvironment)]),
+		uvCacheRoot,
 		...(manifestPath ? { toolchainManifestPath: realpathSync(manifestPath) } : {}),
 		...(manifestDigest ? { toolchainManifestDigest: manifestDigest } : {}),
 		...(manifestPath ? { toolchainManifestVerified: true as const } : {}),
 	};
+}
+
+export function resolveSpecBenchUvCacheRoot(environment: NodeJS.ProcessEnv = process.env): string {
+	const configured = environment.UV_CACHE_DIR?.trim();
+	if (configured) return resolve(configured);
+	const xdgCacheHome = environment.XDG_CACHE_HOME?.trim();
+	if (xdgCacheHome) return join(resolve(xdgCacheHome), "uv");
+	const home = environment.HOME?.trim();
+	return join(home ? resolve(home) : homedir(), ".cache", "uv");
+}
+
+export function ensureSpecBenchNooaUvCache(environment: NodeJS.ProcessEnv = process.env): void {
+	const uvCacheRoot = resolveSpecBenchUvCacheRoot(environment);
+	if (!existsSync(uvCacheRoot)) throw new Error(`SpecBench NOOA uv cache is missing: ${uvCacheRoot}`);
+	const preflightEnvironment = specBenchAgentEnvironment(environment);
+	preflightEnvironment.UV_CACHE_DIR = uvCacheRoot;
+	const result = spawnSync(
+		resolveExecutable("uv"),
+		[
+			"run",
+			"--quiet",
+			"--offline",
+			"--no-project",
+			"--python",
+			"3.13",
+			"--with",
+			"nooa-memory==0.0.9",
+			"python",
+			"-c",
+			"import nooa_memory",
+		],
+		{
+			env: preflightEnvironment,
+			encoding: "utf8",
+			timeout: 120_000,
+		},
+	);
+	if (result.status !== 0) {
+		throw new Error(`SpecBench NOOA dependency is not available in the offline uv cache: ${result.stderr}`);
+	}
 }
 
 function validateSpecBenchGraderPython(path: string): { version: string; packageDigest: string } | undefined {
@@ -919,12 +963,13 @@ function specBenchRunProvenance(
 	specbenchRevision: string,
 	agentExecutable: string,
 	grader: ReturnType<typeof ensureSpecBenchGraderPython>,
+	environment: NodeJS.ProcessEnv = process.env,
 ): SpecBenchRunProvenance {
 	const prime = primeImplementationProvenance();
 	const agentExecutableDigest = fileDigest(realpathSync(agentExecutable));
 	const behaviorDigest = configBehaviorDigest(options.configSource);
 	const catalogDigest = specBenchCatalogDigest(options.specbenchRoot);
-	const toolchain = specBenchToolchainProvenance();
+	const toolchain = specBenchToolchainProvenance(environment);
 	const diskWatchdogMinimumBytes = specBenchDiskWatchdogMinimumBytes();
 	const diskWatchdogMaximumCaseBytes = specBenchDiskWatchdogMaximumCaseBytes();
 	return {
@@ -939,7 +984,7 @@ function specBenchRunProvenance(
 		diskWatchdogMaximumCaseBytes,
 		runConfigurationDigest: hashParts([
 			JSON.stringify({
-				schemaVersion: 2,
+				schemaVersion: 3,
 				specbenchRevision,
 				primeRevision: prime.primeRevision,
 				primeWorkspaceDigest: prime.primeWorkspaceDigest,
@@ -959,6 +1004,7 @@ function specBenchRunProvenance(
 				toolchainManifestPath: toolchain.toolchainManifestPath ?? null,
 				toolchainManifestDigest: toolchain.toolchainManifestDigest ?? null,
 				toolchainManifestVerified: toolchain.toolchainManifestVerified ?? false,
+				uvCacheRoot: toolchain.uvCacheRoot,
 				graderPythonVersion: grader.version,
 				graderPythonDigest: grader.digest,
 				diskWatchdogMinimumBytes,
@@ -1307,6 +1353,8 @@ export function specBenchAgentEnvironment(base: NodeJS.ProcessEnv): NodeJS.Proce
 		OS_KERNEL_USE_DOCKER: "0",
 		PYTHONSAFEPATH: "1",
 		PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1",
+		UV_CACHE_DIR: resolveSpecBenchUvCacheRoot(base),
+		UV_OFFLINE: "1",
 	});
 	delete environment.PYTHONPATH;
 	for (const name of BENCHMARK_SECRET_ENVIRONMENT) delete environment[name];
@@ -2171,8 +2219,11 @@ export function buildSpecBenchSandboxArgs(
 	configSource: string,
 	protectedPaths: string[],
 	brokerSocketPaths: string[] = [],
+	environment: NodeJS.ProcessEnv = process.env,
 ): string[] {
 	const resolverArguments = buildSpecBenchResolverSandboxArgs();
+	const uvCacheRoot = resolveSpecBenchUvCacheRoot(environment);
+	const uvCacheArguments = existsSync(uvCacheRoot) ? ["--overlay-src", uvCacheRoot, "--tmp-overlay", uvCacheRoot] : [];
 	const argv = [
 		"bwrap",
 		"--ro-bind",
@@ -2188,6 +2239,7 @@ export function buildSpecBenchSandboxArgs(
 		"--tmpfs",
 		"/run",
 		...resolverArguments,
+		...uvCacheArguments,
 		"--tmpfs",
 		REPOSITORY_GIT_DIR,
 		"--tmpfs",
@@ -2462,6 +2514,7 @@ async function runTask(
 							[probeBroker?.socketPath, verificationBroker?.socketPath].filter(
 								(path): path is string => path !== undefined,
 							),
+							environment,
 						)
 					: [agentExecutable, ...agentArgs],
 				{
@@ -3177,7 +3230,11 @@ async function main(): Promise<void> {
 	assertSpecBenchDiskCapacity(options.outputDir, specBenchDiskWatchdogMinimumBytes());
 	const agentExecutable = resolveExecutable(options.agentCommand);
 	const grader = ensureSpecBenchGraderPython();
-	const provenance = specBenchRunProvenance(options, specbenchRevision, agentExecutable, grader);
+	const benchmarkEnvironment = specBenchAgentEnvironment(process.env);
+	if (options.conditions.some((conditionId) => !specBenchCondition(conditionId).disabledFeatures.includes("nooa"))) {
+		ensureSpecBenchNooaUvCache(benchmarkEnvironment);
+	}
+	const provenance = specBenchRunProvenance(options, specbenchRevision, agentExecutable, grader, benchmarkEnvironment);
 	const results: SpecBenchResult[] = [];
 	const jobs = specBenchJobs(selected, options);
 	for (const [index, job] of jobs.entries()) {
