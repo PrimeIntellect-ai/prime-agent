@@ -179,6 +179,15 @@ function lockMemoryLedger(path: string): () => void {
 	throw new Error("unreachable memory ledger lock state");
 }
 
+function stateFileSignature(path: string): string | undefined {
+	try {
+		return createHash("sha256").update(readFileSync(path)).digest("hex");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
 function isRecord(value: unknown): value is JsonRecord {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1808,8 +1817,16 @@ export function parseAvoMemoryInput(value: unknown): AvoMemoryInput {
 	};
 }
 
+/**
+ * Persisted stores use optimistic single-writer coordination. Multiple
+ * instances may read one artifact directory, but a stale instance must be
+ * reopened after another writer commits state.
+ */
 export class AvoStore {
 	private readonly statePath?: string;
+	private stateSignature?: string;
+	private initialSaveRequired = false;
+	private writeConflict?: string;
 	private readonly projectKey: string;
 	private readonly legacyProjectKey: string;
 	private readonly projectMemoryLedgerPath?: string;
@@ -1852,6 +1869,7 @@ export class AvoStore {
 			: undefined;
 		this.globalMemoryDatabasePath = memoryRoot ? join(memoryRoot, "global", "nooa-memory.sqlite") : undefined;
 		this.state = this.load(sessionId);
+		const loadedStateDigest = digestAvoPayload(this.state);
 		if (this.projectPromotionLedgerPath && existsSync(this.projectPromotionLedgerPath)) {
 			this.readPromotionLedger(this.projectPromotionLedgerPath);
 		}
@@ -1860,7 +1878,9 @@ export class AvoStore {
 		this.hardenLegacyExperimentMemories();
 		if (!this.loadError) {
 			this.savePersistentMemories();
-			if (this.statePath) this.save();
+			if (this.statePath && (this.initialSaveRequired || digestAvoPayload(this.state) !== loadedStateDigest)) {
+				this.save();
+			}
 		}
 	}
 
@@ -2369,10 +2389,17 @@ export class AvoStore {
 
 	private load(sessionId: string): AvoRunState {
 		const fallback = emptyState(sessionId, this.now());
-		if (!this.statePath || !existsSync(this.statePath)) return fallback;
+		if (!this.statePath) return fallback;
+		if (!existsSync(this.statePath)) {
+			this.initialSaveRequired = true;
+			return fallback;
+		}
 		try {
-			const parsed = JSON.parse(readFileSync(this.statePath, "utf8")) as unknown;
+			const serialized = readFileSync(this.statePath, "utf8");
+			this.stateSignature = createHash("sha256").update(serialized).digest("hex");
+			const parsed = JSON.parse(serialized) as unknown;
 			if (isAvoState(parsed)) return parsed;
+			this.initialSaveRequired = true;
 			if (isAvoV12State(parsed)) return migrateAvoV12State(parsed);
 			if (isAvoV11State(parsed)) return migrateAvoV11State(parsed);
 			if (isAvoV10State(parsed)) return migrateAvoV10State(parsed);
@@ -2395,16 +2422,31 @@ export class AvoStore {
 	private assertHealthy(): void {
 		if (this.loadError)
 			throw new Error(`AVO state could not be loaded; the existing file was preserved: ${this.loadError}`);
+		if (this.writeConflict) throw new Error(this.writeConflict);
 	}
 
 	private save(): void {
 		this.assertHealthy();
-		this.state.updatedAt = this.now();
-		if (!this.statePath) return;
+		if (!this.statePath) {
+			this.state.updatedAt = this.now();
+			return;
+		}
 		mkdirSync(dirname(this.statePath), { recursive: true });
-		const temporaryPath = `${this.statePath}.${process.pid}.${randomUUID()}.tmp`;
-		writeFileSync(temporaryPath, `${JSON.stringify(this.state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-		renameSync(temporaryPath, this.statePath);
+		const release = lockMemoryLedger(this.statePath);
+		try {
+			if (stateFileSignature(this.statePath) !== this.stateSignature) {
+				this.writeConflict = `AVO state changed on disk; reopen the store before writing: ${this.statePath}`;
+				throw new Error(this.writeConflict);
+			}
+			this.state.updatedAt = this.now();
+			const serialized = `${JSON.stringify(this.state, null, 2)}\n`;
+			const temporaryPath = `${this.statePath}.${process.pid}.${randomUUID()}.tmp`;
+			writeFileSync(temporaryPath, serialized, { encoding: "utf8", mode: 0o600 });
+			renameSync(temporaryPath, this.statePath);
+			this.stateSignature = createHash("sha256").update(serialized).digest("hex");
+		} finally {
+			release();
+		}
 	}
 
 	getState(): AvoRunState {

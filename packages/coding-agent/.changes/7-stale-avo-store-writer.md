@@ -1,0 +1,1 @@
+- Fixed direct concurrent AVO state writers so stale snapshots are rejected instead of overwriting newer persisted state.
