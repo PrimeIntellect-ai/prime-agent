@@ -1,7 +1,14 @@
-import type { Socket } from "node:net";
+import { mkdtempSync, rmSync } from "node:fs";
+import { createServer, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { getProcessStartId } from "../src/core/session-lease.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
+import { AgentRoster, workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
+import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
+import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import type { DaemonWorkerCommand, DaemonWorkerPeerGrant } from "../src/modes/daemon/daemon-worker-protocol.js";
 
 interface WorkerInternals {
@@ -235,5 +242,138 @@ describe("daemon worker peer transport", () => {
 		expect(await registerGrant(internals, supervisor, makeGrant({ grantId: "grant-3" }))).toMatchObject({
 			success: true,
 		});
+	});
+});
+
+describe("supervisor direct transport issuance", () => {
+	interface SupervisorInternals {
+		issuePeerTransport(
+			worker: unknown,
+			summary: SessionSummary,
+		): Promise<{
+			purpose: string;
+			socketPath: string;
+			socketIdentity?: { dev: number; ino: number };
+			workerInstanceId: string;
+			activeSessionId: string;
+			grantId: string;
+			token: string;
+			expiresAt: string;
+		}>;
+		workerEvictionSnapshot(worker: unknown): { sessions: { attachedClients: number }[] };
+	}
+
+	function makeIssuingSupervisor(
+		requestWorker: ReturnType<typeof vi.fn>,
+		summary: SessionSummary,
+	): SupervisorInternals {
+		return Object.assign(Object.create(DaemonSupervisor.prototype), {
+			generation: "gen-1",
+			assertCurrentOwnership: vi.fn(async () => undefined),
+			refreshWorkerSummaries: vi.fn(async () => undefined),
+			requireAvailableWorkerClient: vi.fn(() => ({ requestWorker })),
+			findSummaryInWorker: vi.fn(() => summary),
+			processIdentity: vi.fn(() => "current"),
+		}) as unknown as SupervisorInternals;
+	}
+
+	it("issues a dev/ino-bound single-use ticket only after the worker accepted the grant", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-agent-peer-ticket-"));
+		const socketPath = join(directory, "worker.sock");
+		const server = createServer();
+		await new Promise<void>((resolveListen) => server.listen(socketPath, resolveListen));
+		try {
+			const summary = { id: "target-1", activeSessionId: "target-1" } as unknown as SessionSummary;
+			const requestWorker = vi.fn(async (_command: unknown) => ({
+				type: "response",
+				command: "attach",
+				success: true,
+			}));
+			const supervisor = makeIssuingSupervisor(requestWorker, summary);
+			const worker = {
+				peerTransportCapable: true,
+				descriptor: {
+					workerId: "worker-1",
+					workerInstanceId: "instance-1",
+					pid: process.pid,
+					processStartId: getProcessStartId(process.pid),
+					socketPath,
+					rootActiveSessionId: "target-1",
+				},
+			};
+
+			const ticket = await supervisor.issuePeerTransport(worker, summary);
+
+			expect(ticket).toMatchObject({
+				purpose: "session_client",
+				socketPath,
+				workerInstanceId: "instance-1",
+				activeSessionId: "target-1",
+			});
+			expect(ticket.socketIdentity).toEqual(
+				expect.objectContaining({ dev: expect.any(Number), ino: expect.any(Number) }),
+			);
+			expect(requestWorker).toHaveBeenCalledOnce();
+			expect(requestWorker.mock.calls[0]?.[0]).toMatchObject({
+				type: "worker_register_peer_transport",
+				grant: {
+					grantId: ticket.grantId,
+					token: ticket.token,
+					expiresAt: ticket.expiresAt,
+					purpose: "session_client",
+					workerInstanceId: "instance-1",
+					activeSessionId: "target-1",
+					issuerGeneration: "gen-1",
+				},
+			});
+		} finally {
+			await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses tickets for workers that predate peer transport", async () => {
+		const summary = { id: "target-1", activeSessionId: "target-1" } as unknown as SessionSummary;
+		const requestWorker = vi.fn();
+		const supervisor = makeIssuingSupervisor(requestWorker, summary);
+		const worker = {
+			peerTransportCapable: false,
+			descriptor: {
+				workerId: "worker-1",
+				workerInstanceId: "instance-1",
+				pid: process.pid,
+				processStartId: getProcessStartId(process.pid),
+				socketPath: "/tmp/prime-agent-peer-missing.sock",
+			},
+		};
+
+		await expect(supervisor.issuePeerTransport(worker, summary)).rejects.toThrow(
+			"does not support direct peer transport",
+		);
+		expect(requestWorker).not.toHaveBeenCalled();
+	});
+
+	it("counts worker-reported direct attachments in idle-eviction snapshots", () => {
+		const summary = {
+			id: "target-1",
+			activeSessionId: "target-1",
+			sessionId: "session-target",
+			directAttachedClients: 1,
+			attachedClients: 2,
+			isStreaming: false,
+			isSessionActive: false,
+			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+		} as unknown as SessionSummary;
+		const roster = new AgentRoster((path) => path);
+		roster.write(workerRosterEntryFromSummary(summary), "worker-1");
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			clients: new Set(),
+			rosterStore: roster,
+			updateRestartPhase: undefined,
+			isWorkerStopping: vi.fn(() => false),
+		}) as unknown as SupervisorInternals;
+		const worker = { descriptor: { workerId: "worker-1", lifecycle: "ready" }, client: {} };
+
+		expect(supervisor.workerEvictionSnapshot(worker).sessions[0]?.attachedClients).toBe(1);
 	});
 });

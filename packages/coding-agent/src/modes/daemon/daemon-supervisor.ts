@@ -86,6 +86,7 @@ import {
 	type DaemonClosingReason,
 	type DaemonCommand,
 	type DaemonOutbound,
+	type DaemonPeerTransportTicket,
 	type DaemonResponse,
 	type DaemonServerCapability,
 	type DaemonUpdateRestartManifest,
@@ -125,6 +126,8 @@ import {
 import { DaemonWorkerClient } from "./daemon-worker-client.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
+	DAEMON_WORKER_INSTANCE_ID_ENV,
+	DAEMON_WORKER_PEER_TRANSPORT_CAPABILITY,
 	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
 	DAEMON_WORKER_ROLE_ENV,
 	DAEMON_WORKER_ROSTER_CAPABILITY,
@@ -164,7 +167,9 @@ const ROSTER_STALE_AFTER_MS = 3 * ROSTER_HEARTBEAT_INTERVAL_MS;
 const SUPERVISOR_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
 	...DAEMON_DEFAULT_SERVER_CAPABILITIES,
 	"agent_roster",
+	"direct_peer_transport",
 ];
+const PEER_TRANSPORT_GRANT_TTL_MS = 10_000;
 const WORKER_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const INPUT_PAUSE_CLEANUP_TIMEOUT_MS = 5_000;
 const UPDATE_RESTART_MUTATION_DRAIN_TIMEOUT_MS = 80_000;
@@ -195,6 +200,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
 	"list",
 	"list_agent_peers",
+	"get_direct_worker_transport",
 	"roster_subscribe",
 	"roster_unsubscribe",
 	"list_saved_sessions",
@@ -322,6 +328,8 @@ interface ResidentWorker {
 	updateRestartPrepareClient?: DaemonWorkerClient;
 	lastFrameAt?: number;
 	rosterStale?: boolean;
+	/** worker_auth advertised peer-transport support; absent on workers from older builds. */
+	peerTransportCapable?: boolean;
 	/** In-flight replacement connection during authentication; an allowed frame source alongside client. */
 	pendingClient?: DaemonWorkerClient;
 	/** Bumped per applied roster frame; a summaries pull that straddles a frame must not gap-fill. */
@@ -497,6 +505,7 @@ function isDaemonWorkerDescriptor(value: unknown, socketPath: string): value is 
 		(descriptor.ownerClientId === undefined || typeof descriptor.ownerClientId === "string") &&
 		typeof descriptor.socketPath === "string" &&
 		typeof descriptor.authenticationToken === "string" &&
+		(descriptor.workerInstanceId === undefined || typeof descriptor.workerInstanceId === "string") &&
 		typeof descriptor.rootActiveSessionId === "string" &&
 		typeof descriptor.createdAt === "string" &&
 		typeof descriptor.updatedAt === "string" &&
@@ -513,6 +522,12 @@ function workerAuthAdvertisesRoster(data: unknown): boolean {
 	if (typeof data !== "object" || data === null) return false;
 	const capabilities = (data as { capabilities?: unknown }).capabilities;
 	return Array.isArray(capabilities) && capabilities.includes(DAEMON_WORKER_ROSTER_CAPABILITY);
+}
+
+function workerAuthAdvertisesPeerTransport(data: unknown): boolean {
+	if (typeof data !== "object" || data === null) return false;
+	const capabilities = (data as { capabilities?: unknown }).capabilities;
+	return Array.isArray(capabilities) && capabilities.includes(DAEMON_WORKER_PEER_TRANSPORT_CAPABILITY);
 }
 
 function sessionSummariesFromResponse(response: DaemonResponse): SessionSummary[] {
@@ -841,9 +856,9 @@ export class DaemonSupervisor {
 					const activeSessionId = summary.activeSessionId ?? summary.id;
 					return {
 						isSessionActive: isSessionSummaryBusy(summary),
-						attachedClients: [...this.clients].filter((client) =>
-							client.attachedActiveSessionIds.has(activeSessionId),
-						).length,
+						attachedClients:
+							(summary.directAttachedClients ?? 0) +
+							[...this.clients].filter((client) => client.attachedActiveSessionIds.has(activeSessionId)).length,
 						hasRegisteredHeartbeat: summary.hasRegisteredHeartbeat === true,
 						hasRegisteredCronJob: summary.hasRegisteredCronJob === true,
 						lastActivityAt: Date.parse(summary.lastActivityAt ?? ""),
@@ -1669,6 +1684,14 @@ export class DaemonSupervisor {
 						return root ? [this.agentPeerSummary(sessionSummaryFromRosterEntry(root))] : [];
 					});
 				return success(command.id, command.type, { peers });
+			}
+			case "get_direct_worker_transport": {
+				const match = await this.findWorkerForClient(client, command.activeSessionId);
+				if (match.worker.descriptor.ownerClientId !== undefined) {
+					throw new Error("Direct transport is unavailable for client-owned workers");
+				}
+				const ticket = await this.issuePeerTransport(match.worker, match.summary);
+				return success(command.id, command.type, ticket);
 			}
 			case "list_saved_sessions":
 				return this.handleSavedSessionList(client, command);
@@ -2716,6 +2739,8 @@ export class DaemonSupervisor {
 		const rootActiveSessionId = existing?.descriptor.rootActiveSessionId ?? createActiveSessionId();
 		const socketPath = existing?.descriptor.socketPath ?? workerSocketPath(this.socketPath, workerId);
 		const token = existing?.descriptor.authenticationToken ?? randomBytes(32).toString("base64url");
+		// Fresh per incarnation: peer transport grants must never survive a worker restart.
+		const workerInstanceId = randomUUID();
 		const now = new Date().toISOString();
 		const descriptorPath = existing?.descriptorPath ?? join(this.descriptorDir, `${workerId}.json`);
 		const recoveryJournalPath =
@@ -2728,6 +2753,7 @@ export class DaemonSupervisor {
 			...launchEnv,
 			[DAEMON_WORKER_ROLE_ENV]: "1",
 			[DAEMON_WORKER_TOKEN_ENV]: token,
+			[DAEMON_WORKER_INSTANCE_ID_ENV]: workerInstanceId,
 			[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV]: rootActiveSessionId,
 			[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV]: this.socketPath,
 			[DAEMON_WORKER_RECOVERY_JOURNAL_ENV]: recoveryJournalPath,
@@ -2798,6 +2824,7 @@ export class DaemonSupervisor {
 				orphanProcessJournalPath,
 				supervisorSocketPath: this.socketPath,
 				authenticationToken: token,
+				workerInstanceId,
 				rootActiveSessionId,
 				ownerClientId: existing?.descriptor.ownerClientId ?? ownerClientId,
 				sessionDir: createCommand.config?.sessionDir,
@@ -2969,13 +2996,19 @@ export class DaemonSupervisor {
 				try {
 					const authResponse = await client.authenticateWorker(
 						worker.descriptor.authenticationToken,
-						this.supervisorAuthenticationClaim(),
+						{
+							...this.supervisorAuthenticationClaim(),
+							...(worker.descriptor.workerInstanceId !== undefined
+								? { workerInstanceId: worker.descriptor.workerInstanceId }
+								: {}),
+						},
 						1000,
 					);
 					await this.assertRecoveryAllowed();
 					if (!workerAuthAdvertisesRoster(authResponse.data)) {
 						throw new PreRosterWorkerError("Session worker predates the roster protocol and must be restarted");
 					}
+					worker.peerTransportCapable = workerAuthAdvertisesPeerTransport(authResponse.data);
 					worker.lastFrameAt = Date.now();
 					worker.client?.close();
 					worker.client = client;
@@ -4229,6 +4262,72 @@ export class DaemonSupervisor {
 		return worker.client;
 	}
 
+	private async issuePeerTransport(
+		worker: ResidentWorker,
+		summary: SessionSummary,
+	): Promise<DaemonPeerTransportTicket> {
+		await this.assertCurrentOwnership();
+		if (!worker.peerTransportCapable) {
+			throw new Error("Session worker does not support direct peer transport");
+		}
+		await this.refreshWorkerSummaries(worker);
+		const workerClient = this.requireAvailableWorkerClient(worker);
+		const activeSessionId = summary.activeSessionId ?? summary.id;
+		const currentSummary = this.findSummaryInWorker(worker, activeSessionId);
+		if (!currentSummary) {
+			throw new Error("Direct transport target changed during admission");
+		}
+		const workerInstanceId = worker.descriptor.workerInstanceId;
+		const workerProcessStartId = worker.descriptor.processStartId;
+		if (!workerInstanceId || !workerProcessStartId) {
+			throw new Error("Direct transport requires an exact worker process identity");
+		}
+		if (this.processIdentity(worker.descriptor.pid, workerProcessStartId) !== "current") {
+			throw new Error("Direct transport worker process identity is not current");
+		}
+		let socketIdentity: DaemonSocketIdentity | undefined;
+		try {
+			socketIdentity = getDaemonSocketIdentity(worker.descriptor.socketPath);
+		} catch {
+			socketIdentity = undefined;
+		}
+		if (!socketIdentity) {
+			throw new Error("Direct transport requires an exact worker socket identity");
+		}
+		const grantId = randomUUID();
+		const token = randomBytes(32).toString("base64url");
+		const expiresAt = new Date(Date.now() + PEER_TRANSPORT_GRANT_TTL_MS).toISOString();
+		const resolvedActiveSessionId = currentSummary.activeSessionId ?? currentSummary.id;
+		const registration = await workerClient.requestWorker(
+			{
+				type: "worker_register_peer_transport",
+				grant: {
+					grantId,
+					token,
+					expiresAt,
+					purpose: "session_client",
+					workerInstanceId,
+					activeSessionId: resolvedActiveSessionId,
+					issuerGeneration: this.generation,
+				},
+			},
+			3000,
+		);
+		if (!registration.success) {
+			throw deserializeDaemonError(registration);
+		}
+		return {
+			purpose: "session_client",
+			socketPath: worker.descriptor.socketPath,
+			socketIdentity,
+			workerInstanceId,
+			activeSessionId: resolvedActiveSessionId,
+			grantId,
+			token,
+			expiresAt,
+		};
+	}
+
 	private familyCatalogEntry(summary: SessionSummary): AgentFamilyCatalogEntry {
 		const depth = summary.rlmDepth ?? (summary.parentSessionPath ? 1 : 0);
 		return {
@@ -4271,8 +4370,9 @@ export class DaemonSupervisor {
 		const activeSessionId = summary.activeSessionId ?? summary.id;
 		return {
 			...summary,
-			attachedClients: [...this.clients].filter((client) => client.attachedActiveSessionIds.has(activeSessionId))
-				.length,
+			attachedClients:
+				(summary.directAttachedClients ?? 0) +
+				[...this.clients].filter((client) => client.attachedActiveSessionIds.has(activeSessionId)).length,
 			workerState: this.effectiveWorkerState(worker),
 			workerPid: worker.descriptor.pid,
 		};
