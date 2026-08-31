@@ -1,0 +1,1 @@
+- Sandboxed KernelBench authoritative grading so model-authored solutions cannot access host credentials, home files, runtime sockets, the network, or host-writable paths.

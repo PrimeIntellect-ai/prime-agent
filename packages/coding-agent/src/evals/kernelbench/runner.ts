@@ -6,6 +6,7 @@ import {
 	chmodSync,
 	cpSync,
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
@@ -13,7 +14,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { summarizePrimeIntegrityTrace } from "../prime-integrity/runner.js";
 
@@ -93,7 +94,7 @@ Options:
   --config-source <dir>         Prime auth/settings source
   --max-turns <n>               Autonomous root-turn limit (default: 20)
   --timeout-ms <n>              Per-problem timeout (default: ${DEFAULT_TIMEOUT_MS})
-  --hardening <on|off>          Read-only evaluator mounts (default: on)
+  --hardening <on|off>          Sandbox the agent and authoritative grader (default: on)
   --list                        List Level-1 problems
 `;
 }
@@ -408,6 +409,16 @@ function sha256(path: string): string {
 	return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+function immutableFileDigest(path: string): string | undefined {
+	try {
+		const stat = lstatSync(path);
+		if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+		return sha256(path);
+	} catch {
+		return undefined;
+	}
+}
+
 function findJsonl(root: string): string[] {
 	if (!existsSync(root)) return [];
 	const output: string[] = [];
@@ -453,6 +464,161 @@ function parseKernelResult(
 		speedup: typeof parsed.speedup === "number" ? parsed.speedup : 0,
 		graderError: typeof parsed.error === "string" ? parsed.error : undefined,
 	};
+}
+
+const KERNELBENCH_GRADE_ENVIRONMENT_ALLOWLIST = new Set([
+	"CUDA_DEVICE_ORDER",
+	"CUDA_VISIBLE_DEVICES",
+	"LD_LIBRARY_PATH",
+	"MAX_JOBS",
+	"NVIDIA_DRIVER_CAPABILITIES",
+	"NVIDIA_VISIBLE_DEVICES",
+]);
+
+export function kernelBenchGradeEnvironment(
+	hostEnvironment: NodeJS.ProcessEnv,
+	kernelbenchRoot: string,
+	buildCache: string,
+): NodeJS.ProcessEnv {
+	const allowed = Object.fromEntries(
+		Object.entries(hostEnvironment).filter(
+			(entry): entry is [string, string] =>
+				entry[1] !== undefined && KERNELBENCH_GRADE_ENVIRONMENT_ALLOWLIST.has(entry[0]),
+		),
+	);
+	return {
+		...allowed,
+		HOME: homedir(),
+		XDG_CACHE_HOME: join(buildCache, "xdg-cache"),
+		XDG_CONFIG_HOME: join(homedir(), ".config"),
+		XDG_DATA_HOME: join(homedir(), ".local", "share"),
+		XDG_STATE_HOME: join(homedir(), ".local", "state"),
+		TMPDIR: "/tmp",
+		TMP: "/tmp",
+		TEMP: "/tmp",
+		PATH: [join(kernelbenchRoot, ".venv", "bin"), "/usr/local/cuda/bin", "/usr/local/bin", "/usr/bin", "/bin"].join(
+			":",
+		),
+		LANG: "C.UTF-8",
+		LC_ALL: "C.UTF-8",
+		PYTHONNOUSERSITE: "1",
+		PYTHONDONTWRITEBYTECODE: "1",
+		KERNELBENCH_ENFORCE_STATIC: "1",
+		KERNELBENCH_CORRECT_TRIALS: "5",
+		KERNELBENCH_PERF_TRIALS: "50",
+		TORCH_EXTENSIONS_DIR: buildCache,
+		CUDA_CACHE_PATH: join(buildCache, "cuda-cache"),
+		CC: "/usr/bin/gcc-13",
+		CXX: "/usr/bin/g++-13",
+	};
+}
+
+export function kernelBenchGradeCommand(hardening: boolean): string[] {
+	return [
+		hardening ? "/usr/bin/python3" : "python3",
+		"-I",
+		"-c",
+		'import runpy; runpy.run_path("test_kernel.py", run_name="kernelbench_trusted_grade")["test_kernelbench_correctness"]()',
+	];
+}
+
+function maskedMountTargetArgs(paths: readonly string[]): string[] {
+	const maskedRoots = [...new Set(["/tmp", "/run", homedir()].map((path) => resolve(path)))].sort(
+		(left, right) => right.length - left.length,
+	);
+	const created = new Set<string>();
+	const args: string[] = [];
+	for (const path of paths.map((item) => resolve(item))) {
+		const root = maskedRoots.find((candidate) => path === candidate || path.startsWith(`${candidate}${sep}`));
+		if (!root) continue;
+		const parent = dirname(path);
+		const suffix = relative(root, parent);
+		if (!suffix || suffix === "." || suffix === ".." || suffix.startsWith(`..${sep}`)) continue;
+		let current = root;
+		for (const segment of suffix.split(sep)) {
+			current = join(current, segment);
+			if (created.has(current)) continue;
+			args.push("--dir", current);
+			created.add(current);
+		}
+	}
+	return args;
+}
+
+export function buildKernelBenchGradeSandboxArgs(
+	command: string[],
+	workspace: string,
+	buildCache: string,
+	kernelbenchRoot: string,
+	environment: NodeJS.ProcessEnv = kernelBenchGradeEnvironment(process.env, kernelbenchRoot, buildCache),
+): string[] {
+	for (const [label, path] of [
+		["workspace", workspace],
+		["build cache", buildCache],
+	] as const) {
+		const stat = lstatSync(path);
+		if (!stat.isDirectory() || stat.isSymbolicLink()) {
+			throw new Error(`KernelBench grade ${label} must be a host-owned directory: ${path}`);
+		}
+	}
+	const caseRoot = dirname(resolve(workspace));
+	if (dirname(resolve(buildCache)) !== caseRoot) {
+		throw new Error("KernelBench grade build cache must be a dedicated sibling of the workspace");
+	}
+	const pythonPath = realpathSync(join(kernelbenchRoot, ".venv", "bin", "python"));
+	const pythonInstallRoot = dirname(dirname(pythonPath));
+	const interpreterCatalogRoot = pythonPath.startsWith(`${homedir()}${sep}`) ? dirname(pythonInstallRoot) : undefined;
+	const readOnlyBindings = [
+		...new Set([kernelbenchRoot, workspace, interpreterCatalogRoot].filter(Boolean)),
+	] as string[];
+	const mountPaths = [...readOnlyBindings, buildCache];
+	const environmentArgs = Object.entries(environment)
+		.filter((entry): entry is [string, string] => entry[1] !== undefined)
+		.sort(([left], [right]) => left.localeCompare(right))
+		.flatMap(([name, value]) => ["--setenv", name, value]);
+	return [
+		"/usr/bin/bwrap",
+		"--ro-bind",
+		"/",
+		"/",
+		"--dev-bind",
+		"/dev",
+		"/dev",
+		"--tmpfs",
+		"/dev/shm",
+		"--proc",
+		"/proc",
+		"--tmpfs",
+		"/tmp",
+		"--tmpfs",
+		"/run",
+		"--tmpfs",
+		homedir(),
+		...maskedMountTargetArgs(mountPaths),
+		"--tmpfs",
+		caseRoot,
+		...readOnlyBindings.flatMap((path) => ["--ro-bind", path, path]),
+		"--bind",
+		buildCache,
+		buildCache,
+		"--unshare-net",
+		"--unshare-user",
+		"--unshare-pid",
+		"--unshare-ipc",
+		"--unshare-uts",
+		"--disable-userns",
+		"--assert-userns-disabled",
+		"--new-session",
+		"--die-with-parent",
+		"--cap-drop",
+		"ALL",
+		"--chdir",
+		workspace,
+		"--clearenv",
+		...environmentArgs,
+		"--",
+		...command,
+	];
 }
 
 function sandboxArgs(
@@ -539,7 +705,7 @@ async function runProblem(
 		"pytest.ini",
 		"TASK.md",
 	].map((name) => join(workspace, name));
-	const protectedBefore = new Map(protectedPaths.map((path) => [path, sha256(path)]));
+	const protectedBefore = new Map(protectedPaths.map((path) => [path, immutableFileDigest(path)]));
 	for (const path of protectedPaths) chmodSync(path, 0o444);
 	copyConfig(options.configSource, agentDir);
 	const agentArgs = [
@@ -586,34 +752,47 @@ async function runProblem(
 		{ cwd: workspace, env: environment, timeoutMs: options.timeoutMs + 30_000 },
 	);
 	writeFileSync(transcriptPath, `# stdout\n${agent.stdout}\n# stderr\n${agent.stderr}\n`);
-	const grade = await runCommand(["python3", "-m", "pytest", "-q", "-s", "-p", "no:cacheprovider", "test_kernel.py"], {
-		cwd: workspace,
-		timeoutMs: 15 * 60 * 1000,
-		env: {
-			...process.env,
-			KERNELBENCH_ENFORCE_STATIC: "1",
-			KERNELBENCH_CORRECT_TRIALS: "5",
-			KERNELBENCH_PERF_TRIALS: "50",
-			CC: "/usr/bin/gcc-13",
-			CXX: "/usr/bin/g++-13",
-		},
-	});
+	const protectedChanges = protectedPaths.filter((path) => protectedBefore.get(path) !== immutableFileDigest(path));
+	const gradeCommand = kernelBenchGradeCommand(options.hardening);
+	const gradeEnvironment = options.hardening
+		? kernelBenchGradeEnvironment(process.env, options.kernelbenchRoot, buildCache)
+		: {
+				...process.env,
+				KERNELBENCH_ENFORCE_STATIC: "1",
+				KERNELBENCH_CORRECT_TRIALS: "5",
+				KERNELBENCH_PERF_TRIALS: "50",
+				CC: "/usr/bin/gcc-13",
+				CXX: "/usr/bin/g++-13",
+			};
+	const grade =
+		protectedChanges.length === 0
+			? await runCommand(
+					options.hardening
+						? buildKernelBenchGradeSandboxArgs(
+								gradeCommand,
+								workspace,
+								buildCache,
+								options.kernelbenchRoot,
+								gradeEnvironment,
+							)
+						: gradeCommand,
+					{
+						cwd: workspace,
+						timeoutMs: 15 * 60 * 1000,
+						env: gradeEnvironment,
+					},
+				)
+			: {
+					exitCode: 1,
+					timedOut: false,
+					durationMs: 0,
+					stdout: "",
+					stderr: `authoritative grading refused modified control files: ${protectedChanges.join(", ")}\n`,
+				};
 	writeFileSync(join(caseRoot, "host-grade.log"), `${grade.stdout}\n${grade.stderr}`);
 	let infrastructureError: string | undefined;
 	let parsed: ReturnType<typeof parseKernelResult>;
-	try {
-		parsed = parseKernelResult(`${grade.stdout}\n${grade.stderr}`);
-		if (grade.timedOut) infrastructureError = "host grader timed out after 15 minutes";
-		if (
-			!infrastructureError &&
-			parsed.graderError &&
-			sha256(join(workspace, "solution.py")) === baselineSolutionDigest &&
-			/(?:outofmemory|out of memory|cuda is unavailable|no cuda|driver)/i.test(parsed.graderError)
-		) {
-			infrastructureError = `immutable reference could not run on this host: ${parsed.graderError}`;
-		}
-	} catch (error) {
-		infrastructureError = `host grader produced no parseable result: ${error instanceof Error ? error.message : String(error)}`;
+	if (protectedChanges.length > 0) {
 		parsed = {
 			hardware: "unknown",
 			compiled: false,
@@ -622,9 +801,33 @@ async function runProblem(
 			staticErrors: [],
 			staticWarnings: [],
 			speedup: 0,
+			graderError: "authoritative grading refused modified control files",
 		};
+	} else {
+		try {
+			parsed = parseKernelResult(`${grade.stdout}\n${grade.stderr}`);
+			if (grade.timedOut) infrastructureError = "host grader timed out after 15 minutes";
+			if (
+				!infrastructureError &&
+				parsed.graderError &&
+				sha256(join(workspace, "solution.py")) === baselineSolutionDigest &&
+				/(?:outofmemory|out of memory|cuda is unavailable|no cuda|driver)/i.test(parsed.graderError)
+			) {
+				infrastructureError = `immutable reference could not run on this host: ${parsed.graderError}`;
+			}
+		} catch (error) {
+			infrastructureError = `host grader produced no parseable result: ${error instanceof Error ? error.message : String(error)}`;
+			parsed = {
+				hardware: "unknown",
+				compiled: false,
+				correct: false,
+				staticValid: false,
+				staticErrors: [],
+				staticWarnings: [],
+				speedup: 0,
+			};
+		}
 	}
-	const protectedChanges = protectedPaths.filter((path) => protectedBefore.get(path) !== sha256(path));
 	const result: KernelResult = {
 		problemId: problem.id,
 		problemName: problem.name,
@@ -693,7 +896,9 @@ async function main(): Promise<void> {
 		return;
 	}
 	if (!options.all && options.problems.length === 0) throw new Error("select --problem <id> or --all");
-	if (options.hardening && !existsSync("/usr/bin/bwrap")) throw new Error("hardening requires bwrap");
+	if (options.hardening && (!existsSync("/usr/bin/bwrap") || !existsSync("/usr/bin/python3"))) {
+		throw new Error("hardening requires bubblewrap (/usr/bin/bwrap) and Python (/usr/bin/python3)");
+	}
 	if (!existsSync(join(options.kernelbenchRoot, ".venv", "bin", "python"))) {
 		throw new Error("KernelBench environment is missing; run `uv sync` in the official checkout");
 	}
