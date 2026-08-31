@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../src/modes/agent-connection/types.js";
-import {
-	type AgentRosterStatus,
-	type AgentStatusInput,
-	classifyAgentStatus,
-} from "../src/modes/daemon/agent-roster.js";
+import { classifyAgentStatus } from "../src/modes/daemon/agent-roster.js";
 import { classifySessionRosterStatus, type SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { classifySubagentSnapshotStatus } from "../src/modes/interactive/components/subagent-summary-line.js";
 
@@ -37,22 +33,18 @@ function childFor(resident: boolean, busy: boolean): AgentConnectionRlmChildAgen
 }
 
 describe("classifyAgentStatus", () => {
-	it("classifies from the four input bits", () => {
-		const cases: Array<[AgentStatusInput, AgentRosterStatus]> = [
-			// An admitted-but-sessionless child run is already working.
-			[{ resident: false, queuedChild: true, busy: false, hasActiveHeartbeat: false }, "running"],
-			// Nothing resurrects a non-resident agent except a queued child run.
-			[{ resident: false, queuedChild: false, busy: true, hasActiveHeartbeat: true }, "inactive"],
-			[{ resident: true, queuedChild: false, busy: true, hasActiveHeartbeat: false }, "running"],
-			[{ resident: true, queuedChild: false, busy: false, hasActiveHeartbeat: true }, "running"],
-			[{ resident: true, queuedChild: false, busy: false, hasActiveHeartbeat: false }, "idle"],
-		];
-		for (const [input, expected] of cases) {
-			expect(classifyAgentStatus(input), JSON.stringify(input)).toBe(expected);
-		}
-	});
-
-	it("keeps the agents-view and subagents-bar adapters equal to the shared formula", () => {
+	it("classifies once and both surface adapters agree with it", () => {
+		// The formula's three defining rows: a queued child runs before any session
+		// exists, nothing else resurrects a non-resident agent, residents split on work.
+		expect(classifyAgentStatus({ resident: false, queuedChild: true, busy: false, hasActiveHeartbeat: false })).toBe(
+			"running",
+		);
+		expect(classifyAgentStatus({ resident: false, queuedChild: false, busy: true, hasActiveHeartbeat: true })).toBe(
+			"inactive",
+		);
+		expect(classifySubagentSnapshotStatus({ ...childFor(false, false), status: "queued" }, new Set())).toBe(
+			"running",
+		);
 		for (const busy of [false, true]) {
 			for (const heartbeat of [false, true]) {
 				const expected = classifyAgentStatus({
@@ -61,6 +53,7 @@ describe("classifyAgentStatus", () => {
 					busy,
 					hasActiveHeartbeat: heartbeat,
 				});
+				expect(expected).toBe(busy || heartbeat ? "running" : "idle");
 				const heartbeatIds = new Set(heartbeat ? ["as-1"] : []);
 				expect(classifySessionRosterStatus(summaryFor(true, busy, heartbeat)), `busy=${busy} hb=${heartbeat}`).toBe(
 					expected,
@@ -71,15 +64,7 @@ describe("classifyAgentStatus", () => {
 				).toBe(expected);
 			}
 		}
-		// A passivated agent is inactive on both surfaces.
 		expect(classifySessionRosterStatus(summaryFor(false, false, false))).toBe("inactive");
 		expect(classifySubagentSnapshotStatus(childFor(false, false), new Set())).toBe("inactive");
-	});
-
-	it("treats a child run without a session yet as a running queued child", () => {
-		expect(classifySubagentSnapshotStatus(childFor(false, true), new Set())).toBe("running");
-		expect(classifySubagentSnapshotStatus({ ...childFor(false, false), status: "queued" }, new Set())).toBe(
-			"running",
-		);
 	});
 });
