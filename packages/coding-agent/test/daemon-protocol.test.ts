@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { isDaemonSessionSummary } from "../src/cli/daemon-launch.js";
 import {
 	createDaemonCommandEnvelope,
 	createDaemonEventEnvelope,
@@ -358,6 +359,25 @@ describe("daemon protocol helpers", () => {
 		expect(isDaemonMutatingCommand({ type: "roster_unsubscribe" })).toBe(false);
 		expect(isDaemonMutatingCommand({ type: "wait_for_headless_completion" })).toBe(true);
 		expect(isDaemonMutatingCommand({ type: "switch_session" })).toBe(true);
+	});
+
+	it("keeps the roster push additive for pre-roster clients", () => {
+		// Subscription commands and the push are capability-gated; a client that
+		// never sends roster_subscribe is never written a roster_update.
+		expect(DAEMON_COMMAND_COMPATIBILITY.roster_subscribe).toEqual({ minProtocol: 7, capability: "agent_roster" });
+		expect(DAEMON_COMMAND_COMPATIBILITY.roster_unsubscribe).toEqual({ minProtocol: 7, capability: "agent_roster" });
+		expect(DAEMON_OUTBOUND_COMPATIBILITY.roster_update).toEqual({ minProtocol: 7, capability: "agent_roster" });
+		// list responses now carry rosterStatus/statusLabel/lastHeardFromAt; the
+		// summary validator pre-roster clients shipped stays open to additive fields.
+		expect(
+			isDaemonSessionSummary({
+				id: "session-1",
+				activeSessionId: "active-1",
+				rosterStatus: "running",
+				statusLabel: "queued",
+				lastHeardFromAt: "2026-08-01T12:00:00.000Z",
+			}),
+		).toBe(true);
 	});
 
 	it("reports replay availability from resume cursors", () => {

@@ -377,6 +377,7 @@ describe("supervisor roster subscription", () => {
 		};
 		vi.spyOn(DaemonCatalogClient.prototype, "start").mockResolvedValue();
 		const client = new DaemonClient(socketPath);
+		const bystander = new DaemonClient(socketPath);
 		try {
 			await internals.start();
 			internals.writeRosterEntry(
@@ -388,6 +389,13 @@ describe("supervisor roster subscription", () => {
 			const updates: Array<Extract<DaemonOutbound, { type: "roster_update" }>> = [];
 			client.onMessage((message) => {
 				if (message.type === "roster_update") updates.push(message);
+			});
+			// A connected client that never subscribes stands in for a pre-roster client.
+			await bystander.connect();
+			await bystander.waitForHello();
+			const bystanderUpdates: DaemonOutbound["type"][] = [];
+			bystander.onMessage((message) => {
+				if (message.type === "roster_update") bystanderUpdates.push(message.type);
 			});
 
 			const subscribed = await client.request({ type: "roster_subscribe" });
@@ -409,8 +417,11 @@ describe("supervisor roster subscription", () => {
 			expect(updates[0]?.changed.map((entry) => entry.agentId).sort()).toEqual(["a", "b"]);
 			expect(updates[0]?.changed.find((entry) => entry.agentId === "a")?.status).toBe("running");
 			expect(updates[0]?.removed).toEqual(["seeded"]);
+			// The push already flushed to the subscriber; the unsubscribed socket saw nothing.
+			expect(bystanderUpdates).toEqual([]);
 		} finally {
 			client.close();
+			bystander.close();
 			await internals.cleanupSupervisorResources();
 		}
 	});
