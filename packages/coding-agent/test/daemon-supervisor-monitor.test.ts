@@ -497,8 +497,8 @@ describe("daemon worker supervisor monitoring", () => {
 			sessions: new Map(),
 			cronStore: { list: () => [] },
 			rosterReporter: {
-				lastSent: new Map(),
 				lastComposed: new Map(),
+				lastComposedJson: new Map(),
 				queuedChildren: new Map(),
 				removedAgentIds: new Set(),
 				snapshotPending: false,

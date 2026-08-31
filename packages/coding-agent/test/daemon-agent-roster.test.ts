@@ -690,6 +690,103 @@ describe("supervisor roster ledger", () => {
 		expect(entry?.summary.activeSessionId).toBe("r-active");
 	});
 
+	it("removes queued rows on worker unregistration instead of passivating unlistable ghosts", () => {
+		const worker = makeWorker("worker-1");
+		const supervisor = makeSupervisor([worker]);
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(summary({ id: "r-active", sessionId: "r", activeSessionId: "r-active" })),
+			worker,
+		);
+		supervisor.consumeWorkerRosterDelta(
+			worker,
+			rosterDelta([
+				{
+					agentId: "queued-child",
+					queuedChild: true,
+					summary: summary({ id: "queued-child", sessionId: "queued-child", runtimeKind: "subagent" }),
+				},
+			]),
+		);
+		expect(supervisor.roster().has("queued-child")).toBe(true);
+
+		supervisor.flipWorkerRosterEntriesInactive(worker);
+
+		// A terminal unbound child run owns no transcript: removal, never a fileless inactive ghost.
+		expect(supervisor.roster().has("queued-child")).toBe(false);
+		expect(supervisor.roster().get("r")).toMatchObject({ status: "inactive" });
+		expect(supervisor.roster().get("r")?.workerId).toBeUndefined();
+	});
+
+	it("never clobbers a row rebound while its seeded header read was in flight", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-hydrate-race-"));
+		tempDirs.push(directory);
+		const manager = SessionManager.create(directory, join(directory, "artifacts"));
+		manager.appendMessage({ role: "user", content: "child fixture", timestamp: 1 });
+		manager.flushNow();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Fixture session did not persist");
+		const supervisor = makeSupervisor([]);
+		const stale = supervisor.writeRosterEntry({
+			agentId: "raced",
+			seededCwd: true,
+			summary: summary({ id: "raced", sessionId: "raced", sessionFile, cwd: join(directory, "artifacts") }),
+		});
+		// A frame rebinds the agentId while the header read would be in flight.
+		const live = supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({ id: "raced", sessionId: "raced", activeSessionId: "raced-active", sessionFile }),
+			),
+		);
+
+		const internals = supervisor as unknown as {
+			hydrateSeededEntry(entry: AgentRosterEntry): Promise<AgentRosterEntry>;
+		};
+		const hydrated = await internals.hydrateSeededEntry(stale);
+
+		expect(hydrated).toBe(live);
+		expect(supervisor.roster().get("raced")).toBe(live);
+		expect(supervisor.roster().get("raced")?.summary.activeSessionId).toBe("raced-active");
+	});
+
+	it("keeps claimed passive children in the non-all list across snapshots that omit them", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-claim-stability-"));
+		tempDirs.push(directory);
+		const sessionsDir = join(directory, "sessions");
+		const ledger = new RlmSpawnLedger(directory, sessionsDir);
+		const parentPath = join(sessionsDir, "root.jsonl");
+		const childPath = join(directory, "artifacts", "p.jsonl");
+		await ledger.appendSpawn({ childId: "p", parent: parentPath, child: childPath, depth: 1, name: "p" });
+		const worker = makeWorker("worker-1");
+		Object.assign(worker.descriptor, { createCommand: { type: "create" } });
+		const supervisor = makeSupervisor([worker], { rlmSpawnLedger: () => ledger });
+		const root = summary({ id: "worker-1-root-active", sessionId: "root", activeSessionId: "worker-1-root-active" });
+		const passive = summary({
+			id: "p-session",
+			sessionId: "p-session",
+			sessionFile: childPath,
+			runtimeKind: "subagent",
+			rlmChildId: "p",
+			parentSessionPath: parentPath,
+		});
+		worker.summaries.set("worker-1-root-active", root);
+		worker.summaries.set("p-session", passive);
+		(
+			supervisor as unknown as { fillRosterGapsFromWorkerSummaries(worker: WorkerFixture): void }
+		).fillRosterGapsFromWorkerSummaries(worker);
+
+		// A snapshot composes only live sessions; the passive registry child must not flap off the worker.
+		supervisor.consumeWorkerRosterDelta(worker, rosterDelta([workerRosterEntryFromSummary(root)], undefined, true));
+		await new Promise((resolveSettle) => setImmediate(resolveSettle));
+
+		const passiveRow = [...supervisor.roster().values()].find((entry) => entry.summary.rlmChildId === "p");
+		expect(passiveRow?.workerId).toBe("worker-1");
+		const listed = await supervisor.handleList({}, { type: "list" });
+		expect(listed.data?.sessions.map((session) => session.sessionId).sort()).toEqual([
+			passiveRow?.summary.sessionId,
+			"root",
+		]);
+	});
+
 	it("seeds catalog and ledger rows list-all-only, serves resident worker rows, and keeps evicted rows inactive", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-seed-"));
 		tempDirs.push(directory);
@@ -986,6 +1083,42 @@ describe("saved-session delete paths", () => {
 		await internals.handleCommand(client, { type: "delete_saved_session", sessionPath: "/tmp/owned-failed.jsonl" });
 		expect(reclaimStaleWorkerRegistration).toHaveBeenCalledWith(failed);
 		expect(catalogDelete).toHaveBeenCalledWith("/tmp/owned-failed.jsonl");
+	});
+
+	it("rejects a foreign client's delete of a client-owned worker's passivated session as unknown", async () => {
+		const owned = makeWorker("w-owned");
+		Object.assign(owned.descriptor, {
+			ownerClientId: "owner-client",
+			sessionFile: "/tmp/owned-private.jsonl",
+			createCommand: { type: "create" },
+		});
+		owned.client = {
+			request: vi.fn(async () => ({ type: "response", command: "delete_saved_session", success: true })),
+		};
+		const catalogDelete = vi.fn(async () => ({ ok: true, method: "unlink" }));
+		const supervisor = makeSupervisor([owned], {
+			catalog: { delete: catalogDelete, list: vi.fn(async () => []) },
+			mutationDrain: { begin: vi.fn(), end: vi.fn() },
+			protocolClientIds: new Map(),
+			rlmSpawnLedger: () => ({ edges: vi.fn(async () => []) }),
+		});
+		const internals = supervisor as unknown as { handleCommand(client: object, command: object): Promise<unknown> };
+
+		await expect(
+			internals.handleCommand(
+				{ id: "intruder", attachedActiveSessionIds: new Set<string>() },
+				{ type: "delete_saved_session", sessionPath: "/tmp/owned-private.jsonl" },
+			),
+		).rejects.toThrow("Unknown active session: /tmp/owned-private.jsonl");
+		expect(owned.client.request).not.toHaveBeenCalled();
+		expect(catalogDelete).not.toHaveBeenCalled();
+
+		// The owning client still routes the delete through its own worker.
+		await internals.handleCommand(
+			{ id: "owner-client", attachedActiveSessionIds: new Set<string>() },
+			{ type: "delete_saved_session", sessionPath: "/tmp/owned-private.jsonl" },
+		);
+		expect(owned.client.request).toHaveBeenCalled();
 	});
 
 	it("keeps the roster row when a delete fails on disk", async () => {
@@ -1326,7 +1459,11 @@ describe("review-round regressions", () => {
 		// Settle any apply work a broken serialization would leave dangling past the pull.
 		await new Promise((resolveSettle) => setImmediate(resolveSettle));
 
-		expect(supervisor.roster().get(childEntry.agentId)?.workerId).toBe("worker-1");
+		const restored = supervisor.roster().get(childEntry.agentId);
+		expect(restored?.workerId).toBe("worker-1");
+		// The queued fill also replaced the synthetic ledger seed with the pulled summary.
+		expect(restored?.summary.cwd).toBe("/tmp/project");
+		expect(restored?.seededCwd).toBeUndefined();
 	});
 
 	it("aborts queued roster applies when the worker stops during the snapshot ledger pre-read", async () => {
