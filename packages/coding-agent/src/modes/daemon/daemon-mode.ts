@@ -233,7 +233,6 @@ export interface DaemonModeOptions {
 	createRuntime: CreateAgentSessionRuntimeFactory;
 	worker?: {
 		authenticationToken: string;
-		/** Fresh per-process identity that peer transport grants bind to. Absent under pre-peer supervisors. */
 		workerInstanceId?: string;
 		restoreActiveSessionId?: string;
 	};
@@ -3348,7 +3347,6 @@ export class AgentDaemon {
 			// Public supervisor authentication has already bound this socket's identity.
 			if (this.options.worker && client.authenticated !== true) {
 				const commandId = typeof parsed.id === "string" ? parsed.id : undefined;
-				// A pre-auth socket may only authenticate; any failure or other command ends it.
 				if (parsed.type === "peer_auth") {
 					// Single use: the grant is burned before its token is checked.
 					const grant = typeof parsed.grantId === "string" ? this.peerGrants.get(parsed.grantId) : undefined;
@@ -3461,9 +3459,6 @@ export class AgentDaemon {
 					this.write(client, failure(commandId, commandName, "Direct peer transport is fenced"));
 					return;
 				}
-				// Direct peers get exactly the session plane of their granted session; worker_*
-				// control commands and every other session are rejected here, and unknown
-				// command types never classify as session-plane.
 				if (
 					typeof parsed.type !== "string" ||
 					!isSessionPlaneDaemonCommand(parsed.type) ||

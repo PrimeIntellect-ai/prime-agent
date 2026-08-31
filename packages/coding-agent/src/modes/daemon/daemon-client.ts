@@ -107,11 +107,7 @@ export interface DaemonClientReconnectOptions {
 	onStatus?: (status: DaemonClientReconnectStatus) => void;
 }
 
-/**
- * The client surface DaemonAgentConnection depends on. DaemonClient satisfies
- * it directly; DaemonRoutedClient satisfies it by splitting session-plane
- * commands onto a direct worker socket.
- */
+/** The client surface DaemonAgentConnection depends on; DaemonClient and DaemonRoutedClient both satisfy it. */
 export interface DaemonTransportClient {
 	readonly hello: DaemonHello | undefined;
 	readonly isConnected: boolean;

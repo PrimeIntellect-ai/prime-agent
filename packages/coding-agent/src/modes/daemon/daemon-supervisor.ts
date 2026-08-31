@@ -4364,7 +4364,6 @@ export class DaemonSupervisor {
 		};
 	}
 
-	/** Worker-reported direct attachments plus this supervisor's own attached clients. */
 	private attachedClientCount(summary: SessionSummary, activeSessionId: string): number {
 		return (
 			(summary.directAttachedClients ?? 0) +

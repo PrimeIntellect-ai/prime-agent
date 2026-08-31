@@ -165,17 +165,12 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"acp_mcp_servers",
 ];
 
-/**
- * Single-use, short-lived credential for one direct TUI connection to one
- * worker process. The supervisor pre-registers the grant in the worker before
- * returning the ticket; the worker deletes the grant on first presentation.
- */
+/** Single-use short-lived credential for one direct TUI connection to one worker process incarnation. */
 export interface DaemonPeerTransportTicket {
 	purpose: "session_client";
 	socketPath: string;
 	/** Filesystem identity of the worker socket at issue time; re-checked by the client before connecting. */
 	socketIdentity: { dev: number; ino: number };
-	/** Fresh random identity of the exact worker process incarnation. */
 	workerInstanceId: string;
 	activeSessionId: string;
 	grantId: string;
@@ -856,21 +851,13 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 } as const satisfies Record<DaemonCommandName, DaemonCommandCompatibility>;
 
 /**
- * Which endpoint serves each daemon command when a client holds both a
- * supervisor (control-plane) connection and a direct worker (session-plane)
- * connection.
- *
- * The rule: a command the worker serves for exactly one of its own sessions is
- * "session" — that is the default for session-addressed commands. "control" is
- * the exception list: supervisor semantics such as worker lifecycle
- * (create/kill/reattach/retry/update/restart/shutdown), cross-worker targeting
- * (send_message), daemon-global registries (roster, cron/heartbeat catalog,
- * saved-session catalog, command-journal acks), and names that mean something
- * different on a worker (a worker's "list" is only its own sessions).
- *
- * The mapped type is total over DaemonCommand["type"]: adding a command
- * without classifying its plane is a compile error. An unknown or unclassified
- * command must never be routed to the direct transport.
+ * Which endpoint serves each command when a client holds both a supervisor
+ * (control-plane) and a direct worker (session-plane) connection. Session is
+ * the default for session-addressed commands; "control" marks supervisor
+ * semantics: worker lifecycle, cross-worker targeting, daemon-global
+ * registries, and names a worker resolves differently (a worker's "list" is
+ * only its own sessions). Total over DaemonCommand["type"], so an
+ * unclassified command is a compile error and never routes direct.
  */
 export const DAEMON_COMMAND_PLANE = {
 	ack_result: "control",
@@ -1006,7 +993,6 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 	return [...requirements, DAEMON_COMMAND_COMPATIBILITY[command.type]];
 }
 
-/** One compatibility predicate for every transport that negotiates via daemon_hello. */
 export function meetsDaemonCommandCompatibility(
 	hello: {
 		protocol: DaemonProtocolInfo;

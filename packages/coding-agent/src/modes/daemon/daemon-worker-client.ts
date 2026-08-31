@@ -169,7 +169,6 @@ export class DaemonWorkerClient {
 		return response;
 	}
 
-	/** Redeem a supervisor-issued single-use ticket; success flips this client into a direct session transport. */
 	async authenticatePeer(ticket: DaemonPeerTransportTicket, timeoutMs = 3000): Promise<void> {
 		const response = await this.requestWire(
 			{
@@ -273,11 +272,7 @@ export class DaemonWorkerClient {
 		}
 	}
 
-	/**
-	 * A malformed outbound frame closes the direct link instead of surfacing a
-	 * decode error to consumers: the routed client then falls back to the
-	 * supervisor transport.
-	 */
+	/** A malformed outbound frame closes the direct link (the routed client falls back) instead of throwing into consumers. */
 	private emitDirectOutbound(frame: PrivateFrame<DaemonWorkerFrameHeader>): void {
 		if (frame.header.kind !== "outbound") return;
 		let message: DaemonOutbound;

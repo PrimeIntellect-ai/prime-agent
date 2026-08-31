@@ -278,8 +278,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		});
 		this.captureDaemonLogPath();
 		this.unsubscribeDaemonClose = this.client.onClose((error) => {
-			// A supervisor-socket loss does not invalidate a session served by a
-			// healthy direct worker link: pauses, snapshots, and events live there.
+			// Pauses, snapshots, and events live on a healthy direct link; only its loss invalidates them.
 			const directSessionSurvives =
 				this.client instanceof DaemonRoutedClient &&
 				this.client.hasDirectTransport &&
@@ -306,8 +305,7 @@ export class DaemonAgentConnection implements AgentConnection {
 				});
 				return;
 			}
-			// An authoritative shutdown/update reason outranks the surviving direct link:
-			// a clean daemon stop must stay terminal instead of degrading into a reconnect.
+			// An authoritative shutdown/update reason outranks the surviving direct link.
 			const closeReason = getDaemonSocketCloseReason(error);
 			if (closeReason === "shutdown") {
 				this.terminalCloseEmitted = true;
@@ -345,7 +343,6 @@ export class DaemonAgentConnection implements AgentConnection {
 				await connection.attach();
 			} catch (error) {
 				if (!(transport instanceof DaemonRoutedClient)) throw error;
-				// The direct link failed before the session was served once; retry on the supervisor.
 				transport.fallbackToSupervisor();
 				await connection.attach();
 			}
@@ -1598,8 +1595,7 @@ export class DaemonAgentConnection implements AgentConnection {
 					if (this.disposed) {
 						return;
 					}
-					// A failure on the surviving direct half must not tear down a
-					// control-plane socket that already completed its handshake.
+					// A direct-half failure must not tear down a control-plane socket with a completed handshake.
 					const shouldResetControlPlane =
 						!(this.client instanceof DaemonRoutedClient) ||
 						!controlPlaneHandshakeComplete ||

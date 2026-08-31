@@ -69,11 +69,7 @@ export function durableDaemonCreateCommand(command: DaemonCreateCommand): Durabl
 	};
 }
 
-/**
- * A supervisor-registered admission for one direct peer connection. Held in
- * worker memory only, single-use (deleted before its token is checked), and
- * scoped to exactly one session of one worker process incarnation.
- */
+/** A single-use, worker-memory-only admission for one direct peer, scoped to one session of one worker incarnation. */
 export interface DaemonWorkerPeerGrant {
 	grantId: string;
 	token: string;
@@ -152,7 +148,6 @@ export interface DaemonWorkerDescriptor {
 	orphanProcessJournalPath?: string;
 	supervisorSocketPath: string;
 	authenticationToken: string;
-	/** Fresh random identity for this exact worker process incarnation. */
 	workerInstanceId?: string;
 	rootActiveSessionId: string;
 	/** Stable protocol client that owns this worker. Omitted for resident sessions. */

@@ -37,11 +37,10 @@ export class DaemonControlPlaneTransportError extends Error {
 }
 
 /**
- * Splits one logical daemon connection across two sockets: session-plane
- * commands go to the session's worker directly, everything else stays on the
- * supervisor control plane. Any direct-path loss degrades silently to
- * supervisor routing; an established direct link keeps serving the session
- * while the supervisor socket reconnects.
+ * One logical daemon connection over two sockets: session-plane commands go
+ * to the session's worker directly, everything else to the supervisor. Any
+ * direct-path loss degrades silently to supervisor routing; an established
+ * direct link keeps serving the session while the supervisor reconnects.
  */
 export class DaemonRoutedClient implements DaemonTransportClient {
 	private direct?: DaemonWorkerClient;
@@ -146,7 +145,6 @@ export class DaemonRoutedClient implements DaemonTransportClient {
 		return this.requestControlPlane(command, timeoutMs, options);
 	}
 
-	/** Route direct only when the plane says session AND the worker's own hello serves the command. */
 	private servesDirect(direct: DaemonWorkerClient, command: DaemonCommandBody): boolean {
 		if (!isSessionPlaneDaemonCommand(command.type)) return false;
 		const hello = direct.hello;
@@ -210,11 +208,7 @@ export class DaemonRoutedClient implements DaemonTransportClient {
 	}
 }
 
-/**
- * Try to upgrade a supervisor connection with a direct link to the session's
- * worker. Every failure returns the supervisor transport unchanged: direct
- * transport is an optimization, never a requirement.
- */
+/** Upgrade a supervisor connection with a direct worker link; every failure returns the supervisor unchanged. */
 export async function createDaemonSessionTransport(
 	supervisor: DaemonTransportClient,
 	activeSessionId: string,
