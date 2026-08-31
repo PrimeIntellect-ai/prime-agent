@@ -31,6 +31,7 @@ interface SupervisorInternals {
 	workers: Map<string, WorkerFixture>;
 	clients: Set<{ id: string; attachedActiveSessionIds: Set<string> }>;
 	idleEvictionFence?: Promise<void>;
+	mutationDrain: { begin(): void; end(): void };
 	catalog: { resolve: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
 	createOrReuseWorker: ReturnType<typeof vi.fn>;
 	stopWorker: ReturnType<typeof vi.fn>;
@@ -527,5 +528,41 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 
 		expect(supervisor.stopWorker).not.toHaveBeenCalled();
 		expect(supervisor.workers.get("swap")).toBe(successor);
+	});
+
+	it("does not evict when a mutation admitted during the refresh registers a schedule", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeSupervisor();
+		const worker = makeWorker("gap", [makeSummary("gap-root", now, { messageCount: 0 })]);
+		let releaseList!: () => void;
+		worker.client!.request.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					releaseList = () =>
+						resolve(
+							success(undefined, "list", { sessions: [makeSummary("gap-root", now, { messageCount: 0 })] }),
+						);
+				}),
+		);
+		supervisor.workers.set("gap", worker);
+		const client = makeDetachClient("viewer", ["gap-root"]);
+		supervisor.clients.add(client);
+
+		await supervisor.handleCommand(client, { id: "detach", type: "detach", activeSessionId: "gap-root" });
+		await vi.waitFor(() => expect(worker.client!.request).toHaveBeenCalled());
+		// A heartbeat_set admitted mid-refresh registers a schedule before the eviction decision.
+		supervisor.mutationDrain.begin();
+		worker.client!.request.mockImplementation(async () =>
+			success(undefined, "list", {
+				sessions: [makeSummary("gap-root", now, { messageCount: 0, hasRegisteredHeartbeat: true })],
+			}),
+		);
+		releaseList();
+		await settle();
+		supervisor.mutationDrain.end();
+		await settle();
+
+		expect(supervisor.stopWorker).not.toHaveBeenCalled();
+		expect(supervisor.workers.get("gap")).toBe(worker);
 	});
 });

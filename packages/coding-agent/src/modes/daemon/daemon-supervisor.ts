@@ -917,7 +917,7 @@ export class DaemonSupervisor {
 
 	/** Passivates an abandoned empty draft on last detach - same passivation as the idle sweep; never rejects. */
 	private async evictEmptySessionOnLastDetach(activeSessionId: string): Promise<void> {
-		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
+		if (this.shuttingDown || this.updateRestartPhase !== undefined || this.idleEvictionFence) return;
 		const worker = this.matchWorkers(activeSessionId)[0]?.worker;
 		if (
 			!worker ||
@@ -934,31 +934,49 @@ export class DaemonSupervisor {
 		} catch {
 			return;
 		}
+		if (!this.isEmptyDetachEvictionCandidate(worker) || this.idleEvictionFence) return;
+		// Same coordination as the idle sweep: fence new mutations, drain admitted
+		// ones, then re-read so the final decision reflects them.
+		let releaseFence: () => void = () => {};
+		const fence = new Promise<void>((resolveFence) => {
+			releaseFence = resolveFence;
+		});
+		this.idleEvictionFence = fence;
+		try {
+			await this.mutationDrain.waitForDrain(
+				0,
+				AbortSignal.timeout(IDLE_EVICTION_DRAIN_TIMEOUT_MS),
+				"Timed out draining daemon mutations for empty-session eviction",
+			);
+			await this.refreshWorkerSummaries(worker);
+			if (!this.isEmptyDetachEvictionCandidate(worker)) return;
+			await this.stopWorker(worker, true);
+			this.log(
+				`Evicted empty session worker ${worker.descriptor.workerId} root=${worker.descriptor.rootSessionId ?? worker.descriptor.rootActiveSessionId} on last client detach`,
+			);
+		} catch (error) {
+			this.log(`Empty-session eviction failed for worker ${worker.descriptor.workerId}: ${String(error)}`);
+		} finally {
+			if (this.idleEvictionFence === fence) this.idleEvictionFence = undefined;
+			releaseFence();
+		}
+	}
+
+	private isEmptyDetachEvictionCandidate(worker: ResidentWorker): boolean {
 		if (
 			this.shuttingDown ||
 			this.updateRestartPhase !== undefined ||
 			this.workers.get(worker.descriptor.workerId) !== worker ||
 			this.isWorkerStopping(worker)
 		) {
-			return;
+			return false;
 		}
 		const summaries = [...worker.summaries.values()];
 		const hasAttachedClient = summaries.some((summary) => {
 			const summaryActiveSessionId = summary.activeSessionId ?? summary.id;
 			return [...this.clients].some((client) => client.attachedActiveSessionIds.has(summaryActiveSessionId));
 		});
-		if (summaries.length === 0 || hasAttachedClient || !summaries.every(isEvictableEmptySessionSummary)) {
-			return;
-		}
-		try {
-			await this.stopWorker(worker, true);
-		} catch (error) {
-			this.log(`Empty-session eviction failed for worker ${worker.descriptor.workerId}: ${String(error)}`);
-			return;
-		}
-		this.log(
-			`Evicted empty session worker ${worker.descriptor.workerId} root=${worker.descriptor.rootSessionId ?? worker.descriptor.rootActiveSessionId} on last client detach`,
-		);
+		return summaries.length > 0 && !hasAttachedClient && summaries.every(isEvictableEmptySessionSummary);
 	}
 
 	private async assertCurrentOwnership(): Promise<void> {
