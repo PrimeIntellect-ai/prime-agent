@@ -9,7 +9,8 @@ import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import type { ActiveSessionState } from "./active-session-state.js";
-import { type AgentRosterStatus, classifyAgentStatus } from "./agent-roster.js";
+
+export { classifySessionRosterStatus, isSessionSummaryBusy } from "./agent-roster.js";
 
 // Durable lifecycle; decides agents-view visibility. Only "live" is shown.
 // "draft" = no message sent yet (discarded on close); "archived" = ctrl+x'd,
@@ -100,17 +101,30 @@ export function resolveAttachModelFallbackMessage(
 	return summary.model ? undefined : startupModelFallbackMessage;
 }
 
-export function classifySessionRosterStatus(summary: SessionSummary): AgentRosterStatus {
-	return classifyAgentStatus({
-		resident: !!summary.activeSessionId,
-		queuedChild: false,
-		busy: summary.activity === "working" || isSessionSummaryBusy(summary),
-		hasActiveHeartbeat: summary.hasActiveHeartbeat === true,
-	});
-}
-
-export function isSessionSummaryBusy(summary: SessionSummary): boolean {
-	return summary.isSessionActive || summary.hasRunningRlmChildren === true;
+/** The one registration index over scheduled jobs; summaries and passivated roster flips both read it. */
+export function scheduledJobRegistrations(scheduledJobs: readonly AgentCronJob[]): {
+	activeHeartbeatSessionIds: Set<string>;
+	heartbeatSessionIds: Set<string>;
+	cronSessionIds: Set<string>;
+	heartbeatSessionFiles: Set<string>;
+	cronSessionFiles: Set<string>;
+} {
+	const activeHeartbeatSessionIds = new Set<string>();
+	const heartbeatSessionIds = new Set<string>();
+	const cronSessionIds = new Set<string>();
+	const heartbeatSessionFiles = new Set<string>();
+	const cronSessionFiles = new Set<string>();
+	for (const job of scheduledJobs) {
+		const heartbeat = isHeartbeatCronJob(job);
+		if (heartbeat && job.status === "active") activeHeartbeatSessionIds.add(job.activeSessionId);
+		// A paused heartbeat cannot fire, so unlike a live heartbeat (or a registered
+		// cron job) it must not silently pin a worker forever.
+		const registered = heartbeat ? job.status === "active" : job.status === "active" || job.status === "paused";
+		if (!registered) continue;
+		(heartbeat ? heartbeatSessionIds : cronSessionIds).add(job.activeSessionId);
+		(heartbeat ? heartbeatSessionFiles : cronSessionFiles).add(resolve(job.sessionFile));
+	}
+	return { activeHeartbeatSessionIds, heartbeatSessionIds, cronSessionIds, heartbeatSessionFiles, cronSessionFiles };
 }
 
 /** Naming signals intent to return, so named sessions are exempt even when empty. */
@@ -130,23 +144,13 @@ export function buildSessionList(
 	scheduledJobs: readonly AgentCronJob[] = [],
 ): SessionSummary[] {
 	const activeBySessionFile = new Map<string, ActiveSessionState>();
-	const heartbeatSessionIds = new Set<string>();
-	const registeredHeartbeatSessionIds = new Set<string>();
-	const registeredCronSessionIds = new Set<string>();
-	const registeredHeartbeatSessionFiles = new Set<string>();
-	const registeredCronSessionFiles = new Set<string>();
-	for (const job of scheduledJobs) {
-		const heartbeat = isHeartbeatCronJob(job);
-		if (heartbeat && job.status === "active") heartbeatSessionIds.add(job.activeSessionId);
-		// A paused heartbeat cannot fire, so unlike a live heartbeat (or a registered
-		// cron job) it must not silently pin a worker forever.
-		const registered = heartbeat ? job.status === "active" : job.status === "active" || job.status === "paused";
-		if (!registered) continue;
-		const ids = heartbeat ? registeredHeartbeatSessionIds : registeredCronSessionIds;
-		const files = heartbeat ? registeredHeartbeatSessionFiles : registeredCronSessionFiles;
-		ids.add(job.activeSessionId);
-		files.add(resolve(job.sessionFile));
-	}
+	const {
+		activeHeartbeatSessionIds: heartbeatSessionIds,
+		heartbeatSessionIds: registeredHeartbeatSessionIds,
+		cronSessionIds: registeredCronSessionIds,
+		heartbeatSessionFiles: registeredHeartbeatSessionFiles,
+		cronSessionFiles: registeredCronSessionFiles,
+	} = scheduledJobRegistrations(scheduledJobs);
 
 	for (const activeSession of activeSessions) {
 		const sessionFile = activeSession.runtime.session.sessionFile;

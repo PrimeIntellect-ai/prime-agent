@@ -841,3 +841,32 @@ export class RlmSpawnLedger {
 		return edges;
 	}
 }
+
+/**
+ * One delete-classification policy for user deletes of saved sessions, shared
+ * by the worker and supervisor delete routes. In-memory state classifies
+ * first; only a readable no-parent transcript is positively top-level.
+ * Children and unknown targets classify via the ledger: an unreadable ledger
+ * aborts, and the tombstone appends before the file delete — a
+ * tombstoned-but-undeleted file is the accepted orphan of a failed delete.
+ */
+export async function tombstoneSavedSessionDelete(
+	ledger: RlmSpawnLedger,
+	sessionPath: string,
+	knownSummary: { runtimeKind?: "top-level" | "subagent" } | undefined,
+): Promise<{ deletedInfo: SessionInfo | undefined; ledgerEdge: RlmLedgerEdge | undefined }> {
+	const deletedPath = canonicalSessionPath(sessionPath);
+	const deletedInfo = (await readSessionInfo(sessionPath).catch(() => null)) ?? undefined;
+	const knownChild =
+		knownSummary?.runtimeKind === "subagent" ||
+		deletedInfo?.parentSessionPath !== undefined ||
+		(deletedInfo?.rlmDepth ?? 0) > 0;
+	const positivelyTopLevel = !knownChild && (knownSummary !== undefined || deletedInfo !== undefined);
+	if (positivelyTopLevel) return { deletedInfo, ledgerEdge: undefined };
+	const edges = await ledger.edges();
+	const ledgerEdge = edges.find((edge) => canonicalSessionPath(edge.child) === deletedPath);
+	if (ledgerEdge) {
+		await ledger.appendDelete({ childId: ledgerEdge.childId, child: sessionPath, reason: "user" });
+	}
+	return { deletedInfo, ledgerEdge };
+}

@@ -20,6 +20,29 @@ export function classifyAgentStatus(input: AgentStatusInput): AgentRosterStatus 
 	return input.busy || input.hasActiveHeartbeat ? "running" : "idle";
 }
 
+/** The one busy predicate over session summaries; every surface (list, roster, launch checks) derives from it. */
+export function isSessionSummaryBusy(
+	summary: Pick<SessionSummary, "isSessionActive" | "hasRunningRlmChildren">,
+): boolean {
+	return summary.isSessionActive || summary.hasRunningRlmChildren === true;
+}
+
+/** The one summary-shaped adapter over classifyAgentStatus; roster rows add only their queuedChild bit. */
+export function classifySessionRosterStatus(
+	summary: Pick<
+		SessionSummary,
+		"activeSessionId" | "activity" | "isSessionActive" | "hasRunningRlmChildren" | "hasActiveHeartbeat"
+	>,
+	queuedChild = false,
+): AgentRosterStatus {
+	return classifyAgentStatus({
+		resident: !!summary.activeSessionId,
+		queuedChild,
+		busy: summary.activity === "working" || isSessionSummaryBusy(summary),
+		hasActiveHeartbeat: summary.hasActiveHeartbeat === true,
+	});
+}
+
 // A session summary without its heavyweight per-event fields; `list` re-adds an empty sessionActions.
 export type RosterSessionSummary = Omit<SessionSummary, "streamingMessage" | "sessionActions" | "diagnostics">;
 
@@ -62,20 +85,20 @@ export function workerRosterEntryFromSummary(summary: SessionSummary): WorkerRos
 
 /** The roster half of the classifier input; the queuedChild bit rides the entry itself. */
 export function classifyWorkerRosterEntry(entry: WorkerRosterEntry): AgentRosterStatus {
-	const summary = entry.summary;
-	return classifyAgentStatus({
-		resident: !!summary.activeSessionId,
-		queuedChild: entry.queuedChild === true,
-		busy: summary.activity === "working" || summary.isSessionActive || summary.hasRunningRlmChildren === true,
-		hasActiveHeartbeat: summary.hasActiveHeartbeat === true,
-	});
+	return classifySessionRosterStatus(entry.summary, entry.queuedChild === true);
 }
 
 /** Final entry for an agent whose runtime left memory; identity and display fields survive. */
-export function passivatedWorkerRosterEntry(entry: WorkerRosterEntry): WorkerRosterEntry {
+export function passivatedWorkerRosterEntry(
+	entry: WorkerRosterEntry,
+	// Registration flags never freeze: callers with a cron store pass fresh values, others strip them.
+	registrations?: { hasRegisteredHeartbeat: boolean; hasRegisteredCronJob: boolean },
+): WorkerRosterEntry {
 	const {
 		activeSessionId,
 		hasActiveHeartbeat,
+		hasRegisteredHeartbeat,
+		hasRegisteredCronJob,
 		hasRunningRlmChildren,
 		isBashRunning,
 		isRunningTools,
@@ -94,6 +117,8 @@ export function passivatedWorkerRosterEntry(entry: WorkerRosterEntry): WorkerRos
 			isStreaming: false,
 			isCompacting: false,
 			attachedClients: 0,
+			...(registrations?.hasRegisteredHeartbeat ? { hasRegisteredHeartbeat: true } : {}),
+			...(registrations?.hasRegisteredCronJob ? { hasRegisteredCronJob: true } : {}),
 		},
 	};
 }

@@ -172,6 +172,7 @@ import {
 	inactiveLifecycleForSession,
 	isActiveSessionBusy,
 	type SessionSummary,
+	scheduledJobRegistrations,
 	summaryForActiveSession,
 } from "./daemon-session-list.js";
 import { DaemonSessionSummarizer } from "./daemon-session-summarizer.js";
@@ -196,6 +197,7 @@ import {
 	type DaemonWorkerFrameHeader,
 	type DaemonWorkerRosterOutbound,
 	isDaemonWorkerFrameHeader,
+	ROSTER_HEARTBEAT_INTERVAL_MS,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
 } from "./daemon-worker-protocol.js";
@@ -207,6 +209,7 @@ import {
 	type RlmLedgerEdge,
 	RlmSpawnLedger,
 	readLegacyRlmSubagentRegistry as readLegacyRlmSubagentRegistryFile,
+	tombstoneSavedSessionDelete,
 } from "./rlm-ledger.js";
 import {
 	readRlmSubagentDisplayEntry,
@@ -3907,29 +3910,12 @@ export class AgentDaemon {
 				if (this.findActiveSessionByFile(command.sessionPath)) {
 					throw new Error("Cannot delete the currently active session");
 				}
-				const deletedPath = canonicalSessionPath(command.sessionPath);
-				const deletedInfo = (await readSessionInfo(command.sessionPath).catch(() => null)) ?? undefined;
-				const composedEntry = this.rosterEntryForSessionPath(deletedPath);
-				// Worker-held state classifies first; only a readable no-parent transcript is positively top-level.
-				const knownChild =
-					composedEntry?.summary.runtimeKind === "subagent" ||
-					deletedInfo?.parentSessionPath !== undefined ||
-					(deletedInfo?.rlmDepth ?? 0) > 0;
-				const positivelyTopLevel = !knownChild && (composedEntry !== undefined || deletedInfo !== undefined);
-				let ledgerEdge: RlmLedgerEdge | undefined;
-				if (!positivelyTopLevel) {
-					// Children and unknown targets classify via the ledger; an unreadable ledger aborts, else the child reseeds.
-					const edges = await this.rlmSpawnLedger().edges();
-					ledgerEdge = edges.find((edge) => canonicalSessionPath(edge.child) === deletedPath);
-					// Tombstone first: a failed append aborts; a tombstoned-but-undeleted file is the accepted orphan of a failed delete.
-					if (ledgerEdge) {
-						await this.rlmSpawnLedger().appendDelete({
-							childId: ledgerEdge.childId,
-							child: command.sessionPath,
-							reason: "user",
-						});
-					}
-				}
+				const composedEntry = this.rosterEntryForSessionPath(canonicalSessionPath(command.sessionPath));
+				const { deletedInfo, ledgerEdge } = await tombstoneSavedSessionDelete(
+					this.rlmSpawnLedger(),
+					command.sessionPath,
+					composedEntry?.summary,
+				);
 				const result = await this.deleteSavedSessionFile(command.sessionPath, {
 					afterFileRemoved: () => {
 						this.cancelScheduledJobsForSessionFile(command.sessionPath);
@@ -6680,7 +6666,8 @@ export class AgentDaemon {
 	private flushRoster(): void {
 		const reporter = this.rosterReporter;
 		const entries = new Map<string, WorkerRosterEntry>();
-		for (const summary of buildSessionList([...this.sessions.values()], [], this.cronStore.list())) {
+		const scheduledJobs = this.cronStore.list();
+		for (const summary of buildSessionList([...this.sessions.values()], [], scheduledJobs)) {
 			const entry = workerRosterEntryFromSummary(summary);
 			entries.set(entry.agentId, entry);
 		}
@@ -6697,9 +6684,18 @@ export class AgentDaemon {
 			reporter.queuedChildren.delete(agentId);
 		}
 		// Rows whose runtime left memory flip to passivated and stay known, delivered or not.
+		// Their registration flags come fresh from the cron store per flush; frozen flags would pin eviction.
+		const registrations = scheduledJobRegistrations(scheduledJobs);
 		for (const [agentId, previous] of reporter.lastComposed) {
 			if (!entries.has(agentId) && !reporter.removedAgentIds.has(agentId)) {
-				entries.set(agentId, passivatedWorkerRosterEntry(previous));
+				const file = previous.summary.sessionFile ? resolve(previous.summary.sessionFile) : undefined;
+				entries.set(
+					agentId,
+					passivatedWorkerRosterEntry(previous, {
+						hasRegisteredHeartbeat: file !== undefined && registrations.heartbeatSessionFiles.has(file),
+						hasRegisteredCronJob: file !== undefined && registrations.cronSessionFiles.has(file),
+					}),
+				);
 			}
 		}
 		// Deltas are best-effort freshness hints; any miss escalates to one full replacing snapshot.
@@ -7137,8 +7133,6 @@ export class AgentDaemon {
 		process.exit(exitCode);
 	}
 }
-
-const ROSTER_HEARTBEAT_INTERVAL_MS = 15_000;
 
 interface WorkerRosterReporterState {
 	/** Last composed roster, delivered or not; the source for passivated flips and change hints. */

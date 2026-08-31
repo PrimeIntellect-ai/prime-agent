@@ -137,11 +137,17 @@ import {
 	type DaemonWorkerRosterOutbound,
 	durableDaemonCreateCommand,
 	durableDaemonWorkerDescriptor,
+	ROSTER_HEARTBEAT_INTERVAL_MS,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
 } from "./daemon-worker-protocol.js";
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
-import { createRlmLedgerRegistrySeedSource, type RlmLedgerEdge, RlmSpawnLedger } from "./rlm-ledger.js";
+import {
+	createRlmLedgerRegistrySeedSource,
+	type RlmLedgerEdge,
+	RlmSpawnLedger,
+	tombstoneSavedSessionDelete,
+} from "./rlm-ledger.js";
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import { SNAPSHOT_TARGET_CHUNK_BYTES, SnapshotTranscriptCache } from "./snapshot-transcript-cache.js";
 import { WorkerRecoveryJournal } from "./worker-recovery-journal.js";
@@ -152,7 +158,8 @@ type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
 const structuredLog = getLogger("coding-agent.daemon-supervisor");
 const WORKER_CONNECT_TIMEOUT_MS = 30_000;
 const ROSTER_WATCHDOG_INTERVAL_MS = 15_000;
-const ROSTER_STALE_AFTER_MS = 45_000;
+// Three missed worker heartbeats: the watchdog stamps silence, it never drives recovery.
+const ROSTER_STALE_AFTER_MS = 3 * ROSTER_HEARTBEAT_INTERVAL_MS;
 const WORKER_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const INPUT_PAUSE_CLEANUP_TIMEOUT_MS = 5_000;
 const UPDATE_RESTART_MUTATION_DRAIN_TIMEOUT_MS = 80_000;
@@ -2139,26 +2146,7 @@ export class DaemonSupervisor {
 							);
 						}
 					}
-					const deletedInfo = (await readSessionInfo(command.sessionPath).catch(() => null)) ?? undefined;
-					// Roster/disk state classifies first; only a readable no-parent transcript is positively top-level.
-					const knownChild =
-						entry?.summary.runtimeKind === "subagent" ||
-						deletedInfo?.parentSessionPath !== undefined ||
-						(deletedInfo?.rlmDepth ?? 0) > 0;
-					const positivelyTopLevel = !knownChild && (entry !== undefined || deletedInfo !== undefined);
-					if (!positivelyTopLevel) {
-						// Children and unknown targets classify via the ledger; an unreadable ledger aborts, else the child reseeds.
-						const edges = await this.rlmSpawnLedger().edges();
-						const edge = edges.find((candidate) => canonicalSessionPath(candidate.child) === deletedPath);
-						// Tombstone first: a failed append aborts; a tombstoned-but-undeleted file is the accepted orphan of a failed delete.
-						if (edge) {
-							await this.rlmSpawnLedger().appendDelete({
-								childId: edge.childId,
-								child: command.sessionPath,
-								reason: "user",
-							});
-						}
-					}
+					await tombstoneSavedSessionDelete(this.rlmSpawnLedger(), command.sessionPath, entry?.summary);
 					const result = await this.catalog.delete(command.sessionPath);
 					if (result.ok && entry) this.roster().delete(entry.agentId);
 					return success(command.id, command.type, result);

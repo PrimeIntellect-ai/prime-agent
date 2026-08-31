@@ -29,6 +29,9 @@ export type DaemonWorkerRosterOutbound =
 /** Advertised by new workers in the worker_auth response; absent on legacy workers. */
 export const DAEMON_WORKER_ROSTER_CAPABILITY = "agent_roster";
 
+/** Idle keepalive cadence for worker->supervisor roster frames; the supervisor staleness threshold derives from it. */
+export const ROSTER_HEARTBEAT_INTERVAL_MS = 15_000;
+
 export type DaemonWorkerFrameHeader =
 	| {
 			kind: "command";
