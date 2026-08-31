@@ -5093,7 +5093,11 @@ export class InteractiveMode {
 	private async subscribeToRosterBar(): Promise<void> {
 		if (!this.agentConnection.subscribeAgentRoster) return;
 		try {
-			this.rosterBar = await this.agentConnection.subscribeAgentRoster(() => this.updateSubagentSummaryLine());
+			this.rosterBar = await this.agentConnection.subscribeAgentRoster(() => {
+				// A push can arrive with no accompanying session event; paint the new counts now.
+				this.updateSubagentSummaryLine();
+				this.ui.requestRender();
+			});
 		} catch {
 			// Only the agents view hard-errors on a missing roster; chat keeps its snapshot-fed bar.
 			this.rosterBar = undefined;

@@ -112,12 +112,22 @@ export class AgentsViewRosterStore {
 		this.client = undefined;
 	}
 
+	/** Serialized behind attach: an in-flight attach settles first, so its listener cannot outlive this detach. */
 	async dispose(): Promise<void> {
+		const run = () => this.disposeNow();
+		const chained = this.attachChain.then(run, run);
+		this.attachChain = chained;
+		return chained;
+	}
+
+	private disposeNow(): void {
 		const client = this.client;
 		this.detachFromClient();
 		this.listeners.clear();
+		// Best-effort courtesy on a still-open client: nobody needs the ack, and a
+		// closed socket already dropped the server-side subscription with the client.
 		if (client?.isConnected) {
-			await client.request({ type: "roster_unsubscribe" }).catch(() => undefined);
+			void client.request({ type: "roster_unsubscribe" }).catch(() => undefined);
 		}
 	}
 }

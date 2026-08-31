@@ -427,8 +427,10 @@ export async function runAgentsViewMode(options: AgentsViewModeOptions): Promise
 	try {
 		await runAgentsViewLoop(options, persistentState, promptStashStore);
 	} finally {
-		await persistentState.rosterStore?.dispose();
+		// Close first: the supervisor drops the subscription with the socket, so a
+		// wedged daemon cannot hold the exit hostage for an unsubscribe ack.
 		persistentState.rosterClient?.close();
+		await persistentState.rosterStore?.dispose();
 		persistentState.rosterStore = undefined;
 		persistentState.rosterClient = undefined;
 	}
@@ -1892,10 +1894,11 @@ export class AgentsViewMode implements Component, Focusable {
 				try {
 					// Deliberate RPC before a destructive action: the daemon answers with the
 					// authoritative liveness verdict instead of the pushed mirror's last state.
+					// The verdict stays local: plain list is a narrower surface (no queued,
+					// passivated, or seeded rows), so it must never become what the view renders.
 					const latest = expectSessionList(
 						requireDaemonData(await this.requireClient().request(createAgentsViewListCommand())),
 					);
-					this.lastListedSummaries = latest;
 					const active = resolveAgentsViewActiveSummaryForPath(row.summary.sessionFile, latest);
 					if (active) {
 						this.pendingDeleteAgent = undefined;

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import { AgentsViewMode } from "../src/modes/agents-view/agents-view-mode.js";
-import { buildAgentsViewRows } from "../src/modes/agents-view/agents-view-state.js";
+import { buildAgentsViewRows, getAgentsViewSummaryIdentity } from "../src/modes/agents-view/agents-view-state.js";
 import { AgentsViewRosterStore } from "../src/modes/agents-view/roster-store.js";
 import {
 	type AgentRosterEntry,
@@ -297,6 +297,41 @@ describe("agents-view roster store", () => {
 		await expect(store.attach(client as never)).resolves.toBe(true);
 		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["b"]);
 	});
+
+	it("disposes without an unsubscribe ack on a closed client and detaches an attach still in flight", async () => {
+		// A closed socket already dropped the server-side subscription: no unsubscribe RPC.
+		const closed = fakeRosterClient([ledgerEntry({ id: "a", sessionId: "a" })]);
+		const closedStore = new AgentsViewRosterStore();
+		await expect(closedStore.attach(closed as never)).resolves.toBe(true);
+		closed.isConnected = false;
+		await closedStore.dispose();
+		expect(closed.request).toHaveBeenCalledTimes(1);
+
+		// Dispose serializes behind an attach in flight, so its listener cannot survive.
+		const client = fakeRosterClient([]);
+		let releaseSubscribe: (response: unknown) => void = () => {};
+		client.request.mockImplementationOnce(
+			() =>
+				new Promise((resolveSubscribe) => {
+					releaseSubscribe = resolveSubscribe;
+				}) as never,
+		);
+		const store = new AgentsViewRosterStore();
+		const attach = store.attach(client as never);
+		const dispose = store.dispose();
+		// The chained attach reaches its subscribe only on a later microtask.
+		await vi.waitFor(() => expect(client.request).toHaveBeenCalled());
+		releaseSubscribe({
+			type: "response",
+			command: "roster_subscribe",
+			success: true,
+			data: { roster: [ledgerEntry({ id: "a", sessionId: "a" })] },
+		});
+		await expect(attach).resolves.toBe(true);
+		await dispose;
+		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "b", sessionId: "b" })] });
+		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["a"]);
+	});
 });
 
 describe("roster-driven agents view rows", () => {
@@ -487,6 +522,50 @@ describe("roster-driven agents view instance", () => {
 
 		// With no 1s poll left, the push itself must settle the anchor so Enter works again.
 		expect(internals.selectionAnchorPending).toBe(false);
+	});
+
+	it("keeps passivated rows when a failed delete's liveness probe narrows the list", async () => {
+		const passivated = ledgerEntry(
+			{ id: "gone", sessionId: "gone", sessionFile: "/tmp/sessions/gone.jsonl" },
+			{ status: "inactive" },
+		);
+		const { view, store, client } = makeView([passivated]);
+		await store.attach(client as never);
+		const internals = view as unknown as {
+			refreshSessions(): Promise<void>;
+			handleDeleteSelected(): Promise<void>;
+			reconcileCatalogs(): void;
+			rows: Array<{ summary: SessionSummary }>;
+		};
+		await internals.refreshSessions();
+		const rowIndex = internals.rows.findIndex((row) => row.summary.sessionId === "gone");
+		expect(rowIndex).toBeGreaterThanOrEqual(0);
+		const rowSummary = internals.rows[rowIndex]?.summary;
+		if (!rowSummary) throw new Error("Missing passivated row");
+		Reflect.set(view, "selectedIndex", rowIndex);
+		Reflect.set(view, "pendingDeleteAgent", {
+			identity: getAgentsViewSummaryIdentity(rowSummary),
+			sessionFile: "/tmp/sessions/gone.jsonl",
+			summary: rowSummary,
+			stopped: false,
+		});
+		Reflect.set(view, "deleteConfirmExpiresAt", Date.now() + 60_000);
+		client.request.mockImplementation(async (command: { type: string }) => {
+			// The liveness probe answers with the narrower plain list; the delete then fails.
+			if (command.type === "list") {
+				return { type: "response", command: command.type, success: true, data: { sessions: [] } };
+			}
+			if (command.type === "delete_saved_session") {
+				return { type: "response", command: command.type, success: false, error: "delete failed" };
+			}
+			return { type: "response", command: command.type, success: true };
+		});
+
+		await internals.handleDeleteSelected();
+
+		// The next non-push reconcile (the 15s heartbeat tick) must still render the row.
+		internals.reconcileCatalogs();
+		expect(internals.rows.some((row) => row.summary.sessionId === "gone")).toBe(true);
 	});
 
 	it("fetches the saved catalog at most once per view instance, and only when a query is typed", () => {
@@ -764,10 +843,11 @@ describe("push-fed subagents bar", () => {
 				syncWorkingLoader: vi.fn(),
 				updateWorkingLoaderMessage: vi.fn(),
 				ui: { requestRender: vi.fn() },
-			}) as unknown as { subscribeToRosterBar(): Promise<void> };
+			}) as unknown as { subscribeToRosterBar(): Promise<void>; ui: { requestRender: ReturnType<typeof vi.fn> } };
 
 			await bar.subscribeToRosterBar();
 			expect(setSubagentCounts).toHaveBeenLastCalledWith({ total: 2, running: 1, idle: 0, inactive: 1 });
+			bar.ui.requestRender.mockClear();
 
 			// A pushed change reaches the bar without any snapshot traffic.
 			internals.writeRosterEntry(
@@ -786,6 +866,8 @@ describe("push-fed subagents bar", () => {
 			await vi.waitFor(() =>
 				expect(setSubagentCounts).toHaveBeenLastCalledWith({ total: 3, running: 1, idle: 0, inactive: 2 }),
 			);
+			// A push with no accompanying session event still repaints the bar.
+			expect(bar.ui.requestRender).toHaveBeenCalled();
 		} finally {
 			client.close();
 			await internals.cleanupSupervisorResources();
