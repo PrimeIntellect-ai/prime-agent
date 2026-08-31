@@ -1,14 +1,16 @@
 ---
 name: agent-observe
-description: Read-only observation of active Prime Agent sessions through the local daemon. Use to list agents, inspect session status, and read bounded recent-message previews without mutating other sessions.
+description: Read-only observation of an agent's parent, siblings, and direct children. Use to inspect family status and bounded recent-message previews without mutating sessions.
 ---
 
 # Agent Observe
 
-Observe active Prime Agent sessions through the local daemon. This skill is
-read-only: it can list sessions, inspect one session, and fetch bounded recent
-message previews. It cannot prompt, steer, clear, kill, rename, or otherwise
-mutate another session.
+Observe the current agent's nuclear family through the local daemon: parent,
+siblings, direct children, and self. Observation is currently limited to family
+members in the same worker; root siblings in other workers are not observable yet.
+This skill is read-only: it can list family sessions, inspect one session, and fetch
+bounded recent message previews. It cannot prompt, steer, clear, kill, rename, or
+otherwise mutate another session.
 
 Call directly from the kernel:
 
@@ -27,12 +29,9 @@ if child is not None:
 - `await agent_observe.list_agents()` returns `current` and `agents`. Each
   agent includes active session id, session id, optional name, runtime kind,
   cwd, status, streaming state, message count, pending count, and a latest
-  message preview. This includes live subagents and successful completed
-  subagents retained by an open parent. For the current parent session's direct
-  children, prefer `await rlm.list_subagents()` over filtering this global
-  list. Every RLM child gets a readable unique `session_name`, or the
-  orchestrator can choose one with `rlm("task", name="api-reviewer")`; use that
-  name directly as an observation target.
+  message preview. The list is restricted to self, parent, siblings, and direct
+  children. For direct children, `await rlm.list_subagents()` also exposes
+  parent-owned lifecycle handles.
 - `await agent_observe.get_agent(target)` returns `agent`, where `agent`
   contains one agent summary. `target` is resolved like other live-session
   selectors: active id, session id/name, or unambiguous suffix.
@@ -43,6 +42,8 @@ if child is not None:
 ## Safety
 
 - This skill is read-only and exposes no mutation commands.
+- Targets outside the nuclear family are rejected; transcript reads follow the
+  same family rule as messaging.
 - Message access is bounded by count and per-message character limit.
 - Prefer status and recent previews for orchestration. Ask the user before
   using observed context to steer or message another session.

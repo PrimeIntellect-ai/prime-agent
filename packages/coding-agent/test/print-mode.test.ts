@@ -5,6 +5,7 @@ import type { AgentAutonomousStatus } from "../src/core/autonomous.js";
 import {
 	createCompactionOutcomeMessage,
 	createCustomMessage,
+	createRefinementOutcomeMessage,
 	createSessionSlashCommandResultMessage,
 } from "../src/core/messages.js";
 import type { SessionShutdownEvent } from "../src/index.js";
@@ -15,6 +16,9 @@ const output = vi.hoisted(() => ({ write: vi.fn(), flush: vi.fn(async () => {}) 
 vi.mock("../src/core/output-guard.js", () => ({
 	writeRawStdout: output.write,
 	flushRawStdout: output.flush,
+}));
+vi.mock("../src/utils/shell.js", () => ({
+	killTrackedDetachedChildren: vi.fn(),
 }));
 
 type EmitEvent = SessionShutdownEvent;
@@ -28,6 +32,7 @@ type FakeSession = {
 	sessionManager: { getHeader: () => object | undefined };
 	agent: { waitForIdle: ReturnType<typeof vi.fn<() => Promise<void>>> };
 	waitForIdle: ReturnType<typeof vi.fn<() => Promise<void>>>;
+	waitForHeadlessIdle: ReturnType<typeof vi.fn<() => Promise<void>>>;
 	state: { messages: AgentMessage[] };
 	messages: AgentMessage[];
 	extensionRunner: FakeExtensionRunner;
@@ -93,13 +98,13 @@ function createRuntimeHost(
 	};
 
 	const state = { messages: Array.isArray(assistantMessage) ? assistantMessage : [assistantMessage] };
+	const waitForIdle = vi.fn(async () => {});
 
 	const session: FakeSession = {
 		sessionManager: { getHeader: () => undefined },
 		agent: { waitForIdle: vi.fn(async () => {}) },
-		waitForIdle: vi.fn(async () => {
-			await session.agent.waitForIdle();
-		}),
+		waitForIdle,
+		waitForHeadlessIdle: waitForIdle,
 		state,
 		messages: state.messages,
 		extensionRunner,
@@ -145,6 +150,36 @@ describe("runPrintMode", () => {
 		expect(session.promptAndWait).toHaveBeenCalledWith("Say done", { images });
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
+	});
+
+	it("disposes the connection before exiting on SIGINT", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
+		const { session } = runtimeHost;
+		let resolvePrompt: (() => void) | undefined;
+		session.promptAndWait.mockImplementation(
+			() =>
+				new Promise<void>((resolve) => {
+					resolvePrompt = resolve;
+				}),
+		);
+		const onSpy = vi.spyOn(process, "on");
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => undefined) as typeof process.exit);
+
+		const runPromise = runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+			initialMessage: "Wait",
+		});
+		await vi.waitFor(() => expect(session.promptAndWait).toHaveBeenCalled());
+		const handler = onSpy.mock.calls.find(([event]) => event === "SIGINT")?.[1];
+		if (typeof handler !== "function") throw new Error("SIGINT handler was not registered");
+
+		handler();
+
+		await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(130));
+		expect(runtimeHost.dispose).toHaveBeenCalledTimes(1);
+		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
+		resolvePrompt?.();
+		await expect(runPromise).resolves.toBe(0);
 	});
 
 	it("prints successful session command results in text mode", async () => {
@@ -285,6 +320,27 @@ describe("runPrintMode", () => {
 		expect(exitCode).toBe(0);
 		expect(output.write).toHaveBeenCalledWith("done\n");
 		expect(errorSpy).toHaveBeenCalledWith("Auto-compaction skipped: nothing to compact");
+	});
+
+	it("prints assistant output past a trailing refinement outcome", async () => {
+		const outcome = createRefinementOutcomeMessage({
+			id: "refine-1",
+			summary: "Added a local memory.",
+			rationale: "",
+			expectedOutcome: "",
+			appliedEdits: [],
+			harnessStatePath: "/tmp/harness/state.json",
+			scope: "local",
+		});
+		const runtimeHost = createRuntimeHost([createAssistantMessage({ text: "done" }), outcome]);
+		output.write.mockClear();
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+		});
+
+		expect(exitCode).toBe(0);
+		expect(output.write).toHaveBeenCalledWith("done\n");
 	});
 
 	it("reports an outcome-only failure and exits non-zero", async () => {
@@ -509,7 +565,7 @@ describe("runPrintMode", () => {
 			() => statuses[Math.min(statusIndex++, statuses.length - 1)] as AgentAutonomousStatus,
 		);
 		let waitCount = 0;
-		session.agent.waitForIdle.mockImplementation(async () => {
+		session.waitForIdle.mockImplementation(async () => {
 			waitCount++;
 			if (waitCount === 2) {
 				session.state.messages = [createAssistantMessage({ text: "queued retry completed" })];
@@ -524,7 +580,7 @@ describe("runPrintMode", () => {
 		expect(exitCode).toBe(0);
 		expect(session.prompt).toHaveBeenCalledTimes(1);
 		expect(session.recordHostAutonomousContinuation).toHaveBeenCalledTimes(1);
-		expect(session.agent.waitForIdle).toHaveBeenCalledTimes(3);
+		expect(session.waitForIdle).toHaveBeenCalledTimes(3);
 		expect(errorSpy).not.toHaveBeenCalledWith("provider down");
 	});
 
@@ -698,7 +754,7 @@ describe("runPrintMode", () => {
 		});
 
 		expect(exitCode).toBe(0);
-		expect(session.agent.waitForIdle).toHaveBeenCalledBefore(session.prompt);
+		expect(session.waitForIdle).toHaveBeenCalledBefore(session.prompt);
 		expect(session.prompt).toHaveBeenCalledTimes(2);
 		expect(session.prompt.mock.calls[0][0]).toContain("Autonomous quality gate failed (attempt 1/3)");
 		expect(session.prompt.mock.calls[0][0]).toContain("0/9");
@@ -805,7 +861,7 @@ describe("runPrintMode", () => {
 		});
 
 		expect(exitCode).toBe(1);
-		expect(session.agent.waitForIdle).toHaveBeenCalledTimes(7);
+		expect(session.waitForIdle).toHaveBeenCalledTimes(7);
 		expect(session.prompt).toHaveBeenCalledTimes(3);
 		expect(session.recordHostAutonomousContinuation).toHaveBeenCalledTimes(3);
 		expect(session.prompt.mock.calls[1][0]).toContain("workspace unchanged");

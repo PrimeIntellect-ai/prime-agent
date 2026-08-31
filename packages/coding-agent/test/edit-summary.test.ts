@@ -5,6 +5,7 @@ import type { AssistantMessage, ToolResultMessage, Usage } from "@earendil-works
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, test } from "vitest";
 import {
+	formatFileChangeSummaryLine,
 	formatTotalChangeSummary,
 	getToolFileChanges,
 	mergeTurnFileChanges,
@@ -134,5 +135,20 @@ describe("edit summaries", () => {
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("formatFileChangeSummaryLine", () => {
+	beforeAll(() => initTheme("dark"));
+
+	test("keeps the truncated path stable when the ctrl+j hint flips", () => {
+		const change = { added: 3, removed: 1 };
+		const path = "src/some/deeply/nested/directory/with-a-long-file-name.ts";
+		const width = 44;
+		const pathPart = (line: string) => stripAnsi(line).replace(/\s*\+\d+ -\d+.*$/, "");
+		const expanded = formatFileChangeSummaryLine(path, undefined, change, true, width);
+		const collapsed = formatFileChangeSummaryLine(path, undefined, change, false, width);
+		expect(stripAnsi(expanded)).toContain("…");
+		expect(pathPart(expanded)).toBe(pathPart(collapsed));
 	});
 });

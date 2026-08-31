@@ -698,6 +698,20 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("extension action plumbing", () => {
+		it("returns asynchronous session-name failures to extensions", async () => {
+			const runtime = createExtensionRuntime();
+			const runner = new ExtensionRunner([], runtime, tempDir, sessionManager, modelRegistry);
+			const failure = new Error("duplicate session name");
+			runner.bindCore(
+				{ ...extensionActions, setSessionName: async () => Promise.reject(failure) },
+				extensionContextActions,
+			);
+
+			await expect(runtime.setSessionName("duplicate")).rejects.toBe(failure);
+		});
+	});
+
 	describe("provider registration", () => {
 		it("bindCore ignores invalid queued registrations and reports extension error", () => {
 			const runtime = createExtensionRuntime();

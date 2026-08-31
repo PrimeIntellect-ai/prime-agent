@@ -6,6 +6,7 @@ import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/
 import { AgentActivityTracker } from "../src/modes/interactive/agent-activity.js";
 import type { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
 import type { FileChangeSummary } from "../src/modes/interactive/components/edit-summary.js";
+import { createMermaidMarkdownTransform } from "../src/modes/interactive/components/mermaid.js";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -35,7 +36,6 @@ type HandleEventThis = {
 	chatContainer: Container;
 	recapContainer: Container;
 	sessionRecap: string | undefined;
-	childAgentPanelMode: undefined;
 	hideThinkingBlock: boolean;
 	hiddenThinkingLabel: string;
 	streamingComponent: AssistantMessageComponent | undefined;
@@ -52,14 +52,13 @@ type HandleEventThis = {
 	checkShutdownRequested(): Promise<void>;
 	applyOptimisticContextUsage(): void;
 	refreshConnectionContextUsage(): Promise<void>;
-	setSessionHasMessages(hasMessages: boolean): void;
 	clearShortcutGuide(): void;
 	addMessageToChat(): void;
 };
 
 type HandleEvent = (this: HandleEventThis, event: AgentConnectionSessionEvent) => Promise<void>;
 type GetUserInput = (this: {
-	returnToAgentsViewRequested: boolean;
+	agentsViewRequest?: "agents_view" | "scoped_agents_view";
 	onInputCallback?: (text: string | undefined) => void;
 }) => Promise<string | undefined>;
 type HandleSubagentSummaryChatAction = (
@@ -85,7 +84,6 @@ function createFakeInteractiveModeThis(): HandleEventThis {
 		chatContainer: new Container(),
 		recapContainer: new Container(),
 		sessionRecap: "Updated files",
-		childAgentPanelMode: undefined,
 		hideThinkingBlock: false,
 		hiddenThinkingLabel: "Thinking...",
 		streamingComponent: undefined,
@@ -104,7 +102,6 @@ function createFakeInteractiveModeThis(): HandleEventThis {
 		checkShutdownRequested: vi.fn(async () => {}),
 		applyOptimisticContextUsage: vi.fn(),
 		refreshConnectionContextUsage: vi.fn(async () => {}),
-		setSessionHasMessages: vi.fn(),
 		clearShortcutGuide: vi.fn(),
 		addMessageToChat: vi.fn(),
 	};
@@ -212,6 +209,35 @@ describe("InteractiveMode streaming events", () => {
 		expect(fakeThis.streamingMessage).toBeUndefined();
 	});
 
+	test("defers mermaid rendering to message_end in final mode", async () => {
+		const fakeThis = createFakeInteractiveModeThis() as HandleEventThis & {
+			mermaidMarkdownTransform?: ReturnType<typeof createMermaidMarkdownTransform>;
+		};
+		fakeThis.mermaidMarkdownTransform = createMermaidMarkdownTransform({ getMode: () => "final" });
+		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+		const mermaidText = "```mermaid\nflowchart LR\n  A[Start] --> B[Done]\n```";
+
+		await handleEvent.call(fakeThis, {
+			type: "message_update",
+			message: createAssistantMessage(mermaidText),
+			assistantMessageEvent: {
+				type: "text_delta",
+				contentIndex: 0,
+				delta: mermaidText,
+				partial: createAssistantMessage(mermaidText),
+			},
+		});
+
+		expect(renderChat(fakeThis.chatContainer)).not.toContain("───▶");
+
+		await handleEvent.call(fakeThis, {
+			type: "message_end",
+			message: createAssistantMessage(mermaidText),
+		});
+
+		expect(renderChat(fakeThis.chatContainer)).toContain("───▶");
+	});
+
 	test("renders one agent-run edit total only when files changed", async () => {
 		const fakeThis = createFakeInteractiveModeThis();
 		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
@@ -286,7 +312,7 @@ describe("InteractiveMode streaming events", () => {
 	test("resolves input immediately after return to agents view was requested", async () => {
 		const getUserInput = (InteractiveMode.prototype as unknown as { getUserInput: GetUserInput }).getUserInput;
 
-		await expect(getUserInput.call({ returnToAgentsViewRequested: true })).resolves.toBeUndefined();
+		await expect(getUserInput.call({ agentsViewRequest: "agents_view" })).resolves.toBeUndefined();
 	});
 
 	test("forwards typed keys from focused subagent summary back to the editor", () => {
@@ -326,5 +352,30 @@ describe("InteractiveMode streaming events", () => {
 		expect(fakeThis.toggleToolOutputExpansion).toHaveBeenCalledOnce();
 		expect(fakeThis.focusEditor).not.toHaveBeenCalled();
 		expect(fakeThis.editor.handleInput).not.toHaveBeenCalled();
+	});
+
+	test("does not pulse renders for background-only subagent work", () => {
+		vi.useFakeTimers();
+		try {
+			const requestRender = vi.fn();
+			const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;
+			Object.assign(mode, {
+				connectionState: { isStreaming: false },
+				subagentSnapshots: new Map([["worker", { id: "worker", status: "running" }]]),
+				pulseTimer: undefined,
+				ui: { requestRender },
+			});
+			const updatePulse = Reflect.get(InteractiveMode.prototype, "updateWorkingPulse") as (
+				this: typeof mode,
+			) => void;
+
+			updatePulse.call(mode);
+			vi.advanceTimersByTime(1000);
+
+			expect(requestRender).not.toHaveBeenCalled();
+			expect(Reflect.get(mode, "pulseTimer")).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

@@ -1,8 +1,9 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import type { ImageContent, TextContent, UserMessage } from "@earendil-works/pi-ai";
+import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getDaemonUpdateRestartManifestPath } from "../../../src/config.js";
+import type { SessionActionRecoverySnapshot } from "../../../src/core/agent-session.js";
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.js";
 import type { AgentCronJob, AgentCronJobStore, AgentCronScheduler } from "../../../src/core/cron-jobs.js";
 import { type CustomMessage, createSessionSlashCommandMessage } from "../../../src/core/messages.js";
@@ -52,37 +53,6 @@ type AgentDaemonUpdateInternals = {
 	commitPreparedUpdateRestart(transactionId: symbol): Promise<DaemonUpdateRestartManifest>;
 };
 
-type QueueInternals = {
-	_steeringMessages: Array<{
-		text: string;
-		queueKey?: string;
-		agentMessageId?: string;
-		prefixMessages: CustomMessage[];
-		message: UserMessage | CustomMessage;
-	}>;
-	_followUpMessages: Array<{
-		text: string;
-		queueKey?: string;
-		agentMessageId?: string;
-		prefixMessages: CustomMessage[];
-		message: UserMessage | CustomMessage;
-	}>;
-	_pendingNextTurnMessages: CustomMessage[];
-	_acceptedAgentMessagePrompt?: {
-		text: string;
-		agentMessageId: string;
-		message: UserMessage;
-		messages: Set<unknown>;
-		pendingNextTurnMessages: CustomMessage[];
-		deliveredPendingNextTurnMessages: Set<CustomMessage>;
-		accepted: Promise<void>;
-		resolveAccepted: () => void;
-		rejectAccepted: (error: Error) => void;
-		turnStarted: boolean;
-		cleared: boolean;
-	};
-};
-
 function createState(
 	harness: Harness,
 	activeSessionId: string,
@@ -103,6 +73,7 @@ function createState(
 		activeSessionId,
 		runtime,
 		clients: new Set(),
+		pendingAttaches: 0,
 		extensionUiRequests: new Map(),
 		eventGeneration: `generation-${activeSessionId}`,
 		lastEventSequence: 0,
@@ -268,17 +239,17 @@ describe("issue #4257 update restart resume", () => {
 
 		expect(manifest.sessions).toHaveLength(1);
 		expect(manifest.sessions[0]).toMatchObject({
-			queue: { steering: [], nextTurn: [] },
+			queue: { nextTurn: [], actions: { formatVersion: 1 } },
 			shouldResume: true,
 			wasStreaming: false,
 			wasRetrying: false,
 			hadAcceptedPromptInFlight: false,
 		});
-		expect(manifest.sessions[0]?.queue.followUp).toEqual([
-			{
-				message: "paused restart input",
-				content: [{ type: "text", text: "paused restart input" }],
-			},
+		expect(manifest.sessions[0]?.queue.actions.actions).toEqual([
+			expect.objectContaining({
+				delivery: "when_run_idle",
+				payload: expect.objectContaining({ kind: "turn", text: "paused restart input" }),
+			}),
 		]);
 		expect(
 			harness.sessionManager
@@ -357,6 +328,7 @@ describe("issue #4257 update restart resume", () => {
 		});
 		Reflect.set(internals, "mutationDrain", mutationDrain);
 		const checkpoint = vi.spyOn(internals, "prepareUpdateRestartCheckpoint").mockResolvedValue({
+			formatVersion: 1,
 			createdAt: "now",
 			sessions: [],
 		});
@@ -692,6 +664,39 @@ describe("issue #4257 update restart resume", () => {
 		agentAbortSpy.mockRestore();
 	});
 
+	it("rolls back a preselected prompt when update restart pauses the pump", async () => {
+		const harness = await createHarness({ persistSession: true });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("done")]);
+		const idleReached = createDeferred();
+		const idleGate = createDeferred();
+		const originalWaitForIdle = harness.session.agent.waitForIdle.bind(harness.session.agent);
+		let gateIdle = true;
+		const waitForIdleSpy = vi.spyOn(harness.session.agent, "waitForIdle").mockImplementation(async () => {
+			if (gateIdle) {
+				gateIdle = false;
+				idleReached.resolve();
+				await idleGate.promise;
+			}
+			await originalWaitForIdle();
+		});
+		const prompt = harness.session.prompt("paused before selection");
+		await idleReached.promise;
+
+		const pause = harness.session.acquireQueuedWorkPause();
+		const checkpoint = harness.session.waitForSessionInputCheckpoint(AbortSignal.timeout(1000));
+		idleGate.resolve();
+
+		await expect(checkpoint).resolves.toBeUndefined();
+		expect(harness.session.getSessionActionRecoverySnapshot().actions.map((action) => action.payload.text)).toEqual([
+			"paused before selection",
+		]);
+		pause.release();
+		await prompt;
+		expect(getUserTexts(harness)).toEqual(["paused before selection"]);
+		waitForIdleSpy.mockRestore();
+	});
+
 	it("rejects new daemon sessions after update restart preparation starts", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
@@ -793,42 +798,45 @@ describe("issue #4257 update restart resume", () => {
 			activeSessionId: "parent-active",
 			clientEnv: { PRIME_SESSION: "pane-1" },
 			runtimeMetadata: { kind: "top-level" },
-			queue: {
-				steering: [
-					{
-						message: "queued work",
-						content,
-						images: [image],
-						prefixMessages: [queuedContext],
-						queueKey: "heartbeat:steer",
-						agentMessageId: "agentmsg_steer",
-					},
-				],
-				followUp: [
-					{
-						message: "heartbeat",
-						content: followUpContent,
-						prefixMessages: [followUpContext],
-						queueKey: "heartbeat:job-1",
-						agentMessageId: "agentmsg_followup",
-					},
-					{
-						message: "custom heartbeat",
-						queueKey: "heartbeat:custom",
-						agentMessageId: "agentmsg_custom",
-						customMessage: customFollowUp,
-					},
-					{
-						message: "/autonomous on",
-						customMessage: expect.objectContaining({
-							customType: "session_slash_command",
-							details: { command },
-						}),
-					},
-				],
-			},
+			queue: { actions: { formatVersion: 1 }, nextTurn: [] },
 			shouldResume: true,
 		});
+		const recoveredActions = manifest.sessions[0]?.queue.actions.actions ?? [];
+		expect(recoveredActions.map((action) => action.payload.text)).toEqual([
+			"queued work",
+			"heartbeat",
+			"custom heartbeat",
+			"/autonomous on",
+		]);
+		expect(recoveredActions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					delivery: "next_turn_boundary",
+					wake: "on_lower_boundary",
+					queueKey: "heartbeat:steer",
+					agentMessageId: "agentmsg_steer",
+					payload: expect.objectContaining({ kind: "turn", text: "queued work", content, images: [image] }),
+				}),
+				expect.objectContaining({
+					delivery: "when_run_idle",
+					queueKey: "heartbeat:job-1",
+					agentMessageId: "agentmsg_followup",
+					payload: expect.objectContaining({ kind: "turn", text: "heartbeat", content: followUpContent }),
+				}),
+				expect.objectContaining({
+					queueKey: "heartbeat:custom",
+					agentMessageId: "agentmsg_custom",
+					payload: expect.objectContaining({
+						kind: "turn",
+						text: "custom heartbeat",
+						customMessage: customFollowUp,
+					}),
+				}),
+				expect.objectContaining({
+					payload: expect.objectContaining({ kind: "session_command", text: "/autonomous on", command }),
+				}),
+			]),
+		);
 		expect(manifest.sessions[1]).toMatchObject({
 			activeSessionId: "child-active",
 			sessionFile: childHarness.session.sessionFile,
@@ -839,44 +847,27 @@ describe("issue #4257 update restart resume", () => {
 				parentSessionFile: parentHarness.session.sessionFile,
 				rlmChildId: "child-1",
 			},
-			queue: { steering: [], followUp: [], nextTurn: [] },
+			queue: { actions: { formatVersion: 1, actions: [] }, nextTurn: [] },
 			shouldResume: false,
 		});
 		expect(hasArchivedState(parentHarness)).toBe(false);
 		expect(hasArchivedState(childHarness)).toBe(false);
 	});
 
-	it("captures next-turn context and accepted prompts in the restart manifest", async () => {
+	it("captures next-turn context and full queued actions in the restart manifest", async () => {
 		const harness = await createHarness({ persistSession: true });
 		harnesses.push(harness);
 
 		const pendingNextTurn = createCustomMessage("pending next turn");
-		const acceptedNextTurn = createCustomMessage("accepted prompt context");
-		const deliveredAcceptedNextTurn = createCustomMessage("already delivered context");
-		const acceptedContent: TextContent[] = [
-			{ type: "text", text: "accepted prefix" },
-			{ type: "text", text: "accepted work" },
-		];
-		const acceptedMessage: UserMessage = {
-			role: "user",
-			content: acceptedContent,
-			timestamp: Date.now(),
-		};
-		const queueInternals = harness.session as unknown as QueueInternals;
+		const queuedContext = createCustomMessage("queued prompt context");
+		const content: TextContent[] = [{ type: "text", text: "queued work" }];
+		await harness.session.restoreFollowUpMessage("queued work", undefined, {
+			content,
+			agentMessageId: "agentmsg_queued",
+			queueKey: "recovery-key",
+			prefixMessages: [queuedContext],
+		});
 		harness.session.restorePendingNextTurnMessages([pendingNextTurn]);
-		queueInternals._acceptedAgentMessagePrompt = {
-			text: "accepted work",
-			agentMessageId: "agentmsg_accepted",
-			message: acceptedMessage,
-			messages: new Set([acceptedNextTurn, deliveredAcceptedNextTurn, acceptedMessage]),
-			pendingNextTurnMessages: [acceptedNextTurn, deliveredAcceptedNextTurn],
-			deliveredPendingNextTurnMessages: new Set([deliveredAcceptedNextTurn]),
-			accepted: Promise.resolve(),
-			resolveAccepted: () => undefined,
-			rejectAccepted: () => undefined,
-			turnStarted: false,
-			cleared: false,
-		};
 
 		const internals = createDaemonInternals(harness);
 		internals.sessions.set(
@@ -886,18 +877,24 @@ describe("issue #4257 update restart resume", () => {
 
 		const manifest = await internals.prepareUpdateRestart();
 
-		expect(manifest.sessions).toHaveLength(1);
-		expect(manifest.sessions[0]).toMatchObject({
-			activeSessionId: "active-1",
-			shouldResume: true,
-			hadAcceptedPromptInFlight: true,
-		});
+		expect(manifest.formatVersion).toBe(1);
 		expect(manifest.sessions[0]?.queue.nextTurn).toEqual([pendingNextTurn]);
-		expect(manifest.sessions[0]?.queue.acceptedPrompt).toEqual({
-			message: "accepted work",
-			content: acceptedContent,
-			agentMessageId: "agentmsg_accepted",
-			nextTurn: [acceptedNextTurn],
+		const recovered = manifest.sessions[0]?.queue.actions.actions[0];
+		expect(recovered).toMatchObject({
+			id: expect.any(String),
+			delivery: "when_run_idle",
+			wake: "external_resume",
+			queueKey: "recovery-key",
+			agentMessageId: "agentmsg_queued",
+			payload: {
+				kind: "turn",
+				text: "queued work",
+				content,
+				records: expect.arrayContaining([
+					expect.objectContaining({ role: "prefix", message: queuedContext, ownerActionId: recovered?.id }),
+					expect.objectContaining({ role: "primary", ownerActionId: recovered?.id }),
+				]),
+			},
 		});
 	});
 
@@ -929,13 +926,12 @@ describe("issue #4257 update restart resume", () => {
 		expect(session?.sessionFile.startsWith(`${sessionDir}/`)).toBe(true);
 		expect(harness.session.sessionFile).toBe(session?.sessionFile);
 		expect(readFileSync(session?.sessionFile ?? "", "utf8")).toContain('"type":"session"');
-		expect(session?.queue.followUp).toEqual([
-			{
-				message: "queued follow-up",
-				content: followUpContent,
+		expect(session?.queue.actions.actions).toEqual([
+			expect.objectContaining({
 				queueKey: "heartbeat:job-1",
 				agentMessageId: "agentmsg_followup",
-			},
+				payload: expect.objectContaining({ kind: "turn", text: "queued follow-up", content: followUpContent }),
+			}),
 		]);
 		expect(session?.shouldResume).toBe(true);
 	});
@@ -961,54 +957,43 @@ describe("issue #4257 update restart resume", () => {
 		expect(session).toMatchObject({
 			shouldResume: true,
 			wasStreaming: true,
-			queue: { steering: [], followUp: [], nextTurn: [] },
+			queue: { actions: { formatVersion: 1, actions: [] }, nextTurn: [] },
 		});
 	});
 
-	it("keeps undelivered accepted-prompt context after the accepted turn starts", async () => {
-		const harness = await createHarness({ persistSession: true });
-		harnesses.push(harness);
+	it("restores queued actions through the public recovery API with stable ids and FIFO", async () => {
+		const source = await createHarness({ persistSession: true });
+		const target = await createHarness({ persistSession: true });
+		harnesses.push(source, target);
+		await source.session.restoreSteeringMessage("steering one");
+		await source.session.restoreSteeringMessage("steering two");
+		await source.session.restoreFollowUpMessage("follow-up one", undefined, { queueKey: "job-1" });
 
-		const pendingNextTurn = createCustomMessage("pending next turn");
-		const acceptedNextTurn = createCustomMessage("accepted prompt context");
-		const deliveredAcceptedNextTurn = createCustomMessage("already delivered context");
-		const acceptedMessage: UserMessage = {
-			role: "user",
-			content: [{ type: "text", text: "accepted work" }],
-			timestamp: Date.now(),
-		};
-		const queueInternals = harness.session as unknown as QueueInternals;
-		harness.session.restorePendingNextTurnMessages([pendingNextTurn]);
-		queueInternals._acceptedAgentMessagePrompt = {
-			text: "accepted work",
-			agentMessageId: "agentmsg_accepted",
-			message: acceptedMessage,
-			messages: new Set([acceptedMessage, deliveredAcceptedNextTurn]),
-			pendingNextTurnMessages: [acceptedNextTurn, deliveredAcceptedNextTurn],
-			deliveredPendingNextTurnMessages: new Set([deliveredAcceptedNextTurn]),
-			accepted: Promise.resolve(),
-			resolveAccepted: () => undefined,
-			rejectAccepted: () => undefined,
-			turnStarted: true,
-			cleared: false,
-		};
+		const snapshot = source.session.getSessionActionRecoverySnapshot();
+		await target.session.restoreSessionActions(snapshot);
 
-		const internals = createDaemonInternals(harness);
-		internals.sessions.set(
-			"active-1",
-			createState(harness, "active-1", { kind: "top-level", createdAt: Date.now() }),
-		);
+		expect(target.session.getSessionActionRecoverySnapshot()).toEqual(snapshot);
+		expect(target.session.getSteeringMessages()).toEqual(["steering one", "steering two"]);
+		expect(target.session.getFollowUpMessages()).toEqual(["follow-up one"]);
+		await expect(
+			target.session.restoreSessionActions({
+				formatVersion: 2,
+				actions: [],
+			} as unknown as SessionActionRecoverySnapshot),
+		).rejects.toThrow("Unsupported session action recovery format version: 2");
+	});
 
-		const manifest = await internals.prepareUpdateRestart();
+	it("rejects duplicate recovered action ids without partial admission", async () => {
+		const source = await createHarness({ persistSession: true });
+		const target = await createHarness({ persistSession: true });
+		harnesses.push(source, target);
+		await source.session.restoreFollowUpMessage("follow-up");
+		const action = source.session.getSessionActionRecoverySnapshot().actions[0]!;
 
-		expect(manifest.sessions).toHaveLength(1);
-		expect(manifest.sessions[0]).toMatchObject({
-			activeSessionId: "active-1",
-			shouldResume: true,
-			hadAcceptedPromptInFlight: true,
-		});
-		expect(manifest.sessions[0]?.queue.nextTurn).toEqual([pendingNextTurn, acceptedNextTurn]);
-		expect(manifest.sessions[0]?.queue.acceptedPrompt).toBeUndefined();
+		await expect(
+			target.session.restoreSessionActions({ formatVersion: 1, actions: [action, action] }),
+		).rejects.toThrow(`Duplicate session action id: ${action.id}`);
+		expect(target.session.getSessionActionRecoverySnapshot().actions).toEqual([]);
 	});
 
 	it("accepts restore_next_turn through daemon command parsing", async () => {
@@ -1163,21 +1148,22 @@ describe("issue #4257 update restart resume", () => {
 			expect.objectContaining({ id: "follow-up-1", command: "follow_up", success: true, data: { queued: false } }),
 			expect.objectContaining({ id: "follow-up-2", command: "follow_up", success: true, data: { queued: true } }),
 		]);
-		expect(harness.session.getSteeringQueueSnapshots()).toEqual([
+		const recovery = harness.session.getSessionActionRecoverySnapshot().actions;
+		expect(recovery.filter((action) => action.delivery === "next_turn_boundary")).toEqual([
 			expect.objectContaining({
-				text: "restored steer",
-				content: restoredSteerContent,
-				prefixMessages: [restoredPrefix],
 				queueKey: "heartbeat:steer",
 				agentMessageId: "agentmsg_restored_steer",
+				payload: expect.objectContaining({ kind: "turn", text: "restored steer", content: restoredSteerContent }),
 			}),
 		]);
-		expect(harness.session.getFollowUpQueueSnapshots()).toEqual([
-			expect.objectContaining({ text: "existing", agentMessageId: "agentmsg_existing" }),
+		expect(recovery.filter((action) => action.delivery === "when_run_idle")).toEqual([
 			expect.objectContaining({
-				text: "restored follow-up",
-				content: restoredFollowUpContent,
+				agentMessageId: "agentmsg_existing",
+				payload: expect.objectContaining({ text: "existing" }),
+			}),
+			expect.objectContaining({
 				agentMessageId: "agentmsg_restored_followup",
+				payload: expect.objectContaining({ text: "restored follow-up", content: restoredFollowUpContent }),
 			}),
 		]);
 	});
@@ -1255,8 +1241,7 @@ describe("issue #4257 update restart resume", () => {
 			expect.objectContaining({ id: "resume-1", command: "resume_queue", success: true }),
 		]);
 		expect(getUserTexts(harness)).toEqual(["start", "restored steer 1", "restored steer 2", "restored follow-up"]);
-		expect(harness.session.getSteeringQueueSnapshots()).toEqual([]);
-		expect(harness.session.getFollowUpQueueSnapshots()).toEqual([]);
+		expect(harness.session.getSessionActionRecoverySnapshot().actions).toEqual([]);
 	});
 
 	it("drains restored queues when a continuation prompt resumes interrupted work", async () => {
@@ -1320,8 +1305,7 @@ describe("issue #4257 update restart resume", () => {
 			expect.objectContaining({ id: "prompt-1", command: "prompt", success: true }),
 		]);
 		expect(getUserTexts(harness)).toEqual(["restored steer", "restored follow-up", "continue interrupted work"]);
-		expect(harness.session.getSteeringQueueSnapshots()).toEqual([]);
-		expect(harness.session.getFollowUpQueueSnapshots()).toEqual([]);
+		expect(harness.session.getSessionActionRecoverySnapshot().actions).toEqual([]);
 	});
 
 	it("resumes restored queues after an update marker without prior transcript messages", async () => {
@@ -1370,7 +1354,7 @@ describe("issue #4257 update restart resume", () => {
 			expect.objectContaining({ id: "resume-1", command: "resume_queue", success: true }),
 		]);
 		expect(getUserTexts(harness)).toEqual(["restored follow-up"]);
-		expect(harness.session.getFollowUpQueueSnapshots()).toEqual([]);
+		expect(harness.session.getSessionActionRecoverySnapshot().actions).toEqual([]);
 	});
 
 	it("adopts attach env after a fenced update preparation rolls back", async () => {

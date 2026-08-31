@@ -1,7 +1,3 @@
-/**
- * TUI config selector for `pi config` command
- */
-
 import { ProcessTerminal, TUI } from "@earendil-works/pi-tui";
 import type { ResolvedPaths } from "../core/package-manager.js";
 import type { SettingsManager } from "../core/settings-manager.js";
@@ -15,9 +11,7 @@ export interface ConfigSelectorOptions {
 	agentDir: string;
 }
 
-/** Show TUI config selector and return when closed */
 export async function selectConfig(options: ConfigSelectorOptions): Promise<void> {
-	// Initialize theme before showing TUI
 	initTheme(options.settingsManager.getTheme(), true);
 
 	return new Promise((resolve) => {

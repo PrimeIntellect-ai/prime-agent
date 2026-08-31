@@ -8,13 +8,10 @@ export async function listDaemonHeartbeats(
 	activeSessionId?: string,
 ): Promise<AgentConnectionHeartbeat[]> {
 	if (!client.hello) await client.waitForHello();
-	const hasCapability = client.supportsServerCapability("heartbeat_catalog");
-	if (!hasCapability && client.hello?.protocol.version !== 3) {
-		return [];
-	}
+	if (!client.supportsServerCapability("heartbeat_catalog")) return [];
 	try {
 		const command = { type: "heartbeats_list", ...(activeSessionId ? { activeSessionId } : {}) } as const;
-		const response = hasCapability ? await client.request(command) : await client.requestLegacy(command);
+		const response = await client.request(command);
 		if (!response.success) {
 			throw deserializeDaemonError(response);
 		}

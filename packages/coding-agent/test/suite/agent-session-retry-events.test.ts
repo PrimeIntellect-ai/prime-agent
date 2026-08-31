@@ -171,7 +171,7 @@ describe("AgentSession retry and event characterization", () => {
 		await expect(
 			harness.session.prompt("second", { queueIfBusy: true, streamingBehavior: "followUp" }),
 		).resolves.toBeUndefined();
-		expect(harness.session.pendingMessageCount).toBe(1);
+		expect(harness.session.queuedActionCount).toBe(1);
 	});
 
 	it("does not retry when retry is disabled", async () => {

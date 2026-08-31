@@ -39,15 +39,35 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         self.assertEqual(subagents[0].status, "completed")
         host_request.assert_awaited_once_with("rlm.list_subagents")
 
+
+    def test_lists_failed_subagents_from_host(self) -> None:
+        host_request = AsyncMock(
+            return_value={
+                "subagents": [
+                    {
+                        "rlm_child_id": "sub-failed",
+                        "active_session_id": None,
+                        "session_id": None,
+                        "session_name": "failed-worker",
+                        "session_dir": "/tmp/parent/sub-failed",
+                        "status": "error",
+                    }
+                ]
+            }
+        )
+
+        with patch.object(rlm_module, "host_request", host_request):
+            subagents = asyncio.run(rlm_module.rlm.list_subagents())
+
+        self.assertEqual(subagents[0].status, "error")
+
     def test_forwards_orchestrator_chosen_name_and_model_to_host(self) -> None:
         host_request = AsyncMock(
             return_value={
-                "answer": "done",
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-                "turns": 1,
+                "rlm_child_id": "sub-a1b2c3d4",
+                "name": "api-reviewer",
                 "session_dir": "/tmp/parent/sub-a1b2c3d4",
-                "model": "openai/gpt-5.4",
-                "warning": "Requested model unavailable; tell the user about the fallback.",
+                "model": "deepseek/deepseek-v4-flash",
             }
         )
 
@@ -70,8 +90,9 @@ class RlmSubagentRegistryTest(unittest.TestCase):
                 },
             },
         )
-        self.assertEqual(result.model, "openai/gpt-5.4")
-        self.assertIn("tell the user", result.warning)
+        self.assertEqual(result.rlm_child_id, "sub-a1b2c3d4")
+        self.assertEqual(result.name, "api-reviewer")
+        self.assertEqual(result.model, "deepseek/deepseek-v4-flash")
 
     def test_finds_authenticated_models_through_host(self) -> None:
         host_request = AsyncMock(

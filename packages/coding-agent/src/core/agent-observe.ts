@@ -16,7 +16,8 @@ export interface AgentObserveAgentSummary {
 	isCompacting: boolean;
 	attachedClients: number;
 	messageCount: number;
-	pendingMessageCount: number;
+	queuedCount: number;
+	isSessionActive: boolean;
 	parentActiveSessionId?: string;
 	parentSessionId?: string;
 	rlmChildId?: string;
@@ -59,9 +60,11 @@ export interface AgentObserveMessagePreview {
 }
 
 export interface AgentObserveController {
-	listAgents(): AgentObserveListResult;
-	getAgent(target: string): AgentObserveAgentSnapshot;
-	recentMessages(input: AgentObserveRecentMessagesInput): AgentObserveRecentMessagesResult;
+	listAgents(): AgentObserveListResult | Promise<AgentObserveListResult>;
+	getAgent(target: string): AgentObserveAgentSnapshot | Promise<AgentObserveAgentSnapshot>;
+	recentMessages(
+		input: AgentObserveRecentMessagesInput,
+	): AgentObserveRecentMessagesResult | Promise<AgentObserveRecentMessagesResult>;
 }
 
 export function createAgentObserveHostHandlers(controller: AgentObserveController) {
@@ -71,17 +74,17 @@ export function createAgentObserveHostHandlers(controller: AgentObserveControlle
 			if (typeof payload.target !== "string") {
 				throw new Error("agent_observe.get target must be a string");
 			}
-			return controller.getAgent(payload.target) as unknown as Record<string, unknown>;
+			return (await controller.getAgent(payload.target)) as unknown as Record<string, unknown>;
 		},
 		"agent_observe.recent": async (payload: Record<string, unknown> = {}) => {
 			if (typeof payload.target !== "string") {
 				throw new Error("agent_observe.recent target must be a string");
 			}
-			return controller.recentMessages({
+			return (await controller.recentMessages({
 				target: payload.target,
 				limit: normalizeOptionalInteger(payload.limit, "agent_observe.recent limit"),
 				maxChars: normalizeOptionalInteger(payload.max_chars ?? payload.maxChars, "agent_observe.recent max_chars"),
-			}) as unknown as Record<string, unknown>;
+			})) as unknown as Record<string, unknown>;
 		},
 	};
 }

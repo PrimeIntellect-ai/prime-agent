@@ -8,6 +8,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Message, TextContent } from "@earendil-works/pi-ai";
 import type { AgentCronJob } from "./cron-jobs.js";
+import type { AppliedRefinementEdit, HarnessScope, RefinementResult } from "./refinement/refinement.js";
 import { isSessionSlashCommandName, parseSessionSlashCommand, type SessionSlashCommand } from "./slash-commands.js";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
@@ -31,6 +32,9 @@ export const IPYTHON_STATE_RESTORED_CUSTOM_TYPE = "ipython_state_restored";
 export const SESSION_SLASH_COMMAND_CUSTOM_TYPE = "session_slash_command";
 export const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE = "session_slash_command_result";
 export const COMPACTION_OUTCOME_CUSTOM_TYPE = "compaction_outcome";
+export const REFINEMENT_OUTCOME_CUSTOM_TYPE = "refinement_outcome";
+export const RLM_CHILD_FAILURE_CUSTOM_TYPE = "rlm_child_failure";
+export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice";
 
 export interface SessionSlashCommandDetails {
 	command: SessionSlashCommand;
@@ -69,6 +73,72 @@ export interface CompactionOutcomeMessage extends CustomMessage<CompactionOutcom
 	customType: typeof COMPACTION_OUTCOME_CUSTOM_TYPE;
 	content: string;
 	details: CompactionOutcomeDetails;
+}
+
+export interface RefinementOutcomeDetails {
+	refinementId: string;
+	summary: string;
+	scope: HarnessScope;
+	rollbackOf?: string;
+	edits: AppliedRefinementEdit[];
+}
+
+export interface RefinementOutcomeMessage extends CustomMessage<RefinementOutcomeDetails> {
+	customType: typeof REFINEMENT_OUTCOME_CUSTOM_TYPE;
+	content: string;
+	details: RefinementOutcomeDetails;
+}
+
+export interface RlmChildFailureDetails {
+	childId: string;
+	sessionName: string;
+	error: string;
+}
+
+export type RlmChildTerminalNoticeDetails =
+	| {
+			kind: "cancelled";
+			childId: string;
+			sessionName: string;
+			reason?: string;
+	  }
+	| {
+			kind: "completed_without_reply";
+			childId: string;
+			sessionName: string;
+			lastAssistantTextPreview?: string;
+	  };
+
+export function createRlmChildFailureMessage(
+	details: RlmChildFailureDetails,
+	timestamp = Date.now(),
+): CustomMessage<RlmChildFailureDetails> {
+	return {
+		role: "custom",
+		customType: RLM_CHILD_FAILURE_CUSTOM_TYPE,
+		content: `RLM child ${details.sessionName} (${details.childId}) failed: ${details.error}`,
+		display: true,
+		details,
+		timestamp,
+	};
+}
+
+export function createRlmChildTerminalNoticeMessage(
+	details: RlmChildTerminalNoticeDetails,
+	timestamp = Date.now(),
+): CustomMessage<RlmChildTerminalNoticeDetails> {
+	const content =
+		details.kind === "cancelled"
+			? `RLM child ${details.sessionName} (${details.childId}) was cancelled${details.reason ? `: ${details.reason}` : ""}`
+			: `RLM child ${details.sessionName} (${details.childId}) completed without sending a reply${details.lastAssistantTextPreview ? `. Last assistant text: ${details.lastAssistantTextPreview}` : ""}`;
+	return {
+		role: "custom",
+		customType: RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+		content,
+		display: true,
+		details,
+		timestamp,
+	};
 }
 
 /**
@@ -131,7 +201,6 @@ export interface CompactionSummaryMessage {
 	timestamp: number;
 }
 
-// Extend CustomAgentMessages via declaration merging
 declare module "@earendil-works/pi-agent-core" {
 	interface CustomAgentMessages {
 		bashExecution: BashExecutionMessage;
@@ -271,6 +340,27 @@ export function createCompactionOutcomeMessage(
 	};
 }
 
+export function createRefinementOutcomeMessage(
+	result: RefinementResult,
+	display = true,
+	timestamp = Date.now(),
+): RefinementOutcomeMessage {
+	return {
+		role: "custom",
+		customType: REFINEMENT_OUTCOME_CUSTOM_TYPE,
+		content: `Refinement complete: ${result.summary}`,
+		display,
+		details: {
+			refinementId: result.id,
+			summary: result.summary,
+			scope: result.scope ?? "local",
+			...(result.rollbackOf ? { rollbackOf: result.rollbackOf } : {}),
+			edits: result.appliedEdits,
+		},
+		timestamp,
+	};
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
@@ -286,7 +376,7 @@ function hasValidCustomMessageEnvelope(message: Record<string, unknown>, customT
 	);
 }
 
-function isSessionSlashCommand(value: unknown): value is SessionSlashCommand {
+export function isSessionSlashCommand(value: unknown): value is SessionSlashCommand {
 	if (
 		!isRecord(value) ||
 		!isSessionSlashCommandName(value.name) ||
@@ -344,6 +434,27 @@ export function isCompactionOutcomeMessage(message: unknown): message is Compact
 	);
 }
 
+function isAppliedRefinementEdit(value: unknown): value is AppliedRefinementEdit {
+	return (
+		isRecord(value) &&
+		(value.action === "create" || value.action === "update" || value.action === "delete") &&
+		typeof value.kind === "string" &&
+		typeof value.id === "string" &&
+		typeof value.applied === "boolean"
+	);
+}
+
+export function isRefinementOutcomeMessage(message: unknown): message is RefinementOutcomeMessage {
+	if (!isRecord(message) || !hasValidCustomMessageEnvelope(message, REFINEMENT_OUTCOME_CUSTOM_TYPE)) return false;
+	if (!isRecord(message.details)) return false;
+	return (
+		typeof message.details.summary === "string" &&
+		(message.details.scope === "local" || message.details.scope === "global") &&
+		Array.isArray(message.details.edits) &&
+		message.details.edits.every(isAppliedRefinementEdit)
+	);
+}
+
 export function createHeartbeatPromptMessage(
 	job: AgentCronJob,
 	timestamp = Date.now(),
@@ -378,7 +489,6 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 		.map((m): Message | undefined => {
 			switch (m.role) {
 				case "bashExecution":
-					// Skip messages excluded from context (!! prefix)
 					if (m.excludeFromContext) {
 						return undefined;
 					}
@@ -391,7 +501,8 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 					if (
 						m.customType === SESSION_SLASH_COMMAND_CUSTOM_TYPE ||
 						m.customType === SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE ||
-						m.customType === COMPACTION_OUTCOME_CUSTOM_TYPE
+						m.customType === COMPACTION_OUTCOME_CUSTOM_TYPE ||
+						m.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE
 					) {
 						return undefined;
 					}

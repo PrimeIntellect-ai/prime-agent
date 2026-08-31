@@ -63,13 +63,14 @@ function summary(messageCount: number): SessionSummary {
 		activeSessionId,
 		lifecycle: "live",
 		activity: "idle",
+		isSessionActive: false,
 		sessionId: "session-4677",
 		cwd: "/tmp",
 		isStreaming: false,
 		isCompacting: false,
 		attachedClients: 0,
 		messageCount,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 	};
 }
 
@@ -131,6 +132,11 @@ function workerHarness(result: DaemonAttachResult, transcript: SnapshotTranscrip
 			rootActiveSessionId: activeSessionId,
 			lifecycle: "ready",
 			pid: 4677,
+		},
+		client: {
+			request: vi.fn(async () => {
+				throw new Error("unexpected snapshot reload");
+			}),
 		},
 		summaries: new Map([[activeSessionId, result.snapshot.summary]]),
 		snapshotCache: new Map([[activeSessionId, result]]),

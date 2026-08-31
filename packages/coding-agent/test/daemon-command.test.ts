@@ -14,6 +14,7 @@ const daemonClientMock = vi.hoisted(() => {
 		schedule?: string;
 		prompt?: string;
 		includeInactive?: boolean;
+		all?: boolean;
 		sessionPath?: string;
 		config?: {
 			extensionFlagValues?: Record<string, boolean | string>;
@@ -219,6 +220,18 @@ describe("daemon command", () => {
 		expect(client?.closeListenerCountAtClose).toBe(0);
 	});
 
+	it("chooses a terminating non-colliding default name past the safe-integer range", async () => {
+		const unsafeIntegerName = "9007199254740992";
+		daemonClientMock.behavior.sessions = [makeSessionSummary("active-1", "session-1", unsafeIntegerName)];
+
+		await expect(handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock"])).resolves.toBe(true);
+
+		const client = daemonClientMock.instances[1];
+		expect(client?.requests[0]).toEqual({ type: "list", all: true });
+		expect(client?.requests[1]).toMatchObject({ type: "create", name: "1" });
+		expect(client?.requests[1]?.name).not.toBe(unsafeIntegerName);
+	});
+
 	it("keeps create session name after an unknown boolean extension flag", async () => {
 		await expect(
 			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "create", "--unknown-typo", "my-session"]),
@@ -269,31 +282,6 @@ describe("daemon command", () => {
 		});
 	});
 
-	it("honors send delivery-mode flags after the target", async () => {
-		await expect(
-			handleDaemonCommand([
-				"daemon",
-				"--socket",
-				"/tmp/prime-agent.sock",
-				"send",
-				"worker",
-				"--steer",
-				"stop",
-				"and",
-				"re-plan",
-			]),
-		).resolves.toBe(true);
-
-		const client = daemonClientMock.instances[0];
-		expect(client?.requests[0]).toEqual({
-			type: "send_message",
-			targetActiveSessionId: "worker",
-			fromActiveSessionId: undefined,
-			deliveryMode: "steer",
-			message: "stop and re-plan",
-		});
-	});
-
 	it("rejects unknown send options instead of folding them into the message", async () => {
 		await expect(
 			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "send", "worker", "--bogus", "hello"]),
@@ -314,7 +302,6 @@ describe("daemon command", () => {
 				"--socket",
 				"/tmp/prime-agent.sock",
 				"send",
-				"--follow-up",
 				"worker",
 				"--",
 				"--from",
@@ -328,7 +315,6 @@ describe("daemon command", () => {
 			type: "send_message",
 			targetActiveSessionId: "worker",
 			fromActiveSessionId: undefined,
-			deliveryMode: "follow_up",
 			message: "--from literal --steer",
 		});
 	});
@@ -353,28 +339,6 @@ describe("daemon command", () => {
 			targetActiveSessionId: "--target-like",
 			message: "--from literal",
 		});
-	});
-
-	it("rejects conflicting send delivery modes", async () => {
-		await expect(
-			handleDaemonCommand([
-				"daemon",
-				"--socket",
-				"/tmp/prime-agent.sock",
-				"send",
-				"--steer",
-				"--follow-up",
-				"worker",
-				"hello",
-			]),
-		).resolves.toBe(true);
-
-		expect(daemonClientMock.instances[0]?.requests).toEqual([]);
-		expect(
-			consoleErrorMessages.some(
-				(message) => typeof message === "string" && message.includes("Only one send delivery mode"),
-			),
-		).toBe(true);
 	});
 
 	it("rejects extra agent-messages status arguments", async () => {
@@ -410,7 +374,6 @@ describe("daemon command", () => {
 			type: "send_message",
 			targetActiveSessionId: "worker",
 			fromActiveSessionId: "planner",
-			deliveryMode: undefined,
 			message: "please keep --from literal --steer",
 		});
 	});
@@ -570,11 +533,12 @@ function makeSessionSummary(activeSessionId: string, sessionId: string, sessionN
 		cwd: "/tmp/project",
 		lifecycle: "ready",
 		activity: "idle",
+		isSessionActive: false,
 		isStreaming: false,
 		isCompacting: false,
 		attachedClients: 0,
 		messageCount: 0,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 	};
 }
 

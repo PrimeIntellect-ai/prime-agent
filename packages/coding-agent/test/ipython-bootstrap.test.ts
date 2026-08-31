@@ -1,12 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { KernelManager } from "../src/core/kernel/index.js";
+import { ReplKernelManager } from "../src/core/kernel/index.js";
 import { buildRlmBootstrapCode } from "../src/core/tools/ipython.js";
 
-describe("IPython RLM bootstrap", () => {
+describe("RLM bootstrap", () => {
 	it("pre-imports asyncio so the prompt's subagent patterns work without a manual import", () => {
 		expect(buildRlmBootstrapCode()).toMatch(/^import asyncio$/m);
 	});
@@ -21,6 +21,17 @@ describe("IPython RLM bootstrap", () => {
 
 	it("disables colored output for subprocesses launched by the kernel", () => {
 		expect(buildRlmBootstrapCode()).toContain('_prime_agent_os.environ["NO_COLOR"] = "1"');
+	});
+
+	it("binds bash from the runtime with a missing-runtime stub fallback", () => {
+		const code = buildRlmBootstrapCode();
+		expect(code).toContain("bash = _prime_agent_rlm_module.bash");
+		expect(code).toContain("def bash(command):");
+		expect(code).toContain("rlm._raise_missing()");
+	});
+
+	it("does not install a kernel shutdown hook (the runtime closes MCP on shutdown itself)", () => {
+		expect(buildRlmBootstrapCode()).not.toContain("install_shutdown_hook");
 	});
 
 	it("guards Python skill imports so a broken skill does not abort bootstrap", () => {
@@ -40,15 +51,18 @@ describe("IPython RLM bootstrap", () => {
 	});
 });
 
-/** Find a python that can launch an ipykernel, or null to skip. */
+/** Find a python with a current rlm runtime, or null to skip. */
 function resolveKernelPython(): string | null {
 	const candidates = [
 		process.env.PRIME_AGENT_KERNEL_PYTHON,
+		resolve(__dirname, "..", "..", "..", "prime-agent-runtime", ".venv", "bin", "python"),
 		join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python"),
 	].filter((p): p is string => Boolean(p));
 	for (const python of candidates) {
 		if (!existsSync(python)) continue;
-		const check = spawnSync(python, ["-c", "import ipykernel"], { encoding: "utf8" });
+		const check = spawnSync(python, ["-c", "import rlm.repl, rlm; assert callable(rlm.emit)"], {
+			encoding: "utf8",
+		});
 		if (check.status === 0) return python;
 	}
 	return null;
@@ -57,7 +71,7 @@ function resolveKernelPython(): string | null {
 const python = resolveKernelPython();
 const describeIfKernel = python ? describe : describe.skip;
 
-describeIfKernel("IPython RLM bootstrap (real kernel)", () => {
+describeIfKernel("RLM bootstrap (real kernel)", () => {
 	const dir = mkdtempSync(join(tmpdir(), "prime-agent-bootstrap-"));
 
 	afterAll(() => {
@@ -65,7 +79,7 @@ describeIfKernel("IPython RLM bootstrap (real kernel)", () => {
 	});
 
 	it("binds asyncio in the user namespace", async () => {
-		const manager = new KernelManager({ python: python as string, cwd: dir });
+		const manager = new ReplKernelManager({ python: python as string, cwd: dir });
 		try {
 			await manager.start();
 			const bootstrap = await manager.execute(buildRlmBootstrapCode());
@@ -75,11 +89,11 @@ describeIfKernel("IPython RLM bootstrap (real kernel)", () => {
 			expect(result.status).toBe("ok");
 			expect(result.stdout).toContain("Task");
 
-			const bashResult = await manager.execute('%%bash\nprintf %s "$NO_COLOR"');
-			expect(bashResult.status).toBe("ok");
-			expect(bashResult.stdout).toBe("1");
+			const envResult = await manager.execute('import os\nprint(os.environ["NO_COLOR"])');
+			expect(envResult.status).toBe("ok");
+			expect(envResult.stdout.trim()).toBe("1");
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	}, 60_000);
 
@@ -91,7 +105,7 @@ describeIfKernel("IPython RLM bootstrap (real kernel)", () => {
 		writeFileSync(join(firstDir, "same.txt"), "old");
 		writeFileSync(join(secondDir, "same.txt"), "old");
 		const editSkillRoot = join(process.cwd(), "skills", "edit");
-		const manager = new KernelManager({
+		const manager = new ReplKernelManager({
 			python: python as string,
 			cwd: dir,
 			env: { PYTHONPATH: join(editSkillRoot, "src") },
@@ -121,7 +135,7 @@ describeIfKernel("IPython RLM bootstrap (real kernel)", () => {
 			expect(second.diffs?.[0]?.path).toBe(realpathSync(join(secondDir, "same.txt")));
 			expect(first.diffs?.[0]?.path).not.toBe(second.diffs?.[0]?.path);
 		} finally {
-			await manager.dispose();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	}, 60_000);
 });

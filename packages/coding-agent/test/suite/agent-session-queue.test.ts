@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { AgentContinueError, type AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -11,7 +11,12 @@ import {
 	createAgentSessionMessage,
 	createAgentSessionMessagePrompt,
 } from "../../src/core/agent-messages.js";
-import { createSessionSlashCommandMessage } from "../../src/core/messages.js";
+import { type AgentCronJob, shouldDeferHeartbeatCronJob } from "../../src/core/cron-jobs.js";
+import {
+	createSessionSlashCommandMessage,
+	isRefinementOutcomeMessage,
+	REFINEMENT_OUTCOME_CUSTOM_TYPE,
+} from "../../src/core/messages.js";
 import {
 	applyRefinementProposal,
 	getGlobalHarnessStateDir,
@@ -36,7 +41,7 @@ type AutoRefineInternals = {
 	_scheduleAutoRefine(reason: AutoRefineReason): void;
 	_scheduleAutoRefineAfterCompaction(willContinueAfterCompaction: boolean): void;
 	_scheduleAutoRefineAfterAgentEnd(): void;
-	_schedulePostCompactionContinue(): void;
+	_schedulePostCompactionContinue(continueAfterSessionInput?: boolean): void;
 	_invalidatePendingAutoRefineForBranchChange(): Promise<void>;
 	_cancelPostCompactionContinue(): void;
 	_assistantTurnsSinceAutoRefine: number;
@@ -80,6 +85,24 @@ function createAutoRefineHarness(options: Parameters<typeof createHarness>[0] = 
 
 function agentPromptText(id: string, body: string): string {
 	return `Agent-to-agent message received.\nSource: agent_message\nTo: Target, active target, session session-target\nMessage id: ${id}\n\n${body}`;
+}
+
+function heartbeatJob(): AgentCronJob {
+	return {
+		id: "heartbeat-test",
+		status: "active",
+		source: "heartbeat",
+		activeSessionId: "active-test",
+		sessionId: "session-test",
+		sessionFile: "/tmp/session.jsonl",
+		cwd: "/tmp",
+		prompt: "check progress",
+		schedule: { kind: "interval", expression: "every 5m", intervalMs: 300_000 },
+		createdAt: "2026-01-01T00:00:00.000Z",
+		updatedAt: "2026-01-01T00:00:00.000Z",
+		nextRunAt: "2026-01-01T00:05:00.000Z",
+		runCount: 0,
+	};
 }
 
 const skipReviewer = vi.fn(async () => ({ shouldRefine: true, rationale: "durable lesson" }));
@@ -215,6 +238,7 @@ describe("AgentSession queue characterization", () => {
 				for (const fragment of refineFragments) {
 					expect(refine).toHaveBeenCalledWith(
 						expect.objectContaining({ instructions: expect.stringContaining(fragment) }),
+						{ trigger: "auto" },
 					);
 				}
 			}
@@ -305,32 +329,71 @@ describe("AgentSession queue characterization", () => {
 		}
 	});
 
-	it("retries a scheduled post-compaction continuation when another run starts first", async () => {
-		vi.useFakeTimers();
+	it("waits for the active run to settle before retrying a post-compaction continuation", async () => {
 		const harness = await createAutoRefineHarness({
 			settings: { autoRefine: { enabled: true, turnInterval: 25, cooldownMs: 0 } },
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
+		const activeRunSettled = createDeferred();
 		const continueAgent = vi
 			.spyOn(harness.session.agent, "continue")
-			.mockRejectedValueOnce(new Error("Agent is already processing. Wait for completion before continuing."))
+			.mockRejectedValueOnce(
+				new AgentContinueError("busy", "Agent is already processing. Wait for completion before continuing."),
+			)
 			.mockResolvedValueOnce();
+		vi.spyOn(harness.session.agent, "waitForIdle").mockImplementation(() =>
+			continueAgent.mock.calls.length === 0 ? Promise.resolve() : activeRunSettled.promise,
+		);
 
-		try {
-			internals._schedulePostCompactionContinue();
-			await vi.advanceTimersByTimeAsync(100);
+		internals._schedulePostCompactionContinue();
+		await vi.waitFor(() => expect(continueAgent).toHaveBeenCalledTimes(1));
+		expect(internals._postCompactionContinuationScheduled).toBe(true);
 
-			expect(continueAgent).toHaveBeenCalledTimes(1);
-			expect(internals._postCompactionContinuationScheduled).toBe(true);
+		activeRunSettled.resolve();
+		await vi.waitFor(() => expect(continueAgent).toHaveBeenCalledTimes(2));
+		expect(internals._postCompactionContinuationScheduled).toBe(false);
+	});
 
-			await vi.advanceTimersByTimeAsync(100);
+	it("does not let a failed cancelled continuation reject its replacement", async () => {
+		const harness = await createAutoRefineHarness();
+		harnesses.push(harness);
+		const internals = harness.session as unknown as AutoRefineInternals;
+		const cancelledRun = createDeferred();
+		const replacementRun = createDeferred();
+		const continueAgent = vi
+			.spyOn(harness.session.agent, "continue")
+			.mockReturnValueOnce(cancelledRun.promise)
+			.mockReturnValueOnce(replacementRun.promise);
 
-			expect(continueAgent).toHaveBeenCalledTimes(2);
-			expect(internals._postCompactionContinuationScheduled).toBe(false);
-		} finally {
-			vi.useRealTimers();
-		}
+		internals._schedulePostCompactionContinue();
+		await vi.waitFor(() => expect(continueAgent).toHaveBeenCalledTimes(1));
+		internals._cancelPostCompactionContinue();
+		internals._schedulePostCompactionContinue();
+		await vi.waitFor(() => expect(continueAgent).toHaveBeenCalledTimes(2));
+		const idle = harness.session.waitForHeadlessIdle();
+
+		cancelledRun.reject(new Error("cancelled continuation failed"));
+		await new Promise<void>(setImmediate);
+		replacementRun.resolve();
+
+		await expect(idle).resolves.toBeUndefined();
+	});
+
+	it("waits for a queued-work pause to release before post-compaction continuation", async () => {
+		const harness = await createAutoRefineHarness();
+		harnesses.push(harness);
+		const internals = harness.session as unknown as AutoRefineInternals;
+		const pause = harness.session.acquireQueuedWorkPause();
+		const continueAgent = vi.spyOn(harness.session.agent, "continue").mockResolvedValue();
+
+		internals._schedulePostCompactionContinue();
+		await new Promise<void>(setImmediate);
+		expect(continueAgent).not.toHaveBeenCalled();
+
+		pause.release();
+		await harness.session.waitForHeadlessIdle();
+		expect(continueAgent).toHaveBeenCalledTimes(1);
 	});
 
 	it("cancels scheduled post-compaction continuation on branch changes", async () => {
@@ -383,24 +446,22 @@ describe("AgentSession queue characterization", () => {
 	});
 
 	it("keeps scheduled post-compaction continuation when session-input pump compaction skips without aborting", async () => {
-		vi.useFakeTimers();
 		const harness = await createAutoRefineHarness({
 			settings: { autoRefine: { enabled: true, turnInterval: 25, cooldownMs: 0 } },
 		});
 		harnesses.push(harness);
 		const internals = harness.session as unknown as AutoRefineInternals;
-		try {
-			internals._schedulePostCompactionContinue();
+		const idle = createDeferred();
+		vi.spyOn(harness.session.agent, "waitForIdle").mockReturnValue(idle.promise);
+		internals._schedulePostCompactionContinue();
 
-			await expect(harness.session.compact(undefined, { skipAbort: true })).rejects.toThrow(
-				"Session is too short to compact",
-			);
+		await expect(harness.session.compact(undefined, { skipAbort: true })).rejects.toThrow(
+			"Session is too short to compact",
+		);
 
-			expect(internals._postCompactionContinuationScheduled).toBe(true);
-		} finally {
-			internals._cancelPostCompactionContinue();
-			vi.useRealTimers();
-		}
+		expect(internals._postCompactionContinuationScheduled).toBe(true);
+		internals._cancelPostCompactionContinue();
+		idle.resolve();
 	});
 
 	it("auto-refine pending review uses the in-progress guard and catches refine failures", async () => {
@@ -423,6 +484,7 @@ describe("AgentSession queue characterization", () => {
 
 		expect(refine).toHaveBeenCalledWith(
 			expect.objectContaining({ instructions: expect.stringContaining("durable lesson") }),
+			{ trigger: "auto" },
 		);
 		expect(guardWasSetDuringRefine).toBe(true);
 		expect(internals._autoRefineInProgress).toBe(false);
@@ -629,6 +691,39 @@ describe("AgentSession queue characterization", () => {
 		expect(navigated).toBe(true);
 	});
 
+	it("cancels a restart checkpoint while tree navigation owns the commit fence", async () => {
+		const treeEventReached = createDeferred();
+		const treeEventGate = createDeferred();
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_tree", async () => {
+						treeEventReached.resolve();
+						await treeEventGate.promise;
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+		await harness.session.prompt("one");
+		const target = harness.sessionManager.getEntries().find((entry) => entry.type === "message");
+		expect(target).toBeDefined();
+		await harness.session.prompt("two");
+
+		const navigation = harness.session.navigateTree(target!.id, { summarize: false });
+		await treeEventReached.promise;
+		const controller = new AbortController();
+		const checkpoint = harness.session.waitForSessionInputCheckpoint(controller.signal);
+		controller.abort();
+
+		await expect(checkpoint).rejects.toThrow("Update restart preparation cancelled");
+		const nextCheckpoint = harness.session.waitForSessionInputCheckpoint();
+		treeEventGate.resolve();
+		await navigation;
+		await expect(nextCheckpoint).resolves.toBeUndefined();
+	});
+
 	it("keeps queued work paused until tree navigation events settle", async () => {
 		const treeEvent = createDeferred();
 		const harness = await createHarness({
@@ -698,16 +793,19 @@ describe("AgentSession queue characterization", () => {
 		withStreaming(harness, false);
 		await vi.waitFor(() => expect(pause).toBeDefined());
 		await harness.session.waitForSessionInputIdle();
-		const queued = (harness.session as unknown as { _followUpMessages: { preparation?: unknown }[] })
-			._followUpMessages;
-		await vi.waitFor(() => expect(queued[0]?.preparation).toBeDefined());
+		const store = (
+			harness.session as unknown as {
+				_actionStore: { queuedActions(): readonly { payload: { prepared?: unknown } }[] };
+			}
+		)._actionStore;
+		await vi.waitFor(() => expect(store.queuedActions()[0]?.payload.prepared).toBeDefined());
 
 		const navigation = harness.session.navigateTree(target!.id, { summarize: false });
 		pause?.release();
 		pause = undefined;
 		await navigation;
 
-		expect(queued[0]?.preparation).toBeUndefined();
+		expect(store.queuedActions()[0]?.payload.prepared).toBeUndefined();
 	});
 
 	it.each([
@@ -947,7 +1045,7 @@ describe("AgentSession queue characterization", () => {
 		}
 	});
 
-	it("persists a prompt started while a background refine is in flight", async () => {
+	it("records a durable refinement outcome while preserving a concurrent prompt result", async () => {
 		const harness = await createAutoRefineHarness();
 		harnesses.push(harness);
 		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
@@ -998,6 +1096,13 @@ describe("AgentSession queue characterization", () => {
 			await refinePromise;
 			await promptPromise;
 
+			const outcome = harness.session.messages.find(isRefinementOutcomeMessage);
+			expect(outcome?.details.summary).toBe("no-op");
+			expect(
+				harness.sessionManager
+					.getEntries()
+					.some((entry) => entry.type === "custom_message" && entry.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE),
+			).toBe(true);
 			expect(
 				harness
 					.eventsOfType("message_end")
@@ -1007,6 +1112,68 @@ describe("AgentSession queue characterization", () => {
 				.getEntries()
 				.filter((entry) => entry.type === "message" && entry.message.role === "assistant");
 			expect(persistedAssistants).toHaveLength(1);
+		} finally {
+			if (previousAgentDir === undefined) {
+				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+			} else {
+				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+			}
+		}
+	});
+
+	it("keeps an unpersisted refinement outcome when the refinement audit append fails", async () => {
+		const harness = await createAutoRefineHarness();
+		harnesses.push(harness);
+		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
+		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		try {
+			harness.setResponses([fauxAssistantMessage(refinePlanJson("no-op"))]);
+			const auditAppendError = new Error("audit write failed");
+			vi.spyOn(harness.sessionManager, "appendCustomEntry").mockImplementationOnce(() => {
+				throw auditAppendError;
+			});
+			vi.spyOn(harness.sessionManager, "appendCustomMessageEntryWithRollback").mockImplementationOnce(() => {
+				throw new Error("outcome write failed");
+			});
+
+			await expect(harness.session.refine({ instructions: "audit persistence failure" })).rejects.toThrow(
+				auditAppendError,
+			);
+
+			expect(harness.session.messages.some(isRefinementOutcomeMessage)).toBe(true);
+			// The outcome survives context rebuilds even when neither session entry could persist.
+			expect(harness.session.buildSessionContext().messages.some(isRefinementOutcomeMessage)).toBe(true);
+		} finally {
+			if (previousAgentDir === undefined) {
+				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+			} else {
+				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+			}
+		}
+	});
+
+	it("keeps an unpersisted refinement outcome across context rebuilds", async () => {
+		const harness = await createAutoRefineHarness();
+		harnesses.push(harness);
+		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
+		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		try {
+			harness.setResponses([fauxAssistantMessage(refinePlanJson("no-op"))]);
+			vi.spyOn(harness.sessionManager, "appendCustomMessageEntryWithRollback").mockImplementationOnce(() => {
+				throw new Error("disk full");
+			});
+
+			await harness.session.refine({ instructions: "outcome persistence failure" });
+
+			const outcome = harness.session.messages.find(isRefinementOutcomeMessage);
+			expect(outcome?.details.summary).toBe("no-op");
+			expect(
+				harness.sessionManager
+					.getEntries()
+					.some((entry) => entry.type === "custom_message" && entry.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE),
+			).toBe(false);
+			// The memory-only outcome survives context rebuilds despite the failed write.
+			expect(harness.session.buildSessionContext().messages.some(isRefinementOutcomeMessage)).toBe(true);
 		} finally {
 			if (previousAgentDir === undefined) {
 				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
@@ -1253,6 +1420,24 @@ describe("AgentSession queue characterization", () => {
 		expect(harness.session.messages).toEqual([]);
 	});
 
+	it("settles a visibly queued session command while an earlier action is preparing", async () => {
+		const hook = gatedHook({ prompt: "preparing turn" });
+		const harness = await createHarness({ extensionFactories: [hook.factory] });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("done")]);
+		const pause = harness.session.acquireQueuedWorkPause();
+		await harness.session.followUp("preparing turn", undefined, { resumeIfIdle: true });
+		pause.release();
+		await hook.reached;
+
+		const command = harness.session.prompt("/goal status");
+		await vi.waitFor(() => expect(harness.session.getFollowUpMessages()).toContain("/goal status"));
+		await expect(command).resolves.toBeUndefined();
+
+		hook.release();
+		await harness.session.waitForIdle();
+	});
+
 	it("removes goal context while its steering handoff is still preparing", async () => {
 		const hook = gatedHook({ prompt: "stale goal context" });
 		const harness = await createHarness({ extensionFactories: [hook.factory] });
@@ -1320,8 +1505,8 @@ describe("AgentSession queue characterization", () => {
 		pause.release();
 		await hook.reached;
 
-		// The pump owns the prompt during preparation, but it stays visible as pending.
-		expect(harness.session.getSteeringMessages()).toEqual(["active steering"]);
+		// The pump owns the prompt during preparation, so it is active rather than queued.
+		expect(harness.session.getSteeringMessages()).toEqual([]);
 		expect(internals._steeringStopPending).toBe(true);
 		expect(harness.session.clearQueue()).toEqual({ steering: ["active steering"], followUp: [] });
 		expect(harness.session.clearQueue()).toEqual({ steering: [], followUp: [] });
@@ -1333,15 +1518,15 @@ describe("AgentSession queue characterization", () => {
 		expect(getUserTexts(harness)).toEqual([]);
 	});
 
-	it("keeps owned inputs visible in counts, previews, and queue updates until delivery", async () => {
+	it("removes preparing inputs from literal queue projections", async () => {
 		const hook = gatedHook({ prompt: "owned prompt" });
 		const harness = await createHarness({ extensionFactories: [hook.factory] });
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("delivered")]);
 		const queueUpdates: { steering: readonly string[]; followUp: readonly string[] }[] = [];
 		harness.session.subscribe((event) => {
-			if (event.type === "queue_update") {
-				queueUpdates.push({ steering: [...event.steering], followUp: [...event.followUp] });
+			if (event.type === "session_action_update") {
+				queueUpdates.push({ steering: [...event.actions.steering], followUp: [...event.actions.followUps] });
 			}
 		});
 		const pause = harness.session.acquireQueuedWorkPause();
@@ -1349,20 +1534,142 @@ describe("AgentSession queue characterization", () => {
 		pause.release();
 		await hook.reached;
 
-		// The pump moved the prompt into _activeSessionInput (preparing); it must
-		// still count as pending and appear in previews and snapshots.
-		expect(harness.session.pendingMessageCount).toBe(1);
-		expect(harness.session.hasSessionInputWork).toBe(true);
-		expect(harness.session.getFollowUpMessagePreviews()).toEqual(["owned prompt"]);
-		expect(harness.session.getFollowUpQueueSnapshots().map((snapshot) => snapshot.text)).toEqual(["owned prompt"]);
-		expect(queueUpdates.at(-1)).toEqual({ steering: [], followUp: ["owned prompt"] });
+		expect(harness.session.queuedActionCount).toBe(0);
+		expect(harness.session.unfinishedActionCount).toBe(1);
+		expect(harness.session.getFollowUpMessagePreviews()).toEqual([]);
+		expect(harness.session.getSessionActionRecoverySnapshot().actions).toEqual([]);
+		expect(queueUpdates.at(-1)).toEqual({ steering: [], followUp: [] });
 
 		hook.release();
 		await harness.session.waitForIdle();
-		expect(harness.session.pendingMessageCount).toBe(0);
-		expect(harness.session.hasSessionInputWork).toBe(false);
+		expect(harness.session.queuedActionCount).toBe(0);
+		expect(harness.session.unfinishedActionCount).toBe(0);
 		expect(queueUpdates.at(-1)).toEqual({ steering: [], followUp: [] });
 		expect(getUserTexts(harness)).toEqual(["owned prompt"]);
+	});
+
+	it("hides queued trigger-turn actions from user-visible queue projections", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const internals = harness.session as unknown as { _scheduleSessionInputPump(): void };
+		const schedule = vi.spyOn(internals, "_scheduleSessionInputPump").mockImplementation(() => {});
+		await harness.session.followUp("visible queued prompt");
+		const hidden = harness.session.sendCustomMessage(
+			{ customType: "hidden-trigger", content: "hidden queued prompt", display: false },
+			{ triggerTurn: true },
+		);
+		const hiddenRejection = expect(hidden).rejects.toThrow("Prompt aborted before delivery.");
+
+		await vi.waitFor(() => expect(harness.session.getSessionActionRecoverySnapshot().actions).toHaveLength(2));
+		expect(harness.session.getFollowUpMessages()).toEqual(["visible queued prompt"]);
+		expect(harness.session.getFollowUpMessagePreviews()).toEqual(["visible queued prompt"]);
+		expect(harness.session.getSessionActionSnapshot()).toMatchObject({
+			queuedCount: 1,
+			steering: [],
+			followUps: ["visible queued prompt"],
+		});
+		expect(harness.session.queuedActionCount).toBe(1);
+		expect(harness.session.getSessionActionRecoverySnapshot().actions.map((action) => action.payload.text)).toEqual([
+			"visible queued prompt",
+			"hidden queued prompt",
+		]);
+
+		harness.session.requestAbort();
+		expect(harness.session.clearQueue()).toEqual({ steering: [], followUp: ["visible queued prompt"] });
+		schedule.mockRestore();
+		await hiddenRejection;
+	});
+
+	it("emits the running phase when a queued turn starts", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("done")]);
+		const phases: string[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "session_action_update" && event.actions.active) {
+				phases.push(event.actions.active.phase);
+			}
+		});
+		const pause = harness.session.acquireQueuedWorkPause();
+		await harness.session.followUp("phase probe", undefined, { resumeIfIdle: true });
+
+		pause.release();
+		await harness.session.waitForIdle();
+
+		expect(phases).toContain("running");
+	});
+
+	it("reports selected work when resuming after an abort", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const command = parseSessionSlashCommand("/autonomous status");
+		expect(command).toBeDefined();
+		const selected = createDeferred<void>();
+		const releaseSelection = createDeferred<void>();
+		const internals = harness.session as unknown as {
+			_executeSelectedSessionCommand(action: unknown, epoch?: number): Promise<void>;
+		};
+		internals._executeSelectedSessionCommand = async () => {
+			selected.resolve();
+			await releaseSelection.promise;
+		};
+		const pause = harness.session.acquireQueuedWorkPause();
+		await harness.session.restoreFollowUpMessage(command!.text, undefined, {
+			customMessage: createSessionSlashCommandMessage(command!),
+		});
+
+		pause.release();
+		await selected.promise;
+		harness.session.requestAbort();
+		expect(harness.session.resumeQueuedWork()).toBe(true);
+		expect(harness.session.clearQueue()).toEqual({ steering: [], followUp: [command!.text] });
+		releaseSelection.resolve();
+		await harness.session.waitForSessionInputIdle();
+	});
+
+	it("revalidates turn batches after acquiring the commit fence", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.setFollowUpMode("all");
+		harness.setResponses([fauxAssistantMessage("survivor delivered")]);
+		const pause = harness.session.acquireQueuedWorkPause();
+		withStreaming(harness, true);
+		const removed = harness.session.promptAndWait("remove after preparation", {
+			streamingBehavior: "followUp",
+			followUpQueueKey: "remove",
+		});
+		const removedOutcome = removed.then(
+			() => ({ error: undefined }),
+			(error: unknown) => ({ error }),
+		);
+		const survivor = harness.session.promptAndWait("survive re-selection", {
+			streamingBehavior: "followUp",
+			followUpQueueKey: "survivor",
+		});
+		const survivorOutcome = survivor.then(
+			() => ({ error: undefined }),
+			(error: unknown) => ({ error }),
+		);
+		withStreaming(harness, false);
+		const internals = harness.session as unknown as {
+			_acquireSessionActionCommitFence(): Promise<{ release(): void }>;
+		};
+		const fence = await internals._acquireSessionActionCommitFence();
+
+		pause.release();
+		try {
+			await vi.waitFor(() => expect(harness.session.getSessionActionSnapshot().active?.phase).toBe("preparing"));
+			expect(harness.session.removeQueuedFollowUp("remove")).toBe(true);
+		} finally {
+			fence.release();
+		}
+		await harness.session.waitForSessionInputIdle();
+		expect(harness.session.getFollowUpMessages()).toEqual([]);
+		expect((await removedOutcome).error).toEqual(
+			expect.objectContaining({ message: "Queued agent message was cleared before delivery." }),
+		);
+		expect((await survivorOutcome).error).toBeUndefined();
+		expect(getUserTexts(harness)).toEqual(["survive re-selection"]);
 	});
 
 	it("stops counting cleared preparing inputs as pending", async () => {
@@ -1374,15 +1681,33 @@ describe("AgentSession queue characterization", () => {
 		await harness.session.followUp("cleared prompt", undefined, { resumeIfIdle: true });
 		pause.release();
 		await hook.reached;
-		expect(harness.session.pendingMessageCount).toBe(1);
+		expect(harness.session.queuedActionCount).toBe(0);
 
 		expect(harness.session.clearQueue()).toEqual({ steering: [], followUp: ["cleared prompt"] });
-		expect(harness.session.pendingMessageCount).toBe(0);
+		expect(harness.session.queuedActionCount).toBe(0);
 		expect(harness.session.getFollowUpMessagePreviews()).toEqual([]);
 
 		hook.release();
 		await harness.session.waitForSessionInputIdle();
 		expect(getUserTexts(harness)).toEqual([]);
+	});
+
+	it("coalesces a same-key follow-up while a steering owner is preparing", async () => {
+		const hook = gatedHook({ prompt: "steering heartbeat" });
+		const harness = await createHarness({ extensionFactories: [hook.factory] });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("done")]);
+		const pause = harness.session.acquireQueuedWorkPause();
+		await harness.session.steer("steering heartbeat", undefined, { queueKey: "heartbeat", resumeIfIdle: true });
+		pause.release();
+		await hook.reached;
+
+		expect(await harness.session.followUp("duplicate heartbeat", undefined, { queueKey: "heartbeat" })).toBe(false);
+		expect(harness.session.getFollowUpMessages()).toEqual([]);
+
+		hook.release();
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual(["steering heartbeat"]);
 	});
 
 	it("queues a same-key follow-up once the prior owner has handed off", async () => {
@@ -1414,6 +1739,73 @@ describe("AgentSession queue characterization", () => {
 		await harness.session.waitForSessionInputIdle();
 		await harness.session.waitForIdle();
 		expect(getUserTexts(harness)).toEqual(["first heartbeat", "second heartbeat"]);
+	});
+
+	it("does not reclaim a handed-off action before its delivery event", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("delivered")]);
+		const dispatchGate = createDeferred();
+		const promptCalled = createDeferred();
+		const originalPrompt = harness.session.agent.prompt.bind(harness.session.agent);
+		const promptSpy = vi
+			.spyOn(harness.session.agent, "prompt")
+			.mockImplementation(async (messages: Parameters<typeof originalPrompt>[0]) => {
+				promptSpy.mockRestore();
+				promptCalled.resolve();
+				await dispatchGate.promise;
+				return originalPrompt(messages);
+			});
+		const pause = harness.session.acquireQueuedWorkPause();
+		await harness.session.followUp("handed off", undefined, { resumeIfIdle: true });
+		pause.release();
+		await promptCalled.promise;
+
+		expect(harness.session.clearQueue()).toEqual({ steering: [], followUp: [] });
+		dispatchGate.resolve();
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual(["handed off"]);
+		expect(getAssistantTexts(harness)).toEqual(["delivered"]);
+	});
+
+	it("does not cancel one action from a handed-off batch", async () => {
+		const firstPrompt = agentPromptText("agentmsg_batch_first", "first");
+		const secondPrompt = agentPromptText("agentmsg_batch_second", "second");
+		let cancelSecond: (() => void) | undefined;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("message_start", (event) => {
+						if (event.message.role === "user" && getMessageText(event.message) === firstPrompt) {
+							cancelSecond?.();
+						}
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.session.setFollowUpMode("all");
+		harness.setResponses([fauxAssistantMessage("shared response")]);
+		let cleared: { steering: string[]; followUp: string[] } | undefined;
+		cancelSecond = () => {
+			cleared = harness.session.clearQueuedUserMessagesMatching((text) => text === secondPrompt);
+		};
+
+		const pause = harness.session.acquireQueuedWorkPause();
+		await harness.session.queueAgentMessagePrompt(firstPrompt, "followUp");
+		await harness.session.queueAgentMessagePrompt(secondPrompt, "followUp");
+		pause.release();
+		await harness.session.waitForIdle();
+
+		expect(cleared).toEqual({ steering: [], followUp: [] });
+		expect(getUserTexts(harness)).toEqual([firstPrompt, secondPrompt]);
+		expect(getAssistantTexts(harness)).toEqual(["shared response"]);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.filter((entry) => entry.type === "message")
+				.map((entry) => getMessageText(entry.message)),
+		).toContain("shared response");
 	});
 
 	it("keeps cleared prompts out of the handoff snapshot during the refine wait", async () => {
@@ -1458,6 +1850,74 @@ describe("AgentSession queue characterization", () => {
 
 		expect(cleared).toEqual({ steering: [], followUp: [clearedAgentMessage] });
 		expect(getUserTexts(harness)).toEqual(["kept"]);
+	});
+
+	it("restores next-turn context from cancelled actions in action order", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const firstPrompt = agentPromptText("agentmsg_restore_first", "first");
+		const secondPrompt = agentPromptText("agentmsg_restore_second", "second");
+		withStreaming(harness, true);
+		await harness.session.sendCustomMessage(
+			{ customType: "next-turn", content: "context A", display: true, details: {} },
+			{ deliverAs: "nextTurn" },
+		);
+		await harness.session.queueAgentMessagePrompt(firstPrompt, "followUp");
+		await harness.session.sendCustomMessage(
+			{ customType: "next-turn", content: "context B", display: true, details: {} },
+			{ deliverAs: "nextTurn" },
+		);
+		await harness.session.queueAgentMessagePrompt(secondPrompt, "followUp");
+
+		expect(harness.session.clearQueue().followUp).toEqual([firstPrompt, secondPrompt]);
+		expect(harness.session.getPendingNextTurnMessageSnapshots().map(getMessageText)).toEqual([
+			"context A",
+			"context B",
+		]);
+		withStreaming(harness, false);
+	});
+
+	it("delivers next-turn context when the first preparing turn is cancelled", async () => {
+		const firstPrompt = agentPromptText("agentmsg_cancel_first", "cancelled");
+		let cancelFirst: (() => void) | undefined;
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", () => {
+						cancelFirst?.();
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.session.setFollowUpMode("all");
+		let cleared: { steering: string[]; followUp: string[] } | undefined;
+		cancelFirst = () => {
+			cleared = harness.session.clearQueuedUserMessagesMatching((text) => text === firstPrompt);
+		};
+		let sawNextTurnContext = false;
+		harness.setResponses([
+			(context) => {
+				sawNextTurnContext = context.messages.some(
+					(message) => message.role === "user" && getMessageText(message) === "carry this",
+				);
+				return fauxAssistantMessage("done");
+			},
+		]);
+
+		const pause = harness.session.acquireQueuedWorkPause();
+		await harness.session.sendCustomMessage(
+			{ customType: "next-turn", content: "carry this", display: true, details: {} },
+			{ deliverAs: "nextTurn" },
+		);
+		await harness.session.queueAgentMessagePrompt(firstPrompt, "followUp");
+		await harness.session.followUp("surviving");
+		pause.release();
+		await harness.session.waitForIdle();
+
+		expect(cleared).toEqual({ steering: [], followUp: [firstPrompt] });
+		expect(sawNextTurnContext).toBe(true);
+		expect(getUserTexts(harness)).toEqual(["surviving"]);
 	});
 
 	it("injects nextTurn custom messages into the next prompt", async () => {
@@ -1509,7 +1969,7 @@ describe("AgentSession queue characterization", () => {
 		const delivery = harness.session.waitForAgentMessagePromptDelivery("agentmsg_queue_update_clear");
 		let cleared = false;
 		const unsubscribe = harness.session.subscribe((event) => {
-			if (event.type === "queue_update" && !cleared) {
+			if (event.type === "session_action_update" && !cleared) {
 				cleared = true;
 				harness.session.clearQueue();
 			}
@@ -1542,10 +2002,12 @@ describe("AgentSession queue characterization", () => {
 			preparationStarted = resolve;
 		});
 		let pause: { release(): void } | undefined;
+		let gatePreparation = true;
 		const harness = await createHarness({
 			extensionFactories: [
 				(pi) => {
 					pi.on("before_agent_start", async () => {
+						if (!gatePreparation) return;
 						preparationStarted?.();
 						pause = harness.session.acquireQueuedWorkPause();
 					});
@@ -1569,6 +2031,7 @@ describe("AgentSession queue characterization", () => {
 		const completionRejection = expect(completion).rejects.toThrow("cleared before delivery");
 		withStreaming(harness, false);
 		await waitForPreparation;
+		gatePreparation = false;
 		expect(pause).toBeDefined();
 
 		expect(harness.session.clearQueue()).toEqual({
@@ -1632,7 +2095,6 @@ describe("AgentSession queue characterization", () => {
 			id: "agentmsg_same_object",
 			source: AGENT_MESSAGE_SOURCE,
 			message: "same object",
-			deliveryMode: "follow_up" as const,
 			target: { activeSessionId: "worker-active", sessionId: "worker-session" },
 		};
 		const message = createAgentSessionMessage(payload);
@@ -1644,12 +2106,12 @@ describe("AgentSession queue characterization", () => {
 
 		await firstProviderStarted.promise;
 		await new Promise<void>((resolve) => setImmediate(resolve));
-		expect(harness.session.pendingMessageCount).toBe(1);
+		expect(harness.session.queuedActionCount).toBe(1);
 		expect(harness.session.getFollowUpMessages()).toEqual([prompt]);
 		firstResponse.resolve();
 		await harness.session.waitForIdle();
 
-		expect(harness.session.pendingMessageCount).toBe(0);
+		expect(harness.session.queuedActionCount).toBe(0);
 		expect(harness.session.messages.filter((item) => item === message)).toHaveLength(2);
 		expect(getAssistantTexts(harness)).toEqual(["first done", "second done"]);
 	});
@@ -1820,26 +2282,26 @@ describe("AgentSession queue characterization", () => {
 		await harness.session.prompt("two");
 		const queueUpdates: { steering: readonly string[]; followUp: readonly string[] }[] = [];
 		harness.session.subscribe((event) => {
-			if (event.type === "queue_update") {
-				queueUpdates.push({ steering: [...event.steering], followUp: [...event.followUp] });
+			if (event.type === "session_action_update") {
+				queueUpdates.push({ steering: [...event.actions.steering], followUp: [...event.actions.followUps] });
 			}
 		});
 
 		const command = harness.session.prompt("/compact", { streamingBehavior: "steer" });
 		await compactionStarted.promise;
 
-		expect(harness.session.pendingMessageCount).toBe(0);
-		expect(harness.session.hasSessionInputWork).toBe(true);
+		expect(harness.session.queuedActionCount).toBe(0);
+		expect(harness.session.unfinishedActionCount).toBe(1);
 		expect(harness.session.getSteeringMessagePreviews()).toEqual([]);
 		expect(queueUpdates.at(-1)).toEqual({ steering: [], followUp: [] });
 		expect(
 			createAgentConnectionState({ session: harness.session } as Parameters<typeof createAgentConnectionState>[0])
-				.hasActiveSessionInput,
-		).toBe(true);
+				.sessionActions.active,
+		).toMatchObject({ kind: "session_command" });
 
 		releaseCompaction.resolve();
 		await command;
-		expect(harness.session.hasSessionInputWork).toBe(false);
+		expect(harness.session.unfinishedActionCount).toBe(0);
 	});
 
 	it("waits for an executing session command before headless completion", async () => {
@@ -1894,6 +2356,49 @@ describe("AgentSession queue characterization", () => {
 		expect(compactionEndErrorSeverity).toBe("warning");
 	});
 
+	it("splits all-mode batches when execution policies differ", async () => {
+		const beforeAgentStartPrompts: string[] = [];
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", async (event) => {
+						beforeAgentStartPrompts.push(event.prompt);
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.session.setFollowUpMode("all");
+		harness.setResponses([fauxAssistantMessage("custom done"), fauxAssistantMessage("follow-up done")]);
+		const prompt = vi.spyOn(harness.session.agent, "prompt");
+		const admitted = createDeferred<void>();
+		let pause: { release(): void } | undefined;
+		const internals = harness.session as unknown as {
+			_canStartSessionActionImmediately(): boolean;
+			_scheduleSessionInputPump(): void;
+		};
+		const immediateEligibilitySpy = vi.spyOn(internals, "_canStartSessionActionImmediately").mockReturnValue(false);
+		const scheduleSpy = vi.spyOn(internals, "_scheduleSessionInputPump").mockImplementation(() => {
+			pause = harness.session.acquireQueuedWorkPause();
+			admitted.resolve();
+		});
+
+		const customTurn = harness.session.sendCustomMessage(
+			{ customType: "trigger", content: "trigger", display: false },
+			{ triggerTurn: true },
+		);
+		await admitted.promise;
+		immediateEligibilitySpy.mockRestore();
+		scheduleSpy.mockRestore();
+		await harness.session.followUp("ordinary follow-up");
+		pause?.release();
+		await customTurn;
+		await harness.session.waitForIdle();
+
+		expect(prompt).toHaveBeenCalledTimes(2);
+		expect(beforeAgentStartPrompts).toEqual(["ordinary follow-up"]);
+	});
+
 	it("serializes concurrent trigger-turn custom messages", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
@@ -1938,33 +2443,7 @@ describe("AgentSession queue characterization", () => {
 		expect(getAssistantTexts(harness)).toEqual(["custom done", "follow-up done"]);
 	});
 
-	it("rechecks queued-work pauses acquired at the direct-admission boundary", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("direct done")]);
-		const internals = harness.session as unknown as {
-			_acquireTurnAdmission(): Promise<{ owner: symbol; release(): void }>;
-		};
-		const acquireTurnAdmission = internals._acquireTurnAdmission.bind(internals);
-		let pause: { release(): void } | undefined;
-		let first = true;
-		internals._acquireTurnAdmission = async () => {
-			const admission = await acquireTurnAdmission();
-			if (first) {
-				first = false;
-				pause = harness.session.acquireQueuedWorkPause();
-			}
-			return admission;
-		};
-		const prompt = harness.session.prompt("direct");
-		await new Promise<void>((resolve) => setImmediate(resolve));
-		expect(getUserTexts(harness)).toEqual([]);
-		pause?.release();
-		await prompt;
-		expect(getUserTexts(harness)).toEqual(["direct"]);
-	});
-
-	it("rejects disposal while direct admission waits behind a pause", async () => {
+	it("settles an action disposed while its queued-work pause is held", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const pause = harness.session.acquireQueuedWorkPause();
@@ -1983,7 +2462,7 @@ describe("AgentSession queue characterization", () => {
 		expect(release).not.toHaveBeenCalled();
 	});
 
-	it("rejects a post-disposal direct call without prompting the agent", async () => {
+	it("rejects a post-disposal action call without prompting the agent", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const prompt = vi.spyOn(harness.session.agent, "prompt");
@@ -2034,8 +2513,7 @@ describe("AgentSession queue characterization", () => {
 			} else {
 				withStreaming(harness, false);
 				await prepared.promise;
-				// Owned by the pump during preparation, still reported as pending.
-				expect(harness.session.getFollowUpMessages()).toEqual(["accepted"]);
+				expect(harness.session.getFollowUpMessages()).toEqual([]);
 			}
 			await expect(
 				harness.session.restoreFollowUpMessage("duplicate", undefined, { queueKey: "same", agentMessageId: id }),
@@ -2124,33 +2602,6 @@ describe("AgentSession queue characterization", () => {
 		await expect(run(harness)).rejects.toThrow(`Cannot ${action} without aborting while the agent is running.`);
 	});
 
-	it("defers work queued after direct admission until the direct handoff", async () => {
-		const harness = await createHarness();
-		harnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage("direct done"), fauxAssistantMessage("queued done")]);
-		const internals = harness.session as unknown as {
-			_acquireDirectTurnAdmission(options?: { allowStreaming?: boolean }): Promise<{
-				owner: symbol;
-				release(): void;
-			}>;
-		};
-		const acquireDirectTurnAdmission = internals._acquireDirectTurnAdmission.bind(internals);
-		let queuedAtBoundary = false;
-		internals._acquireDirectTurnAdmission = async (options = {}) => {
-			const admission = await acquireDirectTurnAdmission(options);
-			if (!queuedAtBoundary) {
-				queuedAtBoundary = true;
-				await harness.session.followUp("queued", undefined, { resumeIfIdle: true });
-			}
-			return admission;
-		};
-
-		await harness.session.prompt("direct");
-		await harness.session.waitForIdle();
-
-		expect(getUserTexts(harness)).toEqual(["direct", "queued"]);
-	});
-
 	it("serializes an extension command behind an unrelated navigation owner", async () => {
 		let targetId: string | undefined;
 		const navigationGate = createDeferred();
@@ -2202,6 +2653,422 @@ describe("AgentSession queue characterization", () => {
 		expect(commandNavigated).toBe(true);
 		expect(navigationStarts).toBe(2);
 		expect(harness.sessionManager.getLeafId()).not.toBe(secondId);
+	});
+
+	it("defers steer heartbeats while a non-streaming session command is running", async () => {
+		const commandStarted = createDeferred();
+		const commandGate = createDeferred();
+		const harness = await createHarness();
+		harnesses.push(harness);
+		vi.spyOn(harness.session, "refine").mockImplementation(async () => {
+			commandStarted.resolve();
+			await commandGate.promise;
+			return emptyRefinementResult();
+		});
+
+		const command = harness.session.prompt("/refine --local");
+		await commandStarted.promise;
+		expect(harness.session.isStreaming).toBe(false);
+		expect(harness.session.unfinishedActionCount).toBe(1);
+		expect(harness.session.hasPendingSessionWork).toBe(false);
+		expect(shouldDeferHeartbeatCronJob(heartbeatJob(), harness.session)).toBe(true);
+
+		commandGate.resolve();
+		await command;
+	});
+
+	it("keeps a slow session command on one branch while concurrent navigation waits", async () => {
+		const commandStarted = createDeferred();
+		const commandGate = createDeferred();
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+		await harness.session.prompt("one");
+		const target = harness.sessionManager.getEntries().find((entry) => entry.type === "message");
+		expect(target).toBeDefined();
+		await harness.session.prompt("two");
+		vi.spyOn(harness.session, "refine").mockImplementation(async () => {
+			commandStarted.resolve();
+			await commandGate.promise;
+			return emptyRefinementResult();
+		});
+
+		const command = harness.session.prompt("/refine --local");
+		await commandStarted.promise;
+		let navigationSettled = false;
+		const navigation = harness.session.navigateTree(target!.id, { summarize: false }).then(() => {
+			navigationSettled = true;
+		});
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(navigationSettled).toBe(false);
+
+		commandGate.resolve();
+		await command;
+		await navigation;
+		const entries = harness.sessionManager.getEntries();
+		const inputEntry = entries.find(
+			(entry) =>
+				entry.type === "custom_message" &&
+				entry.customType === "session_slash_command" &&
+				entry.content === "/refine --local",
+		);
+		const resultEntry = entries.find(
+			(entry) => entry.type === "custom_message" && entry.customType === "session_slash_command_result",
+		);
+		expect(inputEntry).toBeDefined();
+		expect(resultEntry).toMatchObject({ display: false });
+		expect(harness.sessionManager.getBranch(resultEntry!.id).map((entry) => entry.id)).toContain(inputEntry!.id);
+	});
+
+	it("emits refine_failed when a queued /refine command fails", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("one")]);
+		await harness.session.prompt("one");
+		vi.spyOn(harness.session, "refine").mockRejectedValue(new Error("planner unavailable"));
+
+		const failures: string[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "refine_failed") failures.push(event.error);
+		});
+
+		await harness.session.prompt("/refine --local").catch(() => undefined);
+		expect(failures).toEqual(["planner unavailable"]);
+		const errorRow = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "custom_message" && entry.customType === "session_slash_command_result");
+		expect(errorRow).toMatchObject({ content: "Command failed: planner unavailable" });
+	});
+
+	it("emits an unpersisted /refine result when error-row persistence fails", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("one")]);
+		await harness.session.prompt("one");
+		vi.spyOn(harness.session, "refine").mockRejectedValue(new Error("planner unavailable"));
+
+		const append = harness.sessionManager.appendCustomMessageEntryWithRollback.bind(harness.sessionManager);
+		vi.spyOn(harness.sessionManager, "appendCustomMessageEntryWithRollback").mockImplementation((...args) => {
+			if (args[0] === "session_slash_command_result") throw new Error("disk full");
+			return append(...args);
+		});
+		const resultMessages: string[] = [];
+		harness.session.subscribe((event) => {
+			if (
+				event.type === "message_start" &&
+				event.message.role === "custom" &&
+				event.message.customType === "session_slash_command_result" &&
+				typeof event.message.content === "string"
+			) {
+				resultMessages.push(event.message.content);
+			}
+		});
+
+		await harness.session.prompt("/refine --local").catch(() => undefined);
+		expect(resultMessages).toEqual(["Command failed: planner unavailable"]);
+		expect(
+			harness.sessionManager
+				.getEntries()
+				.some((entry) => entry.type === "custom_message" && entry.customType === "session_slash_command_result"),
+		).toBe(false);
+	});
+
+	it("does not emit refine_failed when only the result-row persist fails after a successful refine", async () => {
+		const harness = await createAutoRefineHarness();
+		harnesses.push(harness);
+		const previousAgentDir = process.env.PRIME_AGENT_CODING_AGENT_DIR;
+		process.env.PRIME_AGENT_CODING_AGENT_DIR = `${harness.tempDir}/agent`;
+		try {
+			harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage(refinePlanJson("no-op"))]);
+			await harness.session.prompt("one");
+			const append = harness.sessionManager.appendCustomMessageEntryWithRollback.bind(harness.sessionManager);
+			vi.spyOn(harness.sessionManager, "appendCustomMessageEntryWithRollback").mockImplementation((...args) => {
+				if (args[0] === "session_slash_command_result") throw new Error("disk full");
+				return append(...args);
+			});
+			const failures: string[] = [];
+			harness.session.subscribe((event) => {
+				if (event.type === "refine_failed") failures.push(event.error);
+			});
+
+			await harness.session.prompt("/refine --local").catch(() => undefined);
+
+			expect(failures).toEqual([]);
+			expect(harness.session.messages.find(isRefinementOutcomeMessage)?.details.summary).toBe("no-op");
+		} finally {
+			if (previousAgentDir === undefined) {
+				delete process.env.PRIME_AGENT_CODING_AGENT_DIR;
+			} else {
+				process.env.PRIME_AGENT_CODING_AGENT_DIR = previousAgentDir;
+			}
+		}
+	});
+
+	it("allows a /compact extension hook to navigate without deadlocking on the commit fence", async () => {
+		let targetId: string | undefined;
+		let navigateFromContext: ((target: string) => Promise<{ cancelled: boolean }>) | undefined;
+		let navigated = false;
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.registerCommand("capture-navigation", {
+						description: "Capture command context",
+						handler: async (_args, ctx) => {
+							navigateFromContext = (target) => ctx.navigateTree(target, { summarize: false });
+						},
+					});
+					pi.on("session_before_compact", async () => {
+						if (!navigateFromContext) throw new Error("Expected captured extension command context");
+						const result = await navigateFromContext(targetId!);
+						navigated = !result.cancelled;
+						return { cancel: true };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({
+			commandContextActions: {
+				waitForIdle: () => harness.session.waitForIdle(),
+				newSession: async () => ({ cancelled: false }),
+				fork: async () => ({ cancelled: false }),
+				navigateTree: async (target, options) => harness.session.navigateTree(target, options),
+				switchSession: async () => ({ cancelled: false }),
+				reload: async () => {},
+			},
+		});
+		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+		await harness.session.prompt("one");
+		targetId = harness.sessionManager.getEntries().find((entry) => entry.type === "message")?.id;
+		expect(targetId).toBeDefined();
+		await harness.session.prompt("two");
+		await harness.session.prompt("/capture-navigation");
+
+		await harness.session.prompt("/compact");
+
+		expect(navigated).toBe(true);
+	});
+
+	it("waitForIdle yields to timers while queued work is paused", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("done")]);
+		const pause = harness.session.acquireQueuedWorkPause();
+		await harness.session.followUp("paused follow-up", undefined, { resumeIfIdle: true });
+		const originalWaitForIdle = harness.session.agent.waitForIdle.bind(harness.session.agent);
+		let waitCalls = 0;
+		vi.spyOn(harness.session.agent, "waitForIdle").mockImplementation(async () => {
+			if (++waitCalls > 100) throw new Error("waitForIdle spun without yielding");
+			await originalWaitForIdle();
+		});
+		const waiting = harness.session.waitForIdle().then(
+			() => ({ ok: true as const }),
+			(error: unknown) => ({ ok: false as const, error }),
+		);
+
+		try {
+			await new Promise<void>((resolve) => setTimeout(resolve, 0));
+			expect(waitCalls).toBeLessThan(100);
+			expect(harness.session.getFollowUpMessages()).toEqual(["paused follow-up"]);
+		} finally {
+			pause.release();
+		}
+		expect(await waiting).toEqual({ ok: true });
+		expect(getUserTexts(harness)).toEqual(["paused follow-up"]);
+	});
+
+	it("waitForIdle yields to timers while queued work is suspended after abort", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("done")]);
+		await harness.session.followUp("queued across abort");
+		harness.session.requestAbort();
+		expect(harness.session.getFollowUpMessages()).toEqual(["queued across abort"]);
+		const originalWaitForIdle = harness.session.agent.waitForIdle.bind(harness.session.agent);
+		let waitCalls = 0;
+		vi.spyOn(harness.session.agent, "waitForIdle").mockImplementation(async () => {
+			if (++waitCalls > 100) throw new Error("waitForIdle spun without yielding");
+			await originalWaitForIdle();
+		});
+		const waiting = harness.session.waitForIdle().then(
+			() => ({ ok: true as const }),
+			(error: unknown) => ({ ok: false as const, error }),
+		);
+
+		try {
+			await new Promise<void>((resolve) => setTimeout(resolve, 0));
+			expect(waitCalls).toBeLessThan(100);
+		} finally {
+			harness.session.resumeQueuedWork();
+		}
+		expect(await waiting).toEqual({ ok: true });
+		expect(getUserTexts(harness)).toEqual(["queued across abort"]);
+	});
+
+	it("admits a resumeIfIdle follow-up after abort suspends queued work", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("queued done"), fauxAssistantMessage("wake done")]);
+		await harness.session.followUp("queued before abort");
+		await harness.session.abort();
+
+		await expect(harness.session.followUp("wake after abort", undefined, { resumeIfIdle: true })).resolves.toBe(true);
+		await harness.session.waitForIdle();
+
+		expect(getUserTexts(harness)).toEqual(["queued before abort", "wake after abort"]);
+	});
+
+	it("resumes an explicit custom trigger after an ordinary abort", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("trigger resumed")]);
+		harness.session.requestAbort();
+
+		await harness.session.sendCustomMessage(
+			{ customType: "trigger", content: "resume after abort", display: false },
+			{ triggerTurn: true },
+		);
+		await harness.session.waitForIdle();
+		expect(
+			harness.session.messages.filter((message) => message.role === "custom").map((message) => message.content),
+		).toContain("resume after abort");
+	});
+
+	it("rejects all new session actions while an input admission pause is held", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const pause = harness.session.acquireSessionInputPause();
+		await expect(harness.session.prompt("blocked prompt")).rejects.toThrow("input admission is paused");
+		await expect(harness.session.followUp("blocked follow-up")).rejects.toThrow("input admission is paused");
+
+		pause.release();
+		harness.setResponses([fauxAssistantMessage("resumed")]);
+		await harness.session.prompt("allowed prompt");
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual(["allowed prompt"]);
+	});
+
+	it("reschedules previously queued input when an admission pause releases", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("queued input resumed")]);
+		const internals = harness.session as unknown as {
+			_sessionInputPumpRequested: boolean;
+			_scheduleSessionInputPump(): void;
+		};
+		const schedule = vi.spyOn(internals, "_scheduleSessionInputPump").mockImplementation(() => {});
+		await harness.session.followUp("queued before pause");
+		expect(harness.session.getFollowUpMessages()).toEqual(["queued before pause"]);
+		schedule.mockRestore();
+
+		// Model a pump that was requested before the pause invalidated its epoch.
+		internals._sessionInputPumpRequested = true;
+		const pause = harness.session.acquireSessionInputPause();
+		expect(internals._sessionInputPumpRequested).toBe(false);
+		pause.release();
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual(["queued before pause"]);
+	});
+
+	it("does not admit a late agent message across an abort and explicit resume", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("user turn done")]);
+		harness.session.requestAbort();
+		const lateAgentMessage = harness.session.acceptAgentMessagePrompt(
+			agentPromptText("agentmsg_after_abort", "late child result"),
+		);
+		const lateRejection = expect(lateAgentMessage).rejects.toThrow("queued session input is suspended");
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+		await harness.session.prompt("explicit user resume");
+		await lateRejection;
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual(["explicit user resume"]);
+	});
+
+	it("invalidates late agent-message admission when queued work is resumed", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.requestAbort();
+		const lateAgentMessage = harness.session.acceptAgentMessagePrompt(
+			agentPromptText("agentmsg_resume_queue", "late child result"),
+		);
+		const lateRejection = expect(lateAgentMessage).rejects.toThrow("queued session input is suspended");
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+		harness.session.resumeQueuedWork();
+		await lateRejection;
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).toEqual([]);
+	});
+
+	it("waitForIdle resolves when the queue is cleared while the pump is suspended", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		await harness.session.followUp("cleared while suspended");
+		harness.session.requestAbort();
+		expect(harness.session.getFollowUpMessages()).toEqual(["cleared while suspended"]);
+		const waiting = harness.session.waitForIdle().then(
+			() => ({ ok: true as const }),
+			(error: unknown) => ({ ok: false as const, error }),
+		);
+		await new Promise<void>((resolve) => setTimeout(resolve, 0));
+		const cleared = harness.session.clearQueue();
+		expect(cleared.followUp).toEqual(["cleared while suspended"]);
+		const outcome = await Promise.race([
+			waiting,
+			new Promise<{ ok: false; error: Error }>((resolve) =>
+				setTimeout(() => resolve({ ok: false, error: new Error("waitForIdle hung after clearQueue") }), 500),
+			),
+		]);
+		expect(outcome).toEqual({ ok: true });
+	});
+
+	it("does not report a visible accepted prompt as accepted in flight", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		withStreaming(harness, true);
+
+		await harness.session.promptUntilAccepted("visible queued prompt", {
+			streamingBehavior: "followUp",
+			queueIfBusy: true,
+		});
+
+		expect(harness.session.getFollowUpMessages()).toEqual(["visible queued prompt"]);
+		expect(harness.session.hasAcceptedPromptInFlight).toBe(false);
+		harness.session.clearQueue();
+		withStreaming(harness, false);
+	});
+
+	it("waitForIdle observes event-queue work chained while settling", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const initialEvent = createDeferred();
+		const chainedOperation = createDeferred();
+		const internals = harness.session as unknown as { _agentEventQueue: Promise<void> };
+		let eventQueue: Promise<void>;
+		eventQueue = initialEvent.promise.then(() => {
+			internals._agentEventQueue = eventQueue.then(() => chainedOperation.promise);
+		});
+		internals._agentEventQueue = eventQueue;
+		let idle = false;
+		const waiting = harness.session.waitForIdle().then(() => {
+			idle = true;
+		});
+		await new Promise<void>((resolve) => setImmediate(resolve));
+
+		initialEvent.resolve();
+		await eventQueue;
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		try {
+			expect(idle).toBe(false);
+		} finally {
+			chainedOperation.resolve();
+		}
+		await waiting;
+		expect(idle).toBe(true);
 	});
 
 	it("waitForIdle observes a run that starts at its final idle boundary", async () => {
@@ -2301,7 +3168,7 @@ describe("AgentSession scheduler scenarios", () => {
 			if (event.type === "message_start" && event.message.role === "user") {
 				countsAtUserMessageStart.push({
 					text: getMessageText(event.message),
-					pending: harness.session.pendingMessageCount,
+					pending: harness.session.queuedActionCount,
 				});
 			}
 		});
@@ -2368,7 +3235,7 @@ describe("AgentSession scheduler scenarios", () => {
 
 		// Phase 2: queued work stays in session queues, not Agent queues.
 		expect(harness.session.agent.hasQueuedMessages()).toBe(false);
-		const pendingAfterQueueing = harness.session.pendingMessageCount;
+		const pendingAfterQueueing = harness.session.queuedActionCount;
 		expect(pendingAfterQueueing).toBeGreaterThan(0);
 		expect(harness.session.getFollowUpMessages()).toContain("f1");
 		expect(harness.session.getFollowUpMessages()).toContain("f2");
@@ -2408,7 +3275,7 @@ describe("AgentSession scheduler scenarios", () => {
 		expect(rows).toContain("custom:queue-test-follow-up");
 
 		// Phase 5: every queued input left the pending count before its message_start.
-		expect(harness.session.pendingMessageCount).toBe(0);
+		expect(harness.session.queuedActionCount).toBe(0);
 		const queuedStarts = countsAtUserMessageStart.filter((entry) => entry.text !== "start");
 		expect(queuedStarts.length).toBeGreaterThan(0);
 		for (const entry of queuedStarts) {
@@ -2516,7 +3383,7 @@ describe("AgentSession scheduler scenarios", () => {
 		expect(continuationSawRemoved).toBe(false);
 		expect(getUserTexts(harness)).toEqual(["start", "keep me", spoofedPlain]);
 		expect(getAssistantTexts(harness)).toEqual(["", "continued clean", "keep me done", "spoof done"]);
-		expect(harness.session.pendingMessageCount).toBe(0);
+		expect(harness.session.queuedActionCount).toBe(0);
 	});
 
 	it("S3: pause-lease preparation journey with anchor re-preparation and direct handoff", async () => {
@@ -2635,10 +3502,15 @@ describe("AgentSession scheduler scenarios", () => {
 		await harness.session.waitForSessionInputIdle();
 		expect(providerCalls).toBe(0);
 		expect(harness.session.getFollowUpMessages()).toEqual(["queued for restart", "/goal inspect image", agentPrompt]);
-		expect(harness.session.getFollowUpQueueSnapshots()).toEqual([
-			expect.objectContaining({ text: "queued for restart" }),
-			expect.objectContaining({ text: "/goal inspect image", images: [image] }),
-			expect.objectContaining({ text: agentPrompt, agentMessageId: "agentmsg_abort" }),
+		expect(harness.session.getSessionActionRecoverySnapshot().actions).toEqual([
+			expect.objectContaining({ payload: expect.objectContaining({ text: "queued for restart" }) }),
+			expect.objectContaining({
+				payload: expect.objectContaining({ text: "/goal inspect image", images: [image] }),
+			}),
+			expect.objectContaining({
+				agentMessageId: "agentmsg_abort",
+				payload: expect.objectContaining({ text: agentPrompt }),
+			}),
 		]);
 		expect(deliverySettled).toBe(false);
 
@@ -2699,7 +3571,7 @@ describe("AgentSession scheduler scenarios", () => {
 		await expect(delivery).resolves.toBeUndefined();
 		expect(getUserTexts(harness)).toContain("queued for restart");
 		expect(getUserTexts(harness)).toContain(agentPrompt);
-		expect(harness.session.pendingMessageCount).toBe(0);
+		expect(harness.session.queuedActionCount).toBe(0);
 	});
 
 	it("S5: settles queued command delivery before gated completion and rejects completion on failure", async () => {

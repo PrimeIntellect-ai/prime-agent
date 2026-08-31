@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
 	psCalls: [] as boolean[],
 	reapCalls: [] as Array<[boolean, boolean]>,
 	shutdownCalls: [] as Array<[boolean, boolean]>,
+	mcpCommands: [] as string[][],
 }));
 
 vi.mock("../src/cli/daemon-command.js", () => ({
@@ -22,6 +23,19 @@ vi.mock("../src/package-manager-cli.js", () => ({
 		return true;
 	},
 	isSelfUpdateSource: (source: string) => source === "self" || source === "pi" || source === "prime-agent",
+}));
+
+vi.mock("../src/core/mcp/mcp-command.js", () => ({
+	runMcpManagementCommand: async (args: string[]) => {
+		mocks.mcpCommands.push(args);
+		return { action: args[0], message: "managed", changed: false };
+	},
+}));
+
+vi.mock("../src/core/settings-manager.js", () => ({
+	SettingsManager: {
+		create: () => ({ flush: async () => {}, drainErrors: () => [], getGlobalMcpServers: () => undefined }),
+	},
 }));
 
 vi.mock("../src/cli/daemon-ps.js", () => ({
@@ -48,6 +62,7 @@ describe("public command routing", () => {
 		mocks.psCalls.length = 0;
 		mocks.reapCalls.length = 0;
 		mocks.shutdownCalls.length = 0;
+		mocks.mcpCommands.length = 0;
 		process.exitCode = undefined;
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
@@ -98,9 +113,34 @@ describe("public command routing", () => {
 		});
 	});
 
+	it("routes MCP management without entering agent startup", async () => {
+		await expect(
+			handlePublicCommand(["mcp", "add", "local", "--", "node", "server file.js", "--stdio"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.mcpCommands).toEqual([["add", "local", "--", "node", "server file.js", "--stdio"]]);
+	});
+
 	it("routes agent operations through the internal protocol adapter", async () => {
 		await expect(handlePublicCommand(["list", "--all", "--json"])).resolves.toMatchObject({ handled: true });
 		expect(mocks.daemonCommands).toEqual([["daemon", "list", "--all", "--json"]]);
+	});
+
+	it("forwards a custom daemon socket when stopping an agent", async () => {
+		await expect(
+			handlePublicCommand(["stop", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.daemonCommands).toEqual([
+			["daemon", "kill", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"],
+		]);
+	});
+
+	it("forwards a custom daemon socket when renaming an agent", async () => {
+		await expect(
+			handlePublicCommand(["rename", "worker", "reviewer", "--daemon-socket", "/tmp/custom-daemon.sock"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.daemonCommands).toEqual([
+			["daemon", "rename", "worker", "reviewer", "--daemon-socket", "/tmp/custom-daemon.sock"],
+		]);
 	});
 
 	it("separates Prime Agent updates from package updates", async () => {
@@ -303,16 +343,30 @@ describe("public command routing", () => {
 		});
 	});
 
-	it("formats concise top-level help", () => {
+	it("formats complete top-level help, including autonomous options", () => {
 		const help = formatTopLevelHelp();
 		expect(help).toContain("Options:");
-		expect(help).toContain("-p, --print");
+		expect(help).toContain("Run options:");
+		expect(help).toContain("--mode <text|json|rpc|acp|daemon>");
+		expect(help).toContain("Autonomous options:");
+		for (const option of [
+			"--autonomous",
+			"--autonomous-gate <command>",
+			"--autonomous-gate-retries <n>",
+			"--autonomous-gate-timeout-ms <n>",
+			"--autonomous-max-continuations <n>",
+			"--autonomous-max-turns <n>",
+			"--autonomous-max-tokens <n>",
+			"--autonomous-timeout-ms <n>",
+		]) {
+			expect(help).toContain(option);
+		}
+		expect(help).toContain("default: 300000");
+		expect(help).toContain("default: 1800000");
 		expect(help).toContain("Commands:");
 		expect(help).toContain("shutdown");
-		expect(help).not.toContain("daemon");
 		expect(help).not.toContain("Environment Variables:");
 		expect(help).not.toContain("Examples:");
 		expect(help).not.toContain("Built-in Tool Names:");
-		expect(help).not.toContain("--autonomous");
 	});
 });

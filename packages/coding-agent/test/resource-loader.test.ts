@@ -468,6 +468,9 @@ Content`,
 			const { skills } = loader.getSkills();
 			const websearch = skills.find((s) => s.name === "websearch");
 			expect(websearch).toBeDefined();
+			expect(websearch?.description).toContain("/login");
+			expect(websearch?.description).toContain("MCP Connections");
+			expect(websearch?.description).toContain("Serper (web search)");
 			expect(websearch?.kind).toBe("python");
 			if (websearch?.kind === "python") {
 				expect(websearch.python.importName).toBe("websearch");
@@ -596,7 +599,6 @@ Explicit override.`,
 
 	describe("extension conflict detection", () => {
 		it("should detect tool conflicts between extensions", async () => {
-			// Create two extensions that register the same tool
 			const ext1Dir = join(agentDir, "extensions", "ext1");
 			const ext2Dir = join(agentDir, "extensions", "ext2");
 			mkdirSync(ext1Dir, { recursive: true });

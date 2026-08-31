@@ -24,8 +24,8 @@ type FakeInteractiveMode = {
 		isCompacting: boolean;
 		isBashRunning: boolean;
 		retryAttempt: number;
+		sessionActions: { queuedCount: number; steering: readonly string[]; followUps: readonly string[] };
 	};
-	connectionQueue: { steering: string[]; followUp: string[] };
 	agentConnection: {
 		abort: Mock;
 		clearQueue: Mock;
@@ -35,15 +35,17 @@ type FakeInteractiveMode = {
 		abortBranchSummary: Mock;
 		abortBash: Mock;
 	};
-	childAgentSummary: { invalidate: Mock };
+	subagentSummaryLine: { invalidate: Mock };
 	ui: { requestRender: Mock; onDebug?: () => void };
-	restoreQueuedMessagesToEditor: Mock;
 	updatePendingMessagesDisplay: Mock;
+	showError: Mock;
 	showTreeSelector: Mock;
 	shutdown: Mock;
 	updateEditorBorderColor: Mock;
+	queueSelection: { isBrowsing: boolean; reset: () => string };
 	defaultEditor?: {
 		onAction: Mock;
+		getHeaderLine?: () => string | undefined;
 		onEscape?: () => void;
 		onCtrlD?: () => void;
 		onPasteImage?: () => void;
@@ -93,8 +95,8 @@ function createInteractiveFake(options: {
 			isCompacting: options.compacting ?? false,
 			isBashRunning: options.bashRunning ?? false,
 			retryAttempt: options.retryAttempt ?? 0,
+			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 		},
-		connectionQueue: { steering: [], followUp: [] },
 		agentConnection: {
 			abort: vi.fn().mockResolvedValue(undefined),
 			clearQueue: vi.fn().mockResolvedValue({ steering: [], followUp: [] }),
@@ -104,10 +106,11 @@ function createInteractiveFake(options: {
 			abortBranchSummary: vi.fn(),
 			abortBash: vi.fn(),
 		},
-		childAgentSummary: { invalidate: vi.fn() },
+		subagentSummaryLine: { invalidate: vi.fn() },
 		ui: { requestRender: vi.fn() },
-		restoreQueuedMessagesToEditor: vi.fn().mockResolvedValue(0),
+		queueSelection: { isBrowsing: false, reset: () => "" },
 		updatePendingMessagesDisplay: vi.fn(),
+		showError: vi.fn(),
 		showTreeSelector: vi.fn(),
 		shutdown: vi.fn().mockResolvedValue(undefined),
 		updateEditorBorderColor: vi.fn(),
@@ -133,7 +136,7 @@ describe("InteractiveMode interrupt shortcuts", () => {
 
 		Reflect.get(InteractiveMode.prototype, "handleCtrlC").call(mode);
 
-		expect(mode.restoreQueuedMessagesToEditor).toHaveBeenCalledWith({ abort: true });
+		expect(mode.agentConnection.abort).toHaveBeenCalledTimes(1);
 		expect(mode.shutdown).not.toHaveBeenCalled();
 		expect(Reflect.get(InteractiveMode.prototype, "getTrayOverrideLabel").call(mode)).toBe(
 			"Press Ctrl+C again to exit",
@@ -146,7 +149,7 @@ describe("InteractiveMode interrupt shortcuts", () => {
 		Reflect.get(InteractiveMode.prototype, "handleCtrlC").call(mode);
 
 		expect(mode.agentConnection.abortBash).toHaveBeenCalledTimes(1);
-		expect(mode.restoreQueuedMessagesToEditor).toHaveBeenCalledWith({ abort: true });
+		expect(mode.agentConnection.abort).toHaveBeenCalledTimes(1);
 		expect(mode.shutdown).not.toHaveBeenCalled();
 	});
 
@@ -165,21 +168,21 @@ describe("InteractiveMode interrupt shortcuts", () => {
 		expect(mode.shutdown).not.toHaveBeenCalled();
 	});
 
-	it("restores queued messages through the atomic abort-and-clear path", async () => {
-		const mode = createInteractiveFake({ editorText: "draft" });
-		mode.agentConnection.abortAndClearQueue.mockResolvedValue({
-			steering: ["steer"],
-			followUp: ["follow"],
-		});
+	it("preserves the queue and the draft when interrupting streaming", () => {
+		const mode = createInteractiveFake({ editorText: "draft", streaming: true });
+		mode.connectionState.sessionActions = { queuedCount: 2, steering: ["steer"], followUps: ["follow"] };
 
-		const restoreQueuedMessagesToEditor = Reflect.get(InteractiveMode.prototype, "restoreQueuedMessagesToEditor");
-		const restored = await restoreQueuedMessagesToEditor.call(mode, { abort: true });
+		Reflect.get(InteractiveMode.prototype, "handleCtrlC").call(mode);
 
-		expect(restored).toBe(2);
-		expect(mode.agentConnection.abortAndClearQueue).toHaveBeenCalledTimes(1);
+		expect(mode.agentConnection.abort).toHaveBeenCalledTimes(1);
+		expect(mode.agentConnection.abortAndClearQueue).not.toHaveBeenCalled();
 		expect(mode.agentConnection.clearQueue).not.toHaveBeenCalled();
-		expect(mode.agentConnection.abort).not.toHaveBeenCalled();
-		expect(mode.editor.getText()).toBe("steer\n\nfollow\n\ndraft");
+		expect(mode.editor.getText()).toBe("draft");
+		expect(mode.connectionState.sessionActions).toEqual({
+			queuedCount: 2,
+			steering: ["steer"],
+			followUps: ["follow"],
+		});
 	});
 
 	it("exits on the second Ctrl+C while the hint is visible", () => {
@@ -189,7 +192,7 @@ describe("InteractiveMode interrupt shortcuts", () => {
 		handleCtrlC.call(mode);
 		handleCtrlC.call(mode);
 
-		expect(mode.restoreQueuedMessagesToEditor).toHaveBeenCalledTimes(1);
+		expect(mode.agentConnection.abort).toHaveBeenCalledTimes(1);
 		expect(mode.shutdown).toHaveBeenCalledTimes(1);
 	});
 
@@ -205,7 +208,7 @@ describe("InteractiveMode interrupt shortcuts", () => {
 		await vi.advanceTimersByTimeAsync(2000);
 
 		expect(Reflect.get(InteractiveMode.prototype, "getTrayOverrideLabel").call(mode)).toBeUndefined();
-		expect(mode.childAgentSummary.invalidate).toHaveBeenCalled();
+		expect(mode.subagentSummaryLine.invalidate).toHaveBeenCalled();
 		expect(mode.ui.requestRender).toHaveBeenCalled();
 	});
 
@@ -215,7 +218,7 @@ describe("InteractiveMode interrupt shortcuts", () => {
 		Reflect.get(InteractiveMode.prototype, "handleCtrlC").call(mode);
 
 		expect(mode.editor.getText()).toBe("draft");
-		expect(mode.restoreQueuedMessagesToEditor).not.toHaveBeenCalled();
+		expect(mode.agentConnection.abort).not.toHaveBeenCalled();
 		expect(mode.shutdown).not.toHaveBeenCalled();
 	});
 
@@ -236,7 +239,7 @@ describe("InteractiveMode interrupt shortcuts", () => {
 		Reflect.get(InteractiveMode.prototype, "setupKeyHandlers").call(mode);
 		expect(defaultEditor.onEscape).toBeDefined();
 		defaultEditor.onEscape?.();
-		expect(mode.restoreQueuedMessagesToEditor).toHaveBeenCalledWith({ abort: true });
+		expect(mode.agentConnection.abort).toHaveBeenCalledTimes(1);
 		expect(mode.editor.getText()).toBe("draft");
 		mode.editor.setText("queued draft");
 		defaultEditor.onChange?.("queued draft");
@@ -247,7 +250,7 @@ describe("InteractiveMode interrupt shortcuts", () => {
 		expect(mode.shutdown).not.toHaveBeenCalled();
 	});
 
-	it("preserves the tree repeat while restoring queued messages", async () => {
+	it("preserves the tree repeat while browsing into a queued message", () => {
 		const mode = createInteractiveFake({});
 		const defaultEditor: NonNullable<FakeInteractiveMode["defaultEditor"]> = {
 			onAction: vi.fn(),
@@ -256,6 +259,7 @@ describe("InteractiveMode interrupt shortcuts", () => {
 			defaultEditor,
 			keybindings: new KeybindingsManager(),
 			handleDebugCommand: vi.fn(),
+			isApplyingQueueSelectionText: false,
 		});
 		Reflect.get(InteractiveMode.prototype, "setupKeyHandlers").call(mode);
 		const setText = mode.editor.setText.bind(mode.editor);
@@ -265,11 +269,10 @@ describe("InteractiveMode interrupt shortcuts", () => {
 		};
 		mode.escapeRepeatAction = "tree";
 		mode.escapeRepeatExpiresAt = Date.now() + 500;
-		mode.agentConnection.abortAndClearQueue.mockResolvedValue({ steering: ["queued"], followUp: [] });
 
-		const restoreQueuedMessagesToEditor = Reflect.get(InteractiveMode.prototype, "restoreQueuedMessagesToEditor");
-		await restoreQueuedMessagesToEditor.call(mode, { abort: true });
+		Reflect.get(InteractiveMode.prototype, "setEditorTextFromQueueSelection").call(mode, "queued item");
 
+		expect(mode.editor.getText()).toBe("queued item");
 		expect(mode.escapeRepeatAction).toBe("tree");
 	});
 
@@ -294,7 +297,7 @@ describe("InteractiveMode interrupt shortcuts", () => {
 		defaultEditor.onEscape?.();
 
 		expect(mode.editor.getText()).toBe("");
-		expect(mode.restoreQueuedMessagesToEditor).not.toHaveBeenCalled();
+		expect(mode.agentConnection.abort).not.toHaveBeenCalled();
 	});
 
 	it("opens the tree on double Escape with an empty idle prompt", () => {

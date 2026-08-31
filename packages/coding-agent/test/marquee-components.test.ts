@@ -1,16 +1,10 @@
-import type { AssistantMessage, Usage, UserMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
 import { type Component, setKeybindings, TUI, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, test } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
-import {
-	ChildAgentDetailComponent,
-	type ChildAgentInspectorNode,
-	ChildAgentSummaryComponent,
-} from "../src/modes/interactive/components/child-agent-inspector.js";
-import { buildConversationComponents } from "../src/modes/interactive/components/conversation-components.js";
 import { IPythonCellComponent, type IPythonCellState } from "../src/modes/interactive/components/ipython-cell.js";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { initTheme } from "../src/modes/interactive/theme/theme.js";
@@ -48,14 +42,6 @@ const EMPTY_USAGE: Usage = {
 	},
 };
 
-function createUserMessage(text: string): UserMessage {
-	return {
-		role: "user",
-		content: [{ type: "text", text }],
-		timestamp: Date.now(),
-	};
-}
-
 function createAssistantMessage(text: string, thinking?: string): AssistantMessage {
 	return {
 		role: "assistant",
@@ -66,16 +52,6 @@ function createAssistantMessage(text: string, thinking?: string): AssistantMessa
 		usage: EMPTY_USAGE,
 		stopReason: "stop",
 		timestamp: Date.now(),
-	};
-}
-
-function bodyOptions(toolsExpanded = false) {
-	return {
-		ui: { requestRender() {} } as unknown as TUI,
-		cwd: "/tmp",
-		toolOptions: {},
-		getToolDefinition: () => undefined,
-		toolsExpanded,
 	};
 }
 
@@ -115,7 +91,6 @@ describe("marquee TUI components", () => {
 		const component = new IPythonCellComponent(state);
 
 		const collapsed = await renderInVirtualTerminal(component);
-		// Collapsed: marker + the bash command + duration + error name, on one line.
 		expect(collapsed).toContain("bash");
 		expect(collapsed).toContain("echo hi");
 		expect(collapsed).not.toContain("%%bash");
@@ -172,7 +147,7 @@ describe("marquee TUI components", () => {
 
 		const collapsed = stripAnsi(component.render(100).join("\n"));
 		expect(collapsed).toContain("cat /tmp/missing-file");
-		expect(collapsed).toContain("CalledProcessError · Ctrl+O to expand");
+		expect(collapsed).toContain("CalledProcessError · (Ctrl+O to expand)");
 		expect(collapsed).not.toContain("No such file or directory");
 		expect(collapsed).not.toContain("returned non-zero exit status 1.");
 		expect(collapsed).not.toContain("traceback collapsed");
@@ -207,7 +182,7 @@ describe("marquee TUI components", () => {
 		const component = new IPythonCellComponent(state);
 
 		const collapsed = stripAnsi(component.render(100).join("\n"));
-		expect(collapsed).toContain("RuntimeError · Ctrl+O to expand");
+		expect(collapsed).toContain("RuntimeError · (Ctrl+O to expand)");
 		expect(collapsed).not.toContain("no output");
 		expect(collapsed).not.toContain("/tmp/internal.py");
 		expect(collapsed).not.toContain("line 12");
@@ -252,7 +227,6 @@ describe("marquee TUI components", () => {
 		const component = new IPythonCellComponent(state);
 
 		const collapsed = stripAnsi(component.render(100).join("\n"));
-		// Collapsed python shows a one-line preview, the input line count, and the expand hint.
 		expect(collapsed).toContain("line_0 = 0");
 		expect(collapsed).not.toContain("line_7 = 7");
 		expect(collapsed).toContain("↑ 8");
@@ -277,7 +251,6 @@ describe("marquee TUI components", () => {
 		});
 
 		const collapsed = stripAnsi(component.render(100).join("\n"));
-		// A single status line carries both counts and exactly one expand hint.
 		expect(collapsed).toContain("↑ 8 ↓ 8 lines");
 		expect(collapsed.match(/to expand/g)?.length).toBe(1);
 	});
@@ -294,7 +267,6 @@ describe("marquee TUI components", () => {
 			details: { status: "ok", durationMs: 15 },
 			executionStarted: true,
 			argsComplete: true,
-			// Expanded so the long code/output lines wrap and reflow with width.
 			expanded: true,
 		};
 		const component = new IPythonCellComponent(state);
@@ -428,177 +400,6 @@ describe("marquee TUI components", () => {
 		expect(short).not.toContain("Ctrl+O to expand");
 	});
 
-	test("renders child agent summary inline list and detail view", () => {
-		const summary = new ChildAgentSummaryComponent(
-			() => "agents-sidebar",
-			() => "37% context left",
-		);
-		const node: ChildAgentInspectorNode = {
-			id: "sub-a",
-			label: "inspect training logs",
-			model: "openai/gpt-5.4",
-			status: "running",
-			sessionDir: "/tmp/session/sub-a",
-			children: [
-				{
-					id: "sub-b",
-					label: "check shard 2",
-					model: "anthropic/claude-sonnet-4-5",
-					status: "done",
-					sessionDir: "/tmp/session/sub-b",
-				},
-			],
-		};
-		summary.setNodes([node]);
-
-		// The info line carries location/context; the list renders the subagents
-		// below a separator, with the time pinned at the right edge.
-		const summaryLines = summary.render(90).map(stripAnsi);
-		const summaryText = summaryLines.join("\n");
-		expect(summaryText).toContain("agents-sidebar");
-		expect(summaryText).toContain("37% context left");
-		expect(summaryText).toContain("S1");
-		expect(summaryText).toContain("inspect train…");
-		expect(summaryText).toContain("GPT-5.4");
-		expect(summaryText).not.toContain("openai/gpt-5.4");
-		const infoRow = summary.render(90)[0] ?? "";
-		expect(visibleWidth(infoRow)).toBe(90);
-
-		summary.focused = true;
-		let openedNodeId: string | undefined;
-		summary.onOpenDetail = (nodeId) => {
-			openedNodeId = nodeId;
-		};
-		// Right opens the selected subagent, like Enter.
-		summary.handleInput("\x1b[C");
-		expect(openedNodeId).toBe("sub-a");
-
-		const detailComponent = new ChildAgentDetailComponent(() => 20);
-		detailComponent.setNode(node);
-		detailComponent.setBodyComponents(
-			buildConversationComponents(
-				[
-					createUserMessage("inspect training logs"),
-					createAssistantMessage("reading shard metrics", "checking loss curve"),
-				],
-				bodyOptions(),
-			),
-		);
-		const detailLines = detailComponent.render(42);
-		const detail = stripAnsi(detailLines.join("\n"));
-		expect(detail).toContain("inspect training logs");
-		expect(detail).toContain("reading shard metrics");
-		expect(detail).toContain("← back to chat");
-		expect(stripAnsi(detailComponent.render(80).at(-1) ?? "")).toContain("GPT-5.4");
-		expect(stripAnsi(detailComponent.render(80).at(-1) ?? "")).not.toContain("openai/gpt-5.4");
-		expect(detail).not.toContain("user: inspect training logs");
-		expect(detail).not.toContain("assistant: reading shard metrics");
-	});
-
-	test("renders child agent assistant errors in the detail view", () => {
-		const detailComponent = new ChildAgentDetailComponent(() => 20);
-		detailComponent.setToolsExpanded(true);
-		const assistantError: AssistantMessage = {
-			...createAssistantMessage(""),
-			content: [],
-			stopReason: "error",
-			errorMessage: [
-				"Provider request failed",
-				"Traceback (most recent call last):",
-				'  File "/tmp/internal.py", line 12, in run',
-				"RuntimeError: backend crashed",
-			].join("\n"),
-		};
-		detailComponent.setNode({
-			id: "sub-assistant-error",
-			label: "inspect failure",
-			status: "error",
-			sessionDir: "/tmp/session/sub-assistant-error",
-		});
-		detailComponent.setBodyComponents(buildConversationComponents([assistantError], bodyOptions(true)));
-
-		const expanded = stripAnsi(detailComponent.render(100).join("\n"));
-		expect(expanded).toContain("/tmp/internal.py");
-	});
-
-	test("routes child agent detail tool expansion through app keybindings", () => {
-		setKeybindings(new KeybindingsManager({ "app.tools.expand": "ctrl+x" }));
-		try {
-			const detailComponent = new ChildAgentDetailComponent(() => 20);
-			let toggleCount = 0;
-			detailComponent.onToggleToolsExpanded = () => {
-				toggleCount += 1;
-			};
-			detailComponent.setNode({
-				id: "sub-a",
-				label: "inspect training logs",
-				status: "running",
-				sessionDir: "/tmp/session/sub-a",
-			});
-
-			const before = stripAnsi(detailComponent.render(80).join("\n"));
-			expect(before).toContain("Ctrl+X to expand");
-			detailComponent.handleInput("\x18");
-
-			expect(toggleCount).toBe(1);
-			detailComponent.setToolsExpanded(true);
-			const after = stripAnsi(detailComponent.render(80).join("\n"));
-			expect(after).toContain("Ctrl+X to collapse");
-		} finally {
-			setKeybindings(new KeybindingsManager());
-		}
-	});
-
-	test("keeps child agent summary visible when the right tray label is long", () => {
-		const summary = new ChildAgentSummaryComponent(
-			() => undefined,
-			() => "Pursuing goal (1m 05s) · 25% context left",
-		);
-		summary.setNodes([
-			{
-				id: "sub-a",
-				label: "inspect training logs",
-				status: "running",
-				sessionDir: "/tmp/session/sub-a",
-			},
-		]);
-
-		const lines = summary.render(32);
-		const infoRow = lines[0] ?? "";
-
-		expect(visibleWidth(infoRow)).toBe(32);
-		expect(stripAnsi(infoRow)).toContain("Pursuing goal");
-		// The subagent itself renders as a list row below the info line.
-		expect(stripAnsi(lines.join("\n"))).toContain("S1");
-	});
-
-	test("renders full child agent detail without internal scroll controls", () => {
-		const detailComponent = new ChildAgentDetailComponent(() => 6);
-		detailComponent.setNode({
-			id: "sub-scroll",
-			label: "inspect long output",
-			status: "done",
-			sessionDir: "/tmp/session/sub-scroll",
-		});
-		detailComponent.setBodyComponents(
-			buildConversationComponents(
-				Array.from({ length: 12 }, (_, index) =>
-					createAssistantMessage(`conversation row ${String(index + 1).padStart(2, "0")}`),
-				),
-				bodyOptions(),
-			),
-		);
-
-		const firstLines = detailComponent.render(48);
-		const first = stripAnsi(firstLines.join("\n"));
-		expect(first).toContain("conversation row 01");
-		expect(first).toContain("conversation row 12");
-		expect(first).toContain("← back to chat");
-		expect(first).not.toContain("↑");
-		expect(first).not.toContain("↓");
-		expect(firstLines.length).toBeGreaterThan(6);
-	});
-
 	test("routes built-in ipython tool rows through the cell renderer", () => {
 		const component = new ToolExecutionComponent(
 			"ipython",
@@ -617,8 +418,6 @@ describe("marquee TUI components", () => {
 			isError: false,
 		});
 
-		// Collapsed: routed through the cell renderer (a status line), not the
-		// generic JSON arg dump.
 		const collapsedLines = component.render(100);
 		const collapsed = stripAnsi(collapsedLines.join("\n"));
 		expect(collapsed).toContain("python");
@@ -627,8 +426,6 @@ describe("marquee TUI components", () => {
 		expect(collapsed).not.toContain("ipython");
 		expect(collapsed).not.toContain('"code"');
 
-		// Expanded keeps the same status content while updating the toggle hint,
-		// then attaches the code and output below it, backgroundless like the top line.
 		component.setExpanded(true);
 		const expandedLines = component.render(100);
 		const expanded = stripAnsi(expandedLines.join("\n"));

@@ -3,7 +3,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
+import { expandCollapseHint } from "../../modes/interactive/components/keybinding-hints.js";
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.js";
 import { theme } from "../../modes/interactive/theme/theme.js";
 import { waitForChildProcess } from "../../utils/child-process.js";
@@ -81,17 +81,14 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 				if (child.pid) trackDetachedChildPid(child.pid);
 				let timedOut = false;
 				let timeoutHandle: NodeJS.Timeout | undefined;
-				// Set timeout if provided.
 				if (timeout !== undefined && timeout > 0) {
 					timeoutHandle = setTimeout(() => {
 						timedOut = true;
 						if (child.pid) killProcessTree(child.pid);
 					}, timeout * 1000);
 				}
-				// Stream stdout and stderr.
 				child.stdout?.on("data", onData);
 				child.stderr?.on("data", onData);
-				// Handle abort signal by killing the entire process tree.
 				const onAbort = () => {
 					if (child.pid) killProcessTree(child.pid);
 				};
@@ -232,8 +229,7 @@ function rebuildBashResultRenderComponent(
 					}
 					if (state.cachedSkipped && state.cachedSkipped > 0) {
 						const hint = showExpandHint
-							? theme.fg("muted", `... (${state.cachedSkipped} earlier lines,`) +
-								` ${keyHint("app.tools.expand", "to expand")})`
+							? `${theme.fg("muted", `... ${state.cachedSkipped} earlier lines`)} ${expandCollapseHint("app.tools.expand", false)}`
 							: theme.fg("muted", `... (${state.cachedSkipped} earlier lines)`);
 						return ["", truncateToWidth(hint, width, "..."), ...(state.cachedLines ?? [])];
 					}

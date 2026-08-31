@@ -18,7 +18,7 @@ flowchart TD
         policy["Continuation policy"]
         queue["Session prompt queue"]
         session["AgentSession"]
-        kernel["Persistent IPython kernel"]
+        kernel["Persistent Python kernel"]
         children["RLM child sessions"]
 
         heartbeat --> queue
@@ -44,7 +44,7 @@ The client can detach at any point. The resident worker continues to own the que
 
 ## Daemon-Backed Sessions
 
-Normal interactive sessions run in resident worker processes managed by a local supervisor. The worker owns the root session, its IPython kernel, scheduled jobs, and RLM descendants.
+Normal interactive sessions run in resident worker processes managed by a local supervisor. The worker owns the root session, its Python kernel, scheduled jobs, and RLM descendants.
 
 Closing the terminal UI detaches the client; it does not stop the worker. List and reconnect to active agents with:
 
@@ -76,13 +76,14 @@ The daemon routes direct messages between active sessions and retained daemon-ba
 prime-agent send <agent> "Please verify the latest migration"
 ```
 
-From the IPython kernel, use the preloaded `agent_message` Python skill:
+From the Python kernel, use the preloaded `agent_message` Python skill:
 
 ```python
 roster = await agent_message.list_agents()
 receipt = await agent_message.send(
-    "api-reviewer",
     "Recheck the endpoint after the latest edit",
+    receiver_role="sibling",
+    receiver_name="api-reviewer",
     mode="auto",
 )
 print(receipt["deliveryStatus"])
@@ -93,7 +94,11 @@ For the current parent's direct RLM children, prefer the parent-scoped registry:
 ```python
 children = await rlm.list_subagents()
 child = next(item for item in children if item.session_name == "api-reviewer")
-await agent_message.send(child.session_name, "Continue with the updated diff")
+await agent_message.send(
+    "Continue with the updated diff",
+    receiver_role="child",
+    receiver_name=child.session_name,
+)
 ```
 
 Delivery modes are:
@@ -102,7 +107,7 @@ Delivery modes are:
 - `steer`: intentionally inject the message into active work; and
 - `follow_up`: wait until the target's current work finishes.
 
-A receipt is `delivered` when it reached an idle target's context or `queued` when accepted for later delivery. Messaging is direct only; broadcasts are not supported. The daemon derives sender identity and enforces message-size, rate, and pending-queue limits.
+A receipt is `delivered` when it reached an idle target's context or `queued` when accepted for later delivery. `agent_message.send("all", message)` broadcasts only within the family roster. The daemon derives sender identity and enforces message-size, rate, and pending-queue limits.
 
 ## Heartbeats and Scheduled Prompts
 
@@ -222,7 +227,7 @@ Goals and autonomous mode are complementary but different:
 
 ## Compaction and Continuity
 
-Automatic compaction handles context growth during long tasks. On overflow or near the configured threshold, Prime Agent summarizes older messages, retains recent context, and continues. The IPython kernel persists through compaction, so variables, imports, helper functions, and task state remain available.
+Automatic compaction handles context growth during long tasks. On overflow or near the configured threshold, Prime Agent summarizes older messages, retains recent context, and continues. The Python kernel persists through compaction, so variables, imports, helper functions, and task state remain available.
 
 The agent can inspect or request compaction programmatically:
 

@@ -1,3 +1,4 @@
+import type { ImageContent, TextContent, UserMessage } from "@earendil-works/pi-ai";
 import chalk from "chalk";
 import { spawn } from "child_process";
 import { readFileSync, rmSync, statSync } from "fs";
@@ -41,25 +42,22 @@ import {
 	type SelfUpdateCommand,
 	VERSION,
 } from "./config.js";
-import { parseAgentSessionMessagePromptId } from "./core/agent-messages.js";
+import type { SessionActionRecoverySnapshot } from "./core/agent-session.js";
+import { SESSION_ACTION_RECOVERY_FORMAT_VERSION } from "./core/agent-session.js";
 import type { AgentSessionRuntimeMetadata } from "./core/agent-session-runtime.js";
-import {
-	type CustomMessage,
-	isSessionSlashCommandMessage,
-	SESSION_SLASH_COMMAND_CUSTOM_TYPE,
-} from "./core/messages.js";
+import { type CustomMessage, isSessionSlashCommand } from "./core/messages.js";
 import { DefaultPackageManager } from "./core/package-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { DaemonClient, type DaemonHello } from "./modes/daemon/daemon-client.js";
 import {
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_ID,
+	DAEMON_UPDATE_RESTART_FORMAT_VERSION,
 	type DaemonUpdateRestartManifest,
-	type DaemonUpdateRestartQueuedMessage,
 	type DaemonUpdateRestartSession,
 	isUnknownDaemonCommandError,
 } from "./modes/daemon/daemon-protocol.js";
-import { defaultDaemonSocketPath } from "./modes/daemon/daemon-socket.js";
+import { defaultDaemonSocketPath, normalizeSocketPath } from "./modes/daemon/daemon-socket.js";
 import {
 	acquireDaemonShutdownAdmission,
 	persistDaemonStartupFenceFromOwner,
@@ -270,7 +268,7 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 				conflictingOptions = conflictingOptions ?? "--daemon-socket can only be provided once";
 				index++;
 			} else {
-				daemonSocketPath = value;
+				daemonSocketPath = normalizeSocketPath(value);
 				index++;
 			}
 			continue;
@@ -394,7 +392,9 @@ function updateTargetIncludesExtensions(target: UpdateTarget): boolean {
 }
 
 export function resolveUpdateDaemonSocketPath(explicitSocketPath?: string): string {
-	return explicitSocketPath ?? process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] ?? defaultDaemonSocketPath();
+	return normalizeSocketPath(
+		explicitSocketPath ?? process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] ?? defaultDaemonSocketPath(),
+	);
 }
 
 function reportDaemonUpdateRestartStatus(status: DaemonUpdateRestartStatus): void {
@@ -430,6 +430,7 @@ interface SelfUpdatePlan {
 	installSpec: string;
 	packageName: string;
 	shouldRun: boolean;
+	targetVersion?: string;
 }
 
 function setSelfUpdateNoChangeExitCode(): void {
@@ -449,7 +450,7 @@ async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
 			packageRenameRequiresUpdate ||
 			isNewerPackageVersion(latestRelease.version, VERSION)
 		) {
-			return { installSpec, packageName, shouldRun: true };
+			return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease?.version };
 		}
 	} catch {
 		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: true };
@@ -516,6 +517,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isStringEnum(value: unknown, allowed: readonly string[]): boolean {
+	return typeof value === "string" && allowed.includes(value);
+}
+
 function readString(value: unknown, fieldName: string): string {
 	if (typeof value !== "string") {
 		throw new Error(`Daemon update restart response is missing ${fieldName}`);
@@ -557,36 +562,16 @@ function readOptionalStringRecord(value: unknown, fieldName: string): Record<str
 	return value as Record<string, string>;
 }
 
-function readOptionalImages(value: unknown, fieldName: string): DaemonUpdateRestartQueuedMessage["images"] {
-	if (value === undefined) {
-		return undefined;
-	}
-	if (!Array.isArray(value) || !value.every(isImageContent)) {
-		throw new Error(`Daemon update restart response is missing ${fieldName}`);
-	}
-	return value;
-}
-
-function readOptionalMessageContent(value: unknown, fieldName: string): DaemonUpdateRestartQueuedMessage["content"] {
-	if (value === undefined) {
-		return undefined;
-	}
-	if (!Array.isArray(value) || !value.every(isCustomMessageContentBlock)) {
-		throw new Error(`Daemon update restart response is missing ${fieldName}`);
-	}
-	return value;
-}
-
-function isImageContent(value: unknown): value is NonNullable<DaemonUpdateRestartQueuedMessage["images"]>[number] {
+function isMessageContentBlock(value: unknown): value is TextContent | ImageContent {
 	return (
-		isRecord(value) && value.type === "image" && typeof value.data === "string" && typeof value.mimeType === "string"
+		isRecord(value) &&
+		((value.type === "text" && typeof value.text === "string") ||
+			(value.type === "image" && typeof value.data === "string" && typeof value.mimeType === "string"))
 	);
 }
 
-function isCustomMessageContentBlock(
-	value: unknown,
-): value is NonNullable<DaemonUpdateRestartQueuedMessage["content"]>[number] {
-	return (isRecord(value) && value.type === "text" && typeof value.text === "string") || isImageContent(value);
+function isImageContent(value: unknown): value is ImageContent {
+	return isMessageContentBlock(value) && value.type === "image";
 }
 
 function isCustomMessage(value: unknown): value is CustomMessage {
@@ -595,83 +580,98 @@ function isCustomMessage(value: unknown): value is CustomMessage {
 		value.role === "custom" &&
 		typeof value.customType === "string" &&
 		(typeof value.content === "string" ||
-			(Array.isArray(value.content) && value.content.every(isCustomMessageContentBlock))) &&
+			(Array.isArray(value.content) && value.content.every(isMessageContentBlock))) &&
 		typeof value.display === "boolean" &&
 		typeof value.timestamp === "number"
 	);
 }
 
+function isUserMessage(value: unknown): value is UserMessage {
+	return (
+		isRecord(value) &&
+		value.role === "user" &&
+		(typeof value.content === "string" ||
+			(Array.isArray(value.content) && value.content.every(isMessageContentBlock))) &&
+		typeof value.timestamp === "number"
+	);
+}
+
+function isQueuedAgentMessage(value: unknown): value is UserMessage | CustomMessage {
+	return isUserMessage(value) || isCustomMessage(value);
+}
+
 function readCustomMessages(value: unknown, fieldName: string): CustomMessage[] {
-	if (value === undefined) {
-		return [];
-	}
+	if (value === undefined) return [];
 	if (!Array.isArray(value) || !value.every(isCustomMessage)) {
 		throw new Error(`Daemon update restart response is missing ${fieldName}`);
 	}
 	return value;
 }
 
-function parseDaemonUpdateRestartQueuedMessage(value: unknown): DaemonUpdateRestartQueuedMessage {
-	if (!isRecord(value)) {
-		throw new Error("Daemon update restart response contains an invalid queued message");
-	}
-	const message = readString(value.message, "queue.message");
-	const content = readOptionalMessageContent(value.content, "queue.content");
-	const images = readOptionalImages(value.images, "queue.images");
-	const queueKey = readOptionalString(value.queueKey, "queue.queueKey");
-	const prefixMessages = readCustomMessages(value.prefixMessages, "queue.prefixMessages");
-	const customMessage =
-		value.customMessage === undefined
-			? undefined
-			: isCustomMessage(value.customMessage)
-				? value.customMessage
-				: undefined;
+function isSessionActionRecoveryAction(value: unknown): value is SessionActionRecoverySnapshot["actions"][number] {
 	if (
-		value.customMessage !== undefined &&
-		(!customMessage ||
-			(customMessage.customType === SESSION_SLASH_COMMAND_CUSTOM_TYPE &&
-				(!isSessionSlashCommandMessage(customMessage) || message !== customMessage.details.command.text)))
+		!isRecord(value) ||
+		typeof value.id !== "string" ||
+		typeof value.source !== "string" ||
+		(value.delivery !== "next_turn_boundary" && value.delivery !== "when_run_idle") ||
+		(value.wake !== "immediate" && value.wake !== "on_lower_boundary" && value.wake !== "external_resume") ||
+		!isRecord(value.payload) ||
+		typeof value.payload.text !== "string" ||
+		(value.payload.images !== undefined &&
+			(!Array.isArray(value.payload.images) || !value.payload.images.every(isImageContent)))
 	) {
-		throw new Error("Daemon update restart response contains an invalid custom queued message");
+		return false;
 	}
-	const restoredAgentMessageId = readOptionalString(value.agentMessageId, "queue.agentMessageId");
-	if (restoredAgentMessageId === "") throw new Error("queue.agentMessageId must not be empty");
-	const agentMessageId = restoredAgentMessageId ?? parseAgentSessionMessagePromptId(message);
+	if (value.payload.kind === "session_command") return isSessionSlashCommand(value.payload.command);
+	return (
+		value.payload.kind === "turn" &&
+		Array.isArray(value.payload.records) &&
+		value.payload.records.filter((record) => isRecord(record) && record.role === "primary").length === 1 &&
+		value.payload.records.every(
+			(record) =>
+				isRecord(record) &&
+				typeof record.id === "string" &&
+				(record.role === "primary" || record.role === "prefix" || record.role === "next_turn") &&
+				record.ownerActionId === value.id &&
+				isQueuedAgentMessage(record.message),
+		) &&
+		(value.payload.content === undefined ||
+			(Array.isArray(value.payload.content) && value.payload.content.every(isMessageContentBlock))) &&
+		(value.payload.customMessage === undefined || isCustomMessage(value.payload.customMessage)) &&
+		isRecord(value.payload.executionPolicy) &&
+		isRecord(value.payload.executionPolicy.preparation) &&
+		isStringEnum(value.payload.executionPolicy.preparation.initialRefineBarrier, ["always", "ifInFlight", "skip"]) &&
+		typeof value.payload.executionPolicy.preparation.flushPendingBashBeforeValidation === "boolean" &&
+		typeof value.payload.executionPolicy.preparation.validateModelAndAuth === "boolean" &&
+		typeof value.payload.executionPolicy.preparation.awaitPendingModelSelection === "boolean" &&
+		isStringEnum(value.payload.executionPolicy.preparation.preTurnCompaction, [
+			"beforeModelSelection",
+			"afterModelSelection",
+			"skip",
+		]) &&
+		isStringEnum(value.payload.executionPolicy.preparation.finalRefineBarrier, ["always", "ifInFlight", "skip"]) &&
+		typeof value.payload.executionPolicy.runBeforeAgentStart === "boolean" &&
+		isStringEnum(value.payload.executionPolicy.nextTurnContextTiming, ["preparation", "commit", "skip"]) &&
+		typeof value.payload.executionPolicy.preserveEmptyExtensionPrompt === "boolean" &&
+		typeof value.payload.executionPolicy.completionIncludesRetryChain === "boolean" &&
+		typeof value.payload.queueVisible === "boolean" &&
+		typeof value.payload.acceptedAgentMessage === "boolean" &&
+		typeof value.payload.acceptedBeforeCompletion === "boolean"
+	);
+}
+
+function parseSessionActionRecoverySnapshot(value: unknown): SessionActionRecoverySnapshot {
+	if (!isRecord(value)) throw new Error("Daemon update restart response contains invalid session actions");
+	if (value.formatVersion !== SESSION_ACTION_RECOVERY_FORMAT_VERSION) {
+		throw new Error(`Unsupported session action recovery format version: ${String(value.formatVersion)}`);
+	}
+	if (!Array.isArray(value.actions) || !value.actions.every(isSessionActionRecoveryAction)) {
+		throw new Error("Daemon update restart response is missing session actions");
+	}
 	return {
-		message,
-		...(content ? { content } : {}),
-		...(images ? { images } : {}),
-		...(queueKey ? { queueKey } : {}),
-		...(agentMessageId ? { agentMessageId } : {}),
-		...(customMessage ? { customMessage } : {}),
-		...(prefixMessages.length > 0 ? { prefixMessages } : {}),
+		formatVersion: SESSION_ACTION_RECOVERY_FORMAT_VERSION,
+		actions: value.actions,
 	};
-}
-
-function parseDaemonUpdateRestartAcceptedPrompt(
-	value: unknown,
-): NonNullable<DaemonUpdateRestartSession["queue"]["acceptedPrompt"]> {
-	if (!isRecord(value)) {
-		throw new Error("Daemon update restart response contains an invalid accepted prompt");
-	}
-	return {
-		...parseDaemonUpdateRestartQueuedMessage(value),
-		nextTurn: readCustomMessages(value.nextTurn, "queue.acceptedPrompt.nextTurn"),
-	};
-}
-
-function readOptionalAcceptedPrompt(value: unknown): DaemonUpdateRestartSession["queue"]["acceptedPrompt"] | undefined {
-	if (value === undefined) {
-		return undefined;
-	}
-	return parseDaemonUpdateRestartAcceptedPrompt(value);
-}
-
-function readQueuedMessages(value: unknown, fieldName: string): DaemonUpdateRestartQueuedMessage[] {
-	if (!Array.isArray(value)) {
-		throw new Error(`Daemon update restart response is missing ${fieldName}`);
-	}
-	return value.map(parseDaemonUpdateRestartQueuedMessage);
 }
 
 function parseDaemonUpdateRestartRuntimeMetadata(value: unknown): AgentSessionRuntimeMetadata | undefined {
@@ -710,10 +710,6 @@ function parseDaemonUpdateRestartRuntimeMetadata(value: unknown): AgentSessionRu
 	};
 }
 
-function wasFollowUpQueued(response: { success: true; data?: unknown }): boolean {
-	return !isRecord(response.data) || response.data.queued !== false;
-}
-
 function parseDaemonUpdateRestartSession(value: unknown): DaemonUpdateRestartSession {
 	if (!isRecord(value)) {
 		throw new Error("Daemon update restart response contains an invalid session");
@@ -737,12 +733,8 @@ function parseDaemonUpdateRestartSession(value: unknown): DaemonUpdateRestartSes
 		...(runtimeMetadata ? { runtimeMetadata } : {}),
 		...(clientEnv ? { clientEnv } : {}),
 		queue: {
-			steering: readQueuedMessages(queue.steering, "queue.steering"),
-			followUp: readQueuedMessages(queue.followUp, "queue.followUp"),
+			actions: parseSessionActionRecoverySnapshot(queue.actions),
 			nextTurn: readCustomMessages(queue.nextTurn, "queue.nextTurn"),
-			...(queue.acceptedPrompt !== undefined
-				? { acceptedPrompt: readOptionalAcceptedPrompt(queue.acceptedPrompt) }
-				: {}),
 		},
 		shouldResume: readBoolean(value.shouldResume, "shouldResume"),
 		wasStreaming: readBoolean(value.wasStreaming, "wasStreaming"),
@@ -758,11 +750,15 @@ function parseDaemonUpdateRestartManifest(value: unknown): DaemonUpdateRestartMa
 	if (!isRecord(value)) {
 		throw new Error("Daemon update restart response is invalid");
 	}
+	if (value.formatVersion !== DAEMON_UPDATE_RESTART_FORMAT_VERSION) {
+		throw new Error(`Unsupported daemon update restart format version: ${String(value.formatVersion)}`);
+	}
 	const sessions = value.sessions;
 	if (!Array.isArray(sessions)) {
 		throw new Error("Daemon update restart response is missing sessions");
 	}
 	return {
+		formatVersion: DAEMON_UPDATE_RESTART_FORMAT_VERSION,
 		createdAt: readString(value.createdAt, "createdAt"),
 		sessions: sessions.map(parseDaemonUpdateRestartSession),
 	};
@@ -812,6 +808,7 @@ function tryReadPreparedDaemonUpdateRestartManifest(
 	try {
 		return readPreparedDaemonUpdateRestartManifest(socketPath, agentDir);
 	} catch {
+		clearPreparedDaemonUpdateRestartManifest(socketPath, agentDir);
 		return undefined;
 	}
 }
@@ -874,11 +871,8 @@ async function prepareConnectedDaemonUpdateRestart(
 		if (hasFixedDaemonSupervisorOwnerIdentity(hello)) {
 			fixedOwnerIdentity = hello;
 		}
-		const useLegacyProtocol = hello !== undefined && hello.protocol.version < DAEMON_PROTOCOL_VERSION;
 		if (pendingManifest && pendingManifest.sessions.length > 0) {
-			const listResponse = useLegacyProtocol
-				? await client.requestLegacy({ type: "list" }, 30000)
-				: await client.request({ type: "list" }, 30000);
+			const listResponse = await client.request({ type: "list" }, 30000);
 			if (listResponse.success && !responseHasActiveDaemonSessions(listResponse.data)) {
 				await persistPreparedRestartFence();
 				return pendingManifest;
@@ -886,9 +880,7 @@ async function prepareConnectedDaemonUpdateRestart(
 		}
 		clearPreparedDaemonUpdateRestartManifest(socketPath, agentDir);
 		startedAt = Date.now();
-		const response = useLegacyProtocol
-			? await client.requestLegacy({ type: "prepare_update_restart" }, 120000)
-			: await client.request({ type: "prepare_update_restart" }, 120000);
+		const response = await client.request({ type: "prepare_update_restart" }, 120000);
 		if (!response.success) {
 			throw new Error(response.error);
 		}
@@ -1043,11 +1035,9 @@ async function restoreDaemonUpdateRestartSession(
 			);
 		}
 	}
-	const acceptedPrompt = session.queue.acceptedPrompt;
-	if (!session.shouldResume) {
-		await restoreNextTurnMessages(client, activeSessionId, session.sessionFile, session.queue.nextTurn);
-		return { restored: true, resumed: false };
-	}
+	await restoreNextTurnMessages(client, activeSessionId, session.sessionFile, session.queue.nextTurn);
+	if (!session.shouldResume) return { restored: true, resumed: false };
+
 	const needsContinuationPrompt =
 		session.wasStreaming ||
 		session.wasCompacting ||
@@ -1055,87 +1045,28 @@ async function restoreDaemonUpdateRestartSession(
 		session.hadRunningRlmChildren ||
 		session.wasRetrying ||
 		session.hadAcceptedPromptInFlight;
-	const steeringQueue = [...session.queue.steering];
-	const followUpQueue = [...session.queue.followUp];
 	let resumedSession = false;
 	let restoredQueuedWork = false;
-	if (acceptedPrompt) {
-		await restoreNextTurnMessages(client, activeSessionId, session.sessionFile, acceptedPrompt.nextTurn);
-	} else {
-		await restoreNextTurnMessages(client, activeSessionId, session.sessionFile, session.queue.nextTurn);
-	}
-	for (const queued of steeringQueue) {
+	if (session.queue.actions.actions.length > 0) {
 		const response = await client.request(
-			{
-				type: "steer",
-				activeSessionId,
-				message: queued.message,
-				content: queued.content,
-				images: queued.images,
-				expandPromptTemplates: false,
-				agentMessageId: queued.agentMessageId,
-				customMessage: queued.customMessage,
-				prefixMessages: queued.prefixMessages,
-			},
+			{ type: "restore_actions", activeSessionId, snapshot: session.queue.actions },
 			30000,
 		);
 		if (response.success) {
 			restoredQueuedWork = true;
 		} else {
 			console.error(
-				chalk.yellow(
-					`Warning: could not restore queued steering message for ${session.sessionFile}: ${response.error}`,
-				),
+				chalk.yellow(`Warning: could not restore queued actions for ${session.sessionFile}: ${response.error}`),
 			);
 		}
 	}
-	for (const queued of followUpQueue) {
-		const response = await client.request(
-			{
-				type: "follow_up",
-				activeSessionId,
-				message: queued.message,
-				content: queued.content,
-				images: queued.images,
-				queueKey: queued.queueKey,
-				expandPromptTemplates: false,
-				agentMessageId: queued.agentMessageId,
-				customMessage: queued.customMessage,
-				prefixMessages: queued.prefixMessages,
-			},
-			30000,
+	const restoredAcceptedTurn =
+		restoredQueuedWork &&
+		session.queue.actions.actions.some(
+			(action) =>
+				action.payload.kind === "turn" && !action.payload.queueVisible && action.payload.acceptedBeforeCompletion,
 		);
-		if (response.success && wasFollowUpQueued(response)) {
-			restoredQueuedWork = true;
-		} else if (!response.success) {
-			console.error(
-				chalk.yellow(
-					`Warning: could not restore queued follow-up message for ${session.sessionFile}: ${response.error}`,
-				),
-			);
-		}
-	}
-	if (acceptedPrompt) {
-		const promptResponse = await client.request(
-			{
-				type: "prompt",
-				activeSessionId,
-				message: acceptedPrompt.message,
-				content: acceptedPrompt.content,
-				images: acceptedPrompt.images,
-				expandPromptTemplates: false,
-				agentMessageId: acceptedPrompt.agentMessageId,
-				customMessage: acceptedPrompt.customMessage,
-			},
-			120000,
-		);
-		if (!promptResponse.success) {
-			console.error(chalk.yellow(`Warning: could not resume ${session.sessionFile}: ${promptResponse.error}`));
-		} else {
-			resumedSession = true;
-		}
-		await restoreNextTurnMessages(client, activeSessionId, session.sessionFile, session.queue.nextTurn);
-	} else if (needsContinuationPrompt) {
+	if (needsContinuationPrompt && !restoredAcceptedTurn) {
 		const promptResponse = await client.request(
 			{
 				type: "prompt",
@@ -1151,7 +1082,7 @@ async function restoreDaemonUpdateRestartSession(
 			resumedSession = true;
 		}
 	}
-	if (!resumedSession && restoredQueuedWork && !acceptedPrompt) {
+	if (!resumedSession && restoredQueuedWork) {
 		const response = await client.request({ type: "resume_queue", activeSessionId }, 30000);
 		if (response.success) {
 			resumedSession = true;
@@ -1247,10 +1178,6 @@ function processIdentityFromDaemonHello(
 	};
 }
 
-function normalizedSocketPath(socketPath: string): string {
-	return process.platform === "win32" ? socketPath.toLowerCase() : resolve(socketPath);
-}
-
 function validateReplacementDaemon(
 	socketPath: string,
 	hello: DaemonHello,
@@ -1268,7 +1195,7 @@ function validateReplacementDaemon(
 	}
 	if (
 		!hello.supervisorSocketPath ||
-		normalizedSocketPath(hello.supervisorSocketPath) !== normalizedSocketPath(socketPath)
+		normalizeSocketPath(hello.supervisorSocketPath) !== normalizeSocketPath(socketPath)
 	) {
 		throw new Error(`Replacement daemon identity does not match ${socketPath}`);
 	}
@@ -1677,7 +1604,10 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						process.exitCode = 1;
 						return true;
 					}
-					console.log(chalk.green(`Updated ${APP_NAME}`));
+					const versionChange = selfUpdatePlan.targetVersion
+						? ` from v${VERSION} to v${selfUpdatePlan.targetVersion}`
+						: "";
+					console.log(chalk.green(`Updated ${APP_NAME}${versionChange}`));
 					if (process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] === "1") {
 						return true;
 					}

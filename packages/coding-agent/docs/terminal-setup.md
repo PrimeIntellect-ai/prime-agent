@@ -104,3 +104,7 @@ The built-in terminal has limited escape sequence support. Shift+Enter cannot be
 If you want the hardware cursor visible, set `PI_HARDWARE_CURSOR=1` before running `prime-agent` (disabled by default for compatibility).
 
 Consider using a dedicated terminal emulator for the best experience.
+
+### macOS Control+Option+Arrow shortcuts
+
+Pending-message reordering defaults to `Control+Option+Up` and `Control+Option+Down`. Prime Agent accepts modern modified-arrow sequences and legacy Option-as-Meta wrapped Control+Arrow sequences. macOS VoiceOver uses Control+Option as its modifier, and system or terminal shortcuts can intercept these chords before they reach Prime Agent. If that happens, remap `app.message.moveEarlier` and `app.message.moveLater` in `~/.prime/agent/keybindings.json`.

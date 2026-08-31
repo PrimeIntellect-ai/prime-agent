@@ -51,7 +51,6 @@ describe("SessionInfo.modified", () => {
 		createSessionFile(filePath);
 
 		const before = await stat(filePath);
-		// Ensure the file mtime can differ from our message timestamp even on coarse filesystems.
 		await new Promise((r) => setTimeout(r, 10));
 
 		const mgr = SessionManager.open(filePath);

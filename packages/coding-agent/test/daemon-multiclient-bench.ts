@@ -285,7 +285,7 @@ function createAttachResponseForMessages(
 		isCompacting: false,
 		attachedClients: clientIndex + 1,
 		messageCount: messages.length,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 	};
 	const state = {
 		activeSessionId,
@@ -301,7 +301,7 @@ function createAttachResponseForMessages(
 		leafId: "leaf-benchmark",
 		autoCompactionEnabled: true,
 		messageCount: messages.length,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 		compactionCount: 0,
 		scopedModels: [],
 		activeToolNames: ["read", "bash", "edit"],

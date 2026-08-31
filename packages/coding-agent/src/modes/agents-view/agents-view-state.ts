@@ -1,7 +1,7 @@
 import { basename, resolve } from "node:path";
 import { canonicalizePath } from "../../utils/paths.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/index.js";
-import type { SessionSummary } from "../daemon/daemon-session-list.js";
+import { classifySessionRosterStatus, type SessionSummary } from "../daemon/daemon-session-list.js";
 
 export type AgentsViewSection = "running" | "idle" | "inactive";
 
@@ -20,6 +20,43 @@ export interface UnifiedSessionRecord {
 	section: AgentsViewSection;
 	searchableText: string;
 	heartbeat?: UnifiedSessionHeartbeat;
+}
+
+export interface AgentsViewScopeKey {
+	sessionId: string;
+	activeSessionId?: string;
+}
+
+export interface AgentsViewScopeFrame {
+	scope: AgentsViewScopeKey;
+	/** Chat to revisit before returning to the parent agents view. */
+	returnChat?: SessionSummary;
+}
+
+export type AgentsViewScopeAction =
+	| { type: "push"; scope: AgentsViewScopeKey; returnChat?: SessionSummary }
+	| { type: "back" };
+
+export interface AgentsViewScopeResolution {
+	frames: AgentsViewScopeFrame[];
+	root?: UnifiedSessionRecord;
+	droppedFrames: number;
+}
+
+export interface AgentsViewScopeBackResult {
+	type: "scope_back";
+	selection: SessionSummary;
+	expandedAncestorSessionIds: string[];
+	returnChat?: SessionSummary;
+}
+
+export interface UnattachableChildOpenResult {
+	type: "open";
+	summary: SessionSummary;
+	selection: SessionSummary;
+	expandedAncestorSessionIds: string[];
+	hasChildren: boolean;
+	statusMessage: string;
 }
 
 export type AgentsViewRowKind = "agent" | "subagent-summary" | "subagent" | "subagent-code";
@@ -43,6 +80,8 @@ export interface AgentsViewRow {
 	parentIdentity?: string;
 	/** True when this row's subagents carry spawn code that can be revealed. */
 	hasSpawnCode?: boolean;
+	/** True when this subagent-summary row's list is expanded. */
+	expanded?: boolean;
 	/** One source line of the spawn cell, for "subagent-code" rows. */
 	code?: string;
 	/** Merged durable/live source data for unified rows. */
@@ -51,22 +90,7 @@ export interface AgentsViewRow {
 }
 
 export function classifyAgentsViewSession(summary: SessionSummary): AgentsViewSection {
-	if (summary.hasActiveHeartbeat || summary.activity === "working" || isAgentsViewSessionBusy(summary)) {
-		return "running";
-	}
-	return "idle";
-}
-
-function isAgentsViewSessionBusy(summary: SessionSummary): boolean {
-	return (
-		summary.isStreaming ||
-		summary.hasActiveSessionInput === true ||
-		summary.isCompacting ||
-		summary.isBashRunning === true ||
-		summary.isRunningTools === true ||
-		summary.hasRunningRlmChildren === true ||
-		summary.pendingMessageCount > 0
-	);
+	return classifySessionRosterStatus(summary);
 }
 
 export function classifyUnifiedSession(record: Pick<UnifiedSessionRecord, "daemon" | "heartbeat">): AgentsViewSection {
@@ -84,7 +108,7 @@ export function shouldShowAgentsViewSession(summary: SessionSummary, manuallyIna
 	if (manuallyInactive) {
 		return false;
 	}
-	return summary.lifecycle === "live";
+	return summary.lifecycle === "live" && (summary.workerState === undefined || summary.workerState === "ready");
 }
 
 export function sectionTitle(section: AgentsViewSection): string {
@@ -214,8 +238,11 @@ export function summaryForUnifiedRecord(record: UnifiedSessionRecord): SessionSu
 			sessionName: record.daemon.sessionName ?? saved.name,
 			firstMessage: record.daemon.firstMessage ?? saved.firstMessage,
 			sessionFile: record.daemon.sessionFile ?? canonicalSessionPath(saved.path),
+			parentSessionPath: record.daemon.parentSessionPath ?? saved.parentSessionPath,
+			rlmDepth: record.daemon.rlmDepth ?? saved.rlmDepth,
 			created: record.daemon.created ?? saved.created.toISOString(),
 			modified: record.daemon.modified ?? saved.modified.toISOString(),
+			lastActivityAt: record.daemon.lastActivityAt ?? saved.modified.toISOString(),
 		};
 	}
 	const saved = record.saved;
@@ -224,39 +251,154 @@ export function summaryForUnifiedRecord(record: UnifiedSessionRecord): SessionSu
 		id: saved.id,
 		lifecycle: "archived",
 		activity: "idle",
+		isSessionActive: false,
+		runtimeKind: saved.parentSessionPath ? "subagent" : "top-level",
+		rlmDepth: saved.rlmDepth,
 		sessionId: saved.id,
 		sessionFile: canonicalSessionPath(saved.path),
+		parentSessionPath: saved.parentSessionPath,
 		sessionName: saved.name,
 		cwd: saved.cwd,
 		isStreaming: false,
 		isCompacting: false,
 		attachedClients: 0,
 		messageCount: saved.messageCount,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 		created: saved.created.toISOString(),
 		modified: saved.modified.toISOString(),
+		lastActivityAt: saved.modified.toISOString(),
 		firstMessage: saved.firstMessage,
 		summary: saved.agentStatus?.summary,
 		taskState: saved.agentStatus?.taskState,
 	};
 }
 
+export function transitionAgentsViewScope(
+	frames: readonly AgentsViewScopeFrame[],
+	action: AgentsViewScopeAction,
+): AgentsViewScopeFrame[] {
+	if (action.type === "back") return frames.slice(0, -1);
+	const nextFrame = { scope: action.scope, ...(action.returnChat ? { returnChat: action.returnChat } : {}) };
+	if (frames.at(-1)?.scope.sessionId !== action.scope.sessionId) return [...frames, nextFrame];
+	return [...frames.slice(0, -1), nextFrame];
+}
+
+export function resolveAgentsViewLeftResult(
+	scopeRoot: SessionSummary | undefined,
+	expandedAncestorSessionIds: string[] = [],
+	returnChat?: SessionSummary,
+): AgentsViewScopeBackResult | undefined {
+	if (!scopeRoot) return undefined;
+	return {
+		type: "scope_back",
+		selection: scopeRoot,
+		expandedAncestorSessionIds,
+		...(returnChat?.sessionId === scopeRoot.sessionId ? { returnChat: scopeRoot } : {}),
+	};
+}
+
+export function shouldApplyScopeResolution(
+	droppedFrames: number,
+	liveCatalogReady: boolean,
+	savedCatalogReady: boolean,
+): boolean {
+	return droppedFrames === 0 || (liveCatalogReady && savedCatalogReady);
+}
+
+export function createUnattachableChildOpenResult(
+	child: SessionSummary,
+	parent: SessionSummary,
+	expandedAncestorSessionIds: readonly string[],
+	hasChildren: boolean,
+): UnattachableChildOpenResult {
+	return {
+		type: "open",
+		summary: parent,
+		selection: child,
+		expandedAncestorSessionIds: [...expandedAncestorSessionIds],
+		hasChildren,
+		statusMessage: "Child session is unavailable; opened its parent instead",
+	};
+}
+
+export function resolveAgentsViewScopeFrames(
+	records: readonly UnifiedSessionRecord[],
+	frames: readonly AgentsViewScopeFrame[],
+	index: UnifiedSessionIndex = buildUnifiedSessionIndex(records),
+): AgentsViewScopeResolution {
+	if (frames.length === 0) return { frames: [], droppedFrames: 0 };
+	for (let frameIndex = frames.length - 1; frameIndex >= 0; frameIndex--) {
+		const frame = frames[frameIndex]!;
+		const root = findScopeRecord(frame.scope, index.byKey);
+		if (!root) continue;
+		return {
+			frames: frames.slice(0, frameIndex + 1),
+			root,
+			droppedFrames: frames.length - frameIndex - 1,
+		};
+	}
+	return { frames: [], droppedFrames: frames.length };
+}
+
+/** Restrict records to the scoped root and every descendant of that root. */
+export function scopeToSessionSubtree(
+	records: readonly UnifiedSessionRecord[],
+	scope: AgentsViewScopeKey | undefined,
+	index: UnifiedSessionIndex = buildUnifiedSessionIndex(records),
+): UnifiedSessionRecord[] {
+	if (!scope) return [...records];
+	const root = findScopeRecord(scope, index.byKey);
+	if (!root) return [];
+	const retained = new Set<UnifiedSessionRecord>();
+	const queue = [root];
+	for (let queueIndex = 0; queueIndex < queue.length; queueIndex++) {
+		const current = queue[queueIndex]!;
+		if (retained.has(current)) continue;
+		retained.add(current);
+		queue.push(...(index.childrenByParent.get(current) ?? []));
+	}
+	return records.filter((record) => retained.has(record));
+}
+
+export function hasUnifiedSessionChildren(
+	records: readonly UnifiedSessionRecord[],
+	scope: AgentsViewScopeKey,
+	index: UnifiedSessionIndex = buildUnifiedSessionIndex(records),
+): boolean {
+	const root = findScopeRecord(scope, index.byKey);
+	return root !== undefined && (index.childrenByParent.get(root)?.length ?? 0) > 0;
+}
+
+export function getUnifiedSessionAncestorSessionIds(
+	records: readonly UnifiedSessionRecord[],
+	scope: AgentsViewScopeKey,
+	index: UnifiedSessionIndex = buildUnifiedSessionIndex(records),
+): string[] {
+	const root = findScopeRecord(scope, index.byKey);
+	if (!root) return [];
+	const ancestors: string[] = [];
+	const visited = new Set<UnifiedSessionRecord>([root]);
+	let current = findParentRecord(root, index.byKey);
+	while (current && !visited.has(current)) {
+		visited.add(current);
+		ancestors.unshift(summaryForUnifiedRecord(current).sessionId);
+		current = findParentRecord(current, index.byKey);
+	}
+	return ancestors;
+}
+
 export function filterUnifiedSessions(
 	records: readonly UnifiedSessionRecord[],
 	matches: (searchableText: string) => boolean,
 ): UnifiedSessionRecord[] {
-	const recordsByKey = new Map<string, UnifiedSessionRecord>();
-	for (const record of records) {
-		for (const key of record.identityAliases) recordsByKey.set(key, record);
-	}
-
+	const index = buildUnifiedSessionIndex(records);
 	const retained = new Set<UnifiedSessionRecord>();
 	for (const record of records) {
 		if (!matches(record.searchableText)) continue;
 		let current: UnifiedSessionRecord | undefined = record;
 		while (current && !retained.has(current)) {
 			retained.add(current);
-			current = findParentRecord(current, recordsByKey);
+			current = findParentRecord(current, index.byKey);
 		}
 	}
 	// Keep catalog order and the original records so row ranking and sections
@@ -264,13 +406,63 @@ export function filterUnifiedSessions(
 	return records.filter((record) => retained.has(record));
 }
 
+export interface UnifiedSessionIndex {
+	byKey: Map<string, UnifiedSessionRecord>;
+	childrenByParent: Map<UnifiedSessionRecord, UnifiedSessionRecord[]>;
+}
+
+export function buildUnifiedSessionIndex(records: readonly UnifiedSessionRecord[]): UnifiedSessionIndex {
+	const byKey = new Map<string, UnifiedSessionRecord>();
+	for (const record of records) {
+		for (const key of record.identityAliases) byKey.set(key, record);
+	}
+	const childrenByParent = new Map<UnifiedSessionRecord, UnifiedSessionRecord[]>();
+	for (const record of records) {
+		const parent = findParentRecord(record, byKey);
+		if (!parent || parent === record) continue;
+		const children = childrenByParent.get(parent) ?? [];
+		children.push(record);
+		childrenByParent.set(parent, children);
+	}
+	return { byKey, childrenByParent };
+}
+
+/**
+ * Row identities flip when a session gains a sessionFile (active→persisted) or
+ * is re-attached; the old identity survives as an alias. Rewrite stale entries
+ * in a persisted identity set to the current record identity. Entries with no
+ * alias match are kept: their record may not have streamed in yet.
+ */
+export function migrateAgentsViewIdentitySet(
+	identities: Set<string>,
+	byKey: ReadonlyMap<string, UnifiedSessionRecord>,
+): void {
+	for (const identity of [...identities]) {
+		const record = byKey.get(identity);
+		if (!record || record.identity === identity) continue;
+		identities.delete(identity);
+		identities.add(record.identity);
+	}
+}
+
+function findScopeRecord(
+	scope: AgentsViewScopeKey,
+	byKey: ReadonlyMap<string, UnifiedSessionRecord>,
+): UnifiedSessionRecord | undefined {
+	if (scope.activeSessionId) {
+		const active = byKey.get(`active:${scope.activeSessionId}`);
+		if (active) return active;
+	}
+	return byKey.get(`session:${scope.sessionId}`);
+}
+
 function findParentRecord(
 	record: UnifiedSessionRecord,
 	byKey: ReadonlyMap<string, UnifiedSessionRecord>,
 ): UnifiedSessionRecord | undefined {
-	// Only live daemon summaries carry parent links; saved-only rows are roots.
-	if (!record.daemon) return undefined;
-	for (const key of getParentKeys(record.daemon)) {
+	const daemonKeys = record.daemon ? getParentKeys(record.daemon) : [];
+	const savedKey = record.saved?.parentSessionPath ? fileIdentity(record.saved.parentSessionPath) : undefined;
+	for (const key of savedKey ? [...daemonKeys, savedKey] : daemonKeys) {
 		const parent = byKey.get(key);
 		if (parent) return parent;
 	}
@@ -436,16 +628,29 @@ export function buildAgentsViewRows(
 	summariesOrRecords: readonly (SessionSummary | UnifiedSessionRecord)[],
 	expandedSubagentParents: ReadonlySet<string> = new Set(),
 	programShownParents: ReadonlySet<string> = new Set(),
+	scope?: AgentsViewScopeKey,
 ): AgentsViewRow[] {
 	const inputs = summariesOrRecords.map((input) =>
 		isUnifiedSessionRecord(input) ? { summary: summaryForUnifiedRecord(input), record: input } : { summary: input },
 	);
+	const scopeRoot = scope
+		? inputs.find(
+				({ summary }) =>
+					summary.sessionId === scope.sessionId ||
+					(scope.activeSessionId !== undefined && summary.activeSessionId === scope.activeSessionId),
+			)
+		: undefined;
+	const scopeRootKeys = new Set(
+		scopeRoot ? (scopeRoot.record?.identityAliases ?? getSummaryKeys(scopeRoot.summary)) : [],
+	);
+	const isDirectScopeChild = (summary: SessionSummary): boolean =>
+		scopeRoot !== undefined && getParentKeys(summary).some((key) => scopeRootKeys.has(key));
 	const baseRows = inputs.map(
 		({ summary, record }): MutableAgentsViewRow => ({
-			kind: isSubagentSummary(summary) ? "subagent" : "agent",
+			kind: isSubagentSummary(summary) && !isDirectScopeChild(summary) ? "subagent" : "agent",
 			section: record?.section ?? classifyAgentsViewSession(summary),
 			summary,
-			title: getSessionTitle(summary),
+			title: getAgentsViewSessionTitle(summary),
 			subtitle: getSessionSubtitle(summary),
 			statusLabel: getSessionStatusLabel(summary),
 			depth: 0,
@@ -464,11 +669,14 @@ export function buildAgentsViewRows(
 		if (row.kind !== "subagent") {
 			continue;
 		}
-		nestedRows.add(row);
 		const parent = findParentRow(row.summary, rowsByKey);
 		if (!parent || parent === row) {
+			// Saved catalogs stream progressively, so a child can arrive before its
+			// parent. Keep it reachable as a root until the parent record appears.
+			row.kind = "agent";
 			continue;
 		}
+		nestedRows.add(row);
 		parentByChild.set(row, parent);
 		if (row.section === "running") {
 			parent.runningSubagentCount += 1;
@@ -489,25 +697,28 @@ export function buildAgentsViewRows(
 			return;
 		}
 		const childHasSpawnCode = children.some((child) => hasSpawnCode(child.summary));
-		if (expandedSubagentParents.has(row.identity)) {
-			const showProgram = programShownParents.has(row.identity);
-			const groups = groupChildrenBySpawnCode(children.sort(compareAgentsViewRows));
-			for (const [groupIndex, group] of groups.entries()) {
-				if (showProgram && group.spawnCode) {
-					for (const codeRow of buildSpawnCodeRows(row, group.spawnCode, depth + 1, groupIndex)) {
-						flattened.push(codeRow);
-					}
-				}
-				for (const child of group.children) {
-					child.parentIdentity = row.identity;
-					emit(child, depth + 1);
+		const expanded = expandedSubagentParents.has(row.identity);
+		flattened.push(createSubagentSummaryRow(row, children, depth + 1, childHasSpawnCode, expanded));
+		if (!expanded) {
+			return;
+		}
+		const showProgram = programShownParents.has(row.identity);
+		const groups = groupChildrenBySpawnCode(children.sort(compareAgentsViewRows));
+		for (const [groupIndex, group] of groups.entries()) {
+			if (showProgram && group.spawnCode) {
+				for (const codeRow of buildSpawnCodeRows(row, group.spawnCode, depth + 1, groupIndex)) {
+					flattened.push(codeRow);
 				}
 			}
-		} else {
-			flattened.push(createSubagentSummaryRow(row, children, depth + 1, childHasSpawnCode));
+			for (const child of group.children) {
+				child.parentIdentity = row.identity;
+				emit(child, depth + 1);
+			}
 		}
 	};
-	for (const root of roots.sort(compareAgentsViewRows)) {
+	const scopedRootRow = scopeRoot ? baseRows.find((row) => row.summary === scopeRoot.summary) : undefined;
+	const visibleRoots = scopedRootRow ? roots.filter((row) => row !== scopedRootRow) : roots;
+	for (const root of visibleRoots.sort(compareAgentsViewRows)) {
 		emit(root, 0);
 	}
 	return flattened;
@@ -543,6 +754,7 @@ function createSubagentSummaryRow(
 	children: readonly AgentsViewRow[],
 	depth: number,
 	hasSpawnCode: boolean,
+	expanded: boolean,
 ): AgentsViewRow {
 	const totalCount = children.length;
 	const running = parent.runningSubagentCount;
@@ -572,6 +784,7 @@ function createSubagentSummaryRow(
 		identity: `subagents:${parent.identity}`,
 		parentIdentity: parent.identity,
 		hasSpawnCode,
+		expanded,
 	};
 }
 
@@ -585,7 +798,7 @@ interface SpawnCodeGroup {
 	children: MutableAgentsViewRow[];
 }
 
-// Subagents spawned by the same IPython cell share its source; group them so
+// Subagents spawned by the same Python cell share its source; group them so
 // each spawn cell renders once, above the subagents it launched. Different turns
 // produce different cells and therefore distinct groups. Insertion order follows
 // each cell's first subagent so groups read top-to-bottom in spawn order.
@@ -642,6 +855,12 @@ function compareAgentsViewRows(a: AgentsViewRow, b: AgentsViewRow): number {
 	if (sectionDiff !== 0) {
 		return sectionDiff;
 	}
+	if (a.section !== "running") {
+		const activityDiff = getTimestamp(b.summary.lastActivityAt) - getTimestamp(a.summary.lastActivityAt);
+		if (activityDiff !== 0) {
+			return activityDiff;
+		}
+	}
 	const createdDiff = getTimestamp(b.summary.created) - getTimestamp(a.summary.created);
 	if (createdDiff !== 0) {
 		return createdDiff;
@@ -682,14 +901,18 @@ function findParentRow(
 	return undefined;
 }
 
-function isSubagentSummary(summary: SessionSummary): boolean {
+export function isSubagentSummary(summary: SessionSummary): boolean {
 	if (summary.runtimeKind) {
 		return summary.runtimeKind === "subagent";
 	}
 	// Summaries from daemons that predate runtimeKind still carry subagent
 	// linkage; never surface those as top-level agents.
 	return Boolean(
-		summary.rlmChildId ?? summary.rlmParentNodeId ?? summary.parentActiveSessionId ?? summary.parentSessionId,
+		summary.rlmChildId ??
+			summary.rlmParentNodeId ??
+			summary.parentActiveSessionId ??
+			summary.parentSessionId ??
+			summary.parentSessionPath,
 	);
 }
 
@@ -716,7 +939,7 @@ function getTimestamp(value: string | undefined): number {
 	return Number.isNaN(timestamp) ? 0 : timestamp;
 }
 
-function getSessionTitle(summary: SessionSummary): string {
+export function getAgentsViewSessionTitle(summary: SessionSummary): string {
 	const candidates = [summary.sessionName, summary.firstMessage, basename(summary.cwd), summary.sessionId, summary.id];
 	for (const candidate of candidates) {
 		const normalized = candidate?.replace(/\s+/g, " ").trim();
@@ -754,17 +977,20 @@ function getSessionStatusLabel(summary: SessionSummary, hasActiveHeartbeat = sum
 	if (summary.hasRunningRlmChildren === true) {
 		return "subagents running";
 	}
-	if (summary.hasActiveSessionInput) {
-		return "working";
+	if (summary.sessionActions.active) {
+		return summary.sessionActions.active.label ?? summary.sessionActions.active.kind.replace("_", " ");
 	}
-	if (summary.pendingMessageCount > 0) {
-		return `${summary.pendingMessageCount} queued`;
+	if (summary.sessionActions.queuedCount > 0) {
+		return `${summary.sessionActions.queuedCount} queued`;
 	}
 	if (summary.lifecycle === "archived") {
 		return "archived";
 	}
 	if (hasActiveHeartbeat) {
 		return "heartbeat active";
+	}
+	if (summary.runtimeKind === "subagent" && summary.repliedSinceTask) {
+		return "replied";
 	}
 	if (summary.activity === "working") {
 		return "classifying";

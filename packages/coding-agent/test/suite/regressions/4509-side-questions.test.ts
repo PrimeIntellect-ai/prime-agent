@@ -407,6 +407,7 @@ describe("ENG-4509 side questions", () => {
 		const fakeThis = Object.assign(Object.create(InteractiveMode.prototype), {
 			defaultEditor,
 			editor: { getText: () => "", setText: vi.fn(), addToHistory },
+			uiServices: { settingsManager: { getTelemetryEnabled: vi.fn(() => false) } },
 			promptStashState: { stash: undefined },
 			clearShortcutGuide: vi.fn(),
 			sideQuestionComponent: {},
@@ -871,7 +872,8 @@ describe("ENG-4509 side questions", () => {
 			isAgentCompacting: () => false,
 			isBashRunning: () => true,
 			applyConnectionStateSnapshot: vi.fn(),
-			replaceChildAgentInspector: vi.fn(),
+			refreshQueueSelectionFromState: vi.fn(),
+			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
 				messages: [],
 				thinkingLevel: "medium",
@@ -879,7 +881,7 @@ describe("ENG-4509 side questions", () => {
 			})),
 			renderSessionContext: vi.fn(async () => {}),
 			restoreStreamingMessageFromSnapshot: vi.fn(async () => {}),
-			refreshConnectionQueue: vi.fn(async () => {}),
+			updatePendingMessagesDisplay: vi.fn(),
 			flushCompactionQueue: vi.fn(async () => {}),
 			flushPendingBashComponents: vi.fn(),
 			updateTerminalTitle: vi.fn(),
@@ -905,6 +907,7 @@ describe("ENG-4509 side questions", () => {
 			messages: [],
 		});
 
+		expect(fakeThis.updatePendingMessagesDisplay).toHaveBeenCalledOnce();
 		expect(bashComponent.setComplete).toHaveBeenCalledWith(undefined, false);
 		expect(finishBash).toHaveBeenCalledOnce();
 		expect(fakeThis.activeBashComponent).toBeUndefined();

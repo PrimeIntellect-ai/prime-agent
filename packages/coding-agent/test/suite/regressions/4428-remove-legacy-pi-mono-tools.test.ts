@@ -9,7 +9,7 @@ import { DefaultResourceLoader } from "../../../src/core/resource-loader.js";
 import { createAgentSession } from "../../../src/core/sdk.js";
 import { SessionManager } from "../../../src/core/session-manager.js";
 import { SettingsManager } from "../../../src/core/settings-manager.js";
-import { allToolNames, createAllToolDefinitions } from "../../../src/core/tools/index.js";
+import { createAllToolDefinitions } from "../../../src/core/tools/index.js";
 
 describe("regression #4428: remove legacy pi-mono built-in tools", () => {
 	let tempDir: string;
@@ -28,7 +28,6 @@ describe("regression #4428: remove legacy pi-mono built-in tools", () => {
 	});
 
 	it("registers only ipython as a built-in tool", () => {
-		expect([...allToolNames]).toEqual(["ipython"]);
 		expect(Object.keys(createAllToolDefinitions(process.cwd()))).toEqual(["ipython"]);
 	});
 
@@ -108,7 +107,7 @@ describe("regression #4428: remove legacy pi-mono built-in tools", () => {
 		session.dispose();
 	});
 
-	it("applies shell settings to ipython bash cells", async () => {
+	it("applies shell settings to bash() commands in the REPL", async () => {
 		const shellPath = join(tempDir, "custom-shell.sh");
 		writeFileSync(shellPath, "#!/bin/sh\nprintf 'custom-shell\\n'\nexec /bin/sh \"$@\"\n");
 		chmodSync(shellPath, 0o755);
@@ -139,15 +138,26 @@ describe("regression #4428: remove legacy pi-mono built-in tools", () => {
 			const ipythonTool = session.agent.state.tools.find((tool) => tool.name === "ipython");
 			expect(ipythonTool).toBeTruthy();
 
-			const result = await ipythonTool!.execute("tool-1", { code: "%%bash\necho body" });
+			// %%bash cells fail as plain Python syntax errors instead of running.
+			const rejected = await ipythonTool!.execute("tool-0", { code: "%%bash\necho body" });
+			expect(rejected.details).toMatchObject({ status: "error" });
+			const rejectedText = rejected.content
+				.filter((item): item is { type: "text"; text: string } => item.type === "text")
+				.map((item) => item.text)
+				.join("");
+			expect(rejectedText).toContain("SyntaxError");
+
+			// bash() picks up the configured shell and command prefix from the tool environment.
+			const result = await ipythonTool!.execute("tool-1", {
+				code: "print((await bash('echo body')).output)",
+			});
 			const output = result.content
 				.filter((item): item is { type: "text"; text: string } => item.type === "text")
 				.map((item) => item.text)
 				.join("");
-
 			expect(output).toContain("custom-shell\nprefix-from-settings\nbody");
 		} finally {
 			await session.disposeAsync();
 		}
-	});
+	}, 120_000);
 });

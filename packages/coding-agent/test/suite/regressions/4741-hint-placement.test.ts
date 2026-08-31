@@ -26,11 +26,13 @@ function createFeatureHintMode() {
 		pendingMessagesContainer: new Container(),
 		pendingBashComponents: [],
 		queuedMessagesContainer: new Container(),
-		connectionQueue: { steering: [] as string[], followUp: [] as string[] },
 		compactionQueuedMessages: [],
 		loadingAnimation: loader,
 		workingVisible: true,
-		connectionState: { isStreaming: true },
+		connectionState: {
+			isStreaming: true,
+			sessionActions: { queuedCount: 0, steering: [] as string[], followUps: [] as string[] },
+		},
 		featureHintDeck: { next: vi.fn(() => ({ id: "test", text: "A useful feature hint." })) },
 		currentFeatureHint: undefined,
 		featureHintEligibleAt: 0,
@@ -39,7 +41,6 @@ function createFeatureHintMode() {
 		featureHintComponent: undefined,
 		featureHintRunPending: false,
 		featureHintSuppressedByQueue: false,
-		childAgentPanelMode: undefined,
 		options: { returnToAgentsView: true },
 		getAppKeyDisplay: () => "Ctrl+Q",
 		ui: { requestRender: vi.fn() },
@@ -67,7 +68,7 @@ describe("ENG-4741 hint placement", () => {
 		const queuedMessagesContainer = new Container();
 		const sideQuestionContainer = new Container();
 		const editorContainer = new Container();
-		const childAgentSummary = new Container();
+		const subagentSummaryLine = new Container();
 		const footerSlot = new Container();
 		const mode = Object.assign(Object.create(InteractiveMode.prototype), {
 			recapContainer,
@@ -75,7 +76,7 @@ describe("ENG-4741 hint placement", () => {
 			queuedMessagesContainer,
 			sideQuestionContainer,
 			editorContainer,
-			childAgentSummary,
+			subagentSummaryLine,
 			footerSlot,
 		});
 
@@ -85,7 +86,7 @@ describe("ENG-4741 hint placement", () => {
 			queuedMessagesContainer,
 			sideQuestionContainer,
 		]);
-		expect(callPrivate(mode, "getPromptDockComponents")).toEqual([editorContainer, childAgentSummary, footerSlot]);
+		expect(callPrivate(mode, "getPromptDockComponents")).toEqual([editorContainer, subagentSummaryLine, footerSlot]);
 	});
 
 	it("keeps hints in the fullscreen transcript instead of the prompt dock", () => {
@@ -149,11 +150,11 @@ describe("ENG-4741 hint placement", () => {
 		vi.advanceTimersByTime(5_000);
 		expect(featureHintContainer.children).toHaveLength(1);
 
-		mode.connectionQueue.followUp = ["Continue after this turn"];
+		mode.connectionState.sessionActions.followUps = ["Continue after this turn"];
 		callPrivate(mode, "updatePendingMessagesDisplay");
 		expect(featureHintContainer.children).toHaveLength(0);
 
-		mode.connectionQueue.followUp = [];
+		mode.connectionState.sessionActions.followUps = [];
 		callPrivate(mode, "updatePendingMessagesDisplay");
 		expect(featureHintContainer.children).toHaveLength(1);
 

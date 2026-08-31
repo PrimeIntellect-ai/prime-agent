@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../src/core/agent-session-config.js";
+import {
+	type AgentSessionRuntimeConfig,
+	durableAgentSessionRuntimeConfig,
+	mergeAgentSessionRuntimeConfig,
+} from "../src/core/agent-session-config.js";
 
 describe("mergeAgentSessionRuntimeConfig", () => {
 	it("applies session overrides without mutating default config", () => {
@@ -150,5 +154,51 @@ describe("mergeAgentSessionRuntimeConfig", () => {
 		// Mutating the original should not affect the clone
 		base.initialGoal!.objective = "mutated";
 		expect(merged.initialGoal?.objective).toBe("base goal");
+	});
+
+	it("preserves and overrides the user-facing execution mode across daemon config merges", () => {
+		const base: AgentSessionRuntimeConfig = {
+			cwd: "/repo",
+			executionMode: "interactive",
+		};
+
+		expect(mergeAgentSessionRuntimeConfig(base, { model: "openai/gpt-4o" }).executionMode).toBe("interactive");
+		expect(mergeAgentSessionRuntimeConfig(base, { executionMode: "rpc" }).executionMode).toBe("rpc");
+		expect(mergeAgentSessionRuntimeConfig(base).executionMode).toBe("interactive");
+	});
+
+	it("keeps the daemon telemetry opt-out monotonic across config merges", () => {
+		expect(mergeAgentSessionRuntimeConfig({ telemetryDisabled: true }, {}).telemetryDisabled).toBe(true);
+		expect(mergeAgentSessionRuntimeConfig({}, { telemetryDisabled: true }).telemetryDisabled).toBe(true);
+		expect(mergeAgentSessionRuntimeConfig({}, {}).telemetryDisabled).toBeUndefined();
+	});
+
+	it("persists only typed daemon host settings", () => {
+		const durable = durableAgentSessionRuntimeConfig({
+			cwd: "/repo",
+			agentDir: "/agent",
+			sessionDir: "/sessions",
+			telemetryDisabled: true,
+			provider: "intercept",
+			model: "openai/example",
+			apiKey: "secret-api-key",
+			extensionFlagValues: { providerSecretKey: "secret-extension-key" },
+			initialGoal: { objective: "transient" },
+		});
+
+		expect(durable).toEqual({
+			cwd: "/repo",
+			agentDir: "/agent",
+			sessionDir: "/sessions",
+			telemetryDisabled: true,
+		});
+		expect(
+			durableAgentSessionRuntimeConfig({
+				cwd: 1,
+				agentDir: "/agent",
+				sessionDir: false,
+				telemetryDisabled: "yes",
+			} as unknown as AgentSessionRuntimeConfig),
+		).toEqual({ agentDir: "/agent" });
 	});
 });

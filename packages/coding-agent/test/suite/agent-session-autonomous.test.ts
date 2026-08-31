@@ -327,7 +327,7 @@ describe("AgentSession autonomous mode", () => {
 		});
 		sessionInternals._compactionAbortController = undefined;
 		expect(harness.session.resumeQueuedWork()).toBe(true);
-		await vi.waitFor(() => expect(harness.session.pendingMessageCount).toBe(0));
+		await vi.waitFor(() => expect(harness.session.queuedActionCount).toBe(0));
 		await harness.session.waitForSessionInputIdle();
 
 		expect(getAssistantTexts(harness)).toEqual(["Still failing."]);

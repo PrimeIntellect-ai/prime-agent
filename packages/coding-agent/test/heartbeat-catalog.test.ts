@@ -33,7 +33,6 @@ describe("daemon heartbeat catalog", () => {
 				success: true,
 				data: { heartbeats: [heartbeat] },
 			})),
-			requestLegacy: vi.fn(),
 		} as unknown as DaemonClient;
 
 		await expect(listDaemonHeartbeats(client)).resolves.toEqual([heartbeat]);

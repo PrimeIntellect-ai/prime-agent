@@ -26,6 +26,7 @@ describe("keybindings migration", () => {
 		const agentDir = createAgentDir({
 			cursorUp: ["up", "ctrl+p"],
 			expandTools: "ctrl+x",
+			"app.message.dequeue": "alt+u",
 		});
 		const previousAgentDir = process.env[ENV_AGENT_DIR];
 		process.env[ENV_AGENT_DIR] = agentDir;
@@ -43,6 +44,7 @@ describe("keybindings migration", () => {
 		expect(migrated).toEqual({
 			"tui.editor.cursorUp": ["up", "ctrl+p"],
 			"app.tools.expand": "ctrl+x",
+			"app.message.navigateOlder": "alt+u",
 		});
 	});
 
@@ -84,5 +86,30 @@ describe("keybindings migration", () => {
 		const effective = keybindings.getEffectiveConfig();
 		expect(effective["tui.select.confirm"]).toBe("enter");
 		expect(effective["app.interrupt"]).toBe("ctrl+x");
+	});
+
+	it("gives explicit editor bindings precedence over application defaults", () => {
+		const keybindings = new KeybindingsManager({
+			"tui.editor.cursorUp": ["up", "ctrl+p"],
+			"tui.editor.cursorDown": ["down", "ctrl+n"],
+		});
+
+		expect(keybindings.getKeys("tui.editor.cursorUp")).toEqual(["up", "ctrl+p"]);
+		expect(keybindings.getKeys("app.messages.expand")).toEqual([]);
+		expect(keybindings.getKeys("app.models.toggleProvider")).toEqual(["ctrl+p"]);
+		expect(keybindings.getKeys("app.agents.new")).toEqual(["ctrl+n"]);
+	});
+
+	it("reports an application default that is explicitly retained against an editor binding", () => {
+		const keybindings = new KeybindingsManager({
+			"tui.editor.cursorUp": ["up", "ctrl+p"],
+			"app.messages.expand": "ctrl+p",
+		});
+
+		expect(keybindings.getConflicts()).toContainEqual({
+			key: "ctrl+p",
+			keybindings: ["tui.editor.cursorUp", "app.messages.expand"],
+		});
+		expect(keybindings.getKeys("app.messages.expand")).toEqual(["ctrl+p"]);
 	});
 });

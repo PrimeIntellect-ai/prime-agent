@@ -99,7 +99,7 @@ function createFakeSession(id: string, messages: AgentMessage[]): FakeSessionCon
 		sessionName: `${id} name`,
 		autoCompactionEnabled: true,
 		messages,
-		pendingMessageCount: 0,
+		getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
 		goalState: emptyGoalState(),
 		modelRegistry: {
 			refreshModelCatalog: async () => ({ models: model ? [model] : [], configuredProviders: ["openai"] }),
@@ -108,6 +108,7 @@ function createFakeSession(id: string, messages: AgentMessage[]): FakeSessionCon
 		getActiveToolNames: () => ["ipython"],
 		getContextUsage: () => undefined,
 		cancelRlmChildRun: (childId: string) => childId === "child-1",
+		getRlmChildSnapshots: () => [],
 		getToolDefinition: (toolName: string) => ({
 			name: toolName,
 			label: toolName,
@@ -321,13 +322,19 @@ describe("InProcessAgentConnection", () => {
 		]);
 
 		events.length = 0;
-		oldSession.emit({ type: "queue_update", steering: ["old"], followUp: [] });
-		newSession.emit({ type: "queue_update", steering: ["new"], followUp: ["later"] });
+		oldSession.emit({ type: "session_action_update", actions: { queuedCount: 1, steering: ["old"], followUps: [] } });
+		newSession.emit({
+			type: "session_action_update",
+			actions: { queuedCount: 2, steering: ["new"], followUps: ["later"] },
+		});
 
 		expect(events).toEqual([
 			{
 				type: "session_event",
-				event: { type: "queue_update", steering: ["new"], followUp: ["later"] },
+				event: {
+					type: "session_action_update",
+					actions: { queuedCount: 2, steering: ["new"], followUps: ["later"] },
+				},
 			},
 		]);
 

@@ -1,0 +1,1 @@
+- Simplified model resolution and feature hint shuffling internals.

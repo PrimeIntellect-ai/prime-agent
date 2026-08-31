@@ -2,47 +2,21 @@
 
 from __future__ import annotations
 
-import asyncio
-import os
 import sys
 import types
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .bash import BashHandle, BashResult, bash
 from .harness import HarnessEntry, HarnessScope, HarnessState, RefinementEvent, get_harness_state
 
-try:
-    from ipykernel.comm import Comm
-except Exception:  # pragma: no cover - depends on ipykernel version
-    Comm = None  # type: ignore[assignment]
-
-try:
-    from IPython import get_ipython
-except Exception:  # pragma: no cover - only available in kernels
-    get_ipython = None  # type: ignore[assignment]
-
-HOST_COMM_TARGET = "host.request"
-
-
-@dataclass
-class TokenUsage:
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-
-    @property
-    def total(self) -> int:
-        return self.prompt_tokens + self.completion_tokens
-
-
-@dataclass
-class RLMResult:
-    answer: str
-    session_dir: Path | None = None
-    usage: TokenUsage = field(default_factory=TokenUsage)
-    turns: int = 0
-    model: str | None = None
-    warning: str | None = None
+@dataclass(frozen=True)
+class RLMSpawnHandle:
+    rlm_child_id: str
+    name: str
+    session_dir: Path
+    model: str
 
 
 @dataclass(frozen=True)
@@ -63,59 +37,30 @@ class RLMSubagent:
     status: str
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise RuntimeError(f"{name} must be an integer, got {raw!r}") from exc
-
-
-def _ensure_recursion_allowed() -> None:
-    depth = _env_int("RLM_DEPTH", 0)
-    max_depth = _env_int("RLM_MAX_DEPTH", 1)
-    if depth >= max_depth:
-        raise RuntimeError(
-            f"RLM recursion depth limit reached "
-            f"(RLM_DEPTH={depth}, RLM_MAX_DEPTH={max_depth})"
-        )
-
-
-def _install_control_comm_handlers() -> None:
-    """Let comm replies arrive on the control channel during an execute_request."""
-    if get_ipython is None:
-        return
-    shell = get_ipython()
-    kernel = getattr(shell, "kernel", None)
-    comm_manager = getattr(kernel, "comm_manager", None)
-    control_handlers = getattr(kernel, "control_handlers", None)
-    if comm_manager is None or not isinstance(control_handlers, dict):
-        return
-    control_handlers.setdefault("comm_msg", comm_manager.comm_msg)
-    control_handlers.setdefault("comm_close", comm_manager.comm_close)
-
-
-def _result_from_payload(payload: dict[str, Any]) -> RLMResult:
-    usage_payload = payload.get("usage")
-    usage = TokenUsage()
-    if isinstance(usage_payload, dict):
-        usage = TokenUsage(
-            prompt_tokens=int(usage_payload.get("prompt_tokens", 0)),
-            completion_tokens=int(usage_payload.get("completion_tokens", 0)),
-        )
-
-    session_dir_payload = payload.get("session_dir")
-    session_dir = Path(session_dir_payload) if isinstance(session_dir_payload, str) else None
-    return RLMResult(
-        answer=str(payload.get("answer", "")),
-        usage=usage,
-        turns=int(payload.get("turns", 0)),
-        session_dir=session_dir,
-        model=payload.get("model") if isinstance(payload.get("model"), str) else None,
-        warning=payload.get("warning") if isinstance(payload.get("warning"), str) else None,
+def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
+    if not isinstance(payload, dict):
+        raise RuntimeError("rlm.run returned an invalid spawn handle")
+    child_id = payload.get("rlm_child_id")
+    name = payload.get("name")
+    session_dir = payload.get("session_dir")
+    model = payload.get("model")
+    if not all(isinstance(value, str) and value for value in (child_id, name, session_dir, model)):
+        raise RuntimeError("rlm.run returned an invalid spawn handle")
+    return RLMSpawnHandle(
+        rlm_child_id=child_id,
+        name=name,
+        session_dir=Path(session_dir),
+        model=model,
     )
+
+
+def _parse_host_reply(request_type: str, reply: dict[str, Any]) -> dict[str, Any]:
+    status = reply.get("status")
+    if status == "ok":
+        return reply["result"]
+    if status == "error":
+        raise RuntimeError(str(reply.get("error") or f"host request {request_type} failed"))
+    raise RuntimeError(f"host request {request_type} returned unexpected status: {status!r}")
 
 
 async def host_request(request_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -130,63 +75,31 @@ async def host_request(request_type: str, payload: dict[str, Any] | None = None)
         raise TypeError("request_type must be a non-empty str")
     if payload is not None and not isinstance(payload, dict):
         raise TypeError(f"payload must be a dict or None, got {type(payload).__name__}")
-    if Comm is None:
-        raise RuntimeError("Jupyter comm support is unavailable in this kernel")
-    _install_control_comm_handlers()
+    from . import repl
 
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future[dict[str, Any]] = loop.create_future()
-    comm = Comm(target_name=HOST_COMM_TARGET, primary=False)
-
-    def _on_msg(msg: dict[str, Any]) -> None:
-        content = msg.get("content", {})
-        reply = content.get("data", {}) if isinstance(content, dict) else {}
-        if not isinstance(reply, dict):
-            return
-
-        status = reply.get("status")
-        if status == "ok":
-            def _resolve_result() -> None:
-                if not future.done():
-                    future.set_result({k: v for k, v in reply.items() if k != "status"})
-                    comm.close()
-
-            loop.call_soon_threadsafe(_resolve_result)
-            return
-        if status == "error":
-            message = reply.get("error") or f"host request {request_type} failed"
-            def _resolve_error() -> None:
-                if not future.done():
-                    future.set_exception(RuntimeError(str(message)))
-                    comm.close()
-
-            loop.call_soon_threadsafe(_resolve_error)
-            return
-
-        unexpected = f"host request {request_type} returned unexpected status: {status!r}"
-        def _resolve_unexpected() -> None:
-            if not future.done():
-                future.set_exception(RuntimeError(unexpected))
-                comm.close()
-
-        loop.call_soon_threadsafe(_resolve_unexpected)
-
-    comm.on_msg(_on_msg)
     # request_type goes last so a payload "type" key cannot reroute the request.
-    comm.open(data={**(payload or {}), "type": request_type})
-    return await future
+    reply = await repl.host_request({**(payload or {}), "type": request_type})
+    return _parse_host_reply(request_type, reply)
 
 
-async def run(prompt: str, **kwargs: Any) -> RLMResult:
-    """Run a recursive Prime Agent child through the TypeScript host.
+def emit(data: dict[str, Any]) -> None:
+    """Ship one display event (dict of MIME type -> JSON payload) to the host."""
+    from . import repl
+
+    repl.emit(data)
+
+
+async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
+    """Spawn a recursive Prime Agent child and return once its task is admitted.
 
     ``model`` selects a child with an exact ``provider/model`` selector.
+    ``thinking`` sets the child reasoning level (e.g. 'off', 'low', 'medium', 'high');
+    defaults to the parent level; levels invalid for the resolved model fail the spawn.
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
-    _ensure_recursion_allowed()
     payload = await host_request("rlm.run", {"prompt": prompt, "kwargs": kwargs})
-    return _result_from_payload(payload)
+    return _spawn_handle_from_payload(payload)
 
 
 def _model_from_payload(payload: Any) -> RLMModel:
@@ -233,7 +146,7 @@ def _subagent_from_payload(payload: Any, operation: str = "rlm.list_subagents") 
         raise RuntimeError(f"{operation} entry is missing session_name")
     if not isinstance(session_dir, str) or not session_dir:
         raise RuntimeError(f"{operation} entry is missing session_dir")
-    if status not in {"running", "completed"}:
+    if status not in {"running", "completed", "error"}:
         raise RuntimeError(f"{operation} entry has invalid status")
     return RLMSubagent(
         rlm_child_id=child_id,
@@ -271,15 +184,13 @@ async def delete_subagent(target: str | RLMSubagent) -> RLMSubagent:
 class _HarnessProxy:
     """Resolve the harness state against the current environment on every access.
 
-    The kernel forkserver preimports rlm in a template process before per-session
-    env vars exist; a state bound at import time would freeze that (env-less)
-    resolution into every forked kernel. Resolving per access picks up the env
-    applied after fork. Resolution must never raise (a failure inside the kernel
-    namespace would take down the kernel). When the local store is genuinely
-    unconfigured (no session env, e.g. --no-session) reads see an empty view but
-    local writes raise instructively instead of vanishing on kernel exit; any
-    other resolution failure degrades to a shared in-memory store until local
-    resolution starts succeeding.
+    Session env vars may be applied after import, so a state bound at import
+    time could freeze an env-less resolution. Resolution must never raise (a
+    failure inside the kernel namespace would take down the kernel). When the
+    local store is genuinely unconfigured (no session env, e.g. --no-session)
+    reads see an empty view but local writes raise instructively instead of
+    vanishing on kernel exit; any other resolution failure degrades to a shared
+    in-memory store until local resolution starts succeeding.
     """
 
     _fallback: HarnessState | None = None
@@ -323,7 +234,7 @@ class _RLMCallable:
     harness = _harness_state
     get_harness_state = staticmethod(get_harness_state)
 
-    async def run(self, prompt: str, **kwargs: Any) -> RLMResult:
+    async def run(self, prompt: str, **kwargs: Any) -> RLMSpawnHandle:
         return await run(prompt, **kwargs)
 
     async def find_models(self, query: str = "", limit: int = 8) -> list[RLMModel]:
@@ -335,7 +246,7 @@ class _RLMCallable:
     async def delete_subagent(self, target: str | RLMSubagent) -> RLMSubagent:
         return await delete_subagent(target)
 
-    async def __call__(self, prompt: str, **kwargs: Any) -> RLMResult:
+    async def __call__(self, prompt: str, **kwargs: Any) -> RLMSpawnHandle:
         return await run(prompt, **kwargs)
 
 
@@ -344,13 +255,15 @@ harness = _harness_state
 
 
 class _CallableModule(types.ModuleType):
-    async def __call__(self, prompt: str, **kwargs: Any) -> RLMResult:
+    async def __call__(self, prompt: str, **kwargs: Any) -> RLMSpawnHandle:
         return await run(prompt, **kwargs)
 
 
 sys.modules[__name__].__class__ = _CallableModule
 
 __all__ = [
+    "BashHandle",
+    "BashResult",
     "HarnessEntry",
     "HarnessScope",
     "HarnessState",
@@ -358,11 +271,12 @@ __all__ = [
     "McpToolError",
     "NotEnabled",
     "RLMModel",
-    "RLMResult",
+    "RLMSpawnHandle",
     "RLMSubagent",
     "RefinementEvent",
-    "TokenUsage",
+    "bash",
     "delete_subagent",
+    "emit",
     "find_models",
     "get_harness_state",
     "harness",

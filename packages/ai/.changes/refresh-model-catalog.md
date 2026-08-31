@@ -1,0 +1,1 @@
+- Refreshed the model catalog from live provider catalogs (pricing updates, new and removed models); fixed OpenCode Go Qwen routes mislabeled as Anthropic and excluded private dev/ Prime Inference routes.

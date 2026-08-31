@@ -294,10 +294,7 @@ describe("builtin skills", () => {
 		});
 	});
 
-	// The bundled skills only reach a deployed agent if the build/release scripts
-	// copy skills/ into the shipped layout. A regression here resolves zero
-	// built-in skills at runtime even though the source tree looks correct
-	// (ENG-4220), so assert each shipping path still copies skills.
+	// Verify every shipping path includes bundled skills; source-only success would hide a release packaging regression.
 	describe("packaging ships bundled skills", () => {
 		const packageRoot = join(__dirname, "..");
 		const repoRoot = join(packageRoot, "..", "..");

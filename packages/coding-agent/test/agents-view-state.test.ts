@@ -10,27 +10,42 @@ import {
 	createAgentsViewListCommand,
 	createAgentsViewReplyHeadline,
 	createAgentsViewResumeConfig,
+	createInitialAgentsViewPersistentState,
+	createInitialAgentsViewScopeFrames,
+	createScopeBackReturnChatOpenResult,
 	formatAgentsViewRelativeTime,
 	formatAgentsViewStatusLine,
+	getAgentsViewDepth,
 	resolveAgentsViewActiveSummaryForPath,
 	resolveAgentsViewOpenCwd,
 	resolveAgentsViewSessionUiServices,
 	shouldReconnectAgentsViewDaemon,
 } from "../src/modes/agents-view/agents-view-mode.js";
 import {
+	type AgentsViewScopeFrame,
 	aggregateSessionHeartbeats,
 	buildAgentsViewRows,
+	buildUnifiedSessionIndex,
 	classifyAgentsViewSession,
+	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
 	getAgentsViewSelectionKey,
+	getUnifiedSessionAncestorSessionIds,
+	hasUnifiedSessionChildren,
 	reconcileUnifiedSessions,
+	resolveAgentsViewLeftResult,
+	resolveAgentsViewScopeFrames,
 	resolveAgentsViewSelectionIndex,
 	resolveAgentsViewSelectionState,
 	type SessionSummary,
+	scopeToSessionSubtree,
 	sectionTitle,
+	shouldApplyScopeResolution,
 	shouldShowAgentsViewSession,
+	transitionAgentsViewScope,
 } from "../src/modes/index.js";
+import { formatAgentDepthLabel } from "../src/modes/interactive/interactive-mode.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
 import type { Theme } from "../src/modes/interactive/theme/theme.js";
 
@@ -54,16 +69,33 @@ function heartbeat(id: string, nextRunAt?: string, activeSessionId = "child") {
 }
 
 describe("agents view state", () => {
-	test("classifies active daemon sessions into coarse fleet sections", () => {
+	test("classifies sessions by live runtime status at any depth", () => {
 		expect(classifyAgentsViewSession(makeSummary({ isStreaming: true, activity: "working" }))).toBe("running");
-		expect(classifyAgentsViewSession(makeSummary({ pendingMessageCount: 1, activity: "working" }))).toBe("running");
-		expect(classifyAgentsViewSession(makeSummary({ hasActiveSessionInput: true, activity: "working" }))).toBe(
-			"running",
-		);
+		expect(
+			classifyAgentsViewSession(
+				makeSummary({ sessionActions: { queuedCount: 1, steering: [], followUps: [] }, activity: "working" }),
+			),
+		).toBe("running");
 		expect(classifyAgentsViewSession(makeSummary({ activity: "working" }))).toBe("running");
+		expect(
+			classifyAgentsViewSession(
+				makeSummary({ runtimeKind: "subagent", rlmDepth: 3, activity: "working", isSessionActive: true }),
+			),
+		).toBe("running");
 		expect(classifyAgentsViewSession(makeSummary({ activity: "idle", messageCount: 2 }))).toBe("idle");
-		expect(classifyAgentsViewSession(makeSummary({ activity: "idle", messageCount: 0 }))).toBe("idle");
-		expect(classifyAgentsViewSession(makeSummary({ activity: "idle", messageCount: 4 }))).toBe("idle");
+		expect(classifyAgentsViewSession(makeSummary({ runtimeKind: "subagent", activity: "idle" }))).toBe("idle");
+		expect(
+			classifyAgentsViewSession(
+				makeSummary({
+					activeSessionId: undefined,
+					runtimeKind: "subagent",
+					rlmDepth: 3,
+					activity: "working",
+					isSessionActive: true,
+					hasActiveHeartbeat: true,
+				}),
+			),
+		).toBe("inactive");
 	});
 
 	test("places all non-busy resident sessions in Idle", () => {
@@ -90,6 +122,30 @@ describe("agents view state", () => {
 		]);
 		expect(busyRow).toMatchObject({ section: "running", statusLabel: "running tools" });
 		expect(sectionTitle("running")).toBe("Running");
+	});
+
+	test("labels replied subagents with active heartbeats as heartbeat active", () => {
+		const summaries = [
+			makeSummary({
+				id: "replied-child",
+				activeSessionId: "replied-child",
+				sessionId: "replied-child-session",
+				sessionName: "Replied child",
+				runtimeKind: "subagent",
+				parentActiveSessionId: "parent-active",
+				repliedSinceTask: true,
+				hasActiveHeartbeat: true,
+				activity: "idle",
+			}),
+			makeSummary({ id: "parent-active", activeSessionId: "parent-active", sessionId: "parent-session" }),
+		];
+		const collapsed = buildAgentsViewRows(summaries);
+		const expanded = buildAgentsViewRows(summaries, new Set([collapsed[0]?.identity ?? ""]));
+
+		expect(expanded.find((row) => row.title === "Replied child")).toMatchObject({
+			section: "running",
+			statusLabel: "heartbeat active",
+		});
 	});
 
 	test("defaults an idle session with no verdict to needs-input", () => {
@@ -137,7 +193,7 @@ describe("agents view state", () => {
 		expect(rows.map((row) => row.section)).toEqual(["running", "running", "running", "idle"]);
 	});
 
-	test("keeps row order stable when modification times and daemon input order change", () => {
+	test("keeps row order stable when activity and modification times and daemon input order change", () => {
 		const older = makeSummary({
 			id: "older",
 			sessionId: "older",
@@ -145,6 +201,7 @@ describe("agents view state", () => {
 			activity: "working",
 			created: "2026-01-01T00:00:00Z",
 			modified: "2026-01-04T00:00:00Z",
+			lastActivityAt: "2026-01-04T00:00:00Z",
 		});
 		const newer = makeSummary({
 			id: "newer",
@@ -153,12 +210,13 @@ describe("agents view state", () => {
 			activity: "working",
 			created: "2026-01-02T00:00:00Z",
 			modified: "2026-01-03T00:00:00Z",
+			lastActivityAt: "2026-01-03T00:00:00Z",
 		});
 
 		const initialOrder = buildAgentsViewRows([older, newer]).map((row) => row.summary.sessionId);
 		const refreshedOrder = buildAgentsViewRows([
-			{ ...newer, modified: "2026-01-05T00:00:00Z" },
-			{ ...older, modified: "2026-01-06T00:00:00Z" },
+			{ ...newer, modified: "2026-01-05T00:00:00Z", lastActivityAt: "2026-01-05T00:00:00Z" },
+			{ ...older, modified: "2026-01-06T00:00:00Z", lastActivityAt: "2026-01-06T00:00:00Z" },
 		]).map((row) => row.summary.sessionId);
 
 		expect(initialOrder).toEqual(["newer", "older"]);
@@ -173,6 +231,52 @@ describe("agents view state", () => {
 		]);
 
 		expect(rows.map((row) => row.summary.sessionId)).toEqual(["alpha", "beta-1", "beta-2"]);
+	});
+
+	test("sorts idle rows by last message activity, newest first", () => {
+		const rows = buildAgentsViewRows([
+			makeSummary({
+				id: "created-newest",
+				sessionId: "created-newest",
+				sessionName: "created newest",
+				activity: "idle",
+				created: "2026-01-03T00:00:00Z",
+				lastActivityAt: "2026-01-01T00:00:00Z",
+			}),
+			makeSummary({
+				id: "middle",
+				sessionId: "middle",
+				sessionName: "middle",
+				activity: "idle",
+				created: "2026-01-02T00:00:00Z",
+				lastActivityAt: "2026-01-02T00:00:00Z",
+			}),
+			makeSummary({
+				id: "active-newest",
+				sessionId: "active-newest",
+				sessionName: "active newest",
+				activity: "idle",
+				created: "2026-01-01T00:00:00Z",
+				lastActivityAt: "2026-01-03T00:00:00Z",
+			}),
+			makeSummary({
+				id: "running-oldest",
+				sessionId: "running-oldest",
+				sessionName: "running oldest",
+				activity: "working",
+				isStreaming: true,
+				created: "2025-12-31T00:00:00Z",
+				lastActivityAt: "2025-12-31T00:00:00Z",
+			}),
+		]);
+
+		expect(rows.map((row) => row.summary.sessionId)).toEqual([
+			"running-oldest",
+			"active-newest",
+			"middle",
+			"created-newest",
+		]);
+		expect(rows.map((row) => row.section)).toEqual(["running", "idle", "idle", "idle"]);
 	});
 
 	test("summarizes subagents on their parent and omits subagent rows", () => {
@@ -279,7 +383,8 @@ describe("agents view state", () => {
 			runningSubagentCount: 1,
 		});
 		const expanded = buildAgentsViewRows(summaries, new Set([collapsed[0]?.identity ?? ""]));
-		expect(expanded[1]).toMatchObject({
+		expect(expanded[1]).toMatchObject({ kind: "subagent-summary", expanded: true });
+		expect(expanded[2]).toMatchObject({
 			kind: "subagent",
 			section: "running",
 			statusLabel: "heartbeat active",
@@ -307,6 +412,7 @@ describe("agents view state", () => {
 				runtimeKind: "subagent",
 				parentActiveSessionId: "parent-active",
 				activity: "idle",
+				isSessionActive: true,
 				isRunningTools: true,
 			}),
 			makeSummary({
@@ -418,14 +524,17 @@ describe("agents view state", () => {
 		const collapsed = buildAgentsViewRows(summaries);
 		expect(collapsed.map((row) => row.kind)).toEqual(["agent", "subagent-summary"]);
 		expect(collapsed[1]?.title).toBe("1 subagent running");
+		expect(collapsed[1]?.expanded).toBe(false);
 
 		const parentIdentity = collapsed[0]?.identity;
 		const expanded = buildAgentsViewRows(summaries, new Set([parentIdentity ?? ""]));
 		expect(expanded.map((row) => [row.title, row.kind, row.depth])).toEqual([
 			["Parent", "agent", 0],
+			["1 subagent running", "subagent-summary", 1],
 			["Child", "subagent", 1],
 			["Completed child", "subagent", 1],
 		]);
+		expect(expanded[1]?.expanded).toBe(true);
 		expect(expanded.slice(1).every((row) => row.selectable && row.parentIdentity === parentIdentity)).toBe(true);
 	});
 
@@ -468,6 +577,7 @@ describe("agents view state", () => {
 		const oneLevel = buildAgentsViewRows(summaries, new Set([rootIdentity]));
 		expect(oneLevel.map((row) => [row.title, row.kind])).toEqual([
 			["Root", "agent"],
+			["1 subagent running", "subagent-summary"],
 			["Child", "subagent"],
 			["1 subagent running", "subagent-summary"],
 		]);
@@ -476,7 +586,9 @@ describe("agents view state", () => {
 		const twoLevel = buildAgentsViewRows(summaries, new Set([rootIdentity, childIdentity]));
 		expect(twoLevel.map((row) => [row.title, row.kind, row.depth])).toEqual([
 			["Root", "agent", 0],
+			["1 subagent running", "subagent-summary", 1],
 			["Child", "subagent", 1],
+			["1 subagent running", "subagent-summary", 2],
 			["Grandchild", "subagent", 2],
 		]);
 	});
@@ -512,7 +624,7 @@ describe("agents view state", () => {
 		expect(rows[1]?.selectable).toBe(true);
 	});
 
-	test("treats parent-linked summaries without runtimeKind as subagents", () => {
+	test("treats parent-linked summaries without runtimeKind as subagents and re-roots unresolved ones", () => {
 		const rows = buildAgentsViewRows([
 			makeSummary({
 				id: "legacy-child",
@@ -545,6 +657,7 @@ describe("agents view state", () => {
 		expect(rows.map((row) => [row.title, row.kind])).toEqual([
 			["Parent", "agent"],
 			["1 subagent running", "subagent-summary"],
+			["Legacy rlm child", "agent"],
 		]);
 		expect(rows[0]?.runningSubagentCount).toBe(1);
 	});
@@ -599,14 +712,21 @@ describe("agents view state", () => {
 
 		const parentIdentity = collapsed[0]?.identity ?? "";
 		const expandedNoProgram = buildAgentsViewRows(summaries, new Set([parentIdentity]));
-		// Without the program toggle, only the grouped subagent rows render.
-		expect(expandedNoProgram.map((row) => row.kind)).toEqual(["agent", "subagent", "subagent", "subagent"]);
+		// Without the program toggle, only the summary and grouped subagent rows render.
+		expect(expandedNoProgram.map((row) => row.kind)).toEqual([
+			"agent",
+			"subagent-summary",
+			"subagent",
+			"subagent",
+			"subagent",
+		]);
 
 		const expanded = buildAgentsViewRows(summaries, new Set([parentIdentity]), new Set([parentIdentity]));
 		// Each spawn cell renders in full, once, directly above the subagents it
 		// launched — padded with a blank panel line above and below, no truncation.
 		expect(expanded.map((row) => [row.kind, row.code ?? row.title])).toEqual([
 			["agent", "Parent"],
+			["subagent-summary", "3 subagents"],
 			["subagent-code", ""],
 			["subagent-code", "task = sleep(60)"],
 			["subagent-code", "for i in range(2):"],
@@ -658,7 +778,7 @@ describe("agents view state", () => {
 		expect(bodyLines[10]).toBe("… +15 more lines");
 	});
 
-	test("omits subagents when their parent is not visible", () => {
+	test("re-roots live subagents when their parent is not visible", () => {
 		const rows = buildAgentsViewRows([
 			makeSummary({
 				id: "child-active",
@@ -681,7 +801,10 @@ describe("agents view state", () => {
 			}),
 		]);
 
-		expect(rows.map((row) => row.title)).toEqual(["Other"]);
+		expect(rows.map((row) => [row.title, row.kind, row.depth])).toEqual([
+			["Child", "agent", 0],
+			["Other", "agent", 0],
+		]);
 	});
 
 	test("shows daemon-resident sessions only", () => {
@@ -887,7 +1010,9 @@ describe("agents view state", () => {
 		).toEqual([
 			["newer-session", 0],
 			["root-session", 0],
+			["root-session", 1],
 			["child-session", 1],
+			["child-session", 2],
 			["match-session", 2],
 		]);
 	});
@@ -1130,6 +1255,320 @@ describe("agents view state", () => {
 			expect(resolveAgentsViewSelectionIndex(rows, undefined, undefined)).toBe(-1);
 		});
 	});
+
+	describe("scoped navigation", () => {
+		const rootScope = { sessionId: "root-session", activeSessionId: "root-active" };
+		const childScope = { sessionId: "child-session", activeSessionId: "child-active" };
+
+		test("seeds handoff scope frames with the matching return chat", () => {
+			const chat = makeSummary({ sessionId: "root-session", activeSessionId: "root-active" });
+			const persistentState = createInitialAgentsViewPersistentState({
+				initialScopeKey: rootScope,
+				initialSession: chat,
+			});
+			const handoffFrame = persistentState.scopeFrames?.at(-1);
+
+			expect(handoffFrame).toEqual({ scope: rootScope, returnChat: chat });
+			expect(createInitialAgentsViewScopeFrames(rootScope, persistentState.backSession)).toEqual([handoffFrame]);
+			expect(createInitialAgentsViewScopeFrames(rootScope, makeSummary({ sessionId: "stale-session" }))).toEqual([
+				{ scope: rootScope },
+			]);
+
+			const leftResult = resolveAgentsViewLeftResult(chat, [], handoffFrame?.returnChat);
+			expect(leftResult?.type).toBe("scope_back");
+			if (leftResult?.type !== "scope_back") throw new Error("Expected scoped Left navigation");
+			expect(createScopeBackReturnChatOpenResult({ ...leftResult, hasChildren: true })).toMatchObject({
+				type: "open",
+				summary: { sessionId: "root-session", activeSessionId: "root-active" },
+			});
+		});
+
+		test("pushes and pops immutable scope frames with their return chats one level at a time", () => {
+			const initial: AgentsViewScopeFrame[] = [];
+			const rootChat = makeSummary({ sessionId: "root-session" });
+			const childChat = makeSummary({ sessionId: "child-session" });
+			const rootFrames = transitionAgentsViewScope(initial, {
+				type: "push",
+				scope: rootScope,
+				returnChat: rootChat,
+			});
+			const childFrames = transitionAgentsViewScope(rootFrames, {
+				type: "push",
+				scope: childScope,
+				returnChat: childChat,
+			});
+
+			expect(initial).toEqual([]);
+			expect(childFrames.map((frame) => [frame.scope.sessionId, frame.returnChat?.sessionId])).toEqual([
+				["root-session", "root-session"],
+				["child-session", "child-session"],
+			]);
+			expect(JSON.parse(JSON.stringify(childFrames))).toEqual(childFrames);
+			expect(transitionAgentsViewScope(childFrames, { type: "back" })).toEqual(rootFrames);
+			expect(transitionAgentsViewScope(rootFrames, { type: "back" })).toEqual([]);
+		});
+
+		test("refreshes the current frame instead of duplicating the same session", () => {
+			const frames = transitionAgentsViewScope([{ scope: rootScope }], {
+				type: "push",
+				scope: { ...rootScope, activeSessionId: "root-active-2" },
+			});
+			expect(frames).toEqual([{ scope: { ...rootScope, activeSessionId: "root-active-2" } }]);
+		});
+
+		test("Left is a no-op globally and returns through a surviving scoped chat", () => {
+			const root = makeSummary({ sessionId: "root-session", activeSessionId: "root-active" });
+			const recordedChat = makeSummary({ sessionId: "root-session", activeSessionId: "stale-active" });
+
+			expect(resolveAgentsViewLeftResult(undefined)).toBeUndefined();
+			expect(resolveAgentsViewLeftResult(root, [], recordedChat)).toMatchObject({
+				type: "scope_back",
+				selection: { sessionId: "root-session" },
+				returnChat: { sessionId: "root-session", activeSessionId: "root-active" },
+			});
+		});
+
+		test("Left falls back to the parent agents view when the recorded chat is gone", () => {
+			const root = makeSummary({ sessionId: "replacement-session" });
+			const deletedChat = makeSummary({ sessionId: "deleted-session" });
+
+			expect(resolveAgentsViewLeftResult(root, ["parent-session"], deletedChat)).toEqual({
+				type: "scope_back",
+				selection: root,
+				expandedAncestorSessionIds: ["parent-session"],
+			});
+		});
+
+		test("carries expansion and child metadata when scope-back reopens its return chat", () => {
+			const root = makeSummary({ sessionId: "root-session", activeSessionId: "root-active" });
+
+			expect(
+				createScopeBackReturnChatOpenResult({
+					type: "scope_back",
+					selection: root,
+					returnChat: root,
+					expandedAncestorSessionIds: ["ancestor-session", "parent-session"],
+					hasChildren: true,
+				}),
+			).toEqual({
+				type: "open",
+				summary: root,
+				expandedAncestorSessionIds: ["ancestor-session", "parent-session"],
+				hasChildren: true,
+			});
+		});
+
+		test("falls back to the nearest surviving scope frame, then global", () => {
+			const root = makeSummary({
+				id: "root-active",
+				activeSessionId: "root-active",
+				sessionId: "root-session",
+			});
+			const frames = [{ scope: rootScope }, { scope: childScope }];
+			const records = reconcileUnifiedSessions([root], []);
+
+			expect(resolveAgentsViewScopeFrames(records, frames)).toMatchObject({
+				frames: [{ scope: rootScope }],
+				root: { daemon: { sessionId: "root-session" } },
+				droppedFrames: 1,
+			});
+			expect(resolveAgentsViewScopeFrames([], frames)).toEqual({ frames: [], droppedFrames: 2 });
+		});
+
+		test("settles vanished scopes only after both catalog attempts finish", () => {
+			expect(shouldApplyScopeResolution(0, false, false)).toBe(true);
+			expect(shouldApplyScopeResolution(1, true, false)).toBe(false);
+			expect(shouldApplyScopeResolution(1, false, true)).toBe(false);
+			expect(shouldApplyScopeResolution(1, true, true)).toBe(true);
+		});
+	});
+
+	describe("scoped unified records", () => {
+		test("buildAgentsViewRows excludes the scope root", () => {
+			const root = makeSummary({
+				id: "root-active",
+				activeSessionId: "root-active",
+				sessionId: "root-session",
+				sessionName: "Root",
+			});
+			const scope = { sessionId: "root-session", activeSessionId: "root-active" };
+
+			expect(buildAgentsViewRows([root], new Set(), new Set(), scope)).toEqual([]);
+		});
+
+		test("buildAgentsViewRows promotes direct scope children to root agent rows", () => {
+			const root = makeSummary({
+				id: "root-active",
+				activeSessionId: "root-active",
+				sessionId: "root-session",
+				sessionName: "Root",
+			});
+			const child = makeSummary({
+				id: "child-active",
+				activeSessionId: "child-active",
+				sessionId: "child-session",
+				sessionName: "Child",
+				runtimeKind: "subagent",
+				parentActiveSessionId: "root-active",
+				parentSessionId: "root-session",
+			});
+			const scope = { sessionId: "root-session", activeSessionId: "root-active" };
+
+			expect(buildAgentsViewRows([root, child], new Set(), new Set(), scope)).toMatchObject([
+				{ kind: "agent", depth: 0, summary: { sessionId: "child-session" } },
+			]);
+		});
+
+		test("buildAgentsViewRows re-roots a saved child whose parent file is missing", () => {
+			const [child] = reconcileUnifiedSessions(
+				[],
+				[
+					makeSessionInfo({
+						id: "saved-child",
+						path: "/tmp/project/saved-child.jsonl",
+						parentSessionPath: "/tmp/project/missing-parent.jsonl",
+						modified: new Date("2026-01-04T00:00:00Z"),
+					}),
+				],
+			);
+
+			expect(buildAgentsViewRows([child!])).toMatchObject([
+				{
+					kind: "agent",
+					depth: 0,
+					summary: { sessionId: "saved-child", lastActivityAt: "2026-01-04T00:00:00.000Z" },
+				},
+			]);
+		});
+
+		test("gets ancestor session ids from root to immediate parent", () => {
+			const records = reconcileUnifiedSessions(
+				[
+					makeSummary({ id: "root", activeSessionId: "root", sessionId: "root-session" }),
+					makeSummary({
+						id: "child",
+						activeSessionId: "child",
+						sessionId: "child-session",
+						runtimeKind: "subagent",
+						parentActiveSessionId: "root",
+					}),
+					makeSummary({
+						id: "grandchild",
+						activeSessionId: "grandchild",
+						sessionId: "grandchild-session",
+						runtimeKind: "subagent",
+						parentActiveSessionId: "child",
+					}),
+				],
+				[],
+			);
+			const index = buildUnifiedSessionIndex(records);
+
+			expect(
+				getUnifiedSessionAncestorSessionIds(
+					records,
+					{ sessionId: "grandchild-session", activeSessionId: "grandchild" },
+					index,
+				),
+			).toEqual(["root-session", "child-session"]);
+		});
+
+		test("reports no children for leaf and unresolvable scopes", () => {
+			const records = reconcileUnifiedSessions(
+				[makeSummary({ id: "leaf", activeSessionId: "leaf", sessionId: "leaf-session" })],
+				[],
+			);
+			const index = buildUnifiedSessionIndex(records);
+
+			expect(hasUnifiedSessionChildren(records, { sessionId: "leaf-session", activeSessionId: "leaf" }, index)).toBe(
+				false,
+			);
+			expect(hasUnifiedSessionChildren(records, { sessionId: "missing" }, index)).toBe(false);
+			expect(scopeToSessionSubtree(records, { sessionId: "missing" }, index)).toEqual([]);
+		});
+		test("includes registry-backed and saved-only passive descendants", () => {
+			const rootPath = "/tmp/project/root.jsonl";
+			const root = makeSummary({
+				id: "root-active",
+				activeSessionId: "root-active",
+				sessionId: "root-session",
+				sessionFile: rootPath,
+				rlmDepth: 0,
+			});
+			const registryChild = makeSummary({
+				id: "registry-child",
+				activeSessionId: undefined,
+				sessionId: "registry-child",
+				sessionFile: "/tmp/project/registry-child.jsonl",
+				runtimeKind: "subagent",
+				parentSessionId: "root-session",
+				rlmDepth: 1,
+			});
+			const records = reconcileUnifiedSessions(
+				[root, registryChild],
+				[
+					makeSessionInfo({ path: rootPath, id: "root-session", rlmDepth: 0 }),
+					makeSessionInfo({
+						path: "/tmp/project/saved-child.jsonl",
+						id: "saved-child",
+						parentSessionPath: rootPath,
+						rlmDepth: 1,
+					}),
+				],
+			);
+			const scope = { sessionId: "root-session", activeSessionId: "root-active" };
+			const scoped = scopeToSessionSubtree(records, scope);
+			const rows = buildAgentsViewRows(scoped, new Set(), new Set(), scope);
+
+			expect(hasUnifiedSessionChildren(records, scope)).toBe(true);
+			expect(scoped.map((record) => record.daemon?.sessionId ?? record.saved?.id)).toEqual([
+				"root-session",
+				"registry-child",
+				"saved-child",
+			]);
+			expect(rows).toHaveLength(2);
+			expect(rows.every((row) => row.kind === "agent" && row.depth === 0 && row.section === "inactive")).toBe(true);
+			expect(rows.find((row) => row.summary.sessionId === "registry-child")?.summary).toMatchObject({
+				parentSessionId: "root-session",
+				rlmDepth: 1,
+			});
+			expect(rows.find((row) => row.summary.sessionId === "saved-child")?.summary).toMatchObject({
+				parentSessionPath: rootPath,
+				rlmDepth: 1,
+			});
+		});
+	});
+
+	test("unattachable-child fallback preserves child selection and explains the parent open", () => {
+		const child = makeSummary({ id: "child", sessionId: "child-session" });
+		const parent = makeSummary({ id: "parent", sessionId: "parent-session" });
+		const result = createUnattachableChildOpenResult(child, parent, ["root-session"], true);
+
+		expect(result).toMatchObject({
+			type: "open",
+			summary: { sessionId: "parent-session" },
+			selection: { sessionId: "child-session" },
+			expandedAncestorSessionIds: ["root-session"],
+			hasChildren: true,
+			statusMessage: "Child session is unavailable; opened its parent instead",
+		});
+		expect(result.selection).not.toBe(result.summary);
+	});
+
+	describe("stored depth display", () => {
+		test("labels the global agents view as depth zero and scoped views at their child level", () => {
+			expect(getAgentsViewDepth(undefined)).toBe(0);
+			expect(getAgentsViewDepth(makeSummary({ rlmDepth: 0 }))).toBe(1);
+			expect(getAgentsViewDepth(makeSummary({ rlmDepth: 3 }))).toBe(4);
+		});
+
+		test("never infers a chat depth when the persisted field is absent", () => {
+			expect(formatAgentDepthLabel(undefined, true)).toBeUndefined();
+			expect(formatAgentDepthLabel(0, false)).toBeUndefined();
+			expect(formatAgentDepthLabel(0, true)).toBe("depth 0");
+			expect(formatAgentDepthLabel(3, false)).toBe("depth 3");
+		});
+	});
 });
 
 function makeSummary(overrides: Partial<SessionSummary>): SessionSummary {
@@ -1138,13 +1577,14 @@ function makeSummary(overrides: Partial<SessionSummary>): SessionSummary {
 		activeSessionId: "active-1",
 		lifecycle: "live",
 		activity: "idle",
+		isSessionActive: false,
 		sessionId: "session-1",
 		cwd: "/tmp/project",
 		isStreaming: false,
 		isCompacting: false,
 		attachedClients: 0,
 		messageCount: 1,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 		...overrides,
 	};
 }
@@ -1157,6 +1597,7 @@ function makeSessionInfo(overrides: Partial<SessionInfo> & { path: string; id: s
 		name: overrides.name,
 		state: overrides.state,
 		parentSessionPath: overrides.parentSessionPath,
+		rlmDepth: overrides.rlmDepth ?? 0,
 		created: overrides.created ?? new Date("2026-01-01T00:00:00Z"),
 		modified: overrides.modified ?? new Date("2026-01-01T00:00:00Z"),
 		messageCount: overrides.messageCount ?? 1,

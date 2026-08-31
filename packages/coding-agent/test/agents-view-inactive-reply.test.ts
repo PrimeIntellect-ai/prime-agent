@@ -21,8 +21,9 @@ function summary(overrides: Partial<SessionSummary>): SessionSummary {
 		isCompacting: false,
 		attachedClients: 0,
 		messageCount: 3,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 		...overrides,
+		isSessionActive: overrides.isSessionActive ?? false,
 	};
 }
 

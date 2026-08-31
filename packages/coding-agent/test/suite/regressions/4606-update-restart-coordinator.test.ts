@@ -113,6 +113,15 @@ async function waitForExit(child: ChildProcess, timeoutMs = 60_000): Promise<voi
 	});
 }
 
+async function waitForProcessExit(pid: number, timeoutMs = 30_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (!isProcessAlive(pid)) return;
+		await delay(25);
+	}
+	throw new Error(`Timed out waiting for process ${pid} to exit`);
+}
+
 async function waitForFile(path: string, timeoutMs = 30_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
@@ -431,5 +440,11 @@ describe("ENG-4606 update restart coordinator", () => {
 		const owners = listSupervisorOwnerRecords(paths.registryDir);
 		expect(owners).toHaveLength(1);
 		expect(owners[0]).toMatchObject({ pid: status.successor?.pid, socketPath: resolve(paths.socketPath) });
+		await stopDaemon(paths.socketPath);
+		sockets.delete(paths.socketPath);
+		if (replacementHello.supervisorPid === undefined) {
+			throw new Error("Replacement daemon did not report its supervisor PID");
+		}
+		await waitForProcessExit(replacementHello.supervisorPid);
 	}, 180_000);
 });

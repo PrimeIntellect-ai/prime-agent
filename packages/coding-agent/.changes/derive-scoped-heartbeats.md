@@ -1,0 +1,1 @@
+- Kept heartbeat lists current when session or subagent scope changes.

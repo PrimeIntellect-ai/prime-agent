@@ -34,7 +34,7 @@ interface MockSessionSummary {
 	isCompacting: boolean;
 	isBashRunning?: boolean;
 	hasRunningRlmChildren?: boolean;
-	pendingMessageCount: number;
+	sessionActions: { queuedCount: number; steering: string[]; followUps: string[] };
 }
 
 type MockRunningDaemonProbe = { reachable: false } | { reachable: true; activeSessions?: MockSessionSummary[] };
@@ -48,13 +48,15 @@ interface MockCustomMessage {
 	details?: unknown;
 }
 
-interface MockQueuedMessage {
-	message: string;
-	content?: Array<{ type: "text"; text: string }>;
-	agentMessageId?: string;
+interface MockRecoveryAction {
+	id: string;
+	source: "internal";
+	delivery: "next_turn_boundary" | "when_run_idle";
+	wake: "immediate" | "on_lower_boundary" | "external_resume";
 	queueKey?: string;
-	customMessage?: MockCustomMessage;
-	prefixMessages?: MockCustomMessage[];
+	snapshot?: unknown;
+	agentMessageId?: string;
+	payload: { kind: "turn" | "session_command"; text: string; [key: string]: unknown };
 }
 
 interface MockUpdateRestartSession {
@@ -65,10 +67,8 @@ interface MockUpdateRestartSession {
 	config: Record<string, unknown>;
 	runtimeMetadata?: AgentSessionRuntimeMetadata;
 	queue: {
-		steering: MockQueuedMessage[];
-		followUp: MockQueuedMessage[];
+		actions: { formatVersion: 1; actions: MockRecoveryAction[] };
 		nextTurn: MockCustomMessage[];
-		acceptedPrompt?: MockQueuedMessage & { nextTurn: MockCustomMessage[] };
 	};
 	shouldResume: boolean;
 	wasStreaming: boolean;
@@ -80,8 +80,26 @@ interface MockUpdateRestartSession {
 }
 
 interface MockUpdateRestartManifest {
+	formatVersion: 1;
 	createdAt: string;
 	sessions: MockUpdateRestartSession[];
+}
+
+function createMockTurnExecutionPolicy(): Record<string, unknown> {
+	return {
+		preparation: {
+			initialRefineBarrier: "skip",
+			flushPendingBashBeforeValidation: false,
+			validateModelAndAuth: true,
+			awaitPendingModelSelection: true,
+			preTurnCompaction: "beforeModelSelection",
+			finalRefineBarrier: "always",
+		},
+		runBeforeAgentStart: true,
+		nextTurnContextTiming: "commit",
+		preserveEmptyExtensionPrompt: true,
+		completionIncludesRetryChain: true,
+	};
 }
 
 interface MockDaemonRequest {
@@ -94,6 +112,7 @@ interface MockDaemonRequest {
 	content?: unknown;
 	messages?: MockCustomMessage[];
 	queueKey?: string;
+	snapshot?: unknown;
 	sessionPath?: string;
 	runtimeMetadata?: AgentSessionRuntimeMetadata;
 }
@@ -121,7 +140,11 @@ const mockState = vi.hoisted(() => ({
 	listResponse: undefined as MockDaemonResponse | undefined,
 	noticeError: undefined as string | undefined,
 	prepareError: undefined as string | undefined,
-	prepareManifest: { createdAt: "2026-07-07T00:00:00.000Z", sessions: [] } as MockUpdateRestartManifest,
+	prepareManifest: {
+		formatVersion: 1,
+		createdAt: "2026-07-07T00:00:00.000Z",
+		sessions: [],
+	} as MockUpdateRestartManifest,
 	preparedManifestPath: "",
 	prepareResponse: undefined as MockDaemonResponse | undefined,
 	promptFailures: 0,
@@ -131,6 +154,7 @@ const mockState = vi.hoisted(() => ({
 	disconnectAfterPersistRequestTypes: [] as string[],
 	requestPayloads: [] as MockDaemonRequest[],
 	helloWaitFailures: 0,
+	restoreActionFailures: 0,
 	restoreNextTurnFailures: 0,
 	socketPath: "",
 	successorProcessStartId: "replacement-start" as string | undefined,
@@ -235,7 +259,7 @@ vi.mock("../src/cli/daemon-launch.js", () => ({
 		summary.isCompacting ||
 		summary.isBashRunning === true ||
 		summary.hasRunningRlmChildren === true ||
-		summary.pendingMessageCount > 0,
+		summary.sessionActions.queuedCount > 0,
 	probeRunningDaemonSessions: vi.fn(async (socketPath: string) => {
 		mockState.calls.push("probe-daemon");
 		mockState.probeSocketPaths.push(socketPath);
@@ -307,10 +331,6 @@ vi.mock("../src/modes/daemon/daemon-client.js", () => ({
 			return hello;
 		}
 
-		async requestLegacy(request: MockDaemonRequest): Promise<MockDaemonResponse> {
-			return this.request(request);
-		}
-
 		async request(request: MockDaemonRequest): Promise<MockDaemonResponse> {
 			this.observedHello ??= mockState.hello;
 			mockState.calls.push(`daemon-request:${request.type}`);
@@ -348,6 +368,10 @@ vi.mock("../src/modes/daemon/daemon-client.js", () => ({
 				}
 				const activeSessionId = mockState.createActiveSessionIds.shift() ?? "restored-active";
 				return { success: true, data: { id: activeSessionId, activeSessionId } };
+			}
+			if (request.type === "restore_actions" && mockState.restoreActionFailures > 0) {
+				mockState.restoreActionFailures--;
+				return { success: false, error: "restore failed" };
 			}
 			if (request.type === "restore_next_turn" && mockState.restoreNextTurnFailures > 0) {
 				mockState.restoreNextTurnFailures--;
@@ -389,6 +413,60 @@ describe("self-update daemon restart", () => {
 		});
 	}
 
+	function createAcceptedRecoveryManifest(nextTurn: MockCustomMessage[] = []): MockUpdateRestartManifest {
+		return {
+			formatVersion: 1,
+			createdAt: "2026-07-07T00:00:00.000Z",
+			sessions: [
+				{
+					activeSessionId: "old-active",
+					sessionId: "session-1",
+					sessionFile: join(projectDir, "session.jsonl"),
+					cwd: projectDir,
+					config: { cwd: projectDir, agentDir },
+					queue: {
+						actions: {
+							formatVersion: 1,
+							actions: [
+								{
+									id: "accepted-action",
+									source: "internal",
+									delivery: "when_run_idle",
+									wake: "external_resume",
+									agentMessageId: "agentmsg_accepted",
+									payload: {
+										kind: "turn",
+										text: "accepted work",
+										records: [
+											{
+												id: "accepted-action-primary",
+												role: "primary",
+												message: { role: "user", content: "accepted work", timestamp: 1 },
+												ownerActionId: "accepted-action",
+											},
+										],
+										executionPolicy: createMockTurnExecutionPolicy(),
+										queueVisible: false,
+										acceptedAgentMessage: false,
+										acceptedBeforeCompletion: true,
+									},
+								},
+							],
+						},
+						nextTurn,
+					},
+					shouldResume: true,
+					wasStreaming: false,
+					wasCompacting: false,
+					wasBashRunning: false,
+					hadRunningRlmChildren: false,
+					wasRetrying: false,
+					hadAcceptedPromptInFlight: true,
+				},
+			],
+		};
+	}
+
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pi-self-update-daemon-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		agentDir = join(tempDir, "agent");
@@ -411,7 +489,7 @@ describe("self-update daemon restart", () => {
 		mockState.daemonProbeAfterShutdown = undefined;
 		mockState.disconnectAfterPersistRequestTypes = [];
 		mockState.disconnectRequestTypes = [];
-		mockState.prepareManifest = { createdAt: "2026-07-07T00:00:00.000Z", sessions: [] };
+		mockState.prepareManifest = { formatVersion: 1, createdAt: "2026-07-07T00:00:00.000Z", sessions: [] };
 		mockState.preparedManifestPath = getDaemonUpdateRestartManifestPath(mockState.socketPath, agentDir);
 		mockState.prepareResponse = undefined;
 		mockState.helloWaitFailures = 0;
@@ -419,6 +497,7 @@ describe("self-update daemon restart", () => {
 		mockState.probeSocketPaths = [];
 		mockState.requestThrowTypes = [];
 		mockState.requestPayloads = [];
+		mockState.restoreActionFailures = 0;
 		mockState.restoreNextTurnFailures = 0;
 		mockState.spawnExitCodes = [];
 		mockState.shutdownResult = true;
@@ -474,6 +553,18 @@ describe("self-update daemon restart", () => {
 		);
 	});
 
+	it.each([
+		["unreadable", "{"],
+		["unknown-format", JSON.stringify({ formatVersion: 0, createdAt: "stale", sessions: [] })],
+	])("ignores a %s pending restart manifest when probing", async (_name, contents) => {
+		writeFileSync(mockState.preparedManifestPath, contents);
+
+		await expect(prepareDaemonUpdateRestart(mockState.socketPath, agentDir)).resolves.toEqual(
+			mockState.prepareManifest,
+		);
+		expect(mockState.calls).toContain("daemon-request:prepare_update_restart");
+	});
+
 	it("uses the interactive no-change sentinel only when self-update is unchanged", async () => {
 		process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] = "1";
 		vi.stubGlobal(
@@ -497,7 +588,7 @@ describe("self-update daemon restart", () => {
 					activeSessionId: "busy",
 					isStreaming: true,
 					isCompacting: false,
-					pendingMessageCount: 0,
+					sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 				},
 			],
 		};
@@ -671,6 +762,7 @@ describe("self-update daemon restart", () => {
 	it("clears the prepared manifest after fallback restoration when shutdown fails", async () => {
 		mockState.shutdownResult = false;
 		mockState.prepareManifest = {
+			formatVersion: 1,
 			createdAt: "2026-07-07T00:00:00.000Z",
 			sessions: [
 				{
@@ -679,7 +771,7 @@ describe("self-update daemon restart", () => {
 					sessionFile: join(tempDir, "session.jsonl"),
 					cwd: tempDir,
 					config: {},
-					queue: { steering: [], followUp: [], nextTurn: [] },
+					queue: { actions: { formatVersion: 1, actions: [] }, nextTurn: [] },
 					shouldResume: false,
 					wasStreaming: false,
 					wasCompacting: false,
@@ -704,6 +796,7 @@ describe("self-update daemon restart", () => {
 		mockState.shutdownResult = false;
 		mockState.daemonProbeAfterShutdown = { reachable: false };
 		mockState.prepareManifest = {
+			formatVersion: 1,
 			createdAt: "2026-07-07T00:00:00.000Z",
 			sessions: [
 				{
@@ -712,7 +805,7 @@ describe("self-update daemon restart", () => {
 					sessionFile: join(tempDir, "session.jsonl"),
 					cwd: tempDir,
 					config: {},
-					queue: { steering: [], followUp: [], nextTurn: [] },
+					queue: { actions: { formatVersion: 1, actions: [] }, nextTurn: [] },
 					shouldResume: false,
 					wasStreaming: false,
 					wasCompacting: false,
@@ -737,6 +830,7 @@ describe("self-update daemon restart", () => {
 	it("continues queued-work restoration when the update notice request rejects", async () => {
 		mockState.noticeError = "socket closed";
 		mockState.prepareManifest = {
+			formatVersion: 1,
 			createdAt: "2026-07-07T00:00:00.000Z",
 			sessions: [
 				{
@@ -746,8 +840,7 @@ describe("self-update daemon restart", () => {
 					cwd: tempDir,
 					config: {},
 					queue: {
-						steering: [],
-						followUp: [],
+						actions: { formatVersion: 1, actions: [] },
 						nextTurn: [
 							{
 								role: "custom",
@@ -781,20 +874,6 @@ describe("self-update daemon restart", () => {
 		} finally {
 			errorSpy.mockRestore();
 		}
-	});
-
-	it("restarts an idle legacy daemon without a restorable manifest", async () => {
-		mockState.hello = { protocol: { version: 1 } };
-		mockState.prepareError = "Unknown daemon command: prepare_update_restart";
-
-		await performUpdateAndRunCoordinator();
-
-		expect(mockState.lastCoordinatorStatus).toMatchObject({
-			phase: "complete",
-			counts: { total: 0, restored: 0, resumed: 0, failed: 0 },
-		});
-		expect(mockState.calls).toContain("shutdown-daemon");
-		expect(mockState.calls).toContain("ensure-daemon");
 	});
 
 	it("restarts the daemon only after the package update succeeds", async () => {
@@ -837,7 +916,10 @@ describe("self-update daemon restart", () => {
 
 		for (const prepareResponse of [
 			{ success: false, error: "prepare failed" } as const,
-			{ success: true, data: { createdAt: "2026-07-07T00:00:00.000Z", sessions: "invalid" } } as const,
+			{
+				success: true,
+				data: { formatVersion: 1, createdAt: "2026-07-07T00:00:00.000Z", sessions: "invalid" },
+			} as const,
 		]) {
 			mockState.calls = [];
 			mockState.prepareResponse = prepareResponse;
@@ -867,6 +949,7 @@ describe("self-update daemon restart", () => {
 		mockState.preparedManifestPath = legacyManifestPath;
 		mockState.disconnectAfterPersistRequestTypes = ["prepare_update_restart"];
 		mockState.prepareManifest = {
+			formatVersion: 1,
 			createdAt: "2026-07-07T00:00:00.000Z",
 			sessions: [
 				{
@@ -875,7 +958,7 @@ describe("self-update daemon restart", () => {
 					sessionFile: join(tempDir, "session.jsonl"),
 					cwd: tempDir,
 					config: { apiKey: "legacy-secret" },
-					queue: { steering: [], followUp: [], nextTurn: [] },
+					queue: { actions: { formatVersion: 1, actions: [] }, nextTurn: [] },
 					shouldResume: false,
 					wasStreaming: false,
 					wasCompacting: false,
@@ -901,6 +984,7 @@ describe("self-update daemon restart", () => {
 	it("fences a pending prepared restart only after verifying the live daemon is empty", async () => {
 		useFixedOwnerHello();
 		const pendingManifest: MockUpdateRestartManifest = {
+			formatVersion: 1,
 			createdAt: "2026-07-07T00:00:00.000Z",
 			sessions: [
 				{
@@ -909,7 +993,7 @@ describe("self-update daemon restart", () => {
 					sessionFile: join(projectDir, "pending.jsonl"),
 					cwd: projectDir,
 					config: { cwd: projectDir, agentDir },
-					queue: { steering: [], followUp: [], nextTurn: [] },
+					queue: { actions: { formatVersion: 1, actions: [] }, nextTurn: [] },
 					shouldResume: false,
 					wasStreaming: false,
 					wasCompacting: false,
@@ -948,7 +1032,7 @@ describe("self-update daemon restart", () => {
 						id: "live-active",
 						isStreaming: false,
 						isCompacting: false,
-						pendingMessageCount: 0,
+						sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 					},
 				],
 			},
@@ -981,80 +1065,33 @@ describe("self-update daemon restart", () => {
 	});
 
 	it("still resumes accepted prompts when accepted context restore fails", async () => {
-		mockState.restoreNextTurnFailures = 1;
-		mockState.prepareManifest = {
-			createdAt: "2026-07-07T00:00:00.000Z",
-			sessions: [
-				{
-					activeSessionId: "old-active",
-					sessionId: "session-1",
-					sessionFile: join(projectDir, "session.jsonl"),
-					cwd: projectDir,
-					config: { cwd: projectDir, agentDir },
-					queue: {
-						steering: [],
-						followUp: [],
-						nextTurn: [
-							{
-								role: "custom",
-								customType: "prime-agent.test",
-								content: "subsequent turn context",
-								display: false,
-								timestamp: Date.now(),
-							},
-						],
-						acceptedPrompt: {
-							message: "accepted work",
-							content: [{ type: "text", text: "accepted work" }],
-							agentMessageId: "agentmsg_accepted",
-							nextTurn: [
-								{
-									role: "custom",
-									customType: "prime-agent.test",
-									content: "accepted prompt context",
-									display: false,
-									timestamp: Date.now(),
-								},
-							],
-						},
-					},
-					shouldResume: true,
-					wasStreaming: false,
-					wasCompacting: false,
-					wasBashRunning: false,
-					hadRunningRlmChildren: false,
-					wasRetrying: false,
-					hadAcceptedPromptInFlight: true,
-				},
-			],
-		};
+		mockState.restoreActionFailures = 1;
+		mockState.prepareManifest = createAcceptedRecoveryManifest();
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 
 		try {
 			await expect(performUpdateAndRunCoordinator("old-active")).resolves.toBeUndefined();
 
-			const promptRequests = mockState.requestPayloads.filter((request) => request.type === "prompt");
-			expect(promptRequests).toEqual([
-				expect.objectContaining({
-					activeSessionId: "restored-active",
-					message: "accepted work",
-					agentMessageId: "agentmsg_accepted",
-				}),
-			]);
-			const noticeIndex = mockState.requestPayloads.findIndex(
-				(request) => request.type === "append_custom_message" && request.activeSessionId === "restored-active",
-			);
-			const promptIndex = mockState.requestPayloads.findIndex((request) => request.type === "prompt");
-			expect(noticeIndex).toBeGreaterThanOrEqual(0);
-			expect(promptIndex).toBeGreaterThan(noticeIndex);
-			const subsequentNextTurnIndex = mockState.requestPayloads.findIndex(
-				(request) =>
-					request.type === "restore_next_turn" &&
-					request.messages?.some((message) => message.content === "subsequent turn context") === true,
-			);
-			expect(promptIndex).toBeGreaterThanOrEqual(0);
-			expect(subsequentNextTurnIndex).toBeGreaterThan(promptIndex);
+			expect(mockState.requestPayloads.some((request) => request.type === "restore_actions")).toBe(true);
+			expect(mockState.requestPayloads.some((request) => request.type === "prompt")).toBe(true);
+		} finally {
+			errorSpy.mockRestore();
+			logSpy.mockRestore();
+		}
+	});
+
+	it("does not replay a continuation after restoring an accepted turn", async () => {
+		mockState.prepareManifest = createAcceptedRecoveryManifest();
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		try {
+			await expect(performUpdateAndRunCoordinator("old-active")).resolves.toBeUndefined();
+
+			expect(mockState.requestPayloads.filter((request) => request.type === "restore_actions")).toHaveLength(1);
+			expect(mockState.requestPayloads.some((request) => request.type === "prompt")).toBe(false);
+			expect(mockState.requestPayloads.filter((request) => request.type === "resume_queue")).toHaveLength(1);
 		} finally {
 			errorSpy.mockRestore();
 			logSpy.mockRestore();
@@ -1066,6 +1103,7 @@ describe("self-update daemon restart", () => {
 		const restoredSessionFile = join(projectDir, "restored.jsonl");
 		mockState.createThrowSessionPaths = [failedSessionFile];
 		mockState.prepareManifest = {
+			formatVersion: 1,
 			createdAt: "2026-07-07T00:00:00.000Z",
 			sessions: [
 				{
@@ -1074,7 +1112,7 @@ describe("self-update daemon restart", () => {
 					sessionFile: failedSessionFile,
 					cwd: projectDir,
 					config: { cwd: projectDir, agentDir },
-					queue: { steering: [], followUp: [], nextTurn: [] },
+					queue: { actions: { formatVersion: 1, actions: [] }, nextTurn: [] },
 					shouldResume: true,
 					wasStreaming: true,
 					wasCompacting: false,
@@ -1089,7 +1127,7 @@ describe("self-update daemon restart", () => {
 					sessionFile: restoredSessionFile,
 					cwd: projectDir,
 					config: { cwd: projectDir, agentDir },
-					queue: { steering: [], followUp: [], nextTurn: [] },
+					queue: { actions: { formatVersion: 1, actions: [] }, nextTurn: [] },
 					shouldResume: true,
 					wasStreaming: true,
 					wasCompacting: false,
@@ -1136,6 +1174,7 @@ describe("self-update daemon restart", () => {
 		const childSessionFile = join(projectDir, "child.jsonl");
 		mockState.createActiveSessionIds = ["new-parent", "new-child"];
 		mockState.prepareManifest = {
+			formatVersion: 1,
 			createdAt: "2026-07-07T00:00:00.000Z",
 			sessions: [
 				{
@@ -1145,7 +1184,7 @@ describe("self-update daemon restart", () => {
 					cwd: projectDir,
 					config: { cwd: projectDir, agentDir },
 					runtimeMetadata: { kind: "top-level", createdAt: 1 },
-					queue: { steering: [], followUp: [], nextTurn: [] },
+					queue: { actions: { formatVersion: 1, actions: [] }, nextTurn: [] },
 					shouldResume: false,
 					wasStreaming: false,
 					wasCompacting: false,
@@ -1169,7 +1208,7 @@ describe("self-update daemon restart", () => {
 						rlmChildId: "child-1",
 						prompt: "child task",
 					},
-					queue: { steering: [], followUp: [], nextTurn: [] },
+					queue: { actions: { formatVersion: 1, actions: [] }, nextTurn: [] },
 					shouldResume: false,
 					wasStreaming: false,
 					wasCompacting: false,
@@ -1210,7 +1249,61 @@ describe("self-update daemon restart", () => {
 		}
 	});
 
-	it("preserves queued custom messages and prefixes when restoring update restart queues", async () => {
+	it("rejects malformed recovery actions while parsing the manifest", async () => {
+		const manifest = createAcceptedRecoveryManifest();
+		const session = manifest.sessions[0]!;
+		const action = session.queue.actions.actions[0]!;
+		const incompleteExecutionPolicy = createMockTurnExecutionPolicy();
+		delete incompleteExecutionPolicy.nextTurnContextTiming;
+		const cases: { name: string; action: MockRecoveryAction }[] = [
+			{
+				name: "turn without primary record",
+				action: { ...action, payload: { ...action.payload, records: [] } },
+			},
+			{
+				name: "non-array images",
+				action: { ...action, payload: { ...action.payload, images: {} } },
+			},
+			{
+				name: "turn execution policy missing next-turn context timing",
+				action: {
+					...action,
+					payload: { ...action.payload, executionPolicy: incompleteExecutionPolicy },
+				},
+			},
+			{
+				name: "unknown session command",
+				action: {
+					...action,
+					payload: {
+						kind: "session_command",
+						text: "/bogus",
+						command: { name: "bogus", args: "", text: "/bogus" },
+					},
+				},
+			},
+		];
+
+		for (const testCase of cases) {
+			mockState.prepareResponse = {
+				success: true,
+				data: {
+					...manifest,
+					sessions: [
+						{
+							...session,
+							queue: { ...session.queue, actions: { formatVersion: 1, actions: [testCase.action] } },
+						},
+					],
+				},
+			};
+			await expect(prepareDaemonUpdateRestart(mockState.socketPath, agentDir), testCase.name).rejects.toThrow(
+				"Daemon update restart response is missing session actions",
+			);
+		}
+	});
+
+	it("preserves complete queued actions and rejects unknown recovery formats", async () => {
 		const customMessage: MockCustomMessage = {
 			role: "custom",
 			customType: "heartbeat_prompt",
@@ -1218,24 +1311,33 @@ describe("self-update daemon restart", () => {
 			display: true,
 			timestamp: Date.now(),
 		};
-		const commandMessage: MockCustomMessage = {
-			role: "custom",
-			customType: "session_slash_command",
-			content: "/autonomous on",
-			display: true,
-			timestamp: Date.now(),
-			details: {
-				command: { name: "autonomous", args: "on", text: "/autonomous on" },
+		const recoveredAction: MockRecoveryAction = {
+			id: "action-1",
+			source: "internal",
+			delivery: "when_run_idle",
+			wake: "external_resume",
+			queueKey: "heartbeat:job-1",
+			agentMessageId: "agentmsg_followup",
+			payload: {
+				kind: "turn",
+				text: "heartbeat body",
+				customMessage,
+				records: [
+					{
+						id: "action-1-primary",
+						role: "primary",
+						message: customMessage,
+						ownerActionId: "action-1",
+					},
+				],
+				executionPolicy: createMockTurnExecutionPolicy(),
+				queueVisible: true,
+				acceptedAgentMessage: false,
+				acceptedBeforeCompletion: false,
 			},
 		};
-		const prefixMessage: MockCustomMessage = {
-			role: "custom",
-			customType: "ipython_state_restored",
-			content: "restore context",
-			display: true,
-			timestamp: Date.now(),
-		};
 		mockState.prepareManifest = {
+			formatVersion: 1,
 			createdAt: "2026-07-07T00:00:00.000Z",
 			sessions: [
 				{
@@ -1244,24 +1346,7 @@ describe("self-update daemon restart", () => {
 					sessionFile: join(projectDir, "session.jsonl"),
 					cwd: projectDir,
 					config: { cwd: projectDir, agentDir },
-					queue: {
-						steering: [],
-						followUp: [
-							{
-								message: "heartbeat body",
-								queueKey: "heartbeat:job-1",
-								agentMessageId: "agentmsg_followup",
-								customMessage,
-								prefixMessages: [prefixMessage],
-							},
-							{
-								message: "/autonomous on",
-								agentMessageId: "agentmsg_command",
-								customMessage: commandMessage,
-							},
-						],
-						nextTurn: [],
-					},
+					queue: { actions: { formatVersion: 1, actions: [recoveredAction] }, nextTurn: [] },
 					shouldResume: true,
 					wasStreaming: false,
 					wasCompacting: false,
@@ -1277,42 +1362,17 @@ describe("self-update daemon restart", () => {
 
 		try {
 			await expect(performUpdateAndRunCoordinator()).resolves.toBeUndefined();
-
-			expect(mockState.requestPayloads).toContainEqual(
-				expect.objectContaining({
-					type: "follow_up",
-					activeSessionId: "restored-active",
-					message: "heartbeat body",
-					queueKey: "heartbeat:job-1",
-					agentMessageId: "agentmsg_followup",
-					customMessage,
-					prefixMessages: [prefixMessage],
-				}),
-			);
-			expect(mockState.requestPayloads).toContainEqual(
-				expect.objectContaining({
-					type: "follow_up",
-					activeSessionId: "restored-active",
-					message: "/autonomous on",
-					agentMessageId: "agentmsg_command",
-					customMessage: commandMessage,
-				}),
-			);
+			expect(mockState.requestPayloads).toContainEqual({
+				type: "restore_actions",
+				activeSessionId: "restored-active",
+				snapshot: { formatVersion: 1, actions: [recoveredAction] },
+			});
 			mockState.prepareResponse = {
 				success: true,
-				data: {
-					...mockState.prepareManifest,
-					sessions: mockState.prepareManifest.sessions.map((session) => ({
-						...session,
-						queue: {
-							...session.queue,
-							followUp: [{ message: "/autonomous off", customMessage: commandMessage }],
-						},
-					})),
-				},
+				data: { ...mockState.prepareManifest, formatVersion: 2 },
 			};
 			await expect(prepareDaemonUpdateRestart(mockState.socketPath, agentDir)).rejects.toThrow(
-				"invalid custom queued message",
+				"Unsupported daemon update restart format version: 2",
 			);
 		} finally {
 			errorSpy.mockRestore();
@@ -1320,9 +1380,33 @@ describe("self-update daemon restart", () => {
 		}
 	});
 
-	it("does not resume queued work when accepted prompt replay fails", async () => {
+	it("resumes restored queued work when continuation replay fails", async () => {
 		mockState.promptFailures = 1;
+		const recoveredAction: MockRecoveryAction = {
+			id: "action-queued",
+			source: "internal",
+			delivery: "when_run_idle",
+			wake: "external_resume",
+			agentMessageId: "agentmsg_followup",
+			payload: {
+				kind: "turn",
+				text: "queued follow-up",
+				records: [
+					{
+						id: "action-queued-primary",
+						role: "primary",
+						message: { role: "user", content: "queued follow-up", timestamp: 1 },
+						ownerActionId: "action-queued",
+					},
+				],
+				executionPolicy: createMockTurnExecutionPolicy(),
+				queueVisible: true,
+				acceptedAgentMessage: false,
+				acceptedBeforeCompletion: false,
+			},
+		};
 		mockState.prepareManifest = {
+			formatVersion: 1,
 			createdAt: "2026-07-07T00:00:00.000Z",
 			sessions: [
 				{
@@ -1331,16 +1415,7 @@ describe("self-update daemon restart", () => {
 					sessionFile: join(projectDir, "session.jsonl"),
 					cwd: projectDir,
 					config: { cwd: projectDir, agentDir },
-					queue: {
-						steering: [],
-						followUp: [{ message: "queued follow-up", agentMessageId: "agentmsg_followup" }],
-						nextTurn: [],
-						acceptedPrompt: {
-							message: "accepted work",
-							agentMessageId: "agentmsg_accepted",
-							nextTurn: [],
-						},
-					},
+					queue: { actions: { formatVersion: 1, actions: [recoveredAction] }, nextTurn: [] },
 					shouldResume: true,
 					wasStreaming: false,
 					wasCompacting: false,
@@ -1356,9 +1431,8 @@ describe("self-update daemon restart", () => {
 
 		try {
 			await expect(performUpdateAndRunCoordinator()).resolves.toBeUndefined();
-
-			expect(mockState.requestPayloads.some((request) => request.type === "follow_up")).toBe(true);
-			expect(mockState.requestPayloads.some((request) => request.type === "resume_queue")).toBe(false);
+			expect(mockState.requestPayloads.some((request) => request.type === "restore_actions")).toBe(true);
+			expect(mockState.requestPayloads.some((request) => request.type === "resume_queue")).toBe(true);
 		} finally {
 			errorSpy.mockRestore();
 			logSpy.mockRestore();

@@ -1,6 +1,34 @@
 # Changelog
 
-## [Unreleased]
+## [0.8.0] - 2026-08-21
+
+- Added `AgentContinueError` with stable codes (`busy`, `nothing-to-continue`) for `Agent.continue()` precondition failures, so callers classify without matching message text.
+
+## [0.7.4] - 2026-08-19
+
+## [0.7.3] - 2026-08-17
+
+- Changed explicit `off` reasoning selections to reach providers instead of being omitted, preserving provider-specific disable behavior.
+
+## [0.7.2] - 2026-08-11
+
+## [0.7.1] - 2026-08-07
+
+## [0.7.0] - 2026-08-05
+
+## [0.6.1] - 2026-08-05
+
+## [0.6.0] - 2026-08-04
+
+## [0.5.1] - 2026-08-04
+
+## [0.5.0] - 2026-08-03
+
+## [0.4.0] - 2026-08-01
+
+### Added
+
+- Added the synchronous `shouldStopBeforeTurn` agent-loop hook, allowing hosts to end after a completed turn without starting another provider call.
 
 ## [0.3.3] - 2026-07-23
 

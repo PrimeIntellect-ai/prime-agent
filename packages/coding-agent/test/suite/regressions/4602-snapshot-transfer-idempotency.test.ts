@@ -52,13 +52,14 @@ function summary(): SessionSummary {
 		activeSessionId,
 		lifecycle: "live",
 		activity: "idle",
+		isSessionActive: false,
 		sessionId: "session-4602",
 		cwd: "/tmp",
 		isStreaming: false,
 		isCompacting: false,
 		attachedClients: 0,
 		messageCount: 1,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 	};
 }
 
@@ -338,7 +339,6 @@ describe("ENG-4602 snapshot transfer containment", () => {
 			descriptorDir: "/tmp/eng-4602-supervisor-state",
 		});
 		const { close, worker } = workerHarness();
-		worker.intentionalStop = true;
 		const client = socketClient("public", new PassThrough());
 		const streamSnapshot = vi.fn(async () => {});
 		const internals = supervisor as unknown as {
@@ -382,6 +382,7 @@ describe("ENG-4602 snapshot transfer containment", () => {
 				summary: {
 					...frames.begin.snapshot.summary,
 					activity: "working" as const,
+					isSessionActive: true,
 					attachedClients: 2,
 				},
 			},
@@ -392,6 +393,7 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		expect(worker.snapshotCache.get(activeSessionId)?.snapshot.summary).toMatchObject({
 			activity: "working",
+			isSessionActive: true,
 		});
 		expect(streamSnapshot).toHaveBeenCalledOnce();
 		expect(close).not.toHaveBeenCalled();
@@ -421,7 +423,6 @@ describe("ENG-4602 snapshot transfer containment", () => {
 			descriptorDir: "/tmp/eng-4602-supervisor-gate-state",
 		});
 		const { close, request, worker } = workerHarness();
-		worker.intentionalStop = true;
 		const client = socketClient("catchup", new PassThrough());
 		const streamSnapshot = vi.fn(async () => {});
 		const internals = supervisor as unknown as {
@@ -580,19 +581,16 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		});
 		const recoverWorker = vi.fn(async () => {});
 		const persistWorker = vi.fn();
-		const syncAgentPeers = vi.fn(async () => {});
 		const assertRecoveryAllowed = vi.fn(async () => {});
 		const internals = supervisor as unknown as {
 			workers: Map<string, WorkerHarness>;
 			recoverWorker: typeof recoverWorker;
 			persistWorker: typeof persistWorker;
-			syncAgentPeers: typeof syncAgentPeers;
 			assertRecoveryAllowed: typeof assertRecoveryAllowed;
 			handleWorkerFrame(worker: WorkerHarness, frame: PrivateFrame<DaemonWorkerFrameHeader>): void;
 		};
 		internals.recoverWorker = recoverWorker;
 		internals.persistWorker = persistWorker;
-		internals.syncAgentPeers = syncAgentPeers;
 		internals.assertRecoveryAllowed = assertRecoveryAllowed;
 		const frames = snapshotFrames([{ role: "user", content: "stable", timestamp: 1 }]);
 

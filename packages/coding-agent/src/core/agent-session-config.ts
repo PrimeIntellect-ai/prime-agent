@@ -1,6 +1,8 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AgentAutonomousConfig } from "./autonomous.js";
 
+export type AgentExecutionMode = "interactive" | "print" | "json" | "rpc" | "acp";
+
 export interface AgentSessionRuntimeConfig {
 	cwd?: string;
 	agentDir?: string;
@@ -33,12 +35,29 @@ export interface AgentSessionRuntimeConfig {
 	 * so it survives the appMode="daemon" context switch.
 	 */
 	serializedRefine?: boolean;
+	executionMode?: AgentExecutionMode;
+	telemetryDisabled?: true;
 	/**
 	 * Initial goal to seed when creating a new top-level session (rlmDepth 0).
 	 * Ignored for subagent sessions and when the branch already has a persisted
 	 * thread_goal_state entry (idempotent restart/rehydration).
 	 */
 	initialGoal?: { objective: string; tokenBudget?: number };
+}
+
+export type DurableAgentSessionRuntimeConfig = Pick<
+	AgentSessionRuntimeConfig,
+	"cwd" | "agentDir" | "sessionDir" | "telemetryDisabled"
+>;
+
+/** Only non-secret host settings needed to locate and govern durable daemon state. */
+export function durableAgentSessionRuntimeConfig(config: AgentSessionRuntimeConfig): DurableAgentSessionRuntimeConfig {
+	return {
+		...(typeof config.cwd === "string" ? { cwd: config.cwd } : {}),
+		...(typeof config.agentDir === "string" ? { agentDir: config.agentDir } : {}),
+		...(typeof config.sessionDir === "string" ? { sessionDir: config.sessionDir } : {}),
+		...(config.telemetryDisabled === true ? { telemetryDisabled: true as const } : {}),
+	};
 }
 
 export function mergeAgentSessionRuntimeConfig(
@@ -77,6 +96,8 @@ export function mergeAgentSessionRuntimeConfig(
 				? { ...(base.extensionFlagValues ?? {}), ...(override.extensionFlagValues ?? {}) }
 				: undefined,
 		serializedRefine: override.serializedRefine ?? base.serializedRefine,
+		executionMode: override.executionMode ?? base.executionMode,
+		telemetryDisabled: base.telemetryDisabled || override.telemetryDisabled ? true : undefined,
 		initialGoal: override.initialGoal ?? base.initialGoal,
 	};
 }
@@ -94,6 +115,8 @@ function cloneAgentSessionRuntimeConfig(config: AgentSessionRuntimeConfig): Agen
 		autonomous: mergeAutonomousConfig(undefined, config.autonomous),
 		extensionFlagValues: config.extensionFlagValues ? { ...config.extensionFlagValues } : undefined,
 		serializedRefine: config.serializedRefine,
+		executionMode: config.executionMode,
+		telemetryDisabled: config.telemetryDisabled,
 		initialGoal: config.initialGoal ? { ...config.initialGoal } : undefined,
 	};
 }

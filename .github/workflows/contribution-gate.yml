@@ -1,0 +1,40 @@
+name: Contribution gate
+
+on:
+  issues:
+    types: [opened, reopened]
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+
+permissions: {}
+
+jobs:
+  issue:
+    name: Check issue author
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: mitchellh/vouch/action/check-issue@d66fa29a64600490892131ad87597c30c91fcac4 # v1
+        with:
+          issue-number: ${{ github.event.issue.number }}
+          auto-close: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  pull-request:
+    name: Check pull request author
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: mitchellh/vouch/action/check-pr@d66fa29a64600490892131ad87597c30c91fcac4 # v1
+        with:
+          pr-number: ${{ github.event.pull_request.number }}
+          auto-close: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

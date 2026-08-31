@@ -215,16 +215,49 @@ describe("DaemonClient", () => {
 		client.close();
 	});
 
-	it("rejects flat session-tree requests to an old daemon", async () => {
+	it("does not send subagent deletion to an old daemon without the capability", async () => {
 		const client = new DaemonClient("/tmp/prime-agent.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
 		await connect;
-		emitHello(socket, 5);
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, []);
 
-		await expect(client.request({ type: "get_session_tree", activeSessionId: "active-1" })).rejects.toThrow(
-			"does not support get_session_tree",
+		await expect(
+			client.request({ type: "delete_rlm_subagent", activeSessionId: "active-1", childId: "child-1" }),
+		).rejects.toThrow("does not support delete_rlm_subagent");
+		expect(socket.writes).toEqual([]);
+		client.close();
+	});
+
+	it("sends subagent deletion to a capable daemon without requiring a schema bump", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["delete_rlm_subagent"], DAEMON_SCHEMA_REVISION - 1);
+
+		const request = client.request({
+			type: "delete_rlm_subagent",
+			activeSessionId: "active-1",
+			childId: "child-1",
+		});
+		await vi.waitFor(() => expect(socket.writes).toHaveLength(1));
+		client.close();
+		await expect(request).rejects.toThrow("closed before the operation completed");
+	});
+
+	it("rejects an old daemon before requesting session state", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION - 1);
+
+		await expect(client.request({ type: "get_state", activeSessionId: "active-1" })).rejects.toThrow(
+			"does not support get_state",
 		);
 		expect(socket.writes).toEqual([]);
 		client.close();
@@ -384,59 +417,20 @@ describe("DaemonClient", () => {
 		});
 	});
 
-	it("keeps a raw one-release request path for v1 daemon handoff", async () => {
+	it("keeps durable command envelopes on the session-action protocol", async () => {
 		const client = new DaemonClient("/tmp/prime-agent.sock");
 		const connect = client.connect();
 		const socket = netMock.sockets[0]!;
 		socket.emit("connect");
 		await connect;
-
-		const response = client.requestLegacy({ type: "prepare_update_restart" });
-		const command = JSON.parse(socket.writes[0]!.trim()) as { id: string; type: string };
-		expect(command.type).toBe("prepare_update_restart");
-		expect(command).not.toHaveProperty("protocol");
-		socket.emit(
-			"data",
-			`${JSON.stringify({ id: command.id, type: "response", command: command.type, success: true })}\n`,
-		);
-		await expect(response).resolves.toMatchObject({ success: true });
-		client.close();
-	});
-
-	it("uses legacy framing automatically after a v1 daemon hello", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
-		const connect = client.connect();
-		const socket = netMock.sockets[0]!;
-		socket.emit("connect");
-		await connect;
-		emitHello(socket, 1);
-
-		const response = client.request({ type: "create" });
-		const command = JSON.parse(socket.writes[0]!.trim()) as { id: string; type: string };
-		expect(command.type).toBe("create");
-		expect(command).not.toHaveProperty("protocol");
-		socket.emit(
-			"data",
-			`${JSON.stringify({ id: command.id, type: "response", command: command.type, success: true })}\n`,
-		);
-		await expect(response).resolves.toMatchObject({ success: true });
-		client.close();
-	});
-
-	it("keeps durable command envelopes when connected to a v2 daemon", async () => {
-		const client = new DaemonClient("/tmp/prime-agent.sock");
-		const connect = client.connect();
-		const socket = netMock.sockets[0]!;
-		socket.emit("connect");
-		await connect;
-		emitHello(socket, 2);
+		emitHello(socket, DAEMON_PROTOCOL_VERSION);
 
 		const response = client.request({ type: "create" });
 		const request = JSON.parse(socket.writes[0]!.trim()) as {
 			id: string;
 			protocol: { version: number };
 		};
-		expect(request.protocol.version).toBe(2);
+		expect(request.protocol.version).toBe(DAEMON_PROTOCOL_VERSION);
 
 		socket.emit(
 			"data",
@@ -449,7 +443,7 @@ describe("DaemonClient", () => {
 			command: { type: string; commandId: string };
 		};
 		expect(acknowledgement).toMatchObject({
-			protocol: { version: 2 },
+			protocol: { version: DAEMON_PROTOCOL_VERSION },
 			command: { type: "ack_result", commandId: request.id },
 		});
 		client.close();

@@ -1,35 +1,25 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Api, Model, ServiceTier, Usage } from "@earendil-works/pi-ai";
+import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
+import { THINKING_LEVELS } from "./thinking-levels.js";
 
-export interface RlmUsage {
-	prompt_tokens: number;
-	completion_tokens: number;
-}
-
+/** Request emitted by `rlm.run`; cellSourceCode preserves the spawning cell for display. */
 export interface RlmRunRequest {
 	prompt: string;
 	kwargs: Record<string, unknown>;
-	/** Source of the IPython cell that issued this rlm.run call, when available. */
 	cellSourceCode?: string;
 }
 
-export interface RlmRunResult {
-	answer: string;
-	usage: RlmUsage;
-	turns: number;
-	session_dir: string | null;
+export interface RlmSpawnHandle {
+	rlm_child_id: string;
+	name: string;
+	session_dir: string;
 	model: string;
-	warning?: string;
 }
 
-export interface RlmInternalRunResult extends RlmRunResult {
-	assistantUsage: Usage;
-}
-
-export type RlmSubagentRegistryStatus = "running" | "completed";
+export type RlmSubagentRegistryStatus = "running" | "completed" | "error";
 
 export interface RlmSubagentRegistryEntry {
 	rlm_child_id: string;
@@ -46,6 +36,7 @@ export interface RlmListSubagentsResult {
 
 export interface RlmDeleteSubagentResult {
 	subagent: RlmSubagentRegistryEntry;
+	outcome?: "deleted" | "skipped_running";
 }
 
 export interface RlmModelMatch {
@@ -59,8 +50,8 @@ export interface RlmFindModelsResult {
 	models: RlmModelMatch[];
 }
 
-export type RlmRunHandler = (request: RlmRunRequest) => Promise<RlmRunResult>;
-export type RlmListSubagentsHandler = () => RlmListSubagentsResult;
+export type RlmRunHandler = (request: RlmRunRequest) => Promise<Record<string, unknown>>;
+export type RlmListSubagentsHandler = () => RlmListSubagentsResult | Promise<RlmListSubagentsResult>;
 export type RlmDeleteSubagentHandler = (target: string) => Promise<RlmDeleteSubagentResult>;
 export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindModelsResult | Promise<RlmFindModelsResult>;
 
@@ -68,7 +59,6 @@ const RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH = 64;
 export const DEFAULT_RLM_MODEL_SEARCH_LIMIT = 8;
 export const MAX_RLM_MODEL_SEARCH_LIMIT = 20;
 
-/** Validate and normalize an orchestrator-supplied subagent session name. */
 export function normalizeRequestedRlmSubagentSessionName(value: unknown): string | undefined {
 	if (value === undefined) {
 		return undefined;
@@ -86,7 +76,20 @@ export function normalizeRequestedRlmSubagentSessionName(value: unknown): string
 	return name;
 }
 
-/** Validate and normalize an orchestrator-supplied subagent model reference. */
+export function normalizeRequestedRlmSubagentThinkingLevel(value: unknown): ThinkingLevel | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (typeof value !== "string") {
+		throw new Error("rlm.run thinking must be a string");
+	}
+	const level = value.trim().toLowerCase();
+	if (!THINKING_LEVELS.includes(level as ThinkingLevel)) {
+		throw new Error(`rlm.run thinking must be one of: ${THINKING_LEVELS.join(", ")}`);
+	}
+	return level as ThinkingLevel;
+}
+
 export function normalizeRequestedRlmSubagentModel(value: unknown): string | undefined {
 	if (value === undefined) {
 		return undefined;
@@ -158,7 +161,7 @@ export function findRlmModelMatches(query: string, models: Model<Api>[], limit: 
 		}));
 }
 
-/** Adapt an RlmRunHandler into the typed "rlm.run" handler for the kernel host bridge. */
+/** Adapt an RlmRunHandler into the typed `rlm.run` kernel host handler. */
 export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHandler {
 	return async (payload) => {
 		if (typeof payload.prompt !== "string") {
@@ -166,7 +169,11 @@ export function createRlmRunHostHandler(handler: RlmRunHandler): HostRequestHand
 		}
 		const kwargs = isRecord(payload.kwargs) ? payload.kwargs : {};
 		const cellSourceCode = typeof payload.cellSourceCode === "string" ? payload.cellSourceCode : undefined;
-		const result = await handler({ prompt: payload.prompt, kwargs, cellSourceCode });
+		const result = await handler({
+			prompt: payload.prompt,
+			kwargs,
+			cellSourceCode,
+		});
 		return result as unknown as Record<string, unknown>;
 	};
 }
@@ -185,10 +192,10 @@ export function createRlmFindModelsHostHandler(handler: RlmFindModelsHandler): H
 	};
 }
 
-/** Expose the current parent session's RLM child registry to its kernel. */
+/** Expose the current parent session's direct RLM child registry to its kernel. */
 export function createRlmListSubagentsHostHandler(handler: RlmListSubagentsHandler): HostRequestHandler {
 	return async () => {
-		const { subagents } = handler();
+		const { subagents } = await handler();
 		return { subagents };
 	};
 }
@@ -199,8 +206,8 @@ export function createRlmDeleteSubagentHostHandler(handler: RlmDeleteSubagentHan
 		if (typeof payload.target !== "string" || !payload.target.trim()) {
 			throw new Error("rlm.delete_subagent target must be a non-empty string");
 		}
-		const { subagent } = await handler(payload.target.trim());
-		return { subagent };
+		const { subagent, outcome } = await handler(payload.target.trim());
+		return outcome === undefined ? { subagent } : { subagent, outcome };
 	};
 }
 
@@ -226,23 +233,23 @@ export interface CreateRlmSubagentRuntimeOptions {
 	rlmDepth: number;
 	rlmMaxDepth: number;
 	rlmParentNodeId: string;
-	/** Source of the IPython cell that spawned this subagent, for display. */
+	/** Source of the Python cell that spawned this subagent, for display. */
 	spawnCode?: string;
 	/** Publish the session to the parent before a host makes the runtime addressable. */
 	onSessionPublished?: (session: AgentSession) => void;
 }
 
-/** Terminal status of an RLM child run, passed to the host when releasing its runtime. */
-export type RlmSubagentReleaseStatus = "done" | "error" | "cancelled";
-
 export interface SubagentRuntimeHost {
 	createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime>;
-	/** Close the host-owned child identified by childId; session may predate an in-child session replacement. */
-	deleteRlmSubagentRuntime(childId: string, session: AgentSession): Promise<void>;
-	releaseRlmSubagentRuntime?(
+	/** Persist host-owned completion before the child becomes passivation-eligible. */
+	completeRlmSubagentRuntime?(childId: string, session: AgentSession): boolean;
+	/** Release a host-owned child after its detached initial task settles. */
+	releaseRlmSubagentRuntime?: (
 		runtime: RlmSubagentRuntime,
 		options: CreateRlmSubagentRuntimeOptions,
-		status: RlmSubagentReleaseStatus,
-	): Promise<void>;
+		status: "done" | "error" | "cancelled",
+	) => Promise<void>;
+	/** Close or remove the host-owned child; session is absent when a persisted child is still passive. */
+	deleteRlmSubagentRuntime(childId: string, session?: AgentSession): Promise<void>;
 	disposeRlmSubagentRuntimes?(): Promise<void>;
 }

@@ -14,8 +14,9 @@ import {
 } from "@earendil-works/pi-tui";
 import { execFile } from "child_process";
 import { PRIME_BUTTERFLY_LOGO } from "../../../themes/prime-logo.js";
+import { copyToClipboard } from "../../../utils/clipboard.js";
 import { theme } from "../theme/theme.js";
-import { keyHint } from "./keybinding-hints.js";
+import { formatKeyText, keyHint } from "./keybinding-hints.js";
 import { MenuPanel, MenuSearchInput } from "./menu-panel.js";
 import { shouldTreatAsBack } from "./modal-back.js";
 
@@ -29,6 +30,16 @@ function centeredLine(text: string, width: number): string {
 	const padding = Math.max(0, safeWidth - visibleWidth(content));
 	const left = Math.floor(padding / 2);
 	return " ".repeat(left) + content + " ".repeat(padding - left);
+}
+
+function isTextEntryKeybinding(key: string): boolean {
+	const parts = key.toLowerCase().split("+");
+	const keyPart = parts.at(-1);
+	return !parts.includes("ctrl") && !parts.includes("alt") && (keyPart === "space" || keyPart?.length === 1);
+}
+
+function isPrintableInput(data: string): boolean {
+	return data.length === 1 && data >= " " && data !== "\x7f";
 }
 
 class PrimeLoginHeader implements Component {
@@ -72,6 +83,8 @@ export class LoginDialogComponent extends Container implements Focusable {
 	private inputVisible = false;
 	private continueResolver?: () => void;
 	private continueRejecter?: (error: Error) => void;
+	private authUrl?: string;
+	private authActions?: Text;
 
 	// Focusable implementation - propagate to input for IME cursor positioning
 	private _focused = false;
@@ -143,13 +156,15 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 */
 	showAuth(url: string, instructions?: string): void {
 		this.startContent();
+		this.authUrl = url;
 		this.addSectionTitle("Browser sign-in");
 		this.addMutedText("The sign-in page should already be opening. If it did not open, use the link below.");
 		this.contentContainer.addChild(new Spacer(1));
 		this.addLabel("Sign-in link");
 		const linkedUrl = getCapabilities().hyperlinks ? `\x1b]8;;${url}\x07${url}\x1b]8;;\x07` : url;
 		this.contentContainer.addChild(new Text(theme.fg("text", linkedUrl), 0, 0));
-		this.contentContainer.addChild(new Text(theme.fg("muted", keyHint("tui.select.cancel", "cancel")), 0, 0));
+		this.authActions = new Text(this.getAuthActionsText(), 0, 0);
+		this.contentContainer.addChild(this.authActions);
 
 		if (instructions) {
 			this.contentContainer.addChild(new Spacer(1));
@@ -181,6 +196,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.addMutedText(prompt);
 		this.contentContainer.addChild(this.input);
 		this.inputVisible = true;
+		this.authActions?.setText(this.getAuthActionsText());
 		this.contentContainer.addChild(new Text(theme.fg("muted", keyHint("tui.select.cancel", "cancel")), 0, 0));
 		this.tui.requestRender();
 
@@ -209,6 +225,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		}
 		this.contentContainer.addChild(this.input);
 		this.inputVisible = true;
+		this.authActions?.setText(this.getAuthActionsText());
 		this.contentContainer.addChild(
 			new Text(
 				theme.fg("muted", `${keyHint("tui.select.confirm", "submit")}  ${keyHint("tui.select.cancel", "cancel")}`),
@@ -283,6 +300,8 @@ export class LoginDialogComponent extends Container implements Focusable {
 
 	private startContent(): void {
 		this.contentContainer.clear();
+		this.authUrl = undefined;
+		this.authActions = undefined;
 		// The cleared panel no longer shows the paste field.
 		this.inputVisible = false;
 		if (this.isPrimeInference) {
@@ -324,8 +343,57 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.contentContainer.addChild(new Text(theme.fg("muted", text), 0, 0));
 	}
 
+	private getAuthActionsText(status?: "copied" | "failed"): string {
+		const configuredCopyKeys = getKeybindings().getKeys("app.clipboard.copyLoginUrl");
+		const copyKeys = this.inputVisible
+			? configuredCopyKeys.filter((key) => !isTextEntryKeybinding(key))
+			: configuredCopyKeys.slice(0, 1);
+		const copyHint =
+			copyKeys.length > 0
+				? theme.fg("dim", formatKeyText(copyKeys.join("/"))) +
+					theme.fg("muted", ` ${status === "failed" ? "retry" : "copy"}`)
+				: undefined;
+		const statusText =
+			status === "copied"
+				? theme.fg("success", "Copied sign-in link")
+				: status === "failed"
+					? theme.fg("error", "Failed to copy sign-in link")
+					: undefined;
+		return [statusText, copyHint, keyHint("tui.select.cancel", "cancel")]
+			.filter((part): part is string => part !== undefined)
+			.join("  ");
+	}
+
+	private async copyAuthUrl(): Promise<void> {
+		const url = this.authUrl;
+		const actions = this.authActions;
+		if (!url || !actions) return;
+
+		try {
+			await copyToClipboard(url);
+			if (this.authUrl === url && this.authActions === actions) {
+				actions.setText(this.getAuthActionsText("copied"));
+				this.tui.requestRender();
+			}
+		} catch {
+			if (this.authUrl === url && this.authActions === actions) {
+				actions.setText(this.getAuthActionsText("failed"));
+				this.tui.requestRender();
+			}
+		}
+	}
+
 	handleInput(data: string): void {
 		const kb = getKeybindings();
+
+		if (
+			this.authUrl &&
+			kb.matches(data, "app.clipboard.copyLoginUrl") &&
+			(!this.inputVisible || !isPrintableInput(data))
+		) {
+			void this.copyAuthUrl();
+			return;
+		}
 
 		// Left arrow acts as "back" like Esc. While the editable field is actually
 		// shown, only treat it as back at the start of the text so left still moves

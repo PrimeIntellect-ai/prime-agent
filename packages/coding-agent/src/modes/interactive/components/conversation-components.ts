@@ -4,18 +4,26 @@ import { isAgentSessionMessage } from "../../../core/agent-messages.js";
 import {
 	COMPACTION_OUTCOME_CUSTOM_TYPE,
 	isCompactionOutcomeMessage,
+	isRefinementOutcomeMessage,
 	isSessionSlashCommandMessage,
 	isSessionSlashCommandResultMessage,
+	REFINEMENT_OUTCOME_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_CUSTOM_TYPE,
 	SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
 } from "../../../core/messages.js";
 import { AgentMessageComponent } from "./agent-message.js";
 import { AssistantMessageComponent } from "./assistant-message.js";
+import { BashExecutionComponent } from "./bash-execution.js";
 import {
 	CompactionOutcomeMessageComponent,
 	MalformedCompactionOutcomeMessageComponent,
 } from "./compaction-outcome-message.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./injected-prompt-message.js";
+import { IPythonCellComponent } from "./ipython-cell.js";
+import {
+	MalformedRefinementOutcomeMessageComponent,
+	RefinementOutcomeMessageComponent,
+} from "./refinement-outcome-message.js";
 import { SlashCommandMessageComponent } from "./slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./slash-command-result-message.js";
 import {
@@ -35,7 +43,18 @@ export interface ConversationComponentsOptions {
 	hideThinkingBlock?: boolean;
 	hiddenThinkingLabel?: string;
 	toolsExpanded?: boolean;
+	agentMessagesExpanded?: boolean;
+	editDiffsExpanded?: boolean;
 	isRecognizedSlashCommand?: (name: string) => boolean;
+}
+
+export function isCompactAgentMessageNeighbor(component: Component | undefined): boolean {
+	return (
+		component instanceof AgentMessageComponent ||
+		component instanceof ToolExecutionComponent ||
+		component instanceof IPythonCellComponent ||
+		component instanceof BashExecutionComponent
+	);
 }
 
 function readUserText(content: string | Array<{ type: string; text?: string }>): string {
@@ -58,6 +77,8 @@ export function buildConversationComponents(
 	const components: Component[] = [];
 	const pendingTools = new Map<string, ToolExecutionComponent>();
 	const expanded = options.toolsExpanded ?? false;
+	const agentMessagesExpanded = options.agentMessagesExpanded ?? false;
+	const editDiffsExpanded = options.editDiffsExpanded ?? false;
 
 	for (const message of messages) {
 		if (message.role === "assistant") {
@@ -69,7 +90,9 @@ export function buildConversationComponents(
 					options.hiddenThinkingLabel ?? "Thinking...",
 					{
 						expanded,
-						precededByToolActivity: components.at(-1) instanceof ToolExecutionComponent,
+						precededByToolActivity:
+							components.at(-1) instanceof ToolExecutionComponent ||
+							components.at(-1) instanceof AgentMessageComponent,
 					},
 				),
 			);
@@ -87,6 +110,8 @@ export function buildConversationComponents(
 					options.cwd,
 				);
 				tool.setExpanded(expanded);
+				tool.setAgentMessagesExpanded(agentMessagesExpanded);
+				tool.setEditDiffsExpanded(editDiffsExpanded);
 				tool.markExecutionStarted();
 				tool.setArgsComplete();
 				selectLatestToolExpandHint(components, tool);
@@ -123,9 +148,18 @@ export function buildConversationComponents(
 					? new CompactionOutcomeMessageComponent(message)
 					: new MalformedCompactionOutcomeMessageComponent(),
 			);
-		} else if (isAgentSessionMessage(message) && message.display) {
-			const component = new AgentMessageComponent(message, options.markdownTheme);
+		} else if (message.role === "custom" && message.customType === REFINEMENT_OUTCOME_CUSTOM_TYPE) {
+			if (!message.display) continue;
+			const component = isRefinementOutcomeMessage(message)
+				? new RefinementOutcomeMessageComponent(message)
+				: new MalformedRefinementOutcomeMessageComponent();
 			component.setExpanded(expanded);
+			components.push(component);
+		} else if (isAgentSessionMessage(message) && message.display) {
+			const component = new AgentMessageComponent(message, options.markdownTheme, {
+				suppressLeadingSpace: isCompactAgentMessageNeighbor(components.at(-1)),
+			});
+			component.setExpanded(agentMessagesExpanded);
 			components.push(component);
 		} else if (isInjectedPromptMessage(message) && message.display) {
 			const component = new InjectedPromptMessageComponent(message, options.markdownTheme);

@@ -65,6 +65,7 @@ describe("ENG-4657 update heartbeat recovery", () => {
 				dispose: async () => {},
 			} as unknown as AgentSessionRuntime,
 			clients: new Set(),
+			pendingAttaches: 0,
 			extensionUiRequests: new Map(),
 			eventGeneration: "restored-generation",
 			lastEventSequence: 0,

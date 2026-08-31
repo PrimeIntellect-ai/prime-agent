@@ -164,8 +164,9 @@ describe("ENG-3885 subagent runtime host", () => {
 
 		releaseChild();
 		const result = await resultPromise;
+		await waitFor(() => childRuntime?.session.getLastAssistantText() === "child answer from faux-child");
 
-		expect(result.answer).toBe("child answer from faux-child");
+		expect(result.rlm_child_id).toBe(childRuntime?.metadata.rlmChildId);
 		expect(result.session_dir).not.toBeNull();
 		const childSessions = await SessionManager.list(tempDir, result.session_dir!);
 		expect(childSessions.some((session) => session.parentSessionPath === runtime.session.sessionFile)).toBe(true);

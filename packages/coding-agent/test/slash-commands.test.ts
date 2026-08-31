@@ -21,6 +21,15 @@ describe("built-in slash commands", () => {
 		expect(commandNames).not.toContain("cron");
 	});
 
+	test("describes the fine-grained /rlm-max-depth semantics", () => {
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "rlm-max-depth")).toMatchObject({
+			description:
+				"Set/view the per-chat persistent RLM max depth immediately; never interrupts or queues the running turn",
+			argumentHint: "[<int> [--global]]",
+			takesArgument: true,
+		});
+	});
+
 	test("exposes heartbeat syntax guidance", () => {
 		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "heartbeat")).toMatchObject({
 			description:
@@ -51,7 +60,7 @@ describe("built-in slash commands", () => {
 	test("describes /mcp as the MCP Connections menu entry point", () => {
 		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "mcp")).toMatchObject({
 			description: "Open MCP Connections or manage MCP integrations",
-			argumentHint: "[list|login <name>|logout <name>]",
+			argumentHint: "[add|list|get|remove|login|logout]",
 			takesArgument: true,
 		});
 	});
@@ -64,6 +73,17 @@ describe("built-in slash commands", () => {
 	});
 
 	test("marks argument commands as taking a free-form argument", () => {
+		for (const [name, argumentHint] of [
+			["model", "[search]"],
+			["export", "[path]"],
+			["import", "<path.jsonl>"],
+			["name", "[name]"],
+		] as const) {
+			expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === name)).toMatchObject({
+				argumentHint,
+				takesArgument: true,
+			});
+		}
 		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "goal")).toMatchObject({
 			takesArgument: true,
 		});
@@ -92,7 +112,9 @@ describe("slash command aliases", () => {
 			aliases: ["usage"],
 		});
 		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "name")).toMatchObject({
-			description: "Set session display name",
+			description: "Set or show the session display name",
+			argumentHint: "[name]",
+			takesArgument: true,
 			aliases: ["rename"],
 		});
 	});
@@ -235,6 +257,7 @@ describe("session slash commands", () => {
 			args: "status",
 			text: "/autonomous status",
 		});
+		expect(parseSessionSlashCommand("/rlm-max-depth 3 --global")).toBeUndefined();
 		expect(parseSessionSlashCommand("Explain /compact")).toBeUndefined();
 		expect(parseSessionSlashCommand(" /compact")).toBeUndefined();
 		expect(parseSessionSlashCommand("/compaction")).toBeUndefined();

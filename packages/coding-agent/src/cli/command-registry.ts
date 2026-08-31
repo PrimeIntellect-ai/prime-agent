@@ -43,7 +43,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 	},
 	{
 		path: ["send"],
-		usage: "send [--from <agent>] [--steer|--follow-up] <agent> <message>",
+		usage: "send [--from <agent>] <agent> <message>",
 		summary: "Send a message to an agent",
 		options: [
 			"--from <agent>  Identify the sending agent",
@@ -91,6 +91,32 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		summary: "Stop every agent and background service",
 		description: "Without --force, an interactive confirmation is required. --force also kills unresponsive workers.",
 		options: ["--force  Skip confirmation and kill unresponsive processes", "--json   Print JSON"],
+	},
+	{
+		path: ["mcp"],
+		usage: "mcp <add|list|get|remove>",
+		summary: "Manage user MCP servers",
+	},
+	{
+		path: ["mcp", "add"],
+		usage: "mcp add <name> --url <url> [--bearer-token-env-var <env>|--oauth] [--force]",
+		summary: "Add an HTTP or stdio MCP server",
+		description: "For stdio, use: mcp add <name> [--cwd <dir>] [--env CHILD=SOURCE] -- <command> [args...]",
+	},
+	{
+		path: ["mcp", "list"],
+		usage: "mcp list",
+		summary: "List user MCP servers",
+	},
+	{
+		path: ["mcp", "get"],
+		usage: "mcp get <name>",
+		summary: "Show a user MCP server",
+	},
+	{
+		path: ["mcp", "remove"],
+		usage: "mcp remove <name>",
+		summary: "Remove a user MCP server",
 	},
 	{
 		path: ["package"],
@@ -158,16 +184,88 @@ export const PUBLIC_COMMAND_NAMES = new Set(
 
 export const REMOVED_COMMAND_NAMES = new Set(["app", "daemon", "install", "manage", "remove", "uninstall"]);
 
-const TOP_LEVEL_OPTIONS = [
-	["-p, --print", "Print a response and exit"],
-	["-c, --continue", "Continue the previous session"],
-	["-r, --resume <path|id>", "Resume a session"],
-	["--model <pattern>", "Choose a model"],
-	["--thinking <level>", "Set the reasoning level"],
-	["--offline", "Disable startup network operations"],
-	["-v, --version", "Show version and exit"],
-	["-h, --help", "Show this help"],
-] as const;
+type TopLevelOption = readonly [option: string, summary: string];
+
+const TOP_LEVEL_OPTION_GROUPS: ReadonlyArray<{ heading: string; options: readonly TopLevelOption[] }> = [
+	{
+		heading: "Run options",
+		options: [
+			["-p, --print", "Print a response and exit"],
+			["--mode <text|json|rpc|acp|daemon>", "Select the output mode (default: text)"],
+			["--cwd <dir>", "Use a specific working directory"],
+			["--offline", "Disable startup network operations"],
+			["--verbose", "Force verbose startup"],
+			["--daemon-socket <path>", "Use a specific daemon socket"],
+		],
+	},
+	{
+		heading: "Model options",
+		options: [
+			["--provider <name>", "Select a model provider"],
+			["--model <id>", "Select a model"],
+			["--api-key <key>", "Use an API key for this run"],
+			["--models <patterns>", "Set comma-separated models for cycling"],
+			["--thinking <level>", "Set reasoning: off, minimal, low, medium, high, xhigh, max"],
+		],
+	},
+	{
+		heading: "Session options",
+		options: [
+			["-c, --continue", "Continue the previous session"],
+			["-r, --resume [path|id]", "Open the agents view, or resume a saved session"],
+			["--fork <path|id>", "Fork a saved session into a new session"],
+			["--session-dir <dir>", "Use a custom session directory"],
+			["--no-session", "Do not save the session"],
+			["--goal <objective>", "Seed a persistent goal for a new root session"],
+			["--goal-token-budget <n>", "Set a positive token budget for --goal"],
+		],
+	},
+	{
+		heading: "Tool and resource options",
+		options: [
+			["-t, --tools <list>", "Allowlist comma-separated tool names"],
+			["-nt, --no-tools", "Disable all tools by default"],
+			["-nbt, --no-builtin-tools", "Disable built-in tools by default"],
+			["-e, --extension <source>", "Load an extension (repeatable)"],
+			["-ne, --no-extensions", "Disable extension discovery"],
+			["--skill <path>", "Load a skill (repeatable)"],
+			["-ns, --no-skills", "Disable skill discovery"],
+			["--prompt-template <path>", "Load a prompt template (repeatable)"],
+			["-np, --no-prompt-templates", "Disable prompt template discovery"],
+			["--theme <path>", "Load a theme (repeatable)"],
+			["--no-themes", "Disable theme discovery"],
+			["-nc, --no-context-files", "Disable AGENTS.md and CLAUDE.md discovery"],
+		],
+	},
+	{
+		heading: "Prompt options",
+		options: [
+			["--system-prompt <text>", "Replace the default system prompt"],
+			["--append-system-prompt <text>", "Append to the system prompt (repeatable)"],
+			["--", "Treat all following arguments as messages"],
+		],
+	},
+	{
+		heading: "Autonomous options",
+		options: [
+			["--autonomous", "Continue until gates pass or a limit is reached"],
+			["--autonomous-gate <command>", "Run a completion gate (repeatable)"],
+			["--autonomous-gate-retries <n>", "Set positive retries per failed gate (default: 3)"],
+			["--autonomous-gate-timeout-ms <n>", "Set positive per-gate timeout in ms (default: 300000)"],
+			["--autonomous-max-continuations <n>", "Set positive follow-up limit (default: 3)"],
+			["--autonomous-max-turns <n>", "Set positive assistant-turn limit (default: 12)"],
+			["--autonomous-max-tokens <n>", "Set positive token limit (default: 80000)"],
+			["--autonomous-timeout-ms <n>", "Set positive wall-clock limit in ms (default: 1800000)"],
+		],
+	},
+	{
+		heading: "Help",
+		options: [
+			["-v, --version", "Show version and exit"],
+			["-h, --help", "Show this help"],
+		],
+	},
+];
 
 export function getCommandSpec(path: readonly string[]): CommandSpec | undefined {
 	return COMMAND_SPECS.find(
@@ -213,20 +311,25 @@ export function findCommandSuggestion(input: string, candidates: readonly string
 export function formatTopLevelHelp(): string {
 	const commands = COMMAND_SPECS.filter((spec) => spec.path.length === 1);
 	const commandWidth = Math.max(...commands.map((spec) => spec.path[0]!.length));
-	const optionWidth = Math.max(...TOP_LEVEL_OPTIONS.map(([option]) => option.length));
-	return `${APP_NAME} - AI coding assistant with an IPython tool
+	const options = TOP_LEVEL_OPTION_GROUPS.map((group) => formatOptionGroup(group.heading, group.options)).join("\n\n");
+	return `${APP_NAME} - AI coding assistant with a Python REPL tool
 
 Usage:
   ${APP_NAME} [options] [@files...] [message...]
   ${APP_NAME} <command> [args...]
 
 Options:
-${TOP_LEVEL_OPTIONS.map(([option, summary]) => `  ${option.padEnd(optionWidth)}  ${summary}`).join("\n")}
+${options}
 
 Commands:
 ${commands.map((spec) => `  ${spec.path[0]!.padEnd(commandWidth)}  ${spec.summary}`).join("\n")}
 
 Run "${APP_NAME} help <command>" for command details.`;
+}
+
+function formatOptionGroup(heading: string, options: readonly TopLevelOption[]): string {
+	const width = Math.max(...options.map(([option]) => option.length));
+	return `${heading}:\n${options.map(([option, summary]) => `  ${option.padEnd(width)}  ${summary}`).join("\n")}`;
 }
 
 export function formatCommandHelp(path: readonly string[]): string | undefined {

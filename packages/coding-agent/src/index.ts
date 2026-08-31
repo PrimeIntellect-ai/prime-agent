@@ -94,11 +94,14 @@ export type {
 	ProviderConfig,
 	ProviderModelConfig,
 	RefineCompleteEvent,
+	RefinePreparation,
 	RegisteredCommand,
 	RegisteredTool,
 	ResolvedCommand,
 	SessionBeforeCompactEvent,
 	SessionBeforeForkEvent,
+	SessionBeforeRefineEvent,
+	SessionBeforeRefineResult,
 	SessionBeforeSwitchEvent,
 	SessionBeforeTreeEvent,
 	SessionCompactEvent,
@@ -148,6 +151,12 @@ export type {
 	ResolvedResource,
 } from "./core/package-manager.js";
 export { DefaultPackageManager } from "./core/package-manager.js";
+export type {
+	HarnessState,
+	RefinementEdit,
+	RefinementProposal,
+	RefinementResult,
+} from "./core/refinement/index.js";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.js";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.js";
 // SDK for programmatic usage
@@ -179,6 +188,7 @@ export {
 	type RlmSubagentRuntime,
 	type SubagentRuntimeHost,
 } from "./core/sdk.js";
+export type { SessionActionSnapshot } from "./core/session-action-store.js";
 export { SessionImportFileNotFoundError } from "./core/session-import-errors.js";
 export {
 	type BranchSummaryEntry,

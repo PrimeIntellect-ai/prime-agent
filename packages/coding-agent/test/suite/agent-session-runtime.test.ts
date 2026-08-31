@@ -52,6 +52,8 @@ describe("AgentSessionRuntime characterization", () => {
 			bootstrapThinkingLevel?: boolean;
 			inMemory?: boolean;
 			sessionConfig?: AgentSessionRuntimeConfig;
+			sessionManager?: SessionManager;
+			sessionOptions?: Parameters<CreateAgentSessionRuntimeFactory>[0]["sessionOptions"];
 			onCreateRuntime?: (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => void;
 		},
 	) {
@@ -115,6 +117,7 @@ describe("AgentSessionRuntime characterization", () => {
 					sessionStartEvent,
 					model: serviceOptions.model,
 					thinkingLevel: serviceOptions.thinkingLevel,
+					...runtimeOptions.sessionOptions,
 				})),
 				services,
 				diagnostics: services.diagnostics,
@@ -123,10 +126,13 @@ describe("AgentSessionRuntime characterization", () => {
 		const runtime = await createAgentSessionRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: options?.inMemory
-				? SessionManager.inMemory(tempDir)
-				: SessionManager.create(tempDir, join(tempDir, "sessions")),
+			sessionManager:
+				options?.sessionManager ??
+				(options?.inMemory
+					? SessionManager.inMemory(tempDir)
+					: SessionManager.create(tempDir, join(tempDir, "sessions"))),
 			sessionConfig: options?.sessionConfig,
+			sessionOptions: options?.sessionOptions,
 		});
 		await runtime.session.bindExtensions({});
 
@@ -182,6 +188,55 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(calls).toHaveLength(2);
 		expect(calls[1]?.sessionConfig).toBe(sessionConfig);
 	});
+
+	it("copies depth across new-session parent reference edges", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		const parentSession = runtime.session.sessionFile;
+		if (!parentSession) throw new Error("Missing parent session file");
+
+		await runtime.newSession({ parentSession });
+
+		expect(runtime.session.sessionManager.getHeader()).toMatchObject({ parentSession, rlmDepth: 0 });
+	});
+
+	it("uses effective runtime depth for a parented new session from a legacy header", async () => {
+		const tempDir = join(tmpdir(), `pi-runtime-legacy-new-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const sessionManager = SessionManager.create(tempDir, join(tempDir, "sessions"));
+		sessionManager.newSession({ rlmDepth: undefined });
+		const parentSession = sessionManager.getSessionFile();
+		if (!parentSession) throw new Error("Missing parent session file");
+		const { runtime } = await createRuntimeForTest(() => {}, {
+			cwd: tempDir,
+			sessionManager,
+			sessionOptions: { rlmDepth: 2 },
+		});
+
+		await runtime.newSession({ parentSession });
+
+		expect(runtime.session.sessionManager.getHeader()).toMatchObject({ parentSession, rlmDepth: 2 });
+	});
+
+	it.each([false, true])(
+		"uses the effective runtime depth when forking a legacy session before its first entry (inMemory=%s)",
+		async (inMemory) => {
+			const tempDir = join(tmpdir(), `pi-runtime-legacy-fork-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+			const sessionManager = inMemory
+				? SessionManager.inMemory(tempDir)
+				: SessionManager.create(tempDir, join(tempDir, "sessions"));
+			sessionManager.newSession({ rlmDepth: undefined });
+			const firstEntry = sessionManager.appendMessage({ role: "user", content: "fork here", timestamp: 1 });
+			const { runtime } = await createRuntimeForTest(() => {}, {
+				cwd: tempDir,
+				sessionManager,
+				sessionOptions: { rlmDepth: 2 },
+			});
+
+			await runtime.fork(firstEntry);
+
+			expect(runtime.session.sessionManager.getHeader()?.rlmDepth).toBe(2);
+			expect(runtime.session.rlmDepth).toBe(2);
+		},
+	);
 
 	it("disposes a runtime only once across repeated teardown calls", async () => {
 		const shutdownEvents: SessionShutdownEvent[] = [];
@@ -318,6 +373,47 @@ describe("AgentSessionRuntime characterization", () => {
 			}),
 		).rejects.toThrow("startup was cancelled");
 		expect((runtime as unknown as RuntimeSubagentMapAccess).subagentRuntimes.has("cancelled-child")).toBe(false);
+	});
+
+	it("releases a failed child run from the inline runtime host", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		const deleteRlmSubagentRuntime = vi.spyOn(runtime, "deleteRlmSubagentRuntime");
+		vi.spyOn(runtime, "createRlmSubagentRuntime").mockImplementationOnce(async (options) => {
+			const childRuntime = await AgentSessionRuntime.prototype.createRlmSubagentRuntime.call(runtime, options);
+			vi.spyOn(childRuntime.session, "promptAndWait").mockRejectedValue(new Error("child run failed"));
+			return childRuntime;
+		});
+
+		await runtime.session.runRlmChild("fail after startup");
+
+		await vi.waitFor(() => expect(deleteRlmSubagentRuntime).toHaveBeenCalledOnce());
+		expect(runtime.listSubagentRuntimes()).toEqual([]);
+	});
+
+	it("plumbs the parent agent identity into runtime-created child prompts", async () => {
+		const { runtime } = await createRuntimeForTest(() => {});
+		runtime.session.setSessionName("parent-worker");
+		const childRuntime = await runtime.createRlmSubagentRuntime({
+			parentSession: runtime.session,
+			id: "parent-agent-child",
+			prompt: "inspect parent identity",
+			sessionName: "child-worker",
+			sessionDir: join(runtime.cwd, "parent-agent-child"),
+			model: runtime.session.model!,
+			thinkingLevel: "off",
+			serviceTier: null,
+			scopedModels: [],
+			activeToolNames: [],
+			customTools: [],
+			includeGoals: false,
+			includeCompactSkill: false,
+			rlmDepth: 1,
+			rlmMaxDepth: 2,
+			rlmParentNodeId: "parent-agent-child",
+		});
+
+		expect(childRuntime.session.systemPrompt).toContain("spawned by parent-worker");
+		await runtime.deleteRlmSubagentRuntime("parent-agent-child", childRuntime.session);
 	});
 
 	it("disposes hosted RLM children during session replacement", async () => {
@@ -694,6 +790,7 @@ describe("AgentSessionRuntime characterization", () => {
 		});
 		await otherRuntime.session.prompt("other");
 		const otherSessionFile = otherRuntime.session.sessionFile!;
+		await otherRuntime.dispose();
 
 		await runtime.switchSession(otherSessionFile);
 
@@ -769,6 +866,7 @@ describe("AgentSessionRuntime characterization", () => {
 		otherRuntime.session.setThinkingLevel("off");
 		await otherRuntime.session.prompt("hello");
 		const targetSessionFile = otherRuntime.session.sessionFile!;
+		await otherRuntime.dispose();
 
 		await runtime.switchSession(targetSessionFile);
 

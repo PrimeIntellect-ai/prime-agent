@@ -34,10 +34,6 @@ import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { classifyStreamFailure, StreamFailureError } from "../utils/stream-failure.js";
 import { transformMessages } from "./transform-messages.js";
 
-// =============================================================================
-// Utilities
-// =============================================================================
-
 function encodeTextSignatureV1(id: string, phase?: TextSignatureV1["phase"]): string {
 	const payload: TextSignatureV1 = { v: 1, id };
 	if (phase) payload.phase = phase;
@@ -83,10 +79,6 @@ export interface ConvertResponsesMessagesOptions {
 export interface ConvertResponsesToolsOptions {
 	strict?: boolean | null;
 }
-
-// =============================================================================
-// Message conversion
-// =============================================================================
 
 export function convertResponsesMessages<TApi extends Api>(
 	model: Model<TApi>,
@@ -262,10 +254,6 @@ export function convertResponsesMessages<TApi extends Api>(
 	return messages;
 }
 
-// =============================================================================
-// Tool conversion
-// =============================================================================
-
 export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesToolsOptions): OpenAITool[] {
 	const strict = options?.strict === undefined ? false : options.strict;
 	return tools.map((tool) => ({
@@ -276,10 +264,6 @@ export function convertResponsesTools(tools: Tool[], options?: ConvertResponsesT
 		strict,
 	}));
 }
-
-// =============================================================================
-// Stream processing
-// =============================================================================
 
 export async function processResponsesStream<TApi extends Api>(
 	openaiStream: AsyncIterable<ResponseStreamEvent>,
@@ -368,7 +352,6 @@ export async function processResponsesStream<TApi extends Api>(
 		} else if (event.type === "response.content_part.added") {
 			if (currentItem?.type === "message") {
 				currentItem.content = currentItem.content || [];
-				// Filter out ReasoningText, only accept output_text and refusal
 				if (event.part.type === "output_text" || event.part.type === "refusal") {
 					currentItem.content.push(event.part);
 				}
@@ -510,7 +493,6 @@ export async function processResponsesStream<TApi extends Api>(
 					: (response?.service_tier ?? options.serviceTier);
 				options.applyServiceTierPricing(output.usage, serviceTier);
 			}
-			// Map status to stop reason
 			output.stopReason = mapStopReason(response?.status);
 			if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
 				output.stopReason = "toolUse";
@@ -550,7 +532,6 @@ function mapStopReason(status: OpenAI.Responses.ResponseStatus | undefined): Sto
 		case "failed":
 		case "cancelled":
 			return "error";
-		// These two are wonky ...
 		case "in_progress":
 		case "queued":
 			return "stop";

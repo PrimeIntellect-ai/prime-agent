@@ -3,6 +3,7 @@ import { describe, expect, it, type Mock, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { ClientPromptStashStore, type PromptStashState } from "../src/modes/interactive/prompt-stash-state.js";
+import { QueueSelection } from "../src/modes/interactive/queue-selection.js";
 
 type FakePasteSnapshot = {
 	pastes: readonly (readonly [number, string])[];
@@ -14,6 +15,7 @@ type PromptStash = {
 	expandedText?: string;
 	pasteSnapshot?: FakePasteSnapshot;
 	images?: readonly (readonly [number, ImageContent])[];
+	restoreOnOpen?: boolean;
 };
 
 type FakeEditor = {
@@ -42,7 +44,9 @@ type PromptStashHarness = {
 };
 
 type PromptStashLiveMarkerHarness = PromptStashHarness & {
-	connectionQueue: { steering: string[]; followUp: string[] };
+	connectionState: {
+		sessionActions: { queuedCount: number; steering: readonly string[]; followUps: readonly string[] };
+	};
 };
 
 type SharedPromptStashHarness = PromptStashHarness & {
@@ -55,6 +59,7 @@ type SharedPromptStashHarness = PromptStashHarness & {
 };
 
 type ResetHarness = PromptStashLiveMarkerHarness & {
+	queueSelection: QueueSelection;
 	chatContainer: { clear: Mock };
 	shortcutGuideContainer: { clear: Mock };
 	pendingMessagesContainer: { clear: Mock };
@@ -73,7 +78,7 @@ type ResetHarness = PromptStashLiveMarkerHarness & {
 	ipythonToolComponents: Map<string, unknown>;
 	lateIpythonSentAgentMessages: Map<string, unknown>;
 	resetPendingToolState: Mock;
-	resetChildAgentInspector: Mock;
+	resetSubagentSummary: Mock;
 	setGoalAnnouncementBaseline: Mock;
 	getGoalState: Mock<() => unknown>;
 	syncGoalTray: Mock;
@@ -81,6 +86,7 @@ type ResetHarness = PromptStashLiveMarkerHarness & {
 
 type SubmitHarness = PromptStashHarness & {
 	defaultEditor: { onSubmit?: (text: string) => void | Promise<void> };
+	uiServices: { settingsManager: { getTelemetryEnabled: Mock<() => boolean> } };
 	sideQuestionContainer: { clear: Mock };
 	isAgentCompacting: () => boolean;
 	isAgentStreaming: () => boolean;
@@ -106,6 +112,8 @@ type PromptStashMethods = {
 	hydratePromptStash: (this: SharedPromptStashHarness) => void;
 	resetCurrentSessionRenderState: (this: ResetHarness, options?: { clearPromptStash?: boolean }) => void;
 	restorePromptStashIfEditorEmpty: (this: PromptStashHarness, stash?: PromptStash) => boolean;
+	restorePromptStashOnOpen: (this: PromptStashHarness) => void;
+	stashDraftForAgentsView: (this: SharedPromptStashHarness) => void;
 	liveImageMarkerIds: (this: PromptStashLiveMarkerHarness) => Set<number>;
 	setupEditorSubmitHandler: (this: SubmitHarness) => void;
 };
@@ -186,6 +194,7 @@ function createSubmitHarness(
 	const mode: SubmitHarness = {
 		...createPromptStashHarness(options),
 		defaultEditor: {},
+		uiServices: { settingsManager: { getTelemetryEnabled: vi.fn(() => false) } },
 		sideQuestionContainer: { clear: vi.fn() },
 		isAgentCompacting: () => false,
 		isAgentStreaming: () => false,
@@ -316,6 +325,95 @@ describe("InteractiveMode prompt stash", () => {
 		expect(mode.nextImageMarkerId).toBe(4);
 		expect(state.stash).toBeUndefined();
 		expect(state.queuedStashes).toBeUndefined();
+	});
+
+	it("auto-stashes a draft for the agents view and restores it on reopen", () => {
+		const store = new ClientPromptStashStore();
+		const pasteSnapshot: FakePasteSnapshot = {
+			pastes: [[1, "line one\nline two"]],
+			pasteCounter: 1,
+		};
+		const mode = createSharedPromptStashHarness(store, "session-a", {
+			text: "draft [paste #1 +2 lines]",
+			expandedText: "draft line one\nline two",
+			pasteSnapshot,
+		});
+
+		interactiveModeMethods.stashDraftForAgentsView.call(mode);
+
+		expect(mode.promptStashState.stash).toMatchObject({
+			text: "draft [paste #1 +2 lines]",
+			restoreOnOpen: true,
+		});
+
+		const reopenedMode = createSharedPromptStashHarness(store, "session-a");
+		interactiveModeMethods.hydratePromptStash.call(reopenedMode);
+		interactiveModeMethods.restorePromptStashOnOpen.call(reopenedMode);
+
+		expect(reopenedMode.editor.getText()).toBe("draft [paste #1 +2 lines]");
+		expect(reopenedMode.editor.restoredPasteSnapshot).toBe(pasteSnapshot);
+		expect(reopenedMode.promptStashState.stash).toBeUndefined();
+	});
+
+	it("lands the on-open restore notice in a fresh status block", () => {
+		const store = new ClientPromptStashStore();
+		const mode = createSharedPromptStashHarness(store, "session-a", { text: "draft" });
+		interactiveModeMethods.stashDraftForAgentsView.call(mode);
+
+		const reopenedMode = createSharedPromptStashHarness(store, "session-a");
+		// init() may have just posted a status (e.g. a compaction notice); showStatus
+		// replaces the anchored last status, so the restore must drop the anchor first.
+		const priorStatus = { setText: vi.fn() };
+		(reopenedMode as { lastStatusText?: unknown }).lastStatusText = priorStatus;
+		(reopenedMode as { lastStatusSpacer?: unknown }).lastStatusSpacer = { spacer: true };
+		interactiveModeMethods.restorePromptStashOnOpen.call(reopenedMode);
+
+		expect(reopenedMode.editor.getText()).toBe("draft");
+		expect((reopenedMode as { lastStatusText?: unknown }).lastStatusText).toBeUndefined();
+		expect((reopenedMode as { lastStatusSpacer?: unknown }).lastStatusSpacer).toBeUndefined();
+		expect(priorStatus.setText).not.toHaveBeenCalled();
+	});
+
+	it("queues an existing manual stash behind the agents-view auto-stash", () => {
+		const store = new ClientPromptStashStore();
+		const state = store.forSession("session-a");
+		state.stash = { text: "manual draft" };
+		const mode = createSharedPromptStashHarness(store, "session-a", { text: "typed draft" });
+
+		interactiveModeMethods.stashDraftForAgentsView.call(mode);
+
+		expect(state.stash).toMatchObject({ text: "typed draft", restoreOnOpen: true });
+		expect(state.queuedStashes).toEqual([{ text: "manual draft" }]);
+
+		const reopenedMode = createSharedPromptStashHarness(store, "session-a");
+		interactiveModeMethods.restorePromptStashOnOpen.call(reopenedMode);
+
+		expect(reopenedMode.editor.getText()).toBe("typed draft");
+		expect(state.stash).toEqual({ text: "manual draft" });
+		expect(state.queuedStashes).toBeUndefined();
+	});
+
+	it("skips the agents-view auto-stash for whitespace-only drafts", () => {
+		const store = new ClientPromptStashStore();
+		const state = store.forSession("session-a");
+		state.stash = { text: "manual draft" };
+		const mode = createSharedPromptStashHarness(store, "session-a", { text: "   \n\t" });
+
+		interactiveModeMethods.stashDraftForAgentsView.call(mode);
+
+		expect(state.stash).toEqual({ text: "manual draft" });
+		expect(state.queuedStashes).toBeUndefined();
+	});
+
+	it("does not auto-restore a manual stash on reopen", () => {
+		const store = new ClientPromptStashStore();
+		store.forSession("session-a").stash = { text: "manual draft" };
+
+		const reopenedMode = createSharedPromptStashHarness(store, "session-a");
+		interactiveModeMethods.restorePromptStashOnOpen.call(reopenedMode);
+
+		expect(reopenedMode.editor.getText()).toBe("");
+		expect(store.forSession("session-a").stash).toEqual({ text: "manual draft" });
 	});
 
 	it("rebinds prompt stash state when the connected session changes", () => {
@@ -532,12 +630,13 @@ describe("InteractiveMode prompt stash", () => {
 		expect(mode.editor.getText()).toBe("half-written draft");
 	});
 
-	it("drops queued image references from old sessions while keeping stashed images", () => {
+	it("drops old-session images while keeping stashed images", () => {
 		const base = createPromptStashHarness({ stash: "keep [image #1]" });
 		const mode: ResetHarness = {
 			...base,
 			defaultEditor: base.editor,
-			connectionQueue: { steering: ["old [image #2]"], followUp: [] },
+			queueSelection: new QueueSelection(),
+			connectionState: { sessionActions: { queuedCount: 0, steering: [], followUps: [] } },
 			chatContainer: { clear: vi.fn() },
 			shortcutGuideContainer: { clear: vi.fn() },
 			pendingMessagesContainer: { clear: vi.fn() },
@@ -555,7 +654,7 @@ describe("InteractiveMode prompt stash", () => {
 			ipythonToolComponents: new Map(),
 			lateIpythonSentAgentMessages: new Map(),
 			resetPendingToolState: vi.fn(),
-			resetChildAgentInspector: vi.fn(),
+			resetSubagentSummary: vi.fn(),
 			setGoalAnnouncementBaseline: vi.fn(),
 			getGoalState: vi.fn(() => undefined),
 			syncGoalTray: vi.fn(),
@@ -564,7 +663,6 @@ describe("InteractiveMode prompt stash", () => {
 
 		interactiveModeMethods.resetCurrentSessionRenderState.call(mode);
 
-		expect(mode.connectionQueue).toEqual({ steering: [], followUp: [] });
 		expect(mode.promptStash?.text).toBe("keep [image #1]");
 		expect(mode.pastedImages.has(1)).toBe(true);
 		expect(mode.pastedImages.has(2)).toBe(false);
@@ -575,7 +673,8 @@ describe("InteractiveMode prompt stash", () => {
 		const mode: ResetHarness = {
 			...base,
 			defaultEditor: base.editor,
-			connectionQueue: { steering: [], followUp: [] },
+			queueSelection: new QueueSelection(),
+			connectionState: { sessionActions: { queuedCount: 0, steering: [], followUps: [] } },
 			chatContainer: { clear: vi.fn() },
 			shortcutGuideContainer: { clear: vi.fn() },
 			pendingMessagesContainer: { clear: vi.fn() },
@@ -590,7 +689,7 @@ describe("InteractiveMode prompt stash", () => {
 			ipythonToolComponents: new Map(),
 			lateIpythonSentAgentMessages: new Map(),
 			resetPendingToolState: vi.fn(),
-			resetChildAgentInspector: vi.fn(),
+			resetSubagentSummary: vi.fn(),
 			setGoalAnnouncementBaseline: vi.fn(),
 			getGoalState: vi.fn(() => undefined),
 			syncGoalTray: vi.fn(),
@@ -720,7 +819,7 @@ describe("InteractiveMode prompt stash", () => {
 	it("keeps image markers in a stashed prompt live", () => {
 		const mode: PromptStashLiveMarkerHarness = {
 			...createPromptStashHarness({ stash: "look at [image #7]" }),
-			connectionQueue: { steering: [], followUp: [] },
+			connectionState: { sessionActions: { queuedCount: 0, steering: [], followUps: [] } },
 		};
 		Object.setPrototypeOf(mode, InteractiveMode.prototype);
 

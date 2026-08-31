@@ -8,11 +8,12 @@ import { expandTildePath } from "../config.js";
 import type { AgentSessionEvent } from "../core/agent-session.js";
 import type { AgentSessionRuntimeConfig } from "../core/agent-session-config.js";
 import { type AgentCronJob, formatAgentCronJob } from "../core/cron-jobs.js";
+import { looksLikeSessionPath } from "../core/session-resolver.js";
 import { DaemonClient, type DaemonClientMessageListener } from "../modes/daemon/daemon-client.js";
 import type { DaemonOutbound, DaemonResponse } from "../modes/daemon/daemon-protocol.js";
 import { matchesSessionIdSuffix } from "../modes/daemon/daemon-session-id.js";
 import type { SessionSummary } from "../modes/daemon/daemon-session-list.js";
-import { defaultDaemonSocketPath } from "../modes/daemon/daemon-socket.js";
+import { defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
 import { isLocalPath } from "../utils/paths.js";
 import { isValidThinkingLevel } from "./args.js";
 import { formatSessionListTable } from "./daemon-list-format.js";
@@ -107,7 +108,7 @@ function parseDaemonClientCommand(args: string[]): ParsedDaemonClientCommand {
 			if (!value) {
 				throw new Error(`${arg} requires a value`);
 			}
-			socketPath = value;
+			socketPath = normalizeSocketPath(value);
 			index++;
 			continue;
 		}
@@ -272,15 +273,24 @@ async function runOpen(parsed: ParsedDaemonClientCommand): Promise<void> {
 	const client = new DaemonClient(parsed.socketPath);
 	await client.connect();
 	try {
-		const sessions = await getLiveSessions(client);
-		const sessionName = sessionArgs.name ?? nextDefaultSessionName(sessions);
-		const response = await client.request({
-			type: "create",
-			name: sessionName,
-			config: sessionArgs.config,
-			sessionPath: sessionArgs.sessionPath,
-			continueRecent: sessionArgs.continueRecent,
-		});
+		const autoName = sessionArgs.name === undefined;
+		const sessions = await getLiveSessions(client, autoName);
+		let sessionName = sessionArgs.name ?? nextDefaultSessionName(sessions);
+		let response: DaemonResponse;
+		while (true) {
+			response = await client.request({
+				type: "create",
+				name: sessionName,
+				config: sessionArgs.config,
+				sessionPath: sessionArgs.sessionPath,
+				continueRecent: sessionArgs.continueRecent,
+			});
+			if (response.success || !autoName || !response.error.includes(`Agent name "${sessionName}" is unavailable`)) {
+				break;
+			}
+			sessions.push({ sessionName } as SessionSummary);
+			sessionName = nextDefaultSessionName(sessions);
+		}
 		const data = requireSuccess(response);
 		if (!isLiveSessionSummary(data)) {
 			throw new Error("Daemon returned an invalid create response");
@@ -612,10 +622,6 @@ function parseExtensionFlagOption(
 	return { consumed: 0, daemonArg: arg };
 }
 
-function looksLikeSessionPath(value: string): boolean {
-	return value.includes("/") || value.includes("\\") || value.endsWith(".jsonl");
-}
-
 function requireOptionValue(args: string[], index: number, option: string): string {
 	const value = args[index + 1];
 	if (!value) {
@@ -629,8 +635,8 @@ function resolvePathOption(value: string, cwd: string): string {
 	return isLocalPath(expanded) ? resolve(cwd, expanded) : expanded;
 }
 
-async function getLiveSessions(client: DaemonClient): Promise<SessionSummary[]> {
-	const response = await client.request({ type: "list" });
+async function getLiveSessions(client: DaemonClient, all = false): Promise<SessionSummary[]> {
+	const response = await client.request({ type: "list", ...(all ? { all: true } : {}) });
 	const data = requireSuccess(response);
 	const sessions = getSessionSummaries(data);
 	if (!sessions) {
@@ -645,12 +651,20 @@ function nextDefaultSessionName(sessions: SessionSummary[]): string {
 	);
 	const numericNames = [...existingNames]
 		.map((name) => Number.parseInt(name, 10))
-		.filter((value) => Number.isInteger(value) && value > 0);
+		.filter((value) => Number.isSafeInteger(value) && value > 0);
 	let next = numericNames.length > 0 ? Math.max(...numericNames) + 1 : 1;
-	while (existingNames.has(String(next))) {
+	while (Number.isSafeInteger(next)) {
+		if (!existingNames.has(String(next))) {
+			return String(next);
+		}
 		next++;
 	}
-	return String(next);
+
+	let fallback = "session";
+	while (existingNames.has(fallback)) {
+		fallback += "-";
+	}
+	return fallback;
 }
 
 async function runStart(parsed: ParsedDaemonClientCommand): Promise<void> {
@@ -882,7 +896,6 @@ async function runSend(client: DaemonClient, args: string[], json: boolean): Pro
 		type: "send_message",
 		targetActiveSessionId: parsed.targetActiveSessionId,
 		fromActiveSessionId: parsed.fromActiveSessionId,
-		deliveryMode: parsed.deliveryMode,
 		message: parsed.message,
 	});
 	const data = requireSuccess(response);
@@ -901,13 +914,11 @@ async function runSend(client: DaemonClient, args: string[], json: boolean): Pro
 interface ParsedSendArgs {
 	targetActiveSessionId: string;
 	fromActiveSessionId?: string;
-	deliveryMode?: "auto" | "steer" | "follow_up";
 	message: string;
 }
 
 function parseSendArgs(args: string[]): ParsedSendArgs {
 	let fromActiveSessionId: string | undefined;
-	let deliveryMode: "auto" | "steer" | "follow_up" | undefined;
 	let targetActiveSessionId: string | undefined;
 	let explicitMessage: string | undefined;
 	const messageParts: string[] = [];
@@ -926,27 +937,6 @@ function parseSendArgs(args: string[]): ParsedSendArgs {
 			}
 			fromActiveSessionId = value;
 			index++;
-			continue;
-		}
-		if (parseOptions && arg === "--steer") {
-			if (deliveryMode !== undefined) {
-				throw new Error("Only one send delivery mode may be specified: --steer or --follow-up");
-			}
-			deliveryMode = "steer";
-			continue;
-		}
-		if (parseOptions && arg === "--follow-up") {
-			if (deliveryMode !== undefined) {
-				throw new Error("Only one send delivery mode may be specified: --steer or --follow-up");
-			}
-			deliveryMode = "follow_up";
-			continue;
-		}
-		if (parseOptions && arg === "--auto") {
-			if (deliveryMode !== undefined) {
-				throw new Error("Only one send delivery mode may be specified: --steer or --follow-up");
-			}
-			deliveryMode = "auto";
 			continue;
 		}
 		if (parseOptions && arg === "--message") {
@@ -973,20 +963,15 @@ function parseSendArgs(args: string[]): ParsedSendArgs {
 	}
 
 	if (explicitMessage !== undefined && messageParts.length > 0) {
-		throw new Error(
-			"Usage: prime-agent send [--from <agent>] [--steer|--follow-up] <agent> [--message <message>|<message>]",
-		);
+		throw new Error("Usage: prime-agent send [--from <agent>] <agent> [--message <message>|<message>]");
 	}
 	const message = (explicitMessage ?? messageParts.join(" ")).trim();
 	if (!targetActiveSessionId || !message) {
-		throw new Error(
-			"Usage: prime-agent send [--from <agent>] [--steer|--follow-up] <agent> [--message <message>|<message>]",
-		);
+		throw new Error("Usage: prime-agent send [--from <agent>] <agent> [--message <message>|<message>]");
 	}
 	return {
 		targetActiveSessionId,
 		fromActiveSessionId,
-		deliveryMode,
 		message,
 	};
 }
@@ -1451,10 +1436,12 @@ class DaemonAttachTerminal {
 			case "tool_execution_end":
 				this.writeLine(chalk.dim(`Tool ${event.isError ? "failed" : "finished"}: ${event.toolName}`));
 				return;
-			case "queue_update":
-				if (event.steering.length > 0 || event.followUp.length > 0) {
+			case "session_action_update":
+				if (event.actions.queuedCount > 0) {
 					this.writeLine(
-						chalk.dim(`Queued: ${event.steering.length} steering, ${event.followUp.length} follow-up`),
+						chalk.dim(
+							`Queued: ${event.actions.steering.length} steering, ${event.actions.followUps.length} follow-up`,
+						),
 					);
 				}
 				return;
@@ -1648,11 +1635,17 @@ function isSessionSummary(value: unknown): value is SessionSummary {
 		typeof candidate.cwd === "string" &&
 		typeof candidate.lifecycle === "string" &&
 		typeof candidate.activity === "string" &&
+		typeof candidate.isSessionActive === "boolean" &&
 		typeof candidate.isStreaming === "boolean" &&
 		typeof candidate.isCompacting === "boolean" &&
 		typeof candidate.attachedClients === "number" &&
 		typeof candidate.messageCount === "number" &&
-		typeof candidate.pendingMessageCount === "number"
+		(candidate.unfinishedActionCount === undefined || typeof candidate.unfinishedActionCount === "number") &&
+		typeof candidate.sessionActions === "object" &&
+		candidate.sessionActions !== null &&
+		typeof candidate.sessionActions.queuedCount === "number" &&
+		Array.isArray(candidate.sessionActions.steering) &&
+		Array.isArray(candidate.sessionActions.followUps)
 	);
 }
 

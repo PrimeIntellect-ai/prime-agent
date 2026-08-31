@@ -13,14 +13,14 @@ Events are defined in [`AgentSessionEvent`](../src/core/agent-session.ts):
 ```typescript
 type AgentSessionEvent =
   | AgentEvent
-  | { type: "queue_update"; steering: readonly string[]; followUp: readonly string[] }
+  | { type: "session_action_update"; actions: SessionActionSnapshot }
   | { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
   | { type: "compaction_end"; reason: "manual" | "threshold" | "overflow"; result: CompactionResult | undefined; aborted: boolean; willRetry: boolean; errorMessage?: string }
   | { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
   | { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
 ```
 
-`queue_update` emits the full pending steering and follow-up queues whenever they change. `compaction_start` and `compaction_end` cover both manual and automatic compaction.
+`session_action_update` emits literal queued actions separately from active scheduler work whenever either projection changes. `compaction_start` and `compaction_end` cover both manual and automatic compaction.
 
 Base events from [`AgentEvent`](../../agent/src/types.ts):
 

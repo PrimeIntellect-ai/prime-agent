@@ -1,6 +1,28 @@
 # Changelog
 
-## [Unreleased]
+## [0.8.0] - 2026-08-21
+
+## [0.7.4] - 2026-08-19
+
+## [0.7.3] - 2026-08-17
+
+- Fixed hyperlinks not being clickable in fullscreen mode on terminals that gate native link handling while mouse reporting is active (e.g. Ghostty); left-clicking a link now opens it directly.
+
+## [0.7.2] - 2026-08-11
+
+## [0.7.1] - 2026-08-07
+
+## [0.7.0] - 2026-08-05
+
+## [0.6.1] - 2026-08-05
+
+## [0.6.0] - 2026-08-04
+
+## [0.5.1] - 2026-08-04
+
+## [0.5.0] - 2026-08-03
+
+## [0.4.0] - 2026-08-01
 
 ## [0.3.3] - 2026-07-23
 

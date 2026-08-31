@@ -66,6 +66,7 @@ function makeSummary(options: {
 		id: options.id,
 		lifecycle: options.lifecycle,
 		activity: options.activity,
+		isSessionActive: options.activity === "working",
 		sessionId: options.id,
 		sessionName: options.name,
 		cwd: "/tmp/project",
@@ -74,7 +75,7 @@ function makeSummary(options: {
 		isCompacting: false,
 		attachedClients: options.clients ?? 0,
 		messageCount: 2,
-		pendingMessageCount: 0,
+		sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 		modified: "2026-05-29T10:00:00.000Z",
 	};
 }

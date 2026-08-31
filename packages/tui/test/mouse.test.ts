@@ -25,7 +25,6 @@ describe("parseSgrMouseEvent", () => {
 	});
 
 	it("strips modifier bits into flags", () => {
-		// 64 + shift(4) + ctrl(16) = 84
 		const event = parseSgrMouseEvent("\x1b[<84;3;7M");
 		assert.strictEqual(event!.button, 64);
 		assert.strictEqual(event!.shift, true);

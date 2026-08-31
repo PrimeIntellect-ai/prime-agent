@@ -10,7 +10,8 @@ import {
 	Spacer,
 	Text,
 } from "@earendil-works/pi-tui";
-import type { WarningSettings } from "../../../core/settings-manager.js";
+import type { IdleEvictionMinutes } from "../../../core/session-action-store.js";
+import type { MermaidRenderingMode, WarningSettings } from "../../../core/settings-manager.js";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 
@@ -31,6 +32,7 @@ const THINKING_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 
 export interface SettingsConfig {
 	autoCompact: boolean;
+	idleEvictionMinutes: IdleEvictionMinutes;
 	showImages: boolean;
 	autoResizeImages: boolean;
 	blockImages: boolean;
@@ -44,6 +46,7 @@ export interface SettingsConfig {
 	currentTheme: string;
 	availableThemes: string[];
 	hideThinkingBlock: boolean;
+	mermaidRenderingMode: MermaidRenderingMode;
 	treeFilterMode: "default" | "no-tools" | "user-only" | "labeled-only" | "all";
 	showHardwareCursor: boolean;
 	editorPaddingX: number;
@@ -57,6 +60,7 @@ export interface SettingsConfig {
 
 export interface SettingsCallbacks {
 	onAutoCompactChange: (enabled: boolean) => void;
+	onIdleEvictionMinutesChange: (value: IdleEvictionMinutes) => void;
 	onShowImagesChange: (enabled: boolean) => void;
 	onAutoResizeImagesChange: (enabled: boolean) => void;
 	onBlockImagesChange: (blocked: boolean) => void;
@@ -69,6 +73,7 @@ export interface SettingsCallbacks {
 	onThemeChange: (theme: string) => void;
 	onThemePreview?: (theme: string) => void;
 	onHideThinkingBlockChange: (hidden: boolean) => void;
+	onMermaidRenderingModeChange: (mode: MermaidRenderingMode) => void;
 	onTreeFilterModeChange: (mode: "default" | "no-tools" | "user-only" | "labeled-only" | "all") => void;
 	onShowHardwareCursorChange: (enabled: boolean) => void;
 	onEditorPaddingXChange: (padding: number) => void;
@@ -81,9 +86,6 @@ export interface SettingsCallbacks {
 	onCancel: () => void;
 }
 
-/**
- * A submenu component for selecting from a list of options.
- */
 class WarningSettingsSubmenu extends Container {
 	private settingsList: SettingsList;
 	private state: WarningSettings;
@@ -140,19 +142,15 @@ class SelectSubmenu extends Container {
 	) {
 		super();
 
-		// Title
 		this.addChild(new Text(theme.bold(theme.fg("accent", title)), 0, 0));
 
-		// Description
 		if (description) {
 			this.addChild(new Spacer(1));
 			this.addChild(new Text(theme.fg("muted", description), 0, 0));
 		}
 
-		// Spacer
 		this.addChild(new Spacer(1));
 
-		// Select list
 		this.selectList = new SelectList(
 			options,
 			Math.min(options.length, 10),
@@ -160,7 +158,6 @@ class SelectSubmenu extends Container {
 			SETTINGS_SUBMENU_SELECT_LIST_LAYOUT,
 		);
 
-		// Pre-select current value
 		const currentIndex = options.findIndex((o) => o.value === currentValue);
 		if (currentIndex !== -1) {
 			this.selectList.setSelectedIndex(currentIndex);
@@ -180,7 +177,6 @@ class SelectSubmenu extends Container {
 
 		this.addChild(this.selectList);
 
-		// Hint
 		this.addChild(new Spacer(1));
 		this.addChild(new Text(theme.fg("dim", "  Enter to select · esc to go back"), 0, 0));
 	}
@@ -190,9 +186,6 @@ class SelectSubmenu extends Container {
 	}
 }
 
-/**
- * Main settings selector component.
- */
 export class SettingsSelectorComponent extends Container {
 	private settingsList: SettingsList;
 
@@ -200,6 +193,11 @@ export class SettingsSelectorComponent extends Container {
 		super();
 
 		let currentWarnings = { ...config.warnings };
+		const idleEvictionValues = [30, 60, 90, 180, 360];
+		if (typeof config.idleEvictionMinutes === "number" && !idleEvictionValues.includes(config.idleEvictionMinutes)) {
+			idleEvictionValues.push(config.idleEvictionMinutes);
+			idleEvictionValues.sort((a, b) => a - b);
+		}
 
 		const items: SettingItem[] = [
 			{
@@ -208,6 +206,13 @@ export class SettingsSelectorComponent extends Container {
 				description: "Automatically compact context when it gets too large",
 				currentValue: config.autoCompact ? "true" : "false",
 				values: ["true", "false"],
+			},
+			{
+				id: "idle-eviction-minutes",
+				label: "Idle worker eviction",
+				description: "Stop fully idle agent trees after this many minutes (global daemon policy)",
+				currentValue: String(config.idleEvictionMinutes),
+				values: ["off", ...idleEvictionValues.map(String)],
 			},
 			{
 				id: "steering-mode",
@@ -238,6 +243,13 @@ export class SettingsSelectorComponent extends Container {
 				description: "Hide thinking blocks in assistant responses",
 				currentValue: config.hideThinkingBlock ? "true" : "false",
 				values: ["true", "false"],
+			},
+			{
+				id: "mermaid-rendering",
+				label: "Mermaid diagrams",
+				description: "Render Mermaid code blocks as Unicode diagrams",
+				currentValue: config.mermaidRenderingMode,
+				values: ["off", "final", "streaming"],
 			},
 			{
 				id: "quiet-startup",
@@ -428,7 +440,6 @@ export class SettingsSelectorComponent extends Container {
 			values: ["true", "false"],
 		});
 
-		// Add borders
 		this.addChild(new DynamicBorder());
 
 		this.settingsList = new SettingsList(
@@ -439,6 +450,9 @@ export class SettingsSelectorComponent extends Container {
 				switch (id) {
 					case "autocompact":
 						callbacks.onAutoCompactChange(newValue === "true");
+						break;
+					case "idle-eviction-minutes":
+						callbacks.onIdleEvictionMinutesChange(newValue === "off" ? "off" : Number(newValue));
 						break;
 					case "show-images":
 						callbacks.onShowImagesChange(newValue === "true");
@@ -466,6 +480,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "hide-thinking":
 						callbacks.onHideThinkingBlockChange(newValue === "true");
+						break;
+					case "mermaid-rendering":
+						callbacks.onMermaidRenderingModeChange(newValue as MermaidRenderingMode);
 						break;
 					case "quiet-startup":
 						callbacks.onQuietStartupChange(newValue === "true");

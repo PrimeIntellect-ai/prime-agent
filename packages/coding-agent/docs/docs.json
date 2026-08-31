@@ -103,6 +103,10 @@
           "path": "sdk.md"
         },
         {
+          "title": "ACP Mode",
+          "path": "acp.md"
+        },
+        {
           "title": "RPC Mode",
           "path": "rpc.md"
         },

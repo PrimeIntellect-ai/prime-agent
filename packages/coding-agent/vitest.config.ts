@@ -12,13 +12,21 @@ export default defineConfig({
 		globals: true,
 		environment: "node",
 		testTimeout: 30000,
+		env: { DO_NOT_TRACK: "1" },
 		tags: [
 			{
 				name: "process-stress",
 				description: "Slow real-process stress and wall-clock scheduling coverage",
 			},
+			{
+				name: "kernel-heavy",
+				description: "Boots a real Python kernel and syncs skills into the shared venv",
+			},
 		],
-		tagsFilter: ["!process-stress"],
+		// Kernel-heavy tests are excluded from the default sharded run: several files
+		// booting real kernels in one shard starve the neighbouring kernel tests that
+		// rely on the 30s default timeout. `test:kernel` runs them on their own.
+		tagsFilter: ["!process-stress", "!kernel-heavy"],
 		server: {
 			deps: {
 				external: [/@silvia-odwyer\/photon-node/],

@@ -902,6 +902,33 @@ describe("initial goal seeding from config", () => {
 		const branch = harness.sessionManager.getBranch();
 		const goalEntry = branch.find((e) => e.type === "custom" && e.customType === GOAL_STATE_CUSTOM_TYPE);
 		expect(goalEntry).toBeDefined();
+
+		// The seeded goal context must reach the model before its first reply.
+		harness.setResponses([fauxAssistantMessage("ack")]);
+		await harness.session.prompt("hello");
+		const messages = harness.session.messages;
+		const firstContextIndex = messages.findIndex(
+			(message) => message.role === "custom" && message.customType === "goal_context",
+		);
+		const firstAssistantIndex = messages.findIndex((message) => message.role === "assistant");
+		expect(firstContextIndex).toBeGreaterThanOrEqual(0);
+		expect(firstContextIndex).toBeLessThan(firstAssistantIndex);
+		expect(getMessageText(messages[firstContextIndex])).toContain("Write tests");
+		expect(currentAgentContext(harness).messages).toContain(messages[firstContextIndex]);
+	});
+
+	it("drops the seeded goal context when the goal is cleared before the first prompt", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			initialGoal: { objective: "Write tests", tokenBudget: 50000 },
+		});
+		harnesses.push(harness);
+
+		harness.setResponses([fauxAssistantMessage("ack")]);
+		await harness.session.prompt("/goal clear");
+		expect(harness.session.goalState.status).toBe("idle");
+		await harness.session.prompt("hello");
+		expect(goalContextMessages(harness)).toHaveLength(0);
 	});
 
 	it("does not seed initialGoal for subagent sessions (rlmDepth > 0)", async () => {

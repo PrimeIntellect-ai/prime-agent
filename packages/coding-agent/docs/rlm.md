@@ -1,6 +1,6 @@
 # RLM Programming Model
 
-Prime Agent is built around a recursive language model (RLM) runtime: the model works inside a persistent Python control environment and composes capabilities as code. Provider calls, session persistence, child lifecycles, scheduling, and safety policy remain in the TypeScript host; IPython is the model-facing programming surface.
+Prime Agent is built around a recursive language model (RLM) runtime: the model works inside a persistent Python control environment and composes capabilities as code. Provider calls, session persistence, child lifecycles, scheduling, and safety policy remain in the TypeScript host; the Python REPL is the model-facing programming surface.
 
 ## RLM Loop
 
@@ -8,19 +8,19 @@ Prime Agent is built around a recursive language model (RLM) runtime: the model 
 flowchart LR
     task["Task + working context"]
     parent["Parent model"]
-    kernel["Persistent IPython kernel"]
+    kernel["Persistent Python kernel"]
     data["Files · data · shell commands"]
     skills["Python-backed skills"]
     children["rlm(...) child agents"]
     answer["Answer or next turn"]
 
     task --> parent
-    parent -->|"IPython call"| kernel
+    parent -->|"Python call"| kernel
     kernel <-->|"inspect · search · transform"| data
     kernel <-->|"call functions"| skills
-    kernel -->|"delegate focused work"| children
-    children -->|"return results"| kernel
-    kernel -->|"tool result"| parent
+    kernel -->|"spawn focused work"| children
+    children -->|"agent messages · files"| parent
+    kernel -->|"admission handle"| parent
     parent --> answer
 ```
 
@@ -41,48 +41,53 @@ config_files = list(Path(".").rglob("*.toml"))
 large_files = [path for path in config_files if path.stat().st_size > 10_000]
 ```
 
-Run a project's normal commands through its own environment from an IPython cell:
+Run a project's normal commands through its own environment with `bash()`:
 
-```bash
-%%bash
-npm run check
+```python
+result = await bash("npm run check")
+print(result.output)
 ```
 
-Each `%%bash` cell is a temporary subshell, while Python state and `%cd` changes persist in the kernel. Prime Agent extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
+Each `bash()` call is its own process, while Python state, `os.chdir(...)`, and `os.environ[...]` changes persist in the kernel and apply to later `bash()` calls. Prime Agent extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
 
 ### 2. Subagents are native RLM calls
 
-The callable `rlm` object is preloaded in the kernel. A child is created by calling it like any other async Python function:
+The callable `rlm` object is preloaded in the kernel. Spawn a child with a direct call:
 
 ```python
-result = await rlm("Review the authentication flow for security issues")
-print(result.answer)
+handle = await rlm("Review the authentication flow for security issues", name="auth-reviewer")
+print(handle.rlm_child_id, handle.name, handle.session_dir, handle.model)
 ```
 
-The TypeScript host creates a normal child `AgentSession` with an independent context and session directory. The child inherits the parent model, provider configuration, skills, tools, retry policy, and resource loader unless the call requests another configured model.
+The call returns immediately after task admission with a child handle; it never waits for or returns the child's answer. The TypeScript host creates a normal child `AgentSession` with an independent context and session directory. The child inherits the parent model, provider configuration, skills, tools, retry policy, and resource loader unless the call requests another configured model.
 
-Normal Python async patterns provide concurrency:
+Spawn independent children in separate calls and end the turn instead of awaiting completion:
 
 ```python
-import asyncio
-
-background = asyncio.create_task(
-    rlm("Run the slow integration audit", name="integration-audit")
-)
-
-api_review, test_review = await asyncio.gather(
-    rlm("Review the public API"),
-    rlm("Review the test coverage"),
-)
-
-integration_review = await background
+api_review = await rlm("Review the public API", name="api-reviewer")
+test_review = await rlm("Review the test coverage", name="test-reviewer")
+integration_audit = await rlm("Run the slow integration audit", name="integration-audit")
 ```
 
-Use direct `await rlm(...)` when the result is needed immediately, `asyncio.gather(...)` for independent fan-out, and `asyncio.create_task(...)` when the parent can continue useful work before collecting the result.
+Results arrive only through explicit `agent_message` replies or files, never as an `rlm()` return value. Children reply when an answer is needed:
 
-#### Child results and lifecycle
+```python
+await agent_message.send(message, receiver_role="parent")
+```
 
-An `RLMResult` includes the final answer, the child's token usage, assistant-turn count, selected model, session directory, and any model-fallback warning. Child usage is attributed to the parent session while remaining distinguishable in context-tree reporting.
+The parent can follow up with a retained child:
+
+```python
+await agent_message.send(
+    "Check the newly added regression test.",
+    receiver_role="child",
+    receiver_name=api_review.name,
+)
+```
+
+#### Child handles and lifecycle
+
+An admission handle contains `rlm_child_id`, `name`, `session_dir`, and `model`. Child usage is attributed to the parent session while remaining distinguishable in context-tree reporting.
 
 The parent-scoped child registry survives compaction, kernel restart, and parent restoration:
 
@@ -135,6 +140,6 @@ This keeps credentials, provider execution, transcript writes, worker routing, a
 
 ## Trust Model
 
-The IPython kernel runs model-generated Python and project commands with the worker's operating-system permissions. It is a durable control environment, not a security sandbox. Review third-party Python skills and use an external sandbox or restricted environment for untrusted repositories and instructions.
+The Python kernel runs model-generated Python and project commands with the worker's operating-system permissions. It is a durable control environment, not a security sandbox. Review third-party Python skills and use an external sandbox or restricted environment for untrusted repositories and instructions.
 
 For implementation details, see [RLM Runtime Architecture](rlm-runtime.md).

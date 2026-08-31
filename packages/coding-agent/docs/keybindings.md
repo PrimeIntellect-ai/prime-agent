@@ -98,6 +98,7 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | `app.suspend` | `ctrl+z` (none on Windows) | Suspend to background |
 | `app.editor.external` | `ctrl+g` | Open in external editor (`$VISUAL` or `$EDITOR`) |
 | `app.clipboard.pasteImage` | `ctrl+v` (`alt+v` on Windows) | Paste image from clipboard |
+| `app.clipboard.copyLoginUrl` | `c`, `alt+c` | Copy the sign-in URL from a login dialog |
 
 ### Sessions
 
@@ -113,20 +114,29 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `app.model.select` | `ctrl+l` | Open model selector |
-| `app.model.toggleScope` | `shift+tab` | Toggle between all and scoped models |
+| `app.model.toggleScope` | `alt+s` | Toggle between all and scoped models |
 | `app.thinking.toggle` | `ctrl+t` | Collapse or expand thinking blocks |
 
 ### Configuration Menu
 
-Use `tab` to cycle through Providers, Models, and MCP Connections, and `escape` to close the menu. Left and right move the cursor in the active search field.
+Use `tab` to cycle forward and `shift+tab` to cycle backward through Providers, Models, and MCP Connections. Use `escape` to close the menu. Left and right move the cursor in the active search field.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.configuration.previousTab` | `shift+tab` | Select the previous configuration tab |
 
 ### Display and Message Queue
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `app.tools.expand` | `ctrl+o` | Collapse or expand tool output |
+| `app.messages.expand` | `ctrl+p` | Collapse or expand agent-to-agent messages |
+| `app.edits.expand` | `ctrl+j` | Collapse or expand edit diffs |
 | `app.message.followUp` | `alt+enter` | Queue follow-up message |
-| `app.message.dequeue` | `alt+up` | Restore queued messages to editor |
+| `app.message.navigateOlder` | `alt+up` | Select the next older pending message |
+| `app.message.navigateNewer` | `alt+down` | Select the next newer pending message or restore the draft |
+| `app.message.moveEarlier` | `ctrl+alt+up` | Move the selected pending message one place earlier in its queue |
+| `app.message.moveLater` | `ctrl+alt+down` | Move the selected pending message one place later in its queue |
 
 ### Tree Navigation
 
@@ -174,6 +184,8 @@ Each action can have a single key or an array of keys. User config overrides def
 On native Windows, `app.suspend` has no default binding because Windows terminals do not support Unix job control. If you bind it manually, Prime Agent shows a status message instead of suspending. In WSL, the normal Linux `ctrl+z`/`fg` behavior still applies.
 
 ### Emacs Example
+
+Binding `ctrl+p` below releases the conflicting `app.messages.expand` default; shortcuts in other views keep their defaults.
 
 ```json
 {

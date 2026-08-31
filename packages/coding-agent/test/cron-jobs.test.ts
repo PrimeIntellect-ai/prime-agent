@@ -1352,21 +1352,24 @@ describe("shouldDeferHeartbeatCronJob", () => {
 				shouldDeferHeartbeatCronJob(job, {
 					isStreaming: true,
 					isBashRunning: false,
-					hasSessionInputWork: false,
+					hasPendingSessionWork: false,
+					unfinishedActionCount: 0,
 				}),
 			).toBe(true);
 			expect(
 				shouldDeferHeartbeatCronJob(job, {
 					isStreaming: false,
 					isBashRunning: true,
-					hasSessionInputWork: false,
+					hasPendingSessionWork: false,
+					unfinishedActionCount: 0,
 				}),
 			).toBe(true);
 			expect(
 				shouldDeferHeartbeatCronJob(job, {
 					isStreaming: false,
 					isBashRunning: false,
-					hasSessionInputWork: true,
+					hasPendingSessionWork: false,
+					unfinishedActionCount: 1,
 				}),
 			).toBe(true);
 		}
@@ -1383,7 +1386,8 @@ describe("shouldDeferHeartbeatCronJob", () => {
 					shouldDeferHeartbeatCronJob(job, {
 						isStreaming: true,
 						isBashRunning: false,
-						hasSessionInputWork: false,
+						hasPendingSessionWork: false,
+						unfinishedActionCount: 1,
 					}),
 				).toBe(false);
 			}
@@ -1398,21 +1402,24 @@ describe("shouldDeferHeartbeatCronJob", () => {
 				isStreaming: true,
 				isCompacting: true,
 				isBashRunning: false,
-				hasSessionInputWork: false,
+				hasPendingSessionWork: false,
+				unfinishedActionCount: 0,
 			}),
 		).toBe(true);
 		expect(
 			shouldDeferHeartbeatCronJob(job, {
 				isStreaming: false,
 				isBashRunning: true,
-				hasSessionInputWork: false,
+				hasPendingSessionWork: false,
+				unfinishedActionCount: 0,
 			}),
 		).toBe(true);
 		expect(
 			shouldDeferHeartbeatCronJob(job, {
 				isStreaming: false,
 				isBashRunning: false,
-				hasSessionInputWork: true,
+				hasPendingSessionWork: false,
+				unfinishedActionCount: 1,
 			}),
 		).toBe(true);
 		expect(
@@ -1420,15 +1427,16 @@ describe("shouldDeferHeartbeatCronJob", () => {
 				isStreaming: false,
 				isRetrying: true,
 				isBashRunning: false,
-				hasSessionInputWork: false,
+				hasPendingSessionWork: false,
+				unfinishedActionCount: 0,
 			}),
 		).toBe(true);
 		expect(
 			shouldDeferHeartbeatCronJob(job, {
-				isStreaming: false,
+				isStreaming: true,
 				isBashRunning: false,
-				hasAcceptedPromptInFlight: true,
-				hasSessionInputWork: false,
+				hasPendingSessionWork: true,
+				unfinishedActionCount: 2,
 			}),
 		).toBe(true);
 	});
@@ -1437,7 +1445,7 @@ describe("shouldDeferHeartbeatCronJob", () => {
 		expect(
 			shouldDeferHeartbeatCronJob(
 				{ ...baseJob, source: "heartbeat" },
-				{ isStreaming: false, isBashRunning: false, hasSessionInputWork: false },
+				{ isStreaming: false, isBashRunning: false, hasPendingSessionWork: false, unfinishedActionCount: 0 },
 			),
 		).toBe(false);
 	});
@@ -1446,7 +1454,7 @@ describe("shouldDeferHeartbeatCronJob", () => {
 		expect(
 			shouldDeferHeartbeatCronJob(
 				{ ...baseJob, source: "cron" },
-				{ isStreaming: true, isBashRunning: true, hasSessionInputWork: true },
+				{ isStreaming: true, isBashRunning: true, hasPendingSessionWork: true, unfinishedActionCount: 2 },
 			),
 		).toBe(false);
 	});

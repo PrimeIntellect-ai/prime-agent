@@ -1,16 +1,15 @@
-/** SGR mouse event parsing (CSI < button ; x ; y M/m). */
-
 export interface MouseEvent {
-	/** Base button code with modifier/motion bits stripped (wheel: 64 up, 65 down). */
+	/** Base SGR button code with modifier and motion bits removed; wheel up/down are 64/65. */
 	button: number;
-	/** 1-based column. */
+	/** One-based terminal column. */
 	x: number;
-	/** 1-based row. */
+	/** One-based terminal row. */
 	y: number;
-	/** True for press/wheel/drag ("M"), false for release ("m"). */
+	/** True for SGR `M` reports (press, wheel, or drag), false for release `m`. */
 	press: boolean;
-	/** True for drag/motion reports (bit 32). */
+	/** Whether the SGR motion bit is set. */
 	motion: boolean;
+	/** Modifier bits carried by the SGR report. */
 	shift: boolean;
 	alt: boolean;
 	ctrl: boolean;
@@ -26,7 +25,6 @@ const MODIFIER_ALT = 8;
 const MODIFIER_CTRL = 16;
 const MOTION_BIT = 32;
 
-/** True for any mouse report (SGR or legacy), parseable or not. */
 export function isMouseSequence(sequence: string): boolean {
 	return sequence.startsWith("\x1b[<") || sequence.startsWith("\x1b[M");
 }

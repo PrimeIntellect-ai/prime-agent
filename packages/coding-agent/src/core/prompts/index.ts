@@ -1,1 +1,7 @@
-export { buildRlmPrompt, buildSubagentGuidance, type RlmPromptOptions } from "./rlm.js";
+export {
+	buildChildAgentDoctrine,
+	buildRlmPrompt,
+	buildSubagentGuidance,
+	type ChildAgentDoctrineOptions,
+	type RlmPromptOptions,
+} from "./rlm.js";

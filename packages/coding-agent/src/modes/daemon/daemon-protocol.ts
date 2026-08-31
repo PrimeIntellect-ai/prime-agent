@@ -5,6 +5,7 @@ import type {
 	AgentSessionMessageReceipt,
 	AgentSessionMessageSafetyStatus,
 } from "../../core/agent-messages.js";
+import type { SessionActionRecoverySnapshot } from "../../core/agent-session.js";
 import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import type { AgentSessionRuntimeMetadata } from "../../core/agent-session-runtime.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
@@ -16,7 +17,9 @@ import type {
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
 import type { InputSource } from "../../core/extensions/types.js";
+import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { CustomMessage } from "../../core/messages.js";
+import type { QueuedMessageLane, QueuedMessageMutation } from "../../core/session-action-store.js";
 import type { SessionCwdIssue } from "../../core/session-cwd.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import type {
@@ -48,12 +51,24 @@ import type { SessionSummary } from "./daemon-session-list.js";
  */
 
 export const DAEMON_PROTOCOL_NAME = "prime-agent.daemon";
-export const DAEMON_PROTOCOL_VERSION = 6;
-export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 2;
-// Revision 6 combines prompt-admission cancellation with side-question transcripts and transient bash.
-// Revision 7 makes get_session_tree return flatNodes instead of a recursively nested tree.
-export const DAEMON_SCHEMA_REVISION = 7;
-export const DAEMON_SCHEMA_ID = "protocol-6-schema-7-48a562b9bffe";
+export const DAEMON_PROTOCOL_VERSION = 7;
+export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
+// Revision 9 publishes persisted RLM spawn depth on passive session rows.
+// Revision 10 publishes persisted RLM spawn depth on all session catalog rows.
+// Revision 11 adds immediate get/set commands for active-session RLM max depth.
+// Revision 12 publishes idle-residency metadata on session summary rows.
+// Revision 13 narrows agent-origin reach and roster wire shapes to the nuclear family.
+// Revision 14 carries the client's monotonic telemetry opt-out on attach and reattach.
+// Revision 15 adds the mutate_queued_message command and queue_message_mutation capability.
+// Revision 16 adds the "stopping" workerState and stops reporting disconnected workers as "ready".
+// Revision 17 gates authoritative child rosters and transient owned-session recovery context.
+// Revision 18 adds the opt-in RLM quiescence barrier to headless completion.
+// Revision 19 adds daemon-held session input pauses.
+// Revision 20 lets cancellation target a prompt the session owns but has not started.
+// Revision 21 adds capability-gated, session-scoped ACP MCP server replacement.
+// Revision 23 lets workers query the supervisor agent roster on demand.
+export const DAEMON_SCHEMA_REVISION = 23;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-23-649fe649d15e";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -78,6 +93,7 @@ export interface DaemonPromptAdmissionCancellationResult {
 }
 export type DaemonServerCapability =
 	| DaemonClientCapability
+	| "delete_rlm_subagent"
 	| "heartbeat_catalog"
 	| "heartbeat_management"
 	| "model_catalog"
@@ -90,7 +106,14 @@ export type DaemonServerCapability =
 	// identity). Clients must check before sending.
 	| "transient_bash"
 	| "session_input_admission"
-	| "prompt_admission_cancellation";
+	| "prompt_admission_cancellation"
+	| "queue_message_mutation"
+	| "authoritative_child_roster"
+	| "owned_session_recovery_context"
+	| "rlm_quiescence_barrier"
+	| "session_input_pause"
+	| "owned_prompt_cancellation"
+	| "acp_mcp_servers";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -120,6 +143,7 @@ export const DAEMON_SUPPORTED_CLIENT_CAPABILITIES: readonly DaemonClientCapabili
 
 export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
 	...DAEMON_SUPPORTED_CLIENT_CAPABILITIES,
+	"delete_rlm_subagent",
 	"heartbeat_catalog",
 	"heartbeat_management",
 	"model_catalog",
@@ -127,6 +151,13 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"transient_bash",
 	"session_input_admission",
 	"prompt_admission_cancellation",
+	"owned_prompt_cancellation",
+	"queue_message_mutation",
+	"authoritative_child_roster",
+	"owned_session_recovery_context",
+	"rlm_quiescence_barrier",
+	"session_input_pause",
+	"acp_mcp_servers",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -144,6 +175,10 @@ export interface DaemonAttachClientMetadata {
 	clientId?: DaemonClientId;
 	capabilities?: readonly DaemonClientCapability[];
 	resumeCursor?: DaemonResumeCursor;
+	/** Opt-out-only policy. A telemetry-enabled worker must reject this attach. */
+	telemetryDisabled?: true;
+	/** Fresh owner-supplied runtime context for recovering a client-owned worker. Never persisted. */
+	recoveryConfig?: AgentSessionRuntimeConfig;
 }
 
 /**
@@ -290,25 +325,11 @@ export interface DaemonAttachResult {
 	};
 }
 
-export interface DaemonUpdateRestartQueuedMessage {
-	message: string;
-	content?: (TextContent | ImageContent)[];
-	images?: ImageContent[];
-	queueKey?: string;
-	agentMessageId?: string;
-	customMessage?: CustomMessage;
-	prefixMessages?: CustomMessage[];
-}
-
-export interface DaemonUpdateRestartAcceptedPrompt extends DaemonUpdateRestartQueuedMessage {
-	nextTurn: CustomMessage[];
-}
+export const DAEMON_UPDATE_RESTART_FORMAT_VERSION = 1;
 
 export interface DaemonUpdateRestartQueue {
-	steering: DaemonUpdateRestartQueuedMessage[];
-	followUp: DaemonUpdateRestartQueuedMessage[];
+	actions: SessionActionRecoverySnapshot;
 	nextTurn: CustomMessage[];
-	acceptedPrompt?: DaemonUpdateRestartAcceptedPrompt;
 }
 
 export interface DaemonUpdateRestartSession {
@@ -330,6 +351,7 @@ export interface DaemonUpdateRestartSession {
 }
 
 export interface DaemonUpdateRestartManifest {
+	formatVersion: typeof DAEMON_UPDATE_RESTART_FORMAT_VERSION;
 	createdAt: string;
 	sessions: DaemonUpdateRestartSession[];
 	discardedActiveSessionIds?: string[];
@@ -355,6 +377,7 @@ export type DaemonCommand =
 			includeClientOwned?: boolean;
 	  }
 	| DaemonSavedSessionListCommand
+	| { id?: string; type: "list_agent_peers"; workerToken: string }
 	| ({
 			id?: string;
 			type: "create";
@@ -413,6 +436,8 @@ export type DaemonCommand =
 			type: "cancel_prompt_admission";
 			activeSessionId: string;
 			admissionId: string;
+			/** Cancel session-owned work too when it has not started delivery. */
+			cancelOwned?: boolean;
 	  }
 	| {
 			id?: string;
@@ -455,6 +480,7 @@ export type DaemonCommand =
 			prefixMessages?: CustomMessage[];
 	  }
 	| { id?: string; type: "restore_next_turn"; activeSessionId: string; messages: CustomMessage[] }
+	| { id?: string; type: "restore_actions"; activeSessionId: string; snapshot: SessionActionRecoverySnapshot }
 	| {
 			id?: string;
 			type: "append_custom_message";
@@ -468,6 +494,8 @@ export type DaemonCommand =
 			targetActiveSessionId: string;
 			message: string;
 			fromActiveSessionId?: string;
+			/** Internal worker-origin marker; public clients remain unrestricted. */
+			agentOrigin?: boolean;
 			deliveryMode?: AgentSessionMessageDeliveryMode;
 	  }
 	| { id?: string; type: "agent_messages_status"; activeSessionId?: string }
@@ -495,21 +523,46 @@ export type DaemonCommand =
 	  }
 	| { id?: string; type: "abort_bash"; activeSessionId: string }
 	| { id?: string; type: "cancel_rlm_child"; activeSessionId: string; childId: string }
+	| { id?: string; type: "delete_rlm_subagent"; activeSessionId: string; childId: string }
 	| { id?: string; type: "wait_for_idle"; activeSessionId: string }
-	| { id?: string; type: "wait_for_headless_completion"; activeSessionId: string }
+	| {
+			id?: string;
+			type: "wait_for_headless_completion";
+			activeSessionId: string;
+			waitForRlmQuiescence?: boolean;
+	  }
 	| { id?: string; type: "get_session_header"; activeSessionId: string }
 	| { id?: string; type: "get_state"; activeSessionId: string }
 	| { id?: string; type: "get_connection_state"; activeSessionId: string }
 	| { id?: string; type: "get_messages"; activeSessionId: string }
+	| { id?: string; type: "get_rlm_children"; activeSessionId: string }
 	| { id?: string; type: "get_session_stats"; activeSessionId: string }
 	| { id?: string; type: "get_context_tree"; activeSessionId: string }
 	| { id?: string; type: "get_commands"; activeSessionId: string }
 	| { id?: string; type: "get_resource_snapshot"; activeSessionId: string }
+	| {
+			id?: string;
+			type: "replace_acp_mcp_servers";
+			activeSessionId: string;
+			ownerId: string;
+			servers: AcpMcpServerConfig[];
+	  }
 	| { id?: string; type: "get_model_catalog"; activeSessionId: string }
 	| { id?: string; type: "get_available_models"; activeSessionId: string }
 	| { id?: string; type: "get_queue"; activeSessionId: string }
+	| {
+			id?: string;
+			type: "mutate_queued_message";
+			activeSessionId: string;
+			lane: QueuedMessageLane;
+			index: number;
+			expectedText: string;
+			mutation: QueuedMessageMutation;
+	  }
 	| { id?: string; type: "clear_queue"; activeSessionId: string }
 	| { id?: string; type: "abort_and_clear_queue"; activeSessionId: string }
+	| { id?: string; type: "acquire_session_input_pause"; activeSessionId: string; leaseKey: string }
+	| { id?: string; type: "release_session_input_pause"; activeSessionId: string; pauseId: string }
 	| { id?: string; type: "cron_list"; activeSessionId?: string; includeInactive?: boolean }
 	| { id?: string; type: "heartbeats_list"; activeSessionId?: string }
 	| {
@@ -580,7 +633,9 @@ export type DaemonCommand =
 	| { id?: string; type: "import_jsonl"; activeSessionId: string; inputPath: string; cwdOverride?: string }
 	| { id?: string; type: "export_html"; activeSessionId: string; outputPath?: string }
 	| { id?: string; type: "export_jsonl"; activeSessionId: string; outputPath?: string }
-	| { id?: string; type: "set_session_name"; activeSessionId: string; name: string }
+	| { id?: string; type: "set_session_name"; activeSessionId: string; name: string; workerToken?: string }
+	| { id?: string; type: "get_rlm_max_depth_status"; activeSessionId: string }
+	| { id?: string; type: "set_rlm_max_depth"; activeSessionId: string; maxDepth: number; global?: boolean }
 	| { id?: string; type: "rename_saved_session"; activeSessionId?: string; sessionPath: string; name: string }
 	| { id?: string; type: "delete_saved_session"; activeSessionId?: string; sessionPath: string }
 	| { id?: string; type: "get_session_context"; activeSessionId: string }
@@ -611,27 +666,60 @@ export interface DaemonCommandCompatibility {
 	capability?: DaemonServerCapability;
 }
 
-const LEGACY_DAEMON_COMMAND = { minProtocol: 1 } as const;
-const CURRENT_DAEMON_COMMAND = { minProtocol: 4 } as const;
+const LEGACY_DAEMON_COMMAND = { minProtocol: 7 } as const;
+const CURRENT_DAEMON_COMMAND = { minProtocol: 7 } as const;
+const RLM_MAX_DEPTH_COMMAND = { minProtocol: 7, minSchemaRevision: 11 } as const;
 const SESSION_INPUT_ADMISSION_COMMAND = {
-	minProtocol: 4,
+	minProtocol: 7,
 	capability: "session_input_admission",
 } as const;
 const PROMPT_ADMISSION_CANCELLATION_COMMAND = {
-	minProtocol: 5,
-	minSchemaRevision: 6,
+	minProtocol: 7,
+	minSchemaRevision: 8,
 	capability: "prompt_admission_cancellation",
 } as const;
+const OWNED_PROMPT_CANCELLATION_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 20,
+	capability: "owned_prompt_cancellation",
+} as const;
 const CLIENT_OWNED_DAEMON_COMMAND = {
-	minProtocol: 4,
+	minProtocol: 7,
 	capability: "client_owned_sessions",
 } as const;
-const FLAT_SESSION_TREE_COMMAND = { minProtocol: 6 } as const;
+const DELETE_RLM_SUBAGENT_COMMAND = {
+	minProtocol: 7,
+	capability: "delete_rlm_subagent",
+} as const;
+const FLAT_SESSION_TREE_COMMAND = { minProtocol: 7 } as const;
+const TELEMETRY_POLICY_COMMAND = { minProtocol: 7, minSchemaRevision: 14 } as const;
+const AUTHORITATIVE_CHILD_ROSTER_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 17,
+	capability: "authoritative_child_roster",
+} as const;
+const OWNED_SESSION_RECOVERY_CONTEXT = {
+	minProtocol: 7,
+	minSchemaRevision: 17,
+	capability: "owned_session_recovery_context",
+} as const;
+const RLM_QUIESCENCE_BARRIER_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 18,
+	capability: "rlm_quiescence_barrier",
+} as const;
+const SESSION_INPUT_PAUSE_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 19,
+	capability: "session_input_pause",
+} as const;
+const AGENT_PEER_LIST_COMMAND = { minProtocol: 7, minSchemaRevision: 23 } as const;
 
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
 	list: LEGACY_DAEMON_COMMAND,
 	list_saved_sessions: LEGACY_DAEMON_COMMAND,
+	list_agent_peers: AGENT_PEER_LIST_COMMAND,
 	create: LEGACY_DAEMON_COMMAND,
 	attach: LEGACY_DAEMON_COMMAND,
 	reattach: LEGACY_DAEMON_COMMAND,
@@ -646,6 +734,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	steer: SESSION_INPUT_ADMISSION_COMMAND,
 	follow_up: SESSION_INPUT_ADMISSION_COMMAND,
 	restore_next_turn: LEGACY_DAEMON_COMMAND,
+	restore_actions: LEGACY_DAEMON_COMMAND,
 	append_custom_message: LEGACY_DAEMON_COMMAND,
 	resume_queue: SESSION_INPUT_ADMISSION_COMMAND,
 	send_message: LEGACY_DAEMON_COMMAND,
@@ -659,24 +748,30 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	execute_bash: LEGACY_DAEMON_COMMAND,
 	abort_bash: LEGACY_DAEMON_COMMAND,
 	cancel_rlm_child: LEGACY_DAEMON_COMMAND,
+	delete_rlm_subagent: DELETE_RLM_SUBAGENT_COMMAND,
 	wait_for_idle: LEGACY_DAEMON_COMMAND,
 	wait_for_headless_completion: CURRENT_DAEMON_COMMAND,
 	get_session_header: CURRENT_DAEMON_COMMAND,
 	get_state: LEGACY_DAEMON_COMMAND,
 	get_connection_state: LEGACY_DAEMON_COMMAND,
 	get_messages: LEGACY_DAEMON_COMMAND,
+	get_rlm_children: AUTHORITATIVE_CHILD_ROSTER_COMMAND,
 	get_session_stats: LEGACY_DAEMON_COMMAND,
 	get_context_tree: LEGACY_DAEMON_COMMAND,
 	get_commands: LEGACY_DAEMON_COMMAND,
 	get_resource_snapshot: LEGACY_DAEMON_COMMAND,
-	get_model_catalog: { minProtocol: 4, capability: "model_catalog" },
+	replace_acp_mcp_servers: { minProtocol: 7, minSchemaRevision: 22, capability: "acp_mcp_servers" },
+	get_model_catalog: { minProtocol: 7, capability: "model_catalog" },
 	get_available_models: LEGACY_DAEMON_COMMAND,
 	get_queue: LEGACY_DAEMON_COMMAND,
+	mutate_queued_message: { minProtocol: 7, minSchemaRevision: 15, capability: "queue_message_mutation" },
 	clear_queue: LEGACY_DAEMON_COMMAND,
 	abort_and_clear_queue: LEGACY_DAEMON_COMMAND,
+	acquire_session_input_pause: SESSION_INPUT_PAUSE_COMMAND,
+	release_session_input_pause: SESSION_INPUT_PAUSE_COMMAND,
 	cron_list: LEGACY_DAEMON_COMMAND,
-	heartbeats_list: { minProtocol: 3, capability: "heartbeat_catalog" },
-	heartbeat_manage: { minProtocol: 3, capability: "heartbeat_management" },
+	heartbeats_list: { minProtocol: 7, capability: "heartbeat_catalog" },
+	heartbeat_manage: { minProtocol: 7, capability: "heartbeat_management" },
 	cron_add: LEGACY_DAEMON_COMMAND,
 	cron_cancel: LEGACY_DAEMON_COMMAND,
 	heartbeat_get: LEGACY_DAEMON_COMMAND,
@@ -708,6 +803,8 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	export_html: LEGACY_DAEMON_COMMAND,
 	export_jsonl: LEGACY_DAEMON_COMMAND,
 	set_session_name: LEGACY_DAEMON_COMMAND,
+	get_rlm_max_depth_status: RLM_MAX_DEPTH_COMMAND,
+	set_rlm_max_depth: RLM_MAX_DEPTH_COMMAND,
 	rename_saved_session: LEGACY_DAEMON_COMMAND,
 	delete_saved_session: LEGACY_DAEMON_COMMAND,
 	get_session_context: LEGACY_DAEMON_COMMAND,
@@ -725,11 +822,24 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 } as const satisfies Record<DaemonCommandName, DaemonCommandCompatibility>;
 
 export function getDaemonCommandCompatibilities(command: DaemonCommand): readonly DaemonCommandCompatibility[] {
-	const compatibility = DAEMON_COMMAND_COMPATIBILITY[command.type];
-	if ((command.type === "prompt" || command.type === "prompt_and_wait") && command.admissionId !== undefined) {
-		return [PROMPT_ADMISSION_CANCELLATION_COMMAND, compatibility];
+	const requirements: DaemonCommandCompatibility[] = [];
+	if ((command.type === "attach" || command.type === "reattach") && command.recoveryConfig !== undefined) {
+		requirements.push(OWNED_SESSION_RECOVERY_CONTEXT);
 	}
-	return [compatibility];
+	const carriesTelemetryPolicy =
+		((command.type === "attach" || command.type === "reattach") && command.telemetryDisabled !== undefined) ||
+		(command.type === "create" && command.config?.telemetryDisabled !== undefined);
+	if (carriesTelemetryPolicy) requirements.push(TELEMETRY_POLICY_COMMAND);
+	if ((command.type === "prompt" || command.type === "prompt_and_wait") && command.admissionId !== undefined) {
+		requirements.push(PROMPT_ADMISSION_CANCELLATION_COMMAND);
+	}
+	if (command.type === "wait_for_headless_completion" && command.waitForRlmQuiescence === true) {
+		requirements.push(RLM_QUIESCENCE_BARRIER_COMMAND);
+	}
+	if (command.type === "cancel_prompt_admission" && command.cancelOwned === true) {
+		requirements.push(OWNED_PROMPT_CANCELLATION_COMMAND);
+	}
+	return [...requirements, DAEMON_COMMAND_COMPATIBILITY[command.type]];
 }
 
 export type DaemonResponse =
@@ -790,6 +900,7 @@ export interface DaemonSavedSessionInfo {
 	name?: string;
 	state?: AgentConnectionSavedSessionState;
 	parentSessionPath?: string;
+	rlmDepth?: number;
 	created: string;
 	modified: string;
 	messageCount: number;
@@ -919,7 +1030,7 @@ export const DAEMON_OUTBOUND_COMPATIBILITY = {
 	session_list_item: LEGACY_DAEMON_COMMAND,
 	daemon_hello: LEGACY_DAEMON_COMMAND,
 	daemon_closing: LEGACY_DAEMON_COMMAND,
-	heartbeats_changed: { minProtocol: 3, capability: "heartbeat_catalog" },
+	heartbeats_changed: { minProtocol: 7, capability: "heartbeat_catalog" },
 	session_event: LEGACY_DAEMON_COMMAND,
 	side_question_event: LEGACY_DAEMON_COMMAND,
 	session_status: LEGACY_DAEMON_COMMAND,
@@ -975,10 +1086,30 @@ export function isDaemonCommandEnvelope(value: unknown): value is DaemonCommandE
 	);
 }
 
+/**
+ * Best-effort id salvage for rejected command lines, so parse failures reach
+ * the sender as correlatable responses instead of client-side timeouts.
+ * Deliberately ignores everything but the id itself: whatever made the line
+ * unparseable (rejected protocol version, missing or invalid type), the
+ * sender still correlates the failure by id.
+ */
+export function salvageDaemonCommandId(line: string): string | undefined {
+	try {
+		const candidate = JSON.parse(line) as { id?: unknown };
+		if (!candidate || typeof candidate !== "object") {
+			return undefined;
+		}
+		return typeof candidate.id === "string" ? candidate.id : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"ack_result",
 	"list",
 	"list_saved_sessions",
+	"list_agent_peers",
 	"attach",
 	"reattach",
 	"agent_messages_status",
@@ -987,6 +1118,7 @@ const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"get_state",
 	"get_connection_state",
 	"get_messages",
+	"get_rlm_children",
 	"get_session_stats",
 	"get_context_tree",
 	"get_commands",
@@ -1002,6 +1134,7 @@ const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"get_user_messages_for_forking",
 	"get_last_assistant_text",
 	"get_system_prompt",
+	"get_rlm_max_depth_status",
 	"get_tool_definition",
 ]);
 

@@ -328,15 +328,6 @@ export class DaemonClient {
 		);
 	}
 
-	/** One-release compatibility path for preparing and stopping a v1 daemon. */
-	async requestLegacy(
-		command: DaemonCommandBody,
-		timeoutMs = 30000,
-		options: DaemonClientRequestOptions = {},
-	): Promise<DaemonResponse> {
-		return this.requestWire(command, timeoutMs, options);
-	}
-
 	async authenticateWorker(token: string, timeoutMs = 3000): Promise<void> {
 		const legacyAuthentication = { type: "worker_auth", token } as DaemonWorkerCommandBody;
 		const response = await this.requestWire(legacyAuthentication, timeoutMs);

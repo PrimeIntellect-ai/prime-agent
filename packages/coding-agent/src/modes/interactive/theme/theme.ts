@@ -188,6 +188,10 @@ type ColorMode = "truecolor" | "256color";
 const ADAPTIVE_LIGHT_BG_ACCENT: Rgb = { r: 0, g: 95, b: 135 };
 const SURFACE_MIN_LUMINANCE_DELTA = 12;
 const SURFACE_CONTRAST_ALPHA = 0.08;
+// Selection rows must stand out clearly, much more than passive surfaces.
+const SELECTION_MIN_LUMINANCE_DELTA = 28;
+const SELECTION_MAX_BLEND_ALPHA = 0.5;
+const SELECTION_BLEND_STEP = 0.05;
 const BLACK: Rgb = { r: 0, g: 0, b: 0 };
 const WHITE: Rgb = { r: 255, g: 255, b: 255 };
 const CUBE_VALUES = [0, 95, 135, 175, 215, 255] as const;
@@ -418,6 +422,80 @@ export class Theme {
 
 	getPopupBackgroundColor(): (str: string) => string {
 		return this.surfaceBackgroundColor("toolPanelBg");
+	}
+
+	getSelectionBackgroundColor(): (str: string) => string {
+		const terminalBg = getDefaultTerminalColors()?.background;
+		const selectedBgValue = this.bgColorValues.get("selectedBg");
+		// Basic ANSI colors (0-15) are terminal-defined; their rendered color is
+		// unknown, so no reliable contrast computation (or blend base) exists.
+		if (!terminalBg || (typeof selectedBgValue === "number" && selectedBgValue < 16)) {
+			return (str: string) => this.bg("selectedBg", str);
+		}
+		// An empty selectedBg renders as the terminal background itself; blend
+		// from there so the selection still gets an explicit contrasting color.
+		const selectionRgb = colorValueToRgb(selectedBgValue) ?? terminalBg;
+
+		// Compare against what actually renders: on 256-color terminals the
+		// palette quantization can erase the contrast of the configured value,
+		// and gives the blends a quantized baseline to beat.
+		const terminalLuminance = luminance(terminalBg);
+		const renderedSelection = colorValueToRgb(bestAnsiColor(selectionRgb, this.mode)) ?? selectionRgb;
+		const selectionLuminance = luminance(renderedSelection);
+		const delta = Math.abs(selectionLuminance - terminalLuminance);
+		if (delta >= SELECTION_MIN_LUMINANCE_DELTA) {
+			return (str: string) => this.bg("selectedBg", str);
+		}
+
+		// Blend away from the terminal background toward the endpoint on the
+		// selection's side of it. When that direction cannot reach the minimum
+		// delta (e.g. the selection already sits at the endpoint), fall back to
+		// the opposite endpoint, which requires crossing the background.
+		const endpoints = selectionLuminance >= terminalLuminance ? [WHITE, BLACK] : [BLACK, WHITE];
+		let bestColor: string | number | undefined;
+		let bestDelta = delta;
+		for (const top of endpoints) {
+			const spread = luminance(top) - selectionLuminance;
+			if (spread === 0) {
+				continue;
+			}
+			const targetLuminance = terminalLuminance + Math.sign(spread) * SELECTION_MIN_LUMINANCE_DELTA;
+			const baseAlpha = Math.min(SELECTION_MAX_BLEND_ALPHA, (targetLuminance - selectionLuminance) / spread);
+			// Quantize before evaluating: on 256-color terminals the palette
+			// rounding can otherwise erase the delta the blend was chosen for.
+			// If the direct hit undershoots, keep stepping toward the cap —
+			// a stronger blend may quantize to a palette color that passes.
+			const alphas: number[] = [];
+			for (let alpha = baseAlpha; alpha < SELECTION_MAX_BLEND_ALPHA; alpha += SELECTION_BLEND_STEP) {
+				alphas.push(alpha);
+			}
+			alphas.push(SELECTION_MAX_BLEND_ALPHA);
+			for (const alpha of alphas) {
+				const adjustedColor = bestAnsiColor(blendColor(top, selectionRgb, alpha), this.mode);
+				const adjustedRgb = colorValueToRgb(adjustedColor);
+				if (adjustedColor === "" || !adjustedRgb) {
+					continue;
+				}
+				const resultDelta = Math.abs(luminance(adjustedRgb) - terminalLuminance);
+				if (resultDelta >= SELECTION_MIN_LUMINANCE_DELTA - 1) {
+					bestColor = adjustedColor;
+					bestDelta = resultDelta;
+					break;
+				}
+				if (resultDelta > bestDelta) {
+					bestColor = adjustedColor;
+					bestDelta = resultDelta;
+				}
+			}
+			if (bestColor !== undefined && bestDelta >= SELECTION_MIN_LUMINANCE_DELTA - 1) {
+				break;
+			}
+		}
+		if (bestColor === undefined) {
+			return (str: string) => this.bg("selectedBg", str);
+		}
+		const ansi = bgAnsi(bestColor, this.mode);
+		return (str: string) => `${ansi}${str}\x1b[49m`;
 	}
 
 	private surfaceBackgroundColor(color: ThemeBg): (str: string) => string {

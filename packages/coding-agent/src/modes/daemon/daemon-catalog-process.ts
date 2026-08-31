@@ -56,6 +56,17 @@ function deserializeSessionInfo(session: SessionInfoWire): SessionInfo {
 	};
 }
 
+export function resolveCatalogSessionMatch(
+	sessions: readonly SessionInfo[],
+	selector: string,
+): SessionInfo | undefined {
+	const matches = sessions.filter((session) => session.id.startsWith(selector) || session.name === selector);
+	if (matches.length > 1) {
+		throw new Error(`Ambiguous session selector "${selector}"`);
+	}
+	return matches[0];
+}
+
 function isCatalogOutbound(value: unknown): value is CatalogOutbound {
 	if (!value || typeof value !== "object") {
 		return false;
@@ -130,35 +141,31 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 				return;
 			}
 			case "resolve": {
-				const localMatches = (await SessionManager.list(request.cwd, request.sessionDir)).filter((session) =>
-					session.id.startsWith(request.selector),
+				const localMatch = resolveCatalogSessionMatch(
+					await SessionManager.list(request.cwd, request.sessionDir),
+					request.selector,
 				);
-				if (localMatches.length === 1) {
+				if (localMatch) {
 					sendCatalogMessage({
 						type: "response",
 						id: request.id,
 						success: true,
-						data: { sessionPath: localMatches[0]!.path },
+						data: { sessionPath: localMatch.path },
 					});
 					return;
 				}
-				if (localMatches.length > 1) {
-					throw new Error(`Ambiguous session selector "${request.selector}"`);
-				}
-				const globalMatches = (await SessionManager.listAll(undefined, request.sessionDir)).filter((session) =>
-					session.id.startsWith(request.selector),
+				const globalMatch = resolveCatalogSessionMatch(
+					await SessionManager.listAll(undefined, request.sessionDir),
+					request.selector,
 				);
-				if (globalMatches.length === 1) {
+				if (globalMatch) {
 					sendCatalogMessage({
 						type: "response",
 						id: request.id,
 						success: true,
-						data: { sessionPath: globalMatches[0]!.path },
+						data: { sessionPath: globalMatch.path },
 					});
 					return;
-				}
-				if (globalMatches.length > 1) {
-					throw new Error(`Ambiguous session selector "${request.selector}"`);
 				}
 				throw new Error(`No session found matching '${request.selector}'`);
 			}

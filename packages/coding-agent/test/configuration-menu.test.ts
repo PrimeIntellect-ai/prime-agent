@@ -110,12 +110,12 @@ describe("ConfigurationMenuComponent", () => {
 		expect(output).not.toContain("Anthropic");
 	});
 
-	it("switches tabs with Tab and preserves focus and search state", async () => {
+	it("switches tabs with Tab and Shift+Tab while preserving focus and search state", async () => {
 		const menu = await createMenu();
 		menu.focused = true;
 		const lines = stripAnsi(menu.render(120).join("\n")).split("\n");
 		const tabsLine = lines.findIndex((line) => line.includes("[▶ Providers]"));
-		const shortcutsLine = lines.findIndex((line) => line.includes("Tab switch tabs"));
+		const shortcutsLine = lines.findIndex((line) => line.includes("Tab/Shift+Tab switch tabs"));
 		expect(shortcutsLine).toBeGreaterThan(tabsLine);
 		expect(lines[shortcutsLine]).toContain("Esc close");
 
@@ -129,6 +129,12 @@ describe("ConfigurationMenuComponent", () => {
 		expect(menu.getSearchValue("models")).toBe("f");
 		menu.handleInput("\t");
 		expect(menu.getActiveTab()).toBe("providers");
+
+		menu.handleInput("\x1b[Z");
+		expect(menu.getActiveTab()).toBe("mcp-connections");
+		menu.handleInput("\x1b[Z");
+		expect(menu.getActiveTab()).toBe("models");
+		expect(menu.getSearchValue("models")).toBe("f");
 	});
 
 	it("keeps the existing catalog while syncing a post-login current model", async () => {

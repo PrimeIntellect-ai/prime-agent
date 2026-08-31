@@ -126,11 +126,12 @@ class HarnessStateTest(unittest.TestCase):
                 "Call contract: installed Python skills use await <skill_import>(...)",
                 reloaded.overview(),
             )
-            self.assertIn("await rlm('sub-task')", reloaded.overview())
-            self.assertIn(
-                "asyncio.gather(rlm('task1'), rlm('task2'))",
-                reloaded.overview(),
-            )
+            overview = reloaded.overview()
+            self.assertIn("handle = await rlm('sub-task')", overview)
+            self.assertIn("never the child's answer", overview)
+            self.assertIn("receiver_role='parent'", overview)
+            self.assertIn("await rlm.list_subagents()", overview)
+            self.assertIn("receiver_role='child'", overview)
             self.assertIn("refinements: 1", reloaded.overview())
 
     def test_load_ignores_unknown_json_keys(self) -> None:

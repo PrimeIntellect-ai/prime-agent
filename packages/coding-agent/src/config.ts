@@ -16,6 +16,7 @@ import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
+import { normalizeSocketPath } from "./utils/daemon-socket-path.js";
 
 // =============================================================================
 // Package Detection
@@ -41,7 +42,7 @@ export const SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE = 75;
 // Install Method Detection
 // =============================================================================
 
-export type InstallMethod = "bun-binary" | "npm" | "pnpm" | "yarn" | "bun" | "unknown";
+export type InstallMethod = "bun-binary" | "homebrew" | "npm" | "pnpm" | "yarn" | "bun" | "unknown";
 
 interface SelfUpdateCommandStep {
 	command: string;
@@ -85,6 +86,9 @@ export function detectInstallMethod(): InstallMethod {
 	if (isBunBinary) {
 		return "bun-binary";
 	}
+	if (isHomebrewInstall()) {
+		return "homebrew";
+	}
 
 	const resolvedPath = `${__dirname}\0${process.execPath || ""}`.toLowerCase().replace(/\\/g, "/");
 
@@ -102,6 +106,11 @@ export function detectInstallMethod(): InstallMethod {
 	}
 
 	return "unknown";
+}
+
+function isHomebrewInstall(): boolean {
+	const packageDir = getPackageDir().toLowerCase().replace(/\\/g, "/");
+	return packageDir.includes("/cellar/") && packageDir.includes("/libexec/lib/node_modules/");
 }
 
 function getInferredNpmInstall(): { root: string; prefix: string } | undefined {
@@ -151,6 +160,7 @@ function getSelfUpdateCommandForMethod(
 	const uninstallAfterInstall = isDirectPackageArtifactSpec(updateSpec);
 	switch (method) {
 		case "bun-binary":
+		case "homebrew":
 			return undefined;
 		case "pnpm":
 			return makeSelfUpdateCommand(
@@ -248,6 +258,7 @@ function getGlobalPackageRoots(method: InstallMethod, _packageName: string, npmC
 			return roots;
 		}
 		case "bun-binary":
+		case "homebrew":
 		case "unknown":
 			return [];
 	}
@@ -318,6 +329,9 @@ export function getSelfUpdateUnavailableInstruction(
 	const method = detectInstallMethod();
 	if (method === "bun-binary") {
 		return `Download from: https://github.com/PrimeIntellect-ai/prime-agent/releases/latest`;
+	}
+	if (method === "homebrew") {
+		return `Update with: brew upgrade ${APP_NAME}`;
 	}
 	const command = getSelfUpdateCommandForMethod(method, packageName, updateSpec, npmCommand, updatePackageName);
 	if (command) {
@@ -409,19 +423,9 @@ export function getPackageJsonPath(): string {
 	return join(getPackageDir(), "package.json");
 }
 
-/** Get path to README.md */
-export function getReadmePath(): string {
-	return resolve(join(getPackageDir(), "README.md"));
-}
-
 /** Get path to docs directory */
 export function getDocsPath(): string {
 	return resolve(join(getPackageDir(), "docs"));
-}
-
-/** Get path to examples directory */
-export function getExamplesPath(): string {
-	return resolve(join(getPackageDir(), "examples"));
 }
 
 /** Get path to CHANGELOG.md */
@@ -556,12 +560,13 @@ export function getAgentLogPath(): string {
  * daemon.sock in different dirs) don't interleave into one file.
  */
 export function getDaemonLogPath(socketPath: string): string {
-	const hash = createHash("sha256").update(socketPath).digest("hex").slice(0, 8);
-	return join(getLogsDir(), `${basename(socketPath)}.${hash}.log`);
+	const normalized = normalizeSocketPath(socketPath);
+	const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 8);
+	return join(getLogsDir(), `${basename(normalized)}.${hash}.log`);
 }
 
 export function getDaemonUpdateRestartManifestPath(socketPath: string, agentDir: string = getAgentDir()): string {
-	const normalizedSocketPath = process.platform === "win32" ? socketPath.toLowerCase() : resolve(socketPath);
+	const normalizedSocketPath = normalizeSocketPath(socketPath);
 	const socketHash = createHash("sha256").update(normalizedSocketPath).digest("hex");
 	return join(agentDir, "daemon-update-restarts", `${socketHash}.json`);
 }
@@ -596,19 +601,9 @@ export function appendRotatingLog(logPath: string, message: string, maxBytes: nu
 	}
 }
 
-/** Get path to models.json */
-export function getModelsPath(): string {
-	return join(getAgentDir(), "models.json");
-}
-
 /** Get path to auth.json */
 export function getAuthPath(): string {
 	return join(getAgentDir(), "auth.json");
-}
-
-/** Get path to settings.json */
-export function getSettingsPath(): string {
-	return join(getAgentDir(), "settings.json");
 }
 
 /** Get path to cron jobs store */
@@ -616,19 +611,9 @@ export function getCronJobsPath(agentDir: string = getAgentDir()): string {
 	return join(agentDir, "cron-jobs.json");
 }
 
-/** Get path to tools directory */
-export function getToolsDir(): string {
-	return join(getAgentDir(), "tools");
-}
-
 /** Get path to managed binaries directory (fd, rg) */
 export function getBinDir(): string {
 	return join(getAgentDir(), "bin");
-}
-
-/** Get path to prompt templates directory */
-export function getPromptsDir(): string {
-	return join(getAgentDir(), "prompts");
 }
 
 /** Get path to sessions directory */

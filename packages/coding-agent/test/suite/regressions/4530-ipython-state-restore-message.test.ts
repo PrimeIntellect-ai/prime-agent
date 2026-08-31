@@ -86,10 +86,16 @@ describe("ENG-4530 IPython state restore message", () => {
 		});
 		await harness.session.prompt("stop the heartbeat", { streamingBehavior: "followUp" });
 
-		const [queued] = harness.session.getFollowUpQueueSnapshots();
-		expect(queued?.content).toEqual([{ type: "text", text: "stop the heartbeat" }]);
-		expect(queued?.prefixMessages).toHaveLength(1);
-		expect(queued?.prefixMessages?.[0]).toMatchObject({
+		const [queued] = harness.session.getSessionActionRecoverySnapshot().actions;
+		expect(queued?.payload.kind === "turn" ? queued.payload.content : undefined).toEqual([
+			{ type: "text", text: "stop the heartbeat" },
+		]);
+		const prefixMessages =
+			queued?.payload.kind === "turn"
+				? queued.payload.records.filter((record) => record.role === "prefix").map((record) => record.message)
+				: [];
+		expect(prefixMessages).toHaveLength(1);
+		expect(prefixMessages[0]).toMatchObject({
 			role: "custom",
 			customType: IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
 			display: true,
@@ -110,10 +116,10 @@ describe("ENG-4530 IPython state restore message", () => {
 		}
 
 		const component = new InjectedPromptMessageComponent(restoreMessage);
-		expect(render(component)).toContain("◆ Restored IPython kernel state");
+		expect(render(component)).toContain("◆ Restored Python kernel state");
 		expect(render(component)).not.toContain("alpha");
 		component.setExpanded(true);
-		expect(render(component)).toContain("◆ Restored IPython kernel state");
+		expect(render(component)).toContain("◆ Restored Python kernel state");
 		expect(render(component)).not.toContain("ipython_state_restored");
 		expect(render(component)).not.toContain("alpha");
 	});
@@ -143,9 +149,11 @@ describe("ENG-4530 IPython state restore message", () => {
 		harness.session.resumeQueuedWork();
 		await harness.session.waitForSessionInputIdle();
 
-		const [queued] = harness.session.getFollowUpQueueSnapshots();
-		expect(queued).toMatchObject({ text: "queued prompt" });
-		expect(queued?.prefixMessages).toBeUndefined();
+		const [queued] = harness.session.getSessionActionRecoverySnapshot().actions;
+		expect(queued?.payload).toMatchObject({ text: "queued prompt" });
+		expect(
+			queued?.payload.kind === "turn" ? queued.payload.records.filter((record) => record.role === "prefix") : [],
+		).toEqual([]);
 		expect(harness.session.messages).toEqual([
 			expect.objectContaining({ customType: IPYTHON_STATE_RESTORED_CUSTOM_TYPE }),
 		]);
@@ -162,7 +170,7 @@ describe("ENG-4530 IPython state restore message", () => {
 		};
 		const component = new InjectedPromptMessageComponent(message);
 
-		expect(render(component)).toContain("◆ Started fresh IPython kernel");
+		expect(render(component)).toContain("◆ Started fresh Python kernel");
 		component.setExpanded(true);
 		expect(render(component)).not.toContain("restore details");
 	});

@@ -1,13 +1,13 @@
 import { resolve } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { describe, expect, it } from "vitest";
+import type { RlmChildAgentSnapshot } from "../src/core/agent-session.js";
 import type { AgentCronJob } from "../src/core/cron-jobs.js";
 import type { SessionInfo } from "../src/core/session-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import {
 	buildRlmChildSnapshots,
 	buildSessionList,
-	isSessionSummaryBusy,
 	resolveAttachModelFallbackMessage,
 	type SessionSummary,
 	summaryForActiveSession,
@@ -62,7 +62,54 @@ describe("buildSessionList", () => {
 		const first = summaryForActiveSession(state);
 		const second = summaryForActiveSession(state);
 		expect(first.created).toBe("2026-05-01T00:00:00.000Z");
+		expect(first.lastActivityAt).toBe("2026-05-01T00:00:00.000Z");
 		expect(second.created).toBe(first.created);
+	});
+
+	it("takes last activity from custom messages and tool results", () => {
+		const oldMessage = {
+			role: "user",
+			content: "old",
+			timestamp: Date.parse("2026-05-02T00:00:00.000Z"),
+		} as AgentMessage;
+		const customTimestamp = Date.parse("2026-05-03T00:00:00.000Z");
+		const customMessage = {
+			role: "custom",
+			customType: "activity",
+			content: "newer",
+			display: false,
+			timestamp: customTimestamp,
+		} as AgentMessage;
+		const toolResultTimestamp = Date.parse("2026-05-04T00:00:00.000Z");
+		const toolResult = {
+			role: "toolResult",
+			toolCallId: "tool-1",
+			toolName: "example",
+			content: [],
+			isError: false,
+			timestamp: toolResultTimestamp,
+		} as AgentMessage;
+
+		expect(
+			summaryForActiveSession(makeState({ activeSessionId: "custom-active", messages: [oldMessage, customMessage] }))
+				.lastActivityAt,
+		).toBe(new Date(customTimestamp).toISOString());
+		expect(
+			summaryForActiveSession(makeState({ activeSessionId: "tool-active", messages: [oldMessage, toolResult] }))
+				.lastActivityAt,
+		).toBe(new Date(toolResultTimestamp).toISOString());
+	});
+
+	it("ignores message timestamps outside the valid Date range", () => {
+		const validTimestamp = Date.parse("2026-05-04T00:00:00.000Z");
+		const messages = [
+			{ role: "user", content: "valid", timestamp: validTimestamp },
+			{ role: "assistant", content: "corrupt", timestamp: 8.64e15 + 1 },
+		] as AgentMessage[];
+
+		const summary = summaryForActiveSession(makeState({ activeSessionId: "invalid-timestamp", messages }));
+
+		expect(summary.lastActivityAt).toBe(new Date(validTimestamp).toISOString());
 	});
 
 	it("keeps a session working while background subagents run", () => {
@@ -90,7 +137,7 @@ describe("buildSessionList", () => {
 		const activeSessionIds = ["heartbeat", "rlm-heartbeat", "paused-heartbeat", "cron"];
 		const entries = buildSessionList(
 			activeSessionIds.map((activeSessionId) => makeState({ activeSessionId, messages, summaryState })),
-			[],
+			[makeSessionInfo({ id: "passive", path: "/tmp/passive.jsonl" })],
 			[
 				makeCronJob({ id: "heartbeat-job", activeSessionId: "heartbeat", source: "heartbeat" }),
 				makeCronJob({ id: "rlm-job", activeSessionId: "rlm-heartbeat", source: "rlm_heartbeat" }),
@@ -101,6 +148,12 @@ describe("buildSessionList", () => {
 					status: "paused",
 				}),
 				makeCronJob({ id: "cron-job", activeSessionId: "cron", source: "cron" }),
+				makeCronJob({
+					id: "passive-job",
+					activeSessionId: "old-passive-active-id",
+					sessionFile: "/tmp/passive.jsonl",
+					source: "rlm_heartbeat",
+				}),
 			],
 		);
 
@@ -109,10 +162,49 @@ describe("buildSessionList", () => {
 			"rlm-heartbeat": true,
 			"paused-heartbeat": undefined,
 			cron: undefined,
+			passive: undefined,
+		});
+		expect(Object.fromEntries(entries.map((entry) => [entry.id, entry.hasRegisteredHeartbeat]))).toEqual({
+			heartbeat: true,
+			"rlm-heartbeat": true,
+			"paused-heartbeat": undefined,
+			cron: undefined,
+			passive: true,
+		});
+		expect(Object.fromEntries(entries.map((entry) => [entry.id, entry.hasRegisteredCronJob]))).toEqual({
+			heartbeat: undefined,
+			"rlm-heartbeat": undefined,
+			"paused-heartbeat": undefined,
+			cron: true,
+			passive: undefined,
 		});
 	});
 
-	it("counts accepted in-flight agent prompts as pending work", () => {
+	it("keeps file-keyed schedule pins on active rows while active ids are being rebound", () => {
+		const sessionFile = "/tmp/child.jsonl";
+		const [entry] = buildSessionList(
+			[makeState({ activeSessionId: "new-active-id", sessionFile })],
+			[makeSessionInfo({ id: "child-session", path: sessionFile })],
+			[
+				makeCronJob({
+					id: "stale-heartbeat",
+					activeSessionId: "old-active-id",
+					sessionFile,
+					source: "heartbeat",
+				}),
+				makeCronJob({
+					id: "stale-cron",
+					activeSessionId: "old-active-id",
+					sessionFile,
+					source: "cron",
+				}),
+			],
+		);
+
+		expect(entry).toMatchObject({ hasRegisteredHeartbeat: true, hasRegisteredCronJob: true });
+	});
+
+	it("reports accepted in-flight prompts as active with no queued work", () => {
 		const oneMessage = [{ role: "user", content: "hi" }] as unknown as AgentMessage[];
 		const summary = summaryForActiveSession(
 			makeState({
@@ -123,39 +215,21 @@ describe("buildSessionList", () => {
 			}),
 		);
 
-		expect(summary.pendingMessageCount).toBe(1);
+		expect(summary.sessionActions).toMatchObject({ queuedCount: 0, active: { kind: "turn", phase: "running" } });
 		expect(summary.activity).toBe("working");
 	});
 
-	it("marks active session input without reporting it as queued", () => {
-		const oneMessage = [{ role: "user", content: "hi" }] as unknown as AgentMessage[];
+	it("reports the exact unfinished action count independently of the visible action snapshot", () => {
 		const summary = summaryForActiveSession(
 			makeState({
-				activeSessionId: "active-input",
-				messages: oneMessage,
-				summaryState: { basedOnMessageCount: 1 } as ActiveSessionState["summaryState"],
-				hasActiveSessionInput: true,
+				activeSessionId: "batched",
+				unfinishedActionCount: 3,
+				hasAcceptedPromptInFlight: true,
 			}),
 		);
 
-		expect(summary.pendingMessageCount).toBe(0);
-		expect(summary.hasActiveSessionInput).toBe(true);
-		expect(summary.activity).toBe("working");
-		expect(isSessionSummaryBusy(summary)).toBe(true);
-	});
-
-	it("does not double-count an active prompt that is still pending preparation", () => {
-		const oneMessage = [{ role: "user", content: "hi" }] as unknown as AgentMessage[];
-		const state = makeState({
-			activeSessionId: "preparing-prompt",
-			messages: oneMessage,
-			hasActiveSessionInput: true,
-		});
-		(state.runtime.session as { pendingMessageCount: number }).pendingMessageCount = 1;
-
-		const summary = summaryForActiveSession(state);
-		expect(summary.pendingMessageCount).toBe(1);
-		expect(summary.hasActiveSessionInput).toBe(true);
+		expect(summary.sessionActions).toMatchObject({ queuedCount: 0, active: { kind: "turn" } });
+		expect(summary.unfinishedActionCount).toBe(3);
 	});
 
 	it("marks a finished subagent idle instead of holding it at working", () => {
@@ -365,6 +439,21 @@ describe("buildSessionList", () => {
 			firstMessage: "Audit the retry logic for races",
 		});
 	});
+
+	it("uses runtime depth for live rows and catalog depth for saved-only rows", () => {
+		const livePath = resolve("/tmp/project/live-depth.jsonl");
+		const savedPath = resolve("/tmp/project/saved-depth.jsonl");
+		const entries = buildSessionList(
+			[makeState({ activeSessionId: "live", sessionFile: livePath, rlmDepth: 2 })],
+			[
+				makeSessionInfo({ path: livePath, id: "live", rlmDepth: 99 }),
+				makeSessionInfo({ path: savedPath, id: "saved", rlmDepth: 3 }),
+			],
+		);
+
+		expect(entries.find((entry) => entry.activeSessionId === "live")?.rlmDepth).toBe(2);
+		expect(entries.find((entry) => entry.sessionFile === savedPath)?.rlmDepth).toBe(3);
+	});
 });
 
 describe("summaryForActiveSession recap currency", () => {
@@ -408,128 +497,42 @@ describe("summaryForActiveSession recap currency", () => {
 });
 
 describe("buildRlmChildSnapshots", () => {
-	it("collects children and grandchildren with event-compatible parent ids", () => {
-		const parent = makeState({ activeSessionId: "parent", sessionFile: "/tmp/parent.jsonl" });
-		const child = makeState({
-			activeSessionId: "child",
-			model: { provider: "anthropic", id: "claude-opus-4-7" },
-			isStreaming: true,
-			metadata: {
-				kind: "subagent",
-				createdAt: 1,
-				parentActiveSessionId: "parent",
-				rlmChildId: "sub-aaa",
-				rlmParentNodeId: "sub-aaa",
-				prompt: "Summarize   the repo\nlayout",
-				sessionDir: "/tmp/artifacts/sub-aaa",
-			},
-			messages: [
-				{ role: "user", content: "Summarize the repo layout" },
-				{
-					role: "assistant",
-					content: [
-						{ type: "text", text: "The repo is an npm workspace." },
-						{ type: "toolCall", id: "tool-1", name: "ipython", arguments: {} },
-					],
-				},
-			] as AgentMessage[],
-			contextTokens: 41_000,
-		});
-		const grandchild = makeState({
-			activeSessionId: "grandchild",
-			metadata: {
-				kind: "subagent",
-				createdAt: 2,
-				parentActiveSessionId: "child",
-				rlmChildId: "sub-bbb",
-				rlmParentNodeId: "sub-bbb",
-				prompt: "Read the docs",
-				sessionDir: "/tmp/artifacts/sub-aaa/sub-bbb",
-			},
-		});
-		const unrelated = makeState({
-			activeSessionId: "unrelated-child",
-			metadata: {
-				kind: "subagent",
-				createdAt: 3,
-				parentActiveSessionId: "someone-else",
-				rlmChildId: "sub-ccc",
-			},
-		});
-
-		const snapshots = buildRlmChildSnapshots("parent", [parent, child, grandchild, unrelated]);
-
-		expect(snapshots.map((snapshot) => [snapshot.id, snapshot.parentId, snapshot.status])).toEqual([
-			["sub-aaa", undefined, "running"],
-			["sub-bbb", "sub-aaa", "done"],
-		]);
-		expect(snapshots[0]).toMatchObject({
-			model: "anthropic/claude-opus-4-7",
-			label: "Summarize the repo layout",
-			answerPreview: "The repo is an npm workspace.",
-			toolUseCount: 1,
-			tokenCount: 41_000,
-			sessionDir: "/tmp/artifacts/sub-aaa",
-			activeSessionId: "child",
-		});
-	});
-
-	it("prefers the parent's run status over the streaming heuristic", () => {
-		// An idle child session is still part of an active run; only the parent's
-		// run tracker knows that.
+	it("uses the AgentSession projection and adds resident active session ids", () => {
+		const queued = {
+			id: "sub-queued",
+			label: "Queued task",
+			status: "queued" as const,
+			sessionDir: "/tmp/artifacts/sub-queued",
+		};
+		const executing = {
+			id: "sub-running",
+			label: "Running task",
+			status: "running" as const,
+			sessionDir: "/tmp/artifacts/sub-running",
+			activity: { kind: "executing" as const, toolName: "ipython" },
+		};
 		const parent = makeState({
 			activeSessionId: "parent",
-			sessionFile: "/tmp/parent.jsonl",
-			childRunStatuses: { "sub-aaa": "running" },
+			childSnapshots: [queued, executing],
 		});
-		const idleChild = makeState({
-			activeSessionId: "child",
-			isStreaming: false,
+		const residentChild = makeState({
+			activeSessionId: "running-child",
 			metadata: {
 				kind: "subagent",
 				createdAt: 1,
 				parentActiveSessionId: "parent",
-				rlmChildId: "sub-aaa",
-				rlmParentNodeId: "sub-aaa",
-				prompt: "Slow task",
-				sessionDir: "/tmp/artifacts/sub-aaa",
+				rlmChildId: "sub-running",
 			},
 		});
 
-		const snapshots = buildRlmChildSnapshots("parent", [parent, idleChild]);
-
-		expect(snapshots.map((snapshot) => [snapshot.id, snapshot.status])).toEqual([["sub-aaa", "running"]]);
+		expect(buildRlmChildSnapshots("parent", [parent, residentChild])).toEqual([
+			{ ...queued, activeSessionId: undefined },
+			{ ...executing, activeSessionId: "running-child" },
+		]);
 	});
 
-	it("includes in-flight assistant output in child snapshots", () => {
-		const parent = makeState({ activeSessionId: "parent" });
-		const child = makeState({
-			activeSessionId: "child",
-			isStreaming: true,
-			metadata: {
-				kind: "subagent",
-				createdAt: 1,
-				parentActiveSessionId: "parent",
-				rlmChildId: "sub-aaa",
-			},
-			streamingMessage: {
-				role: "assistant",
-				content: [
-					{ type: "text", text: "Still investigating" },
-					{ type: "toolCall", id: "tool-1", name: "search", arguments: {} },
-				],
-			} as AgentMessage,
-		});
-
-		expect(buildRlmChildSnapshots("parent", [parent, child])[0]).toMatchObject({
-			answerPreview: "Still investigating",
-			toolUseCount: 1,
-		});
-	});
-
-	it("returns no snapshots for sessions without children", () => {
-		const solo = makeState({ activeSessionId: "solo" });
-		expect(buildRlmChildSnapshots("solo", [solo])).toEqual([]);
+	it("returns no snapshots when the root is not resident", () => {
+		expect(buildRlmChildSnapshots("missing", [])).toEqual([]);
 	});
 });
 
@@ -547,8 +550,9 @@ describe("resolveAttachModelFallbackMessage", () => {
 			isCompacting: false,
 			attachedClients: 0,
 			messageCount: 0,
-			pendingMessageCount: 0,
+			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 			...overrides,
+			isSessionActive: overrides.isSessionActive ?? false,
 		};
 	}
 
@@ -580,12 +584,13 @@ interface StateOptions {
 	messages?: AgentMessage[];
 	hasUserContent?: boolean;
 	summaryState?: ActiveSessionState["summaryState"];
-	childRunStatuses?: Record<string, "queued" | "running" | "done" | "error" | "cancelled">;
 	hasRunningRlmChildren?: boolean;
 	hasAcceptedPromptInFlight?: boolean;
-	hasActiveSessionInput?: boolean;
+	unfinishedActionCount?: number;
 	contextTokens?: number;
 	streamingMessage?: AgentMessage;
+	childSnapshots?: RlmChildAgentSnapshot[];
+	rlmDepth?: number;
 	metadata?: {
 		kind: "top-level" | "subagent";
 		createdAt: number;
@@ -620,6 +625,7 @@ function makeState(options: StateOptions): ActiveSessionState {
 				isCompacting: false,
 				sessionFile: options.sessionFile,
 				sessionId: options.sessionId ?? `session-${options.activeSessionId}`,
+				rlmDepth: options.rlmDepth ?? 0,
 				sessionName: `session ${options.activeSessionId}`,
 				sessionManager: {
 					getCwd: () => "/tmp/project",
@@ -628,16 +634,21 @@ function makeState(options: StateOptions): ActiveSessionState {
 					hasUserContent: () => options.hasUserContent ?? false,
 				},
 				messages: options.messages ?? ([] as AgentMessage[]),
-				getRlmChildRunStatus: (childId: string) => options.childRunStatuses?.[childId],
+				getRlmChildSnapshots: () => options.childSnapshots ?? [],
 				hasRunningRlmChildren: () => options.hasRunningRlmChildren ?? false,
 				hasAcceptedPromptInFlight: options.hasAcceptedPromptInFlight ?? false,
-				hasActiveSessionInput: options.hasActiveSessionInput ?? false,
-				get hasSessionInputWork() {
-					return this.pendingMessageCount > 0 || this.hasActiveSessionInput;
-				},
+				unfinishedActionCount: options.unfinishedActionCount ?? (options.hasAcceptedPromptInFlight ? 1 : 0),
+				isSessionActive: options.isStreaming === true || options.hasAcceptedPromptInFlight === true,
 				getCurrentRecap: () => undefined,
 				_contextTokensForCurrentMessages: () => options.contextTokens,
-				pendingMessageCount: 0,
+				getSessionActionSnapshot: () => ({
+					queuedCount: 0,
+					steering: [],
+					followUps: [],
+					...(options.hasAcceptedPromptInFlight
+						? { active: { kind: "turn" as const, phase: "running" as const } }
+						: {}),
+				}),
 				state: {
 					streamingMessage: options.streamingMessage,
 					pendingToolCalls: new Set(options.pendingToolCalls ?? []),
@@ -654,6 +665,8 @@ function makeSessionInfo(overrides: Pick<SessionInfo, "path" | "id"> & Partial<S
 		cwd: "/tmp/project",
 		name: overrides.name,
 		state: overrides.state,
+		parentSessionPath: overrides.parentSessionPath,
+		rlmDepth: overrides.rlmDepth ?? 0,
 		created: new Date("2026-05-01T00:00:00.000Z"),
 		modified: new Date("2026-05-02T00:00:00.000Z"),
 		messageCount: overrides.messageCount ?? 2,
@@ -670,7 +683,7 @@ function makeCronJob(overrides: Pick<AgentCronJob, "id" | "activeSessionId"> & P
 		source: overrides.source,
 		activeSessionId: overrides.activeSessionId,
 		sessionId: `session-${overrides.activeSessionId}`,
-		sessionFile: `/tmp/${overrides.activeSessionId}.jsonl`,
+		sessionFile: overrides.sessionFile ?? `/tmp/${overrides.activeSessionId}.jsonl`,
 		cwd: "/tmp/project",
 		prompt: "Check for follow-up work",
 		schedule: { kind: "interval", expression: "every 5m", intervalMs: 300_000 },

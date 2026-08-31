@@ -151,7 +151,7 @@ async def run(
             "Web search is not set up yet: no Serper API key is configured.\n"
             "Tell the user how to enable it:\n"
             "  1. Get a free API key at https://serper.dev (sign up, copy the key).\n"
-            "  2. In Prime Agent, run /login and choose \"Serper (web search)\", then paste the key.\n"
+            "  2. In Prime Agent, run /login, switch to MCP Connections, choose \"Serper (web search)\", and paste the key.\n"
             "Do not ask the user to set environment variables. Once the key is saved, web search works automatically."
         )
 
