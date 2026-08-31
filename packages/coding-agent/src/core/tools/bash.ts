@@ -1,6 +1,6 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve, sep } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { spawn } from "child_process";
@@ -58,6 +58,62 @@ export interface BashOperations {
 			env?: NodeJS.ProcessEnv;
 		},
 	) => Promise<{ exitCode: number | null }>;
+}
+
+const AVO_VERIFICATION_CREDENTIAL_HOME_PATHS = [
+	".aws",
+	".azure",
+	".codex",
+	join(".config", "gcloud"),
+	join(".config", "gh"),
+	join(".config", "glab"),
+	".docker",
+	".git-credentials",
+	".gnupg",
+	".kube",
+	".netrc",
+	".npmrc",
+	".pypirc",
+	join(".prime", "agent-avo"),
+	".ssh",
+	".terraform.d",
+] as const;
+
+const AVO_VERIFICATION_CREDENTIAL_PATH_ENVIRONMENT_KEYS = [
+	"AWS_CONFIG_FILE",
+	"AWS_SHARED_CREDENTIALS_FILE",
+	"CODEX_HOME",
+	"DOCKER_CONFIG",
+	"GOOGLE_APPLICATION_CREDENTIALS",
+	"KUBECONFIG",
+	"NETRC",
+	"NPM_CONFIG_USERCONFIG",
+	"PRIME_AGENT_AVO_CONFIG_DIR",
+	"PRIME_AGENT_CODING_AGENT_DIR",
+] as const;
+
+function avoVerificationCredentialMountArgs(cwd: string, environment: NodeJS.ProcessEnv): string[] {
+	const workspace = resolve(cwd);
+	const home = homedir();
+	const candidates = [
+		...AVO_VERIFICATION_CREDENTIAL_HOME_PATHS.map((path) => join(home, path)),
+		...AVO_VERIFICATION_CREDENTIAL_PATH_ENVIRONMENT_KEYS.flatMap((key) => {
+			const value = environment[key]?.trim();
+			return value ? [resolve(value)] : [];
+		}),
+	];
+	const selected: Array<{ path: string; directory: boolean }> = [];
+	for (const path of [...new Set(candidates.map((candidate) => resolve(candidate)))].sort()) {
+		if (!existsSync(path)) continue;
+		const overlapsWorkspace =
+			path === workspace || path.startsWith(`${workspace}${sep}`) || workspace.startsWith(`${path}${sep}`);
+		if (overlapsWorkspace) {
+			throw new Error(`AVO verification workspace overlaps a host credential path: ${path}`);
+		}
+		if (selected.some((entry) => entry.directory && path.startsWith(`${entry.path}${sep}`))) continue;
+		selected.push({ path, directory: statSync(path).isDirectory() });
+	}
+	return selected.flatMap(({ path, directory }) => (directory ? ["--tmpfs", path] : ["--ro-bind", "/dev/null", path]));
 }
 
 /**
@@ -142,6 +198,14 @@ export function createReadOnlyVerificationBashOperations(): BashOperations | und
 					reject(new Error(`Working directory does not exist: ${cwd}\nCannot execute verification command.`));
 					return;
 				}
+				const verificationEnvironment = env ?? process.env;
+				let credentialMountArgs: string[];
+				try {
+					credentialMountArgs = avoVerificationCredentialMountArgs(cwd, verificationEnvironment);
+				} catch (error) {
+					reject(error);
+					return;
+				}
 				const writableTemp = mkdtempSync(join(tmpdir(), "prime-avo-verifier-"));
 				const sandboxTemp = writableTemp;
 				const child = spawn(
@@ -154,9 +218,14 @@ export function createReadOnlyVerificationBashOperations(): BashOperations | und
 						"/dev",
 						"--proc",
 						"/proc",
+						...(existsSync("/run") ? ["--tmpfs", "/run"] : []),
+						...credentialMountArgs,
 						"--bind",
 						writableTemp,
 						sandboxTemp,
+						"--ro-bind",
+						cwd,
+						cwd,
 						"--unshare-net",
 						"--unshare-pid",
 						"--new-session",
@@ -174,7 +243,7 @@ export function createReadOnlyVerificationBashOperations(): BashOperations | und
 						cwd,
 						detached: true,
 						env: {
-							...sanitizeAvoVerificationEnvironment(env ?? process.env),
+							...sanitizeAvoVerificationEnvironment(verificationEnvironment),
 							TMPDIR: sandboxTemp,
 							TMP: sandboxTemp,
 							TEMP: sandboxTemp,
