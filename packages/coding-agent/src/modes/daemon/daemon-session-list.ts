@@ -407,7 +407,7 @@ export function activeActivityForSession(activeSession: ActiveSessionState): Ses
  * session_state is treated as not-archived, so older sessions that never wrote a
  * lifecycle entry still surface. Message-based to match activeLifecycleForSession.
  */
-export function inactiveLifecycleForSession(session: SessionInfo): SessionLifecycle {
+export function inactiveLifecycleForSession(session: Pick<SessionInfo, "state" | "messageCount">): SessionLifecycle {
 	const status = session.state?.status;
 	if (status === "archived" || status === "crash") {
 		return "archived";

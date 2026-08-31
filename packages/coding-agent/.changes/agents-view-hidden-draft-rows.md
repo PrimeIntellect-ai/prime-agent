@@ -1,0 +1,1 @@
+- Fixed message-less draft and archived session files surfacing as agents-view rows that Ctrl+X could never delete.

@@ -42,6 +42,7 @@ import {
 	scopeToSessionSubtree,
 	sectionTitle,
 	shouldApplyScopeResolution,
+	shouldShowAgentsViewSavedSession,
 	shouldShowAgentsViewSession,
 	transitionAgentsViewScope,
 } from "../src/modes/index.js";
@@ -962,6 +963,43 @@ describe("agents view state", () => {
 			title: "Live name",
 			record,
 		});
+	});
+
+	test("keeps saved drafts and archived files out of the catalog rows", () => {
+		// A message-less file is a draft. The daemon hides its resident row and refuses to
+		// delete a file it still holds, so a saved-only draft row could never be removed.
+		const draft = makeSessionInfo({ path: "/tmp/draft.jsonl", id: "draft", messageCount: 0, firstMessage: "" });
+		const archived = makeSessionInfo({ path: "/tmp/archived.jsonl", id: "archived", state: { status: "archived" } });
+		const crashed = makeSessionInfo({ path: "/tmp/crashed.jsonl", id: "crashed", state: { status: "crash" } });
+		const live = makeSessionInfo({ path: "/tmp/live.jsonl", id: "live" });
+
+		expect(shouldShowAgentsViewSavedSession(draft)).toBe(false);
+		expect(shouldShowAgentsViewSavedSession(archived)).toBe(false);
+		expect(shouldShowAgentsViewSavedSession(crashed)).toBe(false);
+		expect(shouldShowAgentsViewSavedSession(live)).toBe(true);
+		expect(reconcileUnifiedSessions([], [draft, archived, crashed, live]).map((record) => record.saved?.id)).toEqual([
+			"live",
+		]);
+	});
+
+	test("still merges a hidden saved draft into its resident session", () => {
+		const draft = makeSessionInfo({
+			path: "/tmp/draft.jsonl",
+			id: "draft-session",
+			messageCount: 0,
+			firstMessage: "",
+			name: "Durable name",
+		});
+		const daemon = makeSummary({
+			id: "runtime",
+			activeSessionId: "runtime",
+			sessionId: "draft-session",
+			sessionFile: "/tmp/draft.jsonl",
+		});
+
+		const records = reconcileUnifiedSessions([daemon], [draft]);
+		expect(records).toHaveLength(1);
+		expect(records[0]).toMatchObject({ daemon, saved: draft });
 	});
 
 	test("retains the ancestor chain when search matches only a nested subagent", () => {

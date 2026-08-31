@@ -1,7 +1,11 @@
 import { basename, resolve } from "node:path";
 import { canonicalizePath } from "../../utils/paths.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/index.js";
-import { classifySessionRosterStatus, type SessionSummary } from "../daemon/daemon-session-list.js";
+import {
+	classifySessionRosterStatus,
+	inactiveLifecycleForSession,
+	type SessionSummary,
+} from "../daemon/daemon-session-list.js";
 
 export type AgentsViewSection = "running" | "idle" | "inactive";
 
@@ -111,6 +115,16 @@ export function shouldShowAgentsViewSession(summary: SessionSummary, manuallyIna
 	return summary.lifecycle === "live" && (summary.workerState === undefined || summary.workerState === "ready");
 }
 
+/**
+ * Same live-only rule for catalog rows that have no daemon summary to classify.
+ * A message-less file is a draft: the daemon hides its resident row but keeps
+ * the session, and delete_saved_session refuses to remove a file that is still
+ * resident, so a saved-only draft row is undeletable from the view.
+ */
+export function shouldShowAgentsViewSavedSession(saved: AgentConnectionSavedSessionInfo): boolean {
+	return inactiveLifecycleForSession(saved) === "live";
+}
+
 export function sectionTitle(section: AgentsViewSection): string {
 	switch (section) {
 		case "running":
@@ -213,6 +227,9 @@ export function reconcileUnifiedSessions(
 			record.identityAliases = [...new Set([...record.identityAliases, ...aliases])];
 			record.searchableText = createUnifiedSearchableText(record.daemon, saved);
 			for (const alias of aliases) recordByAlias.set(alias, record);
+			continue;
+		}
+		if (!shouldShowAgentsViewSavedSession(saved)) {
 			continue;
 		}
 		const inactive: UnifiedSessionRecord = {
