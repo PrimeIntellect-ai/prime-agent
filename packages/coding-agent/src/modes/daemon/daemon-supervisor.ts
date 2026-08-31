@@ -915,12 +915,7 @@ export class DaemonSupervisor {
 		}
 	}
 
-	/**
-	 * Passivate an abandoned empty draft as soon as its last client lets go
-	 * instead of parking the worker for the idle sweep. Same passivation as idle
-	 * eviction: the on-disk session (if any) survives and is classified draft by
-	 * inactiveLifecycleForSession. Action-driven only; never rejects.
-	 */
+	/** Passivates an abandoned empty draft on last detach - same passivation as the idle sweep; never rejects. */
 	private async evictEmptySessionOnLastDetach(activeSessionId: string): Promise<void> {
 		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
 		const worker = this.matchWorkers(activeSessionId)[0]?.worker;
@@ -928,18 +923,16 @@ export class DaemonSupervisor {
 			!worker ||
 			worker.descriptor.lifecycle !== "ready" ||
 			!worker.client ||
-			// Client-owned workers have their own disconnect cleanup with a grace period.
-			worker.descriptor.ownerClientId !== undefined ||
+			worker.descriptor.ownerClientId !== undefined || // owned workers have their own cleanup path
 			this.isWorkerStopping(worker)
 		) {
 			return;
 		}
 		try {
-			// Refresh so the busy check sees an admitted first turn that has not
-			// persisted a message yet.
+			// Fresh summaries, so an admitted-but-unpersisted first turn reads busy.
 			await this.refreshWorkerSummaries(worker);
 		} catch {
-			return; // A stopping or disconnected worker is never a candidate.
+			return;
 		}
 		if (
 			this.shuttingDown ||

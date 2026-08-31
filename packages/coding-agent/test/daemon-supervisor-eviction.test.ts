@@ -452,67 +452,55 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		await new Promise((resolve) => setTimeout(resolve, 25));
 	}
 
-	it("evicts an empty unnamed session only when its last client detaches", async () => {
+	it("evicts only abandoned empty unnamed sessions, and only on the last detach", async () => {
 		const now = Date.parse("2026-08-01T12:00:00.000Z");
 		const supervisor = makeSupervisor();
 		const empty = makeWorker("empty", [makeSummary("empty-root", now, { messageCount: 0 })]);
-		supervisor.workers.set("empty", empty);
+		const exempt = [
+			makeWorker("named", [makeSummary("named-root", now, { messageCount: 0, sessionName: "keep me" })]),
+			makeWorker("busy", [makeSummary("busy-root", now, { messageCount: 0, isSessionActive: true })]),
+			makeWorker("one-message", [makeSummary("one-message-root", now)]),
+			makeWorker("heartbeat", [
+				makeSummary("heartbeat-root", now, { messageCount: 0, hasRegisteredHeartbeat: true }),
+			]),
+			makeWorker("cron", [makeSummary("cron-root", now, { messageCount: 0, hasRegisteredCronJob: true })]),
+			makeWorker("owned", [makeSummary("owned-root", now, { messageCount: 0 })]),
+		];
+		exempt[5]!.descriptor.ownerClientId = "owner";
+		for (const worker of [empty, ...exempt]) {
+			supervisor.workers.set(worker.descriptor.workerId, worker);
+		}
 		const first = makeDetachClient("first", ["empty-root"]);
-		const second = makeDetachClient("second", ["empty-root"]);
+		const viewer = makeDetachClient("viewer", [
+			"empty-root",
+			"named-root",
+			"busy-root",
+			"one-message-root",
+			"heartbeat-root",
+			"cron-root",
+			"owned-root",
+		]);
 		supervisor.clients.add(first);
-		supervisor.clients.add(second);
+		supervisor.clients.add(viewer);
 
+		// Not the last client of empty-root: nothing evicted.
 		await supervisor.handleCommand(first, { id: "detach-1", type: "detach", activeSessionId: "empty-root" });
 		await settle();
 		expect(supervisor.stopWorker).not.toHaveBeenCalled();
 
-		await supervisor.handleCommand(second, { id: "detach-2", type: "detach", activeSessionId: "empty-root" });
+		await supervisor.handleCommand(viewer, { id: "detach-all", type: "detach" });
 		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(empty, true));
-		expect(supervisor.workers.has("empty")).toBe(false);
-		expect(supervisor.log).toHaveBeenCalledWith(expect.stringContaining("Evicted empty session worker empty"));
-	});
-
-	it("keeps named, busy, and non-empty sessions resident when their last client detaches", async () => {
-		const now = Date.parse("2026-08-01T12:00:00.000Z");
-		const supervisor = makeSupervisor();
-		const named = makeWorker("named", [makeSummary("named-root", now, { messageCount: 0, sessionName: "keep me" })]);
-		// An empty session whose first turn is in flight reports busy before any message persists.
-		const busy = makeWorker("busy", [makeSummary("busy-root", now, { messageCount: 0, isSessionActive: true })]);
-		const oneMessage = makeWorker("one-message", [makeSummary("one-message-root", now)]);
-		for (const worker of [named, busy, oneMessage]) {
-			supervisor.workers.set(worker.descriptor.workerId, worker);
-		}
-		const client = makeDetachClient("viewer", ["named-root", "busy-root", "one-message-root"]);
-		supervisor.clients.add(client);
-
-		await supervisor.handleCommand(client, { id: "detach-all", type: "detach" });
 		await settle();
-
-		expect(supervisor.stopWorker).not.toHaveBeenCalled();
-		expect([...supervisor.workers.keys()].sort()).toEqual(["busy", "named", "one-message"]);
-	});
-
-	it("keeps schedule-pinned and client-owned empty sessions resident when their last client detaches", async () => {
-		const now = Date.parse("2026-08-01T12:00:00.000Z");
-		const supervisor = makeSupervisor();
-		const heartbeat = makeWorker("heartbeat", [
-			makeSummary("heartbeat-root", now, { messageCount: 0, hasRegisteredHeartbeat: true }),
+		expect(supervisor.stopWorker).toHaveBeenCalledTimes(1);
+		expect([...supervisor.workers.keys()].sort()).toEqual([
+			"busy",
+			"cron",
+			"heartbeat",
+			"named",
+			"one-message",
+			"owned",
 		]);
-		const cron = makeWorker("cron", [makeSummary("cron-root", now, { messageCount: 0, hasRegisteredCronJob: true })]);
-		// Client-owned workers keep their own disconnect cleanup path.
-		const owned = makeWorker("owned", [makeSummary("owned-root", now, { messageCount: 0 })]);
-		owned.descriptor.ownerClientId = "owner";
-		for (const worker of [heartbeat, cron, owned]) {
-			supervisor.workers.set(worker.descriptor.workerId, worker);
-		}
-		const client = makeDetachClient("viewer", ["heartbeat-root", "cron-root", "owned-root"]);
-		supervisor.clients.add(client);
-
-		await supervisor.handleCommand(client, { id: "detach-all", type: "detach" });
-		await settle();
-
-		expect(supervisor.stopWorker).not.toHaveBeenCalled();
-		expect([...supervisor.workers.keys()].sort()).toEqual(["cron", "heartbeat", "owned"]);
+		expect(supervisor.log).toHaveBeenCalledWith(expect.stringContaining("Evicted empty session worker empty"));
 	});
 
 	it("does not stop a worker that was replaced while its summary refresh was in flight", async () => {
@@ -532,7 +520,6 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 
 		await supervisor.handleCommand(client, { id: "detach", type: "detach", activeSessionId: "swap-root" });
 		await vi.waitFor(() => expect(worker.client!.request).toHaveBeenCalled());
-		// The worker is stopped and relaunched under a successor registration mid-refresh.
 		const successor = makeWorker("swap", [makeSummary("swap-root", now, { messageCount: 0 })]);
 		supervisor.workers.set("swap", successor);
 		releaseList();

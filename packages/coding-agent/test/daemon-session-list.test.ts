@@ -230,13 +230,10 @@ describe("buildSessionList", () => {
 
 		expect(summary.sessionActions).toMatchObject({ queuedCount: 0, active: { kind: "turn" } });
 		expect(summary.unfinishedActionCount).toBe(3);
-		// An empty session whose first turn is in flight is busy, not idle.
 		expect(summary.activity).toBe("working");
 	});
 
 	it("marks an empty resident session idle instead of holding it at working", () => {
-		// No messages and nothing in flight: the summarizer never issues a verdict
-		// for an empty session, so it must not be pinned at "working" forever.
 		const summary = summaryForActiveSession(makeState({ activeSessionId: "empty" }));
 		expect(summary.activity).toBe("idle");
 	});

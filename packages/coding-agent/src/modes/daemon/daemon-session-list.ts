@@ -110,13 +110,7 @@ export function isSessionSummaryBusy(summary: SessionSummary): boolean {
 	return summary.isSessionActive || summary.hasRunningRlmChildren === true;
 }
 
-/**
- * An abandoned draft: no messages, no user-assigned name, nothing in flight or
- * queued (isSessionActive covers unfinished actions), and no schedule pin.
- * Safe to passivate as soon as its last client detaches instead of parking the
- * worker for the idle sweep. Naming a session signals intent to return, so
- * named sessions are exempt even when empty.
- */
+/** An abandoned draft, safe to passivate on last detach. Naming signals intent to return, so named sessions are exempt. */
 export function isEvictableEmptySessionSummary(summary: SessionSummary): boolean {
 	return (
 		summary.messageCount === 0 &&
@@ -412,9 +406,7 @@ export function activeActivityForSession(activeSession: ActiveSessionState): Ses
 	if (activeSession.runtime.metadata?.kind === "subagent") {
 		return "idle";
 	}
-	// An empty session never gets a summarizer verdict either (there is nothing
-	// to classify), so don't hold it at "working" forever. A first turn that has
-	// not persisted a message yet is busy and already returned "working" above.
+	// An empty session never gets a summarizer verdict; don't hold it at "working" forever.
 	if (activeSession.runtime.session.messages.length === 0) {
 		return "idle";
 	}
