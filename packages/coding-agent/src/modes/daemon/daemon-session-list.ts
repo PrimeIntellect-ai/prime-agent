@@ -79,9 +79,7 @@ export interface SessionSummary {
 	summary?: string;
 	/** Completion verdict for an idle session; absent while working or unjudged. */
 	taskState?: AgentTaskState;
-	/** Ledger status computed by the supervisor at roster-write time. */
 	rosterStatus?: AgentRosterStatus;
-	/** Roster lifecycle label; renders on the row, never hides it. */
 	statusLabel?: "queued" | "recovering" | "failed";
 	/** Set while the owning worker has been silent past the staleness threshold. */
 	lastHeardFromAt?: string;

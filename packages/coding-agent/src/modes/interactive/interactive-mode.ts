@@ -5985,8 +5985,7 @@ export class InteractiveMode {
 					activeHeartbeatSessionIds,
 				)
 			: undefined;
-		// A client-owned session's rows are invisible to the public roster; when it has
-		// no direct children for this parent, the connection snapshots are the truth.
+		// Client-owned rows are invisible to the public roster; an empty roster count defers to snapshots.
 		this.subagentSummaryLine.setSubagentCounts(
 			rosterCounts && rosterCounts.total > 0
 				? rosterCounts

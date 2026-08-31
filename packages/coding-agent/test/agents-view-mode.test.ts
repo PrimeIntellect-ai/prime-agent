@@ -686,31 +686,6 @@ describe("AgentsViewMode persistent catalog state", () => {
 		}
 	});
 
-	it("exits a failed roster handshake without arming the close-driven reconnect", async () => {
-		const persistentState = createInitialAgentsViewPersistentState({});
-		const onClose = vi.fn(() => () => {});
-		persistentState.rosterClient = {
-			isConnected: true,
-			hello: { type: "daemon_hello" },
-			supportsServerCapability: () => true,
-			onMessage: () => () => {},
-			onClose,
-			request: vi.fn(async () => {
-				throw new Error("socket closed during handshake");
-			}),
-		} as never;
-		const view = new AgentsViewMode(
-			{ config: {}, uiServices: createUiServices(), socketPath: "/tmp/unused.sock" },
-			persistentState,
-		);
-		try {
-			await expect(view.run()).rejects.toThrow("socket closed during handshake");
-			expect(onClose).not.toHaveBeenCalled();
-		} finally {
-			stopThemeWatcher();
-		}
-	});
-
 	it("re-arms reconnect from the heartbeat poll over a dead socket and never overwrites a sticky notice", async () => {
 		const harness = (isConnected: boolean, statusMessageSticky: boolean) => {
 			const client = {

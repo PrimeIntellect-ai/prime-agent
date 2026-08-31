@@ -14,7 +14,6 @@ export class AgentsViewRosterStore {
 	private unsubscribeMessage: (() => void) | undefined;
 	private emitScheduled = false;
 	private subscribed = false;
-	/** A new hello means a new socket; the live subscription is keyed to it. */
 	private subscribedHello: DaemonHello | undefined;
 	private attachChain: Promise<unknown> = Promise.resolve();
 

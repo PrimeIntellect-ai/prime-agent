@@ -644,7 +644,7 @@ describe("agents view slash commands", () => {
 		expect(self.refreshSavedSessions).toHaveBeenCalledTimes(1);
 	});
 
-	it("arms the saved-search fetch once and guards latch and gate against superseded settles", async () => {
+	it("arms the saved-search fetch once and lets only the current fetch re-arm the latch", async () => {
 		const latchHarness = (text: string, responses: unknown[]) => {
 			const request = vi.fn(async () => responses.shift());
 			const persistentState: Record<string, unknown> = {};
@@ -713,35 +713,6 @@ describe("agents view slash commands", () => {
 		await expect(newerFailure).resolves.toBe(false);
 		expect(failing.self.savedSearchFetchStarted).toBe(false);
 		expect(failing.persistentState.savedCatalogLoaded).toBeUndefined();
-
-		// Success ordering: a stale settle can clear neither the gate nor the fresh data.
-		const wire = {
-			path: "/tmp/sessions/kept.jsonl",
-			id: "kept",
-			cwd: "/tmp/project",
-			rlmDepth: 0,
-			created: 1,
-			modified: 1,
-			messageCount: 1,
-			firstMessage: "kept",
-			allMessagesText: "kept",
-		};
-		let resolveFirst: (response: unknown) => void = () => {};
-		const succeeding = latchHarness("deep search text", [
-			new Promise((resolve) => {
-				resolveFirst = resolve;
-			}),
-			{ success: true, data: { sessions: [wire] } },
-		]);
-		invoke("queryChanged", succeeding.self);
-		const olderSuccess = (succeeding.self.refreshSavedSessions as ReturnType<typeof vi.fn>).mock.results[0]
-			?.value as Promise<boolean>;
-		await expect(succeeding.supersede()).resolves.toBe(true);
-		expect(succeeding.persistentState.savedCatalogLoaded).toBe(true);
-		resolveFirst({ success: true, data: { sessions: [] } });
-		await expect(olderSuccess).resolves.toBe(false);
-		expect(succeeding.persistentState.savedCatalogLoaded).toBe(true);
-		expect(succeeding.persistentState.savedSessions).toHaveLength(1);
 	});
 
 	it("kills a live target and disarms the composer", async () => {

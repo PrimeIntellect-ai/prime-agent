@@ -270,23 +270,15 @@ describe("SubagentSummaryLine", () => {
 	});
 
 	it("counts parentSessionId-only roster children exactly like the agents view", () => {
-		const rosterChild: SessionSummary = {
+		const rosterChild = {
 			id: "c1",
 			sessionId: "c1",
 			lifecycle: "live",
-			activity: "idle",
-			isSessionActive: false,
-			cwd: "/tmp",
-			isStreaming: false,
-			isCompacting: false,
-			attachedClients: 0,
-			messageCount: 0,
-			sessionActions: { queuedCount: 0, steering: [], followUps: [] },
 			runtimeKind: "subagent",
 			rlmChildId: "c1",
 			parentSessionId: "root-session",
 			rosterStatus: "idle",
-		};
+		} as SessionSummary;
 		expect(isDirectAgentChild(rosterChild, { sessionId: "root-session" })).toBe(true);
 		expect(countRosterSubagentStatuses([rosterChild], { sessionId: "root-session" }, new Set())).toEqual({
 			total: 1,
