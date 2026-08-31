@@ -218,6 +218,33 @@ describe("worker roster reporter", () => {
 		expect(sentDeltas.at(-1)?.entries.some((entry) => entry.agentId === "child-2")).toBe(false);
 	});
 
+	it("lets a composed session row beat a lingering queued marker during the bind window", () => {
+		const { daemon, sentDeltas } = makeWorkerReporter();
+		const parent = makeState({ activeSessionId: "parent-active" });
+		daemon.sessions.set(parent.activeSessionId, parent);
+		daemon.observeRosterEvent(
+			parent,
+			childUpdate(parent, { id: "child-1", label: "task", status: "queued", sessionDir: "/tmp/c" }),
+		);
+		daemon.flushRoster();
+
+		// The child session registers before any rlm_child_update reports the bind.
+		const childState = makeState({
+			activeSessionId: "child-active",
+			kind: "subagent",
+			rlmChildId: "child-1",
+			parentActiveSessionId: "parent-active",
+			messages: [{ role: "user", content: "hi" } as unknown as AgentMessage],
+		});
+		daemon.sessions.set(childState.activeSessionId, childState);
+		daemon.flushRoster();
+
+		const row = sentDeltas.at(-1)?.entries.find((entry) => entry.agentId === "child-1");
+		expect(row?.queuedChild).toBeUndefined();
+		expect(row?.summary.activeSessionId).toBe("child-active");
+		expect(daemon.rosterReporter.queuedChildren.size).toBe(0);
+	});
+
 	it("schedules a republish for retry and tool-execution transitions", () => {
 		const { daemon } = makeWorkerReporter();
 		const state = makeState({ activeSessionId: "root-active" });

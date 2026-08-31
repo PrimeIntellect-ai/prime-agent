@@ -6671,8 +6671,13 @@ export class AgentDaemon {
 			const entry = workerRosterEntryFromSummary(summary);
 			entries.set(entry.agentId, entry);
 		}
-		// Disjoint from session rows by the observeRosterChildUpdate lifecycle guard; insertion order is free.
+		// Session rows win: a run whose session already composed is bound, and the rlm_child_update
+		// that clears the queued marker can trail the session's own first events.
 		for (const [childId, queued] of reporter.queuedChildren) {
+			if (entries.has(childId)) {
+				reporter.queuedChildren.delete(childId);
+				continue;
+			}
 			entries.set(childId, queued);
 		}
 		// A terminal unbound child run owns no transcript: it is a removal, never a passivated row.
