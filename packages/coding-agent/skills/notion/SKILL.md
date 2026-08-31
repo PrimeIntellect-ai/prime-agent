@@ -1,5 +1,6 @@
 ---
-name: notion description: Search Notion and read/create/update pages and databases via Notion's official hosted MCP server. Tools are auto-discovered from the server at runtime.
+name: notion
+description: Search Notion and read/create/update pages and databases via Notion's official hosted MCP server. Tools are auto-discovered from the server at runtime.
 ---
 
 # Notion

@@ -1,5 +1,6 @@
 ---
-name: agent-message description: Message an agent's parent, siblings, or direct children through the daemon. Use the family roster to discover reachable agents and send direct text without spoofing sender identity.
+name: agent-message
+description: Message an agent's parent, siblings, or direct children through the daemon. Use the family roster to discover reachable agents and send direct text without spoofing sender identity.
 ---
 
 # Agent Message

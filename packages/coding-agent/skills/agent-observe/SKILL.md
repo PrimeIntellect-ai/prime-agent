@@ -1,5 +1,6 @@
 ---
-name: agent-observe description: Read-only observation of an agent's parent, siblings, and direct children. Use to inspect family status and bounded recent-message previews without mutating sessions.
+name: agent-observe
+description: Read-only observation of an agent's parent, siblings, and direct children. Use to inspect family status and bounded recent-message previews without mutating sessions.
 ---
 
 # Agent Observe
