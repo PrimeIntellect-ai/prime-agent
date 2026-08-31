@@ -395,6 +395,12 @@ export function activeActivityForSession(activeSession: ActiveSessionState): Ses
 	if (activeSession.runtime.metadata?.kind === "subagent") {
 		return "idle";
 	}
+	// An empty session never gets a summarizer verdict either (there is nothing
+	// to classify), so don't hold it at "working" forever. A first turn that has
+	// not persisted a message yet is busy and already returned "working" above.
+	if (activeSession.runtime.session.messages.length === 0) {
+		return "idle";
+	}
 	// Hold at "working" until the idle verdict is current, so the view never
 	// buckets an unlabeled idle session.
 	return isSummaryCurrent(activeSession) ? "idle" : "working";
