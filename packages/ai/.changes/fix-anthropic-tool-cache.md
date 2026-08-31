@@ -1,0 +1,1 @@
+- Fixed Anthropic-compatible prompt caching so the rolling cache marker advances to the latest tool result.
