@@ -52,7 +52,7 @@ import {
 	createAgentSessionServices,
 } from "./core/agent-session-services.js";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.js";
-import { AuthStorage } from "./core/auth-storage.js";
+import { createAgentAuthStorage } from "./core/ephemeral-auth-storage.js";
 import { exportFromFile } from "./core/export-html/index.js";
 import type { ExtensionFactory } from "./core/extensions/types.js";
 import { KeybindingsManager } from "./core/keybindings.js";
@@ -735,8 +735,10 @@ async function prepareRuntimeServices(options: {
 }): Promise<PreparedRuntimeServices> {
 	const { config, sessionManager } = options;
 	const effectiveAgentDir = config.agentDir ?? options.agentDir;
-	const authStorage = AuthStorage.create(join(effectiveAgentDir, "auth.json"), {
+	const authStorage = createAgentAuthStorage({
+		authPath: join(effectiveAgentDir, "auth.json"),
 		usePrimeCliConfig: effectiveAgentDir === options.agentDir,
+		environment: process.env,
 	});
 	const services = await createAgentSessionServices({
 		cwd: options.cwd,

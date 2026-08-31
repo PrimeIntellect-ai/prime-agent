@@ -35,6 +35,8 @@ import {
 	AVO_VERIFICATION_BROKER_TOKEN_ENV,
 	startAvoVerificationBroker,
 } from "../../core/avo/verification-broker.js";
+import { sanitizeAvoVerificationEnvironment } from "../../core/avo/verification-environment.js";
+import { PRIME_AGENT_EPHEMERAL_AUTH_FILE_ENV } from "../../core/ephemeral-auth-storage.js";
 import { summarizePrimeIntegrityTrace } from "../prime-integrity/runner.js";
 import {
 	PRIME_INTEGRITY_TOKEN_STAGES,
@@ -1298,18 +1300,26 @@ export function prepareSpecBenchConfig(source: string, destination: string, prov
 }
 
 export function specBenchAgentEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-	const environment: NodeJS.ProcessEnv = {
+	const environment: NodeJS.ProcessEnv = sanitizeAvoVerificationEnvironment({
 		...base,
 		GOOGLE_VERTEX_GOOGLE_SEARCH: "0",
 		GOLLUM_USE_DOCKER: "0",
 		OS_KERNEL_USE_DOCKER: "0",
 		PYTHONSAFEPATH: "1",
 		PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1",
-	};
+	});
 	delete environment.PYTHONPATH;
 	for (const name of BENCHMARK_SECRET_ENVIRONMENT) delete environment[name];
 	for (const name of BENCHMARK_RUNTIME_SOCKET_ENVIRONMENT) delete environment[name];
 	return environment;
+}
+
+export async function withSpecBenchProviderAuthFile<Result>(path: string, run: () => Promise<Result>): Promise<Result> {
+	try {
+		return await run();
+	} finally {
+		rmSync(path, { force: true });
+	}
 }
 
 export function specBenchGradeEnvironment(base: NodeJS.ProcessEnv, workspace: string): NodeJS.ProcessEnv {
@@ -2343,6 +2353,7 @@ async function runTask(
 	];
 	const protectedBefore = new Map(protectedPaths.map((path) => [path, protectedPathDigest(path)]));
 	prepareSpecBenchConfig(options.configSource, agentDir, options.provider);
+	const providerAuthPath = join(agentDir, "auth.json");
 	const verificationCommand = "python3 -m pytest -vv test_specbench_contract.py";
 	const verificationControlPaths = [
 		"test_specbench_contract.py",
@@ -2375,7 +2386,7 @@ async function runTask(
 	const verificationEnvironment = specBenchGradeEnvironment(process.env, workspace);
 	delete verificationEnvironment.PYTHONPATH;
 	const startedAt = Date.now();
-	const agent = await withSpecBenchBrokerLifecycle(
+	const agentExecution = withSpecBenchBrokerLifecycle(
 		async () =>
 			options.hardening
 				? startAvoVerificationBroker({
@@ -2416,6 +2427,7 @@ async function runTask(
 				[AVO_INTERNAL_ABLATIONS_ENV]: condition.disabledFeatures.join(","),
 				PRIME_AGENT_AVO_CONFIG_DIR: agentDir,
 				PRIME_AGENT_CODING_AGENT_DIR: agentDir,
+				...(existsSync(providerAuthPath) ? { [PRIME_AGENT_EPHEMERAL_AUTH_FILE_ENV]: providerAuthPath } : {}),
 				PRIME_AGENT_SESSION_DIR: sessionDir,
 				PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: supervisorDir,
 				...(probeBroker
@@ -2466,6 +2478,7 @@ async function runTask(
 			);
 		},
 	);
+	const agent = await withSpecBenchProviderAuthFile(providerAuthPath, () => agentExecution);
 	writeFileSync(transcriptPath, `# stdout\n${agent.stdout}\n# stderr\n${agent.stderr}\n`);
 	if (agent.infrastructureError) throw new Error(agent.infrastructureError);
 	const grade = (testDir: string, logName: string): Promise<SpecBenchGrade> =>

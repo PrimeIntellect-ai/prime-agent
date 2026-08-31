@@ -1,0 +1,1 @@
+- Fixed SpecBench provider authentication and inherited host secrets leaking into model-facing tool execution ([#4](https://github.com/PrimeIntellect-ai/prime-agent/issues/4))
