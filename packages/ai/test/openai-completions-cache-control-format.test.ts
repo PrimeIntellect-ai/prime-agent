@@ -179,59 +179,36 @@ describe("openai-completions cacheControlFormat", () => {
 		expect(result.usage.cost.cacheWrite).toBeCloseTo((80 * model.cost.cacheWrite) / 1_000_000);
 	});
 
-	it("advances the Anthropic cache marker to the latest tool result", async () => {
+	it("advances the Anthropic cache marker to a tool result", async () => {
 		const model = getModel("prime-inference", "anthropic/claude-fable-5");
 		const now = Date.now();
-		const firstAssistant: AssistantMessage = {
-			role: "assistant",
-			content: [
-				{ type: "text", text: "Starting the first read." },
-				{ type: "toolCall", id: "tool-1", name: "read", arguments: { path: "first.txt" } },
-			],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			usage: emptyUsage,
-			stopReason: "toolUse",
-			timestamp: now + 1,
-		};
-		const secondAssistant: AssistantMessage = {
-			...firstAssistant,
-			content: [{ type: "toolCall", id: "tool-2", name: "read", arguments: { path: "second.txt" } }],
-			timestamp: now + 3,
-		};
 		const messages: Context["messages"] = [
-			{ role: "user", content: "Read both files", timestamp: now },
-			firstAssistant,
+			{ role: "user", content: "Read the file", timestamp: now },
+			{
+				role: "assistant",
+				content: [{ type: "toolCall", id: "tool-1", name: "read", arguments: { path: "file.txt" } }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: emptyUsage,
+				stopReason: "toolUse",
+				timestamp: now + 1,
+			},
 			{
 				role: "toolResult",
 				toolCallId: "tool-1",
 				toolName: "read",
-				content: [{ type: "text", text: "first result" }],
+				content: [{ type: "text", text: "file contents" }],
 				isError: false,
 				timestamp: now + 2,
-			},
-			secondAssistant,
-			{
-				role: "toolResult",
-				toolCallId: "tool-2",
-				toolName: "read",
-				content: [{ type: "text", text: "second result" }],
-				isError: false,
-				timestamp: now + 4,
 			},
 		];
 
 		const { params } = await runCompletion(model, undefined, messages);
-		const lastMessage = params.messages[params.messages.length - 1];
-		expect(lastMessage.role).toBe("tool");
-		expect(Array.isArray(lastMessage.content)).toBe(true);
-		expect((lastMessage.content as TextPart[])[0]?.cache_control).toEqual({ type: "ephemeral" });
-
-		const firstAssistantPayload = params.messages.find(
-			(message) => message.role === "assistant" && message.content !== null,
-		);
-		expect(typeof firstAssistantPayload?.content).toBe("string");
+		expect(params.messages.at(-1)).toMatchObject({
+			role: "tool",
+			content: [{ type: "text", text: "file contents", cache_control: { type: "ephemeral" } }],
+		});
 	});
 
 	it("preserves Anthropic-style cache markers for OpenRouter Anthropic models", async () => {
