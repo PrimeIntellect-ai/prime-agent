@@ -352,8 +352,14 @@ export class DaemonAgentConnection implements AgentConnection {
 			connection.initialAttachPending = false;
 			const initialControlPlaneClose = connection.initialControlPlaneClose;
 			connection.initialControlPlaneClose = undefined;
-			// Replay through the one close handler so reasoned closes stay terminal here too.
-			if (initialControlPlaneClose) connection.handleTransportClose(initialControlPlaneClose);
+			if (initialControlPlaneClose) {
+				// No listeners exist yet: a terminal close must reject the attach (pre-transport
+				// semantics) instead of emitting into the void; the rest replays through the one handler.
+				if (getDaemonSocketCloseReason(initialControlPlaneClose) === "shutdown") {
+					throw initialControlPlaneClose;
+				}
+				connection.handleTransportClose(initialControlPlaneClose);
+			}
 			return connection;
 		} catch (error) {
 			connection.initialAttachPending = false;

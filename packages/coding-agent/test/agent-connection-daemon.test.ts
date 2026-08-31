@@ -1058,12 +1058,13 @@ describe("DaemonAgentConnection", () => {
 		} as unknown as DaemonWorkerClient;
 		const routed = new DaemonRoutedClient(asDaemonClient(supervisor), direct);
 
-		const connection = await DaemonAgentConnection.attach(routed, "active-1", { recoverDaemon });
+		// No listener can exist during construction, so the terminal close must reject the attach.
+		await expect(DaemonAgentConnection.attach(routed, "active-1", { recoverDaemon })).rejects.toThrow(
+			"Reason: shutdown",
+		);
 		await new Promise((resolveSettle) => setImmediate(resolveSettle));
-
 		expect(recoverDaemon).not.toHaveBeenCalled();
 		expect(supervisor.reconnectCount).toBe(0);
-		await connection.dispose();
 	});
 
 	it("keeps the source direct socket when a cross-worker reattach is rejected", async () => {
