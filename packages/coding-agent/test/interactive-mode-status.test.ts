@@ -1264,7 +1264,7 @@ describe("InteractiveMode pending bash components", () => {
 
 	const bashComponent = () => ({ render: () => [], invalidate: () => {} });
 
-	test("keeps pending bash components visible across queue refreshes", () => {
+	test("keeps pending bash components visible across queue display updates", () => {
 		const pendingMessagesContainer = new Container();
 		const component = bashComponent();
 		const fakeThis = {
@@ -1434,74 +1434,60 @@ describe("InteractiveMode pending bash components", () => {
 });
 
 describe("InteractiveMode connection events", () => {
-	test("rendering a switched session tolerates a transient queue refresh failure", async () => {
+	test("rendering a switched session updates the pending display from its snapshot", async () => {
 		const harness = {
 			resetCurrentSessionRenderState: vi.fn(),
 			renderInitialMessages: vi.fn(async () => {}),
-			refreshConnectionQueue: vi.fn(async () => {
-				throw new Error("queue unavailable");
-			}),
+			updatePendingMessagesDisplay: vi.fn(),
 			syncWorkingLoader: vi.fn(),
 		};
 
-		await expect(
-			(
-				InteractiveMode.prototype as unknown as {
-					renderCurrentSessionState(this: typeof harness): Promise<void>;
-				}
-			).renderCurrentSessionState.call(harness),
-		).resolves.toBeUndefined();
+		await (
+			InteractiveMode.prototype as unknown as {
+				renderCurrentSessionState(this: typeof harness): Promise<void>;
+			}
+		).renderCurrentSessionState.call(harness);
+		expect(harness.updatePendingMessagesDisplay).toHaveBeenCalledOnce();
 		expect(harness.syncWorkingLoader).toHaveBeenCalledOnce();
 	});
 
-	test("degrades heartbeat refresh failures without hiding queue refresh failures during rebind", async () => {
+	test("degrades heartbeat refresh failures while updating the pending display during rebind", async () => {
 		const rebindCurrentSession = (
 			InteractiveMode.prototype as unknown as { rebindCurrentSession(this: InteractiveMode): Promise<void> }
 		).rebindCurrentSession;
-		const createHarness = (
-			refreshConnectionQueue: () => Promise<void>,
-			refreshHeartbeatCatalog: () => Promise<void>,
-		) =>
-			({
-				unsubscribe: undefined,
-				localSessionHost: undefined,
-				toolDefinitionCache: { clear: vi.fn() },
-				applyRuntimeSettings: vi.fn(),
-				bindLocalSessionExtensions: true,
-				bindCurrentSessionExtensions: vi.fn(async () => {}),
-				subscribeToAgent: vi.fn(),
-				refreshConnectionQueue,
-				refreshHeartbeatCatalog,
-				updateAvailableProviderCount: vi.fn(async () => {}),
-				updateEditorBorderColor: vi.fn(),
-				updateTerminalTitle: vi.fn(),
-				setGoalAnnouncementBaseline: vi.fn(),
-				syncGoalTray: vi.fn(),
-				syncWorkingLoader: vi.fn(),
-				getGoalState: () => emptyGoalState(),
-			}) as unknown as InteractiveMode;
+		const updatePendingMessagesDisplay = vi.fn();
+		const subscribeToAgent = vi.fn();
+		const getState = vi.fn(async () => createConnectionState());
+		const harness = {
+			unsubscribe: undefined,
+			localSessionHost: undefined,
+			toolDefinitionCache: { clear: vi.fn() },
+			applyRuntimeSettings: vi.fn(),
+			bindLocalSessionExtensions: true,
+			bindCurrentSessionExtensions: vi.fn(async () => {}),
+			subscribeToAgent,
+			agentConnection: { getState },
+			patchConnectionState: vi.fn(),
+			refreshQueueSelectionFromState: vi.fn(),
+			updatePendingMessagesDisplay,
+			refreshHeartbeatCatalog: vi.fn(async () => {
+				throw new Error("heartbeat unavailable");
+			}),
+			updateAvailableProviderCount: vi.fn(async () => {}),
+			updateEditorBorderColor: vi.fn(),
+			updateTerminalTitle: vi.fn(),
+			setGoalAnnouncementBaseline: vi.fn(),
+			syncGoalTray: vi.fn(),
+			syncWorkingLoader: vi.fn(),
+			getGoalState: () => emptyGoalState(),
+		} as unknown as InteractiveMode;
 
-		await expect(
-			rebindCurrentSession.call(
-				createHarness(
-					vi.fn(async () => {}),
-					vi.fn(async () => {
-						throw new Error("heartbeat unavailable");
-					}),
-				),
-			),
-		).resolves.toBeUndefined();
-
-		await expect(
-			rebindCurrentSession.call(
-				createHarness(
-					vi.fn(async () => {
-						throw new Error("queue unavailable");
-					}),
-					vi.fn(async () => {}),
-				),
-			),
-		).rejects.toThrow("queue unavailable");
+		await expect(rebindCurrentSession.call(harness)).resolves.toBeUndefined();
+		expect(updatePendingMessagesDisplay).toHaveBeenCalledOnce();
+		// The queue re-sync must run after subscribing, or updates in the gap are lost.
+		expect(getState.mock.invocationCallOrder[0]).toBeGreaterThan(
+			subscribeToAgent.mock.invocationCallOrder[0] as number,
+		);
 	});
 
 	test("restores in-flight assistant state on every session render", async () => {
@@ -1694,6 +1680,64 @@ describe("InteractiveMode connection events", () => {
 		expect(fakeThis.renderInitialMessages).toHaveBeenCalledOnce();
 	});
 
+	test("exits stale queue browsing when a resync replaces the queue snapshot", async () => {
+		const queueSelection = new QueueSelection();
+		let editorText = "draft";
+		queueSelection.move({ steering: [], followUp: ["queued"] }, editorText, -1);
+		editorText = "queued";
+		const snapshot: AgentConnectionSnapshot = {
+			state: createConnectionState({
+				sessionActions: { queuedCount: 0, steering: [], followUps: [] },
+			}),
+			messages: [],
+		};
+		const fakeThis = {
+			connectionState: createConnectionState({
+				sessionActions: { queuedCount: 1, steering: [], followUps: ["queued"] },
+			}),
+			queueSelection,
+			pendingQueueEdit: undefined,
+			pendingQueueMove: false,
+			isApplyingQueueSelectionText: false,
+			editor: {
+				getText: () => editorText,
+				setText: (text: string) => {
+					editorText = text;
+				},
+			},
+			isBashRunning: () => false,
+			applyConnectionStateSnapshot: vi.fn(),
+			restoreTurnStartFromMessages: vi.fn(),
+			replaceSubagentSummary: vi.fn(),
+			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
+				messages: [],
+				thinkingLevel: "medium",
+				model: null,
+			})),
+			renderSessionContext: vi.fn(async () => {}),
+			restoreStreamingMessageFromSnapshot: vi.fn(),
+			updatePendingMessagesDisplay: vi.fn(),
+			updateTerminalTitle: vi.fn(),
+			setGoalAnnouncementBaseline: vi.fn(),
+			syncGoalTray: vi.fn(),
+			syncWorkingLoader: vi.fn(),
+			getGoalState: () => emptyGoalState(),
+		};
+		fakeThis.applyConnectionStateSnapshot.mockImplementation((state: AgentConnectionState) => {
+			fakeThis.connectionState = state;
+		});
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
+
+		await (
+			InteractiveMode.prototype as unknown as {
+				renderResyncedSession(this: unknown, value: AgentConnectionSnapshot): Promise<void>;
+			}
+		).renderResyncedSession.call(fakeThis, snapshot);
+
+		expect(queueSelection.isBrowsing).toBe(false);
+		expect(editorText).toBe("draft");
+	});
+
 	test("preserves client-local work while rendering a resynchronized snapshot", async () => {
 		const sideQuestion = { id: "side-1", status: "running" };
 		const extensionRequests = new Map([["request-1", { cancelLocal: vi.fn() }]]);
@@ -1727,6 +1771,7 @@ describe("InteractiveMode connection events", () => {
 			streamingComponent: {},
 			streamingMessage: {},
 			applyConnectionStateSnapshot: vi.fn(),
+			refreshQueueSelectionFromState: vi.fn(),
 			updateWorkingLoaderMessage: vi.fn(),
 			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
@@ -1736,7 +1781,7 @@ describe("InteractiveMode connection events", () => {
 			})),
 			renderSessionContext: vi.fn(async () => {}),
 			restoreStreamingMessageFromSnapshot,
-			refreshConnectionQueue: vi.fn(async () => {}),
+			updatePendingMessagesDisplay: vi.fn(),
 			flushPendingBashComponents: vi.fn(),
 			updateTerminalTitle: vi.fn(),
 			setGoalAnnouncementBaseline: vi.fn(),
@@ -1783,6 +1828,7 @@ describe("InteractiveMode connection events", () => {
 			isAgentCompacting: () => true,
 			isBashRunning: () => true,
 			applyConnectionStateSnapshot: vi.fn(),
+			refreshQueueSelectionFromState: vi.fn(),
 			restoreTurnStartFromMessages: vi.fn(),
 			replaceSubagentSummary: vi.fn(),
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
@@ -1792,7 +1838,7 @@ describe("InteractiveMode connection events", () => {
 			})),
 			renderSessionContext: vi.fn(async () => {}),
 			restoreStreamingMessageFromSnapshot: vi.fn(),
-			refreshConnectionQueue: vi.fn(async () => {}),
+			updatePendingMessagesDisplay: vi.fn(),
 			flushPendingBashComponents,
 			updateTerminalTitle: vi.fn(),
 			setGoalAnnouncementBaseline: vi.fn(),
@@ -1830,7 +1876,7 @@ describe("InteractiveMode connection events", () => {
 			}),
 			resetCurrentSessionRenderState: () => calls.push("reset"),
 			renderInitialMessages: async () => calls.push("messages"),
-			refreshConnectionQueue: async () => calls.push("queue"),
+			updatePendingMessagesDisplay: () => calls.push("display"),
 			syncWorkingLoader: () => calls.push("loader"),
 		};
 
@@ -1840,7 +1886,7 @@ describe("InteractiveMode connection events", () => {
 			}
 		).renderCurrentSessionState.call(fakeThis);
 
-		expect(calls).toEqual(["replacement", "reset", "messages", "queue", "loader"]);
+		expect(calls).toEqual(["replacement", "reset", "messages", "display", "loader"]);
 	});
 
 	test("drops a queued source event after the session is replaced", async () => {
@@ -3119,7 +3165,7 @@ class EventEmittingReplacementRuntime {
 
 describe("InteractiveMode session switch command catalog", () => {
 	test.each(["switchSession", "newSession", "fork"] as const)(
-		"refreshes an event-emitting in-process %s replacement exactly once before replay",
+		"refreshes the command catalog for an event-emitting in-process %s replacement exactly once before replay",
 		async (operation) => {
 			const sourceSession = createFakeConnectionSession("source-command");
 			const targetSession = createFakeConnectionSession("target-command");
@@ -3150,12 +3196,13 @@ describe("InteractiveMode session switch command catalog", () => {
 				resetExtensionUI: vi.fn(),
 				applyConnectionStateSnapshot: vi.fn(),
 				resetCurrentSessionRenderState: vi.fn(() => calls.push("reset")),
+				queueSelection: { selected: undefined },
 				setupAutocompleteProvider: vi.fn(() => calls.push("catalog")),
 				renderInitialMessages: vi.fn(async () => {
 					calls.push("render");
 					expect(fakeThis.connectionCommands.map((command) => command.name)).toEqual(["target-command"]);
 				}),
-				refreshConnectionQueue: vi.fn(async () => {}),
+				updatePendingMessagesDisplay: vi.fn(),
 				syncWorkingLoader: vi.fn(),
 				ui: { requestRender: vi.fn() },
 				handleEvent: vi.fn(),
@@ -4206,8 +4253,11 @@ describe("InteractiveMode goal status announcements", () => {
 describe("InteractiveMode tray goal label", () => {
 	type TrayUsage = { contextWindow: number; tokens: number | null; percent: number | null };
 	type TrayLabelHarness = {
-		heartbeats: AgentConnectionHeartbeat[];
+		heartbeatCatalog: AgentConnectionHeartbeat[];
+		subagentSnapshots: Map<string, never>;
 		connectionState: {
+			activeSessionId: string;
+			sessionId: string;
 			goal: GoalState;
 			heartbeat?: AgentCronJob | null;
 			contextUsage: TrayUsage | undefined;
@@ -4237,8 +4287,11 @@ describe("InteractiveMode tray goal label", () => {
 
 	test("shows active goals in the lower tray without an objective", () => {
 		const fakeThis = Object.create(InteractiveMode.prototype) as TrayLabelHarness;
-		fakeThis.heartbeats = [];
+		fakeThis.heartbeatCatalog = [];
+		fakeThis.subagentSnapshots = new Map<string, never>();
 		fakeThis.connectionState = {
+			activeSessionId: "active-1",
+			sessionId: "session-1",
 			goal: {
 				active: true,
 				status: "active",
@@ -4256,8 +4309,11 @@ describe("InteractiveMode tray goal label", () => {
 
 	test("combines active goals with token/context usage in one lower-tray label", () => {
 		const fakeThis = Object.create(InteractiveMode.prototype) as TrayLabelHarness;
-		fakeThis.heartbeats = [];
+		fakeThis.heartbeatCatalog = [];
+		fakeThis.subagentSnapshots = new Map<string, never>();
 		fakeThis.connectionState = {
+			activeSessionId: "active-1",
+			sessionId: "session-1",
 			goal: {
 				active: true,
 				status: "active",
@@ -4275,8 +4331,11 @@ describe("InteractiveMode tray goal label", () => {
 
 	test("combines active goals, active heartbeats, and context usage in one lower-tray label", () => {
 		const fakeThis = Object.create(InteractiveMode.prototype) as TrayLabelHarness;
-		fakeThis.heartbeats = [{ job: createHeartbeat("active") }];
+		fakeThis.heartbeatCatalog = [{ job: createHeartbeat("active") }];
+		fakeThis.subagentSnapshots = new Map<string, never>();
 		fakeThis.connectionState = {
+			activeSessionId: "active-1",
+			sessionId: "session-1",
 			goal: {
 				active: true,
 				status: "active",
@@ -4295,8 +4354,11 @@ describe("InteractiveMode tray goal label", () => {
 
 	test("omits the usage segment when token count is unknown", () => {
 		const fakeThis = Object.create(InteractiveMode.prototype) as TrayLabelHarness;
-		fakeThis.heartbeats = [];
+		fakeThis.heartbeatCatalog = [];
+		fakeThis.subagentSnapshots = new Map<string, never>();
 		fakeThis.connectionState = {
+			activeSessionId: "active-1",
+			sessionId: "session-1",
 			goal: {
 				active: true,
 				status: "active",

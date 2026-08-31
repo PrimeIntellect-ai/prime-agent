@@ -48,8 +48,8 @@ describe("HeartbeatManagerComponent", () => {
 	});
 
 	it("groups user and agent heartbeats and stays within terminal width", () => {
-		const component = new HeartbeatManagerComponent(
-			[
+		const component = new HeartbeatManagerComponent({
+			getHeartbeats: () => [
 				heartbeat("user", { source: "heartbeat" }),
 				heartbeat("agent", {
 					source: "rlm_heartbeat",
@@ -59,8 +59,11 @@ describe("HeartbeatManagerComponent", () => {
 					lastError: "the previous delivery failed",
 				}),
 			],
-			{ getRows: () => 20, onAction: async () => {}, onClose: () => {}, requestRender: () => {} },
-		);
+			getRows: () => 20,
+			onAction: async () => {},
+			onClose: () => {},
+			requestRender: () => {},
+		});
 		for (const width of [32, 48, 80]) {
 			const lines = component.render(width);
 			expect(lines.every((line) => visibleWidth(line) === width)).toBe(true);
@@ -81,9 +84,25 @@ describe("HeartbeatManagerComponent", () => {
 		expect(rendered.find((line) => line.includes("Esc close"))?.indexOf("Esc close")).toBe(titleColumn);
 	});
 
+	it("reads the current heartbeat list when rendered", () => {
+		let heartbeats = [heartbeat("user", { source: "heartbeat" })];
+		const component = new HeartbeatManagerComponent({
+			getHeartbeats: () => heartbeats,
+			getRows: () => 20,
+			onAction: async () => {},
+			onClose: () => {},
+			requestRender: () => {},
+		});
+
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("1 heartbeat.");
+		heartbeats = [heartbeat("user", { source: "heartbeat" }), heartbeat("agent", { source: "rlm_heartbeat" })];
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("2 heartbeats.");
+	});
+
 	it("uses arrows to open and go back, and closes with escape or the toggle shortcut", () => {
 		let closeCount = 0;
-		const component = new HeartbeatManagerComponent([heartbeat("user", { source: "heartbeat" })], {
+		const component = new HeartbeatManagerComponent({
+			getHeartbeats: () => [heartbeat("user", { source: "heartbeat" })],
 			getRows: () => 20,
 			onAction: async () => {},
 			onClose: () => closeCount++,
@@ -114,7 +133,8 @@ describe("HeartbeatManagerComponent", () => {
 
 	it("pauses and stops individual heartbeats immediately", async () => {
 		const actions: Array<{ id: string; action: AgentHeartbeatManagementAction }> = [];
-		const component = new HeartbeatManagerComponent([heartbeat("user", { source: "heartbeat" })], {
+		const component = new HeartbeatManagerComponent({
+			getHeartbeats: () => [heartbeat("user", { source: "heartbeat" })],
 			getRows: () => 20,
 			onAction: async (entry, action) => {
 				actions.push({ id: entry.job.id, action });

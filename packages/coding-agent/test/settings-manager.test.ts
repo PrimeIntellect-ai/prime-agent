@@ -206,6 +206,19 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("mermaid rendering mode", () => {
+		it("survives a non-object markdown settings value when saving the mode", async () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ markdown: "custom" }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			manager.setMermaidRenderingMode("off");
+			await manager.flush();
+
+			expect(manager.getMermaidRenderingMode()).toBe("off");
+			expect(SettingsManager.create(projectDir, agentDir).getMermaidRenderingMode()).toBe("off");
+		});
+	});
+
 	describe("autoRefine", () => {
 		it("defaults to enabled while preserving explicit opt-out", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

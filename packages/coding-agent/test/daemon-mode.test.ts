@@ -70,6 +70,103 @@ describe("daemon mode helpers", () => {
 		expect(client.id).toBe("public-client");
 	});
 
+	it("waits for overlapping Bash commands with a bounded close deadline", async () => {
+		vi.useFakeTimers();
+		try {
+			const daemon = new AgentDaemon("/tmp/unused-daemon.sock", {
+				defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+				createRuntime: vi.fn(),
+			});
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<DaemonOutbound | undefined>;
+				abortBashForClose(state: ActiveSessionState): Promise<void>;
+			};
+
+			let resolveFirstBash!: () => void;
+			let resolveSecondBash!: () => void;
+			const firstBash = new Promise<void>((resolve) => {
+				resolveFirstBash = resolve;
+			});
+			const secondBash = new Promise<void>((resolve) => {
+				resolveSecondBash = resolve;
+			});
+			let isBashRunning = false;
+			const abortBash = vi.fn();
+			const state = makeState("active");
+			state.runtime = {
+				...state.runtime,
+				session: {
+					get isBashRunning() {
+						return isBashRunning;
+					},
+					runUserBash: vi.fn(() => {
+						isBashRunning = true;
+						return firstBash;
+					}),
+					executeBash: vi.fn(() => secondBash),
+					abortBash,
+				},
+			} as never;
+			internals.sessions.set(state.activeSessionId, state);
+			const client = makeClient("client", state.activeSessionId);
+
+			await internals.handleCommand(client, {
+				id: "first",
+				type: "execute_bash",
+				activeSessionId: state.activeSessionId,
+				command: "first",
+			});
+			const secondResponse = internals.handleCommand(client, {
+				id: "second",
+				type: "execute_bash_and_wait",
+				activeSessionId: state.activeSessionId,
+				command: "second",
+			});
+			resolveSecondBash();
+			await secondResponse;
+
+			const closing = internals.abortBashForClose(state);
+			expect(await Promise.race([closing.then(() => "done"), Promise.resolve("pending")])).toBe("pending");
+			resolveFirstBash();
+			await expect(closing).resolves.toBeUndefined();
+			expect(abortBash).toHaveBeenCalledOnce();
+
+			let isStalledBashRunning = false;
+			const abortStalledBash = vi.fn();
+			const stalledState = makeState("stalled");
+			stalledState.runtime = {
+				...stalledState.runtime,
+				session: {
+					get isBashRunning() {
+						return isStalledBashRunning;
+					},
+					runUserBash: vi.fn(() => {
+						isStalledBashRunning = true;
+						return new Promise<void>(() => {});
+					}),
+					abortBash: abortStalledBash,
+				},
+			} as never;
+			internals.sessions.set(stalledState.activeSessionId, stalledState);
+			await internals.handleCommand(makeClient("stalled-client", stalledState.activeSessionId), {
+				id: "stalled",
+				type: "execute_bash",
+				activeSessionId: stalledState.activeSessionId,
+				command: "stalled",
+			});
+
+			const stalledClose = internals.abortBashForClose(stalledState);
+			await vi.advanceTimersByTimeAsync(4999);
+			expect(await Promise.race([stalledClose.then(() => "done"), Promise.resolve("pending")])).toBe("pending");
+			await vi.advanceTimersByTimeAsync(1);
+			await expect(stalledClose).resolves.toBeUndefined();
+			expect(abortStalledBash).toHaveBeenCalledOnce();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("normalizes daemon session names before validation and persistence", async () => {
 		const daemon = new AgentDaemon("/tmp/unused-daemon.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
@@ -969,18 +1066,19 @@ describe("daemon mode helpers", () => {
 			const registryPath = join(fixture.parentArtifactDir, "rlm-subagents.jsonl");
 			const entry = JSON.parse(readFileSync(registryPath, "utf8")) as Record<string, unknown>;
 			entry.status = "running";
+			delete entry.sessionDir;
 			writeFileSync(registryPath, `${JSON.stringify(entry)}\n`);
 			const internals = fixture.daemon as unknown as {
 				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
-				listPassiveRlmSubagents(): Promise<Array<{ entry: { childId: string } }>>;
+				listPassiveRlmSubagents(): Promise<Array<{ entry: { childId: string; status: string } }>>;
 				createAgentMessageController(
 					getCurrentState: () => ActiveSessionState | undefined,
 				): AgentSessionMessageController;
 			};
 			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
 
-			expect((await internals.listPassiveRlmSubagents()).map(({ entry }) => entry.childId)).toContain(
-				fixture.childId,
+			expect((await internals.listPassiveRlmSubagents()).map(({ entry }) => entry)).toContainEqual(
+				expect.objectContaining({ childId: fixture.childId, status: "running" }),
 			);
 			await expect(internals.createAgentMessageController(() => parentState).roster?.()).resolves.toMatchObject({
 				entries: [expect.objectContaining({ relationship: "child", name: "renamed-worker" })],
@@ -1850,6 +1948,85 @@ describe("daemon mode helpers", () => {
 				"Target session has too many pending messages",
 			);
 			expect(connectionCount).toBe(1);
+		} finally {
+			if (previousSupervisorSocket === undefined) {
+				delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+			} else {
+				process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSupervisorSocket;
+			}
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not retry after the supervisor receives an agent message", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pa-msg-disconnect-"));
+		const socketPath = join(tempDir, "d.sock");
+		let requestCount = 0;
+		const server: Server = createServer((socket) => {
+			socket.on("error", () => undefined);
+			socket.write(
+				`${JSON.stringify({
+					type: "daemon_hello",
+					socketPath,
+					protocol: DAEMON_PROTOCOL_INFO,
+					schemaId: DAEMON_SCHEMA_ID,
+					clientId: "supervisor",
+					serverCapabilities: [],
+				})}\n`,
+			);
+			let buffer = "";
+			socket.on("data", (chunk) => {
+				buffer += chunk.toString();
+				const newline = buffer.indexOf("\n");
+				if (newline === -1) return;
+				const wire = JSON.parse(buffer.slice(0, newline)) as {
+					id: string;
+					command?: { type: string };
+					type: string;
+				};
+				const command = wire.command ?? wire;
+				requestCount++;
+				if (requestCount === 1) {
+					socket.destroy();
+					return;
+				}
+				socket.write(
+					`${JSON.stringify({
+						type: "response",
+						id: wire.id,
+						command: command.type,
+						success: true,
+						data: {},
+					})}\n`,
+				);
+			});
+		});
+		const previousSupervisorSocket = process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
+		try {
+			await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+			process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = socketPath;
+			const daemon = new AgentDaemon("/tmp/prime-agent-worker-test.sock", {
+				defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+				createRuntime: async () => {
+					throw new Error("unexpected runtime creation");
+				},
+				worker: { authenticationToken: "worker-token" },
+			});
+			const sendRemoteAgentSessionMessage = (
+				daemon as unknown as {
+					sendRemoteAgentSessionMessage(
+						fromState: ActiveSessionState,
+						targetSelector: string,
+						message: string,
+					): Promise<unknown>;
+				}
+			).sendRemoteAgentSessionMessage.bind(daemon);
+
+			await expect(sendRemoteAgentSessionMessage(makeState("source"), "remote", "continue")).rejects.toThrow(
+				"Connection to the Prime Agent daemon closed",
+			);
+			expect(requestCount).toBe(1);
 		} finally {
 			if (previousSupervisorSocket === undefined) {
 				delete process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV];
@@ -5789,7 +5966,7 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("re-adopts a resident child when its passivation close fails", async () => {
+	it("keeps ownership of a resident child until passivation succeeds", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passivation-close-failure-"));
 		let releaseAbort!: () => void;
 		const abortGate = new Promise<void>((resolve) => {
@@ -5813,7 +5990,6 @@ describe("daemon mode helpers", () => {
 			const childState = await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
 			const parentSession = parentState.runtime.session as unknown as {
 				releaseRlmChildSession: ReturnType<typeof vi.fn>;
-				registerRlmChildSession: ReturnType<typeof vi.fn>;
 			};
 			let parentOwnsChild = true;
 			let forwarderActive = true;
@@ -5826,16 +6002,11 @@ describe("daemon mode helpers", () => {
 			});
 			parentSession.releaseRlmChildSession = vi.fn(() => {
 				if (!parentOwnsChild) return false;
-				parentOwnsChild = false;
-				return unsubscribeForwarder;
+				return () => {
+					parentOwnsChild = false;
+					unsubscribeForwarder();
+				};
 			});
-			parentSession.registerRlmChildSession = vi.fn(
-				(_childId: string, _childSession: unknown, unsubscribe: () => void) => {
-					parentOwnsChild = true;
-					forwarderActive = unsubscribe === unsubscribeForwarder;
-					return true;
-				},
-			);
 			childState.unsubscribe = vi
 				.fn()
 				.mockImplementationOnce(() => {
@@ -5861,11 +6032,6 @@ describe("daemon mode helpers", () => {
 			await expect(delivery).resolves.toMatchObject({ deliveryStatus: "delivered" });
 			expect(internals.sessions.get(childState.activeSessionId)).toBe(childState);
 			expect(parentOwnsChild).toBe(true);
-			expect(parentSession.registerRlmChildSession).toHaveBeenCalledWith(
-				fixture.childId,
-				childState.runtime.session,
-				unsubscribeForwarder,
-			);
 			expect(unsubscribeForwarder).not.toHaveBeenCalled();
 			emitChildUpdate("recap after failed close");
 			expect(parentUpdates).toEqual(["recap after failed close"]);
@@ -8979,6 +9145,7 @@ function makeRuntimeSession(
 		},
 		setSubagentRuntimeHost: vi.fn(),
 		getRlmChildRunStatus: vi.fn(() => "running"),
+		getRlmChildSnapshots: vi.fn(() => []),
 		registerRlmChildSession: vi.fn(() => true),
 		releaseRlmChildSession: vi.fn(() => vi.fn()),
 		subscribe: vi.fn(() => vi.fn()),

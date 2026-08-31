@@ -1,0 +1,1 @@
+- Removed the `getOverflowPatterns()` test helper export from `utils/overflow.ts`; use `isContextOverflow()` directly.

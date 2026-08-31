@@ -2272,17 +2272,30 @@ export class DaemonSupervisor {
 				? resolve(command.sessionPath)
 				: await this.catalog.resolve(command.sessionPath, config.cwd ?? process.cwd(), config.sessionDir);
 			createCommand = { ...createCommand, sessionPath };
-			const existing = this.findWorkerBySessionFile(sessionPath);
-			if (existing && !(await this.reclaimStaleWorkerRegistration(existing, command.launchEnv !== undefined))) {
-				return this.reuseWorkerForCreate(existing, ownerClientId, sessionPath);
-			}
 		}
 		const key = createCommand.sessionPath
 			? canonicalSessionPath(createCommand.sessionPath)
 			: `new:${command.id ? createCommandIdempotencyKey(clientId, command.id) : createActiveSessionId()}`;
 		const pending = this.openingWorkers.get(key);
 		if (pending) {
-			return pending;
+			return this.joinOpeningWorker(pending, ownerClientId, createCommand.sessionPath ?? key);
+		}
+		if (createCommand.sessionPath) {
+			const existing = this.findWorkerBySessionFile(createCommand.sessionPath);
+			if (existing && !(await this.reclaimStaleWorkerRegistration(existing, command.launchEnv !== undefined))) {
+				return this.reuseWorkerForCreate(existing, ownerClientId, createCommand.sessionPath);
+			}
+			// The reclaim await may have let a concurrent opener register; join it instead of double-launching.
+			const opened = this.openingWorkers.get(key);
+			if (opened) {
+				return this.joinOpeningWorker(opened, ownerClientId, createCommand.sessionPath);
+			}
+		}
+		if (createCommand.sessionPath) {
+			const existing = this.findWorkerBySessionFile(createCommand.sessionPath);
+			if (existing && !(await this.reclaimStaleWorkerRegistration(existing, command.launchEnv !== undefined))) {
+				return this.reuseWorkerForCreate(existing, ownerClientId, createCommand.sessionPath);
+			}
 		}
 		const opening = (async () => {
 			if (!createCommand.name) return this.launchWorker(createCommand, undefined, ownerClientId);
@@ -2311,20 +2324,68 @@ export class DaemonSupervisor {
 		}
 	}
 
-	private reuseWorkerForCreate(
+	private async reuseWorkerForCreate(
 		worker: ResidentWorker,
 		ownerClientId: string | undefined,
 		sessionPath: string,
-	): ResidentWorker {
+	): Promise<ResidentWorker> {
 		if (worker.descriptor.lifecycle === "failed") {
 			throw new Error(
 				`Session "${sessionPath}" is registered to a failed worker that could not be safely reclaimed`,
 			);
 		}
-		if (worker.descriptor.ownerClientId === ownerClientId) {
-			return worker;
+		this.assertWorkerCreateOwner(worker, ownerClientId, sessionPath);
+		if (!this.isWorkerReadyForCreate(worker)) {
+			if (worker.recovery) {
+				await worker.recovery;
+			} else if (this.isWorkerRecoveryEligible(worker)) {
+				await this.recoverWorker(worker);
+			}
 		}
-		throw new SessionAlreadyActiveError(sessionPath, worker.descriptor.rootActiveSessionId);
+		const current = this.workers.get(worker.descriptor.workerId);
+		if (!current) {
+			throw new Error(`Session "${sessionPath}" worker recovery was interrupted; retry opening the session`);
+		}
+		this.assertWorkerCreateOwner(current, ownerClientId, sessionPath);
+		if (!this.isWorkerReadyForCreate(current)) {
+			if (!current.summaries.has(current.descriptor.rootActiveSessionId)) {
+				throw new Error(
+					`Session "${sessionPath}" worker is unavailable for reuse: assigned root session is missing`,
+				);
+			}
+			const detail = current.descriptor.lastError ? `: ${current.descriptor.lastError}` : "";
+			throw new Error(`Session "${sessionPath}" worker is ${this.effectiveWorkerState(current)}${detail}`);
+		}
+		return current;
+	}
+
+	private async joinOpeningWorker(
+		pending: Promise<ResidentWorker>,
+		ownerClientId: string | undefined,
+		sessionPath: string,
+	): Promise<ResidentWorker> {
+		const worker = await pending;
+		this.assertWorkerCreateOwner(worker, ownerClientId, sessionPath);
+		return worker;
+	}
+
+	private assertWorkerCreateOwner(
+		worker: ResidentWorker,
+		ownerClientId: string | undefined,
+		sessionPath: string,
+	): void {
+		if (worker.descriptor.ownerClientId !== ownerClientId) {
+			throw new SessionAlreadyActiveError(sessionPath, worker.descriptor.rootActiveSessionId);
+		}
+	}
+
+	private isWorkerReadyForCreate(worker: ResidentWorker): boolean {
+		return (
+			worker.descriptor.lifecycle === "ready" &&
+			worker.client !== undefined &&
+			worker.summaries.has(worker.descriptor.rootActiveSessionId) &&
+			!this.isWorkerStopping(worker)
+		);
 	}
 
 	/**
@@ -3251,7 +3312,12 @@ export class DaemonSupervisor {
 		}
 		const response = await worker.client.request({ type: "list" }, 5000);
 		const summaries = sessionSummariesFromResponse(response);
-		worker.summaries = new Map(summaries.map((summary) => [summary.activeSessionId ?? summary.id, summary]));
+		const nextSummaries = new Map(summaries.map((summary) => [summary.activeSessionId ?? summary.id, summary]));
+		const root = nextSummaries.get(worker.descriptor.rootActiveSessionId);
+		if (recovery && !root) {
+			throw new Error(`Session worker omitted its root session during recovery`);
+		}
+		worker.summaries = nextSummaries;
 		for (const summary of summaries) {
 			const activeSessionId = summary.activeSessionId ?? summary.id;
 			if (summary.streamingMessage?.role === "assistant") {
@@ -3260,7 +3326,6 @@ export class DaemonSupervisor {
 				this.streamReconstructor.clear(activeSessionId);
 			}
 		}
-		const root = worker.summaries.get(worker.descriptor.rootActiveSessionId);
 		if (root) {
 			if (recovery) {
 				await this.assertRecoveryAllowed();

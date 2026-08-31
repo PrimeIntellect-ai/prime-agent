@@ -9,7 +9,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { type Api, getLogger, type Model } from "@earendil-works/pi-ai";
@@ -193,9 +193,11 @@ import {
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
 import {
 	createRlmLedgerRegistrySeedSource,
+	type LegacyRlmSubagentRegistryEntry,
 	type RlmLedgerDeleteReason,
 	type RlmLedgerEdge,
 	RlmSpawnLedger,
+	readLegacyRlmSubagentRegistry as readLegacyRlmSubagentRegistryFile,
 } from "./rlm-ledger.js";
 import {
 	readRlmSubagentDisplayEntry,
@@ -401,17 +403,6 @@ interface PassiveRlmSubagentEntry {
 	model?: { provider: string; modelId: string };
 	status: "running" | "completed" | "deleted";
 	createdAt: number;
-}
-
-/**
- * Legacy per-parent `rlm-subagents.jsonl` entry shape, exactly as the daemon
- * wrote it before the spawn ledger became topology authority. Read-only:
- * registries are consumed only as the ledger seed source and as fallback
- * hydration metadata for pre-ledger children without a display file.
- */
-interface LegacyRlmSubagentRegistryEntry extends PassiveRlmSubagentEntry {
-	type: "rlm_subagent";
-	updatedAt: string;
 }
 
 /** Spread-ready optional metadata fields shared by display files and legacy registry entries. */
@@ -957,50 +948,14 @@ export class AgentDaemon {
 		return join(getSessionArtifactPathForFile(parentSessionFile, parentSessionId), RLM_SUBAGENT_REGISTRY_FILE);
 	}
 
-	private async readLegacyRlmSubagentRegistry(
+	private readLegacyRlmSubagentRegistry(
 		path: string,
 		throwOnReadError = false,
 	): Promise<LegacyRlmSubagentRegistryEntry[]> {
-		let lines: string[];
-		try {
-			lines = (await readFile(path, "utf8")).split(/\r?\n/);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-				this.log(`failed to read RLM subagent registry: ${error instanceof Error ? error.message : String(error)}`);
-				if (throwOnReadError) {
-					throw error;
-				}
-			}
-			return [];
-		}
-		const latest = new Map<string, LegacyRlmSubagentRegistryEntry>();
-		for (const line of lines) {
-			const trimmed = line.trim();
-			if (!trimmed) {
-				continue;
-			}
-			try {
-				const entry = JSON.parse(trimmed) as Partial<LegacyRlmSubagentRegistryEntry>;
-				if (
-					entry.type !== "rlm_subagent" ||
-					typeof entry.childId !== "string" ||
-					typeof entry.sessionName !== "string" ||
-					typeof entry.sessionDir !== "string" ||
-					typeof entry.sessionFile !== "string" ||
-					(entry.status !== "running" && entry.status !== "completed" && entry.status !== "deleted") ||
-					(entry.rlmDepth !== undefined && (!Number.isSafeInteger(entry.rlmDepth) || entry.rlmDepth < 0)) ||
-					(entry.rlmMaxDepth !== undefined && (!Number.isSafeInteger(entry.rlmMaxDepth) || entry.rlmMaxDepth < 0))
-				) {
-					continue;
-				}
-				latest.set(entry.childId, entry as LegacyRlmSubagentRegistryEntry);
-			} catch (error) {
-				this.log(
-					`ignored malformed RLM subagent registry entry: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-		}
-		return [...latest.values()];
+		return readLegacyRlmSubagentRegistryFile(path, {
+			throwOnReadError,
+			log: (message) => this.log(message),
+		});
 	}
 
 	/**
@@ -2679,12 +2634,9 @@ export class AgentDaemon {
 			try {
 				await this.closeSession(state, "shutdown", true, false);
 			} catch (error) {
-				// A pre-removal close failure must not strand a resident child outside its
-				// parent's ownership map or disconnect its event forwarder.
 				if (
 					this.sessions.get(state.activeSessionId) === state &&
-					this.sessions.get(parentActiveSessionId) === parentState &&
-					parentState.runtime.session.registerRlmChildSession(childId, state.runtime.session, unsubscribeChild)
+					this.sessions.get(parentActiveSessionId) === parentState
 				) {
 					throw error;
 				}
@@ -4228,28 +4180,23 @@ export class AgentDaemon {
 				}
 				// Respond before completion (bash can outlive the client request
 				// timeout); output and completion stream via bash_* session events.
-				void state.runtime.session
-					.runUserBash(command.command, {
-						excludeFromContext: command.excludeFromContext,
-						transient: command.transient,
-						runId: command.runId,
-					})
-					.catch((error) => {
-						this.broadcastToSession(
-							state,
-							failure(undefined, "execute_bash", error, serializeDaemonError(error)),
-						);
-					});
+				const bash = state.runtime.session.runUserBash(command.command, {
+					excludeFromContext: command.excludeFromContext,
+					transient: command.transient,
+					runId: command.runId,
+				});
+				state.inFlightBash = Promise.allSettled([state.inFlightBash, bash]).then(() => undefined);
+				void bash.catch((error) => {
+					this.broadcastToSession(state, failure(undefined, "execute_bash", error, serializeDaemonError(error)));
+				});
 				return success(command.id, "execute_bash");
 			}
 
 			case "execute_bash_and_wait": {
 				const state = this.getSessionState(command.activeSessionId);
-				return success(
-					command.id,
-					"execute_bash_and_wait",
-					await state.runtime.session.executeBash(command.command),
-				);
+				const bash = state.runtime.session.executeBash(command.command);
+				state.inFlightBash = Promise.allSettled([state.inFlightBash, bash]).then(() => undefined);
+				return success(command.id, "execute_bash_and_wait", await bash);
 			}
 
 			case "abort_bash": {
@@ -5742,42 +5689,45 @@ export class AgentDaemon {
 			throw new Error(`Unknown active session: ${targetSelector}`);
 		}
 		const deadline = Date.now() + 30_000;
+		let client: DaemonClient | undefined;
 		let lastError: unknown;
 		while (Date.now() < deadline && !this.shuttingDown) {
-			const client = new DaemonClient(supervisorSocketPath);
-			let receivedResponse = false;
+			const candidate = new DaemonClient(supervisorSocketPath);
 			try {
-				await client.connect(1000);
-				await client.waitForHello(1000);
-				const response = await client.request(
-					{
-						type: "send_message",
-						targetActiveSessionId: targetSelector,
-						message,
-						fromActiveSessionId: fromState.activeSessionId,
-						agentOrigin: true,
-					},
-					30_000,
-				);
-				receivedResponse = true;
-				if (!response.success) {
-					throw deserializeDaemonError(response);
-				}
-				if (!response.data || typeof response.data !== "object") {
-					throw new Error("Supervisor returned an invalid agent-message receipt");
-				}
-				return response.data as AgentSessionMessageReceipt;
+				await candidate.connect(1000);
+				await candidate.waitForHello(1000);
+				client = candidate;
+				break;
 			} catch (error) {
 				lastError = error;
-				if (receivedResponse) {
-					throw error;
-				}
-			} finally {
-				client.close();
+				candidate.close();
 			}
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
 		}
-		throw lastError instanceof Error ? lastError : new Error(`Unknown active session: ${targetSelector}`);
+		if (!client) {
+			throw lastError instanceof Error ? lastError : new Error(`Unknown active session: ${targetSelector}`);
+		}
+		try {
+			const response = await client.request(
+				{
+					type: "send_message",
+					targetActiveSessionId: targetSelector,
+					message,
+					fromActiveSessionId: fromState.activeSessionId,
+					agentOrigin: true,
+				},
+				30_000,
+			);
+			if (!response.success) {
+				throw deserializeDaemonError(response);
+			}
+			if (!response.data || typeof response.data !== "object") {
+				throw new Error("Supervisor returned an invalid agent-message receipt");
+			}
+			return response.data as AgentSessionMessageReceipt;
+		} finally {
+			client.close();
+		}
 	}
 
 	private async acceptAgentSessionMessage(
@@ -6277,14 +6227,12 @@ export class AgentDaemon {
 	}
 
 	private async abortBashForClose(state: ActiveSessionState): Promise<void> {
-		if (!state.runtime.session.isBashRunning) {
+		const session = state.runtime.session;
+		if (!session.isBashRunning) {
 			return;
 		}
-		state.runtime.session.abortBash();
-		const deadline = Date.now() + UPDATE_RESTART_ABORT_BASH_TIMEOUT_MS;
-		while (state.runtime.session.isBashRunning && Date.now() < deadline) {
-			await delay(50);
-		}
+		session.abortBash();
+		await Promise.race([state.inFlightBash ?? Promise.resolve(), delay(UPDATE_RESTART_ABORT_BASH_TIMEOUT_MS)]);
 	}
 
 	private async closeSessionOnce(

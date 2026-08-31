@@ -1613,7 +1613,7 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(supervisor.persistWorker).toHaveBeenCalledWith(worker);
 	});
 
-	it("rejects create reuse when a failed worker cannot be safely reclaimed", () => {
+	it("rejects create reuse when a failed worker cannot be safely reclaimed", async () => {
 		const worker = {
 			descriptor: {
 				workerId: "failed-unreclaimed",
@@ -1622,10 +1622,173 @@ describe("daemon worker supervisor monitoring", () => {
 			},
 		};
 		const supervisor = Object.create(DaemonSupervisor.prototype) as {
-			reuseWorkerForCreate(target: typeof worker, ownerClientId: undefined, sessionPath: string): typeof worker;
+			reuseWorkerForCreate(
+				target: typeof worker,
+				ownerClientId: undefined,
+				sessionPath: string,
+			): Promise<typeof worker>;
 		};
 
-		expect(() => supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/failed.jsonl")).toThrow(/failed worker/);
+		await expect(supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/failed.jsonl")).rejects.toThrow(
+			/failed worker/,
+		);
+	});
+
+	it("waits for worker recovery before reusing a saved session", async () => {
+		const root = { id: "active-root", activeSessionId: "active-root", sessionId: "session-root", cwd: "/tmp" };
+		const recovery = createDeferred<void>();
+		const worker = {
+			descriptor: {
+				workerId: "recovering-worker",
+				rootActiveSessionId: root.activeSessionId,
+				lifecycle: "recovering",
+			},
+			client: undefined as object | undefined,
+			summaries: new Map<string, SessionSummary>(),
+			recovery: recovery.promise,
+			intentionalStop: false,
+		};
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+		}) as {
+			reuseWorkerForCreate(
+				target: typeof worker,
+				ownerClientId: undefined,
+				sessionPath: string,
+			): Promise<typeof worker>;
+		};
+
+		let settled = false;
+		const reused = supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/session.jsonl").finally(() => {
+			settled = true;
+		});
+		await Promise.resolve();
+		expect(settled).toBe(false);
+
+		worker.descriptor.lifecycle = "ready";
+		worker.client = {};
+		worker.summaries.set(root.activeSessionId, root as SessionSummary);
+		recovery.resolve();
+
+		await expect(reused).resolves.toBe(worker);
+	});
+
+	it("starts recovery before reusing a persisted recovering worker", async () => {
+		const root = { id: "active-root", activeSessionId: "active-root", sessionId: "session-root", cwd: "/tmp" };
+		const worker = {
+			descriptor: {
+				workerId: "persisted-recovering-worker",
+				rootActiveSessionId: root.activeSessionId,
+				lifecycle: "recovering",
+			},
+			client: undefined as object | undefined,
+			summaries: new Map<string, SessionSummary>(),
+			intentionalStop: false,
+		};
+		const recoverWorker = vi.fn(async () => {
+			worker.descriptor.lifecycle = "ready";
+			worker.client = {};
+			worker.summaries.set(root.activeSessionId, root as SessionSummary);
+		});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			recoverWorker,
+		}) as {
+			reuseWorkerForCreate(
+				target: typeof worker,
+				ownerClientId: undefined,
+				sessionPath: string,
+			): Promise<typeof worker>;
+		};
+
+		await expect(supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/session.jsonl")).resolves.toBe(worker);
+		expect(recoverWorker).toHaveBeenCalledOnce();
+	});
+
+	it("starts recovery for a disconnected worker still marked ready", async () => {
+		const root = { id: "active-root", activeSessionId: "active-root", sessionId: "session-root", cwd: "/tmp" };
+		const worker = {
+			descriptor: {
+				workerId: "disconnected-ready-worker",
+				rootActiveSessionId: root.activeSessionId,
+				lifecycle: "ready",
+			},
+			client: undefined as object | undefined,
+			summaries: new Map([[root.activeSessionId, root as SessionSummary]]),
+			intentionalStop: false,
+		};
+		const recoverWorker = vi.fn(async () => {
+			worker.client = {};
+		});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			recoverWorker,
+		}) as {
+			reuseWorkerForCreate(
+				target: typeof worker,
+				ownerClientId: undefined,
+				sessionPath: string,
+			): Promise<typeof worker>;
+		};
+
+		await expect(supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/session.jsonl")).resolves.toBe(worker);
+		expect(recoverWorker).toHaveBeenCalledOnce();
+	});
+
+	it("rejects recovered workers whose assigned root is still missing", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "rootless-worker",
+				rootActiveSessionId: "active-root",
+				lifecycle: "ready",
+			},
+			client: {},
+			summaries: new Map<string, SessionSummary>(),
+			recovery: Promise.resolve(),
+			intentionalStop: false,
+		};
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+		}) as {
+			reuseWorkerForCreate(
+				target: typeof worker,
+				ownerClientId: undefined,
+				sessionPath: string,
+			): Promise<typeof worker>;
+		};
+
+		await expect(supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/session.jsonl")).rejects.toThrow(
+			"assigned root session is missing",
+		);
+	});
+
+	it("preserves cached summaries when recovery omits the assigned root", async () => {
+		const root = { id: "active-root", activeSessionId: "active-root", sessionId: "session-root", cwd: "/tmp" };
+		const worker = {
+			descriptor: {
+				workerId: "root-omitting-worker",
+				rootActiveSessionId: root.activeSessionId,
+			},
+			client: {
+				request: vi.fn(async () =>
+					success(undefined, "list", {
+						sessions: [{ id: "other", activeSessionId: "other", sessionId: "session-other", cwd: "/tmp" }],
+					}),
+				),
+			},
+			summaries: new Map([[root.activeSessionId, root as SessionSummary]]),
+			intentionalStop: false,
+		};
+		const supervisor = Object.create(DaemonSupervisor.prototype) as {
+			refreshWorkerSummaries(target: typeof worker, recovery: boolean): Promise<void>;
+		};
+
+		await expect(supervisor.refreshWorkerSummaries(worker, true)).rejects.toThrow(
+			"Session worker omitted its root session during recovery",
+		);
+		expect(worker.summaries.get(root.activeSessionId)).toBe(root);
 	});
 
 	it("ignores conflicting paths on workers unrelated to a session lookup", () => {

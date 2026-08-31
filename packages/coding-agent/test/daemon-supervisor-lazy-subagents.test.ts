@@ -22,7 +22,7 @@ interface SupervisorInternals {
 	findSummaryInWorker(worker: WorkerFixture, selector: string): SessionSummary | undefined;
 	createOrReuseWorker(
 		clientId: string,
-		command: { type: "create"; name?: string; sessionPath?: string },
+		command: { type: "create"; name?: string; sessionPath?: string; lifecycle?: "client_owned" },
 	): Promise<WorkerFixture>;
 	assertSupervisorSavedSessionNameAvailable(sessionPath: string, name: string): Promise<void>;
 	assertSavedSiblingNameAvailable(
@@ -37,13 +37,13 @@ interface SupervisorInternals {
 interface WorkerFixture {
 	descriptor: {
 		workerId: string;
-		lifecycle: "ready";
+		lifecycle: "ready" | "starting";
 		rootActiveSessionId: string;
 		rootSessionId: string;
 		pid: number;
 		authenticationToken: string;
 		ownerClientId?: string;
-		createCommand: { config: { cwd: string } };
+		createCommand: { config: { cwd: string }; sessionPath?: string };
 	};
 	client: {
 		request: ReturnType<typeof vi.fn>;
@@ -342,10 +342,116 @@ describe("daemon supervisor passive subagent topology", () => {
 		});
 
 		const first = supervisor.createOrReuseWorker("client", { type: "create", name: "named", sessionPath });
+		const starting = worker("starting");
+		starting.descriptor.lifecycle = "starting";
+		starting.descriptor.createCommand = { config: { cwd: "/tmp/project" }, sessionPath };
+		supervisor.workers.set(starting.descriptor.workerId, starting);
 		const second = supervisor.createOrReuseWorker("client", { type: "create", sessionPath });
 		releaseSiblings();
 		expect(await Promise.all([first, second])).toEqual([resident, resident]);
 		expect(launchWorker).toHaveBeenCalledOnce();
+	});
+
+	it("enforces session ownership when joining an in-flight open", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-pending-owner-"));
+		tempDirs.push(directory);
+		const sessionPath = join(directory, "session.jsonl");
+		let releaseLaunch!: () => void;
+		const launchGate = new Promise<void>((resolve) => {
+			releaseLaunch = resolve;
+		});
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorInternals;
+		const resident = worker("opened");
+		resident.descriptor.ownerClientId = "owner";
+		const launchWorker = vi.fn(async () => {
+			await launchGate;
+			return resident;
+		});
+		Object.assign(supervisor, { launchWorker });
+
+		const create = { type: "create" as const, sessionPath, lifecycle: "client_owned" as const };
+		const first = supervisor.createOrReuseWorker("owner", create);
+		const sameOwner = supervisor.createOrReuseWorker("owner", create);
+		const otherClient = supervisor.createOrReuseWorker("intruder", create);
+		const expectations = Promise.all([
+			expect(first).resolves.toBe(resident),
+			expect(sameOwner).resolves.toBe(resident),
+			expect(otherClient).rejects.toMatchObject({ code: "session_already_active" }),
+		]);
+		releaseLaunch();
+		await expectations;
+		expect(launchWorker).toHaveBeenCalledOnce();
+	});
+
+	it("rejoins an open registered while reclaiming a stale worker registration", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-reclaim-rejoin-"));
+		tempDirs.push(directory);
+		const sessionPath = join(directory, "session.jsonl");
+		let releaseReclaim!: () => void;
+		const reclaimGate = new Promise<void>((resolve) => {
+			releaseReclaim = resolve;
+		});
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorInternals;
+		const stale = worker("stale");
+		stale.descriptor.createCommand = { config: { cwd: directory }, sessionPath };
+		supervisor.workers.set(stale.descriptor.workerId, stale);
+		const resident = worker("opened");
+		resident.descriptor.ownerClientId = "owner";
+		const launchWorker = vi.fn(async () => resident);
+		const reclaimStaleWorkerRegistration = vi.fn(async () => {
+			await reclaimGate;
+			supervisor.workers.delete(stale.descriptor.workerId);
+			return true;
+		});
+		Object.assign(supervisor, { launchWorker, reclaimStaleWorkerRegistration });
+
+		const create = { type: "create" as const, sessionPath, lifecycle: "client_owned" as const };
+		const first = supervisor.createOrReuseWorker("owner", create);
+		const second = supervisor.createOrReuseWorker("owner", create);
+		const intruder = supervisor.createOrReuseWorker("intruder", create);
+		const expectations = Promise.all([
+			expect(first).resolves.toBe(resident),
+			expect(second).resolves.toBe(resident),
+			expect(intruder).rejects.toMatchObject({ code: "session_already_active" }),
+		]);
+		releaseReclaim();
+		await expectations;
+		expect(launchWorker).toHaveBeenCalledOnce();
+	});
+
+	it("propagates an in-flight open failure to joiners", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-pending-failure-"));
+		tempDirs.push(directory);
+		const sessionPath = join(directory, "session.jsonl");
+		let releaseLaunch!: () => void;
+		const launchGate = new Promise<void>((resolve) => {
+			releaseLaunch = resolve;
+		});
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorInternals;
+		const launchWorker = vi.fn(async () => {
+			await launchGate;
+			throw new Error("launch exploded");
+		});
+		Object.assign(supervisor, { launchWorker });
+
+		const create = { type: "create" as const, sessionPath, lifecycle: "client_owned" as const };
+		const first = supervisor.createOrReuseWorker("owner", create);
+		const joiner = supervisor.createOrReuseWorker("intruder", create);
+		const expectations = Promise.all([
+			expect(first).rejects.toThrow("launch exploded"),
+			expect(joiner).rejects.toThrow("launch exploded"),
+		]);
+		releaseLaunch();
+		await expectations;
 	});
 
 	it("uses injective structural session name reservation keys", () => {
