@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
 	AVO_VERIFICATION_BROKER_PYTHON_AUTHORITY_ENV,
@@ -73,13 +73,16 @@ describe.sequential("AVO host verification broker", () => {
 			expect(git.status, git.stderr).toBe(0);
 		}
 		const semanticWorkspaceDigest = captureAvoWorkspaceSnapshot(workspace).digest;
+		const hostHome = realpathSync(homedir());
+		const nodeInstallationRoot = realpathSync(dirname(dirname(process.execPath)));
+		const nodeVisiblePaths = nodeInstallationRoot.startsWith(`${hostHome}${sep}`) ? [nodeInstallationRoot] : [];
 		const broker = await startAvoVerificationBroker({
 			workspace,
 			allowedCommand: command,
 			controlPaths: ["verifier.test.cjs"],
 			hiddenPaths: [hidden, homeSensitive],
 			privateHome: true,
-			visiblePaths: [dirname(dirname(process.execPath))],
+			visiblePaths: nodeVisiblePaths,
 			hostFixtures: [{ sourcePath: hostFixture, destinationPath: "fs.img" }],
 			environment: { ...process.env, NODE_OPTIONS: "--require=/tmp/unbound-hook.cjs" },
 			pythonSemanticAuthority: true,
