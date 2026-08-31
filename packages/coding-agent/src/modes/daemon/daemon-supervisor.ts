@@ -870,11 +870,7 @@ export class DaemonSupervisor {
 		);
 		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
 
-		let releaseFence: () => void = () => {};
-		const fence = new Promise<void>((resolveFence) => {
-			releaseFence = resolveFence;
-		});
-		this.idleEvictionFence = fence;
+		const releaseFence = await this.acquireIdleEvictionFence();
 		try {
 			await this.mutationDrain.waitForDrain(
 				0,
@@ -910,13 +906,26 @@ export class DaemonSupervisor {
 				}),
 			);
 		} finally {
-			if (this.idleEvictionFence === fence) this.idleEvictionFence = undefined;
 			releaseFence();
 		}
 	}
 
+	/** Waits for any held eviction fence, then takes the slot; release clears it only if still ours. */
+	private async acquireIdleEvictionFence(): Promise<() => void> {
+		while (this.idleEvictionFence) await this.idleEvictionFence;
+		let releaseFence: () => void = () => {};
+		const fence = new Promise<void>((resolveFence) => {
+			releaseFence = resolveFence;
+		});
+		this.idleEvictionFence = fence;
+		return () => {
+			if (this.idleEvictionFence === fence) this.idleEvictionFence = undefined;
+			releaseFence();
+		};
+	}
+
 	private async evictEmptySessionOnLastDetach(activeSessionId: string): Promise<void> {
-		if (this.shuttingDown || this.updateRestartPhase !== undefined || this.idleEvictionFence) return;
+		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
 		const worker = this.matchWorkers(activeSessionId)[0]?.worker;
 		if (
 			!worker ||
@@ -932,13 +941,9 @@ export class DaemonSupervisor {
 		} catch {
 			return;
 		}
-		if (!this.isEmptyDetachEvictionCandidate(worker) || this.idleEvictionFence) return;
+		if (!this.isEmptyDetachEvictionCandidate(worker)) return;
 		// Idle-sweep coordination: fence new mutations, drain admitted ones, re-read before deciding.
-		let releaseFence: () => void = () => {};
-		const fence = new Promise<void>((resolveFence) => {
-			releaseFence = resolveFence;
-		});
-		this.idleEvictionFence = fence;
+		const releaseFence = await this.acquireIdleEvictionFence();
 		try {
 			await this.mutationDrain.waitForDrain(
 				0,
@@ -954,7 +959,6 @@ export class DaemonSupervisor {
 		} catch (error) {
 			this.log(`Empty-session eviction failed for worker ${worker.descriptor.workerId}: ${String(error)}`);
 		} finally {
-			if (this.idleEvictionFence === fence) this.idleEvictionFence = undefined;
 			releaseFence();
 		}
 	}

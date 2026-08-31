@@ -564,4 +564,63 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		expect(supervisor.stopWorker).not.toHaveBeenCalled();
 		expect(supervisor.workers.get("gap")).toBe(worker);
 	});
+
+	it("evicts every empty draft when one client detaches from several at once", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeSupervisor();
+		const draftA = makeWorker("draft-a", [makeSummary("draft-a-root", now, { messageCount: 0 })]);
+		const draftB = makeWorker("draft-b", [makeSummary("draft-b-root", now, { messageCount: 0 })]);
+		supervisor.workers.set("draft-a", draftA);
+		supervisor.workers.set("draft-b", draftB);
+		const client = makeDetachClient("viewer", ["draft-a-root", "draft-b-root"]);
+		supervisor.clients.add(client);
+
+		await supervisor.handleCommand(client, { id: "detach-all", type: "detach" });
+
+		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledTimes(2));
+		expect(supervisor.workers.size).toBe(0);
+	});
+
+	it("makes a starting sweep wait for the detach fence instead of overwriting it", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeSupervisor();
+		// Recent activity keeps the worker out of the sweep's own idle candidates.
+		const emptySessions = () => [
+			makeSummary("gap-root", now, { messageCount: 0, lastActivityAt: new Date(now).toISOString() }),
+		];
+		const worker = makeWorker("gap", emptySessions());
+		let releaseSweepList!: () => void;
+		let releaseHookList!: () => void;
+		worker
+			.client!.request.mockImplementationOnce(
+				() =>
+					new Promise((resolve) => {
+						releaseSweepList = () => resolve(success(undefined, "list", { sessions: emptySessions() }));
+					}),
+			)
+			.mockImplementationOnce(async () => success(undefined, "list", { sessions: emptySessions() }))
+			.mockImplementationOnce(
+				() =>
+					new Promise((resolve) => {
+						releaseHookList = () => resolve(success(undefined, "list", { sessions: emptySessions() }));
+					}),
+			);
+		supervisor.workers.set("gap", worker);
+		const client = makeDetachClient("viewer", ["gap-root"]);
+		supervisor.clients.add(client);
+
+		const sweep = supervisor.runIdleEvictionSweep(now);
+		await vi.waitFor(() => expect(worker.client!.request).toHaveBeenCalledTimes(1));
+		await supervisor.handleCommand(client, { id: "detach", type: "detach", activeSessionId: "gap-root" });
+		await vi.waitFor(() => expect(worker.client!.request).toHaveBeenCalledTimes(3));
+		releaseSweepList();
+		await settle();
+
+		// The hook is still mid-decision, so its fence must still be in the slot.
+		expect(supervisor.idleEvictionFence).toBeDefined();
+		releaseHookList();
+		await sweep;
+		expect(supervisor.stopWorker).toHaveBeenCalledTimes(1);
+		expect(supervisor.stopWorker).toHaveBeenCalledWith(worker, true);
+	});
 });
