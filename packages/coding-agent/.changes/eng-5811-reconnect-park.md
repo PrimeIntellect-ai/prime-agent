@@ -1,0 +1,1 @@
+- Fixed a reconnect deadlock where a daemon socket close during recovery or post-update restore parked the reconnect loop's own attach, snapshot, and list requests behind a hello that the stuck loop could never produce ([#1905](https://github.com/PrimeIntellect-ai/prime-agent/issues/1905)).
