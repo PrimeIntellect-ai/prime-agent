@@ -410,20 +410,88 @@ function pythonPreviewIndex(lines: readonly string[], index: number): number {
 	return childIndex === undefined ? index : pythonPreviewIndex(lines, childIndex);
 }
 
+const PYTHON_ESCAPES: Record<string, string> = {
+	"\n": "", // backslash-newline is a line continuation
+	'"': '"',
+	"'": "'",
+	"\\": "\\",
+	n: "\n",
+	r: "\r",
+	t: "\t",
+};
+
+interface PythonStringScan {
+	value: string;
+	end: number;
+	closed: boolean;
+}
+
+// Walks a python string-literal body starting just after the opening delimiter.
+// In both raw and cooked strings a backslash consumes the next char (python's
+// raw-string rule: backslash-quote never closes the literal); only cooked
+// strings unescape, and unknown escapes keep the backslash, matching python.
+function scanPythonStringLiteral(code: string, start: number, quote: string, raw: boolean): PythonStringScan {
+	let value = "";
+	let i = start;
+	while (i < code.length) {
+		const char = code[i] ?? "";
+		if (char === "\\" && i + 1 < code.length) {
+			const next = code[i + 1] ?? "";
+			value += raw ? char + next : (PYTHON_ESCAPES[next] ?? char + next);
+			i += 2;
+			continue;
+		}
+		if (code.startsWith(quote, i)) {
+			return { value, end: i + quote.length, closed: true };
+		}
+		if (quote.length === 1 && char === "\n") {
+			break; // single-quoted literals cannot span lines
+		}
+		value += char;
+		i += 1;
+	}
+	return { value, end: i, closed: false };
+}
+
+// True when the lines end inside an unterminated triple-quoted string, meaning
+// the following line is string text rather than code.
+function endsInsideMultilineString(lines: readonly string[]): boolean {
+	const text = lines.join("\n");
+	let i = 0;
+	while (i < text.length) {
+		const char = text[i] ?? "";
+		if (char === "#") {
+			const newline = text.indexOf("\n", i);
+			if (newline < 0) return false;
+			i = newline + 1;
+			continue;
+		}
+		if (char === '"' || char === "'") {
+			const quote = text.startsWith(char.repeat(3), i) ? char.repeat(3) : char;
+			const scan = scanPythonStringLiteral(text, i + quote.length, quote, true);
+			if (!scan.closed && scan.end >= text.length) {
+				return quote.length === 3;
+			}
+			i = scan.end;
+			continue;
+		}
+		i += 1;
+	}
+	return false;
+}
+
 function extractBashSkillCommand(code: string): string | undefined {
 	const match = code.match(BASH_SKILL_CALL_PATTERN);
 	const quote = match?.[1];
-	if (!quote) return undefined;
-	const start = match?.[0].length ?? 0;
-	const end = code.indexOf(quote, start);
-	if (end < 0) return undefined;
-	// A backslash before the close quote means an escaped quote inside the literal;
-	// extracting the mis-cut prefix would preview a wrong command, so fall back.
-	if (quote.length === 1 && code[end - 1] === "\\") return undefined;
-	const rest = code.slice(end + quote.length).trimStart();
+	if (!match || !quote) return undefined;
+	const start = match[0].length;
+	const prefixChar = match[0][start - quote.length - 1];
+	const scan = scanPythonStringLiteral(code, start, quote, prefixChar === "r" || prefixChar === "R");
+	if (!scan.closed) return undefined;
+	const rest = code.slice(scan.end).trimStart();
 	// Require a plain literal first argument; concatenation or other expressions fall back.
 	if (!rest.startsWith(",") && !rest.startsWith(")")) return undefined;
-	return code.slice(start, end);
+	return scan.value;
 }
 
 export function previewPythonCode(code: string): CodePreview {
@@ -443,7 +511,10 @@ export function previewPythonCode(code: string): CodePreview {
 	if (bestIndex !== undefined && bestScore >= 0) {
 		const previewIndex = pythonPreviewIndex(lines, bestIndex);
 		// The literal may span lines below the chosen one, so extract from the full tail.
-		const bashCommand = extractBashSkillCommand(lines.slice(previewIndex).join("\n"));
+		// A line inside a multiline string is text, not a bash-skill call: no bash ran.
+		const bashCommand = endsInsideMultilineString(lines.slice(0, previewIndex))
+			? undefined
+			: extractBashSkillCommand(lines.slice(previewIndex).join("\n"));
 		if (bashCommand) {
 			return previewBashCommand(bashCommand);
 		}

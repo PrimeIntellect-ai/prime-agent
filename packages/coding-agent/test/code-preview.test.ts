@@ -142,6 +142,8 @@ set -e
 git add packages/foo.ts
 ''')`;
 		expect(previewIpythonCode(code)).toEqual({ language: "bash", text: "git add packages/foo.ts" });
+		// Escaped quote adjacent to the closing delimiter: the full evaluated command, never a mis-cut prefix.
+		expect(previewIpythonCode("r = await bash('''echo it\\'''')")).toEqual({ language: "bash", text: "echo it'" });
 	});
 
 	it("keeps the python preview for non-literal bash-skill arguments", () => {
@@ -157,12 +159,29 @@ git add packages/foo.ts
 			language: "python",
 			text: "r = await bash('echo ' + name)",
 		});
-		expect(previewIpythonCode("r = await bash('echo can\\'t stop')")).toEqual({
-			language: "python",
-			text: "r = await bash('echo can\\'t stop')",
+	});
+
+	it("evaluates escapes in bash-skill literals instead of previewing source text", () => {
+		// \n in the source is a real newline in the executed command; salience follows the evaluated text.
+		expect(previewIpythonCode("r = await bash('printf \"a\\nb\"\\ngit add -A')")).toEqual({
+			language: "bash",
+			text: "git add -A",
 		});
-		// Escaped quote directly before the close quote: a mis-cut here would preview a wrong command.
-		expect(previewIpythonCode('r = await bash("grep -n \\")\\" src.c")').language).toBe("python");
+		expect(previewIpythonCode("r = await bash('echo can\\'t stop')")).toEqual({
+			language: "bash",
+			text: "echo can't stop",
+		});
+		expect(previewIpythonCode('r = await bash("grep -n \\")\\" src.c")')).toEqual({
+			language: "bash",
+			text: 'grep -n ")" src.c',
+		});
+	});
+
+	it("keeps the python preview for bash-looking text inside a multiline string", () => {
+		expect(previewIpythonCode('doc = """\nbash("git status")\n"""')).toEqual({
+			language: "python",
+			text: 'bash("git status")',
+		});
 	});
 
 	it("previews the bash-skill call when the scorer picks it among other lines", () => {
