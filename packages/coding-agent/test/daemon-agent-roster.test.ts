@@ -297,6 +297,36 @@ describe("worker roster reporter", () => {
 		expect(daemon.rosterReporter.lastComposed.has("parent-active#child-2")).toBe(false);
 	});
 
+	it("scopes pending spawn appends by parent so equal child ids cannot cross wires", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-roster-spawn-key-"));
+		tempDirs.push(directory);
+		const daemon = new AgentDaemon(join(directory, "worker.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			worker: { authenticationToken: "token" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		} as never);
+		const internals = daemon as unknown as {
+			pendingRlmSpawnAppends: Map<string, Promise<void>>;
+			recordRlmSubagentState(parentState: ActiveSessionState, input: object): boolean;
+		};
+		const spawn = (parent: ActiveSessionState, dir: string) =>
+			internals.recordRlmSubagentState(parent, {
+				childId: "sub-1",
+				sessionName: "child",
+				sessionDir: join(directory, dir),
+				sessionFile: join(directory, dir, "child.jsonl"),
+				rlmDepth: 1,
+				rlmMaxDepth: 4,
+				status: "running",
+			});
+		spawn(makeState({ activeSessionId: "parent-a", sessionFile: join(directory, "a.jsonl") }), "a");
+		spawn(makeState({ activeSessionId: "parent-b", sessionFile: join(directory, "b.jsonl") }), "b");
+
+		expect(internals.pendingRlmSpawnAppends.size).toBe(2);
+	});
+
 	it("publishes a removal when an archived top-level close leaves the worker's list", async () => {
 		const { daemon, sentDeltas } = makeWorkerReporter();
 		const state = makeState({
@@ -585,6 +615,10 @@ describe("supervisor roster ledger", () => {
 		const parentPath = join(sessionsDir, "root.jsonl");
 		const passivatedPath = join(directory, "artifacts", "passivated-child.jsonl");
 		const deletedPath = join(directory, "artifacts", "deleted-child.jsonl");
+		mkdirSync(sessionsDir, { recursive: true });
+		writeFileSync(parentPath, "");
+		mkdirSync(dirname(passivatedPath), { recursive: true });
+		writeFileSync(passivatedPath, "");
 		await ledger.appendSpawn({
 			childId: "passivated-child",
 			parent: parentPath,
@@ -741,6 +775,10 @@ describe("supervisor roster ledger", () => {
 		const ledger = new RlmSpawnLedger(directory, sessionsDir);
 		const liveChildPath = join(directory, "artifacts", "live-child.jsonl");
 		const deletedChildPath = join(directory, "artifacts", "deleted-child.jsonl");
+		mkdirSync(sessionsDir, { recursive: true });
+		writeFileSync(join(sessionsDir, "root.jsonl"), "");
+		mkdirSync(dirname(liveChildPath), { recursive: true });
+		writeFileSync(liveChildPath, "");
 		await ledger.appendSpawn({
 			childId: "live-child",
 			parent: join(sessionsDir, "root.jsonl"),
@@ -756,6 +794,14 @@ describe("supervisor roster ledger", () => {
 			name: "deleted-child",
 		});
 		await ledger.appendDelete({ childId: "deleted-child", child: deletedChildPath, reason: "user" });
+		// Removed out-of-band: no transcript backs this edge, so no row may serve it.
+		await ledger.appendSpawn({
+			childId: "ghost-child",
+			parent: join(sessionsDir, "root.jsonl"),
+			child: join(directory, "artifacts", "ghost-child.jsonl"),
+			depth: 1,
+			name: "ghost-child",
+		});
 
 		const supervisor = makeSupervisor([], {
 			rlmSpawnLedger: () => ledger,
@@ -1029,6 +1075,40 @@ describe("saved-session delete paths", () => {
 		expect(owned.client.request).toHaveBeenCalled();
 	});
 
+	it("resolves file ownership from the roster, never from the stale pull cache", () => {
+		const worker = makeWorker("worker-1");
+		Object.assign(worker.descriptor, { createCommand: { type: "create" } });
+		const supervisor = makeSupervisor([worker]);
+		worker.summaries.set(
+			"stale-active",
+			summary({
+				id: "stale-active",
+				sessionId: "stale",
+				activeSessionId: "stale-active",
+				sessionFile: "/tmp/f.jsonl",
+			}),
+		);
+		const internals = supervisor as unknown as {
+			findWorkerBySessionFile(sessionFile: string): WorkerFixture | undefined;
+		};
+
+		// The roster removed the row (e.g. an archived close); the old pull cache must not resurrect ownership.
+		expect(internals.findWorkerBySessionFile("/tmp/f.jsonl")).toBeUndefined();
+
+		supervisor.writeRosterEntry(
+			workerRosterEntryFromSummary(
+				summary({
+					id: "live-active",
+					sessionId: "live",
+					activeSessionId: "live-active",
+					sessionFile: "/tmp/f.jsonl",
+				}),
+			),
+			worker,
+		);
+		expect(internals.findWorkerBySessionFile("/tmp/f.jsonl")).toBe(worker);
+	});
+
 	it("keeps a row rewritten during the delete's own await", async () => {
 		const { directory, supervisor } = makeOfflineSupervisor("prime-roster-delete-race-");
 		const sessionPath = join(directory, "saved.jsonl");
@@ -1218,7 +1298,7 @@ describe("review-round regressions", () => {
 		const supervisor = makeSupervisor([worker], {
 			refreshWorkerSummaries: DaemonSupervisor.prototype["refreshWorkerSummaries" as never],
 			streamReconstructor: { seed: vi.fn(), clear: vi.fn() },
-			rlmSpawnLedger: () => ({ edges: () => edgesPromise }),
+			rlmSpawnLedger: () => ({ liveEdges: () => edgesPromise }),
 		});
 		supervisor.writeRosterEntry(childEntry, worker);
 		const root = summary({ id: "worker-1-root-active", sessionId: "root", activeSessionId: "worker-1-root-active" });
@@ -1261,7 +1341,7 @@ describe("review-round regressions", () => {
 		const supervisor = makeSupervisor([worker], {
 			refreshWorkerSummaries,
 			rlmSpawnLedger: () => ({
-				edges: vi.fn(async () => {
+				liveEdges: vi.fn(async () => {
 					throw new Error("ledger unreadable");
 				}),
 			}),
@@ -1304,7 +1384,7 @@ describe("review-round regressions", () => {
 		const edgesPromise = new Promise<unknown[]>((resolveEdges) => {
 			releaseEdges = resolveEdges;
 		});
-		const supervisor = makeSupervisor([worker], { rlmSpawnLedger: () => ({ edges: () => edgesPromise }) });
+		const supervisor = makeSupervisor([worker], { rlmSpawnLedger: () => ({ liveEdges: () => edgesPromise }) });
 		supervisor.writeRosterEntry(rootEntry, worker);
 
 		// The snapshot apply starts and blocks on the ledger pre-read; a delta queues behind it.
@@ -1329,7 +1409,7 @@ describe("review-round regressions", () => {
 		let releaseClosedEdges: (edges: unknown[]) => void = () => {};
 		const closedSupervisor = makeSupervisor([closed], {
 			rlmSpawnLedger: () => ({
-				edges: () =>
+				liveEdges: () =>
 					new Promise<unknown[]>((resolveEdges) => {
 						releaseClosedEdges = resolveEdges;
 					}),

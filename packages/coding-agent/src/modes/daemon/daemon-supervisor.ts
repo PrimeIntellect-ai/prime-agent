@@ -3714,7 +3714,8 @@ export class DaemonSupervisor {
 			this.log(`Could not seed the agent roster from the session catalog: ${String(error)}`);
 		}
 		try {
-			for (const edge of await this.rlmSpawnLedger().edges()) {
+			// Stat-reconciled: rows the disk cannot back (out-of-band transcript removal) never seed.
+			for (const edge of await this.rlmSpawnLedger().liveEdges()) {
 				const entry = this.rosterEntryForSpawnLedgerEdge(edge);
 				if (this.roster().has(entry.agentId)) continue;
 				if (this.roster().hasSessionFile(canonicalSessionPath(edge.child))) continue;
@@ -3833,7 +3834,7 @@ export class DaemonSupervisor {
 		// Live edges are read before any deletion, so a reseeded child never surfaces as a transient removal.
 		let edgesFailed = false;
 		const edges = await this.rlmSpawnLedger()
-			.edges()
+			.liveEdges()
 			.catch((error: unknown) => {
 				this.log(`Could not read the spawn ledger during a snapshot apply: ${String(error)}`);
 				edgesFailed = true;
@@ -4228,11 +4229,8 @@ export class DaemonSupervisor {
 		const targetEntry = this.roster().bySessionFile(target);
 		const matches = new Set<ResidentWorker>();
 		for (const worker of this.workers.values()) {
-			const summaryMatches =
-				targetEntry?.workerId === worker.descriptor.workerId ||
-				[...worker.summaries.values()].some(
-					(summary) => summary.sessionFile !== undefined && canonicalSessionPath(summary.sessionFile) === target,
-				);
+			// The roster is the one live ownership source; the stale pull cache must not resurrect a match.
+			const summaryMatches = targetEntry?.workerId === worker.descriptor.workerId;
 			const descriptorPath = worker.descriptor.sessionFile
 				? canonicalSessionPath(worker.descriptor.sessionFile)
 				: undefined;

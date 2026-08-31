@@ -1029,7 +1029,8 @@ export class AgentDaemon {
 			// Mark handled so an early rejection cannot surface as an
 			// unhandled-rejection crash before the admission path awaits it.
 			spawnAppend.catch(() => undefined);
-			this.pendingRlmSpawnAppends.set(input.childId, spawnAppend);
+			// Child ids are only unique per parent; the parent scopes the pending-append key.
+			this.pendingRlmSpawnAppends.set(`${parentState.activeSessionId}#${input.childId}`, spawnAppend);
 		}
 		try {
 			writeRlmSubagentDisplayEntry({
@@ -2556,7 +2557,7 @@ export class AgentDaemon {
 				},
 			);
 		} catch (error) {
-			this.pendingRlmSpawnAppends.delete(options.id);
+			this.pendingRlmSpawnAppends.delete(`${parentState.activeSessionId}#${options.id}`);
 			throw error;
 		}
 		// Admission is complete only once the spawn record is durably in the
@@ -2565,8 +2566,8 @@ export class AgentDaemon {
 		// failed append therefore FAILS admission — the just-added child is
 		// closed like any other admission failure rather than admitted as a
 		// ghost the ledger-driven listing and hydration could never find.
-		const spawnAppend = this.pendingRlmSpawnAppends.get(options.id);
-		this.pendingRlmSpawnAppends.delete(options.id);
+		const spawnAppend = this.pendingRlmSpawnAppends.get(`${parentState.activeSessionId}#${options.id}`);
+		this.pendingRlmSpawnAppends.delete(`${parentState.activeSessionId}#${options.id}`);
 		try {
 			await spawnAppend;
 		} catch (error) {

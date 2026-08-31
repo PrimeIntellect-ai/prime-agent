@@ -79,7 +79,7 @@ export function workerRosterEntryFromSummary(summary: SessionSummary): WorkerRos
 	return { agentId: rosterAgentIdForSummary(summary), summary: slim };
 }
 
-export function classifyWorkerRosterEntry(entry: WorkerRosterEntry): AgentRosterStatus {
+function classifyWorkerRosterEntry(entry: WorkerRosterEntry): AgentRosterStatus {
 	return classifySessionRosterStatus(entry.summary, entry.queuedChild === true);
 }
 

@@ -497,12 +497,13 @@ export class RlmSpawnLedger {
 		});
 	}
 
-	private async familyUnlocked(): Promise<SessionInfo[]> {
+	/** Live edges reconciled by stat, exactly like family(): a dead parent or child drops the edge. */
+	liveEdges(): Promise<RlmLedgerEdge[]> {
+		return this.enqueue(() => this.liveEdgesUnlocked());
+	}
+
+	private async liveEdgesUnlocked(): Promise<RlmLedgerEdge[]> {
 		const edges = [...this.replaySync().values()].filter((edge) => !edge.deleted);
-		const byChild = new Map<string, RlmLedgerEdge>();
-		for (const edge of edges) {
-			byChild.set(canonicalSessionPath(edge.child), edge);
-		}
 		const statCache = new Map<string, boolean>();
 		const exists = async (path: string): Promise<boolean> => {
 			const cached = statCache.get(path);
@@ -516,12 +517,21 @@ export class RlmSpawnLedger {
 			statCache.set(path, ok);
 			return ok;
 		};
-		let alive: RlmLedgerEdge[] = [];
+		const alive: RlmLedgerEdge[] = [];
 		for (const edge of edges) {
 			if ((await exists(canonicalSessionPath(edge.child))) && (await exists(canonicalSessionPath(edge.parent)))) {
 				alive.push(edge);
 			}
 		}
+		return alive;
+	}
+
+	private async familyUnlocked(): Promise<SessionInfo[]> {
+		const byChild = new Map<string, RlmLedgerEdge>();
+		for (const edge of [...this.replaySync().values()].filter((candidate) => !candidate.deleted)) {
+			byChild.set(canonicalSessionPath(edge.child), edge);
+		}
+		let alive: RlmLedgerEdge[] = await this.liveEdgesUnlocked();
 		const rootPaths: string[] = [];
 		let rootEntries: string[] = [];
 		try {
