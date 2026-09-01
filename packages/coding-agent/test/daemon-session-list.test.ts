@@ -328,6 +328,24 @@ describe("buildSessionList", () => {
 		expect(entries[0]!.sessionName).toBe("session active-1");
 	});
 
+	it("keeps a resident message-less subagent live while a top-level one stays a draft", () => {
+		const entries = buildSessionList(
+			[
+				makeState({
+					activeSessionId: "child",
+					metadata: { kind: "subagent", createdAt: 1, rlmChildId: "child-1" },
+				}),
+				makeState({ activeSessionId: "top" }),
+			],
+			[],
+		);
+
+		expect(entries.map((entry) => [entry.id, entry.lifecycle])).toEqual([
+			["child", "live"],
+			["top", "draft"],
+		]);
+	});
+
 	it("treats a message-less on-disk active session as a hidden draft", () => {
 		const emptyPath = resolve("/tmp/project/empty.jsonl");
 		const usedPath = resolve("/tmp/project/used.jsonl");

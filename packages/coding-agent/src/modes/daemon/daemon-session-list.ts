@@ -9,6 +9,7 @@ import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import type { ActiveSessionState } from "./active-session-state.js";
+import { type AgentRosterStatus, classifyAgentStatus } from "./agent-roster.js";
 
 // Durable lifecycle; decides agents-view visibility. Only "live" is shown.
 // "draft" = no message sent yet (discarded on close); "archived" = ctrl+x'd,
@@ -18,7 +19,6 @@ export type SessionLifecycle = "draft" | "live" | "archived";
 // Heuristic activity of a live session. Classification-in-flight counts as
 // "working" so the view never sees an unlabeled idle session.
 export type SessionActivity = "working" | "idle";
-export type SessionRosterStatus = "running" | "idle" | "inactive";
 
 // Upper bound on the spawn-code source carried in a session summary. Generous
 // enough for real spawn cells while keeping the daemon wire payload bounded.
@@ -100,10 +100,13 @@ export function resolveAttachModelFallbackMessage(
 	return summary.model ? undefined : startupModelFallbackMessage;
 }
 
-export function classifySessionRosterStatus(summary: SessionSummary): SessionRosterStatus {
-	if (!summary.activeSessionId) return "inactive";
-	if (summary.hasActiveHeartbeat || summary.activity === "working" || isSessionSummaryBusy(summary)) return "running";
-	return "idle";
+export function classifySessionRosterStatus(summary: SessionSummary): AgentRosterStatus {
+	return classifyAgentStatus({
+		resident: !!summary.activeSessionId,
+		queuedChild: false,
+		busy: summary.activity === "working" || isSessionSummaryBusy(summary),
+		hasActiveHeartbeat: summary.hasActiveHeartbeat === true,
+	});
 }
 
 export function isSessionSummaryBusy(summary: SessionSummary): boolean {
@@ -431,6 +434,8 @@ export function inactiveLifecycleForSession(session: SessionInfo): SessionLifecy
 }
 
 export function activeLifecycleForSession(activeSession: ActiveSessionState): SessionLifecycle {
+	// A resident subagent is a spawned worker, not a user draft; it is visible before its first message lands.
+	if (activeSession.runtime.metadata?.kind === "subagent") return "live";
 	// Lifecycle drives agents-view visibility and is message-based: a session
 	// becomes live once a message is sent. A message-less session is a draft (hidden
 	// from the view) even if the user changed its model/name first — that config is

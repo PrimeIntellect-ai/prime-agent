@@ -1,0 +1,3 @@
+- Fixed the agents view hiding running subagents whose worker is starting or recovering; the worker state now shows as the row's status label.
+- Made spawned subagent sessions visible from creation, before their first message lands.
+- Renamed the subagent summary bar label from "agents" to "subagents" and unified the status formula behind both surfaces.
