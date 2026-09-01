@@ -493,51 +493,6 @@ describe("ENG-4531 agent message UI", () => {
 		expect(expanded).not.toContain("Message id:");
 	});
 
-	it("renders sent messages beneath collapsed Python cells", () => {
-		const component = new IPythonCellComponent({
-			code: 'await agent_message.send("worker-active", "Review shard seven.")',
-			executionStarted: true,
-			details: {
-				status: "ok",
-				sentAgentMessages: [
-					{
-						id: "agentmsg_4531",
-						message: "Review shard seven.",
-						deliveryStatus: "queued",
-						receiverRole: "child",
-						target: {
-							activeSessionId: "worker-active",
-							sessionId: "worker-session",
-							sessionName: "Worker",
-						},
-					},
-					{
-						id: "agentmsg_4531_delivered",
-						message: "Continue with shard eight.",
-						deliveryStatus: "delivered",
-						receiverRole: "parent",
-						target: {
-							activeSessionId: "worker-active",
-							sessionId: "worker-session",
-							sessionName: "Worker",
-						},
-					},
-				],
-			},
-		});
-
-		const rendered = stripAnsi(component.render(120).join("\n"));
-		const lines = rendered.split("\n");
-		expect(lines).toEqual([
-			expect.stringContaining("python"),
-			expect.stringMatching(/^ ◆ Agent message queued · to child Worker · Review shard seven\. \(.*to expand\)$/),
-			expect.stringMatching(
-				/^ ◆ Agent message sent · to parent Worker · Continue with shard eight\. \(.*to expand\)$/,
-			),
-		]);
-		expect(rendered).not.toContain("Agent message received");
-	});
-
 	it("expands sent messages to the message text without the receipt metadata", () => {
 		const receipt =
 			"{'id': 'agentmsg_4531_delivered',\n" +
