@@ -124,6 +124,7 @@ describe("daemon extension binding", () => {
 			extensionUiRequests: new Map(),
 			eventGeneration: "generation-slim",
 			lastEventSequence: 0,
+			rlmRosterRevision: 0,
 		};
 		await bindActiveSessionState(state, {
 			broadcast: (_state, message) => {
@@ -198,6 +199,7 @@ describe("daemon extension binding", () => {
 			extensionUiRequests: new Map(),
 			eventGeneration: "generation-test",
 			lastEventSequence: 0,
+			rlmRosterRevision: 0,
 			summaryState: { summary: "old recap", taskState: "completed", basedOnMessageCount: 2 },
 		};
 		await bindActiveSessionState(state, {

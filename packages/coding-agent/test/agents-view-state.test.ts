@@ -816,6 +816,15 @@ describe("agents view state", () => {
 		expect(shouldShowAgentsViewSession(makeSummary({ lifecycle: "live", activity: "idle" }), true)).toBe(false);
 	});
 
+	test("keeps sessions of non-ready workers visible and labels them with the worker state", () => {
+		for (const workerState of ["starting", "recovering", "stopping", "failed"] as const) {
+			const summary = makeSummary({ lifecycle: "live", workerState });
+			expect(shouldShowAgentsViewSession(summary), workerState).toBe(true);
+			expect(buildAgentsViewRows([summary])[0]?.statusLabel, workerState).toBe(workerState);
+		}
+		expect(buildAgentsViewRows([makeSummary({ workerState: "ready" })])[0]?.statusLabel).toBe("needs input");
+	});
+
 	test("does not override saved session cwd when reopening inactive agents", () => {
 		const config: AgentSessionRuntimeConfig = {
 			cwd: "/tmp/dashboard",

@@ -6296,6 +6296,138 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("atomically fences RLM child cancellation on the authoritative roster token", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-conditional-rlm-cancel-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const parentSession = parentState.runtime.session as unknown as {
+				cancelRlmChildRun: ReturnType<typeof vi.fn>;
+				getRlmChildSnapshots: ReturnType<typeof vi.fn>;
+			};
+			parentSession.cancelRlmChildRun = vi.fn(() => true);
+			let status = "running";
+			parentSession.getRlmChildSnapshots = vi.fn(() => [{ id: fixture.childId, status }]);
+			const client = makeClient("client-1", parentState.activeSessionId);
+			const initial = (await internals.handleCommand(client, {
+				type: "get_rlm_children",
+				activeSessionId: parentState.activeSessionId,
+			})) as { data: { rosterToken: string } };
+			status = "done";
+
+			await expect(
+				internals.handleCommand(client, {
+					type: "cancel_rlm_child",
+					activeSessionId: parentState.activeSessionId,
+					childId: fixture.childId,
+					expectedRosterToken: initial.data.rosterToken,
+				}),
+			).rejects.toMatchObject({
+				name: "RlmChildRosterChangedError",
+				expectedRosterToken: initial.data.rosterToken,
+			});
+			expect(parentSession.cancelRlmChildRun).not.toHaveBeenCalled();
+
+			const current = (await internals.handleCommand(client, {
+				type: "get_rlm_children",
+				activeSessionId: parentState.activeSessionId,
+			})) as { data: { rosterToken: string } };
+			const result = (await internals.handleCommand(client, {
+				type: "cancel_rlm_child",
+				activeSessionId: parentState.activeSessionId,
+				childId: fixture.childId,
+				expectedRosterToken: current.data.rosterToken,
+			})) as { data: { cancelled: boolean } };
+			expect(result.data.cancelled).toBe(true);
+			expect(parentSession.cancelRlmChildRun).toHaveBeenCalledOnce();
+			expect(parentSession.cancelRlmChildRun).toHaveBeenCalledWith(fixture.childId);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a pre-recovery roster token after an event-sequence ABA", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-rlm-roster-recovery-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const parentSession = parentState.runtime.session as unknown as {
+				cancelRlmChildRun: ReturnType<typeof vi.fn>;
+			};
+			parentSession.cancelRlmChildRun = vi.fn(() => true);
+			parentState.lastEventSequence = 7;
+			const client = makeClient("client-1", parentState.activeSessionId);
+			const beforeRecovery = (await internals.handleCommand(client, {
+				type: "get_rlm_children",
+				activeSessionId: parentState.activeSessionId,
+			})) as { data: { rosterToken: string } };
+
+			parentState.eventGeneration = "recovered-generation";
+			parentState.lastEventSequence = 7;
+			await expect(
+				internals.handleCommand(client, {
+					type: "cancel_rlm_child",
+					activeSessionId: parentState.activeSessionId,
+					childId: fixture.childId,
+					expectedRosterToken: beforeRecovery.data.rosterToken,
+				}),
+			).rejects.toBeInstanceOf(Error);
+			expect(parentSession.cancelRlmChildRun).not.toHaveBeenCalled();
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("advances the roster token across passive hydration and passivation", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-rlm-roster-residency-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+				passivateIdleChildren(threshold: number, now: number, limit: number): Promise<number>;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const parentSession = parentState.runtime.session as unknown as {
+				getRlmChildSnapshots: ReturnType<typeof vi.fn>;
+			};
+			parentSession.getRlmChildSnapshots = vi.fn(() =>
+				[...internals.sessions.values()]
+					.filter((state) => state.runtime.metadata.parentActiveSessionId === parentState.activeSessionId)
+					.map((state) => ({ id: state.runtime.metadata.rlmChildId, status: "done" })),
+			);
+			const client = makeClient("client-1", parentState.activeSessionId);
+			const roster = async () =>
+				(await internals.handleCommand(client, {
+					type: "get_rlm_children",
+					activeSessionId: parentState.activeSessionId,
+				})) as { data: { eventSequence: number; rosterToken: string } };
+
+			const passive = await roster();
+			await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+			const hydrated = await roster();
+			expect(hydrated.data.eventSequence).toBe(passive.data.eventSequence);
+			expect(hydrated.data.rosterToken).not.toBe(passive.data.rosterToken);
+
+			await expect(internals.passivateIdleChildren(90, Date.parse("2036-08-01T12:00:00Z"), 1)).resolves.toBe(1);
+			const passivated = await roster();
+			expect(passivated.data.eventSequence).toBe(passive.data.eventSequence);
+			expect(passivated.data.rosterToken).not.toBe(hydrated.data.rosterToken);
+			expect(passivated.data.rosterToken).not.toBe(passive.data.rosterToken);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("refuses to delete a busy hydrated child and deletes it after it becomes idle", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-hydrated-rlm-delete-"));
 		try {
@@ -9155,6 +9287,7 @@ function makeState(activeSessionId: string, parentActiveSessionId?: string): Act
 		clients: new Set(),
 		pendingAttaches: 0,
 		lastEventSequence: 0,
+		rlmRosterRevision: 0,
 		runtime: {
 			metadata: {
 				kind: "subagent",

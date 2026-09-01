@@ -69,6 +69,7 @@ describe("ENG-4657 update heartbeat recovery", () => {
 			extensionUiRequests: new Map(),
 			eventGeneration: "restored-generation",
 			lastEventSequence: 0,
+			rlmRosterRevision: 0,
 		};
 		internals.sessions.set(activeSessionId, state);
 		internals.cronScheduler.start();

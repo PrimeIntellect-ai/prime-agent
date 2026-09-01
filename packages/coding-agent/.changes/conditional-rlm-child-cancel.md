@@ -1,0 +1,1 @@
+- Added capability-gated compare-and-cancel semantics for RLM child runs, rejecting cancellation atomically when the authoritative child roster is stale.

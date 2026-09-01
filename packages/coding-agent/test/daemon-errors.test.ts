@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { SessionAlreadyActiveError } from "../src/core/session-lease.js";
-import { DaemonSessionCreateError, deserializeDaemonCreateError } from "../src/modes/daemon/daemon-errors.js";
+import {
+	DaemonSessionCreateError,
+	deserializeDaemonCreateError,
+	deserializeDaemonError,
+	RlmChildRosterChangedError,
+	serializeDaemonError,
+} from "../src/modes/daemon/daemon-errors.js";
 
 describe("deserializeDaemonCreateError", () => {
 	it("wraps generic create failures so the CLI boundary prints one line instead of rethrowing", () => {
@@ -23,5 +29,30 @@ describe("deserializeDaemonCreateError", () => {
 			errorInfo: { code: "session_already_active", sessionPath: "/tmp/session.jsonl" },
 		});
 		expect(error).toBeInstanceOf(SessionAlreadyActiveError);
+	});
+});
+
+describe("RLM child roster errors", () => {
+	it("round-trips the authoritative roster mismatch", () => {
+		const source = new RlmChildRosterChangedError("a".repeat(64), "b".repeat(64));
+		const errorInfo = serializeDaemonError(source);
+		expect(errorInfo).toEqual({
+			code: "rlm_child_roster_changed",
+			expectedRosterToken: "a".repeat(64),
+			actualRosterToken: "b".repeat(64),
+		});
+
+		const restored = deserializeDaemonError({
+			type: "response",
+			command: "cancel_rlm_child",
+			success: false,
+			error: source.message,
+			errorInfo,
+		});
+		expect(restored).toBeInstanceOf(RlmChildRosterChangedError);
+		expect(restored).toMatchObject({
+			expectedRosterToken: "a".repeat(64),
+			actualRosterToken: "b".repeat(64),
+		});
 	});
 });

@@ -1,5 +1,6 @@
 import { type Component, type Focusable, getKeybindings, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../../agent-connection/index.js";
+import { type AgentRosterStatus, classifyAgentStatus } from "../../daemon/agent-roster.js";
 import { theme } from "../theme/theme.js";
 import { keyText } from "./keybinding-hints.js";
 
@@ -10,29 +11,33 @@ export interface SubagentSummaryCounts {
 	inactive: number;
 }
 
+export function classifySubagentSnapshotStatus(
+	child: AgentConnectionRlmChildAgentSnapshot,
+	activeHeartbeatSessionIds: ReadonlySet<string>,
+): AgentRosterStatus {
+	// Activity implies a live session; the in-process connection never stamps activeSessionId.
+	const resident = child.activeSessionId !== undefined || child.activity !== undefined;
+	const busy = child.status === "running" || child.status === "queued" || child.activity !== undefined;
+	return classifyAgentStatus({
+		resident,
+		queuedChild: !resident && busy,
+		busy,
+		hasActiveHeartbeat: child.activeSessionId !== undefined && activeHeartbeatSessionIds.has(child.activeSessionId),
+	});
+}
+
 export function countDirectSubagentStatuses(
 	children: Iterable<AgentConnectionRlmChildAgentSnapshot>,
 	parentId: string | undefined,
 	activeHeartbeatSessionIds: ReadonlySet<string>,
 ): SubagentSummaryCounts {
-	let total = 0;
-	let running = 0;
-	let idle = 0;
+	const counts: SubagentSummaryCounts = { total: 0, running: 0, idle: 0, inactive: 0 };
 	for (const child of children) {
 		if (child.parentId !== parentId || child.status === "cancelled") continue;
-		total += 1;
-		const isRunning =
-			child.status === "running" ||
-			child.status === "queued" ||
-			child.activity !== undefined ||
-			(child.activeSessionId !== undefined && activeHeartbeatSessionIds.has(child.activeSessionId));
-		if (isRunning) {
-			running += 1;
-		} else if ((child.status === "done" || child.status === "error") && child.activeSessionId !== undefined) {
-			idle += 1;
-		}
+		counts.total += 1;
+		counts[classifySubagentSnapshotStatus(child, activeHeartbeatSessionIds)] += 1;
 	}
-	return { total, running, idle, inactive: total - running - idle };
+	return counts;
 }
 
 /** One-line entry into the current session's scoped agents view. */
@@ -86,9 +91,9 @@ export class SubagentSummaryLine implements Component, Focusable {
 		if (width < 2) return lines;
 		const safeWidth = width;
 		const inner = safeWidth - 2;
-		const label = theme.fg("accent", "[1magents[22m");
+		const label = theme.fg("accent", "[1msubagents[22m");
 		const top = truncateToWidth(
-			`${theme.fg("border", "╭─ ")}${label}${theme.fg("border", ` ${"─".repeat(Math.max(0, inner - 9))}╮`)}`,
+			`${theme.fg("border", "╭─ ")}${label}${theme.fg("border", ` ${"─".repeat(Math.max(0, inner - 3 - visibleWidth(label)))}╮`)}`,
 			safeWidth,
 			"…",
 		);
