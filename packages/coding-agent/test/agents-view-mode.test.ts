@@ -118,6 +118,19 @@ describe("AgentsViewMode", () => {
 		expect(self.selectedIndex).toBe(4);
 	});
 
+	it("loads the saved catalog on view entry without a search query", () => {
+		const self = {
+			savedSearchFetchStarted: false,
+			persistentState: {},
+			refreshSavedSessions: vi.fn(async () => true),
+		};
+
+		invoke("armSavedSearchFetch", self);
+
+		expect(self.refreshSavedSessions).toHaveBeenCalledOnce();
+		expect(self.savedSearchFetchStarted).toBe(true);
+	});
+
 	it("re-resolves subagent state before choosing stop or delete intent", async () => {
 		const child = summary({
 			id: "passive-child-session",
