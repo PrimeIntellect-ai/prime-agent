@@ -7304,10 +7304,13 @@ export class AgentDaemon {
 			cleanup();
 		}
 		this.cronScheduler.stop();
-		for (const state of [...this.sessions.values()]) {
-			await this.closeSession(state, closingReason);
+		try {
+			for (const state of [...this.sessions.values()]) {
+				await this.closeSession(state, closingReason);
+			}
+		} finally {
+			await flushAllPendingAgentTraceUploads();
 		}
-		await flushAllPendingAgentTraceUploads();
 		for (const client of this.clients) {
 			client.detachInput();
 			client.socket.end();

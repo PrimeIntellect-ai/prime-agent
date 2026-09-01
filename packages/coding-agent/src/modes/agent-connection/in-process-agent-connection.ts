@@ -634,8 +634,11 @@ export class InProcessAgentConnection implements AgentConnection {
 			this.runtimeHost.setBeforeSessionInvalidate(undefined);
 		}
 		this.runtimeHost.setRebindSession(undefined);
-		await this.runtimeHost.dispose();
-		await flushAllPendingAgentTraceUploads();
+		try {
+			await this.runtimeHost.dispose();
+		} finally {
+			await flushAllPendingAgentTraceUploads();
+		}
 	}
 
 	private get session() {
