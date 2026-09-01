@@ -1612,14 +1612,16 @@ export class DaemonSupervisor {
 
 		if (mutation && !UPDATE_RESTART_DRAIN_COMMANDS.has(command.type)) {
 			const idleEvictionFence = this.idleEvictionFence;
-			if (idleEvictionFence) await idleEvictionFence;
-		}
-		try {
-			await this.assertCurrentOwnership();
-		} catch (error) {
-			if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
-			this.write(client, failure(command.id, command.type, error, serializeDaemonError(error)));
-			return;
+			if (idleEvictionFence) {
+				await idleEvictionFence;
+				try {
+					await this.assertCurrentOwnership();
+				} catch (error) {
+					if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
+					this.write(client, failure(command.id, command.type, error, serializeDaemonError(error)));
+					return;
+				}
+			}
 		}
 		// Attach is intentionally read-only and is not fence-gated. If eviction wins
 		// the race, attach fails cleanly with "Session worker is not connected" and
