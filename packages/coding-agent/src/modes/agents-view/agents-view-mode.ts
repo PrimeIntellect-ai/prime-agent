@@ -2566,7 +2566,12 @@ export class AgentsViewMode implements Component, Focusable {
 			isSubagentSummary(row.summary) && !pendingDelete && !pendingKill && row.summary.model
 				? `${row.summary.model.provider}/${row.summary.model.id}${row.summary.thinkingLevel && row.summary.thinkingLevel !== "off" ? `:${row.summary.thinkingLevel}` : ""}`
 				: undefined;
-		const statusLabel = !pendingDelete && !pendingKill ? row.statusLabel : undefined;
+		const statusLabel =
+			!pendingDelete &&
+			!pendingKill &&
+			(row.summary.statusLabel !== undefined || row.summary.lastHeardFromAt !== undefined)
+				? row.statusLabel
+				: undefined;
 		const suffixes = [statusLabel, modelLabel, summaryText].filter(
 			(suffix): suffix is string => suffix !== undefined && suffix.length > 0,
 		);
