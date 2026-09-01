@@ -120,7 +120,9 @@ export function parseLsofListeners(stdout: string): DiscoveredDaemonProcess[] {
 		if (field === "p") {
 			pid = Number.parseInt(value, 10);
 		} else if (field === "n" && pid !== undefined && value.startsWith("/")) {
-			const socketPath = normalizeSocketPath(value);
+			// Linux lsof appends metadata such as " type=STREAM" to Unix socket
+			// names, while macOS reports only the path.
+			const socketPath = normalizeSocketPath(value.replace(/\s+type=\w+(?:\s.*)?$/, ""));
 			const key = `${pid}:${socketPath}`;
 			if (!seen.has(key)) {
 				seen.add(key);

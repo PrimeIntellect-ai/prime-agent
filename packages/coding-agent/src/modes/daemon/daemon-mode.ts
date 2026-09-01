@@ -7346,6 +7346,7 @@ export class AgentDaemon {
 		for (const client of this.clients) {
 			client.detachInput();
 			client.socket.end();
+			client.socket.destroy();
 		}
 		await new Promise<void>((resolveClose) => {
 			if (!this.server) {

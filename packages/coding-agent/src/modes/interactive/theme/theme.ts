@@ -820,7 +820,7 @@ function getDefaultTheme(): string {
 // Global Theme Instance
 // ============================================================================
 
-// Use globalThis to share theme across module loaders (tsx + jiti in dev mode)
+// Use globalThis to share theme across module loaders (direct Bun source execution + jiti in dev mode)
 const THEME_KEY = Symbol.for("@earendil-works/pi-coding-agent:theme");
 
 // Export theme as a getter that reads from globalThis
@@ -1024,6 +1024,10 @@ function startThemeWatcher(): void {
 				themeWatcher = undefined;
 			},
 		) ?? undefined;
+}
+
+export function getActiveThemeWatcher(): fs.FSWatcher | undefined {
+	return themeWatcher;
 }
 
 export function stopThemeWatcher(): void {

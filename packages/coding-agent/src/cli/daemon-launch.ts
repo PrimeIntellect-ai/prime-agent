@@ -346,11 +346,22 @@ async function shutdownStaleDaemonIfNotBusy(socketPath: string): Promise<StaleDa
 	return (await shutdownConnectedDaemonAndWait(client, socketPath, 5000, hello)) ? "stopped" : "busy";
 }
 
-async function ensureDaemonRunning(socketPath: string, spawnCwd?: string): Promise<void> {
+export interface DaemonLaunchTiming {
+	startupTimeoutMs?: number;
+	initialHelloTimeoutMs?: number;
+}
+
+async function ensureDaemonRunning(
+	socketPath: string,
+	spawnCwd?: string,
+	timing: DaemonLaunchTiming = {},
+): Promise<void> {
+	const startupTimeoutMs = timing.startupTimeoutMs ?? DAEMON_STARTUP_TIMEOUT_MS;
+	const initialHelloTimeoutMs = timing.initialHelloTimeoutMs ?? 2000;
 	const probeStartedAt = Date.now();
-	let probe = await probeDaemonVersion(socketPath);
+	let probe = await probeDaemonVersion(socketPath, initialHelloTimeoutMs);
 	if (probe.status === "unresponsive") {
-		const remainingStartupMs = Math.max(1, DAEMON_STARTUP_TIMEOUT_MS - (Date.now() - probeStartedAt));
+		const remainingStartupMs = Math.max(1, startupTimeoutMs - (Date.now() - probeStartedAt));
 		probe = await probeDaemonVersion(socketPath, remainingStartupMs);
 	}
 	if (probe.status === "current") {
@@ -358,7 +369,7 @@ async function ensureDaemonRunning(socketPath: string, spawnCwd?: string): Promi
 	}
 	if (probe.status === "unresponsive") {
 		throw new Error(
-			`Prime Agent daemon on ${socketPath} accepted connections but did not finish startup within ${DAEMON_STARTUP_TIMEOUT_MS / 1000} seconds. ` +
+			`Prime Agent daemon on ${socketPath} accepted connections but did not finish startup within ${startupTimeoutMs / 1000} seconds. ` +
 				`It was left running to avoid interrupting active work.
 
 Run:
@@ -436,7 +447,7 @@ Then retry the original command.`,
 	// A child exit is not immediately fatal: it may have lost the socket to a
 	// concurrent launcher whose daemon is still booting. Keep probing for a
 	// short grace window before attributing the failure to the exit.
-	const deadline = Date.now() + DAEMON_STARTUP_TIMEOUT_MS;
+	const deadline = Date.now() + startupTimeoutMs;
 	let exitDeadline: number | undefined;
 	while (Date.now() < Math.min(deadline, exitDeadline ?? Number.POSITIVE_INFINITY)) {
 		const started = await probeDaemonVersion(socketPath);
@@ -489,10 +500,14 @@ const ensurePromises = new Map<string, Promise<void>>();
  * main.ts share one probe/spawn; failed attempts are forgotten so a later call
  * retries (and surfaces the real error at its await site).
  */
-export function ensureInteractiveDaemonRunning(socketPath: string, spawnCwd?: string): Promise<void> {
+export function ensureInteractiveDaemonRunning(
+	socketPath: string,
+	spawnCwd?: string,
+	timing?: DaemonLaunchTiming,
+): Promise<void> {
 	let promise = ensurePromises.get(socketPath);
 	if (!promise) {
-		promise = ensureDaemonRunning(socketPath, spawnCwd);
+		promise = ensureDaemonRunning(socketPath, spawnCwd, timing);
 		ensurePromises.set(socketPath, promise);
 		const clear = () => {
 			if (ensurePromises.get(socketPath) === promise) {
