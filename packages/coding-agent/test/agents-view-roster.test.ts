@@ -482,7 +482,8 @@ describe("subscriber push transitions", () => {
 			rlmSpawnLedger: () => ledger,
 			defaultSessionConfig: { agentDir: directory, cwd: directory },
 		});
-		const worker = pushWorker("w1");
+		// Reseeds are family-scoped: the worker must own the family root it snapshots for.
+		const worker = { ...pushWorker("w1"), descriptor: { ...pushWorker("w1").descriptor, sessionFile: parentPath } };
 		supervisor.workers.set("w1", worker);
 		const childEntry = workerRosterEntryFromSummary(
 			summary({
