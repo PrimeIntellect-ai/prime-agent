@@ -1,0 +1,1 @@
+- Fixed daemon startup and recovery to preserve slow live processes and fail closed after socket lock loss.

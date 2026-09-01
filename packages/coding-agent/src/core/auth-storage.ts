@@ -126,11 +126,23 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		const maxAttempts = 10;
 		const delayMs = 20;
 		let lastError: unknown;
+		let compromisedError: Error | undefined;
 
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			try {
-				return lockfile.lockSync(path, { realpath: false });
+				const release = lockfile.lockSync(path, {
+					realpath: false,
+					onCompromised: (error) => {
+						compromisedError ??= error;
+					},
+				});
+				if (compromisedError) {
+					release();
+					throw compromisedError;
+				}
+				return release;
 			} catch (error) {
+				if (compromisedError) throw compromisedError;
 				const code =
 					typeof error === "object" && error !== null && "code" in error
 						? String((error as { code?: unknown }).code)
@@ -211,11 +223,8 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			return result;
 		} finally {
 			if (release) {
-				try {
-					await release();
-				} catch {
-					// Ignore unlock errors when lock is compromised.
-				}
+				if (lockCompromised) await release().catch(() => undefined);
+				else await release();
 			}
 		}
 	}

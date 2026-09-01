@@ -324,11 +324,18 @@ function coordinatorRecordPath(registryDir: string, socketPath: string): string 
 
 async function withCoordinatorRegistryGuard<T>(registryDir: string, action: () => T | Promise<T>): Promise<T> {
 	mkdirSync(registryDir, { recursive: true, mode: 0o700 });
+	let compromisedError: Error | undefined;
+	const assertGuardHeld = () => {
+		if (compromisedError) throw new Error(`Coordinator registry guard was compromised: ${compromisedError.message}`);
+	};
 	const release = await lockfile.lock(registryDir, {
 		realpath: false,
 		lockfilePath: resolve(registryDir, ".guard"),
 		stale: COORDINATOR_REGISTRY_LOCK_STALE_MS,
 		update: COORDINATOR_REGISTRY_LOCK_UPDATE_MS,
+		onCompromised: (error) => {
+			compromisedError ??= error;
+		},
 		retries: {
 			retries: COORDINATOR_REGISTRY_LOCK_RETRIES,
 			factor: 1,
@@ -337,9 +344,13 @@ async function withCoordinatorRegistryGuard<T>(registryDir: string, action: () =
 		},
 	});
 	try {
-		return await action();
+		assertGuardHeld();
+		const result = await action();
+		assertGuardHeld();
+		return result;
 	} finally {
-		await release();
+		if (compromisedError) await release().catch(() => undefined);
+		else await release();
 	}
 }
 

@@ -7,6 +7,7 @@ import lockfile from "proper-lockfile";
 import { describe, expect, it } from "vitest";
 import {
 	cleanupDaemonSocketPath,
+	DaemonSocketPathLease,
 	defaultDaemonSocketPath,
 	getDaemonSocketIdentity,
 	normalizeSocketPath,
@@ -250,6 +251,47 @@ describe("defaultDaemonSocketPath", () => {
 			if (replacementServer.listening) {
 				await new Promise<void>((resolve) => replacementServer.close(() => resolve()));
 			}
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe.skipIf(process.platform === "win32")("DaemonSocketPathLease compromise hardening", () => {
+	it("records compromise without rethrowing listener failures", () => {
+		const lease = new DaemonSocketPathLease("/tmp/test.sock", () => Promise.resolve());
+		const observed: Error[] = [];
+		lease.onCompromised(() => {
+			throw new Error("listener failed");
+		});
+		lease.onCompromised((error) => observed.push(error));
+
+		expect(() => lease.recordCompromise(new Error("lock update failed"))).not.toThrow();
+		expect(lease.compromise?.message).toBe("lock update failed");
+		expect(observed).toHaveLength(1);
+	});
+
+	it("fails closed before preparing a path with a compromised lease", async () => {
+		const socketPath = join(tmpdir(), "test-missing.sock");
+		const lease = new DaemonSocketPathLease(socketPath, () => Promise.resolve());
+		lease.recordCompromise(new Error("lock stolen"));
+
+		await expect(prepareDaemonSocketPath(socketPath, lease)).rejects.toThrow(/was compromised/);
+	});
+
+	it("does not unlink a successor socket after the old lease is compromised", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pa-socket-compromise-"));
+		const socketPath = join(dir, "daemon.sock");
+		const server = createServer();
+		try {
+			await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+			const identity = getDaemonSocketIdentity(socketPath);
+			const lease = new DaemonSocketPathLease(socketPath, () => Promise.resolve());
+			lease.recordCompromise(new Error("lock stolen"));
+
+			cleanupDaemonSocketPath(socketPath, identity, lease);
+			expect(existsSync(socketPath)).toBe(true);
+		} finally {
+			await new Promise<void>((resolve) => server.close(() => resolve()));
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
