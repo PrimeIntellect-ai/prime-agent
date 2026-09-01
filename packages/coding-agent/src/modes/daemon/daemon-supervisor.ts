@@ -434,7 +434,6 @@ function isSupervisorRecoveryCancelled(error: unknown): boolean {
 	return isSupervisorShutdownAdmissionCancelled(error) || isSupervisorGenerationStale(error);
 }
 
-/** Resolves paths to their family root through the edge set; a cycle terminates at first revisit. */
 function rosterFamilyRoot(edges: readonly RlmLedgerEdge[]): (path: string) => string {
 	const parentByChild = new Map(
 		edges.map((edge) => [canonicalSessionPath(edge.child), canonicalSessionPath(edge.parent)]),
@@ -2467,7 +2466,6 @@ export class DaemonSupervisor {
 		return success(command.id, "list", { ...data, sessions: merged });
 	}
 
-	/** The one hydration owner: a seeded row's display cwd comes from one transcript-header read. */
 	private async hydratedSeedEntry<T extends WorkerRosterEntry>(entry: T): Promise<T> {
 		const info = entry.summary.sessionFile
 			? await readSessionInfo(entry.summary.sessionFile).catch(() => undefined)
@@ -3964,12 +3962,6 @@ export class DaemonSupervisor {
 		return this.roster().entriesForWorker(worker.descriptor.workerId);
 	}
 
-	/**
-	 * The roster seeds only registered workers' families: stat-reconciled ledger children whose
-	 * family root is a registered worker's session. The saved-session corpus stays owned by the
-	 * disk catalog (list --all, search) — seeding it published the whole corpus (~thousands of
-	 * inactive rows and sequential header reads) to every subscriber after a restart.
-	 */
 	private async seedRosterLedger(): Promise<void> {
 		try {
 			const roots = new Set<string>();
@@ -4097,7 +4089,6 @@ export class DaemonSupervisor {
 		delta: Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>,
 		source?: DaemonWorkerClient,
 	): Promise<void> {
-		// Live edges are read before any deletion, so a reseeded child never surfaces as a transient removal.
 		let edgesFailed = false;
 		const edges = await this.rlmSpawnLedger()
 			.liveEdges()
@@ -4117,19 +4108,14 @@ export class DaemonSupervisor {
 				unclaimed.set(entry.agentId, entry);
 			}
 		}
-		// A reseed keeps the previous claim and hydrated summary; a synthetic seed would drop
-		// lastActivityAt (pinning canEvictWorker on NaN) and flap the claim off on every snapshot.
-		// Only THIS worker's family reseeds: other families' rows are owned by their own workers or
-		// the startup seed, and a client-owned worker's dropped rows must not resurrect as public rows.
+		// Only this worker's family reseeds: anything wider can resurrect a client-owned worker's dropped children.
 		const workerRoot = worker.descriptor.sessionFile ?? worker.descriptor.createCommand.sessionPath;
 		const rootPath = workerRoot !== undefined ? canonicalSessionPath(workerRoot) : undefined;
 		const familyRoot = rosterFamilyRoot(edges);
 		const familyEdges = edges.filter(
 			(edge) => rootPath !== undefined && familyRoot(canonicalSessionPath(edge.child)) === rootPath,
 		);
-		// A ledger child needs no reseed when something else keeps a row for it: the sweep's
-		// unclaimed set restores it, the snapshot (re)sends it, or a surviving row already owns
-		// its id or its file.
+		// "Unclaimed" rows survive: the sweep deletes them but the restore branch rewrites them.
 		const rowSurvivesWithoutReseed = (entry: WorkerRosterEntry, childPath: string): boolean => {
 			if (unclaimed.has(entry.agentId)) return true;
 			if (sent.has(entry.agentId) && !removed.has(entry.agentId)) return true;
