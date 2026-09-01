@@ -7874,6 +7874,40 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("blocks deleting a live session through a symlinked path", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-symlink-"));
+		try {
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
+				createRuntime: async () => {
+					throw new Error("unexpected runtime creation");
+				},
+			});
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+			};
+			const sessionFile = join(tempDir, "live-session.jsonl");
+			writeFileSync(sessionFile, "");
+			const linkPath = join(tempDir, "live-session-link.jsonl");
+			symlinkSync(sessionFile, linkPath);
+			const state = makeState("active-1");
+			(state.runtime as { session?: unknown }).session = { sessionFile };
+			internals.sessions.set(state.activeSessionId, state);
+
+			await expect(
+				internals.handleCommand(makeClient("client-1", "active-1"), {
+					id: "command-1",
+					type: "delete_saved_session",
+					sessionPath: linkPath,
+				}),
+			).rejects.toThrow("Cannot delete the currently active session");
+			expect(existsSync(sessionFile)).toBe(true);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("cancels scheduled jobs when a saved session is deleted", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-cron-"));
 		try {

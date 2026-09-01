@@ -311,10 +311,27 @@ describe("rlm spawn ledger", () => {
 			});
 			await ledger.appendRename({ childId: "sub-11111111", child: child.file, name: "renamed-worker" });
 
+			// A sessions-dir child whose parent transcript vanished degrades to a root row: the dead
+			// edge is reconciled away for suppression exactly as for emission.
+			const orphan = SessionManager.create(root, sessionsDir);
+			orphan.newSession();
+			orphan.appendSessionInfo("orphan-root");
+			orphan.flushNow();
+			const orphanFile = orphan.getSessionFile();
+			if (!orphanFile) throw new Error("Missing orphan file");
+			await ledger.appendSpawn({
+				childId: "sub-44444444",
+				parent: join(sessionsDir, "missing-parent.jsonl"),
+				child: orphanFile,
+				depth: 1,
+				name: "orphan",
+			});
+
 			const family = await ledger.family();
 			expect(family.map((row) => [row.name, row.rlmDepth])).toEqual([
 				["parent", 0],
 				["other-root", 0],
+				["orphan-root", 0],
 				["renamed-worker", 1],
 				["nested", 2],
 			]);
@@ -325,7 +342,7 @@ describe("rlm spawn ledger", () => {
 			const siblings = await ledger.siblings(child.file);
 			expect(siblings.map((row) => row.name)).toEqual(["renamed-worker"]);
 			const rootSiblings = await ledger.siblings(parentFile);
-			expect(rootSiblings.map((row) => row.name)).toEqual(["parent", "other-root"]);
+			expect(rootSiblings.map((row) => row.name)).toEqual(["parent", "other-root", "orphan-root"]);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

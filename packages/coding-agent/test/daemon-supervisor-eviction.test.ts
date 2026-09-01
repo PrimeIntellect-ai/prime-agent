@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { success } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor, idleEvictionSweepIntervalMs } from "../src/modes/daemon/daemon-supervisor.js";
+import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
 
 interface WorkerFixture {
 	descriptor: {
@@ -123,6 +124,7 @@ describe("daemon supervisor whole-tree eviction", () => {
 		for (const worker of [idle, active, heartbeat, cron, attached]) {
 			supervisor.workers.set(worker.descriptor.workerId, worker);
 		}
+		seedSupervisorRoster(supervisor, idle, active, heartbeat, cron, attached);
 		supervisor.clients.add({ id: "viewer", attachedActiveSessionIds: new Set(["attached-root"]) });
 
 		await supervisor.runIdleEvictionSweep(now);
@@ -151,6 +153,7 @@ describe("daemon supervisor whole-tree eviction", () => {
 		});
 		supervisor.workers.set("active", active);
 		supervisor.workers.set("wholly-idle", whollyIdle);
+		seedSupervisorRoster(supervisor, active, whollyIdle);
 
 		await supervisor.runIdleEvictionSweep(now);
 
@@ -215,6 +218,7 @@ describe("daemon supervisor whole-tree eviction", () => {
 		]);
 		supervisor.workers.set("paused", paused);
 		supervisor.workers.set("active-heartbeat", active);
+		seedSupervisorRoster(supervisor, paused, active);
 
 		await supervisor.runIdleEvictionSweep(now);
 
@@ -284,7 +288,10 @@ describe("daemon supervisor whole-tree eviction", () => {
 		});
 		const reopened = makeWorker("reopened", [rootSummary]);
 		reopened.descriptor.rootActiveSessionId = "new-active-id";
-		supervisor.createOrReuseWorker = vi.fn(async () => reopened);
+		supervisor.createOrReuseWorker = vi.fn(async () => {
+			seedSupervisorRoster(supervisor, reopened);
+			return reopened;
+		});
 		const client = { id: "viewer", attachedActiveSessionIds: new Set<string>() };
 
 		const response = await supervisor.handleCommand(client, {
@@ -325,8 +332,12 @@ describe("daemon supervisor whole-tree eviction", () => {
 			data: { deliveryStatus: "delivered" },
 		});
 		supervisor.workers.set("source", source);
+		seedSupervisorRoster(supervisor, source);
 		supervisor.catalog.resolve = vi.fn(async () => "/tmp/target.jsonl");
-		supervisor.createOrReuseWorker = vi.fn(async () => target);
+		supervisor.createOrReuseWorker = vi.fn(async () => {
+			seedSupervisorRoster(supervisor, target);
+			return target;
+		});
 		const client = { id: "sender", attachedActiveSessionIds: new Set<string>() };
 
 		const response = await supervisor.handleCommand(client, {
@@ -369,6 +380,7 @@ describe("daemon supervisor whole-tree eviction", () => {
 			data: { deliveryStatus: "delivered" },
 		});
 		supervisor.workers.set("shared", worker);
+		seedSupervisorRoster(supervisor, worker);
 		const client = { id: "sender", attachedActiveSessionIds: new Set<string>() };
 
 		const response = await supervisor.handleCommand(client, {
@@ -401,6 +413,7 @@ describe("daemon supervisor whole-tree eviction", () => {
 		const supervisor = makeSupervisor();
 		const source = makeWorker("source", [makeSummary("source-active", now)]);
 		supervisor.workers.set("source", source);
+		seedSupervisorRoster(supervisor, source);
 		supervisor.catalog.resolve = vi.fn(async () => {
 			throw new Error("Unknown saved session: missing-target");
 		});
@@ -471,6 +484,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		for (const worker of [empty, ...exempt]) {
 			supervisor.workers.set(worker.descriptor.workerId, worker);
 		}
+		seedSupervisorRoster(supervisor, empty, ...exempt);
 		const first = makeDetachClient("first", ["empty-root"]);
 		const viewer = makeDetachClient("viewer", [
 			"empty-root",
@@ -515,6 +529,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 				}),
 		);
 		supervisor.workers.set("swap", worker);
+		seedSupervisorRoster(supervisor, worker);
 		const client = makeDetachClient("viewer", ["swap-root"]);
 		supervisor.clients.add(client);
 
@@ -544,6 +559,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 				}),
 		);
 		supervisor.workers.set("gap", worker);
+		seedSupervisorRoster(supervisor, worker);
 		const client = makeDetachClient("viewer", ["gap-root"]);
 		supervisor.clients.add(client);
 
@@ -572,6 +588,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		const draftB = makeWorker("draft-b", [makeSummary("draft-b-root", now, { messageCount: 0 })]);
 		supervisor.workers.set("draft-a", draftA);
 		supervisor.workers.set("draft-b", draftB);
+		seedSupervisorRoster(supervisor, draftA, draftB);
 		const client = makeDetachClient("viewer", ["draft-a-root", "draft-b-root"]);
 		supervisor.clients.add(client);
 
@@ -606,6 +623,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 					}),
 			);
 		supervisor.workers.set("gap", worker);
+		seedSupervisorRoster(supervisor, worker);
 		const client = makeDetachClient("viewer", ["gap-root"]);
 		supervisor.clients.add(client);
 

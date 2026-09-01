@@ -4,6 +4,7 @@ import type { IdleEvictionMinutes } from "../../core/session-action-store.js";
 
 export { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../../core/session-lease.js";
 
+import type { WorkerRosterEntry } from "./agent-roster.js";
 import type { DaemonClientCapability, DaemonCommand, DaemonOutbound } from "./daemon-protocol.js";
 
 export const DAEMON_WORKER_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WORKER";
@@ -15,6 +16,22 @@ export const DAEMON_WORKER_STARTUP_GATE_FD_ENV = "PRIME_AGENT_INTERNAL_DAEMON_WO
 export const DAEMON_WORKER_STARTUP_GATE_COMMIT = "start\n";
 export type DaemonWorkerLifecycle = "starting" | "ready" | "recovering" | "stopping" | "failed";
 
+// Worker->supervisor roster frames live outside the client-facing DaemonOutbound schema.
+export type DaemonWorkerRosterOutbound =
+	| {
+			type: "roster_delta";
+			entries: WorkerRosterEntry[];
+			removedAgentIds?: string[];
+			snapshot?: true;
+	  }
+	| { type: "roster_heartbeat" };
+
+/** Advertised by new workers in the worker_auth response; absent on legacy workers. */
+export const DAEMON_WORKER_ROSTER_CAPABILITY = "agent_roster";
+
+/** Idle keepalive cadence for worker->supervisor roster frames; the supervisor staleness threshold derives from it. */
+export const ROSTER_HEARTBEAT_INTERVAL_MS = 15_000;
+
 export type DaemonWorkerFrameHeader =
 	| {
 			kind: "command";
@@ -24,7 +41,7 @@ export type DaemonWorkerFrameHeader =
 	| {
 			kind: "outbound";
 			requestId?: string;
-			outboundType: DaemonOutbound["type"];
+			outboundType: DaemonOutbound["type"] | DaemonWorkerRosterOutbound["type"];
 			activeSessionId?: string;
 			snapshotId?: string;
 			sessionEventType?: string;

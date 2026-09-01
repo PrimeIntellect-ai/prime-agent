@@ -29,6 +29,7 @@ import { MutationDrainLatch } from "../src/modes/daemon/mutation-drain-latch.js"
 import { WorkerRecoveryJournal } from "../src/modes/daemon/worker-recovery-journal.js";
 import type { PrivateFrame } from "../src/modes/session-worker/private-framing.js";
 import * as childProcessModule from "../src/utils/child-process.js";
+import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
 import { createDeferred } from "./suite/scheduling.js";
 
 const workerLaunchTestState = vi.hoisted(() => ({
@@ -478,6 +479,16 @@ describe("daemon worker supervisor monitoring", () => {
 		const daemon = Object.assign(Object.create(AgentDaemon.prototype), {
 			options: { worker: { authenticationToken: "token" } },
 			supervisorClaims: new Map(),
+			clients: new Set(),
+			sessions: new Map(),
+			cronStore: { list: () => [] },
+			rosterReporter: {
+				lastComposed: new Map(),
+				lastComposedJson: new Map(),
+				queuedChildren: new Map(),
+				removedAgentIds: new Map(),
+				snapshotPending: false,
+			},
 			shuttingDown: false,
 			clearSupervisorAvailabilityCheck: vi.fn(),
 			scheduleSupervisorFenceCheck: vi.fn(),
@@ -1721,6 +1732,7 @@ describe("daemon worker supervisor monitoring", () => {
 		worker.descriptor.lifecycle = "ready";
 		worker.client = {};
 		worker.summaries.set(root.activeSessionId, root as SessionSummary);
+		seedSupervisorRoster(supervisor, worker);
 		recovery.resolve();
 
 		await expect(reused).resolves.toBe(worker);
@@ -1742,6 +1754,7 @@ describe("daemon worker supervisor monitoring", () => {
 			worker.descriptor.lifecycle = "ready";
 			worker.client = {};
 			worker.summaries.set(root.activeSessionId, root as SessionSummary);
+			seedSupervisorRoster(supervisor, worker);
 		});
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
@@ -1785,6 +1798,7 @@ describe("daemon worker supervisor monitoring", () => {
 				sessionPath: string,
 			): Promise<typeof worker>;
 		};
+		seedSupervisorRoster(supervisor, worker);
 
 		await expect(supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/session.jsonl")).resolves.toBe(worker);
 		expect(recoverWorker).toHaveBeenCalledOnce();
@@ -2072,6 +2086,7 @@ describe("daemon worker supervisor monitoring", () => {
 				data?: { sessions: Array<{ activeSessionId?: string; id: string; workerState?: string }> };
 			}>;
 		};
+		seedSupervisorRoster(supervisor, liveWorker, stoppingWorker);
 
 		const response = await supervisor.handleList({}, { id: "list-1", type: "list" });
 
@@ -3410,6 +3425,7 @@ describe("daemon worker supervisor monitoring", () => {
 				command: { type: "attach"; activeSessionId: string },
 			): Promise<unknown>;
 		};
+		seedSupervisorRoster(supervisor, worker);
 
 		await supervisor.attachClient(client, { type: "attach", activeSessionId });
 
@@ -3523,6 +3539,7 @@ describe("daemon worker supervisor monitoring", () => {
 				command: { type: "attach"; activeSessionId: string; telemetryDisabled?: true },
 			): Promise<unknown>;
 		};
+		seedSupervisorRoster(supervisor, worker);
 
 		await expect(
 			supervisor.attachClient(client, { type: "attach", activeSessionId, telemetryDisabled: true }),
@@ -3687,6 +3704,7 @@ describe("daemon worker supervisor monitoring", () => {
 		}) as {
 			attachClient(client: AttachClient, command: { type: "attach"; activeSessionId: string }): Promise<unknown>;
 		};
+		seedSupervisorRoster(supervisor, worker);
 
 		await expect(supervisor.attachClient(client, { type: "attach", activeSessionId })).rejects.toThrow(
 			"snapshot failed",
@@ -3761,6 +3779,35 @@ describe("daemon worker supervisor monitoring", () => {
 		} finally {
 			kill.mockRestore();
 			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("skips the recovery SIGKILL when the pid identity is no longer current", async () => {
+		const kill = vi.spyOn(process, "kill").mockReturnValue(true);
+		const makeSupervisorFixture = (identity: "current" | "replaced") =>
+			Object.assign(Object.create(DaemonSupervisor.prototype), {
+				log: vi.fn(),
+				assertRecoveryAllowed: vi.fn(async () => {}),
+				// The verdict a caller computed before awaiting its way in can go stale;
+				// the signal must re-check identity at the last moment (PIDs recycle).
+				processIdentity: vi.fn(() => identity),
+			}) as {
+				recoverUncertainWorkerOperations(
+					worker: { descriptor: { workerId: string; pid: number; recoveryJournalPath: string } },
+					killWorkerProcess: boolean,
+				): Promise<void>;
+			};
+		const worker = {
+			descriptor: { workerId: "worker-1", pid: 987_654, recoveryJournalPath: join(tmpdir(), "absent.jsonl") },
+		};
+
+		try {
+			await makeSupervisorFixture("replaced").recoverUncertainWorkerOperations(worker, true);
+			expect(kill).not.toHaveBeenCalled();
+			await makeSupervisorFixture("current").recoverUncertainWorkerOperations(worker, true);
+			expect(kill).toHaveBeenCalled();
+		} finally {
+			kill.mockRestore();
 		}
 	});
 	it.each([
