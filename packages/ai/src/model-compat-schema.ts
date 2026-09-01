@@ -92,7 +92,12 @@ function createCompatSchemas(strict: boolean) {
 }
 
 const strictSchemas = createCompatSchemas(true);
-export const ProviderCompatSchema = createCompatSchemas(false).provider;
+const localSchemas = createCompatSchemas(false);
+export const ProviderCompatSchema = Type.Intersect([
+	localSchemas.openAICompletions,
+	localSchemas.openAIResponses,
+	localSchemas.anthropicMessages,
+]) as unknown as typeof localSchemas.provider;
 
 export function isModelCompat(api: string, value: unknown): boolean {
 	if (value === undefined) return true;
