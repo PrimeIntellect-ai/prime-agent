@@ -1,8 +1,10 @@
+import { appendFileSync, readFileSync } from "node:fs";
 import type { AgentTool, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentCronJob } from "../../src/core/cron-jobs.js";
+import { SessionManager } from "../../src/core/session-manager.js";
 import type { ExtensionAPI } from "../../src/index.js";
 import { createHarness, getAssistantTexts, getMessageText, type Harness } from "./harness.js";
 
@@ -114,6 +116,73 @@ describe("AgentSession model and extension characterization", () => {
 			}),
 		]);
 		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "thinking_level_change")).toEqual([]);
+	});
+
+	it("keeps the live profile and branch unchanged when atomic profile persistence fails", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "faux-1", name: "One", reasoning: true },
+				{ id: "faux-2", name: "Two", reasoning: true },
+			],
+			persistSession: true,
+		});
+		harnesses.push(harness);
+		const originalModel = harness.session.model;
+		const originalThinking = harness.session.thinkingLevel;
+		const sessionFile = harness.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("missing persisted session file");
+		const originalFlush = harness.sessionManager.flushNow.bind(harness.sessionManager);
+		const flush = vi.spyOn(harness.sessionManager, "flushNow");
+		flush.mockImplementationOnce(() => {
+			appendFileSync(sessionFile, '{"type":"model_change","torn":');
+			throw new Error("synthetic profile persistence failure");
+		});
+
+		await expect(
+			harness.session.setModel(harness.getModel("faux-2")!, {
+				waitForExtensions: false,
+				persistDefaults: false,
+				persistProfileAtomically: true,
+				thinkingLevel: "high",
+				requireExactThinkingLevel: true,
+			}),
+		).rejects.toThrow("synthetic profile persistence failure");
+
+		expect(harness.session.model).toBe(originalModel);
+		expect(harness.session.thinkingLevel).toBe(originalThinking);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "model_change")).toEqual([]);
+		flush.mockRestore();
+		originalFlush();
+		expect(readFileSync(sessionFile, "utf8")).not.toContain('"type":"model_change"');
+		expect(() => SessionManager.open(sessionFile, harness.sessionManager.getSessionDir())).not.toThrow();
+	});
+
+	it("durably restores an atomic profile written before the first assistant message", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "faux-1", name: "One", reasoning: true },
+				{ id: "faux-2", name: "Two", reasoning: true },
+			],
+			persistSession: true,
+		});
+		harnesses.push(harness);
+		const nextModel = harness.getModel("faux-2")!;
+
+		await harness.session.setModel(nextModel, {
+			waitForExtensions: false,
+			persistDefaults: false,
+			persistProfileAtomically: true,
+			thinkingLevel: "high",
+			requireExactThinkingLevel: true,
+		});
+
+		const sessionFile = harness.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("missing persisted session file");
+		const reopened = SessionManager.open(sessionFile, harness.sessionManager.getSessionDir());
+		expect(reopened.buildSessionContext()).toMatchObject({
+			model: { provider: nextModel.provider, modelId: nextModel.id },
+			thinkingLevel: "high",
+		});
 	});
 
 	it("can save the model before slow model_select handlers finish", async () => {

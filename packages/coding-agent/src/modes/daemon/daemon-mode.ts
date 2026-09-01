@@ -3776,6 +3776,24 @@ export class AgentDaemon {
 		}
 	}
 
+	private async withSessionProfileTransition<T>(activeSessionId: string, action: () => Promise<T>): Promise<T> {
+		const previousTransition = this.sessionProfileTransitions.get(activeSessionId) ?? Promise.resolve();
+		let releaseTransition!: () => void;
+		const transition = new Promise<void>((resolve) => {
+			releaseTransition = resolve;
+		});
+		this.sessionProfileTransitions.set(activeSessionId, transition);
+		await previousTransition;
+		try {
+			return await action();
+		} finally {
+			releaseTransition();
+			if (this.sessionProfileTransitions.get(activeSessionId) === transition) {
+				this.sessionProfileTransitions.delete(activeSessionId);
+			}
+		}
+	}
+
 	private async handleCommand(
 		client: DaemonSocketClient,
 		command: DaemonCommand,
@@ -4759,31 +4777,26 @@ export class AgentDaemon {
 
 			case "set_model": {
 				const state = this.getSessionState(command.activeSessionId);
-				const session = state.runtime.session;
-				const availableModels = await session.modelRegistry.refreshAvailableModels();
-				const model = availableModels.find((candidate) => {
-					return candidate.provider === command.provider && candidate.id === command.modelId;
+				return this.withSessionProfileTransition(state.activeSessionId, async () => {
+					const session = state.runtime.session;
+					const availableModels = await session.modelRegistry.refreshAvailableModels();
+					const model = availableModels.find((candidate) => {
+						return candidate.provider === command.provider && candidate.id === command.modelId;
+					});
+					if (!model) {
+						throw new Error(`Model not found: ${command.provider}/${command.modelId}`);
+					}
+					await session.setModel(model, {
+						waitForExtensions: !(session.isStreaming || session.isCompacting),
+					});
+					return success(command.id, "set_model", model);
 				});
-				if (!model) {
-					throw new Error(`Model not found: ${command.provider}/${command.modelId}`);
-				}
-				await session.setModel(model, {
-					waitForExtensions: !(session.isStreaming || session.isCompacting),
-				});
-				return success(command.id, "set_model", model);
 			}
 
 			case "set_profile_if_idle": {
 				const state = this.getSessionState(command.activeSessionId);
 				const session = state.runtime.session;
-				const previousTransition = this.sessionProfileTransitions.get(state.activeSessionId) ?? Promise.resolve();
-				let releaseTransition!: () => void;
-				const transition = new Promise<void>((resolve) => {
-					releaseTransition = resolve;
-				});
-				this.sessionProfileTransitions.set(state.activeSessionId, transition);
-				await previousTransition;
-				try {
+				return this.withSessionProfileTransition(state.activeSessionId, async () => {
 					const sessionInputPause = session.acquireSessionInputPause();
 					const queuedWorkPause = session.acquireQueuedWorkPause();
 					try {
@@ -4848,45 +4861,50 @@ export class AgentDaemon {
 						queuedWorkPause.release();
 						sessionInputPause.release();
 					}
-				} finally {
-					releaseTransition();
-					if (this.sessionProfileTransitions.get(state.activeSessionId) === transition) {
-						this.sessionProfileTransitions.delete(state.activeSessionId);
-					}
-				}
+				});
 			}
 
 			case "cycle_model": {
 				const state = this.getSessionState(command.activeSessionId);
-				const session = state.runtime.session;
-				const result = await session.cycleModel(command.direction, {
-					waitForExtensions: !(session.isStreaming || session.isCompacting),
+				return this.withSessionProfileTransition(state.activeSessionId, async () => {
+					const session = state.runtime.session;
+					const result = await session.cycleModel(command.direction, {
+						waitForExtensions: !(session.isStreaming || session.isCompacting),
+					});
+					return success(command.id, "cycle_model", result ?? null);
 				});
-				return success(command.id, "cycle_model", result ?? null);
 			}
 
 			case "set_scoped_models": {
 				const state = this.getSessionState(command.activeSessionId);
-				state.runtime.session.setScopedModels(command.scopedModels);
-				return success(command.id, "set_scoped_models");
+				return this.withSessionProfileTransition(state.activeSessionId, async () => {
+					state.runtime.session.setScopedModels(command.scopedModels);
+					return success(command.id, "set_scoped_models");
+				});
 			}
 
 			case "set_thinking_level": {
 				const state = this.getSessionState(command.activeSessionId);
-				state.runtime.session.setThinkingLevel(command.level);
-				return success(command.id, "set_thinking_level");
+				return this.withSessionProfileTransition(state.activeSessionId, async () => {
+					state.runtime.session.setThinkingLevel(command.level);
+					return success(command.id, "set_thinking_level");
+				});
 			}
 
 			case "set_service_tier": {
 				const state = this.getSessionState(command.activeSessionId);
-				state.runtime.session.setServiceTier(command.serviceTier);
-				return success(command.id, "set_service_tier");
+				return this.withSessionProfileTransition(state.activeSessionId, async () => {
+					state.runtime.session.setServiceTier(command.serviceTier);
+					return success(command.id, "set_service_tier");
+				});
 			}
 
 			case "cycle_thinking_level": {
 				const state = this.getSessionState(command.activeSessionId);
-				const level = state.runtime.session.cycleThinkingLevel();
-				return success(command.id, "cycle_thinking_level", level ? { level } : null);
+				return this.withSessionProfileTransition(state.activeSessionId, async () => {
+					const level = state.runtime.session.cycleThinkingLevel();
+					return success(command.id, "cycle_thinking_level", level ? { level } : null);
+				});
 			}
 
 			case "set_transport": {

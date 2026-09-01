@@ -7288,12 +7288,16 @@ export class AgentSession {
 			throw new Error(`Thinking level "${thinkingLevel}" is not available for ${model.provider}/${model.id}`);
 		}
 		const serviceTier = this._getServiceTierForModelSwitch();
-		this.agent.state.model = model;
-		this.sessionManager.appendModelChange(
-			model.provider,
-			model.id,
-			options.persistProfileAtomically ? thinkingLevel : undefined,
-		);
+		if (options.persistProfileAtomically) {
+			// The conditional daemon transition promises crash recovery. Commit the
+			// combined profile before exposing it to live state, including for a fresh
+			// session whose ordinary pre-assistant writes are intentionally deferred.
+			this.sessionManager.appendModelChangeWithRollback(model.provider, model.id, thinkingLevel);
+			this.agent.state.model = model;
+		} else {
+			this.agent.state.model = model;
+			this.sessionManager.appendModelChange(model.provider, model.id);
+		}
 		if (options.persistDefaults !== false) {
 			this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 		}

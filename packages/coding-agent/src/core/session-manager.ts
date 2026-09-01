@@ -1446,6 +1446,15 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/**
+	 * Append and immediately durably flush one combined model/thinking profile.
+	 * If either append or flush fails, restore the exact prior in-memory branch
+	 * and rewrite away any torn final record before the error escapes.
+	 */
+	appendModelChangeWithRollback(provider: string, modelId: string, thinkingLevel: string): string {
+		return this._appendEntryWithRollback(() => this.appendModelChange(provider, modelId, thinkingLevel));
+	}
+
 	appendCompaction<T = unknown>(
 		summary: string,
 		firstKeptEntryId: string,

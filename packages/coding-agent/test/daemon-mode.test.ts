@@ -9199,6 +9199,51 @@ describe("daemon mode helpers", () => {
 		expect(session.setModel).toHaveBeenCalledOnce();
 	});
 
+	it("serializes a legacy thinking mutation behind a conditional profile change", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp/project" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const { state, session, targetModel } = makeConditionalProfileState("active-1");
+		let releaseCatalog!: (models: Model<Api>[]) => void;
+		const catalog = new Promise<Model<Api>[]>((resolve) => {
+			releaseCatalog = resolve;
+		});
+		session.modelRegistry.refreshAvailableModels.mockImplementationOnce(() => catalog);
+		session.setThinkingLevel = vi.fn((level: string) => {
+			session.thinkingLevel = level;
+		});
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+
+		const conditional = internals.handleCommand(
+			makeClient("client-1", state.activeSessionId),
+			conditionalProfileCommand(state.activeSessionId),
+		);
+		await vi.waitFor(() => expect(session.modelRegistry.refreshAvailableModels).toHaveBeenCalledOnce());
+		const legacy = internals.handleCommand(makeClient("client-2", state.activeSessionId), {
+			id: "legacy-thinking-1",
+			type: "set_thinking_level",
+			activeSessionId: state.activeSessionId,
+			level: "low",
+		});
+		await Promise.resolve();
+		expect(session.setThinkingLevel).not.toHaveBeenCalled();
+
+		releaseCatalog([session.model, targetModel]);
+		await expect(conditional).resolves.toMatchObject({ success: true, data: { status: "applied" } });
+		await expect(legacy).resolves.toMatchObject({ success: true, command: "set_thinking_level" });
+		expect(session.setModel.mock.invocationCallOrder[0]).toBeLessThan(
+			session.setThinkingLevel.mock.invocationCallOrder[0],
+		);
+		expect(session.thinkingLevel).toBe("low");
+	});
+
 	it("waits for model_select extension handlers when setting models while idle", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
