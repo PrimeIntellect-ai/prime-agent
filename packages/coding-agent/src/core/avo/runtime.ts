@@ -15,6 +15,7 @@ import type {
 	AvoCandidateInput,
 	AvoCriticalAssumptionInput,
 	AvoDashboardProjection,
+	AvoDeliveryState,
 	AvoEnvironmentSelection,
 	AvoEvaluationInput,
 	AvoExperimentInput,
@@ -24,6 +25,7 @@ import type {
 	AvoObligationCoverageInput,
 	AvoObligationInput,
 	AvoRunState,
+	AvoStopGate,
 	AvoTrialInput,
 } from "./types.js";
 
@@ -113,7 +115,13 @@ export class AvoSessionRuntime {
 			(memory) => allowed.has(memory.namespace) && this.store.isMemoryRecallEligible(memory, channel, profile),
 		);
 		const nooa = this.memoryBridge
-			? await this.memoryBridge.spontaneousRecall(this.store.memoryRecordsForSync(), cue, limit, maxChars)
+			? await this.memoryBridge.spontaneousRecall(
+					this.store.memoryRecordsForSync(),
+					cue,
+					limit,
+					maxChars,
+					this.store.protectedCanonicalDeliveryMemoryIds(),
+				)
 			: { ok: false as const, memoryIds: [], backend: "host-fallback" as const, reason: "NOOA bridge unavailable" };
 		const byId = new Map(eligible.map((memory) => [memory.memoryId, memory]));
 		const recalled: AvoMemory[] = [];
@@ -169,12 +177,19 @@ export class AvoSessionRuntime {
 	async syncMemory(): Promise<Record<string, unknown>> {
 		this.store.refreshPersistentMemories();
 		if (!this.memoryBridge) return { ok: false, reason: "NOOA bridge unavailable" };
-		return this.memoryBridge.sync(this.store.memoryRecordsForSync());
+		return this.memoryBridge.sync(
+			this.store.memoryRecordsForSync(),
+			this.store.protectedCanonicalDeliveryMemoryIds(),
+		);
 	}
 
 	async reflectMemory(trigger: AvoMemoryReflection["trigger"], cycleId?: string): Promise<Record<string, unknown>> {
 		if (!this.memoryBridge) return { ok: false, reason: "NOOA bridge unavailable" };
-		const result = await this.memoryBridge.reflect(this.store.memoryRecordsForSync(), trigger);
+		const result = await this.memoryBridge.reflect(
+			this.store.memoryRecordsForSync(),
+			trigger,
+			this.store.protectedCanonicalDeliveryMemoryIds(),
+		);
 		if (result.ok !== true) return result;
 		const report =
 			typeof result.report === "object" && result.report !== null && !Array.isArray(result.report)
@@ -192,11 +207,20 @@ export class AvoSessionRuntime {
 	}
 
 	async reconciliationCandidates() {
-		return (await this.memoryBridge?.reconciliationCandidates(this.store.memoryRecordsForSync())) ?? [];
+		return (
+			(await this.memoryBridge?.reconciliationCandidates(
+				this.store.memoryRecordsForSync(),
+				this.store.protectedCanonicalDeliveryMemoryIds(),
+			)) ?? []
+		);
 	}
 
 	getState(): AvoRunState {
 		return this.store.getState();
+	}
+
+	getStateVersion(): number {
+		return this.store.getStateVersion();
 	}
 
 	observeRootPrompt(prompt: string): AvoRunState {
@@ -324,18 +348,41 @@ export class AvoSessionRuntime {
 		this.reconcileAcceptedCandidateIntegrity();
 		const state = this.store.getState();
 		const gate = this.adapters.get(state.routing.environment).evaluateStopCondition(state);
-		return applyAvoSpecContractStopGate(state, gate, {
+		const contracted = applyAvoSpecContractStopGate(state, gate, {
 			cwd: this.workspaceCwd,
 			excludedRoots: this.workspaceExcludedRoots,
 			receiptDirectory: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_DIR,
 			receiptPublicKey: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_PUBLIC_KEY,
 		});
+		return this.store.finalizeCanonicalDeliveryStopGate(contracted);
+	}
+
+	beginCanonicalDelivery(gate: AvoStopGate = this.evaluateStopGate()): AvoDeliveryState {
+		return this.store.beginCanonicalDelivery(gate);
+	}
+
+	canonicalDeliveryText(): string | undefined {
+		return this.store.canonicalDeliveryText();
+	}
+
+	repairCanonicalDeliveryMemory(): AvoMemory {
+		return this.store.repairCanonicalDeliveryMemory();
+	}
+
+	failCanonicalDelivery(code: string, reason: string): AvoDeliveryState {
+		return this.store.failCanonicalDelivery(code, reason);
 	}
 
 	complete(): AvoRunState {
+		const state = this.store.getState();
+		if (state.delivery.phase === "pending" || state.delivery.phase === "delivered") return state;
 		const gate = this.evaluateStopGate();
 		if (!gate.passed) throw new Error(`AVO completion is blocked: ${gate.reasons.join("; ")}`);
 		return this.store.complete(gate);
+	}
+
+	completeCanonicalDelivery(observedCanonicalText: string): AvoRunState {
+		return this.store.completeCanonicalDelivery(observedCanonicalText);
 	}
 
 	syncResearchState(
@@ -588,7 +635,7 @@ export function buildAvoRuntimePrompt(state: AvoRunState, memoryContext = ""): s
 			: "For coding candidates, the host derives changed source, public-API/schema, configuration, and documentation impact surfaces. Source requires test evidence; public API/schema requires test and build; configuration requires test plus build or runtime; documentation requires a direct filesystem check. Uncovered impact surfaces block the cycle and final gate.",
 		ablations.has("qualified_watchdog")
 			? undefined
-			: "The host also runs a default anti-laziness watchdog. A turn counts as progress only when it records a meaningful host pass, covers a preregistered obligation, tests a critical assumption, completes a cycle, completes a host-bound experiment cell, or completes an experiment. A workspace edit or fresh candidate alone does not count. Reading, narrating, repeating the same failed check, inspecting Prime internals, or merely saying done does not reset it. Six consecutive tool batches without one of those milestones inject an immediate steering intervention. At blocked root-turn boundaries, one empty turn triggers a corrective watch, two trigger an intervention, and three automatically escalate the horizon to long. Repeatedly paraphrasing or decorating an already verified canonical delivery triggers a separate delivery intervention. Resume from the latest concrete milestone and change approach when intervened.",
+			: "The host also runs a default anti-laziness watchdog. A turn counts as progress only when it records a meaningful host pass, covers a preregistered obligation, tests a critical assumption, completes a cycle, completes a host-bound experiment cell, or completes an experiment. A workspace edit or fresh candidate alone does not count. Reading, narrating, repeating the same failed check, inspecting Prime internals, or merely saying done does not reset it. Four consecutive tool batches without one of those milestones inject immediate steering and activate state-aware IPython probation: the next cell must invoke the exact next AVO action permitted by current host state. At blocked root-turn boundaries, one empty turn triggers a corrective watch, two trigger an intervention, and three may automatically escalate the horizon to long only before the coding candidate-admission contract is locked. Once a coding baseline execution, candidate, evaluation, or experiment has begun, watchdog steering cannot add new horizon-derived candidate prerequisites. Repeatedly paraphrasing or decorating an already verified canonical delivery triggers a separate delivery intervention. Resume from the latest concrete milestone and follow the host's exact recovery action when intervened.",
 		ablations.has("adversarial_supervision")
 			? undefined
 			: "For required coding work at long horizon, and requirement-dense iterative work, the retained verifier performs a bounded read-only adversarial acceptance audit after an accepted cycle. It inspects the implementation and existing tests, challenges up to three high-risk specification boundaries, and may veto but never upgrade host evidence. A broad test receipt is a review-prioritization signal rather than an automatic failure.",

@@ -25,6 +25,7 @@ import {
 import {
 	avoEvaluationSatisfiesObligation,
 	avoEvaluatorMatchesRequiredEvidence,
+	avoExternalEvaluationAddressesObjective,
 	deriveAvoCandidateImpactSurfaces,
 	deriveAvoObjectiveObligations,
 	requiredAvoPremortemAssumptionCount,
@@ -32,6 +33,7 @@ import {
 import { requiredAvoCodingPivotParent } from "./pivot.js";
 import {
 	AVO_AUTHORITIES,
+	AVO_DELIVERY_PHASES,
 	AVO_ENVIRONMENTS,
 	AVO_EVALUATION_ISSUERS,
 	AVO_EVALUATION_STATUSES,
@@ -62,10 +64,12 @@ import {
 	type AvoCandidate,
 	type AvoCandidateClaim,
 	type AvoCandidateInput,
+	type AvoCanonicalDeliveryReadiness,
 	type AvoCriticalAssumption,
 	type AvoCriticalAssumptionInput,
 	type AvoCycle,
 	type AvoCycleInput,
+	type AvoDeliveryState,
 	type AvoEnvironment,
 	type AvoEnvironmentSelection,
 	type AvoEvaluationInput,
@@ -104,6 +108,8 @@ import {
 } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
+
+export const AVO_CANONICAL_DELIVERY_MAX_CHARS = 64_000;
 
 interface AvoPersistentMemoryLedger {
 	schemaVersion: 1;
@@ -334,12 +340,38 @@ function stableJson(value: unknown): string {
 		.join(",")}}`;
 }
 
+function canonicalStopGateSnapshot(gate: AvoStopGate): AvoStopGate {
+	return JSON.parse(JSON.stringify(gate)) as AvoStopGate;
+}
+
+function digestAvoStopGate(gate: AvoStopGate): string {
+	return createHash("sha256")
+		.update(stableJson(canonicalStopGateSnapshot(gate)))
+		.digest("hex");
+}
+
 export function digestAvoPayload(payload: unknown): string {
 	return createHash("sha256").update(stableJson(payload)).digest("hex");
 }
 
 export function digestAvoDeliveryText(text: string): string {
 	return createHash("sha256").update(text).digest("hex");
+}
+
+function canonicalDeliveryTextForCandidate(candidate: AvoCandidate): string | undefined {
+	const digest = candidate.deliveryDigest;
+	if (!digest || !/^[a-f0-9]{64}$/.test(digest)) return undefined;
+	for (const text of [candidate.canonicalDeliveryText, candidate.deterministicResult, candidate.summary]) {
+		if (
+			typeof text === "string" &&
+			text.length > 0 &&
+			text.length <= AVO_CANONICAL_DELIVERY_MAX_CHARS &&
+			digestAvoDeliveryText(text) === digest
+		) {
+			return text;
+		}
+	}
+	return undefined;
 }
 
 function canonicalPathIdentity(cwd: string): string {
@@ -524,10 +556,12 @@ function taskRunId(sessionId: string, index: number): string {
 }
 
 function emptyState(sessionId: string, now: string): AvoRunState {
+	const runId = taskRunId(sessionId, 1);
 	return {
 		schemaVersion: AVO_STATE_VERSION,
 		sessionId,
-		runId: taskRunId(sessionId, 1),
+		runId,
+		stateVersion: 1,
 		taskRuns: [],
 		verificationPolicy: "best_effort",
 		verificationClass: "external_factual",
@@ -536,6 +570,7 @@ function emptyState(sessionId: string, now: string): AvoRunState {
 		horizonSelection: "auto",
 		routing: defaultRouting(now),
 		status: "active",
+		delivery: { phase: "working", runId },
 		candidates: [],
 		evaluations: [],
 		experiments: [],
@@ -598,10 +633,14 @@ function isAvoState(value: unknown): value is AvoRunState {
 		value.schemaVersion === AVO_STATE_VERSION &&
 		typeof value.sessionId === "string" &&
 		typeof value.runId === "string" &&
+		AVO_RUN_STATUSES.includes(value.status as AvoRunState["status"]) &&
+		(value.stateVersion === undefined || typeof value.stateVersion === "number") &&
 		Array.isArray(value.taskRuns) &&
 		value.taskRuns.every(
 			(run) =>
 				isRecord(run) &&
+				isAvoDeliveryState(run.delivery, run.runId) &&
+				isAvoStatusDeliveryPair(run.status, run.delivery) &&
 				Array.isArray(run.experiments) &&
 				run.experiments.every(isAvoExperiment) &&
 				Array.isArray(run.trials) &&
@@ -612,6 +651,8 @@ function isAvoState(value: unknown): value is AvoRunState {
 		) &&
 		AVO_VERIFICATION_POLICIES.includes(value.verificationPolicy as AvoVerificationPolicy) &&
 		AVO_VERIFICATION_CLASSES.includes(value.verificationClass as AvoVerificationClass) &&
+		isAvoDeliveryState(value.delivery, value.runId) &&
+		isAvoStatusDeliveryPair(value.status, value.delivery) &&
 		Array.isArray(value.verificationReasons) &&
 		typeof value.createdAt === "string" &&
 		typeof value.updatedAt === "string" &&
@@ -637,6 +678,151 @@ function isAvoState(value: unknown): value is AvoRunState {
 		AVO_ENVIRONMENTS.includes(value.routing.environment as AvoEnvironment) &&
 		AVO_HORIZONS.includes(value.routing.horizon as AvoHorizon)
 	);
+}
+
+function isAvoStatusDeliveryPair(status: unknown, delivery: AvoDeliveryState): boolean {
+	if (!AVO_RUN_STATUSES.includes(status as AvoRunState["status"])) return false;
+	switch (status as AvoRunState["status"]) {
+		case "active":
+			return delivery.phase === "working" || delivery.phase === "accepted" || delivery.phase === "pending";
+		case "completed":
+			return delivery.phase === "delivered";
+		case "blocked":
+		case "failed":
+			return delivery.phase === "failed";
+	}
+}
+
+function isAvoDeliveryState(value: unknown, runId: unknown): value is AvoDeliveryState {
+	if (!isRecord(value) || typeof runId !== "string") return false;
+	if (!AVO_DELIVERY_PHASES.includes(value.phase as AvoDeliveryState["phase"]) || value.runId !== runId) return false;
+	if (
+		value.stateVersion !== undefined &&
+		(typeof value.stateVersion !== "number" || !Number.isSafeInteger(value.stateVersion) || value.stateVersion < 0)
+	) {
+		return false;
+	}
+	for (const key of [
+		"candidateId",
+		"cycleId",
+		"memoryId",
+		"deliveryDigest",
+		"canonicalText",
+		"acceptedAt",
+		"gatePassedAt",
+		"gateDigest",
+		"deliveredAt",
+		"failureCode",
+		"failureReason",
+		"failedAt",
+	] as const) {
+		if (value[key] !== undefined && typeof value[key] !== "string") return false;
+	}
+	const gate = value.gate;
+	const gateValid =
+		isRecord(gate) &&
+		gate.passed === true &&
+		Array.isArray(gate.checks) &&
+		gate.checks.every(
+			(check) =>
+				isRecord(check) &&
+				typeof check.id === "string" &&
+				typeof check.label === "string" &&
+				typeof check.passed === "boolean" &&
+				(check.reason === undefined || typeof check.reason === "string"),
+		) &&
+		Array.isArray(gate.reasons) &&
+		gate.reasons.every((reason) => typeof reason === "string");
+	if (value.phase === "working") {
+		return value.candidateId === undefined && value.cycleId === undefined && value.memoryId === undefined;
+	}
+	return (
+		typeof value.candidateId === "string" &&
+		typeof value.cycleId === "string" &&
+		typeof value.memoryId === "string" &&
+		typeof value.deliveryDigest === "string" &&
+		/^[a-f0-9]{64}$/.test(value.deliveryDigest) &&
+		(value.canonicalText === undefined ||
+			(typeof value.canonicalText === "string" &&
+				value.canonicalText.length > 0 &&
+				value.canonicalText.length <= AVO_CANONICAL_DELIVERY_MAX_CHARS &&
+				digestAvoDeliveryText(value.canonicalText) === value.deliveryDigest)) &&
+		typeof value.acceptedAt === "string" &&
+		(value.phase !== "pending" ||
+			(typeof value.canonicalText === "string" && typeof value.stateVersion === "number")) &&
+		(value.phase === "accepted" || value.phase === "failed" || typeof value.gatePassedAt === "string") &&
+		(value.phase === "accepted" ||
+			value.phase === "failed" ||
+			(gateValid &&
+				typeof value.gateDigest === "string" &&
+				/^[a-f0-9]{64}$/.test(value.gateDigest) &&
+				digestAvoStopGate(gate as unknown as AvoStopGate) === value.gateDigest)) &&
+		(value.phase !== "delivered" || typeof value.deliveredAt === "string") &&
+		(value.phase !== "failed" ||
+			(typeof value.failureCode === "string" &&
+				typeof value.failureReason === "string" &&
+				typeof value.failedAt === "string"))
+	);
+}
+
+function derivePersistedDeliveryState(
+	run: Pick<AvoRunState, "runId" | "status" | "candidates" | "cycles" | "updatedAt">,
+): AvoDeliveryState {
+	const cycle = canonicalAcceptedCycle(run.candidates, run.cycles);
+	const candidate = cycle ? run.candidates.find((item) => item.candidateId === cycle.candidateId) : undefined;
+	if (!cycle || !candidate?.deliveryDigest || !/^[a-f0-9]{64}$/.test(candidate.deliveryDigest)) {
+		return { phase: "working", runId: run.runId };
+	}
+	const canonicalText = canonicalDeliveryTextForCandidate(candidate);
+	const base = {
+		runId: run.runId,
+		candidateId: candidate.candidateId,
+		cycleId: cycle.cycleId,
+		memoryId: `episode:${cycle.cycleId}`,
+		deliveryDigest: candidate.deliveryDigest,
+		...(canonicalText === undefined ? {} : { canonicalText }),
+		acceptedAt: cycle.completedAt,
+	};
+	if (run.status === "active" && canonicalText === undefined) {
+		return {
+			...base,
+			phase: "failed",
+			failureCode: "LEGACY_CANONICAL_TEXT_UNAVAILABLE",
+			failureReason: "Migrated AVO v13 run cannot reconstruct the exact accepted canonical delivery bytes.",
+			failedAt: run.updatedAt,
+		};
+	}
+	if (run.status === "completed") {
+		const gate: AvoStopGate = {
+			passed: true,
+			checks: [
+				{
+					id: "legacy_completed_state",
+					label: "Legacy completed AVO state",
+					passed: true,
+				},
+			],
+			reasons: [],
+		};
+		return {
+			...base,
+			phase: "delivered",
+			gatePassedAt: run.updatedAt,
+			gate,
+			gateDigest: digestAvoStopGate(gate),
+			deliveredAt: run.updatedAt,
+		};
+	}
+	if (run.status === "blocked" || run.status === "failed") {
+		return {
+			...base,
+			phase: "failed",
+			failureCode: run.status === "blocked" ? "LEGACY_AVO_RUN_BLOCKED" : "LEGACY_AVO_RUN_FAILED",
+			failureReason: `Migrated terminal AVO v13 run with status=${run.status}; canonical delivery was not completed.`,
+			failedAt: run.updatedAt,
+		};
+	}
+	return { ...base, phase: "accepted" };
 }
 
 function isLegacyPythonProbeState(value: unknown, schemaVersion: 9 | 10 | 11 | 12): value is JsonRecord {
@@ -788,10 +974,150 @@ function migrateLegacyPythonRun<T extends AvoRunState | AvoRunState["taskRuns"][
 
 function migrateLegacyPythonProbeState(value: JsonRecord, schemaVersion: 8 | 9 | 10 | 11 | 12): AvoRunState {
 	const state = value as unknown as AvoRunState;
+	const current = migrateLegacyPythonRun(state, schemaVersion, true);
+	const taskRuns = state.taskRuns.map((run) => migrateLegacyPythonRun(run, schemaVersion, false));
 	return {
-		...migrateLegacyPythonRun(state, schemaVersion, true),
+		...current,
 		schemaVersion: AVO_STATE_VERSION,
-		taskRuns: state.taskRuns.map((run) => migrateLegacyPythonRun(run, schemaVersion, false)),
+		delivery: derivePersistedDeliveryState(current),
+		taskRuns: taskRuns.map((run) => ({ ...run, delivery: derivePersistedDeliveryState(run) })),
+	};
+}
+
+function isAvoV13State(value: unknown): value is JsonRecord {
+	return (
+		isRecord(value) &&
+		value.schemaVersion === 13 &&
+		isRecord(value.routing) &&
+		typeof value.sessionId === "string" &&
+		typeof value.runId === "string" &&
+		AVO_RUN_STATUSES.includes(value.status as AvoRunState["status"]) &&
+		Array.isArray(value.taskRuns) &&
+		Array.isArray(value.candidates) &&
+		Array.isArray(value.evaluations) &&
+		Array.isArray(value.cycles) &&
+		Array.isArray(value.memories)
+	);
+}
+
+function migrateAvoV13State(value: JsonRecord, migratedAt: string): AvoRunState {
+	const state = value as unknown as AvoRunState;
+	const migrationTimestamp = nextIsoTimestamp(migratedAt, state.updatedAt);
+	const staleExternalReceiptIds = new Set(
+		state.evaluations.flatMap((receipt) => {
+			const candidate = state.candidates.find((item) => item.candidateId === receipt.candidateId);
+			return receipt.evaluatorId === "external_claim" &&
+				receipt.issuedBy === "host" &&
+				candidate &&
+				!avoExternalEvaluationAddressesObjective(receipt, state.objective, candidate)
+				? [receipt.evaluationId]
+				: [];
+		}),
+	);
+	const staleAcceptedCycleIds = new Set(
+		state.cycles
+			.filter(
+				(cycle) =>
+					cycle.outcome === "accepted" &&
+					cycle.evaluationIds.some((evaluationId) => staleExternalReceiptIds.has(evaluationId)),
+			)
+			.map((cycle) => cycle.cycleId),
+	);
+	let current = state;
+	if (state.objective && staleAcceptedCycleIds.size > 0) {
+		const environment = inferAvoEnvironment(state.objective, "");
+		const verification = inferAvoVerificationPolicy(state.objective, environment.environment);
+		current = {
+			...state,
+			status: "active",
+			routing: {
+				...state.routing,
+				environment: environment.environment,
+				source: "host_auto",
+				reasons: [
+					...environment.reasons,
+					"AVO v14 migration reopened an accepted v13 cycle that depended on obsolete external-claim evidence",
+				],
+				decidedAt: migrationTimestamp,
+			},
+			verificationPolicy: verification.policy,
+			verificationClass: verification.verificationClass,
+			verificationReasons: [
+				...new Set([
+					...state.verificationReasons,
+					...verification.reasons,
+					"migrated from AVO v13; obsolete external-claim evidence requires fresh host verification",
+				]),
+			],
+			evaluations: state.evaluations.map((receipt) =>
+				staleExternalReceiptIds.has(receipt.evaluationId)
+					? { ...receipt, issuedBy: "legacy_unverified" as const }
+					: receipt,
+			),
+			cycles: state.cycles.map((cycle) =>
+				staleAcceptedCycleIds.has(cycle.cycleId)
+					? {
+							...cycle,
+							outcome: "inconclusive" as const,
+							failureSignature: "verification-policy-v3:obsolete-external-claim-evidence",
+						}
+					: cycle,
+			),
+			obligations: deriveAvoObjectiveObligations(
+				state.objective,
+				verification.verificationClass,
+				verification.policy,
+				migrationTimestamp,
+			),
+			obligationCoverage: [],
+			criticalAssumptions: [],
+			memories: state.memories.map((memory) =>
+				staleAcceptedCycleIds.has(memory.memoryId.replace(/^episode:/, "")) ||
+				memory.sourceIds.some((sourceId) => staleAcceptedCycleIds.has(sourceId))
+					? {
+							...memory,
+							verificationState: "invalidated" as const,
+							invalidatedAt: migrationTimestamp,
+							updatedAt: migrationTimestamp,
+							tags: [...new Set([...memory.tags, "verification-policy-v3-migration"])],
+						}
+					: memory,
+			),
+			supervision: state.supervision.map((review) =>
+				staleAcceptedCycleIds.has(review.cycleId) && review.status === "progressing"
+					? {
+							...review,
+							status: "watch" as const,
+							reason: `Verification-policy migration requires fresh host evidence. ${review.reason}`,
+						}
+					: review,
+			),
+			lineage: [
+				...state.lineage,
+				{
+					lineageId: `lineage-${randomUUID()}`,
+					kind: "routing_changed" as const,
+					summary: `Migrated stale v13 accepted cycle to ${environment.environment}/${verification.policy}`,
+					recordedAt: migrationTimestamp,
+				},
+			],
+		};
+	}
+	const delivery = derivePersistedDeliveryState(current);
+	const status = delivery.phase === "failed" && current.status === "active" ? "failed" : current.status;
+	return {
+		...current,
+		schemaVersion: AVO_STATE_VERSION,
+		status,
+		delivery,
+		taskRuns: state.taskRuns.map((run) => {
+			const archivedDelivery = derivePersistedDeliveryState(run);
+			return {
+				...run,
+				status: archivedDelivery.phase === "failed" && run.status === "active" ? "failed" : run.status,
+				delivery: archivedDelivery,
+			};
+		}),
 	};
 }
 
@@ -1316,15 +1642,40 @@ export function inferAvoEnvironment(prompt: string, cwd = ""): { environment: Av
 			? [...codingMutationActions, ...codingMutationObjects]
 			: []),
 	];
+	const workspaceDeicticReference =
+		/\b(?:current|this)\s+(?:folder|directory|workspace|repo|repository|codebase)\b/i.test(prompt) ||
+		/\bworking\s+directory\b/i.test(prompt);
+	const workspaceWorkRequest = matchingUnnegatedSignals(normalized, [
+		"inspect",
+		"work",
+		"work on",
+		"start working",
+		"analyze",
+		"audit",
+		"fix",
+		"debug",
+		"benchmark",
+		"test",
+		"build",
+		"implement",
+		"improve",
+		"refactor",
+		"update",
+		"change",
+		"modify",
+		"edit",
+	]);
+	const workspaceDeicticCoding = workspaceDeicticReference && workspaceWorkRequest.length > 0;
 	const artifactSignals = normalized.match(
 		/(?:^|[\s`'"(])(?:[\w./-]+\.(?:c|cc|cpp|cs|go|java|js|jsx|kt|php|py|rb|rs|sh|sql|swift|ts|tsx|vue)|package\.json|pyproject\.toml|cargo\.toml)(?:$|[\s`'"),:])/g,
 	);
-	if (codingSignals.length > 0 || (artifactSignals?.length ?? 0) > 0) {
+	if (codingSignals.length > 0 || (artifactSignals?.length ?? 0) > 0 || workspaceDeicticCoding) {
 		return {
 			environment: "coding",
 			reasons: [
 				...(codingSignals.length > 0 ? [`coding signals: ${codingSignals.join(", ")}`] : []),
 				...((artifactSignals?.length ?? 0) > 0 ? ["referenced code or repository artifacts"] : []),
+				...(workspaceDeicticCoding ? [`workspace-deictic work request: ${workspaceWorkRequest.join(", ")}`] : []),
 			],
 		};
 	}
@@ -1355,8 +1706,14 @@ export function inferAvoVerificationPolicy(
 		"search",
 		"find out",
 		"latest",
-		"current",
-		"currently",
+		"current version",
+		"current release",
+		"current documentation",
+		"current docs",
+		"current law",
+		"current regulation",
+		"current time",
+		"current date",
 		"today",
 		"right now",
 		"recent",
@@ -2337,7 +2694,26 @@ export class AvoStore {
 		const byId = new Map(this.state.memories.map((memory) => [memory.memoryId, memory]));
 		for (const memory of persisted) {
 			const current = byId.get(memory.memoryId);
-			if (!current || shouldReplaceMemory(current, memory)) byId.set(memory.memoryId, structuredClone(memory));
+			if (!current) {
+				byId.set(memory.memoryId, structuredClone(memory));
+				continue;
+			}
+			if (this.isCanonicalDeliveryProtectedMemory(current.memoryId)) {
+				const sameCanonicalRecord =
+					!memory.invalidatedAt &&
+					(memory.verificationState === "proposed" || memory.verificationState === "verified") &&
+					memory.content === current.content &&
+					memory.taskRunId === current.taskRunId;
+				if (
+					sameCanonicalRecord &&
+					memory.verificationState === "verified" &&
+					current.verificationState === "proposed"
+				) {
+					byId.set(memory.memoryId, structuredClone(memory));
+				}
+				continue;
+			}
+			if (shouldReplaceMemory(current, memory)) byId.set(memory.memoryId, structuredClone(memory));
 		}
 		this.state.memories = [...byId.values()];
 		return true;
@@ -2353,7 +2729,17 @@ export class AvoStore {
 			);
 			for (const memory of this.state.memories.filter((item) => item.scope === scope)) {
 				const persisted = merged.get(memory.memoryId);
-				if (!persisted || shouldReplaceMemory(persisted, memory)) {
+				if (this.isCanonicalDeliveryProtectedMemory(memory.memoryId)) {
+					const persistedIsVerifiedCanonical =
+						persisted !== undefined &&
+						!persisted.invalidatedAt &&
+						persisted.verificationState === "verified" &&
+						persisted.content === memory.content &&
+						persisted.taskRunId === memory.taskRunId;
+					if (!persistedIsVerifiedCanonical || memory.verificationState === "verified") {
+						merged.set(memory.memoryId, structuredClone(memory));
+					}
+				} else if (!persisted || shouldReplaceMemory(persisted, memory)) {
 					merged.set(memory.memoryId, structuredClone(memory));
 				}
 			}
@@ -2379,6 +2765,7 @@ export class AvoStore {
 
 	refreshPersistentMemories(): boolean {
 		this.assertHealthy();
+		this.assertTaskMutationAllowed("persistent-memory refresh");
 		const changed = this.mergePersistentMemories();
 		const hardenedPython = this.hardenLegacyVerificationPolicyMemories();
 		const hardened = this.hardenLegacyExperimentMemories() || hardenedPython;
@@ -2400,6 +2787,7 @@ export class AvoStore {
 			const parsed = JSON.parse(serialized) as unknown;
 			if (isAvoState(parsed)) return parsed;
 			this.initialSaveRequired = true;
+			if (isAvoV13State(parsed)) return migrateAvoV13State(parsed, this.now());
 			if (isAvoV12State(parsed)) return migrateAvoV12State(parsed);
 			if (isAvoV11State(parsed)) return migrateAvoV11State(parsed);
 			if (isAvoV10State(parsed)) return migrateAvoV10State(parsed);
@@ -2427,6 +2815,7 @@ export class AvoStore {
 
 	private save(): void {
 		this.assertHealthy();
+		this.state.stateVersion = (typeof this.state.stateVersion === "number" ? this.state.stateVersion : 0) + 1;
 		if (!this.statePath) {
 			this.state.updatedAt = this.now();
 			return;
@@ -2454,6 +2843,11 @@ export class AvoStore {
 		return structuredClone(this.state);
 	}
 
+	getStateVersion(): number {
+		this.assertHealthy();
+		return this.state.stateVersion ?? 1;
+	}
+
 	getStatePath(): string | undefined {
 		return this.statePath;
 	}
@@ -2472,6 +2866,12 @@ export class AvoStore {
 				global: this.globalMemoryDatabasePath,
 			},
 		};
+	}
+
+	private assertTaskMutationAllowed(operation: string): void {
+		const phase = this.state.delivery.phase;
+		if (phase === "working" || phase === "accepted") return;
+		throw new Error(`AVO ${operation} is blocked while canonical delivery phase=${phase}`);
 	}
 
 	private ownerForRole(role: string): string {
@@ -2590,6 +2990,7 @@ export class AvoStore {
 	}
 
 	setVerificationBaseline(baseline: AvoVerificationBaseline): AvoRunState {
+		this.assertTaskMutationAllowed("verification-baseline mutation");
 		if (this.state.routing.environment !== "coding") {
 			throw new Error("a coding verification baseline can only be recorded for a host-routed coding task");
 		}
@@ -2626,6 +3027,7 @@ export class AvoStore {
 	}
 
 	setArtifactBaselinePaths(paths: readonly string[]): AvoRunState {
+		this.assertTaskMutationAllowed("artifact-baseline mutation");
 		if (this.state.routing.environment !== "general" || this.state.verificationClass !== "artifact") {
 			throw new Error("an artifact path baseline can only be recorded for a host-routed artifact task");
 		}
@@ -2644,6 +3046,7 @@ export class AvoStore {
 	recordVerificationBaselineExecution(
 		execution: Omit<AvoBaselineExecution, "executionId" | "recordedAt">,
 	): AvoBaselineExecution {
+		this.assertTaskMutationAllowed("verification-baseline execution recording");
 		const baseline = this.state.verificationBaseline;
 		if (this.state.routing.environment !== "coding" || !baseline) {
 			throw new Error("coding baseline execution requires a captured host verification baseline");
@@ -2731,6 +3134,7 @@ export class AvoStore {
 	}
 
 	initialize(objective: string, prompt = objective): AvoRunState {
+		this.assertTaskMutationAllowed("initialization");
 		const normalizedObjective = requireString(objective, "objective");
 		if (!this.state.objective) {
 			this.state.objective = normalizedObjective;
@@ -2755,6 +3159,9 @@ export class AvoStore {
 	}
 
 	startTask(objective: string, prompt = objective, archiveReason = "previous task passed its stop gate"): AvoRunState {
+		if (this.state.delivery.phase === "accepted" || this.state.delivery.phase === "pending") {
+			throw new Error(`AVO task transition is blocked while canonical delivery phase=${this.state.delivery.phase}`);
+		}
 		const normalizedObjective = requireString(objective, "objective");
 		if (this.state.objective) {
 			this.state.taskRuns.push({
@@ -2765,6 +3172,7 @@ export class AvoStore {
 				verificationReasons: [...this.state.verificationReasons],
 				routing: structuredClone(this.state.routing),
 				status: this.state.status,
+				delivery: structuredClone(this.state.delivery),
 				candidates: structuredClone(this.state.candidates),
 				evaluations: structuredClone(this.state.evaluations),
 				experiments: structuredClone(this.state.experiments),
@@ -2800,6 +3208,7 @@ export class AvoStore {
 		this.state.environmentSelection = "auto";
 		this.state.routing = defaultRouting(now);
 		this.state.status = "active";
+		this.state.delivery = { phase: "working", runId: this.state.runId };
 		this.state.candidates = [];
 		this.state.evaluations = [];
 		this.state.experiments = [];
@@ -2834,6 +3243,7 @@ export class AvoStore {
 	}
 
 	routePrompt(prompt: string, preserveTaskConstraints = true): AvoRoutingDecision {
+		this.assertTaskMutationAllowed("prompt routing");
 		const normalized = requireString(prompt, "prompt");
 		const inferredEnvironment = inferAvoEnvironment(normalized, this.cwd);
 		const hasTrajectory = this.state.candidates.length > 0 || this.state.cycles.length > 0;
@@ -2914,6 +3324,7 @@ export class AvoStore {
 	}
 
 	setEnvironment(selection: AvoEnvironmentSelection, source: "model" | "user" = "user"): AvoRunState {
+		this.assertTaskMutationAllowed("environment mutation");
 		if (selection !== "auto" && !AVO_ENVIRONMENTS.includes(selection)) throw new Error("invalid AVO environment");
 		this.state.environmentSelection = selection;
 		if (selection !== "auto") {
@@ -2928,6 +3339,7 @@ export class AvoStore {
 	}
 
 	setHorizon(selection: AvoHorizonSelection, source: "model" | "user" = "user"): AvoRunState {
+		this.assertTaskMutationAllowed("horizon mutation");
 		if (selection !== "auto" && !AVO_HORIZONS.includes(selection)) throw new Error("invalid AVO horizon");
 		this.state.horizonSelection = selection;
 		if (selection !== "auto") this.state.routing.horizon = selection;
@@ -2947,6 +3359,7 @@ export class AvoStore {
 	}
 
 	registerObligations(inputs: readonly AvoObligationInput[]): AvoObligation[] {
+		this.assertTaskMutationAllowed("obligation registration");
 		if (this.state.candidates.length > 0 || this.state.evaluations.length > 0) {
 			throw new Error("obligations must be preregistered before candidate evaluation begins");
 		}
@@ -2976,6 +3389,7 @@ export class AvoStore {
 	}
 
 	recordObligationCoverage(input: AvoObligationCoverageInput): AvoObligationCoverage {
+		this.assertTaskMutationAllowed("obligation coverage recording");
 		const obligation = this.state.obligations.find((item) => item.obligationId === input.obligationId);
 		const candidate = this.state.candidates.find((item) => item.candidateId === input.candidateId);
 		if (!obligation) throw new Error(`unknown obligation ${input.obligationId}`);
@@ -2996,7 +3410,12 @@ export class AvoStore {
 				(item) => item.evaluationId === evaluationId && item.candidateId === candidate.candidateId,
 			);
 			if (!receipt) throw new Error(`evaluation ${evaluationId} is not bound to candidate ${candidate.candidateId}`);
-			if (!avoEvaluationSatisfiesObligation(receipt, obligation)) {
+			if (
+				!avoEvaluationSatisfiesObligation(receipt, obligation) ||
+				(obligation.source === "host_objective" &&
+					obligation.requiredEvidence.includes("external") &&
+					!avoExternalEvaluationAddressesObjective(receipt, this.state.objective, candidate))
+			) {
 				throw new Error(`evaluation ${evaluationId} is not passing host evidence of the required kind`);
 			}
 			return receipt;
@@ -3016,6 +3435,7 @@ export class AvoStore {
 	}
 
 	registerCriticalAssumptions(inputs: readonly AvoCriticalAssumptionInput[]): AvoCriticalAssumption[] {
+		this.assertTaskMutationAllowed("critical-assumption registration");
 		if (this.state.candidates.length > 0 || this.state.evaluations.length > 0) {
 			throw new Error("critical assumptions must be preregistered before candidate evaluation begins");
 		}
@@ -3071,6 +3491,7 @@ export class AvoStore {
 	}
 
 	resolveCriticalAssumption(input: AvoAssumptionResolutionInput): AvoCriticalAssumption {
+		this.assertTaskMutationAllowed("critical-assumption resolution");
 		const assumption = this.state.criticalAssumptions.find((item) => item.assumptionId === input.assumptionId);
 		const candidate = this.state.candidates.find((item) => item.candidateId === input.candidateId);
 		if (!assumption) throw new Error(`unknown assumption ${input.assumptionId}`);
@@ -3131,6 +3552,7 @@ export class AvoStore {
 	}
 
 	recordCandidate(input: AvoCandidateInput): AvoCandidate {
+		this.assertTaskMutationAllowed("candidate mutation");
 		const candidateId = input.candidateId ?? `candidate-${randomUUID()}`;
 		const requiredPremortemAssumptions =
 			this.state.candidates.length === 0 ? requiredAvoPremortemAssumptionCount(this.state) : 0;
@@ -3141,6 +3563,14 @@ export class AvoStore {
 			);
 		}
 		const requiredPivotParent = requiredAvoCodingPivotParent(this.state);
+		if (
+			requiredPivotParent &&
+			!this.state.cycles.some((cycle) => cycle.candidateId === requiredPivotParent.candidateId)
+		) {
+			throw new Error(
+				`host-revised coding candidate ${requiredPivotParent.candidateId} must complete its nonaccepted cycle before a successor can be added`,
+			);
+		}
 		if (requiredPivotParent && input.parentCandidateId !== requiredPivotParent.candidateId) {
 			throw new Error(
 				`host-revised coding candidate ${requiredPivotParent.candidateId} requires the next candidate to declare parent_candidate_id=${requiredPivotParent.candidateId}`,
@@ -3261,12 +3691,16 @@ export class AvoStore {
 					? requiredDeterministicResult
 					: payloadText(input.payload).trim();
 		if (!canonicalDeliveryText) throw new Error("candidate payload must derive a non-empty canonical delivery");
+		if (canonicalDeliveryText.length > AVO_CANONICAL_DELIVERY_MAX_CHARS) {
+			throw new Error(`candidate canonical delivery exceeds ${AVO_CANONICAL_DELIVERY_MAX_CHARS} characters`);
+		}
 		const candidate: AvoCandidate = {
 			candidateId: requireIdentifier(candidateId, "candidate_id"),
 			kind: requireIdentifier(input.kind, "candidate.kind"),
 			summary,
 			payloadDigest: digestAvoPayload({ payload: input.payload, claims }),
 			deliveryDigest: digestAvoDeliveryText(canonicalDeliveryText),
+			canonicalDeliveryText,
 			deterministicResult: requiredDeterministicResult,
 			artifactPaths: input.artifactPaths === undefined ? undefined : [...input.artifactPaths],
 			artifactTargetDigest:
@@ -3298,6 +3732,7 @@ export class AvoStore {
 		input: AvoEvaluationInput,
 		issuedBy: Exclude<AvoEvaluationIssuer, "legacy_unverified">,
 	): AvoEvaluationReceipt {
+		this.assertTaskMutationAllowed("evaluation mutation");
 		if (!this.state.candidates.some((candidate) => candidate.candidateId === input.candidateId)) {
 			throw new Error(`evaluation references unknown candidate ${input.candidateId}`);
 		}
@@ -3342,7 +3777,9 @@ export class AvoStore {
 					item.source === "host_objective" &&
 					item.kind === "outcome" &&
 					candidate.obligationIds.includes(item.obligationId) &&
-					avoEvaluationSatisfiesObligation(receipt, item),
+					avoEvaluationSatisfiesObligation(receipt, item) &&
+					(!item.requiredEvidence.includes("external") ||
+						avoExternalEvaluationAddressesObjective(receipt, this.state.objective, candidate)),
 			)) {
 				if (
 					this.state.obligationCoverage.some(
@@ -3374,6 +3811,7 @@ export class AvoStore {
 	}
 
 	recordExperiment(input: AvoExperimentInput): AvoExperiment {
+		this.assertTaskMutationAllowed("experiment mutation");
 		const experimentId = requireIdentifier(input.experimentId ?? `experiment-${randomUUID()}`, "experiment_id");
 		if (
 			this.findCurrentOrArchived(
@@ -3423,6 +3861,7 @@ export class AvoStore {
 		conditionId: string,
 		seed: string,
 	): AvoExperimentCellContract {
+		this.assertTaskMutationAllowed("trial preparation");
 		const normalizedExperimentId = requireIdentifier(experimentId, "experiment_id");
 		const experiment = this.state.experiments.find((item) => item.experimentId === normalizedExperimentId);
 		if (!experiment) throw new Error(`trial references unknown experiment ${normalizedExperimentId}`);
@@ -3458,6 +3897,7 @@ export class AvoStore {
 	}
 
 	recordTrial(input: AvoTrialInput): AvoTrial {
+		this.assertTaskMutationAllowed("trial mutation");
 		const experiment = this.state.experiments.find((item) => item.experimentId === input.experimentId);
 		if (!experiment) throw new Error(`trial references unknown experiment ${input.experimentId}`);
 		if (experiment.status === "completed") throw new Error(`experiment ${input.experimentId} is already completed`);
@@ -3581,6 +4021,7 @@ export class AvoStore {
 		evaluation: AvoEvaluationReceipt;
 		outcome: NonNullable<AvoExperiment["outcome"]>;
 	} {
+		this.assertTaskMutationAllowed("experiment completion");
 		const normalizedId = requireIdentifier(experimentId, "experiment_id");
 		const experiment = this.state.experiments.find((item) => item.experimentId === normalizedId);
 		if (!experiment) throw new Error(`experiment ${normalizedId} does not exist`);
@@ -3785,6 +4226,7 @@ export class AvoStore {
 		) => { status: "pass" | "fail" | "revise" | "inconclusive" } = (_candidate, receipts) =>
 			deriveAvoEvaluation(receipts),
 	): { cycle: AvoCycle; checkpoint: ReturnType<typeof evaluateAvoCheckpoint> } {
+		this.assertTaskMutationAllowed("cycle mutation");
 		const candidate = this.state.candidates.find((item) => item.candidateId === input.candidateId);
 		if (!candidate) throw new Error(`cycle references unknown candidate ${input.candidateId}`);
 		if (this.state.cycles.some((cycle) => cycle.candidateId === input.candidateId)) {
@@ -3793,12 +4235,16 @@ export class AvoStore {
 		const candidateEvaluations = this.state.evaluations.filter(
 			(evaluation) => evaluation.candidateId === input.candidateId,
 		);
-		const evaluationIds = input.evaluationIds ?? candidateEvaluations.map((evaluation) => evaluation.evaluationId);
-		for (const evaluationId of evaluationIds) {
+		for (const evaluationId of input.evaluationIds ?? []) {
 			if (!candidateEvaluations.some((evaluation) => evaluation.evaluationId === evaluationId)) {
 				throw new Error(`cycle evaluation ${evaluationId} is not bound to candidate ${input.candidateId}`);
 			}
 		}
+		// The host owns one closed candidate-bound evidence ledger. Caller-selected
+		// subsets are advisory only: adverse authoritative receipts cannot be
+		// omitted, and any semantic proof used for acceptance is retained in the
+		// cycle and its episode.
+		const evaluationIds = candidateEvaluations.map((evaluation) => evaluation.evaluationId);
 		const derived = deriveEvaluation(
 			candidate,
 			candidateEvaluations.filter((evaluation) => evaluationIds.includes(evaluation.evaluationId)),
@@ -3844,6 +4290,7 @@ export class AvoStore {
 		this.applyAutomaticEscalation(cycle, checkpoint);
 		this.linkMemoryRecallsToCycle(cycle);
 		this.recordCycleEpisode(cycle, candidate, candidateEvaluations);
+		if (cycle.outcome === "accepted") this.synchronizeCanonicalDelivery();
 		this.save();
 		return { cycle: structuredClone(cycle), checkpoint: structuredClone(checkpoint) };
 	}
@@ -3856,6 +4303,7 @@ export class AvoStore {
 		forceIntervene?: boolean;
 		unit?: "root_turn" | "tool_batch" | "delivery";
 	}): AvoRunState["checkpoints"][number] {
+		this.assertTaskMutationAllowed("progress-watchdog mutation");
 		if (!this.state.objective || this.state.status !== "active") {
 			throw new Error("the progress watchdog requires an active AVO task");
 		}
@@ -3901,7 +4349,19 @@ export class AvoStore {
 			createdAt: recordedAt,
 		};
 		this.state.checkpoints.push(checkpoint);
-		if (!input.resumed && input.escalateHorizon !== false && this.state.horizonSelection === "auto") {
+		const codingAdmissionContractLocked =
+			this.state.routing.environment === "coding" &&
+			((this.state.verificationBaseline?.executions.length ?? 0) > 0 ||
+				this.state.candidates.length > 0 ||
+				this.state.evaluations.length > 0 ||
+				this.state.experiments.length > 0 ||
+				this.state.trials.length > 0);
+		if (
+			!input.resumed &&
+			input.escalateHorizon !== false &&
+			this.state.horizonSelection === "auto" &&
+			!codingAdmissionContractLocked
+		) {
 			const previous = this.state.routing.horizon;
 			const next =
 				input.consecutiveNoProgressTurns >= 3
@@ -3945,6 +4405,17 @@ export class AvoStore {
 		candidate: AvoCandidate,
 		evaluations: readonly AvoEvaluationReceipt[],
 	): void {
+		this.recordMemory(
+			this.cycleEpisodeMemoryInput(cycle, candidate, evaluations),
+			cycle.outcome === "accepted" ? "proposed" : "verified",
+		);
+	}
+
+	private cycleEpisodeMemoryInput(
+		cycle: AvoCycle,
+		candidate: AvoCandidate,
+		evaluations: readonly AvoEvaluationReceipt[],
+	): AvoMemoryInput {
 		const hostEvaluations = evaluations.filter((evaluation) => evaluation.issuedBy === "host");
 		const modelEvaluations = evaluations.filter((evaluation) => evaluation.issuedBy === "model");
 		const evidence = hostEvaluations.flatMap((evaluation) => evaluation.evidenceRefs).slice(0, 24);
@@ -3977,29 +4448,26 @@ export class AvoStore {
 			...(cycle.failureSignature ? [`Failure or significant observation: ${cycle.failureSignature}`] : []),
 			...(evidence.length > 0 ? [`Observed evidence references: ${evidence.join(", ")}`] : []),
 		].join("\n");
-		this.recordMemory(
-			{
-				memoryId: `episode:${cycle.cycleId}`,
-				namespace: this.state.routing.environment,
-				type: "episode",
-				scope: "project",
-				title: `${cycle.outcome[0]!.toUpperCase()}${cycle.outcome.slice(1)} ${this.state.routing.environment} cycle`,
-				content,
-				tags: [this.state.routing.environment, cycle.outcome, candidate.kind, "epistemic-separated-v2"],
-				importance: cycle.outcome === "accepted" ? 7 : 6,
-				sourceIds: [candidate.candidateId, cycle.cycleId, ...cycle.evaluationIds],
-				references: [
-					{ kind: "candidate", key: candidate.candidateId },
-					{ kind: "cycle", key: cycle.cycleId },
-					...cycle.evaluationIds.slice(0, 8).map((evaluationId) => ({
-						kind: "evaluation" as const,
-						key: evaluationId,
-					})),
-					...artifactReferences,
-				],
-			},
-			cycle.outcome === "accepted" ? "proposed" : "verified",
-		);
+		return {
+			memoryId: `episode:${cycle.cycleId}`,
+			namespace: this.state.routing.environment,
+			type: "episode",
+			scope: "project",
+			title: `${cycle.outcome[0]!.toUpperCase()}${cycle.outcome.slice(1)} ${this.state.routing.environment} cycle`,
+			content,
+			tags: [this.state.routing.environment, cycle.outcome, candidate.kind, "epistemic-separated-v2"],
+			importance: cycle.outcome === "accepted" ? 7 : 6,
+			sourceIds: [candidate.candidateId, cycle.cycleId, ...cycle.evaluationIds],
+			references: [
+				{ kind: "candidate", key: candidate.candidateId },
+				{ kind: "cycle", key: cycle.cycleId },
+				...cycle.evaluationIds.slice(0, 8).map((evaluationId) => ({
+					kind: "evaluation" as const,
+					key: evaluationId,
+				})),
+				...artifactReferences,
+			],
+		};
 	}
 
 	private candidateMemoryResult(candidate: AvoCandidate, canonicalDelivery: boolean): string {
@@ -4050,6 +4518,255 @@ export class AvoStore {
 		return cycle ? { candidate, cycle } : undefined;
 	}
 
+	private isCanonicalDeliveryProtectedMemory(memoryId: string): boolean {
+		if (this.state.status !== "active") return false;
+		const canonical = this.canonicalAcceptedCycle();
+		return canonical !== undefined && memoryId === `episode:${canonical.cycle.cycleId}`;
+	}
+
+	protectedCanonicalDeliveryMemoryIds(): string[] {
+		if (this.state.status !== "active") return [];
+		const canonical = this.canonicalAcceptedCycle();
+		return canonical ? [`episode:${canonical.cycle.cycleId}`] : [];
+	}
+
+	/**
+	 * Rebinds the persisted pre-delivery record when authoritative evidence
+	 * changes which accepted cycle is canonical. A pending, delivered, or failed
+	 * terminal record is never silently rebound.
+	 */
+	synchronizeCanonicalDelivery(): AvoDeliveryState {
+		if (this.state.status !== "active") return structuredClone(this.state.delivery);
+		if (["pending", "delivered", "failed"].includes(this.state.delivery.phase)) {
+			return structuredClone(this.state.delivery);
+		}
+		const canonical = this.canonicalAcceptedCycle();
+		const digest = canonical?.candidate.deliveryDigest;
+		const canonicalText = canonical ? canonicalDeliveryTextForCandidate(canonical.candidate) : undefined;
+		const next: AvoDeliveryState =
+			canonical && digest && /^[a-f0-9]{64}$/.test(digest)
+				? {
+						phase: "accepted",
+						runId: this.state.runId,
+						candidateId: canonical.candidate.candidateId,
+						cycleId: canonical.cycle.cycleId,
+						memoryId: `episode:${canonical.cycle.cycleId}`,
+						deliveryDigest: digest,
+						...(canonicalText === undefined ? {} : { canonicalText }),
+						acceptedAt: canonical.cycle.completedAt,
+					}
+				: { phase: "working", runId: this.state.runId };
+		if (JSON.stringify(next) !== JSON.stringify(this.state.delivery)) {
+			this.state.delivery = next;
+			this.save();
+		}
+		return structuredClone(this.state.delivery);
+	}
+
+	canonicalDeliveryText(): string | undefined {
+		const delivery = this.state.delivery;
+		if (
+			delivery.phase !== "pending" ||
+			!delivery.canonicalText ||
+			!delivery.deliveryDigest ||
+			digestAvoDeliveryText(delivery.canonicalText) !== delivery.deliveryDigest
+		) {
+			return undefined;
+		}
+		return delivery.canonicalText;
+	}
+
+	canonicalDeliveryReadiness(): AvoCanonicalDeliveryReadiness {
+		this.synchronizeCanonicalDelivery();
+		if (this.state.status === "failed" || this.state.delivery.phase === "failed") {
+			return { ready: false, reason: "canonical delivery is in a terminal failed state" };
+		}
+		const canonical = this.canonicalAcceptedCycle();
+		if (!canonical) {
+			return { ready: false, reason: "no accepted cycle currently satisfies the verification contract" };
+		}
+		const { candidate, cycle } = canonical;
+		const memoryId = `episode:${cycle.cycleId}`;
+		const deliveryDigest = candidate.deliveryDigest;
+		const canonicalText = canonicalDeliveryTextForCandidate(candidate);
+		const identity = { candidateId: candidate.candidateId, cycleId: cycle.cycleId, memoryId, deliveryDigest };
+		if (!deliveryDigest || !/^[a-f0-9]{64}$/.test(deliveryDigest)) {
+			return { ready: false, ...identity, reason: "canonical candidate delivery digest is missing or invalid" };
+		}
+		if (!canonicalText) {
+			return { ready: false, ...identity, reason: "exact canonical delivery text is unavailable" };
+		}
+		const delivery = this.state.delivery;
+		if (
+			delivery.runId !== this.state.runId ||
+			delivery.candidateId !== candidate.candidateId ||
+			delivery.cycleId !== cycle.cycleId ||
+			delivery.memoryId !== memoryId ||
+			delivery.deliveryDigest !== deliveryDigest ||
+			delivery.canonicalText !== canonicalText ||
+			!["accepted", "pending", "delivered"].includes(delivery.phase)
+		) {
+			return { ready: false, ...identity, reason: "persisted canonical delivery binding is missing or stale" };
+		}
+		const memory = this.state.memories.find((item) => item.memoryId === memoryId);
+		if (!memory || memory.invalidatedAt || memory.verificationState === "invalidated") {
+			return { ready: false, ...identity, reason: "canonical accepted-cycle memory is missing or invalidated" };
+		}
+		if (memory.verificationState !== "proposed" && memory.verificationState !== "verified") {
+			return { ready: false, ...identity, reason: "canonical accepted-cycle memory is not verifiable" };
+		}
+		const expected = this.cycleEpisodeMemoryInput(
+			cycle,
+			candidate,
+			this.state.evaluations.filter((evaluation) => cycle.evaluationIds.includes(evaluation.evaluationId)),
+		);
+		if (
+			memory.type !== "episode" ||
+			memory.namespace !== expected.namespace ||
+			memory.scope !== "project" ||
+			memory.taskRunId !== this.state.runId ||
+			memory.title !== expected.title ||
+			memory.content !== expected.content ||
+			!expected.sourceIds?.every((sourceId) => memory.sourceIds.includes(sourceId))
+		) {
+			return { ready: false, ...identity, reason: "canonical accepted-cycle memory does not match its cycle" };
+		}
+		return { ready: true, ...identity };
+	}
+
+	finalizeCanonicalDeliveryStopGate(gate: AvoStopGate): AvoStopGate {
+		const readiness = this.canonicalDeliveryReadiness();
+		const check = {
+			id: "canonical_delivery_state",
+			label: "Canonical delivery state",
+			passed: readiness.ready,
+			reason: readiness.reason,
+		};
+		const checks = [...gate.checks.filter((item) => item.id !== check.id), check];
+		const reasons = [
+			...gate.reasons,
+			...(!readiness.ready && readiness.reason && !gate.reasons.includes(readiness.reason)
+				? [readiness.reason]
+				: []),
+		];
+		return { passed: gate.passed && readiness.ready, checks, reasons };
+	}
+
+	beginCanonicalDelivery(gate: AvoStopGate): AvoDeliveryState {
+		if (this.state.status === "completed" && this.state.delivery.phase === "delivered") {
+			return structuredClone(this.state.delivery);
+		}
+		if (this.state.delivery.phase === "pending") return structuredClone(this.state.delivery);
+		const finalGate = this.finalizeCanonicalDeliveryStopGate(gate);
+		if (!finalGate.passed) throw new Error(`AVO canonical delivery is blocked: ${finalGate.reasons.join("; ")}`);
+		if (this.state.delivery.phase !== "accepted") {
+			throw new Error(`AVO canonical delivery cannot begin from phase ${this.state.delivery.phase}`);
+		}
+		const gateSnapshot = canonicalStopGateSnapshot(finalGate);
+		const pendingStateVersion = (typeof this.state.stateVersion === "number" ? this.state.stateVersion : 0) + 1;
+		this.state.delivery = {
+			...this.state.delivery,
+			phase: "pending",
+			// save() advances the run to this exact version. Keep the transition
+			// version immutable on the delivery record so restart recovery and every
+			// canonical request can bind to the same accepted-to-pending generation.
+			stateVersion: pendingStateVersion,
+			gatePassedAt: this.now(),
+			gateDigest: digestAvoStopGate(gateSnapshot),
+			gate: gateSnapshot,
+		};
+		this.save();
+		return structuredClone(this.state.delivery);
+	}
+
+	repairCanonicalDeliveryMemory(): AvoMemory {
+		if (this.state.status !== "active") {
+			throw new Error("canonical delivery memory repair requires an active AVO run");
+		}
+		const canonical = this.canonicalAcceptedCycle();
+		if (!canonical) throw new Error("canonical delivery memory repair requires an accepted canonical cycle");
+		const { candidate, cycle } = canonical;
+		const evaluations = this.state.evaluations.filter((evaluation) =>
+			cycle.evaluationIds.includes(evaluation.evaluationId),
+		);
+		const input = this.cycleEpisodeMemoryInput(cycle, candidate, evaluations);
+		const memoryId = input.memoryId!;
+		const existing = this.state.memories.find((memory) => memory.memoryId === memoryId);
+		if (
+			existing &&
+			!existing.invalidatedAt &&
+			(existing.verificationState === "proposed" || existing.verificationState === "verified") &&
+			existing.content === input.content &&
+			existing.taskRunId === this.state.runId
+		) {
+			return structuredClone(existing);
+		}
+		if (!existing) {
+			this.recordCycleEpisode(cycle, candidate, evaluations);
+			this.synchronizeCanonicalDelivery();
+			return structuredClone(this.state.memories.find((memory) => memory.memoryId === memoryId)!);
+		}
+		const nooaReflection = [...this.state.memoryReflections]
+			.reverse()
+			.find((reflection) => reflection.cycleId === cycle.cycleId && reflection.archivedMemoryIds.includes(memoryId));
+		const exactNooaMaintenanceArchive =
+			nooaReflection !== undefined &&
+			existing.verificationState === "invalidated" &&
+			existing.invalidatedAt !== undefined &&
+			existing.contestedAt === undefined &&
+			existing.supersededBy === undefined &&
+			existing.namespace === input.namespace &&
+			existing.type === "episode" &&
+			existing.scope === "project" &&
+			existing.taskRunId === this.state.runId &&
+			existing.title === input.title &&
+			existing.content === input.content &&
+			(input.sourceIds ?? []).every((sourceId) => existing.sourceIds.includes(sourceId));
+		if (exactNooaMaintenanceArchive) {
+			const repairedAt = nextIsoTimestamp(this.now(), existing.updatedAt);
+			existing.verificationState = "proposed";
+			existing.invalidatedAt = undefined;
+			existing.updatedAt = repairedAt;
+			existing.tags = [...new Set([...existing.tags, "canonical-delivery-repaired"])];
+			existing.sourceIds = [
+				...new Set([...existing.sourceIds, `repair:nooa-reflection:${nooaReflection.reflectionId}`]),
+			];
+			this.state.lineage.push({
+				lineageId: `lineage-${randomUUID()}`,
+				kind: "canonical_memory_repaired",
+				summary: `Restored exact canonical cycle episode archived by NOOA reflection ${nooaReflection.reflectionId}`,
+				referenceId: memoryId,
+				recordedAt: repairedAt,
+			});
+			this.savePersistentMemories();
+			this.save();
+			return structuredClone(existing);
+		}
+		throw new Error(
+			"canonical accepted-cycle memory exists but is invalidated, contested, or mismatched; automatic resurrection is forbidden",
+		);
+	}
+
+	failCanonicalDelivery(code: string, reason: string): AvoDeliveryState {
+		if (this.state.delivery.phase === "delivered") {
+			throw new Error("a delivered canonical result cannot transition to failed");
+		}
+		this.synchronizeCanonicalDelivery();
+		if (this.state.delivery.phase !== "accepted" && this.state.delivery.phase !== "pending") {
+			throw new Error("canonical delivery failure requires an accepted or pending delivery binding");
+		}
+		this.state.delivery = {
+			...this.state.delivery,
+			phase: "failed",
+			failureCode: requireIdentifier(code, "canonical delivery failure code"),
+			failureReason: requireString(reason, "canonical delivery failure reason"),
+			failedAt: this.now(),
+		};
+		this.state.status = "failed";
+		this.save();
+		return structuredClone(this.state.delivery);
+	}
+
 	private applyAutomaticEscalation(cycle: AvoCycle, checkpoint: ReturnType<typeof evaluateAvoCheckpoint>): void {
 		if (this.state.horizonSelection !== "auto" || cycle.outcome === "accepted") return;
 		const previous = this.state.routing.horizon;
@@ -4077,12 +4794,14 @@ export class AvoStore {
 	}
 
 	setSupervisor(binding: Omit<AvoSupervisorBinding, "boundAt">): AvoSupervisorBinding {
+		this.assertTaskMutationAllowed("supervisor mutation");
 		this.state.supervisor = { ...binding, boundAt: this.now() };
 		this.save();
 		return structuredClone(this.state.supervisor);
 	}
 
 	recordSupervision(review: Omit<AvoSupervisorReview, "reviewId" | "recordedAt">): AvoSupervisorReview {
+		this.assertTaskMutationAllowed("supervision mutation");
 		if (!this.state.cycles.some((cycle) => cycle.cycleId === review.cycleId)) {
 			throw new Error(`supervision references unknown cycle ${review.cycleId}`);
 		}
@@ -4461,18 +5180,26 @@ export class AvoStore {
 	}
 
 	remember(input: AvoMemoryInput): AvoMemory {
+		this.assertTaskMutationAllowed("memory mutation");
 		return this.recordMemory(input, "proposed");
 	}
 
 	rememberVerified(input: AvoMemoryInput): AvoMemory {
+		this.assertTaskMutationAllowed("verified-memory mutation");
 		return this.recordMemory(input, "verified");
 	}
 
 	rememberProposedForRole(input: AvoMemoryInput, role: string): AvoMemory {
+		this.assertTaskMutationAllowed("role-memory mutation");
 		return this.recordMemory(input, "proposed", this.ownerForRole(role));
 	}
 
 	verifyProposedMemory(memoryId: string, evidenceRef: string): AvoMemory {
+		this.assertTaskMutationAllowed("memory verification");
+		return this.verifyProposedMemoryInternal(memoryId, evidenceRef);
+	}
+
+	private verifyProposedMemoryInternal(memoryId: string, evidenceRef: string): AvoMemory {
 		const memory = this.state.memories.find((item) => item.memoryId === memoryId);
 		if (!memory || memory.invalidatedAt) throw new Error(`memory ${memoryId} is unavailable`);
 		if (memory.verificationState !== "proposed") throw new Error(`memory ${memoryId} is not proposed`);
@@ -4511,6 +5238,10 @@ export class AvoStore {
 	}
 
 	contestMemory(memoryId: string, evidenceRef: string): AvoMemory {
+		this.assertTaskMutationAllowed("memory contest");
+		if (this.isCanonicalDeliveryProtectedMemory(memoryId)) {
+			throw new Error("canonical accepted-cycle memory is protected until canonical delivery terminates");
+		}
 		const memory = this.state.memories.find((item) => item.memoryId === memoryId);
 		if (!memory || memory.invalidatedAt) throw new Error(`memory ${memoryId} is unavailable`);
 		memory.verificationState = "contested";
@@ -4523,6 +5254,7 @@ export class AvoStore {
 	}
 
 	reconcileMemories(currentMemoryId: string, supersedeMemoryIds: readonly string[], evidenceRef: string): AvoMemory[] {
+		this.assertTaskMutationAllowed("memory reconciliation");
 		const current = this.state.memories.find(
 			(memory) => memory.memoryId === currentMemoryId && !memory.invalidatedAt,
 		);
@@ -4535,6 +5267,9 @@ export class AvoStore {
 		const uniqueIds = [...new Set(supersedeMemoryIds)];
 		if (uniqueIds.length === 0 || uniqueIds.includes(currentMemoryId)) {
 			throw new Error("memory reconciliation requires distinct superseded records");
+		}
+		if (uniqueIds.some((memoryId) => this.isCanonicalDeliveryProtectedMemory(memoryId))) {
+			throw new Error("canonical accepted-cycle memory cannot be superseded before canonical delivery terminates");
 		}
 		const currentVerifiedAt = Date.parse(current.lastVerifiedAt ?? current.updatedAt);
 		const targets = uniqueIds.map((memoryId) => {
@@ -4651,6 +5386,7 @@ export class AvoStore {
 			satisfies?: readonly string[];
 		},
 	): AvoMemoryRecall {
+		this.assertTaskMutationAllowed("memory recall recording");
 		if (!AVO_MEMORY_RECALL_CHANNELS.includes(channel)) throw new Error("invalid memory recall channel");
 		const bounded = (value: string | undefined) => value?.replace(/\s+/g, " ").trim().slice(0, 1_000) || undefined;
 		const recall: AvoMemoryRecall = {
@@ -4779,10 +5515,12 @@ export class AvoStore {
 	}
 
 	recordMemoryReflection(input: Omit<AvoMemoryReflection, "reflectionId" | "recordedAt">): AvoMemoryReflection {
+		this.assertTaskMutationAllowed("memory reflection");
 		const archivedMemoryIds: string[] = [];
 		for (const memoryId of input.archivedMemoryIds) {
 			const memory = this.state.memories.find((item) => item.memoryId === memoryId);
 			if (!memory) continue;
+			if (this.isCanonicalDeliveryProtectedMemory(memoryId)) continue;
 			if (memory.invalidatedAt) {
 				if (memory.supersededBy) archivedMemoryIds.push(memoryId);
 				continue;
@@ -4806,6 +5544,7 @@ export class AvoStore {
 	}
 
 	recordAdapterProgress(summary: string, referenceId: string): void {
+		this.assertTaskMutationAllowed("adapter-progress mutation");
 		const normalizedReference = requireString(referenceId, "adapter progress reference_id");
 		if (
 			this.state.lineage.some(
@@ -4825,6 +5564,7 @@ export class AvoStore {
 	}
 
 	setAdapterStateRef(reference: AvoAdapterStateRef): AvoAdapterStateRef {
+		this.assertTaskMutationAllowed("adapter-state mutation");
 		if (reference.adapterId !== this.state.routing.environment) {
 			throw new Error("adapter state reference must match the effective environment");
 		}
@@ -4834,34 +5574,103 @@ export class AvoStore {
 	}
 
 	evaluateStopGate(): AvoStopGate {
-		return evaluateGenericAvoStopGate(this.state.candidates, this.state.evaluations);
+		return this.finalizeCanonicalDeliveryStopGate(
+			evaluateGenericAvoStopGate(this.state.candidates, this.state.evaluations),
+		);
 	}
 
 	complete(gate?: AvoStopGate): AvoRunState {
-		if (!gate) {
-			throw new Error(
-				"AVO completion requires an explicit host-bound stop gate; use AvoSessionRuntime.complete() or the AgentSession completion path",
-			);
+		if (this.state.status === "completed" && this.state.delivery.phase === "delivered") return this.getState();
+		if (this.state.delivery.phase === "accepted") {
+			if (!gate) {
+				throw new Error(
+					"AVO completion requires an explicit host-bound stop gate; use AvoSessionRuntime.complete() or the AgentSession completion path",
+				);
+			}
+			const finalGate = this.finalizeCanonicalDeliveryStopGate(gate);
+			if (!finalGate.passed) throw new Error(`AVO completion is blocked: ${finalGate.reasons.join("; ")}`);
+			this.beginCanonicalDelivery(finalGate);
 		}
-		if (!gate.passed) throw new Error(`AVO completion is blocked: ${gate.reasons.join("; ")}`);
-		const canonical = this.canonicalAcceptedCycle();
-		if (!canonical) {
-			throw new Error("AVO completion is blocked: no accepted cycle currently satisfies the verification contract");
+		if (this.state.delivery.phase !== "pending" || !this.state.delivery.deliveryDigest) {
+			throw new Error(`AVO completion is blocked from canonical delivery phase=${this.state.delivery.phase}`);
 		}
-		const { candidate: acceptedCandidate, cycle: acceptedCycle } = canonical;
+		return this.getState();
+	}
+
+	completeCanonicalDelivery(observedCanonicalText: string): AvoRunState {
+		if (typeof observedCanonicalText !== "string" || observedCanonicalText.length === 0) {
+			throw new Error("observed canonical delivery text must be a non-empty string");
+		}
+		if (observedCanonicalText.length > AVO_CANONICAL_DELIVERY_MAX_CHARS) {
+			throw new Error(`observed canonical delivery exceeds ${AVO_CANONICAL_DELIVERY_MAX_CHARS} characters`);
+		}
+		const observedDigest = digestAvoDeliveryText(observedCanonicalText);
+		if (this.state.status === "completed" && this.state.delivery.phase === "delivered") {
+			if (observedDigest !== this.state.delivery.deliveryDigest) {
+				throw new Error("AVO canonical delivery digest does not match the completed result");
+			}
+			return this.getState();
+		}
+		if (this.state.status !== "active" || this.state.delivery.phase !== "pending") {
+			throw new Error(`AVO canonical delivery cannot complete from phase ${this.state.delivery.phase}`);
+		}
+		const delivery = this.state.delivery;
+		if (observedDigest !== delivery.deliveryDigest) {
+			throw new Error("AVO canonical delivery digest does not match the persisted accepted candidate");
+		}
+		if (
+			!delivery.gate ||
+			delivery.gate.passed !== true ||
+			!delivery.gateDigest ||
+			digestAvoStopGate(delivery.gate) !== delivery.gateDigest
+		) {
+			throw new Error("AVO canonical delivery is blocked: persisted host gate receipt is missing or invalid");
+		}
+		if (!delivery.canonicalText || digestAvoDeliveryText(delivery.canonicalText) !== delivery.deliveryDigest) {
+			throw new Error("AVO canonical delivery is blocked: sealed canonical delivery text is missing or invalid");
+		}
+		const acceptedCandidate = this.state.candidates.find(
+			(candidate) => candidate.candidateId === delivery.candidateId,
+		);
+		const acceptedCycle = this.state.cycles.find((cycle) => cycle.cycleId === delivery.cycleId);
+		if (
+			!acceptedCandidate ||
+			!acceptedCycle ||
+			acceptedCycle.outcome !== "accepted" ||
+			acceptedCycle.candidateId !== acceptedCandidate.candidateId ||
+			acceptedCandidate.deliveryDigest !== delivery.deliveryDigest ||
+			canonicalDeliveryTextForCandidate(acceptedCandidate) !== delivery.canonicalText ||
+			delivery.runId !== this.state.runId ||
+			delivery.memoryId !== `episode:${acceptedCycle.cycleId}`
+		) {
+			throw new Error("AVO canonical delivery is blocked: persisted candidate/cycle binding is stale");
+		}
 		const cycleMemory = this.state.memories.find(
-			(memory) => memory.memoryId === `episode:${acceptedCycle.cycleId}` && !memory.invalidatedAt,
+			(memory) => memory.memoryId === delivery.memoryId && !memory.invalidatedAt,
 		);
 		if (!cycleMemory) throw new Error("AVO completion is blocked: canonical accepted-cycle memory is missing");
+		const acceptedEvaluations = this.state.evaluations.filter((evaluation) =>
+			acceptedCycle.evaluationIds.includes(evaluation.evaluationId),
+		);
+		const expectedCycleMemory = this.cycleEpisodeMemoryInput(acceptedCycle, acceptedCandidate, acceptedEvaluations);
+		if (
+			cycleMemory.type !== "episode" ||
+			cycleMemory.scope !== "project" ||
+			cycleMemory.taskRunId !== this.state.runId ||
+			cycleMemory.content !== expectedCycleMemory.content ||
+			cycleMemory.title !== expectedCycleMemory.title
+		) {
+			throw new Error("AVO completion is blocked: canonical accepted-cycle memory does not match its cycle");
+		}
 		if (cycleMemory.verificationState === "proposed") {
-			this.verifyProposedMemory(cycleMemory.memoryId, `canonical-delivery:${acceptedCandidate.deliveryDigest}`);
+			this.verifyProposedMemoryInternal(
+				cycleMemory.memoryId,
+				`canonical-delivery:${acceptedCandidate.deliveryDigest}`,
+			);
 		} else if (cycleMemory.verificationState !== "verified") {
 			throw new Error("AVO completion is blocked: canonical accepted-cycle memory is not verifiable");
 		}
 		const result = this.candidateMemoryResult(acceptedCandidate, true);
-		const acceptedEvaluations = this.state.evaluations.filter((evaluation) =>
-			acceptedCycle.evaluationIds.includes(evaluation.evaluationId),
-		);
 		const acceptedHostEvaluations = acceptedEvaluations.filter((evaluation) => evaluation.issuedBy === "host");
 		const acceptedModelEvaluations = acceptedEvaluations.filter((evaluation) => evaluation.issuedBy === "model");
 		const coveredObligations = this.state.obligationCoverage.filter(
@@ -4872,39 +5681,55 @@ export class AvoStore {
 				assumption.candidateId === acceptedCandidate.candidateId &&
 				(assumption.status === "supported" || assumption.status === "refuted"),
 		);
-		this.recordMemory(
-			{
-				memoryId: `episode:task:${this.state.runId}`,
-				namespace: this.state.routing.environment,
-				type: "episode",
-				scope: "project",
-				title: "Completed AVO task",
-				content: [
-					"Record type: avo_task_episode_v2",
-					`Task run: ${this.state.runId}`,
-					`Declared objective: ${this.state.objective ?? "Unspecified"}`,
-					result,
-					`Observed accepted cycle: ${acceptedCycle.cycleId}`,
-					`Observed host evaluations: ${acceptedHostEvaluations.map((evaluation) => `${evaluation.evaluatorId}=${evaluation.status}`).join(", ") || "none"}`,
-					`Recorded model-opinion evaluations (not host evidence): ${acceptedModelEvaluations.map((evaluation) => `${evaluation.evaluatorId}=${evaluation.status}`).join(", ") || "none"}`,
-					`Observed obligation coverage: ${coveredObligations.map((coverage) => coverage.obligationId).join(", ") || "none"}`,
-					`Observed critical-assumption resolutions: ${resolvedAssumptions.map((assumption) => `${assumption.assumptionId}=${assumption.status}`).join(", ") || "none"}`,
-					`Verification contract: ${this.state.verificationClass}/${this.state.verificationPolicy}`,
-					`Verification scope: ${this.candidateMemoryVerificationScope(acceptedCandidate)}`,
-					`Observed cycle count: ${this.state.cycles.length}`,
-					`Canonical delivery digest: ${acceptedCandidate.deliveryDigest}`,
-				].join("\n"),
-				tags: [this.state.routing.environment, "task-completed", "epistemic-separated-v2"],
-				importance: 7,
-				sourceIds: [acceptedCandidate.candidateId, acceptedCycle.cycleId, ...acceptedCycle.evaluationIds],
-				references: [
-					{ kind: "task", key: this.state.runId },
-					{ kind: "cycle", key: acceptedCycle.cycleId },
-				],
-			},
-			"verified",
-		);
+		const taskEpisodeInput: AvoMemoryInput = {
+			memoryId: `episode:task:${this.state.runId}`,
+			namespace: this.state.routing.environment,
+			type: "episode",
+			scope: "project",
+			title: "Completed AVO task",
+			content: [
+				"Record type: avo_task_episode_v2",
+				`Task run: ${this.state.runId}`,
+				`Declared objective: ${this.state.objective ?? "Unspecified"}`,
+				result,
+				`Observed accepted cycle: ${acceptedCycle.cycleId}`,
+				`Observed host evaluations: ${acceptedHostEvaluations.map((evaluation) => `${evaluation.evaluatorId}=${evaluation.status}`).join(", ") || "none"}`,
+				`Recorded model-opinion evaluations (not host evidence): ${acceptedModelEvaluations.map((evaluation) => `${evaluation.evaluatorId}=${evaluation.status}`).join(", ") || "none"}`,
+				`Observed obligation coverage: ${coveredObligations.map((coverage) => coverage.obligationId).join(", ") || "none"}`,
+				`Observed critical-assumption resolutions: ${resolvedAssumptions.map((assumption) => `${assumption.assumptionId}=${assumption.status}`).join(", ") || "none"}`,
+				`Verification contract: ${this.state.verificationClass}/${this.state.verificationPolicy}`,
+				`Verification scope: ${this.candidateMemoryVerificationScope(acceptedCandidate)}`,
+				`Observed cycle count: ${this.state.cycles.length}`,
+				`Canonical delivery digest: ${acceptedCandidate.deliveryDigest}`,
+			].join("\n"),
+			tags: [this.state.routing.environment, "task-completed", "epistemic-separated-v2"],
+			importance: 7,
+			sourceIds: [acceptedCandidate.candidateId, acceptedCycle.cycleId, ...acceptedCycle.evaluationIds],
+			references: [
+				{ kind: "task", key: this.state.runId },
+				{ kind: "cycle", key: acceptedCycle.cycleId },
+			],
+		};
+		const existingTaskEpisode = this.state.memories.find((memory) => memory.memoryId === taskEpisodeInput.memoryId);
+		if (existingTaskEpisode) {
+			if (
+				existingTaskEpisode.invalidatedAt ||
+				existingTaskEpisode.verificationState !== "verified" ||
+				existingTaskEpisode.namespace !== taskEpisodeInput.namespace ||
+				existingTaskEpisode.type !== taskEpisodeInput.type ||
+				existingTaskEpisode.scope !== taskEpisodeInput.scope ||
+				existingTaskEpisode.taskRunId !== this.state.runId ||
+				existingTaskEpisode.title !== taskEpisodeInput.title ||
+				existingTaskEpisode.content !== taskEpisodeInput.content ||
+				!(taskEpisodeInput.sourceIds ?? []).every((sourceId) => existingTaskEpisode.sourceIds.includes(sourceId))
+			) {
+				throw new Error("AVO completion is blocked: deterministic task episode conflicts with persisted state");
+			}
+		} else {
+			this.recordMemory(taskEpisodeInput, "verified");
+		}
 		this.state.status = "completed";
+		this.state.delivery = { ...this.state.delivery, phase: "delivered", deliveredAt: this.now() };
 		this.state.lineage.push({
 			lineageId: `lineage-${randomUUID()}`,
 			kind: "completed",

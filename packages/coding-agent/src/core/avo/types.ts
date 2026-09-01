@@ -1,4 +1,4 @@
-export const AVO_STATE_VERSION = 13;
+export const AVO_STATE_VERSION = 14;
 export const AVO_SKILL_NAME = "avo";
 export const AVO_HOST_REQUEST_TYPES = [
 	"avo.initialize",
@@ -48,6 +48,7 @@ export const AVO_VERIFICATION_CLASSES = [
 	"subjective",
 ] as const;
 export const AVO_RUN_STATUSES = ["active", "completed", "blocked", "failed"] as const;
+export const AVO_DELIVERY_PHASES = ["working", "accepted", "pending", "delivered", "failed"] as const;
 export const AVO_CYCLE_OUTCOMES = ["accepted", "rejected", "revised", "inconclusive"] as const;
 export const AVO_MEMORY_NAMESPACES = ["shared", ...AVO_ENVIRONMENTS] as const;
 export const AVO_MEMORY_TYPES = ["info", "skill", "episode", "intent", "todo", "reflection", "scratch"] as const;
@@ -110,6 +111,7 @@ export type AvoEvaluationIssuer = (typeof AVO_EVALUATION_ISSUERS)[number];
 export type AvoVerificationPolicy = (typeof AVO_VERIFICATION_POLICIES)[number];
 export type AvoVerificationClass = (typeof AVO_VERIFICATION_CLASSES)[number];
 export type AvoRunStatus = (typeof AVO_RUN_STATUSES)[number];
+export type AvoDeliveryPhase = (typeof AVO_DELIVERY_PHASES)[number];
 export type AvoCycleOutcome = (typeof AVO_CYCLE_OUTCOMES)[number];
 export type AvoMemoryNamespace = (typeof AVO_MEMORY_NAMESPACES)[number];
 export type AvoMemoryType = (typeof AVO_MEMORY_TYPES)[number];
@@ -142,6 +144,7 @@ export interface AvoCandidate {
 	summary: string;
 	payloadDigest: string;
 	deliveryDigest?: string;
+	canonicalDeliveryText?: string;
 	deterministicResult?: string;
 	artifactPaths?: string[];
 	artifactTargetDigest?: string;
@@ -442,6 +445,7 @@ export interface AvoTaskRunArchive {
 	verificationReasons: string[];
 	routing: AvoRoutingDecision;
 	status: AvoRunStatus;
+	delivery: AvoDeliveryState;
 	candidates: AvoCandidate[];
 	evaluations: AvoEvaluationReceipt[];
 	experiments: AvoExperiment[];
@@ -489,6 +493,7 @@ export interface AvoLineageEntry {
 		| "horizon_escalated"
 		| "supervisor_intervention"
 		| "adapter_progress"
+		| "canonical_memory_repaired"
 		| "completed";
 	summary: string;
 	referenceId?: string;
@@ -723,10 +728,54 @@ export interface AvoAdapterStateRef {
 	updatedAt: string;
 }
 
+export interface AvoCanonicalDeliveryBinding {
+	runId: string;
+	candidateId: string;
+	cycleId: string;
+	deliveryDigest: string;
+	stateVersion: number;
+}
+
+/**
+ * Persisted canonical-delivery ownership. `accepted` protects the accepted
+ * cycle while host verification/supervision finishes. `pending` is the
+ * fail-closed terminal phase in which the only permitted model action is the
+ * exact canonical delivery. The record deliberately binds every identity
+ * needed to resume that phase after a process restart.
+ */
+export interface AvoDeliveryState {
+	phase: AvoDeliveryPhase;
+	runId: string;
+	stateVersion?: number;
+	candidateId?: string;
+	cycleId?: string;
+	memoryId?: string;
+	deliveryDigest?: string;
+	canonicalText?: string;
+	acceptedAt?: string;
+	gatePassedAt?: string;
+	gateDigest?: string;
+	gate?: AvoStopGate;
+	deliveredAt?: string;
+	failureCode?: string;
+	failureReason?: string;
+	failedAt?: string;
+}
+
+export interface AvoCanonicalDeliveryReadiness {
+	ready: boolean;
+	candidateId?: string;
+	cycleId?: string;
+	memoryId?: string;
+	deliveryDigest?: string;
+	reason?: string;
+}
+
 export interface AvoRunState {
 	schemaVersion: typeof AVO_STATE_VERSION;
 	sessionId: string;
 	runId: string;
+	stateVersion?: number;
 	taskRuns: AvoTaskRunArchive[];
 	objective?: string;
 	verificationPolicy: AvoVerificationPolicy;
@@ -736,6 +785,7 @@ export interface AvoRunState {
 	horizonSelection: AvoHorizonSelection;
 	routing: AvoRoutingDecision;
 	status: AvoRunStatus;
+	delivery: AvoDeliveryState;
 	candidates: AvoCandidate[];
 	evaluations: AvoEvaluationReceipt[];
 	experiments: AvoExperiment[];

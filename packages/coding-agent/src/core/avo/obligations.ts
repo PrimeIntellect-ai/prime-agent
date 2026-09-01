@@ -48,6 +48,27 @@ function obligationId(prefix: string, description: string): string {
 	return `${prefix}-${createHash("sha256").update(description).digest("hex").slice(0, 16)}`;
 }
 
+export function avoExternalEvaluationAddressesObjective(
+	receipt: AvoEvaluationReceipt,
+	objective: string | undefined,
+	candidate: AvoCandidate,
+): boolean {
+	if (!objective) return false;
+	return (
+		receipt.issuedBy === "host" &&
+		receipt.authority === "external" &&
+		receipt.evaluatorId === "external_claim" &&
+		receipt.status === "pass" &&
+		receipt.metrics.meaningful === true &&
+		receipt.metrics.semantic_relation === "supports" &&
+		receipt.metrics.independent_relation === "supports" &&
+		receipt.metrics.objective_relation === "addresses" &&
+		receipt.metrics.objective_verifier === "host_bound_claim_objective_independent_rlm_v3" &&
+		receipt.metrics.objective_digest === createHash("sha256").update(objective).digest("hex") &&
+		receipt.metrics.candidate_payload_digest === candidate.payloadDigest
+	);
+}
+
 /**
  * Host-owned objective decomposition. The full objective is always retained,
  * and explicit checklist/list items become separate critical obligations.
@@ -150,18 +171,33 @@ export function deriveAvoObligationCoverage(
 			explicit?.evaluationIds ??
 			(obligation.source === "host_objective" && obligation.kind === "outcome"
 				? receipts
-						.filter((receipt) => avoEvaluationSatisfiesObligation(receipt, obligation))
+						.filter(
+							(receipt) =>
+								avoEvaluationSatisfiesObligation(receipt, obligation) &&
+								(!obligation.requiredEvidence.includes("external") ||
+									avoExternalEvaluationAddressesObjective(receipt, state.objective, candidate)),
+						)
 						.map((item) => item.evaluationId)
 				: []);
 		const valid = evidenceIds.filter((evaluationId) => {
 			const receipt = receipts.find((item) => item.evaluationId === evaluationId);
-			return receipt !== undefined && avoEvaluationSatisfiesObligation(receipt, obligation);
+			return (
+				receipt !== undefined &&
+				avoEvaluationSatisfiesObligation(receipt, obligation) &&
+				(!obligation.requiredEvidence.includes("external") ||
+					avoExternalEvaluationAddressesObjective(receipt, state.objective, candidate))
+			);
 		});
 		return {
 			obligation,
 			satisfied: valid.length > 0,
 			evidenceIds: valid,
-			reason: valid.length > 0 ? undefined : "no matching host-issued evidence is bound",
+			reason:
+				valid.length > 0
+					? undefined
+					: obligation.requiredEvidence.includes("external")
+						? "no host-bound external evidence proves that the candidate addresses this objective"
+						: "no matching host-issued evidence is bound",
 		};
 	});
 }

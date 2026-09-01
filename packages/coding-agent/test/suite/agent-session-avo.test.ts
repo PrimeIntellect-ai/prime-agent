@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
+import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AGENT_MESSAGE_SOURCE, createAgentSessionMessage } from "../../src/core/agent-messages.js";
+import { AgentSession } from "../../src/core/agent-session.js";
+import { AuthStorage } from "../../src/core/auth-storage.js";
 import {
 	AVO_HOST_REQUEST_TYPES,
 	AVO_VERIFICATION_BROKER_PYTHON_AUTHORITY_ENV,
@@ -12,7 +14,12 @@ import {
 	type AvoVerificationBrokerReceipt,
 	GeneralAvoAdapter,
 } from "../../src/core/avo/index.js";
-import { createHarness, type Harness } from "./harness.js";
+import { type CustomMessage, convertToLlm } from "../../src/core/messages.js";
+import { ModelRegistry } from "../../src/core/model-registry.js";
+import { SessionManager } from "../../src/core/session-manager.js";
+import { SettingsManager } from "../../src/core/settings-manager.js";
+import { createTestResourceLoader } from "../utilities.js";
+import { createHarness, getMessageText, type Harness } from "./harness.js";
 
 function testVerificationBrokerReceipt(
 	command: string,
@@ -119,9 +126,88 @@ describe("AgentSession universal AVO runtime", () => {
 	});
 
 	let harness: Harness | undefined;
+	let childHarness: Harness | undefined;
+	let restartedSession: AgentSession | undefined;
+	const createLimitReadyTool = (candidateId: string, delivery: string): AgentTool => ({
+		name: "ready_at_limit",
+		label: "Ready at limit",
+		description: "Records a verified candidate during the final admitted assistant turn",
+		parameters: Type.Object({}),
+		execute: async () => {
+			await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+				candidate: {
+					candidate_id: candidateId,
+					kind: "answer",
+					summary: "Rain poem",
+					payload: delivery,
+				},
+			});
+			await harness!.session.handleAvoHostRequest("avo.evaluation.record", {
+				evaluation: {
+					candidate_id: candidateId,
+					evaluator_id: "subjective_review",
+					status: "pass",
+					authority: "model_opinion",
+					evidence_refs: [],
+					metrics: { reviewed: true },
+				},
+			});
+			await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
+				cycle: { candidate_id: candidateId },
+			});
+			return { content: [{ type: "text", text: "host evidence recorded" }], details: {} };
+		},
+	});
+	const recordAcceptedAnswer = async (candidateId: string, delivery: string): Promise<void> => {
+		await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: { candidate_id: candidateId, kind: "answer", summary: `${candidateId} answer`, payload: delivery },
+		});
+		await harness!.session.handleAvoHostRequest("avo.evaluation.record", {
+			evaluation: {
+				candidate_id: candidateId,
+				evaluator_id: "subjective_review",
+				status: "pass",
+				authority: "model_opinion",
+				evidence_refs: [],
+				metrics: { reviewed: true },
+			},
+		});
+		await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
+			cycle: { candidate_id: candidateId },
+		});
+	};
+	const restartPersistedHarnessSession = (): AgentSession => {
+		const sessionFile = harness!.sessionManager.getSessionFile();
+		expect(sessionFile).toBeDefined();
+		const reopenedManager = SessionManager.open(sessionFile!);
+		const model = harness!.getModel();
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "faux-key");
+		const restartedAgent = new Agent({
+			getApiKey: () => "faux-key",
+			initialState: { model, systemPrompt: "You are a test assistant.", tools: [] },
+			convertToLlm,
+		});
+		restartedAgent.state.messages = reopenedManager.buildSessionContext().messages;
+		restartedSession = new AgentSession({
+			agent: restartedAgent,
+			sessionManager: reopenedManager,
+			settingsManager: SettingsManager.inMemory(),
+			cwd: harness!.tempDir,
+			modelRegistry: ModelRegistry.inMemory(authStorage),
+			resourceLoader: createTestResourceLoader(),
+			rlmDepth: 0,
+			enforceAvoCompletion: true,
+		});
+		return restartedSession;
+	};
 
 	afterEach(() => {
+		restartedSession?.dispose();
+		childHarness?.cleanup();
 		harness?.cleanup();
+		restartedSession = undefined;
+		childHarness = undefined;
 		harness = undefined;
 		vi.unstubAllEnvs();
 	});
@@ -298,7 +384,12 @@ describe("AgentSession universal AVO runtime", () => {
 			harness.session.messages.filter(
 				(message) => message.role === "custom" && message.customType === "avo_completion_required",
 			),
-		).toHaveLength(2);
+		).toHaveLength(1);
+		expect(
+			harness.session.messages.filter(
+				(message) => message.role === "custom" && message.customType === "avo_canonical_delivery_required",
+			),
+		).toHaveLength(1);
 		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
 			state: { status: "completed", candidates: [{ candidateId: "rain-poem", deliveryDigest: expect.any(String) }] },
 		});
@@ -331,6 +422,792 @@ describe("AgentSession universal AVO runtime", () => {
 		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
 			state: { status: "active" },
 		});
+	});
+
+	it("lets only the terminal canonical-delivery prompt cross the hard assistant-turn limit", async () => {
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			tools: [createLimitReadyTool("limit-ready", "Rain sings.")],
+			autonomous: { enabled: true, maxContinuations: 99, maxTurns: 1, maxTokens: 1_000_000 },
+		});
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("ready_at_limit", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Rain sings."),
+		]);
+
+		await harness.session.prompt("Write a poem about rain");
+
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			turnsUsed: 2,
+			terminalEvidence: { kind: "avo_completion", runId: `${harness.session.sessionId}:task-1` },
+		});
+		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
+			state: { status: "completed", delivery: { phase: "delivered" } },
+		});
+	});
+
+	it("credits exact canonical AVO delivery from the limit-closing tool turn", async () => {
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			tools: [createLimitReadyTool("limit-canonical", "Rain sings.")],
+			autonomous: { enabled: true, maxContinuations: 99, maxTurns: 1, maxTokens: 1_000_000 },
+		});
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("ready_at_limit", {}), fauxText("Rain sings.")], {
+				stopReason: "toolUse",
+			}),
+		]);
+
+		await harness.session.prompt("Write a poem about rain");
+
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			turnsUsed: 1,
+			terminalEvidence: { kind: "avo_completion", runId: `${harness.session.sessionId}:task-1` },
+		});
+		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
+			state: { status: "completed" },
+		});
+	});
+
+	it("finalizes exact observed canonical text once without re-running the mutable stop gate", async () => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Write a poem about rain");
+		await recordAcceptedAnswer("digest-once", "Rain sings.");
+		const internals = harness.session as unknown as {
+			_enforceAvoCompletion: boolean;
+			_avoRuntime: {
+				store: { completeCanonicalDelivery(observedCanonicalText: string): unknown };
+				getState(): AvoRunState;
+			};
+			_evaluateAvoHostBoundStopGate(): unknown;
+			_getAvoCompletionContinuation(context: unknown): Promise<unknown>;
+			_completeAvoCanonicalDeliveryIfMatching(context: unknown): Promise<boolean>;
+		};
+		internals._enforceAvoCompletion = true;
+		const wrong = fauxAssistantMessage("decorated Rain sings.");
+		expect(await internals._getAvoCompletionContinuation({ message: wrong, newMessages: [wrong] })).toMatchObject({
+			customType: "avo_canonical_delivery_required",
+		});
+		expect(internals._avoRuntime.getState()).toMatchObject({
+			status: "active",
+			delivery: { phase: "pending", gate: { passed: true }, gateDigest: expect.any(String) },
+		});
+		const stopGate = vi.spyOn(internals, "_evaluateAvoHostBoundStopGate");
+		const finalize = vi.spyOn(internals._avoRuntime.store, "completeCanonicalDelivery");
+		const evaluationsBefore = internals._avoRuntime.getState().evaluations.length;
+		const exact = fauxAssistantMessage("Rain sings.");
+		expect(await internals._getAvoCompletionContinuation({ message: exact, newMessages: [exact] })).toBeUndefined();
+		expect(stopGate).not.toHaveBeenCalled();
+		expect(finalize).toHaveBeenCalledTimes(1);
+		expect(internals._avoRuntime.getState()).toMatchObject({
+			status: "completed",
+			delivery: { phase: "delivered" },
+		});
+		expect(internals._avoRuntime.getState().evaluations).toHaveLength(evaluationsBefore);
+		for (let index = 0; index < 10; index++) {
+			expect(await internals._completeAvoCanonicalDeliveryIfMatching({ message: exact, newMessages: [exact] })).toBe(
+				false,
+			);
+		}
+		expect(finalize).toHaveBeenCalledTimes(1);
+	});
+
+	it("recovers the crash window after exact assistant persistence without another provider call", async () => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Write a poem about rain");
+		await recordAcceptedAnswer("persisted-exact", "Rain sings.");
+		const internals = harness.session as unknown as {
+			_enforceAvoCompletion: boolean;
+			_getAvoCompletionContinuation(context: unknown): Promise<unknown>;
+		};
+		internals._enforceAvoCompletion = true;
+		const wrong = fauxAssistantMessage("not exact");
+		const canonicalPrompt = (await internals._getAvoCompletionContinuation({
+			message: wrong,
+			newMessages: [wrong],
+		})) as CustomMessage;
+		expect(canonicalPrompt).toMatchObject({
+			customType: "avo_canonical_delivery_required",
+		});
+		const persistedExact = fauxAssistantMessage("Rain sings.");
+		harness.session.agent.state.messages.push(canonicalPrompt, persistedExact);
+		harness.sessionManager.appendCustomMessageEntry(
+			canonicalPrompt.customType,
+			canonicalPrompt.content,
+			canonicalPrompt.display,
+			canonicalPrompt.details,
+		);
+		harness.sessionManager.appendMessage(persistedExact);
+		const providerCallsBeforeRecovery = harness.faux.state.callCount;
+		const recovered = restartPersistedHarnessSession();
+
+		expect(harness.faux.state.callCount).toBe(providerCallsBeforeRecovery);
+		expect(await recovered.handleAvoHostRequest("avo.get")).toMatchObject({
+			state: { status: "completed", delivery: { phase: "delivered" } },
+		});
+	});
+
+	it.each([
+		{
+			label: "a missing candidate ID",
+			mutate: (details: Record<string, unknown>) => {
+				delete details.candidateId;
+			},
+		},
+		{
+			label: "a mismatched run ID",
+			mutate: (details: Record<string, unknown>) => {
+				details.runId = `${String(details.runId)}:stale`;
+			},
+		},
+		{
+			label: "a mismatched candidate ID",
+			mutate: (details: Record<string, unknown>) => {
+				details.candidateId = "stale-candidate";
+			},
+		},
+		{
+			label: "a mismatched cycle ID",
+			mutate: (details: Record<string, unknown>) => {
+				details.cycleId = "stale-cycle";
+			},
+		},
+		{
+			label: "a mismatched delivery digest",
+			mutate: (details: Record<string, unknown>) => {
+				details.deliveryDigest = "0".repeat(64);
+			},
+		},
+		{
+			label: "a mismatched state version",
+			mutate: (details: Record<string, unknown>) => {
+				details.stateVersion = Number(details.stateVersion) + 1;
+			},
+		},
+	])("rejects persisted canonical recovery with $label", async ({ mutate }) => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Write a poem about rain");
+		await recordAcceptedAnswer("persisted-binding-mismatch", "Rain sings.");
+		const internals = harness.session as unknown as {
+			_enforceAvoCompletion: boolean;
+			_getAvoCompletionContinuation(context: unknown): Promise<unknown>;
+		};
+		internals._enforceAvoCompletion = true;
+		const wrong = fauxAssistantMessage("not exact");
+		const canonicalPrompt = (await internals._getAvoCompletionContinuation({
+			message: wrong,
+			newMessages: [wrong],
+		})) as CustomMessage;
+		const invalidDetails = { ...(canonicalPrompt.details as Record<string, unknown>) };
+		mutate(invalidDetails);
+		const invalidPrompt = { ...canonicalPrompt, details: invalidDetails } satisfies CustomMessage;
+		const persistedExact = fauxAssistantMessage("Rain sings.");
+		harness.session.agent.state.messages.push(invalidPrompt, persistedExact);
+		harness.sessionManager.appendCustomMessageEntry(
+			invalidPrompt.customType,
+			invalidPrompt.content,
+			invalidPrompt.display,
+			invalidPrompt.details,
+		);
+		harness.sessionManager.appendMessage(persistedExact);
+		const providerCallsBeforeRecovery = harness.faux.state.callCount;
+		const recovered = restartPersistedHarnessSession();
+
+		expect(harness.faux.state.callCount).toBe(providerCallsBeforeRecovery);
+		expect(await recovered.handleAvoHostRequest("avo.get")).toMatchObject({
+			state: { status: "active", delivery: { phase: "pending" } },
+		});
+	});
+
+	it("fails closed on restart when persisted run status and delivery phase disagree", async () => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Write a poem about rain");
+		const internals = harness.session as unknown as {
+			_avoRuntime: {
+				getState: () => AvoRunState;
+				store: { getStatePath: () => string | undefined };
+			};
+		};
+		const statePath = internals._avoRuntime.store.getStatePath();
+		expect(statePath).toBeDefined();
+		const malformed = internals._avoRuntime.getState();
+		malformed.status = "completed";
+		const serialized = JSON.stringify(malformed);
+		writeFileSync(statePath!, serialized, "utf8");
+		const providerCallsBeforeRestart = harness.faux.state.callCount;
+
+		expect(() => restartPersistedHarnessSession()).toThrow(/state schema is invalid or unsupported/);
+		expect(harness.faux.state.callCount).toBe(providerCallsBeforeRestart);
+		expect(readFileSync(statePath!, "utf8")).toBe(serialized);
+	});
+
+	it("recovers a persisted canonical-provider failure after restart without another provider call", async () => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Write a poem about rain");
+		await recordAcceptedAnswer("persisted-provider-error", "Rain sings.");
+		const internals = harness.session as unknown as {
+			_enforceAvoCompletion: boolean;
+			_getAvoCompletionContinuation(context: unknown): Promise<unknown>;
+		};
+		internals._enforceAvoCompletion = true;
+		const wrong = fauxAssistantMessage("not exact");
+		const canonicalPrompt = (await internals._getAvoCompletionContinuation({
+			message: wrong,
+			newMessages: [wrong],
+		})) as CustomMessage;
+		expect(canonicalPrompt).toMatchObject({ customType: "avo_canonical_delivery_required" });
+		const persistedError = fauxAssistantMessage("", {
+			stopReason: "error",
+			errorMessage: "429 resource exhausted",
+		});
+		harness.session.agent.state.messages.push(canonicalPrompt, persistedError);
+		harness.sessionManager.appendCustomMessageEntry(
+			canonicalPrompt.customType,
+			canonicalPrompt.content,
+			canonicalPrompt.display,
+			canonicalPrompt.details,
+		);
+		harness.sessionManager.appendMessage(persistedError);
+		const providerCallsBeforeRecovery = harness.faux.state.callCount;
+
+		const recovered = restartPersistedHarnessSession();
+
+		expect(harness.faux.state.callCount).toBe(providerCallsBeforeRecovery);
+		expect(await recovered.handleAvoHostRequest("avo.get")).toMatchObject({
+			state: { status: "completed", delivery: { phase: "delivered" } },
+		});
+		expect(getMessageText(recovered.messages.at(-1))).toBe("Rain sings.");
+		expect(
+			recovered.messages.filter(
+				(message) => message.role === "custom" && message.customType === "avo_canonical_delivery_host_fallback",
+			),
+		).toHaveLength(1);
+	});
+
+	it("repairs a missing accepted-cycle episode locally before entering delivery pending", async () => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Write a poem about rain");
+		await recordAcceptedAnswer("repair-episode", "Rain sings.");
+		const internals = harness.session as unknown as {
+			_enforceAvoCompletion: boolean;
+			_avoRuntime: {
+				store: {
+					state: AvoRunState;
+					save(): void;
+					repairCanonicalDeliveryMemory(): unknown;
+				};
+				getState(): AvoRunState;
+			};
+			_getAvoCompletionContinuation(context: unknown): Promise<unknown>;
+		};
+		internals._enforceAvoCompletion = true;
+		const acceptedCycle = internals._avoRuntime.getState().cycles.at(-1)!;
+		internals._avoRuntime.store.state.memories = internals._avoRuntime.store.state.memories.filter(
+			(memory) => memory.memoryId !== `episode:${acceptedCycle.cycleId}`,
+		);
+		internals._avoRuntime.store.save();
+		const repair = vi.spyOn(internals._avoRuntime.store, "repairCanonicalDeliveryMemory");
+		const wrong = fauxAssistantMessage("not exact");
+		expect(await internals._getAvoCompletionContinuation({ message: wrong, newMessages: [wrong] })).toMatchObject({
+			customType: "avo_canonical_delivery_required",
+		});
+		expect(repair).toHaveBeenCalledTimes(1);
+		expect(internals._avoRuntime.getState()).toMatchObject({ delivery: { phase: "pending" } });
+		const exact = fauxAssistantMessage("Rain sings.");
+		expect(await internals._getAvoCompletionContinuation({ message: exact, newMessages: [exact] })).toBeUndefined();
+		expect(internals._avoRuntime.getState()).toMatchObject({ status: "completed", delivery: { phase: "delivered" } });
+	});
+
+	it("persists one terminal invariant failure when an accepted-cycle episode cannot be repaired", async () => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Write a poem about rain");
+		await recordAcceptedAnswer("invalid-episode", "Rain sings.");
+		const internals = harness.session as unknown as {
+			_enforceAvoCompletion: boolean;
+			_avoCanonicalDeliveryFailedRunIds: Set<string>;
+			_avoRuntime: { store: { state: AvoRunState; save(): void }; getState(): AvoRunState };
+			_getAvoCompletionContinuation(context: unknown): Promise<unknown>;
+			_isAvoCanonicalDeliveryTerminalFailure(): boolean;
+		};
+		internals._enforceAvoCompletion = true;
+		const acceptedCycle = internals._avoRuntime.getState().cycles.at(-1)!;
+		const memory = internals._avoRuntime.store.state.memories.find(
+			(item) => item.memoryId === `episode:${acceptedCycle.cycleId}`,
+		)!;
+		memory.verificationState = "invalidated";
+		memory.invalidatedAt = new Date().toISOString();
+		internals._avoRuntime.store.save();
+		const wrong = fauxAssistantMessage("not exact");
+		expect(await internals._getAvoCompletionContinuation({ message: wrong, newMessages: [wrong] })).toBeUndefined();
+		for (let index = 0; index < 10; index++) {
+			expect(
+				await internals._getAvoCompletionContinuation({ message: wrong, newMessages: [wrong] }),
+			).toBeUndefined();
+		}
+		expect(internals._avoRuntime.getState()).toMatchObject({
+			status: "failed",
+			delivery: { phase: "failed", failureCode: "CANONICAL_ACCEPTED_CYCLE_MEMORY_MISSING" },
+		});
+		expect(
+			harness.session.messages.filter(
+				(message) => message.role === "custom" && message.customType === "avo_invariant_failure",
+			),
+		).toHaveLength(1);
+		internals._avoCanonicalDeliveryFailedRunIds.clear();
+		expect(internals._isAvoCanonicalDeliveryTerminalFailure()).toBe(true);
+	});
+
+	it("drops restored internal work and blocks tools after a persisted terminal delivery failure", async () => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([
+			fauxAssistantMessage("working"),
+			fauxAssistantMessage(fauxToolCall("must_not_run_after_failure", {}), { stopReason: "toolUse" }),
+		]);
+		await harness.session.prompt("Write a poem about rain");
+		await recordAcceptedAnswer("terminal-restart", "Rain sings.");
+		const internals = harness.session as unknown as {
+			_avoRuntime: {
+				store: { failCanonicalDelivery(code: string, reason: string): unknown };
+			};
+			_createPreparedTurnAction(
+				schedule: "followUp",
+				text: string,
+				images: undefined,
+				options: { source: "internal" },
+			): unknown;
+			_admitSessionInput(action: unknown, options: { wake: false }): unknown;
+		};
+		const staleInternalAction = internals._createPreparedTurnAction(
+			"followUp",
+			"stale internal completion repair",
+			undefined,
+			{ source: "internal" },
+		);
+		internals._admitSessionInput(staleInternalAction, { wake: false });
+		const recoverySnapshot = harness.session.getSessionActionRecoverySnapshot();
+		expect(recoverySnapshot.actions).toHaveLength(1);
+		internals._avoRuntime.store.failCanonicalDelivery(
+			"CANONICAL_DELIVERY_INVARIANT_FAILURE",
+			"persisted terminal failure fixture",
+		);
+		const providerCallsBeforeRestart = harness.faux.state.callCount;
+
+		const recovered = restartPersistedHarnessSession();
+		expect(await recovered.restoreSessionActions(recoverySnapshot)).toBe(0);
+		const recoveredInternals = recovered as unknown as {
+			_actionStore: { unfinishedActions(): readonly unknown[] };
+			_scheduleSessionInputPump(): void;
+		};
+		expect(recoveredInternals._actionStore.unfinishedActions()).toHaveLength(0);
+		const toolCall = fauxToolCall("must_not_run_after_failure", {});
+		const toolBlock = await recovered.agent.beforeToolCall?.({ toolCall, args: {} } as never);
+		expect(toolBlock).toMatchObject({
+			block: true,
+			reason: expect.stringContaining("AVO_CANONICAL_DELIVERY_FAILED"),
+		});
+		await expect(recovered.runRlmChild("must not spawn")).rejects.toThrow("AVO_CANONICAL_DELIVERY_FAILED");
+		recoveredInternals._scheduleSessionInputPump();
+		await recovered.waitForIdle();
+		expect(harness.faux.state.callCount).toBe(providerCallsBeforeRestart);
+	});
+
+	it("uses deterministic host delivery after one canonical provider 429 without re-entering AVO", async () => {
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			tools: [createLimitReadyTool("retry-canonical", "Rain sings.")],
+			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
+		});
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("ready_at_limit", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 resource exhausted" }),
+			fauxAssistantMessage("Rain sings."),
+			fauxAssistantMessage("must remain unused"),
+		]);
+
+		await harness.session.prompt("Write a poem about rain");
+		await harness.session.waitForIdle();
+
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.eventsOfType("auto_retry_start")).toHaveLength(0);
+		expect(harness.getPendingResponseCount()).toBe(2);
+		const state = (await harness.session.handleAvoHostRequest("avo.get")).state as AvoRunState;
+		expect(state).toMatchObject({ status: "completed", delivery: { phase: "delivered" } });
+		expect(state.candidates).toHaveLength(1);
+		expect(state.cycles).toHaveLength(1);
+		expect(
+			harness.session.messages.filter(
+				(message) => message.role === "custom" && message.customType === "avo_canonical_delivery_host_fallback",
+			),
+		).toHaveLength(1);
+		expect(getMessageText(harness.session.messages.at(-1))).toBe("Rain sings.");
+		expect(
+			harness.session.messages.filter(
+				(message) => message.role === "custom" && message.customType === "avo_invariant_failure",
+			),
+		).toHaveLength(0);
+	});
+
+	it("closes AVO mutation, RLM, compaction, and evaluation paths while delivery is pending", async () => {
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			tools: [createLimitReadyTool("closed-canonical", "Rain sings.")],
+		});
+		let evaluationsAtPending = -1;
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("ready_at_limit", {}), { stopReason: "toolUse" }),
+			async () => {
+				const pending = (await harness!.session.handleAvoHostRequest("avo.get")).state as AvoRunState;
+				expect(pending.delivery.phase).toBe("pending");
+				evaluationsAtPending = pending.evaluations.length;
+				await expect(
+					harness!.session.handleAvoHostRequest("avo.candidate.add", {
+						candidate: {
+							candidate_id: "forbidden-after-gate",
+							kind: "answer",
+							summary: "forbidden",
+							payload: "forbidden",
+						},
+					}),
+				).rejects.toThrow("AVO_CANONICAL_DELIVERY_PENDING");
+				await expect(harness!.session.runRlmChild("verify again")).rejects.toThrow(
+					"AVO_CANONICAL_DELIVERY_PENDING",
+				);
+				await expect(harness!.session.compact()).rejects.toThrow("canonical delivery is terminal");
+				return fauxAssistantMessage("Rain sings.");
+			},
+		]);
+
+		await harness.session.prompt("Write a poem about rain");
+
+		const state = (await harness.session.handleAvoHostRequest("avo.get")).state as AvoRunState;
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(state).toMatchObject({ status: "completed", delivery: { phase: "delivered" } });
+		expect(state.candidates).toHaveLength(1);
+		expect(state.cycles).toHaveLength(1);
+		expect(state.evaluations).toHaveLength(evaluationsAtPending);
+	});
+
+	it("blocks a canonical response that attempts tool use and terminates without another model turn", async () => {
+		const forbiddenExecute = vi.fn(async () => ({
+			content: [{ type: "text" as const, text: "must not execute" }],
+			details: {},
+		}));
+		const forbiddenTool: AgentTool = {
+			name: "forbidden_after_gate",
+			label: "Forbidden after gate",
+			description: "Must never execute during canonical delivery",
+			parameters: Type.Object({}),
+			execute: forbiddenExecute,
+		};
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			tools: [createLimitReadyTool("tool-closed", "Rain sings."), forbiddenTool],
+		});
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("ready_at_limit", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("forbidden_after_gate", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("must remain unused"),
+		]);
+
+		await harness.session.prompt("Write a poem about rain");
+
+		expect(forbiddenExecute).not.toHaveBeenCalled();
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
+			state: { status: "failed", delivery: { phase: "failed" }, candidates: [expect.any(Object)] },
+		});
+		expect(
+			harness.session.messages.filter(
+				(message) => message.role === "custom" && message.customType === "avo_invariant_failure",
+			),
+		).toHaveLength(1);
+	});
+
+	it("rechecks delivery pending after asynchronous RLM model resolution before allocating a child", async () => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Write a poem about rain");
+		await recordAcceptedAnswer("rlm-race", "Rain sings.");
+		let releaseResolution!: () => void;
+		let markResolutionStarted!: () => void;
+		const resolutionStarted = new Promise<void>((resolve) => {
+			markResolutionStarted = resolve;
+		});
+		const resolutionGate = new Promise<void>((resolve) => {
+			releaseResolution = resolve;
+		});
+		const internals = harness.session as unknown as {
+			_enforceAvoCompletion: boolean;
+			_activeRlmChildRuns: Map<string, unknown>;
+			_resolveRlmSubagentModel(reference: string | undefined): Promise<unknown>;
+			_startRlmChildRun(prompt: string): Promise<unknown>;
+			_getAvoCompletionContinuation(context: unknown): Promise<unknown>;
+		};
+		internals._enforceAvoCompletion = true;
+		const originalResolve = internals._resolveRlmSubagentModel.bind(internals);
+		vi.spyOn(internals, "_resolveRlmSubagentModel").mockImplementation(async (reference) => {
+			markResolutionStarted();
+			await resolutionGate;
+			return originalResolve(reference);
+		});
+		const spawn = internals._startRlmChildRun("verify after acceptance");
+		await resolutionStarted;
+		const wrong = fauxAssistantMessage("not exact");
+		expect(await internals._getAvoCompletionContinuation({ message: wrong, newMessages: [wrong] })).toMatchObject({
+			customType: "avo_canonical_delivery_required",
+		});
+		releaseResolution();
+
+		await expect(spawn).rejects.toThrow("AVO_CANONICAL_DELIVERY_PENDING");
+		expect(internals._activeRlmChildRuns.size).toBe(0);
+	});
+
+	it("cancels an RLM whose runtime construction overlaps canonical-delivery sealing", async () => {
+		childHarness = await createHarness();
+		childHarness.setResponses([fauxAssistantMessage("must never run")]);
+		let releaseRuntime!: () => void;
+		let markRuntimeStarted!: () => void;
+		const runtimeStarted = new Promise<void>((resolve) => {
+			markRuntimeStarted = resolve;
+		});
+		const runtimeGate = new Promise<void>((resolve) => {
+			releaseRuntime = resolve;
+		});
+		const deleteRuntime = vi.fn(async () => {});
+		harness = await createHarness({
+			persistSession: true,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => {
+					markRuntimeStarted();
+					await runtimeGate;
+					return { session: childHarness!.session };
+				},
+				deleteRlmSubagentRuntime: deleteRuntime,
+			},
+		});
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Write a poem about rain");
+		await recordAcceptedAnswer("rlm-runtime-race", "Rain sings.");
+		const internals = harness.session as unknown as {
+			_enforceAvoCompletion: boolean;
+			_activeRlmChildRuns: Map<string, unknown>;
+			_getAvoCompletionContinuation(context: unknown): Promise<unknown>;
+		};
+		internals._enforceAvoCompletion = true;
+		const spawned = await harness.session.runRlmChild("verify after acceptance", { name: "runtime-race" });
+		await runtimeStarted;
+		const wrong = fauxAssistantMessage("not exact");
+		expect(await internals._getAvoCompletionContinuation({ message: wrong, newMessages: [wrong] })).toMatchObject({
+			customType: "avo_canonical_delivery_required",
+		});
+		releaseRuntime();
+
+		await expect.poll(() => internals._activeRlmChildRuns.has(spawned.rlm_child_id)).toBe(false);
+		expect(childHarness.faux.state.callCount).toBe(0);
+		expect(deleteRuntime).toHaveBeenCalledTimes(1);
+		expect(
+			harness.session.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+			),
+		).toHaveLength(0);
+	});
+
+	it("rechecks delivery pending after agent discovery and before the first RLM provider call", async () => {
+		childHarness = await createHarness();
+		childHarness.setResponses([fauxAssistantMessage("must never run")]);
+		let releaseDiscovery!: () => void;
+		let markDiscoveryStarted!: () => void;
+		const discoveryStarted = new Promise<void>((resolve) => {
+			markDiscoveryStarted = resolve;
+		});
+		const discoveryGate = new Promise<void>((resolve) => {
+			releaseDiscovery = resolve;
+		});
+		let discoveryCalls = 0;
+		const deleteRuntime = vi.fn(async () => {});
+		harness = await createHarness({
+			persistSession: true,
+			agentMessageController: {
+				listAgents: async () => {
+					discoveryCalls += 1;
+					if (discoveryCalls === 1) {
+						return { current: { activeSessionId: "root-active", sessionId: "root-session" }, agents: [] };
+					}
+					markDiscoveryStarted();
+					await discoveryGate;
+					return { current: { activeSessionId: "root-active", sessionId: "root-session" }, agents: [] };
+				},
+				sendAgentMessage: async () => {
+					throw new Error("must not send an agent message during canonical delivery");
+				},
+			},
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: childHarness!.session }),
+				deleteRlmSubagentRuntime: deleteRuntime,
+			},
+		});
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Write a poem about rain");
+		await recordAcceptedAnswer("rlm-discovery-race", "Rain sings.");
+		const internals = harness.session as unknown as {
+			_enforceAvoCompletion: boolean;
+			_activeRlmChildRuns: Map<string, unknown>;
+			_getAvoCompletionContinuation(context: unknown): Promise<unknown>;
+		};
+		internals._enforceAvoCompletion = true;
+		const spawned = await harness.session.runRlmChild("verify after acceptance", { name: "discovery-race" });
+		await discoveryStarted;
+		const wrong = fauxAssistantMessage("not exact");
+		expect(await internals._getAvoCompletionContinuation({ message: wrong, newMessages: [wrong] })).toMatchObject({
+			customType: "avo_canonical_delivery_required",
+		});
+		releaseDiscovery();
+
+		await expect.poll(() => internals._activeRlmChildRuns.has(spawned.rlm_child_id)).toBe(false);
+		expect(discoveryCalls).toBe(2);
+		expect(childHarness.faux.state.callCount).toBe(0);
+		expect(deleteRuntime).toHaveBeenCalledTimes(1);
+		expect(
+			harness.session.messages.filter(
+				(message) => message.role === "custom" && message.customType === "rlm_child_terminal_notice",
+			),
+		).toHaveLength(0);
+	});
+
+	it("invalidates an in-flight serialized refine plan when tool evidence enters delivery pending", async () => {
+		let releaseReview!: () => void;
+		let markReviewStarted!: () => void;
+		const reviewStarted = new Promise<void>((resolve) => {
+			markReviewStarted = resolve;
+		});
+		const reviewGate = new Promise<void>((resolve) => {
+			releaseReview = resolve;
+		});
+		const reviewer = vi.fn(async () => {
+			markReviewStarted();
+			await reviewGate;
+			return { shouldRefine: true, rationale: "stale", instructions: "must not apply" };
+		});
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			serializedRefine: true,
+			settings: { autoRefine: { enabled: true, turnInterval: 1, cooldownMs: 0 } },
+			autoRefineReviewer: reviewer,
+			tools: [createLimitReadyTool("refine-closed", "Rain sings.")],
+		});
+		const internals = harness.session as unknown as {
+			_planRefine(...args: unknown[]): Promise<unknown>;
+			_applyRefine(...args: unknown[]): Promise<unknown>;
+		};
+		const plan = vi.spyOn(internals, "_planRefine");
+		const apply = vi.spyOn(internals, "_applyRefine");
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("ready_at_limit", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Rain sings."),
+		]);
+
+		const prompt = harness.session.prompt("Write a poem about rain");
+		await reviewStarted;
+		await prompt;
+		releaseReview();
+		await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+		expect(reviewer).toHaveBeenCalledTimes(1);
+		expect(plan).not.toHaveBeenCalled();
+		expect(apply).not.toHaveBeenCalled();
+		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
+			state: { status: "completed", delivery: { phase: "delivered" } },
+		});
+	});
+
+	it("resumes persisted pending delivery before queued user work and drops stale internal context", async () => {
+		harness = await createHarness({ persistSession: true });
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Write a poem about rain");
+		await recordAcceptedAnswer("restart-rain", "Rain sings.");
+		const internals = harness.session as unknown as {
+			_enforceAvoCompletion: boolean;
+			_avoCanonicalDeliveryQueuedRunId?: string;
+			_avoCanonicalDeliveryDirectBinding?: unknown;
+			_avoCanonicalDeliveryAttemptBinding?: unknown;
+			_pendingNextTurnMessages: Array<{
+				role: "custom";
+				customType: string;
+				content: string;
+				display: boolean;
+				timestamp: number;
+			}>;
+			_getAvoCompletionContinuation(context: unknown): Promise<unknown>;
+		};
+		internals._enforceAvoCompletion = true;
+		const wrong = fauxAssistantMessage("not exact");
+		expect(await internals._getAvoCompletionContinuation({ message: wrong, newMessages: [wrong] })).toMatchObject({
+			customType: "avo_canonical_delivery_required",
+		});
+		// Simulate a process/session reconstruction: only the persisted pending
+		// binding remains; transient queued/attempt latches are gone.
+		internals._avoCanonicalDeliveryQueuedRunId = undefined;
+		internals._avoCanonicalDeliveryDirectBinding = undefined;
+		internals._avoCanonicalDeliveryAttemptBinding = undefined;
+		internals._pendingNextTurnMessages.push({
+			role: "custom",
+			customType: "rlm_child_terminal_notice",
+			content: "late RLM child notice",
+			display: true,
+			timestamp: Date.now(),
+		});
+		let resumedPromptText = "";
+		let resumedSystemPrompt = "";
+		harness.setResponses([
+			async (context) => {
+				resumedPromptText = context.messages.map(getMessageText).join("\n");
+				resumedSystemPrompt = context.systemPrompt ?? "";
+				return fauxAssistantMessage("Rain sings.");
+			},
+			async () => {
+				expect(await harness!.session.handleAvoHostRequest("avo.get")).toMatchObject({
+					state: { runId: `${harness!.session.sessionId}:task-2`, objective: "Write a poem about sun" },
+				});
+				await recordAcceptedAnswer("fresh-sun", "Sun sings.");
+				return fauxAssistantMessage("Sun sings.");
+			},
+		]);
+
+		await harness.session.prompt("Write a poem about sun");
+		await harness.session.waitForSessionInputIdle();
+
+		expect(resumedSystemPrompt).toContain("AVO_CANONICAL_DELIVERY_PENDING");
+		expect(resumedPromptText).toContain("<avo_canonical_delivery_required>");
+		expect(resumedPromptText).toContain('decoded value of "Rain sings."');
+		expect(resumedPromptText).not.toContain("late RLM child notice");
+		expect(resumedPromptText).not.toContain("Write a poem about sun");
+		const resumedState = await harness.session.handleAvoHostRequest("avo.get");
+		expect(resumedState).toMatchObject({
+			state: {
+				runId: `${harness.session.sessionId}:task-2`,
+				status: "completed",
+				delivery: { phase: "delivered" },
+				taskRuns: [expect.objectContaining({ runId: `${harness.session.sessionId}:task-1`, status: "completed" })],
+			},
+		});
+		expect(harness.faux.state.callCount).toBe(3);
 	});
 
 	it("discards queued AVO supervisor prompts and requests canonical delivery immediately", async () => {
@@ -375,6 +1252,15 @@ describe("AgentSession universal AVO runtime", () => {
 					});
 					await harness!.session.queueAgentMessagePrompt(supervisorMessage.content, "steer", supervisorMessage);
 				}
+				const lateNotice = createAgentSessionMessage({
+					id: "late-rlm-notice",
+					source: AGENT_MESSAGE_SOURCE,
+					message: "late generic RLM child terminal notice",
+					from: { sessionName: "unrelated-worker" },
+					fromRelationship: "child",
+					target: { activeSessionId: "root-active", sessionId: harness!.session.sessionId },
+				});
+				await harness!.session.queueAgentMessagePrompt(lateNotice.content, "steer", lateNotice);
 				const gate = await harness!.session.handleAvoHostRequest("avo.stop_gate");
 				return { content: [{ type: "text", text: JSON.stringify(gate) }], details: {} };
 			},
@@ -386,7 +1272,12 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("ready", {}), { stopReason: "toolUse" }),
-			fauxAssistantMessage("Rain wakes the quiet street."),
+			async (context) => {
+				expect(context.messages.map(getMessageText).join("\n")).not.toContain(
+					"late generic RLM child terminal notice",
+				);
+				return fauxAssistantMessage("Rain wakes the quiet street.");
+			},
 		]);
 
 		await harness.session.prompt("Write a short poem about rain");
@@ -512,14 +1403,14 @@ describe("AgentSession universal AVO runtime", () => {
 		expect(interventions).toHaveLength(2);
 		expect(interventions[0]).toMatchObject({
 			details: {
-				toolBatchesWithoutProgress: 6,
+				toolBatchesWithoutProgress: 4,
 				escalationLevel: 1,
 				trigger: "anti_laziness_tool_intervention",
 			},
 		});
 		expect(interventions[1]).toMatchObject({
 			details: {
-				toolBatchesWithoutProgress: 9,
+				toolBatchesWithoutProgress: 7,
 				escalationLevel: 2,
 				trigger: "anti_laziness_tool_escalation",
 			},
@@ -529,18 +1420,18 @@ describe("AgentSession universal AVO runtime", () => {
 		expect(state.checkpoints).toContainEqual(
 			expect.objectContaining({
 				status: "intervene",
-				triggeredHeuristics: expect.arrayContaining(["no_observable_progress_6_tool_batches"]),
+				triggeredHeuristics: expect.arrayContaining(["no_observable_progress_4_tool_batches"]),
 			}),
 		);
 		expect(state.checkpoints).toContainEqual(
 			expect.objectContaining({
 				status: "intervene",
-				triggeredHeuristics: expect.arrayContaining(["no_observable_progress_9_tool_batches"]),
+				triggeredHeuristics: expect.arrayContaining(["no_observable_progress_7_tool_batches"]),
 			}),
 		);
 	});
 
-	it("blocks non-milestone coding probes after four ignored tool-loop interventions", async () => {
+	it("blocks the first non-milestone coding probe immediately after intervention", async () => {
 		let executions = 0;
 		const ipythonTool: AgentTool = {
 			name: "ipython",
@@ -561,14 +1452,14 @@ describe("AgentSession universal AVO runtime", () => {
 			tools: [ipythonTool],
 		});
 		harness.setResponses([
-			...Array.from({ length: 16 }, () =>
+			...Array.from({ length: 5 }, () =>
 				fauxAssistantMessage(fauxToolCall("ipython", { code: "print('still inspecting')" }), {
 					stopReason: "toolUse",
 				}),
 			),
 			fauxAssistantMessage(
 				fauxToolCall("ipython", {
-					code: 'candidate = await avo.add_candidate({"candidate_id":"real-work","kind":"implementation","summary":"work","payload":"work"})',
+					code: 'baseline = await avo.run_coding_baseline("node --test parser.test.cjs")',
 				}),
 				{ stopReason: "toolUse" },
 			),
@@ -579,22 +1470,413 @@ describe("AgentSession universal AVO runtime", () => {
 		const interventions = harness.session.messages.filter(
 			(message) => message.role === "custom" && message.customType === "avo_progress_intervention",
 		);
-		expect(interventions).toHaveLength(4);
-		expect(interventions[3]).toMatchObject({
+		expect(interventions).toHaveLength(1);
+		expect(interventions[0]).toMatchObject({
 			details: {
-				toolBatchesWithoutProgress: 15,
-				escalationLevel: 4,
-				trigger: "anti_laziness_tool_escalation",
+				toolBatchesWithoutProgress: 4,
+				escalationLevel: 1,
+				trigger: "anti_laziness_tool_intervention",
 			},
 		});
-		// Calls 1–15 execute, call 16 is blocked, and the explicit AVO milestone-shaped
+		// Calls 1–4 execute, call 5 is blocked, and the explicit AVO milestone-shaped
 		// call is admitted so the model can escape probation.
-		expect(executions).toBe(16);
+		expect(executions).toBe(5);
 		expect(
 			harness.session.messages.some(
 				(message) => message.role === "toolResult" && JSON.stringify(message).includes("tool probation blocked"),
 			),
 		).toBe(true);
+	});
+
+	it("gives general best-effort tasks an exact model-opinion recovery without a coding baseline", async () => {
+		harness = await createHarness({ persistSession: true, enforceAvoCompletion: true });
+		await harness.session.handleAvoHostRequest("avo.initialize", { objective: "Please check this folder" });
+		const initialized = (await harness.session.handleAvoHostRequest("avo.get")).state as AvoRunState;
+		const initialRecovery = (
+			harness.session as unknown as {
+				_avoToolRecoveryContract(value: AvoRunState): { allowedCalls: string[]; guidance: string };
+			}
+		)._avoToolRecoveryContract(initialized);
+		expect(initialRecovery.allowedCalls).toEqual(["add_candidate"]);
+		expect(initialRecovery.guidance).toContain("immediately record evaluation");
+		expect(initialRecovery.guidance).toContain("Do not invent another API name");
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "folder-summary",
+				kind: "artifact",
+				summary: "Folder summary",
+				payload: "Folder summary",
+			},
+		});
+		const state = (await harness.session.handleAvoHostRequest("avo.get")).state as AvoRunState;
+		const recovery = (
+			harness.session as unknown as {
+				_avoToolRecoveryContract(value: AvoRunState): { allowedCalls: string[]; guidance: string };
+			}
+		)._avoToolRecoveryContract(state);
+
+		expect(state).toMatchObject({
+			routing: { environment: "general", horizon: "direct" },
+			verificationPolicy: "best_effort",
+		});
+		expect(recovery.allowedCalls).toEqual(["record_evaluation"]);
+		expect(recovery.guidance).toContain('"evaluator_id":"model_opinion"');
+		expect(recovery.guidance).toContain('"status":"pass"');
+		expect(recovery.guidance).toContain("not host or external proof");
+		expect(recovery.guidance).not.toContain("run_coding_baseline");
+	});
+
+	it("blocks AVO API introspection before probation and returns the state-aware recovery", async () => {
+		let executions = 0;
+		const ipythonTool: AgentTool = {
+			name: "ipython",
+			label: "Python",
+			description: "Attempts prohibited AVO introspection",
+			parameters: Type.Object({ code: Type.String() }),
+			execute: async () => {
+				executions += 1;
+				return { content: [{ type: "text", text: "should not execute" }], details: {} };
+			},
+		};
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			tools: [ipythonTool],
+		});
+		harness.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("ipython", {
+					code: "import inspect; print(dir(avo)); inspect.signature(avo.record_evaluation)",
+				}),
+				{ stopReason: "toolUse" },
+			),
+		]);
+
+		await harness.session.prompt("Please check this folder and summarize what is here");
+
+		expect(executions).toBe(0);
+		const blocked = harness.session.messages.find(
+			(message) => message.role === "toolResult" && getMessageText(message).includes("API introspection is blocked"),
+		);
+		expect(blocked).toBeDefined();
+		expect(getMessageText(blocked!)).toContain("in one bounded cell create the final candidate");
+	});
+
+	it("keeps general-task probation active after candidate creation and admits only the exact recovery API", async () => {
+		let executions = 0;
+		const ipythonTool: AgentTool = {
+			name: "ipython",
+			label: "Python",
+			description: "Replays a direct general-task recovery",
+			parameters: Type.Object({ code: Type.String() }),
+			execute: async (_toolCallId, params) => {
+				executions += 1;
+				const code = (params as { code: string }).code;
+				if (code.includes("add_candidate")) {
+					await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+						candidate: {
+							candidate_id: "folder-summary",
+							kind: "artifact",
+							summary: "Folder summary",
+							payload: "Folder summary",
+						},
+					});
+				}
+				if (code.includes("record_evaluation")) {
+					await harness!.session.handleAvoHostRequest("avo.evaluation.record", {
+						evaluation: {
+							candidate_id: "folder-summary",
+							evaluator_id: "model_opinion",
+							status: "pass",
+							authority: "model_opinion",
+							evidence_refs: [],
+							metrics: { reviewed: true },
+						},
+					});
+				}
+				return { content: [{ type: "text", text: `executed:${code}` }], details: {} };
+			},
+		};
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			tools: [ipythonTool],
+		});
+		const probe = () =>
+			fauxAssistantMessage(fauxToolCall("ipython", { code: "print('inspect folder')" }), {
+				stopReason: "toolUse",
+			});
+		harness.setResponses([
+			probe(),
+			probe(),
+			probe(),
+			probe(),
+			fauxAssistantMessage(
+				fauxToolCall("ipython", { code: "candidate = await avo.add_candidate({'kind':'artifact'})" }),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(
+				fauxToolCall("ipython", { code: "await avo.record_model_opinion({'candidate_id':'folder-summary'})" }),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(
+				fauxToolCall("ipython", {
+					code: "await avo.record_evaluation({'candidate_id':'folder-summary','status':'pass'})",
+				}),
+				{ stopReason: "toolUse" },
+			),
+		]);
+
+		await harness.session.prompt("Please check this folder and summarize what is here");
+
+		expect(executions).toBe(6);
+		expect(
+			harness.session.messages.some(
+				(message) =>
+					message.role === "toolResult" &&
+					getMessageText(message).includes("tool probation blocked") &&
+					getMessageText(message).includes("record_evaluation"),
+			),
+		).toBe(true);
+		expect((await harness.session.handleAvoHostRequest("avo.get")).state).toMatchObject({
+			routing: { environment: "general", horizon: "direct" },
+			candidates: [{ candidateId: "folder-summary" }],
+			evaluations: [{ evaluatorId: "model_opinion", status: "pass" }],
+		});
+	});
+
+	it("keeps the iterative candidate contract stable after a workspace write and gives exact recovery", async () => {
+		let executions = 0;
+		const ipythonTool: AgentTool = {
+			name: "ipython",
+			label: "Python",
+			description: "Replays the canary tool timeline",
+			parameters: Type.Object({ code: Type.String() }),
+			execute: async (_toolCallId, params) => {
+				executions += 1;
+				const code = (params as { code: string }).code;
+				if (code.includes("run_coding_baseline")) {
+					await harness!.session.handleAvoHostRequest("avo.verification.baseline.run", {
+						command: "node --test parser.test.cjs",
+					});
+				}
+				if (code.includes("WRITE_TARGET")) {
+					writeFileSync(`${harness!.tempDir}/parser.py`, "def parse(value):\n    return value\n");
+				}
+				if (code.includes("add_candidate")) {
+					await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+						candidate: {
+							candidate_id: "parser-fix",
+							kind: "implementation",
+							summary: "Parser fix",
+							payload: { change: "parser fix" },
+						},
+					});
+					await harness!.session.handleAvoHostRequest("avo.evaluation.record", {
+						evaluation: {
+							candidate_id: "parser-fix",
+							evaluator_id: "model_review",
+							status: "fail",
+							authority: "model_opinion",
+							evidence_refs: [],
+							metrics: { reviewed: true },
+						},
+					});
+				}
+				return { content: [{ type: "text", text: `executed:${code}` }], details: {} };
+			},
+		};
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			tools: [ipythonTool],
+		});
+		writeFileSync(
+			`${harness.tempDir}/parser.test.cjs`,
+			'const test = require("node:test"); test("baseline", () => {});\n',
+		);
+		harness.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("ipython", { code: 'await avo.run_coding_baseline("node --test parser.test.cjs")' }),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(fauxToolCall("ipython", { code: "print('inspect source')" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("ipython", { code: "print('inspect tests')" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("ipython", { code: "print('probe behavior')" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("ipython", { code: "WRITE_TARGET = True" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("ipython", { code: "print('one more probe')" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(
+				fauxToolCall("ipython", {
+					code: 'candidate = await avo.add_candidate({"candidate_id":"parser-fix","kind":"implementation","summary":"parser fix","payload":{"change":"parser fix"}})',
+				}),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(fauxToolCall("ipython", { code: "print('retest unchanged candidate')" }), {
+				stopReason: "toolUse",
+			}),
+		]);
+
+		await harness.session.prompt("Fix and test the parser implementation");
+
+		const intervention = harness.session.messages.find(
+			(message) => message.role === "custom" && message.customType === "avo_progress_intervention",
+		);
+		expect(intervention).toMatchObject({
+			details: { toolBatchesWithoutProgress: 4, escalationLevel: 1 },
+		});
+		expect(getMessageText(intervention!)).toContain(
+			"candidate-admission contract remains horizon=iterative, required_premortem_assumptions=0",
+		);
+		expect(getMessageText(intervention!)).toContain("await avo.add_candidate(...)");
+		expect(
+			harness.session.messages.some(
+				(message) => message.role === "toolResult" && JSON.stringify(message).includes("tool probation blocked"),
+			),
+		).toBe(true);
+		expect(
+			harness.session.messages.some(
+				(message) =>
+					message.role === "toolResult" &&
+					JSON.stringify(message).includes('await avo.complete_cycle({\\"candidate_id\\":\\"parser-fix\\"}) once'),
+			),
+		).toBe(true);
+		expect(executions).toBe(6);
+		expect((await harness.session.handleAvoHostRequest("avo.get")).state).toMatchObject({
+			routing: { environment: "coding", horizon: "iterative" },
+			criticalAssumptions: [],
+			candidates: [{ candidateId: "parser-fix" }],
+		});
+	});
+
+	it("replays failed Python evaluation through a terminal cycle and an exact material successor", async () => {
+		let executions = 0;
+		let completedOutcome: string | undefined;
+		const command = "node --test parser.test.cjs";
+		const ipythonTool: AgentTool = {
+			name: "ipython",
+			label: "Python",
+			description: "Replays the failed-evaluation canary timeline",
+			parameters: Type.Object({ code: Type.String() }),
+			execute: async (_toolCallId, params) => {
+				executions += 1;
+				const code = (params as { code: string }).code;
+				if (code.includes("run_coding_baseline")) {
+					await harness!.session.handleAvoHostRequest("avo.verification.baseline.run", { command });
+				}
+				if (code.includes("ADD_FIRST")) {
+					writeFileSync(`${harness!.tempDir}/parser.py`, "def parse(value):\n    return 2\n");
+					await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+						candidate: {
+							candidate_id: "python-first",
+							kind: "implementation",
+							summary: "First Python repair",
+							payload: { value: 2 },
+						},
+					});
+				}
+				if (code.includes("run_evaluation")) {
+					await harness!.session.handleAvoHostRequest("avo.evaluation.run", {
+						candidate_id: "python-first",
+						command,
+					});
+				}
+				if (code.includes("complete_cycle")) {
+					const result = await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
+						cycle: { candidate_id: "python-first" },
+					});
+					completedOutcome = (result.cycle as { outcome: string }).outcome;
+				}
+				if (code.includes("ADD_SUCCESSOR")) {
+					writeFileSync(`${harness!.tempDir}/parser.py`, "def parse(value):\n    return 1\n");
+					await harness!.session.handleAvoHostRequest("avo.candidate.add", {
+						candidate: {
+							candidate_id: "python-successor",
+							parent_candidate_id: "python-first",
+							kind: "implementation",
+							summary: "Material Python successor",
+							payload: { value: 1 },
+						},
+					});
+				}
+				return { content: [{ type: "text", text: `executed:${code}` }], details: {} };
+			},
+		};
+		harness = await createHarness({
+			persistSession: true,
+			enforceAvoCompletion: true,
+			tools: [ipythonTool],
+		});
+		writeFileSync(`${harness.tempDir}/parser.py`, "def parse(value):\n    return 1\n");
+		writeFileSync(
+			`${harness.tempDir}/parser.test.cjs`,
+			"const test = require('node:test'); const assert = require('node:assert'); const fs = require('node:fs'); test('parser source', () => assert.match(fs.readFileSync('parser.py', 'utf8'), /return 1/));\n",
+		);
+		const probe = (label: string) =>
+			fauxAssistantMessage(fauxToolCall("ipython", { code: `print('${label}')` }), { stopReason: "toolUse" });
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("ipython", { code: `await avo.run_coding_baseline("${command}")` }), {
+				stopReason: "toolUse",
+			}),
+			probe("inspect source"),
+			probe("inspect tests"),
+			probe("inspect contract"),
+			probe("inspect fixtures"),
+			fauxAssistantMessage(
+				fauxToolCall("ipython", {
+					code: 'ADD_FIRST = True; await avo.add_candidate({"candidate_id":"python-first","kind":"implementation","summary":"first","payload":{"value":2}})',
+				}),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(
+				fauxToolCall("ipython", { code: `await avo.run_evaluation("python-first", "${command}")` }),
+				{ stopReason: "toolUse" },
+			),
+			probe("retry unchanged failure"),
+			fauxAssistantMessage(
+				fauxToolCall("ipython", { code: 'await avo.complete_cycle({"candidate_id":"python-first"})' }),
+				{ stopReason: "toolUse" },
+			),
+			probe("post-cycle probe 1"),
+			probe("post-cycle probe 2"),
+			probe("post-cycle probe 3"),
+			probe("post-cycle probe 4"),
+			probe("probe superseded candidate"),
+			fauxAssistantMessage(
+				fauxToolCall("ipython", {
+					code: 'ADD_SUCCESSOR = True; await avo.add_candidate({"candidate_id":"python-successor","parent_candidate_id":"python-first","kind":"implementation","summary":"successor","payload":{"value":1}})',
+				}),
+				{ stopReason: "toolUse" },
+			),
+		]);
+
+		await harness.session.prompt("Fix and test parser.py without weakening verification");
+
+		expect(completedOutcome).toBe("revised");
+		const blocked = harness.session.messages.filter(
+			(message) => message.role === "toolResult" && JSON.stringify(message).includes("tool probation blocked"),
+		);
+		expect(
+			blocked.some((message) =>
+				getMessageText(message).includes('await avo.complete_cycle({"candidate_id":"python-first"}) once'),
+			),
+		).toBe(true);
+		expect(
+			blocked.some(
+				(message) =>
+					getMessageText(message).includes("parent_candidate_id=python-first") &&
+					getMessageText(message).includes("material correction"),
+			),
+		).toBe(true);
+		expect(executions).toBe(13);
+		expect((await harness.session.handleAvoHostRequest("avo.get")).state).toMatchObject({
+			routing: { environment: "coding", horizon: "iterative" },
+			criticalAssumptions: [],
+			cycles: [{ candidateId: "python-first", outcome: "revised" }],
+			candidates: [
+				{ candidateId: "python-first" },
+				{ candidateId: "python-successor", parentCandidateId: "python-first" },
+			],
+		});
 	});
 
 	it("interrupts a timed-out tool chain with an immediate targeted intervention", async () => {
@@ -711,8 +1993,8 @@ describe("AgentSession universal AVO runtime", () => {
 
 		await harness.session.prompt("Write a poem about rain");
 
-		expect(harness.eventsOfType("compaction_start")).toEqual([expect.objectContaining({ reason: "threshold" })]);
-		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.eventsOfType("compaction_start")).toEqual([]);
+		expect(harness.faux.state.callCount).toBe(1);
 		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
 			state: { status: "completed" },
 		});
@@ -721,7 +2003,7 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 	});
 
-	it("resumes the AVO repair continuation after threshold compaction", async () => {
+	it("does not compact or loop after a mismatched canonical-delivery attempt", async () => {
 		harness = await createHarness({
 			persistSession: true,
 			enforceAvoCompletion: true,
@@ -755,11 +2037,17 @@ describe("AgentSession universal AVO runtime", () => {
 		await harness.session.prompt("Write a poem about rain");
 		await harness.session.waitForIdle();
 
-		expect(harness.eventsOfType("compaction_start")).toEqual([expect.objectContaining({ reason: "threshold" })]);
-		expect(harness.faux.state.callCount).toBe(3);
+		expect(harness.eventsOfType("compaction_start")).toEqual([]);
+		expect(harness.faux.state.callCount).toBe(2);
 		expect(await harness.session.handleAvoHostRequest("avo.get")).toMatchObject({
-			state: { status: "completed" },
+			state: { status: "failed", delivery: { phase: "failed" } },
 		});
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(
+			harness.session.messages.filter(
+				(message) => message.role === "custom" && message.customType === "avo_invariant_failure",
+			),
+		).toHaveLength(1);
 	});
 
 	it.each(["followUp", "steer"] as const)(
@@ -883,21 +2171,21 @@ describe("AgentSession universal AVO runtime", () => {
 				await harness!.session.handleAvoHostRequest("avo.cycle.complete", {
 					cycle: { candidate_id: "poem-1" },
 				});
+				await harness!.session.handleAvoHostRequest("avo.memory.remember", {
+					memory: {
+						namespace: "general",
+						type: "info",
+						scope: "project",
+						title: "Rain imagery",
+						content: "The user accepted concise natural imagery.",
+						importance: 5,
+						source_ids: ["poem-1"],
+					},
+				});
 				return fauxAssistantMessage("Rain sings.");
 			},
 		]);
 		await harness.session.prompt("Write a poem about rain");
-		await harness.session.handleAvoHostRequest("avo.memory.remember", {
-			memory: {
-				namespace: "general",
-				type: "info",
-				scope: "project",
-				title: "Rain imagery",
-				content: "The user accepted concise natural imagery.",
-				importance: 5,
-				source_ids: ["poem-1"],
-			},
-		});
 
 		harness.setResponses([
 			async (context) => {
@@ -1487,8 +2775,15 @@ describe("AgentSession universal AVO runtime", () => {
 		expect(post.evaluation).toMatchObject({
 			status: "fail",
 			issuedBy: "host",
-			metrics: { meaningful: true, post_workspace_matches_candidate: true },
+			metrics: {
+				meaningful: true,
+				post_workspace_matches_candidate: true,
+				validation_reason: "command exited non-zero",
+			},
 		});
+		expect((post.evaluation as { metrics: Record<string, unknown> }).metrics.validation_reason).not.toContain(
+			"passed afterward",
+		);
 		expect(post.execution).toMatchObject({ output: expect.stringMatching(/read-only|EROFS/i) });
 		expect(readFileSync(`${harness.tempDir}/tests/expected_value.py`, "utf8")).toBe("EXPECTED = 5\n");
 	});
@@ -1766,7 +3061,7 @@ describe("AgentSession universal AVO runtime", () => {
 		internals._enforceAvoCompletion = true;
 		const wrong = fauxAssistantMessage("Delivered candidate 3");
 		expect(await internals._getAvoCompletionContinuation({ message: wrong, newMessages: [wrong] })).toMatchObject({
-			customType: "avo_completion_required",
+			customType: "avo_canonical_delivery_required",
 		});
 		expect((await harness.session.handleAvoHostRequest("avo.get")).state).toMatchObject({ status: "active" });
 		const correct = fauxAssistantMessage("Delivered candidate 2");
@@ -2366,6 +3661,12 @@ describe("AgentSession universal AVO runtime", () => {
 			candidate_id: "decision-1",
 			command: "node verify-decision.js",
 		});
+		const longInternals = harness.session as unknown as {
+			_runAvoGenerativeMemoryReflection(...args: unknown[]): Promise<unknown>;
+			_runAvoGenerativeMemoryReconciliation(...args: unknown[]): Promise<unknown>;
+		};
+		const reflection = vi.spyOn(longInternals, "_runAvoGenerativeMemoryReflection");
+		const reconciliation = vi.spyOn(longInternals, "_runAvoGenerativeMemoryReconciliation");
 		const result = await harness.session.handleAvoHostRequest("avo.cycle.complete", {
 			cycle: { candidate_id: "decision-1" },
 		});
@@ -2375,6 +3676,8 @@ describe("AgentSession universal AVO runtime", () => {
 			supervisor: null,
 		});
 		expect((result.delivery as { error: string }).error).toContain("retained-child messaging");
+		expect(reflection).not.toHaveBeenCalled();
+		expect(reconciliation).not.toHaveBeenCalled();
 		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
 			stop_gate: { passed: false },
 		});
@@ -2525,6 +3828,349 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 	});
 
+	it("lets a failed Python evaluation close after a meaningful failed baseline without weakening acceptance", async () => {
+		vi.stubEnv("PYTHONDONTWRITEBYTECODE", "1");
+		vi.stubEnv("PYTEST_ADDOPTS", "-p no:cacheprovider");
+		harness = await createHarness({ persistSession: true });
+		writeFileSync(`${harness.tempDir}/subject.py`, "def value():\n    return 0\n");
+		writeFileSync(
+			`${harness.tempDir}/test_subject.py`,
+			"from subject import value\n\ndef test_subject():\n    assert value() == 1\n",
+		);
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix subject.py value() and prove its Python behavior");
+		const command = "python3 -m pytest test_subject.py -vv";
+		const baseline = await harness.session.handleAvoHostRequest("avo.verification.baseline.run", { command });
+		expect(baseline).toMatchObject({ execution: { status: "fail", meaningful: true } });
+		writeFileSync(`${harness.tempDir}/subject.py`, "def value():\n    return 2\n");
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "failed-python-candidate",
+				kind: "implementation",
+				summary: "Python candidate that fails its immutable test",
+				payload: { value: 2 },
+			},
+		});
+		const post = await harness.session.handleAvoHostRequest("avo.evaluation.run", {
+			candidate_id: "failed-python-candidate",
+			command,
+		});
+		expect(post.evaluation).toMatchObject({
+			evaluatorId: "test",
+			status: "fail",
+			issuedBy: "host",
+			metrics: { meaningful: true, baseline_execution_id: expect.any(String) },
+		});
+
+		const completed = await harness.session.handleAvoHostRequest("avo.cycle.complete", {
+			cycle: { candidate_id: "failed-python-candidate" },
+		});
+		expect(completed).toMatchObject({ cycle: { candidateId: "failed-python-candidate", outcome: "revised" } });
+		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
+			stop_gate: { passed: false },
+		});
+	});
+
+	it("lets an inconclusive Python candidate close when independent semantic proof is unavailable", async () => {
+		harness = await createHarness({ persistSession: true });
+		writeFileSync(`${harness.tempDir}/subject.py`, "def value():\n    return 1\n");
+		writeFileSync(
+			`${harness.tempDir}/test_subject.py`,
+			"from subject import value\n\ndef test_subject():\n    assert value() == 1\n",
+		);
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix subject.py value() and prove its Python behavior");
+		const command = "python3 -m pytest test_subject.py -vv";
+		await harness.session.handleAvoHostRequest("avo.verification.baseline.run", { command });
+		writeFileSync(`${harness.tempDir}/subject.py`, "def value():\n    return 2\n");
+		const added = await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "inconclusive-python-candidate",
+				kind: "implementation",
+				summary: "Python candidate awaiting independent semantics",
+				payload: { value: 2 },
+			},
+		});
+		const candidate = added.candidate as { payloadDigest: string; workspaceDigest: string };
+		const internals = harness.session as unknown as {
+			_avoRuntime: {
+				recordHostEvaluation(input: Record<string, unknown>): unknown;
+			};
+		};
+		internals._avoRuntime.recordHostEvaluation({
+			candidateId: "inconclusive-python-candidate",
+			evaluatorId: "test",
+			status: "inconclusive",
+			authority: "environment",
+			evidenceRefs: ["host:test:inconclusive-python"],
+			metrics: {
+				meaningful: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+				workspace_digest: candidate.workspaceDigest,
+			},
+		});
+
+		const completed = await harness.session.handleAvoHostRequest("avo.cycle.complete", {
+			cycle: { candidate_id: "inconclusive-python-candidate" },
+		});
+		expect(completed).toMatchObject({
+			cycle: { candidateId: "inconclusive-python-candidate", outcome: "revised" },
+		});
+		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
+			stop_gate: { passed: false },
+		});
+	});
+
+	it("turns missing Python semantic proof into revision despite an unrelated authoritative pass", async () => {
+		harness = await createHarness({ persistSession: true });
+		writeFileSync(`${harness.tempDir}/subject.py`, "VALUE = 1\n");
+		writeFileSync(
+			`${harness.tempDir}/baseline.test.cjs`,
+			"const test = require('node:test'); test('baseline', () => {});\n",
+		);
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix subject.py and verify its behavior");
+		await harness.session.handleAvoHostRequest("avo.verification.baseline.run", {
+			command: "node --test baseline.test.cjs",
+		});
+		writeFileSync(`${harness.tempDir}/subject.py`, "VALUE = 2\n");
+		const added = await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "python-unrelated-pass",
+				kind: "implementation",
+				summary: "Python candidate with only a build pass",
+				payload: { value: 2 },
+			},
+		});
+		const candidate = added.candidate as { payloadDigest: string; workspaceDigest: string };
+		const internals = harness.session as unknown as {
+			_avoRuntime: { recordHostEvaluation(input: Record<string, unknown>): unknown };
+		};
+		internals._avoRuntime.recordHostEvaluation({
+			candidateId: "python-unrelated-pass",
+			evaluatorId: "build",
+			status: "pass",
+			authority: "environment",
+			evidenceRefs: ["host:build:unrelated-pass"],
+			metrics: {
+				meaningful: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+				workspace_digest: candidate.workspaceDigest,
+			},
+		});
+		internals._avoRuntime.recordHostEvaluation({
+			candidateId: "python-unrelated-pass",
+			evaluatorId: "test",
+			status: "inconclusive",
+			authority: "environment",
+			evidenceRefs: ["host:test:inconclusive-semantic-check"],
+			metrics: {
+				meaningful: true,
+				baseline_execution_matched: true,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+				workspace_digest: candidate.workspaceDigest,
+			},
+		});
+
+		const completed = await harness.session.handleAvoHostRequest("avo.cycle.complete", {
+			cycle: { candidate_id: "python-unrelated-pass" },
+		});
+		expect(completed).toMatchObject({
+			cycle: { candidateId: "python-unrelated-pass", outcome: "revised" },
+		});
+		const state = (await harness.session.handleAvoHostRequest("avo.get")).state as AvoRunState;
+		expect(state.evaluations).toContainEqual(
+			expect.objectContaining({
+				candidateId: "python-unrelated-pass",
+				evaluatorId: "spec_contract",
+				status: "revise",
+				issuedBy: "host",
+				metrics: expect.objectContaining({ spec_semantic_evidence: false }),
+			}),
+		);
+		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
+			stop_gate: { passed: false },
+		});
+	});
+
+	it("closes over every candidate receipt and forbids skipping an adverse predecessor cycle", async () => {
+		harness = await createHarness({ persistSession: true });
+		writeFileSync(`${harness.tempDir}/parser.py`, "def parse(value):\n    return 1\n");
+		writeFileSync(
+			`${harness.tempDir}/parser.test.cjs`,
+			"const test = require('node:test'); const assert = require('node:assert'); const fs = require('node:fs'); test('parser', () => assert.match(fs.readFileSync('parser.py', 'utf8'), /return [123]/));\n",
+		);
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix parser.py and verify the implementation");
+		await harness.session.handleAvoHostRequest("avo.verification.baseline.run", {
+			command: "node --test parser.test.cjs",
+		});
+		writeFileSync(`${harness.tempDir}/parser.py`, "def parse(value):\n    return 2\n");
+		const added = await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "mixed-python-first",
+				kind: "implementation",
+				summary: "Mixed-evidence Python candidate",
+				payload: { value: 2 },
+			},
+		});
+		const candidate = added.candidate as { payloadDigest: string; workspaceDigest: string };
+		const internals = harness.session as unknown as {
+			_avoRuntime: {
+				recordHostEvaluation(input: Record<string, unknown>): { evaluationId: string };
+			};
+		};
+		const commonMetrics = {
+			meaningful: true,
+			workspace_matches_candidate: true,
+			candidate_payload_digest: candidate.payloadDigest,
+			workspace_digest: candidate.workspaceDigest,
+			baseline_execution_matched: true,
+		};
+		const pass = internals._avoRuntime.recordHostEvaluation({
+			evaluationId: "evaluation-mixed-pass",
+			candidateId: "mixed-python-first",
+			evaluatorId: "test",
+			status: "pass",
+			authority: "environment",
+			evidenceRefs: ["host:test:mixed-pass"],
+			metrics: commonMetrics,
+		});
+		const fail = internals._avoRuntime.recordHostEvaluation({
+			evaluationId: "evaluation-mixed-fail",
+			candidateId: "mixed-python-first",
+			evaluatorId: "test",
+			status: "fail",
+			authority: "environment",
+			evidenceRefs: ["host:test:mixed-fail"],
+			metrics: commonMetrics,
+		});
+
+		await expect(
+			harness.session.handleAvoHostRequest("avo.candidate.add", {
+				candidate: {
+					candidate_id: "premature-successor",
+					parent_candidate_id: "mixed-python-first",
+					kind: "implementation",
+					summary: "Premature successor",
+					payload: { value: 3 },
+				},
+			}),
+		).rejects.toThrow(/must complete its nonaccepted cycle before a successor/);
+
+		const completed = await harness.session.handleAvoHostRequest("avo.cycle.complete", {
+			cycle: {
+				candidate_id: "mixed-python-first",
+				evaluation_ids: [pass.evaluationId],
+			},
+		});
+		expect(completed).toMatchObject({
+			cycle: {
+				candidateId: "mixed-python-first",
+				outcome: "rejected",
+				evaluationIds: expect.arrayContaining([pass.evaluationId, fail.evaluationId]),
+			},
+		});
+		const state = (await harness.session.handleAvoHostRequest("avo.get")).state as AvoRunState;
+		const cycle = state.cycles.find((item) => item.candidateId === "mixed-python-first")!;
+		const episode = state.memories.find((memory) => memory.memoryId === `episode:${cycle.cycleId}`)!;
+		expect(episode.sourceIds).toEqual(expect.arrayContaining([pass.evaluationId, fail.evaluationId]));
+		expect(episode.references).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ kind: "evaluation", key: pass.evaluationId }),
+				expect.objectContaining({ kind: "evaluation", key: fail.evaluationId }),
+			]),
+		);
+		expect(episode.content).toContain("test=pass");
+		expect(episode.content).toContain("test=fail");
+
+		writeFileSync(`${harness.tempDir}/parser.py`, "def parse(value):\n    return 3\n");
+		await expect(
+			harness.session.handleAvoHostRequest("avo.candidate.add", {
+				candidate: {
+					candidate_id: "material-successor",
+					parent_candidate_id: "mixed-python-first",
+					kind: "implementation",
+					summary: "Material successor after closed failure",
+					payload: { value: 3 },
+				},
+			}),
+		).resolves.toMatchObject({ candidate: { parentCandidateId: "mixed-python-first" } });
+	});
+
+	it.each([
+		{ label: "timed out", issuedByHost: true, status: "inconclusive", metric: "verification_broker_timed_out" },
+		{ label: "cancelled", issuedByHost: true, status: "inconclusive", metric: "cancelled" },
+		{ label: "truncated", issuedByHost: true, status: "inconclusive", metric: "truncated" },
+		{ label: "model-only fail", issuedByHost: false, status: "fail", metric: "reviewed" },
+		{ label: "model-only revise", issuedByHost: false, status: "revise", metric: "reviewed" },
+	])("closes a $label Python evidence path without treating it as acceptance", async (fixture) => {
+		harness = await createHarness({ persistSession: true });
+		writeFileSync(`${harness.tempDir}/edge.py`, "VALUE = 1\n");
+		writeFileSync(
+			`${harness.tempDir}/edge.test.cjs`,
+			"const test = require('node:test'); const assert = require('node:assert'); const fs = require('node:fs'); test('edge', () => assert.match(fs.readFileSync('edge.py', 'utf8'), /VALUE = [12]/));\n",
+		);
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt("Fix edge.py and verify it");
+		await harness.session.handleAvoHostRequest("avo.verification.baseline.run", {
+			command: "node --test edge.test.cjs",
+		});
+		writeFileSync(`${harness.tempDir}/edge.py`, "VALUE = 2\n");
+		const candidateId = `edge-${fixture.label.replaceAll(" ", "-")}`;
+		const added = await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: candidateId,
+				kind: "implementation",
+				summary: `${fixture.label} Python candidate`,
+				payload: { value: 2 },
+			},
+		});
+		const candidate = added.candidate as { payloadDigest: string; workspaceDigest: string };
+		const evaluation = {
+			candidateId,
+			evaluatorId: "test",
+			status: fixture.status,
+			authority: fixture.issuedByHost ? "environment" : "model_opinion",
+			evidenceRefs: fixture.issuedByHost ? [`host:test:${fixture.label}`] : [],
+			metrics: {
+				meaningful: false,
+				workspace_matches_candidate: true,
+				candidate_payload_digest: candidate.payloadDigest,
+				workspace_digest: candidate.workspaceDigest,
+				[fixture.metric]: true,
+			},
+		};
+		if (fixture.issuedByHost) {
+			const internals = harness.session as unknown as {
+				_avoRuntime: { recordHostEvaluation(input: Record<string, unknown>): unknown };
+			};
+			internals._avoRuntime.recordHostEvaluation(evaluation);
+		} else {
+			await harness.session.handleAvoHostRequest("avo.evaluation.record", {
+				evaluation: {
+					candidate_id: candidateId,
+					evaluator_id: "test",
+					status: fixture.status,
+					authority: "model_opinion",
+					evidence_refs: [],
+					metrics: evaluation.metrics,
+				},
+			});
+		}
+
+		const completed = await harness.session.handleAvoHostRequest("avo.cycle.complete", {
+			cycle: { candidate_id: candidateId },
+		});
+		expect((completed.cycle as { outcome: string }).outcome).not.toBe("accepted");
+		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
+			stop_gate: { passed: false },
+		});
+	});
+
 	it("rejects a no-op implementation even when an existing file passes a build check", async () => {
 		harness = await createHarness({ persistSession: true });
 		writeFileSync(`${harness.tempDir}/parser.cjs`, "module.exports = 1;\n");
@@ -2642,7 +4288,7 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 		harness.appendResponses([
 			fauxAssistantMessage(
-				'AVO_CLAIM_VERDICT_JSON:president-answer:president\n{"relation":"supports","reason":"The quote exactly states the complete claim."}',
+				'AVO_CLAIM_VERDICT_JSON:president-answer:president\n{"relation":"supports","reason":"The quote exactly states the complete claim.","objective_relation":"addresses","objective_reason":"The candidate claim directly answers who is president of France."}',
 			),
 		]);
 		const receipt = await harness.session.handleAvoHostRequest("avo.evaluation.url", {
@@ -2664,6 +4310,71 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
 			stop_gate: { passed: true },
+		});
+	});
+
+	it("rejects a sourced but objective-unrelated factual claim and cannot use it to cover the host objective", async () => {
+		harness = await createHarness({ persistSession: true });
+		Object.defineProperty(harness.session, "_fetchAvoExternalSource", {
+			value: async () => ({
+				url: "https://official.example/kaggle-environments",
+				text: "Kaggle Environments was created to evaluate episodes.",
+				bodyDigest: "c".repeat(64),
+				contentType: "text/html",
+				truncated: false,
+			}),
+		});
+		harness.setResponses([fauxAssistantMessage("searching")]);
+		const objective = "Who is the president of France?";
+		await harness.session.prompt(objective);
+		const added = (await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "unrelated-kaggle-answer",
+				kind: "answer",
+				summary: "Unrelated Kaggle fact",
+				payload: "The president of France is Example Person. Kaggle Environments was created to evaluate episodes.",
+				claims: [
+					{
+						claim_id: "president",
+						claim_text: "The president of France is Example Person.",
+					},
+					{
+						claim_id: "kaggle-environments",
+						claim_text: "Kaggle Environments was created to evaluate episodes.",
+					},
+				],
+			},
+		})) as { candidate: { payloadDigest: string } };
+		harness.appendResponses([
+			fauxAssistantMessage(
+				'AVO_CLAIM_VERDICT_JSON:unrelated-kaggle-answer:kaggle-environments\n{"relation":"supports","reason":"The quote exactly states the claim.","objective_relation":"unrelated","objective_reason":"This exact evidenced Kaggle claim does not answer who is president of France; the separate unevidenced president claim cannot make it relevant."}',
+			),
+		]);
+		const receipt = await harness.session.handleAvoHostRequest("avo.evaluation.url", {
+			candidate_id: "unrelated-kaggle-answer",
+			claim_id: "kaggle-environments",
+			url: "https://official.example/kaggle-environments",
+			exact_quote: "Kaggle Environments was created to evaluate episodes.",
+		});
+		expect(receipt).toMatchObject({
+			evaluation: {
+				status: "revise",
+				metrics: {
+					meaningful: false,
+					semantic_relation: "supports",
+					objective_relation: "unrelated",
+					objective_digest: createHash("sha256").update(objective).digest("hex"),
+					candidate_payload_digest: added.candidate.payloadDigest,
+				},
+			},
+		});
+		const state = (await harness.session.handleAvoHostRequest("avo.get")) as { state: AvoRunState };
+		expect(state.state.obligationCoverage).toEqual([]);
+		await harness.session.handleAvoHostRequest("avo.cycle.complete", {
+			cycle: { candidate_id: "unrelated-kaggle-answer" },
+		});
+		expect(await harness.session.handleAvoHostRequest("avo.stop_gate")).toMatchObject({
+			stop_gate: { passed: false },
 		});
 	});
 
@@ -2692,7 +4403,7 @@ describe("AgentSession universal AVO runtime", () => {
 		});
 		harness.appendResponses([
 			fauxAssistantMessage(
-				'AVO_CLAIM_VERDICT_JSON:cropped-denial:revenue\n{"relation":"supports","reason":"The cropped quote states the claim."}',
+				'AVO_CLAIM_VERDICT_JSON:cropped-denial:revenue\n{"relation":"supports","reason":"The cropped quote states the claim.","objective_relation":"addresses","objective_reason":"The revenue claim addresses the revenue objective."}',
 			),
 		]);
 
@@ -2815,7 +4526,7 @@ describe("AgentSession universal AVO runtime", () => {
 		).rejects.toThrow(/not found in the host-observed tool result/);
 		harness.appendResponses([
 			fauxAssistantMessage(
-				'AVO_CLAIM_VERDICT_JSON:weather-answer:weather-temperature\n{"relation":"supports","reason":"The quote directly states the complete temperature claim."}',
+				'AVO_CLAIM_VERDICT_JSON:weather-answer:weather-temperature\n{"relation":"supports","reason":"The quote directly states the complete temperature claim.","objective_relation":"addresses","objective_reason":"The temperature claim directly answers the weather objective."}',
 			),
 		]);
 		const receipt = await harness.session.handleAvoHostRequest("avo.evaluation.tool_result", {

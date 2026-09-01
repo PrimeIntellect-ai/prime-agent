@@ -8,6 +8,7 @@ import {
 	isAvoExperimentSelectionReservationCurrent,
 } from "./experiment.js";
 import {
+	avoExternalEvaluationAddressesObjective,
 	deriveAvoCandidateImpactChecks,
 	deriveAvoCriticalAssumptionChecks,
 	deriveAvoObligationCoverage,
@@ -67,6 +68,37 @@ const CODING_EVALUATION_CONTRACTS: Record<(typeof CODING_AVO_CANDIDATE_KINDS)[nu
 	diagnosis: ["test", "runtime"],
 	artifact: ["test", "build", "lint", "benchmark", "runtime"],
 };
+
+export function isAvoImmutableSemanticTestReceipt(
+	receipt: AvoEvaluationReceipt,
+	candidate: AvoCandidate,
+	state: AvoRunState,
+): boolean {
+	const baselineExecutionId = receipt.metrics.baseline_execution_id;
+	const baseline = state.verificationBaseline;
+	const execution =
+		typeof baselineExecutionId === "string"
+			? baseline?.executions.find((item) => item.executionId === baselineExecutionId)
+			: undefined;
+	if (!baseline || !execution || !candidate.workspaceDigest) return false;
+	return (
+		isAuthoritativeAvoEvaluation(receipt) &&
+		receipt.evaluatorId === "test" &&
+		receipt.status === "pass" &&
+		receipt.metrics.meaningful === true &&
+		receipt.metrics.baseline_execution_matched === true &&
+		receipt.metrics.workspace_matches_candidate === true &&
+		receipt.metrics.post_workspace_matches_candidate === true &&
+		receipt.metrics.candidate_payload_digest === candidate.payloadDigest &&
+		receipt.metrics.workspace_digest === candidate.workspaceDigest &&
+		receipt.metrics.post_workspace_digest === candidate.workspaceDigest &&
+		receipt.metrics.command_digest === execution.commandDigest &&
+		receipt.metrics.baseline_contract_digest === baseline.contractDigest &&
+		receipt.metrics.baseline_verification_harness_digest === execution.verificationHarness.digest &&
+		receipt.metrics.observed_verification_harness_digest === execution.verificationHarness.digest &&
+		receipt.metrics.python_test_semantic_authority === true
+	);
+}
 
 function genericProgress(state: AvoRunState): AvoProgressSignals {
 	const outcomes = state.cycles.map((cycle) => cycle.outcome);
@@ -905,14 +937,8 @@ export class GeneralAvoAdapter extends BaseAdapter {
 			}
 			const supportedClaimIds = new Set(
 				receipts.flatMap((receipt) =>
-					receipt.issuedBy === "host" &&
-					receipt.authority === "external" &&
-					receipt.evaluatorId === "external_claim" &&
-					receipt.status === "pass" &&
-					receipt.metrics.semantic_relation === "supports" &&
-					receipt.metrics.independent_relation === "supports" &&
-					receipt.metrics.semantic_verifier === "host_bound_exact_claim_independent_rlm_v2" &&
-					receipt.metrics.candidate_payload_digest === candidate.payloadDigest &&
+					avoExternalEvaluationAddressesObjective(receipt, state.objective, candidate) &&
+					receipt.metrics.semantic_verifier === "host_bound_exact_claim_independent_rlm_v3" &&
 					typeof receipt.metrics.claim_id === "string"
 						? [receipt.metrics.claim_id]
 						: [],
@@ -1119,6 +1145,7 @@ export class CodingAvoAdapter extends BaseAdapter {
 			(receipt) =>
 				isAuthoritativeAvoEvaluation(receipt) &&
 				allowedEvaluators?.includes(receipt.evaluatorId) === true &&
+				receipt.status === "pass" &&
 				receipt.metrics.meaningful === true &&
 				receipt.metrics.workspace_matches_candidate === true &&
 				receipt.metrics.candidate_payload_digest === candidate.payloadDigest,
@@ -1167,8 +1194,8 @@ export class CodingAvoAdapter extends BaseAdapter {
 			mutationKind &&
 			workspaceChanged &&
 			candidate.workspaceChangedPaths?.some((path) => path.endsWith(".py")) === true;
-		const immutableSemanticTest = executable.some(
-			(receipt) => receipt.evaluatorId === "test" && receipt.metrics.baseline_execution_matched === true,
+		const immutableSemanticTest = receipts.some((receipt) =>
+			isAvoImmutableSemanticTestReceipt(receipt, candidate, state),
 		);
 		const exactSpecProof = receipts.some(
 			(receipt) =>

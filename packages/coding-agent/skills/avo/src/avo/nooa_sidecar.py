@@ -176,18 +176,27 @@ def _record(value: dict[str, Any]) -> Memory:
             for source in value.get("sourceIds", [])
             if str(source).startswith(("memory-", "episode:"))
         ]
+    sync_version = value.get("updatedAt")
+    sync_version_tag = (
+        f"avo-sync-version:{sync_version}"
+        if isinstance(sync_version, str) and sync_version
+        else None
+    )
+    tags = [
+        *[str(tag) for tag in value.get("tags", [])],
+        f"namespace:{value.get('namespace', 'general')}",
+        f"scope:{scope}",
+        f"verification:{verification}",
+    ]
+    if sync_version_tag is not None:
+        tags.append(sync_version_tag)
     kwargs: dict[str, Any] = {
         "id": str(value["memoryId"]),
         "type": memory_type,
         "title": str(value["title"]),
         "content": str(value["content"]),
         "importance": float(value["importance"]),
-        "tags": [
-            *[str(tag) for tag in value.get("tags", [])],
-            f"namespace:{value.get('namespace', 'general')}",
-            f"scope:{scope}",
-            f"verification:{verification}",
-        ],
+        "tags": tags,
         "source_task_ref": ",".join(str(source) for source in value.get("sourceIds", [])) or None,
         "related_files": [str(reference) for reference in value.get("currentStateReferences", [])],
         "owner": str(value.get("owner", OWNER)),
@@ -199,6 +208,14 @@ def _record(value: dict[str, Any]) -> Memory:
         kwargs["created_at"] = parsed_created_at
     return Memory(
         **kwargs,
+    )
+
+
+def _sync_version(memory: Memory) -> str | None:
+    prefix = "avo-sync-version:"
+    return next(
+        (tag[len(prefix) :] for tag in memory.tags if tag.startswith(prefix)),
+        None,
     )
 
 
@@ -230,10 +247,25 @@ def _components(path: Path, payload: dict[str, Any]) -> tuple[MemoryStore, Any, 
     return store, embedder, config
 
 
-def _upsert(store: MemoryStore, embedder: Any, value: dict[str, Any]) -> None:
+def _upsert(
+    store: MemoryStore,
+    embedder: Any,
+    value: dict[str, Any],
+    *,
+    force_active: bool = False,
+) -> None:
     record = _record(value)
     existing = store.get(record.id)
     if existing is not None:
+        incoming_version = _sync_version(record)
+        existing_version = _sync_version(existing)
+        if (
+            not force_active
+            and incoming_version is not None
+            and existing_version is not None
+            and incoming_version < existing_version
+        ):
+            return
         record.created_at = existing.created_at
         record.last_accessed_at = existing.last_accessed_at
         record.access_log = existing.access_log
@@ -251,8 +283,17 @@ def _upsert(store: MemoryStore, embedder: Any, value: dict[str, Any]) -> None:
         # canonical host importance assigned after the first mirror.
         record.importance = max(existing.importance, record.importance)
         record.edges = existing.edges
-        if str(value.get("verificationState", "proposed")) != "verified":
+        if (
+            not force_active
+            and incoming_version is not None
+            and incoming_version == existing_version
+            and existing.archived
+        ):
+            record.archived = True
+        if not force_active and str(value.get("verificationState", "proposed")) != "verified":
             record.archived = record.archived or existing.archived
+    if force_active:
+        record.archived = False
     embedding_text = "\n".join([record.title or "", record.content, " ".join(record.tags)])
     store.add(record, embedder.embed(embedding_text))
 
@@ -266,6 +307,11 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
         stores = payload.get("stores")
         if not isinstance(stores, list) or not stores:
             raise ValueError(f"{command} requires a non-empty stores array")
+        protected_memory_ids = {
+            memory_id
+            for memory_id in payload.get("protected_memory_ids", [])
+            if isinstance(memory_id, str)
+        }
         results: list[dict[str, Any]] = []
         memory_ids: list[str] = []
         ranked_memories: dict[str, tuple[int, float, int]] = {}
@@ -276,7 +322,11 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(item, dict) or not isinstance(item.get("path"), str):
                 continue
             item_path = Path(item["path"])
-            sync = run("sync", item_path, item)
+            sync = run(
+                "sync",
+                item_path,
+                {**item, "protected_memory_ids": list(protected_memory_ids)},
+            )
             if command == "sync_spontaneous":
                 result = run(
                     "spontaneous",
@@ -309,10 +359,18 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 result = run(
                     "reflect",
                     item_path,
-                    {**item, "trigger": payload.get("trigger", "manual")},
+                    {
+                        **item,
+                        "trigger": payload.get("trigger", "manual"),
+                        "protected_memory_ids": list(protected_memory_ids),
+                    },
                 )
                 for memory_id in result.get("archived_memory_ids", []):
-                    if isinstance(memory_id, str) and memory_id not in archived_ids:
+                    if (
+                        isinstance(memory_id, str)
+                        and memory_id not in protected_memory_ids
+                        and memory_id not in archived_ids
+                    ):
                         archived_ids.append(memory_id)
                 report = result.get("report")
                 if isinstance(report, dict):
@@ -357,6 +415,7 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 "ok": True,
                 "report": aggregate_report,
                 "archived_memory_ids": archived_ids,
+                "protected_memory_ids": sorted(protected_memory_ids),
                 "stores": results,
             }
         return {
@@ -380,12 +439,23 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(memories, list):
                 raise ValueError("sync requires a memories array")
             valid = [memory for memory in memories if isinstance(memory, dict)]
-            canonical_ids = {str(memory["memoryId"]) for memory in valid}
-            for existing in store.all_memories(include_archived=True, owner=None):
-                if existing.id not in canonical_ids:
-                    store.delete(existing.id)
+            protected_memory_ids = {
+                memory_id
+                for memory_id in payload.get("protected_memory_ids", [])
+                if isinstance(memory_id, str)
+            }
+            # Sync is a versioned merge. Absence from one caller's snapshot is
+            # never a deletion signal because project/global databases are shared
+            # by concurrent sessions. Host invalidation records are the explicit
+            # tombstones and are retained by _upsert's version check.
             for memory in valid:
-                _upsert(store, embedder, memory)
+                memory_id = str(memory.get("memoryId", ""))
+                _upsert(
+                    store,
+                    embedder,
+                    memory,
+                    force_active=memory_id in protected_memory_ids,
+                )
             return {"ok": True, "mirrored": len(valid)}
         if command == "recall":
             query = payload.get("query")
@@ -506,6 +576,11 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 clusters.append({"memory_ids": cluster})
             return {"ok": True, "clusters": clusters}
         if command == "reflect":
+            protected_memory_ids = {
+                memory_id
+                for memory_id in payload.get("protected_memory_ids", [])
+                if isinstance(memory_id, str)
+            }
             previously_archived = {
                 memory.id
                 for memory in store.all_memories(include_archived=True, owner=None)
@@ -520,11 +595,22 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
             )
             report = engine.consolidate()
             report_data = report.model_dump(exclude_none=True)
+            canonical_memories = {
+                str(memory.get("memoryId")): memory
+                for memory in payload.get("memories", [])
+                if isinstance(memory, dict) and isinstance(memory.get("memoryId"), str)
+            }
+            for memory_id in protected_memory_ids:
+                canonical = canonical_memories.get(memory_id)
+                if canonical is not None:
+                    _upsert(store, embedder, canonical, force_active=True)
             store.log_maintenance("reflect", {"trigger": payload.get("trigger", "manual"), **report_data})
             archived = [
                 memory.id
                 for memory in store.all_memories(include_archived=True, owner=None)
-                if memory.archived and memory.id not in previously_archived
+                if memory.archived
+                and memory.id not in previously_archived
+                and memory.id not in protected_memory_ids
             ]
             return {
                 "ok": True,

@@ -141,6 +141,7 @@ import {
 	AVO_PYTHON_PROBE_MAX_CASES,
 	AVO_SKILL_NAME,
 	AVO_VERIFICATION_BROKER_PYTHON_AUTHORITY_ENV,
+	type AvoCanonicalDeliveryBinding,
 	type AvoEvaluationReceipt,
 	type AvoHorizonSelection,
 	type AvoIndependentClaimVerdict,
@@ -198,6 +199,7 @@ import {
 	getAvoPythonProbeExecutorAvailability,
 	inspectAvoPythonPublicCallables,
 	isAvoFeatureAblated,
+	isAvoImmutableSemanticTestReceipt,
 	parseAvoAssumptionResolutionInput,
 	parseAvoCandidateInput,
 	parseAvoClaimVerifierMessage,
@@ -217,6 +219,7 @@ import {
 	parseAvoTrialInput,
 	parseAvoTrialMetricsOutput,
 	parseAvoTrialRunInput,
+	requiredAvoPremortemAssumptionCount,
 	requiresAvoAdversarialReview,
 } from "./avo/index.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
@@ -1135,6 +1138,64 @@ function readAvoAssistantDeliveryText(message: AssistantMessage): string {
 		.join("");
 }
 
+function parseAvoCanonicalDeliveryBinding(value: unknown): AvoCanonicalDeliveryBinding | undefined {
+	if (!isObjectRecord(value)) return undefined;
+	const { runId, candidateId, cycleId, deliveryDigest, stateVersion } = value;
+	if (
+		typeof runId !== "string" ||
+		!runId ||
+		typeof candidateId !== "string" ||
+		!candidateId ||
+		typeof cycleId !== "string" ||
+		!cycleId ||
+		typeof deliveryDigest !== "string" ||
+		!/^[a-f0-9]{64}$/.test(deliveryDigest) ||
+		typeof stateVersion !== "number" ||
+		!Number.isSafeInteger(stateVersion) ||
+		stateVersion < 0
+	) {
+		return undefined;
+	}
+	return { runId, candidateId, cycleId, deliveryDigest, stateVersion };
+}
+
+function matchesAvoCanonicalDeliveryBinding(
+	value: unknown,
+	expected: AvoCanonicalDeliveryBinding,
+): value is AvoCanonicalDeliveryBinding {
+	const actual = parseAvoCanonicalDeliveryBinding(value);
+	return (
+		actual !== undefined &&
+		actual.runId === expected.runId &&
+		actual.candidateId === expected.candidateId &&
+		actual.cycleId === expected.cycleId &&
+		actual.deliveryDigest === expected.deliveryDigest &&
+		actual.stateVersion === expected.stateVersion
+	);
+}
+
+function captureAvoCanonicalDeliveryGeneration(state: AvoRunState): AvoCanonicalDeliveryBinding | undefined {
+	if (state.status !== "active" || (state.delivery.phase !== "accepted" && state.delivery.phase !== "pending")) {
+		return undefined;
+	}
+	return parseAvoCanonicalDeliveryBinding({
+		...state.delivery,
+		stateVersion: state.delivery.phase === "pending" ? state.delivery.stateVersion : state.stateVersion,
+	});
+}
+
+function matchesAvoCanonicalDeliveryGeneration(
+	state: AvoRunState,
+	expected: AvoCanonicalDeliveryBinding,
+	expectedPhase: "accepted" | "pending",
+): boolean {
+	return (
+		state.status === "active" &&
+		state.delivery.phase === expectedPhase &&
+		matchesAvoCanonicalDeliveryBinding(captureAvoCanonicalDeliveryGeneration(state), expected)
+	);
+}
+
 export function extractMarkedPersistedAgentMessage(details: unknown, marker: string): string | undefined {
 	if (!isObjectRecord(details) || details.status !== "ok" || !Array.isArray(details.sentAgentMessages)) {
 		return undefined;
@@ -1330,7 +1391,19 @@ export class AgentSession {
 	private _avoToolInterventionQueued = false;
 	private _avoToolInterventionCount = 0;
 	private _avoToolLastInterventionBatch = 0;
+	private _avoCanonicalDeliverySerializer: Promise<void> = Promise.resolve();
 	private _avoCanonicalDeliveryQueuedRunId?: string;
+	private _avoCanonicalDeliveryQueuedBinding?: AvoCanonicalDeliveryBinding;
+	private _avoCanonicalDeliveryDirectBinding?: AvoCanonicalDeliveryBinding;
+	private _avoCanonicalDeliveryAttemptBinding?: AvoCanonicalDeliveryBinding;
+	private readonly _avoCanonicalDeliveryClosedRunIds = new Set<string>();
+	/**
+	 * A delivery failure is terminal for one AVO run. Keep this session-local
+	 * latch in addition to the persisted store phase so a malformed canonical
+	 * response or invariant failure cannot re-enter the completion repair loop
+	 * while its durable failure record is being surfaced.
+	 */
+	private readonly _avoCanonicalDeliveryFailedRunIds = new Set<string>();
 	private _avoSupervisorBoundToRuntime = false;
 	private _autoresearchStore?: AutoresearchStore;
 	private _autoresearchSupervisorBoundToRuntime = false;
@@ -1523,6 +1596,33 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		if (this._pendingAvoCanonicalDelivery()) {
+			// Close the crash window between persisting DELIVERY_PENDING and
+			// enqueueing its sole admissible provider request. Recovery must not
+			// depend on a new user prompt arriving after process restart.
+			if (!this._completePersistedAvoCanonicalDeliveryIfPresent()) {
+				const providerFailure = this._persistedAvoCanonicalDeliveryProviderFailure();
+				if (
+					!providerFailure ||
+					!this._completeAvoCanonicalDeliveryFromHostFallback(providerFailure.message, providerFailure.binding)
+				) {
+					this._ensurePersistedAvoCanonicalDeliveryActionLocked();
+					setTimeout(() => {
+						if (!this._disposed && !this._disposing && this._pendingAvoCanonicalDelivery()) {
+							this._scheduleSessionInputPump();
+						}
+					}, 0);
+				}
+			}
+		} else if (this._isAvoCanonicalDeliveryTerminalFailure()) {
+			// A persisted terminal failure owns the old run just as strictly as
+			// DELIVERY_PENDING. Drop any restored internal continuation before the
+			// input pump can re-enter the provider or a tool on process restart.
+			this._closeAvoCanonicalDeliveryBackgroundWork();
+			this._clearQueuedAutonomousContinuations();
+			this._clearQueuedGoalContexts();
+			this._fenceAvoCanonicalDeliveryInputs();
+		}
 	}
 
 	/** Refreshes MCP provider registrations without rebuilding the session runtime. */
@@ -1650,6 +1750,22 @@ export class AgentSession {
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
 			await this._agentEventQueue;
+			const pendingDelivery = this._pendingAvoCanonicalDelivery();
+			if (pendingDelivery) {
+				return {
+					block: true,
+					reason: `AVO_CANONICAL_DELIVERY_PENDING run_id=${pendingDelivery.runId} candidate_id=${pendingDelivery.candidateId ?? "unknown"}: tool execution is closed; return only the exact canonical delivery.`,
+				};
+			}
+			if (this._isAvoCanonicalDeliveryTerminalFailure()) {
+				const failedState = this._avoRuntime?.getState();
+				return {
+					block: true,
+					reason: `AVO_CANONICAL_DELIVERY_FAILED run_id=${failedState?.runId ?? "unknown"}: tool execution is closed for the terminal run; submit a new user task to start fresh.`,
+				};
+			}
+			const contractViolationReason = this._avoPythonContractViolationReason(toolCall.name, args);
+			if (contractViolationReason) return { block: true, reason: contractViolationReason };
 			const probationReason = this._avoToolProbationReason(toolCall.name, args);
 			if (probationReason) return { block: true, reason: probationReason };
 
@@ -2420,11 +2536,62 @@ export class AgentSession {
 		);
 	}
 
+	private _hasReachedAutonomousLimit(): boolean {
+		return this._autonomousState.enabled && autonomousLimitReason(this._autonomousState) !== undefined;
+	}
+
 	private _shouldStopBeforeTurn(): boolean {
 		return this._steeringStopPending;
 	}
 
 	private async _shouldStopAfterTurn(context: ShouldStopAfterTurnContext): Promise<boolean> {
+		// message_end accounting is intentionally serialized off the agent event
+		// callback. Wait for it here so a tool-use response cannot start another
+		// provider turn before its autonomous usage has been charged. The current
+		// tool batch has already finished at this boundary, so host evidence is
+		// never interrupted or discarded.
+		await this._agentEventQueue;
+		const avoBoundaryState = this._avoRuntime?.getState();
+		if (
+			this._enforceAvoCompletion &&
+			avoBoundaryState?.status === "active" &&
+			(avoBoundaryState.delivery.phase === "accepted" || avoBoundaryState.delivery.phase === "pending")
+		) {
+			const completed = await this._completeAvoCanonicalDeliveryIfMatching(context);
+			if (completed) return true;
+			const pendingDelivery = this._pendingAvoCanonicalDelivery();
+			if (pendingDelivery) {
+				const pendingBinding = parseAvoCanonicalDeliveryBinding(pendingDelivery);
+				if (
+					pendingBinding &&
+					matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryAttemptBinding, pendingBinding) &&
+					context.message.stopReason === "toolUse"
+				) {
+					this._recordAvoCanonicalDeliveryFailure(
+						new Error("the assistant attempted tool use instead of returning the exact canonical delivery"),
+						pendingBinding,
+					);
+					return true;
+				}
+				await this._ensurePersistedAvoCanonicalDeliveryAction();
+				return true;
+			}
+			if (this._isAvoCanonicalDeliveryTerminalFailure()) return true;
+		}
+		if (this._hasReachedAutonomousLimit()) {
+			// Configured gates are host evidence too. Preserve the existing
+			// gate-before-limit rule so changes made by the final tool batch can
+			// still be observed even though no further model turn is admissible.
+			await refreshAutonomousQualityGates(this._autonomousState, {
+				cwd: this._cwd,
+				signal: this.agent.signal,
+			});
+			// A final assistant response can itself be the exact canonical AVO
+			// delivery, including when its just-finished tool batch produced the
+			// evidence that closed the gate. Credit that terminal evidence before
+			// enforcing the hard provider-turn boundary.
+			return true;
+		}
 		if (
 			this._stopGoalContinuationForTerminalMessage(context.message) &&
 			(!this._enforceAvoCompletion || this._avoRuntime?.getState().status !== "active")
@@ -2519,7 +2686,7 @@ export class AgentSession {
 	 * in-flight guards and counter resets.
 	 */
 	private async _runSerializedRefineCheckpoint(): Promise<void> {
-		if (this._disposed || this._disposing) {
+		if (this._disposed || this._disposing || this._pendingAvoCanonicalDelivery()) {
 			return;
 		}
 
@@ -2530,7 +2697,7 @@ export class AgentSession {
 		//    the pending request at message_end.
 		const branchVersion = this._autoRefineBranchVersion;
 		const bgConsumption = await this._consumeSerializedBackgroundPlan(async (bgResult) => {
-			if (this._disposed || this._disposing) {
+			if (this._disposed || this._disposing || this._pendingAvoCanonicalDelivery()) {
 				return true;
 			}
 
@@ -2541,7 +2708,7 @@ export class AgentSession {
 						this._assistantTurnsSinceAutoRefine = 0;
 						return true;
 					}
-				} else {
+				} else if (!this._pendingAvoCanonicalDelivery()) {
 					// Apply the EXACT background plan directly via _applyRefine
 					// (no second _planRefine call).
 					try {
@@ -2602,13 +2769,14 @@ export class AgentSession {
 			await this._runSerializedRefineCheckpointAfterBackground(branchVersion);
 			return true;
 		});
-		if (this._disposed || this._disposing || bgConsumption !== "none") {
+		if (this._disposed || this._disposing || this._pendingAvoCanonicalDelivery() || bgConsumption !== "none") {
 			return;
 		}
 		await this._runSerializedRefineCheckpointAfterBackground(branchVersion);
 	}
 
 	private async _runSerializedRefineCheckpointAfterBackground(branchVersion: number): Promise<void> {
+		if (this._pendingAvoCanonicalDelivery()) return;
 		// No background result, or a refine.run arrived while the background result was
 		// in flight. Fall through so an explicit pending request is serviced at this boundary.
 
@@ -2759,6 +2927,7 @@ export class AgentSession {
 	private async _applySerializedPlan(
 		bgResult: Extract<SerializedBackgroundPlanResult, { status: "plan" }>,
 	): Promise<void> {
+		if (this._pendingAvoCanonicalDelivery()) return;
 		let resolveApplySettled: () => void = () => {};
 		const applySettled = new Promise<void>((resolve) => {
 			resolveApplySettled = resolve;
@@ -2782,7 +2951,13 @@ export class AgentSession {
 	 * execution only — never another model request.
 	 */
 	private _maybeStartSerializedBackgroundPlan(): void {
-		if (!this._serializedRefine || this._disposed || this._disposing) {
+		if (
+			!this._serializedRefine ||
+			this._disposed ||
+			this._disposing ||
+			this._hasReachedAutonomousLimit() ||
+			this._pendingAvoCanonicalDelivery()
+		) {
 			return;
 		}
 		// Don't start if a plan is already in flight.
@@ -3515,6 +3690,9 @@ export class AgentSession {
 		claimId: string,
 		claimText: string,
 		exactQuote: string,
+		objective: string,
+		candidateClaims: readonly string[],
+		candidatePayloadDigest: string,
 	): Promise<{
 		verdict: AvoIndependentClaimVerdict;
 		verifierChildId?: string;
@@ -3526,7 +3704,14 @@ export class AgentSession {
 		try {
 			const suffix = randomUUID().replaceAll("-", "").slice(0, 10);
 			const handle = await this._startRlmChildRun(
-				buildAvoClaimVerifierPrompt(marker, claimText, exactQuote),
+				buildAvoClaimVerifierPrompt(
+					marker,
+					claimText,
+					exactQuote,
+					objective,
+					candidateClaims,
+					candidatePayloadDigest,
+				),
 				{ name: `avo-claim-verifier-${suffix}` },
 				undefined,
 				{ allowedToolNames: [] },
@@ -3548,7 +3733,12 @@ export class AgentSession {
 		} catch (error) {
 			const reason = error instanceof Error ? error.message : String(error);
 			return {
-				verdict: { relation: "insufficient", reason: `independent verifier unavailable: ${reason}` },
+				verdict: {
+					relation: "insufficient",
+					reason: `independent verifier unavailable: ${reason}`,
+					objectiveRelation: "insufficient",
+					objectiveReason: `independent verifier unavailable: ${reason}`,
+				},
 				error: reason,
 			};
 		}
@@ -3584,7 +3774,19 @@ export class AgentSession {
 	): Promise<Record<string, unknown>> {
 		if (isAvoFeatureAblated("nooa")) return { ok: false, reason: "NOOA disabled by benchmark ablation" };
 		const runtime = this._requireAvoRuntime();
+		const deliveryClosed = () => {
+			const latest = runtime.getState();
+			return (
+				latest.status !== "active" ||
+				latest.delivery.phase === "pending" ||
+				latest.delivery.phase === "delivered" ||
+				latest.delivery.phase === "failed"
+			);
+		};
 		const state = runtime.getState();
+		if (deliveryClosed()) {
+			return { ok: false, skipped: "canonical delivery is pending" };
+		}
 		if (
 			state.memoryReflections.some(
 				(reflection) => reflection.cycleId === cycleId && (reflection.proposedMemoryIds?.length ?? 0) > 0,
@@ -3604,6 +3806,7 @@ export class AgentSession {
 		} catch (error) {
 			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
 		}
+		if (deliveryClosed()) return { ok: false, skipped: "canonical delivery became terminal" };
 		let proposals: ReturnType<typeof parseAvoMemoryReasonerMessage>;
 		try {
 			proposals = parseAvoMemoryReasonerMessage(
@@ -3657,6 +3860,7 @@ export class AgentSession {
 				"avo-memory-verifier",
 			);
 		} catch (error) {
+			if (deliveryClosed()) return { ok: false, skipped: "canonical delivery became terminal" };
 			const reflection = runtime.store.recordMemoryReflection({
 				trigger,
 				cycleId,
@@ -3670,6 +3874,7 @@ export class AgentSession {
 			});
 			return { ok: false, reflection, reason: "independent memory verifier was unavailable" };
 		}
+		if (deliveryClosed()) return { ok: false, skipped: "canonical delivery became terminal" };
 		let decisions: ReturnType<typeof parseAvoMemoryVerifierMessage>;
 		try {
 			decisions = parseAvoMemoryVerifierMessage(
@@ -3678,6 +3883,7 @@ export class AgentSession {
 				new Set(proposedMemories.map((memory) => memory.memoryId)),
 			);
 		} catch (error) {
+			if (deliveryClosed()) return { ok: false, skipped: "canonical delivery became terminal" };
 			const reflection = runtime.store.recordMemoryReflection({
 				trigger,
 				cycleId,
@@ -3691,6 +3897,7 @@ export class AgentSession {
 			});
 			return { ok: false, reflection, reason: "independent memory verifier reply failed closed" };
 		}
+		if (deliveryClosed()) return { ok: false, skipped: "canonical delivery became terminal" };
 		const verifiedMemoryIds: string[] = [];
 		for (const decision of decisions) {
 			const evidenceRef = `memory-verifier:${verifier.childId}:${verifier.responseDigest}`;
@@ -3723,7 +3930,20 @@ export class AgentSession {
 	private async _runAvoGenerativeMemoryReconciliation(cycleId: string): Promise<Record<string, unknown>> {
 		if (isAvoFeatureAblated("nooa")) return { ok: false, reason: "NOOA disabled by benchmark ablation" };
 		const runtime = this._requireAvoRuntime();
+		const deliveryClosed = () => {
+			const latest = runtime.getState();
+			return (
+				latest.status !== "active" ||
+				latest.delivery.phase === "pending" ||
+				latest.delivery.phase === "delivered" ||
+				latest.delivery.phase === "failed"
+			);
+		};
+		if (deliveryClosed()) {
+			return { ok: false, skipped: "canonical delivery is pending" };
+		}
 		const proposedClusters = await runtime.reconciliationCandidates();
+		if (deliveryClosed()) return { ok: false, skipped: "canonical delivery became terminal" };
 		const memories = runtime.getState().memories;
 		const byId = new Map(memories.map((memory) => [memory.memoryId, memory]));
 		const clusters = proposedClusters
@@ -3761,6 +3981,7 @@ export class AgentSession {
 		} catch (error) {
 			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
 		}
+		if (deliveryClosed()) return { ok: false, skipped: "canonical delivery became terminal" };
 		let decisions: ReturnType<typeof parseAvoMemoryReconcilerMessage>;
 		try {
 			decisions = parseAvoMemoryReconcilerMessage(reconciler.text, reconcilerMarker, clusters).filter(
@@ -3785,6 +4006,7 @@ export class AgentSession {
 		} catch (error) {
 			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
 		}
+		if (deliveryClosed()) return { ok: false, skipped: "canonical delivery became terminal" };
 		let verification: ReturnType<typeof parseAvoMemoryReconciliationVerifierMessage>;
 		try {
 			verification = parseAvoMemoryReconciliationVerifierMessage(
@@ -3795,6 +4017,7 @@ export class AgentSession {
 		} catch (error) {
 			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
 		}
+		if (deliveryClosed()) return { ok: false, skipped: "canonical delivery became terminal" };
 		const supported = new Set(
 			verification.filter((decision) => decision.verdict === "supports").map((decision) => decision.clusterId),
 		);
@@ -3918,24 +4141,164 @@ export class AgentSession {
 			!this._enforceAvoCompletion ||
 			!this._avoRuntime ||
 			this._rlmDepth !== 0 ||
-			this._avoToolInterventionCount < 4 ||
+			!this._avoToolInterventionQueued ||
+			this._avoToolInterventionCount < 1 ||
 			toolName !== "ipython"
 		) {
 			return undefined;
 		}
 		const state = this._avoRuntime.getState();
-		if (!state.objective || state.status !== "active" || state.routing.environment !== "coding") {
+		if (!state.objective || state.status !== "active") {
 			return undefined;
 		}
 		const code = isObjectRecord(args) && typeof args.code === "string" ? args.code : "";
-		const milestoneCall =
-			/\bawait\s+(?:avo\s*\.\s*)?(?:run_coding_baseline|add_candidate|register_obligations|cover_obligation|cover_obligations|register_critical_assumptions|resolve_critical_assumption|record_evaluation|record_experiment|record_trial|run_trial|complete_experiment|run_evaluation|verify_deterministic_result|verify_artifacts|bind_tool_result|fetch_external_source|bind_url|complete_cycle|stop_gate|complete)\s*\(/;
-		if (milestoneCall.test(code)) return undefined;
+		const recovery = this._avoToolRecoveryContract(state);
+		if (
+			recovery.allowedCalls.some((call) => new RegExp(`\\bawait\\s+(?:avo\\s*\\.\\s*)?${call}\\s*\\(`).test(code))
+		) {
+			return undefined;
+		}
 		return [
-			`AVO host tool probation blocked another non-milestone IPython call after ${this._avoToolNoProgressBatches} stalled tool batches and ${this._avoToolInterventionCount} ignored interventions.`,
-			"Read-only probing is temporarily denied. In one bounded cell, combine any final task-file change with an awaited AVO action that can create host-observable progress, such as add_candidate followed by run_evaluation, cover_obligations, or complete_cycle.",
+			`AVO host tool probation blocked a non-milestone IPython call after ${this._avoToolNoProgressBatches} stalled tool batches and ${this._avoToolInterventionCount} intervention(s).`,
+			`The active candidate-admission contract remains horizon=${state.routing.horizon}, required_premortem_assumptions=${requiredAvoPremortemAssumptionCount(state)}; watchdog steering cannot add new candidate prerequisites after work begins.`,
+			recovery.guidance,
 			"Probation clears automatically when the host observes a meaningful verification milestone.",
 		].join(" ");
+	}
+
+	private _avoPythonContractViolationReason(toolName: string, args: unknown): string | undefined {
+		if (!this._enforceAvoCompletion || !this._avoRuntime || this._rlmDepth !== 0 || toolName !== "ipython") {
+			return undefined;
+		}
+		const state = this._avoRuntime.getState();
+		if (!state.objective || state.status !== "active") return undefined;
+		const code = isObjectRecord(args) && typeof args.code === "string" ? args.code : "";
+		const introspectsAvo = [
+			/\bdir\s*\(\s*avo\s*\)/,
+			/\bhelp\s*\(\s*avo(?:\.|\s*\))/,
+			/\bhasattr\s*\(\s*avo\s*,/,
+			/\binspect\s*\.\s*(?:signature|getsource|getmembers)\s*\(\s*avo(?:\.|\s*\))/,
+			/\bavo\s*\.\s*__dict__\b/,
+		].some((pattern) => pattern.test(code));
+		if (!introspectsAvo) return undefined;
+		return [
+			"AVO public API introspection is blocked: the injected AVO contract is complete, so do not call dir(), help(), hasattr(), inspect.signature(), inspect.getsource(), inspect.getmembers(), or __dict__ on avo.",
+			this._avoToolRecoveryContract(state).guidance,
+		].join(" ");
+	}
+
+	private _avoToolRecoveryContract(state: AvoRunState): { allowedCalls: string[]; guidance: string } {
+		const meaningfulBaselineCount =
+			state.verificationBaseline?.executions.filter((execution) => execution.meaningful).length ?? 0;
+		if (state.routing.environment === "coding" && meaningfulBaselineCount === 0) {
+			if (state.candidates.length > 0 || state.evaluations.length > 0 || state.cycles.length > 0) {
+				return {
+					allowedCalls: [],
+					guidance:
+						"No recovery action is admissible: candidate work exists without the required immutable baseline, and a baseline cannot be backfilled after candidate work. Start a fresh task run; do not retry the candidate or verifier.",
+				};
+			}
+			return {
+				allowedCalls: ["run_coding_baseline"],
+				guidance:
+					"Next action: run the required immutable baseline with await avo.run_coding_baseline(<exact direct test command>).",
+			};
+		}
+		if (state.candidates.length === 0) {
+			const requiredAssumptions = requiredAvoPremortemAssumptionCount(state);
+			const registeredAssumptions = state.criticalAssumptions.filter((assumption) => assumption.critical).length;
+			if (registeredAssumptions < requiredAssumptions) {
+				let workspaceChanged = false;
+				try {
+					workspaceChanged = this._captureAvoProgressWatchdogSnapshot(state).workspaceChanged;
+				} catch {
+					workspaceChanged = true;
+				}
+				if (workspaceChanged) {
+					return {
+						allowedCalls: [],
+						guidance:
+							"No candidate action is currently admissible: the required pre-mortem was not registered before the workspace changed. Restore the task-start workspace or start a fresh task run; do not inspect APIs or retry add_candidate.",
+					};
+				}
+				return {
+					allowedCalls: ["register_critical_assumptions"],
+					guidance: `Next action: register ${requiredAssumptions - registeredAssumptions} more distinct critical assumption(s) with concrete falsification plans using await avo.register_critical_assumptions(...).`,
+				};
+			}
+			if (state.routing.environment !== "coding" && state.verificationPolicy !== "required") {
+				return {
+					allowedCalls: ["add_candidate"],
+					guidance:
+						'Next action: in one bounded cell create the final candidate with candidate = await avo.add_candidate(...), take candidate_id = candidate["candidate"]["candidateId"], immediately record evaluation = await avo.record_evaluation({"candidate_id":candidate_id,"evaluator_id":"model_opinion","status":"pass","authority":"model_opinion","evidence_refs":[],"metrics":{"reviewed":true}}), cover candidate["candidate"]["obligationIds"] with that evaluation ID, complete the cycle, and call await avo.stop_gate(). Do not invent another API name or split this lifecycle across exploratory cells.',
+				};
+			}
+			return {
+				allowedCalls: ["add_candidate"],
+				guidance:
+					"Next action: in one bounded cell, finish the task-file change if needed and call await avo.add_candidate(...) bound to that exact workspace. Do not perform another read-only probe.",
+			};
+		}
+		const candidate = state.candidates.at(-1)!;
+		const candidateCycle = [...state.cycles].reverse().find((cycle) => cycle.candidateId === candidate.candidateId);
+		if (candidateCycle && candidateCycle.outcome !== "accepted") {
+			return {
+				allowedCalls: ["add_candidate"],
+				guidance: `Next action: make a material correction and call await avo.add_candidate(...) with parent_candidate_id=${candidate.candidateId}; do not rerun evidence against the superseded candidate.`,
+			};
+		}
+		const evaluations = state.evaluations.filter((evaluation) => evaluation.candidateId === candidate.candidateId);
+		if (evaluations.length === 0) {
+			if (state.verificationPolicy !== "required") {
+				return {
+					allowedCalls: ["record_evaluation"],
+					guidance: `Next action: record the transparent best-effort review exactly with evaluation = await avo.record_evaluation({"candidate_id":"${candidate.candidateId}","evaluator_id":"model_opinion","status":"pass","authority":"model_opinion","evidence_refs":[],"metrics":{"reviewed":true}}). This is explicitly model opinion, not host or external proof.`,
+				};
+			}
+			return {
+				allowedCalls: ["run_evaluation", "verify_deterministic_result", "verify_artifacts"],
+				guidance: `Next action: run one direct candidate-bound verifier for candidate_id=${candidate.candidateId} with await avo.run_evaluation(...), or the host verifier required by the active verification class.`,
+			};
+		}
+		if (!evaluations.some((evaluation) => evaluation.status === "pass")) {
+			return {
+				allowedCalls: ["complete_cycle"],
+				guidance: `Next action: call await avo.complete_cycle({"candidate_id":"${candidate.candidateId}"}) once so the host records the failed or inconclusive outcome; then make a material successor rather than retesting unchanged work.`,
+			};
+		}
+		const uncovered = state.obligations.filter(
+			(obligation) =>
+				obligation.critical &&
+				!state.obligationCoverage.some(
+					(coverage) =>
+						coverage.candidateId === candidate.candidateId && coverage.obligationId === obligation.obligationId,
+				),
+		);
+		if (uncovered.length > 0) {
+			return {
+				allowedCalls: ["cover_obligation", "cover_obligations", "run_evaluation"],
+				guidance: `Next action: bind passing candidate evidence to the ${uncovered.length} uncovered critical obligation(s) with await avo.cover_obligations(...); run a distinct direct verifier first if the existing receipt is not sufficient.`,
+			};
+		}
+		const openAssumptions = state.criticalAssumptions.filter(
+			(assumption) => assumption.critical && assumption.status === "open",
+		);
+		if (openAssumptions.length > 0) {
+			return {
+				allowedCalls: ["resolve_critical_assumption", "run_evaluation"],
+				guidance: `Next action: run the preregistered distinct falsification check, then call await avo.resolve_critical_assumption(...) for ${openAssumptions[0]!.assumptionId}.`,
+			};
+		}
+		if (!state.cycles.some((cycle) => cycle.candidateId === candidate.candidateId)) {
+			return {
+				allowedCalls: ["complete_cycle"],
+				guidance: `Next action: call await avo.complete_cycle({"candidate_id":"${candidate.candidateId}"}) and inspect the host outcome.`,
+			};
+		}
+		return {
+			allowedCalls: ["stop_gate", "complete"],
+			guidance: "Next action: call await avo.stop_gate() and follow its exact blocker or canonical-delivery result.",
+		};
 	}
 
 	private async _queueAvoToolStagnationIntervention(
@@ -3948,11 +4311,18 @@ export class AgentSession {
 			forceIntervene?: boolean;
 		},
 	): Promise<void> {
+		// A watchdog prompt is useful only when another provider turn is
+		// admissible. Do not let an internal anti-laziness action bypass the
+		// same autonomous limit that stops ordinary continuations.
+		if (this._hasReachedAutonomousLimit() || this._pendingAvoCanonicalDelivery()) return;
 		this._avoRuntime?.store.recordProgressWatchdogCheckpoint({
 			consecutiveNoProgressTurns: this._avoToolNoProgressBatches,
 			resumed: false,
 			reason: input.reason,
-			escalateHorizon: input.escalationLevel > 1,
+			// Tool-loop steering must not mutate the candidate-admission contract.
+			// The horizon is selected before work; intervention only constrains the
+			// next action to the next already-admissible host milestone.
+			escalateHorizon: false,
 			forceIntervene: input.forceIntervene,
 			unit: "tool_batch",
 		});
@@ -3964,11 +4334,10 @@ export class AgentSession {
 				input.reason,
 				input.instruction ??
 					(input.escalationLevel === 1
-						? "Stop broad exploration and do not inspect Prime/AVO internals. Change approach now."
-						: "The previous intervention was ignored. Do at most one bounded diagnostic call, then produce and verify concrete task work now."),
-				state.routing.environment === "coding"
-					? "Work on the target files, make one concrete task-relevant workspace change, record a fresh candidate, and run one direct task-specific verifier."
-					: "Convert the evidence already gathered into a concrete candidate and run the verification class selected by the host.",
+						? "Stop broad exploration and do not inspect Prime/AVO internals. The next tool action must invoke the next admissible AVO milestone."
+						: "The previous intervention was ignored. The next tool action must invoke the next admissible AVO milestone; no extra diagnostic call is permitted."),
+				this._avoToolRecoveryContract(state).guidance,
+				`The active candidate-admission contract remains horizon=${state.routing.horizon}, required_premortem_assumptions=${requiredAvoPremortemAssumptionCount(state)}. This intervention does not add prerequisites.`,
 				"Do not repeat a failed or unrelated command merely to keep the tool loop active.",
 				"</avo_progress_intervention>",
 			].join("\n"),
@@ -3988,7 +4357,521 @@ export class AgentSession {
 		});
 	}
 
-	private async _queueAvoCanonicalDeliveryAfterPassingGate(gate: AvoStopGate): Promise<void> {
+	private _pendingAvoCanonicalDelivery(): AvoRunState["delivery"] | undefined {
+		if (!this._avoRuntime || this._rlmDepth !== 0) return undefined;
+		const state = this._avoRuntime.getState();
+		return state.status === "active" &&
+			state.delivery.phase === "pending" &&
+			!this._avoCanonicalDeliveryFailedRunIds.has(state.runId)
+			? state.delivery
+			: undefined;
+	}
+
+	private _isAvoCanonicalDeliveryTerminalFailure(): boolean {
+		const state = this._avoRuntime?.getState();
+		return (
+			state !== undefined &&
+			(state.delivery.phase === "failed" ||
+				state.status === "failed" ||
+				this._avoCanonicalDeliveryFailedRunIds.has(state.runId))
+		);
+	}
+
+	private _isRepairableAvoCanonicalMemoryFailure(error: unknown): boolean {
+		const reason = error instanceof Error ? error.message : String(error);
+		return /canonical accepted-cycle memory (?:is missing|is missing or invalidated|does not match its cycle)/i.test(
+			reason,
+		);
+	}
+
+	private async _withAvoCanonicalDeliverySerialization<T>(operation: () => Promise<T>): Promise<T> {
+		const next = this._avoCanonicalDeliverySerializer.then(operation, operation);
+		this._avoCanonicalDeliverySerializer = next.then(
+			() => undefined,
+			() => undefined,
+		);
+		return next;
+	}
+
+	private async _beginAvoCanonicalDeliveryLocked(gate: AvoStopGate): Promise<AvoCanonicalDeliveryBinding | undefined> {
+		if (!this._avoRuntime) throw new Error("AVO runtime is unavailable");
+		let state = this._avoRuntime.getState();
+		if (state.status !== "active") return undefined;
+		if (state.delivery.phase === "pending") {
+			return captureAvoCanonicalDeliveryGeneration(state);
+		}
+		if (state.delivery.phase !== "accepted") return undefined;
+		let expectedGeneration = captureAvoCanonicalDeliveryGeneration(state);
+		if (!expectedGeneration) return undefined;
+		let effectiveGate = gate;
+		// Give the durable NOOA sidecar a chance to activate the protected cycle
+		// episode before sealing delivery. The canonical store remains the fail-
+		// closed authority if the sidecar is unavailable.
+		await this._avoRuntime.syncMemory().catch(() => undefined);
+		if (this._disposed || this._disposing || !this._avoRuntime) return undefined;
+		state = this._avoRuntime.getState();
+		if (state.status !== "active") return undefined;
+		if (state.delivery.phase === "pending") {
+			return captureAvoCanonicalDeliveryGeneration(state);
+		}
+		if (state.delivery.phase !== "accepted") return undefined;
+		if (!matchesAvoCanonicalDeliveryGeneration(state, expectedGeneration, "accepted")) {
+			// Memory refreshes and concurrent host mutations can advance the accepted
+			// generation while the sidecar is awaited. Only a freshly projected full
+			// gate may seal that new owner.
+			effectiveGate = this._evaluateAvoStopGateWithCanonicalRepair();
+			state = this._avoRuntime.getState();
+			expectedGeneration = captureAvoCanonicalDeliveryGeneration(state);
+			if (!effectiveGate.passed || !expectedGeneration || state.delivery.phase !== "accepted") return undefined;
+		}
+		try {
+			this._avoRuntime.store.beginCanonicalDelivery(effectiveGate);
+		} catch (error) {
+			if (!this._isRepairableAvoCanonicalMemoryFailure(error)) throw error;
+			this._avoRuntime.store.repairCanonicalDeliveryMemory();
+			state = this._avoRuntime.getState();
+			expectedGeneration = captureAvoCanonicalDeliveryGeneration(state);
+			if (!expectedGeneration || state.delivery.phase !== "accepted") return undefined;
+			await this._avoRuntime.syncMemory().catch(() => undefined);
+			if (this._disposed || this._disposing || !this._avoRuntime) return undefined;
+			state = this._avoRuntime.getState();
+			if (state.status !== "active") return undefined;
+			if (state.delivery.phase === "pending") {
+				return captureAvoCanonicalDeliveryGeneration(state);
+			}
+			if (state.delivery.phase !== "accepted") return undefined;
+			// Repair and its sidecar sync both mutate durable evidence. Re-project the
+			// complete host gate even when the accepted identity appears unchanged.
+			effectiveGate = this._evaluateAvoStopGateWithCanonicalRepair();
+			state = this._avoRuntime.getState();
+			expectedGeneration = captureAvoCanonicalDeliveryGeneration(state);
+			if (!effectiveGate.passed || !expectedGeneration || state.delivery.phase !== "accepted") return undefined;
+			this._avoRuntime.store.beginCanonicalDelivery(effectiveGate);
+		}
+		state = this._avoRuntime.getState();
+		const pendingGeneration = captureAvoCanonicalDeliveryGeneration(state);
+		if (!pendingGeneration || state.delivery.phase !== "pending") return undefined;
+		this._closeAvoCanonicalDeliveryBackgroundWork();
+		this._clearQueuedAutonomousContinuations();
+		this._clearQueuedGoalContexts();
+		this._fenceAvoCanonicalDeliveryInputs();
+		return pendingGeneration;
+	}
+
+	private _closeAvoCanonicalDeliveryBackgroundWork(): void {
+		const pending = this._pendingAvoCanonicalDelivery();
+		const state = this._avoRuntime?.getState();
+		const terminalRunId =
+			state !== undefined &&
+			(state.delivery.phase === "failed" ||
+				state.status === "failed" ||
+				this._avoCanonicalDeliveryFailedRunIds.has(state.runId))
+				? state.runId
+				: undefined;
+		const closingRunId = pending?.runId ?? terminalRunId;
+		if (!closingRunId || this._avoCanonicalDeliveryClosedRunIds.has(closingRunId)) return;
+		this._avoCanonicalDeliveryClosedRunIds.add(closingRunId);
+		this._autoRefineReviewAbort?.abort();
+		this._refineAbortController?.abort();
+		this._autoCompactionAbortController?.abort();
+		this._autoRefineBranchVersion++;
+		this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+		this._pendingRequestedRefine = undefined;
+		this._assistantTurnsSinceAutoRefine = 0;
+		for (const run of this._activeRlmChildRuns.values()) {
+			if (run.status !== "queued" && run.status !== "running") continue;
+			// Canonical delivery is an exclusive terminal phase. A child whose
+			// runtime is still being constructed must neither reach its provider nor
+			// enqueue a late terminal notice after the gate has sealed. Abandoning
+			// quiescence here also prevents canonical delivery from waiting on a
+			// startup/provider call which has already been aborted.
+			run.suppressTerminalNotice = true;
+			if (this._cancelRlmChildRun(run, "AVO canonical delivery is pending")) {
+				if (!run.abandonedForQuiescence) this._abandonRlmRunForQuiescence(run);
+			}
+		}
+		if (this._serializedPlanInFlight) {
+			void this._consumeSerializedBackgroundPlan(async () => false).catch(() => undefined);
+		}
+	}
+
+	private _completeAvoCanonicalDelivery(observedCanonicalText: string): void {
+		if (!this._avoRuntime) throw new Error("AVO runtime is unavailable");
+		// Pending owns an immutable persisted gate receipt. Final delivery must be
+		// only a digest comparison plus local store finalization; never re-run the
+		// mutable stop gate or create another evaluation here.
+		this._avoRuntime.store.completeCanonicalDelivery(observedCanonicalText);
+	}
+
+	private _completePersistedAvoCanonicalDeliveryIfPresent(): boolean {
+		const pending = this._pendingAvoCanonicalDelivery();
+		const expectedBinding = parseAvoCanonicalDeliveryBinding(pending);
+		if (!expectedBinding) return false;
+		const messages = this.agent.state.messages;
+		for (let assistantIndex = messages.length - 1; assistantIndex >= 0; assistantIndex--) {
+			const message = messages[assistantIndex];
+			if (message.role !== "assistant") continue;
+			const assistant = message as AssistantMessage;
+			if (assistant.stopReason === "error" || assistant.stopReason === "aborted") return false;
+
+			let matchedPrompt = false;
+			for (let promptIndex = assistantIndex - 1; promptIndex >= 0; promptIndex--) {
+				const prompt = messages[promptIndex];
+				if (prompt.role === "assistant" || prompt.role === "user") break;
+				if (prompt.role !== "custom" || prompt.customType !== "avo_canonical_delivery_required") continue;
+				if (matchesAvoCanonicalDeliveryBinding(prompt.details, expectedBinding)) {
+					matchedPrompt = true;
+					break;
+				}
+			}
+			if (!matchedPrompt) return false;
+
+			const observedText = readAvoAssistantDeliveryText(assistant);
+			if (digestAvoDeliveryText(observedText) !== expectedBinding.deliveryDigest) return false;
+			try {
+				this._completeAvoCanonicalDelivery(observedText);
+				this._avoCanonicalDeliveryQueuedRunId = undefined;
+				this._avoCanonicalDeliveryQueuedBinding = undefined;
+				this._avoCanonicalDeliveryDirectBinding = undefined;
+				this._avoCanonicalDeliveryAttemptBinding = undefined;
+				return true;
+			} catch (error) {
+				this._recordAvoCanonicalDeliveryFailure(error, expectedBinding);
+				return false;
+			}
+		}
+		return false;
+	}
+
+	private _persistedAvoCanonicalDeliveryProviderFailure():
+		| { message: AssistantMessage; binding: AvoCanonicalDeliveryBinding }
+		| undefined {
+		const pending = this._pendingAvoCanonicalDelivery();
+		const expectedBinding = parseAvoCanonicalDeliveryBinding(pending);
+		if (!expectedBinding) return undefined;
+		const messages = this.agent.state.messages;
+		for (let assistantIndex = messages.length - 1; assistantIndex >= 0; assistantIndex--) {
+			const message = messages[assistantIndex];
+			if (message.role !== "assistant") continue;
+			const assistant = message as AssistantMessage;
+			if (assistant.stopReason !== "error") return undefined;
+			for (let promptIndex = assistantIndex - 1; promptIndex >= 0; promptIndex--) {
+				const prompt = messages[promptIndex];
+				if (prompt.role === "assistant" || prompt.role === "user") return undefined;
+				if (prompt.role !== "custom") continue;
+				if (prompt.customType !== "avo_canonical_delivery_required") continue;
+				return matchesAvoCanonicalDeliveryBinding(prompt.details, expectedBinding)
+					? { message: assistant, binding: expectedBinding }
+					: undefined;
+			}
+			return undefined;
+		}
+		return undefined;
+	}
+
+	private _completeAvoCanonicalDeliveryFromHostFallback(
+		providerFailure: AssistantMessage,
+		expectedBinding: AvoCanonicalDeliveryBinding,
+	): boolean {
+		if (!this._avoRuntime) return false;
+		const state = this._avoRuntime.getState();
+		const canonicalText = this._avoRuntime.canonicalDeliveryText();
+		if (
+			!matchesAvoCanonicalDeliveryGeneration(state, expectedBinding, "pending") ||
+			!canonicalText ||
+			digestAvoDeliveryText(canonicalText) !== expectedBinding.deliveryDigest
+		) {
+			return false;
+		}
+		const audit = {
+			role: "custom" as const,
+			customType: "avo_canonical_delivery_host_fallback",
+			content: `The canonical-delivery provider request failed after the immutable host gate. Prime emitted the already sealed delivery locally; no provider, evaluator, supervisor, or RLM retry was started. Provider error: ${providerFailure.errorMessage ?? "unknown provider error"}`,
+			display: false,
+			details: {
+				...expectedBinding,
+			},
+			timestamp: Date.now(),
+		} satisfies CustomMessage;
+		const synthetic = {
+			...providerFailure,
+			content: [{ type: "text" as const, text: canonicalText }],
+			stopReason: "stop" as const,
+			errorMessage: undefined,
+			diagnostics: undefined,
+			timestamp: Date.now(),
+		} satisfies AssistantMessage;
+		try {
+			// Persist the exact observed assistant output before sealing delivery.
+			// A crash in the following narrow window is recovered on construction
+			// by hashing this persisted assistant message locally.
+			this.agent.state.messages.push(audit, synthetic);
+			this.sessionManager.appendCustomMessageEntry(audit.customType, audit.content, audit.display, audit.details);
+			this.sessionManager.appendMessage(synthetic);
+			this._emit({ type: "message_start", message: audit });
+			this._emit({ type: "message_end", message: audit });
+			this._emit({ type: "message_start", message: synthetic });
+			this._emit({ type: "message_end", message: synthetic });
+			this._completeAvoCanonicalDelivery(readAvoAssistantDeliveryText(synthetic));
+		} catch (error) {
+			this._recordAvoCanonicalDeliveryFailure(error, expectedBinding);
+			return false;
+		}
+		this._discardObsoleteAvoCompletionInputs(state, { includeCanonicalDelivery: false });
+		this._avoCanonicalDeliveryQueuedRunId = undefined;
+		this._avoCanonicalDeliveryQueuedBinding = undefined;
+		this._avoCanonicalDeliveryDirectBinding = undefined;
+		this._avoCanonicalDeliveryAttemptBinding = undefined;
+		return true;
+	}
+
+	private _createAvoCanonicalDeliveryMessage(state: AvoRunState): CustomMessage | undefined {
+		const delivery = state.delivery;
+		const binding = parseAvoCanonicalDeliveryBinding(delivery);
+		if (
+			delivery.phase !== "pending" ||
+			!binding ||
+			binding.runId !== state.runId ||
+			this._avoCanonicalDeliveryFailedRunIds.has(state.runId)
+		) {
+			return undefined;
+		}
+		const acceptedCandidate = state.candidates.find((candidate) => candidate.candidateId === binding.candidateId);
+		if (!acceptedCandidate || acceptedCandidate.deliveryDigest !== binding.deliveryDigest) return undefined;
+		const canonicalText = this._avoRuntime?.canonicalDeliveryText();
+		if (!canonicalText || digestAvoDeliveryText(canonicalText) !== binding.deliveryDigest) return undefined;
+		return {
+			role: "custom",
+			customType: "avo_canonical_delivery_required",
+			content: [
+				"<avo_canonical_delivery_required>",
+				`The host stop gate passed for candidate ${acceptedCandidate.candidateId}.`,
+				"End tool use now. Do not clean up verifier helpers, inspect state, call the stop gate again, or perform additional work.",
+				`The exact host-sealed delivery is the decoded value of ${JSON.stringify(canonicalText)}. Output that value without JSON quotes and with no preface, suffix, explanation, or decoration.`,
+				"</avo_canonical_delivery_required>",
+			].join("\n"),
+			display: true,
+			details: {
+				...binding,
+				gatePassed: true,
+				trigger: "post_ready_canonical_delivery",
+			},
+			timestamp: Date.now(),
+		};
+	}
+
+	private _isAvoCanonicalDeliveryAction(
+		action: QueuedSessionAction,
+		expectedBinding?: AvoCanonicalDeliveryBinding,
+	): boolean {
+		if (
+			action.payload.kind !== "turn" ||
+			action.payload.customMessage?.customType !== "avo_canonical_delivery_required"
+		) {
+			return false;
+		}
+		const currentBinding = expectedBinding ?? parseAvoCanonicalDeliveryBinding(this._pendingAvoCanonicalDelivery());
+		return (
+			currentBinding !== undefined &&
+			matchesAvoCanonicalDeliveryBinding(action.payload.customMessage.details, currentBinding)
+		);
+	}
+
+	private _fenceAvoCanonicalDeliveryInputs(): void {
+		const pending = this._pendingAvoCanonicalDelivery();
+		const pendingBinding = parseAvoCanonicalDeliveryBinding(pending);
+		const terminalFailure = this._isAvoCanonicalDeliveryTerminalFailure();
+		if (!pending && !terminalFailure) return;
+		this._pendingNextTurnMessages = pendingBinding
+			? this._pendingNextTurnMessages.filter((message) => {
+					if (message.customType !== "avo_canonical_delivery_required") return false;
+					return matchesAvoCanonicalDeliveryBinding(message.details, pendingBinding);
+				})
+			: [];
+		this._cancelSessionActions(
+			(action) =>
+				action.source === "internal" &&
+				(terminalFailure || !pendingBinding || !this._isAvoCanonicalDeliveryAction(action, pendingBinding)),
+			new Error("Queued internal work was closed by canonical delivery."),
+		);
+		this.agent.removeQueuedMessages(
+			(message) =>
+				message.role === "custom" && (terminalFailure || message.customType !== "avo_canonical_delivery_required"),
+		);
+		if (pendingBinding) {
+			const canonicalActions = this._actionStore
+				.unfinishedActions()
+				.filter((action) => this._isAvoCanonicalDeliveryAction(action, pendingBinding));
+			if (canonicalActions.length > 1) {
+				const [, ...duplicates] = canonicalActions;
+				const duplicateIds = new Set(duplicates.map((action) => action.id));
+				this._cancelSessionActions(
+					(action) => duplicateIds.has(action.id),
+					new Error("Duplicate canonical delivery action was canceled."),
+				);
+			}
+		}
+		this._emitQueueUpdate();
+	}
+
+	private async _ensurePersistedAvoCanonicalDeliveryAction(): Promise<void> {
+		return this._withAvoCanonicalDeliverySerialization(async () => {
+			this._ensurePersistedAvoCanonicalDeliveryActionLocked();
+		});
+	}
+
+	private _ensurePersistedAvoCanonicalDeliveryActionLocked(): void {
+		const pending = this._pendingAvoCanonicalDelivery();
+		if (!pending) return;
+		const pendingBinding = parseAvoCanonicalDeliveryBinding(pending);
+		if (!pendingBinding) {
+			this._recordMalformedPendingAvoCanonicalDeliveryFailure(
+				new Error("AVO completion is blocked: persisted canonical delivery binding is incomplete"),
+			);
+			return;
+		}
+		if (
+			matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryDirectBinding, pendingBinding) ||
+			matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryAttemptBinding, pendingBinding)
+		) {
+			return;
+		}
+		this._closeAvoCanonicalDeliveryBackgroundWork();
+		this._fenceAvoCanonicalDeliveryInputs();
+		const existingAction = this._actionStore
+			.unfinishedActions()
+			.find((action) => this._isAvoCanonicalDeliveryAction(action, pendingBinding));
+		if (existingAction) {
+			if (existingAction.lifecycle.state === "queued") {
+				this._actionStore.moveQueued(existingAction, "next_turn_boundary", 0);
+			}
+			this._avoCanonicalDeliveryQueuedRunId = pendingBinding.runId;
+			this._avoCanonicalDeliveryQueuedBinding = pendingBinding;
+			this._emitQueueUpdate();
+			return;
+		}
+		const state = this._requireAvoRuntime().getState();
+		const message = this._createAvoCanonicalDeliveryMessage(state);
+		if (!message) {
+			this._recordAvoCanonicalDeliveryFailure(
+				new Error("AVO completion is blocked: persisted canonical delivery record is inconsistent"),
+				pendingBinding,
+			);
+			return;
+		}
+		const normalized = normalizeMessageContent(message.content);
+		const action = this._createPreparedTurnAction("steer", normalized.text, normalized.images, {
+			message,
+			resumeIfIdle: true,
+			executionPolicy: this._turnExecutionPolicy("queued"),
+			source: "internal",
+			queueVisible: false,
+		});
+		this._admitSessionInput(action, { front: true, wake: false });
+		this._avoCanonicalDeliveryQueuedRunId = state.runId;
+		this._avoCanonicalDeliveryQueuedBinding = pendingBinding;
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
+	}
+
+	private _recordAvoCanonicalDeliveryFailure(
+		error: unknown,
+		expectedBinding: AvoCanonicalDeliveryBinding,
+		expectedPhase: "accepted" | "pending" = "pending",
+	): boolean {
+		if (!this._avoRuntime) return false;
+		const state = this._avoRuntime.getState();
+		if (!matchesAvoCanonicalDeliveryGeneration(state, expectedBinding, expectedPhase)) return false;
+		return this._sealAvoCanonicalDeliveryFailure(error, state);
+	}
+
+	private _recordCurrentAvoCanonicalDeliveryFailure(error: unknown): boolean {
+		if (!this._avoRuntime) return false;
+		const state = this._avoRuntime.getState();
+		const binding = captureAvoCanonicalDeliveryGeneration(state);
+		if (!binding || (state.delivery.phase !== "accepted" && state.delivery.phase !== "pending")) return false;
+		return this._recordAvoCanonicalDeliveryFailure(error, binding, state.delivery.phase);
+	}
+
+	private _recordObservedAvoCanonicalDeliveryFailure(error: unknown, observedState: AvoRunState): boolean {
+		const binding = captureAvoCanonicalDeliveryGeneration(observedState);
+		if (!binding || (observedState.delivery.phase !== "accepted" && observedState.delivery.phase !== "pending")) {
+			return false;
+		}
+		return this._recordAvoCanonicalDeliveryFailure(error, binding, observedState.delivery.phase);
+	}
+
+	private _recordMalformedPendingAvoCanonicalDeliveryFailure(error: unknown): boolean {
+		if (!this._avoRuntime) return false;
+		const state = this._avoRuntime.getState();
+		if (
+			state.status !== "active" ||
+			state.delivery.phase !== "pending" ||
+			parseAvoCanonicalDeliveryBinding(state.delivery) !== undefined
+		) {
+			return false;
+		}
+		return this._sealAvoCanonicalDeliveryFailure(error, state);
+	}
+
+	private _sealAvoCanonicalDeliveryFailure(error: unknown, state: AvoRunState): boolean {
+		if (!this._avoRuntime || this._avoCanonicalDeliveryFailedRunIds.has(state.runId)) return false;
+		this._avoCanonicalDeliveryFailedRunIds.add(state.runId);
+		this._closeAvoCanonicalDeliveryBackgroundWork();
+		const reason = error instanceof Error ? error.message : String(error);
+		const code = /canonical accepted-cycle memory/i.test(reason)
+			? "CANONICAL_ACCEPTED_CYCLE_MEMORY_MISSING"
+			: "CANONICAL_DELIVERY_INVARIANT_FAILURE";
+		const store = this._avoRuntime.store as unknown as {
+			failCanonicalDelivery?: (failureCode: string, failureReason: string) => unknown;
+		};
+		try {
+			store.failCanonicalDelivery?.(code, reason);
+		} catch {
+			// The durable custom failure below remains authoritative even if the
+			// state-store failure transition itself cannot be persisted.
+		}
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
+		this._discardObsoleteAvoCompletionInputs(state);
+		this._clearQueuedAutonomousContinuations();
+		this._clearQueuedGoalContexts();
+		this._cancelSessionActions(
+			(action) => action.source === "internal",
+			new Error("Queued internal work was closed by terminal canonical-delivery failure."),
+		);
+		this.agent.removeQueuedMessages((message) => message.role === "custom");
+		this._avoCanonicalDeliveryQueuedRunId = undefined;
+		this._avoCanonicalDeliveryQueuedBinding = undefined;
+		this._avoCanonicalDeliveryDirectBinding = undefined;
+		this._avoCanonicalDeliveryAttemptBinding = undefined;
+		const message = {
+			role: "custom" as const,
+			customType: "avo_invariant_failure",
+			content: `AVO_INVARIANT_FAILURE code=${code} run_id=${state.runId} candidate_id=${state.delivery.candidateId ?? "unknown"} cycle_id=${state.delivery.cycleId ?? "unknown"}: ${reason}`,
+			display: true,
+			details: {
+				code,
+				runId: state.runId,
+				candidateId: state.delivery.candidateId,
+				cycleId: state.delivery.cycleId,
+				reason,
+			},
+			timestamp: Date.now(),
+		} satisfies CustomMessage;
+		this.agent.state.messages.push(message);
+		this.sessionManager.appendCustomMessageEntry(
+			message.customType,
+			message.content,
+			message.display,
+			message.details,
+		);
+		this._emit({ type: "message_start", message });
+		this._emit({ type: "message_end", message });
+		return true;
+	}
+
+	private async _queueAvoCanonicalDeliveryAfterPassingGateLocked(gate: AvoStopGate): Promise<void> {
 		if (
 			!gate.passed ||
 			!this._enforceAvoCompletion ||
@@ -3998,59 +4881,83 @@ export class AgentSession {
 		) {
 			return;
 		}
-		const state = this._avoRuntime.getState();
-		if (!state.objective || state.status !== "active" || this._avoCanonicalDeliveryQueuedRunId === state.runId) {
+		let state = this._avoRuntime.getState();
+		if (!state.objective || state.status !== "active") {
 			return;
 		}
-		const acceptedCandidateIds = new Set(
-			state.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
-		);
-		const adapter = this._avoRuntime.adapters.get(state.routing.environment);
-		const acceptedCandidate = [...state.candidates].reverse().find(
-			(candidate) =>
-				acceptedCandidateIds.has(candidate.candidateId) &&
-				adapter.deriveEvaluationState(
-					candidate,
-					state.evaluations.filter((receipt) => receipt.candidateId === candidate.candidateId),
-					state,
-				).canonical,
-		);
-		if (!acceptedCandidate?.deliveryDigest) return;
+		let deliveryBinding = parseAvoCanonicalDeliveryBinding(state.delivery);
+		if (
+			deliveryBinding &&
+			(matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryDirectBinding, deliveryBinding) ||
+				matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryAttemptBinding, deliveryBinding))
+		) {
+			return;
+		}
+
+		// If already queued for this run and an active action is in the store, skip duplicate
+		if (
+			deliveryBinding !== undefined &&
+			this._avoCanonicalDeliveryQueuedRunId === state.runId &&
+			matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryQueuedBinding, deliveryBinding) &&
+			this._actionStore
+				.unfinishedActions()
+				.some((action) => this._isAvoCanonicalDeliveryAction(action, deliveryBinding))
+		) {
+			return;
+		}
+
+		if (state.delivery.phase !== "pending") {
+			try {
+				deliveryBinding = await this._beginAvoCanonicalDeliveryLocked(gate);
+				if (this._disposed || this._disposing || !this._avoRuntime) return;
+				state = this._avoRuntime.getState();
+				if (!deliveryBinding || !matchesAvoCanonicalDeliveryGeneration(state, deliveryBinding, "pending")) {
+					return;
+				}
+			} catch (error) {
+				this._recordCurrentAvoCanonicalDeliveryFailure(error);
+				return;
+			}
+		}
+		if (!deliveryBinding || !matchesAvoCanonicalDeliveryGeneration(state, deliveryBinding, "pending")) return;
+		const message = this._createAvoCanonicalDeliveryMessage(state);
+		if (!message) return;
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
 		this._discardObsoleteAvoCompletionInputs(state);
+		this._clearQueuedAutonomousContinuations();
+		this._clearQueuedGoalContexts();
 		this._avoCanonicalDeliveryQueuedRunId = state.runId;
-		const exactCodingDelivery =
-			state.routing.environment === "coding" || state.routing.environment === "research"
-				? ` The exact recorded delivery is the decoded value of ${JSON.stringify(acceptedCandidate.summary)}; output it without JSON quotes.`
-				: "";
-		const message: CustomMessage = {
-			role: "custom",
-			customType: "avo_canonical_delivery_required",
-			content: [
-				"<avo_canonical_delivery_required>",
-				`The host stop gate passed for candidate ${acceptedCandidate.candidateId}.`,
-				"End tool use now. Do not clean up verifier helpers, inspect state, call the stop gate again, or perform additional work.",
-				`Return only the accepted candidate's exact canonical delivery with no preface, suffix, explanation, or decoration.${exactCodingDelivery}`,
-				"</avo_canonical_delivery_required>",
-			].join("\n"),
-			display: true,
-			details: {
-				runId: state.runId,
-				candidateId: acceptedCandidate.candidateId,
-				gatePassed: true,
-				trigger: "post_ready_canonical_delivery",
-			},
-			timestamp: Date.now(),
-		};
+		this._avoCanonicalDeliveryQueuedBinding = deliveryBinding;
 		const normalized = normalizeMessageContent(message.content);
 		try {
 			await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
 				message,
 				resumeIfIdle: true,
 				front: true,
+				queueVisible: false,
 			});
-		} catch {
-			if (this._avoCanonicalDeliveryQueuedRunId === state.runId) {
+			if (this._disposed || this._disposing || !this._avoRuntime) return;
+			const postState = this._avoRuntime.getState();
+			if (!matchesAvoCanonicalDeliveryGeneration(postState, deliveryBinding, "pending")) {
+				this._cancelSessionActions(
+					(action) => this._isAvoCanonicalDeliveryAction(action, deliveryBinding),
+					new Error("Stale canonical delivery action was discarded after queue admission."),
+				);
+				if (matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryQueuedBinding, deliveryBinding)) {
+					this._avoCanonicalDeliveryQueuedRunId = undefined;
+					this._avoCanonicalDeliveryQueuedBinding = undefined;
+				}
+				this._fenceAvoCanonicalDeliveryInputs();
+			}
+		} catch (error) {
+			if (matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryQueuedBinding, deliveryBinding)) {
 				this._avoCanonicalDeliveryQueuedRunId = undefined;
+				this._avoCanonicalDeliveryQueuedBinding = undefined;
+			}
+			const postState = this._avoRuntime?.getState();
+			if (postState && matchesAvoCanonicalDeliveryGeneration(postState, deliveryBinding, "pending")) {
+				this._recordAvoCanonicalDeliveryFailure(error, deliveryBinding);
 			}
 		}
 	}
@@ -4104,7 +5011,8 @@ export class AgentSession {
 			toolResults.length === 0 ||
 			!this._enforceAvoCompletion ||
 			!this._avoRuntime ||
-			this._rlmDepth !== 0
+			this._rlmDepth !== 0 ||
+			this._pendingAvoCanonicalDelivery() !== undefined
 		) {
 			return;
 		}
@@ -4157,7 +5065,7 @@ export class AgentSession {
 			return;
 		}
 		this._avoToolNoProgressBatches += 1;
-		const threshold = this._avoToolInterventionCount === 0 ? 6 : this._avoToolLastInterventionBatch + 3;
+		const threshold = this._avoToolInterventionCount === 0 ? 4 : this._avoToolLastInterventionBatch + 3;
 		if (this._avoToolNoProgressBatches < threshold) return;
 		this._avoToolInterventionQueued = true;
 		this._avoToolInterventionCount += 1;
@@ -4168,11 +5076,11 @@ export class AgentSession {
 			reason,
 			escalationLevel,
 			trigger: escalationLevel === 1 ? "anti_laziness_tool_intervention" : "anti_laziness_tool_escalation",
-			...(escalationLevel >= 4
+			...(escalationLevel >= 1
 				? {
 						forceIntervene: true,
 						instruction:
-							"Host tool probation is now active. Read-only IPython calls will be denied until one bounded cell invokes an AVO action that can create a verification milestone.",
+							"Host tool probation is active now. The next IPython cell must invoke the state-aware AVO action named below; read-only probing is denied until the host observes a verification milestone.",
 					}
 				: {}),
 		});
@@ -4216,12 +5124,20 @@ export class AgentSession {
 		const state = runtime.getState();
 		const candidate = state.candidates.find((item) => item.candidateId === candidateId);
 		if (!candidate) return;
-		const assessment = assessAvoCandidateIntegrity(
-			state,
-			candidate,
-			this.sessionManager.getCwd(),
-			this._avoWorkspaceExcludedRoots(),
-		);
+		let assessment: ReturnType<typeof assessAvoCandidateIntegrity>;
+		try {
+			assessment = assessAvoCandidateIntegrity(
+				state,
+				candidate,
+				this.sessionManager.getCwd(),
+				this._avoWorkspaceExcludedRoots(),
+			);
+		} catch (error) {
+			assessment = {
+				passed: false,
+				reason: `candidate integrity observation failed: ${(error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").slice(0, 500)}`,
+			};
+		}
 		if (assessment.passed) return;
 		const reason = assessment.reason ?? "candidate integrity changed";
 		const observedDigest = assessment.observedDigest;
@@ -4452,7 +5368,39 @@ export class AgentSession {
 		const pythonPaths = [...new Set(candidate?.workspaceChangedPaths?.filter((path) => path.endsWith(".py")) ?? [])]
 			.map((path) => path.replaceAll("\\", "/"))
 			.sort();
-		if (!candidate || pythonPaths.length === 0 || !spec) return undefined;
+		if (!candidate || pythonPaths.length === 0) return undefined;
+		if (!spec) {
+			const reason = "no immutable baseline test or exact independently verified spec proof is available";
+			const receiptDigest = digestAvoPayload({
+				runId: state.runId,
+				candidateId: candidate.candidateId,
+				candidatePayloadDigest: candidate.payloadDigest,
+				candidateWorkspaceDigest: candidate.workspaceDigest,
+				pythonPaths,
+				reason,
+			});
+			const evaluationId = `evaluation-spec-contract-${receiptDigest}`;
+			const existing = state.evaluations.find((receipt) => receipt.evaluationId === evaluationId);
+			if (existing) return existing;
+			return runtime.recordHostEvaluation({
+				evaluationId,
+				candidateId: candidate.candidateId,
+				evaluatorId: "spec_contract",
+				status: "revise",
+				authority: "host",
+				evidenceRefs: [`host:spec-contract:${receiptDigest}`],
+				metrics: {
+					meaningful: false,
+					spec_semantic_evidence: false,
+					workspace_matches_candidate: false,
+					candidate_payload_digest: candidate.payloadDigest,
+					candidate_workspace_digest: candidate.workspaceDigest ?? "missing",
+					spec_contract_digest: "missing",
+					spec_impact_digest: digestAvoPayload({ pythonPaths, reason }),
+					validation_reason: reason,
+				},
+			});
+		}
 
 		let workspaceMatchesCandidate = false;
 		let contractValue: unknown;
@@ -4518,7 +5466,7 @@ export class AgentSession {
 			evaluationId,
 			candidateId: candidate.candidateId,
 			evaluatorId: "spec_contract",
-			status: passed ? "pass" : "inconclusive",
+			status: passed ? "pass" : "revise",
 			authority: "host",
 			evidenceRefs: [
 				`host:spec-contract:${receiptDigest}`,
@@ -4556,6 +5504,34 @@ export class AgentSession {
 		this._recordAvoPythonProbeApplicability();
 		this._recordAvoOnlineEvidence();
 		return runtime.evaluateStopGate();
+	}
+
+	private _evaluateAvoStopGateWithCanonicalRepair(): AvoStopGate {
+		let gate = this._evaluateAvoHostBoundStopGate();
+		const state = this._requireAvoRuntime().getState();
+		const readiness = gate.checks.find((check) => check.id === "canonical_delivery_state");
+		const allOtherChecksPass = gate.checks
+			.filter((check) => check.id !== "canonical_delivery_state")
+			.every((check) => check.passed);
+		if (
+			state.status !== "active" ||
+			state.delivery.phase !== "accepted" ||
+			readiness?.passed !== false ||
+			!allOtherChecksPass ||
+			!this._isRepairableAvoCanonicalMemoryFailure(readiness.reason ?? gate.reasons.join("; "))
+		) {
+			return gate;
+		}
+		try {
+			this._requireAvoRuntime().store.repairCanonicalDeliveryMemory();
+			gate = this._evaluateAvoHostBoundStopGate();
+			if (!gate.passed) {
+				throw new Error(`canonical delivery memory repair did not restore readiness: ${gate.reasons.join("; ")}`);
+			}
+		} catch (error) {
+			this._recordCurrentAvoCanonicalDeliveryFailure(error);
+		}
+		return gate;
 	}
 
 	private _handleAvoSlashCommand(command: SessionSlashCommand): string {
@@ -4691,13 +5667,27 @@ export class AgentSession {
 			const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 			return new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}(?:$|[^A-Za-z0-9_])`).test(specificationText);
 		};
+		const specificationReferencesCallableSyntax = (name: string): boolean => {
+			const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			return new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}\\s*\\(`).test(specificationText);
+		};
 		const specificationDeclaredSignature = (
 			name: string,
-		): { inputDimensions: string[]; signatureDigest: string; fullSignatureDeclared: boolean } | undefined => {
+		):
+			| {
+					inputDimensions: string[];
+					signatureDigest: string;
+					signatureAuthority: "full" | "parameters" | "structural";
+			  }
+			| undefined => {
 			const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-			const match = new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}\\s*\\(([^()\\r\\n]{0,500})\\)`).exec(
+			const definitionMatch = new RegExp(
+				`(?:^|\\r?\\n)[ \\t]*def[ \\t]+${escaped}[ \\t]*\\(([^()\\r\\n]{0,500})\\)[ \\t]*(?:->[ \\t]*([^:\\r\\n]{1,500}?))?[ \\t]*:`,
+			).exec(signatureAuthorityText);
+			const callMatch = new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}\\s*\\(([^()\\r\\n]{0,500})\\)`).exec(
 				signatureAuthorityText,
 			);
+			const match = definitionMatch ?? callMatch;
 			if (!match) return undefined;
 			const parameters = match[1]!.trim()
 				? match[1]!
@@ -4708,14 +5698,25 @@ export class AgentSession {
 			if (!parameters.every((item) => /^\*{0,2}[A-Za-z_][A-Za-z0-9_]*(?:\s*[:=].*)?$/.test(item))) {
 				return undefined;
 			}
-			const inspection = inspectAvoPythonPublicCallables(`def ${name}(${match[1]!}):\n    pass\n`);
+			const returnAnnotation = definitionMatch?.[2]?.trim();
+			const inspection = inspectAvoPythonPublicCallables(
+				`def ${name}(${match[1]!})${returnAnnotation ? ` -> ${returnAnnotation}` : ""}:\n    pass\n`,
+			);
 			const callable = inspection.callables.find((item) => item.name === name);
 			const declaresAnnotationOrDefault = parameters.some((parameter) => /[:=]/.test(parameter));
 			return callable
 				? {
 						inputDimensions: callable.inputDimensions,
-						signatureDigest: declaresAnnotationOrDefault ? callable.signatureDigest : callable.structuralDigest,
-						fullSignatureDeclared: declaresAnnotationOrDefault,
+						signatureDigest: returnAnnotation
+							? callable.signatureDigest
+							: declaresAnnotationOrDefault
+								? callable.parameterSignatureDigest
+								: callable.structuralDigest,
+						signatureAuthority: returnAnnotation
+							? "full"
+							: declaresAnnotationOrDefault
+								? "parameters"
+								: "structural",
 					}
 				: undefined;
 		};
@@ -4728,13 +5729,27 @@ export class AgentSession {
 					: [];
 			}),
 		);
+		const baselineTestPaths = new Set(
+			(state.verificationBaseline?.testFiles ?? []).map((item) => item.path.replaceAll("\\", "/")),
+		);
+		const taskSourcePaths = new Set(state.verificationBaseline?.taskSourcePaths ?? []);
+		const eligibleBaselineEntrypoint = (path: string): boolean =>
+			!baselineTestPaths.has(path) &&
+			(!state.verificationBaseline?.strictTaskSourcePaths || taskSourcePaths.has(path));
 		const baselineEntrypointPaths = [
 			...new Set([
 				...Object.entries(state.verificationBaseline?.pythonCallableDimensions ?? {})
-					.filter(([, callables]) => Object.keys(callables).some(specificationReferences))
+					.filter(
+						([path, callables]) =>
+							eligibleBaselineEntrypoint(path) && Object.keys(callables).some(specificationReferences),
+					)
 					.map(([path]) => path),
 				...Object.entries(state.verificationBaseline?.pythonUninspectableCallables ?? {})
-					.filter(([, names]) => names.some((name) => name === "*" || specificationReferences(name)))
+					.filter(
+						([path, names]) =>
+							eligibleBaselineEntrypoint(path) &&
+							names.some((name) => name === "*" || specificationReferencesCallableSyntax(name)),
+					)
 					.map(([path]) => path),
 			]),
 		];
@@ -4839,7 +5854,11 @@ export class AgentSession {
 						if (
 							declaredSignature &&
 							declaredSignature.signatureDigest !==
-								(declaredSignature.fullSignatureDeclared ? callable.signatureDigest : callable.structuralDigest)
+								(declaredSignature.signatureAuthority === "full"
+									? callable.signatureDigest
+									: declaredSignature.signatureAuthority === "parameters"
+										? callable.parameterSignatureDigest
+										: callable.structuralDigest)
 						) {
 							invalidateCandidateSurface(
 								`${modulePath}: callable ${callable.name} does not match its host-declared public parameter contract`,
@@ -4858,7 +5877,7 @@ export class AgentSession {
 					}),
 			);
 			for (const error of inspection.errors.filter(
-				(item) => item.name === "*" || specificationReferences(item.name),
+				(item) => item.name === "*" || specificationReferencesCallableSyntax(item.name),
 			)) {
 				invalidateCandidateSurface(`${modulePath}: ${error.reason}`);
 			}
@@ -4872,7 +5891,7 @@ export class AgentSession {
 				}
 			}
 			for (const name of (state.verificationBaseline?.pythonUninspectableCallables?.[modulePath] ?? []).filter(
-				(item) => item === "*" || specificationReferences(item),
+				(item) => item === "*" || specificationReferencesCallableSyntax(item),
 			)) {
 				surfaceErrors.push(
 					`specification-named baseline callable ${name} was not safely inspectable in ${modulePath}`,
@@ -5551,6 +6570,14 @@ export class AgentSession {
 	}> {
 		const runtime = this._requireAvoRuntime();
 		const state = runtime.getState();
+		if (
+			state.delivery.phase === "pending" ||
+			state.delivery.phase === "failed" ||
+			state.status === "failed" ||
+			this._avoCanonicalDeliveryFailedRunIds.has(state.runId)
+		) {
+			return { ingested: 0, supervision: state.supervision, errors: [] };
+		}
 		const supervisor = state.supervisor;
 		if (!supervisor) return { ingested: 0, supervision: state.supervision, errors: [] };
 		let ingested = 0;
@@ -5661,6 +6688,17 @@ export class AgentSession {
 					supersedesReviewId: priorReview?.reviewId,
 				});
 				if (
+					parsed.status === "progressing" &&
+					cycle.outcome === "accepted" &&
+					runtime.getState().routing.horizon === "long" &&
+					!this._pendingAvoCanonicalDelivery()
+				) {
+					const clearedState = runtime.getState();
+					const trigger = clearedState.cycles.length % 5 === 0 ? "five_cycles" : "candidate_acceptance";
+					await this._runAvoGenerativeMemoryReflection(cycle.cycleId, trigger);
+					await this._runAvoGenerativeMemoryReconciliation(cycle.cycleId);
+				}
+				if (
 					attemptIndex === 0 &&
 					parsed.status === "watch" &&
 					parsed.detectedPatterns.includes("invalid_adversarial_probe_plan")
@@ -5678,10 +6716,6 @@ export class AgentSession {
 						typeof validationReason === "string" ? validationReason : parsed.reason,
 					);
 					if (correction.error) errors.push(correction.error);
-				}
-				if (parsed.status === "intervene" && runtime.getState().routing.horizon === "long") {
-					await this._runAvoGenerativeMemoryReflection(cycle.cycleId, "supervisor_intervention");
-					await this._runAvoGenerativeMemoryReconciliation(cycle.cycleId);
 				}
 				ingested += 1;
 			} catch (error) {
@@ -5762,6 +6796,15 @@ export class AgentSession {
 
 	async handleAvoHostRequest(type: string, payload: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
 		const runtime = this._requireAvoRuntime();
+		const pendingDelivery = this._pendingAvoCanonicalDelivery();
+		if (type !== "avo.get" && (pendingDelivery || this._isAvoCanonicalDeliveryTerminalFailure())) {
+			const state = runtime.getState();
+			throw new Error(
+				this._isAvoCanonicalDeliveryTerminalFailure()
+					? `AVO_CANONICAL_DELIVERY_FAILED run_id=${state.runId}: the terminal invariant failure is already recorded; no recovery loop is permitted`
+					: `AVO_CANONICAL_DELIVERY_PENDING run_id=${state.runId} candidate_id=${pendingDelivery?.candidateId ?? "unknown"}: only the exact canonical assistant response is permitted`,
+			);
+		}
 		switch (type) {
 			case "avo.initialize": {
 				if (typeof payload.objective !== "string") throw new Error("avo.initialize objective must be a string");
@@ -6317,15 +7360,16 @@ export class AgentSession {
 								process.env[AVO_VERIFICATION_BROKER_PYTHON_AUTHORITY_ENV] === "1",
 							verification_broker_semantic_authority: brokerPythonSemanticAuthority,
 							verification_broker_receipt_digest: verificationBrokerReceipt?.receiptDigest ?? "missing",
-							validation_reason: meaningful
-								? "the same immutable pre-candidate baseline test contract executed and passed afterward"
-								: pythonInProcessSelfCertification
-									? "in-process pytest output cannot certify changed Python code; use an out-of-process verifier or independently verified specification proof"
-									: commandPassed
-										? "coding tests require a proven matching pre-candidate baseline execution"
-										: typeof assessment.metrics.validation_reason === "string"
-											? assessment.metrics.validation_reason
-											: "the coding test command did not produce a passing authoritative result",
+							validation_reason:
+								commandPassed && meaningful
+									? "the same immutable pre-candidate baseline test contract executed and passed afterward"
+									: pythonInProcessSelfCertification
+										? "in-process pytest output cannot certify changed Python code; use an out-of-process verifier or independently verified specification proof"
+										: commandPassed
+											? "coding tests require a proven matching pre-candidate baseline execution"
+											: typeof assessment.metrics.validation_reason === "string"
+												? assessment.metrics.validation_reason
+												: "the coding test command did not produce a passing authoritative result",
 						},
 					};
 				}
@@ -6487,11 +7531,18 @@ export class AgentSession {
 					claim.claimId,
 					claim.claimText,
 					payload.exact_quote,
+					state.objective ?? "",
+					(candidate.claims ?? []).map((item) => item.claimText),
+					candidate.payloadDigest,
 				);
 				const semanticAssessment = combineAvoClaimEvidenceAssessments(
 					lexicalAssessment,
 					independentAssessment.verdict,
 				);
+				const objectiveDigest = createHash("sha256")
+					.update(state.objective ?? "")
+					.digest("hex");
+				const objectiveAddressed = independentAssessment.verdict.objectiveRelation === "addresses";
 				const receiptDigest = createHash("sha256")
 					.update(
 						JSON.stringify({
@@ -6505,6 +7556,8 @@ export class AgentSession {
 							lexicalRelation: lexicalAssessment.relation,
 							independentRelation: independentAssessment.verdict.relation,
 							semanticRelation: semanticAssessment.relation,
+							objectiveDigest,
+							objectiveRelation: independentAssessment.verdict.objectiveRelation,
 						}),
 					)
 					.digest("hex");
@@ -6512,25 +7565,30 @@ export class AgentSession {
 					candidateId: candidate.candidateId,
 					evaluatorId: "external_claim",
 					status:
-						semanticAssessment.relation === "supports"
+						semanticAssessment.relation === "supports" && objectiveAddressed
 							? "pass"
-							: semanticAssessment.relation === "contradicts"
+							: semanticAssessment.relation === "contradicts" ||
+									independentAssessment.verdict.objectiveRelation === "unrelated"
 								? "revise"
 								: "inconclusive",
 					authority: "external",
 					evidenceRefs: [`host:url:${receiptDigest}`, `source:${fetched.url}`],
 					metrics: {
-						meaningful: semanticAssessment.relation === "supports",
+						meaningful: semanticAssessment.relation === "supports" && objectiveAddressed,
 						tool_name: "host_https_fetch",
 						claim_id: claim.claimId,
 						claim_text_digest: createHash("sha256").update(claim.claimText).digest("hex"),
 						semantic_relation: semanticAssessment.relation,
 						semantic_reason: semanticAssessment.reason,
-						semantic_verifier: "host_bound_exact_claim_independent_rlm_v2",
+						semantic_verifier: "host_bound_exact_claim_independent_rlm_v3",
 						lexical_relation: lexicalAssessment.relation,
 						lexical_reason: lexicalAssessment.reason,
 						independent_relation: independentAssessment.verdict.relation,
 						independent_reason: independentAssessment.verdict.reason,
+						objective_relation: independentAssessment.verdict.objectiveRelation,
+						objective_reason: independentAssessment.verdict.objectiveReason,
+						objective_verifier: "host_bound_claim_objective_independent_rlm_v3",
+						objective_digest: objectiveDigest,
 						independent_verifier_child_id: independentAssessment.verifierChildId ?? "unavailable",
 						independent_verifier_model: independentAssessment.verifierModel ?? "unavailable",
 						independent_response_digest: independentAssessment.responseDigest ?? "unavailable",
@@ -6555,6 +7613,7 @@ export class AgentSession {
 						claim_id: claim.claimId,
 						semantic_relation: semanticAssessment.relation,
 						independent_relation: independentAssessment.verdict.relation,
+						objective_relation: independentAssessment.verdict.objectiveRelation,
 						verifier_child_id: independentAssessment.verifierChildId ?? null,
 					},
 				};
@@ -6615,11 +7674,18 @@ export class AgentSession {
 					claim.claimId,
 					claim.claimText,
 					payload.exact_quote,
+					state.objective ?? "",
+					(candidate.claims ?? []).map((item) => item.claimText),
+					candidate.payloadDigest,
 				);
 				const semanticAssessment = combineAvoClaimEvidenceAssessments(
 					lexicalAssessment,
 					independentAssessment.verdict,
 				);
+				const objectiveDigest = createHash("sha256")
+					.update(state.objective ?? "")
+					.digest("hex");
+				const objectiveAddressed = independentAssessment.verdict.objectiveRelation === "addresses";
 				const argumentDigest = createHash("sha256").update(JSON.stringify(call.arguments)).digest("hex");
 				const resultDigest = createHash("sha256")
 					.update(JSON.stringify({ content: result.content, details: result.details, isError: result.isError }))
@@ -6638,6 +7704,8 @@ export class AgentSession {
 							lexicalRelation: lexicalAssessment.relation,
 							independentRelation: independentAssessment.verdict.relation,
 							semanticRelation: semanticAssessment.relation,
+							objectiveDigest,
+							objectiveRelation: independentAssessment.verdict.objectiveRelation,
 						}),
 					)
 					.digest("hex");
@@ -6645,26 +7713,31 @@ export class AgentSession {
 					candidateId: candidate.candidateId,
 					evaluatorId: "external_claim",
 					status:
-						semanticAssessment.relation === "supports"
+						semanticAssessment.relation === "supports" && objectiveAddressed
 							? "pass"
-							: semanticAssessment.relation === "contradicts"
+							: semanticAssessment.relation === "contradicts" ||
+									independentAssessment.verdict.objectiveRelation === "unrelated"
 								? "revise"
 								: "inconclusive",
 					authority: "external",
 					evidenceRefs: [`host:tool:${receiptDigest}`, ...sourceIdentifiers.map((source) => `source:${source}`)],
 					metrics: {
-						meaningful: semanticAssessment.relation === "supports",
+						meaningful: semanticAssessment.relation === "supports" && objectiveAddressed,
 						tool_name: call.name,
 						tool_call_id: call.id,
 						claim_id: claim.claimId,
 						claim_text_digest: createHash("sha256").update(claim.claimText).digest("hex"),
 						semantic_relation: semanticAssessment.relation,
 						semantic_reason: semanticAssessment.reason,
-						semantic_verifier: "host_bound_exact_claim_independent_rlm_v2",
+						semantic_verifier: "host_bound_exact_claim_independent_rlm_v3",
 						lexical_relation: lexicalAssessment.relation,
 						lexical_reason: lexicalAssessment.reason,
 						independent_relation: independentAssessment.verdict.relation,
 						independent_reason: independentAssessment.verdict.reason,
+						objective_relation: independentAssessment.verdict.objectiveRelation,
+						objective_reason: independentAssessment.verdict.objectiveReason,
+						objective_verifier: "host_bound_claim_objective_independent_rlm_v3",
+						objective_digest: objectiveDigest,
 						independent_verifier_child_id: independentAssessment.verifierChildId ?? "unavailable",
 						independent_verifier_model: independentAssessment.verifierModel ?? "unavailable",
 						independent_response_digest: independentAssessment.responseDigest ?? "unavailable",
@@ -6693,12 +7766,17 @@ export class AgentSession {
 						semantic_reason: semanticAssessment.reason,
 						lexical_relation: lexicalAssessment.relation,
 						independent_relation: independentAssessment.verdict.relation,
+						objective_relation: independentAssessment.verdict.objectiveRelation,
 						verifier_child_id: independentAssessment.verifierChildId ?? null,
 					},
 				};
 			}
 			case "avo.cycle.complete": {
 				const cycleInput = parseAvoCycleInput(payload.cycle);
+				// Integrity is part of the same closed evidence set as cycle derivation.
+				// Record drift before semantic preflight so stale work can never look
+				// provisionally acceptable while the host is deciding whether to close it.
+				this._recordAvoCandidateIntegrityFailure(cycleInput.candidateId);
 				const preflightState = runtime.getState();
 				const preflightCandidate = preflightState.candidates.find(
 					(item) => item.candidateId === cycleInput.candidateId,
@@ -6708,38 +7786,27 @@ export class AgentSession {
 					preflightCandidate !== undefined &&
 					["patch", "implementation", "configuration", "artifact"].includes(preflightCandidate.kind) &&
 					preflightCandidate.workspaceChangedPaths?.some((path) => path.endsWith(".py")) === true;
-				const hasImmutableSemanticTest = preflightState.evaluations.some(
-					(receipt) =>
-						receipt.candidateId === cycleInput.candidateId &&
-						receipt.issuedBy === "host" &&
-						receipt.evaluatorId === "test" &&
-						receipt.status === "pass" &&
-						receipt.metrics.meaningful === true &&
-						receipt.metrics.baseline_execution_matched === true,
-				);
+				const hasImmutableSemanticTest =
+					preflightCandidate !== undefined &&
+					preflightState.evaluations.some((receipt) =>
+						isAvoImmutableSemanticTestReceipt(receipt, preflightCandidate, preflightState),
+					);
 				if (requiresIndependentPythonSemantics && !hasImmutableSemanticTest) {
-					const specProof = this._recordAvoSpecSemanticEvidence(cycleInput.candidateId);
-					if (specProof?.status !== "pass" || specProof.metrics.spec_semantic_evidence !== true) {
-						throw new Error(
-							`AVO Python cycle is blocked before completion: ${String(specProof?.metrics.validation_reason ?? "no immutable baseline test or exact independently verified spec proof is available")}`,
-						);
-					}
+					// A candidate may earn acceptance if the independent exact-spec verifier
+					// succeeds. If it cannot, the adapter remains non-canonical and the cycle
+					// must still close so a material successor is reachable.
+					this._recordAvoSpecSemanticEvidence(cycleInput.candidateId);
 				}
 				this._recordAvoCandidateIntegrityFailure(cycleInput.candidateId);
 				const result = runtime.completeCycle(cycleInput);
 				const stateAfterCycle = runtime.getState();
 				let memoryReflection: Record<string, unknown> | undefined;
-				if (stateAfterCycle.routing.horizon === "long") {
-					const trigger = stateAfterCycle.cycles.length % 5 === 0 ? "five_cycles" : "candidate_acceptance";
-					memoryReflection =
-						result.cycle.outcome === "accepted"
-							? {
-									reflection: await this._runAvoGenerativeMemoryReflection(result.cycle.cycleId, trigger),
-									reconciliation: await this._runAvoGenerativeMemoryReconciliation(result.cycle.cycleId),
-								}
-							: stateAfterCycle.cycles.length % 5 === 0
-								? await runtime.reflectMemory(trigger, result.cycle.cycleId)
-								: undefined;
+				if (
+					stateAfterCycle.routing.horizon === "long" &&
+					result.cycle.outcome !== "accepted" &&
+					stateAfterCycle.cycles.length % 5 === 0
+				) {
+					memoryReflection = await runtime.reflectMemory("five_cycles", result.cycle.cycleId);
 				}
 				if (!result.activateSupervisor) return { ...result, memoryReflection };
 				let supervisor: { rlmChildId: string; name: string };
@@ -6894,21 +7961,29 @@ export class AgentSession {
 			case "avo.checkpoint":
 				return { checkpoint: runtime.getState().checkpoints.at(-1) ?? null };
 			case "avo.stop_gate":
-				await this._collectAvoSupervisorResults();
-				{
-					const stopGate = this._evaluateAvoHostBoundStopGate();
-					await this._queueAvoCanonicalDeliveryAfterPassingGate(stopGate);
+				return await this._withAvoCanonicalDeliverySerialization(async () => {
+					await this._collectAvoSupervisorResults();
+					if (this._disposed || this._disposing || !this._avoRuntime) {
+						throw new Error("AVO session was disposed");
+					}
+					const stopGate = this._evaluateAvoStopGateWithCanonicalRepair();
+					await this._queueAvoCanonicalDeliveryAfterPassingGateLocked(stopGate);
 					return { stop_gate: stopGate };
-				}
+				});
 			case "avo.complete": {
-				await this._collectAvoSupervisorResults();
-				const stopGate = this._evaluateAvoHostBoundStopGate();
-				await this._queueAvoCanonicalDeliveryAfterPassingGate(stopGate);
-				return {
-					state: runtime.getState(),
-					stop_gate: stopGate,
-					completion_deferred_to_host_delivery: true,
-				};
+				return await this._withAvoCanonicalDeliverySerialization(async () => {
+					await this._collectAvoSupervisorResults();
+					if (this._disposed || this._disposing || !this._avoRuntime) {
+						throw new Error("AVO session was disposed");
+					}
+					const stopGate = this._evaluateAvoStopGateWithCanonicalRepair();
+					await this._queueAvoCanonicalDeliveryAfterPassingGateLocked(stopGate);
+					return {
+						state: runtime.getState(),
+						stop_gate: stopGate,
+						completion_deferred_to_host_delivery: true,
+					};
+				});
 			}
 			default:
 				throw new Error(`unknown AVO request type "${type}"`);
@@ -7906,6 +8981,7 @@ export class AgentSession {
 		if (this._enforceAvoCompletion && this._avoRuntime?.getState().status === "completed") {
 			return [];
 		}
+		if (this._pendingAvoCanonicalDelivery() || this._isAvoCanonicalDeliveryTerminalFailure()) return [];
 		const arrivalEpoch = this._sessionInputArrivalEpoch;
 		const goalSnapshot = this._goalState;
 		const goalAccountingStartedAt = this._goalAccountingStartedAt;
@@ -7936,44 +9012,88 @@ export class AgentSession {
 		return autonomousMessage ? [autonomousMessage] : [];
 	}
 
-	private async _assessAvoCanonicalDelivery(context: GetContinuationMessagesContext, signal?: AbortSignal) {
+	private async _assessAvoCanonicalDeliveryLocked(
+		context: Pick<GetContinuationMessagesContext, "message" | "newMessages">,
+		signal?: AbortSignal,
+	) {
 		if (
 			!this._enforceAvoCompletion ||
 			!this._avoRuntime ||
 			this._rlmDepth !== 0 ||
 			signal?.aborted ||
-			context.message.stopReason === "error" ||
 			context.message.stopReason === "aborted"
 		) {
 			return undefined;
 		}
 		const initial = this._avoRuntime.getState();
 		if (!initial.objective || initial.status !== "active") return undefined;
-		await this._collectAvoSupervisorResults();
-		const gate = this._evaluateAvoHostBoundStopGate();
-		const state = this._avoRuntime.getState();
-		const acceptedCandidateIds = new Set(
-			state.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
-		);
-		const adapter = this._avoRuntime.adapters.get(state.routing.environment);
-		const acceptedCandidate = [...state.candidates].reverse().find(
-			(candidate) =>
-				acceptedCandidateIds.has(candidate.candidateId) &&
-				adapter.deriveEvaluationState(
-					candidate,
-					state.evaluations.filter((receipt) => receipt.candidateId === candidate.candidateId),
-					state,
-				).canonical,
-		);
+		let gate: AvoStopGate;
+		let expectedGeneration = captureAvoCanonicalDeliveryGeneration(initial);
+		if (initial.delivery.phase === "pending") {
+			if (!expectedGeneration) return undefined;
+			// `pending` is a persisted receipt that the full mutable stop gate
+			// already passed. Never re-run integrity/evaluator projection here:
+			// canonical delivery is a digest comparison plus store finalization.
+			gate = {
+				passed: true,
+				checks: [{ id: "canonical_delivery_pending", label: "Persisted canonical delivery", passed: true }],
+				reasons: [],
+			};
+		} else {
+			await this._collectAvoSupervisorResults();
+			if (this._disposed || this._disposing || !this._avoRuntime) return undefined;
+			const postSupervisorState = this._avoRuntime.getState();
+			if (postSupervisorState.status !== "active") return undefined;
+			if (postSupervisorState.delivery.phase === "pending") {
+				expectedGeneration = captureAvoCanonicalDeliveryGeneration(postSupervisorState);
+				if (!expectedGeneration) return undefined;
+				gate = {
+					passed: true,
+					checks: [{ id: "canonical_delivery_pending", label: "Persisted canonical delivery", passed: true }],
+					reasons: [],
+				};
+			} else {
+				// Whether or not the generation changed during supervisor collection,
+				// project the full gate from the post-await owner only.
+				expectedGeneration = captureAvoCanonicalDeliveryGeneration(postSupervisorState);
+				if (postSupervisorState.delivery.phase === "accepted" && !expectedGeneration) return undefined;
+				gate = this._evaluateAvoStopGateWithCanonicalRepair();
+			}
+		}
+		let state = this._avoRuntime.getState();
+		if (state.status !== "active") return undefined;
+		let completionError: Error | undefined;
+		if (gate.passed && state.delivery.phase !== "pending") {
+			try {
+				expectedGeneration = await this._beginAvoCanonicalDeliveryLocked(gate);
+				if (this._disposed || this._disposing || !this._avoRuntime) return undefined;
+				state = this._avoRuntime.getState();
+				if (!expectedGeneration || !matchesAvoCanonicalDeliveryGeneration(state, expectedGeneration, "pending")) {
+					return undefined;
+				}
+			} catch (error) {
+				completionError = error instanceof Error ? error : new Error(String(error));
+			}
+			if (!completionError) {
+				this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+				this.agent.state.systemPrompt = this._baseSystemPrompt;
+			}
+		}
+		const acceptedCandidate = state.delivery.candidateId
+			? state.candidates.find((candidate) => candidate.candidateId === state.delivery.candidateId)
+			: undefined;
 		// Provider-authored search provenance is visible evidence, not model-authored
 		// candidate text. Keep it out of the exact canonical-delivery digest while
 		// retaining the structured block for the independent online-evidence gate.
-		const assistantDigest = digestAvoDeliveryText(readAvoAssistantDeliveryText(context.message));
+		const assistantText = readAvoAssistantDeliveryText(context.message);
+		const assistantDigest = digestAvoDeliveryText(assistantText);
 		const deliveryMatches =
 			gate.passed &&
+			state.delivery.phase === "pending" &&
 			acceptedCandidate?.deliveryDigest !== undefined &&
+			acceptedCandidate.deliveryDigest === state.delivery.deliveryDigest &&
 			assistantDigest === acceptedCandidate.deliveryDigest;
-		return { state, gate, acceptedCandidate, assistantDigest, deliveryMatches };
+		return { state, gate, acceptedCandidate, assistantText, assistantDigest, deliveryMatches, completionError };
 	}
 
 	private _assessAvoProgressWatchdog(
@@ -8031,13 +9151,36 @@ export class AgentSession {
 	}
 
 	private async _completeAvoCanonicalDeliveryIfMatching(
-		context: GetContinuationMessagesContext,
+		context: Pick<GetContinuationMessagesContext, "message" | "newMessages">,
 		signal?: AbortSignal,
 	): Promise<boolean> {
-		const delivery = await this._assessAvoCanonicalDelivery(context, signal);
-		if (!delivery?.deliveryMatches || !this._avoRuntime) return false;
-		this._avoRuntime.store.complete(delivery.gate);
+		return this._withAvoCanonicalDeliverySerialization(() =>
+			this._completeAvoCanonicalDeliveryIfMatchingLocked(context, signal),
+		);
+	}
+
+	private async _completeAvoCanonicalDeliveryIfMatchingLocked(
+		context: Pick<GetContinuationMessagesContext, "message" | "newMessages">,
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		const delivery = await this._assessAvoCanonicalDeliveryLocked(context, signal);
+		if (!delivery || !this._avoRuntime) return false;
+		if (delivery.completionError) {
+			this._recordObservedAvoCanonicalDeliveryFailure(delivery.completionError, delivery.state);
+			return false;
+		}
+		if (!delivery.deliveryMatches) return false;
+		try {
+			this._completeAvoCanonicalDelivery(delivery.assistantText);
+		} catch (error) {
+			this._recordObservedAvoCanonicalDeliveryFailure(error, delivery.state);
+			return false;
+		}
 		this._discardObsoleteAvoCompletionInputs(delivery.state, { includeCanonicalDelivery: false });
+		this._avoCanonicalDeliveryQueuedRunId = undefined;
+		this._avoCanonicalDeliveryQueuedBinding = undefined;
+		this._avoCanonicalDeliveryDirectBinding = undefined;
+		this._avoCanonicalDeliveryAttemptBinding = undefined;
 		return true;
 	}
 
@@ -8045,12 +9188,73 @@ export class AgentSession {
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
 	): Promise<CustomMessage | undefined> {
-		const delivery = await this._assessAvoCanonicalDelivery(context, signal);
+		return this._withAvoCanonicalDeliverySerialization(() =>
+			this._getAvoCompletionContinuationLocked(context, signal),
+		);
+	}
+
+	private async _getAvoCompletionContinuationLocked(
+		context: GetContinuationMessagesContext,
+		signal?: AbortSignal,
+	): Promise<CustomMessage | undefined> {
+		const delivery = await this._assessAvoCanonicalDeliveryLocked(context, signal);
 		if (!delivery || !this._avoRuntime) return undefined;
-		const { state, gate, acceptedCandidate, assistantDigest, deliveryMatches } = delivery;
+		const { state, gate, acceptedCandidate, assistantText, assistantDigest, deliveryMatches, completionError } =
+			delivery;
+		if (completionError) {
+			this._recordObservedAvoCanonicalDeliveryFailure(completionError, state);
+			return undefined;
+		}
 		if (deliveryMatches) {
-			this._avoRuntime.store.complete(gate);
+			try {
+				this._completeAvoCanonicalDelivery(assistantText);
+			} catch (error) {
+				this._recordObservedAvoCanonicalDeliveryFailure(error, state);
+				return undefined;
+			}
 			this._discardObsoleteAvoCompletionInputs(state, { includeCanonicalDelivery: false });
+			this._avoCanonicalDeliveryQueuedRunId = undefined;
+			this._avoCanonicalDeliveryQueuedBinding = undefined;
+			this._avoCanonicalDeliveryDirectBinding = undefined;
+			this._avoCanonicalDeliveryAttemptBinding = undefined;
+			return undefined;
+		}
+		if (this._isAvoCanonicalDeliveryTerminalFailure()) return undefined;
+		if (state.delivery.phase === "pending") {
+			const pendingBinding = parseAvoCanonicalDeliveryBinding(state.delivery);
+			if (!pendingBinding) {
+				this._recordMalformedPendingAvoCanonicalDeliveryFailure(
+					new Error("AVO completion is blocked: canonical delivery record is inconsistent"),
+				);
+				return undefined;
+			}
+			if (
+				!matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryQueuedBinding, pendingBinding) &&
+				!matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryDirectBinding, pendingBinding) &&
+				!matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryAttemptBinding, pendingBinding)
+			) {
+				const canonicalMessage = this._createAvoCanonicalDeliveryMessage(state);
+				if (!canonicalMessage) {
+					this._recordAvoCanonicalDeliveryFailure(
+						new Error("AVO completion is blocked: canonical delivery record is inconsistent"),
+						pendingBinding,
+					);
+					return undefined;
+				}
+				this._discardObsoleteAvoCompletionInputs(state);
+				this._clearQueuedAutonomousContinuations();
+				this._clearQueuedGoalContexts();
+				this._fenceAvoCanonicalDeliveryInputs();
+				this._avoCanonicalDeliveryDirectBinding = pendingBinding;
+				return canonicalMessage;
+			}
+			// `agent_end` owns deterministic host fallback for a provider failure
+			// of this exact request. It must not become an AVO repair continuation.
+			if (context.message.stopReason === "error") return undefined;
+			this._recordAvoCanonicalDeliveryFailure(
+				new Error("the assistant did not return the accepted candidate's exact canonical delivery"),
+				pendingBinding,
+			);
 			return undefined;
 		}
 		// AVO completion repair is an autonomous continuation path too. It runs
@@ -8264,6 +9468,14 @@ export class AgentSession {
 		if (event.type !== "agent_end" || this._retryPromise) {
 			return;
 		}
+		const pendingDelivery = this._pendingAvoCanonicalDelivery();
+		const pendingBinding = parseAvoCanonicalDeliveryBinding(pendingDelivery);
+		if (
+			pendingBinding &&
+			matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryAttemptBinding, pendingBinding)
+		) {
+			return;
+		}
 
 		const settings = this.settingsManager.getRetrySettings();
 		if (!settings.enabled) {
@@ -8351,6 +9563,17 @@ export class AgentSession {
 		if (event.type === "message_start" && startsAgentRun(event.message)) {
 			this._overflowRecovery = "idle";
 		}
+		if (
+			event.type === "message_start" &&
+			event.message.role === "custom" &&
+			event.message.customType === "avo_canonical_delivery_required"
+		) {
+			const binding = parseAvoCanonicalDeliveryBinding(event.message.details);
+			if (binding && matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryDirectBinding, binding)) {
+				this._avoCanonicalDeliveryDirectBinding = undefined;
+			}
+			this._avoCanonicalDeliveryAttemptBinding = binding;
+		}
 
 		await this._emitExtensionEvent(event);
 		if (event.type === "message_start" || event.type === "message_end") {
@@ -8390,10 +9613,19 @@ export class AgentSession {
 				this._lastAssistantMessage = event.message;
 
 				const assistantMsg = event.message as AssistantMessage;
+				const pendingDelivery = this._pendingAvoCanonicalDelivery();
+				const pendingBinding = parseAvoCanonicalDeliveryBinding(pendingDelivery);
+				const canonicalDeliveryAttempt =
+					pendingBinding !== undefined &&
+					matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryAttemptBinding, pendingBinding);
 				if (assistantMsg.stopReason !== "error") {
 					addAutonomousUsage(this._autonomousState, assistantMsg.usage);
 				}
-				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") {
+				if (
+					!canonicalDeliveryAttempt &&
+					assistantMsg.stopReason !== "error" &&
+					assistantMsg.stopReason !== "aborted"
+				) {
 					this._assistantTurnsSinceAutoRefine++;
 					// In serialized mode, kick off background refinement planning
 					// immediately after the primary stream finishes, while tools
@@ -8420,7 +9652,7 @@ export class AgentSession {
 					this._retryAttempt = 0;
 					this._retryAuthFailureSources = [];
 				}
-				if (this._accountGoalUsageForAssistantMessage(assistantMsg)) {
+				if (!canonicalDeliveryAttempt && this._accountGoalUsageForAssistantMessage(assistantMsg)) {
 					const message = createGoalContextMessage(this._goalState, "budget_limit");
 					const normalized = normalizeMessageContent(message.content);
 					await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
@@ -8441,6 +9673,56 @@ export class AgentSession {
 				(this._retryPromise ? this._findLastAssistantInMessages(event.messages) : undefined);
 			this._lastAssistantMessage = undefined;
 			if (!msg) {
+				this._resolveRetry();
+				return;
+			}
+			const avoTerminalState = this._enforceAvoCompletion ? this._avoRuntime?.getState() : undefined;
+			if (avoTerminalState && this._avoCanonicalDeliveryFailedRunIds.has(avoTerminalState.runId)) {
+				this._finishActiveRetryWithFailure(msg);
+				this._resolveRetry();
+				return;
+			}
+			if (avoTerminalState?.status === "completed" || avoTerminalState?.delivery.phase === "delivered") {
+				// Canonical delivery was finalized at the turn boundary. Nothing after
+				// that boundary may start compaction, refinement, a provider retry, or
+				// another autonomous/goal continuation.
+				this._resolveRetry();
+				return;
+			}
+			if (avoTerminalState?.status === "failed" || avoTerminalState?.delivery.phase === "failed") {
+				this._finishActiveRetryWithFailure(msg);
+				this._resolveRetry();
+				return;
+			}
+			const pendingDelivery = this._pendingAvoCanonicalDelivery();
+			const pendingBinding = parseAvoCanonicalDeliveryBinding(pendingDelivery);
+			if (
+				pendingBinding &&
+				matchesAvoCanonicalDeliveryBinding(this._avoCanonicalDeliveryAttemptBinding, pendingBinding)
+			) {
+				const completed = await this._completeAvoCanonicalDeliveryIfMatching({
+					message: msg,
+					newMessages: [msg],
+				});
+				const hostFallbackCompleted =
+					!completed && msg.stopReason === "error"
+						? this._completeAvoCanonicalDeliveryFromHostFallback(msg, pendingBinding)
+						: false;
+				if (hostFallbackCompleted) {
+					this._resolveRetry();
+					return;
+				}
+				if (!completed && !this._isAvoCanonicalDeliveryTerminalFailure()) {
+					this._recordAvoCanonicalDeliveryFailure(
+						new Error(
+							msg.stopReason === "error"
+								? `canonical delivery provider failed: ${msg.errorMessage ?? "unknown provider error"}`
+								: "the assistant did not return the accepted candidate's exact canonical delivery",
+						),
+						pendingBinding,
+					);
+				}
+				this._finishActiveRetryWithFailure(msg);
 				this._resolveRetry();
 				return;
 			}
@@ -9204,10 +10486,20 @@ export class AgentSession {
 
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const avoPrompt = this._avoRuntime
-			? buildAvoRuntimePrompt(this._avoRuntime.getState(), this._avoMemoryContext)
-			: undefined;
+		const avoState = this._avoRuntime?.getState();
+		const avoPrompt = avoState ? buildAvoRuntimePrompt(avoState, this._avoMemoryContext) : undefined;
+		const avoDeliveryPrompt =
+			avoState?.delivery.phase === "pending"
+				? [
+						`AVO_CANONICAL_DELIVERY_PENDING run_id=${avoState.runId} candidate_id=${avoState.delivery.candidateId ?? "unknown"}.`,
+						"This persisted terminal phase survived process restart. Do not use tools, create candidates, start supervisors or RLM children, evaluate, reflect, reconcile, retry task work, or answer a newer queued task.",
+						"Return only the exact canonical delivery already bound by the host. No preface, suffix, explanation, or decoration is permitted.",
+					].join("\n")
+				: avoState?.delivery.phase === "failed" || avoState?.status === "failed"
+					? `AVO_CANONICAL_DELIVERY_FAILED run_id=${avoState.runId}. The persisted invariant failure is terminal; do not re-enter AVO or invoke any provider, tool, supervisor, or RLM recovery loop.`
+					: undefined;
 		const appendSystemPromptParts = [...loaderAppendSystemPrompt, ...(avoPrompt ? [avoPrompt] : [])];
+		if (avoDeliveryPrompt) appendSystemPromptParts.push(avoDeliveryPrompt);
 		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;
 		const loadedSkills = this._modelVisibleSkills();
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
@@ -9287,6 +10579,7 @@ export class AgentSession {
 	}
 
 	private async _runPreTurnCompaction(): Promise<void> {
+		if (this._pendingAvoCanonicalDelivery()) return;
 		const lastAssistant = this._findLastAssistantMessage();
 		if (lastAssistant) await this._checkCompaction(lastAssistant, false, false);
 	}
@@ -9296,8 +10589,9 @@ export class AgentSession {
 		steps: CommitPreparationSteps<TPrepared, TCommitted>,
 	): Promise<TCommitted | undefined> {
 		if (
-			policy.initialRefineBarrier === "always" ||
-			(policy.initialRefineBarrier === "ifInFlight" && this._refineInFlight)
+			!this._pendingAvoCanonicalDelivery() &&
+			(policy.initialRefineBarrier === "always" ||
+				(policy.initialRefineBarrier === "ifInFlight" && this._refineInFlight))
 		) {
 			await this._waitForRefineIdle();
 		}
@@ -9318,8 +10612,9 @@ export class AgentSession {
 		steps.beforeFinalRefineBarrier?.(prepared);
 		let passedFinalRefineBarrier = false;
 		if (
-			policy.finalRefineBarrier === "always" ||
-			(policy.finalRefineBarrier === "ifInFlight" && this._refineInFlight)
+			!this._pendingAvoCanonicalDelivery() &&
+			(policy.finalRefineBarrier === "always" ||
+				(policy.finalRefineBarrier === "ifInFlight" && this._refineInFlight))
 		) {
 			await this._waitForRefineIdle();
 			passedFinalRefineBarrier = true;
@@ -9740,10 +11035,18 @@ export class AgentSession {
 					return;
 				}
 
+				const canonicalDeliveryPending = this._pendingAvoCanonicalDelivery() !== undefined;
+				if (canonicalDeliveryPending) {
+					await this._ensurePersistedAvoCanonicalDeliveryAction();
+					this._scheduleSessionInputPump();
+				}
 				const queueForStreaming = this.isStreaming;
 				const queueForBusy = options?.queueIfBusy === true && this._isBusyForSessionInput("preflight");
-				const visibleQueued = queueForStreaming || queueForBusy;
-				if (visibleQueued && !options?.streamingBehavior) {
+				// A persisted pending delivery owns the next provider turn even after a
+				// process restart. Genuine user work is retained behind it and starts a
+				// fresh AVO run only after canonical delivery terminates.
+				const visibleQueued = queueForStreaming || queueForBusy || canonicalDeliveryPending;
+				if (visibleQueued && !canonicalDeliveryPending && !options?.streamingBehavior) {
 					const stateDescription = queueForStreaming ? "Agent is already processing" : "Agent has queued work";
 					throw new Error(
 						`${stateDescription}. Specify streamingBehavior ('steer' or 'followUp') to queue the message.`,
@@ -9993,7 +11296,18 @@ export class AgentSession {
 			throw new Error(`Unsupported session action recovery format version: ${snapshot.formatVersion}`);
 		}
 		const actionIds = new Set(this._actionStore.ownedActions().map((action) => action.id));
-		const actions = snapshot.actions.map((recovered): QueuedSessionAction => {
+		const avoState = this._rlmDepth === 0 ? this._avoRuntime?.getState() : undefined;
+		const closeRecoveredInternalWork =
+			avoState !== undefined &&
+			(avoState.delivery.phase === "pending" ||
+				avoState.delivery.phase === "delivered" ||
+				avoState.delivery.phase === "failed" ||
+				avoState.status === "completed" ||
+				avoState.status === "failed");
+		const recoverableActions = closeRecoveredInternalWork
+			? snapshot.actions.filter((action) => action.source !== "internal")
+			: snapshot.actions;
+		const actions = recoverableActions.map((recovered): QueuedSessionAction => {
 			if (actionIds.has(recovered.id)) throw new Error(`Duplicate session action id: ${recovered.id}`);
 			actionIds.add(recovered.id);
 			if (
@@ -10408,6 +11722,20 @@ export class AgentSession {
 		if (this._sessionInputAdmissionPauses.size > 0) {
 			throw new Error("Cannot admit a session action while session input admission is paused.");
 		}
+		if (action.source === "internal" && this._rlmDepth === 0 && this._avoRuntime) {
+			const state = this._avoRuntime.getState();
+			const pending = state.status === "active" && state.delivery.phase === "pending";
+			const terminal =
+				state.delivery.phase === "delivered" ||
+				state.delivery.phase === "failed" ||
+				state.status === "completed" ||
+				state.status === "failed";
+			if ((pending && !this._isAvoCanonicalDeliveryAction(action)) || terminal) {
+				throw new Error(
+					`Cannot admit internal session work while AVO canonical delivery phase=${state.delivery.phase}.`,
+				);
+			}
+		}
 		const coalescedOwner = options.restore ? undefined : this._coalescedFollowUpOwner(action);
 		if (coalescedOwner) {
 			if (action.agentMessageId !== coalescedOwner.agentMessageId) {
@@ -10464,6 +11792,7 @@ export class AgentSession {
 			resumeIfIdle?: boolean;
 			source?: InputSource | "internal";
 			front?: boolean;
+			queueVisible?: boolean;
 		} = {},
 	): Promise<boolean> {
 		const action = this._createPreparedTurnAction(schedule, text, images, options);
@@ -10533,9 +11862,17 @@ export class AgentSession {
 		try {
 			while (!this._disposed && !this._disposing && this._hasSelectableSessionInput()) {
 				await this.agent.waitForIdle();
-				const preselected = this._actionStore
-					.activeActions()
-					.find((action) => action.lifecycle.state === "selected");
+				let preselected = this._actionStore.activeActions().find((action) => action.lifecycle.state === "selected");
+				if (this._pendingAvoCanonicalDelivery()) {
+					if (preselected && !this._isAvoCanonicalDeliveryAction(preselected)) {
+						this._actionStore.rollback(preselected);
+						preselected = undefined;
+						this._notifySessionInputCheckpointChange();
+						this._emitQueueUpdate();
+					}
+					await this._ensurePersistedAvoCanonicalDeliveryAction();
+					preselected = this._actionStore.activeActions().find((action) => action.lifecycle.state === "selected");
+				}
 				if (epoch !== this._sessionInputPumpEpoch) {
 					if (preselected) {
 						this._actionStore.rollback(preselected);
@@ -10566,7 +11903,7 @@ export class AgentSession {
 
 				const mode = first.delivery === "next_turn_boundary" ? this.steeringMode : this.followUpMode;
 				const actions: QueuedSessionAction[] = [first];
-				while (!preselected && mode === "all") {
+				while (!preselected && mode === "all" && !this._pendingAvoCanonicalDelivery()) {
 					const next = this._actionStore.queuedActions(first.delivery)[0];
 					if (
 						!next ||
@@ -11184,7 +12521,18 @@ export class AgentSession {
 		}
 		const clearableIds = new Set(clearable.map((action) => action.id));
 		this._cancelSessionActions((action) => clearableIds.has(action.id), agentMessageError);
-		this.agent.clearAllQueues();
+		const pendingBinding = parseAvoCanonicalDeliveryBinding(this._pendingAvoCanonicalDelivery());
+		if (pendingBinding) {
+			this.agent.removeQueuedMessages(
+				(message) =>
+					message.role !== "custom" ||
+					message.customType !== "avo_canonical_delivery_required" ||
+					!matchesAvoCanonicalDeliveryBinding(message.details, pendingBinding),
+			);
+			this._fenceAvoCanonicalDeliveryInputs();
+		} else {
+			this.agent.clearAllQueues();
+		}
 		this._emitQueueUpdate();
 		return { steering, followUp };
 	}
@@ -12207,6 +13555,9 @@ export class AgentSession {
 	}
 
 	async compact(customInstructions?: string, options: { skipAbort?: boolean } = {}): Promise<CompactionResult> {
+		if (this._pendingAvoCanonicalDelivery() || this._isAvoCanonicalDeliveryTerminalFailure()) {
+			throw new Error("AVO canonical delivery is terminal: compaction is closed");
+		}
 		if (options.skipAbort && this.isStreaming) {
 			throw new Error("Cannot compact without aborting while the agent is running.");
 		}
@@ -12471,7 +13822,11 @@ export class AgentSession {
 	}
 
 	private _scheduleAutoRefineAfterAgentEnd(): void {
-		if (!this._autoRefineAllowedForSession()) {
+		if (
+			!this._autoRefineAllowedForSession() ||
+			this._pendingAvoCanonicalDelivery() ||
+			this._avoRuntime?.getState().status === "completed"
+		) {
 			return;
 		}
 		if (this._pendingAutoRefineReview) {
@@ -12529,6 +13884,10 @@ export class AgentSession {
 	}
 
 	private async _runScheduledPostCompactionContinue(): Promise<void> {
+		if (this._pendingAvoCanonicalDelivery() || this._isAvoCanonicalDeliveryTerminalFailure()) {
+			this._cancelPostCompactionContinue();
+			return;
+		}
 		await this._waitForRefineIdle();
 		if (!this._postCompactionContinuationScheduled) {
 			return;
@@ -12632,6 +13991,10 @@ export class AgentSession {
 			return;
 		}
 		if (!this._autoRefineAllowedForSession()) {
+			this._discardPendingAutoRefine();
+			return;
+		}
+		if (this._pendingAvoCanonicalDelivery() || this._avoRuntime?.getState().status === "completed") {
 			this._discardPendingAutoRefine();
 			return;
 		}
@@ -13209,6 +14572,14 @@ export class AgentSession {
 		skipAbortedCheck = true,
 		queueAutonomousContinuation = true,
 	): Promise<boolean> {
+		const avoDelivery = this._avoRuntime?.getState().delivery;
+		if (
+			avoDelivery &&
+			(avoDelivery.phase === "pending" || avoDelivery.phase === "delivered" || avoDelivery.phase === "failed")
+		) {
+			this._pendingRequestedCompaction = undefined;
+			return false;
+		}
 		// An abort drops any compaction the model requested this turn, even on the
 		// pre-prompt path (skipAbortedCheck=false) which continues to threshold checks.
 		if (assistantMessage.stopReason === "aborted") {
@@ -15191,6 +16562,16 @@ export class AgentSession {
 		spawnCode?: string,
 		internalOptions: { allowedToolNames?: string[] } = {},
 	): Promise<RlmSpawnHandle> {
+		const assertDeliveryOpen = () => {
+			const pendingDelivery = this._pendingAvoCanonicalDelivery();
+			if (!pendingDelivery && !this._isAvoCanonicalDeliveryTerminalFailure()) return;
+			throw new Error(
+				pendingDelivery
+					? `AVO_CANONICAL_DELIVERY_PENDING run_id=${pendingDelivery.runId}: RLM child creation is closed until canonical delivery terminates`
+					: "AVO_CANONICAL_DELIVERY_FAILED: RLM child creation is closed for this terminal run",
+			);
+		};
+		assertDeliveryOpen();
 		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
@@ -15218,6 +16599,9 @@ export class AgentSession {
 		} finally {
 			if (requestedSessionName) this._pendingRlmSubagentSessionNames.delete(requestedSessionName);
 		}
+		// Model discovery/authentication is asynchronous. Recheck the persisted
+		// delivery phase before allocating or launching any child runtime.
+		assertDeliveryOpen();
 		if (requestedThinkingLevel !== undefined) {
 			const supported = getSupportedThinkingLevels(modelSelection.model) as ThinkingLevel[];
 			if (!supported.includes(requestedThinkingLevel)) {
@@ -15232,6 +16616,7 @@ export class AgentSession {
 		const childNodeId = basename(childSessionDir);
 		const sessionName = requestedSessionName ?? createDefaultRlmSubagentSessionName(prompt, childNodeId);
 		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
+		assertDeliveryOpen();
 		const startedAt = Date.now();
 		const parentAssistantForUsage = this._findLastAssistantMessage();
 		const label = rlmChildLabel(prompt);
@@ -15351,6 +16736,11 @@ export class AgentSession {
 			let childRuntime: RlmSubagentRuntime | undefined;
 			try {
 				childRuntime = await this._createRlmSubagentRuntime(subagentOptions);
+				// Runtime construction is host-controlled and asynchronous. Delivery
+				// may have become pending while it was in flight, so close this TOCTOU
+				// window before publishing or prompting the child.
+				assertDeliveryOpen();
+				throwIfCancelled();
 				const child = childRuntime.session;
 				if (run.status === "cancelled") throw new Error(run.error ?? "RLM child cancelled");
 				if (child.sessionName !== sessionName) child.setSessionName(sessionName);
@@ -15423,6 +16813,12 @@ export class AgentSession {
 				});
 				run.unsubscribe = unsubscribeChildEvents;
 				const content = `[task from parent]\n\n${prompt}`;
+				const parentActiveSessionId = await this._currentActiveSessionId();
+				// Agent discovery is another asynchronous host boundary. Recheck both
+				// the persisted delivery phase and local cancellation immediately before
+				// the first child provider call.
+				assertDeliveryOpen();
+				throwIfCancelled();
 				const spawnMessage: AgentSessionMessage = {
 					role: "custom",
 					customType: AGENT_MESSAGE_CUSTOM_TYPE,
@@ -15434,12 +16830,13 @@ export class AgentSession {
 						from: {
 							sessionId: this.sessionId,
 							sessionName: this.sessionName,
-							activeSessionId: await this._currentActiveSessionId(),
+							activeSessionId: parentActiveSessionId,
 						},
 						fromRelationship: "parent",
 					},
 					timestamp: Date.now(),
 				};
+				assertDeliveryOpen();
 				throwIfCancelled();
 				const parentReplyCountBeforeRun = child._parentReplyCount;
 				await child.promptAndWait(content, {

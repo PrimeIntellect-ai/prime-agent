@@ -26,6 +26,30 @@ export interface AvoNooaReconciliationCluster {
 
 type AvoNooaCommandResult = Record<string, unknown> & { ok?: boolean; reason?: string };
 
+const nooaStoreTails = new Map<string, Promise<void>>();
+
+async function serializeNooaStoreOperation<T>(databasePath: string, operation: () => Promise<T>): Promise<T> {
+	const prior = nooaStoreTails.get(databasePath) ?? Promise.resolve();
+	const current = prior.then(operation, operation);
+	const settled = current.then(
+		() => undefined,
+		() => undefined,
+	);
+	nooaStoreTails.set(databasePath, settled);
+	try {
+		return await current;
+	} finally {
+		if (nooaStoreTails.get(databasePath) === settled) nooaStoreTails.delete(databasePath);
+	}
+}
+
+function serializeNooaStoreOperations<T>(databasePaths: readonly string[], operation: () => Promise<T>): Promise<T> {
+	const paths = [...new Set(databasePaths)].sort();
+	const acquire = (index: number): Promise<T> =>
+		index >= paths.length ? operation() : serializeNooaStoreOperation(paths[index]!, () => acquire(index + 1));
+	return acquire(0);
+}
+
 export type AvoNooaRunner = (
 	command: string,
 	databasePath: string,
@@ -184,13 +208,23 @@ export class AvoNooaMemoryBridge {
 		});
 	}
 
-	async sync(memories: readonly AvoMemory[]): Promise<AvoNooaCommandResult> {
+	async sync(
+		memories: readonly AvoMemory[],
+		protectedMemoryIds: readonly string[] = [],
+	): Promise<AvoNooaCommandResult> {
 		const stores = this.stores(memories);
 		if (stores.length === 0) return { ok: false, reason: "no persistent NOOA store" };
+		const protectedIds = [...new Set(protectedMemoryIds)];
 		const results: AvoNooaCommandResult[] = [];
 		let mirrored = 0;
 		for (const store of stores) {
-			const result = await this.run("sync", String(store.path), store);
+			const databasePath = String(store.path);
+			const result = await serializeNooaStoreOperation(databasePath, () =>
+				this.run("sync", databasePath, {
+					...store,
+					protected_memory_ids: protectedIds,
+				}),
+			);
 			results.push(result);
 			if (result.ok !== true) {
 				return {
@@ -209,18 +243,24 @@ export class AvoNooaMemoryBridge {
 		query: string,
 		limit = 5,
 		maxChars = 2_000,
+		protectedMemoryIds: readonly string[] = [],
 	): Promise<AvoNooaRecallResult> {
 		const stores = this.stores(memories);
 		if (stores.length === 0 || memories.length === 0) {
 			return { ok: false, memoryIds: [], backend: "host-fallback", reason: "no persistent NOOA store" };
 		}
 		const databasePath = String(stores[0]!.path);
-		const result = await this.run("sync_spontaneous", databasePath, {
-			stores,
-			query,
-			limit,
-			max_chars: maxChars,
-		});
+		const result = await serializeNooaStoreOperations(
+			stores.map((store) => String(store.path)),
+			() =>
+				this.run("sync_spontaneous", databasePath, {
+					stores,
+					query,
+					limit,
+					max_chars: maxChars,
+					protected_memory_ids: [...new Set(protectedMemoryIds)],
+				}),
+		);
 		if (result.ok !== true || !Array.isArray(result.memory_ids)) {
 			return {
 				ok: false,
@@ -237,18 +277,40 @@ export class AvoNooaMemoryBridge {
 		};
 	}
 
-	async reflect(memories: readonly AvoMemory[], trigger: string): Promise<AvoNooaCommandResult> {
+	async reflect(
+		memories: readonly AvoMemory[],
+		trigger: string,
+		protectedMemoryIds: readonly string[] = [],
+	): Promise<AvoNooaCommandResult> {
 		const stores = this.stores(memories);
 		if (stores.length === 0 || memories.length < 2) {
 			return { ok: false, reason: "fewer than two memories are available for consolidation" };
 		}
-		return this.run("sync_reflect", String(stores[0]!.path), { stores, trigger });
+		return serializeNooaStoreOperations(
+			stores.map((store) => String(store.path)),
+			() =>
+				this.run("sync_reflect", String(stores[0]!.path), {
+					stores,
+					trigger,
+					protected_memory_ids: [...new Set(protectedMemoryIds)],
+				}),
+		);
 	}
 
-	async reconciliationCandidates(memories: readonly AvoMemory[]): Promise<AvoNooaReconciliationCluster[]> {
+	async reconciliationCandidates(
+		memories: readonly AvoMemory[],
+		protectedMemoryIds: readonly string[] = [],
+	): Promise<AvoNooaReconciliationCluster[]> {
 		const stores = this.stores(memories);
 		if (stores.length === 0 || memories.length < 2) return [];
-		const result = await this.run("sync_reconciliation_candidates", String(stores[0]!.path), { stores });
+		const result = await serializeNooaStoreOperations(
+			stores.map((store) => String(store.path)),
+			() =>
+				this.run("sync_reconciliation_candidates", String(stores[0]!.path), {
+					stores,
+					protected_memory_ids: [...new Set(protectedMemoryIds)],
+				}),
+		);
 		if (result.ok !== true || !Array.isArray(result.clusters)) return [];
 		return result.clusters.flatMap((cluster) => {
 			if (typeof cluster !== "object" || cluster === null || Array.isArray(cluster)) return [];
