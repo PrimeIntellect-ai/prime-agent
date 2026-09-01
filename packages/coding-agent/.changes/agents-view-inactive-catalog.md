@@ -1,1 +1,0 @@
-- Fixed a v0.9.0 regression: the agents view's Inactive section was empty on a fresh view until a search was typed. The saved-session catalog now loads (progressively) when the view opens; it was previously deferred to search because the roster's boot seed carried the saved corpus, which the seed scoping removed.

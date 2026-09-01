@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.9.1] - 2026-09-01
+
+- Fixed a v0.9.0 regression: the agents view's Inactive section was empty on a fresh view until a search was typed. The saved-session catalog now loads (progressively) when the view opens; it was previously deferred to search because the roster's boot seed carried the saved corpus, which the seed scoping removed.
+
 ## [0.9.0] - 2026-09-01
 
 - Fixed background (unattributed) kernel output missing from the expanded IPython cell view: it is now surfaced in the tool details and rendered under a "background output (unattributed)" label after stdout/stderr/result.
