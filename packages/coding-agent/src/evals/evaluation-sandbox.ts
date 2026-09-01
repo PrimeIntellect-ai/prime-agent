@@ -1,5 +1,10 @@
-import { existsSync, lstatSync, readlinkSync } from "node:fs";
+import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
+import {
+	KERNEL_PROCESS_SANDBOX_ENV,
+	KERNEL_SANDBOX_CONNECTION_PLACEHOLDER,
+	KERNEL_SANDBOX_PYTHON_PLACEHOLDER,
+} from "../core/kernel/index.js";
 
 export interface IsolatedEvaluationSandboxOptions {
 	command: readonly string[];
@@ -10,6 +15,18 @@ export interface IsolatedEvaluationSandboxOptions {
 	hiddenPaths?: readonly string[];
 	maskedFiles?: readonly string[];
 	rootFilesystem?: "host-read-only" | "minimal";
+	deviceFilesystem?: "minimal" | "host";
+}
+
+export interface EvaluationKernelSandboxOptions {
+	cwd: string;
+	privateHome: string;
+	kernelPython: string;
+	writablePaths: readonly string[];
+	readOnlyPaths: readonly string[];
+	maskedFiles?: readonly string[];
+	inheritEnvironment: readonly string[];
+	hostDevices?: boolean;
 }
 
 function normalizedAbsolutePath(path: string, label: string): string {
@@ -25,8 +42,20 @@ function uniquePaths(paths: readonly string[], label: string): string[] {
 	return [...new Set(paths.map((path) => normalizedAbsolutePath(path, label)))];
 }
 
-function minimalSystemArguments(): string[] {
-	const args = ["--tmpfs", "/", "--proc", "/proc", "--dev", "/dev", "--ro-bind", "/usr", "/usr"];
+function minimalSystemArguments(deviceFilesystem: "minimal" | "host"): string[] {
+	const deviceArguments = deviceFilesystem === "host" ? ["--dev-bind", "/dev", "/dev"] : ["--dev", "/dev"];
+	const args = [
+		"--tmpfs",
+		"/",
+		"--proc",
+		"/proc",
+		...deviceArguments,
+		"--tmpfs",
+		"/dev/shm",
+		"--ro-bind",
+		"/usr",
+		"/usr",
+	];
 	for (const path of ["/bin", "/lib", "/lib64", "/sbin"]) {
 		if (!existsSync(path)) continue;
 		if (lstatSync(path).isSymbolicLink()) {
@@ -88,7 +117,7 @@ export function buildIsolatedEvaluationSandboxArgs(options: IsolatedEvaluationSa
 	);
 	const rootArguments =
 		options.rootFilesystem === "minimal"
-			? minimalSystemArguments()
+			? minimalSystemArguments(options.deviceFilesystem ?? "minimal")
 			: ["--ro-bind", "/", "/", "--dev-bind", "/dev", "/dev", "--proc", "/proc"];
 
 	return [
@@ -113,4 +142,38 @@ export function buildIsolatedEvaluationSandboxArgs(options: IsolatedEvaluationSa
 		"--",
 		...options.command,
 	];
+}
+
+export function buildEvaluationKernelSandboxEnvironment(options: EvaluationKernelSandboxOptions): NodeJS.ProcessEnv {
+	const kernelRoot = dirname(dirname(options.kernelPython));
+	// The venv executable may point through a floating cpython-X.Y-* alias, so
+	// expose the containing catalog rather than only the pinned realpath target.
+	const interpreterCatalogRoot = dirname(dirname(dirname(realpathSync(options.kernelPython))));
+	const readOnlyPaths = [kernelRoot, interpreterCatalogRoot, ...options.readOnlyPaths]
+		.filter((path) => existsSync(path))
+		.filter((path, index, paths) => paths.indexOf(path) === index);
+	const argv = buildIsolatedEvaluationSandboxArgs({
+		command: [
+			KERNEL_SANDBOX_PYTHON_PLACEHOLDER,
+			"-m",
+			"ipykernel_launcher",
+			"-f",
+			KERNEL_SANDBOX_CONNECTION_PLACEHOLDER,
+		],
+		cwd: options.cwd,
+		privateHome: options.privateHome,
+		writablePaths: options.writablePaths,
+		readOnlyPaths,
+		maskedFiles: options.maskedFiles,
+		rootFilesystem: "minimal",
+		deviceFilesystem: options.hostDevices ? "host" : "minimal",
+	});
+	return {
+		[KERNEL_PROCESS_SANDBOX_ENV]: JSON.stringify({
+			version: 1,
+			argv,
+			home: options.privateHome,
+			inheritEnvironment: [...new Set(options.inheritEnvironment)],
+		}),
+	};
 }
