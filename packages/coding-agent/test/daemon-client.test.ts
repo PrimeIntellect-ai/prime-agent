@@ -230,6 +230,26 @@ describe("DaemonClient", () => {
 		client.close();
 	});
 
+	it("does not send conditional RLM child cancellation to an older daemon", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["authoritative_child_roster"], DAEMON_SCHEMA_REVISION - 1);
+
+		await expect(
+			client.request({
+				type: "cancel_rlm_child",
+				activeSessionId: "active-1",
+				childId: "child-1",
+				expectedEventSequence: 17,
+			}),
+		).rejects.toThrow("does not support conditional_rlm_child_cancel");
+		expect(socket.writes).toEqual([]);
+		client.close();
+	});
+
 	it("sends subagent deletion to a capable daemon without requiring a schema bump", async () => {
 		const client = new DaemonClient("/tmp/prime-agent.sock");
 		const connect = client.connect();

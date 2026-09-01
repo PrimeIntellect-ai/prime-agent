@@ -6296,6 +6296,50 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("atomically fences RLM child cancellation on the authoritative event sequence", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-conditional-rlm-cancel-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const parentSession = parentState.runtime.session as unknown as {
+				cancelRlmChildRun: ReturnType<typeof vi.fn>;
+			};
+			parentSession.cancelRlmChildRun = vi.fn(() => true);
+			parentState.lastEventSequence = 23;
+			const client = makeClient("client-1", parentState.activeSessionId);
+
+			await expect(
+				internals.handleCommand(client, {
+					type: "cancel_rlm_child",
+					activeSessionId: parentState.activeSessionId,
+					childId: fixture.childId,
+					expectedEventSequence: 22,
+				}),
+			).rejects.toMatchObject({
+				name: "RlmChildRosterChangedError",
+				expectedEventSequence: 22,
+				actualEventSequence: 23,
+			});
+			expect(parentSession.cancelRlmChildRun).not.toHaveBeenCalled();
+
+			const result = (await internals.handleCommand(client, {
+				type: "cancel_rlm_child",
+				activeSessionId: parentState.activeSessionId,
+				childId: fixture.childId,
+				expectedEventSequence: 23,
+			})) as { data: { cancelled: boolean } };
+			expect(result.data.cancelled).toBe(true);
+			expect(parentSession.cancelRlmChildRun).toHaveBeenCalledOnce();
+			expect(parentSession.cancelRlmChildRun).toHaveBeenCalledWith(fixture.childId);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("refuses to delete a busy hydrated child and deletes it after it becomes idle", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-hydrated-rlm-delete-"));
 		try {

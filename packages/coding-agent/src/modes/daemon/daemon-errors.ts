@@ -3,6 +3,18 @@ import { SessionImportFileNotFoundError } from "../../core/session-import-errors
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
 import type { DaemonErrorInfo, DaemonResponse } from "./daemon-protocol.js";
 
+export class RlmChildRosterChangedError extends Error {
+	constructor(
+		readonly expectedEventSequence: number,
+		readonly actualEventSequence: number,
+	) {
+		super(
+			`RLM child roster changed before cancellation (expected event sequence ${expectedEventSequence}, current ${actualEventSequence})`,
+		);
+		this.name = "RlmChildRosterChangedError";
+	}
+}
+
 export function serializeDaemonError(error: unknown): DaemonErrorInfo | undefined {
 	if (error instanceof MissingSessionCwdError) {
 		return { code: "missing_session_cwd", issue: error.issue };
@@ -15,6 +27,13 @@ export function serializeDaemonError(error: unknown): DaemonErrorInfo | undefine
 			code: "session_already_active",
 			sessionPath: error.sessionPath,
 			activeSessionId: error.activeSessionId,
+		};
+	}
+	if (error instanceof RlmChildRosterChangedError) {
+		return {
+			code: "rlm_child_roster_changed",
+			expectedEventSequence: error.expectedEventSequence,
+			actualEventSequence: error.actualEventSequence,
 		};
 	}
 	return undefined;
@@ -44,6 +63,9 @@ export function deserializeDaemonError(response: Extract<DaemonResponse, { succe
 	}
 	if (errorInfo?.code === "session_already_active") {
 		return new SessionAlreadyActiveError(errorInfo.sessionPath, errorInfo.activeSessionId);
+	}
+	if (errorInfo?.code === "rlm_child_roster_changed") {
+		return new RlmChildRosterChangedError(errorInfo.expectedEventSequence, errorInfo.actualEventSequence);
 	}
 	return new Error(response.error);
 }

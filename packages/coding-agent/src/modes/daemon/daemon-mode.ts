@@ -127,7 +127,7 @@ import {
 import { createCompactAssistantDelta } from "./compact-session-stream.js";
 import { DaemonClient } from "./daemon-client.js";
 import { filterClientEnv, withClientEnv } from "./daemon-client-env.js";
-import { deserializeDaemonError, serializeDaemonError } from "./daemon-errors.js";
+import { deserializeDaemonError, RlmChildRosterChangedError, serializeDaemonError } from "./daemon-errors.js";
 import { bindActiveSessionState } from "./daemon-extension-binding.js";
 import {
 	createDaemonEventMeta,
@@ -4205,6 +4205,14 @@ export class AgentDaemon {
 
 			case "cancel_rlm_child": {
 				const state = this.getSessionState(command.activeSessionId);
+				if (command.expectedEventSequence !== undefined) {
+					if (!Number.isSafeInteger(command.expectedEventSequence) || command.expectedEventSequence < 0) {
+						throw new Error("expectedEventSequence must be a non-negative safe integer");
+					}
+					if (state.lastEventSequence !== command.expectedEventSequence) {
+						throw new RlmChildRosterChangedError(command.expectedEventSequence, state.lastEventSequence);
+					}
+				}
 				const cancelled = state.runtime.session.cancelRlmChildRun(command.childId);
 				return success(command.id, "cancel_rlm_child", { cancelled });
 			}
