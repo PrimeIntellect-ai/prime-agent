@@ -1123,45 +1123,6 @@ describe("DaemonAgentConnection", () => {
 		await connection.dispose();
 	});
 
-	it("acquires a direct transport for the target after a successful reattach", async () => {
-		const supervisor = new FakeDaemonClient();
-		supervisor.request = vi.fn(async (command: DaemonCommand) => ({
-			type: "response" as const,
-			command: command.type,
-			success: true as const,
-			data:
-				command.type === "reattach"
-					? createAttachResult(command.targetActiveSessionId, undefined, undefined, 12)
-					: undefined,
-		})) as unknown as typeof supervisor.request;
-		const direct = {
-			isConnected: true,
-			hello: supervisor.hello,
-			supportsServerCapability: () => false,
-			onMessage: () => () => {},
-			onClose: () => () => {},
-			request: async (command: Extract<DaemonCommand, { type: "attach" }>) => ({
-				type: "response" as const,
-				command: "attach" as const,
-				success: true as const,
-				data: createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12),
-			}),
-			close: () => {},
-		} as unknown as DaemonWorkerClient;
-		const routed = new DaemonRoutedClient(asDaemonClient(supervisor), direct);
-		const upgrade = vi.spyOn(routed, "upgradeDirectTransport").mockResolvedValue(true);
-		const connection = await DaemonAgentConnection.attach(routed, "active-1");
-
-		await (
-			connection as unknown as {
-				reattachSession(source: string, target: string): Promise<{ cancelled: boolean }>;
-			}
-		).reattachSession("active-1", "target-1");
-
-		expect(upgrade).toHaveBeenCalledWith("target-1");
-		await connection.dispose();
-	});
-
 	it("keeps the source direct socket when a cross-worker reattach is rejected", async () => {
 		const supervisor = new FakeDaemonClient();
 		supervisor.request = vi.fn(async (command: DaemonCommand) => ({

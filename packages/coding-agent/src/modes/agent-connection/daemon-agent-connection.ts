@@ -1393,10 +1393,6 @@ export class DaemonAgentConnection implements AgentConnection {
 					messages: result.snapshot.messages,
 				});
 			}
-			// The old direct link was dropped with the old session; try to ride the target's worker.
-			if (this.client instanceof DaemonRoutedClient) {
-				await this.client.upgradeDirectTransport(this.activeSessionId);
-			}
 			return { cancelled: false };
 		} catch (error) {
 			if (!reattached) {
