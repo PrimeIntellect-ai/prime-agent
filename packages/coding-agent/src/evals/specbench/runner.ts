@@ -37,12 +37,7 @@ import {
 } from "../../core/avo/verification-broker.js";
 import { sanitizeAvoVerificationEnvironment } from "../../core/avo/verification-environment.js";
 import { PRIME_AGENT_EPHEMERAL_AUTH_FILE_ENV } from "../../core/ephemeral-auth-storage.js";
-import {
-	KERNEL_PROCESS_SANDBOX_ENV,
-	KERNEL_SANDBOX_CONNECTION_PLACEHOLDER,
-	KERNEL_SANDBOX_PYTHON_PLACEHOLDER,
-} from "../../core/kernel/index.js";
-import { buildIsolatedEvaluationSandboxArgs } from "../evaluation-sandbox.js";
+import { buildEvaluationKernelSandboxEnvironment, buildIsolatedEvaluationSandboxArgs } from "../evaluation-sandbox.js";
 import { summarizePrimeIntegrityTrace } from "../prime-integrity/runner.js";
 import {
 	PRIME_INTEGRITY_TOKEN_STAGES,
@@ -1409,39 +1404,18 @@ export function specBenchKernelSandboxEnvironment(options: {
 }): NodeJS.ProcessEnv {
 	const environment = options.environment ?? process.env;
 	const privateHome = homedir();
-	const kernelRoot = dirname(dirname(options.kernelPython));
-	// The venv executable may point through a floating cpython-X.Y-* alias, so
-	// expose the containing catalog rather than only the pinned realpath target.
-	const interpreterRoot = dirname(dirname(dirname(realpathSync(options.kernelPython))));
 	const uvCacheRoot = resolveSpecBenchUvCacheRoot(environment);
 	const writablePaths = [options.workspace, options.agentDir, options.sessionDir, options.supervisorDir];
 	if (existsSync(uvCacheRoot)) writablePaths.push(uvCacheRoot);
-	const readOnlyPaths = [kernelRoot, interpreterRoot, SPECBENCH_TOOLCHAIN_ROOT, ...(options.brokerSocketPaths ?? [])]
-		.filter((path) => existsSync(path))
-		.filter((path, index, paths) => paths.indexOf(path) === index);
-	const argv = buildIsolatedEvaluationSandboxArgs({
-		command: [
-			KERNEL_SANDBOX_PYTHON_PLACEHOLDER,
-			"-m",
-			"ipykernel_launcher",
-			"-f",
-			KERNEL_SANDBOX_CONNECTION_PLACEHOLDER,
-		],
+	return buildEvaluationKernelSandboxEnvironment({
 		cwd: options.workspace,
 		privateHome,
+		kernelPython: options.kernelPython,
 		writablePaths,
-		readOnlyPaths,
+		readOnlyPaths: [SPECBENCH_TOOLCHAIN_ROOT, ...(options.brokerSocketPaths ?? [])],
 		maskedFiles: [options.providerAuthPath],
-		rootFilesystem: "minimal",
+		inheritEnvironment: SPECBENCH_KERNEL_INHERITED_ENVIRONMENT,
 	});
-	return {
-		[KERNEL_PROCESS_SANDBOX_ENV]: JSON.stringify({
-			version: 1,
-			argv,
-			home: privateHome,
-			inheritEnvironment: SPECBENCH_KERNEL_INHERITED_ENVIRONMENT,
-		}),
-	};
 }
 
 export async function withSpecBenchProviderAuthFile<Result>(path: string, run: () => Promise<Result>): Promise<Result> {

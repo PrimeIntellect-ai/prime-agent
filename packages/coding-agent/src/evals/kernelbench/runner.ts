@@ -11,16 +11,68 @@ import {
 	readdirSync,
 	readFileSync,
 	realpathSync,
+	rmSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { sanitizeAvoVerificationEnvironment } from "../../core/avo/verification-environment.js";
+import { PRIME_AGENT_EPHEMERAL_AUTH_FILE_ENV } from "../../core/ephemeral-auth-storage.js";
+import { buildEvaluationKernelSandboxEnvironment } from "../evaluation-sandbox.js";
 import { summarizePrimeIntegrityTrace } from "../prime-integrity/runner.js";
 
 const SOURCE_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_GIT_DIR = resolve(SOURCE_DIR, "..", "..", "..", "..", "..", ".git");
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
+const KERNELBENCH_RUNTIME_SOCKET_ENVIRONMENT = [
+	"CONTAINER_HOST",
+	"DOCKER_CONTEXT",
+	"DOCKER_HOST",
+	"SSH_AUTH_SOCK",
+	"XDG_RUNTIME_DIR",
+] as const;
+const KERNELBENCH_HOME_CREDENTIAL_DIRECTORIES = [
+	".aws",
+	".codex",
+	".config/gcloud",
+	".config/gh",
+	".docker",
+	".gnupg",
+	".kube",
+	".ssh",
+] as const;
+const KERNELBENCH_HOME_CREDENTIAL_FILES = [".git-credentials", ".netrc", ".npmrc", ".pypirc"] as const;
+const KERNELBENCH_KERNEL_INHERITED_ENVIRONMENT = [
+	"AVO_ONLINE_EVIDENCE",
+	"CC",
+	"COMPILER_PATH",
+	"CUDA_CACHE_PATH",
+	"CUDA_DEVICE_ORDER",
+	"CUDA_VISIBLE_DEVICES",
+	"CXX",
+	"GOOGLE_VERTEX_GOOGLE_SEARCH",
+	"LANG",
+	"LC_ALL",
+	"LC_CTYPE",
+	"LD_LIBRARY_PATH",
+	"MAX_JOBS",
+	"NVIDIA_DRIVER_CAPABILITIES",
+	"NVIDIA_VISIBLE_DEVICES",
+	"NO_COLOR",
+	"PATH",
+	"PI_OFFLINE",
+	"PRIME_AGENT_AVO_CONFIG_DIR",
+	"PRIME_AGENT_CODING_AGENT_DIR",
+	"PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR",
+	"PRIME_AGENT_SESSION_DIR",
+	"PYTHONSAFEPATH",
+	"PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+	"TERM",
+	"TORCH_EXTENSIONS_DIR",
+	"TZ",
+	"UV_OFFLINE",
+] as const;
 
 interface Options {
 	all: boolean;
@@ -237,14 +289,48 @@ async function runCommand(
 	return { exitCode, timedOut, durationMs: Date.now() - startedAt, stdout, stderr };
 }
 
-function copyConfig(source: string, destination: string): void {
+function readJsonObject(path: string): Record<string, unknown> {
+	const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error(`KernelBench configuration must contain a JSON object: ${path}`);
+	}
+	return parsed as Record<string, unknown>;
+}
+
+export function prepareKernelBenchConfig(source: string, destination: string, providerOverride?: string): void {
 	mkdirSync(destination, { recursive: true, mode: 0o700 });
-	for (const filename of ["auth.json", "models.json", "settings.json", "telemetry.json"]) {
-		const input = join(source, filename);
-		if (!existsSync(input)) continue;
-		const output = join(destination, filename);
-		cpSync(input, output);
-		chmodSync(output, 0o600);
+	const settingsPath = join(source, "settings.json");
+	const settings = existsSync(settingsPath) ? readJsonObject(settingsPath) : {};
+	const bundledSkills =
+		settings.bundledSkills && typeof settings.bundledSkills === "object" && !Array.isArray(settings.bundledSkills)
+			? (settings.bundledSkills as Record<string, unknown>)
+			: {};
+	const selectedProvider =
+		providerOverride ?? (typeof settings.defaultProvider === "string" ? settings.defaultProvider : undefined);
+	const settingsOutput = join(destination, "settings.json");
+	writeFileSync(
+		settingsOutput,
+		`${JSON.stringify({ ...settings, mcpServers: {}, bundledSkills: { ...bundledSkills, websearch: false } }, null, 2)}\n`,
+	);
+	chmodSync(settingsOutput, 0o600);
+
+	const authPath = join(source, "auth.json");
+	if (existsSync(authPath)) {
+		const auth = readJsonObject(authPath);
+		const selectedAuth = selectedProvider ? auth[selectedProvider] : undefined;
+		const authOutput = join(destination, "auth.json");
+		writeFileSync(
+			authOutput,
+			`${JSON.stringify(selectedProvider && selectedAuth !== undefined ? { [selectedProvider]: selectedAuth } : {}, null, 2)}\n`,
+		);
+		chmodSync(authOutput, 0o600);
+	}
+
+	const modelsPath = join(source, "models.json");
+	if (existsSync(modelsPath)) {
+		const modelsOutput = join(destination, "models.json");
+		cpSync(modelsPath, modelsOutput);
+		chmodSync(modelsOutput, 0o600);
 	}
 }
 
@@ -402,7 +488,7 @@ Optimize solution.py for the local NVIDIA GeForce RTX 3050 Laptop GPU (Ampere, 4
 - Use that identical command for every AVO candidate evaluation. Inspect KERNELBENCH_RESULT_JSON and iterate when correct but slow.
 - Complete the AVO candidate, host evaluation, cycle, and stop gate; return the exact accepted candidate summary only.
 
-This task is local and self-contained. Online search is not required.`;
+This task is local and self-contained. Model tool execution is network-isolated; do not attempt online search, package downloads, or external connections.`;
 }
 
 function sha256(path: string): string {
@@ -464,6 +550,77 @@ function parseKernelResult(
 		speedup: typeof parsed.speedup === "number" ? parsed.speedup : 0,
 		graderError: typeof parsed.error === "string" ? parsed.error : undefined,
 	};
+}
+
+export function kernelBenchAgentEnvironment(
+	hostEnvironment: NodeJS.ProcessEnv,
+	kernelbenchRoot: string,
+	buildCache: string,
+): NodeJS.ProcessEnv {
+	const environment = sanitizeAvoVerificationEnvironment({
+		...hostEnvironment,
+		AVO_ONLINE_EVIDENCE: "not_required",
+		GOOGLE_VERTEX_GOOGLE_SEARCH: "0",
+		GOLLUM_USE_DOCKER: "0",
+		OS_KERNEL_USE_DOCKER: "0",
+		PI_OFFLINE: "1",
+		PYTHONSAFEPATH: "1",
+		PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1",
+		UV_OFFLINE: "1",
+		TORCH_EXTENSIONS_DIR: buildCache,
+		CUDA_CACHE_PATH: join(buildCache, "cuda-cache"),
+		CC: "/usr/bin/gcc-13",
+		CXX: "/usr/bin/g++-13",
+	});
+	delete environment.PYTHONPATH;
+	for (const name of KERNELBENCH_RUNTIME_SOCKET_ENVIRONMENT) delete environment[name];
+	environment.PATH = [
+		join(kernelbenchRoot, ".venv", "bin"),
+		"/usr/local/cuda/bin",
+		"/usr/local/bin",
+		"/usr/bin",
+		"/bin",
+	].join(":");
+	return environment;
+}
+
+export function kernelBenchKernelSandboxEnvironment(options: {
+	workspace: string;
+	agentDir: string;
+	sessionDir: string;
+	supervisorDir: string;
+	buildCache: string;
+	kernelbenchRoot: string;
+	providerAuthPath: string;
+	kernelPython: string;
+}): NodeJS.ProcessEnv {
+	return buildEvaluationKernelSandboxEnvironment({
+		cwd: options.workspace,
+		privateHome: homedir(),
+		kernelPython: options.kernelPython,
+		writablePaths: [
+			options.workspace,
+			options.agentDir,
+			options.sessionDir,
+			options.supervisorDir,
+			options.buildCache,
+		],
+		readOnlyPaths: [options.kernelbenchRoot, "/sys"],
+		maskedFiles: [options.providerAuthPath],
+		inheritEnvironment: KERNELBENCH_KERNEL_INHERITED_ENVIRONMENT,
+		hostDevices: true,
+	});
+}
+
+export async function withKernelBenchProviderAuthFile<Result>(
+	path: string,
+	run: () => Promise<Result>,
+): Promise<Result> {
+	try {
+		return await run();
+	} finally {
+		rmSync(path, { force: true });
+	}
 }
 
 const KERNELBENCH_GRADE_ENVIRONMENT_ALLOWLIST = new Set([
@@ -621,13 +778,18 @@ export function buildKernelBenchGradeSandboxArgs(
 	];
 }
 
-function sandboxArgs(
+export function buildKernelBenchAgentSandboxArgs(
 	executable: string,
 	args: string[],
 	runRoot: string,
 	workspace: string,
 	protectedPaths: string[],
+	environment: NodeJS.ProcessEnv,
 ): string[] {
+	const environmentArgs = Object.entries(environment)
+		.filter((entry): entry is [string, string] => entry[1] !== undefined)
+		.sort(([left], [right]) => left.localeCompare(right))
+		.flatMap(([name, value]) => ["--setenv", name, value]);
 	const argv = [
 		"bwrap",
 		"--ro-bind",
@@ -640,18 +802,26 @@ function sandboxArgs(
 		"/proc",
 		"--tmpfs",
 		"/tmp",
+		"--tmpfs",
+		"/run",
 		"--bind",
 		runRoot,
 		runRoot,
 		"--tmpfs",
 		REPOSITORY_GIT_DIR,
+		...KERNELBENCH_HOME_CREDENTIAL_DIRECTORIES.map((path) => join(homedir(), path))
+			.filter((path) => existsSync(path))
+			.flatMap((path) => ["--tmpfs", path]),
+		...KERNELBENCH_HOME_CREDENTIAL_FILES.map((path) => join(homedir(), path))
+			.filter((path) => existsSync(path))
+			.flatMap((path) => ["--ro-bind", "/dev/null", path]),
 		"--unshare-pid",
 		"--die-with-parent",
 		"--chdir",
 		workspace,
 	];
 	for (const path of protectedPaths) argv.push("--ro-bind", path, path);
-	argv.push("--", executable, ...args);
+	argv.push("--clearenv", ...environmentArgs, "--", executable, ...args);
 	return argv;
 }
 
@@ -707,7 +877,8 @@ async function runProblem(
 	].map((name) => join(workspace, name));
 	const protectedBefore = new Map(protectedPaths.map((path) => [path, immutableFileDigest(path)]));
 	for (const path of protectedPaths) chmodSync(path, 0o444);
-	copyConfig(options.configSource, agentDir);
+	prepareKernelBenchConfig(options.configSource, agentDir, options.provider);
+	const providerAuthPath = join(agentDir, "auth.json");
 	const agentArgs = [
 		"--daemon-socket",
 		`/tmp/prime-kernelbench-${problem.id}.sock`,
@@ -724,6 +895,7 @@ async function runProblem(
 		"--session-dir",
 		sessionDir,
 		"--offline",
+		"--no-env",
 		"--no-context-files",
 		"--no-extensions",
 		...(options.provider ? ["--provider", options.provider] : []),
@@ -733,24 +905,43 @@ async function runProblem(
 		"--",
 		taskPrompt(problem),
 	];
+	const kernelPython = join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python");
 	const environment = {
-		...process.env,
+		...kernelBenchAgentEnvironment(process.env, options.kernelbenchRoot, buildCache),
+		...(options.hardening
+			? kernelBenchKernelSandboxEnvironment({
+					workspace,
+					agentDir,
+					sessionDir,
+					supervisorDir,
+					buildCache,
+					kernelbenchRoot: options.kernelbenchRoot,
+					providerAuthPath,
+					kernelPython,
+				})
+			: {}),
 		PRIME_AGENT_AVO_CONFIG_DIR: agentDir,
 		PRIME_AGENT_CODING_AGENT_DIR: agentDir,
+		...(existsSync(providerAuthPath) ? { [PRIME_AGENT_EPHEMERAL_AUTH_FILE_ENV]: providerAuthPath } : {}),
 		PRIME_AGENT_SESSION_DIR: sessionDir,
 		PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR: supervisorDir,
-		PRIME_AGENT_KERNEL_PYTHON: join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python"),
-		TORCH_EXTENSIONS_DIR: buildCache,
-		CC: "/usr/bin/gcc-13",
-		CXX: "/usr/bin/g++-13",
+		PRIME_AGENT_KERNEL_PYTHON: kernelPython,
 	};
 	const startedAt = Date.now();
-	const agent = await runCommand(
+	const agentExecution = runCommand(
 		options.hardening
-			? sandboxArgs(agentExecutable, agentArgs, caseRoot, workspace, protectedPaths)
+			? buildKernelBenchAgentSandboxArgs(
+					agentExecutable,
+					agentArgs,
+					caseRoot,
+					workspace,
+					protectedPaths,
+					environment,
+				)
 			: [agentExecutable, ...agentArgs],
 		{ cwd: workspace, env: environment, timeoutMs: options.timeoutMs + 30_000 },
 	);
+	const agent = await withKernelBenchProviderAuthFile(providerAuthPath, () => agentExecution);
 	writeFileSync(transcriptPath, `# stdout\n${agent.stdout}\n# stderr\n${agent.stderr}\n`);
 	const protectedChanges = protectedPaths.filter((path) => protectedBefore.get(path) !== immutableFileDigest(path));
 	const gradeCommand = kernelBenchGradeCommand(options.hardening);

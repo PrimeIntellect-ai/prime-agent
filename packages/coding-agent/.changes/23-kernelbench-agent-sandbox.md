@@ -1,0 +1,1 @@
+- Hardened KernelBench model execution against host credentials, MCP integrations, runtime sockets, and outbound network access ([#23](https://github.com/lewbei/prime-agent/issues/23))
