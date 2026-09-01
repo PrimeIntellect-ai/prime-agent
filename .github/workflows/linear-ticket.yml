@@ -14,13 +14,13 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.pull_request.user.type != 'Bot'
     steps:
-      - name: Require a Linear ticket reference
+      - name: Require a Linear ticket reference or an explicit opt-out
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           script: |
             const pr = context.payload.pull_request;
             const text = `${pr.title}\n${pr.body ?? ""}\n${pr.head.ref}`;
-            const ticket = /\b(?:res|eng)-\d+\b|linear\.app\/[\w-]+\/issue\/[a-z]+-\d+/i;
+            const ticket = /\beng-\d+\b|linear\.app\/[\w-]+\/issue\/[a-z]+-\d+/i;
             if (ticket.test(text)) {
               core.info("Linear ticket reference found.");
               return;
@@ -28,8 +28,7 @@ jobs:
             core.setFailed(
               [
                 "No Linear ticket is linked in this pull request.",
-                "Prime Agent tickets should normally use the Research team and the Prime Agent: Long-Horizon research project.",
-                "Add the ticket ID (e.g. RES-1234) or a linear.app issue link to the PR title or description,",
-                "or use a branch named after the ticket (e.g. res-1234).",
+                "Add the ticket ID (e.g. ENG-1234) or a linear.app issue link to the PR title or description,",
+                "or use a branch named after the ticket (e.g. eng-1234).",
               ].join(" "),
             );
