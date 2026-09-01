@@ -63,7 +63,15 @@ describe("tryExecUpdateRelaunch", () => {
 		expect(
 			tryExecUpdateRelaunch(
 				{ command: "/usr/bin/node", args: ["--trace-warnings", "/opt/prime-agent/cli.js", "--resume", "session"] },
-				{ platform: "darwin", nodeVersion: "26.1.0", cwd: "/tmp/project", environment, chdir, execve },
+				{
+					platform: "darwin",
+					nodeVersion: "26.1.0",
+					cwd: "/tmp/project",
+					previousCwd: "/tmp/before",
+					environment,
+					chdir,
+					execve,
+				},
 			),
 		).toBe(true);
 		expect(chdir).toHaveBeenCalledWith("/tmp/project");
@@ -72,6 +80,26 @@ describe("tryExecUpdateRelaunch", () => {
 			["/usr/bin/node", "--trace-warnings", "/opt/prime-agent/cli.js", "--resume", "session"],
 			{ PRIME_AGENT_CODING_AGENT_DIR: "/tmp/agent" },
 		);
+
+		// A thrown execve restores the previous cwd before the fallback runs.
+		execve.mockImplementationOnce(() => {
+			throw new Error("execve failed");
+		});
+		expect(() =>
+			tryExecUpdateRelaunch(
+				{ command: "/usr/bin/node", args: ["cli.js"] },
+				{
+					platform: "darwin",
+					nodeVersion: "26.1.0",
+					cwd: "/tmp/project",
+					previousCwd: "/tmp/before",
+					environment,
+					chdir,
+					execve,
+				},
+			),
+		).toThrow("execve failed");
+		expect(chdir).toHaveBeenLastCalledWith("/tmp/before");
 	});
 
 	it.each(["win32", "os400"])("keeps the compatible child relaunch on %s", (platform) => {
@@ -81,7 +109,15 @@ describe("tryExecUpdateRelaunch", () => {
 		expect(
 			tryExecUpdateRelaunch(
 				{ command: "node", args: ["cli.js"] },
-				{ platform, nodeVersion: "26.1.0", cwd: "/tmp/project", environment: {}, chdir, execve },
+				{
+					platform,
+					nodeVersion: "26.1.0",
+					cwd: "/tmp/project",
+					previousCwd: "/tmp/before",
+					environment: {},
+					chdir,
+					execve,
+				},
 			),
 		).toBe(false);
 		expect(chdir).not.toHaveBeenCalled();
@@ -97,7 +133,15 @@ describe("tryExecUpdateRelaunch", () => {
 			expect(
 				tryExecUpdateRelaunch(
 					{ command: "/usr/bin/node", args: ["cli.js"] },
-					{ platform: "linux", nodeVersion, cwd: "/tmp/project", environment: {}, chdir, execve },
+					{
+						platform: "linux",
+						nodeVersion,
+						cwd: "/tmp/project",
+						previousCwd: "/tmp/before",
+						environment: {},
+						chdir,
+						execve,
+					},
 				),
 			).toBe(false);
 			expect(chdir).not.toHaveBeenCalled();
@@ -109,7 +153,14 @@ describe("tryExecUpdateRelaunch", () => {
 		expect(
 			tryExecUpdateRelaunch(
 				{ command: "/usr/bin/node", args: ["cli.js"] },
-				{ platform: "linux", nodeVersion: "26.1.0", cwd: "/tmp/project", environment: {}, chdir: vi.fn() },
+				{
+					platform: "linux",
+					nodeVersion: "26.1.0",
+					cwd: "/tmp/project",
+					previousCwd: "/tmp/before",
+					environment: {},
+					chdir: vi.fn(),
+				},
 			),
 		).toBe(false);
 	});

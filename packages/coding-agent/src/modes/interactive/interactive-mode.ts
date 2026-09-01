@@ -777,6 +777,7 @@ interface UpdateRelaunchExecOptions {
 	platform: string;
 	nodeVersion: string;
 	cwd: string;
+	previousCwd: string;
 	environment: NodeJS.ProcessEnv;
 	chdir: (directory: string) => void;
 	execve?: UpdateRelaunchExecve;
@@ -807,7 +808,13 @@ export function tryExecUpdateRelaunch(launch: CliSubprocessLaunchSpec, options: 
 		Object.entries(options.environment).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
 	);
 	options.chdir(options.cwd);
-	options.execve(launch.command, [launch.command, ...launch.args], environment);
+	try {
+		options.execve(launch.command, [launch.command, ...launch.args], environment);
+	} catch (error) {
+		// A thrown execve must not leave the fallback's process on a changed cwd.
+		options.chdir(options.previousCwd);
+		throw error;
+	}
 	return true;
 }
 
@@ -8858,6 +8865,7 @@ export class InteractiveMode {
 						platform: process.platform,
 						nodeVersion: process.versions.node,
 						cwd: updateCwd,
+						previousCwd: process.cwd(),
 						environment: process.env,
 						chdir: (directory) => process.chdir(directory),
 						execve: updateProcess.execve,
