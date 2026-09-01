@@ -1039,7 +1039,12 @@ prime_agent_binary_fresh_install() {
 	mkdir -p "$(dirname "$prime_agent_binary_symlink")"
 	prime_agent_binary_atomic_symlink "$_binary_path" "$prime_agent_binary_symlink"
 	if ! prime_agent_binary_smoke_binary "$prime_agent_binary_symlink"; then
-		if [ -n "$_old_target" ] && prime_agent_binary_smoke_binary "$_old_target"; then
+		_old_target_dir=
+		if [ -n "$_old_target" ]; then
+			_old_target_dir=$(dirname "$_old_target")
+		fi
+		if [ -n "$_old_target" ] && [ "$_old_target_dir" != "$_version_dir" ] &&
+			prime_agent_binary_smoke_binary "$_old_target"; then
 			prime_agent_binary_atomic_symlink "$_old_target" "$prime_agent_binary_symlink"
 		else
 			rm -f "$prime_agent_binary_symlink"
@@ -1091,6 +1096,14 @@ prime_agent_binary_update() {
 	_artifact_name="$(prime_agent_binary_artifact_name "$_update_version" "$_platform")"
 	_artifact_url="$prime_agent_base_url/releases/v$_update_version/$_artifact_name"
 	_version_dir="$(prime_agent_binary_target_version_dir "$_update_version")"
+	prime_agent_binary_rollback_version=
+	if [ -L "$prime_agent_binary_symlink" ]; then
+		_old_target=$(readlink "$prime_agent_binary_symlink" 2>/dev/null || printf '')
+		_old_version_dir=$(dirname "$_old_target" 2>/dev/null || printf '')
+		if [ "$_old_version_dir" != "$_version_dir" ]; then
+			prime_agent_binary_rollback_version="$_old_version_dir"
+		fi
+	fi
 
 	_download_dir=$(create_temp_dir)
 	prime_agent_download_dir="$_download_dir"
@@ -1162,24 +1175,17 @@ prime_agent_binary_update() {
 		exit 1
 	fi
 
-	# Remember old version for rollback
-	if [ -L "$prime_agent_binary_symlink" ]; then
-		_old_target=$(readlink "$prime_agent_binary_symlink" 2>/dev/null || printf '')
-		_old_version_dir=$(dirname "$_old_target" 2>/dev/null || printf '')
-		prime_agent_binary_rollback_version="$_old_version_dir"
-	fi
-
 	# Atomically switch the symlink, then verify the activated path. If activation
 	# fails, restore the previous immutable version before returning an error.
 	prime_agent_binary_atomic_symlink "$_binary_path" "$prime_agent_binary_symlink"
 	if ! prime_agent_binary_smoke_binary "$prime_agent_binary_symlink"; then
 		if prime_agent_binary_rollback; then
-			rm -rf "$_version_dir"
 			printf 'error: activation failed; restored the previous Prime Agent version.\n' >&2
 		else
+			rm -f "$prime_agent_binary_symlink"
 			printf 'error: activation failed and no healthy rollback version was available.\n' >&2
 		fi
-		rm -rf "$_download_dir"
+		rm -rf "$_version_dir" "$_download_dir"
 		prime_agent_download_dir=
 		exit 1
 	fi
@@ -1210,6 +1216,7 @@ prime_agent_binary_rollback() {
 		return 1
 	fi
 	prime_agent_binary_atomic_symlink "$_rollback_binary" "$prime_agent_binary_symlink"
+	prime_agent_binary_smoke_binary "$prime_agent_binary_symlink"
 }
 
 prime_agent_verify_binary_checksum() {
