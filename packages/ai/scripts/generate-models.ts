@@ -814,6 +814,7 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 			models.push(normalizedModel);
 		}
 
+		if (models.length === 0) throw new Error("OpenRouter catalog has no tool-capable models");
 		console.log(`Fetched ${models.length} tool-capable models from OpenRouter`);
 		return models;
 	} catch (error) {
