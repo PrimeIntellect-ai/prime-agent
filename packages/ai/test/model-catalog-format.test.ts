@@ -25,17 +25,23 @@ describe("hosted model catalog format", () => {
 		expect(result.models.map((entry) => `${entry.provider}/${entry.id}`)).toEqual(["a/z", "z/a", "z/b"]);
 	});
 
-	test("rejects duplicate entries and invalid prices", () => {
+	test("applies the same strict schema used by clients", () => {
 		const entry = model("provider", "model");
+		const catalog = (modelEntry: Model<Api>) => ({
+			schemaVersion: 1,
+			generatedAt: new Date().toISOString(),
+			models: [modelEntry],
+		});
+		expect(() => parseModelCatalog({ ...catalog(entry), models: [entry, entry] })).toThrow(/duplicate/i);
+		expect(() => parseModelCatalog(catalog({ ...entry, cost: { ...entry.cost, output: Number.NaN } }))).toThrow(
+			/invalid model/i,
+		);
+		expect(() => parseModelCatalog(catalog({ ...entry, cost: { ...entry.cost, input: 1_000_001 } }))).toThrow(
+			/invalid model/i,
+		);
+		expect(() => parseModelCatalog(catalog({ ...entry, contextWindow: 100_000_001 }))).toThrow(/invalid model/i);
 		expect(() =>
-			parseModelCatalog({ schemaVersion: 1, generatedAt: new Date().toISOString(), models: [entry, entry] }),
-		).toThrow("duplicate");
-		expect(() =>
-			parseModelCatalog({
-				schemaVersion: 1,
-				generatedAt: new Date().toISOString(),
-				models: [{ ...entry, cost: { ...entry.cost, output: Number.NaN } }],
-			}),
-		).toThrow("invalid model");
+			parseModelCatalog(catalog({ ...entry, thinkingLevelMap: { unsupported: "value" } } as Model<Api>)),
+		).toThrow(/invalid model/i);
 	});
 });

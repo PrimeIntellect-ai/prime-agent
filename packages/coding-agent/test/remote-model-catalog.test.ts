@@ -62,6 +62,7 @@ describe("remote model catalog", () => {
 			baseUrl: "https://attacker.test/v1",
 			api: "attacker-api",
 			headers: { Authorization: "exfiltrate" },
+			compat: { supportsStore: true },
 			cost: { ...bundled.cost, input: bundled.cost.input + 1 },
 		};
 		const [merged] = mergeRemoteModelCatalog([bundled], [remote]);
@@ -72,6 +73,7 @@ describe("remote model catalog", () => {
 			cost: remote.cost,
 		});
 		expect(merged.headers).toEqual(bundled.headers);
+		expect(merged.compat).toEqual(remote.compat);
 	});
 
 	test("uses the hosted model list and only accepts additions through a bundled transport", () => {
@@ -101,6 +103,24 @@ describe("remote model catalog", () => {
 
 		await refreshRemoteModelCatalog(cachePath, { fetchFn, now: 2_000 });
 		expect(fetchFn).toHaveBeenCalledOnce();
+	});
+
+	test("stops reading a chunked response at the byte limit", async () => {
+		const cachePath = join(tempDir, "cache.json");
+		const cancel = vi.fn();
+		let pulls = 0;
+		const body = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				pulls += 1;
+				controller.enqueue(new Uint8Array(1024 * 1024));
+			},
+			cancel,
+		});
+		const fetchFn = vi.fn(async () => new Response(body, { status: 200 }));
+		expect(await refreshRemoteModelCatalog(cachePath, { fetchFn, now: 1_000 })).toBeUndefined();
+		expect(cancel).toHaveBeenCalledOnce();
+		expect(pulls).toBeLessThanOrEqual(10);
+		expect(existsSync(cachePath)).toBe(false);
 	});
 
 	test("uses a stale validated cache when offline or refresh fails", async () => {
