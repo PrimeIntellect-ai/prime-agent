@@ -9347,6 +9347,8 @@ export class InteractiveMode {
 				return `Trace uploaded (${result.bytesStored.toLocaleString()} bytes).`;
 			case "disabled":
 				return "Trace sharing is disabled.";
+			case "unchanged":
+				return "Trace is already uploaded; no new content since the last upload.";
 			case "missing_credentials":
 				return "Trace sharing needs a Prime API key. Run /traces login.";
 			case "no_session_file":

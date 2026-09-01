@@ -73,7 +73,6 @@ import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionRuntime,
 } from "../../core/agent-session-runtime.js";
-import { flushAllPendingAgentTraceUploads } from "../../core/agent-traces.js";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -3672,7 +3671,6 @@ export class AgentDaemon {
 					for (const state of [...this.sessions.values()]) {
 						await this.closeSession(state, "killed");
 					}
-					await flushAllPendingAgentTraceUploads();
 					this.fencePeerTransports();
 					this.writeWorkerSuccess(client, command);
 					setImmediate(() => void this.shutdown(0));
@@ -6256,7 +6254,6 @@ export class AgentDaemon {
 			}
 		}
 		for (const state of [...this.sessions.values()]) await this.closeSession(state, "killed");
-		await flushAllPendingAgentTraceUploads();
 		return manifest;
 	}
 
@@ -7304,12 +7301,8 @@ export class AgentDaemon {
 			cleanup();
 		}
 		this.cronScheduler.stop();
-		try {
-			for (const state of [...this.sessions.values()]) {
-				await this.closeSession(state, closingReason);
-			}
-		} finally {
-			await flushAllPendingAgentTraceUploads();
+		for (const state of [...this.sessions.values()]) {
+			await this.closeSession(state, closingReason);
 		}
 		for (const client of this.clients) {
 			client.detachInput();

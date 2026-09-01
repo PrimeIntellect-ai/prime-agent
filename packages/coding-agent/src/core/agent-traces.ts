@@ -1,8 +1,9 @@
 import { Buffer } from "node:buffer";
+import { randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { appendRotatingLog, getAgentTracesLogPath, getSessionsDir, VERSION } from "../config.js";
+import { appendRotatingLog, getAgentDir, getAgentTracesLogPath, getSessionsDir, VERSION } from "../config.js";
 import { readFirstLineSync } from "../utils/file-lines.js";
 import type { AuthStorage } from "./auth-storage.js";
 import {
@@ -47,6 +48,7 @@ export type AgentTraceUploadResult =
 			key?: string;
 	  }
 	| { status: "disabled" }
+	| { status: "unchanged" }
 	| { status: "missing_credentials" }
 	| { status: "no_session_file" }
 	| { status: "empty_session" }
@@ -176,7 +178,8 @@ const RETRIABLE_NETWORK_CODES = new Set([
 	"UND_ERR_CONNECT_TIMEOUT",
 ]);
 
-const RETRIABLE_HTTP_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+// 429 is deliberately absent: a rate-limited upload is rescheduled by its caller instead of sleeping in-request.
+const RETRIABLE_HTTP_STATUSES = new Set([408, 425, 500, 502, 503, 504]);
 
 function isRetriableNetworkError(error: unknown): boolean {
 	if (error instanceof TraceUploadTimeoutError) {
@@ -423,9 +426,7 @@ async function fetchWithRetry(
 			if (attempt >= TRACE_UPLOAD_MAX_RETRIES || !RETRIABLE_HTTP_STATUSES.has(response.status)) {
 				return response;
 			}
-			if (response.status === 429) {
-				retryDelayMs = retryAfterDelay(response) ?? TRACE_UPLOAD_RATE_LIMIT_WINDOW_MS;
-			} else if (response.status === 503) {
+			if (response.status === 503) {
 				retryDelayMs = retryAfterDelay(response);
 			}
 			await response.body?.cancel().catch(() => undefined);
@@ -632,6 +633,140 @@ export async function uploadAllAgentTraces(options: AgentTraceUploadAllOptions):
 	};
 }
 
+interface AgentTraceUploadedSignature {
+	size: number;
+	mtimeMs: number;
+}
+
+export interface AgentTraceCatchUpResult {
+	pruned: number;
+	results: Array<{ sessionFile: string; result: AgentTraceUploadResult }>;
+}
+
+function getAgentTraceOutboxPath(): string {
+	return join(getAgentDir(), "agent-traces-outbox.json");
+}
+
+function parseOutboxSignature(value: unknown): AgentTraceUploadedSignature | null | undefined {
+	if (value === null) {
+		return null;
+	}
+	if (isRecord(value) && typeof value.size === "number" && typeof value.mtimeMs === "number") {
+		return { size: value.size, mtimeMs: value.mtimeMs };
+	}
+	return undefined;
+}
+
+/** Path-keyed upload cursors: `null` marks content scheduled but never uploaded. */
+async function readAgentTraceOutbox(): Promise<Record<string, AgentTraceUploadedSignature | null>> {
+	let raw: string;
+	try {
+		raw = await readFile(getAgentTraceOutboxPath(), "utf8");
+	} catch {
+		return {};
+	}
+	const parsed = parseResponseObject(raw);
+	if (!parsed || !isRecord(parsed.sessions)) {
+		return {};
+	}
+	const sessions: Record<string, AgentTraceUploadedSignature | null> = {};
+	for (const [file, value] of Object.entries(parsed.sessions)) {
+		const signature = parseOutboxSignature(value);
+		if (signature !== undefined) {
+			sessions[file] = signature;
+		}
+	}
+	return sessions;
+}
+
+function signatureEquals(a: AgentTraceUploadedSignature | null | undefined, b: AgentTraceUploadedSignature): boolean {
+	return a != null && a.size === b.size && a.mtimeMs === b.mtimeMs;
+}
+
+/** Session files with a live upload controller in this process; catch-up leaves them to their controller. */
+const locallyManagedSessionFiles = new Set<string>();
+
+let outboxWriteQueue: Promise<void> = Promise.resolve();
+
+function mutateAgentTraceOutbox(
+	mutate: (sessions: Record<string, AgentTraceUploadedSignature | null>) => boolean,
+): Promise<void> {
+	const task = outboxWriteQueue.then(async () => {
+		const sessions = await readAgentTraceOutbox();
+		if (!mutate(sessions)) {
+			return;
+		}
+		const path = getAgentTraceOutboxPath();
+		await mkdir(dirname(path), { recursive: true });
+		const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+		await writeFile(tempPath, `${JSON.stringify({ version: 1, sessions })}\n`, "utf8");
+		await rename(tempPath, path);
+	});
+	outboxWriteQueue = task.catch(() => undefined);
+	return task;
+}
+
+function markAgentTraceOutboxPending(sessionFile: string): Promise<void> {
+	return mutateAgentTraceOutbox((sessions) => {
+		if (sessionFile in sessions) {
+			return false;
+		}
+		sessions[sessionFile] = null;
+		return true;
+	});
+}
+
+function recordAgentTraceOutboxUpload(sessionFile: string, signature: AgentTraceUploadedSignature): Promise<void> {
+	return mutateAgentTraceOutbox((sessions) => {
+		sessions[sessionFile] = signature;
+		return true;
+	});
+}
+
+/**
+ * Startup catch-up: upload every outbox entry whose file content is ahead of its
+ * cursor, and prune entries whose file no longer exists. Runs once per process,
+ * in whichever process hosts sessions (the only place trace upload is installed).
+ */
+export async function catchUpAgentTraceUploads(
+	options: Omit<AgentTraceUploadOptions, "sessionFile">,
+): Promise<AgentTraceCatchUpResult> {
+	const catchUp: AgentTraceCatchUpResult = { pruned: 0, results: [] };
+	if (options.requireEnabled !== false && !(await getAgentTracesEnabled(options))) {
+		return catchUp;
+	}
+	const outbox = await readAgentTraceOutbox();
+	const beforeRequest = createTraceUploadAllRequestGate(options.signal);
+	for (const [sessionFile, uploaded] of Object.entries(outbox)) {
+		if (options.signal?.aborted) {
+			break;
+		}
+		if (locallyManagedSessionFiles.has(sessionFile)) {
+			continue;
+		}
+		let stats: Awaited<ReturnType<typeof stat>> | undefined;
+		try {
+			stats = await stat(sessionFile);
+		} catch {
+			stats = undefined;
+		}
+		if (!stats?.isFile()) {
+			await mutateAgentTraceOutbox((sessions) => delete sessions[sessionFile]);
+			catchUp.pruned += 1;
+			continue;
+		}
+		if (signatureEquals(uploaded, { size: stats.size, mtimeMs: stats.mtimeMs })) {
+			continue;
+		}
+		const result = await uploadAgentTraceFileWithRequestGate(
+			{ ...options, sessionFile, reloadConfig: false },
+			beforeRequest,
+		);
+		catchUp.results.push({ sessionFile, result });
+	}
+	return catchUp;
+}
+
 export async function getPrimeAgentTraceCredential(
 	authStorage: AuthStorage,
 	options: { reloadAuth?: boolean; configPath?: string } = {},
@@ -730,21 +865,26 @@ async function performAgentTraceUpload(
 		return { status: "no_session_file" };
 	}
 
-	let fileSize: number;
+	let signature: AgentTraceUploadedSignature;
 	try {
 		const stats = await stat(options.sessionFile);
 		if (!stats.isFile()) {
 			return { status: "no_session_file" };
 		}
-		fileSize = stats.size;
+		signature = { size: stats.size, mtimeMs: stats.mtimeMs };
 	} catch {
 		return { status: "no_session_file" };
 	}
+	const fileSize = signature.size;
 	if (fileSize === 0) {
 		return { status: "empty_session" };
 	}
 	if (fileSize > MAX_TRACE_BYTES) {
 		return { status: "too_large", size: fileSize, maxBytes: MAX_TRACE_BYTES };
+	}
+	// Cursor invariant: an automatic upload never re-sends a file whose content already matches its uploaded cursor.
+	if (requireEnabled && signatureEquals((await readAgentTraceOutbox())[options.sessionFile], signature)) {
+		return { status: "unchanged" };
 	}
 
 	const header = readSessionHeader(options.sessionFile);
@@ -831,6 +971,7 @@ async function performAgentTraceUpload(
 
 	const responseText = await response.text().catch(() => "");
 	const responseData = parseResponseObject(responseText);
+	await recordAgentTraceOutboxUpload(options.sessionFile, signature).catch(() => undefined);
 	return {
 		status: "uploaded",
 		sessionId: responseData ? (stringField(responseData, "session_id") ?? header.id) : header.id,
@@ -850,10 +991,8 @@ export function uploadAgentTraceSession(options: AgentTraceSessionUploadOptions)
 class AgentTraceUploadController {
 	private timeout: NodeJS.Timeout | undefined;
 	private pending = false;
-	private inFlight: Promise<AgentTraceUploadResult> | undefined;
-	private flushPromise: Promise<AgentTraceUploadResult | undefined> | undefined;
+	private inFlight: Promise<void> | undefined;
 	private lastUploadStartedAt: number | undefined;
-	private lastUploadedSignature: string | undefined;
 
 	constructor(
 		private readonly sessionManager: SessionManager,
@@ -866,96 +1005,66 @@ class AgentTraceUploadController {
 
 	schedule = (): void => {
 		this.pending = true;
-		pendingUploadControllers.add(this);
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (sessionFile && !locallyManagedSessionFiles.has(sessionFile)) {
+			locallyManagedSessionFiles.add(sessionFile);
+			void markAgentTraceOutboxPending(sessionFile).catch(() => undefined);
+		}
+		this.arm();
+	};
+
+	private arm(): void {
 		if (this.timeout) {
 			clearTimeout(this.timeout);
 		}
-		const elapsed = this.lastUploadStartedAt === undefined ? 0 : Date.now() - this.lastUploadStartedAt;
-		const throttleDelay =
-			this.lastUploadStartedAt === undefined ? 0 : Math.max(0, TRACE_UPLOAD_MIN_INTERVAL_MS - elapsed);
+		const elapsed = this.lastUploadStartedAt === undefined ? undefined : Date.now() - this.lastUploadStartedAt;
+		const throttleDelay = elapsed === undefined ? 0 : Math.max(0, TRACE_UPLOAD_MIN_INTERVAL_MS - elapsed);
 		this.timeout = setTimeout(
 			() => {
 				this.timeout = undefined;
-				void this.flush().catch(() => undefined);
+				void this.runScheduledUpload();
 			},
 			Math.max(TRACE_UPLOAD_DEBOUNCE_MS, throttleDelay),
 		);
-	};
-
-	private async getCurrentFileSignature(): Promise<string | undefined> {
-		const sessionFile = this.sessionManager.getSessionFile();
-		if (!sessionFile) {
-			return undefined;
-		}
-		try {
-			const stats = await stat(sessionFile);
-			return `${sessionFile}:${stats.size}:${stats.mtimeMs}`;
-		} catch {
-			return undefined;
-		}
 	}
 
-	async flush(): Promise<AgentTraceUploadResult | undefined> {
-		if (this.flushPromise) {
-			const result = await this.flushPromise;
-			if (!this.pending) {
-				return result;
-			}
-			return (await this.flush()) ?? result;
-		}
-
-		this.flushPromise = this.runFlush();
-		try {
-			return await this.flushPromise;
-		} finally {
-			this.flushPromise = undefined;
-			if (!this.pending) {
-				pendingUploadControllers.delete(this);
-			}
-		}
-	}
-
-	private async runFlush(): Promise<AgentTraceUploadResult | undefined> {
-		if (this.timeout) {
-			clearTimeout(this.timeout);
-			this.timeout = undefined;
-		}
+	private async runScheduledUpload(): Promise<void> {
 		if (this.inFlight) {
-			await this.inFlight.catch(() => undefined);
+			return;
 		}
-		if (!this.pending) {
-			return undefined;
-		}
-
-		const signature = await this.getCurrentFileSignature();
-		if (signature && signature === this.lastUploadedSignature) {
-			this.pending = false;
-			return undefined;
-		}
-
 		this.pending = false;
 		this.lastUploadStartedAt = Date.now();
 		this.inFlight = uploadAgentTraceSession({
 			...this.options,
 			sessionManager: this.sessionManager,
-		});
-		try {
-			const result = await this.inFlight;
-			if (result.status === "uploaded" && signature) {
-				this.lastUploadedSignature = signature;
-			}
-			return result;
-		} finally {
-			this.inFlight = undefined;
+		}).then(
+			(result) => {
+				if (result.status === "failed" && isRescheduledUploadFailure(result.statusCode)) {
+					this.pending = true;
+				}
+			},
+			() => undefined,
+		);
+		await this.inFlight;
+		this.inFlight = undefined;
+		if (this.pending) {
+			this.arm();
 		}
 	}
 }
 
+function isRescheduledUploadFailure(statusCode: number | undefined): boolean {
+	return statusCode === undefined || statusCode === 429 || RETRIABLE_HTTP_STATUSES.has(statusCode);
+}
+
 const traceUploadControllers = new WeakMap<SessionManager, AgentTraceUploadController>();
-// Disposal never awaits uploads; exit paths drain this set instead.
-const pendingUploadControllers = new Set<AgentTraceUploadController>();
+let catchUpTriggered = false;
 
 export function installAgentTraceUpload(sessionManager: SessionManager, options: AgentTraceUploadInstallOptions): void {
+	if (!catchUpTriggered) {
+		catchUpTriggered = true;
+		void catchUpAgentTraceUploads(options).catch(() => undefined);
+	}
 	let controller = traceUploadControllers.get(sessionManager);
 	if (controller) {
 		controller.update(options);
@@ -965,24 +1074,4 @@ export function installAgentTraceUpload(sessionManager: SessionManager, options:
 	controller = new AgentTraceUploadController(sessionManager, options);
 	traceUploadControllers.set(sessionManager, controller);
 	sessionManager.onPersist(controller.schedule);
-}
-
-export async function flushAgentTraceUpload(
-	sessionManager: SessionManager,
-): Promise<AgentTraceUploadResult | undefined> {
-	return traceUploadControllers.get(sessionManager)?.flush();
-}
-
-/** Exit barrier: drains every scheduled or in-flight trace upload. */
-export async function flushAllPendingAgentTraceUploads(): Promise<void> {
-	await Promise.allSettled([...pendingUploadControllers].map((controller) => controller.flush()));
-}
-
-/** Log a detached (fire-and-forget) flush rejection; upload outcomes themselves are already logged per attempt. */
-export function logDetachedAgentTraceFlushFailure(sessionFile: string | undefined, error: unknown): void {
-	const suffix = sessionFile ? ` [${sessionFile}]` : "";
-	appendRotatingLog(
-		getAgentTracesLogPath(),
-		`[${new Date().toISOString()}] detached flush failed: ${describeError(error)}${suffix}`,
-	);
 }
