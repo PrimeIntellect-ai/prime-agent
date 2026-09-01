@@ -45,6 +45,7 @@ export interface AppKeybindings {
 	"app.modal.back": true;
 	"app.agents.reply": true;
 	"app.agents.new": true;
+	"app.agents.newWorktree": true;
 	"app.agents.delete": true;
 	"app.agents.program": true;
 	"app.agents.rename": true;
@@ -156,6 +157,10 @@ export const KEYBINDINGS = {
 	"app.modal.back": { defaultKeys: "left", description: "Go back / close the current dialog" },
 	"app.agents.reply": { defaultKeys: "space", description: "Reply to selected agent" },
 	"app.agents.new": { defaultKeys: "ctrl+n", description: "Start a new session from the agents view" },
+	"app.agents.newWorktree": {
+		defaultKeys: "alt+w",
+		description: "Create a git worktree and start a session in it",
+	},
 	"app.agents.delete": { defaultKeys: "ctrl+x", description: "Stop or delete selected agent" },
 	"app.agents.program": { defaultKeys: "ctrl+o", description: "Show the program that spawned subagents" },
 	"app.agents.rename": { defaultKeys: "ctrl+r", description: "Rename selected agent session" },

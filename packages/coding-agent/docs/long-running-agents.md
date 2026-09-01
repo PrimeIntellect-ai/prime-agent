@@ -64,6 +64,11 @@ prime-agent doctor [--fix]          # Diagnose or repair service state
 prime-agent shutdown [--force]      # Stop all agents and services
 ```
 
+In the agents view, `ctrl+n` starts a new session in the current directory and `alt+w` prompts for a
+name, creates a git worktree for it, and starts a session with that worktree as its working directory.
+The worktree is created under `$PRIME_AGENT_WORKTREE_DIR` when that variable is set, and under
+`<repoRoot>/.worktrees` otherwise. See [Keybindings](keybindings.md) for the full action list.
+
 Workers persist transcripts as JSONL and store feature-specific state under the session artifact directory. A worker or supervisor restart can recover session state and schedules and rehydrate retained completed RLM children without treating a terminal client as the owner of the work.
 
 Daemon workers are process-isolated for lifecycle and failure containment, not security-sandboxed. They normally run with the same operating-system permissions as the client.

@@ -109,6 +109,33 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | `app.session.fork` | *(none)* | Fork current session (`/fork`) |
 | `app.session.resume` | *(none)* | Open session resume picker (`/resume`) |
 
+### Agents View
+
+Used in the agents view (the session picker opened with `prime-agent agents` or `/resume`).
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.agents.open` | `right` | Drill into the selected agent |
+| `app.agents.back` | `left` | Return to the parent agent scope |
+| `app.agents.reply` | `space` | Reply to (or resume) the selected agent |
+| `app.agents.new` | `ctrl+n` | Start a new session in the current directory |
+| `app.agents.newWorktree` | `alt+w` | Create a git worktree and start a session in it |
+| `app.agents.rename` | `ctrl+r` | Rename the selected agent session |
+| `app.agents.delete` | `ctrl+x` | Stop or delete the selected agent |
+| `app.agents.program` | `ctrl+o` | Show the program that spawned subagents |
+
+`app.agents.newWorktree` opens an inline prompt for a name. The name is sanitized into
+one path segment and used as the branch name. Confirming runs `git worktree add`, and
+attaches an existing branch instead of creating one. The worktree path resolves in this
+order:
+
+1. `$PRIME_AGENT_WORKTREE_DIR/<name>` when that environment variable is set (a relative
+   value resolves against the repository root); then
+2. `<repoRoot>/.worktrees/<name>`.
+
+An existing worktree at that path is reused. The new session starts with the worktree as
+its working directory.
+
 ### Models and Thinking
 
 | Keybinding id | Default | Description |

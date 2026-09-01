@@ -24,6 +24,7 @@ import {
 	parseSlashCommand,
 	resolveBuiltinSlashCommandName,
 } from "../../core/slash-commands.js";
+import { createGitWorktree } from "../../utils/git-worktree.js";
 import { canonicalizePath } from "../../utils/paths.js";
 import { ensureTool } from "../../utils/tools-manager.js";
 import { DaemonAgentConnection } from "../agent-connection/daemon-agent-connection.js";
@@ -108,6 +109,7 @@ const STATUS_MESSAGE_DURATION_MS = 4500;
 const SEARCH_PROMPT_PLACEHOLDER = "Search sessions";
 const REPLY_PROMPT_FALLBACK_PLACEHOLDER = "Write a reply to this agent";
 const RESUME_PROMPT_PLACEHOLDER = "Write a prompt to resume this session";
+const WORKTREE_PROMPT_PLACEHOLDER = "Name the new git worktree branch";
 const COMPLETED_ROW_ICON = "✓";
 const NEEDS_INPUT_ROW_ICON = "●";
 const SELECTED_ROW_MARKER = "\0agents-view-selected-row\0";
@@ -677,6 +679,8 @@ export class AgentsViewMode implements Component, Focusable {
 	private pendingDeleteAgent: PendingDeleteAgent | undefined;
 	private pendingKillSubagent: PendingKillSubagent | undefined;
 	private renameTarget: { activeSessionId?: string; sessionFile?: string; summary: SessionSummary } | undefined;
+	/** True while the inline "new worktree session" prompt owns the editor. */
+	private worktreePromptActive = false;
 	private actionModeSearchQuery: string | undefined;
 	private readonly inactiveAgentIdentities = new Set<string>();
 	private statusMessage: string | undefined;
@@ -888,6 +892,14 @@ export class AgentsViewMode implements Component, Focusable {
 			this.editor.handleInput(data);
 			return;
 		}
+		if (this.worktreePromptActive) {
+			if (this.keybindings.matches(data, "tui.select.cancel")) {
+				this.exitWorktreeMode();
+				return;
+			}
+			this.editor.handleInput(data);
+			return;
+		}
 		if (this.keybindings.matches(data, "app.clear")) {
 			// The composer hints advertise ctrl+c as cancel; it must not start the exit flow.
 			if (this.replyTarget) {
@@ -914,6 +926,10 @@ export class AgentsViewMode implements Component, Focusable {
 		}
 		if (!this.replyTarget && this.keybindings.matches(data, "app.agents.new")) {
 			void this.createNewSession();
+			return;
+		}
+		if (!this.replyTarget && this.keybindings.matches(data, "app.agents.newWorktree")) {
+			this.enterWorktreeMode();
 			return;
 		}
 		if (this.replyTarget && this.keybindings.matches(data, "app.message.followUp")) {
@@ -1237,7 +1253,10 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private getFilteredRecords(): UnifiedSessionRecord[] {
-		const query = this.replyTarget || this.renameTarget ? (this.actionModeSearchQuery ?? "") : this.editor.getText();
+		const query =
+			this.replyTarget || this.renameTarget || this.worktreePromptActive
+				? (this.actionModeSearchQuery ?? "")
+				: this.editor.getText();
 		return filterUnifiedSessions(this.scopedRecords, (text) => matchesSearchText(text, query));
 	}
 
@@ -1262,6 +1281,10 @@ export class AgentsViewMode implements Component, Focusable {
 	private async submit(value: string, delivery: "steer" | "followUp" = "steer"): Promise<void> {
 		if (this.renameTarget) {
 			await this.confirmRename(value);
+			return;
+		}
+		if (this.worktreePromptActive) {
+			await this.confirmWorktree(value);
 			return;
 		}
 		if (this.replyTarget) {
@@ -1605,6 +1628,60 @@ export class AgentsViewMode implements Component, Focusable {
 		await this.renameSession(target.summary, name);
 	}
 
+	private enterWorktreeMode(): void {
+		this.setReplyTarget(undefined);
+		this.actionModeSearchQuery = this.editor.getText();
+		this.renameTarget = undefined;
+		this.pendingDeleteAgent = undefined;
+		this.pendingKillSubagent = undefined;
+		this.worktreePromptActive = true;
+		this.editor.setPlaceholder(WORKTREE_PROMPT_PLACEHOLDER);
+		this.editor.setText("");
+		this.ui.requestRender();
+	}
+
+	private exitWorktreeMode(): void {
+		this.worktreePromptActive = false;
+		this.editor.setText(this.actionModeSearchQuery ?? this.persistentState.query ?? "");
+		this.actionModeSearchQuery = undefined;
+		this.editor.setPlaceholder(SEARCH_PROMPT_PLACEHOLDER);
+		this.rebuildRows();
+		this.ui.requestRender();
+	}
+
+	private async confirmWorktree(value: string): Promise<void> {
+		if (!this.worktreePromptActive) {
+			return;
+		}
+		const name = value.trim();
+		if (!name) {
+			this.exitWorktreeMode();
+			return;
+		}
+		this.exitWorktreeMode();
+		await this.createWorktreeSession(name);
+	}
+
+	/** Add a git worktree next to the current repository and open a session rooted in it. */
+	private async createWorktreeSession(name: string): Promise<boolean> {
+		if (this.creatingNewSession || this.stopped) {
+			return false;
+		}
+		this.setStatusMessage(`Creating worktree ${name}...`);
+		try {
+			const worktree = await createGitWorktree({ cwd: this.getSavedSessionCwd(), name });
+			if (this.stopped) {
+				return false;
+			}
+			return await this.createNewSession({ ...this.options.config, cwd: worktree.path });
+		} catch (error) {
+			if (!this.stopped) {
+				this.setStatusMessage(formatError("Failed to create worktree", error));
+			}
+			return false;
+		}
+	}
+
 	/** Shared by rename mode and /name: rename, refresh both catalogs, report. */
 	private async renameSession(summary: SessionSummary, name: string): Promise<boolean> {
 		this.setStatusMessage("Renaming agent...");
@@ -1644,6 +1721,9 @@ export class AgentsViewMode implements Component, Focusable {
 	private renderReplyHeaderLine(): string | undefined {
 		if (this.renameTarget) {
 			return theme.fg("warning", "Rename agent session");
+		}
+		if (this.worktreePromptActive) {
+			return theme.fg("warning", "New git worktree session");
 		}
 		if (!this.replyTarget) {
 			return undefined;
@@ -1720,7 +1800,7 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	/** Create a fresh daemon session and open it in the chat view. */
-	private async createNewSession(): Promise<boolean> {
+	private async createNewSession(config: AgentSessionRuntimeConfig = this.options.config): Promise<boolean> {
 		if (this.creatingNewSession || this.stopped) return false;
 		this.creatingNewSession = true;
 		try {
@@ -1729,7 +1809,7 @@ export class AgentsViewMode implements Component, Focusable {
 				this.setStatusMessage("Creating session...");
 				const response = await client.request({
 					type: "create",
-					config: this.options.config,
+					config,
 					env: collectDaemonClientEnv(),
 				});
 				const created = expectSessionSummary(requireDaemonData(response));
@@ -2647,6 +2727,10 @@ export class AgentsViewMode implements Component, Focusable {
 			const hint = `${keyText("tui.select.confirm")} save   ${keyText("tui.select.cancel")} cancel`;
 			return truncateToWidth(theme.fg("muted", hint), width);
 		}
+		if (this.worktreePromptActive) {
+			const hint = `${keyText("tui.select.confirm")} create   ${keyText("tui.select.cancel")} cancel`;
+			return truncateToWidth(theme.fg("muted", hint), width);
+		}
 		if (this.replyTarget) {
 			return truncateToWidth(theme.fg("muted", this.renderReplyComposerHints()), width);
 		}
@@ -2665,6 +2749,7 @@ export class AgentsViewMode implements Component, Focusable {
 				? `${keyText("app.agents.reply")} ${selectedRow?.section === "inactive" ? "resume" : "reply"}`
 				: undefined,
 			`${keyText("app.agents.new")} new`,
+			`${keyText("app.agents.newWorktree")} new worktree`,
 			selectedAgent ? `${keyText("app.agents.rename")} rename` : undefined,
 			selectedAgent
 				? `${keyText("app.agents.delete")} ${selectedRow?.section === "inactive" ? "delete" : "stop/deactivate"}`
