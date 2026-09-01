@@ -590,8 +590,6 @@ class _SnapshotSizeLimitExceeded(Exception):
 
 
 class _CappedWriter:
-    """Pass-through writer that fails once total written bytes would exceed the cap."""
-
     def __init__(self, sink: Any, limit: int) -> None:
         self._sink = sink
         self._limit = limit
@@ -689,8 +687,6 @@ def _snapshot_state(
     previous = None
     try:
         try:
-            # The payload pickles straight into the staged temp; an in-memory
-            # aggregate copy would transiently double the snapshot's footprint.
             fh, tmp = stage_temp(path, "wb")
             with fh:
                 def dump_to_temp(candidate: dict[str, bytes]) -> int | None:
@@ -708,8 +704,6 @@ def _snapshot_state(
 
                 bytes_written = dump_to_temp(payload)
                 if bytes_written is None:
-                    # The blob total fit, so only the dict pickle's key/framing overhead is over.
-                    # Keep the largest insertion-order prefix whose complete pickle fits.
                     # Prefix pickle size is monotonic because each prefix only adds a string key and bytes value.
                     items = list(payload.items())
                     if redump_to_temp({}) is None:
