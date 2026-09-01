@@ -26,6 +26,9 @@ import { summarizePrimeIntegrityTrace } from "../prime-integrity/runner.js";
 const SOURCE_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_GIT_DIR = resolve(SOURCE_DIR, "..", "..", "..", "..", "..", ".git");
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
+export const KERNELBENCH_CANDIDATE_RESULT_PREFIX = "KERNELBENCH_CANDIDATE_RESULT_JSON:";
+export const KERNELBENCH_HOST_RESULT_PREFIX = "KERNELBENCH_HOST_RESULT_JSON:";
+const KERNELBENCH_LEGACY_RESULT_PREFIX = "KERNELBENCH_RESULT_JSON:";
 const KERNELBENCH_RUNTIME_SOCKET_ENVIRONMENT = [
 	"CONTAINER_HOST",
 	"DOCKER_CONTEXT",
@@ -423,21 +426,96 @@ try:
 except BaseException as error:
     payload["error"] = f"{type(error).__name__}: {error}"
 
-print("KERNELBENCH_RESULT_JSON:" + json.dumps(payload, sort_keys=True))
+print(${JSON.stringify("KERNELBENCH_CANDIDATE_RESULT_JSON:")} + json.dumps(payload, sort_keys=True))
 raise SystemExit(0 if payload["correct"] and (payload["static_valid"] or not enforce_static) else 1)
 `;
 }
 
-function pytestSource(kernelbenchRoot: string, baselineSolutionDigest: string): string {
+export function kernelBenchTrustedGraderSource(kernelbenchRoot: string, baselineSolutionDigest: string): string {
 	return `import hashlib
 import json
+import math
 import os
-import re
 import subprocess
 
 EVALUATOR = os.path.abspath("kernel_eval.py")
 PYTHON = ${JSON.stringify(join(kernelbenchRoot, ".venv", "bin", "python"))}
 BASELINE_SOLUTION_DIGEST = ${JSON.stringify(baselineSolutionDigest)}
+CANDIDATE_RESULT_PREFIX = ${JSON.stringify(KERNELBENCH_CANDIDATE_RESULT_PREFIX)}
+HOST_RESULT_PREFIX = ${JSON.stringify(KERNELBENCH_HOST_RESULT_PREFIX)}
+LEGACY_RESULT_PREFIX = ${JSON.stringify(KERNELBENCH_LEGACY_RESULT_PREFIX)}
+
+def _trusted_hardware():
+    completed = subprocess.run(
+        [PYTHON, "-I", "-c", "import torch; print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'unavailable')"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=30,
+    )
+    return completed.stdout.strip() if completed.returncode == 0 and completed.stdout.strip() else "unavailable"
+
+def _positive_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) and number > 0 else None
+
+def _failed_result(message):
+    return {
+        "hardware": _trusted_hardware(),
+        "compiled": False,
+        "correct": False,
+        "static_valid": False,
+        "static_errors": [],
+        "static_warnings": [],
+        "speedup": 0.0,
+        "error": message,
+    }
+
+def _trusted_result(output):
+    protocol_lines = [
+        line for line in output.splitlines()
+        if line.startswith((CANDIDATE_RESULT_PREFIX, HOST_RESULT_PREFIX, LEGACY_RESULT_PREFIX))
+    ]
+    candidate_lines = [line for line in protocol_lines if line.startswith(CANDIDATE_RESULT_PREFIX)]
+    if len(candidate_lines) != 1:
+        message = f"candidate evaluation emitted {len(candidate_lines)} result envelopes; expected exactly one"
+        return _failed_result(message), message
+    if len(protocol_lines) != 1:
+        message = "candidate evaluation emitted an out-of-order or untrusted result marker"
+        return _failed_result(message), message
+    try:
+        candidate = json.loads(candidate_lines[0][len(CANDIDATE_RESULT_PREFIX):])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        message = "candidate evaluation emitted malformed result JSON"
+        return _failed_result(message), message
+    if not isinstance(candidate, dict):
+        message = "candidate evaluation result must be a JSON object"
+        return _failed_result(message), message
+
+    reference_runtime_ms = _positive_number(candidate.get("reference_runtime_ms"))
+    kernel_runtime_ms = _positive_number(candidate.get("kernel_runtime_ms"))
+    correct = candidate.get("correct") is True
+    payload = {
+        "hardware": _trusted_hardware(),
+        "compiled": candidate.get("compiled") is True,
+        "correct": correct,
+        "static_valid": candidate.get("static_valid") is True,
+        "static_errors": [str(item) for item in candidate.get("static_errors", [])]
+            if isinstance(candidate.get("static_errors", []), list) else [],
+        "static_warnings": [str(item) for item in candidate.get("static_warnings", [])]
+            if isinstance(candidate.get("static_warnings", []), list) else [],
+        "speedup": reference_runtime_ms / kernel_runtime_ms
+            if correct and reference_runtime_ms is not None and kernel_runtime_ms is not None else 0.0,
+    }
+    if reference_runtime_ms is not None:
+        payload["reference_runtime_ms"] = reference_runtime_ms
+    if kernel_runtime_ms is not None:
+        payload["kernel_runtime_ms"] = kernel_runtime_ms
+    if isinstance(candidate.get("error"), str):
+        payload["error"] = candidate["error"]
+    return payload, None
 
 def test_kernelbench_correctness():
     solution_digest = hashlib.sha256(open("solution.py", "rb").read()).hexdigest()
@@ -456,12 +534,11 @@ def test_kernelbench_correctness():
         stderr=subprocess.STDOUT,
         timeout=600,
     )
-    print(completed.stdout)
-    assert completed.returncode == 0
+    result, channel_error = _trusted_result(completed.stdout)
+    print(HOST_RESULT_PREFIX + json.dumps(result, sort_keys=True), flush=True)
+    assert channel_error is None, channel_error
+    assert completed.returncode == 0, f"candidate evaluation exited with code {completed.returncode}"
     if not is_immutable_baseline:
-        matches = re.findall(r"KERNELBENCH_RESULT_JSON:(\\{[^\\n]+\\})", completed.stdout)
-        assert matches, "candidate evaluation emitted no KernelBench result"
-        result = json.loads(matches[-1])
         assert result["compiled"] and result["correct"] and result["static_valid"]
         assert result["speedup"] > 1.0, f"candidate is correct but slower than eager: {result['speedup']:.3f}x"
 `;
@@ -486,7 +563,7 @@ Optimize solution.py for the local NVIDIA GeForce RTX 3050 Laptop GPU (Ampere, 4
 - Target speedup > 1.0 over PyTorch eager. Do not call a slower result optimized.
 - Never modify reference.py, test_kernel.py, kernel_eval.py, sitecustomize.py, pytest.ini, or evaluator behavior.
 - Before editing, call avo.run_coding_baseline with exactly: python3 -m pytest -vv -rP --capture=fd -p no:cacheprovider test_kernel.py
-- Use that identical command for every AVO candidate evaluation. Inspect KERNELBENCH_RESULT_JSON and iterate when correct but slow.
+- Use that identical command for every AVO candidate evaluation. Inspect KERNELBENCH_HOST_RESULT_JSON and iterate when correct but slow.
 - Complete the AVO candidate, host evaluation, cycle, and stop gate; return the exact accepted candidate summary only.
 
 This task is local and self-contained. Model tool execution is network-isolated; do not attempt online search, package downloads, or external connections.`;
@@ -520,7 +597,7 @@ function findJsonl(root: string): string[] {
 	return output;
 }
 
-function parseKernelResult(
+export function parseKernelBenchResult(
 	output: string,
 ): Omit<
 	KernelResult,
@@ -536,19 +613,53 @@ function parseKernelResult(
 	| "fast0"
 	| "fast1"
 > {
-	const matches = [...output.matchAll(/KERNELBENCH_RESULT_JSON:(\{[^\n]+\})/g)];
+	const protocolPrefixes = [
+		KERNELBENCH_CANDIDATE_RESULT_PREFIX,
+		KERNELBENCH_HOST_RESULT_PREFIX,
+		KERNELBENCH_LEGACY_RESULT_PREFIX,
+	];
+	const protocolLines = output
+		.split(/\r?\n/)
+		.filter((line) => protocolPrefixes.some((prefix) => line.startsWith(prefix)));
+	const matches = protocolLines.filter((line) => line.startsWith(KERNELBENCH_HOST_RESULT_PREFIX));
 	if (matches.length === 0) throw new Error("host grader emitted no KernelBench result");
-	const parsed = JSON.parse(matches.at(-1)![1]!) as Record<string, unknown>;
+	if (matches.length !== 1) {
+		throw new Error(`host grader emitted ${matches.length} KernelBench results; expected exactly one`);
+	}
+	if (protocolLines.length !== 1) {
+		throw new Error("host grader emitted an out-of-order or untrusted KernelBench result marker");
+	}
+	const decoded: unknown = JSON.parse(matches[0]!.slice(KERNELBENCH_HOST_RESULT_PREFIX.length));
+	if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+		throw new Error("host grader KernelBench result must be a JSON object");
+	}
+	const parsed = decoded as Record<string, unknown>;
+	const correct = parsed.correct === true;
+	const referenceRuntimeMs =
+		typeof parsed.reference_runtime_ms === "number" &&
+		Number.isFinite(parsed.reference_runtime_ms) &&
+		parsed.reference_runtime_ms > 0
+			? parsed.reference_runtime_ms
+			: undefined;
+	const kernelRuntimeMs =
+		typeof parsed.kernel_runtime_ms === "number" &&
+		Number.isFinite(parsed.kernel_runtime_ms) &&
+		parsed.kernel_runtime_ms > 0
+			? parsed.kernel_runtime_ms
+			: undefined;
 	return {
 		hardware: typeof parsed.hardware === "string" ? parsed.hardware : "unknown",
 		compiled: parsed.compiled === true,
-		correct: parsed.correct === true,
+		correct,
 		staticValid: parsed.static_valid === true,
 		staticErrors: Array.isArray(parsed.static_errors) ? parsed.static_errors.map(String) : [],
 		staticWarnings: Array.isArray(parsed.static_warnings) ? parsed.static_warnings.map(String) : [],
-		referenceRuntimeMs: typeof parsed.reference_runtime_ms === "number" ? parsed.reference_runtime_ms : undefined,
-		kernelRuntimeMs: typeof parsed.kernel_runtime_ms === "number" ? parsed.kernel_runtime_ms : undefined,
-		speedup: typeof parsed.speedup === "number" ? parsed.speedup : 0,
+		referenceRuntimeMs,
+		kernelRuntimeMs,
+		speedup:
+			correct && referenceRuntimeMs !== undefined && kernelRuntimeMs !== undefined
+				? referenceRuntimeMs / kernelRuntimeMs
+				: 0,
 		graderError: typeof parsed.error === "string" ? parsed.error : undefined,
 	};
 }
@@ -853,7 +964,10 @@ async function runProblem(
 	writeFileSync(join(workspace, "reference.py"), readFileSync(problem.path));
 	writeFileSync(join(workspace, "solution.py"), startingSolution);
 	writeFileSync(join(workspace, "kernel_eval.py"), evaluatorSource(options.kernelbenchRoot, buildCache));
-	writeFileSync(join(workspace, "test_kernel.py"), pytestSource(options.kernelbenchRoot, baselineSolutionDigest));
+	writeFileSync(
+		join(workspace, "test_kernel.py"),
+		kernelBenchTrustedGraderSource(options.kernelbenchRoot, baselineSolutionDigest),
+	);
 	writeFileSync(join(workspace, "TASK.md"), `${taskPrompt(problem)}\n`);
 	writeFileSync(join(workspace, ".gitignore"), "__pycache__/\n*.pyc\n.pytest_cache/\n");
 	writeFileSync(join(workspace, "sitecustomize.py"), sitecustomizeSource(workspace));
@@ -994,7 +1108,7 @@ async function runProblem(
 				};
 	writeHostFile(options.outputDir, join(caseName, "host-grade.log"), `${grade.stdout}\n${grade.stderr}`);
 	let infrastructureError: string | undefined;
-	let parsed: ReturnType<typeof parseKernelResult>;
+	let parsed: ReturnType<typeof parseKernelBenchResult>;
 	if (protectedChanges.length > 0) {
 		parsed = {
 			hardware: "unknown",
@@ -1008,7 +1122,7 @@ async function runProblem(
 		};
 	} else {
 		try {
-			parsed = parseKernelResult(`${grade.stdout}\n${grade.stderr}`);
+			parsed = parseKernelBenchResult(`${grade.stdout}\n${grade.stderr}`);
 			if (grade.timedOut) infrastructureError = "host grader timed out after 15 minutes";
 			if (
 				!infrastructureError &&
