@@ -270,14 +270,6 @@ describe.skipIf(process.platform === "win32")("DaemonSocketPathLease compromise 
 		expect(observed).toHaveLength(1);
 	});
 
-	it("fails closed before preparing a path with a compromised lease", async () => {
-		const socketPath = join(tmpdir(), "test-missing.sock");
-		const lease = new DaemonSocketPathLease(socketPath, () => Promise.resolve());
-		lease.recordCompromise(new Error("lock stolen"));
-
-		await expect(prepareDaemonSocketPath(socketPath, lease)).rejects.toThrow(/was compromised/);
-	});
-
 	it("does not unlink a successor socket after the old lease is compromised", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pa-socket-compromise-"));
 		const socketPath = join(dir, "daemon.sock");

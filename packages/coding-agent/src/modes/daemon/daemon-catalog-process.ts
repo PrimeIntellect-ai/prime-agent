@@ -11,7 +11,7 @@ import { deleteSessionFile } from "../../core/session-file-actions.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
 
 export const DAEMON_CATALOG_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
-export const DAEMON_CATALOG_START_TIMEOUT_MS = 30_000;
+const DAEMON_CATALOG_START_TIMEOUT_MS = 30_000;
 
 export function isDaemonCatalogSourcePath(modulePath: string, packageDir: string): boolean {
 	return modulePath.startsWith(`${join(packageDir, "src")}${sep}`);

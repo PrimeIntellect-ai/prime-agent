@@ -2047,7 +2047,7 @@ describe("daemon worker supervisor monitoring", () => {
 		};
 		const processStartId = getProcessStartId(process.pid);
 		expect(processStartId).toBeDefined();
-		const workers: AdoptionWorker[] = ["slow-1", "slow-2", "slow-unverified", "healthy"].map((workerId) => ({
+		const workers: AdoptionWorker[] = ["slow-verified", "slow-unverified", "healthy"].map((workerId) => ({
 			descriptor: {
 				workerId,
 				pid: process.pid,
@@ -2080,52 +2080,12 @@ describe("daemon worker supervisor monitoring", () => {
 			Promise.all(workers.map((worker) => supervisor.adoptOrRecoverWorker(worker))),
 		).resolves.toBeDefined();
 
-		expect(recoverWorker).toHaveBeenCalledTimes(3);
-		expect(workers.map((worker) => worker.descriptor.lifecycle)).toEqual([
-			"recovering",
-			"recovering",
-			"recovering",
-			"ready",
-		]);
-		expect(persistWorker).toHaveBeenCalledTimes(4);
+		expect(recoverWorker).toHaveBeenCalledTimes(2);
+		expect(workers.map((worker) => worker.descriptor.lifecycle)).toEqual(["recovering", "recovering", "ready"]);
+		expect(persistWorker).toHaveBeenCalledTimes(3);
 	});
 
-	it("preserves worker authentication rejection instead of wrapping it as a connection timeout", async () => {
-		const worker = {
-			descriptor: {
-				socketPath: "/tmp/worker-auth-rejected.sock",
-				authenticationToken: "stale-token",
-			},
-			client: undefined,
-		};
-		const authError = new DaemonWorkerAuthenticationError("Invalid daemon worker authentication token");
-		const connect = vi.spyOn(DaemonWorkerClient.prototype, "connect").mockResolvedValue(undefined);
-		const hello = vi.spyOn(DaemonWorkerClient.prototype, "waitForHello").mockResolvedValue({} as never);
-		const authenticate = vi.spyOn(DaemonWorkerClient.prototype, "authenticateWorker").mockRejectedValue(authError);
-		const close = vi.spyOn(DaemonWorkerClient.prototype, "close").mockImplementation(() => undefined);
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			assertRecoveryAllowed: vi.fn(async () => undefined),
-			supervisorAuthenticationClaim: vi.fn(() => ({
-				supervisorGeneration: "generation",
-				supervisorPid: process.pid,
-				supervisorSocketPath: "/tmp/supervisor.sock",
-			})),
-		}) as {
-			connectWorker(target: typeof worker, timeoutMs: number): Promise<DaemonWorkerClient>;
-		};
-
-		try {
-			await expect(supervisor.connectWorker(worker, 2000)).rejects.toBe(authError);
-			expect(authenticate).toHaveBeenCalledOnce();
-		} finally {
-			connect.mockRestore();
-			hello.mockRestore();
-			authenticate.mockRestore();
-			close.mockRestore();
-		}
-	});
-
-	it("does not classify worker authentication rejection as a probe timeout", async () => {
+	it("preserves authentication rejection outside the probe-timeout recovery path", async () => {
 		const processStartId = getProcessStartId(process.pid);
 		expect(processStartId).toBeDefined();
 		const worker = {
@@ -2135,15 +2095,27 @@ describe("daemon worker supervisor monitoring", () => {
 				processStartId: processStartId!,
 				rootActiveSessionId: "active-auth",
 				consecutiveFailures: 0,
+				socketPath: "/tmp/worker-auth-rejected.sock",
+				authenticationToken: "stale-token",
 			},
+			client: undefined,
 		};
+		const authError = new DaemonWorkerAuthenticationError(
+			"Timed out connecting to daemon session worker: invalid token",
+		);
+		const connect = vi.spyOn(DaemonWorkerClient.prototype, "connect").mockResolvedValue(undefined);
+		const hello = vi.spyOn(DaemonWorkerClient.prototype, "waitForHello").mockResolvedValue({} as never);
+		const authenticate = vi.spyOn(DaemonWorkerClient.prototype, "authenticateWorker").mockRejectedValue(authError);
+		const close = vi.spyOn(DaemonWorkerClient.prototype, "close").mockImplementation(() => undefined);
 		const recoverWorker = vi.fn(async () => undefined);
 		const persistWorker = vi.fn();
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			assertRecoveryAllowed: vi.fn(async () => undefined),
-			connectWorker: vi.fn(async () => {
-				throw new DaemonWorkerAuthenticationError("Timed out connecting to daemon session worker: invalid token");
-			}),
+			supervisorAuthenticationClaim: vi.fn(() => ({
+				supervisorGeneration: "generation",
+				supervisorPid: process.pid,
+				supervisorSocketPath: "/tmp/supervisor.sock",
+			})),
 			recoverWorker,
 			persistWorker,
 			log: vi.fn(),
@@ -2151,99 +2123,46 @@ describe("daemon worker supervisor monitoring", () => {
 			adoptOrRecoverWorker(target: typeof worker): Promise<void>;
 		};
 
-		await supervisor.adoptOrRecoverWorker(worker);
+		try {
+			await supervisor.adoptOrRecoverWorker(worker);
 
-		expect(recoverWorker).toHaveBeenCalledWith(worker);
-		expect(persistWorker).not.toHaveBeenCalled();
-		expect(worker.descriptor).not.toHaveProperty("lifecycle", "recovering");
+			expect(authenticate).toHaveBeenCalledOnce();
+			expect(recoverWorker).toHaveBeenCalledWith(worker);
+			expect(persistWorker).not.toHaveBeenCalled();
+			expect(worker.descriptor).not.toHaveProperty("lifecycle", "recovering");
+		} finally {
+			connect.mockRestore();
+			hello.mockRestore();
+			authenticate.mockRestore();
+			close.mockRestore();
+		}
 	});
 
-	it("defers recovery without replacing a verified live worker that keeps timing out", async () => {
+	it.each([
+		{ name: "verified", hasProcessIdentity: true, error: "Timed out waiting for daemon worker hello" },
+		{ name: "identity-unavailable", hasProcessIdentity: false, error: "worker socket unavailable" },
+	])("defers recovery without replacing a live $name worker", async ({ hasProcessIdentity, error }) => {
 		vi.useFakeTimers();
-		const processStartId = getProcessStartId(process.pid);
-		expect(processStartId).toBeDefined();
-		const worker = {
-			descriptor: {
-				workerId: "worker-live-unresponsive",
-				pid: process.pid,
-				processStartId: processStartId!,
-				rootActiveSessionId: "active-1",
-				createCommand: { type: "create" as const },
-				lifecycle: "recovering",
-				consecutiveFailures: 0,
-			},
-			intentionalStop: false,
-			stopRevision: 0,
-		};
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			workers: new Map([[worker.descriptor.workerId, worker]]),
-			shuttingDown: false,
-			connectWorker: vi.fn(async () => {
-				throw new Error("Timed out waiting for daemon worker hello");
-			}),
-			subscribeWorker: vi.fn(async () => {}),
-			refreshWorkerSummaries: vi.fn(async () => {}),
-			recoverUncertainWorkerOperations: vi.fn(async () => {}),
-			launchWorker: vi.fn(async () => worker),
-			persistWorker: vi.fn(),
-			broadcastHeartbeatsChanged: vi.fn(),
-			deferWorkerRecovery: vi.fn(),
-			log: vi.fn(),
-			assertRecoveryAllowed: vi.fn(async () => {}),
-		}) as {
-			recoverWorker(target: typeof worker): Promise<void>;
-			connectWorker: ReturnType<typeof vi.fn>;
-			recoverUncertainWorkerOperations: ReturnType<typeof vi.fn>;
-			launchWorker: ReturnType<typeof vi.fn>;
-			deferWorkerRecovery: ReturnType<typeof vi.fn>;
-		};
-
-		const recovery = supervisor.recoverWorker(worker);
-		await vi.advanceTimersByTimeAsync(6250);
-		await recovery;
-
-		expect(supervisor.connectWorker).toHaveBeenCalledTimes(3);
-		expect(supervisor.recoverUncertainWorkerOperations).not.toHaveBeenCalled();
-		expect(supervisor.launchWorker).not.toHaveBeenCalled();
-		expect(supervisor.deferWorkerRecovery).toHaveBeenCalledWith(worker, expect.any(Error));
-		expect(worker.descriptor.lifecycle).toBe("recovering");
-	});
-
-	it("does not relaunch a live worker whose process identity is unknown", async () => {
-		vi.useFakeTimers();
+		const processStartId = hasProcessIdentity ? getProcessStartId(process.pid) : undefined;
+		if (hasProcessIdentity) expect(processStartId).toBeDefined();
 		type RecoveryWorker = {
 			descriptor: {
 				workerId: string;
 				pid: number;
+				processStartId?: string;
 				rootActiveSessionId: string;
 				createCommand: { type: "create" };
 				lifecycle?: string;
 				consecutiveFailures: number;
-				lastFailureAt?: string;
-				lastError?: string;
 			};
 			intentionalStop: boolean;
 			stopRevision: number;
-			recovery?: Promise<void>;
-			client?: { close(): void };
-		};
-		type RecoveryHarness = {
-			workers: Map<string, RecoveryWorker>;
-			shuttingDown: boolean;
-			connectWorker: ReturnType<typeof vi.fn>;
-			recoverUncertainWorkerOperations: ReturnType<typeof vi.fn>;
-			launchWorker: ReturnType<typeof vi.fn>;
-			persistWorker: ReturnType<typeof vi.fn>;
-			broadcastHeartbeatsChanged: ReturnType<typeof vi.fn>;
-			log: ReturnType<typeof vi.fn>;
-			assertRecoveryAllowed: ReturnType<typeof vi.fn>;
-			deferWorkerRecovery: ReturnType<typeof vi.fn>;
-			recoverWorker(worker: RecoveryWorker): Promise<void>;
 		};
 		const worker: RecoveryWorker = {
 			descriptor: {
-				workerId: "worker-unknown-identity",
+				workerId: `worker-${hasProcessIdentity ? "verified" : "unknown"}-identity`,
 				pid: process.pid,
+				...(processStartId ? { processStartId } : {}),
 				rootActiveSessionId: "active-1",
 				createCommand: { type: "create" },
 				consecutiveFailures: 0,
@@ -2255,15 +2174,22 @@ describe("daemon worker supervisor monitoring", () => {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
 			shuttingDown: false,
 			connectWorker: vi.fn(async () => {
-				throw new Error("worker socket unavailable");
+				throw new Error(error);
 			}),
 			recoverUncertainWorkerOperations: vi.fn(async () => {}),
 			launchWorker: vi.fn(async () => worker),
 			persistWorker: vi.fn(),
+			broadcastHeartbeatsChanged: vi.fn(),
+			deferWorkerRecovery: vi.fn(),
 			log: vi.fn(),
 			assertRecoveryAllowed: vi.fn(async () => {}),
-			deferWorkerRecovery: vi.fn(),
-		}) as RecoveryHarness;
+		}) as {
+			recoverWorker(target: RecoveryWorker): Promise<void>;
+			connectWorker: ReturnType<typeof vi.fn>;
+			recoverUncertainWorkerOperations: ReturnType<typeof vi.fn>;
+			launchWorker: ReturnType<typeof vi.fn>;
+			deferWorkerRecovery: ReturnType<typeof vi.fn>;
+		};
 
 		const recovery = supervisor.recoverWorker(worker);
 		await vi.advanceTimersByTimeAsync(6250);

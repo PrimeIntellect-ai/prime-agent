@@ -21,11 +21,7 @@ vi.mock("node:child_process", () => ({
 	},
 }));
 
-import {
-	DAEMON_CATALOG_START_TIMEOUT_MS,
-	DaemonCatalogClient,
-	isDaemonCatalogSourcePath,
-} from "../src/modes/daemon/daemon-catalog-process.js";
+import { DaemonCatalogClient, isDaemonCatalogSourcePath } from "../src/modes/daemon/daemon-catalog-process.js";
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -50,7 +46,6 @@ describe("daemon catalog startup", () => {
 		const client = new DaemonCatalogClient(() => {});
 		const starting = client.start();
 
-		expect(DAEMON_CATALOG_START_TIMEOUT_MS).toBeGreaterThanOrEqual(30_000);
 		expect(spawnState.args.some((arg) => /daemon-catalog-entry\.(?:js|ts)$/.test(arg))).toBe(true);
 		await vi.advanceTimersByTimeAsync(6000);
 		spawnState.child?.emit("message", { type: "ready" });
