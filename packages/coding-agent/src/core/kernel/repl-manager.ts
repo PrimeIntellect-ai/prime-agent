@@ -53,10 +53,8 @@ const REPAIR_STEP_TIMEOUT_MS = 30_000;
 // Runtime-minted host-request ids never repeat; the bound only guards a
 // misbehaving runtime from growing the dedup set forever.
 const MAX_HANDLED_HOST_REQUEST_IDS = 1024;
-// Cap for unattributed background output buffered between and during cells.
 const MAX_BACKGROUND_OUTPUT_CHARS = 64 * 1024;
 
-// Diagnostics keep only a stderr tail; readers slice at most the last 1 KiB.
 const MAX_KERNEL_STDERR_CHARS = 8 * 1024;
 
 /** ExecuteResult plus the raw fields of the request's `done` event (state ops). */

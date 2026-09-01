@@ -41,7 +41,6 @@ describe("ReplKernelManager startup", () => {
 
 	it("keeps only a bounded stderr tail from a chatty kernel", async () => {
 		const python = join(tempDir, "python");
-		// ~200 KiB of stderr noise before dying; only a tail may stay resident.
 		writeExecutable(
 			python,
 			["#!/bin/sh", 'yes "noise line" | head -c 204800 >&2', 'echo "final stderr line" >&2', "exit 42", ""].join(

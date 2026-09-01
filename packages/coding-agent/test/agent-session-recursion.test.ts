@@ -2402,7 +2402,6 @@ describe("AgentSession rlm recursion", () => {
 		await waitFor(() => childStarted);
 		const run = [...(root as unknown as InspectableRlmSession)._activeRlmChildRuns.values()][0];
 		if (!run?.emitUpdate || !run.session) throw new Error("Missing child run emit");
-		// The gated stream leaves the run in a steady state; re-emits carry no change.
 		await waitFor(() => run.activity?.kind === "waiting");
 		const before = updates;
 		run.emitUpdate();
