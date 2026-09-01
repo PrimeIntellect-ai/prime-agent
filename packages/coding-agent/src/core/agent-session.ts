@@ -916,6 +916,8 @@ interface RlmChildRun {
 	completeDeletion?: () => Promise<void>;
 	reportDeletionCleanupFailure?: (error: unknown) => Promise<void>;
 	emitUpdate?: () => void;
+	/** Serialized last-emitted snapshot; suppresses no-change per-delta updates. */
+	lastEmittedUpdate?: string;
 	unsubscribe?: () => void;
 }
 
@@ -10467,7 +10469,13 @@ export class AgentSession {
 		this._activeRlmChildRuns.set(run.id, run);
 		this._unsettledRlmChildRuns.add(run);
 		const emitChildUpdate = () => {
-			this._emit({ type: "rlm_child_update", child: this._rlmChildSnapshotForRun(run) });
+			// Child streaming re-emits per delta; once the snapshot stops changing
+			// (preview capped, activity steady) the repeats are pure wire noise.
+			const child = this._rlmChildSnapshotForRun(run);
+			const serialized = JSON.stringify(child);
+			if (serialized === run.lastEmittedUpdate) return;
+			run.lastEmittedUpdate = serialized;
+			this._emit({ type: "rlm_child_update", child });
 		};
 		run.emitUpdate = emitChildUpdate;
 		emitChildUpdate();

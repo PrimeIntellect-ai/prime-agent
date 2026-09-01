@@ -102,6 +102,8 @@ interface InspectableRlmRun {
 	settled: boolean;
 	error?: string;
 	abandonedForQuiescence?: boolean;
+	activity?: { kind: string };
+	emitUpdate?: () => void;
 	publication?: { promise: Promise<void>; resolve(): void; reject(error: Error): void };
 	settlement?: { promise: Promise<void>; resolve(): void; reject(error: Error): void };
 	detachedDeletion?: Awaited<ReturnType<AgentSession["listRlmSubagents"]>>["subagents"][number];
@@ -2372,6 +2374,45 @@ describe("AgentSession rlm recursion", () => {
 
 		releaseChild();
 		await waitFor(() => rootRun.status === "done");
+	});
+
+	it("suppresses repeated child updates whose snapshot did not change", async () => {
+		let releaseChild: () => void = () => {};
+		const release = new Promise<void>((resolve) => {
+			releaseChild = resolve;
+		});
+		let childStarted = false;
+		const root = createSession({
+			streamFn: (_model, context) => {
+				const text = userText(context);
+				const stream = createAssistantMessageEventStream();
+				childStarted = true;
+				void release.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage(`child answer: ${text}`) });
+				});
+				return stream;
+			},
+		});
+		let updates = 0;
+		root.subscribe((event) => {
+			if (event.type === "rlm_child_update") updates += 1;
+		});
+
+		await root.runRlmChild("slow shard");
+		await waitFor(() => childStarted);
+		const run = [...(root as unknown as InspectableRlmSession)._activeRlmChildRuns.values()][0];
+		if (!run?.emitUpdate || !run.session) throw new Error("Missing child run emit");
+		// The gated stream leaves the run in a steady state; re-emits carry no change.
+		await waitFor(() => run.activity?.kind === "waiting");
+		const before = updates;
+		run.emitUpdate();
+		run.emitUpdate();
+		expect(updates).toBe(before);
+		run.session.setCurrentRecap("changed recap");
+		await waitFor(() => updates === before + 1);
+
+		releaseChild();
+		await waitFor(() => run.status === "done");
 	});
 
 	it("runs a child agent without requiring ripgrep", async () => {
