@@ -1,0 +1,1 @@
+- Reduced idle streaming overhead: repeated `rlm_child_update` events with an unchanged child snapshot are no longer emitted, and the kernel stderr diagnostic buffer keeps only a bounded tail instead of growing for the kernel's lifetime.

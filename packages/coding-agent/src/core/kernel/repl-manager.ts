@@ -56,6 +56,9 @@ const MAX_HANDLED_HOST_REQUEST_IDS = 1024;
 // Cap for unattributed background output buffered between and during cells.
 const MAX_BACKGROUND_OUTPUT_CHARS = 64 * 1024;
 
+// Diagnostics keep only a stderr tail; readers slice at most the last 1 KiB.
+const MAX_KERNEL_STDERR_CHARS = 8 * 1024;
+
 /** ExecuteResult plus the raw fields of the request's `done` event (state ops). */
 interface InternalExecuteResult extends ExecuteResult {
 	doneFields?: Record<string, unknown>;
@@ -201,7 +204,11 @@ export class ReplKernelManager {
 	}
 
 	private appendKernelDiagnostic(message: string): void {
-		this.kernelStderr += `[kernel] ${message.endsWith("\n") ? message : `${message}\n`}`;
+		this.appendKernelStderr(`[kernel] ${message.endsWith("\n") ? message : `${message}\n`}`);
+	}
+
+	private appendKernelStderr(chunk: string): void {
+		this.kernelStderr = (this.kernelStderr + chunk).slice(-MAX_KERNEL_STDERR_CHARS);
 	}
 
 	async start(options: KernelStartOptions = {}): Promise<void> {
@@ -329,7 +336,7 @@ export class ReplKernelManager {
 		});
 
 		child.stderr?.on("data", (buf: Buffer) => {
-			this.kernelStderr += buf.toString();
+			this.appendKernelStderr(buf.toString());
 		});
 
 		child.on("error", (err) => {
