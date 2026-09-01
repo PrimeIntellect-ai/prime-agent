@@ -26,6 +26,8 @@ import { summarizePrimeIntegrityTrace } from "../prime-integrity/runner.js";
 const SOURCE_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_GIT_DIR = resolve(SOURCE_DIR, "..", "..", "..", "..", "..", ".git");
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
+export const KERNELBENCH_RESULT_SCHEMA_VERSION = 2;
+export const KERNELBENCH_EVALUATOR_VERSION = "prime-kernelbench-evaluator-v2";
 export const KERNELBENCH_CANDIDATE_RESULT_PREFIX = "KERNELBENCH_CANDIDATE_RESULT_JSON:";
 export const KERNELBENCH_HOST_RESULT_PREFIX = "KERNELBENCH_HOST_RESULT_JSON:";
 const KERNELBENCH_LEGACY_RESULT_PREFIX = "KERNELBENCH_RESULT_JSON:";
@@ -104,7 +106,30 @@ interface CommandResult {
 	stderr: string;
 }
 
+export interface KernelBenchRunProvenance {
+	schemaVersion: 1;
+	evaluatorVersion: string;
+	kernelbenchRevision: string;
+	catalogDigest: string;
+	problem: {
+		id: number;
+		name: string;
+		sourceDigest: string;
+	};
+	provider: string | null;
+	model: string | null;
+	configuration: {
+		hardening: boolean;
+		maxTurns: number;
+		timeoutMs: number;
+		agentExecutableDigest: string;
+		configDigest: string;
+	};
+}
+
 interface KernelResult {
+	schemaVersion: typeof KERNELBENCH_RESULT_SCHEMA_VERSION;
+	provenance: KernelBenchRunProvenance;
 	problemId: number;
 	problemName: string;
 	hardware: string;
@@ -573,6 +598,61 @@ function sha256(path: string): string {
 	return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+function kernelBenchCatalogDigest(problems: Array<{ id: number; name: string; path: string }>): string {
+	const digest = createHash("sha256");
+	for (const problem of problems) {
+		digest.update(`${problem.id}\0${problem.name}\0${sha256(problem.path)}\n`);
+	}
+	return digest.digest("hex");
+}
+
+function kernelBenchRevision(root: string, catalogDigest: string): string {
+	const revision = spawnSync("git", ["-C", root, "rev-parse", "--verify", "HEAD"], { encoding: "utf8" });
+	const value = revision.status === 0 ? revision.stdout.trim() : "";
+	return /^[0-9a-f]{40,64}$/i.test(value) ? value : `catalog:${catalogDigest}`;
+}
+
+function kernelBenchConfigDigest(configSource: string): string {
+	const digest = createHash("sha256");
+	for (const name of ["settings.json", "models.json"]) {
+		const path = join(configSource, name);
+		digest.update(`${name}\0`);
+		if (existsSync(path)) digest.update(readFileSync(path));
+		else digest.update("<missing>");
+		digest.update("\0");
+	}
+	return digest.digest("hex");
+}
+
+function createKernelBenchRunProvenance(
+	problem: { id: number; name: string; path: string },
+	options: Options,
+	agentExecutable: string,
+	catalogDigest: string,
+	revision: string,
+): KernelBenchRunProvenance {
+	return {
+		schemaVersion: 1,
+		evaluatorVersion: KERNELBENCH_EVALUATOR_VERSION,
+		kernelbenchRevision: revision,
+		catalogDigest,
+		problem: {
+			id: problem.id,
+			name: problem.name,
+			sourceDigest: sha256(problem.path),
+		},
+		provider: options.provider ?? null,
+		model: options.model ?? null,
+		configuration: {
+			hardening: options.hardening,
+			maxTurns: options.maxTurns,
+			timeoutMs: options.timeoutMs,
+			agentExecutableDigest: sha256(agentExecutable),
+			configDigest: kernelBenchConfigDigest(options.configSource),
+		},
+	};
+}
+
 function immutableFileDigest(path: string): string | undefined {
 	try {
 		const stat = lstatSync(path);
@@ -603,6 +683,8 @@ export function parseKernelBenchResult(
 	KernelResult,
 	| "problemId"
 	| "problemName"
+	| "schemaVersion"
+	| "provenance"
 	| "agentExitCode"
 	| "agentTimedOut"
 	| "protectedChanges"
@@ -662,6 +744,165 @@ export function parseKernelBenchResult(
 				: 0,
 		graderError: typeof parsed.error === "string" ? parsed.error : undefined,
 	};
+}
+
+function resumeRecord(value: unknown, label: string): Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error(`KernelBench resume result is malformed: ${label} must be an object`);
+	}
+	return value as Record<string, unknown>;
+}
+
+function resumeFiniteNumber(value: unknown, label: string, minimum = 0): number {
+	if (typeof value !== "number" || !Number.isFinite(value) || value < minimum) {
+		throw new Error(`KernelBench resume result is malformed: ${label} must be a finite number >= ${minimum}`);
+	}
+	return value;
+}
+
+function resumeStringArray(value: unknown, label: string): string[] {
+	if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+		throw new Error(`KernelBench resume result is malformed: ${label} must be an array of strings`);
+	}
+	return value;
+}
+
+function validateKernelBenchProvenance(value: unknown): KernelBenchRunProvenance {
+	const provenance = resumeRecord(value, "provenance");
+	const problem = resumeRecord(provenance.problem, "provenance.problem");
+	const configuration = resumeRecord(provenance.configuration, "provenance.configuration");
+	for (const [label, field] of [
+		["provenance.evaluatorVersion", provenance.evaluatorVersion],
+		["provenance.kernelbenchRevision", provenance.kernelbenchRevision],
+		["provenance.catalogDigest", provenance.catalogDigest],
+		["provenance.problem.name", problem.name],
+		["provenance.problem.sourceDigest", problem.sourceDigest],
+		["provenance.configuration.agentExecutableDigest", configuration.agentExecutableDigest],
+		["provenance.configuration.configDigest", configuration.configDigest],
+	] as const) {
+		if (typeof field !== "string" || field.length === 0) {
+			throw new Error(`KernelBench resume result is malformed: ${label} must be a non-empty string`);
+		}
+	}
+	if (provenance.schemaVersion !== 1) {
+		throw new Error("KernelBench resume result is malformed: provenance.schemaVersion must be 1");
+	}
+	if (!Number.isSafeInteger(problem.id) || (problem.id as number) <= 0) {
+		throw new Error("KernelBench resume result is malformed: provenance.problem.id must be a positive integer");
+	}
+	for (const label of ["provider", "model"] as const) {
+		if (provenance[label] !== null && typeof provenance[label] !== "string") {
+			throw new Error(`KernelBench resume result is malformed: provenance.${label} must be a string or null`);
+		}
+	}
+	if (typeof configuration.hardening !== "boolean") {
+		throw new Error("KernelBench resume result is malformed: provenance.configuration.hardening must be a boolean");
+	}
+	for (const label of ["maxTurns", "timeoutMs"] as const) {
+		if (!Number.isSafeInteger(configuration[label]) || (configuration[label] as number) <= 0) {
+			throw new Error(
+				`KernelBench resume result is malformed: provenance.configuration.${label} must be a positive integer`,
+			);
+		}
+	}
+	return provenance as unknown as KernelBenchRunProvenance;
+}
+
+function provenanceValue(value: KernelBenchRunProvenance, path: string): unknown {
+	return path.split(".").reduce<unknown>((current, segment) => {
+		if (!current || typeof current !== "object" || Array.isArray(current)) return undefined;
+		return (current as Record<string, unknown>)[segment];
+	}, value);
+}
+
+function assertMatchingKernelBenchProvenance(
+	actual: KernelBenchRunProvenance,
+	expected: KernelBenchRunProvenance,
+): void {
+	for (const path of [
+		"schemaVersion",
+		"evaluatorVersion",
+		"kernelbenchRevision",
+		"catalogDigest",
+		"problem.id",
+		"problem.name",
+		"problem.sourceDigest",
+		"provider",
+		"model",
+		"configuration.hardening",
+		"configuration.maxTurns",
+		"configuration.timeoutMs",
+		"configuration.agentExecutableDigest",
+		"configuration.configDigest",
+	]) {
+		const stored = provenanceValue(actual, path);
+		const current = provenanceValue(expected, path);
+		if (!Object.is(stored, current)) {
+			throw new Error(
+				`KernelBench resume provenance mismatch for ${path}: stored ${JSON.stringify(stored)}, current ${JSON.stringify(current)}`,
+			);
+		}
+	}
+}
+
+export function parseKernelBenchResumeResult(
+	serialized: string,
+	expectedProvenance: KernelBenchRunProvenance,
+): KernelResult {
+	let decoded: unknown;
+	try {
+		decoded = JSON.parse(serialized);
+	} catch (error) {
+		throw new Error(
+			`KernelBench resume result is malformed JSON: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	const result = resumeRecord(decoded, "result");
+	if (result.schemaVersion !== KERNELBENCH_RESULT_SCHEMA_VERSION) {
+		throw new Error(
+			`KernelBench resume result schema mismatch: stored ${JSON.stringify(result.schemaVersion)}, current ${KERNELBENCH_RESULT_SCHEMA_VERSION}`,
+		);
+	}
+	const provenance = validateKernelBenchProvenance(result.provenance);
+	assertMatchingKernelBenchProvenance(provenance, expectedProvenance);
+	if (result.problemId !== expectedProvenance.problem.id || result.problemName !== expectedProvenance.problem.name) {
+		throw new Error(
+			`KernelBench resume problem mismatch: stored ${JSON.stringify({ id: result.problemId, name: result.problemName })}, current ${JSON.stringify({ id: expectedProvenance.problem.id, name: expectedProvenance.problem.name })}`,
+		);
+	}
+	for (const label of ["problemName", "hardware", "workspacePath", "transcriptPath"] as const) {
+		if (typeof result[label] !== "string") {
+			throw new Error(`KernelBench resume result is malformed: ${label} must be a string`);
+		}
+	}
+	if (!Number.isSafeInteger(result.problemId) || (result.problemId as number) <= 0) {
+		throw new Error("KernelBench resume result is malformed: problemId must be a positive integer");
+	}
+	for (const label of ["compiled", "correct", "staticValid", "fast0", "fast1", "agentTimedOut"] as const) {
+		if (typeof result[label] !== "boolean") {
+			throw new Error(`KernelBench resume result is malformed: ${label} must be a boolean`);
+		}
+	}
+	resumeStringArray(result.staticErrors, "staticErrors");
+	resumeStringArray(result.staticWarnings, "staticWarnings");
+	resumeStringArray(result.protectedChanges, "protectedChanges");
+	resumeFiniteNumber(result.speedup, "speedup");
+	resumeFiniteNumber(result.durationMs, "durationMs");
+	if (result.agentExitCode !== null && !Number.isSafeInteger(result.agentExitCode)) {
+		throw new Error("KernelBench resume result is malformed: agentExitCode must be an integer or null");
+	}
+	for (const label of ["referenceRuntimeMs", "kernelRuntimeMs"] as const) {
+		if (result[label] !== undefined) resumeFiniteNumber(result[label], label, Number.MIN_VALUE);
+	}
+	for (const label of ["infrastructureError", "graderError"] as const) {
+		if (result[label] !== undefined && typeof result[label] !== "string") {
+			throw new Error(`KernelBench resume result is malformed: ${label} must be a string when present`);
+		}
+	}
+	const trace = resumeRecord(result.trace, "trace");
+	resumeFiniteNumber(trace.costUsd, "trace.costUsd");
+	resumeFiniteNumber(trace.totalTokens, "trace.totalTokens");
+	return result as unknown as KernelResult;
 }
 
 export function kernelBenchAgentEnvironment(
@@ -947,6 +1188,7 @@ async function runProblem(
 	problem: { id: number; name: string; path: string },
 	options: Options,
 	agentExecutable: string,
+	provenance: KernelBenchRunProvenance,
 ): Promise<KernelResult> {
 	const caseName = `problem-${String(problem.id).padStart(3, "0")}`;
 	const caseRoot = createFreshHostDirectory(options.outputDir, caseName);
@@ -1146,6 +1388,8 @@ async function runProblem(
 		}
 	}
 	const result: KernelResult = {
+		schemaVersion: KERNELBENCH_RESULT_SCHEMA_VERSION,
+		provenance,
 		problemId: problem.id,
 		problemName: problem.name,
 		...parsed,
@@ -1173,7 +1417,7 @@ function writeReport(options: Options, results: KernelResult[]): void {
 	const rate = (predicate: (result: KernelResult) => boolean): number =>
 		results.length === 0 ? 0 : results.filter(predicate).length / results.length;
 	const report = {
-		schemaVersion: 1,
+		schemaVersion: KERNELBENCH_RESULT_SCHEMA_VERSION,
 		benchmark: "KernelBench Level 1 via Prime AVO",
 		provider: options.provider,
 		model: options.model,
@@ -1225,15 +1469,21 @@ async function main(): Promise<void> {
 	if (selected.length === 0) throw new Error("no matching Level-1 problems");
 	mkdirSync(options.outputDir, { recursive: true });
 	const agentExecutable = resolveExecutable(options.agentCommand);
+	const catalogDigest = kernelBenchCatalogDigest(catalog);
+	const revision = kernelBenchRevision(options.kernelbenchRoot, catalogDigest);
 	const results: KernelResult[] = [];
 	for (const [index, problem] of selected.entries()) {
+		const provenance = createKernelBenchRunProvenance(problem, options, agentExecutable, catalogDigest, revision);
 		const caseName = `problem-${String(problem.id).padStart(3, "0")}`;
 		const caseKind = hostPathKind(options.outputDir, caseName);
 		const resultKind =
 			caseKind === "directory" ? hostPathKind(options.outputDir, join(caseName, "result.json")) : "missing";
 		if (options.resume && resultKind === "file") {
 			results.push(
-				JSON.parse(readHostFile(options.outputDir, join(caseName, "result.json")).toString("utf8")) as KernelResult,
+				parseKernelBenchResumeResult(
+					readHostFile(options.outputDir, join(caseName, "result.json")).toString("utf8"),
+					provenance,
+				),
 			);
 			process.stdout.write(`[${index + 1}/${selected.length}] resumed problem ${problem.id}\n`);
 			continue;
@@ -1244,7 +1494,7 @@ async function main(): Promise<void> {
 			);
 		}
 		process.stdout.write(`[${index + 1}/${selected.length}] running problem ${problem.id}: ${problem.name}\n`);
-		const result = await runProblem(problem, options, agentExecutable);
+		const result = await runProblem(problem, options, agentExecutable, provenance);
 		results.push(result);
 		writeReport(options, results);
 		process.stdout.write(

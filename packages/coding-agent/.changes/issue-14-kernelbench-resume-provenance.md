@@ -1,0 +1,1 @@
+- Fixed KernelBench resume to reject results from mismatched problems, catalogs, models, configurations, or evaluator versions ([#14](https://github.com/lewbei/prime-agent/issues/14)).
