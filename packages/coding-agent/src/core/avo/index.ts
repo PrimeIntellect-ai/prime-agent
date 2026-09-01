@@ -11,6 +11,7 @@ export {
 	type AvoEnvironmentAdapter,
 	CodingAvoAdapter,
 	GeneralAvoAdapter,
+	isAvoImmutableSemanticTestReceipt,
 	type ResearchAdapterState,
 	ResearchAvoAdapter,
 } from "./adapters.js";
@@ -162,6 +163,7 @@ export {
 	validateAvoSpecContract,
 } from "./spec-contract.js";
 export {
+	AVO_CANONICAL_DELIVERY_MAX_CHARS,
 	AvoStore,
 	digestAvoDeliveryText,
 	digestAvoPayload,

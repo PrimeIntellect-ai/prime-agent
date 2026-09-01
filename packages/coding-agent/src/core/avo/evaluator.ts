@@ -290,7 +290,14 @@ function nodeFileOnlySubtest(name: string): boolean {
 }
 
 export function deriveAvoObservedTestIdentities(output: string): string[] {
-	const normalized = output.replaceAll("\r", "");
+	// SpecBench's outer immutable contract prints the nested public-suite output
+	// on failure so the model can repair visible collection/runtime errors. Those
+	// nested lines are diagnostics, not additional identities in the authoritative
+	// outer command. Strip only the explicitly delimited block before comparing a
+	// failing baseline with a later passing rerun.
+	const normalized = output
+		.replaceAll("\r", "")
+		.replace(/(?:^|\n)SPECBENCH_PUBLIC_DIAGNOSTIC_BEGIN\n[\s\S]*?\nSPECBENCH_PUBLIC_DIAGNOSTIC_END(?=\n|$)/g, "\n");
 	const nodeIdentities: string[] = [];
 	const nodeStack: Array<{ indentation: number; name: string }> = [];
 	for (const line of normalized.split("\n")) {

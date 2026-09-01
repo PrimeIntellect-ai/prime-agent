@@ -1,0 +1,4 @@
+- Bound canonical AVO delivery to one serialized run/candidate/cycle/digest/state generation across host gates, turn boundaries, restarts, provider failures, and queue admission.
+- Revalidated canonical ownership after asynchronous supervision, memory, repair, and queue work; stale success and failure callbacks no longer mutate the current generation.
+- Validated persisted run-status/delivery-phase pairs and protected the sole canonical action from generic queue projection, clear, delete, and move operations.
+- Made shared NOOA synchronization merge-only with explicit versioned tombstones and cross-session per-database serialization.

@@ -159,7 +159,13 @@ export interface AvoPythonProbeAdequacy {
 }
 
 export interface AvoPythonCallableInspection {
-	callables: Array<{ name: string; inputDimensions: string[]; signatureDigest: string; structuralDigest: string }>;
+	callables: Array<{
+		name: string;
+		inputDimensions: string[];
+		signatureDigest: string;
+		parameterSignatureDigest: string;
+		structuralDigest: string;
+	}>;
 	errors: Array<{ name: string; reason: string }>;
 }
 
@@ -436,17 +442,20 @@ def inspect_source(source):
         if not dimensions and any(item["kind"].startswith("var_") for item in signature):
             errors.append({"name": name, "reason": f"public callable {name} has only variadic inputs and cannot be contrasted deterministically"})
             continue
-        signature_nodes = [*node.args.defaults, *node.args.kw_defaults, node.returns]
-        signature_nodes.extend(item.annotation for item in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs] if item.annotation is not None)
+        parameter_nodes = [*node.args.defaults, *node.args.kw_defaults]
+        parameter_nodes.extend(item.annotation for item in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs] if item.annotation is not None)
         if node.args.vararg is not None:
-            signature_nodes.append(node.args.vararg.annotation)
+            parameter_nodes.append(node.args.vararg.annotation)
         if node.args.kwarg is not None:
-            signature_nodes.append(node.args.kwarg.annotation)
+            parameter_nodes.append(node.args.kwarg.annotation)
+        signature_nodes = [*parameter_nodes, node.returns]
         signature_record = {"parameters": signature, "returns": shape(node.returns), "type_comment": node.type_comment, "async": isinstance(node, ast.AsyncFunctionDef), "bindings": binding_closure(signature_nodes, available_bindings)}
         encoded = json.dumps(signature_record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        parameter_record = {"parameters": signature, "async": isinstance(node, ast.AsyncFunctionDef), "bindings": binding_closure(parameter_nodes, available_bindings)}
+        parameter_encoded = json.dumps(parameter_record, sort_keys=True, separators=(",", ":")).encode("utf-8")
         structural = [{"name": item["name"], "kind": item["kind"], "required": item["required"]} for item in signature]
         structural_encoded = json.dumps({"parameters": structural, "async": isinstance(node, ast.AsyncFunctionDef)}, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        callables.append({"name": name, "inputDimensions": dimensions, "signatureDigest": hashlib.sha256(encoded).hexdigest(), "structuralDigest": hashlib.sha256(structural_encoded).hexdigest()})
+        callables.append({"name": name, "inputDimensions": dimensions, "signatureDigest": hashlib.sha256(encoded).hexdigest(), "parameterSignatureDigest": hashlib.sha256(parameter_encoded).hexdigest(), "structuralDigest": hashlib.sha256(structural_encoded).hexdigest()})
     return {"callables": callables, "errors": errors}
 
 def main():
@@ -468,6 +477,8 @@ function parseAvoPythonCallableInspection(value: unknown): AvoPythonCallableInsp
 			!item.inputDimensions.every((dimension) => typeof dimension === "string") ||
 			typeof item.signatureDigest !== "string" ||
 			!/^[a-f0-9]{64}$/.test(item.signatureDigest) ||
+			typeof item.parameterSignatureDigest !== "string" ||
+			!/^[a-f0-9]{64}$/.test(item.parameterSignatureDigest) ||
 			typeof item.structuralDigest !== "string" ||
 			!/^[a-f0-9]{64}$/.test(item.structuralDigest)
 		) {
@@ -477,6 +488,7 @@ function parseAvoPythonCallableInspection(value: unknown): AvoPythonCallableInsp
 			name: item.name,
 			inputDimensions: item.inputDimensions,
 			signatureDigest: item.signatureDigest,
+			parameterSignatureDigest: item.parameterSignatureDigest,
 			structuralDigest: item.structuralDigest,
 		};
 	});

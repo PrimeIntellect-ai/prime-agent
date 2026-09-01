@@ -748,12 +748,12 @@ function commandExecutable(command: string): string | undefined {
 	return token;
 }
 
-function resolveCommandExecutable(cwd: string, command: string): string | undefined {
+function resolveCommandInvocationPath(cwd: string, command: string): string | undefined {
 	const token = commandExecutable(command);
 	if (!token) return undefined;
 	if (token.includes("/")) {
 		const path = resolve(cwd, token);
-		return existsSync(path) ? realpathSync(path) : undefined;
+		return existsSync(path) ? path : undefined;
 	}
 	const found = spawnSync("which", [token], {
 		cwd,
@@ -761,7 +761,8 @@ function resolveCommandExecutable(cwd: string, command: string): string | undefi
 		stdio: ["ignore", "pipe", "ignore"],
 	});
 	const path = found.status === 0 ? found.stdout.trim().split("\n")[0] : undefined;
-	return path && existsSync(path) ? realpathSync(path) : undefined;
+	const absolutePath = path ? resolve(cwd, path) : undefined;
+	return absolutePath && existsSync(absolutePath) ? absolutePath : undefined;
 }
 
 function verificationTestRoot(path: string): string {
@@ -1117,7 +1118,8 @@ export function captureAvoVerificationHarnessManifest(
 			return [entry];
 		});
 
-	const executablePath = resolveCommandExecutable(cwd, command);
+	const executableInvocationPath = resolveCommandInvocationPath(cwd, command);
+	const executablePath = executableInvocationPath ? realpathSync(executableInvocationPath) : undefined;
 	if (!executablePath) unsupportedReasons.push("test runner executable could not be resolved exactly");
 	let runnerSha256 = "unresolved";
 	if (executablePath) {
@@ -1137,8 +1139,8 @@ export function captureAvoVerificationHarnessManifest(
 	}
 	let pythonEnvironment = "not-python";
 	if (runnerFamily === "pytest" && unsupportedReasons.length === 0) {
-		const pythonToken = /^(?:python3?|python)\b/i.test(command.trim()) ? executablePath : undefined;
-		const pythonPath = pythonToken ?? resolveCommandExecutable(cwd, "python3");
+		const pythonToken = /^(?:python3?|python)\b/i.test(command.trim()) ? executableInvocationPath : undefined;
+		const pythonPath = pythonToken ?? resolveCommandInvocationPath(cwd, "python3");
 		if (!pythonPath) {
 			unsupportedReasons.push("Python interpreter identity could not be resolved");
 		} else {
@@ -1215,7 +1217,15 @@ export function captureAvoVerificationHarnessManifest(
 		}
 	}
 	const runnerIdentityDigest = createHash("sha256")
-		.update(JSON.stringify({ executablePath, runnerSha256, sandboxSha256, pythonEnvironment }))
+		.update(
+			JSON.stringify({
+				executableInvocationPath,
+				executablePath,
+				runnerSha256,
+				sandboxSha256,
+				pythonEnvironment,
+			}),
+		)
 		.digest("hex");
 	const environmentDigest = createHash("sha256")
 		.update(
