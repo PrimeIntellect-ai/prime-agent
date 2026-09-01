@@ -2,12 +2,13 @@ import { Buffer } from "node:buffer";
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { type Api, type Model, type ModelCatalogV1, parseModelCatalog } from "@earendil-works/pi-ai";
 import { isTruthyEnvFlag } from "../utils/env.js";
+import { getPrimeAgentDownloadBaseUrl } from "../utils/prime-agent-download.js";
 
-const DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
 const MODEL_CATALOG_PATH = "model-catalog.json";
 const MODEL_CATALOG_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const MODEL_CATALOG_FETCH_TIMEOUT_MS = 5_000;
 const MAX_MODEL_CATALOG_BYTES = 8 * 1024 * 1024;
+const MIN_REMOTE_MODEL_CATALOG_COVERAGE = 0.5;
 const pendingRefreshes = new Map<string, Promise<Model<Api>[] | undefined>>();
 
 interface CachedModelCatalog {
@@ -43,6 +44,14 @@ function modelKey(provider: string, id: string): string {
 	return JSON.stringify([provider, id]);
 }
 
+function transportKey(model: Model<Api>): string {
+	return `${model.provider}\0${model.api}\0${model.baseUrl}`;
+}
+
+export function getMinimumRemoteModelCatalogSize(bundledModelCount: number): number {
+	return Math.ceil(bundledModelCount * MIN_REMOTE_MODEL_CATALOG_COVERAGE);
+}
+
 export function mergeRemoteModelCatalog(
 	bundledModels: readonly Model<Api>[],
 	remoteModels: readonly Model<Api>[] | undefined,
@@ -50,7 +59,11 @@ export function mergeRemoteModelCatalog(
 	if (!remoteModels) return bundledModels.map((model) => structuredClone(model));
 	const exact = new Map(bundledModels.map((model) => [modelKey(model.provider, model.id), model]));
 	const transports = new Map<string, Model<Api>>();
-	for (const model of bundledModels) transports.set(`${model.provider}\0${model.api}\0${model.baseUrl}`, model);
+	for (const model of bundledModels) {
+		const key = transportKey(model);
+		const current = transports.get(key);
+		if (!current || model.id < current.id) transports.set(key, model);
+	}
 
 	const merged: Model<Api>[] = [];
 	for (const remote of remoteModels) {
@@ -59,23 +72,21 @@ export function mergeRemoteModelCatalog(
 		const template =
 			exactTemplate && exactTemplate.api === remote.api && exactTemplate.baseUrl === remote.baseUrl
 				? exactTemplate
-				: transports.get(`${remote.provider}\0${remote.api}\0${remote.baseUrl}`);
+				: transports.get(transportKey(remote));
 		if (template) merged.push(cloneTransport(template, remote));
 	}
-	return merged.length > 0 ? merged : bundledModels.map((model) => structuredClone(model));
+	const minimumModels = getMinimumRemoteModelCatalogSize(bundledModels.length);
+	return merged.length >= minimumModels ? merged : bundledModels.map((model) => structuredClone(model));
 }
 
 export function getRemoteModelCatalogUrl(): string {
 	const explicit = process.env.PRIME_AGENT_MODEL_CATALOG_URL?.trim();
-	if (explicit) return explicit;
-	const base = (process.env.PRIME_AGENT_DOWNLOAD_BASE_URL?.trim() || DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL).replace(
-		/\/+$/,
-		"",
-	);
-	return `${base}/${MODEL_CATALOG_PATH}`;
+	const url = explicit || `${getPrimeAgentDownloadBaseUrl()}/${MODEL_CATALOG_PATH}`;
+	if (new URL(url).protocol !== "https:") throw new Error("Model catalog URL must use HTTPS");
+	return url;
 }
 
-function readCache(cachePath: string, url: string): CachedModelCatalog | undefined {
+function readCache(cachePath: string, url: string, minimumModels = 1): CachedModelCatalog | undefined {
 	if (!existsSync(cachePath)) return undefined;
 	try {
 		const value = JSON.parse(readFileSync(cachePath, "utf8")) as unknown;
@@ -86,7 +97,9 @@ function readCache(cachePath: string, url: string): CachedModelCatalog | undefin
 			!Number.isFinite(value.fetchedAt)
 		)
 			return undefined;
-		return { url, fetchedAt: value.fetchedAt, catalog: parseModelCatalog(value.catalog) };
+		const catalog = parseModelCatalog(value.catalog, { skipInvalidModels: true });
+		if (catalog.models.length < minimumModels) return undefined;
+		return { url, fetchedAt: value.fetchedAt, catalog };
 	} catch {
 		return undefined;
 	}
@@ -108,8 +121,12 @@ function writeCache(cachePath: string, cache: CachedModelCatalog): void {
 	}
 }
 
-export function readCachedRemoteModelCatalog(cachePath: string): Model<Api>[] | undefined {
-	return readCache(cachePath, getRemoteModelCatalogUrl())?.catalog.models;
+export function readCachedRemoteModelCatalog(cachePath: string, minimumModels = 1): Model<Api>[] | undefined {
+	try {
+		return readCache(cachePath, getRemoteModelCatalogUrl(), minimumModels)?.catalog.models;
+	} catch {
+		return undefined;
+	}
 }
 
 async function fetchCatalog(url: string, fetchFn: typeof fetch): Promise<ModelCatalogV1> {
@@ -145,16 +162,22 @@ async function fetchCatalog(url: string, fetchFn: typeof fetch): Promise<ModelCa
 		reader.releaseLock();
 	}
 	const text = Buffer.concat(chunks, bytesRead).toString("utf8");
-	return parseModelCatalog(JSON.parse(text) as unknown);
+	return parseModelCatalog(JSON.parse(text) as unknown, { skipInvalidModels: true });
 }
 
 export async function refreshRemoteModelCatalog(
 	cachePath: string,
-	options: { fetchFn?: typeof fetch; now?: number } = {},
+	options: { fetchFn?: typeof fetch; minimumModels?: number; now?: number } = {},
 ): Promise<Model<Api>[] | undefined> {
-	const url = getRemoteModelCatalogUrl();
+	let url: string;
+	try {
+		url = getRemoteModelCatalogUrl();
+	} catch {
+		return undefined;
+	}
 	const now = options.now ?? Date.now();
-	const cached = readCache(cachePath, url);
+	const minimumModels = options.minimumModels ?? 1;
+	const cached = readCache(cachePath, url, minimumModels);
 	if (cached && now - cached.fetchedAt < MODEL_CATALOG_CACHE_TTL_MS) return cached.catalog.models;
 	if (isTruthyEnvFlag(process.env.PI_OFFLINE)) return cached?.catalog.models;
 
@@ -164,6 +187,7 @@ export async function refreshRemoteModelCatalog(
 	const promise = (async () => {
 		try {
 			const catalog = await fetchCatalog(url, options.fetchFn ?? fetch);
+			if (catalog.models.length < minimumModels) throw new Error("Model catalog has too few compatible entries");
 			writeCache(cachePath, { url, fetchedAt: now, catalog });
 			return catalog.models;
 		} catch {

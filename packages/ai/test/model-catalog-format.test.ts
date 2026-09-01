@@ -20,9 +20,11 @@ function model(provider: string, id: string): Model<Api> {
 describe("hosted model catalog format", () => {
 	test("creates deterministic provider/model ordering", () => {
 		const generatedAt = new Date("2026-08-31T00:00:00.000Z");
-		const result = createModelCatalog([model("z", "b"), model("a", "z"), model("z", "a")], generatedAt);
+		const input = { ...model("z", "b"), headers: { Authorization: "bundled secret" } };
+		const result = createModelCatalog([input, model("a", "z"), model("z", "a")], generatedAt);
 		expect(result.generatedAt).toBe(generatedAt.toISOString());
 		expect(result.models.map((entry) => `${entry.provider}/${entry.id}`)).toEqual(["a/z", "z/a", "z/b"]);
+		expect(result.models.find((entry) => entry.id === "b")?.headers).toBeUndefined();
 	});
 
 	test("treats provider and model ids as an unambiguous pair", () => {
@@ -34,7 +36,17 @@ describe("hosted model catalog format", () => {
 		expect(parsed.models).toHaveLength(2);
 	});
 
-	test("applies the same strict schema used by clients", () => {
+	test("keeps compatible entries for older clients", () => {
+		const current = model("provider", "current");
+		const future = { ...model("provider", "future"), api: "future-api" };
+		const parsed = parseModelCatalog(
+			{ schemaVersion: 1, generatedAt: new Date().toISOString(), models: [current, future] },
+			{ skipInvalidModels: true },
+		);
+		expect(parsed.models).toEqual([current]);
+	});
+
+	test("applies strict publication and entry validation", () => {
 		const entry = model("provider", "model");
 		const parse = (modelEntry: Model<Api>) =>
 			parseModelCatalog({ schemaVersion: 1, generatedAt: new Date().toISOString(), models: [modelEntry] });
@@ -53,6 +65,8 @@ describe("hosted model catalog format", () => {
 			{ ...entry, thinkingLevelMap: { unsupported: "value" } },
 			{ ...entry, compat: { openRouterRouting: "invalid" } },
 			{ ...entry, api: "openai-responses", compat: { supportsStore: true } },
+			{ ...entry, api: "future-api", compat: undefined },
+			{ ...entry, headers: { authorization: "remote secret" } },
 			{ ...entry, headers: { authorization: { nested: true } } },
 		] as unknown as Model<Api>[];
 		for (const invalid of invalidEntries) expect(() => parse(invalid)).toThrow(/invalid model/i);

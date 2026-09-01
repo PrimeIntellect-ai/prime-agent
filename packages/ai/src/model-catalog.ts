@@ -27,7 +27,7 @@ const ThinkingLevelMapSchema = strictObject({
 	max: Type.Optional(ThinkingLevelValueSchema),
 });
 const CostSchema = Type.Number({ minimum: 0, maximum: 1_000_000 });
-const CatalogModelSchema = Type.Object({
+const CatalogModelSchema = strictObject({
 	id: Type.String({ minLength: 1, maxLength: 1_024 }),
 	name: Type.String({ minLength: 1, maxLength: 1_024 }),
 	api: Type.String({ minLength: 1, maxLength: 128 }),
@@ -45,15 +45,12 @@ const CatalogModelSchema = Type.Object({
 	contextWindow: Type.Integer({ minimum: 1, maximum: 100_000_000 }),
 	maxTokens: Type.Integer({ minimum: 1, maximum: 100_000_000 }),
 	featured: Type.Optional(Type.Boolean()),
-	headers: Type.Optional(
-		Type.Record(Type.String({ maxLength: 128 }), Type.String({ maxLength: 4_096 }), { maxProperties: 100 }),
-	),
 	compat: Type.Optional(Type.Unknown()),
 });
-const ModelCatalogSchema = Type.Object({
+const ModelCatalogEnvelopeSchema = Type.Object({
 	schemaVersion: Type.Literal(MODEL_CATALOG_SCHEMA_VERSION),
 	generatedAt: Type.String(),
-	models: Type.Array(CatalogModelSchema, { minItems: 1, maxItems: MAX_MODEL_CATALOG_MODELS }),
+	models: Type.Array(Type.Unknown(), { minItems: 1, maxItems: MAX_MODEL_CATALOG_MODELS }),
 });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -65,12 +62,16 @@ export function createModelCatalog(models: readonly Model<Api>[], generatedAt = 
 		schemaVersion: MODEL_CATALOG_SCHEMA_VERSION,
 		generatedAt: generatedAt.toISOString(),
 		models: models
-			.map((model) => structuredClone(model))
+			.map((model) => {
+				const catalogModel = structuredClone(model);
+				delete catalogModel.headers;
+				return catalogModel;
+			})
 			.sort((left, right) => left.provider.localeCompare(right.provider) || left.id.localeCompare(right.id)),
 	};
 }
 
-export function parseModelCatalog(value: unknown): ModelCatalogV1 {
+export function parseModelCatalog(value: unknown, options: { skipInvalidModels?: boolean } = {}): ModelCatalogV1 {
 	if (!isRecord(value) || value.schemaVersion !== MODEL_CATALOG_SCHEMA_VERSION) {
 		throw new Error("Unsupported model catalog schema version");
 	}
@@ -80,15 +81,25 @@ export function parseModelCatalog(value: unknown): ModelCatalogV1 {
 	if (!Array.isArray(value.models) || value.models.length === 0 || value.models.length > MAX_MODEL_CATALOG_MODELS) {
 		throw new Error("Invalid model catalog model count");
 	}
-	if (!Value.Check(ModelCatalogSchema, value)) throw new Error("Invalid model catalog entry");
+	if (!Value.Check(ModelCatalogEnvelopeSchema, value)) throw new Error("Invalid model catalog entry");
 
-	const models = value.models as Model<Api>[];
+	const models: Model<Api>[] = [];
 	const seen = new Set<string>();
-	for (const model of models) {
-		if (!isModelCompat(model.api, model.compat)) throw new Error("Invalid model catalog entry");
+	for (const candidate of value.models) {
+		if (!Value.Check(CatalogModelSchema, candidate)) {
+			if (options.skipInvalidModels) continue;
+			throw new Error("Invalid model catalog entry");
+		}
+		const model = candidate as Model<Api>;
+		if (!isModelCompat(model.api, model.compat)) {
+			if (options.skipInvalidModels) continue;
+			throw new Error("Invalid model catalog entry");
+		}
 		const key = JSON.stringify([model.provider, model.id]);
 		if (seen.has(key)) throw new Error(`Duplicate model catalog entry ${key}`);
 		seen.add(key);
+		models.push(model);
 	}
-	return value as unknown as ModelCatalogV1;
+	if (models.length === 0) throw new Error("Model catalog has no compatible entries");
+	return { schemaVersion: MODEL_CATALOG_SCHEMA_VERSION, generatedAt: value.generatedAt, models };
 }

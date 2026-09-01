@@ -1,5 +1,6 @@
-import { type TProperties, Type } from "typebox";
+import { type TProperties, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
+import type { KnownApi } from "./types.js";
 
 function createCompatSchemas(strict: boolean) {
 	const object = <T extends TProperties>(properties: T) => Type.Object(properties, { additionalProperties: !strict });
@@ -99,10 +100,20 @@ export const ProviderCompatSchema = Type.Intersect([
 	localSchemas.anthropicMessages,
 ]) as unknown as typeof localSchemas.provider;
 
+const apiCompatSchemas = {
+	"openai-completions": strictSchemas.openAICompletions,
+	"openai-responses": strictSchemas.openAIResponses,
+	"anthropic-messages": strictSchemas.anthropicMessages,
+	"mistral-conversations": null,
+	"azure-openai-responses": null,
+	"openai-codex-responses": null,
+	"bedrock-converse-stream": null,
+	"google-generative-ai": null,
+	"google-vertex": null,
+} satisfies Record<KnownApi, TSchema | null>;
+
 export function isModelCompat(api: string, value: unknown): boolean {
-	if (value === undefined) return true;
-	if (api === "openai-completions") return Value.Check(strictSchemas.openAICompletions, value);
-	if (api === "openai-responses") return Value.Check(strictSchemas.openAIResponses, value);
-	if (api === "anthropic-messages") return Value.Check(strictSchemas.anthropicMessages, value);
-	return false;
+	if (!Object.hasOwn(apiCompatSchemas, api)) return false;
+	const schema = apiCompatSchemas[api as KnownApi];
+	return schema ? value === undefined || Value.Check(schema, value) : value === undefined;
 }

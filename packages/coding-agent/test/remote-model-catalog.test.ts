@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Api, getModels, type Model } from "@earendil-works/pi-ai";
+import { type Api, getModels, getProviders, type Model } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
@@ -19,6 +19,12 @@ function catalog(models: Model<Api>[]) {
 
 function openAiModel(): Model<Api> {
 	return structuredClone(getModels("openai")[0] as Model<Api>);
+}
+
+function bundledModels(): Model<Api>[] {
+	return getProviders()
+		.flatMap((provider) => getModels(provider) as Model<Api>[])
+		.map((model) => structuredClone(model));
 }
 
 describe("remote model catalog", () => {
@@ -70,6 +76,11 @@ describe("remote model catalog", () => {
 			const [fallback] = mergeRemoteModelCatalog([bundled], [redirected]);
 			expect(fallback).toEqual(bundled);
 		}
+
+		const first = { ...structuredClone(bundled), id: "a", headers: { "X-Template": "first" } };
+		const last = { ...structuredClone(bundled), id: "z", headers: { "X-Template": "last" } };
+		const addition = { ...structuredClone(bundled), id: "future" };
+		expect(mergeRemoteModelCatalog([last, first], [addition])[0].headers).toEqual(first.headers);
 	});
 
 	test("uses the hosted model list and only accepts additions through a bundled transport", () => {
@@ -93,6 +104,21 @@ describe("remote model catalog", () => {
 		expect(merged[0]).not.toBe(bundled);
 	});
 
+	test("rejects a materially truncated hosted catalog", () => {
+		const bundled = openAiModel();
+		const bundledModels = ["a", "b", "c"].map((id) => ({ ...structuredClone(bundled), id }));
+		const remote = [{ ...structuredClone(bundled), id: "a", name: "Remote A" }];
+		expect(mergeRemoteModelCatalog(bundledModels, remote)).toEqual(bundledModels);
+	});
+
+	test("rejects insecure catalog URL overrides without fetching", async () => {
+		process.env.PRIME_AGENT_MODEL_CATALOG_URL = "http://catalog.test/model-catalog.json";
+		expect(() => getRemoteModelCatalogUrl()).toThrow(/HTTPS/);
+		const fetchFn = vi.fn();
+		expect(await refreshRemoteModelCatalog(join(tempDir, "cache.json"), { fetchFn })).toBeUndefined();
+		expect(fetchFn).not.toHaveBeenCalled();
+	});
+
 	test("fetches once, validates, and reuses the fresh atomic cache", async () => {
 		const cachePath = join(tempDir, "cache.json");
 		const model = openAiModel();
@@ -111,6 +137,21 @@ describe("remote model catalog", () => {
 
 		await refreshRemoteModelCatalog(cachePath, { fetchFn, now: 2_000 });
 		expect(fetchFn).toHaveBeenCalledOnce();
+	});
+
+	test("keeps a stale catalog when a refresh is materially truncated", async () => {
+		const cachePath = join(tempDir, "cache.json");
+		const model = openAiModel();
+		const staleModels = ["a", "b"].map((id) => ({ ...structuredClone(model), id }));
+		writeFileSync(
+			cachePath,
+			JSON.stringify({ url: getRemoteModelCatalogUrl(), fetchedAt: 1, catalog: catalog(staleModels) }),
+		);
+		const truncated = [{ ...structuredClone(model), id: "a" }];
+		const fetchFn = vi.fn(async () => new Response(JSON.stringify(catalog(truncated)), { status: 200 }));
+		const refreshed = await refreshRemoteModelCatalog(cachePath, { fetchFn, minimumModels: 2, now: 100_000_000 });
+		expect(refreshed?.map((entry) => entry.id)).toEqual(["a", "b"]);
+		expect(JSON.parse(readFileSync(cachePath, "utf8")).fetchedAt).toBe(1);
 	});
 
 	test("stops reading a chunked response at the byte limit", async () => {
@@ -150,6 +191,24 @@ describe("remote model catalog", () => {
 		expect(offlineFetch).not.toHaveBeenCalled();
 	});
 
+	test("serves bundled models while a cold catalog refresh runs in the background", async () => {
+		const modelsPath = join(tempDir, "models.json");
+		let respond: ((response: Response) => void) | undefined;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(() => new Promise<Response>((resolve) => (respond = resolve))),
+		);
+		const registry = ModelRegistry.create(
+			AuthStorage.inMemory({ openai: { type: "api_key", key: "key" } }),
+			modelsPath,
+		);
+		const available = await registry.refreshAvailableModels();
+		expect(available.length).toBeGreaterThan(0);
+		expect(respond).toBeDefined();
+		respond?.(new Response(JSON.stringify(catalog(bundledModels())), { status: 200 }));
+		await vi.waitFor(() => expect(existsSync(join(tempDir, "model-catalog-cache.json"))).toBe(true));
+	});
+
 	test("keeps local model overrides and custom models above remote metadata", async () => {
 		const model = openAiModel();
 		const modelsPath = join(tempDir, "models.json");
@@ -164,10 +223,19 @@ describe("remote model catalog", () => {
 				},
 			}),
 		);
-		const remote = { ...structuredClone(model), name: "Remote name", cost: { ...model.cost, input: 42 } };
+		const remoteModels = bundledModels().map((entry) =>
+			entry.provider === model.provider && entry.id === model.id
+				? {
+						...entry,
+						name: "Remote name",
+						cost: { ...entry.cost, input: 42 },
+						contextWindow: entry.contextWindow + 1,
+					}
+				: entry,
+		);
 		vi.stubGlobal(
 			"fetch",
-			vi.fn(async () => new Response(JSON.stringify(catalog([remote])), { status: 200 })),
+			vi.fn(async () => new Response(JSON.stringify(catalog(remoteModels)), { status: 200 })),
 		);
 		const registry = ModelRegistry.create(
 			AuthStorage.inMemory({ openai: { type: "api_key", key: "key" } }),
@@ -180,7 +248,13 @@ describe("remote model catalog", () => {
 			models: [{ ...model, id: "extension-model", name: "Extension model" }],
 		});
 		await registry.refreshAvailableModels();
-		expect(registry.find("openai", model.id)).toMatchObject({ name: "Local name", cost: { input: 99 } });
+		await vi.waitFor(() =>
+			expect(registry.find("openai", model.id)).toMatchObject({
+				name: "Local name",
+				cost: { input: 99 },
+				contextWindow: model.contextWindow + 1,
+			}),
+		);
 		expect(registry.find("openai", "local-model")?.name).toBe("Local model");
 		expect(registry.find("extension-provider", "extension-model")?.name).toBe("Extension model");
 	});

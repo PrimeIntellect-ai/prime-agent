@@ -39,6 +39,7 @@ import {
 } from "./prime-inference-models.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.js";
 import {
+	getMinimumRemoteModelCatalogSize,
 	mergeRemoteModelCatalog,
 	readCachedRemoteModelCatalog,
 	refreshRemoteModelCatalog,
@@ -434,6 +435,11 @@ export class ModelRegistry {
 		return this.modelsJsonPath ? join(dirname(this.modelsJsonPath), "model-catalog-cache.json") : undefined;
 	}
 
+	private minimumRemoteModelCatalogSize(): number {
+		const bundledModelCount = getProviders().reduce((count, provider) => count + getModels(provider).length, 0);
+		return getMinimumRemoteModelCatalogSize(bundledModelCount);
+	}
+
 	private loadModels(): void {
 		const {
 			models: customModels,
@@ -451,7 +457,8 @@ export class ModelRegistry {
 		);
 		const cachePath = this.remoteModelCatalogCachePath();
 		const remoteModels =
-			this.remoteCatalogModels ?? (cachePath ? readCachedRemoteModelCatalog(cachePath) : undefined);
+			this.remoteCatalogModels ??
+			(cachePath ? readCachedRemoteModelCatalog(cachePath, this.minimumRemoteModelCatalogSize()) : undefined);
 		const builtInModels = [
 			...this.loadBuiltInModels(overrides, modelOverrides, remoteModels),
 			...getPrivatePrimeInferenceModels(),
@@ -705,9 +712,16 @@ export class ModelRegistry {
 		this.refresh();
 		const cachePath = this.remoteModelCatalogCachePath();
 		if (cachePath) {
-			this.remoteCatalogModels = await refreshRemoteModelCatalog(cachePath);
-			this.loadModels();
-			this.reapplyRegisteredProviders();
+			void refreshRemoteModelCatalog(cachePath, {
+				minimumModels: this.minimumRemoteModelCatalogSize(),
+			})
+				.then((remoteModels) => {
+					if (!remoteModels || remoteModels === this.remoteCatalogModels) return;
+					this.remoteCatalogModels = remoteModels;
+					this.loadModels();
+					this.reapplyRegisteredProviders();
+				})
+				.catch(() => {});
 		}
 		await this.refreshPrivatePrimeInferenceAuthorization(previousPrivateModelIds, previousTeamId);
 		return this.getAvailable();
