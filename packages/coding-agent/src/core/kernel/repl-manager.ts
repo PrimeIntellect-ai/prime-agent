@@ -136,7 +136,15 @@ function asReasonArray(value: unknown): { name: string; reason: string }[] {
 export class ReplKernelManager {
 	private readonly options: Pick<
 		KernelManagerOptions,
-		"python" | "cwd" | "env" | "sessionId" | "hostHandlers" | "pythonSkills" | "snapshot" | "bootstrapCode"
+		| "python"
+		| "cwd"
+		| "env"
+		| "sessionId"
+		| "hostHandlers"
+		| "sessionHostHandlers"
+		| "pythonSkills"
+		| "snapshot"
+		| "bootstrapCode"
 	>;
 	private readonly handledHostRequestIds = new Set<string>();
 	private child?: ChildProcess;
@@ -153,6 +161,10 @@ export class ReplKernelManager {
 	// rlm.run spawns from detached asyncio tasks (cell already idle) can still
 	// attribute their spawning program.
 	private lastCellCode?: string;
+	// Owner of the most recently started cell, retained for the same detached
+	// case: a host request that fires after the scheduling cell went idle still
+	// dispatches to the session that scheduled it.
+	private lastCellOwnerSessionId?: string;
 	/** Unattributed stream text that arrived between cells; surfaced on the next execution. */
 	private pendingBackgroundOutput = "";
 	private pendingBackgroundOutputTruncated = false;
@@ -190,6 +202,7 @@ export class ReplKernelManager {
 			env: options.env,
 			sessionId: options.sessionId,
 			hostHandlers: options.hostHandlers,
+			sessionHostHandlers: options.sessionHostHandlers,
 			pythonSkills: options.pythonSkills,
 			snapshot: options.snapshot,
 			bootstrapCode: options.bootstrapCode,
@@ -877,6 +890,7 @@ export class ReplKernelManager {
 			}
 			if (!opts.internal) {
 				this.lastCellCode = code;
+				this.lastCellOwnerSessionId = opts.ownerSessionId;
 			}
 			try {
 				const sendPromise = this.writeLine({ ...requestFields, id: requestId });
@@ -1125,13 +1139,27 @@ export class ReplKernelManager {
 			throw new Error("host request payload must have a string type");
 		}
 
-		const handler = this.options.hostHandlers?.[data.type];
+		// Attribute the request to the session whose cell raised it. A blocking
+		// call is still the in-flight execution; detached spawns
+		// (asyncio.create_task) fire after the scheduling cell goes idle, so fall
+		// back to the last cell's owner — mirroring the cellSourceCode fallback.
+		const attributedSessionId = this.activeExecution
+			? this.activeExecution.opts.ownerSessionId
+			: this.lastCellOwnerSessionId;
+		let handler = this.options.hostHandlers?.[data.type];
+		// Session-scoped dispatch (shared kernels): a cell tagged with another
+		// registered session's id uses THAT session's handlers, so identity-bearing
+		// requests (agent_message.send, rlm.run) act as the issuing session. A type
+		// the delegated set lacks falls back to the owner's handler — availability
+		// over attribution, and exactly the pre-registry behavior.
+		if (attributedSessionId && attributedSessionId !== this.options.sessionId) {
+			const delegated = this.options.sessionHostHandlers?.get(attributedSessionId)?.();
+			const delegatedHandler = delegated?.[data.type];
+			if (delegatedHandler) handler = delegatedHandler;
+		}
 		if (!handler) {
 			throw new Error(`host request type "${data.type}" is not available in this session`);
 		}
-		// Tag the request with the cell that triggered it. A blocking call is still
-		// the in-flight execution; detached spawns (asyncio.create_task) fire after
-		// the scheduling cell goes idle, so fall back to that last cell's source.
 		const cellSourceCode = this.activeExecution?.code ?? this.lastCellCode;
 		return handler({ ...data, cellSourceCode });
 	}

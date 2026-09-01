@@ -10398,6 +10398,51 @@ export class AgentSession {
 		return { model };
 	}
 
+	/**
+	 * The kernel whose session-handlers registry this session's rlm children
+	 * must be registered on. Extensions that adopt a shared kernel (the
+	 * kernel-fulfill path) adopt the TOP session's provisioner and route EVERY
+	 * descendant's cells onto it, so registrations must land there no matter
+	 * how deep the spawn chain goes. Set by the parent at registration time,
+	 * propagating the root provisioner down the chain; unset on a top-level
+	 * session, which uses its own provisioner.
+	 */
+	private _rlmKernelHostRegistrar?: IpythonKernelProvisioner;
+
+	/**
+	 * Route host requests raised by this child's executions on the shared
+	 * kernel back to the child's own handlers. On the kernel-fulfill path
+	 * (extensions adopting the shared kernel), a child's cells execute on the
+	 * top session's kernel; without per-session dispatch, identity-bearing host
+	 * requests (agent_message.send, rlm.run) ran through the kernel owner's
+	 * handlers and acted as the owner. Executions tagged with the child's
+	 * session id (ExecuteOptions.ownerSessionId) now dispatch to the child's
+	 * handlers.
+	 *
+	 * Registration lands on the ROOT provisioner (inherited via
+	 * _rlmKernelHostRegistrar), not the spawning session's own: a grandchild's
+	 * cells run on the top session's kernel too, so registering it on the
+	 * middle child's provisioner would leave its requests falling back to the
+	 * top session's identity. The root is propagated onto the child so ITS
+	 * children register in the same place.
+	 *
+	 * The provider is liveness-checked through a WeakRef: once the child is
+	 * disposed or collected, dispatch falls back to the owner's handlers, so no
+	 * explicit unregistration is required on the many child-teardown paths.
+	 * Children retained for follow-up messaging stay resolvable.
+	 */
+	private _registerRlmChildKernelHostHandlers(child: AgentSession): void {
+		const provisioner = this._rlmKernelHostRegistrar ?? this._ipythonKernelProvisioner;
+		if (!provisioner) return;
+		child._rlmKernelHostRegistrar = provisioner;
+		const ref = new WeakRef(child);
+		provisioner.registerSessionHostHandlers(child.sessionId, () => {
+			const session = ref.deref();
+			if (!session || session._disposed || session._disposing) return undefined;
+			return session._createKernelHostHandlers();
+		});
+	}
+
 	private async _startRlmChildRun(
 		prompt: string,
 		kwargs: Record<string, unknown> = {},
@@ -10546,6 +10591,7 @@ export class AgentSession {
 				if (run.status === "cancelled") throw new Error(run.error ?? "RLM child cancelled");
 				if (child.sessionName !== sessionName) child.setSessionName(sessionName);
 				publishChildSession(child);
+				this._registerRlmChildKernelHostHandlers(child);
 				throwIfCancelled();
 				run.status = "running";
 				emitChildUpdate();

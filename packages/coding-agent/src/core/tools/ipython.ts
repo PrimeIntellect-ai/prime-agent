@@ -16,6 +16,7 @@ import {
 	type KernelDiffDisplay,
 	type KernelSentAgentMessage,
 	ReplKernelManager,
+	type SessionHostHandlersProvider,
 } from "../kernel/index.js";
 import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
@@ -311,6 +312,9 @@ export class IpythonKernelProvisioner {
 	private lastStartupMessage?: string;
 	private _lastRestore?: RestoreResult;
 	private readonly disposeController = new AbortController();
+	// Shared by reference with every kernel this provisioner starts (including
+	// restarts), so sessions registered after kernel start are still seen.
+	private readonly sessionHostHandlers = new Map<string, SessionHostHandlersProvider>();
 
 	constructor(
 		private readonly cwd: string,
@@ -325,6 +329,22 @@ export class IpythonKernelProvisioner {
 	/** Result of reviving a prior session's namespace on the last kernel start, if any. */
 	get lastRestore(): RestoreResult | undefined {
 		return this._lastRestore;
+	}
+
+	/**
+	 * Allow another session (an rlm child executing on this shared kernel) to
+	 * receive host requests raised by executions tagged with its session id, so
+	 * identity-bearing requests (agent_message.send) act as that session rather
+	 * than this kernel's owner. The provider is resolved per host request and
+	 * should return undefined once its session is gone; dispatch then falls
+	 * back to the owner's handlers.
+	 */
+	registerSessionHostHandlers(sessionId: string, provider: SessionHostHandlersProvider): void {
+		this.sessionHostHandlers.set(sessionId, provider);
+	}
+
+	unregisterSessionHostHandlers(sessionId: string): void {
+		this.sessionHostHandlers.delete(sessionId);
 	}
 
 	/** Start the kernel in the background. Failures are swallowed here and surface on the next ensure(). */
@@ -466,6 +486,7 @@ export class IpythonKernelProvisioner {
 				},
 				sessionId: this.options?.sessionId,
 				hostHandlers: this.options?.hostHandlers,
+				sessionHostHandlers: this.sessionHostHandlers,
 				pythonSkills: this.options?.pythonSkills,
 				// Only persistent sessions (which have an artifact dir) get a revivable snapshot.
 				snapshot: snapshotDir
