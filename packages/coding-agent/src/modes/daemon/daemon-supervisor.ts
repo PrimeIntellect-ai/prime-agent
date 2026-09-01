@@ -3635,6 +3635,9 @@ export class DaemonSupervisor {
 			} catch {
 				return;
 			}
+			// Leak-over-kill: a live worker that keeps failing for non-timeout reasons parks failed with
+			// its process intact. A verified-identity survivor is reclaimed by the next fresh create;
+			// an unverifiable one waits for exit — killing a pid we cannot verify as ours is worse.
 			worker.descriptor.lifecycle = "failed";
 			this.persistWorker(worker);
 			this.markWorkerRosterEntries(worker, "failed");
