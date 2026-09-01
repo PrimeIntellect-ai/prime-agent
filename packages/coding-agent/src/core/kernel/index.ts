@@ -1,8 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHmac, randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import { v4 as uuid } from "uuid";
@@ -63,6 +63,18 @@ export class KernelBusyAfterInterruptError extends Error {
 export const HOST_COMM_TARGET = "host.request";
 /** Advertises fixed per-kernel host capabilities so unsupported calls fail before opening a Comm. */
 export const HOST_REQUEST_TYPES_ENV = "PRIME_AGENT_HOST_REQUEST_TYPES";
+
+/** Host-only launch policy for isolating model-controlled kernel processes. */
+export const KERNEL_PROCESS_SANDBOX_ENV = "PRIME_AGENT_KERNEL_PROCESS_SANDBOX";
+export const KERNEL_SANDBOX_PYTHON_PLACEHOLDER = "__PRIME_AGENT_KERNEL_PYTHON__";
+export const KERNEL_SANDBOX_CONNECTION_PLACEHOLDER = "__PRIME_AGENT_KERNEL_CONNECTION__";
+
+interface KernelProcessSandboxConfig {
+	version: 1;
+	argv: string[];
+	home: string;
+	inheritEnvironment: string[];
+}
 
 /**
  * Handles one typed request from Python code running in the kernel.
@@ -362,7 +374,7 @@ function raceStartupWithAbort<T>(promise: Promise<T>, signal: AbortSignal | unde
 
 interface ConnectionInfo {
 	ip: string;
-	transport: "tcp";
+	transport: "tcp" | "ipc";
 	shell_port: number;
 	iopub_port: number;
 	stdin_port: number;
@@ -417,6 +429,47 @@ interface Deferred<T> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseKernelProcessSandbox(value: string | undefined): KernelProcessSandboxConfig | undefined {
+	if (value === undefined) return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(value);
+	} catch {
+		throw new Error(`${KERNEL_PROCESS_SANDBOX_ENV} must contain valid JSON`);
+	}
+	if (!isRecord(parsed) || parsed.version !== 1) {
+		throw new Error(`${KERNEL_PROCESS_SANDBOX_ENV} must contain a version 1 object`);
+	}
+	if (
+		!Array.isArray(parsed.argv) ||
+		parsed.argv.length === 0 ||
+		!parsed.argv.every((item) => typeof item === "string")
+	) {
+		throw new Error(`${KERNEL_PROCESS_SANDBOX_ENV}.argv must contain command arguments`);
+	}
+	if (parsed.argv.filter((item) => item === KERNEL_SANDBOX_PYTHON_PLACEHOLDER).length !== 1) {
+		throw new Error(`${KERNEL_PROCESS_SANDBOX_ENV}.argv must contain one kernel Python placeholder`);
+	}
+	if (parsed.argv.filter((item) => item === KERNEL_SANDBOX_CONNECTION_PLACEHOLDER).length !== 1) {
+		throw new Error(`${KERNEL_PROCESS_SANDBOX_ENV}.argv must contain one kernel connection placeholder`);
+	}
+	if (typeof parsed.home !== "string" || !isAbsolute(parsed.home) || resolve(parsed.home) === sep) {
+		throw new Error(`${KERNEL_PROCESS_SANDBOX_ENV}.home must be an absolute non-root path`);
+	}
+	if (
+		!Array.isArray(parsed.inheritEnvironment) ||
+		!parsed.inheritEnvironment.every((item) => typeof item === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(item))
+	) {
+		throw new Error(`${KERNEL_PROCESS_SANDBOX_ENV}.inheritEnvironment must contain environment names`);
+	}
+	return {
+		version: 1,
+		argv: parsed.argv,
+		home: resolve(parsed.home),
+		inheritEnvironment: [...new Set(parsed.inheritEnvironment)],
+	};
 }
 
 function errorMessage(error: unknown): string {
@@ -492,10 +545,17 @@ function hasResolvedPorts(info: ConnectionInfo): boolean {
 	return CONNECTION_PORT_KEYS.every((key) => Number.isInteger(info[key]) && info[key] > 0);
 }
 
-function parseConnectionInfo(value: unknown): ConnectionInfo | null {
+function connectionIsReady(info: ConnectionInfo): boolean {
+	if (!hasResolvedPorts(info)) return false;
+	return info.transport === "tcp" || CONNECTION_PORT_KEYS.every((key) => existsSync(`${info.ip}-${info[key]}`));
+}
+
+function parseConnectionInfo(value: unknown, expectedTransport: ConnectionInfo["transport"]): ConnectionInfo | null {
 	if (!isRecord(value)) return null;
-	if (value.ip !== "127.0.0.1") return null;
-	if (value.transport !== "tcp") return null;
+	const transport = value.transport;
+	const ip = value.ip;
+	if ((transport !== "tcp" && transport !== "ipc") || transport !== expectedTransport) return null;
+	if (typeof ip !== "string" || (expectedTransport === "tcp" && ip !== "127.0.0.1")) return null;
 	if (value.signature_scheme !== "hmac-sha256") return null;
 	if (typeof value.key !== "string") return null;
 	const shellPort = value.shell_port;
@@ -510,8 +570,8 @@ function parseConnectionInfo(value: unknown): ConnectionInfo | null {
 	if (typeof hbPort !== "number" || !Number.isInteger(hbPort)) return null;
 	const kernelName = typeof value.kernel_name === "string" ? value.kernel_name : "python3";
 	return {
-		ip: value.ip,
-		transport: value.transport,
+		ip,
+		transport,
 		shell_port: shellPort,
 		iopub_port: iopubPort,
 		stdin_port: stdinPort,
@@ -523,31 +583,43 @@ function parseConnectionInfo(value: unknown): ConnectionInfo | null {
 	};
 }
 
-function readConnectionInfo(path: string): ConnectionInfo | null {
+function readConnectionInfo(path: string, expectedTransport: ConnectionInfo["transport"]): ConnectionInfo | null {
 	try {
-		return parseConnectionInfo(JSON.parse(readFileSync(path, "utf8")));
+		const info = parseConnectionInfo(JSON.parse(readFileSync(path, "utf8")), expectedTransport);
+		if (info?.transport === "ipc" && info.ip !== join(dirname(path), "kernel")) {
+			return null;
+		}
+		return info;
 	} catch {
 		return null;
 	}
 }
 
-function makeConnection(): { info: ConnectionInfo; path: string; tempDir: string } {
+function makeConnection(transport: ConnectionInfo["transport"]): {
+	info: ConnectionInfo;
+	path: string;
+	tempDir: string;
+} {
+	const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-kernel-"));
 	const info: ConnectionInfo = {
-		ip: "127.0.0.1",
-		transport: "tcp",
-		shell_port: 0,
-		iopub_port: 0,
-		stdin_port: 0,
-		control_port: 0,
-		hb_port: 0,
+		ip: transport === "tcp" ? "127.0.0.1" : join(tempDir, "kernel"),
+		transport,
+		shell_port: transport === "tcp" ? 0 : 1,
+		iopub_port: transport === "tcp" ? 0 : 2,
+		stdin_port: transport === "tcp" ? 0 : 3,
+		control_port: transport === "tcp" ? 0 : 4,
+		hb_port: transport === "tcp" ? 0 : 5,
 		signature_scheme: "hmac-sha256",
 		key: randomBytes(16).toString("hex"),
 		kernel_name: "python3",
 	};
-	const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-kernel-"));
 	const path = join(tempDir, "connection.json");
 	writeFileSync(path, JSON.stringify(info, null, 2), { mode: 0o600 });
 	return { info, path, tempDir };
+}
+
+function connectionEndpoint(connection: ConnectionInfo, port: number): string {
+	return connection.transport === "ipc" ? `ipc://${connection.ip}-${port}` : `tcp://${connection.ip}:${port}`;
 }
 
 const liveKernels = new Set<KernelManager>();
@@ -594,6 +666,7 @@ export class KernelManager {
 	> &
 		Required<Pick<KernelManagerOptions, "username">>;
 	private readonly session = uuid();
+	private readonly processSandbox: KernelProcessSandboxConfig | undefined;
 	private readonly commTargets = new Map<string, string>();
 	private readonly handledHostRequestCommIds = new Set<string>();
 	private kernel?: ChildProcess;
@@ -631,6 +704,7 @@ export class KernelManager {
 	private snapshotTimer?: ReturnType<typeof globalThis.setTimeout>;
 
 	constructor(options: KernelManagerOptions) {
+		this.processSandbox = parseKernelProcessSandbox(process.env[KERNEL_PROCESS_SANDBOX_ENV]);
 		this.options = {
 			python: options.python,
 			cwd: options.cwd,
@@ -644,6 +718,43 @@ export class KernelManager {
 			snapshot: options.snapshot,
 			username: options.username ?? "prime-agent",
 		};
+	}
+
+	private kernelEnvironment(): NodeJS.ProcessEnv {
+		if (!this.processSandbox) {
+			return { ...process.env, ...this.options.env, JPY_PARENT_PID: String(process.pid) };
+		}
+		const environment: NodeJS.ProcessEnv = {};
+		for (const name of this.processSandbox.inheritEnvironment) {
+			const value = process.env[name];
+			if (value !== undefined) environment[name] = value;
+		}
+		Object.assign(environment, this.options.env, {
+			HOME: this.processSandbox.home,
+			TMPDIR: "/tmp",
+			PYTHONDONTWRITEBYTECODE: "1",
+		});
+		environment.PATH ??= "/usr/bin:/bin";
+		delete environment[KERNEL_PROCESS_SANDBOX_ENV];
+		return environment;
+	}
+
+	private kernelLaunch(
+		python: string,
+		connection: { path: string; tempDir: string },
+	): { executable: string; args: string[] } {
+		if (!this.processSandbox) {
+			return { executable: python, args: ["-m", "ipykernel_launcher", "-f", connection.path] };
+		}
+		const separator = this.processSandbox.argv.lastIndexOf("--");
+		if (separator < 1) throw new Error(`${KERNEL_PROCESS_SANDBOX_ENV}.argv must contain a command separator`);
+		const argv = this.processSandbox.argv.map((argument) => {
+			if (argument === KERNEL_SANDBOX_PYTHON_PLACEHOLDER) return python;
+			if (argument === KERNEL_SANDBOX_CONNECTION_PLACEHOLDER) return connection.path;
+			return argument;
+		});
+		argv.splice(separator, 0, "--bind", connection.tempDir, connection.tempDir);
+		return { executable: argv[0]!, args: argv.slice(1) };
 	}
 
 	get ownerSessionId(): string | undefined {
@@ -699,14 +810,15 @@ export class KernelManager {
 			throw new Error("Kernel was disposed during startup");
 		}
 
-		let connection = makeConnection();
+		const connectionTransport = this.processSandbox ? "ipc" : "tcp";
+		let connection = makeConnection(connectionTransport);
 		this.tempDir = connection.tempDir;
 
 		// Fast path: fork a pre-imported kernel from the forkserver. Any failure
 		// (disabled, unavailable, fork error) degrades to the direct-spawn path so
 		// correctness never depends on fork.
 		let forked = false;
-		if (isForkServerEnabled()) {
+		if (!this.processSandbox && isForkServerEnabled()) {
 			try {
 				const handle = await forkKernel(python, {
 					connectionPath: connection.path,
@@ -738,16 +850,18 @@ export class KernelManager {
 					// Leave temporary kernel files for OS cleanup.
 				}
 				// A failed fork may leave stale ports; retry with a fresh connection file.
-				connection = makeConnection();
+				connection = makeConnection(connectionTransport);
 				this.tempDir = connection.tempDir;
 			}
 		}
 
 		if (!forked) {
-			const kernel = spawn(python, ["-m", "ipykernel_launcher", "-f", connection.path], {
+			const launch = this.kernelLaunch(python, connection);
+			const kernel = spawn(launch.executable, launch.args, {
 				cwd: this.options.cwd,
-				// ipykernel's parent poller exits the kernel if this pid dies (covers SIGKILL of the owner).
-				env: { ...process.env, ...this.options.env, JPY_PARENT_PID: String(process.pid) },
+				// A normal kernel uses ipykernel's parent poller. Sandboxed kernels use
+				// bubblewrap's die-with-parent boundary because host pids are not visible.
+				env: this.kernelEnvironment(),
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 			this.kernel = kernel;
@@ -780,7 +894,7 @@ export class KernelManager {
 		const connectionPath = connection.path;
 		let conn: ConnectionInfo;
 		try {
-			conn = await this.waitForResolvedConnection(connectionPath);
+			conn = await this.waitForResolvedConnection(connectionPath, connectionTransport);
 			if (this.startStale(generation)) throw new Error("Kernel start superseded");
 			this.connection = conn;
 		} catch (e) {
@@ -795,9 +909,9 @@ export class KernelManager {
 		this.shell = new Dealer();
 		this.iopub = new Subscriber();
 		this.control = new Dealer();
-		this.shell.connect(`${conn.transport}://${conn.ip}:${conn.shell_port}`);
-		this.iopub.connect(`${conn.transport}://${conn.ip}:${conn.iopub_port}`);
-		this.control.connect(`${conn.transport}://${conn.ip}:${conn.control_port}`);
+		this.shell.connect(connectionEndpoint(conn, conn.shell_port));
+		this.iopub.connect(connectionEndpoint(conn, conn.iopub_port));
+		this.control.connect(connectionEndpoint(conn, conn.control_port));
 		this.iopub.subscribe("");
 		this.startControlPump();
 
@@ -872,7 +986,10 @@ export class KernelManager {
 		}
 	}
 
-	private async waitForResolvedConnection(connectionPath: string): Promise<ConnectionInfo> {
+	private async waitForResolvedConnection(
+		connectionPath: string,
+		expectedTransport: ConnectionInfo["transport"],
+	): Promise<ConnectionInfo> {
 		const startedAt = Date.now();
 		while (Date.now() - startedAt < PORTS_RESOLVE_TIMEOUT_MS) {
 			const remainingBudget = PORTS_RESOLVE_TIMEOUT_MS - (Date.now() - startedAt);
@@ -884,8 +1001,8 @@ export class KernelManager {
 				throw new Error(`Kernel exited before resolving ports. stderr:\n${tail || "(empty)"}`);
 			}
 
-			const info = readConnectionInfo(connectionPath);
-			if (info && hasResolvedPorts(info)) {
+			const info = readConnectionInfo(connectionPath, expectedTransport);
+			if (info && connectionIsReady(info)) {
 				return info;
 			}
 
