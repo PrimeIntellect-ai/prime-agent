@@ -8,7 +8,6 @@ import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import { APP_NAME, getBinDir } from "../config.js";
 
-const TOOLS_DIR = getBinDir();
 const NETWORK_TIMEOUT_MS = 10_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const COMMAND_TIMEOUT_MS = 5_000;
@@ -100,7 +99,7 @@ const TOOLS: Record<string, ToolConfig> = {
 // Check that a command both launches and reports a successful version.
 function commandWorks(cmd: string): boolean {
 	try {
-		const result = spawnSync(cmd, ["--version"], { stdio: "pipe", timeout: COMMAND_TIMEOUT_MS });
+		const result = spawnSync(cmd, ["--version"], { env: process.env, stdio: "pipe", timeout: COMMAND_TIMEOUT_MS });
 		return !result.error && result.status === 0;
 	} catch {
 		return false;
@@ -113,7 +112,7 @@ export function getToolPath(tool: ManagedTool): string | null {
 	if (!config) return null;
 
 	// Check our tools directory first
-	const localPath = join(TOOLS_DIR, config.binaryName + (platform() === "win32" ? ".exe" : ""));
+	const localPath = join(getBinDir(), config.binaryName + (platform() === "win32" ? ".exe" : ""));
 	if (existsSync(localPath) && commandWorks(localPath)) {
 		return localPath;
 	}
@@ -190,6 +189,7 @@ class UnsupportedToolPlatformError extends Error {}
 async function downloadTool(tool: ManagedTool): Promise<string> {
 	const config = TOOLS[tool];
 	if (!config) throw new Error(`Unknown tool: ${tool}`);
+	const toolsDir = getBinDir();
 
 	const plat = platform();
 	const architecture = arch();
@@ -204,12 +204,12 @@ async function downloadTool(tool: ManagedTool): Promise<string> {
 	if (!assetName) throw new UnsupportedToolPlatformError(`Unsupported platform: ${plat}/${architecture}`);
 
 	// Create tools directory
-	mkdirSync(TOOLS_DIR, { recursive: true });
+	mkdirSync(toolsDir, { recursive: true });
 
 	const downloadUrl = `https://github.com/${config.repo}/releases/download/${config.tagPrefix}${version}/${assetName}`;
-	const archivePath = join(TOOLS_DIR, assetName);
+	const archivePath = join(toolsDir, assetName);
 	const binaryExt = plat === "win32" ? ".exe" : "";
-	const binaryPath = join(TOOLS_DIR, config.binaryName + binaryExt);
+	const binaryPath = join(toolsDir, config.binaryName + binaryExt);
 
 	// Download
 	await downloadFile(downloadUrl, archivePath);
@@ -217,7 +217,7 @@ async function downloadTool(tool: ManagedTool): Promise<string> {
 	// Extract into a unique temp directory. fd and rg downloads can run concurrently
 	// during startup, so sharing a fixed directory causes races.
 	const extractDir = join(
-		TOOLS_DIR,
+		toolsDir,
 		`extract_tmp_${config.binaryName}_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
 	);
 	mkdirSync(extractDir, { recursive: true });

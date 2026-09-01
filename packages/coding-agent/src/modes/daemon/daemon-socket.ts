@@ -278,7 +278,10 @@ function assertSocketLeaseHeld(socketPath: string, lease: DaemonSocketPathLease)
 
 export function defaultDaemonSocketDir(): string {
 	const suffix = typeof process.getuid === "function" ? String(process.getuid()) : "user";
-	return join(tmpdir(), `prime-agent-${suffix}`);
+	// Bun caches os.tmpdir() at startup. Read the standard overrides here so
+	// isolated processes and tests can select a runtime temporary directory.
+	const runtimeTmpDir = process.env.TMPDIR || process.env.TMP || process.env.TEMP || tmpdir();
+	return join(runtimeTmpDir, `prime-agent-${suffix}`);
 }
 
 function ensureDefaultDaemonSocketDir(socketPath: string): void {

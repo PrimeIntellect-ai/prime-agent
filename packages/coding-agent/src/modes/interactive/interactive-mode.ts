@@ -3348,11 +3348,11 @@ export class InteractiveMode {
 	}
 
 	private clearFeatureHintPresentation(): void {
-		if (this.featureHintTimer) {
+		if (this.featureHintTimer !== undefined) {
 			clearTimeout(this.featureHintTimer);
 			this.featureHintTimer = undefined;
 		}
-		if (this.featureHintAnimationTimer) {
+		if (this.featureHintAnimationTimer !== undefined) {
 			clearInterval(this.featureHintAnimationTimer);
 			this.featureHintAnimationTimer = undefined;
 		}

@@ -87,7 +87,7 @@ export type PrimeTeam = {
 };
 
 function defaultPrimeCliConfigPath(): string {
-	return join(homedir(), ".prime", "config.json");
+	return join(process.env.HOME || homedir(), ".prime", "config.json");
 }
 
 export function getPrimeCliConfigPath(configPath?: string): string {

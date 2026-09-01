@@ -59,7 +59,7 @@ import { KeybindingsManager } from "./core/keybindings.js";
 import { installFileLogSink, setLogContext } from "./core/logging.js";
 import type { ModelRegistry } from "./core/model-registry.js";
 import { findInitialModel, resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
-import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
+import { restoreStdout, takeOverStdout, writeRawStdout } from "./core/output-guard.js";
 import type { CreateAgentSessionOptions } from "./core/sdk.js";
 import {
 	formatMissingSessionCwdPrompt,
@@ -1095,12 +1095,17 @@ export async function main(args: string[], options?: MainOptions) {
 		takeOverStdout();
 	}
 
+	const writeCliMetadata = (text: string): void => {
+		const explicitMachineMode = parsed.print || parsed.mode !== undefined;
+		if (explicitMachineMode) console.error(text);
+		else writeRawStdout(`${text}\n`);
+	};
 	if (parsed.version) {
-		console.log(VERSION);
+		writeCliMetadata(VERSION);
 		process.exit(0);
 	}
 	if (parsed.help) {
-		console.log(formatTopLevelHelp());
+		writeCliMetadata(formatTopLevelHelp());
 		process.exit(0);
 	}
 
