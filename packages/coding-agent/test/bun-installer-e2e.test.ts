@@ -1,7 +1,16 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	readlinkSync,
+	realpathSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -105,7 +114,7 @@ describe("compiled binary installer", () => {
 
 		const result = runInstaller(root, ["1.2.3"]);
 		expect(result.exitCode, result.stderr).toBe(0);
-		const target = join(root, "apps", "versions", "v1.2.3", "prime-agent");
+		const target = join(realpathSync(root), "apps", "versions", "v1.2.3", "prime-agent");
 		expect(readlinkSync(join(root, "bin", "prime-agent"))).toBe(target);
 		expect(readFileSync(join(root, "apps", "versions", "v1.2.3", "package.json"), "utf8")).toContain('"1.2.3"');
 		expect(readFileSync(join(root, "home", ".prime", "sentinel"), "utf8")).toBe("user data");
@@ -209,7 +218,7 @@ describe("compiled binary installer", () => {
 		const result = runInstaller(root, ["1.2.3"], { PRIME_AGENT_VERSIONS_DIR: "relative/versions" });
 		expect(result.exitCode, result.stderr).toBe(0);
 		expect(readlinkSync(join(root, "bin", "prime-agent"))).toBe(
-			join(root, "relative", "versions", "v1.2.3", "prime-agent"),
+			join(realpathSync(root), "relative", "versions", "v1.2.3", "prime-agent"),
 		);
 	});
 });

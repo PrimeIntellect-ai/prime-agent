@@ -173,6 +173,15 @@ describe("compiled release archives", () => {
 		expect(result.stderr).toContain("must use HTTPS");
 	});
 
+	test("rejects empty query and fragment delimiters in release base URLs", () => {
+		for (const delimiter of ["?", "#"]) {
+			const f = fixture();
+			const result = pack(f, ["--base-url", `https://downloads.example.test/${delimiter}`]);
+			expect(result.status).not.toBe(0);
+			expect(result.stderr).toContain("must not contain a query or fragment");
+		}
+	});
+
 	test("rejects shell-active release base URLs", () => {
 		const f = fixture();
 		const result = pack(f, ["--base-url", "https://downloads.example.test/$(touch-danger)"]);
