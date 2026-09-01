@@ -1032,7 +1032,27 @@ describe("autoresearch control plane", () => {
 			}),
 		).toThrow("relative path within the workspace");
 
-		// 2. Rejects traversal paths in input parsing
+		// 2. Rejects traversal paths in input parsing (both forward and backslash forms)
+		expect(() =>
+			parseAutoresearchExperimentInput({
+				candidate_id: "candidate-1",
+				hypothesis: "test",
+				design: "test",
+				baselines: ["base"],
+				artifact_paths: ["artifacts/../secret.json"],
+			}),
+		).toThrow("must not contain traversal segments");
+
+		expect(() =>
+			parseAutoresearchExperimentInput({
+				candidate_id: "candidate-1",
+				hypothesis: "test",
+				design: "test",
+				baselines: ["base"],
+				artifact_paths: ["artifacts\\..\\..\\secret.json"],
+			}),
+		).toThrow("must not contain traversal segments");
+
 		expect(() =>
 			parseAutoresearchExperimentInput({
 				candidate_id: "candidate-1",
@@ -1041,7 +1061,7 @@ describe("autoresearch control plane", () => {
 				baselines: ["base"],
 				artifact_paths: ["../outside.json"],
 			}),
-		).toThrow("must not escape the workspace");
+		).toThrow("must not contain traversal segments");
 
 		expect(() =>
 			parseAutoresearchExperimentInput({
@@ -1051,7 +1071,7 @@ describe("autoresearch control plane", () => {
 				baselines: ["base"],
 				artifact_paths: ["artifacts/../../secret.json"],
 			}),
-		).toThrow("must not escape the workspace");
+		).toThrow("must not contain traversal segments");
 
 		// 3. Rejects null bytes in input parsing
 		expect(() =>

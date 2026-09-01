@@ -1,7 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import {
+	closeSync,
+	existsSync,
+	fstatSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	realpathSync,
+	renameSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { BlockList, isIP } from "node:net";
-import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 
 export const AUTORESEARCH_SKILL_NAME = "autoresearch";
 export const AUTORESEARCH_STATE_VERSION = 4;
@@ -1219,26 +1230,44 @@ function emptySearchCoverage(): AutoresearchSearchCoverage {
 }
 
 export function normalizeAutoresearchArtifactPath(path: unknown, label = "experiment.artifact_paths"): string {
-	const raw = requireString(path, label);
+	const raw = requireString(path, label).trim();
+	if (!raw) {
+		throw new Error(`${label} must not be empty`);
+	}
 	if (raw.includes("\0")) {
 		throw new Error(`${label} must not contain null bytes`);
 	}
-	if (isAbsolute(raw) || raw.startsWith("/") || raw.startsWith("\\") || /^[A-Za-z]:[/\\]/.test(raw)) {
+	if (
+		isAbsolute(raw) ||
+		raw.startsWith("/") ||
+		raw.startsWith("\\") ||
+		/^[A-Za-z]:[/\\]/.test(raw) ||
+		/^\\\\/.test(raw)
+	) {
 		throw new Error(`${label} must be a relative path within the workspace: ${raw}`);
 	}
-	const normalized = normalize(raw).replaceAll("\\", "/");
+	const rawSegments = raw.split(/[/\\]/);
+	if (rawSegments.some((segment) => segment === "..")) {
+		throw new Error(`${label} must not contain traversal segments ('..'): ${raw}`);
+	}
+	const forwardSlashes = raw.replace(/\\/g, "/");
+	const normalized = posix.normalize(forwardSlashes);
 	if (
 		normalized === "." ||
 		normalized === ".." ||
 		normalized.startsWith("../") ||
-		normalized.startsWith(`..${sep}`) ||
-		isAbsolute(normalized)
+		normalized.includes("/../") ||
+		normalized.startsWith("/")
 	) {
 		throw new Error(`${label} must not escape the workspace: ${raw}`);
 	}
 	const cleaned = normalized.replace(/^\.\//, "");
-	if (!cleaned) {
+	if (!cleaned || cleaned === ".") {
 		throw new Error(`${label} must specify a valid file path within the workspace`);
+	}
+	const cleanedSegments = cleaned.split("/");
+	if (cleanedSegments.some((seg) => seg === ".." || seg === ".")) {
+		throw new Error(`${label} must not contain traversal segments: ${raw}`);
 	}
 	return cleaned;
 }
@@ -2169,10 +2198,10 @@ export class AutoresearchStore {
 		return structuredClone(experiment);
 	}
 
-	private assertContainedArtifactPath(path: string): {
-		canonicalTarget: string;
+	private readAndVerifyContainedArtifact(path: string): {
 		canonicalRelative: string;
-		stats: ReturnType<typeof statSync>;
+		sha256: string;
+		size: number;
 	} {
 		const normalized = normalizeAutoresearchArtifactPath(path, "experiment artifact path");
 		const canonicalWorkspace = canonicalizeWorkspaceDir(this.workspaceDir);
@@ -2187,48 +2216,65 @@ export class AutoresearchStore {
 		if (!existsSync(absoluteTarget)) {
 			throw new Error(`experiment artifact does not exist: ${path}`);
 		}
-		let canonicalTarget: string;
+
+		let fd: number;
 		try {
-			canonicalTarget = realpathSync(absoluteTarget);
+			fd = openSync(absoluteTarget, "r");
 		} catch {
-			throw new Error(`experiment artifact does not exist: ${path}`);
+			throw new Error(`experiment artifact could not be opened: ${path}`);
 		}
-		const canonicalRel = relative(canonicalWorkspace, canonicalTarget);
-		if (
-			canonicalRel === "" ||
-			canonicalRel === ".." ||
-			canonicalRel.startsWith(`..${sep}`) ||
-			isAbsolute(canonicalRel)
-		) {
-			throw new Error(`experiment artifact escapes the workspace: ${path}`);
+
+		try {
+			const fstats = fstatSync(fd);
+			if (!fstats.isFile()) {
+				throw new Error(`experiment artifact is not a file: ${path}`);
+			}
+
+			let canonicalTarget: string | undefined;
+			if (process.platform === "linux") {
+				try {
+					canonicalTarget = realpathSync(`/proc/self/fd/${fd}`);
+				} catch {
+					canonicalTarget = undefined;
+				}
+			}
+			if (!canonicalTarget) {
+				canonicalTarget = realpathSync(absoluteTarget);
+				const currentStat = statSync(canonicalTarget);
+				if (currentStat.ino !== fstats.ino || currentStat.dev !== fstats.dev) {
+					throw new Error(`experiment artifact was modified during verification: ${path}`);
+				}
+			}
+
+			const canonicalRel = relative(canonicalWorkspace, canonicalTarget);
+			if (
+				canonicalRel === "" ||
+				canonicalRel === ".." ||
+				canonicalRel.startsWith(`..${sep}`) ||
+				isAbsolute(canonicalRel)
+			) {
+				throw new Error(`experiment artifact escapes the workspace: ${path}`);
+			}
+
+			const content = readFileSync(fd);
+			const sha256 = createHash("sha256").update(content).digest("hex");
+			return {
+				canonicalRelative: canonicalRel.replaceAll("\\", "/"),
+				sha256,
+				size: fstats.size,
+			};
+		} finally {
+			closeSync(fd);
 		}
-		const stats = statSync(canonicalTarget);
-		if (!stats.isFile()) {
-			throw new Error(`experiment artifact is not a file: ${path}`);
-		}
-		return {
-			canonicalTarget,
-			canonicalRelative: canonicalRel.replaceAll("\\", "/"),
-			stats,
-		};
 	}
 
 	private createArtifactReceipts(paths: string[]): AutoresearchArtifactReceipt[] {
 		return paths.map((path) => {
-			const { canonicalTarget, canonicalRelative } = this.assertContainedArtifactPath(path);
-			const canonicalWorkspace = canonicalizeWorkspaceDir(this.workspaceDir);
-			const currentTarget = realpathSync(canonicalTarget);
-			const currentRel = relative(canonicalWorkspace, currentTarget);
-			if (currentRel === "" || currentRel === ".." || currentRel.startsWith(`..${sep}`) || isAbsolute(currentRel)) {
-				throw new Error(`experiment artifact escapes the workspace: ${path}`);
-			}
-			const stats = statSync(currentTarget);
-			if (!stats.isFile()) throw new Error(`experiment artifact is not a file: ${path}`);
-			const content = readFileSync(currentTarget);
+			const { canonicalRelative, sha256, size } = this.readAndVerifyContainedArtifact(path);
 			return {
 				path: canonicalRelative,
-				sha256: createHash("sha256").update(content).digest("hex"),
-				size: stats.size,
+				sha256,
+				size,
 				verifiedAt: this.now(),
 			};
 		});
@@ -2237,9 +2283,6 @@ export class AutoresearchStore {
 	private experimentArtifactsAreCurrent(experiment: AutoresearchExperiment): boolean {
 		if (experiment.status !== "completed" || experiment.artifactReceipts.length === 0) return false;
 		try {
-			const canonicalWorkspace = canonicalizeWorkspaceDir(this.workspaceDir);
-			if (!existsSync(canonicalWorkspace)) return false;
-
 			return experiment.artifactReceipts.every((receipt) => {
 				if (
 					typeof receipt.path !== "string" ||
@@ -2249,29 +2292,8 @@ export class AutoresearchStore {
 				) {
 					return false;
 				}
-				const normalized = normalize(receipt.path).replaceAll("\\", "/");
-				if (normalized === "." || normalized === ".." || normalized.startsWith("../") || isAbsolute(normalized)) {
-					return false;
-				}
-				const absoluteTarget = resolve(canonicalWorkspace, normalized);
-				if (!existsSync(absoluteTarget)) return false;
-
-				const canonicalTarget = realpathSync(absoluteTarget);
-				const canonicalRel = relative(canonicalWorkspace, canonicalTarget);
-				if (
-					canonicalRel === "" ||
-					canonicalRel === ".." ||
-					canonicalRel.startsWith(`..${sep}`) ||
-					isAbsolute(canonicalRel)
-				) {
-					return false;
-				}
-
-				const stats = statSync(canonicalTarget);
-				if (!stats.isFile() || stats.size !== receipt.size) return false;
-
-				const currentHash = createHash("sha256").update(readFileSync(canonicalTarget)).digest("hex");
-				return currentHash === receipt.sha256;
+				const { sha256, size } = this.readAndVerifyContainedArtifact(receipt.path);
+				return size === receipt.size && sha256 === receipt.sha256;
 			});
 		} catch {
 			return false;
