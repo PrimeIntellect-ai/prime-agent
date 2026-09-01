@@ -130,7 +130,7 @@ describe("daemon protocol helpers", () => {
 	it("capability- and schema-gates conditional RLM child cancellation", () => {
 		const legacy = { type: "cancel_rlm_child", activeSessionId: "active-1", childId: "child-1" } as const;
 		expect(getDaemonCommandCompatibilities(legacy)).toEqual([DAEMON_COMMAND_COMPATIBILITY.cancel_rlm_child]);
-		expect(getDaemonCommandCompatibilities({ ...legacy, expectedEventSequence: 17 })).toEqual([
+		expect(getDaemonCommandCompatibilities({ ...legacy, expectedRosterToken: "a".repeat(64) })).toEqual([
 			{ minProtocol: 7, minSchemaRevision: 24, capability: "conditional_rlm_child_cancel" },
 			DAEMON_COMMAND_COMPATIBILITY.cancel_rlm_child,
 		]);

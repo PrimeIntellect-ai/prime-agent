@@ -40,6 +40,8 @@ export interface ActiveSessionState {
 	extensionUiRequests: Map<string, ActiveSessionExtensionUiRequest>;
 	eventGeneration: string;
 	lastEventSequence: DaemonEventSequence;
+	/** Monotonic within eventGeneration; advances for every recursive RLM roster lifecycle change. */
+	rlmRosterRevision: number;
 	inFlightBash?: Promise<void>;
 	unsubscribe?: () => void;
 	/** Latest background status summary, surfaced in the agents view. */

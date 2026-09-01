@@ -69,7 +69,7 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 23 lets workers query the supervisor agent roster on demand.
 // Revision 24 adds compare-and-cancel semantics for RLM child runs.
 export const DAEMON_SCHEMA_REVISION = 24;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-24-2bcb370507d5";
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-24-7c25db49fd5f";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -530,7 +530,7 @@ export type DaemonCommand =
 			type: "cancel_rlm_child";
 			activeSessionId: string;
 			childId: string;
-			expectedEventSequence?: DaemonEventSequence;
+			expectedRosterToken?: string;
 	  }
 	| { id?: string; type: "delete_rlm_subagent"; activeSessionId: string; childId: string }
 	| { id?: string; type: "wait_for_idle"; activeSessionId: string }
@@ -850,7 +850,7 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 	if (command.type === "wait_for_headless_completion" && command.waitForRlmQuiescence === true) {
 		requirements.push(RLM_QUIESCENCE_BARRIER_COMMAND);
 	}
-	if (command.type === "cancel_rlm_child" && command.expectedEventSequence !== undefined) {
+	if (command.type === "cancel_rlm_child" && command.expectedRosterToken !== undefined) {
 		requirements.push(CONDITIONAL_RLM_CHILD_CANCEL_COMMAND);
 	}
 	if (command.type === "cancel_prompt_admission" && command.cancelOwned === true) {
@@ -876,8 +876,8 @@ export type DaemonErrorInfo =
 	| { code: "session_already_active"; sessionPath: string; activeSessionId?: string }
 	| {
 			code: "rlm_child_roster_changed";
-			expectedEventSequence: DaemonEventSequence;
-			actualEventSequence: DaemonEventSequence;
+			expectedRosterToken: string;
+			actualRosterToken: string;
 	  }
 	| { code: "command_result_uncertain"; clientId: DaemonClientId; commandId: DaemonCommandId };
 

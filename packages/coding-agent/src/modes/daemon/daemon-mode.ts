@@ -1379,6 +1379,7 @@ export class AgentDaemon {
 			extensionUiRequests: new Map(),
 			eventGeneration: createActiveSessionId(),
 			lastEventSequence: 0,
+			rlmRosterRevision: 0,
 			clientEnv,
 		};
 		this.sessions.set(state.activeSessionId, state);
@@ -2642,6 +2643,7 @@ export class AgentDaemon {
 				throw error;
 			}
 			unsubscribeChild();
+			this.bumpRlmRosterRevision(parentState);
 			this.log(
 				`Passivated idle child sessionId=${state.runtime.session.sessionId} name=${JSON.stringify(state.runtime.session.sessionName ?? "")} idleMinutes=${idleMinutes}`,
 			);
@@ -2933,6 +2935,7 @@ export class AgentDaemon {
 				}
 				throw new RuntimeOpenCancelledError();
 			}
+			this.bumpRlmRosterRevision(parentState);
 			return state;
 		} catch (error) {
 			if (stateRef && this.sessions.get(stateRef.activeSessionId) === stateRef) {
@@ -4205,12 +4208,13 @@ export class AgentDaemon {
 
 			case "cancel_rlm_child": {
 				const state = this.getSessionState(command.activeSessionId);
-				if (command.expectedEventSequence !== undefined) {
-					if (!Number.isSafeInteger(command.expectedEventSequence) || command.expectedEventSequence < 0) {
-						throw new Error("expectedEventSequence must be a non-negative safe integer");
+				if (command.expectedRosterToken !== undefined) {
+					if (!/^[a-f0-9]{64}$/.test(command.expectedRosterToken)) {
+						throw new Error("expectedRosterToken must be a lowercase SHA-256 digest");
 					}
-					if (state.lastEventSequence !== command.expectedEventSequence) {
-						throw new RlmChildRosterChangedError(command.expectedEventSequence, state.lastEventSequence);
+					const { rosterToken } = this.createRlmChildRoster(state);
+					if (rosterToken !== command.expectedRosterToken) {
+						throw new RlmChildRosterChangedError(command.expectedRosterToken, rosterToken);
 					}
 				}
 				const cancelled = state.runtime.session.cancelRlmChildRun(command.childId);
@@ -4314,9 +4318,11 @@ export class AgentDaemon {
 
 			case "get_rlm_children": {
 				const state = this.getSessionState(command.activeSessionId);
+				const roster = this.createRlmChildRoster(state);
 				return success(command.id, "get_rlm_children", {
-					children: state.runtime.session.getRlmChildSnapshots(),
+					children: roster.children,
 					eventSequence: state.lastEventSequence,
+					rosterToken: roster.rosterToken,
 				});
 			}
 
@@ -6348,6 +6354,9 @@ export class AgentDaemon {
 	private broadcastToSession(state: ActiveSessionState, message: DaemonOutbound): void {
 		if (message.type === "session_event") {
 			const eventType = message.event.type;
+			if (eventType === "rlm_child_update") {
+				this.bumpRlmRosterRevision(state);
+			}
 			// A finished turn/compaction is the cue to refresh status.
 			if (eventType === "turn_end" || eventType === "compaction_end") {
 				this.summarizer.notifyActivity(state);
@@ -6409,6 +6418,28 @@ export class AgentDaemon {
 				this.writeSerialized(client, serialized, sequencedMessage);
 			}
 		}
+	}
+
+	private bumpRlmRosterRevision(state: ActiveSessionState): void {
+		const visited = new Set<string>();
+		let current: ActiveSessionState | undefined = state;
+		while (current && !visited.has(current.activeSessionId)) {
+			visited.add(current.activeSessionId);
+			current.rlmRosterRevision++;
+			const parentActiveSessionId: string | undefined = current.runtime.metadata.parentActiveSessionId;
+			current = parentActiveSessionId ? this.sessions.get(parentActiveSessionId) : undefined;
+		}
+	}
+
+	private createRlmChildRoster(state: ActiveSessionState): {
+		children: ReturnType<ActiveSessionState["runtime"]["session"]["getRlmChildSnapshots"]>;
+		rosterToken: string;
+	} {
+		const children = state.runtime.session.getRlmChildSnapshots();
+		const rosterToken = createHash("sha256")
+			.update(JSON.stringify([state.eventGeneration, state.rlmRosterRevision, children]))
+			.digest("hex");
+		return { children, rosterToken };
 	}
 
 	private beginReplacementSnapshot(

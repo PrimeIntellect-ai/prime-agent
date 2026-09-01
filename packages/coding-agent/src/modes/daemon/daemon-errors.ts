@@ -5,12 +5,10 @@ import type { DaemonErrorInfo, DaemonResponse } from "./daemon-protocol.js";
 
 export class RlmChildRosterChangedError extends Error {
 	constructor(
-		readonly expectedEventSequence: number,
-		readonly actualEventSequence: number,
+		readonly expectedRosterToken: string,
+		readonly actualRosterToken: string,
 	) {
-		super(
-			`RLM child roster changed before cancellation (expected event sequence ${expectedEventSequence}, current ${actualEventSequence})`,
-		);
+		super("RLM child roster changed before cancellation; refresh the authoritative roster and retry");
 		this.name = "RlmChildRosterChangedError";
 	}
 }
@@ -32,8 +30,8 @@ export function serializeDaemonError(error: unknown): DaemonErrorInfo | undefine
 	if (error instanceof RlmChildRosterChangedError) {
 		return {
 			code: "rlm_child_roster_changed",
-			expectedEventSequence: error.expectedEventSequence,
-			actualEventSequence: error.actualEventSequence,
+			expectedRosterToken: error.expectedRosterToken,
+			actualRosterToken: error.actualRosterToken,
 		};
 	}
 	return undefined;
@@ -65,7 +63,7 @@ export function deserializeDaemonError(response: Extract<DaemonResponse, { succe
 		return new SessionAlreadyActiveError(errorInfo.sessionPath, errorInfo.activeSessionId);
 	}
 	if (errorInfo?.code === "rlm_child_roster_changed") {
-		return new RlmChildRosterChangedError(errorInfo.expectedEventSequence, errorInfo.actualEventSequence);
+		return new RlmChildRosterChangedError(errorInfo.expectedRosterToken, errorInfo.actualRosterToken);
 	}
 	return new Error(response.error);
 }

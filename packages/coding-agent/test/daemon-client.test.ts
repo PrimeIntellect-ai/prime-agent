@@ -243,7 +243,7 @@ describe("DaemonClient", () => {
 				type: "cancel_rlm_child",
 				activeSessionId: "active-1",
 				childId: "child-1",
-				expectedEventSequence: 17,
+				expectedRosterToken: "a".repeat(64),
 			}),
 		).rejects.toThrow("does not support conditional_rlm_child_cancel");
 		expect(socket.writes).toEqual([]);

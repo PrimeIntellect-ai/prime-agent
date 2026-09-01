@@ -33,13 +33,13 @@ describe("deserializeDaemonCreateError", () => {
 });
 
 describe("RLM child roster errors", () => {
-	it("round-trips the authoritative sequence mismatch", () => {
-		const source = new RlmChildRosterChangedError(17, 18);
+	it("round-trips the authoritative roster mismatch", () => {
+		const source = new RlmChildRosterChangedError("a".repeat(64), "b".repeat(64));
 		const errorInfo = serializeDaemonError(source);
 		expect(errorInfo).toEqual({
 			code: "rlm_child_roster_changed",
-			expectedEventSequence: 17,
-			actualEventSequence: 18,
+			expectedRosterToken: "a".repeat(64),
+			actualRosterToken: "b".repeat(64),
 		});
 
 		const restored = deserializeDaemonError({
@@ -50,6 +50,9 @@ describe("RLM child roster errors", () => {
 			errorInfo,
 		});
 		expect(restored).toBeInstanceOf(RlmChildRosterChangedError);
-		expect(restored).toMatchObject({ expectedEventSequence: 17, actualEventSequence: 18 });
+		expect(restored).toMatchObject({
+			expectedRosterToken: "a".repeat(64),
+			actualRosterToken: "b".repeat(64),
+		});
 	});
 });
