@@ -1,1 +1,1 @@
-- Added daily runtime refreshes of provider model metadata and pricing from the hosted Prime Agent catalog, with validated disk and bundled fallbacks.
+- Added daily authoritative refreshes of provider model availability, metadata, and pricing from the hosted Prime Agent catalog, with validated disk and bundled fallbacks.

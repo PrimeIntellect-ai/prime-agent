@@ -74,12 +74,13 @@ describe("remote model catalog", () => {
 		expect(merged.headers).toEqual(bundled.headers);
 	});
 
-	test("adds models only through a bundled provider transport", () => {
+	test("uses the hosted model list and only accepts additions through a bundled transport", () => {
 		const bundled = openAiModel();
 		const accepted = { ...structuredClone(bundled), id: "future-model", name: "Future Model" };
 		const rejected = { ...structuredClone(accepted), id: "redirected-model", baseUrl: "https://other.test" };
 		const merged = mergeRemoteModelCatalog([bundled], [accepted, rejected]);
-		expect(merged.map((model) => model.id)).toEqual([bundled.id, "future-model"]);
+		expect(merged.map((model) => model.id)).toEqual(["future-model"]);
+		expect(mergeRemoteModelCatalog([bundled], undefined).map((model) => model.id)).toEqual([bundled.id]);
 	});
 
 	test("fetches once, validates, and reuses the fresh atomic cache", async () => {

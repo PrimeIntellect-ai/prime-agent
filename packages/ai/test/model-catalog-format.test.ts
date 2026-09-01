@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { assertProviderCounts, createModelCatalog, parseModelCatalog } from "../scripts/model-catalog-format.js";
+import { createModelCatalog, parseModelCatalog } from "../scripts/model-catalog-format.js";
 import type { Api, Model } from "../src/types.js";
 
 function model(provider: string, id: string): Model<Api> {
@@ -37,11 +37,5 @@ describe("hosted model catalog format", () => {
 				models: [{ ...entry, cost: { ...entry.cost, output: Number.NaN } }],
 			}),
 		).toThrow("invalid model");
-	});
-
-	test("fails closed on a provider-wide source outage", () => {
-		const baseline = createModelCatalog([model("large", "1"), model("large", "2"), model("small", "1")]);
-		const candidate = createModelCatalog([model("large", "1"), model("large", "2")]);
-		expect(() => assertProviderCounts(candidate, baseline)).toThrow("Provider small dropped");
 	});
 });

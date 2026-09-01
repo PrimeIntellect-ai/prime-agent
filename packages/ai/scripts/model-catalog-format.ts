@@ -81,25 +81,3 @@ export function parseModelCatalog(value: unknown): ModelCatalogV1 {
 	}
 	return value as unknown as ModelCatalogV1;
 }
-
-export function assertProviderCounts(
-	candidate: ModelCatalogV1,
-	baseline: ModelCatalogV1,
-	minimumRatio = 0.5,
-): void {
-	if (!(minimumRatio > 0 && minimumRatio <= 1)) throw new Error("minimumRatio must be in (0, 1]");
-	const count = (catalog: ModelCatalogV1): Map<string, number> => {
-		const counts = new Map<string, number>();
-		for (const model of catalog.models) counts.set(model.provider, (counts.get(model.provider) ?? 0) + 1);
-		return counts;
-	};
-	const baselineCounts = count(baseline);
-	const candidateCounts = count(candidate);
-	for (const [provider, previous] of baselineCounts) {
-		const current = candidateCounts.get(provider) ?? 0;
-		const minimum = Math.max(1, Math.floor(previous * minimumRatio));
-		if (current < minimum) {
-			throw new Error(`Provider ${provider} dropped from ${previous} to ${current} models (minimum ${minimum})`);
-		}
-	}
-}

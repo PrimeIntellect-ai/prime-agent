@@ -77,6 +77,7 @@ const KIMI_STATIC_HEADERS = {
 
 const AI_GATEWAY_MODELS_URL = "https://ai-gateway.vercel.sh/v1";
 const AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh";
+const STRICT_MODEL_CATALOG_REFRESH = process.env.PRIME_AGENT_MODEL_CATALOG_STRICT === "1";
 const ZAI_TOOL_STREAM_UNSUPPORTED_MODELS = new Set(["glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4.5v"]);
 const EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS = new Set([
 	"github-copilot:claude-haiku-4.5",
@@ -652,9 +653,12 @@ async function fetchPrimeInferenceModels(): Promise<Model<"openai-completions">[
 		const response = await fetch(`${PRIME_INFERENCE_BASE_URL}/models`, {
 			headers: getPrimeInferenceHeaders(apiKey, teamId),
 		});
+		if (!response.ok) throw new Error(`Prime Inference catalog request failed with status ${response.status}`);
 		catalog = parsePrimeInferenceCatalog(await response.json());
+		if (catalog.length === 0) throw new Error("Prime Inference catalog is empty or invalid");
 	} catch (error) {
 		console.error("Failed to fetch Prime Inference models:", error);
+		if (STRICT_MODEL_CATALOG_REFRESH) throw error;
 	}
 
 	let openRouterIndex = new Map<string, PrimeInferenceOpenRouterMetadata>();
@@ -662,10 +666,12 @@ async function fetchPrimeInferenceModels(): Promise<Model<"openai-completions">[
 		openRouterIndex = buildPrimeInferenceOpenRouterIndex(await fetchOpenRouterCatalog());
 	} catch (error) {
 		console.error("Failed to fetch OpenRouter catalog for Prime Inference metadata:", error);
+		if (STRICT_MODEL_CATALOG_REFRESH) throw error;
 	}
 	if (openRouterIndex.size === 0) {
 		// Without OpenRouter metadata every model would regress to the defaults;
 		// keep the previous snapshot instead.
+		if (STRICT_MODEL_CATALOG_REFRESH) throw new Error("OpenRouter catalog has no Prime Inference metadata");
 		console.error("OpenRouter catalog unavailable; keeping snapshot Prime Inference models");
 		return getExistingPrimeInferenceModels();
 	}
@@ -744,8 +750,10 @@ function fetchOpenRouterCatalog(): Promise<any[]> {
 	openRouterCatalogPromise ??= (async () => {
 		console.log("Fetching models from OpenRouter API...");
 		const response = await fetch("https://openrouter.ai/api/v1/models");
+		if (!response.ok) throw new Error(`OpenRouter catalog request failed with status ${response.status}`);
 		const data = await response.json();
-		return Array.isArray(data?.data) ? data.data : [];
+		if (!Array.isArray(data?.data) || data.data.length === 0) throw new Error("OpenRouter catalog is empty or invalid");
+		return data.data;
 	})();
 	return openRouterCatalogPromise;
 }
@@ -810,6 +818,7 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 		return models;
 	} catch (error) {
 		console.error("Failed to fetch OpenRouter models:", error);
+		if (STRICT_MODEL_CATALOG_REFRESH) throw error;
 		return [];
 	}
 }
@@ -818,7 +827,9 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 	try {
 		console.log("Fetching models from Vercel AI Gateway API...");
 		const response = await fetch(`${AI_GATEWAY_MODELS_URL}/models`);
+		if (!response.ok) throw new Error(`Vercel AI Gateway catalog request failed with status ${response.status}`);
 		const data = await response.json();
+		if (!Array.isArray(data?.data)) throw new Error("Vercel AI Gateway catalog is invalid");
 		const models: Model<any>[] = [];
 
 		const toNumber = (value: string | number | undefined): number => {
@@ -865,10 +876,12 @@ async function fetchAiGatewayModels(): Promise<Model<any>[]> {
 			});
 		}
 
+		if (models.length === 0) throw new Error("Vercel AI Gateway catalog has no tool-capable models");
 		console.log(`Fetched ${models.length} tool-capable models from Vercel AI Gateway`);
 		return models;
 	} catch (error) {
 		console.error("Failed to fetch Vercel AI Gateway models:", error);
+		if (STRICT_MODEL_CATALOG_REFRESH) throw error;
 		return [];
 	}
 }
@@ -877,7 +890,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 	try {
 		console.log("Fetching models from models.dev API...");
 		const response = await fetch("https://models.dev/api.json");
+		if (!response.ok) throw new Error(`models.dev catalog request failed with status ${response.status}`);
 		const data = await response.json();
+		if (!isRecord(data)) throw new Error("models.dev catalog is invalid");
 
 		const models: Model<any>[] = [];
 
@@ -1568,10 +1583,12 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
+		if (models.length === 0) throw new Error("models.dev catalog has no tool-capable models");
 		console.log(`Loaded ${models.length} tool-capable models from models.dev`);
 		return models;
 	} catch (error) {
 		console.error("Failed to load models.dev data:", error);
+		if (STRICT_MODEL_CATALOG_REFRESH) throw error;
 		return [];
 	}
 }
@@ -2459,4 +2476,7 @@ export const MODELS = {
 }
 
 // Run the generator
-generateModels().catch(console.error);
+generateModels().catch((error) => {
+	console.error(error);
+	process.exitCode = 1;
+});
