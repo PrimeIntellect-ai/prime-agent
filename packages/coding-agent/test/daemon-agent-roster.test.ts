@@ -1530,7 +1530,8 @@ describe("review-round regressions", () => {
 			}
 		).restartPreRosterWorker(worker, undefined);
 
-		expect(recoverUncertainWorkerOperations).toHaveBeenCalledWith(worker);
+		// No destructive cleanup against a possibly-live worker.
+		expect(recoverUncertainWorkerOperations).not.toHaveBeenCalled();
 		expect(launchWorker).not.toHaveBeenCalled();
 		expect(worker.descriptor.lifecycle).toBe("failed");
 
@@ -1538,11 +1539,12 @@ describe("review-round regressions", () => {
 		const killed = makeWorker("worker-2");
 		Object.assign(killed.descriptor, { pid: 987_654, processStartId: "start-1", createCommand: { type: "create" } });
 		const launchReplacement = vi.fn();
+		const cleanup = vi.fn(async () => {});
 		const signal = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
 		const identities = ["current", "gone"];
 		const killSupervisor = makeSupervisor([killed], {
 			assertRecoveryAllowed: vi.fn(async () => {}),
-			recoverUncertainWorkerOperations: vi.fn(async () => {}),
+			recoverUncertainWorkerOperations: cleanup,
 			launchWorker: launchReplacement,
 			processIdentity: vi.fn(() => (identities.length > 1 ? identities.shift() : identities[0])),
 		});
@@ -1553,6 +1555,9 @@ describe("review-round regressions", () => {
 				}
 			).restartPreRosterWorker(killed, "start-1");
 			expect(signal).toHaveBeenCalledWith(987_654, "SIGKILL");
+			// Destructive cleanup only after the predecessor is confirmed gone.
+			expect(cleanup).toHaveBeenCalledOnce();
+			expect(signal.mock.invocationCallOrder[0]).toBeLessThan(cleanup.mock.invocationCallOrder[0]!);
 			expect(launchReplacement).toHaveBeenCalled();
 		} finally {
 			signal.mockRestore();

@@ -3188,7 +3188,6 @@ export class DaemonSupervisor {
 			worker.descriptor.processStartId = observedProcessStartId;
 		}
 		const identity = () => this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
-		await this.recoverUncertainWorkerOperations(worker);
 		// The one deliberate kill of a live worker: it authenticated as ours and predates the roster
 		// protocol, so this identity-verified upgrade replaces it. No await between recheck and signal.
 		if (identity() === "current") {
@@ -3201,6 +3200,8 @@ export class DaemonSupervisor {
 		}
 		const finalIdentity = identity();
 		if (finalIdentity !== "gone" && finalIdentity !== "replaced") {
+			// A live or unverifiable survivor parks failed with no destructive cleanup: interruption
+			// marking and orphan reaping must never run against a possibly-active worker.
 			worker.descriptor.lifecycle = "failed";
 			worker.descriptor.lastError = `Pre-roster worker process ${worker.descriptor.pid} is still running and cannot be replaced safely`;
 			this.persistWorker(worker);
@@ -3208,6 +3209,7 @@ export class DaemonSupervisor {
 			this.log(`Kept pre-roster worker ${worker.descriptor.workerId} failed: ${worker.descriptor.lastError}`);
 			return;
 		}
+		await this.recoverUncertainWorkerOperations(worker);
 		if (this.isWorkerRecoveryCancelled(worker)) {
 			return;
 		}
