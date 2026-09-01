@@ -69,7 +69,12 @@ export function durableDaemonCreateCommand(command: DaemonCreateCommand): Durabl
 	};
 }
 
-/** A single-use, worker-memory-only admission for one direct peer, scoped to one session of one worker incarnation. */
+/**
+ * A single-use, worker-memory-only admission for one direct peer, scoped to one active-session
+ * slot (stable across switch_session/new_session/fork) of one worker incarnation. The session pin
+ * is a routing/accident guard, not a privilege boundary: ticket holders already hold supervisor
+ * access, which can attach to, switch, or kill any session.
+ */
 export interface DaemonWorkerPeerGrant {
 	grantId: string;
 	token: string;
