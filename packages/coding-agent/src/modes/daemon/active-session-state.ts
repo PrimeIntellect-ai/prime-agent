@@ -22,7 +22,6 @@ export interface DaemonSocketClient {
 	/** A push hit backpressure; one full-roster resync goes out on drain. */
 	rosterResyncPending?: boolean;
 	authenticated?: boolean;
-	/** How the socket authenticated on a worker: the supervisor claim or a direct session peer grant. */
 	authenticationRole?: "supervisor" | "session_client";
 	transport?: "jsonl" | "private-framed";
 	snapshotStreaming?: boolean;

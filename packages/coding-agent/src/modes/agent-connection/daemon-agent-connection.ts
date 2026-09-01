@@ -281,7 +281,6 @@ export class DaemonAgentConnection implements AgentConnection {
 	}
 
 	private handleTransportClose(error: Error): void {
-		// Pauses, snapshots, and events live on a healthy direct link; only its loss invalidates them.
 		const directSessionSurvives =
 			this.client instanceof DaemonRoutedClient &&
 			this.client.hasDirectTransport &&
@@ -300,8 +299,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		if (this.disposed || this.terminalCloseEmitted) {
 			return;
 		}
-		// A lost direct link invalidates the fence (holders learn via the generation bump) but the
-		// session itself falls back; only a control-plane loss mid-pause stays fail-closed.
+		// A lost direct link invalidates the fence (holders learn via the generation bump) yet the session falls back.
 		if (invalidatedInputPause && !(error instanceof DaemonDirectTransportClosedError)) {
 			this.terminalCloseEmitted = true;
 			void this.emit({
@@ -355,8 +353,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			const initialControlPlaneClose = connection.initialControlPlaneClose;
 			connection.initialControlPlaneClose = undefined;
 			if (initialControlPlaneClose) {
-				// No listeners exist yet: a terminal close must reject the attach (pre-transport
-				// semantics) instead of emitting into the void; the rest replays through the one handler.
+				// No listeners exist yet: a terminal close rejects the attach; the rest replays through the one handler.
 				if (getDaemonSocketCloseReason(initialControlPlaneClose) === "shutdown") {
 					throw initialControlPlaneClose;
 				}

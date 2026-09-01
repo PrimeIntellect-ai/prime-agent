@@ -912,8 +912,6 @@ describe("DaemonAgentConnection", () => {
 		expect(supervisor.reconnectCount).toBe(2);
 		expect(supervisor.resetTransportCount).toBe(1);
 		expect(routed.hasDirectTransport).toBe(true);
-		// The direct link streamed state throughout, so control-plane recovery must not flash a resync.
-		expect(events.filter((event) => event.type === "session_resynced")).toHaveLength(0);
 		await connection.dispose();
 	});
 

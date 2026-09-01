@@ -37,10 +37,9 @@ export class DaemonControlPlaneTransportError extends Error {
 }
 
 /**
- * One logical daemon connection over two sockets: session-plane commands go
- * to the session's worker directly, everything else to the supervisor. Any
- * direct-path loss degrades silently to supervisor routing; an established
- * direct link keeps serving the session while the supervisor reconnects.
+ * One logical daemon connection over two sockets: session-plane commands go direct to the worker,
+ * the rest to the supervisor. Any direct-path loss degrades silently to supervisor routing; an
+ * established direct link keeps serving the session while the supervisor reconnects.
  */
 export class DaemonRoutedClient implements DaemonTransportClient {
 	private direct?: DaemonWorkerClient;
