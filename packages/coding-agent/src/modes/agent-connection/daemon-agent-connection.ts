@@ -347,7 +347,13 @@ export class DaemonAgentConnection implements AgentConnection {
 			} catch (error) {
 				if (!(transport instanceof DaemonRoutedClient)) throw error;
 				transport.fallbackToSupervisor();
-				await connection.attach();
+				try {
+					// This retry owns its failure; a parked request would pend the attach forever.
+					await connection.attach({ recoverable: false });
+				} catch (retryError) {
+					// A control-plane close saved during the window is the authoritative cause.
+					throw connection.initialControlPlaneClose ?? retryError;
+				}
 			}
 			connection.initialAttachPending = false;
 			const initialControlPlaneClose = connection.initialControlPlaneClose;
@@ -1602,9 +1608,14 @@ export class DaemonAgentConnection implements AgentConnection {
 					await this.client.waitForHello(3000);
 					controlPlaneHandshakeComplete = true;
 					if (directSessionHeld) {
+						// The roster subscription is a control-plane accessory; its usual rebind seam (attach) is skipped while held.
+						if (this.rosterStore) await this.rosterStore.attach(this.client).catch(() => undefined);
+						// One liveness check after the last await: a close inside the window joined this
+						// in-flight recovery, so it must be absorbed here instead of emitting "connected".
+						if (this.disposed || this.terminalCloseEmitted) {
+							return;
+						}
 						if (this.client instanceof DaemonRoutedClient && this.client.hasDirectTransport) {
-							// The roster subscription is a control-plane accessory; its usual rebind seam (attach) is skipped while held.
-							if (this.rosterStore) await this.rosterStore.attach(this.client).catch(() => undefined);
 							void this.emit({ type: "connection_status", status: "connected" });
 							return;
 						}
