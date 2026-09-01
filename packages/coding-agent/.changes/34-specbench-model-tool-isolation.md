@@ -1,0 +1,1 @@
+- Fixed hardened SpecBench runs so model-controlled IPython and shell execution cannot read host credentials or make outbound network connections ([#34](https://github.com/lewbei/prime-agent/issues/34))

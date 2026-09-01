@@ -37,6 +37,12 @@ import {
 } from "../../core/avo/verification-broker.js";
 import { sanitizeAvoVerificationEnvironment } from "../../core/avo/verification-environment.js";
 import { PRIME_AGENT_EPHEMERAL_AUTH_FILE_ENV } from "../../core/ephemeral-auth-storage.js";
+import {
+	KERNEL_PROCESS_SANDBOX_ENV,
+	KERNEL_SANDBOX_CONNECTION_PLACEHOLDER,
+	KERNEL_SANDBOX_PYTHON_PLACEHOLDER,
+} from "../../core/kernel/index.js";
+import { buildIsolatedEvaluationSandboxArgs } from "../evaluation-sandbox.js";
 import { summarizePrimeIntegrityTrace } from "../prime-integrity/runner.js";
 import {
 	PRIME_INTEGRITY_TOKEN_STAGES,
@@ -151,6 +157,35 @@ const BENCHMARK_RUNTIME_SOCKET_ENVIRONMENT = [
 	"DOCKER_CONTEXT",
 	"CONTAINER_HOST",
 	"XDG_RUNTIME_DIR",
+] as const;
+const SPECBENCH_KERNEL_INHERITED_ENVIRONMENT = [
+	"AVO_ONLINE_EVIDENCE",
+	AVO_INTERNAL_ABLATIONS_ENV,
+	AVO_PYTHON_PROBE_BROKER_SOCKET_ENV,
+	AVO_PYTHON_PROBE_BROKER_TOKEN_ENV,
+	AVO_VERIFICATION_BROKER_PYTHON_AUTHORITY_ENV,
+	AVO_VERIFICATION_BROKER_SOCKET_ENV,
+	AVO_VERIFICATION_BROKER_TOKEN_ENV,
+	"COMPILER_PATH",
+	"GOOGLE_VERTEX_GOOGLE_SEARCH",
+	"GOROOT",
+	"LANG",
+	"LC_ALL",
+	"LC_CTYPE",
+	"LD_LIBRARY_PATH",
+	"NO_COLOR",
+	"PATH",
+	"PI_OFFLINE",
+	"PRIME_AGENT_AVO_CONFIG_DIR",
+	"PRIME_AGENT_CODING_AGENT_DIR",
+	"PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR",
+	"PRIME_AGENT_SESSION_DIR",
+	"PYTHONSAFEPATH",
+	"PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+	"TERM",
+	"TZ",
+	"UV_CACHE_DIR",
+	"UV_OFFLINE",
 ] as const;
 
 export const SPECBENCH_ABLATION_CONDITIONS = [
@@ -1362,6 +1397,53 @@ export function specBenchAgentEnvironment(base: NodeJS.ProcessEnv): NodeJS.Proce
 	return environment;
 }
 
+export function specBenchKernelSandboxEnvironment(options: {
+	workspace: string;
+	agentDir: string;
+	sessionDir: string;
+	supervisorDir: string;
+	providerAuthPath: string;
+	kernelPython: string;
+	brokerSocketPaths?: readonly string[];
+	environment?: NodeJS.ProcessEnv;
+}): NodeJS.ProcessEnv {
+	const environment = options.environment ?? process.env;
+	const privateHome = homedir();
+	const kernelRoot = dirname(dirname(options.kernelPython));
+	// The venv executable may point through a floating cpython-X.Y-* alias, so
+	// expose the containing catalog rather than only the pinned realpath target.
+	const interpreterRoot = dirname(dirname(dirname(realpathSync(options.kernelPython))));
+	const uvCacheRoot = resolveSpecBenchUvCacheRoot(environment);
+	const writablePaths = [options.workspace, options.agentDir, options.sessionDir, options.supervisorDir];
+	if (existsSync(uvCacheRoot)) writablePaths.push(uvCacheRoot);
+	const readOnlyPaths = [kernelRoot, interpreterRoot, SPECBENCH_TOOLCHAIN_ROOT, ...(options.brokerSocketPaths ?? [])]
+		.filter((path) => existsSync(path))
+		.filter((path, index, paths) => paths.indexOf(path) === index);
+	const argv = buildIsolatedEvaluationSandboxArgs({
+		command: [
+			KERNEL_SANDBOX_PYTHON_PLACEHOLDER,
+			"-m",
+			"ipykernel_launcher",
+			"-f",
+			KERNEL_SANDBOX_CONNECTION_PLACEHOLDER,
+		],
+		cwd: options.workspace,
+		privateHome,
+		writablePaths,
+		readOnlyPaths,
+		maskedFiles: [options.providerAuthPath],
+		rootFilesystem: "minimal",
+	});
+	return {
+		[KERNEL_PROCESS_SANDBOX_ENV]: JSON.stringify({
+			version: 1,
+			argv,
+			home: privateHome,
+			inheritEnvironment: SPECBENCH_KERNEL_INHERITED_ENVIRONMENT,
+		}),
+	};
+}
+
 export async function withSpecBenchProviderAuthFile<Result>(path: string, run: () => Promise<Result>): Promise<Result> {
 	try {
 		return await run();
@@ -2030,56 +2112,14 @@ export function buildSpecBenchGradeSandboxArgs(
 		(path, index, paths) =>
 			path.startsWith(`${privateHome}${sep}`) && existsSync(path) && paths.indexOf(path) === index,
 	);
-	const externalBenchmarkMask = specbenchRoot.startsWith(`${privateHome}${sep}`) ? [] : ["--tmpfs", specbenchRoot];
-	const homeArguments: string[] = ["--tmpfs", privateHome];
-	const created = new Set<string>();
-	for (const path of homeBindings) {
-		let current = privateHome;
-		for (const part of path
-			.slice(privateHome.length + 1)
-			.split(sep)
-			.slice(0, -1)) {
-			current = join(current, part);
-			if (!created.has(current)) {
-				homeArguments.push("--dir", current);
-				created.add(current);
-			}
-		}
-		homeArguments.push("--ro-bind", path, path);
-	}
-	return [
-		"bwrap",
-		"--ro-bind",
-		"/",
-		"/",
-		"--dev-bind",
-		"/dev",
-		"/dev",
-		"--proc",
-		"/proc",
-		"--tmpfs",
-		"/tmp",
-		"--tmpfs",
-		"/run",
-		"--unshare-net",
-		...homeArguments,
-		...externalBenchmarkMask,
-		"--bind",
-		workspace,
-		workspace,
-		"--bind",
-		evidenceRoot,
-		evidenceRoot,
-		"--ro-bind",
-		controlRoot,
-		controlRoot,
-		"--unshare-pid",
-		"--die-with-parent",
-		"--chdir",
-		workspace,
-		"--",
-		...command,
-	];
+	return buildIsolatedEvaluationSandboxArgs({
+		command,
+		cwd: workspace,
+		privateHome,
+		writablePaths: [workspace, evidenceRoot],
+		readOnlyPaths: [controlRoot, ...homeBindings],
+		hiddenPaths: [specbenchRoot],
+	});
 }
 
 export function stageSpecBenchGradeControl(options: {
@@ -2464,6 +2504,10 @@ async function runTask(
 				: undefined,
 		async () => (options.hardening ? startAvoPythonProbeBroker(workspace) : undefined),
 		async (verificationBroker, probeBroker) => {
+			const kernelPython = join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python");
+			const brokerSocketPaths = [probeBroker?.socketPath, verificationBroker?.socketPath].filter(
+				(path): path is string => path !== undefined,
+			);
 			const agentArgs = buildSpecBenchAgentArgs({
 				taskId,
 				workspace,
@@ -2476,6 +2520,17 @@ async function runTask(
 			});
 			const environment = {
 				...specBenchAgentEnvironment(process.env),
+				...(options.hardening
+					? specBenchKernelSandboxEnvironment({
+							workspace,
+							agentDir,
+							sessionDir,
+							supervisorDir,
+							providerAuthPath,
+							kernelPython,
+							brokerSocketPaths,
+						})
+					: {}),
 				[AVO_INTERNAL_ABLATIONS_ENV]: condition.disabledFeatures.join(","),
 				PRIME_AGENT_AVO_CONFIG_DIR: agentDir,
 				PRIME_AGENT_CODING_AGENT_DIR: agentDir,
@@ -2495,7 +2550,7 @@ async function runTask(
 							[AVO_VERIFICATION_BROKER_PYTHON_AUTHORITY_ENV]: "1",
 						}
 					: {}),
-				PRIME_AGENT_KERNEL_PYTHON: join(homedir(), ".prime", "agent", "kernel-venv", "bin", "python"),
+				PRIME_AGENT_KERNEL_PYTHON: kernelPython,
 				PRIME_AGENT_IPYTHON_EXECUTION_TIMEOUT_MS: String(
 					deriveSpecBenchExecutionBudgets(task.timeoutSeconds).ipythonCellTimeoutMs,
 				),
@@ -2511,9 +2566,7 @@ async function runTask(
 							options.specbenchRoot,
 							options.configSource,
 							protectedPaths,
-							[probeBroker?.socketPath, verificationBroker?.socketPath].filter(
-								(path): path is string => path !== undefined,
-							),
+							brokerSocketPaths,
 							environment,
 						)
 					: [agentExecutable, ...agentArgs],
