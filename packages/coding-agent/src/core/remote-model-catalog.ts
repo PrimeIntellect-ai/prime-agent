@@ -43,22 +43,26 @@ function cloneTransport(template: Model<Api>, remote: Model<Api>): Model<Api> {
 	};
 }
 
+function modelKey(provider: string, id: string): string {
+	return JSON.stringify([provider, id]);
+}
+
 export function mergeRemoteModelCatalog(
 	bundledModels: readonly Model<Api>[],
 	remoteModels: readonly Model<Api>[] | undefined,
 ): Model<Api>[] {
 	if (!remoteModels) return bundledModels.map((model) => structuredClone(model));
-	const exact = new Map(bundledModels.map((model) => [`${model.provider}/${model.id}`, model]));
+	const exact = new Map(bundledModels.map((model) => [modelKey(model.provider, model.id), model]));
 	const transports = new Map<string, Model<Api>>();
 	for (const model of bundledModels) transports.set(`${model.provider}\0${model.api}\0${model.baseUrl}`, model);
 
 	const merged: Model<Api>[] = [];
 	for (const remote of remoteModels) {
-		const key = `${remote.provider}/${remote.id}`;
+		const key = modelKey(remote.provider, remote.id);
 		const template = exact.get(key) ?? transports.get(`${remote.provider}\0${remote.api}\0${remote.baseUrl}`);
 		if (template) merged.push(cloneTransport(template, remote));
 	}
-	return merged;
+	return merged.length > 0 ? merged : bundledModels.map((model) => structuredClone(model));
 }
 
 export function getRemoteModelCatalogUrl(): string {

@@ -85,6 +85,18 @@ describe("remote model catalog", () => {
 		expect(mergeRemoteModelCatalog([bundled], undefined).map((model) => model.id)).toEqual([bundled.id]);
 	});
 
+	test("falls back to bundled models when no hosted entry uses a known transport", () => {
+		const bundled = openAiModel();
+		const incompatible = {
+			...structuredClone(bundled),
+			id: "incompatible-model",
+			baseUrl: "https://unsupported.test/v1",
+		};
+		const merged = mergeRemoteModelCatalog([bundled], [incompatible]);
+		expect(merged.map((model) => model.id)).toEqual([bundled.id]);
+		expect(merged[0]).not.toBe(bundled);
+	});
+
 	test("fetches once, validates, and reuses the fresh atomic cache", async () => {
 		const cachePath = join(tempDir, "cache.json");
 		const model = openAiModel();

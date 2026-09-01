@@ -25,6 +25,15 @@ describe("hosted model catalog format", () => {
 		expect(result.models.map((entry) => `${entry.provider}/${entry.id}`)).toEqual(["a/z", "z/a", "z/b"]);
 	});
 
+	test("treats provider and model ids as an unambiguous pair", () => {
+		const parsed = parseModelCatalog({
+			schemaVersion: 1,
+			generatedAt: new Date().toISOString(),
+			models: [model("a", "b/c"), model("a/b", "c")],
+		});
+		expect(parsed.models).toHaveLength(2);
+	});
+
 	test("applies the same strict schema used by clients", () => {
 		const entry = model("provider", "model");
 		const catalog = (modelEntry: Model<Api>) => ({
@@ -42,6 +51,27 @@ describe("hosted model catalog format", () => {
 		expect(() => parseModelCatalog(catalog({ ...entry, contextWindow: 100_000_001 }))).toThrow(/invalid model/i);
 		expect(() =>
 			parseModelCatalog(catalog({ ...entry, thinkingLevelMap: { unsupported: "value" } } as Model<Api>)),
+		).toThrow(/invalid model/i);
+		expect(() =>
+			parseModelCatalog(
+				catalog({
+					...entry,
+					compat: { openRouterRouting: { only: ["anthropic"], max_price: { prompt: "1" } } },
+				}),
+			),
+		).not.toThrow();
+		expect(() =>
+			parseModelCatalog(catalog({ ...entry, compat: { openRouterRouting: "invalid" } } as Model<Api>)),
+		).toThrow(/invalid model/i);
+		expect(() =>
+			parseModelCatalog(
+				catalog({ ...entry, api: "openai-responses", compat: { supportsStore: true } } as Model<Api>),
+			),
+		).toThrow(/invalid model/i);
+		expect(() =>
+			parseModelCatalog(
+				catalog({ ...entry, headers: { authorization: { nested: true } } } as unknown as Model<Api>),
+			),
 		).toThrow(/invalid model/i);
 	});
 });
