@@ -11,15 +11,15 @@
 		"packages/coding-agent/examples/extensions/sandbox"
 	],
 	"scripts": {
-		"clean": "npm run clean --workspaces",
-		"build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build",
-		"dev": "concurrently --names \"ai,agent,coding-agent,tui\" --prefix-colors \"cyan,yellow,red,magenta\" \"cd packages/ai && npm run dev\" \"cd packages/agent && npm run dev\" \"cd packages/coding-agent && npm run dev\" \"cd packages/tui && npm run dev\"",
-		"dev:tsc": "cd packages/ai && npm run dev:tsc",
-		"check": "biome check --write --error-on-warnings . && tsgo --noEmit && npm run check:installer && npm run check:browser-smoke",
-		"check:installer": "node scripts/check-installer.mjs",
-		"check:browser-smoke": "node scripts/check-browser-smoke.mjs",
-		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",
-		"profile:rpc": "node scripts/profile-coding-agent-node.mjs --mode rpc",
+		"clean": "bun scripts/remove-paths.ts packages/tui/dist packages/ai/dist packages/agent/dist packages/coding-agent/dist",
+		"build": "bun run --cwd packages/tui build && bun run --cwd packages/ai build && bun run --cwd packages/agent build && bun run --cwd packages/coding-agent build",
+		"dev": "bun scripts/dev.ts",
+		"dev:tsc": "bun run --cwd packages/ai dev:tsc",
+		"check": "bun --bun biome check --write --error-on-warnings . && bun run check:type && bun run check:installer && bun run check:browser-smoke",
+		"check:installer": "bun scripts/check-installer-render.mjs",
+		"check:browser-smoke": "bun scripts/check-browser-smoke.mjs",
+		"profile:tui": "bun scripts/profile-coding-agent-node.mjs --mode tui",
+		"profile:rpc": "bun scripts/profile-coding-agent-node.mjs --mode rpc",
 		"test": "npm run test --workspaces --if-present",
 		"version:patch": "npm version patch -ws --no-git-tag-version && node scripts/sync-versions.js && shx rm -rf node_modules packages/*/node_modules package-lock.json && npm install",
 		"version:minor": "npm version minor -ws --no-git-tag-version && node scripts/sync-versions.js && shx rm -rf node_modules packages/*/node_modules package-lock.json && npm install",
@@ -32,14 +32,16 @@
 		"release:patch": "node scripts/release.mjs patch",
 		"release:minor": "node scripts/release.mjs minor",
 		"release:major": "node scripts/release.mjs major",
-		"prepare": "husky"
+		"prepare": "bun --bun husky",
+		"build:binary": "bun run --cwd packages/coding-agent build:binary",
+		"dev:cli": "bun packages/coding-agent/src/bun/cli.ts",
+		"check:type": "bun --bun tsgo --noEmit"
 	},
 	"devDependencies": {
 		"@anthropic-ai/sandbox-runtime": "^0.0.55",
 		"@biomejs/biome": "2.5.5",
 		"@types/node": "^22.10.5",
 		"@typescript/native-preview": "7.0.0-dev.20260120.1",
-		"concurrently": "^9.2.4",
 		"husky": "^9.1.7",
 		"jiti": "^2.7.0",
 		"shx": "^0.4.0",
@@ -47,7 +49,8 @@
 		"typescript": "^7.0.2"
 	},
 	"engines": {
-		"node": ">=22.8.0"
+		"node": ">=22.8.0",
+		"bun": "1.3.14"
 	},
 	"version": "0.9.1",
 	"dependencies": {
