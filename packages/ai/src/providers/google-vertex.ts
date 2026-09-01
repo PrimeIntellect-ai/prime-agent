@@ -285,9 +285,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 				throw streamFailureFromStopReason(output.stopReasonRaw);
 			}
 
-			if (output.stopReason !== "toolUse") {
-				appendGoogleSearchGrounding(output, stream, groundingQueries, groundingSources);
-			}
+			appendGoogleSearchGrounding(output, stream, groundingQueries, groundingSources);
 
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
@@ -503,9 +501,24 @@ function buildParams(
 	return params;
 }
 
+function isTruthyEnvFlag(value: string | undefined): boolean {
+	if (!value) return false;
+	const lower = value.trim().toLowerCase();
+	return lower === "1" || lower === "true" || lower === "yes" || lower === "on";
+}
+
 function resolveGoogleSearchEnabled(options: GoogleVertexOptions, context: Context): boolean {
-	if (options.googleSearch !== undefined) {
-		return options.googleSearch;
+	if (options.googleSearch === false) {
+		return false;
+	}
+	if (isTruthyEnvFlag(process.env.PI_OFFLINE)) {
+		return false;
+	}
+	if (context.systemPrompt?.includes("AVO_ONLINE_EVIDENCE=not_required") === true) {
+		return false;
+	}
+	if (options.googleSearch === true) {
+		return true;
 	}
 	const value = process.env.GOOGLE_VERTEX_GOOGLE_SEARCH?.trim().toLowerCase();
 	if (value === "1" || value === "true" || value === "yes" || value === "on") return true;
