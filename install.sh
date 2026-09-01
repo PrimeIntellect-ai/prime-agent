@@ -916,6 +916,16 @@ prime_agent_binary_validate_layout() {
 	done
 }
 
+prime_agent_binary_canonicalize_install_paths() {
+	mkdir -p "$prime_agent_binary_versions_dir"
+	prime_agent_binary_versions_dir=$(CDPATH= cd -P "$prime_agent_binary_versions_dir" && pwd)
+	_link_dir=$(dirname "$prime_agent_binary_symlink")
+	_link_name=$(basename "$prime_agent_binary_symlink")
+	mkdir -p "$_link_dir"
+	_link_dir=$(CDPATH= cd -P "$_link_dir" && pwd)
+	prime_agent_binary_symlink="$_link_dir/$_link_name"
+}
+
 prime_agent_binary_acquire_lock() {
 	_versions_dir="$1"
 	_lock_dir="$_versions_dir/.install.lock"
@@ -1004,6 +1014,7 @@ prime_agent_binary_fresh_install() {
 	fi
 	_artifact_name="$(prime_agent_binary_artifact_name "$_version" "$_platform")"
 	_artifact_url="$prime_agent_base_url/releases/v$_version/$_artifact_name"
+	prime_agent_binary_canonicalize_install_paths
 	_versions_dir="$prime_agent_binary_versions_dir"
 	_version_dir="$(prime_agent_binary_target_version_dir "$_version")"
 
@@ -1011,7 +1022,6 @@ prime_agent_binary_fresh_install() {
 	prime_agent_download_dir="$_download_dir"
 	_artifact_path="$_download_dir/$_artifact_name"
 
-	mkdir -p "$_versions_dir"
 	prime_agent_binary_acquire_lock "$_versions_dir"
 
 	# Version directories are immutable. Reuse a healthy existing install instead
@@ -1023,8 +1033,10 @@ prime_agent_binary_fresh_install() {
 	if [ -x "$_existing_binary" ] && prime_agent_binary_validate_layout "$_version_dir" "$_existing_binary"; then
 		prime_agent_binary_write_install_paths "$_version_dir"
 		prime_agent_binary_atomic_symlink "$_existing_binary" "$prime_agent_binary_symlink"
-		prime_agent_configure_binary_path "$_version"
-		return
+		if prime_agent_binary_smoke_binary "$prime_agent_binary_symlink"; then
+			prime_agent_configure_binary_path "$_version"
+			return
+		fi
 	fi
 
 	prime_agent_run_quiet_with_animation 		"Downloading Prime Agent v$_version" 		"Downloading Prime Agent v$_version" 		"Fetching the compiled binary for $_platform." 		curl -fsSL "$_artifact_url" -o "$_artifact_path"
@@ -1122,8 +1134,8 @@ prime_agent_binary_fresh_install() {
 prime_agent_binary_update() {
 	_update_version=
 	_update_version="$(resolve_prime_agent_version "$@")"
+	prime_agent_binary_canonicalize_install_paths
 	_versions_dir="$prime_agent_binary_versions_dir"
-	mkdir -p "$_versions_dir"
 	prime_agent_binary_acquire_lock "$_versions_dir"
 
 	# Read current version from the symlink target's package.json

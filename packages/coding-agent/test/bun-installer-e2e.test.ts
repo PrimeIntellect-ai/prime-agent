@@ -9,6 +9,7 @@ import {
 	readlinkSync,
 	realpathSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -230,6 +231,30 @@ describe("compiled binary installer", () => {
 		expect(result.stderr).toContain("no healthy rollback version was available");
 		expect(() => readlinkSync(link)).toThrow();
 		expect(() => readFileSync(join(root, "apps", "versions", "v1.2.3", "package.json"))).toThrow();
+	});
+
+	test("does not self-rollback through an aliased versions directory", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		const physicalVersions = join(root, "physical-versions");
+		const aliasedVersions = join(root, "aliased-versions");
+		mkdirSync(physicalVersions);
+		symlinkSync(physicalVersions, aliasedVersions, "dir");
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		const pathEnv = { PRIME_AGENT_VERSIONS_DIR: aliasedVersions };
+		expect(runInstaller(root, ["1.2.3"], pathEnv).exitCode).toBe(0);
+		const link = join(root, "bin", "prime-agent");
+		const target = readlinkSync(link);
+		writeFileSync(target, "#!/bin/sh\nexit 1\n");
+		chmodSync(target, 0o755);
+		const publicPathFailure =
+			'#!/bin/sh\ncase "$0" in */bin/prime-agent) exit 1 ;; esac\nif [ "$1" = "--version" ]; then exit 0; fi\nexit 0\n';
+		makeRelease(root, "1.2.3", publicPathFailure);
+
+		const result = runInstaller(root, ["1.2.3"], pathEnv);
+		expect(result.exitCode).not.toBe(0);
+		expect(() => readlinkSync(link)).toThrow();
+		expect(() => readFileSync(join(physicalVersions, "v1.2.3", "package.json"))).toThrow();
 	});
 
 	test("keeps the previous symlink when an update fails its smoke test", () => {
