@@ -16,20 +16,53 @@ prime_agent_release_channel="${PRIME_AGENT_RELEASE_CHANNEL:-$prime_agent_default
 prime_agent_cmd="${PRIME_AGENT_CMD:-prime-agent}"
 prime_agent_persisted_versions_dir=
 prime_agent_persisted_symlink=
-prime_agent_script_dir=$(CDPATH= cd -P "$(dirname "$0")" 2>/dev/null && pwd)
-if [ -f "$prime_agent_script_dir/.install-paths" ]; then
-	prime_agent_persisted_versions_dir=$(sed -n '1p' "$prime_agent_script_dir/.install-paths")
-	prime_agent_persisted_symlink=$(sed -n '2p' "$prime_agent_script_dir/.install-paths")
+prime_agent_persisted_paths_invalid=0
+prime_agent_script_dir=
+case "$0" in
+	*/*)
+		prime_agent_script_dir=$(CDPATH= cd -P "$(dirname "$0")" 2>/dev/null && pwd)
+		;;
+esac
+if [ -n "$prime_agent_script_dir" ] && [ -f "$prime_agent_script_dir/.install-paths" ]; then
+	_persisted_versions=$(sed -n '1p' "$prime_agent_script_dir/.install-paths")
+	_persisted_symlink=$(sed -n '2p' "$prime_agent_script_dir/.install-paths")
+	_persisted_cmd=$(sed -n '3p' "$prime_agent_script_dir/.install-paths")
+	if [ -z "$_persisted_cmd" ]; then
+		_persisted_cmd=$(basename "$_persisted_symlink")
+	fi
+	_persisted_versions_physical=
+	_persisted_target_dir=
+	if [ -d "$_persisted_versions" ]; then
+		_persisted_versions_physical=$(CDPATH= cd -P "$_persisted_versions" 2>/dev/null && pwd)
+	fi
+	if [ -L "$_persisted_symlink" ]; then
+		_persisted_target=$(readlink "$_persisted_symlink" 2>/dev/null || printf '')
+		if [ -n "$_persisted_target" ] && [ -d "$(dirname "$_persisted_target")" ]; then
+			_persisted_target_dir=$(CDPATH= cd -P "$(dirname "$_persisted_target")" 2>/dev/null && pwd)
+		fi
+	fi
+	if [ -n "$_persisted_versions_physical" ] &&
+		[ "$_persisted_versions_physical" = "$(dirname "$prime_agent_script_dir")" ] &&
+		[ "$_persisted_target_dir" = "$prime_agent_script_dir" ] &&
+		[ "$(basename "$_persisted_symlink")" = "$_persisted_cmd" ]; then
+		prime_agent_persisted_versions_dir="$_persisted_versions_physical"
+		prime_agent_persisted_symlink="$_persisted_symlink"
+		if [ -z "${PRIME_AGENT_CMD:-}" ]; then
+			prime_agent_cmd="$_persisted_cmd"
+		fi
+	else
+		prime_agent_persisted_paths_invalid=1
+	fi
 fi
 prime_agent_default_data_home="${XDG_DATA_HOME:-${HOME:+$HOME/.local/share}}"
 prime_agent_default_bin_home="${XDG_BIN_HOME:-${HOME:+$HOME/.local/bin}}"
 prime_agent_binary_versions_dir="${PRIME_AGENT_VERSIONS_DIR:-${prime_agent_persisted_versions_dir:-${prime_agent_default_data_home:+$prime_agent_default_data_home/prime-agent/versions}}}"
 if [ -n "${PRIME_AGENT_BIN_DIR:-}" ]; then
-	prime_agent_binary_symlink="${PRIME_AGENT_BIN_DIR%/}/prime-agent"
+	prime_agent_binary_symlink="${PRIME_AGENT_BIN_DIR%/}/$prime_agent_cmd"
 elif [ -n "$prime_agent_persisted_symlink" ]; then
 	prime_agent_binary_symlink="$prime_agent_persisted_symlink"
 else
-	prime_agent_binary_symlink="${prime_agent_default_bin_home:+$prime_agent_default_bin_home/prime-agent}"
+	prime_agent_binary_symlink="${prime_agent_default_bin_home:+$prime_agent_default_bin_home/$prime_agent_cmd}"
 fi
 prime_agent_esc=$(printf '\033')
 prime_agent_reset="${prime_agent_esc}[0m"
@@ -72,12 +105,17 @@ prime_agent_screen_detail=
 prime_agent_animation_frame=0
 prime_agent_binary_rollback_version=
 prime_agent_binary_lock_dir=
+prime_agent_binary_lock_root=
 prime_agent_is_update=0
 
 main() {
 	if [ "$prime_agent_base_url" = "$prime_agent_unconfigured_base_url" ]; then
 		printf 'error: installer download URL is not configured.\n' >&2
 		printf 'Set PRIME_AGENT_DOWNLOAD_BASE_URL or use the installer published by the release workflow.\n' >&2
+		exit 1
+	fi
+	if [ "$prime_agent_persisted_paths_invalid" = 1 ]; then
+		printf 'error: installed Prime Agent path metadata does not match this sidecar or active command.\n' >&2
 		exit 1
 	fi
 	if [ -z "$prime_agent_binary_versions_dir" ] || [ -z "$prime_agent_binary_symlink" ]; then
@@ -153,6 +191,10 @@ prime_agent_cleanup() {
 	if [ -n "${prime_agent_binary_lock_dir:-}" ] && [ -d "$prime_agent_binary_lock_dir" ]; then
 		rm -rf "$prime_agent_binary_lock_dir"
 		prime_agent_binary_lock_dir=
+	fi
+	if [ -n "${prime_agent_binary_lock_root:-}" ] && [ -d "$prime_agent_binary_lock_root" ]; then
+		rmdir "$prime_agent_binary_lock_root" 2>/dev/null || true
+		prime_agent_binary_lock_root=
 	fi
 	prime_agent_restore_terminal
 	return "$status"
@@ -928,7 +970,7 @@ prime_agent_binary_canonicalize_install_paths() {
 
 prime_agent_binary_acquire_lock() {
 	_versions_dir="$1"
-	_lock_dir="$_versions_dir/.install.lock"
+	_lock_root="$_versions_dir/.install-locks"
 	_timeout="${PRIME_AGENT_INSTALL_LOCK_TIMEOUT_SECONDS:-60}"
 	case "$_timeout" in
 		''|*[!0-9]*)
@@ -936,35 +978,75 @@ prime_agent_binary_acquire_lock() {
 			return 1
 			;;
 	esac
-	_waited=0
-	while ! mkdir "$_lock_dir" 2>/dev/null; do
-		_lock_pid=
-		if [ -f "$_lock_dir/pid" ]; then
-			_lock_pid=$(sed -n '1p' "$_lock_dir/pid" 2>/dev/null || printf '')
-		fi
-		case "$_lock_pid" in
-			'')
-				# The owner writes its PID immediately after mkdir. Give that tiny
-				# publication window one retry before treating the lock as abandoned.
-				if [ "$_waited" -eq 0 ]; then
-					sleep 1
-					_waited=$((_waited + 1))
-					continue
-				fi
-				_lock_is_stale=1
-				;;
-			*[!0-9]*) _lock_is_stale=1 ;;
-			*)
-				if kill -0 "$_lock_pid" 2>/dev/null; then
-					_lock_is_stale=0
-				else
-					_lock_is_stale=1
-				fi
-				;;
-		esac
-		if [ "$_lock_is_stale" = 1 ]; then
-			rm -rf "$_lock_dir"
+	mkdir -p "$_lock_root"
+	prime_agent_binary_lock_root="$_lock_root"
+	rm -rf "$_lock_root/choosing-$$"
+	for _entry in "$_lock_root"/*-"$$"; do
+		[ -d "$_entry" ] || continue
+		rm -rf "$_entry"
+	done
+	_choosing_dir="$_lock_root/choosing-$$"
+	mkdir "$_choosing_dir"
+	prime_agent_binary_lock_dir="$_choosing_dir"
+
+	_max_ticket=0
+	for _entry in "$_lock_root"/*-*; do
+		[ -d "$_entry" ] || continue
+		_entry_name=$(basename "$_entry")
+		case "$_entry_name" in choosing-*) continue ;; esac
+		_entry_ticket=${_entry_name%%-*}
+		_entry_pid=${_entry_name#*-}
+		case "$_entry_ticket:$_entry_pid" in *[!0-9:]*|:*) continue ;; esac
+		if ! kill -0 "$_entry_pid" 2>/dev/null; then
+			rm -rf "$_entry"
 			continue
+		fi
+		if [ "$_entry_ticket" -gt "$_max_ticket" ]; then
+			_max_ticket="$_entry_ticket"
+		fi
+	done
+	_my_ticket=$((_max_ticket + 1))
+	while :; do
+		_my_contender="$_lock_root/$_my_ticket-$$"
+		if mkdir "$_my_contender" 2>/dev/null; then
+			break
+		fi
+		_my_ticket=$((_my_ticket + 1))
+	done
+	rm -rf "$_choosing_dir"
+	prime_agent_binary_lock_dir="$_my_contender"
+
+	_waited=0
+	while :; do
+		_blocked=0
+		for _entry in "$_lock_root"/choosing-*; do
+			[ -d "$_entry" ] || continue
+			_entry_pid=${_entry##*-}
+			case "$_entry_pid" in ''|*[!0-9]*) rm -rf "$_entry"; continue ;; esac
+			if kill -0 "$_entry_pid" 2>/dev/null; then
+				_blocked=1
+			else
+				rm -rf "$_entry"
+			fi
+		done
+		for _entry in "$_lock_root"/*-*; do
+			[ -d "$_entry" ] || continue
+			_entry_name=$(basename "$_entry")
+			case "$_entry_name" in choosing-*|"$_my_ticket-$$") continue ;; esac
+			_entry_ticket=${_entry_name%%-*}
+			_entry_pid=${_entry_name#*-}
+			case "$_entry_ticket:$_entry_pid" in *[!0-9:]*|:*) continue ;; esac
+			if ! kill -0 "$_entry_pid" 2>/dev/null; then
+				rm -rf "$_entry"
+				continue
+			fi
+			if [ "$_entry_ticket" -lt "$_my_ticket" ] ||
+				{ [ "$_entry_ticket" -eq "$_my_ticket" ] && [ "$_entry_pid" -lt "$$" ]; }; then
+				_blocked=1
+			fi
+		done
+		if [ "$_blocked" = 0 ]; then
+			return 0
 		fi
 		if [ "$_waited" -ge "$_timeout" ]; then
 			printf 'error: timed out waiting for another Prime Agent install or update to finish.\n' >&2
@@ -973,15 +1055,13 @@ prime_agent_binary_acquire_lock() {
 		sleep 1
 		_waited=$((_waited + 1))
 	done
-	printf '%s\n' "$$" > "$_lock_dir/pid"
-	prime_agent_binary_lock_dir="$_lock_dir"
 }
 
 prime_agent_binary_write_install_paths() {
 	_version_dir="$1"
 	_state_path="$_version_dir/.install-paths"
 	_state_tmp="${_state_path}.tmp.$$"
-	printf '%s\n%s\n' "$prime_agent_binary_versions_dir" "$prime_agent_binary_symlink" > "$_state_tmp"
+	printf '%s\n%s\n%s\n' "$prime_agent_binary_versions_dir" "$prime_agent_binary_symlink" "$prime_agent_cmd" > "$_state_tmp"
 	mv -f "$_state_tmp" "$_state_path"
 }
 
@@ -1030,6 +1110,9 @@ prime_agent_binary_fresh_install() {
 	if [ ! -x "$_existing_binary" ] && [ -x "$_version_dir/pi" ]; then
 		_existing_binary="$_version_dir/pi"
 	fi
+	if [ ! -x "$_existing_binary" ] && [ -x "$_version_dir/prime-agent" ]; then
+		_existing_binary="$_version_dir/prime-agent"
+	fi
 	if [ -x "$_existing_binary" ] && prime_agent_binary_validate_layout "$_version_dir" "$_existing_binary"; then
 		prime_agent_binary_write_install_paths "$_version_dir"
 		prime_agent_binary_atomic_symlink "$_existing_binary" "$prime_agent_binary_symlink"
@@ -1059,6 +1142,8 @@ prime_agent_binary_fresh_install() {
 		_binary_path="$_version_dir/pi"
 	elif [ -f "$_version_dir/$prime_agent_cmd" ]; then
 		_binary_path="$_version_dir/$prime_agent_cmd"
+	elif [ -f "$_version_dir/prime-agent" ]; then
+		_binary_path="$_version_dir/prime-agent"
 	else
 		for _d in "$_version_dir"/*/; do
 			_d="${_d%/}"
@@ -1067,6 +1152,9 @@ prime_agent_binary_fresh_install() {
 				break
 			elif [ -f "${_d}/$prime_agent_cmd" ]; then
 				_binary_path="${_d}/$prime_agent_cmd"
+				break
+			elif [ -f "${_d}/prime-agent" ]; then
+				_binary_path="${_d}/prime-agent"
 				break
 			fi
 		done
@@ -1205,6 +1293,8 @@ prime_agent_binary_update() {
 		_binary_path="$_version_dir/pi"
 	elif [ -f "$_version_dir/$prime_agent_cmd" ]; then
 		_binary_path="$_version_dir/$prime_agent_cmd"
+	elif [ -f "$_version_dir/prime-agent" ]; then
+		_binary_path="$_version_dir/prime-agent"
 	else
 		for _d in "$_version_dir"/*/; do
 			_d="${_d%/}"
@@ -1213,6 +1303,9 @@ prime_agent_binary_update() {
 				break
 			elif [ -f "${_d}/$prime_agent_cmd" ]; then
 				_binary_path="${_d}/$prime_agent_cmd"
+				break
+			elif [ -f "${_d}/prime-agent" ]; then
+				_binary_path="${_d}/prime-agent"
 				break
 			fi
 		done
@@ -1281,6 +1374,8 @@ prime_agent_binary_rollback() {
 		_rollback_binary="$prime_agent_binary_rollback_version/pi"
 	elif [ -f "$prime_agent_binary_rollback_version/$prime_agent_cmd" ]; then
 		_rollback_binary="$prime_agent_binary_rollback_version/$prime_agent_cmd"
+	elif [ -f "$prime_agent_binary_rollback_version/prime-agent" ]; then
+		_rollback_binary="$prime_agent_binary_rollback_version/prime-agent"
 	fi
 	if [ -z "$_rollback_binary" ] || [ ! -x "$_rollback_binary" ]; then
 		return 1
@@ -1309,6 +1404,12 @@ prime_agent_verify_binary_checksum() {
 		printf 'error: sha256sum or shasum is required to verify the download.\n' >&2
 		exit 1
 	fi
+}
+
+prime_agent_shell_quote() {
+	printf "'"
+	printf '%s' "$1" | sed "s/'/'\\\\''/g"
+	printf "'"
 }
 
 prime_agent_configure_binary_path() {
@@ -1340,16 +1441,18 @@ prime_agent_configure_binary_path() {
 	fi
 
 	_profile=$(detect_shell_profile)
+	_quoted_bin_dir=$(prime_agent_shell_quote "$_bin_dir")
+	_quoted_cmd=$(prime_agent_shell_quote "$prime_agent_cmd")
 	if [ -n "$_profile" ] && [ -w "$_profile" ] 2>/dev/null; then
 		if ! grep -F -q -- "$_bin_dir" "$_profile" 2>/dev/null; then
-			printf '\nexport PATH="%s:$PATH"\n' "$_bin_dir" >> "$_profile"
+			printf '\nexport PATH=%s:"$PATH"\n' "$_quoted_bin_dir" >> "$_profile"
 			printf 'Added %s to %s.\n' "$_bin_dir" "$_profile"
 		fi
-		printf '\nRestart your shell or run: export PATH="%s:$PATH" && %s\n' "$_bin_dir" "$prime_agent_cmd"
+		printf '\nRestart your shell or run: export PATH=%s:"$PATH" && %s\n' "$_quoted_bin_dir" "$_quoted_cmd"
 	else
 		printf '\nAdd to your shell profile:\n'
-		printf '  export PATH="%s:$PATH"\n' "$_bin_dir"
-		printf '\nThen restart your shell and run: %s\n' "$prime_agent_cmd"
+		printf '  export PATH=%s:"$PATH"\n' "$_quoted_bin_dir"
+		printf '\nThen restart your shell and run: %s\n' "$_quoted_cmd"
 	fi
 }
 
