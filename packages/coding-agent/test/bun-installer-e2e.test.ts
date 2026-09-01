@@ -126,6 +126,36 @@ describe("compiled binary installer", () => {
 		expect(readlinkSync(join(root, "bin", "prime-agent"))).toBe(target);
 	});
 
+	test("self-updates the persisted custom install paths without exported overrides", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+		const v1Sidecar = join(root, "apps", "versions", "v1.2.3", "install.sh");
+		writeFileSync(v1Sidecar, readFileSync(installer));
+		chmodSync(v1Sidecar, 0o755);
+		makeRelease(root, "2.0.0", goodExecutable("2.0.0"));
+		const isolatedHome = join(root, "isolated-home");
+		mkdirSync(isolatedHome);
+		const result = spawnSync("sh", [v1Sidecar, "--update", "2.0.0"], {
+			cwd: root,
+			env: {
+				...process.env,
+				HOME: isolatedHome,
+				PRIME_AGENT_DOWNLOAD_BASE_URL: `file://${join(root, "server")}`,
+				PRIME_AGENT_VERSIONS_DIR: undefined,
+				PRIME_AGENT_BIN_DIR: undefined,
+				XDG_DATA_HOME: undefined,
+				XDG_BIN_HOME: undefined,
+				TERM: "dumb",
+			},
+			encoding: "utf8",
+		});
+		expect(result.status, result.stderr).toBe(0);
+		expect(readlinkSync(join(root, "bin", "prime-agent"))).toContain("v2.0.0/prime-agent");
+		expect(() => readlinkSync(join(isolatedHome, ".local", "bin", "prime-agent"))).toThrow();
+	});
+
 	test("rejects a fresh install that fails through the activated command symlink", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
 		temporaryRoots.push(root);
@@ -239,6 +269,24 @@ describe("compiled binary installer", () => {
 		expect(readlinkSync(link)).toContain("v2.0.0/prime-agent");
 		expect(spawnSync(link, ["--version"], { encoding: "utf8" }).status).toBe(0);
 		expect(() => readFileSync(join(root, "apps", "versions", ".install.lock", "pid"))).toThrow();
+	});
+
+	test("recovers an install lock whose recorded process is gone", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+		makeRelease(root, "2.0.0", goodExecutable("2.0.0"));
+		const lockDir = join(root, "apps", "versions", ".install.lock");
+		mkdirSync(lockDir);
+		writeFileSync(join(lockDir, "pid"), "99999999\n");
+
+		const result = runInstaller(root, ["--update", "2.0.0"], {
+			PRIME_AGENT_INSTALL_LOCK_TIMEOUT_SECONDS: "1",
+		});
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(readlinkSync(join(root, "bin", "prime-agent"))).toContain("v2.0.0/prime-agent");
+		expect(() => readFileSync(join(lockDir, "pid"))).toThrow();
 	});
 
 	test("keeps the previous version when an update is missing a required sidecar", () => {

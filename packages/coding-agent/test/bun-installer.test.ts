@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -58,6 +58,20 @@ describe("install.sh shell syntax", () => {
 
 	it("rejects removed package-manager method flags", () => {
 		expect(installerText).toContain("--method is no longer supported");
+	});
+
+	it("reports an actionable error when HOME and explicit install paths are absent", () => {
+		const result = spawnSync("sh", [installer, "1.2.3"], {
+			encoding: "utf8",
+			env: {
+				PATH: process.env.PATH,
+				PRIME_AGENT_DOWNLOAD_BASE_URL: "https://downloads.example.test",
+				TERM: "dumb",
+			},
+		});
+		expect(result.status).not.toBe(0);
+		expect(result.stderr).toContain("HOME is not set");
+		expect(result.stderr).not.toContain("parameter not set");
 	});
 });
 
