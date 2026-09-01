@@ -4691,6 +4691,7 @@ export class DaemonSupervisor {
 		} else if (
 			sessionEventType === "turn_start" ||
 			sessionEventType === "turn_end" ||
+			sessionEventType === "session_action_update" ||
 			sessionEventType === "rlm_child_update"
 		) {
 			void this.refreshWorkerSummaries(worker).catch(() => undefined);

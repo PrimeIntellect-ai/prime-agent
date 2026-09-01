@@ -3617,6 +3617,45 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(catchUpClient).not.toHaveBeenCalled();
 	});
 
+	it("refreshes remote agent peers when session input activity changes", async () => {
+		const activeSessionId = "active-action-update";
+		const refreshWorkerSummaries = vi.fn(async () => undefined);
+		const worker = {
+			snapshotCache: new Map(),
+			transcriptCaches: new Map(),
+			incomingTranscriptActiveSessionIds: new Set(),
+			duplicateIncomingTranscriptChunkIndexes: new Map(),
+			snapshotTransferFrames: new Map(),
+		};
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			clients: new Set(),
+			streamReconstructor: { observe: vi.fn() },
+			invalidateWorkerSnapshot: vi.fn(),
+			refreshWorkerSummaries,
+		}) as {
+			handleWorkerFrame(residentWorker: typeof worker, frame: PrivateFrame<DaemonWorkerFrameHeader>): void;
+		};
+		const frame: PrivateFrame<DaemonWorkerFrameHeader> = {
+			header: {
+				kind: "outbound",
+				outboundType: "session_event",
+				activeSessionId,
+				sessionEventType: "session_action_update",
+			},
+			payload: Buffer.from(
+				`${JSON.stringify({
+					type: "session_event",
+					activeSessionId,
+					event: { type: "session_action_update", actions: { queuedCount: 0, steering: [], followUps: [] } },
+				})}\n`,
+			),
+		};
+
+		supervisor.handleWorkerFrame(worker, frame);
+		await vi.waitFor(() => expect(refreshWorkerSummaries).toHaveBeenCalledTimes(1));
+		expect(refreshWorkerSummaries).toHaveBeenCalledWith(worker);
+	});
+
 	it("subscribes to worker updates with chunked snapshots", async () => {
 		type SubscriptionWorker = {
 			client: { requestWorker: (command: unknown) => Promise<{ success: boolean }> };
