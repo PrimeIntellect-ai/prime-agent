@@ -124,6 +124,21 @@ describe("compiled binary installer", () => {
 		expect(readlinkSync(join(root, "bin", "prime-agent"))).toBe(target);
 	});
 
+	test("rejects a fresh install that fails through the activated command symlink", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(
+			root,
+			"1.2.3",
+			'#!/bin/sh\ncase "$0" in */bin/prime-agent) exit 1 ;; esac\nif [ "$1" = "--version" ]; then exit 0; fi\nexit 0\n',
+		);
+
+		const result = runInstaller(root, ["1.2.3"]);
+		expect(result.exitCode).not.toBe(0);
+		expect(result.stderr).toContain("installed Prime Agent command did not run correctly");
+		expect(() => readlinkSync(join(root, "bin", "prime-agent"))).toThrow();
+	});
+
 	test("rejects a bad checksum before changing the active version", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
 		temporaryRoots.push(root);
@@ -132,6 +147,24 @@ describe("compiled binary installer", () => {
 		const result = runInstaller(root, ["1.2.3"]);
 		expect(result.exitCode).not.toBe(0);
 		expect(() => readlinkSync(join(root, "bin", "prime-agent"))).toThrow();
+	});
+
+	test("repairs a broken active command when updating to the same version", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+		const link = join(root, "bin", "prime-agent");
+		const target = readlinkSync(link);
+		writeFileSync(target, "#!/bin/sh\nexit 1\n");
+		chmodSync(target, 0o755);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+
+		const result = runInstaller(root, ["--update", "1.2.3"]);
+		expect(result.exitCode, result.stderr).toBe(0);
+		const smoke = spawnSync(link, ["--version"], { encoding: "utf8" });
+		expect(smoke.status).toBe(0);
+		expect(smoke.stdout).toContain("1.2.3");
 	});
 
 	test("keeps the previous symlink when an update fails its smoke test", () => {
