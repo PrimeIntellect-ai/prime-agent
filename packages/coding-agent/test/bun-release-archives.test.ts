@@ -106,6 +106,7 @@ describe("compiled release archives", () => {
 			name: "prime-agent",
 			version: "1.2.3",
 			bin: { "prime-agent": "dist/bundle/cli.js" },
+			scripts: { postinstall: "node postinstall.cjs" },
 		});
 
 		const extracted = join(f.root, "extracted");

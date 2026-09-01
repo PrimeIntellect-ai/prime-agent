@@ -163,7 +163,7 @@ function createReleasePackageJson(sourcePackage, packageName, version, internalP
 		version,
 		dependencies: rewriteInternalDependencies(sourcePackage.dependencies, internalPackageUrls),
 		optionalDependencies: rewriteInternalDependencies(sourcePackage.optionalDependencies, internalPackageUrls),
-		scripts: sourcePackage.scripts?.postinstall ? { postinstall: sourcePackage.scripts.postinstall } : undefined,
+		scripts: sourcePackage.scripts?.postinstall ? { postinstall: "node postinstall.cjs" } : undefined,
 	};
 	delete manifest.devDependencies;
 	delete manifest.overrides;
