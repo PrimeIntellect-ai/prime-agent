@@ -1,0 +1,1 @@
+- Added xAI (Grok) OAuth login via the device code flow for SuperGrok / Premium+ accounts. `/login` can now authenticate against `auth.x.ai`; access tokens refresh automatically, refresh tokens rotate, and HTTP 403 is reported as a subscription-tier gate with `XAI_API_KEY` as the fallback.

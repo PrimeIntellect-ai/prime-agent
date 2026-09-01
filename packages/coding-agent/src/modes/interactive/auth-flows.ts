@@ -842,7 +842,7 @@ export class ProviderAuthFlows {
 									manualCodeReject = undefined;
 								}
 							});
-					} else if (providerId === "github-copilot") {
+					} else if (providerId === "github-copilot" || providerId === "xai") {
 						dialog.showWaiting("Waiting for browser authentication...");
 					}
 				},

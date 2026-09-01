@@ -5,6 +5,7 @@
  * for OAuth-based providers:
  * - Anthropic (Claude Pro/Max)
  * - GitHub Copilot
+ * - xAI (Grok SuperGrok / Premium+)
  */
 
 export { anthropicOAuthProvider, loginAnthropic, refreshAnthropicToken } from "./anthropic.js";
@@ -16,18 +17,20 @@ export {
 	refreshGitHubCopilotToken,
 } from "./github-copilot.js";
 export { loginOpenAICodex, openaiCodexOAuthProvider, refreshOpenAICodexToken } from "./openai-codex.js";
-
 export * from "./types.js";
+export { loginXai, refreshXaiToken, xaiOAuthProvider } from "./xai.js";
 
 import { anthropicOAuthProvider } from "./anthropic.js";
 import { githubCopilotOAuthProvider } from "./github-copilot.js";
 import { openaiCodexOAuthProvider } from "./openai-codex.js";
 import type { OAuthCredentials, OAuthProviderId, OAuthProviderInfo, OAuthProviderInterface } from "./types.js";
+import { xaiOAuthProvider } from "./xai.js";
 
 const BUILT_IN_OAUTH_PROVIDERS: OAuthProviderInterface[] = [
 	anthropicOAuthProvider,
 	githubCopilotOAuthProvider,
 	openaiCodexOAuthProvider,
+	xaiOAuthProvider,
 ];
 
 const oauthProviderRegistry = new Map<string, OAuthProviderInterface>(
@@ -118,8 +121,11 @@ export async function getOAuthApiKey(
 	if (Date.now() >= creds.expires) {
 		try {
 			creds = await provider.refreshToken(creds);
-		} catch (_error) {
-			throw new Error(`Failed to refresh OAuth token for ${providerId}`);
+		} catch (error) {
+			// Keep the provider's detailed refresh error (tier gates, re-login
+			// hints, server response) attached so callers can surface it.
+			const reason = error instanceof Error ? error.message : String(error);
+			throw new Error(`Failed to refresh OAuth token for ${providerId}: ${reason}`, { cause: error });
 		}
 	}
 

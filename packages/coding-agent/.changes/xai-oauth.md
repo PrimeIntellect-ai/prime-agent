@@ -1,0 +1,1 @@
+- Added xAI (Grok SuperGrok / Premium+) subscription login to `/login` via the OAuth device code flow, including the waiting-for-browser state used by other device-flow providers.
