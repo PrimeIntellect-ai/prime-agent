@@ -56,6 +56,7 @@ prime_agent_animation_frame=0
 prime_agent_binary_versions_dir="${PRIME_AGENT_VERSIONS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/prime-agent/versions}"
 prime_agent_binary_symlink="${PRIME_AGENT_BIN_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}/prime-agent"
 prime_agent_binary_rollback_version=
+prime_agent_binary_lock_dir=
 prime_agent_is_update=0
 
 main() {
@@ -129,6 +130,10 @@ prime_agent_cleanup() {
 	status=$?
 	if [ -n "${prime_agent_download_dir:-}" ] && [ -d "$prime_agent_download_dir" ]; then
 		rm -rf "$prime_agent_download_dir"
+	fi
+	if [ -n "${prime_agent_binary_lock_dir:-}" ] && [ -d "$prime_agent_binary_lock_dir" ]; then
+		rm -rf "$prime_agent_binary_lock_dir"
+		prime_agent_binary_lock_dir=
 	fi
 	prime_agent_restore_terminal
 	return "$status"
@@ -892,6 +897,29 @@ prime_agent_binary_validate_layout() {
 	done
 }
 
+prime_agent_binary_acquire_lock() {
+	_versions_dir="$1"
+	_lock_dir="$_versions_dir/.install.lock"
+	_timeout="${PRIME_AGENT_INSTALL_LOCK_TIMEOUT_SECONDS:-60}"
+	case "$_timeout" in
+		''|*[!0-9]*)
+			printf 'error: PRIME_AGENT_INSTALL_LOCK_TIMEOUT_SECONDS must be a non-negative integer.\n' >&2
+			return 1
+			;;
+	esac
+	_waited=0
+	while ! mkdir "$_lock_dir" 2>/dev/null; do
+		if [ "$_waited" -ge "$_timeout" ]; then
+			printf 'error: timed out waiting for another Prime Agent install or update to finish.\n' >&2
+			return 1
+		fi
+		sleep 1
+		_waited=$((_waited + 1))
+	done
+	printf '%s\n' "$$" > "$_lock_dir/pid"
+	prime_agent_binary_lock_dir="$_lock_dir"
+}
+
 prime_agent_binary_atomic_symlink() {
 	_target="$1"
 	_link="$2"
@@ -901,6 +929,10 @@ prime_agent_binary_atomic_symlink() {
 	_link_dir=$(dirname "$_link")
 	if [ ! -d "$_link_dir" ]; then
 		mkdir -p "$_link_dir"
+	fi
+	if [ -d "$_link" ] && [ ! -L "$_link" ]; then
+		printf 'error: cannot activate Prime Agent because the command path is a directory: %s\n' "$_link" >&2
+		return 1
 	fi
 	# Atomic replacement with temp symlink
 	_tmp="${_link}.tmp.$$"
@@ -925,6 +957,7 @@ prime_agent_binary_fresh_install() {
 	_artifact_path="$_download_dir/$_artifact_name"
 
 	mkdir -p "$_versions_dir"
+	prime_agent_binary_acquire_lock "$_versions_dir"
 
 	# Version directories are immutable. Reuse a healthy existing install instead
 	# of replacing files underneath the active command symlink.
@@ -1027,6 +1060,9 @@ prime_agent_binary_fresh_install() {
 prime_agent_binary_update() {
 	_update_version=
 	_update_version="$(resolve_prime_agent_version "$@")"
+	_versions_dir="$prime_agent_binary_versions_dir"
+	mkdir -p "$_versions_dir"
+	prime_agent_binary_acquire_lock "$_versions_dir"
 
 	# Read current version from the symlink target's package.json
 	_current_version=
@@ -1054,7 +1090,6 @@ prime_agent_binary_update() {
 	fi
 	_artifact_name="$(prime_agent_binary_artifact_name "$_update_version" "$_platform")"
 	_artifact_url="$prime_agent_base_url/releases/v$_update_version/$_artifact_name"
-	_versions_dir="$prime_agent_binary_versions_dir"
 	_version_dir="$(prime_agent_binary_target_version_dir "$_update_version")"
 
 	_download_dir=$(create_temp_dir)
@@ -1229,7 +1264,7 @@ prime_agent_configure_binary_path() {
 
 	_profile=$(detect_shell_profile)
 	if [ -n "$_profile" ] && [ -w "$_profile" ] 2>/dev/null; then
-		if ! grep -q "$_bin_dir" "$_profile" 2>/dev/null; then
+		if ! grep -F -q -- "$_bin_dir" "$_profile" 2>/dev/null; then
 			printf '\nexport PATH="%s:$PATH"\n' "$_bin_dir" >> "$_profile"
 			printf 'Added %s to %s.\n' "$_bin_dir" "$_profile"
 		fi
