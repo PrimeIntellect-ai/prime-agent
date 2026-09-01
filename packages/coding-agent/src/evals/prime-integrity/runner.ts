@@ -23,6 +23,7 @@ import {
 } from "../../core/avo/probe.js";
 import { sanitizeAvoVerificationEnvironment } from "../../core/avo/verification-environment.js";
 import { createFreshHostDirectory, writeHostFile } from "../../core/host-files.js";
+import { requireOptionValue } from "../cli-options.js";
 import { createPrimeIntegrityCatalog } from "./catalog.js";
 import type {
 	PrimeIntegrityAggregate,
@@ -156,7 +157,7 @@ Options:
 }
 
 function positiveInteger(value: string | undefined, flag: string): number {
-	const parsed = Number(value);
+	const parsed = Number(requireOptionValue(value, flag, "a positive integer"));
 	if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${flag} requires a positive integer`);
 	return parsed;
 }
@@ -190,8 +191,7 @@ export function parsePrimeIntegrityArgs(argv: string[]): RunnerOptions {
 				options.all = true;
 				break;
 			case "--case": {
-				const value = argv[++index];
-				if (!value) throw new Error("--case requires an ID");
+				const value = requireOptionValue(argv[++index], "--case", "an ID");
 				options.caseIds.push(
 					...value
 						.split(",")
@@ -204,24 +204,19 @@ export function parsePrimeIntegrityArgs(argv: string[]): RunnerOptions {
 				options.limit = positiveInteger(argv[++index], "--limit");
 				break;
 			case "--provider":
-				options.provider = argv[++index] || undefined;
-				if (!options.provider) throw new Error("--provider requires a name");
+				options.provider = requireOptionValue(argv[++index], "--provider", "a name");
 				break;
 			case "--model":
-				options.model = argv[++index] || undefined;
-				if (!options.model) throw new Error("--model requires an ID");
+				options.model = requireOptionValue(argv[++index], "--model", "an ID");
 				break;
 			case "--agent-command":
-				options.agentCommand = argv[++index] || "";
-				if (!options.agentCommand) throw new Error("--agent-command requires a path");
+				options.agentCommand = requireOptionValue(argv[++index], "--agent-command", "a path");
 				break;
 			case "--config-source":
-				options.configSource = resolve(argv[++index] || "");
-				if (!options.configSource) throw new Error("--config-source requires a directory");
+				options.configSource = resolve(requireOptionValue(argv[++index], "--config-source", "a directory"));
 				break;
 			case "--output":
-				options.outputDir = resolve(argv[++index] || "");
-				if (!options.outputDir) throw new Error("--output requires a directory");
+				options.outputDir = resolve(requireOptionValue(argv[++index], "--output", "a directory"));
 				break;
 			case "--timeout-ms":
 				options.timeoutMs = positiveInteger(argv[++index], "--timeout-ms");
@@ -230,7 +225,7 @@ export function parsePrimeIntegrityArgs(argv: string[]): RunnerOptions {
 				options.maxTurns = positiveInteger(argv[++index], "--max-turns");
 				break;
 			case "--hardening": {
-				const value = argv[++index];
+				const value = requireOptionValue(argv[++index], "--hardening", "on or off");
 				if (value !== "on" && value !== "off") throw new Error("--hardening must be on or off");
 				options.hardening = value === "on";
 				break;
