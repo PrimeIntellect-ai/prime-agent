@@ -2,6 +2,7 @@
 	"name": "prime-agent",
 	"private": true,
 	"type": "module",
+	"packageManager": "bun@1.3.14",
 	"workspaces": [
 		"packages/*",
 		"packages/coding-agent/examples/extensions/with-deps",
@@ -55,9 +56,6 @@
 	},
 	"overrides": {
 		"rimraf": "6.1.2",
-		"gaxios": {
-			"rimraf": "6.1.2"
-		},
 		"shell-quote": "^1.10.0"
 	}
 }

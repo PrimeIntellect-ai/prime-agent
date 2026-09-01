@@ -1,0 +1,3 @@
+[install]
+linker = "hoisted"
+minimumReleaseAge = 604800
