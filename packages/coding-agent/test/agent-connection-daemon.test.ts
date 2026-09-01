@@ -986,6 +986,66 @@ describe("DaemonAgentConnection", () => {
 		await connection.dispose();
 	});
 
+	it("stands down for update restoration when the update close lands inside the held roster re-attach", async () => {
+		const supervisor = new FakeDaemonClient();
+		supervisor.serverCapabilities.add("agent_roster");
+		supervisor.updateRestartSessions = [
+			{
+				id: "active-restored",
+				activeSessionId: "active-restored",
+				sessionId: "session-current",
+				sessionFile: "/tmp/session-current.jsonl",
+			},
+		];
+		let rosterSubscribes = 0;
+		const originalRequest = supervisor.request.bind(supervisor);
+		supervisor.request = async (command: DaemonCommand, timeoutMs?: number, options?: DaemonClientRequestOptions) => {
+			if (command.type === "roster_subscribe") {
+				rosterSubscribes++;
+				if (rosterSubscribes === 2) {
+					supervisor.connected = false;
+					supervisor.emitClose(new DaemonSocketClosedError("/tmp/prime-agent.sock", "update"));
+				}
+			}
+			return originalRequest(command, timeoutMs ?? 30000, options ?? {});
+		};
+		const direct = {
+			isConnected: true,
+			hello: supervisor.hello,
+			supportsServerCapability: (capability: string) => supervisor.supportsServerCapability(capability),
+			onMessage: () => () => {},
+			onClose: () => () => {},
+			request: async (command: Extract<DaemonCommand, { type: "attach" }>) => ({
+				type: "response" as const,
+				command: "attach" as const,
+				success: true as const,
+				data: createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12),
+			}),
+			close: () => {},
+		} as unknown as DaemonWorkerClient;
+		const routed = new DaemonRoutedClient(asDaemonClient(supervisor), direct);
+		// A short deadline would abort the restore if the held loop wrongly stayed its owner.
+		const connection = await DaemonAgentConnection.attach(routed, "active-1", { reconnectTimeoutMs: 30 });
+		await connection.subscribeAgentRoster(() => {});
+		const events: AgentConnectionEvent[] = [];
+		connection.subscribe(async (event) => {
+			events.push(event);
+		});
+		supervisor.hello = { ...supervisor.hello! };
+
+		supervisor.connected = false;
+		supervisor.emitClose(new Error("supervisor socket lost"));
+
+		await vi.waitFor(() => expect(events.some((event) => event.type === "session_resynced")).toBe(true), {
+			timeout: 5000,
+		});
+		expect(events.find((event) => event.type === "session_resynced")).toMatchObject({
+			snapshot: { state: { activeSessionId: "active-restored" } },
+		});
+		expect(events.some((event) => event.type === "closed")).toBe(false);
+		await connection.dispose();
+	});
+
 	it("rebinds the roster subscription onto the recovered supervisor socket while the direct link holds", async () => {
 		const supervisor = new FakeDaemonClient();
 		supervisor.serverCapabilities.add("agent_roster");

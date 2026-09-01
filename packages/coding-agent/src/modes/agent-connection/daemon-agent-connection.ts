@@ -1610,9 +1610,10 @@ export class DaemonAgentConnection implements AgentConnection {
 					if (directSessionHeld) {
 						// The roster subscription is a control-plane accessory; its usual rebind seam (attach) is skipped while held.
 						if (this.rosterStore) await this.rosterStore.attach(this.client).catch(() => undefined);
-						// One liveness check after the last await: a close inside the window joined this
-						// in-flight recovery, so it must be absorbed here instead of emitting "connected".
-						if (this.disposed || this.terminalCloseEmitted) {
+						// One check after the last await, against the close handler's own dispatch outputs:
+						// terminal closes set terminalCloseEmitted, update closes set updateRestartPending
+						// (restoration owns the client), and recoverable closes joined this loop.
+						if (this.disposed || this.terminalCloseEmitted || this.updateRestartPending) {
 							return;
 						}
 						if (this.client instanceof DaemonRoutedClient && this.client.hasDirectTransport) {
