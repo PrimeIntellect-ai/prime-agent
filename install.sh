@@ -1645,17 +1645,21 @@ prime_agent_detect_binary_platform() {
 			case "$_arch" in
 				x86_64|amd64) printf 'darwin-x64' ;;
 				arm64|aarch64) printf 'darwin-arm64' ;;
-				*) return 1 ;;
+				*) printf 'error: unsupported macOS architecture for binary install: %s\n' "$_arch" >&2; return 1 ;;
 			esac
 			;;
 		Linux)
+			if [ -f /etc/alpine-release ] || { command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; }; then
+				printf 'error: Prime Agent binaries require glibc Linux; use --method=npm on musl systems.\n' >&2
+				return 1
+			fi
 			case "$_arch" in
 				x86_64|amd64) printf 'linux-x64' ;;
 				arm64|aarch64) printf 'linux-arm64' ;;
-				*) return 1 ;;
+				*) printf 'error: unsupported Linux architecture for binary install: %s\n' "$_arch" >&2; return 1 ;;
 			esac
 			;;
-		*) return 1 ;;
+		*) printf 'error: unsupported platform for binary install: %s %s\n' "$_os" "$_arch" >&2; return 1 ;;
 	esac
 }
 
@@ -1698,7 +1702,6 @@ prime_agent_binary_fresh_install() {
 	_version="$(resolve_prime_agent_version "$@")"
 	_platform=
 	if ! _platform=$(prime_agent_detect_binary_platform); then
-		printf 'error: unsupported platform for binary install: %s %s\n' "$(uname -s)" "$(uname -m)" >&2
 		exit 1
 	fi
 	_artifact_name="$(prime_agent_binary_artifact_name "$_version" "$_platform")"
@@ -1821,7 +1824,6 @@ prime_agent_binary_update() {
 
 	_platform=
 	if ! _platform=$(prime_agent_detect_binary_platform); then
-		printf 'error: unsupported platform for binary update: %s %s\n' "$(uname -s)" "$(uname -m)" >&2
 		exit 1
 	fi
 	_artifact_name="$(prime_agent_binary_artifact_name "$_update_version" "$_platform")"
@@ -1914,8 +1916,20 @@ prime_agent_binary_update() {
 		prime_agent_binary_rollback_version="$_old_version_dir"
 	fi
 
-	# Atomically switch the symlink
+	# Atomically switch the symlink, then verify the activated path. If activation
+	# fails, restore the previous immutable version before returning an error.
 	prime_agent_binary_atomic_symlink "$_binary_path" "$prime_agent_binary_symlink"
+	if ! prime_agent_binary_smoke_binary "$prime_agent_binary_symlink"; then
+		if prime_agent_binary_rollback; then
+			rm -rf "$_version_dir"
+			printf 'error: activation failed; restored the previous Prime Agent version.\n' >&2
+		else
+			printf 'error: activation failed and no healthy rollback version was available.\n' >&2
+		fi
+		rm -rf "$_download_dir"
+		prime_agent_download_dir=
+		exit 1
+	fi
 
 	rm -rf "$_download_dir"
 	prime_agent_download_dir=
@@ -1983,16 +1997,10 @@ prime_agent_configure_binary_path() {
 	fi
 
 	_bin_dir=$(dirname "$prime_agent_binary_symlink")
-	case ":$PATH:" in
-		*":$_bin_dir:"*)
-			if [ "$prime_agent_screen_enabled" = 1 ]; then
-				prime_agent_screen "Prime Agent installed" "" "Run it with: $prime_agent_cmd" ""
-			else
-				printf '\nRun it with: %s\n' "$prime_agent_cmd"
-			fi
-			return
-			;;
-	esac
+	if [ -n "${_existing_path:-}" ] && [ "$_existing_path" != "$prime_agent_binary_symlink" ]; then
+		printf 'warning: %s at %s currently shadows the new binary at %s.\n' \
+			"$prime_agent_cmd" "$_existing_path" "$prime_agent_binary_symlink" >&2
+	fi
 
 	if [ "$prime_agent_screen_enabled" = 1 ]; then
 		prime_agent_screen "Prime Agent installed" "" "PATH update needed for $prime_agent_cmd." ""

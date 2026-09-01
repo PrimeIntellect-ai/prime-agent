@@ -25,7 +25,7 @@ cd /path/to/project
 prime-agent
 ```
 
-To run a source checkout instead, use Node.js 22.8.0 or newer:
+To run a source checkout instead, use Bun 1.3.14:
 
 ```bash
 git clone https://github.com/PrimeIntellect-ai/prime-agent

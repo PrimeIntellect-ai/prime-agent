@@ -36,7 +36,17 @@
  */
 
 import { createHash } from "node:crypto";
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	cpSync,
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readFileSync,
+	readdirSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
@@ -130,7 +140,7 @@ function parseArgs(args) {
 
 	parsed.version = normalizeVersion(parsed.version);
 	if (parsed.platforms.length === 0) parsed.platforms = [...PLATFORMS];
-	parsed.baseUrl = parsed.baseUrl.replace(/\/+$/, "");
+	parsed.baseUrl = normalizeBaseUrl(parsed.baseUrl);
 	return parsed;
 }
 
@@ -153,11 +163,41 @@ function normalizeVersion(version) {
 	return normalized;
 }
 
+function normalizeBaseUrl(value) {
+	if (/[\u0000-\u001f\u007f"'`$\\]/.test(value)) {
+		throw new Error("Release base URL contains unsafe shell characters");
+	}
+	let parsed;
+	try {
+		parsed = new URL(value);
+	} catch {
+		throw new Error(`Invalid release base URL: ${value}`);
+	}
+	if (!new Set(["https:", "http:"]).has(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password) {
+		throw new Error(`Invalid release base URL: ${value}`);
+	}
+	if (parsed.search || parsed.hash) throw new Error("Release base URL must not contain a query or fragment");
+	return parsed.toString().replace(/\/+$/, "");
+}
+
 function assertSafeOutputDir(outDir) {
 	const base = resolve(defaultOutDir);
-	const pathFromBase = relative(base, resolve(outDir));
-	if (pathFromBase === "" || (!pathFromBase.startsWith("..") && !isAbsolute(pathFromBase))) return;
-	throw new Error(`Refusing to write output outside ${base}: ${outDir}`);
+	const resolvedOutDir = resolve(outDir);
+	const pathFromBase = relative(base, resolvedOutDir);
+	if (pathFromBase !== "" && (pathFromBase.startsWith("..") || isAbsolute(pathFromBase))) {
+		throw new Error(`Refusing to write output outside ${base}: ${outDir}`);
+	}
+
+	let current = base;
+	for (const part of pathFromBase.split(/[\/\\]/).filter(Boolean)) {
+		if (existsSync(current) && lstatSync(current).isSymbolicLink()) {
+			throw new Error(`Refusing to write through symlinked output path: ${current}`);
+		}
+		current = join(current, part);
+	}
+	if (existsSync(current) && lstatSync(current).isSymbolicLink()) {
+		throw new Error(`Refusing to write through symlinked output path: ${current}`);
+	}
 }
 
 function sha256File(path) {
@@ -222,10 +262,6 @@ function main() {
 	const args = parseArgs(process.argv.slice(2));
 	const outDir = resolve(args.outDir);
 	assertSafeOutputDir(outDir);
-	rmSync(outDir, { force: true, recursive: true });
-
-	const versionDir = join(outDir, "artifacts");
-	mkdirSync(versionDir, { recursive: true });
 
 	const missing = validateSidecars(args.sidecarDir);
 	if (missing.length > 0) {
@@ -239,14 +275,22 @@ function main() {
 		throw new Error(`Release sidecars contain a forbidden dependency or cache directory: ${forbiddenDirectory}`);
 	}
 
-	const archives = [];
-
+	const binarySources = new Map();
 	for (const platform of args.platforms) {
 		const binarySource = join(args.binaryDir, platform, "pi");
 		if (!existsSync(binarySource)) {
 			throw new Error(`Binary not found for platform ${platform}: ${binarySource}`);
 		}
+		binarySources.set(platform, binarySource);
+	}
 
+	rmSync(outDir, { force: true, recursive: true });
+	const versionDir = join(outDir, "artifacts");
+	mkdirSync(versionDir, { recursive: true });
+	const archives = [];
+
+	for (const platform of args.platforms) {
+		const binarySource = binarySources.get(platform);
 		const stagingDir = join(outDir, "staging", platform);
 		mkdirSync(stagingDir, { recursive: true });
 
