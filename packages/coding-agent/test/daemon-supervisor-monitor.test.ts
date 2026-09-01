@@ -2138,6 +2138,26 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
+	it("parks an unresponsive worker failed after the bounded probe rounds", () => {
+		const worker = {
+			descriptor: { workerId: "worker-stuck", pid: process.pid, rootActiveSessionId: "active-1" },
+			deferredRecoveryRounds: 10,
+		};
+		const persistWorker = vi.fn();
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			persistWorker,
+			markWorkerRosterEntries: vi.fn(),
+			log: vi.fn(),
+		}) as { deferWorkerRecovery(target: typeof worker, error: Error): void };
+
+		supervisor.deferWorkerRecovery(worker, new Error("still silent"));
+
+		expect(worker.descriptor).toMatchObject({ lifecycle: "failed" });
+		expect((worker as { deferredRecovery?: unknown }).deferredRecovery).toBeUndefined();
+		expect(persistWorker).toHaveBeenCalled();
+	});
+
 	it.each([
 		{ name: "verified", hasProcessIdentity: true, error: "Timed out waiting for daemon worker hello" },
 		{ name: "identity-unavailable", hasProcessIdentity: false, error: "worker socket unavailable" },

@@ -180,6 +180,8 @@ const UPDATE_RESTART_WORKER_REQUEST_TIMEOUT_MS = 90_000;
 const UPDATE_RESTART_PREPARE_DEADLINE_MS = 100_000;
 const WORKER_RETRY_DELAYS_MS = [250, 1000, 5000] as const;
 const DEFERRED_RECOVERY_RECHECK_MS = 5000;
+// ~2.5 minutes of probing: each round is one 5s defer recheck plus a ~11s three-delay probe pass.
+const MAX_DEFERRED_RECOVERY_ROUNDS = 10;
 const STOP_FINALIZATION_RECHECK_MS = 250;
 const STOP_FINALIZATION_SIGKILL_GRACE_MS = 5000;
 const STOP_FINALIZATION_RETRY_MS = 5000;
@@ -332,6 +334,8 @@ interface ResidentWorker {
 	peerTransportCapable?: boolean;
 	/** In-flight replacement connection during authentication; an allowed frame source alongside client. */
 	pendingClient?: DaemonWorkerClient;
+	/** Consecutive defer->probe rounds against a live-but-silent worker; bounded by MAX_DEFERRED_RECOVERY_ROUNDS. */
+	deferredRecoveryRounds?: number;
 	/** Bumped per applied roster frame; a summaries pull that straddles a frame must not gap-fill. */
 	rosterEpoch?: number;
 	rosterApplyChain?: Promise<void>;
@@ -1978,6 +1982,7 @@ export class DaemonSupervisor {
 				worker.descriptor.archiveOnStop = undefined;
 				worker.descriptor.lifecycle = "recovering";
 				worker.descriptor.consecutiveFailures = 0;
+				worker.deferredRecoveryRounds = 0;
 				this.persistWorker(worker);
 				await this.recoverWorker(worker);
 				if (this.workers.get(worker.descriptor.workerId)?.descriptor.lifecycle !== "ready") {
@@ -2949,6 +2954,7 @@ export class DaemonSupervisor {
 			await this.assertRecoveryAllowed();
 			worker.descriptor.lifecycle = "ready";
 			worker.descriptor.consecutiveFailures = 0;
+			worker.deferredRecoveryRounds = 0;
 			worker.descriptor.lastError = undefined;
 			this.persistWorker(worker);
 			if (!worker.descriptor.ownerClientId) {
@@ -3140,6 +3146,7 @@ export class DaemonSupervisor {
 			await this.assertRecoveryAllowed();
 			worker.descriptor.lifecycle = "ready";
 			worker.descriptor.consecutiveFailures = 0;
+			worker.deferredRecoveryRounds = 0;
 			this.persistWorker(worker);
 			this.broadcastHeartbeatsChanged();
 		} catch (error) {
@@ -3279,6 +3286,19 @@ export class DaemonSupervisor {
 
 	private deferWorkerRecovery(worker: ResidentWorker, disconnectError: Error): void {
 		if (worker.deferredRecovery) {
+			return;
+		}
+		// A live-but-silent worker must not probe forever: park it failed (user-visible through the
+		// roster's failed status) and keep its process alive for a manual retry_worker.
+		worker.deferredRecoveryRounds = (worker.deferredRecoveryRounds ?? 0) + 1;
+		if (worker.deferredRecoveryRounds > MAX_DEFERRED_RECOVERY_ROUNDS) {
+			worker.descriptor.lifecycle = "failed";
+			worker.descriptor.lastError = `Live session worker did not answer recovery probes for ${MAX_DEFERRED_RECOVERY_ROUNDS} rounds: ${disconnectError.message}`;
+			this.persistWorker(worker);
+			this.markWorkerRosterEntries(worker, "failed");
+			this.log(
+				`Worker ${worker.descriptor.workerId} is unresponsive; parked failed after ${MAX_DEFERRED_RECOVERY_ROUNDS} probe rounds`,
+			);
 			return;
 		}
 		worker.deferredRecovery = this.resumeDeferredWorkerRecovery(worker, disconnectError).finally(() => {
@@ -3542,6 +3562,7 @@ export class DaemonSupervisor {
 							await this.assertRecoveryAllowed();
 							worker.descriptor.lifecycle = "ready";
 							worker.descriptor.consecutiveFailures = 0;
+							worker.deferredRecoveryRounds = 0;
 							this.persistWorker(worker);
 							this.broadcastHeartbeatsChanged();
 							return;
@@ -4637,6 +4658,7 @@ export class DaemonSupervisor {
 				ownedWorker.descriptor.archiveOnStop = undefined;
 				ownedWorker.descriptor.lifecycle = "recovering";
 				ownedWorker.descriptor.consecutiveFailures = 0;
+				ownedWorker.deferredRecoveryRounds = 0;
 				this.persistWorker(ownedWorker);
 				await this.recoverWorker(ownedWorker);
 			}
