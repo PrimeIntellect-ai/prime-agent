@@ -164,6 +164,22 @@ describe("compiled release archives", () => {
 		expect(result.status).not.toBe(0);
 		expect(result.stderr).toContain("forbidden dependency or cache directory");
 	});
+	test("normalizes v-prefixed versions for npm artifact URLs", () => {
+		const f = fixture();
+		const result = pack(f, ["--version", "v1.2.3"]);
+		expect(result.status, result.stderr).toBe(0);
+		const manifest = JSON.parse(readFileSync(join(f.output, "artifacts", "latest.json"), "utf8"));
+		expect(manifest.tarball).toBe("releases/v1.2.3/prime-agent-1.2.3.tgz");
+		expect(existsSync(join(f.output, "artifacts", "prime-agent-1.2.3.tgz"))).toBe(true);
+	});
+
+	test("rejects insecure release base URLs", () => {
+		const f = fixture();
+		const result = pack(f, ["--base-url", "http://downloads.example.test"]);
+		expect(result.status).not.toBe(0);
+		expect(result.stderr).toContain("must use HTTPS");
+	});
+
 	test("rejects shell-active release base URLs", () => {
 		const f = fixture();
 		const result = pack(f, ["--base-url", "https://downloads.example.test/$(touch-danger)"]);

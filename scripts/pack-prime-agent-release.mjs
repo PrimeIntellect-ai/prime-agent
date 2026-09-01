@@ -112,13 +112,20 @@ function parseArgs(args) {
 	if (!parsed.baseUrl) throw new Error("--base-url or PRIME_AGENT_DOWNLOAD_BASE_URL is required");
 	parsed.baseUrl = parsed.baseUrl.replace(/\/+$/, "");
 
-	// Resolve version from coding-agent package.json if not provided.
+	// Resolve and normalize the version once for archive names and embedded URLs.
 	if (!parsed.version) {
 		const cliPkg = JSON.parse(readFileSync(join(root, "packages", "coding-agent", "package.json"), "utf8"));
 		parsed.version = cliPkg.version;
 	}
+	parsed.version = normalizeVersion(parsed.version);
 
 	return parsed;
+}
+
+function normalizeVersion(version) {
+	const normalized = version.startsWith("v") ? version.slice(1) : version;
+	if (!/^[0-9A-Za-z.-]+$/.test(normalized)) throw new Error(`Invalid release version: ${version}`);
+	return normalized;
 }
 
 function printHelp() {

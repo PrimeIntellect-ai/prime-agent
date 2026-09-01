@@ -42,6 +42,7 @@ function runInstaller(
 	mkdirSync(join(home, ".prime"), { recursive: true });
 	writeFileSync(join(home, ".prime", "sentinel"), "user data");
 	const result = spawnSync("sh", [installer, ...args], {
+		cwd: root,
 		env: {
 			...process.env,
 			HOME: home,
@@ -152,5 +153,16 @@ describe("compiled binary installer", () => {
 		expect(result.exitCode, result.stderr).toBe(0);
 		expect(result.stderr).toContain("currently shadows the new binary");
 		expect(result.stdout).toContain('export PATH="');
+	});
+	test("canonicalizes relative version directories before linking", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+
+		const result = runInstaller(root, ["1.2.3"], { PRIME_AGENT_VERSIONS_DIR: "relative/versions" });
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(readlinkSync(join(root, "bin", "prime-agent"))).toBe(
+			join(root, "relative", "versions", "v1.2.3", "prime-agent"),
+		);
 	});
 });

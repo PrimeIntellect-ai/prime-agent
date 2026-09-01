@@ -1665,6 +1665,8 @@ prime_agent_binary_smoke_binary() {
 prime_agent_binary_atomic_symlink() {
 	_target="$1"
 	_link="$2"
+	_target_dir=$(cd "$(dirname "$_target")" 2>/dev/null && pwd -P) || return 1
+	_target="$_target_dir/$(basename "$_target")"
 	# Create parent dir if needed
 	_link_dir=$(dirname "$_link")
 	if [ ! -d "$_link_dir" ]; then

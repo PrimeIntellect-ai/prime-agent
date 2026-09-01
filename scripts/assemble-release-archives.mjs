@@ -173,8 +173,8 @@ function normalizeBaseUrl(value) {
 	} catch {
 		throw new Error(`Invalid release base URL: ${value}`);
 	}
-	if (!new Set(["https:", "http:"]).has(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password) {
-		throw new Error(`Invalid release base URL: ${value}`);
+	if (parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password) {
+		throw new Error(`Release base URL must use HTTPS without credentials: ${value}`);
 	}
 	if (parsed.search || parsed.hash) throw new Error("Release base URL must not contain a query or fragment");
 	return parsed.toString().replace(/\/+$/, "");
