@@ -30,7 +30,7 @@ To run a source checkout instead, use Node.js 22.8.0 or newer:
 ```bash
 git clone https://github.com/PrimeIntellect-ai/prime-agent
 cd prime-agent
-npm ci
+bun install --frozen-lockfile
 ./prime-agent.sh
 ```
 
@@ -94,7 +94,7 @@ Prime Agent loads context files at startup. Add an `AGENTS.md` file to tell it h
 ```markdown
 # Project Instructions
 
-- Run `npm run check` after code changes.
+- Run `bun run check` after code changes.
 - Do not run production migrations locally.
 - Keep responses concise.
 ```
@@ -124,7 +124,7 @@ Images can be pasted with Ctrl+V (Alt+V on Windows) or dragged into supported te
 In interactive mode:
 
 ```text
-!npm run lint
+!bun run lint
 ```
 
 The command output is sent to the model. Use `!!command` to run a command without adding its output to model context. During agent work, the model normally runs project commands from the Python REPL with `bash()`.

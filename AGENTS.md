@@ -22,10 +22,10 @@
 
 ## Commands
 
-- After code changes (not documentation changes): `npm run check` (get full output, no tail). Fix all errors, warnings, and infos before committing.
-- Note: `npm run check` does not run tests.
-- NEVER run: `npm run dev`, `npm run build`, `npm test`
-- Only run specific tests if user instructs: `npx tsx ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`
+- After code changes (not documentation changes): `bun run check` (get full output, no tail). Fix all errors, warnings, and infos before committing.
+- Note: `bun run check` does not run tests.
+- NEVER run: `bun run dev`, `bun run build`, `bun test`
+- Only run specific tests if user instructs: `bun test test/specific.test.ts`
 - Run tests from the package root, not the repo root.
 - If you create or modify a test file, you MUST run that test file and iterate until it passes.
 - When writing tests, run them, identify issues in either the test or implementation, and iterate until fixed.
@@ -43,9 +43,9 @@
 
 ## Dependencies
 
-- A 7-day minimum release age applies to all dependency updates: `.npmrc` sets `min-release-age=7` and `.github/dependabot.yml` uses a matching `cooldown`. Never bypass it for routine updates.
-- Enforcement requires npm >= 11.10; older npm silently ignores the setting, so use a current npm when updating dependencies.
-- For an urgent security patch younger than 7 days, override explicitly: `npm install --min-release-age=0 <pkg>`.
+- A 7-day minimum release age applies to all dependency updates: `bunfig.toml` sets `minimumReleaseAge = 604800` and `.github/dependabot.yml` uses a matching `cooldown`. Never bypass it for routine updates.
+- Bun 1.3.14 enforces this setting for dependency updates.
+- For an urgent security patch younger than 7 days, override explicitly: `bun add --minimum-release-age=0 <pkg>`.
 
 ## GitHub Workflow
 
@@ -195,8 +195,8 @@ Create provider file exporting:
 
 2. **Run release script**:
    ```bash
-   npm run release:patch    # Fixes and additions
-   npm run release:minor    # API breaking changes
+   bun run release:patch    # Fixes and additions
+   bun run release:minor    # API breaking changes
    ```
 
 The script handles: version bump, folding `.changes/` fragments into the release section, commit, tag, and publish.

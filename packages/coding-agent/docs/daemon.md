@@ -156,11 +156,11 @@ If preparation or manifest validation fails, prepared workers are released and a
 From `packages/coding-agent`:
 
 ```sh
-npx tsx test/daemon-multiclient-bench.ts
-npx tsx test/daemon-multiclient-bench.ts --generated-session-mib 100
-npx tsx test/daemon-multiclient-bench.ts --generated-session-mib 500
-npx tsx test/daemon-multiclient-bench.ts --session-file /path/to/session.jsonl
-PRIME_AGENT_STRESS_WORKERS=50 npx tsx ../../node_modules/vitest/dist/cli.js --run test/daemon-supervisor-process.test.ts -t "hosts resident roots"
+bun test/daemon-multiclient-bench.ts
+bun test/daemon-multiclient-bench.ts --generated-session-mib 100
+bun test/daemon-multiclient-bench.ts --generated-session-mib 500
+bun test/daemon-multiclient-bench.ts --session-file /path/to/session.jsonl
+PRIME_AGENT_STRESS_WORKERS=50 PRIME_AGENT_TEST_TAGS=process-stress bun test --isolate test/daemon-supervisor-process.test.ts -t "hosts resident roots"
 ```
 
 The benchmark compares fanout and attach paths, including serialization count, throughput, elapsed time, and sampled RSS. The stress case starts many resident roots and verifies that their schedules advance independently while sessions are busy.
