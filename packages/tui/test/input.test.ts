@@ -557,4 +557,45 @@ describe("Input component", () => {
 			assert.strictEqual(input.getValue(), "");
 		});
 	});
+
+	describe("Raw multi-line paste without bracketed markers (conhost)", () => {
+		it("flattens a raw multi-line chunk into one line without submitting", () => {
+			const input = new Input();
+			let submitted: string | null = null;
+			input.onSubmit = (value) => {
+				submitted = value;
+			};
+
+			input.handleInput("line1\nline2\nline3");
+
+			assert.strictEqual(submitted, null);
+			assert.strictEqual(input.getValue(), "line1 line2 line3");
+		});
+
+		it("flattens CRLF line endings in a raw multi-line chunk", () => {
+			const input = new Input();
+			let submitted: string | null = null;
+			input.onSubmit = (value) => {
+				submitted = value;
+			};
+
+			input.handleInput("line1\r\nline2");
+
+			assert.strictEqual(submitted, null);
+			assert.strictEqual(input.getValue(), "line1 line2");
+		});
+
+		it("still submits on a lone Enter", () => {
+			const input = new Input();
+			let submitted: string | null = null;
+			input.onSubmit = (value) => {
+				submitted = value;
+			};
+
+			input.handleInput("hello");
+			input.handleInput("\r");
+
+			assert.strictEqual(submitted, "hello");
+		});
+	});
 });

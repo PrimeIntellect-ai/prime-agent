@@ -1,0 +1,1 @@
+- Fixed multi-line pastes being submitted as one message per line in terminals without bracketed-paste support (e.g. Windows cmd/console).

@@ -71,6 +71,15 @@ export class Input implements Component, Focusable {
 			return;
 		}
 
+		// Terminals without bracketed-paste support (e.g. Windows conhost) can
+		// deliver a paste as one multi-byte chunk containing newlines. Treat it
+		// as paste content, not as submit keypresses (a lone \r / \n below still
+		// submits).
+		if (data.length > 1 && /[\r\n]/.test(data)) {
+			this.handlePaste(data);
+			return;
+		}
+
 		const kb = getKeybindings();
 
 		if (kb.matches(data, "tui.select.cancel")) {
@@ -393,7 +402,9 @@ export class Input implements Component, Focusable {
 		this.lastAction = null;
 		this.pushUndo();
 
-		const cleanText = pastedText.replace(/\r\n/g, "").replace(/\r/g, "").replace(/\n/g, "").replace(/\t/g, "    ");
+		// Single-line input: flatten pasted line breaks to spaces so multi-line
+		// content stays one line (matching the Editor's bracketed-paste path)
+		const cleanText = pastedText.replace(/\r\n/g, " ").replace(/\r/g, " ").replace(/\n/g, " ").replace(/\t/g, "    ");
 
 		this.value = this.value.slice(0, this.cursor) + cleanText + this.value.slice(this.cursor);
 		this.cursor += cleanText.length;

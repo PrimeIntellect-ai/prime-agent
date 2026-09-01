@@ -3656,4 +3656,46 @@ describe("Editor component", () => {
 			assert.strictEqual(submitted, pastedText);
 		});
 	});
+
+	describe("Raw multi-line input without bracketed markers (conhost)", () => {
+		it("treats a raw multi-line chunk as paste content, not as multiple submits", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted: string | null = null;
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+
+			editor.handleInput("line1\nline2\nline3");
+
+			assert.strictEqual(submitted, null);
+			assert.strictEqual(editor.getText(), "line1\nline2\nline3");
+		});
+
+		it("creates a paste marker for a large raw multi-line chunk", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted: string | null = null;
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+
+			const bigContent = "line\n".repeat(20).trimEnd();
+			editor.handleInput(bigContent);
+
+			assert.strictEqual(submitted, null);
+			assert.match(editor.getText(), /\[paste #\d+ \+\d+ lines\]/);
+		});
+
+		it("still submits on a lone Enter after raw paste content", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted: string | null = null;
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+
+			editor.handleInput("line1\nline2");
+			editor.handleInput("\r");
+
+			assert.strictEqual(submitted, "line1\nline2");
+		});
+	});
 });

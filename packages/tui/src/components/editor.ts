@@ -701,6 +701,15 @@ export class Editor implements Component, Focusable {
 			return;
 		}
 
+		// Terminals that deliver paste chunks without bracketed-paste markers
+		// (e.g. Windows conhost) can still hand us a raw multi-line chunk (when
+		// the same OS read contains several pasted lines). Treat any chunk that
+		// mixes text with CR/LF as paste content, never as submit keypresses.
+		if (data.length > 1 && /[\r\n]/.test(data)) {
+			this.handlePaste(data);
+			return;
+		}
+
 		if (kb.matches(data, "tui.input.copy")) {
 			return;
 		}

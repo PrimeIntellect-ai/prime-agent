@@ -261,6 +261,16 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			return;
 		}
 
+		// Terminals without bracketed-paste support (e.g. Windows conhost)
+		// deliver a multi-line paste as one raw chunk containing CR/LF bytes,
+		// with no \x1b[200~ / \x1b[201~ wrappers. Left raw, each pasted line
+		// looks like an Enter keypress and submits as its own message. Wrap it
+		// in bracketed-paste markers so downstream components treat it as a
+		// single paste.
+		if (str.length > 1 && !str.startsWith(ESC) && !str.includes(BRACKETED_PASTE_START) && /[\r\n]/.test(str)) {
+			str = `${BRACKETED_PASTE_START}${str}${BRACKETED_PASTE_END}`;
+		}
+
 		this.buffer += str;
 
 		if (this.pasteMode) {

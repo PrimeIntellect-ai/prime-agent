@@ -409,4 +409,64 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(emittedSequences, []);
 		});
 	});
+
+	describe("Raw multi-line paste without bracketed markers (conhost)", () => {
+		let emittedPaste: string[] = [];
+
+		beforeEach(() => {
+			buffer = new StdinBuffer({ timeout: 10 });
+
+			emittedSequences = [];
+			buffer.on("data", (sequence) => {
+				emittedSequences.push(sequence);
+			});
+
+			emittedPaste = [];
+			buffer.on("paste", (data) => {
+				emittedPaste.push(data);
+			});
+		});
+
+		it("should wrap a raw multi-line paste into a single paste event", () => {
+			processInput("line1\nline2\nline3");
+
+			assert.deepStrictEqual(emittedPaste, ["line1\nline2\nline3"]);
+			assert.deepStrictEqual(emittedSequences, []);
+		});
+
+		it("should wrap a raw paste using CRLF line endings", () => {
+			processInput("line1\r\nline2\r\n");
+
+			assert.deepStrictEqual(emittedPaste, ["line1\r\nline2\r\n"]);
+			assert.deepStrictEqual(emittedSequences, []);
+		});
+
+		it("should not wrap a lone Enter keypress", () => {
+			processInput("\r");
+
+			assert.deepStrictEqual(emittedPaste, []);
+			assert.deepStrictEqual(emittedSequences, ["\r"]);
+		});
+
+		it("should not wrap a lone newline keypress", () => {
+			processInput("\n");
+
+			assert.deepStrictEqual(emittedPaste, []);
+			assert.deepStrictEqual(emittedSequences, ["\n"]);
+		});
+
+		it("should not wrap single-line text without newlines", () => {
+			processInput("abc");
+
+			assert.deepStrictEqual(emittedPaste, []);
+			assert.deepStrictEqual(emittedSequences, ["a", "b", "c"]);
+		});
+
+		it("should not double-wrap content that already has bracketed markers", () => {
+			processInput("\x1b[200~line1\nline2\x1b[201~");
+
+			assert.deepStrictEqual(emittedPaste, ["line1\nline2"]);
+			assert.deepStrictEqual(emittedSequences, []);
+		});
+	});
 });
