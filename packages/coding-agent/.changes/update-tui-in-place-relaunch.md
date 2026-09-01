@@ -1,1 +1,1 @@
-- Fixed `/update` keeping the old TUI process alive until the relaunched TUI quit by replacing the process in place on Node 26.1 and newer.
+- Fixed `/update` keeping the old TUI process alive until the relaunched TUI quit by replacing the process in place on POSIX platforms running Node 26.1 and newer; Windows and IBM i keep the previous child relaunch.
