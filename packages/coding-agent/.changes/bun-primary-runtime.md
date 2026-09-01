@@ -1,0 +1,1 @@
+- Added Bun-primary development, testing, native binary releases, and verified binary-first installation.
