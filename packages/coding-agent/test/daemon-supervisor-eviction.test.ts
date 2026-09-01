@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import { success } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor, idleEvictionSweepIntervalMs } from "../src/modes/daemon/daemon-supervisor.js";
@@ -41,6 +42,7 @@ interface SupervisorInternals {
 	runIdleEvictionSweep(now?: number): Promise<void>;
 	shutdown(exitCode: number, stopWorkers: boolean): Promise<never>;
 	handleCommand(client: object, command: object): Promise<unknown>;
+	writeRosterEntry(entry: object, worker?: object): unknown;
 }
 
 const tempDirs: string[] = [];
@@ -515,6 +517,46 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 			"owned",
 		]);
 		expect(supervisor.log).toHaveBeenCalledWith(expect.stringContaining("Evicted empty session worker empty"));
+	});
+
+	it("evicts an empty draft when the worker reports its last direct viewer gone", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeSupervisor();
+		const liveSummaries = [makeSummary("draft-root", now, { messageCount: 0, directAttachedClients: 1 })];
+		const worker = makeWorker("draft", liveSummaries);
+		supervisor.workers.set("draft", worker);
+		seedSupervisorRoster(supervisor, worker);
+
+		// Clean detach and socket drop both surface as the same worker roster truth.
+		const detached = makeSummary("draft-root", now, { messageCount: 0 });
+		liveSummaries[0] = detached;
+		worker.summaries.set("draft-root", detached);
+		supervisor.writeRosterEntry(workerRosterEntryFromSummary(detached), worker);
+
+		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(worker, true));
+		expect(supervisor.log).toHaveBeenCalledWith(expect.stringContaining("Evicted empty session worker draft"));
+	});
+
+	it("evicts a mixed-client empty draft only when the last of both client kinds is gone", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeSupervisor();
+		const liveSummaries = [makeSummary("mixed-root", now, { messageCount: 0, directAttachedClients: 1 })];
+		const worker = makeWorker("mixed", liveSummaries);
+		supervisor.workers.set("mixed", worker);
+		seedSupervisorRoster(supervisor, worker);
+		const routed = makeDetachClient("routed", ["mixed-root"]);
+		supervisor.clients.add(routed);
+
+		await supervisor.handleCommand(routed, { id: "detach-1", type: "detach", activeSessionId: "mixed-root" });
+		await settle();
+		expect(supervisor.stopWorker).not.toHaveBeenCalled();
+
+		const detached = makeSummary("mixed-root", now, { messageCount: 0 });
+		liveSummaries[0] = detached;
+		worker.summaries.set("mixed-root", detached);
+		supervisor.writeRosterEntry(workerRosterEntryFromSummary(detached), worker);
+
+		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(worker, true));
 	});
 
 	it("does not stop a worker that was replaced while its summary refresh was in flight", async () => {

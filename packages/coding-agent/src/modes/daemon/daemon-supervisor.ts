@@ -1048,10 +1048,9 @@ export class DaemonSupervisor {
 		const summaries = this.workerRosterEntries(worker)
 			.filter((entry) => !entry.queuedChild)
 			.map(sessionSummaryFromRosterEntry);
-		const hasAttachedClient = summaries.some((summary) => {
-			const summaryActiveSessionId = summary.activeSessionId ?? summary.id;
-			return [...this.clients].some((client) => client.attachedActiveSessionIds.has(summaryActiveSessionId));
-		});
+		const hasAttachedClient = summaries.some(
+			(summary) => this.attachedClientCount(summary, summary.activeSessionId ?? summary.id) > 0,
+		);
 		return summaries.length > 0 && !hasAttachedClient && summaries.every(isEvictableEmptySessionSummary);
 	}
 
@@ -3928,7 +3927,14 @@ export class DaemonSupervisor {
 		worker?: ResidentWorker,
 		statusLabel?: AgentRosterEntry["statusLabel"],
 	): AgentRosterEntry {
-		return this.roster().write(entry, worker?.descriptor.workerId, statusLabel);
+		const previousDirect = this.roster().get(entry.agentId)?.summary.directAttachedClients ?? 0;
+		const stored = this.roster().write(entry, worker?.descriptor.workerId, statusLabel);
+		// Direct peers attach and detach on the worker socket, so their last detach arrives
+		// here as roster truth instead of through a supervisor-socket close.
+		if (worker !== undefined && previousDirect > 0 && (entry.summary.directAttachedClients ?? 0) === 0) {
+			void this.evictEmptySessionOnLastDetach(entry.summary.activeSessionId ?? entry.summary.id);
+		}
+		return stored;
 	}
 
 	private workerOwnedRosterSummaryForPath(canonicalPath: string): SessionSummary | undefined {
