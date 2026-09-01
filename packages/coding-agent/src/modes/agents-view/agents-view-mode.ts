@@ -721,6 +721,7 @@ export class AgentsViewMode implements Component, Focusable {
 		this.lastListedSummaries = persistentState.lastSuccessfulLiveSummaries ?? [];
 		this.savedSessions = persistentState.savedSessions ?? [];
 		this.lastSuccessfulSavedSessions = persistentState.lastSuccessfulSavedSessions ?? this.savedSessions;
+		this.savedCatalogReady = persistentState.savedCatalogLoaded === true;
 		this.heartbeats = persistentState.heartbeats ?? [];
 		this.savedCatalogGeneration = persistentState.savedCatalogGeneration ?? 0;
 		this.expandedSubagentParents = persistentState.expandedSubagentParents ?? new Set();
@@ -883,7 +884,6 @@ export class AgentsViewMode implements Component, Focusable {
 		const runPromise = new Promise<AgentsViewRunResult>((resolve) => {
 			this.resolveRun = resolve;
 		});
-		this.savedCatalogReady = true;
 		this.unsubscribeRosterUpdate = this.rosterStore.onUpdate(() => this.onRosterUpdate());
 		this.applySessionList(this.rosterStore.summaries(), true);
 		this.armSavedSearchFetch();
@@ -2427,9 +2427,9 @@ export class AgentsViewMode implements Component, Focusable {
 				if (!this.rosterStore || !(await this.rosterStore.attach(client))) {
 					throw new Error("Daemon lost the agent_roster capability during reconnect");
 				}
-				const sessions = this.rosterStore.summaries();
 				const heartbeatsRefreshed = await this.refreshHeartbeats({ duringReconnect: true });
 				if (!heartbeatsRefreshed) throw new Error("Heartbeat catalog did not refresh during reconnect");
+				const sessions = this.rosterStore.summaries();
 				this.daemonShutdownReceived = false;
 				this.reconnectTimedOut = false;
 				this.setStatusMessage("Daemon reconnected", { render: false });
@@ -2566,7 +2566,13 @@ export class AgentsViewMode implements Component, Focusable {
 			isSubagentSummary(row.summary) && !pendingDelete && !pendingKill && row.summary.model
 				? `${row.summary.model.provider}/${row.summary.model.id}${row.summary.thinkingLevel && row.summary.thinkingLevel !== "off" ? `:${row.summary.thinkingLevel}` : ""}`
 				: undefined;
-		const suffixes = [modelLabel, summaryText].filter(
+		const statusLabel =
+			!pendingDelete &&
+			!pendingKill &&
+			(row.summary.statusLabel !== undefined || row.summary.lastHeardFromAt !== undefined)
+				? row.statusLabel
+				: undefined;
+		const suffixes = [statusLabel, modelLabel, summaryText].filter(
 			(suffix): suffix is string => suffix !== undefined && suffix.length > 0,
 		);
 		const titleContent = suffixes.length > 0 ? `${title} ${theme.fg("dim", `· ${suffixes.join(" · ")}`)}` : title;

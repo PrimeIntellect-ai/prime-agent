@@ -12,7 +12,11 @@ import {
 	createInitialAgentsViewPersistentState,
 	runAgentsViewMode,
 } from "../src/modes/agents-view/agents-view-mode.js";
-import { type AgentsViewRow, resolveAgentsViewLeftResult } from "../src/modes/agents-view/agents-view-state.js";
+import {
+	type AgentsViewRow,
+	buildAgentsViewRows,
+	resolveAgentsViewLeftResult,
+} from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
 import { stopThemeWatcher } from "../src/modes/interactive/theme/theme.js";
@@ -648,6 +652,26 @@ describe("AgentsViewMode", () => {
 		expect(programShownParents.size).toBe(0);
 		expect(self.rebuildRows).toHaveBeenCalledTimes(2);
 	});
+
+	it("renders roster recovery and stale-worker status labels", () => {
+		const rows = buildAgentsViewRows([
+			summary({ id: "recovering", sessionId: "recovering", statusLabel: "recovering" }),
+			summary({
+				id: "stale",
+				sessionId: "stale",
+				lastHeardFromAt: new Date(Date.now() - 60_000).toISOString(),
+			}),
+		]);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+
+		try {
+			expect(invoke("renderRow", view, rows[0], 160)).toContain("recovering");
+			expect(invoke("renderRow", view, rows[1], 160)).toContain("last heard");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
 });
 
 function createUiServices(): InteractiveModeUiServices {
@@ -665,6 +689,18 @@ afterEach(() => {
 });
 
 describe("AgentsViewMode persistent catalog state", () => {
+	it("treats only a previously loaded saved catalog as settled on mount", () => {
+		const fresh = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		const loaded = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+
+		try {
+			expect(Reflect.get(fresh, "savedCatalogReady")).toBe(false);
+			expect(Reflect.get(loaded, "savedCatalogReady")).toBe(true);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("applies an initial handoff scope from the first pushed roster refresh", async () => {
 		const root = summary();
 		const scope = { sessionId: root.sessionId, activeSessionId: root.activeSessionId };
@@ -778,6 +814,42 @@ describe("AgentsViewMode persistent catalog state", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("applies the roster snapshot produced during reconnect heartbeat refresh", async () => {
+		const beforeRefresh = summary({ id: "before", sessionId: "before" });
+		const afterRefresh = summary({ id: "after", sessionId: "after" });
+		let current = [beforeRefresh];
+		let finishHeartbeatRefresh: (() => void) | undefined;
+		const heartbeatRefresh = new Promise<void>((resolve) => {
+			finishHeartbeatRefresh = resolve;
+		});
+		const client = { reconnect: vi.fn(async () => undefined) };
+		const self = {
+			options: { recoverDaemon: vi.fn(async () => undefined) },
+			client,
+			rosterStore: {
+				attach: vi.fn(async () => true),
+				summaries: vi.fn(() => current),
+			},
+			refreshHeartbeats: vi.fn(async () => {
+				await heartbeatRefresh;
+				return true;
+			}),
+			daemonShutdownReceived: false,
+			reconnectTimedOut: true,
+			setStatusMessage: vi.fn(),
+			applySessionList: vi.fn(),
+			armSavedSearchFetch: vi.fn(),
+		};
+
+		const reconnect = invoke("reconnectClient", self, client, new Error("disconnected")) as Promise<void>;
+		await vi.waitFor(() => expect(self.refreshHeartbeats).toHaveBeenCalledOnce());
+		current = [afterRefresh];
+		finishHeartbeatRefresh?.();
+		await reconnect;
+
+		expect(self.applySessionList).toHaveBeenCalledWith([afterRefresh], true);
 	});
 
 	it("keeps a newly pushed scope and the existing live cache when its first poll fails", async () => {
