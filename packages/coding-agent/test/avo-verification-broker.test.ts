@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -201,6 +201,37 @@ describe.sequential("AVO host verification broker", () => {
 			await expect(
 				operations!.exec("node --test other.test.cjs", workspace, { onData: () => undefined, timeout: 30 }),
 			).rejects.toThrow("exact host-allowlisted command");
+		} finally {
+			await broker.close();
+		}
+	});
+
+	test("rejects a host-fixture ancestor replaced with a symlink after registration", async () => {
+		if (process.platform !== "linux" || !existsSync("/usr/bin/bwrap")) return;
+		const workspace = mkdtempSync(join(tmpdir(), "avo-verification-broker-race-workspace-"));
+		const hostFixtureRoot = mkdtempSync(join(tmpdir(), "avo-verification-broker-race-fixture-"));
+		const outside = mkdtempSync(join(tmpdir(), "avo-verification-broker-race-outside-"));
+		temporaryRoots.push(workspace, hostFixtureRoot, outside);
+		const control = join(workspace, "verifier.test.cjs");
+		const hostFixture = join(hostFixtureRoot, "canonical.img");
+		writeFileSync(control, "process.exitCode = 0\n");
+		writeFileSync(hostFixture, "canonical-image");
+		const command = "node verifier.test.cjs";
+		const broker = await startAvoVerificationBroker({
+			workspace,
+			allowedCommand: command,
+			controlPaths: ["verifier.test.cjs"],
+			hostFixtures: [{ sourcePath: hostFixture, destinationPath: "fixtures/fs.img" }],
+		});
+		try {
+			symlinkSync(outside, join(workspace, "fixtures"));
+			vi.stubEnv(AVO_VERIFICATION_BROKER_SOCKET_ENV, broker.socketPath);
+			vi.stubEnv(AVO_VERIFICATION_BROKER_TOKEN_ENV, broker.token);
+			const operations = createAvoVerificationBrokerBashOperations();
+			await expect(operations!.exec(command, workspace, { onData: () => undefined, timeout: 30 })).rejects.toThrow(
+				/symbolic link/,
+			);
+			expect(existsSync(join(outside, "fs.img"))).toBe(false);
 		} finally {
 			await broker.close();
 		}

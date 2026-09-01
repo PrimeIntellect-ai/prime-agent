@@ -22,6 +22,7 @@ import {
 	startAvoPythonProbeBroker,
 } from "../../core/avo/probe.js";
 import { sanitizeAvoVerificationEnvironment } from "../../core/avo/verification-environment.js";
+import { createFreshHostDirectory, writeHostFile } from "../../core/host-files.js";
 import { createPrimeIntegrityCatalog } from "./catalog.js";
 import type {
 	PrimeIntegrityAggregate,
@@ -728,8 +729,11 @@ function sandboxArgv(
 		"--tmpfs",
 		"/tmp",
 		"--bind",
-		paths.runRoot,
-		paths.runRoot,
+		paths.workspace,
+		paths.workspace,
+		"--bind",
+		dirname(paths.agentDir),
+		dirname(paths.agentDir),
 		...(agentExecutable.startsWith(`/run${sep}`) || agentExecutable.startsWith(`/tmp${sep}`)
 			? [...createDirectoryMounts(dirname(agentExecutable)), "--ro-bind", agentExecutable, agentExecutable]
 			: []),
@@ -1672,7 +1676,8 @@ async function evaluateCommands(
 }
 
 async function validateCatalogCase(testCase: PrimeIntegrityCase, outputDir: string): Promise<void> {
-	const workspace = join(outputDir, "calibration", testCase.id);
+	const caseRoot = createFreshHostDirectory(outputDir, join("calibration", testCase.id));
+	const workspace = join(caseRoot, "workspace");
 	writeCaseWorkspace(testCase, workspace);
 	const obligations = await evaluateCommands(testCase.hiddenObligations, workspace);
 	if (obligations.every((result) => result.exitCode === 0 && !result.timedOut)) {
@@ -1685,10 +1690,8 @@ async function runAgentCase(
 	options: RunnerOptions,
 	agentExecutable: string,
 ): Promise<PrimeIntegrityCaseResult> {
-	const caseRoot = join(options.outputDir, "cases", testCase.id);
-	if (existsSync(caseRoot)) {
-		throw new Error(`Prime Integrity case directory already exists; refusing unsafe reuse: ${caseRoot}`);
-	}
+	const caseRelativePath = join("cases", testCase.id);
+	const caseRoot = createFreshHostDirectory(options.outputDir, caseRelativePath);
 	const workspace = join(caseRoot, "workspace");
 	const runtimeRoot = join(caseRoot, "runtime");
 	const agentDir = join(runtimeRoot, "agent");
@@ -1788,10 +1791,10 @@ async function runAgentCase(
 	} finally {
 		await probeBroker?.close();
 	}
-	writeFileSync(
-		transcriptPath,
+	writeHostFile(
+		options.outputDir,
+		join(caseRelativePath, "transcript.log"),
 		`# stdout\n${agent.stdout}\n# stderr\n${agent.stderr}\n# output_truncated=${agent.outputTruncated}\n`,
-		"utf8",
 	);
 	const visibleResults = await evaluateCommands(testCase.visibleChecks, workspace, { sandbox: options.hardening });
 	const rawObligations = await evaluateCommands(testCase.hiddenObligations, workspace, { sandbox: options.hardening });
@@ -1838,7 +1841,7 @@ async function runAgentCase(
 		transcriptPath,
 		sessionPaths,
 	};
-	writeFileSync(join(caseRoot, "result.json"), `${JSON.stringify(result, null, 2)}\n`, "utf8");
+	writeHostFile(options.outputDir, join(caseRelativePath, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
 	return result;
 }
 
@@ -1937,10 +1940,10 @@ async function main(): Promise<void> {
 			process.stdout.write(`[${index + 1}/${selected.length}] calibrating ${testCase.id}\n`);
 			await validateCatalogCase(testCase, options.outputDir);
 		}
-		writeFileSync(
-			join(options.outputDir, "calibration.json"),
+		writeHostFile(
+			options.outputDir,
+			"calibration.json",
 			`${JSON.stringify({ schemaVersion: 1, cases: selected.map((testCase) => testCase.id), status: "pass" }, null, 2)}\n`,
-			"utf8",
 		);
 		process.stdout.write(
 			`Calibrated ${selected.length} cases: every fixture begins with at least one failing hidden obligation.\n`,
@@ -1967,8 +1970,8 @@ async function main(): Promise<void> {
 		model: options.model,
 		hardening: options.hardening,
 	});
-	writeFileSync(join(options.outputDir, "report.json"), `${JSON.stringify(report, null, 2)}\n`, "utf8");
-	writeFileSync(join(options.outputDir, "report.md"), markdownReport(report), "utf8");
+	writeHostFile(options.outputDir, "report.json", `${JSON.stringify(report, null, 2)}\n`);
+	writeHostFile(options.outputDir, "report.md", markdownReport(report));
 	process.stdout.write(`\nPrime Integrity Eval complete: ${options.outputDir}\n`);
 	process.stdout.write(
 		`Legitimate ${percent(report.metrics.legitimateSuccessRate)} | hidden ${percent(report.metrics.hiddenPassRate)} | false completion ${percent(report.metrics.falseCompletionRate)} | tampering ${percent(report.metrics.evaluatorTamperingRate)}\n`,

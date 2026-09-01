@@ -19,6 +19,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { sanitizeAvoVerificationEnvironment } from "../../core/avo/verification-environment.js";
 import { PRIME_AGENT_EPHEMERAL_AUTH_FILE_ENV } from "../../core/ephemeral-auth-storage.js";
+import { createFreshHostDirectory, hostPathKind, readHostFile, writeHostFile } from "../../core/host-files.js";
 import { buildEvaluationKernelSandboxEnvironment } from "../evaluation-sandbox.js";
 import { summarizePrimeIntegrityTrace } from "../prime-integrity/runner.js";
 
@@ -805,8 +806,14 @@ export function buildKernelBenchAgentSandboxArgs(
 		"--tmpfs",
 		"/run",
 		"--bind",
-		runRoot,
-		runRoot,
+		workspace,
+		workspace,
+		"--bind",
+		join(runRoot, "runtime"),
+		join(runRoot, "runtime"),
+		...(existsSync(join(runRoot, "build-cache"))
+			? ["--bind", join(runRoot, "build-cache"), join(runRoot, "build-cache")]
+			: []),
 		"--tmpfs",
 		REPOSITORY_GIT_DIR,
 		...KERNELBENCH_HOME_CREDENTIAL_DIRECTORIES.map((path) => join(homedir(), path))
@@ -830,7 +837,8 @@ async function runProblem(
 	options: Options,
 	agentExecutable: string,
 ): Promise<KernelResult> {
-	const caseRoot = join(options.outputDir, `problem-${String(problem.id).padStart(3, "0")}`);
+	const caseName = `problem-${String(problem.id).padStart(3, "0")}`;
+	const caseRoot = createFreshHostDirectory(options.outputDir, caseName);
 	const workspace = join(caseRoot, "workspace");
 	const runtimeRoot = join(caseRoot, "runtime");
 	const sessionDir = join(runtimeRoot, "sessions");
@@ -942,7 +950,11 @@ async function runProblem(
 		{ cwd: workspace, env: environment, timeoutMs: options.timeoutMs + 30_000 },
 	);
 	const agent = await withKernelBenchProviderAuthFile(providerAuthPath, () => agentExecution);
-	writeFileSync(transcriptPath, `# stdout\n${agent.stdout}\n# stderr\n${agent.stderr}\n`);
+	writeHostFile(
+		options.outputDir,
+		join(caseName, "transcript.log"),
+		`# stdout\n${agent.stdout}\n# stderr\n${agent.stderr}\n`,
+	);
 	const protectedChanges = protectedPaths.filter((path) => protectedBefore.get(path) !== immutableFileDigest(path));
 	const gradeCommand = kernelBenchGradeCommand(options.hardening);
 	const gradeEnvironment = options.hardening
@@ -980,7 +992,7 @@ async function runProblem(
 					stdout: "",
 					stderr: `authoritative grading refused modified control files: ${protectedChanges.join(", ")}\n`,
 				};
-	writeFileSync(join(caseRoot, "host-grade.log"), `${grade.stdout}\n${grade.stderr}`);
+	writeHostFile(options.outputDir, join(caseName, "host-grade.log"), `${grade.stdout}\n${grade.stderr}`);
 	let infrastructureError: string | undefined;
 	let parsed: ReturnType<typeof parseKernelResult>;
 	if (protectedChanges.length > 0) {
@@ -1039,7 +1051,7 @@ async function runProblem(
 		transcriptPath,
 		...(infrastructureError ? { infrastructureError } : {}),
 	};
-	writeFileSync(join(caseRoot, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
+	writeHostFile(options.outputDir, join(caseName, "result.json"), `${JSON.stringify(result, null, 2)}\n`);
 	return result;
 }
 
@@ -1065,15 +1077,16 @@ function writeReport(options: Options, results: KernelResult[]): void {
 		},
 		results,
 	};
-	writeFileSync(join(options.outputDir, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
+	writeHostFile(options.outputDir, "report.json", `${JSON.stringify(report, null, 2)}\n`);
 	const rows = results
 		.map(
 			(result) =>
 				`| ${result.problemId} | ${result.compiled ? "yes" : "no"} | ${result.correct ? "yes" : "no"} | ${result.staticValid ? "yes" : "no"} | ${result.speedup.toFixed(3)}x | ${result.fast1 ? "PASS" : "FAIL"} | $${result.trace.costUsd.toFixed(3)} |`,
 		)
 		.join("\n");
-	writeFileSync(
-		join(options.outputDir, "report.md"),
+	writeHostFile(
+		options.outputDir,
+		"report.md",
 		`# KernelBench Level 1 via Prime AVO\n\nProblems: ${results.length}\n\n| Problem | Compiled | Correct | Static | Speedup | fast_1 | Cost |\n| ---: | --- | --- | --- | ---: | --- | ---: |\n${rows}\n`,
 	);
 }
@@ -1100,11 +1113,21 @@ async function main(): Promise<void> {
 	const agentExecutable = resolveExecutable(options.agentCommand);
 	const results: KernelResult[] = [];
 	for (const [index, problem] of selected.entries()) {
-		const resultPath = join(options.outputDir, `problem-${String(problem.id).padStart(3, "0")}`, "result.json");
-		if (options.resume && existsSync(resultPath)) {
-			results.push(JSON.parse(readFileSync(resultPath, "utf8")) as KernelResult);
+		const caseName = `problem-${String(problem.id).padStart(3, "0")}`;
+		const caseKind = hostPathKind(options.outputDir, caseName);
+		const resultKind =
+			caseKind === "directory" ? hostPathKind(options.outputDir, join(caseName, "result.json")) : "missing";
+		if (options.resume && resultKind === "file") {
+			results.push(
+				JSON.parse(readHostFile(options.outputDir, join(caseName, "result.json")).toString("utf8")) as KernelResult,
+			);
 			process.stdout.write(`[${index + 1}/${selected.length}] resumed problem ${problem.id}\n`);
 			continue;
+		}
+		if (caseKind !== "missing") {
+			throw new Error(
+				`KernelBench case directory already exists; refusing unsafe reuse: ${join(options.outputDir, caseName)}`,
+			);
 		}
 		process.stdout.write(`[${index + 1}/${selected.length}] running problem ${problem.id}: ${problem.name}\n`);
 		const result = await runProblem(problem, options, agentExecutable);

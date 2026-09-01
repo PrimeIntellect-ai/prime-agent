@@ -596,7 +596,10 @@ def get_task(): return Task()
 		expect(mountIndex("--tmpfs", join(homedir(), ".cache", "prime-agent", "specbench"))).toBeGreaterThan(-1);
 		expect(mountIndex("--tmpfs", "/output")).toBeGreaterThan(-1);
 		expect(mountIndex("--tmpfs", "/config")).toBeGreaterThan(-1);
-		expect(mountIndex("--bind", "/output/current")).toBeGreaterThan(mountIndex("--tmpfs", "/output"));
+		expect(mountIndex("--dir", "/output/current")).toBeGreaterThan(mountIndex("--tmpfs", "/output"));
+		expect(mountIndex("--bind", "/output/current/workspace")).toBeGreaterThan(mountIndex("--tmpfs", "/output"));
+		expect(mountIndex("--bind", "/output/current/runtime")).toBeGreaterThan(mountIndex("--tmpfs", "/output"));
+		expect(mountIndex("--bind", "/output/current")).toBe(-1);
 	});
 
 	test("masks runtime sockets but rebinds only the two authenticated broker sockets", () => {
