@@ -9,10 +9,35 @@ import {
 	cleanupDaemonSocketPath,
 	DaemonSocketPathLease,
 	defaultDaemonSocketPath,
+	endDaemonSocketAfterFlush,
 	getDaemonSocketIdentity,
 	normalizeSocketPath,
 	prepareDaemonSocketPath,
 } from "../src/modes/daemon/daemon-socket.js";
+
+describe("endDaemonSocketAfterFlush", () => {
+	it("delivers queued bytes before closing the socket", async () => {
+		const server = createServer((socket) => {
+			socket.write("daemon_closing\n");
+			endDaemonSocketAfterFlush(socket);
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("Expected TCP server address");
+		const received = await new Promise<string>((resolve, reject) => {
+			let data = "";
+			const socket = createConnection({ host: "127.0.0.1", port: address.port });
+			socket.setEncoding("utf8");
+			socket.on("data", (chunk) => {
+				data += chunk;
+			});
+			socket.on("end", () => resolve(data));
+			socket.on("error", reject);
+		});
+		await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+		expect(received).toBe("daemon_closing\n");
+	});
+});
 
 describe("normalizeSocketPath", () => {
 	it("normalizes equivalent Unix spellings", () => {
