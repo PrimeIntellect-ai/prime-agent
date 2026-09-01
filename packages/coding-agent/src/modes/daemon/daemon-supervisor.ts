@@ -434,20 +434,25 @@ function isSupervisorRecoveryCancelled(error: unknown): boolean {
 	return isSupervisorShutdownAdmissionCancelled(error) || isSupervisorGenerationStale(error);
 }
 
-function rosterFamilyRoot(edges: readonly RlmLedgerEdge[]): (path: string) => string {
+// Workers can be registered mid-tree (a resumed subagent transcript), so descent is membership at
+// any step of the parent walk, never a comparison against the ultimate root alone.
+function rosterFamilyDescendsFrom(
+	edges: readonly RlmLedgerEdge[],
+): (path: string, roots: ReadonlySet<string>) => boolean {
 	const parentByChild = new Map(
 		edges.map((edge) => [canonicalSessionPath(edge.child), canonicalSessionPath(edge.parent)]),
 	);
-	return (path) => {
+	return (path, roots) => {
 		const visited = new Set<string>();
 		let current = path;
 		while (!visited.has(current)) {
+			if (roots.has(current)) return true;
 			visited.add(current);
 			const parent = parentByChild.get(current);
-			if (parent === undefined) return current;
+			if (parent === undefined) return false;
 			current = parent;
 		}
-		return current;
+		return false;
 	};
 }
 
@@ -3971,9 +3976,9 @@ export class DaemonSupervisor {
 			}
 			if (roots.size === 0) return;
 			const edges = await this.rlmSpawnLedger().liveEdges();
-			const familyRoot = rosterFamilyRoot(edges);
+			const descendsFrom = rosterFamilyDescendsFrom(edges);
 			for (const edge of edges) {
-				if (!roots.has(familyRoot(canonicalSessionPath(edge.child)))) continue;
+				if (!descendsFrom(canonicalSessionPath(edge.parent), roots)) continue;
 				const entry = this.rosterEntryForSpawnLedgerEdge(edge);
 				if (this.roster().has(entry.agentId)) continue;
 				if (this.roster().hasSessionFile(canonicalSessionPath(edge.child))) continue;
@@ -4110,11 +4115,9 @@ export class DaemonSupervisor {
 		}
 		// Only this worker's family reseeds: anything wider can resurrect a client-owned worker's dropped children.
 		const workerRoot = worker.descriptor.sessionFile ?? worker.descriptor.createCommand.sessionPath;
-		const rootPath = workerRoot !== undefined ? canonicalSessionPath(workerRoot) : undefined;
-		const familyRoot = rosterFamilyRoot(edges);
-		const familyEdges = edges.filter(
-			(edge) => rootPath !== undefined && familyRoot(canonicalSessionPath(edge.child)) === rootPath,
-		);
+		const rootPaths = new Set(workerRoot !== undefined ? [canonicalSessionPath(workerRoot)] : []);
+		const descendsFrom = rosterFamilyDescendsFrom(edges);
+		const familyEdges = edges.filter((edge) => descendsFrom(canonicalSessionPath(edge.parent), rootPaths));
 		// "Unclaimed" rows survive: the sweep deletes them but the restore branch rewrites them.
 		const rowSurvivesWithoutReseed = (entry: WorkerRosterEntry, childPath: string): boolean => {
 			if (unclaimed.has(entry.agentId)) return true;

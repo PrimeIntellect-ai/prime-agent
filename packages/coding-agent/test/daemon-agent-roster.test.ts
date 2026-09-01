@@ -872,10 +872,31 @@ describe("supervisor roster ledger", () => {
 			depth: 1,
 			name: "foreign-child",
 		});
+		// A worker registered mid-tree (resumed subagent) seeds its descendants, not its siblings.
+		const foreignGrandPath = join(directory, "artifacts", "foreign-grand.jsonl");
+		const foreignSiblingPath = join(directory, "artifacts", "foreign-sibling.jsonl");
+		writeFileSync(foreignGrandPath, "");
+		writeFileSync(foreignSiblingPath, "");
+		await ledger.appendSpawn({
+			childId: "foreign-grand",
+			parent: foreignChildPath,
+			child: foreignGrandPath,
+			depth: 2,
+			name: "foreign-grand",
+		});
+		await ledger.appendSpawn({
+			childId: "foreign-sibling",
+			parent: join(sessionsDir, "foreign-root.jsonl"),
+			child: foreignSiblingPath,
+			depth: 1,
+			name: "foreign-sibling",
+		});
 
 		const worker = makeWorker("worker-1");
 		Object.assign(worker.descriptor, { sessionFile: join(sessionsDir, "root.jsonl") });
-		const supervisor = makeSupervisor([worker], {
+		const midWorker = makeWorker("worker-mid");
+		Object.assign(midWorker.descriptor, { sessionFile: foreignChildPath });
+		const supervisor = makeSupervisor([worker, midWorker], {
 			rlmSpawnLedger: () => ledger,
 			catalog: {
 				list: vi.fn(async () => [
@@ -904,14 +925,16 @@ describe("supervisor roster ledger", () => {
 		});
 		await supervisor.seedRosterLedger();
 
-		// Only the registered worker's family seeds; the saved corpus is served by the catalog scan alone.
+		// Only registered workers' descendants seed; the saved corpus is served by the catalog scan alone.
 		expect(supervisor.roster().has("saved-root")).toBe(false);
-		expect([...supervisor.roster().values()].some((entry) => entry.summary.rlmChildId === "foreign-child")).toBe(
-			false,
-		);
+		const seededChildIds = new Set([...supervisor.roster().values()].map((entry) => entry.summary.rlmChildId));
+		// The mid-tree worker seeds its descendant, never its own transcript's siblings or ancestors.
+		expect(seededChildIds.has("foreign-grand")).toBe(true);
+		expect(seededChildIds.has("foreign-child")).toBe(false);
+		expect(seededChildIds.has("foreign-sibling")).toBe(false);
 		const listed = await supervisor.handleList({}, { type: "list", all: true });
 		const ids = listed.data?.sessions.map((session) => session.sessionId).sort();
-		expect(ids).toEqual(["foreign-root", "live-child", "saved-root"]);
+		expect(ids).toEqual(["foreign-grand", "foreign-root", "live-child", "saved-root"]);
 		expect(listed.data?.sessions.every((session) => session.activeSessionId === undefined)).toBe(true);
 		expect((await supervisor.handleList({}, { type: "list" })).data?.sessions).toEqual([]);
 
@@ -951,6 +974,7 @@ describe("supervisor roster ledger", () => {
 		expect(liveAll.data?.sessions.map((session) => session.sessionId).sort()).toEqual([
 			"child-session",
 			"evicted",
+			"foreign-grand",
 			"foreign-root",
 			"live-child",
 			"saved-root",
