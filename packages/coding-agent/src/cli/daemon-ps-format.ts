@@ -20,9 +20,21 @@ export function formatDaemonListTable(daemons: readonly DaemonInfo[]): string {
 		uptime: formatUptime(daemon.uptimeSeconds),
 	}));
 	const table = formatTable(["socket", "pid", "version", "status", "sessions", "uptime"], rows, formatDaemonCell);
-	return daemons.some((daemon) => daemon.isDefault)
-		? `${table}\n\n${chalk.dim("* default background service")}`
-		: table;
+	const footers: string[] = [];
+	if (daemons.some((daemon) => daemon.isDefault)) {
+		footers.push(chalk.dim("* default background service"));
+	}
+	for (const daemon of daemons) {
+		if (daemon.status === "ownership-lost") {
+			footers.push(
+				chalk.dim(
+					`! ${daemon.socketPath}: supervisor lost its ownership record — ` +
+						'run "prime-agent doctor --fix" to restart it (sessions are preserved)',
+				),
+			);
+		}
+	}
+	return footers.length > 0 ? `${table}\n\n${footers.join("\n")}` : table;
 }
 
 function formatDaemonCell(_row: DaemonRow, column: keyof DaemonRow, value: string): string {
@@ -38,6 +50,7 @@ function colorStatus(status: DaemonStatus, value: string): string {
 			return chalk.green(value);
 		case "stale":
 			return chalk.yellow(value);
+		case "ownership-lost":
 		case "unreachable":
 			return chalk.red(value);
 		case "orphan-file":

@@ -101,17 +101,28 @@ class DaemonSupervisorAlreadyRunningError extends Error {
 	}
 }
 
+type DaemonSupervisorOwnershipLostReason = "released" | "record-missing" | "record-replaced";
+
+const OWNERSHIP_LOST_REASON_TEXT: Record<DaemonSupervisorOwnershipLostReason, string> = {
+	released: "ownership was already released",
+	"record-missing": "owner record is missing on disk",
+	"record-replaced": "owner record on disk was replaced by another owner",
+};
+
 class DaemonSupervisorOwnershipLostError extends Error {
 	readonly code = "supervisor_generation_stale" as const;
 
-	constructor(generation: string, details: { socketPath?: string; registryDir?: string } = {}) {
+	constructor(
+		generation: string,
+		details: { socketPath?: string; registryDir?: string; reason: DaemonSupervisorOwnershipLostReason },
+	) {
 		const context = [
 			details.socketPath ? `socket: ${details.socketPath}` : undefined,
 			details.registryDir ? `registry: ${details.registryDir}` : undefined,
 		].filter((part) => part !== undefined);
 		super(
 			`Daemon supervisor generation ${generation} no longer owns its registry entry ` +
-				`(record on disk is missing or was replaced)${context.length > 0 ? `; ${context.join("; ")}` : ""}; ` +
+				`(${OWNERSHIP_LOST_REASON_TEXT[details.reason]})${context.length > 0 ? `; ${context.join("; ")}` : ""}; ` +
 				"restart the daemon to recover — sessions are preserved",
 		);
 		this.name = "DaemonSupervisorOwnershipLostError";
@@ -194,18 +205,22 @@ class DaemonSupervisorOwnership {
 
 	async assertCurrent(): Promise<void> {
 		if (this.released) {
-			throw this.ownershipLostError();
+			throw this.ownershipLostError("released");
 		}
 		const current = readOwnerRecord(this.ownerDirectory);
-		if (!current || !sameOwnerRecord(current, this.record)) {
-			throw this.ownershipLostError();
+		if (!current) {
+			throw this.ownershipLostError("record-missing");
+		}
+		if (!sameOwnerRecord(current, this.record)) {
+			throw this.ownershipLostError("record-replaced");
 		}
 	}
 
-	private ownershipLostError(): DaemonSupervisorOwnershipLostError {
+	private ownershipLostError(reason: DaemonSupervisorOwnershipLostReason): DaemonSupervisorOwnershipLostError {
 		return new DaemonSupervisorOwnershipLostError(this.record.generation, {
 			socketPath: this.record.socketPath,
 			registryDir: this.registryDir,
+			reason,
 		});
 	}
 
@@ -481,20 +496,55 @@ export async function assertDaemonSupervisorOwnerCurrent(
 	const current =
 		readOwnerRecord(ownerDirectoryPath(registryDir, owner.generation)) ??
 		(legacyRegistryDir ? readOwnerRecord(ownerDirectoryPath(legacyRegistryDir, owner.generation)) : undefined);
+	if (!current) {
+		throw new DaemonSupervisorOwnershipLostError(owner.generation, {
+			socketPath: owner.socketPath,
+			registryDir,
+			reason: "record-missing",
+		});
+	}
 	if (
-		!current ||
 		current.pid !== owner.pid ||
 		current.processStartId !== owner.processStartId ||
 		current.socketPath !== normalizeSocketPath(owner.socketPath) ||
 		!isProcessAlive(current.pid)
 	) {
-		throw new DaemonSupervisorOwnershipLostError(owner.generation, { socketPath: owner.socketPath, registryDir });
+		throw new DaemonSupervisorOwnershipLostError(owner.generation, {
+			socketPath: owner.socketPath,
+			registryDir,
+			reason: "record-replaced",
+		});
 	}
 	const fingerprint = ownerRecordFingerprint(current);
 	if (fingerprint !== validatedFingerprint && !isProcessIdentityAlive(current)) {
-		throw new DaemonSupervisorOwnershipLostError(owner.generation, { socketPath: owner.socketPath, registryDir });
+		throw new DaemonSupervisorOwnershipLostError(owner.generation, {
+			socketPath: owner.socketPath,
+			registryDir,
+			reason: "record-replaced",
+		});
 	}
 	return fingerprint;
+}
+
+/** Purely-local registry scan for the owner record of a socket, used for diagnostics. */
+export function findDaemonSupervisorOwnerForSocket(
+	socketPath: string,
+	registryDir: string = defaultDaemonSupervisorRegistryDir(),
+): { pid: number; generation: string } | undefined {
+	const normalized = normalizeSocketPath(socketPath);
+	let directories: string[];
+	try {
+		directories = listOwnerDirectories(registryDir);
+	} catch {
+		return undefined;
+	}
+	for (const directory of directories) {
+		const owner = readOwnerRecord(directory);
+		if (owner && owner.socketPath === normalized) {
+			return { pid: owner.pid, generation: owner.generation };
+		}
+	}
+	return undefined;
 }
 
 export async function acquireDaemonShutdownAdmission(): Promise<DaemonShutdownAdmission> {

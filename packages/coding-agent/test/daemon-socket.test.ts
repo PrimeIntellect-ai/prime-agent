@@ -254,3 +254,21 @@ describe("defaultDaemonSocketPath", () => {
 		}
 	});
 });
+
+describe("proper-lockfile contention error shape", () => {
+	it.runIf(process.platform !== "win32")("reports ELOCKED on a held lock", async () => {
+		// The daemon supervisor's socket-lease error wrapping keys off
+		// error.code === "ELOCKED"; this pins that library contract.
+		const dir = mkdtempSync(join(tmpdir(), "prime-lockfile-shape-"));
+		const target = join(dir, "daemon.sock");
+		const release = await lockfile.lock(target, { realpath: false });
+		try {
+			await expect(lockfile.lock(target, { realpath: false, retries: 0 })).rejects.toMatchObject({
+				code: "ELOCKED",
+			});
+		} finally {
+			await release();
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
