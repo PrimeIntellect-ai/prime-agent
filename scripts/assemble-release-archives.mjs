@@ -164,6 +164,7 @@ function normalizeVersion(version) {
 }
 
 function normalizeBaseUrl(value) {
+	value = value.trim();
 	if (/[\u0000-\u001f\u007f"'`$\\]/.test(value)) {
 		throw new Error("Release base URL contains unsafe shell characters");
 	}

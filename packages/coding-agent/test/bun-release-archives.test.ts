@@ -174,6 +174,21 @@ describe("compiled release archives", () => {
 		expect(existsSync(join(f.output, "artifacts", "prime-agent-1.2.3.tgz"))).toBe(true);
 	});
 
+	test("trims release base URLs before writing npm dependency specs", () => {
+		const f = fixture();
+		const result = pack(f, ["--base-url", "  https://downloads.example.test/  "]);
+		expect(result.status, result.stderr).toBe(0);
+		const packedManifest = spawnSync(
+			"tar",
+			["-xOzf", join(f.output, "artifacts", "prime-agent-1.2.3.tgz"), "package/package.json"],
+			{ encoding: "utf8" },
+		);
+		expect(packedManifest.status, packedManifest.stderr).toBe(0);
+		expect(JSON.parse(packedManifest.stdout).dependencies["@earendil-works/pi-ai"]).toBe(
+			"https://downloads.example.test/releases/v1.2.3/prime-agent-ai-1.2.3.tgz",
+		);
+	});
+
 	test("rejects insecure release base URLs", () => {
 		const f = fixture();
 		const result = pack(f, ["--base-url", "http://downloads.example.test"]);

@@ -110,7 +110,7 @@ function parseArgs(args) {
 	}
 
 	if (!parsed.baseUrl) throw new Error("--base-url or PRIME_AGENT_DOWNLOAD_BASE_URL is required");
-	parsed.baseUrl = parsed.baseUrl.replace(/\/+$/, "");
+	parsed.baseUrl = parsed.baseUrl.trim().replace(/\/+$/, "");
 
 	// Resolve and normalize the version once for archive names and embedded URLs.
 	if (!parsed.version) {
