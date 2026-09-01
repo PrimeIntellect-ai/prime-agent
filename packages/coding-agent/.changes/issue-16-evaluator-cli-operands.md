@@ -1,0 +1,1 @@
+- Fixed evaluator CLIs to reject missing or flag-like option operands before resolving paths or parsing values ([#16](https://github.com/lewbei/prime-agent/issues/16)).

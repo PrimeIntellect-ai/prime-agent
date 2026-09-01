@@ -44,6 +44,7 @@ import {
 	renameHostDirectory,
 	writeHostFile,
 } from "../../core/host-files.js";
+import { requireOptionValue } from "../cli-options.js";
 import { buildEvaluationKernelSandboxEnvironment, buildIsolatedEvaluationSandboxArgs } from "../evaluation-sandbox.js";
 import { summarizePrimeIntegrityTrace } from "../prime-integrity/runner.js";
 import {
@@ -1081,7 +1082,7 @@ Options:
 }
 
 function positiveInteger(value: string | undefined, flag: string): number {
-	const parsed = Number(value);
+	const parsed = Number(requireOptionValue(value, flag, "a positive integer"));
 	if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${flag} requires a positive integer`);
 	return parsed;
 }
@@ -1118,8 +1119,7 @@ export function parseSpecBenchArgs(argv: string[]): SpecBenchOptions {
 				options.all = true;
 				break;
 			case "--task": {
-				const value = argv[++index];
-				if (!value) throw new Error("--task requires an ID");
+				const value = requireOptionValue(argv[++index], "--task", "an ID");
 				options.tasks.push(
 					...value
 						.split(",")
@@ -1132,22 +1132,22 @@ export function parseSpecBenchArgs(argv: string[]): SpecBenchOptions {
 				options.limit = positiveInteger(argv[++index], "--limit");
 				break;
 			case "--provider":
-				options.provider = argv[++index] || undefined;
+				options.provider = requireOptionValue(argv[++index], "--provider", "a name");
 				break;
 			case "--model":
-				options.model = argv[++index] || undefined;
+				options.model = requireOptionValue(argv[++index], "--model", "an ID");
 				break;
 			case "--agent-command":
-				options.agentCommand = argv[++index] || "";
+				options.agentCommand = requireOptionValue(argv[++index], "--agent-command", "a path");
 				break;
 			case "--config-source":
-				options.configSource = resolve(argv[++index] || "");
+				options.configSource = resolve(requireOptionValue(argv[++index], "--config-source", "a directory"));
 				break;
 			case "--specbench-root":
-				options.specbenchRoot = resolve(argv[++index] || "");
+				options.specbenchRoot = resolve(requireOptionValue(argv[++index], "--specbench-root", "a directory"));
 				break;
 			case "--output":
-				options.outputDir = resolve(argv[++index] || "");
+				options.outputDir = resolve(requireOptionValue(argv[++index], "--output", "a directory"));
 				break;
 			case "--max-turns":
 				options.maxTurns = positiveInteger(argv[++index], "--max-turns");
@@ -1156,7 +1156,7 @@ export function parseSpecBenchArgs(argv: string[]): SpecBenchOptions {
 				options.timeoutMs = positiveInteger(argv[++index], "--timeout-ms");
 				break;
 			case "--hardening": {
-				const value = argv[++index];
+				const value = requireOptionValue(argv[++index], "--hardening", "on or off");
 				if (value !== "on" && value !== "off") throw new Error("--hardening must be on or off");
 				options.hardening = value === "on";
 				break;
@@ -1168,8 +1168,7 @@ export function parseSpecBenchArgs(argv: string[]): SpecBenchOptions {
 				options.resume = true;
 				break;
 			case "--condition": {
-				const value = argv[++index];
-				if (!value) throw new Error("--condition requires an ID");
+				const value = requireOptionValue(argv[++index], "--condition", "an ID");
 				for (const conditionId of value.split(",").map((item) => item.trim())) {
 					if (!SPECBENCH_ABLATION_CONDITIONS.some((item) => item.conditionId === conditionId)) {
 						throw new Error(`unknown SpecBench ablation condition: ${conditionId}`);
@@ -1185,8 +1184,7 @@ export function parseSpecBenchArgs(argv: string[]): SpecBenchOptions {
 				options.repetitions = positiveInteger(argv[++index], "--repetitions");
 				break;
 			case "--experiment-seed":
-				options.experimentSeed = argv[++index]?.trim() ?? "";
-				if (!options.experimentSeed) throw new Error("--experiment-seed requires non-empty text");
+				options.experimentSeed = requireOptionValue(argv[++index]?.trim(), "--experiment-seed", "non-empty text");
 				break;
 			case "--help":
 			case "-h":

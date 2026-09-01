@@ -20,6 +20,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { sanitizeAvoVerificationEnvironment } from "../../core/avo/verification-environment.js";
 import { PRIME_AGENT_EPHEMERAL_AUTH_FILE_ENV } from "../../core/ephemeral-auth-storage.js";
 import { createFreshHostDirectory, hostPathKind, readHostFile, writeHostFile } from "../../core/host-files.js";
+import { requireOptionValue } from "../cli-options.js";
 import { buildEvaluationKernelSandboxEnvironment } from "../evaluation-sandbox.js";
 import { summarizePrimeIntegrityTrace } from "../prime-integrity/runner.js";
 
@@ -181,12 +182,12 @@ Options:
 }
 
 function positiveInteger(value: string | undefined, flag: string): number {
-	const parsed = Number(value);
+	const parsed = Number(requireOptionValue(value, flag, "a positive integer"));
 	if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new Error(`${flag} requires a positive integer`);
 	return parsed;
 }
 
-function parseArgs(argv: string[]): Options {
+export function parseKernelBenchArgs(argv: string[]): Options {
 	const timestamp = new Date().toISOString().replaceAll(":", "-");
 	const options: Options = {
 		all: false,
@@ -209,8 +210,7 @@ function parseArgs(argv: string[]): Options {
 				options.all = true;
 				break;
 			case "--problem": {
-				const value = argv[++index];
-				if (!value) throw new Error("--problem requires an ID");
+				const value = requireOptionValue(argv[++index], "--problem", "an ID");
 				options.problems.push(...value.split(",").map((item) => positiveInteger(item.trim(), "--problem")));
 				break;
 			}
@@ -218,22 +218,22 @@ function parseArgs(argv: string[]): Options {
 				options.limit = positiveInteger(argv[++index], "--limit");
 				break;
 			case "--provider":
-				options.provider = argv[++index] || undefined;
+				options.provider = requireOptionValue(argv[++index], "--provider", "a name");
 				break;
 			case "--model":
-				options.model = argv[++index] || undefined;
+				options.model = requireOptionValue(argv[++index], "--model", "an ID");
 				break;
 			case "--agent-command":
-				options.agentCommand = argv[++index] || "";
+				options.agentCommand = requireOptionValue(argv[++index], "--agent-command", "a path");
 				break;
 			case "--config-source":
-				options.configSource = resolve(argv[++index] || "");
+				options.configSource = resolve(requireOptionValue(argv[++index], "--config-source", "a directory"));
 				break;
 			case "--kernelbench-root":
-				options.kernelbenchRoot = resolve(argv[++index] || "");
+				options.kernelbenchRoot = resolve(requireOptionValue(argv[++index], "--kernelbench-root", "a directory"));
 				break;
 			case "--output":
-				options.outputDir = resolve(argv[++index] || "");
+				options.outputDir = resolve(requireOptionValue(argv[++index], "--output", "a directory"));
 				break;
 			case "--max-turns":
 				options.maxTurns = positiveInteger(argv[++index], "--max-turns");
@@ -242,7 +242,7 @@ function parseArgs(argv: string[]): Options {
 				options.timeoutMs = positiveInteger(argv[++index], "--timeout-ms");
 				break;
 			case "--hardening": {
-				const value = argv[++index];
+				const value = requireOptionValue(argv[++index], "--hardening", "on or off");
 				if (value !== "on" && value !== "off") throw new Error("--hardening must be on or off");
 				options.hardening = value === "on";
 				break;
@@ -1450,7 +1450,7 @@ function writeReport(options: Options, results: KernelResult[]): void {
 }
 
 async function main(): Promise<void> {
-	const options = parseArgs(process.argv.slice(2));
+	const options = parseKernelBenchArgs(process.argv.slice(2));
 	if (options.help) return void process.stdout.write(usage());
 	const catalog = levelOneProblems(options.kernelbenchRoot);
 	if (options.list) {
