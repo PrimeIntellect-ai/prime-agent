@@ -37,8 +37,9 @@ import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../sr
 import { canonicalSessionPath } from "../src/core/session-lease.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
+import type { AgentRosterEntry } from "../src/modes/daemon/agent-roster.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
-import type { DaemonCommand } from "../src/modes/daemon/daemon-protocol.js";
+import type { DaemonCommand, DaemonResponse } from "../src/modes/daemon/daemon-protocol.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import {
 	RLM_LEDGER_MAX_BYTES,
@@ -1051,11 +1052,45 @@ interface SupervisorLedgerInternals {
 	rlmSpawnLedger(): RlmSpawnLedger;
 	rlmLedgerSiblings(sessionPath: string): Promise<Array<{ name?: string; rlmDepth: number; path: string }>>;
 	assertSupervisorSavedSessionNameAvailable(sessionPath: string, name: string): Promise<void>;
-	handleCommand(client: object, command: Record<string, unknown>): Promise<unknown>;
+	seedRosterLedger(): Promise<void>;
+	handleCommand(client: object, command: Record<string, unknown>): Promise<DaemonResponse | undefined>;
 	catalog: object;
 }
 
 describe("rlm spawn ledger supervisor wiring", () => {
+	it("hydrates a ledger-seeded child's cwd before publishing the roster", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-supervisor-cwd-"));
+		try {
+			const { sessionsDir, parent, parentFile } = makeRoots(tempDir);
+			const parentArtifactDir = parent.getSessionArtifactDir();
+			if (!parentArtifactDir) throw new Error("Missing parent artifact directory");
+			const child = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "worker");
+			const supervisor = new DaemonSupervisor(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: sessionsDir },
+				descriptorDir: join(tempDir, "workers"),
+			}) as unknown as SupervisorLedgerInternals;
+			Object.assign(supervisor.catalog, { list: vi.fn(async () => []) });
+			await supervisor.rlmSpawnLedger().appendSpawn({
+				childId: "sub-11111111",
+				parent: parentFile,
+				child: child.file,
+				depth: 1,
+				name: "worker",
+			});
+
+			await supervisor.seedRosterLedger();
+			const response = await supervisor.handleCommand({}, { type: "roster_subscribe" });
+			if (!response?.success) throw new Error("Roster subscription failed");
+			const row = (response.data as { roster: AgentRosterEntry[] }).roster.find(
+				(entry) => entry.summary.sessionFile === canonicalSessionPath(child.file),
+			);
+			expect(row?.summary.cwd).toBe(tempDir);
+			expect(row?.seededCwd).toBeUndefined();
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("reserves saved-sibling names against ledger-backed siblings", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-supervisor-"));
 		try {

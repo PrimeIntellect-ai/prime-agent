@@ -3811,7 +3811,10 @@ export class DaemonSupervisor {
 				const entry = this.rosterEntryForSpawnLedgerEdge(edge);
 				if (this.roster().has(entry.agentId)) continue;
 				if (this.roster().hasSessionFile(canonicalSessionPath(edge.child))) continue;
-				this.roster().write({ ...entry, seededCwd: true });
+				const info = await readSessionInfo(edge.child).catch(() => undefined);
+				this.roster().write(
+					info ? { ...entry, summary: { ...entry.summary, cwd: info.cwd } } : { ...entry, seededCwd: true },
+				);
 			}
 		} catch (error) {
 			this.log(`Could not seed the agent roster from the spawn ledger: ${String(error)}`);
@@ -3985,7 +3988,10 @@ export class DaemonSupervisor {
 				this.writeRosterEntry(rest, worker);
 				continue;
 			}
-			this.roster().write({ ...entry, seededCwd: true });
+			const info = await readSessionInfo(edge.child).catch(() => undefined);
+			this.roster().write(
+				info ? { ...entry, summary: { ...entry.summary, cwd: info.cwd } } : { ...entry, seededCwd: true },
+			);
 		}
 	}
 
