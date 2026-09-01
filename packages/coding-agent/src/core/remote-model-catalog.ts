@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { type Api, type Model, type ModelCatalogV1, parseModelCatalog } from "@earendil-works/pi-ai";
+import { isTruthyEnvFlag } from "../utils/env.js";
 
 const DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
 const MODEL_CATALOG_PATH = "model-catalog.json";
@@ -107,11 +108,6 @@ export function readCachedRemoteModelCatalog(cachePath: string): Model<Api>[] | 
 	return readCache(cachePath, getRemoteModelCatalogUrl())?.catalog.models;
 }
 
-function offlineModeEnabled(): boolean {
-	const value = process.env.PI_OFFLINE?.toLowerCase();
-	return value === "1" || value === "true" || value === "yes";
-}
-
 async function fetchCatalog(url: string, fetchFn: typeof fetch): Promise<ModelCatalogV1> {
 	const response = await fetchFn(url, {
 		headers: { accept: "application/json" },
@@ -156,7 +152,7 @@ export async function refreshRemoteModelCatalog(
 	const now = options.now ?? Date.now();
 	const cached = readCache(cachePath, url);
 	if (cached && now - cached.fetchedAt < MODEL_CATALOG_CACHE_TTL_MS) return cached.catalog.models;
-	if (offlineModeEnabled()) return cached?.catalog.models;
+	if (isTruthyEnvFlag(process.env.PI_OFFLINE)) return cached?.catalog.models;
 
 	const key = `${cachePath}\0${url}`;
 	const existing = pendingRefreshes.get(key);

@@ -28,6 +28,7 @@ import { type Static, type TProperties, Type } from "typebox";
 import type { Validator } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { getAgentDir } from "../config.js";
+import { isTruthyEnvFlag } from "../utils/env.js";
 import type { AuthSourceToken, AuthStatus, AuthStorage } from "./auth-storage.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "./prime-inference-auth.js";
 import {
@@ -429,12 +430,6 @@ function privatePrimeAuthorizationFingerprint(apiKey: string, teamId: string): s
 	return createHash("sha256").update(apiKey).update("\0").update(teamId).digest("hex");
 }
 
-function isOfflineModeEnabled(): boolean {
-	const value = process.env.PI_OFFLINE;
-	if (!value) return false;
-	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
-}
-
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
@@ -826,13 +821,13 @@ export class ModelRegistry {
 			this.authorizedPrivatePrimeInferenceModelIds = new Set(cached.modelIds);
 			this.authorizedPrivatePrimeInferenceTeamId = teamId;
 			const cacheIsFresh = Date.now() - cached.refreshedAt < PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS;
-			if (cacheIsFresh || isOfflineModeEnabled()) {
+			if (cacheIsFresh || isTruthyEnvFlag(process.env.PI_OFFLINE)) {
 				return;
 			}
 			this.startBackgroundPrivatePrimeAuthorizationRefresh(apiKey, teamHeaders, teamId, fingerprint);
 			return;
 		}
-		if (isOfflineModeEnabled()) {
+		if (isTruthyEnvFlag(process.env.PI_OFFLINE)) {
 			this.authorizedPrivatePrimeInferenceModelIds.clear();
 			this.authorizedPrivatePrimeInferenceTeamId = undefined;
 			return;

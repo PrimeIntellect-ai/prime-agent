@@ -29,6 +29,7 @@ import ignore from "ignore";
 import { minimatch } from "minimatch";
 import { CONFIG_DIR_NAME, getBundledSkillsDir } from "../config.js";
 import { shouldUseWindowsShell } from "../utils/child-process.js";
+import { isTruthyEnvFlag } from "../utils/env.js";
 import { type GitSource, parseGitUrl } from "../utils/git.js";
 import { canonicalizePath, isLocalPath } from "../utils/paths.js";
 import type { ResourceDiagnostic } from "./diagnostics.js";
@@ -38,12 +39,6 @@ import type { PackageSource, SettingsManager } from "./settings-manager.js";
 const NETWORK_TIMEOUT_MS = 10000;
 const UPDATE_CHECK_CONCURRENCY = 4;
 const GIT_UPDATE_CONCURRENCY = 4;
-
-function isOfflineModeEnabled(): boolean {
-	const value = process.env.PI_OFFLINE;
-	if (!value) return false;
-	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
-}
 
 export interface PathMetadata {
 	source: string;
@@ -1028,7 +1023,7 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private async updateConfiguredSources(sources: ConfiguredUpdateSource[]): Promise<void> {
-		if (isOfflineModeEnabled() || sources.length === 0) {
+		if (isTruthyEnvFlag(process.env.PI_OFFLINE) || sources.length === 0) {
 			return;
 		}
 
@@ -1126,7 +1121,7 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	async checkForAvailableUpdates(): Promise<PackageUpdate[]> {
-		if (isOfflineModeEnabled()) {
+		if (isTruthyEnvFlag(process.env.PI_OFFLINE)) {
 			return [];
 		}
 
@@ -1208,7 +1203,7 @@ export class DefaultPackageManager implements PackageManager {
 			}
 
 			const installMissing = async (): Promise<boolean> => {
-				if (isOfflineModeEnabled()) {
+				if (isTruthyEnvFlag(process.env.PI_OFFLINE)) {
 					return false;
 				}
 				if (!onMissing) {
@@ -1241,7 +1236,7 @@ export class DefaultPackageManager implements PackageManager {
 				if (!existsSync(installedPath)) {
 					const installed = await installMissing();
 					if (!installed) continue;
-				} else if (scope === "temporary" && !parsed.pinned && !isOfflineModeEnabled()) {
+				} else if (scope === "temporary" && !parsed.pinned && !isTruthyEnvFlag(process.env.PI_OFFLINE)) {
 					await this.refreshTemporaryGitSource(parsed, sourceStr);
 				}
 				metadata.baseDir = installedPath;
@@ -1407,7 +1402,7 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private async npmHasAvailableUpdate(source: NpmSource, installedPath: string): Promise<boolean> {
-		if (isOfflineModeEnabled()) {
+		if (isTruthyEnvFlag(process.env.PI_OFFLINE)) {
 			return false;
 		}
 
@@ -1449,7 +1444,7 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private async gitHasAvailableUpdate(installedPath: string): Promise<boolean> {
-		if (isOfflineModeEnabled()) {
+		if (isTruthyEnvFlag(process.env.PI_OFFLINE)) {
 			return false;
 		}
 
@@ -1761,7 +1756,7 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private async refreshTemporaryGitSource(source: GitSource, sourceStr: string): Promise<void> {
-		if (isOfflineModeEnabled()) {
+		if (isTruthyEnvFlag(process.env.PI_OFFLINE)) {
 			return;
 		}
 		try {
