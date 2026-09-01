@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -551,6 +551,8 @@ function makeSupervisor(workers: WorkerFixture[], extra: Record<string, unknown>
 		assertRecoveryAllowed: vi.fn(async () => {
 			throw new Error("recovery halted for test");
 		}),
+		// handleList consults the spawn ledger; the unit fixture defaults to an empty one.
+		rlmSpawnLedger: () => ({ liveEdges: async () => [] }),
 		log: vi.fn(),
 		...extra,
 	}) as SupervisorFixture;
@@ -827,17 +829,21 @@ describe("supervisor roster ledger", () => {
 		}
 	});
 
-	it("seeds catalog and ledger rows list-all-only, serves resident worker rows, and keeps evicted rows inactive", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "prime-roster-seed-"));
+	it("seeds only registered workers' families; list --all still serves dead-family ledger rows", async () => {
+		// realpath: the sessionDir filter compares against ledger paths, which are canonicalized.
+		const directory = realpathSync(mkdtempSync(join(tmpdir(), "prime-roster-seed-")));
 		tempDirs.push(directory);
 		const sessionsDir = join(directory, "sessions");
 		const ledger = new RlmSpawnLedger(directory, sessionsDir);
 		const liveChildPath = join(directory, "artifacts", "live-child.jsonl");
 		const deletedChildPath = join(directory, "artifacts", "deleted-child.jsonl");
+		const foreignChildPath = join(directory, "artifacts", "foreign-child.jsonl");
 		mkdirSync(sessionsDir, { recursive: true });
 		writeFileSync(join(sessionsDir, "root.jsonl"), "");
+		writeFileSync(join(sessionsDir, "foreign-root.jsonl"), "");
 		mkdirSync(dirname(liveChildPath), { recursive: true });
 		writeFileSync(liveChildPath, "");
+		writeFileSync(foreignChildPath, "");
 		await ledger.appendSpawn({
 			childId: "live-child",
 			parent: join(sessionsDir, "root.jsonl"),
@@ -861,8 +867,50 @@ describe("supervisor roster ledger", () => {
 			depth: 1,
 			name: "ghost-child",
 		});
+		// A dead family: its root has no registered worker, so its children never seed;
+		// list --all still serves them straight from the spawn ledger.
+		await ledger.appendSpawn({
+			childId: "foreign-child",
+			parent: join(sessionsDir, "foreign-root.jsonl"),
+			child: foreignChildPath,
+			depth: 1,
+			name: "foreign-child",
+		});
+		// A worker registered mid-tree (resumed subagent) seeds its descendants, not its siblings.
+		const foreignGrandPath = join(directory, "artifacts", "foreign-grand.jsonl");
+		const foreignSiblingPath = join(directory, "artifacts", "foreign-sibling.jsonl");
+		writeFileSync(foreignGrandPath, "");
+		writeFileSync(foreignSiblingPath, "");
+		await ledger.appendSpawn({
+			childId: "foreign-grand",
+			parent: foreignChildPath,
+			child: foreignGrandPath,
+			depth: 2,
+			name: "foreign-grand",
+		});
+		await ledger.appendSpawn({
+			childId: "foreign-sibling",
+			parent: join(sessionsDir, "foreign-root.jsonl"),
+			child: foreignSiblingPath,
+			depth: 1,
+			name: "foreign-sibling",
+		});
+		// A depth-2 dead-family child: the sessionDir walk must climb ledger edges, not roster rows.
+		const deadGrandPath = join(directory, "artifacts", "dead-grand.jsonl");
+		writeFileSync(deadGrandPath, "");
+		await ledger.appendSpawn({
+			childId: "dead-grand",
+			parent: foreignSiblingPath,
+			child: deadGrandPath,
+			depth: 2,
+			name: "dead-grand",
+		});
 
-		const supervisor = makeSupervisor([], {
+		const worker = makeWorker("worker-1");
+		Object.assign(worker.descriptor, { sessionFile: join(sessionsDir, "root.jsonl") });
+		const midWorker = makeWorker("worker-mid");
+		Object.assign(midWorker.descriptor, { sessionFile: foreignChildPath });
+		const supervisor = makeSupervisor([worker, midWorker], {
 			rlmSpawnLedger: () => ledger,
 			catalog: {
 				list: vi.fn(async () => [
@@ -876,22 +924,53 @@ describe("supervisor roster ledger", () => {
 						firstMessage: "hello",
 						allMessagesText: "",
 					},
+					{
+						id: "foreign-root",
+						path: join(sessionsDir, "foreign-root.jsonl"),
+						cwd: "/tmp/project",
+						created: new Date(0),
+						modified: new Date(0),
+						messageCount: 1,
+						firstMessage: "",
+						allMessagesText: "",
+					},
 				]),
 			},
 		});
 		await supervisor.seedRosterLedger();
 
-		// A push-only view needs saved top-level rows in the ledger itself, not only in list-all rescans.
-		expect(supervisor.roster().has("saved-root")).toBe(true);
-		const listed = await supervisor.handleList({}, { type: "list", all: true });
+		// Only registered workers' descendants seed; the saved corpus is served by the catalog scan alone.
+		expect(supervisor.roster().has("saved-root")).toBe(false);
+		const seededChildIds = new Set([...supervisor.roster().values()].map((entry) => entry.summary.rlmChildId));
+		// The mid-tree worker seeds its descendant, never its own transcript's siblings or ancestors.
+		expect(seededChildIds.has("foreign-grand")).toBe(true);
+		expect(seededChildIds.has("foreign-child")).toBe(false);
+		expect(seededChildIds.has("foreign-sibling")).toBe(false);
+		// Dead-family rows stay visible in list --all, served on demand from the spawn ledger.
+		const listed = await supervisor.handleList({}, { type: "list", all: true, sessionDir: sessionsDir });
 		const ids = listed.data?.sessions.map((session) => session.sessionId).sort();
-		expect(ids).toEqual(["live-child", "saved-root"]);
+		expect(ids).toEqual([
+			"dead-grand",
+			"foreign-child",
+			"foreign-grand",
+			"foreign-root",
+			"foreign-sibling",
+			"live-child",
+			"saved-root",
+		]);
 		expect(listed.data?.sessions.every((session) => session.activeSessionId === undefined)).toBe(true);
+		expect(listed.data?.sessions.find((session) => session.sessionId === "foreign-sibling")).toMatchObject({
+			rosterStatus: "inactive",
+			runtimeKind: "subagent",
+			rlmDepth: 1,
+			rlmChildId: "foreign-sibling",
+			sessionFile: foreignSiblingPath,
+			parentSessionPath: join(sessionsDir, "foreign-root.jsonl"),
+			cwd: dirname(foreignSiblingPath),
+		});
 		expect((await supervisor.handleList({}, { type: "list" })).data?.sessions).toEqual([]);
 
 		// A live worker's rows: the active root and its passivated child are resident; seeded rows stay list-all-only.
-		const worker = makeWorker("worker-1");
-		supervisor.workers.set("worker-1", worker);
 		supervisor.writeRosterEntry(
 			workerRosterEntryFromSummary(
 				summary({
@@ -926,7 +1005,12 @@ describe("supervisor roster ledger", () => {
 		const liveAll = await supervisor.handleList({}, { type: "list", all: true });
 		expect(liveAll.data?.sessions.map((session) => session.sessionId).sort()).toEqual([
 			"child-session",
+			"dead-grand",
 			"evicted",
+			"foreign-child",
+			"foreign-grand",
+			"foreign-root",
+			"foreign-sibling",
 			"live-child",
 			"saved-root",
 		]);

@@ -1089,6 +1089,10 @@ describe("rlm spawn ledger supervisor wiring", () => {
 				depth: 1,
 				name: "worker",
 			});
+			// The seed scopes to registered workers' families.
+			supervisor.workers.set("worker-1", {
+				descriptor: { workerId: "worker-1", sessionFile: parentFile, createCommand: { type: "create" } },
+			} as never);
 
 			await supervisor.seedRosterLedger();
 			const response = await supervisor.handleCommand({}, { type: "roster_subscribe" });
@@ -1134,6 +1138,10 @@ describe("rlm spawn ledger supervisor wiring", () => {
 				name: "existing",
 			});
 			Object.assign(supervisor.catalog, { list: vi.fn(async () => []) });
+			// The seed scopes to registered workers' families.
+			supervisor.workers.set("worker-1", {
+				descriptor: { workerId: "worker-1", sessionFile: parentFile, createCommand: { type: "create" } },
+			} as never);
 			await supervisor.seedRosterLedger();
 			const seeded = await supervisor.handleCommand({}, { type: "roster_subscribe" });
 			if (!seeded?.success) throw new Error("Roster subscription failed");

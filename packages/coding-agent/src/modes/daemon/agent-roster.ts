@@ -118,6 +118,7 @@ export function passivatedWorkerRosterEntry(
 
 export function sessionSummaryFromRosterEntry(entry: WorkerRosterEntry | AgentRosterEntry): SessionSummary {
 	const ledger = "status" in entry ? entry : undefined;
+	// statusLabel/lastHeardFromAt are set only for exceptional states; viewers key label display on their presence.
 	return {
 		...entry.summary,
 		sessionActions: { queuedCount: 0, steering: [], followUps: [] },

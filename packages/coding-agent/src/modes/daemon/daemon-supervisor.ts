@@ -434,6 +434,28 @@ function isSupervisorRecoveryCancelled(error: unknown): boolean {
 	return isSupervisorShutdownAdmissionCancelled(error) || isSupervisorGenerationStale(error);
 }
 
+// Workers can be registered mid-tree (a resumed subagent transcript), so descent is membership at
+// any step of the parent walk, never a comparison against the ultimate root alone.
+function rosterFamilyDescendsFrom(
+	edges: readonly RlmLedgerEdge[],
+): (path: string, roots: ReadonlySet<string>) => boolean {
+	const parentByChild = new Map(
+		edges.map((edge) => [canonicalSessionPath(edge.child), canonicalSessionPath(edge.parent)]),
+	);
+	return (path, roots) => {
+		const visited = new Set<string>();
+		let current = path;
+		while (!visited.has(current)) {
+			if (roots.has(current)) return true;
+			visited.add(current);
+			const parent = parentByChild.get(current);
+			if (parent === undefined) return false;
+			current = parent;
+		}
+		return false;
+	};
+}
+
 function isDaemonWorkerProbeTimeout(error: unknown): boolean {
 	return error instanceof DaemonWorkerProbeTimeoutError;
 }
@@ -2426,6 +2448,16 @@ export class DaemonSupervisor {
 			// The on-disk scan is public: an unserved (client-owned) worker row hides its live metadata only.
 			merged.push(summaryForInactiveSession(info));
 		}
+		// The boot seed covers registered workers' families only, so dead families (pure on-disk
+		// history, no registered worker anywhere in the tree) are not roster-resident. Their
+		// subagent rows are read from the spawn ledger on demand instead.
+		let spawnEdges: RlmLedgerEdge[] = [];
+		try {
+			spawnEdges = await this.rlmSpawnLedger().liveEdges();
+		} catch (error) {
+			this.log(`Could not list spawn-ledger sessions: ${String(error)}`);
+		}
+		const spawnParents = new Map(spawnEdges.map((edge) => [canonicalSessionPath(edge.child), edge.parent]));
 		const offlineRows: AgentRosterEntry[] = [];
 		for (const entry of this.roster().values()) {
 			if (entry.queuedChild || entry.summary.activeSessionId !== undefined) continue;
@@ -2437,7 +2469,28 @@ export class DaemonSupervisor {
 		for (const hydrated of await Promise.all(offlineRows.map((entry) => this.hydrateSeededEntry(entry)))) {
 			const summary = sessionSummaryFromRosterEntry(hydrated);
 			if (cwd !== undefined && resolve(summary.cwd) !== cwd) continue;
-			if (!this.matchesListSessionDir(summary, sessionDir)) continue;
+			if (!this.matchesListSessionDir(summary, sessionDir, spawnParents)) continue;
+			merged.push(summary);
+		}
+		const unseededEntries: WorkerRosterEntry[] = [];
+		const unseededFiles = new Set<string>();
+		for (const edge of spawnEdges) {
+			const childPath = canonicalSessionPath(edge.child);
+			if (scannedFiles.has(childPath) || activeByFile.has(childPath) || unseededFiles.has(childPath)) continue;
+			if (this.roster().hasSessionFile(childPath)) continue;
+			const entry = this.rosterEntryForSpawnLedgerEdge(edge);
+			if (this.roster().has(entry.agentId)) continue;
+			unseededFiles.add(childPath);
+			unseededEntries.push(entry);
+		}
+		for (const entry of await Promise.all(unseededEntries.map((entry) => this.hydratedSeedEntry(entry)))) {
+			// The same classification a roster write would have applied: these rows read "inactive".
+			const summary = sessionSummaryFromRosterEntry({
+				...entry,
+				status: classifySessionRosterStatus(entry.summary),
+			});
+			if (cwd !== undefined && resolve(summary.cwd) !== cwd) continue;
+			if (!this.matchesListSessionDir(summary, sessionDir, spawnParents)) continue;
 			merged.push(summary);
 		}
 		for (const summary of active) {
@@ -2448,21 +2501,29 @@ export class DaemonSupervisor {
 		return success(command.id, "list", { ...data, sessions: merged });
 	}
 
-	private async hydrateSeededEntry(entry: AgentRosterEntry): Promise<AgentRosterEntry> {
-		if (entry.seededCwd !== true || !entry.summary.sessionFile) return entry;
-		const info = await readSessionInfo(entry.summary.sessionFile).catch(() => undefined);
-		if (!info) return entry;
-		const current = this.roster().get(entry.agentId);
-		if (current !== entry) return current ?? entry;
+	private async hydratedSeedEntry<T extends WorkerRosterEntry>(entry: T): Promise<T> {
+		const info = entry.summary.sessionFile
+			? await readSessionInfo(entry.summary.sessionFile).catch(() => undefined)
+			: undefined;
+		if (!info) return { ...entry, seededCwd: true as const };
 		const { seededCwd, ...rest } = entry;
-		return this.roster().write(
-			{ ...rest, summary: { ...entry.summary, cwd: info.cwd } },
-			entry.workerId,
-			entry.statusLabel,
-		);
+		return { ...rest, summary: { ...entry.summary, cwd: info.cwd } } as T;
 	}
 
-	private matchesListSessionDir(summary: SessionSummary, sessionDir: string | undefined): boolean {
+	private async hydrateSeededEntry(entry: AgentRosterEntry): Promise<AgentRosterEntry> {
+		if (entry.seededCwd !== true || !entry.summary.sessionFile) return entry;
+		const hydrated = await this.hydratedSeedEntry(entry);
+		if (hydrated.seededCwd === true) return entry;
+		const current = this.roster().get(entry.agentId);
+		if (current !== entry) return current ?? entry;
+		return this.roster().write(hydrated, entry.workerId, entry.statusLabel);
+	}
+
+	private matchesListSessionDir(
+		summary: SessionSummary,
+		sessionDir: string | undefined,
+		spawnParents?: ReadonlyMap<string, string>,
+	): boolean {
 		if (sessionDir === undefined) return true;
 		if (!summary.sessionFile) return false;
 		let file = resolve(summary.sessionFile);
@@ -2473,7 +2534,9 @@ export class DaemonSupervisor {
 			if (visited.has(canonical)) break;
 			visited.add(canonical);
 			file = resolve(parentSessionPath);
-			parentSessionPath = this.roster().bySessionFile(canonical)?.summary.parentSessionPath;
+			// Dead-family ancestors are not roster-resident; the spawn ledger continues the walk.
+			parentSessionPath =
+				this.roster().bySessionFile(canonical)?.summary.parentSessionPath ?? spawnParents?.get(canonical);
 		}
 		return dirname(file) === resolve(sessionDir);
 	}
@@ -3949,23 +4012,20 @@ export class DaemonSupervisor {
 
 	private async seedRosterLedger(): Promise<void> {
 		try {
-			for (const info of await this.catalog.list(undefined, this.defaultSessionConfig.sessionDir)) {
-				const entry = workerRosterEntryFromSummary(summaryForInactiveSession(info));
-				if (!this.roster().has(entry.agentId)) this.writeRosterEntry(entry);
+			const roots = new Set<string>();
+			for (const worker of this.workers.values()) {
+				const root = worker.descriptor.sessionFile ?? worker.descriptor.createCommand.sessionPath;
+				if (root !== undefined) roots.add(canonicalSessionPath(root));
 			}
-		} catch (error) {
-			this.log(`Could not seed the agent roster from the session catalog: ${String(error)}`);
-		}
-		try {
-			// Stat-reconciled: rows the disk cannot back (out-of-band transcript removal) never seed.
-			for (const edge of await this.rlmSpawnLedger().liveEdges()) {
+			if (roots.size === 0) return;
+			const edges = await this.rlmSpawnLedger().liveEdges();
+			const descendsFrom = rosterFamilyDescendsFrom(edges);
+			for (const edge of edges) {
+				if (!descendsFrom(canonicalSessionPath(edge.parent), roots)) continue;
 				const entry = this.rosterEntryForSpawnLedgerEdge(edge);
 				if (this.roster().has(entry.agentId)) continue;
 				if (this.roster().hasSessionFile(canonicalSessionPath(edge.child))) continue;
-				const info = await readSessionInfo(edge.child).catch(() => undefined);
-				this.roster().write(
-					info ? { ...entry, summary: { ...entry.summary, cwd: info.cwd } } : { ...entry, seededCwd: true },
-				);
+				this.roster().write(await this.hydratedSeedEntry(entry));
 			}
 		} catch (error) {
 			this.log(`Could not seed the agent roster from the spawn ledger: ${String(error)}`);
@@ -4077,7 +4137,6 @@ export class DaemonSupervisor {
 		delta: Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>,
 		source?: DaemonWorkerClient,
 	): Promise<void> {
-		// Live edges are read before any deletion, so a reseeded child never surfaces as a transient removal.
 		let edgesFailed = false;
 		const edges = await this.rlmSpawnLedger()
 			.liveEdges()
@@ -4097,48 +4156,24 @@ export class DaemonSupervisor {
 				unclaimed.set(entry.agentId, entry);
 			}
 		}
-		// A reseed keeps the previous claim and hydrated summary; a synthetic seed would drop
-		// lastActivityAt (pinning canEvictWorker on NaN) and flap the claim off on every snapshot.
-		// Only THIS worker's family reseeds: other families' rows are owned by their own workers or
-		// the startup seed, and a client-owned worker's dropped rows must not resurrect as public rows.
+		// Only this worker's family reseeds: anything wider can resurrect a client-owned worker's dropped children.
 		const workerRoot = worker.descriptor.sessionFile ?? worker.descriptor.createCommand.sessionPath;
-		const rootPath = workerRoot !== undefined ? canonicalSessionPath(workerRoot) : undefined;
-		const parentByChild = new Map(
-			edges.map((edge) => [canonicalSessionPath(edge.child), canonicalSessionPath(edge.parent)]),
-		);
-		const familyRoot = (path: string): string => {
-			const visited = new Set<string>();
-			let current = path;
-			while (!visited.has(current)) {
-				visited.add(current);
-				const parent = parentByChild.get(current);
-				if (parent === undefined) return current;
-				current = parent;
-			}
-			return current;
+		const rootPaths = new Set(workerRoot !== undefined ? [canonicalSessionPath(workerRoot)] : []);
+		const descendsFrom = rosterFamilyDescendsFrom(edges);
+		const familyEdges = edges.filter((edge) => descendsFrom(canonicalSessionPath(edge.parent), rootPaths));
+		// "Unclaimed" rows survive: the sweep deletes them but the restore branch rewrites them.
+		const rowSurvivesWithoutReseed = (entry: WorkerRosterEntry, childPath: string): boolean => {
+			if (unclaimed.has(entry.agentId)) return true;
+			if (sent.has(entry.agentId) && !removed.has(entry.agentId)) return true;
+			const survives = (row: AgentRosterEntry | undefined): boolean =>
+				row !== undefined && !unclaimed.has(row.agentId) && !removed.has(row.agentId);
+			return survives(this.roster().get(entry.agentId)) || survives(this.roster().bySessionFile(childPath));
 		};
-		const familyEdges = edges.filter(
-			(edge) => rootPath !== undefined && familyRoot(canonicalSessionPath(edge.child)) === rootPath,
-		);
-		const seedInfo = new Map<string, SessionInfo | null | undefined>();
+		const seededEntries = new Map<string, WorkerRosterEntry>();
 		for (const edge of familyEdges) {
 			const entry = this.rosterEntryForSpawnLedgerEdge(edge);
-			const childPath = canonicalSessionPath(edge.child);
-			const currentById = this.roster().get(entry.agentId);
-			const currentByFile = this.roster().bySessionFile(childPath);
-			const currentIdSurvives =
-				currentById !== undefined && !unclaimed.has(currentById.agentId) && !removed.has(currentById.agentId);
-			const currentFileSurvives =
-				currentByFile !== undefined && !unclaimed.has(currentByFile.agentId) && !removed.has(currentByFile.agentId);
-			if (
-				unclaimed.has(entry.agentId) ||
-				(sent.has(entry.agentId) && !removed.has(entry.agentId)) ||
-				currentIdSurvives ||
-				currentFileSurvives
-			) {
-				continue;
-			}
-			seedInfo.set(entry.agentId, await readSessionInfo(edge.child).catch(() => undefined));
+			if (rowSurvivesWithoutReseed(entry, canonicalSessionPath(edge.child))) continue;
+			seededEntries.set(entry.agentId, await this.hydratedSeedEntry(entry));
 			if (!this.isWorkerRosterApplyCurrent(worker, applySource)) return;
 		}
 
@@ -4163,10 +4198,7 @@ export class DaemonSupervisor {
 				this.writeRosterEntry(rest, worker);
 				continue;
 			}
-			const info = seedInfo.get(entry.agentId);
-			this.roster().write(
-				info ? { ...entry, summary: { ...entry.summary, cwd: info.cwd } } : { ...entry, seededCwd: true },
-			);
+			this.roster().write(seededEntries.get(entry.agentId) ?? { ...entry, seededCwd: true });
 		}
 	}
 
