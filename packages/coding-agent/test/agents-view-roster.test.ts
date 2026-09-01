@@ -277,7 +277,13 @@ describe("supervisor roster subscription", () => {
 			expect(updates[0]?.removed).toEqual(["seeded"]);
 			expect(bystanderUpdates).toEqual([]);
 
-			// The chat bar rides the same push surface through its own connection.
+			// The chat bar rides the same push surface through its own connection; a
+			// public parent has its own roster row alongside its children.
+			internals.writeRosterEntry(
+				workerRosterEntryFromSummary(
+					summary({ id: "parent-active", sessionId: "parent", activeSessionId: "parent-active" }),
+				),
+			);
 			internals.writeRosterEntry(barChild("child-a", { activeSessionId: "child-a-active", isSessionActive: true }));
 			const barClient = new DaemonClient(socketPath);
 			await barClient.connect();
@@ -286,7 +292,7 @@ describe("supervisor roster subscription", () => {
 			const setSubagentCounts = vi.fn();
 			const bar = Object.assign(Object.create(InteractiveMode.prototype), {
 				agentConnection: connection,
-				connectionState: { activeSessionId: "parent-active" },
+				connectionState: { activeSessionId: "parent-active", sessionId: "parent" },
 				// A stale snapshot claims one lone running child; a nonempty roster must win.
 				subagentSnapshots: new Map([
 					["stale", { id: "stale", label: "stale", status: "running", sessionDir: "/tmp" }],
@@ -317,10 +323,21 @@ describe("supervisor roster subscription", () => {
 				// A push with no accompanying session event must still repaint.
 				expect(bar.ui.requestRender).toHaveBeenCalled();
 
-				// A client-owned session has no public roster rows: the bar falls back to snapshots.
-				bar.connectionState = { activeSessionId: "owned-active" };
+				// A client-owned session has no public roster row: the bar falls back to snapshots.
+				bar.connectionState = { activeSessionId: "owned-active", sessionId: "owned" };
 				bar.updateSubagentSummaryLine();
 				expect(setSubagentCounts).toHaveBeenLastCalledWith({ total: 1, running: 1, idle: 0, inactive: 0 });
+
+				// A public parent whose children all left the roster shows zero, never stale snapshots.
+				bar.connectionState = { activeSessionId: "parent2-active", sessionId: "parent2" };
+				internals.writeRosterEntry(
+					workerRosterEntryFromSummary(
+						summary({ id: "parent2-active", sessionId: "parent2", activeSessionId: "parent2-active" }),
+					),
+				);
+				await vi.waitFor(() =>
+					expect(setSubagentCounts).toHaveBeenLastCalledWith({ total: 0, running: 0, idle: 0, inactive: 0 }),
+				);
 			} finally {
 				barClient.close();
 			}
