@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.0] - 2026-09-01
+
+- Refreshed the model catalog from live provider catalogs (pricing updates, new and removed models); fixed OpenCode Go Qwen routes mislabeled as Anthropic and excluded private dev/ Prime Inference routes.
+- Removed the `getOverflowPatterns()` test helper export from `utils/overflow.ts`; use `isContextOverflow()` directly.
+- Fixed Anthropic-compatible prompt caching so the rolling cache marker advances to the latest tool result.
+
 ## [0.8.1] - 2026-08-26
 
 - Refreshed the generated model catalog from live provider catalogs: added GLM 5.3 (OpenRouter, Prime Inference), DeepSeek V4 Flash Vision Exp, and Inkling free routes; followed the Vercel AI Gateway `xai/` to `spacexai/` grok rename; picked up repricing for gpt-5.6-sol, Gemini 3.6 Flash, and others.

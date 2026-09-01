@@ -1,1 +1,0 @@
-- Render Mermaid code blocks in assistant messages as inline Unicode diagrams, with a "Mermaid diagrams" setting (off/final/streaming, default streaming).

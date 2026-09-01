@@ -1,1 +1,0 @@
-- Fixed concurrent `execute_bash_and_wait` commands sharing one bash abort controller: each `executeBash` invocation now gets its own controller, so a finishing command no longer clears a still-running command's abort state and `abortBash` cancels every in-flight command.

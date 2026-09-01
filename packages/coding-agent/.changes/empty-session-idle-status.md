@@ -1,1 +1,0 @@
-- Fixed `prime-agent list` pinning an abandoned empty session at "working" forever; an empty session with nothing in flight now reports "idle".

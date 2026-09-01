@@ -1,1 +1,0 @@
-- Made cross-worker agent lists current without broadcasting duplicate peer rosters.

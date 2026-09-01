@@ -1,1 +1,0 @@
-- Fixed queued-message editing so duplicate prompts always target the selected queue entry.

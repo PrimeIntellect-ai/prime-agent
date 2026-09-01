@@ -1,1 +1,0 @@
-- Fixed empty draft sessions lingering as zombie rows after the last viewer quit: a direct-transport client's detach or socket drop now triggers the same last-detach eviction as supervisor-routed clients.

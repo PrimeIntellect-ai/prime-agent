@@ -1,1 +1,0 @@
-- Session disposal no longer blocks on the final trace upload (uploads finish detached; daemon exit, update restarts, and worker archive-and-shutdown drain them through a single barrier), and deleting an RLM subagent no longer writes a kernel snapshot that the deletion sweep removes right away.

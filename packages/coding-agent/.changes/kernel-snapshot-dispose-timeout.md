@@ -1,1 +1,0 @@
-- Fixed graceful Python kernel disposal so timed-out final snapshots are cancelled before teardown.

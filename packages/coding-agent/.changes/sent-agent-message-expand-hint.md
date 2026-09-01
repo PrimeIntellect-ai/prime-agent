@@ -1,1 +1,0 @@
-- Fixed sent agent messages under Python cells not showing the expand/collapse keybinding hint that received agent messages show.

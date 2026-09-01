@@ -1,1 +1,0 @@
-- Reduced kernel memory spikes during namespace snapshots: the payload now pickles straight into the staged file instead of building serialized copies in memory (peak snapshot overhead ~3.9x payload -> ~1x; ENG-5819).
