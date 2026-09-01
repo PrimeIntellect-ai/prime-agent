@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AVO_INTERNAL_ABLATIONS_ENV, type AvoAblationFeature } from "../../core/avo/ablation.js";
 import { summarizeAvoMetric } from "../../core/avo/experiment.js";
@@ -60,7 +61,13 @@ const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 const SPECBENCH_CACHE_ROOT = join(homedir(), ".cache", "prime-agent", "specbench");
 const SPECBENCH_GRADER_ROOT = join(homedir(), ".cache", "prime-agent", "specbench-grader-v1");
 const SPECBENCH_TOOLCHAIN_ROOT = join(homedir(), ".cache", "prime-agent", "specbench-toolchains");
-const SPECBENCH_OFFICIAL_SUITE_TIMEOUT_MS = 900_000;
+export const SPECBENCH_TIMEOUT_DEFAULTS = {
+	ipythonCellMinimumMs: 60_000,
+	ipythonCellMaximumMs: 120_000,
+	gradeSuiteMinimumMs: 30_000,
+	gradeSuiteMaximumMs: 120_000,
+	gradeTotalMaximumMs: 180_000,
+} as const;
 const SPECBENCH_OFFICIAL_TASK_COUNT = 31;
 // Frozen against the clean official catalog and pinned GCC 15 toolchain. The
 // digest covers JSON.stringify(sorted [{nodeId, reason}]) without disclosing
@@ -306,15 +313,42 @@ export function deriveSpecBenchExecutionBudgets(timeoutSeconds: number): {
 	if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
 		throw new Error("SpecBench timeoutSeconds must be positive");
 	}
+	const taskTimeoutMs = timeoutSeconds * 1_000;
+	const gradeSuiteTimeoutMs = Math.min(
+		SPECBENCH_TIMEOUT_DEFAULTS.gradeSuiteMaximumMs,
+		Math.max(SPECBENCH_TIMEOUT_DEFAULTS.gradeSuiteMinimumMs, taskTimeoutMs),
+	);
 	return {
-		// The model-facing cell waits on a host broker that may legitimately run an
-		// official suite for 900 seconds, plus the client's bounded close-out margin.
-		// Retiring the kernel first leaves a live host evaluation behind and makes a
-		// retry appear active/duplicate, so the caller must outlive the broker.
-		ipythonCellTimeoutMs: 990_000,
-		gradeSuiteTimeoutMs: SPECBENCH_OFFICIAL_SUITE_TIMEOUT_MS,
-		gradeTotalTimeoutMs: SPECBENCH_OFFICIAL_SUITE_TIMEOUT_MS * 3,
+		ipythonCellTimeoutMs: Math.min(
+			SPECBENCH_TIMEOUT_DEFAULTS.ipythonCellMaximumMs,
+			Math.max(SPECBENCH_TIMEOUT_DEFAULTS.ipythonCellMinimumMs, taskTimeoutMs + 30_000),
+		),
+		gradeSuiteTimeoutMs,
+		gradeTotalTimeoutMs: SPECBENCH_TIMEOUT_DEFAULTS.gradeTotalMaximumMs,
 	};
+}
+
+export interface SpecBenchGradeDeadline {
+	expiresAtMs: number;
+	suiteTimeoutMs: number;
+}
+
+export function createSpecBenchGradeDeadline(
+	totalTimeoutMs: number,
+	suiteTimeoutMs: number,
+	nowMs = performance.now(),
+): SpecBenchGradeDeadline {
+	if (!Number.isFinite(totalTimeoutMs) || totalTimeoutMs <= 0) {
+		throw new Error("SpecBench total grading timeout must be positive");
+	}
+	if (!Number.isFinite(suiteTimeoutMs) || suiteTimeoutMs <= 0) {
+		throw new Error("SpecBench suite grading timeout must be positive");
+	}
+	return { expiresAtMs: nowMs + totalTimeoutMs, suiteTimeoutMs };
+}
+
+export function specBenchRemainingGradeTimeoutMs(deadline: SpecBenchGradeDeadline, nowMs = performance.now()): number {
+	return Math.max(0, Math.min(deadline.suiteTimeoutMs, Math.ceil(deadline.expiresAtMs - nowMs)));
 }
 
 export interface SpecBenchResult {
@@ -1736,6 +1770,7 @@ export function buildSpecBenchBaselineTestSource(
 	if (!Number.isSafeInteger(timeoutSeconds) || timeoutSeconds <= 0) {
 		throw new Error("SpecBench baseline timeoutSeconds must be a positive integer");
 	}
+	const suiteTimeoutSeconds = Math.ceil(deriveSpecBenchExecutionBudgets(timeoutSeconds).gradeSuiteTimeoutMs / 1_000);
 	const manifest = Object.fromEntries(
 		Object.entries(starterCode).map(([path, content]) => [path, createHash("sha256").update(content).digest("hex")]),
 	);
@@ -1779,7 +1814,7 @@ def test_specbench_public_contract():
             text=True,
             capture_output=True,
             env=env,
-            timeout=900,
+            timeout=${suiteTimeoutSeconds},
         )
         assert junit_path.is_file(), "SpecBench public validation produced no structured evidence"
         root = ET.parse(junit_path).getroot()
@@ -2162,6 +2197,7 @@ async function gradeSuite(options: {
 	specbenchRoot: string;
 	diskWatchdogMinimumBytes: number;
 	diskWatchdogMaximumCaseBytes: number;
+	deadline: SpecBenchGradeDeadline;
 	hostFixtures?: readonly SpecBenchHostFixture[];
 }): Promise<SpecBenchGrade> {
 	const suiteRoot = mkdtempSync(join(tmpdir(), `prime-specbench-grade-${options.taskId}-`));
@@ -2194,6 +2230,22 @@ async function gradeSuite(options: {
 			junitPath,
 		});
 		const environment = specBenchGradeEnvironment(process.env, isolatedWorkspace);
+		const timeoutMs = specBenchRemainingGradeTimeoutMs(options.deadline);
+		if (timeoutMs === 0) {
+			const result: CommandResult = {
+				exitCode: null,
+				timedOut: true,
+				durationMs: 0,
+				stdout: "",
+				stderr: "SpecBench shared grading deadline was exhausted before this suite started.\n",
+			};
+			writeHostFile(
+				options.outputDir,
+				relative(options.outputDir, options.logPath),
+				`${result.stdout}\n${result.stderr}`,
+			);
+			return parseSpecBenchGrade(result);
+		}
 		const result = await runCommand(
 			buildSpecBenchGradeSandboxArgs(
 				gradeCommand,
@@ -2204,7 +2256,7 @@ async function gradeSuite(options: {
 			),
 			{
 				cwd: isolatedWorkspace,
-				timeoutMs: SPECBENCH_OFFICIAL_SUITE_TIMEOUT_MS,
+				timeoutMs,
 				env: environment,
 				diskWatchdog: {
 					capacityPath: options.outputDir,
@@ -2385,6 +2437,7 @@ async function runTask(
 ): Promise<SpecBenchResult> {
 	const diskAvailableBytesBefore = assertSpecBenchDiskCapacity(options.outputDir, provenance.diskWatchdogMinimumBytes);
 	const task = loadTaskMetadata(options.specbenchRoot, taskId);
+	const executionBudgets = deriveSpecBenchExecutionBudgets(task.timeoutSeconds);
 	const hostFixtures = specBenchHostFixtures(taskId, dirname(dirname(task.publicTestDir)));
 	const hostFixtureDigest =
 		hostFixtures.length > 0
@@ -2494,8 +2547,8 @@ async function runTask(
 							dirname(dirname(graderPython)),
 							dirname(dirname(dirname(realpathSync(graderPython)))),
 						].filter((path) => path.startsWith(`${homedir()}${sep}`) && existsSync(path)),
-						defaultTimeoutMs: deriveSpecBenchExecutionBudgets(task.timeoutSeconds).gradeSuiteTimeoutMs,
-						maximumTimeoutMs: deriveSpecBenchExecutionBudgets(task.timeoutSeconds).gradeSuiteTimeoutMs,
+						defaultTimeoutMs: executionBudgets.gradeSuiteTimeoutMs,
+						maximumTimeoutMs: executionBudgets.gradeSuiteTimeoutMs,
 						pythonSemanticAuthority: true,
 					})
 				: undefined,
@@ -2548,9 +2601,7 @@ async function runTask(
 						}
 					: {}),
 				PRIME_AGENT_KERNEL_PYTHON: kernelPython,
-				PRIME_AGENT_IPYTHON_EXECUTION_TIMEOUT_MS: String(
-					deriveSpecBenchExecutionBudgets(task.timeoutSeconds).ipythonCellTimeoutMs,
-				),
+				PRIME_AGENT_IPYTHON_EXECUTION_TIMEOUT_MS: String(executionBudgets.ipythonCellTimeoutMs),
 			};
 			return runCommand(
 				options.hardening
@@ -2588,6 +2639,10 @@ async function runTask(
 		`# stdout\n${agent.stdout}\n# stderr\n${agent.stderr}\n`,
 	);
 	if (agent.infrastructureError) throw new Error(agent.infrastructureError);
+	const gradeDeadline = createSpecBenchGradeDeadline(
+		executionBudgets.gradeTotalTimeoutMs,
+		executionBudgets.gradeSuiteTimeoutMs,
+	);
 	const grade = (testDir: string, logName: string): Promise<SpecBenchGrade> =>
 		gradeSuite({
 			taskId,
@@ -2600,6 +2655,7 @@ async function runTask(
 			specbenchRoot: options.specbenchRoot,
 			diskWatchdogMinimumBytes: provenance.diskWatchdogMinimumBytes,
 			diskWatchdogMaximumCaseBytes: provenance.diskWatchdogMaximumCaseBytes,
+			deadline: gradeDeadline,
 			hostFixtures,
 		});
 	const publicGrade = await grade(task.publicTestDir, "public-grade.log");

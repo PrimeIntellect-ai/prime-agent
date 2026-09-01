@@ -1,0 +1,1 @@
+- Fixed SpecBench grading to enforce its documented per-suite limits within one shared three-minute deadline ([#15](https://github.com/lewbei/prime-agent/issues/15)).

@@ -13,6 +13,7 @@ import {
 	buildSpecBenchGradeSandboxArgs,
 	buildSpecBenchResolverSandboxArgs,
 	buildSpecBenchSandboxArgs,
+	createSpecBenchGradeDeadline,
 	deriveSpecBenchExecutionBudgets,
 	ensureSpecBenchGraderPython,
 	listSpecBenchTasks,
@@ -35,6 +36,7 @@ import {
 	specBenchLockedStarterPaths,
 	specBenchNetworkPolicyViolations,
 	specBenchNetworkToolPolicyViolations,
+	specBenchRemainingGradeTimeoutMs,
 	specBenchTaskPrompt,
 	specBenchToolchainProvenance,
 	specBenchVerificationHiddenPaths,
@@ -53,7 +55,7 @@ describe("SpecBench evaluation runner", () => {
 			"c_compiler",
 		);
 		expect(source).toContain('"--timeout=30"');
-		expect(source).toContain("timeout=900");
+		expect(source).toContain("timeout=30");
 		expect(source).toContain('"pytest_timeout"');
 		expect(source).toContain("assert junit_path.is_file()");
 		expect(source).toContain(".specbench-visible/tests/public");
@@ -148,15 +150,22 @@ describe("SpecBench evaluation runner", () => {
 
 	test("bounds model-authored cells and all official grading independently of the outer task timeout", () => {
 		expect(deriveSpecBenchExecutionBudgets(30)).toEqual({
-			ipythonCellTimeoutMs: 990_000,
-			gradeSuiteTimeoutMs: 900_000,
-			gradeTotalTimeoutMs: 2_700_000,
+			ipythonCellTimeoutMs: 60_000,
+			gradeSuiteTimeoutMs: 30_000,
+			gradeTotalTimeoutMs: 180_000,
 		});
 		expect(deriveSpecBenchExecutionBudgets(600)).toEqual({
-			ipythonCellTimeoutMs: 990_000,
-			gradeSuiteTimeoutMs: 900_000,
-			gradeTotalTimeoutMs: 2_700_000,
+			ipythonCellTimeoutMs: 120_000,
+			gradeSuiteTimeoutMs: 120_000,
+			gradeTotalTimeoutMs: 180_000,
 		});
+	});
+
+	test("caps sequential grading suites by one monotonic total deadline", () => {
+		const deadline = createSpecBenchGradeDeadline(180_000, 120_000, 1_000);
+		expect(specBenchRemainingGradeTimeoutMs(deadline, 1_000)).toBe(120_000);
+		expect(specBenchRemainingGradeTimeoutMs(deadline, 121_000)).toBe(60_000);
+		expect(specBenchRemainingGradeTimeoutMs(deadline, 181_000)).toBe(0);
 	});
 
 	test("parses explicit task and hardening controls", () => {
