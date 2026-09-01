@@ -7,7 +7,8 @@ https://github.com/PrimeIntellect-ai/prime-agent/discussions
 ## Context
 
 <!-- Link the accepted Issue or Discussion and explain why this change is needed.
-Prime Agent Linear tickets should normally use the Research team and the Prime Agent: Long-Horizon research project. -->
+Prime Agent Linear tickets should normally use the Research team and the Prime Agent: Long-Horizon research project.
+If this change has no ticket, add `No-Ticket: <short reason>` below. -->
 
 ## Changes
 
