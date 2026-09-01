@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
 	chmodSync,
@@ -6544,11 +6545,12 @@ describe("daemon mode helpers", () => {
 
 			// The transcript survives deletion and its upload completes independently.
 			releaseFetch();
+			const entryKey = createHash("sha256").update(fixture.childSessionFile).digest("hex").slice(0, 32);
 			await vi.waitFor(() => {
-				const outbox = JSON.parse(readFileSync(join(tempDir, "agent-traces-outbox.json"), "utf8")) as {
-					sessions: Record<string, unknown>;
-				};
-				expect(outbox.sessions[fixture.childSessionFile]).not.toBeNull();
+				const entry = JSON.parse(
+					readFileSync(join(tempDir, "agent-traces-outbox", `${entryKey}.json`), "utf8"),
+				) as { sessionFile: string; size?: number };
+				expect(entry.size).toBeGreaterThan(0);
 			});
 			expect(calls[0]?.body).toBe(transcriptAtUpload);
 		} finally {

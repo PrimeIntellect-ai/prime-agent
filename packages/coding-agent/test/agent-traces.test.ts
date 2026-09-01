@@ -1,3 +1,5 @@
+import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -74,11 +76,29 @@ function writeSession(cwd: string, sessionDir: string, id: string, parentSession
 	return sessionManager;
 }
 
-function readOutboxFile(agentDir: string): Record<string, { size: number; mtimeMs: number } | null> {
-	const raw = JSON.parse(readFileSync(join(agentDir, "agent-traces-outbox.json"), "utf8")) as {
-		sessions: Record<string, { size: number; mtimeMs: number } | null>;
+/** Mirrors the outbox on-disk format: one JSON entry per session file, named by path hash. */
+function outboxEntryPath(agentDir: string, sessionFile: string): string {
+	const key = createHash("sha256").update(sessionFile).digest("hex").slice(0, 32);
+	return join(agentDir, "agent-traces-outbox", `${key}.json`);
+}
+
+function writeOutboxEntry(agentDir: string, sessionFile: string, signature?: { size: number; mtimeMs: number }): void {
+	mkdirSync(join(agentDir, "agent-traces-outbox"), { recursive: true });
+	writeFileSync(outboxEntryPath(agentDir, sessionFile), JSON.stringify({ sessionFile, ...signature }));
+}
+
+function readOutboxEntry(
+	agentDir: string,
+	sessionFile: string,
+): { sessionFile: string; size?: number; mtimeMs?: number } | undefined {
+	if (!existsSync(outboxEntryPath(agentDir, sessionFile))) {
+		return undefined;
+	}
+	return JSON.parse(readFileSync(outboxEntryPath(agentDir, sessionFile), "utf8")) as {
+		sessionFile: string;
+		size?: number;
+		mtimeMs?: number;
 	};
-	return raw.sessions;
 }
 
 async function advanceTimersUntil(condition: () => boolean): Promise<void> {
@@ -325,10 +345,7 @@ describe("agent trace upload", () => {
 		const missed = writeSession(cwd, sessionDir, "missed-session");
 		const missedFile = missed.getSessionFile();
 		expect(missedFile).toBeDefined();
-		writeFileSync(
-			join(tempDir, "agent-traces-outbox.json"),
-			JSON.stringify({ version: 1, sessions: { [missedFile as string]: null } }),
-		);
+		writeOutboxEntry(tempDir, missedFile as string);
 
 		const live = SessionManager.create(cwd, sessionDir);
 		live.newSession({ id: "live-session" });
@@ -347,7 +364,11 @@ describe("agent trace upload", () => {
 		expect(calls[0].init.body).toBe(readFileSync(missedFile as string, "utf8"));
 		const stats = await stat(missedFile as string);
 		await vi.waitFor(() =>
-			expect(readOutboxFile(tempDir)[missedFile as string]).toEqual({ size: stats.size, mtimeMs: stats.mtimeMs }),
+			expect(readOutboxEntry(tempDir, missedFile as string)).toEqual({
+				sessionFile: missedFile,
+				size: stats.size,
+				mtimeMs: stats.mtimeMs,
+			}),
 		);
 	});
 
@@ -423,7 +444,13 @@ describe("agent trace upload", () => {
 
 		releaseFetch();
 		await advanceTimersUntil(() => calls.length === 2);
-		expect(calls[1].init.body).toBe(readFileSync(sessionManager.getSessionFile() as string, "utf8"));
+		const finalBody = readFileSync(sessionManager.getSessionFile() as string, "utf8");
+		expect(calls[1].init.body).toBe(finalBody);
+		// Drain the follow-up upload's completion so its chain cannot leak into later fake-timer tests.
+		await advanceTimersUntil(
+			() =>
+				readOutboxEntry(tempDir, sessionManager.getSessionFile() as string)?.size === Buffer.byteLength(finalBody),
+		);
 	});
 
 	it("schedules automatic uploads at most once per minute and only after new entries persist", async () => {
@@ -1109,11 +1136,8 @@ describe("agent trace upload", () => {
 		const sessionFile = sessionManager.getSessionFile();
 		expect(sessionFile).toBeDefined();
 
-		// Wait on real fs completion only: advancing timers would start the upload itself.
-		for (let step = 0; step < 50 && !existsSync(join(tempDir, "agent-traces-outbox.json")); step += 1) {
-			await stat(new URL(import.meta.url));
-		}
-		expect(readOutboxFile(tempDir)).toEqual({ [sessionFile as string]: null });
+		// Synchronously durable: the intent marker is on disk the moment the persist returns.
+		expect(readOutboxEntry(tempDir, sessionFile as string)).toEqual({ sessionFile });
 		expect(calls).toHaveLength(0);
 	});
 
@@ -1123,10 +1147,7 @@ describe("agent trace upload", () => {
 		mkdirSync(cwd, { recursive: true });
 		const missed = writeSession(cwd, sessionDir, "crash-lost-session");
 		const missedFile = missed.getSessionFile() as string;
-		writeFileSync(
-			join(tempDir, "agent-traces-outbox.json"),
-			JSON.stringify({ version: 1, sessions: { [missedFile]: null } }),
-		);
+		writeOutboxEntry(tempDir, missedFile);
 
 		const calls: FetchCall[] = [];
 		const options = {
@@ -1144,7 +1165,11 @@ describe("agent trace upload", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0].init.body).toBe(readFileSync(missedFile, "utf8"));
 		const stats = await stat(missedFile);
-		expect(readOutboxFile(tempDir)[missedFile]).toEqual({ size: stats.size, mtimeMs: stats.mtimeMs });
+		expect(readOutboxEntry(tempDir, missedFile)).toEqual({
+			sessionFile: missedFile,
+			size: stats.size,
+			mtimeMs: stats.mtimeMs,
+		});
 
 		// Unchanged content: subsequent cycles and restarts never re-POST.
 		const second = await catchUpAgentTraceUploads(options);
@@ -1163,13 +1188,8 @@ describe("agent trace upload", () => {
 		const keptStats = await stat(keptFile);
 		const keptSignature = { size: keptStats.size, mtimeMs: keptStats.mtimeMs };
 		const deletedFile = join(sessionDir, "deleted-session.jsonl");
-		writeFileSync(
-			join(tempDir, "agent-traces-outbox.json"),
-			JSON.stringify({
-				version: 1,
-				sessions: { [deletedFile]: null, [keptFile]: keptSignature },
-			}),
-		);
+		writeOutboxEntry(tempDir, deletedFile);
+		writeOutboxEntry(tempDir, keptFile, keptSignature);
 
 		const calls: FetchCall[] = [];
 		const result = await catchUpAgentTraceUploads({
@@ -1184,7 +1204,126 @@ describe("agent trace upload", () => {
 
 		expect(result).toEqual({ pruned: 1, results: [] });
 		expect(calls).toHaveLength(0);
-		expect(readOutboxFile(tempDir)).toEqual({ [keptFile]: keptSignature });
+		expect(existsSync(outboxEntryPath(tempDir, deletedFile))).toBe(false);
+		expect(readOutboxEntry(tempDir, keptFile)).toEqual({ sessionFile: keptFile, ...keptSignature });
+	});
+
+	it("arms upload timers that never hold the process open", async () => {
+		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+		const cwd = join(tempDir, "project");
+		const sessionDir = join(tempDir, "sessions");
+		mkdirSync(cwd, { recursive: true });
+		const sessionManager = SessionManager.create(cwd, sessionDir);
+		sessionManager.newSession({ id: "unref-session" });
+
+		const calls: FetchCall[] = [];
+		installAgentTraceUpload(sessionManager, {
+			authStorage: AuthStorage.inMemory({
+				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+			}),
+			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
+			baseUrl: "https://api.example.test",
+			fetchFn: createFetchRecorder(calls),
+		});
+
+		sessionManager.appendMessage(createUserMessage("hello"));
+		sessionManager.appendMessage(createAssistantMessage("hi"));
+		const timer = setTimeoutSpy.mock.results.at(-1)?.value as NodeJS.Timeout;
+		expect(timer.hasRef()).toBe(false);
+	});
+
+	it("honors an advertised Retry-After on the next scheduled cycle without blocking", async () => {
+		vi.useFakeTimers();
+		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+		const cwd = join(tempDir, "project");
+		const sessionDir = join(tempDir, "sessions");
+		mkdirSync(cwd, { recursive: true });
+		const sessionManager = SessionManager.create(cwd, sessionDir);
+		sessionManager.newSession({ id: "retry-after-reschedule-session" });
+
+		let attempts = 0;
+		const calls: FetchCall[] = [];
+		const fetchFn: typeof fetch = async (input, init) => {
+			attempts += 1;
+			if (attempts === 1) {
+				return new Response(null, { status: 429, headers: { "retry-after": "300" } });
+			}
+			return createFetchRecorder(calls)(input, init);
+		};
+
+		installAgentTraceUpload(sessionManager, {
+			authStorage: AuthStorage.inMemory({
+				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+			}),
+			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
+			baseUrl: "https://api.example.test",
+			fetchFn,
+		});
+
+		sessionManager.appendMessage(createUserMessage("hello"));
+		sessionManager.appendMessage(createAssistantMessage("hi"));
+		await advanceTimersUntil(() => attempts === 1);
+		await advanceTimersUntil(() => vi.getTimerCount() > 0);
+		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBe(300_000);
+
+		// A fresh persist must not re-arm inside the advertised window.
+		sessionManager.appendMessage(createUserMessage("more"));
+		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBeGreaterThanOrEqual(299_000);
+
+		await advanceTimersUntil(() => calls.length === 1);
+		expect(attempts).toBe(2);
+	});
+
+	it("returns a retryable failure when the upload cursor cannot be persisted", async () => {
+		const session = writeSession(tempDir, join(tempDir, "sessions"), "cursor-persist-failure");
+		writeFileSync(join(tempDir, "agent-traces-outbox"), "not a directory");
+
+		const calls: FetchCall[] = [];
+		const result = await uploadAgentTraceFile({
+			sessionFile: session.getSessionFile(),
+			authStorage: AuthStorage.inMemory({
+				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+			}),
+			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
+			baseUrl: "https://api.example.test",
+			fetchFn: createFetchRecorder(calls),
+			reloadConfig: false,
+		});
+
+		expect(calls).toHaveLength(1);
+		expect(result.status).toBe("failed");
+		if (result.status === "failed") {
+			expect(result.message).toContain("cursor");
+		}
+	});
+
+	it("a corrupt outbox entry costs only itself; other cursors survive", async () => {
+		const cwd = join(tempDir, "project");
+		const sessionDir = join(tempDir, "sessions");
+		mkdirSync(cwd, { recursive: true });
+		const kept = writeSession(cwd, sessionDir, "kept-cursor-session");
+		const keptFile = kept.getSessionFile() as string;
+		const keptStats = await stat(keptFile);
+		writeOutboxEntry(tempDir, keptFile, { size: keptStats.size, mtimeMs: keptStats.mtimeMs });
+		writeFileSync(join(tempDir, "agent-traces-outbox", "deadbeef.json"), "not json");
+
+		const calls: FetchCall[] = [];
+		const options = {
+			authStorage: AuthStorage.inMemory({
+				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+			}),
+			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
+			baseUrl: "https://api.example.test",
+			fetchFn: createFetchRecorder(calls),
+			reloadConfig: false,
+		};
+
+		const result = await catchUpAgentTraceUploads(options);
+		expect(result).toEqual({ pruned: 1, results: [] });
+		expect(calls).toHaveLength(0);
+		expect(existsSync(join(tempDir, "agent-traces-outbox", "deadbeef.json"))).toBe(false);
+		expect(await uploadAgentTraceFile({ ...options, sessionFile: keptFile })).toEqual({ status: "unchanged" });
+		expect(calls).toHaveLength(0);
 	});
 
 	it("prefers the prime-inference credential over the prime-cli config key", async () => {
