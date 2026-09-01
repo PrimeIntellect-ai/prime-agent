@@ -49,4 +49,6 @@ line(s) that describe the change, e.g. `- Fixed the frobnicator dropping input o
 script aggregates fragments into the release section and deletes them. PRs that change `packages/<pkg>/src`
 without a fragment fail CI; apply the `no-changelog` label to opt out.
 
+Release preparation and the pre-release verification checklist are documented in [RELEASING.md](RELEASING.md).
+
 Maintainers may close a pull request that changes scope, cannot be validated safely, or no longer fits the project roadmap.
