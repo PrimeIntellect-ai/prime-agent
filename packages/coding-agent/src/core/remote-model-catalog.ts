@@ -111,22 +111,6 @@ export function parseRemoteModelCatalog(value: unknown): ModelCatalogV1 {
 	return value as unknown as ModelCatalogV1;
 }
 
-function canonicalize(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(canonicalize);
-	if (!isRecord(value)) return value;
-	return Object.fromEntries(
-		Object.keys(value)
-			.sort()
-			.map((key) => [key, canonicalize(value[key])]),
-	);
-}
-
-function transportSignature(model: Model<Api>): string {
-	return JSON.stringify(
-		canonicalize({ api: model.api, baseUrl: model.baseUrl, headers: model.headers, compat: model.compat }),
-	);
-}
-
 function cloneTransport(template: Model<Api>, remote: Model<Api>): Model<Api> {
 	return {
 		id: remote.id,
@@ -142,7 +126,7 @@ function cloneTransport(template: Model<Api>, remote: Model<Api>): Model<Api> {
 		maxTokens: remote.maxTokens,
 		...(remote.featured !== undefined ? { featured: remote.featured } : {}),
 		headers: template.headers ? { ...template.headers } : undefined,
-		compat: template.compat ? structuredClone(template.compat) : undefined,
+		compat: remote.compat ? structuredClone(remote.compat) : undefined,
 	};
 }
 
@@ -153,12 +137,12 @@ export function mergeRemoteModelCatalog(
 	if (!remoteModels) return bundledModels.map((model) => structuredClone(model));
 	const exact = new Map(bundledModels.map((model) => [`${model.provider}/${model.id}`, model]));
 	const transports = new Map<string, Model<Api>>();
-	for (const model of bundledModels) transports.set(`${model.provider}\0${transportSignature(model)}`, model);
+	for (const model of bundledModels) transports.set(`${model.provider}\0${model.api}\0${model.baseUrl}`, model);
 
 	const merged: Model<Api>[] = [];
 	for (const remote of remoteModels) {
 		const key = `${remote.provider}/${remote.id}`;
-		const template = exact.get(key) ?? transports.get(`${remote.provider}\0${transportSignature(remote)}`);
+		const template = exact.get(key) ?? transports.get(`${remote.provider}\0${remote.api}\0${remote.baseUrl}`);
 		if (template) merged.push(cloneTransport(template, remote));
 	}
 	return merged;
