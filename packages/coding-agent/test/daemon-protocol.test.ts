@@ -163,6 +163,15 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("conditional_cron_delivery");
 	});
 
+	it("capability- and schema-gates conditional session profile changes", () => {
+		expect((DAEMON_COMMAND_COMPATIBILITY as Record<string, unknown>).set_profile_if_idle).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 25,
+			capability: "conditional_session_profile",
+		});
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("conditional_session_profile");
+	});
+
 	it("capability-gates the optional model catalog surface", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.get_model_catalog).toEqual({
 			minProtocol: 7,

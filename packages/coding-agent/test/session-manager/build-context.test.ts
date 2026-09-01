@@ -57,8 +57,22 @@ function thinkingLevel(id: string, parentId: string | null, level: string): Thin
 	return { type: "thinking_level_change", id, parentId, timestamp: "2025-01-01T00:00:00Z", thinkingLevel: level };
 }
 
-function modelChange(id: string, parentId: string | null, provider: string, modelId: string): ModelChangeEntry {
-	return { type: "model_change", id, parentId, timestamp: "2025-01-01T00:00:00Z", provider, modelId };
+function modelChange(
+	id: string,
+	parentId: string | null,
+	provider: string,
+	modelId: string,
+	thinkingLevel?: string,
+): ModelChangeEntry {
+	return {
+		type: "model_change",
+		id,
+		parentId,
+		timestamp: "2025-01-01T00:00:00Z",
+		provider,
+		modelId,
+		...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
+	};
 }
 
 function serviceTier(id: string, parentId: string | null, tier: "default" | "priority"): ServiceTierChangeEntry {
@@ -103,6 +117,18 @@ describe("buildSessionContext", () => {
 			const ctx = buildSessionContext(entries);
 			expect(ctx.thinkingLevel).toBe("high");
 			expect(ctx.messages).toHaveLength(2);
+		});
+
+		it("restores an atomic model and thinking profile entry", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "hello"),
+				modelChange("2", "1", "openai-codex", "gpt-5.6-sol", "xhigh"),
+			];
+
+			const ctx = buildSessionContext(entries);
+
+			expect(ctx.model).toEqual({ provider: "openai-codex", modelId: "gpt-5.6-sol" });
+			expect(ctx.thinkingLevel).toBe("xhigh");
 		});
 
 		it("tracks service tier changes on the active branch", () => {

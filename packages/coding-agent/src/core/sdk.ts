@@ -175,7 +175,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const existingSession = sessionManager.buildSessionContext();
 	const hasExistingSession = existingSession.messages.length > 0;
-	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
+	const hasThinkingEntry = sessionManager
+		.getBranch()
+		.some(
+			(entry) => entry.type === "thinking_level_change" || (entry.type === "model_change" && entry.thinkingLevel),
+		);
 	const hasServiceTierEntry = sessionManager.getBranch().some((entry) => entry.type === "service_tier_change");
 
 	let model = options.model;

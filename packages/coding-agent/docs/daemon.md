@@ -73,7 +73,7 @@ Due ticks are claimed and advanced before prompt delivery. A crash therefore doe
 
 Resident workers keep scheduling across supervisor replacement. Worker recovery marks uncertain claims interrupted, keeps the advanced schedule, and resumes future ticks only. The supervisor routes schedule commands and merges worker summaries for global listing.
 
-## Public Daemon Protocol v4
+## Public Daemon Protocol v7
 
 The public local socket is JSONL-framed. The current protocol provides:
 
@@ -85,6 +85,8 @@ The public local socket is JSONL-framed. The current protocol provides:
 - begin/chunk/end snapshot streaming with a 512 KiB target chunk size;
 - file-backed transcript caches above 4 MiB;
 - resident and client-owned worker lifecycle commands;
+- an exact-idle, capability-gated profile transition that persists model and thinking level atomically for one
+  session without changing global defaults;
 - daemon-side headless completion, session-header, bash, and retry operations; and
 - structured errors for recoverable cases such as an already-active session or uncertain mutation result.
 

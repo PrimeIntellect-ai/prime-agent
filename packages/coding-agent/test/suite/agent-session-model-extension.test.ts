@@ -78,6 +78,44 @@ describe("AgentSession model and extension characterization", () => {
 		).toEqual([`${nextModel.provider}/${nextModel.id}`]);
 	});
 
+	it("can persist an exact model profile only in the current session", async () => {
+		const harness = await createHarness({
+			models: [
+				{ id: "faux-1", name: "One", reasoning: true },
+				{ id: "faux-2", name: "Two", reasoning: true },
+			],
+			settings: {
+				defaultProvider: "original-provider",
+				defaultModel: "original-model",
+				defaultThinkingLevel: "low",
+			},
+		});
+		harnesses.push(harness);
+		const nextModel = harness.getModel("faux-2")!;
+
+		await harness.session.setModel(nextModel, {
+			waitForExtensions: false,
+			persistDefaults: false,
+			persistProfileAtomically: true,
+			thinkingLevel: "high",
+			requireExactThinkingLevel: true,
+		});
+
+		expect(harness.session.model?.id).toBe("faux-2");
+		expect(harness.session.thinkingLevel).toBe("high");
+		expect(harness.settingsManager.getDefaultProvider()).toBe("original-provider");
+		expect(harness.settingsManager.getDefaultModel()).toBe("original-model");
+		expect(harness.settingsManager.getDefaultThinkingLevel()).toBe("low");
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "model_change")).toEqual([
+			expect.objectContaining({
+				provider: nextModel.provider,
+				modelId: nextModel.id,
+				thinkingLevel: "high",
+			}),
+		]);
+		expect(harness.sessionManager.getEntries().filter((entry) => entry.type === "thinking_level_change")).toEqual([]);
+	});
+
 	it("can save the model before slow model_select handlers finish", async () => {
 		const handlerStarted = createDeferred();
 		const finishHandler = createDeferred();

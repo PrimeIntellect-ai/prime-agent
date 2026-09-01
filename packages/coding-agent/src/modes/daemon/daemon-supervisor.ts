@@ -230,6 +230,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"heartbeat_set",
 	"heartbeat_update",
 	"set_model",
+	"set_profile_if_idle",
 	"cycle_model",
 	"set_scoped_models",
 	"set_thinking_level",

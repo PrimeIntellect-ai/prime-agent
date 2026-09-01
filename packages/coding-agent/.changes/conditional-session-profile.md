@@ -1,0 +1,1 @@
+- Added an atomic, session-only daemon profile switch guarded by exact idle-state preconditions.

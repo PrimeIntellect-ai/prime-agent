@@ -119,6 +119,8 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	type: "model_change";
 	provider: string;
 	modelId: string;
+	/** When present, model and thinking level form one durable profile transition. */
+	thinkingLevel?: string;
 }
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
@@ -463,6 +465,9 @@ export function buildSessionContext(
 			serviceTier = entry.serviceTier;
 		} else if (entry.type === "model_change") {
 			model = { provider: entry.provider, modelId: entry.modelId };
+			if (entry.thinkingLevel !== undefined) {
+				thinkingLevel = entry.thinkingLevel;
+			}
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			model = { provider: entry.message.provider, modelId: entry.message.model };
 		} else if (entry.type === "compaction") {
@@ -1427,7 +1432,7 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	appendModelChange(provider: string, modelId: string): string {
+	appendModelChange(provider: string, modelId: string, thinkingLevel?: string): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
 			id: generateId(this.byId),
@@ -1435,6 +1440,7 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			provider,
 			modelId,
+			...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
 		};
 		this._appendEntry(entry);
 		return entry.id;

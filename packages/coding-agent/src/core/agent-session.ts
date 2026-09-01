@@ -870,6 +870,15 @@ export interface ModelCycleResult {
 
 interface ModelSelectOptions {
 	waitForExtensions?: boolean;
+	persistDefaults?: boolean;
+	persistProfileAtomically?: boolean;
+	thinkingLevel?: ThinkingLevel;
+	requireExactThinkingLevel?: boolean;
+}
+
+interface ThinkingLevelSelectOptions {
+	persistDefault?: boolean;
+	persistSession?: boolean;
 }
 
 interface ToolDefinitionEntry {
@@ -7271,13 +7280,28 @@ export class AgentSession {
 		}
 
 		const previousModel = this.model;
-		const thinkingLevel = this._getThinkingLevelForModelSwitch();
+		const thinkingLevel = this._getThinkingLevelForModelSwitch(options.thinkingLevel);
+		if (
+			options.requireExactThinkingLevel &&
+			!(getSupportedThinkingLevels(model) as ThinkingLevel[]).includes(thinkingLevel)
+		) {
+			throw new Error(`Thinking level "${thinkingLevel}" is not available for ${model.provider}/${model.id}`);
+		}
 		const serviceTier = this._getServiceTierForModelSwitch();
 		this.agent.state.model = model;
-		this.sessionManager.appendModelChange(model.provider, model.id);
-		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+		this.sessionManager.appendModelChange(
+			model.provider,
+			model.id,
+			options.persistProfileAtomically ? thinkingLevel : undefined,
+		);
+		if (options.persistDefaults !== false) {
+			this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
+		}
 
-		this.setThinkingLevel(thinkingLevel);
+		this.setThinkingLevel(thinkingLevel, {
+			persistDefault: options.persistDefaults !== false,
+			persistSession: !options.persistProfileAtomically,
+		});
 		this._clampServiceTierForModel(serviceTier);
 
 		const emitPromise = this._queueModelSelectEmit(model, previousModel, "set");
@@ -7401,7 +7425,7 @@ export class AgentSession {
 		};
 	}
 
-	setThinkingLevel(level: ThinkingLevel): void {
+	setThinkingLevel(level: ThinkingLevel, options: ThinkingLevelSelectOptions = {}): void {
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
 
@@ -7411,8 +7435,10 @@ export class AgentSession {
 		this.agent.state.thinkingLevel = effectiveLevel;
 
 		if (isChanging) {
-			this.sessionManager.appendThinkingLevelChange(effectiveLevel);
-			if (this.supportsThinking() || effectiveLevel !== "off") {
+			if (options.persistSession !== false) {
+				this.sessionManager.appendThinkingLevelChange(effectiveLevel);
+			}
+			if (options.persistDefault !== false && (this.supportsThinking() || effectiveLevel !== "off")) {
 				this.settingsManager.setDefaultThinkingLevel(effectiveLevel);
 			}
 			this._emit({ type: "thinking_level_changed", level: effectiveLevel });

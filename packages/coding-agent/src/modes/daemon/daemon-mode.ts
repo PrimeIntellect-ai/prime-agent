@@ -147,6 +147,7 @@ import {
 	type DaemonOutbound,
 	type DaemonResponse,
 	type DaemonSessionClosedReason,
+	type DaemonSessionProfilePrecondition,
 	type DaemonSessionSnapshot,
 	type DaemonUpdateRestartManifest,
 	type DaemonUpdateRestartSession,
@@ -241,19 +242,80 @@ const UPDATE_RESTART_PREPARE_TIMEOUT_MS = 90_000;
 const MAX_SESSION_SNAPSHOT_STABILIZATION_RETRIES = 3;
 const MAX_CONDITIONAL_GOAL_RECOVERY_ATTEMPTS = 5;
 
+function matchesGoalFence(expected: AgentCronDeliveryFence["goal"], actual: SessionSummary["goal"]): boolean {
+	const normalizedActual = actual ?? null;
+	return expected === null
+		? normalizedActual === null
+		: normalizedActual !== null &&
+				normalizedActual.active === expected.active &&
+				normalizedActual.status === expected.status &&
+				normalizedActual.goalId === expected.goalId &&
+				normalizedActual.dispatchReceiptId === expected.dispatchReceiptId &&
+				normalizedActual.dispatchPhase === expected.dispatchPhase &&
+				normalizedActual.updatedAt === expected.updatedAt;
+}
+
+function isExactIdleSessionSummary(summary: SessionSummary, state: ActiveSessionState): boolean {
+	return (
+		summary.runtimeKind === "top-level" &&
+		summary.rlmDepth === 0 &&
+		!isActiveSessionBusy(state) &&
+		!state.runtime.session.isRetrying &&
+		summary.isStreaming === false &&
+		summary.isCompacting === false &&
+		summary.isBashRunning === false &&
+		summary.hasRunningRlmChildren === false &&
+		summary.isRunningTools === false &&
+		summary.unfinishedActionCount === 0 &&
+		summary.sessionActions.queuedCount === 0
+	);
+}
+
+function matchesSessionProfile(
+	summary: SessionSummary,
+	profile: Pick<DaemonSessionProfilePrecondition, "provider" | "modelId" | "thinkingLevel">,
+): boolean {
+	return (
+		summary.model?.provider === profile.provider &&
+		summary.model.id === profile.modelId &&
+		summary.thinkingLevel === profile.thinkingLevel
+	);
+}
+
+function matchesSessionProfileSourceOrIntermediate(
+	summary: SessionSummary,
+	source: Pick<DaemonSessionProfilePrecondition, "provider" | "modelId" | "thinkingLevel">,
+	target: Pick<DaemonSessionProfilePrecondition, "provider" | "modelId" | "thinkingLevel">,
+): boolean {
+	return (
+		matchesSessionProfile(summary, source) ||
+		(summary.model?.provider === target.provider &&
+			summary.model.id === target.modelId &&
+			summary.thinkingLevel === source.thinkingLevel)
+	);
+}
+
+function matchesSessionProfileActivityPrecondition(
+	summary: SessionSummary,
+	state: ActiveSessionState,
+	precondition: DaemonSessionProfilePrecondition,
+): boolean {
+	return (
+		summary.activeSessionId === state.activeSessionId &&
+		summary.sessionId === precondition.sessionId &&
+		summary.sessionFile === precondition.sessionFile &&
+		summary.sessionName === precondition.sessionName &&
+		summary.cwd === precondition.cwd &&
+		summary.messageCount === precondition.messageCount &&
+		(summary.lastActivityAt ?? null) === precondition.lastActivityAt &&
+		(summary.taskState ?? null) === precondition.taskState &&
+		matchesGoalFence(precondition.goal, summary.goal) &&
+		isExactIdleSessionSummary(summary, state)
+	);
+}
+
 function matchesCronDeliveryFence(fence: AgentCronDeliveryFence, state: ActiveSessionState): boolean {
 	const summary = summaryForActiveSession(state);
-	const actualGoal = summary.goal ?? null;
-	const goalMatches =
-		fence.goal === null
-			? actualGoal === null
-			: actualGoal !== null &&
-				actualGoal.active === fence.goal.active &&
-				actualGoal.status === fence.goal.status &&
-				actualGoal.goalId === fence.goal.goalId &&
-				actualGoal.dispatchReceiptId === fence.goal.dispatchReceiptId &&
-				actualGoal.dispatchPhase === fence.goal.dispatchPhase &&
-				actualGoal.updatedAt === fence.goal.updatedAt;
 	return (
 		summary.activeSessionId === fence.activeSessionId &&
 		summary.runtimeKind === "top-level" &&
@@ -266,16 +328,8 @@ function matchesCronDeliveryFence(fence: AgentCronDeliveryFence, state: ActiveSe
 		summary.messageCount === fence.messageCount &&
 		summary.lastActivityAt === fence.lastActivityAt &&
 		summary.taskState === fence.taskState &&
-		goalMatches &&
-		!isActiveSessionBusy(state) &&
-		!state.runtime.session.isRetrying &&
-		summary.isStreaming === false &&
-		summary.isCompacting === false &&
-		summary.isBashRunning === false &&
-		summary.hasRunningRlmChildren === false &&
-		summary.isRunningTools === false &&
-		summary.unfinishedActionCount === 0 &&
-		summary.sessionActions.queuedCount === 0
+		matchesGoalFence(fence.goal, summary.goal) &&
+		isExactIdleSessionSummary(summary, state)
 	);
 }
 
@@ -339,6 +393,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"heartbeat_set",
 	"heartbeat_update",
 	"set_model",
+	"set_profile_if_idle",
 	"cycle_model",
 	"set_scoped_models",
 	"set_thinking_level",
@@ -486,6 +541,7 @@ export class AgentDaemon {
 	private server?: Server;
 	private shuttingDown = false;
 	private readonly updateRestartQueuePauses = new Map<string, { release(): void }>();
+	private readonly sessionProfileTransitions = new Map<string, Promise<void>>();
 	private readonly sessionInputPauses = new Map<
 		string,
 		{ activeSessionId: string; owner: DaemonSocketClient; leaseKey: string; pause: { release(): void } }
@@ -4701,6 +4757,89 @@ export class AgentDaemon {
 					waitForExtensions: !(session.isStreaming || session.isCompacting),
 				});
 				return success(command.id, "set_model", model);
+			}
+
+			case "set_profile_if_idle": {
+				const state = this.getSessionState(command.activeSessionId);
+				const session = state.runtime.session;
+				const previousTransition = this.sessionProfileTransitions.get(state.activeSessionId) ?? Promise.resolve();
+				let releaseTransition!: () => void;
+				const transition = new Promise<void>((resolve) => {
+					releaseTransition = resolve;
+				});
+				this.sessionProfileTransitions.set(state.activeSessionId, transition);
+				await previousTransition;
+				try {
+					const sessionInputPause = session.acquireSessionInputPause();
+					const queuedWorkPause = session.acquireQueuedWorkPause();
+					try {
+						await session.waitForSessionInputCheckpoint();
+						let summary = summaryForActiveSession(state);
+						if (!matchesSessionProfileActivityPrecondition(summary, state, command.precondition)) {
+							return success(command.id, "set_profile_if_idle", {
+								status: "precondition_changed",
+								transitionId: command.transitionId,
+							});
+						}
+						if (matchesSessionProfile(summary, command.target)) {
+							return success(command.id, "set_profile_if_idle", {
+								status: "already_applied",
+								transitionId: command.transitionId,
+							});
+						}
+						if (!matchesSessionProfileSourceOrIntermediate(summary, command.precondition, command.target)) {
+							return success(command.id, "set_profile_if_idle", {
+								status: "precondition_changed",
+								transitionId: command.transitionId,
+							});
+						}
+
+						const availableModels = await session.modelRegistry.refreshAvailableModels();
+						const targetModel = availableModels.find(
+							(candidate) =>
+								candidate.provider === command.target.provider && candidate.id === command.target.modelId,
+						);
+						if (!targetModel) {
+							throw new Error(`Model not found: ${command.target.provider}/${command.target.modelId}`);
+						}
+						summary = summaryForActiveSession(state);
+						if (matchesSessionProfile(summary, command.target)) {
+							return success(command.id, "set_profile_if_idle", {
+								status: "already_applied",
+								transitionId: command.transitionId,
+							});
+						}
+						if (
+							!matchesSessionProfileActivityPrecondition(summary, state, command.precondition) ||
+							!matchesSessionProfileSourceOrIntermediate(summary, command.precondition, command.target)
+						) {
+							return success(command.id, "set_profile_if_idle", {
+								status: "precondition_changed",
+								transitionId: command.transitionId,
+							});
+						}
+
+						await session.setModel(targetModel, {
+							waitForExtensions: false,
+							persistDefaults: false,
+							persistProfileAtomically: true,
+							thinkingLevel: command.target.thinkingLevel,
+							requireExactThinkingLevel: true,
+						});
+						return success(command.id, "set_profile_if_idle", {
+							status: "applied",
+							transitionId: command.transitionId,
+						});
+					} finally {
+						queuedWorkPause.release();
+						sessionInputPause.release();
+					}
+				} finally {
+					releaseTransition();
+					if (this.sessionProfileTransitions.get(state.activeSessionId) === transition) {
+						this.sessionProfileTransitions.delete(state.activeSessionId);
+					}
+				}
 			}
 
 			case "cycle_model": {

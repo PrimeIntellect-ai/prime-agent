@@ -8915,6 +8915,158 @@ describe("daemon mode helpers", () => {
 		expect(setModel).toHaveBeenCalledWith(model, { waitForExtensions: false });
 	});
 
+	it("does not change a profile when provider work starts after the caller snapshot", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp/project" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const { state, session, targetModel } = makeConditionalProfileState("active-1");
+		session.waitForSessionInputCheckpoint.mockImplementation(async () => {
+			session.isStreaming = true;
+		});
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+
+		const response = await internals.handleCommand(
+			makeClient("client-1", state.activeSessionId),
+			conditionalProfileCommand(state.activeSessionId),
+		);
+
+		expect(response).toMatchObject({ success: true, data: { status: "precondition_changed" } });
+		expect(session.setModel).not.toHaveBeenCalled();
+		expect(session.model).not.toBe(targetModel);
+		expect(session.acquireSessionInputPause.mock.invocationCallOrder[0]).toBeLessThan(
+			session.waitForSessionInputCheckpoint.mock.invocationCallOrder[0],
+		);
+		expect(session.inputPauseRelease).toHaveBeenCalledOnce();
+		expect(session.pauseRelease).toHaveBeenCalledOnce();
+	});
+
+	it("changes an exact idle profile once with session-only persistence", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp/project" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const { state, session, targetModel } = makeConditionalProfileState("active-1");
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+
+		const response = await internals.handleCommand(
+			makeClient("client-1", state.activeSessionId),
+			conditionalProfileCommand(state.activeSessionId),
+		);
+
+		expect(response).toMatchObject({ success: true, data: { status: "applied" } });
+		expect(session.setModel).toHaveBeenCalledWith(targetModel, {
+			waitForExtensions: false,
+			persistDefaults: false,
+			persistProfileAtomically: true,
+			thinkingLevel: "xhigh",
+			requireExactThinkingLevel: true,
+		});
+		expect(session.pauseRelease).toHaveBeenCalledOnce();
+	});
+
+	it("acknowledges an exact target profile after a lost response without writing twice", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp/project" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const { state, session, targetModel } = makeConditionalProfileState("active-1");
+		session.model = targetModel;
+		session.thinkingLevel = "xhigh";
+		session.modelRegistry.refreshAvailableModels.mockRejectedValue(new Error("catalog unavailable"));
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+
+		const response = await internals.handleCommand(
+			makeClient("client-1", state.activeSessionId),
+			conditionalProfileCommand(state.activeSessionId),
+		);
+
+		expect(response).toMatchObject({ success: true, data: { status: "already_applied" } });
+		expect(session.setModel).not.toHaveBeenCalled();
+		expect(session.pauseRelease).toHaveBeenCalledOnce();
+	});
+
+	it("repairs the single legacy model-first intermediate profile", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp/project" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const { state, session, targetModel } = makeConditionalProfileState("active-1");
+		session.model = targetModel;
+		session.thinkingLevel = "max";
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+
+		const response = await internals.handleCommand(
+			makeClient("client-1", state.activeSessionId),
+			conditionalProfileCommand(state.activeSessionId),
+		);
+
+		expect(response).toMatchObject({ success: true, data: { status: "applied" } });
+		expect(session.setModel).toHaveBeenCalledOnce();
+		expect(session.pauseRelease).toHaveBeenCalledOnce();
+	});
+
+	it("serializes concurrent conditional profile changes for one session", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp/project" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const { state, session, targetModel } = makeConditionalProfileState("active-1");
+		let releaseCatalog!: (models: Model<Api>[]) => void;
+		const catalog = new Promise<Model<Api>[]>((resolve) => {
+			releaseCatalog = resolve;
+		});
+		session.modelRegistry.refreshAvailableModels.mockImplementationOnce(() => catalog);
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		const firstCommand = conditionalProfileCommand(state.activeSessionId);
+		const secondCommand = {
+			...conditionalProfileCommand(state.activeSessionId),
+			id: "profile-transition-2",
+			transitionId: "transition-2",
+		};
+
+		const first = internals.handleCommand(makeClient("client-1", state.activeSessionId), firstCommand);
+		await vi.waitFor(() => expect(session.modelRegistry.refreshAvailableModels).toHaveBeenCalledOnce());
+		const second = internals.handleCommand(makeClient("client-2", state.activeSessionId), secondCommand);
+		await Promise.resolve();
+		expect(session.acquireSessionInputPause).toHaveBeenCalledOnce();
+
+		releaseCatalog([session.model, targetModel]);
+		await expect(first).resolves.toMatchObject({ success: true, data: { status: "applied" } });
+		await expect(second).resolves.toMatchObject({ success: true, data: { status: "already_applied" } });
+		expect(session.setModel).toHaveBeenCalledOnce();
+	});
+
 	it("waits for model_select extension handlers when setting models while idle", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
@@ -9471,6 +9623,91 @@ function makeState(activeSessionId: string, parentActiveSessionId?: string): Act
 			},
 		},
 	} as unknown as ActiveSessionState;
+}
+
+function conditionalProfileCommand(activeSessionId: string): DaemonCommand {
+	return {
+		id: "profile-transition-1",
+		type: "set_profile_if_idle",
+		activeSessionId,
+		transitionId: "transition-1",
+		precondition: {
+			sessionId: "session-1",
+			sessionFile: "/tmp/session-1.jsonl",
+			sessionName: "leblon",
+			cwd: "/tmp/project",
+			provider: "source",
+			modelId: "source-1",
+			thinkingLevel: "max",
+			messageCount: 1,
+			lastActivityAt: "1970-01-01T00:00:00.000Z",
+			taskState: "needs_input",
+			goal: null,
+		},
+		target: { provider: "target", modelId: "target-1", thinkingLevel: "xhigh" },
+	} as DaemonCommand;
+}
+
+function makeConditionalProfileState(activeSessionId: string): {
+	state: ActiveSessionState;
+	session: Record<string, any>;
+	targetModel: Model<Api>;
+} {
+	const sourceModel: Model<Api> = {
+		provider: "source",
+		id: "source-1",
+		name: "Source",
+		api: "openai-completions",
+		baseUrl: "https://example.com",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 4096,
+	};
+	const targetModel: Model<Api> = { ...sourceModel, provider: "target", id: "target-1", name: "Target" };
+	const pauseRelease = vi.fn();
+	const inputPauseRelease = vi.fn();
+	const session: Record<string, any> = {
+		sessionId: "session-1",
+		sessionFile: "/tmp/session-1.jsonl",
+		sessionName: "leblon",
+		rlmDepth: 0,
+		model: sourceModel,
+		thinkingLevel: "max",
+		isStreaming: false,
+		isCompacting: false,
+		isBashRunning: false,
+		isRetrying: false,
+		isSessionActive: false,
+		unfinishedActionCount: 0,
+		messages: [{ timestamp: 0 }],
+		state: { pendingToolCalls: new Set(), streamingMessage: undefined },
+		sessionManager: {
+			getCwd: () => "/tmp/project",
+			getHeader: () => ({ timestamp: "1970-01-01T00:00:00.000Z" }),
+		},
+		hasRunningRlmChildren: () => false,
+		getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
+		acquireQueuedWorkPause: vi.fn(() => ({ release: pauseRelease })),
+		acquireSessionInputPause: vi.fn(() => ({ release: inputPauseRelease })),
+		waitForSessionInputCheckpoint: vi.fn(async () => {}),
+		modelRegistry: { refreshAvailableModels: vi.fn(async () => [sourceModel, targetModel]) },
+		setModel: vi.fn(async (model: Model<Api>) => {
+			session.model = model;
+			session.thinkingLevel = "xhigh";
+		}),
+		pauseRelease,
+		inputPauseRelease,
+	};
+	const state = makeState(activeSessionId);
+	state.runtime = {
+		metadata: { kind: "top-level" },
+		session,
+		diagnostics: [],
+	} as never;
+	state.summaryState = { basedOnMessageCount: 1, taskState: "needs_input", summary: "idle" } as never;
+	return { state, session, targetModel };
 }
 
 function makeClient(id: string, activeSessionId: string, supportsExtensionUi = false): DaemonSocketClient {

@@ -69,8 +69,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 21 adds capability-gated, session-scoped ACP MCP server replacement.
 // Revision 23 lets workers query the supervisor agent roster on demand.
 // Revision 24 adds capability-gated, delivery-time fenced cron prompts.
-export const DAEMON_SCHEMA_REVISION = 24;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-24-9bb630bf7f1d";
+// Revision 25 adds an exact-idle, session-only profile transition.
+export const DAEMON_SCHEMA_REVISION = 25;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-25-812689647889";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -116,7 +117,8 @@ export type DaemonServerCapability =
 	| "session_input_pause"
 	| "owned_prompt_cancellation"
 	| "acp_mcp_servers"
-	| "conditional_cron_delivery";
+	| "conditional_cron_delivery"
+	| "conditional_session_profile";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -162,7 +164,28 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"session_input_pause",
 	"acp_mcp_servers",
 	"conditional_cron_delivery",
+	"conditional_session_profile",
 ];
+
+export interface DaemonSessionProfilePrecondition {
+	sessionId: string;
+	sessionFile: string;
+	sessionName: string;
+	cwd: string;
+	provider: string;
+	modelId: string;
+	thinkingLevel: ThinkingLevel;
+	messageCount: number;
+	lastActivityAt: string | null;
+	taskState: "needs_input" | "completed" | null;
+	goal: AgentCronDeliveryFence["goal"];
+}
+
+export interface DaemonSessionProfileTarget {
+	provider: string;
+	modelId: string;
+	thinkingLevel: ThinkingLevel;
+}
 
 export interface DaemonRuntimeIdentity {
 	buildId: string;
@@ -598,6 +621,14 @@ export type DaemonCommand =
 	  }
 	| { id?: string; type: "heartbeat_update"; activeSessionId: string; action: AgentHeartbeatUpdateAction }
 	| { id?: string; type: "set_model"; activeSessionId: string; provider: string; modelId: string }
+	| {
+			id?: string;
+			type: "set_profile_if_idle";
+			activeSessionId: string;
+			transitionId: string;
+			precondition: DaemonSessionProfilePrecondition;
+			target: DaemonSessionProfileTarget;
+	  }
 	| { id?: string; type: "cycle_model"; activeSessionId: string; direction?: "forward" | "backward" }
 	| { id?: string; type: "set_scoped_models"; activeSessionId: string; scopedModels: AgentConnectionScopedModel[] }
 	| { id?: string; type: "set_thinking_level"; activeSessionId: string; level: ThinkingLevel }
@@ -724,6 +755,11 @@ const CONDITIONAL_CRON_DELIVERY_COMMAND = {
 	minSchemaRevision: 24,
 	capability: "conditional_cron_delivery",
 } as const;
+const CONDITIONAL_SESSION_PROFILE_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 25,
+	capability: "conditional_session_profile",
+} as const;
 
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
@@ -788,6 +824,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	heartbeat_set: LEGACY_DAEMON_COMMAND,
 	heartbeat_update: LEGACY_DAEMON_COMMAND,
 	set_model: LEGACY_DAEMON_COMMAND,
+	set_profile_if_idle: CONDITIONAL_SESSION_PROFILE_COMMAND,
 	cycle_model: LEGACY_DAEMON_COMMAND,
 	set_scoped_models: LEGACY_DAEMON_COMMAND,
 	set_thinking_level: LEGACY_DAEMON_COMMAND,
