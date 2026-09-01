@@ -1053,7 +1053,6 @@ export class DaemonSupervisor {
 	}
 
 	private async assertCurrentOwnership(): Promise<void> {
-		this.assertSupervisorServing();
 		const ownership = this.ownership;
 		if (!ownership) {
 			const error = new Error(
@@ -1064,11 +1063,16 @@ export class DaemonSupervisor {
 			throw error;
 		}
 		await ownership.assertCurrent();
+	}
+
+	private async assertServingCurrentOwnership(): Promise<void> {
+		this.assertSupervisorServing();
+		await this.assertCurrentOwnership();
 		this.assertSupervisorServing();
 	}
 
 	private async assertRecoveryAllowed(): Promise<void> {
-		await this.assertCurrentOwnership();
+		await this.assertServingCurrentOwnership();
 		if (await isDaemonShutdownAdmissionActive()) {
 			throw new SupervisorRecoveryCancelledError("Daemon shutdown admission cancelled worker recovery");
 		}
@@ -1550,7 +1554,7 @@ export class DaemonSupervisor {
 		}
 
 		try {
-			await waitForPromptAdmission(this.assertCurrentOwnership(), parsedAdmission?.controller.signal);
+			await waitForPromptAdmission(this.assertServingCurrentOwnership(), parsedAdmission?.controller.signal);
 		} catch (error) {
 			if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
 			this.write(client, failure(command.id, command.type, error));
@@ -1615,7 +1619,7 @@ export class DaemonSupervisor {
 			if (idleEvictionFence) {
 				await idleEvictionFence;
 				try {
-					await this.assertCurrentOwnership();
+					await this.assertServingCurrentOwnership();
 				} catch (error) {
 					if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
 					this.write(client, failure(command.id, command.type, error, serializeDaemonError(error)));

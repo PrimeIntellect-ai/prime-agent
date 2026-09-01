@@ -3986,18 +3986,23 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
-	it("retains the orphan journal when a recoverable orphan cannot be reaped", async () => {
+	it.each([
+		{ name: "identity-bearing", hasProcessIdentity: true, retained: true },
+		{ name: "PID-only", hasProcessIdentity: false, retained: false },
+	])("retains only a $name orphan journal after a failed reap", async ({ hasProcessIdentity, retained }) => {
 		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-orphan-retry-test-"));
 		const orphanJournalPath = join(root, "worker.orphans.jsonl");
 		const workerPid = 987_653;
 		const orphanPid = process.pid;
+		const processStartId = hasProcessIdentity ? getProcessStartId(orphanPid) : undefined;
+		if (hasProcessIdentity) expect(processStartId).toBeDefined();
 		writeFileSync(
 			orphanJournalPath,
 			`${JSON.stringify({
 				version: 1,
 				pid: orphanPid,
 				ownerPid: workerPid,
-				processStartId: getProcessStartId(orphanPid),
+				...(processStartId ? { processStartId } : {}),
 				active: true,
 				recordedAt: new Date().toISOString(),
 			})}
@@ -4026,8 +4031,12 @@ describe("daemon worker supervisor monitoring", () => {
 		try {
 			await supervisor.recoverUncertainWorkerOperations(worker);
 
-			expect(kill).toHaveBeenCalledWith(orphanPid);
-			expect(existsSync(orphanJournalPath)).toBe(true);
+			if (hasProcessIdentity || process.platform !== "win32") {
+				expect(kill).toHaveBeenCalledWith(orphanPid);
+			} else {
+				expect(kill).not.toHaveBeenCalled();
+			}
+			expect(existsSync(orphanJournalPath)).toBe(retained);
 		} finally {
 			kill.mockRestore();
 			rmSync(root, { recursive: true, force: true });
