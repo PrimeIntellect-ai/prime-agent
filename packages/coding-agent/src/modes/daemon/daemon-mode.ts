@@ -68,6 +68,7 @@ import { type PromptOptions, rlmChildLabel } from "../../core/agent-session.js";
 import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import {
 	type AgentSessionRuntime,
+	type AgentSessionRuntimeDisposeOptions,
 	type AgentSessionRuntimeMetadata,
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionRuntime,
@@ -2371,11 +2372,21 @@ export class AgentDaemon {
 						candidate.runtime.metadata.rlmChildId === options.id &&
 						candidate.runtime.session === runtime.session,
 				);
+				// A cancelled release is a deletion: the artifact sweep below removes
+				// the kernel snapshot right away, so skip writing it.
+				const disposal = status === "cancelled" ? { kernelSnapshot: false } : undefined;
 				try {
 					if (state) {
-						await this.closeSession(state, status === "cancelled" ? "killed" : "completed");
+						await this.closeSession(
+							state,
+							status === "cancelled" ? "killed" : "completed",
+							true,
+							true,
+							undefined,
+							disposal,
+						);
 					} else {
-						await runtime.session.disposeAsync();
+						await runtime.session.disposeAsync(disposal);
 					}
 				} finally {
 					// Sweep even when teardown throws (see deleteRlmSubagentRuntime);
@@ -2432,12 +2443,14 @@ export class AgentDaemon {
 				try {
 					try {
 						if (state) {
-							await this.closeSession(state, "killed", false);
+							// The artifact sweep below deletes the kernel snapshot
+							// milliseconds after it would be written: skip it.
+							await this.closeSession(state, "killed", false, true, undefined, { kernelSnapshot: false });
 						} else {
-							await session?.disposeAsync();
+							await session?.disposeAsync({ kernelSnapshot: false });
 						}
 					} finally {
-						await staleSession?.disposeAsync();
+						await staleSession?.disposeAsync({ kernelSnapshot: false });
 					}
 				} finally {
 					// Runs even when teardown throws: the jobs-cancel rewrite and the
@@ -3659,8 +3672,9 @@ export class AgentDaemon {
 				}
 				case "worker_archive_and_shutdown": {
 					// Close sessions first so direct peers read session_closed "killed", not a daemon shutdown.
+					// The daemon exits right after, so the trace flush must complete now.
 					for (const state of [...this.sessions.values()]) {
-						await this.closeSession(state, "killed");
+						await this.closeSession(state, "killed", true, true, undefined, { traceFlush: "await" });
 					}
 					this.fencePeerTransports();
 					this.writeWorkerSuccess(client, command);
@@ -6239,12 +6253,23 @@ export class AgentDaemon {
 		const closeStates = [...this.sessions.values()].sort(
 			(left, right) => this.getUpdateRestartSessionDepth(right) - this.getUpdateRestartSessionDepth(left),
 		);
+		// The daemon restarts right after: even the discarded ("killed") sessions
+		// must finish their trace flush before this process goes away.
 		for (const state of closeStates) {
 			if (this.sessions.has(state.activeSessionId)) {
-				await this.closeSession(state, restartByActiveSessionId.has(state.activeSessionId) ? "update" : "killed");
+				await this.closeSession(
+					state,
+					restartByActiveSessionId.has(state.activeSessionId) ? "update" : "killed",
+					true,
+					true,
+					undefined,
+					{ traceFlush: "await" },
+				);
 			}
 		}
-		for (const state of [...this.sessions.values()]) await this.closeSession(state, "killed");
+		for (const state of [...this.sessions.values()]) {
+			await this.closeSession(state, "killed", true, true, undefined, { traceFlush: "await" });
+		}
 		return manifest;
 	}
 
@@ -6337,6 +6362,7 @@ export class AgentDaemon {
 		waitForAbort = true,
 		cascadeChildren = true,
 		descendantCollector?: Set<ActiveSessionState>,
+		disposal?: AgentSessionRuntimeDisposeOptions,
 	): Promise<void> {
 		this.abortWaitingPromptAdmissionsForSession(state.activeSessionId);
 		for (const client of state.clients) {
@@ -6375,7 +6401,7 @@ export class AgentDaemon {
 		}
 		const descendants = new Set<ActiveSessionState>();
 		const closePromise = Promise.resolve().then(() =>
-			this.closeSessionOnce(state, reason, waitForAbort, cascadeChildren, descendants),
+			this.closeSessionOnce(state, reason, waitForAbort, cascadeChildren, descendants, disposal),
 		);
 		const close = { promise: closePromise, reason, descendants };
 		this.closingSessions.set(state.activeSessionId, close);
@@ -6448,6 +6474,7 @@ export class AgentDaemon {
 		waitForAbort: boolean,
 		cascadeChildren: boolean,
 		descendants: Set<ActiveSessionState>,
+		disposal?: AgentSessionRuntimeDisposeOptions,
 	): Promise<void> {
 		if (!this.sessions.has(state.activeSessionId)) {
 			return;
@@ -6461,7 +6488,7 @@ export class AgentDaemon {
 		// agent_status to a session being torn down.
 		this.summarizer.forget(state.activeSessionId);
 		const cascadeError = cascadeChildren
-			? await this.closeChildSessions(state, reason, waitForAbort, descendants)
+			? await this.closeChildSessions(state, reason, waitForAbort, descendants, disposal)
 			: undefined;
 		// Empty draft (no messages, config, or jobs): discard rather than persist an
 		// empty session file. Mirrors the detach-time discard so a config-bearing
@@ -6496,7 +6523,14 @@ export class AgentDaemon {
 		state.unsubscribe?.();
 		let disposeError: unknown;
 		try {
-			await state.runtime.dispose();
+			// "shutdown"/"update" closes precede a process exit that a detached
+			// upload would not survive; every other close leaves the daemon and
+			// the session file alive, so the final trace flush finishes on its
+			// own (exit-adjacent callers with other reasons override explicitly).
+			await state.runtime.dispose({
+				traceFlush: disposal?.traceFlush ?? (reason === "shutdown" || reason === "update" ? "await" : "detach"),
+				kernelSnapshot: disposal?.kernelSnapshot,
+			});
 		} catch (error) {
 			disposeError = error;
 		}
@@ -6538,12 +6572,13 @@ export class AgentDaemon {
 		reason: DaemonSessionClosedReason,
 		waitForAbort = true,
 		descendants = new Set<ActiveSessionState>(),
+		disposal?: AgentSessionRuntimeDisposeOptions,
 	): Promise<unknown> {
 		let cascadeError: unknown;
 		for (const childState of getChildActiveSessionStates(this.sessions, parentState)) {
 			descendants.add(childState);
 			try {
-				await this.closeSession(childState, reason, waitForAbort, true, descendants);
+				await this.closeSession(childState, reason, waitForAbort, true, descendants, disposal);
 			} catch (error) {
 				cascadeError ??= error;
 			}

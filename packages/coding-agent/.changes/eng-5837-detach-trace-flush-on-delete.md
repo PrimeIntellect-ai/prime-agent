@@ -1,0 +1,1 @@
+- Deleting or killing a resident RLM subagent no longer blocks on the final trace upload (it now finishes detached) and no longer writes a kernel snapshot that the deletion sweep removes right away; daemon shutdown and update restarts still await the upload.

@@ -24,7 +24,10 @@ import {
 } from "../src/core/agent-messages.js";
 import type { AgentObserveController } from "../src/core/agent-observe.js";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
+import { flushAgentTraceUpload, installAgentTraceUpload } from "../src/core/agent-traces.js";
+import { AuthStorage } from "../src/core/auth-storage.js";
 import type { AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
+import { PRIME_AGENT_TRACES_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
@@ -32,6 +35,7 @@ import {
 } from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../src/core/session-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import {
 	AgentDaemon,
@@ -852,7 +856,7 @@ describe("daemon mode helpers", () => {
 			);
 
 		expect(recordDeletion).not.toHaveBeenCalled();
-		expect(closeSession).toHaveBeenCalledWith(childState, "completed");
+		expect(closeSession).toHaveBeenCalledWith(childState, "completed", true, true, undefined, undefined);
 		internals.sessions.set(childState.activeSessionId, childState);
 		await internals
 			.createSubagentRuntimeHost(parentState)
@@ -863,7 +867,9 @@ describe("daemon mode helpers", () => {
 			);
 		expect(recordDeletion).toHaveBeenCalledWith(parentState, "child-1", "revoked");
 		expect(recordDeletion.mock.invocationCallOrder[0]).toBeLessThan(closeSession.mock.invocationCallOrder[1]!);
-		expect(closeSession).toHaveBeenLastCalledWith(childState, "killed");
+		expect(closeSession).toHaveBeenLastCalledWith(childState, "killed", true, true, undefined, {
+			kernelSnapshot: false,
+		});
 		expect(internals.sessions.has(childState.activeSessionId)).toBe(false);
 
 		// A registry failure must not strand the cancelled child as a stale resident session.
@@ -880,7 +886,9 @@ describe("daemon mode helpers", () => {
 					"cancelled",
 				),
 		).rejects.toThrow("registry write failed");
-		expect(closeSession).toHaveBeenLastCalledWith(childState, "killed");
+		expect(closeSession).toHaveBeenLastCalledWith(childState, "killed", true, true, undefined, {
+			kernelSnapshot: false,
+		});
 		expect(internals.sessions.has(childState.activeSessionId)).toBe(false);
 	});
 
@@ -1409,7 +1417,9 @@ describe("daemon mode helpers", () => {
 		await host.deleteRlmSubagentRuntime("child-1", staleParentReference);
 
 		expect(closeSession).toHaveBeenCalledOnce();
-		expect(closeSession).toHaveBeenCalledWith(childState, "killed", false);
+		expect(closeSession).toHaveBeenCalledWith(childState, "killed", false, true, undefined, {
+			kernelSnapshot: false,
+		});
 		expect(closeSession).not.toHaveBeenCalledWith(foreignChildState, expect.anything());
 		expect(childSession.disposeAsync).not.toHaveBeenCalled();
 		expect(staleParentReference.disposeAsync).toHaveBeenCalledOnce();
@@ -6505,6 +6515,71 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("deletes a resident child without awaiting its pending trace upload and skips the doomed kernel snapshot", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-trace-flush-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const childState = await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+			const childManager = childState.runtime.session.sessionManager as SessionManager;
+			const { calls, releaseFetch } = installGatedTraceUpload(childManager);
+			childManager.appendMessage({ role: "user", content: "pending trace data", timestamp: 3 });
+			childManager.flushNow();
+
+			// Resolving while the stubbed fetch is still gated is the pin: the
+			// delete must not await the upload.
+			await internals
+				.createSubagentRuntimeHost(parentState)
+				.deleteRlmSubagentRuntime(fixture.childId, childState.runtime.session);
+
+			// The detached upload still fired exactly once.
+			await vi.waitFor(() => expect(calls).toHaveLength(1));
+			// The artifact sweep deletes the snapshot right away, so none is written.
+			expect(childState.runtime.session.disposeAsync).toHaveBeenCalledWith({ kernelSnapshot: false });
+			releaseFetch();
+			await flushAgentTraceUpload(childManager);
+			expect(calls).toHaveLength(1);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("awaits the pending trace upload and keeps the kernel snapshot on a shutdown close", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-shutdown-trace-flush-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				closeSession(state: ActiveSessionState, reason: string): Promise<void>;
+			};
+			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const childState = await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+			const childManager = childState.runtime.session.sessionManager as SessionManager;
+			const { calls, releaseFetch } = installGatedTraceUpload(childManager);
+			childManager.appendMessage({ role: "user", content: "pending trace data", timestamp: 3 });
+			childManager.flushNow();
+
+			// Passivation and daemon exit both close with "shutdown": the flush
+			// stays blocking there and the kernel snapshot is still written.
+			let closeSettled = false;
+			const closing = internals.closeSession(childState, "shutdown").then(() => {
+				closeSettled = true;
+			});
+			await vi.waitFor(() => expect(calls).toHaveLength(1));
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+			expect(closeSettled).toBe(false);
+			releaseFetch();
+			await closing;
+			expect(childState.runtime.session.disposeAsync).toHaveBeenCalledWith({ kernelSnapshot: true });
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	// chmod-based read-only dirs don't block root, so skip when running as uid 0.
 	it.skipIf(process.getuid?.() === 0)("does not fail a deletion when the artifact dir cannot be removed", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-artifact-rm-failure-"));
@@ -8923,6 +8998,37 @@ function makeCronJob(input: {
 		nextRunAt: "2026-01-01T12:05:00.000Z",
 		runCount: 0,
 	};
+}
+
+/**
+ * Arm a child session's trace-upload controller with a gated fetch stub so a
+ * test can observe whether a close awaits the final upload.
+ */
+function installGatedTraceUpload(sessionManager: SessionManager): {
+	calls: string[];
+	releaseFetch: () => void;
+} {
+	const calls: string[] = [];
+	let releaseFetch: () => void = () => {};
+	const gate = new Promise<void>((resolveGate) => {
+		releaseFetch = resolveGate;
+	});
+	installAgentTraceUpload(sessionManager, {
+		authStorage: AuthStorage.inMemory({
+			[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+		}),
+		settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
+		baseUrl: "https://api.example.test",
+		fetchFn: (async (input: unknown) => {
+			calls.push(String(input));
+			await gate;
+			return new Response(JSON.stringify({ bytes_stored: 1 }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		}) as typeof fetch,
+	});
+	return { calls, releaseFetch };
 }
 
 function makePersistedRlmDaemonFixture(
