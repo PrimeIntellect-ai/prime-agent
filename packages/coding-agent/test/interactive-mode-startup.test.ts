@@ -20,14 +20,15 @@ describe("InteractiveMode startup hints", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	function createMode(sessionHasMessages = false, returnToAgentsView = false, getEditorText = () => "") {
+	function createMode(messageCount = 0, returnToAgentsView = false, getEditorText = () => "") {
 		const mode = {
-			sessionHasMessages,
 			options: { returnToAgentsView },
 			editor: { getText: getEditorText },
 			connectionState: {
 				model: { name: "test-model", reasoning: true },
 				thinkingLevel: "high",
+				messageCount,
+				isStreaming: false,
 			},
 		};
 		Object.setPrototypeOf(mode, InteractiveMode.prototype);
@@ -83,9 +84,35 @@ describe("InteractiveMode startup hints", () => {
 		expect(stripAnsi(label)).toBe("test-model • high  ? for shortcuts");
 	});
 
+	it("keeps fresh-chat guidance hidden when a mid-turn snapshot still has no committed messages", () => {
+		const mode = createMode();
+		const patchConnectionState = (patch: Record<string, unknown>) => Object.assign(mode.connectionState, patch);
+		Object.assign(mode, {
+			patchConnectionState,
+			builtInHeader: { invalidate: vi.fn() },
+			subagentSummaryLine: { invalidate: vi.fn() },
+		});
+		const updateConnectionStateFromEvent = Reflect.get(
+			InteractiveMode.prototype,
+			"updateConnectionStateFromEvent",
+		) as (event: unknown) => void;
+		const getLabel = () => stripAnsi(Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode));
+		const message = { role: "user", content: "hello", timestamp: 1 };
+
+		updateConnectionStateFromEvent.call(mode, { type: "agent_start" });
+		updateConnectionStateFromEvent.call(mode, { type: "message_start", message });
+		Object.assign(mode.connectionState, { messageCount: 0, isStreaming: true });
+
+		expect(getLabel()).not.toContain("for shortcuts");
+
+		updateConnectionStateFromEvent.call(mode, { type: "message_end", message });
+		updateConnectionStateFromEvent.call(mode, { type: "agent_end", messages: [message] });
+		expect(getLabel()).not.toContain("for shortcuts");
+	});
+
 	it("routes session-view requests through the existing agents-view return path", async () => {
 		const returnToAgentsView = vi.fn(async () => {});
-		const mode = Object.assign(createMode(false, true), { returnToAgentsView });
+		const mode = Object.assign(createMode(0, true), { returnToAgentsView });
 
 		await Reflect.get(InteractiveMode.prototype, "requestAgentsView").call(mode);
 
@@ -96,7 +123,7 @@ describe("InteractiveMode startup hints", () => {
 		const returnToAgentsView = vi.fn(async () => {});
 		const showStatus = vi.fn();
 		const mode = Object.assign(
-			createMode(false, true, () => "draft prompt"),
+			createMode(0, true, () => "draft prompt"),
 			{ returnToAgentsView, showStatus },
 		);
 
@@ -110,7 +137,7 @@ describe("InteractiveMode startup hints", () => {
 		const returnToAgentsView = vi.fn(async () => {});
 		const showStatus = vi.fn();
 		const mode = Object.assign(
-			createMode(false, true, () => "scoped draft"),
+			createMode(0, true, () => "scoped draft"),
 			{ returnToAgentsView, showStatus },
 		);
 
@@ -127,7 +154,7 @@ describe("InteractiveMode startup hints", () => {
 			resolveDispose = resolve;
 		});
 		const mode = Object.assign(
-			createMode(false, true, () => "draft prompt"),
+			createMode(0, true, () => "draft prompt"),
 			{
 				promptStashState,
 				pastedImages: new Map(),
@@ -152,7 +179,7 @@ describe("InteractiveMode startup hints", () => {
 	it("opens the shared session view on back navigation for process-local chats", async () => {
 		const requestAgentsView = vi.fn(async () => {});
 		const returnToAgentsView = vi.fn(async () => {});
-		const mode = Object.assign(createMode(false, false), { requestAgentsView, returnToAgentsView });
+		const mode = Object.assign(createMode(0, false), { requestAgentsView, returnToAgentsView });
 
 		const handled = Reflect.get(InteractiveMode.prototype, "handleAgentsBack").call(mode) as boolean;
 
@@ -164,7 +191,7 @@ describe("InteractiveMode startup hints", () => {
 	it("returns to the daemon agents view on back navigation for daemon chats", async () => {
 		const requestAgentsView = vi.fn(async () => {});
 		const returnToAgentsView = vi.fn(async () => {});
-		const mode = Object.assign(createMode(false, true), { requestAgentsView, returnToAgentsView });
+		const mode = Object.assign(createMode(0, true), { requestAgentsView, returnToAgentsView });
 
 		const handled = Reflect.get(InteractiveMode.prototype, "handleAgentsBack").call(mode) as boolean;
 
@@ -176,7 +203,7 @@ describe("InteractiveMode startup hints", () => {
 	it("leaves back navigation to the editor while a draft exists", async () => {
 		const requestAgentsView = vi.fn(async () => {});
 		const mode = Object.assign(
-			createMode(false, false, () => "draft prompt"),
+			createMode(0, false, () => "draft prompt"),
 			{ requestAgentsView },
 		);
 
@@ -189,7 +216,7 @@ describe("InteractiveMode startup hints", () => {
 	it("explains that the agents view needs the daemon for non-daemon chats", async () => {
 		const showStatus = vi.fn();
 		const shutdown = vi.fn(async () => {});
-		const mode = Object.assign(createMode(false, false), {
+		const mode = Object.assign(createMode(0, false), {
 			returnToAgentsView: vi.fn(async () => {}),
 			showStatus,
 			shutdown,
@@ -203,7 +230,7 @@ describe("InteractiveMode startup hints", () => {
 
 	it("keeps the lowercase agents hint while typing", () => {
 		let editorText = "";
-		const mode = createMode(false, true, () => editorText);
+		const mode = createMode(0, true, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
 		expect(stripAnsi(getLabel())).toBe("← agents/resume  test-model • high  ? for shortcuts");
@@ -214,7 +241,7 @@ describe("InteractiveMode startup hints", () => {
 
 	it("hides the fresh-chat shortcut hint while the prompt has text", () => {
 		let editorText = "";
-		const mode = createMode(false, false, () => editorText);
+		const mode = createMode(0, false, () => editorText);
 		const getLabel = () => Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
 		expect(stripAnsi(getLabel())).toBe("test-model • high  ? for shortcuts");
@@ -230,7 +257,7 @@ describe("InteractiveMode startup hints", () => {
 	});
 
 	it("hides the tray shortcut guidance for chats with history", () => {
-		const mode = createMode(true);
+		const mode = createMode(1);
 		const label = Reflect.get(InteractiveMode.prototype, "getTrayLocationLabel").call(mode);
 
 		expect(stripAnsi(label)).toBe("test-model • high");

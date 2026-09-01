@@ -12,7 +12,11 @@ import {
 	createInitialAgentsViewPersistentState,
 	runAgentsViewMode,
 } from "../src/modes/agents-view/agents-view-mode.js";
-import { type AgentsViewRow, resolveAgentsViewLeftResult } from "../src/modes/agents-view/agents-view-state.js";
+import {
+	type AgentsViewRow,
+	buildAgentsViewRows,
+	resolveAgentsViewLeftResult,
+} from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
 import { stopThemeWatcher } from "../src/modes/interactive/theme/theme.js";
@@ -97,10 +101,14 @@ describe("AgentsViewMode", () => {
 		const self = {
 			editor: { getText: () => "matching query" },
 			persistentState: { query: "" },
+			savedSearchFetchStarted: true,
 			selectedIndex: 4,
 			rebuildRows: vi.fn(),
 			syncSelectedRowState: vi.fn(),
 			ui: { requestRender: vi.fn() },
+			armSavedSearchFetch(): void {
+				invoke("armSavedSearchFetch", self);
+			},
 		};
 
 		invoke("queryChanged", self);
@@ -431,8 +439,6 @@ describe("AgentsViewMode", () => {
 			heartbeats: [],
 			inactiveAgentIdentities: new Set(),
 			pendingDeleteAgent: undefined,
-			liveCatalogReady: true,
-			liveCatalogRefreshPending: false,
 			scopeKey: persistentState.scopeFrames?.[0]?.scope,
 			expandedSubagentParents: new Set(),
 			programShownParents: new Set(),
@@ -486,7 +492,6 @@ describe("AgentsViewMode", () => {
 			heartbeats: [],
 			inactiveAgentIdentities: new Set(),
 			pendingDeleteAgent: undefined,
-			liveCatalogReady: true,
 			savedCatalogReady: true,
 			scopeKey: persistentState.scopeFrames?.[0]?.scope,
 			expandedSubagentParents: new Set(),
@@ -574,7 +579,6 @@ describe("AgentsViewMode", () => {
 				heartbeats: [],
 				inactiveAgentIdentities: new Set(),
 				pendingDeleteAgent: undefined,
-				liveCatalogReady: true,
 				savedCatalogReady: true,
 				expandedSubagentParents,
 				programShownParents: new Set(),
@@ -648,6 +652,26 @@ describe("AgentsViewMode", () => {
 		expect(programShownParents.size).toBe(0);
 		expect(self.rebuildRows).toHaveBeenCalledTimes(2);
 	});
+
+	it("renders roster recovery and stale-worker status labels", () => {
+		const rows = buildAgentsViewRows([
+			summary({ id: "recovering", sessionId: "recovering", statusLabel: "recovering" }),
+			summary({
+				id: "stale",
+				sessionId: "stale",
+				lastHeardFromAt: new Date(Date.now() - 60_000).toISOString(),
+			}),
+		]);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+
+		try {
+			expect(invoke("renderRow", view, rows[0], 160)).toContain("recovering");
+			expect(invoke("renderRow", view, rows[1], 160)).toContain("last heard");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
 });
 
 function createUiServices(): InteractiveModeUiServices {
@@ -665,7 +689,19 @@ afterEach(() => {
 });
 
 describe("AgentsViewMode persistent catalog state", () => {
-	it("keeps an initial handoff scope when the first live poll fails after both catalogs settle", async () => {
+	it("treats only a previously loaded saved catalog as settled on mount", () => {
+		const fresh = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		const loaded = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+
+		try {
+			expect(Reflect.get(fresh, "savedCatalogReady")).toBe(false);
+			expect(Reflect.get(loaded, "savedCatalogReady")).toBe(true);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("applies an initial handoff scope from the first pushed roster refresh", async () => {
 		const root = summary();
 		const scope = { sessionId: root.sessionId, activeSessionId: root.activeSessionId };
 		const persistentState = createInitialAgentsViewPersistentState({
@@ -674,22 +710,47 @@ describe("AgentsViewMode persistent catalog state", () => {
 		});
 		persistentState.lastSuccessfulSavedSessions = [];
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
-		Reflect.set(view, "client", {
-			isConnected: true,
-			request: vi.fn(async () => {
-				throw new Error("transient list failure");
-			}),
-		});
+		Reflect.set(view, "rosterStore", { summaries: () => [root] });
+		Reflect.set(view, "savedCatalogReady", true);
 
 		try {
-			await expect(invoke("refreshSessions", view, { preserveStatusOnError: true })).resolves.toBe(false);
-			expect(Reflect.get(view, "liveCatalogReady")).toBe(true);
-			expect(Reflect.get(view, "savedCatalogReady")).toBe(true);
+			await expect(invoke("refreshSessions", view)).resolves.toBeUndefined();
 			expect(persistentState.scopeFrames).toEqual([{ scope, returnChat: root }]);
 			expect(persistentState.lastSuccessfulLiveSummaries).toEqual([root]);
 		} finally {
 			stopThemeWatcher();
 		}
+	});
+
+	it("re-arms reconnect from the heartbeat poll over a dead socket and never overwrites a sticky notice", async () => {
+		const harness = (isConnected: boolean, statusMessageSticky: boolean) => {
+			const client = {
+				isConnected,
+				request: vi.fn(async () => {
+					throw new Error("heartbeats unavailable");
+				}),
+			};
+			return {
+				client,
+				heartbeatCatalogGeneration: 0,
+				reconnectPromise: undefined,
+				daemonShutdownReceived: false,
+				statusMessageSticky,
+				requireClient: () => client,
+				startClientReconnect: vi.fn(),
+				setStatusMessage: vi.fn(),
+			};
+		};
+
+		const reconnecting = harness(false, false);
+		await expect(invoke("refreshHeartbeats", reconnecting)).resolves.toBe(false);
+		expect(reconnecting.startClientReconnect).toHaveBeenCalledWith(reconnecting.client, expect.any(Error));
+		expect(reconnecting.setStatusMessage).not.toHaveBeenCalled();
+
+		const sticky = harness(true, true);
+		await expect(invoke("refreshHeartbeats", sticky)).resolves.toBe(false);
+		expect(sticky.startClientReconnect).not.toHaveBeenCalled();
+		expect(sticky.setStatusMessage).not.toHaveBeenCalled();
 	});
 
 	it("keeps a live-only scope after a fresh instance's first live poll fails", async () => {
@@ -715,7 +776,7 @@ describe("AgentsViewMode persistent catalog state", () => {
 		});
 
 		try {
-			await expect(invoke("refreshSessions", view, { preserveStatusOnError: true })).resolves.toBe(false);
+			await expect(invoke("refreshSessions", view, { preserveStatusOnError: true })).resolves.toBeUndefined();
 			expect(persistentState.scopeFrames).toEqual([
 				{ scope: { sessionId: root.sessionId, activeSessionId: root.activeSessionId } },
 			]);
@@ -739,7 +800,6 @@ describe("AgentsViewMode persistent catalog state", () => {
 		);
 		const client = { isConnected: false, reconnect: vi.fn() };
 		Reflect.set(view, "client", client);
-		Reflect.set(view, "liveCatalogReady", true);
 		Reflect.set(view, "savedCatalogReady", true);
 
 		try {
@@ -747,15 +807,49 @@ describe("AgentsViewMode persistent catalog state", () => {
 			expect(persistentState.scopeFrames).toEqual([frame]);
 			expect(Reflect.get(view, "lastListedSummaries")).toEqual([root]);
 
-			Reflect.set(view, "client", {
-				isConnected: true,
-				request: vi.fn(async () => ({ success: true, data: { sessions: [] } })),
-			});
-			await expect(invoke("refreshSessions", view)).resolves.toBe(true);
+			Reflect.set(view, "client", { isConnected: true });
+			Reflect.set(view, "rosterStore", { summaries: () => [] });
+			await expect(invoke("refreshSessions", view)).resolves.toBeUndefined();
 			expect(persistentState.scopeFrames).toEqual([]);
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("applies the roster snapshot produced during reconnect heartbeat refresh", async () => {
+		const beforeRefresh = summary({ id: "before", sessionId: "before" });
+		const afterRefresh = summary({ id: "after", sessionId: "after" });
+		let current = [beforeRefresh];
+		let finishHeartbeatRefresh: (() => void) | undefined;
+		const heartbeatRefresh = new Promise<void>((resolve) => {
+			finishHeartbeatRefresh = resolve;
+		});
+		const client = { reconnect: vi.fn(async () => undefined) };
+		const self = {
+			options: { recoverDaemon: vi.fn(async () => undefined) },
+			client,
+			rosterStore: {
+				attach: vi.fn(async () => true),
+				summaries: vi.fn(() => current),
+			},
+			refreshHeartbeats: vi.fn(async () => {
+				await heartbeatRefresh;
+				return true;
+			}),
+			daemonShutdownReceived: false,
+			reconnectTimedOut: true,
+			setStatusMessage: vi.fn(),
+			applySessionList: vi.fn(),
+			armSavedSearchFetch: vi.fn(),
+		};
+
+		const reconnect = invoke("reconnectClient", self, client, new Error("disconnected")) as Promise<void>;
+		await vi.waitFor(() => expect(self.refreshHeartbeats).toHaveBeenCalledOnce());
+		current = [afterRefresh];
+		finishHeartbeatRefresh?.();
+		await reconnect;
+
+		expect(self.applySessionList).toHaveBeenCalledWith([afterRefresh], true);
 	});
 
 	it("keeps a newly pushed scope and the existing live cache when its first poll fails", async () => {
@@ -780,7 +874,7 @@ describe("AgentsViewMode persistent catalog state", () => {
 					throw new Error("transient list failure");
 				}),
 			});
-			await expect(invoke("refreshSessions", this, { preserveStatusOnError: true })).resolves.toBe(false);
+			await expect(invoke("refreshSessions", this, { preserveStatusOnError: true })).resolves.toBeUndefined();
 			expect(persistentState.scopeFrames).toEqual([{ scope, returnChat: returnedRoot }]);
 			return { type: "exit" };
 		});

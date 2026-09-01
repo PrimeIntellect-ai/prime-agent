@@ -1,0 +1,1 @@
+- Removed the delay before continuing sessions after compaction.

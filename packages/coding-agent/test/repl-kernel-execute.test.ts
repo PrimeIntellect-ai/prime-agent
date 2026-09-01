@@ -37,7 +37,7 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 	});
 
 	afterEach(async () => {
-		await manager?.dispose();
+		await manager?.shutdown({ snapshot: true, drainHostRequests: true });
 		manager = undefined;
 		if (dir) {
 			rmSync(dir, { recursive: true, force: true });
@@ -128,7 +128,7 @@ describeIf("ReplKernelManager execute (real runtime)", () => {
 		expect(r.status).toBe("ok");
 		const pid = Number(r.result);
 		expect(Number.isInteger(pid)).toBe(true);
-		await manager.dispose();
+		await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		let alive = true;
 		for (let i = 0; i < 100; i++) {
 			try {

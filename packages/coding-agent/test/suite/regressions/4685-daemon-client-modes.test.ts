@@ -149,22 +149,16 @@ async function runRpc(
 }
 
 describe("ENG-4685 daemon-backed client modes", () => {
-	it("commits owned-worker promotion before best-effort peer synchronization", async () => {
+	it("commits owned-worker promotion once", async () => {
 		const client = { id: "client-1" } as DaemonSocketClient;
 		const worker = {
 			descriptor: { ownerClientId: "protocol-client" },
 			launchEnv: { TEST: "value" },
 		};
 		const persistWorker = vi.fn();
-		const syncAgentPeers = vi.fn(async () => {
-			throw new Error("peer unavailable");
-		});
-		const log = vi.fn();
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			protocolClientId: () => "protocol-client",
 			persistWorker,
-			syncAgentPeers,
-			log,
 		}) as {
 			promoteOwnedWorker(client: DaemonSocketClient, resident: typeof worker): Promise<void>;
 		};
@@ -175,8 +169,6 @@ describe("ENG-4685 daemon-backed client modes", () => {
 		expect(worker.descriptor.ownerClientId).toBeUndefined();
 		expect(worker.launchEnv).toBeUndefined();
 		expect(persistWorker).toHaveBeenCalledOnce();
-		expect(syncAgentPeers).toHaveBeenCalledOnce();
-		expect(log).toHaveBeenCalledWith(expect.stringContaining("peer unavailable"));
 	});
 
 	it("rolls back owned-worker promotion when persistence fails", async () => {

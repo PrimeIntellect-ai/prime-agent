@@ -1,6 +1,7 @@
 import { basename, resolve } from "node:path";
 import { canonicalizePath } from "../../utils/paths.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/index.js";
+import { rosterAgentIdForSummary } from "../daemon/agent-roster.js";
 import { classifySessionRosterStatus, type SessionSummary } from "../daemon/daemon-session-list.js";
 
 export type AgentsViewSection = "running" | "idle" | "inactive";
@@ -90,7 +91,7 @@ export interface AgentsViewRow {
 }
 
 export function classifyAgentsViewSession(summary: SessionSummary): AgentsViewSection {
-	return classifySessionRosterStatus(summary);
+	return summary.rosterStatus ?? classifySessionRosterStatus(summary);
 }
 
 export function classifyUnifiedSession(record: Pick<UnifiedSessionRecord, "daemon" | "heartbeat">): AgentsViewSection {
@@ -103,12 +104,11 @@ export function classifyUnifiedSession(record: Pick<UnifiedSessionRecord, "daemo
 	return classifyAgentsViewSession(record.daemon);
 }
 
-// Live sessions only; drafts and archived stay out.
 export function shouldShowAgentsViewSession(summary: SessionSummary, manuallyInactive = false): boolean {
 	if (manuallyInactive) {
 		return false;
 	}
-	return summary.lifecycle === "live" && (summary.workerState === undefined || summary.workerState === "ready");
+	return summary.lifecycle === "live";
 }
 
 export function sectionTitle(section: AgentsViewSection): string {
@@ -126,6 +126,13 @@ export function sectionTitle(section: AgentsViewSection): string {
 	}
 }
 
+function formatAgeLabel(timestamp: string): string {
+	const seconds = Math.max(0, Math.round((Date.now() - Date.parse(timestamp)) / 1000));
+	if (seconds < 120) return `${seconds}s ago`;
+	const minutes = Math.round(seconds / 60);
+	return minutes < 120 ? `${minutes}m ago` : `${Math.round(minutes / 60)}h ago`;
+}
+
 function canonicalSessionPath(path: string): string {
 	return resolve(canonicalizePath(path));
 }
@@ -136,6 +143,9 @@ function fileIdentity(path: string): string {
 
 function summaryIdentityAliases(summary: SessionSummary): string[] {
 	return [
+		summary.runtimeKind === "subagent" && summary.rlmChildId
+			? `agent:${rosterAgentIdForSummary(summary)}`
+			: undefined,
 		summary.sessionFile ? fileIdentity(summary.sessionFile) : undefined,
 		`session:${summary.sessionId}`,
 		summary.activeSessionId ? `active:${summary.activeSessionId}` : undefined,
@@ -297,12 +307,8 @@ export function resolveAgentsViewLeftResult(
 	};
 }
 
-export function shouldApplyScopeResolution(
-	droppedFrames: number,
-	liveCatalogReady: boolean,
-	savedCatalogReady: boolean,
-): boolean {
-	return droppedFrames === 0 || (liveCatalogReady && savedCatalogReady);
+export function shouldApplyScopeResolution(droppedFrames: number, savedCatalogReady: boolean): boolean {
+	return droppedFrames === 0 || savedCatalogReady;
 }
 
 export function createUnattachableChildOpenResult(
@@ -546,7 +552,21 @@ function getParentKeys(summary: SessionSummary): string[] {
 	].filter((key): key is string => key !== undefined);
 }
 
+/** Direct-child linkage over getParentKeys, shared by the view tree and the chat subagents bar. */
+export function isDirectAgentChild(
+	child: SessionSummary,
+	parent: { activeSessionId?: string | undefined; sessionId?: string | undefined; sessionFile?: string | undefined },
+): boolean {
+	const parentKeys = new Set(getParentKeys(child));
+	if (parent.activeSessionId !== undefined && parentKeys.has(`active:${parent.activeSessionId}`)) return true;
+	if (parent.sessionId !== undefined && parentKeys.has(`session:${parent.sessionId}`)) return true;
+	return parent.sessionFile !== undefined && parentKeys.has(fileIdentity(parent.sessionFile));
+}
+
 export function getAgentsViewSummaryIdentity(summary: SessionSummary): string {
+	if (summary.runtimeKind === "subagent" && summary.rlmChildId) {
+		return `agent:${rosterAgentIdForSummary(summary)}`;
+	}
 	if (summary.sessionFile) {
 		return fileIdentity(summary.sessionFile);
 	}
@@ -960,6 +980,16 @@ function getSessionSubtitle(summary: SessionSummary): string {
 }
 
 function getSessionStatusLabel(summary: SessionSummary, hasActiveHeartbeat = summary.hasActiveHeartbeat): string {
+	if (summary.statusLabel !== undefined) {
+		return summary.statusLabel;
+	}
+	if (summary.lastHeardFromAt !== undefined) {
+		return `last heard ${formatAgeLabel(summary.lastHeardFromAt)}`;
+	}
+	// A non-ready worker cannot report fresh runtime flags; its state is the row's story.
+	if (summary.workerState !== undefined && summary.workerState !== "ready") {
+		return summary.workerState;
+	}
 	if (summary.isCompacting) {
 		return "compacting";
 	}

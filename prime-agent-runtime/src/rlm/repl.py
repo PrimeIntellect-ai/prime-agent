@@ -31,7 +31,7 @@ from typing import Any
 
 from .bash import _kill_live_handles
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 DEFAULT_SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024
 DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES = 16 * 1024 * 1024
@@ -589,20 +589,19 @@ class _SnapshotSizeLimitExceeded(Exception):
     pass
 
 
-class _SnapshotBuffer:
-    def __init__(self, limit: int) -> None:
-        import io
-
-        self._buf = io.BytesIO()
+class _CappedWriter:
+    def __init__(self, sink: Any, limit: int) -> None:
+        self._sink = sink
         self._limit = limit
+        self.written = 0
 
-    def write(self, chunk: bytes) -> int:
-        if self._buf.tell() + len(chunk) > self._limit:
+    def write(self, chunk: Any) -> int:
+        size = len(chunk)
+        if self.written + size > self._limit:
             raise _SnapshotSizeLimitExceeded()
-        return self._buf.write(chunk)
-
-    def getvalue(self) -> bytes:
-        return self._buf.getvalue()
+        self._sink.write(chunk)
+        self.written += size
+        return size
 
 
 def _snapshot_state(
@@ -637,9 +636,9 @@ def _snapshot_state(
             continue
         remaining = max_bytes - total
         limit = max_variable_bytes if prune_oversized else min(max_variable_bytes, remaining)
-        buffer = _SnapshotBuffer(limit)
+        buffer = io.BytesIO()
         try:
-            dill.dump(value, buffer)
+            dill.dump(value, _CappedWriter(buffer, limit))
             blob = buffer.getvalue()
         except _SnapshotSizeLimitExceeded:
             if not prune_oversized and remaining < max_variable_bytes:
@@ -688,39 +687,41 @@ def _snapshot_state(
     previous = None
     try:
         try:
-            def serialize(candidate: dict[str, bytes]) -> bytes | None:
-                buffer = _SnapshotBuffer(max_bytes)
-                try:
-                    dill.dump(candidate, buffer)
-                except _SnapshotSizeLimitExceeded:
-                    return None
-                return buffer.getvalue()
-
-            serialized_payload = serialize(payload)
-            if serialized_payload is None:
-                items = list(payload.items())
-                serialized_payload = serialize({})
-                if serialized_payload is None:
-                    return {"error": "write failed: snapshot exceeds aggregate snapshot size cap"}
-                # Keep the largest insertion-order prefix whose complete pickle fits.
-                # Prefix pickle size is monotonic because each prefix only adds a string key and bytes value.
-                low, high = 0, len(items) - 1
-                while low < high:
-                    mid = (low + high + 1) // 2
-                    candidate = serialize(dict(items[:mid]))
-                    if candidate is None:
-                        high = mid - 1
-                    else:
-                        low = mid
-                        serialized_payload = candidate
-                for name, _ in items[low:]:
-                    skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
-                payload = dict(items[:low])
-
             fh, tmp = stage_temp(path, "wb")
             with fh:
-                fh.write(serialized_payload)
-            bytes_written = len(serialized_payload)
+                def dump_to_temp(candidate: dict[str, bytes]) -> int | None:
+                    writer = _CappedWriter(fh, max_bytes)
+                    try:
+                        dill.dump(candidate, writer)
+                    except _SnapshotSizeLimitExceeded:
+                        return None
+                    return writer.written
+
+                def redump_to_temp(candidate: dict[str, bytes]) -> int | None:
+                    fh.seek(0)
+                    fh.truncate()
+                    return dump_to_temp(candidate)
+
+                bytes_written = dump_to_temp(payload)
+                if bytes_written is None:
+                    # Prefix pickle size is monotonic because each prefix only adds a string key and bytes value.
+                    items = list(payload.items())
+                    if redump_to_temp({}) is None:
+                        return {"error": "write failed: snapshot exceeds aggregate snapshot size cap"}
+                    low, high = 0, len(items) - 1
+                    while low < high:
+                        mid = (low + high + 1) // 2
+                        if redump_to_temp(dict(items[:mid])) is None:
+                            high = mid - 1
+                        else:
+                            low = mid
+                    for name, _ in items[low:]:
+                        skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
+                    payload = dict(items[:low])
+                    # The search's last attempt may have overflowed the temp; rewrite the chosen prefix.
+                    bytes_written = redump_to_temp(payload)
+                    if bytes_written is None:
+                        return {"error": "write failed: snapshot exceeds aggregate snapshot size cap"}
             saved = sorted(payload.keys())
             pruned = sorted(name for name in oversized if name in ns) if prune_oversized else []
             manifest = {

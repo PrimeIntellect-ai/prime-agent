@@ -1,0 +1,1 @@
+- Fixed daemon session create when the worker process cannot be spawned (e.g. EMFILE from fd exhaustion): the create now fails with the real spawn error plus a resident-worker/ulimit hint, and the CLI prints a one-line error instead of crashing with a TypeError stack dump.

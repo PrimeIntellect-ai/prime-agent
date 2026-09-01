@@ -1,0 +1,1 @@
+- Fixed saved-session resume when its resident worker is still recovering after a daemon restart.

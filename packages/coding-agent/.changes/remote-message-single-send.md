@@ -1,0 +1,1 @@
+- Fixed remote agent messages being delivered twice when the daemon request timed out or the response was lost: the message is now sent exactly once per call, and post-send failures surface as errors instead of triggering a resend.

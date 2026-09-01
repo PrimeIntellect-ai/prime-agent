@@ -103,22 +103,76 @@ export interface RlmLedgerSeedRegistryEntry {
 	status: "running" | "completed" | "deleted";
 }
 
+export interface LegacyRlmSubagentRegistryEntry extends RlmLedgerSeedRegistryEntry {
+	type: "rlm_subagent";
+	sessionDir: string;
+	parentSessionId: string;
+	parentSessionFile?: string;
+	rlmMaxDepth?: number;
+	rlmParentNodeId?: string;
+	prompt?: string;
+	spawnCode?: string;
+	model?: { provider: string; modelId: string };
+	createdAt: number;
+	updatedAt: string;
+}
+
 export interface RlmLedgerSeedSource {
-	/**
-	 * Tolerant last-writer-wins registry read for a parent session file, using
-	 * the daemon's existing registry conventions. Must never throw for a
-	 * missing registry; other failures may throw (seeding degrades to empty).
-	 */
 	readRegistryForSessionFile(sessionFile: string): Promise<RlmLedgerSeedRegistryEntry[]>;
 }
 
-/**
- * Default seed source: derive the per-parent registry path from the session
- * file's header id (a bounded first-line read, no full transcript parse) and
- * read it with the same tolerant last-writer-wins semantics the daemon's
- * passive-hydration reader uses (malformed lines ignored, unknown fields
- * accepted, absent depths allowed).
- */
+export async function readLegacyRlmSubagentRegistry(
+	path: string,
+	options: { throwOnReadError?: boolean; log?: (message: string) => void } = {},
+): Promise<LegacyRlmSubagentRegistryEntry[]> {
+	let contents: string;
+	try {
+		contents = await readFile(path, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+			options.log?.(
+				`failed to read RLM subagent registry: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			if (options.throwOnReadError) throw error;
+		}
+		return [];
+	}
+	const latest = new Map<string, LegacyRlmSubagentRegistryEntry>();
+	for (const line of contents.split(/\r?\n/)) {
+		const trimmed = line.trim();
+		if (!trimmed) continue;
+		try {
+			const entry = JSON.parse(trimmed) as Partial<LegacyRlmSubagentRegistryEntry>;
+			if (
+				entry.type !== "rlm_subagent" ||
+				typeof entry.childId !== "string" ||
+				typeof entry.sessionName !== "string" ||
+				typeof entry.sessionFile !== "string" ||
+				(entry.status !== "running" && entry.status !== "completed" && entry.status !== "deleted") ||
+				(entry.rlmDepth !== undefined && (!Number.isSafeInteger(entry.rlmDepth) || entry.rlmDepth < 0))
+			) {
+				continue;
+			}
+			latest.set(entry.childId, {
+				...entry,
+				sessionDir: typeof entry.sessionDir === "string" ? entry.sessionDir : dirname(entry.sessionFile),
+				// rlmMaxDepth is optional hydration metadata the ledger seeder never
+				// reads; a damaged value must not discard the child's topology edge,
+				// so it is dropped instead of rejecting the whole entry.
+				rlmMaxDepth:
+					entry.rlmMaxDepth !== undefined && Number.isSafeInteger(entry.rlmMaxDepth) && entry.rlmMaxDepth >= 0
+						? entry.rlmMaxDepth
+						: undefined,
+			} as LegacyRlmSubagentRegistryEntry);
+		} catch (error) {
+			options.log?.(
+				`ignored malformed RLM subagent registry entry: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	return [...latest.values()];
+}
+
 export function createRlmLedgerRegistrySeedSource(): RlmLedgerSeedSource {
 	return {
 		readRegistryForSessionFile: async (sessionFile) => {
@@ -133,49 +187,9 @@ export function createRlmLedgerRegistrySeedSource(): RlmLedgerSeedSource {
 				return [];
 			}
 			if (!headerId) return [];
-			const registryPath = join(getSessionArtifactPathForFile(sessionFile, headerId), "rlm-subagents.jsonl");
-			let contents: string;
-			try {
-				contents = await readFile(registryPath, "utf8");
-			} catch {
-				return [];
-			}
-			const latest = new Map<string, RlmLedgerSeedRegistryEntry>();
-			for (const line of contents.split(/\r?\n/)) {
-				const trimmed = line.trim();
-				if (!trimmed) continue;
-				try {
-					const entry = JSON.parse(trimmed) as {
-						type?: unknown;
-						childId?: unknown;
-						sessionName?: unknown;
-						sessionFile?: unknown;
-						rlmDepth?: unknown;
-						status?: unknown;
-					};
-					if (
-						entry.type !== "rlm_subagent" ||
-						typeof entry.childId !== "string" ||
-						typeof entry.sessionName !== "string" ||
-						typeof entry.sessionFile !== "string" ||
-						(entry.status !== "running" && entry.status !== "completed" && entry.status !== "deleted") ||
-						(entry.rlmDepth !== undefined &&
-							(!Number.isSafeInteger(entry.rlmDepth) || (entry.rlmDepth as number) < 0))
-					) {
-						continue;
-					}
-					latest.set(entry.childId, {
-						childId: entry.childId,
-						sessionName: entry.sessionName,
-						sessionFile: entry.sessionFile,
-						...(typeof entry.rlmDepth === "number" ? { rlmDepth: entry.rlmDepth } : {}),
-						status: entry.status,
-					});
-				} catch {
-					// Malformed registry history is ignored, matching the daemon reader.
-				}
-			}
-			return [...latest.values()];
+			return readLegacyRlmSubagentRegistry(
+				join(getSessionArtifactPathForFile(sessionFile, headerId), "rlm-subagents.jsonl"),
+			);
 		},
 	};
 }
@@ -483,12 +497,14 @@ export class RlmSpawnLedger {
 		});
 	}
 
-	private async familyUnlocked(): Promise<SessionInfo[]> {
-		const edges = [...this.replaySync().values()].filter((edge) => !edge.deleted);
-		const byChild = new Map<string, RlmLedgerEdge>();
-		for (const edge of edges) {
-			byChild.set(canonicalSessionPath(edge.child), edge);
-		}
+	/** Live edges reconciled by stat, exactly like family(): a dead parent or child drops the edge. */
+	liveEdges(): Promise<RlmLedgerEdge[]> {
+		return this.enqueue(() => this.liveEdgesUnlocked());
+	}
+
+	private async liveEdgesUnlocked(
+		edges = [...this.replaySync().values()].filter((edge) => !edge.deleted),
+	): Promise<RlmLedgerEdge[]> {
 		const statCache = new Map<string, boolean>();
 		const exists = async (path: string): Promise<boolean> => {
 			const cached = statCache.get(path);
@@ -502,11 +518,24 @@ export class RlmSpawnLedger {
 			statCache.set(path, ok);
 			return ok;
 		};
-		let alive: RlmLedgerEdge[] = [];
+		const alive: RlmLedgerEdge[] = [];
 		for (const edge of edges) {
 			if ((await exists(canonicalSessionPath(edge.child))) && (await exists(canonicalSessionPath(edge.parent)))) {
 				alive.push(edge);
 			}
+		}
+		return alive;
+	}
+
+	private async familyUnlocked(): Promise<SessionInfo[]> {
+		// One replay, one stat snapshot: byChild comes from the same alive set that emits child rows,
+		// so a child whose dead edge was reconciled away degrades to a root row instead of vanishing.
+		let alive: RlmLedgerEdge[] = await this.liveEdgesUnlocked(
+			[...this.replaySync().values()].filter((candidate) => !candidate.deleted),
+		);
+		const byChild = new Map<string, RlmLedgerEdge>();
+		for (const edge of alive) {
+			byChild.set(canonicalSessionPath(edge.child), edge);
 		}
 		const rootPaths: string[] = [];
 		let rootEntries: string[] = [];
@@ -826,4 +855,30 @@ export class RlmSpawnLedger {
 		}
 		return edges;
 	}
+}
+
+// Shared user-delete policy: only a readable no-parent transcript is positively top-level; children and
+// unknown targets tombstone via the ledger BEFORE the file delete (a tombstoned-but-undeleted file is
+// the accepted orphan of a failed delete).
+export async function tombstoneSavedSessionDelete(
+	ledger: RlmSpawnLedger,
+	sessionPath: string,
+	knownSummary: { runtimeKind?: "top-level" | "subagent" } | undefined,
+): Promise<{ deletedInfo: SessionInfo | undefined; ledgerEdge: RlmLedgerEdge | undefined }> {
+	const deletedPath = canonicalSessionPath(sessionPath);
+	const deletedInfo = (await readSessionInfo(sessionPath).catch(() => null)) ?? undefined;
+	const knownChild =
+		knownSummary?.runtimeKind === "subagent" ||
+		deletedInfo?.parentSessionPath !== undefined ||
+		(deletedInfo?.rlmDepth ?? 0) > 0;
+	const positivelyTopLevel = !knownChild && (knownSummary !== undefined || deletedInfo !== undefined);
+	if (positivelyTopLevel) return { deletedInfo, ledgerEdge: undefined };
+	const edges = await ledger.edges();
+	// Tombstone every matching edge: a duplicate edge for the path (corrupt or raced appends) left
+	// live would resurrect a later recreation at that path as a subagent.
+	const matching = edges.filter((edge) => canonicalSessionPath(edge.child) === deletedPath);
+	for (const edge of matching) {
+		await ledger.appendDelete({ childId: edge.childId, child: sessionPath, reason: "user" });
+	}
+	return { deletedInfo, ledgerEdge: matching[0] };
 }
