@@ -8,6 +8,7 @@ export type AgentsViewSection = "running" | "idle" | "inactive";
 
 export interface UnifiedSessionHeartbeat {
 	activeCount: number;
+	pausedCount?: number;
 	nextRunAt?: string;
 }
 
@@ -94,12 +95,9 @@ export function classifyAgentsViewSession(summary: SessionSummary): AgentsViewSe
 	return summary.rosterStatus ?? classifySessionRosterStatus(summary);
 }
 
-export function classifyUnifiedSession(record: Pick<UnifiedSessionRecord, "daemon" | "heartbeat">): AgentsViewSection {
+export function classifyUnifiedSession(record: Pick<UnifiedSessionRecord, "daemon">): AgentsViewSection {
 	if (!record.daemon) {
 		return "inactive";
-	}
-	if ((record.heartbeat?.activeCount ?? 0) > 0) {
-		return "running";
 	}
 	return classifyAgentsViewSession(record.daemon);
 }
@@ -202,7 +200,10 @@ export function reconcileUnifiedSessions(
 			heartbeatByActiveId.get(daemon.activeSessionId ?? daemon.id) ??
 			(daemon.hasActiveHeartbeat ? { activeCount: 1 } : undefined);
 		const record: UnifiedSessionRecord = {
-			daemon: heartbeat && !daemon.hasActiveHeartbeat ? { ...daemon, hasActiveHeartbeat: true } : daemon,
+			daemon:
+				heartbeat && heartbeat.activeCount > 0 && !daemon.hasActiveHeartbeat
+					? { ...daemon, hasActiveHeartbeat: true }
+					: daemon,
 			identity: aliases[0]!,
 			identityAliases: aliases,
 			section: "idle",
@@ -483,41 +484,54 @@ export function aggregateSessionHeartbeats(
 	for (const summary of summaries) {
 		for (const key of getSummaryKeys(summary)) summaryByKey.set(key, summary);
 	}
-	const jobIdsByOwner = new Map<string, Set<string>>();
+	const activeJobIdsByOwner = new Map<string, Set<string>>();
+	const pausedJobIdsByOwner = new Map<string, Set<string>>();
 	const nextRunByJob = new Map<string, string>();
-	const add = (owner: string, jobId: string): void => {
-		const ids = jobIdsByOwner.get(owner) ?? new Set<string>();
+	const add = (byOwner: Map<string, Set<string>>, owner: string, jobId: string): void => {
+		const ids = byOwner.get(owner) ?? new Set<string>();
 		ids.add(jobId);
-		jobIdsByOwner.set(owner, ids);
+		byOwner.set(owner, ids);
 	};
 	for (const heartbeat of heartbeats) {
 		const job = heartbeat.job;
-		if (job.status !== "active") continue;
-		if (job.nextRunAt && Number.isFinite(Date.parse(job.nextRunAt))) nextRunByJob.set(job.id, job.nextRunAt);
+		if (job.status !== "active" && job.status !== "paused") continue;
+		const byOwner = job.status === "active" ? activeJobIdsByOwner : pausedJobIdsByOwner;
+		if (job.status === "active" && job.nextRunAt && Number.isFinite(Date.parse(job.nextRunAt))) {
+			nextRunByJob.set(job.id, job.nextRunAt);
+		}
 		let summary = summaryByKey.get(`active:${job.activeSessionId}`);
 		const visited = new Set<string>();
-		if (!summary) add(job.activeSessionId, job.id);
+		if (!summary) add(byOwner, job.activeSessionId, job.id);
 		while (summary) {
 			const owner = summary.activeSessionId ?? summary.id;
 			if (visited.has(owner)) break;
 			visited.add(owner);
-			add(owner, job.id);
+			add(byOwner, owner, job.id);
 			summary = findParentSummary(summary, summaryByKey);
 		}
 	}
 	const result = new Map<string, UnifiedSessionHeartbeat>();
-	for (const [owner, jobIds] of jobIdsByOwner) {
+	for (const owner of new Set([...activeJobIdsByOwner.keys(), ...pausedJobIdsByOwner.keys()])) {
+		const jobIds = activeJobIdsByOwner.get(owner) ?? new Set<string>();
+		const pausedCount = pausedJobIdsByOwner.get(owner)?.size ?? 0;
 		const nextRunAt = [...jobIds]
 			.map((jobId) => nextRunByJob.get(jobId))
 			.filter((value): value is string => value !== undefined)
 			.sort((a, b) => Date.parse(a) - Date.parse(b))[0];
-		result.set(owner, { activeCount: jobIds.size, ...(nextRunAt ? { nextRunAt } : {}) });
+		result.set(owner, {
+			activeCount: jobIds.size,
+			...(pausedCount > 0 ? { pausedCount } : {}),
+			...(nextRunAt ? { nextRunAt } : {}),
+		});
 	}
 	return result;
 }
 
 export function formatHeartbeatBadge(heartbeat: UnifiedSessionHeartbeat | undefined, now = Date.now()): string {
-	if (!heartbeat || heartbeat.activeCount < 1) return "";
+	if (!heartbeat) return "";
+	if (heartbeat.activeCount < 1) {
+		return (heartbeat.pausedCount ?? 0) > 0 ? `♥ ${heartbeat.pausedCount}` : "";
+	}
 	const next = heartbeat.nextRunAt ? Date.parse(heartbeat.nextRunAt) : Number.NaN;
 	const countdown = Number.isFinite(next) ? formatHeartbeatCountdown(next - now) : undefined;
 	return `♥ ${heartbeat.activeCount}${countdown ? `·${countdown}` : ""}`;
@@ -672,7 +686,7 @@ export function buildAgentsViewRows(
 			summary,
 			title: getAgentsViewSessionTitle(summary),
 			subtitle: getSessionSubtitle(summary),
-			statusLabel: getSessionStatusLabel(summary),
+			statusLabel: getSessionStatusLabel(summary, record?.heartbeat),
 			depth: 0,
 			selectable: true,
 			runningSubagentCount: 0,
@@ -682,7 +696,6 @@ export function buildAgentsViewRows(
 	);
 	const rowsByKey = buildRowKeyMap(baseRows);
 	const childrenByParent = new Map<MutableAgentsViewRow, MutableAgentsViewRow[]>();
-	const parentByChild = new Map<MutableAgentsViewRow, MutableAgentsViewRow>();
 	const nestedRows = new Set<MutableAgentsViewRow>();
 
 	for (const row of baseRows) {
@@ -697,7 +710,6 @@ export function buildAgentsViewRows(
 			continue;
 		}
 		nestedRows.add(row);
-		parentByChild.set(row, parent);
 		if (row.section === "running") {
 			parent.runningSubagentCount += 1;
 		}
@@ -705,7 +717,6 @@ export function buildAgentsViewRows(
 		siblings.push(row);
 		childrenByParent.set(parent, siblings);
 	}
-	propagateHeartbeatStateToAncestors(baseRows, parentByChild);
 
 	const roots = baseRows.filter((row) => !nestedRows.has(row));
 	const flattened: AgentsViewRow[] = [];
@@ -746,25 +757,6 @@ export function buildAgentsViewRows(
 
 function isUnifiedSessionRecord(value: SessionSummary | UnifiedSessionRecord): value is UnifiedSessionRecord {
 	return "identityAliases" in value;
-}
-
-function propagateHeartbeatStateToAncestors(
-	rows: readonly MutableAgentsViewRow[],
-	parentByChild: ReadonlyMap<MutableAgentsViewRow, MutableAgentsViewRow>,
-): void {
-	for (const row of rows) {
-		if (!row.summary.hasActiveHeartbeat) {
-			continue;
-		}
-		const visited = new Set<MutableAgentsViewRow>([row]);
-		let ancestor = parentByChild.get(row);
-		while (ancestor && !visited.has(ancestor)) {
-			visited.add(ancestor);
-			ancestor.section = "running";
-			ancestor.statusLabel = getSessionStatusLabel(ancestor.summary, true);
-			ancestor = parentByChild.get(ancestor);
-		}
-	}
 }
 
 type MutableAgentsViewRow = AgentsViewRow;
@@ -979,7 +971,7 @@ function getSessionSubtitle(summary: SessionSummary): string {
 	return parts.join("  ");
 }
 
-function getSessionStatusLabel(summary: SessionSummary, hasActiveHeartbeat = summary.hasActiveHeartbeat): string {
+function getSessionStatusLabel(summary: SessionSummary, heartbeat?: UnifiedSessionHeartbeat): string {
 	if (summary.statusLabel !== undefined) {
 		return summary.statusLabel;
 	}
@@ -1016,8 +1008,11 @@ function getSessionStatusLabel(summary: SessionSummary, hasActiveHeartbeat = sum
 	if (summary.lifecycle === "archived") {
 		return "archived";
 	}
-	if (hasActiveHeartbeat) {
-		return "heartbeat active";
+	if (summary.hasActiveHeartbeat) {
+		const next = heartbeat?.nextRunAt ? Date.parse(heartbeat.nextRunAt) : Number.NaN;
+		return Number.isFinite(next)
+			? `heartbeat · next ${formatHeartbeatCountdown(next - Date.now())}`
+			: "heartbeat active";
 	}
 	if (summary.runtimeKind === "subagent" && summary.repliedSinceTask) {
 		return "replied";

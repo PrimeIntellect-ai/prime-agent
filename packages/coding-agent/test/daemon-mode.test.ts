@@ -522,7 +522,7 @@ describe("daemon mode helpers", () => {
 		});
 	});
 
-	it("classifies local roster status with heartbeat and running-child activity", () => {
+	it("classifies local roster status from running-child activity, not armed heartbeats", () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-status-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			createRuntime: vi.fn(),
@@ -548,8 +548,8 @@ describe("daemon mode helpers", () => {
 			};
 			createAgentMessageAgentSummary(state: ActiveSessionState): { status?: string };
 		};
-		const getHeartbeat = vi.spyOn(internals.cronStore, "getHeartbeat").mockReturnValue(undefined);
-		const listRlmHeartbeats = vi.spyOn(internals.cronStore, "listRlmHeartbeats").mockReturnValue([]);
+		vi.spyOn(internals.cronStore, "getHeartbeat").mockReturnValue({ status: "active" } as AgentCronJob);
+		vi.spyOn(internals.cronStore, "listRlmHeartbeats").mockReturnValue([{ status: "active" } as AgentCronJob]);
 
 		expect(internals.createAgentMessageAgentSummary(state).status).toBe("running");
 		hasRunningChildren = false;
@@ -557,12 +557,8 @@ describe("daemon mode helpers", () => {
 			...state.runtime,
 			metadata: { kind: "subagent", createdAt: 1 },
 		} as ActiveSessionState["runtime"];
+		// Armed heartbeats between firings never lift a quiet session out of idle.
 		expect(internals.createAgentMessageAgentSummary(state).status).toBe("idle");
-		getHeartbeat.mockReturnValue({ status: "active" } as AgentCronJob);
-		expect(internals.createAgentMessageAgentSummary(state).status).toBe("running");
-		getHeartbeat.mockReturnValue(undefined);
-		listRlmHeartbeats.mockReturnValue([{ status: "active" } as AgentCronJob]);
-		expect(internals.createAgentMessageAgentSummary(state).status).toBe("running");
 	});
 
 	it("reserves a session name across equivalent session-relative parent headers", async () => {

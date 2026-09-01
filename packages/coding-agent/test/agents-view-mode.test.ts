@@ -1,4 +1,5 @@
 import { setKeybindings } from "@earendil-works/pi-tui";
+import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
@@ -15,11 +16,12 @@ import {
 import {
 	type AgentsViewRow,
 	buildAgentsViewRows,
+	reconcileUnifiedSessions,
 	resolveAgentsViewLeftResult,
 } from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
-import { stopThemeWatcher } from "../src/modes/interactive/theme/theme.js";
+import { stopThemeWatcher, theme } from "../src/modes/interactive/theme/theme.js";
 
 const modeMocks = vi.hoisted(() => ({
 	interactiveRun: vi.fn<() => Promise<never>>(),
@@ -681,6 +683,60 @@ describe("AgentsViewMode", () => {
 		try {
 			expect(invoke("renderRow", view, rows[0], 160)).toContain("recovering");
 			expect(invoke("renderRow", view, rows[1], 160)).toContain("last heard");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("dims a paused-only heartbeat badge and keeps active badges in the error color", () => {
+		const job = (status: "active" | "paused") => ({
+			job: {
+				id: `${status}-job`,
+				status,
+				activeSessionId: "scope-active",
+				sessionId: "scope-session",
+				sessionFile: "/tmp/scope.jsonl",
+				cwd: "/tmp",
+				prompt: "tick",
+				schedule: { kind: "interval" as const, expression: "5m" },
+				createdAt: "2026-01-01T00:00:00Z",
+				updatedAt: "2026-01-01T00:00:00Z",
+				runCount: 0,
+			},
+		});
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+
+		try {
+			const [pausedRow] = buildAgentsViewRows(reconcileUnifiedSessions([summary()], [], [job("paused")]));
+			Reflect.set(view, "rows", [pausedRow]);
+			const pausedLine = invoke("renderRow", view, pausedRow, 160) as string;
+			expect(pausedLine).toContain(theme.fg("dim", "♥ 1"));
+			expect(pausedRow).toMatchObject({ section: "idle" });
+
+			const [activeRow] = buildAgentsViewRows(reconcileUnifiedSessions([summary()], [], [job("active")]));
+			Reflect.set(view, "rows", [activeRow]);
+			const activeLine = invoke("renderRow", view, activeRow, 160) as string;
+			expect(activeLine).toContain(theme.fg("error", "♥ 1"));
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("warns about the armed heartbeat in the delete confirmation", () => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "deleteConfirmExpiresAt", Date.now() + 10_000);
+		const confirmLine = (row: AgentsViewRow): string => {
+			Reflect.set(view, "rows", [row]);
+			Reflect.set(view, "pendingDeleteAgent", { identity: row.identity, summary: row.summary, stopped: false });
+			return stripAnsi(invoke("renderRow", view, row, 160) as string);
+		};
+
+		try {
+			const [armedRow] = buildAgentsViewRows([summary({ hasActiveHeartbeat: true })]);
+			expect(confirmLine(armedRow!)).toContain("has an armed heartbeat — ");
+			const [plainRow] = buildAgentsViewRows([summary()]);
+			expect(confirmLine(plainRow!)).not.toContain("armed heartbeat");
+			expect(confirmLine(plainRow!)).toContain("again to remove");
 		} finally {
 			stopThemeWatcher();
 		}

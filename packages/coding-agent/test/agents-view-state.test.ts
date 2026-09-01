@@ -49,11 +49,11 @@ import { formatAgentDepthLabel } from "../src/modes/interactive/interactive-mode
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
 import type { Theme } from "../src/modes/interactive/theme/theme.js";
 
-function heartbeat(id: string, nextRunAt?: string, activeSessionId = "child") {
+function heartbeat(id: string, nextRunAt?: string, activeSessionId = "child", status: "active" | "paused" = "active") {
 	return {
 		job: {
 			id,
-			status: "active" as const,
+			status,
 			activeSessionId,
 			sessionId: `${activeSessionId}-session`,
 			sessionFile: `/tmp/${activeSessionId}.jsonl`,
@@ -109,19 +109,19 @@ describe("agents view state", () => {
 		expect(classifyAgentsViewSession(makeSummary({ activity: "idle", taskState: undefined }))).toBe("idle");
 	});
 
-	test("active heartbeats make sessions Running regardless of current activity", () => {
+	test("armed heartbeats stay Idle between firings; only real work is Running", () => {
 		expect(classifyAgentsViewSession(makeSummary({ activity: "working", hasActiveHeartbeat: true }))).toBe("running");
 		expect(
 			classifyAgentsViewSession(makeSummary({ activity: "idle", taskState: "completed", hasActiveHeartbeat: true })),
-		).toBe("running");
+		).toBe("idle");
 
 		const [row] = buildAgentsViewRows([makeSummary({ activity: "idle", hasActiveHeartbeat: true })]);
-		expect(row).toMatchObject({ section: "running", statusLabel: "heartbeat active" });
+		expect(row).toMatchObject({ section: "idle", statusLabel: "heartbeat active" });
 		const [busyRow] = buildAgentsViewRows([
 			makeSummary({ activity: "working", hasActiveHeartbeat: true, isStreaming: true, isRunningTools: true }),
 		]);
 		expect(busyRow).toMatchObject({ section: "running", statusLabel: "running tools" });
-		expect(sectionTitle("running")).toBe("Running");
+		expect(sectionTitle("idle")).toBe("Idle");
 	});
 
 	test("labels replied subagents with active heartbeats as heartbeat active", () => {
@@ -143,7 +143,7 @@ describe("agents view state", () => {
 		const expanded = buildAgentsViewRows(summaries, new Set([collapsed[0]?.identity ?? ""]));
 
 		expect(expanded.find((row) => row.title === "Replied child")).toMatchObject({
-			section: "running",
+			section: "idle",
 			statusLabel: "heartbeat active",
 		});
 	});
@@ -189,8 +189,8 @@ describe("agents view state", () => {
 			}),
 		]);
 
-		expect(rows.map((row) => row.title)).toEqual(["newer working", "older working", "heartbeat", "completed"]);
-		expect(rows.map((row) => row.section)).toEqual(["running", "running", "running", "idle"]);
+		expect(rows.map((row) => row.title)).toEqual(["newer working", "older working", "completed", "heartbeat"]);
+		expect(rows.map((row) => row.section)).toEqual(["running", "running", "idle", "idle"]);
 	});
 
 	test("keeps row order stable when activity and modification times and daemon input order change", () => {
@@ -373,25 +373,25 @@ describe("agents view state", () => {
 		const collapsed = buildAgentsViewRows(summaries);
 		expect(collapsed[0]).toMatchObject({
 			kind: "agent",
-			section: "running",
-			statusLabel: "heartbeat active",
+			section: "idle",
+			statusLabel: "completed",
 		});
 		expect(collapsed[1]).toMatchObject({
 			kind: "subagent-summary",
-			section: "running",
-			title: "1 subagent running · 1 heartbeat active",
-			runningSubagentCount: 1,
+			section: "idle",
+			title: "1 subagent · 1 heartbeat active",
+			runningSubagentCount: 0,
 		});
 		const expanded = buildAgentsViewRows(summaries, new Set([collapsed[0]?.identity ?? ""]));
 		expect(expanded[1]).toMatchObject({ kind: "subagent-summary", expanded: true });
 		expect(expanded[2]).toMatchObject({
 			kind: "subagent",
-			section: "running",
+			section: "idle",
 			statusLabel: "heartbeat active",
 		});
 	});
 
-	test("counts every idle heartbeating subagent as running", () => {
+	test("keeps idle heartbeating subagents out of the running count", () => {
 		const heartbeatChildren = Array.from({ length: 10 }, (_, index) =>
 			makeSummary({
 				id: `heartbeat-child-${index}`,
@@ -425,15 +425,15 @@ describe("agents view state", () => {
 			}),
 		]);
 
-		expect(rows[0]).toMatchObject({ section: "running", runningSubagentCount: 11 });
+		expect(rows[0]).toMatchObject({ section: "idle", runningSubagentCount: 1 });
 		expect(rows[1]).toMatchObject({
 			kind: "subagent-summary",
-			title: "11 subagents running · 10 heartbeats active",
-			runningSubagentCount: 11,
+			title: "1 subagent running · 10 heartbeats active",
+			runningSubagentCount: 1,
 		});
 	});
 
-	test("propagates a descendant heartbeat through completed subagent ancestors", () => {
+	test("leaves completed ancestors idle while a descendant heartbeat is armed", () => {
 		const summaries = [
 			makeSummary({
 				id: "heartbeat-grandchild",
@@ -469,8 +469,8 @@ describe("agents view state", () => {
 		const rootIdentity = buildAgentsViewRows(summaries)[0]?.identity ?? "";
 		const oneLevel = buildAgentsViewRows(summaries, new Set([rootIdentity]));
 		const child = oneLevel.find((row) => row.title === "Child");
-		expect(oneLevel[0]).toMatchObject({ section: "running", statusLabel: "heartbeat active" });
-		expect(child).toMatchObject({ section: "running", statusLabel: "heartbeat active" });
+		expect(oneLevel[0]).toMatchObject({ section: "idle", statusLabel: "completed" });
+		expect(child).toMatchObject({ section: "idle", statusLabel: "completed" });
 
 		const childIdentity = child?.identity ?? "";
 		const expanded = buildAgentsViewRows(summaries, new Set([rootIdentity, childIdentity]));
@@ -479,9 +479,9 @@ describe("agents view state", () => {
 				.filter((row) => row.kind === "agent" || row.kind === "subagent")
 				.map((row) => [row.title, row.section, row.statusLabel]),
 		).toEqual([
-			["Root", "running", "heartbeat active"],
-			["Child", "running", "heartbeat active"],
-			["Heartbeat grandchild", "running", "heartbeat active"],
+			["Root", "idle", "completed"],
+			["Child", "idle", "completed"],
+			["Heartbeat grandchild", "idle", "heartbeat active"],
 		]);
 	});
 
@@ -1075,7 +1075,7 @@ describe("agents view state", () => {
 
 	test("shows a fallback heartbeat count while catalog details are unavailable", () => {
 		const [record] = reconcileUnifiedSessions([makeSummary({ hasActiveHeartbeat: true })], []);
-		expect(record).toMatchObject({ section: "running", heartbeat: { activeCount: 1 } });
+		expect(record).toMatchObject({ section: "idle", heartbeat: { activeCount: 1 } });
 		expect(formatHeartbeatBadge(record?.heartbeat)).toBe("♥ 1");
 	});
 
@@ -1125,8 +1125,8 @@ describe("agents view state", () => {
 		expect(aggregates.get("child")).toEqual({ activeCount: 2, nextRunAt: "2026-01-01T00:05:00Z" });
 		expect(aggregates.get("parent")).toEqual({ activeCount: 2, nextRunAt: "2026-01-01T00:05:00Z" });
 		const rows = buildAgentsViewRows(reconcileUnifiedSessions([parent, child], [], [heartbeat("one")]));
-		expect(rows[0]).toMatchObject({ section: "running", heartbeat: { activeCount: 1 } });
-		expect(rows[1]).toMatchObject({ title: "1 subagent running · 1 heartbeat active" });
+		expect(rows[0]).toMatchObject({ section: "idle", heartbeat: { activeCount: 1 } });
+		expect(rows[1]).toMatchObject({ title: "1 subagent · 1 heartbeat active" });
 		expect(formatHeartbeatBadge(aggregates.get("parent"), Date.parse("2026-01-01T00:00:00Z"))).toBe("♥ 2·5m");
 		expect(
 			formatHeartbeatBadge(
@@ -1154,6 +1154,24 @@ describe("agents view state", () => {
 				Date.parse("2026-01-01T00:00:00Z"),
 			),
 		).toBe("♥ 1·1s");
+	});
+
+	test("labels an armed idle session with its next fire time", () => {
+		const parent = makeSummary({ id: "parent", activeSessionId: "parent", sessionId: "parent-session" });
+		const nextRunAt = new Date(Date.now() + 5 * 60_000).toISOString();
+		const rows = buildAgentsViewRows(reconcileUnifiedSessions([parent], [], [heartbeat("one", nextRunAt, "parent")]));
+		expect(rows[0]).toMatchObject({ section: "idle", statusLabel: "heartbeat · next 5m" });
+	});
+
+	test("counts paused heartbeats separately without affecting the section", () => {
+		const parent = makeSummary({ id: "parent", activeSessionId: "parent", sessionId: "parent-session" });
+		const paused = heartbeat("paused-job", undefined, "parent", "paused");
+		const aggregates = aggregateSessionHeartbeats([parent], [paused]);
+		expect(aggregates.get("parent")).toEqual({ activeCount: 0, pausedCount: 1 });
+		expect(formatHeartbeatBadge(aggregates.get("parent"))).toBe("♥ 1");
+		const [record] = reconcileUnifiedSessions([parent], [], [paused]);
+		expect(record).toMatchObject({ section: "idle", heartbeat: { activeCount: 0, pausedCount: 1 } });
+		expect(record?.daemon?.hasActiveHeartbeat).toBeUndefined();
 	});
 
 	describe("restores selection to the previously open session", () => {

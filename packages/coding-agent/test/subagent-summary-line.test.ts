@@ -93,10 +93,11 @@ describe("SubagentSummaryLine", () => {
 			child("grandchild", "running", { parentId: "running" }),
 		];
 
-		expect(countDirectSubagentStatuses(children, undefined, new Set(["heartbeat-session"]))).toEqual({
+		// A resident child with an armed heartbeat counts as idle, not running.
+		expect(countDirectSubagentStatuses(children, undefined)).toEqual({
 			total: 8,
-			running: 4,
-			idle: 2,
+			running: 3,
+			idle: 3,
 			inactive: 2,
 		});
 	});
@@ -280,7 +281,7 @@ describe("SubagentSummaryLine", () => {
 			rosterStatus: "idle",
 		} as SessionSummary;
 		expect(isDirectAgentChild(rosterChild, { sessionId: "root-session" })).toBe(true);
-		expect(countRosterSubagentStatuses([rosterChild], { sessionId: "root-session" }, new Set())).toEqual({
+		expect(countRosterSubagentStatuses([rosterChild], { sessionId: "root-session" })).toEqual({
 			total: 1,
 			running: 0,
 			idle: 1,

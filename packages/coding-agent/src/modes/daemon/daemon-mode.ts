@@ -5388,9 +5388,6 @@ export class AgentDaemon {
 				activity: session.isSessionActive ? "working" : "idle",
 				isSessionActive: session.isSessionActive,
 				hasRunningRlmChildren: session.hasRunningRlmChildren?.() ?? false,
-				hasActiveHeartbeat:
-					this.cronStore.getHeartbeat(state.activeSessionId)?.status === "active" ||
-					this.cronStore.listRlmHeartbeats(state.activeSessionId).some((job) => job.status === "active"),
 				isStreaming: session.isStreaming,
 			} as SessionSummary),
 			...(metadata.rlmChildId ? { rlmChildId: metadata.rlmChildId } : {}),
