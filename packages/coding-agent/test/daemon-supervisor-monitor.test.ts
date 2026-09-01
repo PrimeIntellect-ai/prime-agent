@@ -4043,19 +4043,72 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
-	it("does not kill a recoverable worker when the catalog is not ready", async () => {
-		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-catalog-readiness-test-"));
+	it("skips catalog startup when recovery has no interrupted operations", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-empty-recovery-test-"));
 		const worker = {
 			descriptor: {
-				workerId: "worker-catalog-blocked",
+				workerId: "worker-empty-recovery",
 				pid: 987_654,
 				rootActiveSessionId: "root-active",
 				recoveryJournalPath: join(root, "worker.recovery.jsonl"),
 			},
+		};
+		const catalogStart = vi.fn(async () => {
+			throw new Error("catalog unavailable");
+		});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			catalog: { start: catalogStart, markInterrupted: vi.fn() },
+			assertRecoveryAllowed: vi.fn(async () => undefined),
+		}) as {
+			recoverUncertainWorkerOperations(target: typeof worker): Promise<void>;
+		};
+
+		try {
+			await expect(supervisor.recoverUncertainWorkerOperations(worker)).resolves.toBeUndefined();
+			expect(catalogStart).not.toHaveBeenCalled();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not reap interrupted worker resources before the catalog is ready", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-catalog-readiness-test-"));
+		const recoveryJournalPath = join(root, "worker.recovery.jsonl");
+		const orphanJournalPath = join(root, "worker.orphans.jsonl");
+		const workerPid = 987_654;
+		new WorkerRecoveryJournal(recoveryJournalPath).record({
+			activeSessionId: "root-active",
+			sessionId: "root-session",
+			sessionFile: "/tmp/root.jsonl",
+			busy: true,
+			operation: "model_stream",
+		});
+		writeFileSync(
+			orphanJournalPath,
+			`${JSON.stringify({
+				version: 1,
+				pid: process.pid,
+				ownerPid: workerPid,
+				processStartId: getProcessStartId(process.pid),
+				active: true,
+				recordedAt: new Date().toISOString(),
+			})}
+`,
+		);
+		const worker = {
+			descriptor: {
+				workerId: "worker-catalog-blocked",
+				pid: workerPid,
+				rootActiveSessionId: "root-active",
+				recoveryJournalPath,
+				orphanProcessJournalPath: orphanJournalPath,
+			},
 			intentionalStop: false,
 		};
 		const catalogError = new Error("Timed out starting daemon catalog");
-		const signal = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
+		const kill = vi.spyOn(orphanProcessModule, "killOrphanProcess").mockReturnValue(true);
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
 			shuttingDown: false,
@@ -4072,9 +4125,10 @@ describe("daemon worker supervisor monitoring", () => {
 
 		try {
 			await expect(supervisor.recoverUncertainWorkerOperations(worker)).rejects.toThrow(catalogError);
-			expect(signal).not.toHaveBeenCalled();
+			expect(kill).not.toHaveBeenCalled();
+			expect(existsSync(orphanJournalPath)).toBe(true);
 		} finally {
-			signal.mockRestore();
+			kill.mockRestore();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});

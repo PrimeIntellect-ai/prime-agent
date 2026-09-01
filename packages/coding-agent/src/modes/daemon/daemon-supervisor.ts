@@ -1594,6 +1594,19 @@ export class DaemonSupervisor {
 			this.write(client, failure(command.id, command.type, "Daemon is preparing an update restart"));
 			return;
 		}
+		if (mutation && !UPDATE_RESTART_DRAIN_COMMANDS.has(command.type)) {
+			const idleEvictionFence = this.idleEvictionFence;
+			if (idleEvictionFence) {
+				await idleEvictionFence;
+				try {
+					await this.assertServingCurrentOwnership();
+				} catch (error) {
+					if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
+					this.write(client, failure(command.id, command.type, error, serializeDaemonError(error)));
+					return;
+				}
+			}
+		}
 		if (journalIdentity) {
 			const admitted = this.commandJournal.begin(journalIdentity.clientId, journalIdentity.commandId, command.type);
 			if (admitted.status === "complete") {
@@ -1614,19 +1627,6 @@ export class DaemonSupervisor {
 			}
 		}
 
-		if (mutation && !UPDATE_RESTART_DRAIN_COMMANDS.has(command.type)) {
-			const idleEvictionFence = this.idleEvictionFence;
-			if (idleEvictionFence) {
-				await idleEvictionFence;
-				try {
-					await this.assertServingCurrentOwnership();
-				} catch (error) {
-					if (parsedAdmission) this.deletePromptAdmission(parsedAdmission);
-					this.write(client, failure(command.id, command.type, error, serializeDaemonError(error)));
-					return;
-				}
-			}
-		}
 		// Attach is intentionally read-only and is not fence-gated. If eviction wins
 		// the race, attach fails cleanly with "Session worker is not connected" and
 		// the client retries through the saved-session path instead of mutating state.
