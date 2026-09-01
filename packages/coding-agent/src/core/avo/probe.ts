@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
-import { createConnection, createServer, type Server } from "node:net";
+import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { parseAvoSupervisorPayload } from "./supervisor.js";
@@ -12,6 +12,14 @@ export const AVO_PYTHON_PROBE_BROKER_TOKEN_ENV = "PRIME_AGENT_INTERNAL_AVO_PROBE
 export const AVO_PYTHON_PROBE_MAX_CASES = 64;
 export const AVO_PYTHON_PROBE_POLICY_VERSION = 4;
 const AVO_PYTHON_PROBE_BROKER_PROTOCOL_VERSION = 3;
+const AVO_PYTHON_PROBE_BROKER_MAX_CONNECTIONS = 32;
+const AVO_PYTHON_PROBE_BROKER_MAX_ACTIVE_EXECUTIONS = 2;
+const AVO_PYTHON_PROBE_BROKER_MAX_QUEUED_EXECUTIONS = 8;
+const AVO_PYTHON_PROBE_BROKER_PREAUTH_MAX_BYTES = 512;
+const AVO_PYTHON_PROBE_BROKER_PREAUTH_IDLE_MS = 2_000;
+const AVO_PYTHON_PROBE_BROKER_REQUEST_IDLE_MS = 5_000;
+const AVO_PYTHON_PROBE_BROKER_MAX_REQUEST_BYTES = 24_000_000;
+const AVO_PYTHON_PROBE_BROKER_MAX_BUFFERED_REQUEST_BYTES = 64 * 1024 * 1024;
 
 export type AvoProbeJsonValue =
 	| null
@@ -1017,6 +1025,7 @@ async function executeAvoPythonProbeLocalSandbox(
 	workspace: string,
 	plan: AvoPythonProbePlan,
 	bundle: AvoPythonProbeBundle,
+	signal?: AbortSignal,
 ): Promise<AvoPythonProbeExecution> {
 	if (process.platform !== "linux" || !existsSync("/usr/bin/bwrap") || !existsSync("/usr/bin/python3")) {
 		return {
@@ -1068,6 +1077,10 @@ async function executeAvoPythonProbeLocalSandbox(
 	const results: AvoPythonProbeCaseResult[] = [];
 	const aggregateDeadline = startedAt + 10_000;
 	for (let caseIndex = 0; caseIndex < plan.cases.length; caseIndex += 1) {
+		if (signal?.aborted) {
+			executionError = "probe execution aborted";
+			break;
+		}
 		const probeCase = plan.cases[caseIndex]!;
 		const remainingMs = aggregateDeadline - Date.now();
 		if (remainingMs <= 0) {
@@ -1102,10 +1115,12 @@ async function executeAvoPythonProbeLocalSandbox(
 			});
 			let settled = false;
 			let timeout: ReturnType<typeof setTimeout> | undefined;
+			const onAbort = () => child.kill("SIGKILL");
 			const finish = (result: { exitCode: number | null; error?: string }) => {
 				if (settled) return;
 				settled = true;
 				if (timeout) clearTimeout(timeout);
+				signal?.removeEventListener("abort", onAbort);
 				resolveResult(result);
 			};
 			const append = (target: "stdout" | "stderr", chunk: Buffer) => {
@@ -1134,7 +1149,13 @@ async function executeAvoPythonProbeLocalSandbox(
 				},
 				Math.max(1, Math.min(3_000, remainingMs)),
 			);
+			signal?.addEventListener("abort", onAbort, { once: true });
+			if (signal?.aborted) onAbort();
 		});
+		if (signal?.aborted) {
+			executionError = "probe execution aborted";
+			break;
+		}
 		timedOut ||= caseTimedOut;
 		truncated ||= caseTruncated;
 		if (caseStderr.trim()) stderr = `${stderr}${probeCase.caseId}: ${caseStderr.trim()}\n`.slice(0, 64_000);
@@ -1387,7 +1408,7 @@ async function listenOnSocket(server: Server, socketPath: string): Promise<void>
 		};
 		server.once("error", onError);
 		server.once("listening", onListening);
-		server.listen(socketPath);
+		server.listen(socketPath, AVO_PYTHON_PROBE_BROKER_MAX_CONNECTIONS);
 	});
 }
 
@@ -1403,55 +1424,219 @@ export async function startAvoPythonProbeBroker(
 		brokerSocketDirectory(options.socketDirectory),
 		`prime-avo-probe-${process.pid}-${randomBytes(8).toString("hex")}.sock`,
 	);
-	const server = createServer((socket) => {
+	type ExecutionTask = {
+		socket: Socket;
+		abortController: AbortController;
+		cancelled: boolean;
+		completion?: Promise<void>;
+		execute(): Promise<void>;
+	};
+	const clients = new Set<Socket>();
+	const queuedExecutions: ExecutionTask[] = [];
+	const activeTasks = new Set<ExecutionTask>();
+	let activeExecutions = 0;
+	let bufferedRequestBytes = 0;
+	let closing = false;
+	const startExecution = (task: ExecutionTask) => {
+		activeExecutions += 1;
+		activeTasks.add(task);
+		task.completion = task.execute().finally(() => {
+			activeExecutions -= 1;
+			activeTasks.delete(task);
+			drainExecutions();
+		});
+		void task.completion;
+	};
+	const drainExecutions = () => {
+		while (!closing && activeExecutions < AVO_PYTHON_PROBE_BROKER_MAX_ACTIVE_EXECUTIONS) {
+			const task = queuedExecutions.shift();
+			if (!task) return;
+			if (task.cancelled || task.socket.destroyed) continue;
+			startExecution(task);
+		}
+	};
+	const scheduleExecution = (task: ExecutionTask): boolean => {
+		if (closing || task.socket.destroyed) return false;
+		if (activeExecutions < AVO_PYTHON_PROBE_BROKER_MAX_ACTIVE_EXECUTIONS) {
+			startExecution(task);
+			return true;
+		}
+		if (queuedExecutions.length >= AVO_PYTHON_PROBE_BROKER_MAX_QUEUED_EXECUTIONS) return false;
+		queuedExecutions.push(task);
+		return true;
+	};
+	const server = createServer({ allowHalfOpen: true }, (socket) => {
+		if (closing || clients.size >= AVO_PYTHON_PROBE_BROKER_MAX_CONNECTIONS) {
+			socket.destroy();
+			return;
+		}
+		clients.add(socket);
 		let requestText = "";
+		let requestBytes = 0;
+		let requestBytesReleased = false;
 		let handled = false;
+		let authenticated = false;
+		let requestDeadline: ReturnType<typeof setTimeout> | undefined;
+		let task: ExecutionTask | undefined;
+		const releaseRequestBytes = () => {
+			if (requestBytesReleased) return;
+			requestBytesReleased = true;
+			bufferedRequestBytes -= requestBytes;
+		};
 		const respond = (value: Record<string, unknown>) => {
 			if (socket.destroyed) return;
-			socket.end(`${JSON.stringify({ protocolVersion: AVO_PYTHON_PROBE_BROKER_PROTOCOL_VERSION, ...value })}\n`);
+			if (requestDeadline) clearTimeout(requestDeadline);
+			requestDeadline = setTimeout(() => socket.destroy(), AVO_PYTHON_PROBE_BROKER_REQUEST_IDLE_MS);
+			socket.end(
+				`${JSON.stringify({ protocolVersion: AVO_PYTHON_PROBE_BROKER_PROTOCOL_VERSION, ...value })}\n`,
+				() => {
+					if (requestDeadline) clearTimeout(requestDeadline);
+					socket.destroy();
+				},
+			);
+		};
+		const rejectRequest = (message: string) => {
+			if (handled) return;
+			handled = true;
+			socket.setTimeout(0);
+			respond({ error: message });
 		};
 		socket.setEncoding("utf8");
+		socket.once("error", () => socket.destroy());
+		requestDeadline = setTimeout(
+			() => rejectRequest("broker authentication timed out"),
+			AVO_PYTHON_PROBE_BROKER_PREAUTH_IDLE_MS,
+		);
+		socket.setTimeout(AVO_PYTHON_PROBE_BROKER_PREAUTH_IDLE_MS, () => {
+			rejectRequest(authenticated ? "broker request timed out" : "broker authentication timed out");
+		});
+		socket.once("close", () => {
+			if (requestDeadline) clearTimeout(requestDeadline);
+			releaseRequestBytes();
+			clients.delete(socket);
+			if (!task) return;
+			task.cancelled = true;
+			task.abortController.abort();
+			const queuedIndex = queuedExecutions.indexOf(task);
+			if (queuedIndex >= 0) queuedExecutions.splice(queuedIndex, 1);
+		});
 		socket.on("data", (chunk: string) => {
 			if (handled) return;
+			const chunkBytes = Buffer.byteLength(chunk);
+			if (bufferedRequestBytes + chunkBytes > AVO_PYTHON_PROBE_BROKER_MAX_BUFFERED_REQUEST_BYTES) {
+				rejectRequest("probe broker buffered request capacity exceeded");
+				return;
+			}
 			requestText += chunk;
-			if (requestText.length > 24_000_000) {
-				handled = true;
-				respond({ error: "request exceeded 24000000 characters" });
+			requestBytes += chunkBytes;
+			bufferedRequestBytes += chunkBytes;
+			if (!authenticated) {
+				const authenticationWindow = Buffer.from(requestText)
+					.subarray(0, AVO_PYTHON_PROBE_BROKER_PREAUTH_MAX_BYTES)
+					.toString("utf8");
+				const observedToken = /"token"\s*:\s*"([^"\\]*)"/.exec(authenticationWindow)?.[1];
+				const observedProtocol = /"protocolVersion"\s*:\s*(\d+)/.exec(authenticationWindow)?.[1];
+				if (observedToken !== undefined && !brokerTokenMatches(token, observedToken)) {
+					rejectRequest("unauthorized or invalid broker request");
+					return;
+				}
+				if (observedToken !== undefined && observedProtocol !== undefined) {
+					if (observedProtocol !== String(AVO_PYTHON_PROBE_BROKER_PROTOCOL_VERSION)) {
+						rejectRequest("unauthorized or invalid broker request");
+						return;
+					}
+					authenticated = true;
+					socket.setTimeout(AVO_PYTHON_PROBE_BROKER_REQUEST_IDLE_MS);
+					if (requestDeadline) clearTimeout(requestDeadline);
+					requestDeadline = setTimeout(
+						() => rejectRequest("broker request timed out"),
+						AVO_PYTHON_PROBE_BROKER_REQUEST_IDLE_MS,
+					);
+				} else if (requestBytes > AVO_PYTHON_PROBE_BROKER_PREAUTH_MAX_BYTES || requestText.includes("\n")) {
+					rejectRequest("unauthorized or invalid broker request");
+					return;
+				} else {
+					return;
+				}
+			}
+			if (requestBytes > AVO_PYTHON_PROBE_BROKER_MAX_REQUEST_BYTES) {
+				rejectRequest("request exceeded 24000000 bytes");
 				return;
 			}
 			const newline = requestText.indexOf("\n");
 			if (newline < 0) return;
+			const requestLine = requestText.slice(0, newline);
+			requestText = "";
 			handled = true;
-			void (async () => {
-				try {
-					const request = JSON.parse(requestText.slice(0, newline)) as unknown;
-					if (
-						!isRecord(request) ||
-						request.protocolVersion !== AVO_PYTHON_PROBE_BROKER_PROTOCOL_VERSION ||
-						!brokerTokenMatches(token, request.token)
-					) {
-						throw new Error("unauthorized or invalid broker request");
-					}
-					const plan = parseBrokerPlan(request.plan);
-					const bundle = parseBrokerBundle(request.bundle);
-					const execution = await executeAvoPythonProbeLocalSandbox(workspace, plan, bundle);
-					respond({ execution });
-				} catch (error) {
-					respond({
-						error: error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000),
-					});
+			socket.setTimeout(0);
+			if (requestDeadline) clearTimeout(requestDeadline);
+			try {
+				const request = JSON.parse(requestLine) as unknown;
+				if (
+					!isRecord(request) ||
+					request.protocolVersion !== AVO_PYTHON_PROBE_BROKER_PROTOCOL_VERSION ||
+					!brokerTokenMatches(token, request.token)
+				) {
+					throw new Error("unauthorized or invalid broker request");
 				}
-			})();
+				const plan = parseBrokerPlan(request.plan);
+				const bundle = parseBrokerBundle(request.bundle);
+				const abortController = new AbortController();
+				task = {
+					socket,
+					abortController,
+					cancelled: false,
+					execute: async () => {
+						try {
+							const execution = await executeAvoPythonProbeLocalSandbox(
+								workspace,
+								plan,
+								bundle,
+								abortController.signal,
+							);
+							respond({ execution });
+						} catch (error) {
+							respond({
+								error: error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000),
+							});
+						}
+					},
+				};
+				if (!scheduleExecution(task)) respond({ error: "probe broker is at execution capacity" });
+			} catch (error) {
+				respond({
+					error: error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000),
+				});
+			}
 		});
 	});
+	server.maxConnections = AVO_PYTHON_PROBE_BROKER_MAX_CONNECTIONS;
 	await listenOnSocket(server, socketPath);
 	chmodSync(socketPath, 0o600);
+	let closePromise: Promise<void> | undefined;
 	return {
 		socketPath,
 		token,
-		close: async () => {
-			await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
-			rmSync(socketPath, { force: true });
+		close: () => {
+			closePromise ??= (async () => {
+				closing = true;
+				const activeCompletions = [...activeTasks].flatMap((active) => {
+					active.cancelled = true;
+					active.abortController.abort();
+					return active.completion ? [active.completion] : [];
+				});
+				for (const queued of queuedExecutions) {
+					queued.cancelled = true;
+					queued.abortController.abort();
+				}
+				queuedExecutions.length = 0;
+				for (const client of clients) client.destroy();
+				const serverClosed = new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+				await Promise.allSettled(activeCompletions);
+				await serverClosed;
+				rmSync(socketPath, { force: true });
+			})();
+			return closePromise;
 		},
 	};
 }

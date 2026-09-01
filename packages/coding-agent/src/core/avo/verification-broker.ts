@@ -13,7 +13,7 @@ import {
 	realpathSync,
 	rmSync,
 } from "node:fs";
-import { createConnection, createServer, type Server } from "node:net";
+import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { BashOperations } from "../tools/bash.js";
@@ -33,6 +33,12 @@ const AVO_VERIFICATION_BROKER_MAX_CONTROL_BYTES = 128 * 1024 * 1024;
 const AVO_VERIFICATION_BROKER_MAX_HOST_FIXTURE_BYTES = 128 * 1024 * 1024;
 const AVO_VERIFICATION_BROKER_HARD_MAXIMUM_TIMEOUT_MS = 900_000;
 const AVO_VERIFICATION_BROKER_RESPONSE_MARGIN_MS = 60_000;
+const AVO_VERIFICATION_BROKER_MAX_CONNECTIONS = 32;
+const AVO_VERIFICATION_BROKER_MAX_ACTIVE_EXECUTIONS = 1;
+const AVO_VERIFICATION_BROKER_MAX_QUEUED_EXECUTIONS = 8;
+const AVO_VERIFICATION_BROKER_PREAUTH_MAX_BYTES = 512;
+const AVO_VERIFICATION_BROKER_PREAUTH_IDLE_MS = 2_000;
+const AVO_VERIFICATION_BROKER_REQUEST_IDLE_MS = 5_000;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -522,7 +528,7 @@ async function listenOnSocket(server: Server, socketPath: string): Promise<void>
 		};
 		server.once("error", onError);
 		server.once("listening", onListening);
-		server.listen(socketPath);
+		server.listen(socketPath, AVO_VERIFICATION_BROKER_MAX_CONNECTIONS);
 	});
 }
 
@@ -626,6 +632,7 @@ async function executeHostSandbox(
 		let outputBytes = 0;
 		let timedOut = false;
 		let settled = false;
+		let timeout: ReturnType<typeof setTimeout> | undefined;
 		const append = (chunk: Buffer) => {
 			outputBytes += chunk.byteLength;
 			if (outputBytes > AVO_VERIFICATION_BROKER_MAX_OUTPUT_BYTES) {
@@ -637,7 +644,7 @@ async function executeHostSandbox(
 		const finish = (error?: Error, exitCode: number | null = null) => {
 			if (settled) return;
 			settled = true;
-			clearTimeout(timeout);
+			if (timeout) clearTimeout(timeout);
 			signal.removeEventListener("abort", onAbort);
 			if (error) rejectExecution(error);
 			else if (outputBytes > AVO_VERIFICATION_BROKER_MAX_OUTPUT_BYTES) {
@@ -651,11 +658,12 @@ async function executeHostSandbox(
 		child.stderr.on("data", append);
 		child.once("error", (error) => finish(error));
 		child.once("close", (exitCode) => finish(undefined, exitCode));
-		signal.addEventListener("abort", onAbort, { once: true });
-		const timeout = setTimeout(() => {
+		timeout = setTimeout(() => {
 			timedOut = true;
 			child.kill("SIGKILL");
 		}, options.timeoutMs);
+		signal.addEventListener("abort", onAbort, { once: true });
+		if (signal.aborted) onAbort();
 	});
 }
 
@@ -778,154 +786,303 @@ export async function startAvoVerificationBroker(
 		brokerSocketDirectory(),
 		`prime-avo-verify-${process.pid}-${randomBytes(6).toString("hex")}.sock`,
 	);
-	let active = false;
-	const server = createServer((socket) => {
+	type ExecutionTask = {
+		socket: Socket;
+		abortController: AbortController;
+		cancelled: boolean;
+		completion?: Promise<void>;
+		execute(): Promise<void>;
+	};
+	const clients = new Set<Socket>();
+	const queuedExecutions: ExecutionTask[] = [];
+	const activeTasks = new Set<ExecutionTask>();
+	let activeExecutions = 0;
+	let closing = false;
+	const startExecution = (task: ExecutionTask) => {
+		activeExecutions += 1;
+		activeTasks.add(task);
+		task.completion = task.execute().finally(() => {
+			activeExecutions -= 1;
+			activeTasks.delete(task);
+			drainExecutions();
+		});
+		void task.completion;
+	};
+	const drainExecutions = () => {
+		while (!closing && activeExecutions < AVO_VERIFICATION_BROKER_MAX_ACTIVE_EXECUTIONS) {
+			const task = queuedExecutions.shift();
+			if (!task) return;
+			if (task.cancelled || task.socket.destroyed) continue;
+			startExecution(task);
+		}
+	};
+	const scheduleExecution = (task: ExecutionTask): boolean => {
+		if (closing || task.socket.destroyed) return false;
+		if (activeExecutions < AVO_VERIFICATION_BROKER_MAX_ACTIVE_EXECUTIONS) {
+			startExecution(task);
+			return true;
+		}
+		if (queuedExecutions.length >= AVO_VERIFICATION_BROKER_MAX_QUEUED_EXECUTIONS) return false;
+		queuedExecutions.push(task);
+		return true;
+	};
+	const server = createServer({ allowHalfOpen: true }, (socket) => {
+		if (closing || clients.size >= AVO_VERIFICATION_BROKER_MAX_CONNECTIONS) {
+			socket.destroy();
+			return;
+		}
+		clients.add(socket);
 		let requestText = "";
+		let requestBytes = 0;
 		let handled = false;
-		const abortController = new AbortController();
-		let responding = false;
+		let authenticated = false;
+		let requestDeadline: ReturnType<typeof setTimeout> | undefined;
+		let task: ExecutionTask | undefined;
 		const respond = (value: Record<string, unknown>) => {
-			responding = true;
 			if (!socket.destroyed) {
-				socket.end(`${JSON.stringify({ protocolVersion: AVO_VERIFICATION_BROKER_PROTOCOL_VERSION, ...value })}\n`);
+				if (requestDeadline) clearTimeout(requestDeadline);
+				requestDeadline = setTimeout(() => socket.destroy(), AVO_VERIFICATION_BROKER_REQUEST_IDLE_MS);
+				socket.end(
+					`${JSON.stringify({ protocolVersion: AVO_VERIFICATION_BROKER_PROTOCOL_VERSION, ...value })}\n`,
+					() => {
+						if (requestDeadline) clearTimeout(requestDeadline);
+						socket.destroy();
+					},
+				);
 			}
 		};
+		const rejectRequest = (message: string) => {
+			if (handled) return;
+			handled = true;
+			socket.setTimeout(0);
+			respond({ error: message });
+		};
 		socket.setEncoding("utf8");
+		socket.once("error", () => socket.destroy());
+		requestDeadline = setTimeout(
+			() => rejectRequest("verification broker authentication timed out"),
+			AVO_VERIFICATION_BROKER_PREAUTH_IDLE_MS,
+		);
+		socket.setTimeout(AVO_VERIFICATION_BROKER_PREAUTH_IDLE_MS, () => {
+			rejectRequest(
+				authenticated ? "verification broker request timed out" : "verification broker authentication timed out",
+			);
+		});
 		socket.once("close", () => {
-			if (!responding) abortController.abort();
+			if (requestDeadline) clearTimeout(requestDeadline);
+			clients.delete(socket);
+			if (!task) return;
+			task.cancelled = true;
+			task.abortController.abort();
+			const queuedIndex = queuedExecutions.indexOf(task);
+			if (queuedIndex >= 0) queuedExecutions.splice(queuedIndex, 1);
 		});
 		socket.on("data", (chunk: string) => {
 			if (handled) return;
 			requestText += chunk;
-			if (requestText.length > AVO_VERIFICATION_BROKER_MAX_REQUEST_BYTES) {
-				handled = true;
-				respond({ error: "request exceeded 32768 characters" });
+			requestBytes += Buffer.byteLength(chunk);
+			if (!authenticated) {
+				const authenticationWindow = Buffer.from(requestText)
+					.subarray(0, AVO_VERIFICATION_BROKER_PREAUTH_MAX_BYTES)
+					.toString("utf8");
+				const observedToken = /"token"\s*:\s*"([^"\\]*)"/.exec(authenticationWindow)?.[1];
+				const observedProtocol = /"protocolVersion"\s*:\s*(\d+)/.exec(authenticationWindow)?.[1];
+				if (observedToken !== undefined && !constantTimeTokenMatches(token, observedToken)) {
+					rejectRequest("unauthorized or invalid verification broker request");
+					return;
+				}
+				if (observedToken !== undefined && observedProtocol !== undefined) {
+					if (observedProtocol !== String(AVO_VERIFICATION_BROKER_PROTOCOL_VERSION)) {
+						rejectRequest("unauthorized or invalid verification broker request");
+						return;
+					}
+					authenticated = true;
+					socket.setTimeout(AVO_VERIFICATION_BROKER_REQUEST_IDLE_MS);
+					if (requestDeadline) clearTimeout(requestDeadline);
+					requestDeadline = setTimeout(
+						() => rejectRequest("verification broker request timed out"),
+						AVO_VERIFICATION_BROKER_REQUEST_IDLE_MS,
+					);
+				} else if (requestBytes > AVO_VERIFICATION_BROKER_PREAUTH_MAX_BYTES || requestText.includes("\n")) {
+					rejectRequest("unauthorized or invalid verification broker request");
+					return;
+				} else {
+					return;
+				}
+			}
+			if (requestBytes > AVO_VERIFICATION_BROKER_MAX_REQUEST_BYTES) {
+				rejectRequest("request exceeded 32768 bytes");
 				return;
 			}
 			const newline = requestText.indexOf("\n");
 			if (newline < 0) return;
+			const requestLine = requestText.slice(0, newline);
+			requestText = "";
 			handled = true;
-			void (async () => {
-				try {
-					if (active) throw new Error("verification broker is already executing a request");
-					const request = parseBrokerRequest(JSON.parse(requestText.slice(0, newline)) as unknown, token);
-					if (request.command !== allowedCommand) {
-						throw new Error("verification command is not the exact host-allowlisted command");
-					}
-					if (realpathSync(resolve(request.cwd)) !== workspace) {
-						throw new Error("verification request cwd does not match the host-bound workspace");
-					}
-					if (digestControlPaths(workspace, controlPaths) !== initialControlDigest) {
-						throw new Error("verification controls changed after broker registration");
-					}
-					if (digestHostFixtureFiles(hostFixtures, (fixture) => fixture.sourcePath) !== initialHostFixtureDigest) {
-						throw new Error("verification host fixtures changed after broker registration");
-					}
-					active = true;
-					const workspaceDigest = captureAvoWorkspaceSnapshot(workspace).digest;
-					const sourceDigest = digestWorkspaceTree(workspace);
-					const snapshotRoot = mkdtempSync(join(brokerSnapshotDirectory(), "request-"));
-					const executionWorkspace = join(snapshotRoot, "workspace");
-					const { execution, postSourceDigest, postWorkspaceDigest, postHostFixtureDigest } = await (async () => {
-						try {
-							cpSync(workspace, executionWorkspace, {
-								recursive: true,
-								dereference: false,
-								preserveTimestamps: true,
-							});
-							if (
-								digestWorkspaceTree(workspace) !== sourceDigest ||
-								digestWorkspaceTree(executionWorkspace) !== sourceDigest ||
-								captureAvoWorkspaceSnapshot(workspace).digest !== workspaceDigest ||
-								captureAvoWorkspaceSnapshot(executionWorkspace).digest !== workspaceDigest
-							) {
-								throw new Error("verification source changed while its disposable snapshot was captured");
-							}
-							copyHostFixtures(executionWorkspace, hostFixtures, initialHostFixtureDigest);
-							const disposableExecution = await executeHostSandbox(
-								{
-									executionWorkspace,
-									command: request.command,
-									controlPaths,
-									hiddenPaths,
-									privateHome,
-									visiblePaths,
-									environment,
-									timeoutMs: normalizeTimeout(request.timeoutMs, defaultTimeoutMs, maximumTimeoutMs),
-								},
-								abortController.signal,
-							);
-							return {
-								execution: disposableExecution,
-								postSourceDigest: digestWorkspaceTree(workspace),
-								postWorkspaceDigest: captureAvoWorkspaceSnapshot(workspace).digest,
-								postHostFixtureDigest: digestHostFixtureFiles(hostFixtures, (fixture) => fixture.sourcePath),
-							};
-						} finally {
-							rmSync(snapshotRoot, { recursive: true, force: true });
-						}
-					})();
-					if (sourceDigest !== postSourceDigest) {
-						throw new Error("verification source changed during broker execution");
-					}
-					if (workspaceDigest !== postWorkspaceDigest) {
-						throw new Error("verification semantic workspace changed during broker execution");
-					}
-					if (initialHostFixtureDigest !== postHostFixtureDigest) {
-						throw new Error("verification host fixtures changed during broker execution");
-					}
-					if (digestControlPaths(workspace, controlPaths) !== initialControlDigest) {
-						throw new Error("verification controls changed during broker execution");
-					}
-					const payload: Omit<AvoVerificationBrokerReceipt, "receiptDigest"> = {
-						protocolVersion: 1,
-						brokerId,
-						requestId: request.requestId,
-						commandDigest: sha256(request.command),
-						controlDigest: initialControlDigest,
-						hostFixtureDigest: initialHostFixtureDigest,
-						postHostFixtureDigest,
-						hostFixtureCount: hostFixtures.length,
-						environmentDigest: boundEnvironmentDigest,
-						workspaceDigest,
-						postWorkspaceDigest,
-						sourceDigest,
-						postSourceDigest,
-						exitCode: execution.exitCode,
-						outputDigest: sha256(execution.output),
-						durationMs: execution.durationMs,
-						timedOut: execution.timedOut,
-						sourceWorkspaceImmutable: true,
-						disposableWorkspace: true,
-						networkIsolated: true,
-						homeIsolated: privateHome,
-						hostFixturesImmutable: true,
-						pythonSemanticAuthority: options.pythonSemanticAuthority === true,
-					};
-					const receipt: AvoVerificationBrokerReceipt = {
-						...payload,
-						receiptDigest: sha256(receiptPayload(payload)),
-					};
-					respond({ execution: { exitCode: execution.exitCode, output: execution.output, receipt } });
-				} catch (error) {
-					respond({
-						error: error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000),
-					});
-				} finally {
-					active = false;
+			socket.setTimeout(0);
+			if (requestDeadline) clearTimeout(requestDeadline);
+			try {
+				const request = parseBrokerRequest(JSON.parse(requestLine) as unknown, token);
+				if (request.command !== allowedCommand) {
+					throw new Error("verification command is not the exact host-allowlisted command");
 				}
-			})();
+				if (realpathSync(resolve(request.cwd)) !== workspace) {
+					throw new Error("verification request cwd does not match the host-bound workspace");
+				}
+				const abortController = new AbortController();
+				task = {
+					socket,
+					abortController,
+					cancelled: false,
+					execute: async () => {
+						try {
+							if (abortController.signal.aborted) throw new Error("verification broker request aborted");
+							if (digestControlPaths(workspace, controlPaths) !== initialControlDigest) {
+								throw new Error("verification controls changed after broker registration");
+							}
+							if (
+								digestHostFixtureFiles(hostFixtures, (fixture) => fixture.sourcePath) !==
+								initialHostFixtureDigest
+							) {
+								throw new Error("verification host fixtures changed after broker registration");
+							}
+							const workspaceDigest = captureAvoWorkspaceSnapshot(workspace).digest;
+							const sourceDigest = digestWorkspaceTree(workspace);
+							const snapshotRoot = mkdtempSync(join(brokerSnapshotDirectory(), "request-"));
+							const executionWorkspace = join(snapshotRoot, "workspace");
+							const { execution, postSourceDigest, postWorkspaceDigest, postHostFixtureDigest } =
+								await (async () => {
+									try {
+										cpSync(workspace, executionWorkspace, {
+											recursive: true,
+											dereference: false,
+											preserveTimestamps: true,
+										});
+										if (
+											digestWorkspaceTree(workspace) !== sourceDigest ||
+											digestWorkspaceTree(executionWorkspace) !== sourceDigest ||
+											captureAvoWorkspaceSnapshot(workspace).digest !== workspaceDigest ||
+											captureAvoWorkspaceSnapshot(executionWorkspace).digest !== workspaceDigest
+										) {
+											throw new Error(
+												"verification source changed while its disposable snapshot was captured",
+											);
+										}
+										copyHostFixtures(executionWorkspace, hostFixtures, initialHostFixtureDigest);
+										const disposableExecution = await executeHostSandbox(
+											{
+												executionWorkspace,
+												command: request.command,
+												controlPaths,
+												hiddenPaths,
+												privateHome,
+												visiblePaths,
+												environment,
+												timeoutMs: normalizeTimeout(request.timeoutMs, defaultTimeoutMs, maximumTimeoutMs),
+											},
+											abortController.signal,
+										);
+										if (abortController.signal.aborted) {
+											throw new Error("verification broker request aborted");
+										}
+										return {
+											execution: disposableExecution,
+											postSourceDigest: digestWorkspaceTree(workspace),
+											postWorkspaceDigest: captureAvoWorkspaceSnapshot(workspace).digest,
+											postHostFixtureDigest: digestHostFixtureFiles(
+												hostFixtures,
+												(fixture) => fixture.sourcePath,
+											),
+										};
+									} finally {
+										rmSync(snapshotRoot, { recursive: true, force: true });
+									}
+								})();
+							if (sourceDigest !== postSourceDigest) {
+								throw new Error("verification source changed during broker execution");
+							}
+							if (workspaceDigest !== postWorkspaceDigest) {
+								throw new Error("verification semantic workspace changed during broker execution");
+							}
+							if (initialHostFixtureDigest !== postHostFixtureDigest) {
+								throw new Error("verification host fixtures changed during broker execution");
+							}
+							if (digestControlPaths(workspace, controlPaths) !== initialControlDigest) {
+								throw new Error("verification controls changed during broker execution");
+							}
+							const payload: Omit<AvoVerificationBrokerReceipt, "receiptDigest"> = {
+								protocolVersion: 1,
+								brokerId,
+								requestId: request.requestId,
+								commandDigest: sha256(request.command),
+								controlDigest: initialControlDigest,
+								hostFixtureDigest: initialHostFixtureDigest,
+								postHostFixtureDigest,
+								hostFixtureCount: hostFixtures.length,
+								environmentDigest: boundEnvironmentDigest,
+								workspaceDigest,
+								postWorkspaceDigest,
+								sourceDigest,
+								postSourceDigest,
+								exitCode: execution.exitCode,
+								outputDigest: sha256(execution.output),
+								durationMs: execution.durationMs,
+								timedOut: execution.timedOut,
+								sourceWorkspaceImmutable: true,
+								disposableWorkspace: true,
+								networkIsolated: true,
+								homeIsolated: privateHome,
+								hostFixturesImmutable: true,
+								pythonSemanticAuthority: options.pythonSemanticAuthority === true,
+							};
+							const receipt: AvoVerificationBrokerReceipt = {
+								...payload,
+								receiptDigest: sha256(receiptPayload(payload)),
+							};
+							respond({ execution: { exitCode: execution.exitCode, output: execution.output, receipt } });
+						} catch (error) {
+							respond({
+								error: error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000),
+							});
+						}
+					},
+				};
+				if (!scheduleExecution(task)) respond({ error: "verification broker is at execution capacity" });
+			} catch (error) {
+				respond({
+					error: error instanceof Error ? error.message.slice(0, 1_000) : String(error).slice(0, 1_000),
+				});
+			}
 		});
 	});
+	server.maxConnections = AVO_VERIFICATION_BROKER_MAX_CONNECTIONS;
 	await listenOnSocket(server, socketPath);
 	chmodSync(socketPath, 0o600);
+	let closePromise: Promise<void> | undefined;
 	return {
 		socketPath,
 		token,
 		brokerId,
-		close: async () => {
-			await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
-			rmSync(socketPath, { force: true });
+		close: () => {
+			closePromise ??= (async () => {
+				closing = true;
+				const activeCompletions = [...activeTasks].flatMap((active) => {
+					active.cancelled = true;
+					active.abortController.abort();
+					return active.completion ? [active.completion] : [];
+				});
+				for (const queued of queuedExecutions) {
+					queued.cancelled = true;
+					queued.abortController.abort();
+				}
+				queuedExecutions.length = 0;
+				for (const client of clients) client.destroy();
+				const serverClosed = new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+				await Promise.allSettled(activeCompletions);
+				await serverClosed;
+				rmSync(socketPath, { force: true });
+			})();
+			return closePromise;
 		},
 	};
 }
