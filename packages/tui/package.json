@@ -5,11 +5,11 @@
 	"type": "module",
 	"main": "dist/index.js",
 	"scripts": {
-		"clean": "shx rm -rf dist",
-		"build": "tsgo -p tsconfig.build.json",
-		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+		"clean": "bun ../../scripts/remove-paths.ts dist",
+		"build": "bun --bun tsgo -p tsconfig.build.json",
+		"dev": "bun --bun tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"test": "node --test --import tsx test/*.test.ts",
-		"prepublishOnly": "npm run clean && npm run build"
+		"prepublishOnly": "bun run clean && bun run build"
 	},
 	"files": [
 		"dist/**/*",
