@@ -13,10 +13,8 @@ if [ "$prime_agent_default_release_channel" = "$prime_agent_unconfigured_default
 	prime_agent_default_release_channel=stable
 fi
 prime_agent_release_channel="${PRIME_AGENT_RELEASE_CHANNEL:-$prime_agent_default_release_channel}"
-prime_agent_package="${PRIME_AGENT_PACKAGE:-prime-agent}"
 prime_agent_cmd="${PRIME_AGENT_CMD:-prime-agent}"
 prime_agent_esc=$(printf '\033')
-prime_agent_original_path="${PATH:-}"
 prime_agent_reset="${prime_agent_esc}[0m"
 prime_agent_bold="${prime_agent_esc}[1m"
 prime_agent_italic="${prime_agent_esc}[3m"
@@ -33,7 +31,7 @@ prime_agent_color_dim="${prime_agent_esc}[38;2;113;113;122m"
 prime_agent_color_primary="${prime_agent_esc}[38;2;127;91;213m"
 prime_agent_color_scan="${prime_agent_esc}[38;2;14;165;233m"
 prime_agent_color_warning="${prime_agent_esc}[38;2;245;158;11m"
-readonly prime_agent_unconfigured_base_url prime_agent_unconfigured_default_release_channel prime_agent_base_url prime_agent_default_release_channel prime_agent_release_channel prime_agent_package prime_agent_cmd prime_agent_esc prime_agent_original_path
+readonly prime_agent_unconfigured_base_url prime_agent_unconfigured_default_release_channel prime_agent_base_url prime_agent_default_release_channel prime_agent_release_channel prime_agent_cmd prime_agent_esc
 readonly prime_agent_reset prime_agent_bold prime_agent_italic prime_agent_hide_cursor prime_agent_show_cursor prime_agent_home_cursor prime_agent_clear_screen prime_agent_clear_line
 readonly prime_agent_sync_start prime_agent_sync_end
 readonly prime_agent_color_text prime_agent_color_muted prime_agent_color_dim prime_agent_color_primary prime_agent_color_scan prime_agent_color_warning
@@ -51,11 +49,9 @@ prime_agent_screen_layout_lab_width=0
 prime_agent_screen_render_lab_width=0
 prime_agent_screen_compact=0
 prime_agent_download_dir=
-prime_agent_bootstrap_kernel_on_install=0
 prime_agent_screen_title=
 prime_agent_screen_status=
 prime_agent_screen_detail=
-prime_agent_screen_question=
 prime_agent_animation_frame=0
 prime_agent_binary_versions_dir="${PRIME_AGENT_VERSIONS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/prime-agent/versions}"
 prime_agent_binary_symlink="${PRIME_AGENT_BIN_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}/prime-agent"
@@ -197,7 +193,6 @@ prime_agent_screen() {
 	fi
 	prime_agent_screen_status=
 	prime_agent_screen_detail="${3:-}"
-	prime_agent_screen_question="${4:-}"
 	prime_agent_screen_frame=$((prime_agent_screen_frame + 1))
 	prime_agent_read_terminal_size
 	prime_agent_init_screen_layout
@@ -341,36 +336,18 @@ prime_agent_content_line() {
 	fi
 
 	if [ "$index" -eq 0 ]; then
-		if [ -n "$prime_agent_screen_question" ]; then
-			prime_agent_set_text_line "$(prime_agent_screen_primary_text)" "$prime_agent_bold$prime_agent_color_text"
-		else
-			prime_agent_set_title_line "$prime_agent_screen_title"
-		fi
+		prime_agent_set_title_line "$prime_agent_screen_title"
 		return
 	fi
 
 	if [ "$index" -eq 1 ]; then
-		if [ -n "$prime_agent_screen_question" ]; then
-			prime_agent_set_text_line "Press Enter to continue; type n to cancel." "$prime_agent_color_muted"
-		elif [ -n "$prime_agent_screen_detail" ]; then
+		if [ -n "$prime_agent_screen_detail" ]; then
 			prime_agent_set_text_line "$prime_agent_screen_detail" "$prime_agent_color_muted"
 		else
 			prime_agent_set_blank_line
 		fi
 		return
 	fi
-}
-
-prime_agent_screen_primary_text() {
-	if [ -z "$prime_agent_screen_question" ]; then
-		printf '%s' "$prime_agent_screen_title"
-		return
-	fi
-
-	case "$prime_agent_screen_question" in
-		*'[Y/n]'*) printf '%s [Y/n] >' "$prime_agent_screen_title" ;;
-		*) printf '%s %s' "$prime_agent_screen_title" "$prime_agent_screen_question" ;;
-	esac
 }
 
 prime_agent_set_lab_line() {
@@ -1020,9 +997,25 @@ prime_agent_binary_fresh_install() {
 		exit 1
 	fi
 
-	# Create the stable symlink
+	# Create and verify the stable symlink. Restore a healthy prior target if the
+	# activated command cannot run through its public path.
+	_old_target=
+	if [ -L "$prime_agent_binary_symlink" ]; then
+		_old_target=$(readlink "$prime_agent_binary_symlink" 2>/dev/null || printf '')
+	fi
 	mkdir -p "$(dirname "$prime_agent_binary_symlink")"
 	prime_agent_binary_atomic_symlink "$_binary_path" "$prime_agent_binary_symlink"
+	if ! prime_agent_binary_smoke_binary "$prime_agent_binary_symlink"; then
+		if [ -n "$_old_target" ] && prime_agent_binary_smoke_binary "$_old_target"; then
+			prime_agent_binary_atomic_symlink "$_old_target" "$prime_agent_binary_symlink"
+		else
+			rm -f "$prime_agent_binary_symlink"
+		fi
+		rm -rf "$_version_dir" "$_download_dir"
+		prime_agent_download_dir=
+		printf 'error: the installed Prime Agent command did not run correctly.\n' >&2
+		exit 1
+	fi
 
 	rm -rf "$_download_dir"
 	prime_agent_download_dir=
@@ -1045,7 +1038,8 @@ prime_agent_binary_update() {
 		fi
 	fi
 
-	if [ -n "$_current_version" ] && [ "$_current_version" = "$_update_version" ]; then
+	if [ -n "$_current_version" ] && [ "$_current_version" = "$_update_version" ] &&
+		prime_agent_binary_validate_layout "$_pkg_dir" "$prime_agent_binary_symlink"; then
 		if [ "$prime_agent_screen_enabled" = 1 ]; then
 			prime_agent_screen "Prime Agent is up to date" "" "v$_current_version" ""
 		else
@@ -1246,10 +1240,5 @@ prime_agent_configure_binary_path() {
 		printf '\nThen restart your shell and run: %s\n' "$prime_agent_cmd"
 	fi
 }
-
-# =============================================================================
-# NPM Install Path (extracted from main)
-# =============================================================================
-
 
 main "$@"

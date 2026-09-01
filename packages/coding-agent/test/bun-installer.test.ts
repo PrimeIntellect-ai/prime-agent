@@ -47,6 +47,11 @@ describe("install.sh shell syntax", () => {
 		expect(installerText).not.toContain("prime_agent_npm_install");
 		expect(installerText).not.toContain("install_node_npm");
 		expect(installerText).not.toContain("npm install");
+		expect(installerText).not.toContain("NPM Install Path");
+		expect(installerText).not.toContain("prime_agent_package");
+		expect(installerText).not.toContain("prime_agent_original_path");
+		expect(installerText).not.toContain("prime_agent_bootstrap_kernel_on_install");
+		expect(installerText).not.toContain("prime_agent_screen_question");
 	});
 
 	it("rejects removed package-manager method flags", () => {
