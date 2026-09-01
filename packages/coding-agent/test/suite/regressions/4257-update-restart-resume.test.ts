@@ -77,6 +77,7 @@ function createState(
 		extensionUiRequests: new Map(),
 		eventGeneration: `generation-${activeSessionId}`,
 		lastEventSequence: 0,
+		rlmRosterRevision: 0,
 		...(options.clientEnv ? { clientEnv: options.clientEnv } : {}),
 	};
 }
