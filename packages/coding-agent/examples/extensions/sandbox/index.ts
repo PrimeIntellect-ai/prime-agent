@@ -36,7 +36,7 @@
  *
  * Setup:
  * 1. Copy sandbox/ directory to ~/.prime/agent/extensions/
- * 2. Run `npm install` in ~/.prime/agent/extensions/sandbox/
+ * 2. Run `bun install` in ~/.prime/agent/extensions/sandbox/
  *
  * Linux also requires: bubblewrap, socat, ripgrep
  */
