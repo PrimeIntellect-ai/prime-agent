@@ -1,0 +1,1 @@
+- Fixed kernel setup failing on Windows by resolving the kernel venv python as `Scripts\python.exe` instead of the POSIX `bin/python` path.
