@@ -35,7 +35,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
 import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
-import { SessionManager } from "../src/core/session-manager.js";
+import * as sessionManagerModule from "../src/core/session-manager.js";
 import type { ActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import type { AgentRosterEntry } from "../src/modes/daemon/agent-roster.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
@@ -49,6 +49,8 @@ import {
 	readLegacyRlmSubagentRegistry,
 	rlmLedgerPath,
 } from "../src/modes/daemon/rlm-ledger.js";
+
+const { SessionManager } = sessionManagerModule;
 
 function makeRoots(root: string) {
 	const sessionsDir = join(root, "sessions");
@@ -1053,7 +1055,13 @@ interface SupervisorLedgerInternals {
 	rlmLedgerSiblings(sessionPath: string): Promise<Array<{ name?: string; rlmDepth: number; path: string }>>;
 	assertSupervisorSavedSessionNameAvailable(sessionPath: string, name: string): Promise<void>;
 	seedRosterLedger(): Promise<void>;
+	applyWorkerRosterSnapshot(
+		worker: object,
+		delta: { type: "roster_delta"; snapshot: true; entries: AgentRosterEntry[] },
+		source: object,
+	): Promise<void>;
 	handleCommand(client: object, command: Record<string, unknown>): Promise<DaemonResponse | undefined>;
+	workers: Map<string, object>;
 	catalog: object;
 }
 
@@ -1087,6 +1095,63 @@ describe("rlm spawn ledger supervisor wiring", () => {
 			expect(row?.summary.cwd).toBe(tempDir);
 			expect(row?.seededCwd).toBeUndefined();
 		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("abandons a ledger reseed when its source worker disconnects during cwd hydration", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-supervisor-stale-"));
+		let readSpy: ReturnType<typeof vi.spyOn> | undefined;
+		try {
+			const { sessionsDir, parent, parentFile } = makeRoots(tempDir);
+			const parentArtifactDir = parent.getSessionArtifactDir();
+			if (!parentArtifactDir) throw new Error("Missing parent artifact directory");
+			const child = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "worker");
+			const childInfo = await sessionManagerModule.readSessionInfo(child.file);
+			if (!childInfo) throw new Error("Missing child session info");
+			const supervisor = new DaemonSupervisor(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: sessionsDir },
+				descriptorDir: join(tempDir, "workers"),
+			}) as unknown as SupervisorLedgerInternals;
+			await supervisor.rlmSpawnLedger().appendSpawn({
+				childId: "sub-11111111",
+				parent: parentFile,
+				child: child.file,
+				depth: 1,
+				name: "worker",
+			});
+			const source = {};
+			const replacement = {};
+			const worker = {
+				descriptor: { workerId: "worker-1", sessionFile: parentFile, createCommand: {} },
+				client: source,
+				summaries: new Map(),
+			};
+			supervisor.workers.set("worker-1", worker);
+			let finishRead: (() => void) | undefined;
+			const readBlocked = new Promise<void>((resolve) => {
+				finishRead = resolve;
+			});
+			readSpy = vi.spyOn(sessionManagerModule, "readSessionInfo").mockImplementation(async () => {
+				await readBlocked;
+				return childInfo;
+			});
+
+			const apply = supervisor.applyWorkerRosterSnapshot(
+				worker,
+				{ type: "roster_delta", snapshot: true, entries: [] },
+				source,
+			);
+			await vi.waitFor(() => expect(readSpy).toHaveBeenCalledOnce());
+			worker.client = replacement;
+			finishRead?.();
+			await apply;
+
+			const response = await supervisor.handleCommand({}, { type: "roster_subscribe" });
+			if (!response?.success) throw new Error("Roster subscription failed");
+			expect((response.data as { roster: AgentRosterEntry[] }).roster).toEqual([]);
+		} finally {
+			readSpy?.mockRestore();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});

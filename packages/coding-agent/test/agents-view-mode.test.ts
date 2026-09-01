@@ -780,6 +780,42 @@ describe("AgentsViewMode persistent catalog state", () => {
 		}
 	});
 
+	it("applies the roster snapshot produced during reconnect heartbeat refresh", async () => {
+		const beforeRefresh = summary({ id: "before", sessionId: "before" });
+		const afterRefresh = summary({ id: "after", sessionId: "after" });
+		let current = [beforeRefresh];
+		let finishHeartbeatRefresh: (() => void) | undefined;
+		const heartbeatRefresh = new Promise<void>((resolve) => {
+			finishHeartbeatRefresh = resolve;
+		});
+		const client = { reconnect: vi.fn(async () => undefined) };
+		const self = {
+			options: { recoverDaemon: vi.fn(async () => undefined) },
+			client,
+			rosterStore: {
+				attach: vi.fn(async () => true),
+				summaries: vi.fn(() => current),
+			},
+			refreshHeartbeats: vi.fn(async () => {
+				await heartbeatRefresh;
+				return true;
+			}),
+			daemonShutdownReceived: false,
+			reconnectTimedOut: true,
+			setStatusMessage: vi.fn(),
+			applySessionList: vi.fn(),
+			armSavedSearchFetch: vi.fn(),
+		};
+
+		const reconnect = invoke("reconnectClient", self, client, new Error("disconnected")) as Promise<void>;
+		await vi.waitFor(() => expect(self.refreshHeartbeats).toHaveBeenCalledOnce());
+		current = [afterRefresh];
+		finishHeartbeatRefresh?.();
+		await reconnect;
+
+		expect(self.applySessionList).toHaveBeenCalledWith([afterRefresh], true);
+	});
+
 	it("keeps a newly pushed scope and the existing live cache when its first poll fails", async () => {
 		const root = summary();
 		const other = summary({ id: "other-active", activeSessionId: "other-active", sessionId: "other-session" });

@@ -2427,9 +2427,9 @@ export class AgentsViewMode implements Component, Focusable {
 				if (!this.rosterStore || !(await this.rosterStore.attach(client))) {
 					throw new Error("Daemon lost the agent_roster capability during reconnect");
 				}
-				const sessions = this.rosterStore.summaries();
 				const heartbeatsRefreshed = await this.refreshHeartbeats({ duringReconnect: true });
 				if (!heartbeatsRefreshed) throw new Error("Heartbeat catalog did not refresh during reconnect");
+				const sessions = this.rosterStore.summaries();
 				this.daemonShutdownReceived = false;
 				this.reconnectTimedOut = false;
 				this.setStatusMessage("Daemon reconnected", { render: false });

@@ -3935,7 +3935,8 @@ export class DaemonSupervisor {
 				edgesFailed = true;
 				return [] as RlmLedgerEdge[];
 			});
-		if (!this.isWorkerRosterApplyCurrent(worker, source ?? worker.client ?? worker.pendingClient)) return;
+		const applySource = source ?? worker.client ?? worker.pendingClient;
+		if (!this.isWorkerRosterApplyCurrent(worker, applySource)) return;
 		// Unreadable edges: skip the absentee sweep (it cannot tell registry children from stale rows) and repair by pull.
 		const sent = new Set(delta.entries.map((entry) => entry.agentId));
 		const unclaimed = new Map<string, AgentRosterEntry>();
@@ -3989,6 +3990,7 @@ export class DaemonSupervisor {
 				continue;
 			}
 			const info = await readSessionInfo(edge.child).catch(() => undefined);
+			if (!this.isWorkerRosterApplyCurrent(worker, applySource)) return;
 			this.roster().write(
 				info ? { ...entry, summary: { ...entry.summary, cwd: info.cwd } } : { ...entry, seededCwd: true },
 			);
