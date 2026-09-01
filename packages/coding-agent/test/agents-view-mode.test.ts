@@ -689,6 +689,18 @@ afterEach(() => {
 });
 
 describe("AgentsViewMode persistent catalog state", () => {
+	it("treats only a previously loaded saved catalog as settled on mount", () => {
+		const fresh = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		const loaded = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
+
+		try {
+			expect(Reflect.get(fresh, "savedCatalogReady")).toBe(false);
+			expect(Reflect.get(loaded, "savedCatalogReady")).toBe(true);
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("applies an initial handoff scope from the first pushed roster refresh", async () => {
 		const root = summary();
 		const scope = { sessionId: root.sessionId, activeSessionId: root.activeSessionId };
