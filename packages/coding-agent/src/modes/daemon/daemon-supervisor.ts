@@ -3937,26 +3937,14 @@ export class DaemonSupervisor {
 			});
 		const applySource = source ?? worker.client ?? worker.pendingClient;
 		if (!this.isWorkerRosterApplyCurrent(worker, applySource)) return;
-		// Unreadable edges: skip the absentee sweep (it cannot tell registry children from stale rows) and repair by pull.
 		const sent = new Set(delta.entries.map((entry) => entry.agentId));
+		const removed = new Set(delta.removedAgentIds ?? []);
 		const unclaimed = new Map<string, AgentRosterEntry>();
 		if (!edgesFailed) {
 			for (const entry of this.workerRosterEntries(worker)) {
 				if (sent.has(entry.agentId)) continue;
 				unclaimed.set(entry.agentId, entry);
-				this.roster().delete(entry.agentId);
 			}
-		}
-		for (const entry of delta.entries) {
-			this.writeRosterEntry(entry, worker);
-			this.syncRootDescriptorFromRosterEntry(worker, entry);
-		}
-		for (const agentId of delta.removedAgentIds ?? []) {
-			this.roster().delete(agentId);
-		}
-		if (edgesFailed) {
-			this.scheduleRosterRepairPull(worker);
-			return;
 		}
 		// A reseed keeps the previous claim and hydrated summary; a synthetic seed would drop
 		// lastActivityAt (pinning canEvictWorker on NaN) and flap the claim off on every snapshot.
@@ -3978,8 +3966,43 @@ export class DaemonSupervisor {
 			}
 			return current;
 		};
-		for (const edge of edges) {
-			if (rootPath === undefined || familyRoot(canonicalSessionPath(edge.child)) !== rootPath) continue;
+		const familyEdges = edges.filter(
+			(edge) => rootPath !== undefined && familyRoot(canonicalSessionPath(edge.child)) === rootPath,
+		);
+		const seedInfo = new Map<string, SessionInfo | null | undefined>();
+		for (const edge of familyEdges) {
+			const entry = this.rosterEntryForSpawnLedgerEdge(edge);
+			const childPath = canonicalSessionPath(edge.child);
+			const currentById = this.roster().get(entry.agentId);
+			const currentByFile = this.roster().bySessionFile(childPath);
+			const currentIdSurvives =
+				currentById !== undefined && !unclaimed.has(currentById.agentId) && !removed.has(currentById.agentId);
+			const currentFileSurvives =
+				currentByFile !== undefined && !unclaimed.has(currentByFile.agentId) && !removed.has(currentByFile.agentId);
+			if (
+				unclaimed.has(entry.agentId) ||
+				(sent.has(entry.agentId) && !removed.has(entry.agentId)) ||
+				currentIdSurvives ||
+				currentFileSurvives
+			) {
+				continue;
+			}
+			seedInfo.set(entry.agentId, await readSessionInfo(edge.child).catch(() => undefined));
+			if (!this.isWorkerRosterApplyCurrent(worker, applySource)) return;
+		}
+
+		// Unreadable edges skip the absentee sweep: it cannot tell registry children from stale rows.
+		for (const entry of unclaimed.values()) this.roster().delete(entry.agentId);
+		for (const entry of delta.entries) {
+			this.writeRosterEntry(entry, worker);
+			this.syncRootDescriptorFromRosterEntry(worker, entry);
+		}
+		for (const agentId of removed) this.roster().delete(agentId);
+		if (edgesFailed) {
+			this.scheduleRosterRepairPull(worker);
+			return;
+		}
+		for (const edge of familyEdges) {
 			const entry = this.rosterEntryForSpawnLedgerEdge(edge);
 			if (this.roster().has(entry.agentId)) continue;
 			if (this.roster().hasSessionFile(canonicalSessionPath(edge.child))) continue;
@@ -3989,8 +4012,7 @@ export class DaemonSupervisor {
 				this.writeRosterEntry(rest, worker);
 				continue;
 			}
-			const info = await readSessionInfo(edge.child).catch(() => undefined);
-			if (!this.isWorkerRosterApplyCurrent(worker, applySource)) return;
+			const info = seedInfo.get(entry.agentId);
 			this.roster().write(
 				info ? { ...entry, summary: { ...entry.summary, cwd: info.cwd } } : { ...entry, seededCwd: true },
 			);

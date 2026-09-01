@@ -12,7 +12,11 @@ import {
 	createInitialAgentsViewPersistentState,
 	runAgentsViewMode,
 } from "../src/modes/agents-view/agents-view-mode.js";
-import { type AgentsViewRow, resolveAgentsViewLeftResult } from "../src/modes/agents-view/agents-view-state.js";
+import {
+	type AgentsViewRow,
+	buildAgentsViewRows,
+	resolveAgentsViewLeftResult,
+} from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
 import { stopThemeWatcher } from "../src/modes/interactive/theme/theme.js";
@@ -647,6 +651,26 @@ describe("AgentsViewMode", () => {
 		expect(expandedSubagentParents).toEqual(new Set(["root-row"]));
 		expect(programShownParents.size).toBe(0);
 		expect(self.rebuildRows).toHaveBeenCalledTimes(2);
+	});
+
+	it("renders roster recovery and stale-worker status labels", () => {
+		const rows = buildAgentsViewRows([
+			summary({ id: "recovering", sessionId: "recovering", statusLabel: "recovering" }),
+			summary({
+				id: "stale",
+				sessionId: "stale",
+				lastHeardFromAt: new Date(Date.now() - 60_000).toISOString(),
+			}),
+		]);
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "rows", rows);
+
+		try {
+			expect(invoke("renderRow", view, rows[0], 160)).toContain("recovering");
+			expect(invoke("renderRow", view, rows[1], 160)).toContain("last heard");
+		} finally {
+			stopThemeWatcher();
+		}
 	});
 });
 
