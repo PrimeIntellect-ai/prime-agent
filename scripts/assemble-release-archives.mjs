@@ -177,7 +177,9 @@ function normalizeBaseUrl(value) {
 	if (parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password) {
 		throw new Error(`Release base URL must use HTTPS without credentials: ${value}`);
 	}
-	if (parsed.search || parsed.hash) throw new Error("Release base URL must not contain a query or fragment");
+	if (parsed.search || parsed.hash || /[?#]$/.test(parsed.toString())) {
+		throw new Error("Release base URL must not contain a query or fragment");
+	}
 	return parsed.toString().replace(/\/+$/, "");
 }
 
