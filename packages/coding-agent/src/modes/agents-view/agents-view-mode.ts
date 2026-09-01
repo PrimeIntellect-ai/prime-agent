@@ -1254,8 +1254,7 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private armSavedSearchFetch(options: { duringReconnect?: boolean } = {}): void {
-		// No query gate: the inactive section is catalog-fed now that the roster
-		// carries live families only, so the view loads the catalog when it opens.
+		// The inactive section is catalog-fed, so no query gate: load on view open.
 		if (this.savedSearchFetchStarted || this.persistentState.savedCatalogLoaded === true) {
 			return;
 		}
