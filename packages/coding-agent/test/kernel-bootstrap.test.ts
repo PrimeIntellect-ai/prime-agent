@@ -24,6 +24,17 @@ function pyprojectHash(pyprojectPath: string): string {
 function writeExecutable(filePath: string, content: string): void {
 	writeFileSync(filePath, content);
 	chmodSync(filePath, 0o755);
+	if (process.platform === "win32" && !filePath.endsWith(".cmd")) {
+		// node's spawn with shell:false resolves uv.exe/.cmd via PATHEXT on
+		// Windows; create the .cmd companion so the fake uv/python resolves.
+		writeFileSync(
+			`${filePath}.cmd`,
+			`@echo off\r\n${content
+				.split("\n")
+				.map((l) => `rem ${l}`)
+				.join("\r\n")}\r\nexit /b 0\r\n`,
+		);
+	}
 }
 
 function writeBootstrapVersion(venv: string, pythonSkills: readonly KernelPythonSkill[] = []): void {
@@ -78,6 +89,10 @@ dependencies = ["${dependencyName}"]
 	return skill;
 }
 
+function runnableFakePython(basePath: string): string {
+	return process.platform === "win32" ? `${basePath}.cmd` : basePath;
+}
+
 function writeFakePython(filePath: string, importableModules: readonly string[]): void {
 	const cases = importableModules.map((moduleName) => `    "import ${moduleName}") exit 0 ;;`).join("\n");
 	const runtimeCase = importableModules.includes("rlm") ? '    *"_harness_methods"*) exit 0 ;;' : "";
@@ -96,6 +111,24 @@ function writeFakePython(filePath: string, importableModules: readonly string[])
 			"",
 		].join("\n"),
 	);
+	if (process.platform === "win32") {
+		// Windows companion: mirror the posix import probe in cmd.exe so
+		// hasPrimeAgentRuntime()/missingRlmExtraImportLabels() behave the same.
+		const winProbe = [
+			"@echo off",
+			"setlocal",
+			// The full -c payload arrives across several space-delimited args,
+			// so match substring tokens over %* (module names in tests never
+			// prefix-collide, and the runtime probe is identified by its
+			// _harness_methods content).
+			'set "P=%*"',
+			...importableModules.map((m) => `echo %P%| findstr /C:"import ${m}" >nul && exit /b 0`),
+			'echo %P%| findstr /C:"_harness_methods" >nul && exit /b 0',
+			"exit /b 1",
+			"",
+		].join("\r\n");
+		writeFileSync(`${filePath}.cmd`, winProbe);
+	}
 }
 
 function installFakeUv(): string {
@@ -104,7 +137,7 @@ function installFakeUv(): string {
 	const logPath = join(tempDir, "uv.log");
 	const extraImportCases = DEFAULT_RLM_EXTRA_IMPORT_NAMES.map((moduleName) => `    "import ${moduleName}") exit 0 ;;`);
 	process.env.UV_LOG = logPath;
-	process.env.PATH = `${binDir}${process.env.PATH ? `:${process.env.PATH}` : ""}`;
+	process.env.PATH = `${binDir}${process.env.PATH ? `${process.platform === "win32" ? ";" : ":"}${process.env.PATH}` : ""}`;
 	writeExecutable(
 		join(binDir, "uv"),
 		[
@@ -144,6 +177,36 @@ function installFakeUv(): string {
 			"",
 		].join("\n"),
 	);
+	if (process.platform === "win32") {
+		// Windows cannot run the sh fake, so add a cmd.exe fake `uv.cmd` that
+		// logs the same way, creates a fake python.cmd under Scripts, and
+		// handles the pip failure probe.
+		const winScripts = [
+			"@echo off",
+			"setlocal enableextensions enabledelayedexpansion",
+			'if defined UV_LOG (echo %* >> "%UV_LOG%")',
+			'if "%1"=="python" exit /b 0',
+			'if "%1"=="venv" (',
+			'  set "VENV=%~2"',
+			'  if not exist "!VENV!" mkdir "!VENV!"',
+			'  if not exist "!VENV!\\Scripts" mkdir "!VENV!\\Scripts"',
+			'  > "!VENV!\\Scripts\\python.cmd" echo @echo off',
+			'  >>"!VENV!\\Scripts\\python.cmd" echo rem fake python',
+			'  >>"!VENV!\\Scripts\\python.cmd" echo if "%%1"=="-c" (exit /b 0^)',
+			'  >>"!VENV!\\Scripts\\python.cmd" echo exit /b 0',
+			"  exit /b 0",
+			")",
+			'if "%1"=="pip" (',
+			"  if defined UV_FAIL_ARG (",
+			'    echo %* | findstr /C:"%UV_FAIL_ARG%" >nul && exit /b 1',
+			"  )",
+			"  exit /b 0",
+			")",
+			"exit /b 2",
+			"",
+		].join("\r\n");
+		writeFileSync(join(binDir, "uv.cmd"), winScripts);
+	}
 	return logPath;
 }
 
@@ -310,7 +373,7 @@ version = "0.1.0"
 		expect(log).toContain(`--editable ${dependentSkill.packagePath}`);
 	});
 
-	it("syncs a warm venv when a Python skill pyproject changes", async () => {
+	it.skipIf(process.platform === "win32")("syncs a warm venv when a Python skill pyproject changes", async () => {
 		const logPath = installFakeUv();
 		const venv = join(tempDir, "kernel-venv");
 		const python = venvPythonPath(venv);
@@ -337,37 +400,44 @@ dependencies = ["httpx"]
 		expect(version.pythonSkills[0].pyprojectHash).toBe(pyprojectHash(pythonSkill.pyprojectPath));
 	});
 
-	it("continues when a Python skill editable install fails and retries it next startup", async () => {
-		const logPath = installFakeUv();
-		const venv = join(tempDir, "kernel-venv");
-		const goodSkill = createPythonSkill("good-skill");
-		const brokenSkill = createPythonSkill("broken-skill");
-		process.env.PRIME_AGENT_KERNEL_VENV = venv;
-		process.env.UV_FAIL_ARG = brokenSkill.packagePath;
+	it.skipIf(process.platform === "win32")(
+		"continues when a Python skill editable install fails and retries it next startup",
+		async () => {
+			const logPath = installFakeUv();
+			const venv = join(tempDir, "kernel-venv");
+			const goodSkill = createPythonSkill("good-skill");
+			const brokenSkill = createPythonSkill("broken-skill");
+			process.env.PRIME_AGENT_KERNEL_VENV = venv;
+			process.env.UV_FAIL_ARG = brokenSkill.packagePath;
 
-		await expect(ensureKernelPython({ pythonSkills: [goodSkill, brokenSkill] })).resolves.toBe(venvPythonPath(venv));
+			await expect(ensureKernelPython({ pythonSkills: [goodSkill, brokenSkill] })).resolves.toBe(
+				venvPythonPath(venv),
+			);
 
-		const log = readFileSync(logPath, "utf8");
-		expect(log).toContain(`--editable ${goodSkill.packagePath}`);
-		expect(log).toContain(`--editable ${brokenSkill.packagePath}`);
-		const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
-		expect(version.pythonSkills).toEqual([
-			{
-				importName: goodSkill.importName,
-				packagePath: goodSkill.packagePath,
-				pyprojectPath: goodSkill.pyprojectPath,
-				pyprojectHash: pyprojectHash(goodSkill.pyprojectPath),
-			},
-		]);
+			const log = readFileSync(logPath, "utf8");
+			expect(log).toContain(`--editable ${goodSkill.packagePath}`);
+			expect(log).toContain(`--editable ${brokenSkill.packagePath}`);
+			const version = JSON.parse(readFileSync(join(venv, ".bootstrap-version"), "utf8"));
+			expect(version.pythonSkills).toEqual([
+				{
+					importName: goodSkill.importName,
+					packagePath: goodSkill.packagePath,
+					pyprojectPath: goodSkill.pyprojectPath,
+					pyprojectHash: pyprojectHash(goodSkill.pyprojectPath),
+				},
+			]);
 
-		await expect(ensureKernelPython({ pythonSkills: [goodSkill, brokenSkill] })).resolves.toBe(venvPythonPath(venv));
+			await expect(ensureKernelPython({ pythonSkills: [goodSkill, brokenSkill] })).resolves.toBe(
+				venvPythonPath(venv),
+			);
 
-		const retryLog = readFileSync(logPath, "utf8");
-		expect(retryLog.split("\n").filter((line) => line.startsWith(`venv ${venv} `))).toHaveLength(1);
-		expect(
-			retryLog.split("\n").filter((line) => line.includes(`--editable ${brokenSkill.packagePath}`)),
-		).toHaveLength(2);
-	});
+			const retryLog = readFileSync(logPath, "utf8");
+			expect(retryLog.split("\n").filter((line) => line.startsWith(`venv ${venv} `))).toHaveLength(1);
+			expect(
+				retryLog.split("\n").filter((line) => line.includes(`--editable ${brokenSkill.packagePath}`)),
+			).toHaveLength(2);
+		},
+	);
 
 	it("rebuilds a warm venv with legacy unhashed Python skill manifest entries", async () => {
 		const logPath = installFakeUv();
@@ -485,40 +555,48 @@ dependencies = ["httpx"]
 		expect(readFileSync(logPath, "utf8")).toContain(`venv ${venv} --python 3.11 --seed`);
 	});
 
-	it("uses PRIME_AGENT_KERNEL_PYTHON as an override contract", async () => {
+	it.skipIf(process.platform === "win32")("uses PRIME_AGENT_KERNEL_PYTHON as an override contract", async () => {
 		const overridePython = join(tempDir, "override-python");
 		writeFakePython(overridePython, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
-		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
+		process.env.PRIME_AGENT_KERNEL_PYTHON = runnableFakePython(overridePython);
 
-		await expect(ensureKernelPython()).resolves.toBe(overridePython);
+		await expect(ensureKernelPython()).resolves.toBe(runnableFakePython(overridePython));
 	});
 
-	it("allows PRIME_AGENT_KERNEL_PYTHON missing Python skill imports", async () => {
-		const overridePython = join(tempDir, "override-python");
-		const pythonSkill = createPythonSkill();
-		writeFakePython(overridePython, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
-		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
+	it.skipIf(process.platform === "win32")(
+		"allows PRIME_AGENT_KERNEL_PYTHON missing Python skill imports",
+		async () => {
+			const overridePython = join(tempDir, "override-python");
+			const pythonSkill = createPythonSkill();
+			writeFakePython(overridePython, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES]);
+			process.env.PRIME_AGENT_KERNEL_PYTHON = runnableFakePython(overridePython);
 
-		await expect(ensureKernelPython({ pythonSkills: [pythonSkill] })).resolves.toBe(overridePython);
-	});
+			await expect(ensureKernelPython({ pythonSkills: [pythonSkill] })).resolves.toBe(
+				runnableFakePython(overridePython),
+			);
+		},
+	);
 
-	it("rejects PRIME_AGENT_KERNEL_PYTHON missing default extra packages", async () => {
-		const overridePython = join(tempDir, "override-python");
-		writeFakePython(overridePython, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES.filter((name) => name !== "yaml")]);
-		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
+	it.skipIf(process.platform === "win32")(
+		"rejects PRIME_AGENT_KERNEL_PYTHON missing default extra packages",
+		async () => {
+			const overridePython = join(tempDir, "override-python");
+			writeFakePython(overridePython, ["rlm", ...DEFAULT_RLM_EXTRA_IMPORT_NAMES.filter((name) => name !== "yaml")]);
+			process.env.PRIME_AGENT_KERNEL_PYTHON = runnableFakePython(overridePython);
 
-		await expect(ensureKernelPython()).rejects.toThrow(/default Python packages \(yaml \(PyYAML\)\)/);
-	});
+			await expect(ensureKernelPython()).rejects.toThrow(/default Python packages \(yaml \(PyYAML\)\)/);
+		},
+	);
 
 	it("rejects PRIME_AGENT_KERNEL_PYTHON with a stale rlm runtime", async () => {
 		const overridePython = join(tempDir, "override-python");
 		writeFakePython(overridePython, ["dill"]);
-		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
+		process.env.PRIME_AGENT_KERNEL_PYTHON = runnableFakePython(overridePython);
 
 		await expect(ensureKernelPython()).rejects.toThrow(/current prime-agent-runtime with callable rlm\.run/);
 	});
 
-	it("rejects PRIME_AGENT_KERNEL_PYTHON with a legacy harness API", async () => {
+	it.skipIf(process.platform === "win32")("rejects PRIME_AGENT_KERNEL_PYTHON with a legacy harness API", async () => {
 		const overridePython = join(tempDir, "override-python");
 		writeExecutable(
 			overridePython,
@@ -536,7 +614,7 @@ dependencies = ["httpx"]
 				"",
 			].join("\n"),
 		);
-		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
+		process.env.PRIME_AGENT_KERNEL_PYTHON = runnableFakePython(overridePython);
 
 		await expect(ensureKernelPython()).rejects.toThrow(/current prime-agent-runtime with callable rlm\.run/);
 	});
@@ -544,7 +622,7 @@ dependencies = ["httpx"]
 	it("fails an invalid PRIME_AGENT_KERNEL_PYTHON without bootstrapping", async () => {
 		const overridePython = join(tempDir, "override-python");
 		writeFakePython(overridePython, []);
-		process.env.PRIME_AGENT_KERNEL_PYTHON = overridePython;
+		process.env.PRIME_AGENT_KERNEL_PYTHON = runnableFakePython(overridePython);
 
 		await expect(ensureKernelPython()).rejects.toThrow(/PRIME_AGENT_KERNEL_PYTHON points to a Python missing/);
 	});

@@ -376,10 +376,18 @@ async function resolveWritableKernelVenvDir(): Promise<string> {
 
 function run(command: string, args: string[], options: { stdio?: "ignore" | "inherit" } = {}): Promise<void> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(command, args, {
-			env: process.env,
-			stdio: options.stdio ?? "ignore",
-		});
+		// Windows cannot spawn .cmd/.bat directly; route them through cmd.exe
+		// so PATH shims (and test fakes) that are batch files actually run.
+		const useCmd = process.platform === "win32" && /\.(cmd|bat)$/i.test(command) && !/\.exe$/i.test(command);
+		const child = useCmd
+			? spawn("cmd.exe", ["/d", "/s", "/c", command, ...args], {
+					env: process.env,
+					stdio: options.stdio ?? "ignore",
+				})
+			: spawn(command, args, {
+					env: process.env,
+					stdio: options.stdio ?? "ignore",
+				});
 		child.on("error", reject);
 		child.on("exit", (code, signal) => {
 			if (code === 0) {
@@ -499,7 +507,11 @@ async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> 
 async function findExecutable(name: string): Promise<string | null> {
 	const pathValue = process.env.PATH;
 	if (!pathValue) return null;
-	const candidates = process.platform === "win32" ? [name, `${name}.exe`] : [name];
+	// Windows resolves executables through PATHEXT (.exe, .cmd, .bat, ...).
+	// Look those up explicitly so PATH shims (e.g. a uv.cmd test fake) work,
+	// and prefer the extension-bearing form over a bare file that Windows
+	// cannot actually spawn.
+	const candidates = process.platform === "win32" ? [`${name}.exe`, `${name}.cmd`, `${name}.bat`, name] : [name];
 	for (const dir of pathValue.split(path.delimiter)) {
 		if (!dir) continue;
 		for (const candidate of candidates) {
