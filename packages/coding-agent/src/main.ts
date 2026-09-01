@@ -1058,6 +1058,7 @@ export async function main(args: string[], options?: MainOptions) {
 	if (offlineMode) {
 		process.env.PI_OFFLINE = "1";
 		process.env.PI_SKIP_VERSION_CHECK = "1";
+		process.env.GOOGLE_VERTEX_GOOGLE_SEARCH = "0";
 	}
 
 	const publicCommand = await handlePublicCommand(args);
