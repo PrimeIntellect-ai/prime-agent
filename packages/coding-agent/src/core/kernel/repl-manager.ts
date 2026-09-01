@@ -2,6 +2,8 @@
 // (`python -m rlm.repl`) — requests on stdin, events on stdout, stderr kept as
 // a diagnostics tail. The protocol is documented in prime-agent-runtime/src/rlm/repl.md.
 import { type ChildProcess, spawn } from "node:child_process";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { v4 as uuid } from "uuid";
 import { reapKernelOrphanProcesses, recordOrphanProcessState } from "../orphan-process-journal.js";
@@ -55,6 +57,9 @@ const REPAIR_STEP_TIMEOUT_MS = 30_000;
 const MAX_HANDLED_HOST_REQUEST_IDS = 1024;
 // Cap for unattributed background output buffered between and during cells.
 const MAX_BACKGROUND_OUTPUT_CHARS = 64 * 1024;
+
+const MAX_KERNEL_STDERR_CHARS = 8 * 1024;
+const MAX_KERNEL_STDERR_LOG_BYTES = 5 * 1024 * 1024;
 
 /** ExecuteResult plus the raw fields of the request's `done` event (state ops). */
 interface InternalExecuteResult extends ExecuteResult {
@@ -136,7 +141,15 @@ function asReasonArray(value: unknown): { name: string; reason: string }[] {
 export class ReplKernelManager {
 	private readonly options: Pick<
 		KernelManagerOptions,
-		"python" | "cwd" | "env" | "sessionId" | "hostHandlers" | "pythonSkills" | "snapshot" | "bootstrapCode"
+		| "python"
+		| "cwd"
+		| "env"
+		| "sessionId"
+		| "hostHandlers"
+		| "pythonSkills"
+		| "snapshot"
+		| "bootstrapCode"
+		| "stderrLogPath"
 	>;
 	private readonly handledHostRequestIds = new Set<string>();
 	private child?: ChildProcess;
@@ -193,6 +206,7 @@ export class ReplKernelManager {
 			pythonSkills: options.pythonSkills,
 			snapshot: options.snapshot,
 			bootstrapCode: options.bootstrapCode,
+			stderrLogPath: options.stderrLogPath,
 		};
 	}
 
@@ -201,7 +215,45 @@ export class ReplKernelManager {
 	}
 
 	private appendKernelDiagnostic(message: string): void {
-		this.kernelStderr += `[kernel] ${message.endsWith("\n") ? message : `${message}\n`}`;
+		this.appendKernelStderrText(`[kernel] ${message.endsWith("\n") ? message : `${message}\n`}`);
+	}
+
+	private appendKernelStderrText(text: string): void {
+		this.kernelStderr = (this.kernelStderr + text).slice(-MAX_KERNEL_STDERR_CHARS);
+	}
+
+	/**
+	 * The runtime dup2's fd 2 into its protocol pump before ready (repl.py
+	 * _setup_fds), so this file only ever receives startup-bounded pre-ready
+	 * bytes; rotating once per spawn is enough.
+	 */
+	private openStderrLogFd(): number | undefined {
+		const path = this.options.stderrLogPath;
+		if (!path) return undefined;
+		try {
+			mkdirSync(dirname(path), { recursive: true });
+			if (existsSync(path) && statSync(path).size > MAX_KERNEL_STDERR_LOG_BYTES) {
+				// Drop any prior .old first: rename fails on Windows if it exists.
+				rmSync(`${path}.old`, { force: true });
+				renameSync(path, `${path}.old`);
+			}
+			return openSync(path, "a");
+		} catch (error) {
+			this.appendKernelDiagnostic(`cannot open kernel stderr log: ${errorMessage(error)}`);
+			return undefined;
+		}
+	}
+
+	private stderrTail(): string {
+		let fileTail = "";
+		if (this.options.stderrLogPath) {
+			try {
+				fileTail = readFileSync(this.options.stderrLogPath).subarray(-1024).toString("utf8");
+			} catch {
+				// Unreadable log; host diagnostics below still surface.
+			}
+		}
+		return `${fileTail}${this.kernelStderr}`.slice(-1024);
 	}
 
 	async start(options: KernelStartOptions = {}): Promise<void> {
@@ -249,17 +301,23 @@ export class ReplKernelManager {
 			throw new Error("Kernel was disposed during startup");
 		}
 
-		const child = spawn(python, ["-m", "rlm.repl"], {
-			cwd: this.options.cwd,
-			// bash.py journals its process groups under this pid so the host can
-			// reap them if the runtime dies without running its shutdown hook.
-			env: {
-				...process.env,
-				...this.options.env,
-				PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid),
-			},
-			stdio: ["pipe", "pipe", "pipe"],
-		});
+		const stderrLogFd = this.openStderrLogFd();
+		let child: ChildProcess;
+		try {
+			child = spawn(python, ["-m", "rlm.repl"], {
+				cwd: this.options.cwd,
+				// bash.py journals its process groups under this pid so the host can
+				// reap them if the runtime dies without running its shutdown hook.
+				env: {
+					...process.env,
+					...this.options.env,
+					PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid),
+				},
+				stdio: ["pipe", "pipe", stderrLogFd ?? "pipe"],
+			});
+		} finally {
+			if (stderrLogFd !== undefined) closeSync(stderrLogFd);
+		}
 		this.child = child;
 		if (child.pid !== undefined) recordOrphanProcessState(child.pid, true);
 		this.readyDeferred = createDeferred<number>();
@@ -329,7 +387,7 @@ export class ReplKernelManager {
 		});
 
 		child.stderr?.on("data", (buf: Buffer) => {
-			this.kernelStderr += buf.toString();
+			this.appendKernelStderrText(buf.toString());
 		});
 
 		child.on("error", (err) => {
@@ -588,7 +646,7 @@ export class ReplKernelManager {
 			return await new Promise<number>((resolve, reject) => {
 				ready.promise.then(resolve, reject);
 				onExit = () => {
-					const tail = this.kernelStderr.slice(-1024);
+					const tail = this.stderrTail();
 					reject(new Error(`Kernel exited before ready. stderr:\n${tail || "(empty)"}`));
 				};
 				if (child.exitCode !== null || child.signalCode !== null) {
@@ -597,7 +655,7 @@ export class ReplKernelManager {
 				}
 				child.once("exit", onExit);
 				timeout = globalThis.setTimeout(() => {
-					const tail = this.kernelStderr.slice(-1024);
+					const tail = this.stderrTail();
 					reject(
 						new Error(
 							`Kernel did not become ready within ${READY_TIMEOUT_MS}ms. stderr tail:\n${tail || "(empty)"}`,

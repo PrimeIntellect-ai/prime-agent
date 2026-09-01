@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -36,6 +36,55 @@ describe("ReplKernelManager startup", () => {
 		} finally {
 			errorSpy.mockRestore();
 			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+		}
+	});
+
+	it("lands the exact kernel stderr bytes in the log file", async () => {
+		const python = join(tempDir, "python");
+		writeExecutable(
+			python,
+			[
+				"#!/bin/sh",
+				"printf 'progress 1\\rprogress 2\\rcaf\\303' >&2",
+				"sleep 0.2",
+				"printf '\\251\\n' >&2",
+				'printf "final stderr line" >&2',
+				"exit 42",
+				"",
+			].join("\n"),
+		);
+		const stderrLogPath = join(tempDir, "kernel-stderr.log");
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const manager = new ReplKernelManager({ python, cwd: tempDir, stderrLogPath });
+
+		try {
+			await expect(manager.execute("print(1)")).rejects.toThrow(
+				/Kernel exited before ready[\s\S]*caf\u00e9[\s\S]*final stderr line/,
+			);
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+			const expected = Buffer.from("progress 1\rprogress 2\rcaf\u00e9\nfinal stderr line", "utf8");
+			expect(readFileSync(stderrLogPath).equals(expected)).toBe(true);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("rotates an oversized stderr log at spawn", async () => {
+		const python = join(tempDir, "python");
+		writeExecutable(python, ["#!/bin/sh", 'echo "fresh incarnation" >&2', "exit 42", ""].join("\n"));
+		const stderrLogPath = join(tempDir, "kernel-stderr.log");
+		const previous = Buffer.alloc(5 * 1024 * 1024 + 1, "x");
+		writeFileSync(stderrLogPath, previous);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const manager = new ReplKernelManager({ python, cwd: tempDir, stderrLogPath });
+
+		try {
+			await expect(manager.execute("print(1)")).rejects.toThrow(/Kernel exited before ready/);
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+			expect(statSync(`${stderrLogPath}.old`).size).toBe(previous.length);
+			expect(readFileSync(stderrLogPath, "utf8")).toBe("fresh incarnation\n");
+		} finally {
+			errorSpy.mockRestore();
 		}
 	});
 
