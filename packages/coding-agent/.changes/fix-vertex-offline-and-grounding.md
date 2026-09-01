@@ -1,0 +1,1 @@
+- Sanitized `GOOGLE_VERTEX_GOOGLE_SEARCH=0` when entering offline mode in CLI ([#13](https://github.com/lewbei/prime-agent/issues/13)).

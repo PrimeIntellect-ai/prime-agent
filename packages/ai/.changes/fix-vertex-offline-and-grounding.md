@@ -1,0 +1,1 @@
+- Hard-disabled Google Search grounding in offline mode, and preserved Vertex search grounding metadata on tool-use responses ([#13](https://github.com/lewbei/prime-agent/issues/13), [#22](https://github.com/lewbei/prime-agent/issues/22)).
