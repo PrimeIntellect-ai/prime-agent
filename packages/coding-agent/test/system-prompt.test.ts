@@ -154,6 +154,8 @@ describe("buildRlmPrompt", () => {
 		for (const prompt of [withoutObserve, withObserve]) {
 			expect(prompt).toContain("await rlm.list_subagents()");
 			expect(prompt).toContain("await rlm.delete_subagent(child)");
+			expect(prompt).toContain("when it is no longer needed");
+			expect(prompt).not.toContain("Only do this if and when a user asks for it");
 			expect(prompt).toContain("recover direct child handles");
 			expect(prompt).not.toContain("Write a small disk registry");
 		}

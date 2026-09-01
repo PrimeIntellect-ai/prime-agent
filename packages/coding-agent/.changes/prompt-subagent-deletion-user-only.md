@@ -1,1 +1,0 @@
-- The system prompt no longer tells the model to delete finished subagents by default; deletion is now described as user-requested only, so idle children stay available for follow-ups.
