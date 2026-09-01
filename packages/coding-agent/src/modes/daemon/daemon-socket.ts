@@ -1,5 +1,5 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
-import { createConnection } from "node:net";
+import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
@@ -12,6 +12,19 @@ const DAEMON_SOCKET_RELEASE_GRACE_MS = 1000;
 const DAEMON_SOCKET_RELEASE_POLL_MS = 25;
 const DAEMON_SOCKET_LOCK_STALE_MS = 5000;
 const DAEMON_SOCKET_LOCK_UPDATE_MS = 1000;
+const DAEMON_SOCKET_FLUSH_TIMEOUT_MS = 1000;
+
+export function endDaemonSocketAfterFlush(socket: Socket): void {
+	if (socket.destroyed) return;
+	const forceCloseTimer = setTimeout(() => socket.destroy(), DAEMON_SOCKET_FLUSH_TIMEOUT_MS);
+	forceCloseTimer.unref();
+	const clearForceClose = () => clearTimeout(forceCloseTimer);
+	socket.once("close", clearForceClose);
+	socket.end(() => {
+		clearForceClose();
+		if (!socket.destroyed) socket.destroy();
+	});
+}
 
 type DaemonSocketCompromiseListener = (error: Error) => void;
 

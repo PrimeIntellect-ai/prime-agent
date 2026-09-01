@@ -183,6 +183,7 @@ import {
 	cleanupDaemonSocketPath,
 	type DaemonSocketIdentity,
 	defaultDaemonSocketPath,
+	endDaemonSocketAfterFlush,
 	getDaemonSocketIdentity,
 	normalizeSocketPath,
 	prepareDaemonSocketPath,
@@ -7313,8 +7314,7 @@ export class AgentDaemon {
 		}
 		for (const client of this.clients) {
 			client.detachInput();
-			client.socket.end();
-			client.socket.destroy();
+			endDaemonSocketAfterFlush(client.socket);
 		}
 		await new Promise<void>((resolveClose) => {
 			if (!this.server) {

@@ -113,6 +113,7 @@ import {
 	type DaemonSocketPathLease,
 	defaultDaemonSocketDir,
 	defaultDaemonSocketPath,
+	endDaemonSocketAfterFlush,
 	getDaemonSocketIdentity,
 	normalizeSocketPath,
 	prepareDaemonSocketPath,
@@ -6554,8 +6555,7 @@ export class DaemonSupervisor {
 		await this.catalog.stop();
 		for (const client of this.clients) {
 			client.detachInput();
-			client.socket.end();
-			client.socket.destroy();
+			endDaemonSocketAfterFlush(client.socket);
 		}
 		await new Promise<void>((resolveClose) => this.server?.close(() => resolveClose()) ?? resolveClose());
 		await this.runCleanupStep("daemon socket", () => this.cleanupSocket());

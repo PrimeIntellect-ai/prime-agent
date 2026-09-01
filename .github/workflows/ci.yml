@@ -129,11 +129,11 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Install uv
+      - name: Install uv 0.12.4
         if: matrix.install_uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.4"
 
       - name: Test
         working-directory: ${{ matrix.package }}
@@ -168,10 +168,10 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install uv 0.12.4
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.4"
 
       - name: Run process stress tests
         working-directory: packages/coding-agent
@@ -208,10 +208,10 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install uv 0.12.4
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.4"
 
       - name: Run kernel-heavy tests
         working-directory: packages/coding-agent
@@ -237,10 +237,10 @@ jobs:
       - name: Install dependencies (frozen lockfile)
         run: bun install --frozen-lockfile
 
-      - name: Install uv
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install uv 0.12.4
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.4"
 
       - name: Install Python runtime dependencies
         working-directory: prime-agent-runtime
