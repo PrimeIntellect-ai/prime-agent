@@ -1606,6 +1606,8 @@ export class DaemonAgentConnection implements AgentConnection {
 					controlPlaneHandshakeComplete = true;
 					if (directSessionHeld) {
 						if (this.client instanceof DaemonRoutedClient && this.client.hasDirectTransport) {
+							// The roster subscription is a control-plane accessory; its usual rebind seam (attach) is skipped while held.
+							if (this.rosterStore) await this.rosterStore.attach(this.client).catch(() => undefined);
 							void this.emit({ type: "connection_status", status: "connected" });
 							return;
 						}

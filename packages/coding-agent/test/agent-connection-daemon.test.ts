@@ -388,6 +388,8 @@ class FakeDaemonClient {
 						limits: { maxContinuations: 0 },
 					},
 				};
+			case "roster_subscribe":
+				return { type: "response", command: command.type, success: true, data: { roster: [] } };
 			case "wait_for_idle":
 			case "set_scoped_models":
 			case "rename_saved_session":
@@ -834,6 +836,40 @@ describe("DaemonAgentConnection", () => {
 		expect(routed.hasDirectTransport).toBe(true);
 		// Held-direct recovery is control-plane only: no re-attach crosses either socket.
 		expect(directRequests.filter((type) => type === "attach")).toHaveLength(1);
+		expect(supervisor.requests.filter((request) => request.type === "attach")).toHaveLength(0);
+		await connection.dispose();
+	});
+
+	it("rebinds the roster subscription onto the recovered supervisor socket while the direct link holds", async () => {
+		const supervisor = new FakeDaemonClient();
+		supervisor.serverCapabilities.add("agent_roster");
+		const direct = {
+			isConnected: true,
+			hello: supervisor.hello,
+			supportsServerCapability: (capability: string) => supervisor.supportsServerCapability(capability),
+			onMessage: () => () => {},
+			onClose: () => () => {},
+			request: async (command: Extract<DaemonCommand, { type: "attach" }>) => ({
+				type: "response" as const,
+				command: "attach" as const,
+				success: true as const,
+				data: createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12),
+			}),
+			close: () => {},
+		} as unknown as DaemonWorkerClient;
+		const routed = new DaemonRoutedClient(asDaemonClient(supervisor), direct);
+		const connection = await DaemonAgentConnection.attach(routed, "active-1");
+		await connection.subscribeAgentRoster(() => {});
+		// A reconnect delivers a fresh hello object; the roster store keys its subscription on it.
+		supervisor.hello = { ...supervisor.hello! };
+
+		supervisor.connected = false;
+		supervisor.emitClose(new Error("supervisor socket lost"));
+
+		await vi.waitFor(() =>
+			expect(supervisor.requests.filter((request) => request.type === "roster_subscribe")).toHaveLength(2),
+		);
+		expect(routed.hasDirectTransport).toBe(true);
 		expect(supervisor.requests.filter((request) => request.type === "attach")).toHaveLength(0);
 		await connection.dispose();
 	});
