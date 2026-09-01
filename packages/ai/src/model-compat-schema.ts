@@ -69,10 +69,10 @@ function createCompatSchemas(strict: boolean) {
 		),
 		openRouterRouting: Type.Optional(openRouterRouting),
 		vercelGatewayRouting: Type.Optional(vercelGatewayRouting),
-		zaiToolStream: Type.Optional(Type.Boolean()),
+		...(strict ? { zaiToolStream: Type.Optional(Type.Boolean()) } : {}),
 		supportsStrictMode: Type.Optional(Type.Boolean()),
 		cacheControlFormat: Type.Optional(Type.Literal("anthropic")),
-		sendSessionAffinityHeaders: Type.Optional(Type.Boolean()),
+		...(strict ? { sendSessionAffinityHeaders: Type.Optional(Type.Boolean()) } : {}),
 		supportsLongCacheRetention: Type.Optional(Type.Boolean()),
 	});
 	const openAIResponses = object({
