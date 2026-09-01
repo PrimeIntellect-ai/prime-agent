@@ -300,7 +300,9 @@ export class DaemonAgentConnection implements AgentConnection {
 		if (this.disposed || this.terminalCloseEmitted) {
 			return;
 		}
-		if (invalidatedInputPause) {
+		// A lost direct link invalidates the fence (holders learn via the generation bump) but the
+		// session itself falls back; only a control-plane loss mid-pause stays fail-closed.
+		if (invalidatedInputPause && !(error instanceof DaemonDirectTransportClosedError)) {
 			this.terminalCloseEmitted = true;
 			void this.emit({
 				type: "closed",
@@ -1390,6 +1392,10 @@ export class DaemonAgentConnection implements AgentConnection {
 					state: result.snapshot.state,
 					messages: result.snapshot.messages,
 				});
+			}
+			// The old direct link was dropped with the old session; try to ride the target's worker.
+			if (this.client instanceof DaemonRoutedClient) {
+				await this.client.upgradeDirectTransport(this.activeSessionId);
 			}
 			return { cancelled: false };
 		} catch (error) {

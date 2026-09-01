@@ -165,6 +165,26 @@ export class DaemonRoutedClient implements DaemonTransportClient {
 		});
 	}
 
+	/** Acquire a direct link for a newly reattached session; failure keeps supervisor routing. */
+	async upgradeDirectTransport(activeSessionId: string): Promise<boolean> {
+		if (
+			this.closed ||
+			this.direct?.isConnected ||
+			!this.supervisor.supportsServerCapability("direct_peer_transport")
+		) {
+			return false;
+		}
+		const direct = await acquireDirectWorkerTransport(this.supervisor, activeSessionId);
+		if (!direct) return false;
+		if (this.closed || this.direct) {
+			direct.close();
+			return false;
+		}
+		this.direct = direct;
+		this.bindDirect(direct);
+		return true;
+	}
+
 	fallbackToSupervisor(): void {
 		const direct = this.direct;
 		if (!direct) return;
@@ -221,13 +241,21 @@ export async function createDaemonSessionTransport(
 	) {
 		return supervisor;
 	}
+	const direct = await acquireDirectWorkerTransport(supervisor, activeSessionId);
+	return direct ? new DaemonRoutedClient(supervisor, direct) : supervisor;
+}
+
+async function acquireDirectWorkerTransport(
+	supervisor: DaemonTransportClient,
+	activeSessionId: string,
+): Promise<DaemonWorkerClient | undefined> {
 	let direct: DaemonWorkerClient | undefined;
 	try {
 		const response = await supervisor.request({ type: "get_direct_worker_transport", activeSessionId }, 5000);
-		if (!response.success) return supervisor;
+		if (!response.success) return undefined;
 		const ticket = readSessionTransportTicket(response.data);
 		if (!ticket || ticket.activeSessionId !== activeSessionId || Date.parse(ticket.expiresAt) <= Date.now()) {
-			return supervisor;
+			return undefined;
 		}
 		const currentIdentity = getDaemonSocketIdentity(ticket.socketPath);
 		if (
@@ -235,16 +263,16 @@ export async function createDaemonSessionTransport(
 			currentIdentity.dev !== ticket.socketIdentity.dev ||
 			currentIdentity.ino !== ticket.socketIdentity.ino
 		) {
-			return supervisor;
+			return undefined;
 		}
 		direct = new DaemonWorkerClient(ticket.socketPath);
 		await direct.connect(1000);
 		await direct.waitForHello(1000);
 		await direct.authenticatePeer(ticket, 1000);
-		return new DaemonRoutedClient(supervisor, direct);
+		return direct;
 	} catch {
 		direct?.close();
-		return supervisor;
+		return undefined;
 	}
 }
 

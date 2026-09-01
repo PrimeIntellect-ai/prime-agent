@@ -1021,6 +1021,8 @@ describe("DaemonAgentConnection", () => {
 		connection.subscribe(async (event) => {
 			events.push(event);
 		});
+		supervisor.serverCapabilities.add("session_input_pause");
+		const pause = await connection.acquireSessionInputPause("lease-1");
 
 		directConnected = false;
 		for (const listener of [...closeListeners]) listener(new Error("direct worker socket died"));
@@ -1028,6 +1030,8 @@ describe("DaemonAgentConnection", () => {
 		await vi.waitFor(() => expect(events.filter((event) => event.type === "session_resynced")).toHaveLength(1));
 		expect(events.some((event) => event.type === "closed")).toBe(false);
 		expect(supervisor.requests.filter((request) => request.type === "attach")).toHaveLength(1);
+		// The fence died with the direct link; its holder learns on release while the session lives on.
+		await expect(pause.release()).rejects.toThrow("invalidated by a daemon reconnect");
 		await connection.dispose();
 	});
 
@@ -1065,6 +1069,97 @@ describe("DaemonAgentConnection", () => {
 		await new Promise((resolveSettle) => setImmediate(resolveSettle));
 		expect(recoverDaemon).not.toHaveBeenCalled();
 		expect(supervisor.reconnectCount).toBe(0);
+	});
+
+	it("takes update restoration when the direct link closes for an update while a pause is held", async () => {
+		const supervisor = new FakeDaemonClient();
+		supervisor.serverCapabilities.add("session_input_pause");
+		supervisor.updateRestartSessions = [
+			{
+				id: "active-restored",
+				activeSessionId: "active-restored",
+				sessionId: "session-current",
+				sessionFile: "/tmp/session-current.jsonl",
+			},
+		];
+		const closeListeners = new Set<(error: Error) => void>();
+		let directConnected = true;
+		const direct = {
+			get isConnected() {
+				return directConnected;
+			},
+			hello: supervisor.hello,
+			supportsServerCapability: (capability: string) => supervisor.supportsServerCapability(capability),
+			onMessage: () => () => {},
+			onClose: (listener: (error: Error) => void) => {
+				closeListeners.add(listener);
+				return () => closeListeners.delete(listener);
+			},
+			request: async (command: Extract<DaemonCommand, { type: "attach" }>) => ({
+				type: "response" as const,
+				command: "attach" as const,
+				success: true as const,
+				data: createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12),
+			}),
+			close: () => {
+				directConnected = false;
+			},
+		} as unknown as DaemonWorkerClient;
+		const routed = new DaemonRoutedClient(asDaemonClient(supervisor), direct);
+		const connection = await DaemonAgentConnection.attach(routed, "active-1");
+		const events: AgentConnectionEvent[] = [];
+		connection.subscribe(async (event) => {
+			events.push(event);
+		});
+		await connection.acquireSessionInputPause("lease-1");
+
+		directConnected = false;
+		for (const listener of [...closeListeners]) {
+			listener(new DaemonSocketClosedError("/tmp/worker.sock", "update"));
+		}
+
+		await vi.waitFor(() => expect(events.some((event) => event.type === "session_resynced")).toBe(true));
+		expect(events.some((event) => event.type === "closed")).toBe(false);
+		await connection.dispose();
+	});
+
+	it("acquires a direct transport for the target after a successful reattach", async () => {
+		const supervisor = new FakeDaemonClient();
+		supervisor.request = vi.fn(async (command: DaemonCommand) => ({
+			type: "response" as const,
+			command: command.type,
+			success: true as const,
+			data:
+				command.type === "reattach"
+					? createAttachResult(command.targetActiveSessionId, undefined, undefined, 12)
+					: undefined,
+		})) as unknown as typeof supervisor.request;
+		const direct = {
+			isConnected: true,
+			hello: supervisor.hello,
+			supportsServerCapability: () => false,
+			onMessage: () => () => {},
+			onClose: () => () => {},
+			request: async (command: Extract<DaemonCommand, { type: "attach" }>) => ({
+				type: "response" as const,
+				command: "attach" as const,
+				success: true as const,
+				data: createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12),
+			}),
+			close: () => {},
+		} as unknown as DaemonWorkerClient;
+		const routed = new DaemonRoutedClient(asDaemonClient(supervisor), direct);
+		const upgrade = vi.spyOn(routed, "upgradeDirectTransport").mockResolvedValue(true);
+		const connection = await DaemonAgentConnection.attach(routed, "active-1");
+
+		await (
+			connection as unknown as {
+				reattachSession(source: string, target: string): Promise<{ cancelled: boolean }>;
+			}
+		).reattachSession("active-1", "target-1");
+
+		expect(upgrade).toHaveBeenCalledWith("target-1");
+		await connection.dispose();
 	});
 
 	it("keeps the source direct socket when a cross-worker reattach is rejected", async () => {
