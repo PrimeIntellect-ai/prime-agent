@@ -53,9 +53,8 @@ const REPAIR_STEP_TIMEOUT_MS = 30_000;
 // Runtime-minted host-request ids never repeat; the bound only guards a
 // misbehaving runtime from growing the dedup set forever.
 const MAX_HANDLED_HOST_REQUEST_IDS = 1024;
+// Cap for unattributed background output buffered between and during cells.
 const MAX_BACKGROUND_OUTPUT_CHARS = 64 * 1024;
-
-const MAX_KERNEL_STDERR_CHARS = 8 * 1024;
 
 /** ExecuteResult plus the raw fields of the request's `done` event (state ops). */
 interface InternalExecuteResult extends ExecuteResult {
@@ -202,11 +201,7 @@ export class ReplKernelManager {
 	}
 
 	private appendKernelDiagnostic(message: string): void {
-		this.appendKernelStderr(`[kernel] ${message.endsWith("\n") ? message : `${message}\n`}`);
-	}
-
-	private appendKernelStderr(chunk: string): void {
-		this.kernelStderr = (this.kernelStderr + chunk).slice(-MAX_KERNEL_STDERR_CHARS);
+		this.kernelStderr += `[kernel] ${message.endsWith("\n") ? message : `${message}\n`}`;
 	}
 
 	async start(options: KernelStartOptions = {}): Promise<void> {
@@ -334,7 +329,7 @@ export class ReplKernelManager {
 		});
 
 		child.stderr?.on("data", (buf: Buffer) => {
-			this.appendKernelStderr(buf.toString());
+			this.kernelStderr += buf.toString();
 		});
 
 		child.on("error", (err) => {

@@ -39,29 +39,6 @@ describe("ReplKernelManager startup", () => {
 		}
 	});
 
-	it("keeps only a bounded stderr tail from a chatty kernel", async () => {
-		const python = join(tempDir, "python");
-		writeExecutable(
-			python,
-			["#!/bin/sh", 'yes "noise line" | head -c 204800 >&2', 'echo "final stderr line" >&2', "exit 42", ""].join(
-				"\n",
-			),
-		);
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-		const manager = new ReplKernelManager({ python, cwd: tempDir });
-
-		try {
-			await expect(manager.execute("print(1)")).rejects.toThrow(
-				/Kernel exited before ready[\s\S]*final stderr line/,
-			);
-			const stderr = (manager as unknown as { kernelStderr: string }).kernelStderr;
-			expect(stderr.length).toBeLessThanOrEqual(8 * 1024);
-		} finally {
-			errorSpy.mockRestore();
-			await manager.shutdown({ snapshot: true, drainHostRequests: true });
-		}
-	});
-
 	it("fails a runtime announcing an unexpected protocol version", async () => {
 		const python = join(tempDir, "python");
 		writeExecutable(
