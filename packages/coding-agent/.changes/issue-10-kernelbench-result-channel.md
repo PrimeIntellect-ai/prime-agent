@@ -1,0 +1,1 @@
+- Fixed KernelBench result spoofing by isolating and validating the authoritative grader channel ([#10](https://github.com/lewbei/prime-agent/issues/10)).
