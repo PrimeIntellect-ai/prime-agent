@@ -186,6 +186,16 @@ describe("IpythonKernelProvisioner", () => {
 		expect(provisioner.manager).toBeUndefined();
 	});
 
+	it("dispose({ snapshot: false }) skips the kernel's final snapshot flush", async () => {
+		const { python } = writeFakePython();
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python });
+		const shutdown = vi.fn(async () => {});
+		Reflect.set(provisioner, "managerPromise", Promise.resolve({ shutdown }));
+
+		await provisioner.dispose({ snapshot: false });
+		expect(shutdown).toHaveBeenCalledWith({ snapshot: false, drainHostRequests: true });
+	});
+
 	it("dispose() before the boot slot prevents the kernel from spawning", async () => {
 		const { python, countRuns } = writeFakePython();
 		let release: () => void = () => {};

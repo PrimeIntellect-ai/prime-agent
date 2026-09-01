@@ -966,3 +966,12 @@ export async function flushAgentTraceUpload(
 ): Promise<AgentTraceUploadResult | undefined> {
 	return traceUploadControllers.get(sessionManager)?.flush();
 }
+
+/** Log a detached (fire-and-forget) flush rejection; upload outcomes themselves are already logged per attempt. */
+export function logDetachedAgentTraceFlushFailure(sessionFile: string | undefined, error: unknown): void {
+	const suffix = sessionFile ? ` [${sessionFile}]` : "";
+	appendRotatingLog(
+		getAgentTracesLogPath(),
+		`[${new Date().toISOString()}] detached flush failed: ${describeError(error)}${suffix}`,
+	);
+}

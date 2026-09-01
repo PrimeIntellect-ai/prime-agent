@@ -350,8 +350,12 @@ export class IpythonKernelProvisioner {
 		return (await m?.listNamespaceNames(signal)) ?? null;
 	}
 
-	/** Dispose the kernel owned by this provisioner, including one still starting up. */
-	async dispose(): Promise<void> {
+	/**
+	 * Dispose the kernel owned by this provisioner, including one still starting up.
+	 * Pass snapshot:false when the artifact dir is deleted right after (kill/delete),
+	 * so no doomed final snapshot is written.
+	 */
+	async dispose(options?: { snapshot?: boolean }): Promise<void> {
 		// Drops a still-queued boot out of the semaphore and short-circuits an
 		// in-flight startKernel before it spawns, so a disposed session's boot
 		// doesn't waste a slot during a fan-out.
@@ -362,7 +366,7 @@ export class IpythonKernelProvisioner {
 		if (!pending) return;
 		try {
 			const m = await pending;
-			await m.shutdown({ snapshot: true, drainHostRequests: true });
+			await m.shutdown({ snapshot: options?.snapshot ?? true, drainHostRequests: true });
 		} catch {
 			// a failed startup already cleaned up after itself
 		}

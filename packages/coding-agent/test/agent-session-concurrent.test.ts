@@ -188,6 +188,15 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(disposed).toBe(true);
 	});
 
+	it("forwards kernelSnapshot: false to the kernel provisioner during disposal", async () => {
+		createSession();
+		const dispose = vi.fn(async () => {});
+		Reflect.set(session, "_ipythonKernelProvisioner", { dispose });
+
+		await session.disposeAsync({ kernelSnapshot: false });
+		expect(dispose).toHaveBeenCalledWith({ snapshot: false });
+	});
+
 	it("should throw when prompt() called while streaming", async () => {
 		createSession();
 
