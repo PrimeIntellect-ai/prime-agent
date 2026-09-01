@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -1002,5 +1002,169 @@ describe("autoresearch control plane", () => {
 			final_problem_statement: { candidateId: "candidate-1" },
 			stop_gate: { passed: true },
 		});
+	});
+
+	it("confines artifact paths and receipts strictly to the workspace and rejects escapes", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-autoresearch-containment-"));
+		const outsideDir = mkdtempSync(join(tmpdir(), "prime-autoresearch-outside-"));
+		writeFileSync(join(outsideDir, "secret.json"), '{"secret":true}\n', "utf8");
+
+		const value = new AutoresearchStore(join(root, "artifacts-state"), () => NOW, root);
+
+		// 1. Rejects absolute paths in input parsing
+		expect(() =>
+			parseAutoresearchExperimentInput({
+				candidate_id: "candidate-1",
+				hypothesis: "test",
+				design: "test",
+				baselines: ["base"],
+				artifact_paths: ["/etc/passwd"],
+			}),
+		).toThrow("relative path within the workspace");
+
+		expect(() =>
+			parseAutoresearchExperimentInput({
+				candidate_id: "candidate-1",
+				hypothesis: "test",
+				design: "test",
+				baselines: ["base"],
+				artifact_paths: ["C:\\secret.json"],
+			}),
+		).toThrow("relative path within the workspace");
+
+		// 2. Rejects traversal paths in input parsing
+		expect(() =>
+			parseAutoresearchExperimentInput({
+				candidate_id: "candidate-1",
+				hypothesis: "test",
+				design: "test",
+				baselines: ["base"],
+				artifact_paths: ["../outside.json"],
+			}),
+		).toThrow("must not escape the workspace");
+
+		expect(() =>
+			parseAutoresearchExperimentInput({
+				candidate_id: "candidate-1",
+				hypothesis: "test",
+				design: "test",
+				baselines: ["base"],
+				artifact_paths: ["artifacts/../../secret.json"],
+			}),
+		).toThrow("must not escape the workspace");
+
+		// 3. Rejects null bytes in input parsing
+		expect(() =>
+			parseAutoresearchExperimentInput({
+				candidate_id: "candidate-1",
+				hypothesis: "test",
+				design: "test",
+				baselines: ["base"],
+				artifact_paths: ["artifacts/results.json\0/etc/passwd"],
+			}),
+		).toThrow("must not contain null bytes");
+
+		// 4. Rejects symlink escape to outside files
+		mkdirSync(join(root, "artifacts"), { recursive: true });
+		symlinkSync(join(outsideDir, "secret.json"), join(root, "artifacts", "symlink-outside.json"));
+
+		expect(() =>
+			value.recordExperiment(
+				parseAutoresearchExperimentInput({
+					experiment_id: "exp-symlink",
+					candidate_id: "candidate-1",
+					hypothesis: "test",
+					design: "test",
+					baselines: ["base"],
+					artifact_paths: ["artifacts/symlink-outside.json"],
+					results: "results",
+					interpretation: "interpretation",
+					status: "completed",
+				}),
+			),
+		).toThrow("escapes the workspace");
+
+		// 5. Accepts legitimate in-workspace artifacts and canonicalizes paths
+		writeFileSync(join(root, "artifacts", "valid.json"), '{"valid":true}\n', "utf8");
+		const validExp = value.recordExperiment(
+			parseAutoresearchExperimentInput({
+				experiment_id: "exp-valid",
+				candidate_id: "candidate-1",
+				hypothesis: "test",
+				design: "test",
+				baselines: ["base"],
+				artifact_paths: ["./artifacts/valid.json"],
+				results: "valid results",
+				interpretation: "valid interpretation",
+				status: "completed",
+			}),
+		);
+		expect(validExp.artifactReceipts).toHaveLength(1);
+		expect(validExp.artifactReceipts[0]?.path).toBe("artifacts/valid.json");
+		expect(validExp.artifactPaths).toEqual(["artifacts/valid.json"]);
+
+		// 6. Accepts intra-workspace symlinks and canonicalizes correctly
+		symlinkSync(join(root, "artifacts", "valid.json"), join(root, "artifacts", "symlink-internal.json"));
+		const internalSymExp = value.recordExperiment(
+			parseAutoresearchExperimentInput({
+				experiment_id: "exp-internal-sym",
+				candidate_id: "candidate-1",
+				hypothesis: "test",
+				design: "test",
+				baselines: ["base"],
+				artifact_paths: ["artifacts/symlink-internal.json"],
+				results: "valid results",
+				interpretation: "valid interpretation",
+				status: "completed",
+			}),
+		);
+		expect(internalSymExp.artifactReceipts[0]?.path).toBe("artifacts/valid.json");
+
+		// 7. TOCTOU Defense: Revalidates containment immediately before reading during claim promotion
+		addVerifiedPublication(value, 1);
+		const claim = value.addClaim(
+			parseAutoresearchClaimInput({
+				claim_id: "claim-toctou",
+				claim_text: "Empirical claim needing valid artifacts",
+				claim_type: "EMPIRICAL_OBSERVATION",
+				supporting_evidence: [
+					{
+						source_type: "experiment",
+						source_id: "exp-valid",
+						exact_pointer: "artifacts/valid.json",
+						exact_quote: '{"valid":true}',
+						demonstrates: "valid experiment output",
+						interpretation: "valid interpretation",
+					},
+				],
+			}),
+		);
+		// Promote claim succeeds initially
+		value.promoteClaim(claim.claimId);
+
+		// Now replace valid.json with a symlink to outsideDir/secret.json
+		rmSync(join(root, "artifacts", "valid.json"));
+		symlinkSync(join(outsideDir, "secret.json"), join(root, "artifacts", "valid.json"));
+
+		// Adding/promoting a claim referencing exp-valid should fail without reading outside secret.json
+		expect(() =>
+			value.addClaim(
+				parseAutoresearchClaimInput({
+					claim_id: "claim-toctou-2",
+					claim_text: "Second empirical claim",
+					claim_type: "EMPIRICAL_OBSERVATION",
+					supporting_evidence: [
+						{
+							source_type: "experiment",
+							source_id: "exp-valid",
+							exact_pointer: "artifacts/valid.json",
+							exact_quote: '{"valid":true}',
+							demonstrates: "valid experiment output",
+							interpretation: "valid interpretation",
+						},
+					],
+				}),
+			),
+		).toThrow("missing or modified artifact receipts");
 	});
 });
