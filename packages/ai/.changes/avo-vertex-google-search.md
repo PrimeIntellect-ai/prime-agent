@@ -1,0 +1,1 @@
+- Added optional Vertex AI Grounding with Google Search with visible source links and search queries.

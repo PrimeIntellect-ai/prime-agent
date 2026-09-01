@@ -1,0 +1,1 @@
+- Fixed AVO broker resource exhaustion and shutdown stalls ([#12](https://github.com/lewbei/prime-agent/issues/12)).

@@ -1,0 +1,1 @@
+- Added a bounded tool-free adversarial supervisor audit for accepted requirement-dense coding candidates, with host-bound source/requirement counterexamples, cross-requirement calibration, actionable stop-gate feedback, and benchmark trace/ablation support.

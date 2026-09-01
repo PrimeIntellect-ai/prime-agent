@@ -16,7 +16,7 @@ function bundledAgentObserveSkill(): PythonSkillRuntimeInfo {
 	};
 }
 
-describe("agent-observe skill over the kernel host bridge", () => {
+describe("agent-observe skill over the kernel host bridge", { tags: ["kernel-heavy"] }, () => {
 	let tempDir: string;
 	let provisioner: IpythonKernelProvisioner | undefined;
 

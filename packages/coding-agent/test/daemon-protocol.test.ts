@@ -14,6 +14,7 @@ import {
 	DAEMON_PROTOCOL_VERSION,
 	DAEMON_SCHEMA_ID,
 	DAEMON_SCHEMA_REVISION,
+	type DaemonAutonomousStatus,
 	type DaemonCommand,
 	type DaemonOutbound,
 	getDaemonCommandCompatibilities,
@@ -93,6 +94,26 @@ describe("daemon protocol helpers", () => {
 			.digest("hex")
 			.slice(0, 12);
 		expect(DAEMON_SCHEMA_ID).toBe(`protocol-${DAEMON_PROTOCOL_VERSION}-schema-${DAEMON_SCHEMA_REVISION}-${digest}`);
+	});
+
+	it("keeps autonomous terminal evidence optional across daemon schema revisions", () => {
+		const legacy: DaemonAutonomousStatus = {
+			enabled: true,
+			continuationsUsed: 3,
+			turnsUsed: 12,
+			tokensUsed: 1_000,
+			limits: { maxContinuations: 3, maxTurns: 12, maxTokens: 80_000, timeoutMs: 1_800_000 },
+			gates: { commands: [], maxRetries: 3, timeoutMs: 300_000 },
+			gateAttempts: {},
+		};
+		const current: DaemonAutonomousStatus = {
+			...legacy,
+			terminalEvidence: { kind: "avo_completion", runId: "session-1:task-1" },
+		};
+
+		expect(legacy.terminalEvidence).toBeUndefined();
+		expect(current.terminalEvidence).toEqual({ kind: "avo_completion", runId: "session-1:task-1" });
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(23);
 	});
 
 	it("requires compatibility metadata for the heartbeat protocol surface", () => {

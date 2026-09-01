@@ -1,0 +1,1 @@
+- Added controlled SpecBench ablations, normalized evidence-concentration diagnostics, and token-stage attribution for measuring the held-out correctness, false-completion, token, latency, and cost value of individual AVO mechanisms.

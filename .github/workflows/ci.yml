@@ -1,10 +1,11 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, avo-edition]
   pull_request:
-    branches: [main]
+    branches: [main, avo-edition]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -13,12 +14,15 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  PRIME_AGENT_MODEL_CATALOG_MODE: snapshot
+
 jobs:
   trust:
     name: Contributor trust
     runs-on: ubuntu-latest
     outputs:
-      allowed: ${{ github.event_name == 'push' || steps.vouch.outputs.vouched == 'true' }}
+      allowed: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' || steps.vouch.outputs.vouched == 'true' }}
     steps:
       - name: Check pull request author
         id: vouch
@@ -51,8 +55,12 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
+          sudo apt-get install -y bubblewrap python3-pytest libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
           sudo ln -s $(which fdfind) /usr/local/bin/fd
+          if sudo sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net --unshare-pid --new-session --die-with-parent --cap-drop ALL -- /bin/true
 
       - name: Install dependencies
         run: npm ci
@@ -61,7 +69,12 @@ jobs:
         run: npm run build
 
       - name: Check
-        run: npm run check
+        run: npm run check:ci
+
+      - name: Verify checkout unchanged
+        run: |
+          git status --short
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
   test:
     name: Test (${{ matrix.name }})
@@ -109,6 +122,10 @@ jobs:
             package: prime-agent-runtime
             command: uv run python -m unittest discover -s test
             install_uv: true
+          - name: coding-agent NOOA behavior
+            package: packages/coding-agent
+            command: npm run test:nooa-behavior
+            install_uv: true
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -124,8 +141,12 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
+          sudo apt-get install -y bubblewrap python3-pytest libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
           sudo ln -s $(which fdfind) /usr/local/bin/fd
+          if sudo sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          bwrap --ro-bind / / --dev /dev --proc /proc --unshare-net --unshare-pid --new-session --die-with-parent --cap-drop ALL -- /bin/true
 
       - name: Install dependencies
         run: npm ci
@@ -145,14 +166,16 @@ jobs:
 
   build-check-test:
     name: build-check-test
-    if: always() && needs.trust.outputs.allowed == 'true'
+    if: always()
     needs: [trust, build-check, test]
     runs-on: ubuntu-latest
     steps:
       - name: Verify CI results
         env:
+          TRUST_ALLOWED: ${{ needs.trust.outputs.allowed }}
           BUILD_CHECK_RESULT: ${{ needs.build-check.result }}
           TEST_RESULT: ${{ needs.test.result }}
         run: |
+          test "$TRUST_ALLOWED" = true
           test "$BUILD_CHECK_RESULT" = success
           test "$TEST_RESULT" = success

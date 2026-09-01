@@ -1,0 +1,2 @@
+- Fixed autonomous CLI completion precedence after canonical AVO delivery and expanded the live dashboard with host-derived experiment statistics, paired decisions, trials, and receipt digests.
+- Added canonical experiment schema guidance and actionable validation errors for required fields and metric direction.

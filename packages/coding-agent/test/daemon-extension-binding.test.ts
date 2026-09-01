@@ -248,9 +248,15 @@ describe("daemon extension binding", () => {
 				message.type === "session_replaced",
 		);
 		expect(replaced?.state.recap).toBeUndefined();
-		expect(runtime.session.messages.map((message) => `${message.role}:${getText(message)}`)).toEqual([
+		const messages = runtime.session.messages;
+		expect(messages.slice(0, 2).map((message) => `${message.role}:${getText(message)}`)).toEqual([
 			"user:daemon replacement message",
 			"assistant:replacement reply",
 		]);
+		expect(messages[2]).toMatchObject({
+			role: "custom",
+			customType: "avo_completion_required",
+		});
+		expect(messages[3]).toMatchObject({ role: "assistant" });
 	});
 });

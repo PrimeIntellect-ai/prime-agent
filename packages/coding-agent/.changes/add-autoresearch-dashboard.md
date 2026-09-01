@@ -1,0 +1,1 @@
+- Added a localhost-only live autoresearch dashboard with a phase graph, durable progress metrics, reviewer state, supervisor status, and the publication-grade stop gate.

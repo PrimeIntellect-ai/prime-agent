@@ -56,6 +56,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 					sessionManager,
 					sessionStartEvent,
 					model: faux.getModel(),
+					enforceAvoCompletion: false,
 				})),
 				services,
 				diagnostics: services.diagnostics,

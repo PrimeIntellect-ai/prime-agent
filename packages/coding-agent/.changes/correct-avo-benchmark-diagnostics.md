@@ -1,0 +1,3 @@
+- Fixed SpecBench compliance and false-completion reporting to include every available hidden suite, and separated genuine completion-repair amplification from successful canonical-delivery cost.
+- Added per-run completion-blocker clearance details and hidden in-distribution scores to benchmark reports.
+- Added accepted/revised-cycle, watchdog, and tool-probation activation/block counters to anti-laziness benchmark traces.

@@ -50,6 +50,8 @@ Prime Agent combines a persistent Python control environment with durable harnes
 - **Sessions run in the background:** daemon-backed agents keep running when the terminal disconnects and can be reattached later.
 - **Agents communicate directly:** running agents can exchange messages and orchestrate one another without routing everything through the user.
 - **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
+- **AVO verifies work by default:** every root task receives an automatic candidate/evaluate/revise contract, canonical final-delivery enforcement, a live `prime-agent avo dashboard` phase graph, and NOOA 0.0.9 project memory recalled before relevant turns.
+- **Research can stay evidence-grounded:** the built-in autoresearch control plane uses agent-driven literature search with scholarly verification helpers, keeps exact claim/experiment provenance and safe reusable memory, automatically collects hostile reviews, checkpoints a retained trajectory supervisor, and blocks final export until every strong-problem gate passes.
 
 ## Getting Started
 
@@ -101,6 +103,7 @@ Prime Agent is built for long-running work, especially for evaluations in resear
 - [Usage and CLI reference](packages/coding-agent/docs/usage.md) — commands, sessions, autonomous limits, and output modes
 - [Long-running and background agents](packages/coding-agent/docs/long-running-agents.md) — detach and reattach, goals, heartbeats, and schedules
 - [RLM programming model](packages/coding-agent/docs/rlm.md) — persistent IPython, subagents, skills, and the trust model
+- [Supervisor-first autoresearch](packages/coding-agent/docs/autoresearch.md) — publication provenance, hostile reviews, cycle checkpoints, and research-state export
 - [JSON mode](packages/coding-agent/docs/json.md) and [RPC mode](packages/coding-agent/docs/rpc.md) — headless automation and integrations
 - [Skills](packages/coding-agent/docs/skills.md) — install and create reusable capabilities
 - [Provider setup](packages/coding-agent/docs/providers.md) — subscription and API-key providers

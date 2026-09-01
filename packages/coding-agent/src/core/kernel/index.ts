@@ -61,6 +61,8 @@ export class KernelBusyAfterInterruptError extends Error {
 
 /** Comm target the kernel-side `rlm.host_request` shim opens for typed host requests. */
 export const HOST_COMM_TARGET = "host.request";
+/** Advertises fixed per-kernel host capabilities so unsupported calls fail before opening a Comm. */
+export const HOST_REQUEST_TYPES_ENV = "PRIME_AGENT_HOST_REQUEST_TYPES";
 
 /**
  * Handles one typed request from Python code running in the kernel.
@@ -632,7 +634,10 @@ export class KernelManager {
 		this.options = {
 			python: options.python,
 			cwd: options.cwd,
-			env: options.env,
+			env: {
+				...options.env,
+				[HOST_REQUEST_TYPES_ENV]: JSON.stringify(Object.keys(options.hostHandlers ?? {}).sort()),
+			},
 			sessionId: options.sessionId,
 			hostHandlers: options.hostHandlers,
 			pythonSkills: options.pythonSkills,

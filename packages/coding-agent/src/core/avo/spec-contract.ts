@@ -1,0 +1,1220 @@
+import {
+	createHash,
+	createPublicKey,
+	type KeyLike,
+	type KeyObject,
+	sign as signPayload,
+	verify as verifyPayload,
+} from "node:crypto";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import type { AvoRunState, AvoStopGate, AvoVerificationBaseline } from "./types.js";
+import { captureAvoWorkspaceSnapshot, deriveAvoWorkspaceImpactPaths } from "./workspace.js";
+
+export const AVO_SPEC_GATES = [
+	"static",
+	"unit",
+	"integration",
+	"behavioral",
+	"adversarial",
+	"independent_review",
+] as const;
+
+export type AvoSpecGate = (typeof AVO_SPEC_GATES)[number];
+export type AvoSpecEvidenceState = "planned" | "linked" | "observed";
+export type AvoSpecRequirementStatus = "unproven" | "partial" | "verified";
+
+export const AVO_SPEC_MECHANISMS = [
+	"compiler",
+	"linter",
+	"deterministic_unit_test",
+	"deterministic_integration_test",
+	"invariant_test",
+	"runtime_trace",
+	"adversarial_test",
+	"fault_injection",
+	"independent_review",
+] as const;
+
+export const AVO_SPEC_CONTRACT_PATHS = [
+	".prime/spec/requirements.json",
+	"spec/requirements.json",
+	"packages/coding-agent/spec/requirements.json",
+] as const;
+
+const MAX_AVO_SPEC_FILE_BYTES = 1_000_000;
+
+export type AvoSpecMechanism = (typeof AVO_SPEC_MECHANISMS)[number];
+
+const MECHANISMS_BY_GATE: Record<AvoSpecGate, readonly AvoSpecMechanism[]> = {
+	static: ["compiler", "linter"],
+	unit: ["deterministic_unit_test"],
+	integration: ["deterministic_integration_test"],
+	behavioral: ["invariant_test", "runtime_trace"],
+	adversarial: ["adversarial_test", "fault_injection"],
+	independent_review: ["independent_review"],
+};
+
+const PRODUCER_ROLE_BY_MECHANISM: Record<AvoSpecMechanism, AvoSpecReceipt["producer"]["role"]> = {
+	compiler: "compiler",
+	linter: "compiler",
+	deterministic_unit_test: "deterministic_test_runner",
+	deterministic_integration_test: "deterministic_test_runner",
+	invariant_test: "deterministic_test_runner",
+	runtime_trace: "runtime_host",
+	adversarial_test: "deterministic_test_runner",
+	fault_injection: "deterministic_test_runner",
+	independent_review: "independent_reviewer",
+};
+
+export interface AvoSpecEvidenceDefinition {
+	evidenceId: string;
+	gate: AvoSpecGate;
+	state: AvoSpecEvidenceState;
+	mechanism: AvoSpecMechanism;
+	path?: string;
+	anchor?: string;
+	plan?: string;
+	receiptPath?: string;
+}
+
+export interface AvoSpecRequirementDefinition {
+	id: string;
+	domain: string;
+	title: string;
+	statement: string;
+	critical: boolean;
+	behaviors: {
+		normal: string;
+		failure: string;
+		ordering: string;
+		authority: string;
+		persistence: string;
+	};
+	sourcePaths: string[];
+	requiredGates: AvoSpecGate[];
+	requiresRuntimeTrace: boolean;
+	declaredStatus: AvoSpecRequirementStatus;
+	evidence: AvoSpecEvidenceDefinition[];
+}
+
+interface AvoSpecReceipt {
+	schemaVersion: 2;
+	receiptId: string;
+	runId: string;
+	workspaceDigest: string;
+	contractDigest: string;
+	requirementId: string;
+	evidenceId: string;
+	gate: AvoSpecGate;
+	mechanism: AvoSpecMechanism;
+	status: "pass";
+	sourceDigest: string;
+	command: string;
+	startedAt: string;
+	completedAt: string;
+	satisfies: string[];
+	producer: {
+		role: "compiler" | "deterministic_test_runner" | "runtime_host" | "independent_reviewer";
+		identity: string;
+		independentFromCandidateGenerator: boolean;
+	};
+	events?: Array<{ event: string; satisfies: string[] }>;
+	signature: string;
+}
+
+export interface AvoSpecValidationOptions {
+	receiptPublicKey?: KeyLike;
+	receipts?: Readonly<Record<string, unknown>>;
+	receiptBinding?: AvoSpecReceiptBinding;
+}
+
+export interface AvoSpecReceiptBinding {
+	runId: string;
+	workspaceDigest: string;
+	contractDigest: string;
+}
+
+export interface AvoSpecImpactReport {
+	affectedRequirementIds: string[];
+	unmappedProtectedPaths: string[];
+	protectedRoots: string[];
+	pathImpacts: Array<{
+		path: string;
+		protected: boolean;
+		requirementIds: string[];
+	}>;
+	errors: string[];
+}
+
+export interface AvoSpecSemanticCoverage {
+	affectedRequirementIds: string[];
+	coveredPaths: string[];
+	uncoveredPaths: string[];
+	impactDigest: string;
+	errors: string[];
+}
+
+export interface AvoSpecReceiptOverlay {
+	receipts: Record<string, unknown>;
+	errors: string[];
+}
+
+export interface AvoSpecStopGateOptions {
+	cwd: string;
+	excludedRoots?: readonly string[];
+	receiptDirectory?: string;
+	receiptPublicKey?: KeyLike;
+}
+
+export interface AvoSpecRequirementCoverage {
+	id: string;
+	declaredStatus: AvoSpecRequirementStatus;
+	derivedStatus: AvoSpecRequirementStatus;
+	mappedGates: AvoSpecGate[];
+	observedGates: AvoSpecGate[];
+	missingObservedGates: AvoSpecGate[];
+	runtimeTraceObserved: boolean;
+	independentReviewObserved: boolean;
+	mechanisms: AvoSpecMechanism[];
+}
+
+export interface AvoSpecValidationReport {
+	valid: boolean;
+	contractId?: string;
+	errors: string[];
+	warnings: string[];
+	requirements: AvoSpecRequirementCoverage[];
+	summary: {
+		total: number;
+		unproven: number;
+		partial: number;
+		verified: number;
+	};
+}
+
+export function assertAvoSpecReceiptTrustConfiguration(environment: NodeJS.ProcessEnv): void {
+	if (environment.PRIME_AGENT_AVO_SPEC_RECEIPT_KEY) {
+		throw new Error(
+			"PRIME_AGENT_AVO_SPEC_RECEIPT_KEY is insecure with model-controlled same-user tools; unset it and configure PRIME_AGENT_AVO_SPEC_RECEIPT_PUBLIC_KEY for Ed25519 verification",
+		);
+	}
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): value is string {
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+function unique<T>(values: readonly T[]): T[] {
+	return [...new Set(values)];
+}
+
+function canonicalAvoSpecJson(value: unknown): string {
+	if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) throw new Error("spec receipt contains a non-finite number");
+		return JSON.stringify(value);
+	}
+	if (Array.isArray(value)) return `[${value.map(canonicalAvoSpecJson).join(",")}]`;
+	if (!isObject(value)) throw new Error("spec receipt contains a non-JSON value");
+	return `{${Object.keys(value)
+		.filter((key) => key !== "signature" && value[key] !== undefined)
+		.sort()
+		.map((key) => `${JSON.stringify(key)}:${canonicalAvoSpecJson(value[key])}`)
+		.join(",")}}`;
+}
+
+export function signAvoSpecReceipt(value: Record<string, unknown>, privateKey: KeyLike): string {
+	const signature = signPayload(null, Buffer.from(canonicalAvoSpecJson(value), "utf8"), privateKey);
+	return `ed25519:${signature.toString("base64url")}`;
+}
+
+export function digestAvoSpecReceiptPublicKey(key: KeyLike): string {
+	const publicKey =
+		typeof key === "object" && "type" in key && key.type === "public" ? (key as KeyObject) : createPublicKey(key);
+	return createHash("sha256")
+		.update(publicKey.export({ type: "spki", format: "der" }))
+		.digest("hex");
+}
+
+function receiptSignatureMatches(
+	receipt: AvoSpecReceipt,
+	publicKey: KeyLike | undefined,
+	path: string,
+	errors: string[],
+): boolean {
+	if (publicKey === undefined) {
+		errors.push(`${path} cannot be trusted without the independent spec-receipt public key`);
+		return false;
+	}
+	try {
+		const encoded = receipt.signature.slice("ed25519:".length);
+		const signature = Buffer.from(encoded, "base64url");
+		if (signature.byteLength !== 64 || signature.toString("base64url") !== encoded) {
+			errors.push(`${path} has a malformed Ed25519 signature`);
+			return false;
+		}
+		if (
+			!verifyPayload(
+				null,
+				Buffer.from(canonicalAvoSpecJson(receipt as unknown as Record<string, unknown>), "utf8"),
+				publicKey,
+				signature,
+			)
+		) {
+			errors.push(`${path} has an invalid independent signature`);
+			return false;
+		}
+	} catch (error) {
+		errors.push(`${path} could not verify its independent signature: ${String(error)}`);
+		return false;
+	}
+	return true;
+}
+
+function isAvoSpecGate(value: unknown): value is AvoSpecGate {
+	return typeof value === "string" && AVO_SPEC_GATES.includes(value as AvoSpecGate);
+}
+
+function isAvoSpecMechanism(value: unknown): value is AvoSpecMechanism {
+	return typeof value === "string" && AVO_SPEC_MECHANISMS.includes(value as AvoSpecMechanism);
+}
+
+function isAvoSpecEvidenceState(value: unknown): value is AvoSpecEvidenceState {
+	return value === "planned" || value === "linked" || value === "observed";
+}
+
+function isAvoSpecRequirementStatus(value: unknown): value is AvoSpecRequirementStatus {
+	return value === "unproven" || value === "partial" || value === "verified";
+}
+
+function normalizedRepositoryPath(value: string): string | undefined {
+	const normalized = value.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/+$/, "");
+	if (!normalized || normalized.startsWith("/") || normalized.split("/").some((part) => part === "..")) {
+		return undefined;
+	}
+	return normalized;
+}
+
+function pathIsProtected(path: string, protectedRoot: string): boolean {
+	return path === protectedRoot || path.startsWith(`${protectedRoot}/`);
+}
+
+function safeRepositoryFile(repositoryRoot: string, path: string): string | undefined {
+	if (isAbsolute(path)) return undefined;
+	const root = resolve(repositoryRoot);
+	const absolute = resolve(root, path);
+	const fromRoot = relative(root, absolute);
+	if (fromRoot.startsWith("..") || isAbsolute(fromRoot)) return undefined;
+	if (!existsSync(absolute)) return absolute;
+	try {
+		if (lstatSync(absolute).isSymbolicLink()) return undefined;
+		const canonicalRoot = realpathSync(root);
+		const canonical = realpathSync(absolute);
+		const canonicalFromRoot = relative(canonicalRoot, canonical);
+		if (canonicalFromRoot.startsWith("..") || isAbsolute(canonicalFromRoot)) return undefined;
+		return canonical;
+	} catch {
+		return undefined;
+	}
+}
+
+export function loadAvoSpecReceiptOverlay(directory: string | undefined): AvoSpecReceiptOverlay {
+	if (!directory) return { receipts: {}, errors: [] };
+	const errors: string[] = [];
+	const receipts: Record<string, unknown> = {};
+	if (!existsSync(directory) || !statSync(directory).isDirectory() || lstatSync(directory).isSymbolicLink()) {
+		return { receipts, errors: [`receipt directory is missing, unsafe, or not a directory: ${directory}`] };
+	}
+	for (const name of readdirSync(directory)
+		.filter((item) => item.endsWith(".json"))
+		.sort()) {
+		const path = join(directory, name);
+		try {
+			const stat = lstatSync(path);
+			if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_AVO_SPEC_FILE_BYTES) {
+				errors.push(`receipt file is unsafe or too large: ${path}`);
+				continue;
+			}
+			const value = JSON.parse(readFileSync(path, "utf8")) as unknown;
+			if (
+				typeof value !== "object" ||
+				value === null ||
+				Array.isArray(value) ||
+				typeof (value as { evidenceId?: unknown }).evidenceId !== "string"
+			) {
+				errors.push(`receipt file has no evidenceId: ${path}`);
+				continue;
+			}
+			const evidenceId = (value as { evidenceId: string }).evidenceId;
+			if (Object.hasOwn(receipts, evidenceId)) {
+				errors.push(`duplicate external receipt for ${evidenceId}`);
+				continue;
+			}
+			receipts[evidenceId] = value;
+		} catch (error) {
+			errors.push(`could not load receipt ${path}: ${String(error)}`);
+		}
+	}
+	return { receipts, errors };
+}
+
+export function captureAvoSpecContractBaseline(
+	repositoryRoot: string,
+	capturedAt: string,
+	options: AvoSpecValidationOptions = {},
+): NonNullable<AvoVerificationBaseline["specContract"]> | undefined {
+	for (const contractPath of AVO_SPEC_CONTRACT_PATHS) {
+		const absolute = safeRepositoryFile(repositoryRoot, contractPath);
+		if (!absolute || !existsSync(absolute)) continue;
+		const stat = lstatSync(absolute);
+		if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_AVO_SPEC_FILE_BYTES) {
+			throw new Error(`AVO spec contract is unsafe or too large: ${contractPath}`);
+		}
+		const contractContent = readFileSync(absolute, "utf8");
+		let value: unknown;
+		try {
+			value = JSON.parse(contractContent) as unknown;
+		} catch (error) {
+			throw new Error(`AVO spec contract is invalid JSON at ${contractPath}: ${String(error)}`);
+		}
+		const report = validateAvoSpecContract(value, repositoryRoot, options);
+		if (!report.valid) throw new Error(`AVO spec contract is invalid: ${report.errors.join("; ")}`);
+		return {
+			contractPath,
+			contractContent,
+			contractDigest: createHash("sha256").update(contractContent).digest("hex"),
+			receiptPublicKeyDigest: options.receiptPublicKey
+				? digestAvoSpecReceiptPublicKey(options.receiptPublicKey)
+				: undefined,
+			capturedAt,
+		};
+	}
+	return undefined;
+}
+
+function combineAvoSpecStopGateChecks(baseGate: AvoStopGate, checks: AvoStopGate["checks"]): AvoStopGate {
+	const addedReasons = checks
+		.slice(baseGate.checks.length)
+		.filter((check) => !check.passed)
+		.map((check) => check.reason ?? `${check.label} is not satisfied`);
+	return {
+		passed: baseGate.passed && addedReasons.length === 0,
+		checks,
+		reasons: [...baseGate.reasons, ...addedReasons],
+	};
+}
+
+export function applyAvoSpecContractStopGate(
+	state: AvoRunState,
+	baseGate: AvoStopGate,
+	options: AvoSpecStopGateOptions,
+): AvoStopGate {
+	const baseline = state.verificationBaseline;
+	const spec = baseline?.specContract;
+	if (state.routing.environment !== "coding" || !baseline) return baseGate;
+
+	const checks = [...baseGate.checks];
+	const appendCheck = (id: string, label: string, passed: boolean, reason?: string): void => {
+		checks.push({ id, label, passed, ...(reason ? { reason } : {}) });
+	};
+	const cwd = resolve(options.cwd);
+	if (!spec) {
+		let workspaceRoot = baseline.workspaceRoot ?? cwd;
+		let knownContractPathChanged = false;
+		try {
+			const workspace = captureAvoWorkspaceSnapshot(cwd, { excludedRoots: options.excludedRoots });
+			workspaceRoot = workspace.root;
+			knownContractPathChanged = workspace.changedPaths.some((path) =>
+				AVO_SPEC_CONTRACT_PATHS.includes(path as (typeof AVO_SPEC_CONTRACT_PATHS)[number]),
+			);
+		} catch {
+			// Existing contract discovery below still prevents a missing baseline from becoming an authority bypass.
+		}
+		const contractExists = AVO_SPEC_CONTRACT_PATHS.some((path) => existsSync(resolve(workspaceRoot, path)));
+		if (!contractExists && !knownContractPathChanged) return baseGate;
+		appendCheck(
+			"spec_contract_baseline",
+			"behavioral contract was captured before candidate work",
+			false,
+			"this coding run has no task-start spec snapshot; start a fresh task before accepting protected changes",
+		);
+		return combineAvoSpecStopGateChecks(baseGate, checks);
+	}
+
+	const repositoryRoot = baseline.workspaceRoot ?? cwd;
+	const retainedDigest = createHash("sha256").update(spec.contractContent).digest("hex");
+	let currentContractIntegrity = retainedDigest === spec.contractDigest;
+	let integrityReason = currentContractIntegrity
+		? undefined
+		: "the host-retained spec contract content does not match its captured digest";
+	try {
+		if (!AVO_SPEC_CONTRACT_PATHS.includes(spec.contractPath as (typeof AVO_SPEC_CONTRACT_PATHS)[number])) {
+			throw new Error(`unrecognized captured contract path: ${spec.contractPath}`);
+		}
+		const contractPath = resolve(repositoryRoot, spec.contractPath);
+		const metadata = lstatSync(contractPath);
+		if (!metadata.isFile() || metadata.isSymbolicLink()) {
+			currentContractIntegrity = false;
+			integrityReason = "the task-start spec contract was replaced by an unsafe filesystem entry";
+		} else {
+			const currentDigest = createHash("sha256").update(readFileSync(contractPath)).digest("hex");
+			if (currentDigest !== spec.contractDigest) {
+				currentContractIntegrity = false;
+				integrityReason = "the candidate changed the task-start behavioral contract";
+			}
+		}
+	} catch (error) {
+		currentContractIntegrity = false;
+		integrityReason = `the task-start behavioral contract is unavailable: ${String(error)}`;
+	}
+	appendCheck(
+		"spec_contract_integrity",
+		"task-start behavioral contract remains immutable",
+		currentContractIntegrity,
+		integrityReason,
+	);
+	let currentPublicKeyDigest: string | undefined;
+	let publicKeyError: string | undefined;
+	try {
+		currentPublicKeyDigest = options.receiptPublicKey
+			? digestAvoSpecReceiptPublicKey(options.receiptPublicKey)
+			: undefined;
+	} catch (error) {
+		publicKeyError = `the configured independent receipt public key is invalid: ${String(error)}`;
+	}
+	const trustRootStable = publicKeyError === undefined && currentPublicKeyDigest === spec.receiptPublicKeyDigest;
+	appendCheck(
+		"spec_trust_root",
+		"independent receipt verifier identity matches the task-start baseline",
+		trustRootStable,
+		trustRootStable ? undefined : (publicKeyError ?? "the independent receipt public key changed after task start"),
+	);
+
+	let contractValue: unknown;
+	try {
+		contractValue = JSON.parse(spec.contractContent) as unknown;
+	} catch (error) {
+		appendCheck(
+			"spec_contract_parse",
+			"host-retained behavioral contract is readable",
+			false,
+			`the captured contract cannot be parsed: ${String(error)}`,
+		);
+		return combineAvoSpecStopGateChecks(baseGate, checks);
+	}
+
+	let changedPaths: string[] = [];
+	let verificationWorkspaceDigest: string | undefined;
+	try {
+		const workspace = captureAvoWorkspaceSnapshot(cwd, { excludedRoots: options.excludedRoots });
+		if (resolve(repositoryRoot) !== workspace.root) {
+			throw new Error(`workspace root changed after baseline capture (${repositoryRoot} -> ${workspace.root})`);
+		}
+		verificationWorkspaceDigest = workspace.digest;
+		changedPaths = deriveAvoWorkspaceImpactPaths(baseline, workspace);
+	} catch (error) {
+		appendCheck(
+			"spec_workspace_impact",
+			"candidate workspace impact is host-observable",
+			false,
+			`the host could not capture current workspace impact: ${String(error)}`,
+		);
+		return combineAvoSpecStopGateChecks(baseGate, checks);
+	}
+
+	const impact = deriveAvoSpecRequirementImpacts(contractValue, changedPaths);
+	appendCheck(
+		"spec_impact_mapping",
+		"changed protected files map to behavioral requirements",
+		impact.errors.length === 0,
+		impact.errors.length > 0 ? impact.errors.join("; ") : undefined,
+	);
+	for (const path of impact.unmappedProtectedPaths) {
+		appendCheck(
+			`spec_unmapped:${createHash("sha256").update(path).digest("hex").slice(0, 12)}`,
+			`protected change has a behavioral requirement: ${path}`,
+			false,
+			`changed protected path is not mapped to an executable invariant: ${path}`,
+		);
+	}
+	const pythonCoverage = deriveAvoSpecSemanticCoverage(
+		contractValue,
+		changedPaths.filter((path) => path.endsWith(".py")),
+	);
+	for (const path of pythonCoverage.uncoveredPaths) {
+		appendCheck(
+			`spec_uncovered_python:${createHash("sha256").update(path).digest("hex").slice(0, 12)}`,
+			`Python change has exact behavioral-contract coverage: ${path}`,
+			false,
+			`changed Python path is outside the protected contract or is not mapped to an executable invariant: ${path}`,
+		);
+	}
+
+	const overlay = loadAvoSpecReceiptOverlay(options.receiptDirectory ? resolve(options.receiptDirectory) : undefined);
+	appendCheck(
+		"spec_receipt_overlay",
+		"host spec receipt overlay is safe and unambiguous",
+		overlay.errors.length === 0,
+		overlay.errors.length > 0 ? overlay.errors.join("; ") : undefined,
+	);
+	const report = validateAvoSpecContract(contractValue, repositoryRoot, {
+		receiptPublicKey: options.receiptPublicKey,
+		receipts: overlay.receipts,
+		receiptBinding: {
+			runId: state.runId,
+			workspaceDigest: verificationWorkspaceDigest!,
+			contractDigest: spec.contractDigest,
+		},
+	});
+	appendCheck(
+		"spec_contract_validation",
+		"current implementation satisfies the captured contract structure",
+		report.valid,
+		report.errors.length > 0 ? report.errors.join("; ") : undefined,
+	);
+	const coverageById = new Map(report.requirements.map((requirement) => [requirement.id, requirement]));
+	for (const requirementId of impact.affectedRequirementIds) {
+		const coverage = coverageById.get(requirementId);
+		const passed = coverage?.derivedStatus === "verified";
+		const missing = coverage?.missingObservedGates.join(", ") || "all required evidence";
+		appendCheck(
+			`spec_requirement:${requirementId}`,
+			`${requirementId} has six current heterogeneous verification gates`,
+			passed,
+			passed
+				? undefined
+				: `${requirementId} is ${coverage?.derivedStatus ?? "missing"}; missing host-observed gates: ${missing}`,
+		);
+	}
+	try {
+		const stableWorkspace = captureAvoWorkspaceSnapshot(cwd, { excludedRoots: options.excludedRoots });
+		const stable = stableWorkspace.digest === verificationWorkspaceDigest;
+		appendCheck(
+			"spec_workspace_stability",
+			"workspace remains stable throughout behavioral verification",
+			stable,
+			stable ? undefined : "the candidate workspace changed while behavioral receipts were being verified",
+		);
+	} catch (error) {
+		appendCheck(
+			"spec_workspace_stability",
+			"workspace remains stable throughout behavioral verification",
+			false,
+			`the host could not confirm post-verification workspace stability: ${String(error)}`,
+		);
+	}
+	return combineAvoSpecStopGateChecks(baseGate, checks);
+}
+
+export function digestAvoSpecSources(repositoryRoot: string, sourcePaths: readonly string[]): string {
+	const hash = createHash("sha256");
+	for (const path of [...sourcePaths].sort()) {
+		const absolute = safeRepositoryFile(repositoryRoot, path);
+		if (!absolute || !existsSync(absolute) || !statSync(absolute).isFile()) {
+			throw new Error(`cannot digest missing or unsafe source path: ${path}`);
+		}
+		hash.update(path);
+		hash.update("\0");
+		hash.update(readFileSync(absolute));
+		hash.update("\0");
+	}
+	return hash.digest("hex");
+}
+
+export function digestAvoSpecRequirement(repositoryRoot: string, requirement: AvoSpecRequirementDefinition): string {
+	const evidenceDigests = requirement.evidence.flatMap((evidence) => {
+		if (!evidence.path) return [];
+		const absolute = safeRepositoryFile(repositoryRoot, evidence.path);
+		if (!absolute || !existsSync(absolute) || !statSync(absolute).isFile()) {
+			throw new Error(`cannot digest missing or unsafe evidence path: ${evidence.path}`);
+		}
+		return [
+			{
+				evidenceId: evidence.evidenceId,
+				path: evidence.path,
+				sha256: createHash("sha256").update(readFileSync(absolute)).digest("hex"),
+			},
+		];
+	});
+	const definition = {
+		id: requirement.id,
+		domain: requirement.domain,
+		title: requirement.title,
+		statement: requirement.statement,
+		critical: requirement.critical,
+		behaviors: requirement.behaviors,
+		sourcePaths: requirement.sourcePaths,
+		requiredGates: requirement.requiredGates,
+		requiresRuntimeTrace: requirement.requiresRuntimeTrace,
+		evidence: requirement.evidence.map((evidence) => ({
+			evidenceId: evidence.evidenceId,
+			gate: evidence.gate,
+			mechanism: evidence.mechanism,
+			path: evidence.path,
+			anchor: evidence.anchor,
+			plan: evidence.plan,
+		})),
+	};
+	return createHash("sha256")
+		.update(
+			canonicalAvoSpecJson({
+				definition,
+				evidenceDigests,
+				sourceDigest: digestAvoSpecSources(repositoryRoot, requirement.sourcePaths),
+			}),
+		)
+		.digest("hex");
+}
+
+function parseReceipt(value: unknown, path: string, errors: string[]): AvoSpecReceipt | undefined {
+	if (!isObject(value)) {
+		errors.push(`${path} must contain a JSON object`);
+		return undefined;
+	}
+	const producer = value.producer;
+	if (!isObject(producer)) errors.push(`${path}.producer must be an object`);
+	const events = value.events;
+	if (events !== undefined && !Array.isArray(events)) errors.push(`${path}.events must be an array when present`);
+	const validEvents =
+		events === undefined ||
+		(Array.isArray(events) &&
+			events.every(
+				(event) =>
+					isObject(event) &&
+					nonEmptyString(event.event) &&
+					Array.isArray(event.satisfies) &&
+					event.satisfies.every(nonEmptyString),
+			));
+	const valid =
+		value.schemaVersion === 2 &&
+		nonEmptyString(value.receiptId) &&
+		nonEmptyString(value.runId) &&
+		typeof value.workspaceDigest === "string" &&
+		/^[a-f0-9]{64}$/.test(value.workspaceDigest) &&
+		typeof value.contractDigest === "string" &&
+		/^[a-f0-9]{64}$/.test(value.contractDigest) &&
+		nonEmptyString(value.requirementId) &&
+		nonEmptyString(value.evidenceId) &&
+		isAvoSpecGate(value.gate) &&
+		isAvoSpecMechanism(value.mechanism) &&
+		value.status === "pass" &&
+		typeof value.sourceDigest === "string" &&
+		/^[a-f0-9]{64}$/.test(value.sourceDigest) &&
+		nonEmptyString(value.command) &&
+		nonEmptyString(value.startedAt) &&
+		nonEmptyString(value.completedAt) &&
+		Array.isArray(value.satisfies) &&
+		value.satisfies.every(nonEmptyString) &&
+		validEvents &&
+		typeof value.signature === "string" &&
+		/^ed25519:[A-Za-z0-9_-]{86}$/.test(value.signature) &&
+		isObject(producer) &&
+		["compiler", "deterministic_test_runner", "runtime_host", "independent_reviewer"].includes(
+			String(producer.role),
+		) &&
+		nonEmptyString(producer.identity) &&
+		typeof producer.independentFromCandidateGenerator === "boolean";
+	if (!valid) {
+		errors.push(`${path} is not a valid schema-v2 host evidence receipt`);
+		return undefined;
+	}
+	const startedAt = Date.parse(value.startedAt as string);
+	const completedAt = Date.parse(value.completedAt as string);
+	if (!Number.isFinite(startedAt) || !Number.isFinite(completedAt)) {
+		errors.push(`${path} startedAt and completedAt must be valid timestamps`);
+		return undefined;
+	}
+	if (startedAt > completedAt) {
+		errors.push(`${path} completedAt precedes startedAt`);
+		return undefined;
+	}
+	return value as unknown as AvoSpecReceipt;
+}
+
+function parseEvidence(value: unknown, path: string, errors: string[]): AvoSpecEvidenceDefinition | undefined {
+	if (!isObject(value)) {
+		errors.push(`${path} must be an object`);
+		return undefined;
+	}
+	if (
+		!nonEmptyString(value.evidenceId) ||
+		!isAvoSpecGate(value.gate) ||
+		!isAvoSpecEvidenceState(value.state) ||
+		!isAvoSpecMechanism(value.mechanism)
+	) {
+		errors.push(`${path} has an invalid evidenceId, gate, state, or mechanism`);
+		return undefined;
+	}
+	if (!MECHANISMS_BY_GATE[value.gate].includes(value.mechanism)) {
+		errors.push(`${path} mechanism ${value.mechanism} cannot satisfy gate ${value.gate}`);
+	}
+	if (value.state === "planned") {
+		if (!nonEmptyString(value.plan)) errors.push(`${path}.plan is required for planned evidence`);
+	} else {
+		if (!nonEmptyString(value.path)) errors.push(`${path}.path is required for ${value.state} evidence`);
+		if (!nonEmptyString(value.anchor)) errors.push(`${path}.anchor is required for ${value.state} evidence`);
+		if (value.state === "observed" && !nonEmptyString(value.receiptPath)) {
+			errors.push(`${path}.receiptPath is required for observed evidence`);
+		}
+	}
+	return value as unknown as AvoSpecEvidenceDefinition;
+}
+
+function parseRequirement(value: unknown, path: string, errors: string[]): AvoSpecRequirementDefinition | undefined {
+	if (!isObject(value)) {
+		errors.push(`${path} must be an object`);
+		return undefined;
+	}
+	const behaviors = value.behaviors;
+	const evidenceValues = Array.isArray(value.evidence) ? value.evidence : [];
+	const evidence = evidenceValues.flatMap((item, index) => {
+		const parsed = parseEvidence(item, `${path}.evidence[${index}]`, errors);
+		return parsed ? [parsed] : [];
+	});
+	const requiredGates = Array.isArray(value.requiredGates) ? value.requiredGates.filter(isAvoSpecGate) : [];
+	const valid =
+		nonEmptyString(value.id) &&
+		/^[A-Z][A-Z0-9]*-\d{3}$/.test(value.id) &&
+		nonEmptyString(value.domain) &&
+		nonEmptyString(value.title) &&
+		nonEmptyString(value.statement) &&
+		typeof value.critical === "boolean" &&
+		isObject(behaviors) &&
+		nonEmptyString(behaviors.normal) &&
+		nonEmptyString(behaviors.failure) &&
+		nonEmptyString(behaviors.ordering) &&
+		nonEmptyString(behaviors.authority) &&
+		nonEmptyString(behaviors.persistence) &&
+		Array.isArray(value.sourcePaths) &&
+		value.sourcePaths.length > 0 &&
+		value.sourcePaths.every(nonEmptyString) &&
+		Array.isArray(value.requiredGates) &&
+		value.requiredGates.length === requiredGates.length &&
+		typeof value.requiresRuntimeTrace === "boolean" &&
+		isAvoSpecRequirementStatus(value.declaredStatus) &&
+		Array.isArray(value.evidence) &&
+		evidence.length === evidenceValues.length;
+	if (!valid) {
+		errors.push(`${path} is not a complete observable requirement`);
+		return undefined;
+	}
+	return {
+		...(value as unknown as AvoSpecRequirementDefinition),
+		requiredGates,
+		evidence,
+	};
+}
+
+function readJsonFile(repositoryRoot: string, path: string, errors: string[]): unknown {
+	const absolute = safeRepositoryFile(repositoryRoot, path);
+	if (!absolute) {
+		errors.push(`unsafe repository path: ${path}`);
+		return undefined;
+	}
+	if (!existsSync(absolute) || !statSync(absolute).isFile()) {
+		errors.push(`missing repository file: ${path}`);
+		return undefined;
+	}
+	try {
+		return JSON.parse(readFileSync(absolute, "utf8")) as unknown;
+	} catch (error) {
+		errors.push(`invalid JSON in ${path}: ${String(error)}`);
+		return undefined;
+	}
+}
+
+function validateLinkedEvidence(
+	repositoryRoot: string,
+	requirement: AvoSpecRequirementDefinition,
+	evidence: AvoSpecEvidenceDefinition,
+	errors: string[],
+): boolean {
+	if (evidence.state === "planned") return true;
+	if (!evidence.path || !evidence.anchor) return false;
+	const absolute = safeRepositoryFile(repositoryRoot, evidence.path);
+	if (!absolute || !existsSync(absolute) || !statSync(absolute).isFile()) {
+		errors.push(`${requirement.id}/${evidence.evidenceId} references missing or unsafe file ${evidence.path}`);
+		return false;
+	}
+	const contents = readFileSync(absolute, "utf8");
+	let valid = true;
+	if (!contents.includes(evidence.anchor)) {
+		errors.push(`${requirement.id}/${evidence.evidenceId} anchor was not found in ${evidence.path}`);
+		valid = false;
+	}
+	if (
+		["deterministic_unit_test", "deterministic_integration_test", "invariant_test", "adversarial_test"].includes(
+			evidence.mechanism,
+		) &&
+		!evidence.anchor.includes(requirement.id)
+	) {
+		errors.push(`${requirement.id}/${evidence.evidenceId} test anchor must include its stable requirement ID`);
+		valid = false;
+	}
+	return valid;
+}
+
+function validateObservedEvidence(
+	repositoryRoot: string,
+	requirement: AvoSpecRequirementDefinition,
+	evidence: AvoSpecEvidenceDefinition,
+	sourceDigest: string | undefined,
+	usedReceiptIds: Set<string>,
+	options: AvoSpecValidationOptions,
+	errors: string[],
+): boolean {
+	const externalReceipt =
+		options.receipts && Object.hasOwn(options.receipts, evidence.evidenceId)
+			? options.receipts[evidence.evidenceId]
+			: undefined;
+	if (evidence.state === "planned") {
+		if (externalReceipt !== undefined) {
+			errors.push(
+				`${requirement.id}/${evidence.evidenceId} is prose-only planned evidence and cannot be promoted by a receipt`,
+			);
+		}
+		return false;
+	}
+	if (externalReceipt === undefined && (evidence.state !== "observed" || !evidence.receiptPath)) return false;
+	if (!sourceDigest) return false;
+	const receiptLabel = externalReceipt === undefined ? evidence.receiptPath! : `trusted:${evidence.evidenceId}`;
+	const receipt = parseReceipt(
+		externalReceipt === undefined ? readJsonFile(repositoryRoot, evidence.receiptPath!, errors) : externalReceipt,
+		receiptLabel,
+		errors,
+	);
+	if (!receipt) return false;
+	if (!receiptSignatureMatches(receipt, options.receiptPublicKey, receiptLabel, errors)) return false;
+	if (!options.receiptBinding) {
+		errors.push(`${requirement.id}/${evidence.evidenceId} receipt has no live task and workspace binding`);
+		return false;
+	}
+	if (
+		receipt.runId !== options.receiptBinding.runId ||
+		receipt.workspaceDigest !== options.receiptBinding.workspaceDigest ||
+		receipt.contractDigest !== options.receiptBinding.contractDigest
+	) {
+		errors.push(`${requirement.id}/${evidence.evidenceId} receipt is bound to a different task or workspace`);
+		return false;
+	}
+	if (
+		receipt.requirementId !== requirement.id ||
+		receipt.evidenceId !== evidence.evidenceId ||
+		receipt.gate !== evidence.gate ||
+		receipt.mechanism !== evidence.mechanism
+	) {
+		errors.push(`${requirement.id}/${evidence.evidenceId} receipt identity does not match its evidence declaration`);
+		return false;
+	}
+	if (usedReceiptIds.has(receipt.receiptId)) {
+		errors.push(`receipt ${receipt.receiptId} was reused across evidence declarations`);
+		return false;
+	}
+	usedReceiptIds.add(receipt.receiptId);
+	if (receipt.sourceDigest !== sourceDigest) {
+		errors.push(`${requirement.id}/${evidence.evidenceId} receipt is stale for the current requirement sources`);
+		return false;
+	}
+	if (!receipt.satisfies.includes(requirement.id)) {
+		errors.push(`${requirement.id}/${evidence.evidenceId} receipt does not cite the requirement it satisfies`);
+		return false;
+	}
+	const expectedProducerRole = PRODUCER_ROLE_BY_MECHANISM[evidence.mechanism];
+	if (receipt.producer.role !== expectedProducerRole) {
+		errors.push(
+			`${requirement.id}/${evidence.evidenceId} producer role ${receipt.producer.role} cannot issue ${evidence.mechanism} evidence`,
+		);
+		return false;
+	}
+	if (evidence.mechanism === "runtime_trace") {
+		if (!receipt.events?.some((event) => nonEmptyString(event.event) && event.satisfies.includes(requirement.id))) {
+			errors.push(
+				`${requirement.id}/${evidence.evidenceId} runtime receipt has no trace event citing the requirement`,
+			);
+			return false;
+		}
+		if (receipt.producer.role !== "runtime_host") {
+			errors.push(`${requirement.id}/${evidence.evidenceId} runtime trace was not issued by the runtime host`);
+			return false;
+		}
+	}
+	if (
+		evidence.gate === "independent_review" &&
+		(receipt.producer.role !== "independent_reviewer" || !receipt.producer.independentFromCandidateGenerator)
+	) {
+		errors.push(`${requirement.id}/${evidence.evidenceId} review is not independent of the candidate generator`);
+		return false;
+	}
+	return true;
+}
+
+export function validateAvoSpecContract(
+	value: unknown,
+	repositoryRoot: string,
+	options: AvoSpecValidationOptions = {},
+): AvoSpecValidationReport {
+	const errors: string[] = [];
+	const warnings: string[] = [];
+	if (!isObject(value)) {
+		return {
+			valid: false,
+			errors: ["spec contract must be a JSON object"],
+			warnings,
+			requirements: [],
+			summary: { total: 0, unproven: 0, partial: 0, verified: 0 },
+		};
+	}
+	if (value.schemaVersion !== 1) errors.push("schemaVersion must be 1");
+	if (!nonEmptyString(value.contractId)) errors.push("contractId must be a non-empty string");
+	const protectedRoots = Array.isArray(value.protectedRoots)
+		? value.protectedRoots.filter(nonEmptyString).map(normalizedRepositoryPath)
+		: [];
+	if (
+		!Array.isArray(value.protectedRoots) ||
+		protectedRoots.length === 0 ||
+		protectedRoots.some((path) => path === undefined) ||
+		new Set(protectedRoots).size !== protectedRoots.length
+	) {
+		errors.push("protectedRoots must contain unique safe repository-relative paths");
+	}
+	const validProtectedRoots = protectedRoots.filter((path): path is string => path !== undefined);
+	const gateOrder = Array.isArray(value.gateOrder) ? value.gateOrder.filter(isAvoSpecGate) : [];
+	if (gateOrder.length !== AVO_SPEC_GATES.length || gateOrder.some((gate, index) => gate !== AVO_SPEC_GATES[index])) {
+		errors.push(`gateOrder must be exactly ${AVO_SPEC_GATES.join(" -> ")}`);
+	}
+	const requirementValues = Array.isArray(value.requirements) ? value.requirements : [];
+	if (requirementValues.length === 0) errors.push("requirements must contain at least one requirement");
+	const requirements = requirementValues.flatMap((item, index) => {
+		const parsed = parseRequirement(item, `requirements[${index}]`, errors);
+		return parsed ? [parsed] : [];
+	});
+	const requirementIds = new Set<string>();
+	const evidenceIds = new Set<string>();
+	const usedReceiptIds = new Set<string>();
+	const coverage: AvoSpecRequirementCoverage[] = [];
+	for (const requirement of requirements) {
+		if (requirementIds.has(requirement.id)) errors.push(`duplicate requirement ID: ${requirement.id}`);
+		requirementIds.add(requirement.id);
+		if (
+			requirement.requiredGates.length !== AVO_SPEC_GATES.length ||
+			requirement.requiredGates.some((gate, index) => gate !== AVO_SPEC_GATES[index])
+		) {
+			errors.push(`${requirement.id} must require all six gates in canonical order`);
+		}
+		if (!requirement.requiresRuntimeTrace) errors.push(`${requirement.id} must require a runtime trace`);
+		for (const sourcePath of requirement.sourcePaths) {
+			const normalized = normalizedRepositoryPath(sourcePath);
+			if (!normalized || !validProtectedRoots.some((root) => pathIsProtected(normalized, root))) {
+				errors.push(`${requirement.id} source path is outside protectedRoots: ${sourcePath}`);
+			}
+		}
+		let sourceDigest: string | undefined;
+		try {
+			sourceDigest = digestAvoSpecRequirement(repositoryRoot, requirement);
+		} catch (error) {
+			errors.push(`${requirement.id}: ${String(error)}`);
+		}
+		const mappedGates: AvoSpecGate[] = [];
+		const observedGates: AvoSpecGate[] = [];
+		const observedMechanisms: AvoSpecMechanism[] = [];
+		let runtimeTraceObserved = false;
+		let independentReviewObserved = false;
+		for (const evidence of requirement.evidence) {
+			if (evidenceIds.has(evidence.evidenceId)) errors.push(`duplicate evidence ID: ${evidence.evidenceId}`);
+			evidenceIds.add(evidence.evidenceId);
+			if (!evidence.evidenceId.startsWith(`${requirement.id}:`)) {
+				errors.push(`${requirement.id} evidence ID must start with ${requirement.id}:`);
+			}
+			mappedGates.push(evidence.gate);
+			const linkedEvidenceValid = validateLinkedEvidence(repositoryRoot, requirement, evidence, errors);
+			if (
+				linkedEvidenceValid &&
+				validateObservedEvidence(
+					repositoryRoot,
+					requirement,
+					evidence,
+					sourceDigest,
+					usedReceiptIds,
+					options,
+					errors,
+				)
+			) {
+				observedGates.push(evidence.gate);
+				observedMechanisms.push(evidence.mechanism);
+				if (evidence.mechanism === "runtime_trace") runtimeTraceObserved = true;
+				if (evidence.gate === "independent_review") independentReviewObserved = true;
+			}
+		}
+		for (const gate of AVO_SPEC_GATES) {
+			if (!mappedGates.includes(gate))
+				errors.push(`${requirement.id} has no planned, linked, or observed ${gate} evidence`);
+		}
+		if (!requirement.evidence.some((evidence) => evidence.mechanism === "runtime_trace")) {
+			errors.push(`${requirement.id} has no runtime-trace evidence declaration`);
+		}
+		const distinctObservedGates = unique(observedGates);
+		const missingObservedGates = AVO_SPEC_GATES.filter((gate) => !distinctObservedGates.includes(gate));
+		const structurallyVerified =
+			missingObservedGates.length === 0 &&
+			runtimeTraceObserved &&
+			independentReviewObserved &&
+			unique(observedMechanisms).length >= 5;
+		const derivedStatus: AvoSpecRequirementStatus = structurallyVerified
+			? "verified"
+			: requirement.evidence.some((evidence) => evidence.state !== "planned")
+				? "partial"
+				: "unproven";
+		const statusRank: Record<AvoSpecRequirementStatus, number> = { unproven: 0, partial: 1, verified: 2 };
+		if (statusRank[requirement.declaredStatus] > statusRank[derivedStatus]) {
+			errors.push(
+				`${requirement.id} overstates ${requirement.declaredStatus} but current evidence derives ${derivedStatus}`,
+			);
+		}
+		if (derivedStatus !== "verified") {
+			warnings.push(
+				`${requirement.id} is ${derivedStatus}; missing observed gates: ${missingObservedGates.join(", ") || "runtime/diversity policy"}`,
+			);
+		}
+		coverage.push({
+			id: requirement.id,
+			declaredStatus: requirement.declaredStatus,
+			derivedStatus,
+			mappedGates: AVO_SPEC_GATES.filter((gate) => mappedGates.includes(gate)),
+			observedGates: distinctObservedGates,
+			missingObservedGates,
+			runtimeTraceObserved,
+			independentReviewObserved,
+			mechanisms: unique(requirement.evidence.map((evidence) => evidence.mechanism)),
+		});
+	}
+	const summary = {
+		total: coverage.length,
+		unproven: coverage.filter((item) => item.derivedStatus === "unproven").length,
+		partial: coverage.filter((item) => item.derivedStatus === "partial").length,
+		verified: coverage.filter((item) => item.derivedStatus === "verified").length,
+	};
+	return {
+		valid: errors.length === 0,
+		contractId: nonEmptyString(value.contractId) ? value.contractId : undefined,
+		errors,
+		warnings,
+		requirements: coverage,
+		summary,
+	};
+}
+
+export function deriveAvoSpecRequirementImpacts(value: unknown, changedPaths: readonly string[]): AvoSpecImpactReport {
+	const errors: string[] = [];
+	if (!isObject(value)) {
+		return {
+			affectedRequirementIds: [],
+			unmappedProtectedPaths: [],
+			protectedRoots: [],
+			pathImpacts: [],
+			errors: ["invalid contract"],
+		};
+	}
+	const protectedRoots = Array.isArray(value.protectedRoots)
+		? value.protectedRoots.flatMap((path) => {
+				const normalized = nonEmptyString(path) ? normalizedRepositoryPath(path) : undefined;
+				return normalized ? [normalized] : [];
+			})
+		: [];
+	const requirements = Array.isArray(value.requirements)
+		? value.requirements.flatMap((item, index) => {
+				const parsed = parseRequirement(item, `requirements[${index}]`, errors);
+				return parsed ? [parsed] : [];
+			})
+		: [];
+	const normalizedChanges = unique(
+		changedPaths.flatMap((path) => {
+			const normalized = normalizedRepositoryPath(path);
+			if (!normalized) {
+				errors.push(`unsafe changed path: ${path}`);
+				return [];
+			}
+			return [normalized];
+		}),
+	);
+	const pathImpacts = normalizedChanges.map((path) => ({
+		path,
+		protected: protectedRoots.some((root) => pathIsProtected(path, root)),
+		requirementIds: unique(
+			requirements
+				.filter((requirement) =>
+					requirement.sourcePaths.some((sourcePath) => normalizedRepositoryPath(sourcePath) === path),
+				)
+				.map((requirement) => requirement.id),
+		).sort(),
+	}));
+	const affectedRequirementIds = unique(pathImpacts.flatMap((impact) => impact.requirementIds)).sort();
+	const mappedSources = new Set(
+		requirements.flatMap((requirement) =>
+			requirement.sourcePaths.flatMap((path) => normalizedRepositoryPath(path) ?? []),
+		),
+	);
+	const unmappedProtectedPaths = pathImpacts
+		.filter((impact) => impact.protected && !mappedSources.has(impact.path))
+		.map((impact) => impact.path);
+	return {
+		affectedRequirementIds,
+		unmappedProtectedPaths: unmappedProtectedPaths.sort(),
+		protectedRoots: unique(protectedRoots).sort(),
+		pathImpacts,
+		errors,
+	};
+}
+
+export function deriveAvoSpecSemanticCoverage(
+	value: unknown,
+	changedPythonPaths: readonly string[],
+): AvoSpecSemanticCoverage {
+	const impact = deriveAvoSpecRequirementImpacts(value, changedPythonPaths);
+	const coveredPaths = impact.pathImpacts
+		.filter((item) => item.protected && item.requirementIds.length > 0)
+		.map((item) => item.path)
+		.sort();
+	const uncoveredPaths = impact.pathImpacts
+		.filter((item) => !item.protected || item.requirementIds.length === 0)
+		.map((item) => item.path)
+		.sort();
+	const affectedRequirementIds = unique(
+		impact.pathImpacts
+			.filter((item) => item.protected && item.requirementIds.length > 0)
+			.flatMap((item) => item.requirementIds),
+	).sort();
+	const errors = [...impact.errors];
+	return {
+		affectedRequirementIds,
+		coveredPaths,
+		uncoveredPaths,
+		impactDigest: createHash("sha256")
+			.update(canonicalAvoSpecJson({ affectedRequirementIds, coveredPaths, uncoveredPaths, errors }))
+			.digest("hex"),
+		errors,
+	};
+}
+
+export function loadAndValidateAvoSpecContract(
+	contractPath: string,
+	repositoryRoot: string,
+	options: AvoSpecValidationOptions = {},
+): AvoSpecValidationReport {
+	const errors: string[] = [];
+	const value = readJsonFile(repositoryRoot, contractPath, errors);
+	if (value === undefined) {
+		return {
+			valid: false,
+			errors,
+			warnings: [],
+			requirements: [],
+			summary: { total: 0, unproven: 0, partial: 0, verified: 0 },
+		};
+	}
+	return validateAvoSpecContract(value, repositoryRoot, options);
+}

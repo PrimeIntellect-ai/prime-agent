@@ -69,6 +69,7 @@ describe("issue #2753 reload stale resource settings", () => {
 					sessionManager,
 					sessionStartEvent,
 					model: faux.getModel(),
+					enforceAvoCompletion: false,
 				})),
 				services,
 				diagnostics: services.diagnostics,

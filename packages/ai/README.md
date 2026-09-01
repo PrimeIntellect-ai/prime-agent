@@ -506,6 +506,12 @@ await complete(googleModel, context, {
     budgetTokens: 8192  // -1 for dynamic, 0 to disable
   }
 });
+
+// Vertex AI native Grounding with Google Search
+const vertexModel = getModel('google-vertex', 'gemini-2.5-flash');
+await complete(vertexModel, context, {
+  googleSearch: true
+});
 ```
 
 ### Streaming Thinking Content
@@ -1052,7 +1058,7 @@ In Node.js environments, you can set environment variables to avoid passing API 
 | Anthropic | `ANTHROPIC_API_KEY` or `ANTHROPIC_OAUTH_TOKEN` |
 | DeepSeek | `DEEPSEEK_API_KEY` |
 | Google | `GEMINI_API_KEY` |
-| Vertex AI | `GOOGLE_CLOUD_API_KEY` or `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`) + `GOOGLE_CLOUD_LOCATION` + ADC |
+| Vertex AI | `GOOGLE_CLOUD_API_KEY` or `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`) + `GOOGLE_CLOUD_LOCATION` + ADC. Set `GOOGLE_VERTEX_GOOGLE_SEARCH=1` to enable native Google Search grounding. |
 | Mistral | `MISTRAL_API_KEY` |
 | Groq | `GROQ_API_KEY` |
 | Cerebras | `CEREBRAS_API_KEY` |
@@ -1114,6 +1120,8 @@ Vertex AI models support either a Google Cloud API key or Application Default Cr
 
 When using ADC, also set `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`) and `GOOGLE_CLOUD_LOCATION`. You can also pass `project`/`location` in the call options. When using `GOOGLE_CLOUD_API_KEY`, `project` and `location` are not required.
 
+Set `GOOGLE_VERTEX_GOOGLE_SEARCH=1` to make native Grounding with Google Search available to every Vertex request, or pass `googleSearch: true` to a direct `streamGoogleVertex`/`complete` call. Google Search can coexist with normal function tools. When Vertex returns grounding metadata, the provider appends the unique source links and search queries to the assistant response.
+
 Example:
 
 ```bash
@@ -1143,7 +1151,7 @@ import { getModel, complete } from 'prime-agent-ai';
 })().catch(console.error);
 ```
 
-Official docs: [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials)
+Official docs: [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials), [Grounding with Google Search](https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/ground-with-google-search)
 
 ### CLI Login
 

@@ -1,0 +1,7 @@
+- Made one universal AVO runtime the default for every root task, with automatic internal general, coding, and research adapters across direct, iterative, and long task horizons.
+- Added host-authoritative candidate evaluation, durable lineage, namespaced NOOA memory, and lazy retained supervision with automatic stagnation escalation.
+- Restricted model-issued evaluations to `model_opinion`; executable authority now comes only from immutable receipts created after the host runs a recognized direct check.
+- Separated task runs within a session, retaining archived lineage and cross-run memory while automatically starting a clean run after the previous stop gate passes.
+- Added explicit required, best-effort, and not-applicable verification policies; weakened Git-workspace-only routing and required two environment-qualified sources for shared memory.
+- Added `/avo`, optional `/horizon` overrides, and a localhost `prime-agent avo dashboard` phase graph while retaining the autoresearch dashboard alias; adapter selection stays automatic rather than becoming a user-facing mode.
+- Hardened research promotion gates with host-derived search, publication, reviewer-query, inspected-paper, and evidence-binding receipts.

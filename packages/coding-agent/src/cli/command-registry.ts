@@ -80,6 +80,38 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		summary: "Show background service status",
 	},
 	{
+		path: ["avo"],
+		usage: "avo dashboard [options]",
+		summary: "Inspect the default AVO adapter, horizon, and progress",
+	},
+	{
+		path: ["avo", "dashboard"],
+		usage: "avo dashboard [--session <id>] [--port <number>] [--no-open]",
+		summary: "Open the live universal AVO phase graph",
+		description: "Serves a read-only localhost dashboard and includes environment-specific evaluation progress.",
+		options: [
+			"--session <id>  Follow one root session instead of the most recently updated state",
+			"--port <number> Use a custom localhost port (default: 4317)",
+			"--no-open       Print the URL without opening a browser",
+		],
+	},
+	{
+		path: ["autoresearch"],
+		usage: "autoresearch dashboard [options]",
+		summary: "Compatibility alias for the research-specific dashboard",
+	},
+	{
+		path: ["autoresearch", "dashboard"],
+		usage: "autoresearch dashboard [--session <id>] [--port <number>] [--no-open]",
+		summary: "Open the live autoresearch phase graph",
+		description: "Serves a read-only dashboard on 127.0.0.1 and follows the latest durable autoresearch state.",
+		options: [
+			"--session <id>  Follow one root session instead of the most recently updated state",
+			"--port <number> Use a custom localhost port (default: 4317)",
+			"--no-open       Print the URL without opening a browser",
+		],
+	},
+	{
 		path: ["doctor"],
 		usage: "doctor [--fix] [--json]",
 		summary: "Inspect and safely clean up background services",

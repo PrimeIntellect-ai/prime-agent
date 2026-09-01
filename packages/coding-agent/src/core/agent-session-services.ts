@@ -70,6 +70,8 @@ export interface AgentSessionCreationOptions {
 	executionMode?: AgentExecutionMode;
 	telemetryDisabled?: true;
 	initialGoal?: { objective: string; tokenBudget?: number };
+	/** Override root-turn AVO completion enforcement. Defaults to true. */
+	enforceAvoCompletion?: boolean;
 }
 
 export interface CreateAgentSessionFromServicesOptions extends AgentSessionCreationOptions {
@@ -258,6 +260,7 @@ export async function createAgentSessionFromServices(
 		autonomous: options.autonomous,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
+		enforceAvoCompletion: options.enforceAvoCompletion,
 	});
 	if (result.session.rlmDepth === 0 && !options.telemetryDisabled) {
 		installAgentTelemetry(result.session, {

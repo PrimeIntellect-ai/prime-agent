@@ -1,0 +1,1 @@
+- Fixed repository builds and tests to use the committed model catalog snapshot while monitoring live provider drift separately.

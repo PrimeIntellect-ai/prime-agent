@@ -510,7 +510,6 @@ stale extension instructions`,
 			],
 		});
 		harnesses.push(harness);
-		const baseSystemPrompt = harness.session.systemPrompt;
 		const providerSystemPrompts: string[] = [];
 		harness.setResponses([
 			(context) => {
@@ -524,11 +523,15 @@ stale extension instructions`,
 		]);
 
 		await harness.session.prompt("normal prompt");
-		await harness.session.acceptAgentMessagePrompt("agent-to-agent payload", { expandPromptTemplates: false });
+		const routedBaseSystemPrompt = harness.session.systemPrompt.replace("\n\nstale extension instructions", "");
+		await harness.session.acceptAgentMessagePrompt("research gap publication-grade agent-to-agent payload", {
+			expandPromptTemplates: false,
+		});
 		await harness.session.agent.waitForIdle();
 
 		expect(providerSystemPrompts[0]).toContain("stale extension instructions");
-		expect(providerSystemPrompts[1]).toBe(baseSystemPrompt);
+		expect(providerSystemPrompts[1]).toBe(routedBaseSystemPrompt);
+		expect(providerSystemPrompts[1]).toContain("adapter=general, horizon=direct");
 		expect(providerSystemPrompts[1]).not.toContain("stale extension instructions");
 	});
 

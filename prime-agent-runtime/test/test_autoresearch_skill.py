@@ -1,0 +1,572 @@
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+SKILL = Path(__file__).parents[2] / "packages/coding-agent/skills/autoresearch/src/autoresearch/__init__.py"
+
+
+def load_skill(name: str):
+    spec = importlib.util.spec_from_file_location(name, SKILL)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class AutoresearchSkillTest(unittest.TestCase):
+    def test_execution_contract_prevents_guessed_api_calls(self) -> None:
+        module = load_skill("autoresearch_execution_contract_test")
+        contract = module.execution_contract()
+        self.assertTrue(contract["forbid_runtime_introspection"])
+        self.assertIn("native Google Search", contract["search_tool"])
+        self.assertIn("review_candidate", contract["calls"]["host_review"])
+        self.assertIn("peer-review verification is optional", contract["error_policy"])
+        self.assertIn("['state']", contract["calls"]["inspect_state"])
+        self.assertIn("retry_supervision", contract["calls"]["recover_supervisor_after_restart"])
+        self.assertEqual(len(contract["search_coverage_kinds"]), 8)
+
+    def test_initialize_and_complete_cycle_use_host_owned_requests(self) -> None:
+        module = load_skill("autoresearch_host_test")
+        host = AsyncMock(return_value={"checkpoint": {"status": "progressing"}})
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(module, "spontaneous_recall", AsyncMock(return_value={"ok": True})),
+            patch.object(module, "_finish_cycle_memory", AsyncMock()),
+        ):
+            initialized = asyncio.run(module.initialize("Find a problem", topic="agent memory"))
+            asyncio.run(module.complete_cycle({"candidate": {"statement": "candidate"}}))
+            asyncio.run(module.update_claim("claim-1", {"unresolved_objections": ["new evidence"]}))
+        self.assertEqual(host.await_args_list[0].args[0], "autoresearch.initialize")
+        self.assertEqual(initialized["execution_contract"]["contract_version"], 1)
+        self.assertEqual(host.await_args_list[1].args[0], "autoresearch.cycle.complete")
+        self.assertGreater(host.await_args_list[1].args[1]["supervisor_timeout_ms"], 0)
+        self.assertEqual(host.await_args_list[2].args[0], "autoresearch.claim.update")
+
+    def test_search_and_peer_review_evidence_use_host_owned_receipts(self) -> None:
+        module = load_skill("autoresearch_receipts_test")
+        host = AsyncMock(return_value={"receipt": {"verified": True}})
+        candidate = {"candidate_id": "candidate-authority", "statement": "Authority failures"}
+        with patch.object(module, "host_request", host):
+            asyncio.run(
+                module.record_search(
+                    candidate,
+                    coverage_kind="mechanism_queries",
+                    query="authority calibration agent memory",
+                    source="google_search",
+                    result_urls=["https://example.org/search?q=authority"],
+                    inspected_paper_ids=["doi:10.1000/example"],
+                )
+            )
+            asyncio.run(
+                module.verify_peer_review(
+                    "doi:10.1000/example",
+                    "https://publisher.example/articles/example",
+                    "This article underwent peer review before publication.",
+                )
+            )
+        self.assertEqual(host.await_args_list[0].args[0], "autoresearch.search.record")
+        self.assertEqual(
+            host.await_args_list[0].args[1]["receipt"]["inspected_paper_ids"],
+            ["doi:10.1000/example"],
+        )
+        self.assertEqual(
+            host.await_args_list[1].args,
+            (
+                "autoresearch.publication.peer_review.verify",
+                {
+                    "evidence": {
+                        "paper_id": "doi:10.1000/example",
+                        "evidence_url": "https://publisher.example/articles/example",
+                        "exact_quote": "This article underwent peer review before publication.",
+                    }
+                },
+            ),
+        )
+
+    def test_cycle_memory_runs_reflection_at_each_required_milestone(self) -> None:
+        module = load_skill("autoresearch_cycle_memory_test")
+        scenarios = (
+            (
+                "candidate_promotion",
+                {"cycle": {"cycleId": "cycle-1"}},
+                {"outcome": "promoted", "candidate": {"statement": "promoted candidate"}},
+                [],
+            ),
+            (
+                "supervisor_intervention",
+                {
+                    "cycle": {"cycleId": "cycle-2"},
+                    "supervision": {"interventionNeeded": True, "reason": "trajectory collapsed"},
+                },
+                {"outcome": "rejected", "candidate": {"statement": "rejected candidate"}},
+                [],
+            ),
+            (
+                "five_cycles",
+                {"cycle": {"cycleId": "cycle-5"}},
+                {"outcome": "rejected", "candidate": {"statement": "fifth candidate"}},
+                [{"cycleId": f"cycle-{index}"} for index in range(1, 6)],
+            ),
+        )
+        for expected_trigger, response, cycle, state_cycles in scenarios:
+            with self.subTest(trigger=expected_trigger):
+                reflect = AsyncMock(return_value={"ok": True})
+                spontaneous = AsyncMock(return_value={"ok": True, "context": "memory"})
+                with (
+                    patch.object(module, "sync_nooa_memory", AsyncMock(return_value={"ok": True})),
+                    patch.object(
+                        module,
+                        "get_state",
+                        AsyncMock(return_value={"state": {"cycles": state_cycles}}),
+                    ),
+                    patch.object(module, "_reflect_synced", reflect),
+                    patch.object(module, "_spontaneous_recall_synced", spontaneous),
+                ):
+                    asyncio.run(module._finish_cycle_memory(response, cycle))
+                reflect.assert_awaited_once_with(expected_trigger, cycle_id=response["cycle"]["cycleId"])
+                spontaneous.assert_awaited_once()
+                self.assertEqual(response["spontaneous_recall"]["context"], "memory")
+
+    def test_nooa_reflection_is_bound_back_to_canonical_host_state(self) -> None:
+        module = load_skill("autoresearch_reflection_receipt_test")
+        host = AsyncMock(return_value={"reflection": {"reflectionId": "reflection-1"}})
+        sidecar = {
+            "ok": True,
+            "report": {"merged": 1, "pruned": 2},
+            "archived_memory_ids": ["memory-1"],
+        }
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(module, "_run_nooa_sidecar", return_value=sidecar),
+        ):
+            result = asyncio.run(
+                module._reflect_synced("supervisor_intervention", cycle_id="cycle-1")
+            )
+        self.assertTrue(result["ok"])
+        host.assert_awaited_once_with(
+            "autoresearch.memory.reflection.record",
+            {
+                "trigger": "supervisor_intervention",
+                "report": {"merged": 1, "pruned": 2},
+                "archived_memory_ids": ["memory-1"],
+                "cycle_id": "cycle-1",
+            },
+        )
+
+    def test_supervisor_timeout_still_runs_next_cycle_memory_maintenance(self) -> None:
+        module = load_skill("autoresearch_timeout_memory_test")
+        host = AsyncMock(
+            return_value={
+                "cycle": {"cycleId": "cycle-timeout"},
+                "checkpoint": {"interventionNeeded": False},
+                "delivery": {},
+            }
+        )
+        finish = AsyncMock()
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(module, "collect_results", AsyncMock(return_value={"supervision": []})),
+            patch.object(module, "_finish_cycle_memory", finish),
+        ):
+            with self.assertRaisesRegex(TimeoutError, "cycle-timeout"):
+                asyncio.run(
+                    module.complete_cycle(
+                        {"candidate": {"statement": "candidate"}, "outcome": "rejected"},
+                        timeout=0,
+                        poll_interval=0,
+                    )
+                )
+        finish.assert_awaited_once()
+
+    def test_supervisor_timeout_budget_includes_host_dispatch_time(self) -> None:
+        module = load_skill("autoresearch_host_dispatch_timeout_test")
+        clock = SimpleNamespace(now=100.0)
+        loop = SimpleNamespace(time=lambda: clock.now)
+
+        async def delayed_host(_type, _payload):
+            clock.now += 2.0
+            return {
+                "cycle": {"cycleId": "cycle-host-timeout"},
+                "delivery": {},
+            }
+
+        finish = AsyncMock()
+        collect = AsyncMock(return_value={"supervision": []})
+        with (
+            patch.object(module.asyncio, "get_running_loop", return_value=loop),
+            patch.object(module, "host_request", AsyncMock(side_effect=delayed_host)) as host,
+            patch.object(module, "collect_results", collect),
+            patch.object(module, "_finish_cycle_memory", finish),
+        ):
+            with self.assertRaisesRegex(TimeoutError, "cycle-host-timeout"):
+                asyncio.run(
+                    module.complete_cycle(
+                        {"candidate": {"statement": "candidate"}, "outcome": "rejected"},
+                        timeout=1,
+                        poll_interval=0,
+                    )
+                )
+        self.assertEqual(host.await_args.args[1]["supervisor_timeout_ms"], 1000)
+        collect.assert_not_awaited()
+        finish.assert_awaited_once()
+
+    def test_retry_supervision_redelivers_existing_cycle_and_finishes_memory(self) -> None:
+        module = load_skill("autoresearch_supervisor_retry_test")
+        cycle = {"cycleId": "cycle-retry", "outcome": "rejected"}
+        supervision = {"cycleId": "cycle-retry", "status": "progressing"}
+        host = AsyncMock(
+            return_value={
+                "cycle": cycle,
+                "checkpoint": {"status": "watch"},
+                "delivery": {"receipt": "sent"},
+            }
+        )
+        finish = AsyncMock()
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(
+                module,
+                "collect_results",
+                AsyncMock(return_value={"supervision": [supervision]}),
+            ),
+            patch.object(module, "_finish_cycle_memory", finish),
+        ):
+            result = asyncio.run(module.retry_supervision("cycle-retry", timeout=60))
+        self.assertEqual(host.await_args.args[0], "autoresearch.supervision.retry")
+        self.assertEqual(host.await_args.args[1]["cycle_id"], "cycle-retry")
+        self.assertGreater(host.await_args.args[1]["supervisor_timeout_ms"], 0)
+        self.assertEqual(result["supervision"], supervision)
+        finish.assert_awaited_once_with(result, cycle)
+
+    def test_retry_supervision_rebinds_a_terminal_child_without_waiting_for_timeout(self) -> None:
+        module = load_skill("autoresearch_supervisor_rebind_test")
+        cycle = {"cycleId": "cycle-rebind", "outcome": "rejected"}
+        first = {
+            "cycle": cycle,
+            "supervisor": {"rlmChildId": "sub-failed", "name": "supervisor-failed"},
+            "delivery": {},
+        }
+        replacement = {
+            "cycle": cycle,
+            "supervisor": {"rlmChildId": "sub-replacement", "name": "supervisor-replacement"},
+            "delivery": {},
+        }
+        supervision = {"cycleId": "cycle-rebind", "status": "progressing"}
+        failed_child = SimpleNamespace(
+            rlm_child_id="sub-failed",
+            session_name="supervisor-failed",
+            status="completed",
+        )
+        host = AsyncMock(side_effect=[first, replacement])
+        finish = AsyncMock()
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(
+                module,
+                "collect_results",
+                AsyncMock(
+                    side_effect=[
+                        {"supervision": []},
+                        {"supervision": []},
+                        {"supervision": [supervision]},
+                    ]
+                ),
+            ),
+            patch.object(module, "list_subagents", AsyncMock(return_value=[failed_child])),
+            patch.object(module.asyncio, "sleep", AsyncMock()),
+            patch.object(module, "_finish_cycle_memory", finish),
+        ):
+            result = asyncio.run(module.retry_supervision("cycle-rebind", timeout=60))
+        self.assertEqual(host.await_count, 2)
+        self.assertEqual(host.await_args_list[1].args[0], "autoresearch.supervision.retry")
+        self.assertEqual(host.await_args_list[1].args[1]["cycle_id"], "cycle-rebind")
+        self.assertGreater(host.await_args_list[1].args[1]["supervisor_timeout_ms"], 0)
+        self.assertEqual(result["supervisor"]["rlmChildId"], "sub-replacement")
+        self.assertEqual(result["supervision"], supervision)
+        finish.assert_awaited_once_with(result, cycle)
+
+    def test_retry_supervision_collects_once_more_at_child_settlement_boundary(self) -> None:
+        module = load_skill("autoresearch_supervisor_boundary_collection_test")
+        cycle = {"cycleId": "cycle-boundary", "outcome": "rejected"}
+        response = {
+            "cycle": cycle,
+            "supervisor": {"rlmChildId": "sub-done", "name": "supervisor-done"},
+            "delivery": {},
+        }
+        supervision = {"cycleId": "cycle-boundary", "status": "watch"}
+        completed_child = SimpleNamespace(
+            rlm_child_id="sub-done",
+            session_name="supervisor-done",
+            status="completed",
+        )
+        host = AsyncMock(return_value=response)
+        finish = AsyncMock()
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(
+                module,
+                "collect_results",
+                AsyncMock(side_effect=[{"supervision": []}, {"supervision": [supervision]}]),
+            ),
+            patch.object(module, "list_subagents", AsyncMock(return_value=[completed_child])),
+            patch.object(module.asyncio, "sleep", AsyncMock()),
+            patch.object(module, "_finish_cycle_memory", finish),
+        ):
+            result = asyncio.run(module.retry_supervision("cycle-boundary", timeout=60))
+        host.assert_awaited_once()
+        self.assertEqual(result["supervision"], supervision)
+        finish.assert_awaited_once_with(result, cycle)
+
+    def test_retry_supervision_does_not_rebind_during_queued_followup_transition(self) -> None:
+        module = load_skill("autoresearch_supervisor_followup_transition_test")
+        cycle = {"cycleId": "cycle-followup", "outcome": "rejected"}
+        response = {
+            "cycle": cycle,
+            "supervisor": {"rlmChildId": "sub-followup", "name": "supervisor-followup"},
+            "delivery": {"receipt": "queued"},
+        }
+        supervision = {"cycleId": "cycle-followup", "status": "watch"}
+        completed_child = SimpleNamespace(
+            rlm_child_id="sub-followup",
+            session_name="supervisor-followup",
+            status="completed",
+        )
+        running_child = SimpleNamespace(
+            rlm_child_id="sub-followup",
+            session_name="supervisor-followup",
+            status="running",
+        )
+        host = AsyncMock(return_value=response)
+        finish = AsyncMock()
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(
+                module,
+                "collect_results",
+                AsyncMock(
+                    side_effect=[
+                        {"supervision": []},
+                        {"supervision": []},
+                        {"supervision": [supervision]},
+                    ]
+                ),
+            ),
+            patch.object(
+                module,
+                "list_subagents",
+                AsyncMock(side_effect=[[completed_child], [running_child]]),
+            ),
+            patch.object(module.asyncio, "sleep", AsyncMock()),
+            patch.object(module, "_finish_cycle_memory", finish),
+        ):
+            result = asyncio.run(module.retry_supervision("cycle-followup", timeout=60))
+        host.assert_awaited_once()
+        self.assertEqual(result["supervision"], supervision)
+        finish.assert_awaited_once_with(result, cycle)
+
+    def test_retry_supervision_rebinds_after_bootstrap_delivery_failure(self) -> None:
+        module = load_skill("autoresearch_supervisor_delivery_rebind_test")
+        cycle = {"cycleId": "cycle-delivery", "outcome": "rejected"}
+        first = {
+            "cycle": cycle,
+            "supervisor": {"rlmChildId": "sub-busy", "name": "supervisor-busy"},
+            "delivery": {"error": "Agent is already processing"},
+        }
+        replacement = {
+            "cycle": cycle,
+            "supervisor": {"rlmChildId": "sub-ready", "name": "supervisor-ready"},
+            "delivery": {},
+        }
+        supervision = {"cycleId": "cycle-delivery", "status": "watch"}
+        host = AsyncMock(side_effect=[first, replacement])
+        finish = AsyncMock()
+        with (
+            patch.object(module, "host_request", host),
+            patch.object(
+                module,
+                "collect_results",
+                AsyncMock(return_value={"supervision": [supervision]}),
+            ),
+            patch.object(module.asyncio, "sleep", AsyncMock()),
+            patch.object(module, "_finish_cycle_memory", finish),
+        ):
+            result = asyncio.run(module.retry_supervision("cycle-delivery", timeout=60))
+        self.assertEqual(host.await_count, 2)
+        self.assertEqual(result["supervisor"]["rlmChildId"], "sub-ready")
+        self.assertEqual(result["supervision"], supervision)
+        finish.assert_awaited_once_with(result, cycle)
+
+    def test_spawn_reviewers_creates_four_role_separated_children(self) -> None:
+        module = load_skill("autoresearch_reviewers_test")
+        roles = (
+            "literature_auditor",
+            "prior_art_killer",
+            "experimental_critic",
+            "top_tier_editor",
+        )
+        host = AsyncMock(
+            return_value={
+                "assignments": [
+                    {
+                        "childId": f"sub-autoresearch-{role}",
+                        "name": f"autoresearch-{role}",
+                        "role": role,
+                        "candidateDigest": "sha256:candidate",
+                    }
+                    for role in roles
+                ],
+            }
+        )
+        candidate = {"candidate_id": "candidate-authority"}
+        with patch.object(module, "host_request", host):
+            assignments = asyncio.run(module.spawn_reviewers(candidate))
+        self.assertEqual(len(assignments), 4)
+        self.assertEqual(
+            [assignment["role"] for assignment in assignments],
+            list(roles),
+        )
+        host.assert_awaited_once_with("autoresearch.reviewers.spawn", {"candidate": candidate})
+
+    def test_await_reviews_fails_fast_when_a_bound_reviewer_child_errors(self) -> None:
+        module = load_skill("autoresearch_reviewer_failure_test")
+        assignment = {
+            "candidateId": "candidate-authority",
+            "role": "experimental_critic",
+            "rlmChildId": "sub-failed",
+            "name": "research-experimental-critic",
+        }
+        failed_child = SimpleNamespace(
+            rlm_child_id="sub-failed",
+            session_name="research-experimental-critic",
+            status="error",
+        )
+        with (
+            patch.object(module, "collect_results", AsyncMock(return_value={"reviews": []})),
+            patch.object(
+                module,
+                "get_state",
+                AsyncMock(return_value={"state": {"reviewerAssignments": [assignment]}}),
+            ),
+            patch.object(module, "list_subagents", AsyncMock(return_value=[failed_child])),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "experimental_critic"):
+                asyncio.run(module.await_reviews("candidate-authority", timeout=300))
+
+    def test_rejects_non_dict_claim_before_contacting_host(self) -> None:
+        module = load_skill("autoresearch_validation_test")
+        host = AsyncMock()
+        with patch.object(module, "host_request", host):
+            with self.assertRaisesRegex(TypeError, "claim must be a dict"):
+                asyncio.run(module.add_claim([]))
+        host.assert_not_awaited()
+
+    def test_scholarly_clients_normalize_crossref_and_arxiv_without_inventing_peer_review(self) -> None:
+        module = load_skill("autoresearch_scholarly_test")
+        crossref_payload = {
+            "message": {
+                "items": [
+                    {
+                        "DOI": "10.1000/example",
+                        "title": ["Grounded Research"],
+                        "author": [{"given": "Ada", "family": "Lovelace"}],
+                        "published": {"date-parts": [[2026, 8, 25]]},
+                        "container-title": ["Research Journal"],
+                    }
+                ]
+            }
+        }
+        arxiv_xml = b"""<?xml version="1.0"?>
+        <feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+          <entry>
+            <id>http://arxiv.org/abs/2608.12345v2</id>
+            <title>Mechanistic Agent Memory</title>
+            <summary>A complete abstract.</summary>
+            <published>2026-08-20T00:00:00Z</published>
+            <author><name>A. Researcher</name></author>
+            <link title="pdf" href="https://arxiv.org/pdf/2608.12345v2" type="application/pdf" />
+          </entry>
+          <entry>
+            <id>http://arxiv.org/abs/math/0301234v2</id>
+            <title>Legacy Category Identifier</title>
+            <summary>An older identifier must retain its category.</summary>
+            <published>2003-01-20T00:00:00Z</published>
+            <author><name>B. Researcher</name></author>
+          </entry>
+        </feed>"""
+        with patch.object(module, "_request_json", return_value=crossref_payload):
+            crossref = asyncio.run(module.crossref_search("agent memory", rows=1))
+        with patch.object(module, "_cached_bytes", return_value=arxiv_xml):
+            arxiv = asyncio.run(module.arxiv_search("agent memory", max_results=2))
+        self.assertEqual(crossref[0]["paper_id"], "doi:10.1000/example")
+        self.assertNotIn("publication_status", crossref[0])
+        self.assertNotIn("metadata_verified_by", crossref[0])
+        self.assertEqual(arxiv[0]["paper_id"], "arxiv:2608.12345")
+        self.assertNotIn("publication_status", arxiv[0])
+        self.assertNotIn("metadata_verified_by", arxiv[0])
+        self.assertEqual(arxiv[0]["full_text_url"], "https://arxiv.org/pdf/2608.12345v2")
+        self.assertEqual(arxiv[1]["paper_id"], "arxiv:math/0301234")
+        self.assertEqual(arxiv[1]["preprint_id"], "math/0301234")
+        self.assertEqual(arxiv[1]["full_text_url"], "https://arxiv.org/pdf/math/0301234v2")
+
+    def test_memory_reuse_and_final_export_use_host_gates(self) -> None:
+        module = load_skill("autoresearch_memory_test")
+        host = AsyncMock(
+            side_effect=[
+                {"memory": {"memoryId": "memory-1"}},
+                {"reuse": {"status": "proposed"}},
+                {"reuse": {"status": "verified"}},
+                {"deliverable": {"stop_gate": {"passed": True}}},
+            ]
+        )
+        with patch.object(module, "host_request", host):
+            asyncio.run(
+                module.remember(
+                    {"type": "FAILED_DIRECTION", "title": "Old failure", "content": "Do not repeat."},
+                    mirror_nooa=False,
+                )
+            )
+            asyncio.run(module.prepare_memory_reuse({"memory_ids": ["memory-1"]}))
+            asyncio.run(module.verify_memory_reuse("reuse-1", accepted=True, evidence=["rechecked"]))
+            asyncio.run(module.export_deliverable())
+        self.assertEqual(host.await_args_list[0].args[0], "autoresearch.memory.remember")
+        self.assertEqual(host.await_args_list[1].args[0], "autoresearch.memory.reuse.prepare")
+        self.assertEqual(host.await_args_list[2].args[0], "autoresearch.memory.reuse.verify")
+        self.assertEqual(host.await_args_list[3].args, ("autoresearch.export", {"final": True}))
+
+    def test_heartbeat_uses_existing_host_scheduler(self) -> None:
+        module = load_skill("autoresearch_heartbeat_test")
+        host = AsyncMock(return_value={"heartbeat": {"id": "heartbeat-1"}})
+        with patch.object(module, "host_request", host):
+            asyncio.run(module.enable_heartbeat(interval="45m"))
+            asyncio.run(module.disable_heartbeat("heartbeat-1"))
+        self.assertEqual(host.await_args_list[0].args[0], "rlm_heartbeat.create")
+        self.assertEqual(host.await_args_list[0].args[1]["delivery_mode"], "follow_up")
+        self.assertEqual(host.await_args_list[1].args, ("rlm_heartbeat.delete", {"id": "heartbeat-1"}))
+
+    def test_full_text_download_rejects_non_https_and_uses_bounded_artifact_helper(self) -> None:
+        module = load_skill("autoresearch_fulltext_test")
+        with self.assertRaisesRegex(ValueError, "credential-free HTTPS"):
+            module._validate_public_https_url("http://127.0.0.1/paper.pdf")
+        with patch.object(
+            module,
+            "_download_open_full_text",
+            return_value={"path": "/tmp/paper.pdf", "bytes": 100},
+        ) as download:
+            result = asyncio.run(
+                module.download_open_full_text(
+                    "https://example.org/paper.pdf",
+                    filename="paper",
+                    max_bytes=1024,
+                )
+            )
+        self.assertEqual(result["bytes"], 100)
+        download.assert_called_once_with("https://example.org/paper.pdf", "paper", 1024)
+
+
+if __name__ == "__main__":
+    unittest.main()

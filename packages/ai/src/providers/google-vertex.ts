@@ -2,6 +2,7 @@ import {
 	type GenerateContentConfig,
 	type GenerateContentParameters,
 	GoogleGenAI,
+	type GroundingMetadata,
 	type HttpOptions,
 	ResourceScope,
 	type ThinkingConfig,
@@ -42,6 +43,8 @@ import { buildBaseOptions } from "./simple-options.js";
 
 export interface GoogleVertexOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "any";
+	/** Enable native Grounding with Google Search. Defaults to GOOGLE_VERTEX_GOOGLE_SEARCH. */
+	googleSearch?: boolean;
 	thinking?: {
 		enabled: boolean;
 		budgetTokens?: number; // -1 for dynamic, 0 to disable
@@ -104,6 +107,8 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 
 			stream.push({ type: "start", partial: output });
 			let currentBlock: TextContent | ThinkingContent | null = null;
+			const groundingQueries = new Set<string>();
+			const groundingSources = new Map<string, string>();
 			const blocks = output.content;
 			const blockIndex = () => blocks.length - 1;
 			for await (const chunk of googleStream) {
@@ -111,6 +116,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 				// responseId is documented there as an output-only identifier for each response.
 				output.responseId ||= chunk.responseId;
 				const candidate = chunk.candidates?.[0];
+				captureGoogleSearchGrounding(candidate?.groundingMetadata, groundingQueries, groundingSources);
 				if (candidate?.content?.parts) {
 					for (const part of candidate.content.parts) {
 						if (part.text !== undefined) {
@@ -279,6 +285,10 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 				throw streamFailureFromStopReason(output.stopReasonRaw);
 			}
 
+			if (output.stopReason !== "toolUse") {
+				appendGoogleSearchGrounding(output, stream, groundingQueries, groundingSources);
+			}
+
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
@@ -437,6 +447,9 @@ function buildParams(
 	options: GoogleVertexOptions = {},
 ): GenerateContentParameters {
 	const contents = convertMessages(model, context);
+	const functionTools = context.tools && context.tools.length > 0 ? convertTools(context.tools) : undefined;
+	const googleSearchEnabled = resolveGoogleSearchEnabled(options, context);
+	const tools = [...(functionTools ?? []), ...(googleSearchEnabled ? [{ googleSearch: {} }] : [])];
 
 	const generationConfig: GenerateContentConfig = {};
 	if (options.temperature !== undefined) {
@@ -449,7 +462,7 @@ function buildParams(
 	const config: GenerateContentConfig = {
 		...(Object.keys(generationConfig).length > 0 && generationConfig),
 		...(context.systemPrompt && { systemInstruction: sanitizeSurrogates(context.systemPrompt) }),
-		...(context.tools && context.tools.length > 0 && { tools: convertTools(context.tools) }),
+		...(tools.length > 0 && { tools }),
 	};
 
 	if (context.tools && context.tools.length > 0 && options.toolChoice) {
@@ -490,6 +503,85 @@ function buildParams(
 	return params;
 }
 
+function resolveGoogleSearchEnabled(options: GoogleVertexOptions, context: Context): boolean {
+	if (options.googleSearch !== undefined) {
+		return options.googleSearch;
+	}
+	const value = process.env.GOOGLE_VERTEX_GOOGLE_SEARCH?.trim().toLowerCase();
+	if (value === "1" || value === "true" || value === "yes" || value === "on") return true;
+	if (value === "0" || value === "false" || value === "no" || value === "off") return false;
+	return context.systemPrompt?.includes("AVO_ONLINE_EVIDENCE=required") === true;
+}
+
+function captureGoogleSearchGrounding(
+	metadata: GroundingMetadata | undefined,
+	queries: Set<string>,
+	sources: Map<string, string>,
+): void {
+	for (const query of metadata?.webSearchQueries ?? []) {
+		const trimmed = query.trim().replace(/\s+/g, " ");
+		if (trimmed) queries.add(trimmed);
+	}
+
+	for (const chunk of metadata?.groundingChunks ?? []) {
+		const uri = normalizeHttpUrl(chunk.web?.uri);
+		if (!uri) continue;
+		const title = (chunk.web?.title?.trim() || chunk.web?.domain?.trim() || uri).replace(/\s+/g, " ");
+		sources.set(uri, title);
+	}
+}
+
+function normalizeHttpUrl(value: string | undefined): string | undefined {
+	if (!value) return undefined;
+	try {
+		const url = new URL(value);
+		return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function appendGoogleSearchGrounding(
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	queries: Set<string>,
+	sources: Map<string, string>,
+): void {
+	if (queries.size === 0 && sources.size === 0) return;
+
+	const lines = ["", ""];
+	if (sources.size > 0) {
+		lines.push("Sources (Google Search):");
+		for (const [uri, title] of sources) {
+			lines.push(`- [${escapeMarkdownLinkText(title)}](${uri})`);
+		}
+	}
+	if (queries.size > 0) {
+		if (sources.size > 0) lines.push("");
+		lines.push(`Search queries: ${[...queries].join("; ")}`);
+	}
+
+	const block: TextContent = {
+		type: "text",
+		text: lines.join("\n"),
+		providerMetadata: {
+			googleSearchGrounding: {
+				queries: [...queries],
+				sources: [...sources].map(([url, title]) => ({ url, title })),
+			},
+		},
+	};
+	output.content.push(block);
+	const contentIndex = output.content.length - 1;
+	stream.push({ type: "text_start", contentIndex, partial: output });
+	stream.push({ type: "text_delta", contentIndex, delta: block.text, partial: output });
+	stream.push({ type: "text_end", contentIndex, content: block.text, partial: output });
+}
+
+function escapeMarkdownLinkText(text: string): string {
+	return text.replace(/\\/g, "\\\\").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+}
+
 type ClampedThinkingLevel = Exclude<PiThinkingLevel, "xhigh" | "max">;
 
 function isGemini3ProModel(model: Model<"google-generative-ai">): boolean {
@@ -505,11 +597,13 @@ function getDisabledThinkingConfig(model: Model<"google-vertex">): ThinkingConfi
 	// do not support full thinking-off either. For Gemini 3 models, use the lowest supported
 	// thinkingLevel without includeThoughts so hidden thinking remains invisible to pi.
 	const geminiModel = model as unknown as Model<"google-generative-ai">;
-	if (isGemini3ProModel(geminiModel)) {
-		return { thinkingLevel: ThinkingLevel.LOW };
-	}
-	if (isGemini3FlashModel(geminiModel)) {
-		return { thinkingLevel: ThinkingLevel.MINIMAL };
+	if (isGemini3ProModel(geminiModel) || isGemini3FlashModel(geminiModel)) {
+		// Custom/new Vertex model definitions can rule out MINIMAL while supporting LOW
+		// (for example Gemini 3.7 Flash). The non-reasoning stream path used to bypass
+		// capability normalization and hard-code MINIMAL for every Flash model.
+		const lowestSupported = clampThinkingLevel(model, "minimal");
+		const effort = (lowestSupported === "off" ? "minimal" : lowestSupported) as ClampedThinkingLevel;
+		return { thinkingLevel: THINKING_LEVEL_MAP[getGemini3ThinkingLevel(effort, geminiModel)] };
 	}
 
 	// Gemini 2.x supports disabling via thinkingBudget = 0.

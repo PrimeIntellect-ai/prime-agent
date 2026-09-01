@@ -25,7 +25,7 @@ type LateHandlerRetentionHost = {
 	) => void;
 };
 
-describe("agent-message skill over the kernel host bridge", () => {
+describe("agent-message skill over the kernel host bridge", { tags: ["kernel-heavy"] }, () => {
 	let tempDir: string;
 	let provisioner: IpythonKernelProvisioner | undefined;
 

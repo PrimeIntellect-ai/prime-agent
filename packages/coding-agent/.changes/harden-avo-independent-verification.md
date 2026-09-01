@@ -1,0 +1,3 @@
+- Prevented autoresearch calls from changing a host-routed non-research task into the research adapter.
+- Required external evidence to support explicit candidate claims through a host-issued semantic relation before factual completion.
+- Prevented candidate-created tests from independently certifying coding changes without a trusted pre-task test baseline or user acceptance command.

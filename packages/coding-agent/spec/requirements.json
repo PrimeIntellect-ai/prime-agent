@@ -1,0 +1,816 @@
+{
+  "schemaVersion": 1,
+  "contractId": "prime-avo-behavior-v1",
+  "protectedRoots": [
+    "package.json",
+    "packages/coding-agent/package.json",
+    "packages/coding-agent/spec",
+    "packages/coding-agent/src/cli/avo-dashboard.ts",
+    "packages/coding-agent/src/core/agent-session.ts",
+    "packages/coding-agent/src/core/avo",
+		"packages/coding-agent/src/core/tools/bash.ts",
+    "packages/coding-agent/src/evals/spec-contract"
+  ],
+  "gateOrder": [
+    "static",
+    "unit",
+    "integration",
+    "behavioral",
+    "adversarial",
+    "independent_review"
+  ],
+  "requirements": [
+    {
+      "id": "AUTH-001",
+      "domain": "authority",
+      "title": "Only host-observed evidence can mint authoritative progress",
+      "statement": "Model claims, model-written metrics, model-opinion receipts, and model-controlled child processes must never mint or obtain authority reserved for the host.",
+      "critical": true,
+      "behaviors": {
+        "normal": "A candidate becomes canonical only after an applicable host-issued receipt passes.",
+        "failure": "Missing, model-minted, inconclusive, or semantically unrelated evidence leaves the cycle blocked or revised.",
+        "ordering": "The host issues and binds the receipt before cycle acceptance and canonical delivery.",
+        "authority": "The model proposes a candidate; the host owns authoritative evaluation, signing secrets, and stop-gate decisions.",
+        "persistence": "Reopening state must preserve receipt issuer and authority without upgrading legacy or model evidence."
+      },
+      "sourcePaths": [
+        "packages/coding-agent/src/core/agent-session.ts",
+        "packages/coding-agent/src/core/avo/adapters.ts",
+        "packages/coding-agent/src/core/avo/evaluator.ts",
+        "packages/coding-agent/src/core/avo/probe.ts",
+        "packages/coding-agent/src/core/avo/spec-contract.ts",
+        "packages/coding-agent/src/core/avo/store.ts",
+        "packages/coding-agent/src/core/avo/supervisor.ts",
+				"packages/coding-agent/src/core/avo/verification-environment.ts",
+        "packages/coding-agent/src/core/avo/workspace.ts",
+        "packages/coding-agent/src/core/tools/bash.ts",
+        "packages/coding-agent/src/evals/spec-contract/runner.ts"
+      ],
+      "requiredGates": [
+        "static",
+        "unit",
+        "integration",
+        "behavioral",
+        "adversarial",
+        "independent_review"
+      ],
+      "requiresRuntimeTrace": true,
+      "declaredStatus": "partial",
+      "evidence": [
+        {
+          "evidenceId": "AUTH-001:static-types",
+          "gate": "static",
+          "state": "linked",
+          "mechanism": "compiler",
+          "path": "tsconfig.json",
+          "anchor": "\"noEmit\": true"
+        },
+        {
+          "evidenceId": "AUTH-001:model-opinion-unit",
+          "gate": "unit",
+          "state": "linked",
+          "mechanism": "deterministic_unit_test",
+          "path": "packages/coding-agent/test/avo.test.ts",
+          "anchor": "[AUTH-001] does not promote model opinion into canonical progress"
+        },
+        {
+          "evidenceId": "AUTH-001:asymmetric-trust-unit",
+          "gate": "unit",
+          "state": "linked",
+          "mechanism": "deterministic_unit_test",
+          "path": "packages/coding-agent/test/avo-spec-contract.test.ts",
+          "anchor": "[AUTH-001] accepts only public-key verification and rejects the retired shared-secret trust root"
+        },
+        {
+          "evidenceId": "AUTH-001:closed-verifier-unit",
+          "gate": "adversarial",
+          "state": "linked",
+          "mechanism": "adversarial_test",
+          "path": "packages/coding-agent/test/avo.test.ts",
+          "anchor": "[AUTH-001] binds helpers, configuration, plugins, and runner shadows into the verifier manifest"
+        },
+        {
+          "evidenceId": "AUTH-001:host-session-integration",
+          "gate": "integration",
+          "state": "planned",
+          "mechanism": "deterministic_integration_test",
+          "plan": "Tag and execute a faux-provider session test that attempts to mint external authority from the model path."
+        },
+        {
+          "evidenceId": "AUTH-001:runtime-authority-trace",
+          "gate": "behavioral",
+          "state": "planned",
+          "mechanism": "runtime_trace",
+          "plan": "Capture host receipt issuance, cycle decision, and canonical delivery events in one real task trace."
+        },
+        {
+          "evidenceId": "AUTH-001:receipt-forgery",
+          "gate": "adversarial",
+          "state": "planned",
+          "mechanism": "adversarial_test",
+          "plan": "Attempt issuer, authority, candidate, and payload-digest forgery against the host boundary."
+        },
+        {
+          "evidenceId": "AUTH-001:independent-review",
+          "gate": "independent_review",
+          "state": "planned",
+          "mechanism": "independent_review",
+          "plan": "An independent reviewer traces every authority transition without relying on implementation-authored tests."
+        }
+      ]
+    },
+    {
+      "id": "MEM-001",
+      "domain": "memory",
+      "title": "Verified project memory survives restart without cross-project leakage",
+      "statement": "Verified project memory must survive process restart and remain isolated to the stable identity of the same repository.",
+      "critical": true,
+      "behaviors": {
+        "normal": "A new process in the same repository can retrieve the verified project record.",
+        "failure": "A different repository cannot receive that project record through automatic or deliberate recall.",
+        "ordering": "Persistent ledgers are refreshed before recall in the new process.",
+        "authority": "Only the canonical project ledger determines persisted project memory; session scratch cannot promote itself.",
+        "persistence": "Termination and restart preserve content, verification state, owner, provenance, and project identity."
+      },
+      "sourcePaths": [
+        "packages/coding-agent/src/core/avo/memory.ts",
+        "packages/coding-agent/src/core/avo/runtime.ts",
+        "packages/coding-agent/src/core/avo/store.ts"
+      ],
+      "requiredGates": [
+        "static",
+        "unit",
+        "integration",
+        "behavioral",
+        "adversarial",
+        "independent_review"
+      ],
+      "requiresRuntimeTrace": true,
+      "declaredStatus": "partial",
+      "evidence": [
+        {
+          "evidenceId": "MEM-001:static-types",
+          "gate": "static",
+          "state": "linked",
+          "mechanism": "compiler",
+          "path": "tsconfig.json",
+          "anchor": "\"noEmit\": true"
+        },
+        {
+          "evidenceId": "MEM-001:persistence-unit",
+          "gate": "unit",
+          "state": "linked",
+          "mechanism": "deterministic_unit_test",
+          "path": "packages/coding-agent/test/avo.test.ts",
+          "anchor": "[MEM-001] persists project and global memory independently of session scratch memory"
+        },
+        {
+          "evidenceId": "MEM-001:process-restart",
+          "gate": "integration",
+          "state": "planned",
+          "mechanism": "deterministic_integration_test",
+          "plan": "Write memory, terminate the Prime process, reopen in the same Git project, and retrieve it."
+        },
+        {
+          "evidenceId": "MEM-001:cross-session-trace",
+          "gate": "behavioral",
+          "state": "planned",
+          "mechanism": "runtime_trace",
+          "plan": "Trace a new process refreshing and using the durable memory before candidate generation."
+        },
+        {
+          "evidenceId": "MEM-001:project-isolation",
+          "gate": "adversarial",
+          "state": "planned",
+          "mechanism": "fault_injection",
+          "plan": "Move between repositories, subdirectories, concurrent writers, and corrupt ledgers without leakage or silent replacement."
+        },
+        {
+          "evidenceId": "MEM-001:independent-review",
+          "gate": "independent_review",
+          "state": "planned",
+          "mechanism": "independent_review",
+          "plan": "An independent reviewer audits project identity, restart lifecycle, and ledger locking."
+        }
+      ]
+    },
+    {
+      "id": "MEM-002",
+      "domain": "memory",
+      "title": "Contested or invalidated memory cannot regain verified authority",
+      "statement": "A stale process, migration, duplicate write, or fallback path must not revive contested or invalidated memory as verified evidence.",
+      "critical": true,
+      "behaviors": {
+        "normal": "Current verified memory is recallable according to its scope and role policy.",
+        "failure": "Contested, invalidated, malformed, or legacy-ineligible memory is excluded from authoritative recall.",
+        "ordering": "Conflict and migration hardening run before eligibility and recall scoring.",
+        "authority": "The canonical ledger's strongest current verification state overrides stale session copies.",
+        "persistence": "Contestation and invalidation tombstones survive concurrent saves and process restart."
+      },
+      "sourcePaths": [
+        "packages/coding-agent/src/core/avo/store.ts",
+        "packages/coding-agent/src/core/avo/types.ts"
+      ],
+      "requiredGates": [
+        "static",
+        "unit",
+        "integration",
+        "behavioral",
+        "adversarial",
+        "independent_review"
+      ],
+      "requiresRuntimeTrace": true,
+      "declaredStatus": "partial",
+      "evidence": [
+        {
+          "evidenceId": "MEM-002:static-types",
+          "gate": "static",
+          "state": "linked",
+          "mechanism": "compiler",
+          "path": "tsconfig.json",
+          "anchor": "\"noEmit\": true"
+        },
+        {
+          "evidenceId": "MEM-002:stale-writer-unit",
+          "gate": "unit",
+          "state": "linked",
+          "mechanism": "deterministic_unit_test",
+          "path": "packages/coding-agent/test/avo.test.ts",
+          "anchor": "[MEM-002] does not let an equal-timestamp stale session revive contested project memory"
+        },
+        {
+          "evidenceId": "MEM-002:reopen-integration",
+          "gate": "integration",
+          "state": "planned",
+          "mechanism": "deterministic_integration_test",
+          "plan": "Contest memory in one process, save unrelated state in a stale process, reopen, and verify exclusion."
+        },
+        {
+          "evidenceId": "MEM-002:recall-exclusion-trace",
+          "gate": "behavioral",
+          "state": "planned",
+          "mechanism": "runtime_trace",
+          "plan": "Record a recall trace showing the invalidated memory ID was evaluated and excluded before the model turn."
+        },
+        {
+          "evidenceId": "MEM-002:migration-and-duplicate-adversary",
+          "gate": "adversarial",
+          "state": "planned",
+          "mechanism": "fault_injection",
+          "plan": "Attempt revival through legacy migrations, equal timestamps, duplicate content IDs, and cross-owner writes."
+        },
+        {
+          "evidenceId": "MEM-002:independent-review",
+          "gate": "independent_review",
+          "state": "planned",
+          "mechanism": "independent_review",
+          "plan": "An independent reviewer checks every verification-state merge and recall predicate."
+        }
+      ]
+    },
+    {
+      "id": "ORDER-001",
+      "domain": "ordering",
+      "title": "Automatic memory recall precedes candidate-producing decisions",
+      "statement": "Prime must finish and trace automatic recall before the first root model decision that could use the recalled information.",
+      "critical": true,
+      "behaviors": {
+        "normal": "The root system prompt contains eligible recalled context before the model starts its candidate turn.",
+        "failure": "Recall after candidate generation, missing recall ordering, or untraced fallback cannot count as functional memory use.",
+        "ordering": "Observe task, refresh ledgers, recall memory, rebuild prompt, then start the root agent.",
+        "authority": "The host controls recall timing and records the backend; the model cannot claim it recalled earlier.",
+        "persistence": "The ordering invariant applies on new tasks, queued follow-ups, compaction resumes, and process restarts."
+      },
+      "sourcePaths": [
+        "packages/coding-agent/src/core/agent-session.ts",
+        "packages/coding-agent/src/core/avo/runtime.ts"
+      ],
+      "requiredGates": [
+        "static",
+        "unit",
+        "integration",
+        "behavioral",
+        "adversarial",
+        "independent_review"
+      ],
+      "requiresRuntimeTrace": true,
+      "declaredStatus": "partial",
+      "evidence": [
+        {
+          "evidenceId": "ORDER-001:static-types",
+          "gate": "static",
+          "state": "linked",
+          "mechanism": "compiler",
+          "path": "tsconfig.json",
+          "anchor": "\"noEmit\": true"
+        },
+        {
+          "evidenceId": "ORDER-001:recall-unit",
+          "gate": "unit",
+          "state": "linked",
+          "mechanism": "deterministic_unit_test",
+          "path": "packages/coding-agent/test/avo.test.ts",
+          "anchor": "[ORDER-001] re-resolves live file references and records spontaneous recall outcomes"
+        },
+        {
+          "evidenceId": "ORDER-001:root-turn-order",
+          "gate": "integration",
+          "state": "linked",
+          "mechanism": "deterministic_integration_test",
+          "path": "packages/coding-agent/test/suite/agent-session-avo.test.ts",
+          "anchor": "[ORDER-001] injects automatic recall before the first candidate-producing model turn"
+        },
+        {
+          "evidenceId": "ORDER-001:pre-candidate-trace",
+          "gate": "behavioral",
+          "state": "planned",
+          "mechanism": "runtime_trace",
+          "plan": "Trace task observation, recall completion, prompt rebuild, model start, and candidate creation in timestamp order."
+        },
+        {
+          "evidenceId": "ORDER-001:queue-compaction-adversary",
+          "gate": "adversarial",
+          "state": "planned",
+          "mechanism": "fault_injection",
+          "plan": "Exercise queued follow-ups, compaction, recall timeout, and restart to find candidate-before-recall paths."
+        },
+        {
+          "evidenceId": "ORDER-001:independent-review",
+          "gate": "independent_review",
+          "state": "planned",
+          "mechanism": "independent_review",
+          "plan": "An independent reviewer traces session-input ownership and all root-turn entry paths."
+        }
+      ]
+    },
+    {
+      "id": "ID-001",
+      "domain": "identity",
+      "title": "Evidence and delivery bind to the exact candidate identity",
+      "statement": "Every authoritative evaluation, accepted cycle, experiment result, and delivered answer must bind to the same candidate payload and host-observed workspace or artifact identity.",
+      "critical": true,
+      "behaviors": {
+        "normal": "The currently valid candidate's payload, workspace, receipts, cycle, and canonical delivery have matching identities.",
+        "failure": "Receipts for another candidate, stale workspace, substituted payload, symlink target, or older fallback candidate cannot certify delivery.",
+        "ordering": "Identity is captured before evaluation, rechecked after evaluation, and reconciled again before cycle acceptance and delivery.",
+        "authority": "Candidate declarations are model-authored; workspace, artifact, evaluation, and delivery digests are host-derived.",
+        "persistence": "Migration and reopen must not detach accepted lineage from the receipts and identities that authorized it."
+      },
+      "sourcePaths": [
+        "packages/coding-agent/src/core/agent-session.ts",
+        "packages/coding-agent/src/core/avo/integrity.ts",
+        "packages/coding-agent/src/core/avo/store.ts",
+        "packages/coding-agent/src/core/avo/workspace.ts"
+      ],
+      "requiredGates": [
+        "static",
+        "unit",
+        "integration",
+        "behavioral",
+        "adversarial",
+        "independent_review"
+      ],
+      "requiresRuntimeTrace": true,
+      "declaredStatus": "partial",
+      "evidence": [
+        {
+          "evidenceId": "ID-001:static-types",
+          "gate": "static",
+          "state": "linked",
+          "mechanism": "compiler",
+          "path": "tsconfig.json",
+          "anchor": "\"noEmit\": true"
+        },
+        {
+          "evidenceId": "ID-001:workspace-digest-unit",
+          "gate": "unit",
+          "state": "linked",
+          "mechanism": "deterministic_unit_test",
+          "path": "packages/coding-agent/test/avo.test.ts",
+          "anchor": "[ID-001] changes the host workspace digest when a candidate file changes"
+        },
+        {
+          "evidenceId": "ID-001:stale-workspace-integration",
+          "gate": "integration",
+          "state": "linked",
+          "mechanism": "deterministic_integration_test",
+          "path": "packages/coding-agent/test/suite/agent-session-avo.test.ts",
+          "anchor": "[ID-001] refuses to run a coding receipt after the workspace diverges from its candidate"
+        },
+        {
+          "evidenceId": "ID-001:canonical-delivery-trace",
+          "gate": "behavioral",
+          "state": "planned",
+          "mechanism": "runtime_trace",
+          "plan": "Trace candidate digest through evaluation, accepted cycle, current integrity reconciliation, and exact delivery digest."
+        },
+        {
+          "evidenceId": "ID-001:fallback-substitution",
+          "gate": "adversarial",
+          "state": "linked",
+          "mechanism": "adversarial_test",
+          "path": "packages/coding-agent/test/suite/agent-session-avo.test.ts",
+          "anchor": "[ID-001] binds final delivery to the candidate that currently satisfies a fallback gate"
+        },
+        {
+          "evidenceId": "ID-001:independent-review",
+          "gate": "independent_review",
+          "state": "planned",
+          "mechanism": "independent_review",
+          "plan": "An independent reviewer follows candidate identity through migrations, experiments, fallback selection, and delivery."
+        }
+      ]
+    },
+    {
+      "id": "STATE-001",
+      "domain": "state",
+      "title": "Verification cannot leave or certify stale delivered state",
+      "statement": "A verifier that mutates code or artifacts, or any post-verification corruption, must invalidate the candidate before acceptance and delivery.",
+      "critical": true,
+      "behaviors": {
+        "normal": "Post-command and stop-gate integrity match the candidate snapshot and immutable artifact manifest.",
+        "failure": "Mutation during tests or corruption after a pass records authoritative revision and blocks all stale fallback candidates.",
+        "ordering": "Capture candidate, run verifier, recapture state, complete cycle, reconcile current state, then deliver.",
+        "authority": "Only host filesystem and artifact observations determine current state identity.",
+        "persistence": "A fresh dashboard or process must recompute integrity instead of trusting a stale persisted pass."
+      },
+      "sourcePaths": [
+        "packages/coding-agent/src/core/agent-session.ts",
+        "packages/coding-agent/src/core/avo/integrity.ts",
+        "packages/coding-agent/src/core/avo/workspace.ts",
+        "packages/coding-agent/src/core/tools/bash.ts"
+      ],
+      "requiredGates": [
+        "static",
+        "unit",
+        "integration",
+        "behavioral",
+        "adversarial",
+        "independent_review"
+      ],
+      "requiresRuntimeTrace": true,
+      "declaredStatus": "partial",
+      "evidence": [
+        {
+          "evidenceId": "STATE-001:static-types",
+          "gate": "static",
+          "state": "linked",
+          "mechanism": "compiler",
+          "path": "tsconfig.json",
+          "anchor": "\"noEmit\": true"
+        },
+        {
+          "evidenceId": "STATE-001:integrity-unit",
+          "gate": "unit",
+          "state": "planned",
+          "mechanism": "deterministic_unit_test",
+          "plan": "Directly derive pass and revision from matching and diverged candidate snapshots."
+        },
+        {
+          "evidenceId": "STATE-001:mutating-verifier-integration",
+          "gate": "integration",
+          "state": "linked",
+          "mechanism": "deterministic_integration_test",
+          "path": "packages/coding-agent/test/suite/agent-session-avo.test.ts",
+          "anchor": "[STATE-001] denies a coding test that attempts to mutate the evaluated workspace"
+        },
+        {
+          "evidenceId": "STATE-001:post-command-trace",
+          "gate": "behavioral",
+          "state": "planned",
+          "mechanism": "runtime_trace",
+          "plan": "Trace pre-command candidate digest, post-command digest, integrity receipt, stop gate, and delivered state."
+        },
+        {
+          "evidenceId": "STATE-001:corruption-faults",
+          "gate": "adversarial",
+          "state": "planned",
+          "mechanism": "fault_injection",
+          "plan": "Mutate source during a passing test and corrupt files, artifacts, and symlinks after verification."
+        },
+        {
+          "evidenceId": "STATE-001:independent-review",
+          "gate": "independent_review",
+          "state": "planned",
+          "mechanism": "independent_review",
+          "plan": "An independent reviewer checks all snapshot moments and fallback candidate selection."
+        }
+      ]
+    },
+    {
+      "id": "SYNC-001",
+      "domain": "synchronization",
+      "title": "Dashboard and canonical runtime expose the same current gate",
+      "statement": "The live dashboard must not show a champion, final phase, or passed stop gate that the host-bound canonical runtime currently rejects.",
+      "critical": true,
+      "behaviors": {
+        "normal": "Dashboard phase, champion, experiment outcome, and stop gate match current reconciled canonical state.",
+        "failure": "Missing cycles, corrupted artifacts, stale workspaces, or ineligible legacy experiments display blocked or superseded state.",
+        "ordering": "Read-only integrity reconciliation runs before dashboard projection.",
+        "authority": "The dashboard projects host state; it never invents or independently promotes a candidate.",
+        "persistence": "Reopening the dashboard from disk applies current policy and current filesystem integrity."
+      },
+      "sourcePaths": [
+        "packages/coding-agent/src/cli/avo-dashboard.ts",
+        "packages/coding-agent/src/core/avo/adapters.ts",
+        "packages/coding-agent/src/core/avo/integrity.ts",
+        "packages/coding-agent/src/core/avo/spec-contract.ts"
+      ],
+      "requiredGates": [
+        "static",
+        "unit",
+        "integration",
+        "behavioral",
+        "adversarial",
+        "independent_review"
+      ],
+      "requiresRuntimeTrace": true,
+      "declaredStatus": "partial",
+      "evidence": [
+        {
+          "evidenceId": "SYNC-001:static-types",
+          "gate": "static",
+          "state": "linked",
+          "mechanism": "compiler",
+          "path": "tsconfig.json",
+          "anchor": "\"noEmit\": true"
+        },
+        {
+          "evidenceId": "SYNC-001:pre-cycle-dashboard-unit",
+          "gate": "unit",
+          "state": "linked",
+          "mechanism": "deterministic_unit_test",
+          "path": "packages/coding-agent/test/avo.test.ts",
+          "anchor": "[SYNC-001] does not show the dashboard final gate before a candidate cycle is accepted"
+        },
+        {
+          "evidenceId": "SYNC-001:disk-dashboard-integration",
+          "gate": "integration",
+          "state": "linked",
+          "mechanism": "deterministic_integration_test",
+          "path": "packages/coding-agent/test/avo-dashboard.test.ts",
+          "anchor": "[SYNC-001] shows missing behavioral proof instead of a stale successful coding gate"
+        },
+        {
+          "evidenceId": "SYNC-001:projection-trace",
+          "gate": "behavioral",
+          "state": "planned",
+          "mechanism": "runtime_trace",
+          "plan": "Emit one trace containing canonical candidate, experiment outcome, integrity reconciliation, gate, and dashboard phase."
+        },
+        {
+          "evidenceId": "SYNC-001:stale-dashboard-adversary",
+          "gate": "adversarial",
+          "state": "planned",
+          "mechanism": "fault_injection",
+          "plan": "Corrupt a verified artifact, substitute workspace state, and reopen legacy experiment state before projection."
+        },
+        {
+          "evidenceId": "SYNC-001:independent-review",
+          "gate": "independent_review",
+          "state": "planned",
+          "mechanism": "independent_review",
+          "plan": "An independent reviewer compares every dashboard field with the canonical store derivation."
+        }
+      ]
+    },
+    {
+      "id": "FALLBACK-001",
+      "domain": "fallback",
+      "title": "Memory backend failures and fallbacks are never silent",
+      "statement": "If NOOA recall fails or host fallback is used, Prime must persist and expose the backend, status, and bounded reason instead of presenting the turn as an ordinary NOOA recall.",
+      "critical": true,
+      "behaviors": {
+        "normal": "A successful NOOA recall is recorded as nooa-memory with the selected memory IDs.",
+        "failure": "Bridge errors and unexpected exceptions are recorded as fallback or failed with a bounded reason and explicit prompt warning.",
+        "ordering": "Backend selection and failure recording complete before the root model turn.",
+        "authority": "Only the host records recall backend and status; the model cannot claim NOOA was used.",
+        "persistence": "Recall backend, status, and reason survive state save, reopen, and dashboard projection."
+      },
+      "sourcePaths": [
+        "packages/coding-agent/src/core/agent-session.ts",
+        "packages/coding-agent/src/core/avo/adapters.ts",
+        "packages/coding-agent/src/core/avo/runtime.ts",
+        "packages/coding-agent/src/core/avo/store.ts",
+        "packages/coding-agent/src/core/avo/types.ts"
+      ],
+      "requiredGates": [
+        "static",
+        "unit",
+        "integration",
+        "behavioral",
+        "adversarial",
+        "independent_review"
+      ],
+      "requiresRuntimeTrace": true,
+      "declaredStatus": "partial",
+      "evidence": [
+        {
+          "evidenceId": "FALLBACK-001:static-types",
+          "gate": "static",
+          "state": "linked",
+          "mechanism": "compiler",
+          "path": "tsconfig.json",
+          "anchor": "\"noEmit\": true"
+        },
+        {
+          "evidenceId": "FALLBACK-001:backend-unit",
+          "gate": "unit",
+          "state": "linked",
+          "mechanism": "deterministic_unit_test",
+          "path": "packages/coding-agent/test/avo.test.ts",
+          "anchor": "[FALLBACK-001] records host fallback without claiming NOOA retrieval"
+        },
+        {
+          "evidenceId": "FALLBACK-001:root-prompt-integration",
+          "gate": "integration",
+          "state": "linked",
+          "mechanism": "deterministic_integration_test",
+          "path": "packages/coding-agent/test/suite/agent-session-avo.test.ts",
+          "anchor": "[FALLBACK-001] exposes an unexpected recall failure before the root model turn"
+        },
+        {
+          "evidenceId": "FALLBACK-001:backend-trace",
+          "gate": "behavioral",
+          "state": "planned",
+          "mechanism": "runtime_trace",
+          "plan": "Trace attempted backend, fallback selection, reason, selected IDs, and model-start ordering."
+        },
+        {
+          "evidenceId": "FALLBACK-001:sidecar-faults",
+          "gate": "adversarial",
+          "state": "planned",
+          "mechanism": "fault_injection",
+          "plan": "Inject timeout, invalid JSON, process exit, thrown runner error, and absent bridge."
+        },
+        {
+          "evidenceId": "FALLBACK-001:independent-review",
+          "gate": "independent_review",
+          "state": "planned",
+          "mechanism": "independent_review",
+          "plan": "An independent reviewer searches every recall catch and fallback path for unrecorded success."
+        }
+      ]
+    },
+    {
+      "id": "LIFE-001",
+      "domain": "lifecycle",
+      "title": "Accepted state survives restart without duplication or identity drift",
+      "statement": "Crash, restart, partial write, and resume paths must preserve authoritative lineage and must not duplicate cycles, experiment cells, or evidence bindings.",
+      "critical": true,
+      "behaviors": {
+        "normal": "A clean restart restores the same accepted lineage and current gate state.",
+        "failure": "Corrupt or partial state is preserved for diagnosis and fails closed; resumed work cannot duplicate authoritative cells.",
+        "ordering": "Durable state is atomically saved before completion is exposed and validated before reuse.",
+        "authority": "Only retained host receipts and current identity bindings may authorize resumed state.",
+        "persistence": "Cycles, evaluations, experiment reservations, memory provenance, and completion status retain their canonical IDs."
+      },
+      "sourcePaths": [
+        "packages/coding-agent/src/core/avo/runtime.ts",
+        "packages/coding-agent/src/core/avo/store.ts"
+      ],
+      "requiredGates": [
+        "static",
+        "unit",
+        "integration",
+        "behavioral",
+        "adversarial",
+        "independent_review"
+      ],
+      "requiresRuntimeTrace": true,
+      "declaredStatus": "partial",
+      "evidence": [
+        {
+          "evidenceId": "LIFE-001:static-types",
+          "gate": "static",
+          "state": "linked",
+          "mechanism": "compiler",
+          "path": "tsconfig.json",
+          "anchor": "\"noEmit\": true"
+        },
+        {
+          "evidenceId": "LIFE-001:lineage-reopen-unit",
+          "gate": "unit",
+          "state": "linked",
+          "mechanism": "deterministic_unit_test",
+          "path": "packages/coding-agent/test/avo.test.ts",
+          "anchor": "[LIFE-001] persists a host-authoritative accepted lineage across restart"
+        },
+        {
+          "evidenceId": "LIFE-001:process-resume-integration",
+          "gate": "integration",
+          "state": "planned",
+          "mechanism": "deterministic_integration_test",
+          "plan": "Kill and restart the Prime process during an incomplete experiment, then finish only the missing cells."
+        },
+        {
+          "evidenceId": "LIFE-001:resume-trace",
+          "gate": "behavioral",
+          "state": "planned",
+          "mechanism": "runtime_trace",
+          "plan": "Trace save, process termination, reopen, migration, resumed selection, and final canonical IDs."
+        },
+        {
+          "evidenceId": "LIFE-001:partial-write-adversary",
+          "gate": "adversarial",
+          "state": "planned",
+          "mechanism": "fault_injection",
+          "plan": "Inject malformed JSON, partial atomic rename, duplicate callbacks, and restart between trial and aggregate."
+        },
+        {
+          "evidenceId": "LIFE-001:independent-review",
+          "gate": "independent_review",
+          "state": "planned",
+          "mechanism": "independent_review",
+          "plan": "An independent reviewer audits every state transition and idempotency key across restart."
+        }
+      ]
+    },
+    {
+      "id": "SPEC-001",
+      "domain": "specification",
+      "title": "Behavioral proof cannot be overstated or forged",
+      "statement": "The executable contract must reject missing, stale, self-issued, cross-task replayed, path-escaping, or cryptographically untrusted evidence and must expose protected implementation changes without a mapped invariant.",
+      "critical": true,
+      "behaviors": {
+        "normal": "Current independently signed receipts from six heterogeneous gates derive verified status for the exact task, workspace, contract, requirement, and source digest.",
+        "failure": "Untrusted or stale receipts, wrong task or workspace bindings, weakened semantics, reused IDs, unsafe paths, and unmapped protected changes fail closed.",
+        "ordering": "The host captures the contract, maps candidate changes, verifies receipts, and only then permits canonical acceptance.",
+        "authority": "The coding model can edit candidates and linked tests but has only the Ed25519 public key, so it cannot mint the independent verifier's signature or role.",
+        "persistence": "External receipts remain valid only for the signed task run, candidate workspace, captured contract, requirement definition, and mapped source digest."
+      },
+      "sourcePaths": [
+        "package.json",
+        "packages/coding-agent/package.json",
+        "packages/coding-agent/spec/requirements.json",
+        "packages/coding-agent/src/core/agent-session.ts",
+        "packages/coding-agent/src/core/avo/index.ts",
+        "packages/coding-agent/src/core/avo/probe.ts",
+        "packages/coding-agent/src/core/avo/spec-contract.ts",
+        "packages/coding-agent/src/core/avo/supervisor.ts",
+        "packages/coding-agent/src/core/avo/types.ts",
+        "packages/coding-agent/src/core/avo/workspace.ts",
+        "packages/coding-agent/src/core/tools/bash.ts",
+        "packages/coding-agent/src/evals/spec-contract/runner.ts"
+      ],
+      "requiredGates": [
+        "static",
+        "unit",
+        "integration",
+        "behavioral",
+        "adversarial",
+        "independent_review"
+      ],
+      "requiresRuntimeTrace": true,
+      "declaredStatus": "partial",
+      "evidence": [
+        {
+          "evidenceId": "SPEC-001:static-types",
+          "gate": "static",
+          "state": "linked",
+          "mechanism": "compiler",
+          "path": "tsconfig.json",
+          "anchor": "\"noEmit\": true"
+        },
+        {
+          "evidenceId": "SPEC-001:receipt-validator-unit",
+          "gate": "unit",
+          "state": "linked",
+          "mechanism": "deterministic_unit_test",
+          "path": "packages/coding-agent/test/avo-spec-contract.test.ts",
+          "anchor": "[SPEC-001] accepts verified only with six current receipts"
+        },
+        {
+          "evidenceId": "SPEC-001:host-overlay-integration",
+          "gate": "integration",
+          "state": "linked",
+          "mechanism": "deterministic_integration_test",
+          "path": "packages/coding-agent/test/suite/agent-session-avo.test.ts",
+          "anchor": "[SPEC-001] blocks ordinary test success without affected invariant receipts and rejects contract weakening"
+        },
+        {
+          "evidenceId": "SPEC-001:acceptance-trace",
+          "gate": "behavioral",
+          "state": "planned",
+          "mechanism": "runtime_trace",
+          "plan": "Trace baseline contract capture, changed-path mapping, receipt verification, and final candidate decision."
+        },
+        {
+          "evidenceId": "SPEC-001:verifier-adversary",
+          "gate": "adversarial",
+          "state": "linked",
+          "mechanism": "adversarial_test",
+          "path": "packages/coding-agent/test/avo-spec-contract.test.ts",
+          "anchor": "[SPEC-001] rejects self-review, stale semantics, forged receipts, and path escapes"
+        },
+        {
+          "evidenceId": "SPEC-001:independent-review",
+          "gate": "independent_review",
+          "state": "planned",
+          "mechanism": "independent_review",
+          "plan": "An independent reviewer attempts to falsify the checker, trust root, impact mapping, and host acceptance integration."
+        }
+      ]
+    }
+  ]
+}

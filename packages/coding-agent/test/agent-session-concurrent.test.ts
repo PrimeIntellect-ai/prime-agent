@@ -115,6 +115,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			cwd: tempDir,
 			modelRegistry,
 			resourceLoader: createTestResourceLoader(),
+			enforceAvoCompletion: false,
 		});
 
 		return session;
@@ -302,6 +303,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			cwd: tempDir,
 			modelRegistry,
 			resourceLoader: createTestResourceLoader({ extensionsResult }),
+			enforceAvoCompletion: false,
 		});
 		session.subscribe((event) => {
 			if (event.type === "session_action_update") {
@@ -396,6 +398,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			cwd: tempDir,
 			modelRegistry,
 			resourceLoader: createTestResourceLoader({ extensionsResult }),
+			enforceAvoCompletion: false,
 		});
 
 		await session.acceptAgentMessagePrompt("agent-to-agent payload", { expandPromptTemplates: false });
@@ -458,6 +461,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			cwd: tempDir,
 			modelRegistry,
 			resourceLoader: createTestResourceLoader({ extensionsResult }),
+			enforceAvoCompletion: false,
 		});
 
 		await session.prompt("host gate follow-up", { internalPrompt: true });
@@ -499,6 +503,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			cwd: tempDir,
 			modelRegistry,
 			resourceLoader: createTestResourceLoader(),
+			enforceAvoCompletion: false,
 		});
 
 		await session.prompt("First message");
@@ -601,6 +606,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			modelRegistry,
 			resourceLoader: createTestResourceLoader(),
 			baseToolsOverride: { dummy: tool },
+			enforceAvoCompletion: false,
 		});
 
 		const snapshots: string[][] = [];
@@ -747,6 +753,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			modelRegistry,
 			resourceLoader: createTestResourceLoader(),
 			baseToolsOverride: { dummy: tool },
+			enforceAvoCompletion: false,
 		});
 
 		const sessionWithRunner = session as unknown as {

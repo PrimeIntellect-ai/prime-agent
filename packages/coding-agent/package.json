@@ -1,6 +1,6 @@
 {
 	"name": "@earendil-works/pi-coding-agent",
-	"version": "0.8.0",
+	"version": "0.8.1",
 	"description": "Coding agent CLI with IPython-backed tools and session management",
 	"type": "module",
 	"piConfig": {
@@ -39,18 +39,23 @@
 		"copy-binary-assets": "shx cp package.json dist/ && shx cp README.md dist/ && shx cp CHANGELOG.md dist/ && shx mkdir -p dist/theme && shx cp src/modes/interactive/theme/*.json dist/theme/ && shx mkdir -p dist/assets && shx cp src/modes/interactive/assets/*.png dist/assets/ && shx mkdir -p dist/export-html/vendor && shx cp src/core/export-html/template.html dist/export-html/ && shx cp src/core/export-html/vendor/*.js dist/export-html/vendor/ && shx cp -r docs dist/ && shx cp -r examples dist/ && shx cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm dist/ && shx rm -rf dist/skills && shx cp -r skills dist/skills",
 		"test": "vitest --run",
 		"test:ci": "tsx src/core/kernel/bootstrap-cli.ts && vitest --run --exclude test/daemon-supervisor-process.test.ts",
+		"test:nooa-behavior": "uv run --quiet --no-project --python 3.13 --with nooa-memory==0.0.9 python skills/autoresearch/evals/nooa_behavior_eval.py",
 		"test:process": "vitest --run test/daemon-supervisor-process.test.ts",
 		"test:process-stress": "vitest --run --tagsFilter process-stress test/daemon-supervisor-process.test.ts",
+		"eval:integrity": "tsx src/evals/prime-integrity/runner.ts",
+		"eval:kernelbench": "tsx src/evals/kernelbench/runner.ts",
+		"eval:spec-contract": "tsx src/evals/spec-contract/runner.ts",
+		"eval:specbench": "tsx src/evals/specbench/runner.ts",
 		"postinstall": "node postinstall.cjs",
 		"prepublishOnly": "npm run clean && npm run build",
 		"bundle": "node scripts/bundle.mjs",
-		"test:kernel": "vitest --run --no-file-parallelism --tagsFilter kernel-heavy test/acp-kernel-features.test.ts test/acp-cold-cli.test.ts test/kernel-goal-skill.test.ts test/kernel-state-roundtrip.test.ts test/kernel-mcp-shutdown.test.ts"
+		"test:kernel": "vitest --run --no-file-parallelism --tagsFilter kernel-heavy test/acp-kernel-features.test.ts test/acp-cold-cli.test.ts test/ipython-bootstrap.test.ts test/kernel-agent-message-skill.test.ts test/kernel-agent-observe-skill.test.ts test/kernel-attach-image-skill.test.ts test/kernel-goal-skill.test.ts test/kernel-rlm-heartbeat-skill.test.ts test/kernel-state-roundtrip.test.ts test/kernel-mcp-shutdown.test.ts"
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "^1.3.0",
-		"@earendil-works/pi-agent-core": "^0.8.0",
-		"@earendil-works/pi-ai": "^0.8.0",
-		"@earendil-works/pi-tui": "^0.8.0",
+		"@earendil-works/pi-agent-core": "^0.8.1",
+		"@earendil-works/pi-ai": "^0.8.1",
+		"@earendil-works/pi-tui": "^0.8.1",
 		"@silvia-odwyer/photon-node": "^0.3.4",
 		"chalk": "^5.5.0",
 		"cli-highlight": "^2.1.11",

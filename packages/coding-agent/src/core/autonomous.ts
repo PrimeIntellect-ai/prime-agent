@@ -30,6 +30,11 @@ export interface AgentAutonomousGateFailure {
 	output: string;
 }
 
+export interface AgentAutonomousTerminalEvidence {
+	kind: "avo_completion";
+	runId: string;
+}
+
 export interface AgentAutonomousStatus {
 	enabled: boolean;
 	continuationsUsed: number;
@@ -40,6 +45,7 @@ export interface AgentAutonomousStatus {
 	gates: Required<AgentAutonomousGateConfig>;
 	gateAttempts: Record<string, number>;
 	lastGateFailure?: AgentAutonomousGateFailure;
+	terminalEvidence?: AgentAutonomousTerminalEvidence;
 }
 
 export const DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT =

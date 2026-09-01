@@ -1,0 +1,18 @@
+[project]
+name = "avo"
+version = "0.1.0"
+description = "Prime Agent universal AVO control plane"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+nooa = [
+  "nooa-memory>=0.0.9,<0.0.10 ; python_version >= '3.12' and python_version < '3.14'",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/avo"]

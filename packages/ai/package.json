@@ -1,6 +1,6 @@
 {
 	"name": "@earendil-works/pi-ai",
-	"version": "0.8.0",
+	"version": "0.8.1",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -64,6 +64,7 @@
 	],
 	"scripts": {
 		"clean": "shx rm -rf dist",
+		"check:models-live": "npx tsx scripts/generate-models.ts --check-live",
 		"generate-models": "npx tsx scripts/generate-models.ts",
 		"build": "npm run generate-models && tsgo -p tsconfig.build.json",
 		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",

@@ -1,8 +1,19 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { lookup } from "node:dns/promises";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
+import type { LookupFunction } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
 	Agent,
 	type AgentContext,
@@ -22,6 +33,8 @@ import type {
 	Model,
 	ServiceTier,
 	TextContent,
+	ToolCall,
+	ToolResultMessage,
 	Usage,
 	UserMessage,
 } from "@earendil-works/pi-ai";
@@ -34,6 +47,13 @@ import {
 	resetApiProviders,
 	supportsFastMode,
 } from "@earendil-works/pi-ai";
+import {
+	Agent as UndiciAgent,
+	type RequestInit as UndiciRequestInit,
+	type Response as UndiciResponse,
+	fetch as undiciFetch,
+} from "undici";
+import { getAgentDir } from "../config.js";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";
@@ -83,12 +103,122 @@ import {
 	type AutonomousRuntimeState,
 	addAutonomousContinuation,
 	addAutonomousUsage,
+	autonomousLimitReason,
 	autonomousStatus,
 	createAutonomousRuntimeState,
 	nextAutonomousContinuation,
 	refreshAutonomousQualityGates,
 	setAutonomousEnabled,
 } from "./autonomous.js";
+import {
+	AUTORESEARCH_SKILL_NAME,
+	type AutoresearchPeerReviewVerification,
+	type AutoresearchPublication,
+	type AutoresearchPublicationVerification,
+	type AutoresearchReviewerRole,
+	AutoresearchStore,
+	buildAutoresearchReviewerPrompts,
+	buildAutoresearchSupervisorBootstrapPrompt,
+	buildAutoresearchSupervisorPrompt,
+	hasApplicablePeerReviewEvidence,
+	isPublicAutoresearchAddress,
+	parseAutoresearchCandidateInput,
+	parseAutoresearchClaimInput,
+	parseAutoresearchClaimUpdateInput,
+	parseAutoresearchCycleInput,
+	parseAutoresearchExperimentInput,
+	parseAutoresearchMemoryInput,
+	parseAutoresearchMemoryReuseInput,
+	parseAutoresearchPeerReviewEvidenceInput,
+	parseAutoresearchPublicationInput,
+	parseAutoresearchSearchReceiptInput,
+	parseAutoresearchSupervisionInput,
+	visibleAutoresearchEvidenceText,
+} from "./autoresearch.js";
+import {
+	AVO_HORIZONS,
+	AVO_HOST_REQUEST_TYPES,
+	AVO_PYTHON_PROBE_MAX_CASES,
+	AVO_SKILL_NAME,
+	AVO_VERIFICATION_BROKER_PYTHON_AUTHORITY_ENV,
+	type AvoEvaluationReceipt,
+	type AvoHorizonSelection,
+	type AvoIndependentClaimVerdict,
+	AvoProgressWatchdog,
+	type AvoProgressWatchdogAssessment,
+	type AvoPythonProbeBindings,
+	type AvoPythonProbeBundle,
+	type AvoPythonProbeExecutorAvailability,
+	type AvoPythonProbePlan,
+	type AvoPythonProbeReport,
+	type AvoRunState,
+	AvoSessionRuntime,
+	type AvoStopGate,
+	type AvoVerificationBrokerReceipt,
+	applyAvoSpecContractStopGate,
+	assertAvoClaimSourceContextSafe,
+	assertAvoClaimVerifierQuoteSafe,
+	assertAvoSpecReceiptTrustConfiguration,
+	assessAvoCandidateIntegrity,
+	assessAvoClaimEvidence,
+	assessAvoHostCommand,
+	assessAvoPythonProbeAdequacy,
+	assessAvoTestTrust,
+	avoClaimVerifierMarker,
+	avoVerificationBrokerGrantsPythonSemanticAuthority,
+	avoVerificationBrokerReceiptMatchesWorkspace,
+	buildAvoClaimVerifierPrompt,
+	buildAvoMemoryReasonerPrompt,
+	buildAvoMemoryReconcilerPrompt,
+	buildAvoMemoryReconciliationVerifierPrompt,
+	buildAvoMemoryVerifierPrompt,
+	buildAvoRuntimePrompt,
+	buildAvoSupervisorBootstrapPrompt,
+	buildAvoSupervisorMessage,
+	buildAvoSupervisorPacket,
+	captureAvoArtifactPathBaseline,
+	captureAvoCodingVerificationBaseline,
+	captureAvoPythonProbeBundle,
+	captureAvoSpecContractBaseline,
+	captureAvoVerificationHarnessManifest,
+	captureAvoWorkspaceSnapshot,
+	classifyAvoHostEvaluationCommand,
+	combineAvoClaimEvidenceAssessments,
+	createAvoVerificationBrokerBashOperations,
+	deriveAvoDeterministicArithmeticContract,
+	deriveAvoObservedTestIdentities,
+	deriveAvoProgressWatchdogSnapshot,
+	deriveAvoSpecSemanticCoverage,
+	deriveAvoWorkspaceImpactPaths,
+	digestAvoDeliveryText,
+	digestAvoPayload,
+	digestAvoPythonProbeApplicability,
+	executeAvoPythonProbeSandbox,
+	findAvoSupervisorResponseText,
+	getAvoPythonProbeExecutorAvailability,
+	inspectAvoPythonPublicCallables,
+	isAvoFeatureAblated,
+	parseAvoAssumptionResolutionInput,
+	parseAvoCandidateInput,
+	parseAvoClaimVerifierMessage,
+	parseAvoCriticalAssumptionInput,
+	parseAvoCycleInput,
+	parseAvoEvaluationInput,
+	parseAvoExperimentInput,
+	parseAvoMemoryInput,
+	parseAvoMemoryReasonerMessage,
+	parseAvoMemoryReconcilerMessage,
+	parseAvoMemoryReconciliationVerifierMessage,
+	parseAvoMemoryVerifierMessage,
+	parseAvoObligationCoverageInput,
+	parseAvoObligationInput,
+	parseAvoPythonProbePlan,
+	parseAvoSupervisorMessage,
+	parseAvoTrialInput,
+	parseAvoTrialMetricsOutput,
+	parseAvoTrialRunInput,
+	requiresAvoAdversarialReview,
+} from "./avo/index.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 import {
 	COMPACT_SKILL_NAME,
@@ -267,7 +397,11 @@ import {
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
-import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
+import {
+	type BashOperations,
+	createLocalBashOperations,
+	createReadOnlyVerificationBashOperations,
+} from "./tools/bash.js";
 import { createAllToolDefinitions } from "./tools/index.js";
 import { IpythonKernelProvisioner } from "./tools/ipython.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
@@ -455,6 +589,8 @@ export interface AgentSessionConfig {
 	 * is 0 and no persisted thread_goal_state entry exists in the branch.
 	 */
 	initialGoal?: { objective: string; tokenBudget?: number };
+	/** Enforce the default AVO gate and canonical delivery at root turn completion. Default: true. */
+	enforceAvoCompletion?: boolean;
 }
 
 export interface ExtensionBindings {
@@ -597,6 +733,7 @@ interface PreparedTurnPayload extends SessionTurnPayload {
 	queueVisible: boolean;
 	acceptedAgentMessage: boolean;
 	acceptedBeforeCompletion: boolean;
+	avoObservedRunId?: string;
 	captureRunMessages?: Set<AgentMessage>;
 	cancelledDispatchEnded?: boolean;
 }
@@ -658,6 +795,7 @@ export type SessionActionRecoveryPayload =
 			queueVisible: boolean;
 			acceptedAgentMessage: boolean;
 			acceptedBeforeCompletion: boolean;
+			avoObservedRunId?: string;
 	  }
 	| {
 			kind: "session_command";
@@ -986,6 +1124,40 @@ function readAssistantText(message: AssistantMessage): string {
 		.join("");
 }
 
+function readAvoAssistantDeliveryText(message: AssistantMessage): string {
+	return message.content
+		.filter((block) => {
+			if (block.type !== "text") return false;
+			if (!isObjectRecord(block.providerMetadata)) return true;
+			return !isObjectRecord(block.providerMetadata.googleSearchGrounding);
+		})
+		.map((block) => (block.type === "text" ? block.text : ""))
+		.join("");
+}
+
+export function extractMarkedPersistedAgentMessage(details: unknown, marker: string): string | undefined {
+	if (!isObjectRecord(details) || details.status !== "ok" || !Array.isArray(details.sentAgentMessages)) {
+		return undefined;
+	}
+	for (const value of [...details.sentAgentMessages].reverse()) {
+		if (!isObjectRecord(value) || !isObjectRecord(value.target)) continue;
+		if (
+			typeof value.id !== "string" ||
+			!value.id.startsWith("agentmsg_") ||
+			typeof value.message !== "string" ||
+			!value.message.includes(marker) ||
+			(value.deliveryStatus !== "queued" && value.deliveryStatus !== "delivered") ||
+			value.receiverRole !== "parent" ||
+			typeof value.target.activeSessionId !== "string" ||
+			typeof value.target.sessionId !== "string"
+		) {
+			continue;
+		}
+		return value.message;
+	}
+	return undefined;
+}
+
 function waitForPromiseOrAbort<T>(
 	promise: Promise<T>,
 	signal: AbortSignal | undefined,
@@ -1013,6 +1185,28 @@ function waitForPromiseOrAbort<T>(
 			},
 		);
 	});
+}
+
+/** Maximum time graceful disposal waits for an in-flight refinement before aborting it. */
+export const REFINEMENT_DISPOSAL_GRACE_MS = 5_000;
+/** Hard upper bound for disposeAsync(); expiry forces synchronous teardown and rejects. */
+export const SESSION_DISPOSAL_TIMEOUT_MS = 30_000;
+
+const DEFAULT_AUTORESEARCH_SUPERVISOR_TIMEOUT_MS = 60_000;
+const MAX_AUTORESEARCH_SUPERVISOR_TIMEOUT_MS = 300_000;
+
+function parseAutoresearchSupervisorTimeoutMs(value: unknown): number {
+	if (value === undefined) return DEFAULT_AUTORESEARCH_SUPERVISOR_TIMEOUT_MS;
+	if (
+		!Number.isInteger(value) ||
+		(value as number) < 1 ||
+		(value as number) > MAX_AUTORESEARCH_SUPERVISOR_TIMEOUT_MS
+	) {
+		throw new Error(
+			`autoresearch supervisor_timeout_ms must be an integer from 1 to ${MAX_AUTORESEARCH_SUPERVISOR_TIMEOUT_MS}`,
+		);
+	}
+	return value as number;
 }
 
 function attributeChildUsage(parentUsage: Usage, childUsage: Usage): void {
@@ -1125,6 +1319,21 @@ export class AgentSession {
 	private _rlmHeartbeatController?: AgentRlmHeartbeatController;
 	private _agentMessageController?: AgentSessionMessageController;
 	private _agentObserveController?: AgentObserveController;
+	private _avoRuntime?: AvoSessionRuntime;
+	private _avoMemoryContext = "";
+	private readonly _enforceAvoCompletion: boolean;
+	private readonly _avoProgressWatchdog = new AvoProgressWatchdog();
+	private readonly _avoProgressWatchdogAssessments = new WeakMap<object, AvoProgressWatchdogAssessment>();
+	private _avoToolProgressRunId?: string;
+	private _avoToolProgressToken?: string;
+	private _avoToolNoProgressBatches = 0;
+	private _avoToolInterventionQueued = false;
+	private _avoToolInterventionCount = 0;
+	private _avoToolLastInterventionBatch = 0;
+	private _avoCanonicalDeliveryQueuedRunId?: string;
+	private _avoSupervisorBoundToRuntime = false;
+	private _autoresearchStore?: AutoresearchStore;
+	private _autoresearchSupervisorBoundToRuntime = false;
 	private _mcpManager?: McpManager;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
@@ -1222,6 +1431,7 @@ export class AgentSession {
 	};
 
 	constructor(config: AgentSessionConfig) {
+		assertAvoSpecReceiptTrustConfiguration(process.env);
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
@@ -1254,6 +1464,23 @@ export class AgentSession {
 		const resolvedRlmMaxDepth = this._resolveRlmMaxDepth();
 		this._rlmMaxDepth = resolvedRlmMaxDepth.maxDepth;
 		this._rlmMaxDepthSource = resolvedRlmMaxDepth.source;
+		this._avoRuntime =
+			this._rlmDepth === 0
+				? new AvoSessionRuntime(
+						this.sessionManager.getSessionArtifactDir(),
+						this.sessionManager.getSessionId(),
+						undefined,
+						this._cwd,
+						this._agentDir ?? getAgentDir(),
+						undefined,
+						this._avoWorkspaceExcludedRoots(),
+					)
+				: undefined;
+		this._enforceAvoCompletion = config.enforceAvoCompletion ?? true;
+		this._autoresearchStore =
+			this._rlmDepth === 0
+				? new AutoresearchStore(this.sessionManager.getSessionArtifactDir(), undefined, this._cwd)
+				: undefined;
 		this._prewarmIpythonKernel = (config.prewarmIpythonKernel ?? false) && this._rlmDepth === 0;
 		this._autoRefineReviewer = config.autoRefineReviewer;
 		this._serializedRefine = config.serializedRefine ?? false;
@@ -1422,12 +1649,14 @@ export class AgentSession {
 	 */
 	private _installAgentToolHooks(): void {
 		this.agent.beforeToolCall = async ({ toolCall, args }) => {
+			await this._agentEventQueue;
+			const probationReason = this._avoToolProbationReason(toolCall.name, args);
+			if (probationReason) return { block: true, reason: probationReason };
+
 			const runner = this._extensionRunner;
 			if (!runner.hasHandlers("tool_call")) {
 				return undefined;
 			}
-
-			await this._agentEventQueue;
 
 			try {
 				return await runner.emitToolCall({
@@ -2196,7 +2425,10 @@ export class AgentSession {
 	}
 
 	private async _shouldStopAfterTurn(context: ShouldStopAfterTurnContext): Promise<boolean> {
-		if (this._stopGoalContinuationForTerminalMessage(context.message)) {
+		if (
+			this._stopGoalContinuationForTerminalMessage(context.message) &&
+			(!this._enforceAvoCompletion || this._avoRuntime?.getState().status !== "active")
+		) {
 			return true;
 		}
 		try {
@@ -2223,6 +2455,7 @@ export class AgentSession {
 			await this._agentEventQueue;
 			await this._runSerializedRefineCheckpoint();
 		}
+		if (this._steeringStopPending) await this._completeAvoCanonicalDeliveryIfMatching(context);
 		if (await this._shouldStopForThresholdCompaction(context)) {
 			return true;
 		}
@@ -2233,14 +2466,46 @@ export class AgentSession {
 
 	private async _shouldStopForThresholdCompaction(context: ShouldStopAfterTurnContext): Promise<boolean> {
 		this._continueAfterThresholdCompaction = false;
-		if (this._pendingRequestedCompaction === undefined && !(await this._thresholdCompactionNeeded(context))) {
+		const thresholdNeeded =
+			this._pendingRequestedCompaction === undefined && (await this._thresholdCompactionNeeded(context));
+		if (this._pendingRequestedCompaction === undefined && !thresholdNeeded) {
 			return false;
+		}
+		if (thresholdNeeded) {
+			const avoDisposition = await this._queueAvoContinuationForThresholdCompaction(context);
+			if (avoDisposition === "queued") {
+				this._continueAfterThresholdCompaction = true;
+			} else if (
+				avoDisposition === "none" &&
+				(this._queueGoalContinuationForThresholdCompaction(context.message) ||
+					(await this._queueAutonomousContinuationForThresholdCompaction(context.message)))
+			) {
+				this._continueAfterThresholdCompaction = true;
+			}
 		}
 
 		const lastMessage = this.agent.state.messages[this.agent.state.messages.length - 1];
 		// A queued continuation disproves the assistant-last "task finished" heuristic, so preserve a true set above.
 		this._continueAfterThresholdCompaction ||= lastMessage !== undefined && lastMessage.role !== "assistant";
 		return true;
+	}
+
+	private async _queueAvoContinuationForThresholdCompaction(
+		context: ShouldStopAfterTurnContext,
+	): Promise<"queued" | "completed" | "none"> {
+		const continuation = await this._getAvoCompletionContinuation(context, this.agent.signal);
+		if (!continuation) {
+			return this._enforceAvoCompletion && this._avoRuntime?.getState().status === "completed"
+				? "completed"
+				: "none";
+		}
+		const normalized = normalizeMessageContent(continuation.content);
+		this._admitSessionInput(
+			this._createPreparedTurnAction("followUp", normalized.text, normalized.images, {
+				message: continuation,
+			}),
+		);
+		return "queued";
 	}
 
 	/**
@@ -2733,13 +2998,6 @@ export class AgentSession {
 		if (contextTokens === undefined || !shouldCompact(contextTokens, contextWindow, settings)) {
 			return false;
 		}
-
-		// Goal continuation takes exclusive priority over autonomous continuation, matching _getContinuationMessages.
-		if (this._queueGoalContinuationForThresholdCompaction(context.message)) {
-			this._continueAfterThresholdCompaction = true;
-		} else if (await this._queueAutonomousContinuationForThresholdCompaction(context.message)) {
-			this._continueAfterThresholdCompaction = true;
-		}
 		return true;
 	}
 
@@ -3164,6 +3422,4329 @@ export class AgentSession {
 		}
 	}
 
+	private _requireAvoRuntime(): AvoSessionRuntime {
+		if (!this._avoRuntime || this._rlmDepth !== 0) {
+			throw new Error("AVO state is only available in a root agent session");
+		}
+		return this._avoRuntime;
+	}
+
+	private _resolveAvoExternalToolResult(toolCallId: string): {
+		call: ToolCall;
+		callTimestamp: number;
+		result: ToolResultMessage;
+	} {
+		let call: ToolCall | undefined;
+		let callTimestamp = 0;
+		let result: ToolResultMessage | undefined;
+		for (const message of this.messages) {
+			if (message.role === "assistant") {
+				const matched = message.content.find(
+					(item): item is ToolCall => item.type === "toolCall" && item.id === toolCallId,
+				);
+				if (matched) {
+					call = matched;
+					callTimestamp = message.timestamp;
+				}
+			} else if (message.role === "toolResult" && message.toolCallId === toolCallId) {
+				result = message;
+			}
+		}
+		if (!call || !result) throw new Error(`AVO could not resolve completed tool call ${toolCallId}`);
+		if (result.toolName !== call.name) throw new Error("AVO tool call and result names do not match");
+		if (result.isError) throw new Error("AVO cannot bind an errored tool result as external evidence");
+		const trustedNames = new Set([
+			"web_search",
+			"google_search",
+			"google_search_retrieval",
+			"browser_search",
+			"weather",
+			"finance",
+			"sports",
+		]);
+		const definitionEntry = this._toolDefinitions.get(call.name);
+		const isProviderNative = definitionEntry === undefined && trustedNames.has(call.name);
+		const isPrimeBuiltin =
+			this._baseToolsOverride === undefined &&
+			trustedNames.has(call.name) &&
+			definitionEntry?.sourceInfo.source === "builtin" &&
+			definitionEntry.sourceInfo.path === `<builtin:${call.name}>`;
+		if (!isProviderNative && !isPrimeBuiltin) {
+			throw new Error(`tool ${call.name} is not a host-trusted external evidence provider`);
+		}
+		if (result.timestamp < callTimestamp) {
+			throw new Error("AVO external tool result predates its tool call");
+		}
+		return { call, callTimestamp, result };
+	}
+
+	private _readRlmLastAssistantText(subagent: RlmSubagentRegistryEntry): string | undefined {
+		const liveSession =
+			this._activeRlmChildRuns.get(subagent.rlm_child_id)?.session ??
+			this._rlmChildSessions.get(subagent.rlm_child_id);
+		const liveText = liveSession?.getLastAssistantText();
+		if (liveText) return liveText;
+		try {
+			const descriptorPath = join(subagent.session_dir, "rlm-subagent.json");
+			const descriptor = JSON.parse(readFileSync(descriptorPath, "utf8")) as unknown;
+			if (!isObjectRecord(descriptor)) return undefined;
+			if (descriptor.childId !== subagent.rlm_child_id || descriptor.sessionName !== subagent.session_name) {
+				return undefined;
+			}
+			if (typeof descriptor.sessionFile !== "string") return undefined;
+			const sessionDir = resolve(subagent.session_dir);
+			const sessionFile = resolve(descriptor.sessionFile);
+			if (dirname(sessionFile) !== sessionDir || !existsSync(sessionFile)) return undefined;
+			const branch = [...SessionManager.open(sessionFile).getBranch()].reverse();
+			for (const entry of branch) {
+				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+				const text = entry.message.content
+					.filter((item): item is TextContent => item.type === "text")
+					.map((item) => item.text)
+					.join("\n");
+				if (text) return text;
+			}
+		} catch {
+			return undefined;
+		}
+		return undefined;
+	}
+
+	private async _verifyAvoClaimEvidenceIndependently(
+		candidateId: string,
+		claimId: string,
+		claimText: string,
+		exactQuote: string,
+	): Promise<{
+		verdict: AvoIndependentClaimVerdict;
+		verifierChildId?: string;
+		verifierModel?: string;
+		responseDigest?: string;
+		error?: string;
+	}> {
+		const marker = avoClaimVerifierMarker(candidateId, claimId);
+		try {
+			const suffix = randomUUID().replaceAll("-", "").slice(0, 10);
+			const handle = await this._startRlmChildRun(
+				buildAvoClaimVerifierPrompt(marker, claimText, exactQuote),
+				{ name: `avo-claim-verifier-${suffix}` },
+				undefined,
+				{ allowedToolNames: [] },
+			);
+			await this._awaitPendingRlmChildSettlement(handle.name);
+			const children = (await this.listRlmSubagents()).subagents;
+			const child =
+				children.find((item) => item.rlm_child_id === handle.rlm_child_id || item.session_name === handle.name) ??
+				this._persistedAutoresearchSubagent(handle.rlm_child_id, handle.name);
+			if (!child) throw new Error("claim verifier child was not retained for host inspection");
+			const response = this._readRlmLastAssistantText(child);
+			if (!response) throw new Error("claim verifier child produced no final text");
+			return {
+				verdict: parseAvoClaimVerifierMessage(response, marker),
+				verifierChildId: handle.rlm_child_id,
+				verifierModel: handle.model,
+				responseDigest: createHash("sha256").update(response).digest("hex"),
+			};
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			return {
+				verdict: { relation: "insufficient", reason: `independent verifier unavailable: ${reason}` },
+				error: reason,
+			};
+		}
+	}
+
+	private async _runIsolatedAvoMemoryModel(
+		prompt: string,
+		namePrefix: string,
+	): Promise<{ text: string; childId: string; model: string; responseDigest: string }> {
+		const suffix = randomUUID().replaceAll("-", "").slice(0, 10);
+		const handle = await this._startRlmChildRun(prompt, { name: `${namePrefix}-${suffix}` }, undefined, {
+			allowedToolNames: [],
+		});
+		await this._awaitPendingRlmChildSettlement(handle.name);
+		const children = (await this.listRlmSubagents()).subagents;
+		const child =
+			children.find((item) => item.rlm_child_id === handle.rlm_child_id || item.session_name === handle.name) ??
+			this._persistedAutoresearchSubagent(handle.rlm_child_id, handle.name);
+		if (!child) throw new Error("isolated memory model was not retained for host inspection");
+		const text = this._readRlmLastAssistantText(child);
+		if (!text) throw new Error("isolated memory model produced no final text");
+		return {
+			text,
+			childId: handle.rlm_child_id,
+			model: handle.model,
+			responseDigest: createHash("sha256").update(text).digest("hex"),
+		};
+	}
+
+	private async _runAvoGenerativeMemoryReflection(
+		cycleId: string,
+		trigger: "five_cycles" | "candidate_acceptance" | "supervisor_intervention",
+	): Promise<Record<string, unknown>> {
+		if (isAvoFeatureAblated("nooa")) return { ok: false, reason: "NOOA disabled by benchmark ablation" };
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		if (
+			state.memoryReflections.some(
+				(reflection) => reflection.cycleId === cycleId && (reflection.proposedMemoryIds?.length ?? 0) > 0,
+			)
+		) {
+			return { ok: true, skipped: "cycle already has generative memory proposals" };
+		}
+		const episodes = runtime.store.verifiedEpisodesForReflection(12);
+		if (episodes.length < 2) return { ok: false, reason: "at least two verified episodes are required" };
+		const reasonerMarker = `AVO_MEMORY_REASONER_JSON:${cycleId}:${randomUUID().replaceAll("-", "")}`;
+		let reasoner: Awaited<ReturnType<AgentSession["_runIsolatedAvoMemoryModel"]>>;
+		try {
+			reasoner = await this._runIsolatedAvoMemoryModel(
+				buildAvoMemoryReasonerPrompt(reasonerMarker, episodes),
+				"avo-memory-reasoner",
+			);
+		} catch (error) {
+			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+		let proposals: ReturnType<typeof parseAvoMemoryReasonerMessage>;
+		try {
+			proposals = parseAvoMemoryReasonerMessage(
+				reasoner.text,
+				reasonerMarker,
+				new Set(episodes.map((episode) => episode.memoryId)),
+			);
+		} catch (error) {
+			return {
+				ok: false,
+				reason: error instanceof Error ? error.message : String(error),
+				reasoner_child_id: reasoner.childId,
+			};
+		}
+		const proposedMemories = proposals.map((proposal) =>
+			runtime.store.rememberProposedForRole(
+				{
+					namespace: state.routing.environment,
+					type: "reflection",
+					scope: "project",
+					title: proposal.title,
+					content: proposal.content,
+					tags: proposal.tags,
+					importance: 6,
+					sourceIds: proposal.sourceEpisodeIds,
+					references: proposal.sourceEpisodeIds.map((memoryId) => ({ kind: "memory", key: memoryId })),
+				},
+				"avo-supervisor",
+			),
+		);
+		if (proposedMemories.length === 0) {
+			const reflection = runtime.store.recordMemoryReflection({
+				trigger,
+				cycleId,
+				report: {
+					reasoner_proposals: 0,
+					reasoner_child_id: reasoner.childId,
+					reasoner_model: reasoner.model,
+				},
+				archivedMemoryIds: [],
+				proposedMemoryIds: [],
+				verifiedMemoryIds: [],
+			});
+			return { ok: true, reflection };
+		}
+		const verifierMarker = `AVO_MEMORY_VERIFIER_JSON:${cycleId}:${randomUUID().replaceAll("-", "")}`;
+		let verifier: Awaited<ReturnType<AgentSession["_runIsolatedAvoMemoryModel"]>>;
+		try {
+			verifier = await this._runIsolatedAvoMemoryModel(
+				buildAvoMemoryVerifierPrompt(verifierMarker, episodes, proposedMemories),
+				"avo-memory-verifier",
+			);
+		} catch (error) {
+			const reflection = runtime.store.recordMemoryReflection({
+				trigger,
+				cycleId,
+				report: {
+					reasoner_proposals: proposedMemories.length,
+					verifier_error: (error instanceof Error ? error.message : String(error)).slice(0, 1_000),
+				},
+				archivedMemoryIds: [],
+				proposedMemoryIds: proposedMemories.map((memory) => memory.memoryId),
+				verifiedMemoryIds: [],
+			});
+			return { ok: false, reflection, reason: "independent memory verifier was unavailable" };
+		}
+		let decisions: ReturnType<typeof parseAvoMemoryVerifierMessage>;
+		try {
+			decisions = parseAvoMemoryVerifierMessage(
+				verifier.text,
+				verifierMarker,
+				new Set(proposedMemories.map((memory) => memory.memoryId)),
+			);
+		} catch (error) {
+			const reflection = runtime.store.recordMemoryReflection({
+				trigger,
+				cycleId,
+				report: {
+					reasoner_proposals: proposedMemories.length,
+					verifier_error: (error instanceof Error ? error.message : String(error)).slice(0, 1_000),
+				},
+				archivedMemoryIds: [],
+				proposedMemoryIds: proposedMemories.map((memory) => memory.memoryId),
+				verifiedMemoryIds: [],
+			});
+			return { ok: false, reflection, reason: "independent memory verifier reply failed closed" };
+		}
+		const verifiedMemoryIds: string[] = [];
+		for (const decision of decisions) {
+			const evidenceRef = `memory-verifier:${verifier.childId}:${verifier.responseDigest}`;
+			if (decision.verdict === "supports") {
+				runtime.store.verifyProposedMemory(decision.memoryId, evidenceRef);
+				verifiedMemoryIds.push(decision.memoryId);
+			} else {
+				runtime.store.contestMemory(decision.memoryId, `${evidenceRef}:${decision.reason}`);
+			}
+		}
+		const reflection = runtime.store.recordMemoryReflection({
+			trigger,
+			cycleId,
+			report: {
+				reasoner_proposals: proposedMemories.length,
+				verifier_supported: verifiedMemoryIds.length,
+				verifier_rejected: proposedMemories.length - verifiedMemoryIds.length,
+				reasoner_child_id: reasoner.childId,
+				verifier_child_id: verifier.childId,
+				verifier_model: verifier.model,
+			},
+			archivedMemoryIds: [],
+			proposedMemoryIds: proposedMemories.map((memory) => memory.memoryId),
+			verifiedMemoryIds,
+		});
+		const consolidation = await runtime.reflectMemory("post_task", cycleId);
+		return { ok: true, reflection, consolidation };
+	}
+
+	private async _runAvoGenerativeMemoryReconciliation(cycleId: string): Promise<Record<string, unknown>> {
+		if (isAvoFeatureAblated("nooa")) return { ok: false, reason: "NOOA disabled by benchmark ablation" };
+		const runtime = this._requireAvoRuntime();
+		const proposedClusters = await runtime.reconciliationCandidates();
+		const memories = runtime.getState().memories;
+		const byId = new Map(memories.map((memory) => [memory.memoryId, memory]));
+		const clusters = proposedClusters
+			.flatMap((cluster) => {
+				const groups = new Map<string, string[]>();
+				for (const memoryId of cluster.memoryIds) {
+					const memory = byId.get(memoryId);
+					if (
+						!memory ||
+						memory.invalidatedAt ||
+						memory.verificationState === "contested" ||
+						!(["info", "skill", "reflection"] as const).includes(memory.type as "info" | "skill" | "reflection")
+					)
+						continue;
+					const key = `${memory.type}:${memory.namespace}:${memory.scope}`;
+					groups.set(key, [...(groups.get(key) ?? []), memoryId]);
+				}
+				return [...groups.values()].filter(
+					(memoryIds) =>
+						memoryIds.length >= 2 &&
+						memoryIds.some((memoryId) => byId.get(memoryId)?.verificationState === "verified"),
+				);
+			})
+			.slice(0, 8)
+			.map((memoryIds, index) => ({ clusterId: `recon-${index + 1}`, memoryIds }));
+		if (clusters.length === 0) return { ok: true, skipped: "NOOA found no reconsolidation clusters" };
+
+		const reconcilerMarker = `AVO_MEMORY_RECONCILER_JSON:${cycleId}:${randomUUID().replaceAll("-", "")}`;
+		let reconciler: Awaited<ReturnType<AgentSession["_runIsolatedAvoMemoryModel"]>>;
+		try {
+			reconciler = await this._runIsolatedAvoMemoryModel(
+				buildAvoMemoryReconcilerPrompt(reconcilerMarker, clusters, memories),
+				"avo-memory-reconciler",
+			);
+		} catch (error) {
+			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+		let decisions: ReturnType<typeof parseAvoMemoryReconcilerMessage>;
+		try {
+			decisions = parseAvoMemoryReconcilerMessage(reconciler.text, reconcilerMarker, clusters).filter(
+				(decision) => decision.currentMemoryId && decision.supersedeMemoryIds.length > 0,
+			);
+		} catch (error) {
+			return {
+				ok: false,
+				reason: error instanceof Error ? error.message : String(error),
+				reconciler_child_id: reconciler.childId,
+			};
+		}
+		if (decisions.length === 0) return { ok: true, reconciled: 0, reconciler_child_id: reconciler.childId };
+
+		const verifierMarker = `AVO_MEMORY_RECONCILIATION_VERIFIER_JSON:${cycleId}:${randomUUID().replaceAll("-", "")}`;
+		let verifier: Awaited<ReturnType<AgentSession["_runIsolatedAvoMemoryModel"]>>;
+		try {
+			verifier = await this._runIsolatedAvoMemoryModel(
+				buildAvoMemoryReconciliationVerifierPrompt(verifierMarker, clusters, memories, decisions),
+				"avo-memory-reconciliation-verifier",
+			);
+		} catch (error) {
+			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+		let verification: ReturnType<typeof parseAvoMemoryReconciliationVerifierMessage>;
+		try {
+			verification = parseAvoMemoryReconciliationVerifierMessage(
+				verifier.text,
+				verifierMarker,
+				new Set(decisions.map((decision) => decision.clusterId)),
+			);
+		} catch (error) {
+			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+		const supported = new Set(
+			verification.filter((decision) => decision.verdict === "supports").map((decision) => decision.clusterId),
+		);
+		const archivedMemoryIds: string[] = [];
+		const errors: string[] = [];
+		for (const decision of decisions) {
+			if (!supported.has(decision.clusterId) || !decision.currentMemoryId) continue;
+			try {
+				const archived = runtime.store.reconcileMemories(
+					decision.currentMemoryId,
+					decision.supersedeMemoryIds,
+					`memory-reconciliation:${reconciler.childId}:${reconciler.responseDigest}:${verifier.childId}:${verifier.responseDigest}`,
+				);
+				archivedMemoryIds.push(...archived.map((memory) => memory.memoryId));
+			} catch (error) {
+				errors.push(error instanceof Error ? error.message : String(error));
+			}
+		}
+		const reflection = runtime.store.recordMemoryReflection({
+			trigger: "post_task",
+			cycleId,
+			report: {
+				nooa_candidate_clusters: clusters.length,
+				reconciler_actionable: decisions.length,
+				verifier_supported: supported.size,
+				host_superseded: archivedMemoryIds.length,
+				reconciliation_errors: errors.length,
+				reconciler_child_id: reconciler.childId,
+				verifier_child_id: verifier.childId,
+			},
+			archivedMemoryIds,
+			proposedMemoryIds: [],
+			verifiedMemoryIds: [],
+		});
+		return { ok: errors.length === 0, reflection, errors };
+	}
+
+	private _formatAvoStatus(): string {
+		const state = this._requireAvoRuntime().getState();
+		const gate = this._evaluateAvoHostBoundStopGate();
+		return [
+			"AVO is active by default for this root task.",
+			`Task run: ${state.runId} (${state.taskRuns.length} archived in this session)`,
+			`Automatic evaluation adapter: ${state.routing.environment}`,
+			`AVO horizon: ${state.routing.horizon} (selection: ${state.horizonSelection})`,
+			`Verification class: ${state.verificationClass}`,
+			`Verification policy: ${state.verificationPolicy}`,
+			`Status: ${state.status}; cycles: ${state.cycles.length}; candidates: ${state.candidates.length}`,
+			`Obligations: ${state.obligationCoverage.length} bound coverage receipts across ${state.obligations.length} requirements; critical assumptions: ${state.criticalAssumptions.filter((item) => item.status === "supported").length}/${state.criticalAssumptions.filter((item) => item.critical).length} supported`,
+			`Final gate: ${gate.passed ? "passed" : `blocked — ${gate.reasons.join("; ")}`}`,
+		].join("\n");
+	}
+
+	private _avoWorkspaceExcludedRoots(): string[] {
+		const artifactDir = this.sessionManager.getSessionArtifactDir();
+		return [this.sessionManager.getSessionDir(), ...(artifactDir ? [artifactDir] : [])];
+	}
+
+	private _ensureAvoCodingVerificationBaseline(): void {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		if (state.routing.environment !== "coding" || state.verificationBaseline || !state.objective) return;
+		const cwd = this.sessionManager.getCwd();
+		const baseline = captureAvoCodingVerificationBaseline(cwd, state.objective, {
+			excludedRoots: this._avoWorkspaceExcludedRoots(),
+		});
+		baseline.specContract = captureAvoSpecContractBaseline(baseline.workspaceRoot ?? cwd, baseline.capturedAt, {
+			receiptPublicKey: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_PUBLIC_KEY,
+		});
+		runtime.store.setVerificationBaseline(baseline);
+	}
+
+	private _ensureAvoArtifactVerificationBaseline(): void {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		if (
+			state.routing.environment !== "general" ||
+			state.verificationClass !== "artifact" ||
+			state.artifactBaselinePaths
+		) {
+			return;
+		}
+		runtime.store.setArtifactBaselinePaths(
+			captureAvoArtifactPathBaseline(this.sessionManager.getCwd(), {
+				excludedRoots: this._avoWorkspaceExcludedRoots(),
+			}),
+		);
+	}
+
+	private _captureAvoProgressWatchdogSnapshot(state: AvoRunState) {
+		let workspaceDigest: string | undefined;
+		if (state.routing.environment === "coding") {
+			try {
+				workspaceDigest = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+				}).digest;
+			} catch {
+				// An unavailable workspace cannot be counted as progress; the completion gate remains fail closed.
+			}
+		}
+		return deriveAvoProgressWatchdogSnapshot(state, workspaceDigest);
+	}
+
+	private _primeAvoProgressWatchdog(): void {
+		if (!this._avoRuntime) return;
+		const snapshot = this._captureAvoProgressWatchdogSnapshot(this._avoRuntime.getState());
+		this._avoProgressWatchdog.prime(snapshot);
+		if (this._avoToolProgressRunId !== snapshot.runId) {
+			this._avoToolProgressRunId = snapshot.runId;
+			this._avoToolProgressToken = snapshot.token;
+			this._avoToolNoProgressBatches = 0;
+			this._avoToolInterventionQueued = false;
+			this._avoToolInterventionCount = 0;
+			this._avoToolLastInterventionBatch = 0;
+		}
+	}
+
+	private _avoToolProbationReason(toolName: string, args: unknown): string | undefined {
+		if (
+			isAvoFeatureAblated("qualified_watchdog") ||
+			!this._enforceAvoCompletion ||
+			!this._avoRuntime ||
+			this._rlmDepth !== 0 ||
+			this._avoToolInterventionCount < 4 ||
+			toolName !== "ipython"
+		) {
+			return undefined;
+		}
+		const state = this._avoRuntime.getState();
+		if (!state.objective || state.status !== "active" || state.routing.environment !== "coding") {
+			return undefined;
+		}
+		const code = isObjectRecord(args) && typeof args.code === "string" ? args.code : "";
+		const milestoneCall =
+			/\bawait\s+(?:avo\s*\.\s*)?(?:run_coding_baseline|add_candidate|register_obligations|cover_obligation|cover_obligations|register_critical_assumptions|resolve_critical_assumption|record_evaluation|record_experiment|record_trial|run_trial|complete_experiment|run_evaluation|verify_deterministic_result|verify_artifacts|bind_tool_result|fetch_external_source|bind_url|complete_cycle|stop_gate|complete)\s*\(/;
+		if (milestoneCall.test(code)) return undefined;
+		return [
+			`AVO host tool probation blocked another non-milestone IPython call after ${this._avoToolNoProgressBatches} stalled tool batches and ${this._avoToolInterventionCount} ignored interventions.`,
+			"Read-only probing is temporarily denied. In one bounded cell, combine any final task-file change with an awaited AVO action that can create host-observable progress, such as add_candidate followed by run_evaluation, cover_obligations, or complete_cycle.",
+			"Probation clears automatically when the host observes a meaningful verification milestone.",
+		].join(" ");
+	}
+
+	private async _queueAvoToolStagnationIntervention(
+		state: AvoRunState,
+		input: {
+			reason: string;
+			escalationLevel: number;
+			trigger: string;
+			instruction?: string;
+			forceIntervene?: boolean;
+		},
+	): Promise<void> {
+		this._avoRuntime?.store.recordProgressWatchdogCheckpoint({
+			consecutiveNoProgressTurns: this._avoToolNoProgressBatches,
+			resumed: false,
+			reason: input.reason,
+			escalateHorizon: input.escalationLevel > 1,
+			forceIntervene: input.forceIntervene,
+			unit: "tool_batch",
+		});
+		const message: CustomMessage = {
+			role: "custom",
+			customType: "avo_progress_intervention",
+			content: [
+				"<avo_progress_intervention>",
+				input.reason,
+				input.instruction ??
+					(input.escalationLevel === 1
+						? "Stop broad exploration and do not inspect Prime/AVO internals. Change approach now."
+						: "The previous intervention was ignored. Do at most one bounded diagnostic call, then produce and verify concrete task work now."),
+				state.routing.environment === "coding"
+					? "Work on the target files, make one concrete task-relevant workspace change, record a fresh candidate, and run one direct task-specific verifier."
+					: "Convert the evidence already gathered into a concrete candidate and run the verification class selected by the host.",
+				"Do not repeat a failed or unrelated command merely to keep the tool loop active.",
+				"</avo_progress_intervention>",
+			].join("\n"),
+			display: true,
+			details: {
+				runId: state.runId,
+				toolBatchesWithoutProgress: this._avoToolNoProgressBatches,
+				escalationLevel: input.escalationLevel,
+				trigger: input.trigger,
+			},
+			timestamp: Date.now(),
+		};
+		const normalized = normalizeMessageContent(message.content);
+		await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
+			message,
+			resumeIfIdle: true,
+		});
+	}
+
+	private async _queueAvoCanonicalDeliveryAfterPassingGate(gate: AvoStopGate): Promise<void> {
+		if (
+			!gate.passed ||
+			!this._enforceAvoCompletion ||
+			!this._avoRuntime ||
+			this._rlmDepth !== 0 ||
+			!this.isStreaming
+		) {
+			return;
+		}
+		const state = this._avoRuntime.getState();
+		if (!state.objective || state.status !== "active" || this._avoCanonicalDeliveryQueuedRunId === state.runId) {
+			return;
+		}
+		const acceptedCandidateIds = new Set(
+			state.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
+		);
+		const adapter = this._avoRuntime.adapters.get(state.routing.environment);
+		const acceptedCandidate = [...state.candidates].reverse().find(
+			(candidate) =>
+				acceptedCandidateIds.has(candidate.candidateId) &&
+				adapter.deriveEvaluationState(
+					candidate,
+					state.evaluations.filter((receipt) => receipt.candidateId === candidate.candidateId),
+					state,
+				).canonical,
+		);
+		if (!acceptedCandidate?.deliveryDigest) return;
+		this._discardObsoleteAvoCompletionInputs(state);
+		this._avoCanonicalDeliveryQueuedRunId = state.runId;
+		const exactCodingDelivery =
+			state.routing.environment === "coding" || state.routing.environment === "research"
+				? ` The exact recorded delivery is the decoded value of ${JSON.stringify(acceptedCandidate.summary)}; output it without JSON quotes.`
+				: "";
+		const message: CustomMessage = {
+			role: "custom",
+			customType: "avo_canonical_delivery_required",
+			content: [
+				"<avo_canonical_delivery_required>",
+				`The host stop gate passed for candidate ${acceptedCandidate.candidateId}.`,
+				"End tool use now. Do not clean up verifier helpers, inspect state, call the stop gate again, or perform additional work.",
+				`Return only the accepted candidate's exact canonical delivery with no preface, suffix, explanation, or decoration.${exactCodingDelivery}`,
+				"</avo_canonical_delivery_required>",
+			].join("\n"),
+			display: true,
+			details: {
+				runId: state.runId,
+				candidateId: acceptedCandidate.candidateId,
+				gatePassed: true,
+				trigger: "post_ready_canonical_delivery",
+			},
+			timestamp: Date.now(),
+		};
+		const normalized = normalizeMessageContent(message.content);
+		try {
+			await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
+				message,
+				resumeIfIdle: true,
+				front: true,
+			});
+		} catch {
+			if (this._avoCanonicalDeliveryQueuedRunId === state.runId) {
+				this._avoCanonicalDeliveryQueuedRunId = undefined;
+			}
+		}
+	}
+
+	private _isObsoleteAvoCompletionMessage(
+		message: CustomMessage,
+		state: AvoRunState,
+		includeCanonicalDelivery: boolean,
+	): boolean {
+		if (includeCanonicalDelivery && message.customType === "avo_canonical_delivery_required") return true;
+		if (!isAgentSessionMessage(message) || message.details.fromRelationship !== "child") return false;
+		const senderName = message.details.from?.sessionName;
+		return (
+			typeof senderName === "string" &&
+			(senderName === state.supervisor?.name ||
+				(senderName.startsWith("avo-supervisor-") &&
+					(message.details.message.includes("AVO_SUPERVISOR_READY") ||
+						message.details.message.includes("AVO_SUPERVISION_JSON:"))))
+		);
+	}
+
+	private _discardObsoleteAvoCompletionInputs(
+		state: AvoRunState,
+		options: { includeCanonicalDelivery?: boolean } = {},
+	): void {
+		const includeCanonicalDelivery = options.includeCanonicalDelivery ?? true;
+		const isObsolete = (message: CustomMessage) =>
+			this._isObsoleteAvoCompletionMessage(message, state, includeCanonicalDelivery);
+		this._pendingNextTurnMessages = this._pendingNextTurnMessages.filter((message) => !isObsolete(message));
+		this._cancelSessionActions(
+			(action) =>
+				action.payload.kind === "turn" &&
+				(action.lifecycle.state === "queued" ||
+					action.lifecycle.state === "selected" ||
+					action.lifecycle.state === "preparing") &&
+				action.payload.customMessage !== undefined &&
+				isObsolete(action.payload.customMessage),
+			new Error("Queued AVO supervisor work was superseded by canonical delivery."),
+		);
+	}
+
+	private async _maybeInterveneAvoToolStagnation(toolResults: readonly ToolResultMessage[]): Promise<void> {
+		const timedOutTool = toolResults.find((result) => {
+			const details = result.details;
+			return (
+				typeof details === "object" && details !== null && (details as { timedOut?: unknown }).timedOut === true
+			);
+		});
+		if (
+			isAvoFeatureAblated("qualified_watchdog") ||
+			toolResults.length === 0 ||
+			!this._enforceAvoCompletion ||
+			!this._avoRuntime ||
+			this._rlmDepth !== 0
+		) {
+			return;
+		}
+		const state = this._avoRuntime.getState();
+		if (!state.objective || state.status !== "active") return;
+		const snapshot = this._captureAvoProgressWatchdogSnapshot(state);
+		if (this._avoToolProgressRunId !== snapshot.runId || this._avoToolProgressToken === undefined) {
+			this._avoToolProgressRunId = snapshot.runId;
+			this._avoToolProgressToken = snapshot.token;
+			this._avoToolNoProgressBatches = 0;
+			this._avoToolInterventionQueued = false;
+			this._avoToolInterventionCount = 0;
+			this._avoToolLastInterventionBatch = 0;
+			if (!timedOutTool) return;
+		}
+		if (snapshot.token !== this._avoToolProgressToken) {
+			const recoveredBatches = this._avoToolNoProgressBatches;
+			const recoveredFromIntervention = this._avoToolInterventionQueued;
+			this._avoToolProgressToken = snapshot.token;
+			this._avoToolNoProgressBatches = 0;
+			this._avoToolInterventionQueued = false;
+			this._avoToolInterventionCount = 0;
+			this._avoToolLastInterventionBatch = 0;
+			if (recoveredFromIntervention) {
+				this._avoRuntime.store.recordProgressWatchdogCheckpoint({
+					consecutiveNoProgressTurns: 0,
+					resumed: true,
+					reason: `Host-observable progress resumed after ${recoveredBatches} stalled tool batches.`,
+					escalateHorizon: false,
+					unit: "tool_batch",
+				});
+			}
+			if (!timedOutTool) return;
+		}
+		if (timedOutTool) {
+			this._avoToolNoProgressBatches += 1;
+			this._avoToolInterventionQueued = true;
+			this._avoToolInterventionCount += 1;
+			this._avoToolLastInterventionBatch = this._avoToolNoProgressBatches;
+			const escalationLevel = this._avoToolInterventionCount;
+			const reason = `Anti-laziness timeout escalation ${escalationLevel}: the host terminated a ${timedOutTool.toolName} call after its execution ceiling without host-observable verification progress.`;
+			await this._queueAvoToolStagnationIntervention(state, {
+				reason,
+				escalationLevel,
+				trigger: "anti_laziness_tool_timeout",
+				forceIntervene: true,
+				instruction:
+					"Do not retry the same long-running cell or algorithm. Use a small bounded reproducer to remove the nontermination, split the work, then run the direct verifier again.",
+			});
+			return;
+		}
+		this._avoToolNoProgressBatches += 1;
+		const threshold = this._avoToolInterventionCount === 0 ? 6 : this._avoToolLastInterventionBatch + 3;
+		if (this._avoToolNoProgressBatches < threshold) return;
+		this._avoToolInterventionQueued = true;
+		this._avoToolInterventionCount += 1;
+		this._avoToolLastInterventionBatch = this._avoToolNoProgressBatches;
+		const escalationLevel = this._avoToolInterventionCount;
+		const reason = `${escalationLevel === 1 ? "Anti-laziness tool intervention" : `Anti-laziness escalation ${escalationLevel}`}: ${this._avoToolNoProgressBatches} consecutive tool batches produced no meaningful host pass, obligation coverage, tested critical assumption, completed cycle, or experiment cell.`;
+		await this._queueAvoToolStagnationIntervention(state, {
+			reason,
+			escalationLevel,
+			trigger: escalationLevel === 1 ? "anti_laziness_tool_intervention" : "anti_laziness_tool_escalation",
+			...(escalationLevel >= 4
+				? {
+						forceIntervene: true,
+						instruction:
+							"Host tool probation is now active. Read-only IPython calls will be denied until one bounded cell invokes an AVO action that can create a verification milestone.",
+					}
+				: {}),
+		});
+	}
+
+	private async _refreshAvoMemoryContext(prompt: string): Promise<void> {
+		if (!this._avoRuntime || this._rlmDepth !== 0) {
+			this._avoMemoryContext = "";
+			return;
+		}
+		try {
+			const recalled = await this._avoRuntime.recallMemory(prompt, { spontaneous: true, limit: 5, maxChars: 2_000 });
+			const backendNotice =
+				recalled.backend === "host-fallback"
+					? `AVO_MEMORY_RECALL_STATUS=fallback. NOOA did not provide this recall; the host fallback was used${recalled.reason ? ` because ${recalled.reason.replace(/\s+/g, " ").trim().slice(0, 500)}` : ""}. Do not claim that NOOA memory influenced this turn.`
+					: undefined;
+			this._avoMemoryContext = [backendNotice, recalled.context]
+				.filter((value): value is string => Boolean(value))
+				.join("\n\n");
+		} catch (error) {
+			const reason = (error instanceof Error ? error.message : String(error))
+				.replace(/\s+/g, " ")
+				.trim()
+				.slice(0, 500);
+			try {
+				this._avoRuntime.store.recordMemoryRecall(prompt, [], "spontaneous", 0, {
+					backend: "host-fallback",
+					status: "failed",
+					reason,
+					satisfies: ["ORDER-001", "FALLBACK-001"],
+				});
+			} catch {
+				// The prompt still exposes the failure if the state store itself is unavailable.
+			}
+			this._avoMemoryContext = `AVO_MEMORY_RECALL_STATUS=failed. Automatic memory recall failed before this turn: ${reason || "unknown host error"}. No recalled memory was injected; do not claim that NOOA or remembered experience influenced this turn.`;
+		}
+	}
+
+	private _recordAvoCandidateIntegrityFailure(candidateId: string): void {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		const candidate = state.candidates.find((item) => item.candidateId === candidateId);
+		if (!candidate) return;
+		const assessment = assessAvoCandidateIntegrity(
+			state,
+			candidate,
+			this.sessionManager.getCwd(),
+			this._avoWorkspaceExcludedRoots(),
+		);
+		if (assessment.passed) return;
+		const reason = assessment.reason ?? "candidate integrity changed";
+		const observedDigest = assessment.observedDigest;
+		const duplicate = state.evaluations.some(
+			(item) =>
+				item.candidateId === candidateId &&
+				item.evaluatorId === "candidate_integrity" &&
+				item.status === "revise" &&
+				item.metrics.observed_integrity_digest === (observedDigest ?? "unavailable"),
+		);
+		if (duplicate) return;
+		runtime.recordHostEvaluation({
+			candidateId,
+			evaluatorId: "candidate_integrity",
+			status: "revise",
+			authority: "host",
+			evidenceRefs: [`host:integrity:${observedDigest ?? "unavailable"}`],
+			metrics: {
+				meaningful: false,
+				candidate_payload_digest: candidate.payloadDigest,
+				observed_integrity_digest: observedDigest ?? "unavailable",
+				validation_reason: reason,
+			},
+		});
+	}
+
+	private _observeAvoOnlineEvidence():
+		| { provider: string; sourceCount: number; queryCount: number; evidenceRefs: string[] }
+		| undefined {
+		const state = this._requireAvoRuntime().getState();
+		const taskStartedAt = Date.parse(state.createdAt);
+		const externalClaim = [...state.evaluations]
+			.reverse()
+			.find(
+				(receipt) =>
+					receipt.issuedBy === "host" &&
+					receipt.authority === "external" &&
+					receipt.evaluatorId === "external_claim" &&
+					receipt.status === "pass",
+			);
+		if (externalClaim) {
+			return {
+				provider: "host_bound_external_claim",
+				sourceCount: 1,
+				queryCount: 0,
+				evidenceRefs: [...externalClaim.evidenceRefs],
+			};
+		}
+
+		for (const message of [...this.messages].reverse()) {
+			if (message.role !== "assistant" || message.timestamp < taskStartedAt) continue;
+			for (const item of message.content) {
+				if (item.type !== "text" || !isObjectRecord(item.providerMetadata)) continue;
+				const grounding = item.providerMetadata.googleSearchGrounding;
+				if (!isObjectRecord(grounding) || !Array.isArray(grounding.sources)) continue;
+				const sources = grounding.sources.filter(
+					(source) => isObjectRecord(source) && typeof source.url === "string" && /^https?:\/\//i.test(source.url),
+				);
+				if (sources.length === 0) continue;
+				const queries = Array.isArray(grounding.queries)
+					? grounding.queries.filter(
+							(query): query is string => typeof query === "string" && query.trim().length > 0,
+						)
+					: [];
+				return {
+					provider: "google_vertex_native_search",
+					sourceCount: sources.length,
+					queryCount: queries.length,
+					evidenceRefs: sources.map((source) => `source:${String(source.url)}`),
+				};
+			}
+		}
+
+		const trustedNames = new Set([
+			"web_search",
+			"google_search",
+			"google_search_retrieval",
+			"browser_search",
+			"weather",
+			"finance",
+			"sports",
+		]);
+		for (const message of [...this.messages].reverse()) {
+			if (message.role !== "toolResult" || message.timestamp < taskStartedAt || message.isError) continue;
+			if (!trustedNames.has(message.toolName)) continue;
+			return {
+				provider: message.toolName,
+				sourceCount: 1,
+				queryCount: 1,
+				evidenceRefs: [`host:tool-result:${message.toolCallId}`],
+			};
+		}
+		return undefined;
+	}
+
+	private _recordAvoOnlineEvidence(): void {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		if (!state.routing.reasons.some((reason) => reason.startsWith("online evidence required:"))) return;
+		const observation = this._observeAvoOnlineEvidence();
+		if (!observation) return;
+		for (const candidateId of new Set(
+			state.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
+		)) {
+			const candidate = state.candidates.find((item) => item.candidateId === candidateId);
+			if (!candidate) continue;
+			if (
+				state.evaluations.some(
+					(receipt) =>
+						receipt.candidateId === candidateId &&
+						receipt.issuedBy === "host" &&
+						receipt.evaluatorId === "online_evidence" &&
+						receipt.status === "pass" &&
+						receipt.metrics.candidate_payload_digest === candidate.payloadDigest,
+				)
+			)
+				continue;
+			runtime.recordHostEvaluation({
+				candidateId,
+				evaluatorId: "online_evidence",
+				status: "pass",
+				authority: "external",
+				evidenceRefs: observation.evidenceRefs,
+				metrics: {
+					meaningful: true,
+					provider: observation.provider,
+					source_count: observation.sourceCount,
+					query_count: observation.queryCount,
+					candidate_payload_digest: candidate.payloadDigest,
+				},
+			});
+		}
+	}
+
+	private _recordAvoPythonProbeApplicability(): void {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		if (state.routing.environment !== "coding") return;
+		for (const candidateId of new Set(
+			state.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
+		)) {
+			const candidate = state.candidates.find((item) => item.candidateId === candidateId);
+			if (!candidate?.workspaceChangedPaths?.some((path) => path.endsWith(".py"))) continue;
+			const contractDigest = digestAvoPythonProbeApplicability(state, candidate);
+			if (
+				state.evaluations.some(
+					(receipt) =>
+						receipt.candidateId === candidateId &&
+						receipt.evaluatorId === "adversarial_probe_contract" &&
+						receipt.issuedBy === "host" &&
+						receipt.metrics.probe_contract_digest === contractDigest &&
+						receipt.metrics.candidate_payload_digest === candidate.payloadDigest &&
+						receipt.metrics.candidate_workspace_digest === candidate.workspaceDigest &&
+						receipt.metrics.candidate_python_bundle_digest === candidate.pythonProbeBundleDigest &&
+						receipt.metrics.workspace_matches_candidate === true &&
+						receipt.metrics.python_bundle_matches_candidate === true,
+				)
+			) {
+				continue;
+			}
+			let workspaceMatchesCandidate = false;
+			let bundleMatchesCandidate = false;
+			let integrityError: string | undefined;
+			let capturedBundle: AvoPythonProbeBundle | undefined;
+			try {
+				const snapshot = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+				});
+				capturedBundle = captureAvoPythonProbeBundle(this.sessionManager.getCwd(), {
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+				});
+				workspaceMatchesCandidate = snapshot.digest === candidate.workspaceDigest;
+				bundleMatchesCandidate = capturedBundle.digest === candidate.pythonProbeBundleDigest;
+			} catch (error) {
+				integrityError = error instanceof Error ? error.message : String(error);
+			}
+			const candidateIntegrityCurrent = workspaceMatchesCandidate && bundleMatchesCandidate;
+			const bindings = candidateIntegrityCurrent
+				? this._avoPythonProbeBindings(state, candidate, candidate.workspaceChangedPaths, capturedBundle)
+				: undefined;
+			const probeRequired = candidateIntegrityCurrent ? bindings !== undefined : true;
+			const receiptDigest = digestAvoPayload({
+				runId: state.runId,
+				candidateId,
+				contractDigest,
+				bindings,
+				probeRequired,
+				workspaceMatchesCandidate,
+				bundleMatchesCandidate,
+			});
+			const evaluationId = `evaluation-adversarial-probe-contract-${receiptDigest}`;
+			if (runtime.getState().evaluations.some((receipt) => receipt.evaluationId === evaluationId)) continue;
+			runtime.recordHostEvaluation({
+				evaluationId,
+				candidateId,
+				evaluatorId: "adversarial_probe_contract",
+				status: "inconclusive",
+				authority: "environment",
+				evidenceRefs: [`host:adversarial-probe-contract:${receiptDigest}`],
+				metrics: {
+					meaningful: false,
+					probe_required: probeRequired,
+					probe_surface_supported: candidateIntegrityCurrent && bindings?.surfaceError === undefined,
+					probe_contract_digest: contractDigest,
+					probe_module_paths: JSON.stringify(bindings?.modulePaths ?? []),
+					probe_required_callables: JSON.stringify(bindings?.requiredCallables ?? []),
+					probe_callable_input_dimensions: JSON.stringify(bindings?.callableInputDimensions ?? {}),
+					candidate_payload_digest: candidate.payloadDigest,
+					candidate_workspace_digest: candidate.workspaceDigest ?? "missing",
+					candidate_python_bundle_digest: candidate.pythonProbeBundleDigest ?? "missing",
+					workspace_matches_candidate: workspaceMatchesCandidate,
+					python_bundle_matches_candidate: bundleMatchesCandidate,
+					validation_reason: !candidateIntegrityCurrent
+						? `cannot derive probe applicability from non-candidate source state${integrityError ? `: ${integrityError}` : ""}`
+						: bindings
+							? (bindings.surfaceError ?? "host-derived Python adversarial probe is required")
+							: "no specification-named public Python callable requires a function probe",
+				},
+			});
+		}
+	}
+
+	private _recordAvoSpecSemanticEvidence(candidateId: string): AvoEvaluationReceipt | undefined {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		const candidate = state.candidates.find((item) => item.candidateId === candidateId);
+		const spec = state.verificationBaseline?.specContract;
+		const pythonPaths = [...new Set(candidate?.workspaceChangedPaths?.filter((path) => path.endsWith(".py")) ?? [])]
+			.map((path) => path.replaceAll("\\", "/"))
+			.sort();
+		if (!candidate || pythonPaths.length === 0 || !spec) return undefined;
+
+		let workspaceMatchesCandidate = false;
+		let contractValue: unknown;
+		let coverage = {
+			affectedRequirementIds: [] as string[],
+			coveredPaths: [] as string[],
+			uncoveredPaths: [...pythonPaths],
+			impactDigest: digestAvoPayload({ pythonPaths, error: "contract-unavailable" }),
+			errors: [] as string[],
+		};
+		let specGate: AvoStopGate = { passed: false, checks: [], reasons: ["spec evidence was not evaluated"] };
+		const failures: string[] = [];
+		try {
+			const workspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+				excludedRoots: this._avoWorkspaceExcludedRoots(),
+			});
+			workspaceMatchesCandidate = workspace.digest === candidate.workspaceDigest;
+			if (!workspaceMatchesCandidate) failures.push("current workspace does not match the candidate");
+			contractValue = JSON.parse(spec.contractContent) as unknown;
+			coverage = deriveAvoSpecSemanticCoverage(contractValue, pythonPaths);
+			specGate = applyAvoSpecContractStopGate(
+				state,
+				{ passed: true, checks: [], reasons: [] },
+				{
+					cwd: this.sessionManager.getCwd(),
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+					receiptDirectory: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_DIR,
+					receiptPublicKey: process.env.PRIME_AGENT_AVO_SPEC_RECEIPT_PUBLIC_KEY,
+				},
+			);
+		} catch (error) {
+			failures.push(error instanceof Error ? error.message : String(error));
+		}
+		if (coverage.errors.length > 0) failures.push(...coverage.errors);
+		if (coverage.uncoveredPaths.length > 0) {
+			failures.push(`uncovered Python paths: ${coverage.uncoveredPaths.join(", ")}`);
+		}
+		if (coverage.affectedRequirementIds.length === 0) failures.push("no affected behavioral requirements");
+		if (!specGate.passed) failures.push(...specGate.reasons);
+		const passed =
+			workspaceMatchesCandidate &&
+			coverage.coveredPaths.length === pythonPaths.length &&
+			coverage.uncoveredPaths.length === 0 &&
+			coverage.affectedRequirementIds.length > 0 &&
+			coverage.errors.length === 0 &&
+			specGate.passed;
+		const gateDigest = digestAvoPayload({ checks: specGate.checks, reasons: specGate.reasons });
+		const receiptDigest = digestAvoPayload({
+			runId: state.runId,
+			candidateId: candidate.candidateId,
+			candidatePayloadDigest: candidate.payloadDigest,
+			candidateWorkspaceDigest: candidate.workspaceDigest,
+			contractDigest: spec.contractDigest,
+			pythonPaths,
+			coverage,
+			gateDigest,
+			passed,
+		});
+		const evaluationId = `evaluation-spec-contract-${receiptDigest}`;
+		const existing = runtime.getState().evaluations.find((receipt) => receipt.evaluationId === evaluationId);
+		if (existing) return existing;
+		return runtime.recordHostEvaluation({
+			evaluationId,
+			candidateId: candidate.candidateId,
+			evaluatorId: "spec_contract",
+			status: passed ? "pass" : "inconclusive",
+			authority: "host",
+			evidenceRefs: [
+				`host:spec-contract:${receiptDigest}`,
+				...coverage.affectedRequirementIds.map((requirementId) => `spec-requirement:${requirementId}`),
+			],
+			metrics: {
+				meaningful: passed,
+				spec_semantic_evidence: passed,
+				workspace_matches_candidate: workspaceMatchesCandidate,
+				candidate_payload_digest: candidate.payloadDigest,
+				candidate_workspace_digest: candidate.workspaceDigest ?? "missing",
+				spec_contract_digest: spec.contractDigest,
+				spec_impact_digest: coverage.impactDigest,
+				spec_gate_digest: gateDigest,
+				spec_covered_python_paths: JSON.stringify(coverage.coveredPaths),
+				spec_uncovered_python_paths: JSON.stringify(coverage.uncoveredPaths),
+				spec_affected_requirements: JSON.stringify(coverage.affectedRequirementIds),
+				validation_reason: passed
+					? "every changed Python path is exactly mapped to current independently verified behavioral requirements"
+					: [...new Set(failures)].join("; ").slice(0, 4_000),
+			},
+		});
+	}
+
+	private _evaluateAvoHostBoundStopGate(): AvoStopGate {
+		const runtime = this._requireAvoRuntime();
+		for (const candidateId of new Set(
+			runtime
+				.getState()
+				.cycles.filter((cycle) => cycle.outcome === "accepted")
+				.map((cycle) => cycle.candidateId),
+		)) {
+			this._recordAvoCandidateIntegrityFailure(candidateId);
+		}
+		this._recordAvoPythonProbeApplicability();
+		this._recordAvoOnlineEvidence();
+		return runtime.evaluateStopGate();
+	}
+
+	private _handleAvoSlashCommand(command: SessionSlashCommand): string {
+		const runtime = this._requireAvoRuntime();
+		let target: "horizon" | "status" = "status";
+		let value = command.args.trim();
+		if (command.name === "horizon") target = "horizon";
+		else if (value) {
+			const match = /^(status|horizon)(?:\s+(.+))?$/.exec(value);
+			if (!match) throw new Error("Usage: /avo [status|horizon <value>]");
+			target = match[1] as "horizon" | "status";
+			value = (match[2] ?? "").trim();
+		}
+		if (target === "status" || !value) return this._formatAvoStatus();
+		if (value !== "auto" && !AVO_HORIZONS.includes(value as (typeof AVO_HORIZONS)[number])) {
+			throw new Error("AVO horizon must be auto, direct, iterative, or long");
+		}
+		runtime.configure({ horizon: value as AvoHorizonSelection, source: "user" });
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
+		return this._formatAvoStatus();
+	}
+
+	private _syncAvoResearchState(): void {
+		if (!this._avoRuntime || !this._autoresearchStore) return;
+		if (this._avoRuntime.getState().routing.environment !== "research") {
+			throw new Error("autoresearch is only available when the host routed the active task to research");
+		}
+		const state = this._autoresearchStore.getState();
+		this._avoRuntime.syncResearchState(
+			state,
+			this._autoresearchStore.evaluateStopGate(),
+			this._avoRuntime.researchStatePath(),
+		);
+	}
+
+	private async _ensureAvoSupervisor(): Promise<{ rlmChildId: string; name: string }> {
+		const runtime = this._requireAvoRuntime();
+		if (!this._agentMessageController) throw new Error("AVO supervision requires retained-child messaging");
+		const state = runtime.getState();
+		if (!state.objective) throw new Error("initialize AVO before starting its supervisor");
+		const children = (await this.listRlmSubagents()).subagents;
+		if (state.supervisor && this._avoSupervisorBoundToRuntime) {
+			const retained = children.find(
+				(child) =>
+					child.rlm_child_id === state.supervisor?.rlmChildId || child.session_name === state.supervisor?.name,
+			);
+			if (retained && retained.status !== "error") {
+				this._avoSupervisorBoundToRuntime = true;
+				return { rlmChildId: retained.rlm_child_id, name: retained.session_name };
+			}
+		}
+		const suffix = this.sessionId.replace(/[^A-Za-z0-9]/g, "").slice(-8) || randomUUID().slice(0, 8);
+		const preferredName = `avo-supervisor-${suffix}`;
+		const name = children.some((child) => child.session_name === preferredName)
+			? `${preferredName}-${randomUUID().slice(0, 8)}`
+			: preferredName;
+		const handle = await this._startRlmChildRun(buildAvoSupervisorBootstrapPrompt(), { name }, undefined, {
+			allowedToolNames: [],
+		});
+		runtime.store.setSupervisor({ rlmChildId: handle.rlm_child_id, name: handle.name });
+		this._avoSupervisorBoundToRuntime = true;
+		return { rlmChildId: handle.rlm_child_id, name: handle.name };
+	}
+
+	private _avoAdversarialReviewPaths(
+		state: AvoRunState,
+		candidate: AvoRunState["candidates"][number] | undefined,
+	): string[] {
+		const baselinePaths =
+			state.verificationBaseline?.kind === "coding"
+				? state.verificationBaseline.testFiles.map((item) => item.path)
+				: [];
+		const safePaths = (paths: readonly string[]): string[] =>
+			[...new Set(paths)].flatMap((path) => {
+				const absolute = resolve(this._cwd, path);
+				const relativePath = relative(this._cwd, absolute);
+				if (!relativePath || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) return [];
+				if (!existsSync(absolute)) return [];
+				const stats = lstatSync(absolute);
+				if (!stats.isFile() || stats.size > 1_000_000) return [];
+				if (readFileSync(absolute).includes(0)) return [];
+				return [relativePath];
+			});
+		const changedPaths = safePaths(candidate?.workspaceChangedPaths ?? []);
+		const changed = new Set(changedPaths);
+		return [
+			...changedPaths,
+			...safePaths(baselinePaths)
+				.filter((path) => !changed.has(path))
+				.slice(0, 4),
+		];
+	}
+
+	private _avoPythonProbeBindings(
+		state: AvoRunState,
+		candidate: AvoRunState["candidates"][number] | undefined,
+		probePaths = candidate?.workspaceChangedPaths ?? [],
+		probeBundle?: AvoPythonProbeBundle,
+	): AvoPythonProbeBindings | undefined {
+		const requirementIds = state.obligations
+			.filter((item) => item.critical && item.kind !== "outcome")
+			.map((item) => item.obligationId);
+		if (requirementIds.length === 0) return undefined;
+		if (!candidate?.workspaceChangedPaths?.some((path) => path.endsWith(".py"))) return undefined;
+		let boundBundle = probeBundle;
+		let bundleError: string | undefined;
+		if (!boundBundle) {
+			try {
+				boundBundle = captureAvoPythonProbeBundle(this.sessionManager.getCwd(), {
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+				});
+			} catch (error) {
+				bundleError = error instanceof Error ? error.message : String(error);
+			}
+		}
+		if (boundBundle && boundBundle.digest !== candidate.pythonProbeBundleDigest) {
+			bundleError = "current Python source bundle does not match the host-captured candidate bundle";
+		}
+		const bundleSources = boundBundle
+			? new Map(boundBundle.files.map((file) => [file.path, Buffer.from(file.contentBase64, "base64")]))
+			: undefined;
+		const signatureAuthorityText = [state.objective, state.verificationBaseline?.specContract?.contractContent]
+			.filter((item): item is string => typeof item === "string")
+			.join("\n");
+		const specificationText = [signatureAuthorityText, ...state.obligations.map((item) => item.description)]
+			.filter((item): item is string => typeof item === "string")
+			.join("\n");
+		// The root objective and task-start spec contract are host captured.
+		// Obligation descriptions may be proposed by the model, so they can identify
+		// relevant APIs but cannot manufacture a trusted signature for a new API.
+		const specificationReferences = (name: string): boolean => {
+			const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			return new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}(?:$|[^A-Za-z0-9_])`).test(specificationText);
+		};
+		const specificationDeclaredSignature = (
+			name: string,
+		): { inputDimensions: string[]; signatureDigest: string; fullSignatureDeclared: boolean } | undefined => {
+			const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			const match = new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}\\s*\\(([^()\\r\\n]{0,500})\\)`).exec(
+				signatureAuthorityText,
+			);
+			if (!match) return undefined;
+			const parameters = match[1]!.trim()
+				? match[1]!
+						.split(",")
+						.map((item) => item.trim())
+						.filter(Boolean)
+				: [];
+			if (!parameters.every((item) => /^\*{0,2}[A-Za-z_][A-Za-z0-9_]*(?:\s*[:=].*)?$/.test(item))) {
+				return undefined;
+			}
+			const inspection = inspectAvoPythonPublicCallables(`def ${name}(${match[1]!}):\n    pass\n`);
+			const callable = inspection.callables.find((item) => item.name === name);
+			const declaresAnnotationOrDefault = parameters.some((parameter) => /[:=]/.test(parameter));
+			return callable
+				? {
+						inputDimensions: callable.inputDimensions,
+						signatureDigest: declaresAnnotationOrDefault ? callable.signatureDigest : callable.structuralDigest,
+						fullSignatureDeclared: declaresAnnotationOrDefault,
+					}
+				: undefined;
+		};
+		const changedPaths = new Set(
+			(candidate?.workspaceChangedPaths ?? []).flatMap((path) => {
+				const absolute = resolve(this._cwd, path);
+				const relativePath = relative(this._cwd, absolute);
+				return relativePath && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath)
+					? [relativePath]
+					: [];
+			}),
+		);
+		const baselineEntrypointPaths = [
+			...new Set([
+				...Object.entries(state.verificationBaseline?.pythonCallableDimensions ?? {})
+					.filter(([, callables]) => Object.keys(callables).some(specificationReferences))
+					.map(([path]) => path),
+				...Object.entries(state.verificationBaseline?.pythonUninspectableCallables ?? {})
+					.filter(([, names]) => names.some((name) => name === "*" || specificationReferences(name)))
+					.map(([path]) => path),
+			]),
+		];
+		const baselineEntrypointPathSet = new Set(baselineEntrypointPaths);
+		const requestedPythonPaths = [
+			...new Set([...probePaths.filter((path) => path.endsWith(".py")), ...baselineEntrypointPaths]),
+		];
+		if (requestedPythonPaths.length === 0) return undefined;
+		const readableModules: Array<{ modulePath: string; source: string }> = [];
+		const inspectedModulePaths: string[] = [];
+		const surfaceErrors: string[] = (state.verificationBaseline?.pythonUnsafePaths ?? []).map(
+			(path) => `task-start Python source was unsafe or unreadable: ${path}`,
+		);
+		let candidateSurfaceInvalid = false;
+		const invalidateCandidateSurface = (reason: string): void => {
+			candidateSurfaceInvalid = true;
+			surfaceErrors.push(reason);
+		};
+		if (bundleError) surfaceErrors.push(bundleError);
+		for (const path of requestedPythonPaths) {
+			const absolute = resolve(this._cwd, path);
+			const relativePath = relative(this._cwd, absolute);
+			if (!relativePath || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) {
+				invalidateCandidateSurface(`required Python path is outside the workspace: ${path.slice(0, 300)}`);
+				continue;
+			}
+			if (!changedPaths.has(relativePath) && !baselineEntrypointPathSet.has(relativePath)) continue;
+			inspectedModulePaths.push(relativePath);
+			try {
+				const bundledContents = bundleSources?.get(relativePath.replaceAll(sep, "/"));
+				if (bundleSources) {
+					if (!bundledContents) {
+						invalidateCandidateSurface(
+							`required Python module is missing from the candidate bundle: ${relativePath}`,
+						);
+						continue;
+					}
+					if (bundledContents.byteLength > 1_000_000) {
+						invalidateCandidateSurface(
+							`required Python module exceeds the 1000000-byte probe inspection limit: ${relativePath}`,
+						);
+						continue;
+					}
+					const source = bundledContents.toString("utf8");
+					if (bundledContents.includes(0) || source.includes("\uFFFD")) {
+						invalidateCandidateSurface(`required Python module is not inspectable UTF-8 source: ${relativePath}`);
+						continue;
+					}
+					readableModules.push({ modulePath: relativePath, source });
+					continue;
+				}
+				if (!existsSync(absolute)) {
+					invalidateCandidateSurface(`required Python module is missing or deleted: ${relativePath}`);
+					continue;
+				}
+				const stats = lstatSync(absolute);
+				if (!stats.isFile()) {
+					invalidateCandidateSurface(`required Python module is not a regular file: ${relativePath}`);
+					continue;
+				}
+				if (stats.size > 1_000_000) {
+					invalidateCandidateSurface(
+						`required Python module exceeds the 1000000-byte probe inspection limit: ${relativePath}`,
+					);
+					continue;
+				}
+				const contents = readFileSync(absolute);
+				const source = contents.toString("utf8");
+				if (contents.includes(0) || source.includes("\uFFFD")) {
+					invalidateCandidateSurface(`required Python module is not inspectable UTF-8 source: ${relativePath}`);
+					continue;
+				}
+				readableModules.push({ modulePath: relativePath, source });
+			} catch (error) {
+				invalidateCandidateSurface(
+					`required Python module could not be inspected: ${relativePath}: ${String(error)}`,
+				);
+			}
+		}
+		if (inspectedModulePaths.length === 0 && surfaceErrors.length === 0) return undefined;
+		const modules = readableModules.map(({ modulePath, source }) => {
+			const inspection = inspectAvoPythonPublicCallables(source);
+			const baselineCallables = state.verificationBaseline?.pythonCallableDimensions?.[modulePath];
+			const callableInputDimensions = Object.fromEntries(
+				inspection.callables
+					.filter((callable) => specificationReferences(callable.name))
+					.map((callable) => {
+						const baselineDimensions = baselineCallables?.[callable.name];
+						const declaredSignature = specificationDeclaredSignature(callable.name);
+						if (!baselineDimensions && declaredSignature === undefined) {
+							surfaceErrors.push(
+								`${modulePath}: new callable ${callable.name} has no task-start or explicit specification signature`,
+							);
+						}
+						const baselineSignature =
+							state.verificationBaseline?.pythonCallableSignatureDigests?.[modulePath]?.[callable.name];
+						if (baselineDimensions && baselineSignature !== callable.signatureDigest) {
+							invalidateCandidateSurface(
+								`${modulePath}: baseline callable ${callable.name} changed its public parameter contract`,
+							);
+						}
+						if (
+							declaredSignature &&
+							declaredSignature.signatureDigest !==
+								(declaredSignature.fullSignatureDeclared ? callable.signatureDigest : callable.structuralDigest)
+						) {
+							invalidateCandidateSurface(
+								`${modulePath}: callable ${callable.name} does not match its host-declared public parameter contract`,
+							);
+						}
+						return [
+							callable.name,
+							[
+								...new Set([
+									...(baselineDimensions ?? []),
+									...(declaredSignature?.inputDimensions ?? []),
+									...callable.inputDimensions,
+								]),
+							],
+						];
+					}),
+			);
+			for (const error of inspection.errors.filter(
+				(item) => item.name === "*" || specificationReferences(item.name),
+			)) {
+				invalidateCandidateSurface(`${modulePath}: ${error.reason}`);
+			}
+			if (baselineCallables) {
+				for (const name of Object.keys(baselineCallables).filter(specificationReferences)) {
+					if (!Object.hasOwn(callableInputDimensions, name)) {
+						invalidateCandidateSurface(
+							`specification-named baseline callable ${name} is missing from ${modulePath}`,
+						);
+					}
+				}
+			}
+			for (const name of (state.verificationBaseline?.pythonUninspectableCallables?.[modulePath] ?? []).filter(
+				(item) => item === "*" || specificationReferences(item),
+			)) {
+				surfaceErrors.push(
+					`specification-named baseline callable ${name} was not safely inspectable in ${modulePath}`,
+				);
+			}
+			return { modulePath, callableInputDimensions, requiredCallables: Object.keys(callableInputDimensions) };
+		});
+		modules.sort(
+			(left, right) =>
+				right.requiredCallables.length - left.requiredCallables.length ||
+				left.modulePath.localeCompare(right.modulePath),
+		);
+		const relevantModules = modules.filter((item) => item.requiredCallables.length > 0);
+		if (state.verificationBaseline?.pythonCallableDimensions === undefined) {
+			surfaceErrors.push(
+				"task-start Python callable manifest is unavailable, so signature weakening or removal of a specification-named API cannot be excluded",
+			);
+		}
+		if (!candidate.pythonProbeBundleDigest) {
+			surfaceErrors.push("candidate has no host-captured Python source-bundle digest");
+		}
+		if (relevantModules.length === 0 && surfaceErrors.length === 0) return undefined;
+		const requiredCallables = [...new Set(relevantModules.flatMap((item) => item.requiredCallables))];
+		const callableInputDimensions = Object.fromEntries(
+			relevantModules.flatMap((item) => Object.entries(item.callableInputDimensions)),
+		);
+		const requiredCaseCount = requiredCallables.reduce(
+			(total, callable) => total + Math.max(1, (callableInputDimensions[callable]?.length ?? 0) + 1),
+			0,
+		);
+		const maximumInputDimensionCount = Math.max(
+			0,
+			...Object.values(callableInputDimensions).map((dimensions) => dimensions.length),
+		);
+		if (maximumInputDimensionCount > 16) {
+			surfaceErrors.push(
+				`a required public API exposes ${maximumInputDimensionCount} inputs, above the host probe limit of 16`,
+			);
+		}
+		for (const [callable, dimensions] of Object.entries(callableInputDimensions)) {
+			const positionalCount = dimensions.filter((dimension) => dimension.startsWith("arg:")).length;
+			const keywordCount = dimensions.filter((dimension) => dimension.startsWith("kwarg:")).length;
+			if (positionalCount > 8 || keywordCount > 8) {
+				surfaceErrors.push(
+					`required public API ${callable} exposes ${positionalCount} positional and ${keywordCount} keyword-only inputs, above the host per-kind limit of 8`,
+				);
+			}
+		}
+		if (
+			requiredCallables.length > 0 &&
+			requiredCallables.every((callable) => (callableInputDimensions[callable]?.length ?? 0) === 0) &&
+			requiredCallables.length < 6
+		) {
+			surfaceErrors.push(
+				`${requiredCallables.length} zero-input public APIs cannot supply the six distinct host probe inputs required by policy`,
+			);
+		}
+		if (relevantModules.length > 1) {
+			surfaceErrors.push(
+				`required public APIs span ${relevantModules.length} Python entrypoint modules; one host probe plan cannot bind all modules atomically`,
+			);
+		}
+		if (requiredCaseCount > AVO_PYTHON_PROBE_MAX_CASES) {
+			surfaceErrors.push(
+				`${requiredCallables.length} required public APIs need at least ${requiredCaseCount} contrast cases, above the host limit of ${AVO_PYTHON_PROBE_MAX_CASES}`,
+			);
+		}
+		return {
+			modulePaths: [
+				...new Set(
+					relevantModules.length > 0 ? relevantModules.map((item) => item.modulePath) : inspectedModulePaths,
+				),
+			],
+			requiredCallables,
+			callableInputDimensions,
+			surfaceError: surfaceErrors.length > 0 ? surfaceErrors.join("; ") : undefined,
+			surfaceErrorDisposition:
+				surfaceErrors.length > 0
+					? candidateSurfaceInvalid
+						? "candidate_invalid"
+						: "environment_unsupported"
+					: undefined,
+			requirementIds,
+			minimumCases: 6,
+			maximumCases: Math.max(8, Math.min(AVO_PYTHON_PROBE_MAX_CASES, requiredCaseCount)),
+			minimumCrossRequirementCases: requirementIds.length >= 2 ? 3 : 0,
+			minimumDistinctRequirements: Math.min(4, requirementIds.length),
+			minimumContrastedInputDimensions: maximumInputDimensionCount,
+		};
+	}
+
+	private async _runAvoPythonProbe(
+		candidate: AvoRunState["candidates"][number],
+		plan: AvoPythonProbePlan,
+	): Promise<{
+		report?: AvoPythonProbeReport;
+		exitCode: number | null;
+		timedOut: boolean;
+		truncated: boolean;
+		stdout: string;
+		stderr: string;
+		durationMs: number;
+		workspaceDigest: string;
+		postWorkspaceDigest: string;
+		error?: string;
+	}> {
+		const cwd = this.sessionManager.getCwd();
+		const before = captureAvoWorkspaceSnapshot(cwd, { excludedRoots: this._avoWorkspaceExcludedRoots() });
+		if (!candidate.workspaceDigest || before.digest !== candidate.workspaceDigest) {
+			return {
+				exitCode: null,
+				timedOut: false,
+				truncated: false,
+				stdout: "",
+				stderr: "",
+				durationMs: 0,
+				workspaceDigest: before.digest,
+				postWorkspaceDigest: before.digest,
+				error: "workspace changed after candidate creation",
+			};
+		}
+		const bundle = captureAvoPythonProbeBundle(cwd, { excludedRoots: this._avoWorkspaceExcludedRoots() });
+		if (!candidate.pythonProbeBundleDigest || bundle.digest !== candidate.pythonProbeBundleDigest) {
+			return {
+				exitCode: null,
+				timedOut: false,
+				truncated: false,
+				stdout: "",
+				stderr: "",
+				durationMs: 0,
+				workspaceDigest: before.digest,
+				postWorkspaceDigest: before.digest,
+				error: "Python source bundle does not match the host-captured candidate bundle",
+			};
+		}
+		const execution = await executeAvoPythonProbeSandbox(cwd, plan, bundle);
+		const post = captureAvoWorkspaceSnapshot(cwd, { excludedRoots: this._avoWorkspaceExcludedRoots() });
+		const postBundle = captureAvoPythonProbeBundle(cwd, { excludedRoots: this._avoWorkspaceExcludedRoots() });
+		const executionError =
+			post.digest !== candidate.workspaceDigest || postBundle.digest !== candidate.pythonProbeBundleDigest
+				? "probe execution changed the candidate workspace"
+				: execution.error;
+		return {
+			...execution,
+			workspaceDigest: before.digest,
+			postWorkspaceDigest: post.digest,
+			error: executionError,
+		};
+	}
+
+	private async _dispatchAvoCheckpoint(
+		supervisor: { rlmChildId: string; name: string },
+		cycleId: string,
+		probeValidationFeedback?: string,
+	): Promise<{ receipt?: AgentSessionMessageReceipt; error?: string }> {
+		try {
+			// Publication is sufficient: daemon messaging queues a follow-up behind a
+			// still-running bootstrap turn. Waiting for full model settlement here can
+			// exceed the IPython cell deadline during provider backoff, even though the
+			// accepted cycle is already durable.
+			await this._awaitPendingRlmChildPublication(supervisor.name);
+			const runtime = this._requireAvoRuntime();
+			this._recordAvoPythonProbeApplicability();
+			const state = runtime.getState();
+			const adversarialReview = requiresAvoAdversarialReview(state, cycleId);
+			const supervisorMemory = await runtime.recallSupervisorMemory(
+				[
+					`Review trajectory for cycle ${cycleId}.`,
+					state.objective ? `Objective: ${state.objective}` : undefined,
+					state.cycles.at(-1)?.failureSignature
+						? `Latest failure: ${state.cycles.at(-1)!.failureSignature}`
+						: undefined,
+				]
+					.filter((item): item is string => item !== undefined)
+					.join("\n"),
+			);
+			const adapter = runtime.adapters.get(state.routing.environment);
+			let rawContext = adapter.buildSupervisorContext(state);
+			let compactAdversarialContext: Record<string, unknown> | undefined;
+			if (adversarialReview) {
+				const cycle = state.cycles.find((item) => item.cycleId === cycleId);
+				const candidate = cycle
+					? state.candidates.find((item) => item.candidateId === cycle.candidateId)
+					: undefined;
+				const reviewPaths = this._avoAdversarialReviewPaths(state, candidate);
+				const requiredPythonPaths = [
+					...new Set(candidate?.workspaceChangedPaths?.filter((path) => path.endsWith(".py")) ?? []),
+				]
+					.map((path) => relative(this._cwd, resolve(this._cwd, path)))
+					.filter((path) => path && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+				const missingRequiredReviewPaths = requiredPythonPaths.filter((path) => !reviewPaths.includes(path));
+				if (missingRequiredReviewPaths.length > 0) {
+					throw new Error(
+						`retained review cannot safely bind required Python paths: ${missingRequiredReviewPaths.join(", ")}`,
+					);
+				}
+				if (requiredPythonPaths.length > 24) {
+					throw new Error("retained review supports at most 24 changed Python paths per accepted candidate");
+				}
+				const pythonProbeBindings = this._avoPythonProbeBindings(state, candidate);
+				const reviewFileBudget = 5_000;
+				const perFileBudget = Math.max(128, Math.min(2_400, Math.floor(reviewFileBudget / reviewPaths.length)));
+				const reviewFiles: Array<{ path: string; excerpt: string; truncated: boolean }> = [];
+				for (const path of reviewPaths) {
+					const absolute = resolve(this._cwd, path);
+					const text = readFileSync(absolute, "utf8");
+					const budget = perFileBudget;
+					const truncated = text.length > budget;
+					const headChars = Math.ceil(budget * 0.7);
+					const excerpt = truncated
+						? `${text.slice(0, headChars)}\n\n[... host truncated ${text.length - budget} characters ...]\n\n${text.slice(-(budget - headChars))}`
+						: text;
+					reviewFiles.push({ path, excerpt, truncated });
+				}
+				const reviewObligations = state.obligations.filter((item) => item.critical && item.kind !== "outcome");
+				const requirementExcerpts: Array<{ requirement_id: string; description: string }> = [];
+				const requirementDescriptionBudget = 2_400;
+				const perRequirementBudget = Math.max(
+					48,
+					Math.floor(requirementDescriptionBudget / Math.max(1, reviewObligations.length)),
+				);
+				for (const obligation of reviewObligations) {
+					const description = obligation.description.slice(0, perRequirementBudget);
+					requirementExcerpts.push({ requirement_id: obligation.obligationId, description });
+				}
+				const acceptedCandidate = candidate
+					? {
+							candidate_id: candidate.candidateId,
+							kind: candidate.kind,
+							summary: candidate.summary.slice(0, 500),
+							changed_paths: candidate.workspaceChangedPaths ?? [],
+							impact_surfaces: (candidate.impactSurfaces ?? []).slice(0, 4),
+						}
+					: undefined;
+				const authoritativeReceipts = state.evaluations
+					.filter((item) => item.candidateId === candidate?.candidateId)
+					.slice(-4)
+					.map((item) => ({
+						evaluation_id: item.evaluationId,
+						evaluator: item.evaluatorId,
+						status: item.status,
+						validation_reason:
+							typeof item.metrics.validation_reason === "string"
+								? item.metrics.validation_reason.slice(0, 300)
+								: item.metrics.validation_reason,
+					}));
+				const criticalAssumptions = state.criticalAssumptions.slice(-3).map((item) => ({
+					assumption_id: item.assumptionId,
+					statement: item.statement.slice(0, 240),
+					falsification_plan: item.falsificationPlan.slice(0, 240),
+					status: item.status,
+				}));
+				const obligationCoverageReceiptCount = new Set(
+					state.obligationCoverage
+						.filter((item) => item.candidateId === candidate?.candidateId)
+						.flatMap((item) => item.evaluationIds),
+				).size;
+				rawContext = {
+					run_id: state.runId,
+					accepted_candidate: acceptedCandidate,
+					authoritative_receipts: authoritativeReceipts,
+					critical_requirement_count: state.obligations.filter((item) => item.critical).length,
+					critical_requirement_excerpts: requirementExcerpts,
+					obligation_coverage_receipt_count: obligationCoverageReceiptCount,
+					critical_assumptions: criticalAssumptions,
+					review_files: reviewFiles,
+					python_probe_contract: pythonProbeBindings
+						? {
+								probe_version: 1,
+								runtime: "python_call_v1",
+								module_path:
+									pythonProbeBindings.modulePaths.length === 1
+										? pythonProbeBindings.modulePaths[0]
+										: undefined,
+								required_callables: pythonProbeBindings.requiredCallables,
+								callable_input_dimensions: pythonProbeBindings.callableInputDimensions,
+								surface_error: pythonProbeBindings.surfaceError,
+								minimum_cases: pythonProbeBindings.minimumCases,
+								maximum_cases: pythonProbeBindings.maximumCases,
+								minimum_cross_requirement_cases: pythonProbeBindings.minimumCrossRequirementCases,
+								minimum_distinct_requirements: pythonProbeBindings.minimumDistinctRequirements,
+								minimum_contrasted_input_dimensions: pythonProbeBindings.minimumContrastedInputDimensions,
+								require_cross_requirement_case_per_required_callable:
+									pythonProbeBindings.minimumCrossRequirementCases > 0,
+							}
+						: undefined,
+				};
+				const sampledRequirements =
+					requirementExcerpts.length <= 24
+						? requirementExcerpts
+						: Array.from(
+								{ length: 24 },
+								(_, index) => requirementExcerpts[Math.floor((index * (requirementExcerpts.length - 1)) / 23)],
+							);
+				compactAdversarialContext = {
+					truncated: true,
+					run_id: state.runId,
+					accepted_candidate: acceptedCandidate
+						? { ...acceptedCandidate, summary: acceptedCandidate.summary.slice(0, 240) }
+						: undefined,
+					authoritative_receipts: authoritativeReceipts.slice(-2),
+					critical_requirement_count: state.obligations.filter((item) => item.critical).length,
+					critical_requirement_excerpts: sampledRequirements.map((item) => ({
+						...item,
+						description: item.description.slice(0, 64),
+					})),
+					obligation_coverage_receipt_count: obligationCoverageReceiptCount,
+					critical_assumptions: criticalAssumptions.slice(-1),
+					python_probe_contract: pythonProbeBindings
+						? {
+								probe_version: 1,
+								runtime: "python_call_v1",
+								module_path:
+									pythonProbeBindings.modulePaths.length === 1
+										? pythonProbeBindings.modulePaths[0]
+										: undefined,
+								required_callables: pythonProbeBindings.requiredCallables,
+								callable_input_dimensions: pythonProbeBindings.callableInputDimensions,
+								surface_error: pythonProbeBindings.surfaceError,
+								minimum_cases: pythonProbeBindings.minimumCases,
+								maximum_cases: pythonProbeBindings.maximumCases,
+								minimum_cross_requirement_cases: pythonProbeBindings.minimumCrossRequirementCases,
+								minimum_distinct_requirements: pythonProbeBindings.minimumDistinctRequirements,
+								minimum_contrasted_input_dimensions: pythonProbeBindings.minimumContrastedInputDimensions,
+								require_cross_requirement_case_per_required_callable:
+									pythonProbeBindings.minimumCrossRequirementCases > 0,
+							}
+						: undefined,
+					review_files: reviewFiles.map((item) => ({
+						...item,
+						excerpt: item.excerpt.slice(0, 128),
+						truncated: true,
+					})),
+				};
+			}
+			const rawContextJson = JSON.stringify(rawContext);
+			const context =
+				rawContextJson.length <= (adversarialReview ? 8_000 : 3_500)
+					? rawContext
+					: adversarialReview && compactAdversarialContext
+						? {
+								...compactAdversarialContext,
+								sha256: createHash("sha256").update(rawContextJson).digest("hex"),
+							}
+						: {
+								truncated: true,
+								sha256: createHash("sha256").update(rawContextJson).digest("hex"),
+								contextPrefix: rawContextJson.slice(0, 3_000),
+							};
+			const packet = buildAvoSupervisorPacket(state, context, adversarialReview ? "" : supervisorMemory.context);
+			const serialized = JSON.stringify(packet);
+			const boundedPacket: Record<string, unknown> =
+				serialized.length <= (adversarialReview ? 12_000 : 7_000)
+					? packet
+					: {
+							packet_version: 1,
+							truncated: true,
+							sha256: createHash("sha256").update(serialized).digest("hex"),
+							run_id: state.runId,
+							objective: state.objective?.slice(0, 1_500),
+							environment: state.routing.environment,
+							horizon: state.routing.horizon,
+							latest_checkpoint: state.checkpoints.at(-1),
+							adapter_context: context,
+						};
+			let prompt = buildAvoSupervisorMessage(
+				state,
+				cycleId,
+				context,
+				adversarialReview ? "" : supervisorMemory.context,
+				adversarialReview ? undefined : boundedPacket,
+			);
+			if (probeValidationFeedback) {
+				prompt = `${prompt}\n\n[HOST PROBE VALIDATION]\nYour previous probe_plan was rejected: ${probeValidationFeedback.slice(0, 1_000)}\nReturn one corrected complete AVO_SUPERVISION_JSON response for this same cycle. This is the only automatic schema-repair turn.`;
+			}
+			if (prompt.length > 16_384) throw new Error("AVO supervisor prompt exceeds the retained-message limit");
+			const receipt = await this._agentMessageController!.sendAgentMessage({
+				target: assertDirectAgentMessageTarget(supervisor.name),
+				message: normalizeAgentSessionMessage(prompt),
+			});
+			return { receipt };
+		} catch (error) {
+			return { error: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	private async _bindAvoPythonProbeReview(
+		runtime: AvoSessionRuntime,
+		cycle: AvoRunState["cycles"][number],
+		candidate: AvoRunState["candidates"][number],
+		message: string,
+		bindings: AvoPythonProbeBindings,
+		parsed: ReturnType<typeof parseAvoSupervisorMessage>,
+		executorAvailability: AvoPythonProbeExecutorAvailability = getAvoPythonProbeExecutorAvailability(),
+	): Promise<ReturnType<typeof parseAvoSupervisorMessage>> {
+		if (parsed.status !== "progressing") return parsed;
+		const currentState = runtime.getState();
+		const probeContractDigest = digestAvoPythonProbeApplicability(currentState, candidate);
+		const prospectiveContract = [...currentState.evaluations]
+			.reverse()
+			.find(
+				(item) =>
+					item.candidateId === candidate.candidateId &&
+					item.evaluatorId === "adversarial_probe_contract" &&
+					item.issuedBy === "host" &&
+					item.metrics.probe_contract_digest === probeContractDigest &&
+					item.metrics.probe_required === true &&
+					item.metrics.workspace_matches_candidate === true &&
+					item.metrics.python_bundle_matches_candidate === true &&
+					item.metrics.candidate_payload_digest === candidate.payloadDigest &&
+					item.metrics.candidate_workspace_digest === candidate.workspaceDigest &&
+					item.metrics.candidate_python_bundle_digest === candidate.pythonProbeBundleDigest,
+			);
+		const supervisorMessageDigest = createHash("sha256").update(message).digest("hex");
+		const existingAttempts = currentState.evaluations.filter(
+			(item) =>
+				item.candidateId === candidate.candidateId &&
+				item.evaluatorId === "adversarial_probe" &&
+				item.metrics.supervisor_cycle_id === cycle.cycleId &&
+				item.metrics.probe_contract_digest === probeContractDigest,
+		);
+		const existing = existingAttempts.at(-1);
+		if (existing) {
+			const reason =
+				typeof existing.metrics.validation_reason === "string"
+					? existing.metrics.validation_reason
+					: "the existing immutable adversarial probe receipt has no validation reason";
+			const exactRegisteredContract =
+				prospectiveContract !== undefined &&
+				existing.metrics.probe_contract_registered === true &&
+				existing.metrics.probe_contract_evaluation_id === prospectiveContract.evaluationId;
+			if (existing.status === "pass" && exactRegisteredContract) {
+				return {
+					...parsed,
+					reason: `${parsed.reason.trim()} Host-executed supervisor challenges: ${reason}.`,
+					detectedPatterns: [...parsed.detectedPatterns, "host_executed_model_oracle_matched"],
+				};
+			}
+			if (existing.status === "revise" || existing.status === "fail") {
+				return {
+					...parsed,
+					status: "intervene",
+					reason,
+					detectedPatterns: [...parsed.detectedPatterns, "adversarial_probe_failure"],
+					recommendedActions: [
+						"Revise the candidate or provide a valid requirement-linked probe plan.",
+						...parsed.recommendedActions,
+					].slice(0, 3),
+				};
+			}
+			const sameMessage = existing.metrics.probe_supervisor_message_digest === supervisorMessageDigest;
+			const contractWasRepaired = !exactRegisteredContract && prospectiveContract !== undefined;
+			const environmentMayHaveRecovered =
+				existing.metrics.probe_environment_unsupported === true &&
+				prospectiveContract !== undefined &&
+				!bindings.surfaceError &&
+				executorAvailability.available &&
+				(existing.metrics.probe_executor_available !== true ||
+					existing.metrics.probe_surface_unsupported === true ||
+					!sameMessage);
+			const correctedPlan =
+				existing.metrics.probe_environment_unsupported !== true &&
+				!bindings.surfaceError &&
+				executorAvailability.available &&
+				!sameMessage;
+			if (!contractWasRepaired && !environmentMayHaveRecovered && !correctedPlan) {
+				return {
+					...parsed,
+					status: "watch",
+					reason:
+						existing.metrics.probe_environment_unsupported === true
+							? `${parsed.reason.trim()} Host probes were unavailable: ${reason}.`
+							: reason,
+					detectedPatterns: [
+						...parsed.detectedPatterns,
+						existing.metrics.probe_environment_unsupported === true
+							? "adversarial_probe_environment_unsupported"
+							: "invalid_adversarial_probe_plan",
+					],
+				};
+			}
+		}
+		const attemptIndex = existingAttempts.length;
+		let plan: AvoPythonProbePlan | undefined;
+		let adequacy: ReturnType<typeof assessAvoPythonProbeAdequacy> | undefined;
+		let execution: Awaited<ReturnType<AgentSession["_runAvoPythonProbe"]>> | undefined;
+		let validationError: string | undefined;
+		if (!prospectiveContract) {
+			validationError = "the host did not preregister this Python probe contract before supervisor review";
+		} else if (bindings.surfaceError) {
+			validationError = bindings.surfaceError;
+		} else if (!executorAvailability.available) {
+			validationError = executorAvailability.reason ?? "the host has no isolated Python probe executor";
+		} else {
+			try {
+				plan = parseAvoPythonProbePlan(message, cycle.cycleId, bindings);
+				adequacy = assessAvoPythonProbeAdequacy(plan, bindings);
+				execution = await this._runAvoPythonProbe(candidate, plan);
+				validationError = execution.error;
+			} catch (error) {
+				validationError = error instanceof Error ? error.message : String(error);
+			}
+		}
+		const passed =
+			plan !== undefined &&
+			execution?.report?.passed === true &&
+			execution.exitCode === 0 &&
+			!execution.timedOut &&
+			!execution.truncated &&
+			!validationError;
+		const failedResults = execution?.report?.results.filter((item) => item.status === "fail") ?? [];
+		const brokerUnavailable = /^host probe broker (?:connection failed|timed out|closed without a result)/.test(
+			validationError ?? "",
+		);
+		const candidateSurfaceInvalid =
+			Boolean(bindings.surfaceError) && bindings.surfaceErrorDisposition === "candidate_invalid";
+		const probeEnvironmentUnsupported =
+			!prospectiveContract ||
+			(Boolean(bindings.surfaceError) && !candidateSurfaceInvalid) ||
+			!executorAvailability.available ||
+			brokerUnavailable ||
+			(failedResults.length > 0 &&
+				failedResults.length === execution?.report?.results.length &&
+				failedResults.every((item) =>
+					/^module import failed: (?:ModuleNotFoundError|ImportError):/.test(item.error ?? ""),
+				));
+		const planDigest = digestAvoPayload(
+			plan ?? {
+				cycleId: cycle.cycleId,
+				invalidProbeMessageDigest: createHash("sha256").update(message).digest("hex"),
+			},
+		);
+		const reportDigest = digestAvoPayload(
+			execution?.report ?? { error: validationError ?? "probe produced no report" },
+		);
+		const receiptDigest = digestAvoPayload({
+			attemptIndex,
+			cycleId: cycle.cycleId,
+			candidateId: candidate.candidateId,
+			candidatePayloadDigest: candidate.payloadDigest,
+			candidateWorkspaceDigest: candidate.workspaceDigest,
+			candidatePythonBundleDigest: candidate.pythonProbeBundleDigest,
+			probeContractDigest,
+			probeContractEvaluationId: prospectiveContract?.evaluationId ?? "missing",
+			planDigest,
+			reportDigest,
+			exitCode: execution?.exitCode ?? null,
+			timedOut: execution?.timedOut ?? false,
+			truncated: execution?.truncated ?? false,
+			validationError,
+		});
+		const executionDiagnostic = execution?.stderr.trim() || execution?.stdout.trim() || "";
+		const validationReason = passed
+			? `${execution!.report!.results.length} distinct fresh-process host-sandboxed supervisor challenges matched the retained model oracle; ${adequacy?.contrastedInputDimensions ?? 0}/${adequacy?.requiredInputDimensions ?? 0} host-required input contrasts executed; this is diagnostic and not semantic proof`
+			: probeEnvironmentUnsupported
+				? (bindings.surfaceError ??
+					executorAvailability.reason ??
+					validationError ??
+					"the isolated system Python could not import a candidate dependency; executable adversarial proof remains unavailable")
+				: validationError
+					? `adversarial probe was not executable: ${validationError}${executionDiagnostic ? `; runner=${executionDiagnostic.slice(0, 500)}` : ""}`
+					: `${failedResults.length} of ${execution?.report?.results.length ?? 0} adversarial probe cases failed`;
+		runtime.recordHostEvaluation({
+			evaluationId: `evaluation-adversarial-probe-${createHash("sha256")
+				.update(
+					`${runtime.getState().runId}\0${cycle.cycleId}\0${candidate.candidateId}\0${probeContractDigest}\0${prospectiveContract?.evaluationId ?? "missing"}\0${attemptIndex}\0${supervisorMessageDigest}`,
+				)
+				.digest("hex")}`,
+			candidateId: candidate.candidateId,
+			evaluatorId: "adversarial_probe",
+			status: passed
+				? "pass"
+				: candidateSurfaceInvalid
+					? "revise"
+					: probeEnvironmentUnsupported
+						? "inconclusive"
+						: execution?.report
+							? "revise"
+							: "inconclusive",
+			authority: "model_opinion",
+			evidenceRefs: [`host:adversarial-probe:${receiptDigest}`],
+			metrics: {
+				meaningful: false,
+				probe_execution_observed: execution?.report !== undefined,
+				probe_oracle_source: "retained_supervisor",
+				probe_semantic_authority: false,
+				probe_attempt_index: attemptIndex,
+				probe_supervisor_message_digest: supervisorMessageDigest,
+				candidate_payload_digest: candidate.payloadDigest,
+				candidate_workspace_digest: candidate.workspaceDigest ?? "missing",
+				candidate_python_bundle_digest: candidate.pythonProbeBundleDigest ?? "missing",
+				workspace_matches_candidate:
+					execution !== undefined && execution.postWorkspaceDigest === candidate.workspaceDigest,
+				supervisor_cycle_id: cycle.cycleId,
+				probe_contract_digest: probeContractDigest,
+				probe_contract_evaluation_id: prospectiveContract?.evaluationId ?? "missing",
+				probe_contract_registered: prospectiveContract !== undefined,
+				probe_runtime: plan?.runtime ?? "invalid",
+				probe_plan_digest: planDigest,
+				probe_report_digest: reportDigest,
+				probe_plan: JSON.stringify(plan ?? { error: validationError ?? "missing plan" }).slice(0, 32_000),
+				probe_callables: [...new Set(plan?.cases.map((item) => item.callable) ?? [])].sort().join(","),
+				probe_required_callables: [...bindings.requiredCallables].sort().join(","),
+				probe_adequacy_policy: "host_signature_contrast_model_oracle_v4",
+				probe_required_contrast_dimension_count: adequacy?.requiredInputDimensions ?? 0,
+				probe_contrasted_input_dimension_count: adequacy?.contrastedInputDimensions ?? 0,
+				probe_case_count: plan?.cases.length ?? 0,
+				probe_unique_input_count: plan?.cases.length ?? 0,
+				probe_passed_case_count: execution?.report?.results.filter((item) => item.status === "pass").length ?? 0,
+				probe_failed_case_count: failedResults.length,
+				probe_environment_unsupported: probeEnvironmentUnsupported,
+				probe_surface_unsupported: Boolean(bindings.surfaceError),
+				probe_surface_disposition: bindings.surfaceErrorDisposition ?? "supported",
+				probe_executor_available: executorAvailability.available,
+				probe_executor_mode: executorAvailability.mode,
+				exit_code: execution?.exitCode ?? -1,
+				timed_out: execution?.timedOut ?? false,
+				truncated: execution?.truncated ?? false,
+				duration_ms: execution?.durationMs ?? 0,
+				probe_report: JSON.stringify(execution?.report ?? { error: validationError ?? "missing report" }).slice(
+					0,
+					8_000,
+				),
+				probe_stdout: execution?.stdout.slice(0, 2_000) ?? "",
+				probe_stderr: execution?.stderr.slice(0, 2_000) ?? "",
+				validation_reason: validationReason,
+			},
+		});
+		if (passed) {
+			return {
+				...parsed,
+				reason: `${parsed.reason.trim()} Host-executed supervisor challenges: ${validationReason}.`,
+				detectedPatterns: [...parsed.detectedPatterns, "host_executed_model_oracle_matched"],
+			};
+		}
+		if (probeEnvironmentUnsupported) {
+			return {
+				...parsed,
+				status: "watch",
+				reason: `${parsed.reason.trim()} Host probes were unavailable: ${validationReason}.`,
+				detectedPatterns: [...parsed.detectedPatterns, "adversarial_probe_environment_unsupported"],
+			};
+		}
+		const failureActions = failedResults
+			.slice(0, 3)
+			.map(
+				(item) =>
+					`probe_case=${item.caseId}; actual=${JSON.stringify(item.actual ?? item.error ?? null).slice(0, 300)}; expected=${JSON.stringify(item.expected ?? null).slice(0, 300)}`,
+			);
+		return {
+			...parsed,
+			status: candidateSurfaceInvalid || execution?.report ? "intervene" : "watch",
+			reason: validationReason,
+			detectedPatterns: [
+				...parsed.detectedPatterns,
+				candidateSurfaceInvalid
+					? "adversarial_probe_surface_invalid"
+					: execution?.report
+						? "adversarial_probe_failure"
+						: "invalid_adversarial_probe_plan",
+			],
+			recommendedActions: [
+				...(candidateSurfaceInvalid
+					? [`Revise the candidate to restore the required Python surface: ${validationReason}`]
+					: []),
+				...failureActions,
+				...parsed.recommendedActions,
+			].slice(0, 3),
+		};
+	}
+
+	private async _collectAvoSupervisorResults(): Promise<{
+		ingested: number;
+		supervision: ReturnType<AvoSessionRuntime["getState"]>["supervision"];
+		errors: string[];
+	}> {
+		const runtime = this._requireAvoRuntime();
+		const state = runtime.getState();
+		const supervisor = state.supervisor;
+		if (!supervisor) return { ingested: 0, supervision: state.supervision, errors: [] };
+		let ingested = 0;
+		const errors: string[] = [];
+		const messages = [...this.messages];
+		for (const action of this._actionStore.unfinishedActions()) {
+			if (action.payload.kind === "turn" && action.payload.customMessage)
+				messages.push(action.payload.customMessage);
+		}
+		const pendingCycles = state.cycles.filter((cycle) => {
+			const latest = [...state.supervision]
+				.reverse()
+				.find((review) => review.cycleId === cycle.cycleId && review.source === "retained_supervisor");
+			return !latest || latest.status === "watch";
+		});
+		for (const cycle of pendingCycles) {
+			const marker = `AVO_SUPERVISION_JSON:${cycle.cycleId}`;
+			const message = [...messages]
+				.reverse()
+				.find(
+					(item) =>
+						isAgentSessionMessage(item) &&
+						item.details.message.includes(marker) &&
+						item.details.from?.sessionName === supervisor.name,
+				);
+			let text = message && isAgentSessionMessage(message) ? message.details.message : undefined;
+			if (!text) {
+				const retainedSession = this.getRlmChildSession(supervisor.rlmChildId);
+				if (retainedSession) {
+					text = findAvoSupervisorResponseText(
+						retainedSession.messages.flatMap((item) =>
+							item.role === "assistant" ? [readAssistantText(item)] : [],
+						),
+						cycle.cycleId,
+					);
+				}
+			}
+			if (!text) {
+				const children = (await this.listRlmSubagents()).subagents;
+				const child =
+					children.find(
+						(item) => item.rlm_child_id === supervisor.rlmChildId || item.session_name === supervisor.name,
+					) ?? this._persistedAutoresearchSubagent(supervisor.rlmChildId, supervisor.name);
+				if (child?.status === "completed" || child?.status === "error") {
+					text = this._readAutoresearchTerminal(child, marker);
+				}
+			}
+			if (!text) continue;
+			try {
+				const currentState = runtime.getState();
+				const priorReview = [...currentState.supervision]
+					.reverse()
+					.find((review) => review.cycleId === cycle.cycleId && review.source === "retained_supervisor");
+				const inputDigest = createHash("sha256").update(text).digest("hex");
+				const priorProbeAttemptCount = currentState.evaluations.filter(
+					(item) => item.evaluatorId === "adversarial_probe" && item.metrics.supervisor_cycle_id === cycle.cycleId,
+				).length;
+				const candidate = currentState.candidates.find((item) => item.candidateId === cycle.candidateId);
+				const trajectoryVerificationRequired = requiresAvoAdversarialReview(currentState, cycle.cycleId);
+				const adversarialBindings = trajectoryVerificationRequired
+					? {
+							sourcePaths: this._avoAdversarialReviewPaths(currentState, candidate),
+							requirementIds: currentState.obligations
+								.filter((item) => item.critical && item.kind !== "outcome")
+								.map((item) => item.obligationId),
+							minimumAnalyses:
+								currentState.obligations.filter((item) => item.critical && item.kind !== "outcome").length >= 16
+									? 3
+									: 1,
+							requireCrossRequirement:
+								currentState.obligations.filter((item) => item.critical && item.kind !== "outcome").length >=
+								16,
+						}
+					: undefined;
+				let parsed = parseAvoSupervisorMessage(text, cycle.cycleId, adversarialBindings);
+				const pythonProbeBindings = trajectoryVerificationRequired
+					? this._avoPythonProbeBindings(currentState, candidate)
+					: undefined;
+				if (candidate && pythonProbeBindings) {
+					parsed = await this._bindAvoPythonProbeReview(
+						runtime,
+						cycle,
+						candidate,
+						text,
+						pythonProbeBindings,
+						parsed,
+					);
+				}
+				const probeAttemptCount = runtime
+					.getState()
+					.evaluations.filter(
+						(item) =>
+							item.evaluatorId === "adversarial_probe" && item.metrics.supervisor_cycle_id === cycle.cycleId,
+					).length;
+				if (
+					priorReview &&
+					priorReview.inputDigest === inputDigest &&
+					probeAttemptCount === priorProbeAttemptCount
+				) {
+					continue;
+				}
+				const attemptIndex = priorReview ? (priorReview.attemptIndex ?? 0) + 1 : 0;
+				runtime.store.recordSupervision({
+					...parsed,
+					source: "retained_supervisor",
+					attemptIndex,
+					inputDigest,
+					supersedesReviewId: priorReview?.reviewId,
+				});
+				if (
+					attemptIndex === 0 &&
+					parsed.status === "watch" &&
+					parsed.detectedPatterns.includes("invalid_adversarial_probe_plan")
+				) {
+					const validationReason = runtime
+						.getState()
+						.evaluations.filter(
+							(item) =>
+								item.evaluatorId === "adversarial_probe" && item.metrics.supervisor_cycle_id === cycle.cycleId,
+						)
+						.at(-1)?.metrics.validation_reason;
+					const correction = await this._dispatchAvoCheckpoint(
+						supervisor,
+						cycle.cycleId,
+						typeof validationReason === "string" ? validationReason : parsed.reason,
+					);
+					if (correction.error) errors.push(correction.error);
+				}
+				if (parsed.status === "intervene" && runtime.getState().routing.horizon === "long") {
+					await this._runAvoGenerativeMemoryReflection(cycle.cycleId, "supervisor_intervention");
+					await this._runAvoGenerativeMemoryReconciliation(cycle.cycleId);
+				}
+				ingested += 1;
+			} catch (error) {
+				errors.push(error instanceof Error ? error.message : String(error));
+			}
+		}
+		return { ingested, supervision: runtime.getState().supervision, errors };
+	}
+
+	private _bindAvoExperimentTrial(
+		runtime: AvoSessionRuntime,
+		input: ReturnType<typeof parseAvoTrialInput>,
+		sourceEvaluation: AvoEvaluationReceipt,
+		output = "",
+	): Record<string, unknown> {
+		const contract = runtime.store.prepareTrialExecution(
+			input.experimentId,
+			input.candidateId,
+			input.conditionId,
+			input.seed,
+		);
+		const state = runtime.getState();
+		const experiment = state.experiments.find((item) => item.experimentId === input.experimentId);
+		const candidate = state.candidates.find((item) => item.candidateId === input.candidateId);
+		if (!experiment?.plan || !candidate) throw new Error("experiment trial references missing host state");
+		if (
+			sourceEvaluation.candidateId !== candidate.candidateId ||
+			sourceEvaluation.issuedBy !== "host" ||
+			sourceEvaluation.authority === "model_opinion" ||
+			["experiment_trial", "experiment_aggregate"].includes(sourceEvaluation.evaluatorId) ||
+			sourceEvaluation.status !== "pass" ||
+			sourceEvaluation.metrics.meaningful !== true
+		) {
+			throw new Error("experiment trial source must be a meaningful passing host evaluation for the candidate");
+		}
+		if (sourceEvaluation.metrics.command_digest !== contract.commandDigest) {
+			throw new Error("experiment trial source command does not match the host-rendered preregistered cell");
+		}
+		if (sourceEvaluation.metrics.candidate_payload_digest !== candidate.payloadDigest) {
+			throw new Error("experiment trial source is not bound to the current candidate payload");
+		}
+		runtime.store.assertTrialSourceOrder(experiment.experimentId, sourceEvaluation.evaluationId);
+		const outputMetrics = parseAvoTrialMetricsOutput(output, experiment.plan.primaryMetric);
+		const primaryValue =
+			outputMetrics[experiment.plan.primaryMetric] ?? sourceEvaluation.metrics[experiment.plan.primaryMetric];
+		if (typeof primaryValue !== "number" || !Number.isFinite(primaryValue)) {
+			throw new Error(
+				`trial command must emit AVO_TRIAL_METRICS_JSON:{"${experiment.plan.primaryMetric}":<finite number>}`,
+			);
+		}
+		const evaluation = runtime.recordHostEvaluation({
+			candidateId: candidate.candidateId,
+			evaluatorId: "experiment_trial",
+			status: "pass",
+			authority: "host",
+			evidenceRefs: [
+				...sourceEvaluation.evidenceRefs,
+				`host:experiment-cell:${contract.cellDigest}`,
+				`evaluation:${sourceEvaluation.evaluationId}`,
+			],
+			metrics: {
+				...sourceEvaluation.metrics,
+				meaningful: true,
+				[experiment.plan.primaryMetric]: primaryValue,
+				experiment_id: experiment.experimentId,
+				condition_id: contract.conditionId,
+				seed: contract.seed,
+				command_digest: contract.commandDigest,
+				cell_digest: contract.cellDigest,
+				source_evaluation_id: sourceEvaluation.evaluationId,
+				source_evaluation_created_at: sourceEvaluation.createdAt,
+				candidate_payload_digest: candidate.payloadDigest,
+			},
+		});
+		const trial = runtime.recordTrial({ ...input, evaluationId: evaluation.evaluationId });
+		return { trial, evaluation, sourceEvaluation, contract };
+	}
+
+	async handleAvoHostRequest(type: string, payload: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+		const runtime = this._requireAvoRuntime();
+		switch (type) {
+			case "avo.initialize": {
+				if (typeof payload.objective !== "string") throw new Error("avo.initialize objective must be a string");
+				const current = runtime.getState();
+				const state = current.objective ? current : runtime.store.initialize(payload.objective, payload.objective);
+				return { state };
+			}
+			case "avo.get":
+				return { state: runtime.getState() };
+			case "avo.obligations.register": {
+				if (isAvoFeatureAblated("obligations")) return { obligations: [], disabled: true };
+				if (!Array.isArray(payload.obligations)) throw new Error("avo.obligations.register requires an array");
+				return {
+					obligations: runtime.registerObligations(payload.obligations.map(parseAvoObligationInput)),
+				};
+			}
+			case "avo.obligations.cover":
+				if (isAvoFeatureAblated("obligations")) return { coverage: null, disabled: true };
+				return { coverage: runtime.recordObligationCoverage(parseAvoObligationCoverageInput(payload.coverage)) };
+			case "avo.assumptions.register": {
+				if (isAvoFeatureAblated("critical_assumptions")) return { assumptions: [], disabled: true };
+				if (!Array.isArray(payload.assumptions)) throw new Error("avo.assumptions.register requires an array");
+				const state = runtime.getState();
+				if (state.routing.environment === "coding" && state.verificationBaseline) {
+					const workspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+						excludedRoots: this._avoWorkspaceExcludedRoots(),
+					});
+					const preregistrationDigest =
+						state.verificationBaseline.executions.at(-1)?.postWorkspaceDigest ??
+						state.verificationBaseline.workspaceDigest;
+					if (workspace.digest !== preregistrationDigest) {
+						throw new Error(
+							"critical assumptions must be preregistered before task workspace changes; restore or start a fresh task run",
+						);
+					}
+				}
+				return {
+					assumptions: runtime.registerCriticalAssumptions(
+						payload.assumptions.map(parseAvoCriticalAssumptionInput),
+					),
+				};
+			}
+			case "avo.assumptions.resolve":
+				if (isAvoFeatureAblated("critical_assumptions")) return { assumption: null, disabled: true };
+				return {
+					assumption: runtime.resolveCriticalAssumption(parseAvoAssumptionResolutionInput(payload.resolution)),
+				};
+			case "avo.configure": {
+				const environment = payload.environment;
+				const horizon = payload.horizon;
+				if (environment !== undefined)
+					throw new Error("AVO environment is host-routed and cannot be model-configured");
+				if (horizon !== "iterative" && horizon !== "long") {
+					throw new Error("model-facing AVO configure may only escalate horizon to iterative or long");
+				}
+				const current = runtime.getState().routing.horizon;
+				const rank = { direct: 0, iterative: 1, long: 2 } as const;
+				if (rank[horizon] < rank[current]) throw new Error("model-facing AVO configure cannot lower the horizon");
+				return {
+					state: runtime.configure({
+						horizon: horizon as AvoHorizonSelection | undefined,
+						source: "model",
+					}),
+				};
+			}
+			case "avo.candidate.add": {
+				const candidate = parseAvoCandidateInput(payload.candidate);
+				if (runtime.getState().routing.environment === "coding") {
+					const state = runtime.getState();
+					const workspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+						excludedRoots: this._avoWorkspaceExcludedRoots(),
+					});
+					candidate.workspaceDigest = workspace.digest;
+					candidate.workspaceHead = workspace.head;
+					candidate.workspaceMode = workspace.mode;
+					candidate.workspaceChangedPaths = deriveAvoWorkspaceImpactPaths(state.verificationBaseline, workspace);
+					if (candidate.workspaceChangedPaths.some((path) => path.endsWith(".py"))) {
+						candidate.pythonProbeBundleDigest = captureAvoPythonProbeBundle(this.sessionManager.getCwd(), {
+							excludedRoots: this._avoWorkspaceExcludedRoots(),
+						}).digest;
+					}
+				}
+				return { candidate: runtime.recordCandidate(candidate) };
+			}
+			case "avo.evaluation.record": {
+				const evaluation = parseAvoEvaluationInput(payload.evaluation);
+				if (evaluation.authority !== "model_opinion") {
+					throw new Error(
+						"model-submitted evaluations must use authority=model_opinion; use avo.evaluation.run for host-observed executable evidence",
+					);
+				}
+				return { evaluation: runtime.recordEvaluation(evaluation) };
+			}
+			case "avo.external.fetch": {
+				if (typeof payload.url !== "string" || payload.url.length > 4_096) {
+					throw new Error("avo.external.fetch url must contain 1 to 4096 characters");
+				}
+				const state = runtime.getState();
+				if (state.routing.environment !== "general" || state.verificationClass !== "external_factual") {
+					throw new Error("AVO external source fetching is available only for general external-factual tasks");
+				}
+				const source = await this._fetchAvoExternalSource(payload.url);
+				return {
+					source: {
+						url: source.url,
+						text: source.text,
+						body_digest: source.bodyDigest,
+						content_type: source.contentType,
+						truncated: source.truncated,
+						fetched_at: new Date().toISOString(),
+					},
+				};
+			}
+			case "avo.verification.baseline.run": {
+				if (typeof payload.command !== "string") {
+					throw new Error("avo.verification.baseline.run command must be a string");
+				}
+				if (classifyAvoHostEvaluationCommand(payload.command) !== "test") {
+					throw new Error("the coding verification baseline must be a recognized direct test command");
+				}
+				const state = runtime.getState();
+				if (state.routing.environment !== "coding" || !state.verificationBaseline) {
+					throw new Error("coding baseline execution is available only for a host-routed coding task");
+				}
+				if (state.candidates.length > 0) {
+					throw new Error("coding baseline execution must run before the first candidate is recorded");
+				}
+				const workspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+				});
+				if (workspace.digest !== state.verificationBaseline.workspaceDigest) {
+					throw new Error("the workspace changed before its immutable coding baseline was executed");
+				}
+				const verificationHarnessBefore = captureAvoVerificationHarnessManifest(
+					this.sessionManager.getCwd(),
+					payload.command,
+					state.verificationBaseline,
+				);
+				const result = await this._executeAvoVerificationBash(payload.command);
+				const assessment = assessAvoHostCommand("test", {
+					exitCode: result.exitCode,
+					cancelled: result.cancelled,
+					truncated: result.truncated,
+					output: result.output,
+				});
+				const trust = assessAvoTestTrust(
+					this.sessionManager.getCwd(),
+					payload.command,
+					state.verificationBaseline,
+					result.output,
+				);
+				const observedWorkUnits =
+					typeof assessment.metrics.observed_work_units === "number" ? assessment.metrics.observed_work_units : 0;
+				const observedPassedWorkUnits =
+					typeof assessment.metrics.observed_passed_work_units === "number"
+						? assessment.metrics.observed_passed_work_units
+						: 0;
+				const observedTestIdentities = deriveAvoObservedTestIdentities(result.output);
+				const commandDigest = createHash("sha256").update(payload.command).digest("hex");
+				const outputDigest = createHash("sha256").update(result.output).digest("hex");
+				const postWorkspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+				});
+				const verificationHarnessAfter = trust.verificationHarness;
+				const harnessStable =
+					verificationHarnessBefore.supported &&
+					verificationHarnessAfter?.supported === true &&
+					verificationHarnessBefore.digest === verificationHarnessAfter.digest;
+				const verificationBrokerTimedOut =
+					result.verificationMode === "host_broker" && result.verificationBrokerReceipt?.timedOut === true;
+				const verificationBrokerWorkspaceMatched = avoVerificationBrokerReceiptMatchesWorkspace(
+					payload.command,
+					result.verificationMode,
+					result.verificationBrokerReceipt,
+					workspace.digest,
+				);
+				const meaningful =
+					!verificationBrokerTimedOut &&
+					verificationBrokerWorkspaceMatched &&
+					assessment.metrics.meaningful === true &&
+					trust.trusted &&
+					trust.executionProven &&
+					harnessStable &&
+					postWorkspace.digest === workspace.digest &&
+					observedWorkUnits > 0 &&
+					observedTestIdentities.length > 0;
+				const execution = runtime.store.recordVerificationBaselineExecution({
+					command: payload.command,
+					commandDigest,
+					outputDigest,
+					workspaceDigest: workspace.digest,
+					postWorkspaceDigest: postWorkspace.digest,
+					status: assessment.status,
+					meaningful,
+					observedWorkUnits,
+					observedPassedWorkUnits,
+					observedTestIdentities,
+					observedBaselineTestFiles: trust.observedBaselineTestFiles,
+					testTrustBasis: trust.basis,
+					verificationHarness: verificationHarnessBefore,
+				});
+				return {
+					execution,
+					assessment: {
+						status: assessment.status,
+						meaningful,
+						observed_work_units: observedWorkUnits,
+						observed_passed_work_units: observedPassedWorkUnits,
+						observed_test_identities: observedTestIdentities,
+						observed_baseline_test_files: trust.observedBaselineTestFiles,
+						test_trust_basis: trust.basis,
+						execution_proven: trust.executionProven,
+						verification_harness_supported: verificationHarnessBefore.supported,
+						verification_harness_stable: harnessStable,
+						verification_harness_digest: verificationHarnessBefore.digest,
+						verification_execution_mode: result.verificationMode,
+						verification_broker_timed_out: verificationBrokerTimedOut,
+						verification_broker_workspace_matches_baseline: verificationBrokerWorkspaceMatched,
+						verification_broker_workspace_digest: result.verificationBrokerReceipt?.workspaceDigest ?? "missing",
+						verification_broker_post_workspace_digest:
+							result.verificationBrokerReceipt?.postWorkspaceDigest ?? "missing",
+						verification_broker_receipt_digest: result.verificationBrokerReceipt?.receiptDigest ?? "missing",
+					},
+					output: result.output,
+					exit_code: result.exitCode ?? null,
+				};
+			}
+			case "avo.evaluation.deterministic": {
+				if (typeof payload.candidate_id !== "string") {
+					throw new Error("avo.evaluation.deterministic candidate_id must be a string");
+				}
+				const state = runtime.getState();
+				if (state.routing.environment !== "general" || state.verificationClass !== "deterministic_local") {
+					throw new Error("AVO deterministic evaluation is available only for deterministic-local tasks");
+				}
+				const candidate = state.candidates.find((item) => item.candidateId === payload.candidate_id);
+				if (!candidate) throw new Error(`evaluation references unknown candidate ${payload.candidate_id}`);
+				if (!state.objective) throw new Error("AVO deterministic evaluation requires an active objective");
+				const contract = deriveAvoDeterministicArithmeticContract(state.objective);
+				const matches = candidate.deterministicResult === contract.result;
+				const receiptDigest = digestAvoPayload({
+					candidateId: candidate.candidateId,
+					candidatePayloadDigest: candidate.payloadDigest,
+					objective: state.objective,
+					expression: contract.expression,
+					result: contract.result,
+					matches,
+				});
+				const evaluation = runtime.recordHostEvaluation({
+					candidateId: candidate.candidateId,
+					evaluatorId: "deterministic_result",
+					status: matches ? "pass" : "revise",
+					authority: "environment",
+					evidenceRefs: [`host:deterministic:${receiptDigest}`],
+					metrics: {
+						meaningful: matches,
+						candidate_result_matches_objective: matches,
+						candidate_payload_digest: candidate.payloadDigest,
+						objective_digest: createHash("sha256").update(state.objective).digest("hex"),
+						expression_digest: createHash("sha256").update(contract.expression).digest("hex"),
+						expected_result_digest: createHash("sha256").update(contract.result).digest("hex"),
+						validation_reason: matches
+							? "the candidate result equals the host-evaluated arithmetic objective"
+							: "the candidate result does not equal the host-evaluated arithmetic objective",
+					},
+				});
+				return { evaluation, contract: { expression: contract.expression, result: contract.result } };
+			}
+			case "avo.evaluation.artifacts": {
+				if (typeof payload.candidate_id !== "string") {
+					throw new Error("avo.evaluation.artifacts candidate_id must be a string");
+				}
+				const state = runtime.getState();
+				if (state.routing.environment !== "general" || state.verificationClass !== "artifact") {
+					throw new Error("AVO artifact evaluation is available only for artifact tasks");
+				}
+				const candidate = state.candidates.find((item) => item.candidateId === payload.candidate_id);
+				if (!candidate) throw new Error(`evaluation references unknown candidate ${payload.candidate_id}`);
+				if (!candidate.artifactPaths?.length || !candidate.artifactTargetDigest) {
+					throw new Error("artifact candidate has no host-recorded artifact_paths contract");
+				}
+				const allowedRoots = [resolve(this.sessionManager.getCwd())];
+				const forbiddenRoots = this._avoWorkspaceExcludedRoots().map((root) => resolve(root));
+				const taskStartedAt = Date.parse(state.createdAt);
+				const baselinePaths = new Set(state.artifactBaselinePaths ?? []);
+				const verified: Array<{ declaredPath: string; path: string; sha256: string; size: number }> = [];
+				const failures: string[] = [];
+				const resolvedArtifacts = new Set<string>();
+				for (const requestedPath of candidate.artifactPaths) {
+					try {
+						const absolute = isAbsolute(requestedPath)
+							? resolve(requestedPath)
+							: resolve(this.sessionManager.getCwd(), requestedPath);
+						if (lstatSync(absolute).isSymbolicLink()) throw new Error("symbolic-link artifacts are not accepted");
+						const resolvedPath = realpathSync(absolute);
+						if (resolvedArtifacts.has(resolvedPath)) {
+							throw new Error("artifact path aliases another declared artifact");
+						}
+						resolvedArtifacts.add(resolvedPath);
+						const insideAllowedRoot = allowedRoots.some((root) => {
+							const fromRoot = relative(root, resolvedPath);
+							return (
+								fromRoot === "" ||
+								(fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot))
+							);
+						});
+						if (!insideAllowedRoot) throw new Error("path is outside the active workspace");
+						if (
+							forbiddenRoots.some((root) => resolvedPath === root || resolvedPath.startsWith(`${root}${sep}`))
+						) {
+							throw new Error("path is inside host-owned session metadata");
+						}
+						if (baselinePaths.has(resolvedPath)) throw new Error("path already existed at task start");
+						const stats = statSync(resolvedPath);
+						if (!stats.isFile()) throw new Error("path is not a regular file");
+						if (stats.size === 0) throw new Error("file is empty");
+						if (stats.size > 128 * 1024 * 1024) throw new Error("file exceeds the 128 MiB verification limit");
+						if (
+							!Number.isFinite(stats.birthtimeMs) ||
+							stats.birthtimeMs <= 0 ||
+							(Number.isFinite(taskStartedAt) && stats.birthtimeMs < taskStartedAt)
+						) {
+							throw new Error("file was not created during the active task");
+						}
+						verified.push({
+							declaredPath: absolute,
+							path: resolvedPath,
+							sha256: createHash("sha256").update(readFileSync(resolvedPath)).digest("hex"),
+							size: stats.size,
+						});
+					} catch (error) {
+						failures.push(`${requestedPath}: ${error instanceof Error ? error.message : String(error)}`);
+					}
+				}
+				const passed = failures.length === 0 && verified.length === candidate.artifactPaths.length;
+				const receiptDigest = digestAvoPayload({
+					candidateId: candidate.candidateId,
+					candidatePayloadDigest: candidate.payloadDigest,
+					artifactTargetDigest: candidate.artifactTargetDigest,
+					verified,
+					failures,
+				});
+				const evaluation = runtime.recordHostEvaluation({
+					candidateId: candidate.candidateId,
+					evaluatorId: "artifact_binding",
+					status: passed ? "pass" : "revise",
+					authority: "environment",
+					evidenceRefs: [
+						`host:artifact:${receiptDigest}`,
+						...verified.map((artifact) => `artifact:${artifact.sha256}:${artifact.path}`),
+					],
+					metrics: {
+						meaningful: passed,
+						artifact_candidate_binding: passed,
+						artifact_target_digest: candidate.artifactTargetDigest,
+						candidate_payload_digest: candidate.payloadDigest,
+						artifact_target_count: candidate.artifactPaths.length,
+						artifact_verified_count: verified.length,
+						artifact_total_bytes: verified.reduce((total, artifact) => total + artifact.size, 0),
+						artifact_manifest: JSON.stringify(verified),
+						validation_reason: passed ? "every candidate-declared artifact was host-hashed" : failures.join("; "),
+					},
+				});
+				return { evaluation, artifacts: verified, failures };
+			}
+			case "avo.evaluation.run": {
+				if (typeof payload.candidate_id !== "string") {
+					throw new Error("avo.evaluation.run candidate_id must be a string");
+				}
+				if (typeof payload.command !== "string") throw new Error("avo.evaluation.run command must be a string");
+				const evaluatorId = classifyAvoHostEvaluationCommand(payload.command);
+				const state = runtime.getState();
+				if (
+					state.routing.environment === "general" &&
+					state.verificationPolicy === "required" &&
+					(state.verificationClass === "deterministic_local" || state.verificationClass === "artifact")
+				) {
+					throw new Error(
+						state.verificationClass === "deterministic_local"
+							? "required deterministic tasks must use avo.evaluation.deterministic"
+							: "required artifact tasks must use avo.evaluation.artifacts",
+					);
+				}
+				const candidate = state.candidates.find((item) => item.candidateId === payload.candidate_id);
+				if (!candidate) throw new Error(`evaluation references unknown candidate ${payload.candidate_id}`);
+				const workspace = captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+					excludedRoots: this._avoWorkspaceExcludedRoots(),
+				});
+				const requiresWorkspaceBinding = state.routing.environment === "coding";
+				if (
+					requiresWorkspaceBinding &&
+					(!candidate.workspaceDigest || workspace.digest !== candidate.workspaceDigest)
+				) {
+					const evaluation = runtime.recordHostEvaluation({
+						candidateId: candidate.candidateId,
+						evaluatorId: "workspace_binding",
+						status: "revise",
+						authority: "host",
+						evidenceRefs: [`host:workspace:${workspace.digest}`],
+						metrics: {
+							meaningful: false,
+							workspace_matches_candidate: false,
+							candidate_workspace_digest: candidate.workspaceDigest ?? "missing",
+							observed_workspace_digest: workspace.digest,
+							candidate_payload_digest: candidate.payloadDigest,
+							validation_reason: "workspace changed after candidate creation; record a new candidate",
+						},
+					});
+					return {
+						evaluation,
+						execution: {
+							command: payload.command,
+							skipped: true,
+							reason: "workspace changed after candidate creation",
+							workspace_digest: workspace.digest,
+						},
+					};
+				}
+				const commandDigest = createHash("sha256").update(payload.command).digest("hex");
+				const baselineExecution = state.verificationBaseline?.executions.find(
+					(item) => item.commandDigest === commandDigest && item.meaningful,
+				);
+				const verificationHarnessBefore =
+					requiresWorkspaceBinding && evaluatorId === "test" && state.verificationBaseline
+						? captureAvoVerificationHarnessManifest(
+								this.sessionManager.getCwd(),
+								payload.command,
+								state.verificationBaseline,
+							)
+						: undefined;
+				const startedAt = Date.now();
+				const result =
+					requiresWorkspaceBinding && evaluatorId === "test"
+						? await this._executeAvoVerificationBash(payload.command)
+						: await this.executeBash(payload.command);
+				const verificationBrokerReceipt =
+					"verificationBrokerReceipt" in result
+						? (result.verificationBrokerReceipt as AvoVerificationBrokerReceipt | undefined)
+						: undefined;
+				const verificationExecutionMode =
+					"verificationMode" in result && typeof result.verificationMode === "string"
+						? result.verificationMode
+						: "ordinary";
+				const durationMs = Date.now() - startedAt;
+				let assessment = assessAvoHostCommand(evaluatorId, {
+					exitCode: result.exitCode,
+					cancelled: result.cancelled,
+					truncated: result.truncated,
+					output: result.output,
+				});
+				const postWorkspace = requiresWorkspaceBinding
+					? captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
+							excludedRoots: this._avoWorkspaceExcludedRoots(),
+						})
+					: workspace;
+				const verificationBrokerWorkspaceMatched = avoVerificationBrokerReceiptMatchesWorkspace(
+					payload.command,
+					verificationExecutionMode,
+					verificationBrokerReceipt,
+					candidate.workspaceDigest ?? "",
+				);
+				if (requiresWorkspaceBinding && evaluatorId === "test") {
+					const commandPassed = assessment.status === "pass";
+					const trust = assessAvoTestTrust(
+						this.sessionManager.getCwd(),
+						payload.command,
+						state.verificationBaseline,
+						result.output,
+					);
+					const postWorkUnits =
+						typeof assessment.metrics.observed_work_units === "number"
+							? assessment.metrics.observed_work_units
+							: 0;
+					const postPassedWorkUnits =
+						typeof assessment.metrics.observed_passed_work_units === "number"
+							? assessment.metrics.observed_passed_work_units
+							: 0;
+					const postTestIdentities = deriveAvoObservedTestIdentities(result.output);
+					const identityMatched =
+						baselineExecution !== undefined &&
+						JSON.stringify(postTestIdentities) === JSON.stringify(baselineExecution.observedTestIdentities) &&
+						(baselineExecution.testTrustBasis === "user_acceptance" ||
+							(baselineExecution.observedBaselineTestFiles.length > 0 &&
+								baselineExecution.observedBaselineTestFiles.every((path) =>
+									trust.observedBaselineTestFiles.includes(path),
+								)));
+					const verificationHarnessMatched =
+						baselineExecution?.verificationHarness?.supported === true &&
+						verificationHarnessBefore?.supported === true &&
+						trust.verificationHarness?.supported === true &&
+						baselineExecution.verificationHarness.commandDigest === commandDigest &&
+						baselineExecution.verificationHarness.digest === verificationHarnessBefore.digest &&
+						verificationHarnessBefore.digest === trust.verificationHarness.digest;
+					const brokerPythonSemanticAuthority =
+						verificationBrokerWorkspaceMatched &&
+						avoVerificationBrokerGrantsPythonSemanticAuthority(
+							payload.command,
+							verificationExecutionMode,
+							verificationBrokerReceipt,
+						);
+					const pythonInProcessVerifier =
+						verificationHarnessBefore?.runnerFamily === "pytest" &&
+						candidate.workspaceChangedPaths?.some((path) => path.endsWith(".py")) === true &&
+						!brokerPythonSemanticAuthority;
+					const pythonInProcessSelfCertification = commandPassed && pythonInProcessVerifier;
+					const baselineExecutionObservedMatched =
+						trust.trusted &&
+						trust.executionProven &&
+						verificationHarnessMatched &&
+						identityMatched &&
+						postWorkUnits >= (baselineExecution?.observedWorkUnits ?? Number.POSITIVE_INFINITY) &&
+						postPassedWorkUnits >= (baselineExecution?.observedPassedWorkUnits ?? Number.POSITIVE_INFINITY) &&
+						postWorkUnits - postPassedWorkUnits <=
+							(baselineExecution
+								? baselineExecution.observedWorkUnits - baselineExecution.observedPassedWorkUnits
+								: Number.NEGATIVE_INFINITY);
+					const baselineExecutionMatched = baselineExecutionObservedMatched && !pythonInProcessSelfCertification;
+					const meaningful = commandPassed
+						? trust.taskSpecific && baselineExecutionMatched
+						: assessment.metrics.meaningful === true;
+					assessment = {
+						status: commandPassed ? (meaningful ? "pass" : "inconclusive") : assessment.status,
+						metrics: {
+							...assessment.metrics,
+							meaningful,
+							trusted_test: trust.trusted,
+							task_specific_test: trust.taskSpecific,
+							test_trust_basis: trust.basis,
+							test_execution_proven: trust.executionProven,
+							observed_baseline_test_files: trust.observedBaselineTestFiles.join(","),
+							baseline_execution_matched: baselineExecutionMatched,
+							baseline_execution_observed_matched: baselineExecutionObservedMatched,
+							baseline_execution_id: baselineExecution?.executionId ?? "missing",
+							baseline_pre_status: baselineExecution?.status ?? "missing",
+							baseline_observed_work_units: baselineExecution?.observedWorkUnits ?? 0,
+							baseline_observed_passed_work_units: baselineExecution?.observedPassedWorkUnits ?? 0,
+							baseline_observed_test_identities: JSON.stringify(baselineExecution?.observedTestIdentities ?? []),
+							observed_test_identities: JSON.stringify(postTestIdentities),
+							test_identity_matched: identityMatched,
+							baseline_contract_digest: state.verificationBaseline?.contractDigest ?? "missing",
+							baseline_verification_harness_digest: baselineExecution?.verificationHarness?.digest ?? "missing",
+							observed_verification_harness_digest: trust.verificationHarness?.digest ?? "missing",
+							verification_harness_supported: trust.verificationHarnessSupported,
+							verification_harness_matched: verificationHarnessMatched,
+							baseline_test_count: trust.baselineTestCount,
+							unchanged_baseline_test_count: trust.unchangedBaselineTestCount,
+							explicit_baseline_targets: trust.explicitBaselineTargets,
+							narrowed_test_selection: trust.narrowedSelection,
+							python_in_process_self_certification: pythonInProcessSelfCertification,
+							python_test_semantic_authority: !pythonInProcessVerifier,
+							verification_execution_mode: verificationExecutionMode,
+							verification_broker_python_authority_enabled:
+								process.env[AVO_VERIFICATION_BROKER_PYTHON_AUTHORITY_ENV] === "1",
+							verification_broker_semantic_authority: brokerPythonSemanticAuthority,
+							verification_broker_receipt_digest: verificationBrokerReceipt?.receiptDigest ?? "missing",
+							validation_reason: meaningful
+								? "the same immutable pre-candidate baseline test contract executed and passed afterward"
+								: pythonInProcessSelfCertification
+									? "in-process pytest output cannot certify changed Python code; use an out-of-process verifier or independently verified specification proof"
+									: commandPassed
+										? "coding tests require a proven matching pre-candidate baseline execution"
+										: typeof assessment.metrics.validation_reason === "string"
+											? assessment.metrics.validation_reason
+											: "the coding test command did not produce a passing authoritative result",
+						},
+					};
+				}
+				if (requiresWorkspaceBinding && !verificationBrokerWorkspaceMatched) {
+					assessment = {
+						status: "revise",
+						metrics: {
+							...assessment.metrics,
+							meaningful: false,
+							verification_broker_workspace_matches_candidate: false,
+							verification_broker_workspace_digest: verificationBrokerReceipt?.workspaceDigest ?? "missing",
+							verification_broker_post_workspace_digest:
+								verificationBrokerReceipt?.postWorkspaceDigest ?? "missing",
+							validation_reason:
+								"the host verification broker receipt is not bound to the evaluated candidate workspace",
+						},
+					};
+				}
+				const verificationBrokerTimedOut =
+					verificationExecutionMode === "host_broker" && verificationBrokerReceipt?.timedOut === true;
+				if (verificationBrokerTimedOut) {
+					assessment = {
+						status: "revise",
+						metrics: {
+							...assessment.metrics,
+							meaningful: false,
+							verification_broker_timed_out: true,
+							validation_reason:
+								"the host verification broker timed out before completing authoritative verification",
+						},
+					};
+				}
+				if (requiresWorkspaceBinding && postWorkspace.digest !== candidate.workspaceDigest) {
+					assessment = {
+						status: "revise",
+						metrics: {
+							...assessment.metrics,
+							meaningful: false,
+							post_workspace_matches_candidate: false,
+							post_workspace_digest: postWorkspace.digest,
+							validation_reason: "the authoritative command changed the candidate workspace",
+						},
+					};
+				}
+				const receiptDigest = createHash("sha256")
+					.update(
+						JSON.stringify({
+							command: payload.command,
+							cwd: this.sessionManager.getCwd(),
+							exitCode: result.exitCode ?? null,
+							cancelled: result.cancelled,
+							output: result.output,
+							truncated: result.truncated,
+							workspaceDigest: workspace.digest,
+							postWorkspaceDigest: postWorkspace.digest,
+							candidatePayloadDigest: candidate.payloadDigest,
+							verificationBrokerReceiptDigest: verificationBrokerReceipt?.receiptDigest ?? null,
+						}),
+					)
+					.digest("hex");
+				const evaluation = runtime.recordHostEvaluation({
+					candidateId: payload.candidate_id,
+					evaluatorId,
+					status: assessment.status,
+					authority: "environment",
+					evidenceRefs: [
+						`host:command:${receiptDigest}`,
+						`host:workspace:${workspace.digest}`,
+						`host:workspace-post:${postWorkspace.digest}`,
+						...(verificationBrokerReceipt
+							? [`host:verification-broker:${verificationBrokerReceipt.receiptDigest}`]
+							: []),
+					],
+					metrics: {
+						...assessment.metrics,
+						command_digest: createHash("sha256").update(payload.command).digest("hex"),
+						output_digest: createHash("sha256").update(result.output).digest("hex"),
+						duration_ms: durationMs,
+						...(requiresWorkspaceBinding
+							? { workspace_matches_candidate: verificationBrokerWorkspaceMatched }
+							: { workspace_binding: "not_required" }),
+						workspace_digest: workspace.digest,
+						post_workspace_digest: postWorkspace.digest,
+						post_workspace_matches_candidate: postWorkspace.digest === candidate.workspaceDigest,
+						workspace_head: workspace.head,
+						workspace_mode: workspace.mode,
+						workspace_changed_files: workspace.changedFileCount,
+						workspace_snapshot_bytes: workspace.totalBytes,
+						candidate_payload_digest: candidate.payloadDigest,
+						verification_execution_mode: verificationExecutionMode,
+						verification_broker_timed_out: verificationBrokerTimedOut,
+						verification_broker_workspace_matches_candidate: verificationBrokerWorkspaceMatched,
+						verification_broker_workspace_digest: verificationBrokerReceipt?.workspaceDigest ?? "missing",
+						verification_broker_post_workspace_digest:
+							verificationBrokerReceipt?.postWorkspaceDigest ?? "missing",
+						verification_broker_receipt_digest: verificationBrokerReceipt?.receiptDigest ?? "missing",
+					},
+				});
+				return {
+					evaluation,
+					execution: {
+						command: payload.command,
+						output: result.output,
+						exit_code: result.exitCode ?? null,
+						cancelled: result.cancelled,
+						truncated: result.truncated,
+						receipt_digest: receiptDigest,
+						workspace_digest: workspace.digest,
+					},
+				};
+			}
+			case "avo.evaluation.url": {
+				if (typeof payload.candidate_id !== "string") {
+					throw new Error("avo.evaluation.url candidate_id must be a string");
+				}
+				if (typeof payload.claim_id !== "string") {
+					throw new Error("avo.evaluation.url claim_id must be a string");
+				}
+				if (typeof payload.url !== "string" || payload.url.length > 4_096) {
+					throw new Error("avo.evaluation.url url must contain 1 to 4096 characters");
+				}
+				if (typeof payload.exact_quote !== "string" || payload.exact_quote.trim().length < 8) {
+					throw new Error("avo.evaluation.url exact_quote must contain at least 8 characters");
+				}
+				if (payload.exact_quote.length > 4_000) {
+					throw new Error("avo.evaluation.url exact_quote must not exceed 4000 characters");
+				}
+				const state = runtime.getState();
+				if (state.routing.environment !== "general" || state.verificationClass !== "external_factual") {
+					throw new Error("URL evidence is available only for general external-factual tasks");
+				}
+				const candidate = state.candidates.find((item) => item.candidateId === payload.candidate_id);
+				if (!candidate) throw new Error(`evaluation references unknown candidate ${payload.candidate_id}`);
+				const claim = candidate.claims?.find((item) => item.claimId === payload.claim_id);
+				if (!claim) throw new Error(`candidate ${candidate.candidateId} has no claim ${payload.claim_id}`);
+				const fetched = await this._fetchAvoExternalSource(payload.url);
+				const normalizeEvidence = (value: string) => value.normalize("NFKC").replace(/\s+/g, " ").trim();
+				const normalizedQuote = normalizeEvidence(payload.exact_quote);
+				const matchingRecords = fetched.text
+					.split("\n")
+					.map(normalizeEvidence)
+					.filter((record) => record.includes(normalizedQuote));
+				if (matchingRecords.length === 0) {
+					throw new Error("AVO exact_quote was not found in the host-fetched visible source text");
+				}
+				if (matchingRecords.length !== 1) {
+					throw new Error("AVO exact_quote matched multiple visible source records and is ambiguous");
+				}
+				const matchedRecord = matchingRecords[0]!;
+				const firstOccurrence = matchedRecord.indexOf(normalizedQuote);
+				if (matchedRecord.indexOf(normalizedQuote, firstOccurrence + normalizedQuote.length) >= 0) {
+					throw new Error("AVO exact_quote occurs multiple times in one visible source record and is ambiguous");
+				}
+				assertAvoClaimVerifierQuoteSafe(claim.claimText, payload.exact_quote);
+				assertAvoClaimSourceContextSafe(claim.claimText, payload.exact_quote, matchedRecord);
+				const lexicalAssessment = assessAvoClaimEvidence(claim.claimText, payload.exact_quote);
+				const independentAssessment = await this._verifyAvoClaimEvidenceIndependently(
+					candidate.candidateId,
+					claim.claimId,
+					claim.claimText,
+					payload.exact_quote,
+				);
+				const semanticAssessment = combineAvoClaimEvidenceAssessments(
+					lexicalAssessment,
+					independentAssessment.verdict,
+				);
+				const receiptDigest = createHash("sha256")
+					.update(
+						JSON.stringify({
+							url: fetched.url,
+							bodyDigest: fetched.bodyDigest,
+							candidateId: candidate.candidateId,
+							candidatePayloadDigest: candidate.payloadDigest,
+							claimId: claim.claimId,
+							claimText: claim.claimText,
+							exactQuote: payload.exact_quote,
+							lexicalRelation: lexicalAssessment.relation,
+							independentRelation: independentAssessment.verdict.relation,
+							semanticRelation: semanticAssessment.relation,
+						}),
+					)
+					.digest("hex");
+				const evaluation = runtime.recordHostEvaluation({
+					candidateId: candidate.candidateId,
+					evaluatorId: "external_claim",
+					status:
+						semanticAssessment.relation === "supports"
+							? "pass"
+							: semanticAssessment.relation === "contradicts"
+								? "revise"
+								: "inconclusive",
+					authority: "external",
+					evidenceRefs: [`host:url:${receiptDigest}`, `source:${fetched.url}`],
+					metrics: {
+						meaningful: semanticAssessment.relation === "supports",
+						tool_name: "host_https_fetch",
+						claim_id: claim.claimId,
+						claim_text_digest: createHash("sha256").update(claim.claimText).digest("hex"),
+						semantic_relation: semanticAssessment.relation,
+						semantic_reason: semanticAssessment.reason,
+						semantic_verifier: "host_bound_exact_claim_independent_rlm_v2",
+						lexical_relation: lexicalAssessment.relation,
+						lexical_reason: lexicalAssessment.reason,
+						independent_relation: independentAssessment.verdict.relation,
+						independent_reason: independentAssessment.verdict.reason,
+						independent_verifier_child_id: independentAssessment.verifierChildId ?? "unavailable",
+						independent_verifier_model: independentAssessment.verifierModel ?? "unavailable",
+						independent_response_digest: independentAssessment.responseDigest ?? "unavailable",
+						independent_verifier_error: independentAssessment.error ?? "none",
+						claim_token_coverage: semanticAssessment.claimTokenCoverage,
+						exact_quote_digest: createHash("sha256").update(payload.exact_quote).digest("hex"),
+						candidate_payload_digest: candidate.payloadDigest,
+						source_count: 1,
+						source_url: fetched.url,
+						body_digest: fetched.bodyDigest,
+						content_type: fetched.contentType,
+						response_truncated: fetched.truncated,
+						fetched_at: new Date().toISOString(),
+					},
+				});
+				return {
+					evaluation,
+					source_receipt: {
+						receipt_digest: receiptDigest,
+						url: fetched.url,
+						body_digest: fetched.bodyDigest,
+						claim_id: claim.claimId,
+						semantic_relation: semanticAssessment.relation,
+						independent_relation: independentAssessment.verdict.relation,
+						verifier_child_id: independentAssessment.verifierChildId ?? null,
+					},
+				};
+			}
+			case "avo.evaluation.tool_result": {
+				if (typeof payload.candidate_id !== "string") {
+					throw new Error("avo.evaluation.tool_result candidate_id must be a string");
+				}
+				if (typeof payload.claim_id !== "string") {
+					throw new Error("avo.evaluation.tool_result claim_id must be a string");
+				}
+				if (typeof payload.tool_call_id !== "string") {
+					throw new Error("avo.evaluation.tool_result tool_call_id must be a string");
+				}
+				if (typeof payload.exact_quote !== "string" || payload.exact_quote.trim().length < 8) {
+					throw new Error("avo.evaluation.tool_result exact_quote must contain at least 8 characters");
+				}
+				if (payload.exact_quote.length > 4_000) {
+					throw new Error("avo.evaluation.tool_result exact_quote must not exceed 4000 characters");
+				}
+				const state = runtime.getState();
+				const candidate = state.candidates.find((item) => item.candidateId === payload.candidate_id);
+				if (!candidate) throw new Error(`evaluation references unknown candidate ${payload.candidate_id}`);
+				const claim = candidate.claims?.find((item) => item.claimId === payload.claim_id);
+				if (!claim) throw new Error(`candidate ${candidate.candidateId} has no claim ${payload.claim_id}`);
+				const { call, callTimestamp, result } = this._resolveAvoExternalToolResult(payload.tool_call_id);
+				if (callTimestamp < Date.parse(state.createdAt)) {
+					throw new Error("AVO external evidence must come from the active task run");
+				}
+				const normalizeEvidence = (value: string) => value.normalize("NFKC").replace(/\s+/g, " ").trim();
+				const normalizedQuote = normalizeEvidence(payload.exact_quote);
+				const matchingRecords = result.content.filter(
+					(item): item is TextContent =>
+						item.type === "text" && normalizeEvidence(item.text).includes(normalizedQuote),
+				);
+				if (matchingRecords.length === 0) {
+					throw new Error("AVO exact_quote was not found in the host-observed tool result");
+				}
+				if (matchingRecords.length !== 1) {
+					throw new Error("AVO exact_quote matched multiple external source records and is ambiguous");
+				}
+				const evidenceRecord = matchingRecords[0].text;
+				const sourceIdentifiers = [
+					...new Set(
+						(evidenceRecord.match(/https?:\/\/[^\s<>"']+/g) ?? []).map((source) =>
+							source.replace(/[),.;!?]+$/g, ""),
+						),
+					),
+				];
+				if (sourceIdentifiers.length > 1) {
+					throw new Error("AVO external source record contains multiple source URLs and is ambiguous");
+				}
+				assertAvoClaimVerifierQuoteSafe(claim.claimText, payload.exact_quote);
+				assertAvoClaimSourceContextSafe(claim.claimText, payload.exact_quote, evidenceRecord);
+				const lexicalAssessment = assessAvoClaimEvidence(claim.claimText, payload.exact_quote);
+				const independentAssessment = await this._verifyAvoClaimEvidenceIndependently(
+					candidate.candidateId,
+					claim.claimId,
+					claim.claimText,
+					payload.exact_quote,
+				);
+				const semanticAssessment = combineAvoClaimEvidenceAssessments(
+					lexicalAssessment,
+					independentAssessment.verdict,
+				);
+				const argumentDigest = createHash("sha256").update(JSON.stringify(call.arguments)).digest("hex");
+				const resultDigest = createHash("sha256")
+					.update(JSON.stringify({ content: result.content, details: result.details, isError: result.isError }))
+					.digest("hex");
+				const receiptDigest = createHash("sha256")
+					.update(
+						JSON.stringify({
+							toolCallId: call.id,
+							toolName: call.name,
+							argumentDigest,
+							resultDigest,
+							candidateId: candidate.candidateId,
+							candidatePayloadDigest: candidate.payloadDigest,
+							claimId: claim.claimId,
+							claimText: claim.claimText,
+							lexicalRelation: lexicalAssessment.relation,
+							independentRelation: independentAssessment.verdict.relation,
+							semanticRelation: semanticAssessment.relation,
+						}),
+					)
+					.digest("hex");
+				const evaluation = runtime.recordHostEvaluation({
+					candidateId: candidate.candidateId,
+					evaluatorId: "external_claim",
+					status:
+						semanticAssessment.relation === "supports"
+							? "pass"
+							: semanticAssessment.relation === "contradicts"
+								? "revise"
+								: "inconclusive",
+					authority: "external",
+					evidenceRefs: [`host:tool:${receiptDigest}`, ...sourceIdentifiers.map((source) => `source:${source}`)],
+					metrics: {
+						meaningful: semanticAssessment.relation === "supports",
+						tool_name: call.name,
+						tool_call_id: call.id,
+						claim_id: claim.claimId,
+						claim_text_digest: createHash("sha256").update(claim.claimText).digest("hex"),
+						semantic_relation: semanticAssessment.relation,
+						semantic_reason: semanticAssessment.reason,
+						semantic_verifier: "host_bound_exact_claim_independent_rlm_v2",
+						lexical_relation: lexicalAssessment.relation,
+						lexical_reason: lexicalAssessment.reason,
+						independent_relation: independentAssessment.verdict.relation,
+						independent_reason: independentAssessment.verdict.reason,
+						independent_verifier_child_id: independentAssessment.verifierChildId ?? "unavailable",
+						independent_verifier_model: independentAssessment.verifierModel ?? "unavailable",
+						independent_response_digest: independentAssessment.responseDigest ?? "unavailable",
+						independent_verifier_error: independentAssessment.error ?? "none",
+						claim_token_coverage: semanticAssessment.claimTokenCoverage,
+						argument_digest: argumentDigest,
+						result_digest: resultDigest,
+						exact_quote_digest: createHash("sha256").update(payload.exact_quote).digest("hex"),
+						candidate_payload_digest: candidate.payloadDigest,
+						source_count: sourceIdentifiers.length,
+						tool_call_timestamp: callTimestamp,
+						tool_result_timestamp: result.timestamp,
+					},
+				});
+				return {
+					evaluation,
+					tool_receipt: {
+						tool_call_id: call.id,
+						tool_name: call.name,
+						argument_digest: argumentDigest,
+						result_digest: resultDigest,
+						source_identifiers: sourceIdentifiers,
+						receipt_digest: receiptDigest,
+						claim_id: claim.claimId,
+						semantic_relation: semanticAssessment.relation,
+						semantic_reason: semanticAssessment.reason,
+						lexical_relation: lexicalAssessment.relation,
+						independent_relation: independentAssessment.verdict.relation,
+						verifier_child_id: independentAssessment.verifierChildId ?? null,
+					},
+				};
+			}
+			case "avo.cycle.complete": {
+				const cycleInput = parseAvoCycleInput(payload.cycle);
+				const preflightState = runtime.getState();
+				const preflightCandidate = preflightState.candidates.find(
+					(item) => item.candidateId === cycleInput.candidateId,
+				);
+				const requiresIndependentPythonSemantics =
+					preflightState.verificationPolicy === "required" &&
+					preflightCandidate !== undefined &&
+					["patch", "implementation", "configuration", "artifact"].includes(preflightCandidate.kind) &&
+					preflightCandidate.workspaceChangedPaths?.some((path) => path.endsWith(".py")) === true;
+				const hasImmutableSemanticTest = preflightState.evaluations.some(
+					(receipt) =>
+						receipt.candidateId === cycleInput.candidateId &&
+						receipt.issuedBy === "host" &&
+						receipt.evaluatorId === "test" &&
+						receipt.status === "pass" &&
+						receipt.metrics.meaningful === true &&
+						receipt.metrics.baseline_execution_matched === true,
+				);
+				if (requiresIndependentPythonSemantics && !hasImmutableSemanticTest) {
+					const specProof = this._recordAvoSpecSemanticEvidence(cycleInput.candidateId);
+					if (specProof?.status !== "pass" || specProof.metrics.spec_semantic_evidence !== true) {
+						throw new Error(
+							`AVO Python cycle is blocked before completion: ${String(specProof?.metrics.validation_reason ?? "no immutable baseline test or exact independently verified spec proof is available")}`,
+						);
+					}
+				}
+				this._recordAvoCandidateIntegrityFailure(cycleInput.candidateId);
+				const result = runtime.completeCycle(cycleInput);
+				const stateAfterCycle = runtime.getState();
+				let memoryReflection: Record<string, unknown> | undefined;
+				if (stateAfterCycle.routing.horizon === "long") {
+					const trigger = stateAfterCycle.cycles.length % 5 === 0 ? "five_cycles" : "candidate_acceptance";
+					memoryReflection =
+						result.cycle.outcome === "accepted"
+							? {
+									reflection: await this._runAvoGenerativeMemoryReflection(result.cycle.cycleId, trigger),
+									reconciliation: await this._runAvoGenerativeMemoryReconciliation(result.cycle.cycleId),
+								}
+							: stateAfterCycle.cycles.length % 5 === 0
+								? await runtime.reflectMemory(trigger, result.cycle.cycleId)
+								: undefined;
+				}
+				if (!result.activateSupervisor) return { ...result, memoryReflection };
+				let supervisor: { rlmChildId: string; name: string };
+				try {
+					supervisor = await this._ensureAvoSupervisor();
+				} catch (error) {
+					return {
+						...result,
+						memoryReflection,
+						supervisor: null,
+						delivery: { error: error instanceof Error ? error.message : String(error) },
+					};
+				}
+				const delivery = await this._dispatchAvoCheckpoint(supervisor, result.cycle.cycleId);
+				return { ...result, memoryReflection, supervisor, delivery };
+			}
+			case "avo.experiment.record":
+				return { experiment: runtime.recordExperiment(parseAvoExperimentInput(payload.experiment)) };
+			case "avo.trial.record": {
+				const input = parseAvoTrialInput(payload.trial);
+				const sourceEvaluation = runtime
+					.getState()
+					.evaluations.find((evaluation) => evaluation.evaluationId === input.evaluationId);
+				if (!sourceEvaluation) throw new Error(`trial source evaluation ${input.evaluationId} does not exist`);
+				return this._bindAvoExperimentTrial(runtime, input, sourceEvaluation);
+			}
+			case "avo.trial.run": {
+				const input = parseAvoTrialRunInput(payload.trial);
+				const contract = runtime.store.prepareTrialExecution(
+					input.experimentId,
+					input.candidateId,
+					input.conditionId,
+					input.seed,
+				);
+				const run = await this.handleAvoHostRequest("avo.evaluation.run", {
+					candidate_id: input.candidateId,
+					command: contract.command,
+				});
+				const evaluationId =
+					typeof run.evaluation === "object" &&
+					run.evaluation !== null &&
+					"evaluationId" in run.evaluation &&
+					typeof run.evaluation.evaluationId === "string"
+						? run.evaluation.evaluationId
+						: undefined;
+				const output =
+					typeof run.execution === "object" &&
+					run.execution !== null &&
+					"output" in run.execution &&
+					typeof run.execution.output === "string"
+						? run.execution.output
+						: "";
+				const sourceEvaluation = runtime
+					.getState()
+					.evaluations.find((evaluation) => evaluation.evaluationId === evaluationId);
+				if (!sourceEvaluation) throw new Error("trial execution did not produce a host evaluation");
+				return {
+					...this._bindAvoExperimentTrial(
+						runtime,
+						{ ...input, evaluationId: sourceEvaluation.evaluationId },
+						sourceEvaluation,
+						output,
+					),
+					execution: run.execution,
+				};
+			}
+			case "avo.experiment.complete": {
+				if (typeof payload.experiment_id !== "string") {
+					throw new Error("avo.experiment.complete experiment_id must be a string");
+				}
+				const result = runtime.completeExperiment(payload.experiment_id);
+				return { ...result, nooa: await runtime.syncMemory() };
+			}
+			case "avo.results.collect":
+				return await this._collectAvoSupervisorResults();
+			case "avo.memory.remember": {
+				const memory = runtime.store.remember(parseAvoMemoryInput(payload.memory));
+				return { memory, nooa: await runtime.syncMemory() };
+			}
+			case "avo.memory.sync":
+				return await runtime.syncMemory();
+			case "avo.memory.recall": {
+				if (typeof payload.query !== "string") throw new Error("avo.memory.recall query must be a string");
+				if (payload.limit !== undefined && typeof payload.limit !== "number")
+					throw new Error("avo.memory.recall limit must be a number");
+				return await runtime.recallMemory(payload.query, { limit: payload.limit ?? 8 });
+			}
+			case "avo.memory.spontaneous": {
+				if (typeof payload.query !== "string") throw new Error("avo.memory.spontaneous query must be a string");
+				if (payload.limit !== undefined && typeof payload.limit !== "number") {
+					throw new Error("avo.memory.spontaneous limit must be a number");
+				}
+				if (payload.max_chars !== undefined && typeof payload.max_chars !== "number") {
+					throw new Error("avo.memory.spontaneous max_chars must be a number");
+				}
+				return await runtime.recallMemory(payload.query, {
+					limit: payload.limit ?? 5,
+					maxChars: payload.max_chars ?? 2_000,
+					spontaneous: true,
+				});
+			}
+			case "avo.memory.reflect": {
+				const trigger = payload.trigger;
+				if (
+					trigger !== "five_cycles" &&
+					trigger !== "supervisor_intervention" &&
+					trigger !== "candidate_acceptance" &&
+					trigger !== "post_task" &&
+					trigger !== "manual"
+				) {
+					throw new Error("invalid AVO memory reflection trigger");
+				}
+				return await runtime.reflectMemory(
+					trigger,
+					typeof payload.cycle_id === "string" ? payload.cycle_id : undefined,
+				);
+			}
+			case "avo.memory.reflection.record": {
+				const trigger = payload.trigger;
+				if (
+					trigger !== "five_cycles" &&
+					trigger !== "supervisor_intervention" &&
+					trigger !== "candidate_acceptance" &&
+					trigger !== "post_task" &&
+					trigger !== "manual"
+				) {
+					throw new Error("invalid AVO memory reflection trigger");
+				}
+				if (!isObjectRecord(payload.report)) throw new Error("AVO memory reflection report must be an object");
+				const report: Record<string, number | string | boolean> = {};
+				for (const [key, value] of Object.entries(payload.report)) {
+					if (typeof value !== "number" && typeof value !== "string" && typeof value !== "boolean") {
+						throw new Error(`AVO memory reflection report.${key} must be scalar`);
+					}
+					report[key] = value;
+				}
+				if (
+					!Array.isArray(payload.archived_memory_ids) ||
+					!payload.archived_memory_ids.every((item) => typeof item === "string")
+				) {
+					throw new Error("AVO archived_memory_ids must be an array of strings");
+				}
+				return {
+					reflection: runtime.store.recordMemoryReflection({
+						trigger,
+						cycleId: typeof payload.cycle_id === "string" ? payload.cycle_id : undefined,
+						report,
+						archivedMemoryIds: payload.archived_memory_ids,
+					}),
+				};
+			}
+			case "avo.checkpoint":
+				return { checkpoint: runtime.getState().checkpoints.at(-1) ?? null };
+			case "avo.stop_gate":
+				await this._collectAvoSupervisorResults();
+				{
+					const stopGate = this._evaluateAvoHostBoundStopGate();
+					await this._queueAvoCanonicalDeliveryAfterPassingGate(stopGate);
+					return { stop_gate: stopGate };
+				}
+			case "avo.complete": {
+				await this._collectAvoSupervisorResults();
+				const stopGate = this._evaluateAvoHostBoundStopGate();
+				await this._queueAvoCanonicalDeliveryAfterPassingGate(stopGate);
+				return {
+					state: runtime.getState(),
+					stop_gate: stopGate,
+					completion_deferred_to_host_delivery: true,
+				};
+			}
+			default:
+				throw new Error(`unknown AVO request type "${type}"`);
+		}
+	}
+
+	private _requireAutoresearchStore(): AutoresearchStore {
+		if (!this._autoresearchStore || this._rlmDepth !== 0) {
+			throw new Error("autoresearch is only available in a root agent session");
+		}
+		if (!this._agentMessageController) {
+			throw new Error("autoresearch requires retained-child messaging");
+		}
+		return this._autoresearchStore;
+	}
+
+	private async _ensureAutoresearchSupervisor(
+		options: { forceRebind?: boolean } = {},
+	): Promise<{ rlmChildId: string; name: string }> {
+		const store = this._requireAutoresearchStore();
+		const state = store.getState();
+		if (!state.objective) throw new Error("initialize autoresearch before starting its supervisor");
+		const children = (await this.listRlmSubagents()).subagents;
+		const configured = state.supervisor;
+		if (configured && this._autoresearchSupervisorBoundToRuntime && !options.forceRebind) {
+			const retained = children.find(
+				(child) => child.rlm_child_id === configured.rlmChildId || child.session_name === configured.name,
+			);
+			if (retained && retained.status !== "error") {
+				if (retained.rlm_child_id !== configured.rlmChildId || retained.session_name !== configured.name) {
+					store.setSupervisor({ rlmChildId: retained.rlm_child_id, name: retained.session_name });
+				}
+				this._autoresearchSupervisorBoundToRuntime = true;
+				return { rlmChildId: retained.rlm_child_id, name: retained.session_name };
+			}
+		}
+
+		const stableSuffix = this.sessionId.replace(/[^A-Za-z0-9]/g, "").slice(-8) || randomUUID().slice(0, 8);
+		const preferredName = `autoresearch-supervisor-${stableSuffix}`;
+		const name = children.some((child) => child.session_name === preferredName)
+			? `${preferredName}-${randomUUID().slice(0, 8)}`
+			: preferredName;
+		const handle = await this.runRlmChild(buildAutoresearchSupervisorBootstrapPrompt(), { name });
+		store.setSupervisor({ rlmChildId: handle.rlm_child_id, name: handle.name });
+		this._autoresearchSupervisorBoundToRuntime = true;
+		return { rlmChildId: handle.rlm_child_id, name: handle.name };
+	}
+
+	private async _dispatchAutoresearchCheckpoint(
+		supervisor: { rlmChildId: string; name: string },
+		cycleId: string,
+		packet: Record<string, unknown>,
+		timeoutMs: number,
+	): Promise<{ receipt?: AgentSessionMessageReceipt; error?: string }> {
+		const deadline = Date.now() + timeoutMs;
+		const waitWithinDeadline = <T>(promise: Promise<T>, operation: string): Promise<T> => {
+			const remainingMs = Math.max(1, deadline - Date.now());
+			return waitForPromiseOrAbort(
+				promise,
+				AbortSignal.timeout(remainingMs),
+				`autoresearch supervisor timed out ${operation} for ${cycleId}`,
+			);
+		};
+		try {
+			await waitWithinDeadline(
+				this._awaitPendingRlmChildSettlement(supervisor.name),
+				"waiting for bootstrap settlement",
+			);
+			const state = this._requireAutoresearchStore().getState();
+			if (!state.objective) throw new Error("autoresearch supervisor objective is missing");
+			const instructions = buildAutoresearchSupervisorPrompt(state.objective, state.topic);
+			const envelope = `[autoresearch supervisor instructions]\n\n${instructions}\n\n[autoresearch checkpoint ${cycleId}]\n\n`;
+			const maxSerializedLength = 15_000 - envelope.length;
+			if (maxSerializedLength < 1_000) {
+				throw new Error("autoresearch supervisor instructions leave insufficient room for a checkpoint");
+			}
+			const original = JSON.stringify(packet);
+			const compactValue = (value: unknown, maxString: number, maxArray: number, depth = 0): unknown => {
+				if (typeof value === "string") {
+					return value.length <= maxString ? value : `${value.slice(0, maxString - 1)}…`;
+				}
+				if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
+				if (depth >= 8) return "[depth truncated]";
+				if (Array.isArray(value)) {
+					return value.slice(0, maxArray).map((item) => compactValue(item, maxString, maxArray, depth + 1));
+				}
+				if (isObjectRecord(value)) {
+					return Object.fromEntries(
+						Object.entries(value).map(([key, item]) => [key, compactValue(item, maxString, maxArray, depth + 1)]),
+					);
+				}
+				return String(value);
+			};
+			let deliveredPacket: Record<string, unknown> = packet;
+			if (original.length > maxSerializedLength) {
+				deliveredPacket = {
+					...(compactValue(packet, 600, 12) as Record<string, unknown>),
+					packet_truncated: true,
+					packet_original_chars: original.length,
+				};
+			}
+			let serialized = JSON.stringify(deliveredPacket);
+			if (serialized.length > maxSerializedLength) {
+				deliveredPacket = {
+					...(compactValue(packet, 300, 6) as Record<string, unknown>),
+					packet_truncated: true,
+					packet_original_chars: original.length,
+				};
+				serialized = JSON.stringify(deliveredPacket);
+			}
+			if (serialized.length > maxSerializedLength) {
+				throw new Error(
+					`autoresearch supervisor packet could not be bounded below ${maxSerializedLength} characters`,
+				);
+			}
+			const receipt = await waitWithinDeadline(
+				this._agentMessageController!.sendAgentMessage({
+					target: assertDirectAgentMessageTarget(supervisor.name),
+					message: normalizeAgentSessionMessage(`${envelope}${serialized}`),
+				}),
+				"delivering checkpoint",
+			);
+			return { receipt };
+		} catch (error) {
+			return { error: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	private async _verifyAutoresearchPublication(
+		publication: AutoresearchPublication,
+	): Promise<AutoresearchPublicationVerification> {
+		const verifiedAt = new Date().toISOString();
+		if (publication.doi) {
+			const response = await fetch(`https://api.crossref.org/works/${encodeURIComponent(publication.doi)}`, {
+				headers: { Accept: "application/json", "User-Agent": "Prime-Agent-Autoresearch/0.2" },
+				signal: AbortSignal.timeout(30_000),
+			});
+			if (!response.ok) throw new Error(`Crossref verification failed with HTTP ${response.status}`);
+			const body = await response.text();
+			const payload = JSON.parse(body) as unknown;
+			if (!isObjectRecord(payload) || !isObjectRecord(payload.message)) {
+				throw new Error("Crossref verification response omitted message metadata");
+			}
+			const message = payload.message;
+			const doi = typeof message.DOI === "string" ? message.DOI : publication.doi;
+			if (doi.toLowerCase() !== publication.doi.toLowerCase()) {
+				throw new Error("Crossref verification returned a different DOI");
+			}
+			const rawTitles = message.title;
+			const title = Array.isArray(rawTitles) && typeof rawTitles[0] === "string" ? rawTitles[0] : publication.title;
+			const authors = Array.isArray(message.author)
+				? message.author
+						.filter(isObjectRecord)
+						.map((author) =>
+							[author.given, author.family]
+								.filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+								.join(" "),
+						)
+						.filter((author) => author.length > 0)
+				: [];
+			const containers = message["container-title"];
+			const venue =
+				Array.isArray(containers) && typeof containers[0] === "string" ? containers[0] : publication.venue;
+			let year = publication.year;
+			for (const key of ["published-print", "published-online", "published", "issued"] as const) {
+				const date = message[key];
+				if (!isObjectRecord(date) || !Array.isArray(date["date-parts"])) continue;
+				const parts = date["date-parts"][0];
+				if (Array.isArray(parts) && typeof parts[0] === "number") {
+					year = parts[0];
+					break;
+				}
+			}
+			const registeredType = typeof message.type === "string" ? message.type : "";
+			const publishedTypes = new Set(["journal-article", "proceedings-article"]);
+			const publicationStatus =
+				publishedTypes.has(registeredType) && venue ? "published" : "published_status_unclear";
+			const resolvedMetadata: AutoresearchPublicationVerification["resolvedMetadata"] = {
+				title,
+				authors: authors.length > 0 ? authors : publication.authors,
+				doi,
+				fullTextUrl: publication.fullTextUrl ?? `https://doi.org/${encodeURIComponent(doi)}`,
+			};
+			if (year !== undefined) resolvedMetadata.year = year;
+			if (venue) resolvedMetadata.venue = venue;
+			return {
+				verificationId: `publication-verification-${randomUUID()}`,
+				paperId: publication.paperId,
+				source: "crossref",
+				publicationStatus,
+				verifiedAt,
+				metadataDigest: createHash("sha256").update(body).digest("hex"),
+				resolvedMetadata,
+			};
+		}
+		if (publication.preprintId) {
+			const response = await fetch(
+				`https://export.arxiv.org/api/query?id_list=${encodeURIComponent(publication.preprintId)}`,
+				{
+					headers: { Accept: "application/atom+xml", "User-Agent": "Prime-Agent-Autoresearch/0.2" },
+					signal: AbortSignal.timeout(30_000),
+				},
+			);
+			if (!response.ok) throw new Error(`arXiv verification failed with HTTP ${response.status}`);
+			const body = await response.text();
+			if (!/<entry[>\s]/i.test(body)) throw new Error("arXiv verification returned no matching entry");
+			const title = body
+				.match(/<title>([\s\S]*?)<\/title>/gi)
+				?.at(-1)
+				?.replace(/<\/?title>/gi, "")
+				.trim();
+			const authors = [...body.matchAll(/<author>[\s\S]*?<name>([\s\S]*?)<\/name>[\s\S]*?<\/author>/gi)]
+				.map((match) => match[1]?.replace(/\s+/g, " ").trim())
+				.filter((author): author is string => !!author);
+			const published = body.match(/<published>(\d{4})-/i)?.[1];
+			const resolvedMetadata: AutoresearchPublicationVerification["resolvedMetadata"] = {
+				title: title?.replace(/\s+/g, " ") || publication.title,
+				authors: authors.length > 0 ? authors : publication.authors,
+				preprintId: publication.preprintId,
+				fullTextUrl: publication.fullTextUrl ?? `https://arxiv.org/pdf/${publication.preprintId}`,
+			};
+			if (published) resolvedMetadata.year = Number.parseInt(published, 10);
+			return {
+				verificationId: `publication-verification-${randomUUID()}`,
+				paperId: publication.paperId,
+				source: "arxiv",
+				publicationStatus: "preprint",
+				verifiedAt,
+				metadataDigest: createHash("sha256").update(body).digest("hex"),
+				resolvedMetadata,
+			};
+		}
+		throw new Error("host publication verification requires a DOI or arXiv preprint_id");
+	}
+
+	private async _readBoundedAutoresearchEvidence(
+		response: UndiciResponse,
+		maxBytes = 2 * 1024 * 1024,
+	): Promise<string> {
+		const reader = response.body?.getReader();
+		if (!reader) return "";
+		const chunks: Uint8Array[] = [];
+		let size = 0;
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			size += value.byteLength;
+			if (size > maxBytes) {
+				await reader.cancel();
+				throw new Error(`peer-review evidence exceeds ${maxBytes} bytes`);
+			}
+			chunks.push(value);
+		}
+		return Buffer.concat(chunks).toString("utf8");
+	}
+
+	private async _resolvePublicAutoresearchUrl(url: URL, label: string): Promise<{ address: string; family: number }> {
+		if (url.protocol !== "https:" || url.username || url.password) {
+			throw new Error(`${label} must be credential-free HTTPS`);
+		}
+		const addresses = await lookup(url.hostname, { all: true, verbatim: true });
+		if (addresses.length === 0 || addresses.some((item) => !isPublicAutoresearchAddress(item.address))) {
+			throw new Error(`${label} must resolve only to public Internet addresses`);
+		}
+		return addresses[0]!;
+	}
+
+	private async _fetchPublicAutoresearchUrl(
+		initialUrl: string,
+		init: UndiciRequestInit,
+		label: string,
+	): Promise<{ response: UndiciResponse; url: URL; dispatcher: UndiciAgent }> {
+		let url = new URL(initialUrl);
+		for (let redirects = 0; redirects <= 5; redirects++) {
+			const pinnedAddress = await this._resolvePublicAutoresearchUrl(url, label);
+			const pinnedLookup: LookupFunction = (_hostname, options, callback) => {
+				if (options.all) {
+					callback(null, [pinnedAddress]);
+					return;
+				}
+				callback(null, pinnedAddress.address, pinnedAddress.family);
+			};
+			const dispatcher = new UndiciAgent({ connect: { lookup: pinnedLookup } });
+			let response: UndiciResponse;
+			try {
+				response = await undiciFetch(url, { ...init, redirect: "manual", dispatcher });
+			} catch (error) {
+				await dispatcher.close();
+				throw error;
+			}
+			if (![301, 302, 303, 307, 308].includes(response.status)) return { response, url, dispatcher };
+			const location = response.headers.get("location");
+			try {
+				await response.body?.cancel();
+			} finally {
+				await dispatcher.close();
+			}
+			if (!location) throw new Error(`${label} redirect omitted its location`);
+			url = new URL(location, url);
+		}
+		throw new Error(`${label} exceeded five redirects`);
+	}
+
+	private async _fetchAvoExternalSource(initialUrl: string): Promise<{
+		url: string;
+		text: string;
+		bodyDigest: string;
+		contentType: string;
+		truncated: boolean;
+	}> {
+		let parsed: URL;
+		try {
+			parsed = new URL(initialUrl);
+		} catch {
+			throw new Error("AVO external source URL is invalid");
+		}
+		const fetched = await this._fetchPublicAutoresearchUrl(
+			parsed.toString(),
+			{
+				headers: {
+					Accept: "text/html, text/plain, application/json;q=0.9",
+					"User-Agent": "Prime-Agent-AVO/0.3",
+				},
+				signal: AbortSignal.timeout(30_000),
+			},
+			"AVO external source",
+		);
+		try {
+			if (!fetched.response.ok) {
+				throw new Error(`AVO external source fetch failed with HTTP ${fetched.response.status}`);
+			}
+			const contentType = fetched.response.headers.get("content-type")?.toLowerCase() ?? "";
+			if (
+				contentType &&
+				!contentType.includes("text/html") &&
+				!contentType.includes("text/plain") &&
+				!contentType.includes("application/json") &&
+				!contentType.includes("application/xhtml+xml")
+			) {
+				throw new Error(`AVO external source content type is not textual: ${contentType}`);
+			}
+			const body = await this._readBoundedAutoresearchEvidence(fetched.response);
+			const extracted =
+				contentType.includes("html") || /^\s*</.test(body)
+					? visibleAutoresearchEvidenceText(body, false)
+					: body.replace(/\r\n?/g, "\n").trim();
+			if (!extracted) throw new Error("AVO external source contained no visible textual evidence");
+			const maxCharacters = 120_000;
+			return {
+				url: fetched.url.toString(),
+				text: extracted.slice(0, maxCharacters),
+				bodyDigest: createHash("sha256").update(body).digest("hex"),
+				contentType,
+				truncated: extracted.length > maxCharacters,
+			};
+		} finally {
+			await fetched.response.body?.cancel().catch(() => undefined);
+			await fetched.dispatcher.close();
+		}
+	}
+
+	private _sameAutoresearchDocument(left: URL, right: URL): boolean {
+		const path = (url: URL): string => url.pathname.replace(/\/+$/, "") || "/";
+		return left.origin.toLowerCase() === right.origin.toLowerCase() && path(left) === path(right);
+	}
+
+	private async _verifyAutoresearchPeerReview(
+		publication: AutoresearchPublication,
+		input: ReturnType<typeof parseAutoresearchPeerReviewEvidenceInput>,
+	): Promise<AutoresearchPeerReviewVerification> {
+		if (!publication.doi) throw new Error("peer-review verification requires a DOI");
+		if (publication.publicationStatus !== "published") {
+			throw new Error("peer-review verification requires Crossref-verified published metadata");
+		}
+		const doiResult = await this._fetchPublicAutoresearchUrl(
+			`https://doi.org/${encodeURIComponent(publication.doi)}`,
+			{
+				headers: { Accept: "text/html", "User-Agent": "Prime-Agent-Autoresearch/0.2" },
+				signal: AbortSignal.timeout(30_000),
+			},
+			"DOI publisher resolution",
+		);
+		const doiResponse = doiResult.response;
+		const publisherUrl = doiResult.url;
+		const publisherHost = publisherUrl.hostname.toLowerCase();
+		try {
+			if (!doiResponse.ok) throw new Error(`DOI publisher resolution failed with HTTP ${doiResponse.status}`);
+		} finally {
+			await doiResponse.body?.cancel().catch(() => undefined);
+			await doiResult.dispatcher.close();
+		}
+		const requestedHost = new URL(input.evidenceUrl).hostname.toLowerCase();
+		if (requestedHost !== publisherHost) {
+			throw new Error(`peer-review evidence must use the DOI publisher host ${publisherHost}`);
+		}
+		const evidenceResult = await this._fetchPublicAutoresearchUrl(
+			input.evidenceUrl,
+			{
+				headers: { Accept: "text/html,text/plain", "User-Agent": "Prime-Agent-Autoresearch/0.2" },
+				signal: AbortSignal.timeout(30_000),
+			},
+			"publisher peer-review evidence",
+		);
+		const { response } = evidenceResult;
+		let body: string;
+		try {
+			if (!response.ok) throw new Error(`publisher peer-review evidence failed with HTTP ${response.status}`);
+			if (evidenceResult.url.hostname.toLowerCase() !== publisherHost) {
+				throw new Error("peer-review evidence redirected away from the DOI publisher host");
+			}
+			if (!this._sameAutoresearchDocument(evidenceResult.url, publisherUrl)) {
+				throw new Error("peer-review evidence must appear on the DOI item's own publisher page");
+			}
+			body = await this._readBoundedAutoresearchEvidence(response);
+		} finally {
+			await response.body?.cancel().catch(() => undefined);
+			await evidenceResult.dispatcher.close();
+		}
+		if (!hasApplicablePeerReviewEvidence(body, input.exactQuote)) {
+			throw new Error("publisher page does not contain applicable visible peer-review evidence for this item");
+		}
+		return {
+			verificationId: `peer-review-verification-${randomUUID()}`,
+			paperId: publication.paperId,
+			source: "publisher",
+			evidenceUrl: evidenceResult.url.toString(),
+			exactQuote: input.exactQuote,
+			verifiedAt: new Date().toISOString(),
+			evidenceDigest: createHash("sha256").update(body).digest("hex"),
+		};
+	}
+
+	private async _spawnAutoresearchReviewers(
+		candidate: ReturnType<typeof parseAutoresearchCandidateInput>,
+	): Promise<ReturnType<AutoresearchStore["getReviewerAssignments"]>> {
+		const store = this._requireAutoresearchStore();
+		const existing = new Map(store.getReviewerAssignments(candidate.candidateId).map((item) => [item.role, item]));
+		const children = (await this.listRlmSubagents()).subagents;
+		const reviewedRoles = new Set(store.getCollectedReviews(candidate.candidateId).map((review) => review.role));
+		const prompts = buildAutoresearchReviewerPrompts(candidate, store.getState());
+		const roles = Object.keys(prompts) as AutoresearchReviewerRole[];
+		const slug = candidate.candidateId.replace(/[^A-Za-z0-9]+/g, "-").slice(0, 20) || "candidate";
+		for (const role of roles) {
+			const assignment = existing.get(role);
+			const assignedChild = assignment
+				? children.find(
+						(child) => child.rlm_child_id === assignment.rlmChildId || child.session_name === assignment.name,
+					)
+				: undefined;
+			if (reviewedRoles.has(role) || assignedChild?.status === "running") continue;
+			const kwargs: Record<string, unknown> = {
+				name: `research-${role.replaceAll("_", "-")}-${slug}-${randomUUID().slice(0, 8)}`,
+			};
+			const handle = await this.runRlmChild(prompts[role], kwargs);
+			const replacement = store.registerReviewerAssignment(candidate, role, {
+				rlmChildId: handle.rlm_child_id,
+				name: handle.name,
+			});
+			existing.set(role, replacement);
+		}
+		return store.getReviewerAssignments(candidate.candidateId);
+	}
+
+	private _readAutoresearchTerminal(subagent: RlmSubagentRegistryEntry, marker: string): string | undefined {
+		const liveSession =
+			this._activeRlmChildRuns.get(subagent.rlm_child_id)?.session ??
+			this._rlmChildSessions.get(subagent.rlm_child_id);
+		if (liveSession) {
+			for (const message of [...liveSession.messages].reverse()) {
+				if (message.role === "toolResult" && message.toolName === "ipython" && !message.isError) {
+					const persisted = extractMarkedPersistedAgentMessage(message.details, marker);
+					if (persisted) return persisted;
+				}
+			}
+		}
+
+		try {
+			const descriptorPath = join(subagent.session_dir, "rlm-subagent.json");
+			const descriptor = JSON.parse(readFileSync(descriptorPath, "utf8")) as unknown;
+			if (!isObjectRecord(descriptor)) return undefined;
+			if (descriptor.childId !== subagent.rlm_child_id || descriptor.sessionName !== subagent.session_name) {
+				return undefined;
+			}
+			if (typeof descriptor.sessionFile !== "string") return undefined;
+			const sessionDir = resolve(subagent.session_dir);
+			const sessionFile = resolve(descriptor.sessionFile);
+			if (dirname(sessionFile) !== sessionDir || !existsSync(sessionFile)) return undefined;
+			const sessionManager = SessionManager.open(sessionFile);
+			const branch = [...sessionManager.getBranch()].reverse();
+			for (const entry of branch) {
+				if (entry.type !== "message") continue;
+				if (entry.message.role === "toolResult" && entry.message.toolName === "ipython" && !entry.message.isError) {
+					const persisted = extractMarkedPersistedAgentMessage(entry.message.details, marker);
+					if (persisted) return persisted;
+				}
+			}
+		} catch {
+			return undefined;
+		}
+		return undefined;
+	}
+
+	private _persistedAutoresearchSubagent(
+		rlmChildId: string,
+		sessionName: string,
+	): RlmSubagentRegistryEntry | undefined {
+		const artifactDir = this.sessionManager.getSessionArtifactDir();
+		if (!artifactDir) return undefined;
+		const resolvedArtifactDir = resolve(artifactDir);
+		const sessionDir = resolve(resolvedArtifactDir, rlmChildId);
+		if (dirname(sessionDir) !== resolvedArtifactDir || !existsSync(join(sessionDir, "rlm-subagent.json"))) {
+			return undefined;
+		}
+		return {
+			rlm_child_id: rlmChildId,
+			active_session_id: null,
+			session_id: null,
+			session_name: sessionName,
+			session_dir: sessionDir,
+			status: "completed",
+		};
+	}
+
+	private async _collectAutoresearchAgentResults(): Promise<{
+		ingested: number;
+		reviews: ReturnType<AutoresearchStore["getState"]>["collectedReviews"];
+		supervision: ReturnType<AutoresearchStore["getState"]>["supervision"];
+		errors: Array<{ messageId: string; error: string }>;
+	}> {
+		const store = this._requireAutoresearchStore();
+		let ingested = 0;
+		const errors: Array<{ messageId: string; error: string }> = [];
+		const messages = [...this.messages];
+		for (const action of this._actionStore.unfinishedActions()) {
+			if (action.payload.kind === "turn" && action.payload.customMessage) {
+				messages.push(action.payload.customMessage);
+			}
+		}
+		for (const message of messages) {
+			if (!isAgentSessionMessage(message) || !message.details.message.includes("AUTORESEARCH_")) continue;
+			try {
+				if (store.ingestAgentMessage(message.details.id, message.details.message, message.details.from)) ingested++;
+			} catch (error) {
+				errors.push({
+					messageId: message.details.id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		const stateBeforeTerminalCollection = store.getState();
+		const reviewedRoles = new Set(
+			stateBeforeTerminalCollection.collectedReviews.map((item) => `${item.candidateId}:${item.reviewer.role}`),
+		);
+		const subagents = (await this.listRlmSubagents()).subagents;
+		for (const assignment of stateBeforeTerminalCollection.reviewerAssignments) {
+			if (reviewedRoles.has(`${assignment.candidateId}:${assignment.role}`)) continue;
+			const child =
+				subagents.find(
+					(item) => item.rlm_child_id === assignment.rlmChildId || item.session_name === assignment.name,
+				) ?? this._persistedAutoresearchSubagent(assignment.rlmChildId, assignment.name);
+			if (child?.status !== "completed" && child?.status !== "error") continue;
+			const text = this._readAutoresearchTerminal(child, "AUTORESEARCH_REVIEW_JSON:");
+			if (!text) continue;
+			const messageId = `autoresearch-terminal:${assignment.assignmentId}`;
+			try {
+				if (store.ingestAgentMessage(messageId, text, { sessionName: assignment.name })) ingested++;
+			} catch (error) {
+				errors.push({
+					messageId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		const stateBeforeSupervisorTerminalCollection = store.getState();
+		const configuredSupervisor = stateBeforeSupervisorTerminalCollection.supervisor;
+		if (configuredSupervisor) {
+			const child =
+				subagents.find(
+					(item) =>
+						item.rlm_child_id === configuredSupervisor.rlmChildId ||
+						item.session_name === configuredSupervisor.name,
+				) ?? this._persistedAutoresearchSubagent(configuredSupervisor.rlmChildId, configuredSupervisor.name);
+			if (child?.status === "completed" || child?.status === "error") {
+				const text = this._readAutoresearchTerminal(child, "AUTORESEARCH_SUPERVISION_JSON:");
+				if (text) {
+					const digest = createHash("sha256").update(text).digest("hex");
+					const messageId = `autoresearch-supervisor-terminal:${child.rlm_child_id}:${digest}`;
+					try {
+						if (store.ingestAgentMessage(messageId, text, { sessionName: configuredSupervisor.name })) ingested++;
+					} catch (error) {
+						errors.push({
+							messageId,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				}
+			}
+		}
+		const state = store.getState();
+		return {
+			ingested,
+			reviews: state.collectedReviews,
+			supervision: state.supervision,
+			errors,
+		};
+	}
+
+	async handleAutoresearchHostRequest(
+		type: string,
+		payload: Record<string, unknown> = {},
+	): Promise<Record<string, unknown>> {
+		if (this._requireAvoRuntime().getState().routing.environment !== "research") {
+			throw new Error("autoresearch is only available when the host routed the active task to research");
+		}
+		const store = this._requireAutoresearchStore();
+		switch (type) {
+			case "autoresearch.initialize": {
+				if (typeof payload.objective !== "string") {
+					throw new Error("autoresearch.initialize objective must be a string");
+				}
+				if (payload.topic !== undefined && typeof payload.topic !== "string") {
+					throw new Error("autoresearch.initialize topic must be a string when provided");
+				}
+				store.initialize(payload.objective, payload.topic);
+				const supervisor = await this._ensureAutoresearchSupervisor();
+				this._syncAvoResearchState();
+				return { state: store.getState(), supervisor };
+			}
+			case "autoresearch.get":
+				return { state: store.getState() };
+			case "autoresearch.publication.add": {
+				const publication = store.addPublication(parseAutoresearchPublicationInput(payload.publication));
+				return { publication };
+			}
+			case "autoresearch.publication.verify": {
+				if (typeof payload.paper_id !== "string") {
+					throw new Error("autoresearch.publication.verify paper_id must be a string");
+				}
+				const publication = store.getState().publications.find((item) => item.paperId === payload.paper_id);
+				if (!publication) throw new Error(`publication ${payload.paper_id} was not found`);
+				const verification = store.recordPublicationVerification(
+					await this._verifyAutoresearchPublication(publication),
+				);
+				return {
+					publication: store.getState().publications.find((item) => item.paperId === publication.paperId),
+					verification,
+				};
+			}
+			case "autoresearch.publication.peer_review.verify": {
+				const input = parseAutoresearchPeerReviewEvidenceInput(payload.evidence);
+				const publication = store.getState().publications.find((item) => item.paperId === input.paperId);
+				if (!publication) throw new Error(`publication ${input.paperId} was not found`);
+				const verification = store.recordPeerReviewVerification(
+					await this._verifyAutoresearchPeerReview(publication, input),
+				);
+				return {
+					publication: store.getState().publications.find((item) => item.paperId === publication.paperId),
+					verification,
+				};
+			}
+			case "autoresearch.search.record": {
+				const candidate = parseAutoresearchCandidateInput(payload.candidate);
+				const receipt = store.recordSearchReceipt(parseAutoresearchSearchReceiptInput(candidate, payload.receipt));
+				return { receipt };
+			}
+			case "autoresearch.experiment.record": {
+				const experiment = store.recordExperiment(parseAutoresearchExperimentInput(payload.experiment));
+				return { experiment };
+			}
+			case "autoresearch.memory.remember": {
+				const memory = store.remember(parseAutoresearchMemoryInput(payload.memory));
+				return { memory };
+			}
+			case "autoresearch.memory.recall": {
+				if (typeof payload.query !== "string") {
+					throw new Error("autoresearch.memory.recall query must be a string");
+				}
+				if (payload.limit !== undefined && typeof payload.limit !== "number") {
+					throw new Error("autoresearch.memory.recall limit must be a number when provided");
+				}
+				return { memories: store.recallMemories(payload.query, payload.limit ?? 8) };
+			}
+			case "autoresearch.memory.reuse.prepare": {
+				const reuse = store.createMemoryReusePlan(parseAutoresearchMemoryReuseInput(payload.reuse));
+				return { reuse };
+			}
+			case "autoresearch.memory.reuse.verify": {
+				if (typeof payload.reuse_id !== "string") {
+					throw new Error("autoresearch.memory.reuse.verify reuse_id must be a string");
+				}
+				if (typeof payload.accepted !== "boolean") {
+					throw new Error("autoresearch.memory.reuse.verify accepted must be a boolean");
+				}
+				if (!Array.isArray(payload.evidence) || !payload.evidence.every((item) => typeof item === "string")) {
+					throw new Error("autoresearch.memory.reuse.verify evidence must be an array of strings");
+				}
+				return {
+					reuse: store.verifyMemoryReuse(payload.reuse_id, payload.accepted, payload.evidence),
+				};
+			}
+			case "autoresearch.memory.reflection.record": {
+				if (typeof payload.trigger !== "string") {
+					throw new Error("autoresearch.memory.reflection.record trigger must be a string");
+				}
+				if (!isObjectRecord(payload.report)) {
+					throw new Error("autoresearch.memory.reflection.record report must be an object");
+				}
+				const report: Record<string, number | string | boolean> = {};
+				for (const [key, value] of Object.entries(payload.report)) {
+					if (typeof value !== "number" && typeof value !== "string" && typeof value !== "boolean") {
+						throw new Error(`autoresearch.memory.reflection.record report.${key} must be scalar`);
+					}
+					report[key] = value;
+				}
+				if (
+					!Array.isArray(payload.archived_memory_ids) ||
+					!payload.archived_memory_ids.every((item) => typeof item === "string")
+				) {
+					throw new Error("autoresearch.memory.reflection.record archived_memory_ids must be strings");
+				}
+				const trigger = payload.trigger;
+				if (
+					!(["five_cycles", "supervisor_intervention", "candidate_promotion", "manual"] as const).includes(
+						trigger as "five_cycles" | "supervisor_intervention" | "candidate_promotion" | "manual",
+					)
+				) {
+					throw new Error("autoresearch.memory.reflection.record trigger is invalid");
+				}
+				return {
+					reflection: store.recordMemoryReflection({
+						trigger: trigger as "five_cycles" | "supervisor_intervention" | "candidate_promotion" | "manual",
+						cycleId: typeof payload.cycle_id === "string" ? payload.cycle_id : undefined,
+						report,
+						archivedMemoryIds: payload.archived_memory_ids,
+					}),
+				};
+			}
+			case "autoresearch.claim.add": {
+				const claim = store.addClaim(parseAutoresearchClaimInput(payload.claim));
+				return { claim };
+			}
+			case "autoresearch.claim.update": {
+				if (typeof payload.claim_id !== "string") {
+					throw new Error("autoresearch.claim.update claim_id must be a string");
+				}
+				return {
+					claim: store.updateClaim(payload.claim_id, parseAutoresearchClaimUpdateInput(payload.update)),
+				};
+			}
+			case "autoresearch.claim.promote": {
+				if (typeof payload.claim_id !== "string") {
+					throw new Error("autoresearch.claim.promote claim_id must be a string");
+				}
+				return { claim: store.promoteClaim(payload.claim_id) };
+			}
+			case "autoresearch.claim.invalidate": {
+				if (typeof payload.claim_id !== "string") {
+					throw new Error("autoresearch.claim.invalidate claim_id must be a string");
+				}
+				if (typeof payload.reason !== "string") {
+					throw new Error("autoresearch.claim.invalidate reason must be a string");
+				}
+				return { claim: store.invalidateClaim(payload.claim_id, payload.reason) };
+			}
+			case "autoresearch.reviewer_prompts": {
+				const candidate = parseAutoresearchCandidateInput(payload.candidate);
+				return { candidate, prompts: buildAutoresearchReviewerPrompts(candidate, store.getState()) };
+			}
+			case "autoresearch.reviewers.spawn": {
+				if (payload.model !== undefined || payload.thinking !== undefined) {
+					throw new Error("autoresearch reviewers inherit the current Prime model/provider configuration");
+				}
+				const candidate = parseAutoresearchCandidateInput(payload.candidate);
+				const assignments = await this._spawnAutoresearchReviewers(candidate);
+				return { candidate, assignments };
+			}
+			case "autoresearch.results.collect":
+				return await this._collectAutoresearchAgentResults();
+			case "autoresearch.cycle.complete": {
+				const timeoutMs = parseAutoresearchSupervisorTimeoutMs(payload.supervisor_timeout_ms);
+				const collection = await this._collectAutoresearchAgentResults();
+				const result = store.recordCycle(parseAutoresearchCycleInput(payload.cycle));
+				this._syncAvoResearchState();
+				let supervisor: { rlmChildId: string; name: string };
+				try {
+					supervisor = await this._ensureAutoresearchSupervisor();
+				} catch (error) {
+					return {
+						...result,
+						supervisor: null,
+						delivery: { error: error instanceof Error ? error.message : String(error) },
+					};
+				}
+				const delivery = await this._dispatchAutoresearchCheckpoint(
+					supervisor,
+					result.cycle.cycleId,
+					result.packet,
+					timeoutMs,
+				);
+				return { ...result, supervisor, delivery, collection };
+			}
+			case "autoresearch.supervision.record": {
+				return { supervision: store.recordSupervision(parseAutoresearchSupervisionInput(payload.supervision)) };
+			}
+			case "autoresearch.supervision.retry": {
+				if (typeof payload.cycle_id !== "string") {
+					throw new Error("autoresearch.supervision.retry cycle_id must be a string");
+				}
+				const result = store.getSupervisorCheckpoint(payload.cycle_id);
+				const timeoutMs = parseAutoresearchSupervisorTimeoutMs(payload.supervisor_timeout_ms);
+				const supervisor = await this._ensureAutoresearchSupervisor({ forceRebind: true });
+				const delivery = await this._dispatchAutoresearchCheckpoint(
+					supervisor,
+					result.cycle.cycleId,
+					result.packet,
+					timeoutMs,
+				);
+				return { ...result, supervisor, delivery };
+			}
+			case "autoresearch.stop_gate":
+				await this._collectAutoresearchAgentResults();
+				this._syncAvoResearchState();
+				return { stop_gate: store.evaluateStopGate() };
+			case "autoresearch.export": {
+				if (payload.final !== undefined && typeof payload.final !== "boolean") {
+					throw new Error("autoresearch.export final must be a boolean when provided");
+				}
+				await this._collectAutoresearchAgentResults();
+				this._syncAvoResearchState();
+				return { deliverable: store.exportDeliverable(payload.final === true) };
+			}
+			default:
+				throw new Error(`unknown autoresearch request type "${type}"`);
+		}
+	}
+
 	handleAgentMessageHostRequest(
 		type: string,
 		payload: Record<string, unknown> = {},
@@ -3314,6 +7895,15 @@ export class AgentSession {
 		signal?: AbortSignal,
 	): Promise<AgentMessage[]> {
 		if (this.queuedActionCount > 0) {
+			await this._completeAvoCanonicalDeliveryIfMatching(context, signal);
+			return [];
+		}
+		const avoContinuation = await this._getAvoCompletionContinuation(context, signal);
+		if (avoContinuation) return [avoContinuation];
+		// Canonical AVO delivery is terminal evidence. _getAvoCompletionContinuation()
+		// may have completed the run while handling this exact assistant message, so
+		// do not fall through and enqueue a generic autonomous continuation.
+		if (this._enforceAvoCompletion && this._avoRuntime?.getState().status === "completed") {
 			return [];
 		}
 		const arrivalEpoch = this._sessionInputArrivalEpoch;
@@ -3344,6 +7934,192 @@ export class AgentSession {
 			return [];
 		}
 		return autonomousMessage ? [autonomousMessage] : [];
+	}
+
+	private async _assessAvoCanonicalDelivery(context: GetContinuationMessagesContext, signal?: AbortSignal) {
+		if (
+			!this._enforceAvoCompletion ||
+			!this._avoRuntime ||
+			this._rlmDepth !== 0 ||
+			signal?.aborted ||
+			context.message.stopReason === "error" ||
+			context.message.stopReason === "aborted"
+		) {
+			return undefined;
+		}
+		const initial = this._avoRuntime.getState();
+		if (!initial.objective || initial.status !== "active") return undefined;
+		await this._collectAvoSupervisorResults();
+		const gate = this._evaluateAvoHostBoundStopGate();
+		const state = this._avoRuntime.getState();
+		const acceptedCandidateIds = new Set(
+			state.cycles.filter((cycle) => cycle.outcome === "accepted").map((cycle) => cycle.candidateId),
+		);
+		const adapter = this._avoRuntime.adapters.get(state.routing.environment);
+		const acceptedCandidate = [...state.candidates].reverse().find(
+			(candidate) =>
+				acceptedCandidateIds.has(candidate.candidateId) &&
+				adapter.deriveEvaluationState(
+					candidate,
+					state.evaluations.filter((receipt) => receipt.candidateId === candidate.candidateId),
+					state,
+				).canonical,
+		);
+		// Provider-authored search provenance is visible evidence, not model-authored
+		// candidate text. Keep it out of the exact canonical-delivery digest while
+		// retaining the structured block for the independent online-evidence gate.
+		const assistantDigest = digestAvoDeliveryText(readAvoAssistantDeliveryText(context.message));
+		const deliveryMatches =
+			gate.passed &&
+			acceptedCandidate?.deliveryDigest !== undefined &&
+			assistantDigest === acceptedCandidate.deliveryDigest;
+		return { state, gate, acceptedCandidate, assistantDigest, deliveryMatches };
+	}
+
+	private _assessAvoProgressWatchdog(
+		message: object,
+		state: AvoRunState,
+		deliveryReady: boolean,
+	): AvoProgressWatchdogAssessment {
+		const cached = this._avoProgressWatchdogAssessments.get(message);
+		if (cached) return cached;
+		if (isAvoFeatureAblated("qualified_watchdog")) {
+			const disabled: AvoProgressWatchdogAssessment = {
+				action: "disabled",
+				madeProgress: false,
+				consecutiveNoProgressTurns: 0,
+				consecutiveDeliveryMismatchTurns: 0,
+				recoveredFromNoProgressTurns: 0,
+				progressIndicators: [],
+			};
+			this._avoProgressWatchdogAssessments.set(message, disabled);
+			return disabled;
+		}
+		const assessment = this._avoProgressWatchdog.observe(this._captureAvoProgressWatchdogSnapshot(state), {
+			deliveryReady,
+		});
+		if (
+			assessment.action === "watch" ||
+			assessment.action === "intervene" ||
+			assessment.action === "delivery_intervene"
+		) {
+			const reason =
+				assessment.action === "watch"
+					? "Anti-laziness watch: this root turn produced no meaningful host pass, obligation coverage, tested critical assumption, completed cycle, or experiment cell."
+					: assessment.action === "delivery_intervene"
+						? `Anti-laziness delivery intervention: ${assessment.consecutiveDeliveryMismatchTurns} consecutive root turns changed or decorated the verified candidate's exact canonical delivery.`
+						: `Anti-laziness intervention: ${assessment.consecutiveNoProgressTurns} consecutive root turns produced no new host-observable progress; the next turn must change approach.`;
+			this._requireAvoRuntime().store.recordProgressWatchdogCheckpoint({
+				consecutiveNoProgressTurns:
+					assessment.action === "delivery_intervene"
+						? assessment.consecutiveDeliveryMismatchTurns
+						: assessment.consecutiveNoProgressTurns,
+				resumed: false,
+				reason,
+				escalateHorizon: assessment.action !== "delivery_intervene",
+				unit: assessment.action === "delivery_intervene" ? "delivery" : "root_turn",
+			});
+		} else if (assessment.recoveredFromNoProgressTurns > 0) {
+			this._requireAvoRuntime().store.recordProgressWatchdogCheckpoint({
+				consecutiveNoProgressTurns: 0,
+				resumed: true,
+				reason: `Host-observable progress resumed after ${assessment.recoveredFromNoProgressTurns} stalled turn(s): ${assessment.progressIndicators.join("; ")}.`,
+			});
+		}
+		this._avoProgressWatchdogAssessments.set(message, assessment);
+		return assessment;
+	}
+
+	private async _completeAvoCanonicalDeliveryIfMatching(
+		context: GetContinuationMessagesContext,
+		signal?: AbortSignal,
+	): Promise<boolean> {
+		const delivery = await this._assessAvoCanonicalDelivery(context, signal);
+		if (!delivery?.deliveryMatches || !this._avoRuntime) return false;
+		this._avoRuntime.store.complete(delivery.gate);
+		this._discardObsoleteAvoCompletionInputs(delivery.state, { includeCanonicalDelivery: false });
+		return true;
+	}
+
+	private async _getAvoCompletionContinuation(
+		context: GetContinuationMessagesContext,
+		signal?: AbortSignal,
+	): Promise<CustomMessage | undefined> {
+		const delivery = await this._assessAvoCanonicalDelivery(context, signal);
+		if (!delivery || !this._avoRuntime) return undefined;
+		const { state, gate, acceptedCandidate, assistantDigest, deliveryMatches } = delivery;
+		if (deliveryMatches) {
+			this._avoRuntime.store.complete(gate);
+			this._discardObsoleteAvoCompletionInputs(state, { includeCanonicalDelivery: false });
+			return undefined;
+		}
+		// AVO completion repair is an autonomous continuation path too. It runs
+		// before the generic autonomous continuation policy, so enforce the shared
+		// hard budget here after first giving this in-flight assistant message a
+		// chance to provide canonical terminal evidence.
+		if (this._autonomousState.enabled && autonomousLimitReason(this._autonomousState)) {
+			return undefined;
+		}
+		const watchdog = this._assessAvoProgressWatchdog(
+			context.message,
+			state,
+			gate.passed && acceptedCandidate !== undefined,
+		);
+		const continuationState = this._avoRuntime.getState();
+		const reasons = [
+			...gate.reasons,
+			...(acceptedCandidate ? [] : ["no accepted candidate currently satisfies the verification contract"]),
+			...(gate.passed && acceptedCandidate?.deliveryDigest === undefined
+				? ["the accepted candidate predates canonical-delivery binding; record and verify a fresh candidate"]
+				: []),
+			...(gate.passed && acceptedCandidate?.deliveryDigest && assistantDigest !== acceptedCandidate.deliveryDigest
+				? ["the assistant text does not exactly match the accepted candidate's canonical delivery"]
+				: []),
+		];
+		await this._refreshAvoMemoryContext(
+			`${continuationState.objective ?? "Active AVO task"}\nCurrent blocking conditions: ${reasons.join("; ")}`,
+		);
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
+		const content = [
+			"<avo_completion_required>",
+			"The host blocked task completion. Continue working now; do not ask the user to re-prompt you.",
+			`Task run: ${continuationState.runId}`,
+			`Blocking conditions: ${reasons.join("; ") || "canonical delivery is incomplete"}`,
+			watchdog.action === "watch"
+				? "Anti-laziness watch: no new host-observable progress occurred in this turn. Stop narrating, stop probing Prime/AVO internals, and perform the next concrete task action now."
+				: watchdog.action === "intervene"
+					? `Anti-laziness intervention: ${watchdog.consecutiveNoProgressTurns} consecutive turns made no measurable progress. Do not repeat the same approach. Work on the target directly, produce a fresh candidate, and obtain a task-specific host check.`
+					: watchdog.action === "delivery_intervene"
+						? `Anti-laziness delivery intervention: ${watchdog.consecutiveDeliveryMismatchTurns} consecutive turns failed exact delivery. Return only the accepted candidate's canonical text now; do not paraphrase, explain, decorate, or append anything.`
+						: watchdog.action === "progress"
+							? `Progress watchdog observed: ${watchdog.progressIndicators.join("; ") || "host-observable task state changed"}. Continue from that progress and close the remaining verification gap.`
+							: watchdog.action === "disabled"
+								? "Continue working on the blocking conditions and produce the required host evidence."
+								: "The verified candidate is ready. Return its exact canonical delivery without extra text.",
+			"Use the avo skill automatically to record a candidate, obtain the required host-issued evidence, complete its cycle, and inspect the stop gate.",
+			"Once the gate passes, return only the exact canonical delivery for the accepted candidate: general tasks use the candidate payload text, deterministic arithmetic uses the numeric result, and coding/research use the candidate summary. Do not add a preface, suffix, or unverified claim.",
+			"</avo_completion_required>",
+		].join("\n");
+		return {
+			role: "custom",
+			customType: "avo_completion_required",
+			content,
+			display: true,
+			details: {
+				runId: continuationState.runId,
+				gatePassed: gate.passed,
+				checks: gate.checks,
+				reasons,
+				watchdog: {
+					action: watchdog.action,
+					consecutiveNoProgressTurns: watchdog.consecutiveNoProgressTurns,
+					consecutiveDeliveryMismatchTurns: watchdog.consecutiveDeliveryMismatchTurns,
+					progressIndicators: watchdog.progressIndicators,
+				},
+			},
+			timestamp: Date.now(),
+		};
 	}
 
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
@@ -3589,6 +8365,10 @@ export class AgentSession {
 		this._addLoginGuidanceToAuthError(event);
 
 		this._emit(event);
+
+		if (event.type === "turn_end") {
+			await this._maybeInterveneAvoToolStagnation(event.toolResults);
+		}
 
 		if (event.type === "message_end") {
 			if (event.message.role === "custom") {
@@ -3861,26 +8641,85 @@ export class AgentSession {
 	 * the latest state reaches disk instead of racing process exit.
 	 */
 	async disposeAsync(): Promise<void> {
-		if (this._disposed) {
-			return this._disposeCallbacksPromise;
-		}
 		// Concurrent callers await the same in-flight teardown so none resolves before
 		// the kernel snapshot flush finishes.
 		if (this._disposeAsyncPromise) {
 			return this._disposeAsyncPromise;
 		}
-		this._disposeAsyncPromise = (async () => {
-			// Drain before marking _disposing so a refine triggered at the final
-			// agent_end completes instead of being aborted by dispose().
-			await this._drainPendingRefinementForDisposal();
-			if (this._disposed) {
-				return this._disposeCallbacksPromise;
-			}
-			this._disposing = true;
-			this._sessionActionCommitDisposeAbortController.abort();
-			await this._disposeAsyncOnce();
-		})();
+		this._disposeAsyncPromise = this._disposeWithinDeadline();
 		return this._disposeAsyncPromise;
+	}
+
+	private async _disposeWithinDeadline(): Promise<void> {
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const deadline = new Promise<never>((_, reject) => {
+			timeout = setTimeout(() => {
+				try {
+					this._disposing = true;
+					this._abortPendingRefinementForDisposal();
+					this._sessionActionCommitDisposeAbortController.abort();
+					this.dispose();
+				} catch {
+					// The deadline still rejects even if best-effort synchronous teardown fails.
+				}
+				reject(new Error(`Session disposal exceeded ${SESSION_DISPOSAL_TIMEOUT_MS}ms`));
+			}, SESSION_DISPOSAL_TIMEOUT_MS);
+		});
+
+		try {
+			await Promise.race([this._disposeGracefully(), deadline]);
+		} finally {
+			if (timeout) clearTimeout(timeout);
+		}
+	}
+
+	private async _disposeGracefully(): Promise<void> {
+		if (this._disposed) {
+			return this._disposeCallbacksPromise;
+		}
+		// Drain before marking _disposing so a refine triggered at the final
+		// agent_end can complete during the bounded grace period.
+		await this._drainPendingRefinementForDisposalWithinGrace();
+		if (this._disposed) {
+			return this._disposeCallbacksPromise;
+		}
+		this._disposing = true;
+		this._sessionActionCommitDisposeAbortController.abort();
+		await this._disposeAsyncOnce();
+	}
+
+	private async _drainPendingRefinementForDisposalWithinGrace(): Promise<void> {
+		const drain = this._drainPendingRefinementForDisposal();
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const graceExpired = new Promise<"expired">((resolve) => {
+			timeout = setTimeout(() => resolve("expired"), REFINEMENT_DISPOSAL_GRACE_MS);
+		});
+		try {
+			const outcome = await Promise.race([drain.then(() => "drained" as const), graceExpired]);
+			if (outcome === "drained") return;
+
+			// Stop late plans from applying even when a provider or extension ignores
+			// the abort signal. The abandoned drain remains observed to avoid an
+			// unhandled rejection if it eventually settles.
+			this._disposing = true;
+			this._abortPendingRefinementForDisposal();
+			void drain.catch(() => undefined);
+		} finally {
+			if (timeout) clearTimeout(timeout);
+		}
+	}
+
+	private _abortPendingRefinementForDisposal(): void {
+		for (const timer of this._scheduledAutoRefineTimers) {
+			clearTimeout(timer);
+		}
+		this._scheduledAutoRefineTimers.clear();
+		this._pendingRequestedRefine = undefined;
+		this._serializedExplicitRefineOptions = undefined;
+		this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
+		this._autoRefineBranchVersion++;
+		this._autoRefineReviewAbort?.abort();
+		this._refineAbortController?.abort();
 	}
 
 	/**
@@ -4123,6 +8962,7 @@ export class AgentSession {
 			);
 			this._disconnectFromAgent();
 			this._eventListeners = [];
+			this._avoRuntime?.dispose();
 			cleanupSessionResources(this.sessionId);
 		} finally {
 			void this._startDisposeCallbacks();
@@ -4272,7 +9112,16 @@ export class AgentSession {
 	}
 
 	getAutonomousStatus(): AgentAutonomousStatus {
-		return autonomousStatus(this._autonomousState);
+		const status = autonomousStatus(this._autonomousState);
+		const avoState = this._avoRuntime?.getState();
+		if (avoState?.status !== "completed") return status;
+		return {
+			...status,
+			terminalEvidence: {
+				kind: "avo_completion",
+				runId: avoState.runId,
+			},
+		};
 	}
 
 	recordHostAutonomousContinuation(): void {
@@ -4355,8 +9204,11 @@ export class AgentSession {
 
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
-		const appendSystemPrompt =
-			loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : undefined;
+		const avoPrompt = this._avoRuntime
+			? buildAvoRuntimePrompt(this._avoRuntime.getState(), this._avoMemoryContext)
+			: undefined;
+		const appendSystemPromptParts = [...loaderAppendSystemPrompt, ...(avoPrompt ? [avoPrompt] : [])];
+		const appendSystemPrompt = appendSystemPromptParts.length > 0 ? appendSystemPromptParts.join("\n\n") : undefined;
 		const loadedSkills = this._modelVisibleSkills();
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
@@ -4899,6 +9751,17 @@ export class AgentSession {
 				}
 				const schedule = options?.streamingBehavior ?? "followUp";
 				const prefixMessages = visibleQueued ? this._takePendingNextTurnMessages() : undefined;
+				let avoObservedRunId: string | undefined;
+				if (!visibleQueued && !isInternalPrompt && options?.skipPrePromptWork !== true && this._avoRuntime) {
+					this._avoRuntime.observeRootPrompt(normalized.text);
+					avoObservedRunId = this._avoRuntime.getState().runId;
+					this._ensureAvoCodingVerificationBaseline();
+					this._ensureAvoArtifactVerificationBaseline();
+					this._primeAvoProgressWatchdog();
+					await this._refreshAvoMemoryContext(normalized.text);
+					this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+					this.agent.state.systemPrompt = this._baseSystemPrompt;
+				}
 				const content = options?.content
 					? options.content.map((block) => ({ ...block }))
 					: this._buildPromptContent(normalized.text, normalized.images);
@@ -4934,6 +9797,7 @@ export class AgentSession {
 					queueVisible: visibleQueued,
 					acceptedAgentMessage,
 					acceptedBeforeCompletion: options?.returnAfterAccepted === true,
+					avoObservedRunId,
 				});
 				if (action.suppressAutonomousContinuation) {
 					this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
@@ -5180,6 +10044,9 @@ export class AgentSession {
 							queueVisible: recovered.payload.queueVisible,
 							acceptedAgentMessage: recovered.payload.acceptedAgentMessage,
 							acceptedBeforeCompletion: recovered.payload.acceptedBeforeCompletion,
+							...(recovered.payload.avoObservedRunId
+								? { avoObservedRunId: recovered.payload.avoObservedRunId }
+								: {}),
 						}
 					: {
 							kind: "session_command",
@@ -5427,6 +10294,7 @@ export class AgentSession {
 			queueVisible?: boolean;
 			acceptedAgentMessage?: boolean;
 			acceptedBeforeCompletion?: boolean;
+			avoObservedRunId?: string;
 		},
 	): QueuedSessionAction {
 		const id = randomUUID();
@@ -5455,6 +10323,7 @@ export class AgentSession {
 			queueVisible: options.queueVisible ?? true,
 			acceptedAgentMessage: options.acceptedAgentMessage ?? false,
 			acceptedBeforeCompletion: options.acceptedBeforeCompletion ?? false,
+			...(options.avoObservedRunId ? { avoObservedRunId: options.avoObservedRunId } : {}),
 		};
 		return {
 			id,
@@ -5594,13 +10463,14 @@ export class AgentSession {
 			suppressAutonomousContinuation?: boolean;
 			resumeIfIdle?: boolean;
 			source?: InputSource | "internal";
+			front?: boolean;
 		} = {},
 	): Promise<boolean> {
 		const action = this._createPreparedTurnAction(schedule, text, images, options);
 		if (action.suppressAutonomousContinuation) {
 			this._markAutonomousContinuationSuppressed(primaryDeliveryRecord(action).message);
 		}
-		return this._admitSessionInput(action).accepted;
+		return this._admitSessionInput(action, { front: options.front }).accepted;
 	}
 
 	private _runtimeActivity(): RuntimeActivity {
@@ -5896,6 +10766,28 @@ export class AgentSession {
 		return false;
 	}
 
+	private async _prepareAvoQueuedRootTurns(actions: SessionAction<PreparedTurnPayload>[]): Promise<void> {
+		if (!this._avoRuntime || this._rlmDepth !== 0) return;
+		const rootTurns = actions.filter(
+			(action) => !action.payload.acceptedAgentMessage && primaryDeliveryRecord(action).message.role === "user",
+		);
+		let observed = false;
+		for (const action of rootTurns) {
+			const state = this._avoRuntime.getState();
+			if (state.status === "active" && action.payload.avoObservedRunId === state.runId) continue;
+			this._avoRuntime.observeRootPrompt(action.payload.text);
+			action.payload.avoObservedRunId = this._avoRuntime.getState().runId;
+			observed = true;
+		}
+		if (!observed) return;
+		this._ensureAvoCodingVerificationBaseline();
+		this._ensureAvoArtifactVerificationBaseline();
+		this._primeAvoProgressWatchdog();
+		await this._refreshAvoMemoryContext(rootTurns.map((action) => action.payload.text).join("\n"));
+		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
+		this.agent.state.systemPrompt = this._baseSystemPrompt;
+	}
+
 	private _surfaceSessionInputError(error: unknown): void {
 		const normalized = this._asError(error);
 		try {
@@ -5919,6 +10811,7 @@ export class AgentSession {
 			);
 		const firstTurn = activeTurns()[0];
 		if (!firstTurn) return;
+		await this._prepareAvoQueuedRootTurns(activeTurns());
 		const executionPolicy = firstTurn.payload.executionPolicy;
 		const restoreNextTurnContext = () => {
 			this._pendingNextTurnMessages.unshift(...nextTurnMessages);
@@ -6078,6 +10971,10 @@ export class AgentSession {
 					break;
 				case "autonomous":
 					await this._handleAutonomousSlashCommand(input.text);
+					break;
+				case "avo":
+				case "horizon":
+					resultText = this._handleAvoSlashCommand(input.command);
 					break;
 			}
 			if (resultText) {
@@ -6560,6 +11457,9 @@ export class AgentSession {
 								queueVisible: action.payload.queueVisible,
 								acceptedAgentMessage: action.payload.acceptedAgentMessage,
 								acceptedBeforeCompletion: action.payload.acceptedBeforeCompletion,
+								...(action.payload.avoObservedRunId
+									? { avoObservedRunId: action.payload.avoObservedRunId }
+									: {}),
 							}
 						: {
 								kind: "session_command",
@@ -8392,10 +13292,19 @@ export class AgentSession {
 		const contextTokens = this._getThresholdContextTokens(assistantMessage, compactionTimestamp);
 		if (contextTokens === undefined) return false;
 		if (shouldCompact(contextTokens, contextWindow, settings)) {
-			if (queueAutonomousContinuation && this._queueGoalContinuationForThresholdCompaction(assistantMessage)) {
+			const canonicalAvoDeliveryCompleted =
+				this._enforceAvoCompletion && this._avoRuntime?.getState().status === "completed";
+			if (
+				queueAutonomousContinuation &&
+				!this._continueAfterThresholdCompaction &&
+				!canonicalAvoDeliveryCompleted &&
+				this._queueGoalContinuationForThresholdCompaction(assistantMessage)
+			) {
 				this._continueAfterThresholdCompaction = true;
 			} else if (
 				queueAutonomousContinuation &&
+				!this._continueAfterThresholdCompaction &&
+				!canonicalAvoDeliveryCompleted &&
 				(await this._queueAutonomousContinuationForThresholdCompaction(assistantMessage))
 			) {
 				this._continueAfterThresholdCompaction = true;
@@ -9053,6 +13962,17 @@ export class AgentSession {
 		if (!this._agentObserveController || !this._rlmHeartbeatController) {
 			skills = skills.filter((skill) => skill.name !== ORCHESTRATION_HEARTBEAT_SKILL_NAME);
 		}
+		const canRunAutoresearch =
+			this._rlmDepth === 0 &&
+			this._rlmDepth < this._rlmMaxDepth &&
+			this._agentMessageController !== undefined &&
+			skills.some((skill) => skill.name === AGENT_MESSAGE_SKILL_NAME && !skill.disableModelInvocation);
+		if (!canRunAutoresearch) {
+			skills = skills.filter((skill) => skill.name !== AUTORESEARCH_SKILL_NAME);
+		}
+		if (this._rlmDepth !== 0) {
+			skills = skills.filter((skill) => skill.name !== AVO_SKILL_NAME);
+		}
 		return skills;
 	}
 
@@ -9154,6 +14074,41 @@ export class AgentSession {
 				}),
 			);
 		}
+		if (visibleKernelSkillNames.has(AUTORESEARCH_SKILL_NAME)) {
+			for (const type of [
+				"autoresearch.initialize",
+				"autoresearch.get",
+				"autoresearch.publication.add",
+				"autoresearch.publication.verify",
+				"autoresearch.publication.peer_review.verify",
+				"autoresearch.search.record",
+				"autoresearch.experiment.record",
+				"autoresearch.memory.remember",
+				"autoresearch.memory.recall",
+				"autoresearch.memory.reuse.prepare",
+				"autoresearch.memory.reuse.verify",
+				"autoresearch.memory.reflection.record",
+				"autoresearch.claim.add",
+				"autoresearch.claim.update",
+				"autoresearch.claim.promote",
+				"autoresearch.claim.invalidate",
+				"autoresearch.reviewer_prompts",
+				"autoresearch.reviewers.spawn",
+				"autoresearch.results.collect",
+				"autoresearch.cycle.complete",
+				"autoresearch.supervision.record",
+				"autoresearch.supervision.retry",
+				"autoresearch.stop_gate",
+				"autoresearch.export",
+			]) {
+				handlers[type] = async (payload) => this.handleAutoresearchHostRequest(type, payload);
+			}
+		}
+		if (visibleKernelSkillNames.has(AVO_SKILL_NAME)) {
+			for (const type of AVO_HOST_REQUEST_TYPES) {
+				handlers[type] = async (payload) => this.handleAvoHostRequest(type, payload);
+			}
+		}
 		if (this._mcpManager) {
 			Object.assign(handlers, this._mcpManager.hostHandlers());
 		}
@@ -9208,6 +14163,14 @@ export class AgentSession {
 			// the same local harness path. Subagents prefer their own artifact dir;
 			// ephemeral sessions fall back to the RLM session dir once it exists.
 			env.RLM_HARNESS_STATE_DIR = this._localHarnessStateDir() ?? getLocalHarnessStateDir(rlmSessionDir)!;
+		}
+		const memoryBackend = this._avoRuntime?.store.getMemoryBackendConfig();
+		if (memoryBackend) {
+			env.PRIME_AGENT_AVO_MEMORY_OWNER = memoryBackend.owner;
+			env.PRIME_AGENT_AVO_MEMORY_OWNER_ROLE = memoryBackend.ownerRole;
+			if (memoryBackend.paths.task) env.PRIME_AGENT_AVO_MEMORY_TASK_PATH = memoryBackend.paths.task;
+			if (memoryBackend.paths.project) env.PRIME_AGENT_AVO_MEMORY_PROJECT_PATH = memoryBackend.paths.project;
+			if (memoryBackend.paths.global) env.PRIME_AGENT_AVO_MEMORY_GLOBAL_PATH = memoryBackend.paths.global;
 		}
 		this._addWebsearchKeyEnv(env);
 		return env;
@@ -9310,6 +14273,7 @@ export class AgentSession {
 		sessionDir: string;
 		model: Model<any>;
 		thinkingLevel?: ThinkingLevel;
+		allowedToolNames?: string[];
 	}): CreateRlmSubagentRuntimeOptions {
 		return {
 			parentSession: this,
@@ -9325,7 +14289,8 @@ export class AgentSession {
 				this.serviceTier === "priority" && !supportsFastMode(options.model) ? "default" : this.serviceTier,
 			scopedModels: [...this._scopedModels],
 			activeToolNames: this.getActiveToolNames(),
-			allowedToolNames: this._allowedToolNames ? [...this._allowedToolNames] : undefined,
+			allowedToolNames:
+				options.allowedToolNames ?? (this._allowedToolNames ? [...this._allowedToolNames] : undefined),
 			customTools: [...this._customTools],
 			includeGoals: this._includeGoals,
 			includeCompactSkill: this._includeCompactSkill,
@@ -9467,12 +14432,37 @@ export class AgentSession {
 		return run.session?.sessionId;
 	}
 
+	private async _awaitPendingRlmChildSettlement(selector: string): Promise<string | undefined> {
+		const run = [...this._activeRlmChildRuns.values()].find(
+			(candidate) =>
+				!candidate.detachedDeletion && (candidate.id === selector || candidate.sessionName === selector),
+		);
+		if (!run) return undefined;
+		await run.publication.promise;
+		await run.settlement.promise;
+		if (run.status === "error" || run.status === "cancelled") {
+			throw new Error(run.error ?? `RLM child ${selector} failed before becoming idle`);
+		}
+		return run.session?.sessionId;
+	}
+
 	async listRlmSubagents(): Promise<RlmListSubagentsResult> {
 		return this._buildRlmSubagentList(await this._agentMessageController?.listAgents());
 	}
 
 	private _buildRlmSubagentList(listedAgents?: AgentSessionMessageListResult): RlmListSubagentsResult {
 		const daemonChildren = new Map<string, AgentSessionMessageAgentSummary>();
+		const daemonStatus = (child: AgentSessionMessageAgentSummary): RlmSubagentRegistryEntry["status"] => {
+			if (child.isStreaming || child.unfinishedActionCount > 0 || child.status === "running") {
+				return "running";
+			}
+			// A nonresident daemon ledger entry left in `running` did not reach its
+			// durable completion boundary. Only live daemon activity above can turn
+			// that stale registry state back into a running child.
+			return child.rlmChildRegistryStatus === "running" || child.rlmChildRegistryStatus === "deleted"
+				? "error"
+				: "completed";
+		};
 		const parentActiveSessionId = listedAgents?.current?.activeSessionId;
 		if (parentActiveSessionId) {
 			for (const agent of listedAgents.agents) {
@@ -9523,7 +14513,7 @@ export class AgentSession {
 				session_name:
 					daemonChild?.sessionName ?? childSession.sessionName ?? createDefaultRlmSubagentSessionName("", childId),
 				session_dir: sessionDir,
-				status: "completed",
+				status: daemonChild ? daemonStatus(daemonChild) : "completed",
 			});
 			recorded.add(childId);
 		}
@@ -9543,7 +14533,7 @@ export class AgentSession {
 				session_id: daemonChild.sessionId,
 				session_name: daemonChild.sessionName ?? createDefaultRlmSubagentSessionName("", childId),
 				session_dir: daemonChild.sessionDir,
-				status: daemonChild.rlmChildRegistryStatus === "completed" ? "completed" : "error",
+				status: daemonStatus(daemonChild),
 			});
 		}
 		return { subagents };
@@ -10199,6 +15189,7 @@ export class AgentSession {
 		prompt: string,
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
+		internalOptions: { allowedToolNames?: string[] } = {},
 	): Promise<RlmSpawnHandle> {
 		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
@@ -10313,6 +15304,7 @@ export class AgentSession {
 				sessionDir: childSessionDir,
 				model: modelSelection.model,
 				thinkingLevel: requestedThinkingLevel,
+				allowedToolNames: internalOptions.allowedToolNames,
 			}),
 			onSessionPublished: publishChildSession,
 		};
@@ -10914,13 +15906,14 @@ export class AgentSession {
 			excludeFromContext?: boolean;
 			operations?: BashOperations;
 			transient?: boolean;
+			ignoreConfiguredPrefix?: boolean;
 		},
 	): Promise<BashResult> {
 		this._bashAbortController = new AbortController();
 
 		const prefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
-		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
+		const resolvedCommand = prefix && !options?.ignoreConfiguredPrefix ? `${prefix}\n${command}` : command;
 
 		try {
 			const result = await executeBashWithOperations(
@@ -10940,6 +15933,35 @@ export class AgentSession {
 		} finally {
 			this._bashAbortController = undefined;
 		}
+	}
+
+	private async _executeAvoVerificationBash(command: string): Promise<
+		BashResult & {
+			verificationMode: "host_broker" | "local_sandbox" | "unavailable";
+			verificationBrokerReceipt?: AvoVerificationBrokerReceipt;
+		}
+	> {
+		const brokerOperations = createAvoVerificationBrokerBashOperations();
+		const operations = brokerOperations ?? createReadOnlyVerificationBashOperations();
+		if (!operations) {
+			return {
+				output: "AVO read-only verification sandbox unavailable; command was not executed.\n",
+				exitCode: undefined,
+				cancelled: false,
+				truncated: false,
+				verificationMode: "unavailable",
+			};
+		}
+		const result = await this.executeBash(command, undefined, {
+			operations,
+			ignoreConfiguredPrefix: true,
+		});
+		const verificationBrokerReceipt = brokerOperations?.lastReceipt();
+		return {
+			...result,
+			verificationMode: brokerOperations ? "host_broker" : "local_sandbox",
+			...(verificationBrokerReceipt ? { verificationBrokerReceipt } : {}),
+		};
 	}
 
 	/**

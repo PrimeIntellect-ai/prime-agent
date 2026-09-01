@@ -1,0 +1,1 @@
+- Bound AVO specification receipts to current requirement semantics and rejected evidence paths that escape the repository through symlinks.

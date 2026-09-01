@@ -1,0 +1,1 @@
+- Fixed the local AVO verification sandbox to hide host credentials, secret environment values, and runtime sockets ([#2](https://github.com/lewbei/prime-agent/issues/2)).

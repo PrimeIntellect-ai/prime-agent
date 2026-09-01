@@ -1,0 +1,1 @@
+- Hardened AVO completion with monotonic host-selected verification classes, DNS-pinned URL evidence for Serper/Vertex search, exact claim/source binding, host-parsed arithmetic checks, task-time artifact hashing, and matched pre-candidate coding test contracts.

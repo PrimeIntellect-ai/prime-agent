@@ -72,6 +72,15 @@ describe("built-in slash commands", () => {
 		});
 	});
 
+	test("keeps AVO default and adapter selection internal", () => {
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "avo")).toMatchObject({
+			description: "Show the default AVO runtime or optionally override its task horizon",
+			argumentHint: "[status|horizon <auto|direct|iterative|long>]",
+		});
+		expect(BUILTIN_SLASH_COMMANDS.some((command) => command.name === "mode")).toBe(false);
+		expect(isSessionSlashCommandName("mode")).toBe(false);
+	});
+
 	test("marks argument commands as taking a free-form argument", () => {
 		for (const [name, argumentHint] of [
 			["model", "[search]"],
