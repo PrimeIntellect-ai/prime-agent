@@ -90,24 +90,7 @@ describe("compiled release archives", () => {
 		const archives = readdirSync(artifacts).filter((name) => name.endsWith(".tar.gz"));
 		expect(archives.sort()).toEqual(platforms.map((platform) => `prime-agent-1.2.3-${platform}.tar.gz`).sort());
 		expect(readFileSync(join(artifacts, "stable"), "utf8")).toBe("v1.2.3\n");
-		expect(readFileSync(join(artifacts, "SHA256SUMS"), "utf8").trim().split("\n")).toHaveLength(8);
-		for (const tarball of [
-			"prime-agent-1.2.3.tgz",
-			"prime-agent-ai-1.2.3.tgz",
-			"prime-agent-core-1.2.3.tgz",
-			"prime-agent-tui-1.2.3.tgz",
-		]) {
-			expect(existsSync(join(artifacts, tarball)), tarball).toBe(true);
-		}
-		const npmExtracted = join(f.root, "npm-extracted");
-		mkdirSync(npmExtracted);
-		expect(spawnSync("tar", ["-xzf", join(artifacts, "prime-agent-1.2.3.tgz"), "-C", npmExtracted]).status).toBe(0);
-		expect(JSON.parse(readFileSync(join(npmExtracted, "package", "package.json"), "utf8"))).toMatchObject({
-			name: "prime-agent",
-			version: "1.2.3",
-			bin: { "prime-agent": "dist/bundle/cli.js" },
-			scripts: { postinstall: "node postinstall.cjs" },
-		});
+		expect(readFileSync(join(artifacts, "SHA256SUMS"), "utf8").trim().split("\n")).toHaveLength(4);
 
 		const extracted = join(f.root, "extracted");
 		mkdirSync(extracted);
@@ -165,28 +148,22 @@ describe("compiled release archives", () => {
 		expect(result.status).not.toBe(0);
 		expect(result.stderr).toContain("forbidden dependency or cache directory");
 	});
-	test("normalizes v-prefixed versions for npm artifact URLs", () => {
+	test("normalizes v-prefixed versions for binary archive metadata", () => {
 		const f = fixture();
 		const result = pack(f, ["--version", "v1.2.3"]);
 		expect(result.status, result.stderr).toBe(0);
 		const manifest = JSON.parse(readFileSync(join(f.output, "artifacts", "latest.json"), "utf8"));
-		expect(manifest.tarball).toBe("releases/v1.2.3/prime-agent-1.2.3.tgz");
-		expect(existsSync(join(f.output, "artifacts", "prime-agent-1.2.3.tgz"))).toBe(true);
+		expect(manifest.version).toBe("v1.2.3");
+		expect(manifest.baseUrl).toBe("https://downloads.example.test/releases/v1.2.3");
+		expect(existsSync(join(f.output, "artifacts", "prime-agent-1.2.3-darwin-arm64.tar.gz"))).toBe(true);
 	});
 
-	test("trims release base URLs before writing npm dependency specs", () => {
+	test("trims release base URLs before writing binary metadata", () => {
 		const f = fixture();
 		const result = pack(f, ["--base-url", "  https://downloads.example.test/  "]);
 		expect(result.status, result.stderr).toBe(0);
-		const packedManifest = spawnSync(
-			"tar",
-			["-xOzf", join(f.output, "artifacts", "prime-agent-1.2.3.tgz"), "package/package.json"],
-			{ encoding: "utf8" },
-		);
-		expect(packedManifest.status, packedManifest.stderr).toBe(0);
-		expect(JSON.parse(packedManifest.stdout).dependencies["@earendil-works/pi-ai"]).toBe(
-			"https://downloads.example.test/releases/v1.2.3/prime-agent-ai-1.2.3.tgz",
-		);
+		const manifest = JSON.parse(readFileSync(join(f.output, "artifacts", "latest.json"), "utf8"));
+		expect(manifest.baseUrl).toBe("https://downloads.example.test/releases/v1.2.3");
 	});
 
 	test("rejects insecure release base URLs", () => {

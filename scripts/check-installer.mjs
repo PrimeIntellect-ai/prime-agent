@@ -93,9 +93,9 @@ screen_case() {
 }
 
 progress_case() {
-	progress_details="Preparing global install.
-Linking command binaries.
-Finalizing npm install."
+	progress_details="Downloading verified archive.
+Extracting compiled binary.
+Validating runtime sidecars."
 	for progress_frame in 1 24 25 48 49 200; do
 		prime_agent_animation_frame="$progress_frame"
 		printf '__PROGRESS__ %s\t%s\t%s\\n' "$progress_frame" "$(prime_agent_animation_status "Installing Prime Agent" "$progress_details" static)" "$(prime_agent_animation_detail "$progress_details")"
@@ -303,12 +303,12 @@ function assertInstallerProgress(progress) {
 	if (progress.length !== 6) return;
 
 	const expectedDetails = [
-		"Preparing global install.",
-		"Preparing global install.",
-		"Linking command binaries.",
-		"Linking command binaries.",
-		"Finalizing npm install.",
-		"Finalizing npm install.",
+		"Downloading verified archive.",
+		"Downloading verified archive.",
+		"Extracting compiled binary.",
+		"Extracting compiled binary.",
+		"Validating runtime sidecars.",
+		"Validating runtime sidecars.",
 	];
 	for (const [index, expectedDetail] of expectedDetails.entries()) {
 		check(

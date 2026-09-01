@@ -40,27 +40,17 @@ describe("install.sh shell syntax", () => {
 		expect(() => execFileSync("sh", ["-n", installer], { stdio: "pipe" })).not.toThrow();
 	});
 
-	it("contains the npm install function", () => {
-		expect(installerText).toContain("prime_agent_npm_install");
-	});
-
-	it("supports --method and --update flags", () => {
-		expect(installerText).toContain("--method=*");
-		expect(installerText).toContain("binary|npm|auto");
+	it("supports compiled binary installs and updates only", () => {
+		expect(installerText).toContain("prime_agent_binary_fresh_install");
+		expect(installerText).toContain("prime_agent_binary_update");
 		expect(installerText).toContain("--update");
-	});
-});
-
-// ============================================================================
-describe("default install method (auto) routes to binary", () => {
-	it("routes auto and binary to binary_fresh_install, never npm", () => {
-		expect(installerText).toMatch(/\$prime_agent_install_method" != npm/);
+		expect(installerText).not.toContain("prime_agent_npm_install");
+		expect(installerText).not.toContain("install_node_npm");
+		expect(installerText).not.toContain("npm install");
 	});
 
-	it("uses npm only with explicit --method=npm", () => {
-		const matches = installerText.match(/\$prime_agent_install_method"\s*!=\s*npm/g);
-		expect(matches).not.toBeNull();
-		expect(matches!.length).toBeGreaterThanOrEqual(1);
+	it("rejects removed package-manager method flags", () => {
+		expect(installerText).toContain("--method is no longer supported");
 	});
 });
 

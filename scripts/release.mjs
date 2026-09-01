@@ -13,7 +13,7 @@
  * 3. Update CHANGELOG.md files: aggregate .changes/*.md fragments into a
  *    [version] - date section, git rm the consumed fragments
  * 4. Commit and tag
- * 5. Publish the npm compatibility packages with Bun
+ * 5. Publish registry packages with Bun
  */
 
 import { execSync } from "child_process";
@@ -212,7 +212,7 @@ run(`git commit -m "Release v${version}"`);
 run(`git tag v${version}`);
 console.log();
 
-console.log("Publishing npm compatibility packages...");
+console.log("Publishing registry packages with Bun...");
 run("bun run publish");
 console.log();
 
