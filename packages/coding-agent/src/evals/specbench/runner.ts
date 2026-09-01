@@ -3,7 +3,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-	appendFileSync,
 	chmodSync,
 	cpSync,
 	existsSync,
@@ -14,13 +13,12 @@ import {
 	readFileSync,
 	readlinkSync,
 	realpathSync,
-	renameSync,
 	rmSync,
 	statfsSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AVO_INTERNAL_ABLATIONS_ENV, type AvoAblationFeature } from "../../core/avo/ablation.js";
 import { summarizeAvoMetric } from "../../core/avo/experiment.js";
@@ -37,6 +35,15 @@ import {
 } from "../../core/avo/verification-broker.js";
 import { sanitizeAvoVerificationEnvironment } from "../../core/avo/verification-environment.js";
 import { PRIME_AGENT_EPHEMERAL_AUTH_FILE_ENV } from "../../core/ephemeral-auth-storage.js";
+import {
+	appendHostFile,
+	copyHostFile,
+	createFreshHostDirectory,
+	hostPathKind,
+	readHostFile,
+	renameHostDirectory,
+	writeHostFile,
+} from "../../core/host-files.js";
 import { buildEvaluationKernelSandboxEnvironment, buildIsolatedEvaluationSandboxArgs } from "../evaluation-sandbox.js";
 import { summarizePrimeIntegrityTrace } from "../prime-integrity/runner.js";
 import {
@@ -735,9 +742,7 @@ export function stageSpecBenchHostFixtures(workspace: string, fixtures: readonly
 		if (!destination.startsWith(`${workspace}${sep}`)) {
 			throw new Error(`SpecBench host fixture destination is not bounded: ${fixture.destinationPath}`);
 		}
-		mkdirSync(dirname(destination), { recursive: true });
-		cpSync(fixture.sourcePath, destination);
-		chmodSync(destination, 0o600);
+		copyHostFile(fixture.sourcePath, workspace, fixture.destinationPath);
 		if (fileDigest(destination) !== fixture.digest) {
 			throw new Error(`SpecBench host fixture copy failed: ${fixture.destinationPath}`);
 		}
@@ -1488,22 +1493,28 @@ function specBenchTraceArtifactDigest(caseRoot: string): string {
 	);
 }
 
-function writeSpecBenchResultArtifact(caseRoot: string, result: SpecBenchResult): void {
-	const resultPath = join(caseRoot, "result.json");
+function writeSpecBenchResultArtifact(outputDir: string, caseRoot: string, result: SpecBenchResult): void {
+	const caseRelativePath = relative(outputDir, caseRoot);
 	const serialized = `${JSON.stringify(result, null, 2)}\n`;
-	writeFileSync(resultPath, serialized);
-	writeFileSync(
-		join(caseRoot, "result.json.sha256"),
+	writeHostFile(outputDir, join(caseRelativePath, "result.json"), serialized);
+	writeHostFile(
+		outputDir,
+		join(caseRelativePath, "result.json.sha256"),
 		`${createHash("sha256").update(serialized).digest("hex")}  result.json\n`,
 	);
 }
 
-function assertSpecBenchResultArtifact(caseRoot: string): void {
-	const resultPath = join(caseRoot, "result.json");
-	const digestPath = join(caseRoot, "result.json.sha256");
-	if (!existsSync(digestPath)) throw new Error("durable SpecBench result digest is missing");
-	const expected = readFileSync(digestPath, "utf8").trim().split(/\s+/)[0];
-	if (!/^[a-f0-9]{64}$/.test(expected ?? "") || fileDigest(resultPath) !== expected) {
+function assertSpecBenchResultArtifact(outputDir: string, caseRoot: string): void {
+	const caseRelativePath = relative(outputDir, caseRoot);
+	if (hostPathKind(outputDir, join(caseRelativePath, "result.json.sha256")) !== "file") {
+		throw new Error("durable SpecBench result digest is missing");
+	}
+	const expected = readHostFile(outputDir, join(caseRelativePath, "result.json.sha256"))
+		.toString("utf8")
+		.trim()
+		.split(/\s+/)[0];
+	const result = readHostFile(outputDir, join(caseRelativePath, "result.json"));
+	if (!/^[a-f0-9]{64}$/.test(expected ?? "") || createHash("sha256").update(result).digest("hex") !== expected) {
 		throw new Error("durable SpecBench result digest does not match result.json");
 	}
 }
@@ -2205,7 +2216,11 @@ async function gradeSuite(options: {
 				},
 			},
 		);
-		writeFileSync(options.logPath, `${result.stdout}\n${result.stderr}`);
+		writeHostFile(
+			options.outputDir,
+			relative(options.outputDir, options.logPath),
+			`${result.stdout}\n${result.stderr}`,
+		);
 		if (!existsSync(junitPath)) {
 			if (result.timedOut) return parseSpecBenchGrade(result);
 			return parseSpecBenchGrade({
@@ -2235,6 +2250,15 @@ export function buildSpecBenchSandboxArgs(
 	brokerSocketPaths: string[] = [],
 	environment: NodeJS.ProcessEnv = process.env,
 ): string[] {
+	const relativeRunRoot = relative(outputRoot, runRoot);
+	if (!relativeRunRoot || relativeRunRoot === ".." || relativeRunRoot.startsWith(`..${sep}`)) {
+		throw new Error("SpecBench run root must be bounded by its output root");
+	}
+	let sandboxRunParent = outputRoot;
+	const sandboxRunDirectories = relativeRunRoot.split(sep).flatMap((part) => {
+		sandboxRunParent = join(sandboxRunParent, part);
+		return ["--dir", sandboxRunParent];
+	});
 	const resolverArguments = buildSpecBenchResolverSandboxArgs();
 	const uvCacheRoot = resolveSpecBenchUvCacheRoot(environment);
 	const uvCacheArguments = existsSync(uvCacheRoot) ? ["--overlay-src", uvCacheRoot, "--tmp-overlay", uvCacheRoot] : [];
@@ -2264,9 +2288,13 @@ export function buildSpecBenchSandboxArgs(
 		outputRoot,
 		"--tmpfs",
 		configSource,
+		...sandboxRunDirectories,
 		"--bind",
-		runRoot,
-		runRoot,
+		workspace,
+		workspace,
+		"--bind",
+		join(runRoot, "runtime"),
+		join(runRoot, "runtime"),
 		"--unshare-pid",
 		"--die-with-parent",
 		"--chdir",
@@ -2364,9 +2392,6 @@ async function runTask(
 		hostFixtures.length > 0
 			? hashParts(hostFixtures.flatMap((fixture) => [fixture.destinationPath, fixture.digest]))
 			: undefined;
-	if (existsSync(caseRoot)) {
-		throw new Error(`SpecBench task output already exists for ${taskId}; use --resume or a fresh --output directory`);
-	}
 	const workspace = join(caseRoot, "workspace");
 	const runtimeRoot = join(caseRoot, "runtime");
 	const sessionDir = join(runtimeRoot, "sessions");
@@ -2559,7 +2584,11 @@ async function runTask(
 		},
 	);
 	const agent = await withSpecBenchProviderAuthFile(providerAuthPath, () => agentExecution);
-	writeFileSync(transcriptPath, `# stdout\n${agent.stdout}\n# stderr\n${agent.stderr}\n`);
+	writeHostFile(
+		options.outputDir,
+		join(relative(options.outputDir, caseRoot), "transcript.log"),
+		`# stdout\n${agent.stdout}\n# stderr\n${agent.stderr}\n`,
+	);
 	if (agent.infrastructureError) throw new Error(agent.infrastructureError);
 	const grade = (testDir: string, logName: string): Promise<SpecBenchGrade> =>
 		gradeSuite({
@@ -2641,7 +2670,7 @@ async function runTask(
 		diskAvailableBytesBefore,
 		diskAvailableBytesAfter: specBenchDiskAvailableBytes(options.outputDir),
 	};
-	writeSpecBenchResultArtifact(caseRoot, result);
+	writeSpecBenchResultArtifact(options.outputDir, caseRoot, result);
 	return result;
 }
 
@@ -2892,7 +2921,7 @@ function writeReport(
 		conditions,
 		results,
 	};
-	writeFileSync(join(options.outputDir, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
+	writeHostFile(options.outputDir, "report.json", `${JSON.stringify(report, null, 2)}\n`);
 	const rows = results
 		.map(
 			(item) =>
@@ -3008,8 +3037,9 @@ ${adversarialProbeRows}
 | Condition | Rep | Task | Probe receipts | Pass | Revise | Inconclusive | Cases | Case pass | Case fail | Environment unsupported | Input contrasts | Required APIs | Called APIs |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
 ${adversarialProbeRunRows}`;
-	writeFileSync(
-		join(options.outputDir, "report.md"),
+	writeHostFile(
+		options.outputDir,
+		"report.md",
 		finalizeSpecBenchReportMarkdown(
 			insertSpecBenchReportSection(
 				`# WecoAI SpecBench via Prime AVO\n\nUpstream revision: \`${specbenchRevision}\`\n\nExecution-order seed: \`${options.experimentSeed}\`. Provider sampling can remain stochastic; use multiple repetitions before causal claims. Deltas use only task/repetition pairs present in both the condition and full AVO. Obligation evidence columns are scoped to the candidate in the latest accepted cycle; they are diagnostics, not an additional acceptance gate. Identity-private is hidden in-distribution coverage; held-out is the benchmark's compositional private suite. Spec compliance requires both hidden suites when identity-private is present.\n\n## Conditions\n\n| Condition | Runs | Paired | Validation | ID-private | Held-out | Gap | Canonical completion | False completion | Nonzero exit | Timeout | Tokens | Model calls | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Time | Cost | Held-out Δ vs full | Student-t 95% CI |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n${conditionRows}\n\n## Model-token attribution\n\nBilled model tokens are assigned to the assistant turn's dominant observable activity. This is diagnostic attribution, not a causal decomposition; uncached input and cache-read tokens can both contain accumulated context from earlier stages.\n\n| Condition | Uncached input/call | Cached input/call | Setup | Implementation | Candidate/evaluation | Obligation coverage | Completion | Completion repair | Post-ready work | Memory | Other/final |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${tokenStageRows}\n\n## Anti-laziness diagnostics\n\nTool probation activates on the fourth ignored coding-loop intervention. A blocked-call count of zero can still mean probation worked: the model may respond to the activation by making its next cell milestone-capable. Long-horizon coding also requires at least two distinct pre-mortem assumptions before the first workspace change; each remains unresolved until candidate-bound host evidence addresses it.\n\n| Condition | Candidates | Cycles | Accepted | Revised | Pre-mortem assumptions | Resolved assumptions | Watchdog interventions | Watches | Probation activations | Blocked calls | Model calls | Tool calls |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${antiLazinessRows}\n\n### Anti-laziness runs\n\n| Condition | Rep | Task | Candidates | Cycles | Accepted | Revised | Pre-mortem assumptions | Resolved assumptions | Watchdog interventions | Watches | Probation activations | Blocked calls | Model calls | Tool calls |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${antiLazinessRunRows}\n\n## Completion-loop diagnostics\n\nA completion attempt is an explicit stop-gate/complete call or a host-blocked root delivery. “After first” includes all later model work. “Completion repair” contains otherwise-unclassified tool turns after a non-passing attempt; post-ready work separately captures unnecessary tool work after a passing gate. Repair amplification is zero when the first attempt passes; raw after-first counters remain visible so canonical-delivery/context cost is not hidden. Blocker-clearance token counts can overlap when one turn clears multiple blockers.\n\n| Condition | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output | Repair uncached/call | Repair cached/call | Repair output/call |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRows}\n\n### Completion runs\n\n| Condition | Rep | Task | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output |\n| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRunRows}\n\n### Completion blockers\n\n| Condition | Rep | Task | Blocker | Attempts seen | Occurrences | Cleared at | Turns to clear | Tokens to clear | Latest reason |\n| --- | ---: | --- | --- | --- | ---: | --- | ---: | ---: | --- |\n${completionBlockerRows || "| _none_ |  |  |  |  | 0 |  |  |  | No failed completion blockers observed. |"}\n\n## Runs\n\n| Condition | Rep | Task | Validation | ID-private | Held-out | Gap | Canonical completion | Exit | Timeout | False completion | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Tokens | Cost |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows}\n`,
@@ -3080,14 +3110,15 @@ export function specBenchResultInfrastructureError(result: SpecBenchResult): str
 	);
 }
 
-function archiveSpecBenchAttempt(caseRoot: string): string {
+function archiveSpecBenchAttempt(outputDir: string, caseRoot: string): string {
+	const caseRelativePath = relative(outputDir, caseRoot);
 	let index = 1;
 	let archived = `${caseRoot}.infrastructure-attempt-${index}`;
-	while (existsSync(archived)) {
+	while (hostPathKind(outputDir, relative(outputDir, archived)) !== "missing") {
 		index += 1;
 		archived = `${caseRoot}.infrastructure-attempt-${index}`;
 	}
-	renameSync(caseRoot, archived);
+	renameHostDirectory(outputDir, caseRelativePath, relative(outputDir, archived));
 	return archived;
 }
 
@@ -3126,7 +3157,8 @@ function recordArchivedSpecBenchAttempt(options: {
 	result?: SpecBenchResult;
 	infrastructureError: string;
 }): SpecBenchAttemptLedgerRecord {
-	const resultPath = join(options.archivedPath, "result.json");
+	const archivedRelativePath = relative(options.outputDir, options.archivedPath);
+	const archivedResultKind = hostPathKind(options.outputDir, join(archivedRelativePath, "result.json"));
 	const trace =
 		options.result?.trace ??
 		summarizePrimeIntegrityTrace(
@@ -3145,9 +3177,15 @@ function recordArchivedSpecBenchAttempt(options: {
 		totalTokens: trace.totalTokens,
 		costUsd: trace.costUsd,
 		traceArtifactDigest: specBenchTraceArtifactDigest(options.archivedPath),
-		...(existsSync(resultPath) ? { resultArtifactDigest: fileDigest(resultPath) } : {}),
+		...(archivedResultKind === "file"
+			? {
+					resultArtifactDigest: createHash("sha256")
+						.update(readHostFile(options.outputDir, join(archivedRelativePath, "result.json")))
+						.digest("hex"),
+				}
+			: {}),
 	};
-	appendFileSync(specBenchAttemptLedgerPath(options.outputDir), `${JSON.stringify(record)}\n`);
+	appendHostFile(options.outputDir, "attempt-ledger.jsonl", `${JSON.stringify(record)}\n`);
 	return record;
 }
 
@@ -3182,8 +3220,11 @@ function writeSpecBenchInfrastructureResult(options: {
 	experimentSeed: string;
 }): SpecBenchResult {
 	const message = options.error instanceof Error ? options.error.message : String(options.error);
-	mkdirSync(options.caseRoot, { recursive: true });
-	writeFileSync(join(options.caseRoot, "infrastructure-error.log"), `${message}\n`);
+	writeHostFile(
+		options.outputDir,
+		join(relative(options.outputDir, options.caseRoot), "infrastructure-error.log"),
+		`${message}\n`,
+	);
 	const trace = summarizePrimeIntegrityTrace(
 		findJsonl(join(options.caseRoot, "runtime", "sessions")),
 		join(options.caseRoot, "runtime", "session-artifacts"),
@@ -3227,7 +3268,7 @@ function writeSpecBenchInfrastructureResult(options: {
 		diskAvailableBytesBefore: availableBytes,
 		diskAvailableBytesAfter: availableBytes,
 	};
-	writeSpecBenchResultArtifact(options.caseRoot, result);
+	writeSpecBenchResultArtifact(options.outputDir, options.caseRoot, result);
 	return result;
 }
 
@@ -3266,10 +3307,15 @@ async function main(): Promise<void> {
 	const jobs = specBenchJobs(selected, options);
 	for (const [index, job] of jobs.entries()) {
 		const caseRoot = specBenchCaseRoot(options, job);
-		const resultPath = join(caseRoot, "result.json");
-		if (options.resume && existsSync(resultPath)) {
-			assertSpecBenchResultArtifact(caseRoot);
-			const resumed = JSON.parse(readFileSync(resultPath, "utf8")) as SpecBenchResult;
+		const caseRelativePath = relative(options.outputDir, caseRoot);
+		const caseKind = hostPathKind(options.outputDir, caseRelativePath);
+		const resultKind =
+			caseKind === "directory" ? hostPathKind(options.outputDir, join(caseRelativePath, "result.json")) : "missing";
+		if (options.resume && resultKind === "file") {
+			assertSpecBenchResultArtifact(options.outputDir, caseRoot);
+			const resumed = JSON.parse(
+				readHostFile(options.outputDir, join(caseRelativePath, "result.json")).toString("utf8"),
+			) as SpecBenchResult;
 			if (
 				resumed.specbenchRevision !== specbenchRevision ||
 				resumed.taskId !== job.taskId ||
@@ -3284,7 +3330,7 @@ async function main(): Promise<void> {
 			}
 			const resumeInfrastructureError = specBenchResultInfrastructureError(resumed);
 			if (resumeInfrastructureError) {
-				const archived = archiveSpecBenchAttempt(caseRoot);
+				const archived = archiveSpecBenchAttempt(options.outputDir, caseRoot);
 				recordArchivedSpecBenchAttempt({
 					outputDir: options.outputDir,
 					archivedPath: archived,
@@ -3308,8 +3354,8 @@ async function main(): Promise<void> {
 				);
 				continue;
 			}
-		} else if (options.resume && existsSync(caseRoot)) {
-			const archived = archiveSpecBenchAttempt(caseRoot);
+		} else if (options.resume && caseKind === "directory") {
+			const archived = archiveSpecBenchAttempt(options.outputDir, caseRoot);
 			recordArchivedSpecBenchAttempt({
 				outputDir: options.outputDir,
 				archivedPath: archived,
@@ -3319,11 +3365,12 @@ async function main(): Promise<void> {
 			process.stdout.write(
 				`[${index + 1}/${jobs.length}] retrying interrupted ${job.condition.conditionId} rep=${job.repetition} ${job.taskId}; archived ${archived}\n`,
 			);
-		} else if (existsSync(caseRoot)) {
+		} else if (caseKind !== "missing") {
 			throw new Error(
 				`SpecBench task output already exists for ${job.taskId}; use --resume or a fresh --output directory`,
 			);
 		}
+		createFreshHostDirectory(options.outputDir, caseRelativePath);
 		process.stdout.write(
 			`[${index + 1}/${jobs.length}] running ${job.condition.conditionId} rep=${job.repetition} ${job.taskId}\n`,
 		);

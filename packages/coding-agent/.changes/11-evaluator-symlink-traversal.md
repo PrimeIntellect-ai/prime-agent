@@ -1,0 +1,1 @@
+- Fixed evaluator host writes and fixture staging to reject stale roots and symbolic-link traversal ([#11](https://github.com/PrimeIntellect-ai/prime-agent/issues/11))

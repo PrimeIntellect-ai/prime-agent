@@ -15,7 +15,8 @@ import {
 } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
+import { copyHostFile } from "../host-files.js";
 import type { BashOperations } from "../tools/bash.js";
 import { sanitizeAvoVerificationEnvironment } from "./verification-environment.js";
 import { captureAvoWorkspaceSnapshot } from "./workspace.js";
@@ -206,10 +207,7 @@ function copyHostFixtures(
 	expectedDigest: string,
 ): void {
 	for (const fixture of fixtures) {
-		const destination = resolve(executionWorkspace, fixture.destinationPath);
-		mkdirSync(dirname(destination), { recursive: true });
-		cpSync(fixture.sourcePath, destination, { dereference: false });
-		chmodSync(destination, 0o600);
+		copyHostFile(fixture.sourcePath, executionWorkspace, fixture.destinationPath);
 	}
 	if (
 		digestHostFixtureFiles(fixtures, (fixture) => resolve(executionWorkspace, fixture.destinationPath)) !==
