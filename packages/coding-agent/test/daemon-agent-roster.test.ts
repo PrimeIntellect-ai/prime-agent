@@ -827,17 +827,20 @@ describe("supervisor roster ledger", () => {
 		}
 	});
 
-	it("seeds catalog and ledger rows list-all-only, serves resident worker rows, and keeps evicted rows inactive", async () => {
+	it("seeds only registered workers' families; the saved corpus stays catalog-owned", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-roster-seed-"));
 		tempDirs.push(directory);
 		const sessionsDir = join(directory, "sessions");
 		const ledger = new RlmSpawnLedger(directory, sessionsDir);
 		const liveChildPath = join(directory, "artifacts", "live-child.jsonl");
 		const deletedChildPath = join(directory, "artifacts", "deleted-child.jsonl");
+		const foreignChildPath = join(directory, "artifacts", "foreign-child.jsonl");
 		mkdirSync(sessionsDir, { recursive: true });
 		writeFileSync(join(sessionsDir, "root.jsonl"), "");
+		writeFileSync(join(sessionsDir, "foreign-root.jsonl"), "");
 		mkdirSync(dirname(liveChildPath), { recursive: true });
 		writeFileSync(liveChildPath, "");
+		writeFileSync(foreignChildPath, "");
 		await ledger.appendSpawn({
 			childId: "live-child",
 			parent: join(sessionsDir, "root.jsonl"),
@@ -861,8 +864,18 @@ describe("supervisor roster ledger", () => {
 			depth: 1,
 			name: "ghost-child",
 		});
+		// A dead family: its root has no registered worker, so its children never seed.
+		await ledger.appendSpawn({
+			childId: "foreign-child",
+			parent: join(sessionsDir, "foreign-root.jsonl"),
+			child: foreignChildPath,
+			depth: 1,
+			name: "foreign-child",
+		});
 
-		const supervisor = makeSupervisor([], {
+		const worker = makeWorker("worker-1");
+		Object.assign(worker.descriptor, { sessionFile: join(sessionsDir, "root.jsonl") });
+		const supervisor = makeSupervisor([worker], {
 			rlmSpawnLedger: () => ledger,
 			catalog: {
 				list: vi.fn(async () => [
@@ -876,22 +889,33 @@ describe("supervisor roster ledger", () => {
 						firstMessage: "hello",
 						allMessagesText: "",
 					},
+					{
+						id: "foreign-root",
+						path: join(sessionsDir, "foreign-root.jsonl"),
+						cwd: "/tmp/project",
+						created: new Date(0),
+						modified: new Date(0),
+						messageCount: 1,
+						firstMessage: "",
+						allMessagesText: "",
+					},
 				]),
 			},
 		});
 		await supervisor.seedRosterLedger();
 
-		// A push-only view needs saved top-level rows in the ledger itself, not only in list-all rescans.
-		expect(supervisor.roster().has("saved-root")).toBe(true);
+		// Only the registered worker's family seeds; the saved corpus is served by the catalog scan alone.
+		expect(supervisor.roster().has("saved-root")).toBe(false);
+		expect([...supervisor.roster().values()].some((entry) => entry.summary.rlmChildId === "foreign-child")).toBe(
+			false,
+		);
 		const listed = await supervisor.handleList({}, { type: "list", all: true });
 		const ids = listed.data?.sessions.map((session) => session.sessionId).sort();
-		expect(ids).toEqual(["live-child", "saved-root"]);
+		expect(ids).toEqual(["foreign-root", "live-child", "saved-root"]);
 		expect(listed.data?.sessions.every((session) => session.activeSessionId === undefined)).toBe(true);
 		expect((await supervisor.handleList({}, { type: "list" })).data?.sessions).toEqual([]);
 
 		// A live worker's rows: the active root and its passivated child are resident; seeded rows stay list-all-only.
-		const worker = makeWorker("worker-1");
-		supervisor.workers.set("worker-1", worker);
 		supervisor.writeRosterEntry(
 			workerRosterEntryFromSummary(
 				summary({
@@ -927,6 +951,7 @@ describe("supervisor roster ledger", () => {
 		expect(liveAll.data?.sessions.map((session) => session.sessionId).sort()).toEqual([
 			"child-session",
 			"evicted",
+			"foreign-root",
 			"live-child",
 			"saved-root",
 		]);

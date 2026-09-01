@@ -1,0 +1,1 @@
+- Scoped the roster's restart seed to registered workers' families: the saved-session corpus stays owned by the disk catalog (list --all, search), so a supervisor restart no longer publishes thousands of inactive rows (and one header read per row) to every roster subscriber.
