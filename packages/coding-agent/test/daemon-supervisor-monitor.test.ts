@@ -22,7 +22,11 @@ import {
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSocketPathLease } from "../src/modes/daemon/daemon-socket.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
-import { DaemonWorkerAuthenticationError, DaemonWorkerClient } from "../src/modes/daemon/daemon-worker-client.js";
+import {
+	DaemonWorkerAuthenticationError,
+	DaemonWorkerClient,
+	DaemonWorkerProbeTimeoutError,
+} from "../src/modes/daemon/daemon-worker-client.js";
 import {
 	DAEMON_WORKER_STARTUP_GATE_COMMIT,
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
@@ -2065,7 +2069,7 @@ describe("daemon worker supervisor monitoring", () => {
 			subscribeWorker: vi.fn(async () => {}),
 			refreshWorkerSummaries: vi.fn(async (worker: AdoptionWorker) => {
 				if (worker.descriptor.workerId.startsWith("slow")) {
-					throw new Error("Timed out waiting for daemon worker response to list");
+					throw new DaemonWorkerProbeTimeoutError("Timed out waiting for daemon worker response to list");
 				}
 			}),
 			recoverWorker,
@@ -2194,7 +2198,7 @@ describe("daemon worker supervisor monitoring", () => {
 			workers: new Map([[worker.descriptor.workerId, worker]]),
 			shuttingDown: false,
 			connectWorker: vi.fn(async () => {
-				throw new Error(error);
+				throw hasProcessIdentity ? new DaemonWorkerProbeTimeoutError(error) : new Error(error);
 			}),
 			recoverUncertainWorkerOperations: vi.fn(async () => {}),
 			launchWorker: vi.fn(async () => worker),

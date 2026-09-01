@@ -123,7 +123,11 @@ import {
 	isDaemonShutdownAdmissionActive,
 	waitForDaemonStartupFence,
 } from "./daemon-supervisor-ownership.js";
-import { DaemonWorkerAuthenticationError, DaemonWorkerClient } from "./daemon-worker-client.js";
+import {
+	DaemonWorkerAuthenticationError,
+	DaemonWorkerClient,
+	DaemonWorkerProbeTimeoutError,
+} from "./daemon-worker-client.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	DAEMON_WORKER_INSTANCE_ID_ENV,
@@ -431,12 +435,7 @@ function isSupervisorRecoveryCancelled(error: unknown): boolean {
 }
 
 function isDaemonWorkerProbeTimeout(error: unknown): boolean {
-	if (error instanceof DaemonWorkerAuthenticationError) return false;
-	const message = error instanceof Error ? error.message : String(error);
-	return (
-		message.startsWith("Timed out connecting to daemon session worker") ||
-		message.startsWith("Timed out waiting for daemon worker")
-	);
+	return error instanceof DaemonWorkerProbeTimeoutError;
 }
 
 function isSupervisorShutdownAdmissionCancelled(error: unknown): boolean {
@@ -3074,7 +3073,7 @@ export class DaemonSupervisor {
 				await delay(25);
 			}
 		}
-		throw new Error(`Timed out connecting to daemon session worker: ${String(lastError)}`);
+		throw new DaemonWorkerProbeTimeoutError(`Timed out connecting to daemon session worker: ${String(lastError)}`);
 	}
 
 	private async subscribeWorker(worker: ResidentWorker, activeSessionId: string): Promise<void> {
