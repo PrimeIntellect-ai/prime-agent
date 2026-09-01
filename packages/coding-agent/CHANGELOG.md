@@ -43,7 +43,7 @@
 - Kept available model lists in sync with the current catalog and configured providers.
 - Removed unused host-request capability helpers and the `kernelManagerRef` option from `IpythonToolOptions`.
 - Fixed `bash()` to capture all foreground command output before finalizing results by using an ordered per-command completion marker; output written after the marker (e.g. by `EXIT` traps or background jobs) is not in the awaited result but stays visible via `handle.output()`/`tail()`.
-Agent messages now use core session admission to choose immediate or queued delivery.
+- Agent messages now use core session admission to choose immediate or queued delivery.
 - Made cross-worker agent lists current without broadcasting duplicate peer rosters.
 - Namespaced kernel host handler results so handler fields cannot overwrite host reply protocol metadata.
 - Fixed graceful Python kernel disposal so timed-out final snapshots are cancelled before teardown.
