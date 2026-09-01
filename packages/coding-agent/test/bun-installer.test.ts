@@ -52,6 +52,8 @@ describe("install.sh shell syntax", () => {
 		expect(installerText).not.toContain("prime_agent_original_path");
 		expect(installerText).not.toContain("prime_agent_bootstrap_kernel_on_install");
 		expect(installerText).not.toContain("prime_agent_screen_question");
+		expect(installerText).toContain("prime_agent_binary_acquire_lock");
+		expect(installerText).toContain('grep -F -q -- "$_bin_dir"');
 	});
 
 	it("rejects removed package-manager method flags", () => {

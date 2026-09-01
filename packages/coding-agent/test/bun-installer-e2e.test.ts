@@ -72,27 +72,29 @@ function makeRelease(
 	writeFileSync(join(releaseDir, "SHA256SUMS"), `${checksum}  ${archiveName}\n`);
 }
 
+function installerEnv(root: string, overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
+	const home = join(root, "home");
+	mkdirSync(join(home, ".prime"), { recursive: true });
+	writeFileSync(join(home, ".prime", "sentinel"), "user data");
+	return {
+		...process.env,
+		HOME: home,
+		PRIME_AGENT_DOWNLOAD_BASE_URL: `file://${join(root, "server")}`,
+		PRIME_AGENT_VERSIONS_DIR: join(root, "apps", "versions"),
+		PRIME_AGENT_BIN_DIR: join(root, "bin"),
+		TERM: "dumb",
+		...overrides,
+	};
+}
+
 function runInstaller(
 	root: string,
 	args: string[],
 	env: Record<string, string> = {},
 ): { exitCode: number; stdout: string; stderr: string } {
-	const home = join(root, "home");
-	const versions = join(root, "apps", "versions");
-	const bin = join(root, "bin");
-	mkdirSync(join(home, ".prime"), { recursive: true });
-	writeFileSync(join(home, ".prime", "sentinel"), "user data");
 	const result = spawnSync("sh", [installer, ...args], {
 		cwd: root,
-		env: {
-			...process.env,
-			HOME: home,
-			PRIME_AGENT_DOWNLOAD_BASE_URL: `file://${join(root, "server")}`,
-			PRIME_AGENT_VERSIONS_DIR: versions,
-			PRIME_AGENT_BIN_DIR: bin,
-			TERM: "dumb",
-			...env,
-		},
+		env: installerEnv(root, env),
 		encoding: "utf8",
 	});
 	return {
@@ -149,6 +151,19 @@ describe("compiled binary installer", () => {
 		expect(() => readlinkSync(join(root, "bin", "prime-agent"))).toThrow();
 	});
 
+	test("rejects a pre-existing directory at the command path", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		const commandPath = join(root, "bin", "prime-agent");
+		mkdirSync(commandPath, { recursive: true });
+
+		const result = runInstaller(root, ["1.2.3"]);
+		expect(result.exitCode).not.toBe(0);
+		expect(result.stderr).toContain("command path is a directory");
+		expect(readFileSync(join(root, "home", ".prime", "sentinel"), "utf8")).toBe("user data");
+	});
+
 	test("repairs a broken active command when updating to the same version", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
 		temporaryRoots.push(root);
@@ -180,6 +195,30 @@ describe("compiled binary installer", () => {
 		expect(result.exitCode).not.toBe(0);
 		expect(readlinkSync(link)).toBe(oldTarget);
 		expect(readFileSync(join(root, "home", ".prime", "sentinel"), "utf8")).toBe("user data");
+	});
+
+	test("serializes concurrent updates without deleting an activated version", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+		makeRelease(root, "2.0.0", goodExecutable("2.0.0").replace("then echo", "then sleep 1; echo"));
+
+		const result = spawnSync(
+			"sh",
+			[
+				"-c",
+				'sh "$1" --update 2.0.0 & first=$!; sh "$1" --update 2.0.0 & second=$!; wait "$first"; a=$?; wait "$second"; b=$?; [ "$a" -eq 0 ] && [ "$b" -eq 0 ]',
+				"--",
+				installer,
+			],
+			{ cwd: root, env: installerEnv(root), encoding: "utf8", timeout: 20_000 },
+		);
+		expect(result.status, result.stderr).toBe(0);
+		const link = join(root, "bin", "prime-agent");
+		expect(readlinkSync(link)).toContain("v2.0.0/prime-agent");
+		expect(spawnSync(link, ["--version"], { encoding: "utf8" }).status).toBe(0);
+		expect(() => readFileSync(join(root, "apps", "versions", ".install.lock", "pid"))).toThrow();
 	});
 
 	test("keeps the previous version when an update is missing a required sidecar", () => {
