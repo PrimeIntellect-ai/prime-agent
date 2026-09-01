@@ -14,6 +14,23 @@ if [ "$prime_agent_default_release_channel" = "$prime_agent_unconfigured_default
 fi
 prime_agent_release_channel="${PRIME_AGENT_RELEASE_CHANNEL:-$prime_agent_default_release_channel}"
 prime_agent_cmd="${PRIME_AGENT_CMD:-prime-agent}"
+prime_agent_persisted_versions_dir=
+prime_agent_persisted_symlink=
+prime_agent_script_dir=$(CDPATH= cd -P "$(dirname "$0")" 2>/dev/null && pwd)
+if [ -f "$prime_agent_script_dir/.install-paths" ]; then
+	prime_agent_persisted_versions_dir=$(sed -n '1p' "$prime_agent_script_dir/.install-paths")
+	prime_agent_persisted_symlink=$(sed -n '2p' "$prime_agent_script_dir/.install-paths")
+fi
+prime_agent_default_data_home="${XDG_DATA_HOME:-${HOME:+$HOME/.local/share}}"
+prime_agent_default_bin_home="${XDG_BIN_HOME:-${HOME:+$HOME/.local/bin}}"
+prime_agent_binary_versions_dir="${PRIME_AGENT_VERSIONS_DIR:-${prime_agent_persisted_versions_dir:-${prime_agent_default_data_home:+$prime_agent_default_data_home/prime-agent/versions}}}"
+if [ -n "${PRIME_AGENT_BIN_DIR:-}" ]; then
+	prime_agent_binary_symlink="${PRIME_AGENT_BIN_DIR%/}/prime-agent"
+elif [ -n "$prime_agent_persisted_symlink" ]; then
+	prime_agent_binary_symlink="$prime_agent_persisted_symlink"
+else
+	prime_agent_binary_symlink="${prime_agent_default_bin_home:+$prime_agent_default_bin_home/prime-agent}"
+fi
 prime_agent_esc=$(printf '\033')
 prime_agent_reset="${prime_agent_esc}[0m"
 prime_agent_bold="${prime_agent_esc}[1m"
@@ -53,8 +70,6 @@ prime_agent_screen_title=
 prime_agent_screen_status=
 prime_agent_screen_detail=
 prime_agent_animation_frame=0
-prime_agent_binary_versions_dir="${PRIME_AGENT_VERSIONS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/prime-agent/versions}"
-prime_agent_binary_symlink="${PRIME_AGENT_BIN_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}/prime-agent"
 prime_agent_binary_rollback_version=
 prime_agent_binary_lock_dir=
 prime_agent_is_update=0
@@ -63,6 +78,10 @@ main() {
 	if [ "$prime_agent_base_url" = "$prime_agent_unconfigured_base_url" ]; then
 		printf 'error: installer download URL is not configured.\n' >&2
 		printf 'Set PRIME_AGENT_DOWNLOAD_BASE_URL or use the installer published by the release workflow.\n' >&2
+		exit 1
+	fi
+	if [ -z "$prime_agent_binary_versions_dir" ] || [ -z "$prime_agent_binary_symlink" ]; then
+		printf 'error: HOME is not set; set HOME or explicit PRIME_AGENT_VERSIONS_DIR and PRIME_AGENT_BIN_DIR paths.\n' >&2
 		exit 1
 	fi
 
@@ -909,6 +928,34 @@ prime_agent_binary_acquire_lock() {
 	esac
 	_waited=0
 	while ! mkdir "$_lock_dir" 2>/dev/null; do
+		_lock_pid=
+		if [ -f "$_lock_dir/pid" ]; then
+			_lock_pid=$(sed -n '1p' "$_lock_dir/pid" 2>/dev/null || printf '')
+		fi
+		case "$_lock_pid" in
+			'')
+				# The owner writes its PID immediately after mkdir. Give that tiny
+				# publication window one retry before treating the lock as abandoned.
+				if [ "$_waited" -eq 0 ]; then
+					sleep 1
+					_waited=$((_waited + 1))
+					continue
+				fi
+				_lock_is_stale=1
+				;;
+			*[!0-9]*) _lock_is_stale=1 ;;
+			*)
+				if kill -0 "$_lock_pid" 2>/dev/null; then
+					_lock_is_stale=0
+				else
+					_lock_is_stale=1
+				fi
+				;;
+		esac
+		if [ "$_lock_is_stale" = 1 ]; then
+			rm -rf "$_lock_dir"
+			continue
+		fi
 		if [ "$_waited" -ge "$_timeout" ]; then
 			printf 'error: timed out waiting for another Prime Agent install or update to finish.\n' >&2
 			return 1
@@ -918,6 +965,14 @@ prime_agent_binary_acquire_lock() {
 	done
 	printf '%s\n' "$$" > "$_lock_dir/pid"
 	prime_agent_binary_lock_dir="$_lock_dir"
+}
+
+prime_agent_binary_write_install_paths() {
+	_version_dir="$1"
+	_state_path="$_version_dir/.install-paths"
+	_state_tmp="${_state_path}.tmp.$$"
+	printf '%s\n%s\n' "$prime_agent_binary_versions_dir" "$prime_agent_binary_symlink" > "$_state_tmp"
+	mv -f "$_state_tmp" "$_state_path"
 }
 
 prime_agent_binary_atomic_symlink() {
@@ -966,6 +1021,7 @@ prime_agent_binary_fresh_install() {
 		_existing_binary="$_version_dir/pi"
 	fi
 	if [ -x "$_existing_binary" ] && prime_agent_binary_validate_layout "$_version_dir" "$_existing_binary"; then
+		prime_agent_binary_write_install_paths "$_version_dir"
 		prime_agent_binary_atomic_symlink "$_existing_binary" "$prime_agent_binary_symlink"
 		prime_agent_configure_binary_path "$_version"
 		return
@@ -1029,6 +1085,7 @@ prime_agent_binary_fresh_install() {
 		prime_agent_download_dir=
 		exit 1
 	fi
+	prime_agent_binary_write_install_paths "$_version_dir"
 
 	# Create and verify the stable symlink. Restore a healthy prior target if the
 	# activated command cannot run through its public path.
@@ -1174,6 +1231,7 @@ prime_agent_binary_update() {
 		prime_agent_download_dir=
 		exit 1
 	fi
+	prime_agent_binary_write_install_paths "$_version_dir"
 
 	# Atomically switch the symlink, then verify the activated path. If activation
 	# fails, restore the previous immutable version before returning an error.
