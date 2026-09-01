@@ -530,8 +530,10 @@ describe("ENG-4531 agent message UI", () => {
 		const lines = rendered.split("\n");
 		expect(lines).toEqual([
 			expect.stringContaining("python"),
-			" ◆ Agent message queued · to child Worker · Review shard seven.",
-			" ◆ Agent message sent · to parent Worker · Continue with shard eight.",
+			expect.stringMatching(/^ ◆ Agent message queued · to child Worker · Review shard seven\. \(.*to expand\)$/),
+			expect.stringMatching(
+				/^ ◆ Agent message sent · to parent Worker · Continue with shard eight\. \(.*to expand\)$/,
+			),
 		]);
 		expect(rendered).not.toContain("Agent message received");
 	});
@@ -574,7 +576,7 @@ describe("ENG-4531 agent message UI", () => {
 		expect(lines).toEqual([
 			expect.stringContaining("python"),
 			expect.stringContaining("await agent_message.send"),
-			" ◆ Agent message sent · to parent Worker",
+			expect.stringMatching(/^ ◆ Agent message sent · to parent Worker \(.*to collapse\)$/),
 			" ╰─ Continue with shard eight.",
 			"    Then report back.",
 		]);
