@@ -673,7 +673,21 @@ describe("supervisor roster ledger", () => {
 			name: "deleted",
 		});
 		await ledger.appendDelete({ childId: "deleted-child", child: deletedPath, reason: "user" });
+		// A foreign family's unclaimed edge (e.g. a client-owned worker's dropped child) must not
+		// resurrect through THIS worker's snapshot.
+		const foreignRoot = join(sessionsDir, "foreign.jsonl");
+		const foreignChild = join(directory, "artifacts", "foreign-child.jsonl");
+		writeFileSync(foreignRoot, "");
+		writeFileSync(foreignChild, "");
+		await ledger.appendSpawn({
+			childId: "foreign-child",
+			parent: foreignRoot,
+			child: foreignChild,
+			depth: 1,
+			name: "foreign",
+		});
 		const worker = makeWorker("worker-1");
+		Object.assign(worker.descriptor, { sessionFile: parentPath });
 		const supervisor = makeSupervisor([worker], { rlmSpawnLedger: () => ledger });
 		supervisor.writeRosterEntry(
 			workerRosterEntryFromSummary(
@@ -737,6 +751,7 @@ describe("supervisor roster ledger", () => {
 		expect(reseeded).toBeDefined();
 		expect(reseeded?.summary.activeSessionId).toBeUndefined();
 		expect(entries.some((entry) => entry.summary.rlmChildId === "deleted-child")).toBe(false);
+		expect(entries.some((entry) => entry.summary.rlmChildId === "foreign-child")).toBe(false);
 	});
 
 	it("drops a client-owned worker's rows on unregistration instead of leaking public inactive rows", async () => {
@@ -933,6 +948,18 @@ describe("supervisor roster ledger", () => {
 		await supervisor
 			.rlmSpawnLedger()
 			.appendSpawn({ childId: "child-1", parent: parentPath, child: childPath, depth: 1, name: "child" });
+		// A raced cross-process duplicate (appendSpawn's uniqueness check is per-process TOCTOU)
+		// must tombstone with the original, not stay live.
+		(supervisor.rlmSpawnLedger() as unknown as { appendRecord(record: object): void }).appendRecord({
+			v: 1,
+			op: "spawn",
+			at: new Date().toISOString(),
+			childId: "child-dup",
+			parent: parentPath,
+			child: childPath,
+			depth: 1,
+			name: "dup",
+		});
 		const childEntry = workerRosterEntryFromSummary(
 			summary({
 				id: "child-1",
@@ -1330,6 +1357,7 @@ describe("review-round regressions", () => {
 			lastActivityAt: "2026-08-01T10:00:00.000Z",
 		});
 		const childEntry = workerRosterEntryFromSummary(child);
+		Object.assign(worker.descriptor, { sessionFile: "/tmp/sessions/root.jsonl" });
 		let releaseEdges: (edges: unknown[]) => void = () => {};
 		const edgesPromise = new Promise<unknown[]>((resolveEdges) => {
 			releaseEdges = resolveEdges;

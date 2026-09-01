@@ -3864,7 +3864,26 @@ export class DaemonSupervisor {
 		}
 		// A reseed keeps the previous claim and hydrated summary; a synthetic seed would drop
 		// lastActivityAt (pinning canEvictWorker on NaN) and flap the claim off on every snapshot.
+		// Only THIS worker's family reseeds: other families' rows are owned by their own workers or
+		// the startup seed, and a client-owned worker's dropped rows must not resurrect as public rows.
+		const workerRoot = worker.descriptor.sessionFile ?? worker.descriptor.createCommand.sessionPath;
+		const rootPath = workerRoot !== undefined ? canonicalSessionPath(workerRoot) : undefined;
+		const parentByChild = new Map(
+			edges.map((edge) => [canonicalSessionPath(edge.child), canonicalSessionPath(edge.parent)]),
+		);
+		const familyRoot = (path: string): string => {
+			const visited = new Set<string>();
+			let current = path;
+			while (!visited.has(current)) {
+				visited.add(current);
+				const parent = parentByChild.get(current);
+				if (parent === undefined) return current;
+				current = parent;
+			}
+			return current;
+		};
 		for (const edge of edges) {
+			if (rootPath === undefined || familyRoot(canonicalSessionPath(edge.child)) !== rootPath) continue;
 			const entry = this.rosterEntryForSpawnLedgerEdge(edge);
 			if (this.roster().has(entry.agentId)) continue;
 			if (this.roster().hasSessionFile(canonicalSessionPath(edge.child))) continue;

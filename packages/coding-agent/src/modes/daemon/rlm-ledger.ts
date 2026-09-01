@@ -502,8 +502,9 @@ export class RlmSpawnLedger {
 		return this.enqueue(() => this.liveEdgesUnlocked());
 	}
 
-	private async liveEdgesUnlocked(): Promise<RlmLedgerEdge[]> {
-		const edges = [...this.replaySync().values()].filter((edge) => !edge.deleted);
+	private async liveEdgesUnlocked(
+		edges = [...this.replaySync().values()].filter((edge) => !edge.deleted),
+	): Promise<RlmLedgerEdge[]> {
 		const statCache = new Map<string, boolean>();
 		const exists = async (path: string): Promise<boolean> => {
 			const cached = statCache.get(path);
@@ -527,11 +528,15 @@ export class RlmSpawnLedger {
 	}
 
 	private async familyUnlocked(): Promise<SessionInfo[]> {
+		// One replay, one stat snapshot: byChild comes from the same alive set that emits child rows,
+		// so a child whose dead edge was reconciled away degrades to a root row instead of vanishing.
+		let alive: RlmLedgerEdge[] = await this.liveEdgesUnlocked(
+			[...this.replaySync().values()].filter((candidate) => !candidate.deleted),
+		);
 		const byChild = new Map<string, RlmLedgerEdge>();
-		for (const edge of [...this.replaySync().values()].filter((candidate) => !candidate.deleted)) {
+		for (const edge of alive) {
 			byChild.set(canonicalSessionPath(edge.child), edge);
 		}
-		let alive: RlmLedgerEdge[] = await this.liveEdgesUnlocked();
 		const rootPaths: string[] = [];
 		let rootEntries: string[] = [];
 		try {
@@ -869,9 +874,11 @@ export async function tombstoneSavedSessionDelete(
 	const positivelyTopLevel = !knownChild && (knownSummary !== undefined || deletedInfo !== undefined);
 	if (positivelyTopLevel) return { deletedInfo, ledgerEdge: undefined };
 	const edges = await ledger.edges();
-	const ledgerEdge = edges.find((edge) => canonicalSessionPath(edge.child) === deletedPath);
-	if (ledgerEdge) {
-		await ledger.appendDelete({ childId: ledgerEdge.childId, child: sessionPath, reason: "user" });
+	// Tombstone every matching edge: a duplicate edge for the path (corrupt or raced appends) left
+	// live would resurrect a later recreation at that path as a subagent.
+	const matching = edges.filter((edge) => canonicalSessionPath(edge.child) === deletedPath);
+	for (const edge of matching) {
+		await ledger.appendDelete({ childId: edge.childId, child: sessionPath, reason: "user" });
 	}
-	return { deletedInfo, ledgerEdge };
+	return { deletedInfo, ledgerEdge: matching[0] };
 }
