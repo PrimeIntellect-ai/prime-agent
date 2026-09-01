@@ -57,6 +57,11 @@ prime_agent_screen_status=
 prime_agent_screen_detail=
 prime_agent_screen_question=
 prime_agent_animation_frame=0
+prime_agent_install_method="${PRIME_AGENT_INSTALL_METHOD:-auto}"
+prime_agent_binary_versions_dir="${PRIME_AGENT_VERSIONS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/prime-agent/versions}"
+prime_agent_binary_symlink="${PRIME_AGENT_BIN_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}/prime-agent"
+prime_agent_binary_rollback_version=
+prime_agent_is_update=0
 
 main() {
 	if [ "$prime_agent_base_url" = "$prime_agent_unconfigured_base_url" ]; then
@@ -65,81 +70,62 @@ main() {
 		exit 1
 	fi
 
+	# Parse flags before positional args
+	prime_agent_install_method="${PRIME_AGENT_INSTALL_METHOD:-auto}"
+	prime_agent_is_update=0
+	_prime_agent_positional=
+	for _prime_agent_arg in "$@"; do
+		case "$_prime_agent_arg" in
+			--method=*)
+				prime_agent_install_method="${_prime_agent_arg#--method=}"
+				case "$prime_agent_install_method" in
+					binary|npm|auto) ;;
+					*)
+						printf 'error: invalid install method: %s (must be binary, npm, or auto)\n' "$prime_agent_install_method" >&2
+						exit 1
+						;;
+				esac
+				;;
+			--update)
+				prime_agent_is_update=1
+				prime_agent_install_method=binary
+				;;
+			*)
+				if [ -z "$_prime_agent_positional" ]; then
+					_prime_agent_positional="$_prime_agent_arg"
+				else
+					_prime_agent_positional="$_prime_agent_positional $_prime_agent_arg"
+				fi
+				;;
+		esac
+	done
+
 	prime_agent_install_traps
 	prime_agent_init_screen
-	if [ "$prime_agent_screen_enabled" = 1 ]; then
-		prime_agent_screen "Installing Prime Agent" "" "" ""
-	else
-		printf '\n\033[1m  Installing Prime Agent\033[0m\n\033[2m  npm global install\033[0m\n\n'
-	fi
 
-	start_preflight_checks
-
-	if finish_preflight_checks; then
-		check_status=0
-	else
-		check_status=$?
-	fi
-
-	if [ "$check_status" -ne 0 ]; then
-		if ! install_node_npm_interactive; then
-			exit "$check_status"
-		fi
-
-		start_preflight_checks
-		if finish_preflight_checks; then
-			check_status=0
-		else
-			check_status=$?
-		fi
-
-		if [ "$check_status" -ne 0 ]; then
-			exit "$check_status"
-		fi
-	fi
-
-	version="$(resolve_prime_agent_version "$@")"
-	tarball_name="$prime_agent_package-$version.tgz"
-	tarball_url="$prime_agent_base_url/releases/v$version/$tarball_name"
-
-	confirm_install "$version" "$tarball_url"
-	confirm_kernel_runtime_setup
-
-	download_dir=$(create_temp_dir)
-	prime_agent_download_dir="$download_dir"
-	tarball_path="$download_dir/$tarball_name"
-
-	download_prime_agent_package "$version" "$tarball_url" "$tarball_path"
-	install_prime_agent_package "$tarball_path"
-	rm -rf "$download_dir"
-	prime_agent_download_dir=
-
-	if [ "${PRIME_AGENT_NODE_INSTALLED_STANDALONE:-0}" = 1 ]; then
-		prime_agent_screen "Prime Agent installed" "" "Checking your shell PATH." ""
-		configure_standalone_node_path
-	elif command -v "$prime_agent_cmd" >/dev/null 2>&1; then
+	if [ "$prime_agent_is_update" = 1 ]; then
 		if [ "$prime_agent_screen_enabled" = 1 ]; then
-			prime_agent_screen "Prime Agent installed" "" "Run it with: $prime_agent_cmd" ""
+			prime_agent_screen "Updating Prime Agent" "" "" ""
 		else
-			printf '\nPrime Agent was installed successfully.\n'
-			printf '\nRun it with: %s\n' "$prime_agent_cmd"
+			printf '\n\033[1m  Updating Prime Agent\033[0m\n'
 		fi
-	else
-		if [ "$prime_agent_screen_enabled" = 1 ]; then
-			prime_agent_screen "Prime Agent installed" "" "PATH update needed for $prime_agent_cmd." ""
-			prime_agent_restore_terminal
-		else
-			printf '\nPrime Agent was installed successfully.\n'
-		fi
-		cat <<EOF
-The $prime_agent_cmd command was installed, but it is not on your PATH yet.
-Check npm's global bin directory with:
-
-  npm bin -g
-
-Then add that directory to your shell PATH.
-EOF
+		prime_agent_binary_update "${_prime_agent_positional:-}"
+		return
 	fi
+
+	# Default auto and explicit --method=binary both use compiled binary
+	if [ "$prime_agent_install_method" != npm ]; then
+		if [ "$prime_agent_screen_enabled" = 1 ]; then
+			prime_agent_screen "Installing Prime Agent" "" "" ""
+		else
+			printf '\n\033[1m  Installing Prime Agent\033[0m\n\033[2m  compiled binary\033[0m\n\n'
+		fi
+		prime_agent_binary_fresh_install "${_prime_agent_positional:-}"
+		return
+	fi
+
+	# Explicit --method=npm: original npm install path
+	prime_agent_npm_install "${_prime_agent_positional:-}"
 }
 
 create_temp_dir() {
@@ -1635,6 +1621,471 @@ Finalizing npm install."
 			"Installing Prime Agent" \
 			"$npm_install_details" \
 			prime_agent_npm_install "$tarball_path" PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1
+	fi
+}
+
+
+
+# =============================================================================
+# Binary Install Path (Bun-compiled artifact, no Node/npm needed)
+# =============================================================================
+
+# Architecture: install each release into a versioned directory
+#   ${XDG_DATA_HOME:-$HOME/.local/share}/prime-agent/versions/v<version>/
+# and point a stable symlink at it from ~/.local/bin/prime-agent.
+# On update: download to a fresh version dir, smoke-test the binary there,
+# then atomically switch the symlink. Rollback by restoring the old symlink.
+# Never copy runtime sidecars into user config dirs (~/.prime/*).
+
+prime_agent_detect_binary_platform() {
+	_os=$(uname -s)
+	_arch=$(uname -m)
+	case "$_os" in
+		Darwin)
+			case "$_arch" in
+				x86_64|amd64) printf 'darwin-x64' ;;
+				arm64|aarch64) printf 'darwin-arm64' ;;
+				*) return 1 ;;
+			esac
+			;;
+		Linux)
+			case "$_arch" in
+				x86_64|amd64) printf 'linux-x64' ;;
+				arm64|aarch64) printf 'linux-arm64' ;;
+				*) return 1 ;;
+			esac
+			;;
+		*) return 1 ;;
+	esac
+}
+
+prime_agent_binary_artifact_name() {
+	_version="$1"
+	_platform="$2"
+	printf 'prime-agent-%s-%s.tar.gz' "$_version" "$_platform"
+}
+
+prime_agent_binary_target_version_dir() {
+	printf '%s/v%s' "$prime_agent_binary_versions_dir" "$1"
+}
+
+prime_agent_binary_smoke_binary() {
+	_binary="$1"
+	if [ ! -x "$_binary" ]; then
+		return 1
+	fi
+	if ! "$_binary" --version >/dev/null 2>&1; then
+		return 1
+	fi
+}
+
+prime_agent_binary_atomic_symlink() {
+	_target="$1"
+	_link="$2"
+	# Create parent dir if needed
+	_link_dir=$(dirname "$_link")
+	if [ ! -d "$_link_dir" ]; then
+		mkdir -p "$_link_dir"
+	fi
+	# Atomic replacement with temp symlink
+	_tmp="${_link}.tmp.$$"
+	ln -sf "$_target" "$_tmp"
+	mv -f "$_tmp" "$_link"
+}
+
+prime_agent_binary_fresh_install() {
+	_version=
+	_version="$(resolve_prime_agent_version "$@")"
+	_platform=
+	if ! _platform=$(prime_agent_detect_binary_platform); then
+		printf 'error: unsupported platform for binary install: %s %s\n' "$(uname -s)" "$(uname -m)" >&2
+		exit 1
+	fi
+	_artifact_name="$(prime_agent_binary_artifact_name "$_version" "$_platform")"
+	_artifact_url="$prime_agent_base_url/releases/v$_version/$_artifact_name"
+	_versions_dir="$prime_agent_binary_versions_dir"
+	_version_dir="$(prime_agent_binary_target_version_dir "$_version")"
+
+	_download_dir=$(create_temp_dir)
+	prime_agent_download_dir="$_download_dir"
+	_artifact_path="$_download_dir/$_artifact_name"
+
+	mkdir -p "$_versions_dir"
+
+	# Version directories are immutable. Reuse a healthy existing install instead
+	# of replacing files underneath the active command symlink.
+	_existing_binary="$_version_dir/$prime_agent_cmd"
+	if [ ! -x "$_existing_binary" ] && [ -x "$_version_dir/pi" ]; then
+		_existing_binary="$_version_dir/pi"
+	fi
+	if [ -x "$_existing_binary" ] && prime_agent_binary_smoke_binary "$_existing_binary"; then
+		prime_agent_binary_atomic_symlink "$_existing_binary" "$prime_agent_binary_symlink"
+		prime_agent_configure_binary_path "$_version"
+		return
+	fi
+
+	prime_agent_run_quiet_with_animation 		"Downloading Prime Agent v$_version" 		"Downloading Prime Agent v$_version" 		"Fetching the compiled binary for $_platform." 		curl -fsSL "$_artifact_url" -o "$_artifact_path"
+
+	_checksums_url="$prime_agent_base_url/releases/v$_version/SHA256SUMS"
+	_checksums_path="$_download_dir/SHA256SUMS"
+	prime_agent_run_quiet_with_animation 		"Downloading checksums" 		"Downloading release checksums" 		"Prime Agent v$_version" 		curl -fsSL "$_checksums_url" -o "$_checksums_path"
+
+	prime_agent_verify_binary_checksum "$_checksums_path" "$_artifact_path"
+
+	# Extract to a clean versioned directory
+	rm -rf "$_version_dir"
+	mkdir -p "$_version_dir"
+	prime_agent_run_quiet_with_animation 		"Extracting Prime Agent" 		"Extracting Prime Agent v$_version" 		"Installing to $_version_dir" 		tar -xzf "$_artifact_path" -C "$_version_dir"
+
+	# Find the binary inside the extracted archive.
+	# The archive may contain a wrapper dir (e.g. pi/) or be flat.
+	_binary_path=
+	if [ -f "$_version_dir/pi" ]; then
+		_binary_path="$_version_dir/pi"
+	elif [ -f "$_version_dir/$prime_agent_cmd" ]; then
+		_binary_path="$_version_dir/$prime_agent_cmd"
+	else
+		for _d in "$_version_dir"/*/; do
+			_d="${_d%/}"
+			if [ -f "${_d}/pi" ]; then
+				_binary_path="${_d}/pi"
+				break
+			elif [ -f "${_d}/$prime_agent_cmd" ]; then
+				_binary_path="${_d}/$prime_agent_cmd"
+				break
+			fi
+		done
+	fi
+
+	if [ -z "$_binary_path" ]; then
+		printf 'error: could not find the prime-agent binary in the downloaded artifact.\n' >&2
+		rm -rf "$_version_dir" "$_download_dir"
+		prime_agent_download_dir=
+		exit 1
+	fi
+
+	chmod +x "$_binary_path" 2>/dev/null || true
+	# Ensure bundled install.sh is executable (required sidecar for self-update)
+	if [ -f "$_version_dir/install.sh" ]; then
+		chmod +x "$_version_dir/install.sh" 2>/dev/null || true
+	fi
+
+	if ! "$_binary_path" --version >/dev/null 2>&1; then
+		printf 'error: the downloaded binary did not run correctly.\n' >&2
+		rm -rf "$_version_dir" "$_download_dir"
+		prime_agent_download_dir=
+		exit 1
+	fi
+
+	# If the binary was inside a wrapper dir, move contents up to version_dir
+	_binary_dir=$(dirname "$_binary_path")
+	if [ "$_binary_dir" != "$_version_dir" ]; then
+		cp -R "$_binary_dir/." "$_version_dir/"
+		rm -rf "$_binary_dir"
+		_binary_path="$_version_dir/$(basename "$_binary_path")"
+	fi
+
+	# Create the stable symlink
+	mkdir -p "$(dirname "$prime_agent_binary_symlink")"
+	prime_agent_binary_atomic_symlink "$_binary_path" "$prime_agent_binary_symlink"
+
+	rm -rf "$_download_dir"
+	prime_agent_download_dir=
+
+	prime_agent_configure_binary_path "$_version"
+	# The Python kernel will be bootstrapped on first ipython use.
+}
+
+prime_agent_binary_update() {
+	_update_version=
+	_update_version="$(resolve_prime_agent_version "$@")"
+
+	# Read current version from the symlink target's package.json
+	_current_version=
+	if [ -L "$prime_agent_binary_symlink" ]; then
+		_symlink_target=$(readlink "$prime_agent_binary_symlink")
+		_pkg_dir=$(dirname "$_symlink_target")
+		if [ -f "$_pkg_dir/package.json" ]; then
+			_current_version=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$_pkg_dir/package.json" 2>/dev/null || printf '')
+		fi
+	fi
+
+	if [ -n "$_current_version" ] && [ "$_current_version" = "$_update_version" ]; then
+		if [ "$prime_agent_screen_enabled" = 1 ]; then
+			prime_agent_screen "Prime Agent is up to date" "" "v$_current_version" ""
+		else
+			printf '\nPrime Agent v%s is already installed.\n' "$_current_version"
+		fi
+		return
+	fi
+
+	_platform=
+	if ! _platform=$(prime_agent_detect_binary_platform); then
+		printf 'error: unsupported platform for binary update: %s %s\n' "$(uname -s)" "$(uname -m)" >&2
+		exit 1
+	fi
+	_artifact_name="$(prime_agent_binary_artifact_name "$_update_version" "$_platform")"
+	_artifact_url="$prime_agent_base_url/releases/v$_update_version/$_artifact_name"
+	_versions_dir="$prime_agent_binary_versions_dir"
+	_version_dir="$(prime_agent_binary_target_version_dir "$_update_version")"
+
+	_download_dir=$(create_temp_dir)
+	prime_agent_download_dir="$_download_dir"
+	_artifact_path="$_download_dir/$_artifact_name"
+
+	if [ "$prime_agent_screen_enabled" = 1 ]; then
+		if [ -n "$_current_version" ]; then
+			prime_agent_screen "Updating Prime Agent" "" "v$_current_version to v$_update_version" ""
+		else
+			prime_agent_screen "Updating Prime Agent" "" "to v$_update_version" ""
+		fi
+	fi
+
+	prime_agent_run_quiet_with_animation 		"Downloading Prime Agent v$_update_version" 		"Downloading Prime Agent v$_update_version" 		"Fetching the compiled binary for $_platform." 		curl -fsSL "$_artifact_url" -o "$_artifact_path"
+
+	_checksums_url="$prime_agent_base_url/releases/v$_update_version/SHA256SUMS"
+	_checksums_path="$_download_dir/SHA256SUMS"
+	prime_agent_run_quiet_with_animation 		"Downloading checksums" 		"Downloading release checksums" 		"Prime Agent v$_update_version" 		curl -fsSL "$_checksums_url" -o "$_checksums_path"
+
+	prime_agent_verify_binary_checksum "$_checksums_path" "$_artifact_path"
+
+	# Extract to a fresh version directory
+	rm -rf "$_version_dir"
+	mkdir -p "$_version_dir"
+	prime_agent_run_quiet_with_animation 		"Extracting Prime Agent" 		"Extracting Prime Agent v$_update_version" 		"Preparing the update." 		tar -xzf "$_artifact_path" -C "$_version_dir"
+
+	# Find the binary
+	_binary_path=
+	if [ -f "$_version_dir/pi" ]; then
+		_binary_path="$_version_dir/pi"
+	elif [ -f "$_version_dir/$prime_agent_cmd" ]; then
+		_binary_path="$_version_dir/$prime_agent_cmd"
+	else
+		for _d in "$_version_dir"/*/; do
+			_d="${_d%/}"
+			if [ -f "${_d}/pi" ]; then
+				_binary_path="${_d}/pi"
+				break
+			elif [ -f "${_d}/$prime_agent_cmd" ]; then
+				_binary_path="${_d}/$prime_agent_cmd"
+				break
+			fi
+		done
+	fi
+
+	if [ -z "$_binary_path" ]; then
+		printf 'error: could not find the prime-agent binary in the downloaded artifact.\n' >&2
+		rm -rf "$_version_dir" "$_download_dir"
+		prime_agent_download_dir=
+		exit 1
+	fi
+
+	chmod +x "$_binary_path" 2>/dev/null || true
+	# Ensure bundled install.sh is executable (required sidecar for self-update)
+	if [ -f "$_version_dir/install.sh" ]; then
+		chmod +x "$_version_dir/install.sh" 2>/dev/null || true
+	fi
+
+	# Smoke-test the new binary BEFORE switching the symlink
+	if ! "$_binary_path" --version >/dev/null 2>&1; then
+		# New binary is bad: remove it, keep old symlink
+		rm -rf "$_version_dir" "$_download_dir"
+		prime_agent_download_dir=
+		if [ "$prime_agent_screen_enabled" = 1 ]; then
+			prime_agent_screen "Update failed" "" "New binary did not run correctly." ""
+		else
+			printf '\nUpdate failed: the new binary did not run correctly.\n'
+		fi
+		exit 1
+	fi
+
+	# If the binary was inside a wrapper dir, move contents up
+	_binary_dir=$(dirname "$_binary_path")
+	if [ "$_binary_dir" != "$_version_dir" ]; then
+		cp -R "$_binary_dir/." "$_version_dir/"
+		rm -rf "$_binary_dir"
+		_binary_path="$_version_dir/$(basename "$_binary_path")"
+	fi
+
+	# Remember old version for rollback
+	if [ -L "$prime_agent_binary_symlink" ]; then
+		_old_target=$(readlink "$prime_agent_binary_symlink" 2>/dev/null || printf '')
+		_old_version_dir=$(dirname "$_old_target" 2>/dev/null || printf '')
+		prime_agent_binary_rollback_version="$_old_version_dir"
+	fi
+
+	# Atomically switch the symlink
+	prime_agent_binary_atomic_symlink "$_binary_path" "$prime_agent_binary_symlink"
+
+	rm -rf "$_download_dir"
+	prime_agent_download_dir=
+
+	if [ "$prime_agent_screen_enabled" = 1 ]; then
+		prime_agent_screen "Prime Agent updated" "" "v$_update_version installed." ""
+	else
+		printf '\nPrime Agent was updated to v%s.\n' "$_update_version"
+	fi
+
+	prime_agent_configure_binary_path "$_update_version"
+}
+
+prime_agent_binary_rollback() {
+	if [ -z "$prime_agent_binary_rollback_version" ] || [ ! -d "$prime_agent_binary_rollback_version" ]; then
+		return 1
+	fi
+	_rollback_binary=
+	if [ -f "$prime_agent_binary_rollback_version/pi" ]; then
+		_rollback_binary="$prime_agent_binary_rollback_version/pi"
+	elif [ -f "$prime_agent_binary_rollback_version/$prime_agent_cmd" ]; then
+		_rollback_binary="$prime_agent_binary_rollback_version/$prime_agent_cmd"
+	fi
+	if [ -z "$_rollback_binary" ] || [ ! -x "$_rollback_binary" ]; then
+		return 1
+	fi
+	prime_agent_binary_atomic_symlink "$_rollback_binary" "$prime_agent_binary_symlink"
+}
+
+prime_agent_verify_binary_checksum() {
+	_checksums_path="$1"
+	_artifact_path="$2"
+	_checksum_dir=$(dirname "$_artifact_path")
+	_artifact_name=$(basename "$_artifact_path")
+	_selected_checksums_path="$_checksum_dir/SHA256SUMS.selected"
+
+	if ! awk -v file="$_artifact_name" '$2 == file { print; found = 1; exit } END { if (!found) exit 1 }' 		"$_checksums_path" >"$_selected_checksums_path"; then
+		printf 'error: checksum for %s was not found in %s\n' "$_artifact_name" "$_checksums_path" >&2
+		exit 1
+	fi
+
+	if command -v sha256sum >/dev/null 2>&1; then
+		prime_agent_run_quiet_with_animation 			"Verifying download" 			"Verifying Prime Agent download" 			"Checking SHA-256." 			prime_agent_run_checksum_check "$_checksum_dir" "$(basename "$_selected_checksums_path")" sha256sum
+	elif command -v shasum >/dev/null 2>&1; then
+		prime_agent_run_quiet_with_animation 			"Verifying download" 			"Verifying Prime Agent download" 			"Checking SHA-256." 			prime_agent_run_checksum_check "$_checksum_dir" "$(basename "$_selected_checksums_path")" shasum
+	else
+		printf 'error: sha256sum or shasum is required to verify the download.\n' >&2
+		exit 1
+	fi
+}
+
+prime_agent_configure_binary_path() {
+	_installed_version="${1:-}"
+
+	if command -v "$prime_agent_cmd" >/dev/null 2>&1; then
+		_existing_path="$(command -v "$prime_agent_cmd")"
+		if [ "$_existing_path" = "$prime_agent_binary_symlink" ]; then
+			if [ "$prime_agent_screen_enabled" = 1 ]; then
+				prime_agent_screen "Prime Agent installed" "" "Run it with: $prime_agent_cmd" ""
+			else
+				printf '\nRun it with: %s\n' "$prime_agent_cmd"
+			fi
+			return
+		fi
+	fi
+
+	_bin_dir=$(dirname "$prime_agent_binary_symlink")
+	case ":$PATH:" in
+		*":$_bin_dir:"*)
+			if [ "$prime_agent_screen_enabled" = 1 ]; then
+				prime_agent_screen "Prime Agent installed" "" "Run it with: $prime_agent_cmd" ""
+			else
+				printf '\nRun it with: %s\n' "$prime_agent_cmd"
+			fi
+			return
+			;;
+	esac
+
+	if [ "$prime_agent_screen_enabled" = 1 ]; then
+		prime_agent_screen "Prime Agent installed" "" "PATH update needed for $prime_agent_cmd." ""
+		prime_agent_restore_terminal
+	else
+		printf '\nPrime Agent was installed to %s.\n' "$_bin_dir"
+	fi
+
+	_profile=$(detect_shell_profile)
+	if [ -n "$_profile" ] && [ -w "$_profile" ] 2>/dev/null; then
+		if ! grep -q "$_bin_dir" "$_profile" 2>/dev/null; then
+			printf '\nexport PATH="%s:$PATH"\n' "$_bin_dir" >> "$_profile"
+			printf 'Added %s to %s.\n' "$_bin_dir" "$_profile"
+		fi
+		printf '\nRestart your shell or run: export PATH="%s:$PATH" && %s\n' "$_bin_dir" "$prime_agent_cmd"
+	else
+		printf '\nAdd to your shell profile:\n'
+		printf '  export PATH="%s:$PATH"\n' "$_bin_dir"
+		printf '\nThen restart your shell and run: %s\n' "$prime_agent_cmd"
+	fi
+}
+
+# =============================================================================
+# NPM Install Path (extracted from main)
+# =============================================================================
+
+prime_agent_npm_install() {
+	start_preflight_checks
+
+	if finish_preflight_checks; then
+		check_status=0
+	else
+		check_status=$?
+	fi
+
+	if [ "$check_status" -ne 0 ]; then
+		if ! install_node_npm_interactive; then
+			exit "$check_status"
+		fi
+
+		start_preflight_checks
+		if finish_preflight_checks; then
+			check_status=0
+		else
+			check_status=$?
+		fi
+
+		if [ "$check_status" -ne 0 ]; then
+			exit "$check_status"
+		fi
+	fi
+
+	version="$(resolve_prime_agent_version "$@")"
+	tarball_name="$prime_agent_package-$version.tgz"
+	tarball_url="$prime_agent_base_url/releases/v$version/$tarball_name"
+
+	confirm_install "$version" "$tarball_url"
+	confirm_kernel_runtime_setup
+
+	download_dir=$(create_temp_dir)
+	prime_agent_download_dir="$download_dir"
+	tarball_path="$download_dir/$tarball_name"
+
+	download_prime_agent_package "$version" "$tarball_url" "$tarball_path"
+	install_prime_agent_package "$tarball_path"
+	rm -rf "$download_dir"
+	prime_agent_download_dir=
+
+	if [ "${PRIME_AGENT_NODE_INSTALLED_STANDALONE:-0}" = 1 ]; then
+		prime_agent_screen "Prime Agent installed" "" "Checking your shell PATH." ""
+		configure_standalone_node_path
+	elif command -v "$prime_agent_cmd" >/dev/null 2>&1; then
+		if [ "$prime_agent_screen_enabled" = 1 ]; then
+			prime_agent_screen "Prime Agent installed" "" "Run it with: $prime_agent_cmd" ""
+		else
+			printf '\nPrime Agent was installed successfully.\n'
+			printf '\nRun it with: %s\n' "$prime_agent_cmd"
+		fi
+	else
+		if [ "$prime_agent_screen_enabled" = 1 ]; then
+			prime_agent_screen "Prime Agent installed" "" "PATH update needed for $prime_agent_cmd." ""
+			prime_agent_restore_terminal
+		else
+			printf '\nPrime Agent was installed successfully.\n'
+		fi
+		cat <<EOF
+The $prime_agent_cmd command was installed, but it is not on your PATH yet.
+Check npm's global bin directory with:
+
+  npm bin -g
+
+Then add that directory to your shell PATH.
+EOF
 	fi
 }
 

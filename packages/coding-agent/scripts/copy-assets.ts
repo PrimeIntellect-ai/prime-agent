@@ -16,9 +16,15 @@ async function copyFiles(sourceDir: string, targetDir: string, suffix: string): 
 	}
 }
 
+const excludedReleaseDirectoryNames = new Set(["node_modules", ".venv", "__pycache__", ".pytest_cache"]);
+
+function includeReleasePath(source: string): boolean {
+	return !source.split(/[\\/]/).some((part) => excludedReleaseDirectoryNames.has(part));
+}
+
 async function replaceDirectory(source: string, target: string): Promise<void> {
 	await rm(target, { recursive: true, force: true });
-	await cp(source, target, { recursive: true });
+	await cp(source, target, { recursive: true, filter: includeReleasePath });
 }
 
 async function copyFile(source: string, targetDir: string): Promise<void> {
@@ -43,6 +49,7 @@ async function copyBinaryAssets(): Promise<void> {
 	for (const name of ["package.json", "README.md", "CHANGELOG.md"]) {
 		await copyFile(join(packageDir, name), distDir);
 	}
+	await copyFile(join(repoDir, "install.sh"), distDir);
 	await copyFiles(join(packageDir, "src/modes/interactive/theme"), join(distDir, "theme"), ".json");
 	await copyFiles(join(packageDir, "src/modes/interactive/assets"), join(distDir, "assets"), ".png");
 	await copyFile(join(packageDir, "src/core/export-html/template.html"), join(distDir, "export-html"));
@@ -50,6 +57,7 @@ async function copyBinaryAssets(): Promise<void> {
 	await replaceDirectory(join(packageDir, "docs"), join(distDir, "docs"));
 	await replaceDirectory(join(packageDir, "examples"), join(distDir, "examples"));
 	await copyFile(join(repoDir, "node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm"), distDir);
+	await replaceDirectory(join(repoDir, "prime-agent-runtime"), join(distDir, "prime-agent-runtime"));
 	await replaceDirectory(join(packageDir, "skills"), join(distDir, "skills"));
 }
 

@@ -1,19 +1,19 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
- * Release script for pi-mono
+ * Release script for Prime Agent
  *
  * Usage:
- *   node scripts/release.mjs <major|minor|patch>
- *   node scripts/release.mjs <x.y.z>
- *   node scripts/release.mjs <target> --dry-run   (preview changelog updates only)
+ *   bun scripts/release.mjs <major|minor|patch>
+ *   bun scripts/release.mjs <x.y.z>
+ *   bun scripts/release.mjs <target> --dry-run   (preview changelog updates only)
  *
  * Steps:
  * 1. Check for uncommitted changes
- * 2. Bump version via npm run version:xxx or set an explicit version
+ * 2. Bump every workspace version and refresh bun.lock
  * 3. Update CHANGELOG.md files: aggregate .changes/*.md fragments into a
  *    [version] - date section, git rm the consumed fragments
  * 4. Commit and tag
- * 5. Publish to npm
+ * 5. Publish the npm compatibility packages with Bun
  */
 
 import { execSync } from "child_process";
@@ -27,7 +27,7 @@ const BUMP_TYPES = new Set(["major", "minor", "patch"]);
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 
 if (!RELEASE_TARGET || (!BUMP_TYPES.has(RELEASE_TARGET) && !SEMVER_RE.test(RELEASE_TARGET))) {
-	console.error("Usage: node scripts/release.mjs <major|minor|patch|x.y.z> [--dry-run]");
+	console.error("Usage: bun scripts/release.mjs <major|minor|patch|x.y.z> [--dry-run]");
 	process.exit(1);
 }
 
@@ -82,7 +82,7 @@ function bumpOrSetVersion(target) {
 
 	if (BUMP_TYPES.has(target)) {
 		console.log(`Bumping version (${target})...`);
-		run(`npm run version:${target}`);
+		run(`bun run version:${target}`);
 		return getVersion();
 	}
 
@@ -92,9 +92,7 @@ function bumpOrSetVersion(target) {
 	}
 
 	console.log(`Setting explicit version (${target})...`);
-	run(
-		`npm version ${target} -ws --no-git-tag-version && node scripts/sync-versions.js && npx shx rm -rf node_modules packages/*/node_modules package-lock.json && npm install`,
-	);
+	run(`bun scripts/set-version.ts ${target}`);
 	return getVersion();
 }
 
@@ -214,8 +212,8 @@ run(`git commit -m "Release v${version}"`);
 run(`git tag v${version}`);
 console.log();
 
-console.log("Publishing to npm...");
-run("npm run publish");
+console.log("Publishing npm compatibility packages...");
+run("bun run publish");
 console.log();
 
 console.log("Pushing to remote...");
