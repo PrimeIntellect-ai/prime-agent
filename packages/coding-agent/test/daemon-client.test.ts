@@ -15,7 +15,17 @@ const netMock = vi.hoisted(() => {
 		readonly writes: string[] = [];
 		destroyed = false;
 
-		constructor(readonly path: string) {}
+		path = "";
+
+		constructor(path = "") {
+			this.path = path;
+		}
+
+		connect(path: string): this {
+			this.path = path;
+			sockets.push(this);
+			return this;
+		}
 
 		on(event: string, listener: Listener): this {
 			const listeners = this.listeners.get(event) ?? new Set<TrackedListener>();
@@ -83,11 +93,12 @@ const netMock = vi.hoisted(() => {
 		return socket;
 	});
 
-	return { createConnection, sockets };
+	return { createConnection, MockSocket, sockets };
 });
 
 vi.mock("node:net", () => ({
 	createConnection: netMock.createConnection,
+	Socket: netMock.MockSocket,
 }));
 
 function emitHello(
@@ -155,11 +166,9 @@ describe("DaemonClient", () => {
 		expect(netMock.sockets).toHaveLength(1);
 		const firstSocket = netMock.sockets[0]!;
 
-		const timeoutRejection = expect(firstAttempt).resolves.toMatchObject({
-			message: expect.stringContaining("Timed out after 5ms connecting to the Prime Agent daemon."),
-		});
 		await vi.advanceTimersByTimeAsync(5);
-		await timeoutRejection;
+		const timeoutError = await firstAttempt;
+		expect(timeoutError.message).toContain("Timed out after 5ms connecting to the Prime Agent daemon.");
 
 		expect(firstSocket.destroyed).toBe(true);
 		expect(firstSocket.listenerCount("data")).toBe(0);
@@ -419,17 +428,12 @@ describe("DaemonClient", () => {
 
 		const request = client.request({ type: "list", all: true });
 
-		await expect(request).rejects.toMatchObject({
-			message: expect.stringContaining(
-				'Cannot send daemon command "list" because the Prime Agent daemon is not connected.',
-			),
-		});
-		await expect(request).rejects.toMatchObject({
-			message: expect.stringContaining("Socket: /tmp/prime-agent.sock."),
-		});
-		await expect(request).rejects.toMatchObject({
-			message: expect.stringContaining("Daemon log:"),
-		});
+		const requestError = await captureRejection(request);
+		expect(requestError.message).toContain(
+			'Cannot send daemon command "list" because the Prime Agent daemon is not connected.',
+		);
+		expect(requestError.message).toContain("Socket: /tmp/prime-agent.sock.");
+		expect(requestError.message).toContain("Daemon log:");
 	});
 
 	it("keeps durable command envelopes on the session-action protocol", async () => {
@@ -931,7 +935,7 @@ describe("DaemonClient", () => {
 	});
 });
 
-async function captureRejection(promise: Promise<void>): Promise<Error> {
+async function captureRejection(promise: Promise<unknown>): Promise<Error> {
 	try {
 		await promise;
 	} catch (error) {

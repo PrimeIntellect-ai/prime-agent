@@ -1,10 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
-const googleGenAiMock = vi.hoisted(() => ({
-	constructorCalls: [] as Array<Record<string, unknown>>,
-}));
+const googleGenAiMock: { constructorCalls: Array<Record<string, unknown>> } = {
+	constructorCalls: [],
+};
 
-vi.mock("@google/genai", () => {
+mock.module("@google/genai", () => {
 	class GoogleGenAI {
 		models = {
 			generateContentStream: async function* () {

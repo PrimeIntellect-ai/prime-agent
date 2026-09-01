@@ -68,7 +68,7 @@
 		"build": "bun run generate-models && bun --bun tsgo -p tsconfig.build.json",
 		"dev": "bun --bun tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"dev:tsc": "bun --bun tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
-		"test": "vitest --run",
+		"test": "bun ../../scripts/run-with-clean-env.ts bun test --isolate --timeout 30000",
 		"prepublishOnly": "bun run clean && bun run build"
 	},
 	"dependencies": {
@@ -102,11 +102,11 @@
 		"directory": "packages/ai"
 	},
 	"engines": {
-		"node": ">=20.0.0"
+		"node": ">=20.0.0",
+		"bun": "1.3.14"
 	},
 	"devDependencies": {
 		"@types/node": "^24.3.0",
-		"canvas": "^3.2.0",
-		"vitest": "^4.1.10"
+		"canvas": "^3.2.0"
 	}
 }

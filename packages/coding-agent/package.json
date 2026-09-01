@@ -37,14 +37,14 @@
 		"build:binary": "bun run --cwd ../tui build && bun run --cwd ../ai build && bun run --cwd ../agent build && bun run build && bun build --compile ./dist/bun/cli.js --outfile dist/pi && bun scripts/copy-assets.ts binary",
 		"copy-assets": "bun scripts/copy-assets.ts package",
 		"copy-binary-assets": "bun scripts/copy-assets.ts binary",
-		"test": "vitest --run",
-		"test:ci": "tsx src/core/kernel/bootstrap-cli.ts && vitest --run --exclude test/daemon-supervisor-process.test.ts",
-		"test:process": "vitest --run test/daemon-supervisor-process.test.ts",
-		"test:process-stress": "vitest --run --tagsFilter process-stress test/daemon-supervisor-process.test.ts",
+		"test": "bun ../../scripts/run-with-clean-env.ts bun scripts/run-tests.ts",
+		"test:ci": "bun ../../scripts/run-with-clean-env.ts bun src/core/kernel/bootstrap-cli.ts && bun ../../scripts/run-with-clean-env.ts bun scripts/run-tests.ts",
+		"test:process": "bun ../../scripts/run-with-clean-env.ts bun test --isolate --timeout 30000 test/daemon-supervisor-process.test.ts",
+		"test:process-stress": "PRIME_AGENT_TEST_TAGS=process-stress bun ../../scripts/run-with-clean-env.ts bun test --isolate --timeout 30000 test/daemon-supervisor-process.test.ts",
 		"postinstall": "bun postinstall.cjs",
 		"prepublishOnly": "bun run clean && bun run build",
 		"bundle": "bun scripts/bundle.mjs",
-		"test:kernel": "vitest --run --no-file-parallelism --tagsFilter kernel-heavy test/acp-kernel-features.test.ts test/acp-cold-cli.test.ts test/kernel-goal-skill.test.ts test/repl-kernel-state-roundtrip.test.ts test/repl-kernel-mcp-shutdown.test.ts"
+		"test:kernel": "PRIME_AGENT_TEST_TAGS=kernel-heavy bun ../../scripts/run-with-clean-env.ts bun test --isolate --timeout 30000 test/acp-kernel-features.test.ts test/acp-cold-cli.test.ts test/kernel-goal-skill.test.ts test/repl-kernel-state-roundtrip.test.ts test/repl-kernel-mcp-shutdown.test.ts test/repl-kernel-parent-watchdog.test.ts"
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "^1.3.0",
@@ -83,10 +83,7 @@
 		"@types/ms": "^2.1.0",
 		"@types/node": "^24.3.0",
 		"@types/proper-lockfile": "^4.1.4",
-		"esbuild": "^0.28.1",
-		"shx": "^0.4.0",
-		"typescript": "^7.0.2",
-		"vitest": "^4.1.10"
+		"typescript": "^7.0.2"
 	},
 	"keywords": [
 		"coding-agent",
@@ -104,6 +101,7 @@
 		"directory": "packages/coding-agent"
 	},
 	"engines": {
-		"node": ">=22.8.0"
+		"node": ">=22.8.0",
+		"bun": "1.3.14"
 	}
 }

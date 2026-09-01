@@ -5,7 +5,6 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 const fixturePath = resolve(__dirname, "fixtures/owned-session-worker-fixture.ts");
-const tsxPath = resolve(__dirname, "../../../node_modules/tsx/dist/cli.mjs");
 const tempDirs: string[] = [];
 const children = new Set<ChildProcess>();
 const workerPids = new Set<number>();
@@ -45,14 +44,13 @@ function spawnFrontend(
 	keepAlive = false,
 	environment: NodeJS.ProcessEnv = {},
 ): ChildProcess {
-	const child = spawn(process.execPath, [tsxPath, fixturePath, ...args], {
+	const child = spawn(process.execPath, [fixturePath, ...args], {
 		env: {
 			...process.env,
 			...environment,
 			PRIME_AGENT_INTERNAL_LEGACY_OWNED_WORKER_FRONTEND: "1",
 			PRIME_AGENT_TEST_OWNED_PID_PATH: pidPath,
 			...(keepAlive ? { PRIME_AGENT_TEST_KEEP_ALIVE: "1" } : {}),
-			TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
 		},
 		stdio: ["pipe", "pipe", "pipe"],
 	});

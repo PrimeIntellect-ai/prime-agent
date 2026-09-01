@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getBundledSkillsDir } from "../src/config.js";
 import type { PythonSkillRuntimeInfo } from "../src/core/skills.js";
 import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
+import { isTestTagEnabled } from "./test-tags.js";
 
 function bundledGoalSkill(): PythonSkillRuntimeInfo {
 	const packagePath = join(getBundledSkillsDir(), "goal");
@@ -16,7 +17,9 @@ function bundledGoalSkill(): PythonSkillRuntimeInfo {
 	};
 }
 
-describe("goal skill over the kernel host bridge", { tags: ["kernel-heavy"] }, () => {
+const kernelHeavyDescribe = isTestTagEnabled("kernel-heavy") ? describe : describe.skip;
+
+kernelHeavyDescribe("goal skill over the kernel host bridge", () => {
 	let tempDir: string;
 	let provisioner: IpythonKernelProvisioner | undefined;
 

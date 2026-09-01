@@ -49,7 +49,6 @@ function spawnError(error: Error): SpawnSyncReturns<Buffer> {
 
 describe("readClipboardImage", () => {
 	beforeEach(() => {
-		vi.resetModules();
 		mocks.spawnSync.mockReset();
 		mocks.clipboard.hasImage.mockReset();
 		mocks.clipboard.getImageBinary.mockReset();

@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { ReplKernelManager } from "../src/core/kernel/index.js";
+import { isTestTagEnabled } from "./test-tags.js";
 
 function resolveReplPython(): string | null {
 	const candidates = [
@@ -20,9 +21,9 @@ function resolveReplPython(): string | null {
 }
 
 const python = resolveReplPython();
-const describeIfKernel = python ? describe : describe.skip;
+const describeIfKernel = python && isTestTagEnabled("kernel-heavy") ? describe : describe.skip;
 
-describeIfKernel("repl kernel state snapshot round-trip (real runtime)", { tags: ["kernel-heavy"] }, () => {
+describeIfKernel("repl kernel state snapshot round-trip (real runtime)", () => {
 	let dir = "";
 	let snapshotPath = "";
 	let manifestPath = "";

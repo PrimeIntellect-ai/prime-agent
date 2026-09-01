@@ -11,8 +11,8 @@ import {
 import { tmpdir } from "node:os";
 
 const linkFailure = vi.hoisted(() => ({ code: undefined as string | undefined }));
-vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:fs")>();
+vi.mock("node:fs", () => {
+	const actual = require("node:fs");
 	return {
 		...actual,
 		linkSync: (

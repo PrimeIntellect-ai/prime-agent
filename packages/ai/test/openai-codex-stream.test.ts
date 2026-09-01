@@ -543,6 +543,7 @@ describe("openai-codex streaming", () => {
 			provider: "openai-codex",
 			baseUrl: "https://chatgpt.com/backend-api",
 			reasoning: true,
+			thinkingLevelMap: { minimal: "low" },
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			contextWindow: 400000,
@@ -554,9 +555,9 @@ describe("openai-codex streaming", () => {
 			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
 		};
 
-		const streamResult = streamOpenAICodexResponses(model, context, {
+		const streamResult = streamSimpleOpenAICodexResponses(model, context, {
 			apiKey: token,
-			reasoningEffort: "minimal",
+			reasoning: "minimal",
 		});
 		await streamResult.result();
 	});

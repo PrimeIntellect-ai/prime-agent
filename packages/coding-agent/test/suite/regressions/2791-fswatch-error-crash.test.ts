@@ -50,18 +50,14 @@ describe("issue #2791 fs.watch error event crashes process", () => {
 		writeFileSync(
 			scriptPath,
 			`
-import { setTheme, stopThemeWatcher } from "${themeModulePath}";
-
 process.env[${JSON.stringify(ENV_AGENT_DIR)}] = ${JSON.stringify(agentDir)};
 
+const { getActiveThemeWatcher, setTheme, stopThemeWatcher } = await import("${themeModulePath}");
 setTheme("custom-test", true);
-
-// Find the FSWatcher among active handles
-const handles = (process as any)._getActiveHandles();
-const fsWatcher = handles.find((h: any) => h.constructor?.name === "FSWatcher");
+const fsWatcher = getActiveThemeWatcher();
 
 if (!fsWatcher) {
-	process.stderr.write("no FSWatcher found among active handles\\n");
+	process.stderr.write("theme did not create an FSWatcher\\n");
 	process.exit(2);
 }
 
@@ -88,7 +84,7 @@ process.exit(0);
 		let stderr = "";
 		let exitCode: number;
 		try {
-			_stdout = execFileSync("npx", ["tsx", scriptPath], {
+			_stdout = execFileSync(process.execPath, [scriptPath], {
 				timeout: 10000,
 				encoding: "utf-8",
 				env: { ...process.env, [ENV_AGENT_DIR]: agentDir },
