@@ -9,6 +9,7 @@ import {
 	readdirSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -89,7 +90,23 @@ describe("compiled release archives", () => {
 		const archives = readdirSync(artifacts).filter((name) => name.endsWith(".tar.gz"));
 		expect(archives.sort()).toEqual(platforms.map((platform) => `prime-agent-1.2.3-${platform}.tar.gz`).sort());
 		expect(readFileSync(join(artifacts, "stable"), "utf8")).toBe("v1.2.3\n");
-		expect(readFileSync(join(artifacts, "SHA256SUMS"), "utf8").trim().split("\n")).toHaveLength(4);
+		expect(readFileSync(join(artifacts, "SHA256SUMS"), "utf8").trim().split("\n")).toHaveLength(8);
+		for (const tarball of [
+			"prime-agent-1.2.3.tgz",
+			"prime-agent-ai-1.2.3.tgz",
+			"prime-agent-core-1.2.3.tgz",
+			"prime-agent-tui-1.2.3.tgz",
+		]) {
+			expect(existsSync(join(artifacts, tarball)), tarball).toBe(true);
+		}
+		const npmExtracted = join(f.root, "npm-extracted");
+		mkdirSync(npmExtracted);
+		expect(spawnSync("tar", ["-xzf", join(artifacts, "prime-agent-1.2.3.tgz"), "-C", npmExtracted]).status).toBe(0);
+		expect(JSON.parse(readFileSync(join(npmExtracted, "package", "package.json"), "utf8"))).toMatchObject({
+			name: "prime-agent",
+			version: "1.2.3",
+			bin: { "prime-agent": "dist/bundle/cli.js" },
+		});
 
 		const extracted = join(f.root, "extracted");
 		mkdirSync(extracted);
@@ -146,5 +163,37 @@ describe("compiled release archives", () => {
 		const result = pack(f);
 		expect(result.status).not.toBe(0);
 		expect(result.stderr).toContain("forbidden dependency or cache directory");
+	});
+	test("rejects shell-active release base URLs", () => {
+		const f = fixture();
+		const result = pack(f, ["--base-url", "https://downloads.example.test/$(touch-danger)"]);
+		expect(result.status).not.toBe(0);
+		expect(result.stderr).toContain("unsafe shell characters");
+	});
+
+	test("preserves existing artifacts when preflight validation fails", () => {
+		const f = fixture();
+		const sentinel = join(f.output, "artifacts", "keep.txt");
+		mkdirSync(dirname(sentinel), { recursive: true });
+		writeFileSync(sentinel, "keep");
+		rmSync(join(f.sidecars, "theme"), { recursive: true });
+		const result = pack(f);
+		expect(result.status).not.toBe(0);
+		expect(readFileSync(sentinel, "utf8")).toBe("keep");
+	});
+
+	test("rejects output paths that traverse a symlink", () => {
+		const f = fixture();
+		const outside = join(f.root, "outside");
+		const sentinel = join(outside, "old", "keep.txt");
+		mkdirSync(dirname(sentinel), { recursive: true });
+		writeFileSync(sentinel, "keep");
+		const link = join(releaseRoot, `link-${process.pid}-${Math.random().toString(36).slice(2)}`);
+		outputDirs.push(link);
+		symlinkSync(outside, link, "dir");
+		const result = pack(f, ["--out-dir", join(link, "old")]);
+		expect(result.status).not.toBe(0);
+		expect(result.stderr).toContain("symlinked output path");
+		expect(readFileSync(sentinel, "utf8")).toBe("keep");
 	});
 });

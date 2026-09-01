@@ -41,6 +41,10 @@ describe("compiled Bun artifact", () => {
 		for (const name of REQUIRED_BINARY_SIDECARS) {
 			expect(existsSync(join(distDir, name)), name).toBe(true);
 		}
+		for (const name of ["template.html", "template.css", "template.js"]) {
+			expect(existsSync(join(distDir, "export-html", name)), name).toBe(true);
+		}
+		expect(existsSync(join(distDir, "prime-agent-runtime", "pyproject.toml"))).toBe(true);
 	});
 
 	it("contains no installed dependency or cache directories", () => {

@@ -31,7 +31,11 @@ function makeRelease(root: string, version: string, executable: string, checksum
 	writeFileSync(join(releaseDir, "SHA256SUMS"), `${checksum}  ${archiveName}\n`);
 }
 
-function runInstaller(root: string, args: string[]): { exitCode: number; stdout: string; stderr: string } {
+function runInstaller(
+	root: string,
+	args: string[],
+	env: Record<string, string> = {},
+): { exitCode: number; stdout: string; stderr: string } {
 	const home = join(root, "home");
 	const versions = join(root, "apps", "versions");
 	const bin = join(root, "bin");
@@ -45,6 +49,7 @@ function runInstaller(root: string, args: string[]): { exitCode: number; stdout:
 			PRIME_AGENT_VERSIONS_DIR: versions,
 			PRIME_AGENT_BIN_DIR: bin,
 			TERM: "dumb",
+			...env,
 		},
 		encoding: "utf8",
 	});
@@ -100,5 +105,52 @@ describe("compiled binary installer", () => {
 		expect(result.exitCode).not.toBe(0);
 		expect(readlinkSync(link)).toBe(oldTarget);
 		expect(readFileSync(join(root, "home", ".prime", "sentinel"), "utf8")).toBe("user data");
+	});
+
+	test("rolls back when the activated symlink fails its smoke test", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+		const link = join(root, "bin", "prime-agent");
+		const oldTarget = readlinkSync(link);
+
+		makeRelease(
+			root,
+			"2.0.0",
+			'#!/bin/sh\ncase "$0" in */bin/prime-agent) exit 1 ;; esac\nif [ "$1" = "--version" ]; then echo "prime-agent 2.0.0"; exit 0; fi\nexit 0\n',
+		);
+		const result = runInstaller(root, ["--update", "2.0.0"]);
+		expect(result.exitCode).not.toBe(0);
+		expect(result.stderr).toContain("restored the previous Prime Agent version");
+		expect(readlinkSync(link)).toBe(oldTarget);
+	});
+
+	test("rejects glibc binaries on musl Linux before downloading", () => {
+		if (process.platform !== "linux") return;
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		const tools = join(root, "tools");
+		mkdirSync(tools);
+		writeFileSync(join(tools, "ldd"), '#!/bin/sh\necho "musl libc"\n');
+		chmodSync(join(tools, "ldd"), 0o755);
+		const result = runInstaller(root, ["1.2.3"], { PATH: `${tools}:${process.env.PATH}` });
+		expect(result.exitCode).not.toBe(0);
+		expect(result.stderr).toContain("require glibc Linux");
+	});
+
+	test("warns when an older command shadows the installed binary", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		const tools = join(root, "tools");
+		mkdirSync(tools);
+		writeFileSync(join(tools, "prime-agent"), '#!/bin/sh\necho "old"\n');
+		chmodSync(join(tools, "prime-agent"), 0o755);
+
+		const result = runInstaller(root, ["1.2.3"], { PATH: `${tools}:${process.env.PATH}` });
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(result.stderr).toContain("currently shadows the new binary");
+		expect(result.stdout).toContain('export PATH="');
 	});
 });
