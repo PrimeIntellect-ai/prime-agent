@@ -11236,9 +11236,9 @@ export const MODELS = {
 			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
 			input: ["text"],
 			cost: {
-				input: 1.0274699999999999,
-				output: 2.0549399999999998,
-				cacheRead: 0.0856225,
+				input: 1.0241639999999999,
+				output: 2.0483279999999997,
+				cacheRead: 0.085347,
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
@@ -14665,11 +14665,11 @@ export const MODELS = {
 			cost: {
 				input: 2,
 				output: 6,
-				cacheRead: 0.25,
+				cacheRead: 0.19999999999999998,
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 262144,
+			maxTokens: 131072,
 		} satisfies Model<"openai-completions">,
 		"qwen/qwen3.8-27b": {
 			id: "qwen/qwen3.8-27b",

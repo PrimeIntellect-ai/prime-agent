@@ -182,6 +182,26 @@ describe("compiled binary installer", () => {
 		expect(smoke.stdout).toContain("1.2.3");
 	});
 
+	test("does not use the repaired version as its own rollback target", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+		const link = join(root, "bin", "prime-agent");
+		const target = readlinkSync(link);
+		const publicPathFailure =
+			'#!/bin/sh\ncase "$0" in */bin/prime-agent) exit 1 ;; esac\nif [ "$1" = "--version" ]; then exit 0; fi\nexit 0\n';
+		writeFileSync(target, publicPathFailure);
+		chmodSync(target, 0o755);
+		makeRelease(root, "1.2.3", publicPathFailure);
+
+		const result = runInstaller(root, ["--update", "1.2.3"]);
+		expect(result.exitCode).not.toBe(0);
+		expect(result.stderr).toContain("no healthy rollback version was available");
+		expect(() => readlinkSync(link)).toThrow();
+		expect(() => readFileSync(join(root, "apps", "versions", "v1.2.3", "package.json"))).toThrow();
+	});
+
 	test("keeps the previous symlink when an update fails its smoke test", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
 		temporaryRoots.push(root);
