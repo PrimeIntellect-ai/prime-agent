@@ -137,6 +137,9 @@ describe("remote model catalog", () => {
 
 		await refreshRemoteModelCatalog(cachePath, { fetchFn, now: 2_000 });
 		expect(fetchFn).toHaveBeenCalledOnce();
+
+		await refreshRemoteModelCatalog(cachePath, { fetchFn, now: 500 });
+		expect(fetchFn).toHaveBeenCalledTimes(2);
 	});
 
 	test("keeps a stale catalog when a refresh is materially truncated", async () => {

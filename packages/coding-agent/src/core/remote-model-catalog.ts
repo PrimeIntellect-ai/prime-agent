@@ -178,7 +178,9 @@ export async function refreshRemoteModelCatalog(
 	const now = options.now ?? Date.now();
 	const minimumModels = options.minimumModels ?? 1;
 	const cached = readCache(cachePath, url, minimumModels);
-	if (cached && now - cached.fetchedAt < MODEL_CATALOG_CACHE_TTL_MS) return cached.catalog.models;
+	if (cached && now >= cached.fetchedAt && now - cached.fetchedAt < MODEL_CATALOG_CACHE_TTL_MS) {
+		return cached.catalog.models;
+	}
 	if (isTruthyEnvFlag(process.env.PI_OFFLINE)) return cached?.catalog.models;
 
 	const key = `${cachePath}\0${url}`;
