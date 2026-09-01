@@ -4,14 +4,14 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type * as kernelBootstrap from "../src/core/kernel/bootstrap.js";
 import { ReplKernelManager } from "../src/core/kernel/index.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../src/core/orphan-process-journal.js";
+import { isTestTagEnabled } from "./test-tags.js";
 
 const ensureKernelPythonMock = vi.hoisted(() => vi.fn());
 
-vi.mock("../src/core/kernel/bootstrap.js", async (importOriginal) => {
-	const original = await importOriginal<typeof kernelBootstrap>();
+vi.mock("../src/core/kernel/bootstrap.js", () => {
+	const original = require("../src/core/kernel/bootstrap.js");
 	return { ...original, ensureKernelPython: ensureKernelPythonMock };
 });
 
@@ -70,12 +70,17 @@ describe("repl kernel parent watchdog", () => {
 
 		expect(readFileSync(envDump, "utf8")).toMatch(new RegExp(`^PRIME_AGENT_KERNEL_OWNER_PID=${process.pid}$`, "m"));
 
-		// Self-exited child: the kill signals nothing, so the record must stay active.
+		// The append-only journal starts with an active ownership record. Bun can
+		// observe the child exit soon enough to append its inactive tombstone too.
 		await vi.waitFor(() => {
 			const records = readJournalRecords(journalPath);
-			expect(records).toHaveLength(1);
+			expect(records.length).toBeGreaterThanOrEqual(1);
 			expect(records[0]?.ownerPid).toBe(process.pid);
 			expect(records[0]?.active).toBe(true);
+			expect(records.every((record) => record.pid === records[0]?.pid && record.ownerPid === process.pid)).toBe(
+				true,
+			);
+			if (records.length > 1) expect(records.at(-1)?.active).toBe(false);
 		});
 	});
 
@@ -287,9 +292,10 @@ function resolveReplPython(): string | null {
 }
 
 const replPython = resolveReplPython();
-const describeIf = replPython && process.platform !== "win32" ? describe : describe.skip;
+const describeIf =
+	replPython && process.platform !== "win32" && isTestTagEnabled("kernel-heavy") ? describe : describe.skip;
 
-describeIf("repl runtime outlives-owner watchdog (real runtime)", { tags: ["kernel-heavy"] }, () => {
+describeIf("repl runtime outlives-owner watchdog (real runtime)", () => {
 	it("runtime exits after its owner is SIGKILLed (stdin EOF watchdog)", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "prime-agent-repl-watchdog-int-"));
 		const pidFile = join(dir, "runtime.pid");

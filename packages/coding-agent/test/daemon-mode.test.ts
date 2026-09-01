@@ -1837,8 +1837,11 @@ describe("daemon mode helpers", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pa-msg-"));
 		const socketPath = join(tempDir, "d.sock");
 		let connectionCount = 0;
+		const sockets = new Set<Socket>();
 		const server: Server = createServer((socket) => {
 			connectionCount++;
+			sockets.add(socket);
+			socket.once("close", () => sockets.delete(socket));
 			socket.on("error", () => undefined);
 			socket.write(
 				`${JSON.stringify({
@@ -1893,9 +1896,14 @@ describe("daemon mode helpers", () => {
 				}
 			).sendRemoteAgentSessionMessage.bind(daemon);
 
-			await expect(sendRemoteAgentSessionMessage(makeState("source"), "remote", "continue")).rejects.toThrow(
-				"Target session has too many pending messages",
-			);
+			let rejection: unknown;
+			try {
+				await sendRemoteAgentSessionMessage(makeState("source"), "remote", "continue");
+			} catch (error) {
+				rejection = error;
+			}
+			expect(rejection).toBeInstanceOf(Error);
+			expect((rejection as Error).message).toContain("Target session has too many pending messages");
 			expect(connectionCount).toBe(1);
 		} finally {
 			if (previousSupervisorSocket === undefined) {
@@ -1903,6 +1911,7 @@ describe("daemon mode helpers", () => {
 			} else {
 				process.env[DAEMON_WORKER_SUPERVISOR_SOCKET_ENV] = previousSupervisorSocket;
 			}
+			for (const socket of sockets) socket.destroy();
 			await new Promise<void>((resolve) => server.close(() => resolve()));
 			rmSync(tempDir, { recursive: true, force: true });
 		}

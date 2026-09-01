@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -5,17 +6,15 @@ const mocks = vi.hoisted(() => ({
 	spawnSync: vi.fn(),
 }));
 
-vi.mock("node:fs", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("node:fs")>();
+const __fs = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
+vi.mock("node:fs", () => {
 	// Module-load reads (config.ts) must see the real fs; tests override per case.
-	mocks.existsSync.mockImplementation(actual.existsSync);
-	return { ...actual, existsSync: mocks.existsSync };
+	mocks.existsSync.mockImplementation(__fs.existsSync);
+	return { ...__fs, existsSync: mocks.existsSync };
 });
 
-vi.mock("child_process", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("child_process")>();
-	return { ...actual, spawnSync: mocks.spawnSync };
-});
+const __childProcess = createRequire(import.meta.url)("child_process") as typeof import("child_process");
+vi.mock("child_process", () => ({ ...__childProcess, spawnSync: mocks.spawnSync }));
 
 import { resolveKernelBashShell } from "../src/utils/shell.js";
 

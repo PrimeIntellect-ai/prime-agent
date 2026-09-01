@@ -4,7 +4,7 @@
  * Mimics the interactive-mode `message_update` handler: for each token chunk,
  * call updateContent() with the grown message and render(). Run with:
  *
- *   npx tsx test/assistant-message-streaming-bench.ts
+ *   bun test/assistant-message-streaming-bench.ts
  */
 import { performance } from "node:perf_hooks";
 import type { AssistantMessage } from "@earendil-works/pi-ai";

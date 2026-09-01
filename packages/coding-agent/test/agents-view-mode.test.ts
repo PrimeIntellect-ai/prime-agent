@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import { setKeybindings } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
@@ -29,10 +30,8 @@ const modeMocks = vi.hoisted(() => ({
 	clientRequest: vi.fn<() => Promise<unknown>>(),
 }));
 
-vi.mock("../src/config.js", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("../src/config.js")>();
-	return { ...actual, appendRotatingLog: vi.fn() };
-});
+const __configJs = createRequire(import.meta.url)("../src/config.js");
+vi.mock("../src/config.js", () => ({ ...__configJs, appendRotatingLog: vi.fn() }));
 
 vi.mock("../src/modes/daemon/daemon-client.js", () => ({
 	DaemonClient: class {
@@ -49,16 +48,14 @@ vi.mock("../src/modes/agent-connection/daemon-agent-connection.js", () => ({
 	}),
 }));
 
-vi.mock("../src/modes/interactive/interactive-mode.js", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("../src/modes/interactive/interactive-mode.js")>();
-	return {
-		...actual,
-		InteractiveMode: class {
-			run = modeMocks.interactiveRun;
-			teardownSessionUi = modeMocks.teardownSessionUi;
-		},
-	};
-});
+const __interactiveMode = createRequire(import.meta.url)("../src/modes/interactive/interactive-mode.js");
+vi.mock("../src/modes/interactive/interactive-mode.js", () => ({
+	...__interactiveMode,
+	InteractiveMode: class {
+		run = modeMocks.interactiveRun;
+		teardownSessionUi = modeMocks.teardownSessionUi;
+	},
+}));
 
 function summary(overrides: Partial<SessionSummary> = {}): SessionSummary {
 	return {

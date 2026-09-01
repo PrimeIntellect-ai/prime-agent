@@ -57,7 +57,7 @@ describe("package commands", () => {
 		originalTmpDir = process.env.TMPDIR;
 		originalExitCode = process.exitCode;
 		originalExecPath = process.execPath;
-		process.exitCode = undefined;
+		process.exitCode = 0;
 		process.env[ENV_AGENT_DIR] = agentDir;
 		process.env.TMPDIR = tempDir;
 		process.chdir(projectDir);
@@ -66,7 +66,7 @@ describe("package commands", () => {
 	afterEach(() => {
 		vi.unstubAllGlobals();
 		process.chdir(originalCwd);
-		process.exitCode = originalExitCode;
+		process.exitCode = originalExitCode ?? 0;
 		restoreEnv(ENV_AGENT_DIR, originalAgentDir);
 		restoreEnv("PI_PACKAGE_DIR", originalPiPackageDir);
 		restoreEnv("PRIME_AGENT_DOWNLOAD_BASE_URL", originalPrimeAgentDownloadBaseUrl);
@@ -113,7 +113,7 @@ describe("package commands", () => {
 			expect(stdout).toContain("Usage:");
 			expect(stdout).toContain(`${APP_NAME} package install <source> [--local]`);
 			expect(errorSpy).not.toHaveBeenCalled();
-			expect(process.exitCode).toBeUndefined();
+			expect(process.exitCode ?? 0).toBe(0);
 		} finally {
 			logSpy.mockRestore();
 			errorSpy.mockRestore();
@@ -219,7 +219,7 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 		try {
 			await expect(runSelfUpdateInstallChild(["update", "--self", "--force"])).resolves.toBeUndefined();
 
-			expect(process.exitCode).toBeUndefined();
+			expect(process.exitCode ?? 0).toBe(0);
 			expect(errorSpy).not.toHaveBeenCalled();
 			expect(fetchMock).toHaveBeenCalledOnce();
 			const recordedArgs = JSON.parse(readFileSync(recordPath, "utf-8")) as string[];
@@ -263,7 +263,7 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 		try {
 			await expect(runSelfUpdateInstallChild(["update", "--self"])).resolves.toBeUndefined();
 
-			expect(process.exitCode).toBeUndefined();
+			expect(process.exitCode ?? 0).toBe(0);
 			expect(errorSpy).not.toHaveBeenCalled();
 			expect(fetchMock).toHaveBeenCalledOnce();
 			const recordedArgs = JSON.parse(readFileSync(recordPath, "utf-8")) as string[];
@@ -312,7 +312,7 @@ else {
 		try {
 			await expect(runSelfUpdateInstallChild(["update", "--self"])).resolves.toBeUndefined();
 
-			expect(process.exitCode).toBeUndefined();
+			expect(process.exitCode ?? 0).toBe(0);
 			expect(errorSpy).not.toHaveBeenCalled();
 			const recordedCalls = JSON.parse(readFileSync(recordPath, "utf-8")) as string[][];
 			expect(recordedCalls).toEqual([
@@ -365,7 +365,7 @@ else {
 		try {
 			await expect(runSelfUpdateInstallChild(["update", "--self"])).resolves.toBeUndefined();
 
-			expect(process.exitCode).toBeUndefined();
+			expect(process.exitCode ?? 0).toBe(0);
 			expect(errorSpy).not.toHaveBeenCalled();
 			const recordedCalls = JSON.parse(readFileSync(recordPath, "utf-8")) as string[][];
 			expect(recordedCalls).toEqual([
@@ -419,7 +419,7 @@ else fs.writeFileSync(${JSON.stringify(recordPath)},JSON.stringify(args));
 		try {
 			await expect(main(["update"])).resolves.toBeUndefined();
 
-			expect(process.exitCode).toBeUndefined();
+			expect(process.exitCode ?? 0).toBe(0);
 			expect(errorSpy).not.toHaveBeenCalled();
 			expect(logSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain("is already up to date");
 			expect(existsSync(recordPath)).toBe(false);

@@ -298,7 +298,7 @@ describe("createAgentSessionFromServices", () => {
 						_createKernelHostHandlers(): Record<string, unknown>;
 					}
 				)._createKernelHostHandlers(),
-			).not.toHaveProperty("agent_message.send");
+			).not.toHaveProperty(["agent_message.send"]);
 		} finally {
 			session.dispose();
 		}
@@ -403,7 +403,7 @@ describe("createAgentSessionFromServices", () => {
 		});
 		try {
 			expect(visibleSkillNames(withMessageController)).toContain(AGENT_MESSAGE_SKILL_NAME);
-			expect(kernelHostHandlers(withMessageController)).toHaveProperty("agent_message.send");
+			expect(kernelHostHandlers(withMessageController)).toHaveProperty(["agent_message.send"]);
 		} finally {
 			withMessageController.dispose();
 		}

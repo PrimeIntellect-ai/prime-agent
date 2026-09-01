@@ -20,6 +20,8 @@ import { SnapshotTranscriptCache } from "../../../src/modes/daemon/snapshot-tran
 import { type PrivateFrame, PrivateFrameDecoder } from "../../../src/modes/session-worker/private-framing.js";
 import { seedSupervisorRoster } from "../../fixtures/roster-seed.js";
 
+import { expectPromiseRejection } from "../scheduling.js";
+
 const activeSessionId = "active-4602";
 const snapshotId = "snapshot-4602";
 
@@ -526,7 +528,7 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		const unhandled = vi.fn();
 		process.on("unhandledRejection", unhandled);
 		try {
-			const validationFailure = expect(validation).rejects.toThrow("stopped during snapshot transfer");
+			const validationFailure = expectPromiseRejection(validation, "stopped during snapshot transfer");
 			await internals.stopWorker(worker, false);
 			await validationFailure;
 			await catchup;

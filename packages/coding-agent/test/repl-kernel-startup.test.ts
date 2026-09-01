@@ -78,12 +78,16 @@ describe("ReplKernelManager startup", () => {
 		const manager = new ReplKernelManager({ python, cwd: tempDir });
 
 		try {
-			const startPromise = manager.start();
-			const expectation = expect(startPromise).rejects.toThrow(/did not become ready within 30000ms/);
+			const startResult = manager
+				.start()
+				.then(() => undefined)
+				.catch((error: Error) => error);
 			await vi.advanceTimersByTimeAsync(30_000);
 			// The failure path runs a graceful shutdown bounded by its own deadline.
 			await vi.advanceTimersByTimeAsync(5_000);
-			await expectation;
+			const startError = await startResult;
+			expect(startError).toBeInstanceOf(Error);
+			expect(startError?.message).toMatch(/did not become ready within 30000ms/);
 		} finally {
 			vi.useRealTimers();
 			errorSpy.mockRestore();

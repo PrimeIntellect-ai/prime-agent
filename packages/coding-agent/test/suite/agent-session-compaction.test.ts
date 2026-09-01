@@ -158,10 +158,10 @@ describe("AgentSession compaction characterization", () => {
 			tokensBefore: result.tokensBefore,
 			fromHook: false,
 		});
-		expect(harness.session.messages[0]).toMatchObject({
-			role: "compactionSummary",
-			summary: expect.stringContaining("model-generated summary"),
-		});
+		const compactedMessage = harness.session.messages[0];
+		expect(compactedMessage?.role).toBe("compactionSummary");
+		if (compactedMessage?.role !== "compactionSummary") throw new Error("Expected compaction summary");
+		expect(compactedMessage.summary).toContain("model-generated summary");
 		expect(harness.eventsOfType("compaction_start")).toEqual([expect.objectContaining({ reason: "manual" })]);
 		expect(harness.eventsOfType("compaction_end")).toEqual([
 			expect.objectContaining({
@@ -1336,7 +1336,6 @@ describe("AgentSession compaction characterization", () => {
 	});
 
 	it("waits for threshold-compaction autonomous continuations before finishing prompt", async () => {
-		vi.useFakeTimers();
 		const harness = await createHarness({
 			autonomous: {
 				enabled: true,
@@ -1356,7 +1355,6 @@ describe("AgentSession compaction characterization", () => {
 		const promptPromise = harness.session.prompt("make the change");
 
 		await vi.waitFor(() => expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1));
-		await vi.advanceTimersByTimeAsync(100);
 		await promptPromise;
 
 		expect(harness.session.getAutonomousStatus()).toMatchObject({
@@ -1475,12 +1473,12 @@ describe("AgentSession compaction characterization", () => {
 			internals._persistCompactionOutcome("requested", "failed", "Requested compaction failed"),
 		).not.toThrow();
 		// The live outcome message discloses that it was not saved.
-		expect(harness.session.messages.at(-1)).toMatchObject({
-			role: "custom",
-			customType: "compaction_outcome",
-			content: expect.stringContaining("could not be saved to session history"),
-			details: { reason: "requested", outcome: "failed" },
-		});
+		const liveOutcome = harness.session.messages.at(-1);
+		expect(liveOutcome?.role).toBe("custom");
+		if (liveOutcome?.role !== "custom") throw new Error("Expected custom compaction outcome");
+		expect(liveOutcome.customType).toBe("compaction_outcome");
+		expect(liveOutcome.content).toContain("could not be saved to session history");
+		expect(liveOutcome.details).toEqual({ reason: "requested", outcome: "failed" });
 		// In-memory state is fully rolled back: no outcome entry, same leaf and entries.
 		expect(harness.sessionManager.getLeafId()).toBe(persistedLeafId);
 		expect(harness.sessionManager.getEntries()).toEqual(persistedEntries);
@@ -1497,11 +1495,11 @@ describe("AgentSession compaction characterization", () => {
 		);
 		// The unpersisted disclosure survives context rebuilds (e.g. thinking toggle).
 		const rebuilt = harness.session.buildSessionContext();
-		expect(rebuilt.messages.at(-1)).toMatchObject({
-			role: "custom",
-			customType: "compaction_outcome",
-			content: expect.stringContaining("could not be saved to session history"),
-		});
+		const rebuiltOutcome = rebuilt.messages.at(-1);
+		expect(rebuiltOutcome?.role).toBe("custom");
+		if (rebuiltOutcome?.role !== "custom") throw new Error("Expected custom compaction outcome");
+		expect(rebuiltOutcome.customType).toBe("compaction_outcome");
+		expect(rebuiltOutcome.content).toContain("could not be saved to session history");
 
 		// Cross a millisecond boundary so the later turn's timestamp is strictly newer.
 		await new Promise((resolve) => setTimeout(resolve, 5));

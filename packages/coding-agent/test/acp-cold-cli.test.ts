@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
+import { isTestTagEnabled } from "./test-tags.js";
 
 /**
  * Cold real-CLI ACP coverage.
@@ -17,7 +18,6 @@ import { ENV_AGENT_DIR } from "../src/config.js";
  */
 
 const cliPath = resolve(__dirname, "../src/cli.ts");
-const tsxPath = resolve(__dirname, "../../../node_modules/tsx/dist/cli.mjs");
 
 const tempDirs: string[] = [];
 const servers: Server[] = [];
@@ -74,7 +74,6 @@ async function driveAcpTurn(baseUrl: string): Promise<AcpResult> {
 	const child = spawn(
 		process.execPath,
 		[
-			tsxPath,
 			cliPath,
 			"--mode",
 			"acp",
@@ -93,7 +92,6 @@ async function driveAcpTurn(baseUrl: string): Promise<AcpResult> {
 				...process.env,
 				[ENV_AGENT_DIR]: agentDir,
 				HOME: agentDir,
-				TSX_TSCONFIG_PATH: resolve(__dirname, "../../../tsconfig.json"),
 			},
 			stdio: ["pipe", "pipe", "pipe"],
 		},
@@ -186,10 +184,8 @@ async function driveAcpTurn(baseUrl: string): Promise<AcpResult> {
 }
 
 describe("ACP mode over a cold real CLI process", () => {
-	it("reports a provider failure instead of a silent end_turn", {
-		tags: ["kernel-heavy"],
-		timeout: 180_000,
-	}, async () => {
+	const kernelHeavyIt = isTestTagEnabled("kernel-heavy") ? it : it.skip;
+	kernelHeavyIt("reports a provider failure instead of a silent end_turn", { timeout: 180_000 }, async () => {
 		const baseUrl = await startRejectingProvider();
 		const { responses, updates } = await driveAcpTurn(baseUrl);
 
