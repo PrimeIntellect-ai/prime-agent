@@ -1,1 +1,1 @@
-- Added Bun-primary development, testing, native binary releases, and verified binary-first installation.
+- Breaking: made compiled Bun binaries the only supported Prime Agent install and update path; removed the Node/npm installer compatibility path.

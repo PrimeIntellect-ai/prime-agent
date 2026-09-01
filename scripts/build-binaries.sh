@@ -17,7 +17,6 @@
 #
 #   packages/coding-agent/release/artifacts/
 #     prime-agent-<version>-<platform>.tar.gz
-#     prime-agent-<version>.tgz (plus internal workspace tarballs)
 #     SHA256SUMS
 #     stable
 #     latest.json
@@ -118,7 +117,7 @@ bun ../../scripts/pack-prime-agent-release.mjs \
 echo ""
 echo "==> Build complete!"
 echo "Release archives:"
-ls -lh "release/artifacts/"*.tar.gz "release/artifacts/"*.tgz 2>/dev/null || true
+ls -lh "release/artifacts/"*.tar.gz
 echo ""
 echo "Metadata:"
 ls -lh "release/artifacts/SHA256SUMS" "release/artifacts/latest.json" "release/artifacts/stable" 2>/dev/null || true

@@ -13,7 +13,13 @@ afterEach(() => {
 	for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function makeRelease(root: string, version: string, executable: string, checksumIsValid = true): void {
+function makeRelease(
+	root: string,
+	version: string,
+	executable: string,
+	checksumIsValid = true,
+	omitSidecar?: string,
+): void {
 	const platform = `${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch === "arm64" ? "arm64" : "x64"}`;
 	const releaseDir = join(root, "server", "releases", `v${version}`);
 	const stage = join(root, `stage-${version}`);
@@ -21,8 +27,34 @@ function makeRelease(root: string, version: string, executable: string, checksum
 	mkdirSync(stage, { recursive: true });
 	writeFileSync(join(stage, "prime-agent"), executable);
 	chmodSync(join(stage, "prime-agent"), 0o755);
-	writeFileSync(join(stage, "package.json"), JSON.stringify({ name: "prime-agent", version }));
-	writeFileSync(join(stage, "install.sh"), "#!/bin/sh\n");
+	const requiredFiles = [
+		"package.json",
+		"README.md",
+		"CHANGELOG.md",
+		"install.sh",
+		"photon_rs_bg.wasm",
+		"prime-agent-runtime/pyproject.toml",
+		"theme/prime.json",
+		"theme/dark.json",
+		"theme/light.json",
+		"theme/theme-schema.json",
+		"export-html/template.html",
+		"export-html/template.css",
+		"export-html/template.js",
+	];
+	for (const relative of requiredFiles) {
+		mkdirSync(dirname(join(stage, relative)), { recursive: true });
+		writeFileSync(
+			join(stage, relative),
+			relative === "package.json" ? JSON.stringify({ name: "prime-agent", version }) : "fixture",
+		);
+	}
+	for (const relative of ["skills", "assets", "docs", "examples", "export-html/vendor"]) {
+		mkdirSync(join(stage, relative), { recursive: true });
+		writeFileSync(join(stage, relative, ".keep"), "fixture");
+	}
+	if (omitSidecar) rmSync(join(stage, omitSidecar), { recursive: true, force: true });
+	chmodSync(join(stage, "install.sh"), 0o755);
 	const archiveName = `prime-agent-${version}-${platform}.tar.gz`;
 	const archive = join(releaseDir, archiveName);
 	const packed = spawnSync("tar", ["-czf", archive, "-C", stage, "."], { encoding: "utf8" });
@@ -106,6 +138,21 @@ describe("compiled binary installer", () => {
 		expect(result.exitCode).not.toBe(0);
 		expect(readlinkSync(link)).toBe(oldTarget);
 		expect(readFileSync(join(root, "home", ".prime", "sentinel"), "utf8")).toBe("user data");
+	});
+
+	test("keeps the previous version when an update is missing a required sidecar", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+		const link = join(root, "bin", "prime-agent");
+		const oldTarget = readlinkSync(link);
+
+		makeRelease(root, "2.0.0", goodExecutable("2.0.0"), true, "theme/prime.json");
+		const result = runInstaller(root, ["--update", "2.0.0"]);
+		expect(result.exitCode).not.toBe(0);
+		expect(result.stderr).toContain("missing required sidecar: theme/prime.json");
+		expect(readlinkSync(link)).toBe(oldTarget);
 	});
 
 	test("rolls back when the activated symlink fails its smoke test", () => {

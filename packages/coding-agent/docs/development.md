@@ -24,7 +24,7 @@ The script can be called from any directory and preserves the caller's working d
 
 Prime Agent is the product, public CLI, release artifact, and repository name. The monorepo still retains inherited `@earendil-works/pi-*` npm workspace names, a source-package `pi` bin entry, the `pi` package manifest key, and some `PI_*` compatibility environment variables. These names are source and compatibility details, not a signal that contributors should install or develop against pi-mono.
 
-Public releases are currently versioned tarball artifacts installed by the stable and beta installer scripts. `scripts/pack-prime-agent-release.mjs` rewrites the coding-agent package name, executable, config metadata, and internal dependency URLs for that distribution. Do not document the inherited npm workspace package as the public Prime Agent install path.
+Public releases are compiled Bun binary archives installed by the stable and beta installer scripts. `scripts/pack-prime-agent-release.mjs` assembles the platform archives and metadata. Do not document a package-manager install path for the public Prime Agent CLI.
 
 ## Local Configuration
 

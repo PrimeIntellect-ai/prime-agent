@@ -57,7 +57,6 @@ prime_agent_screen_status=
 prime_agent_screen_detail=
 prime_agent_screen_question=
 prime_agent_animation_frame=0
-prime_agent_install_method="${PRIME_AGENT_INSTALL_METHOD:-auto}"
 prime_agent_binary_versions_dir="${PRIME_AGENT_VERSIONS_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/prime-agent/versions}"
 prime_agent_binary_symlink="${PRIME_AGENT_BIN_DIR:-${XDG_BIN_HOME:-$HOME/.local/bin}}/prime-agent"
 prime_agent_binary_rollback_version=
@@ -70,25 +69,16 @@ main() {
 		exit 1
 	fi
 
-	# Parse flags before positional args
-	prime_agent_install_method="${PRIME_AGENT_INSTALL_METHOD:-auto}"
 	prime_agent_is_update=0
 	_prime_agent_positional=
 	for _prime_agent_arg in "$@"; do
 		case "$_prime_agent_arg" in
 			--method=*)
-				prime_agent_install_method="${_prime_agent_arg#--method=}"
-				case "$prime_agent_install_method" in
-					binary|npm|auto) ;;
-					*)
-						printf 'error: invalid install method: %s (must be binary, npm, or auto)\n' "$prime_agent_install_method" >&2
-						exit 1
-						;;
-				esac
+				printf 'error: --method is no longer supported; Prime Agent installs as a compiled Bun binary.\n' >&2
+				exit 1
 				;;
 			--update)
 				prime_agent_is_update=1
-				prime_agent_install_method=binary
 				;;
 			*)
 				if [ -z "$_prime_agent_positional" ]; then
@@ -113,19 +103,12 @@ main() {
 		return
 	fi
 
-	# Default auto and explicit --method=binary both use compiled binary
-	if [ "$prime_agent_install_method" != npm ]; then
-		if [ "$prime_agent_screen_enabled" = 1 ]; then
-			prime_agent_screen "Installing Prime Agent" "" "" ""
-		else
-			printf '\n\033[1m  Installing Prime Agent\033[0m\n\033[2m  compiled binary\033[0m\n\n'
-		fi
-		prime_agent_binary_fresh_install "${_prime_agent_positional:-}"
-		return
+	if [ "$prime_agent_screen_enabled" = 1 ]; then
+		prime_agent_screen "Installing Prime Agent" "" "" ""
+	else
+		printf '\n\033[1m  Installing Prime Agent\033[0m\n\033[2m  compiled Bun binary\033[0m\n\n'
 	fi
-
-	# Explicit --method=npm: original npm install path
-	prime_agent_npm_install "${_prime_agent_positional:-}"
+	prime_agent_binary_fresh_install "${_prime_agent_positional:-}"
 }
 
 create_temp_dir() {
@@ -632,37 +615,6 @@ prime_agent_print_centered_line() {
 	fi
 }
 
-prime_agent_place_prompt_cursor() {
-	max_width=$((prime_agent_screen_cols - 4))
-	if [ "$max_width" -lt 1 ]; then
-		max_width=1
-	fi
-	prompt_text=$(prime_agent_fit_ascii "$(prime_agent_screen_primary_text)" "$max_width")
-	prompt_width=${#prompt_text}
-	content_height=$(prime_agent_content_height)
-	top=$(((prime_agent_screen_rows - content_height) / 2))
-	if [ "$top" -lt 0 ]; then
-		top=0
-	fi
-	prompt_index=0
-	if prime_agent_show_logo; then
-		prompt_index=$((prompt_index + 15))
-	fi
-	row=$((top + prompt_index + 1))
-	col=$(((prime_agent_screen_cols - prompt_width) / 2 + prompt_width + 2))
-	if [ "$col" -lt 1 ]; then
-		col=1
-	fi
-	if [ "$col" -gt "$prime_agent_screen_cols" ]; then
-		col="$prime_agent_screen_cols"
-	fi
-	if ( : <>/dev/tty ) 2>/dev/null; then
-		printf '%s%s%s[%s;%sH' "$prime_agent_reset" "$prime_agent_show_cursor" "$prime_agent_esc" "$row" "$col" >/dev/tty
-	else
-		printf '%s%s%s[%s;%sH' "$prime_agent_reset" "$prime_agent_show_cursor" "$prime_agent_esc" "$row" "$col" >&2
-	fi
-}
-
 prime_agent_pulse() {
 	case $((prime_agent_screen_frame % 4)) in
 		0) printf '.' ;;
@@ -741,15 +693,6 @@ prime_agent_run_quiet_with_animation() {
 	prime_agent_run_quiet_with_animation_command "$title" "$status" "$detail" pulse "$@"
 }
 
-prime_agent_run_quiet_with_animation_steps() {
-	title="$1"
-	status="$2"
-	details="$3"
-	shift 3
-
-	prime_agent_run_quiet_with_animation_command "$title" "$status" "$details" static "$@"
-}
-
 prime_agent_run_quiet_with_animation_command() {
 	title="$1"
 	status="$2"
@@ -789,122 +732,6 @@ prime_agent_run_quiet_with_animation_command() {
 	fi
 	rm -rf "$output_dir"
 	return "$command_status"
-}
-
-prime_agent_prompt_yes_no() {
-	question="$1"
-	detail="$2"
-	input_prompt="$3"
-
-	if ( : <>/dev/tty ) 2>/dev/null; then
-		prompt_input=tty
-		exec 3<>/dev/tty
-	elif [ -t 0 ]; then
-		prompt_input=stdin
-	else
-		return 2
-	fi
-
-	if [ "$prime_agent_screen_enabled" = 1 ]; then
-		prime_agent_screen "$question" "" "$detail" "$input_prompt"
-		prime_agent_place_prompt_cursor "$input_prompt"
-	else
-		printf '%s\n' "$detail"
-		if [ "$prompt_input" = tty ]; then
-			printf '%s ' "$input_prompt" >&3
-		else
-			printf '%s ' "$input_prompt" >&2
-		fi
-	fi
-
-	if [ "$prompt_input" = tty ]; then
-		if ! IFS= read -r answer <&3; then
-			answer=
-		fi
-		exec 3>&-
-	else
-		if ! IFS= read -r answer; then
-			answer=
-		fi
-	fi
-
-	case "$answer" in
-		n|N|no|NO)
-			return 1
-			;;
-	esac
-	return 0
-}
-
-start_preflight_checks() {
-	preflight_dir=$(create_temp_dir)
-	preflight_file="$preflight_dir/preflight"
-	run_preflight_checks >"$preflight_file" &
-	preflight_pid=$!
-}
-
-finish_preflight_checks() {
-	if [ "$prime_agent_screen_enabled" = 1 ]; then
-		while kill -0 "$preflight_pid" 2>/dev/null; do
-			prime_agent_screen "Checking Node.js and npm$(prime_agent_pulse)" "" "" ""
-			sleep 0.18
-		done
-	fi
-
-	if wait "$preflight_pid"; then
-		preflight_status=0
-	else
-		preflight_status=$?
-	fi
-
-	if [ "$prime_agent_screen_enabled" = 1 ]; then
-		if [ "$preflight_status" -ne 0 ]; then
-			preflight_summary=$(sed -n '1p' "$preflight_file")
-			prime_agent_screen "Node.js 20.6.0 or newer is required" "" "$preflight_summary" ""
-			sleep 0.4
-		elif [ -s "$preflight_file" ]; then
-			preflight_summary="Existing $prime_agent_cmd command found on PATH."
-			prime_agent_screen "Environment ready" "" "$preflight_summary" ""
-			sleep 0.4
-		fi
-	else
-		cat "$preflight_file"
-	fi
-	rm -rf "$preflight_dir"
-	return "$preflight_status"
-}
-
-run_preflight_checks() {
-	status=0
-	yellow="${prime_agent_esc}[33m"
-	reset="${prime_agent_esc}[0m"
-
-	if command -v node >/dev/null 2>&1; then
-		node_version=$(node --version)
-		if ! node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); process.exit(major > 20 || (major === 20 && (minor > 6 || (minor === 6 && patch >= 0))) ? 0 : 1)' >/dev/null; then
-			printf 'error: Prime Agent requires Node.js 20.6.0 or newer. Found %s.\n' "$node_version"
-			status=1
-		fi
-	else
-		printf 'error: Node.js 20.6.0 or newer is required to install Prime Agent.\n'
-		status=1
-	fi
-
-	if ! command -v npm >/dev/null 2>&1; then
-		printf 'error: npm is required to install Prime Agent.\n'
-		status=1
-	fi
-
-	if [ "$status" -ne 0 ]; then
-		printf '\n'
-	fi
-
-	if prime_agent_path=$(command -v "$prime_agent_cmd" 2>/dev/null); then
-		printf '%sExisting %s found at: %s%s\n' "$yellow" "$prime_agent_cmd" "$prime_agent_path" "$reset"
-		printf '\n'
-	fi
-
-	return "$status"
 }
 
 resolve_prime_agent_version() {
@@ -973,387 +800,6 @@ normalize_version() {
 	printf '%s' "$version"
 }
 
-install_node_npm_interactive() {
-	method=$(detect_node_install_method)
-	case "$method" in
-		homebrew) label="Homebrew" ;;
-		apt) label="apt" ;;
-		apk) label="apk" ;;
-		standalone) label="standalone Node.js" ;;
-		*)
-			method=standalone
-			label="standalone Node.js"
-			;;
-	esac
-
-	if prime_agent_prompt_yes_no \
-		"Install Node.js and npm with $label?" \
-		"Required before Prime Agent can be installed." \
-		"Install? [Y/n]"; then
-		install_node_npm "$method" "$label"
-		return
-	else
-		prompt_status=$?
-	fi
-	if [ "$prompt_status" -eq 2 ]; then
-		printf 'No terminal detected; install Node.js 20.6.0 or newer and npm, then run this installer again.\n'
-	else
-		printf '\nInstall Node.js 20.6.0 or newer and npm, then run this installer again.\n'
-	fi
-	return 1
-}
-
-detect_node_install_method() {
-	case "$(uname -s)" in
-		Darwin)
-			if command -v brew >/dev/null 2>&1; then
-				printf 'homebrew'
-			else
-				printf 'standalone'
-			fi
-			;;
-		Linux)
-			if command -v apt-cache >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1 && apt_node_candidate_is_new_enough; then
-				printf 'apt'
-			elif command -v apk >/dev/null 2>&1 && apk_node_candidate_is_new_enough; then
-				printf 'apk'
-			else
-				printf 'standalone'
-			fi
-			;;
-		*)
-			printf 'standalone'
-			;;
-	esac
-}
-
-apt_node_candidate_is_new_enough() {
-	version=$(apt-cache policy nodejs 2>/dev/null | awk '/Candidate:/ { print $2; exit }')
-	[ -n "$version" ] && [ "$version" != "(none)" ] && node_version_string_is_new_enough "$version"
-}
-
-apk_node_candidate_is_new_enough() {
-	version=$(apk search -x nodejs 2>/dev/null | awk -F- '/^nodejs-/ { print $2; exit }')
-	[ -n "$version" ] && node_version_string_is_new_enough "$version"
-}
-
-node_version_string_is_new_enough() {
-	version="${1#v}"
-	case "$version" in
-		[0-9]*) ;;
-		*) return 1 ;;
-	esac
-	version="${version%%[!0-9.]*}"
-	version_ifs=${IFS- }
-	IFS=.
-	set -- $version
-	IFS=$version_ifs
-	major="${1:-}"
-	minor="${2:-0}"
-	patch="${3:-0}"
-	case "$major" in ''|*[!0-9]*) return 1 ;; esac
-	case "$minor" in ''|*[!0-9]*) minor=0 ;; esac
-	case "$patch" in ''|*[!0-9]*) patch=0 ;; esac
-
-	[ "$major" -gt 20 ] && return 0
-	[ "$major" -eq 20 ] && [ "$minor" -gt 6 ] && return 0
-	[ "$major" -eq 20 ] && [ "$minor" -eq 6 ] && [ "$patch" -ge 0 ] && return 0
-	return 1
-}
-
-install_node_npm() {
-	method="$1"
-	label="$2"
-
-	if [ "$prime_agent_screen_enabled" != 1 ]; then
-		printf '\nInstalling Node.js and npm with %s...\n\n' "$label"
-		run_node_install_method "$method"
-	else
-		prepare_sudo_for_node_install "$method"
-		node_install_details="Using $label.
-Resolving Node.js packages.
-Downloading Node.js runtime.
-Installing npm.
-Preparing Prime Agent setup."
-		prime_agent_run_quiet_with_animation_steps \
-			"Installing Node.js and npm" \
-			"Installing Node.js and npm" \
-			"$node_install_details" \
-			run_node_install_method "$method"
-	fi
-
-	if [ "$method" = standalone ]; then
-		load_standalone_node
-		PRIME_AGENT_NODE_INSTALLED_STANDALONE=1
-	fi
-	hash -r
-	if [ "$prime_agent_screen_enabled" = 1 ]; then
-		prime_agent_screen "Node.js and npm installed" "" "Continuing Prime Agent setup." ""
-	else
-		printf '\nNode.js and npm are installed.\n\n'
-	fi
-}
-
-node_install_needs_sudo() {
-	if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-		return 1
-	fi
-
-	case "$1" in
-		apt|apk)
-			return 0
-			;;
-		standalone)
-			[ "$(uname -s)" = Linux ] || return 1
-			command -v xz >/dev/null 2>&1 && return 1
-			command -v apt-get >/dev/null 2>&1 || command -v apk >/dev/null 2>&1
-			;;
-		*)
-			return 1
-			;;
-	esac
-}
-
-prepare_sudo_for_node_install() {
-	method="$1"
-	if ! node_install_needs_sudo "$method"; then
-		return 0
-	fi
-
-	prime_agent_screen "Preparing Node.js install" "" "This may ask for your sudo password." ""
-	prime_agent_restore_terminal
-	printf '\n'
-	sudo -v
-}
-
-run_node_install_method() {
-	case "$1" in
-		homebrew) install_node_with_homebrew ;;
-		apt) install_node_with_apt ;;
-		apk) install_node_with_apk ;;
-		standalone) install_node_standalone ;;
-	esac
-}
-
-install_node_with_homebrew() {
-	if brew list node >/dev/null 2>&1; then
-		brew upgrade node
-	else
-		brew install node
-	fi
-}
-
-install_node_with_apt() {
-	print_sudo_note
-	if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-		apt-get update
-		apt-get install -y nodejs npm
-	else
-		sudo sh -c 'apt-get update && apt-get install -y nodejs npm'
-	fi
-}
-
-install_node_with_apk() {
-	print_sudo_note
-	run_with_sudo apk add --update-cache nodejs npm
-}
-
-install_node_standalone() {
-	node_platform=$(detect_node_binary_platform) || {
-		printf 'Unsupported operating system for automatic Node.js install: %s\n' "$(uname -s)"
-		return 1
-	}
-	node_arch=$(detect_node_binary_arch) || {
-		printf 'Unsupported CPU architecture for automatic Node.js install: %s\n' "$(uname -m)"
-		return 1
-	}
-	node_dist_base="https://nodejs.org/dist/latest-v22.x"
-	node_base_dir=$(node_standalone_base_dir)
-	node_tmp_dir=$(create_temp_dir)
-
-	mkdir -p "$node_tmp_dir" "$node_base_dir"
-
-	printf 'Resolving Node.js binary for %s-%s\n' "$node_platform" "$node_arch"
-	curl -fsSL "$node_dist_base/SHASUMS256.txt" -o "$node_tmp_dir/SHASUMS256.txt"
-	node_file=$(awk -v suffix="-$node_platform-$node_arch.tar.xz" '
-		index($2, "node-v") == 1 && length($2) >= length(suffix) && substr($2, length($2) - length(suffix) + 1) == suffix { print $2; exit }
-	' "$node_tmp_dir/SHASUMS256.txt")
-	if [ -z "$node_file" ]; then
-		printf 'No Node.js binary is available for %s-%s.\n' "$node_platform" "$node_arch"
-		rm -rf "$node_tmp_dir"
-		return 1
-	fi
-	case "$node_file" in
-		*/*|*\\*|*..*)
-			printf 'Unsafe Node.js archive name in checksum manifest: %s\n' "$node_file"
-			rm -rf "$node_tmp_dir"
-			return 1
-			;;
-		node-v*-"$node_platform"-"$node_arch".tar.xz) ;;
-		*)
-			printf 'Unexpected Node.js archive name in checksum manifest: %s\n' "$node_file"
-			rm -rf "$node_tmp_dir"
-			return 1
-			;;
-	esac
-
-	printf 'Downloading Node.js %s\n' "${node_file%.tar.xz}"
-	curl -fsSL "$node_dist_base/$node_file" -o "$node_tmp_dir/$node_file"
-	verify_node_standalone_download "$node_tmp_dir" "$node_file"
-	ensure_node_standalone_extract_tools "$node_platform"
-
-	node_dir="$node_base_dir/${node_file%.tar.xz}"
-	rm -rf "$node_dir"
-	printf 'Extracting Node.js to %s\n' "$node_dir"
-	tar -xf "$node_tmp_dir/$node_file" -C "$node_base_dir"
-	rm -f "$node_base_dir/current"
-	ln -s "$node_dir" "$node_base_dir/current"
-	rm -rf "$node_tmp_dir"
-	printf 'Node.js installed at %s\n' "$node_dir"
-}
-
-verify_node_standalone_download() {
-	checksum_dir="$1"
-	checksum_file_name="$2"
-	awk -v file="$checksum_file_name" '$2 == file { print }' "$checksum_dir/SHASUMS256.txt" >"$checksum_dir/SHASUMS256.selected"
-
-	if command -v sha256sum >/dev/null 2>&1; then
-		printf 'Verifying Node.js download\n'
-		(cd "$checksum_dir" && sha256sum -c SHASUMS256.selected)
-	elif command -v shasum >/dev/null 2>&1; then
-		printf 'Verifying Node.js download\n'
-		(cd "$checksum_dir" && shasum -a 256 -c SHASUMS256.selected)
-	else
-		printf 'error: sha256sum or shasum is required to verify the Node.js download.\n'
-		return 1
-	fi
-}
-
-ensure_node_standalone_extract_tools() {
-	extract_platform="$1"
-
-	if [ "$extract_platform" = linux ] && ! command -v xz >/dev/null 2>&1; then
-		printf 'Installing xz-utils for Node.js archive extraction\n'
-		print_sudo_note
-		if command -v apt-get >/dev/null 2>&1; then
-			run_with_sudo apt-get update
-			run_with_sudo apt-get install -y xz-utils
-		elif command -v apk >/dev/null 2>&1; then
-			run_with_sudo apk add --update-cache xz
-		else
-			printf 'xz is required to extract Node.js. Install xz and run this installer again.\n'
-			return 1
-		fi
-	fi
-}
-
-load_standalone_node() {
-	PRIME_AGENT_STANDALONE_NODE_BIN="$(node_standalone_base_dir)/current/bin"
-	PATH="$PRIME_AGENT_STANDALONE_NODE_BIN:$PATH"
-	export PRIME_AGENT_STANDALONE_NODE_BIN PATH
-}
-
-node_standalone_base_dir() {
-	if [ -n "${XDG_DATA_HOME:-}" ]; then
-		printf '%s/prime-agent-node' "$XDG_DATA_HOME"
-	else
-		printf '%s/.local/share/prime-agent-node' "$HOME"
-	fi
-}
-
-detect_node_binary_platform() {
-	case "$(uname -s)" in
-		Darwin) printf 'darwin' ;;
-		Linux) printf 'linux' ;;
-		*) return 1 ;;
-	esac
-}
-
-detect_node_binary_arch() {
-	case "$(uname -m)" in
-		x86_64|amd64) printf 'x64' ;;
-		arm64|aarch64) printf 'arm64' ;;
-		armv7l) printf 'armv7l' ;;
-		ppc64le) printf 'ppc64le' ;;
-		s390x) printf 's390x' ;;
-		*) return 1 ;;
-	esac
-}
-
-print_sudo_note() {
-	if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-		printf 'This may ask for your sudo password.\n\n'
-	fi
-}
-
-run_with_sudo() {
-	if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-		"$@"
-	else
-		sudo "$@"
-	fi
-}
-
-configure_standalone_node_path() {
-	if original_prime_agent_path=$(resolve_prime_agent_with_original_path); then
-		case "$original_prime_agent_path" in
-			"$PRIME_AGENT_STANDALONE_NODE_BIN/"*)
-				if [ "$prime_agent_screen_enabled" = 1 ]; then
-					prime_agent_screen "Prime Agent installed" "" "Run it with: $prime_agent_cmd" ""
-				else
-					printf '\nRun it with: %s\n' "$prime_agent_cmd"
-				fi
-				return 0
-				;;
-		esac
-		if [ "$prime_agent_screen_enabled" = 1 ]; then
-			prime_agent_screen "Prime Agent installed" "" "PATH update needed for $prime_agent_cmd." ""
-		else
-			printf '%s was installed, but your shell is not using that install yet.\n' "$prime_agent_cmd"
-			printf 'Your shell currently resolves %s to: %s\n' "$prime_agent_cmd" "$original_prime_agent_path"
-		fi
-	else
-		if [ "$prime_agent_screen_enabled" = 1 ]; then
-			prime_agent_screen "Prime Agent installed" "" "PATH update needed for $prime_agent_cmd." ""
-		else
-			printf '%s was installed, but your shell is not using that install yet.\n' "$prime_agent_cmd"
-		fi
-	fi
-
-	profile=$(detect_shell_profile) || {
-		if [ "$prime_agent_screen_enabled" = 1 ]; then
-			prime_agent_restore_terminal
-			printf '\n'
-		fi
-		print_standalone_path_manual_instructions
-		return 0
-	}
-
-	if shell_profile_has_standalone_node_path "$profile"; then
-		if [ "$prime_agent_screen_enabled" = 1 ]; then
-			prime_agent_screen "Prime Agent installed" "" "Run: $(prime_agent_source_profile_command "$profile")" ""
-		else
-			printf '%s already contains %s.\n' "$profile" "$PRIME_AGENT_STANDALONE_NODE_BIN"
-			printf 'Restart your shell or run: %s\n' "$(prime_agent_source_profile_command "$profile")"
-		fi
-		return 0
-	fi
-
-	prompt_add_standalone_node_path "$profile"
-}
-
-resolve_prime_agent_with_original_path() {
-	saved_path=$PATH
-	PATH=$prime_agent_original_path
-	if command -v "$prime_agent_cmd" 2>/dev/null; then
-		status=0
-	else
-		status=$?
-	fi
-	PATH=$saved_path
-	return "$status"
-}
-
 detect_shell_profile() {
 	if [ -n "${PRIME_AGENT_SHELL_PROFILE:-}" ]; then
 		printf '%s' "$PRIME_AGENT_SHELL_PROFILE"
@@ -1384,119 +830,6 @@ detect_shell_profile() {
 	esac
 }
 
-shell_profile_has_standalone_node_path() {
-	profile="$1"
-	[ -f "$profile" ] && grep -F "$PRIME_AGENT_STANDALONE_NODE_BIN" "$profile" >/dev/null 2>&1
-}
-
-prompt_add_standalone_node_path() {
-	profile="$1"
-	path_line=$(standalone_node_path_line)
-
-	if ! prime_agent_prompt_yes_no \
-		"Add standalone Node.js to your PATH?" \
-		"Updates $profile so future shells can run $prime_agent_cmd." \
-		"Update PATH? [Y/n]"; then
-		if [ "$prime_agent_screen_enabled" = 1 ]; then
-			prime_agent_restore_terminal
-			printf '\n'
-		fi
-		print_standalone_path_manual_instructions
-		return 0
-	fi
-
-	mkdir -p "$(dirname "$profile")"
-	{
-		printf '\n# Prime Agent standalone Node.js\n'
-		printf '%s\n' "$path_line"
-	} >>"$profile"
-	if [ "$prime_agent_screen_enabled" = 1 ]; then
-		prime_agent_screen "Prime Agent installed" "" "Run: $(prime_agent_source_profile_command "$profile")" ""
-	else
-		printf 'Added %s to %s.\n' "$PRIME_AGENT_STANDALONE_NODE_BIN" "$profile"
-		printf 'Restart your shell or run: %s\n' "$(prime_agent_source_profile_command "$profile")"
-	fi
-}
-
-print_standalone_path_manual_instructions() {
-	printf 'Add this to your shell profile to use %s from new shells:\n\n' "$prime_agent_cmd"
-	printf '  %s\n' "$(standalone_node_path_line)"
-	printf '\nThen restart your shell and run: %s\n' "$prime_agent_cmd"
-}
-
-standalone_node_path_line() {
-	printf 'export PATH="%s:$PATH"' "$PRIME_AGENT_STANDALONE_NODE_BIN"
-}
-
-prime_agent_shell_quote() {
-	quoted=$(printf '%s' "$1" | sed "s/'/'\\\\''/g")
-	printf "'%s'" "$quoted"
-}
-
-prime_agent_source_profile_command() {
-	printf '. %s && %s' "$(prime_agent_shell_quote "$1")" "$prime_agent_cmd"
-}
-
-download_prime_agent_package() {
-	version="$1"
-	tarball_url="$2"
-	tarball_path="$3"
-	download_dir=$(dirname "$tarball_path")
-	tarball_name=$(basename "$tarball_path")
-	checksums_url="$prime_agent_base_url/releases/v$version/SHA256SUMS"
-	checksums_path="$download_dir/SHA256SUMS"
-
-	if ! command -v curl >/dev/null 2>&1; then
-		printf 'error: curl is required to download Prime Agent.\n' >&2
-		exit 1
-	fi
-
-	prime_agent_run_quiet_with_animation \
-		"Downloading checksums" \
-		"Downloading release checksums" \
-		"Prime Agent v$version" \
-		curl -fsSL "$checksums_url" -o "$checksums_path"
-
-	prime_agent_run_quiet_with_animation \
-		"Downloading Prime Agent" \
-		"Downloading Prime Agent v$version" \
-		"Fetching the verified package." \
-		curl -fsSL "$tarball_url" -o "$tarball_path"
-
-	verify_prime_agent_package_checksum "$checksums_path" "$tarball_path"
-}
-
-verify_prime_agent_package_checksum() {
-	checksums_path="$1"
-	tarball_path="$2"
-	checksum_dir=$(dirname "$tarball_path")
-	tarball_name=$(basename "$tarball_path")
-	selected_checksums_path="$checksum_dir/SHA256SUMS.selected"
-
-	if ! awk -v file="$tarball_name" '$2 == file { print; found = 1; exit } END { if (!found) exit 1 }' \
-		"$checksums_path" >"$selected_checksums_path"; then
-		printf 'error: checksum for %s was not found in %s\n' "$tarball_name" "$checksums_path" >&2
-		exit 1
-	fi
-
-	if command -v sha256sum >/dev/null 2>&1; then
-		prime_agent_run_quiet_with_animation \
-			"Verifying download" \
-			"Verifying Prime Agent download" \
-			"Checking SHA-256." \
-			prime_agent_run_checksum_check "$checksum_dir" "$(basename "$selected_checksums_path")" sha256sum
-	elif command -v shasum >/dev/null 2>&1; then
-		prime_agent_run_quiet_with_animation \
-			"Verifying download" \
-			"Verifying Prime Agent download" \
-			"Checking SHA-256." \
-			prime_agent_run_checksum_check "$checksum_dir" "$(basename "$selected_checksums_path")" shasum
-	else
-		printf 'error: sha256sum or shasum is required to verify the Prime Agent download.\n' >&2
-		exit 1
-	fi
-}
-
 prime_agent_run_checksum_check() {
 	checksum_dir="$1"
 	selected_checksums_name="$2"
@@ -1511,111 +844,6 @@ prime_agent_run_checksum_check() {
 	esac
 }
 
-confirm_install() {
-	version="$1"
-	tarball_url="$2"
-
-	if prime_agent_prompt_yes_no \
-		"Install Prime Agent v$version globally with npm?" \
-		"Downloads the verified release and runs npm install -g." \
-		"Install? [Y/n]"; then
-		return 0
-	else
-		prompt_status=$?
-	fi
-
-	if [ "$prompt_status" -eq 2 ]; then
-		printf 'This will download, verify, and install:\n\n  %s\n\n' "$tarball_url"
-		printf 'No terminal detected; continuing without confirmation.\n'
-		return 0
-	fi
-
-	if [ "$prime_agent_screen_enabled" = 1 ]; then
-		prime_agent_screen "Installation cancelled" "" "No changes were made." ""
-		exit 0
-	fi
-	printf '\nInstallation cancelled.\n'
-	exit 0
-}
-
-confirm_kernel_runtime_setup() {
-	case "${PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL:-}" in
-		1)
-			prime_agent_bootstrap_kernel_on_install=1
-			return
-			;;
-		0)
-			prime_agent_bootstrap_kernel_on_install=0
-			return
-			;;
-	esac
-
-	if prime_agent_prompt_yes_no \
-		"Prepare Python runtime now?" \
-		"Installs uv, Python 3.11, and the Prime Agent runtime." \
-		"Prepare? [Y/n]"; then
-		prime_agent_bootstrap_kernel_on_install=1
-		return
-	else
-		prompt_status=$?
-	fi
-
-	if [ "$prompt_status" -eq 2 ]; then
-		printf 'No terminal detected; preparing the Python runtime during install.\n'
-		prime_agent_bootstrap_kernel_on_install=1
-		return
-	fi
-
-	prime_agent_bootstrap_kernel_on_install=0
-	if [ "$prime_agent_screen_enabled" = 1 ]; then
-		prime_agent_screen "Python setup skipped" "" "The runtime can be prepared on first ipython use." ""
-		sleep 0.4
-	else
-		printf '\nSkipping Python runtime setup.\n'
-	fi
-}
-
-install_prime_agent_package() {
-	tarball_path="$1"
-	if [ "$prime_agent_bootstrap_kernel_on_install" = 1 ]; then
-		npm_install_details="Preparing global install.
-Linking command binaries.
-Installing runtime packages.
-Preloading search tools.
-Preparing Python kernel.
-Finalizing npm install."
-		prime_agent_run_quiet_with_animation_steps \
-			"Installing Prime Agent" \
-			"Installing Prime Agent" \
-			"$npm_install_details" \
-			env PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1 PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=1 PRIME_AGENT_INSTALL_UV=1 npm install -g --no-fund --no-audit --loglevel=error --progress=false "$tarball_path"
-	else
-		npm_install_details="Preparing global install.
-Linking command binaries.
-Installing runtime packages.
-Preloading search tools.
-Finalizing npm install."
-		prime_agent_run_quiet_with_animation_steps \
-			"Installing Prime Agent" \
-			"Installing Prime Agent" \
-			"$npm_install_details" \
-			env PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1 npm install -g --no-fund --no-audit --loglevel=error --progress=false "$tarball_path"
-	fi
-}
-
-
-
-# =============================================================================
-# Binary Install Path (Bun-compiled artifact, no Node/npm needed)
-# =============================================================================
-
-# Architecture: install each release into a versioned directory
-#   ${XDG_DATA_HOME:-$HOME/.local/share}/prime-agent/versions/v<version>/
-# and point a stable symlink at it from ~/.local/bin/prime-agent.
-# On update: download to a fresh version dir, smoke-test the binary there,
-# then atomically switch the symlink. Rollback by restoring the old symlink.
-# Never copy runtime sidecars into user config dirs (~/.prime/*).
-
 prime_agent_detect_binary_platform() {
 	_os=$(uname -s)
 	_arch=$(uname -m)
@@ -1629,7 +857,7 @@ prime_agent_detect_binary_platform() {
 			;;
 		Linux)
 			if [ -f /etc/alpine-release ] || { command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; }; then
-				printf 'error: Prime Agent binaries require glibc Linux; use --method=npm on musl systems.\n' >&2
+				printf 'error: Prime Agent compiled binaries require glibc Linux and do not support musl systems.\n' >&2
 				return 1
 			fi
 			case "$_arch" in
@@ -1660,6 +888,31 @@ prime_agent_binary_smoke_binary() {
 	if ! "$_binary" --version >/dev/null 2>&1; then
 		return 1
 	fi
+}
+
+prime_agent_binary_validate_layout() {
+	_root="$1"
+	_binary="$2"
+	if ! prime_agent_binary_smoke_binary "$_binary"; then
+		printf 'error: the downloaded Prime Agent binary did not run correctly.\n' >&2
+		return 1
+	fi
+	for _relative_path in \
+		package.json README.md CHANGELOG.md install.sh photon_rs_bg.wasm \
+		prime-agent-runtime/pyproject.toml \
+		theme/prime.json theme/dark.json theme/light.json theme/theme-schema.json \
+		export-html/template.html export-html/template.css export-html/template.js; do
+		if [ ! -f "$_root/$_relative_path" ]; then
+			printf 'error: release archive is missing required sidecar: %s\n' "$_relative_path" >&2
+			return 1
+		fi
+	done
+	for _relative_dir in skills assets docs examples export-html/vendor; do
+		if [ ! -d "$_root/$_relative_dir" ]; then
+			printf 'error: release archive is missing required sidecar directory: %s\n' "$_relative_dir" >&2
+			return 1
+		fi
+	done
 }
 
 prime_agent_binary_atomic_symlink() {
@@ -1702,7 +955,7 @@ prime_agent_binary_fresh_install() {
 	if [ ! -x "$_existing_binary" ] && [ -x "$_version_dir/pi" ]; then
 		_existing_binary="$_version_dir/pi"
 	fi
-	if [ -x "$_existing_binary" ] && prime_agent_binary_smoke_binary "$_existing_binary"; then
+	if [ -x "$_existing_binary" ] && prime_agent_binary_validate_layout "$_version_dir" "$_existing_binary"; then
 		prime_agent_binary_atomic_symlink "$_existing_binary" "$prime_agent_binary_symlink"
 		prime_agent_configure_binary_path "$_version"
 		return
@@ -1754,19 +1007,17 @@ prime_agent_binary_fresh_install() {
 		chmod +x "$_version_dir/install.sh" 2>/dev/null || true
 	fi
 
-	if ! "$_binary_path" --version >/dev/null 2>&1; then
-		printf 'error: the downloaded binary did not run correctly.\n' >&2
-		rm -rf "$_version_dir" "$_download_dir"
-		prime_agent_download_dir=
-		exit 1
-	fi
-
 	# If the binary was inside a wrapper dir, move contents up to version_dir
 	_binary_dir=$(dirname "$_binary_path")
 	if [ "$_binary_dir" != "$_version_dir" ]; then
 		cp -R "$_binary_dir/." "$_version_dir/"
 		rm -rf "$_binary_dir"
 		_binary_path="$_version_dir/$(basename "$_binary_path")"
+	fi
+	if ! prime_agent_binary_validate_layout "$_version_dir" "$_binary_path"; then
+		rm -rf "$_version_dir" "$_download_dir"
+		prime_agent_download_dir=
+		exit 1
 	fi
 
 	# Create the stable symlink
@@ -1869,25 +1120,17 @@ prime_agent_binary_update() {
 		chmod +x "$_version_dir/install.sh" 2>/dev/null || true
 	fi
 
-	# Smoke-test the new binary BEFORE switching the symlink
-	if ! "$_binary_path" --version >/dev/null 2>&1; then
-		# New binary is bad: remove it, keep old symlink
-		rm -rf "$_version_dir" "$_download_dir"
-		prime_agent_download_dir=
-		if [ "$prime_agent_screen_enabled" = 1 ]; then
-			prime_agent_screen "Update failed" "" "New binary did not run correctly." ""
-		else
-			printf '\nUpdate failed: the new binary did not run correctly.\n'
-		fi
-		exit 1
-	fi
-
 	# If the binary was inside a wrapper dir, move contents up
 	_binary_dir=$(dirname "$_binary_path")
 	if [ "$_binary_dir" != "$_version_dir" ]; then
 		cp -R "$_binary_dir/." "$_version_dir/"
 		rm -rf "$_binary_dir"
 		_binary_path="$_version_dir/$(basename "$_binary_path")"
+	fi
+	if ! prime_agent_binary_validate_layout "$_version_dir" "$_binary_path"; then
+		rm -rf "$_version_dir" "$_download_dir"
+		prime_agent_download_dir=
+		exit 1
 	fi
 
 	# Remember old version for rollback
@@ -2008,74 +1251,5 @@ prime_agent_configure_binary_path() {
 # NPM Install Path (extracted from main)
 # =============================================================================
 
-prime_agent_npm_install() {
-	start_preflight_checks
-
-	if finish_preflight_checks; then
-		check_status=0
-	else
-		check_status=$?
-	fi
-
-	if [ "$check_status" -ne 0 ]; then
-		if ! install_node_npm_interactive; then
-			exit "$check_status"
-		fi
-
-		start_preflight_checks
-		if finish_preflight_checks; then
-			check_status=0
-		else
-			check_status=$?
-		fi
-
-		if [ "$check_status" -ne 0 ]; then
-			exit "$check_status"
-		fi
-	fi
-
-	version="$(resolve_prime_agent_version "$@")"
-	tarball_name="$prime_agent_package-$version.tgz"
-	tarball_url="$prime_agent_base_url/releases/v$version/$tarball_name"
-
-	confirm_install "$version" "$tarball_url"
-	confirm_kernel_runtime_setup
-
-	download_dir=$(create_temp_dir)
-	prime_agent_download_dir="$download_dir"
-	tarball_path="$download_dir/$tarball_name"
-
-	download_prime_agent_package "$version" "$tarball_url" "$tarball_path"
-	install_prime_agent_package "$tarball_path"
-	rm -rf "$download_dir"
-	prime_agent_download_dir=
-
-	if [ "${PRIME_AGENT_NODE_INSTALLED_STANDALONE:-0}" = 1 ]; then
-		prime_agent_screen "Prime Agent installed" "" "Checking your shell PATH." ""
-		configure_standalone_node_path
-	elif command -v "$prime_agent_cmd" >/dev/null 2>&1; then
-		if [ "$prime_agent_screen_enabled" = 1 ]; then
-			prime_agent_screen "Prime Agent installed" "" "Run it with: $prime_agent_cmd" ""
-		else
-			printf '\nPrime Agent was installed successfully.\n'
-			printf '\nRun it with: %s\n' "$prime_agent_cmd"
-		fi
-	else
-		if [ "$prime_agent_screen_enabled" = 1 ]; then
-			prime_agent_screen "Prime Agent installed" "" "PATH update needed for $prime_agent_cmd." ""
-			prime_agent_restore_terminal
-		else
-			printf '\nPrime Agent was installed successfully.\n'
-		fi
-		cat <<EOF
-The $prime_agent_cmd command was installed, but it is not on your PATH yet.
-Check npm's global bin directory with:
-
-  npm bin -g
-
-Then add that directory to your shell PATH.
-EOF
-	fi
-}
 
 main "$@"

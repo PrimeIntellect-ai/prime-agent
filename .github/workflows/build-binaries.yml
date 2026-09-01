@@ -344,7 +344,7 @@ jobs:
           test -n "$R2_BUCKET"
           test -n "$R2_ENDPOINT_URL"
 
-          for artifact in "$PRODUCTION_DIR"/*.tar.gz "$PRODUCTION_DIR"/*.tgz; do
+          for artifact in "$PRODUCTION_DIR"/*.tar.gz; do
             test -f "$artifact" || continue
             aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
@@ -411,7 +411,7 @@ jobs:
           test -n "$R2_BUCKET"
           test -n "$R2_ENDPOINT_URL"
 
-          for artifact in "$BETA_DIR"/*.tar.gz "$BETA_DIR"/*.tgz; do
+          for artifact in "$BETA_DIR"/*.tar.gz; do
             test -f "$artifact" || continue
             aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
