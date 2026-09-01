@@ -3776,7 +3776,12 @@ export class AgentDaemon {
 		}
 	}
 
-	private async withSessionProfileTransition<T>(activeSessionId: string, action: () => Promise<T>): Promise<T> {
+	private async withSessionProfileTransition<T>(
+		state: ActiveSessionState,
+		action: () => Promise<T>,
+		allowClosing = false,
+	): Promise<T> {
+		const { activeSessionId } = state;
 		const previousTransition = this.sessionProfileTransitions.get(activeSessionId) ?? Promise.resolve();
 		let releaseTransition!: () => void;
 		const transition = new Promise<void>((resolve) => {
@@ -3785,6 +3790,12 @@ export class AgentDaemon {
 		this.sessionProfileTransitions.set(activeSessionId, transition);
 		await previousTransition;
 		try {
+			if (
+				!allowClosing &&
+				(this.sessions.get(activeSessionId) !== state || this.closingSessions.has(activeSessionId))
+			) {
+				throw new BoundSessionUnavailableError(`Active session ${activeSessionId} is closing`);
+			}
 			return await action();
 		} finally {
 			releaseTransition();
@@ -4777,7 +4788,7 @@ export class AgentDaemon {
 
 			case "set_model": {
 				const state = this.getSessionState(command.activeSessionId);
-				return this.withSessionProfileTransition(state.activeSessionId, async () => {
+				return this.withSessionProfileTransition(state, async () => {
 					const session = state.runtime.session;
 					const availableModels = await session.modelRegistry.refreshAvailableModels();
 					const model = availableModels.find((candidate) => {
@@ -4796,7 +4807,7 @@ export class AgentDaemon {
 			case "set_profile_if_idle": {
 				const state = this.getSessionState(command.activeSessionId);
 				const session = state.runtime.session;
-				return this.withSessionProfileTransition(state.activeSessionId, async () => {
+				return this.withSessionProfileTransition(state, async () => {
 					const sessionInputPause = session.acquireSessionInputPause();
 					const queuedWorkPause = session.acquireQueuedWorkPause();
 					try {
@@ -4866,7 +4877,7 @@ export class AgentDaemon {
 
 			case "cycle_model": {
 				const state = this.getSessionState(command.activeSessionId);
-				return this.withSessionProfileTransition(state.activeSessionId, async () => {
+				return this.withSessionProfileTransition(state, async () => {
 					const session = state.runtime.session;
 					const result = await session.cycleModel(command.direction, {
 						waitForExtensions: !(session.isStreaming || session.isCompacting),
@@ -4877,7 +4888,7 @@ export class AgentDaemon {
 
 			case "set_scoped_models": {
 				const state = this.getSessionState(command.activeSessionId);
-				return this.withSessionProfileTransition(state.activeSessionId, async () => {
+				return this.withSessionProfileTransition(state, async () => {
 					state.runtime.session.setScopedModels(command.scopedModels);
 					return success(command.id, "set_scoped_models");
 				});
@@ -4885,7 +4896,7 @@ export class AgentDaemon {
 
 			case "set_thinking_level": {
 				const state = this.getSessionState(command.activeSessionId);
-				return this.withSessionProfileTransition(state.activeSessionId, async () => {
+				return this.withSessionProfileTransition(state, async () => {
 					state.runtime.session.setThinkingLevel(command.level);
 					return success(command.id, "set_thinking_level");
 				});
@@ -4893,7 +4904,7 @@ export class AgentDaemon {
 
 			case "set_service_tier": {
 				const state = this.getSessionState(command.activeSessionId);
-				return this.withSessionProfileTransition(state.activeSessionId, async () => {
+				return this.withSessionProfileTransition(state, async () => {
 					state.runtime.session.setServiceTier(command.serviceTier);
 					return success(command.id, "set_service_tier");
 				});
@@ -4901,7 +4912,7 @@ export class AgentDaemon {
 
 			case "cycle_thinking_level": {
 				const state = this.getSessionState(command.activeSessionId);
-				return this.withSessionProfileTransition(state.activeSessionId, async () => {
+				return this.withSessionProfileTransition(state, async () => {
 					const level = state.runtime.session.cycleThinkingLevel();
 					return success(command.id, "cycle_thinking_level", level ? { level } : null);
 				});
@@ -6492,8 +6503,10 @@ export class AgentDaemon {
 			return;
 		}
 		const descendants = new Set<ActiveSessionState>();
-		const closePromise = Promise.resolve().then(() =>
-			this.closeSessionOnce(state, reason, waitForAbort, cascadeChildren, descendants),
+		const closePromise = this.withSessionProfileTransition(
+			state,
+			() => this.closeSessionOnce(state, reason, waitForAbort, cascadeChildren, descendants),
+			true,
 		);
 		const close = { promise: closePromise, reason, descendants };
 		this.closingSessions.set(state.activeSessionId, close);

@@ -9199,6 +9199,96 @@ describe("daemon mode helpers", () => {
 		expect(session.setModel).toHaveBeenCalledOnce();
 	});
 
+	it("rejects a conditional profile change after a concurrent kill wins the lifecycle fence", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp/project" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const { state, session } = makeConditionalProfileState("active-1");
+		let markCloseStarted!: () => void;
+		let releaseClose!: () => void;
+		const closeStarted = new Promise<void>((resolve) => {
+			markCloseStarted = resolve;
+		});
+		const closeBlocked = new Promise<void>((resolve) => {
+			releaseClose = resolve;
+		});
+		const closeSessionOnce = vi.fn(async () => {
+			markCloseStarted();
+			await closeBlocked;
+			internals.sessions.delete(state.activeSessionId);
+		});
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			closeSessionOnce: typeof closeSessionOnce;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		internals.closeSessionOnce = closeSessionOnce;
+
+		const killing = internals.handleCommand(makeClient("killer", state.activeSessionId), {
+			id: "kill-1",
+			type: "kill",
+			activeSessionId: state.activeSessionId,
+		});
+		await closeStarted;
+		const transition = internals.handleCommand(
+			makeClient("profile-client", state.activeSessionId),
+			conditionalProfileCommand(state.activeSessionId),
+		);
+		releaseClose();
+
+		await expect(killing).resolves.toMatchObject({ success: true, command: "kill" });
+		await expect(transition).rejects.toThrow(/session.*(closing|initializing)/i);
+		expect(session.modelRegistry.refreshAvailableModels).not.toHaveBeenCalled();
+		expect(session.setModel).not.toHaveBeenCalled();
+	});
+
+	it("waits to close a session until its conditional profile transition commits", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp/project" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		const { state, session, targetModel } = makeConditionalProfileState("active-1");
+		let releaseCatalog!: (models: Model<Api>[]) => void;
+		const catalog = new Promise<Model<Api>[]>((resolve) => {
+			releaseCatalog = resolve;
+		});
+		session.modelRegistry.refreshAvailableModels.mockImplementationOnce(() => catalog);
+		const closeSessionOnce = vi.fn(async () => {
+			internals.sessions.delete(state.activeSessionId);
+		});
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			closeSessionOnce: typeof closeSessionOnce;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(state.activeSessionId, state);
+		internals.closeSessionOnce = closeSessionOnce;
+
+		const transition = internals.handleCommand(
+			makeClient("profile-client", state.activeSessionId),
+			conditionalProfileCommand(state.activeSessionId),
+		);
+		await vi.waitFor(() => expect(session.modelRegistry.refreshAvailableModels).toHaveBeenCalledOnce());
+		const killing = internals.handleCommand(makeClient("killer", state.activeSessionId), {
+			id: "kill-1",
+			type: "kill",
+			activeSessionId: state.activeSessionId,
+		});
+		await Promise.resolve();
+		expect(closeSessionOnce).not.toHaveBeenCalled();
+
+		releaseCatalog([session.model, targetModel]);
+		await expect(transition).resolves.toMatchObject({ success: true, data: { status: "applied" } });
+		await expect(killing).resolves.toMatchObject({ success: true, command: "kill" });
+		expect(session.setModel.mock.invocationCallOrder[0]).toBeLessThan(closeSessionOnce.mock.invocationCallOrder[0]);
+	});
+
 	it("serializes a legacy thinking mutation behind a conditional profile change", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp/project" },
