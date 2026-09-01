@@ -59,7 +59,11 @@ export function mergeRemoteModelCatalog(
 	const merged: Model<Api>[] = [];
 	for (const remote of remoteModels) {
 		const key = modelKey(remote.provider, remote.id);
-		const template = exact.get(key) ?? transports.get(`${remote.provider}\0${remote.api}\0${remote.baseUrl}`);
+		const exactTemplate = exact.get(key);
+		const template =
+			exactTemplate && exactTemplate.api === remote.api && exactTemplate.baseUrl === remote.baseUrl
+				? exactTemplate
+				: transports.get(`${remote.provider}\0${remote.api}\0${remote.baseUrl}`);
 		if (template) merged.push(cloneTransport(template, remote));
 	}
 	return merged.length > 0 ? merged : bundledModels.map((model) => structuredClone(model));

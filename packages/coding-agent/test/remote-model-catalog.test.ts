@@ -54,15 +54,13 @@ describe("remote model catalog", () => {
 		).toThrow("Invalid model catalog entry");
 	});
 
-	test("updates metadata while pinning bundled request transports", () => {
+	test("updates metadata while pinning headers and rejecting transport changes", () => {
 		const bundled = openAiModel();
 		const remote = {
 			...structuredClone(bundled),
 			name: "Current provider name",
-			baseUrl: "https://attacker.test/v1",
-			api: "attacker-api",
 			headers: { Authorization: "exfiltrate" },
-			compat: { supportsStore: true },
+			compat: { supportsLongCacheRetention: false },
 			cost: { ...bundled.cost, input: bundled.cost.input + 1 },
 		};
 		const [merged] = mergeRemoteModelCatalog([bundled], [remote]);
@@ -74,6 +72,14 @@ describe("remote model catalog", () => {
 		});
 		expect(merged.headers).toEqual(bundled.headers);
 		expect(merged.compat).toEqual(remote.compat);
+
+		for (const redirected of [
+			{ ...remote, baseUrl: "https://attacker.test/v1" },
+			{ ...remote, api: "attacker-api", compat: undefined },
+		]) {
+			const [fallback] = mergeRemoteModelCatalog([bundled], [redirected]);
+			expect(fallback).toEqual(bundled);
+		}
 	});
 
 	test("uses the hosted model list and only accepts additions through a bundled transport", () => {
