@@ -74,13 +74,14 @@ Each task writes `result.json`, separate public/id-private/private grade logs,
 the final workspace, transcript, and durable Prime trace. Aggregate
 `report.json` and `report.md` are rewritten after every task.
 
-The runner derives two additional safety budgets from the official task
-timeout. A single model-authored IPython cell is interrupted and its kernel is
-retired after at most 120 seconds (60 seconds for a 30-second task). Each
-official grading suite is bounded by 30–120 seconds and all three suites share
-a maximum three-minute budget. A pathological implementation therefore fails
-closed instead of pinning the agent or grader indefinitely. These bounds do
-not count as a passing evaluation and do not weaken AVO's completion gate.
+The exported `SPECBENCH_TIMEOUT_DEFAULTS` is the single source for the runner's
+additional safety budgets. A single model-authored IPython cell is interrupted
+and its kernel is retired after at most 120 seconds (60 seconds for a 30-second
+task). Each official grading suite is bounded by 30–120 seconds, capped by the
+time remaining on one monotonic three-minute deadline shared by all sequential
+suites. A pathological implementation therefore fails closed instead of
+pinning the agent or grader indefinitely. These bounds do not count as a
+passing evaluation and do not weaken AVO's completion gate.
 
 AVO's tool-loop watchdog first intervenes after six consecutive tool batches
 without a host pass, obligation coverage, tested critical assumption,
