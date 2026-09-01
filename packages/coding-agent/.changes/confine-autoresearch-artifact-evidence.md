@@ -1,0 +1,1 @@
+- Confined autoresearch artifact evidence and receipts strictly to the experiment workspace, rejecting absolute, traversal, and symlink-escape paths ([#17](https://github.com/lewbei/prime-agent/issues/17)).
