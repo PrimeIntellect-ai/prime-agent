@@ -3880,9 +3880,8 @@ export class AgentSession {
 		if (this._disposed) {
 			return this._disposeCallbacksPromise;
 		}
-		// Concurrent callers await the same in-flight teardown (started with the
-		// first caller's options) so none resolves before the kernel snapshot
-		// flush finishes.
+		// Concurrent callers await the same in-flight teardown so none resolves before
+		// the kernel snapshot flush finishes.
 		if (this._disposeAsyncPromise) {
 			return this._disposeAsyncPromise;
 		}

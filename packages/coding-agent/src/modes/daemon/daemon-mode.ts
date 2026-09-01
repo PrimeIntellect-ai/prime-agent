@@ -73,6 +73,7 @@ import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionRuntime,
 } from "../../core/agent-session-runtime.js";
+import { flushAllPendingAgentTraceUploads } from "../../core/agent-traces.js";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -2372,8 +2373,6 @@ export class AgentDaemon {
 						candidate.runtime.metadata.rlmChildId === options.id &&
 						candidate.runtime.session === runtime.session,
 				);
-				// A cancelled release is a deletion: the artifact sweep below removes
-				// the kernel snapshot right away, so skip writing it.
 				const disposal = status === "cancelled" ? { kernelSnapshot: false } : undefined;
 				try {
 					if (state) {
@@ -2443,8 +2442,6 @@ export class AgentDaemon {
 				try {
 					try {
 						if (state) {
-							// The artifact sweep below deletes the kernel snapshot
-							// milliseconds after it would be written: skip it.
 							await this.closeSession(state, "killed", false, true, undefined, { kernelSnapshot: false });
 						} else {
 							await session?.disposeAsync({ kernelSnapshot: false });
@@ -3672,10 +3669,10 @@ export class AgentDaemon {
 				}
 				case "worker_archive_and_shutdown": {
 					// Close sessions first so direct peers read session_closed "killed", not a daemon shutdown.
-					// The daemon exits right after, so the trace flush must complete now.
 					for (const state of [...this.sessions.values()]) {
-						await this.closeSession(state, "killed", true, true, undefined, { traceFlush: "await" });
+						await this.closeSession(state, "killed");
 					}
+					await flushAllPendingAgentTraceUploads();
 					this.fencePeerTransports();
 					this.writeWorkerSuccess(client, command);
 					setImmediate(() => void this.shutdown(0));
@@ -6253,23 +6250,13 @@ export class AgentDaemon {
 		const closeStates = [...this.sessions.values()].sort(
 			(left, right) => this.getUpdateRestartSessionDepth(right) - this.getUpdateRestartSessionDepth(left),
 		);
-		// The daemon restarts right after: even the discarded ("killed") sessions
-		// must finish their trace flush before this process goes away.
 		for (const state of closeStates) {
 			if (this.sessions.has(state.activeSessionId)) {
-				await this.closeSession(
-					state,
-					restartByActiveSessionId.has(state.activeSessionId) ? "update" : "killed",
-					true,
-					true,
-					undefined,
-					{ traceFlush: "await" },
-				);
+				await this.closeSession(state, restartByActiveSessionId.has(state.activeSessionId) ? "update" : "killed");
 			}
 		}
-		for (const state of [...this.sessions.values()]) {
-			await this.closeSession(state, "killed", true, true, undefined, { traceFlush: "await" });
-		}
+		for (const state of [...this.sessions.values()]) await this.closeSession(state, "killed");
+		await flushAllPendingAgentTraceUploads();
 		return manifest;
 	}
 
@@ -6523,14 +6510,7 @@ export class AgentDaemon {
 		state.unsubscribe?.();
 		let disposeError: unknown;
 		try {
-			// "shutdown"/"update" closes precede a process exit that a detached
-			// upload would not survive; every other close leaves the daemon and
-			// the session file alive, so the final trace flush finishes on its
-			// own (exit-adjacent callers with other reasons override explicitly).
-			await state.runtime.dispose({
-				traceFlush: disposal?.traceFlush ?? (reason === "shutdown" || reason === "update" ? "await" : "detach"),
-				kernelSnapshot: disposal?.kernelSnapshot,
-			});
+			await state.runtime.dispose(disposal);
 		} catch (error) {
 			disposeError = error;
 		}
@@ -7327,6 +7307,7 @@ export class AgentDaemon {
 		for (const state of [...this.sessions.values()]) {
 			await this.closeSession(state, closingReason);
 		}
+		await flushAllPendingAgentTraceUploads();
 		for (const client of this.clients) {
 			client.detachInput();
 			client.socket.end();

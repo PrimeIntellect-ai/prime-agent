@@ -62,13 +62,7 @@ function extractUserMessageText(content: string | Array<{ type: string; text?: s
 }
 
 export interface AgentSessionRuntimeDisposeOptions {
-	/**
-	 * "detach" fires the final trace upload without awaiting it. Only safe when
-	 * the process and the session file outlive the disposal so the upload can
-	 * still finish; exit paths must keep the default "await".
-	 */
-	traceFlush?: "await" | "detach";
-	/** Set false when the session's artifact dir is deleted right after disposal. Defaults to true. */
+	/** Set false when the session's artifact dir is deleted right after disposal (default true). */
 	kernelSnapshot?: boolean;
 }
 
@@ -210,8 +204,6 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 			reason,
 			targetSessionFile,
 		});
-		// Replacement keeps this process and the outgoing session file alive, so
-		// the final trace upload can finish detached instead of stalling the swap.
 		this.detachTraceFlush();
 		this.beforeSessionInvalidate?.();
 		// Await the kernel's final snapshot flush before invalidating the session.
@@ -711,15 +703,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		} catch (error) {
 			disposeError ??= error;
 		}
-		if (options.traceFlush === "detach") {
-			this.detachTraceFlush();
-		} else {
-			try {
-				await flushAgentTraceUpload(this.session.sessionManager);
-			} catch (error) {
-				disposeError ??= error;
-			}
-		}
+		this.detachTraceFlush();
 		try {
 			this.beforeSessionInvalidate?.();
 		} catch (error) {
@@ -747,7 +731,6 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 
 	async dispose(options?: AgentSessionRuntimeDisposeOptions): Promise<void> {
 		if (!this.disposePromise) {
-			// Concurrent disposers join the first caller's teardown (and its options).
 			this.disposePromise = this.disposeOnce(options ?? {});
 		}
 		await this.disposePromise;

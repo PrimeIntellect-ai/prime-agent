@@ -6530,15 +6530,12 @@ describe("daemon mode helpers", () => {
 			childManager.appendMessage({ role: "user", content: "pending trace data", timestamp: 3 });
 			childManager.flushNow();
 
-			// Resolving while the stubbed fetch is still gated is the pin: the
-			// delete must not await the upload.
+			// The fetch gate is still held: the delete must not await the upload.
 			await internals
 				.createSubagentRuntimeHost(parentState)
 				.deleteRlmSubagentRuntime(fixture.childId, childState.runtime.session);
 
-			// The detached upload still fired exactly once.
 			await vi.waitFor(() => expect(calls).toHaveLength(1));
-			// The artifact sweep deletes the snapshot right away, so none is written.
 			expect(childState.runtime.session.disposeAsync).toHaveBeenCalledWith({ kernelSnapshot: false });
 			releaseFetch();
 			await flushAgentTraceUpload(childManager);
@@ -6548,34 +6545,50 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("awaits the pending trace upload and keeps the kernel snapshot on a shutdown close", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-shutdown-trace-flush-"));
+	it("resolves a delete that joins an in-flight passivation close without awaiting the trace upload", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-passivation-flush-"));
+		let releaseDispose!: () => void;
+		const disposeGate = new Promise<void>((resolve) => {
+			releaseDispose = resolve;
+		});
+		let markDisposeStarted!: () => void;
+		const disposeStarted = new Promise<void>((resolve) => {
+			markDisposeStarted = resolve;
+		});
 		try {
-			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const fixture = makePersistedRlmDaemonFixture(tempDir, {
+				childDisposeStarted: markDisposeStarted,
+				childDisposeGate: disposeGate,
+			});
 			const internals = fixture.daemon as unknown as {
 				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
-				closeSession(state: ActiveSessionState, reason: string): Promise<void>;
+				createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+				passivateIdleChildren(threshold: number, now: number, limit: number): Promise<number>;
 			};
-			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
 			const childState = await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+			(
+				parentState.runtime.session as unknown as { releaseRlmChildSession: ReturnType<typeof vi.fn> }
+			).releaseRlmChildSession = vi.fn(() => vi.fn());
 			const childManager = childState.runtime.session.sessionManager as SessionManager;
 			const { calls, releaseFetch } = installGatedTraceUpload(childManager);
 			childManager.appendMessage({ role: "user", content: "pending trace data", timestamp: 3 });
 			childManager.flushNow();
 
-			// Passivation and daemon exit both close with "shutdown": the flush
-			// stays blocking there and the kernel snapshot is still written.
-			let closeSettled = false;
-			const closing = internals.closeSession(childState, "shutdown").then(() => {
-				closeSettled = true;
-			});
-			await vi.waitFor(() => expect(calls).toHaveLength(1));
-			await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
-			expect(closeSettled).toBe(false);
-			releaseFetch();
-			await closing;
+			const passivation = internals.passivateIdleChildren(90, Date.parse("2036-08-01T12:00:00Z"), 1);
+			await disposeStarted;
+			const deletion = internals
+				.createSubagentRuntimeHost(parentState)
+				.deleteRlmSubagentRuntime(fixture.childId, childState.runtime.session);
+			releaseDispose();
+			// Both resolve while the fetch gate is still held.
+			await Promise.all([passivation, deletion]);
+			expect(calls).toHaveLength(1);
 			expect(childState.runtime.session.disposeAsync).toHaveBeenCalledWith({ kernelSnapshot: true });
+			releaseFetch();
+			await flushAgentTraceUpload(childManager);
 		} finally {
+			releaseDispose();
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -9000,10 +9013,7 @@ function makeCronJob(input: {
 	};
 }
 
-/**
- * Arm a child session's trace-upload controller with a gated fetch stub so a
- * test can observe whether a close awaits the final upload.
- */
+/** Gated fetch stub on a session's trace-upload controller: observes whether a close awaits the upload. */
 function installGatedTraceUpload(sessionManager: SessionManager): {
 	calls: string[];
 	releaseFetch: () => void;
