@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as orphanProcessModule from "../src/core/orphan-process-journal.js";
 import { getProcessStartId } from "../src/core/session-lease.js";
 import type { DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import { CommandRecoveryJournal } from "../src/modes/daemon/command-recovery-journal.js";
@@ -21,6 +22,7 @@ import {
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSocketPathLease } from "../src/modes/daemon/daemon-socket.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import { DaemonWorkerAuthenticationError, DaemonWorkerClient } from "../src/modes/daemon/daemon-worker-client.js";
 import {
 	DAEMON_WORKER_STARTUP_GATE_COMMIT,
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
@@ -1097,14 +1099,16 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
-	it("leaves startup cleanup to the startup failure path after socket lease compromise", () => {
+	it("fences the startup socket and leaves resource cleanup to the startup failure path after lease compromise", () => {
 		const cleanupSupervisorResources = vi.fn(async () => {});
+		const fenceSupervisorSocket = vi.fn();
 		const lease = new DaemonSocketPathLease("/tmp/daemon.sock", async () => {});
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			shuttingDown: false,
 			startupComplete: false,
 			socketLease: lease,
 			cleanupSupervisorResources,
+			fenceSupervisorSocket,
 			log: vi.fn(),
 		}) as {
 			shuttingDown: boolean;
@@ -1116,6 +1120,7 @@ describe("daemon worker supervisor monitoring", () => {
 		lease.recordCompromise(new Error("lock refresh failed"));
 
 		expect(supervisor.shuttingDown).toBe(true);
+		expect(fenceSupervisorSocket).toHaveBeenCalledOnce();
 		expect(cleanupSupervisorResources).not.toHaveBeenCalled();
 		expect(() => supervisor.assertSocketLeaseHeld()).toThrow(/lease was compromised/);
 	});
@@ -1127,6 +1132,7 @@ describe("daemon worker supervisor monitoring", () => {
 			shuttingDown: false,
 			startupComplete: true,
 			cleanupSupervisorResources,
+			fenceSupervisorSocket: vi.fn(),
 			log: vi.fn(() => {
 				throw new Error("log failed");
 			}),
@@ -1147,6 +1153,37 @@ describe("daemon worker supervisor monitoring", () => {
 		} finally {
 			consoleError.mockRestore();
 		}
+	});
+
+	it("rejects commands immediately after the supervisor is fenced", async () => {
+		const writes: string[] = [];
+		const client = {
+			id: "client-fenced",
+			socket: {
+				destroyed: false,
+				write: vi.fn((chunk: string) => {
+					writes.push(chunk);
+					return true;
+				}),
+			},
+		} as unknown as DaemonSocketClient;
+		const handleCommand = vi.fn();
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			shuttingDown: true,
+			generation: "fenced-generation",
+			socketPath: "/tmp/fenced.sock",
+			handleCommand,
+		}) as {
+			handleLine(target: DaemonSocketClient, line: string): Promise<void>;
+		};
+
+		await supervisor.handleLine(
+			client,
+			JSON.stringify(createDaemonCommandEnvelope({ type: "list" }, "command-fenced", "client-fenced")),
+		);
+
+		expect(writes.join(" ")).toContain("is shutting down");
+		expect(handleCommand).not.toHaveBeenCalled();
 	});
 
 	it("does not poll a healthy supervisor after the startup check", async () => {
@@ -1996,12 +2033,12 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(stopWorker).toHaveBeenCalledWith(worker, true, true);
 	});
 
-	it("continues startup recovery after verified live workers time out during adoption", async () => {
+	it("continues startup recovery after live workers time out during adoption", async () => {
 		type AdoptionWorker = {
 			descriptor: {
 				workerId: string;
 				pid: number;
-				processStartId: string;
+				processStartId?: string;
 				rootActiveSessionId: string;
 				lifecycle?: string;
 				consecutiveFailures: number;
@@ -2010,11 +2047,11 @@ describe("daemon worker supervisor monitoring", () => {
 		};
 		const processStartId = getProcessStartId(process.pid);
 		expect(processStartId).toBeDefined();
-		const workers: AdoptionWorker[] = ["slow-1", "slow-2", "healthy"].map((workerId) => ({
+		const workers: AdoptionWorker[] = ["slow-1", "slow-2", "slow-unverified", "healthy"].map((workerId) => ({
 			descriptor: {
 				workerId,
 				pid: process.pid,
-				processStartId: processStartId!,
+				...(workerId === "slow-unverified" ? {} : { processStartId: processStartId! }),
 				rootActiveSessionId: `${workerId}-active`,
 				consecutiveFailures: 0,
 			},
@@ -2043,9 +2080,82 @@ describe("daemon worker supervisor monitoring", () => {
 			Promise.all(workers.map((worker) => supervisor.adoptOrRecoverWorker(worker))),
 		).resolves.toBeDefined();
 
-		expect(recoverWorker).toHaveBeenCalledTimes(2);
-		expect(workers.map((worker) => worker.descriptor.lifecycle)).toEqual(["recovering", "recovering", "ready"]);
-		expect(persistWorker).toHaveBeenCalledTimes(3);
+		expect(recoverWorker).toHaveBeenCalledTimes(3);
+		expect(workers.map((worker) => worker.descriptor.lifecycle)).toEqual([
+			"recovering",
+			"recovering",
+			"recovering",
+			"ready",
+		]);
+		expect(persistWorker).toHaveBeenCalledTimes(4);
+	});
+
+	it("preserves worker authentication rejection instead of wrapping it as a connection timeout", async () => {
+		const worker = {
+			descriptor: {
+				socketPath: "/tmp/worker-auth-rejected.sock",
+				authenticationToken: "stale-token",
+			},
+			client: undefined,
+		};
+		const authError = new DaemonWorkerAuthenticationError("Invalid daemon worker authentication token");
+		const connect = vi.spyOn(DaemonWorkerClient.prototype, "connect").mockResolvedValue(undefined);
+		const hello = vi.spyOn(DaemonWorkerClient.prototype, "waitForHello").mockResolvedValue({} as never);
+		const authenticate = vi.spyOn(DaemonWorkerClient.prototype, "authenticateWorker").mockRejectedValue(authError);
+		const close = vi.spyOn(DaemonWorkerClient.prototype, "close").mockImplementation(() => undefined);
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			assertRecoveryAllowed: vi.fn(async () => undefined),
+			supervisorAuthenticationClaim: vi.fn(() => ({
+				supervisorGeneration: "generation",
+				supervisorPid: process.pid,
+				supervisorSocketPath: "/tmp/supervisor.sock",
+			})),
+		}) as {
+			connectWorker(target: typeof worker, timeoutMs: number): Promise<DaemonWorkerClient>;
+		};
+
+		try {
+			await expect(supervisor.connectWorker(worker, 2000)).rejects.toBe(authError);
+			expect(authenticate).toHaveBeenCalledOnce();
+		} finally {
+			connect.mockRestore();
+			hello.mockRestore();
+			authenticate.mockRestore();
+			close.mockRestore();
+		}
+	});
+
+	it("does not classify worker authentication rejection as a probe timeout", async () => {
+		const processStartId = getProcessStartId(process.pid);
+		expect(processStartId).toBeDefined();
+		const worker = {
+			descriptor: {
+				workerId: "worker-auth-rejected",
+				pid: process.pid,
+				processStartId: processStartId!,
+				rootActiveSessionId: "active-auth",
+				consecutiveFailures: 0,
+			},
+		};
+		const recoverWorker = vi.fn(async () => undefined);
+		const persistWorker = vi.fn();
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			assertRecoveryAllowed: vi.fn(async () => undefined),
+			connectWorker: vi.fn(async () => {
+				throw new DaemonWorkerAuthenticationError("Timed out connecting to daemon session worker: invalid token");
+			}),
+			recoverWorker,
+			persistWorker,
+			log: vi.fn(),
+		}) as {
+			adoptOrRecoverWorker(target: typeof worker): Promise<void>;
+		};
+
+		await supervisor.adoptOrRecoverWorker(worker);
+
+		expect(recoverWorker).toHaveBeenCalledWith(worker);
+		expect(persistWorker).not.toHaveBeenCalled();
+		expect(worker.descriptor).not.toHaveProperty("lifecycle", "recovering");
 	});
 
 	it("defers recovery without replacing a verified live worker that keeps timing out", async () => {
@@ -3944,6 +4054,54 @@ describe("daemon worker supervisor monitoring", () => {
 			expect(markInterrupted).toHaveBeenCalledTimes(2);
 			expect(markInterrupted).toHaveBeenCalledWith("/tmp/root.jsonl", "root-active", ["model_stream"]);
 			expect(markInterrupted).toHaveBeenCalledWith("/tmp/child.jsonl", "child-active", ["tool_execution"]);
+		} finally {
+			kill.mockRestore();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("retains the orphan journal when a recoverable orphan cannot be reaped", async () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-orphan-retry-test-"));
+		const orphanJournalPath = join(root, "worker.orphans.jsonl");
+		const workerPid = 987_653;
+		const orphanPid = process.pid;
+		writeFileSync(
+			orphanJournalPath,
+			`${JSON.stringify({
+				version: 1,
+				pid: orphanPid,
+				ownerPid: workerPid,
+				processStartId: getProcessStartId(orphanPid),
+				active: true,
+				recordedAt: new Date().toISOString(),
+			})}
+`,
+		);
+		const worker = {
+			descriptor: {
+				workerId: "worker-orphan-retry",
+				pid: workerPid,
+				rootActiveSessionId: "root-active",
+				recoveryJournalPath: join(root, "worker.recovery.jsonl"),
+				orphanProcessJournalPath: orphanJournalPath,
+			},
+		};
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			catalog: { start: vi.fn(async () => undefined), markInterrupted: vi.fn(async () => undefined) },
+			log: vi.fn(),
+			assertRecoveryAllowed: vi.fn(async () => undefined),
+		}) as {
+			recoverUncertainWorkerOperations(target: typeof worker): Promise<void>;
+		};
+		const kill = vi.spyOn(orphanProcessModule, "killOrphanProcess").mockReturnValue(false);
+
+		try {
+			await supervisor.recoverUncertainWorkerOperations(worker);
+
+			expect(kill).toHaveBeenCalledWith(orphanPid);
+			expect(existsSync(orphanJournalPath)).toBe(true);
 		} finally {
 			kill.mockRestore();
 			rmSync(root, { recursive: true, force: true });

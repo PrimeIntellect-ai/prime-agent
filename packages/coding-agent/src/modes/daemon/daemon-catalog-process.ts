@@ -13,11 +13,15 @@ import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/se
 export const DAEMON_CATALOG_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
 export const DAEMON_CATALOG_START_TIMEOUT_MS = 30_000;
 
+export function isDaemonCatalogSourcePath(modulePath: string, packageDir: string): boolean {
+	return modulePath.startsWith(`${join(packageDir, "src")}${sep}`);
+}
+
 function resolveDaemonCatalogEntrypoint(): string {
 	const packageDir = getPackageDir();
 	const sourceEntrypoint = join(packageDir, "src", "modes", "daemon", "daemon-catalog-entry.ts");
 	const compiledEntrypoint = join(packageDir, "dist", "modes", "daemon", "daemon-catalog-entry.js");
-	const runningFromSource = fileURLToPath(import.meta.url).includes(`${sep}src${sep}`);
+	const runningFromSource = isDaemonCatalogSourcePath(fileURLToPath(import.meta.url), packageDir);
 	const candidates = runningFromSource
 		? [sourceEntrypoint, compiledEntrypoint]
 		: [compiledEntrypoint, sourceEntrypoint];
