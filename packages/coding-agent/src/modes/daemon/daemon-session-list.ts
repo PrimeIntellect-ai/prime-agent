@@ -5,6 +5,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { compactRlmText } from "../../core/agent-session.js";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.js";
 import { type AgentCronJob, isHeartbeatCronJob } from "../../core/cron-jobs.js";
+import type { GoalState } from "../../core/goals.js";
 import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
@@ -19,6 +20,10 @@ export type SessionLifecycle = "draft" | "live" | "archived";
 // "working" so the view never sees an unlabeled idle session.
 export type SessionActivity = "working" | "idle";
 export type SessionRosterStatus = "running" | "idle" | "inactive";
+export type SessionGoalFence = Pick<
+	GoalState,
+	"active" | "status" | "goalId" | "updatedAt" | "dispatchReceiptId" | "dispatchPhase"
+>;
 
 // Upper bound on the spawn-code source carried in a session summary. Generous
 // enough for real spawn cells while keeping the daemon wire payload bounded.
@@ -76,6 +81,8 @@ export interface SessionSummary {
 	summary?: string;
 	/** Completion verdict for an idle session; absent while working or unjudged. */
 	taskState?: AgentTaskState;
+	/** Non-sensitive exact goal generation for deterministic resident-session fencing. */
+	goal?: SessionGoalFence | null;
 	/** Resident session-host process state, populated by the global supervisor. */
 	workerState?: "starting" | "ready" | "recovering" | "stopping" | "failed";
 	/** Diagnostic process identity; clients must not use this as a stable session identifier. */
@@ -219,6 +226,7 @@ export function summaryForActiveSession(
 		}
 	}
 
+	const goalState = session.goalState;
 	return {
 		id: activeSession.activeSessionId,
 		lifecycle: activeLifecycleForSession(activeSession),
@@ -245,6 +253,17 @@ export function summaryForActiveSession(
 		isRunningTools: session.isStreaming && session.state.pendingToolCalls.size > 0,
 		attachedClients: activeSession.clients.size,
 		messageCount: session.messages.length,
+		goal:
+			!goalState || goalState.status === "idle"
+				? null
+				: {
+						active: goalState.active,
+						status: goalState.status,
+						...(goalState.goalId ? { goalId: goalState.goalId } : {}),
+						...(goalState.dispatchReceiptId ? { dispatchReceiptId: goalState.dispatchReceiptId } : {}),
+						...(goalState.dispatchPhase ? { dispatchPhase: goalState.dispatchPhase } : {}),
+						...(goalState.updatedAt !== undefined ? { updatedAt: goalState.updatedAt } : {}),
+					},
 		unfinishedActionCount: session.unfinishedActionCount,
 		sessionActions: session.getSessionActionSnapshot(),
 		streamingMessage: session.state.streamingMessage,

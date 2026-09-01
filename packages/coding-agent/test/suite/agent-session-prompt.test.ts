@@ -6,6 +6,7 @@ import { fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BashResult } from "../../src/core/bash-executor.js";
+import { createGoalContextMessage } from "../../src/core/goals.js";
 import type { PromptTemplate } from "../../src/core/prompt-templates.js";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.js";
 import { createTestResourceLoader } from "../utilities.js";
@@ -64,6 +65,241 @@ describe("AgentSession prompt characterization", () => {
 		harness.setResponses([fauxAssistantMessage("recovered")]);
 		await harness.session.prompt("second");
 		expect(getUserTexts(harness)).toEqual(["second"]);
+	});
+
+	it("rechecks a conditional goal fence after validation and before persisting the goal", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		let validationReached = () => {};
+		const reached = new Promise<void>((resolve) => {
+			validationReached = resolve;
+		});
+		let releaseValidation = () => {};
+		const validationGate = new Promise<void>((resolve) => {
+			releaseValidation = resolve;
+		});
+		const internals = harness.session as unknown as {
+			_validateCanStartAgentRun(): Promise<void>;
+			startGoalFromConditionalPrompt(
+				text: string,
+				options: { admissionCommitted(): void; receiptId: string },
+			): Promise<void>;
+		};
+		internals._validateCanStartAgentRun = vi.fn(async () => {
+			validationReached();
+			await validationGate;
+		});
+		const expectedName = harness.session.sessionName;
+		const fenceChanged = new Error("conditional goal fence changed");
+		const start = internals.startGoalFromConditionalPrompt("/goal guarded objective", {
+			receiptId: "cron-delivery-1",
+			admissionCommitted: () => {
+				if (harness.session.sessionName !== expectedName) throw fenceChanged;
+			},
+		});
+
+		await reached;
+		harness.session.setSessionName("changed-during-validation");
+		releaseValidation();
+		await expect(start).rejects.toBe(fenceChanged);
+		expect(harness.session.goalState.status).toBe("idle");
+	});
+
+	it("persists a conditional delivery receipt before starting its goal turn", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("working")]);
+
+		await harness.session.startGoalFromConditionalPrompt("/goal guarded objective", {
+			receiptId: "cron-delivery-committed",
+			admissionCommitted: () => {},
+		});
+		await vi.waitFor(() => expect(getAssistantTexts(harness)).toContain("working"));
+
+		expect(harness.session.goalState).toMatchObject({
+			dispatchReceiptId: "cron-delivery-committed",
+			dispatchPhase: "provider_committed",
+		});
+	});
+
+	it("reconstructs only a pre-provider conditional receipt and wakes its turn", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const now = Date.now();
+		const internals = harness.session as unknown as {
+			_setGoalState(goal: typeof harness.session.goalState): void;
+			recoverConditionalGoalDelivery(receiptId: string): boolean;
+		};
+		internals._setGoalState({
+			active: true,
+			status: "active",
+			goalId: "recovered-goal",
+			dispatchReceiptId: "cron-delivery-recovered",
+			dispatchPhase: "receipt",
+			objective: "recover guarded objective",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			continuationsUsed: 0,
+			createdAt: now,
+			updatedAt: now,
+		});
+		harness.setResponses([fauxAssistantMessage("recovered")]);
+
+		expect(internals.recoverConditionalGoalDelivery("cron-delivery-recovered")).toBe(true);
+		await vi.waitFor(() => expect(getAssistantTexts(harness)).toContain("recovered"));
+		expect(harness.session.goalState.dispatchPhase).toBe("provider_committed");
+		expect(internals.recoverConditionalGoalDelivery("cron-delivery-recovered")).toBe(false);
+	});
+
+	it("persists a recovery attempt before rebuilding the conditional goal turn", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const now = Date.now();
+		const recoveryWriteError = new Error("recovery counter write failed");
+		const internals = harness.session as unknown as {
+			_setGoalState(goal: typeof harness.session.goalState): void;
+			recoverConditionalGoalDelivery(receiptId: string, options: { recoveryCommitted(): void }): boolean;
+		};
+		internals._setGoalState({
+			active: true,
+			status: "active",
+			goalId: "recovered-goal",
+			dispatchReceiptId: "cron-delivery-counter-failed",
+			dispatchPhase: "receipt",
+			objective: "recover guarded objective",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			continuationsUsed: 0,
+			createdAt: now,
+			updatedAt: now,
+		});
+		harness.setResponses([fauxAssistantMessage("must not run")]);
+
+		expect(() =>
+			internals.recoverConditionalGoalDelivery("cron-delivery-counter-failed", {
+				recoveryCommitted: () => {
+					throw recoveryWriteError;
+				},
+			}),
+		).toThrow(recoveryWriteError);
+		expect(harness.session.goalState.dispatchPhase).toBe("receipt");
+		expect(getAssistantTexts(harness)).toEqual([]);
+	});
+
+	it("terminalizes an exhausted pre-provider conditional receipt without calling the provider", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const now = Date.now();
+		const internals = harness.session as unknown as {
+			_setGoalState(goal: typeof harness.session.goalState): void;
+			failConditionalGoalDelivery(receiptId: string): boolean;
+		};
+		internals._setGoalState({
+			active: true,
+			status: "active",
+			goalId: "exhausted-goal",
+			dispatchReceiptId: "cron-delivery-exhausted",
+			dispatchPhase: "receipt",
+			objective: "recover guarded objective",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			continuationsUsed: 0,
+			createdAt: now,
+			updatedAt: now,
+		});
+
+		expect(internals.failConditionalGoalDelivery("cron-delivery-exhausted")).toBe(true);
+		expect(harness.session.goalState).toMatchObject({
+			active: false,
+			status: "error",
+			dispatchReceiptId: "cron-delivery-exhausted",
+			dispatchPhase: "receipt",
+			lastError: "Conditional goal delivery recovery exhausted",
+		});
+		expect(internals.failConditionalGoalDelivery("cron-delivery-exhausted")).toBe(false);
+		expect(getAssistantTexts(harness)).toEqual([]);
+	});
+
+	it("does not exhaust a conditional receipt while its final recovery action is queued", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const now = Date.now();
+		const internals = harness.session as unknown as {
+			_setGoalState(goal: typeof harness.session.goalState): void;
+			recoverConditionalGoalDelivery(receiptId: string): boolean;
+			failConditionalGoalDelivery(receiptId: string): boolean;
+		};
+		internals._setGoalState({
+			active: true,
+			status: "active",
+			goalId: "queued-recovery-goal",
+			dispatchReceiptId: "cron-delivery-final-attempt",
+			dispatchPhase: "receipt",
+			objective: "recover guarded objective",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			continuationsUsed: 0,
+			createdAt: now,
+			updatedAt: now,
+		});
+		vi.spyOn(harness.session, "isCompacting", "get").mockReturnValue(true);
+
+		expect(internals.recoverConditionalGoalDelivery("cron-delivery-final-attempt")).toBe(true);
+		expect(internals.failConditionalGoalDelivery("cron-delivery-final-attempt")).toBe(false);
+		expect(harness.session.goalState).toMatchObject({ active: true, status: "active", dispatchPhase: "receipt" });
+	});
+
+	it("rejects an invalidated conditional receipt at the provider boundary", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const now = Date.now();
+		const receiptGoal = {
+			active: true,
+			status: "active" as const,
+			goalId: "invalidated-recovery-goal",
+			dispatchReceiptId: "cron-delivery-invalidated",
+			dispatchPhase: "receipt" as const,
+			objective: "recover guarded objective",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			continuationsUsed: 0,
+			createdAt: now,
+			updatedAt: now,
+		};
+		const internals = harness.session as unknown as {
+			_setGoalState(goal: typeof harness.session.goalState): void;
+			_commitConditionalGoalProviderBoundary(messages: ReturnType<typeof createGoalContextMessage>[]): void;
+		};
+		internals._setGoalState({
+			...receiptGoal,
+			active: false,
+			status: "error",
+			lastError: "Conditional goal delivery recovery exhausted",
+		});
+
+		expect(() =>
+			internals._commitConditionalGoalProviderBoundary([createGoalContextMessage(receiptGoal, "continuation")]),
+		).toThrow("Conditional goal delivery state invalidated before provider commit");
+		expect(harness.session.goalState.dispatchPhase).toBe("receipt");
+		expect(getAssistantTexts(harness)).toEqual([]);
+	});
+
+	it("leaves no live goal when its conditional receipt cannot be persisted", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const persistenceError = new Error("disk full");
+		vi.spyOn(harness.session.sessionManager, "appendCustomEntryWithRollback").mockImplementation(() => {
+			throw persistenceError;
+		});
+
+		await expect(
+			harness.session.startGoalFromConditionalPrompt("/goal guarded objective", {
+				receiptId: "cron-delivery-failed",
+				admissionCommitted: () => {},
+			}),
+		).rejects.toBe(persistenceError);
+		expect(harness.session.goalState).toMatchObject({ status: "idle", active: false });
+		expect(harness.session.goalState).not.toHaveProperty("dispatchReceiptId");
 	});
 
 	it("keeps a prompt session-owned when cancellation arrives after admission", async () => {

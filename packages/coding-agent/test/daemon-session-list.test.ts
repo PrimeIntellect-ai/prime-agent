@@ -500,6 +500,33 @@ describe("summaryForActiveSession recap currency", () => {
 		expect(summary.summary).toBeUndefined();
 		expect(summary.taskState).toBeUndefined();
 	});
+
+	it("exposes a sanitized exact goal fence without the objective", () => {
+		const summary = summaryForActiveSession(
+			makeState({
+				activeSessionId: "s1",
+				goalState: {
+					active: false,
+					status: "complete",
+					goalId: "goal-1",
+					objective: "secret owner objective",
+					tokensUsed: 123,
+					timeUsedSeconds: 45,
+					continuationsUsed: 2,
+					createdAt: 100,
+					updatedAt: 200,
+				},
+			}),
+		);
+
+		expect(summary).toHaveProperty("goal", {
+			active: false,
+			status: "complete",
+			goalId: "goal-1",
+			updatedAt: 200,
+		});
+		expect(JSON.stringify(summary)).not.toContain("secret owner objective");
+	});
 });
 
 describe("buildRlmChildSnapshots", () => {
@@ -590,6 +617,7 @@ interface StateOptions {
 	messages?: AgentMessage[];
 	hasUserContent?: boolean;
 	summaryState?: ActiveSessionState["summaryState"];
+	goalState?: ActiveSessionState["runtime"]["session"]["goalState"];
 	hasRunningRlmChildren?: boolean;
 	hasAcceptedPromptInFlight?: boolean;
 	unfinishedActionCount?: number;
@@ -625,6 +653,13 @@ function makeState(options: StateOptions): ActiveSessionState {
 			metadata: options.metadata ?? { kind: "top-level", createdAt: 1 },
 			diagnostics: [],
 			session: {
+				goalState: options.goalState ?? {
+					active: false,
+					status: "idle",
+					tokensUsed: 0,
+					timeUsedSeconds: 0,
+					continuationsUsed: 0,
+				},
 				model: options.model,
 				thinkingLevel: "off",
 				isStreaming: options.isStreaming ?? false,

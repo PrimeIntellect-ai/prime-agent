@@ -11,11 +11,12 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
+import type { GoalState } from "./goals.js";
 import { getSessionArtifactPathForFile } from "./session-manager.js";
 
 export type AgentCronJobStatus = "active" | "paused" | "completed" | "cancelled";
 export type AgentCronScheduleKind = "once" | "cron" | "interval";
-export type AgentCronJobSource = "cron" | "heartbeat" | "rlm_heartbeat";
+export type AgentCronJobSource = "cron" | "conditional_cron" | "heartbeat" | "rlm_heartbeat";
 export type AgentCronJobRuntimeKind = "top-level" | "subagent";
 export type AgentHeartbeatUpdateAction = "pause" | "resume" | "clear";
 export type AgentHeartbeatManagementAction = "pause" | "resume" | "stop";
@@ -32,6 +33,29 @@ export interface AgentCronSchedule {
 	intervalMs?: number;
 }
 
+export type AgentCronGoalFence = Pick<
+	GoalState,
+	"active" | "status" | "goalId" | "updatedAt" | "dispatchReceiptId" | "dispatchPhase"
+>;
+
+export interface AgentCronModelFence {
+	provider: string;
+	id: string;
+}
+
+export interface AgentCronDeliveryFence {
+	version: 1;
+	activeSessionId: string;
+	sessionName: string;
+	cwd: string;
+	model: AgentCronModelFence;
+	thinkingLevel: string;
+	messageCount: number;
+	lastActivityAt: string;
+	taskState: "needs_input" | "completed";
+	goal: AgentCronGoalFence | null;
+}
+
 export interface AgentCronJob {
 	id: string;
 	status: AgentCronJobStatus;
@@ -39,6 +63,11 @@ export interface AgentCronJob {
 	runtimeKind?: AgentCronJobRuntimeKind;
 	/** Delivery mode for heartbeat/rlm_heartbeat jobs when the session is busy. Defaults to "steer". */
 	deliveryMode?: AgentHeartbeatDeliveryMode;
+	deliveryFence?: AgentCronDeliveryFence;
+	/** Durable bounded attempts to rebuild a pre-provider conditional goal turn. */
+	deliveryRecoveryCount?: number;
+	/** Durable terminal marker after the pre-provider recovery budget is exhausted. */
+	deliveryRecoveryExhaustedAt?: string;
 	activeSessionId: string;
 	sessionId: string;
 	sessionFile: string;
@@ -66,6 +95,7 @@ export interface CreateAgentCronJobInput {
 	source?: AgentCronJobSource;
 	runtimeKind?: AgentCronJobRuntimeKind;
 	deliveryMode?: AgentHeartbeatDeliveryMode;
+	deliveryFence?: AgentCronDeliveryFence;
 	now?: Date;
 }
 
@@ -81,6 +111,7 @@ export interface AgentCronSchedulerHooks {
 	beginDispatch?: (dispatch: AgentCronDispatch) => (() => void) | undefined;
 	now?: () => Date;
 	onError?: (job: AgentCronJob, error: unknown) => void;
+	onRecovered?: (jobs: readonly AgentCronJob[]) => void;
 }
 
 export interface HeartbeatCronSessionActivity {
@@ -227,11 +258,12 @@ export class AgentCronJobStore {
 			throw new Error("Cron job prompt cannot be empty");
 		}
 		const parsed = parseAgentCronSchedule(input.scheduleText, now);
+		const deliveryFence = normalizeAgentCronDeliveryFence(input.deliveryFence);
 		const nowIso = now.toISOString();
 		const job: AgentCronJob = {
 			id: randomUUID(),
 			status: "active",
-			source: input.source ?? "cron",
+			source: deliveryFence ? "conditional_cron" : (input.source ?? "cron"),
 			runtimeKind: input.runtimeKind,
 			activeSessionId: input.activeSessionId,
 			sessionId: input.sessionId,
@@ -239,6 +271,7 @@ export class AgentCronJobStore {
 			cwd: input.cwd,
 			label: normalizeOptionalLabel(input.label),
 			prompt,
+			deliveryFence,
 			schedule: parsed.schedule,
 			createdAt: nowIso,
 			updatedAt: nowIso,
@@ -265,20 +298,34 @@ export class AgentCronJobStore {
 		const targetSessionFile = resolve(input.sessionFile);
 		const reboundJobs: AgentCronJob[] = [];
 		const jobs = this.readJobs().map((job) => {
-			if (job.activeSessionId !== input.activeSessionId && resolve(job.sessionFile) !== targetSessionFile) {
+			const sameSessionFile = resolve(job.sessionFile) === targetSessionFile;
+			if (
+				job.source === "conditional_cron"
+					? !sameSessionFile
+					: job.activeSessionId !== input.activeSessionId && !sameSessionFile
+			) {
 				return job;
 			}
 			if (
 				job.activeSessionId === input.activeSessionId &&
 				job.sessionId === input.sessionId &&
 				resolve(job.sessionFile) === targetSessionFile &&
-				job.cwd === input.cwd
+				job.cwd === input.cwd &&
+				(!job.deliveryFence || job.deliveryFence.activeSessionId === input.activeSessionId)
 			) {
 				return job;
 			}
 			const rebound = {
 				...job,
 				activeSessionId: input.activeSessionId,
+				...(job.deliveryFence
+					? {
+							deliveryFence: {
+								...job.deliveryFence,
+								activeSessionId: input.activeSessionId,
+							},
+						}
+					: {}),
 				sessionId: input.sessionId,
 				sessionFile: input.sessionFile,
 				cwd: input.cwd,
@@ -634,6 +681,54 @@ export class AgentCronJobStore {
 		return cancelled;
 	}
 
+	rejectDelivery(id: string, reason: string, now = new Date()): AgentCronJob | undefined {
+		let rejected: AgentCronJob | undefined;
+		const jobs = this.readJobs().map((job) => {
+			if (job.id !== id || job.status !== "active") return job;
+			rejected = withoutNextRunAt({
+				...job,
+				status: "cancelled",
+				lastSkippedAt: now.toISOString(),
+				lastError: reason,
+				updatedAt: now.toISOString(),
+			});
+			return rejected;
+		});
+		if (rejected) this.writeJobs(jobs);
+		return rejected;
+	}
+
+	recordDeliveryRecoveryAttempt(id: string, now = new Date()): AgentCronJob | undefined {
+		let updated: AgentCronJob | undefined;
+		const jobs = this.readJobs().map((job) => {
+			if (job.id !== id || job.source !== "conditional_cron" || job.status !== "cancelled") return job;
+			updated = {
+				...job,
+				deliveryRecoveryCount: (job.deliveryRecoveryCount ?? 0) + 1,
+				updatedAt: now.toISOString(),
+			};
+			return updated;
+		});
+		if (updated) this.writeJobs(jobs);
+		return updated;
+	}
+
+	recordDeliveryRecoveryExhausted(id: string, now = new Date()): AgentCronJob | undefined {
+		let updated: AgentCronJob | undefined;
+		const jobs = this.readJobs().map((job) => {
+			if (job.id !== id || job.source !== "conditional_cron" || job.status !== "cancelled") return job;
+			updated = {
+				...job,
+				deliveryRecoveryExhaustedAt: now.toISOString(),
+				lastError: "Conditional goal delivery recovery exhausted",
+				updatedAt: now.toISOString(),
+			};
+			return updated;
+		});
+		if (updated) this.writeJobs(jobs);
+		return updated;
+	}
+
 	recordRunResult(id: string, result: { now?: Date; error?: unknown }): AgentCronJob | undefined {
 		const now = result.now ?? new Date();
 		let updated: AgentCronJob | undefined;
@@ -945,7 +1040,8 @@ export class AgentCronScheduler {
 		this.stopped = false;
 		if (!this.hasStarted) {
 			this.hasStarted = true;
-			this.store.recoverInterruptedDispatches(this.now());
+			const recovered = this.store.recoverInterruptedDispatches(this.now());
+			if (recovered.length > 0) this.hooks.onRecovered?.(recovered);
 		}
 		this.scheduleNext();
 	}
@@ -1618,7 +1714,13 @@ function recoverInterruptedInState(
 		}
 		const next = {
 			...job,
-			status: job.schedule.kind === "once" ? ("completed" as const) : job.status,
+			status:
+				job.source === "conditional_cron"
+					? ("cancelled" as const)
+					: job.schedule.kind === "once"
+						? ("completed" as const)
+						: job.status,
+			...(job.source === "conditional_cron" ? { lastSkippedAt: now.toISOString() } : {}),
 			lastError: "Interrupted before scheduled operation completion",
 			updatedAt: now.toISOString(),
 		};
@@ -1675,6 +1777,81 @@ function normalizeOptionalLabel(label: string | undefined): string | undefined {
 	return trimmed ? trimmed : undefined;
 }
 
+export function normalizeAgentCronDeliveryFence(value: unknown): AgentCronDeliveryFence | undefined {
+	if (value === undefined) return undefined;
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error("Cron delivery fence must be an object");
+	}
+	const candidate = value as Partial<AgentCronDeliveryFence>;
+	const keys = Object.keys(candidate).sort();
+	if (
+		keys.join(",") !==
+			"activeSessionId,cwd,goal,lastActivityAt,messageCount,model,sessionName,taskState,thinkingLevel,version" ||
+		candidate.version !== 1 ||
+		typeof candidate.activeSessionId !== "string" ||
+		candidate.activeSessionId.length === 0 ||
+		typeof candidate.sessionName !== "string" ||
+		candidate.sessionName.length === 0 ||
+		typeof candidate.cwd !== "string" ||
+		candidate.cwd.length === 0 ||
+		!candidate.model ||
+		typeof candidate.model !== "object" ||
+		Array.isArray(candidate.model) ||
+		Object.keys(candidate.model).sort().join(",") !== "id,provider" ||
+		typeof candidate.model.provider !== "string" ||
+		candidate.model.provider.length === 0 ||
+		typeof candidate.model.id !== "string" ||
+		candidate.model.id.length === 0 ||
+		typeof candidate.thinkingLevel !== "string" ||
+		candidate.thinkingLevel.length === 0 ||
+		!Number.isSafeInteger(candidate.messageCount) ||
+		(candidate.messageCount ?? -1) < 0 ||
+		typeof candidate.lastActivityAt !== "string" ||
+		!Number.isFinite(Date.parse(candidate.lastActivityAt)) ||
+		(candidate.taskState !== "needs_input" && candidate.taskState !== "completed")
+	) {
+		throw new Error("Cron delivery fence is invalid");
+	}
+	let goal: AgentCronGoalFence | null = null;
+	if (candidate.goal !== null) {
+		if (!candidate.goal || typeof candidate.goal !== "object" || Array.isArray(candidate.goal)) {
+			throw new Error("Cron delivery fence goal is invalid");
+		}
+		const goalKeys = Object.keys(candidate.goal).sort();
+		if (
+			goalKeys.some(
+				(key) => !["active", "dispatchPhase", "dispatchReceiptId", "goalId", "status", "updatedAt"].includes(key),
+			) ||
+			candidate.goal.active !== false ||
+			(candidate.goal.status !== "complete" && candidate.goal.status !== "error") ||
+			(candidate.goal.goalId !== undefined && typeof candidate.goal.goalId !== "string") ||
+			(candidate.goal.dispatchReceiptId !== undefined &&
+				(typeof candidate.goal.dispatchReceiptId !== "string" || candidate.goal.dispatchReceiptId.length === 0)) ||
+			(candidate.goal.dispatchPhase !== undefined &&
+				candidate.goal.dispatchPhase !== "receipt" &&
+				candidate.goal.dispatchPhase !== "provider_committed") ||
+			(candidate.goal.dispatchPhase !== undefined && candidate.goal.dispatchReceiptId === undefined) ||
+			(candidate.goal.updatedAt !== undefined &&
+				(typeof candidate.goal.updatedAt !== "number" || !Number.isFinite(candidate.goal.updatedAt)))
+		) {
+			throw new Error("Cron delivery fence goal is invalid");
+		}
+		goal = { ...candidate.goal } as AgentCronGoalFence;
+	}
+	return {
+		version: 1,
+		activeSessionId: candidate.activeSessionId,
+		sessionName: candidate.sessionName,
+		cwd: candidate.cwd,
+		model: { provider: candidate.model.provider, id: candidate.model.id },
+		thinkingLevel: candidate.thinkingLevel,
+		messageCount: candidate.messageCount!,
+		lastActivityAt: candidate.lastActivityAt,
+		taskState: candidate.taskState,
+		goal,
+	};
+}
+
 function withoutNextRunAt(job: AgentCronJob): AgentCronJob {
 	const { nextRunAt: _nextRunAt, ...rest } = job;
 	return rest;
@@ -1693,6 +1870,7 @@ function isAgentCronJob(value: unknown): value is AgentCronJob {
 			candidate.status === "cancelled") &&
 		(candidate.source === undefined ||
 			candidate.source === "cron" ||
+			candidate.source === "conditional_cron" ||
 			candidate.source === "heartbeat" ||
 			candidate.source === "rlm_heartbeat") &&
 		(candidate.runtimeKind === undefined ||
@@ -1701,6 +1879,13 @@ function isAgentCronJob(value: unknown): value is AgentCronJob {
 		(candidate.deliveryMode === undefined ||
 			candidate.deliveryMode === "steer" ||
 			candidate.deliveryMode === "follow_up") &&
+		(candidate.deliveryRecoveryCount === undefined ||
+			(Number.isSafeInteger(candidate.deliveryRecoveryCount) && candidate.deliveryRecoveryCount >= 0)) &&
+		(candidate.deliveryRecoveryExhaustedAt === undefined ||
+			(typeof candidate.deliveryRecoveryExhaustedAt === "string" &&
+				Number.isFinite(new Date(candidate.deliveryRecoveryExhaustedAt).getTime()))) &&
+		((candidate.source === "conditional_cron" && isAgentCronDeliveryFence(candidate.deliveryFence)) ||
+			(candidate.source !== "conditional_cron" && candidate.deliveryFence === undefined)) &&
 		typeof candidate.activeSessionId === "string" &&
 		typeof candidate.sessionId === "string" &&
 		typeof candidate.sessionFile === "string" &&
@@ -1719,6 +1904,14 @@ function isAgentCronJob(value: unknown): value is AgentCronJob {
 		typeof candidate.updatedAt === "string" &&
 		typeof candidate.runCount === "number"
 	);
+}
+
+function isAgentCronDeliveryFence(value: unknown): value is AgentCronDeliveryFence {
+	try {
+		return normalizeAgentCronDeliveryFence(value) !== undefined;
+	} catch {
+		return false;
+	}
 }
 
 function isAgentCronDispatchRecord(value: unknown): value is AgentCronDispatchRecord {

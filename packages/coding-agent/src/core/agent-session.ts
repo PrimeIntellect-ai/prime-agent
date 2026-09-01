@@ -151,6 +151,7 @@ import {
 	GOAL_CONTEXT_PREVIEW_LABEL,
 	GOAL_SKILL_NAME,
 	GOAL_STATE_CUSTOM_TYPE,
+	type GoalContextDetails,
 	type GoalHostResponse,
 	type GoalState,
 	type GoalStatus,
@@ -159,6 +160,7 @@ import {
 	isPersistedGoalState,
 	normalizeGoalState,
 	validateGoalBudget,
+	validateGoalDispatchReceiptId,
 	validateGoalObjective,
 } from "./goals.js";
 import type { HostRequestHandlers, KernelSentAgentMessage } from "./kernel/index.js";
@@ -700,6 +702,24 @@ function cloneQueuedAgentMessage(message: QueuedAgentMessage): QueuedAgentMessag
 	};
 }
 
+function conditionalGoalReceiptForMessage(message: CustomMessage | undefined): string | undefined {
+	if (message?.customType !== GOAL_CONTEXT_CUSTOM_TYPE || !message.details || typeof message.details !== "object") {
+		return undefined;
+	}
+	const receiptId = (message.details as Partial<GoalContextDetails>).dispatchReceiptId;
+	return typeof receiptId === "string" && receiptId.length > 0 ? receiptId : undefined;
+}
+
+function conditionalGoalReceiptForRecoveryPayload(payload: SessionActionRecoveryPayload): string | undefined {
+	return payload.kind === "turn" ? conditionalGoalReceiptForMessage(payload.customMessage) : undefined;
+}
+
+function conditionalGoalReceiptForPreparedPayload(
+	payload: PreparedTurnPayload | PreparedCommandPayload,
+): string | undefined {
+	return payload.kind === "turn" ? conditionalGoalReceiptForMessage(payload.customMessage) : undefined;
+}
+
 function primaryDeliveryRecord(action: QueuedSessionAction): DeliveryRecord {
 	if (action.payload.kind !== "turn") throw new Error(`Session action ${action.id} is not a turn`);
 	const record = action.payload.records.find((candidate) => candidate.role === "primary");
@@ -1085,6 +1105,7 @@ export class AgentSession {
 	private _goalState: GoalState = emptyGoalState();
 	private _goalAccountingStartedAt: number | undefined = undefined;
 	private _goalContinuationAwaitsRlmWork = false;
+	private readonly _recoveredConditionalGoalReceipts = new Set<string>();
 	private _goalAccountedAssistantMessages = new WeakSet<AssistantMessage>();
 	private _goalAbortInProgress = false;
 	private _autonomousState: AutonomousRuntimeState;
@@ -1663,11 +1684,9 @@ export class AgentSession {
 	}
 
 	private _persistGoalState(goal: GoalState): void {
-		this.sessionManager.appendCustomEntry(GOAL_STATE_CUSTOM_TYPE, goal);
-		// Force flush so the goal state is durable on disk immediately,
-		// even before the first assistant response. This ensures idempotent
-		// restart/rehydration can detect the persisted goal.
-		this.sessionManager.flushNow();
+		// Append and flush as one rollback-capable branch mutation so a failed
+		// conditional start cannot leave an unsaved live goal behind.
+		this.sessionManager.appendCustomEntryWithRollback(GOAL_STATE_CUSTOM_TYPE, goal);
 	}
 
 	private _setGoalState(next: GoalState, options: { persist?: boolean } = {}): void {
@@ -1675,15 +1694,23 @@ export class AgentSession {
 			...next,
 			updatedAt: Date.now(),
 		});
+		if (options.persist !== false) {
+			this._persistGoalState(normalized);
+		}
 		this._goalState = normalized;
 		if (normalized.status === "active") {
 			this._goalAccountingStartedAt ??= Date.now();
 		} else {
 			this._goalAccountingStartedAt = undefined;
 		}
-		if (options.persist !== false) {
-			this._persistGoalState(normalized);
-		}
+		this._emitGoalUpdate();
+	}
+
+	private _restoreGoalStateGeneration(goal: GoalState): void {
+		const restored = normalizeGoalState(goal);
+		this._persistGoalState(restored);
+		this._goalState = restored;
+		this._goalAccountingStartedAt = restored.status === "active" ? Date.now() : undefined;
 		this._emitGoalUpdate();
 	}
 
@@ -1789,14 +1816,17 @@ export class AgentSession {
 		this._emitQueueUpdate();
 	}
 
-	private _startGoal(objectiveText: string, tokenBudget: number | undefined): GoalState {
+	private _startGoal(objectiveText: string, tokenBudget: number | undefined, dispatchReceiptId?: string): GoalState {
 		const objective = validateGoalObjective(objectiveText);
 		const budget = validateGoalBudget(tokenBudget);
+		const receiptId = validateGoalDispatchReceiptId(dispatchReceiptId);
 		const now = Date.now();
 		const goal: GoalState = {
 			active: true,
 			status: "active",
 			goalId: randomUUID(),
+			...(receiptId ? { dispatchReceiptId: receiptId } : {}),
+			...(receiptId ? { dispatchPhase: "receipt" as const } : {}),
 			objective,
 			tokenBudget: budget,
 			tokensUsed: 0,
@@ -2102,8 +2132,12 @@ export class AgentSession {
 		}
 	}
 
-	private _runOrQueueGoalContext(kind: "continuation" | "objective_updated", images?: ImageContent[]): void {
-		if (!this._goalState.objective) return;
+	private _runOrQueueGoalContext(
+		kind: "continuation" | "objective_updated",
+		images?: ImageContent[],
+		options: { wake?: boolean } = {},
+	): ActionTicket {
+		if (!this._goalState.objective) throw new Error("Cannot queue goal context without an objective");
 		this._ensureGoalRuntimeActive();
 		const message = createGoalContextMessage(this._goalState, kind, images);
 		const normalized = normalizeMessageContent(message.content);
@@ -2111,7 +2145,11 @@ export class AgentSession {
 			message,
 			resumeIfIdle: true,
 		});
-		this._admitSessionInput(action, { front: true, wake: false });
+		const admission = this._admitSessionInput(action, { front: true, wake: options.wake ?? false });
+		if (!admission.accepted || !admission.ticket) {
+			throw new Error("Goal context was not accepted by the session action queue");
+		}
+		return admission.ticket;
 	}
 
 	private async _handleGoalSlashCommand(text: string, images: ImageContent[] | undefined): Promise<boolean> {
@@ -2140,15 +2178,34 @@ export class AgentSession {
 			return true;
 		}
 
+		await this._startGoalSlashCommand(command, images);
+		return true;
+	}
+
+	private async _startGoalSlashCommand(
+		command: Extract<GoalSlashCommand, { kind: "start" }>,
+		images: ImageContent[] | undefined,
+		beforeStart?: () => void,
+		dispatchReceiptId?: string,
+		wake = false,
+	): Promise<ActionTicket> {
 		const previousWasActive = this._goalState.status === "active";
+		const previousGoal = this._goalState;
 		if (!this.isStreaming) {
 			await this._validateCanStartAgentRun();
 		}
-		this._ensureGoalRuntimeActive();
-		this._clearQueuedGoalContexts();
-		this._startGoal(command.objective, command.tokenBudget);
-		await this._runOrQueueGoalContext(previousWasActive ? "objective_updated" : "continuation", images);
-		return true;
+		let goalStarted = false;
+		try {
+			beforeStart?.();
+			this._ensureGoalRuntimeActive();
+			this._clearQueuedGoalContexts();
+			this._startGoal(command.objective, command.tokenBudget, dispatchReceiptId);
+			goalStarted = true;
+			return this._runOrQueueGoalContext(previousWasActive ? "objective_updated" : "continuation", images, { wake });
+		} catch (error) {
+			if (beforeStart && goalStarted) this._restoreGoalStateGeneration(previousGoal);
+			throw error;
+		}
 	}
 
 	private _accountGoalUsageForAssistantMessage(message: AssistantMessage): boolean {
@@ -4534,6 +4591,48 @@ export class AgentSession {
 		return this._prompt(text, { ...options, returnAfterAccepted: true });
 	}
 
+	/**
+	 * Atomically validate and persist a scheduled /goal start. The caller's
+	 * admission fence is checked both after ownership and immediately before
+	 * the goal state changes, so async model validation cannot open a stale
+	 * delivery window.
+	 */
+	async startGoalFromConditionalPrompt(
+		text: string,
+		options: { admissionCommitted: () => void; receiptId: string; signal?: AbortSignal },
+	): Promise<void> {
+		const receiptId = validateGoalDispatchReceiptId(options.receiptId);
+		if (!receiptId) throw new Error("Conditional goal delivery requires a dispatch receipt");
+		if (this.isStreaming) {
+			throw new Error("Conditional goal delivery requires an idle session");
+		}
+		this._resumeSessionInputAdmission();
+		this._assertSessionActionAdmissionAvailable();
+		const admissionEpoch = this._sessionInputPumpEpoch;
+		const commitFence = await this._acquireDirectTurnAdmissionFence(options.signal).catch((error: unknown) => {
+			throwIfPromptAdmissionCancelled(options.signal);
+			throw error;
+		});
+		const run = async (): Promise<ActionTicket> => {
+			try {
+				throwIfPromptAdmissionCancelled(options.signal);
+				if (admissionEpoch !== this._sessionInputPumpEpoch) {
+					throw new Error("Session input was invalidated before conditional goal admission");
+				}
+				options.admissionCommitted();
+				const command = this._parseGoalSlashCommand(text);
+				if (command?.kind !== "start") {
+					throw new Error("Conditional goal delivery requires a /goal start command");
+				}
+				return await this._startGoalSlashCommand(command, undefined, options.admissionCommitted, receiptId, true);
+			} finally {
+				commitFence.release();
+			}
+		};
+		const ticket = await this._sessionActionCommitContext.run(commitFence.owner, run);
+		await ticket.delivered;
+	}
+
 	async promptAndWait(text: string, options?: PromptOptions): Promise<void> {
 		const agentMessageId = options?.agentMessageId ?? `prompt-wait:${randomUUID()}`;
 		if (this._agentMessageOutcomes.get(agentMessageId)?.completion) {
@@ -5167,82 +5266,97 @@ export class AgentSession {
 			throw new Error(`Unsupported session action recovery format version: ${snapshot.formatVersion}`);
 		}
 		const actionIds = new Set(this._actionStore.ownedActions().map((action) => action.id));
-		const actions = snapshot.actions.map((recovered): QueuedSessionAction => {
-			if (actionIds.has(recovered.id)) throw new Error(`Duplicate session action id: ${recovered.id}`);
-			actionIds.add(recovered.id);
-			if (
-				recovered.payload.kind === "turn" &&
-				recovered.payload.records.some((record) => record.ownerActionId !== recovered.id)
-			) {
-				throw new Error(`Session action ${recovered.id} has invalid delivery correlation`);
-			}
-			const payload: PreparedTurnPayload | PreparedCommandPayload =
-				recovered.payload.kind === "turn"
-					? {
-							kind: "turn",
-							text: recovered.payload.text,
-							...(recovered.payload.preview ? { preview: recovered.payload.preview } : {}),
-							records: recovered.payload.records.map((record) => ({
-								id: record.id,
-								role: record.role,
-								message: cloneQueuedAgentMessage(record.message),
-								started: false,
-								durable: false,
-								ownerActionId: record.ownerActionId,
-							})),
-							...(recovered.payload.images
-								? {
-										images: recovered.payload.images.map((image) => ({
-											...image,
-										})),
-									}
-								: {}),
-							...(recovered.payload.content
-								? {
-										content: recovered.payload.content.map((block) => ({
-											...block,
-										})),
-									}
-								: {}),
-							...(recovered.payload.customMessage
-								? {
-										customMessage: cloneCustomMessage(recovered.payload.customMessage),
-									}
-								: {}),
-							executionPolicy: {
-								...recovered.payload.executionPolicy,
-								preparation: {
-									...recovered.payload.executionPolicy.preparation,
+		const actions = snapshot.actions
+			.filter((recovered) => {
+				const receiptId = conditionalGoalReceiptForRecoveryPayload(recovered.payload);
+				if (!receiptId) return true;
+				if (this._recoveredConditionalGoalReceipts.has(receiptId)) return false;
+				if (
+					this._goalState.dispatchReceiptId === receiptId &&
+					this._goalState.dispatchPhase === "provider_committed"
+				) {
+					return false;
+				}
+				return !this.agent.state.messages.some(
+					(message) => message.role === "custom" && conditionalGoalReceiptForMessage(message) === receiptId,
+				);
+			})
+			.map((recovered): QueuedSessionAction => {
+				if (actionIds.has(recovered.id)) throw new Error(`Duplicate session action id: ${recovered.id}`);
+				actionIds.add(recovered.id);
+				if (
+					recovered.payload.kind === "turn" &&
+					recovered.payload.records.some((record) => record.ownerActionId !== recovered.id)
+				) {
+					throw new Error(`Session action ${recovered.id} has invalid delivery correlation`);
+				}
+				const payload: PreparedTurnPayload | PreparedCommandPayload =
+					recovered.payload.kind === "turn"
+						? {
+								kind: "turn",
+								text: recovered.payload.text,
+								...(recovered.payload.preview ? { preview: recovered.payload.preview } : {}),
+								records: recovered.payload.records.map((record) => ({
+									id: record.id,
+									role: record.role,
+									message: cloneQueuedAgentMessage(record.message),
+									started: false,
+									durable: false,
+									ownerActionId: record.ownerActionId,
+								})),
+								...(recovered.payload.images
+									? {
+											images: recovered.payload.images.map((image) => ({
+												...image,
+											})),
+										}
+									: {}),
+								...(recovered.payload.content
+									? {
+											content: recovered.payload.content.map((block) => ({
+												...block,
+											})),
+										}
+									: {}),
+								...(recovered.payload.customMessage
+									? {
+											customMessage: cloneCustomMessage(recovered.payload.customMessage),
+										}
+									: {}),
+								executionPolicy: {
+									...recovered.payload.executionPolicy,
+									preparation: {
+										...recovered.payload.executionPolicy.preparation,
+									},
 								},
-							},
-							queueVisible: recovered.payload.queueVisible,
-							acceptedAgentMessage: recovered.payload.acceptedAgentMessage,
-							acceptedBeforeCompletion: recovered.payload.acceptedBeforeCompletion,
-						}
-					: {
-							kind: "session_command",
-							text: recovered.payload.text,
-							command: { ...recovered.payload.command },
-							...(recovered.payload.images
-								? {
-										images: recovered.payload.images.map((image) => ({
-											...image,
-										})),
-									}
-								: {}),
-						};
-			return {
-				id: recovered.id,
-				source: recovered.source,
-				delivery: recovered.delivery,
-				wake: recovered.wake,
-				payload,
-				lifecycle: { state: "queued" },
-				...(recovered.queueKey ? { queueKey: recovered.queueKey } : {}),
-				...(recovered.agentMessageId ? { agentMessageId: recovered.agentMessageId } : {}),
-				...(recovered.suppressAutonomousContinuation ? { suppressAutonomousContinuation: true } : {}),
-			};
-		});
+								queueVisible: recovered.payload.queueVisible,
+								acceptedAgentMessage: recovered.payload.acceptedAgentMessage,
+								acceptedBeforeCompletion: recovered.payload.acceptedBeforeCompletion,
+							}
+						: {
+								kind: "session_command",
+								text: recovered.payload.text,
+								command: { ...recovered.payload.command },
+								...(recovered.payload.images
+									? {
+											images: recovered.payload.images.map((image) => ({
+												...image,
+											})),
+										}
+									: {}),
+							};
+				return {
+					id: recovered.id,
+					source: recovered.source,
+					delivery: recovered.delivery,
+					wake: recovered.wake,
+					payload,
+					lifecycle: { state: "queued" },
+					...(recovered.queueKey ? { queueKey: recovered.queueKey } : {}),
+					...(recovered.agentMessageId ? { agentMessageId: recovered.agentMessageId } : {}),
+					...(recovered.suppressAutonomousContinuation ? { suppressAutonomousContinuation: true } : {}),
+				};
+			});
 		for (const action of actions) {
 			const durableTerminalNotice = this._isRlmTerminalNoticeAction(action);
 			if (durableTerminalNotice) this._durableRlmTerminalNoticeActionIds.add(action.id);
@@ -5254,6 +5368,69 @@ export class AgentSession {
 			}
 		}
 		return actions.length;
+	}
+
+	/** Rebuild the goal turn lost with an interrupted conditional cron dispatch. */
+	recoverConditionalGoalDelivery(receiptValue: string, options: { recoveryCommitted?: () => void } = {}): boolean {
+		const receiptId = validateGoalDispatchReceiptId(receiptValue);
+		if (
+			!receiptId ||
+			this._goalState.status !== "active" ||
+			this._goalState.dispatchReceiptId !== receiptId ||
+			this._goalState.dispatchPhase !== "receipt"
+		) {
+			return false;
+		}
+		this._recoveredConditionalGoalReceipts.add(receiptId);
+		if (
+			this.agent.state.messages.some(
+				(message) => message.role === "custom" && conditionalGoalReceiptForMessage(message) === receiptId,
+			)
+		) {
+			return false;
+		}
+		const alreadyQueued = this._actionStore
+			.unfinishedActions()
+			.some((action) => conditionalGoalReceiptForPreparedPayload(action.payload) === receiptId);
+		if (alreadyQueued) return false;
+		try {
+			options.recoveryCommitted?.();
+			this._runOrQueueGoalContext("continuation", undefined, { wake: true });
+			return true;
+		} catch (error) {
+			this._recoveredConditionalGoalReceipts.delete(receiptId);
+			throw error;
+		}
+	}
+
+	/** Fail a pre-provider conditional receipt after its bounded recovery budget. */
+	failConditionalGoalDelivery(receiptValue: string): boolean {
+		const receiptId = validateGoalDispatchReceiptId(receiptValue);
+		if (
+			!receiptId ||
+			this._goalState.status !== "active" ||
+			this._goalState.dispatchReceiptId !== receiptId ||
+			this._goalState.dispatchPhase !== "receipt"
+		) {
+			return false;
+		}
+		if (
+			this._actionStore
+				.unfinishedActions()
+				.some((action) => conditionalGoalReceiptForPreparedPayload(action.payload) === receiptId)
+		) {
+			return false;
+		}
+		const now = Date.now();
+		this._setGoalState({
+			...this._goalState,
+			active: false,
+			status: "error",
+			updatedAt: now,
+			lastError: "Conditional goal delivery recovery exhausted",
+		});
+		this._recoveredConditionalGoalReceipts.delete(receiptId);
+		return true;
 	}
 
 	private _restoreSessionCommand(
@@ -5958,6 +6135,26 @@ export class AgentSession {
 		}
 	}
 
+	private _commitConditionalGoalProviderBoundary(messages: readonly AgentMessage[]): void {
+		const receiptId = messages.find(
+			(message): message is CustomMessage =>
+				message.role === "custom" && conditionalGoalReceiptForMessage(message) !== undefined,
+		);
+		const deliveredReceiptId = conditionalGoalReceiptForMessage(receiptId);
+		if (!deliveredReceiptId) return;
+		if (
+			this._goalState.active !== true ||
+			this._goalState.status !== "active" ||
+			this._goalState.dispatchReceiptId !== deliveredReceiptId ||
+			this._goalState.dispatchPhase !== "receipt"
+		) {
+			throw new Error("Conditional goal delivery state invalidated before provider commit");
+		}
+		// Persist the fail-closed boundary before provider code can observe the
+		// goal context. A restart may reconstruct only the earlier receipt phase.
+		this._setGoalState({ ...this._goalState, dispatchPhase: "provider_committed" });
+	}
+
 	private async _startPreparedTurnActions(actions: QueuedSessionAction[], epoch: number): Promise<void> {
 		let nextTurnMessages: CustomMessage[] = [];
 		const activeTurns = () =>
@@ -6057,6 +6254,7 @@ export class AgentSession {
 					for (const action of turns) transitionSessionAction(action, { state: "committing" });
 					this._notifySessionInputCheckpointChange();
 					this._emitQueueUpdate();
+					this._commitConditionalGoalProviderBoundary(preparedMessages);
 					return turns.some((action) => action.suppressAutonomousContinuation)
 						? this._runWithAutonomousContinuationSuppressed(() => this.agent.prompt(preparedMessages))
 						: this.agent.prompt(preparedMessages);

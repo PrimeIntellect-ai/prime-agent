@@ -248,6 +248,57 @@ describe("DaemonClient", () => {
 		await expect(request).rejects.toThrow("closed before the operation completed");
 	});
 
+	it("does not send a guarded cron job to a daemon without conditional delivery", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, [], DAEMON_SCHEMA_REVISION - 1);
+
+		await expect(
+			client.request({
+				type: "cron_add",
+				activeSessionId: "active-1",
+				schedule: "in 1m",
+				prompt: "/goal guarded work",
+				deliveryFence: {
+					version: 1,
+					activeSessionId: "active-1",
+					sessionName: "project-root",
+					cwd: "/tmp/project",
+					model: { provider: "test", id: "planner" },
+					thinkingLevel: "xhigh",
+					messageCount: 4,
+					lastActivityAt: "2026-08-31T12:00:00.000Z",
+					taskState: "needs_input",
+					goal: null,
+				},
+			}),
+		).rejects.toThrow("does not support conditional_cron_delivery");
+		expect(socket.writes).toEqual([]);
+		client.close();
+	});
+
+	it("keeps legacy cron requests compatible with a new daemon", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connect = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connect;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["conditional_cron_delivery"], DAEMON_SCHEMA_REVISION);
+
+		const request = client.request({
+			type: "cron_add",
+			activeSessionId: "active-1",
+			schedule: "in 1m",
+			prompt: "legacy work",
+		});
+		await vi.waitFor(() => expect(socket.writes).toHaveLength(1));
+		client.close();
+		await expect(request).rejects.toThrow("closed before the operation completed");
+	});
+
 	it("rejects an old daemon before requesting session state", async () => {
 		const client = new DaemonClient("/tmp/prime-agent.sock");
 		const connect = client.connect();

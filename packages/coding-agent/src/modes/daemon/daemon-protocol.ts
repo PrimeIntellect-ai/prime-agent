@@ -11,6 +11,7 @@ import type { AgentSessionRuntimeMetadata } from "../../core/agent-session-runti
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";
 import type { BashResult } from "../../core/bash-executor.js";
 import type {
+	AgentCronDeliveryFence,
 	AgentCronJob,
 	AgentHeartbeatDeliveryMode,
 	AgentHeartbeatManagementAction,
@@ -67,8 +68,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 20 lets cancellation target a prompt the session owns but has not started.
 // Revision 21 adds capability-gated, session-scoped ACP MCP server replacement.
 // Revision 23 lets workers query the supervisor agent roster on demand.
-export const DAEMON_SCHEMA_REVISION = 23;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-23-649fe649d15e";
+// Revision 24 adds capability-gated, delivery-time fenced cron prompts.
+export const DAEMON_SCHEMA_REVISION = 24;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-24-9bb630bf7f1d";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -113,7 +115,8 @@ export type DaemonServerCapability =
 	| "rlm_quiescence_barrier"
 	| "session_input_pause"
 	| "owned_prompt_cancellation"
-	| "acp_mcp_servers";
+	| "acp_mcp_servers"
+	| "conditional_cron_delivery";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -158,6 +161,7 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"rlm_quiescence_barrier",
 	"session_input_pause",
 	"acp_mcp_servers",
+	"conditional_cron_delivery",
 ];
 
 export interface DaemonRuntimeIdentity {
@@ -578,6 +582,7 @@ export type DaemonCommand =
 			activeSessionId: string;
 			schedule: string;
 			prompt: string;
+			deliveryFence?: AgentCronDeliveryFence;
 			promoteOwnedSession?: boolean;
 	  }
 	| { id?: string; type: "cron_cancel"; activeSessionId?: string; jobId: string }
@@ -714,6 +719,11 @@ const SESSION_INPUT_PAUSE_COMMAND = {
 	capability: "session_input_pause",
 } as const;
 const AGENT_PEER_LIST_COMMAND = { minProtocol: 7, minSchemaRevision: 23 } as const;
+const CONDITIONAL_CRON_DELIVERY_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 24,
+	capability: "conditional_cron_delivery",
+} as const;
 
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
@@ -838,6 +848,9 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 	}
 	if (command.type === "cancel_prompt_admission" && command.cancelOwned === true) {
 		requirements.push(OWNED_PROMPT_CANCELLATION_COMMAND);
+	}
+	if (command.type === "cron_add" && command.deliveryFence !== undefined) {
+		requirements.push(CONDITIONAL_CRON_DELIVERY_COMMAND);
 	}
 	return [...requirements, DAEMON_COMMAND_COMPATIBILITY[command.type]];
 }

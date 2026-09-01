@@ -136,6 +136,33 @@ describe("daemon protocol helpers", () => {
 		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("acp_mcp_servers");
 	});
 
+	it("capability-gates guarded cron delivery without breaking legacy cron clients", () => {
+		const legacyCron = {
+			type: "cron_add",
+			activeSessionId: "active-1",
+			schedule: "in 1m",
+			prompt: "legacy prompt",
+		} as const satisfies DaemonCommand;
+		const guardedCron = {
+			...legacyCron,
+			deliveryFence: {
+				version: 1,
+				activeSessionId: "active-1",
+				messageCount: 4,
+				lastActivityAt: "2026-08-31T12:00:00.000Z",
+				taskState: "needs_input",
+				goal: null,
+			},
+		} as DaemonCommand;
+
+		expect(getDaemonCommandCompatibilities(legacyCron)).toEqual([{ minProtocol: 7 }]);
+		expect(getDaemonCommandCompatibilities(guardedCron)).toEqual([
+			{ minProtocol: 7, minSchemaRevision: 24, capability: "conditional_cron_delivery" },
+			{ minProtocol: 7 },
+		]);
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("conditional_cron_delivery");
+	});
+
 	it("capability-gates the optional model catalog surface", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.get_model_catalog).toEqual({
 			minProtocol: 7,

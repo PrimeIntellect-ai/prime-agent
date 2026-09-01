@@ -53,7 +53,7 @@ import {
 	type DaemonOutbound,
 	failure,
 } from "../src/modes/daemon/daemon-protocol.js";
-import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
+import { type SessionSummary, summaryForActiveSession } from "../src/modes/daemon/daemon-session-list.js";
 import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
 import { RlmSpawnLedger } from "../src/modes/daemon/rlm-ledger.js";
 
@@ -1271,6 +1271,314 @@ describe("daemon mode helpers", () => {
 			expect(await internals.cronScheduler.runDue(new Date(Date.now() + 10 * 60 * 1000))).toBe(0);
 			expect(promptUntilAccepted).toHaveBeenCalledOnce();
 			expect(internals.cronStore.list().find((candidate) => candidate.id === job.id)?.status).toBe("cancelled");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a guarded cron job when its session fence drifts during admission", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-guarded-cron-admission-"));
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const manager = SessionManager.create(tempDir, sessionDir);
+			manager.newSession();
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Missing session file");
+
+			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
+				const session = makeRuntimeSession(options.sessionManager);
+				options.sessionManager.appendSessionInfo("guarded-root");
+				const promptUntilAccepted = vi.fn(
+					async (_prompt: string, promptOptions?: { admissionCommitted?: () => void }) => {
+						Object.assign(session, { thinkingLevel: "high" });
+						promptOptions?.admissionCommitted?.();
+					},
+				);
+				Object.assign(session, {
+					model: { provider: "test", id: "planner" } as Model<Api>,
+					thinkingLevel: "xhigh",
+					isStreaming: false,
+					isCompacting: false,
+					isRetrying: false,
+					isBashRunning: false,
+					isSessionActive: false,
+					unfinishedActionCount: 0,
+					rlmDepth: 0,
+					goalState: { active: false, status: "idle", tokensUsed: 0, timeUsedSeconds: 0, continuationsUsed: 0 },
+					state: { pendingToolCalls: new Set(), streamingMessage: undefined },
+					hasRunningRlmChildren: () => false,
+					getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
+					promptUntilAccepted,
+					startGoalFromConditionalPrompt: promptUntilAccepted,
+				});
+				return {
+					session,
+					extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["extensionsResult"],
+					services: { cwd: options.cwd, agentDir: options.agentDir } as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["services"],
+					diagnostics: [],
+				};
+			});
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
+				createRuntime,
+			});
+			const internals = daemon as unknown as {
+				cronStore: AgentCronJobStore;
+				cronScheduler: { runDue(now: Date): Promise<number> };
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+			};
+			const state = await internals.createRuntime({ type: "create", sessionPath: sessionFile });
+			state.summaryState = { taskState: "needs_input", basedOnMessageCount: 0 } as never;
+			const baseline = summaryForActiveSession(state);
+			const job = internals.cronStore.create({
+				activeSessionId: state.activeSessionId,
+				sessionId: state.runtime.session.sessionId,
+				sessionFile,
+				cwd: tempDir,
+				scheduleText: "in 1m",
+				prompt: "/goal guarded objective",
+				deliveryFence: {
+					version: 1,
+					activeSessionId: state.activeSessionId,
+					sessionName: baseline.sessionName!,
+					cwd: baseline.cwd,
+					model: { provider: baseline.model!.provider, id: baseline.model!.id },
+					thinkingLevel: baseline.thinkingLevel!,
+					messageCount: baseline.messageCount,
+					lastActivityAt: baseline.lastActivityAt!,
+					taskState: "needs_input",
+					goal: null,
+				},
+			});
+
+			expect(await internals.cronScheduler.runDue(new Date(Date.now() + 2 * 60 * 1000))).toBe(0);
+			expect(internals.cronStore.list().find((candidate) => candidate.id === job.id)).toMatchObject({
+				status: "cancelled",
+				lastError: "Delivery fence changed before prompt admission",
+				runCount: 0,
+			});
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a guarded cron job before the busy queue path when its idle profile drifts", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-guarded-cron-busy-"));
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const manager = SessionManager.create(tempDir, sessionDir);
+			manager.newSession();
+			manager.appendSessionInfo("guarded-root");
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Missing session file");
+
+			const followUp = vi.fn(async () => {});
+			const promptUntilAccepted = vi.fn(async () => {});
+			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
+				const session = makeRuntimeSession(options.sessionManager);
+				Object.assign(session, {
+					model: { provider: "test", id: "planner" } as Model<Api>,
+					thinkingLevel: "xhigh",
+					isStreaming: false,
+					isCompacting: false,
+					isRetrying: false,
+					isBashRunning: false,
+					isSessionActive: false,
+					unfinishedActionCount: 0,
+					rlmDepth: 0,
+					goalState: { active: false, status: "idle", tokensUsed: 0, timeUsedSeconds: 0, continuationsUsed: 0 },
+					state: { pendingToolCalls: new Set(), streamingMessage: undefined },
+					hasRunningRlmChildren: () => false,
+					getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
+					followUp,
+					promptUntilAccepted,
+					startGoalFromConditionalPrompt: promptUntilAccepted,
+				});
+				return {
+					session,
+					extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["extensionsResult"],
+					services: { cwd: options.cwd, agentDir: options.agentDir } as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["services"],
+					diagnostics: [],
+				};
+			});
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
+				createRuntime,
+			});
+			const internals = daemon as unknown as {
+				cronStore: AgentCronJobStore;
+				cronScheduler: { runDue(now: Date): Promise<number> };
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+			};
+			const state = await internals.createRuntime({ type: "create", sessionPath: sessionFile });
+			state.summaryState = { taskState: "needs_input", basedOnMessageCount: 0 } as never;
+			const baseline = summaryForActiveSession(state);
+			const job = internals.cronStore.create({
+				activeSessionId: state.activeSessionId,
+				sessionId: state.runtime.session.sessionId,
+				sessionFile,
+				cwd: tempDir,
+				scheduleText: "in 1m",
+				prompt: "/goal guarded objective",
+				deliveryFence: {
+					version: 1,
+					activeSessionId: state.activeSessionId,
+					sessionName: baseline.sessionName!,
+					cwd: baseline.cwd,
+					model: { provider: baseline.model!.provider, id: baseline.model!.id },
+					thinkingLevel: baseline.thinkingLevel!,
+					messageCount: baseline.messageCount,
+					lastActivityAt: baseline.lastActivityAt!,
+					taskState: "needs_input",
+					goal: null,
+				},
+			});
+
+			Object.assign(state.runtime.session, {
+				isStreaming: true,
+				model: { provider: "test", id: "changed-model" } as Model<Api>,
+			});
+			expect(await internals.cronScheduler.runDue(new Date(Date.now() + 2 * 60 * 1000))).toBe(0);
+			expect(followUp).not.toHaveBeenCalled();
+			expect(promptUntilAccepted).not.toHaveBeenCalled();
+			expect(internals.cronStore.list().find((candidate) => candidate.id === job.id)).toMatchObject({
+				status: "cancelled",
+				lastError: "Delivery fence changed before prompt admission",
+				runCount: 0,
+			});
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("terminalizes a pre-provider goal receipt when conditional recovery is exhausted", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-guarded-cron-exhausted-"));
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const manager = SessionManager.create(tempDir, sessionDir);
+			manager.newSession();
+			manager.appendSessionInfo("guarded-root");
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Missing session file");
+			let expectedReceiptId = "pending";
+			const failConditionalGoalDelivery = vi.fn((receiptId: string) => {
+				if (receiptId !== expectedReceiptId) return false;
+				Object.assign(goalState, {
+					active: false,
+					status: "error",
+					lastError: "Conditional goal delivery recovery exhausted",
+				});
+				return true;
+			});
+			const goalState = {
+				active: true,
+				status: "active",
+				goalId: "guarded-goal",
+				dispatchReceiptId: expectedReceiptId,
+				dispatchPhase: "receipt",
+				objective: "guarded objective",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				continuationsUsed: 0,
+			};
+			let recoveryQueued = false;
+			const recoverConditionalGoalDelivery = vi.fn(
+				(_receiptId: string, options?: { recoveryCommitted?: () => void }) => {
+					options?.recoveryCommitted?.();
+					recoveryQueued = true;
+					return true;
+				},
+			);
+			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => {
+				const session = makeRuntimeSession(options.sessionManager);
+				Object.assign(session, {
+					model: { provider: "test", id: "planner" } as Model<Api>,
+					thinkingLevel: "xhigh",
+					goalState,
+					failConditionalGoalDelivery,
+					recoverConditionalGoalDelivery,
+				});
+				return {
+					session,
+					extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["extensionsResult"],
+					services: { cwd: options.cwd, agentDir: options.agentDir } as Awaited<
+						ReturnType<CreateAgentSessionRuntimeFactory>
+					>["services"],
+					diagnostics: [],
+				};
+			});
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
+				createRuntime,
+			});
+			const internals = daemon as unknown as {
+				cronStore: AgentCronJobStore;
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				recoverConditionalCronDeliveryForState(state: ActiveSessionState): void;
+			};
+			const state = await internals.createRuntime({ type: "create", sessionPath: sessionFile });
+			const job = internals.cronStore.create({
+				activeSessionId: state.activeSessionId,
+				sessionId: state.runtime.session.sessionId,
+				sessionFile,
+				cwd: tempDir,
+				scheduleText: "in 1m",
+				prompt: "/goal guarded objective",
+				deliveryFence: {
+					version: 1,
+					activeSessionId: state.activeSessionId,
+					sessionName: "guarded-root",
+					cwd: tempDir,
+					model: { provider: "test", id: "planner" },
+					thinkingLevel: "xhigh",
+					messageCount: 0,
+					lastActivityAt: "2026-01-01T00:00:00.000Z",
+					taskState: "needs_input",
+					goal: null,
+				},
+			});
+			expectedReceiptId = job.id;
+			goalState.dispatchReceiptId = job.id;
+			internals.cronStore.rejectDelivery(
+				job.id,
+				"Conditional goal receipt persisted before delivery error: disk full",
+			);
+			const recoveryWrite = vi
+				.spyOn(internals.cronStore, "recordDeliveryRecoveryAttempt")
+				.mockImplementationOnce(() => {
+					throw new Error("recovery counter write failed");
+				});
+
+			internals.recoverConditionalCronDeliveryForState(state);
+
+			expect(recoveryQueued).toBe(false);
+			expect(internals.cronStore.list().find((candidate) => candidate.id === job.id)).not.toHaveProperty(
+				"deliveryRecoveryCount",
+			);
+			recoveryWrite.mockRestore();
+			for (let attempt = 0; attempt < 5; attempt += 1) {
+				internals.cronStore.recordDeliveryRecoveryAttempt(job.id);
+			}
+
+			internals.recoverConditionalCronDeliveryForState(state);
+
+			expect(failConditionalGoalDelivery).toHaveBeenCalledOnce();
+			expect(goalState).toMatchObject({ active: false, status: "error" });
+			expect(internals.cronStore.list().find((candidate) => candidate.id === job.id)).toMatchObject({
+				deliveryRecoveryCount: 5,
+				deliveryRecoveryExhaustedAt: expect.any(String),
+				lastError: "Conditional goal delivery recovery exhausted",
+			});
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

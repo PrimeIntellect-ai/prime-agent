@@ -167,7 +167,7 @@ prime-agent schedule list --all
 prime-agent schedule cancel <job-id>
 ```
 
-Scheduled jobs are persisted per session and continue while the UI is detached. Due ticks are claimed before delivery so a crash does not replay an uncertain prompt, and missed ticks are coalesced rather than accumulated into an unbounded backlog.
+Scheduled jobs are persisted per session and continue while the UI is detached. Due ticks are claimed before delivery so a crash does not replay an uncertain prompt, and missed ticks are coalesced rather than accumulated into an unbounded backlog. A conditionally fenced `/goal` additionally persists its job receipt before queueing and its provider-commit phase before provider code can observe the prompt. Daemon recovery rebuilds only a receipt-phase turn, counts each recovery before queue admission, and terminalizes an exhausted pre-provider receipt so an external coordinator can safely rearm it.
 
 ## Persistent Goals
 
@@ -195,6 +195,8 @@ await goal.complete()
 ```
 
 Goal state records token usage, elapsed time, continuation count, and an optional explicit token budget. The harness keeps prompting an active goal after ordinary assistant turns; only `goal.complete()` marks successful completion. Creating a persistent goal is an explicit user or host action, not something the agent should infer from every task.
+
+Resident daemon `get_state` summaries expose a non-sensitive goal fence (`active`, `status`, `goalId`, `updatedAt`, and optional `dispatchReceiptId`/`dispatchPhase`, or `null` when absent) so supervisors can make deterministic scheduling and crash-recovery decisions without receiving the goal objective.
 
 ## Autonomous Mode
 

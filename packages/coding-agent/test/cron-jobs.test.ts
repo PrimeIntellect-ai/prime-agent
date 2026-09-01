@@ -193,6 +193,113 @@ describe("AgentCronJobStore", () => {
 		expect(store.list()[0]).not.toHaveProperty("nextRunAt");
 	});
 
+	it("persists guarded jobs with a downgrade-safe source discriminator and exact fence", () => {
+		const storePath = makeStorePath(tempDirs);
+		const store = new AgentCronJobStore(storePath);
+		const deliveryFence = {
+			version: 1 as const,
+			activeSessionId: "active-1",
+			sessionName: "project-root",
+			cwd: "/tmp/project",
+			model: { provider: "test", id: "planner" },
+			thinkingLevel: "xhigh",
+			messageCount: 4,
+			lastActivityAt: "2026-01-01T12:30:00.000Z",
+			taskState: "needs_input" as const,
+			goal: null,
+		};
+		const job = store.create({
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			sessionFile: "/tmp/session.jsonl",
+			cwd: "/tmp/project",
+			scheduleText: "in 1h",
+			prompt: "/goal guarded work",
+			deliveryFence,
+			now: start,
+		});
+
+		expect(job).toMatchObject({ source: "conditional_cron", deliveryFence });
+		expect(new AgentCronJobStore(storePath).list()).toMatchObject([
+			{ id: job.id, source: "conditional_cron", deliveryFence },
+		]);
+		expect(JSON.parse(readFileSync(storePath, "utf8"))).toMatchObject({
+			jobs: [{ id: job.id, source: "conditional_cron", deliveryFence }],
+		});
+	});
+
+	it("persists an explicit terminal receipt after conditional recovery exhaustion", () => {
+		const storePath = makeStorePath(tempDirs);
+		const store = new AgentCronJobStore(storePath);
+		const job = store.create({
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			sessionFile: "/tmp/session.jsonl",
+			cwd: "/tmp/project",
+			scheduleText: "in 1h",
+			prompt: "/goal guarded work",
+			deliveryFence: {
+				version: 1,
+				activeSessionId: "active-1",
+				sessionName: "project-root",
+				cwd: "/tmp/project",
+				model: { provider: "test", id: "planner" },
+				thinkingLevel: "xhigh",
+				messageCount: 4,
+				lastActivityAt: "2026-01-01T12:30:00.000Z",
+				taskState: "needs_input",
+				goal: null,
+			},
+			now: start,
+		});
+		store.rejectDelivery(
+			job.id,
+			"Conditional goal receipt persisted before delivery error: disk full",
+			new Date("2026-01-01T12:35:00.000Z"),
+		);
+		for (let attempt = 0; attempt < 5; attempt += 1) {
+			store.recordDeliveryRecoveryAttempt(job.id, new Date(`2026-01-01T12:4${attempt}:00.000Z`));
+		}
+
+		const exhausted = store.recordDeliveryRecoveryExhausted(job.id, new Date("2026-01-01T12:50:00.000Z"));
+
+		expect(exhausted).toMatchObject({
+			id: job.id,
+			status: "cancelled",
+			deliveryRecoveryCount: 5,
+			deliveryRecoveryExhaustedAt: "2026-01-01T12:50:00.000Z",
+			lastError: "Conditional goal delivery recovery exhausted",
+		});
+		expect(new AgentCronJobStore(storePath).list()[0]).toMatchObject(exhausted!);
+	});
+
+	it("rejects guarded jobs whose profile fence is incomplete", () => {
+		const store = new AgentCronJobStore(makeStorePath(tempDirs));
+		expect(() =>
+			store.create({
+				activeSessionId: "active-1",
+				sessionId: "session-1",
+				sessionFile: "/tmp/session.jsonl",
+				cwd: "/tmp/project",
+				scheduleText: "in 1h",
+				prompt: "/goal guarded work",
+				deliveryFence: {
+					version: 1,
+					activeSessionId: "active-1",
+					sessionName: "project-root",
+					cwd: "/tmp/project",
+					model: { provider: "test", id: "" },
+					thinkingLevel: "xhigh",
+					messageCount: 4,
+					lastActivityAt: "2026-01-01T12:30:00.000Z",
+					taskState: "needs_input",
+					goal: null,
+				},
+				now: start,
+			}),
+		).toThrow("Cron delivery fence is invalid");
+	});
+
 	it("isolates worker-owned jobs in registered session artifact stores", () => {
 		const root = makeTempDir(tempDirs);
 		const firstArtifactDir = join(root, "session-artifacts", "session-1");
@@ -570,6 +677,27 @@ describe("AgentCronJobStore", () => {
 			prompt: "review the latest output",
 			now: start,
 		});
+		const conditional = store.create({
+			activeSessionId: "old-active",
+			sessionId: "old-session",
+			sessionFile: "/tmp/session.jsonl",
+			cwd: "/tmp/project",
+			scheduleText: "in 5m",
+			prompt: "/goal guarded work",
+			deliveryFence: {
+				version: 1,
+				activeSessionId: "old-active",
+				sessionName: "project-root",
+				cwd: "/tmp/project-restored",
+				model: { provider: "test", id: "planner" },
+				thinkingLevel: "xhigh",
+				messageCount: 4,
+				lastActivityAt: "2026-01-01T12:30:00.000Z",
+				taskState: "needs_input",
+				goal: null,
+			},
+			now: start,
+		});
 		store.createHeartbeat({
 			activeSessionId: "other-active",
 			sessionId: "other-session",
@@ -587,7 +715,9 @@ describe("AgentCronJobStore", () => {
 			cwd: "/tmp/project-restored",
 		});
 
-		expect(rebound.map((job) => job.id)).toEqual(expect.arrayContaining([userHeartbeat.id, rlmHeartbeat.id]));
+		expect(rebound.map((job) => job.id)).toEqual(
+			expect.arrayContaining([userHeartbeat.id, rlmHeartbeat.id, conditional.id]),
+		);
 		expect(store.getHeartbeat("old-active")).toBeUndefined();
 		expect(store.getHeartbeat("new-active")).toMatchObject({
 			id: userHeartbeat.id,
@@ -598,6 +728,10 @@ describe("AgentCronJobStore", () => {
 			id: rlmHeartbeat.id,
 			sessionId: "new-session",
 			cwd: "/tmp/project-restored",
+		});
+		expect(store.list().find((job) => job.id === conditional.id)).toMatchObject({
+			activeSessionId: "new-active",
+			deliveryFence: { activeSessionId: "new-active" },
 		});
 		expect(store.getHeartbeat("other-active")).toMatchObject({ prompt: "check on a different session" });
 	});
@@ -632,6 +766,27 @@ describe("AgentCronJobStore", () => {
 			prompt: "review the latest output",
 			now: start,
 		});
+		const conditional = store.create({
+			activeSessionId: "active-1",
+			sessionId: "old-session",
+			sessionFile: "/tmp/old-session.jsonl",
+			cwd: "/tmp/project",
+			scheduleText: "in 5m",
+			prompt: "/goal stay with the stable root",
+			deliveryFence: {
+				version: 1,
+				activeSessionId: "active-1",
+				sessionName: "old-root",
+				cwd: "/tmp/project",
+				model: { provider: "test", id: "planner" },
+				thinkingLevel: "xhigh",
+				messageCount: 4,
+				lastActivityAt: "2026-01-01T12:30:00.000Z",
+				taskState: "needs_input",
+				goal: null,
+			},
+			now: start,
+		});
 
 		const rebound = store.rebindSessionJobs({
 			activeSessionId: "active-1",
@@ -662,6 +817,12 @@ describe("AgentCronJobStore", () => {
 				}),
 			]),
 		);
+		expect(rebound.map((job) => job.id)).not.toContain(conditional.id);
+		expect(store.list().find((job) => job.id === conditional.id)).toMatchObject({
+			sessionId: "old-session",
+			sessionFile: "/tmp/old-session.jsonl",
+			deliveryFence: { activeSessionId: "active-1" },
+		});
 	});
 
 	it("keeps multiple RLM heartbeats separate from the single user heartbeat", () => {
@@ -1325,6 +1486,45 @@ describe("AgentCronScheduler", () => {
 		]);
 		expect(recovered.getClaimedJob(heartbeat.id)).toBeUndefined();
 		expect(recovered.getDueJob(heartbeat.id, new Date("2026-01-01T12:34:11.000Z"))).toBeUndefined();
+	});
+
+	it("cancels an interrupted guarded one-shot without claiming it ran", () => {
+		const storePath = makeStorePath(tempDirs);
+		const store = new AgentCronJobStore(storePath);
+		const guarded = store.create({
+			activeSessionId: "active-1",
+			sessionId: "session-1",
+			sessionFile: "/tmp/session.jsonl",
+			cwd: "/tmp/project",
+			scheduleText: "in 1m",
+			prompt: "/goal guarded work",
+			deliveryFence: {
+				version: 1,
+				activeSessionId: "active-1",
+				sessionName: "project-root",
+				cwd: "/tmp/project",
+				model: { provider: "test", id: "planner" },
+				thinkingLevel: "xhigh",
+				messageCount: 0,
+				lastActivityAt: "2026-01-01T12:34:00.000Z",
+				taskState: "needs_input",
+				goal: null,
+			},
+			now: start,
+		});
+		store.claimDue(new Date("2026-01-01T12:35:00.000Z"));
+
+		const recovered = new AgentCronJobStore(storePath);
+		expect(recovered.recoverInterruptedDispatches(new Date("2026-01-01T12:35:01.000Z"))).toEqual([
+			expect.objectContaining({
+				id: guarded.id,
+				status: "cancelled",
+				runCount: 0,
+				lastSkippedAt: "2026-01-01T12:35:01.000Z",
+				lastError: "Interrupted before scheduled operation completion",
+			}),
+		]);
+		expect(recovered.getClaimedJob(guarded.id)).toBeUndefined();
 	});
 });
 

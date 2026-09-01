@@ -1,0 +1,1 @@
+- Added sanitized goal-generation and conditional-delivery receipt fences to resident daemon summaries, with crash-safe pre-provider recovery and explicit exhaustion.

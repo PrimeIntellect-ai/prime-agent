@@ -73,6 +73,7 @@ import {
 	createAgentSessionRuntime,
 } from "../../core/agent-session-runtime.js";
 import {
+	type AgentCronDeliveryFence,
 	type AgentCronJob,
 	AgentCronJobStore,
 	AgentCronScheduler,
@@ -238,6 +239,45 @@ const structuredLog = getLogger("coding-agent.daemon");
 const WORKER_SNAPSHOT_TERMINAL_DRAIN_TIMEOUT_MS = 1_000;
 const UPDATE_RESTART_PREPARE_TIMEOUT_MS = 90_000;
 const MAX_SESSION_SNAPSHOT_STABILIZATION_RETRIES = 3;
+const MAX_CONDITIONAL_GOAL_RECOVERY_ATTEMPTS = 5;
+
+function matchesCronDeliveryFence(fence: AgentCronDeliveryFence, state: ActiveSessionState): boolean {
+	const summary = summaryForActiveSession(state);
+	const actualGoal = summary.goal ?? null;
+	const goalMatches =
+		fence.goal === null
+			? actualGoal === null
+			: actualGoal !== null &&
+				actualGoal.active === fence.goal.active &&
+				actualGoal.status === fence.goal.status &&
+				actualGoal.goalId === fence.goal.goalId &&
+				actualGoal.dispatchReceiptId === fence.goal.dispatchReceiptId &&
+				actualGoal.dispatchPhase === fence.goal.dispatchPhase &&
+				actualGoal.updatedAt === fence.goal.updatedAt;
+	return (
+		summary.activeSessionId === fence.activeSessionId &&
+		summary.runtimeKind === "top-level" &&
+		summary.rlmDepth === 0 &&
+		summary.sessionName === fence.sessionName &&
+		summary.cwd === fence.cwd &&
+		summary.model?.provider === fence.model.provider &&
+		summary.model.id === fence.model.id &&
+		summary.thinkingLevel === fence.thinkingLevel &&
+		summary.messageCount === fence.messageCount &&
+		summary.lastActivityAt === fence.lastActivityAt &&
+		summary.taskState === fence.taskState &&
+		goalMatches &&
+		!isActiveSessionBusy(state) &&
+		!state.runtime.session.isRetrying &&
+		summary.isStreaming === false &&
+		summary.isCompacting === false &&
+		summary.isBashRunning === false &&
+		summary.hasRunningRlmChildren === false &&
+		summary.isRunningTools === false &&
+		summary.unfinishedActionCount === 0 &&
+		summary.sessionActions.queuedCount === 0
+	);
+}
 
 const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
@@ -544,6 +584,7 @@ export class AgentDaemon {
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
 	/** In-flight admission spawn appends, awaited (and consumed) by createRlmSubagentRuntime. */
 	private readonly pendingRlmSpawnAppends = new Map<string, Promise<void>>();
+	private readonly recoveredConditionalCronJobs = new Map<string, AgentCronJob>();
 
 	constructor(
 		private readonly socketPath: string,
@@ -570,6 +611,7 @@ export class AgentDaemon {
 			onError: (job, error) => {
 				this.log(`Cron job ${job.id} failed: ${error instanceof Error ? error.message : String(error)}`);
 			},
+			onRecovered: (jobs) => this.rememberRecoveredConditionalCronJobs(jobs),
 		});
 		this.cronStore.onHeartbeatChange(() => this.broadcastGlobal({ type: "heartbeats_changed" }));
 	}
@@ -1421,6 +1463,7 @@ export class AgentDaemon {
 		}
 		this.registerCronStoreForState(state);
 		this.rebindCronJobsToState(state);
+		this.recoverConditionalCronDeliveryForState(state);
 		if (runtime.metadata.kind !== "subagent") {
 			// Mark the session as daemon-resident so a restarted daemon can
 			// restore it. Closes for kill/completed/replaced flip this back to
@@ -1452,6 +1495,69 @@ export class AgentDaemon {
 		}
 		this.registerCronStoreForState(state);
 		this.rebindCronJobsToState(state);
+		this.recoverConditionalCronDeliveryForState(state);
+	}
+
+	private rememberRecoveredConditionalCronJobs(jobs: readonly AgentCronJob[]): void {
+		for (const job of jobs) {
+			if (
+				job.source === "conditional_cron" &&
+				job.status === "cancelled" &&
+				job.lastError === "Interrupted before scheduled operation completion"
+			) {
+				this.recoveredConditionalCronJobs.set(job.id, job);
+			}
+		}
+		for (const state of this.sessions.values()) this.recoverConditionalCronDeliveryForState(state);
+	}
+
+	private recoverConditionalCronDeliveryForState(state: ActiveSessionState): void {
+		const goalState = state.runtime.session.goalState;
+		const receiptId = goalState?.dispatchReceiptId;
+		if (!receiptId) return;
+		const job =
+			this.recoveredConditionalCronJobs.get(receiptId) ??
+			this.cronStore
+				.list()
+				.find(
+					(candidate) =>
+						candidate.id === receiptId &&
+						candidate.source === "conditional_cron" &&
+						candidate.status === "cancelled" &&
+						candidate.lastError !== "Delivery fence changed before prompt admission",
+				);
+		if (!job || job.sessionId !== state.runtime.session.sessionId) return;
+		if (goalState.dispatchPhase !== "receipt") {
+			this.recoveredConditionalCronJobs.delete(receiptId);
+			return;
+		}
+		if ((job.deliveryRecoveryCount ?? 0) >= MAX_CONDITIONAL_GOAL_RECOVERY_ATTEMPTS) {
+			const alreadyFailed =
+				goalState.status === "error" && goalState.lastError === "Conditional goal delivery recovery exhausted";
+			try {
+				if (alreadyFailed || state.runtime.session.failConditionalGoalDelivery(receiptId)) {
+					this.cronStore.recordDeliveryRecoveryExhausted(receiptId);
+					this.recoveredConditionalCronJobs.delete(receiptId);
+				}
+			} catch (error) {
+				this.log(`Conditional cron recovery exhaustion ${receiptId} failed: ${String(error)}`);
+			}
+			return;
+		}
+		const recover = state.runtime.session.recoverConditionalGoalDelivery;
+		if (typeof recover !== "function") return;
+		try {
+			recover.call(state.runtime.session, receiptId, {
+				recoveryCommitted: () => {
+					if (!this.cronStore.recordDeliveryRecoveryAttempt(receiptId)) {
+						throw new Error(`Conditional cron recovery receipt ${receiptId} disappeared`);
+					}
+				},
+			});
+			this.recoveredConditionalCronJobs.delete(receiptId);
+		} catch (error) {
+			this.log(`Conditional cron recovery ${receiptId} failed: ${String(error)}`);
+		}
 	}
 
 	private registerCronStoreForState(state: ActiveSessionState): void {
@@ -1464,7 +1570,7 @@ export class AgentDaemon {
 			return;
 		}
 		if (this.cronStore.registerSessionArtifact(session.sessionId, artifactDir)) {
-			this.cronStore.recoverSessionArtifact(session.sessionId);
+			this.rememberRecoveredConditionalCronJobs(this.cronStore.recoverSessionArtifact(session.sessionId));
 			this.cronScheduler.wake();
 		}
 	}
@@ -1731,6 +1837,10 @@ export class AgentDaemon {
 		if (!state || !runnableJob || !this.isCronJobRunnableForState(runnableJob, state, requirePersistedJob)) {
 			return "skipped";
 		}
+		if (runnableJob.deliveryFence && !matchesCronDeliveryFence(runnableJob.deliveryFence, state)) {
+			this.cronStore.rejectDelivery(runnableJob.id, "Delivery fence changed before prompt admission");
+			return "skipped";
+		}
 		const session = state.runtime.session;
 		if (shouldDeferHeartbeatCronJob(runnableJob, session)) {
 			return "skipped";
@@ -1741,6 +1851,10 @@ export class AgentDaemon {
 			session.isRetrying ||
 			session.isBashRunning ||
 			session.unfinishedActionCount > 0;
+		if (runnableJob.deliveryFence && shouldQueueCronPrompt) {
+			this.cronStore.rejectDelivery(runnableJob.id, "Delivery fence changed before prompt admission");
+			return "skipped";
+		}
 		if (!isHeartbeatCronJob(runnableJob) && shouldQueueCronPrompt) {
 			if (!this.isCronJobRunnableForState(runnableJob, state, requirePersistedJob)) {
 				return "skipped";
@@ -1760,10 +1874,15 @@ export class AgentDaemon {
 		}
 		// Re-check after the session admission fence wait: the job may have been cancelled, completed, or updated meanwhile.
 		const unrunnableAtAdmission = new Error("Cron job became unrunnable before admission");
+		const deliveryFenceChangedAtAdmission = new Error("Cron delivery fence changed before admission");
 		const admissionCommitted = () => {
 			const refreshed = getRunnableJob();
 			if (!refreshed || refreshed.prompt !== current.prompt || refreshed.deliveryMode !== current.deliveryMode) {
 				throw unrunnableAtAdmission;
+			}
+			if (refreshed.deliveryFence && !matchesCronDeliveryFence(refreshed.deliveryFence, state)) {
+				this.cronStore.rejectDelivery(refreshed.id, "Delivery fence changed before prompt admission");
+				throw deliveryFenceChangedAtAdmission;
 			}
 		};
 		try {
@@ -1776,6 +1895,13 @@ export class AgentDaemon {
 				});
 				return;
 			}
+			if (current.deliveryFence) {
+				await session.startGoalFromConditionalPrompt(current.prompt, {
+					admissionCommitted,
+					receiptId: current.id,
+				});
+				return;
+			}
 			await session.promptUntilAccepted(current.prompt, {
 				streamingBehavior: "followUp",
 				source: "rpc",
@@ -1783,6 +1909,26 @@ export class AgentDaemon {
 			});
 		} catch (error) {
 			if (error === unrunnableAtAdmission) {
+				if (current.deliveryFence) {
+					this.cronStore.rejectDelivery(current.id, "Conditional goal admission invalidated");
+				}
+				return "skipped";
+			}
+			if (error === deliveryFenceChangedAtAdmission) {
+				return "skipped";
+			}
+			if (current.deliveryFence) {
+				const reason = error instanceof Error ? error.message : String(error);
+				const receiptPersisted = session.goalState.dispatchReceiptId === current.id;
+				this.cronStore.rejectDelivery(
+					current.id,
+					`${
+						receiptPersisted
+							? "Conditional goal receipt persisted before delivery error"
+							: "Conditional goal delivery retryable"
+					}: ${reason.slice(0, 500)}`,
+				);
+				if (receiptPersisted) this.recoverConditionalCronDeliveryForState(state);
 				return "skipped";
 			}
 			throw error;
@@ -1793,7 +1939,12 @@ export class AgentDaemon {
 		return this.cronStore.getClaimedJob(jobId) ?? this.cronStore.getDueJob(jobId);
 	}
 
-	private createCronJobForState(state: ActiveSessionState, schedule: string, prompt: string): AgentCronJob {
+	private createCronJobForState(
+		state: ActiveSessionState,
+		schedule: string,
+		prompt: string,
+		deliveryFence?: AgentCronDeliveryFence,
+	): AgentCronJob {
 		const session = state.runtime.session;
 		const sessionFile = session.sessionFile;
 		if (!sessionFile) {
@@ -1807,6 +1958,7 @@ export class AgentDaemon {
 			runtimeKind: state.runtime.metadata.kind,
 			scheduleText: schedule,
 			prompt,
+			deliveryFence,
 		});
 		this.cronScheduler.wake();
 		return job;
@@ -4464,6 +4616,10 @@ export class AgentDaemon {
 			}
 
 			case "cron_list": {
+				if (command.activeSessionId) {
+					const state = this.sessions.get(command.activeSessionId);
+					if (state) this.recoverConditionalCronDeliveryForState(state);
+				}
 				const jobs = this.cronStore.list().filter((job) => {
 					if (!command.includeInactive && job.status !== "active" && job.status !== "paused") {
 						return false;
@@ -4491,7 +4647,7 @@ export class AgentDaemon {
 
 			case "cron_add": {
 				const state = this.getSessionState(command.activeSessionId);
-				const job = this.createCronJobForState(state, command.schedule, command.prompt);
+				const job = this.createCronJobForState(state, command.schedule, command.prompt, command.deliveryFence);
 				return success(command.id, "cron_add", { job });
 			}
 

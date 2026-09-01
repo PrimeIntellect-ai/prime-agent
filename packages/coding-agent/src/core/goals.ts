@@ -6,6 +6,7 @@ export const GOAL_CONTEXT_CUSTOM_TYPE = "goal_context";
 export const GOAL_CONTEXT_PREVIEW_LABEL = "Goal context";
 export const GOAL_SKILL_NAME = "goal";
 export const MAX_THREAD_GOAL_OBJECTIVE_CHARS = 4000;
+export const MAX_GOAL_DISPATCH_RECEIPT_CHARS = 256;
 
 export type GoalStatus = "idle" | "active" | "paused" | "budget_limited" | "complete" | "error";
 export type GoalContextKind = "continuation" | "budget_limit" | "objective_updated";
@@ -14,6 +15,10 @@ export interface GoalState {
 	active: boolean;
 	status: GoalStatus;
 	goalId?: string;
+	/** Durable correlation for a conditionally delivered scheduled /goal. */
+	dispatchReceiptId?: string;
+	/** Durable provider boundary for crash-safe conditional delivery recovery. */
+	dispatchPhase?: "receipt" | "provider_committed";
 	objective?: string;
 	tokenBudget?: number;
 	tokensUsed: number;
@@ -47,6 +52,7 @@ export type GoalHostResponse = {
 export interface GoalContextDetails {
 	kind: GoalContextKind;
 	goalId?: string;
+	dispatchReceiptId?: string;
 	objective: string;
 	status: GoalStatus;
 	continuationsUsed: number;
@@ -93,6 +99,15 @@ export function validateGoalBudget(value: number | undefined): number | undefine
 	return value;
 }
 
+export function validateGoalDispatchReceiptId(value: string | undefined): string | undefined {
+	if (value === undefined) return undefined;
+	const receiptId = value.trim();
+	if (!receiptId || receiptId.length > MAX_GOAL_DISPATCH_RECEIPT_CHARS) {
+		throw new Error(`Goal dispatch receipt must be between 1 and ${MAX_GOAL_DISPATCH_RECEIPT_CHARS} characters.`);
+	}
+	return receiptId;
+}
+
 export function goalTokenDeltaForUsage(usage: { input: number; output: number }): number {
 	return Math.max(0, usage.input) + Math.max(0, usage.output);
 }
@@ -113,6 +128,24 @@ export function isPersistedGoalState(value: unknown): value is GoalState {
 		record.status !== "complete" &&
 		record.status !== "error"
 	) {
+		return false;
+	}
+	if (
+		record.dispatchReceiptId !== undefined &&
+		(typeof record.dispatchReceiptId !== "string" ||
+			record.dispatchReceiptId.length === 0 ||
+			record.dispatchReceiptId.length > MAX_GOAL_DISPATCH_RECEIPT_CHARS)
+	) {
+		return false;
+	}
+	if (
+		record.dispatchPhase !== undefined &&
+		record.dispatchPhase !== "receipt" &&
+		record.dispatchPhase !== "provider_committed"
+	) {
+		return false;
+	}
+	if (record.dispatchPhase !== undefined && typeof record.dispatchReceiptId !== "string") {
 		return false;
 	}
 	return (
@@ -171,6 +204,7 @@ export function createGoalContextMessage(
 		details: {
 			kind,
 			goalId: goal.goalId,
+			dispatchReceiptId: goal.dispatchReceiptId,
 			objective: goal.objective,
 			status: goal.status,
 			continuationsUsed: goal.continuationsUsed,
