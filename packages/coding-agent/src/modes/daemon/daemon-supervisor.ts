@@ -2472,7 +2472,6 @@ export class DaemonSupervisor {
 			if (!this.matchesListSessionDir(summary, sessionDir, spawnParents)) continue;
 			merged.push(summary);
 		}
-		const unseededEntries: WorkerRosterEntry[] = [];
 		const unseededFiles = new Set<string>();
 		for (const edge of spawnEdges) {
 			const childPath = canonicalSessionPath(edge.child);
@@ -2481,13 +2480,13 @@ export class DaemonSupervisor {
 			const entry = this.rosterEntryForSpawnLedgerEdge(edge);
 			if (this.roster().has(entry.agentId)) continue;
 			unseededFiles.add(childPath);
-			unseededEntries.push(entry);
-		}
-		for (const entry of await Promise.all(unseededEntries.map((entry) => this.hydratedSeedEntry(entry)))) {
+			// Hydrated one at a time, like the boot seed: a large dead-family ledger must not fan
+			// out into one concurrent transcript read per child.
+			const hydrated = await this.hydratedSeedEntry(entry);
 			// The same classification a roster write would have applied: these rows read "inactive".
 			const summary = sessionSummaryFromRosterEntry({
-				...entry,
-				status: classifySessionRosterStatus(entry.summary),
+				...hydrated,
+				status: classifySessionRosterStatus(hydrated.summary),
 			});
 			if (cwd !== undefined && resolve(summary.cwd) !== cwd) continue;
 			if (!this.matchesListSessionDir(summary, sessionDir, spawnParents)) continue;
