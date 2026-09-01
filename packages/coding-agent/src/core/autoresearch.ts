@@ -8,7 +8,6 @@ import {
 	readFileSync,
 	realpathSync,
 	renameSync,
-	statSync,
 	writeFileSync,
 } from "node:fs";
 import { BlockList, isIP } from "node:net";
@@ -1935,6 +1934,28 @@ function canonicalizeWorkspaceDir(dir: string): string {
 	}
 }
 
+function getDescriptorCanonicalPath(fd: number, label: string): string {
+	try {
+		const procPath = `/proc/self/fd/${fd}`;
+		if (existsSync(procPath)) {
+			return realpathSync(procPath);
+		}
+	} catch {
+		// Ignore and try next
+	}
+
+	try {
+		const devPath = `/dev/fd/${fd}`;
+		if (existsSync(devPath)) {
+			return realpathSync(devPath);
+		}
+	} catch {
+		// Ignore and try next
+	}
+
+	throw new Error(`handle-based canonicalization is unavailable on this platform for artifact verification: ${label}`);
+}
+
 export class AutoresearchStore {
 	private readonly statePath?: string;
 	private state: AutoresearchState;
@@ -1978,6 +1999,61 @@ export class AutoresearchStore {
 		const temporaryPath = `${this.statePath}.${process.pid}.${randomUUID()}.tmp`;
 		writeFileSync(temporaryPath, `${JSON.stringify(this.state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
 		renameSync(temporaryPath, this.statePath);
+	}
+
+	private readAndVerifyContainedArtifact(path: string): {
+		canonicalRelative: string;
+		sha256: string;
+		size: number;
+	} {
+		const normalized = normalizeAutoresearchArtifactPath(path, "experiment artifact path");
+		const canonicalWorkspace = canonicalizeWorkspaceDir(this.workspaceDir);
+		if (!existsSync(canonicalWorkspace)) {
+			throw new Error(`workspace directory does not exist: ${this.workspaceDir}`);
+		}
+		const absoluteTarget = resolve(canonicalWorkspace, normalized);
+		const staticRel = relative(canonicalWorkspace, absoluteTarget);
+		if (staticRel === ".." || staticRel.startsWith(`..${sep}`) || isAbsolute(staticRel)) {
+			throw new Error(`experiment artifact escapes the workspace: ${path}`);
+		}
+		if (!existsSync(absoluteTarget)) {
+			throw new Error(`experiment artifact does not exist: ${path}`);
+		}
+
+		let fd: number;
+		try {
+			fd = openSync(absoluteTarget, "r");
+		} catch {
+			throw new Error(`experiment artifact could not be opened: ${path}`);
+		}
+
+		try {
+			const fstats = fstatSync(fd);
+			if (!fstats.isFile()) {
+				throw new Error(`experiment artifact is not a file: ${path}`);
+			}
+
+			const canonicalTarget = getDescriptorCanonicalPath(fd, path);
+			const canonicalRel = relative(canonicalWorkspace, canonicalTarget);
+			if (
+				canonicalRel === "" ||
+				canonicalRel === ".." ||
+				canonicalRel.startsWith(`..${sep}`) ||
+				isAbsolute(canonicalRel)
+			) {
+				throw new Error(`experiment artifact escapes the workspace: ${path}`);
+			}
+
+			const content = readFileSync(fd);
+			const sha256 = createHash("sha256").update(content).digest("hex");
+			return {
+				canonicalRelative: canonicalRel.replaceAll("\\", "/"),
+				sha256,
+				size: fstats.size,
+			};
+		} finally {
+			closeSync(fd);
+		}
 	}
 
 	getState(): AutoresearchState {
@@ -2196,76 +2272,6 @@ export class AutoresearchStore {
 		}
 		this.save();
 		return structuredClone(experiment);
-	}
-
-	private readAndVerifyContainedArtifact(path: string): {
-		canonicalRelative: string;
-		sha256: string;
-		size: number;
-	} {
-		const normalized = normalizeAutoresearchArtifactPath(path, "experiment artifact path");
-		const canonicalWorkspace = canonicalizeWorkspaceDir(this.workspaceDir);
-		if (!existsSync(canonicalWorkspace)) {
-			throw new Error(`workspace directory does not exist: ${this.workspaceDir}`);
-		}
-		const absoluteTarget = resolve(canonicalWorkspace, normalized);
-		const staticRel = relative(canonicalWorkspace, absoluteTarget);
-		if (staticRel === ".." || staticRel.startsWith(`..${sep}`) || isAbsolute(staticRel)) {
-			throw new Error(`experiment artifact escapes the workspace: ${path}`);
-		}
-		if (!existsSync(absoluteTarget)) {
-			throw new Error(`experiment artifact does not exist: ${path}`);
-		}
-
-		let fd: number;
-		try {
-			fd = openSync(absoluteTarget, "r");
-		} catch {
-			throw new Error(`experiment artifact could not be opened: ${path}`);
-		}
-
-		try {
-			const fstats = fstatSync(fd);
-			if (!fstats.isFile()) {
-				throw new Error(`experiment artifact is not a file: ${path}`);
-			}
-
-			let canonicalTarget: string | undefined;
-			if (process.platform === "linux") {
-				try {
-					canonicalTarget = realpathSync(`/proc/self/fd/${fd}`);
-				} catch {
-					canonicalTarget = undefined;
-				}
-			}
-			if (!canonicalTarget) {
-				canonicalTarget = realpathSync(absoluteTarget);
-				const currentStat = statSync(canonicalTarget);
-				if (currentStat.ino !== fstats.ino || currentStat.dev !== fstats.dev) {
-					throw new Error(`experiment artifact was modified during verification: ${path}`);
-				}
-			}
-
-			const canonicalRel = relative(canonicalWorkspace, canonicalTarget);
-			if (
-				canonicalRel === "" ||
-				canonicalRel === ".." ||
-				canonicalRel.startsWith(`..${sep}`) ||
-				isAbsolute(canonicalRel)
-			) {
-				throw new Error(`experiment artifact escapes the workspace: ${path}`);
-			}
-
-			const content = readFileSync(fd);
-			const sha256 = createHash("sha256").update(content).digest("hex");
-			return {
-				canonicalRelative: canonicalRel.replaceAll("\\", "/"),
-				sha256,
-				size: fstats.size,
-			};
-		} finally {
-			closeSync(fd);
-		}
 	}
 
 	private createArtifactReceipts(paths: string[]): AutoresearchArtifactReceipt[] {
