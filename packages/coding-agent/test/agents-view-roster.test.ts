@@ -155,6 +155,44 @@ describe("agents-view roster store", () => {
 		client.emit({ type: "roster_update", changed: [ledgerEntry({ id: "f", sessionId: "f" })] });
 		expect(store.summaries().some((entry) => entry.sessionId === "f")).toBe(false);
 	});
+
+	it("keeps a recovered session attach alive when the roster subscribe fails", async () => {
+		const client = fakeRosterClient([ledgerEntry({ id: "a", sessionId: "a" })]);
+		client.request.mockImplementation(async (command: { type: string }) => {
+			if (command.type === "roster_subscribe") {
+				return { type: "response", command: command.type, success: false, error: "subscribe timed out" };
+			}
+			return {
+				type: "response",
+				command: command.type,
+				success: true,
+				data: { id: "root-active", sessionId: "root", activeSessionId: "root-active" },
+			};
+		});
+		const store = new AgentsViewRosterStore();
+		const connection = Object.assign(Object.create(DaemonAgentConnection.prototype), {
+			options: {},
+			client,
+			rosterStore: store,
+			activeSessionId: "root-active",
+			lastEventSequence: undefined,
+			lastEventCursor: undefined,
+			requestData: vi.fn(async () => ({ id: "root-active", sessionId: "root", activeSessionId: "root-active" })),
+		}) as DaemonAgentConnection;
+
+		// The bar is an accessory: the session recovery must not fail with it.
+		await expect(connection.attach()).resolves.toBeUndefined();
+
+		// The seam self-heals: a later attach through the same store subscribes again.
+		client.request.mockImplementation(async (command: { type: string }) => ({
+			type: "response",
+			command: command.type,
+			success: true,
+			data: { roster: [ledgerEntry({ id: "a", sessionId: "a" })] },
+		}));
+		await expect(store.attach(client as never)).resolves.toBe(true);
+		expect(store.summaries().map((entry) => entry.sessionId)).toEqual(["a"]);
+	});
 });
 
 describe("roster-driven agents view rows", () => {

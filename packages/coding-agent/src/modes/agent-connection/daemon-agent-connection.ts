@@ -379,7 +379,10 @@ export class DaemonAgentConnection implements AgentConnection {
 			this.latestSnapshot = undefined;
 			this.latestSnapshotIsFresh = false;
 		}
-		if (this.rosterStore) await this.rosterStore.attach(this.client);
+		// The roster bar is an accessory: its subscribe failure must never fail an
+		// otherwise-recovered session. The bar degrades; the next reconnect or rebind
+		// re-attaches through this same seam.
+		if (this.rosterStore) await this.rosterStore.attach(this.client).catch(() => undefined);
 	}
 
 	async subscribeAgentRoster(
