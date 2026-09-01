@@ -19,7 +19,7 @@ pkg install nodejs termux-api git ripgrep
 # Clone and install Prime Agent from source
 git clone https://github.com/PrimeIntellect-ai/prime-agent.git
 cd prime-agent
-npm ci
+bun install --frozen-lockfile
 
 # Run Prime Agent
 ./prime-agent.sh
