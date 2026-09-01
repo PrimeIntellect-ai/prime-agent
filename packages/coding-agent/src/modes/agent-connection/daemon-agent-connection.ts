@@ -1581,10 +1581,20 @@ export class DaemonAgentConnection implements AgentConnection {
 		}
 		this.reconnectPromise = (async () => {
 			void this.emit({ type: "connection_status", status: "reconnecting", error: cause.message });
-			const deadline = Date.now() + (this.options.reconnectTimeoutMs ?? DAEMON_RECONNECT_TIMEOUT_MS);
+			const timeoutMs = this.options.reconnectTimeoutMs ?? DAEMON_RECONNECT_TIMEOUT_MS;
+			let deadline: number | undefined;
 			let attempt = 0;
 			let lastError: Error = cause;
-			while (!this.disposed && Date.now() < deadline) {
+			while (!this.disposed) {
+				// A held direct link owns session liveness: control-plane recovery retries unbounded,
+				// and the bounded session-plane deadline arms only once the direct link is gone.
+				const directSessionHeld = this.client instanceof DaemonRoutedClient && this.client.hasDirectTransport;
+				if (directSessionHeld) {
+					deadline = undefined;
+				} else {
+					deadline ??= Date.now() + timeoutMs;
+					if (Date.now() >= deadline) break;
+				}
 				let controlPlaneHandshakeComplete = false;
 				try {
 					await this.options.recoverDaemon?.();
@@ -1594,15 +1604,19 @@ export class DaemonAgentConnection implements AgentConnection {
 					await this.client.connect(1000);
 					await this.client.waitForHello(3000);
 					controlPlaneHandshakeComplete = true;
+					if (directSessionHeld) {
+						if (this.client instanceof DaemonRoutedClient && this.client.hasDirectTransport) {
+							void this.emit({ type: "connection_status", status: "connected" });
+							return;
+						}
+						// The direct link died mid-recovery: rerun as a bounded session-plane reconnect.
+						continue;
+					}
 					// This loop owns the retry: a socket close must reject these instead of parking them behind a hello it can never produce.
 					await this.attach({ recoverable: false });
 					if (!this.disposed) {
-						// A held direct link streamed session state throughout; only a supervisor re-attach resyncs.
-						const directSessionHeld = this.client instanceof DaemonRoutedClient && this.client.hasDirectTransport;
-						if (!directSessionHeld) {
-							const snapshot = await this.getInitialSnapshot({ recoverable: false });
-							void this.emit({ type: "session_resynced", snapshot });
-						}
+						const snapshot = await this.getInitialSnapshot({ recoverable: false });
+						void this.emit({ type: "session_resynced", snapshot });
 						void this.emit({ type: "connection_status", status: "connected" });
 					}
 					return;
@@ -1618,11 +1632,14 @@ export class DaemonAgentConnection implements AgentConnection {
 						error instanceof DaemonControlPlaneTransportError ||
 						!this.client.isControlPlaneReady;
 					if (shouldResetControlPlane) this.client.resetTransportForReconnect();
-					const remainingMs = deadline - Date.now();
-					if (remainingMs <= 0) {
+					if (deadline !== undefined && deadline - Date.now() <= 0) {
 						break;
 					}
-					const delayMs = Math.min(remainingMs, 2000, 100 * 2 ** Math.min(attempt, 5));
+					const delayMs = Math.min(
+						...(deadline !== undefined ? [deadline - Date.now()] : []),
+						2000,
+						100 * 2 ** Math.min(attempt, 5),
+					);
 					attempt++;
 					await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
 				}

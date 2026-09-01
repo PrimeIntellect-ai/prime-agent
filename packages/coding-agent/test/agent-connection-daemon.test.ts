@@ -799,6 +799,7 @@ describe("DaemonAgentConnection", () => {
 
 	it("keeps serving the session on the direct link and reconnects a lost supervisor socket", async () => {
 		const supervisor = new FakeDaemonClient();
+		const directRequests: DaemonCommand["type"][] = [];
 		let closeSent = false;
 		const direct = {
 			isConnected: true,
@@ -807,6 +808,7 @@ describe("DaemonAgentConnection", () => {
 			onMessage: () => () => {},
 			onClose: () => () => {},
 			request: async (command: DaemonCommand) => {
+				directRequests.push(command.type);
 				if (!closeSent) {
 					closeSent = true;
 					supervisor.connected = false;
@@ -830,6 +832,9 @@ describe("DaemonAgentConnection", () => {
 		await vi.waitFor(() => expect(supervisor.reconnectCount).toBe(1));
 
 		expect(routed.hasDirectTransport).toBe(true);
+		// Held-direct recovery is control-plane only: no re-attach crosses either socket.
+		expect(directRequests.filter((type) => type === "attach")).toHaveLength(1);
+		expect(supervisor.requests.filter((request) => request.type === "attach")).toHaveLength(0);
 		await connection.dispose();
 	});
 
@@ -1122,6 +1127,58 @@ describe("DaemonAgentConnection", () => {
 		expect(events.some((event) => event.type === "closed")).toBe(false);
 		await connection.dispose();
 	});
+
+	it("outlives the reconnect deadline while the direct link streams, then bounds recovery once it dies", async () => {
+		const supervisor = new FakeDaemonClient();
+		const closeListeners = new Set<(error: Error) => void>();
+		let directConnected = true;
+		const direct = {
+			get isConnected() {
+				return directConnected;
+			},
+			hello: supervisor.hello,
+			supportsServerCapability: (capability: string) => supervisor.supportsServerCapability(capability),
+			onMessage: () => () => {},
+			onClose: (listener: (error: Error) => void) => {
+				closeListeners.add(listener);
+				return () => closeListeners.delete(listener);
+			},
+			request: async (command: Extract<DaemonCommand, { type: "attach" }>) => ({
+				type: "response" as const,
+				command: "attach" as const,
+				success: true as const,
+				data: createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12),
+			}),
+			close: () => {
+				directConnected = false;
+			},
+		} as unknown as DaemonWorkerClient;
+		const routed = new DaemonRoutedClient(asDaemonClient(supervisor), direct);
+		const connection = await DaemonAgentConnection.attach(routed, "active-1", { reconnectTimeoutMs: 60 });
+		const events: AgentConnectionEvent[] = [];
+		connection.subscribe(async (event) => {
+			events.push(event);
+		});
+
+		supervisor.connected = false;
+		supervisor.reconnectError = new Error("supervisor is down");
+		supervisor.emitClose(new Error("supervisor socket lost"));
+		// Three failed control-plane attempts span well past the 60ms deadline.
+		await vi.waitFor(() => expect(supervisor.resetTransportCount).toBeGreaterThanOrEqual(3));
+
+		expect(events.some((event) => event.type === "closed")).toBe(false);
+		expect(supervisor.requests.filter((request) => request.type === "attach")).toHaveLength(0);
+
+		directConnected = false;
+		for (const listener of [...closeListeners]) listener(new Error("direct worker socket died"));
+
+		await vi.waitFor(() => expect(events.some((event) => event.type === "closed")).toBe(true), { timeout: 8000 });
+		expect(events.find((event) => event.type === "closed")).toMatchObject({
+			error: expect.stringContaining("Daemon reconnection failed"),
+		});
+		expect(events.filter((event) => event.type === "session_resynced")).toHaveLength(0);
+		await connection.dispose();
+	}, 10_000);
 
 	it("keeps the source direct socket when a cross-worker reattach is rejected", async () => {
 		const supervisor = new FakeDaemonClient();
