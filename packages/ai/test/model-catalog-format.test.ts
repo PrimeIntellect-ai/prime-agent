@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { createModelCatalog, parseModelCatalog } from "../scripts/model-catalog-format.js";
+import { createModelCatalog, parseModelCatalog } from "../src/model-catalog.js";
 import type { Api, Model } from "../src/types.js";
 
 function model(provider: string, id: string): Model<Api> {
@@ -36,42 +36,25 @@ describe("hosted model catalog format", () => {
 
 	test("applies the same strict schema used by clients", () => {
 		const entry = model("provider", "model");
-		const catalog = (modelEntry: Model<Api>) => ({
-			schemaVersion: 1,
-			generatedAt: new Date().toISOString(),
-			models: [modelEntry],
-		});
-		expect(() => parseModelCatalog({ ...catalog(entry), models: [entry, entry] })).toThrow(/duplicate/i);
-		expect(() => parseModelCatalog(catalog({ ...entry, cost: { ...entry.cost, output: Number.NaN } }))).toThrow(
-			/invalid model/i,
-		);
-		expect(() => parseModelCatalog(catalog({ ...entry, cost: { ...entry.cost, input: 1_000_001 } }))).toThrow(
-			/invalid model/i,
-		);
-		expect(() => parseModelCatalog(catalog({ ...entry, contextWindow: 100_000_001 }))).toThrow(/invalid model/i);
+		const parse = (modelEntry: Model<Api>) =>
+			parseModelCatalog({ schemaVersion: 1, generatedAt: new Date().toISOString(), models: [modelEntry] });
+
 		expect(() =>
-			parseModelCatalog(catalog({ ...entry, thinkingLevelMap: { unsupported: "value" } } as Model<Api>)),
-		).toThrow(/invalid model/i);
-		expect(() =>
-			parseModelCatalog(
-				catalog({
-					...entry,
-					compat: { openRouterRouting: { only: ["anthropic"], max_price: { prompt: "1" } } },
-				}),
-			),
+			parse({ ...entry, compat: { openRouterRouting: { only: ["anthropic"], max_price: { prompt: "1" } } } }),
 		).not.toThrow();
 		expect(() =>
-			parseModelCatalog(catalog({ ...entry, compat: { openRouterRouting: "invalid" } } as Model<Api>)),
-		).toThrow(/invalid model/i);
-		expect(() =>
-			parseModelCatalog(
-				catalog({ ...entry, api: "openai-responses", compat: { supportsStore: true } } as Model<Api>),
-			),
-		).toThrow(/invalid model/i);
-		expect(() =>
-			parseModelCatalog(
-				catalog({ ...entry, headers: { authorization: { nested: true } } } as unknown as Model<Api>),
-			),
-		).toThrow(/invalid model/i);
+			parseModelCatalog({ schemaVersion: 1, generatedAt: new Date().toISOString(), models: [entry, entry] }),
+		).toThrow(/duplicate/i);
+
+		const invalidEntries = [
+			{ ...entry, cost: { ...entry.cost, output: Number.NaN } },
+			{ ...entry, cost: { ...entry.cost, input: 1_000_001 } },
+			{ ...entry, contextWindow: 100_000_001 },
+			{ ...entry, thinkingLevelMap: { unsupported: "value" } },
+			{ ...entry, compat: { openRouterRouting: "invalid" } },
+			{ ...entry, api: "openai-responses", compat: { supportsStore: true } },
+			{ ...entry, headers: { authorization: { nested: true } } },
+		] as unknown as Model<Api>[];
+		for (const invalid of invalidEntries) expect(() => parse(invalid)).toThrow(/invalid model/i);
 	});
 });

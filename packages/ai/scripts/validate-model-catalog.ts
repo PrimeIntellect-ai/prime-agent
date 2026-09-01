@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 
 import { readFileSync } from "node:fs";
-import { parseModelCatalog } from "./model-catalog-format.js";
+import { parseModelCatalog } from "../src/model-catalog.js";
 
 const [candidatePath] = process.argv.slice(2);
 if (!candidatePath) throw new Error("Usage: validate-model-catalog.ts <candidate-path>");

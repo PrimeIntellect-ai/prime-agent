@@ -8,7 +8,6 @@ import { ModelRegistry } from "../src/core/model-registry.js";
 import {
 	getRemoteModelCatalogUrl,
 	mergeRemoteModelCatalog,
-	parseRemoteModelCatalog,
 	refreshRemoteModelCatalog,
 } from "../src/core/remote-model-catalog.js";
 
@@ -43,15 +42,6 @@ describe("remote model catalog", () => {
 		if (previousOffline === undefined) delete process.env.PI_OFFLINE;
 		else process.env.PI_OFFLINE = previousOffline;
 		if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
-	});
-
-	test("validates entries and rejects duplicate provider/model ids", () => {
-		const model = openAiModel();
-		expect(parseRemoteModelCatalog(catalog([model])).models).toHaveLength(1);
-		expect(() => parseRemoteModelCatalog(catalog([model, structuredClone(model)]))).toThrow("Duplicate");
-		expect(() =>
-			parseRemoteModelCatalog(catalog([{ ...model, cost: { ...model.cost, input: Number.NaN } }])),
-		).toThrow("Invalid model catalog entry");
 	});
 
 	test("updates metadata while pinning headers and rejecting transport changes", () => {

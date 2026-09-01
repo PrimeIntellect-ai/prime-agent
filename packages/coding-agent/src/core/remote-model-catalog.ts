@@ -20,10 +20,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function parseRemoteModelCatalog(value: unknown): ModelCatalogV1 {
-	return parseModelCatalog(value);
-}
-
 function cloneTransport(template: Model<Api>, remote: Model<Api>): Model<Api> {
 	return {
 		id: remote.id,
@@ -90,7 +86,7 @@ function readCache(cachePath: string, url: string): CachedModelCatalog | undefin
 			!Number.isFinite(value.fetchedAt)
 		)
 			return undefined;
-		return { url, fetchedAt: value.fetchedAt, catalog: parseRemoteModelCatalog(value.catalog) };
+		return { url, fetchedAt: value.fetchedAt, catalog: parseModelCatalog(value.catalog) };
 	} catch {
 		return undefined;
 	}
@@ -149,7 +145,7 @@ async function fetchCatalog(url: string, fetchFn: typeof fetch): Promise<ModelCa
 		reader.releaseLock();
 	}
 	const text = Buffer.concat(chunks, bytesRead).toString("utf8");
-	return parseRemoteModelCatalog(JSON.parse(text) as unknown);
+	return parseModelCatalog(JSON.parse(text) as unknown);
 }
 
 export async function refreshRemoteModelCatalog(

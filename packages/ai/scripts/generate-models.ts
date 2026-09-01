@@ -6,7 +6,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
-import { createModelCatalog } from "./model-catalog-format.js";
+import { createModelCatalog } from "../src/model-catalog.js";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
