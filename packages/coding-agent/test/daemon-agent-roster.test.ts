@@ -15,6 +15,7 @@ import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js"
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import type { DaemonWorkerRosterOutbound } from "../src/modes/daemon/daemon-worker-protocol.js";
 import { RlmSpawnLedger } from "../src/modes/daemon/rlm-ledger.js";
+import * as childProcessModule from "../src/utils/child-process.js";
 
 type RosterDelta = Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>;
 
@@ -1529,9 +1530,33 @@ describe("review-round regressions", () => {
 			}
 		).restartPreRosterWorker(worker, undefined);
 
-		expect(recoverUncertainWorkerOperations).toHaveBeenCalledWith(worker, false);
+		expect(recoverUncertainWorkerOperations).toHaveBeenCalledWith(worker);
 		expect(launchWorker).not.toHaveBeenCalled();
 		expect(worker.descriptor.lifecycle).toBe("failed");
+
+		// The one deliberate kill of a live worker: identity-verified pre-roster adoption replaces it.
+		const killed = makeWorker("worker-2");
+		Object.assign(killed.descriptor, { pid: 987_654, processStartId: "start-1", createCommand: { type: "create" } });
+		const launchReplacement = vi.fn();
+		const signal = vi.spyOn(childProcessModule, "signalProcessGroupOrProcess").mockImplementation(() => {});
+		const identities = ["current", "gone"];
+		const killSupervisor = makeSupervisor([killed], {
+			assertRecoveryAllowed: vi.fn(async () => {}),
+			recoverUncertainWorkerOperations: vi.fn(async () => {}),
+			launchWorker: launchReplacement,
+			processIdentity: vi.fn(() => (identities.length > 1 ? identities.shift() : identities[0])),
+		});
+		try {
+			await (
+				killSupervisor as unknown as {
+					restartPreRosterWorker(worker: WorkerFixture, observedProcessStartId?: string): Promise<void>;
+				}
+			).restartPreRosterWorker(killed, "start-1");
+			expect(signal).toHaveBeenCalledWith(987_654, "SIGKILL");
+			expect(launchReplacement).toHaveBeenCalled();
+		} finally {
+			signal.mockRestore();
+		}
 	});
 });
 

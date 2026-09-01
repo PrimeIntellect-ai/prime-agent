@@ -3159,15 +3159,8 @@ export class DaemonSupervisor {
 					this.log(`Could not restart pre-roster worker ${worker.descriptor.workerId}: ${String(restartError)}`);
 				}
 			}
-			const processAlive = isProcessAlive(worker.descriptor.pid);
-			const observedStartIdNow = processAlive ? getProcessStartId(worker.descriptor.pid) : undefined;
-			if (
-				isDaemonWorkerProbeTimeout(error) &&
-				processAlive &&
-				(worker.descriptor.processStartId === undefined ||
-					observedStartIdNow === undefined ||
-					observedStartIdNow === worker.descriptor.processStartId)
-			) {
+			const identityNow = this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
+			if (isDaemonWorkerProbeTimeout(error) && (identityNow === "current" || identityNow === "unknown")) {
 				worker.descriptor.lifecycle = "recovering";
 				worker.descriptor.lastError = error instanceof Error ? error.message : String(error);
 				this.persistWorker(worker);
@@ -3528,12 +3521,11 @@ export class DaemonSupervisor {
 				}
 				try {
 					await this.assertRecoveryAllowed();
-					const processAlive = isProcessAlive(worker.descriptor.pid);
-					const observedProcessStartId = processAlive ? getProcessStartId(worker.descriptor.pid) : undefined;
-					const processIdentityMatches =
-						worker.descriptor.processStartId === undefined ||
-						observedProcessStartId === worker.descriptor.processStartId;
-					if (processAlive && processIdentityMatches) {
+					const identityNow = this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
+					const identityCompatible =
+						identityNow === "current" ||
+						(identityNow === "unknown" && worker.descriptor.processStartId === undefined);
+					if (identityCompatible) {
 						try {
 							await this.connectWorker(worker, 1500);
 							await this.subscribeWorker(worker, worker.descriptor.rootActiveSessionId);
@@ -3541,8 +3533,11 @@ export class DaemonSupervisor {
 							if (this.isWorkerRecoveryCancelled(worker)) {
 								return;
 							}
-							if (worker.descriptor.processStartId === undefined && observedProcessStartId) {
-								worker.descriptor.processStartId = observedProcessStartId;
+							if (worker.descriptor.processStartId === undefined) {
+								const observedProcessStartId = getProcessStartId(worker.descriptor.pid);
+								if (observedProcessStartId) {
+									worker.descriptor.processStartId = observedProcessStartId;
+								}
 							}
 							await this.assertRecoveryAllowed();
 							worker.descriptor.lifecycle = "ready";
@@ -3559,17 +3554,11 @@ export class DaemonSupervisor {
 							worker.client = undefined;
 							// A worker with the same durable process identity may be load-slow.
 							// Keep probing it instead of replacing live work after a timeout.
-							keepProbingLiveWorker =
-								isDaemonWorkerProbeTimeout(error) ||
-								worker.descriptor.processStartId === undefined ||
-								observedProcessStartId === undefined;
+							keepProbingLiveWorker = isDaemonWorkerProbeTimeout(error) || identityNow !== "current";
 							throw error;
 						}
 					}
-					if (
-						processAlive &&
-						(worker.descriptor.processStartId === undefined || observedProcessStartId === undefined)
-					) {
+					if (identityNow === "unknown") {
 						keepProbingLiveWorker = true;
 						throw new Error(
 							`Cannot safely replace live session worker ${worker.descriptor.workerId} without a verified process identity`,
