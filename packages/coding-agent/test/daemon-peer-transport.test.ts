@@ -469,8 +469,12 @@ describe("supervisor direct transport issuance", () => {
 			rosterStore: roster,
 			updateRestartPhase: undefined,
 			isWorkerStopping: vi.fn(() => false),
+			defaultSessionConfig: {},
 		}) as unknown as SupervisorInternals;
-		const worker = { descriptor: { workerId: "worker-1", lifecycle: "ready" }, client: {} };
+		const worker = {
+			descriptor: { workerId: "worker-1", lifecycle: "ready", sessionFile: "/tmp/peer-test/session.jsonl" },
+			client: {},
+		};
 
 		expect(supervisor.workerEvictionSnapshot(worker).sessions[0]?.attachedClients).toBe(1);
 	});
