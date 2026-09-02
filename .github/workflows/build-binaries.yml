@@ -209,7 +209,6 @@ jobs:
           trap 'kill "$server_pid" 2>/dev/null || true; rm -rf "$SMOKE_ROOT" "$SMOKE_OUT"' EXIT
 
           curl -fsS --retry 5 --retry-connrefused "$SMOKE_BASE_URL/stable"
-          export NPM_CONFIG_IGNORE_SCRIPTS=true
           export NPM_CONFIG_PREFIX="$SMOKE_ROOT/npm-prefix"
           PATH="$NPM_CONFIG_PREFIX/bin:$PATH" \
             PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=0 \

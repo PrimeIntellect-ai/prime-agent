@@ -39,9 +39,11 @@ if [ "\${1:-}" != install ]; then
 fi
 
 remote_policy=
+script_policy=
 for arg in "$@"; do
 	case "$arg" in
 		--allow-remote=*) remote_policy=\${arg#*=} ;;
+		--allow-scripts=*) script_policy=\${arg#*=} ;;
 	esac
 done
 
@@ -51,8 +53,12 @@ if [ "$npm_major" -ge 12 ]; then
 		printf 'npm error code EALLOWREMOTE\\n' >&2
 		exit 1
 	fi
-elif [ -n "$remote_policy" ]; then
-	printf 'npm error Unknown option: allow-remote\\n' >&2
+	if [ "$script_policy" != "$FAKE_NPM_TARBALL" ]; then
+		printf 'npm error postinstall script was not explicitly allowed\\n' >&2
+		exit 1
+	fi
+elif [ -n "$remote_policy" ] || [ -n "$script_policy" ]; then
+	printf 'npm error Unknown allow option\\n' >&2
 	exit 1
 fi
 
@@ -70,7 +76,7 @@ elif [ -n "\${PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL:-}" ] || [ -n "\${PRIME_AG
 	exit 2
 fi
 
-printf '%s\\n' "$remote_policy" > "$FAKE_NPM_RESULT"
+printf 'remote=%s\\nscripts=%s\\n' "$remote_policy" "$script_policy" > "$FAKE_NPM_RESULT"
 `;
 
 try {
@@ -89,6 +95,7 @@ try {
 					...process.env,
 					EXPECT_KERNEL_BOOTSTRAP: bootstrapKernel ? "1" : "0",
 					FAKE_NPM_RESULT: resultPath,
+					FAKE_NPM_TARBALL: tarballPath,
 					FAKE_NPM_VERSION: npmVersion,
 					PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
 				},
@@ -100,11 +107,18 @@ try {
 				process.exit(1);
 			}
 
-			const remotePolicy = readFileSync(resultPath, "utf-8").trim();
-			const expectedPolicy = npmVersion.startsWith("12.") ? "all" : "";
-			if (remotePolicy !== expectedPolicy) {
+			const policies = Object.fromEntries(
+				readFileSync(resultPath, "utf-8")
+					.trimEnd()
+					.split("\n")
+					.map((line) => line.split("=", 2)),
+			);
+			const npm12OrNewer = Number.parseInt(npmVersion, 10) >= 12;
+			const expectedRemotePolicy = npm12OrNewer ? "all" : "";
+			const expectedScriptPolicy = npm12OrNewer ? tarballPath : "";
+			if (policies.remote !== expectedRemotePolicy || policies.scripts !== expectedScriptPolicy) {
 				console.error(
-					`Installer install check failed for npm ${npmVersion}: expected remote policy ${JSON.stringify(expectedPolicy)}, got ${JSON.stringify(remotePolicy)}.`,
+					`Installer install check failed for npm ${npmVersion}: expected ${JSON.stringify({ remote: expectedRemotePolicy, scripts: expectedScriptPolicy })}, got ${JSON.stringify(policies)}.`,
 				);
 				process.exit(1);
 			}
