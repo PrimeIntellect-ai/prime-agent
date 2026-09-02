@@ -80,7 +80,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 | ID | Depends on | Status | Work package |
 |---|---|---|---|
 | B01 | A01, A03 | done | Add `ExecutionLocation` and opaque remote session DTOs |
-| B02 | A01, A07 | in_progress | Introduce location-neutral `HostedSubagent` and preserve local behavior |
+| B02 | A01, A07 | done | Introduce location-neutral `HostedSubagent` and preserve local behavior |
 | B03 | A02, A16 | in_progress | Exact remote protocol, frame/journal codecs, delivery index, immutable publication, and bounded recovery |
 | B04 | A02, A16 | in_progress | Replace the initial relay with ordered durable receipt/delivery handling |
 | B05 | A04, A14 | done | Add typed streaming home-provider proxy |
@@ -112,14 +112,14 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 ## Current integration baseline
 
 - Branch: `feat/sandbox-backed-sessions` in `/Users/milkkarten/prime-agent-sandbox-sessions`.
-- Reviewed integration tip: `3f17cb640`.
-- Latest full root `npm run check` is green across 1009 files, TypeScript, Biome, installer rendering, and browser smoke.
+- Reviewed integration tip: `2da8b4357`.
+- Latest full root `npm run check` is green across 1011 files, TypeScript, Biome, installer rendering, and browser smoke.
 - Accepted B03 foundations: exact frame codec `55b40d7f1`, journal-record codec `5551582bd`, delivery index `5e8e926b4`, direct-final immutable journal publication `8bd83db6c`, and immutable delivery-marker publication `df846c08f`.
 - Accepted B11 foundations: observation core `939a7baaf`, exact snapshots `62e8b073a`.
 - Accepted B14 foundations: provider client `2195c7a23`, tunnel manager `a636f7d99`, PAB1 `d21f53c1a`, FD3 reader `723a8db52`, PAAR codec `a17f5588d`, stdin frame reader `4beeaa5da`, TypeScript correction `1d63a72c0`, SSH spawn specification `4dd8790db`, SSH specification tests `af83a786f`/`a7add61a4`, one-use upgrade authentication `a4976298c`, and Node stdin normalization `4a8962b54`.
 - Active B03 work: a clean one-list-call paginated recovery scanner. Ordered relay and B10 durable communication wait for accepted recovery.
 - Active B14 work: SSH readiness/cleanup, trusted-tree PAAR builder, streaming PAAR verifier, one-open PAAR installer, offline runtime packaging, and listener/server/orchestration on top of accepted upgrade authentication.
-- Active B02 work: hosted runtime boundary correction using the accepted remote frame and observation types without changing local runtime behavior.
+- Accepted B02 boundary: `2da8b4357` uses the existing `RemoteHostFrameEnvelope`, `RemoteObservationSnapshotV1`, and provider-usage semantics; it snapshots capabilities, owns subscription cleanup, and preserves local runtime behavior.
 - Rejected commits remain isolated and unmerged. This includes `a772e27a`, `f1f5cad9`, `35fb1c61`, `d7b56367`, `bce99cd9`, and `610c696c` plus their earlier rejected chains.
 - No paid sandbox, tunnel, VM, GPU, or live provider resource has been created during the resource-free implementation stage.
 
@@ -231,5 +231,6 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Integrated B13 Agents View execution metadata as `1ccb524da`. The view accepts only exact frozen coarse `local | sandbox+link | unavailable` DTOs, rejects hostile metadata without getters or proxy reads, displays location/link health orthogonally to activity, and never carries sandbox IDs, regions, errors, timestamps, URLs, or credentials. Seven Agents View suites pass 174 tests without changing grouping/counts; the 1005-file root check is green.
 - Integrated the Node stdin normalization boundary as `4a8962b54`. It adapts real Node `Buffer` chunks into exact fresh full-backing `Uint8Array` values, erases them after synchronous consumption, rejects proxies/subclasses/empty chunks without throwing, installs terminal listeners before data/resume, preserves unrelated listeners, and retains exact listener ownership across removal uncertainty. Its adapter+frame suites pass 149 tests and the 1007-file root check is green.
 - Integrated the credential-frame write ownership primitive as `3f17cb640`. It copies and erases the caller payload, writes one length-prefixed frame, treats write ownership as uncertain until an explicit write/release callback or released return, never treats drain/return as completion, erases before end, and preserves the frame when release remains uncertain. Its 54 focused tests and 277-test bootstrap transport suite pass; the 1009-file root check is green.
+- Integrated the accepted hosted-subagent boundary as `2da8b4357`. It reuses the accepted frame, observation snapshot, and provider usage types, binds exact capabilities, owns synchronous subscription callback/backout races, and exposes one shared checked close promise without changing local runtime behavior. Its 42 focused and 366 combined tests pass; the 1011-file root check is green.
 - Rejected paginated scanner `f1f5cad9` after direct review found cursor advancement past unprocessed entries, pre-commit accumulator mutation, incomplete handle/read validation, and unsafe marker ordering across pages. Started a clean one-list-call, page-atomic scanner that defers full marker binding and accumulator construction until recovery completion.
 - Rejected hosted boundary `35fb1c61`, upgrade authenticator `d7b56367`, PAAR builder `bce99cd9`, verifier `610c696c`, and the first SSH lifecycle/Node stdin adapter attempts after committed-source review. Their clean or focused correction tracks are active; none is present on the integration branch.
