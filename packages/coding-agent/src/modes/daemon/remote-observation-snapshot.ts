@@ -1,18 +1,19 @@
 /**
  * B11-b: RemoteObservationSnapshotV1 codec — exact observation state capture/restore.
  *
- * Uses shared jsonPreflight/checkJsonSafe from remote-host-frame-codec for
- * budget and JSON safety validation, and KNOWN_ERR_CODES from the mirror for
- * fixed lastFailure code validation.
- *
+ * Uses shared jsonPreflight only for canonical byte budget. All descriptor,
+ * container, and depth validation is done first for exact rejection codes.
  * Validates every descriptor before reads: rejects accessors, symbols,
  * nonenumerables, sparse arrays, undefined, prototypes, missing/extra keys.
  * Every optional is exact: present malformed rejects. Constructs new
  * recursively frozen DTOs with no input alias.
+ *
+ * Cumulative budget: <=1 MiB UTF-8 JSON-equivalent bytes (via jsonPreflight),
+ * <=2,000 container nodes, depth <=8. Global alias rejection (no seen.delete).
  */
 import type { RemoteHostEventSequence, RemoteHostSessionState } from "./remote-agent-host-protocol.js";
 import { jsonPreflight } from "./remote-host-frame-codec.js";
-import { KNOWN_ERR_CODES } from "./remote-observation-mirror.js";
+import { isKnownObservationErrorCode } from "./remote-observation-mirror.js";
 
 // ---------------------------------------------------------------------------
 // SnapshotRejectionCode — fixed set, no raw remote error messages
@@ -29,12 +30,10 @@ export type SnapshotRejectionCode =
 	| "INVALID_NEXT_MESSAGE_INDEX"
 	| "INVALID_ACTIVITY_STATE"
 	| "INVALID_SESSION_STATE"
-	| "INVALID_BASH_STATE"
 	| "INVALID_BASH_STRUCTURE"
 	| "INVALID_BOOLEAN"
 	| "INVALID_NUMBER"
 	| "INVALID_STRING"
-	| "INVALID_TIMESTAMP_ORDER"
 	| "INVALID_RECORD_INDEX"
 	| "INVALID_RECORD_COUNT"
 	| "INVALID_RECORD_STRUCTURE"
@@ -47,20 +46,14 @@ export type SnapshotRejectionCode =
 	| "INVALID_LAST_FAILURE_CODE"
 	| "INVALID_IDENTITY"
 	| "IDENTITY_MISMATCH"
-	| "ACCESSOR_DETECTED"
-	| "SPARSE_ARRAY"
-	| "SYMBOL_DETECTED"
-	| "NONENUMERABLE_DETECTED"
-	| "PROTOTYPE_POLLUTION"
 	| "UNKNOWN_FIELD"
 	| "MALFORMED_OPTIONAL"
 	| "OVERFLOW_BYTES"
 	| "OVERFLOW_NODES"
 	| "OVERFLOW_DEPTH"
 	| "STRING_OVERFLOW"
-	| "CORRUPT_SNAPSHOT"
-	| "REFLECTION_FAILURE"
-	| "INVALID_JSON";
+	| "ALIAS_DETECTED"
+	| "REFLECTION_FAILURE";
 
 // ---------------------------------------------------------------------------
 // RemoteObservationSnapshotV1 — versioned snapshot type
@@ -162,18 +155,61 @@ const AGENT_DELTA_TYPES = new Set(["agent_text_delta", "agent_thinking_delta", "
 const SESSION_STATES = new Set(["running", "idle", "inactive"]);
 
 // ---------------------------------------------------------------------------
-// Container-node/depth walker (descriptor-safe, Proxy-safe, <=2000/<=8)
+// Strict validateIdentity: decodes expectedIdentity as an exact plain data object
+// ---------------------------------------------------------------------------
+
+function validateExpectedIdentity(
+	ei: unknown,
+): { ok: true; hostId: string; generation: string; sessionId: string } | { ok: false } {
+	if (!ei || typeof ei !== "object") return { ok: false };
+	if (Object.getPrototypeOf(ei) !== Object.prototype) return { ok: false };
+	if (Object.getOwnPropertySymbols(ei).length > 0) return { ok: false };
+	const names = Object.getOwnPropertyNames(ei).sort();
+	if (names.length !== 3 || names[0] !== "generation" || names[1] !== "hostId" || names[2] !== "sessionId")
+		return { ok: false };
+	const obj = ei as Record<string, unknown>;
+	for (const key of names) {
+		const desc = Object.getOwnPropertyDescriptor(ei, key);
+		if (!desc || !desc.enumerable || !("value" in desc) || desc.value === undefined) return { ok: false };
+		if (typeof obj[key] !== "string") return { ok: false };
+	}
+	const hostId = obj.hostId as string;
+	const generation = obj.generation as string;
+	const sessionId = obj.sessionId as string;
+	if (
+		!hostId ||
+		!generation ||
+		!sessionId ||
+		!/^[A-Za-z0-9_\-.:@+=]+$/.test(hostId) ||
+		hostId.length > MAX_ID ||
+		!/^[A-Za-z0-9_\-.:@+=]+$/.test(generation) ||
+		generation.length > MAX_ID ||
+		!/^[A-Za-z0-9_\-.:@+=]+$/.test(sessionId) ||
+		sessionId.length > MAX_ID
+	)
+		return { ok: false };
+	return { ok: true, hostId, generation, sessionId };
+}
+
+// ---------------------------------------------------------------------------
+// Descriptor-safe container/depth walker (global alias tracking, no delete)
 // ---------------------------------------------------------------------------
 
 /**
  * Count container nodes (objects + arrays) and max nesting depth.
+ * Globally tracked: once an object is visited, any repeat visit (alias or
+ * cycle) returns ALIAS_DETECTED. Proxy-safe: wrapped so throws return
+ * REFLECTION_FAILURE. Enforces <=2000 nodes, <=8 depth for snapshots.
  *
- * Descriptor-safe: only walks own enumerable data descriptors.
- * Proxy-safe: wrapped so revoked/hostile Proxy returns OVERFLOW_NODES
- * and never throws. Enforces a snapshot-specific <=2000 nodes, <=8 depth
- * constraint (tighter than the shared codec's 10k/64).
+ * Returns:
+ *   { nodes, depth } — within budget
+ *   { overflow: "depth" } — exceeds MAX_DEPTH
+ *   { overflow: "alias" } — same object visited twice (alias or cycle)
+ *   null — reflection/proxy failure
  */
-function countContainerNodes(v: unknown): { nodes: number; depth: number } | null {
+type ContainerCount = { ok: true; nodes: number; depth: number } | { ok: false; reason: "depth" | "alias" };
+
+function countContainerNodes(v: unknown): ContainerCount | null {
 	try {
 		return countContainerNodesInner(v, new Set<object>(), 0);
 	} catch {
@@ -181,15 +217,11 @@ function countContainerNodes(v: unknown): { nodes: number; depth: number } | nul
 	}
 }
 
-function countContainerNodesInner(
-	v: unknown,
-	seen: Set<object>,
-	depth: number,
-): { nodes: number; depth: number } | null {
-	if (v === null || typeof v !== "object") return { nodes: 0, depth };
-	if (depth > MAX_DEPTH) return { nodes: depth, depth: depth };
-	if (seen.has(v)) return { nodes: 0, depth };
-	seen.add(v);
+function countContainerNodesInner(v: unknown, visited: Set<object>, depth: number): ContainerCount | null {
+	if (v === null || typeof v !== "object") return { ok: true, nodes: 0, depth };
+	if (depth > MAX_DEPTH) return { ok: false, reason: "depth" };
+	if (visited.has(v)) return { ok: false, reason: "alias" };
+	visited.add(v);
 
 	let nodes = 1;
 	let maxDepth = depth + 1;
@@ -199,64 +231,46 @@ function countContainerNodesInner(
 			if (!(i in v)) continue;
 			const desc = Object.getOwnPropertyDescriptor(v, i);
 			if (!desc || !("value" in desc)) continue;
-			const inner = countContainerNodesInner(desc.value, seen, depth + 1);
-			if (!inner || inner.nodes > MAX_NODES) return null;
+			const inner = countContainerNodesInner(desc.value, visited, depth + 1);
+			if (!inner) return null;
+			if (!inner.ok) return inner;
 			nodes += inner.nodes;
 			if (inner.depth > maxDepth) maxDepth = inner.depth;
 		}
-		seen.delete(v);
-		return nodes > MAX_NODES ? null : { nodes, depth: maxDepth };
+		// NOTE: intentionally NOT deleting from visited — global alias tracking
+		return nodes > MAX_NODES ? { ok: true, nodes: nodes, depth: maxDepth } : { ok: true, nodes, depth: maxDepth };
 	}
 
-	// Plain object
 	for (const key of Object.keys(v)) {
 		const desc = Object.getOwnPropertyDescriptor(v, key);
 		if (!desc || !desc.enumerable || !("value" in desc)) continue;
-		const inner = countContainerNodesInner(desc.value, seen, depth + 1);
-		if (!inner || inner.nodes > MAX_NODES) return null;
+		const inner = countContainerNodesInner(desc.value, visited, depth + 1);
+		if (!inner) return null;
+		if (!inner.ok) return inner;
 		nodes += inner.nodes;
 		if (inner.depth > maxDepth) maxDepth = inner.depth;
 	}
-	seen.delete(v);
-	return nodes > MAX_NODES ? null : { nodes, depth: maxDepth };
+	return nodes > MAX_NODES ? { ok: true, nodes: nodes, depth: maxDepth } : { ok: true, nodes, depth: maxDepth };
 }
 
 // ---------------------------------------------------------------------------
-// Budget check: shared jsonPreflight for bytes (1 MiB) + our container walker
+// Budget check: strict descriptor validation first, then jsonPreflight for bytes
 // ---------------------------------------------------------------------------
 
-function checkBudget(
-	raw: unknown,
-	expectedIdentity: { hostId: string; generation: string; sessionId: string },
-): SnapshotRejectionCode | null {
-	// Validate expectedIdentity first (exact/safe IDs)
-	if (
-		!expectedIdentity ||
-		typeof expectedIdentity !== "object" ||
-		typeof expectedIdentity.hostId !== "string" ||
-		typeof expectedIdentity.generation !== "string" ||
-		typeof expectedIdentity.sessionId !== "string" ||
-		!expectedIdentity.hostId ||
-		!expectedIdentity.generation ||
-		!expectedIdentity.sessionId ||
-		!/^[A-Za-z0-9_\-.:@+=]+$/.test(expectedIdentity.hostId) ||
-		expectedIdentity.hostId.length > MAX_ID ||
-		!/^[A-Za-z0-9_\-.:@+=]+$/.test(expectedIdentity.generation) ||
-		expectedIdentity.generation.length > MAX_ID ||
-		!/^[A-Za-z0-9_\-.:@+=]+$/.test(expectedIdentity.sessionId) ||
-		expectedIdentity.sessionId.length > MAX_ID
-	) {
-		return "INVALID_IDENTITY";
+function checkBudget(raw: unknown): SnapshotRejectionCode | null {
+	// 1. Descriptor-safe container/depth/alias walk (no byte counting yet)
+	const counts = countContainerNodes(raw);
+	if (counts === null) return "REFLECTION_FAILURE";
+	if (!counts.ok) {
+		if (counts.reason === "alias") return "ALIAS_DETECTED";
+		if (counts.reason === "depth") return "OVERFLOW_DEPTH";
+		return "OVERFLOW_NODES";
 	}
+	if (counts.nodes > MAX_NODES) return "OVERFLOW_NODES";
 
-	// Shared jsonPreflight for byte budget + JSON safety
+	// 2. Shared jsonPreflight for exact canonical byte validation only
 	const preflight = jsonPreflight(raw);
 	if (!preflight.ok) return "OVERFLOW_BYTES";
-
-	// Descriptor-safe container-node walker
-	const counts = countContainerNodes(raw);
-	if (!counts) return "OVERFLOW_NODES";
-	if (counts.depth > MAX_DEPTH) return "OVERFLOW_DEPTH";
 
 	return null;
 }
@@ -286,22 +300,10 @@ function exactObjectKeys(
 	return keys.every((k) => allowed.has(k)) && required.every((k) => keys.includes(k));
 }
 
-/**
- * Strict plain-array check:
- * - true Array with Array.prototype
- * - no sparse holes
- * - no extra own keys beyond "length" and canonical numeric indices
- * - no own-undefined elements
- * - no accessor/nonenumerable numeric-index descriptors
- * - no symbol keys
- * - Proxy traps fail: Proxy has a non-standard prototype or throws on descriptors
- */
 function isPlainArray(value: unknown): value is unknown[] {
 	if (!Array.isArray(value)) return false;
 	if (Object.getPrototypeOf(value) !== Array.prototype) return false;
 	if (Object.getOwnPropertySymbols(value).length > 0) return false;
-
-	// All own property names must be "length" or canonical numeric indices
 	const names = Object.getOwnPropertyNames(value);
 	for (const name of names) {
 		if (name === "length") continue;
@@ -310,14 +312,11 @@ function isPlainArray(value: unknown): value is unknown[] {
 		if (idx !== Math.floor(idx)) return false;
 		if (idx >= value.length) return false;
 	}
-
-	// Every index must be an own data descriptor with defined value
 	for (let i = 0; i < value.length; i++) {
 		if (!(i in value)) return false;
 		const desc = Object.getOwnPropertyDescriptor(value, String(i));
 		if (!desc || !desc.enumerable || !("value" in desc) || desc.value === undefined) return false;
 	}
-
 	return true;
 }
 
@@ -340,21 +339,36 @@ function isValidCanonicalTimestamp(s: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Decoder
+// Decoder — wrapped for hostile input safety
 // ---------------------------------------------------------------------------
 
 export function decodeRemoteObservationSnapshotV1(
 	raw: unknown,
 	expectedIdentity: { hostId: string; generation: string; sessionId: string },
 ): SnapshotDecodeResult {
-	// ---- Cumulative budget first (fail closed, Proxy-safe) ----
-	const budgetErr = checkBudget(raw, expectedIdentity);
-	if (budgetErr) return fail(budgetErr);
+	try {
+		return decodeInner(raw, expectedIdentity);
+	} catch {
+		return fail("REFLECTION_FAILURE");
+	}
+}
 
-	// ---- Top-level object shape ----
+function decodeInner(
+	raw: unknown,
+	expectedIdentity: { hostId: string; generation: string; sessionId: string },
+): SnapshotDecodeResult {
+	// ---- Validate expectedIdentity as exact plain data object ----
+	const eiResult = validateExpectedIdentity(expectedIdentity);
+	if (!eiResult.ok) return fail("INVALID_IDENTITY");
+
+	// ---- Top-level object shape (strict descriptor validation first) ----
 	if (!isPlainDataObject(raw)) return fail("NOT_AN_OBJECT");
 
-	const required = [
+	// ---- Cumulative budget: container/depth/alias walk, then jsonPreflight for bytes ----
+	const budgetErr = checkBudget(raw);
+	if (budgetErr) return fail(budgetErr);
+
+	const requiredKeys = [
 		"version",
 		"hostId",
 		"generation",
@@ -375,8 +389,7 @@ export function decodeRemoteObservationSnapshotV1(
 		"recap",
 		"lastFailure",
 	];
-
-	if (!exactObjectKeys(raw, required, [])) {
+	if (!exactObjectKeys(raw, requiredKeys, [])) {
 		const obj = raw as Record<string, unknown>;
 		if (obj.version === undefined) return fail("MISSING_VERSION");
 		return fail("UNKNOWN_FIELD");
@@ -384,36 +397,21 @@ export function decodeRemoteObservationSnapshotV1(
 
 	const d = raw as Record<string, unknown>;
 
-	// ---- version ----
 	if (d.version !== "1") return fail("INVALID_VERSION");
-
-	// ---- IDs ----
 	if (!isValidId(d.hostId) || !isValidId(d.generation) || !isValidId(d.sessionId)) return fail("INVALID_ID");
-
-	// ---- Identity match ----
-	if (
-		d.hostId !== expectedIdentity.hostId ||
-		d.generation !== expectedIdentity.generation ||
-		d.sessionId !== expectedIdentity.sessionId
-	)
+	if (d.hostId !== eiResult.hostId || d.generation !== eiResult.generation || d.sessionId !== eiResult.sessionId)
 		return fail("IDENTITY_MISMATCH");
 
 	// ---- capturedAt ----
 	if (typeof d.capturedAt !== "string" || !isValidCanonicalTimestamp(d.capturedAt)) return fail("INVALID_CAPTURED_AT");
 
-	// ---- cursor ----
+	// ---- cursor / cursorTimestamp (no wall-clock ordering — B11-a accepts any emittedAt) ----
 	if (!isSafePosInt(d.cursor)) return fail("INVALID_CURSOR");
-
-	// ---- cursorTimestamp ----
 	if (typeof d.cursorTimestamp !== "string") return fail("INVALID_CURSOR_TIMESTAMP");
-	if (d.cursor === 0) {
-		if (d.cursorTimestamp !== "") return fail("INVALID_CURSOR_TIMESTAMP");
-	} else {
-		if (!isValidCanonicalTimestamp(d.cursorTimestamp as string)) return fail("INVALID_CURSOR_TIMESTAMP");
-		if ((d.cursorTimestamp as string) > (d.capturedAt as string)) return fail("INVALID_TIMESTAMP_ORDER");
-	}
+	if (d.cursor === 0 && d.cursorTimestamp !== "") return fail("INVALID_CURSOR_TIMESTAMP");
+	if (d.cursor > 0 && !isValidCanonicalTimestamp(d.cursorTimestamp as string)) return fail("INVALID_CURSOR_TIMESTAMP");
 
-	// ---- booleans ----
+	// ---- Booleans ----
 	if (
 		typeof d.hasGap !== "boolean" ||
 		typeof d.needsReplay !== "boolean" ||
@@ -426,11 +424,10 @@ export function decodeRemoteObservationSnapshotV1(
 	// ---- Gap invariant ----
 	if (d.hasGap !== d.needsReplay) return fail("INVALID_GAP_INVARIANT");
 
-	// ---- nextMessageIndex ----
+	// ---- Independent counters ----
 	if (!isSafePosInt(d.nextMessageIndex)) return fail("INVALID_NEXT_MESSAGE_INDEX");
-
-	// ---- messageCount (independent counter, accept any safe integer) ----
-	if (!isSafePosInt(d.messageCount)) return fail("INVALID_NUMBER");
+	if (typeof d.messageCount !== "number" || !Number.isSafeInteger(d.messageCount) || d.messageCount < 0)
+		return fail("INVALID_NUMBER");
 
 	// ---- sessionState ----
 	if (d.sessionState !== null && (typeof d.sessionState !== "string" || !SESSION_STATES.has(d.sessionState)))
@@ -438,18 +435,14 @@ export function decodeRemoteObservationSnapshotV1(
 
 	// ---- bash (REQUIRED, may be null) ----
 	let bashOut: RemoteObservationSnapshotV1["bash"] = null;
-	if (d.bash === null) {
-		bashOut = null;
-	} else {
+	if (d.bash !== null) {
 		if (!exactObjectKeys(d.bash, ["command", "output", "exitCode", "cancelled", "truncated"], []))
 			return fail("INVALID_BASH_STRUCTURE");
 		const b = d.bash as Record<string, unknown>;
-
 		if (typeof b.command !== "string" || (b.command as string).length > MAX_CMD) return fail("INVALID_STRING");
 		if (typeof b.output !== "string" || (b.output as string).length > MAX_BASH_OUT) return fail("STRING_OVERFLOW");
 		if (b.exitCode !== null && !Number.isSafeInteger(b.exitCode)) return fail("INVALID_NUMBER");
 		if (typeof b.cancelled !== "boolean" || typeof b.truncated !== "boolean") return fail("INVALID_BOOLEAN");
-
 		bashOut = {
 			command: b.command as string,
 			output: b.output as string,
@@ -462,7 +455,7 @@ export function decodeRemoteObservationSnapshotV1(
 	// ---- compact+checkpoint mutual exclusion ----
 	if (d.compacting && d.checkpointing) return fail("INVALID_ACTIVITY_STATE");
 
-	// ---- records ----
+	// ---- Records ----
 	if (!isPlainArray(d.records)) return fail("INVALID_RECORD_STRUCTURE");
 	const recordsRaw = d.records as unknown[];
 	if (recordsRaw.length > MAX_RECORDS) return fail("INVALID_RECORD_COUNT");
@@ -499,7 +492,6 @@ export function decodeRemoteObservationSnapshotV1(
 			)
 		)
 			return fail("INVALID_RECORD_STRUCTURE");
-
 		const rec = recRaw as Record<string, unknown>;
 
 		if (!isSafePosInt(rec.index)) return fail("INVALID_RECORD_INDEX");
@@ -512,14 +504,11 @@ export function decodeRemoteObservationSnapshotV1(
 		)
 			return fail("STRING_OVERFLOW");
 
+		// B11-a accepts any emittedAt/updatedAt — no wall-clock ordering checks in snapshot
 		if (typeof rec.emittedAt !== "string" || !isValidCanonicalTimestamp(rec.emittedAt as string))
 			return fail("INVALID_CAPTURED_AT");
 		if (typeof rec.updatedAt !== "string" || !isValidCanonicalTimestamp(rec.updatedAt as string))
 			return fail("INVALID_CAPTURED_AT");
-
-		if ((rec.emittedAt as string) > (rec.updatedAt as string)) return fail("INVALID_TIMESTAMP_ORDER");
-		if ((d.cursor as number) > 0 && (rec.updatedAt as string) > (d.cursorTimestamp as string))
-			return fail("INVALID_TIMESTAMP_ORDER");
 
 		if (
 			typeof rec.textTruncated !== "boolean" ||
@@ -542,8 +531,6 @@ export function decodeRemoteObservationSnapshotV1(
 	}
 
 	// ---- Contiguous record suffix ----
-	// first index === nextMessageIndex - records.length
-	// each subsequent index === prior + 1
 	if (recordsOut.length > 0) {
 		const expectedFirst = (d.nextMessageIndex as number) - recordsOut.length;
 		if (recordsOut[0].index !== expectedFirst) return fail("INVALID_RECORD_INDEX");
@@ -552,39 +539,44 @@ export function decodeRemoteObservationSnapshotV1(
 		}
 	}
 
-	// ---- recap ----
+	// ---- Recap: exact retained suffix ----
 	if (!isPlainArray(d.recap)) return fail("INVALID_RECAP_ENTRY");
 	const recapRaw = d.recap as unknown[];
 	if (recapRaw.length > MAX_RECAP) return fail("INVALID_RECAP_COUNT");
 
-	let lastRecapSeq = -1;
-	const recapOut: Array<{
-		eventSequence: number;
-		type: string;
-		messageIndex?: number;
-	}> = [];
+	// Recap must be empty iff cursor === 0
+	const cursorVal = d.cursor as number;
+	if (cursorVal === 0) {
+		if (recapRaw.length !== 0) return fail("INVALID_RECAP_ENTRY");
+	} else {
+		// Exact retained suffix: first = cursor - length + 1, each +1, last = cursor
+		if (recapRaw.length > 0) {
+			const expectedFirst = cursorVal - recapRaw.length + 1;
+			if (expectedFirst < 1) return fail("INVALID_RECAP_SEQUENCE");
+		}
+	}
+
+	const recapOut: Array<{ eventSequence: number; type: string; messageIndex?: number }> = [];
 
 	for (let i = 0; i < recapRaw.length; i++) {
 		const entryRaw = recapRaw[i];
 		if (!isPlainDataObject(entryRaw)) return fail("INVALID_RECAP_ENTRY");
-
 		if (!exactObjectKeys(entryRaw, ["eventSequence", "type"], ["messageIndex"])) return fail("INVALID_RECAP_ENTRY");
-
 		const entry = entryRaw as Record<string, unknown>;
 
-		if (!isSafePosInt(entry.eventSequence) || (entry.eventSequence as number) < 1) return fail("INVALID_RECAP_ENTRY");
+		const seq = entry.eventSequence;
+		if (!isSafePosInt(seq) || (seq as number) < 1) return fail("INVALID_RECAP_ENTRY");
 
-		if ((entry.eventSequence as number) <= lastRecapSeq) return fail("INVALID_RECAP_SEQUENCE");
-		lastRecapSeq = entry.eventSequence as number;
-
-		if ((entry.eventSequence as number) > (d.cursor as number)) return fail("INVALID_RECAP_SEQUENCE");
+		// Exact retained contiguous suffix
+		if (cursorVal > 0) {
+			const expectedSeq = cursorVal - recapRaw.length + 1 + i;
+			if ((seq as number) !== expectedSeq) return fail("INVALID_RECAP_SEQUENCE");
+		}
 
 		if (typeof entry.type !== "string" || !KNOWN_RECAP_TYPES.has(entry.type)) return fail("INVALID_RECAP_TYPE");
 
-		// messageIndex: present exactly for agent delta types, absent for others
-		const isDelta = AGENT_DELTA_TYPES.has(entry.type as string);
+		const isDelta = AGENT_DELTA_TYPES.has(entry.type);
 		const hasMi = "messageIndex" in entry;
-
 		if (isDelta && !hasMi) return fail("INVALID_RECAP_MESSAGE_INDEX");
 		if (!isDelta && hasMi) return fail("INVALID_RECAP_MESSAGE_INDEX");
 
@@ -597,7 +589,7 @@ export function decodeRemoteObservationSnapshotV1(
 		}
 
 		recapOut.push({
-			eventSequence: entry.eventSequence as number,
+			eventSequence: seq as number,
 			type: entry.type as string,
 			...(mi !== undefined ? { messageIndex: mi } : {}),
 		});
@@ -614,13 +606,12 @@ export function decodeRemoteObservationSnapshotV1(
 		return fail("INVALID_LAST_FAILURE");
 
 	let lfOut: RemoteObservationSnapshotV1["lastFailure"];
-
 	switch (lfType) {
 		case "error": {
 			if (!exactObjectKeys(lf, ["type", "code"], [])) return fail("INVALID_LAST_FAILURE");
 			if (typeof lf.code !== "string" || lf.code.length === 0 || (lf.code as string).length > MAX_ERR_CODE)
 				return fail("INVALID_LAST_FAILURE");
-			if (!KNOWN_ERR_CODES.has(lf.code as any)) return fail("INVALID_LAST_FAILURE_CODE");
+			if (!isKnownObservationErrorCode(lf.code as string)) return fail("INVALID_LAST_FAILURE_CODE");
 			lfOut = { type: "error", code: lf.code as string };
 			break;
 		}

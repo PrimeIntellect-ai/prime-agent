@@ -1125,7 +1125,7 @@ const MAX_TEXT_LENGTH = 100_000;
 // B11-b: RemoteObservationSnapshotV1 codec — capture/restore tests
 // ===========================================================================
 
-import { KNOWN_ERR_CODES } from "../src/modes/daemon/remote-observation-mirror.js";
+import { isKnownObservationErrorCode } from "../src/modes/daemon/remote-observation-mirror.js";
 import {
 	decodeRemoteObservationSnapshotV1,
 	type RemoteObservationSnapshotV1,
@@ -1331,11 +1331,12 @@ describe("B11-b: RemoteObservationSnapshotV1 codec", () => {
 		expect(r.cursor).toBe(0);
 		expect(r.cursorTimestamp).toBe("");
 	});
-	it("rejects cursorTimestamp > capturedAt", () => {
-		decodeFail(
-			{ ...makeSnapshot(), capturedAt: "2025-01-01T00:00:00.000Z", cursorTimestamp: "2025-01-02T00:00:00.000Z" },
-			"INVALID_TIMESTAMP_ORDER",
-		);
+	it("accepts future cursorTimestamp (B11-a does not enforce wall-clock ordering)", () => {
+		decodeOk({
+			...makeSnapshot(),
+			capturedAt: "2025-01-01T00:00:00.000Z",
+			cursorTimestamp: "2025-01-02T00:00:00.000Z",
+		});
 	});
 
 	// ---- Gap invariant ----
@@ -1350,11 +1351,11 @@ describe("B11-b: RemoteObservationSnapshotV1 codec", () => {
 	it("rejects non-plain-array records", () => {
 		decodeFail({ ...makeSnapshot(), records: "not-array" }, "INVALID_RECORD_STRUCTURE");
 	});
-	it("rejects sparse records array", () => {
+	it("rejects sparse records array with alias from shared reference", () => {
 		const sparse = makeSnapshot().records.slice();
 		(sparse as any)[5] = sparse[0];
-		// Shared jsonPreflight catches sparse arrays before structural validation
-		decodeFail({ ...makeSnapshot(), records: sparse }, "OVERFLOW_BYTES");
+		// Records array has sparse[0] reused at index 5 → global alias detection
+		decodeFail({ ...makeSnapshot(), records: sparse }, "ALIAS_DETECTED");
 	});
 	it("rejects record with extra key", () => {
 		const recs = [makeSnapshot().records[0]];
@@ -1495,17 +1496,17 @@ describe("B11-b: RemoteObservationSnapshotV1 codec", () => {
 	it("rejects input with accessor property", () => {
 		const raw: Record<string, unknown> = { ...makeSnapshot() };
 		Object.defineProperty(raw, "malicious", { get: () => "x", enumerable: true });
-		decodeFail(raw, "OVERFLOW_BYTES");
+		decodeFail(raw, "NOT_AN_OBJECT");
 	});
 	it("rejects input with symbol key", () => {
 		const raw: Record<string, unknown> = { ...makeSnapshot() };
 		Object.defineProperty(raw, Symbol("hidden"), { value: "x", enumerable: true });
-		decodeFail(raw, "OVERFLOW_BYTES");
+		decodeFail(raw, "NOT_AN_OBJECT");
 	});
 	it("rejects input with non-plain prototype", () => {
 		const raw: Record<string, unknown> = { ...makeSnapshot() };
 		Object.setPrototypeOf(raw, { malicious: true });
-		decodeFail(raw, "OVERFLOW_BYTES");
+		decodeFail(raw, "NOT_AN_OBJECT");
 	});
 
 	// ---- Plain array edge cases ----
@@ -1514,7 +1515,7 @@ describe("B11-b: RemoteObservationSnapshotV1 codec", () => {
 		(arr as any).foo = "bar";
 		decodeFail({ ...makeSnapshot(), records: arr }, "INVALID_RECORD_STRUCTURE");
 	});
-	it("rejects array with own-undefined element", () => {
+	it("rejects array with own-undefined element (jsonPreflight rejects undefined values)", () => {
 		const arr: unknown[] = [...makeSnapshot().records];
 		Object.defineProperty(arr, 0, { value: undefined, enumerable: true, configurable: true, writable: true });
 		decodeFail({ ...makeSnapshot(), records: arr }, "OVERFLOW_BYTES");
@@ -1598,10 +1599,10 @@ describe("B11-b: RemoteObservationSnapshotV1 codec", () => {
 			"OVERFLOW_DEPTH",
 		);
 	});
-	it("rejects cyclic reference (caught by shared jsonPreflight as overflow)", () => {
+	it("rejects cyclic reference (ALIAS_DETECTED)", () => {
 		const raw: Record<string, unknown> = { ...makeSnapshot(), records: [], recap: [] };
 		raw.cycle = raw;
-		decodeFail(raw, "OVERFLOW_BYTES");
+		decodeFail(raw, "ALIAS_DETECTED");
 	});
 	it("rejects byte overflow (200 records x 100KB text = 20MB > 1 MiB)", () => {
 		const records = Array.from({ length: 200 }, (_, i) => ({
@@ -1629,6 +1630,90 @@ describe("B11-b: RemoteObservationSnapshotV1 codec", () => {
 	it("accepts null sessionState", () => {
 		decodeOk({ ...makeSnapshot(), sessionState: null });
 	});
+});
+
+it("rejects object alias (same object visited twice)", () => {
+	const shared = {
+		index: 0,
+		text: "x",
+		thinking: "",
+		toolCallText: "",
+		emittedAt: "2025-01-01T00:00:00.000Z",
+		updatedAt: "2025-01-01T00:00:00.000Z",
+		textTruncated: false,
+		thinkingTruncated: false,
+		toolCallTruncated: false,
+	};
+	const records = [shared, shared];
+	decodeFail({ ...makeSnapshot(), nextMessageIndex: 2, records }, "ALIAS_DETECTED");
+});
+it("rejects array alias (same array referenced twice)", () => {
+	const inner: unknown[] = [];
+	const raw: Record<string, unknown> = {
+		...makeSnapshot(),
+		records: [inner],
+		recap: [inner as any],
+		nextMessageIndex: 0,
+	};
+	decodeFail(raw, "ALIAS_DETECTED");
+});
+it("rejects throwing Proxy as snapshot value", () => {
+	const proxy = new Proxy(
+		{},
+		{
+			getPrototypeOf() {
+				throw new Error("trap");
+			},
+		},
+	);
+	decodeFail(proxy, "REFLECTION_FAILURE");
+});
+it("rejects throwing Proxy as expectedIdentity", () => {
+	const proxy = new Proxy(
+		{},
+		{
+			getOwnPropertyDescriptor() {
+				throw new Error("trap");
+			},
+		},
+	);
+	const r = decodeRemoteObservationSnapshotV1(makeSnapshot(), proxy as any);
+	expect(r.success).toBe(false);
+	if (r.success) {
+		expect(false).toBe(true);
+		return;
+	}
+	expect(r.code === "REFLECTION_FAILURE" || r.code === "INVALID_IDENTITY").toBe(true);
+});
+it("rejects revoked Proxy as snapshot value", () => {
+	const { proxy, revoke } = Proxy.revocable({ version: "1" } as any, {});
+	revoke();
+	decodeFail(proxy, "REFLECTION_FAILURE");
+});
+it("rejects stateful Proxy returning different values on each access", () => {
+	let call = 0;
+	const proxy = new Proxy(
+		{},
+		{
+			getOwnPropertyDescriptor() {
+				call++;
+				if (call === 1) return { value: "1", enumerable: true, configurable: true, writable: true };
+				return undefined;
+			},
+			ownKeys() {
+				call++;
+				if (call <= 3) return ["version"];
+				return ["version", "extra"];
+			},
+		},
+	);
+	// Stateful proxy may cause reflection failure
+	const r = decodeRemoteObservationSnapshotV1(proxy, {
+		hostId: "host-1",
+		generation: "gen-1",
+		sessionId: "sess-1",
+	});
+	expect(r.success).toBe(false);
 });
 
 describe("B11-b: RemoteObservationMirror.fromSnapshot restore", () => {
@@ -1790,10 +1875,10 @@ describe("B11-b: sessionState and bash null roundtrip", () => {
 		const decoded = decodeOk(json);
 		expect(decoded.bash).toBeNull();
 	});
-	it("exported KNOWN_ERR_CODES includes expected codes", () => {
-		expect(KNOWN_ERR_CODES.has("INTERNAL_ERROR")).toBe(true);
-		expect(KNOWN_ERR_CODES.has("BASH_FAILED")).toBe(true);
-		expect(KNOWN_ERR_CODES.has("UNKNOWN")).toBe(true);
-		expect(KNOWN_ERR_CODES.has("INVALID" as any)).toBe(false);
+	it("isKnownObservationErrorCode validates known codes", () => {
+		expect(isKnownObservationErrorCode("INTERNAL_ERROR")).toBe(true);
+		expect(isKnownObservationErrorCode("BASH_FAILED")).toBe(true);
+		expect(isKnownObservationErrorCode("UNKNOWN")).toBe(true);
+		expect(isKnownObservationErrorCode("INVALID")).toBe(false);
 	});
 });

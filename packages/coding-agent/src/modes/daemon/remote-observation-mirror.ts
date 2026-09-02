@@ -26,7 +26,7 @@ const MAX_DTEXT = 50_000,
 const MAX_RECORDS = 200,
 	MAX_RECAP = 100;
 const SESSION_STATES = new Set(["running", "idle", "inactive"]);
-export const KNOWN_ERR_CODES = new Set([
+const KNOWN_ERR_CODES = new Set([
 	"INTERNAL_ERROR",
 	"UNKNOWN_COMMAND",
 	"INVALID_SESSION",
@@ -41,7 +41,11 @@ export const KNOWN_ERR_CODES = new Set([
 	"BUILD_MISMATCH",
 	"CAPABILITY_MISMATCH",
 	"UNKNOWN",
-] as const);
+]);
+
+export function isKnownObservationErrorCode(code: string): boolean {
+	return KNOWN_ERR_CODES.has(code);
+}
 /** Exact ISO 8601 millisecond with Z suffix: YYYY-MM-DDTHH:mm:ss.sssZ — must roundtrip. */
 const EXACT_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -413,7 +417,7 @@ export class RemoteObservationMirror {
 				if (typeof body.message !== "string" || (body.message as string).length > MAX_ERR_MSG) return null;
 				return {
 					type: "error",
-					code: KNOWN_ERR_CODES.has(body.code as any) ? (body.code as string) : "UNKNOWN",
+					code: isKnownObservationErrorCode(body.code as string) ? (body.code as string) : "UNKNOWN",
 				};
 			}
 			case "checkpoint_start":
