@@ -714,10 +714,20 @@ describe("AgentsViewMode", () => {
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
 
 		try {
-			const rows = buildAgentsViewRows([parent, child, inactive]);
+			const collapsed = buildAgentsViewRows([parent, child, inactive]);
+			const rows = buildAgentsViewRows([parent, child, inactive], new Set(collapsed.map((row) => row.identity)));
 			Reflect.set(view, "rows", rows);
 			const parentRow = rows.find((row) => row.summary.sessionId === "spender-session");
-			expect(stripAnsi(invoke("renderRow", view, parentRow, 200) as string)).toContain("12k/1.2k | $0.42 ($1.10)");
+			expect(stripAnsi(invoke("renderRow", view, parentRow, 200) as string)).toContain(
+				"↑12k ↓1.2k · $0.42 ($1.10 w/ subagents)",
+			);
+			// A leaf with no descendant spend shows its own cost alone.
+			const childRow = rows.find(
+				(row) => row.summary.sessionId === "spender-child-session" && row.kind === "subagent",
+			);
+			const childLine = stripAnsi(invoke("renderRow", view, childRow, 200) as string);
+			expect(childLine).toContain("↑500 ↓50 · $0.68");
+			expect(childLine).not.toContain("w/ subagents");
 			const inactiveRow = rows.find((row) => row.summary.sessionId === "saved-only-session");
 			const inactiveLine = stripAnsi(invoke("renderRow", view, inactiveRow, 200) as string);
 			expect(inactiveLine).not.toContain("7 ·");

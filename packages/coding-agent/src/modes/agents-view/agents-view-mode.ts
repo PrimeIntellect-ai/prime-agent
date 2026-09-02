@@ -2825,14 +2825,16 @@ function isRunningSessionSummary(summary: SessionSummary): boolean {
 	return summary.activity === "working";
 }
 
-/** `<input>/<output> | $<own> ($<own + descendants>)`, empty when the session has no usage data. */
+/** `↑<input> ↓<output> · $<own>`, plus `($<total> w/ subagents)` when descendants added visible spend. */
 function formatRowUsage(row: AgentsViewRow): string {
 	const usage = row.summary.usage;
 	if (!usage) {
 		return "";
 	}
-	const tokens = `${formatTokenCount(usage.inputTokens)}/${formatTokenCount(usage.outputTokens)}`;
-	return `${tokens} | $${usage.cost.toFixed(2)} ($${row.recursiveCost.toFixed(2)})`;
+	const own = usage.cost.toFixed(2);
+	const recursive = row.recursiveCost.toFixed(2);
+	const tokens = `↑${formatTokenCount(usage.inputTokens)} ↓${formatTokenCount(usage.outputTokens)}`;
+	return `${tokens} · $${own}${recursive !== own ? ` ($${recursive} w/ subagents)` : ""}`;
 }
 
 // Explicit session names read bold so they stand out from fallback titles
