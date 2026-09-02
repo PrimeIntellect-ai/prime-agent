@@ -90,10 +90,10 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 | B09 | A11, B01, B03 | done | Add top-level sandbox session creation APIs and CLI flags |
 | B10 | A06, B03, B04 | in_progress | Route durable direct agent-to-agent communication across hosts |
 | B11 | A07, B03, B04 | in_progress | Mirror observation, transcript, recap, and usage events |
-| B12 | A08, B03, B06 | in_progress | Add sandbox lifecycle, checkpoint, passivation, wake, and deletion |
+| B12 | A08, B03, B06 | done | Add sandbox lifecycle, checkpoint, passivation, wake, and deletion |
 | B13 | A09, B01, B11 | queued | Show execution location and connection health in Agents View |
 | B14 | B05, B06, B08, B09 | in_progress | Wire end-to-end sandbox session orchestration |
-| B15 | A13, B03, B04 | in_progress | Add protocol compatibility and reconnect tests |
+| B15 | A13, B03, B04 | done | Add protocol compatibility and reconnect tests |
 | B16 | A13, B05, B10, B11 | queued | Add auth, messaging, observation, and security integration tests |
 
 ### Wave 3: integration and release readiness
@@ -160,3 +160,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Integrated B04 managed relay as `53e6b73fe` + `c9b1cabec` (cleanup `1eff5e4e6`); 151 B03/B04 tests cover strict peer/build/session admission, session-bound durable journals, replay/deduplication, send-failure teardown, reconnect, and bounded credential-free frames. Started B10 durable cross-host communication and B11 observation mirroring.
 
 - Integrated the B14b Prime Tunnel manager as `a636f7d99`; it uses outbound `prime tunnel start`, validates and consumes the generated one-time grant, bounds injected CLI output, captures only validated tunnel IDs for cleanup, and provides bounded TERM/KILL plus exact-ID CLI cleanup without retaining output.
+
+- Integrated B12 durable sandbox ownership and lifecycle as `16d844a1a`; 158 B06/B12 tests cover hashed fencing tokens, locked CAS transitions, atomic/fsynced records, corrupt-record fail-closed behavior, compensated provisioning, stale reclamation, passivation/wake, tombstones, and deletion without losing a possibly live sandbox handle.
+
+- Integrated B15 protocol compatibility hardening as `3c80229aa` + `e5a22820f`; 226 B03/B04/B15 tests cover exact accepted-ACK build identity, unknown-field rejection, restart cursors, identity isolation, reconnect, corruption, gaps, and bounded replay. Started B14c loopback WebSocket relay and exact-build bootstrap foundations.
