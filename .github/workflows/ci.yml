@@ -378,17 +378,26 @@ jobs:
       - name: Test persistent CPython kernel behavior
         working-directory: packages/coding-agent
         env:
+          PRIME_AGENT_BASH_SHELL: C:\Program Files\Git\bin\bash.exe
           PRIME_AGENT_KERNEL_VENV: ${{ runner.temp }}\Prime Agent ø\kernel-venv
           PRIME_AGENT_TEST_TAGS: kernel-heavy
         run: >-
           bun ../../scripts/run-with-clean-env.ts bun test --isolate --timeout 30000
           test/acp-kernel-features.test.ts
           test/kernel-goal-skill.test.ts
+          test/repl-kernel-execute.test.ts
           test/repl-kernel-parent-watchdog.test.ts
 
-      - name: Test the CPython runtime
+      - name: Test the Windows CPython runtime
         working-directory: prime-agent-runtime
-        run: uv run python -m unittest discover -s test
+        env:
+          PRIME_AGENT_BASH_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: >-
+          uv run python -m unittest
+          test.test_winjob
+          test.test_repl.ReplTest.test_interrupt_without_pthread_kill_cancels_awaited_cell
+          test.test_repl.ReplTest.test_interrupt_sync_blocking
+          test.test_repl.ReplTest.test_interrupt_await_suspended
 
       - name: Build the native Windows executable
         run: bun run build:binary
