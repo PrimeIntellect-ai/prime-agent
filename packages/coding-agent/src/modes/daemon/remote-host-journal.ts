@@ -1,9 +1,10 @@
 /**
- * Replay/deduplication journal for remote-agent-host protocol.
+ * Replay/deduplication/ack journal for remote-agent-host protocol.
  *
  * Append-only JSONL journal that records every frame sent and received over
  * a remote-host link. Supports replay (reading back frames from a cursor
- * position) and deduplication (detecting and rejecting duplicate frame IDs).
+ * position), deduplication (detecting and rejecting duplicate frame IDs),
+ * and durable ACK tracking (marking acknowledged frames for replay recovery).
  *
  * The journal lives on the home daemon and is the durable record of the
  * link's message exchange.
@@ -39,11 +40,13 @@ export interface RemoteHostJournalEntry {
 	frame: RemoteHostFrame;
 	hostId: string;
 	generation: string;
+	sessionId: string;
 	eventSequence?: RemoteHostEventSequence;
 }
 
 export interface RemoteHostDedupState {
 	received: Set<RemoteHostFrameId>;
+	acknowledged: Set<RemoteHostFrameId>;
 	lastReceivedEventSequence: RemoteHostEventSequence;
 	lastSentEventSequence: RemoteHostEventSequence;
 }
@@ -51,6 +54,7 @@ export interface RemoteHostDedupState {
 export function createRemoteHostDedupState(): RemoteHostDedupState {
 	return {
 		received: new Set(),
+		acknowledged: new Set(),
 		lastReceivedEventSequence: 0,
 		lastSentEventSequence: 0,
 	};
@@ -63,22 +67,23 @@ export class RemoteHostJournal {
 	private nextSeq: number;
 	private readonly hostId: string;
 	private readonly generation: string;
+	private readonly sessionId: string;
 	private readonly dedup: RemoteHostDedupState;
 
-	constructor(opts: { path: string; hostId: string; generation: string }) {
+	constructor(opts: { path: string; hostId: string; generation: string; sessionId: string }) {
 		this.journalPath = opts.path;
 		this.hostId = opts.hostId;
 		this.generation = opts.generation;
+		this.sessionId = opts.sessionId;
 		this.nextSeq = 1;
 		this.dedup = createRemoteHostDedupState();
 
 		const dir = dirname(opts.path);
 		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
+			mkdirSync(dir, { recursive: true, mode: 0o700 });
 		}
 
 		if (existsSync(opts.path)) {
-			// Enforce 0600 on existing journal files.
 			const mode = statSync(opts.path).mode & 0o777;
 			if (mode !== 0o600) {
 				chmodSync(opts.path, 0o600);
@@ -88,6 +93,10 @@ export class RemoteHostJournal {
 			for (const line of lines) {
 				try {
 					const entry = JSON.parse(line) as RemoteHostJournalEntry;
+					// Ignore entries for a different identity.
+					if (entry.hostId !== this.hostId) continue;
+					if (entry.generation !== this.generation) continue;
+					if (entry.sessionId !== this.sessionId) continue;
 					if (entry.journalSeq >= this.nextSeq) {
 						this.nextSeq = entry.journalSeq + 1;
 					}
@@ -95,6 +104,9 @@ export class RemoteHostJournal {
 						this.dedup.received.add(entry.frameId);
 						if (entry.eventSequence !== undefined && entry.eventSequence > this.dedup.lastReceivedEventSequence) {
 							this.dedup.lastReceivedEventSequence = entry.eventSequence;
+						}
+						if (entry.frame.type === "ack" && "acknowledges" in entry.frame) {
+							this.dedup.acknowledged.add((entry.frame as { acknowledges: string }).acknowledges);
 						}
 					}
 					if (
@@ -115,11 +127,6 @@ export class RemoteHostJournal {
 		return this.journalPath;
 	}
 
-	/**
-	 * Persist before returning: the entry is written and fsynced synchronously
-	 * before the caller sends the frame. This ensures the journal is durable
-	 * before the wire write, so replay can always recover the frame.
-	 */
 	recordSent(frame: RemoteHostFrameEnvelope): RemoteHostJournalEntry {
 		const entry: RemoteHostJournalEntry = {
 			journalSeq: this.nextSeq++,
@@ -129,6 +136,7 @@ export class RemoteHostJournal {
 			frame: frame.frame,
 			hostId: this.hostId,
 			generation: this.generation,
+			sessionId: this.sessionId,
 			eventSequence: frame.frame.type === "event" ? frame.frame.sequence : undefined,
 		};
 		if (frame.frame.type === "event") {
@@ -138,11 +146,6 @@ export class RemoteHostJournal {
 		return entry;
 	}
 
-	/**
-	 * Persist before returning. Duplicate frame IDs are detected but
-	 * still persisted (the journal is an audit log). However, duplicates
-	 * do NOT advance sequence/gap state or count toward dedup tracking.
-	 */
 	recordReceived(frame: RemoteHostFrameEnvelope): { entry: RemoteHostJournalEntry; isDuplicate: boolean } {
 		const isDuplicate = this.dedup.received.has(frame.frameId);
 		if (!isDuplicate) {
@@ -159,8 +162,12 @@ export class RemoteHostJournal {
 			frame: frame.frame,
 			hostId: this.hostId,
 			generation: this.generation,
+			sessionId: this.sessionId,
 			eventSequence: frame.frame.type === "event" ? frame.frame.sequence : undefined,
 		};
+		if (frame.frame.type === "ack") {
+			this.dedup.acknowledged.add(frame.frame.acknowledges);
+		}
 		this.persistEntry(entry);
 		return { entry, isDuplicate };
 	}
@@ -179,10 +186,12 @@ export class RemoteHostJournal {
 		for (const line of lines) {
 			try {
 				const entry = JSON.parse(line) as RemoteHostJournalEntry;
-				if (entry.journalSeq >= fromSeq) {
-					entries.push(entry);
-					if (entries.length >= limit) break;
-				}
+				if (entry.journalSeq < fromSeq) continue;
+				if (entry.hostId !== this.hostId) continue;
+				if (entry.generation !== this.generation) continue;
+				if (entry.sessionId !== this.sessionId) continue;
+				entries.push(entry);
+				if (entries.length >= limit) break;
 			} catch {
 				// Skip corrupt lines.
 			}
@@ -192,30 +201,53 @@ export class RemoteHostJournal {
 
 	/**
 	 * Get replay entries matching a resume cursor and a direction filter.
-	 * Sent replay returns only sent entries; received replay returns only
-	 * received entries. Gap analysis is performed on the filtered set so
-	 * outbound and inbound event sequences are never interleaved.
+	 * Filtering by cursor/direction happens before the limit so gaps and
+	 * overflow are detected correctly. Reports partial when more entries
+	 * remain beyond the limit or when a sequence gap is detected.
 	 */
 	getReplayEntries(
 		resumeCursor: RemoteHostEventCursor,
 		_limit: number = 500,
 		direction: JournalReplayDirection = "sent",
 	): { status: "complete" | "partial" | "unavailable"; entries: RemoteHostJournalEntry[]; reason?: string } {
-		// Validate cursor identity: both hostId AND generation must match.
 		if (resumeCursor.hostId !== this.hostId) {
 			return { status: "unavailable", entries: [], reason: "host_identity_mismatch" };
 		}
 		if (resumeCursor.generation !== this.generation) {
 			return { status: "unavailable", entries: [], reason: "generation_changed" };
 		}
+		if (resumeCursor.sessionId !== this.sessionId) {
+			return { status: "unavailable", entries: [], reason: "session_mismatch" };
+		}
+		if (!existsSync(this.journalPath)) {
+			if (resumeCursor.sequence > 0) {
+				return { status: "unavailable", entries: [], reason: "journal_missing" };
+			}
+			return { status: "complete", entries: [] };
+		}
 
-		const allEntries = this.readEntries(1, _limit);
-		const matching = allEntries.filter(
-			(e) =>
-				e.eventSequence !== undefined &&
-				e.eventSequence > resumeCursor.sequence &&
-				(direction === "both" || e.type === direction),
-		);
+		const safeLimit = Number.isSafeInteger(_limit) && _limit > 0 ? Math.min(_limit, 1000) : 500;
+
+		const content = readFileSync(this.journalPath, "utf-8");
+		const lines = content.trim().split("\n").filter(Boolean);
+		const matching: RemoteHostJournalEntry[] = [];
+		for (const line of lines) {
+			try {
+				const entry = JSON.parse(line) as RemoteHostJournalEntry;
+				if (entry.hostId !== this.hostId) continue;
+				if (entry.generation !== this.generation) continue;
+				if (entry.sessionId !== this.sessionId) continue;
+				if (
+					entry.eventSequence !== undefined &&
+					entry.eventSequence > resumeCursor.sequence &&
+					(direction === "both" || entry.type === direction)
+				) {
+					matching.push(entry);
+				}
+			} catch {
+				// Skip corrupt lines.
+			}
+		}
 
 		if (matching.length === 0) {
 			return { status: "complete", entries: [] };
@@ -233,11 +265,18 @@ export class RemoteHostJournal {
 			}
 		}
 
+		const totalMatched = matching.length;
+		const limited = matching.slice(0, safeLimit);
+
 		if (hasGap) {
-			return { status: "partial", entries: matching, reason: "event_sequence_gap" };
+			return { status: "partial", entries: limited, reason: "event_sequence_gap" };
 		}
 
-		return { status: "complete", entries: matching };
+		if (totalMatched > _limit) {
+			return { status: "partial", entries: limited, reason: "more_entries_available" };
+		}
+
+		return { status: "complete", entries: limited };
 	}
 
 	getReplaySentFrames(
@@ -250,6 +289,36 @@ export class RemoteHostJournal {
 			frames: result.entries.map((e) => e.frame),
 			reason: result.reason,
 		};
+	}
+
+	/**
+	 * Returns sent entries (excluding health/handshake/ack frames) that
+	 * have NOT been durably acknowledged via a received ack frame.
+	 * Entries are returned in journalSeq order (oldest first).
+	 */
+	getUnacknowledgedSentEntries(): RemoteHostJournalEntry[] {
+		if (!existsSync(this.journalPath)) {
+			return [];
+		}
+		const content = readFileSync(this.journalPath, "utf-8");
+		const lines = content.trim().split("\n").filter(Boolean);
+		const unacked: RemoteHostJournalEntry[] = [];
+		for (const line of lines) {
+			try {
+				const entry = JSON.parse(line) as RemoteHostJournalEntry;
+				if (entry.hostId !== this.hostId) continue;
+				if (entry.generation !== this.generation) continue;
+				if (entry.sessionId !== this.sessionId) continue;
+				if (entry.type !== "sent") continue;
+				if (entry.frame.type === "health" || entry.frame.type === "handshake" || entry.frame.type === "ack")
+					continue;
+				if (this.dedup.acknowledged.has(entry.frameId)) continue;
+				unacked.push(entry);
+			} catch {
+				// Skip corrupt lines.
+			}
+		}
+		return unacked;
 	}
 
 	get lastReceivedEventSequence(): RemoteHostEventSequence {
@@ -280,11 +349,13 @@ export class InMemoryRemoteHostJournal implements RemoteHostJournalLike {
 	private nextSeq: number = 1;
 	private readonly hostId: string;
 	private readonly generation: string;
+	private readonly sessionId: string;
 	private readonly dedup: RemoteHostDedupState;
 
-	constructor(opts: { hostId: string; generation: string }) {
+	constructor(opts: { hostId: string; generation: string; sessionId: string }) {
 		this.hostId = opts.hostId;
 		this.generation = opts.generation;
+		this.sessionId = opts.sessionId;
 		this.dedup = createRemoteHostDedupState();
 	}
 
@@ -301,6 +372,7 @@ export class InMemoryRemoteHostJournal implements RemoteHostJournalLike {
 			frame: frame.frame,
 			hostId: this.hostId,
 			generation: this.generation,
+			sessionId: this.sessionId,
 			eventSequence: frame.frame.type === "event" ? frame.frame.sequence : undefined,
 		};
 		if (frame.frame.type === "event") {
@@ -326,8 +398,12 @@ export class InMemoryRemoteHostJournal implements RemoteHostJournalLike {
 			frame: frame.frame,
 			hostId: this.hostId,
 			generation: this.generation,
+			sessionId: this.sessionId,
 			eventSequence: frame.frame.type === "event" ? frame.frame.sequence : undefined,
 		};
+		if (frame.frame.type === "ack") {
+			this.dedup.acknowledged.add(frame.frame.acknowledges);
+		}
 		this.entries.push(entry);
 		return { entry, isDuplicate };
 	}
@@ -351,6 +427,11 @@ export class InMemoryRemoteHostJournal implements RemoteHostJournalLike {
 		if (resumeCursor.generation !== this.generation) {
 			return { status: "unavailable", entries: [], reason: "generation_changed" };
 		}
+		if (resumeCursor.sessionId !== this.sessionId) {
+			return { status: "unavailable", entries: [], reason: "session_mismatch" };
+		}
+
+		const safeLimit = Number.isSafeInteger(_limit) && _limit > 0 ? Math.min(_limit, 1000) : 500;
 
 		const matching = this.entries.filter(
 			(e) =>
@@ -375,11 +456,18 @@ export class InMemoryRemoteHostJournal implements RemoteHostJournalLike {
 			}
 		}
 
+		const totalMatched = matching.length;
+		const limited = matching.slice(0, safeLimit);
+
 		if (hasGap) {
-			return { status: "partial", entries: matching, reason: "event_sequence_gap" };
+			return { status: "partial", entries: limited, reason: "event_sequence_gap" };
 		}
 
-		return { status: "complete", entries: matching };
+		if (totalMatched > _limit) {
+			return { status: "partial", entries: limited, reason: "more_entries_available" };
+		}
+
+		return { status: "complete", entries: limited };
 	}
 
 	getReplaySentFrames(
@@ -392,6 +480,17 @@ export class InMemoryRemoteHostJournal implements RemoteHostJournalLike {
 			frames: result.entries.map((e) => e.frame),
 			reason: result.reason,
 		};
+	}
+
+	getUnacknowledgedSentEntries(): RemoteHostJournalEntry[] {
+		return this.entries.filter(
+			(e) =>
+				e.type === "sent" &&
+				e.frame.type !== "health" &&
+				e.frame.type !== "handshake" &&
+				e.frame.type !== "ack" &&
+				!this.dedup.acknowledged.has(e.frameId),
+		);
 	}
 
 	get lastReceivedEventSequence(): RemoteHostEventSequence {
@@ -410,6 +509,7 @@ export class InMemoryRemoteHostJournal implements RemoteHostJournalLike {
 		this.entries = [];
 		this.nextSeq = 1;
 		this.dedup.received.clear();
+		this.dedup.acknowledged.clear();
 		this.dedup.lastReceivedEventSequence = 0;
 		this.dedup.lastSentEventSequence = 0;
 	}
@@ -433,4 +533,5 @@ export interface RemoteHostJournalLike {
 	readonly lastReceivedEventSequence: RemoteHostEventSequence;
 	readonly lastSentEventSequence: RemoteHostEventSequence;
 	readonly dedupCount: number;
+	getUnacknowledgedSentEntries(): RemoteHostJournalEntry[];
 }

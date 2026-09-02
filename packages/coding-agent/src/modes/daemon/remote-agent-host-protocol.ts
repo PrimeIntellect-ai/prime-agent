@@ -106,12 +106,15 @@ export interface RemoteHostHandshakeFrame {
 export interface RemoteHostHandshakeAckFrame {
 	type: "handshake_ack";
 	hostId: string;
+	sessionId: string;
 	protocol: RemoteHostProtocolInfo;
 	accepted: boolean;
 	rejectReason?: string;
 	capabilities: RemoteHostCapability[];
 	linkId: string;
 	cursor?: RemoteHostEventCursor;
+	/** Required remote build identity for exact-build admission checks. */
+	remoteBuildIdentity: RemoteHostBuildIdentity;
 }
 
 export type RemoteHostCommandFrameBody =
@@ -279,13 +282,149 @@ const KNOWN_FRAME_TYPES = new Set([
 	"error",
 ]);
 
+const KNOWN_CAPABILITIES = new Set([
+	"session_commands",
+	"sequenced_events",
+	"provider_proxy",
+	"agent_messages",
+	"link_health",
+	"checkpoint",
+	"workspace_sync",
+	"acknowledgements",
+]);
+const MAX_ID_LENGTH = 128;
+const MAX_REJECT_REASON_LENGTH = 256;
+
+/**
+ * Strict validation of a parsed handshake_ack frame.
+ *
+ * Validates every field before the caller casts: accepted boolean,
+ * bounded hostId/sessionId/linkId, exact protocol fields, known/bounded
+ * capabilities, cursor identity/sequence, remoteBuildIdentity exact fields,
+ * safe fixed reject reason.  Returns undefined on success or a stable
+ * error code on any invalid field.
+ *
+ * A malformed accepted ack MUST be caught here so the relay can
+ * teardown and reject connect with a stable code instead of throwing.
+ */
+export function validateRemoteHostHandshakeAck(value: unknown): RemoteHostValidationError | undefined {
+	if (!value || typeof value !== "object") {
+		return { code: "INVALID_ACK", message: "Not an object" };
+	}
+	const ack = value as Record<string, unknown>;
+
+	if (ack.type !== "handshake_ack") {
+		return { code: "INVALID_ACK_TYPE", message: "Expected handshake_ack" };
+	}
+	if (typeof ack.accepted !== "boolean") {
+		return { code: "INVALID_ACK_ACCEPTED", message: "accepted must be boolean" };
+	}
+	if (typeof ack.hostId !== "string" || ack.hostId.length === 0 || ack.hostId.length > MAX_ID_LENGTH) {
+		return { code: "INVALID_ACK_HOST_ID", message: "hostId must be a non-empty bounded string" };
+	}
+	if (typeof ack.sessionId !== "string" || ack.sessionId.length === 0 || ack.sessionId.length > MAX_ID_LENGTH) {
+		return { code: "INVALID_ACK_SESSION_ID", message: "sessionId must be a bounded string" };
+	}
+	if (typeof ack.linkId !== "string" || ack.linkId.length === 0 || ack.linkId.length > MAX_ID_LENGTH) {
+		return { code: "INVALID_ACK_LINK_ID", message: "linkId must be a non-empty bounded string" };
+	}
+
+	// Protocol must have exact numeric fields.
+	if (!ack.protocol || typeof ack.protocol !== "object") {
+		return { code: "INVALID_ACK_PROTOCOL", message: "protocol is required" };
+	}
+	const proto = ack.protocol as Record<string, unknown>;
+	if (typeof proto.name !== "string" || proto.name.length === 0) {
+		return { code: "INVALID_ACK_PROTOCOL_NAME", message: "protocol.name is required" };
+	}
+	if (typeof proto.version !== "number" || !Number.isInteger(proto.version) || proto.version < 0) {
+		return { code: "INVALID_ACK_PROTOCOL_VERSION", message: "protocol.version must be a non-negative integer" };
+	}
+
+	// Capabilities must be a bounded array of known strings.
+	if (!Array.isArray(ack.capabilities)) {
+		return { code: "INVALID_ACK_CAPABILITIES", message: "capabilities must be an array" };
+	}
+	if (ack.capabilities.length > 50) {
+		return { code: "INVALID_ACK_CAPABILITIES_BOUND", message: "capabilities exceeds max count" };
+	}
+	for (const cap of ack.capabilities) {
+		if (typeof cap !== "string" || !KNOWN_CAPABILITIES.has(cap)) {
+			return { code: "INVALID_ACK_CAPABILITY", message: "Unknown capability" };
+		}
+	}
+
+	// Optional rejectReason — safe fixed string.
+	if (ack.rejectReason !== undefined && typeof ack.rejectReason !== "string") {
+		return { code: "INVALID_ACK_REJECT_REASON", message: "rejectReason must be a string" };
+	}
+	if (ack.rejectReason && typeof ack.rejectReason === "string" && ack.rejectReason.length > MAX_REJECT_REASON_LENGTH) {
+		return { code: "INVALID_ACK_REJECT_REASON", message: "rejectReason too long" };
+	}
+
+	// Optional cursor — identity + sequence validation.
+	if (ack.cursor !== undefined) {
+		if (typeof ack.cursor !== "object" || !ack.cursor) {
+			return { code: "INVALID_ACK_CURSOR", message: "cursor must be an object" };
+		}
+		const cursor = ack.cursor as Record<string, unknown>;
+		if (typeof cursor.hostId !== "string" || cursor.hostId.length === 0 || cursor.hostId.length > MAX_ID_LENGTH) {
+			return { code: "INVALID_ACK_CURSOR_HOST_ID", message: "cursor.hostId must be a bounded string" };
+		}
+		if (
+			typeof cursor.generation !== "string" ||
+			cursor.generation.length === 0 ||
+			cursor.generation.length > MAX_ID_LENGTH
+		) {
+			return { code: "INVALID_ACK_CURSOR_GENERATION", message: "cursor.generation must be a bounded string" };
+		}
+		if (
+			typeof cursor.sessionId !== "string" ||
+			cursor.sessionId.length === 0 ||
+			cursor.sessionId.length > MAX_ID_LENGTH
+		) {
+			return { code: "INVALID_ACK_CURSOR_SESSION_ID", message: "cursor.sessionId must be a bounded string" };
+		}
+		if (typeof cursor.sequence !== "number" || !Number.isInteger(cursor.sequence) || cursor.sequence < 0) {
+			return { code: "INVALID_ACK_CURSOR_SEQUENCE", message: "cursor.sequence must be a non-negative integer" };
+		}
+	}
+
+	// Optional remoteBuildIdentity — exact fields.
+	if (ack.remoteBuildIdentity !== undefined) {
+		if (typeof ack.remoteBuildIdentity !== "object" || !ack.remoteBuildIdentity) {
+			return { code: "INVALID_ACK_BUILD_IDENTITY", message: "remoteBuildIdentity must be an object" };
+		}
+		const build = ack.remoteBuildIdentity as Record<string, unknown>;
+		if (typeof build.buildId !== "string" || build.buildId.length === 0 || build.buildId.length > MAX_ID_LENGTH) {
+			return { code: "INVALID_ACK_BUILD_ID", message: "buildId must be a bounded string" };
+		}
+		if (
+			typeof build.daemonProtocolVersion !== "number" ||
+			!Number.isInteger(build.daemonProtocolVersion) ||
+			build.daemonProtocolVersion < 0
+		) {
+			return { code: "INVALID_ACK_BUILD_PROTOCOL", message: "daemonProtocolVersion must be a non-negative integer" };
+		}
+		if (
+			typeof build.daemonSchemaRevision !== "number" ||
+			!Number.isInteger(build.daemonSchemaRevision) ||
+			build.daemonSchemaRevision < 0
+		) {
+			return { code: "INVALID_ACK_BUILD_SCHEMA", message: "daemonSchemaRevision must be a non-negative integer" };
+		}
+	}
+
+	return undefined;
+}
+
 export function validateRemoteHostFrame(value: unknown): RemoteHostValidationError | undefined {
 	if (!value || typeof value !== "object") {
 		return { code: "NOT_AN_OBJECT", message: "Frame must be a non-null object" };
 	}
 	const candidate = value as Record<string, unknown>;
 	if (candidate.type !== "frame") {
-		return { code: "INVALID_ENVELOPE_TYPE", message: `Expected type "frame", got ${JSON.stringify(candidate.type)}` };
+		return { code: "INVALID_ENVELOPE_TYPE", message: "Invalid envelope type" };
 	}
 	if (typeof candidate.frameId !== "string" || candidate.frameId.length === 0) {
 		return { code: "MISSING_FRAME_ID", message: "frameId must be a non-empty string" };
@@ -295,7 +434,7 @@ export function validateRemoteHostFrame(value: unknown): RemoteHostValidationErr
 	}
 	const proto = candidate.protocol as Record<string, unknown>;
 	if (proto.name !== REMOTE_HOST_PROTOCOL_NAME) {
-		return { code: "UNKNOWN_PROTOCOL", message: `Expected protocol ${REMOTE_HOST_PROTOCOL_NAME}, got ${proto.name}` };
+		return { code: "UNKNOWN_PROTOCOL", message: "Protocol name mismatch" };
 	}
 	if (typeof proto.version !== "number") {
 		return { code: "INVALID_PROTOCOL_VERSION", message: "protocol.version must be a number" };
@@ -308,7 +447,7 @@ export function validateRemoteHostFrame(value: unknown): RemoteHostValidationErr
 	}
 	const frame = candidate.frame as Record<string, unknown>;
 	if (typeof frame.type !== "string" || !KNOWN_FRAME_TYPES.has(frame.type)) {
-		return { code: "UNKNOWN_FRAME_TYPE", message: `Unknown frame type ${JSON.stringify(frame.type)}` };
+		return { code: "UNKNOWN_FRAME_TYPE", message: "Unknown frame type" };
 	}
 	return undefined;
 }
@@ -319,14 +458,11 @@ export function validateRemoteHostHandshake(value: unknown): RemoteHostValidatio
 	}
 	const h = value as Record<string, unknown>;
 	if (h.type !== "handshake") {
-		return { code: "INVALID_TYPE", message: `Expected "handshake", got ${JSON.stringify(h.type)}` };
+		return { code: "INVALID_TYPE", message: "Invalid handshake type" };
 	}
 	const validDirections = ["home_to_host", "host_to_home"];
 	if (typeof h.direction !== "string" || !validDirections.includes(h.direction)) {
-		return {
-			code: "INVALID_DIRECTION",
-			message: `direction must be one of ${validDirections.join(", ")}, got ${JSON.stringify(h.direction)}`,
-		};
+		return { code: "INVALID_DIRECTION", message: "Invalid handshake direction" };
 	}
 	if (typeof h.hostId !== "string" || h.hostId.length === 0) {
 		return { code: "MISSING_HOST_ID", message: "hostId is required" };

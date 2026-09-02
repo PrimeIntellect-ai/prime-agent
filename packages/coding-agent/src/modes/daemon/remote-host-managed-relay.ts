@@ -1,25 +1,13 @@
 /**
  * Managed relay-link state machine for remote-agent-host protocol.
- *
- * An outbound managed-relay link shared by home and sandbox sides.
- * Uses an injected WebSocket factory so unit tests are deterministic
- * and never touch a network.
- *
- * Supports connecting, exact-build handshake admission, authenticated
- * one-time relay grant use without persisting or emitting the grant,
- * connected health, ping/pong liveness, reconnect with bounded
- * exponential backoff+jitter, replay from durable cursors, graceful
- * close, and unreachable terminal state.
- *
- * Both endpoints connect outbound; there is no local listen socket,
- * SSH control path, or client-side global concurrency limiter.
- *
- * No credentials or raw frames containing model content are logged.
  */
 
+import { randomUUID } from "node:crypto";
 import type { SandboxConnectionHealth } from "../../core/execution-location.js";
 import type { RemoteHostEventCursor, RemoteHostEventSequence } from "./remote-agent-host-protocol.js";
 import {
+	isRemoteHostBuildCompatible,
+	isRemoteHostProtocolCompatible,
 	REMOTE_HOST_PROTOCOL_INFO,
 	type RemoteHostBuildIdentity,
 	type RemoteHostCapability,
@@ -29,6 +17,8 @@ import {
 	type RemoteHostHandshakeFrame,
 	type RemoteHostLinkDirection,
 	type RemoteHostLinkStatus,
+	validateRemoteHostFrame,
+	validateRemoteHostHandshakeAck,
 } from "./remote-agent-host-protocol.js";
 import type { RemoteHostJournalLike } from "./remote-host-journal.js";
 
@@ -37,20 +27,17 @@ import type { RemoteHostJournalLike } from "./remote-host-journal.js";
 // ---------------------------------------------------------------------------
 
 const DEFAULT_PING_INTERVAL_MS = 30_000;
+const DEFAULT_PONG_TIMEOUT_MS = 60_000;
+const HANDSHAKE_TIMEOUT_MS = 15_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const BASE_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 60_000;
+const MAX_REPLAY_PAGES = 10;
 
 // ---------------------------------------------------------------------------
 // WebSocket abstraction
 // ---------------------------------------------------------------------------
 
-/**
- * Minimal WebSocket interface for relay links.
- *
- * Both the real ws.WebSocket and test fakes implement this so the
- * relay never touches a real network during unit tests.
- */
 export interface RelayWebSocket {
 	readonly readyState: number;
 	onopen: (() => void) | null;
@@ -61,34 +48,23 @@ export interface RelayWebSocket {
 	close(code?: number, reason?: string): void;
 }
 
-/**
- * Factory interface for creating WebSocket connections.
- *
- * Inject a fake factory in tests to avoid real network I/O.
- */
 export interface WebSocketFactory {
-	create(url: string): RelayWebSocket;
+	create(url: string, auth?: { grant?: string }): RelayWebSocket;
 }
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/**
- * Internal relay state — not emitted directly.
- * The public API surfaces {@link ManagedRelayLink.health} as a
- * {@link SandboxConnectionHealth} value.
- */
 type RelayInternalState =
 	| { readonly status: "idle" }
-	| { readonly status: "connecting"; readonly url: string; readonly attempt: number }
-	| { readonly status: "handshaking"; readonly url: string; readonly attempt: number }
-	| { readonly status: "connected" }
+	| { readonly status: "connecting"; readonly attempt: number }
+	| { readonly status: "handshaking"; readonly attempt: number }
+	| { readonly status: "connected"; readonly linkId: string }
 	| { readonly status: "reconnecting"; readonly attempt: number }
 	| { readonly status: "closed" }
-	| { readonly status: "unreachable"; readonly error: string };
+	| { readonly status: "unreachable"; readonly error: string; readonly failedAt: string };
 
-/** Events emitted by the relay link. */
 export type ManagedRelayLinkEvent =
 	| { readonly type: "frame_received"; readonly envelope: RemoteHostFrameEnvelope; readonly isDuplicate: boolean }
 	| { readonly type: "handshake_rejected"; readonly reason: string }
@@ -98,22 +74,34 @@ export type ManagedRelayLinkEvent =
 			readonly remoteCapabilities: readonly RemoteHostCapability[];
 	  }
 	| { readonly type: "recovered" }
+	| { readonly type: "replay_resync_required"; readonly reason: string }
 	| { readonly type: "error"; readonly error: Error };
 
-/** Callback for relay events. */
 export type ManagedRelayLinkObserver = (event: ManagedRelayLinkEvent) => void;
+
+export type Disposer = () => void;
+
+interface ConnectResult {
+	accepted: boolean;
+	linkId?: string;
+	rejectReason?: string;
+}
 
 export interface ManagedRelayLinkOptions {
 	readonly url: string;
 	readonly hostId: string;
 	readonly generation: string;
+	readonly sessionId: string;
+	readonly expectedRemoteHostId: string;
+	readonly expectedRemoteSessionId: string;
 	readonly buildIdentity: RemoteHostBuildIdentity;
 	readonly direction: RemoteHostLinkDirection;
 	readonly capabilities: readonly RemoteHostCapability[];
 	readonly journal: RemoteHostJournalLike;
 	readonly wsFactory: WebSocketFactory;
-	readonly grant?: string;
+	readonly grantProvider?: () => Promise<string>;
 	readonly pingIntervalMs?: number;
+	readonly pongTimeoutMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,94 +117,130 @@ function nowISO(): string {
 	return new Date().toISOString();
 }
 
-function nextFrameId(hostId: string, n: number): string {
-	return `${hostId}-frame-${n}`;
-}
-
 // ---------------------------------------------------------------------------
 // ManagedRelayLink
 // ---------------------------------------------------------------------------
 
-/**
- * Outbound managed-relay link for the remote-agent-host protocol.
- *
- * Lifecycle:
- *   idle -> connecting -> handshaking -> connected
- *   connected -> reconnecting -> handshaking -> connected
- *   any -> closed (graceful close from outside)
- *   handshaking/reconnecting -> unreachable (rejected or exhausted)
- */
 export class ManagedRelayLink {
 	private _state: RelayInternalState = { status: "idle" };
-	private _connectedAt: string | undefined;
 	private readonly options: ManagedRelayLinkOptions;
 	private readonly pingIntervalMs: number;
-	private nextFrameSeq = 0;
+	private readonly pongTimeoutMs: number;
 
-	// Reconnect state
+	private connectingSince: string | undefined;
+	private connectedAt: string | undefined;
+	private reconnectingSince: string | undefined;
+	private lastPongAt = 0;
+	private healthSeqCounter = 0;
+
 	private reconnectAttempt = 0;
 	private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 	private reconnectAborted = false;
 
-	// Ping timer
 	private pingTimer: ReturnType<typeof setInterval> | undefined;
 
-	// Active socket
+	private generation = 0;
+
 	private socket: RelayWebSocket | undefined;
 
-	// Observers
-	private readonly observers: ManagedRelayLinkObserver[] = [];
+	private observers: ManagedRelayLinkObserver[] = [];
 
-	// Handshake promise — resolves once a handshake_ack is received
-	private handshakeResolver:
-		| ((result: {
-				accepted: boolean;
-				linkId?: string;
-				remoteCapabilities?: readonly RemoteHostCapability[];
-				rejectReason?: string;
-		  }) => void)
-		| undefined;
+	private connectPromise: Promise<ConnectResult> | undefined;
+	private connectResolve: ((result: ConnectResult) => void) | undefined;
+	private handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+	private replayAborted = false;
 
 	constructor(options: ManagedRelayLinkOptions) {
+		// Validate identity fields: all must be nonempty bounded strings.
+		const maxIdLen = 128;
+		if (typeof options.hostId !== "string" || options.hostId.length === 0 || options.hostId.length > maxIdLen) {
+			throw new Error("Invalid or missing hostId");
+		}
+		if (
+			typeof options.generation !== "string" ||
+			options.generation.length === 0 ||
+			options.generation.length > maxIdLen
+		) {
+			throw new Error("Invalid or missing generation");
+		}
+		if (
+			typeof options.sessionId !== "string" ||
+			options.sessionId.length === 0 ||
+			options.sessionId.length > maxIdLen
+		) {
+			throw new Error("Invalid or missing sessionId");
+		}
+		if (
+			typeof options.expectedRemoteHostId !== "string" ||
+			options.expectedRemoteHostId.length === 0 ||
+			options.expectedRemoteHostId.length > maxIdLen
+		) {
+			throw new Error("Invalid or missing expectedRemoteHostId");
+		}
+		if (
+			typeof options.expectedRemoteSessionId !== "string" ||
+			options.expectedRemoteSessionId.length === 0 ||
+			options.expectedRemoteSessionId.length > maxIdLen
+		) {
+			throw new Error("Invalid or missing expectedRemoteSessionId");
+		}
+		// Validate build identity: all fields must be nonnegative integers.
+		if (
+			typeof options.buildIdentity.buildId !== "string" ||
+			options.buildIdentity.buildId.length === 0 ||
+			options.buildIdentity.buildId.length > maxIdLen
+		) {
+			throw new Error("Invalid or missing buildIdentity.buildId");
+		}
+		if (
+			typeof options.buildIdentity.daemonProtocolVersion !== "number" ||
+			!Number.isInteger(options.buildIdentity.daemonProtocolVersion) ||
+			options.buildIdentity.daemonProtocolVersion < 0
+		) {
+			throw new Error("Invalid buildIdentity.daemonProtocolVersion");
+		}
+		if (
+			typeof options.buildIdentity.daemonSchemaRevision !== "number" ||
+			!Number.isInteger(options.buildIdentity.daemonSchemaRevision) ||
+			options.buildIdentity.daemonSchemaRevision < 0
+		) {
+			throw new Error("Invalid buildIdentity.daemonSchemaRevision");
+		}
 		this.options = options;
 		this.pingIntervalMs = options.pingIntervalMs ?? DEFAULT_PING_INTERVAL_MS;
+		this.pongTimeoutMs = options.pongTimeoutMs ?? DEFAULT_PONG_TIMEOUT_MS;
 	}
 
 	// -----------------------------------------------------------------------
 	// Public API
 	// -----------------------------------------------------------------------
 
-	/** Register an observer for relay events. */
-	observe(observer: ManagedRelayLinkObserver): void {
+	observe(observer: ManagedRelayLinkObserver): Disposer {
 		this.observers.push(observer);
+		return () => {
+			const idx = this.observers.indexOf(observer);
+			if (idx >= 0) this.observers.splice(idx, 1);
+		};
 	}
 
-	/** Remove a previously registered observer. */
-	unobserve(observer: ManagedRelayLinkObserver): void {
-		const idx = this.observers.indexOf(observer);
-		if (idx >= 0) {
-			this.observers.splice(idx, 1);
-		}
-	}
-
-	/**
-	 * Initiate a connection.
-	 * Returns a promise that resolves once the handshake completes
-	 * (either accepted or rejected).
-	 */
-	async connect(): Promise<{ accepted: boolean; linkId?: string; rejectReason?: string }> {
+	async connect(): Promise<ConnectResult> {
 		if (this._state.status === "unreachable" || this._state.status === "closed") {
-			throw new Error(`Relay is in terminal state: ${this._state.status}`);
+			throw new Error("Relay is in terminal state");
 		}
-		return this.startConnect();
+		if (this.connectPromise) {
+			return this.connectPromise;
+		}
+		// Cancel pending reconnect timer so this call creates a fresh socket.
+		if (this._state.status === "reconnecting" && this.reconnectTimer !== undefined) {
+			clearTimeout(this.reconnectTimer);
+			this.reconnectTimer = undefined;
+		}
+		this.connectPromise = this.startConnect();
+		return this.connectPromise;
 	}
 
-	/**
-	 * Send a frame over the relay.
-	 * Persists to journal before sending (persist-before-send contract).
-	 */
 	sendFrame(frame: RemoteHostFrame): RemoteHostFrameEnvelope {
-		const frameId = nextFrameId(this.options.hostId, ++this.nextFrameSeq);
+		const frameId = randomUUID();
 		const envelope: RemoteHostFrameEnvelope = {
 			type: "frame",
 			frameId,
@@ -224,57 +248,44 @@ export class ManagedRelayLink {
 			sentAt: nowISO(),
 			frame,
 		};
-
-		// Persist before send
 		this.options.journal.recordSent(envelope);
-
 		if (this.socket && this.socket.readyState === 1) {
-			this.socket.send(JSON.stringify(envelope));
+			try {
+				this.socket.send(JSON.stringify(envelope));
+			} catch {
+				this.teardownSocket();
+				this.handleDisconnect();
+			}
 		}
-
 		return envelope;
 	}
 
-	/**
-	 * Gracefully close the relay link.
-	 * Cancels pending timers and closes the WebSocket.
-	 */
 	close(): void {
+		this.replayAborted = true;
 		this.reconnectAborted = true;
 		this.clearTimers();
-
-		if (this.socket) {
-			try {
-				this.socket.close(1000, "Normal closure");
-			} catch {
-				// Socket may already be closing
-			}
-			this.socket = undefined;
-		}
-
+		this.resolveConnect({ accepted: false, rejectReason: "closed" });
+		this.teardownSocket();
 		this.transition("closed");
+		this.observers = [];
 	}
 
-	/**
-	 * Current public connection health, mapped to SandboxConnectionHealth.
-	 */
 	get health(): SandboxConnectionHealth {
 		switch (this._state.status) {
 			case "idle":
-				return { status: "connecting", startedAt: nowISO() };
 			case "connecting":
 			case "handshaking":
-				return { status: "connecting", startedAt: nowISO() };
+				return { status: "connecting", startedAt: this.connectingSince ?? nowISO() };
 			case "connected":
-				return { status: "connected", connectedAt: this._connectedAt ?? nowISO() };
+				return { status: "connected", connectedAt: this.connectedAt ?? nowISO() };
 			case "reconnecting":
 				return {
 					status: "reconnecting",
 					attempt: this._state.attempt,
-					since: nowISO(),
+					since: this.reconnectingSince ?? nowISO(),
 				};
 			case "unreachable":
-				return { status: "unreachable", error: this._state.error, failedAt: nowISO() };
+				return { status: "unreachable", error: this._state.error, failedAt: this._state.failedAt };
 			case "closed":
 				return { status: "closed" };
 			default:
@@ -282,12 +293,10 @@ export class ManagedRelayLink {
 		}
 	}
 
-	/** Current internal relay status string. */
 	get status(): RelayInternalState["status"] {
 		return this._state.status;
 	}
 
-	/** Link status for health frames. */
 	get linkStatus(): RemoteHostLinkStatus {
 		switch (this._state.status) {
 			case "idle":
@@ -307,87 +316,134 @@ export class ManagedRelayLink {
 		}
 	}
 
-	/**
-	 * Resume cursor derived from the journal's last received event sequence.
-	 */
 	get resumeCursor(): RemoteHostEventCursor | undefined {
 		const seq = this.options.journal.lastReceivedEventSequence;
 		if (seq === 0) return undefined;
 		return {
 			hostId: this.options.hostId,
 			generation: this.options.generation,
-			sessionId: "",
+			sessionId: this.options.sessionId,
 			sequence: seq as RemoteHostEventSequence,
 		};
 	}
 
 	// -----------------------------------------------------------------------
-	// Internal state machine
+	// Internal
 	// -----------------------------------------------------------------------
 
-	private async startConnect(): Promise<{ accepted: boolean; linkId?: string; rejectReason?: string }> {
-		this.transition(this.reconnectAttempt > 0 ? "reconnecting" : "connecting");
+	private async startConnect(): Promise<ConnectResult> {
+		this.transition("connecting");
 		this.reconnectAborted = false;
+		this.connectingSince = nowISO();
 
-		// Build URL, optionally with grant as query param
-		let url = this.options.url;
-		if (this.options.grant && !url.includes("?")) {
-			url += `?grant=${encodeURIComponent(this.options.grant)}`;
-		} else if (this.options.grant) {
-			url += `&grant=${encodeURIComponent(this.options.grant)}`;
+		const gen = ++this.generation;
+
+		let auth: { grant?: string } | undefined;
+		if (this.options.grantProvider) {
+			try {
+				const grant = await this.options.grantProvider();
+				auth = { grant };
+			} catch {
+				this.connectPromise = undefined;
+				this.resolveConnect({ accepted: false, rejectReason: "grant_failed" });
+				this.teardownSocket();
+				this.handleDisconnect();
+				return { accepted: false, rejectReason: "grant_failed" };
+			}
 		}
 
-		const ws = this.options.wsFactory.create(url);
+		if (this.options.grantProvider && !auth) {
+			return { accepted: false, rejectReason: "grant_failed" };
+		}
+
+		const ws = this.options.wsFactory.create(this.options.url, auth);
 		this.socket = ws;
 
-		return new Promise((resolve) => {
-			this.handshakeResolver = resolve;
+		const guard = (): boolean => {
+			if (
+				this.reconnectAborted ||
+				this.generation !== gen ||
+				this._state.status === "closed" ||
+				this._state.status === "unreachable"
+			) {
+				return false;
+			}
+			return true;
+		};
+
+		return new Promise<ConnectResult>((resolve) => {
+			this.connectResolve = resolve;
 
 			ws.onopen = () => {
-				if (this.reconnectAborted) {
-					resolve({ accepted: false, rejectReason: "closed" });
+				if (!guard()) {
+					resolve({ accepted: false, rejectReason: "stale" });
 					return;
 				}
-				this.transitionToConnectingOrHandshaking();
+				this.transition("handshaking");
 
-				// Send handshake frame
 				const handshake: RemoteHostHandshakeFrame = {
 					type: "handshake",
 					direction: this.options.direction,
 					hostId: this.options.hostId,
 					generation: this.options.generation,
-					sessionId: this.options.hostId,
+					sessionId: this.options.sessionId,
 					capabilities: [...this.options.capabilities],
 					runtime: { ...this.options.buildIdentity },
 					protocol: REMOTE_HOST_PROTOCOL_INFO,
 					resumeCursor: this.resumeCursor,
 				};
 
-				// Generate a frameId for the handshake but don't persist handshake to journal
-				const frameId = nextFrameId(this.options.hostId, 0);
 				const envelope: RemoteHostFrameEnvelope = {
 					type: "frame",
-					frameId,
+					frameId: randomUUID(),
 					protocol: REMOTE_HOST_PROTOCOL_INFO,
 					sentAt: nowISO(),
 					frame: handshake,
 				};
-				ws.send(JSON.stringify(envelope));
+				try {
+					ws.send(JSON.stringify(envelope));
+				} catch {
+					this.teardownSocket();
+					resolve({ accepted: false, rejectReason: "send_failed" });
+					this.connectPromise = undefined;
+					this.disconnectAndReconnect();
+					return;
+				}
+
+				this.handshakeTimer = setTimeout(() => {
+					if (!guard()) return;
+					this.teardownSocket();
+					resolve({ accepted: false, rejectReason: "handshake_timeout" });
+					this.connectPromise = undefined;
+					this.disconnectAndReconnect();
+				}, HANDSHAKE_TIMEOUT_MS);
 			};
 
 			ws.onclose = (event) => {
-				if (this.reconnectAborted) return;
+				if (this.generation !== gen) return;
 				this.socket = undefined;
-				this.handleDisconnect(event.code, event.reason);
+				if (!guard() && this._state.status !== "reconnecting" && this._state.status !== "unreachable") {
+					return;
+				}
+				this.clearHandshakeTimer();
+				resolve({ accepted: false, rejectReason: `close:${event.code}` });
+				this.connectPromise = undefined;
+				this.handleDisconnect();
 			};
 
 			ws.onerror = () => {
-				// close event will follow, do nothing here
+				if (this.generation !== gen) return;
+				this.teardownSocket();
+				this.clearHandshakeTimer();
+				resolve({ accepted: false, rejectReason: "socket_error" });
+				this.connectPromise = undefined;
+				this.handleDisconnect();
 			};
 
 			ws.onmessage = (event) => {
+				if (this.generation !== gen) return;
 				try {
-					this.handleMessage(event.data);
+					this.handleMessage(event.data, gen);
 				} catch (err) {
 					this.emit({ type: "error", error: err instanceof Error ? err : new Error(String(err)) });
 				}
@@ -395,23 +451,7 @@ export class ManagedRelayLink {
 		});
 	}
 
-	private transitionToConnectingOrHandshaking(): void {
-		if (this.reconnectAttempt > 0) {
-			this._state = {
-				status: "handshaking",
-				url: this.options.url,
-				attempt: this.reconnectAttempt,
-			};
-		} else {
-			this._state = {
-				status: "handshaking",
-				url: this.options.url,
-				attempt: 0,
-			};
-		}
-	}
-
-	private handleDisconnect(_code: number, _reason: string): void {
+	private handleDisconnect(): void {
 		if (this._state.status === "closed" || this._state.status === "unreachable") {
 			return;
 		}
@@ -419,7 +459,7 @@ export class ManagedRelayLink {
 		this.scheduleReconnect();
 	}
 
-	private handleMessage(raw: string): void {
+	private handleMessage(raw: string, gen: number): void {
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(raw);
@@ -428,64 +468,152 @@ export class ManagedRelayLink {
 			return;
 		}
 
-		const obj = parsed as Record<string, unknown>;
-		if (obj.type !== "frame" || !obj.frame) {
-			this.emit({ type: "error", error: new Error("Received non-frame message") });
+		const validationError = validateRemoteHostFrame(parsed);
+		if (validationError) {
+			this.emit({ type: "error", error: new Error(`Frame validation failed: ${validationError.code}`) });
 			return;
 		}
 
 		const envelope = parsed as RemoteHostFrameEnvelope;
+		this.lastPongAt = Date.now();
 
-		// Handle handshake_ack specially
 		if (envelope.frame.type === "handshake_ack") {
-			this.handleHandshakeAck(envelope.frame);
+			const validationError = validateRemoteHostHandshakeAck(envelope.frame);
+			if (validationError) {
+				this.teardownSocket();
+				this.resolveConnect({ accepted: false, rejectReason: `malformed_ack${validationError.code}` });
+				this.emit({ type: "handshake_rejected", reason: validationError.code });
+				this.transition("unreachable", validationError.code);
+				return;
+			}
+			this.handleHandshakeAck(envelope.frame as RemoteHostHandshakeAckFrame, gen);
 			return;
 		}
 
-		// Record and dedup via journal
+		if (envelope.frame.type === "health") {
+			return;
+		}
+
+		// Persist received frame BEFORE the ack return so ACK state is recorded.
 		const result = this.options.journal.recordReceived(envelope);
+
+		if (envelope.frame.type === "ack") {
+			return;
+		}
+
+		// ACK every durable application frame.
+		if (
+			envelope.frame.type === "event" ||
+			envelope.frame.type === "command" ||
+			envelope.frame.type === "agent_message" ||
+			envelope.frame.type === "provider_proxy"
+		) {
+			const ackFrame: RemoteHostFrameEnvelope = {
+				type: "frame",
+				frameId: randomUUID(),
+				protocol: REMOTE_HOST_PROTOCOL_INFO,
+				sentAt: nowISO(),
+				frame: {
+					type: "ack",
+					ackId: randomUUID(),
+					acknowledges: envelope.frameId,
+					status: (result.isDuplicate ? "replayed" : "delivered") as "replayed" | "delivered",
+				},
+			};
+			if (this.socket) {
+				try {
+					this.socket.send(JSON.stringify(ackFrame));
+				} catch {
+					this.teardownSocket();
+					this.handleDisconnect();
+				}
+			}
+		}
+
+		if (result.isDuplicate) {
+			return;
+		}
+
 		this.emit({
 			type: "frame_received",
 			envelope,
-			isDuplicate: result.isDuplicate,
+			isDuplicate: false,
 		});
-
-		// Handle health frames (ping/pong)
-		if (envelope.frame.type === "health") {
-			// We track lastReceivedFrameTime; no other action needed
-		}
 	}
 
-	private handleHandshakeAck(ack: RemoteHostHandshakeAckFrame): void {
+	private handleHandshakeAck(ack: RemoteHostHandshakeAckFrame, gen: number): void {
+		this.clearHandshakeTimer();
+
+		if (this.generation !== gen) return;
+
+		if (this._state.status !== "handshaking") {
+			this.teardownSocket();
+			return;
+		}
+
 		if (!ack.accepted) {
-			const reason = ack.rejectReason ?? "Handshake rejected";
+			this.teardownSocket();
+			this.emit({ type: "handshake_rejected", reason: "remote_rejected" });
+			this.resolveConnect({ accepted: false, rejectReason: "remote_rejected" });
+			this.transition("unreachable", "remote_rejected");
+			return;
+		}
+
+		if (ack.hostId !== this.options.expectedRemoteHostId) {
+			this.teardownSocket();
+			this.emit({ type: "handshake_rejected", reason: "remote_host_mismatch" });
+			this.resolveConnect({ accepted: false, rejectReason: "remote_host_mismatch" });
+			this.transition("unreachable", "remote_host_mismatch");
+			return;
+		}
+
+		if (ack.sessionId !== this.options.expectedRemoteSessionId) {
+			this.teardownSocket();
+			this.emit({ type: "handshake_rejected", reason: "remote_session_mismatch" });
+			this.resolveConnect({ accepted: false, rejectReason: "remote_session_mismatch" });
+			this.transition("unreachable", "remote_session_mismatch");
+			return;
+		}
+
+		if (!isRemoteHostProtocolCompatible(REMOTE_HOST_PROTOCOL_INFO, ack.protocol)) {
+			this.teardownSocket();
+			const reason = "protocol_incompatible";
 			this.emit({ type: "handshake_rejected", reason });
-
-			if (this.handshakeResolver) {
-				this.handshakeResolver({ accepted: false, rejectReason: reason });
-				this.handshakeResolver = undefined;
-			}
-
+			this.resolveConnect({ accepted: false, rejectReason: reason });
 			this.transition("unreachable", reason);
 			return;
 		}
 
-		// Verify build compatibility on the ack side
-		// The ack carries the remote's runtime info implicitly via
-		// acceptance (the remote already validated us).
-		this._connectedAt = nowISO();
-		this._state = { status: "connected" };
+		const buildOk =
+			ack.remoteBuildIdentity && isRemoteHostBuildCompatible(this.options.buildIdentity, ack.remoteBuildIdentity);
+		if (!buildOk) {
+			this.teardownSocket();
+			const reason = "build_identity_mismatch";
+			this.emit({ type: "handshake_rejected", reason });
+			this.resolveConnect({ accepted: false, rejectReason: reason });
+			this.transition("unreachable", reason);
+			return;
+		}
+
+		this.connectedAt = nowISO();
+		this.reconnectingSince = undefined;
+		this._state = { status: "connected", linkId: ack.linkId };
 		this.reconnectAttempt = 0;
+		this.lastPongAt = Date.now();
+
+		const replayOk = this.collectAndReplay(ack);
+		if (!replayOk) {
+			this.teardownSocket();
+			const reason = "replay_resync_required";
+			this.emit({ type: "replay_resync_required", reason });
+			this.resolveConnect({ accepted: false, rejectReason: reason });
+			this.transition("unreachable", reason);
+			return;
+		}
+
 		this.startPing();
 
-		if (this.handshakeResolver) {
-			this.handshakeResolver({
-				accepted: true,
-				linkId: ack.linkId,
-				remoteCapabilities: ack.capabilities,
-			});
-			this.handshakeResolver = undefined;
-		}
+		this.resolveConnect({ accepted: true, linkId: ack.linkId });
 
 		this.emit({
 			type: "handshake_completed",
@@ -493,8 +621,116 @@ export class ManagedRelayLink {
 			remoteCapabilities: ack.capabilities,
 		});
 
-		// Trigger replay from journal
-		this.emit({ type: "recovered" });
+		if (ack.cursor && ack.cursor.sequence > 0) {
+			this.emit({ type: "recovered" });
+		}
+	}
+
+	/**
+	 * Replay unacknowledged sent entries (with original IDs) then paged
+	 * event catch-up from cursor. Returns false if a resync is required
+	 * (gap, unavailable, or page overflow).
+	 */
+	private collectAndReplay(ack: RemoteHostHandshakeAckFrame): boolean {
+		this.replayAborted = false;
+		const frames: Array<{ frameId: string; frame: RemoteHostFrame }> = [];
+		const alreadySeen = new Set<string>();
+
+		// 1. Collect unacknowledged durable sent entries (bounded by MAX_REPLAY_PAGES).
+		const unacked = this.options.journal.getUnacknowledgedSentEntries();
+		if (unacked.length > MAX_REPLAY_PAGES * 200) {
+			return false;
+		}
+		for (const entry of unacked) {
+			if (this.replayAborted) return false;
+			alreadySeen.add(entry.frameId);
+			frames.push({ frameId: entry.frameId, frame: entry.frame });
+		}
+
+		// 2. Collect event catch-up from cursor with pagination.
+		const cursor = ack.cursor;
+		if (!cursor) {
+			if (!this.sendReplayFrames(frames)) {
+				return false;
+			}
+			return true;
+		}
+
+		const seq = cursor.sequence > 0 ? cursor.sequence : 0;
+		const replayCursor: RemoteHostEventCursor = {
+			hostId: cursor.hostId,
+			generation: cursor.generation,
+			sessionId: cursor.sessionId,
+			sequence: seq as RemoteHostEventSequence,
+		};
+
+		let afterSeq = seq;
+		const pageLimit = 200;
+		let retries = 0;
+		let completed = false;
+
+		while (retries < MAX_REPLAY_PAGES) {
+			retries++;
+			const replayResult = this.options.journal.getReplayEntries(replayCursor, pageLimit, "sent");
+			if (replayResult.status === "unavailable") {
+				return false;
+			}
+			if (replayResult.status === "partial" && replayResult.reason === "event_sequence_gap") {
+				return false;
+			}
+			for (const entry of replayResult.entries) {
+				if (this.replayAborted) return false;
+				if (alreadySeen.has(entry.frameId)) continue;
+				alreadySeen.add(entry.frameId);
+				if (entry.eventSequence !== undefined && entry.eventSequence > afterSeq) {
+					afterSeq = entry.eventSequence;
+				}
+				frames.push({ frameId: entry.frameId, frame: entry.frame });
+			}
+			if (replayResult.status === "complete") {
+				completed = true;
+				break;
+			}
+			replayCursor.sequence = afterSeq as RemoteHostEventSequence;
+		}
+
+		if (!completed) {
+			return false;
+		}
+
+		// All frames validated and collected; now send them.
+		if (!this.sendReplayFrames(frames)) {
+			return false;
+		}
+		return true;
+	}
+
+	private sendReplayFrames(frames: Array<{ frameId: string; frame: RemoteHostFrame }>): boolean {
+		if (!this.socket) return false;
+		for (const { frameId, frame } of frames) {
+			if (this.replayAborted) return false;
+			const envelope: RemoteHostFrameEnvelope = {
+				type: "frame",
+				frameId,
+				protocol: REMOTE_HOST_PROTOCOL_INFO,
+				sentAt: nowISO(),
+				frame,
+			};
+			try {
+				this.socket.send(JSON.stringify(envelope));
+			} catch {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private resolveConnect(result: ConnectResult): void {
+		if (this.connectResolve) {
+			this.connectResolve(result);
+			this.connectResolve = undefined;
+		}
+		this.connectPromise = undefined;
 	}
 
 	private transition(status: RelayInternalState["status"], error?: string): void {
@@ -503,25 +739,55 @@ export class ManagedRelayLink {
 				this._state = { status: "idle" };
 				break;
 			case "connecting":
-				this._state = { status: "connecting", url: this.options.url, attempt: this.reconnectAttempt };
+				this._state = { status: "connecting", attempt: this.reconnectAttempt };
 				break;
 			case "handshaking":
-				this._state = { status: "handshaking", url: this.options.url, attempt: this.reconnectAttempt };
+				this._state = { status: "handshaking", attempt: this.reconnectAttempt };
 				break;
 			case "connected":
-				this._state = { status: "connected" };
-				this._connectedAt = nowISO();
+				this._state = { status: "connected", linkId: "" };
+				this.connectedAt = nowISO();
+				this.reconnectingSince = undefined;
 				this.reconnectAttempt = 0;
 				break;
 			case "reconnecting":
 				this._state = { status: "reconnecting", attempt: this.reconnectAttempt };
+				this.reconnectingSince = nowISO();
 				break;
 			case "closed":
 				this._state = { status: "closed" };
 				break;
 			case "unreachable":
-				this._state = { status: "unreachable", error: error ?? "Unknown error" };
+				this._state = {
+					status: "unreachable",
+					error: error ?? "Unknown error",
+					failedAt: nowISO(),
+				};
 				break;
+		}
+	}
+
+	private teardownSocket(): void {
+		if (this.socket) {
+			try {
+				this.socket.onopen = null;
+				this.socket.onclose = null;
+				this.socket.onerror = null;
+				this.socket.onmessage = null;
+				this.socket.close(1000);
+			} catch {
+				// Socket may already be closing
+			}
+			this.socket = undefined;
+		}
+	}
+
+	private disconnectAndReconnect(): void {
+		this.teardownSocket();
+		this.clearPing();
+		if (this._state.status !== "closed" && this._state.status !== "unreachable") {
+			this.reconnectAborted = false;
+			this.scheduleReconnect();
 		}
 	}
 
@@ -531,7 +797,7 @@ export class ManagedRelayLink {
 
 		this.reconnectAttempt++;
 		if (this.reconnectAttempt > MAX_RECONNECT_ATTEMPTS) {
-			this.transition("unreachable", `Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) exhausted`);
+			this.transition("unreachable", "Max reconnect attempts reached");
 			return;
 		}
 
@@ -541,38 +807,44 @@ export class ManagedRelayLink {
 		this.reconnectTimer = setTimeout(() => {
 			if (this.reconnectAborted) return;
 			if (this._state.status === "closed" || this._state.status === "unreachable") return;
-
-			this.startConnect().catch(() => {
-				// Handled inside startConnect
-			});
+			this.connectPromise = undefined;
+			this.startConnect().catch(() => {});
 		}, delay);
 	}
 
 	private startPing(): void {
 		this.clearPing();
 		this.pingTimer = setInterval(() => {
-			if (this._state.status !== "connected" || !this.socket) {
+			if (this._state.status !== "connected") {
 				this.clearPing();
 				return;
 			}
-			// Send a health frame as a ping
-			const frameId = nextFrameId(this.options.hostId, ++this.nextFrameSeq);
-			const envelope: RemoteHostFrameEnvelope = {
-				type: "frame",
-				frameId,
-				protocol: REMOTE_HOST_PROTOCOL_INFO,
-				sentAt: nowISO(),
-				frame: {
-					type: "health",
-					healthSeq: this.nextFrameSeq,
-					status: this.linkStatus,
-				},
-			};
-			this.options.journal.recordSent(envelope);
-			try {
-				this.socket.send(JSON.stringify(envelope));
-			} catch {
-				this.handleDisconnect(1006, "Ping send failed");
+
+			const elapsed = Date.now() - this.lastPongAt;
+			if (elapsed > this.pongTimeoutMs) {
+				this.teardownSocket();
+				this.handleDisconnect();
+				return;
+			}
+
+			if (this.socket && this.socket.readyState === 1) {
+				const envelope: RemoteHostFrameEnvelope = {
+					type: "frame",
+					frameId: randomUUID(),
+					protocol: REMOTE_HOST_PROTOCOL_INFO,
+					sentAt: nowISO(),
+					frame: {
+						type: "health",
+						healthSeq: ++this.healthSeqCounter,
+						status: this.linkStatus,
+					},
+				};
+				try {
+					this.socket.send(JSON.stringify(envelope));
+				} catch {
+					this.teardownSocket();
+					this.handleDisconnect();
+				}
 			}
 		}, this.pingIntervalMs);
 	}
@@ -584,8 +856,16 @@ export class ManagedRelayLink {
 		}
 	}
 
+	private clearHandshakeTimer(): void {
+		if (this.handshakeTimer !== undefined) {
+			clearTimeout(this.handshakeTimer);
+			this.handshakeTimer = undefined;
+		}
+	}
+
 	private clearTimers(): void {
 		this.clearPing();
+		this.clearHandshakeTimer();
 		if (this.reconnectTimer !== undefined) {
 			clearTimeout(this.reconnectTimer);
 			this.reconnectTimer = undefined;

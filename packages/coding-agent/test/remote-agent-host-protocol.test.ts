@@ -5,6 +5,7 @@
  * versions and build identities.
  */
 
+import * as fs from "node:fs";
 import { describe, expect, it } from "vitest";
 import type {
 	RemoteHostBuildIdentity,
@@ -25,8 +26,9 @@ import {
 	REMOTE_HOST_PROTOCOL_VERSION,
 	validateRemoteHostFrame,
 	validateRemoteHostHandshake,
+	validateRemoteHostHandshakeAck,
 } from "../src/modes/daemon/remote-agent-host-protocol.js";
-import { InMemoryRemoteHostJournal } from "../src/modes/daemon/remote-host-journal.js";
+import { InMemoryRemoteHostJournal, RemoteHostJournal } from "../src/modes/daemon/remote-host-journal.js";
 
 const TEST_BUILD: RemoteHostBuildIdentity = {
 	buildId: "build-abc",
@@ -47,9 +49,209 @@ function buildHandshake(overrides?: Partial<RemoteHostHandshakeFrame>): RemoteHo
 	};
 }
 
-function j(opts: { hostId: string; generation: string }): InMemoryRemoteHostJournal {
-	return new InMemoryRemoteHostJournal(opts);
+function j(opts: { hostId: string; generation: string; sessionId: string }): InMemoryRemoteHostJournal {
+	return new InMemoryRemoteHostJournal({
+		hostId: opts.hostId,
+		generation: opts.generation,
+		sessionId: opts.sessionId ?? "",
+	});
 }
+
+describe("validateRemoteHostHandshakeAck", () => {
+	it("accepts valid handshake ack", () => {
+		const ack = {
+			type: "handshake_ack",
+			accepted: true,
+			hostId: "sandbox-1",
+			sessionId: "sess-1",
+			protocol: { name: "prime-agent.remote-host", version: 1 },
+			capabilities: ["session_commands", "sequenced_events"],
+			linkId: "link-1",
+			cursor: { hostId: "sandbox-1", generation: "gen-1", sessionId: "sess-1", sequence: 5 },
+			remoteBuildIdentity: { buildId: "b1", daemonProtocolVersion: 7, daemonSchemaRevision: 25 },
+		};
+		expect(validateRemoteHostHandshakeAck(ack)).toBeUndefined();
+	});
+
+	it("rejects non-object", () => {
+		expect(validateRemoteHostHandshakeAck(null)).toMatchObject({ code: "INVALID_ACK" });
+	});
+
+	it("rejects missing type", () => {
+		expect(validateRemoteHostHandshakeAck({})).toMatchObject({ code: "INVALID_ACK_TYPE" });
+	});
+
+	it("rejects non-boolean accepted", () => {
+		expect(
+			validateRemoteHostHandshakeAck({
+				type: "handshake_ack",
+				accepted: "yes",
+				hostId: "h",
+				sessionId: "s",
+				protocol: { name: "p", version: 1 },
+				capabilities: [],
+				linkId: "l",
+			}),
+		).toMatchObject({ code: "INVALID_ACK_ACCEPTED" });
+	});
+
+	it("rejects empty hostId", () => {
+		expect(
+			validateRemoteHostHandshakeAck({
+				type: "handshake_ack",
+				accepted: true,
+				hostId: "",
+				sessionId: "s",
+				protocol: { name: "p", version: 1 },
+				capabilities: [],
+				linkId: "l",
+			}),
+		).toMatchObject({ code: "INVALID_ACK_HOST_ID" });
+	});
+
+	it("rejects missing protocol", () => {
+		expect(
+			validateRemoteHostHandshakeAck({
+				type: "handshake_ack",
+				accepted: true,
+				hostId: "h",
+				sessionId: "s",
+				capabilities: [],
+				linkId: "l",
+			}),
+		).toMatchObject({ code: "INVALID_ACK_PROTOCOL" });
+	});
+
+	it("rejects non-array capabilities", () => {
+		expect(
+			validateRemoteHostHandshakeAck({
+				type: "handshake_ack",
+				accepted: true,
+				hostId: "h",
+				sessionId: "s",
+				protocol: { name: "p", version: 1 },
+				capabilities: "not-array",
+				linkId: "l",
+			}),
+		).toMatchObject({ code: "INVALID_ACK_CAPABILITIES" });
+	});
+
+	it("rejects unknown capability", () => {
+		expect(
+			validateRemoteHostHandshakeAck({
+				type: "handshake_ack",
+				accepted: true,
+				hostId: "h",
+				sessionId: "s",
+				protocol: { name: "p", version: 1 },
+				capabilities: ["unknown_cap"],
+				linkId: "l",
+			}),
+		).toMatchObject({ code: "INVALID_ACK_CAPABILITY" });
+	});
+
+	it("rejects empty linkId", () => {
+		expect(
+			validateRemoteHostHandshakeAck({
+				type: "handshake_ack",
+				accepted: true,
+				hostId: "h",
+				sessionId: "s",
+				protocol: { name: "p", version: 1 },
+				capabilities: [],
+				linkId: "",
+			}),
+		).toMatchObject({ code: "INVALID_ACK_LINK_ID" });
+	});
+
+	it("rejects invalid cursor sequence (negative)", () => {
+		expect(
+			validateRemoteHostHandshakeAck({
+				type: "handshake_ack",
+				accepted: true,
+				hostId: "h",
+				sessionId: "s",
+				protocol: { name: "p", version: 1 },
+				capabilities: [],
+				linkId: "l",
+				cursor: { hostId: "h", generation: "g", sessionId: "s", sequence: -1 },
+			}),
+		).toMatchObject({ code: "INVALID_ACK_CURSOR_SEQUENCE" });
+	});
+
+	it("rejects invalid build identity (non-integer protocol version)", () => {
+		expect(
+			validateRemoteHostHandshakeAck({
+				type: "handshake_ack",
+				accepted: true,
+				hostId: "h",
+				sessionId: "s",
+				protocol: { name: "p", version: 1 },
+				capabilities: [],
+				linkId: "l",
+				remoteBuildIdentity: { buildId: "b", daemonProtocolVersion: 1.5, daemonSchemaRevision: 1 },
+			}),
+		).toMatchObject({ code: "INVALID_ACK_BUILD_PROTOCOL" });
+	});
+
+	it("rejects empty sessionId", () => {
+		expect(
+			validateRemoteHostHandshakeAck({
+				type: "handshake_ack",
+				accepted: true,
+				hostId: "h",
+				sessionId: "",
+				protocol: { name: "p", version: 1 },
+				capabilities: [],
+				linkId: "l",
+			}),
+		).toMatchObject({ code: "INVALID_ACK_SESSION_ID" });
+	});
+
+	it("rejects empty cursor hostId", () => {
+		expect(
+			validateRemoteHostHandshakeAck({
+				type: "handshake_ack",
+				accepted: true,
+				hostId: "h",
+				sessionId: "s",
+				protocol: { name: "p", version: 1 },
+				capabilities: [],
+				linkId: "l",
+				cursor: { hostId: "", generation: "g", sessionId: "s", sequence: 1 },
+			}),
+		).toMatchObject({ code: "INVALID_ACK_CURSOR_HOST_ID" });
+	});
+
+	it("rejects non-string capability", () => {
+		expect(
+			validateRemoteHostHandshakeAck({
+				type: "handshake_ack",
+				accepted: true,
+				hostId: "h",
+				sessionId: "s",
+				protocol: { name: "p", version: 1 },
+				capabilities: [42],
+				linkId: "l",
+			}),
+		).toMatchObject({ code: "INVALID_ACK_CAPABILITY" });
+	});
+
+	it("rejects empty buildId", () => {
+		expect(
+			validateRemoteHostHandshakeAck({
+				type: "handshake_ack",
+				accepted: true,
+				hostId: "h",
+				sessionId: "s",
+				protocol: { name: "p", version: 1 },
+				capabilities: [],
+				linkId: "l",
+				remoteBuildIdentity: { buildId: "", daemonProtocolVersion: 7, daemonSchemaRevision: 25 },
+			}),
+		).toMatchObject({ code: "INVALID_ACK_BUILD_ID" });
+	});
+});
 
 describe("remote host protocol versioning", () => {
 	it("has the correct protocol identity constants", () => {
@@ -317,7 +519,7 @@ describe("sequence ordering", () => {
 
 describe("remote host journal", () => {
 	it("records sent and received frames", () => {
-		const journal = j({ hostId: "sandbox-1", generation: "gen-1" });
+		const journal = j({ hostId: "sandbox-1", generation: "gen-1", sessionId: "" });
 
 		const sentFrame: RemoteHostFrameEnvelope = {
 			type: "frame",
@@ -348,7 +550,7 @@ describe("remote host journal", () => {
 	});
 
 	it("detects duplicate frame IDs and does not advance state", () => {
-		const journal = j({ hostId: "s", generation: "s" });
+		const journal = j({ hostId: "s", generation: "s", sessionId: "" });
 
 		journal.recordReceived({
 			type: "frame",
@@ -359,7 +561,7 @@ describe("remote host journal", () => {
 				type: "event",
 				id: "evt-1",
 				sequence: 1,
-				cursor: { hostId: "s", generation: "s", sessionId: "sess", sequence: 1 },
+				cursor: { hostId: "s", generation: "s", sessionId: "", sequence: 1 },
 				emittedAt: "now",
 				body: { type: "agent_start" },
 			},
@@ -376,7 +578,7 @@ describe("remote host journal", () => {
 				type: "event",
 				id: "evt-1",
 				sequence: 5,
-				cursor: { hostId: "s", generation: "s", sessionId: "sess", sequence: 5 },
+				cursor: { hostId: "s", generation: "s", sessionId: "", sequence: 5 },
 				emittedAt: "now",
 				body: { type: "agent_end", messages: 3 },
 			},
@@ -387,7 +589,7 @@ describe("remote host journal", () => {
 	});
 
 	it("reports duplicate check without recording", () => {
-		const journal = j({ hostId: "s", generation: "s" });
+		const journal = j({ hostId: "s", generation: "s", sessionId: "" });
 		expect(journal.isDuplicate("not-yet-seen")).toBe(false);
 
 		journal.recordReceived({
@@ -402,7 +604,7 @@ describe("remote host journal", () => {
 	});
 
 	it("reads back recorded entries in sequence order", () => {
-		const journal = j({ hostId: "s", generation: "g" });
+		const journal = j({ hostId: "s", generation: "g", sessionId: "" });
 
 		for (let i = 1; i <= 5; i++) {
 			journal.recordSent({
@@ -425,7 +627,7 @@ describe("remote host journal", () => {
 	});
 
 	it("tracks last event sequences for sent and received events", () => {
-		const journal = j({ hostId: "s", generation: "g" });
+		const journal = j({ hostId: "s", generation: "g", sessionId: "" });
 
 		journal.recordSent({
 			type: "frame",
@@ -436,7 +638,7 @@ describe("remote host journal", () => {
 				type: "event",
 				id: "evt-s-1",
 				sequence: 1,
-				cursor: { hostId: "s", generation: "g", sessionId: "sess", sequence: 1 },
+				cursor: { hostId: "s", generation: "g", sessionId: "", sequence: 1 },
 				emittedAt: "now",
 				body: { type: "agent_start" },
 			},
@@ -452,7 +654,7 @@ describe("remote host journal", () => {
 				type: "event",
 				id: "evt-r-1",
 				sequence: 2,
-				cursor: { hostId: "s", generation: "g", sessionId: "sess", sequence: 2 },
+				cursor: { hostId: "s", generation: "g", sessionId: "", sequence: 2 },
 				emittedAt: "now",
 				body: { type: "agent_end", messages: 5 },
 			},
@@ -464,22 +666,22 @@ describe("remote host journal", () => {
 
 describe("replay directional (sent vs received)", () => {
 	it("returns complete replay when cursor is current", () => {
-		const journal = j({ hostId: "sandbox-1", generation: "gen-1" });
+		const journal = j({ hostId: "sandbox-1", generation: "gen-1", sessionId: "" });
 		const cursor: RemoteHostEventCursor = {
 			hostId: "sandbox-1",
 			generation: "gen-1",
-			sessionId: "sess-1",
+			sessionId: "",
 			sequence: 5,
 		};
 		expect(journal.getReplayEntries(cursor)).toMatchObject({ status: "complete", entries: [] });
 	});
 
 	it("reports hostId mismatch as unavailable", () => {
-		const journal = j({ hostId: "sandbox-1", generation: "gen-1" });
+		const journal = j({ hostId: "sandbox-1", generation: "gen-1", sessionId: "" });
 		const cursor: RemoteHostEventCursor = {
 			hostId: "sandbox-2",
 			generation: "sandbox-2",
-			sessionId: "sess-1",
+			sessionId: "",
 			sequence: 1,
 		};
 		expect(journal.getReplayEntries(cursor)).toMatchObject({
@@ -488,11 +690,11 @@ describe("replay directional (sent vs received)", () => {
 		});
 	});
 	it("reports hostId mismatch even when generation happens to match", () => {
-		const journal = j({ hostId: "sandbox-1", generation: "gen-1" });
+		const journal = j({ hostId: "sandbox-1", generation: "gen-1", sessionId: "" });
 		const cursor: RemoteHostEventCursor = {
 			hostId: "sandbox-2",
 			generation: "gen-1",
-			sessionId: "sess-1",
+			sessionId: "",
 			sequence: 1,
 		};
 		expect(journal.getReplayEntries(cursor)).toMatchObject({
@@ -502,22 +704,22 @@ describe("replay directional (sent vs received)", () => {
 	});
 
 	it("reports generation mismatch as unavailable even when hostId matches", () => {
-		const journal = j({ hostId: "sandbox-1", generation: "gen-1" });
+		const journal = j({ hostId: "sandbox-1", generation: "gen-1", sessionId: "" });
 		const cursor: RemoteHostEventCursor = {
 			hostId: "sandbox-1",
 			generation: "different-gen",
-			sessionId: "sess-1",
+			sessionId: "",
 			sequence: 1,
 		};
 		expect(journal.getReplayEntries(cursor)).toMatchObject({ status: "unavailable", reason: "generation_changed" });
 	});
 
 	it("reports BOTH hostId and generation mismatch as host_identity_mismatch", () => {
-		const journal = j({ hostId: "sandbox-1", generation: "gen-1" });
+		const journal = j({ hostId: "sandbox-1", generation: "gen-1", sessionId: "" });
 		const cursor: RemoteHostEventCursor = {
 			hostId: "other-host",
 			generation: "other-gen",
-			sessionId: "sess-1",
+			sessionId: "",
 			sequence: 1,
 		};
 		expect(journal.getReplayEntries(cursor)).toMatchObject({
@@ -527,7 +729,7 @@ describe("replay directional (sent vs received)", () => {
 	});
 
 	it("returns sent events after the resume cursor with default direction=sent", () => {
-		const journal = j({ hostId: "s", generation: "g" });
+		const journal = j({ hostId: "s", generation: "g", sessionId: "" });
 
 		for (let i = 1; i <= 5; i++) {
 			journal.recordSent({
@@ -539,14 +741,14 @@ describe("replay directional (sent vs received)", () => {
 					type: "event",
 					id: `evt-${i}`,
 					sequence: i,
-					cursor: { hostId: "s", generation: "g", sessionId: "sess", sequence: i },
+					cursor: { hostId: "s", generation: "g", sessionId: "", sequence: i },
 					emittedAt: `2026-01-01T00:00:00.${String(i).padStart(3, "0")}Z`,
 					body: { type: "agent_start" },
 				},
 			});
 		}
 
-		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "sess", sequence: 2 };
+		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "", sequence: 2 };
 		const result = journal.getReplayEntries(cursor);
 		expect(result.status).toBe("complete");
 		expect(result.entries).toHaveLength(3);
@@ -556,7 +758,7 @@ describe("replay directional (sent vs received)", () => {
 	});
 
 	it("filters received events out of sent-direction replay", () => {
-		const journal = j({ hostId: "s", generation: "g" });
+		const journal = j({ hostId: "s", generation: "g", sessionId: "" });
 
 		journal.recordSent({
 			type: "frame",
@@ -567,7 +769,7 @@ describe("replay directional (sent vs received)", () => {
 				type: "event",
 				id: "evt-s-1",
 				sequence: 1,
-				cursor: { hostId: "s", generation: "g", sessionId: "sess", sequence: 1 },
+				cursor: { hostId: "s", generation: "g", sessionId: "", sequence: 1 },
 				emittedAt: "now",
 				body: { type: "agent_start" },
 			},
@@ -581,14 +783,14 @@ describe("replay directional (sent vs received)", () => {
 				type: "event",
 				id: "evt-r-2",
 				sequence: 2,
-				cursor: { hostId: "s", generation: "g", sessionId: "sess", sequence: 2 },
+				cursor: { hostId: "s", generation: "g", sessionId: "", sequence: 2 },
 				emittedAt: "now",
 				body: { type: "agent_end", messages: 3 },
 			},
 		});
 
 		// Sent direction: should NOT include the received event (seq 2)
-		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "sess", sequence: 0 };
+		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "", sequence: 0 };
 		const sentResult = journal.getReplayEntries(cursor, 500, "sent");
 		expect(sentResult.entries).toHaveLength(1);
 		expect(sentResult.entries[0].type).toBe("sent");
@@ -604,7 +806,7 @@ describe("replay directional (sent vs received)", () => {
 	});
 
 	it("reports partial replay when sent events have gaps (direction=sent)", () => {
-		const journal = j({ hostId: "s", generation: "g" });
+		const journal = j({ hostId: "s", generation: "g", sessionId: "" });
 
 		for (const seq of [1, 2, 4]) {
 			journal.recordSent({
@@ -616,21 +818,21 @@ describe("replay directional (sent vs received)", () => {
 					type: "event",
 					id: `evt-${seq}`,
 					sequence: seq,
-					cursor: { hostId: "s", generation: "g", sessionId: "sess", sequence: seq },
+					cursor: { hostId: "s", generation: "g", sessionId: "", sequence: seq },
 					emittedAt: new Date().toISOString(),
 					body: { type: "agent_start" },
 				},
 			});
 		}
 
-		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "sess", sequence: 1 };
+		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "", sequence: 1 };
 		const result = journal.getReplayEntries(cursor, 500, "sent");
 		expect(result.status).toBe("partial");
 		expect(result.reason).toBe("event_sequence_gap");
 	});
 
 	it("sent-direction replay does not break when received events fill the gap", () => {
-		const journal = j({ hostId: "s", generation: "g" });
+		const journal = j({ hostId: "s", generation: "g", sessionId: "" });
 
 		journal.recordSent({
 			type: "frame",
@@ -641,7 +843,7 @@ describe("replay directional (sent vs received)", () => {
 				type: "event",
 				id: "s-1",
 				sequence: 1,
-				cursor: { hostId: "s", generation: "g", sessionId: "sess", sequence: 1 },
+				cursor: { hostId: "s", generation: "g", sessionId: "", sequence: 1 },
 				emittedAt: "now",
 				body: { type: "agent_start" },
 			},
@@ -656,7 +858,7 @@ describe("replay directional (sent vs received)", () => {
 				type: "event",
 				id: "r-2",
 				sequence: 2,
-				cursor: { hostId: "s", generation: "g", sessionId: "sess", sequence: 2 },
+				cursor: { hostId: "s", generation: "g", sessionId: "", sequence: 2 },
 				emittedAt: "now",
 				body: { type: "agent_end", messages: 1 },
 			},
@@ -671,13 +873,13 @@ describe("replay directional (sent vs received)", () => {
 				type: "event",
 				id: "s-4",
 				sequence: 4,
-				cursor: { hostId: "s", generation: "g", sessionId: "sess", sequence: 4 },
+				cursor: { hostId: "s", generation: "g", sessionId: "", sequence: 4 },
 				emittedAt: "now",
 				body: { type: "agent_start" },
 			},
 		});
 
-		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "sess", sequence: 1 };
+		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "", sequence: 1 };
 		const sentResult = journal.getReplayEntries(cursor, 500, "sent");
 		expect(sentResult.status).toBe("partial");
 		expect(sentResult.reason).toBe("event_sequence_gap");
@@ -688,7 +890,7 @@ describe("replay directional (sent vs received)", () => {
 	});
 
 	it("filters replay to sent frames only via getReplaySentFrames", () => {
-		const journal = j({ hostId: "s", generation: "g" });
+		const journal = j({ hostId: "s", generation: "g", sessionId: "" });
 
 		journal.recordSent({
 			type: "frame",
@@ -699,7 +901,7 @@ describe("replay directional (sent vs received)", () => {
 				type: "event",
 				id: "evt-s-1",
 				sequence: 1,
-				cursor: { hostId: "s", generation: "g", sessionId: "sess", sequence: 1 },
+				cursor: { hostId: "s", generation: "g", sessionId: "", sequence: 1 },
 				emittedAt: "2026-01-01T00:00:00.000Z",
 				body: { type: "agent_start" },
 			},
@@ -714,13 +916,13 @@ describe("replay directional (sent vs received)", () => {
 				type: "event",
 				id: "evt-r-1",
 				sequence: 100,
-				cursor: { hostId: "s", generation: "g", sessionId: "sess", sequence: 100 },
+				cursor: { hostId: "s", generation: "g", sessionId: "", sequence: 100 },
 				emittedAt: "2026-01-01T00:00:00.001Z",
 				body: { type: "agent_end", messages: 3 },
 			},
 		});
 
-		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "sess", sequence: 0 };
+		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "", sequence: 0 };
 		const result = journal.getReplaySentFrames(cursor);
 		expect(result.frames).toHaveLength(1);
 		expect(result.frames[0].type).toBe("event");
@@ -732,7 +934,7 @@ describe("replay directional (sent vs received)", () => {
 
 describe("journal dedup and replay integration", () => {
 	it("handles duplicate IDs gracefully across journal operations", () => {
-		const journal = j({ hostId: "s", generation: "g" });
+		const journal = j({ hostId: "s", generation: "g", sessionId: "" });
 
 		journal.recordReceived({
 			type: "frame",
@@ -758,7 +960,7 @@ describe("journal dedup and replay integration", () => {
 	});
 
 	it("resets correctly for a fresh connection", () => {
-		const journal = j({ hostId: "s", generation: "g" });
+		const journal = j({ hostId: "s", generation: "g", sessionId: "" });
 
 		journal.recordReceived({
 			type: "frame",
@@ -774,6 +976,211 @@ describe("journal dedup and replay integration", () => {
 		expect(journal.lastReceivedEventSequence).toBe(0);
 		expect(journal.lastSentEventSequence).toBe(0);
 		expect(journal.readEntries(1)).toHaveLength(0);
+	});
+});
+
+describe("brand-new journal semantics", () => {
+	it("no-file with cursor > 0 returns unavailable journal_missing", () => {
+		const dir = fs.mkdtempSync("/tmp/journal-missing-");
+		const path = `${dir}/journal.jsonl`;
+		// Journal file does not exist yet
+		const journal = new RemoteHostJournal({ path, hostId: "s", generation: "g", sessionId: "" });
+		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "", sequence: 5 };
+		const result = journal.getReplayEntries(cursor);
+		expect(result.status).toBe("unavailable");
+		expect(result.reason).toBe("journal_missing");
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("no-file with cursor 0 returns complete for brand-new journal", () => {
+		const dir = fs.mkdtempSync("/tmp/journal-empty-");
+		const path = `${dir}/journal.jsonl`;
+		const journal = new RemoteHostJournal({ path, hostId: "s", generation: "g", sessionId: "" });
+		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "", sequence: 0 };
+		const result = journal.getReplayEntries(cursor);
+		expect(result.status).toBe("complete");
+		expect(result.entries).toHaveLength(0);
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("no-file returns unavailable for wrong identity even with cursor 0", () => {
+		const dir = fs.mkdtempSync("/tmp/journal-wrong-id-");
+		const path = `${dir}/journal.jsonl`;
+		const journal = new RemoteHostJournal({ path, hostId: "s", generation: "g", sessionId: "" });
+		const cursor: RemoteHostEventCursor = { hostId: "wrong", generation: "g", sessionId: "", sequence: 0 };
+		const result = journal.getReplayEntries(cursor);
+		expect(result.status).toBe("unavailable");
+		expect(result.reason).toBe("host_identity_mismatch");
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+});
+
+describe("journal ack tracking", () => {
+	it("tracks acknowledged frame IDs from received ack frames", () => {
+		const journal = j({ hostId: "sandbox-1", generation: "gen-1", sessionId: "" });
+
+		// Send a command frame
+		journal.recordSent({
+			type: "frame",
+			frameId: "cmd-1",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: "now",
+			frame: { type: "command", commandId: "cmd-1", body: { type: "abort" } },
+		});
+
+		// Ack the command
+		journal.recordReceived({
+			type: "frame",
+			frameId: "ack-1",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: "now",
+			frame: { type: "ack", ackId: "ack-1", acknowledges: "cmd-1", status: "delivered" },
+		});
+
+		// Command should not appear in unacknowledged entries
+		const unacked = journal.getUnacknowledgedSentEntries();
+		expect(unacked).toHaveLength(0);
+	});
+
+	it("unacknowledged entries exclude health/handshake/ack frames", () => {
+		const journal = j({ hostId: "s", generation: "g", sessionId: "" });
+
+		journal.recordSent({
+			type: "frame",
+			frameId: "h-1",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: "now",
+			frame: { type: "health", healthSeq: 1, status: "connected" },
+		});
+		journal.recordSent({
+			type: "frame",
+			frameId: "cmd-1",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: "now",
+			frame: { type: "command", commandId: "cmd-1", body: { type: "abort" } },
+		});
+
+		const unacked = journal.getUnacknowledgedSentEntries();
+		expect(unacked).toHaveLength(1);
+		expect(unacked[0].frameId).toBe("cmd-1");
+	});
+
+	it("rebuilds ack state on restart from file journal", () => {
+		const dir = fs.mkdtempSync("/tmp/journal-ack-");
+		const path = `${dir}/journal.jsonl`;
+
+		const journal1 = new RemoteHostJournal({ path, hostId: "s", generation: "g", sessionId: "" });
+
+		// Send a command and ack it
+		journal1.recordSent({
+			type: "frame",
+			frameId: "cmd-1",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: "now",
+			frame: { type: "command", commandId: "cmd-1", body: { type: "abort" } },
+		});
+		journal1.recordReceived({
+			type: "frame",
+			frameId: "ack-1",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: "now",
+			frame: { type: "ack", ackId: "ack-1", acknowledges: "cmd-1", status: "delivered" },
+		});
+
+		// Restart from same file
+		const journal2 = new RemoteHostJournal({ path, hostId: "s", generation: "g", sessionId: "" });
+		const unacked = journal2.getUnacknowledgedSentEntries();
+		expect(unacked).toHaveLength(0);
+
+		fs.rmSync(dir, { recursive: true, force: true });
+	});
+});
+
+describe("journal replay pagination and gaps", () => {
+	it("reports partial when more entries remain beyond limit", () => {
+		const journal = j({ hostId: "s", generation: "g", sessionId: "" });
+
+		for (let i = 1; i <= 10; i++) {
+			journal.recordSent({
+				type: "frame",
+				frameId: `evt-${i}`,
+				protocol: REMOTE_HOST_PROTOCOL_INFO,
+				sentAt: "now",
+				frame: {
+					type: "event",
+					id: `evt-${i}`,
+					sequence: i,
+					cursor: { hostId: "s", generation: "g", sessionId: "", sequence: i },
+					emittedAt: "now",
+					body: { type: "agent_start" },
+				},
+			});
+		}
+
+		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "", sequence: 0 };
+		const result = journal.getReplayEntries(cursor, 5, "sent");
+		expect(result.status).toBe("partial");
+		expect(result.reason).toBe("more_entries_available");
+		expect(result.entries).toHaveLength(5);
+	});
+
+	it("reports partial on sequence gap", () => {
+		const journal = j({ hostId: "s", generation: "g", sessionId: "" });
+
+		for (const seq of [1, 2, 4, 5]) {
+			journal.recordSent({
+				type: "frame",
+				frameId: `evt-${seq}`,
+				protocol: REMOTE_HOST_PROTOCOL_INFO,
+				sentAt: "now",
+				frame: {
+					type: "event",
+					id: `evt-${seq}`,
+					sequence: seq,
+					cursor: { hostId: "s", generation: "g", sessionId: "", sequence: seq },
+					emittedAt: "now",
+					body: { type: "agent_start" },
+				},
+			});
+		}
+
+		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "", sequence: 0 };
+		const result = journal.getReplayEntries(cursor, 10, "sent");
+		expect(result.status).toBe("partial");
+		expect(result.reason).toBe("event_sequence_gap");
+	});
+
+	it("reports complete when all entries fit within limit without gaps", () => {
+		const journal = j({ hostId: "s", generation: "g", sessionId: "" });
+
+		for (let i = 1; i <= 3; i++) {
+			journal.recordSent({
+				type: "frame",
+				frameId: `evt-${i}`,
+				protocol: REMOTE_HOST_PROTOCOL_INFO,
+				sentAt: "now",
+				frame: {
+					type: "event",
+					id: `evt-${i}`,
+					sequence: i,
+					cursor: { hostId: "s", generation: "g", sessionId: "", sequence: i },
+					emittedAt: "now",
+					body: { type: "agent_start" },
+				},
+			});
+		}
+
+		const cursor: RemoteHostEventCursor = { hostId: "s", generation: "g", sessionId: "", sequence: 0 };
+		const result = journal.getReplayEntries(cursor, 10, "sent");
+		expect(result.status).toBe("complete");
+		expect(result.entries).toHaveLength(3);
+	});
+
+	it("unavailable cursor returns unavailable", () => {
+		const journal = j({ hostId: "s", generation: "g", sessionId: "" });
+		const cursor: RemoteHostEventCursor = { hostId: "other", generation: "g", sessionId: "s", sequence: 1 };
+		const result = journal.getReplayEntries(cursor);
+		expect(result.status).toBe("unavailable");
 	});
 });
 

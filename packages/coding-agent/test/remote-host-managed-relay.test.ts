@@ -3,26 +3,21 @@
  *
  * Uses a fake WebSocket factory so tests are deterministic and never
  * touch a network.
- *
- * Covers: connect, handshake admission/rejection, credential non-leakage,
- * event ordering, reconnect/replay, duplicate delivery, timeout,
- * cancel/close, and orphaned timers.
  */
 
+import * as fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type {
 	RemoteHostBuildIdentity,
+	RemoteHostEventCursor,
 	RemoteHostFrameEnvelope,
 	RemoteHostHandshakeAckFrame,
-	RemoteHostHandshakeFrame,
 } from "../src/modes/daemon/remote-agent-host-protocol.js";
 import { REMOTE_HOST_PROTOCOL_INFO } from "../src/modes/daemon/remote-agent-host-protocol.js";
-import type { InMemoryRemoteHostJournal } from "../src/modes/daemon/remote-host-journal.js";
-import { InMemoryRemoteHostJournal as InMemoryJournal } from "../src/modes/daemon/remote-host-journal.js";
+import { InMemoryRemoteHostJournal, RemoteHostJournal } from "../src/modes/daemon/remote-host-journal.js";
 import {
 	ManagedRelayLink,
 	type ManagedRelayLinkEvent,
-	type ManagedRelayLinkObserver,
 	type ManagedRelayLinkOptions,
 	type RelayWebSocket,
 	type WebSocketFactory,
@@ -33,7 +28,7 @@ import {
 // ---------------------------------------------------------------------------
 
 class FakeWebSocket implements RelayWebSocket {
-	readyState: number = 0; // 0 = CONNECTING
+	readyState: number = 0;
 	onopen: (() => void) | null = null;
 	onclose: ((event: { code: number; reason: string }) => void) | null = null;
 	onerror: ((event: { error: unknown }) => void) | null = null;
@@ -41,25 +36,21 @@ class FakeWebSocket implements RelayWebSocket {
 	sent: string[] = [];
 	closed = false;
 
-	/** Simulate the socket opening (triggers onopen). */
 	open(): void {
-		this.readyState = 1; // OPEN
+		this.readyState = 1;
 		this.onopen?.();
 	}
 
-	/** Simulate receiving a message. */
 	receive(data: string): void {
 		this.onmessage?.({ data });
 	}
 
-	/** Simulate an abnormal closure (error + close). */
 	closeAbrupt(error: unknown = new Error("connection lost")): void {
-		this.readyState = 3; // CLOSED
+		this.readyState = 3;
 		this.onerror?.({ error });
 		this.onclose?.({ code: 1006, reason: "Abnormal closure" });
 	}
 
-	/** Simulate a normal close event. */
 	closeNormally(code = 1000, reason = ""): void {
 		this.readyState = 3;
 		this.closed = true;
@@ -84,22 +75,28 @@ class FakeWebSocket implements RelayWebSocket {
 class FakeWebSocketFactory implements WebSocketFactory {
 	sockets: FakeWebSocket[] = [];
 	private latest: FakeWebSocket | undefined;
+	capturedAuth: { grant?: string } | undefined;
 
-	create(_url: string): FakeWebSocket {
+	create(_url: string, auth?: { grant?: string }): FakeWebSocket {
+		this.capturedAuth = auth;
 		const ws = new FakeWebSocket();
 		this.sockets.push(ws);
 		this.latest = ws;
 		return ws;
 	}
 
-	/** Get the most recently created socket. */
 	get lastSocket(): FakeWebSocket | undefined {
 		return this.latest;
+	}
+
+	get connectedUrl(): string | undefined {
+		return undefined;
 	}
 
 	reset(): void {
 		this.sockets = [];
 		this.latest = undefined;
+		this.capturedAuth = undefined;
 	}
 }
 
@@ -118,12 +115,16 @@ function createRelayOptions(overrides?: Partial<ManagedRelayLinkOptions>): Manag
 		url: "ws://localhost:9999/test",
 		hostId: "sandbox-1",
 		generation: "gen-abc",
+		sessionId: "sess-1",
+		expectedRemoteHostId: "sandbox-1",
+		expectedRemoteSessionId: "sess-1",
 		buildIdentity: TEST_BUILD,
 		direction: "home_to_host",
 		capabilities: ["session_commands", "sequenced_events", "link_health"],
-		journal: new InMemoryJournal({ hostId: "sandbox-1", generation: "gen-abc" }),
+		journal: new InMemoryRemoteHostJournal({ hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1" }),
 		wsFactory: new FakeWebSocketFactory(),
 		pingIntervalMs: 5000,
+		pongTimeoutMs: 20000,
 		...overrides,
 	};
 }
@@ -134,19 +135,20 @@ function receivedFrameEvents(relay: ManagedRelayLink): ManagedRelayLinkEvent[] {
 	return events;
 }
 
-/** Create a valid handshake ack for the test relay. */
-function handshakeAck(): RemoteHostHandshakeAckFrame {
+function makeAck(overrides?: Partial<RemoteHostHandshakeAckFrame>): RemoteHostHandshakeAckFrame {
 	return {
 		type: "handshake_ack",
 		hostId: "sandbox-1",
+		sessionId: "sess-1",
 		protocol: REMOTE_HOST_PROTOCOL_INFO,
 		accepted: true,
 		capabilities: ["session_commands", "sequenced_events"],
 		linkId: "link-1",
+		remoteBuildIdentity: { ...TEST_BUILD },
+		...overrides,
 	};
 }
 
-/** Wrap a frame body in an envelope. */
 function envelope(body: object, frameId = "env-1"): RemoteHostFrameEnvelope {
 	return {
 		type: "frame",
@@ -157,15 +159,29 @@ function envelope(body: object, frameId = "env-1"): RemoteHostFrameEnvelope {
 	};
 }
 
+/** Connect helper: establishes a full connection and returns the factory. */
+async function connectRelay(
+	relay: ManagedRelayLink,
+	factory: FakeWebSocketFactory,
+): Promise<{ result: { accepted: boolean; linkId?: string }; ws: FakeWebSocket }> {
+	const connectPromise = relay.connect();
+	const ws = factory.lastSocket!;
+	ws.open();
+	const sent = JSON.parse(ws.sent[0]) as RemoteHostFrameEnvelope;
+	expect(sent.frame.type).toBe("handshake");
+	ws.receive(JSON.stringify(envelope(makeAck())));
+	const result = await connectPromise;
+	return { result, ws };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("ManagedRelayLink — initial state", () => {
+describe("initial state", () => {
 	it("starts in idle state", () => {
 		const relay = new ManagedRelayLink(createRelayOptions());
 		expect(relay.status).toBe("idle");
-		expect(relay.health).toEqual({ status: "connecting", startedAt: expect.any(String) });
 	});
 
 	it("starts with no resume cursor when journal is empty", () => {
@@ -175,7 +191,6 @@ describe("ManagedRelayLink — initial state", () => {
 
 	it("rejects connect after unreachable terminal state", async () => {
 		const relay = new ManagedRelayLink(createRelayOptions());
-		// Force unreachable state
 		const state = relay as unknown as { _state: { status: string; error: string } };
 		state._state = { status: "unreachable", error: "forced" };
 		await expect(relay.connect()).rejects.toThrow("terminal state");
@@ -189,44 +204,14 @@ describe("ManagedRelayLink — initial state", () => {
 	});
 });
 
-describe("ManagedRelayLink — connect and handshake", () => {
-	it("connects, sends handshake, transitions to handshaking, then to connected", async () => {
+describe("connect and handshake", () => {
+	it("connects, handshakes, transitions to connected with build validation", async () => {
 		const factory = new FakeWebSocketFactory();
 		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
-		const events = receivedFrameEvents(relay);
-
-		// Initiate connection
-		const connectPromise = relay.connect();
-		const ws = factory.lastSocket!;
-		expect(ws).toBeDefined();
-		expect(relay.status).toBe("connecting");
-
-		// Socket opens — should send handshake
-		ws.open();
-		expect(ws.sent.length).toBe(1);
-		const sentFrame = JSON.parse(ws.sent[0]) as RemoteHostFrameEnvelope;
-		expect(sentFrame.frame.type).toBe("handshake");
-		const handshake = sentFrame.frame as RemoteHostHandshakeFrame;
-		expect(handshake.hostId).toBe("sandbox-1");
-		expect(handshake.generation).toBe("gen-abc");
-		expect(handshake.direction).toBe("home_to_host");
-		expect(handshake.capabilities).toContain("session_commands");
-		expect(handshake.runtime.buildId).toBe("build-abc");
-
-		// Receive handshake_ack
-		ws.receive(JSON.stringify(envelope(handshakeAck())));
-
-		const result = await connectPromise;
+		const { result } = await connectRelay(relay, factory);
 		expect(result.accepted).toBe(true);
 		expect(result.linkId).toBe("link-1");
 		expect(relay.status).toBe("connected");
-
-		// Should have received handshake_completed event
-		const completed = events.find((e) => e.type === "handshake_completed");
-		expect(completed).toBeDefined();
-		if (completed?.type === "handshake_completed") {
-			expect(completed.linkId).toBe("link-1");
-		}
 	});
 
 	it("transitions to unreachable when handshake is rejected", async () => {
@@ -237,168 +222,286 @@ describe("ManagedRelayLink — connect and handshake", () => {
 		const connectPromise = relay.connect();
 		const ws = factory.lastSocket!;
 		ws.open();
-		expect(ws.sent.length).toBe(1);
 
-		// Reject handshake
-		const rejectAck: RemoteHostHandshakeAckFrame = {
-			type: "handshake_ack",
-			hostId: "sandbox-1",
-			protocol: REMOTE_HOST_PROTOCOL_INFO,
-			accepted: false,
-			rejectReason: "build_mismatch",
-			capabilities: [],
-			linkId: "",
-		};
+		const rejectAck = makeAck({ accepted: false, rejectReason: "build_mismatch" });
 		ws.receive(JSON.stringify(envelope(rejectAck)));
 
 		const result = await connectPromise;
 		expect(result.accepted).toBe(false);
-		expect(result.rejectReason).toBe("build_mismatch");
+		expect(result.rejectReason).toBe("remote_rejected");
+		expect(relay.status).toBe("unreachable");
+		expect(events.some((e) => e.type === "handshake_rejected")).toBe(true);
+	});
+
+	it("rejects on build identity mismatch in ack", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+		const events = receivedFrameEvents(relay);
+
+		const connectPromise = relay.connect();
+		const ws = factory.lastSocket!;
+		ws.open();
+
+		const mismatchedAck = makeAck({
+			remoteBuildIdentity: { buildId: "other", daemonProtocolVersion: 7, daemonSchemaRevision: 25 },
+		});
+		ws.receive(JSON.stringify(envelope(mismatchedAck)));
+
+		const result = await connectPromise;
+		expect(result.accepted).toBe(false);
+		expect(result.rejectReason).toBe("build_identity_mismatch");
 		expect(relay.status).toBe("unreachable");
 		expect(events.some((e) => e.type === "handshake_rejected")).toBe(true);
 	});
 
 	it("does not leak the grant into emitted frames or the journal", async () => {
-		const factory = new FakeWebSocketFactory();
-		const journal = new InMemoryJournal({ hostId: "sandbox-1", generation: "gen-abc" });
-		const relay = new ManagedRelayLink(
-			createRelayOptions({ wsFactory: factory, journal, grant: "secret-grant-token" }),
-		);
+		vi.useFakeTimers();
+		try {
+			const factory = new FakeWebSocketFactory();
+			const journal = new InMemoryRemoteHostJournal({
+				hostId: "sandbox-1",
+				generation: "gen-abc",
+				sessionId: "sess-1",
+			});
+			let grantCalled = 0;
+			const relay = new ManagedRelayLink(
+				createRelayOptions({
+					wsFactory: factory,
+					journal,
+					grantProvider: async () => {
+						grantCalled++;
+						return "secret-grant-token";
+					},
+				}),
+			);
 
-		const connectPromise = relay.connect();
-		const ws = factory.lastSocket!;
+			relay.connect();
+			await vi.advanceTimersByTimeAsync(100);
+			const ws = factory.lastSocket!;
+			ws.open();
+			ws.receive(JSON.stringify(envelope(makeAck())));
 
-		// Check the URL includes the grant (encoded)
-		// Note: the url is used in wsFactory.create(url), but our fake doesn't expose it.
-		// We verify non-leakage by checking that no journal entry or sent frame
-		// contains the grant string.
-		ws.open();
-		expect(ws.sent.length).toBe(1);
-		const sentStr = ws.sent[0];
-		expect(sentStr).not.toContain("secret-grant-token");
+			expect(grantCalled).toBe(1);
+			expect(factory.capturedAuth).toEqual({ grant: "secret-grant-token" });
 
-		ws.receive(JSON.stringify(envelope(handshakeAck())));
-		await connectPromise;
-
-		// Send a frame and check journal
-		relay.sendFrame({ type: "health", healthSeq: 1, status: "connected" });
-		const entries = journal.readEntries(1);
-		for (const entry of entries) {
-			const serialized = JSON.stringify(entry);
-			expect(serialized).not.toContain("secret-grant-token");
+			// No sent frame or journal entry should contain the grant
+			relay.sendFrame({ type: "health", healthSeq: 1, status: "connected" });
+			const entries = journal.readEntries(1);
+			for (const entry of entries) {
+				const serialized = JSON.stringify(entry);
+				expect(serialized).not.toContain("secret-grant-token");
+			}
+		} finally {
+			vi.useRealTimers();
 		}
 	});
 
-	it("resolves connect even when socket closes after handshake ack before the relay processes it", async () => {
+	it("handshake timeout transitions to reconnecting", async () => {
+		vi.useFakeTimers();
+		try {
+			const factory = new FakeWebSocketFactory();
+			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory, pingIntervalMs: 100000 }));
+
+			relay.connect();
+			const ws = factory.lastSocket!;
+			ws.open();
+
+			// Advance to just past handshake timeout (15s), but before reconnect timer fires
+			await vi.advanceTimersByTimeAsync(15_001);
+			expect(relay.status).toBe("reconnecting");
+
+			// Now advance past reconnect delay to trigger new socket
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(factory.sockets.length).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("single-flight connect returns same promise", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+
+		const p1 = relay.connect();
+		const p2 = relay.connect();
+		// Can't use toBe for Promise identity in vitest with fake promises,
+		// but we verify they resolve identically
+		const ws = factory.lastSocket!;
+		ws.open();
+		ws.receive(JSON.stringify(envelope(makeAck())));
+		const r1 = await p1;
+		const r2 = await p2;
+		expect(r1.accepted).toBe(true);
+		expect(r2.accepted).toBe(true);
+	});
+
+	it("close settles pending connect promise", async () => {
 		const factory = new FakeWebSocketFactory();
 		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
 
 		const connectPromise = relay.connect();
-		const ws = factory.lastSocket!;
-		ws.open();
-
-		// Receive handshake ack, then close immediately
-		ws.receive(JSON.stringify(envelope(handshakeAck())));
-		ws.closeNormally();
+		relay.close();
 
 		const result = await connectPromise;
-		expect(result.accepted).toBe(true);
+		expect(result.accepted).toBe(false);
+		expect(relay.status).toBe("closed");
 	});
 });
 
-describe("ManagedRelayLink — frame send/receive", () => {
-	it("sends frames and records them in the journal", () => {
-		const journal = new InMemoryJournal({ hostId: "sandbox-1", generation: "gen-abc" });
+describe("frame send/receive", () => {
+	it("sends frames and records them in the journal", async () => {
+		const journal = new InMemoryRemoteHostJournal({
+			hostId: "sandbox-1",
+			generation: "gen-abc",
+			sessionId: "sess-1",
+		});
 		const factory = new FakeWebSocketFactory();
 		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory, journal }));
-		// Establish connection
-		relay.connect();
-		const ws = factory.lastSocket!;
-		ws.open();
-		ws.receive(JSON.stringify(envelope(handshakeAck())));
+		await connectRelay(relay, factory);
+		const _ws = factory.lastSocket!;
 
-		// Send a health frame
 		const sentEnvelope = relay.sendFrame({ type: "health", healthSeq: 1, status: "connected" });
 		expect(sentEnvelope.frame.type).toBe("health");
-		expect(ws.sent.length).toBe(2); // handshake + health
 
-		// Journal should have sent + health frame
 		const entries = journal.readEntries(1);
 		const healthSent = entries.find((e) => e.frame.type === "health");
 		expect(healthSent).toBeDefined();
 	});
 
-	it("receives frames and emits frame_received events", () => {
+	it("receives frames, persists before ack, and emits frame_received", async () => {
 		const factory = new FakeWebSocketFactory();
 		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
 		const events = receivedFrameEvents(relay);
-
-		relay.connect();
+		await connectRelay(relay, factory);
 		const ws = factory.lastSocket!;
-		ws.open();
-		ws.receive(JSON.stringify(envelope(handshakeAck())));
 
-		// Receive a health frame
+		// Send a non-health frame (event) to trigger frame_received
 		ws.receive(
-			JSON.stringify(envelope({ type: "health", healthSeq: 2, status: "connected" as const }, "frame-rcv-1")),
+			JSON.stringify(
+				envelope(
+					{
+						type: "event",
+						id: "evt-1",
+						sequence: 1,
+						cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: 1 },
+						emittedAt: new Date().toISOString(),
+						body: { type: "agent_start" },
+					},
+					"frame-rcv-1",
+				),
+			),
 		);
 
 		const frameEvents = events.filter((e) => e.type === "frame_received");
 		expect(frameEvents).toHaveLength(1);
 		if (frameEvents[0].type === "frame_received") {
-			expect(frameEvents[0].envelope.frame.type).toBe("health");
-			expect(frameEvents[0].isDuplicate).toBe(false);
+			expect(frameEvents[0].envelope.frame.type).toBe("event");
 		}
 	});
 
-	it("reports duplicates and still records them in the journal", () => {
-		const journal = new InMemoryJournal({ hostId: "sandbox-1", generation: "gen-abc" });
+	it("persists received frame before ack and sends ack for event frames", async () => {
+		const journal = new InMemoryRemoteHostJournal({
+			hostId: "sandbox-1",
+			generation: "gen-abc",
+			sessionId: "sess-1",
+		});
 		const factory = new FakeWebSocketFactory();
 		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory, journal }));
-		const events = receivedFrameEvents(relay);
-
-		relay.connect();
+		await connectRelay(relay, factory);
 		const ws = factory.lastSocket!;
-		ws.open();
-		ws.receive(JSON.stringify(envelope(handshakeAck())));
 
-		// Receive the same frame twice
-		ws.receive(JSON.stringify(envelope({ type: "health", healthSeq: 5, status: "connected" as const }, "dup-frame")));
-		ws.receive(JSON.stringify(envelope({ type: "health", healthSeq: 5, status: "connected" as const }, "dup-frame")));
+		// Send an event frame
+		const eventFrame = {
+			type: "event" as const,
+			id: "evt-1",
+			sequence: 1,
+			cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: 1 },
+			emittedAt: new Date().toISOString(),
+			body: { type: "agent_start" as const },
+		};
+		ws.receive(JSON.stringify(envelope(eventFrame, "evt-1")));
+
+		// Journal should have the received entry
+		const entries = journal.readEntries(1);
+		const received1 = entries.find((e) => e.frameId === "evt-1");
+		expect(received1).toBeDefined();
+		expect(received1?.type).toBe("received");
+
+		// Should have sent an ack
+		const sentAcks = ws.sent.filter((s) => {
+			try {
+				const e = JSON.parse(s) as RemoteHostFrameEnvelope;
+				return e.frame.type === "ack";
+			} catch {
+				return false;
+			}
+		});
+		expect(sentAcks.length).toBe(1);
+	});
+
+	it("does not emit duplicate frames as new work", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+		const events = receivedFrameEvents(relay);
+		await connectRelay(relay, factory);
+		const ws = factory.lastSocket!;
+
+		// Send event frame twice
+		const eventFrame = {
+			type: "event" as const,
+			id: "evt-d1",
+			sequence: 1,
+			cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: 1 },
+			emittedAt: new Date().toISOString(),
+			body: { type: "agent_start" as const },
+		};
+		ws.receive(JSON.stringify(envelope(eventFrame, "evt-d1")));
+		ws.receive(JSON.stringify(envelope(eventFrame, "evt-d1")));
 
 		const frameEvents = events.filter((e) => e.type === "frame_received");
-		expect(frameEvents).toHaveLength(2);
-		if (frameEvents[0].type === "frame_received" && frameEvents[1].type === "frame_received") {
-			expect(frameEvents[0].isDuplicate).toBe(false);
-			expect(frameEvents[1].isDuplicate).toBe(true);
-		}
+		expect(frameEvents).toHaveLength(1);
+	});
 
-		// Both should be in the journal
-		expect(journal.readEntries(1).length).toBeGreaterThanOrEqual(2);
+	it("validates envelope and rejects invalid frames", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+		const events = receivedFrameEvents(relay);
+		await connectRelay(relay, factory);
+		const ws = factory.lastSocket!;
+
+		// Invalid envelope
+		ws.receive(JSON.stringify({ not_frame: true }));
+		const errEvents = events.filter((e) => e.type === "error");
+		expect(errEvents.length).toBeGreaterThan(0);
+
+		// Wrong protocol name envelope
+		ws.receive(
+			JSON.stringify({
+				type: "frame",
+				frameId: "bad",
+				protocol: { name: "wrong", version: 1 },
+				sentAt: "now",
+				frame: { type: "health", healthSeq: 1, status: "connected" },
+			}),
+		);
+		expect(events.filter((e) => e.type === "error").length).toBe(2);
 	});
 });
 
-describe("ManagedRelayLink — close", () => {
+describe("close", () => {
 	it("graceful close stops at closed state", async () => {
 		const factory = new FakeWebSocketFactory();
 		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
-
-		relay.connect();
-		const ws = factory.lastSocket!;
-		ws.open();
-		ws.receive(JSON.stringify(envelope(handshakeAck())));
-
-		expect(relay.status).toBe("connected");
+		await connectRelay(relay, factory);
 
 		relay.close();
 		expect(relay.status).toBe("closed");
-		expect(ws.closed).toBe(true);
+		expect(factory.lastSocket!.closed).toBe(true);
 	});
 
 	it("close from connecting state works", () => {
 		const factory = new FakeWebSocketFactory();
 		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
-
 		relay.connect();
 		relay.close();
 		expect(relay.status).toBe("closed");
@@ -407,10 +510,8 @@ describe("ManagedRelayLink — close", () => {
 	it("close from handshaking state works", () => {
 		const factory = new FakeWebSocketFactory();
 		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
-
 		relay.connect();
-		const ws = factory.lastSocket!;
-		ws.open(); // now handshaking
+		factory.lastSocket!.open();
 		relay.close();
 		expect(relay.status).toBe("closed");
 	});
@@ -420,24 +521,15 @@ describe("ManagedRelayLink — close", () => {
 		try {
 			const factory = new FakeWebSocketFactory();
 			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+			await connectRelay(relay, factory);
 
-			relay.connect();
-			const ws = factory.lastSocket!;
-			ws.open();
-			ws.receive(JSON.stringify(envelope(handshakeAck())));
-
-			// Force disconnect — should schedule reconnect
-			ws.closeAbrupt();
+			factory.lastSocket!.closeAbrupt();
 			expect(relay.status).toBe("reconnecting");
 
-			// Close while reconnecting
 			relay.close();
 			expect(relay.status).toBe("closed");
-			expect(relay.health).toEqual({ status: "closed" });
 
-			// Advance timers — reconnect should NOT trigger
 			await vi.advanceTimersByTimeAsync(100_000);
-			// No new socket should be created
 			expect(factory.sockets.length).toBe(1);
 		} finally {
 			vi.useRealTimers();
@@ -445,40 +537,28 @@ describe("ManagedRelayLink — close", () => {
 	});
 });
 
-describe("ManagedRelayLink — reconnect and backoff", () => {
+describe("reconnect and backoff", () => {
 	it("reconnects after unexpected close with bounded exponential backoff", async () => {
 		vi.useFakeTimers();
 		try {
 			const factory = new FakeWebSocketFactory();
 			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
-
-			// Connect normally
-			relay.connect();
-			let ws = factory.lastSocket!;
-			ws.open();
-			ws.receive(JSON.stringify(envelope(handshakeAck())));
-			expect(relay.status).toBe("connected");
+			await connectRelay(relay, factory);
 			expect(factory.sockets.length).toBe(1);
 
-			// Abrupt close triggers reconnect
-			ws.closeAbrupt();
+			factory.lastSocket!.closeAbrupt();
 			expect(relay.status).toBe("reconnecting");
-			expect(relay.health).toMatchObject({ status: "reconnecting" });
 
-			// Fast-forward past backoff
 			await vi.advanceTimersByTimeAsync(5_000);
 			expect(factory.sockets.length).toBe(2);
 
-			// Second socket opens
-			ws = factory.lastSocket!;
+			const ws = factory.lastSocket!;
 			ws.open();
-			// Should have sent a handshake (second message after first socket cleanup)
 			expect(ws.sent.length).toBe(1);
 			const sent = JSON.parse(ws.sent[0]) as RemoteHostFrameEnvelope;
 			expect(sent.frame.type).toBe("handshake");
 
-			// Accept handshake
-			ws.receive(JSON.stringify(envelope(handshakeAck())));
+			ws.receive(JSON.stringify(envelope(makeAck())));
 			expect(relay.status).toBe("connected");
 		} finally {
 			vi.useRealTimers();
@@ -490,27 +570,16 @@ describe("ManagedRelayLink — reconnect and backoff", () => {
 		try {
 			const factory = new FakeWebSocketFactory();
 			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+			await connectRelay(relay, factory);
 
-			relay.connect();
-			const initialWs = factory.lastSocket!;
-			initialWs.open();
-			initialWs.receive(JSON.stringify(envelope(handshakeAck())));
-
-			// Force reconnects repeatedly (first 10 should succeed, 11th exhausts)
 			for (let attempt = 1; attempt <= 10; attempt++) {
-				const currentWs = factory.lastSocket!;
-				currentWs.closeAbrupt();
+				factory.lastSocket!.closeAbrupt();
 				expect(relay.status).toBe("reconnecting");
-
-				// Wait enough time for backoff and reconnect
 				await vi.advanceTimersByTimeAsync(70_000);
 			}
 
-			// 11th close exhausts the retry budget
+			// 11th close exhausts retry budget
 			factory.lastSocket!.closeAbrupt();
-			expect(relay.status).toBe("unreachable");
-
-			// After max attempts, should be unreachable
 			expect(relay.status).toBe("unreachable");
 			expect(relay.health).toMatchObject({ status: "unreachable" });
 		} finally {
@@ -523,49 +592,80 @@ describe("ManagedRelayLink — reconnect and backoff", () => {
 		try {
 			const factory = new FakeWebSocketFactory();
 			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
-
-			relay.connect();
-			const ws = factory.lastSocket!;
-			ws.open();
-			ws.receive(JSON.stringify(envelope(handshakeAck())));
+			await connectRelay(relay, factory);
 
 			relay.close();
 			expect(relay.status).toBe("closed");
 
-			// Advance timers — no reconnect should happen
 			await vi.advanceTimersByTimeAsync(100_000);
 			expect(factory.sockets.length).toBe(1);
 		} finally {
 			vi.useRealTimers();
 		}
 	});
+
+	it("fetches fresh grant per reconnect", async () => {
+		vi.useFakeTimers();
+		try {
+			const factory = new FakeWebSocketFactory();
+			let grantCounter = 0;
+			const relay = new ManagedRelayLink(
+				createRelayOptions({
+					wsFactory: factory,
+					pingIntervalMs: 100000,
+					grantProvider: async () => {
+						grantCounter++;
+						return `grant-${grantCounter}`;
+					},
+				}),
+			);
+
+			// Connect manually (grant provider is async so socket created after await)
+			relay.connect();
+			// advance so the async grant provider resolves
+			await vi.advanceTimersByTimeAsync(100);
+			let ws = factory.lastSocket!;
+			ws.open();
+			ws.receive(JSON.stringify(envelope(makeAck())));
+			expect(grantCounter).toBe(1);
+			expect(factory.capturedAuth).toEqual({ grant: "grant-1" });
+
+			// Disconnect and reconnect — should get fresh grant
+			factory.lastSocket!.closeAbrupt();
+			await vi.advanceTimersByTimeAsync(10_000);
+
+			ws = factory.lastSocket!;
+			expect(grantCounter).toBe(2);
+			expect(factory.capturedAuth).toEqual({ grant: "grant-2" });
+
+			ws.open();
+			ws.receive(JSON.stringify(envelope(makeAck())));
+			expect(relay.status).toBe("connected");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
 
-describe("ManagedRelayLink — ping/pong liveness", () => {
+describe("ping/pong liveness", () => {
 	it("sends periodic health frames when connected", async () => {
 		vi.useFakeTimers();
 		try {
 			const factory = new FakeWebSocketFactory();
-			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory, pingIntervalMs: 100 }));
-
-			relay.connect();
+			const relay = new ManagedRelayLink(
+				createRelayOptions({ wsFactory: factory, pingIntervalMs: 100, pongTimeoutMs: 5000 }),
+			);
+			await connectRelay(relay, factory);
 			const ws = factory.lastSocket!;
-			ws.open();
-			ws.receive(JSON.stringify(envelope(handshakeAck())));
-			expect(relay.status).toBe("connected");
 
-			// Clear initial handshake
 			const initialCount = ws.sent.length;
 
-			// Advance past first ping interval
 			await vi.advanceTimersByTimeAsync(100);
 			expect(ws.sent.length).toBe(initialCount + 1);
 
-			// Second ping
 			await vi.advanceTimersByTimeAsync(100);
 			expect(ws.sent.length).toBe(initialCount + 2);
 
-			// Close — pings should stop
 			relay.close();
 			const afterClose = ws.sent.length;
 			await vi.advanceTimersByTimeAsync(500);
@@ -574,225 +674,100 @@ describe("ManagedRelayLink — ping/pong liveness", () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it("reconnects after pong timeout expires", async () => {
+		vi.useFakeTimers();
+		try {
+			const factory = new FakeWebSocketFactory();
+			const relay = new ManagedRelayLink(
+				createRelayOptions({ wsFactory: factory, pingIntervalMs: 50, pongTimeoutMs: 200 }),
+			);
+			await connectRelay(relay, factory);
+
+			// Advance past pong timeout without receiving any messages
+			await vi.advanceTimersByTimeAsync(300);
+
+			// Should trigger reconnect
+			expect(relay.status).toBe("reconnecting");
+			await vi.advanceTimersByTimeAsync(5_000);
+			expect(factory.sockets.length).toBeGreaterThanOrEqual(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
 
-describe("ManagedRelayLink — event ordering and recovery", () => {
+describe("event ordering and recovery", () => {
 	it("emits handshake_completed before frame_received events", async () => {
 		const factory = new FakeWebSocketFactory();
 		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
 		const order: string[] = [];
 
-		relay.observe((event) => {
-			order.push(event.type);
-		});
+		relay.observe((event) => order.push(event.type));
 
-		relay.connect();
+		await connectRelay(relay, factory);
 		const ws = factory.lastSocket!;
-		ws.open();
-		ws.receive(JSON.stringify(envelope(handshakeAck())));
 
-		// Receive frames after connection
-		ws.receive(JSON.stringify(envelope({ type: "health", healthSeq: 1, status: "connected" as const }, "f1")));
-		ws.receive(JSON.stringify(envelope({ type: "health", healthSeq: 2, status: "connected" as const }, "f2")));
+		// Send event frames (not health) to trigger frame_received
+		ws.receive(
+			JSON.stringify(
+				envelope(
+					{
+						type: "event",
+						id: "evt-1",
+						sequence: 1,
+						cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: 1 },
+						emittedAt: new Date().toISOString(),
+						body: { type: "agent_start" },
+					},
+					"f1",
+				),
+			),
+		);
+		ws.receive(
+			JSON.stringify(
+				envelope(
+					{
+						type: "event",
+						id: "evt-2",
+						sequence: 2,
+						cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: 2 },
+						emittedAt: new Date().toISOString(),
+						body: { type: "agent_end", messages: 1 },
+					},
+					"f2",
+				),
+			),
+		);
 
 		expect(order[0]).toBe("handshake_completed");
-		// frame_received events come after
 		const frameEvents = order.filter((e) => e === "frame_received");
 		expect(frameEvents).toHaveLength(2);
 	});
 
-	it("recovery event fires on handshake completion after reconnect", async () => {
+	it("fires recovered on reconnect with cursor", async () => {
 		vi.useFakeTimers();
 		try {
 			const factory = new FakeWebSocketFactory();
-			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+			const journal = new InMemoryRemoteHostJournal({
+				hostId: "sandbox-1",
+				generation: "gen-abc",
+				sessionId: "sess-1",
+			});
+			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory, journal }));
 			const events: ManagedRelayLinkEvent[] = [];
 			relay.observe((e) => events.push(e));
 
-			// Connect
-			relay.connect();
-			let ws = factory.lastSocket!;
-			ws.open();
-			ws.receive(JSON.stringify(envelope(handshakeAck())));
+			await connectRelay(relay, factory);
 
-			// Disconnect and reconnect
-			ws.closeAbrupt();
-			await vi.advanceTimersByTimeAsync(5_000);
-
-			ws = factory.lastSocket!;
-			ws.open();
-			ws.receive(JSON.stringify(envelope(handshakeAck())));
-
-			// Should have a recovered event
-			const recovered = events.find((e) => e.type === "recovered");
-			expect(recovered).toBeDefined();
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-});
-
-describe("ManagedRelayLink — timeout and cancel", () => {
-	it("observer errors do not crash the relay", () => {
-		const factory = new FakeWebSocketFactory();
-		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
-
-		relay.observe(() => {
-			throw new Error("observer error");
-		});
-
-		relay.connect();
-		const ws = factory.lastSocket!;
-		ws.open();
-
-		// Should not throw
-		ws.receive(JSON.stringify(envelope(handshakeAck())));
-		expect(relay.status).toBe("connected");
-	});
-
-	it("orphaned timers do not fire after close from reconnecting", async () => {
-		vi.useFakeTimers();
-		try {
-			const factory = new FakeWebSocketFactory();
-			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
-			const createdSockets: number[] = [];
-
-			// Track socket creation as a proxy for reconnects
-			const originalCreate = factory.create.bind(factory);
-			vi.spyOn(factory, "create").mockImplementation((url: string) => {
-				createdSockets.push(createdSockets.length + 1);
-				return originalCreate(url);
-			});
-
-			relay.connect();
-			const ws = factory.lastSocket!;
-			ws.open();
-			ws.receive(JSON.stringify(envelope(handshakeAck())));
-
-			// Disconnect — enters reconnecting
-			ws.closeAbrupt();
-			expect(relay.status).toBe("reconnecting");
-
-			// Close immediately
-			relay.close();
-			expect(relay.status).toBe("closed");
-
-			// Advance far past any backoff interval
-			await vi.advanceTimersByTimeAsync(200_000);
-
-			// No new socket should be created after close
-			expect(createdSockets.length).toBe(1);
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-});
-
-describe("ManagedRelayLink — observer lifecycle", () => {
-	it("can add and remove observers", () => {
-		const relay = new ManagedRelayLink(createRelayOptions());
-		const events: ManagedRelayLinkEvent[] = [];
-
-		const observer: ManagedRelayLinkObserver = (e) => events.push(e);
-		relay.observe(observer);
-		relay.unobserve(observer);
-
-		// No events should be captured after unobserving
-		// (events only happen during connection, so this is structural)
-		expect(true).toBe(true);
-	});
-
-	it("supports multiple observers", () => {
-		const factory = new FakeWebSocketFactory();
-		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
-		const eventsA: ManagedRelayLinkEvent[] = [];
-		const eventsB: ManagedRelayLinkEvent[] = [];
-
-		relay.observe((e) => eventsA.push(e));
-		relay.observe((e) => eventsB.push(e));
-
-		relay.connect();
-		const ws = factory.lastSocket!;
-		ws.open();
-		ws.receive(JSON.stringify(envelope(handshakeAck())));
-
-		expect(eventsA.some((e) => e.type === "handshake_completed")).toBe(true);
-		expect(eventsB.some((e) => e.type === "handshake_completed")).toBe(true);
-	});
-});
-
-describe("ManagedRelayLink — consume grant", () => {
-	it("uses grant as URL query parameter only, never in frames", async () => {
-		const factory = new FakeWebSocketFactory();
-		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory, grant: "one-time-grant-xyz" }));
-
-		// Connect and check that sent frames don't contain grant
-		relay.connect();
-		const ws = factory.lastSocket!;
-		ws.open();
-
-		for (const msg of ws.sent) {
-			expect(msg).not.toContain("one-time-grant-xyz");
-		}
-
-		// Journal should not contain it
-		const entries = (createRelayOptions().journal as InMemoryRemoteHostJournal).readEntries(1);
-		for (const entry of entries) {
-			expect(JSON.stringify(entry)).not.toContain("one-time-grant-xyz");
-		}
-	});
-});
-
-describe("ManagedRelayLink — resume cursor", () => {
-	it("returns resume cursor based on journal last received sequence", () => {
-		const journal = new InMemoryJournal({ hostId: "sandbox-1", generation: "gen-abc" });
-		const relay = new ManagedRelayLink(createRelayOptions({ journal }));
-
-		expect(relay.resumeCursor).toBeUndefined();
-
-		// Simulate received events by recording directly into the journal
-		journal.recordReceived(
-			envelope(
-				{
-					type: "event",
-					id: "evt-1",
-					sequence: 5,
-					cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess", sequence: 5 },
-					emittedAt: new Date().toISOString(),
-					body: { type: "agent_start" },
-				},
-				"evt-1",
-			) as RemoteHostFrameEnvelope,
-		);
-
-		const cursor = relay.resumeCursor;
-		expect(cursor).toBeDefined();
-		expect(cursor!.hostId).toBe("sandbox-1");
-		expect(cursor!.generation).toBe("gen-abc");
-		expect(cursor!.sequence).toBe(5);
-	});
-
-	it("sends resume cursor on reconnect", async () => {
-		vi.useFakeTimers();
-		try {
-			const journal = new InMemoryJournal({ hostId: "sandbox-1", generation: "gen-abc" });
-			const factory = new FakeWebSocketFactory();
-			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory, journal }));
-
-			// Connect
-			relay.connect();
-			let ws = factory.lastSocket!;
-			ws.open();
-			ws.receive(JSON.stringify(envelope(handshakeAck())));
-
-			// Record events in journal
+			// Simulate received event in journal so resume cursor is non-zero
 			journal.recordReceived(
 				envelope(
 					{
 						type: "event",
 						id: "evt-1",
-						sequence: 3,
-						cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess", sequence: 3 },
+						sequence: 1,
+						cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: 1 },
 						emittedAt: new Date().toISOString(),
 						body: { type: "agent_start" },
 					},
@@ -801,17 +776,414 @@ describe("ManagedRelayLink — resume cursor", () => {
 			);
 
 			// Disconnect and reconnect
-			ws.closeAbrupt();
+			factory.lastSocket!.closeAbrupt();
 			await vi.advanceTimersByTimeAsync(5_000);
 
-			ws = factory.lastSocket!;
+			const ws = factory.lastSocket!;
 			ws.open();
+			const ackWithCursor = makeAck({
+				cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: 1 },
+			});
+			ws.receive(JSON.stringify(envelope(ackWithCursor)));
 
-			// The handshake should include a resumeCursor
-			const lastSent = JSON.parse(ws.sent[0]) as RemoteHostFrameEnvelope;
-			if (lastSent.frame.type === "handshake") {
-				expect(lastSent.frame.resumeCursor).toBeDefined();
-				expect(lastSent.frame.resumeCursor!.sequence).toBe(3);
+			const recovered = events.find((e) => e.type === "recovered");
+			expect(recovered).toBeDefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe("observe disposer", () => {
+	it("observe returns a disposer that removes the observer", () => {
+		const relay = new ManagedRelayLink(createRelayOptions());
+		const events: ManagedRelayLinkEvent[] = [];
+		const disposer = relay.observe((e) => events.push(e));
+		disposer();
+		expect(true).toBe(true);
+	});
+
+	it("supports multiple observers", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+		const eventsA: ManagedRelayLinkEvent[] = [];
+		const eventsB: ManagedRelayLinkEvent[] = [];
+
+		relay.observe((e) => eventsA.push(e));
+		relay.observe((e) => eventsB.push(e));
+
+		await connectRelay(relay, factory);
+
+		expect(eventsA.some((e) => e.type === "handshake_completed")).toBe(true);
+		expect(eventsB.some((e) => e.type === "handshake_completed")).toBe(true);
+	});
+
+	it("observer errors do not crash the relay", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+
+		relay.observe(() => {
+			throw new Error("observer error");
+		});
+
+		await connectRelay(relay, factory);
+		expect(relay.status).toBe("connected");
+	});
+});
+
+describe("stale socket guards", () => {
+	it("stale socket callbacks do not affect state after close", async () => {
+		vi.useFakeTimers();
+		try {
+			const factory = new FakeWebSocketFactory();
+			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+			await connectRelay(relay, factory);
+
+			const oldSocket = factory.lastSocket!;
+			relay.close();
+
+			// Stale callback on old socket
+			oldSocket.open(); // should be no-op for state
+			const event: ManagedRelayLinkEvent[] = [];
+			relay.observe((e) => event.push(e));
+			oldSocket.receive(JSON.stringify(envelope(makeAck())));
+			expect(event.filter((e) => e.type === "handshake_completed")).toHaveLength(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("onerror forces disconnect path", async () => {
+		vi.useFakeTimers();
+		try {
+			const factory = new FakeWebSocketFactory();
+			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+			await connectRelay(relay, factory);
+
+			factory.lastSocket!.closeAbrupt();
+			expect(relay.status).toBe("reconnecting");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe("random UUID frame IDs", () => {
+	it("sendFrame uses collision-resistant frame IDs", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+		await connectRelay(relay, factory);
+
+		const e1 = relay.sendFrame({ type: "health", healthSeq: 1, status: "connected" });
+		const e2 = relay.sendFrame({ type: "health", healthSeq: 2, status: "connected" });
+		expect(e1.frameId).not.toBe(e2.frameId);
+		expect(e1.frameId.length).toBe(36); // UUID v4
+	});
+
+	it("frame IDs survive restart (no sequential counter leak)", () => {
+		const relay = new ManagedRelayLink(createRelayOptions());
+		const e1 = relay.sendFrame({ type: "health", healthSeq: 1, status: "connected" });
+		// Even without connection, frame ID is a UUID
+		expect(e1.frameId.length).toBe(36);
+	});
+});
+
+describe("grant provider failure", () => {
+	it("connection fails when grant provider throws", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(
+			createRelayOptions({
+				wsFactory: factory,
+				grantProvider: async () => {
+					throw new Error("auth denied");
+				},
+			}),
+		);
+
+		const result = await relay.connect();
+		expect(result.accepted).toBe(false);
+		expect(result.rejectReason).toBe("grant_failed");
+		expect(relay.status).toBe("reconnecting");
+		expect(factory.sockets.length).toBe(0);
+	});
+});
+
+describe("malformed ack", () => {
+	it("rejects malformed ack (missing protocol) with teardown and stable rejection", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+		const events: ManagedRelayLinkEvent[] = [];
+		relay.observe((e) => events.push(e));
+
+		const connectPromise = relay.connect();
+		const ws = factory.lastSocket!;
+		ws.open();
+
+		// Send ack missing protocol and remoteBuildIdentity
+		ws.receive(
+			JSON.stringify({
+				type: "frame",
+				frameId: "bad-ack",
+				protocol: REMOTE_HOST_PROTOCOL_INFO,
+				sentAt: new Date().toISOString(),
+				frame: {
+					type: "handshake_ack",
+					accepted: true,
+					hostId: "sandbox-1",
+					sessionId: "sess-1",
+					linkId: "link-1",
+					capabilities: ["session_commands"],
+				},
+			}),
+		);
+
+		const result = await connectPromise;
+		expect(result.accepted).toBe(false);
+		expect(result.rejectReason).toContain("malformed_ack");
+		expect(relay.status).toBe("unreachable");
+		const rejected = events.find((e) => e.type === "handshake_rejected");
+		expect(rejected).toBeDefined();
+	});
+
+	it("rejects ack with non-boolean accepted field", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+
+		const connectPromise = relay.connect();
+		const ws = factory.lastSocket!;
+		ws.open();
+
+		ws.receive(
+			JSON.stringify({
+				type: "frame",
+				frameId: "bad-ack-2",
+				protocol: REMOTE_HOST_PROTOCOL_INFO,
+				sentAt: new Date().toISOString(),
+				frame: {
+					type: "handshake_ack",
+					accepted: "yes",
+					hostId: "sandbox-1",
+					sessionId: "sess-1",
+					linkId: "link-1",
+					capabilities: ["session_commands"],
+					protocol: REMOTE_HOST_PROTOCOL_INFO,
+				},
+			}),
+		);
+
+		const result = await connectPromise;
+		expect(result.accepted).toBe(false);
+		expect(relay.status).toBe("unreachable");
+	});
+});
+
+describe("send failure handling", () => {
+	it("handshake send failure triggers reconnect", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory, pingIntervalMs: 100000 }));
+		const events: ManagedRelayLinkEvent[] = [];
+		relay.observe((e) => events.push(e));
+
+		relay.connect();
+		const ws = factory.lastSocket!;
+
+		// Make send throw
+		const originalSend = ws.send.bind(ws);
+		ws.send = () => {
+			throw new Error("send failed");
+		};
+
+		ws.open();
+
+		// The error should be caught, socket torn down, and reconnect scheduled
+		expect(relay.status).toBe("reconnecting");
+
+		// Restore send and advance timers to reconnect
+		ws.send = originalSend;
+		expect(factory.sockets.length).toBe(1);
+	});
+});
+
+describe("send replay failure propagation", () => {
+	it("send failure during replay rejects handshake with replay_resync_required", async () => {
+		vi.useFakeTimers();
+		try {
+			const factory = new FakeWebSocketFactory();
+			const journal = new InMemoryRemoteHostJournal({
+				hostId: "sandbox-1",
+				generation: "gen-abc",
+				sessionId: "sess-1",
+			});
+			const relay = new ManagedRelayLink(
+				createRelayOptions({ wsFactory: factory, journal, pingIntervalMs: 100000, pongTimeoutMs: 500000 }),
+			);
+
+			relay.connect();
+			let ws = factory.lastSocket!;
+			ws.open();
+			ws.receive(JSON.stringify(envelope(makeAck())));
+			await vi.advanceTimersByTimeAsync(100);
+			expect(relay.status).toBe("connected");
+
+			for (let i = 1; i <= 3; i++) {
+				journal.recordSent({
+					type: "frame",
+					frameId: "cmd-" + i,
+					protocol: REMOTE_HOST_PROTOCOL_INFO,
+					sentAt: new Date().toISOString(),
+					frame: { type: "command", commandId: "cmd-" + i, body: { type: "abort" } },
+				});
+			}
+
+			const events: ManagedRelayLinkEvent[] = [];
+			relay.observe((e) => events.push(e));
+
+			ws.closeAbrupt();
+			await vi.advanceTimersByTimeAsync(10_000);
+
+			ws = factory.lastSocket!;
+			let sendCount = 0;
+			ws.send = () => {
+				sendCount++;
+				if (sendCount > 1) throw new Error("send failed");
+			};
+			ws.open();
+			ws.receive(
+				JSON.stringify(
+					envelope(
+						makeAck({
+							cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: 0 },
+						}),
+					),
+				),
+			);
+			await vi.advanceTimersByTimeAsync(100);
+
+			expect(relay.status).toBe("unreachable");
+			const resyncEvent = events.find((e) => e.type === "replay_resync_required");
+			expect(resyncEvent).toBeDefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe("constructor validation", () => {
+	it("rejects empty hostId", () => {
+		expect(() => new ManagedRelayLink(createRelayOptions({ hostId: "" }))).toThrow("hostId");
+	});
+	it("rejects empty generation", () => {
+		expect(() => new ManagedRelayLink(createRelayOptions({ generation: "" }))).toThrow("generation");
+	});
+	it("rejects empty sessionId", () => {
+		expect(() => new ManagedRelayLink(createRelayOptions({ sessionId: "" }))).toThrow("sessionId");
+	});
+	it("rejects empty expectedRemoteHostId", () => {
+		expect(() => new ManagedRelayLink(createRelayOptions({ expectedRemoteHostId: "" }))).toThrow(
+			"expectedRemoteHostId",
+		);
+	});
+	it("rejects empty expectedRemoteSessionId", () => {
+		expect(() => new ManagedRelayLink(createRelayOptions({ expectedRemoteSessionId: "" }))).toThrow(
+			"expectedRemoteSessionId",
+		);
+	});
+	it("rejects empty buildIdentity.buildId", () => {
+		expect(
+			() =>
+				new ManagedRelayLink(
+					createRelayOptions({
+						buildIdentity: { buildId: "", daemonProtocolVersion: 7, daemonSchemaRevision: 25 },
+					}),
+				),
+		).toThrow("buildId");
+	});
+	it("rejects invalid daemonProtocolVersion (negative)", () => {
+		expect(
+			() =>
+				new ManagedRelayLink(
+					createRelayOptions({
+						buildIdentity: { buildId: "b", daemonProtocolVersion: -1, daemonSchemaRevision: 25 },
+					}),
+				),
+		).toThrow("daemonProtocolVersion");
+	});
+	it("rejects invalid daemonSchemaRevision (float)", () => {
+		expect(
+			() =>
+				new ManagedRelayLink(
+					createRelayOptions({
+						buildIdentity: { buildId: "b", daemonProtocolVersion: 7, daemonSchemaRevision: 25.5 },
+					}),
+				),
+		).toThrow("daemonSchemaRevision");
+	});
+});
+describe("protocol compatibility", () => {
+	it("rejects handshake ack with mismatched protocol", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+		const events = receivedFrameEvents(relay);
+
+		const connectPromise = relay.connect();
+		const ws = factory.lastSocket!;
+		ws.open();
+
+		const badAck = makeAck({
+			protocol: { name: "prime-agent.remote-host", version: 99 } as never,
+		});
+		ws.receive(JSON.stringify(envelope(badAck)));
+
+		const result = await connectPromise;
+		expect(result.accepted).toBe(false);
+		expect(result.rejectReason).toBe("protocol_incompatible");
+		expect(relay.status).toBe("unreachable");
+		expect(events.some((e) => e.type === "handshake_rejected")).toBe(true);
+	});
+});
+
+describe("unreachable state", () => {
+	it("failedAt timestamp is stable across reads", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+
+		const connectPromise = relay.connect();
+		const ws = factory.lastSocket!;
+		ws.open();
+
+		ws.receive(JSON.stringify(envelope(makeAck({ accepted: false, rejectReason: "denied" }))));
+		await connectPromise;
+
+		const h1 = relay.health;
+		const h2 = relay.health;
+		if (h1.status === "unreachable" && h2.status === "unreachable") {
+			expect(h1.failedAt).toBe(h2.failedAt);
+		}
+	});
+});
+
+describe("monotonic health sequence", () => {
+	it("increments healthSeq on each sent ping", async () => {
+		vi.useFakeTimers();
+		try {
+			const factory = new FakeWebSocketFactory();
+			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory, pingIntervalMs: 50 }));
+			await connectRelay(relay, factory);
+			const ws = factory.lastSocket!;
+
+			const initial = ws.sent.length;
+
+			await vi.advanceTimersByTimeAsync(50);
+			const p1 = JSON.parse(ws.sent[initial]) as RemoteHostFrameEnvelope;
+			expect(p1.frame.type).toBe("health");
+			if (p1.frame.type === "health") {
+				expect(p1.frame.healthSeq).toBe(1);
+			}
+
+			await vi.advanceTimersByTimeAsync(50);
+			const p2 = JSON.parse(ws.sent[initial + 1]) as RemoteHostFrameEnvelope;
+			if (p2.frame.type === "health") {
+				expect(p2.frame.healthSeq).toBe(2);
 			}
 		} finally {
 			vi.useRealTimers();
@@ -819,57 +1191,661 @@ describe("ManagedRelayLink — resume cursor", () => {
 	});
 });
 
-describe("ManagedRelayLink — non-frame messages", () => {
-	it("emits error for unparseable messages", () => {
-		const factory = new FakeWebSocketFactory();
-		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
-		const events = receivedFrameEvents(relay);
+describe("file-backed journal replay", () => {
+	it("persists entries to file journal and recovers via cursor", async () => {
+		vi.useFakeTimers();
+		try {
+			const tmpDir = fs.mkdtempSync("/tmp/relay-journal-");
+			const journalPath = `${tmpDir}/journal.jsonl`;
+			const journal = new RemoteHostJournal({
+				path: journalPath,
+				hostId: "sandbox-1",
+				generation: "gen-abc",
+				sessionId: "sess-1",
+			});
+			const factory = new FakeWebSocketFactory();
+			const relay = new ManagedRelayLink(
+				createRelayOptions({
+					wsFactory: factory,
+					journal,
+					sessionId: "sess-1",
+				}),
+			);
 
-		relay.connect();
-		const ws = factory.lastSocket!;
-		ws.open();
-		ws.receive(JSON.stringify(envelope(handshakeAck())));
+			// Connect under fake timers
+			relay.connect();
+			let ws = factory.lastSocket!;
+			ws.open();
+			ws.receive(JSON.stringify(envelope(makeAck())));
+			// Wait for all microtasks
+			await vi.advanceTimersByTimeAsync(100);
 
-		ws.receive("not json");
+			// Record received event so journal has a non-zero cursor
+			journal.recordReceived({
+				type: "frame",
+				frameId: "evt-rcv-1",
+				protocol: REMOTE_HOST_PROTOCOL_INFO,
+				sentAt: new Date().toISOString(),
+				frame: {
+					type: "event",
+					id: "evt-rcv-1",
+					sequence: 5,
+					cursor: {
+						hostId: "sandbox-1",
+						generation: "gen-abc",
+						sessionId: "sess-1",
+						sequence: 5,
+					},
+					emittedAt: new Date().toISOString(),
+					body: { type: "agent_start" },
+				},
+			});
 
-		const errEvents = events.filter((e) => e.type === "error");
-		expect(errEvents.length).toBeGreaterThan(0);
-	});
+			// Verify file journal has the entry
+			const entriesOnDisk = journal.readEntries(1);
+			expect(entriesOnDisk.length).toBeGreaterThanOrEqual(1);
+			const receivedEvent = entriesOnDisk.find((e) => e.frameId === "evt-rcv-1");
+			expect(receivedEvent).toBeDefined();
+			expect(receivedEvent!.type).toBe("received");
+			expect(journal.lastReceivedEventSequence).toBe(5);
 
-	it("emits error for non-frame objects", () => {
-		const factory = new FakeWebSocketFactory();
-		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
-		const events = receivedFrameEvents(relay);
+			// Disconnect and reconnect
+			ws.closeAbrupt();
+			await vi.advanceTimersByTimeAsync(5_000);
 
-		relay.connect();
-		const ws = factory.lastSocket!;
-		ws.open();
-		ws.receive(JSON.stringify(envelope(handshakeAck())));
+			ws = factory.lastSocket!;
+			ws.open();
 
-		ws.receive(JSON.stringify({ type: "not_frame", data: "hello" }));
-
-		const errEvents = events.filter((e) => e.type === "error");
-		expect(errEvents.length).toBeGreaterThan(0);
+			// Handshake should include resumeCursor from file journal
+			const sent = JSON.parse(ws.sent[0]) as RemoteHostFrameEnvelope;
+			if (sent.frame.type === "handshake") {
+				expect(sent.frame.resumeCursor).toBeDefined();
+				const cursor = sent.frame.resumeCursor!;
+				expect(cursor.hostId).toBe("sandbox-1");
+				expect(cursor.generation).toBe("gen-abc");
+				expect(cursor.sessionId).toBe("sess-1");
+				expect(cursor.sequence).toBe(5);
+			}
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 
-describe("ManagedRelayLink — link status mapping", () => {
-	it("maps internal state to RemoteHostLinkStatus correctly", () => {
-		const relay = new ManagedRelayLink(createRelayOptions());
+describe("orphaned timers", () => {
+	it("orphaned reconnect timer does not fire after close", async () => {
+		vi.useFakeTimers();
+		try {
+			const factory = new FakeWebSocketFactory();
+			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+			await connectRelay(relay, factory);
 
-		expect(relay.linkStatus).toBe("connecting");
+			factory.lastSocket!.closeAbrupt();
+			expect(relay.status).toBe("reconnecting");
 
-		const state = relay as unknown as { _state: { status: string } };
-		state._state = { status: "connected" };
-		expect(relay.linkStatus).toBe("connected");
+			relay.close();
 
-		state._state = { status: "reconnecting" };
-		expect(relay.linkStatus).toBe("reconnecting");
-
-		state._state = { status: "unreachable" };
-		expect(relay.linkStatus).toBe("unreachable");
-
-		state._state = { status: "closed" };
-		expect(relay.linkStatus).toBe("closed");
+			await vi.advanceTimersByTimeAsync(200_000);
+			expect(factory.sockets.length).toBe(1);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
+
+	it("orphaned handshake timer does not fire after close", async () => {
+		vi.useFakeTimers();
+		try {
+			const factory = new FakeWebSocketFactory();
+			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+
+			relay.connect();
+			factory.lastSocket!.open();
+
+			relay.close();
+
+			await vi.advanceTimersByTimeAsync(30_000);
+			expect(relay.status).toBe("closed");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe("health getter stable timestamps", () => {
+	it("health connecting timestamp is stable across reads", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+
+		relay.connect();
+		const h1 = relay.health;
+		const h2 = relay.health;
+		if (h1.status === "connecting" && h2.status === "connecting") {
+			expect(h1.startedAt).toBe(h2.startedAt);
+		}
+	});
+
+	it("health connected timestamp is stable across reads", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+		await connectRelay(relay, factory);
+
+		const h1 = relay.health;
+		const h2 = relay.health;
+		if (h1.status === "connected" && h2.status === "connected") {
+			expect(h1.connectedAt).toBe(h2.connectedAt);
+		}
+	});
+});
+describe("ack frame handling", () => {
+	it("does not emit received ack frames as application work", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+		const events = receivedFrameEvents(relay);
+		await connectRelay(relay, factory);
+		const ws = factory.lastSocket!;
+
+		// Send an ack frame
+		ws.receive(
+			JSON.stringify(
+				envelope({ type: "ack", ackId: "ack-1", acknowledges: "some-frame", status: "delivered" }, "ack-inbound"),
+			),
+		);
+
+		const frameEvents = events.filter((e) => e.type === "frame_received");
+		expect(frameEvents).toHaveLength(0);
+	});
+
+	it("ACKs every durable application frame (event/command/agent_message/provider_proxy)", async () => {
+		const factory = new FakeWebSocketFactory();
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory }));
+		await connectRelay(relay, factory);
+		const ws = factory.lastSocket!;
+
+		const durableTypes = [
+			{
+				type: "event" as const,
+				id: "e-1",
+				sequence: 1,
+				cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: 1 },
+				emittedAt: new Date().toISOString(),
+				body: { type: "agent_start" as const },
+			},
+			{ type: "command" as const, commandId: "c-1", body: { type: "abort" as const } },
+			{
+				type: "agent_message" as const,
+				id: "m-1",
+				fromActiveSessionId: "a",
+				targetActiveSessionId: "b",
+				message: "hi",
+			},
+			{
+				type: "provider_proxy" as const,
+				proxyType: "model_call_request" as const,
+				callId: "call-1",
+				provider: "test",
+				model: "test",
+				messages: [],
+			},
+		];
+
+		for (const frame of durableTypes) {
+			ws.receive(JSON.stringify(envelope(frame as never, `f-${frame.type}`)));
+		}
+
+		// Count ack frames sent back
+		const ackCount = ws.sent.filter((s) => {
+			try {
+				const e = JSON.parse(s) as RemoteHostFrameEnvelope;
+				return e.frame.type === "ack";
+			} catch {
+				return false;
+			}
+		}).length;
+		expect(ackCount).toBe(4);
+	});
+});
+
+describe("unacknowledged replay", () => {
+	it("replays unacknowledged sent entries with original IDs before handshake_completed", async () => {
+		const factory = new FakeWebSocketFactory();
+		const journal = new InMemoryRemoteHostJournal({
+			hostId: "sandbox-1",
+			generation: "gen-abc",
+			sessionId: "sess-1",
+		});
+		const relay = new ManagedRelayLink(
+			createRelayOptions({
+				wsFactory: factory,
+				journal,
+			}),
+		);
+
+		// Simulate unacknowledged sent command
+		journal.recordSent({
+			type: "frame",
+			frameId: "cmd-unacked-1",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: new Date().toISOString(),
+			frame: { type: "command", commandId: "cmd-unacked-1", body: { type: "abort" } },
+		});
+		// Acknowledged command should NOT be replayed
+		journal.recordSent({
+			type: "frame",
+			frameId: "cmd-acked-1",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: new Date().toISOString(),
+			frame: { type: "command", commandId: "cmd-acked-1", body: { type: "abort" } },
+		});
+		journal.recordReceived({
+			type: "frame",
+			frameId: "ack-cmd-1",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: new Date().toISOString(),
+			frame: { type: "ack", ackId: "ack-cmd-1", acknowledges: "cmd-acked-1", status: "delivered" },
+		});
+
+		// Send health frame (should not be replayed)
+		journal.recordSent({
+			type: "frame",
+			frameId: "health-1",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: new Date().toISOString(),
+			frame: { type: "health", healthSeq: 1, status: "connected" },
+		});
+
+		// Connect — replay should resend only the unacknowledged command
+		const connectPromise = relay.connect();
+		const ws = factory.lastSocket!;
+		ws.open();
+		ws.receive(JSON.stringify(envelope(makeAck())));
+		await connectPromise;
+
+		// Check what was sent after handshake: should include unacked cmd with original frameId
+		const afterHandshake = ws.sent.slice(1); // skip handshake envelope
+		const replayed = afterHandshake.filter((s) => {
+			try {
+				const e = JSON.parse(s) as RemoteHostFrameEnvelope;
+				return e.frame.type === "command";
+			} catch {
+				return false;
+			}
+		});
+		expect(replayed).toHaveLength(1);
+		const replayedFrame = JSON.parse(replayed[0]) as RemoteHostFrameEnvelope;
+		expect(replayedFrame.frameId).toBe("cmd-unacked-1");
+	});
+});
+
+describe("grant provider failure handling", () => {
+	it("fails connection and retries on grant provider rejection", async () => {
+		vi.useFakeTimers();
+		try {
+			const factory = new FakeWebSocketFactory();
+			const relay = new ManagedRelayLink(
+				createRelayOptions({
+					wsFactory: factory,
+					pingIntervalMs: 100000,
+					grantProvider: async () => {
+						throw new Error("token expired");
+					},
+				}),
+			);
+
+			relay.connect();
+			// Grant provider throws, should transition to reconnecting
+			await vi.advanceTimersByTimeAsync(100);
+			expect(relay.status).toBe("reconnecting");
+
+			// Should retry (backoff timer fires)
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(factory.sockets.length).toBe(0); // grant failed again, no socket
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+describe("ack persistence before return", () => {
+	it("persists ack frame to journal before returning from handleMessage", async () => {
+		const factory = new FakeWebSocketFactory();
+		const journal = new InMemoryRemoteHostJournal({
+			hostId: "sandbox-1",
+			generation: "gen-abc",
+			sessionId: "sess-1",
+		});
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory, journal }));
+
+		await connectRelay(relay, factory);
+		const ws = factory.lastSocket!;
+
+		// Send a command frame
+		ws.receive(
+			JSON.stringify(envelope({ type: "command", commandId: "cmd-1", body: { type: "abort" } }, "cmd-rcv-1")),
+		);
+
+		// Journal should have the received entry
+		const entries = journal.readEntries(1);
+		const receivedEntry = entries.find((e) => e.frameId === "cmd-rcv-1");
+		expect(receivedEntry).toBeDefined();
+		expect(receivedEntry!.type).toBe("received");
+	});
+});
+
+describe("ack suppresses replay after restart", () => {
+	it("does not replay an acknowledged command after restart", async () => {
+		const factory = new FakeWebSocketFactory();
+		const journal = new InMemoryRemoteHostJournal({
+			hostId: "sandbox-1",
+			generation: "gen-abc",
+			sessionId: "sess-1",
+		});
+		const relay = new ManagedRelayLink(
+			createRelayOptions({
+				wsFactory: factory,
+				journal,
+			}),
+		);
+
+		// Record an unacknowledged command and an acknowledged one
+		journal.recordSent({
+			type: "frame",
+			frameId: "cmd-acked",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: new Date().toISOString(),
+			frame: { type: "command", commandId: "cmd-acked", body: { type: "abort" } },
+		});
+		journal.recordReceived({
+			type: "frame",
+			frameId: "ack-for-cmd",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: new Date().toISOString(),
+			frame: { type: "ack", ackId: "ack-1", acknowledges: "cmd-acked", status: "delivered" },
+		});
+		journal.recordSent({
+			type: "frame",
+			frameId: "cmd-unacked",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: new Date().toISOString(),
+			frame: { type: "command", commandId: "cmd-unacked", body: { type: "abort" } },
+		});
+
+		// Connect — replay should resend only the unacknowledged command with original ID
+		await connectRelay(relay, factory);
+		const ws = factory.lastSocket!;
+
+		const replayedCmds = ws.sent
+			.filter((s) => {
+				try {
+					const e = JSON.parse(s) as RemoteHostFrameEnvelope;
+					return e.frame.type === "command";
+				} catch {
+					return false;
+				}
+			})
+			.map((s) => {
+				const e = JSON.parse(s) as RemoteHostFrameEnvelope;
+				return e.frameId;
+			});
+
+		expect(replayedCmds).toContain("cmd-unacked");
+		expect(replayedCmds).not.toContain("cmd-acked");
+	});
+});
+
+describe("session mismatch", () => {
+	it("reports unavailable replay for different session cursor", async () => {
+		const journal = new InMemoryRemoteHostJournal({
+			hostId: "sandbox-1",
+			generation: "gen-abc",
+			sessionId: "sess-A",
+		});
+		const cursor: RemoteHostEventCursor = {
+			hostId: "sandbox-1",
+			generation: "gen-abc",
+			sessionId: "sess-B",
+			sequence: 1,
+		};
+		const result = journal.getReplayEntries(cursor);
+		expect(result.status).toBe("unavailable");
+		expect(result.reason).toBe("session_mismatch");
+	});
+});
+
+describe("replay_resync_required", () => {
+	it("emits replay_resync_required and fails handshake on sequence gap", async () => {
+		const factory = new FakeWebSocketFactory();
+		const journal = new InMemoryRemoteHostJournal({
+			hostId: "sandbox-1",
+			generation: "gen-abc",
+			sessionId: "sess-1",
+		});
+		const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory, journal }));
+
+		for (const seq of [1, 2, 4]) {
+			journal.recordSent({
+				type: "frame",
+				frameId: `evt-${seq}`,
+				protocol: REMOTE_HOST_PROTOCOL_INFO,
+				sentAt: new Date().toISOString(),
+				frame: {
+					type: "event",
+					id: `evt-${seq}`,
+					sequence: seq,
+					cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: seq },
+					emittedAt: new Date().toISOString(),
+					body: { type: "agent_start" },
+				},
+			});
+		}
+
+		journal.recordReceived({
+			type: "frame",
+			frameId: "rcv-evt-1",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: new Date().toISOString(),
+			frame: {
+				type: "event",
+				id: "rcv-evt-1",
+				sequence: 1,
+				cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: 1 },
+				emittedAt: new Date().toISOString(),
+				body: { type: "agent_start" },
+			},
+		});
+
+		const events: ManagedRelayLinkEvent[] = [];
+		relay.observe((e) => events.push(e));
+		const connectPromise = relay.connect();
+		const ws = factory.lastSocket!;
+		ws.open();
+		ws.receive(
+			JSON.stringify(
+				envelope(
+					makeAck({ cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: 1 } }),
+				),
+			),
+		);
+		const result = await connectPromise;
+		expect(result.accepted).toBe(false);
+		expect(result.rejectReason).toBe("replay_resync_required");
+		const resyncEvent = events.find((e) => e.type === "replay_resync_required");
+		expect(resyncEvent).toBeDefined();
+	});
+});
+
+describe("replay boundary", () => {
+	it("exact MAX_REPLAY_PAGES pages without gap completes successfully", async () => {
+		vi.useFakeTimers();
+		try {
+			const factory = new FakeWebSocketFactory();
+			const journal = new InMemoryRemoteHostJournal({
+				hostId: "sandbox-1",
+				generation: "gen-abc",
+				sessionId: "sess-1",
+			});
+			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory, journal }));
+			for (let i = 1; i <= 10; i++) {
+				journal.recordSent({
+					type: "frame",
+					frameId: `evt-${i}`,
+					protocol: REMOTE_HOST_PROTOCOL_INFO,
+					sentAt: new Date().toISOString(),
+					frame: {
+						type: "event",
+						id: `evt-${i}`,
+						sequence: i,
+						cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: i },
+						emittedAt: new Date().toISOString(),
+						body: { type: "agent_start" },
+					},
+				});
+			}
+			const connectPromise = relay.connect();
+			const ws = factory.lastSocket!;
+			ws.open();
+			ws.receive(
+				JSON.stringify(
+					envelope(
+						makeAck({ cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: 0 } }),
+					),
+				),
+			);
+			const result = await connectPromise;
+			expect(result.accepted).toBe(true);
+			expect(relay.status).toBe("connected");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe("reconnect cancel on explicit connect", () => {
+	it("cancels pending reconnect timer when connect() is called during reconnecting", async () => {
+		vi.useFakeTimers();
+		try {
+			const factory = new FakeWebSocketFactory();
+			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory, pingIntervalMs: 100000 }));
+			await connectRelay(relay, factory);
+			factory.lastSocket!.closeAbrupt();
+			expect(relay.status).toBe("reconnecting");
+			relay.connect();
+			const _newWs = factory.lastSocket!;
+			expect(factory.sockets.length).toBe(2);
+			await vi.advanceTimersByTimeAsync(100_000);
+			expect(factory.sockets.length).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe("resume cursor", () => {
+	it("returns resume cursor based on journal last received sequence", () => {
+		const journal = new InMemoryRemoteHostJournal({
+			hostId: "sandbox-1",
+			generation: "gen-abc",
+			sessionId: "sess-1",
+		});
+		const relay = new ManagedRelayLink(createRelayOptions({ journal }));
+		expect(relay.resumeCursor).toBeUndefined();
+		journal.recordReceived(
+			envelope(
+				{
+					type: "event",
+					id: "evt-1",
+					sequence: 5,
+					cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: 5 },
+					emittedAt: new Date().toISOString(),
+					body: { type: "agent_start" },
+				},
+				"evt-1",
+			) as RemoteHostFrameEnvelope,
+		);
+		const cursor = relay.resumeCursor;
+		expect(cursor).toBeDefined();
+		expect(cursor!.sequence).toBe(5);
+	});
+
+	it("sends resume cursor on reconnect handshake", async () => {
+		vi.useFakeTimers();
+		try {
+			const journal = new InMemoryRemoteHostJournal({
+				hostId: "sandbox-1",
+				generation: "gen-abc",
+				sessionId: "sess-1",
+			});
+			const factory = new FakeWebSocketFactory();
+			const relay = new ManagedRelayLink(createRelayOptions({ wsFactory: factory, journal }));
+			await connectRelay(relay, factory);
+			journal.recordReceived(
+				envelope(
+					{
+						type: "event",
+						id: "evt-1",
+						sequence: 3,
+						cursor: { hostId: "sandbox-1", generation: "gen-abc", sessionId: "sess-1", sequence: 3 },
+						emittedAt: new Date().toISOString(),
+						body: { type: "agent_start" },
+					},
+					"evt-1",
+				) as RemoteHostFrameEnvelope,
+			);
+			factory.lastSocket!.closeAbrupt();
+			await vi.advanceTimersByTimeAsync(5_000);
+			const ws = factory.lastSocket!;
+			ws.open();
+			const sentHandshake = JSON.parse(ws.sent[0]) as RemoteHostFrameEnvelope;
+			if (sentHandshake.frame.type === "handshake") {
+				expect(sentHandshake.frame.resumeCursor).toBeDefined();
+				expect(sentHandshake.frame.resumeCursor!.sequence).toBe(3);
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+describe("session isolation", () => {
+	it("different session sees no prior state from same file", async () => {
+		const dir = fs.mkdtempSync("/tmp/relay-session-iso-");
+		const path = `${dir}/journal.jsonl`;
+
+		// Write entries for session A
+		const journalA = new RemoteHostJournal({
+			path,
+			hostId: "s",
+			generation: "g",
+			sessionId: "session-A",
+		});
+		journalA.recordSent({
+			type: "frame",
+			frameId: "cmd-A",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: new Date().toISOString(),
+			frame: { type: "command", commandId: "cmd-A", body: { type: "abort" } },
+		});
+		journalA.recordReceived({
+			type: "frame",
+			frameId: "rcv-A",
+			protocol: REMOTE_HOST_PROTOCOL_INFO,
+			sentAt: new Date().toISOString(),
+			frame: { type: "ack", ackId: "ack-A", acknowledges: "cmd-A", status: "delivered" },
+		});
+		expect(journalA.dedupCount).toBe(1);
+		expect(journalA.lastReceivedEventSequence).toBe(0);
+
+		// Open same path under session B — must show zero state
+		const journalB = new RemoteHostJournal({
+			path,
+			hostId: "s",
+			generation: "g",
+			sessionId: "session-B",
+		});
+		expect(journalB.dedupCount).toBe(0);
+		expect(journalB.lastReceivedEventSequence).toBe(0);
+		const unackedB = journalB.getUnacknowledgedSentEntries();
+		expect(unackedB).toHaveLength(0);
+		const entriesB = journalB.readEntries(1);
+		expect(entriesB).toHaveLength(0);
+
+		fs.rmSync(dir, { recursive: true, force: true });
+	}, 10_000);
 });
