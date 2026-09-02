@@ -534,10 +534,12 @@ export function readStdinBootstrapFrame(
 		onErrorCb = onError;
 
 		// Register data first.
+		registeredData = true;
 		try {
 			src.on("data", onDataCb);
-			registeredData = true;
 		} catch {
+			registeredData = false;
+			removeOwnListeners();
 			settleWithCode("INVALID_SOURCE");
 			return;
 		}
@@ -545,20 +547,24 @@ export function readStdinBootstrapFrame(
 		if (settled || cancelled) return;
 
 		// Register end.
+		registeredEnd = true;
 		try {
 			src.on("end", onEndCb);
-			registeredEnd = true;
 		} catch {
+			registeredEnd = false;
+			removeOwnListeners();
 			settleWithCode("INVALID_SOURCE");
 			return;
 		}
 		if (settled || cancelled) return;
 
 		// Register error.
+		registeredError = true;
 		try {
 			src.on("error", onErrorCb);
-			registeredError = true;
 		} catch {
+			registeredError = false;
+			removeOwnListeners();
 			settleWithCode("INVALID_SOURCE");
 			return;
 		}

@@ -1170,48 +1170,78 @@ describe("edge: boundary payload sizes", () => {
 // ===========================================================================
 
 describe("registration safety", () => {
-	it('synchronous invalid-length data during on("data") settles before end/error registration', async () => {
+	it('synchronous invalid-length data during on("data") cleans up all listeners', async () => {
 		// on("data") invokes the callback synchronously with an
 		// invalid-length header. onData calls settleWithCode,
 		// then after on("data") returns the settled check fires
 		// and end+error registrations are skipped.
+		// The listener registered for data must be removed.
+		const listeners: Record<string, Array<(...args: Array<unknown>) => void>> = {
+			data: [],
+			end: [],
+			error: [],
+		};
 		const src: StdinSource = {
 			on(event, cb) {
+				listeners[event]?.push(cb);
+				// Fire data synchronously during on("data") so settlement
+				// happens before the on() call returns.
 				if (event === "data") {
-					// Header with length 0 — triggers INVALID_LENGTH
 					(cb as (c: Uint8Array) => void)(new Uint8Array([0, 0, 0, 0]));
 				}
 			},
-			removeListener() {},
+			removeListener(event, cb) {
+				const h = listeners[event];
+				if (h) {
+					const idx = h.indexOf(cb);
+					if (idx >= 0) h.splice(idx, 1);
+				}
+			},
 			resume() {},
 		};
 		const r = await readStdinBootstrapFrame(src, { totalTimeoutMs: 5000 });
 		expect(r).toEqual({ ok: false, code: "INVALID_LENGTH" });
+		// After settle, all listener tables must be empty.
+		expect(listeners.data.length).toBe(0);
+		expect(listeners.end.length).toBe(0);
+		expect(listeners.error.length).toBe(0);
 	});
 
-	it('synchronous end during on("end") settles before error registration', async () => {
+	it('synchronous end during on("end") cleans up all listeners', async () => {
 		// on("end") invokes the callback synchronously during registration.
 		// The phase is HEADER (no data), so settleWithCode("PREMATURE_END")
 		// fires. After on("end") returns, the settled check prevents
 		// error registration and timer creation.
+		// Both data and end listeners must be cleaned up.
+		const listeners: Record<string, Array<(...args: Array<unknown>) => void>> = {
+			data: [],
+			end: [],
+			error: [],
+		};
 		const src: StdinSource = {
 			on(event, cb) {
-				if (event === "data") {
-					// nothing
-				}
+				listeners[event]?.push(cb);
+				// Fire end synchronously during on("end") so settlement
+				// happens before the on() call returns.
 				if (event === "end") {
-					// Invoke end synchronously during on()
 					(cb as () => void)();
 				}
-				if (event === "error") {
-					// Should never be reached
+			},
+			removeListener(event, cb) {
+				const h = listeners[event];
+				if (h) {
+					const idx = h.indexOf(cb);
+					if (idx >= 0) h.splice(idx, 1);
 				}
 			},
-			removeListener() {},
 			resume() {},
 		};
 		const r = await readStdinBootstrapFrame(src, { totalTimeoutMs: 5000 });
 		expect(r).toEqual({ ok: false, code: "PREMATURE_END" });
+		// After settle, all listener tables must be empty.
+		expect(listeners.data.length).toBe(0);
+		expect(listeners.end.length).toBe(0);
+		expect(listeners.error.length).toBe(0);
 	});
 
 	it("preserves unrelated source listeners after cleanup", async () => {
@@ -1277,7 +1307,7 @@ describe("registration safety", () => {
 		expect(getTrapCalls).toBeLessThan(10);
 	});
 
-	it('synchronous error during on("error") settles before timer creation', async () => {
+	it('synchronous error during on("error") cleans up all listeners', async () => {
 		// The error callback is invoked synchronously during
 		// on("error") registration. onError settles the promise,
 		// and the subsequent settled check prevents timer creation.
