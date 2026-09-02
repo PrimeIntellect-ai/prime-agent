@@ -219,6 +219,10 @@ export class McpManager {
 	}
 
 	/** Enabled persistent and session-scoped servers available through the generic kernel API. */
+	getAcpServers(): AcpMcpServerConfig[] {
+		return [...this.acpServers.values()];
+	}
+
 	getEnabledGenericServers(): string[] {
 		const servers = Array.from(this.integrations.values())
 			.filter(

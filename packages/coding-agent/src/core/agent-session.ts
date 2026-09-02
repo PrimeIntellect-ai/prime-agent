@@ -271,6 +271,7 @@ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.js";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.js";
 import { THINKING_LEVELS } from "./thinking-levels.js";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.js";
+import { createAcpMcpToolDefinitions } from "./tools/acp-mcp.js";
 import { createAllToolDefinitions } from "./tools/index.js";
 import { IpythonKernelProvisioner } from "./tools/ipython.js";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.js";
@@ -1392,6 +1393,19 @@ export class AgentSession {
 			activeToolNames: this.getActiveToolNames(),
 			includeAllExtensionTools: true,
 		});
+		const acpServers = this._mcpManager?.getAcpServers() ?? [];
+		if (acpServers.length > 0 && this._ipythonKernelProvisioner) {
+			const mcpTools = createAcpMcpToolDefinitions(acpServers, this._ipythonKernelProvisioner);
+			for (const tool of mcpTools) {
+				const existing = this._customTools.findIndex((t) => t.name === tool.name);
+				if (existing >= 0) this._customTools[existing] = tool;
+				else this._customTools.push(tool);
+			}
+			this._refreshToolRegistry({
+				activeToolNames: this.getActiveToolNames(),
+				includeAllExtensionTools: true,
+			});
+		}
 		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}
