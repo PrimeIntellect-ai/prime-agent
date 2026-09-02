@@ -1,19 +1,9 @@
 /**
  * PAB1 — Payload Bootstrap v1 binary codec for B14 sandbox bootstrap.
  *
- * Wire format (big-endian):
- *   [0-3]   ASCII magic "PAB1"                     (4 bytes)
- *   [4-7]   metadataLength (uint32 BE)             (4 bytes)
- *   [8..]   canonical UTF-8 metadata JSON          (exact metadataLength bytes, <=16 KiB)
- *   [..]    grantLength (uint16 BE)                (2 bytes)
- *   [..]    grant raw bytes                        (exact grantLength bytes, 32-128)
- *   total <= 64 KiB
- *
- * Encode/decode return fixed discriminated Result and never throw for input issues.
- * Input grant/payload views are copied immediately and erased on every reachable path
- * when backed by a genuine non-shared ArrayBuffer.
- * OneUseBootstrapGrant instances are created only by the decoder and tracked via
- * internal WeakSet; the constructor and brand token are not exported.
+ * Every intermediate buffer is zeroed before return. Public encode/decode return
+ * fixed discriminated Result and never throw for input issues (outer catch handles
+ * allocation/hostile failures with erasure).
  *
  * No dynamic imports, no require, no sync fs/process, no Buffer subarray alias.
  */
@@ -22,11 +12,11 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-const MAGIC = new Uint8Array([0x50, 0x41, 0x42, 0x31]); // PAB1
+const MAGIC = new Uint8Array([0x50, 0x41, 0x42, 0x31]);
 const MAGIC_LEN = 4;
 const META_LEN_FIELD = 4;
 const GRANT_LEN_FIELD = 2;
-const HEADER_OVERHEAD = MAGIC_LEN + META_LEN_FIELD; // 8
+const HEADER_OVERHEAD = MAGIC_LEN + META_LEN_FIELD;
 
 const MAX_META_BYTES = 16 * 1024;
 const MAX_GRANT_BYTES = 128;
@@ -44,8 +34,7 @@ const HEX64 = /^[0-9a-f]{64}$/;
 
 function isGrantByte(b: number): boolean {
 	if (b < 0x21 || b > 0x7e) return false;
-	if (b === 0x22 || b === 0x3a || b === 0x5c) return false;
-	return true;
+	return b !== 0x22 && b !== 0x3a && b !== 0x5c;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +73,6 @@ export type Pab1ErrorCode =
 	| "PAB1_ERR_NODE_LIMIT"
 	| "PAB1_ERR_DEPTH_LIMIT"
 	| "PAB1_ERR_META_CYCLE"
-	| "PAB1_ERR_META_ALIAS"
 	| "PAB1_ERR_META_DESCRIPTOR"
 	| "PAB1_ERR_META_NONENUMERABLE"
 	| "PAB1_ERR_META_PROTOTYPE"
@@ -93,10 +81,11 @@ export type Pab1ErrorCode =
 	| "PAB1_ERR_URL_PRIVATE"
 	| "PAB1_ERR_URL_HOST"
 	| "PAB1_ERR_GRANT_FORGE"
-	| "PAB1_ERR_CALLBACK_FAILED";
+	| "PAB1_ERR_CALLBACK_FAILED"
+	| "PAB1_ERR_INPUT_SUBARRAY";
 
 // ---------------------------------------------------------------------------
-// Discriminated Result types — frozen
+// Result types
 // ---------------------------------------------------------------------------
 
 export interface OkResult<T> {
@@ -112,7 +101,6 @@ export type Result<T> = OkResult<T> | FailResult;
 function ok<T>(value: T): OkResult<T> {
 	return Object.freeze({ ok: true as const, value }) as OkResult<T>;
 }
-
 function fail(code: Pab1ErrorCode): FailResult {
 	return Object.freeze({ ok: false as const, code }) as FailResult;
 }
@@ -121,37 +109,37 @@ function fail(code: Pab1ErrorCode): FailResult {
 // Genuine Uint8Array detection
 // ---------------------------------------------------------------------------
 
-/** True for a real Uint8Array with exact Uint8Array prototype and non-shared ArrayBuffer. */
 function isGenuineUint8Array(v: unknown): v is Uint8Array {
-	if (v === null || v === undefined) return false;
-	if (typeof v !== "object") return false;
+	if (!v || typeof v !== "object") return false;
 	try {
 		if (Object.getPrototypeOf(v) !== Uint8Array.prototype) return false;
 		const buf = (v as Uint8Array).buffer;
 		const bufProto = Object.getPrototypeOf(buf);
-		return bufProto === ArrayBuffer.prototype;
+		if (bufProto !== ArrayBuffer.prototype) return false;
+		// Require exact byte views: byteOffset===0, byteLength===buffer.byteLength
+		const u = v as Uint8Array;
+		if (u.byteOffset !== 0) return false;
+		const ab = buf as ArrayBuffer;
+		if (u.byteLength !== ab.byteLength) return false;
+		return true;
 	} catch {
 		return false;
 	}
 }
 
-/** Check if a genuine Uint8Array's backing buffer is detached. */
-function isDetached(buf: Uint8Array): boolean {
+/** True if the backing buffer is detached. Uses an intrinsic that throws. */
+function isDetachedBuffer(buf: ArrayBuffer): boolean {
 	try {
-		// Detached ArrayBuffer throws when byteLength is accessed on some engines
-		const ab = buf.buffer;
 		// eslint-disable-next-line @typescript-eslint/no-unused-expressions
-		ab.byteLength;
-		// Also check that the Uint8Array view is still valid
-		if (buf.byteLength === 0 && buf.length === 0) {
-			// All-zero-length could be legitimately empty; check buffer byteLength
-			const bl = ab.byteLength;
-			if (bl === 0) return false; // empty but valid
-		}
+		buf.slice(0, 0);
 		return false;
 	} catch {
 		return true;
 	}
+}
+
+function isDetachedView(v: Uint8Array): boolean {
+	return isDetachedBuffer(v.buffer as ArrayBuffer);
 }
 
 // ---------------------------------------------------------------------------
@@ -161,15 +149,14 @@ function isDetached(buf: Uint8Array): boolean {
 function safeZero(buf: Uint8Array | null | undefined): void {
 	if (!buf) return;
 	try {
-		if (buf.byteLength > 0 && isGenuineUint8Array(buf) && !isDetached(buf)) {
+		if (buf.byteLength > 0 && isGenuineUint8Array(buf) && !isDetachedView(buf)) {
 			buf.fill(0);
 		}
 	} catch {
-		// best effort
+		/* best effort */
 	}
 }
 
-/** Copy bytes into a fresh ArrayBuffer-backed Uint8Array. */
 function _copyBytes(source: Uint8Array): Uint8Array {
 	const out = new Uint8Array(source.byteLength);
 	out.set(source);
@@ -177,13 +164,31 @@ function _copyBytes(source: Uint8Array): Uint8Array {
 }
 
 /** Copy grant bytes and erase original if genuine. Returns Result. */
-function copyGrant(grant: Uint8Array): Result<Uint8Array> {
+function copyGrant(grant: unknown): Result<Uint8Array> {
 	if (!isGenuineUint8Array(grant)) {
+		if (grant === null || grant === undefined) return fail("PAB1_ERR_INVALID_ARGUMENT");
+		if (typeof grant === "object") {
+			try {
+				const proto = Object.getPrototypeOf(grant);
+				if (typeof Buffer !== "undefined" && proto === Buffer.prototype) return fail("PAB1_ERR_INPUT_SUBCLASS");
+				if (proto === Uint8Array.prototype) {
+					const buf = (grant as Uint8Array).buffer;
+					if (
+						typeof SharedArrayBuffer !== "undefined" &&
+						Object.getPrototypeOf(buf) === SharedArrayBuffer.prototype
+					)
+						return fail("PAB1_ERR_INPUT_SHARED");
+					const u = grant as Uint8Array;
+					if (u.byteOffset !== 0 || u.byteLength !== buf.byteLength) return fail("PAB1_ERR_INPUT_SUBARRAY");
+					return fail("PAB1_ERR_INPUT_DETACHED");
+				}
+			} catch {
+				return fail("PAB1_ERR_INPUT_PROXY");
+			}
+		}
 		return fail("PAB1_ERR_INVALID_ARGUMENT");
 	}
-	if (isDetached(grant)) {
-		return fail("PAB1_ERR_INPUT_DETACHED");
-	}
+	if (isDetachedView(grant)) return fail("PAB1_ERR_INPUT_DETACHED");
 	const out = new Uint8Array(grant.byteLength);
 	try {
 		out.set(grant);
@@ -195,12 +200,11 @@ function copyGrant(grant: Uint8Array): Result<Uint8Array> {
 }
 
 // ---------------------------------------------------------------------------
-// OneUseBootstrapGrant — module-private implementation
+// OneUseBootstrapGrant
 // ---------------------------------------------------------------------------
 
 const grantBrandSet = new WeakSet<object>();
 
-/** Public interface for a one-time-use bootstrap grant. */
 export interface IOneUseBootstrapGrant {
 	readonly byteLength: number;
 	readonly status: "ready" | "consumed" | "disposed";
@@ -215,32 +219,26 @@ export interface IOneUseBootstrapGrant {
 class OneUseBootstrapGrantImpl implements IOneUseBootstrapGrant {
 	#bytes: Uint8Array | null;
 	#state: "ready" | "consumed" | "disposed";
-
 	constructor(bytes: Uint8Array) {
 		this.#bytes = new Uint8Array(bytes);
 		this.#state = "ready";
 		grantBrandSet.add(this);
 		Object.freeze(this);
 	}
-
 	get byteLength(): number {
 		return this.#bytes?.byteLength ?? 0;
 	}
-
 	get status(): "ready" | "consumed" | "disposed" {
 		return this.#state;
 	}
-
 	takeBytes(): Result<Uint8Array> {
-		if (this.#state !== "ready") {
+		if (this.#state !== "ready")
 			return fail(this.#state === "consumed" ? "PAB1_ERR_GRANT_CONSUMED" : "PAB1_ERR_GRANT_DISPOSED");
-		}
 		this.#state = "consumed";
 		const out = this.#bytes!;
 		this.#bytes = null;
 		return ok(out);
 	}
-
 	dispose(): OkResult<undefined> {
 		if (this.#state === "ready" && this.#bytes !== null) {
 			safeZero(this.#bytes);
@@ -249,7 +247,6 @@ class OneUseBootstrapGrantImpl implements IOneUseBootstrapGrant {
 		}
 		return ok(undefined);
 	}
-
 	toJSON(): undefined {
 		return undefined;
 	}
@@ -262,12 +259,8 @@ class OneUseBootstrapGrantImpl implements IOneUseBootstrapGrant {
 	[Symbol.toPrimitive](): string {
 		return "[OneUseBootstrapGrant]";
 	}
-	[Symbol.for("nodejs.util.inspect.custom")](): string {
-		return "[OneUseBootstrapGrant]";
-	}
 }
 
-/** Safe brand check: returns false for any non-object, Proxy that traps getPrototypeOf, etc. */
 function isBrandedGrant(v: unknown): v is IOneUseBootstrapGrant {
 	if (!v || typeof v !== "object") return false;
 	try {
@@ -282,36 +275,32 @@ function createGrant(bytes: Uint8Array): IOneUseBootstrapGrant {
 }
 
 // ---------------------------------------------------------------------------
-// Safe ID / number validation
+// ID / number helpers
 // ---------------------------------------------------------------------------
 
-function isValidSafeId(id: unknown): id is string {
-	return typeof id === "string" && id.length > 0 && id.length <= MAX_ID_LENGTH && SAFE_ID_RE.test(id);
+function isValidSafeId(v: unknown): v is string {
+	return typeof v === "string" && v.length > 0 && v.length <= MAX_ID_LENGTH && SAFE_ID_RE.test(v);
 }
-
 function isNonNegativeInt(v: unknown): v is number {
 	return typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 }
-
 function isPositiveInt(v: unknown): v is number {
 	return typeof v === "number" && Number.isSafeInteger(v) && v > 0;
 }
 
 // ---------------------------------------------------------------------------
-// URL validation
+// URL validation — reject ALL literal IP addresses
 // ---------------------------------------------------------------------------
 
 function isValidRelayUrl(url: unknown): Pab1ErrorCode | undefined {
 	if (typeof url !== "string") return "PAB1_ERR_RELAY_URL";
 	if (!url.startsWith("wss://")) return "PAB1_ERR_RELAY_URL";
-
 	let parsed: URL;
 	try {
 		parsed = new URL(url);
 	} catch {
 		return "PAB1_ERR_RELAY_URL";
 	}
-
 	if (parsed.protocol !== "wss:") return "PAB1_ERR_RELAY_URL";
 	if (parsed.username || parsed.password) return "PAB1_ERR_RELAY_URL";
 	if (parsed.search || parsed.hash) return "PAB1_ERR_RELAY_URL";
@@ -320,52 +309,34 @@ function isValidRelayUrl(url: unknown): Pab1ErrorCode | undefined {
 	const hostname = parsed.hostname;
 	if (!hostname || hostname.length > MAX_HOSTNAME_LENGTH) return "PAB1_ERR_URL_HOST";
 
+	// Reject ALL literal IPv4
+	if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) return "PAB1_ERR_URL_HOST";
+	// Reject ALL bracketed IPv6
+	if (hostname.startsWith("[") && hostname.endsWith("]")) return "PAB1_ERR_URL_HOST";
+
 	const hn = hostname.toLowerCase();
 	if (hn === "localhost" || hn.endsWith(".localhost") || hn.endsWith(".local")) return "PAB1_ERR_URL_PRIVATE";
 
-	// Reject all literal IPv4 patterns
-	if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) {
-		if (/^127\./.test(hostname)) return "PAB1_ERR_URL_PRIVATE";
-		if (/^169\.254\./.test(hostname)) return "PAB1_ERR_URL_PRIVATE";
-		if (/^10\./.test(hostname)) return "PAB1_ERR_URL_PRIVATE";
-		if (/^172\.(1[6-9]|2\d|3[01])\./.test(hostname)) return "PAB1_ERR_URL_PRIVATE";
-		if (/^192\.168\./.test(hostname)) return "PAB1_ERR_URL_PRIVATE";
-		// CGNAT 100.64.0.0/10, 198.18.0.0/15, multicast 224-239.x.x.x
-		if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(hostname)) return "PAB1_ERR_URL_PRIVATE";
-		if (/^198\.1[89]\./.test(hostname)) return "PAB1_ERR_URL_PRIVATE";
-		if (/^22[4-9]\.|^23[0-9]\./.test(hostname)) return "PAB1_ERR_URL_PRIVATE";
+	// DNS label validation
+	const labels = hostname.split(".");
+	for (const label of labels) {
+		if (label.length === 0 || label.length > 63) return "PAB1_ERR_URL_HOST";
+		if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/i.test(label)) return "PAB1_ERR_URL_HOST";
 	}
 
-	// Bracketed IPv6
-	if (hostname.startsWith("[")) {
-		const ipv6 = hostname.slice(1, -1);
-		if (ipv6 === "::1") return "PAB1_ERR_URL_PRIVATE";
-		const lc6 = ipv6.toLowerCase();
-		if (lc6.startsWith("fe80")) return "PAB1_ERR_URL_PRIVATE";
-		if (lc6.startsWith("fc") || lc6.startsWith("fd")) return "PAB1_ERR_URL_PRIVATE";
-	}
-
-	// DNS label validation for non-IP hostnames
-	if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname) && !hostname.startsWith("[")) {
-		const labels = hostname.split(".");
-		for (const label of labels) {
-			if (label.length === 0 || label.length > 63) return "PAB1_ERR_URL_HOST";
-			if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/i.test(label)) return "PAB1_ERR_URL_HOST";
-		}
-	}
-
-	// Path validation: safe segments, nonempty, bounded
-	if (!parsed.pathname || parsed.pathname === "/") return "PAB1_ERR_URL_PATH";
-	if (parsed.pathname.length > MAX_URL_PATH_LENGTH) return "PAB1_ERR_URL_PATH";
-	// Path segments: only unreserved ASCII characters, no percent-encoding,
-	// no dot segments. Prime Tunnel uses DNS hostnames only, no literal IPs.
-	const segments = parsed.pathname.split("/").filter(Boolean);
-	for (const seg of segments) {
-		if (seg === ".." || seg === ".") return "PAB1_ERR_URL_PATH";
-		if (seg.length === 0) return "PAB1_ERR_URL_PATH";
-		for (let i = 0; i < seg.length; i++) {
-			const cp = seg.charCodeAt(i);
-			// Allow A-Z, a-z, 0-9, ., _, ~, -
+	// Path: nonempty, safe segments, no empty/repeated slashes, no dot segments
+	const path = parsed.pathname;
+	if (!path || path === "/") return "PAB1_ERR_URL_PATH";
+	if (path.length > MAX_URL_PATH_LENGTH) return "PAB1_ERR_URL_PATH";
+	const segments = path.split("/");
+	// path starts with / so first is ""
+	if (segments[0] !== "") return "PAB1_ERR_URL_PATH";
+	for (let i = 1; i < segments.length; i++) {
+		const s = segments[i];
+		if (s.length === 0) return "PAB1_ERR_URL_PATH";
+		if (s === "." || s === "..") return "PAB1_ERR_URL_PATH";
+		for (let j = 0; j < s.length; j++) {
+			const cp = s.charCodeAt(j);
 			if (
 				!(cp >= 0x41 && cp <= 0x5a) &&
 				!(cp >= 0x61 && cp <= 0x7a) &&
@@ -379,10 +350,8 @@ function isValidRelayUrl(url: unknown): Pab1ErrorCode | undefined {
 		}
 	}
 
-	// Canonical URL equality
-	const canUrl = `wss://${hostname}${parsed.pathname}`;
+	const canUrl = `wss://${hostname}${path}`;
 	if (canUrl !== url) return "PAB1_ERR_URL_CANONICAL";
-
 	return undefined;
 }
 
@@ -396,7 +365,6 @@ export interface BuildIdentityOpts {
 	readonly daemonSchemaRevision: number;
 	readonly appVersion?: string;
 }
-
 export interface MetadataOpts {
 	readonly hostId: string;
 	readonly generation: string;
@@ -407,47 +375,91 @@ export interface MetadataOpts {
 }
 
 // ---------------------------------------------------------------------------
-// Node/depth preflight
+// Snapshot-based metadata validation — copies descriptor values, never re-reads
 // ---------------------------------------------------------------------------
 
-function preflightNodeDepth(value: unknown, depth: number, budget: { nodes: number }): Pab1ErrorCode | undefined {
-	if (depth > MAX_DEPTH) return "PAB1_ERR_DEPTH_LIMIT";
-	if (budget.nodes <= 0) return "PAB1_ERR_NODE_LIMIT";
+/** Snapshot the own enumerable data descriptor values of a plain object into a fresh structure. */
+/**
+ * Recursively snapshot a value through own data descriptors only.
+ * Returns a fresh structure with no references to the original objects,
+ * rejecting proxies/getters/non-enumerables/non-plain prototypes/symbols,
+ * cycles/aliases, and depth/node overflow during the walk.
+ */
+function snapshotValue(v: unknown, seen: Set<object>, depth: number, budget: { nodes: number }): Result<unknown> {
+	if (depth > MAX_DEPTH) return fail("PAB1_ERR_DEPTH_LIMIT");
+	if (budget.nodes <= 0) return fail("PAB1_ERR_NODE_LIMIT");
 	budget.nodes -= 1;
 
-	if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
-		return undefined;
+	if (v === null || typeof v === "boolean" || typeof v === "number" || typeof v === "string") {
+		return ok(v);
 	}
-	if (Array.isArray(value)) {
-		for (let i = 0; i < value.length; i++) {
-			const e = preflightNodeDepth(value[i], depth + 1, budget);
-			if (e) return e;
+	if (Array.isArray(v)) {
+		if (seen.has(v as object)) return fail("PAB1_ERR_META_CYCLE");
+		seen.add(v as object);
+		const arr: unknown[] = [];
+		for (let i = 0; i < v.length; i++) {
+			const e = snapshotValue(v[i], seen, depth + 1, budget);
+			if (!e.ok) return e;
+			arr.push(e.value);
 		}
-		return undefined;
+		return ok(arr);
 	}
-	if (typeof value === "object") {
-		const keys = Object.getOwnPropertyNames(value);
+	if (typeof v === "object") {
+		if (seen.has(v as object)) return fail("PAB1_ERR_META_CYCLE");
+		seen.add(v as object);
+
+		let proto: object | null;
+		try {
+			proto = Object.getPrototypeOf(v);
+		} catch {
+			return fail("PAB1_ERR_META_PROTOTYPE");
+		}
+		if (proto !== null && proto !== Object.prototype) return fail("PAB1_ERR_META_PROTOTYPE");
+
+		try {
+			if (Object.getOwnPropertySymbols(v).length > 0) return fail("PAB1_ERR_META_SYMBOL");
+		} catch {
+			return fail("PAB1_ERR_META_DESCRIPTOR");
+		}
+
+		let keys: string[];
+		let descs: PropertyDescriptorMap;
+		try {
+			keys = Object.getOwnPropertyNames(v);
+			descs = Object.getOwnPropertyDescriptors(v);
+		} catch {
+			return fail("PAB1_ERR_META_DESCRIPTOR");
+		}
+
+		const out: Record<string, unknown> = {};
 		for (const k of keys) {
-			let v: unknown;
-			try {
-				v = (value as Record<string, unknown>)[k];
-			} catch {
-				return "PAB1_ERR_META_DESCRIPTOR";
-			}
-			const e = preflightNodeDepth(v, depth + 1, budget);
-			if (e) return e;
+			const d = descs[k];
+			if (!d) return fail("PAB1_ERR_META_DESCRIPTOR");
+			if (d.get || d.set) return fail("PAB1_ERR_META_DESCRIPTOR");
+			if (!d.enumerable) return fail("PAB1_ERR_META_NONENUMERABLE");
+			const sub = snapshotValue(d.value, seen, depth + 1, budget);
+			if (!sub.ok) return sub;
+			out[k] = sub.value;
 		}
-		return undefined;
+		return ok(out);
 	}
-	return "PAB1_ERR_META_TYPE";
+	return fail("PAB1_ERR_META_TYPE");
 }
 
-// ---------------------------------------------------------------------------
-// Safe plain-object metadata acquisition
-// ---------------------------------------------------------------------------
+/**
+ * Full metadata validation: recursively snapshot descriptor values,
+ * then validate the fresh snapshot. Never re-reads the original objects.
+ */
+function sanitizeMetadata(raw: unknown) {
+	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return fail("PAB1_ERR_INVALID_ARGUMENT");
+	const snapResult = snapshotValue(raw, new Set<object>(), 0, { nodes: MAX_NODES });
+	if (!snapResult.ok) return snapResult;
+	const snap = snapResult.value as Record<string, unknown>;
+	return validateMetadataSnapshot(snap);
+}
 
-/** Safely acquire metadata as a fresh plain-object copy, rejecting proxies/getters/symbols/non-plain-protos. */
-function sanitizeMetadata(raw: unknown): Result<{
+/** Validate a fresh snapshot of metadata (never re-reads the original). */
+function validateMetadataSnapshot(snapshot: Record<string, unknown>): Result<{
 	version: number;
 	hostId: string;
 	generation: string;
@@ -461,53 +473,6 @@ function sanitizeMetadata(raw: unknown): Result<{
 	};
 	connectTimeoutMs: number;
 }> {
-	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-		return fail("PAB1_ERR_INVALID_ARGUMENT");
-	}
-
-	// Reject non-plain prototype
-	let proto: object | null;
-	try {
-		proto = Object.getPrototypeOf(raw);
-	} catch {
-		return fail("PAB1_ERR_META_PROTOTYPE");
-	}
-	if (proto !== null && proto !== Object.prototype) return fail("PAB1_ERR_META_PROTOTYPE");
-
-	// Reject symbols
-	try {
-		if (Object.getOwnPropertySymbols(raw).length > 0) return fail("PAB1_ERR_META_SYMBOL");
-	} catch {
-		return fail("PAB1_ERR_META_DESCRIPTOR");
-	}
-
-	// Check all own enumerable data descriptors
-	let ownKeys: string[];
-	let descs: PropertyDescriptorMap;
-	try {
-		ownKeys = Object.getOwnPropertyNames(raw);
-		descs = Object.getOwnPropertyDescriptors(raw);
-	} catch {
-		return fail("PAB1_ERR_META_DESCRIPTOR");
-	}
-	for (const k of ownKeys) {
-		const d = descs[k];
-		if (!d) return fail("PAB1_ERR_META_DESCRIPTOR");
-		if (d.get || d.set) return fail("PAB1_ERR_META_DESCRIPTOR");
-		if (!d.enumerable) return fail("PAB1_ERR_META_NONENUMERABLE");
-	}
-
-	// Node/depth preflight
-	const budget = { nodes: MAX_NODES };
-	const pf = preflightNodeDepth(raw, 0, budget);
-	if (pf) return fail(pf);
-
-	// Cycle/alias check
-	const seen = new Set<object>();
-	if (hasCycleOrAlias(raw, seen)) return fail("PAB1_ERR_META_CYCLE");
-
-	// Read and validate fields
-	const obj = raw as Record<string, unknown>;
 	const knownKeys = new Set([
 		"version",
 		"hostId",
@@ -517,123 +482,71 @@ function sanitizeMetadata(raw: unknown): Result<{
 		"buildIdentity",
 		"connectTimeoutMs",
 	]);
-	for (const k of ownKeys) {
+	const snapshotKeys = Object.getOwnPropertyNames(snapshot);
+	for (const k of snapshotKeys) {
 		if (!knownKeys.has(k)) return fail("PAB1_ERR_META_UNKNOWN");
 	}
-	// Check all required keys present
 	const required = new Set(["hostId", "generation", "sessionId", "relayUrl", "buildIdentity", "connectTimeoutMs"]);
 	for (const k of required) {
-		if (!ownKeys.includes(k)) return fail("PAB1_ERR_META_MISSING");
+		if (!snapshotKeys.includes(k)) return fail("PAB1_ERR_META_MISSING");
 	}
 
-	// version is required in parsed JSON (decode path) but optional in encode input
-	if (ownKeys.includes("version") && obj.version !== 1) return fail("PAB1_ERR_VERSION");
-	if (!isValidSafeId(obj.hostId)) return fail("PAB1_ERR_ID");
-	if (!isValidSafeId(obj.generation)) return fail("PAB1_ERR_ID");
-	if (!isValidSafeId(obj.sessionId)) return fail("PAB1_ERR_ID");
+	if (snapshotKeys.includes("version") && snapshot.version !== 1) return fail("PAB1_ERR_VERSION");
 
-	const urlErr = isValidRelayUrl(obj.relayUrl);
+	if (!isValidSafeId(snapshot.hostId)) return fail("PAB1_ERR_ID");
+	if (!isValidSafeId(snapshot.generation)) return fail("PAB1_ERR_ID");
+	if (!isValidSafeId(snapshot.sessionId)) return fail("PAB1_ERR_ID");
+
+	const urlErr = isValidRelayUrl(snapshot.relayUrl);
 	if (urlErr) return fail(urlErr);
 
-	// Validate buildIdentity
-	if (typeof obj.buildIdentity !== "object" || obj.buildIdentity === null || Array.isArray(obj.buildIdentity)) {
+	// buildIdentity — snapshot is a fresh plain object
+	const bi = snapshot.buildIdentity;
+	if (typeof bi !== "object" || bi === null || Array.isArray(bi)) return fail("PAB1_ERR_BUILD_IDENTITY");
+	const biSnapshot = bi as Record<string, unknown>;
+
+	const buildKnown = new Set(["buildId", "daemonProtocolVersion", "daemonSchemaRevision", "appVersion"]);
+	const biKeys = Object.getOwnPropertyNames(biSnapshot);
+	for (const k of biKeys) {
+		if (!buildKnown.has(k)) return fail("PAB1_ERR_META_UNKNOWN");
+	}
+
+	if (typeof biSnapshot.buildId !== "string" || !HEX64.test(biSnapshot.buildId))
 		return fail("PAB1_ERR_BUILD_IDENTITY");
-	}
-	const bi = obj.buildIdentity as Record<string, unknown>;
-
-	// Check buildIdentity descriptors/prototype/symbols
-	try {
-		const biProto = Object.getPrototypeOf(bi);
-		if (biProto !== null && biProto !== Object.prototype) return fail("PAB1_ERR_BUILD_IDENTITY");
-		if (Object.getOwnPropertySymbols(bi).length > 0) return fail("PAB1_ERR_BUILD_IDENTITY");
-		const biDescs = Object.getOwnPropertyDescriptors(bi);
-		const biKeys = Object.getOwnPropertyNames(bi);
-		for (const k of biKeys) {
-			const d = biDescs[k];
-			if (!d || d.get || d.set) return fail("PAB1_ERR_BUILD_IDENTITY");
-			if (!d.enumerable) return fail("PAB1_ERR_BUILD_IDENTITY");
-		}
-	} catch {
+	if (!isNonNegativeInt(biSnapshot.daemonProtocolVersion)) return fail("PAB1_ERR_BUILD_IDENTITY");
+	if (!isNonNegativeInt(biSnapshot.daemonSchemaRevision)) return fail("PAB1_ERR_BUILD_IDENTITY");
+	if (biSnapshot.appVersion !== undefined && !isValidSafeId(biSnapshot.appVersion))
 		return fail("PAB1_ERR_BUILD_IDENTITY");
-	}
 
-	const buildKnownKeys = new Set(["buildId", "daemonProtocolVersion", "daemonSchemaRevision", "appVersion"]);
-	for (const k of Object.getOwnPropertyNames(bi)) {
-		if (!buildKnownKeys.has(k)) return fail("PAB1_ERR_META_UNKNOWN");
-	}
+	if (!isPositiveInt(snapshot.connectTimeoutMs) || snapshot.connectTimeoutMs > MAX_CONNECT_TIMEOUT_MS)
+		return fail("PAB1_ERR_TIMEOUT");
 
-	if (typeof bi.buildId !== "string" || !HEX64.test(bi.buildId)) return fail("PAB1_ERR_BUILD_IDENTITY");
-	if (!isNonNegativeInt(bi.daemonProtocolVersion)) return fail("PAB1_ERR_BUILD_IDENTITY");
-	if (!isNonNegativeInt(bi.daemonSchemaRevision)) return fail("PAB1_ERR_BUILD_IDENTITY");
-	if (bi.appVersion !== undefined) {
-		if (!isValidSafeId(bi.appVersion)) return fail("PAB1_ERR_BUILD_IDENTITY");
-	}
-
-	if (!isPositiveInt(obj.connectTimeoutMs)) return fail("PAB1_ERR_TIMEOUT");
-	if (obj.connectTimeoutMs > MAX_CONNECT_TIMEOUT_MS) return fail("PAB1_ERR_TIMEOUT");
-
-	const result: {
-		version: number;
-		hostId: string;
-		generation: string;
-		sessionId: string;
-		relayUrl: string;
-		buildIdentity: {
-			buildId: string;
-			daemonProtocolVersion: number;
-			daemonSchemaRevision: number;
-			appVersion?: string;
-		};
-		connectTimeoutMs: number;
-	} = {
+	const r = {
 		version: 1,
-		hostId: obj.hostId as string,
-		generation: obj.generation as string,
-		sessionId: obj.sessionId as string,
-		relayUrl: obj.relayUrl as string,
+		hostId: snapshot.hostId as string,
+		generation: snapshot.generation as string,
+		sessionId: snapshot.sessionId as string,
+		relayUrl: snapshot.relayUrl as string,
 		buildIdentity:
-			bi.appVersion !== undefined
+			biSnapshot.appVersion !== undefined
 				? {
-						buildId: bi.buildId as string,
-						daemonProtocolVersion: bi.daemonProtocolVersion as number,
-						daemonSchemaRevision: bi.daemonSchemaRevision as number,
-						appVersion: bi.appVersion as string,
+						buildId: biSnapshot.buildId as string,
+						daemonProtocolVersion: biSnapshot.daemonProtocolVersion as number,
+						daemonSchemaRevision: biSnapshot.daemonSchemaRevision as number,
+						appVersion: biSnapshot.appVersion as string,
 					}
 				: {
-						buildId: bi.buildId as string,
-						daemonProtocolVersion: bi.daemonProtocolVersion as number,
-						daemonSchemaRevision: bi.daemonSchemaRevision as number,
+						buildId: biSnapshot.buildId as string,
+						daemonProtocolVersion: biSnapshot.daemonProtocolVersion as number,
+						daemonSchemaRevision: biSnapshot.daemonSchemaRevision as number,
 					},
-		connectTimeoutMs: obj.connectTimeoutMs as number,
+		connectTimeoutMs: snapshot.connectTimeoutMs as number,
 	};
-
-	return ok(result);
-}
-
-function hasCycleOrAlias(value: unknown, seen: Set<object>): boolean {
-	if (value === null || typeof value !== "object") return false;
-	try {
-		if (seen.has(value as object)) return true;
-		seen.add(value as object);
-		if (Array.isArray(value)) {
-			for (let i = 0; i < value.length; i++) {
-				if (hasCycleOrAlias(value[i], seen)) return true;
-			}
-		} else if (typeof value === "object") {
-			const keys = Object.getOwnPropertyNames(value);
-			for (const k of keys) {
-				const v = (value as Record<string, unknown>)[k];
-				if (hasCycleOrAlias(v, seen)) return true;
-			}
-		}
-		return false;
-	} catch {
-		return true;
-	}
+	return ok(r);
 }
 
 // ---------------------------------------------------------------------------
-// Canonical JSON
+// Canonical JSON builder
 // ---------------------------------------------------------------------------
 
 function buildCanonicalMetadataJson(meta: {
@@ -642,12 +555,7 @@ function buildCanonicalMetadataJson(meta: {
 	generation: string;
 	sessionId: string;
 	relayUrl: string;
-	buildIdentity: {
-		buildId: string;
-		daemonProtocolVersion: number;
-		daemonSchemaRevision: number;
-		appVersion?: string;
-	};
+	buildIdentity: { buildId: string; daemonProtocolVersion: number; daemonSchemaRevision: number; appVersion?: string };
 	connectTimeoutMs: number;
 }): string {
 	const bi: Record<string, unknown> = {
@@ -655,9 +563,7 @@ function buildCanonicalMetadataJson(meta: {
 		daemonProtocolVersion: meta.buildIdentity.daemonProtocolVersion,
 		daemonSchemaRevision: meta.buildIdentity.daemonSchemaRevision,
 	};
-	if (meta.buildIdentity.appVersion !== undefined) {
-		bi.appVersion = meta.buildIdentity.appVersion;
-	}
+	if (meta.buildIdentity.appVersion !== undefined) bi.appVersion = meta.buildIdentity.appVersion;
 	const obj: Record<string, unknown> = {
 		version: 1,
 		hostId: meta.hostId,
@@ -674,17 +580,11 @@ function buildCanonicalMetadataJson(meta: {
 // withBootstrapGrant
 // ---------------------------------------------------------------------------
 
-/**
- * Hand owned grant bytes to a callback, then always erase/dispose.
- * Callback errors are fixed-mapped to CALLBACK_FAILED.
- */
 export async function withBootstrapGrant<T>(
 	grant: IOneUseBootstrapGrant,
 	fn: (bytes: Uint8Array) => Promise<T>,
 ): Promise<Result<T>> {
-	if (!isBrandedGrant(grant)) {
-		return fail("PAB1_ERR_INVALID_BRAND");
-	}
+	if (!isBrandedGrant(grant)) return fail("PAB1_ERR_INVALID_BRAND");
 	let bytes: Uint8Array | undefined;
 	try {
 		const taken = grant.takeBytes();
@@ -701,9 +601,7 @@ export async function withBootstrapGrant<T>(
 		}
 		return ok(result);
 	} finally {
-		if (bytes !== undefined) {
-			safeZero(bytes);
-		}
+		if (bytes !== undefined) safeZero(bytes);
 		grant.dispose();
 	}
 }
@@ -717,66 +615,115 @@ export interface EncodeSandboxBootstrapPayloadOpts {
 	readonly grant: Uint8Array;
 }
 
-/**
- * Encode a PAB1 sandbox bootstrap payload.
- *
- * Safely acquires metadata descriptors, copies+erases grant immediately,
- * then validates metadata schema. Returns fixed Result.
- */
 export function encodeSandboxBootstrapPayload(opts: EncodeSandboxBootstrapPayloadOpts): Result<Uint8Array> {
-	// --- Acquire grant bytes first (copy+erase immediately) ---
 	let grantCopy: Uint8Array | undefined;
 
 	try {
-		if (typeof opts !== "object" || opts === null || Array.isArray(opts)) {
-			return fail("PAB1_ERR_INVALID_ARGUMENT");
-		}
-		// Check opts prototype
-		let optsProto: object | null;
-		try {
-			optsProto = Object.getPrototypeOf(opts);
-		} catch {
-			return fail("PAB1_ERR_META_DESCRIPTOR");
-		}
-		if (optsProto !== null && optsProto !== Object.prototype) return fail("PAB1_ERR_META_DESCRIPTOR");
+		if (typeof opts !== "object" || opts === null || Array.isArray(opts)) return fail("PAB1_ERR_INVALID_ARGUMENT");
 
-		// Check opts own enumerable data descriptors
-		let optsDescs: PropertyDescriptorMap;
-		let optsKeys: string[];
+		// Get descriptors first so we can acquire+erase grant ASAP
+		let ownKeys: string[];
+		let descs: PropertyDescriptorMap;
 		try {
-			optsKeys = Object.getOwnPropertyNames(opts);
-			optsDescs = Object.getOwnPropertyDescriptors(opts);
+			ownKeys = Object.getOwnPropertyNames(opts);
+			descs = Object.getOwnPropertyDescriptors(opts);
 		} catch {
 			return fail("PAB1_ERR_META_DESCRIPTOR");
 		}
-		for (const k of optsKeys) {
-			const d = optsDescs[k];
-			if (!d) return fail("PAB1_ERR_META_DESCRIPTOR");
-			if (d.get || d.set) return fail("PAB1_ERR_META_DESCRIPTOR");
-			if (!d.enumerable) return fail("PAB1_ERR_META_NONENUMERABLE");
+
+		// Acquire and erase grant from descriptor.value BEFORE any other validation
+		// This ensures grant is zeroed even if opts has structural issues later.
+		let grantValue: unknown;
+		let grantDescOk = false;
+		const grantIdx = ownKeys.indexOf("grant");
+		if (grantIdx >= 0) {
+			const gd = descs.grant!;
+			if (gd && !gd.get && !gd.set && gd.enumerable) {
+				grantDescOk = true;
+				try {
+					grantValue = gd.value;
+				} catch {
+					/* best effort */
+				}
+			}
 		}
-		const expectedOptsKeys = new Set(["metadata", "grant"]);
-		for (const k of optsKeys) {
-			if (!expectedOptsKeys.has(k)) return fail("PAB1_ERR_META_UNKNOWN");
+		if (grantDescOk) {
+			const grantResult = copyGrant(grantValue);
+			if (grantResult.ok) {
+				grantCopy = grantResult.value;
+			} // else grant was not a genuine Uint8Array; no need to copy
 		}
-		if (!optsKeys.includes("metadata") || !optsKeys.includes("grant")) {
+
+		// Now validate the rest of opts structure
+		let proto: object | null;
+		try {
+			proto = Object.getPrototypeOf(opts);
+		} catch {
+			safeZero(grantCopy);
+			grantCopy = undefined;
+			return fail("PAB1_ERR_META_DESCRIPTOR");
+		}
+		if (proto !== null && proto !== Object.prototype) {
+			safeZero(grantCopy);
+			grantCopy = undefined;
+			return fail("PAB1_ERR_META_PROTOTYPE");
+		}
+		try {
+			if (Object.getOwnPropertySymbols(opts).length > 0) {
+				safeZero(grantCopy);
+				grantCopy = undefined;
+				return fail("PAB1_ERR_META_SYMBOL");
+			}
+		} catch {
+			safeZero(grantCopy);
+			grantCopy = undefined;
+			return fail("PAB1_ERR_META_DESCRIPTOR");
+		}
+
+		for (const k of ownKeys) {
+			const d = descs[k];
+			if (!d) {
+				safeZero(grantCopy);
+				grantCopy = undefined;
+				return fail("PAB1_ERR_META_DESCRIPTOR");
+			}
+			if (d.get || d.set) {
+				safeZero(grantCopy);
+				grantCopy = undefined;
+				return fail("PAB1_ERR_META_DESCRIPTOR");
+			}
+			if (!d.enumerable) {
+				safeZero(grantCopy);
+				grantCopy = undefined;
+				return fail("PAB1_ERR_META_NONENUMERABLE");
+			}
+		}
+		const expected = new Set(["metadata", "grant"]);
+		for (const k of ownKeys) {
+			if (!expected.has(k)) {
+				safeZero(grantCopy);
+				grantCopy = undefined;
+				return fail("PAB1_ERR_META_UNKNOWN");
+			}
+		}
+		if (!ownKeys.includes("metadata") || !ownKeys.includes("grant")) {
+			safeZero(grantCopy);
+			grantCopy = undefined;
 			return fail("PAB1_ERR_META_MISSING");
 		}
 
-		// Take grant from descriptor, never re-read opts.grant
-		let grantValue: unknown;
-		try {
-			grantValue = optsDescs.grant.value;
-		} catch {
-			return fail("PAB1_ERR_META_DESCRIPTOR");
+		// Validate grant bytes
+		if (!grantCopy) {
+			return fail("PAB1_ERR_INVALID_ARGUMENT");
 		}
-		const grantResult = copyGrant(grantValue as Uint8Array);
-		if (!grantResult.ok) {
-			return fail(grantResult.code);
+		const gErr = validateGrantBytes(grantCopy);
+		if (gErr) {
+			safeZero(grantCopy);
+			grantCopy = undefined;
+			return fail(gErr);
 		}
-		grantCopy = grantResult.value;
 
-		// Validate grant length/bytes
+		// Validate grant bytes
 		const grantErr = validateGrantBytes(grantCopy);
 		if (grantErr) {
 			safeZero(grantCopy);
@@ -784,11 +731,10 @@ export function encodeSandboxBootstrapPayload(opts: EncodeSandboxBootstrapPayloa
 			return fail(grantErr);
 		}
 
-		// --- Validate metadata (after grant is safe) ---
-		// Take metadata from descriptor, never re-read opts.metadata
+		// Acquire metadata from descriptor.value (not opts.metadata)
 		let metaValue: unknown;
 		try {
-			metaValue = optsDescs.metadata.value;
+			metaValue = descs.metadata!.value;
 		} catch {
 			return fail("PAB1_ERR_META_DESCRIPTOR");
 		}
@@ -800,10 +746,9 @@ export function encodeSandboxBootstrapPayload(opts: EncodeSandboxBootstrapPayloa
 		}
 		const meta = metaResult.value;
 
-		// Build canonical JSON
+		// Build payload
 		const metaJson = buildCanonicalMetadataJson(meta);
 		const metaBytes = new TextEncoder().encode(metaJson);
-
 		if (metaBytes.byteLength > MAX_META_BYTES) {
 			safeZero(metaBytes);
 			safeZero(grantCopy);
@@ -827,7 +772,6 @@ export function encodeSandboxBootstrapPayload(opts: EncodeSandboxBootstrapPayloa
 			payload.set(metaBytes, HEADER_OVERHEAD);
 			dv.setUint16(HEADER_OVERHEAD + metaBytes.byteLength, grantCopy.byteLength);
 			payload.set(grantCopy, HEADER_OVERHEAD + metaBytes.byteLength + GRANT_LEN_FIELD);
-
 			safeZero(metaBytes);
 			safeZero(grantCopy);
 			grantCopy = undefined;
@@ -845,14 +789,8 @@ export function encodeSandboxBootstrapPayload(opts: EncodeSandboxBootstrapPayloa
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Grant validation
-// ---------------------------------------------------------------------------
-
 function validateGrantBytes(grant: Uint8Array): Pab1ErrorCode | undefined {
-	if (grant.byteLength < MIN_GRANT_BYTES || grant.byteLength > MAX_GRANT_BYTES) {
-		return "PAB1_ERR_GRANT_LENGTH";
-	}
+	if (grant.byteLength < MIN_GRANT_BYTES || grant.byteLength > MAX_GRANT_BYTES) return "PAB1_ERR_GRANT_LENGTH";
 	for (let i = 0; i < grant.byteLength; i++) {
 		if (!isGrantByte(grant[i])) return "PAB1_ERR_GRANT_BYTE";
 	}
@@ -885,42 +823,50 @@ function freezeDeep<T extends Record<string, unknown>>(obj: T): T {
 	const frozen: Record<string, unknown> = {};
 	for (const key of Object.keys(obj)) {
 		const val = obj[key];
-		if (val !== null && typeof val === "object" && !Array.isArray(val)) {
-			frozen[key] = freezeDeep(val as Record<string, unknown>);
-		} else {
-			frozen[key] = val;
-		}
+		frozen[key] =
+			val !== null && typeof val === "object" && !Array.isArray(val)
+				? freezeDeep(val as Record<string, unknown>)
+				: val;
 	}
 	return Object.freeze(frozen) as T;
 }
 
-/**
- * Decode a PAB1 sandbox bootstrap payload.
- * Returns a deeply frozen metadata DTO plus a brand-gated IOneUseBootstrapGrant.
- */
 export function decodeSandboxBootstrapPayload(payload: Uint8Array): Result<SandboxBootstrapPayloadDecoded> {
-	// --- Validate input ---
-	if (!isGenuineUint8Array(payload)) {
-		if (payload === null || payload === undefined) return fail("PAB1_ERR_INVALID_ARGUMENT");
-		if (typeof payload === "object") {
-			try {
-				const proto = Object.getPrototypeOf(payload);
-				if (proto !== Uint8Array.prototype) {
+	try {
+		// Validate input
+		if (!isGenuineUint8Array(payload)) {
+			if (payload === null || payload === undefined) return fail("PAB1_ERR_INVALID_ARGUMENT");
+			if (typeof payload === "object") {
+				try {
+					const proto = Object.getPrototypeOf(payload);
 					if (typeof Buffer !== "undefined" && proto === Buffer.prototype) return fail("PAB1_ERR_INPUT_SUBCLASS");
+					if (proto === Uint8Array.prototype) {
+						const u = payload as Uint8Array;
+						const buf = u.buffer;
+						if (
+							typeof SharedArrayBuffer !== "undefined" &&
+							Object.getPrototypeOf(buf) === SharedArrayBuffer.prototype
+						)
+							return fail("PAB1_ERR_INPUT_SHARED");
+						if (u.byteOffset !== 0 || u.byteLength !== buf.byteLength) return fail("PAB1_ERR_INPUT_SUBARRAY");
+						return fail("PAB1_ERR_INPUT_DETACHED");
+					}
+				} catch {
 					return fail("PAB1_ERR_INPUT_PROXY");
 				}
-				const bufProto = Object.getPrototypeOf((payload as Uint8Array).buffer);
-				if (bufProto === SharedArrayBuffer.prototype) return fail("PAB1_ERR_INPUT_SHARED");
-				return fail("PAB1_ERR_INPUT_DETACHED");
-			} catch {
-				return fail("PAB1_ERR_INPUT_PROXY");
 			}
+			return fail("PAB1_ERR_INVALID_ARGUMENT");
 		}
-		return fail("PAB1_ERR_INVALID_ARGUMENT");
-	}
-	if (isDetached(payload)) return fail("PAB1_ERR_INPUT_DETACHED");
+		if (isDetachedView(payload)) return fail("PAB1_ERR_INPUT_DETACHED");
 
-	// --- Size preflight ---
+		return decodeImpl(payload);
+	} catch {
+		safeZero(payload);
+		return fail("PAB1_ERR_ENCODE_FAILED");
+	}
+}
+
+function decodeImpl(payload: Uint8Array): Result<SandboxBootstrapPayloadDecoded> {
 	if (payload.byteLength < HEADER_OVERHEAD + GRANT_LEN_FIELD) {
 		safeZero(payload);
 		return fail("PAB1_ERR_TRUNCATED");
@@ -932,7 +878,6 @@ export function decodeSandboxBootstrapPayload(payload: Uint8Array): Result<Sandb
 
 	const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
 
-	// --- Magic ---
 	const magicSlice = payload.slice(0, MAGIC_LEN);
 	const magicOk = constantTimeEqual(magicSlice, MAGIC);
 	safeZero(magicSlice);
@@ -941,7 +886,6 @@ export function decodeSandboxBootstrapPayload(payload: Uint8Array): Result<Sandb
 		return fail("PAB1_ERR_MAGIC");
 	}
 
-	// --- Metadata length ---
 	const metaLen = dv.getUint32(MAGIC_LEN);
 	if (metaLen === 0 || metaLen > MAX_META_BYTES) {
 		safeZero(payload);
@@ -956,7 +900,6 @@ export function decodeSandboxBootstrapPayload(payload: Uint8Array): Result<Sandb
 
 	const metaBytes = payload.slice(HEADER_OVERHEAD, grantLenOffset);
 	const grantLen = dv.getUint16(grantLenOffset);
-
 	if (grantLen < MIN_GRANT_BYTES || grantLen > MAX_GRANT_BYTES) {
 		safeZero(metaBytes);
 		safeZero(payload);
@@ -976,9 +919,8 @@ export function decodeSandboxBootstrapPayload(payload: Uint8Array): Result<Sandb
 	}
 
 	const grantRaw = payload.slice(grantLenOffset + GRANT_LEN_FIELD, grantEnd);
-	safeZero(payload); // erase caller view after copy
+	safeZero(payload); // erase caller after copy
 
-	// --- Validate grant bytes ---
 	for (let i = 0; i < grantRaw.byteLength; i++) {
 		if (!isGrantByte(grantRaw[i])) {
 			safeZero(grantRaw);
@@ -987,7 +929,6 @@ export function decodeSandboxBootstrapPayload(payload: Uint8Array): Result<Sandb
 		}
 	}
 
-	// --- Parse metadata JSON ---
 	let parsed: unknown;
 	try {
 		const metaStr = new TextDecoder("utf-8", { fatal: true }).decode(metaBytes);
@@ -998,7 +939,6 @@ export function decodeSandboxBootstrapPayload(payload: Uint8Array): Result<Sandb
 		return fail("PAB1_ERR_META_PARSE");
 	}
 
-	// --- Validate schema ---
 	const schemaResult = sanitizeMetadata(parsed);
 	if (!schemaResult.ok) {
 		safeZero(grantRaw);
@@ -1007,7 +947,6 @@ export function decodeSandboxBootstrapPayload(payload: Uint8Array): Result<Sandb
 	}
 	const meta = schemaResult.value;
 
-	// --- Canonical JSON roundtrip ---
 	const canonStr = buildCanonicalMetadataJson(meta);
 	const canonBytes = new TextEncoder().encode(canonStr);
 	if (!constantTimeEqual(canonBytes, metaBytes)) {
@@ -1019,17 +958,13 @@ export function decodeSandboxBootstrapPayload(payload: Uint8Array): Result<Sandb
 	safeZero(canonBytes);
 	safeZero(metaBytes);
 
-	// --- Build result ---
 	const frozenMeta = freezeDeep(
 		meta as unknown as Record<string, unknown>,
 	) as unknown as SandboxBootstrapPayloadDecoded["metadata"];
 	const grantObj = createGrant(grantRaw);
 	safeZero(grantRaw);
 
-	const value: SandboxBootstrapPayloadDecoded = Object.freeze({
-		metadata: frozenMeta,
-		grant: grantObj,
-	});
+	const value: SandboxBootstrapPayloadDecoded = Object.freeze({ metadata: frozenMeta, grant: grantObj });
 	return ok(value);
 }
 
