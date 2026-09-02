@@ -364,7 +364,7 @@ describe("strict options preflight", () => {
 			{ read: rawRead, close: rawClose },
 			{
 				get(t, p) {
-					_getTrapCount++;
+					getTrapCount++;
 					return Reflect.get(t, p);
 				},
 			},

@@ -66,7 +66,9 @@ export interface StdinSource {
 	on(event: "data", cb: (chunk: Uint8Array) => void): void;
 	on(event: "end", cb: () => void): void;
 	on(event: "error", cb: (err: Error) => void): void;
-	removeListener(event: "data" | "end" | "error", cb: (...args: Array<unknown>) => void): void;
+	removeListener(event: "data", cb: (chunk: Uint8Array) => void): void;
+	removeListener(event: "end", cb: () => void): void;
+	removeListener(event: "error", cb: (err: Error) => void): void;
 	resume(): void;
 }
 
@@ -323,6 +325,7 @@ export function readStdinBootstrapFrame(
 		}
 
 		function removeOwnListeners(): void {
+			if (!src) return;
 			if (registeredData && onDataCb) {
 				try {
 					src.removeListener("data", onDataCb);

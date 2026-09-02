@@ -35,12 +35,12 @@ function makeSource(opts: {
 
 	const source: StdinSource = {
 		on(event, cb) {
-			handlers[event]?.push(cb);
+			handlers[event]?.push(cb as (...args: unknown[]) => void);
 		},
 		removeListener(event, cb) {
 			const h = handlers[event];
 			if (h) {
-				const idx = h.indexOf(cb);
+				const idx = h.indexOf(cb as (...args: unknown[]) => void);
 				if (idx >= 0) h.splice(idx, 1);
 			}
 		},
@@ -305,7 +305,7 @@ describe("chunk validation", () => {
 		const src: StdinSource = {
 			on(event, cb) {
 				if (event === "data") {
-					setTimeout(() => cb(buf as unknown as Uint8Array), 0);
+					setTimeout(() => (cb as (chunk: Uint8Array) => void)(buf as unknown as Uint8Array), 0);
 				}
 				if (event === "end") {
 					setTimeout(() => (cb as () => void)(), 10);
@@ -320,18 +320,15 @@ describe("chunk validation", () => {
 	it("rejects detached Uint8Array", async () => {
 		const ab = new ArrayBuffer(10);
 		const chunk = new Uint8Array(ab);
-		// Transfer the buffer to detach it (requires node 20+)
-		try {
-			const ab2 = ab.transfer();
-			void ab2;
-		} catch {
-			// transfer not available — skip
-			return;
-		}
+		// Transfer the buffer to detach it via MessageChannel
+		const { port1, port2 } = new MessageChannel();
+		port2.postMessage(ab, [ab]);
+		port1.close();
+		port2.close();
 		const src: StdinSource = {
 			on(event, cb) {
 				if (event === "data") {
-					setTimeout(() => cb(chunk), 0);
+					setTimeout(() => (cb as (chunk: Uint8Array) => void)(chunk), 0);
 				}
 				if (event === "end") {
 					setTimeout(() => (cb as () => void)(), 10);
@@ -363,7 +360,7 @@ describe("chunk validation", () => {
 			on(event, cb) {
 				if (event === "data") {
 					// emit a plain object
-					setTimeout(() => cb({} as unknown as Uint8Array), 0);
+					setTimeout(() => (cb as (chunk: Uint8Array) => void)({} as unknown as Uint8Array), 0);
 				}
 				if (event === "end") {
 					setTimeout(() => (cb as () => void)(), 10);
@@ -379,7 +376,7 @@ describe("chunk validation", () => {
 		const badSrc: StdinSource = {
 			on(event, cb) {
 				if (event === "data") {
-					setTimeout(() => cb(null as unknown as Uint8Array), 0);
+					setTimeout(() => (cb as (chunk: Uint8Array) => void)(null as unknown as Uint8Array), 0);
 				}
 			},
 			removeListener() {},
@@ -643,8 +640,8 @@ describe("source error", () => {
 		const src: StdinSource = {
 			on(event, cb) {
 				if (event === "data") {
-					setTimeout(() => cb(frame.slice(0, 4)), 0);
-					setTimeout(() => cb(frame.slice(4, 6)), 1);
+					setTimeout(() => (cb as (chunk: Uint8Array) => void)(frame.slice(0, 4)), 0);
+					setTimeout(() => (cb as (chunk: Uint8Array) => void)(frame.slice(4, 6)), 1);
 				}
 				if (event === "error") {
 					setTimeout(() => (cb as (e: Error) => void)(new Error("stream error")), 2);
@@ -652,7 +649,6 @@ describe("source error", () => {
 			},
 			removeListener() {},
 			resume() {},
-			// @ts-expect-error - prototype is Object.prototype
 		};
 		const r = await readStdinBootstrapFrame(src);
 		expect(r.ok).toBe(false);
@@ -744,7 +740,6 @@ describe("event reentrancy", () => {
 				const hdr = new Uint8Array(4);
 				const dv = new DataView(hdr.buffer, hdr.byteOffset, 4);
 				dv.setUint32(0, 10, false);
-				// @ts-expect-error - prototype is Uint8Array
 				Object.setPrototypeOf(hdr, {});
 				if (dataCb) {
 					dataCb(hdr);
@@ -1124,7 +1119,7 @@ describe("hostile chunk validation", () => {
 		const src: StdinSource = {
 			on(event, cb) {
 				if (event === "data") {
-					setTimeout(() => cb(buf), 0);
+					setTimeout(() => (cb as (chunk: Uint8Array) => void)(buf), 0);
 				}
 			},
 			removeListener() {},
@@ -1139,7 +1134,7 @@ describe("hostile chunk validation", () => {
 		const src: StdinSource = {
 			on(event, cb) {
 				if (event === "data") {
-					setTimeout(() => cb(buf), 0);
+					setTimeout(() => (cb as (chunk: Uint8Array) => void)(buf), 0);
 				}
 			},
 			removeListener() {},
@@ -1183,7 +1178,7 @@ describe("registration safety", () => {
 		};
 		const src: StdinSource = {
 			on(event, cb) {
-				listeners[event]?.push(cb);
+				listeners[event]?.push(cb as (...args: unknown[]) => void);
 				// Fire data synchronously during on("data") so settlement
 				// happens before the on() call returns.
 				if (event === "data") {
@@ -1193,7 +1188,7 @@ describe("registration safety", () => {
 			removeListener(event, cb) {
 				const h = listeners[event];
 				if (h) {
-					const idx = h.indexOf(cb);
+					const idx = h.indexOf(cb as (...args: unknown[]) => void);
 					if (idx >= 0) h.splice(idx, 1);
 				}
 			},
@@ -1220,7 +1215,7 @@ describe("registration safety", () => {
 		};
 		const src: StdinSource = {
 			on(event, cb) {
-				listeners[event]?.push(cb);
+				listeners[event]?.push(cb as (...args: unknown[]) => void);
 				// Fire end synchronously during on("end") so settlement
 				// happens before the on() call returns.
 				if (event === "end") {
@@ -1230,7 +1225,7 @@ describe("registration safety", () => {
 			removeListener(event, cb) {
 				const h = listeners[event];
 				if (h) {
-					const idx = h.indexOf(cb);
+					const idx = h.indexOf(cb as (...args: unknown[]) => void);
 					if (idx >= 0) h.splice(idx, 1);
 				}
 			},
@@ -1257,7 +1252,7 @@ describe("registration safety", () => {
 		const src: StdinSource = {
 			on(event, cb) {
 				if (event === "data") {
-					ownedCbs.push(cb);
+					ownedCbs.push(cb as (...args: unknown[]) => void);
 					callCount++;
 					// Only throw on the reader's registration call, not on
 					// the pre-registration of the unrelated listener.
@@ -1267,7 +1262,7 @@ describe("registration safety", () => {
 				}
 			},
 			removeListener(_event, cb) {
-				const idx = ownedCbs.indexOf(cb);
+				const idx = ownedCbs.indexOf(cb as (...args: unknown[]) => void);
 				if (idx >= 0) ownedCbs.splice(idx, 1);
 			},
 			resume() {},
@@ -1291,20 +1286,20 @@ describe("registration safety", () => {
 		const src: StdinSource = {
 			on(event, cb) {
 				if (event === "data") {
-					ownedDataCbs.push(cb);
+					ownedDataCbs.push(cb as (...args: unknown[]) => void);
 				}
 				if (event === "end") {
-					ownedEndCbs.push(cb);
+					ownedEndCbs.push(cb as (...args: unknown[]) => void);
 					throw new Error("install then throw");
 				}
 			},
 			removeListener(event, cb) {
 				if (event === "data") {
-					const idx = ownedDataCbs.indexOf(cb);
+					const idx = ownedDataCbs.indexOf(cb as (...args: unknown[]) => void);
 					if (idx >= 0) ownedDataCbs.splice(idx, 1);
 				}
 				if (event === "end") {
-					const idx = ownedEndCbs.indexOf(cb);
+					const idx = ownedEndCbs.indexOf(cb as (...args: unknown[]) => void);
 					if (idx >= 0) ownedEndCbs.splice(idx, 1);
 				}
 			},
@@ -1326,27 +1321,27 @@ describe("registration safety", () => {
 		const src: StdinSource = {
 			on(event, cb) {
 				if (event === "data") {
-					ownedDataCbs.push(cb);
+					ownedDataCbs.push(cb as (...args: unknown[]) => void);
 				}
 				if (event === "end") {
-					ownedEndCbs.push(cb);
+					ownedEndCbs.push(cb as (...args: unknown[]) => void);
 				}
 				if (event === "error") {
-					ownedErrorCbs.push(cb);
+					ownedErrorCbs.push(cb as (...args: unknown[]) => void);
 					throw new Error("install then throw");
 				}
 			},
 			removeListener(event, cb) {
 				if (event === "data") {
-					const idx = ownedDataCbs.indexOf(cb);
+					const idx = ownedDataCbs.indexOf(cb as (...args: unknown[]) => void);
 					if (idx >= 0) ownedDataCbs.splice(idx, 1);
 				}
 				if (event === "end") {
-					const idx = ownedEndCbs.indexOf(cb);
+					const idx = ownedEndCbs.indexOf(cb as (...args: unknown[]) => void);
 					if (idx >= 0) ownedEndCbs.splice(idx, 1);
 				}
 				if (event === "error") {
-					const idx = ownedErrorCbs.indexOf(cb);
+					const idx = ownedErrorCbs.indexOf(cb as (...args: unknown[]) => void);
 					if (idx >= 0) ownedErrorCbs.splice(idx, 1);
 				}
 			},
@@ -1370,12 +1365,12 @@ describe("registration safety", () => {
 		};
 		const src: StdinSource = {
 			on(event, cb) {
-				listeners[event]?.push(cb);
+				listeners[event]?.push(cb as (...args: unknown[]) => void);
 			},
 			removeListener(event, cb) {
 				const h = listeners[event];
 				if (h) {
-					const idx = h.indexOf(cb);
+					const idx = h.indexOf(cb as (...args: unknown[]) => void);
 					if (idx >= 0) h.splice(idx, 1);
 				}
 			},
