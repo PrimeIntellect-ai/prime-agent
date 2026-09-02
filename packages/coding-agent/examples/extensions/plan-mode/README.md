@@ -23,25 +23,27 @@ Read-only exploration mode for safe code analysis.
 2. Ask the agent to analyze code and create a plan
 3. The agent should output a numbered plan under a `Plan:` header:
 
-```
+```text
 Plan:
 1. First step description
 2. Second step description
 3. Third step description
 ```
 
-4. Choose "Execute the plan" when prompted
-5. During execution, the agent marks steps complete with `[DONE:n]` tags
-6. Progress widget shows completion status
+1. Choose "Execute the plan" when prompted
+2. During execution, the agent marks steps complete with `[DONE:n]` tags
+3. Progress widget shows completion status
 
 ## How It Works
 
 ### Plan Mode (Read-Only)
+
 - Only bash and questionnaire are available
 - Bash commands filtered through allowlist
 - Agent creates a plan without making changes
 
 ### Execution Mode
+
 - Full tool access restored
 - Agent executes steps in order
 - `[DONE:n]` markers track completion
@@ -50,6 +52,7 @@ Plan:
 ### Command Allowlist
 
 Safe commands (allowed):
+
 - File inspection: `cat`, `head`, `tail`, `less`, `more`
 - Search: `grep`, `find`, `rg`, `fd`
 - Directory: `ls`, `pwd`, `tree`
@@ -58,6 +61,7 @@ Safe commands (allowed):
 - System info: `uname`, `whoami`, `date`, `uptime`
 
 Blocked commands:
+
 - File modification: `rm`, `mv`, `cp`, `mkdir`, `touch`
 - Git write: `git add`, `git commit`, `git push`
 - Package install: `npm install`, `yarn add`, `pip install`

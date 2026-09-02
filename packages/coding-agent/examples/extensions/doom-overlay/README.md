@@ -9,7 +9,8 @@ pi --extension ./examples/extensions/doom-overlay
 ```
 
 Then run:
-```
+
+```text
 /doom-overlay
 ```
 
@@ -18,7 +19,7 @@ The shareware WAD file (~4MB) is auto-downloaded on first run.
 ## Controls
 
 | Action | Keys |
-|--------|------|
+| -------- | ------ |
 | Move | WASD or Arrow Keys |
 | Run | Shift + WASD |
 | Fire | F or Ctrl |
@@ -33,6 +34,7 @@ The shareware WAD file (~4MB) is auto-downloaded on first run.
 DOOM runs as WebAssembly compiled from [doomgeneric](https://github.com/ozkl/doomgeneric). Each frame is rendered using half-block characters (▀) with 24-bit color, where the top pixel is the foreground color and the bottom pixel is the background color.
 
 The overlay uses:
+
 - `width: "90%"` - 90% of terminal width
 - `maxHeight: "80%"` - Maximum 80% of terminal height
 - `anchor: "center"` - Centered in terminal

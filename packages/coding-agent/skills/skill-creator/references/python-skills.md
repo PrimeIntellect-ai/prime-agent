@@ -15,7 +15,7 @@ For a skill named `word-count`, the kernel exposes `word_count`.
 
 ## Minimal Template
 
-```
+```text
 word-count/
 ├── SKILL.md
 ├── pyproject.toml

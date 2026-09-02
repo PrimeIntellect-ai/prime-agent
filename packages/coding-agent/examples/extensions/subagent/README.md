@@ -2,9 +2,7 @@
 
 Delegate tasks to specialized subprocess agents with isolated context windows.
 
-Prime Agent also provides native recursive delegation through `rlm.call()` and
-`rlm.run_async()`. This extension is a separate example for users who want
-file-defined agent profiles and explicit single, parallel, or chained workflows.
+Prime Agent also provides native recursive delegation through `rlm.call()` and `rlm.run_async()`. This extension is a separate example for users who want file-defined agent profiles and explicit single, parallel, or chained workflows.
 
 ## Features
 
@@ -17,7 +15,7 @@ file-defined agent profiles and explicit single, parallel, or chained workflows.
 
 ## Structure
 
-```
+```text
 subagent/
 ├── README.md            # This file
 ├── index.ts             # The extension (entry point)
@@ -71,22 +69,26 @@ When running interactively, the tool prompts for confirmation before running pro
 ## Usage
 
 ### Single agent
-```
+
+```text
 Use scout to find all authentication code
 ```
 
 ### Parallel execution
-```
+
+```text
 Run 2 scouts in parallel: one to find models, one to find providers
 ```
 
 ### Chained workflow
-```
+
+```text
 Use a chain: first have scout find the ipython tool, then have planner suggest improvements
 ```
 
 ### Workflow prompts
-```
+
+```text
 /implement add Redis caching to the session store
 /scout-and-plan refactor auth to support OAuth
 /implement-and-review add input validation to API endpoints
@@ -95,7 +97,7 @@ Use a chain: first have scout find the ipython tool, then have planner suggest i
 ## Tool Modes
 
 | Mode | Parameter | Description |
-|------|-----------|-------------|
+| ------ | ----------- | ------------- |
 | Single | `{ agent, task }` | One agent, one task |
 | Parallel | `{ tasks: [...] }` | Multiple agents run concurrently (max 8, 4 concurrent) |
 | Chain | `{ chain: [...] }` | Sequential with `{previous}` placeholder |
@@ -103,22 +105,26 @@ Use a chain: first have scout find the ipython tool, then have planner suggest i
 ## Output Display
 
 **Collapsed view** (default):
+
 - Status icon (✓/✗/⏳) and agent name
 - Last 5-10 items (tool calls and text)
 - Usage stats: `3 turns ↑input ↓output RcacheRead WcacheWrite $cost ctx:contextTokens model`
 
 **Expanded view** (Ctrl+O):
+
 - Full task text
 - All tool calls with formatted arguments
 - Final output rendered as Markdown
 - Per-task usage (for chain/parallel)
 
 **Parallel mode streaming**:
+
 - Shows all tasks with live status (⏳ running, ✓ done, ✗ failed)
 - Updates as each task makes progress
 - Shows "2/3 done, 1 running" status
 
 **Tool call formatting**:
+
 - `$ command` for bash
 - `ipython code` for ipython
 - `edit ~/path` for edit
@@ -139,6 +145,7 @@ System prompt for the agent goes here.
 ```
 
 **Locations:**
+
 - `~/.prime/agent/agents/*.md` - User-level (always loaded)
 - `.prime/agent/agents/*.md` - Project-level (only with `agentScope: "project"` or `"both"`)
 
@@ -147,7 +154,7 @@ Project agents override user agents with the same name when `agentScope: "both"`
 ## Sample Agents
 
 | Agent | Purpose | Model | Tools |
-|-------|---------|-------|-------|
+| ------- | --------- | ------- | ------- |
 | `scout` | Fast codebase recon | Haiku | bash |
 | `planner` | Implementation plans | Sonnet | bash |
 | `reviewer` | Code review | Sonnet | bash |
@@ -156,7 +163,7 @@ Project agents override user agents with the same name when `agentScope: "both"`
 ## Workflow Prompts
 
 | Prompt | Flow |
-|--------|------|
+| -------- | ------ |
 | `/implement <query>` | scout → planner → worker |
 | `/scout-and-plan <query>` | scout → planner |
 | `/implement-and-review <query>` | worker → reviewer → worker |

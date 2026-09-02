@@ -114,7 +114,7 @@ A receipt is `delivered` when it reached an idle target's context or `queued` wh
 Prime Agent has three related scheduling surfaces:
 
 | Surface | Owner | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `/heartbeat` | User | One visible recurring instruction for the current session. |
 | `rlm_heartbeat` | Agent | Multiple programmatically managed recurring instructions internal to the current session. |
 | `prime-agent schedule` | User or automation | General one-time or cron prompts targeted at an agent. |

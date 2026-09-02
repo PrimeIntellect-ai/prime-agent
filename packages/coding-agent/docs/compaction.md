@@ -3,6 +3,7 @@
 LLMs have limited context windows. When conversations grow too long, Prime Agent uses compaction to summarize older content while preserving recent work. This page covers both auto-compaction and branch summarization.
 
 **Source files:**
+
 - [`compaction.ts`](../src/core/compaction/compaction.ts) - Auto-compaction logic
 - [`branch-summarization.ts`](../src/core/compaction/branch-summarization.ts) - Branch summarization
 - [`utils.ts`](../src/core/compaction/utils.ts) - Shared utilities (file tracking, serialization)
@@ -16,7 +17,7 @@ For TypeScript definitions in your project, inspect `node_modules/@earendil-work
 Prime Agent has two summarization mechanisms:
 
 | Mechanism | Trigger | Purpose |
-|-----------|---------|---------|
+| ----------- | --------- | --------- |
 | Compaction | Context exceeds threshold, or `/compact` | Summarize old messages to free up context |
 | Branch summarization | `/tree` navigation | Preserve context when switching branches |
 
@@ -28,7 +29,7 @@ Both use the same structured summary format and track file operations cumulative
 
 Auto-compaction triggers when:
 
-```
+```text
 contextTokens > contextWindow - reserveTokens
 ```
 
@@ -44,7 +45,7 @@ You can also trigger manually with `/compact [instructions]`, where optional ins
 4. **Append entry**: Save `CompactionEntry` with summary and `firstKeptEntryId`
 5. **Reload**: Session reloads, using summary + messages from `firstKeptEntryId` onwards
 
-```
+```text
 Before compaction:
 
   entry:  0     1     2     3      4     5     6      7      8     9
@@ -84,7 +85,7 @@ A "turn" starts with a user message and includes all assistant responses and too
 
 When a single turn exceeds `keepRecentTokens`, the cut point lands mid-turn at an assistant message. This is a "split turn":
 
-```
+```text
 Split turn (one huge turn exceeds budget):
 
   entry:  0     1     2      3     4      5      6     7      8
@@ -103,12 +104,14 @@ Split turn (one huge turn exceeds budget):
 ```
 
 For split turns, Prime Agent generates two summaries and merges them:
+
 1. **History summary**: Previous context (if any)
 2. **Turn prefix summary**: The early part of the split turn
 
 ### Cut Point Rules
 
 Valid cut points are:
+
 - User messages
 - Assistant messages
 - BashExecution messages
@@ -159,7 +162,7 @@ When you use `/tree` to navigate to a different branch, Prime Agent offers to su
 4. **Generate summary**: Call LLM with structured format
 5. **Append entry**: Save `BranchSummaryEntry` at navigation point
 
-```
+```text
 Tree before navigation:
 
          ┌─ B ─ C ─ D (old leaf, being abandoned)
@@ -179,6 +182,7 @@ After navigation with summary:
 ### Cumulative File Tracking
 
 Both compaction and branch summarization track files cumulatively. When generating a summary, Prime Agent extracts file operations from:
+
 - Tool calls in the messages being summarized
 - Previous compaction or branch summary `details` (if any)
 
@@ -255,7 +259,7 @@ path/to/changed.ts
 
 Before summarization, messages are serialized to text via [`serializeConversation()`](../src/core/compaction/utils.ts):
 
-```
+```text
 [User]: What they said
 [Assistant thinking]: Internal reasoning
 [Assistant]: Response text
@@ -387,7 +391,7 @@ Configure compaction in `~/.prime/agent/settings.json` or `<project-dir>/.prime/
 ```
 
 | Setting | Default | Description |
-|---------|---------|-------------|
+| --------- | --------- | ------------- |
 | `enabled` | `true` | Enable auto-compaction |
 | `reserveTokens` | `16384` | Tokens to reserve for LLM response |
 | `keepRecentTokens` | `20000` | Recent tokens to keep (not summarized) |

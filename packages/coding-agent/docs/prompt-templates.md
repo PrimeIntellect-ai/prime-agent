@@ -45,7 +45,7 @@ argument-hint: "<PR-URL>"
 
 This renders in the autocomplete dropdown as:
 
-```
+```text
 → pr   <PR-URL>       — Review PRs from URLs with structured issue and code analysis
   is   <issue>        — Analyze GitHub issues (bugs or feature requests)
   wr   [instructions] — Finish the current task end-to-end
@@ -56,7 +56,7 @@ This renders in the autocomplete dropdown as:
 
 Type `/` followed by the template name in the editor. Autocomplete shows available templates with descriptions.
 
-```
+```text
 /review                           # Expands review.md
 /component Button                 # Expands with argument
 /component Button "click handler" # Multiple arguments

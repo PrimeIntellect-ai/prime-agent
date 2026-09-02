@@ -194,6 +194,7 @@ Create provider file exporting:
 1. **Check fragments**: Ensure all changes since last release have fragment files in `packages/<pkg>/.changes/`
 
 2. **Run release script**:
+
    ```bash
    npm run release:patch    # Fixes and additions
    npm run release:minor    # API breaking changes

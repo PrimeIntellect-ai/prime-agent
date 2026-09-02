@@ -2,7 +2,7 @@
 
 Prime Sandboxes are disposable Docker environments for running AI-generated or untrusted code in the cloud: isolated, fast to create, billed only while running (CPU $0.05/core/hr, memory $0.01/GB/hr, disk $0.001/GB/hr).
 
-Live docs: `sandboxes/overview.md`, `sandboxes/cli.md`, `sandboxes/sdk.md`, `sandboxes/images.md`, `sandboxes/tunnel.md` under https://docs.primeintellect.ai/
+Live docs: `sandboxes/overview.md`, `sandboxes/cli.md`, `sandboxes/sdk.md`, `sandboxes/images.md`, `sandboxes/tunnel.md` under <https://docs.primeintellect.ai/>
 
 ## CLI Lifecycle
 

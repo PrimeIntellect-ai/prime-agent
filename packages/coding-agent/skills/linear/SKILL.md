@@ -9,15 +9,11 @@ Talk to Linear through its official hosted MCP server from the Python kernel.
 
 ## Setup
 
-Connect via `/login` → **Services** tab → **Linear** (OAuth in the browser).
-`/mcp login linear` does the same. Once connected, this skill is enabled
-automatically. If a call raises `NotEnabled`, the user isn't logged in — walk
-them through `/login`; don't ask them to set environment variables.
+Connect via `/login` → **Services** tab → **Linear** (OAuth in the browser). `/mcp login linear` does the same. Once connected, this skill is enabled automatically. If a call raises `NotEnabled`, the user isn't logged in — walk them through `/login`; don't ask them to set environment variables.
 
 ## Usage
 
-The tool set is defined by the server, not by this skill, so **discover before
-you call** — don't assume tool names or argument names:
+The tool set is defined by the server, not by this skill, so **discover before you call** — don't assume tool names or argument names:
 
 ```python
 import linear
@@ -35,11 +31,8 @@ print(result)
 ```
 
 Notes:
+
 - Every tool is an `async` method — always `await`.
-- Results are already-parsed Python (a `dict` for structured output, otherwise a
-  string). No need to `json.loads` them.
-- For tools whose names aren't valid Python identifiers, use the escape hatch:
-  `await linear.call_tool("tool-name", {"arg": "value"})`.
-- Run `list_tools()` before relying on `help()` or assuming a tool exists — it
-  populates the schemas `help()` shows, and the server is the source of truth
-  for tool names and arguments.
+- Results are already-parsed Python (a `dict` for structured output, otherwise a string). No need to `json.loads` them.
+- For tools whose names aren't valid Python identifiers, use the escape hatch: `await linear.call_tool("tool-name", {"arg": "value"})`.
+- Run `list_tools()` before relying on `help()` or assuming a tool exists — it populates the schemas `help()` shows, and the server is the source of truth for tool names and arguments.

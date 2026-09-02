@@ -2,7 +2,7 @@
 
 Prime Intellect aggregates GPU capacity across providers: rent single GPU pods on demand or deploy multi-node clusters, with persistent network-attached storage.
 
-Live docs: `cli-reference/check-gpu-availability.md`, `cli-reference/provision-gpu.md`, `cli-reference/managing-disks.md`, `tutorials-multi-node-cluster/deploy-multi-node.md`, `tutorials-storage/create-persistent-storage.md` under https://docs.primeintellect.ai/
+Live docs: `cli-reference/check-gpu-availability.md`, `cli-reference/provision-gpu.md`, `cli-reference/managing-disks.md`, `tutorials-multi-node-cluster/deploy-multi-node.md`, `tutorials-storage/create-persistent-storage.md` under <https://docs.primeintellect.ai/>
 
 ## GPU Availability
 

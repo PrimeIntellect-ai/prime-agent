@@ -49,7 +49,7 @@ Prime Agent accepts three source types in settings and `prime-agent package inst
 
 ### npm
 
-```
+```text
 npm:@scope/pkg@1.2.3
 npm:pkg
 ```
@@ -69,7 +69,7 @@ Example:
 
 ### git
 
-```
+```text
 git:github.com/user/repo@v1
 git:git@github.com:user/repo@v1
 https://github.com/user/repo@v1
@@ -86,6 +86,7 @@ ssh://git@github.com/user/repo@v1
 - Runs `npm install` after clone or pull if `package.json` exists.
 
 **SSH examples:**
+
 ```bash
 # git@host:path shorthand (requires git: prefix)
 prime-agent package install git:git@github.com:user/repo
@@ -99,7 +100,7 @@ prime-agent package install git:git@github.com:user/repo@v1.0.0
 
 ### Local Paths
 
-```
+```text
 /absolute/path/to/package
 ./relative/path/to/package
 ```

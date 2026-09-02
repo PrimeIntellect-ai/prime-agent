@@ -17,7 +17,7 @@ cp permission-gate.ts ~/.prime/agent/extensions/
 ### Lifecycle & Safety
 
 | Extension | Description |
-|-----------|-------------|
+| ----------- | ------------- |
 | `permission-gate.ts` | Prompts for confirmation before dangerous bash commands (rm -rf, sudo, etc.) |
 | `protected-paths.ts` | Blocks writes to protected paths (.env, .git/, node_modules/) |
 | `confirm-destructive.ts` | Confirms before destructive session actions (clear, switch, fork) |
@@ -27,7 +27,7 @@ cp permission-gate.ts ~/.prime/agent/extensions/
 ### Custom Tools
 
 | Extension | Description |
-|-----------|-------------|
+| ----------- | ------------- |
 | `todo.ts` | Todo list tool + `/todos` command with custom rendering and state persistence |
 | `hello.ts` | Minimal custom tool example |
 | `question.ts` | Demonstrates `ctx.ui.select()` for asking the user questions with custom UI |
@@ -44,7 +44,7 @@ cp permission-gate.ts ~/.prime/agent/extensions/
 ### Commands & UI
 
 | Extension | Description |
-|-----------|-------------|
+| ----------- | ------------- |
 | `preset.ts` | Named presets for model, thinking level, tools, and instructions via `--preset` flag and `/preset` command |
 | `plan-mode/` | Claude Code-style plan mode for read-only exploration with `/plan` command and step tracking |
 | `tools.ts` | Interactive `/tools` command to enable/disable tools with session persistence |
@@ -79,14 +79,14 @@ cp permission-gate.ts ~/.prime/agent/extensions/
 ### Git Integration
 
 | Extension | Description |
-|-----------|-------------|
+| ----------- | ------------- |
 | `git-checkpoint.ts` | Creates git stash checkpoints at each turn for code restoration on fork |
 | `auto-commit-on-exit.ts` | Auto-commits on exit using last assistant message for commit message |
 
 ### System Prompt & Compaction
 
 | Extension | Description |
-|-----------|-------------|
+| ----------- | ------------- |
 | `pirate.ts` | Demonstrates `systemPromptAppend` to dynamically modify system prompt |
 | `claude-rules.ts` | Scans `.claude/rules/` folder and lists rules in system prompt |
 | `custom-compaction.ts` | Custom compaction that summarizes entire conversation |
@@ -95,40 +95,40 @@ cp permission-gate.ts ~/.prime/agent/extensions/
 ### System Integration
 
 | Extension | Description |
-|-----------|-------------|
+| ----------- | ------------- |
 | `mac-system-theme.ts` | Syncs the Prime Agent theme with macOS dark/light mode |
 
 ### Resources
 
 | Extension | Description |
-|-----------|-------------|
+| ----------- | ------------- |
 | `dynamic-resources/` | Loads skills, prompts, and themes using `resources_discover` |
 
 ### Messages & Communication
 
 | Extension | Description |
-|-----------|-------------|
+| ----------- | ------------- |
 | `message-renderer.ts` | Custom message rendering with colors and expandable details via `registerMessageRenderer` |
 | `event-bus.ts` | Inter-extension communication via `pi.events` |
 
 ### Session Metadata
 
 | Extension | Description |
-|-----------|-------------|
+| ----------- | ------------- |
 | `session-name.ts` | Name sessions for the session selector via `setSessionName` |
 | `bookmark.ts` | Bookmark entries with labels for `/tree` navigation via `setLabel` |
 
 ### Custom Providers
 
 | Extension | Description |
-|-----------|-------------|
+| ----------- | ------------- |
 | `custom-provider-anthropic/` | Custom Anthropic provider with OAuth support and custom streaming implementation |
 | `custom-provider-gitlab-duo/` | GitLab Duo provider using the inherited `@earendil-works/pi-ai` streaming API through a proxy |
 
 ### External Dependencies
 
 | Extension | Description |
-|-----------|-------------|
+| ----------- | ------------- |
 | `with-deps/` | Extension with its own package.json and dependencies (demonstrates jiti module resolution) |
 | `file-trigger.ts` | Watches a trigger file and injects contents into conversation |
 
@@ -178,6 +178,7 @@ export default function (pi: ExtensionAPI) {
 ## Key Patterns
 
 **Use StringEnum for string parameters** (required for Google API compatibility):
+
 ```typescript
 import { StringEnum } from "@earendil-works/pi-ai";
 
@@ -189,6 +190,7 @@ action: Type.Union([Type.Literal("list"), Type.Literal("add")])
 ```
 
 **State persistence via details:**
+
 ```typescript
 // Store state in tool result details for proper forking support
 return {

@@ -20,7 +20,7 @@ The editor can be replaced temporarily by built-in UI such as `/settings` or by 
 ### Editor Features
 
 | Feature | How |
-|---------|-----|
+| --------- | ----- |
 | File reference | Type `@` to fuzzy-search project files |
 | Path completion | Press Tab to complete paths |
 | Multi-line input | Shift+Enter, or Ctrl+Enter on Windows Terminal |
@@ -36,7 +36,7 @@ See [Keybindings](keybindings.md) for all shortcuts and customization.
 Type `/` in the editor to open command completion. Extensions can register custom commands, skills are available as `/skill:name`, and prompt templates expand via `/templatename`.
 
 | Command | Description |
-|---------|-------------|
+| --------- | ------------- |
 | `/login`, `/logout` | Manage OAuth or API-key credentials |
 | `/model` | Switch models |
 | `/effort` | Set the reasoning/thinking level |
@@ -189,7 +189,7 @@ See [Prime Agent Packages](packages.md) for package sources and security notes.
 ### Modes
 
 | Flag | Description |
-|------|-------------|
+| ------ | ------------- |
 | default | Interactive mode |
 | `-p`, `--print` | Print response and exit |
 | `--mode json` | Output all events as JSON lines; see [JSON mode](json.md) |
@@ -204,7 +204,7 @@ cat README.md | prime-agent -p "Summarize this text"
 ### Model Options
 
 | Option | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `--provider <name>` | Provider, such as `anthropic`, `openai`, or `google` |
 | `--model <pattern>` | Model pattern or ID; supports `provider/id` and optional `:<thinking>` |
 | `--api-key <key>` | API key, overriding environment variables |
@@ -216,7 +216,7 @@ Use `prime-agent model list [search]` to list available models.
 ### Session Options
 
 | Option | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `-c`, `--continue` | Continue the most recent session |
 | `-r`, `--resume [path\|id]` | Browse and select a session, or resume a specific session file or partial UUID |
 | `--fork <path\|id>` | Fork a session file or partial UUID into a new session |
@@ -228,7 +228,7 @@ Use `prime-agent session export <file> [output]` to export a session to HTML.
 ### Tool Options
 
 | Option | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `--tools <list>`, `-t <list>` | Allowlist specific built-in, extension, and custom tools |
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
@@ -238,7 +238,7 @@ Built-in tools: `ipython`.
 ### Resource Options
 
 | Option | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `-e`, `--extension <source>` | Load an extension from path, npm, or git; repeatable |
 | `--no-extensions`, `-ne` | Disable extension discovery |
 | `--skill <path>` | Load a skill; repeatable |
@@ -260,7 +260,7 @@ prime-agent --no-extensions -e ./my-extension.ts
 Autonomous mode is a host policy for unattended work. It starts disabled. `--autonomous` enables it, and supplying any `--autonomous-*` sub-option also enables it. The host starts each enabled run with fresh continuation, turn, token, and elapsed-time counters.
 
 | Option | Behavior, units, and default |
-|--------|------------------------------|
+| -------- | ------------------------------ |
 | `--autonomous` | Enable autonomous continuations. With no gates, the host keeps requesting work until a limit prevents another continuation. |
 | `--autonomous-gate <command>` | Add a shell command that must pass before the run can finish. Repeatable commands run in CLI order; the default is no gates. |
 | `--autonomous-gate-retries <n>` | Set the per-gate retry limit. Default: `3`. A failed gate can continue while its recorded attempt is at most this value; the next failed attempt exhausts the gate. |
@@ -299,7 +299,7 @@ Goals are separate from autonomous mode: `--goal <objective>` starts a persisten
 ### Other Options
 
 | Option | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `--cwd <dir>` | Use a specific working directory for the session |
 | `--system-prompt <text>` | Replace default prompt; context files and skills are still appended |
 | `--append-system-prompt <text>` | Append to system prompt |
@@ -350,7 +350,7 @@ prime-agent --tools ipython -p "Review the code"
 ### Environment Variables
 
 | Variable | Description |
-|----------|-------------|
+| ---------- | ------------- |
 | `PRIME_AGENT_CODING_AGENT_DIR` | Override config directory; default is `~/.prime/agent` |
 | `PRIME_AGENT_SESSION_DIR` | Override session storage directory; overridden by `--session-dir` |
 | `PRIME_AGENT_CODING_AGENT_SESSION_DIR` | Legacy alias for `PRIME_AGENT_SESSION_DIR` |

@@ -62,7 +62,7 @@ sequenceDiagram
 ## Component Ownership
 
 | Component | Responsibility |
-|---|---|
+| --- | --- |
 | `src/core/kernel/repl-manager.ts` | Runtime process, stdio protocol, execution, host-request dispatch, interrupt, and shutdown. |
 | `src/core/tools/ipython.ts` | Agent tool wrapper, lazy kernel provisioning, namespace bootstrap, and output shaping. |
 | `src/core/agent-session.ts` | RLM policy, child creation, registry, usage attribution, cancellation, and goal handlers. |
@@ -241,7 +241,7 @@ Provider credentials are resolved by the TypeScript host. The bounded model cata
 ## Failure Modes
 
 | Failure | Behavior |
-|---|---|
+| --- | --- |
 | Managed runtime is missing | Kernel bootstrap rebuilds it; a custom `PRIME_AGENT_KERNEL_PYTHON` without a current `prime-agent-runtime` is rejected at kernel startup. |
 | Depth limit reached | The host rejects the `rlm.run` request; the error reply raises in Python. |
 | Unsupported options | Host rejects the request. |

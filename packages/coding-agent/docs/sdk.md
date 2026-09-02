@@ -5,6 +5,7 @@
 The SDK provides programmatic access to Prime Agent's capabilities. Use it to embed Prime Agent in other applications, build custom interfaces, or integrate with automated workflows.
 
 **Example use cases:**
+
 - Build a custom UI (web, desktop, mobile)
 - Integrate agent capabilities into existing applications
 - Create automated pipelines with agent reasoning
@@ -119,8 +120,7 @@ Session replacement APIs such as new-session, resume, fork, and import live on `
 
 ### createAgentSessionRuntime() and AgentSessionRuntime
 
-Use the runtime API when you need to replace the active session and rebuild cwd-bound runtime state.
-This is the same layer used by the built-in interactive, print, and RPC modes.
+Use the runtime API when you need to replace the active session and rebuild cwd-bound runtime state. This is the same layer used by the built-in interactive, print, and RPC modes.
 
 `createAgentSessionRuntime()` takes a runtime factory plus the initial cwd/session target. The factory closes over process-global fixed inputs, recreates cwd-bound services for the effective cwd, resolves session options against those services, and returns a full runtime result.
 
@@ -219,6 +219,7 @@ await session.prompt("After you're done, also check X", { streamingBehavior: "fo
 ```
 
 **Behavior:**
+
 - **Extension commands** (e.g., `/mycommand`): Execute immediately, even during streaming. They manage their own LLM interaction via `pi.sendMessage()`.
 - **File-based prompt templates** (from `.md` files): Expanded to their content before sending or queueing.
 - **During streaming without `streamingBehavior`**: Throws an error. Use `steer()` or `followUp()` directly, or specify the option.
@@ -343,6 +344,7 @@ const { session } = await createAgentSession({
 ```
 
 `cwd` is used by `DefaultResourceLoader` for:
+
 - Project extensions (`.prime/agent/extensions/`)
 - Project skills:
   - `.prime/agent/skills/`
@@ -352,6 +354,7 @@ const { session } = await createAgentSession({
 - Session storage resolution
 
 `agentDir` is used by `DefaultResourceLoader` for:
+
 - Global extensions (`extensions/`)
 - Global skills:
   - `skills/` under `agentDir` (for example `~/.prime/agent/skills/`)
@@ -401,6 +404,7 @@ const { session } = await createAgentSession({
 ```
 
 If no model is provided:
+
 1. Tries to restore from session (if continuing)
 2. Uses default from settings
 3. Falls back to first available model
@@ -410,6 +414,7 @@ If no model is provided:
 ### API Keys and OAuth
 
 API key resolution priority (handled by AuthStorage):
+
 1. Runtime overrides (via `setRuntimeApiKey`, not persisted)
 2. Stored credentials in `auth.json` (API keys or OAuth tokens)
 3. Environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.)
@@ -502,10 +507,12 @@ const { session } = await createAgentSession({
 ```
 
 **When you don't need factories:**
+
 - If you omit `tools`, Prime Agent automatically creates them with the correct `cwd`
 - If you use `process.cwd()` as your `cwd`, the pre-built instances work fine
 
 **When you must use factories:**
+
 - When you specify both `cwd` (different from `process.cwd()`) AND `tools`
 
 > See [examples/sdk/05-tools.ts](../examples/sdk/05-tools.ts)
@@ -796,12 +803,14 @@ const { session } = await createAgentSession({
 ```
 
 **Static factories:**
+
 - `SettingsManager.create(cwd?, agentDir?)` - Load from files
 - `SettingsManager.inMemory(settings?)` - No file I/O
 
 **Project-specific settings:**
 
 Settings load from two locations and merge:
+
 1. Global: `~/.prime/agent/settings.json`
 2. Project: `<cwd>/.prime/agent/settings.json`
 
@@ -1069,12 +1078,14 @@ prime-agent --mode rpc --no-session
 See [RPC documentation](rpc.md) for the JSON protocol.
 
 The SDK is preferred when:
+
 - You want type safety
 - You're in the same Node.js process
 - You need direct access to agent state
 - You want to customize tools/extensions programmatically
 
 RPC mode is preferred when:
+
 - You're integrating from another language
 - You want process isolation
 - You're building a language-agnostic client

@@ -103,7 +103,7 @@
 ## [0.2.2] - 2026-06-25
 
 - Added a curated `vision` flag on Prime Inference model metadata so vision-capable models advertise `["text", "image"]` input, since the Prime Inference models API reports no modality data ([#261](https://github.com/PrimeIntellect-ai/prime-agent/issues/261)).
-- Changed Prime Inference model names to drop the redundant ` (Prime Inference)` suffix at the generator source ([#252](https://github.com/PrimeIntellect-ai/prime-agent/issues/252)).
+- Changed Prime Inference model names to drop the redundant `(Prime Inference)` suffix at the generator source ([#252](https://github.com/PrimeIntellect-ai/prime-agent/issues/252)).
 - Fixed the declared context window for Prime Inference Claude Opus 4.6/4.7/4.8 and Sonnet 4.6 to 200k (the route lacks the long-context beta), and added `calculatePromptTokens` so context budgeting counts prompt tokens only ([#246](https://github.com/PrimeIntellect-ai/prime-agent/issues/246)).
 
 ## [0.2.1] - 2026-06-23
@@ -225,6 +225,7 @@
 ### Breaking Changes
 
 - Replaced `OpenAICompletionsCompat.reasoningEffortMap` with top-level `Model.thinkingLevelMap` for model-specific thinking controls ([#3208](https://github.com/badlogic/pi-mono/issues/3208)). Migration: move mappings from `model.compat.reasoningEffortMap` to `model.thinkingLevelMap`. See `packages/ai/README.md#custom-models` and `packages/coding-agent/docs/models.md#thinking-level-map`. Map values keep the same provider-specific string semantics, and `null` marks a pi thinking level unsupported. Example:
+
   ```ts
   // Before
   compat: { reasoningEffortMap: { high: "high", xhigh: "max" } }
@@ -232,6 +233,7 @@
   // After
   thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: "max" }
   ```
+
 - Removed `supportsXhigh()`. Migration: use `getSupportedThinkingLevels(model).includes("xhigh")` or `clampThinkingLevel(model, requestedLevel)` instead ([#3208](https://github.com/badlogic/pi-mono/issues/3208)).
 
 ### Added
@@ -1385,14 +1387,11 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
 ### Added
 
 - **`agentLoopContinue` function**: Continue an agent loop from existing context without adding a new user message. Validates that the last message is `user` or `toolResult`. Useful for retry after context overflow or resuming from manually-added tool results.
+- Added `validateToolCall(tools, toolCall)` helper that finds the tool by name and validates arguments.
 
 ### Breaking Changes
 
 - Removed provider-level tool argument validation. Validation now happens in `agentLoop` via `executeToolCalls`, allowing models to retry on validation errors. For manual tool execution, use `validateToolCall(tools, toolCall)` or `validateToolArguments(tool, toolCall)`.
-
-### Added
-
-- Added `validateToolCall(tools, toolCall)` helper that finds the tool by name and validates arguments.
 
 - **OpenAI compatibility overrides**: Added `compat` field to `Model` for `openai-completions` API, allowing explicit configuration of provider quirks (`supportsStore`, `supportsDeveloperRole`, `supportsReasoningEffort`, `maxTokensField`). Falls back to URL-based detection if not set. Useful for LiteLLM, custom proxies, and other non-standard endpoints. ([#133](https://github.com/badlogic/pi-mono/issues/133), thanks @fink-andreas for the initial idea and PR)
 
@@ -1422,7 +1421,7 @@ _Dedicated to Peter's shoulder ([@steipete](https://twitter.com/steipete))_
   - Corrected cache_read: $1.50 → $0.50 per MTok
   - Corrected cache_write: $18.75 → $6.25 per MTok
   - Added manual override in `scripts/generate-models.ts` until upstream fix is merged
-  - Submitted PR to models.dev: https://github.com/sst/models.dev/pull/439
+  - Submitted PR to models.dev: <https://github.com/sst/models.dev/pull/439>
 
 ## [0.9.4] - 2025-11-26
 

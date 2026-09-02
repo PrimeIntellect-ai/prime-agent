@@ -10,7 +10,7 @@ Prime Intellect is an open superintelligence lab building open-source AGI infras
 ## Product Map
 
 | Product | What it is | Details |
-|---|---|---|
+| --- | --- | --- |
 | verifiers | Python library for building LLM environments and evaluations | [environments.md](references/environments.md) |
 | Environments Hub | Platform library of community RL environments (`prime env`) | [environments.md](references/environments.md) |
 | Hosted Evaluations | Run evals on Prime-managed infra (`prime eval run --hosted`) | [environments.md](references/environments.md) |
@@ -32,18 +32,18 @@ prime login              # browser auth; or: prime config set-api-key
 prime config view        # verify configuration
 ```
 
-The same package provides the Python SDKs (e.g. `prime_sandboxes`, `prime_tunnel`). Source: https://github.com/PrimeIntellect-ai/prime
+The same package provides the Python SDKs (e.g. `prime_sandboxes`, `prime_tunnel`). Source: <https://github.com/PrimeIntellect-ai/prime>
 
 ## Live Documentation
 
-Authoritative, current docs live at https://docs.primeintellect.ai. Any docs page is fetchable as Markdown by appending `.md` to its URL, and the full index is at https://docs.primeintellect.ai/llms.txt. When you need details not covered here (exact flags, API schemas, pricing, new features), fetch the live docs instead of guessing:
+Authoritative, current docs live at <https://docs.primeintellect.ai>. Any docs page is fetchable as Markdown by appending `.md` to its URL, and the full index is at <https://docs.primeintellect.ai/llms.txt>. When you need details not covered here (exact flags, API schemas, pricing, new features), fetch the live docs instead of guessing:
 
 ```bash
 curl -s https://docs.primeintellect.ai/llms.txt                      # discover pages
 curl -s https://docs.primeintellect.ai/sandboxes/overview.md         # fetch a page as markdown
 ```
 
-The REST API is documented under `api-reference/` pages (OpenAPI spec: https://api.primeintellect.ai/openapi.json), with `https://api.primeintellect.ai` as the base URL.
+The REST API is documented under `api-reference/` pages (OpenAPI spec: <https://api.primeintellect.ai/openapi.json>), with `https://api.primeintellect.ai` as the base URL.
 
 ## Command Quick Reference
 
@@ -84,4 +84,4 @@ prime pods ssh <pod-id>             # SSH in (needs: prime config set-ssh-key-pa
 - Smoke-test small (`-n 5`) before scaling evals or training; keep default result uploads unless the user explicitly opts out.
 - For non-trivial eval/training work, ask whether the user wants instruct models (`gpt-4.1` series, `qwen3` instruct) or reasoning models (`gpt-5` series, `qwen3` thinking, `glm` series).
 - Hosted Training launches from a CPU machine; self-managed `prime-rl` requires local GPU access and is a power-user path.
-- The dashboard at https://app.primeintellect.ai covers API keys, billing, teams, and anything the CLI does not.
+- The dashboard at <https://app.primeintellect.ai> covers API keys, billing, teams, and anything the CLI does not.

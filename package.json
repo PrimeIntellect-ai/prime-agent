@@ -14,7 +14,7 @@
 		"build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build",
 		"dev": "concurrently --names \"ai,agent,coding-agent,tui\" --prefix-colors \"cyan,yellow,red,magenta\" \"cd packages/ai && npm run dev\" \"cd packages/agent && npm run dev\" \"cd packages/coding-agent && npm run dev\" \"cd packages/tui && npm run dev\"",
 		"dev:tsc": "cd packages/ai && npm run dev:tsc",
-		"check": "biome check --write --error-on-warnings . && tsgo --noEmit && npm run check:installer && npm run check:browser-smoke",
+		"check": "biome check --write --error-on-warnings . && tsgo --noEmit && npm run check:md && npm run check:installer && npm run check:browser-smoke",
 		"check:installer": "node scripts/check-installer-render.mjs",
 		"check:browser-smoke": "node scripts/check-browser-smoke.mjs",
 		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",
@@ -31,7 +31,8 @@
 		"release:patch": "node scripts/release.mjs patch",
 		"release:minor": "node scripts/release.mjs minor",
 		"release:major": "node scripts/release.mjs major",
-		"prepare": "husky"
+		"prepare": "husky",
+		"check:md": "markdownlint-cli2 '**/*.md'"
 	},
 	"devDependencies": {
 		"@anthropic-ai/sandbox-runtime": "^0.0.55",
@@ -41,6 +42,7 @@
 		"concurrently": "^9.2.4",
 		"husky": "^9.1.7",
 		"jiti": "^2.7.0",
+		"markdownlint-cli2": "^0.23.1",
 		"shx": "^0.4.0",
 		"tsx": "^4.23.1",
 		"typescript": "^7.0.2"

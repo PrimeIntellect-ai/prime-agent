@@ -77,11 +77,13 @@ The Python kernel runtime is set up automatically on first invocation. Set `PRIM
 For each built-in provider, Prime Agent maintains a list of tool-capable models, updated with every release. Authenticate via subscription (`/login`) or API key, then select any model from that provider via `/model` (or Ctrl+L).
 
 **Subscriptions:**
+
 - Anthropic Claude Pro/Max
 - OpenAI ChatGPT Plus/Pro (Codex)
 - GitHub Copilot
 
 **API keys:**
+
 - Anthropic
 - OpenAI
 - Prime Inference
@@ -130,7 +132,7 @@ The editor can be temporarily replaced by other UI, like built-in `/settings` or
 ### Editor
 
 | Feature | How |
-|---------|-----|
+| --------- | ----- |
 | File reference | Type `@` to fuzzy-search project files |
 | Path completion | Tab to complete paths |
 | Multi-line | Shift+Enter (or Ctrl+Enter on Windows Terminal) |
@@ -144,7 +146,7 @@ Standard editing keybindings for delete word, undo, etc. See [docs/keybindings.m
 Type `/` in the editor to trigger commands. [Extensions](#extensions) can register custom commands, [skills](#skills) are available as `/skill:name`, and [prompt templates](#prompt-templates) expand via `/templatename`.
 
 | Command | Description |
-|---------|-------------|
+| --------- | ------------- |
 | `/login`, `/logout` | OAuth authentication |
 | `/model` | Switch models |
 | `/effort` | Set reasoning/thinking level |
@@ -176,7 +178,7 @@ See `/hotkeys` for the full list. Customize via `~/.prime/agent/keybindings.json
 **Commonly used:**
 
 | Key | Action |
-|-----|--------|
+| ----- | -------- |
 | Ctrl+C | Interrupt active work, or show the exit hint when idle |
 | Ctrl+C twice | Exit while the exit hint is visible |
 | Escape | Clear the input without interrupting active work |
@@ -250,7 +252,7 @@ Compaction is lossy. The full history remains in the JSONL file; use `/tree` to 
 Use `/settings` to modify common options, or edit JSON files directly:
 
 | Location | Scope |
-|----------|-------|
+| ---------- | ------- |
 | `~/.prime/agent/settings.json` | Global (all projects) |
 | `.prime/agent/settings.json` | Project (overrides global) |
 
@@ -265,6 +267,7 @@ Use `--offline` or `PI_OFFLINE=1` to disable startup network operations, includi
 ## Context Files
 
 Prime Agent loads `AGENTS.md` (or `CLAUDE.md`) at startup from:
+
 - `~/.prime/agent/AGENTS.md` (global)
 - Parent directories (walking up from cwd)
 - Current directory
@@ -327,7 +330,7 @@ help(linear.list_issues)                                 # description + argumen
 
 Built-in integrations for Linear and Notion ship disabled. **Logging in enables them**: open `/login`, switch to **MCP Connections**, pick the integration, and complete OAuth in the browser. The integration's skill then becomes visible and is auto-imported into the kernel. `/mcp` opens the same tab, while its subcommands support direct management:
 
-```
+```text
 /mcp                 list integrations and connection status
 /mcp login <name>    connect via OAuth (browser)
 /mcp logout <name>   disconnect
@@ -381,6 +384,7 @@ export default function (pi: ExtensionAPI) {
 The default export can also be `async`. Prime Agent waits for async extension factories before startup continues, which is useful for one-time initialization such as fetching remote model lists before calling `pi.registerProvider()`.
 
 **What's possible:**
+
 - Custom tools (or replace built-in tools entirely)
 - Additional orchestration workflows and plan modes
 - Custom compaction and summarization
@@ -536,7 +540,7 @@ prime-agent config                             # Enable/disable package resource
 ### Modes
 
 | Flag | Description |
-|------|-------------|
+| ------ | ------------- |
 | (default) | Interactive mode |
 | `-p`, `--print` | Print response and exit |
 | `--mode json` | Output all events as JSON lines (see [docs/json.md](docs/json.md)) |
@@ -551,7 +555,7 @@ cat README.md | prime-agent -p "Summarize this text"
 ### Model Options
 
 | Option | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `--provider <name>` | Provider (anthropic, openai, google, etc.) |
 | `--model <pattern>` | Model pattern or ID (supports `provider/id` and optional `:<thinking>`) |
 | `--api-key <key>` | API key (overrides env vars) |
@@ -563,7 +567,7 @@ Use `prime-agent model list [search]` to list available models.
 ### Session Options
 
 | Option | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `-c`, `--continue` | Continue most recent session |
 | `-r`, `--resume [path\|id]` | Open the searchable session view, or resume a specific session file or partial UUID |
 | `--fork <path\|id>` | Fork specific session file or partial UUID into a new session |
@@ -575,7 +579,7 @@ Use `prime-agent session export <file> [output]` to export a saved session to HT
 ### Tool Options
 
 | Option | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `--tools <list>`, `-t <list>` | Allowlist specific tool names across built-in, extension, and custom tools |
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
@@ -585,7 +589,7 @@ Available built-in tools: `ipython`
 ### Resource Options
 
 | Option | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `-e`, `--extension <source>` | Load extension from path, npm, or git (repeatable) |
 | `--no-extensions` | Disable extension discovery |
 | `--skill <path>` | Load skill (repeatable) |
@@ -603,7 +607,7 @@ Combine `--no-*` with explicit flags to load exactly what you need, ignoring set
 Autonomous mode is disabled by default. `--autonomous` or any of its sub-options enables host-managed continuations for unattended work.
 
 | Option | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `--autonomous` | Continue until gates pass or a limit prevents another continuation |
 | `--autonomous-gate <command>` | Add a repeatable shell command that must pass before completion |
 | `--autonomous-gate-retries <n>` | Positive per-gate retry limit; default `3` |
@@ -618,7 +622,7 @@ Gates run before the continuation, turn, token, and wall-clock limits are evalua
 ### Other Options
 
 | Option | Description |
-|--------|-------------|
+| -------- | ------------- |
 | `--system-prompt <text>` | Replace default prompt (context files and skills still appended) |
 | `--append-system-prompt <text>` | Append to system prompt |
 | `--verbose` | Force verbose startup |
@@ -669,7 +673,7 @@ prime-agent --thinking high "Solve this complex problem"
 ### Environment Variables
 
 | Variable | Description |
-|----------|-------------|
+| ---------- | ------------- |
 | `PRIME_AGENT_CODING_AGENT_DIR` | Override config directory (default: `~/.prime/agent`) |
 | `PRIME_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
 | `PRIME_AGENT_CODING_AGENT_SESSION_DIR` | Legacy alias for `PRIME_AGENT_SESSION_DIR` |
