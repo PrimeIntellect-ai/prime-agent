@@ -1247,6 +1247,24 @@ describe("agent trace upload", () => {
 		// Synchronously durable, tagged with its own delivery kind, before any wire call.
 		expect(readOutboxEntry(tempDir, ledgerPath)).toEqual({ sessionFile: ledgerPath, kind: "semantic-edges" });
 		expect(calls).toHaveLength(0);
+
+		// A re-install with a DIFFERENT ledger path registers the new ledger at the next persist.
+		const movedLedgerPath = join(tempDir, "artifacts-moved", "semantic-edges.jsonl");
+		installAgentTraceUpload(sessionManager, {
+			authStorage: AuthStorage.inMemory({
+				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+			}),
+			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
+			baseUrl: "https://api.example.test",
+			fetchFn: createFetchRecorder(calls),
+			semanticEdgesLedgerPath: movedLedgerPath,
+		});
+		sessionManager.appendMessage(createAssistantMessage("after re-install"));
+		expect(readOutboxEntry(tempDir, movedLedgerPath)).toEqual({
+			sessionFile: movedLedgerPath,
+			kind: "semantic-edges",
+		});
+		expect(calls).toHaveLength(0);
 	});
 
 	it("counts appended ledger bytes as pending, stays quiet at the cursor, and prunes deleted ledgers", async () => {

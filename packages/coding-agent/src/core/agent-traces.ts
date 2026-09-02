@@ -1076,6 +1076,9 @@ class AgentTraceUploadController {
 	) {}
 
 	update(options: AgentTraceUploadInstallOptions): void {
+		if (options.semanticEdgesLedgerPath !== this.options.semanticEdgesLedgerPath) {
+			this.ledgerIntentMarked = false;
+		}
 		this.options = options;
 	}
 
