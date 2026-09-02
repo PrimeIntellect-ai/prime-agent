@@ -82,14 +82,14 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 | B01 | A01, A03 | done | Add `ExecutionLocation` and opaque remote session DTOs |
 | B02 | A01, A07 | in_progress | Introduce location-neutral `HostedSubagent` and preserve local behavior |
 | B03 | A02, A16 | done | Add capability-gated remote host protocol and replay primitives |
-| B04 | A02, A16 | in_progress | Add authenticated link state machine and fake relay transport |
+| B04 | A02, A16 | done | Add authenticated link state machine and fake relay transport |
 | B05 | A04, A14 | done | Add typed streaming home-provider proxy |
 | B06 | A05, A15 | done | Add Prime Sandbox provisioner and background-job lifecycle |
 | B07 | A10, A14 | done | Add Git workspace snapshot and safe sync-back |
 | B08 | A12, B01, B02 | queued | Add `sandbox` and `sandbox_options` to RLM APIs |
 | B09 | A11, B01, B03 | done | Add top-level sandbox session creation APIs and CLI flags |
-| B10 | A06, B03, B04 | queued | Route durable direct agent-to-agent communication across hosts |
-| B11 | A07, B03, B04 | queued | Mirror observation, transcript, recap, and usage events |
+| B10 | A06, B03, B04 | in_progress | Route durable direct agent-to-agent communication across hosts |
+| B11 | A07, B03, B04 | in_progress | Mirror observation, transcript, recap, and usage events |
 | B12 | A08, B03, B06 | in_progress | Add sandbox lifecycle, checkpoint, passivation, wake, and deletion |
 | B13 | A09, B01, B11 | queued | Show execution location and connection health in Agents View |
 | B14 | B05, B06, B08, B09 | in_progress | Wire end-to-end sandbox session orchestration |
@@ -156,3 +156,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Started B12 after B06 integration. Started transport-neutral B14a provider-client and B14b authenticated Prime Tunnel foundations early because they depend only on already-integrated contracts and touch separate files.
 
 - Integrated the B14a sandbox-side provider client as `2195c7a23`; 67 client/home-proxy tests verify exact model admission, DTO-only requests, concurrent stream isolation, deep frame validation, usage/tool-call reconstruction, cancellation, disconnect cleanup, and credential-free payloads.
+
+- Integrated B04 managed relay as `53e6b73fe` + `c9b1cabec` (cleanup `1eff5e4e6`); 151 B03/B04 tests cover strict peer/build/session admission, session-bound durable journals, replay/deduplication, send-failure teardown, reconnect, and bounded credential-free frames. Started B10 durable cross-host communication and B11 observation mirroring.
+
+- Integrated the B14b Prime Tunnel manager as `a636f7d99`; it uses outbound `prime tunnel start`, validates and consumes the generated one-time grant, bounds injected CLI output, captures only validated tunnel IDs for cleanup, and provides bounded TERM/KILL plus exact-ID CLI cleanup without retaining output.
