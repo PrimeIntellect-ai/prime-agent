@@ -79,7 +79,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 
 | ID | Depends on | Status | Work package |
 |---|---|---|---|
-| B01 | A01, A03 | in_progress | Add `ExecutionLocation` and opaque remote session DTOs |
+| B01 | A01, A03 | done | Add `ExecutionLocation` and opaque remote session DTOs |
 | B02 | A01, A07 | queued | Introduce location-neutral `HostedSubagent` and preserve local behavior |
 | B03 | A02, A16 | in_progress | Add capability-gated remote host protocol and replay primitives |
 | B04 | A02, A16 | queued | Add authenticated link state machine and fake relay transport |
@@ -135,3 +135,5 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Started B01, B03, B05, B06, and B07 in isolated worktrees after their architecture dependencies completed.
 - Completed A06 and A13. Remote message delivery needs receiver-side ID deduplication; integration tests will extend the existing faux-provider and injectable subagent-host harnesses.
 - Completed A11 from its retained transcript after the subagent failed to send a final summary. Top-level support enters through CLI create options and the capability-gated daemon create command.
+
+- Integrated B01 as `68c8c5704`; its remote-safe DTOs passed 49 focused tests after credential-field and error-sanitization review.
