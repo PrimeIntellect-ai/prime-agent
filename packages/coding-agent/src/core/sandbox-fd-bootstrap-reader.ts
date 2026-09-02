@@ -192,7 +192,7 @@ function copyOptions(raw: unknown): ParsedOptions | null {
 				return null;
 		}
 
-		adapter = a as FsFdAdapter;
+		adapter = Object.freeze({ read: aDescs.read.value, close: aDescs.close.value });
 	}
 
 	return Object.freeze({ totalTimeoutMs, closeConfirmTimeoutMs, adapter });

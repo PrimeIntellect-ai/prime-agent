@@ -338,6 +338,79 @@ describe("strict options preflight", () => {
 		});
 		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
 	});
+
+	it("adapter get-trap counter stays zero during actual read and close", async () => {
+		let _getTrapCount = 0;
+		const payload = new Uint8Array([0x42]);
+		const f = tempFileWithFrame(payload);
+		const rawRead = (
+			_fd: number,
+			buf: Uint8Array,
+			off: number,
+			len: number,
+			_pos: number | null,
+			cb: (err: Error | null, br: number, buf: Uint8Array) => void,
+		) => {
+			const bytes = readSync(_fd, buf, off, len, null);
+			cb(null, bytes, buf);
+		};
+		const rawClose = (_fd: number, cb: (err: Error | null) => void) => {
+			try {
+				closeSync(_fd);
+			} catch {}
+			cb(null);
+		};
+		const proxy = new Proxy(
+			{ read: rawRead, close: rawClose },
+			{
+				get(t, p) {
+					_getTrapCount++;
+					return Reflect.get(t, p);
+				},
+			},
+		);
+		const r = await readSandboxBootstrapFrame(f.fd, {
+			_adapter: proxy as unknown as FsFdAdapter,
+		});
+		expect(r.ok).toBe(true);
+		if (r.ok) expect(Array.from(r.payload)).toEqual([0x42]);
+		f.cleanup();
+	});
+
+	it("accepts null-prototype adapter (plain object with null proto)", async () => {
+		const payload = new Uint8Array([0x42]);
+		const f = tempFileWithFrame(payload);
+		const adapter: FsFdAdapter = Object.assign(Object.create(null), {
+			read(
+				_fd: number,
+				buf: Uint8Array,
+				off: number,
+				len: number,
+				_pos: number | null,
+				cb: (err: Error | null, br: number, buf: Uint8Array) => void,
+			) {
+				const bytes = readSync(_fd, buf, off, len, null);
+				cb(null, bytes, buf);
+			},
+			close(_fd: number, cb: (err: Error | null) => void) {
+				try {
+					closeSync(_fd);
+				} catch {}
+				cb(null);
+			},
+		});
+		const fd2 = openSync(f.path, "r");
+		try {
+			const r = await readSandboxBootstrapFrame(fd2, { _adapter: adapter });
+			expect(r.ok).toBe(true);
+			if (r.ok) expect(Array.from(r.payload)).toEqual([0x42]);
+		} finally {
+			try {
+				closeSync(fd2);
+			} catch {}
+			f.cleanup();
+		}
+	});
 });
 
 // ---------------------------------------------------------------------------
