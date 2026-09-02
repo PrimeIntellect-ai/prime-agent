@@ -58,10 +58,10 @@ done
 # Validate platform if specified
 if [[ -n "$PLATFORM" ]]; then
 	case "$PLATFORM" in
-		darwin-arm64|darwin-x64|linux-x64|linux-arm64) ;;
+		darwin-arm64|darwin-x64|linux-x64|linux-arm64|windows-x64|windows-arm64) ;;
 		*)
 			echo "Invalid platform: $PLATFORM"
-			echo "Valid platforms: darwin-arm64, darwin-x64, linux-x64, linux-arm64"
+			echo "Valid platforms: darwin-arm64, darwin-x64, linux-x64, linux-arm64, windows-x64, windows-arm64"
 			exit 1
 			;;
 	esac
@@ -86,7 +86,7 @@ mkdir -p binaries
 if [[ -n "$PLATFORM" ]]; then
 	PLATFORMS=("$PLATFORM")
 else
-	PLATFORMS=(darwin-arm64 darwin-x64 linux-x64 linux-arm64)
+	PLATFORMS=(darwin-arm64 darwin-x64 linux-x64 linux-arm64 windows-x64 windows-arm64)
 fi
 
 for platform in "${PLATFORMS[@]}"; do
@@ -117,7 +117,13 @@ bun ../../scripts/pack-prime-agent-release.mjs \
 echo ""
 echo "==> Build complete!"
 echo "Release archives:"
-ls -lh "release/artifacts/"*.tar.gz
+shopt -s nullglob
+archives=(release/artifacts/*.tar.gz release/artifacts/*.zip)
+if (( ${#archives[@]} == 0 )); then
+	echo "No release archives were created" >&2
+	exit 1
+fi
+ls -lh "${archives[@]}"
 echo ""
 echo "Metadata:"
-ls -lh "release/artifacts/SHA256SUMS" "release/artifacts/latest.json" "release/artifacts/stable" 2>/dev/null || true
+ls -lh "release/artifacts/SHA256SUMS" "release/artifacts/latest.json" "release/artifacts/stable"

@@ -13,6 +13,7 @@ import {
 	getDaemonSocketIdentity,
 	normalizeSocketPath,
 	prepareDaemonSocketPath,
+	windowsNamedPipeUserScope,
 } from "../src/modes/daemon/daemon-socket.js";
 
 describe("endDaemonSocketAfterFlush", () => {
@@ -47,12 +48,31 @@ describe("normalizeSocketPath", () => {
 });
 
 describe("defaultDaemonSocketPath", () => {
-	it("uses a fixed Windows named pipe path", () => {
+	it("uses a per-user Windows named pipe path", () => {
 		if (process.platform !== "win32") {
 			return;
 		}
 
-		expect(defaultDaemonSocketPath()).toBe("\\\\.\\pipe\\prime-agent-daemon");
+		expect(defaultDaemonSocketPath()).toBe(`\\\\.\\pipe\\prime-agent-daemon-${windowsNamedPipeUserScope()}`);
+	});
+
+	it("uses a stable opaque Windows user scope", () => {
+		expect(windowsNamedPipeUserScope()).toMatch(/^[0-9a-f]{16}$/);
+		expect(windowsNamedPipeUserScope()).toBe(windowsNamedPipeUserScope());
+	});
+
+	it("detects a live Windows named pipe", async () => {
+		if (process.platform !== "win32") return;
+		const pipePath = `\\\\.\\pipe\\prime-agent-test-${process.pid}-${Date.now()}`;
+		const server = createServer();
+		await new Promise<void>((resolveListen) => server.listen(pipePath, resolveListen));
+		try {
+			await expect(prepareDaemonSocketPath(pipePath)).rejects.toThrow("already in use");
+		} finally {
+			await new Promise<void>((resolveClose, rejectClose) =>
+				server.close((error) => (error ? rejectClose(error) : resolveClose())),
+			);
+		}
 	});
 
 	it("uses a per-user Unix socket directory", () => {

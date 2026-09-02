@@ -34,7 +34,10 @@ const DEFAULT_RLM_EXTRA_PACKAGES = [
 export const DEFAULT_RLM_EXTRA_UV_ARGS = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) => pkg.uvArg);
 export const DEFAULT_RLM_EXTRA_IMPORT_NAMES = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) => pkg.importName);
 export const DEFAULT_RLM_EXTRA_IMPORT_LABELS = DEFAULT_RLM_EXTRA_PACKAGES.map((pkg) => pkg.promptLabel);
-const UV_INSTALL_COMMAND = "curl -LsSf https://astral.sh/uv/install.sh | sh";
+const IS_WINDOWS = process.platform === "win32";
+const UV_INSTALL_COMMAND_POSIX = "curl -LsSf https://astral.sh/uv/install.sh | sh";
+const UV_INSTALL_COMMAND_WINDOWS =
+	'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex"';
 const REQUIRED_HARNESS_METHODS = [
 	"create_memory",
 	"update_memory",
@@ -340,6 +343,11 @@ export function getKernelVenvDir(): string {
 	return path.join(os.homedir(), ".prime", "agent", "kernel-venv");
 }
 
+/** Python executable path inside a venv directory, respecting Windows layout. */
+function venvPythonPath(venv: string): string {
+	return IS_WINDOWS ? path.join(venv, "Scripts", "python.exe") : path.join(venv, "bin", "python");
+}
+
 function getXdgKernelVenvDir(): string {
 	const dataHome = process.env.XDG_DATA_HOME
 		? path.resolve(expandHome(process.env.XDG_DATA_HOME))
@@ -515,25 +523,35 @@ async function ensureUv(options: EnsureKernelPythonOptions): Promise<string> {
 	const shouldInstallUv =
 		process.env.PRIME_AGENT_INSTALL_UV === "1" || (!options.onProgress && (await confirmUvInstall()));
 	if (!shouldInstallUv) {
+		const command = IS_WINDOWS ? UV_INSTALL_COMMAND_WINDOWS : UV_INSTALL_COMMAND_POSIX;
 		throw new Error(
-			`uv is required to set up the Python kernel. Install uv yourself: ${UV_INSTALL_COMMAND}, ` +
+			`uv is required to set up the Python kernel. Install uv yourself: ${command}, ` +
 				"or set PRIME_AGENT_INSTALL_UV=1 to let prime-agent run that installer.",
 		);
 	}
 
 	reportProgress(options, "› installing uv (one-time)…");
 	try {
-		await run("sh", ["-c", UV_INSTALL_COMMAND], { stdio: options.onProgress ? "ignore" : "inherit" });
+		if (IS_WINDOWS) {
+			await run(
+				"powershell",
+				["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "irm https://astral.sh/uv/install.ps1 | iex"],
+				{ stdio: options.onProgress ? "ignore" : "inherit" },
+			);
+		} else {
+			await run("sh", ["-c", UV_INSTALL_COMMAND_POSIX], { stdio: options.onProgress ? "ignore" : "inherit" });
+		}
 	} catch (error) {
+		const command = IS_WINDOWS ? UV_INSTALL_COMMAND_WINDOWS : UV_INSTALL_COMMAND_POSIX;
 		throw new Error(
-			`couldn't install uv from astral.sh; install it yourself: ${UV_INSTALL_COMMAND}, then re-run prime-agent. ${errorMessage(error)}`,
+			`couldn't install uv from astral.sh; install it yourself: ${command}, then re-run prime-agent. ${errorMessage(error)}`,
 		);
 	}
 
 	if (await isExecutable(localUv)) return localUv;
 	const installedFromPath = await findExecutable("uv");
 	if (installedFromPath) return installedFromPath;
-	throw new Error("uv install completed but binary not found at ~/.local/bin/uv");
+	throw new Error(`uv install completed but binary not found at ${localUv}`);
 }
 
 async function confirmUvInstall(): Promise<boolean> {
@@ -716,7 +734,7 @@ async function bootstrapVenv(
 ): Promise<void> {
 	await mkdir(path.dirname(venv), { recursive: true });
 	const uv = await ensureUv(options);
-	const python = path.join(venv, "bin", "python");
+	const python = venvPythonPath(venv);
 	const sourceDir = await resolveRuntimeSourceDir();
 	const runtimeRequirement = sourceDir ?? RUNTIME_REQUIREMENT;
 	const runtimeIdentity = await resolveRuntimeIdentity();
@@ -873,7 +891,7 @@ async function ensureKernelPythonUncached(
 	}
 
 	const venv = await resolveWritableKernelVenvDir();
-	const python = path.join(venv, "bin", "python");
+	const python = venvPythonPath(venv);
 	const runtimeIdentity = await resolveRuntimeIdentity();
 	if (await kernelReady(python, venv, runtimeIdentity, pythonSkills)) return python;
 

@@ -1,4 +1,4 @@
-import { type ChildProcess, execFileSync } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { constants } from "node:os";
 import { basename } from "node:path";
@@ -52,6 +52,29 @@ export function isProcessAlive(pid: number): boolean {
 }
 
 export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals): void {
+	if (process.platform === "win32") {
+		const fallbackSignal = signal === "SIGKILL" ? "SIGTERM" : signal;
+		const fallback = () => {
+			try {
+				process.kill(pid, fallbackSignal);
+			} catch {
+				// Process may already be dead.
+			}
+		};
+		try {
+			const args = ["/PID", String(pid), "/T"];
+			if (signal === "SIGKILL") args.push("/F");
+			const taskkill = spawn("taskkill", args, { stdio: "ignore", windowsHide: true });
+			taskkill.once("error", fallback);
+			taskkill.once("exit", (code) => {
+				if (code !== 0 && isProcessAlive(pid)) fallback();
+			});
+			taskkill.unref();
+		} catch {
+			fallback();
+		}
+		return;
+	}
 	try {
 		process.kill(-pid, signal);
 		return;

@@ -18,7 +18,7 @@
 		"models:refresh": "bun run --cwd packages/ai generate-models",
 		"check:bun-version": "bun scripts/check-bun-version.ts",
 		"check": "bun run check:bun-version && bun --bun biome check --write --error-on-warnings . && bun run check:type && bun run check:installer && bun run check:browser-smoke",
-		"check:installer": "bun scripts/check-installer-render.mjs",
+		"check:installer": "bun scripts/check-installer-render.mjs && bun scripts/check-powershell-installer.mjs",
 		"check:browser-smoke": "bun scripts/check-browser-smoke.mjs",
 		"profile:tui": "bun scripts/profile-coding-agent-node.mjs --mode tui",
 		"profile:rpc": "bun scripts/profile-coding-agent-node.mjs --mode rpc",

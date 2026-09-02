@@ -166,7 +166,7 @@ jobs:
         working-directory: packages/coding-agent
         run: |
           mkdir -p binaries
-          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64 windows-x64 windows-arm64; do
             echo "Compiling for $platform..."
             mkdir -p "binaries/$platform"
             bun build --compile --minify --keep-names --bytecode --format=esm --external koffi --target="bun-$platform" ./dist/bun/cli.js --outfile "binaries/$platform/pi"
@@ -325,12 +325,15 @@ jobs:
           const fs = require("node:fs");
           const baseUrl = process.env.INSTALL_BASE_URL;
           if (!baseUrl) throw new Error("INSTALL_BASE_URL is required");
-          const installer = fs.readFileSync("install.sh", "utf8");
-          const renderInstaller = (channel) => installer
+          const renderInstaller = (source, channel) => source
             .replaceAll("__PRIME_AGENT_DOWNLOAD_BASE_URL__", baseUrl)
             .replaceAll("__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__", channel);
-          fs.writeFileSync("/tmp/prime-agent-install.sh", renderInstaller("stable"));
-          fs.writeFileSync("/tmp/prime-agent-install-beta.sh", renderInstaller("beta"));
+          const shellInstaller = fs.readFileSync("install.sh", "utf8");
+          const powershellInstaller = fs.readFileSync("install.ps1", "utf8");
+          fs.writeFileSync("/tmp/prime-agent-install.sh", renderInstaller(shellInstaller, "stable"));
+          fs.writeFileSync("/tmp/prime-agent-install-beta.sh", renderInstaller(shellInstaller, "beta"));
+          fs.writeFileSync("/tmp/prime-agent-install.ps1", renderInstaller(powershellInstaller, "stable"));
+          fs.writeFileSync("/tmp/prime-agent-install-beta.ps1", renderInstaller(powershellInstaller, "beta"));
           '
 
       - name: Extract production release notes
@@ -353,14 +356,17 @@ jobs:
           test -n "$R2_BUCKET"
           test -n "$R2_ENDPOINT_URL"
 
-          for artifact in "$PRODUCTION_DIR"/*.tar.gz; do
+          for artifact in "$PRODUCTION_DIR"/*.tar.gz "$PRODUCTION_DIR"/*.zip; do
             test -f "$artifact" || continue
+            content_type="application/gzip"
+            case "$artifact" in
+              *.zip) content_type="application/zip" ;;
+            esac
             aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
-              --content-type application/gzip \
+              --content-type "$content_type" \
               --cache-control 'public, max-age=31536000, immutable'
           done
-
           aws s3 cp "$PRODUCTION_DIR/SHA256SUMS" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/SHA256SUMS" \
             --endpoint-url "$R2_ENDPOINT_URL" \
             --content-type text/plain \
@@ -384,6 +390,16 @@ jobs:
           aws s3 cp /tmp/prime-agent-install-beta.sh "s3://${R2_BUCKET}/install-beta.sh" \
             --endpoint-url "$R2_ENDPOINT_URL" \
             --content-type text/x-shellscript \
+            --cache-control no-cache
+
+          aws s3 cp /tmp/prime-agent-install.ps1 "s3://${R2_BUCKET}/install.ps1" \
+            --endpoint-url "$R2_ENDPOINT_URL" \
+            --content-type text/x-powershell \
+            --cache-control no-cache
+
+          aws s3 cp /tmp/prime-agent-install-beta.ps1 "s3://${R2_BUCKET}/install-beta.ps1" \
+            --endpoint-url "$R2_ENDPOINT_URL" \
+            --content-type text/x-powershell \
             --cache-control no-cache
 
       - name: Create production GitHub release
@@ -420,14 +436,17 @@ jobs:
           test -n "$R2_BUCKET"
           test -n "$R2_ENDPOINT_URL"
 
-          for artifact in "$BETA_DIR"/*.tar.gz; do
+          for artifact in "$BETA_DIR"/*.tar.gz "$BETA_DIR"/*.zip; do
             test -f "$artifact" || continue
+            content_type="application/gzip"
+            case "$artifact" in
+              *.zip) content_type="application/zip" ;;
+            esac
             aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
-              --content-type application/gzip \
+              --content-type "$content_type" \
               --cache-control 'public, max-age=31536000, immutable'
           done
-
           aws s3 cp "$BETA_DIR/SHA256SUMS" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/SHA256SUMS" \
             --endpoint-url "$R2_ENDPOINT_URL" \
             --content-type text/plain \
@@ -467,6 +486,16 @@ jobs:
             --content-type text/x-shellscript \
             --cache-control no-cache
 
+          aws s3 cp /tmp/prime-agent-install.ps1 "s3://${R2_BUCKET}/install.ps1" \
+            --endpoint-url "$R2_ENDPOINT_URL" \
+            --content-type text/x-powershell \
+            --cache-control no-cache
+
+          aws s3 cp /tmp/prime-agent-install-beta.ps1 "s3://${R2_BUCKET}/install-beta.ps1" \
+            --endpoint-url "$R2_ENDPOINT_URL" \
+            --content-type text/x-powershell \
+            --cache-control no-cache
+
           printf 'Automated beta build from `%s` (`%s`).\n' "$DEFAULT_BRANCH" "$BUILD_REF" > /tmp/beta-release-notes.md
 
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/beta" >/dev/null 2>&1; then
@@ -498,3 +527,4 @@ jobs:
 
           gh release upload beta "$BETA_DIR"/* --clobber
           echo "Beta installer: ${R2_PUBLIC_BASE_URL%/}/install-beta.sh"
+          echo "Windows beta installer: ${R2_PUBLIC_BASE_URL%/}/install-beta.ps1"

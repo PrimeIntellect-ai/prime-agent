@@ -22,7 +22,7 @@ const packScript = join(repoRoot, "scripts", "pack-prime-agent-release.mjs");
 const releaseRoot = join(packageDir, "release");
 const temporaryRoots: string[] = [];
 const outputDirs: string[] = [];
-const platforms = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"];
+const platforms = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-x64", "windows-arm64"];
 
 function fixture(): { root: string; binaries: string; sidecars: string; output: string } {
 	const root = mkdtempSync(join(tmpdir(), "prime-agent-release-"));
@@ -32,8 +32,10 @@ function fixture(): { root: string; binaries: string; sidecars: string; output: 
 	for (const platform of platforms) {
 		const dir = join(binaries, platform);
 		mkdirSync(dir, { recursive: true });
-		cpSync("/bin/echo", join(dir, "pi"));
-		chmodSync(join(dir, "pi"), 0o755);
+		const binaryName = platform.startsWith("windows") ? "pi.exe" : "pi";
+		const binaryPath = join(dir, binaryName);
+		cpSync("/bin/echo", binaryPath);
+		chmodSync(binaryPath, 0o755);
 	}
 	mkdirSync(sidecars, { recursive: true });
 	for (const name of ["prime-agent-runtime", "skills", "theme", "assets", "export-html", "docs", "examples"]) {
@@ -48,6 +50,10 @@ function fixture(): { root: string; binaries: string; sidecars: string; output: 
 		'#!/bin/sh\nbase="__PRIME_AGENT_DOWNLOAD_BASE_URL__"\nchannel="__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__"\n',
 	);
 	writeFileSync(join(sidecars, "photon_rs_bg.wasm"), "wasm");
+	writeFileSync(
+		join(sidecars, "install.ps1"),
+		'#!/usr/bin/env pwsh\n# Prime Agent Windows installer\n$Script:PrimeAgentBaseUrl = "__PRIME_AGENT_DOWNLOAD_BASE_URL__"\n$Script:DefaultReleaseChannel = "__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__"\n',
+	);
 	const output = join(releaseRoot, `test-${process.pid}-${Math.random().toString(36).slice(2)}`);
 	outputDirs.push(output);
 	return { root, binaries, sidecars, output };
@@ -87,17 +93,34 @@ describe("compiled release archives", () => {
 		const result = pack(f);
 		expect(result.status, result.stderr).toBe(0);
 		const artifacts = join(f.output, "artifacts");
-		const archives = readdirSync(artifacts).filter((name) => name.endsWith(".tar.gz"));
-		expect(archives.sort()).toEqual(platforms.map((platform) => `prime-agent-1.2.3-${platform}.tar.gz`).sort());
+		const archives = readdirSync(artifacts).filter((name) => name.endsWith(".tar.gz") || name.endsWith(".zip"));
+		const expectedArchives = [
+			...["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"].map((p) => `prime-agent-1.2.3-${p}.tar.gz`),
+			...["windows-x64", "windows-arm64"].map((p) => `prime-agent-1.2.3-${p}.zip`),
+		];
+		expect(archives.sort()).toEqual(expectedArchives.sort());
 		expect(readFileSync(join(artifacts, "stable"), "utf8")).toBe("v1.2.3\n");
-		expect(readFileSync(join(artifacts, "SHA256SUMS"), "utf8").trim().split("\n")).toHaveLength(4);
+		expect(readFileSync(join(artifacts, "SHA256SUMS"), "utf8").trim().split("\n")).toHaveLength(6);
 
 		const extracted = join(f.root, "extracted");
 		mkdirSync(extracted);
 		const archive = join(artifacts, "prime-agent-1.2.3-darwin-arm64.tar.gz");
 		expect(spawnSync("tar", ["-xzf", archive, "-C", extracted]).status).toBe(0);
+
+		const winExtracted = join(f.root, "win-extracted");
+		mkdirSync(winExtracted);
+		const winArchive = join(artifacts, "prime-agent-1.2.3-windows-x64.zip");
+		expect(spawnSync("unzip", ["-q", winArchive, "-d", winExtracted]).status).toBe(0);
+		expect(existsSync(join(winExtracted, "prime-agent.exe"))).toBe(true);
 		expect(readFileSync(join(extracted, "install.sh"), "utf8")).toContain('base="https://downloads.example.test"');
 		expect(readFileSync(join(extracted, "install.sh"), "utf8")).toContain('channel="stable"');
+		const powershellInstaller = readFileSync(join(winExtracted, "install.ps1"), "utf8");
+		expect(powershellInstaller).toContain('$Script:PrimeAgentBaseUrl = "https://downloads.example.test"');
+		expect(powershellInstaller).toContain('$Script:DefaultReleaseChannel = "stable"');
+		expect(powershellInstaller).not.toContain("__PRIME_AGENT_DOWNLOAD_BASE_URL__");
+		expect(powershellInstaller).not.toContain("__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__");
+		const windowsManifest = JSON.parse(readFileSync(join(winExtracted, "package.json"), "utf8"));
+		expect(windowsManifest.bin).toEqual({ "prime-agent": "./prime-agent.exe" });
 		const manifest = JSON.parse(readFileSync(join(extracted, "package.json"), "utf8"));
 		expect(manifest).toMatchObject({
 			name: "prime-agent",
@@ -119,6 +142,7 @@ describe("compiled release archives", () => {
 			"docs",
 			"examples",
 			"photon_rs_bg.wasm",
+			"install.ps1",
 		]) {
 			expect(existsSync(join(extracted, name))).toBe(true);
 		}
@@ -155,6 +179,15 @@ describe("compiled release archives", () => {
 		const manifest = JSON.parse(readFileSync(join(f.output, "artifacts", "latest.json"), "utf8"));
 		expect(manifest.version).toBe("v1.2.3");
 		expect(manifest.baseUrl).toBe("https://downloads.example.test/releases/v1.2.3");
+		expect(manifest.platforms.length).toBe(6);
+		expect(manifest.platforms.map((p: any) => p.platform).sort()).toEqual([
+			"darwin-arm64",
+			"darwin-x64",
+			"linux-arm64",
+			"linux-x64",
+			"windows-arm64",
+			"windows-x64",
+		]);
 		expect(existsSync(join(f.output, "artifacts", "prime-agent-1.2.3-darwin-arm64.tar.gz"))).toBe(true);
 	});
 
