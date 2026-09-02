@@ -8,15 +8,15 @@
  * not pull in the entire package graph at startup.
  */
 
-import * as _bundledPiAgentCore from "@earendil-works/pi-agent-core";
-import * as _bundledPiAi from "@earendil-works/pi-ai";
-import * as _bundledPiAiOauth from "@earendil-works/pi-ai/oauth";
-import * as _bundledPiTui from "@earendil-works/pi-tui";
+import * as _bundledPiAi from "@prime-intellect/prime-agent-ai";
+import * as _bundledPiAiOauth from "@prime-intellect/prime-agent-ai/oauth";
+import * as _bundledPiAgentCore from "@prime-intellect/prime-agent-core";
+import * as _bundledPiTui from "@prime-intellect/prime-agent-tui";
 import * as _bundledTypebox from "typebox";
 import * as _bundledTypeboxCompile from "typebox/compile";
 import * as _bundledTypeboxValue from "typebox/value";
 // NOTE: This import works because loader.ts exports are NOT re-exported from index.ts,
-// avoiding a circular dependency. Extensions can import from @earendil-works/pi-coding-agent.
+// avoiding a circular dependency. Extensions can import from @prime-intellect/prime-agent.
 import * as _bundledPiCodingAgent from "../../index.js";
 
 export const VIRTUAL_MODULES: Record<string, unknown> = {
@@ -26,6 +26,11 @@ export const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@sinclair/typebox": _bundledTypebox,
 	"@sinclair/typebox/compile": _bundledTypeboxCompile,
 	"@sinclair/typebox/value": _bundledTypeboxValue,
+	"@prime-intellect/prime-agent-core": _bundledPiAgentCore,
+	"@prime-intellect/prime-agent-tui": _bundledPiTui,
+	"@prime-intellect/prime-agent-ai": _bundledPiAi,
+	"@prime-intellect/prime-agent-ai/oauth": _bundledPiAiOauth,
+	"@prime-intellect/prime-agent": _bundledPiCodingAgent,
 	"@earendil-works/pi-agent-core": _bundledPiAgentCore,
 	"@earendil-works/pi-tui": _bundledPiTui,
 	"@earendil-works/pi-ai": _bundledPiAi,

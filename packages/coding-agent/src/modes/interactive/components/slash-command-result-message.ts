@@ -1,4 +1,4 @@
-import { Box, Container, Text } from "@earendil-works/pi-tui";
+import { Box, Container, Text } from "@prime-intellect/prime-agent-tui";
 import type { SessionSlashCommandResultMessage } from "../../../core/messages.js";
 import { theme } from "../theme/theme.js";
 

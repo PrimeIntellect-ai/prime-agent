@@ -10,9 +10,9 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
-import { completeSimple } from "@earendil-works/pi-ai";
+import type { Model } from "@prime-intellect/prime-agent-ai";
+import { completeSimple } from "@prime-intellect/prime-agent-ai";
+import type { AgentMessage, ThinkingLevel } from "@prime-intellect/prime-agent-core";
 import { getAgentDir } from "../../config.js";
 import { serializeConversation } from "../compaction/utils.js";
 import { convertToLlm } from "../messages.js";

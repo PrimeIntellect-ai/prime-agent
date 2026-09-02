@@ -1,4 +1,4 @@
-import { type Component, getKeybindings, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, getKeybindings, truncateToWidth, visibleWidth } from "@prime-intellect/prime-agent-tui";
 import { PRIME_BUTTERFLY_LOGO } from "../../../themes/prime-logo.js";
 import { type ThemeColor, theme } from "../theme/theme.js";
 

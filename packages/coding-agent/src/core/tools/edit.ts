@@ -1,5 +1,5 @@
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Box, type Component, Container, Spacer, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import type { AgentTool } from "@prime-intellect/prime-agent-core";
+import { Box, type Component, Container, Spacer, Text, wrapTextWithAnsi } from "@prime-intellect/prime-agent-tui";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
 import { type Static, Type } from "typebox";

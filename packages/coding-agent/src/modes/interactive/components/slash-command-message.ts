@@ -1,4 +1,4 @@
-import { Box, Container, Text } from "@earendil-works/pi-tui";
+import { Box, Container, Text } from "@prime-intellect/prime-agent-tui";
 import { parseSlashCommand } from "../../../core/slash-commands.js";
 import { theme } from "../theme/theme.js";
 

@@ -1,5 +1,5 @@
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
+import type { Api, Model, ServiceTier } from "@prime-intellect/prime-agent-ai";
+import type { ThinkingLevel } from "@prime-intellect/prime-agent-core";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";

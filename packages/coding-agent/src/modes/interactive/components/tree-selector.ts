@@ -8,7 +8,7 @@ import {
 	Text,
 	TruncatedText,
 	truncateToWidth,
-} from "@earendil-works/pi-tui";
+} from "@prime-intellect/prime-agent-tui";
 import type { AgentConnectionSessionTreeNode } from "../../agent-connection/index.js";
 import { theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";

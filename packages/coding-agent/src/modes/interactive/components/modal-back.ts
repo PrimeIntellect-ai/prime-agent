@@ -9,7 +9,7 @@
  * existing `onAgentsBack` guard so behaviour stays consistent across the app.
  */
 
-import { getKeybindings } from "@earendil-works/pi-tui";
+import { getKeybindings } from "@prime-intellect/prime-agent-tui";
 
 /** A text input whose cursor position can be inspected. */
 export interface BackGuardInput {

@@ -1,5 +1,5 @@
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { type Component, Container, Image, Text, type TUI } from "@earendil-works/pi-tui";
+import type { AgentToolResult } from "@prime-intellect/prime-agent-core";
+import { type Component, Container, Image, Text, type TUI } from "@prime-intellect/prime-agent-tui";
 import type { ToolDefinition, ToolRenderContext, ToolRenderResultOptions } from "../../../core/extensions/types.js";
 import type { KernelSentAgentMessage } from "../../../core/kernel/index.js";
 import { createBashToolDefinition } from "../../../core/tools/bash.js";

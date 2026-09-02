@@ -7,9 +7,9 @@
 
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { type Api, type ImageContent, type Model, modelsAreEqual } from "@earendil-works/pi-ai";
-import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
-import { ProcessTerminal, setKeybindings, TUI } from "@earendil-works/pi-tui";
+import { type Api, type ImageContent, type Model, modelsAreEqual } from "@prime-intellect/prime-agent-ai";
+import { registerBuiltinMcpOAuthProviders } from "@prime-intellect/prime-agent-ai/mcp";
+import { ProcessTerminal, setKeybindings, TUI } from "@prime-intellect/prime-agent-tui";
 import chalk from "chalk";
 import { type Args, type Mode, parseArgs } from "./cli/args.js";
 import { formatTopLevelHelp } from "./cli/command-registry.js";

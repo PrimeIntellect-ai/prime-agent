@@ -1,4 +1,4 @@
-import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, truncateToWidth, visibleWidth } from "@prime-intellect/prime-agent-tui";
 import { theme } from "../theme/theme.js";
 
 export const TOOL_PANEL_PADDING_X = 2;

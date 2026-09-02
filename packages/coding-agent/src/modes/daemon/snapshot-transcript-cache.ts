@@ -1,6 +1,6 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage } from "@prime-intellect/prime-agent-core";
 
 export const SNAPSHOT_TARGET_CHUNK_BYTES = 512 * 1024;
 export const SNAPSHOT_MEMORY_CACHE_BYTES = 4 * 1024 * 1024;

@@ -1,4 +1,4 @@
-import { Container, Loader, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import { Container, Loader, Spacer, Text, type TUI } from "@prime-intellect/prime-agent-tui";
 import stripAnsi from "strip-ansi";
 import {
 	DEFAULT_MAX_BYTES,

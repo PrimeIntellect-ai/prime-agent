@@ -1,5 +1,5 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage } from "@prime-intellect/prime-agent-ai";
+import type { AgentMessage } from "@prime-intellect/prime-agent-core";
 import type { AgentSession } from "../core/agent-session.js";
 import {
 	type AgentAutonomousStatus,

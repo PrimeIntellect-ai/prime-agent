@@ -2,8 +2,8 @@
  * Model resolution, scoping, and initial selection
  */
 
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { type Api, getLogger, type KnownProvider, type Model, modelsAreEqual } from "@earendil-works/pi-ai";
+import { type Api, getLogger, type KnownProvider, type Model, modelsAreEqual } from "@prime-intellect/prime-agent-ai";
+import type { ThinkingLevel } from "@prime-intellect/prime-agent-core";
 import chalk from "chalk";
 import { minimatch } from "minimatch";
 import { isValidThinkingLevel } from "../cli/args.js";

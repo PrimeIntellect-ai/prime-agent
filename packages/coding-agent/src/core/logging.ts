@@ -1,4 +1,4 @@
-import { type LogEntry, setLogSink, stringifyLogEntry } from "@earendil-works/pi-ai";
+import { type LogEntry, setLogSink, stringifyLogEntry } from "@prime-intellect/prime-agent-ai";
 import { appendRotatingLog, getAgentLogPath } from "../config.js";
 
 const AGENT_LOG_MAX_BYTES = 20 * 1024 * 1024;

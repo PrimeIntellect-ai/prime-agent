@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Bundles the compiled CLI entry (dist/cli.js) into dist/bundle/ with Bun.
+ * Bundles the Bun CLI entry (dist/bun/cli.js) into dist/bundle/.
  *
  * Why: the unbundled module graph is ~2,500 files; resolving and reading them
  * dominates startup (~1.5s on slow filesystems). The bundle loads the same code
@@ -31,11 +31,11 @@ try {
 rmSync(outdir, { recursive: true, force: true });
 
 const result = await Bun.build({
-	entrypoints: [join(packageDir, "dist", "cli.js")],
+	entrypoints: [join(packageDir, "dist", "bun", "cli.js")],
 	outdir,
 	splitting: true,
 	format: "esm",
-	target: "node",
+	target: "bun",
 	sourcemap: "linked",
 	// Native or interop-sensitive packages stay external; they resolve from
 	// node_modules at runtime (and are loaded via createRequire/lazily anyway).
@@ -60,4 +60,4 @@ if (!result.success) {
 }
 
 chmodSync(join(outdir, "cli.js"), 0o755);
-console.log("bundled dist/cli.js -> dist/bundle/");
+console.log("bundled dist/bun/cli.js -> dist/bundle/");

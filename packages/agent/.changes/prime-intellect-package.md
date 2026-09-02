@@ -1,0 +1,1 @@
+- Moved the agent core package to `@prime-intellect/prime-agent-core`.

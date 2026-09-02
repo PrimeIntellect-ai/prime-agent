@@ -514,7 +514,7 @@ const envPrefix =
 		.toUpperCase()
 		.replace(/[^A-Z0-9]+/g, "_")
 		.replace(/^_+|_+$/g, "") || "PI";
-export const PACKAGE_NAME: string = pkg.name || "@earendil-works/pi-coding-agent";
+export const PACKAGE_NAME: string = pkg.name || "@prime-intellect/prime-agent";
 export const APP_NAME: string = piConfigName || "pi";
 export const APP_TITLE: string = piConfigName ? APP_NAME : "π";
 export const CONFIG_DIR_NAME: string = pkg.piConfig?.configDir || ".prime/agent";

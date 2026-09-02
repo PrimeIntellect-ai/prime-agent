@@ -19,9 +19,9 @@ import {
 	registerApiProvider,
 	resetApiProviders,
 	type SimpleStreamOptions,
-} from "@earendil-works/pi-ai";
-import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
-import { registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
+} from "@prime-intellect/prime-agent-ai";
+import { registerBuiltinMcpOAuthProviders } from "@prime-intellect/prime-agent-ai/mcp";
+import { registerOAuthProvider, resetOAuthProviders } from "@prime-intellect/prime-agent-ai/oauth";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { type Static, type TProperties, Type } from "typebox";

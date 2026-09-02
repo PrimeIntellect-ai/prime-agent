@@ -1,4 +1,4 @@
-import type { ImageContent, TextContent, UserMessage } from "@earendil-works/pi-ai";
+import type { ImageContent, TextContent, UserMessage } from "@prime-intellect/prime-agent-ai";
 import chalk from "chalk";
 import { spawn } from "child_process";
 import { readFileSync, rmSync, statSync } from "fs";

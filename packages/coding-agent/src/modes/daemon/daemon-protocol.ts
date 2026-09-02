@@ -1,5 +1,5 @@
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { ImageContent, ServiceTier, TextContent, Transport } from "@earendil-works/pi-ai";
+import type { ImageContent, ServiceTier, TextContent, Transport } from "@prime-intellect/prime-agent-ai";
+import type { AgentMessage, ThinkingLevel } from "@prime-intellect/prime-agent-core";
 import type {
 	AgentSessionMessageDeliveryMode,
 	AgentSessionMessageReceipt,

@@ -4,10 +4,10 @@ Prime Agent is an RLM-native coding and research harness built around a persiste
 
 ## Quick Start
 
-Install the latest stable release on Linux or macOS:
+Install the latest stable release with Bun:
 
 ```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+bun install -g @prime-intellect/prime-agent
 ```
 
 Then run it in a project directory:
@@ -19,7 +19,7 @@ prime-agent
 
 Authenticate with `/login` for subscription or stored API-key providers, or set an environment variable such as `ANTHROPIC_API_KEY` before launch. See the [Quickstart](quickstart.md) for the complete first-run flow.
 
-Public releases are currently installed from versioned release artifacts. The inherited npm workspace names in the source tree are implementation details, not the public install path.
+The public package installs the `prime-agent` command. Versioned standalone release artifacts remain available as an alternative on macOS and Linux.
 
 ## Start Here
 

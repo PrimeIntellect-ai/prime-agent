@@ -1,4 +1,4 @@
-import type { Component } from "@earendil-works/pi-tui";
+import type { Component } from "@prime-intellect/prime-agent-tui";
 import { theme } from "../theme/theme.js";
 
 /**

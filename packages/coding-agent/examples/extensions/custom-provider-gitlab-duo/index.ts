@@ -9,6 +9,7 @@
  *   # Then /login gitlab-duo, or set GITLAB_TOKEN=glpat-...
  */
 
+import type { ExtensionAPI } from "@prime-intellect/prime-agent";
 import {
 	type Api,
 	type AssistantMessageEventStream,
@@ -20,8 +21,7 @@ import {
 	type SimpleStreamOptions,
 	streamSimpleAnthropic,
 	streamSimpleOpenAIResponses,
-} from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+} from "@prime-intellect/prime-agent-ai";
 
 // =============================================================================
 // Constants

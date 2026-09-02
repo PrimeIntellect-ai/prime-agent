@@ -1,4 +1,4 @@
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import type { ImageContent, TextContent } from "@prime-intellect/prime-agent-ai";
 import type { CustomMessage } from "./messages.js";
 
 export const GOAL_STATE_CUSTOM_TYPE = "thread_goal_state";

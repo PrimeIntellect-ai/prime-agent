@@ -1,4 +1,4 @@
-import type { ServiceTier, Transport } from "@earendil-works/pi-ai";
+import type { ServiceTier, Transport } from "@prime-intellect/prime-agent-ai";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";

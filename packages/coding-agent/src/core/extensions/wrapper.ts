@@ -5,7 +5,7 @@
  * Tool call and tool result interception is handled by AgentSession via agent-core hooks.
  */
 
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentTool } from "@prime-intellect/prime-agent-core";
 import { wrapToolDefinition, wrapToolDefinitions } from "../tools/tool-definition-wrapper.js";
 import type { ExtensionRunner } from "./runner.js";
 import type { RegisteredTool } from "./types.js";

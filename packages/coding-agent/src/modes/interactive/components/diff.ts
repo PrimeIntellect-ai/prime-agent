@@ -1,4 +1,4 @@
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@prime-intellect/prime-agent-tui";
 import * as Diff from "diff";
 import { highlightCode, theme } from "../theme/theme.js";
 

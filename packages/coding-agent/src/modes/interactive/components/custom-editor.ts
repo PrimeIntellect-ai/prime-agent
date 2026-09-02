@@ -6,7 +6,7 @@ import {
 	type TUI,
 	truncateToWidth,
 	visibleWidth,
-} from "@earendil-works/pi-tui";
+} from "@prime-intellect/prime-agent-tui";
 import type { AppKeybinding, KeybindingsManager } from "../../../core/keybindings.js";
 
 export interface CustomEditorOptions extends EditorOptions {

@@ -1,4 +1,4 @@
-import { ProcessTerminal, TUI } from "@earendil-works/pi-tui";
+import { ProcessTerminal, TUI } from "@prime-intellect/prime-agent-tui";
 import type { ResolvedPaths } from "../core/package-manager.js";
 import type { SettingsManager } from "../core/settings-manager.js";
 import { ConfigSelectorComponent } from "../modes/interactive/components/config-selector.js";

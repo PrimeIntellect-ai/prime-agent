@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
 	type Api,
 	type AssistantMessage,
@@ -12,8 +11,9 @@ import {
 	type ServiceTier,
 	supportsFastMode,
 	type ToolCall,
-} from "@earendil-works/pi-ai";
-import { BUILTIN_MCP_CATALOG } from "@earendil-works/pi-ai/mcp";
+} from "@prime-intellect/prime-agent-ai";
+import { BUILTIN_MCP_CATALOG } from "@prime-intellect/prime-agent-ai/mcp";
+import type { AgentMessage, ThinkingLevel } from "@prime-intellect/prime-agent-core";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -24,7 +24,7 @@ import type {
 	OverlayHandle,
 	OverlayOptions,
 	SlashCommand,
-} from "@earendil-works/pi-tui";
+} from "@prime-intellect/prime-agent-tui";
 import {
 	CombinedAutocompleteProvider,
 	type Component,
@@ -41,7 +41,7 @@ import {
 	TUI,
 	truncateToWidth,
 	visibleWidth,
-} from "@earendil-works/pi-tui";
+} from "@prime-intellect/prime-agent-tui";
 import { spawn, spawnSync } from "child_process";
 import {
 	buildDaemonUpdateRestartReport,

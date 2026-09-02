@@ -1,0 +1,1 @@
+- Moved the AI package to `@prime-intellect/prime-agent-ai`.

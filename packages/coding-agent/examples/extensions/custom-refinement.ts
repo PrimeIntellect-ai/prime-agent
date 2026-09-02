@@ -14,8 +14,8 @@
  *   prime-agent -e examples/extensions/custom-refinement.ts
  */
 
-import { complete } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, RefinementProposal } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, RefinementProposal } from "@prime-intellect/prime-agent";
+import { complete } from "@prime-intellect/prime-agent-ai";
 
 export default function (pi: ExtensionAPI) {
 	pi.on("session_before_refine", async (event, ctx) => {

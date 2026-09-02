@@ -1,5 +1,5 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ImageContent, UserMessage } from "@earendil-works/pi-ai";
+import type { ImageContent, UserMessage } from "@prime-intellect/prime-agent-ai";
+import type { AgentMessage } from "@prime-intellect/prime-agent-core";
 import type { InputSource } from "./extensions/index.js";
 import type { CustomMessage } from "./messages.js";
 import type { SessionSlashCommand } from "./slash-commands.js";

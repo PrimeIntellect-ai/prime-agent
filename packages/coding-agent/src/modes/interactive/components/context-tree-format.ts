@@ -1,5 +1,5 @@
-import type { Usage } from "@earendil-works/pi-ai";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { Usage } from "@prime-intellect/prime-agent-ai";
+import { truncateToWidth, visibleWidth } from "@prime-intellect/prime-agent-tui";
 import type { ContextTreeNode } from "../../../core/context-tree.js";
 import type { ContextUsage } from "../../../core/extensions/index.js";
 import { addAssistantUsage, emptyUsage } from "../../../core/usage.js";

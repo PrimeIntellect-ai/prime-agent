@@ -7,8 +7,8 @@
  * Usage: /status [message] - sends a status message with custom rendering
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Box, Text } from "@earendil-works/pi-tui";
+import type { ExtensionAPI } from "@prime-intellect/prime-agent";
+import { Box, Text } from "@prime-intellect/prime-agent-tui";
 
 export default function (pi: ExtensionAPI) {
 	pi.registerMessageRenderer("status-update", (message, { expanded }, theme) => {

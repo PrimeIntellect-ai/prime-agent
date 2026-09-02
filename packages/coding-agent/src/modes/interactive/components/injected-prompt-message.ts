@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage } from "@prime-intellect/prime-agent-core";
 import {
 	Container,
 	Markdown,
@@ -7,7 +7,7 @@ import {
 	Text,
 	truncateToWidth,
 	visibleWidth,
-} from "@earendil-works/pi-tui";
+} from "@prime-intellect/prime-agent-tui";
 import { GOAL_CONTEXT_CUSTOM_TYPE, type GoalContextDetails } from "../../../core/goals.js";
 import {
 	type CustomMessage,

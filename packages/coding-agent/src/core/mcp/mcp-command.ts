@@ -1,4 +1,4 @@
-import { getCatalogEntry } from "@earendil-works/pi-ai/mcp";
+import { getCatalogEntry } from "@prime-intellect/prime-agent-ai/mcp";
 import type { McpServerConfig, SettingsManager } from "../settings-manager.js";
 
 export type McpManagementAction = "add" | "list" | "get" | "remove";

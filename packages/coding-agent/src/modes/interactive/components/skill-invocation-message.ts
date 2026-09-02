@@ -1,4 +1,4 @@
-import { Markdown, type MarkdownTheme, Text } from "@earendil-works/pi-tui";
+import { Markdown, type MarkdownTheme, Text } from "@prime-intellect/prime-agent-tui";
 import type { ParsedSkillBlock } from "../../../core/skill-blocks.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
 import { customMessageLabel, ExpandableCustomMessageBox } from "./expandable-custom-message.js";

@@ -1,5 +1,12 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, ServiceTier, TextContent, Usage } from "@earendil-works/pi-ai";
+import type {
+	AssistantMessage,
+	ImageContent,
+	Message,
+	ServiceTier,
+	TextContent,
+	Usage,
+} from "@prime-intellect/prime-agent-ai";
+import type { AgentMessage } from "@prime-intellect/prime-agent-core";
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,

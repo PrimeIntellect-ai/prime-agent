@@ -123,7 +123,7 @@ cp permission-gate.ts ~/.prime/agent/extensions/
 | Extension | Description |
 |-----------|-------------|
 | `custom-provider-anthropic/` | Custom Anthropic provider with OAuth support and custom streaming implementation |
-| `custom-provider-gitlab-duo/` | GitLab Duo provider using the inherited `@earendil-works/pi-ai` streaming API through a proxy |
+| `custom-provider-gitlab-duo/` | GitLab Duo provider using the inherited `@prime-intellect/prime-agent-ai` streaming API through a proxy |
 
 ### External Dependencies
 
@@ -137,7 +137,7 @@ cp permission-gate.ts ~/.prime/agent/extensions/
 See [docs/extensions.md](../../docs/extensions.md) for full documentation.
 
 ```typescript
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@prime-intellect/prime-agent";
 import { Type } from "typebox";
 
 export default function (pi: ExtensionAPI) {
@@ -179,7 +179,7 @@ export default function (pi: ExtensionAPI) {
 
 **Use StringEnum for string parameters** (required for Google API compatibility):
 ```typescript
-import { StringEnum } from "@earendil-works/pi-ai";
+import { StringEnum } from "@prime-intellect/prime-agent-ai";
 
 // Good
 action: StringEnum(["list", "add"] as const)

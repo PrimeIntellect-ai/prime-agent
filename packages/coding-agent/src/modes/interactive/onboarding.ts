@@ -1,4 +1,4 @@
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@prime-intellect/prime-agent-ai";
 import type { AuthStatus } from "../../core/auth-storage.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../../core/prime-inference-auth.js";
 

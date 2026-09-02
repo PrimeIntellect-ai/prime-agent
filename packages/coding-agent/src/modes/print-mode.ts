@@ -6,7 +6,7 @@
  * - `pi --mode json "prompt"` - JSON event stream
  */
 
-import type { ImageContent } from "@earendil-works/pi-ai";
+import type { ImageContent } from "@prime-intellect/prime-agent-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.js";
 import { type AgentAutonomousStatus, type AutonomousLimitReason, autonomousLimitReason } from "../core/autonomous.js";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.js";

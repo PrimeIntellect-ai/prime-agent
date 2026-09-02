@@ -1,4 +1,4 @@
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { ThinkingLevel } from "@prime-intellect/prime-agent-core";
 import type { AgentAutonomousConfig } from "./autonomous.js";
 
 export type AgentExecutionMode = "interactive" | "print" | "json" | "rpc" | "acp";

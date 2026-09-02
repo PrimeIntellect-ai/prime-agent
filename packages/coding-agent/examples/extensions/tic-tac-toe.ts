@@ -17,9 +17,9 @@
  * separate variables. Only the agent cursor is ever exposed to the agent.
  */
 
-import { StringEnum } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, Theme, ToolExecutionMode } from "@earendil-works/pi-coding-agent";
-import { type Component, matchesKey, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext, Theme, ToolExecutionMode } from "@prime-intellect/prime-agent";
+import { StringEnum } from "@prime-intellect/prime-agent-ai";
+import { type Component, matchesKey, Text, truncateToWidth, visibleWidth } from "@prime-intellect/prime-agent-tui";
 import { Type } from "typebox";
 
 // Thrown from the tool on illegal actions. The agent runtime surfaces thrown

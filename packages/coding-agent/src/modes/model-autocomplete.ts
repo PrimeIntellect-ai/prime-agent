@@ -1,5 +1,5 @@
-import type { AutocompleteItem } from "@earendil-works/pi-tui";
-import { fuzzyFilter } from "@earendil-works/pi-tui";
+import type { AutocompleteItem } from "@prime-intellect/prime-agent-tui";
+import { fuzzyFilter } from "@prime-intellect/prime-agent-tui";
 
 export interface ModelAutocompleteCandidate {
 	id: string;

@@ -10,7 +10,7 @@
  * 3. Use /commands extensions to filter by source
  */
 
-import type { ExtensionAPI, SlashCommandInfo } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, SlashCommandInfo } from "@prime-intellect/prime-agent";
 
 export default function commandsExtension(pi: ExtensionAPI) {
 	pi.registerCommand("commands", {

@@ -1,4 +1,4 @@
-import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
+import { registerSessionResourceCleanup } from "@prime-intellect/prime-agent-ai";
 import type { KernelBootstrapProgressHandler, KernelPythonSkill } from "./bootstrap.js";
 import type { RestoreResult, SnapshotResult } from "./state-snapshot.js";
 
