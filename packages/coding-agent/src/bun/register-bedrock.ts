@@ -1,4 +1,6 @@
-import { setBedrockProviderModule } from "@earendil-works/pi-ai";
-import { bedrockProviderModule } from "@earendil-works/pi-ai/bedrock-provider";
+import { setBedrockProviderModuleLoader } from "@earendil-works/pi-ai";
 
-setBedrockProviderModule(bedrockProviderModule);
+setBedrockProviderModuleLoader(async () => {
+	const { bedrockProviderModule } = await import("@earendil-works/pi-ai/bedrock-provider");
+	return bedrockProviderModule;
+});

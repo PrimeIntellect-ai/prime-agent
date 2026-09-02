@@ -92,7 +92,7 @@ fi
 for platform in "${PLATFORMS[@]}"; do
 	echo "Building for $platform..."
 	mkdir -p "binaries/$platform"
-	bun build --compile --external koffi --target="bun-$platform" ./dist/bun/cli.js --outfile "binaries/$platform/pi"
+	bun build --compile --minify --keep-names --bytecode --format=esm --external koffi --target="bun-$platform" ./dist/bun/cli.js --outfile "binaries/$platform/pi"
 done
 
 echo "==> Copying sidecar assets..."

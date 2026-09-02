@@ -115,15 +115,30 @@ let openAIResponsesProviderModulePromise:
 let bedrockProviderModuleOverride:
 	| LazyProviderModule<"bedrock-converse-stream", BedrockOptions, SimpleStreamOptions>
 	| undefined;
+let bedrockProviderModuleLoaderOverride: (() => Promise<BedrockProviderModule>) | undefined;
 let bedrockProviderModulePromise:
 	| Promise<LazyProviderModule<"bedrock-converse-stream", BedrockOptions, SimpleStreamOptions>>
 	| undefined;
 
-export function setBedrockProviderModule(module: BedrockProviderModule): void {
-	bedrockProviderModuleOverride = {
+function toLazyBedrockProviderModule(
+	module: BedrockProviderModule,
+): LazyProviderModule<"bedrock-converse-stream", BedrockOptions, SimpleStreamOptions> {
+	return {
 		stream: module.streamBedrock,
 		streamSimple: module.streamSimpleBedrock,
 	};
+}
+
+export function setBedrockProviderModule(module: BedrockProviderModule): void {
+	bedrockProviderModuleLoaderOverride = undefined;
+	bedrockProviderModulePromise = undefined;
+	bedrockProviderModuleOverride = toLazyBedrockProviderModule(module);
+}
+
+export function setBedrockProviderModuleLoader(loader: () => Promise<BedrockProviderModule>): void {
+	bedrockProviderModuleOverride = undefined;
+	bedrockProviderModulePromise = undefined;
+	bedrockProviderModuleLoaderOverride = loader;
 }
 
 function forwardStream(target: AssistantMessageEventStream, source: AsyncIterable<AssistantMessageEvent>): void {
@@ -310,13 +325,9 @@ function loadBedrockProviderModule(): Promise<
 	if (bedrockProviderModuleOverride) {
 		return Promise.resolve(bedrockProviderModuleOverride);
 	}
-	bedrockProviderModulePromise ||= importNodeOnlyProvider("./amazon-bedrock.js").then((module) => {
-		const provider = module as BedrockProviderModule;
-		return {
-			stream: provider.streamBedrock,
-			streamSimple: provider.streamSimpleBedrock,
-		};
-	});
+	bedrockProviderModulePromise ||= (
+		bedrockProviderModuleLoaderOverride?.() ?? importNodeOnlyProvider("./amazon-bedrock.js")
+	).then((module) => toLazyBedrockProviderModule(module as BedrockProviderModule));
 	return bedrockProviderModulePromise;
 }
 
