@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type AgentCronJob, AgentCronJobStore, SESSION_SCHEDULED_JOBS_FILENAME } from "../src/core/cron-jobs.js";
-import { canonicalSessionPath } from "../src/core/session-lease.js";
 import { getSessionArtifactPathForFile, type SessionInfo } from "../src/core/session-manager.js";
 import { workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import { success } from "../src/modes/daemon/daemon-protocol.js";
@@ -66,7 +65,10 @@ interface SupervisorInternals {
 	handleCommand(client: object, command: object): Promise<unknown>;
 	writeRosterEntry(entry: object, worker?: object): unknown;
 	cancelEphemeralWorkerScheduledJobs(worker: WorkerFixture): Promise<boolean>;
-	pendingEphemeralCancels: Map<string, { rootSessionId: string; rootSessionFile: string; worker: WorkerFixture }>;
+	descriptorDir: string;
+	socketPath: string;
+	defaultSessionConfig: { agentDir?: string; sessionDir?: string };
+	persistWorker(worker: WorkerFixture): void;
 	stopWorkerUntracked(worker: WorkerFixture, removeDescriptor: boolean, force?: boolean): Promise<void>;
 	promoteOwnedWorker(client: object, worker: WorkerFixture): Promise<void>;
 	loadWorkerDescriptors(): void;
@@ -904,10 +906,13 @@ describe("daemon supervisor scheduled-session wake", () => {
 			liveEdges: vi.fn(async () => []),
 		};
 
-		// A different worker covering the tree keeps its schedules; only an uncovered tree is cancelled.
+		// A different worker covering ANY tree member keeps its schedules; only a fully uncovered tree is cancelled.
 		const covering = makeWorker("covering", []);
-		covering.descriptor.sessionFile = root.sessionFile;
+		covering.descriptor.sessionFile = child.sessionFile;
 		supervisor.workers.set("covering", covering);
+		expect(await supervisor.cancelEphemeralWorkerScheduledJobs(owned)).toBe(true);
+		expect(root.store.list().map((job) => job.status)).toEqual(["active"]);
+		covering.descriptor.sessionFile = root.sessionFile;
 		expect(await supervisor.cancelEphemeralWorkerScheduledJobs(owned)).toBe(true);
 		expect(root.store.list().map((job) => job.status)).toEqual(["active"]);
 		supervisor.workers.delete("covering");
@@ -968,13 +973,21 @@ describe("daemon supervisor scheduled-session wake", () => {
 			}),
 			liveEdges: vi.fn(async () => []),
 		};
-		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-promote-park-"));
-		tempDirs.push(directory);
+		mkdirSync(supervisor.descriptorDir, { recursive: true });
 		const owned = makeWorker("owned", []);
 		owned.descriptor.ownerClientId = "owner";
 		owned.descriptor.rootSessionId = "promoted-parked-root";
 		owned.descriptor.sessionFile = sessionFile;
-		owned.descriptorPath = join(directory, "owned.json");
+		owned.descriptor.version = 2;
+		owned.descriptor.supervisorSocketPath = supervisor.socketPath;
+		owned.descriptor.socketPath = "owned.sock";
+		owned.descriptor.authenticationToken = "token";
+		owned.descriptor.recoveryJournalPath = join(supervisor.descriptorDir, "owned.recovery.jsonl");
+		owned.descriptor.createdAt = new Date(now).toISOString();
+		owned.descriptor.updatedAt = new Date(now).toISOString();
+		owned.descriptor.consecutiveFailures = 0;
+		owned.descriptor.stopRequestedAt = new Date(now).toISOString();
+		owned.descriptorPath = join(supervisor.descriptorDir, "owned.json");
 
 		const cancel = supervisor.cancelEphemeralWorkerScheduledJobs(owned);
 		await supervisor.promoteOwnedWorker({ id: "owner", attachedActiveSessionIds: new Set<string>() }, owned);
@@ -984,7 +997,6 @@ describe("daemon supervisor scheduled-session wake", () => {
 		await supervisor.recomputeScheduledSessionWake();
 		expect(store.list().map((job) => job.status)).toEqual(["active"]);
 		expect(settled).toBe(true);
-		expect(supervisor.pendingEphemeralCancels.size).toBe(0);
 	});
 
 	it("keeps a tree wake-ineligible after a failed ephemeral cancel until an enumeration retry lands", async () => {
@@ -996,10 +1008,22 @@ describe("daemon supervisor scheduled-session wake", () => {
 			family: vi.fn(async () => [makeSavedInfo(sessionFile, "failed-cancel-root")]),
 			liveEdges: vi.fn(async () => []),
 		};
+		mkdirSync(supervisor.descriptorDir, { recursive: true });
 		const owned = makeWorker("owned", []);
 		owned.descriptor.ownerClientId = "owner";
 		owned.descriptor.rootSessionId = "failed-cancel-root";
 		owned.descriptor.sessionFile = sessionFile;
+		owned.descriptor.version = 2;
+		owned.descriptor.supervisorSocketPath = supervisor.socketPath;
+		owned.descriptor.socketPath = "owned.sock";
+		owned.descriptor.authenticationToken = "token";
+		owned.descriptor.recoveryJournalPath = join(supervisor.descriptorDir, "owned.recovery.jsonl");
+		owned.descriptor.createdAt = new Date(now).toISOString();
+		owned.descriptor.updatedAt = new Date(now).toISOString();
+		owned.descriptor.consecutiveFailures = 0;
+		owned.descriptor.stopRequestedAt = new Date(now).toISOString();
+		owned.descriptorPath = join(supervisor.descriptorDir, "owned.json");
+		supervisor.persistWorker(owned);
 		const treeCancel = vi
 			.spyOn(
 				supervisor as unknown as { cancelScheduledJobsForSessionTree: (id: string, file: string) => Promise<void> },
@@ -1020,6 +1044,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		treeCancel.mockRestore();
 		await supervisor.recomputeScheduledSessionWake();
 		expect(store.list().map((job) => job.status)).toEqual(["cancelled"]);
+		expect(existsSync(owned.descriptorPath)).toBe(false);
 		expect(supervisor.scheduledWakeTimer).toBeUndefined();
 	});
 
@@ -1152,11 +1177,22 @@ describe("daemon supervisor scheduled-session wake", () => {
 			family: vi.fn(async () => [makeSavedInfo(sessionFile, "reopened-root")]),
 			liveEdges: vi.fn(async () => []),
 		};
-		supervisor.pendingEphemeralCancels.set(canonicalSessionPath(sessionFile), {
-			rootSessionId: "reopened-root",
-			rootSessionFile: sessionFile,
-			worker: makeWorker("stopped", []),
-		});
+		mkdirSync(supervisor.descriptorDir, { recursive: true });
+		const stopped = makeWorker("stopped", []);
+		stopped.descriptor.ownerClientId = "owner";
+		stopped.descriptor.rootSessionId = "reopened-root";
+		stopped.descriptor.sessionFile = sessionFile;
+		stopped.descriptor.version = 2;
+		stopped.descriptor.supervisorSocketPath = supervisor.socketPath;
+		stopped.descriptor.socketPath = "stopped.sock";
+		stopped.descriptor.authenticationToken = "token";
+		stopped.descriptor.recoveryJournalPath = join(supervisor.descriptorDir, "stopped.recovery.jsonl");
+		stopped.descriptor.createdAt = new Date(now).toISOString();
+		stopped.descriptor.updatedAt = new Date(now).toISOString();
+		stopped.descriptor.consecutiveFailures = 0;
+		stopped.descriptor.stopRequestedAt = new Date(now).toISOString();
+		stopped.descriptorPath = join(supervisor.descriptorDir, "stopped.json");
+		supervisor.persistWorker(stopped);
 		const reopened = makeWorker("reopened", []);
 		reopened.descriptor.sessionFile = sessionFile;
 		supervisor.workers.set("reopened", reopened);
@@ -1168,6 +1204,6 @@ describe("daemon supervisor scheduled-session wake", () => {
 
 		expect(response).toMatchObject({ success: true });
 		expect(store.list().map((job) => job.status)).toEqual(["active"]);
-		expect(supervisor.pendingEphemeralCancels.size).toBe(0);
+		expect(existsSync(stopped.descriptorPath)).toBe(false);
 	});
 });
