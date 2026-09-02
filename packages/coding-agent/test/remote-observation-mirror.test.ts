@@ -1125,7 +1125,7 @@ const MAX_TEXT_LENGTH = 100_000;
 // B11-b: RemoteObservationSnapshotV1 codec — capture/restore tests
 // ===========================================================================
 
-import { isKnownObservationErrorCode } from "../src/modes/daemon/remote-observation-mirror.js";
+import { isKnownObservationErrorCode } from "../src/modes/daemon/remote-observation-constants.js";
 import {
 	decodeRemoteObservationSnapshotV1,
 	type RemoteObservationSnapshotV1,
@@ -1398,6 +1398,37 @@ describe("B11-b: RemoteObservationSnapshotV1 codec", () => {
 		}));
 		decodeFail({ ...makeSnapshot(), cursor: 101, records: [], nextMessageIndex: 0, recap }, "INVALID_RECAP_COUNT");
 	});
+	it("rejects cursor=1 with empty recap (needs exactly 1 entry)", () => {
+		decodeFail({ ...makeSnapshot(), cursor: 1, records: [], nextMessageIndex: 0, recap: [] }, "INVALID_RECAP_ENTRY");
+	});
+	it("accepts cursor=1 with exactly 1 recap entry", () => {
+		decodeOk({
+			...makeSnapshot(),
+			cursor: 1,
+			records: [],
+			nextMessageIndex: 0,
+			recap: [{ eventSequence: 1, type: "session_created" }],
+		});
+	});
+	it("rejects cursor=3 with only 1 recap entry (needs 3)", () => {
+		const recap = [{ eventSequence: 3, type: "session_created" }];
+		decodeFail({ ...makeSnapshot(), cursor: 3, records: [], nextMessageIndex: 0, recap }, "INVALID_RECAP_ENTRY");
+	});
+	it("accepts cursor=101 exactly entries 2..101 (100 entries, suffix eviction)", () => {
+		const recap = Array.from({ length: 100 }, (_, i) => ({
+			eventSequence: i + 2,
+			type: "session_created" as const,
+		}));
+		decodeOk({ ...makeSnapshot(), cursor: 101, records: [], nextMessageIndex: 0, recap });
+	});
+	it("rejects cursor=101 with 99 entries (needs 100)", () => {
+		const recap = Array.from({ length: 99 }, (_, i) => ({
+			eventSequence: i + 3,
+			type: "session_created" as const,
+		}));
+		decodeFail({ ...makeSnapshot(), cursor: 101, records: [], nextMessageIndex: 0, recap }, "INVALID_RECAP_ENTRY");
+	});
+
 	it("rejects recap not strictly increasing", () => {
 		const recap = [
 			{ eventSequence: 2, type: "session_created" as const },

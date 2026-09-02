@@ -26,26 +26,9 @@ const MAX_DTEXT = 50_000,
 const MAX_RECORDS = 200,
 	MAX_RECAP = 100;
 const SESSION_STATES = new Set(["running", "idle", "inactive"]);
-const KNOWN_ERR_CODES = new Set([
-	"INTERNAL_ERROR",
-	"UNKNOWN_COMMAND",
-	"INVALID_SESSION",
-	"SESSION_DESTROYED",
-	"SESSION_TIMEOUT",
-	"COMPACT_FAILED",
-	"CHECKPOINT_FAILED",
-	"BASH_FAILED",
-	"RESOURCE_EXHAUSTED",
-	"UNAUTHORIZED",
-	"PROTOCOL_ERROR",
-	"BUILD_MISMATCH",
-	"CAPABILITY_MISMATCH",
-	"UNKNOWN",
-]);
 
-export function isKnownObservationErrorCode(code: string): boolean {
-	return KNOWN_ERR_CODES.has(code);
-}
+import { isKnownObservationErrorCode } from "./remote-observation-constants.js";
+
 /** Exact ISO 8601 millisecond with Z suffix: YYYY-MM-DDTHH:mm:ss.sssZ — must roundtrip. */
 const EXACT_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 

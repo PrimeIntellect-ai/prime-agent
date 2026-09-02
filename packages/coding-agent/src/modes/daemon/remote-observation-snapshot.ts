@@ -13,7 +13,7 @@
  */
 import type { RemoteHostEventSequence, RemoteHostSessionState } from "./remote-agent-host-protocol.js";
 import { jsonPreflight } from "./remote-host-frame-codec.js";
-import { isKnownObservationErrorCode } from "./remote-observation-mirror.js";
+import { isKnownObservationErrorCode } from "./remote-observation-constants.js";
 
 // ---------------------------------------------------------------------------
 // SnapshotRejectionCode — fixed set, no raw remote error messages
@@ -238,7 +238,7 @@ function countContainerNodesInner(v: unknown, visited: Set<object>, depth: numbe
 			if (inner.depth > maxDepth) maxDepth = inner.depth;
 		}
 		// NOTE: intentionally NOT deleting from visited — global alias tracking
-		return nodes > MAX_NODES ? { ok: true, nodes: nodes, depth: maxDepth } : { ok: true, nodes, depth: maxDepth };
+		return { ok: true, nodes, depth: maxDepth };
 	}
 
 	for (const key of Object.keys(v)) {
@@ -250,7 +250,7 @@ function countContainerNodesInner(v: unknown, visited: Set<object>, depth: numbe
 		nodes += inner.nodes;
 		if (inner.depth > maxDepth) maxDepth = inner.depth;
 	}
-	return nodes > MAX_NODES ? { ok: true, nodes: nodes, depth: maxDepth } : { ok: true, nodes, depth: maxDepth };
+	return { ok: true, nodes, depth: maxDepth };
 }
 
 // ---------------------------------------------------------------------------
@@ -544,17 +544,10 @@ function decodeInner(
 	const recapRaw = d.recap as unknown[];
 	if (recapRaw.length > MAX_RECAP) return fail("INVALID_RECAP_COUNT");
 
-	// Recap must be empty iff cursor === 0
+	// Recap must be empty iff cursor === 0; otherwise exact retained suffix of min(cursor, MAX_RECAP) entries
 	const cursorVal = d.cursor as number;
-	if (cursorVal === 0) {
-		if (recapRaw.length !== 0) return fail("INVALID_RECAP_ENTRY");
-	} else {
-		// Exact retained suffix: first = cursor - length + 1, each +1, last = cursor
-		if (recapRaw.length > 0) {
-			const expectedFirst = cursorVal - recapRaw.length + 1;
-			if (expectedFirst < 1) return fail("INVALID_RECAP_SEQUENCE");
-		}
-	}
+	const expectedRecapLen = Math.min(cursorVal, MAX_RECAP);
+	if (recapRaw.length !== expectedRecapLen) return fail("INVALID_RECAP_ENTRY");
 
 	const recapOut: Array<{ eventSequence: number; type: string; messageIndex?: number }> = [];
 
