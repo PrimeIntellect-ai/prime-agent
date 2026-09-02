@@ -84,7 +84,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 | B03 | A02, A16 | done | Add capability-gated remote host protocol and replay primitives |
 | B04 | A02, A16 | in_progress | Add authenticated link state machine and fake relay transport |
 | B05 | A04, A14 | done | Add typed streaming home-provider proxy |
-| B06 | A05, A15 | in_progress | Add Prime Sandbox provisioner and exact-build bootstrap |
+| B06 | A05, A15 | done | Add Prime Sandbox provisioner and exact-build bootstrap |
 | B07 | A10, A14 | done | Add Git workspace snapshot and safe sync-back |
 | B08 | A12, B01, B02 | queued | Add `sandbox` and `sandbox_options` to RLM APIs |
 | B09 | A11, B01, B03 | done | Add top-level sandbox session creation APIs and CLI flags |
@@ -149,3 +149,5 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Integrated B07 as `7c193eb17`; 65 focused tests cover binary-safe snapshots, secret exclusion, traversal/symlink defenses, base-hash conflicts, and atomic sync-back.
 
 - Integrated B09 as `42a914cba`; 62 focused tests cover default-local compatibility, strict sandbox options, protocol gates, and explicit unsupported-host failures.
+
+- Integrated B06 as `d458e2308`; 80 focused tests cover Prime Sandbox CLI preflight/provisioning, strict DTO parsing, atomic background completion metadata, separate logs, and process-group termination with escalation. No sandbox resource was created.
