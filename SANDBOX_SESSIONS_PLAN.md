@@ -86,7 +86,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 | B05 | A04, A14 | done | Add typed streaming home-provider proxy |
 | B06 | A05, A15 | done | Add Prime Sandbox provisioner and background-job lifecycle |
 | B07 | A10, A14 | done | Add Git workspace snapshot and safe sync-back |
-| B08 | A12, B01, B02 | queued | Add `sandbox` and `sandbox_options` to RLM APIs |
+| B08 | A12, B01, B02 | in_progress | Add `sandbox` and `sandbox_options` to RLM APIs |
 | B09 | A11, B01, B03 | done | Add top-level sandbox session creation APIs and CLI flags |
 | B10 | A06, B03, B04 | in_progress | Route durable direct agent-to-agent communication across hosts |
 | B11 | A07, B03, B04 | in_progress | Mirror observation, transcript, recap, and usage events |
@@ -236,3 +236,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Rejected scanner `f9e5391f0`, SSH monitor `93c134c8a`, PAAR verifier `99168c06e`, and the uncommitted installer v3 after direct review found missing binding, asynchronous admission, one-close, mutation, and safe traversal guarantees.
 - Rejected paginated scanner `f1f5cad9` after direct review found cursor advancement past unprocessed entries, pre-commit accumulator mutation, incomplete handle/read validation, and unsafe marker ordering across pages. Started a clean one-list-call, page-atomic scanner that defers full marker binding and accumulator construction until recovery completion.
 - Rejected hosted boundary `35fb1c61`, upgrade authenticator `d7b56367`, PAAR builder `bce99cd9`, verifier `610c696c`, and the first SSH lifecycle/Node stdin adapter attempts after committed-source review. Their clean or focused correction tracks are active; none is present on the integration branch.
+- Rejected durable-store candidate `e95f0277` after direct review found premature recovery exposure, fabricated state, incomplete persistence/byte accounting, unbounded replay, unbound delivery transitions, and unsafe close/erasure semantics. Started clean accepted-recovery-backed durable-store v2.
+- Rejected PAAR verifier `c985ed406`, installer `5f3d3bbe3`, and builder `22b1d1e3e` after direct review found compilation/tuple crashes, partial-read/write failures, incomplete identity and expected-tuple checks, output ownership leaks, unsafe cleanup, and close uncertainty that did not dominate. Started independent clean verifier v4, installer v5, and builder v5 tracks.
+- Rejected listener/server `f0291bc9` after direct review found duplicate socket ownership, uncancelled late admissions, post-close upgrade races, unbounded connections, unchecked setup cleanup, and timeouts that fabricated server/WebSocket/socket closure. Started clean listener/server v5.
+- B08 candidate `3bdb4f81d` now places options in the core contract and moves no-host rejection before generic allocation, but remains in correction for revoked-proxy validation and missing proof of exact frozen shapes/no local allocation.
