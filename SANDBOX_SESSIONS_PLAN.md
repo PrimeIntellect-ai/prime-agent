@@ -91,7 +91,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 | B10 | A06, B03, B04 | in_progress | Route durable direct agent-to-agent communication across hosts |
 | B11 | A07, B03, B04 | in_progress | Mirror observation, transcript, recap, and usage events |
 | B12 | A08, B03, B06 | done | Add sandbox lifecycle, checkpoint, passivation, wake, and deletion |
-| B13 | A09, B01, B11 | queued | Show execution location and connection health in Agents View |
+| B13 | A09, B01, B11 | done | Show execution location and connection health in Agents View |
 | B14 | B05, B06, B08, B09 | in_progress | Wire end-to-end sandbox session orchestration |
 | B15 | A13, B03, B04 | done | Add protocol compatibility and reconnect tests |
 | B16 | A13, B05, B10, B11 | queued | Add auth, messaging, observation, and security integration tests |
@@ -112,8 +112,8 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 ## Current integration baseline
 
 - Branch: `feat/sandbox-backed-sessions` in `/Users/milkkarten/prime-agent-sandbox-sessions`.
-- Reviewed integration tip: `a4976298c`.
-- Latest full root `npm run check` is green across 1004 files, TypeScript, Biome, installer rendering, and browser smoke.
+- Reviewed integration tip: `1ccb524da`.
+- Latest full root `npm run check` is green across 1005 files, TypeScript, Biome, installer rendering, and browser smoke.
 - Accepted B03 foundations: exact frame codec `55b40d7f1`, journal-record codec `5551582bd`, delivery index `5e8e926b4`, direct-final immutable journal publication `8bd83db6c`, and immutable delivery-marker publication `df846c08f`.
 - Accepted B11 foundations: observation core `939a7baaf`, exact snapshots `62e8b073a`.
 - Accepted B14 foundations: provider client `2195c7a23`, tunnel manager `a636f7d99`, PAB1 `d21f53c1a`, FD3 reader `723a8db52`, PAAR codec `a17f5588d`, stdin frame reader `4beeaa5da`, TypeScript correction `1d63a72c0`, SSH spawn specification `4dd8790db`, SSH specification tests `af83a786f`/`a7add61a4`, and one-use upgrade authentication `a4976298c`.
@@ -228,5 +228,6 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Integrated direct-final immutable journal publication as `8bd83db6c`. It reserves `<20-digit>.b03-journal` with `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW`, mode `0600`, never unlinks evidence, verifies exact file and directory identity, handles short positional writes, reopens and checks content, fsyncs the file and identity-bound directory, owns one checked close per handle, and erases caller/internal buffers. The 68 publisher tests and 714-test integrated B03/B04/B15 suite pass; full root check is green across 1000 files.
 - Integrated immutable delivery-marker publication as `df846c08f`. It reuses the same reviewed direct-final publication core for `<20-digit>.b03-delivery`, preserves journal behavior, binds exact `indexSeq` values through 40,000, and returns fixed delivery-specific results. The combined publisher/journal/index/frame/relay/compatibility suite passes 752 tests; full root check is green across 1002 files.
 - Integrated one-use WebSocket upgrade authentication as `a4976298c`. It takes caller-grant erasure ownership before unrelated factory validation, snapshots and scrubs all safely discoverable grant slots before request rejection, requires exact raw/normalized header agreement and strict Upgrade/Connection grammar, compares fixed SHA-256 digests in constant time, and preserves terminal one-use status. Its 79 focused tests, 248-test bootstrap/auth suite, 81 SSH-spec tests, independent adversarial review, and 1004-file root check pass.
+- Integrated B13 Agents View execution metadata as `1ccb524da`. The view accepts only exact frozen coarse `local | sandbox+link | unavailable` DTOs, rejects hostile metadata without getters or proxy reads, displays location/link health orthogonally to activity, and never carries sandbox IDs, regions, errors, timestamps, URLs, or credentials. Seven Agents View suites pass 174 tests without changing grouping/counts; the 1005-file root check is green.
 - Rejected paginated scanner `f1f5cad9` after direct review found cursor advancement past unprocessed entries, pre-commit accumulator mutation, incomplete handle/read validation, and unsafe marker ordering across pages. Started a clean one-list-call, page-atomic scanner that defers full marker binding and accumulator construction until recovery completion.
 - Rejected hosted boundary `35fb1c61`, upgrade authenticator `d7b56367`, PAAR builder `bce99cd9`, verifier `610c696c`, and the first SSH lifecycle/Node stdin adapter attempts after committed-source review. Their clean or focused correction tracks are active; none is present on the integration branch.
