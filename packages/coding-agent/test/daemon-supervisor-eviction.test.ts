@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
+import { canonicalSessionPath } from "../src/core/session-lease.js";
 import { getSessionArtifactPathForFile, type SessionInfo } from "../src/core/session-manager.js";
 import { workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import { success } from "../src/modes/daemon/daemon-protocol.js";
@@ -53,6 +54,7 @@ interface SupervisorInternals {
 	handleCommand(client: object, command: object): Promise<unknown>;
 	writeRosterEntry(entry: object, worker?: object): unknown;
 	cancelEphemeralWorkerScheduledJobs(worker: WorkerFixture): Promise<void>;
+	pendingEphemeralCancels: Map<string, { rootSessionId: string; rootSessionFile: string }>;
 }
 
 const tempDirs: string[] = [];
@@ -894,5 +896,49 @@ describe("daemon supervisor scheduled-session wake", () => {
 		await supervisor.scheduledWakeRecompute;
 		expect(supervisor.scheduledWakeTimer).toBeUndefined();
 		expect(supervisor.createOrReuseWorker).not.toHaveBeenCalled();
+	});
+
+	it("lists and cancels a passive scheduled job without a resident worker", async () => {
+		const supervisor = makeSupervisor();
+		const { sessionFile, store } = makeScheduledSessionFile("unscoped-root");
+		const job = armHeartbeat(store, "unscoped-root", sessionFile, now);
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => [makeSavedInfo(sessionFile, "unscoped-root")]),
+			liveEdges: vi.fn(async () => []),
+		};
+		const client = { id: "manager", attachedActiveSessionIds: new Set<string>() };
+
+		const listed = await supervisor.handleCommand(client, { id: "list-1", type: "cron_list" });
+		expect(listed).toMatchObject({ success: true, data: { jobs: [{ id: job.id, status: "active" }] } });
+
+		const cancelled = await supervisor.handleCommand(client, { id: "cancel-1", type: "cron_cancel", jobId: job.id });
+		expect(cancelled).toMatchObject({ success: true, data: { job: { id: job.id, status: "cancelled" } } });
+		expect(store.list().map((candidate) => candidate.status)).toEqual(["cancelled"]);
+	});
+
+	it("drops a stale ephemeral-cancel intent once a worker covers the tree again", async () => {
+		const supervisor = makeSupervisor();
+		const { sessionFile, store } = makeScheduledSessionFile("reopened-root");
+		armHeartbeat(store, "reopened-root", sessionFile, now);
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => [makeSavedInfo(sessionFile, "reopened-root")]),
+			liveEdges: vi.fn(async () => []),
+		};
+		supervisor.pendingEphemeralCancels.set(canonicalSessionPath(sessionFile), {
+			rootSessionId: "reopened-root",
+			rootSessionFile: sessionFile,
+		});
+		const reopened = makeWorker("reopened", []);
+		reopened.descriptor.sessionFile = sessionFile;
+		supervisor.workers.set("reopened", reopened);
+
+		const response = await supervisor.handleCommand(
+			{ id: "viewer", attachedActiveSessionIds: new Set<string>() },
+			{ id: "hb-list", type: "heartbeats_list" },
+		);
+
+		expect(response).toMatchObject({ success: true });
+		expect(store.list().map((job) => job.status)).toEqual(["active"]);
+		expect(supervisor.pendingEphemeralCancels.size).toBe(0);
 	});
 });

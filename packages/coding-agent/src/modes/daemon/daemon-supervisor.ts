@@ -920,6 +920,11 @@ export class DaemonSupervisor {
 	> {
 		for (const [rootKey, pending] of [...this.pendingEphemeralCancels]) {
 			try {
+				// A worker covering the tree owns its store again; a stale intent must not kill new schedules.
+				if (this.findWorkerBySessionFile(pending.rootSessionFile)) {
+					this.pendingEphemeralCancels.delete(rootKey);
+					continue;
+				}
 				await this.cancelScheduledJobsForSessionTree(pending.rootSessionId, pending.rootSessionFile);
 				this.pendingEphemeralCancels.delete(rootKey);
 			} catch {
@@ -2227,6 +2232,9 @@ export class DaemonSupervisor {
 						jobs.set(job.id, job);
 					}
 				}
+				for (const { job } of await this.collectPassiveScheduledJobs()) {
+					if (!jobs.has(job.id)) jobs.set(job.id, job);
+				}
 				return success(command.id, "cron_list", { jobs: sortCronJobs([...jobs.values()]) });
 			}
 			case "heartbeats_list": {
@@ -2364,6 +2372,19 @@ export class DaemonSupervisor {
 						cronJobsFromResponse(candidate.response).some((job) => job.id === command.jobId)
 					) {
 						return this.forwardToWorker(candidate.worker, command);
+					}
+				}
+				const passive = (await this.collectPassiveScheduledJobs()).find(({ job }) => job.id === command.jobId);
+				if (passive) {
+					const store = AgentCronJobStore.forSessionArtifacts();
+					store.registerSessionArtifact(
+						passive.info.id,
+						getSessionArtifactPathForFile(resolve(passive.info.path), passive.info.id),
+					);
+					const job = store.cancel(command.jobId);
+					if (job) {
+						this.broadcastHeartbeatsChanged();
+						return success(command.id, "cron_cancel", { job });
 					}
 				}
 				throw new Error(`No cron job found: ${command.jobId}`);
