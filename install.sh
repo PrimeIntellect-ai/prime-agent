@@ -105,7 +105,6 @@ prime_agent_screen_detail=
 prime_agent_animation_frame=0
 prime_agent_binary_rollback_version=
 prime_agent_binary_lock_dir=
-prime_agent_binary_lock_root=
 prime_agent_is_update=0
 
 main() {
@@ -191,10 +190,6 @@ prime_agent_cleanup() {
 	if [ -n "${prime_agent_binary_lock_dir:-}" ] && [ -d "$prime_agent_binary_lock_dir" ]; then
 		rm -rf "$prime_agent_binary_lock_dir"
 		prime_agent_binary_lock_dir=
-	fi
-	if [ -n "${prime_agent_binary_lock_root:-}" ] && [ -d "$prime_agent_binary_lock_root" ]; then
-		rmdir "$prime_agent_binary_lock_root" 2>/dev/null || true
-		prime_agent_binary_lock_root=
 	fi
 	prime_agent_restore_terminal
 	return "$status"
@@ -979,7 +974,6 @@ prime_agent_binary_acquire_lock() {
 			;;
 	esac
 	mkdir -p "$_lock_root"
-	prime_agent_binary_lock_root="$_lock_root"
 	rm -rf "$_lock_root/choosing-$$"
 	for _entry in "$_lock_root"/*-"$$"; do
 		[ -d "$_entry" ] || continue
