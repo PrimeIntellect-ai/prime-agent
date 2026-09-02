@@ -472,6 +472,140 @@ describe("buildSandboxSshSpawnSpec", () => {
 	});
 
 	// -----------------------------------------------------------------------
+
+	// -----------------------------------------------------------------------
+	// Top-level raw schema validation (single descriptor snapshot)
+	// -----------------------------------------------------------------------
+
+	it("rejects raw input with extra key", () => {
+		const result = buildSandboxSshSpawnSpec({ ...GOLDEN, extraKey: "nope" });
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.code).toBe("EXTRA_KEY");
+	});
+
+	it("rejects raw input with Symbol key", () => {
+		const obj: Record<string, unknown> = { ...GOLDEN };
+		obj[Symbol("x")] = "y";
+		const result = buildSandboxSshSpawnSpec(obj);
+		expect(result.ok).toBe(false);
+	});
+
+	it("rejects raw input with non-enumerable key", () => {
+		const obj: Record<string, unknown> = Object.create(null);
+		obj.sandboxId = "sbx-001";
+		obj.remoteExecutable = "/usr/bin/docker";
+		obj.homeCwd = "/home/user";
+		obj.readyNonce = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		obj.homeEnv = GOLDEN.homeEnv;
+		Object.defineProperty(obj, "HIDDEN", { value: "x", enumerable: false, configurable: true });
+		const result = buildSandboxSshSpawnSpec(obj);
+		expect(result.ok).toBe(false);
+	});
+
+	it("rejects raw input with getter accessor", () => {
+		const obj = Object.create(null);
+		obj.sandboxId = "sbx-001";
+		obj.remoteExecutable = "/usr/bin/docker";
+		obj.homeCwd = "/home/user";
+		obj.readyNonce = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		Object.defineProperty(obj, "homeEnv", {
+			get: () => GOLDEN.homeEnv,
+			enumerable: true,
+			configurable: true,
+		});
+		const result = buildSandboxSshSpawnSpec(obj);
+		expect(result.ok).toBe(false);
+	});
+
+	it("rejects Proxy-wrapped raw input", () => {
+		const target = { ...GOLDEN };
+		const proxy = new Proxy(target, {});
+		const result = buildSandboxSshSpawnSpec(proxy);
+		expect(result.ok).toBe(false);
+	});
+
+	it("rejects raw input with undefined property", () => {
+		const result = buildSandboxSshSpawnSpec({ ...GOLDEN, sandboxId: undefined });
+		expect(result.ok).toBe(false);
+	});
+
+	it("never throws; hostile getters return frozen error", () => {
+		const throwingGetter: Record<string, unknown> = {
+			get sandboxId() {
+				throw new Error();
+			},
+		};
+		Object.assign(throwingGetter, {
+			remoteExecutable: "/usr/bin/docker",
+			homeCwd: "/home/user",
+			readyNonce: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			homeEnv: { PATH: "/usr/bin" },
+		});
+		const result = buildSandboxSshSpawnSpec(throwingGetter);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(Object.isFrozen(result)).toBe(true);
+	});
+
+	it("rejects non-plain-object raw input", () => {
+		class Foo {}
+		const obj = new Foo();
+		Object.assign(obj, GOLDEN);
+		const result = buildSandboxSshSpawnSpec(obj);
+		expect(result.ok).toBe(false);
+	});
+
+	it("error messages do not echo caller content", () => {
+		const result = buildSandboxSshSpawnSpec({});
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.message).not.toMatch(/sandboxId|remoteExe|homeCwd|readyNonce|homeEnv/);
+	});
+
+	it("error code belongs to closed literal union", () => {
+		const result = buildSandboxSshSpawnSpec(42 as unknown);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		const code = result.error.code;
+		const validCodes = [
+			"ACCESSOR_PROP",
+			"BACKSLASH",
+			"CONTROL_CHAR",
+			"DOT_SEGMENT",
+			"DOTDOT_SEGMENT",
+			"DOUBLE_SLASH",
+			"EXTRA_KEY",
+			"INVALID_CHAR",
+			"INVALID_INPUT",
+			"INVALID_NONCE",
+			"INVALID_SEGMENT",
+			"INVALID_TYPE",
+			"LEADING_DASH",
+			"LENGTH",
+			"MISSING_KEY",
+			"MISSING_PATH",
+			"NONENUM",
+			"NON_STRING",
+			"NOT_ABSOLUTE",
+			"ROOT_PATH",
+			"SYMBOL_KEY",
+			"TRAILING_SLASH",
+			"THROW",
+			"UNDEFINED_VALUE",
+		];
+		expect(validCodes).toContain(code);
+	});
+
+	it("env is fresh copy; mutation after snapshot is harmless", () => {
+		const env = { PATH: "/usr/bin" };
+		const result = buildSandboxSshSpawnSpec({ ...GOLDEN, homeEnv: env });
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		env.PATH = "/hacked";
+		expect(result.value.options.env.PATH).toBe("/usr/bin");
+	});
+
 	// Mutation protection
 	// -----------------------------------------------------------------------
 
