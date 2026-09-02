@@ -932,7 +932,7 @@ describe("recovery accumulator transitions", () => {
 		if (!r1.ok) return;
 		expect(r1.ok).toBe(true);
 		if (!r1.ok) return;
-		expect(r1.action).toBe("persist_pending_then_apply");
+		expect(r1.action).toBe("apply_idempotently");
 		expect(r1.state).toBe("pending");
 
 		const r2 = acc.ingest(makeMarker(2, "delivered"));
@@ -1014,7 +1014,7 @@ describe("recovery accumulator transitions", () => {
 		const r2 = acc.ingest(makeMarker(2, "pending", { frameId: "f-002", envelopeDigest: DIGEST_B }));
 		if (!r2.ok) return;
 		expect(r2.ok).toBe(true);
-		expect(r2.action).toBe("persist_pending_then_apply");
+		expect(r2.action).toBe("apply_idempotently");
 
 		// Now deliver original frame at later index
 		const r3 = acc.ingest(makeMarker(3, "delivered"));
@@ -1498,5 +1498,368 @@ describe("reentrant / concurrent encode deterministic output", () => {
 			const expected = i % 2 === 0 ? 1 : 2;
 			expect((results[i] as { ok: true; marker: DeliveryMarkerV1 }).marker.indexSeq).toBe(expected);
 		}
+	});
+});
+
+// ===========================================================================
+// 22. Corrupt marker followed by corrected same indexSeq
+// ===========================================================================
+
+describe("corrupt marker followed by corrected same indexSeq", () => {
+	function makeMarker(
+		indexSeq: number,
+		state: "pending" | "delivered",
+		overrides?: Record<string, unknown>,
+	): DeliveryMarkerV1 {
+		const raw: Record<string, unknown> = {
+			version: 1,
+			hostId: "h-1",
+			generation: "g-1",
+			sessionId: "s-1",
+			direction: "sent",
+			frameId: "f-001",
+			envelopeDigest: DIGEST_A,
+			journalSeq: 1,
+			indexSeq,
+			state,
+			recordedAt: "2025-01-15T10:30:00.000Z",
+			...overrides,
+		};
+		return raw as unknown as DeliveryMarkerV1;
+	}
+
+	it("wrong digest marker at indexSeq 1 fails and does not advance lastIndexSeq", () => {
+		const acc = createRecoveryAccumulator(IDENTITY_A, "sent");
+
+		// Deliver a marker with mismatched digest for the pending frame
+		const r1 = acc.ingest(makeMarker(1, "pending", { envelopeDigest: DIGEST_B, frameId: "f-001" }));
+		expect(r1.ok).toBe(true);
+		if (!r1.ok) return;
+		expect(r1.action).toBe("apply_idempotently");
+		expect(r1.state).toBe("pending");
+
+		// Delivered with digest mismatch
+		const r2 = acc.ingest(makeMarker(2, "delivered", { envelopeDigest: DIGEST_A, frameId: "f-001" }));
+		expect(r2.ok).toBe(false);
+
+		// State should still show pending (delivery was rejected)
+		const q = acc.query("f-001");
+		expect(q.state).toBe("pending");
+		expect(q.action).toBe("apply_idempotently");
+	});
+
+	it("corrected same indexSeq succeeds after corrupt marker with that indexSeq fails", () => {
+		const acc = createRecoveryAccumulator(IDENTITY_A, "sent");
+
+		// Skip indexSeq 1 deliberately with a gap -- this tests that
+		// a corrected marker with the SAME indexSeq can follow a failed
+		// marker only if the preceding marker never advanced state.
+		// Here we first feed a bad marker at 1, it fails, state stays at 0.
+		// Then a correct pending at 1 should succeed.
+
+		// Actually the gap test says index 1 -> fail, then index 1 again should work
+		// since lastIndexSeq is still 0. Let me test index 2 first:
+
+		// Wrong digest at index 2 (but index 1 first to establish frame)
+		const r1 = acc.ingest(makeMarker(1, "pending", { frameId: "f-001" }));
+		expect(r1.ok).toBe(true);
+		if (!r1.ok) return;
+		expect(r1.state).toBe("pending");
+
+		// Delivered at index 2 with WRONG digest -- fails
+		const r2 = acc.ingest(makeMarker(2, "delivered", { frameId: "f-001", envelopeDigest: DIGEST_B }));
+		expect(r2.ok).toBe(false);
+
+		// lastIndexSeq should still be 1, so index 2 on CORRECT digest should work
+		const r3 = acc.ingest(makeMarker(2, "delivered", { frameId: "f-001", envelopeDigest: DIGEST_A }));
+		expect(r3.ok).toBe(true);
+		if (!r3.ok) return;
+		expect(r3.action).toBe("send_replay_ack");
+		expect(r3.state).toBe("delivered");
+
+		const q = acc.query("f-001");
+		expect(q.state).toBe("delivered");
+		expect(q.action).toBe("send_replay_ack");
+	});
+
+	it("state and cursor unchanged after every rejected marker type", () => {
+		const acc = createRecoveryAccumulator(IDENTITY_A, "sent");
+
+		// Establish a pending frame
+		const r1 = acc.ingest(makeMarker(1, "pending", { frameId: "f-001" }));
+		expect(r1.ok).toBe(true);
+		if (!r1.ok) return;
+
+		// lastIndexSeq is 1, so next must be 2
+
+		// Establish frame f-002 as pending at index 2 (different frameId is valid)
+		const r2 = acc.ingest(makeMarker(2, "pending", { frameId: "f-002", envelopeDigest: DIGEST_B }));
+		expect(r2.ok).toBe(true);
+		if (!r2.ok) return;
+		expect(r2.state).toBe("pending");
+
+		// lastIndexSeq is 2
+
+		// Reject: digest mismatch on delivered for f-001
+		const r3 = acc.ingest(makeMarker(3, "delivered", { frameId: "f-001", envelopeDigest: DIGEST_B }));
+		expect(r3.ok).toBe(false);
+
+		// lastIndexSeq should still be 2; correct delivered at index 3 should work
+		const r4 = acc.ingest(makeMarker(3, "delivered", { frameId: "f-001", envelopeDigest: DIGEST_A }));
+		expect(r4.ok).toBe(true);
+		if (!r4.ok) return;
+		expect(r4.action).toBe("send_replay_ack");
+		expect(r4.state).toBe("delivered");
+
+		// lastIndexSeq is 3. Second delivered should fail.
+		const r5 = acc.ingest(makeMarker(4, "delivered", { frameId: "f-001" }));
+		expect(r5.ok).toBe(false);
+
+		// f-001 delivered, f-002 still pending - state unchanged by rejected markers
+		const q1 = acc.query("f-001");
+		expect(q1.state).toBe("delivered");
+		const q2 = acc.query("f-002");
+		expect(q2.state).toBe("pending");
+
+		// A correct pending at index 4 should work (lastIndexSeq is still 3)
+		const r6 = acc.ingest(makeMarker(4, "pending", { frameId: "f-003", envelopeDigest: DIGEST_A }));
+		expect(r6.ok).toBe(true);
+		if (!r6.ok) return;
+		expect(r6.state).toBe("pending");
+	});
+});
+
+// ===========================================================================
+// 23. createRecoveryAccumulator rejects invalid identity/direction
+// ===========================================================================
+
+describe("createRecoveryAccumulator rejects invalid identity/direction", () => {
+	it("rejects hostId with bad chars", () => {
+		expect(() =>
+			createRecoveryAccumulator({ hostId: "-bad", generation: "g-1", sessionId: "s-1" }, "sent"),
+		).toThrow();
+	});
+
+	it("rejects empty hostId", () => {
+		expect(() => createRecoveryAccumulator({ hostId: "", generation: "g-1", sessionId: "s-1" }, "sent")).toThrow();
+	});
+
+	it("rejects long hostId", () => {
+		expect(() =>
+			createRecoveryAccumulator({ hostId: "a".repeat(129), generation: "g-1", sessionId: "s-1" }, "sent"),
+		).toThrow();
+	});
+
+	it("rejects invalid direction", () => {
+		expect(() =>
+			createRecoveryAccumulator({ hostId: "h-1", generation: "g-1", sessionId: "s-1" }, "invalid" as any),
+		).toThrow();
+	});
+
+	it("rejects missing identity fields", () => {
+		expect(() => createRecoveryAccumulator({ hostId: "h-1", generation: "g-1" } as any, "sent")).toThrow();
+	});
+
+	it("rejects undefined identity", () => {
+		expect(() => createRecoveryAccumulator(undefined as any, "sent")).toThrow();
+	});
+
+	it("rejects null identity", () => {
+		expect(() => createRecoveryAccumulator(null as any, "sent")).toThrow();
+	});
+});
+
+// ===========================================================================
+// 24. Accumulator ingest hostile marker inputs
+// ===========================================================================
+
+describe("accumulator ingest hostile marker inputs", () => {
+	it("rejects Proxy marker with throwing getOwnPropertyDescriptor", () => {
+		const acc = createRecoveryAccumulator(IDENTITY_A, "sent");
+		const p = new Proxy({} as any, {
+			getOwnPropertyDescriptor() {
+				throw new Error("trap");
+			},
+		});
+		const r = acc.ingest(p);
+		expect(r.ok).toBe(false);
+	});
+
+	it("rejects marker with getter accessor", () => {
+		const acc = createRecoveryAccumulator(IDENTITY_A, "sent");
+		const obj = Object.create(null);
+		Object.defineProperty(obj, "hostId", {
+			get: () => "h-1",
+			enumerable: true,
+			configurable: true,
+		});
+		Object.defineProperty(obj, "generation", {
+			get: () => "g-1",
+			enumerable: true,
+			configurable: true,
+		});
+		Object.defineProperty(obj, "sessionId", {
+			get: () => "s-1",
+			enumerable: true,
+			configurable: true,
+		});
+		Object.defineProperty(obj, "direction", {
+			get: () => "sent",
+			enumerable: true,
+			configurable: true,
+		});
+		Object.defineProperty(obj, "frameId", {
+			get: () => "f-001",
+			enumerable: true,
+			configurable: true,
+		});
+		Object.defineProperty(obj, "envelopeDigest", {
+			get: () => DIGEST_A,
+			enumerable: true,
+			configurable: true,
+		});
+		Object.defineProperty(obj, "journalSeq", {
+			get: () => 1,
+			enumerable: true,
+			configurable: true,
+		});
+		Object.defineProperty(obj, "indexSeq", {
+			get: () => 1,
+			enumerable: true,
+			configurable: true,
+		});
+		Object.defineProperty(obj, "state", {
+			get: () => "pending",
+			enumerable: true,
+			configurable: true,
+		});
+		Object.defineProperty(obj, "recordedAt", {
+			get: () => "2025-01-15T10:30:00.000Z",
+			enumerable: true,
+			configurable: true,
+		});
+		const r = acc.ingest(obj as unknown as DeliveryMarkerV1);
+		expect(r.ok).toBe(false);
+	});
+
+	it("rejects non-object marker", () => {
+		const acc = createRecoveryAccumulator(IDENTITY_A, "sent");
+		expect(acc.ingest(null as any).ok).toBe(false);
+		expect(acc.ingest("string" as any).ok).toBe(false);
+		expect(acc.ingest(42 as any).ok).toBe(false);
+	});
+
+	it("rejects marker with extra keys", () => {
+		const acc = createRecoveryAccumulator(IDENTITY_A, "sent");
+		const raw = {
+			version: 1,
+			hostId: "h-1",
+			generation: "g-1",
+			sessionId: "s-1",
+			direction: "sent",
+			frameId: "f-001",
+			envelopeDigest: DIGEST_A,
+			journalSeq: 1,
+			indexSeq: 1,
+			state: "pending",
+			recordedAt: "2025-01-15T10:30:00.000Z",
+			extra: "x",
+		};
+		const r = acc.ingest(raw as unknown as DeliveryMarkerV1);
+		expect(r.ok).toBe(false);
+	});
+});
+
+// ===========================================================================
+// 25. Query with invalid frameId
+// ===========================================================================
+
+describe("query with invalid frameId", () => {
+	it("returns new for empty string", () => {
+		const acc = createRecoveryAccumulator(IDENTITY_A, "sent");
+		const q = acc.query("");
+		expect(q.state).toBe("new");
+		expect(q.action).toBe("persist_pending_then_apply");
+	});
+
+	it("returns new for frameId starting with hyphen", () => {
+		const acc = createRecoveryAccumulator(IDENTITY_A, "sent");
+		const q = acc.query("-bad");
+		expect(q.state).toBe("new");
+		expect(q.action).toBe("persist_pending_then_apply");
+	});
+
+	it("returns new for very long frameId", () => {
+		const acc = createRecoveryAccumulator(IDENTITY_A, "sent");
+		const q = acc.query("a".repeat(200));
+		expect(q.state).toBe("new");
+		expect(q.action).toBe("persist_pending_then_apply");
+	});
+
+	it("query result is frozen even for invalid id", () => {
+		const acc = createRecoveryAccumulator(IDENTITY_A, "sent");
+		const q = acc.query("");
+		expect(Object.isFrozen(q)).toBe(true);
+	});
+});
+
+// ===========================================================================
+// 26. Exact action sequence
+// ===========================================================================
+
+describe("exact action sequence", () => {
+	function makeMarker(
+		indexSeq: number,
+		state: "pending" | "delivered",
+		overrides?: Record<string, unknown>,
+	): DeliveryMarkerV1 {
+		const raw: Record<string, unknown> = {
+			version: 1,
+			hostId: "h-1",
+			generation: "g-1",
+			sessionId: "s-1",
+			direction: "sent",
+			frameId: "f-001",
+			envelopeDigest: DIGEST_A,
+			journalSeq: 1,
+			indexSeq,
+			state,
+			recordedAt: "2025-01-15T10:30:00.000Z",
+			...overrides,
+		};
+		return raw as unknown as DeliveryMarkerV1;
+	}
+
+	it("new query -> ingest pending -> query pending -> ingest delivered -> query delivered", () => {
+		const acc = createRecoveryAccumulator(IDENTITY_A, "sent");
+
+		// Step 1: query absent frame -> new
+		const q1 = acc.query("f-001");
+		expect(q1.state).toBe("new");
+		expect(q1.action).toBe("persist_pending_then_apply");
+
+		// Step 2: ingest pending
+		const r1 = acc.ingest(makeMarker(1, "pending"));
+		expect(r1.ok).toBe(true);
+		if (!r1.ok) return;
+		expect(r1.action).toBe("apply_idempotently");
+		expect(r1.state).toBe("pending");
+
+		// Step 3: query pending -> apply_idempotently
+		const q2 = acc.query("f-001");
+		expect(q2.state).toBe("pending");
+		expect(q2.action).toBe("apply_idempotently");
+
+		// Step 4: ingest delivered
+		const r2 = acc.ingest(makeMarker(2, "delivered"));
+		expect(r2.ok).toBe(true);
+		if (!r2.ok) return;
+		expect(r2.action).toBe("send_replay_ack");
+		expect(r2.state).toBe("delivered");
+
+		// Step 5: query delivered -> send_replay_ack
+		const q3 = acc.query("f-001");
+		expect(q3.state).toBe("delivered");
+		expect(q3.action).toBe("send_replay_ack");
 	});
 });

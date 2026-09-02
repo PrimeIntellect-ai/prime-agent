@@ -570,7 +570,7 @@ function decodeDeliveryMarkerV1Impl(
 // Recovery Accumulator
 // ===========================================================================
 
-interface TrackedFrame {
+interface TrackedFrameEntry {
 	readonly envelopeDigest: string;
 	readonly journalSeq: number;
 	readonly indexSeq: number;
@@ -584,101 +584,244 @@ export interface RecoveryAccumulator {
 	query(frameId: string): DeliveryQueryResult;
 }
 
+/**
+ * Create a pure recovery accumulator for an exact identity and direction.
+ *
+ * All inputs are validated and deep-copied before any reads or mutations.
+ * ingest computes the entire new internal state in locals first, then
+ * atomically commits.  Every method is wrapped to return frozen error
+ * results on any throw (Proxy, getter, descriptor mismatch).
+ *
+ * @param identity - The delivery identity to bind to.
+ * @param direction - The delivery direction to bind to.
+ * @returns A frozen RecoveryAccumulator.
+ */
 export function createRecoveryAccumulator(
 	identity: DeliveryIdentity,
 	direction: JournalDirection,
 ): RecoveryAccumulator {
+	// ---- Defensive copy of identity ----
+	// copyExactOwnDataObject tolerates Proxy getters and descriptor tricks
+	// by reading descriptor.value instead of invoking [[Get]].
+	const identityKeys = new Set(["hostId", "generation", "sessionId"]);
+	const idCopy = copyExactOwnDataObject(identity, identityKeys, 3);
+	if (typeof idCopy === "string") {
+		throw new TypeError("Invalid identity");
+	}
+	const rawHostId = idCopy.hostId;
+	const rawGeneration = idCopy.generation;
+	const rawSessionId = idCopy.sessionId;
+	if (typeof rawHostId !== "string" || !isValidSafeId(rawHostId)) throw new TypeError("Invalid hostId");
+	if (typeof rawGeneration !== "string" || !isValidSafeId(rawGeneration)) throw new TypeError("Invalid generation");
+	if (typeof rawSessionId !== "string" || !isValidSafeId(rawSessionId)) throw new TypeError("Invalid sessionId");
+
 	const identityFrozen = deepFreeze({
-		hostId: identity.hostId,
-		generation: identity.generation,
-		sessionId: identity.sessionId,
+		hostId: rawHostId,
+		generation: rawGeneration,
+		sessionId: rawSessionId,
 	}) as DeliveryIdentity;
 
-	let lastIndexSeq = 0;
-	const frames = new Map<string, TrackedFrame>();
+	// Validate direction
+	if (direction !== "sent" && direction !== "received") {
+		throw new TypeError("Invalid direction");
+	}
+	const directionVal: JournalDirection = direction;
 
+	// ---- Mutable internal state ----
+	let lastIndexSeq = 0;
+	const frames = new Map<string, TrackedFrameEntry>();
+
+	// ---- Helper: validate a marker defensively ----
+	function validateMarker(marker: DeliveryMarkerV1): TrackedFrameEntry | "IDENTITY_MISMATCH" | "DIRECTION_MISMATCH" {
+		// Defensive copy via hasOwnProperty descriptor inspection.
+		// We can't use copyExactOwnDataObject on the marker because it's
+		// already a deep-frozen DTO and we want to validate its fields
+		// without re-reading through possible Proxy.
+		if (typeof marker !== "object" || marker === null) return "IDENTITY_MISMATCH";
+
+		// Read fields via descriptor.value only, never [[Get]]
+		let proto: object | null;
+		try {
+			proto = Object.getPrototypeOf(marker);
+		} catch {
+			return "IDENTITY_MISMATCH";
+		}
+		if (proto !== null && proto !== Object.prototype) return "IDENTITY_MISMATCH";
+
+		let descs: PropertyDescriptorMap;
+		try {
+			descs = Object.getOwnPropertyDescriptors(marker);
+		} catch {
+			return "IDENTITY_MISMATCH";
+		}
+
+		let keys: string[];
+		try {
+			keys = Object.getOwnPropertyNames(marker);
+		} catch {
+			return "IDENTITY_MISMATCH";
+		}
+
+		// Helper to safely read a field
+		function safeField(key: string): unknown {
+			const desc = descs[key];
+			if (!desc) return undefined;
+			if (desc.get || desc.set) return undefined;
+			if (!desc.enumerable) return undefined;
+			return desc.value;
+		}
+
+		// Reject extra keys outside the marker field set
+		const MARKER_FIELD_KEYS: ReadonlySet<string> = new Set([
+			"version",
+			"hostId",
+			"generation",
+			"sessionId",
+			"direction",
+			"frameId",
+			"envelopeDigest",
+			"journalSeq",
+			"indexSeq",
+			"state",
+			"recordedAt",
+		]);
+		for (const k of keys) {
+			if (!MARKER_FIELD_KEYS.has(k)) return "IDENTITY_MISMATCH";
+		}
+
+		const mHostId = safeField("hostId");
+		const mGeneration = safeField("generation");
+		const mSessionId = safeField("sessionId");
+		const mDirection = safeField("direction");
+		const mFrameId = safeField("frameId");
+		const mEnvelopeDigest = safeField("envelopeDigest");
+		const mJournalSeq = safeField("journalSeq");
+		const mIndexSeq = safeField("indexSeq");
+		const mState = safeField("state");
+
+		if (typeof mHostId !== "string" || mHostId !== identityFrozen.hostId) return "IDENTITY_MISMATCH";
+		if (typeof mGeneration !== "string" || mGeneration !== identityFrozen.generation) return "IDENTITY_MISMATCH";
+		if (typeof mSessionId !== "string" || mSessionId !== identityFrozen.sessionId) return "IDENTITY_MISMATCH";
+		if (typeof mDirection !== "string" || mDirection !== directionVal) return "DIRECTION_MISMATCH";
+		if (typeof mFrameId !== "string") return "IDENTITY_MISMATCH";
+		if (typeof mEnvelopeDigest !== "string") return "IDENTITY_MISMATCH";
+		if (typeof mJournalSeq !== "number" || !Number.isSafeInteger(mJournalSeq) || mJournalSeq <= 0)
+			return "IDENTITY_MISMATCH";
+		if (typeof mIndexSeq !== "number" || !Number.isSafeInteger(mIndexSeq) || mIndexSeq <= 0)
+			return "IDENTITY_MISMATCH";
+		if (mState !== "pending" && mState !== "delivered") return "IDENTITY_MISMATCH";
+
+		return {
+			envelopeDigest: mEnvelopeDigest as string,
+			journalSeq: mJournalSeq as number,
+			indexSeq: mIndexSeq as number,
+			state: mState as "pending" | "delivered",
+		};
+	}
+
+	// ---- Accumulator object ----
 	const accumulator: RecoveryAccumulator = {
 		get identity(): DeliveryIdentity {
 			return identityFrozen;
 		},
+
 		get direction(): JournalDirection {
-			return direction;
+			return directionVal;
 		},
 
 		ingest(marker: DeliveryMarkerV1): IngestResult {
 			try {
-				// Validate identity
-				if (marker.hostId !== identityFrozen.hostId) return fail("MISMATCH");
-				if (marker.generation !== identityFrozen.generation) return fail("MISMATCH");
-				if (marker.sessionId !== identityFrozen.sessionId) return fail("MISMATCH");
-				if (marker.direction !== direction) return fail("MISMATCH");
+				// Step 1: defensively validate the marker (reads descriptor.value only)
+				const entry = validateMarker(marker);
+				if (typeof entry === "string") {
+					if (entry === "IDENTITY_MISMATCH") return fail("MISMATCH");
+					if (entry === "DIRECTION_MISMATCH") return fail("MISMATCH");
+					return fail("INVALID_FRAME");
+				}
 
-				// Validate contiguous indexSeq
+				// Step 2: validate contiguous indexSeq in local
 				const expectedNext = lastIndexSeq + 1;
-				if (marker.indexSeq !== expectedNext) return fail("INVALID_SEQUENCE");
-				lastIndexSeq = marker.indexSeq;
+				if (entry.indexSeq !== expectedNext) return fail("INVALID_SEQUENCE");
+				const newLastIndexSeq = entry.indexSeq;
 
+				// Step 3: look up existing frame state in local
 				const existing = frames.get(marker.frameId);
+
+				let newState: "pending" | "delivered";
+				let action: DeliveryAction;
 
 				if (!existing) {
 					// First marker for this frame -- must be pending
-					if (marker.state !== "pending") return fail("INVALID_FRAME");
+					if (entry.state !== "pending") return fail("INVALID_FRAME");
 
-					frames.set(marker.frameId, {
-						envelopeDigest: marker.envelopeDigest,
-						journalSeq: marker.journalSeq,
-						indexSeq: marker.indexSeq,
-						state: "pending",
-					});
-
-					return okIngest("persist_pending_then_apply", "pending");
-				}
-
-				// Existing tracked frame
-				if (existing.state === "delivered") {
+					newState = "pending";
+					action = "apply_idempotently";
+				} else if (existing.state === "delivered") {
 					// Second delivered on same frame
 					return fail("INVALID_FRAME");
+				} else {
+					// existing.state === "pending"
+					if (entry.state === "pending") {
+						// Duplicate pending
+						return fail("INVALID_FRAME");
+					}
+
+					// Transition: delivered
+					if (entry.state !== "delivered") return fail("INVALID_FRAME");
+
+					// Validate digest + journalSeq match the existing pending
+					if (entry.envelopeDigest !== existing.envelopeDigest) return fail("MISMATCH");
+					if (entry.journalSeq !== existing.journalSeq) return fail("MISMATCH");
+
+					newState = "delivered";
+					action = "send_replay_ack";
 				}
 
-				// existing.state === "pending"
-				if (marker.state === "pending") {
-					// Duplicate pending
-					return fail("INVALID_FRAME");
-				}
-
-				// Transition: delivered
-				if (marker.state !== "delivered") return fail("INVALID_FRAME");
-
-				// Validate digest + journalSeq match the existing pending
-				if (marker.envelopeDigest !== existing.envelopeDigest) return fail("MISMATCH");
-				if (marker.journalSeq !== existing.journalSeq) return fail("MISMATCH");
-
-				// Transition to delivered
+				// ---- Atomic commit ----
+				lastIndexSeq = newLastIndexSeq;
 				frames.set(marker.frameId, {
-					envelopeDigest: existing.envelopeDigest,
-					journalSeq: existing.journalSeq,
-					indexSeq: marker.indexSeq,
-					state: "delivered",
+					envelopeDigest: entry.envelopeDigest,
+					journalSeq: entry.journalSeq,
+					indexSeq: entry.indexSeq,
+					state: newState,
 				});
 
-				return okIngest("send_replay_ack", "delivered");
+				return okIngest(action, newState);
 			} catch {
 				return fail("INVALID_FRAME");
 			}
 		},
 
 		query(frameId: string): DeliveryQueryResult {
-			const tracked = frames.get(frameId);
-			if (!tracked) {
+			try {
+				// Validate frameId
+				if (typeof frameId !== "string" || !isValidSafeId(frameId)) {
+					return Object.freeze({
+						state: "new" as DeliveryState,
+						action: "persist_pending_then_apply" as DeliveryAction,
+					});
+				}
+
+				const tracked = frames.get(frameId);
+				if (!tracked) {
+					return Object.freeze({
+						state: "new" as DeliveryState,
+						action: "persist_pending_then_apply" as DeliveryAction,
+					});
+				}
+				if (tracked.state === "pending") {
+					return Object.freeze({
+						state: "pending" as DeliveryState,
+						action: "apply_idempotently" as DeliveryAction,
+					});
+				}
+				return Object.freeze({ state: "delivered" as DeliveryState, action: "send_replay_ack" as DeliveryAction });
+			} catch {
 				return Object.freeze({
 					state: "new" as DeliveryState,
 					action: "persist_pending_then_apply" as DeliveryAction,
 				});
 			}
-			if (tracked.state === "pending") {
-				return Object.freeze({ state: "pending" as DeliveryState, action: "apply_idempotently" as DeliveryAction });
-			}
-			return Object.freeze({ state: "delivered" as DeliveryState, action: "send_replay_ack" as DeliveryAction });
 		},
 	};
 
