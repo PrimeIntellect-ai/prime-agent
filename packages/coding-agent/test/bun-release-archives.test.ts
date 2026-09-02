@@ -103,7 +103,7 @@ describe("compiled release archives", () => {
 			name: "prime-agent",
 			version: "1.2.3",
 			bin: { "prime-agent": "./prime-agent" },
-			packageManager: "bun@1.3.14",
+			packageManager: "bun@1.4.0",
 		});
 		for (const name of [
 			"prime-agent",

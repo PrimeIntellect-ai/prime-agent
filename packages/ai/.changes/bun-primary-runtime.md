@@ -1,1 +1,1 @@
-- Made Bun 1.3.14 the primary development and test runtime while preserving Node-compatible package output.
+- Made Bun 1.4.0 the primary development and test runtime while preserving Node-compatible package output.

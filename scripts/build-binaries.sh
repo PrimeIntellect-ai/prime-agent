@@ -25,8 +25,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Require Bun 1.3.14
-EXPECTED_BUN_VERSION="1.3.14"
+# Require Bun 1.4.0
+EXPECTED_BUN_VERSION="1.4.0"
 ACTUAL_BUN_VERSION=$(bun --version 2>/dev/null || echo "not-found")
 if [ "$ACTUAL_BUN_VERSION" != "$EXPECTED_BUN_VERSION" ]; then
 	echo "ERROR: Expected Bun ${EXPECTED_BUN_VERSION}, got ${ACTUAL_BUN_VERSION}"
