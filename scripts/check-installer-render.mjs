@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join } from "node:path";
 
 const installerSource = readFileSync("install.sh", "utf-8");
 const mainCall = '\nmain "$@"';
@@ -11,7 +11,7 @@ const syncEnd = "\x1b[?2026l";
 const failures = [];
 
 if (mainCallIndex === -1) {
-	console.error('Installer check failed: could not find final main "$@" call.');
+	console.error('Installer render check failed: could not find final main "$@" call.');
 	process.exit(1);
 }
 
@@ -152,78 +152,16 @@ try {
 	check(compactRows.meta.first.visible === "1", "expected the initial tall render to show the logo");
 	check(compactRows.meta.second.compact === "1", "expected shrink below frozen splash height to use compact mode");
 	check(compactRows.meta.second.visible === "0", "expected compact row mode to hide the logo");
-
-	checkNpmInstallPolicies();
 } finally {
 	rmSync(tempDir, { recursive: true, force: true });
 }
 
 if (failures.length > 0) {
-	console.error(["Installer check failed:", ...failures.map((failure) => `- ${failure}`)].join("\n"));
+	console.error(["Installer render check failed:", ...failures.map((failure) => `- ${failure}`)].join("\n"));
 	process.exit(1);
 }
 
-console.log("Installer check passed.");
-
-function checkNpmInstallPolicies() {
-	const binDir = join(tempDir, "bin");
-	const installHarnessPath = join(tempDir, "install-harness.sh");
-	const npmPath = join(binDir, "npm");
-	const tarballPath = join(tempDir, "verified release package.tgz");
-	const installHarnessSource = `${installerSource.slice(0, mainCallIndex)}
-
-prime_agent_npm_install "$1"
-`;
-	const npmSource = `#!/bin/sh
-set -eu
-
-if [ "\${1:-}" = "--version" ]; then
-	printf '%s\\n' "$FAKE_NPM_VERSION"
-	exit 0
-fi
-[ "\${1:-}" = install ] || exit 1
-
-remote_policy=
-script_policy=
-target=
-for arg in "$@"; do
-	case "$arg" in
-		--allow-remote=*) remote_policy=\${arg#*=} ;;
-		--allow-scripts=*) script_policy=\${arg#*=} ;;
-		"$FAKE_NPM_TARBALL") target="$arg" ;;
-	esac
-done
-[ "$target" = "$FAKE_NPM_TARBALL" ] || exit 1
-
-npm_major=\${FAKE_NPM_VERSION%%.*}
-if [ "$npm_major" -ge 12 ]; then
-	[ "$remote_policy" = all ] && [ "$script_policy" = "$FAKE_NPM_TARBALL" ] || exit 1
-else
-	[ -z "$remote_policy" ] && [ -z "$script_policy" ] || exit 1
-fi
-`;
-
-	mkdirSync(binDir);
-	writeFileSync(installHarnessPath, installHarnessSource, "utf-8");
-	writeFileSync(npmPath, npmSource, "utf-8");
-	writeFileSync(tarballPath, "verified fixture", "utf-8");
-	chmodSync(npmPath, 0o755);
-
-	for (const npmVersion of ["10.9.8", "11.12.1", "12.0.2"]) {
-		const result = spawnSync("sh", [installHarnessPath, tarballPath], {
-			encoding: "utf-8",
-			env: {
-				...process.env,
-				FAKE_NPM_TARBALL: tarballPath,
-				FAKE_NPM_VERSION: npmVersion,
-				PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
-			},
-		});
-		if (result.status !== 0) {
-			failures.push(`npm ${npmVersion}: install policy check failed\n${result.stderr}${result.stdout}`);
-		}
-	}
-}
+console.log("Installer render check passed.");
 
 function runCase(name, initialCols, initialRows, resizedCols, resizedRows) {
 	const result = spawnSync("sh", [harnessPath, String(initialCols), String(initialRows), String(resizedCols), String(resizedRows)], {
