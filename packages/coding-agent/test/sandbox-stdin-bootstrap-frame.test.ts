@@ -1244,6 +1244,122 @@ describe("registration safety", () => {
 		expect(listeners.error.length).toBe(0);
 	});
 
+	it('on("data") that pushes callback and then throws cleans up owned listener and preserves unrelated', async () => {
+		// src.on("data") pushes the callback into its internal table,
+		// then throws. The reader must still remove that installed
+		// callback via removeOwnListeners, because registeredData was
+		// set to true before on(). An unrelated listener must remain.
+		let callCount = 0;
+		const ownedCbs: Array<(...args: Array<unknown>) => void> = [];
+		const unrelatedCb = (chunk: Uint8Array) => {
+			void chunk;
+		};
+		const src: StdinSource = {
+			on(event, cb) {
+				if (event === "data") {
+					ownedCbs.push(cb);
+					callCount++;
+					// Only throw on the reader's registration call, not on
+					// the pre-registration of the unrelated listener.
+					if (callCount > 1) {
+						throw new Error("install then throw");
+					}
+				}
+			},
+			removeListener(_event, cb) {
+				const idx = ownedCbs.indexOf(cb);
+				if (idx >= 0) ownedCbs.splice(idx, 1);
+			},
+			resume() {},
+		};
+		// Pre-register an unrelated listener (first call — does not throw)
+		src.on("data", unrelatedCb);
+		expect(ownedCbs.length).toBe(1);
+		const r = await readStdinBootstrapFrame(src);
+		expect(r).toEqual({ ok: false, code: "INVALID_SOURCE" });
+		// Owned callback must have been removed; unrelated remains
+		expect(ownedCbs.length).toBe(1);
+		expect(ownedCbs[0]).toBe(unrelatedCb);
+	});
+
+	it('on("end") that pushes callback and then throws cleans up installed listeners', async () => {
+		// src.on("end") pushes the callback into its internal table,
+		// then throws. Data listener is already installed; on("end")
+		// throw must cleanup both data and end, with flags still true.
+		const ownedDataCbs: Array<(...args: Array<unknown>) => void> = [];
+		const ownedEndCbs: Array<(...args: Array<unknown>) => void> = [];
+		const src: StdinSource = {
+			on(event, cb) {
+				if (event === "data") {
+					ownedDataCbs.push(cb);
+				}
+				if (event === "end") {
+					ownedEndCbs.push(cb);
+					throw new Error("install then throw");
+				}
+			},
+			removeListener(event, cb) {
+				if (event === "data") {
+					const idx = ownedDataCbs.indexOf(cb);
+					if (idx >= 0) ownedDataCbs.splice(idx, 1);
+				}
+				if (event === "end") {
+					const idx = ownedEndCbs.indexOf(cb);
+					if (idx >= 0) ownedEndCbs.splice(idx, 1);
+				}
+			},
+			resume() {},
+		};
+		const r = await readStdinBootstrapFrame(src);
+		expect(r).toEqual({ ok: false, code: "INVALID_SOURCE" });
+		// Both owned callbacks must have been removed
+		expect(ownedDataCbs.length).toBe(0);
+		expect(ownedEndCbs.length).toBe(0);
+	});
+
+	it('on("error") that pushes callback and then throws cleans up all three installed listeners', async () => {
+		// All three on() succeed until on("error") pushes and throws.
+		// All three installed callbacks must be removed.
+		const ownedDataCbs: Array<(...args: Array<unknown>) => void> = [];
+		const ownedEndCbs: Array<(...args: Array<unknown>) => void> = [];
+		const ownedErrorCbs: Array<(...args: Array<unknown>) => void> = [];
+		const src: StdinSource = {
+			on(event, cb) {
+				if (event === "data") {
+					ownedDataCbs.push(cb);
+				}
+				if (event === "end") {
+					ownedEndCbs.push(cb);
+				}
+				if (event === "error") {
+					ownedErrorCbs.push(cb);
+					throw new Error("install then throw");
+				}
+			},
+			removeListener(event, cb) {
+				if (event === "data") {
+					const idx = ownedDataCbs.indexOf(cb);
+					if (idx >= 0) ownedDataCbs.splice(idx, 1);
+				}
+				if (event === "end") {
+					const idx = ownedEndCbs.indexOf(cb);
+					if (idx >= 0) ownedEndCbs.splice(idx, 1);
+				}
+				if (event === "error") {
+					const idx = ownedErrorCbs.indexOf(cb);
+					if (idx >= 0) ownedErrorCbs.splice(idx, 1);
+				}
+			},
+			resume() {},
+		};
+		const r = await readStdinBootstrapFrame(src);
+		expect(r).toEqual({ ok: false, code: "INVALID_SOURCE" });
+		// All three owned callbacks must have been removed
+		expect(ownedDataCbs.length).toBe(0);
+		expect(ownedEndCbs.length).toBe(0);
+		expect(ownedErrorCbs.length).toBe(0);
+	});
+
 	it("preserves unrelated source listeners after cleanup", async () => {
 		// Verify that the reader's cleanup only removes its own registered
 		// callbacks and leaves unrelated listeners untouched.

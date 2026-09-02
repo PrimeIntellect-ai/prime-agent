@@ -538,8 +538,9 @@ export function readStdinBootstrapFrame(
 		try {
 			src.on("data", onDataCb);
 		} catch {
-			registeredData = false;
-			removeOwnListeners();
+			// on() may have already installed the listener before throwing.
+			// Leave registeredData=true so removeOwnListeners inside
+			// settleWithCode will attempt removal.
 			settleWithCode("INVALID_SOURCE");
 			return;
 		}
@@ -551,8 +552,6 @@ export function readStdinBootstrapFrame(
 		try {
 			src.on("end", onEndCb);
 		} catch {
-			registeredEnd = false;
-			removeOwnListeners();
 			settleWithCode("INVALID_SOURCE");
 			return;
 		}
@@ -563,8 +562,6 @@ export function readStdinBootstrapFrame(
 		try {
 			src.on("error", onErrorCb);
 		} catch {
-			registeredError = false;
-			removeOwnListeners();
 			settleWithCode("INVALID_SOURCE");
 			return;
 		}
