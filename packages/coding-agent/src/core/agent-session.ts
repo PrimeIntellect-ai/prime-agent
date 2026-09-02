@@ -3,6 +3,25 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import type {
+	Api,
+	AssistantMessage,
+	ImageContent,
+	Model,
+	ServiceTier,
+	TextContent,
+	Usage,
+	UserMessage,
+} from "@prime-intellect/prime-agent-ai";
+import {
+	clampThinkingLevel,
+	cleanupSessionResources,
+	getSupportedThinkingLevels,
+	isContextOverflow,
+	modelsAreEqual,
+	resetApiProviders,
+	supportsFastMode,
+} from "@prime-intellect/prime-agent-ai";
 import {
 	Agent,
 	type AgentContext,
@@ -14,26 +33,7 @@ import {
 	type GetContinuationMessagesContext,
 	type ShouldStopAfterTurnContext,
 	type ThinkingLevel,
-} from "@earendil-works/pi-agent-core";
-import type {
-	Api,
-	AssistantMessage,
-	ImageContent,
-	Model,
-	ServiceTier,
-	TextContent,
-	Usage,
-	UserMessage,
-} from "@earendil-works/pi-ai";
-import {
-	clampThinkingLevel,
-	cleanupSessionResources,
-	getSupportedThinkingLevels,
-	isContextOverflow,
-	modelsAreEqual,
-	resetApiProviders,
-	supportsFastMode,
-} from "@earendil-works/pi-ai";
+} from "@prime-intellect/prime-agent-core";
 import { theme } from "../modes/interactive/theme/theme.js";
 import { stripFrontmatter } from "../utils/frontmatter.js";
 import { sleep } from "../utils/sleep.js";

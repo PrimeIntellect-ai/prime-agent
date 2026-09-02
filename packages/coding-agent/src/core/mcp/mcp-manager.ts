@@ -6,8 +6,8 @@ import {
 	createMcpOAuthProvider,
 	getCatalogEntry,
 	registerBuiltinMcpOAuthProviders,
-} from "@earendil-works/pi-ai/mcp";
-import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
+} from "@prime-intellect/prime-agent-ai/mcp";
+import { registerOAuthProvider, unregisterOAuthProvider } from "@prime-intellect/prime-agent-ai/oauth";
 import type { AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
 import type { AcpMcpServerConfig } from "./acp-mcp-types.js";

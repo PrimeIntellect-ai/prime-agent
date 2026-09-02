@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { OAuthAuthInfo } from "@earendil-works/pi-ai";
+import type { OAuthAuthInfo } from "@prime-intellect/prime-agent-ai";
 
 export const PRIME_INFERENCE_PROVIDER_ID = "prime-inference";
 export const PRIME_INFERENCE_PROVIDER_NAME = "Prime Inference";

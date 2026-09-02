@@ -1,5 +1,5 @@
 {
-	"name": "@earendil-works/pi-agent-core",
+	"name": "@prime-intellect/prime-agent-core",
 	"version": "0.9.1",
 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
 	"type": "module",
@@ -17,7 +17,7 @@
 		"prepublishOnly": "bun run clean && bun run build"
 	},
 	"dependencies": {
-		"@earendil-works/pi-ai": "^0.9.1",
+		"@prime-intellect/prime-agent-ai": "^0.9.1",
 		"typebox": "^1.3.9"
 	},
 	"keywords": [
@@ -41,5 +41,8 @@
 	"devDependencies": {
 		"@types/node": "^24.3.0",
 		"typescript": "^7.0.2"
+	},
+	"publishConfig": {
+		"access": "public"
 	}
 }

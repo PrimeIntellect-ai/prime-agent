@@ -1,5 +1,13 @@
-import type { AgentEvent, AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Api, ImageContent, Model, ServiceTier, TextContent, Transport, Usage } from "@earendil-works/pi-ai";
+import type {
+	Api,
+	ImageContent,
+	Model,
+	ServiceTier,
+	TextContent,
+	Transport,
+	Usage,
+} from "@prime-intellect/prime-agent-ai";
+import type { AgentEvent, AgentMessage, ThinkingLevel } from "@prime-intellect/prime-agent-core";
 import type { AgentSessionMessageReceipt, AgentSessionMessageSafetyStatus } from "../../core/agent-messages.js";
 import type { AuthSourceToken } from "../../core/auth-storage.js";
 import type { AgentAutonomousStatus } from "../../core/autonomous.js";

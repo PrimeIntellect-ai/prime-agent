@@ -61,7 +61,7 @@
 	},
 	"version": "0.9.1",
 	"dependencies": {
-		"@earendil-works/pi-coding-agent": "^0.9.1",
+		"@prime-intellect/prime-agent": "^0.9.1",
 		"get-east-asian-width": "^1.6.0"
 	},
 	"overrides": {

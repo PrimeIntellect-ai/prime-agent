@@ -1,5 +1,5 @@
-import { Agent, type AgentMessage } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, UserMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, UserMessage } from "@prime-intellect/prime-agent-ai";
+import { Agent, type AgentMessage } from "@prime-intellect/prime-agent-core";
 
 export type SideQuestionStatus = "running" | "complete" | "cancelled" | "error";
 

@@ -1,5 +1,5 @@
 {
-	"name": "@earendil-works/pi-ai",
+	"name": "@prime-intellect/prime-agent-ai",
 	"version": "0.9.1",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"type": "module",
@@ -108,5 +108,8 @@
 	"devDependencies": {
 		"@types/node": "^24.3.0",
 		"canvas": "^3.2.0"
+	},
+	"publishConfig": {
+		"access": "public"
 	}
 }

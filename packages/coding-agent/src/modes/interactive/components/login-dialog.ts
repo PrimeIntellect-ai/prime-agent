@@ -1,5 +1,5 @@
 import { win32 } from "node:path";
-import { getOAuthProviders } from "@earendil-works/pi-ai/oauth";
+import { getOAuthProviders } from "@prime-intellect/prime-agent-ai/oauth";
 import {
 	type Component,
 	Container,
@@ -11,7 +11,7 @@ import {
 	type TUI,
 	truncateToWidth,
 	visibleWidth,
-} from "@earendil-works/pi-tui";
+} from "@prime-intellect/prime-agent-tui";
 import { execFile } from "child_process";
 import { PRIME_BUTTERFLY_LOGO } from "../../../themes/prime-logo.js";
 import { copyToClipboard } from "../../../utils/clipboard.js";

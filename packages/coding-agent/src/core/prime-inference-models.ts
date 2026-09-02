@@ -1,4 +1,4 @@
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model } from "@prime-intellect/prime-agent-ai";
 
 export const PRIME_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1";
 const PRIVATE_MODEL_REFRESH_TIMEOUT_MS = 10_000;

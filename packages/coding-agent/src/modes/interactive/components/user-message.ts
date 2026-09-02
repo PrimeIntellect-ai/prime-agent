@@ -1,4 +1,11 @@
-import { Box, type Component, Container, Markdown, type MarkdownTheme, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	Box,
+	type Component,
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	visibleWidth,
+} from "@prime-intellect/prime-agent-tui";
 import { parseSlashCommand } from "../../../core/slash-commands.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
 import { isLeadingSlashCommand } from "./slash-command-message.js";

@@ -1,6 +1,6 @@
 import * as path from "node:path";
-import { getProviders, type OAuthProviderId, type OAuthSelectPrompt } from "@earendil-works/pi-ai";
-import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import { getProviders, type OAuthProviderId, type OAuthSelectPrompt } from "@prime-intellect/prime-agent-ai";
+import type { OverlayHandle, TUI } from "@prime-intellect/prime-agent-tui";
 import { getAuthPath, getDocsPath } from "../../config.js";
 import type { ModelRegistry } from "../../core/model-registry.js";
 import {

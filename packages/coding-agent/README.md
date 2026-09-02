@@ -13,7 +13,7 @@
   RLM-native terminal coding and research harness.
 </p>
 
-Prime Agent began as a hard fork of [pi-mono](https://github.com/badlogic/pi-mono), but it is now developed and distributed independently. This workspace retains inherited `@earendil-works/pi-*` source package identifiers, the `pi` package manifest key, and a source-package `pi` bin entry for internal compatibility. Public releases are compiled Bun binary archives installed by the scripts below; release packaging ships the application and command as `prime-agent`. Do not use the inherited npm package as the Prime Agent install path.
+Prime Agent began as a hard fork of [pi-mono](https://github.com/badlogic/pi-mono), but it is now developed and distributed independently under the `@prime-intellect` npm scope. The public CLI package is `@prime-intellect/prime-agent`, and it installs the `prime-agent` command.
 
 ## Table of Contents
 
@@ -43,13 +43,21 @@ Prime Agent began as a hard fork of [pi-mono](https://github.com/badlogic/pi-mon
 ## Quick Start
 
 ```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+bun install -g @prime-intellect/prime-agent
 ```
+
+The global `prime-agent` command runs on Bun. The package's TypeScript SDK exports remain compatible with Node.js 22.8 and newer.
 
 To install the beta built from the latest commit on `main`:
 
 ```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh -s -- beta
+bun install -g @prime-intellect/prime-agent@beta
+```
+
+On macOS and Linux, the standalone release installer remains available as an alternative:
+
+```bash
+curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
 Authenticate with an API key:

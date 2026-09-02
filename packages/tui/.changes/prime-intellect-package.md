@@ -1,0 +1,1 @@
+- Moved the TUI package to `@prime-intellect/prime-agent-tui`.

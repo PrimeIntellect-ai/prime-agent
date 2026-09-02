@@ -1,7 +1,7 @@
 import { isAbsolute } from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ToolResultMessage } from "@earendil-works/pi-ai";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { ToolResultMessage } from "@prime-intellect/prime-agent-ai";
+import type { AgentMessage } from "@prime-intellect/prime-agent-core";
+import { truncateToWidth, visibleWidth } from "@prime-intellect/prime-agent-tui";
 import type { EditToolDetails } from "../../../core/tools/edit.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
 import type { IpythonToolDetails } from "../../../core/tools/ipython.js";

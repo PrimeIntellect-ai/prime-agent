@@ -1,6 +1,6 @@
-import { setBedrockProviderModuleLoader } from "@earendil-works/pi-ai";
+import { setBedrockProviderModuleLoader } from "@prime-intellect/prime-agent-ai";
 
 setBedrockProviderModuleLoader(async () => {
-	const { bedrockProviderModule } = await import("@earendil-works/pi-ai/bedrock-provider");
+	const { bedrockProviderModule } = await import("@prime-intellect/prime-agent-ai/bedrock-provider");
 	return bedrockProviderModule;
 });

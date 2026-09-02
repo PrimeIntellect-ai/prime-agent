@@ -16,9 +16,9 @@
  * Then use ctrl+o to toggle between minimal (collapsed) and full (expanded) views.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createBashTool, createEditTool } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import type { ExtensionAPI } from "@prime-intellect/prime-agent";
+import { createBashTool, createEditTool } from "@prime-intellect/prime-agent";
+import { Text } from "@prime-intellect/prime-agent-tui";
 import { homedir } from "os";
 
 /**

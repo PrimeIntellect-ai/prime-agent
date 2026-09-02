@@ -4,7 +4,7 @@ import {
 	VersionedRenderCache,
 	visibleWidth,
 	wrapTextWithAnsi,
-} from "@earendil-works/pi-tui";
+} from "@prime-intellect/prime-agent-tui";
 import { formatAgentMessageParticipant } from "../../../core/agent-messages.js";
 import { previewIpythonCode } from "../../../core/tools/code-preview.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";

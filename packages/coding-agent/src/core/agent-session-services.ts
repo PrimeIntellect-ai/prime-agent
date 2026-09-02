@@ -1,6 +1,6 @@
 import { join } from "node:path";
-import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model, ServiceTier } from "@earendil-works/pi-ai";
+import type { Model, ServiceTier } from "@prime-intellect/prime-agent-ai";
+import type { ThinkingLevel } from "@prime-intellect/prime-agent-core";
 import { getAgentDir } from "../config.js";
 import type { AgentSessionMessageController } from "./agent-messages.js";
 import type { AgentObserveController } from "./agent-observe.js";

@@ -8,7 +8,7 @@
  *   bun test.ts claude-sonnet-4-5-20250929 --thinking
  */
 
-import { type Api, type Context, type Model, registerApiProvider, streamSimple } from "@earendil-works/pi-ai";
+import { type Api, type Context, type Model, registerApiProvider, streamSimple } from "@prime-intellect/prime-agent-ai";
 import { readFileSync } from "fs";
 import { getAgentDir } from "packages/coding-agent/src/config.js";
 import { join } from "path";

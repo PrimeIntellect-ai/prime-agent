@@ -1,0 +1,1 @@
+- Changed the public CLI package to `@prime-intellect/prime-agent` and made Bun global installation the preferred install path.

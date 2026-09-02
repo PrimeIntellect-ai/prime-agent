@@ -4,19 +4,23 @@ This page gets you from install to a useful first Prime Agent session.
 
 ## Install
 
-Install the latest stable release on Linux or macOS:
+Install the latest stable release with Bun:
 
 ```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+bun install -g @prime-intellect/prime-agent
 ```
 
 To try the latest beta built from `main`:
 
 ```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh -s -- beta
+bun install -g @prime-intellect/prime-agent@beta
 ```
 
-Both commands fetch versioned Prime Agent release artifacts and install the `prime-agent` command. The inherited npm workspace identifiers in the source tree are not the public install path.
+Both commands install the `prime-agent` command. On macOS and Linux, the standalone release installer remains available as an alternative:
+
+```bash
+curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+```
 
 Then start Prime Agent in the project directory you want it to work on:
 

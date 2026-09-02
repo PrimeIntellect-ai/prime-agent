@@ -7,7 +7,7 @@ import {
 	type TUI,
 	truncateToWidth,
 	visibleWidth,
-} from "@earendil-works/pi-tui";
+} from "@prime-intellect/prime-agent-tui";
 
 interface CenteredOverlayOptions {
 	getRows: () => number;

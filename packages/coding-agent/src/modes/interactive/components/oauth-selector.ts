@@ -6,7 +6,7 @@ import {
 	getKeybindings,
 	Spacer,
 	TruncatedText,
-} from "@earendil-works/pi-tui";
+} from "@prime-intellect/prime-agent-tui";
 import type { AuthStatus, AuthStorage } from "../../../core/auth-storage.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../../../core/prime-inference-auth.js";
 import { theme } from "../theme/theme.js";

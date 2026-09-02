@@ -64,7 +64,7 @@ async function main(): Promise<void> {
 
 	if (!command || command === "help" || command === "--help" || command === "-h") {
 		const providerList = PROVIDERS.map((p) => `  ${p.id.padEnd(20)} ${p.name}`).join("\n");
-		console.log(`Usage: bunx @earendil-works/pi-ai <command> [provider]
+		console.log(`Usage: bunx @prime-intellect/prime-agent-ai <command> [provider]
 
 Commands:
   login [provider]  Login to an OAuth provider
@@ -74,9 +74,9 @@ Providers:
 ${providerList}
 
 Examples:
-  bunx @earendil-works/pi-ai login              # interactive provider selection
-  bunx @earendil-works/pi-ai login anthropic    # login to specific provider
-  bunx @earendil-works/pi-ai list               # list providers
+  bunx @prime-intellect/prime-agent-ai login              # interactive provider selection
+  bunx @prime-intellect/prime-agent-ai login anthropic    # login to specific provider
+  bunx @prime-intellect/prime-agent-ai list               # list providers
 `);
 		return;
 	}
@@ -113,7 +113,7 @@ Examples:
 
 		if (!PROVIDERS.some((p) => p.id === provider)) {
 			console.error(`Unknown provider: ${provider}`);
-			console.error(`Use 'bunx @earendil-works/pi-ai list' to see available providers`);
+			console.error(`Use 'bunx @prime-intellect/prime-agent-ai list' to see available providers`);
 			process.exit(1);
 		}
 
@@ -123,7 +123,7 @@ Examples:
 	}
 
 	console.error(`Unknown command: ${command}`);
-	console.error(`Use 'bunx @earendil-works/pi-ai --help' for usage`);
+	console.error(`Use 'bunx @prime-intellect/prime-agent-ai --help' for usage`);
 	process.exit(1);
 }
 

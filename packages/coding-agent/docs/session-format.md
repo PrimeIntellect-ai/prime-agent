@@ -33,7 +33,7 @@ Existing sessions are automatically migrated to the current version (v3) when lo
 - [`packages/ai/src/types.ts`](../../ai/src/types.ts) - Base message types (`UserMessage`, `AssistantMessage`, `ToolResultMessage`)
 - [`packages/agent/src/types.ts`](../../agent/src/types.ts) - `AgentMessage` union type
 
-For TypeScript definitions in your project, inspect `node_modules/@earendil-works/pi-coding-agent/dist/` and `node_modules/@earendil-works/pi-ai/dist/`.
+For TypeScript definitions in your project, inspect `node_modules/@prime-intellect/prime-agent/dist/` and `node_modules/@prime-intellect/prime-agent-ai/dist/`.
 
 ## Message Types
 

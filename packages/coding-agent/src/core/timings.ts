@@ -3,7 +3,7 @@
  * Enable with PI_TIMING=1 environment variable.
  */
 
-import { getLogger } from "@earendil-works/pi-ai";
+import { getLogger } from "@prime-intellect/prime-agent-ai";
 
 const log = getLogger("coding-agent.timings");
 const ENABLED = process.env.PI_TIMING === "1";

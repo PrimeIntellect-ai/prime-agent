@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { AgentMessage } from "@prime-intellect/prime-agent-core";
 
 export const AGENT_OBSERVE_SKILL_NAME = "agent-observe";
 export const AGENT_OBSERVE_IMPORT_NAME = "agent_observe";
