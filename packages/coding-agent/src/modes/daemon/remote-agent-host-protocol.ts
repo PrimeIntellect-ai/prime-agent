@@ -282,6 +282,19 @@ const KNOWN_FRAME_TYPES = new Set([
 	"error",
 ]);
 
+const KNOWN_HANDSHAKE_ACK_FIELDS = new Set([
+	"type",
+	"accepted",
+	"hostId",
+	"sessionId",
+	"protocol",
+	"capabilities",
+	"linkId",
+	"rejectReason",
+	"cursor",
+	"remoteBuildIdentity",
+]);
+
 const KNOWN_CAPABILITIES = new Set([
 	"session_commands",
 	"sequenced_events",
@@ -354,6 +367,14 @@ export function validateRemoteHostHandshakeAck(value: unknown): RemoteHostValida
 		}
 	}
 
+	// Reject unknown fields.
+	const allowedKeys = KNOWN_HANDSHAKE_ACK_FIELDS;
+	for (const key of Object.keys(ack)) {
+		if (!allowedKeys.has(key)) {
+			return { code: "INVALID_ACK_UNKNOWN_FIELD", message: `Unknown field` };
+		}
+	}
+
 	// Optional rejectReason — safe fixed string.
 	if (ack.rejectReason !== undefined && typeof ack.rejectReason !== "string") {
 		return { code: "INVALID_ACK_REJECT_REASON", message: "rejectReason must be a string" };
@@ -390,7 +411,16 @@ export function validateRemoteHostHandshakeAck(value: unknown): RemoteHostValida
 		}
 	}
 
-	// Optional remoteBuildIdentity — exact fields.
+	// remoteBuildIdentity is required when accepted=true (exact-build gate).
+	if (ack.accepted === true) {
+		if (ack.remoteBuildIdentity === undefined || ack.remoteBuildIdentity === null) {
+			return {
+				code: "INVALID_ACK_MISSING_BUILD_IDENTITY",
+				message: "remoteBuildIdentity required for accepted handshake",
+			};
+		}
+	}
+
 	if (ack.remoteBuildIdentity !== undefined) {
 		if (typeof ack.remoteBuildIdentity !== "object" || !ack.remoteBuildIdentity) {
 			return { code: "INVALID_ACK_BUILD_IDENTITY", message: "remoteBuildIdentity must be an object" };

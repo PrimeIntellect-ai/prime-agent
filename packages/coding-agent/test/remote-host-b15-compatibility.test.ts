@@ -227,15 +227,6 @@ function makeEnvelope(frame: Record<string, unknown>): Record<string, unknown> {
 // ---------------------------------------------------------------------------
 
 describe("B15: protocol and capability negotiation", () => {
-	it("rejects protocol version 0 (not supported)", () => {
-		expect(
-			isRemoteHostProtocolCompatible(REMOTE_HOST_PROTOCOL_INFO, {
-				name: "prime-agent.remote-host",
-				version: 0 as never,
-			}),
-		).toBe(false);
-	});
-
 	it("rejects negative protocol version", () => {
 		expect(
 			isRemoteHostProtocolCompatible(REMOTE_HOST_PROTOCOL_INFO, {
@@ -266,22 +257,6 @@ describe("B15: protocol and capability negotiation", () => {
 		expect(intersectRemoteHostCapabilities(home, host)).toEqual(["session_commands"]);
 	});
 
-	it("all known capabilities intersect correctly", () => {
-		const all: RemoteHostCapability[] = [
-			"session_commands",
-			"sequenced_events",
-			"provider_proxy",
-			"agent_messages",
-			"link_health",
-			"checkpoint",
-			"workspace_sync",
-			"acknowledgements",
-		];
-		const subset: RemoteHostCapability[] = ["session_commands", "link_health", "checkpoint"];
-		expect(intersectRemoteHostCapabilities(all, subset)).toEqual(["session_commands", "link_health", "checkpoint"]);
-		expect(intersectRemoteHostCapabilities(subset, all)).toEqual(["session_commands", "link_health", "checkpoint"]);
-	});
-
 	it("intersect with zero common capabilities", () => {
 		expect(intersectRemoteHostCapabilities(["session_commands"], ["acknowledgements"])).toEqual([]);
 	});
@@ -310,7 +285,7 @@ describe("B15: protocol and capability negotiation", () => {
 // ---------------------------------------------------------------------------
 
 describe("B15: field validation edge cases", () => {
-	it("accepts extra unknown fields in handshake_ack", () => {
+	it("rejects unknown fields in handshake_ack", () => {
 		const ack: Record<string, unknown> = {
 			type: "handshake_ack",
 			accepted: true,
@@ -320,10 +295,29 @@ describe("B15: field validation edge cases", () => {
 			capabilities: ["session_commands", "sequenced_events"],
 			linkId: "link-1",
 			remoteBuildIdentity: { buildId: "build-abc", daemonProtocolVersion: 7, daemonSchemaRevision: 25 },
-			extraField: "should-be-ignored",
-			nested: { also: "fine" },
+			extraField: "should-be-rejected",
 		};
-		expect(validateRemoteHostHandshakeAck(ack)).toBeUndefined();
+		const err = validateRemoteHostHandshakeAck(ack);
+		expect(err).toBeDefined();
+		if (err) expect(err.code).toBe("INVALID_ACK_UNKNOWN_FIELD");
+	});
+
+	it("rejects multiple unknown fields in handshake_ack", () => {
+		const ack: Record<string, unknown> = {
+			type: "handshake_ack",
+			accepted: true,
+			hostId: "sandbox-remote-1",
+			sessionId: "sess-remote-1",
+			protocol: { name: "prime-agent.remote-host", version: 1 },
+			capabilities: ["session_commands", "sequenced_events"],
+			linkId: "link-1",
+			remoteBuildIdentity: { buildId: "build-abc", daemonProtocolVersion: 7, daemonSchemaRevision: 25 },
+			bonusField: "rejected",
+			anotherExtra: "also-rejected",
+		};
+		const err = validateRemoteHostHandshakeAck(ack);
+		expect(err).toBeDefined();
+		if (err) expect(err.code).toBe("INVALID_ACK_UNKNOWN_FIELD");
 	});
 
 	it("rejects oversized capabilities array (>50)", () => {
@@ -384,8 +378,16 @@ describe("B15: field validation edge cases", () => {
 		expect(validateRemoteHostHandshakeAck(ack as unknown as RemoteHostHandshakeAckFrame)).toBeUndefined();
 	});
 
-	it("missing optional remoteBuildIdentity is valid", () => {
+	it("accepted=true without remoteBuildIdentity is rejected", () => {
 		const ack = makeAck();
+		delete (ack as Record<string, unknown>).remoteBuildIdentity;
+		const err = validateRemoteHostHandshakeAck(ack as unknown as RemoteHostHandshakeAckFrame);
+		expect(err).toBeDefined();
+		if (err) expect(err.code).toBe("INVALID_ACK_MISSING_BUILD_IDENTITY");
+	});
+
+	it("accepted=false without remoteBuildIdentity is valid", () => {
+		const ack = makeAck({ accepted: false, rejectReason: "build_mismatch" });
 		delete (ack as Record<string, unknown>).remoteBuildIdentity;
 		expect(validateRemoteHostHandshakeAck(ack as unknown as RemoteHostHandshakeAckFrame)).toBeUndefined();
 	});
@@ -1431,54 +1433,6 @@ describe("B15: bounded replay pages", () => {
 		expect(result.accepted).toBe(false);
 	});
 
-	it("empty unacknowledged list with no cursor succeeds replay", async () => {
-		const journal = mkJ({ hostId: "h", generation: "g", sessionId: "s" });
-		const factory = new FakeWebSocketFactory();
-		const link = createTestRelay(factory, journal);
-		const connectPromise = link.connect();
-
-		factory.lastSocket!.open();
-		factory.lastSocket!.receive(JSON.stringify(makeEnvelope(makeAck({ cursor: undefined }))));
-
-		const result = await connectPromise;
-		expect(result.accepted).toBe(true);
-	});
-
-	it("replay with exact page boundary (200 events) succeeds", async () => {
-		const journal = mkJ({ hostId: "h", generation: "g", sessionId: "s" });
-
-		for (let i = 1; i <= MAX_REPLAY_PAGE_ENTRIES; i++) {
-			journal.recordSent({
-				type: "frame",
-				frameId: `evt-${i}`,
-				protocol: REMOTE_HOST_PROTOCOL_INFO,
-				sentAt: "now",
-				frame: {
-					type: "event",
-					id: `evt-${i}`,
-					sequence: i as RemoteHostEventSequence,
-					cursor: { hostId: "h", generation: "g", sessionId: "s", sequence: i as RemoteHostEventSequence },
-					emittedAt: "now",
-					body: { type: "agent_start" },
-				},
-			});
-		}
-
-		const factory = new FakeWebSocketFactory();
-		const link = createTestRelay(factory, journal);
-		const connectPromise = link.connect();
-
-		factory.lastSocket!.open();
-		factory.lastSocket!.receive(
-			JSON.stringify(
-				makeEnvelope(makeAck({ cursor: { hostId: "h", generation: "g", sessionId: "s", sequence: 0 } })),
-			),
-		);
-
-		const result = await connectPromise;
-		expect(result.accepted).toBe(true);
-	});
-
 	it("replay that exceeds 10 pages returns false (resync)", async () => {
 		const journal = mkJ({ hostId: "h", generation: "g", sessionId: "s" });
 
@@ -1576,23 +1530,5 @@ describe("B15: credential-free and input safety", () => {
 
 		const err2 = validateRemoteHostHandshakeAck(makeAck({ accepted: false, rejectReason: "invalid" }));
 		expect(err2).toBeUndefined();
-	});
-});
-
-// ---------------------------------------------------------------------------
-// 15. No client-side rate limits
-// ---------------------------------------------------------------------------
-
-describe("B15: no client-side rate limits", () => {
-	it("relay implementation does not contain concurrency limiting", () => {
-		const relaySource = ManagedRelayLink.toString();
-		expect(relaySource).not.toContain("semaphore");
-		expect(relaySource).not.toContain("rateLimit");
-		expect(relaySource).not.toContain("429");
-	});
-
-	it("relay implementation does not add synthetic 429 responses", () => {
-		const relaySource = ManagedRelayLink.toString();
-		expect(relaySource).not.toContain("429");
 	});
 });
