@@ -402,6 +402,27 @@ jobs:
       - name: Build the native Windows executable
         run: bun run build:binary
 
+      - name: Cross-compile and inspect the Windows Arm64 executable
+        working-directory: packages/coding-agent
+        shell: pwsh
+        run: |
+          bun build --compile --minify --keep-names --bytecode --format=esm --external koffi --target=bun-windows-arm64 ./dist/bun/cli.js --outfile "$env:RUNNER_TEMP\prime-agent-arm64.exe"
+          $artifacts = @(
+            @{ Path = "dist\pi.exe"; Machine = 0x8664 },
+            @{ Path = "$env:RUNNER_TEMP\prime-agent-arm64.exe"; Machine = 0xAA64 }
+          )
+          foreach ($artifact in $artifacts) {
+            $bytes = [System.IO.File]::ReadAllBytes($artifact.Path)
+            if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+              throw "$($artifact.Path) is not a PE executable"
+            }
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            if ($machine -ne $artifact.Machine) {
+              throw "$($artifact.Path) has PE machine 0x$($machine.ToString('X4')), expected 0x$($artifact.Machine.ToString('X4'))"
+            }
+          }
+
       - name: Test the PowerShell installer end to end
         shell: pwsh
         run: ./scripts/test-windows-installer.ps1
