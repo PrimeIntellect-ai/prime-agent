@@ -102,19 +102,23 @@ function copyOptions(raw: unknown): ParsedOptions | null {
 	}
 	if (typeof raw !== "object" || Array.isArray(raw)) return null;
 
-	// Reject non-plain prototype (e.g. class instances, Date, etc.)
-	if (Object.getPrototypeOf(raw) !== Object.prototype) return null;
-
-	// Get own property descriptors — throws immediately on some hostile Proxy.
+	// Snapshot prototype, descriptors, and symbols in one guarded pass so
+	// that a hostile Proxy trap cannot throw past the public Promise boundary.
+	let proto: object | null;
 	let descs: Record<string, PropertyDescriptor>;
+	let ownSymbols: symbol[];
 	try {
+		proto = Object.getPrototypeOf(raw);
 		descs = Object.getOwnPropertyDescriptors(raw);
+		ownSymbols = Object.getOwnPropertySymbols(raw);
 	} catch {
 		return null;
 	}
 
-	// Reject symbol keys — they are returned by getOwnPropertyDescriptors.
-	const ownSymbols = Object.getOwnPropertySymbols(raw);
+	// Reject non-plain prototype (allow Object.prototype and null-prototype).
+	if (proto !== Object.prototype && proto !== null) return null;
+
+	// Reject symbol keys.
 	if (ownSymbols.length > 0) return null;
 
 	// Only own enumerable data descriptors permitted.
@@ -157,38 +161,38 @@ function copyOptions(raw: unknown): ParsedOptions | null {
 
 	let adapter: FsFdAdapter = DEFAULT_ADAPTER;
 
-	// Validate _adapter: must be own enumerable data descriptor with
-	// read/close own data descriptor function values (no getters).
+	// Validate _adapter — snapshot in a second guarded pass.
 	if ("_adapter" in descs) {
 		const a = descs._adapter.value;
 		if (!a || typeof a !== "object") return null;
 
-		// Prototype must be Object.prototype (plain object).
-		if (Object.getPrototypeOf(a) !== Object.prototype) return null;
-
-		// read must be own enumerable data descriptor, value is function.
-		const rDesc = Object.getOwnPropertyDescriptor(a, "read");
-		if (
-			!rDesc ||
-			!rDesc.enumerable ||
-			rDesc.get !== undefined ||
-			rDesc.set !== undefined ||
-			typeof rDesc.value !== "function"
-		)
+		let aProto: object | null;
+		let aDescs: Record<string, PropertyDescriptor>;
+		let aSymbols: symbol[];
+		try {
+			aProto = Object.getPrototypeOf(a);
+			aDescs = Object.getOwnPropertyDescriptors(a);
+			aSymbols = Object.getOwnPropertySymbols(a);
+		} catch {
 			return null;
+		}
 
-		// close must be own enumerable data descriptor, value is function.
-		const cDesc = Object.getOwnPropertyDescriptor(a, "close");
-		if (
-			!cDesc ||
-			!cDesc.enumerable ||
-			cDesc.get !== undefined ||
-			cDesc.set !== undefined ||
-			typeof cDesc.value !== "function"
-		)
-			return null;
+		if (aProto !== Object.prototype && aProto !== null) return null;
+		if (aSymbols.length > 0) return null;
 
-		adapter = a;
+		// Exactly two own enumerable data descriptor keys: read, close.
+		const aKeys = Object.keys(aDescs);
+		if (aKeys.length !== 2) return null;
+		const aKeySet = new Set(aKeys);
+		if (!aKeySet.has("read") || !aKeySet.has("close")) return null;
+
+		for (const k of aKeys) {
+			const d = aDescs[k];
+			if (!d || !d.enumerable || d.get !== undefined || d.set !== undefined || typeof d.value !== "function")
+				return null;
+		}
+
+		adapter = a as FsFdAdapter;
 	}
 
 	return Object.freeze({ totalTimeoutMs, closeConfirmTimeoutMs, adapter });
@@ -535,6 +539,13 @@ export function readSandboxBootstrapFrame(fd: number, options?: ReadOptions): Pr
 				doClose((cc) => {
 					settle({ ok: false, code: cc === "CLOSE_OK" ? "TIMEOUT" : cc });
 				});
+			} else if (closeDispatch) {
+				// Total deadline fires while a normal terminal close is pending.
+				// Override the close outcome: TIMEOUT wins (unless close
+				// fails or remains unconfirmed).
+				closeDispatch = (cc) => {
+					settle({ ok: false, code: cc === "CLOSE_OK" ? "TIMEOUT" : cc });
+				};
 			}
 		}, totalTimeoutMs);
 

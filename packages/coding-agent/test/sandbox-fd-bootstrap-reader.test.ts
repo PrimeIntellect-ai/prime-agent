@@ -1,14 +1,14 @@
 /**
  * Tests for readSandboxBootstrapFrame / consumeSandboxBootstrapFrame.
  *
- * Covers: strict options preflight (proto/symbol/getter/nonenumerable/Proxy),
- * fd validation (0/1/2/neg/safe-int), 1/64KiB payloads, empty/oversize/trailing,
- * short-read loops, total+close timeouts, buffer lifecycle on cancel/delayed
- * callbacks, close lifecycle (single close, sync no-orphan-timer, double close),
- * sync throws from adapter, stale/double callbacks, invalid bytesRead
- * (undefined/negative/too-large/zero in header/payload), 0xFFFFFFFF header,
- * frozen results, consume erasure, sync 64KiB capped depth+defer,
- * timeout-before-defer continuation.
+ * Covers: strict options preflight (proto/symbol/getter/nonenumerable/Proxy,
+ * hostile traps), fd validation (0/1/2/neg/safe-int), 1/64KiB payloads,
+ * empty/oversize/trailing, short-read loops, total+close timeouts, buffer
+ * lifecycle on cancel/delayed callbacks, close lifecycle (single close,
+ * sync no-orphan-timer, double close, total deadline wins over normal
+ * terminal close), sync throws from adapter, stale/double callbacks,
+ * invalid bytesRead, 0xFFFFFFFF header, frozen results, consume erasure,
+ * sync 64KiB capped depth+defer.
  */
 
 import { closeSync, mkdtempSync, openSync, readSync, unlinkSync, writeFileSync } from "node:fs";
@@ -40,19 +40,13 @@ function tempFileWithFrame(payload: Uint8Array): { fd: number; path: string; cle
 		cleanup: () => {
 			try {
 				closeSync(fd);
-			} catch {
-				/* ignore */
-			}
+			} catch {}
 			try {
 				unlinkSync(path);
-			} catch {
-				/* ignore */
-			}
+			} catch {}
 			try {
 				unlinkSync(dir);
-			} catch {
-				/* ignore */
-			}
+			} catch {}
 		},
 	};
 }
@@ -68,19 +62,13 @@ function tempFileWithRawBytes(bytes: Uint8Array): { fd: number; path: string; cl
 		cleanup: () => {
 			try {
 				closeSync(fd);
-			} catch {
-				/* ignore */
-			}
+			} catch {}
 			try {
 				unlinkSync(path);
-			} catch {
-				/* ignore */
-			}
+			} catch {}
 			try {
 				unlinkSync(dir);
-			} catch {
-				/* ignore */
-			}
+			} catch {}
 		},
 	};
 }
@@ -100,34 +88,28 @@ function slurp(path: string): Uint8Array {
 // Adapter helpers
 // ---------------------------------------------------------------------------
 
-interface NeverCallbackAdapter extends FsFdAdapter {
-	readCallCount: number;
-	closeCallCount: number;
-}
-
-function neverCallbackAdapter(): NeverCallbackAdapter {
+/** Track read/close counts for a never-callback adapter. */
+function trackedNeverAdapter(): { adapter: FsFdAdapter; reads: () => number; closes: () => number } {
 	let rc = 0;
 	let cc = 0;
 	return {
-		get readCallCount() {
-			return rc;
+		adapter: {
+			read() {
+				rc++;
+			},
+			close() {
+				cc++;
+			},
 		},
-		get closeCallCount() {
-			return cc;
-		},
-		read() {
-			rc++;
-		},
-		close() {
-			cc++;
-		},
-	} as unknown as NeverCallbackAdapter;
+		reads: () => rc,
+		closes: () => cc,
+	};
 }
 
 function oneByteAtATimeAdapter(pathOrData: string | Uint8Array, deferContinuation?: boolean): FsFdAdapter {
 	const data = typeof pathOrData === "string" ? slurp(pathOrData) : new Uint8Array(pathOrData);
 	let offset = 0;
-	return {
+	const adapter: FsFdAdapter = {
 		read(_fd, buf, off, _len, _pos, cb) {
 			if (offset >= data.length) {
 				cb(null, 0, buf);
@@ -144,12 +126,11 @@ function oneByteAtATimeAdapter(pathOrData: string | Uint8Array, deferContinuatio
 		close(_fd, cb) {
 			try {
 				closeSync(_fd);
-			} catch {
-				/* ignore */
-			}
+			} catch {}
 			cb(null);
 		},
 	};
+	return adapter;
 }
 
 // ===========================================================================
@@ -178,36 +159,32 @@ describe("fd validation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// strict options preflight (all through public API)
+// strict options preflight
 // ---------------------------------------------------------------------------
 describe("strict options preflight", () => {
 	it("accepts null/undefined (defaults)", async () => {
-		const nac = neverCallbackAdapter();
-		const r = await readSandboxBootstrapFrame(3, { _adapter: nac, totalTimeoutMs: 10, closeConfirmTimeoutMs: 1 });
+		const { adapter } = trackedNeverAdapter();
+		const r = await readSandboxBootstrapFrame(3, { _adapter: adapter, totalTimeoutMs: 10, closeConfirmTimeoutMs: 1 });
 		expect(r.ok).toBe(false);
 		expect(["TIMEOUT", "CLOSE_UNCONFIRMED"]).toContain((r as { code: string }).code);
 	});
 
 	it("rejects Proxy with unknown key", async () => {
 		const proxy = new Proxy({ rogue: 1 }, { get: (t, k) => Reflect.get(t, k) });
-		const nac = neverCallbackAdapter();
-		const o = Object.assign(proxy, { _adapter: nac });
-		const r = await readSandboxBootstrapFrame(3, o as unknown as undefined);
+		const r = await readSandboxBootstrapFrame(3, proxy as unknown as undefined);
 		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
 	});
 
 	it("rejects non-enumerable property", async () => {
-		const nac = neverCallbackAdapter();
-		const o: Record<string, unknown> = { _adapter: nac };
+		const o: Record<string, unknown> = {};
 		Object.defineProperty(o, "hidden", { value: 1, enumerable: false });
+		Object.defineProperty(o, "totalTimeoutMs", { value: 10, enumerable: true });
 		const r = await readSandboxBootstrapFrame(3, o as unknown as undefined);
 		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
 	});
 
 	it("rejects getter property", async () => {
-		const nac = neverCallbackAdapter();
 		const o = {
-			_adapter: nac,
 			get rogue() {
 				return 1;
 			},
@@ -217,9 +194,8 @@ describe("strict options preflight", () => {
 	});
 
 	it("rejects symbol-keyed option", async () => {
-		const nac = neverCallbackAdapter();
 		const s = Symbol("x");
-		const o: Record<string | symbol, unknown> = { _adapter: nac, totalTimeoutMs: 10, closeConfirmTimeoutMs: 1 };
+		const o: Record<string | symbol, unknown> = { totalTimeoutMs: 10, closeConfirmTimeoutMs: 1 };
 		(o as Record<symbol, unknown>)[s] = 1;
 		const r = await readSandboxBootstrapFrame(3, o as unknown as undefined);
 		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
@@ -227,23 +203,21 @@ describe("strict options preflight", () => {
 
 	it("rejects non-plain prototype (class instance)", async () => {
 		class Foo {}
-		const nac = neverCallbackAdapter();
-		const o = { _adapter: nac };
+		const o = { totalTimeoutMs: 10 };
 		Object.setPrototypeOf(o, Foo.prototype);
 		const r = await readSandboxBootstrapFrame(3, o as unknown as undefined);
 		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
 	});
 
 	it("rejects non-plain prototype (Date)", async () => {
-		const nac = neverCallbackAdapter();
-		const o = { _adapter: nac };
+		const o = { totalTimeoutMs: 10 };
 		Object.setPrototypeOf(o, Date.prototype);
 		const r = await readSandboxBootstrapFrame(3, o as unknown as undefined);
 		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
 	});
 
 	it("rejects adapter with getter read/close", async () => {
-		const adapter = {
+		const adapter: unknown = {
 			get read() {
 				return () => {};
 			},
@@ -252,7 +226,7 @@ describe("strict options preflight", () => {
 			},
 		};
 		const r = await readSandboxBootstrapFrame(3, {
-			_adapter: adapter as unknown as undefined,
+			_adapter: adapter as FsFdAdapter,
 			totalTimeoutMs: 10,
 			closeConfirmTimeoutMs: 1,
 		});
@@ -260,12 +234,10 @@ describe("strict options preflight", () => {
 	});
 
 	it("rejects adapter with non-plain prototype", async () => {
-		class Adapter implements FsFdAdapter {
-			read() {}
-			close() {}
-		}
+		const adapter = { read() {}, close() {} };
+		Object.setPrototypeOf(adapter, Array.prototype);
 		const r = await readSandboxBootstrapFrame(3, {
-			_adapter: new Adapter() as unknown as undefined,
+			_adapter: adapter as FsFdAdapter,
 			totalTimeoutMs: 10,
 			closeConfirmTimeoutMs: 1,
 		});
@@ -273,38 +245,97 @@ describe("strict options preflight", () => {
 	});
 
 	it("rejects totalTimeoutMs 0", async () => {
-		const nac = neverCallbackAdapter();
-		const r = await readSandboxBootstrapFrame(3, { _adapter: nac, totalTimeoutMs: 0, closeConfirmTimeoutMs: 1 });
+		const r = await readSandboxBootstrapFrame(3, { totalTimeoutMs: 0, closeConfirmTimeoutMs: 1 });
 		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
 	});
 
 	it("rejects totalTimeoutMs > 120000", async () => {
-		const nac = neverCallbackAdapter();
-		const r = await readSandboxBootstrapFrame(3, { _adapter: nac, totalTimeoutMs: 120001, closeConfirmTimeoutMs: 1 });
+		const r = await readSandboxBootstrapFrame(3, { totalTimeoutMs: 120001, closeConfirmTimeoutMs: 1 });
 		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
 	});
 
 	it("rejects closeConfirmTimeoutMs 0", async () => {
-		const nac = neverCallbackAdapter();
-		const r = await readSandboxBootstrapFrame(3, { _adapter: nac, totalTimeoutMs: 10, closeConfirmTimeoutMs: 0 });
+		const r = await readSandboxBootstrapFrame(3, { totalTimeoutMs: 10, closeConfirmTimeoutMs: 0 });
 		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
 	});
 
 	it("rejects closeConfirmTimeoutMs > 10000", async () => {
-		const nac = neverCallbackAdapter();
-		const r = await readSandboxBootstrapFrame(3, { _adapter: nac, totalTimeoutMs: 10, closeConfirmTimeoutMs: 10001 });
+		const r = await readSandboxBootstrapFrame(3, { totalTimeoutMs: 10, closeConfirmTimeoutMs: 10001 });
 		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
 	});
 
 	it("rejects non-integer totalTimeoutMs", async () => {
-		const nac = neverCallbackAdapter();
-		const r = await readSandboxBootstrapFrame(3, { _adapter: nac, totalTimeoutMs: 10.5, closeConfirmTimeoutMs: 1 });
+		const r = await readSandboxBootstrapFrame(3, { totalTimeoutMs: 10.5, closeConfirmTimeoutMs: 1 });
 		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
 	});
 
 	it("rejects NaN totalTimeoutMs", async () => {
-		const nac = neverCallbackAdapter();
-		const r = await readSandboxBootstrapFrame(3, { _adapter: nac, totalTimeoutMs: NaN, closeConfirmTimeoutMs: 1 });
+		const r = await readSandboxBootstrapFrame(3, { totalTimeoutMs: NaN, closeConfirmTimeoutMs: 1 });
+		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
+	});
+
+	it("rejects Proxy that throws on getPrototypeOf", async () => {
+		const proxy = new Proxy(
+			{ totalTimeoutMs: 10 },
+			{
+				getPrototypeOf() {
+					throw new Error("trap");
+				},
+			},
+		);
+		const r = await readSandboxBootstrapFrame(3, proxy as unknown as undefined);
+		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
+	});
+
+	it("rejects Proxy that throws on ownKeys", async () => {
+		const proxy = new Proxy(
+			{ totalTimeoutMs: 10 },
+			{
+				ownKeys() {
+					throw new Error("trap");
+				},
+			},
+		);
+		const r = await readSandboxBootstrapFrame(3, proxy as unknown as undefined);
+		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
+	});
+
+	it("rejects adapter Proxy that throws on getPrototypeOf", async () => {
+		const adapter = new Proxy(
+			{ read() {}, close() {} },
+			{
+				getPrototypeOf() {
+					throw new Error("trap");
+				},
+			},
+		);
+		const r = await readSandboxBootstrapFrame(3, {
+			_adapter: adapter as unknown as FsFdAdapter,
+			totalTimeoutMs: 10,
+			closeConfirmTimeoutMs: 1,
+		});
+		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
+	});
+
+	it("rejects adapter with extra symbol key", async () => {
+		const s = Symbol("x");
+		const adapter: FsFdAdapter = { read() {}, close() {}, [s]: 1 as unknown } as unknown as FsFdAdapter;
+		const r = await readSandboxBootstrapFrame(3, {
+			_adapter: adapter,
+			totalTimeoutMs: 10,
+			closeConfirmTimeoutMs: 1,
+		});
+		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
+	});
+
+	it("rejects adapter with extra own property beyond read/close", async () => {
+		const adapter = { read() {}, close() {} } as FsFdAdapter;
+		(adapter as unknown as Record<string, unknown>).extra = 1;
+		const r = await readSandboxBootstrapFrame(3, {
+			_adapter: adapter,
+			totalTimeoutMs: 10,
+			closeConfirmTimeoutMs: 1,
+		});
 		expect(r).toEqual({ ok: false, code: "INVALID_OPTIONS" });
 	});
 });
@@ -363,8 +394,7 @@ describe("success paths", () => {
 		const payload = new Uint8Array([0x42]);
 		const f = tempFileWithFrame(payload);
 		try {
-			const r = await readSandboxBootstrapFrame(f.fd);
-			expect(Object.isFrozen(r)).toBe(true);
+			expect(Object.isFrozen(await readSandboxBootstrapFrame(f.fd))).toBe(true);
 		} finally {
 			f.cleanup();
 		}
@@ -493,12 +523,7 @@ describe("close lifecycle", () => {
 				cb(new Error("x"));
 			},
 		};
-		// adapter.close is not a data descriptor with a value that is a function,
-		// so it will actually be rejected by copyOptions. Let's fix the inline:
-		// Actually, `close() { ... }` is a shorthand method — that creates a
-		// data descriptor with value=function, so it's fine.
-		const r = await readSandboxBootstrapFrame(f.fd, { _adapter: adapter });
-		expect(r).toEqual({ ok: false, code: "CLOSE_FAILED" });
+		expect(await readSandboxBootstrapFrame(f.fd, { _adapter: adapter })).toEqual({ ok: false, code: "CLOSE_FAILED" });
 	});
 
 	it("sync close callback does not leave orphan timer", async () => {
@@ -516,8 +541,7 @@ describe("close lifecycle", () => {
 				cb(null);
 			},
 		};
-		const r = await readSandboxBootstrapFrame(f.fd, { _adapter: adapter });
-		expect(r.ok).toBe(true);
+		expect((await readSandboxBootstrapFrame(f.fd, { _adapter: adapter })).ok).toBe(true);
 	});
 
 	it("double close callback is ignored", async () => {
@@ -536,20 +560,31 @@ describe("close lifecycle", () => {
 				setTimeout(() => cb(null), 5);
 			},
 		};
-		const r = await readSandboxBootstrapFrame(f.fd, { _adapter: adapter });
-		expect(r.ok).toBe(true);
+		expect((await readSandboxBootstrapFrame(f.fd, { _adapter: adapter })).ok).toBe(true);
 	});
 
 	it("close NOT called on INVALID_FD", async () => {
-		const nac = neverCallbackAdapter();
-		await readSandboxBootstrapFrame(0, { _adapter: nac });
-		expect(nac.closeCallCount).toBe(0);
+		let closeCount = 0;
+		const adapter: FsFdAdapter = {
+			read() {},
+			close() {
+				closeCount++;
+			},
+		};
+		await readSandboxBootstrapFrame(0, { _adapter: adapter });
+		expect(closeCount).toBe(0);
 	});
 
 	it("close NOT called on INVALID_OPTIONS", async () => {
-		const nac = neverCallbackAdapter();
-		await readSandboxBootstrapFrame(3, { _adapter: nac, rogue: 1 } as unknown as undefined);
-		expect(nac.closeCallCount).toBe(0);
+		let closeCount = 0;
+		const adapter: FsFdAdapter = {
+			read() {},
+			close() {
+				closeCount++;
+			},
+		};
+		await readSandboxBootstrapFrame(3, { _adapter: adapter, rogue: 1 } as unknown as undefined);
+		expect(closeCount).toBe(0);
 	});
 });
 
@@ -624,12 +659,16 @@ describe("short-read loops", () => {
 // ---------------------------------------------------------------------------
 describe("timeout and cancellation", () => {
 	it("total timeout fires when adapter never calls back read", async () => {
-		const nac = neverCallbackAdapter();
-		const r = await readSandboxBootstrapFrame(3, { totalTimeoutMs: 50, closeConfirmTimeoutMs: 50, _adapter: nac });
+		const { adapter, reads, closes } = trackedNeverAdapter();
+		const r = await readSandboxBootstrapFrame(3, {
+			totalTimeoutMs: 50,
+			closeConfirmTimeoutMs: 50,
+			_adapter: adapter,
+		});
 		expect(r.ok).toBe(false);
 		expect(["TIMEOUT", "CLOSE_UNCONFIRMED"]).toContain((r as { code: string }).code);
-		expect(nac.readCallCount).toBe(1);
-		expect(nac.closeCallCount).toBe(1);
+		expect(reads()).toBe(1);
+		expect(closes()).toBe(1);
 	});
 
 	it("single total timeout covers all phases", async () => {
@@ -689,16 +728,20 @@ describe("timeout and cancellation", () => {
 	});
 
 	it("close never callback: bounded close-confirm timeout settles", async () => {
-		const nac = neverCallbackAdapter();
-		const r = await readSandboxBootstrapFrame(3, { totalTimeoutMs: 10, closeConfirmTimeoutMs: 20, _adapter: nac });
+		const { adapter } = trackedNeverAdapter();
+		const r = await readSandboxBootstrapFrame(3, {
+			totalTimeoutMs: 10,
+			closeConfirmTimeoutMs: 20,
+			_adapter: adapter,
+		});
 		expect(r).toEqual({ ok: false, code: "CLOSE_UNCONFIRMED" });
 	});
 
 	it("close never callback with pending read: pending buffer retained", async () => {
 		let phase: "header" | "payload" = "header";
-		const nac: NeverCallbackAdapter = {
-			readCallCount: 0,
-			closeCallCount: 0,
+		let rc = 0;
+		let cc = 0;
+		const adapter: FsFdAdapter = {
 			read(
 				_fd: number,
 				buf: Uint8Array,
@@ -707,7 +750,7 @@ describe("timeout and cancellation", () => {
 				_pos: number | null,
 				cb: (err: Error | null, br: number, buf: Uint8Array) => void,
 			) {
-				nac.readCallCount++;
+				rc++;
 				if (phase === "header") {
 					phase = "payload";
 					buf[off] = 0;
@@ -718,37 +761,31 @@ describe("timeout and cancellation", () => {
 				}
 			},
 			close() {
-				nac.closeCallCount++;
+				cc++;
 			},
 		};
-		const r = await readSandboxBootstrapFrame(3, { totalTimeoutMs: 10, closeConfirmTimeoutMs: 20, _adapter: nac });
+		const r = await readSandboxBootstrapFrame(3, {
+			totalTimeoutMs: 10,
+			closeConfirmTimeoutMs: 20,
+			_adapter: adapter,
+		});
 		expect(r).toEqual({ ok: false, code: "CLOSE_UNCONFIRMED" });
-		expect(nac.readCallCount).toBe(2);
-		expect(nac.closeCallCount).toBe(1);
+		expect(rc).toBe(2);
+		expect(cc).toBe(1);
 	});
 
 	it("sync 1-byte read with timeout before deferred continuation does not crash", async () => {
-		// Large payload with sync 1-byte adapter triggers sync depth > 128,
-		// causing setImmediate deferral. Even if timeout fires before the
-		// deferred continuation runs, the deferred callback checks
-		// cancelled/settled and does not proceed (no crash, no double close).
 		const payload = new Uint8Array(200);
 		for (let i = 0; i < payload.length; i++) payload[i] = i & 0xff;
 		const f = tempFileWithFrame(payload);
 		const adapter = oneByteAtATimeAdapter(f.path);
 		const fd2 = openSync(f.path, "r");
 		try {
-			// Use minimum total timeout so the timeout fires as early as possible.
-			// With sync 1-byte reads, the entire read completes in <1ms, so the
-			// timeout may or may not fire. Either outcome is OK — we just verify
-			// no crash and no leaked resources.
 			const r = await readSandboxBootstrapFrame(fd2, {
 				totalTimeoutMs: 50,
 				closeConfirmTimeoutMs: 200,
 				_adapter: adapter,
 			});
-			// Either the read completes successfully or timeout fires.
-			// Both are valid outcomes; no crash is the assertion.
 			expect(
 				r.ok === true ||
 					(r as { code: string }).code === "TIMEOUT" ||
@@ -760,6 +797,38 @@ describe("timeout and cancellation", () => {
 			} catch {}
 			f.cleanup();
 		}
+	});
+
+	it("total timeout wins when close is pending from normal terminal path", async () => {
+		// Frame read completes → doClose called.  Close callback fires
+		// after total timeout but before close-confirm, so the overridden
+		// TIMEOUT dispatch wins over the original success dispatch.
+		const payload = new Uint8Array([0x42]);
+		const f = tempFileWithFrame(payload);
+		const adapter: FsFdAdapter = {
+			read(_fd, buf, off, len, _pos, cb) {
+				const bytes = readSync(_fd, buf, off, len, null);
+				cb(null, bytes, buf);
+			},
+			close(_fd, cb) {
+				// Fire close callback 100ms after doClose (total timeout
+				// at 20ms will have fired and replaced the dispatch).
+				setTimeout(() => {
+					try {
+						closeSync(_fd);
+					} catch {}
+					cb(null);
+				}, 100);
+			},
+		};
+		const r = await readSandboxBootstrapFrame(f.fd, {
+			_adapter: adapter,
+			totalTimeoutMs: 20,
+			closeConfirmTimeoutMs: 5000,
+		});
+		// Total timeout must win: TIMEOUT, not success
+		expect(r).toEqual({ ok: false, code: "TIMEOUT" });
+		f.cleanup();
 	});
 });
 
@@ -865,7 +934,7 @@ describe("sync throws from adapter", () => {
 		let closeCalled = false;
 		const adapter: FsFdAdapter = {
 			read() {
-				throw new Error("sync-read-throw");
+				throw new Error("x");
 			},
 			close(_fd, cb) {
 				closeCalled = true;
@@ -886,11 +955,10 @@ describe("sync throws from adapter", () => {
 				cb(null, bytes, buf);
 			},
 			close() {
-				throw new Error("sync-close-throw");
+				throw new Error("x");
 			},
 		};
-		const r = await readSandboxBootstrapFrame(f.fd, { _adapter: adapter });
-		expect(r).toEqual({ ok: false, code: "CLOSE_FAILED" });
+		expect(await readSandboxBootstrapFrame(f.fd, { _adapter: adapter })).toEqual({ ok: false, code: "CLOSE_FAILED" });
 	});
 });
 
@@ -982,7 +1050,6 @@ describe("invalid bytesRead", () => {
 					buf[off + 3] = 5;
 					cb(null, 4, buf);
 				} else {
-					// Payload: report 0 bytes
 					cb(null, 0, buf);
 				}
 			},
@@ -998,8 +1065,6 @@ describe("invalid bytesRead", () => {
 	it("zero bytesRead in trailing phase => successful EOF", async () => {
 		const payload = new Uint8Array([0x42]);
 		const f = tempFileWithFrame(payload);
-
-		// Use adapter that reads header+payload then reports 0 for trailing
 		const rawData = slurp(f.path);
 		closeSync(f.fd);
 		let byteOffset = 0;
@@ -1007,14 +1072,12 @@ describe("invalid bytesRead", () => {
 		const adapter: FsFdAdapter = {
 			read(_fd, buf, off, len, _pos, cb) {
 				if (!trailingReported) {
-					// Supply header+payload bytes
 					const chunk = Math.min(len, rawData.length - byteOffset);
 					for (let i = 0; i < chunk; i++) buf[off + i] = rawData[byteOffset + i];
 					byteOffset += chunk;
 					cb(null, chunk, buf);
 					if (byteOffset >= rawData.length) trailingReported = true;
 				} else {
-					// Trailing: report 0
 					cb(null, 0, buf);
 				}
 			},
@@ -1025,7 +1088,6 @@ describe("invalid bytesRead", () => {
 				cb(null);
 			},
 		};
-
 		const fd2 = openSync(f.path, "r");
 		try {
 			const r = await readSandboxBootstrapFrame(fd2, { _adapter: adapter });
@@ -1098,9 +1160,7 @@ describe("consumeSandboxBootstrapFrame", () => {
 				captured = p;
 				throw new Error("x");
 			});
-		} catch {
-			/* not thrown */
-		}
+		} catch {}
 		expect(captured).not.toBeNull();
 		if (captured) expect(Array.from(captured)).toEqual([0, 0]);
 		f.cleanup();
