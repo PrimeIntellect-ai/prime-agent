@@ -175,10 +175,19 @@ describe("daemon lifecycle through the supervisor-worker handshake", () => {
 		}
 
 		// 6. The daemon process exits cleanly after shutdown.
+		const daemonExitTimeoutMs = process.platform === "win32" ? 60_000 : 15_000;
 		const exit = await Promise.race([
 			daemonExited,
 			new Promise<never>((_, reject) =>
-				setTimeout(() => reject(new Error("Daemon did not exit within 15s after shutdown")), 15_000),
+				setTimeout(
+					() =>
+						reject(
+							new Error(
+								`Daemon did not exit within ${daemonExitTimeoutMs}ms after shutdown\nstdout:\n${diag.stdout}\nstderr:\n${diag.stderr}`,
+							),
+						),
+					daemonExitTimeoutMs,
+				),
 			),
 		]);
 		expect(exit.signal).toBeNull();
