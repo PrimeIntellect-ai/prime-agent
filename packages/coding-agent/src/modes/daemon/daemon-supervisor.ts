@@ -735,7 +735,10 @@ export class DaemonSupervisor {
 	private scheduledWakeRecomputeQueued = false;
 	private readonly scheduledWakeFailures = new Map<string, number>();
 	/** Trees whose ephemeral-stop cancel failed stay owned for enumeration until a retry lands. */
-	private readonly pendingEphemeralCancels = new Map<string, { rootSessionId: string; rootSessionFile: string }>();
+	private readonly pendingEphemeralCancels = new Map<
+		string,
+		{ rootSessionId: string; rootSessionFile: string; worker: ResidentWorker }
+	>();
 
 	constructor(
 		private readonly socketPath: string,
@@ -921,12 +924,13 @@ export class DaemonSupervisor {
 		for (const [rootKey, pending] of [...this.pendingEphemeralCancels]) {
 			try {
 				// A worker covering the tree owns its store again; a stale intent must not kill new schedules.
-				if (this.findWorkerBySessionFile(pending.rootSessionFile)) {
-					this.pendingEphemeralCancels.delete(rootKey);
-					continue;
+				if (!this.findWorkerBySessionFile(pending.rootSessionFile)) {
+					await this.cancelScheduledJobsForSessionTree(pending.rootSessionId, pending.rootSessionFile);
 				}
-				await this.cancelScheduledJobsForSessionTree(pending.rootSessionId, pending.rootSessionFile);
 				this.pendingEphemeralCancels.delete(rootKey);
+				if (this.workers.get(pending.worker.descriptor.workerId) !== pending.worker) {
+					this.deleteWorkerDescriptor(pending.worker);
+				}
 			} catch {
 				// Still owned until the cancel lands; the tree stays excluded below.
 			}
@@ -4840,11 +4844,12 @@ export class DaemonSupervisor {
 		});
 	}
 
-	private findWorkerBySessionFile(sessionFile: string): ResidentWorker | undefined {
+	private findWorkerBySessionFile(sessionFile: string, exclude?: ResidentWorker): ResidentWorker | undefined {
 		const target = canonicalSessionPath(sessionFile);
 		const targetEntry = this.roster().bySessionFile(target);
 		const matches = new Set<ResidentWorker>();
 		for (const worker of this.workers.values()) {
+			if (worker === exclude) continue;
 			// The roster is the one live ownership source; the stale pull cache must not resurrect a match.
 			const summaryMatches = targetEntry?.workerId === worker.descriptor.workerId;
 			const descriptorPath = worker.descriptor.sessionFile
@@ -6366,12 +6371,14 @@ export class DaemonSupervisor {
 		this.invalidateWorkerSessionInputPauses(worker, "Session worker stopped while input was paused");
 		// Client-owned schedules die with the registration, like their roster rows. Cancel
 		// before the worker leaves the map, so no recompute sees the tree uncovered mid-stop.
+		let ephemeralCancelSettled = true;
 		if (removeDescriptor && worker.descriptor.ownerClientId !== undefined) {
-			await this.cancelEphemeralWorkerScheduledJobs(worker);
+			ephemeralCancelSettled = await this.cancelEphemeralWorkerScheduledJobs(worker);
 		}
 		this.workers.delete(worker.descriptor.workerId);
 		this.flipWorkerRosterEntriesInactive(worker);
-		if (removeDescriptor) {
+		// A failed cancel keeps the stop tombstone as the durable intent; the enumeration retry or the next boot finishes it.
+		if (removeDescriptor && ephemeralCancelSettled) {
 			this.deleteWorkerDescriptor(worker);
 		}
 		if (!this.shuttingDown) {
@@ -6527,23 +6534,36 @@ export class DaemonSupervisor {
 		}
 	}
 
-	private async cancelEphemeralWorkerScheduledJobs(worker: ResidentWorker): Promise<void> {
+	private async cancelEphemeralWorkerScheduledJobs(worker: ResidentWorker): Promise<boolean> {
 		const context = this.workerSessionArtifactContext(worker);
 		if (!context || !worker.descriptor.rootSessionId) {
-			return;
+			return true;
 		}
 		const rootKey = canonicalSessionPath(context.sessionFile);
+		let covered: boolean;
+		try {
+			covered = this.findWorkerBySessionFile(context.sessionFile, worker) !== undefined;
+		} catch {
+			covered = true;
+		}
+		if (covered) {
+			this.pendingEphemeralCancels.delete(rootKey);
+			return true;
+		}
 		try {
 			await this.cancelScheduledJobsForSessionTree(worker.descriptor.rootSessionId, context.sessionFile);
 			this.pendingEphemeralCancels.delete(rootKey);
+			return true;
 		} catch (error) {
 			this.pendingEphemeralCancels.set(rootKey, {
 				rootSessionId: worker.descriptor.rootSessionId,
 				rootSessionFile: context.sessionFile,
+				worker,
 			});
 			this.log(
 				`Could not cancel scheduled jobs for client-owned worker ${worker.descriptor.workerId}: ${String(error)}`,
 			);
+			return false;
 		}
 	}
 

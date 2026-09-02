@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -22,7 +22,19 @@ interface WorkerFixture {
 		ownerClientId?: string;
 		stopRequestedAt?: string;
 		createCommand: { type: "create"; config?: { sessionDir?: string } };
+		version?: number;
+		supervisorSocketPath?: string;
+		socketPath?: string;
+		authenticationToken?: string;
+		recoveryJournalPath?: string;
+		createdAt?: string;
+		updatedAt?: string;
+		consecutiveFailures?: number;
 	};
+	descriptorPath?: string;
+	transcriptCaches?: Map<string, unknown>;
+	snapshotCache?: Map<string, unknown>;
+	stopRevision?: number;
 	client?: {
 		request: ReturnType<typeof vi.fn>;
 		requestWorker: ReturnType<typeof vi.fn>;
@@ -53,8 +65,13 @@ interface SupervisorInternals {
 	shutdown(exitCode: number, stopWorkers: boolean): Promise<never>;
 	handleCommand(client: object, command: object): Promise<unknown>;
 	writeRosterEntry(entry: object, worker?: object): unknown;
-	cancelEphemeralWorkerScheduledJobs(worker: WorkerFixture): Promise<void>;
-	pendingEphemeralCancels: Map<string, { rootSessionId: string; rootSessionFile: string }>;
+	cancelEphemeralWorkerScheduledJobs(worker: WorkerFixture): Promise<boolean>;
+	pendingEphemeralCancels: Map<string, { rootSessionId: string; rootSessionFile: string; worker: WorkerFixture }>;
+	stopWorkerUntracked(worker: WorkerFixture, removeDescriptor: boolean, force?: boolean): Promise<void>;
+	loadWorkerDescriptors(): void;
+	adoptOrRecoverWorker(worker: WorkerFixture): Promise<void>;
+	assertRecoveryAllowed: () => Promise<void>;
+	cancelScheduledJobsForSessionTree: (id: string, file: string) => Promise<void>;
 }
 
 const tempDirs: string[] = [];
@@ -862,7 +879,15 @@ describe("daemon supervisor scheduled-session wake", () => {
 			liveEdges: vi.fn(async () => []),
 		};
 
-		await supervisor.cancelEphemeralWorkerScheduledJobs(owned);
+		// A different worker covering the tree keeps its schedules; only an uncovered tree is cancelled.
+		const covering = makeWorker("covering", []);
+		covering.descriptor.sessionFile = root.sessionFile;
+		supervisor.workers.set("covering", covering);
+		expect(await supervisor.cancelEphemeralWorkerScheduledJobs(owned)).toBe(true);
+		expect(root.store.list().map((job) => job.status)).toEqual(["active"]);
+		supervisor.workers.delete("covering");
+
+		expect(await supervisor.cancelEphemeralWorkerScheduledJobs(owned)).toBe(true);
 
 		expect(root.store.list().map((job) => job.status)).toEqual(["cancelled"]);
 		expect(child.store.list().map((job) => job.status)).toEqual(["cancelled"]);
@@ -902,6 +927,77 @@ describe("daemon supervisor scheduled-session wake", () => {
 		await supervisor.recomputeScheduledSessionWake();
 		expect(store.list().map((job) => job.status)).toEqual(["cancelled"]);
 		expect(supervisor.scheduledWakeTimer).toBeUndefined();
+	});
+
+	it("keeps the tombstoned descriptor after a failed ephemeral cancel so the next boot finishes it", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-durable-cancel-"));
+		tempDirs.push(directory);
+		writeFileSync(join(directory, "settings.json"), JSON.stringify({ idleEvictionMinutes: 90 }));
+		const workersDir = join(directory, "workers");
+		mkdirSync(workersDir, { recursive: true });
+		const socketPath = join(directory, "daemon.sock");
+		const { sessionFile, store } = makeScheduledSessionFile("durable-cancel-root");
+		armHeartbeat(store, "durable-cancel-root", sessionFile, now - 10 * 60_000);
+		const bootSupervisor = (): SupervisorInternals => {
+			const supervisor = new DaemonSupervisor(socketPath, {
+				defaultSessionConfig: { agentDir: directory, cwd: directory },
+				descriptorDir: workersDir,
+			}) as unknown as SupervisorInternals;
+			supervisor.log = vi.fn();
+			supervisor.rlmSpawnLedgerInstance = {
+				family: vi.fn(async () => [makeSavedInfo(sessionFile, "durable-cancel-root")]),
+				liveEdges: vi.fn(async () => []),
+			};
+			return supervisor;
+		};
+		const descriptorPath = join(workersDir, "owned-worker.json");
+		const owned: WorkerFixture = {
+			descriptor: {
+				workerId: "owned-worker",
+				lifecycle: "ready",
+				version: 2,
+				supervisorSocketPath: socketPath,
+				socketPath: join(directory, "worker.sock"),
+				authenticationToken: "token",
+				recoveryJournalPath: join(workersDir, "owned-worker.recovery.jsonl"),
+				rootActiveSessionId: "owned-active",
+				rootSessionId: "durable-cancel-root",
+				sessionFile,
+				pid: 2_000_000_000,
+				ownerClientId: "owner",
+				createdAt: new Date(now).toISOString(),
+				updatedAt: new Date(now).toISOString(),
+				consecutiveFailures: 0,
+				createCommand: { type: "create" },
+			},
+			descriptorPath,
+			summaries: new Map(),
+			transcriptCaches: new Map(),
+			snapshotCache: new Map(),
+			intentionalStop: false,
+			stopRevision: 0,
+		};
+		const stopping = bootSupervisor();
+		stopping.workers.set("owned-worker", owned);
+		vi.spyOn(stopping, "cancelScheduledJobsForSessionTree").mockRejectedValue(new Error("store busy"));
+
+		await stopping.stopWorkerUntracked(owned, true, true);
+		await stopping.scheduledWakeRecompute;
+
+		// The stop tombstone survives the failed cancel as the durable intent.
+		expect(existsSync(descriptorPath)).toBe(true);
+		expect(store.list().map((job) => job.status)).toEqual(["active"]);
+
+		const rebooted = bootSupervisor();
+		rebooted.assertRecoveryAllowed = vi.fn(async () => {});
+		rebooted.loadWorkerDescriptors();
+		expect(rebooted.workers.size).toBe(1);
+		await rebooted.adoptOrRecoverWorker([...rebooted.workers.values()][0]!);
+
+		expect(store.list().map((job) => job.status)).toEqual(["cancelled"]);
+		expect(existsSync(descriptorPath)).toBe(false);
+		await rebooted.recomputeScheduledSessionWake();
+		expect(rebooted.scheduledWakeTimer).toBeUndefined();
 	});
 
 	it("pauses a passivated heartbeat against its durable store without waking it", async () => {
@@ -955,6 +1051,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		supervisor.pendingEphemeralCancels.set(canonicalSessionPath(sessionFile), {
 			rootSessionId: "reopened-root",
 			rootSessionFile: sessionFile,
+			worker: makeWorker("stopped", []),
 		});
 		const reopened = makeWorker("reopened", []);
 		reopened.descriptor.sessionFile = sessionFile;
