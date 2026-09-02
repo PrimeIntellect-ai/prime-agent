@@ -894,10 +894,7 @@ export class DaemonSupervisor {
 		this.scheduledWakeTimer = undefined;
 	}
 
-	// The supervisor owns exactly one scheduling concern: waking a session tree
-	// that is not resident anywhere when one of its scheduled jobs comes due.
-	// Firing and delivery stay worker-owned; the wake only relaunches the root
-	// worker and its own scheduler runs the due job.
+	// The supervisor only wakes non-resident trees; firing and delivery stay worker-owned.
 	private scheduleScheduledSessionWakeRecompute(): void {
 		if (this.shuttingDown) return;
 		if (this.scheduledWakeRecompute) {
@@ -915,11 +912,7 @@ export class DaemonSupervisor {
 			});
 	}
 
-	/**
-	 * Durable truth only: the RLM spawn ledger's family (roots plus ledger
-	 * descendants, fork headers stripped) plus each session's scheduled-jobs
-	 * artifact.
-	 */
+	/** Durable truth: the ledger family (fork headers stripped) plus each session's scheduled-jobs artifact. */
 	private async collectPassiveScheduledJobs(): Promise<
 		Array<{ rootSessionFile: string; job: AgentCronJob; info: SessionInfo }>
 	> {
@@ -953,7 +946,6 @@ export class DaemonSupervisor {
 			if (!info) continue;
 			const rootSessionFile = rootSessionFileFor(info);
 			try {
-				// A live root worker's own scheduler covers the whole tree.
 				if (this.findWorkerBySessionFile(rootSessionFile)) continue;
 			} catch {
 				continue;
@@ -978,7 +970,7 @@ export class DaemonSupervisor {
 			if (job.status !== "active" || job.nextRunAt === undefined) continue;
 			const runAt = Date.parse(job.nextRunAt);
 			if (!Number.isFinite(runAt)) continue;
-			// A failed relaunch must not retry in a hot loop while the job stays overdue.
+			// The failure floor keeps an overdue job off a hot retry loop.
 			const failedAt = this.scheduledWakeFailures.get(canonicalSessionPath(rootSessionFile));
 			wakeTimes.push(failedAt !== undefined ? Math.max(runAt, failedAt + SCHEDULED_WAKE_RETRY_MS) : runAt);
 		}
@@ -994,8 +986,7 @@ export class DaemonSupervisor {
 	}
 
 	private async wakeDueScheduledSessions(now = Date.now()): Promise<void> {
-		// No recompute here: while an update restart is being prepared the schedule
-		// stays disarmed; the phase transition (or the next boot) re-arms it once.
+		// Disarmed during update-restart preparation; the phase transition or next boot re-arms once.
 		if (this.shuttingDown || this.updateRestartPhase !== undefined) {
 			this.clearScheduledWakeTimer();
 			return;
@@ -2272,7 +2263,7 @@ export class DaemonSupervisor {
 						heartbeats.set(heartbeat.job.id, heartbeat);
 					}
 				}
-				// Passivated sessions keep their armed heartbeats; no worker lists them.
+				// Passivated sessions keep their armed heartbeats; no worker can list them.
 				for (const { job, info } of await this.collectPassiveScheduledJobs()) {
 					if (!isHeartbeatCronJob(job) || heartbeats.has(job.id)) continue;
 					heartbeats.set(job.id, {
@@ -2291,8 +2282,7 @@ export class DaemonSupervisor {
 					),
 				);
 				if (!cachedWorker) {
-					// A passivated session's heartbeat is managed against its durable
-					// store; no worker gets woken just to flip a job's status.
+					// Passive jobs are managed against their durable store; no wake just to flip a status.
 					const passive = (await this.collectPassiveScheduledJobs()).find(
 						({ job }) => job.id === command.jobId && job.activeSessionId === command.activeSessionId,
 					);
@@ -4426,8 +4416,7 @@ export class DaemonSupervisor {
 				this.roster().delete(entry.agentId);
 				continue;
 			}
-			// Registration marks survive eviction: they are the durable hint that a
-			// passive row still has scheduled jobs behind it.
+			// Registration marks survive eviction: passive rows still have schedules behind them.
 			this.writeRosterEntry(
 				passivatedWorkerRosterEntry(entry, {
 					hasRegisteredHeartbeat: entry.summary.hasRegisteredHeartbeat === true,
@@ -6334,8 +6323,7 @@ export class DaemonSupervisor {
 		this.invalidateWorkerSessionInputPauses(worker, "Session worker stopped while input was paused");
 		this.workers.delete(worker.descriptor.workerId);
 		this.flipWorkerRosterEntriesInactive(worker);
-		// Client-owned schedules die with the registration, like their roster rows:
-		// a private session must never be listed or woken once its owner is gone.
+		// Client-owned schedules die with the registration, like their roster rows.
 		if (removeDescriptor && worker.descriptor.ownerClientId !== undefined) {
 			await this.cancelEphemeralWorkerScheduledJobs(worker);
 		}
@@ -6537,7 +6525,6 @@ export class DaemonSupervisor {
 	}
 
 	private broadcastHeartbeatsChanged(): void {
-		// Job and residency changes are exactly the moments the wake schedule can move.
 		this.scheduleScheduledSessionWakeRecompute();
 		for (const client of this.clients) {
 			this.write(client, { type: "heartbeats_changed" });

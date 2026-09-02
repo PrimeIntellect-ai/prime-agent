@@ -42,8 +42,6 @@ describe("classifyAgentStatus", () => {
 		for (const busy of [false, true]) {
 			const expected = classifyAgentStatus({ resident: true, queuedChild: false, busy });
 			expect(expected).toBe(busy ? "running" : "idle");
-			// An armed heartbeat between firings is not work: it never lifts a
-			// resident session out of idle.
 			for (const heartbeat of [false, true]) {
 				expect(classifySessionRosterStatus(summaryFor(true, busy, heartbeat)), `busy=${busy} hb=${heartbeat}`).toBe(
 					expected,

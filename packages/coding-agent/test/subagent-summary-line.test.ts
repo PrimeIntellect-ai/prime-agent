@@ -93,7 +93,6 @@ describe("SubagentSummaryLine", () => {
 			child("grandchild", "running", { parentId: "running" }),
 		];
 
-		// A resident child with an armed heartbeat counts as idle, not running.
 		expect(countDirectSubagentStatuses(children, undefined)).toEqual({
 			total: 8,
 			running: 3,

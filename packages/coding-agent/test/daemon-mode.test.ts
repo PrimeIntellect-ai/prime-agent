@@ -562,7 +562,6 @@ describe("daemon mode helpers", () => {
 			...state.runtime,
 			metadata: { kind: "subagent", createdAt: 1 },
 		} as ActiveSessionState["runtime"];
-		// Armed heartbeats between firings never lift a quiet session out of idle.
 		expect(internals.createAgentMessageAgentSummary(state).status).toBe("idle");
 	});
 
@@ -4056,7 +4055,6 @@ describe("daemon mode helpers", () => {
 
 			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
 
-			// A fresh worker must schedule passive descendants' armed heartbeats without hydrating them.
 			await vi.waitFor(() =>
 				expect(internals.cronStore.list().some((job) => job.id === grandchildHeartbeat.id)).toBe(true),
 			);

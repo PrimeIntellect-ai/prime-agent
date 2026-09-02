@@ -1154,13 +1154,15 @@ describe("agents view state", () => {
 				Date.parse("2026-01-01T00:00:00Z"),
 			),
 		).toBe("♥ 1·1s");
-	});
 
-	test("labels an armed idle session with its next fire time", () => {
-		const parent = makeSummary({ id: "parent", activeSessionId: "parent", sessionId: "parent-session" });
-		const nextRunAt = new Date(Date.now() + 5 * 60_000).toISOString();
-		const rows = buildAgentsViewRows(reconcileUnifiedSessions([parent], [], [heartbeat("one", nextRunAt, "parent")]));
-		expect(rows[0]).toMatchObject({ section: "idle", statusLabel: "heartbeat · next 5m" });
+		const soonRows = buildAgentsViewRows(
+			reconcileUnifiedSessions(
+				[parent],
+				[],
+				[heartbeat("one", new Date(Date.now() + 5 * 60_000).toISOString(), "parent")],
+			),
+		);
+		expect(soonRows[0]).toMatchObject({ section: "idle", statusLabel: "heartbeat · next 5m" });
 	});
 
 	test("counts paused heartbeats separately without affecting the section", () => {

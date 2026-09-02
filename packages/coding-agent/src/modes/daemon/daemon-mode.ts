@@ -1532,8 +1532,7 @@ export class AgentDaemon {
 			this.cronStore.recoverSessionArtifact(session.sessionId);
 			this.cronScheduler.wake();
 		}
-		// A fresh worker only knows resident sessions; passive descendants keep
-		// their own scheduled jobs, which must fire without waiting for hydration.
+		// A fresh worker only knows resident sessions' jobs; passive descendants' schedules must fire without hydration.
 		if (state.runtime.metadata.kind !== "subagent") {
 			void this.registerPassiveDescendantCronArtifacts().catch((error) => {
 				this.log(`Could not register passive descendant scheduled jobs: ${String(error)}`);
@@ -1544,7 +1543,6 @@ export class AgentDaemon {
 	private async registerPassiveDescendantCronArtifacts(): Promise<void> {
 		let registered = false;
 		for (const passive of await this.listPassiveRlmSubagents()) {
-			// One corrupt artifact must not strand the remaining descendants' jobs.
 			try {
 				const artifactDir = getSessionArtifactPathForFile(resolve(passive.entry.sessionFile), passive.info.id);
 				if (this.cronStore.registerSessionArtifact(passive.info.id, artifactDir)) {

@@ -141,7 +141,6 @@ describe("daemon supervisor whole-tree eviction", () => {
 
 		await supervisor.runIdleEvictionSweep(now);
 
-		// An armed heartbeat is not work: its worker evicts exactly like any idle worker.
 		expect(supervisor.stopWorker).toHaveBeenCalledTimes(2);
 		expect(supervisor.stopWorker).toHaveBeenCalledWith(idle, true);
 		expect(supervisor.stopWorker).toHaveBeenCalledWith(heartbeat, true);
@@ -221,25 +220,6 @@ describe("daemon supervisor whole-tree eviction", () => {
 
 		expect(supervisor.stopWorker).not.toHaveBeenCalled();
 		expect(supervisor.workers.has("parent")).toBe(true);
-	});
-
-	it("evicts paused-heartbeat and active-heartbeat sessions like any idle session", async () => {
-		const now = Date.parse("2026-08-01T12:00:00.000Z");
-		const supervisor = makeSupervisor();
-		const paused = makeWorker("paused", [makeSummary("paused-root", now)]);
-		const active = makeWorker("active-heartbeat", [
-			makeSummary("active-heartbeat-root", now, { hasRegisteredHeartbeat: true }),
-		]);
-		supervisor.workers.set("paused", paused);
-		supervisor.workers.set("active-heartbeat", active);
-		seedSupervisorRoster(supervisor, paused, active);
-
-		await supervisor.runIdleEvictionSweep(now);
-
-		expect(supervisor.stopWorker).toHaveBeenCalledTimes(2);
-		expect(supervisor.stopWorker).toHaveBeenCalledWith(paused, true);
-		expect(supervisor.stopWorker).toHaveBeenCalledWith(active, true);
-		expect(supervisor.workers.has("active-heartbeat")).toBe(false);
 	});
 
 	it("honors off after reloading settings at sweep time", async () => {
@@ -519,7 +499,6 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 
 		await supervisor.handleCommand(viewer, { id: "detach-all", type: "detach" });
 		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(empty, true));
-		// An empty draft with only an armed heartbeat is abandoned too; the wake revives it on the next beat.
 		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(heartbeat, true));
 		await settle();
 		expect(supervisor.stopWorker).toHaveBeenCalledTimes(2);
@@ -737,7 +716,6 @@ describe("daemon supervisor scheduled-session wake", () => {
 		const supervisor = makeSupervisor();
 		const root = makeScheduledSessionFile("wake-root");
 		const child = makeScheduledSessionFile("wake-child");
-		// Created 10 minutes ago on a 5-minute schedule: due (and missed) by now.
 		armHeartbeat(child.store, "wake-child", child.sessionFile, now - 10 * 60_000);
 		supervisor.rlmSpawnLedgerInstance = {
 			family: vi.fn(async () => [
@@ -779,7 +757,6 @@ describe("daemon supervisor scheduled-session wake", () => {
 		await supervisor.recomputeScheduledSessionWake();
 		expect(supervisor.scheduledWakeTimer).toBeDefined();
 
-		// A live root worker owns firing for its whole tree: no supervisor timer.
 		const resident = makeWorker("resident", []);
 		resident.descriptor.sessionFile = sessionFile;
 		supervisor.workers.set("resident", resident);

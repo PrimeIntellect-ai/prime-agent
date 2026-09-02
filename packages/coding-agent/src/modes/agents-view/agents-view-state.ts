@@ -499,8 +499,7 @@ export function aggregateSessionHeartbeats(
 		if (job.status === "active" && job.nextRunAt && Number.isFinite(Date.parse(job.nextRunAt))) {
 			nextRunByJob.set(job.id, job.nextRunAt);
 		}
-		// A passivated session's job keeps a stale active id; its stable session
-		// id and file still identify the row that owns the badge.
+		// Passivation stales the job's active id; session id and file still find the owning row.
 		let summary: SessionSummary | undefined;
 		for (const key of [`active:${job.activeSessionId}`, `session:${job.sessionId}`, fileIdentity(job.sessionFile)]) {
 			summary = summaryByKey.get(key);
