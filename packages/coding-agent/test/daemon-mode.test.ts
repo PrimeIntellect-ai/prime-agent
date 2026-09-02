@@ -57,9 +57,10 @@ import {
 	type DaemonOutbound,
 	failure,
 } from "../src/modes/daemon/daemon-protocol.js";
-import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
+import { activeActivityForSession, type SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
 import { RlmSpawnLedger } from "../src/modes/daemon/rlm-ledger.js";
+import { WorkerRecoveryJournal } from "../src/modes/daemon/worker-recovery-journal.js";
 
 describe("daemon mode helpers", () => {
 	it("preserves envelope client identity while registering prompt admission", () => {
@@ -564,6 +565,50 @@ describe("daemon mode helpers", () => {
 		getHeartbeat.mockReturnValue(undefined);
 		listRlmHeartbeats.mockReturnValue([{ status: "active" } as AgentCronJob]);
 		expect(internals.createAgentMessageAgentSummary(state).status).toBe("running");
+	});
+
+	it("records live delegated child work as busy for worker recovery while activity stays idle", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-recovery-busy-"));
+		try {
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
+				createRuntime: vi.fn(),
+				worker: { authenticationToken: "worker-token" },
+			});
+			const state = makeState("delegating-parent");
+			state.runtime = {
+				...state.runtime,
+				cwd: tempDir,
+				metadata: { kind: "top-level", createdAt: 1 },
+				session: {
+					sessionId: "delegating-session",
+					sessionFile: join(tempDir, "delegating.jsonl"),
+					isSessionActive: false,
+					isStreaming: false,
+					isRetrying: false,
+					hasAcceptedPromptInFlight: false,
+					messages: [],
+					hasRunningRlmChildren: () => true,
+				},
+			} as never;
+			const journalPath = join(tempDir, "recovery.jsonl");
+			const internals = daemon as unknown as {
+				recoveryJournal?: WorkerRecoveryJournal;
+				recordWorkerRecoveryState(state: ActiveSessionState, operation: string): void;
+			};
+			Object.assign(internals, { recoveryJournal: new WorkerRecoveryJournal(journalPath) });
+
+			internals.recordWorkerRecoveryState(state, "turn_end");
+
+			// Recovery: the child dies with the worker, so the parent had work in flight.
+			expect(WorkerRecoveryJournal.readLatest(journalPath)).toEqual([
+				expect.objectContaining({ activeSessionId: "delegating-parent", busy: true, operation: "turn_end" }),
+			]);
+			// Display: the same state's activity axis reports the session's own (idle) work.
+			expect(activeActivityForSession(state)).toBe("idle");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("reserves a session name across equivalent session-relative parent headers", async () => {

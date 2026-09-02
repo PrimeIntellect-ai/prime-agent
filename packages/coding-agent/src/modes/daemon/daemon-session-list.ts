@@ -408,14 +408,17 @@ function readMessageText(content: unknown): string {
 		.join("\n");
 }
 
-// Agent doing work itself, ignoring the classification verdict; delegated
-// child work is the badge's signal, not this session's activity.
-export function isActiveSessionBusy(activeSession: ActiveSessionState): boolean {
-	return activeSession.runtime.session.isSessionActive;
+// Live work that dies with the worker: the session's own turn or any running
+// RLM child. Recovery and draft-discard gates use this; the display activity
+// axis deliberately does not (delegated work is the badge's signal there).
+export function hasLiveSessionWork(activeSession: ActiveSessionState): boolean {
+	const session = activeSession.runtime.session;
+	return session.isSessionActive || session.hasRunningRlmChildren();
 }
 
 export function activeActivityForSession(activeSession: ActiveSessionState): SessionActivity {
-	if (isActiveSessionBusy(activeSession)) {
+	// The session's own work only, ignoring the classification verdict.
+	if (activeSession.runtime.session.isSessionActive) {
 		return "working";
 	}
 	// A finished subagent is resident but never gets a summarizer verdict, so don't hold
