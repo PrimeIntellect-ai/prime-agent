@@ -179,35 +179,14 @@ export interface DaemonPeerTransportTicket {
 	expiresAt: string;
 }
 
-/**
- * JSON-safe options for creating a sandbox-backed session.
- * Must not carry credentials, provider config, host paths, or arbitrary env.
- * Only region is user-supplied; workspaceId is generated internally.
- */
-export interface SandboxOptions {
-	readonly region?: string;
-}
+import type { SandboxOptions as _CoreSandboxOptions } from "../../core/execution-location.js";
+import { normalizeSandboxOptions as _coreNormalize } from "../../core/execution-location.js";
 
-/**
- * Normalize and validate an unknown value as SandboxOptions.
- * Accepts only: region (optional, non-empty string).
- * Rejects all unknown keys, nested objects, arrays, and primitive non-objects.
- * Does not echo the rejected value in the error message.
- */
-export function normalizeSandboxOptions(value: unknown): SandboxOptions | undefined {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-	const obj = value as Record<string, unknown>;
-	const keys = Object.keys(obj);
-	for (const key of keys) {
-		if (key !== "region") return undefined;
-	}
-	if (obj.region !== undefined) {
-		if (typeof obj.region !== "string") return undefined;
-		if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(obj.region)) return undefined;
-		return { region: obj.region };
-	}
-	return {};
-}
+// Re-export from core execution-location module.
+// The interface and function remain in their canonical home
+// so core code never imports from modes.
+export type SandboxOptions = _CoreSandboxOptions;
+export const normalizeSandboxOptions = _coreNormalize;
 
 export interface DaemonRuntimeIdentity {
 	buildId: string;

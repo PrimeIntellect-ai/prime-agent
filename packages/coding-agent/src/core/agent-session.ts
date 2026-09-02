@@ -9462,14 +9462,10 @@ export class AgentSession {
 		sessionDir: string;
 		model: Model<any>;
 		thinkingLevel?: ThinkingLevel;
-		sandbox?: boolean;
-		sandboxOptions?: { region?: string };
 	}): CreateRlmSubagentRuntimeOptions {
 		return {
 			parentSession: this,
 			id: options.id,
-			sandbox: options.sandbox,
-			sandboxOptions: options.sandboxOptions,
 			prompt: options.prompt,
 			sessionName: options.sessionName,
 			spawnCode: options.spawnCode,
@@ -9500,6 +9496,9 @@ export class AgentSession {
 	}
 
 	private _createInlineRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): RlmSubagentRuntime {
+		if (options.sandbox === true) {
+			throw new Error("Sandbox execution is not available for this session");
+		}
 		const childSessionManager = SessionManager.create(this._cwd, options.sessionDir);
 		if (options.parentSession.sessionFile) {
 			childSessionManager.newSession({
@@ -10427,7 +10426,9 @@ export class AgentSession {
 		const requestedThinkingLevel = normalizeRequestedRlmSubagentThinkingLevel(rawThinking);
 		const requestedSandbox = normalizeRequestedRlmSubagentSandbox(rawSandbox);
 		const requestedSandboxOptions = normalizeRequestedRlmSubagentSandboxOptions(rawSandboxOptions, requestedSandbox);
-		const sandboxOptions = requestedSandboxOptions ? { region: requestedSandboxOptions.region } : undefined;
+		if (requestedSandbox === true && !this._subagentRuntimeHost) {
+			throw new Error("Sandbox execution is not available for this session");
+		}
 		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
 		if (this._rlmDepth >= this._rlmMaxDepth) {
 			throw new Error(
@@ -10513,9 +10514,12 @@ export class AgentSession {
 				sessionDir: childSessionDir,
 				model: modelSelection.model,
 				thinkingLevel: requestedThinkingLevel,
-				sandbox: requestedSandbox,
-				sandboxOptions: requestedSandbox ? sandboxOptions : undefined,
 			}),
+			...(requestedSandbox === true && requestedSandboxOptions !== undefined
+				? { sandbox: true, sandboxOptions: requestedSandboxOptions }
+				: requestedSandbox === true
+					? { sandbox: true }
+					: {}),
 			onSessionPublished: publishChildSession,
 		};
 

@@ -316,6 +316,9 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	}
 
 	async createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime> {
+		if (options.sandbox === true) {
+			throw new Error("Sandbox execution is not available for this session");
+		}
 		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
 		if (options.parentSession.sessionFile) {
 			sessionManager.newSession({
@@ -345,8 +348,6 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 					rlmSessionDir: options.sessionDir,
 					rlmParentNodeId: options.rlmParentNodeId,
 					rlmParentAgent: options.parentSession.sessionName ?? options.parentSession.sessionId,
-					sandbox: options.sandbox,
-					sandboxOptions: options.sandboxOptions,
 				},
 				runtimeMetadata: {
 					kind: "subagent",

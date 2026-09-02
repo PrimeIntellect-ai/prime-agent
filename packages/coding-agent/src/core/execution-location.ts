@@ -1,3 +1,4 @@
+import { types } from "node:util";
 /**
  * Execution location types for the coding agent.
  *
@@ -36,6 +37,54 @@ export interface RemoteSessionDescriptor {
 export type ExecutionLocation =
 	| { readonly type: "local" }
 	| { readonly type: "prime-sandbox"; readonly sandboxId: string; readonly region?: string };
+
+// ---------------------------------------------------------------------------
+// SandboxOptions – validated daemon-protocol descriptor (no secrets, no raw values)
+// ---------------------------------------------------------------------------
+
+/** JSON-safe sandbox session descriptor. No credentials, host paths, or provider config. */
+export interface SandboxOptions {
+	readonly region?: string;
+}
+
+/**
+ * Normalize and validate an unknown value as SandboxOptions.
+ *
+ * Strict descriptor validation (Proxy, non-Object prototype, symbols,
+ * accessor descriptors, non-enumerable keys all rejected).  Only the
+ * known key "region" is accepted.  Returns a frozen copy.
+ * Does NOT echo the rejected value in the error message.
+ */
+export function normalizeSandboxOptions(value: unknown): SandboxOptions | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	try {
+		if (Array.isArray(value)) return undefined;
+		if (types.isProxy(value) || Object.getPrototypeOf(value) !== Object.prototype) return undefined;
+	} catch {
+		return undefined;
+	}
+	if (Object.getOwnPropertySymbols(value).length !== 0) return undefined;
+	const names = Object.getOwnPropertyNames(value);
+	if (names.length > 1) return undefined;
+	for (const name of names) {
+		if (name !== "region") return undefined;
+	}
+	const descriptors = Object.getOwnPropertyDescriptors(value);
+	for (const name of Object.keys(descriptors)) {
+		const d = descriptors[name];
+		if (!d || !("value" in d) || !d.enumerable) return undefined;
+	}
+	if (names.length === 1) {
+		const regionValue = descriptors.region!.value;
+		if (regionValue !== undefined) {
+			if (typeof regionValue !== "string") return undefined;
+			if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(regionValue)) return undefined;
+			return Object.freeze({ region: regionValue });
+		}
+		return undefined;
+	}
+	return Object.freeze({});
+}
 
 // ---------------------------------------------------------------------------
 // Helpers

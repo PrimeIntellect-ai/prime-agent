@@ -2482,6 +2482,9 @@ export class AgentDaemon {
 		parentState: ActiveSessionState,
 		options: CreateRlmSubagentRuntimeOptions,
 	): Promise<AgentSessionRuntime> {
+		if (options.sandbox === true) {
+			throw new Error("Sandbox execution is not available for this session");
+		}
 		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
 		sessionManager.newSession({
 			parentSession: options.parentSession.sessionFile,
@@ -3867,7 +3870,7 @@ export class AgentDaemon {
 					}
 				}
 				if (command.sandbox === true) {
-					throw new Error("Sandbox execution is not available: no sandbox runtime host is installed");
+					throw new Error("Sandbox execution is not available for this session");
 				}
 				const state = await this.createRuntime(command);
 				return success(command.id, "create", summaryForActiveSession(state));

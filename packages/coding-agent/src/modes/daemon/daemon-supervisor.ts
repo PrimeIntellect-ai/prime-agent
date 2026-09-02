@@ -1770,7 +1770,7 @@ export class DaemonSupervisor {
 					}
 				}
 				if (command.sandbox === true) {
-					throw new Error("Sandbox execution is not available: no sandbox runtime host is installed");
+					throw new Error("Sandbox execution is not available for this session");
 				}
 				const worker = await this.createOrReuseWorker(this.protocolClientId(client), command);
 				const requestedSummary = command.sessionPath
