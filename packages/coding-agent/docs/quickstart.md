@@ -10,6 +10,12 @@ Install the latest stable release on Linux or macOS:
 curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
 ```
 
+On Windows, use PowerShell. This is a native install and does not require WSL. Install Git Bash for shell commands.
+
+```powershell
+irm https://app.primeintellect.ai/prime-agent/install.ps1 | iex
+```
+
 To try the latest beta built from `main`:
 
 ```bash

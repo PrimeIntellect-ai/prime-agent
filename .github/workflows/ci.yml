@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -292,7 +291,7 @@ jobs:
   build-check-test:
     name: build-check-test
     if: always() && needs.trust.outputs.allowed == 'true'
-    needs: [trust, build-check, test, process-stress, kernel-heavy, runtime-python, artifact-smoke]
+    needs: [trust, build-check, test, process-stress, kernel-heavy, runtime-python, artifact-smoke, windows]
     runs-on: ubuntu-latest
     steps:
       - name: Verify CI results
@@ -303,6 +302,7 @@ jobs:
           KERNEL_HEAVY_RESULT: ${{ needs.kernel-heavy.result }}
           RUNTIME_PYTHON_RESULT: ${{ needs.runtime-python.result }}
           ARTIFACT_SMOKE_RESULT: ${{ needs.artifact-smoke.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
         run: |
           test "$BUILD_CHECK_RESULT" = success
           test "$TEST_RESULT" = success
@@ -310,3 +310,127 @@ jobs:
           test "$KERNEL_HEAVY_RESULT" = success
           test "$RUNTIME_PYTHON_RESULT" = success
           test "$ARTIFACT_SMOKE_RESULT" = success
+          test "$WINDOWS_RESULT" = success
+
+  windows:
+    name: Windows native
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun 1.4.0
+        uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
+        with:
+          bun-version: 1.4.0
+
+      - name: Install uv 0.12.4
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.12.4"
+
+      - name: Verify Bun 1.4.0
+        run: bun run check:bun-version
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type check
+        run: bun run check:type
+
+      - name: Validate installers
+        run: bun run check:installer
+
+      - name: Run Windows behavior tests
+        working-directory: packages/coding-agent
+        run: >-
+          bun test
+          test/bash-close-hang-windows.test.ts
+          test/child-process.test.ts
+          test/daemon-socket.test.ts
+          test/exec.test.ts
+          test/kernel-bash-shell.test.ts
+
+      - name: Test terminal behavior
+        working-directory: packages/tui
+        run: >-
+          bun test
+          test/fullscreen.test.ts
+          test/input.test.ts
+          test/stdin-buffer.test.ts
+          test/terminal.test.ts
+          test/terminal-image.test.ts
+          test/tui-cell-size-input.test.ts
+          test/tui-render.test.ts
+
+      - name: Bootstrap the CPython kernel
+        working-directory: packages/coding-agent
+        env:
+          PRIME_AGENT_INSTALL_UV: "0"
+          PRIME_AGENT_KERNEL_VENV: ${{ runner.temp }}\Prime Agent ø\kernel-venv
+        run: bun src/core/kernel/bootstrap-cli.ts
+
+      - name: Test persistent CPython kernel behavior
+        working-directory: packages/coding-agent
+        env:
+          PRIME_AGENT_BASH_SHELL: C:\Program Files\Git\bin\bash.exe
+          PRIME_AGENT_KERNEL_VENV: ${{ runner.temp }}\Prime Agent ø\kernel-venv
+          PRIME_AGENT_TEST_TAGS: kernel-heavy
+        run: >-
+          bun ../../scripts/run-with-clean-env.ts bun test --isolate --timeout 30000
+          test/acp-kernel-features.test.ts
+          test/kernel-goal-skill.test.ts
+          test/repl-kernel-execute.test.ts
+          test/repl-kernel-parent-watchdog.test.ts
+
+      - name: Test the Windows CPython runtime
+        working-directory: prime-agent-runtime
+        env:
+          PRIME_AGENT_BASH_SHELL: C:\Program Files\Git\bin\bash.exe
+        run: >-
+          uv run python -m unittest
+          test.test_winjob
+          test.test_repl.ReplTest.test_interrupt_without_pthread_kill_cancels_awaited_cell
+          test.test_repl.ReplTest.test_interrupt_sync_blocking
+          test.test_repl.ReplTest.test_interrupt_await_suspended
+
+      - name: Build the native Windows executable
+        run: bun run build:binary
+
+      - name: Cross-compile and inspect the Windows Arm64 executable
+        working-directory: packages/coding-agent
+        shell: pwsh
+        run: |
+          bun build --compile --minify --keep-names --bytecode --format=esm --external koffi --target=bun-windows-arm64 ./dist/bun/cli.js --outfile "$env:RUNNER_TEMP\prime-agent-arm64.exe"
+          $artifacts = @(
+            @{ Path = "dist\pi.exe"; Machine = 0x8664 },
+            @{ Path = "$env:RUNNER_TEMP\prime-agent-arm64.exe"; Machine = 0xAA64 }
+          )
+          foreach ($artifact in $artifacts) {
+            $bytes = [System.IO.File]::ReadAllBytes($artifact.Path)
+            if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+              throw "$($artifact.Path) is not a PE executable"
+            }
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+            $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+            if ($machine -ne $artifact.Machine) {
+              throw "$($artifact.Path) has PE machine 0x$($machine.ToString('X4')), expected 0x$($artifact.Machine.ToString('X4'))"
+            }
+          }
+
+      - name: Test the PowerShell installer end to end
+        shell: pwsh
+        run: ./scripts/test-windows-installer.ps1
+
+      - name: Smoke test the native Windows executable
+        shell: pwsh
+        run: |
+          & ./packages/coding-agent/dist/pi.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./packages/coding-agent/dist/pi.exe --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

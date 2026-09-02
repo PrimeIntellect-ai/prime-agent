@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
+import { signalProcessGroupOrProcess } from "../src/utils/child-process.js";
 import { isTestTagEnabled } from "./test-tags.js";
 
 /**
@@ -171,13 +172,16 @@ async function driveAcpTurn(baseUrl: string): Promise<AcpResult> {
 			exited.then(() => true),
 			new Promise<boolean>((resolveTimeout) => setTimeout(() => resolveTimeout(false), 10_000)),
 		]);
-		if (!exitedInTime) {
-			child.kill("SIGTERM");
+		if (!exitedInTime && child.pid !== undefined) {
+			signalProcessGroupOrProcess(child.pid, "SIGTERM");
 			const stoppedInTime = await Promise.race([
 				exited.then(() => true),
 				new Promise<boolean>((resolveTimeout) => setTimeout(() => resolveTimeout(false), 5_000)),
 			]);
-			if (!stoppedInTime) child.kill("SIGKILL");
+			if (!stoppedInTime) {
+				signalProcessGroupOrProcess(child.pid, "SIGKILL");
+				await Promise.race([exited, new Promise<void>((resolveTimeout) => setTimeout(resolveTimeout, 5_000))]);
+			}
 		}
 	}
 	return { responses, updates };

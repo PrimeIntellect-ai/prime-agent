@@ -3,7 +3,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { waitForChildProcess } from "../utils/child-process.js";
+import { signalProcessGroupOrProcess, waitForChildProcess } from "../utils/child-process.js";
 
 /**
  * Options for executing shell commands.
@@ -80,7 +80,9 @@ export async function execCommand(
 				forceKillTimeoutId = setTimeout(() => {
 					forceKillTimeoutId = undefined;
 					if (proc.exitCode === null && proc.signalCode === null) {
-						proc.kill("SIGKILL");
+						if (proc.pid) {
+							signalProcessGroupOrProcess(proc.pid, "SIGKILL");
+						}
 					}
 				}, 5000);
 			}

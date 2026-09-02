@@ -50,6 +50,7 @@ async function copyBinaryAssets(): Promise<void> {
 		await copyFile(join(packageDir, name), distDir);
 	}
 	await copyFile(join(repoDir, "install.sh"), distDir);
+	await copyFile(join(repoDir, "install.ps1"), distDir);
 	await copyFiles(join(packageDir, "src/modes/interactive/theme"), join(distDir, "theme"), ".json");
 	await copyFiles(join(packageDir, "src/modes/interactive/assets"), join(distDir, "assets"), ".png");
 	for (const name of ["template.html", "template.css", "template.js"]) {

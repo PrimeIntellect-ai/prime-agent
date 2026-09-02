@@ -1,0 +1,1 @@
+- Added native Windows installation, release archives, process cleanup, daemon named-pipe coordination, CPython bootstrap, and CI coverage without requiring WSL.

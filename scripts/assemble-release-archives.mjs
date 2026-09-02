@@ -17,10 +17,10 @@
  *   <channel>                                  (plain version pointer)
  *   latest.json|beta.json                      (manifest)
  *
- * Platforms: darwin-arm64, darwin-x64, linux-arm64, linux-x64
+ * Platforms: darwin-arm64, darwin-x64, linux-arm64, linux-x64, windows-x64, windows-arm64
  *
- * Archive layout (each .tar.gz):
- *   prime-agent          (compiled binary, executable)
+ * Archive layout (each archive):
+ *   prime-agent[.exe]    (compiled binary, executable)
  *   package.json
  *   README.md
  *   CHANGELOG.md
@@ -56,13 +56,14 @@ const releaseChannels = new Set(["stable", "beta"]);
 const publicPackageName = "prime-agent";
 const binaryName = "prime-agent";
 
-const PLATFORMS = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"];
+const PLATFORMS = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "windows-x64", "windows-arm64"];
 
 const REQUIRED_SIDECARS = [
 	"package.json",
 	"README.md",
 	"CHANGELOG.md",
 	"install.sh",
+	"install.ps1",
 	"prime-agent-runtime",
 	"skills",
 	"theme",
@@ -150,7 +151,8 @@ function printHelp() {
 Assembles platform-specific release archives from a Bun-compiled binary and sidecar files.
 
 Output:
-  <out-dir>/artifacts/prime-agent-<version>-<platform>.tar.gz
+  <out-dir>/artifacts/prime-agent-<version>-<platform>.tar.gz  (macOS/Linux)
+  <out-dir>/artifacts/prime-agent-<version>-<platform>.zip     (Windows)
   <out-dir>/artifacts/SHA256SUMS
   <out-dir>/artifacts/<channel>
   <out-dir>/artifacts/latest.json (stable) or beta.json (beta)
@@ -210,11 +212,32 @@ function sha256File(path) {
 }
 
 function createArchive(sourceDir, archivePath) {
-	const result = spawnSync("tar", ["-czf", archivePath, "-C", sourceDir, "."], {
-		stdio: "pipe",
-		encoding: "utf8",
-	});
-	if (result.status !== 0) throw new Error(`tar failed: ${result.stderr || result.stdout}`);
+	if (archivePath.endsWith(".zip")) {
+		const result = spawnSync("zip", ["-q", "-r", archivePath, "."], {
+			cwd: sourceDir,
+			stdio: "pipe",
+			encoding: "utf8",
+		});
+		if (result.status !== 0) throw new Error(`zip failed: ${result.stderr || result.stdout}`);
+	} else {
+		const result = spawnSync("tar", ["-czf", archivePath, "-C", sourceDir, "."], {
+			stdio: "pipe",
+			encoding: "utf8",
+		});
+		if (result.status !== 0) throw new Error(`tar failed: ${result.stderr || result.stdout}`);
+	}
+}
+
+function isWindowsPlatform(platform) {
+	return platform === "windows-x64" || platform === "windows-arm64";
+}
+
+function archiveExtension(platform) {
+	return isWindowsPlatform(platform) ? "zip" : "tar.gz";
+}
+
+function binaryNameForPlatform(platform) {
+	return isWindowsPlatform(platform) ? "prime-agent.exe" : "prime-agent";
 }
 
 function validateSidecars(sidecarDir) {
@@ -241,11 +264,11 @@ function findForbiddenReleaseDirectory(root, relativePath = "") {
 	return undefined;
 }
 
-function renderPackageManifest(path, version) {
+function renderPackageManifest(path, version, platform) {
 	const manifest = JSON.parse(readFileSync(path, "utf8"));
 	manifest.name = publicPackageName;
 	manifest.version = version;
-	manifest.bin = { [binaryName]: `./${binaryName}` };
+	manifest.bin = { [binaryName]: `./${binaryNameForPlatform(platform)}` };
 	manifest.packageManager = "bun@1.4.0";
 	writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
 }
@@ -280,7 +303,8 @@ function main() {
 
 	const binarySources = new Map();
 	for (const platform of args.platforms) {
-		const binarySource = join(args.binaryDir, platform, "pi");
+		const binaryName = isWindowsPlatform(platform) ? "pi.exe" : "pi";
+		const binarySource = join(args.binaryDir, platform, binaryName);
 		if (!existsSync(binarySource)) {
 			throw new Error(`Binary not found for platform ${platform}: ${binarySource}`);
 		}
@@ -297,8 +321,9 @@ function main() {
 		const stagingDir = join(outDir, "staging", platform);
 		mkdirSync(stagingDir, { recursive: true });
 
-		// Copy binary to archive root as "prime-agent"
-		const dstBinary = join(stagingDir, binaryName);
+		// Copy binary to archive root as platform-specific name
+		const archiveBinaryName = binaryNameForPlatform(platform);
+		const dstBinary = join(stagingDir, archiveBinaryName);
 		cpSync(binarySource, dstBinary);
 		chmodSync(dstBinary, 0o755);
 
@@ -307,10 +332,12 @@ function main() {
 			const src = join(args.sidecarDir, name);
 			cpSync(src, join(stagingDir, name), { recursive: true, dereference: true });
 		}
-		renderPackageManifest(join(stagingDir, "package.json"), args.version);
+		renderPackageManifest(join(stagingDir, "package.json"), args.version, platform);
 		renderInstaller(join(stagingDir, "install.sh"), args.baseUrl, args.channel);
+		renderInstaller(join(stagingDir, "install.ps1"), args.baseUrl, args.channel);
 
-		const archiveName = `prime-agent-${args.version}-${platform}.tar.gz`;
+		const archiveExt = archiveExtension(platform);
+		const archiveName = `prime-agent-${args.version}-${platform}.${archiveExt}`;
 		const archivePath = join(versionDir, archiveName);
 		createArchive(stagingDir, archivePath);
 
@@ -339,6 +366,7 @@ function main() {
 					platform: a.platform,
 					file: a.file,
 					sha256: a.sha256,
+					binaryName: binaryNameForPlatform(a.platform),
 				})),
 				baseUrl: `${args.baseUrl}/releases/v${args.version}`,
 			},

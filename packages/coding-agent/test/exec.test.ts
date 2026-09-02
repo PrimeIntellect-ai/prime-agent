@@ -50,3 +50,28 @@ describe.skipIf(process.platform === "win32")("execCommand", () => {
 		}
 	});
 });
+
+describe.skipIf(process.platform !== "win32")("execCommand on Windows", () => {
+	it("cancels a running process tree", async () => {
+		const testDir = mkdtempSync(join(tmpdir(), "prime-agent-exec-windows-test-"));
+		const readyFile = join(testDir, "ready");
+		const controller = new AbortController();
+		let resultPromise: Promise<Awaited<ReturnType<typeof execCommand>>> | undefined;
+		try {
+			resultPromise = execCommand(
+				process.execPath,
+				["-e", `require("node:fs").writeFileSync(process.argv[1], ""); setInterval(() => {}, 1000);`, readyFile],
+				process.cwd(),
+				{ signal: controller.signal },
+			);
+			await waitForFile(readyFile);
+			controller.abort();
+			const result = await resultPromise;
+			expect(result.killed).toBe(true);
+		} finally {
+			controller.abort();
+			await resultPromise;
+			rmSync(testDir, { recursive: true, force: true });
+		}
+	});
+});

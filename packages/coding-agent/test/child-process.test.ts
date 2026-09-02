@@ -1,7 +1,12 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
-import { isProcessAlive, isZombieProcess, waitForChildProcess } from "../src/utils/child-process.js";
+import {
+	isProcessAlive,
+	isZombieProcess,
+	signalProcessGroupOrProcess,
+	waitForChildProcess,
+} from "../src/utils/child-process.js";
 
 describe("waitForChildProcess", () => {
 	it("reports signaled already-exited children as failures", async () => {
@@ -13,6 +18,19 @@ describe("waitForChildProcess", () => {
 		});
 
 		await expect(waitForChildProcess(child as unknown as ChildProcess)).resolves.toBe(143);
+	});
+});
+
+describe("signalProcessGroupOrProcess", () => {
+	it("does not throw for a running child pid", async () => {
+		const child = spawn(process.execPath, ["--eval", "setTimeout(() => {}, 1000)"], { stdio: "ignore" });
+		await new Promise<void>((resolve) => child.once("spawn", () => resolve()));
+		expect(() => signalProcessGroupOrProcess(child.pid!, "SIGTERM")).not.toThrow();
+		await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+	});
+
+	it("does not throw for a nonexistent pid", () => {
+		expect(() => signalProcessGroupOrProcess(999999999, "SIGKILL")).not.toThrow();
 	});
 });
 
