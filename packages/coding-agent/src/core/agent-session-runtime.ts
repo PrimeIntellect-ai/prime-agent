@@ -7,7 +7,6 @@ import type {
 	AgentSessionRuntimeDiagnostic,
 	AgentSessionServices,
 } from "./agent-session-services.js";
-import { flushAgentTraceUpload, logDetachedAgentTraceFlushFailure } from "./agent-traces.js";
 import { isNoModelsAvailableMessage } from "./auth-guidance.js";
 import type { ReplacedSessionContext, SessionShutdownEvent, SessionStartEvent } from "./extensions/index.js";
 import { emitSessionShutdownEvent } from "./extensions/runner.js";
@@ -204,7 +203,6 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 			reason,
 			targetSessionFile,
 		});
-		this.detachTraceFlush();
 		this.beforeSessionInvalidate?.();
 		// Await the kernel's final snapshot flush before invalidating the session.
 		await this.session.disposeAsync();
@@ -688,13 +686,6 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		return { cancelled: false };
 	}
 
-	private detachTraceFlush(): void {
-		const sessionManager = this.session.sessionManager;
-		void flushAgentTraceUpload(sessionManager).catch((error) =>
-			logDetachedAgentTraceFlushFailure(sessionManager.getSessionFile(), error),
-		);
-	}
-
 	private async disposeOnce(options: AgentSessionRuntimeDisposeOptions): Promise<void> {
 		let disposeError: unknown;
 		try {
@@ -705,7 +696,6 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		} catch (error) {
 			disposeError ??= error;
 		}
-		this.detachTraceFlush();
 		try {
 			this.beforeSessionInvalidate?.();
 		} catch (error) {

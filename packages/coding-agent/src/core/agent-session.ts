@@ -71,7 +71,6 @@ import {
 	normalizeObserveMaxChars,
 	ORCHESTRATION_HEARTBEAT_SKILL_NAME,
 } from "./agent-observe.js";
-import { flushAgentTraceUpload } from "./agent-traces.js";
 import {
 	addLoginGuidanceToAuthError,
 	formatAuthenticationFailedMessage,
@@ -10675,7 +10674,6 @@ export class AgentSession {
 						}
 						const text = compactRlmText(readAssistantText(assistant));
 						if (text) run.answerPreview = text;
-						void flushAgentTraceUpload(child.sessionManager).catch(() => undefined);
 						emitChildUpdate();
 					} else if (event.type === "message_start" || event.type === "message_update") {
 						if (event.message.role === "assistant") {
