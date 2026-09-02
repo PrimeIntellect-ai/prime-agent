@@ -163,6 +163,7 @@ import {
 	isDaemonDialogExtensionUiRequest,
 	isDaemonMutatingCommand,
 	isSessionPlaneDaemonCommand,
+	normalizeSandboxOptions,
 	salvageDaemonCommandId,
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
@@ -3856,6 +3857,18 @@ export class AgentDaemon {
 			}
 
 			case "create": {
+				if (command.sandboxOptions !== undefined) {
+					if (command.sandbox !== true) {
+						throw new Error("sandboxOptions requires sandbox=true");
+					}
+					const normalised = normalizeSandboxOptions(command.sandboxOptions);
+					if (!normalised) {
+						throw new Error("sandboxOptions contains invalid fields");
+					}
+				}
+				if (command.sandbox === true) {
+					throw new Error("Sandbox execution is not available: no sandbox runtime host is installed");
+				}
 				const state = await this.createRuntime(command);
 				return success(command.id, "create", summaryForActiveSession(state));
 			}

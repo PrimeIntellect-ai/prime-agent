@@ -70,8 +70,8 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 23 lets workers query the supervisor agent roster on demand.
 // Revision 24 adds the capability-gated agent-roster subscription and push.
 // Revision 25 adds capability-gated direct worker peer transport discovery.
-export const DAEMON_SCHEMA_REVISION = 25;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-25-585ef1102921";
+export const DAEMON_SCHEMA_REVISION = 26;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-26-f2e0aced4a3e";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -118,7 +118,8 @@ export type DaemonServerCapability =
 	| "session_input_pause"
 	| "owned_prompt_cancellation"
 	| "acp_mcp_servers"
-	| "direct_peer_transport";
+	| "direct_peer_transport"
+	| "sandbox_sessions";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -176,6 +177,36 @@ export interface DaemonPeerTransportTicket {
 	grantId: string;
 	token: string;
 	expiresAt: string;
+}
+
+/**
+ * JSON-safe options for creating a sandbox-backed session.
+ * Must not carry credentials, provider config, host paths, or arbitrary env.
+ * Only region is user-supplied; workspaceId is generated internally.
+ */
+export interface SandboxOptions {
+	readonly region?: string;
+}
+
+/**
+ * Normalize and validate an unknown value as SandboxOptions.
+ * Accepts only: region (optional, non-empty string).
+ * Rejects all unknown keys, nested objects, arrays, and primitive non-objects.
+ * Does not echo the rejected value in the error message.
+ */
+export function normalizeSandboxOptions(value: unknown): SandboxOptions | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const obj = value as Record<string, unknown>;
+	const keys = Object.keys(obj);
+	for (const key of keys) {
+		if (key !== "region") return undefined;
+	}
+	if (obj.region !== undefined) {
+		if (typeof obj.region !== "string") return undefined;
+		if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(obj.region)) return undefined;
+		return { region: obj.region };
+	}
+	return {};
 }
 
 export interface DaemonRuntimeIdentity {
@@ -409,6 +440,8 @@ export type DaemonCommand =
 			config?: AgentSessionRuntimeConfig;
 			runtimeMetadata?: AgentSessionRuntimeMetadata;
 			lifecycle?: DaemonSessionLifecycle;
+			sandbox?: boolean;
+			sandboxOptions?: SandboxOptions;
 	  } & DaemonClientEnv &
 			DaemonLaunchEnv)
 	// Attach env is adopt-if-absent only: it fills identity for env-less
@@ -989,6 +1022,13 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 	}
 	if (command.type === "cancel_prompt_admission" && command.cancelOwned === true) {
 		requirements.push(OWNED_PROMPT_CANCELLATION_COMMAND);
+	}
+	if (command.type === "create" && (command.sandbox === true || command.sandboxOptions !== undefined)) {
+		requirements.push({
+			minProtocol: 7,
+			minSchemaRevision: 26,
+			capability: "sandbox_sessions",
+		});
 	}
 	return [...requirements, DAEMON_COMMAND_COMPATIBILITY[command.type]];
 }

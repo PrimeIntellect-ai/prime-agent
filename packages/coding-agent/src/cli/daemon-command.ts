@@ -10,7 +10,8 @@ import type { AgentSessionRuntimeConfig } from "../core/agent-session-config.js"
 import { type AgentCronJob, formatAgentCronJob } from "../core/cron-jobs.js";
 import { looksLikeSessionPath } from "../core/session-resolver.js";
 import { DaemonClient, type DaemonClientMessageListener } from "../modes/daemon/daemon-client.js";
-import type { DaemonOutbound, DaemonResponse } from "../modes/daemon/daemon-protocol.js";
+import type { DaemonOutbound, DaemonResponse, SandboxOptions } from "../modes/daemon/daemon-protocol.js";
+import { normalizeSandboxOptions } from "../modes/daemon/daemon-protocol.js";
 import { matchesSessionIdSuffix } from "../modes/daemon/daemon-session-id.js";
 import type { SessionSummary } from "../modes/daemon/daemon-session-list.js";
 import { defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
@@ -284,6 +285,8 @@ async function runOpen(parsed: ParsedDaemonClientCommand): Promise<void> {
 				config: sessionArgs.config,
 				sessionPath: sessionArgs.sessionPath,
 				continueRecent: sessionArgs.continueRecent,
+				sandbox: sessionArgs.sandbox,
+				sandboxOptions: sessionArgs.sandboxOptions,
 			});
 			if (response.success || !autoName || !response.error.includes(`Agent name "${sessionName}" is unavailable`)) {
 				break;
@@ -307,6 +310,8 @@ interface ParsedSessionArgs {
 	config?: AgentSessionRuntimeConfig;
 	sessionPath?: string;
 	continueRecent?: boolean;
+	sandbox?: boolean;
+	sandboxOptions?: SandboxOptions;
 }
 
 const SESSION_BOOLEAN_FLAGS = new Set([
@@ -341,6 +346,8 @@ function parseSessionArgs(args: string[]): ParsedSessionArgs {
 	const pathBaseCwd = findSessionCwdArg(args) ?? process.cwd();
 	let sessionPath: string | undefined;
 	let continueRecent: boolean | undefined;
+	let sandbox: boolean | undefined;
+	let sandboxOptions: SandboxOptions | undefined;
 
 	for (let index = 0; index < args.length; index++) {
 		const arg = args[index];
@@ -383,6 +390,12 @@ function parseSessionArgs(args: string[]): ParsedSessionArgs {
 			if (parsedOption.continueRecent !== undefined) {
 				continueRecent = parsedOption.continueRecent;
 			}
+			if (parsedOption.sandbox !== undefined) {
+				sandbox = parsedOption.sandbox;
+			}
+			if (parsedOption.sandboxOptions !== undefined) {
+				sandboxOptions = parsedOption.sandboxOptions;
+			}
 			index += parsedOption.consumed;
 			continue;
 		}
@@ -401,6 +414,8 @@ function parseSessionArgs(args: string[]): ParsedSessionArgs {
 		config: Object.keys(config).length > 0 ? config : undefined,
 		sessionPath,
 		continueRecent,
+		sandbox,
+		sandboxOptions: sandboxOptions && Object.keys(sandboxOptions).length > 0 ? sandboxOptions : undefined,
 	};
 }
 
@@ -410,6 +425,8 @@ interface ParsedSessionOption {
 	value?: string;
 	sessionPath?: string;
 	continueRecent?: boolean;
+	sandbox?: boolean;
+	sandboxOptions?: SandboxOptions;
 }
 
 function parseSessionOption(
@@ -565,6 +582,22 @@ function parseSessionOption(
 			};
 			// Session-specific flag: do NOT propagate to daemon startup args.
 			return { consumed: 1 };
+		}
+		case "--sandbox":
+			return { consumed: 0, sandbox: true };
+		case "--sandbox-options": {
+			const value = readValue();
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(value);
+			} catch {
+				throw new Error("--sandbox-options must be valid JSON");
+			}
+			const normalised = normalizeSandboxOptions(parsed);
+			if (!normalised) {
+				throw new Error("--sandbox-options contains invalid fields");
+			}
+			return { consumed: 1, sandboxOptions: normalised };
 		}
 		case "--foreground":
 		case "--no-detach":
@@ -782,6 +815,8 @@ async function runCreate(client: DaemonClient, args: string[], json: boolean): P
 		config: sessionArgs.config,
 		sessionPath: sessionArgs.sessionPath,
 		continueRecent: sessionArgs.continueRecent,
+		sandbox: sessionArgs.sandbox,
+		sandboxOptions: sessionArgs.sandboxOptions,
 	});
 	const data = requireSuccess(response);
 	if (json) {
