@@ -1028,10 +1028,10 @@ describe("send replay failure propagation", () => {
 			for (let i = 1; i <= 3; i++) {
 				journal.recordSent({
 					type: "frame",
-					frameId: "cmd-" + i,
+					frameId: `cmd-${i}`,
 					protocol: REMOTE_HOST_PROTOCOL_INFO,
 					sentAt: new Date().toISOString(),
-					frame: { type: "command", commandId: "cmd-" + i, body: { type: "abort" } },
+					frame: { type: "command", commandId: `cmd-${i}`, body: { type: "abort" } },
 				});
 			}
 
