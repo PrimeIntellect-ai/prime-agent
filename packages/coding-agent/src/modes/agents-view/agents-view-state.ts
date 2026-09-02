@@ -702,9 +702,10 @@ export function buildAgentsViewRows(
 		siblings.push(row);
 		childrenByParent.set(parent, siblings);
 	}
-	propagateHeartbeatStateToAncestors(baseRows, parentByChild);
 	// The parent's own hasRunningRlmChildren snapshot goes stale between its
-	// flushes; the live descendant rows are the truth the indicator shows.
+	// flushes; the live descendant rows are the truth the indicator shows. The
+	// tally runs before heartbeat propagation so it counts intrinsically busy
+	// rows only, never promotion-inflated ancestors.
 	const tallyRunningDescendants = (row: MutableAgentsViewRow): number => {
 		let count = 0;
 		for (const child of childrenByParent.get(row) ?? []) {
@@ -716,6 +717,7 @@ export function buildAgentsViewRows(
 	for (const row of baseRows) {
 		if (!nestedRows.has(row)) tallyRunningDescendants(row);
 	}
+	propagateHeartbeatStateToAncestors(baseRows, parentByChild);
 
 	const roots = baseRows.filter((row) => !nestedRows.has(row));
 	const flattened: AgentsViewRow[] = [];

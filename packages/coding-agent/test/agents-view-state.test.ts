@@ -463,6 +463,46 @@ describe("agents view state", () => {
 		expect(childRow).toMatchObject({ kind: "subagent", section: "idle", runningSubagentCount: 1 });
 	});
 
+	test("counts a heartbeat-active grandchild once, not its promotion-inflated ancestors", () => {
+		const summaries = [
+			makeSummary({
+				id: "parent-active",
+				activeSessionId: "parent-active",
+				sessionId: "parent-session",
+				sessionName: "Parent",
+				activity: "idle",
+				taskState: "completed",
+				messageCount: 2,
+			}),
+			makeSummary({
+				id: "child-active",
+				activeSessionId: "child-active",
+				sessionId: "child-session",
+				sessionName: "Child",
+				runtimeKind: "subagent",
+				parentActiveSessionId: "parent-active",
+				activity: "idle",
+				taskState: "completed",
+			}),
+			makeSummary({
+				id: "grandchild-active",
+				activeSessionId: "grandchild-active",
+				sessionId: "grandchild-session",
+				sessionName: "Heartbeat grandchild",
+				runtimeKind: "subagent",
+				parentActiveSessionId: "child-active",
+				hasActiveHeartbeat: true,
+				activity: "idle",
+			}),
+		];
+
+		const collapsed = buildAgentsViewRows(summaries);
+		expect(collapsed[0]?.runningSubagentCount).toBe(1);
+		expect(collapsed[1]).toMatchObject({ kind: "subagent-summary", title: "1 subagent running" });
+		const expanded = buildAgentsViewRows(summaries, new Set([collapsed[0]?.identity ?? ""]));
+		expect(expanded.find((row) => row.title === "Child")?.runningSubagentCount).toBe(1);
+	});
+
 	test("ranks idle rows with busy descendants above plain idle rows", () => {
 		const rows = buildAgentsViewRows([
 			makeSummary({
