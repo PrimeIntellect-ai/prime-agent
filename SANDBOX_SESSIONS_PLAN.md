@@ -143,3 +143,5 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Integrated B03 as `d609d182f`; 57 focused tests verify exact-build admission, path-free frames, durable journals, directional replay, and cursor identity. Started B04 managed relay and B09 top-level API plumbing.
 
 - Integrated B05 as `ce567a025`; 34 focused tests verify exact model authorization, typed streaming, cancellation, validation, and credential-safe errors.
+
+- The integration branch passes full `npm run check` after B01, B03, and B05 integration.
