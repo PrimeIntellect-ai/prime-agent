@@ -950,6 +950,43 @@ describe("daemon supervisor scheduled-session wake", () => {
 		expect(store.list().map((job) => job.status)).toEqual(["active"]);
 	});
 
+	it("never parks or retries the cancel once the tree was promoted during a failing family read", async () => {
+		const supervisor = makeSupervisor();
+		supervisor.createOrReuseWorker = vi.fn();
+		const { sessionFile, store } = makeScheduledSessionFile("promoted-parked-root");
+		armHeartbeat(store, "promoted-parked-root", sessionFile, now - 10 * 60_000);
+		let failFamily: (error: Error) => void = () => {};
+		const familyGate = new Promise<never>((_, reject) => {
+			failFamily = reject;
+		});
+		let familyReads = 0;
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => {
+				familyReads += 1;
+				if (familyReads === 1) await familyGate;
+				return [makeSavedInfo(sessionFile, "promoted-parked-root")];
+			}),
+			liveEdges: vi.fn(async () => []),
+		};
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-promote-park-"));
+		tempDirs.push(directory);
+		const owned = makeWorker("owned", []);
+		owned.descriptor.ownerClientId = "owner";
+		owned.descriptor.rootSessionId = "promoted-parked-root";
+		owned.descriptor.sessionFile = sessionFile;
+		owned.descriptorPath = join(directory, "owned.json");
+
+		const cancel = supervisor.cancelEphemeralWorkerScheduledJobs(owned);
+		await supervisor.promoteOwnedWorker({ id: "owner", attachedActiveSessionIds: new Set<string>() }, owned);
+		failFamily(new Error("ledger read failed"));
+
+		const settled = await cancel;
+		await supervisor.recomputeScheduledSessionWake();
+		expect(store.list().map((job) => job.status)).toEqual(["active"]);
+		expect(settled).toBe(true);
+		expect(supervisor.pendingEphemeralCancels.size).toBe(0);
+	});
+
 	it("keeps a tree wake-ineligible after a failed ephemeral cancel until an enumeration retry lands", async () => {
 		const supervisor = makeSupervisor();
 		supervisor.createOrReuseWorker = vi.fn();

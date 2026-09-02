@@ -925,7 +925,11 @@ export class DaemonSupervisor {
 			try {
 				// A worker covering the tree owns its store again; a stale intent must not kill new schedules.
 				if (!this.findWorkerBySessionFile(pending.rootSessionFile)) {
-					await this.cancelScheduledJobsForSessionTree(pending.rootSessionId, pending.rootSessionFile);
+					await this.cancelScheduledJobsForSessionTree(
+						pending.rootSessionId,
+						pending.rootSessionFile,
+						() => pending.worker.descriptor.ownerClientId !== undefined,
+					);
 				}
 				this.pendingEphemeralCancels.delete(rootKey);
 				if (this.workers.get(pending.worker.descriptor.workerId) !== pending.worker) {
@@ -6567,6 +6571,11 @@ export class DaemonSupervisor {
 			this.pendingEphemeralCancels.delete(rootKey);
 			return true;
 		} catch (error) {
+			// A promotion that landed during the failed read means the cancel is no longer wanted; never park it.
+			if (worker.descriptor.ownerClientId === undefined) {
+				this.pendingEphemeralCancels.delete(rootKey);
+				return true;
+			}
 			this.pendingEphemeralCancels.set(rootKey, {
 				rootSessionId: worker.descriptor.rootSessionId,
 				rootSessionFile: context.sessionFile,
