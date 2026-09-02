@@ -1425,6 +1425,121 @@ describe("admission outcomes", () => {
 		expect(r.ok).toBe(false);
 		if (!r.ok) expect(r.code).toBe("ADMISSION_ERROR");
 	});
+
+	it("own then property that calls callback and throws — ready never succeeds (intrinsic bypass)", async () => {
+		const n = nonce();
+		let captured: SshProcessEventListener | null = null;
+		const proc = validProcess({
+			subscribe: (listener: SshProcessEventListener): object => {
+				captured = listener;
+				return subscriptionOk();
+			},
+			signalGroup: (): object => Object.freeze({ status: "sent" }),
+		});
+		// An object that looks like a Promise (right prototype) but has an own
+		// "then" property that calls the callback and then throws.
+		const hostile: Record<string, unknown> = {};
+		Object.setPrototypeOf(hostile, Promise.prototype);
+		Object.defineProperty(hostile, "then", {
+			value: (onFulfilled: (v: unknown) => void): never => {
+				onFulfilled(Object.freeze({ status: "admitted" }));
+				throw new Error("hostile then threw");
+			},
+			enumerable: false,
+			writable: false,
+			configurable: false,
+		});
+		const admission = (): unknown => hostile;
+
+		const result = makeMonitor(validInput({
+			process: proc,
+			expectedNonce: n,
+			confirmRelayAdmission: admission,
+			timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 50, sigintTimeoutMs: 5, sigtermTimeoutMs: 5, sigkillTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
+		}));
+		assertOk(result);
+		if (!result.ok) return;
+		const m = result.monitor;
+
+		const line = `PRIME_AGENT_READY ${n} 12345\n`;
+		const ab = zeroBuffer(line);
+		captured!.onStdout(new Uint8Array(ab));
+
+		const readyResult = await m.ready;
+		// ready must NOT succeed — intrinsic .then sees no own "then" function
+		// as a callable (since maximize-rejection path rejects own names),
+		// or the brand check rejects own properties outright.
+		expect(readyResult.ok).toBe(false);
+		if (!readyResult.ok) expect(readyResult.code).toBe("ADMISSION_ERROR");
+	});
+
+	it("own then property (string) — rejected as ADMISSION_ERROR", async () => {
+		const n = nonce();
+		let captured: SshProcessEventListener | null = null;
+		const proc = validProcess({
+			subscribe: (listener: SshProcessEventListener): object => {
+				captured = listener;
+				return subscriptionOk();
+			},
+		});
+		// Object with Promise prototype but own "then" that is a string.
+		const hostile: Record<string, unknown> = {};
+		Object.setPrototypeOf(hostile, Promise.prototype);
+		hostile.then = "not a function";
+		const admission = (): unknown => hostile;
+
+		const result = makeMonitor(validInput({
+			process: proc,
+			expectedNonce: n,
+			confirmRelayAdmission: admission,
+			timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 50, sigintTimeoutMs: 5, sigtermTimeoutMs: 5, sigkillTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
+		}));
+		assertOk(result);
+		if (!result.ok) return;
+		const m = result.monitor;
+
+		const line = `PRIME_AGENT_READY ${n} 12345\n`;
+		const ab = zeroBuffer(line);
+		captured!.onStdout(new Uint8Array(ab));
+
+		const readyResult = await m.ready;
+		expect(readyResult.ok).toBe(false);
+		if (!readyResult.ok) expect(readyResult.code).toBe("ADMISSION_ERROR");
+	});
+
+	it("admission with own symbol — rejected as ADMISSION_ERROR", async () => {
+		const n = nonce();
+		let captured: SshProcessEventListener | null = null;
+		const proc = validProcess({
+			subscribe: (listener: SshProcessEventListener): object => {
+				captured = listener;
+				return subscriptionOk();
+			},
+		});
+		const sym = Symbol("own");
+		const p = new Promise<object>(() => {});
+		(p as Record<symbol, unknown>)[sym] = 1;
+		const admission = (): unknown => p;
+
+		const result = makeMonitor(validInput({
+			process: proc,
+			expectedNonce: n,
+			confirmRelayAdmission: admission,
+			timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 50, sigintTimeoutMs: 5, sigtermTimeoutMs: 5, sigkillTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
+		}));
+		assertOk(result);
+		if (!result.ok) return;
+		const m = result.monitor;
+
+		const line = `PRIME_AGENT_READY ${n} 12345\n`;
+		const ab = zeroBuffer(line);
+		captured!.onStdout(new Uint8Array(ab));
+
+		const readyResult = await m.ready;
+		expect(readyResult.ok).toBe(false);
+		if (!readyResult.ok) expect(readyResult.code).toBe("ADMISSION_ERROR");
+	});
+
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

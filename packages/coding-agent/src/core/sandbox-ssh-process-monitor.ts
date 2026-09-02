@@ -646,13 +646,15 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 				typeof admission !== "object" ||
 				admission === null ||
 				types.isProxy(admission) ||
-				Object.getPrototypeOf(admission) !== Promise.prototype
+				Object.getPrototypeOf(admission) !== Promise.prototype ||
+				Object.getOwnPropertyNames(admission).length !== 0 ||
+				Object.getOwnPropertySymbols(admission).length !== 0
 			) {
 				beginCleanup("ADMISSION_ERROR");
 				return;
 			}
 			admissionState = 1;
-			(admission as Promise<unknown>).then(
+			Promise.prototype.then.call(admission as Promise<unknown>,
 				(result: unknown) => {
 					if (admissionState !== 1) return;
 					admissionState = 2;
