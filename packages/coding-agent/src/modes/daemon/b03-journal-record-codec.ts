@@ -5,7 +5,8 @@
  * SHA-256 digest over the embedded envelope. No filesystem, store,
  * recovery, relay, or index logic -- just codec.
  *
- * Every input bytes buffer is erased (zero-filled) on every path.
+ * Every safely-writable caller bytes buffer is erased (zero-filled) on
+ * every path.  SharedArrayBuffer-backed views are never written.
  * All returned DTOs are deeply frozen with no aliases to inputs.
  * envelopeDigest is always derived internally -- never accepted as input.
  */
@@ -78,24 +79,20 @@ export interface EncodeOk {
 	readonly bytes: Uint8Array;
 	readonly record: JournalRecordV1;
 }
-
 export interface EncodeError {
 	readonly ok: false;
 	readonly error: CodecError;
 }
-
 export type EncodeJournalResult = EncodeOk | EncodeError;
 
 export interface DecodeOk {
 	readonly ok: true;
 	readonly record: JournalRecordV1;
 }
-
 export interface DecodeError {
 	readonly ok: false;
 	readonly error: CodecError;
 }
-
 export type DecodeJournalResult = DecodeOk | DecodeError;
 
 // ===========================================================================
@@ -122,7 +119,7 @@ function erase(bytes: Uint8Array): void {
 	try {
 		bytes.fill(0);
 	} catch {
-		/* best effort */
+		/* best effort -- detached, frozen, or shared buffer */
 	}
 }
 
@@ -153,7 +150,6 @@ function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 // ===========================================================================
 // Validate raw input is a plain object (no Proxy/getter/symbol/nonenumerable)
-// Returns INVALID_FRAME error code or undefined
 // ===========================================================================
 
 function rawError(raw: unknown): CodecErrorCode | undefined {
@@ -262,63 +258,45 @@ export function encodeJournalRecordV1(raw: unknown): EncodeJournalResult {
 }
 
 function encodeJournalRecordV1Impl(raw: unknown): EncodeJournalResult {
-	// 1. Validate raw is trusted plain object
 	const err = rawError(raw);
 	if (err) return fail(err);
-
 	const obj = raw as Record<string, unknown>;
 	const keys = Object.getOwnPropertyNames(obj);
 
-	// 2. Exact key count + no extra keys (caller must not supply envelopeDigest)
 	if (keys.length !== ENCODE_REQUIRED_KEYS.length) return fail("INVALID_FRAME");
 	for (const k of keys) {
 		if (!ENCODE_KEY_SET.has(k)) return fail("INVALID_FRAME");
 	}
 
-	// 3. Validate version
 	if (obj.version !== RECORD_VERSION) return fail("INVALID_FRAME");
-
-	// 4. Validate journalSeq
 	const journalSeq = obj.journalSeq;
 	if (
 		typeof journalSeq !== "number" ||
 		!Number.isSafeInteger(journalSeq) ||
 		journalSeq <= 0 ||
 		journalSeq > MAX_JOURNAL_SEQ
-	) {
+	)
 		return fail("INVALID_SEQUENCE");
-	}
-
-	// 5. Validate direction
 	const direction = obj.direction;
 	if (direction !== "sent" && direction !== "received") return fail("INVALID_FRAME");
-
-	// 6. Validate IDs
 	const hostId = obj.hostId;
 	const generation = obj.generation;
 	const sessionId = obj.sessionId;
 	if (typeof hostId !== "string" || !isValidSafeId(hostId)) return fail("INVALID_IDENTITY");
 	if (typeof generation !== "string" || !isValidSafeId(generation)) return fail("INVALID_IDENTITY");
 	if (typeof sessionId !== "string" || !isValidSafeId(sessionId)) return fail("INVALID_IDENTITY");
-
-	// 7. Validate recordedAt
 	const recordedAt = obj.recordedAt;
 	if (typeof recordedAt !== "string" || !isCanonicalUtcTimestamp(recordedAt)) return fail("INVALID_TIMESTAMP");
 
-	// 8. Decode envelope using accepted codec (returns canonical-sorted nested DTO)
 	const envelopeRaw = obj.envelope;
 	const decodedEnvelope = decodeEnvelope(envelopeRaw);
-	if (!decodedEnvelope.ok) return { ok: false, error: decodedEnvelope.error };
+	if (!decodedEnvelope.ok) return fail(decodedEnvelope.error.code);
 	const envelope = decodedEnvelope.value;
 
-	// 9. Compute digest from decoded envelope
 	const digestResult = canonicalDigest(envelope);
 	if (!digestResult.ok) return fail("INVALID_DIGEST");
 	const envelopeDigest = digestResult.value;
 
-	// 10. Build record in canonical key insertion order, then JSON.stringify
-	//     preserves that order.  Nested objects from decodeEnvelope are already
-	//     canonical-sorted.  No replacer or custom serializer needed.
 	const recordObj = buildRecordObject(
 		RECORD_VERSION,
 		journalSeq,
@@ -331,68 +309,89 @@ function encodeJournalRecordV1Impl(raw: unknown): EncodeJournalResult {
 		envelopeDigest,
 	);
 	const frozen = deepFreeze(recordObj) as unknown as JournalRecordV1;
-
-	// 11. Encode to JSON bytes (fixed insertion order)
 	const canonStr = JSON.stringify(recordObj);
 	const encoded = new TextEncoder().encode(canonStr);
 
-	// 12. Check max size -- erase encoded before returning failure
 	if (encoded.byteLength > MAX_ENCODED_BYTES) {
 		erase(encoded);
 		return fail("OVERFLOW");
 	}
-
 	return okEncode(encoded, frozen);
 }
 
 // ===========================================================================
-// Decode: keys always include envelopeDigest (9 keys)
+// Decode key set
 // ===========================================================================
 
 const DECODE_KEYS = new Set(CANONICAL_KEYS);
 
 // ===========================================================================
-// validateExpected -- rejects empty/partial missing required fields
+// validateExpected -- copies descriptor values to avoid TOCTOU Proxy traps
 // ===========================================================================
 
 function validateExpected(expected: unknown): ExpectedFields | undefined {
 	if (expected === undefined) return undefined;
+
+	// Reject Proxy/accessor/symbol/nonenumerable via rawError
 	const err = rawError(expected);
 	if (err) return undefined;
+
+	// Copy every own enumerable data descriptor value BEFORE reading any field,
+	// so that a Proxy with benign descriptors but throwing getters cannot
+	// escape after passing rawError.
 	const obj = expected as Record<string, unknown>;
 	const keys = Object.getOwnPropertyNames(obj);
+	const vals: Record<string, unknown> = Object.create(null);
 	const allowed = new Set(["journalSeq", "hostId", "generation", "sessionId", "direction"]);
+
 	for (const k of keys) {
 		if (!allowed.has(k)) return undefined;
+		// Read from the descriptor value directly (not through a getter).
+		// rawError already verified no accessors, so this is a plain data value.
+		try {
+			vals[k] = obj[k];
+		} catch {
+			return undefined;
+		}
 	}
+
+	// journalSeq, hostId, generation, sessionId all required
 	if (
-		obj.journalSeq === undefined ||
-		obj.hostId === undefined ||
-		obj.generation === undefined ||
-		obj.sessionId === undefined
+		vals.journalSeq === undefined ||
+		vals.hostId === undefined ||
+		vals.generation === undefined ||
+		vals.sessionId === undefined
 	)
 		return undefined;
 	if (
-		typeof obj.journalSeq !== "number" ||
-		!Number.isSafeInteger(obj.journalSeq) ||
-		obj.journalSeq <= 0 ||
-		obj.journalSeq > MAX_JOURNAL_SEQ
+		typeof vals.journalSeq !== "number" ||
+		!Number.isSafeInteger(vals.journalSeq as number) ||
+		(vals.journalSeq as number) <= 0 ||
+		(vals.journalSeq as number) > MAX_JOURNAL_SEQ
 	)
 		return undefined;
 	for (const idField of ["hostId", "generation", "sessionId"] as const) {
-		if (typeof obj[idField] !== "string" || !isValidSafeId(obj[idField] as string)) return undefined;
+		if (typeof vals[idField] !== "string" || !isValidSafeId(vals[idField] as string)) return undefined;
 	}
-	if (obj.direction !== undefined && obj.direction !== "sent" && obj.direction !== "received") return undefined;
-	return expected as unknown as ExpectedFields;
+	if (vals.direction !== undefined && vals.direction !== "sent" && vals.direction !== "received") return undefined;
+
+	// Return a fresh plain object with the validated values (no aliases to input)
+	const out: ExpectedFields = {
+		journalSeq: vals.journalSeq as number,
+		hostId: vals.hostId as string,
+		generation: vals.generation as string,
+		sessionId: vals.sessionId as string,
+	};
+	if (typeof vals.direction === "string") (out as unknown as Record<string, unknown>).direction = vals.direction;
+	return out;
 }
 
 // ===========================================================================
-// decodeJournalRecordV1
+// decodeJournalRecordV1 -- outer shell: owns erasure, catches all exceptions
 // ===========================================================================
 
 export function decodeJournalRecordV1(bytes: Uint8Array, expected: unknown): DecodeJournalResult {
 	// ownBuffers tracks all allocated byte buffers for erasure in finally.
-	// Includes the caller's `bytes` so every path erases it.
 	const ownBuffers: Uint8Array[] = [];
 	let erased = false;
 	const eraseAll = () => {
@@ -403,6 +402,10 @@ export function decodeJournalRecordV1(bytes: Uint8Array, expected: unknown): Dec
 
 	try {
 		return decodeJournalRecordV1Impl(bytes, expected, ownBuffers);
+	} catch {
+		// Any unexpected throw from the implementation becomes a frozen error.
+		// ownBuffers already includes the caller bytes, so finally erases them.
+		return fail("INVALID_FRAME");
 	} finally {
 		eraseAll();
 	}
@@ -413,7 +416,7 @@ function decodeJournalRecordV1Impl(
 	expected: unknown,
 	ownBuffers: Uint8Array[],
 ): DecodeJournalResult {
-	// 1. Validate bytes
+	// ---- Step 1: validate bytes ----
 	if (typeof bytes !== "object" || bytes === null) return fail("INVALID_FRAME");
 	let proto: object | null;
 	try {
@@ -440,11 +443,18 @@ function decodeJournalRecordV1Impl(
 		return fail("INVALID_FRAME");
 	}
 
-	// The caller's `bytes` goes into ownBuffers so the outer finally
-	// erases them even when UTF-8 parse or any intermediate step fails.
+	// ---- Step 2: reject oversized before allocating originalBytes ----
+	if (bytes.byteLength > MAX_ENCODED_BYTES) {
+		// ownBuffers is not yet populated -- push bytes so the outer finally
+		// erases the caller buffer even on this early path.
+		ownBuffers.push(bytes);
+		return fail("OVERFLOW");
+	}
+
+	// Caller bytes go into ownBuffers so the outer finally erases them.
 	ownBuffers.push(bytes);
 
-	// 2. Snapshot original bytes (owned copy for canonical re-encoding comparison)
+	// ---- Step 3: snapshot original bytes ----
 	let originalBytes: Uint8Array;
 	try {
 		originalBytes = new Uint8Array(bytes);
@@ -453,17 +463,16 @@ function decodeJournalRecordV1Impl(
 		return fail("INVALID_FRAME");
 	}
 
-	// 3. Parse UTF-8 JSON
+	// ---- Step 4: parse UTF-8 JSON ----
 	let jsonStr: string;
 	try {
 		const decoder = new TextDecoder("utf-8", { fatal: true });
 		jsonStr = decoder.decode(bytes);
-		// bytes are now decoded -- they remain in ownBuffers for finally erasure
 	} catch {
 		return fail("INVALID_FRAME");
 	}
 
-	// 4. Parse JSON
+	// ---- Step 5: parse JSON ----
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(jsonStr);
@@ -471,74 +480,61 @@ function decodeJournalRecordV1Impl(
 		return fail("INVALID_FRAME");
 	}
 
-	// 5. Validate parsed is trusted plain object
+	// ---- Step 6: validate parsed object ----
 	const parseErr = rawError(parsed);
 	if (parseErr) return fail(parseErr);
 	const obj = parsed as Record<string, unknown>;
 	const keys = Object.getOwnPropertyNames(obj);
-
-	// 6. Exact key count and no unknown keys
 	if (keys.length !== CANONICAL_KEYS.length) return fail("INVALID_FRAME");
 	for (const k of keys) {
 		if (!DECODE_KEYS.has(k)) return fail("INVALID_FRAME");
 	}
 
-	// 7. Validate schema
+	// ---- Step 7: validate schema ----
 	if (obj.version !== RECORD_VERSION) return fail("INVALID_FRAME");
-
 	const journalSeq = obj.journalSeq;
 	if (
 		typeof journalSeq !== "number" ||
 		!Number.isSafeInteger(journalSeq) ||
 		journalSeq <= 0 ||
 		journalSeq > MAX_JOURNAL_SEQ
-	) {
+	)
 		return fail("INVALID_SEQUENCE");
-	}
-
 	const direction = obj.direction;
 	if (direction !== "sent" && direction !== "received") return fail("INVALID_FRAME");
-
 	const hostId = obj.hostId;
 	const generation = obj.generation;
 	const sessionId = obj.sessionId;
 	if (typeof hostId !== "string" || !isValidSafeId(hostId)) return fail("INVALID_IDENTITY");
 	if (typeof generation !== "string" || !isValidSafeId(generation)) return fail("INVALID_IDENTITY");
 	if (typeof sessionId !== "string" || !isValidSafeId(sessionId)) return fail("INVALID_IDENTITY");
-
 	const recordedAt = obj.recordedAt;
 	if (typeof recordedAt !== "string" || !isCanonicalUtcTimestamp(recordedAt)) return fail("INVALID_TIMESTAMP");
-
 	const storedDigest = obj.envelopeDigest;
 	if (typeof storedDigest !== "string" || !isValidDigest(storedDigest)) return fail("INVALID_DIGEST");
 
-	// 8. Validate expected fields (if provided)
+	// ---- Step 8: validate expected ----
 	const exp = validateExpected(expected);
 	if (expected !== undefined && exp === undefined) return fail("INVALID_FRAME");
 	if (exp !== undefined) {
-		const expObj = exp as unknown as Record<string, unknown>;
-		if (expObj.journalSeq !== journalSeq) return fail("MISMATCH");
-		if (expObj.hostId !== hostId) return fail("MISMATCH");
-		if (expObj.generation !== generation) return fail("MISMATCH");
-		if (expObj.sessionId !== sessionId) return fail("MISMATCH");
-		if (expObj.direction !== undefined && expObj.direction !== direction) return fail("MISMATCH");
+		if (exp.journalSeq !== journalSeq) return fail("MISMATCH");
+		if (exp.hostId !== hostId) return fail("MISMATCH");
+		if (exp.generation !== generation) return fail("MISMATCH");
+		if (exp.sessionId !== sessionId) return fail("MISMATCH");
+		if (exp.direction !== undefined && exp.direction !== direction) return fail("MISMATCH");
 	}
 
-	// 9. Decode envelope using accepted codec
-	const envelopeRaw = obj.envelope;
-	const decodedEnvelope = decodeEnvelope(envelopeRaw);
-	if (!decodedEnvelope.ok) return { ok: false, error: decodedEnvelope.error };
+	// ---- Step 9: decode envelope ----
+	const decodedEnvelope = decodeEnvelope(obj.envelope);
+	if (!decodedEnvelope.ok) return fail(decodedEnvelope.error.code);
 	const envelope = decodedEnvelope.value;
 
-	// 10. Recompute digest from decoded envelope
+	// ---- Step 10: recompute digest ----
 	const digestResult = canonicalDigest(envelope);
 	if (!digestResult.ok) return fail("INVALID_DIGEST");
-	const recomputedDigest = digestResult.value;
+	if (!digestsEqual(digestResult.value, storedDigest)) return fail("INVALID_DIGEST");
 
-	// 11. Verify digest matches stored digest using accepted digestsEqual
-	if (!digestsEqual(recomputedDigest, storedDigest)) return fail("INVALID_DIGEST");
-
-	// 12. Build fresh record in canonical key insertion order
+	// ---- Step 11: build fresh record ----
 	const recordObj = buildRecordObject(
 		RECORD_VERSION,
 		journalSeq,
@@ -551,15 +547,13 @@ function decodeJournalRecordV1Impl(
 		storedDigest,
 	);
 
-	// 13. Re-encode for canonical verification
+	// ---- Step 12: re-encode for canonical verification ----
 	const canonStr = JSON.stringify(recordObj);
 	const reEncoded = new TextEncoder().encode(canonStr);
 	ownBuffers.push(reEncoded);
-
-	// 14. Constant-time compare re-encoded bytes to original bytes
 	if (!constantTimeEqual(reEncoded, originalBytes)) return fail("INVALID_DIGEST");
 
-	// 15. Deep freeze and return
+	// ---- Step 13: deep freeze and return ----
 	const frozen = deepFreeze(recordObj) as unknown as JournalRecordV1;
 	return okDecode(frozen);
 }

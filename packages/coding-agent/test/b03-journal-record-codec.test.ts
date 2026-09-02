@@ -1059,6 +1059,10 @@ describe("fixed error codes for known hostile patterns", () => {
 // 14. Reentrant / concurrent encode deterministic output
 // ===========================================================================
 
+// ===========================================================================
+// 14. Reentrant / concurrent encode deterministic output
+// ===========================================================================
+
 describe("reentrant / concurrent encode deterministic output", () => {
 	it("consecutive encodes produce identical bytes for same input", () => {
 		const raw = makeRecordRaw(validEnvelope());
@@ -1067,7 +1071,6 @@ describe("reentrant / concurrent encode deterministic output", () => {
 		expect(a.ok).toBe(true);
 		expect(b.ok).toBe(true);
 		if (!a.ok || !b.ok) return;
-
 		expect(a.bytes.byteLength).toBe(b.bytes.byteLength);
 		for (let i = 0; i < a.bytes.byteLength; i++) {
 			expect(a.bytes[i]).toBe(b.bytes[i]);
@@ -1077,12 +1080,9 @@ describe("reentrant / concurrent encode deterministic output", () => {
 	it("interleaved encode calls produce deterministic output (no global state)", () => {
 		const raw1 = makeRecordRaw(validEnvelope(), { journalSeq: 1 });
 		const raw2 = makeRecordRaw(validEnvelope(), { journalSeq: 2 });
-
 		const results = Array.from({ length: 10 }, (_, i) => {
-			const r = i % 2 === 0 ? encodeJournalRecordV1(raw1) : encodeJournalRecordV1(raw2);
-			return r;
+			return i % 2 === 0 ? encodeJournalRecordV1(raw1) : encodeJournalRecordV1(raw2);
 		});
-
 		for (let i = 0; i < results.length; i++) {
 			expect(results[i].ok).toBe(true);
 			if (!results[i].ok) continue;
@@ -1101,7 +1101,6 @@ describe("success result mutation resistance", () => {
 		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
 		expect(enc.ok).toBe(true);
 		if (!enc.ok) return;
-		// Result is frozen
 		expect(() => {
 			(enc as any).extra = "x";
 		}).toThrow();
@@ -1111,7 +1110,6 @@ describe("success result mutation resistance", () => {
 		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
 		expect(enc.ok).toBe(true);
 		if (!enc.ok) return;
-		// bytes is not frozen (caller-owned), but record is
 		expect(Object.isFrozen(enc)).toBe(true);
 		expect(Object.isFrozen(enc.record)).toBe(true);
 	});
@@ -1127,5 +1125,96 @@ describe("success result mutation resistance", () => {
 		expect(() => {
 			(dec as any).extra = "x";
 		}).toThrow();
+	});
+});
+
+// ===========================================================================
+// 16. Oversized decode rejection (no-copy, bounded)
+// ===========================================================================
+
+describe("oversized decode rejection", () => {
+	it("rejects bytes longer than MAX_ENCODED_BYTES (1.25 MiB) without allocating originalBytes copy", () => {
+		// Create a buffer just over 1.25 MiB
+		const size = 1_310_721;
+		const big = new Uint8Array(size);
+		big.fill(0x20); // spaces -- valid ASCII, would parse as whitespace JSON
+		const dec = decodeJournalRecordV1(big, validExpected());
+		expect(dec.ok).toBe(false);
+		// After failure the oversized input bytes are erased
+		for (let i = 0; i < big.length; i += 100000) {
+			expect(big[i]).toBe(0);
+		}
+	});
+
+	it("rejects 1.25 MiB exactly (boundary) and erases", () => {
+		const size = 1_310_720;
+		const big = new Uint8Array(size);
+		big.fill(0x20);
+		const dec = decodeJournalRecordV1(big, validExpected());
+		expect(dec.ok).toBe(false);
+		for (let i = 0; i < big.length; i += 100000) {
+			expect(big[i]).toBe(0);
+		}
+	});
+
+	it("rejects oversized decode and checks return code is OVERFLOW", () => {
+		const size = 1_310_721;
+		const big = new Uint8Array(size);
+		big.fill(0x20);
+		const dec = decodeJournalRecordV1(big, validExpected());
+		expect(dec.ok).toBe(false);
+		if (!dec.ok) expect(dec.error.code).toBe("OVERFLOW");
+	});
+});
+
+// ===========================================================================
+// 17. Proxy expected with benign descriptors then throwing getters
+// ===========================================================================
+
+describe("Proxy expected TOCTOU resistance", () => {
+	it("rejects Proxy expected that passes descriptor checks but throws on field read", () => {
+		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
+		expect(enc.ok).toBe(true);
+		if (!enc.ok) return;
+
+		// Proxy with benign ownKeys/getOwnPropertyDescriptor but throwing get
+		const benignData = { journalSeq: 1, hostId: "h-1", generation: "g-1", sessionId: "s-1" };
+		const trap = new Proxy({} as Record<string, unknown>, {
+			ownKeys() {
+				return ["journalSeq", "hostId", "generation", "sessionId"];
+			},
+			getOwnPropertyDescriptor(_t: unknown, key: string) {
+				return {
+					value: (benignData as Record<string, unknown>)[key],
+					writable: true,
+					enumerable: true,
+					configurable: true,
+				};
+			},
+			get(_t: unknown, key: string) {
+				if (key === "direction") return undefined;
+				throw new Error("getter trap");
+			},
+		});
+		const dec = decodeJournalRecordV1(enc.bytes, trap);
+		expect(dec.ok).toBe(false);
+	});
+
+	it("rejects Proxy expected that throws on one field after passing descriptor checks", () => {
+		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
+		expect(enc.ok).toBe(true);
+		if (!enc.ok) return;
+
+		// Object with a benign `ownKeys` but a throwing getter for `sessionId`
+		const obj: Record<string, unknown> = { journalSeq: 1, hostId: "h-1", generation: "g-1" };
+		Object.defineProperty(obj, "sessionId", {
+			get: () => {
+				throw new Error("trapped");
+			},
+			enumerable: true,
+			configurable: true,
+		});
+		const dec = decodeJournalRecordV1(enc.bytes, obj);
+		expect(dec.ok).toBe(false);
 	});
 });
