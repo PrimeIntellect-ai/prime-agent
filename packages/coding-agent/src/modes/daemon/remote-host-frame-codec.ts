@@ -83,57 +83,173 @@ const MAX_DEPTH = 64;
 // same depth share the same depth value and do not consume extra depth.
 // ===========================================================================
 
-interface PreflightBudget {
-	nodesRemaining: number;
-	bytesRemaining: number;
+// ===========================================================================
+// Bounded JSON-quoted-string byte scanner
+//
+// Counts exact UTF-8 bytes of JSON.stringify(s) without allocating the
+// escaped string. Handles: control escapes (\b\t\n\f\r),
+// backslash, quote, \uXXXX, valid surrogate pairs, lone surrogates.
+// Aborts as soon as the remaining budget is exceeded.
+// ===========================================================================
+
+function consumeJsonStringBytes(s: string, budget: { bytes: number }): DecodeResult<void> {
+	// opening quote
+	if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+	budget.bytes -= 1;
+
+	for (let i = 0; i < s.length; i++) {
+		const cp = s.charCodeAt(i);
+
+		// Short control escapes (\b\t\n\f\r) — 2 bytes in JSON
+		if (cp === 0x08) {
+			if (budget.bytes < 2) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 2;
+			continue;
+		}
+		if (cp === 0x09) {
+			if (budget.bytes < 2) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 2;
+			continue;
+		}
+		if (cp === 0x0a) {
+			if (budget.bytes < 2) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 2;
+			continue;
+		}
+		if (cp === 0x0c) {
+			if (budget.bytes < 2) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 2;
+			continue;
+		}
+		if (cp === 0x0d) {
+			if (budget.bytes < 2) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 2;
+			continue;
+		}
+
+		// Quote
+		if (cp === 0x22) {
+			if (budget.bytes < 2) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 2;
+			continue;
+		}
+
+		// Backslash
+		if (cp === 0x5c) {
+			if (budget.bytes < 2) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 2;
+			continue;
+		}
+
+		// Other control characters (0x00-0x1F) -> \u00XX (6 bytes)
+		if (cp < 0x20) {
+			if (budget.bytes < 6) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 6;
+			continue;
+		}
+
+		// High surrogate — check for valid surrogate pair
+		if (cp >= 0xd800 && cp <= 0xdbff) {
+			if (i + 1 >= s.length) {
+				if (budget.bytes < 6) return fail(CODEC_ERRORS.OVERFLOW);
+				budget.bytes -= 6;
+				continue;
+			}
+			const next = s.charCodeAt(i + 1);
+			if (next >= 0xdc00 && next <= 0xdfff) {
+				// Valid surrogate pair — encodes one supplementary char as 4 UTF-8 bytes
+				if (budget.bytes < 4) return fail(CODEC_ERRORS.OVERFLOW);
+				budget.bytes -= 4;
+				i += 1; // skip low surrogate
+				continue;
+			} else {
+				if (budget.bytes < 6) return fail(CODEC_ERRORS.OVERFLOW);
+				budget.bytes -= 6;
+				continue;
+			}
+		}
+
+		// Lone low surrogate
+		if (cp >= 0xdc00 && cp <= 0xdfff) {
+			if (budget.bytes < 6) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 6;
+			continue;
+		}
+
+		// Normal BMP character — count its UTF-8 bytes
+		let utf8Bytes: number;
+		if (cp < 0x80) utf8Bytes = 1;
+		else if (cp < 0x800) utf8Bytes = 2;
+		else utf8Bytes = 3;
+
+		if (budget.bytes < utf8Bytes) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= utf8Bytes;
+	}
+
+	// closing quote
+	if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+	budget.bytes -= 1;
+	return ok(undefined);
 }
 
-function preflightCanonicalUtf8Bytes(value: unknown, depth: number, budget: PreflightBudget): DecodeResult<number> {
+// ===========================================================================
+// Preflight: exact canonical JSON byte count.
+//
+// Shares one recursion-depth/node/budget counter. Consumes each byte
+// exactly once from the shared counter — no double-charging.
+// Parent returns void; all accounting goes through the shared budget.
+// ===========================================================================
+
+function preflightCanonical(
+	value: unknown,
+	depth: number,
+	budget: { nodes: number; bytes: number },
+): DecodeResult<void> {
 	if (depth > MAX_DEPTH) return fail(CODEC_ERRORS.OVERFLOW);
-	if (budget.nodesRemaining <= 0) return fail(CODEC_ERRORS.OVERFLOW);
-	budget.nodesRemaining -= 1;
+	if (budget.nodes <= 0) return fail(CODEC_ERRORS.OVERFLOW);
+	budget.nodes -= 1;
 
 	if (value === null) {
-		const s = "null";
-		if (s.length > budget.bytesRemaining) return fail(CODEC_ERRORS.OVERFLOW);
-		budget.bytesRemaining -= s.length;
-		return ok(4); // "null"
+		if (budget.bytes < 4) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= 4;
+		return ok(undefined);
 	}
 	if (typeof value === "boolean") {
-		const s = value ? "true" : "false";
-		if (s.length > budget.bytesRemaining) return fail(CODEC_ERRORS.OVERFLOW);
-		budget.bytesRemaining -= s.length;
-		return ok(s.length);
+		const n = value ? 4 : 5;
+		if (budget.bytes < n) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= n;
+		return ok(undefined);
 	}
 	if (typeof value === "number") {
 		if (!Number.isFinite(value)) return fail(CODEC_ERRORS.INVALID_DIGEST);
-		const s = JSON.stringify(value);
-		if (s.length > budget.bytesRemaining) return fail(CODEC_ERRORS.OVERFLOW);
-		budget.bytesRemaining -= s.length;
-		return ok(s.length);
+		const rep = value.toString();
+		if (budget.bytes < rep.length) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= rep.length;
+		return ok(undefined);
 	}
 	if (typeof value === "string") {
-		const quoted = JSON.stringify(value);
-		const bytes = Buffer.byteLength(quoted, "utf-8");
-		if (bytes > budget.bytesRemaining) return fail(CODEC_ERRORS.OVERFLOW);
-		budget.bytesRemaining -= bytes;
-		return ok(bytes);
+		return consumeJsonStringBytes(value, budget);
 	}
 	if (Array.isArray(value)) {
 		for (let i = 0; i < value.length; i++) {
 			if (!(i in value)) return fail(CODEC_ERRORS.INVALID_DIGEST);
 		}
-		let total = 2; // []
+		// '['
+		if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= 1;
 		for (let i = 0; i < value.length; i++) {
+			if (i > 0) {
+				if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+				budget.bytes -= 1;
+			}
 			if (value[i] === undefined) return fail(CODEC_ERRORS.INVALID_DIGEST);
-			if (i > 0) total += 1; // comma
-			const elem = preflightCanonicalUtf8Bytes(value[i], depth + 1, budget);
-			if (!elem.ok) return elem;
-			total += elem.value;
+			const r = preflightCanonical(value[i], depth + 1, budget);
+			if (!r.ok) return r;
 		}
-		if (total > budget.bytesRemaining) return fail(CODEC_ERRORS.OVERFLOW);
-		budget.bytesRemaining -= total;
-		return ok(total);
+		// ']'
+		if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= 1;
+		return ok(undefined);
 	}
 	if (typeof value === "object") {
 		const proto = Object.getPrototypeOf(value);
@@ -147,95 +263,98 @@ function preflightCanonicalUtf8Bytes(value: unknown, depth: number, budget: Pref
 			if (!descs[key].enumerable) return fail(CODEC_ERRORS.INVALID_DIGEST);
 		}
 		const sorted = [...keys].sort();
-		let total = 2; // {}
+		// '{'
+		if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= 1;
 		for (let i = 0; i < sorted.length; i++) {
-			if (i > 0) total += 1; // comma
+			if (i > 0) {
+				if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+				budget.bytes -= 1;
+			}
 			const k = sorted[i];
 			const v = (value as Record<string, unknown>)[k];
 			if (v === undefined) return fail(CODEC_ERRORS.INVALID_DIGEST);
 			// key: quoted + colon
-			const quotedKey = JSON.stringify(k);
-			const keyBytes = Buffer.byteLength(quotedKey, "utf-8");
-			if (keyBytes > budget.bytesRemaining) return fail(CODEC_ERRORS.OVERFLOW);
-			budget.bytesRemaining -= keyBytes;
-			total += keyBytes + 1; // key bytes + colon
-			// value
-			const val = preflightCanonicalUtf8Bytes(v, depth + 1, budget);
-			if (!val.ok) return val;
-			total += val.value;
+			const kr = consumeJsonStringBytes(k, budget);
+			if (!kr.ok) return kr;
+			if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 1;
+			const vr = preflightCanonical(v, depth + 1, budget);
+			if (!vr.ok) return vr;
 		}
-		if (total > budget.bytesRemaining) return fail(CODEC_ERRORS.OVERFLOW);
-		budget.bytesRemaining -= total;
-		return ok(total);
+		// '}'
+		if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= 1;
+		return ok(undefined);
 	}
 	return fail(CODEC_ERRORS.INVALID_DIGEST);
 }
 
 // ===========================================================================
-// JSON input preflight — validates JSON-safety AND counts canonical bytes
-// Combines checkJsonSafe semantics with exact byte counting.
-// Rejects prototypes, accessors, symbols, non-enumerable, undefined, holes,
-// nonfinite, over node/byte/depth budget. Returns running byte count.
+// jsonSafePreflight — unified JSON-safety + optional byte counting
+// Same single-consumption budget model. No double-charging.
 // ===========================================================================
-
-interface JsonPreflightBudget {
-	nodesRemaining: number;
-	bytesRemaining: number;
-}
 
 function jsonSafePreflight(
 	value: unknown,
 	depth: number,
-	budget: JsonPreflightBudget,
-	countCanonicalBytes: boolean,
-): DecodeResult<number> {
+	budget: { nodes: number; bytes: number },
+	countBytes: boolean,
+): DecodeResult<void> {
 	if (depth > MAX_DEPTH) return fail(CODEC_ERRORS.OVERFLOW);
-	if (budget.nodesRemaining <= 0) return fail(CODEC_ERRORS.OVERFLOW);
-	budget.nodesRemaining -= 1;
+	if (budget.nodes <= 0) return fail(CODEC_ERRORS.OVERFLOW);
+	budget.nodes -= 1;
 
 	if (value === null) {
-		const byteCost = countCanonicalBytes ? 4 : 0; // "null"
-		if (countCanonicalBytes && byteCost > budget.bytesRemaining) return fail(CODEC_ERRORS.OVERFLOW);
-		budget.bytesRemaining -= byteCost;
-		return ok(byteCost);
+		if (countBytes) {
+			if (budget.bytes < 4) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 4;
+		}
+		return ok(undefined);
 	}
 	if (typeof value === "boolean") {
-		const s = value ? "true" : "false";
-		const byteCost = countCanonicalBytes ? s.length : 0;
-		if (countCanonicalBytes && byteCost > budget.bytesRemaining) return fail(CODEC_ERRORS.OVERFLOW);
-		budget.bytesRemaining -= byteCost;
-		return ok(byteCost);
+		if (countBytes) {
+			const n = value ? 4 : 5;
+			if (budget.bytes < n) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= n;
+		}
+		return ok(undefined);
 	}
 	if (typeof value === "number") {
 		if (!Number.isFinite(value)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
-		const s = JSON.stringify(value);
-		const byteCost = countCanonicalBytes ? s.length : 0;
-		if (countCanonicalBytes && byteCost > budget.bytesRemaining) return fail(CODEC_ERRORS.OVERFLOW);
-		budget.bytesRemaining -= byteCost;
-		return ok(byteCost);
+		if (countBytes) {
+			const rep = value.toString();
+			if (budget.bytes < rep.length) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= rep.length;
+		}
+		return ok(undefined);
 	}
 	if (typeof value === "string") {
-		const quoted = JSON.stringify(value);
-		const byteCost = countCanonicalBytes ? Buffer.byteLength(quoted, "utf-8") : 0;
-		if (countCanonicalBytes && byteCost > budget.bytesRemaining) return fail(CODEC_ERRORS.OVERFLOW);
-		budget.bytesRemaining -= byteCost;
-		return ok(byteCost);
+		if (countBytes) return consumeJsonStringBytes(value, budget);
+		return ok(undefined);
 	}
 	if (Array.isArray(value)) {
 		for (let i = 0; i < value.length; i++) {
 			if (!(i in value)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
-		}
-		let total = countCanonicalBytes ? 2 : 0; // []
-		for (let i = 0; i < value.length; i++) {
 			if (value[i] === undefined) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
-			if (countCanonicalBytes && i > 0) total += 1; // comma
-			const elem = jsonSafePreflight(value[i], depth + 1, budget, countCanonicalBytes);
-			if (!elem.ok) return elem;
-			if (countCanonicalBytes) total += elem.value;
 		}
-		if (countCanonicalBytes && total > budget.bytesRemaining) return fail(CODEC_ERRORS.OVERFLOW);
-		budget.bytesRemaining -= total;
-		return ok(total);
+		if (countBytes) {
+			if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 1;
+		}
+		for (let i = 0; i < value.length; i++) {
+			if (countBytes && i > 0) {
+				if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+				budget.bytes -= 1;
+			}
+			const r = jsonSafePreflight(value[i], depth + 1, budget, countBytes);
+			if (!r.ok) return r;
+		}
+		if (countBytes) {
+			if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 1;
+		}
+		return ok(undefined);
 	}
 	if (typeof value === "object") {
 		const proto = Object.getPrototypeOf(value);
@@ -248,44 +367,61 @@ function jsonSafePreflight(
 			const desc = descs[key];
 			if (desc.get || desc.set) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
 			if (!desc.enumerable) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+			if ((value as Record<string, unknown>)[key] === undefined) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
 		}
 		const sorted = [...keys].sort();
-		let total = countCanonicalBytes ? 2 : 0; // {}
+		if (countBytes) {
+			if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 1;
+		}
 		for (let i = 0; i < sorted.length; i++) {
-			if (countCanonicalBytes && i > 0) total += 1; // comma
+			if (countBytes && i > 0) {
+				if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+				budget.bytes -= 1;
+			}
 			const k = sorted[i];
 			const v = (value as Record<string, unknown>)[k];
-			if (v === undefined) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
-			if (countCanonicalBytes) {
-				const quotedKey = JSON.stringify(k);
-				total += Buffer.byteLength(quotedKey, "utf-8") + 1; // key bytes + colon
+			if (countBytes) {
+				const kr = consumeJsonStringBytes(k, budget);
+				if (!kr.ok) return kr;
+				if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+				budget.bytes -= 1;
 			}
-			const val = jsonSafePreflight(v, depth + 1, budget, countCanonicalBytes);
-			if (!val.ok) return val;
-			if (countCanonicalBytes) total += val.value;
+			const vr = jsonSafePreflight(v, depth + 1, budget, countBytes);
+			if (!vr.ok) return vr;
 		}
-		if (countCanonicalBytes && total > budget.bytesRemaining) return fail(CODEC_ERRORS.OVERFLOW);
-		budget.bytesRemaining -= total;
-		return ok(total);
+		if (countBytes) {
+			if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 1;
+		}
+		return ok(undefined);
 	}
 	return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
 }
 
+// ---------------------------------------------------------------------------
+// Public preflight wrappers
+// ---------------------------------------------------------------------------
+
 /**
  * Full preflight: validates JSON safety AND computes exact canonical byte count.
+ * Returns the exact canonical byte count on success.
  */
-export function jsonPreflight(value: unknown, countCanonicalBytes: boolean = true): DecodeResult<number> {
-	const budget: JsonPreflightBudget = { nodesRemaining: MAX_JSON_NODES, bytesRemaining: MAX_ENCODED_BYTES };
-	return jsonSafePreflight(value, 0, budget, countCanonicalBytes);
+export function jsonPreflight(value: unknown): DecodeResult<number> {
+	const budget = { nodes: MAX_JSON_NODES, bytes: MAX_ENCODED_BYTES };
+	const initialBytes = budget.bytes;
+	const r = jsonSafePreflight(value, 0, budget, true);
+	if (!r.ok) return { ok: false, error: r.error };
+	return ok(initialBytes - budget.bytes);
 }
 
 /**
  * Validate JSON safety only (no byte counting).
  */
 export function checkJsonSafe(value: unknown): CodecErrorCode | undefined {
-	const budget: JsonPreflightBudget = { nodesRemaining: MAX_JSON_NODES, bytesRemaining: MAX_ENCODED_BYTES };
-	const result = jsonSafePreflight(value, 0, budget, false);
-	return result.ok ? undefined : result.error.code;
+	const budget = { nodes: MAX_JSON_NODES, bytes: MAX_ENCODED_BYTES };
+	const r = jsonSafePreflight(value, 0, budget, false);
+	return r.ok ? undefined : r.error.code;
 }
 
 // ===========================================================================
@@ -551,13 +687,17 @@ function decodeClientCapabilities(raw: unknown): DecodeResult<RemoteHostClientCa
 // ===========================================================================
 
 export function decodeJsonValue(raw: unknown): DecodeResult<JsonValue> {
-	return decodeJsonValueInner(raw, 0, { nodesRemaining: MAX_JSON_NODES, bytesRemaining: MAX_ENCODED_BYTES });
+	return decodeJsonValueInner(raw, 0, { nodes: MAX_JSON_NODES, bytes: MAX_ENCODED_BYTES });
 }
 
-function decodeJsonValueInner(raw: unknown, depth: number, budget: JsonPreflightBudget): DecodeResult<JsonValue> {
+function decodeJsonValueInner(
+	raw: unknown,
+	depth: number,
+	budget: { nodes: number; bytes: number },
+): DecodeResult<JsonValue> {
 	if (depth > MAX_DEPTH) return fail(CODEC_ERRORS.OVERFLOW);
-	if (budget.nodesRemaining <= 0) return fail(CODEC_ERRORS.OVERFLOW);
-	budget.nodesRemaining -= 1;
+	if (budget.nodes <= 0) return fail(CODEC_ERRORS.OVERFLOW);
+	budget.nodes -= 1;
 
 	if (raw === null) return ok(null);
 	if (typeof raw === "boolean") return ok(raw);
@@ -1260,7 +1400,7 @@ const ENVELOPE_KEYS = new Set(["type", "frameId", "protocol", "sentAt", "frame",
  * before constructing fresh DTOs to reject oversized payloads early.
  */
 export function preflightEnvelope(raw: unknown): DecodeResult<void> {
-	const result = jsonPreflight(raw, true);
+	const result = jsonPreflight(raw);
 	if (!result.ok) return { ok: false, error: result.error };
 	if (result.value > MAX_ENCODED_BYTES) return fail(CODEC_ERRORS.OVERFLOW);
 	return ok(undefined);
@@ -1302,9 +1442,9 @@ export function decodeEnvelope(raw: unknown): DecodeResult<RemoteHostFrameEnvelo
 // ===========================================================================
 
 export function canonicalDigest(value: unknown): DecodeResult<string> {
-	// Preflight first
-	const budget: PreflightBudget = { nodesRemaining: MAX_JSON_NODES, bytesRemaining: MAX_ENCODED_BYTES };
-	const pre = preflightCanonicalUtf8Bytes(value, 0, budget);
+	// Preflight first using single-consumption budget
+	const budget = { nodes: MAX_JSON_NODES, bytes: MAX_ENCODED_BYTES };
+	const pre = preflightCanonical(value, 0, budget);
 	if (!pre.ok) return { ok: false, error: pre.error };
 
 	// Now encode, guaranteed bounded

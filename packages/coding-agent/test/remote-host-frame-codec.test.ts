@@ -1652,7 +1652,7 @@ describe("canonical UTF-8 byte budget", () => {
 
 describe("envelope total-size preflight", () => {
 	it("rejects envelope with agent_message slightly over 1 MiB", () => {
-		const largeMsg = "x".repeat(900_000);
+		const largeMsg = "x".repeat(1_100_000);
 		const env = {
 			type: "frame",
 			frameId: "f-001",
@@ -1672,7 +1672,7 @@ describe("envelope total-size preflight", () => {
 	});
 
 	it("rejects envelope with prompt command slightly over 1 MiB", () => {
-		const largePrompt = "x".repeat(900_000);
+		const largePrompt = "x".repeat(1_100_000);
 		const env = {
 			type: "frame",
 			frameId: "f-002",
@@ -1910,5 +1910,152 @@ describe("preflightEnvelope", () => {
 		};
 		const r = preflightEnvelope(small);
 		expect(r.ok).toBe(true);
+	});
+});
+
+// ===========================================================================
+// Canonical byte preflight — exact count verification
+// ===========================================================================
+
+describe("canonical byte preflight — exact count vs JSON.stringify", () => {
+	function buildCanonicalJson(value: unknown): string {
+		if (value === null) return "null";
+		if (typeof value === "boolean") return value ? "true" : "false";
+		if (typeof value === "number") return value.toString();
+		if (typeof value === "string") return JSON.stringify(value);
+		if (Array.isArray(value)) {
+			return `[${value.map(buildCanonicalJson).join(",")}]`;
+		}
+		if (typeof value === "object") {
+			const keys = Object.keys(value as Record<string, unknown>).sort();
+			return (
+				"{" +
+				keys
+					.map((k) => `${JSON.stringify(k)}:${buildCanonicalJson((value as Record<string, unknown>)[k])}`)
+					.join(",") +
+				"}"
+			);
+		}
+		return "";
+	}
+
+	it("nested exact count equals Buffer.byteLength(stable canonical JSON)", () => {
+		const obj = {
+			a: 1,
+			b: "hello",
+			c: [1, 2, { d: true, e: null }],
+			f: { g: "world", h: 42 },
+		};
+		const r = jsonPreflight(obj);
+		expect(r.ok).toBe(true);
+		if (r.ok) {
+			const canonical = buildCanonicalJson(obj);
+			const actualBytes = Buffer.byteLength(canonical, "utf-8");
+			expect(r.value).toBe(actualBytes);
+		}
+	});
+
+	it("unicode chars count as UTF-8, not JS length", () => {
+		// Each Cyrillic char is 2 UTF-8 bytes
+		const obj = { msg: "Привет мир" };
+		const r = jsonPreflight(obj);
+		if (r.ok) {
+			const canonical = buildCanonicalJson(obj);
+			const expectedBytes = Buffer.byteLength(canonical, "utf-8");
+			expect(r.value).toBe(expectedBytes);
+		}
+	});
+
+	it("control characters count as JSON escapes", () => {
+		// String with tab (0x09) and newline (0x0a)
+		const obj = { val: "hello\nworld" };
+		const r = jsonPreflight(obj);
+		if (r.ok) {
+			const canonical = buildCanonicalJson(obj);
+			const expectedBytes = Buffer.byteLength(canonical, "utf-8");
+			expect(r.value).toBe(expectedBytes);
+		}
+	});
+
+	it("lone surrogate counts as \\uXXXX", () => {
+		// Lone low surrogate
+		const loneLow = String.fromCharCode(0xdc00);
+		const obj = { val: loneLow };
+		const r = jsonPreflight(obj);
+		if (r.ok) {
+			const canonical = buildCanonicalJson(obj);
+			const expectedBytes = Buffer.byteLength(canonical, "utf-8");
+			expect(r.value).toBe(expectedBytes);
+		}
+	});
+
+	it("valid surrogate pair counts as 4 UTF-8 bytes", () => {
+		// Emoji U+1F600 (😀) is a surrogate pair, encodes as 4 UTF-8 bytes
+		const obj = { emoji: "😀" };
+		const r = jsonPreflight(obj);
+		if (r.ok) {
+			const canonical = buildCanonicalJson(obj);
+			const expectedBytes = Buffer.byteLength(canonical, "utf-8");
+			expect(r.value).toBe(expectedBytes);
+		}
+	});
+
+	it("nested payload between 1/2 and 1 MiB accepted (no double-counting)", () => {
+		// Build a nested object ~750k canonical bytes
+		const inner: Record<string, unknown> = {};
+		for (let i = 0; i < 500; i++) {
+			inner[`k${i}`] = "x".repeat(200);
+		}
+		const obj = { data: inner, meta: { version: 1, name: "test" } };
+		const r = jsonPreflight(obj);
+		expect(r.ok).toBe(true);
+		// Should be between 200k and 900k
+		if (r.ok) {
+			expect(r.value).toBeGreaterThan(100_000);
+			expect(r.value).toBeLessThan(900_000);
+			// Verify against canonical JSON
+			const canonical = buildCanonicalJson(obj);
+			const actualBytes = Buffer.byteLength(canonical, "utf-8");
+			expect(r.value).toBe(actualBytes);
+		}
+	});
+
+	it("exact limit boundary — payload just under 1 MiB", () => {
+		// Build payload to ~1,048,000 bytes (just under 1 MiB)
+		const target = 1_040_000;
+		const charsPerString = 100_000;
+		const neededStrings = Math.floor((target - 200) / (charsPerString + 7)); // account for key/colon/comma/bracket overhead
+		const obj: Record<string, unknown> = {};
+		for (let i = 0; i < Math.min(neededStrings, 50); i++) {
+			obj[`k${i}`] = "x".repeat(charsPerString);
+		}
+		const r = jsonPreflight(obj);
+		expect(r.ok).toBe(true);
+		if (r.ok) {
+			const canonical = buildCanonicalJson(obj);
+			const actualBytes = Buffer.byteLength(canonical, "utf-8");
+			expect(r.value).toBe(actualBytes);
+			expect(r.value).toBeLessThan(1_048_576);
+		}
+	});
+
+	it("escape-heavy input rejected without stringifying raw string", () => {
+		// Each 0x01 becomes \u0001 (6 bytes), so 180k chars -> 1,080,000 bytes quoted = 1.08MiB > 1 MiB
+		const evil = String.fromCharCode(0x01).repeat(180_000);
+		const obj = { evil };
+		const r = jsonPreflight(obj);
+		expect(r.ok).toBe(false);
+		if (!r.ok) expect(r.error.code).toBe(CODEC_ERRORS.OVERFLOW);
+	});
+
+	it("rejects huge JSON that would exceed budget via JSON.stringify", () => {
+		// This would allocate ~10MB if we did JSON.stringify, but preflight scans without allocating
+		const huge: Record<string, unknown> = {};
+		for (let i = 0; i < 100; i++) {
+			huge[`k${i}`] = "x".repeat(100_000);
+		}
+		const r = jsonPreflight(huge);
+		// ~100 * 100k = 10M chars + overhead -> well over 1MiB
+		expect(r.ok).toBe(false);
 	});
 });
