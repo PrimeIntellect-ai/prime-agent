@@ -355,13 +355,27 @@ jobs:
           test/daemon-socket.test.ts
           test/exec.test.ts
           test/kernel-bash-shell.test.ts
-          test/kernel-bootstrap.test.ts
 
       - name: Bootstrap the CPython kernel
         working-directory: packages/coding-agent
         env:
           PRIME_AGENT_INSTALL_UV: "0"
+          PRIME_AGENT_KERNEL_VENV: ${{ runner.temp }}\Prime Agent ø\kernel-venv
         run: bun src/core/kernel/bootstrap-cli.ts
+
+      - name: Test persistent CPython kernel behavior
+        working-directory: packages/coding-agent
+        env:
+          PRIME_AGENT_KERNEL_VENV: ${{ runner.temp }}\Prime Agent ø\kernel-venv
+          PRIME_AGENT_TEST_TAGS: kernel-heavy
+        run: >-
+          bun ../../scripts/run-with-clean-env.ts bun test --isolate --timeout 30000
+          test/acp-kernel-features.test.ts
+          test/acp-cold-cli.test.ts
+          test/kernel-goal-skill.test.ts
+          test/repl-kernel-state-roundtrip.test.ts
+          test/repl-kernel-mcp-shutdown.test.ts
+          test/repl-kernel-parent-watchdog.test.ts
 
       - name: Test the CPython runtime
         working-directory: prime-agent-runtime
