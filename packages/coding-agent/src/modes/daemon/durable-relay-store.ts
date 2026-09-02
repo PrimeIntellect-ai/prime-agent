@@ -607,6 +607,14 @@ export class DurableRelayStore {
 		return this.enqueue(() => Promise.resolve(success(this.markerPage(input.cursor, input.maxCount))));
 	}
 
+	get status(): DurableRelayStoreStatus {
+		return Object.freeze({
+			identity: this.memory.identity,
+			direction: this.memory.direction,
+			totalBytes: this.memory.totalBytes,
+		});
+	}
+
 	close(): Promise<DurableRelayStoreResult<void>> {
 		if (this.closePromise !== null) return this.closePromise;
 		this.closed = true;
