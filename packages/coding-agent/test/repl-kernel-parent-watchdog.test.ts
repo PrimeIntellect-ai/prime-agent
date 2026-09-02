@@ -32,7 +32,7 @@ function writeEarlyExitKernel(envDump: string): { python: string; env?: Record<s
 			[
 				"import os",
 				"from pathlib import Path",
-				`Path(${JSON.stringify(envDump)}).write_text("\n".join(f"{key}={value}" for key, value in os.environ.items()))`,
+				`Path(${JSON.stringify(envDump)}).write_text("\\n".join(f"{key}={value}" for key, value in os.environ.items()))`,
 				"raise SystemExit(42)",
 				"",
 			].join("\n"),

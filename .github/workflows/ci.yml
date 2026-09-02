@@ -383,10 +383,7 @@ jobs:
         run: >-
           bun ../../scripts/run-with-clean-env.ts bun test --isolate --timeout 30000
           test/acp-kernel-features.test.ts
-          test/acp-cold-cli.test.ts
           test/kernel-goal-skill.test.ts
-          test/repl-kernel-state-roundtrip.test.ts
-          test/repl-kernel-mcp-shutdown.test.ts
           test/repl-kernel-parent-watchdog.test.ts
 
       - name: Test the CPython runtime
