@@ -14,7 +14,9 @@ How to prepare, verify, and publish a Prime Agent release. The mechanical steps 
 
 ### Test gate
 
-Run the full suite in a clean sandbox at the release base, mirroring the CI matrix (`npm run build`, root `npm run check`, per-package suites, coding-agent `test:ci` shards + `test:process` + `test:kernel`, and the `prime-agent-runtime` Python suite). Compare failures by file against the documented environmental baseline; any failure outside the baseline blocks the release.
+Run the full suite in a clean sandbox at the release base, mirroring the CI matrix (`npm run build`, root `npm run check`, per-package suites, coding-agent `test:ci` shards + `test:process` + `test:kernel`, and the `prime-agent-runtime` Python suite). Compare failures by file against the environmental baseline below; any failure outside the baseline blocks the release.
+
+The environmental baseline is the set of test failures caused by the sandbox environment rather than the code, re-derived by running the same suite at the previous release tag in an identical sandbox: only failures that occur at BOTH refs, in the same files, are baseline. As of v0.9.1 the CI-mirroring baseline is 4 tests across 3 files, all environment-shaped: `tools.test.ts` (2 EACCES failures when running as root), `config.test.ts` (config dir not writable as root), and `4603-worker-recovery.test.ts` (requires `lsof`). A raw full-suite run without CI's environment adds kernel-skill bridge suites (`kernel-agent-message-skill`, `kernel-agent-observe-skill`, `kernel-attach-image-skill`, `kernel-rlm-heartbeat-skill`), `sdk-session-manager`, `agent-session-recursion`, and `4428-cancel-mid-tool` — legitimate in CI, environment-dependent outside it. When the baseline changes, update this paragraph in the same PR that observed the change.
 
 ### Cross-surface data checks
 
