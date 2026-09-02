@@ -7,13 +7,11 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { describe as ddescribe, it as xit } from "vitest";
-import { createSshProcessMonitor } from "../src/core/sandbox-ssh-process-monitor.js";
 import type {
 	CreateSshProcessMonitorResult,
 	SshProcessEventListener,
-	SshMonitorFailureCode,
 } from "../src/core/sandbox-ssh-process-monitor.js";
+import { createSshProcessMonitor } from "../src/core/sandbox-ssh-process-monitor.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -46,11 +44,13 @@ function subscriptionError(): object {
 	return Object.freeze({ status: "error" });
 }
 
-function validProcess(overrides?: Partial<{
-	subscribe: (listener: SshProcessEventListener) => unknown;
-	signalGroup: (signal: "SIGINT" | "SIGTERM" | "SIGKILL") => unknown;
-	destroyStdio: () => unknown;
-}>): object {
+function validProcess(
+	overrides?: Partial<{
+		subscribe: (listener: SshProcessEventListener) => unknown;
+		signalGroup: (signal: "SIGINT" | "SIGTERM" | "SIGKILL") => unknown;
+		destroyStdio: () => unknown;
+	}>,
+): object {
 	return Object.freeze({
 		subscribe: overrides?.subscribe ?? ((): object => subscriptionOk()),
 		signalGroup: overrides?.signalGroup ?? ((): object => Object.freeze({ status: "sent" })),
@@ -62,12 +62,14 @@ function validAdmission(): () => Promise<object> {
 	return (): Promise<object> => Promise.resolve(Object.freeze({ status: "admitted" }));
 }
 
-function validInput(overrides?: Partial<{
-	process: object | null;
-	expectedNonce: string;
-	confirmRelayAdmission: () => unknown;
-	timeouts: object | null;
-}>): object {
+function validInput(
+	overrides?: Partial<{
+		process: object | null;
+		expectedNonce: string;
+		confirmRelayAdmission: () => unknown;
+		timeouts: object | null;
+	}>,
+): object {
 	const merged: Record<string, unknown> = {
 		process: validProcess(),
 		expectedNonce: nonce(),
@@ -96,17 +98,14 @@ function assertFail(result: CreateSshProcessMonitorResult): void {
 	if (!result.ok) expect(result.code).toBe("INVALID_INPUT");
 }
 
-function sendRawStdout(
-	m: CreateSshProcessMonitorResult & { ok: true },
-	text: string,
-): void {
+function _sendRawStdout(_m: CreateSshProcessMonitorResult & { ok: true }, _text: string): void {
 	// We need access to the listener. Since the test drives events via the
 	// subscribe callback, we capture the listener when subscribe is called.
 	// Use a helper that wraps the process subscribe.
 }
 
 /** Creates a process that captures the listener for manual event injection. */
-function capturingProcess(): {
+function _capturingProcess(): {
 	process: object;
 	listener: SshProcessEventListener | null;
 	fireStdout: (text: string) => void;
@@ -153,12 +152,25 @@ function capturingProcess(): {
 			return subscriptionOk();
 		},
 	});
-	return { process, listener: captured, fireStdout, fireStderr, fireExit, fireClose, fireProcessError, get listener_() { return captured; } };
+	return {
+		process,
+		listener: captured,
+		fireStdout,
+		fireStderr,
+		fireExit,
+		fireClose,
+		fireProcessError,
+		get listener_() {
+			return captured;
+		},
+	};
 }
 
 /** A sentinel promise that never settles — used to test timeouts. */
-function neverPromise(): Promise<object> {
-	return new Promise<object>(() => { /* never */ });
+function _neverPromise(): Promise<object> {
+	return new Promise<object>(() => {
+		/* never */
+	});
 }
 
 function zeroBuffer(text: string): ArrayBuffer {
@@ -290,7 +302,13 @@ describe("createSshProcessMonitor preflight", () => {
 	});
 
 	it("rejects process with non-function subscribe", () => {
-		assertFail(makeMonitor(validInput({ process: validProcess({ subscribe: (42 as unknown) as (listener: SshProcessEventListener) => object }) })));
+		assertFail(
+			makeMonitor(
+				validInput({
+					process: validProcess({ subscribe: 42 as unknown as (listener: SshProcessEventListener) => object }),
+				}),
+			),
+		);
 	});
 
 	it("rejects process with Proxy subscribe", () => {
@@ -300,15 +318,23 @@ describe("createSshProcessMonitor preflight", () => {
 	});
 
 	it("rejects process with non-function signalGroup", () => {
-		assertFail(makeMonitor(validInput({ process: validProcess({ signalGroup: (42 as unknown) as (signal: "SIGINT" | "SIGTERM" | "SIGKILL") => object }) })));
+		assertFail(
+			makeMonitor(
+				validInput({
+					process: validProcess({
+						signalGroup: 42 as unknown as (signal: "SIGINT" | "SIGTERM" | "SIGKILL") => object,
+					}),
+				}),
+			),
+		);
 	});
 
 	it("rejects process with non-function destroyStdio", () => {
-		assertFail(makeMonitor(validInput({ process: validProcess({ destroyStdio: (42 as unknown) as () => object }) })));
+		assertFail(makeMonitor(validInput({ process: validProcess({ destroyStdio: 42 as unknown as () => object }) })));
 	});
 
 	it("rejects non-string expectedNonce", () => {
-		assertFail(makeMonitor(validInput({ expectedNonce: (42 as unknown) as string })));
+		assertFail(makeMonitor(validInput({ expectedNonce: 42 as unknown as string })));
 	});
 
 	it("rejects short nonce", () => {
@@ -324,7 +350,7 @@ describe("createSshProcessMonitor preflight", () => {
 	});
 
 	it("rejects non-function confirmRelayAdmission", () => {
-		assertFail(makeMonitor(validInput({ confirmRelayAdmission: ("bad" as unknown) as () => unknown })));
+		assertFail(makeMonitor(validInput({ confirmRelayAdmission: "bad" as unknown as () => unknown })));
 	});
 
 	it("rejects Proxy confirmRelayAdmission", () => {
@@ -404,7 +430,9 @@ describe("createSshProcessMonitor preflight", () => {
 describe("subscribe outcomes", () => {
 	it("returns SUBSCRIBE_REJECTED when subscribe throws", () => {
 		const proc = validProcess({
-			subscribe: (): never => { throw new Error("boom"); },
+			subscribe: (): never => {
+				throw new Error("boom");
+			},
 		});
 		const result = makeMonitor(validInput({ process: proc }));
 		assertOk(result);
@@ -443,10 +471,10 @@ describe("subscribe outcomes", () => {
 	});
 
 	it("returns SUBSCRIBE_REJECTED when subscribe returns error with sync events", () => {
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				// Fire a sync stderr event before returning.
 				const raw = new Uint8Array([65]);
 				listener.onStderr(raw);
@@ -463,10 +491,10 @@ describe("subscribe outcomes", () => {
 	});
 
 	it("accepts error with no sync events", () => {
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return subscriptionError();
 			},
 		});
@@ -497,11 +525,13 @@ describe("synchronous exit+close before subscribe failure", () => {
 				return Object.freeze({ status: "sent" });
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), closeConfirmTimeoutMs: 10 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), closeConfirmTimeoutMs: 10 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -528,11 +558,13 @@ describe("synchronous exit+close before subscribe failure", () => {
 				return Object.freeze({ status: "sent" });
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), closeConfirmTimeoutMs: 10 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), closeConfirmTimeoutMs: 10 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -557,11 +589,13 @@ describe("synchronous exit+close before subscribe failure", () => {
 				return Object.freeze({ status: "sent" });
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), sigintTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), sigintTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -585,11 +619,13 @@ describe("synchronous exit+close before subscribe failure", () => {
 				return Object.freeze({ status: "sent" });
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), sigintTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), sigintTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -607,7 +643,10 @@ describe("pending admission during close", () => {
 		const n = nonce();
 		let captured: SshProcessEventListener | null = null;
 		let admissionResolve!: (v: object) => void;
-		const admission = (): Promise<object> => new Promise((r) => { admissionResolve = r; });
+		const admission = (): Promise<object> =>
+			new Promise((r) => {
+				admissionResolve = r;
+			});
 
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
@@ -615,12 +654,14 @@ describe("pending admission during close", () => {
 				return subscriptionOk();
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			confirmRelayAdmission: admission,
-			timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 10000 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				confirmRelayAdmission: admission,
+				timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 10000 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -648,7 +689,10 @@ describe("pending admission during close", () => {
 		const n = nonce();
 		let captured: SshProcessEventListener | null = null;
 		let rejectAdmission!: (reason: unknown) => void;
-		const admission = (): Promise<object> => new Promise<object>((_resolve, reject) => { rejectAdmission = reject; });
+		const admission = (): Promise<object> =>
+			new Promise<object>((_resolve, reject) => {
+				rejectAdmission = reject;
+			});
 
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
@@ -656,12 +700,14 @@ describe("pending admission during close", () => {
 				return subscriptionOk();
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			confirmRelayAdmission: admission,
-			timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 10000 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				confirmRelayAdmission: admission,
+				timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 10000 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -675,7 +721,9 @@ describe("pending admission during close", () => {
 
 		// Reject admission late — should not trigger beginCleanup because
 		// admissionTaskActive was cleared by cleanup.
-		setTimeout(() => { rejectAdmission(new Error("late")); }, 0);
+		setTimeout(() => {
+			rejectAdmission(new Error("late"));
+		}, 0);
 
 		await new Promise((r) => setTimeout(r, 30));
 
@@ -694,12 +742,14 @@ describe("pending admission during close", () => {
 				return subscriptionOk();
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			confirmRelayAdmission: admission,
-			timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 10000 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				confirmRelayAdmission: admission,
+				timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 10000 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -720,9 +770,7 @@ describe("pending admission during close", () => {
 		const readyResult = await m.ready;
 		expect(readyResult.ok).toBe(false);
 	});
-
 });
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests: Happy path
@@ -766,7 +814,10 @@ describe("happy path", () => {
 		const n = nonce();
 		let captured: SshProcessEventListener | null = null;
 		let admissionResolve!: (v: object) => void;
-		const admission = (): Promise<object> => new Promise((r) => { admissionResolve = r; });
+		const admission = (): Promise<object> =>
+			new Promise((r) => {
+				admissionResolve = r;
+			});
 
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
@@ -789,7 +840,10 @@ describe("happy path", () => {
 
 		// Ready should not resolve yet.
 		let readyDone = false;
-		const readyPromise = m.ready.then((r) => { readyDone = true; return r; });
+		const readyPromise = m.ready.then((r) => {
+			readyDone = true;
+			return r;
+		});
 		await Promise.resolve(); // let microtasks run
 		expect(readyDone).toBe(false);
 
@@ -803,7 +857,7 @@ describe("happy path", () => {
 	it("resolves closed with ok=true when close() is called after ready", async () => {
 		const n = nonce();
 		let captured: SshProcessEventListener | null = null;
-		let signalCalls: string[] = [];
+		const signalCalls: string[] = [];
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
 				captured = listener;
@@ -909,7 +963,7 @@ describe("stdout parsing failures", () => {
 		const m = result.monitor;
 
 		// 300 chars then newline.
-		const longLine = "x".repeat(300) + "\n";
+		const longLine = `${"x".repeat(300)}\n`;
 		const ab = zeroBuffer(longLine);
 		captured!.onStdout(new Uint8Array(ab));
 
@@ -934,7 +988,7 @@ describe("stdout parsing failures", () => {
 
 		// Ready line + extra data after newline within the same chunk.
 		const line = `PRIME_AGENT_READY ${n} 12345\n`;
-		const data = line + "extra\n";
+		const data = `${line}extra\n`;
 		const ab = zeroBuffer(data);
 		captured!.onStdout(new Uint8Array(ab));
 
@@ -1361,7 +1415,9 @@ describe("admission outcomes", () => {
 				return subscriptionOk();
 			},
 		});
-		const admission = (): never => { throw new Error("sync fail"); };
+		const admission = (): never => {
+			throw new Error("sync fail");
+		};
 		const result = makeMonitor(validInput({ process: proc, expectedNonce: n, confirmRelayAdmission: admission }));
 		assertOk(result);
 		if (!result.ok) return;
@@ -1440,6 +1496,7 @@ describe("admission outcomes", () => {
 		// "then" property that calls the callback and then throws.
 		const hostile: Record<string, unknown> = {};
 		Object.setPrototypeOf(hostile, Promise.prototype);
+		// biome-ignore lint/suspicious/noThenProperty: adversarial Promise-shape fixture.
 		Object.defineProperty(hostile, "then", {
 			value: (onFulfilled: (v: unknown) => void): never => {
 				onFulfilled(Object.freeze({ status: "admitted" }));
@@ -1451,12 +1508,22 @@ describe("admission outcomes", () => {
 		});
 		const admission = (): unknown => hostile;
 
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			confirmRelayAdmission: admission,
-			timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 50, sigintTimeoutMs: 5, sigtermTimeoutMs: 5, sigkillTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				confirmRelayAdmission: admission,
+				timeouts: {
+					...validTimeouts(),
+					readyTimeoutMs: 100,
+					admissionTimeoutMs: 50,
+					sigintTimeoutMs: 5,
+					sigtermTimeoutMs: 5,
+					sigkillTimeoutMs: 5,
+					closeConfirmTimeoutMs: 5,
+				},
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -1485,15 +1552,26 @@ describe("admission outcomes", () => {
 		// Object with Promise prototype but own "then" that is a string.
 		const hostile: Record<string, unknown> = {};
 		Object.setPrototypeOf(hostile, Promise.prototype);
+		// biome-ignore lint/suspicious/noThenProperty: adversarial Promise-shape fixture.
 		hostile.then = "not a function";
 		const admission = (): unknown => hostile;
 
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			confirmRelayAdmission: admission,
-			timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 50, sigintTimeoutMs: 5, sigtermTimeoutMs: 5, sigkillTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				confirmRelayAdmission: admission,
+				timeouts: {
+					...validTimeouts(),
+					readyTimeoutMs: 100,
+					admissionTimeoutMs: 50,
+					sigintTimeoutMs: 5,
+					sigtermTimeoutMs: 5,
+					sigkillTimeoutMs: 5,
+					closeConfirmTimeoutMs: 5,
+				},
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -1521,12 +1599,22 @@ describe("admission outcomes", () => {
 		(p as Record<symbol, unknown>)[sym] = 1;
 		const admission = (): unknown => p;
 
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			confirmRelayAdmission: admission,
-			timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 50, sigintTimeoutMs: 5, sigtermTimeoutMs: 5, sigkillTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				confirmRelayAdmission: admission,
+				timeouts: {
+					...validTimeouts(),
+					readyTimeoutMs: 100,
+					admissionTimeoutMs: 50,
+					sigintTimeoutMs: 5,
+					sigtermTimeoutMs: 5,
+					sigkillTimeoutMs: 5,
+					closeConfirmTimeoutMs: 5,
+				},
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -1539,7 +1627,6 @@ describe("admission outcomes", () => {
 		expect(readyResult.ok).toBe(false);
 		if (!readyResult.ok) expect(readyResult.code).toBe("ADMISSION_ERROR");
 	});
-
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1660,18 +1747,27 @@ describe("process events", () => {
 describe("timeouts", () => {
 	it("READY_TIMEOUT when no stdout arrives", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return subscriptionOk();
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), readyTimeoutMs: 10, sigintTimeoutMs: 5, sigtermTimeoutMs: 5, sigkillTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: {
+					...validTimeouts(),
+					readyTimeoutMs: 10,
+					sigintTimeoutMs: 5,
+					sigtermTimeoutMs: 5,
+					sigkillTimeoutMs: 5,
+					closeConfirmTimeoutMs: 5,
+				},
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -1691,12 +1787,22 @@ describe("timeouts", () => {
 				return subscriptionOk();
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			confirmRelayAdmission: neverAdmission,
-			timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 10, sigintTimeoutMs: 5, sigtermTimeoutMs: 5, sigkillTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				confirmRelayAdmission: neverAdmission,
+				timeouts: {
+					...validTimeouts(),
+					readyTimeoutMs: 100,
+					admissionTimeoutMs: 10,
+					sigintTimeoutMs: 5,
+					sigtermTimeoutMs: 5,
+					sigkillTimeoutMs: 5,
+					closeConfirmTimeoutMs: 5,
+				},
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -1711,9 +1817,7 @@ describe("timeouts", () => {
 		expect(r.ok).toBe(false);
 		if (!r.ok) expect(r.code).toBe("ADMISSION_TIMEOUT");
 	});
-
 });
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests: Signal sequence and cleanup
@@ -1722,11 +1826,11 @@ describe("timeouts", () => {
 describe("cleanup signal sequence", () => {
 	it("sends SIGINT then SIGTERM then SIGKILL when exit not observed", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const signals: string[] = [];
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return subscriptionOk();
 			},
 			signalGroup: (sig: "SIGINT" | "SIGTERM" | "SIGKILL"): object => {
@@ -1734,17 +1838,19 @@ describe("cleanup signal sequence", () => {
 				return Object.freeze({ status: "sent" });
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: {
-				...validTimeouts(),
-				sigintTimeoutMs: 10,
-				sigtermTimeoutMs: 10,
-				sigkillTimeoutMs: 10,
-				closeConfirmTimeoutMs: 10,
-			},
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: {
+					...validTimeouts(),
+					sigintTimeoutMs: 10,
+					sigtermTimeoutMs: 10,
+					sigkillTimeoutMs: 10,
+					closeConfirmTimeoutMs: 10,
+				},
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -1771,11 +1877,13 @@ describe("cleanup signal sequence", () => {
 				return Object.freeze({ status: "sent" });
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), closeConfirmTimeoutMs: 10 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), closeConfirmTimeoutMs: 10 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -1799,7 +1907,7 @@ describe("cleanup signal sequence", () => {
 				captured = listener;
 				return subscriptionOk();
 			},
-			signalGroup: (sig: "SIGINT" | "SIGTERM" | "SIGKILL"): object => {
+			signalGroup: (_sig: "SIGINT" | "SIGTERM" | "SIGKILL"): object => {
 				signalIndex += 1;
 				if (signalIndex === 1) {
 					// After first signal, fire exit.
@@ -1810,17 +1918,19 @@ describe("cleanup signal sequence", () => {
 				return Object.freeze({ status: "sent" });
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: {
-				...validTimeouts(),
-				sigintTimeoutMs: 100, // won't wait long because exit fires
-				sigtermTimeoutMs: 100,
-				sigkillTimeoutMs: 100,
-				closeConfirmTimeoutMs: 100,
-			},
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: {
+					...validTimeouts(),
+					sigintTimeoutMs: 100, // won't wait long because exit fires
+					sigtermTimeoutMs: 100,
+					sigkillTimeoutMs: 100,
+					closeConfirmTimeoutMs: 100,
+				},
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -1834,25 +1944,27 @@ describe("cleanup signal sequence", () => {
 
 	it("signalUncertain prevents ok=true in cleanup", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return subscriptionOk();
 			},
 			signalGroup: (): object => Object.freeze({ status: "error" }),
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: {
-				...validTimeouts(),
-				sigintTimeoutMs: 10,
-				sigtermTimeoutMs: 10,
-				sigkillTimeoutMs: 10,
-				closeConfirmTimeoutMs: 10,
-			},
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: {
+					...validTimeouts(),
+					sigintTimeoutMs: 10,
+					sigtermTimeoutMs: 10,
+					sigkillTimeoutMs: 10,
+					closeConfirmTimeoutMs: 10,
+				},
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -1865,25 +1977,29 @@ describe("cleanup signal sequence", () => {
 
 	it("signalGroup throwing sets signalUncertain", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return subscriptionOk();
 			},
-			signalGroup: (): never => { throw new Error("fail"); },
-		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: {
-				...validTimeouts(),
-				sigintTimeoutMs: 10,
-				sigtermTimeoutMs: 10,
-				sigkillTimeoutMs: 10,
-				closeConfirmTimeoutMs: 10,
+			signalGroup: (): never => {
+				throw new Error("fail");
 			},
-		}));
+		});
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: {
+					...validTimeouts(),
+					sigintTimeoutMs: 10,
+					sigtermTimeoutMs: 10,
+					sigkillTimeoutMs: 10,
+					closeConfirmTimeoutMs: 10,
+				},
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -1895,25 +2011,27 @@ describe("cleanup signal sequence", () => {
 
 	it("signalGroup returning null status sets signalUncertain", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return subscriptionOk();
 			},
 			signalGroup: (): object => Object.freeze({ status: "unknown" }),
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: {
-				...validTimeouts(),
-				sigintTimeoutMs: 10,
-				sigtermTimeoutMs: 10,
-				sigkillTimeoutMs: 10,
-				closeConfirmTimeoutMs: 10,
-			},
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: {
+					...validTimeouts(),
+					sigintTimeoutMs: 10,
+					sigtermTimeoutMs: 10,
+					sigkillTimeoutMs: 10,
+					closeConfirmTimeoutMs: 10,
+				},
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -1930,10 +2048,10 @@ describe("cleanup signal sequence", () => {
 describe("close() behavior", () => {
 	it("returns the closed promise", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return subscriptionOk();
 			},
 		});
@@ -1948,10 +2066,10 @@ describe("close() behavior", () => {
 
 	it("close() called multiple times returns same promise", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return subscriptionOk();
 			},
 		});
@@ -1999,18 +2117,20 @@ describe("close() behavior", () => {
 
 	it("close() after cleanup started resolves via shared promise", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return subscriptionOk();
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2031,11 +2151,11 @@ describe("close() behavior", () => {
 describe("unsubscribe and destroyStdio", () => {
 	it("calls unsubscribe during cleanup when registration succeeds", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		let unsubscribed = false;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return Object.freeze({
 					status: "subscribed",
 					unsubscribe: (): object => {
@@ -2045,11 +2165,13 @@ describe("unsubscribe and destroyStdio", () => {
 				});
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2060,11 +2182,11 @@ describe("unsubscribe and destroyStdio", () => {
 
 	it("calls destroyStdio during cleanup", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		let destroyed = false;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return subscriptionOk();
 			},
 			destroyStdio: (): object => {
@@ -2072,11 +2194,13 @@ describe("unsubscribe and destroyStdio", () => {
 				return Object.freeze({ status: "destroyed" });
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2093,15 +2217,19 @@ describe("unsubscribe and destroyStdio", () => {
 				captured = listener;
 				return Object.freeze({
 					status: "subscribed",
-					unsubscribe: (): never => { throw new Error("fail"); },
+					unsubscribe: (): never => {
+						throw new Error("fail");
+					},
 				});
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2124,11 +2252,13 @@ describe("unsubscribe and destroyStdio", () => {
 			},
 			destroyStdio: (): object => Object.freeze({ status: "not_destroyed" }),
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2155,11 +2285,13 @@ describe("late result suppression", () => {
 				return subscriptionOk();
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), sigintTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), sigintTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2177,7 +2309,10 @@ describe("late result suppression", () => {
 		const n = nonce();
 		let captured: SshProcessEventListener | null = null;
 		let admissionResolve!: (v: object) => void;
-		const admission = (): Promise<object> => new Promise((r) => { admissionResolve = r; });
+		const admission = (): Promise<object> =>
+			new Promise((r) => {
+				admissionResolve = r;
+			});
 
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
@@ -2185,12 +2320,22 @@ describe("late result suppression", () => {
 				return subscriptionOk();
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			confirmRelayAdmission: admission,
-			timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 10, sigintTimeoutMs: 5, sigtermTimeoutMs: 5, sigkillTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				confirmRelayAdmission: admission,
+				timeouts: {
+					...validTimeouts(),
+					readyTimeoutMs: 100,
+					admissionTimeoutMs: 10,
+					sigintTimeoutMs: 5,
+					sigtermTimeoutMs: 5,
+					sigkillTimeoutMs: 5,
+					closeConfirmTimeoutMs: 5,
+				},
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2220,11 +2365,13 @@ describe("late result suppression", () => {
 				return subscriptionOk();
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), sigintTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), sigintTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2261,7 +2408,7 @@ describe("source erasure", () => {
 		const result = makeMonitor(validInput({ process: proc, expectedNonce: n }));
 		assertOk(result);
 		if (!result.ok) return;
-		const m = result.monitor;
+		const _m = result.monitor;
 
 		const line = `PRIME_AGENT_READY ${n} 12345\n`;
 		const ab = zeroBuffer(line);
@@ -2286,7 +2433,7 @@ describe("source erasure", () => {
 		const result = makeMonitor(validInput({ process: proc, expectedNonce: n }));
 		assertOk(result);
 		if (!result.ok) return;
-		const m = result.monitor;
+		const _m = result.monitor;
 
 		const ab = zeroBuffer("error msg");
 		const view = new Uint8Array(ab);
@@ -2305,10 +2452,10 @@ describe("source erasure", () => {
 describe("synchronous events", () => {
 	it("queued stdout events are replayed", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				// Fire stdout synchronously before returning.
 				const ab = zeroBuffer(`PRIME_AGENT_READY ${n} 12345\n`);
 				listener.onStdout(new Uint8Array(ab));
@@ -2327,10 +2474,10 @@ describe("synchronous events", () => {
 
 	it("SYNCHRONOUS_OVERFLOW when too many sync events", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				// Fire 17 events (max is 16).
 				for (let i = 0; i < 17; i++) {
 					const ab = zeroBuffer("x");
@@ -2351,10 +2498,10 @@ describe("synchronous events", () => {
 
 	it("sync exit triggers exit behavior", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				listener.onExit(Object.freeze({ code: 0, signal: null }));
 				return subscriptionOk();
 			},
@@ -2371,10 +2518,10 @@ describe("synchronous events", () => {
 
 	it("sync close triggers close behavior", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				listener.onClose();
 				return subscriptionOk();
 			},
@@ -2391,10 +2538,10 @@ describe("synchronous events", () => {
 
 	it("sync stderr triggers failure", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				const ab = zeroBuffer("err\n");
 				listener.onStderr(new Uint8Array(ab));
 				return subscriptionOk();
@@ -2412,10 +2559,10 @@ describe("synchronous events", () => {
 
 	it("sync process_error triggers failure", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				listener.onProcessError();
 				return subscriptionOk();
 			},
@@ -2432,10 +2579,10 @@ describe("synchronous events", () => {
 
 	it("sync invalid chunk triggers failure", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				listener.onStdout(42);
 				return subscriptionOk();
 			},
@@ -2470,11 +2617,13 @@ describe("race conditions", () => {
 				return Object.freeze({ status: "sent" });
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), sigintTimeoutMs: 100, closeConfirmTimeoutMs: 100 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), sigintTimeoutMs: 100, closeConfirmTimeoutMs: 100 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2493,7 +2642,10 @@ describe("race conditions", () => {
 		const n = nonce();
 		let captured: SshProcessEventListener | null = null;
 		let admissionResolve!: (v: object) => void;
-		const admission = (): Promise<object> => new Promise((r) => { admissionResolve = r; });
+		const admission = (): Promise<object> =>
+			new Promise((r) => {
+				admissionResolve = r;
+			});
 
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
@@ -2501,12 +2653,14 @@ describe("race conditions", () => {
 				return subscriptionOk();
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			confirmRelayAdmission: admission,
-			timeouts: { ...validTimeouts(), closeConfirmTimeoutMs: 10, sigintTimeoutMs: 10 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				confirmRelayAdmission: admission,
+				timeouts: { ...validTimeouts(), closeConfirmTimeoutMs: 10, sigintTimeoutMs: 10 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2534,18 +2688,27 @@ describe("race conditions", () => {
 describe("promise finality", () => {
 	it("ready never settles with ok=true after cleanup", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return subscriptionOk();
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), readyTimeoutMs: 10, sigintTimeoutMs: 5, sigtermTimeoutMs: 5, sigkillTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: {
+					...validTimeouts(),
+					readyTimeoutMs: 10,
+					sigintTimeoutMs: 5,
+					sigtermTimeoutMs: 5,
+					sigkillTimeoutMs: 5,
+					closeConfirmTimeoutMs: 5,
+				},
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2559,18 +2722,20 @@ describe("promise finality", () => {
 
 	it("closed promise settles exactly once", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return subscriptionOk();
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), closeConfirmTimeoutMs: 10, sigintTimeoutMs: 10 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), closeConfirmTimeoutMs: 10, sigintTimeoutMs: 10 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2591,10 +2756,10 @@ describe("exit event edge cases", () => {
 	it("accepts exit with code=0 and signal=null", () => {
 		const e = Object.freeze({ code: 0, signal: null });
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				listener.onExit(e);
 				return subscriptionOk();
 			},
@@ -2606,10 +2771,10 @@ describe("exit event edge cases", () => {
 
 	it("accepts exit with code=null and signal=SIGTERM", () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				listener.onExit(Object.freeze({ code: null, signal: "SIGTERM" }));
 				return subscriptionOk();
 			},
@@ -2621,10 +2786,10 @@ describe("exit event edge cases", () => {
 
 	it("rejects exit with code=256 (out of range)", () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				listener.onExit(Object.freeze({ code: 256, signal: null }));
 				return subscriptionOk();
 			},
@@ -2636,10 +2801,10 @@ describe("exit event edge cases", () => {
 
 	it("rejects exit with code=-1", () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				listener.onExit(Object.freeze({ code: -1, signal: null }));
 				return subscriptionOk();
 			},
@@ -2651,10 +2816,10 @@ describe("exit event edge cases", () => {
 
 	it("rejects exit with signal containing lowercase", () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				listener.onExit(Object.freeze({ code: null, signal: "sigterm" }));
 				return subscriptionOk();
 			},
@@ -2704,11 +2869,13 @@ describe("cleanup error handling", () => {
 				});
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2733,11 +2900,13 @@ describe("cleanup error handling", () => {
 				throw new Error("fail");
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2764,11 +2933,13 @@ describe("cleanup error handling", () => {
 				});
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), sigintTimeoutMs: 10, closeConfirmTimeoutMs: 10 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2806,19 +2977,21 @@ describe("frozen results", () => {
 
 	it("ready result is frozen", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return subscriptionOk();
 			},
 			signalGroup: (): object => Object.freeze({ status: "sent" }),
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), readyTimeoutMs: 5 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), readyTimeoutMs: 5 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;
@@ -2829,18 +3002,20 @@ describe("frozen results", () => {
 
 	it("close result is frozen", async () => {
 		const n = nonce();
-		let captured: SshProcessEventListener | null = null;
+		let _captured: SshProcessEventListener | null = null;
 		const proc = validProcess({
 			subscribe: (listener: SshProcessEventListener): object => {
-				captured = listener;
+				_captured = listener;
 				return subscriptionOk();
 			},
 		});
-		const result = makeMonitor(validInput({
-			process: proc,
-			expectedNonce: n,
-			timeouts: { ...validTimeouts(), sigintTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
-		}));
+		const result = makeMonitor(
+			validInput({
+				process: proc,
+				expectedNonce: n,
+				timeouts: { ...validTimeouts(), sigintTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
+			}),
+		);
 		assertOk(result);
 		if (!result.ok) return;
 		const m = result.monitor;

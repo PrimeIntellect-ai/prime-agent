@@ -182,23 +182,18 @@ function bindMethod(
 	} catch {
 		return null;
 	}
-	return (...args: readonly unknown[]): unknown =>
-		Reflect.apply(value as CallableFunction, owner, args);
+	return (...args: readonly unknown[]): unknown => Reflect.apply(value as CallableFunction, owner, args);
 }
 
 /** Validates a raw timeout value: safe integer, 1..MAX_TIMEOUT_MS. */
 function timeout(raw: unknown): number | null {
-	return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 && raw <= MAX_TIMEOUT_MS
-		? raw
-		: null;
+	return typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 && raw <= MAX_TIMEOUT_MS ? raw : null;
 }
 
 /** Extracts a `status` string from an object whose only own key is "status". */
 function status(raw: unknown, values: ReadonlySet<string>): string | null {
 	const descriptor = exact(raw, STATUS_KEYS)?.status;
-	return typeof descriptor?.value === "string" && values.has(descriptor.value)
-		? descriptor.value
-		: null;
+	return typeof descriptor?.value === "string" && values.has(descriptor.value) ? descriptor.value : null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -256,15 +251,13 @@ function preflight(raw: unknown): BoundInput | null {
 
 	return Object.freeze({
 		process: Object.freeze({
-			subscribe: (listener: SshProcessEventListener): unknown =>
-				Reflect.apply(subscribe, undefined, [listener]),
+			subscribe: (listener: SshProcessEventListener): unknown => Reflect.apply(subscribe, undefined, [listener]),
 			signalGroup: (signal: "SIGINT" | "SIGTERM" | "SIGKILL"): unknown =>
 				Reflect.apply(signalGroup, undefined, [signal]),
 			destroyStdio: (): unknown => Reflect.apply(destroyStdio, undefined, []),
 		}),
 		expectedNonce,
-		confirmRelayAdmission: (): unknown =>
-			Reflect.apply(confirmRaw as CallableFunction, raw, []),
+		confirmRelayAdmission: (): unknown => Reflect.apply(confirmRaw as CallableFunction, raw, []),
 		timeouts: Object.freeze({
 			readyTimeoutMs,
 			admissionTimeoutMs,
@@ -284,21 +277,12 @@ const TYPED_ARRAY_PROTO = Object.getPrototypeOf(Uint8Array.prototype) as object;
 const BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, "byteLength")?.get;
 const BYTE_OFFSET_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, "byteOffset")?.get;
 const BUFFER_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, "buffer")?.get;
-const ARRAY_BUFFER_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
-	ArrayBuffer.prototype,
-	"byteLength",
-)?.get;
+const ARRAY_BUFFER_LENGTH_GETTER = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get;
 
 /** Erase the contents of a typed array (if safely writable). */
 function eraseTransferred(raw: unknown): void {
 	try {
-		if (
-			typeof raw !== "object" ||
-			raw === null ||
-			types.isProxy(raw) ||
-			!BYTE_LENGTH_GETTER
-		)
-			return;
+		if (typeof raw !== "object" || raw === null || types.isProxy(raw) || !BYTE_LENGTH_GETTER) return;
 		const length = Reflect.apply(BYTE_LENGTH_GETTER, raw, []) as number;
 		if (length > 0) Uint8Array.prototype.fill.call(raw, 0);
 	} catch {
@@ -369,16 +353,13 @@ function takeTransferred(raw: unknown): Uint8Array | null {
 // Exit event validation
 // ─────────────────────────────────────────────────────────────────────────────
 
-function exitEvent(
-	raw: unknown,
-): Readonly<{ code: number | null; signal: string | null }> | null {
+function exitEvent(raw: unknown): Readonly<{ code: number | null; signal: string | null }> | null {
 	const values = exact(raw, EXIT_KEYS);
 	const code = values?.code?.value;
 	const signal = values?.signal?.value;
 	if (code !== null && (typeof code !== "number" || !Number.isSafeInteger(code) || code < 0 || code > 255))
 		return null;
-	if (signal !== null && (typeof signal !== "string" || !/^[A-Z][A-Z0-9]{0,31}$/.test(signal)))
-		return null;
+	if (signal !== null && (typeof signal !== "string" || !/^[A-Z][A-Z0-9]{0,31}$/.test(signal))) return null;
 	return values ? Object.freeze({ code, signal }) : null;
 }
 
@@ -510,8 +491,7 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 		if (unsubscribe !== null && !unsubscribeConsumed) {
 			unsubscribeConsumed = true;
 			try {
-				unsubscribeOk =
-					status(unsubscribe(), new Set(["unsubscribed"])) === "unsubscribed";
+				unsubscribeOk = status(unsubscribe(), new Set(["unsubscribed"])) === "unsubscribed";
 			} catch {
 				unsubscribeOk = false;
 			}
@@ -522,8 +502,7 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 		if (!destroyConsumed) {
 			destroyConsumed = true;
 			try {
-				destroyOk =
-					status(input.process.destroyStdio(), new Set(["destroyed"])) === "destroyed";
+				destroyOk = status(input.process.destroyStdio(), new Set(["destroyed"])) === "destroyed";
 			} catch {
 				destroyOk = false;
 			}
@@ -582,10 +561,7 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 		stage += 1;
 
 		try {
-			const result = status(
-				input.process.signalGroup(signal),
-				new Set(["sent", "not_found", "error"]),
-			);
+			const result = status(input.process.signalGroup(signal), new Set(["sent", "not_found", "error"]));
 			if (result === null || result === "error") signalUncertain = true;
 		} catch {
 			signalUncertain = true;
@@ -654,7 +630,8 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 				return;
 			}
 			admissionState = 1;
-			Promise.prototype.then.call(admission as Promise<unknown>,
+			Promise.prototype.then.call(
+				admission as Promise<unknown>,
 				(result: unknown) => {
 					if (admissionState !== 1) return;
 					admissionState = 2;
@@ -663,9 +640,7 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 					admissionTimer = null;
 					if (status(result, new Set(["admitted"])) !== "admitted") {
 						beginCleanup(
-							status(result, new Set(["rejected"])) === "rejected"
-								? "ADMISSION_REJECTED"
-								: "ADMISSION_ERROR",
+							status(result, new Set(["rejected"])) === "rejected" ? "ADMISSION_REJECTED" : "ADMISSION_ERROR",
 						);
 						return;
 					}
