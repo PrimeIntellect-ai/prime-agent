@@ -236,5 +236,9 @@ export {
 	captureAvoPythonProbeBundle,
 	captureAvoVerificationHarnessManifest,
 	captureAvoWorkspaceSnapshot,
+	checkAvoBaselineTestFilesTampered,
 	deriveAvoWorkspaceImpactPaths,
+	isAvoVerifierScript,
+	isTestFile,
+	restoreAvoBaselineTestFiles,
 } from "./workspace.js";

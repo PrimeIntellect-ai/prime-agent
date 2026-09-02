@@ -217,6 +217,7 @@ export interface AvoCandidateClaim {
 export interface AvoBaselineTestFile {
 	path: string;
 	sha256: string;
+	content?: string;
 }
 
 export interface AvoVerificationHarnessEntry {
@@ -501,6 +502,7 @@ export interface AvoLineageEntry {
 		| "supervisor_intervention"
 		| "adapter_progress"
 		| "canonical_memory_repaired"
+		| "terminal_failure"
 		| "completed";
 	summary: string;
 	referenceId?: string;

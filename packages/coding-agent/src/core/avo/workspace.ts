@@ -1,6 +1,16 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from "node:fs";
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	readlinkSync,
+	realpathSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { builtinModules } from "node:module";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { classifyAvoHostEvaluationCommand } from "./evaluator.js";
@@ -195,13 +205,16 @@ function treeSnapshot(cwd: string, excludedRoots: readonly string[]): AvoWorkspa
 	};
 }
 
-function isTestFile(path: string): boolean {
+export function isTestFile(path: string): boolean {
 	const normalized = path.replaceAll("\\", "/").toLowerCase();
 	const name = normalized.split("/").at(-1) ?? normalized;
 	return (
-		/(?:^|\/)(?:test|tests|__tests__)\//.test(normalized) ||
+		/(?:^|\/)(?:test|tests|__tests__|verifier|verifiers|benchmark|benchmarks)\//.test(normalized) ||
 		/(?:\.test|\.spec)\.[a-z0-9]+$/.test(name) ||
-		/^test_.+\.py$/.test(name) ||
+		/^(?:test|verify|check|validate|certify|grader|benchmark)[_-].+\.py$/.test(name) ||
+		/.+[_-](?:test|verify|verifier|verification|certify|certification|check|validate|benchmark)\.(?:py|go|rs)$/.test(
+			name,
+		) ||
 		/.+_test\.(?:py|go|rs)$/.test(name) ||
 		/(?:test|tests)\.(?:java|kt|cs|swift)$/.test(name)
 	);
@@ -324,7 +337,13 @@ export function captureAvoCodingVerificationBaseline(
 			return [];
 		}
 		const sha256 = fileSha256(root, path);
-		return sha256 ? [{ path: path.replaceAll(sep, "/"), sha256 }] : [];
+		let content: string | undefined;
+		try {
+			content = readFileSync(resolve(root, path), "utf8");
+		} catch {
+			content = undefined;
+		}
+		return sha256 ? [{ path: path.replaceAll(sep, "/"), sha256, ...(content !== undefined ? { content } : {}) }] : [];
 	});
 	let baselinePythonBytes = 0;
 	const pythonCallableDimensions: Record<string, Record<string, string[]>> = {};
@@ -1368,4 +1387,54 @@ export function captureAvoWorkspaceSnapshot(
 ): AvoWorkspaceSnapshot {
 	const excludedRoots = options.excludedRoots ?? [];
 	return gitSnapshot(cwd, excludedRoots) ?? treeSnapshot(cwd, excludedRoots);
+}
+
+export function isAvoVerifierScript(path: string): boolean {
+	const normalized = path.replaceAll("\\", "/").toLowerCase();
+	const name = normalized.split("/").at(-1) ?? normalized;
+	if (name === "conftest.py" || name.includes("fixture")) return false;
+	return (
+		/^(?:verify|verification|check|validate|validation|certify|certification|grader|benchmark)[_-].+\.py$/.test(
+			name,
+		) ||
+		/.+[_-](?:verify|verification|certify|certification|grader|benchmark)\.py$/.test(name) ||
+		/^(?:verify|certification|benchmark|validate)\.py$/.test(name)
+	);
+}
+
+export function restoreAvoBaselineTestFiles(
+	root: string,
+	baseline: AvoVerificationBaseline,
+): { restored: string[]; tampered: boolean } {
+	const restored: string[] = [];
+	for (const testFile of baseline.testFiles) {
+		if (testFile.content === undefined) continue;
+		if (!isAvoVerifierScript(testFile.path)) continue;
+		const currentDigest = fileSha256(root, testFile.path);
+		if (currentDigest !== testFile.sha256) {
+			try {
+				const targetPath = resolve(root, testFile.path);
+				mkdirSync(dirname(targetPath), { recursive: true });
+				writeFileSync(targetPath, testFile.content, "utf8");
+				restored.push(testFile.path);
+			} catch {
+				// failed to restore
+			}
+		}
+	}
+	return { restored, tampered: restored.length > 0 };
+}
+
+export function checkAvoBaselineTestFilesTampered(
+	root: string,
+	baseline: AvoVerificationBaseline,
+): { tampered: boolean; tamperedPaths: string[] } {
+	const tamperedPaths: string[] = [];
+	for (const testFile of baseline.testFiles) {
+		const currentDigest = fileSha256(root, testFile.path);
+		if (currentDigest !== testFile.sha256) {
+			tamperedPaths.push(testFile.path);
+		}
+	}
+	return { tampered: tamperedPaths.length > 0, tamperedPaths };
 }

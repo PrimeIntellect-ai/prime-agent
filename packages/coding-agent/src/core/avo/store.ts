@@ -3599,6 +3599,23 @@ export class AvoStore {
 				`successor to host-revised coding candidate ${requiredPivotParent.candidateId} must contain a host-observed material workspace change`,
 			);
 		}
+		if (this.state.verificationBaseline?.testFiles) {
+			const protectedVerifierPaths = new Set(
+				this.state.verificationBaseline.testFiles
+					.filter((f) =>
+						/^(?:verify|certify|benchmark|validate|grader)[_-]|\.(?:verifier|certification)\./i.test(
+							f.path.split("/").at(-1) ?? "",
+						),
+					)
+					.map((f) => f.path),
+			);
+			const modifiedProtected = (input.workspaceChangedPaths ?? []).filter((p) => protectedVerifierPaths.has(p));
+			if (modifiedProtected.length > 0) {
+				throw new Error(
+					`candidate modified protected verification file: ${modifiedProtected.join(", ")}; candidate writes to verification infrastructure are denied`,
+				);
+			}
+		}
 		if (this.state.candidates.some((candidate) => candidate.candidateId === candidateId)) {
 			throw new Error(`candidate ${candidateId} already exists`);
 		}
@@ -3709,11 +3726,31 @@ export class AvoStore {
 		if (canonicalDeliveryText.length > AVO_CANONICAL_DELIVERY_MAX_CHARS) {
 			throw new Error(`candidate canonical delivery exceeds ${AVO_CANONICAL_DELIVERY_MAX_CHARS} characters`);
 		}
+		const payloadDigest = digestAvoPayload({ payload: input.payload, claims });
+		const equivalentCandidate = this.state.candidates.find((prior) => {
+			if (prior.payloadDigest !== payloadDigest) return false;
+			const priorWorkspace = prior.workspaceDigest ?? "";
+			const candidateWorkspace = input.workspaceDigest ?? "";
+			if (priorWorkspace !== candidateWorkspace) return false;
+			const cycle = this.state.cycles.find((c) => c.candidateId === prior.candidateId);
+			if (cycle && cycle.outcome !== "accepted") return true;
+			const failedEval = this.state.evaluations.some(
+				(e) =>
+					e.candidateId === prior.candidateId &&
+					(e.status === "fail" || e.status === "revise" || e.status === "inconclusive"),
+			);
+			return failedEval;
+		});
+		if (equivalentCandidate) {
+			throw new Error(
+				`equivalent successor candidate rejected: candidate payload and workspace digests are identical to previously rejected candidate ${equivalentCandidate.candidateId}; successor candidate must contain material changes`,
+			);
+		}
 		const candidate: AvoCandidate = {
 			candidateId: requireIdentifier(candidateId, "candidate_id"),
 			kind: requireIdentifier(input.kind, "candidate.kind"),
 			summary,
-			payloadDigest: digestAvoPayload({ payload: input.payload, claims }),
+			payloadDigest,
 			deliveryDigest: digestAvoDeliveryText(canonicalDeliveryText),
 			canonicalDeliveryText,
 			deterministicResult: requiredDeterministicResult,
@@ -4306,6 +4343,28 @@ export class AvoStore {
 		this.linkMemoryRecallsToCycle(cycle);
 		this.recordCycleEpisode(cycle, candidate, candidateEvaluations);
 		if (cycle.outcome === "accepted") this.synchronizeCanonicalDelivery();
+		let consecutiveObjectiveRejections = 0;
+		for (let i = this.state.cycles.length - 1; i >= 0; i--) {
+			const c = this.state.cycles[i]!;
+			const evals = this.state.evaluations.filter((e) => e.candidateId === c.candidateId);
+			const objectiveEvals = evals.filter((e) => typeof e.metrics?.objective_relation === "string");
+			if (
+				objectiveEvals.length > 0 &&
+				objectiveEvals.every(
+					(e) => e.metrics.objective_relation === "unrelated" || e.metrics.objective_relation === "insufficient",
+				)
+			) {
+				consecutiveObjectiveRejections += 1;
+			} else {
+				break;
+			}
+		}
+		if (consecutiveObjectiveRejections >= 3) {
+			this.failTerminalRecovery(
+				"repeated_unrelated_objective",
+				`repeated objective-verifier rejections (${consecutiveObjectiveRejections} consecutive candidate cycles with objective_relation=unrelated|insufficient); candidate payload failed to address host objective`,
+			);
+		}
 		this.save();
 		return { cycle: structuredClone(cycle), checkpoint: structuredClone(checkpoint) };
 	}
@@ -4778,6 +4837,28 @@ export class AvoStore {
 			failedAt: this.now(),
 		};
 		this.state.status = "failed";
+		this.save();
+		return structuredClone(this.state.delivery);
+	}
+
+	failTerminalRecovery(code: string, reason: string): AvoDeliveryState {
+		if (this.state.delivery.phase === "delivered") {
+			throw new Error("a delivered canonical result cannot transition to failed");
+		}
+		this.state.delivery = {
+			...this.state.delivery,
+			phase: "failed",
+			failureCode: requireIdentifier(code, "terminal recovery failure code"),
+			failureReason: requireString(reason, "terminal recovery failure reason"),
+			failedAt: this.now(),
+		};
+		this.state.status = "failed";
+		this.state.lineage.push({
+			lineageId: `lineage-${randomUUID()}`,
+			kind: "terminal_failure",
+			summary: `Terminal recovery failure: ${reason}`,
+			recordedAt: this.now(),
+		});
 		this.save();
 		return structuredClone(this.state.delivery);
 	}

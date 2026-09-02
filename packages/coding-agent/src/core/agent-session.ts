@@ -222,6 +222,7 @@ import {
 	parseAvoTrialRunInput,
 	requiredAvoPremortemAssumptionCount,
 	requiresAvoAdversarialReview,
+	restoreAvoBaselineTestFiles,
 } from "./avo/index.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
 import {
@@ -7245,6 +7246,16 @@ export class AgentSession {
 				const baselineExecution = state.verificationBaseline?.executions.find(
 					(item) => item.commandDigest === commandDigest && item.meaningful,
 				);
+				let verifierTampered = false;
+				if (state.verificationBaseline) {
+					const restoration = restoreAvoBaselineTestFiles(
+						this.sessionManager.getCwd(),
+						state.verificationBaseline,
+					);
+					if (restoration.tampered) {
+						verifierTampered = true;
+					}
+				}
 				const verificationHarnessBefore =
 					requiresWorkspaceBinding && evaluatorId === "test" && state.verificationBaseline
 						? captureAvoVerificationHarnessManifest(
@@ -7273,6 +7284,18 @@ export class AgentSession {
 					truncated: result.truncated,
 					output: result.output,
 				});
+				if (verifierTampered) {
+					assessment = {
+						status: "revise",
+						metrics: {
+							...assessment.metrics,
+							meaningful: false,
+							verifier_tampered: true,
+							validation_reason:
+								"candidate modified protected verification files; verification restored to baseline and candidate revised",
+						},
+					};
+				}
 				const postWorkspace = requiresWorkspaceBinding
 					? captureAvoWorkspaceSnapshot(this.sessionManager.getCwd(), {
 							excludedRoots: this._avoWorkspaceExcludedRoots(),
@@ -17417,6 +17440,10 @@ export class AgentSession {
 			verificationBrokerReceipt?: AvoVerificationBrokerReceipt;
 		}
 	> {
+		const state = this._avoRuntime?.getState();
+		if (state?.verificationBaseline) {
+			restoreAvoBaselineTestFiles(this.sessionManager.getCwd(), state.verificationBaseline);
+		}
 		const brokerOperations = createAvoVerificationBrokerBashOperations();
 		const operations = brokerOperations ?? createReadOnlyVerificationBashOperations();
 		if (!operations) {
