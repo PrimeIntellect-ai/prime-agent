@@ -734,6 +734,8 @@ export class DaemonSupervisor {
 	private scheduledWakeRecompute?: Promise<void>;
 	private scheduledWakeRecomputeQueued = false;
 	private readonly scheduledWakeFailures = new Map<string, number>();
+	/** Trees whose ephemeral-stop cancel failed stay owned for enumeration until a retry lands. */
+	private readonly pendingEphemeralCancels = new Map<string, { rootSessionId: string; rootSessionFile: string }>();
 
 	constructor(
 		private readonly socketPath: string,
@@ -916,6 +918,14 @@ export class DaemonSupervisor {
 	private async collectPassiveScheduledJobs(): Promise<
 		Array<{ rootSessionFile: string; job: AgentCronJob; info: SessionInfo }>
 	> {
+		for (const [rootKey, pending] of [...this.pendingEphemeralCancels]) {
+			try {
+				await this.cancelScheduledJobsForSessionTree(pending.rootSessionId, pending.rootSessionFile);
+				this.pendingEphemeralCancels.delete(rootKey);
+			} catch {
+				// Still owned until the cancel lands; the tree stays excluded below.
+			}
+		}
 		const infos = await this.rlmSpawnLedger().family();
 		const infoByPath = new Map(infos.map((info) => [canonicalSessionPath(info.path), info] as const));
 		const store = AgentCronJobStore.forSessionArtifacts();
@@ -945,6 +955,7 @@ export class DaemonSupervisor {
 			const info = infoBySessionId.get(job.sessionId);
 			if (!info) continue;
 			const rootSessionFile = rootSessionFileFor(info);
+			if (this.pendingEphemeralCancels.has(canonicalSessionPath(rootSessionFile))) continue;
 			try {
 				if (this.findWorkerBySessionFile(rootSessionFile)) continue;
 			} catch {
@@ -6321,12 +6332,13 @@ export class DaemonSupervisor {
 			assertStopStillApplies();
 		}
 		this.invalidateWorkerSessionInputPauses(worker, "Session worker stopped while input was paused");
-		this.workers.delete(worker.descriptor.workerId);
-		this.flipWorkerRosterEntriesInactive(worker);
-		// Client-owned schedules die with the registration, like their roster rows.
+		// Client-owned schedules die with the registration, like their roster rows. Cancel
+		// before the worker leaves the map, so no recompute sees the tree uncovered mid-stop.
 		if (removeDescriptor && worker.descriptor.ownerClientId !== undefined) {
 			await this.cancelEphemeralWorkerScheduledJobs(worker);
 		}
+		this.workers.delete(worker.descriptor.workerId);
+		this.flipWorkerRosterEntriesInactive(worker);
 		if (removeDescriptor) {
 			this.deleteWorkerDescriptor(worker);
 		}
@@ -6450,42 +6462,53 @@ export class DaemonSupervisor {
 		}
 	}
 
+	private async cancelScheduledJobsForSessionTree(rootSessionId: string, rootSessionFile: string): Promise<void> {
+		const store = AgentCronJobStore.forSessionArtifacts();
+		const sessions = [{ sessionId: rootSessionId, sessionFile: rootSessionFile }];
+		const childrenByParent = new Map<string, SessionInfo[]>();
+		for (const info of await this.rlmSpawnLedger().family()) {
+			if (!info.parentSessionPath) continue;
+			const key = canonicalSessionPath(info.parentSessionPath);
+			childrenByParent.set(key, [...(childrenByParent.get(key) ?? []), info]);
+		}
+		const queue = [canonicalSessionPath(rootSessionFile)];
+		const visited = new Set(queue);
+		while (queue.length > 0) {
+			for (const info of childrenByParent.get(queue.shift()!) ?? []) {
+				const child = canonicalSessionPath(info.path);
+				if (visited.has(child)) continue;
+				visited.add(child);
+				sessions.push({ sessionId: info.id, sessionFile: info.path });
+				queue.push(child);
+			}
+		}
+		let registered = false;
+		for (const { sessionId, sessionFile } of sessions) {
+			const artifactDir = getSessionArtifactPathForFile(sessionFile, sessionId);
+			if (!existsSync(join(artifactDir, SESSION_SCHEDULED_JOBS_FILENAME))) continue;
+			store.registerSessionArtifact(sessionId, artifactDir);
+			registered = true;
+		}
+		if (!registered) return;
+		for (const { sessionFile } of sessions) {
+			store.cancelJobsForSession({ sessionFile });
+		}
+	}
+
 	private async cancelEphemeralWorkerScheduledJobs(worker: ResidentWorker): Promise<void> {
 		const context = this.workerSessionArtifactContext(worker);
 		if (!context || !worker.descriptor.rootSessionId) {
 			return;
 		}
+		const rootKey = canonicalSessionPath(context.sessionFile);
 		try {
-			const store = AgentCronJobStore.forSessionArtifacts();
-			const sessions = [{ sessionId: worker.descriptor.rootSessionId, sessionFile: context.sessionFile }];
-			const childrenByParent = new Map<string, RlmLedgerEdge[]>();
-			for (const edge of await this.rlmSpawnLedger().liveEdges()) {
-				const key = canonicalSessionPath(edge.parent);
-				childrenByParent.set(key, [...(childrenByParent.get(key) ?? []), edge]);
-			}
-			const queue = [canonicalSessionPath(context.sessionFile)];
-			const visited = new Set(queue);
-			while (queue.length > 0) {
-				for (const edge of childrenByParent.get(queue.shift()!) ?? []) {
-					const child = canonicalSessionPath(edge.child);
-					if (visited.has(child)) continue;
-					visited.add(child);
-					sessions.push({ sessionId: basename(edge.child, ".jsonl"), sessionFile: edge.child });
-					queue.push(child);
-				}
-			}
-			let registered = false;
-			for (const { sessionId, sessionFile } of sessions) {
-				const artifactDir = getSessionArtifactPathForFile(sessionFile, sessionId);
-				if (!existsSync(join(artifactDir, SESSION_SCHEDULED_JOBS_FILENAME))) continue;
-				store.registerSessionArtifact(sessionId, artifactDir);
-				registered = true;
-			}
-			if (!registered) return;
-			for (const { sessionFile } of sessions) {
-				store.cancelJobsForSession({ sessionFile });
-			}
+			await this.cancelScheduledJobsForSessionTree(worker.descriptor.rootSessionId, context.sessionFile);
+			this.pendingEphemeralCancels.delete(rootKey);
 		} catch (error) {
+			this.pendingEphemeralCancels.set(rootKey, {
+				rootSessionId: worker.descriptor.rootSessionId,
+				rootSessionFile: context.sessionFile,
+			});
 			this.log(
 				`Could not cancel scheduled jobs for client-owned worker ${worker.descriptor.workerId}: ${String(error)}`,
 			);

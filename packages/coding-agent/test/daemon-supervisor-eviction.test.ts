@@ -688,15 +688,18 @@ describe("daemon supervisor scheduled-session wake", () => {
 		} as SessionInfo;
 	}
 
-	function makeScheduledSessionFile(id: string): { sessionFile: string; store: AgentCronJobStore } {
+	function makeScheduledSessionFile(
+		fileBase: string,
+		sessionId = fileBase,
+	): { sessionFile: string; store: AgentCronJobStore } {
 		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-wake-"));
 		tempDirs.push(directory);
 		const sessionDir = join(directory, "sessions");
 		mkdirSync(sessionDir, { recursive: true });
-		const sessionFile = join(sessionDir, `${id}.jsonl`);
+		const sessionFile = join(sessionDir, `${fileBase}.jsonl`);
 		writeFileSync(sessionFile, "");
 		const store = AgentCronJobStore.forSessionArtifacts();
-		store.registerSessionArtifact(id, getSessionArtifactPathForFile(sessionFile, id));
+		store.registerSessionArtifact(sessionId, getSessionArtifactPathForFile(sessionFile, sessionId));
 		return { sessionFile, store };
 	}
 
@@ -810,24 +813,65 @@ describe("daemon supervisor scheduled-session wake", () => {
 	it("cancels a client-owned worker's scheduled jobs, descendants included, when its registration dies", async () => {
 		const supervisor = makeSupervisor();
 		const root = makeScheduledSessionFile("owned-root");
-		const child = makeScheduledSessionFile("owned-child");
+		// The child's persisted id differs from its filename; the artifact keys on the id.
+		const child = makeScheduledSessionFile("owned-child", "owned-child-real");
 		armHeartbeat(root.store, "owned-root", root.sessionFile, now);
-		armHeartbeat(child.store, "owned-child", child.sessionFile, now);
+		armHeartbeat(child.store, "owned-child-real", child.sessionFile, now);
 		const owned = makeWorker("owned", []);
 		owned.descriptor.ownerClientId = "owner";
 		owned.descriptor.rootSessionId = "owned-root";
 		owned.descriptor.sessionFile = root.sessionFile;
 		supervisor.rlmSpawnLedgerInstance = {
-			family: vi.fn(async () => []),
-			liveEdges: vi.fn(async () => [
-				{ parent: root.sessionFile, child: child.sessionFile, childId: "c1", depth: 1 },
+			family: vi.fn(async () => [
+				makeSavedInfo(root.sessionFile, "owned-root"),
+				makeSavedInfo(child.sessionFile, "owned-child-real", {
+					parentSessionPath: root.sessionFile,
+					rlmDepth: 1,
+				}),
 			]),
+			liveEdges: vi.fn(async () => []),
 		};
 
 		await supervisor.cancelEphemeralWorkerScheduledJobs(owned);
 
 		expect(root.store.list().map((job) => job.status)).toEqual(["cancelled"]);
 		expect(child.store.list().map((job) => job.status)).toEqual(["cancelled"]);
+	});
+
+	it("keeps a tree wake-ineligible after a failed ephemeral cancel until an enumeration retry lands", async () => {
+		const supervisor = makeSupervisor();
+		supervisor.createOrReuseWorker = vi.fn();
+		const { sessionFile, store } = makeScheduledSessionFile("failed-cancel-root");
+		armHeartbeat(store, "failed-cancel-root", sessionFile, now - 10 * 60_000);
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => [makeSavedInfo(sessionFile, "failed-cancel-root")]),
+			liveEdges: vi.fn(async () => []),
+		};
+		const owned = makeWorker("owned", []);
+		owned.descriptor.ownerClientId = "owner";
+		owned.descriptor.rootSessionId = "failed-cancel-root";
+		owned.descriptor.sessionFile = sessionFile;
+		const treeCancel = vi
+			.spyOn(
+				supervisor as unknown as { cancelScheduledJobsForSessionTree: (id: string, file: string) => Promise<void> },
+				"cancelScheduledJobsForSessionTree",
+			)
+			.mockRejectedValue(new Error("corrupt scheduled-jobs.json"));
+
+		await supervisor.cancelEphemeralWorkerScheduledJobs(owned);
+		expect(store.list().map((job) => job.status)).toEqual(["active"]);
+
+		await supervisor.recomputeScheduledSessionWake();
+		expect(supervisor.scheduledWakeTimer).toBeUndefined();
+		await supervisor.wakeDueScheduledSessions(now);
+		expect(supervisor.createOrReuseWorker).not.toHaveBeenCalled();
+		expect(store.list().map((job) => job.status)).toEqual(["active"]);
+
+		// The next enumeration retries the cancel; once it lands the jobs are gone for good.
+		treeCancel.mockRestore();
+		await supervisor.recomputeScheduledSessionWake();
+		expect(store.list().map((job) => job.status)).toEqual(["cancelled"]);
+		expect(supervisor.scheduledWakeTimer).toBeUndefined();
 	});
 
 	it("pauses a passivated heartbeat against its durable store without waking it", async () => {
