@@ -112,13 +112,14 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 ## Current integration baseline
 
 - Branch: `feat/sandbox-backed-sessions` in `/Users/milkkarten/prime-agent-sandbox-sessions`.
-- Reviewed integration tip: `f6ede58e5`.
-- Latest full root `npm run check` is green across 1014 files, TypeScript, Biome, installer rendering, and browser smoke.
+- Reviewed integration tip: `55fe678a8`.
+- Latest full root `npm run check` is green across 1016 files, TypeScript, Biome, installer rendering, and browser smoke.
 - Accepted B03 foundations: exact frame codec `55b40d7f1`, journal-record codec `5551582bd`, delivery index `5e8e926b4`, direct-final immutable journal publication `8bd83db6c`, immutable delivery-marker publication `df846c08f`, and page-atomic bounded directory recovery `9df8a3da9`.
 - Accepted B11 foundations: observation core `939a7baaf`, exact snapshots `62e8b073a`.
 - Accepted B14 foundations: provider client `2195c7a23`, tunnel manager `a636f7d99`, PAB1 `d21f53c1a`, FD3 reader `723a8db52`, PAAR codec `a17f5588d`, stdin frame reader `4beeaa5da`, TypeScript correction `1d63a72c0`, SSH spawn specification `4dd8790db`, SSH specification tests `af83a786f`/`a7add61a4`, one-use upgrade authentication `a4976298c`, and Node stdin normalization `4a8962b54`.
 - Active B03 work: the recovered-state durable store. Ordered relay and B10 durable communication now wait only for the store boundary.
-- Active B14 work: SSH readiness/cleanup, trusted-tree PAAR builder, streaming PAAR verifier, one-open PAAR installer, offline runtime packaging, and listener/server/orchestration on top of accepted upgrade authentication.
+- Accepted B14 SSH readiness/process cleanup monitor: integration commits `169c29526`, `7fd5770b5`, and `2da8baa52`; 133 focused tests verify synchronous registration backout, durable admission, independent exit/close evidence, no post-exit signal, shared cleanup, pending-admission uncertainty, and intrinsic Promise handling.
+- Active B14 work: clean PAAR builder v6, verifier v6, installer v7, offline runtime composer v2, FD3 wrapper v4, listener/server v7, and later orchestration on top of accepted foundations. Rejected commits `68821a32a`, `bc85d4388`, `9a116a2b0`, `cc1dff993`, `2c1800ad0`, and `8d361990c` remain isolated after direct source review.
 - Accepted B02 boundary: `2da8b4357` uses the existing `RemoteHostFrameEnvelope`, `RemoteObservationSnapshotV1`, and provider-usage semantics; it snapshots capabilities, owns subscription cleanup, and preserves local runtime behavior.
 - Rejected commits remain isolated and unmerged. This includes `a772e27a`, `f1f5cad9`, `35fb1c61`, `d7b56367`, `bce99cd9`, and `610c696c` plus their earlier rejected chains.
 - No paid sandbox, tunnel, VM, GPU, or live provider resource has been created during the resource-free implementation stage.
