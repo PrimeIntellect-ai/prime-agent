@@ -1065,6 +1065,7 @@ export class DaemonSupervisor {
 			hasOwnerClient: worker.descriptor.ownerClientId !== undefined,
 			isPreparingUpdateRestart:
 				this.updateRestartPhase !== undefined || worker.updateRestartPrepareClient !== undefined,
+			hasWakeBlindSchedule: this.isWakeBlindScheduledWorker(worker),
 			sessions: this.workerRosterEntries(worker)
 				.filter((entry) => !entry.queuedChild)
 				.map(sessionSummaryFromRosterEntry)
@@ -1110,10 +1111,8 @@ export class DaemonSupervisor {
 				}
 			}),
 		);
-		const candidates = [...refreshed].filter(
-			(worker) =>
-				!this.isWakeBlindScheduledWorker(worker) &&
-				canEvictWorker(this.workerEvictionSnapshot(worker), idleEvictionMinutes, now),
+		const candidates = [...refreshed].filter((worker) =>
+			canEvictWorker(this.workerEvictionSnapshot(worker), idleEvictionMinutes, now),
 		);
 		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
 		// Whole-tree candidates skip child work because stopWorker releases everything.
@@ -1247,7 +1246,8 @@ export class DaemonSupervisor {
 			this.shuttingDown ||
 			this.updateRestartPhase !== undefined ||
 			this.workers.get(worker.descriptor.workerId) !== worker ||
-			this.isWorkerStopping(worker)
+			this.isWorkerStopping(worker) ||
+			this.isWakeBlindScheduledWorker(worker)
 		) {
 			return false;
 		}

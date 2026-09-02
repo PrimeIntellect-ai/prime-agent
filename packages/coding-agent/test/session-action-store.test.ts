@@ -247,6 +247,7 @@ describe("whole-tree eviction capability", () => {
 		isStopping: false,
 		hasOwnerClient: false,
 		isPreparingUpdateRestart: false,
+		hasWakeBlindSchedule: false,
 		sessions: [idleSession],
 	};
 
@@ -272,6 +273,7 @@ describe("whole-tree eviction capability", () => {
 		["cron job", { sessions: [{ ...idleSession, hasRegisteredCronJob: true }] }],
 		["missing activity timestamp", { sessions: [{ ...idleSession, lastActivityAt: Number.NaN }] }],
 		["owner client", { hasOwnerClient: true }],
+		["wake-blind schedule", { hasWakeBlindSchedule: true }],
 		["update preparation", { isPreparingUpdateRestart: true }],
 		["disconnected worker", { isConnected: false }],
 		["stopping worker", { isStopping: true }],

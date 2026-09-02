@@ -366,6 +366,7 @@ export interface WorkerEvictionSnapshot {
 	isStopping: boolean;
 	hasOwnerClient: boolean;
 	isPreparingUpdateRestart: boolean;
+	hasWakeBlindSchedule: boolean;
 	sessions: readonly SessionEvictionSnapshot[];
 }
 
@@ -412,6 +413,7 @@ export function canEvictWorker(
 		worker.isStopping ||
 		worker.hasOwnerClient ||
 		worker.isPreparingUpdateRestart ||
+		worker.hasWakeBlindSchedule ||
 		worker.sessions.length === 0
 	) {
 		return false;

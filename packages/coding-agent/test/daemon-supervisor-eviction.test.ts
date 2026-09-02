@@ -181,6 +181,32 @@ describe("daemon supervisor whole-tree eviction", () => {
 		expect([...supervisor.workers.keys()].sort()).toEqual(["active", "attached", "blind-heartbeat", "cron"]);
 	});
 
+	it("keeps a custom-dir worker resident when a heartbeat lands during the eviction drain", async () => {
+		const now = Date.parse("2026-08-01T12:00:00.000Z");
+		const supervisor = makeSupervisor();
+		const blindDir = mkdtempSync(join(tmpdir(), "prime-custom-session-dir-"));
+		tempDirs.push(blindDir);
+		const worker = makeWorker("blind", [makeSummary("blind-root", now)]);
+		worker.descriptor.sessionFile = join(blindDir, "blind-root.jsonl");
+		supervisor.workers.set("blind", worker);
+		seedSupervisorRoster(supervisor, worker);
+		const armed = makeSummary("blind-root", now, { hasRegisteredHeartbeat: true });
+		worker
+			.client!.request.mockImplementationOnce(async () =>
+				success(undefined, "list", { sessions: [makeSummary("blind-root", now)] }),
+			)
+			.mockImplementation(async () => {
+				// A heartbeat_set admitted mid-drain pushes its registration mark before the fenced recheck.
+				supervisor.writeRosterEntry(workerRosterEntryFromSummary(armed), worker);
+				return success(undefined, "list", { sessions: [armed] });
+			});
+
+		await supervisor.runIdleEvictionSweep(now);
+
+		expect(supervisor.stopWorker).not.toHaveBeenCalled();
+		expect(supervisor.workers.get("blind")).toBe(worker);
+	});
+
 	it("delegates capped child passivation only to live non-evictable workers", async () => {
 		const now = Date.parse("2026-08-01T12:00:00.000Z");
 		const supervisor = makeSupervisor();
@@ -505,8 +531,14 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 			makeWorker("one-message", [makeSummary("one-message-root", now)]),
 			makeWorker("cron", [makeSummary("cron-root", now, { messageCount: 0, hasRegisteredCronJob: true })]),
 			makeWorker("owned", [makeSummary("owned-root", now, { messageCount: 0 })]),
+			makeWorker("blind-heartbeat", [
+				makeSummary("blind-root", now, { messageCount: 0, hasRegisteredHeartbeat: true }),
+			]),
 		];
 		exempt[4]!.descriptor.ownerClientId = "owner";
+		const blindDir = mkdtempSync(join(tmpdir(), "prime-custom-session-dir-"));
+		tempDirs.push(blindDir);
+		exempt[5]!.descriptor.sessionFile = join(blindDir, "blind-root.jsonl");
 		for (const worker of [empty, heartbeat, ...exempt]) {
 			supervisor.workers.set(worker.descriptor.workerId, worker);
 		}
@@ -520,6 +552,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 			"heartbeat-root",
 			"cron-root",
 			"owned-root",
+			"blind-root",
 		]);
 		supervisor.clients.add(first);
 		supervisor.clients.add(viewer);
@@ -533,7 +566,14 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(heartbeat, true));
 		await settle();
 		expect(supervisor.stopWorker).toHaveBeenCalledTimes(2);
-		expect([...supervisor.workers.keys()].sort()).toEqual(["busy", "cron", "named", "one-message", "owned"]);
+		expect([...supervisor.workers.keys()].sort()).toEqual([
+			"blind-heartbeat",
+			"busy",
+			"cron",
+			"named",
+			"one-message",
+			"owned",
+		]);
 		expect(supervisor.log).toHaveBeenCalledWith(expect.stringContaining("Evicted empty session worker empty"));
 	});
 
