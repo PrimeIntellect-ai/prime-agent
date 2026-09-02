@@ -902,7 +902,7 @@ describe("SandboxLifecycle", () => {
 			stdout: makeGetJson({ status: "PROVISIONING" }),
 		});
 		const life = lifeWithId(createPrimeSandboxProvider(runner), { id: SBX_ID, status: "PROVISIONING" });
-		await expect(life.waitForReady()).rejects.toThrow(/timed out/);
+		await expect(life.waitForReady()).rejects.toThrow(/wait_timeout/);
 	});
 
 	it("waitForReady respects AbortSignal", async () => {
