@@ -949,10 +949,16 @@ export class DaemonSupervisor {
 			infoBySessionId.set(info.id, info);
 		}
 		if (infoBySessionId.size === 0) return [];
-		const rootSessionFileFor = (info: SessionInfo): string => {
+		const uncoveredRootFor = (info: SessionInfo): string | undefined => {
 			let current = info;
 			const visited = new Set([canonicalSessionPath(current.path)]);
-			while (current.parentSessionPath) {
+			while (true) {
+				try {
+					if (this.findWorkerBySessionFile(current.path)) return undefined;
+				} catch {
+					return undefined;
+				}
+				if (!current.parentSessionPath) break;
 				const parent = infoByPath.get(canonicalSessionPath(current.parentSessionPath));
 				if (!parent || visited.has(canonicalSessionPath(parent.path))) break;
 				visited.add(canonicalSessionPath(parent.path));
@@ -973,13 +979,9 @@ export class DaemonSupervisor {
 				if (!includeInactive && job.status !== "active" && job.status !== "paused") continue;
 				const info = infoBySessionId.get(job.sessionId);
 				if (!info) continue;
-				const rootSessionFile = rootSessionFileFor(info);
+				const rootSessionFile = uncoveredRootFor(info);
+				if (rootSessionFile === undefined) continue;
 				if (this.pendingEphemeralCancels.has(canonicalSessionPath(rootSessionFile))) continue;
-				try {
-					if (this.findWorkerBySessionFile(rootSessionFile)) continue;
-				} catch {
-					continue;
-				}
 				results.push({ rootSessionFile, job, info });
 			}
 		}

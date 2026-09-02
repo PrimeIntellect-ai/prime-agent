@@ -765,6 +765,30 @@ describe("daemon supervisor scheduled-session wake", () => {
 		});
 	});
 
+	it("does not wake the passive root over a mid-tree session that has its own resident worker", async () => {
+		const supervisor = makeSupervisor();
+		supervisor.createOrReuseWorker = vi.fn();
+		const root = makeScheduledSessionFile("covered-mid-root");
+		const mid = makeScheduledSessionFile("covered-mid");
+		armHeartbeat(mid.store, "covered-mid", mid.sessionFile, now - 10 * 60_000);
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => [
+				makeSavedInfo(root.sessionFile, "covered-mid-root"),
+				makeSavedInfo(mid.sessionFile, "covered-mid", { parentSessionPath: root.sessionFile, rlmDepth: 1 }),
+			]),
+			liveEdges: vi.fn(async () => []),
+		};
+		const resident = makeWorker("mid-worker", []);
+		resident.descriptor.sessionFile = mid.sessionFile;
+		supervisor.workers.set("mid-worker", resident);
+
+		await supervisor.wakeDueScheduledSessions(now);
+		expect(supervisor.createOrReuseWorker).not.toHaveBeenCalled();
+		await supervisor.scheduledWakeRecompute;
+		await supervisor.recomputeScheduledSessionWake();
+		expect(supervisor.scheduledWakeTimer).toBeUndefined();
+	});
+
 	it("skips a corrupt scheduled-jobs artifact but still wakes the other passive sessions", async () => {
 		const supervisor = makeSupervisor();
 		const healthy = makeScheduledSessionFile("healthy-root");
