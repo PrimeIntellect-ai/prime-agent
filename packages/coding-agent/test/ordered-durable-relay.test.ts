@@ -22,7 +22,44 @@ function hash(bytes: Uint8Array): string {
 	return createHash("sha256").update(bytes).digest("hex");
 }
 
-async function openStore(direction: "sent" | "received", counts: CloseCounts): Promise<DurableRelayStore> {
+interface DiskFile {
+	readonly name: string;
+	readonly bytes: Uint8Array;
+	readonly stat: Readonly<Record<string, unknown>>;
+}
+
+interface RelayDisk {
+	readonly files: DiskFile[];
+}
+
+function emptyDisk(): RelayDisk {
+	return { files: [] };
+}
+
+async function openStore(
+	direction: "sent" | "received",
+	counts: CloseCounts,
+	disk: RelayDisk = emptyDisk(),
+): Promise<DurableRelayStore> {
+	const save = (name: string, bytes: Uint8Array): void => {
+		const copy = new Uint8Array(bytes);
+		disk.files.push({
+			name,
+			bytes: copy,
+			stat: {
+				dev: "1",
+				ino: String(disk.files.length + 1),
+				uid: "501",
+				mode: 0o600,
+				size: copy.byteLength,
+				nlink: 1,
+				isFile: true,
+				isSymlink: false,
+				mtimeNs: "1",
+				ctimeNs: "1",
+			},
+		});
+	};
 	const journalPublisher = {
 		publish(raw: unknown): Promise<unknown> {
 			const value = raw as { seq: number; bytes: Uint8Array };
@@ -32,6 +69,7 @@ async function openStore(direction: "sent" | "received", counts: CloseCounts): P
 				size: value.bytes.byteLength,
 				sha256: hash(value.bytes),
 			};
+			save(`${String(value.seq).padStart(20, "0")}.b03-journal`, value.bytes);
 			value.bytes.fill(0);
 			return Promise.resolve(result);
 		},
@@ -49,6 +87,7 @@ async function openStore(direction: "sent" | "received", counts: CloseCounts): P
 				size: value.bytes.byteLength,
 				sha256: hash(value.bytes),
 			};
+			save(`${String(value.indexSeq).padStart(20, "0")}.b03-delivery`, value.bytes);
 			value.bytes.fill(0);
 			return Promise.resolve(result);
 		},
@@ -59,10 +98,36 @@ async function openStore(direction: "sent" | "received", counts: CloseCounts): P
 	};
 	const recoveryBackend = {
 		listPage(): Promise<unknown> {
-			return Promise.resolve({ entries: [], nextCursor: null });
+			const entries = [...disk.files]
+				.sort((left, right) => left.name.localeCompare(right.name))
+				.map((file) => ({ name: file.name, stat: file.stat }));
+			return Promise.resolve({ entries, nextCursor: null });
 		},
-		open(): Promise<unknown> {
-			return Promise.resolve({ status: "error" });
+		open(raw: unknown): Promise<unknown> {
+			const name = (raw as { name: string }).name;
+			const file = disk.files.find((candidate) => candidate.name === name);
+			if (!file) return Promise.resolve({ status: "error" });
+			return Promise.resolve({
+				status: "opened",
+				handle: {
+					readAt(offset: number, size: number): Promise<unknown> {
+						if (offset >= file.bytes.byteLength) return Promise.resolve({ status: "eof" });
+						return Promise.resolve({
+							status: "bytes",
+							bytes: file.bytes.slice(offset, Math.min(offset + size, file.bytes.byteLength)),
+						});
+					},
+					confirmEof(size: number): Promise<unknown> {
+						return Promise.resolve({ status: size === file.bytes.byteLength ? "eof" : "error" });
+					},
+					fstat(): Promise<unknown> {
+						return Promise.resolve(file.stat);
+					},
+					close(): Promise<unknown> {
+						return Promise.resolve({ status: "closed" });
+					},
+				},
+			});
 		},
 		close(): Promise<unknown> {
 			counts.recovery += 1;
@@ -130,11 +195,13 @@ async function openRelay(
 	overrides?: Readonly<{
 		transportSend?: (raw: unknown) => Promise<unknown>;
 		applicationApply?: (raw: unknown) => Promise<unknown>;
+		incomingDisk?: RelayDisk;
+		outgoingDisk?: RelayDisk;
 	}>,
 ): Promise<RelayHarness> {
 	const counts = capCounts();
-	const incoming = await openStore("received", counts);
-	const outgoing = await openStore("sent", counts);
+	const incoming = await openStore("received", counts, overrides?.incomingDisk);
+	const outgoing = await openStore("sent", counts, overrides?.outgoingDisk);
 	const sent: RemoteHostFrameEnvelope[] = [];
 	const applied: RemoteHostFrameEnvelope[] = [];
 	const transport = {
@@ -219,6 +286,22 @@ describe("ordered durable relay", () => {
 			expect(harness.sent[0].frame.ackId).not.toBe(harness.sent[0].frameId);
 		}
 		await harness.relay.close();
+	});
+
+	it("replays the exact ACK after both durable stores restart", async () => {
+		const incomingDisk = emptyDisk();
+		const outgoingDisk = emptyDisk();
+		const first = await openRelay({ incomingDisk, outgoingDisk });
+		const initial = await first.relay.receive(eventEnvelope());
+		expect(initial.ok).toBe(true);
+		const exactAck = first.sent[0];
+		await first.relay.close();
+		const second = await openRelay({ incomingDisk, outgoingDisk });
+		const replay = await second.relay.receive(eventEnvelope());
+		expect(replay.ok && replay.value.action).toBe("replayed_ack");
+		expect(second.applied).toHaveLength(0);
+		expect(second.sent).toEqual([exactAck]);
+		await second.relay.close();
 	});
 
 	it("leaves pending durable evidence and poisons after application failure", async () => {
