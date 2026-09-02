@@ -34,7 +34,12 @@ import {
 	type SubagentRuntimeHost,
 } from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
-import { readSessionInfo, type SessionInfo, SessionManager } from "../src/core/session-manager.js";
+import {
+	getSessionArtifactPathForFile,
+	readSessionInfo,
+	type SessionInfo,
+	SessionManager,
+} from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import {
@@ -4013,17 +4018,25 @@ describe("daemon mode helpers", () => {
 		try {
 			const fixture = makePersistedRlmDaemonFixture(tempDir);
 			const childSessionId = basename(fixture.childArtifactDir);
+			const grandchildSessionId = basename(fixture.grandchildSessionFile, ".jsonl");
 			const seedStore = AgentCronJobStore.forSessionArtifacts();
 			seedStore.registerSessionArtifact(childSessionId, fixture.childArtifactDir);
-			const heartbeat = seedStore.createRlmHeartbeat({
-				activeSessionId: "stale-child-active-id",
-				sessionId: childSessionId,
-				sessionFile: fixture.childSessionFile,
-				cwd: tempDir,
-				runtimeKind: "subagent",
-				scheduleText: "every 30s",
-				prompt: "report exactly: hi",
-			});
+			seedStore.registerSessionArtifact(
+				grandchildSessionId,
+				getSessionArtifactPathForFile(fixture.grandchildSessionFile, grandchildSessionId),
+			);
+			const makeJob = (sessionId: string, sessionFile: string) =>
+				seedStore.createRlmHeartbeat({
+					activeSessionId: `stale-${sessionId}`,
+					sessionId,
+					sessionFile,
+					cwd: tempDir,
+					runtimeKind: "subagent",
+					scheduleText: "every 30s",
+					prompt: "report exactly: hi",
+				});
+			makeJob(childSessionId, fixture.childSessionFile);
+			const grandchildHeartbeat = makeJob(grandchildSessionId, fixture.grandchildSessionFile);
 
 			const workerDaemon = new AgentDaemon(join(tempDir, "worker-daemon.sock"), {
 				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: join(tempDir, "sessions") },
@@ -4034,11 +4047,19 @@ describe("daemon mode helpers", () => {
 				cronStore: AgentCronJobStore;
 				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
 			};
+			// A corrupt child artifact must not strand the remaining descendants.
+			const recover = internals.cronStore.recoverSessionArtifact.bind(internals.cronStore);
+			vi.spyOn(internals.cronStore, "recoverSessionArtifact").mockImplementation((sessionId) => {
+				if (sessionId === childSessionId) throw new Error("corrupt scheduled-jobs.json");
+				return recover(sessionId);
+			});
 
 			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
 
-			// A fresh worker must schedule the passive child's armed heartbeat without hydrating it.
-			await vi.waitFor(() => expect(internals.cronStore.list().some((job) => job.id === heartbeat.id)).toBe(true));
+			// A fresh worker must schedule passive descendants' armed heartbeats without hydrating them.
+			await vi.waitFor(() =>
+				expect(internals.cronStore.list().some((job) => job.id === grandchildHeartbeat.id)).toBe(true),
+			);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

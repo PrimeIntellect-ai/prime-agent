@@ -915,11 +915,15 @@ export class DaemonSupervisor {
 			});
 	}
 
-	/** Durable truth only: the saved-session catalog plus each session's scheduled-jobs artifact. */
+	/**
+	 * Durable truth only: the RLM spawn ledger's family (roots plus ledger
+	 * descendants, fork headers stripped) plus each session's scheduled-jobs
+	 * artifact.
+	 */
 	private async collectPassiveScheduledJobs(): Promise<
 		Array<{ rootSessionFile: string; job: AgentCronJob; info: SessionInfo }>
 	> {
-		const infos = await this.catalog.list(undefined, this.defaultSessionConfig.sessionDir);
+		const infos = await this.rlmSpawnLedger().family();
 		const infoByPath = new Map(infos.map((info) => [canonicalSessionPath(info.path), info] as const));
 		const store = AgentCronJobStore.forSessionArtifacts();
 		const infoBySessionId = new Map<string, SessionInfo>();
@@ -960,10 +964,10 @@ export class DaemonSupervisor {
 	}
 
 	private async recomputeScheduledSessionWake(): Promise<void> {
-		if (this.shuttingDown) return;
+		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
 		const candidates = await this.collectPassiveScheduledJobs();
 		this.clearScheduledWakeTimer();
-		if (this.shuttingDown) return;
+		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
 		const now = Date.now();
 		const wakeTimes: number[] = [];
 		const candidateRoots = new Set(candidates.map(({ rootSessionFile }) => canonicalSessionPath(rootSessionFile)));
@@ -990,8 +994,10 @@ export class DaemonSupervisor {
 	}
 
 	private async wakeDueScheduledSessions(now = Date.now()): Promise<void> {
+		// No recompute here: while an update restart is being prepared the schedule
+		// stays disarmed; the phase transition (or the next boot) re-arms it once.
 		if (this.shuttingDown || this.updateRestartPhase !== undefined) {
-			this.scheduleScheduledSessionWakeRecompute();
+			this.clearScheduledWakeTimer();
 			return;
 		}
 		try {
@@ -2284,6 +2290,25 @@ export class DaemonSupervisor {
 							heartbeat.job.id === command.jobId && heartbeat.job.activeSessionId === command.activeSessionId,
 					),
 				);
+				if (!cachedWorker) {
+					// A passivated session's heartbeat is managed against its durable
+					// store; no worker gets woken just to flip a job's status.
+					const passive = (await this.collectPassiveScheduledJobs()).find(
+						({ job }) => job.id === command.jobId && job.activeSessionId === command.activeSessionId,
+					);
+					if (passive) {
+						const store = AgentCronJobStore.forSessionArtifacts();
+						store.registerSessionArtifact(
+							passive.info.id,
+							getSessionArtifactPathForFile(resolve(passive.info.path), passive.info.id),
+						);
+						const heartbeat = store.manageHeartbeat(command.activeSessionId, command.jobId, command.action);
+						if (heartbeat) {
+							this.broadcastHeartbeatsChanged();
+							return success(command.id, "heartbeat_manage", { heartbeat });
+						}
+					}
+				}
 				const worker = cachedWorker ?? (await this.findWorkerForClient(client, command.activeSessionId)).worker;
 				this.assertWorkerAccessibleToClient(client, worker, command.activeSessionId);
 				const response = await this.forwardToWorker(worker, command);
@@ -5923,6 +5948,7 @@ export class DaemonSupervisor {
 			return manifest;
 		} catch (error) {
 			this.updateRestartPhase = undefined;
+			this.scheduleScheduledSessionWakeRecompute();
 			throw error;
 		}
 	}
@@ -6308,6 +6334,11 @@ export class DaemonSupervisor {
 		this.invalidateWorkerSessionInputPauses(worker, "Session worker stopped while input was paused");
 		this.workers.delete(worker.descriptor.workerId);
 		this.flipWorkerRosterEntriesInactive(worker);
+		// Client-owned schedules die with the registration, like their roster rows:
+		// a private session must never be listed or woken once its owner is gone.
+		if (removeDescriptor && worker.descriptor.ownerClientId !== undefined) {
+			await this.cancelEphemeralWorkerScheduledJobs(worker);
+		}
 		if (removeDescriptor) {
 			this.deleteWorkerDescriptor(worker);
 		}
@@ -6428,6 +6459,48 @@ export class DaemonSupervisor {
 				sessionFile: context.sessionFile,
 			});
 			await this.catalog.archive(context.sessionFile, worker.descriptor.rootSessionId);
+		}
+	}
+
+	private async cancelEphemeralWorkerScheduledJobs(worker: ResidentWorker): Promise<void> {
+		const context = this.workerSessionArtifactContext(worker);
+		if (!context || !worker.descriptor.rootSessionId) {
+			return;
+		}
+		try {
+			const store = AgentCronJobStore.forSessionArtifacts();
+			const sessions = [{ sessionId: worker.descriptor.rootSessionId, sessionFile: context.sessionFile }];
+			const childrenByParent = new Map<string, RlmLedgerEdge[]>();
+			for (const edge of await this.rlmSpawnLedger().liveEdges()) {
+				const key = canonicalSessionPath(edge.parent);
+				childrenByParent.set(key, [...(childrenByParent.get(key) ?? []), edge]);
+			}
+			const queue = [canonicalSessionPath(context.sessionFile)];
+			const visited = new Set(queue);
+			while (queue.length > 0) {
+				for (const edge of childrenByParent.get(queue.shift()!) ?? []) {
+					const child = canonicalSessionPath(edge.child);
+					if (visited.has(child)) continue;
+					visited.add(child);
+					sessions.push({ sessionId: basename(edge.child, ".jsonl"), sessionFile: edge.child });
+					queue.push(child);
+				}
+			}
+			let registered = false;
+			for (const { sessionId, sessionFile } of sessions) {
+				const artifactDir = getSessionArtifactPathForFile(sessionFile, sessionId);
+				if (!existsSync(join(artifactDir, SESSION_SCHEDULED_JOBS_FILENAME))) continue;
+				store.registerSessionArtifact(sessionId, artifactDir);
+				registered = true;
+			}
+			if (!registered) return;
+			for (const { sessionFile } of sessions) {
+				store.cancelJobsForSession({ sessionFile });
+			}
+		} catch (error) {
+			this.log(
+				`Could not cancel scheduled jobs for client-owned worker ${worker.descriptor.workerId}: ${String(error)}`,
+			);
 		}
 	}
 

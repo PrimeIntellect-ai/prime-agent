@@ -38,6 +38,8 @@ interface SupervisorInternals {
 	idleEvictionFence?: Promise<void>;
 	mutationDrain: { begin(): void; end(): void };
 	catalog: { resolve: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn>; list?: ReturnType<typeof vi.fn> };
+	rlmSpawnLedgerInstance?: { family: ReturnType<typeof vi.fn>; liveEdges: ReturnType<typeof vi.fn> };
+	updateRestartPhase?: "draining" | "fencing" | "prepared";
 	createOrReuseWorker: ReturnType<typeof vi.fn>;
 	stopWorker: ReturnType<typeof vi.fn>;
 	log: ReturnType<typeof vi.fn>;
@@ -50,6 +52,7 @@ interface SupervisorInternals {
 	shutdown(exitCode: number, stopWorkers: boolean): Promise<never>;
 	handleCommand(client: object, command: object): Promise<unknown>;
 	writeRosterEntry(entry: object, worker?: object): unknown;
+	cancelEphemeralWorkerScheduledJobs(worker: WorkerFixture): Promise<void>;
 }
 
 const tempDirs: string[] = [];
@@ -736,10 +739,13 @@ describe("daemon supervisor scheduled-session wake", () => {
 		const child = makeScheduledSessionFile("wake-child");
 		// Created 10 minutes ago on a 5-minute schedule: due (and missed) by now.
 		armHeartbeat(child.store, "wake-child", child.sessionFile, now - 10 * 60_000);
-		supervisor.catalog.list = vi.fn(async () => [
-			makeSavedInfo(root.sessionFile, "wake-root"),
-			makeSavedInfo(child.sessionFile, "wake-child", { parentSessionPath: root.sessionFile, rlmDepth: 1 }),
-		]);
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => [
+				makeSavedInfo(root.sessionFile, "wake-root"),
+				makeSavedInfo(child.sessionFile, "wake-child", { parentSessionPath: root.sessionFile, rlmDepth: 1 }),
+			]),
+			liveEdges: vi.fn(async () => []),
+		};
 		const woken = makeWorker("woken", [
 			makeSummary("woken-root", now, { sessionId: "wake-root", sessionFile: root.sessionFile }),
 		]);
@@ -765,7 +771,10 @@ describe("daemon supervisor scheduled-session wake", () => {
 		// Real-clock epochs keep nextRunAt in the future so the armed timer never fires mid-test.
 		const armedAt = Date.now();
 		const job = armHeartbeat(store, "armed-root", sessionFile, armedAt);
-		supervisor.catalog.list = vi.fn(async () => [makeSavedInfo(sessionFile, "armed-root")]);
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => [makeSavedInfo(sessionFile, "armed-root")]),
+			liveEdges: vi.fn(async () => []),
+		};
 
 		await supervisor.recomputeScheduledSessionWake();
 		expect(supervisor.scheduledWakeTimer).toBeDefined();
@@ -793,5 +802,76 @@ describe("daemon supervisor scheduled-session wake", () => {
 		store.cancel(job.id);
 		await supervisor.recomputeScheduledSessionWake();
 		expect(supervisor.scheduledWakeTimer).toBeUndefined();
+	});
+
+	it("does not arm the wake timer while an update restart is being prepared", async () => {
+		const supervisor = makeSupervisor();
+		supervisor.createOrReuseWorker = vi.fn();
+		const { sessionFile, store } = makeScheduledSessionFile("restart-root");
+		armHeartbeat(store, "restart-root", sessionFile, now - 10 * 60_000);
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => [makeSavedInfo(sessionFile, "restart-root")]),
+			liveEdges: vi.fn(async () => []),
+		};
+		supervisor.updateRestartPhase = "prepared";
+
+		await supervisor.recomputeScheduledSessionWake();
+		expect(supervisor.scheduledWakeTimer).toBeUndefined();
+		await supervisor.wakeDueScheduledSessions(now);
+		expect(supervisor.createOrReuseWorker).not.toHaveBeenCalled();
+		expect(supervisor.scheduledWakeTimer).toBeUndefined();
+
+		supervisor.updateRestartPhase = undefined;
+		// A throwing launch keeps the re-armed overdue job on the 60s retry backoff.
+		supervisor.createOrReuseWorker = vi.fn(async () => {
+			throw new Error("no launch in this test");
+		});
+		await supervisor.recomputeScheduledSessionWake();
+		expect(supervisor.scheduledWakeTimer).toBeDefined();
+	});
+
+	it("cancels a client-owned worker's scheduled jobs, descendants included, when its registration dies", async () => {
+		const supervisor = makeSupervisor();
+		const root = makeScheduledSessionFile("owned-root");
+		const child = makeScheduledSessionFile("owned-child");
+		armHeartbeat(root.store, "owned-root", root.sessionFile, now);
+		armHeartbeat(child.store, "owned-child", child.sessionFile, now);
+		const owned = makeWorker("owned", []);
+		owned.descriptor.ownerClientId = "owner";
+		owned.descriptor.rootSessionId = "owned-root";
+		owned.descriptor.sessionFile = root.sessionFile;
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => []),
+			liveEdges: vi.fn(async () => [
+				{ parent: root.sessionFile, child: child.sessionFile, childId: "c1", depth: 1 },
+			]),
+		};
+
+		await supervisor.cancelEphemeralWorkerScheduledJobs(owned);
+
+		expect(root.store.list().map((job) => job.status)).toEqual(["cancelled"]);
+		expect(child.store.list().map((job) => job.status)).toEqual(["cancelled"]);
+	});
+
+	it("pauses a passivated heartbeat against its durable store without waking it", async () => {
+		const supervisor = makeSupervisor();
+		supervisor.createOrReuseWorker = vi.fn();
+		const { sessionFile, store } = makeScheduledSessionFile("managed-root");
+		const job = armHeartbeat(store, "managed-root", sessionFile, now - 10 * 60_000);
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => [makeSavedInfo(sessionFile, "managed-root")]),
+			liveEdges: vi.fn(async () => []),
+		};
+
+		const response = await supervisor.handleCommand(
+			{ id: "manager", attachedActiveSessionIds: new Set<string>() },
+			{ id: "manage-1", type: "heartbeat_manage", activeSessionId: "stale-active", jobId: job.id, action: "pause" },
+		);
+
+		expect(response).toMatchObject({ success: true, data: { heartbeat: { id: job.id, status: "paused" } } });
+		expect(store.list().map((candidate) => candidate.status)).toEqual(["paused"]);
+		await supervisor.scheduledWakeRecompute;
+		expect(supervisor.scheduledWakeTimer).toBeUndefined();
+		expect(supervisor.createOrReuseWorker).not.toHaveBeenCalled();
 	});
 });

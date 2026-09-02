@@ -1544,10 +1544,17 @@ export class AgentDaemon {
 	private async registerPassiveDescendantCronArtifacts(): Promise<void> {
 		let registered = false;
 		for (const passive of await this.listPassiveRlmSubagents()) {
-			const artifactDir = getSessionArtifactPathForFile(resolve(passive.entry.sessionFile), passive.info.id);
-			if (this.cronStore.registerSessionArtifact(passive.info.id, artifactDir)) {
-				this.cronStore.recoverSessionArtifact(passive.info.id);
-				registered = true;
+			// One corrupt artifact must not strand the remaining descendants' jobs.
+			try {
+				const artifactDir = getSessionArtifactPathForFile(resolve(passive.entry.sessionFile), passive.info.id);
+				if (this.cronStore.registerSessionArtifact(passive.info.id, artifactDir)) {
+					registered = true;
+					this.cronStore.recoverSessionArtifact(passive.info.id);
+				}
+			} catch (error) {
+				this.log(
+					`Could not register scheduled jobs for passive subagent ${passive.entry.childId}: ${String(error)}`,
+				);
 			}
 		}
 		if (registered) {
