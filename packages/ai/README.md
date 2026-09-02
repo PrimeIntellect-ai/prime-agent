@@ -1272,6 +1272,8 @@ Create a new provider file (for example `amazon-bedrock.ts`) that exports:
 
 #### 4. Model Generation (`scripts/generate-models.ts`)
 
+Normal builds compile the committed `src/models.generated.ts` snapshot and do not contact live provider APIs. Refresh the snapshot intentionally from the repository root with `bun run models:refresh`, then review and commit the generated diff. Live catalog changes must not make unrelated pull-request builds nondeterministic.
+
 - Add logic to fetch and parse models from the provider's source (e.g., models.dev API)
 - Map provider model data to the standardized `Model` interface
 - Handle provider-specific quirks (pricing format, capability flags, model ID transformations)
