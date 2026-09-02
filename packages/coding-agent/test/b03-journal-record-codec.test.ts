@@ -7,10 +7,13 @@
  * JSON parse failures, unknown/missing/reorder/whitespace/duplicate escaped
  * key/-0/digest/case/envelope mutations, caller byte erase every path,
  * returned deep freeze/no aliases/mutation, caller envelopeDigest rejection,
- * empty expected rejection, nested envelope canonical key order.
+ * empty expected rejection, nested envelope canonical key order,
+ * invalid-UTF-8 caller erasure, overflow encoded cleanup,
+ * reentrant/concurrent encode deterministic output, success result mutation.
  */
 
 import { describe, expect, it } from "vitest";
+import type { JournalRecordV1 } from "../src/modes/daemon/b03-journal-record-codec.js";
 import { decodeJournalRecordV1, encodeJournalRecordV1 } from "../src/modes/daemon/b03-journal-record-codec.js";
 import type { RemoteHostFrame, RemoteHostFrameEnvelope } from "../src/modes/daemon/remote-agent-host-protocol.js";
 import {
@@ -219,7 +222,7 @@ describe("envelope digest known", () => {
 // ===========================================================================
 
 describe("exact golden key order", () => {
-	it("encode produces fixed key order via JSON.stringify replacer", () => {
+	it("encode produces fixed key order via insertion-order JSON.stringify", () => {
 		const raw = makeRecordRaw(validEnvelope());
 		const enc = encodeJournalRecordV1(raw);
 		expect(enc.ok).toBe(true);
@@ -267,7 +270,7 @@ describe("exact golden key order", () => {
 		expect(dec.ok).toBe(false);
 	});
 
-	it("nested envelope keys are in canonical sorted order", () => {
+	it("nested envelope preserves decodeEnvelope insertion order (not re-sorted)", () => {
 		const env = validEnvelope();
 		const raw = makeRecordRaw(env);
 		const enc = encodeJournalRecordV1(raw);
@@ -277,15 +280,27 @@ describe("exact golden key order", () => {
 		const jsonStr = new TextDecoder().decode(enc.bytes);
 		const parsed = JSON.parse(jsonStr);
 
-		// envelope keys: type, frameId, protocol, sentAt, frame
-		const envKeys = Object.keys(parsed.envelope);
-		const sortedEnv = [...envKeys].sort();
-		expect(envKeys).toEqual(sortedEnv);
+		// Top-level keys are in CANONICAL_KEYS insertion order
+		const topKeys = Object.keys(parsed);
+		expect(topKeys).toEqual([
+			"version",
+			"journalSeq",
+			"direction",
+			"hostId",
+			"generation",
+			"sessionId",
+			"recordedAt",
+			"envelope",
+			"envelopeDigest",
+		]);
 
-		// frame keys inside envelope
+		// Nested envelope keys preserve insertion order from decodeEnvelope
+		const envKeys = Object.keys(parsed.envelope);
+		expect(envKeys).toEqual(["type", "frameId", "protocol", "sentAt", "frame"]);
+
+		// Nested frame keys preserve insertion order from decodeEnvelope
 		const frameKeys = Object.keys(parsed.envelope.frame);
-		const sortedFrame = [...frameKeys].sort();
-		expect(frameKeys).toEqual(sortedFrame);
+		expect(frameKeys).toEqual(["type", "id", "sequence", "cursor", "emittedAt", "body"]);
 	});
 });
 
@@ -541,7 +556,7 @@ describe("hostile expected inputs", () => {
 		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
 		expect(enc.ok).toBe(true);
 		if (!enc.ok) return;
-		const obj = { journalSeq: 1, hostId: "h-1", generation: "g-1", sessionId: "s-1" };
+		const obj: Record<string, unknown> = { journalSeq: 1, hostId: "h-1", generation: "g-1", sessionId: "s-1" };
 		Object.defineProperty(obj, "evil", { get: () => "x", enumerable: true });
 		expect(decodeJournalRecordV1(enc.bytes, obj).ok).toBe(false);
 	});
@@ -550,7 +565,7 @@ describe("hostile expected inputs", () => {
 		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
 		expect(enc.ok).toBe(true);
 		if (!enc.ok) return;
-		const obj = { journalSeq: 1, hostId: "h-1", generation: "g-1", sessionId: "s-1" };
+		const obj: Record<string, unknown> = { journalSeq: 1, hostId: "h-1", generation: "g-1", sessionId: "s-1" };
 		Object.defineProperty(obj, Symbol.for("k"), { value: 1, enumerable: true });
 		expect(decodeJournalRecordV1(enc.bytes, obj).ok).toBe(false);
 	});
@@ -590,10 +605,25 @@ describe("hostile expected inputs", () => {
 			}).ok,
 		).toBe(false);
 	});
+
+	it("rejects expected non-plain-object (Date)", () => {
+		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
+		expect(enc.ok).toBe(true);
+		if (!enc.ok) return;
+		const d = new Date();
+		expect(decodeJournalRecordV1(enc.bytes, d as any).ok).toBe(false);
+	});
+
+	it("rejects expected null", () => {
+		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
+		expect(enc.ok).toBe(true);
+		if (!enc.ok) return;
+		expect(decodeJournalRecordV1(enc.bytes, null as any).ok).toBe(false);
+	});
 });
 
 // ===========================================================================
-// 8. Hostile bytes inputs
+// 8. Hostile bytes inputs + erasure
 // ===========================================================================
 
 describe("hostile bytes inputs", () => {
@@ -650,16 +680,25 @@ describe("hostile bytes inputs", () => {
 		const dec = decodeJournalRecordV1(enc.bytes, validExpected());
 		expect(dec.ok).toBe(true);
 
-		// Input bytes should be zero-filled
 		for (let i = 0; i < enc.bytes.length; i++) {
 			expect(enc.bytes[i]).toBe(0);
 		}
 	});
 
-	it("erases input bytes on failure", () => {
+	it("erases input bytes on failure (invalid JSON)", () => {
 		const bad = bytesFrom("{invalid}");
 		const dec = decodeJournalRecordV1(bad, validExpected());
 		expect(dec.ok).toBe(false);
+		for (let i = 0; i < bad.length; i++) {
+			expect(bad[i]).toBe(0);
+		}
+	});
+
+	it("erases input bytes on failure (invalid UTF-8)", () => {
+		const bad = new Uint8Array([0xe2, 0x82]); // incomplete UTF-8 sequence
+		const dec = decodeJournalRecordV1(bad, validExpected());
+		expect(dec.ok).toBe(false);
+		// Even after UTF-8 decode failure, the caller bytes must be erased
 		for (let i = 0; i < bad.length; i++) {
 			expect(bad[i]).toBe(0);
 		}
@@ -685,28 +724,7 @@ describe("hostile bytes inputs", () => {
 		}
 	});
 
-	it("erases every owned buffer on success (originalBytes, reEncoded)", () => {
-		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
-		expect(enc.ok).toBe(true);
-		if (!enc.ok) return;
-		const dec = decodeJournalRecordV1(enc.bytes, validExpected());
-		expect(dec.ok).toBe(true);
-		// Also verify the input is erased
-		for (let i = 0; i < enc.bytes.length; i++) {
-			expect(enc.bytes[i]).toBe(0);
-		}
-	});
-
-	it("erases every owned buffer on JSON parse failure", () => {
-		const bad = bytesFrom("not json at all !!!!");
-		const dec = decodeJournalRecordV1(bad, validExpected());
-		expect(dec.ok).toBe(false);
-		for (let i = 0; i < bad.length; i++) {
-			expect(bad[i]).toBe(0);
-		}
-	});
-
-	it("erases every owned buffer on schema failure", () => {
+	it("erases every owned buffer on schema failure (wrong version)", () => {
 		const env = validEnvelope();
 		const raw = makeRecordRaw(env, { version: 99 });
 		const json = JSON.stringify(raw);
@@ -767,11 +785,7 @@ describe("schema validation", () => {
 	});
 
 	it("rejects missing required key", () => {
-		const raw: Record<string, unknown> = makeRecordRaw(validEnvelope());
-		const env = raw.envelope;
-		delete raw.envelope;
-		raw.envelope = env;
-		// Still has envelope. Delete envelopeDigest which is required for decode
+		const env = validEnvelope();
 		const json = JSON.stringify({
 			version: 1,
 			journalSeq: 1,
@@ -798,8 +812,7 @@ describe("schema validation", () => {
 
 	it("rejects wrong envelope digest format", () => {
 		const raw = makeRecordRaw(validEnvelope());
-		const env = raw.envelope;
-		const d = canonicalDigest(env);
+		const d = canonicalDigest(raw.envelope as RemoteHostFrameEnvelope);
 		const digestStr = d.ok ? d.value : "";
 		const json = JSON.stringify(raw).replace(digestStr, "not-hex");
 		const b = bytesFrom(json);
@@ -809,8 +822,7 @@ describe("schema validation", () => {
 
 	it("rejects uppercase hex digest", () => {
 		const raw = makeRecordRaw(validEnvelope());
-		const env = raw.envelope;
-		const d = canonicalDigest(env);
+		const d = canonicalDigest(raw.envelope as RemoteHostFrameEnvelope);
 		const digestStr = d.ok ? d.value : "";
 		const upper = digestStr.toUpperCase();
 		const json = JSON.stringify(raw).replace(digestStr, upper);
@@ -835,11 +847,13 @@ describe("schema validation", () => {
 		expect(decodeJournalRecordV1(bytesFrom(pretty), validExpected()).ok).toBe(false);
 	});
 
-	it("rejects duplicate escaped key", () => {
+	it("rejects duplicate escaped key (JSON last-value wins, but canonical re-encoding mismatch)", () => {
 		const raw = makeRecordRaw(validEnvelope());
 		const json = JSON.stringify(raw);
 		const dup = json.replace('"envelope"', '"envelope","envelope"');
-		expect(decodeJournalRecordV1(bytesFrom(dup), validExpected()).ok).toBe(false);
+		const b = bytesFrom(dup);
+		// The canonical re-encoding won't match the original bytes
+		expect(decodeJournalRecordV1(b, validExpected()).ok).toBe(false);
 	});
 
 	it("rejects envelope mutation -- tampered frameId", () => {
@@ -895,19 +909,38 @@ describe("deep freeze and no aliases", () => {
 		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
 		expect(enc.ok).toBe(true);
 		if (!enc.ok) return;
-		// use try-catch because strict mode throws on frozen mutation
 		try {
 			(enc.record as unknown as Record<string, unknown>).journalSeq = 999;
 		} catch {}
 		expect(enc.record.journalSeq).toBe(1);
 	});
 
-	it("mutable result DTO is frozen", () => {
+	it("encode success result is frozen", () => {
 		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
 		expect(enc.ok).toBe(true);
 		if (!enc.ok) return;
-		// The error container should also be frozen (on failure path)
-		expect(Object.isFrozen(enc.record)).toBe(true);
+		expect(Object.isFrozen(enc)).toBe(true);
+	});
+
+	it("decode success result is frozen", () => {
+		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
+		expect(enc.ok).toBe(true);
+		if (!enc.ok) return;
+		const dec = decodeJournalRecordV1(enc.bytes, validExpected());
+		expect(dec.ok).toBe(true);
+		if (dec.ok) expect(Object.isFrozen(dec)).toBe(true);
+	});
+
+	it("encode error result is frozen", () => {
+		const enc = encodeJournalRecordV1(null);
+		expect(enc.ok).toBe(false);
+		expect(Object.isFrozen(enc)).toBe(true);
+	});
+
+	it("decode error result is frozen", () => {
+		const dec = decodeJournalRecordV1(bytesFrom("xxx"), validExpected());
+		expect(dec.ok).toBe(false);
+		expect(Object.isFrozen(dec)).toBe(true);
 	});
 });
 
@@ -1019,5 +1052,80 @@ describe("fixed error codes for known hostile patterns", () => {
 
 	it("SharedArrayBuffer returns INVALID_FRAME", () => {
 		expect(checkError(new Uint8Array(new SharedArrayBuffer(10)))).toBe("INVALID_FRAME");
+	});
+});
+
+// ===========================================================================
+// 14. Reentrant / concurrent encode deterministic output
+// ===========================================================================
+
+describe("reentrant / concurrent encode deterministic output", () => {
+	it("consecutive encodes produce identical bytes for same input", () => {
+		const raw = makeRecordRaw(validEnvelope());
+		const a = encodeJournalRecordV1(raw);
+		const b = encodeJournalRecordV1(raw);
+		expect(a.ok).toBe(true);
+		expect(b.ok).toBe(true);
+		if (!a.ok || !b.ok) return;
+
+		expect(a.bytes.byteLength).toBe(b.bytes.byteLength);
+		for (let i = 0; i < a.bytes.byteLength; i++) {
+			expect(a.bytes[i]).toBe(b.bytes[i]);
+		}
+	});
+
+	it("interleaved encode calls produce deterministic output (no global state)", () => {
+		const raw1 = makeRecordRaw(validEnvelope(), { journalSeq: 1 });
+		const raw2 = makeRecordRaw(validEnvelope(), { journalSeq: 2 });
+
+		const results = Array.from({ length: 10 }, (_, i) => {
+			const r = i % 2 === 0 ? encodeJournalRecordV1(raw1) : encodeJournalRecordV1(raw2);
+			return r;
+		});
+
+		for (let i = 0; i < results.length; i++) {
+			expect(results[i].ok).toBe(true);
+			if (!results[i].ok) continue;
+			const expected = i % 2 === 0 ? 1 : 2;
+			expect((results[i] as { ok: true; record: JournalRecordV1 }).record.journalSeq).toBe(expected);
+		}
+	});
+});
+
+// ===========================================================================
+// 15. Success result mutation resistance
+// ===========================================================================
+
+describe("success result mutation resistance", () => {
+	it("encode success result { ok, bytes, record } cannot be mutated", () => {
+		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
+		expect(enc.ok).toBe(true);
+		if (!enc.ok) return;
+		// Result is frozen
+		expect(() => {
+			(enc as any).extra = "x";
+		}).toThrow();
+	});
+
+	it("encode ok.bytes is caller-owned and mutable but result object is frozen", () => {
+		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
+		expect(enc.ok).toBe(true);
+		if (!enc.ok) return;
+		// bytes is not frozen (caller-owned), but record is
+		expect(Object.isFrozen(enc)).toBe(true);
+		expect(Object.isFrozen(enc.record)).toBe(true);
+	});
+
+	it("decode success result { ok, record } cannot be mutated", () => {
+		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
+		expect(enc.ok).toBe(true);
+		if (!enc.ok) return;
+		const dec = decodeJournalRecordV1(enc.bytes, validExpected());
+		expect(dec.ok).toBe(true);
+		if (!dec.ok) return;
+		expect(Object.isFrozen(dec)).toBe(true);
+		expect(() => {
+			(dec as any).extra = "x";
+		}).toThrow();
 	});
 });

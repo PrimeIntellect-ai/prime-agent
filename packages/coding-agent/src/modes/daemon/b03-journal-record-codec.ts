@@ -70,68 +70,59 @@ export interface ExpectedFields {
 }
 
 // ===========================================================================
-// Result unions (never-throw)
+// Result unions (never-throw), frozen
 // ===========================================================================
 
-export type EncodeJournalResult =
-	| { ok: true; bytes: Uint8Array; record: JournalRecordV1 }
-	| { ok: false; error: CodecError };
+export interface EncodeOk {
+	readonly ok: true;
+	readonly bytes: Uint8Array;
+	readonly record: JournalRecordV1;
+}
 
-export type DecodeJournalResult = { ok: true; record: JournalRecordV1 } | { ok: false; error: CodecError };
+export interface EncodeError {
+	readonly ok: false;
+	readonly error: CodecError;
+}
+
+export type EncodeJournalResult = EncodeOk | EncodeError;
+
+export interface DecodeOk {
+	readonly ok: true;
+	readonly record: JournalRecordV1;
+}
+
+export interface DecodeError {
+	readonly ok: false;
+	readonly error: CodecError;
+}
+
+export type DecodeJournalResult = DecodeOk | DecodeError;
 
 // ===========================================================================
-// Frozen CodecError
+// Frozen result builders
 // ===========================================================================
 
-function frozenError(code: CodecErrorCode): CodecError {
-	return Object.freeze({ code });
+function fail(code: CodecErrorCode): EncodeError & DecodeError {
+	return Object.freeze({ ok: false, error: Object.freeze({ code }) });
+}
+
+function okEncode(bytes: Uint8Array, record: JournalRecordV1): EncodeOk {
+	return Object.freeze({ ok: true, bytes, record });
+}
+
+function okDecode(record: JournalRecordV1): DecodeOk {
+	return Object.freeze({ ok: true, record });
 }
 
 // ===========================================================================
 // Helpers
 // ===========================================================================
 
-// ===========================================================================
-// canonicalStringify -- sorts keys recursively for canonical encoding
-// ===========================================================================
-
-// ===========================================================================
-// canonicalStringify -- canonical JSON with CANONICAL_KEYS at top level,
-// sorted keys at nested levels
-// ===========================================================================
-
-let _canonDepth = 0;
-
-function canonicalStringify(value: unknown): string {
-	_canonDepth = 0;
-	return JSON.stringify(value, (_key: string, val: unknown): unknown => {
-		if (typeof val === "object" && val !== null && !Array.isArray(val)) {
-			const keys = Object.keys(val);
-			// Root object: check if all CANONICAL_KEYS are present
-			if (_canonDepth === 0 && keys.length >= CANONICAL_KEYS.length) {
-				const hasAll = CANONICAL_KEYS.every((k) => k in (val as Record<string, unknown>));
-				if (hasAll) {
-					_canonDepth = 1;
-					const sorted: Record<string, unknown> = Object.create(null);
-					for (const k of CANONICAL_KEYS) sorted[k] = (val as Record<string, unknown>)[k];
-					return sorted;
-				}
-			}
-			// Nested objects: sort alphabetically
-			const sorted: Record<string, unknown> = Object.create(null);
-			const sortedKeys = [...keys].sort();
-			for (const k of sortedKeys) sorted[k] = (val as Record<string, unknown>)[k];
-			return sorted;
-		}
-		return val;
-	});
-}
-
 function erase(bytes: Uint8Array): void {
 	try {
 		bytes.fill(0);
 	} catch {
-		// best effort -- detached or already freed
+		/* best effort */
 	}
 }
 
@@ -156,9 +147,7 @@ function deepFreeze<T>(value: T): T {
 function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
 	if (a.byteLength !== b.byteLength) return false;
 	let diff = 0;
-	for (let i = 0; i < a.byteLength; i++) {
-		diff |= a[i] ^ b[i];
-	}
+	for (let i = 0; i < a.byteLength; i++) diff |= a[i] ^ b[i];
 	return diff === 0;
 }
 
@@ -217,8 +206,7 @@ function rawError(raw: unknown): CodecErrorCode | undefined {
 }
 
 // ===========================================================================
-// Encode input keys: version, journalSeq, direction, hostId, generation,
-// sessionId, recordedAt, envelope.  envelopeDigest rejected as caller extra.
+// Encode input keys (8 -- no envelopeDigest)
 // ===========================================================================
 
 const ENCODE_REQUIRED_KEYS: readonly string[] = [
@@ -234,6 +222,34 @@ const ENCODE_REQUIRED_KEYS: readonly string[] = [
 const ENCODE_KEY_SET = new Set(ENCODE_REQUIRED_KEYS);
 
 // ===========================================================================
+// Build record in CANONICAL_KEYS insertion order
+// ===========================================================================
+
+function buildRecordObject(
+	version: 1,
+	journalSeq: number,
+	direction: string,
+	hostId: string,
+	generation: string,
+	sessionId: string,
+	recordedAt: string,
+	envelope: RemoteHostFrameEnvelope,
+	envelopeDigest: string,
+): Record<string, unknown> {
+	const r: Record<string, unknown> = Object.create(null);
+	r.version = version;
+	r.journalSeq = journalSeq;
+	r.direction = direction;
+	r.hostId = hostId;
+	r.generation = generation;
+	r.sessionId = sessionId;
+	r.recordedAt = recordedAt;
+	r.envelope = envelope;
+	r.envelopeDigest = envelopeDigest;
+	return r;
+}
+
+// ===========================================================================
 // encodeJournalRecordV1
 // ===========================================================================
 
@@ -241,32 +257,26 @@ export function encodeJournalRecordV1(raw: unknown): EncodeJournalResult {
 	try {
 		return encodeJournalRecordV1Impl(raw);
 	} catch {
-		return { ok: false, error: frozenError("INVALID_FRAME") };
+		return fail("INVALID_FRAME");
 	}
 }
 
 function encodeJournalRecordV1Impl(raw: unknown): EncodeJournalResult {
 	// 1. Validate raw is trusted plain object
 	const err = rawError(raw);
-	if (err) return { ok: false, error: frozenError(err) };
+	if (err) return fail(err);
 
 	const obj = raw as Record<string, unknown>;
 	const keys = Object.getOwnPropertyNames(obj);
 
 	// 2. Exact key count + no extra keys (caller must not supply envelopeDigest)
-	if (keys.length !== ENCODE_REQUIRED_KEYS.length) {
-		return { ok: false, error: frozenError("INVALID_FRAME") };
-	}
+	if (keys.length !== ENCODE_REQUIRED_KEYS.length) return fail("INVALID_FRAME");
 	for (const k of keys) {
-		if (!ENCODE_KEY_SET.has(k)) {
-			return { ok: false, error: frozenError("INVALID_FRAME") };
-		}
+		if (!ENCODE_KEY_SET.has(k)) return fail("INVALID_FRAME");
 	}
 
-	// 3. Validate version (required)
-	if (obj.version !== RECORD_VERSION) {
-		return { ok: false, error: frozenError("INVALID_FRAME") };
-	}
+	// 3. Validate version
+	if (obj.version !== RECORD_VERSION) return fail("INVALID_FRAME");
 
 	// 4. Validate journalSeq
 	const journalSeq = obj.journalSeq;
@@ -276,50 +286,41 @@ function encodeJournalRecordV1Impl(raw: unknown): EncodeJournalResult {
 		journalSeq <= 0 ||
 		journalSeq > MAX_JOURNAL_SEQ
 	) {
-		return { ok: false, error: frozenError("INVALID_SEQUENCE") };
+		return fail("INVALID_SEQUENCE");
 	}
 
 	// 5. Validate direction
 	const direction = obj.direction;
-	if (direction !== "sent" && direction !== "received") {
-		return { ok: false, error: frozenError("INVALID_FRAME") };
-	}
+	if (direction !== "sent" && direction !== "received") return fail("INVALID_FRAME");
 
 	// 6. Validate IDs
 	const hostId = obj.hostId;
 	const generation = obj.generation;
 	const sessionId = obj.sessionId;
-	if (typeof hostId !== "string" || !isValidSafeId(hostId))
-		return { ok: false, error: frozenError("INVALID_IDENTITY") };
-	if (typeof generation !== "string" || !isValidSafeId(generation))
-		return { ok: false, error: frozenError("INVALID_IDENTITY") };
-	if (typeof sessionId !== "string" || !isValidSafeId(sessionId))
-		return { ok: false, error: frozenError("INVALID_IDENTITY") };
+	if (typeof hostId !== "string" || !isValidSafeId(hostId)) return fail("INVALID_IDENTITY");
+	if (typeof generation !== "string" || !isValidSafeId(generation)) return fail("INVALID_IDENTITY");
+	if (typeof sessionId !== "string" || !isValidSafeId(sessionId)) return fail("INVALID_IDENTITY");
 
 	// 7. Validate recordedAt
 	const recordedAt = obj.recordedAt;
-	if (typeof recordedAt !== "string" || !isCanonicalUtcTimestamp(recordedAt)) {
-		return { ok: false, error: frozenError("INVALID_TIMESTAMP") };
-	}
+	if (typeof recordedAt !== "string" || !isCanonicalUtcTimestamp(recordedAt)) return fail("INVALID_TIMESTAMP");
 
-	// 8. Decode envelope using accepted codec
+	// 8. Decode envelope using accepted codec (returns canonical-sorted nested DTO)
 	const envelopeRaw = obj.envelope;
 	const decodedEnvelope = decodeEnvelope(envelopeRaw);
-	if (!decodedEnvelope.ok) {
-		return { ok: false, error: decodedEnvelope.error };
-	}
+	if (!decodedEnvelope.ok) return { ok: false, error: decodedEnvelope.error };
 	const envelope = decodedEnvelope.value;
 
 	// 9. Compute digest from decoded envelope
 	const digestResult = canonicalDigest(envelope);
-	if (!digestResult.ok) {
-		return { ok: false, error: frozenError("INVALID_DIGEST") };
-	}
+	if (!digestResult.ok) return fail("INVALID_DIGEST");
 	const envelopeDigest = digestResult.value;
 
-	// 10. Build frozen record in canonical key order
-	const record: Record<string, unknown> = {
-		version: RECORD_VERSION,
+	// 10. Build record in canonical key insertion order, then JSON.stringify
+	//     preserves that order.  Nested objects from decodeEnvelope are already
+	//     canonical-sorted.  No replacer or custom serializer needed.
+	const recordObj = buildRecordObject(
+		RECORD_VERSION,
 		journalSeq,
 		direction,
 		hostId,
@@ -328,19 +329,20 @@ function encodeJournalRecordV1Impl(raw: unknown): EncodeJournalResult {
 		recordedAt,
 		envelope,
 		envelopeDigest,
-	};
-	const frozen = deepFreeze(record) as unknown as JournalRecordV1;
+	);
+	const frozen = deepFreeze(recordObj) as unknown as JournalRecordV1;
 
-	// 11. Encode to canonical JSON bytes using JSON.stringify of fixed-order object
-	const canonStr = canonicalStringify(record);
+	// 11. Encode to JSON bytes (fixed insertion order)
+	const canonStr = JSON.stringify(recordObj);
 	const encoded = new TextEncoder().encode(canonStr);
 
-	// 12. Check max size
+	// 12. Check max size -- erase encoded before returning failure
 	if (encoded.byteLength > MAX_ENCODED_BYTES) {
-		return { ok: false, error: frozenError("OVERFLOW") };
+		erase(encoded);
+		return fail("OVERFLOW");
 	}
 
-	return { ok: true, bytes: encoded, record: frozen };
+	return okEncode(encoded, frozen);
 }
 
 // ===========================================================================
@@ -348,7 +350,6 @@ function encodeJournalRecordV1Impl(raw: unknown): EncodeJournalResult {
 // ===========================================================================
 
 const DECODE_KEYS = new Set(CANONICAL_KEYS);
-const DECODE_REQUIRED_COUNT = CANONICAL_KEYS.length;
 
 // ===========================================================================
 // validateExpected -- rejects empty/partial missing required fields
@@ -360,17 +361,17 @@ function validateExpected(expected: unknown): ExpectedFields | undefined {
 	if (err) return undefined;
 	const obj = expected as Record<string, unknown>;
 	const keys = Object.getOwnPropertyNames(obj);
-	// Reject extra keys
 	const allowed = new Set(["journalSeq", "hostId", "generation", "sessionId", "direction"]);
 	for (const k of keys) {
 		if (!allowed.has(k)) return undefined;
 	}
-	// journalSeq, hostId, generation, sessionId are ALL required
-	if (obj.journalSeq === undefined) return undefined;
-	if (obj.hostId === undefined) return undefined;
-	if (obj.generation === undefined) return undefined;
-	if (obj.sessionId === undefined) return undefined;
-	// Type-validate
+	if (
+		obj.journalSeq === undefined ||
+		obj.hostId === undefined ||
+		obj.generation === undefined ||
+		obj.sessionId === undefined
+	)
+		return undefined;
 	if (
 		typeof obj.journalSeq !== "number" ||
 		!Number.isSafeInteger(obj.journalSeq) ||
@@ -390,7 +391,8 @@ function validateExpected(expected: unknown): ExpectedFields | undefined {
 // ===========================================================================
 
 export function decodeJournalRecordV1(bytes: Uint8Array, expected: unknown): DecodeJournalResult {
-	// Track all owned byte intermediates for erasure in finally
+	// ownBuffers tracks all allocated byte buffers for erasure in finally.
+	// Includes the caller's `bytes` so every path erases it.
 	const ownBuffers: Uint8Array[] = [];
 	let erased = false;
 	const eraseAll = () => {
@@ -412,31 +414,35 @@ function decodeJournalRecordV1Impl(
 	ownBuffers: Uint8Array[],
 ): DecodeJournalResult {
 	// 1. Validate bytes
-	if (typeof bytes !== "object" || bytes === null) return { ok: false, error: frozenError("INVALID_FRAME") };
+	if (typeof bytes !== "object" || bytes === null) return fail("INVALID_FRAME");
 	let proto: object | null;
 	try {
 		proto = Object.getPrototypeOf(bytes);
 	} catch {
-		return { ok: false, error: frozenError("INVALID_FRAME") };
+		return fail("INVALID_FRAME");
 	}
-	if (proto !== Uint8Array.prototype) return { ok: false, error: frozenError("INVALID_FRAME") };
+	if (proto !== Uint8Array.prototype) return fail("INVALID_FRAME");
 	let buf: ArrayBufferLike;
 	try {
 		buf = bytes.buffer;
 	} catch {
-		return { ok: false, error: frozenError("INVALID_FRAME") };
+		return fail("INVALID_FRAME");
 	}
-	if (buf instanceof SharedArrayBuffer) return { ok: false, error: frozenError("INVALID_FRAME") };
+	if (buf instanceof SharedArrayBuffer) return fail("INVALID_FRAME");
 	try {
-		if (buf.byteLength === 0 && bytes.length > 0) return { ok: false, error: frozenError("INVALID_FRAME") };
-		if (buf.byteLength !== bytes.byteLength) return { ok: false, error: frozenError("INVALID_FRAME") };
+		if (buf.byteLength === 0 && bytes.length > 0) return fail("INVALID_FRAME");
+		if (buf.byteLength !== bytes.byteLength) return fail("INVALID_FRAME");
 		if (bytes.length > 0) {
 			const _x = bytes[0];
 			void _x;
 		}
 	} catch {
-		return { ok: false, error: frozenError("INVALID_FRAME") };
+		return fail("INVALID_FRAME");
 	}
+
+	// The caller's `bytes` goes into ownBuffers so the outer finally
+	// erases them even when UTF-8 parse or any intermediate step fails.
+	ownBuffers.push(bytes);
 
 	// 2. Snapshot original bytes (owned copy for canonical re-encoding comparison)
 	let originalBytes: Uint8Array;
@@ -444,7 +450,7 @@ function decodeJournalRecordV1Impl(
 		originalBytes = new Uint8Array(bytes);
 		ownBuffers.push(originalBytes);
 	} catch {
-		return { ok: false, error: frozenError("INVALID_FRAME") };
+		return fail("INVALID_FRAME");
 	}
 
 	// 3. Parse UTF-8 JSON
@@ -452,39 +458,33 @@ function decodeJournalRecordV1Impl(
 	try {
 		const decoder = new TextDecoder("utf-8", { fatal: true });
 		jsonStr = decoder.decode(bytes);
+		// bytes are now decoded -- they remain in ownBuffers for finally erasure
 	} catch {
-		return { ok: false, error: frozenError("INVALID_FRAME") };
+		return fail("INVALID_FRAME");
 	}
 
-	// 4. Erase input bytes
-	erase(bytes);
-
-	// 5. Parse JSON
+	// 4. Parse JSON
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(jsonStr);
 	} catch {
-		return { ok: false, error: frozenError("INVALID_FRAME") };
+		return fail("INVALID_FRAME");
 	}
 
-	// 6. Validate parsed is trusted plain object
+	// 5. Validate parsed is trusted plain object
 	const parseErr = rawError(parsed);
-	if (parseErr) return { ok: false, error: frozenError(parseErr) };
+	if (parseErr) return fail(parseErr);
 	const obj = parsed as Record<string, unknown>;
 	const keys = Object.getOwnPropertyNames(obj);
 
-	// 7. Exact key count and no unknown keys
-	if (keys.length !== DECODE_REQUIRED_COUNT) {
-		return { ok: false, error: frozenError("INVALID_FRAME") };
-	}
+	// 6. Exact key count and no unknown keys
+	if (keys.length !== CANONICAL_KEYS.length) return fail("INVALID_FRAME");
 	for (const k of keys) {
-		if (!DECODE_KEYS.has(k)) {
-			return { ok: false, error: frozenError("INVALID_FRAME") };
-		}
+		if (!DECODE_KEYS.has(k)) return fail("INVALID_FRAME");
 	}
 
-	// 8. Validate schema
-	if (obj.version !== RECORD_VERSION) return { ok: false, error: frozenError("INVALID_FRAME") };
+	// 7. Validate schema
+	if (obj.version !== RECORD_VERSION) return fail("INVALID_FRAME");
 
 	const journalSeq = obj.journalSeq;
 	if (
@@ -493,68 +493,54 @@ function decodeJournalRecordV1Impl(
 		journalSeq <= 0 ||
 		journalSeq > MAX_JOURNAL_SEQ
 	) {
-		return { ok: false, error: frozenError("INVALID_SEQUENCE") };
+		return fail("INVALID_SEQUENCE");
 	}
 
 	const direction = obj.direction;
-	if (direction !== "sent" && direction !== "received") {
-		return { ok: false, error: frozenError("INVALID_FRAME") };
-	}
+	if (direction !== "sent" && direction !== "received") return fail("INVALID_FRAME");
 
 	const hostId = obj.hostId;
 	const generation = obj.generation;
 	const sessionId = obj.sessionId;
-	if (typeof hostId !== "string" || !isValidSafeId(hostId))
-		return { ok: false, error: frozenError("INVALID_IDENTITY") };
-	if (typeof generation !== "string" || !isValidSafeId(generation))
-		return { ok: false, error: frozenError("INVALID_IDENTITY") };
-	if (typeof sessionId !== "string" || !isValidSafeId(sessionId))
-		return { ok: false, error: frozenError("INVALID_IDENTITY") };
+	if (typeof hostId !== "string" || !isValidSafeId(hostId)) return fail("INVALID_IDENTITY");
+	if (typeof generation !== "string" || !isValidSafeId(generation)) return fail("INVALID_IDENTITY");
+	if (typeof sessionId !== "string" || !isValidSafeId(sessionId)) return fail("INVALID_IDENTITY");
 
 	const recordedAt = obj.recordedAt;
-	if (typeof recordedAt !== "string" || !isCanonicalUtcTimestamp(recordedAt)) {
-		return { ok: false, error: frozenError("INVALID_TIMESTAMP") };
-	}
+	if (typeof recordedAt !== "string" || !isCanonicalUtcTimestamp(recordedAt)) return fail("INVALID_TIMESTAMP");
 
 	const storedDigest = obj.envelopeDigest;
-	if (typeof storedDigest !== "string" || !isValidDigest(storedDigest)) {
-		return { ok: false, error: frozenError("INVALID_DIGEST") };
-	}
+	if (typeof storedDigest !== "string" || !isValidDigest(storedDigest)) return fail("INVALID_DIGEST");
 
-	// 9. Validate expected fields (if provided)
+	// 8. Validate expected fields (if provided)
 	const exp = validateExpected(expected);
-	if (expected !== undefined && exp === undefined) {
-		return { ok: false, error: frozenError("INVALID_FRAME") };
-	}
+	if (expected !== undefined && exp === undefined) return fail("INVALID_FRAME");
 	if (exp !== undefined) {
 		const expObj = exp as unknown as Record<string, unknown>;
-		if (expObj.journalSeq !== journalSeq) return { ok: false, error: frozenError("MISMATCH") };
-		if (expObj.hostId !== hostId) return { ok: false, error: frozenError("MISMATCH") };
-		if (expObj.generation !== generation) return { ok: false, error: frozenError("MISMATCH") };
-		if (expObj.sessionId !== sessionId) return { ok: false, error: frozenError("MISMATCH") };
-		if (expObj.direction !== undefined && expObj.direction !== direction)
-			return { ok: false, error: frozenError("MISMATCH") };
+		if (expObj.journalSeq !== journalSeq) return fail("MISMATCH");
+		if (expObj.hostId !== hostId) return fail("MISMATCH");
+		if (expObj.generation !== generation) return fail("MISMATCH");
+		if (expObj.sessionId !== sessionId) return fail("MISMATCH");
+		if (expObj.direction !== undefined && expObj.direction !== direction) return fail("MISMATCH");
 	}
 
-	// 10. Decode envelope using accepted codec
+	// 9. Decode envelope using accepted codec
 	const envelopeRaw = obj.envelope;
 	const decodedEnvelope = decodeEnvelope(envelopeRaw);
 	if (!decodedEnvelope.ok) return { ok: false, error: decodedEnvelope.error };
 	const envelope = decodedEnvelope.value;
 
-	// 11. Recompute digest from decoded envelope
+	// 10. Recompute digest from decoded envelope
 	const digestResult = canonicalDigest(envelope);
-	if (!digestResult.ok) return { ok: false, error: frozenError("INVALID_DIGEST") };
+	if (!digestResult.ok) return fail("INVALID_DIGEST");
 	const recomputedDigest = digestResult.value;
 
-	// 12. Verify digest matches stored digest using accepted digestsEqual
-	if (!digestsEqual(recomputedDigest, storedDigest)) {
-		return { ok: false, error: frozenError("INVALID_DIGEST") };
-	}
+	// 11. Verify digest matches stored digest using accepted digestsEqual
+	if (!digestsEqual(recomputedDigest, storedDigest)) return fail("INVALID_DIGEST");
 
-	// 13. Build fresh record in canonical key order
-	const record: Record<string, unknown> = {
-		version: RECORD_VERSION,
+	// 12. Build fresh record in canonical key insertion order
+	const recordObj = buildRecordObject(
+		RECORD_VERSION,
 		journalSeq,
 		direction,
 		hostId,
@@ -562,20 +548,18 @@ function decodeJournalRecordV1Impl(
 		sessionId,
 		recordedAt,
 		envelope,
-		envelopeDigest: storedDigest,
-	};
+		storedDigest,
+	);
 
-	// 14. Re-encode for canonical verification
-	const canonStr = canonicalStringify(record);
+	// 13. Re-encode for canonical verification
+	const canonStr = JSON.stringify(recordObj);
 	const reEncoded = new TextEncoder().encode(canonStr);
 	ownBuffers.push(reEncoded);
 
-	// 15. Constant-time compare re-encoded bytes to original bytes
-	if (!constantTimeEqual(reEncoded, originalBytes)) {
-		return { ok: false, error: frozenError("INVALID_DIGEST") };
-	}
+	// 14. Constant-time compare re-encoded bytes to original bytes
+	if (!constantTimeEqual(reEncoded, originalBytes)) return fail("INVALID_DIGEST");
 
-	// 16. Deep freeze and return
-	const frozen = deepFreeze(record) as unknown as JournalRecordV1;
-	return { ok: true, record: frozen };
+	// 15. Deep freeze and return
+	const frozen = deepFreeze(recordObj) as unknown as JournalRecordV1;
+	return okDecode(frozen);
 }
