@@ -131,7 +131,7 @@ function isGenuineUint8Array(v: unknown): v is Uint8Array {
 function isDetachedBuffer(buf: ArrayBuffer): boolean {
 	try {
 		// eslint-disable-next-line @typescript-eslint/no-unused-expressions
-		buf.slice(0, 0);
+		ArrayBuffer.prototype.slice.call(buf, 0, 0);
 		return false;
 	} catch {
 		return true;
@@ -155,12 +155,6 @@ function safeZero(buf: Uint8Array | null | undefined): void {
 	} catch {
 		/* best effort */
 	}
-}
-
-function _copyBytes(source: Uint8Array): Uint8Array {
-	const out = new Uint8Array(source.byteLength);
-	out.set(source);
-	return out;
 }
 
 /** Copy grant bytes and erase original if genuine. Returns Result. */
@@ -394,15 +388,8 @@ function snapshotValue(v: unknown, seen: Set<object>, depth: number, budget: { n
 		return ok(v);
 	}
 	if (Array.isArray(v)) {
-		if (seen.has(v as object)) return fail("PAB1_ERR_META_CYCLE");
-		seen.add(v as object);
-		const arr: unknown[] = [];
-		for (let i = 0; i < v.length; i++) {
-			const e = snapshotValue(v[i], seen, depth + 1, budget);
-			if (!e.ok) return e;
-			arr.push(e.value);
-		}
-		return ok(arr);
+		// PAB1 metadata schema contains no arrays; reject without touching indices.
+		return fail("PAB1_ERR_META_TYPE");
 	}
 	if (typeof v === "object") {
 		if (seen.has(v as object)) return fail("PAB1_ERR_META_CYCLE");
@@ -723,19 +710,13 @@ export function encodeSandboxBootstrapPayload(opts: EncodeSandboxBootstrapPayloa
 			return fail(gErr);
 		}
 
-		// Validate grant bytes
-		const grantErr = validateGrantBytes(grantCopy);
-		if (grantErr) {
-			safeZero(grantCopy);
-			grantCopy = undefined;
-			return fail(grantErr);
-		}
-
 		// Acquire metadata from descriptor.value (not opts.metadata)
 		let metaValue: unknown;
 		try {
 			metaValue = descs.metadata!.value;
 		} catch {
+			safeZero(grantCopy);
+			grantCopy = undefined;
 			return fail("PAB1_ERR_META_DESCRIPTOR");
 		}
 		const metaResult = sanitizeMetadata(metaValue);
