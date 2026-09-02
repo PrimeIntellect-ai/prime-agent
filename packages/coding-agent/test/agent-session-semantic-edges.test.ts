@@ -318,12 +318,18 @@ describe("AgentSession semantic edges", () => {
 		]);
 	});
 
+	/** Attribution requires an active run: production spawns execute inside a turn's tool call. */
+	function spawnDuringRun<T>(session: AgentSession, spawn: () => Promise<T>): Promise<T> {
+		const activeRun = vi.spyOn(session, "isStreaming", "get").mockReturnValue(true);
+		return spawn().finally(() => activeRun.mockRestore());
+	}
+
 	it("records spawned-child ancestry from the latest turn and returns it on success", async () => {
 		const { session: root, capturedHeaders } = createSession();
 
 		await root.prompt("parent turn one");
 		await root.prompt("parent turn two");
-		const spawned = await root.runRlmChild("child task");
+		const spawned = await spawnDuringRun(root, () => root.runRlmChild("child task"));
 		const childId = basename(spawned.session_dir);
 		await waitForAsync(async () => (await root.listRlmSubagents()).subagents[0]?.status === "completed");
 
@@ -368,6 +374,24 @@ describe("AgentSession semantic edges", () => {
 		expect(returnEdges[0]?.source_request_id).toBe(childRequestIds[0]);
 	});
 
+	it("records no spawn attribution for a child spawned outside an active run", async () => {
+		const { session: root } = createSession();
+		await root.prompt("completed turn");
+		expect(root.semanticEdges.lastTurnRequestId).toBeDefined();
+
+		const spawned = await root.runRlmChild("out-of-band child");
+		await waitForAsync(async () => (await root.listRlmSubagents()).subagents[0]?.status === "completed");
+
+		const registration = readSemanticEdgeLedger(childLedgerPath(spawned.session_dir)).find(
+			(event) => event.type === "session_registered",
+		);
+		expect(registration).toMatchObject({ parent_session_id: root.sessionId });
+		expect(registration?.type === "session_registered" ? registration.spawned_by_request_id : "set").toBeUndefined();
+		const childEvents = readSemanticEdgeLedger(childLedgerPath(spawned.session_dir));
+		const edges = deriveSemanticEdges([ledgerFor(root), childEvents]).edges;
+		expect(edges.filter((edge) => edge.type === "subagent_call")).toEqual([]);
+	});
+
 	it("restores spawn attribution from the ledger after a resume", async () => {
 		const { session: first } = createSession();
 		await first.prompt("turn before resume");
@@ -378,7 +402,7 @@ describe("AgentSession semantic edges", () => {
 
 		const resumedManager = SessionManager.open(sessionFile, join(tempDir, "sessions"));
 		const { session: resumed } = createSession({ sessionManager: resumedManager });
-		const spawned = await resumed.runRlmChild("child after resume");
+		const spawned = await spawnDuringRun(resumed, () => resumed.runRlmChild("child after resume"));
 		await waitForAsync(async () => (await resumed.listRlmSubagents()).subagents[0]?.status === "completed");
 
 		const childEvents = readSemanticEdgeLedger(childLedgerPath(spawned.session_dir));
@@ -396,7 +420,7 @@ describe("AgentSession semantic edges", () => {
 		const firstId = startedRequestIds(ledgerFor(root))[0];
 
 		// Advance the parent's lineage while runRlmChild is still awaiting preflight.
-		const spawnPromise = root.runRlmChild("child task");
+		const spawnPromise = spawnDuringRun(root, () => root.runRlmChild("child task"));
 		const laterId = root.semanticEdges.startTurnRequest("later-body-hash");
 		const spawned = await spawnPromise;
 		await waitForAsync(async () => (await root.listRlmSubagents()).subagents[0]?.status === "completed");
@@ -760,6 +784,52 @@ describe("AgentSession semantic edges", () => {
 			(edge) => edge.target_request_id === afterId,
 		);
 		expect(inboundEdges).toEqual([
+			{ source_request_id: preCompactionIds.at(-1), target_request_id: afterId, type: "continuation" },
+		]);
+	});
+
+	it("commits no summary slice when a racing split-turn sibling fails", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			settings: { compaction: { keepRecentTokens: 1 } },
+		});
+		harnesses.push(harness);
+		const ledgerPath = join(harness.sessionManager.getSessionArtifactDir() ?? "", SEMANTIC_EDGES_LEDGER_FILENAME);
+
+		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+		const preCompactionIds = startedRequestIds(readSemanticEdgeLedger(ledgerPath));
+
+		// One slice succeeds on the wire well before its sibling rejects the whole compaction.
+		const successStep = () => fauxAssistantMessage("the summary");
+		const failingStep = async () => {
+			await sleep(25);
+			return fauxAssistantMessage("nope", { stopReason: "error", errorMessage: "summary slice failed" });
+		};
+		harness.setResponses([successStep, failingStep]);
+		await expect(harness.session.compact()).rejects.toThrow(/failed/);
+
+		// A failed compaction leaves NO committed summary request for edges to attach to.
+		const events = readSemanticEdgeLedger(ledgerPath);
+		const summaryIds = startedRequestIds(events).filter((requestId) => !preCompactionIds.includes(requestId));
+		expect(summaryIds).toHaveLength(2);
+		const finished = events
+			.filter((event) => event.type === "request_finished")
+			.map((event) => (event.type === "request_finished" ? event.request_id : ""));
+		for (const summaryId of summaryIds) {
+			expect(finished).not.toContain(summaryId);
+		}
+		expect(events.filter((event) => event.type === "compaction_finished").at(-1)).toMatchObject({
+			status: "failed",
+		});
+
+		// The next turn continues from the pre-compaction request, not the phantom slice.
+		harness.setResponses([fauxAssistantMessage("after")]);
+		await harness.session.prompt("after");
+		const finalEvents = readSemanticEdgeLedger(ledgerPath);
+		const afterId = startedRequestIds(finalEvents).at(-1);
+		expect(deriveSemanticEdges([finalEvents]).edges.filter((edge) => edge.target_request_id === afterId)).toEqual([
 			{ source_request_id: preCompactionIds.at(-1), target_request_id: afterId, type: "continuation" },
 		]);
 	});
