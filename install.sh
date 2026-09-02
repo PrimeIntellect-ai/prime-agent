@@ -1602,8 +1602,7 @@ prime_agent_npm_install() {
 	tarball_path="$1"
 	shift
 	if prime_agent_npm_requires_remote_policy; then
-		# npm 12 blocks the release package's R2 dependencies and lifecycle script by default.
-		# Scope both overrides to this verified install, and allow only its own lifecycle script.
+		# Limit npm 12's required policy overrides to the verified root package.
 		env "$@" npm install -g --no-fund --no-audit --loglevel=error --progress=false \
 			--allow-remote=all --allow-scripts="$tarball_path" "$tarball_path"
 	else

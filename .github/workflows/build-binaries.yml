@@ -181,7 +181,6 @@ jobs:
           SMOKE_BASE_URL=http://127.0.0.1:18188
           SMOKE_OUT=packages/coding-agent/release/npm12-smoke
           SMOKE_ROOT=$(mktemp -d)
-          export SMOKE_BASE_URL SMOKE_ROOT
 
           npm run release:pack -- \
             --channel stable \
@@ -191,24 +190,16 @@ jobs:
 
           mkdir -p "$SMOKE_ROOT/releases/v$SMOKE_VERSION"
           cp "$SMOKE_OUT/artifacts/"* "$SMOKE_ROOT/releases/v$SMOKE_VERSION/"
-          cp "$SMOKE_OUT/artifacts/stable" "$SMOKE_ROOT/stable"
-
-          node - <<'NODE'
-          const fs = require("node:fs");
-          const installer = fs.readFileSync("install.sh", "utf8");
-          fs.writeFileSync(
-            "/tmp/prime-agent-npm12-install.sh",
-            installer
-              .replaceAll("__PRIME_AGENT_DOWNLOAD_BASE_URL__", process.env.SMOKE_BASE_URL)
-              .replaceAll("__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__", "stable"),
-          );
-          NODE
+          sed \
+            -e "s|__PRIME_AGENT_DOWNLOAD_BASE_URL__|$SMOKE_BASE_URL|g" \
+            -e 's|__PRIME_AGENT_DEFAULT_RELEASE_CHANNEL__|stable|g' \
+            install.sh > /tmp/prime-agent-npm12-install.sh
 
           python3 -m http.server 18188 --bind 127.0.0.1 --directory "$SMOKE_ROOT" >/tmp/prime-agent-npm12-http.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true; rm -rf "$SMOKE_ROOT" "$SMOKE_OUT"' EXIT
 
-          curl -fsS --retry 5 --retry-connrefused "$SMOKE_BASE_URL/stable"
+          curl -fsS --retry 5 --retry-connrefused "$SMOKE_BASE_URL/releases/v$SMOKE_VERSION/SHA256SUMS"
           export NPM_CONFIG_PREFIX="$SMOKE_ROOT/npm-prefix"
           PATH="$NPM_CONFIG_PREFIX/bin:$PATH" \
             PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=0 \
