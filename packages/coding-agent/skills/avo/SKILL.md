@@ -42,6 +42,12 @@ scoring utility ($f$), diagnose failures, repair, and re-evaluate in any sequenc
 - `await avo.list_knowledge()`: Inspect available architecture references, constraints, and guides in $K$.
 - `await avo.sample_knowledge(knowledge_id, reason="...")`: Deliberately retrieve domain knowledge into working context.
 
+### Immutable Scoring Utility $f$
+
+Under paper AVO, the scoring utility $f$ is immutable and host-controlled:
+- `await avo.get_scoring_manifest()`: Inspect the immutable scorer definition, metric dimensions, directions, and digest.
+- `await avo.score_candidate(candidate_ref, content=...)`: Invoke $f(\text{candidate})$. Evaluates correctness and scores performance. The caller cannot override or replace the evaluation command.
+
 1. Read `verificationClass`, `verificationPolicy`, and the host-derived
    `obligations` from state. Before candidate work, decompose any additional
    multi-part specification into immutable obligations with

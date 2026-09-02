@@ -8051,6 +8051,19 @@ export class AgentSession {
 				const knowledge = runtime.sampleKnowledge(payload.knowledgeId, reason);
 				return { knowledge, trace: { sourceType: "knowledge", sourceId: payload.knowledgeId, reason } };
 			}
+			case "avo.scoring.manifest.get": {
+				return { manifest: runtime.getScoringManifest() };
+			}
+			case "avo.scoring.evaluate": {
+				if (typeof payload.candidateRef !== "string") {
+					throw new Error("avo.scoring.evaluate requires candidateRef string");
+				}
+				if (payload.command) {
+					throw new Error("avo.scoring.evaluate rejects model-supplied command overrides; scorer is immutable");
+				}
+				const receipt = await runtime.evaluateWithScorer(payload.candidateRef, payload.content ?? "");
+				return { receipt };
+			}
 			default:
 				throw new Error(`unknown AVO request type "${type}"`);
 		}
