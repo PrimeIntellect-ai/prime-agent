@@ -4,7 +4,7 @@ import { lstat, open, realpath } from "node:fs/promises";
 import { join } from "node:path";
 
 // ---------------------------------------------------------------------------
-// Result and option types
+// Result and option types — journal records
 // ---------------------------------------------------------------------------
 
 export type PublishResult =
@@ -28,10 +28,69 @@ export interface PublishOptions {
 /** Versioned journal record suffix shared with the scanner layout. */
 export const JOURNAL_RECORD_SUFFIX = ".b03-journal";
 
-function journalRecordName(seq: number): string {
-	if (!Number.isSafeInteger(seq) || seq < 0 || seq > MAX_SEQ) return "";
-	return `${String(seq).padStart(20, "0")}${JOURNAL_RECORD_SUFFIX}`;
+// ---------------------------------------------------------------------------
+// Result and option types — delivery markers
+// ---------------------------------------------------------------------------
+
+export type DeliveryMarkerPublishResult =
+	| {
+			readonly status: "success";
+			readonly sequence: number;
+			readonly size: number;
+			readonly sha256: string;
+	  }
+	| { readonly status: "IO_UNCONFIRMED" }
+	| { readonly status: "SEQ_COLLISION"; readonly sequence: number }
+	| {
+			readonly status: "POST_PUBLICATION_UNCERTAIN";
+			readonly sequence: number;
+			readonly size: number;
+			readonly sha256: string;
+	  }
+	| { readonly status: "INVALID_ARGUMENT" };
+
+export interface DeliveryMarkerPublishOptions {
+	journalDir: string;
+	indexSeq: number;
+	bytes: Uint8Array;
 }
+
+/** Delivery-index marker suffix shared with the scanner layout. */
+export const DELIVERY_MARKER_SUFFIX = ".b03-delivery";
+
+// ---------------------------------------------------------------------------
+// Private kind descriptors — the only internal parameterization
+// ---------------------------------------------------------------------------
+
+interface PublishKind {
+	readonly suffix: string;
+	readonly maxSeq: number;
+	readonly optionKeys: readonly string[];
+	readonly seqKey: string;
+	readonly fileName: (seq: number) => string;
+}
+
+const JOURNAL_KIND: PublishKind = {
+	suffix: JOURNAL_RECORD_SUFFIX,
+	maxSeq: 20000,
+	optionKeys: Object.freeze(["journalDir", "seq", "bytes"]),
+	seqKey: "seq",
+	fileName(seq: number): string {
+		if (!Number.isSafeInteger(seq) || seq < 0 || seq > JOURNAL_KIND.maxSeq) return "";
+		return `${String(seq).padStart(20, "0")}${JOURNAL_RECORD_SUFFIX}`;
+	},
+};
+
+const DELIVERY_KIND: PublishKind = {
+	suffix: DELIVERY_MARKER_SUFFIX,
+	maxSeq: 40000,
+	optionKeys: Object.freeze(["journalDir", "indexSeq", "bytes"]),
+	seqKey: "indexSeq",
+	fileName(seq: number): string {
+		if (!Number.isSafeInteger(seq) || seq < 0 || seq > DELIVERY_KIND.maxSeq) return "";
+		return `${String(seq).padStart(20, "0")}${DELIVERY_MARKER_SUFFIX}`;
+	},
+};
 
 // ---------------------------------------------------------------------------
 // IO abstraction
@@ -153,12 +212,10 @@ export class RealJournalIo implements JournalIo {
 // Constants
 // ---------------------------------------------------------------------------
 
-const MAX_SEQ = 20000;
 const MAX_BYTES = 1_310_720;
 const MAX_DIR_LEN = 4096;
 const SCRATCH_SIZE = 65_536;
 const NO_SPECIAL = 0o7000;
-const OPTION_KEYS: readonly string[] = Object.freeze(["journalDir", "seq", "bytes"]);
 const STAT_KEYS: readonly string[] = Object.freeze([
 	"dev",
 	"ino",
@@ -339,6 +396,26 @@ function resSimple(s: "IO_UNCONFIRMED" | "INVALID_ARGUMENT"): PublishResult {
 	return Object.freeze({ status: s });
 }
 
+// ---- Delivery result construction (maps sequence -> sequence) ----
+
+function delResSuccess(seq: number, size: number, sha: string): DeliveryMarkerPublishResult {
+	return Object.freeze({ status: "success" as const, sequence: seq, size, sha256: sha });
+}
+function delResCollision(seq: number): DeliveryMarkerPublishResult {
+	return Object.freeze({ status: "SEQ_COLLISION" as const, sequence: seq });
+}
+function delResUncertain(seq: number, size: number, sha: string): DeliveryMarkerPublishResult {
+	return Object.freeze({
+		status: "POST_PUBLICATION_UNCERTAIN" as const,
+		sequence: seq,
+		size,
+		sha256: sha,
+	});
+}
+function delResSimple(s: "IO_UNCONFIRMED" | "INVALID_ARGUMENT"): DeliveryMarkerPublishResult {
+	return Object.freeze({ status: s });
+}
+
 // ---- Identity type ----
 
 interface DirId {
@@ -364,7 +441,7 @@ interface OptionsSnap {
 	readonly seq: number;
 }
 
-function snapshotOptions(options: unknown, knownBytes: Uint8Array | undefined): OptionsSnap | null {
+function snapshotOptions(options: unknown, knownBytes: Uint8Array | undefined, kind: PublishKind): OptionsSnap | null {
 	if (typeof options !== "object" || options === null) return null;
 	if (knownBytes === undefined) return null;
 	let names: string[];
@@ -376,15 +453,15 @@ function snapshotOptions(options: unknown, knownBytes: Uint8Array | undefined): 
 		return null;
 	}
 	if (syms.length > 0) return null;
-	if (names.length !== OPTION_KEYS.length) return null;
+	if (names.length !== kind.optionKeys.length) return null;
 	for (const k of names) {
-		if (!OPTION_KEYS.includes(k)) return null;
+		if (!kind.optionKeys.includes(k)) return null;
 	}
 	// bytes must be an enumerable data descriptor carrying the discovered buffer
 	const bDesc = Object.getOwnPropertyDescriptor(options, "bytes");
 	if (!bDesc || !bDesc.enumerable || bDesc.get !== undefined || bDesc.value !== knownBytes) return null;
 	const journalDir = ownValue(options, "journalDir");
-	const seq = ownValue(options, "seq");
+	const seq = ownValue(options, kind.seqKey);
 	if (journalDir === undefined || seq === undefined) return null;
 	if (typeof journalDir !== "string") return null;
 	if (typeof seq !== "number" || !Number.isInteger(seq)) return null;
@@ -549,7 +626,7 @@ async function verifyContent(fh: IoHandle, expect: Uint8Array, scratch: Uint8Arr
 }
 
 // ---------------------------------------------------------------------------
-// Core publication — direct-final no-replace design
+// Core publication — direct-final no-replace design, parameterized by kind
 // ---------------------------------------------------------------------------
 
 async function publishCore(
@@ -676,13 +753,10 @@ async function publishCore(
 }
 
 // ---------------------------------------------------------------------------
-// Main export
+// Generic publication entry point — parameterized by kind
 // ---------------------------------------------------------------------------
 
-export async function publishImmutableJournalRecord(
-	options: PublishOptions,
-	io: JournalIo = new RealJournalIo(),
-): Promise<PublishResult> {
+async function publishImmutableByKind(kind: PublishKind, options: unknown, io: JournalIo): Promise<PublishResult> {
 	// 1. Discover a proven writable caller bytes value via its own
 	//    data-descriptor, never invoking getters or Proxy traps.
 	const callerBytes = discoverGenuineBytes(options);
@@ -703,7 +777,7 @@ export async function publishImmutableJournalRecord(
 		if (ioSnap === null) return resSimple("INVALID_ARGUMENT");
 
 		// One exact options descriptor snapshot; caller bytes already proven.
-		const opts = snapshotOptions(options, callerBytes);
+		const opts = snapshotOptions(options, callerBytes, kind);
 		if (opts === null) return resSimple("INVALID_ARGUMENT");
 		const journalDir = opts.journalDir;
 		const seq = opts.seq;
@@ -718,7 +792,7 @@ export async function publishImmutableJournalRecord(
 		) {
 			return resSimple("INVALID_ARGUMENT");
 		}
-		if (seq < 1 || seq > MAX_SEQ) return resSimple("INVALID_ARGUMENT");
+		if (seq < 1 || seq > kind.maxSeq) return resSimple("INVALID_ARGUMENT");
 		if (callerBytes === undefined) return resSimple("INVALID_ARGUMENT");
 		if (callerBytes.byteLength < 1 || callerBytes.byteLength > MAX_BYTES) return resSimple("INVALID_ARGUMENT");
 
@@ -770,7 +844,7 @@ export async function publishImmutableJournalRecord(
 			return resSimple("INVALID_ARGUMENT");
 		}
 
-		const finalPath = join(journalDir, journalRecordName(seq));
+		const finalPath = join(journalDir, kind.fileName(seq));
 
 		coreEntered = true;
 		result = await publishCore(ioSnap, owned, sha, journalDir, dirId, finalPath, seq, scratch);
@@ -784,4 +858,48 @@ export async function publishImmutableJournalRecord(
 	}
 
 	return result;
+}
+
+// ---------------------------------------------------------------------------
+// Main exports
+// ---------------------------------------------------------------------------
+
+export async function publishImmutableJournalRecord(
+	options: PublishOptions,
+	io: JournalIo = new RealJournalIo(),
+): Promise<PublishResult> {
+	return await publishImmutableByKind(JOURNAL_KIND, options, io);
+}
+
+export async function publishImmutableDeliveryMarker(
+	options: DeliveryMarkerPublishOptions,
+	io: JournalIo = new RealJournalIo(),
+): Promise<DeliveryMarkerPublishResult> {
+	const result = await publishImmutableByKind(DELIVERY_KIND, options, io);
+	// Map from PublishResult (seq) to DeliveryMarkerPublishResult (sequence)
+	switch (result.status) {
+		case "success": {
+			const r = result as { status: "success"; seq: number; size: number; sha256: string };
+			return delResSuccess(r.seq, r.size, r.sha256);
+		}
+		case "SEQ_COLLISION": {
+			const r = result as { status: "SEQ_COLLISION"; seq: number };
+			return delResCollision(r.seq);
+		}
+		case "POST_PUBLICATION_UNCERTAIN": {
+			const r = result as {
+				status: "POST_PUBLICATION_UNCERTAIN";
+				seq: number;
+				size: number;
+				sha256: string;
+			};
+			return delResUncertain(r.seq, r.size, r.sha256);
+		}
+		case "IO_UNCONFIRMED":
+			return delResSimple("IO_UNCONFIRMED");
+		case "INVALID_ARGUMENT":
+			return delResSimple("INVALID_ARGUMENT");
+		default:
+			return delResSimple("INVALID_ARGUMENT");
+	}
 }
