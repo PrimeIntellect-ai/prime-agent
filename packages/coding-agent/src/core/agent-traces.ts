@@ -82,6 +82,8 @@ export interface AgentTraceUploadInstallOptions {
 	configPath?: string;
 	fetchFn?: typeof fetch;
 	requestTimeoutMs?: number;
+	/** The session's semantic-edge ledger; registered with the outbox as its own delivery kind. */
+	semanticEdgesLedgerPath?: string;
 }
 
 export type AgentTracePreviewResult =
@@ -639,8 +641,12 @@ interface AgentTraceUploadedSignature {
 	mtimeMs: number;
 }
 
+export const SEMANTIC_EDGES_OUTBOX_KIND = "semantic-edges";
+
 export interface AgentTraceCatchUpResult {
 	pruned: number;
+	/** Registered semantic-edge ledgers with bytes beyond their cursor; no delivery endpoint exists yet. */
+	semanticEdgeLedgersPending: number;
 	results: Array<{ sessionFile: string; result: AgentTraceUploadResult }>;
 }
 
@@ -654,9 +660,14 @@ function agentTraceOutboxEntryPath(sessionFile: string): string {
 	return join(getAgentTraceOutboxDir(), `${key}.json`);
 }
 
-function parseOutboxEntry(
-	raw: string,
-): { sessionFile: string; uploaded: AgentTraceUploadedSignature | null } | undefined {
+function parseOutboxEntry(raw: string):
+	| {
+			sessionFile: string;
+			kind?: string;
+			uploaded: AgentTraceUploadedSignature | null;
+			uploadedBytes?: number;
+	  }
+	| undefined {
 	const parsed = parseResponseObject(raw);
 	if (!parsed || typeof parsed.sessionFile !== "string") {
 		return undefined;
@@ -665,7 +676,12 @@ function parseOutboxEntry(
 		typeof parsed.size === "number" && typeof parsed.mtimeMs === "number"
 			? { size: parsed.size, mtimeMs: parsed.mtimeMs }
 			: null;
-	return { sessionFile: parsed.sessionFile, uploaded };
+	return {
+		sessionFile: parsed.sessionFile,
+		kind: typeof parsed.kind === "string" ? parsed.kind : undefined,
+		uploaded,
+		uploadedBytes: typeof parsed.uploadedBytes === "number" ? parsed.uploadedBytes : undefined,
+	};
 }
 
 /** `undefined` = no usable cursor; `null` = scheduled but never uploaded. */
@@ -688,7 +704,7 @@ function signatureEquals(a: AgentTraceUploadedSignature | null | undefined, b: A
 const locallyManagedSessionFiles = new Set<string>();
 
 /** Best-effort and synchronous: upload intent must be on disk the moment the transcript persist returns. */
-function markAgentTraceOutboxPendingSync(sessionFile: string): boolean {
+function markAgentTraceOutboxPendingSync(sessionFile: string, kind?: string): boolean {
 	try {
 		const entryPath = agentTraceOutboxEntryPath(sessionFile);
 		if (existsSync(entryPath)) {
@@ -696,7 +712,11 @@ function markAgentTraceOutboxPendingSync(sessionFile: string): boolean {
 		}
 		mkdirSync(getAgentTraceOutboxDir(), { recursive: true });
 		const tempPath = `${entryPath}.${process.pid}.${randomUUID()}.tmp`;
-		writeFileSync(tempPath, `${JSON.stringify({ sessionFile })}\n`, "utf8");
+		writeFileSync(
+			tempPath,
+			`${JSON.stringify(kind === undefined ? { sessionFile } : { sessionFile, kind })}\n`,
+			"utf8",
+		);
 		renameSync(tempPath, entryPath);
 		return true;
 	} catch {
@@ -724,7 +744,7 @@ async function recordAgentTraceOutboxUpload(
 export async function catchUpAgentTraceUploads(
 	options: Omit<AgentTraceUploadOptions, "sessionFile">,
 ): Promise<AgentTraceCatchUpResult> {
-	const catchUp: AgentTraceCatchUpResult = { pruned: 0, results: [] };
+	const catchUp: AgentTraceCatchUpResult = { pruned: 0, semanticEdgeLedgersPending: 0, results: [] };
 	if (options.requireEnabled !== false && !(await getAgentTracesEnabled(options))) {
 		return catchUp;
 	}
@@ -754,6 +774,36 @@ export async function catchUpAgentTraceUploads(
 		if (!entry) {
 			await unlink(entryPath).catch(() => undefined);
 			catchUp.pruned += 1;
+			continue;
+		}
+		if (entry.kind === SEMANTIC_EDGES_OUTBOX_KIND) {
+			let ledgerStats: Awaited<ReturnType<typeof stat>>;
+			try {
+				ledgerStats = await stat(entry.sessionFile);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+					await unlink(entryPath).catch(() => undefined);
+					catchUp.pruned += 1;
+				}
+				continue;
+			}
+			if (!ledgerStats.isFile()) {
+				await unlink(entryPath).catch(() => undefined);
+				catchUp.pruned += 1;
+				continue;
+			}
+			// Append-only byte cursor: a ledger whose size equals its delivered offset has nothing new.
+			if (ledgerStats.size === entry.uploadedBytes) {
+				continue;
+			}
+			// No delivery endpoint exists yet (verifiers#2449 consumes edges in-band over ACP
+			// metadata; the trace server has no semantic-edges route). The delta and cursor stay
+			// untouched so the first real sender delivers the whole backlog.
+			catchUp.semanticEdgeLedgersPending += 1;
+			continue;
+		}
+		if (entry.kind !== undefined) {
+			// A newer build may register kinds this one cannot deliver; leave their cursors alone.
 			continue;
 		}
 		if (locallyManagedSessionFiles.has(entry.sessionFile)) {
@@ -1018,6 +1068,7 @@ class AgentTraceUploadController {
 	private inFlight: Promise<void> | undefined;
 	private lastUploadStartedAt: number | undefined;
 	private notBeforeAt = 0;
+	private ledgerIntentMarked = false;
 
 	constructor(
 		private readonly sessionManager: SessionManager,
@@ -1033,6 +1084,10 @@ class AgentTraceUploadController {
 		const sessionFile = this.sessionManager.getSessionFile();
 		if (sessionFile && !locallyManagedSessionFiles.has(sessionFile) && markAgentTraceOutboxPendingSync(sessionFile)) {
 			locallyManagedSessionFiles.add(sessionFile);
+		}
+		const ledgerPath = this.options.semanticEdgesLedgerPath;
+		if (ledgerPath && !this.ledgerIntentMarked) {
+			this.ledgerIntentMarked = markAgentTraceOutboxPendingSync(ledgerPath, SEMANTIC_EDGES_OUTBOX_KIND);
 		}
 		this.arm();
 	};

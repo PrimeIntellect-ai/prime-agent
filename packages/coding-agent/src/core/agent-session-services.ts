@@ -16,6 +16,7 @@ import { ModelRegistry } from "./model-registry.js";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.js";
 import type { SubagentRuntimeHost } from "./rlm-runtime.js";
 import { type CreateAgentSessionResult, createAgentSession } from "./sdk.js";
+import { semanticEdgeLedgerPath } from "./semantic-edges.js";
 import type { SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
 import { installAgentTelemetry, isTelemetryEnabled } from "./telemetry.js";
@@ -225,6 +226,10 @@ export async function createAgentSessionFromServices(
 	installAgentTraceUpload(options.sessionManager, {
 		authStorage: options.services.authStorage,
 		settingsManager: options.services.settingsManager,
+		semanticEdgesLedgerPath: semanticEdgeLedgerPath({
+			rlmSessionDir: options.rlmSessionDir,
+			sessionArtifactDir: options.sessionManager.getSessionArtifactDir(),
+		}),
 	});
 	const result = await createAgentSession({
 		cwd: options.services.cwd,

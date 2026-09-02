@@ -233,8 +233,8 @@ import {
 } from "./rlm-runtime.js";
 import {
 	modelRequestHeaders,
-	SEMANTIC_EDGES_LEDGER_FILENAME,
 	SemanticEdgeRecorder,
+	semanticEdgeLedgerPath,
 	wrapStreamFnWithSemanticEdges,
 } from "./semantic-edges.js";
 import {
@@ -1282,9 +1282,11 @@ export class AgentSession {
 		this._rlmSessionDir = config.rlmSessionDir;
 		this._rlmParentNodeId = config.rlmParentNodeId;
 		this._rlmParentAgent = config.rlmParentAgent;
-		const semanticEdgesDir = this._rlmSessionDir ?? this.sessionManager.getSessionArtifactDir();
 		this._semanticEdges = new SemanticEdgeRecorder({
-			ledgerPath: semanticEdgesDir ? join(semanticEdgesDir, SEMANTIC_EDGES_LEDGER_FILENAME) : undefined,
+			ledgerPath: semanticEdgeLedgerPath({
+				rlmSessionDir: this._rlmSessionDir,
+				sessionArtifactDir: this.sessionManager.getSessionArtifactDir(),
+			}),
 			sessionId: this.sessionManager.getSessionId(),
 			parentSessionId: config.semanticParentSessionId,
 			spawnedByRequestId: config.semanticSpawnedByRequestId,
