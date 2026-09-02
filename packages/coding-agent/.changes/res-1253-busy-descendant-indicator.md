@@ -1,0 +1,1 @@
+- Fixed the agents view undercounting running subagents: the "N subagents running" indicator now counts busy descendants at any depth, stays visible on collapsed groups, and idle sessions with busy subagents sort above plain idle sessions.

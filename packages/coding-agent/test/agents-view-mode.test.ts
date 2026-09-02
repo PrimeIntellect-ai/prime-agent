@@ -19,7 +19,7 @@ import {
 } from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
-import { stopThemeWatcher } from "../src/modes/interactive/theme/theme.js";
+import { stopThemeWatcher, theme } from "../src/modes/interactive/theme/theme.js";
 
 const modeMocks = vi.hoisted(() => ({
 	interactiveRun: vi.fn<() => Promise<never>>(),
@@ -681,6 +681,38 @@ describe("AgentsViewMode", () => {
 		try {
 			expect(invoke("renderRow", view, rows[0], 160)).toContain("recovering");
 			expect(invoke("renderRow", view, rows[1], 160)).toContain("last heard");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("renders a collapsed group's busy-subagent badge legibly instead of dimmed", () => {
+		const parent = summary({ id: "parent", activeSessionId: "parent", sessionId: "parent-session" });
+		const busyChild = summary({
+			id: "busy-child",
+			activeSessionId: "busy-child",
+			sessionId: "busy-child-session",
+			sessionFile: "/tmp/busy-child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "parent",
+			activity: "working",
+			isSessionActive: true,
+			isStreaming: true,
+		});
+		const idleChild = { ...busyChild, activity: "idle" as const, isSessionActive: false, isStreaming: false };
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+
+		try {
+			const busyRows = buildAgentsViewRows([parent, busyChild]);
+			const busySummaryRow = busyRows.find((row) => row.kind === "subagent-summary");
+			expect(busySummaryRow).toMatchObject({ section: "idle", title: "1 subagent running" });
+			Reflect.set(view, "rows", busyRows);
+			expect(invoke("renderRow", view, busySummaryRow, 160)).toContain(theme.fg("success", "▸ 1 subagent running"));
+
+			const idleRows = buildAgentsViewRows([parent, idleChild]);
+			const idleSummaryRow = idleRows.find((row) => row.kind === "subagent-summary");
+			Reflect.set(view, "rows", idleRows);
+			expect(invoke("renderRow", view, idleSummaryRow, 160)).toContain(theme.fg("dim", "▸ 1 subagent"));
 		} finally {
 			stopThemeWatcher();
 		}

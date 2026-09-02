@@ -698,14 +698,24 @@ export function buildAgentsViewRows(
 		}
 		nestedRows.add(row);
 		parentByChild.set(row, parent);
-		if (row.section === "running") {
-			parent.runningSubagentCount += 1;
-		}
 		const siblings = childrenByParent.get(parent) ?? [];
 		siblings.push(row);
 		childrenByParent.set(parent, siblings);
 	}
 	propagateHeartbeatStateToAncestors(baseRows, parentByChild);
+	// The parent's own hasRunningRlmChildren snapshot goes stale between its
+	// flushes; the live descendant rows are the truth the indicator shows.
+	const tallyRunningDescendants = (row: MutableAgentsViewRow): number => {
+		let count = 0;
+		for (const child of childrenByParent.get(row) ?? []) {
+			count += (child.section === "running" ? 1 : 0) + tallyRunningDescendants(child);
+		}
+		row.runningSubagentCount = count;
+		return count;
+	};
+	for (const row of baseRows) {
+		if (!nestedRows.has(row)) tallyRunningDescendants(row);
+	}
 
 	const roots = baseRows.filter((row) => !nestedRows.has(row));
 	const flattened: AgentsViewRow[] = [];
@@ -876,6 +886,10 @@ function compareAgentsViewRows(a: AgentsViewRow, b: AgentsViewRow): number {
 		return sectionDiff;
 	}
 	if (a.section !== "running") {
+		const busyDescendantsDiff = Number(b.runningSubagentCount > 0) - Number(a.runningSubagentCount > 0);
+		if (busyDescendantsDiff !== 0) {
+			return busyDescendantsDiff;
+		}
 		const activityDiff = getTimestamp(b.summary.lastActivityAt) - getTimestamp(a.summary.lastActivityAt);
 		if (activityDiff !== 0) {
 			return activityDiff;

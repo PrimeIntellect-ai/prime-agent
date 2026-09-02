@@ -2528,7 +2528,9 @@ export class AgentsViewMode implements Component, Focusable {
 		if (row.kind === "subagent-summary") {
 			const indent = "  ".repeat(row.depth);
 			const hint = row.hasSpawnCode ? theme.fg("dim", ` · ${keyText("app.agents.program")} show program`) : "";
-			const label = `${theme.fg("dim", `${row.expanded ? "▾" : "▸"} ${row.title}`)}${hint}`;
+			// Busy descendants must be legible on a collapsed group, not dimmed away.
+			const titleColor = row.runningSubagentCount > 0 ? ("success" as const) : ("dim" as const);
+			const label = `${theme.fg(titleColor, `${row.expanded ? "▾" : "▸"} ${row.title}`)}${hint}`;
 			const line = padLine(truncateToWidth(`${indent}${label}`, width, ""), width);
 			return selected ? `${SELECTED_ROW_MARKER}${line}` : line;
 		}
