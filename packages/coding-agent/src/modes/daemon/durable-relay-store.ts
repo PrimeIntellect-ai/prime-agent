@@ -339,7 +339,7 @@ function snapshotRecovery(raw: unknown, close: OwnedClose): RecoveryCapability |
 }
 
 async function closeOwned(closes: readonly OwnedClose[]): Promise<boolean> {
-	const tasks = closes.map((close) => close());
+	const tasks = [...new Set(closes)].map((close) => close());
 	const results = await Promise.all(tasks);
 	return results.every((closed) => closed);
 }
@@ -472,17 +472,34 @@ export class DurableRelayStore {
 		const deliveryRaw = deliveryDescriptor && "value" in deliveryDescriptor ? deliveryDescriptor.value : undefined;
 		const recoveryRaw = recoveryDescriptor && "value" in recoveryDescriptor ? recoveryDescriptor.value : undefined;
 		const descriptors = exact(raw, INPUT_KEYS);
-		const journalClose = snapshotClose(journalRaw);
-		const deliveryClose = snapshotClose(deliveryRaw);
-		const recoveryClose = snapshotClose(recoveryRaw);
-		const ownedCloses = [journalClose, deliveryClose, recoveryClose].filter(
+		const closeCache = new Map<object, OwnedClose | null>();
+		const captureClose = (candidate: unknown): OwnedClose | null => {
+			if (typeof candidate !== "object" || candidate === null) return snapshotClose(candidate);
+			const cached = closeCache.get(candidate);
+			if (cached !== undefined || closeCache.has(candidate)) return cached ?? null;
+			const captured = snapshotClose(candidate);
+			closeCache.set(candidate, captured);
+			return captured;
+		};
+		const journalClose = captureClose(journalRaw);
+		const deliveryClose = captureClose(deliveryRaw);
+		const recoveryClose = captureClose(recoveryRaw);
+		const ownedCloses = [...new Set([journalClose, deliveryClose, recoveryClose])].filter(
 			(close): close is OwnedClose => close !== null,
 		);
 		const failCreation = async (code: DurableRelayStoreErrorCode): Promise<CreateDurableRelayStoreResult> => {
 			const closed = await closeOwned(ownedCloses);
 			return failure(closed ? code : "CLOSE_UNCERTAIN");
 		};
-		if (!descriptors || !journalClose || !deliveryClose || !recoveryClose) {
+		if (
+			!descriptors ||
+			!journalClose ||
+			!deliveryClose ||
+			!recoveryClose ||
+			journalRaw === deliveryRaw ||
+			journalRaw === recoveryRaw ||
+			deliveryRaw === recoveryRaw
+		) {
 			return await failCreation("INVALID_ARGUMENT");
 		}
 		const identity = snapshotIdentity(descriptors.identity.value);

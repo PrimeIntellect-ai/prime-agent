@@ -385,6 +385,26 @@ describe("durable relay store", () => {
 		expect(caps.state.recoveryCloses).toBe(1);
 	});
 
+	it("rejects aliased capabilities and closes the shared owner once", async () => {
+		const caps = standardCaps();
+		let sharedCloses = 0;
+		const shared = {
+			publish: caps.journalPublisher.publish,
+			close(): Promise<unknown> {
+				sharedCloses += 1;
+				return closeResult();
+			},
+		};
+		const result = await createDurableRelayStore({
+			...createInput(caps),
+			journalPublisher: shared,
+			deliveryPublisher: shared,
+		});
+		expect(result).toEqual({ ok: false, error: { code: "INVALID_ARGUMENT" } });
+		expect(sharedCloses).toBe(1);
+		expect(caps.state.recoveryCloses).toBe(1);
+	});
+
 	it("lets close uncertainty dominate factory failure", async () => {
 		const caps = standardCaps();
 		const brokenJournal = {
