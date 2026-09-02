@@ -669,6 +669,7 @@ describe("buildSandboxSshSpawnSpec", () => {
 			readyNonce: "00000000000000000000000000000000",
 			homeEnv: env,
 		});
+		expect(result.ok).toBe(false);
 		expect(accessCount).toBe(0);
 	});
 
