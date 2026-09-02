@@ -1,14 +1,157 @@
 import { basename, resolve } from "node:path";
+import { types } from "node:util";
+import type { ExecutionLocation } from "../../core/execution-location.js";
+import { normalizeExecutionLocation } from "../../core/execution-location.js";
 import { canonicalizePath } from "../../utils/paths.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/index.js";
 import { rosterAgentIdForSummary } from "../daemon/agent-roster.js";
 import { classifySessionRosterStatus, type SessionSummary } from "../daemon/daemon-session-list.js";
+import type { RemoteHostLinkStatus } from "../daemon/remote-agent-host-protocol.js";
 
 export type AgentsViewSection = "running" | "idle" | "inactive";
 
 export interface UnifiedSessionHeartbeat {
 	activeCount: number;
 	nextRunAt?: string;
+}
+
+/**
+ * Coarse execution-location metadata for Agents View display.
+ * Projected from the full ExecutionLocation and SandboxConnectionHealth
+ * accepted descriptors -- strips sandboxId, region, timestamps, errors, URLs.
+ *
+ *   { kind: "local" }              — running on the user's machine
+ *   { kind: "sandbox", linkStatus } — running in a remote sandbox
+ *   { kind: "unavailable" }        — present but unparseable/malformed, never local
+ *
+ * The "unavailable" kind is used for any present-but-invalid input (including
+ * primitives, strings, functions). Only undefined/null produces absent (no metadata).
+ * validation; absent metadata produces undefined, which omits the label.
+ */
+export type SessionExecutionMetadata =
+	| { readonly kind: "local" }
+	| { readonly kind: "sandbox"; readonly linkStatus: RemoteHostLinkStatus | "unavailable" }
+	| { readonly kind: "unavailable" };
+
+/**
+ * Reconstruct a stable raw value for projectSessionExecutionMetadata from an
+ * already-projected SessionExecutionMetadata.  This lets reconcile re-validate
+ * a map entry without carrying raw descriptor types through the view boundary.
+ */
+/**
+ * Accepted RemoteHostLinkStatus values for direct validation.
+ */
+const VALID_LINK_STATUSES = new Set(["connecting", "connected", "reconnecting", "unreachable", "closed"]);
+
+/**
+ * Snapshot/validate an already-projected SessionExecutionMetadata from a
+ * trusted map (e.g. B14 hosted registry projection).  This is a strict
+ * plain-deserialised-object check that rejects Proxy wrappers, getter props,
+ * Symbol keys, non-enumerable extras, and non-plain prototypes (class
+ * instances, Proxy targets).  Any present input that fails validation
+ * — including a throwing getter caught here — returns frozen {kind:"unavailable"}.
+ * Only undefined/null input returns undefined (absent metadata).
+ */
+export function snapshotSessionExecutionMetadata(raw: unknown): SessionExecutionMetadata | undefined {
+	if (raw === undefined || raw === null) return undefined;
+	if (typeof raw !== "object") return Object.freeze({ kind: "unavailable" });
+	try {
+		if (types.isProxy(raw)) return Object.freeze({ kind: "unavailable" });
+		const prototype = Object.getPrototypeOf(raw);
+		if (prototype !== Object.prototype && prototype !== null) return Object.freeze({ kind: "unavailable" });
+		const names = Object.getOwnPropertyNames(raw);
+		if (Object.getOwnPropertySymbols(raw).length !== 0) return Object.freeze({ kind: "unavailable" });
+		const descriptors = Object.getOwnPropertyDescriptors(raw);
+		for (const name of names) {
+			const descriptor = descriptors[name];
+			if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+				return Object.freeze({ kind: "unavailable" });
+			}
+		}
+		const kind = descriptors.kind?.value;
+		if (kind === "local" || kind === "unavailable") {
+			if (names.length !== 1 || names[0] !== "kind") return Object.freeze({ kind: "unavailable" });
+			return Object.freeze({ kind });
+		}
+		if (kind === "sandbox") {
+			if (names.length !== 2 || !names.includes("kind") || !names.includes("linkStatus")) {
+				return Object.freeze({ kind: "unavailable" });
+			}
+			const linkStatus = descriptors.linkStatus?.value;
+			if (linkStatus === "unavailable") return Object.freeze({ kind: "sandbox", linkStatus });
+			if (typeof linkStatus !== "string" || !VALID_LINK_STATUSES.has(linkStatus)) {
+				return Object.freeze({ kind: "unavailable" });
+			}
+			return Object.freeze({ kind: "sandbox", linkStatus: linkStatus as RemoteHostLinkStatus });
+		}
+		return Object.freeze({ kind: "unavailable" });
+	} catch {
+		return Object.freeze({ kind: "unavailable" });
+	}
+}
+
+function snapshotExecutionLocation(raw: unknown): ExecutionLocation | undefined {
+	if (typeof raw !== "object" || raw === null) return undefined;
+	try {
+		if (types.isProxy(raw) || Object.getPrototypeOf(raw) !== Object.prototype) return undefined;
+		if (Object.getOwnPropertySymbols(raw).length !== 0) return undefined;
+		const names = Object.getOwnPropertyNames(raw);
+		const descriptors = Object.getOwnPropertyDescriptors(raw);
+		for (const name of names) {
+			const descriptor = descriptors[name];
+			if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return undefined;
+		}
+		const type = descriptors.type?.value;
+		if (type === "local" && names.length === 1) return Object.freeze({ type: "local" });
+		if (type !== "prime-sandbox" || !names.includes("sandboxId")) return undefined;
+		if (names.some((name) => !["region", "sandboxId", "type"].includes(name))) return undefined;
+		const sandboxId = descriptors.sandboxId?.value;
+		const region = descriptors.region?.value;
+		if (typeof sandboxId !== "string" || sandboxId.length === 0) return undefined;
+		if (region !== undefined && (typeof region !== "string" || region.length === 0)) return undefined;
+		return region === undefined
+			? Object.freeze({ type: "prime-sandbox", sandboxId })
+			: Object.freeze({ type: "prime-sandbox", sandboxId, region });
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Project raw execution-location and optional RemoteHostLinkStatus into a safe,
+ * secret-stripped, frozen display DTO.
+ *
+ * Validates locationUnknown through the accepted normalizeExecutionLocation().
+ * Only undefined/null location input produces undefined (absent metadata).
+ * Any present input that is not a valid ExecutionLocation — including primitives,
+ * strings, functions, objects without a recognized shape — returns
+ * frozen {kind:"unavailable"}.
+ *
+ * Link status is validated directly against the accepted RemoteHostLinkStatus
+ * union (connecting|connected|reconnecting|unreachable|closed). Invalid or
+ * absent link values produce "unavailable".
+ *
+ * NEVER returns {kind:"local"} for absent or invalid sandbox metadata.
+ */
+export function projectSessionExecutionMetadata(
+	locationUnknown: unknown,
+	linkStatusUnknown: unknown,
+): SessionExecutionMetadata | undefined {
+	const locationSnapshot = snapshotExecutionLocation(locationUnknown);
+	const location = locationSnapshot ? normalizeExecutionLocation(locationSnapshot) : undefined;
+	if (!location) {
+		// Only undefined/null means absent → no metadata.
+		if (locationUnknown === undefined || locationUnknown === null) return undefined;
+		// Everything else that isn't a valid location → unavailable.
+		return Object.freeze({ kind: "unavailable" });
+	}
+	if (location.type === "local") return Object.freeze({ kind: "local" });
+	// Prime sandbox: validate link status directly against the accepted enum.
+	const linkStatus: RemoteHostLinkStatus | "unavailable" =
+		typeof linkStatusUnknown === "string" && VALID_LINK_STATUSES.has(linkStatusUnknown)
+			? (linkStatusUnknown as RemoteHostLinkStatus)
+			: "unavailable";
+	return Object.freeze({ kind: "sandbox", linkStatus });
 }
 
 export interface UnifiedSessionRecord {
@@ -21,6 +164,8 @@ export interface UnifiedSessionRecord {
 	section: AgentsViewSection;
 	searchableText: string;
 	heartbeat?: UnifiedSessionHeartbeat;
+	/** Projected coarse execution-location metadata for display. */
+	executionMetadata?: SessionExecutionMetadata;
 }
 
 export interface AgentsViewScopeKey {
@@ -88,6 +233,8 @@ export interface AgentsViewRow {
 	/** Merged durable/live source data for unified rows. */
 	record?: UnifiedSessionRecord;
 	heartbeat?: UnifiedSessionHeartbeat;
+	/** Projected coarse execution-location metadata for display. */
+	executionMetadata?: SessionExecutionMetadata;
 }
 
 export function classifyAgentsViewSession(summary: SessionSummary): AgentsViewSection {
@@ -191,6 +338,7 @@ export function reconcileUnifiedSessions(
 	daemonSummaries: readonly SessionSummary[],
 	savedSessions: readonly AgentConnectionSavedSessionInfo[],
 	heartbeats: readonly AgentConnectionHeartbeat[] = [],
+	executionMetadataByActiveSessionId?: ReadonlyMap<string, SessionExecutionMetadata>,
 ): UnifiedSessionRecord[] {
 	const heartbeatByActiveId = aggregateSessionHeartbeats(daemonSummaries, heartbeats);
 	const records: UnifiedSessionRecord[] = [];
@@ -201,6 +349,17 @@ export function reconcileUnifiedSessions(
 		const heartbeat =
 			heartbeatByActiveId.get(daemon.activeSessionId ?? daemon.id) ??
 			(daemon.hasActiveHeartbeat ? { activeCount: 1 } : undefined);
+		let rawMeta: unknown;
+		let metadataReadFailed = false;
+		try {
+			rawMeta = daemon.activeSessionId ? executionMetadataByActiveSessionId?.get(daemon.activeSessionId) : undefined;
+		} catch {
+			rawMeta = undefined;
+			metadataReadFailed = true;
+		}
+		const executionMetadata = metadataReadFailed
+			? Object.freeze({ kind: "unavailable" as const })
+			: snapshotSessionExecutionMetadata(rawMeta);
 		const record: UnifiedSessionRecord = {
 			daemon: heartbeat && !daemon.hasActiveHeartbeat ? { ...daemon, hasActiveHeartbeat: true } : daemon,
 			identity: aliases[0]!,
@@ -208,6 +367,7 @@ export function reconcileUnifiedSessions(
 			section: "idle",
 			searchableText: "",
 			...(heartbeat ? { heartbeat } : {}),
+			...(executionMetadata ? { executionMetadata } : {}),
 		};
 		record.section = classifyUnifiedSession(record);
 		record.searchableText = createUnifiedSearchableText(daemon, undefined);
@@ -678,6 +838,7 @@ export function buildAgentsViewRows(
 			runningSubagentCount: 0,
 			identity: record?.identity ?? getAgentsViewSummaryIdentity(summary),
 			...(record ? { record, heartbeat: record.heartbeat } : {}),
+			...(record?.executionMetadata ? { executionMetadata: record.executionMetadata } : {}),
 		}),
 	);
 	const rowsByKey = buildRowKeyMap(baseRows);

@@ -87,6 +87,7 @@ import {
 	resolveAgentsViewLeftResult,
 	resolveAgentsViewScopeFrames,
 	resolveAgentsViewSelectionState,
+	type SessionExecutionMetadata,
 	scopeToSessionSubtree,
 	sectionTitle,
 	shouldApplyScopeResolution,
@@ -2569,7 +2570,9 @@ export class AgentsViewMode implements Component, Focusable {
 			(row.summary.statusLabel !== undefined || row.summary.lastHeardFromAt !== undefined)
 				? row.statusLabel
 				: undefined;
-		const suffixes = [statusLabel, modelLabel, summaryText].filter(
+		const executionLabel =
+			!pendingDelete && !pendingKill ? formatSessionExecutionLabel(row.executionMetadata) : undefined;
+		const suffixes = [statusLabel, modelLabel, executionLabel, summaryText].filter(
 			(suffix): suffix is string => suffix !== undefined && suffix.length > 0,
 		);
 		const titleContent = suffixes.length > 0 ? `${title} ${theme.fg("dim", `· ${suffixes.join(" · ")}`)}` : title;
@@ -2876,6 +2879,21 @@ function parseSessionTimestamp(value: string | undefined): number | undefined {
 	}
 	const timestamp = Date.parse(value);
 	return Number.isNaN(timestamp) ? undefined : timestamp;
+}
+
+/**
+ * Format a SessionExecutionMetadata DTO into a concise display label.
+ * Returns undefined when there is nothing to show (absent metadata).
+ */
+function formatSessionExecutionLabel(metadata: SessionExecutionMetadata | undefined): string | undefined {
+	if (!metadata) return undefined;
+	if (metadata.kind === "local") return "local";
+	if (metadata.kind === "sandbox") {
+		if (metadata.linkStatus === "unavailable") return "sandbox · link unavailable";
+		return `sandbox · ${metadata.linkStatus}`;
+	}
+	// kind === "unavailable"
+	return "location unavailable";
 }
 
 function requireDaemonData(response: DaemonResponse): unknown {
