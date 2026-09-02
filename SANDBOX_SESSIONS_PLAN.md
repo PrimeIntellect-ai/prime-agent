@@ -85,7 +85,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 | B04 | A02, A16 | queued | Add authenticated link state machine and fake relay transport |
 | B05 | A04, A14 | done | Add typed streaming home-provider proxy |
 | B06 | A05, A15 | in_progress | Add Prime Sandbox provisioner and exact-build bootstrap |
-| B07 | A10, A14 | in_progress | Add Git workspace snapshot and safe sync-back |
+| B07 | A10, A14 | done | Add Git workspace snapshot and safe sync-back |
 | B08 | A12, B01, B02 | queued | Add `sandbox` and `sandbox_options` to RLM APIs |
 | B09 | A11, B01, B03 | queued | Add top-level sandbox session creation APIs and CLI flags |
 | B10 | A06, B03, B04 | queued | Route durable direct agent-to-agent communication across hosts |
@@ -145,3 +145,5 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Integrated B05 as `ce567a025`; 34 focused tests verify exact model authorization, typed streaming, cancellation, validation, and credential-safe errors.
 
 - The integration branch passes full `npm run check` after B01, B03, and B05 integration.
+
+- Integrated B07 as `7c193eb17`; 65 focused tests cover binary-safe snapshots, secret exclusion, traversal/symlink defenses, base-hash conflicts, and atomic sync-back.
