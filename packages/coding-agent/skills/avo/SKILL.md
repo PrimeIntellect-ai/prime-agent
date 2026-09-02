@@ -29,7 +29,11 @@ is complete. Begin with the user's task files and then
 or `await avo.get_state()` after restart. Use the returned execution contract.
 Never pass or request an environment override.
 
-## Required iterative loop
+## Autonomous variation loop
+
+In paper-aligned AVO (arXiv:2603.24517), the agent autonomously directs its variation trajectory:
+it may sample earlier solutions ($P_t$), consult domain knowledge ($K$), edit candidates, invoke the
+scoring utility ($f$), diagnose failures, repair, and re-evaluate in any sequence appropriate for the task.
 
 1. Read `verificationClass`, `verificationPolicy`, and the host-derived
    `obligations` from state. Before candidate work, decompose any additional
