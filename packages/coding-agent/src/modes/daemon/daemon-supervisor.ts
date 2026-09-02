@@ -1,6 +1,15 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { Writable } from "node:stream";
@@ -31,6 +40,7 @@ import {
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
+	isHeartbeatCronJob,
 	migrateLegacyCronJobsToSessionArtifacts,
 	SESSION_SCHEDULED_JOBS_FILENAME,
 } from "../../core/cron-jobs.js";
@@ -199,6 +209,9 @@ const IDLE_EVICTION_MAX_SWEEP_INTERVAL_MS = 5 * 60_000;
 const IDLE_EVICTION_MIN_SWEEP_INTERVAL_MS = 60_000;
 const IDLE_EVICTION_DRAIN_TIMEOUT_MS = 5_000;
 const CHILD_PASSIVATION_PER_WORKER_CAP = 2;
+const SCHEDULED_WAKE_RETRY_MS = 60_000;
+const SCHEDULED_WAKE_MAX_TIMEOUT_MS = 2_147_483_647;
+const SCHEDULED_WAKE_CLIENT_ID = "scheduled-wake";
 const SUPERVISOR_CONFIG_FILE_NAME = "supervisor-config";
 const WORKER_STARTUP_GATE_FD = 3;
 
@@ -717,6 +730,10 @@ export class DaemonSupervisor {
 	private idleEvictionTimer?: ReturnType<typeof setTimeout>;
 	private idleEvictionSweep?: Promise<void>;
 	private idleEvictionFence?: Promise<void>;
+	private scheduledWakeTimer?: ReturnType<typeof setTimeout>;
+	private scheduledWakeRecompute?: Promise<void>;
+	private scheduledWakeRecomputeQueued = false;
+	private readonly scheduledWakeFailures = new Map<string, number>();
 
 	constructor(
 		private readonly socketPath: string,
@@ -819,6 +836,7 @@ export class DaemonSupervisor {
 				this.scheduleOwnedWorkerCleanup(worker);
 			}
 			this.scheduleIdleEvictionSweep();
+			this.scheduleScheduledSessionWakeRecompute();
 			this.rosterWatchdogTimer = setInterval(() => this.sweepRosterStaleness(), ROSTER_WATCHDOG_INTERVAL_MS);
 			this.rosterWatchdogTimer.unref();
 			this.assertSocketLeaseHeld();
@@ -870,6 +888,136 @@ export class DaemonSupervisor {
 		this.rosterWatchdogTimer = undefined;
 	}
 
+	private clearScheduledWakeTimer(): void {
+		if (!this.scheduledWakeTimer) return;
+		clearTimeout(this.scheduledWakeTimer);
+		this.scheduledWakeTimer = undefined;
+	}
+
+	// The supervisor owns exactly one scheduling concern: waking a session tree
+	// that is not resident anywhere when one of its scheduled jobs comes due.
+	// Firing and delivery stay worker-owned; the wake only relaunches the root
+	// worker and its own scheduler runs the due job.
+	private scheduleScheduledSessionWakeRecompute(): void {
+		if (this.shuttingDown) return;
+		if (this.scheduledWakeRecompute) {
+			this.scheduledWakeRecomputeQueued = true;
+			return;
+		}
+		this.scheduledWakeRecompute = this.recomputeScheduledSessionWake()
+			.catch((error) => this.log(`Scheduled-session wake recompute failed: ${String(error)}`))
+			.finally(() => {
+				this.scheduledWakeRecompute = undefined;
+				if (this.scheduledWakeRecomputeQueued) {
+					this.scheduledWakeRecomputeQueued = false;
+					this.scheduleScheduledSessionWakeRecompute();
+				}
+			});
+	}
+
+	/** Durable truth only: the saved-session catalog plus each session's scheduled-jobs artifact. */
+	private async collectPassiveScheduledJobs(): Promise<
+		Array<{ rootSessionFile: string; job: AgentCronJob; info: SessionInfo }>
+	> {
+		const infos = await this.catalog.list(undefined, this.defaultSessionConfig.sessionDir);
+		const infoByPath = new Map(infos.map((info) => [canonicalSessionPath(info.path), info] as const));
+		const store = AgentCronJobStore.forSessionArtifacts();
+		const infoBySessionId = new Map<string, SessionInfo>();
+		for (const info of infos) {
+			if (info.state !== undefined && info.state.status !== "active") continue;
+			const artifactDir = getSessionArtifactPathForFile(resolve(info.path), info.id);
+			if (!existsSync(join(artifactDir, SESSION_SCHEDULED_JOBS_FILENAME))) continue;
+			store.registerSessionArtifact(info.id, artifactDir);
+			infoBySessionId.set(info.id, info);
+		}
+		if (infoBySessionId.size === 0) return [];
+		const rootSessionFileFor = (info: SessionInfo): string => {
+			let current = info;
+			const visited = new Set([canonicalSessionPath(current.path)]);
+			while (current.parentSessionPath) {
+				const parent = infoByPath.get(canonicalSessionPath(current.parentSessionPath));
+				if (!parent || visited.has(canonicalSessionPath(parent.path))) break;
+				visited.add(canonicalSessionPath(parent.path));
+				current = parent;
+			}
+			return current.path;
+		};
+		const results: Array<{ rootSessionFile: string; job: AgentCronJob; info: SessionInfo }> = [];
+		for (const job of store.list()) {
+			if (job.status !== "active" && job.status !== "paused") continue;
+			const info = infoBySessionId.get(job.sessionId);
+			if (!info) continue;
+			const rootSessionFile = rootSessionFileFor(info);
+			try {
+				// A live root worker's own scheduler covers the whole tree.
+				if (this.findWorkerBySessionFile(rootSessionFile)) continue;
+			} catch {
+				continue;
+			}
+			results.push({ rootSessionFile, job, info });
+		}
+		return results;
+	}
+
+	private async recomputeScheduledSessionWake(): Promise<void> {
+		if (this.shuttingDown) return;
+		const candidates = await this.collectPassiveScheduledJobs();
+		this.clearScheduledWakeTimer();
+		if (this.shuttingDown) return;
+		const now = Date.now();
+		const wakeTimes: number[] = [];
+		const candidateRoots = new Set(candidates.map(({ rootSessionFile }) => canonicalSessionPath(rootSessionFile)));
+		for (const root of [...this.scheduledWakeFailures.keys()]) {
+			if (!candidateRoots.has(root)) this.scheduledWakeFailures.delete(root);
+		}
+		for (const { rootSessionFile, job } of candidates) {
+			if (job.status !== "active" || job.nextRunAt === undefined) continue;
+			const runAt = Date.parse(job.nextRunAt);
+			if (!Number.isFinite(runAt)) continue;
+			// A failed relaunch must not retry in a hot loop while the job stays overdue.
+			const failedAt = this.scheduledWakeFailures.get(canonicalSessionPath(rootSessionFile));
+			wakeTimes.push(failedAt !== undefined ? Math.max(runAt, failedAt + SCHEDULED_WAKE_RETRY_MS) : runAt);
+		}
+		if (wakeTimes.length === 0) return;
+		const delay = Math.min(Math.max(0, Math.min(...wakeTimes) - now), SCHEDULED_WAKE_MAX_TIMEOUT_MS);
+		this.scheduledWakeTimer = setTimeout(() => {
+			this.scheduledWakeTimer = undefined;
+			void this.wakeDueScheduledSessions().catch((error) =>
+				this.log(`Scheduled-session wake failed: ${String(error)}`),
+			);
+		}, delay);
+		this.scheduledWakeTimer.unref();
+	}
+
+	private async wakeDueScheduledSessions(now = Date.now()): Promise<void> {
+		if (this.shuttingDown || this.updateRestartPhase !== undefined) {
+			this.scheduleScheduledSessionWakeRecompute();
+			return;
+		}
+		try {
+			const due = new Map<string, string>();
+			for (const { rootSessionFile, job } of await this.collectPassiveScheduledJobs()) {
+				if (job.status !== "active" || job.nextRunAt === undefined) continue;
+				const runAt = Date.parse(job.nextRunAt);
+				if (!Number.isFinite(runAt) || runAt > now) continue;
+				due.set(canonicalSessionPath(rootSessionFile), rootSessionFile);
+			}
+			for (const [rootKey, sessionPath] of due) {
+				if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
+				try {
+					await this.createOrReuseWorker(SCHEDULED_WAKE_CLIENT_ID, { type: "create", sessionPath });
+					this.scheduledWakeFailures.delete(rootKey);
+					this.log(`Woke session worker for a due scheduled job: ${sessionPath}`);
+				} catch (error) {
+					this.scheduledWakeFailures.set(rootKey, Date.now());
+					this.log(`Scheduled wake failed for ${sessionPath}: ${String(error)}`);
+				}
+			}
+		} finally {
+			this.scheduleScheduledSessionWakeRecompute();
+		}
+	}
+
 	private scheduleIdleEvictionSweep(): void {
 		if (this.shuttingDown || this.idleEvictionTimer || this.idleEvictionSweep) return;
 		const delayMs = idleEvictionSweepIntervalMs(this.settingsManager.getIdleEvictionMinutes());
@@ -902,7 +1050,6 @@ export class DaemonSupervisor {
 					return {
 						isSessionActive: isSessionSummaryBusy(summary),
 						attachedClients: this.attachedClientCount(summary, activeSessionId),
-						hasRegisteredHeartbeat: summary.hasRegisteredHeartbeat === true,
 						hasRegisteredCronJob: summary.hasRegisteredCronJob === true,
 						lastActivityAt: Date.parse(summary.lastActivityAt ?? ""),
 					};
@@ -2118,6 +2265,15 @@ export class DaemonSupervisor {
 					for (const heartbeat of snapshot.heartbeats ?? []) {
 						heartbeats.set(heartbeat.job.id, heartbeat);
 					}
+				}
+				// Passivated sessions keep their armed heartbeats; no worker lists them.
+				for (const { job, info } of await this.collectPassiveScheduledJobs()) {
+					if (!isHeartbeatCronJob(job) || heartbeats.has(job.id)) continue;
+					heartbeats.set(job.id, {
+						job,
+						...(info.name !== undefined ? { sessionName: info.name } : {}),
+						...(info.firstMessage !== undefined ? { firstMessage: info.firstMessage } : {}),
+					});
 				}
 				return success(command.id, "heartbeats_list", { heartbeats: [...heartbeats.values()] });
 			}
@@ -4245,7 +4401,14 @@ export class DaemonSupervisor {
 				this.roster().delete(entry.agentId);
 				continue;
 			}
-			this.writeRosterEntry(passivatedWorkerRosterEntry(entry));
+			// Registration marks survive eviction: they are the durable hint that a
+			// passive row still has scheduled jobs behind it.
+			this.writeRosterEntry(
+				passivatedWorkerRosterEntry(entry, {
+					hasRegisteredHeartbeat: entry.summary.hasRegisteredHeartbeat === true,
+					hasRegisteredCronJob: entry.summary.hasRegisteredCronJob === true,
+				}),
+			);
 		}
 	}
 
@@ -6301,6 +6464,8 @@ export class DaemonSupervisor {
 	}
 
 	private broadcastHeartbeatsChanged(): void {
+		// Job and residency changes are exactly the moments the wake schedule can move.
+		this.scheduleScheduledSessionWakeRecompute();
 		for (const client of this.clients) {
 			this.write(client, { type: "heartbeats_changed" });
 		}
@@ -6396,6 +6561,7 @@ export class DaemonSupervisor {
 	private async cleanupSupervisorResourcesOnce(): Promise<void> {
 		this.shuttingDown = true;
 		this.clearIdleEvictionTimer();
+		this.clearScheduledWakeTimer();
 		this.clearRosterWatchdogTimer();
 		await this.idleEvictionSweep?.catch(() => undefined);
 		for (const cleanup of this.signalCleanupHandlers.splice(0)) {
@@ -6496,6 +6662,7 @@ export class DaemonSupervisor {
 		}
 		this.shuttingDown = true;
 		this.clearIdleEvictionTimer();
+		this.clearScheduledWakeTimer();
 		this.clearRosterWatchdogTimer();
 		await this.idleEvictionSweep?.catch(() => undefined);
 		if (closingReason) {

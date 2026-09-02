@@ -2,6 +2,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { type AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
+import { getSessionArtifactPathForFile, type SessionInfo } from "../src/core/session-manager.js";
 import { workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import { success } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
@@ -14,6 +16,7 @@ interface WorkerFixture {
 		lifecycle: "starting" | "ready" | "recovering" | "failed";
 		rootActiveSessionId: string;
 		rootSessionId: string;
+		sessionFile?: string;
 		pid: number;
 		ownerClientId?: string;
 		stopRequestedAt?: string;
@@ -34,12 +37,16 @@ interface SupervisorInternals {
 	clients: Set<{ id: string; attachedActiveSessionIds: Set<string> }>;
 	idleEvictionFence?: Promise<void>;
 	mutationDrain: { begin(): void; end(): void };
-	catalog: { resolve: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
+	catalog: { resolve: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn>; list?: ReturnType<typeof vi.fn> };
 	createOrReuseWorker: ReturnType<typeof vi.fn>;
 	stopWorker: ReturnType<typeof vi.fn>;
 	log: ReturnType<typeof vi.fn>;
+	scheduledWakeTimer?: ReturnType<typeof setTimeout>;
+	scheduledWakeRecompute?: Promise<void>;
 	scheduleIdleEvictionSweep(): void;
 	runIdleEvictionSweep(now?: number): Promise<void>;
+	recomputeScheduledSessionWake(): Promise<void>;
+	wakeDueScheduledSessions(now?: number): Promise<void>;
 	shutdown(exitCode: number, stopWorkers: boolean): Promise<never>;
 	handleCommand(client: object, command: object): Promise<unknown>;
 	writeRosterEntry(entry: object, worker?: object): unknown;
@@ -131,12 +138,14 @@ describe("daemon supervisor whole-tree eviction", () => {
 
 		await supervisor.runIdleEvictionSweep(now);
 
-		expect(supervisor.stopWorker).toHaveBeenCalledTimes(1);
+		// An armed heartbeat is not work: its worker evicts exactly like any idle worker.
+		expect(supervisor.stopWorker).toHaveBeenCalledTimes(2);
 		expect(supervisor.stopWorker).toHaveBeenCalledWith(idle, true);
+		expect(supervisor.stopWorker).toHaveBeenCalledWith(heartbeat, true);
 		expect(supervisor.log).toHaveBeenCalledWith(
 			expect.stringMatching(/Evicted idle worker idle .*idleMinutes=120 sessions=2/),
 		);
-		expect([...supervisor.workers.keys()].sort()).toEqual(["active", "attached", "cron", "heartbeat"]);
+		expect([...supervisor.workers.keys()].sort()).toEqual(["active", "attached", "cron"]);
 	});
 
 	it("delegates capped child passivation only to live non-evictable workers", async () => {
@@ -211,7 +220,7 @@ describe("daemon supervisor whole-tree eviction", () => {
 		expect(supervisor.workers.has("parent")).toBe(true);
 	});
 
-	it("evicts a paused-heartbeat session but pins an active-heartbeat session", async () => {
+	it("evicts paused-heartbeat and active-heartbeat sessions like any idle session", async () => {
 		const now = Date.parse("2026-08-01T12:00:00.000Z");
 		const supervisor = makeSupervisor();
 		const paused = makeWorker("paused", [makeSummary("paused-root", now)]);
@@ -224,9 +233,10 @@ describe("daemon supervisor whole-tree eviction", () => {
 
 		await supervisor.runIdleEvictionSweep(now);
 
-		expect(supervisor.stopWorker).toHaveBeenCalledTimes(1);
+		expect(supervisor.stopWorker).toHaveBeenCalledTimes(2);
 		expect(supervisor.stopWorker).toHaveBeenCalledWith(paused, true);
-		expect(supervisor.workers.has("active-heartbeat")).toBe(true);
+		expect(supervisor.stopWorker).toHaveBeenCalledWith(active, true);
+		expect(supervisor.workers.has("active-heartbeat")).toBe(false);
 	});
 
 	it("honors off after reloading settings at sweep time", async () => {
@@ -472,21 +482,21 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		const now = Date.parse("2026-08-01T12:00:00.000Z");
 		const supervisor = makeSupervisor();
 		const empty = makeWorker("empty", [makeSummary("empty-root", now, { messageCount: 0 })]);
+		const heartbeat = makeWorker("heartbeat", [
+			makeSummary("heartbeat-root", now, { messageCount: 0, hasRegisteredHeartbeat: true }),
+		]);
 		const exempt = [
 			makeWorker("named", [makeSummary("named-root", now, { messageCount: 0, sessionName: "keep me" })]),
 			makeWorker("busy", [makeSummary("busy-root", now, { messageCount: 0, isSessionActive: true })]),
 			makeWorker("one-message", [makeSummary("one-message-root", now)]),
-			makeWorker("heartbeat", [
-				makeSummary("heartbeat-root", now, { messageCount: 0, hasRegisteredHeartbeat: true }),
-			]),
 			makeWorker("cron", [makeSummary("cron-root", now, { messageCount: 0, hasRegisteredCronJob: true })]),
 			makeWorker("owned", [makeSummary("owned-root", now, { messageCount: 0 })]),
 		];
-		exempt[5]!.descriptor.ownerClientId = "owner";
-		for (const worker of [empty, ...exempt]) {
+		exempt[4]!.descriptor.ownerClientId = "owner";
+		for (const worker of [empty, heartbeat, ...exempt]) {
 			supervisor.workers.set(worker.descriptor.workerId, worker);
 		}
-		seedSupervisorRoster(supervisor, empty, ...exempt);
+		seedSupervisorRoster(supervisor, empty, heartbeat, ...exempt);
 		const first = makeDetachClient("first", ["empty-root"]);
 		const viewer = makeDetachClient("viewer", [
 			"empty-root",
@@ -506,16 +516,11 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 
 		await supervisor.handleCommand(viewer, { id: "detach-all", type: "detach" });
 		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(empty, true));
+		// An empty draft with only an armed heartbeat is abandoned too; the wake revives it on the next beat.
+		await vi.waitFor(() => expect(supervisor.stopWorker).toHaveBeenCalledWith(heartbeat, true));
 		await settle();
-		expect(supervisor.stopWorker).toHaveBeenCalledTimes(1);
-		expect([...supervisor.workers.keys()].sort()).toEqual([
-			"busy",
-			"cron",
-			"heartbeat",
-			"named",
-			"one-message",
-			"owned",
-		]);
+		expect(supervisor.stopWorker).toHaveBeenCalledTimes(2);
+		expect([...supervisor.workers.keys()].sort()).toEqual(["busy", "cron", "named", "one-message", "owned"]);
 		expect(supervisor.log).toHaveBeenCalledWith(expect.stringContaining("Evicted empty session worker empty"));
 	});
 
@@ -586,7 +591,7 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		expect(supervisor.workers.get("swap")).toBe(successor);
 	});
 
-	it("does not evict when a mutation admitted during the refresh registers a schedule", async () => {
+	it("does not evict when a mutation admitted during the refresh registers a cron schedule", async () => {
 		const now = Date.parse("2026-08-01T12:00:00.000Z");
 		const supervisor = makeSupervisor();
 		const worker = makeWorker("gap", [makeSummary("gap-root", now, { messageCount: 0 })]);
@@ -607,11 +612,11 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 
 		await supervisor.handleCommand(client, { id: "detach", type: "detach", activeSessionId: "gap-root" });
 		await vi.waitFor(() => expect(worker.client!.request).toHaveBeenCalled());
-		// A heartbeat_set admitted mid-refresh registers a schedule before the eviction decision.
+		// A cron_add admitted mid-refresh registers a schedule before the eviction decision.
 		supervisor.mutationDrain.begin();
 		worker.client!.request.mockImplementation(async () =>
 			success(undefined, "list", {
-				sessions: [makeSummary("gap-root", now, { messageCount: 0, hasRegisteredHeartbeat: true })],
+				sessions: [makeSummary("gap-root", now, { messageCount: 0, hasRegisteredCronJob: true })],
 			}),
 		);
 		releaseList();
@@ -682,5 +687,111 @@ describe("daemon supervisor empty-session eviction on detach", () => {
 		await sweep;
 		expect(supervisor.stopWorker).toHaveBeenCalledTimes(1);
 		expect(supervisor.stopWorker).toHaveBeenCalledWith(worker, true);
+	});
+});
+
+describe("daemon supervisor scheduled-session wake", () => {
+	const now = Date.parse("2026-08-01T12:00:00.000Z");
+
+	function makeSavedInfo(path: string, id: string, overrides: Partial<SessionInfo> = {}): SessionInfo {
+		return {
+			path,
+			id,
+			cwd: "/tmp/project",
+			rlmDepth: 0,
+			created: new Date(now - 12 * 60 * 60_000),
+			modified: new Date(now - 12 * 60 * 60_000),
+			messageCount: 1,
+			...overrides,
+		} as SessionInfo;
+	}
+
+	function makeScheduledSessionFile(id: string): { sessionFile: string; store: AgentCronJobStore } {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-wake-"));
+		tempDirs.push(directory);
+		const sessionDir = join(directory, "sessions");
+		mkdirSync(sessionDir, { recursive: true });
+		const sessionFile = join(sessionDir, `${id}.jsonl`);
+		writeFileSync(sessionFile, "");
+		const store = AgentCronJobStore.forSessionArtifacts();
+		store.registerSessionArtifact(id, getSessionArtifactPathForFile(sessionFile, id));
+		return { sessionFile, store };
+	}
+
+	function armHeartbeat(store: AgentCronJobStore, sessionId: string, sessionFile: string, at: number): AgentCronJob {
+		return store.createHeartbeat({
+			activeSessionId: "stale-active",
+			sessionId,
+			sessionFile,
+			cwd: "/tmp/project",
+			scheduleText: "every 5m",
+			prompt: "tick",
+			now: new Date(at),
+		});
+	}
+
+	it("wakes the non-resident root through the existing create path when a descendant heartbeat is due", async () => {
+		const supervisor = makeSupervisor();
+		const root = makeScheduledSessionFile("wake-root");
+		const child = makeScheduledSessionFile("wake-child");
+		// Created 10 minutes ago on a 5-minute schedule: due (and missed) by now.
+		armHeartbeat(child.store, "wake-child", child.sessionFile, now - 10 * 60_000);
+		supervisor.catalog.list = vi.fn(async () => [
+			makeSavedInfo(root.sessionFile, "wake-root"),
+			makeSavedInfo(child.sessionFile, "wake-child", { parentSessionPath: root.sessionFile, rlmDepth: 1 }),
+		]);
+		const woken = makeWorker("woken", [
+			makeSummary("woken-root", now, { sessionId: "wake-root", sessionFile: root.sessionFile }),
+		]);
+		woken.descriptor.sessionFile = root.sessionFile;
+		supervisor.createOrReuseWorker = vi.fn(async () => {
+			supervisor.workers.set("woken", woken);
+			return woken;
+		});
+
+		await supervisor.wakeDueScheduledSessions(now);
+
+		expect(supervisor.createOrReuseWorker).toHaveBeenCalledTimes(1);
+		expect(supervisor.createOrReuseWorker).toHaveBeenCalledWith("scheduled-wake", {
+			type: "create",
+			sessionPath: root.sessionFile,
+		});
+	});
+
+	it("re-arms the wake timer from the durable store and skips covered, paused, and cancelled jobs", async () => {
+		const supervisor = makeSupervisor();
+		supervisor.createOrReuseWorker = vi.fn();
+		const { sessionFile, store } = makeScheduledSessionFile("armed-root");
+		// Real-clock epochs keep nextRunAt in the future so the armed timer never fires mid-test.
+		const armedAt = Date.now();
+		const job = armHeartbeat(store, "armed-root", sessionFile, armedAt);
+		supervisor.catalog.list = vi.fn(async () => [makeSavedInfo(sessionFile, "armed-root")]);
+
+		await supervisor.recomputeScheduledSessionWake();
+		expect(supervisor.scheduledWakeTimer).toBeDefined();
+
+		// A live root worker owns firing for its whole tree: no supervisor timer.
+		const resident = makeWorker("resident", []);
+		resident.descriptor.sessionFile = sessionFile;
+		supervisor.workers.set("resident", resident);
+		await supervisor.recomputeScheduledSessionWake();
+		expect(supervisor.scheduledWakeTimer).toBeUndefined();
+		supervisor.workers.delete("resident");
+
+		store.pauseHeartbeat("stale-active");
+		await supervisor.recomputeScheduledSessionWake();
+		expect(supervisor.scheduledWakeTimer).toBeUndefined();
+		await supervisor.wakeDueScheduledSessions(armedAt + 60 * 60_000);
+		expect(supervisor.createOrReuseWorker).not.toHaveBeenCalled();
+		// Settle the recompute the wake pass queued before mutating the store again.
+		await supervisor.scheduledWakeRecompute;
+
+		store.resumeHeartbeat("stale-active");
+		await supervisor.recomputeScheduledSessionWake();
+		expect(supervisor.scheduledWakeTimer).toBeDefined();
+
+		store.cancel(job.id);
+		await supervisor.recomputeScheduledSessionWake();
+		expect(supervisor.scheduledWakeTimer).toBeUndefined();
 	});
 });

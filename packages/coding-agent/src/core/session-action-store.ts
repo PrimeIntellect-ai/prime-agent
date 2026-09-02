@@ -350,7 +350,6 @@ export type IdleEvictionMinutes = number | "off";
 export interface SessionEvictionSnapshot {
 	isSessionActive: boolean;
 	attachedClients: number;
-	hasRegisteredHeartbeat: boolean;
 	hasRegisteredCronJob: boolean;
 	lastActivityAt: number;
 }
@@ -381,7 +380,6 @@ function isIdleEvictionThresholdMet(
 	return (
 		!session.isSessionActive &&
 		session.attachedClients === 0 &&
-		!session.hasRegisteredHeartbeat &&
 		!session.hasRegisteredCronJob &&
 		Number.isFinite(session.lastActivityAt) &&
 		now - session.lastActivityAt >= idleEvictionMinutes * 60_000

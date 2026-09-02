@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -26,7 +26,7 @@ import type { AgentObserveController } from "../src/core/agent-observe.js";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
 import { flushAgentTraceUpload, installAgentTraceUpload } from "../src/core/agent-traces.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import type { AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
+import { type AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
 import { PRIME_AGENT_TRACES_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
@@ -4008,6 +4008,42 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("registers passive descendants' scheduled jobs when their root becomes resident", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-descendant-jobs-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const childSessionId = basename(fixture.childArtifactDir);
+			const seedStore = AgentCronJobStore.forSessionArtifacts();
+			seedStore.registerSessionArtifact(childSessionId, fixture.childArtifactDir);
+			const heartbeat = seedStore.createRlmHeartbeat({
+				activeSessionId: "stale-child-active-id",
+				sessionId: childSessionId,
+				sessionFile: fixture.childSessionFile,
+				cwd: tempDir,
+				runtimeKind: "subagent",
+				scheduleText: "every 30s",
+				prompt: "report exactly: hi",
+			});
+
+			const workerDaemon = new AgentDaemon(join(tempDir, "worker-daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: join(tempDir, "sessions") },
+				createRuntime: fixture.createRuntime,
+				worker: { authenticationToken: "worker-token" },
+			});
+			const internals = workerDaemon as unknown as {
+				cronStore: AgentCronJobStore;
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+			};
+
+			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+
+			// A fresh worker must schedule the passive child's armed heartbeat without hydrating it.
+			await vi.waitFor(() => expect(internals.cronStore.list().some((job) => job.id === heartbeat.id)).toBe(true));
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("replaces a resident top-level RLM child when restoring its heartbeat", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-replace-child-heartbeat-"));
 		try {
@@ -6025,7 +6061,6 @@ describe("daemon mode helpers", () => {
 		internals.sessionPassivationSnapshot = vi.fn(async (state: ActiveSessionState) => ({
 			isSessionActive: false,
 			attachedClients: 0,
-			hasRegisteredHeartbeat: false,
 			hasRegisteredCronJob: false,
 			lastActivityAt: order.get(state) ?? 99,
 			hasParent: state !== root,

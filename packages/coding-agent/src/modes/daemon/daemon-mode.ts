@@ -1532,6 +1532,27 @@ export class AgentDaemon {
 			this.cronStore.recoverSessionArtifact(session.sessionId);
 			this.cronScheduler.wake();
 		}
+		// A fresh worker only knows resident sessions; passive descendants keep
+		// their own scheduled jobs, which must fire without waiting for hydration.
+		if (state.runtime.metadata.kind !== "subagent") {
+			void this.registerPassiveDescendantCronArtifacts().catch((error) => {
+				this.log(`Could not register passive descendant scheduled jobs: ${String(error)}`);
+			});
+		}
+	}
+
+	private async registerPassiveDescendantCronArtifacts(): Promise<void> {
+		let registered = false;
+		for (const passive of await this.listPassiveRlmSubagents()) {
+			const artifactDir = getSessionArtifactPathForFile(resolve(passive.entry.sessionFile), passive.info.id);
+			if (this.cronStore.registerSessionArtifact(passive.info.id, artifactDir)) {
+				this.cronStore.recoverSessionArtifact(passive.info.id);
+				registered = true;
+			}
+		}
+		if (registered) {
+			this.cronScheduler.wake();
+		}
 	}
 
 	private async createRuntime(
@@ -2642,7 +2663,6 @@ export class AgentDaemon {
 		return {
 			isSessionActive: summary.isSessionActive || summary.hasRunningRlmChildren === true || hasPendingAdmission,
 			attachedClients: state.clients.size + state.pendingAttaches,
-			hasRegisteredHeartbeat: jobs.some((job) => isHeartbeatCronJob(job) && job.status === "active"),
 			hasRegisteredCronJob: jobs.some((job) => !isHeartbeatCronJob(job)),
 			lastActivityAt: Date.parse(summary.lastActivityAt ?? ""),
 			hasParent: state.runtime.metadata.kind === "subagent" && !!state.runtime.metadata.parentActiveSessionId,
