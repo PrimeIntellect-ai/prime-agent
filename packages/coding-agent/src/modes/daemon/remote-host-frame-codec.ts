@@ -408,6 +408,18 @@ function jsonSafePreflight(
  * Returns the exact canonical byte count on success.
  */
 export function jsonPreflight(value: unknown): DecodeResult<number> {
+	try {
+		return jsonPreflightImpl(value);
+	} catch (e: unknown) {
+		const err = e as { code?: string };
+		if (err.code && err.code in CODEC_ERRORS) {
+			return { ok: false, error: { code: err.code as CodecErrorCode } };
+		}
+		return fail(CODEC_ERRORS.OVERFLOW);
+	}
+}
+
+function jsonPreflightImpl(value: unknown): DecodeResult<number> {
 	const budget = { nodes: MAX_JSON_NODES, bytes: MAX_ENCODED_BYTES };
 	const initialBytes = budget.bytes;
 	const r = jsonSafePreflight(value, 0, budget, true);
@@ -419,6 +431,14 @@ export function jsonPreflight(value: unknown): DecodeResult<number> {
  * Validate JSON safety only (no byte counting).
  */
 export function checkJsonSafe(value: unknown): CodecErrorCode | undefined {
+	try {
+		return checkJsonSafeImpl(value);
+	} catch {
+		return CODEC_ERRORS.INVALID_COMMAND_BODY;
+	}
+}
+
+function checkJsonSafeImpl(value: unknown): CodecErrorCode | undefined {
 	const budget = { nodes: MAX_JSON_NODES, bytes: MAX_ENCODED_BYTES };
 	const r = jsonSafePreflight(value, 0, budget, false);
 	return r.ok ? undefined : r.error.code;
@@ -513,11 +533,31 @@ const VALID_CLIENT_CAPABILITIES = new Set<RemoteHostClientCapability>([
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
 	if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
-	const proto = Object.getPrototypeOf(v);
+	let proto: object | null;
+	try {
+		proto = Object.getPrototypeOf(v);
+	} catch {
+		return false;
+	}
 	if (proto !== null && proto !== Object.prototype) return false;
-	const descs = Object.getOwnPropertyDescriptors(v);
-	const keys = Object.getOwnPropertyNames(v);
-	const symbols = Object.getOwnPropertySymbols(v);
+	let descs: PropertyDescriptorMap;
+	try {
+		descs = Object.getOwnPropertyDescriptors(v);
+	} catch {
+		return false;
+	}
+	let keys: string[];
+	try {
+		keys = Object.getOwnPropertyNames(v);
+	} catch {
+		return false;
+	}
+	let symbols: symbol[];
+	try {
+		symbols = Object.getOwnPropertySymbols(v);
+	} catch {
+		return false;
+	}
 	if (symbols.length > 0) return false;
 	for (const key of keys) {
 		const desc = descs[key];
@@ -525,7 +565,11 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 		if (!desc.enumerable) return false;
 	}
 	for (const key of keys) {
-		if ((v as Record<string, unknown>)[key] === undefined) return false;
+		try {
+			if ((v as Record<string, unknown>)[key] === undefined) return false;
+		} catch {
+			return false;
+		}
 	}
 	return true;
 }
@@ -699,33 +743,72 @@ function decodeJsonValueInner(
 	if (budget.nodes <= 0) return fail(CODEC_ERRORS.OVERFLOW);
 	budget.nodes -= 1;
 
-	if (raw === null) return ok(null);
-	if (typeof raw === "boolean") return ok(raw);
-	if (typeof raw === "number") {
-		if (!Number.isFinite(raw)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+	if (raw === null) {
+		if (budget.bytes < 4) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= 4;
+		return ok(null);
+	}
+	if (typeof raw === "boolean") {
+		const n = raw ? 4 : 5;
+		if (budget.bytes < n) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= n;
 		return ok(raw);
 	}
-	if (typeof raw === "string") return ok(raw);
+	if (typeof raw === "number") {
+		if (!Number.isFinite(raw)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+		const s = raw.toString();
+		if (budget.bytes < s.length) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= s.length;
+		return ok(raw);
+	}
+	if (typeof raw === "string") {
+		const cr = consumeJsonStringBytes(raw, budget);
+		if (!cr.ok) return cr;
+		return ok(raw);
+	}
 	if (Array.isArray(raw)) {
 		for (let i = 0; i < raw.length; i++) {
 			if (!(i in raw)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
 		}
+		if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= 1;
 		const arr: JsonValue[] = [];
 		for (let i = 0; i < raw.length; i++) {
+			if (i > 0) {
+				if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+				budget.bytes -= 1;
+			}
+			if (raw[i] === undefined) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
 			const elem = decodeJsonValueInner(raw[i], depth + 1, budget);
 			if (!elem.ok) return elem;
 			arr.push(elem.value);
 		}
+		if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= 1;
 		return ok(arr);
 	}
 	if (isPlainObject(raw)) {
 		const obj = raw as Record<string, unknown>;
-		const result: { [key: string]: JsonValue } = {};
-		for (const key of Object.keys(obj).sort()) {
+		if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= 1;
+		const keys = Object.keys(obj).sort();
+		const result = Object.create(null) as Record<string, JsonValue>;
+		for (let i = 0; i < keys.length; i++) {
+			if (i > 0) {
+				if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+				budget.bytes -= 1;
+			}
+			const key = keys[i];
+			const kr = consumeJsonStringBytes(key, budget);
+			if (!kr.ok) return kr;
+			if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+			budget.bytes -= 1;
 			const val = decodeJsonValueInner(obj[key], depth + 1, budget);
 			if (!val.ok) return val;
 			result[key] = val.value;
 		}
+		if (budget.bytes < 1) return fail(CODEC_ERRORS.OVERFLOW);
+		budget.bytes -= 1;
 		return ok(result);
 	}
 	return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
@@ -1361,6 +1444,18 @@ export function decodeErrorFrame(raw: unknown): DecodeResult<RemoteHostErrorFram
 // ===========================================================================
 
 export function decodeFrame(raw: unknown): DecodeResult<RemoteHostFrame> {
+	try {
+		return decodeFrameImpl(raw);
+	} catch (e: unknown) {
+		const err = e as { code?: string };
+		if (err.code && err.code in CODEC_ERRORS) {
+			return { ok: false, error: { code: err.code as CodecErrorCode } };
+		}
+		return fail(CODEC_ERRORS.INVALID_FRAME);
+	}
+}
+
+function decodeFrameImpl(raw: unknown): DecodeResult<RemoteHostFrame> {
 	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
 	const obj = raw as Record<string, unknown>;
 	if (typeof obj.type !== "string") return fail(CODEC_ERRORS.INVALID_FRAME);
@@ -1407,6 +1502,18 @@ export function preflightEnvelope(raw: unknown): DecodeResult<void> {
 }
 
 export function decodeEnvelope(raw: unknown): DecodeResult<RemoteHostFrameEnvelope> {
+	try {
+		return decodeEnvelopeImpl(raw);
+	} catch (e: unknown) {
+		const err = e as { code?: string };
+		if (err.code && err.code in CODEC_ERRORS) {
+			return { ok: false, error: { code: err.code as CodecErrorCode } };
+		}
+		return fail(CODEC_ERRORS.INVALID_ENVELOPE);
+	}
+}
+
+function decodeEnvelopeImpl(raw: unknown): DecodeResult<RemoteHostFrameEnvelope> {
 	// Preflight the raw input before any decoding
 	const preflightResult = preflightEnvelope(raw);
 	if (!preflightResult.ok) return { ok: false, error: preflightResult.error };
@@ -1442,6 +1549,18 @@ export function decodeEnvelope(raw: unknown): DecodeResult<RemoteHostFrameEnvelo
 // ===========================================================================
 
 export function canonicalDigest(value: unknown): DecodeResult<string> {
+	try {
+		return canonicalDigestImpl(value);
+	} catch (e: unknown) {
+		const err = e as { code?: string };
+		if (err.code && err.code in CODEC_ERRORS) {
+			return { ok: false, error: { code: err.code as CodecErrorCode } };
+		}
+		return fail(CODEC_ERRORS.INVALID_DIGEST);
+	}
+}
+
+function canonicalDigestImpl(value: unknown): DecodeResult<string> {
 	// Preflight first using single-consumption budget
 	const budget = { nodes: MAX_JSON_NODES, bytes: MAX_ENCODED_BYTES };
 	const pre = preflightCanonical(value, 0, budget);

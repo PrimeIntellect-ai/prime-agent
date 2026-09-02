@@ -42,6 +42,7 @@ import {
 	decodeHandshakeAckFrame,
 	decodeHandshakeFrame,
 	decodeHealthFrame,
+	decodeJsonValue,
 	decodeProtocolInfo,
 	decodeProviderProxyFrame,
 	digestsEqual,
@@ -1837,7 +1838,7 @@ describe("combined messages+tools node budget", () => {
 		const r = decodeProviderProxyFrame(raw);
 		expect(r.ok).toBe(false);
 	});
-	it("many messages with large content pass node budget", () => {
+	it("many messages with moderate content pass node and byte budget", () => {
 		const raw = {
 			type: "provider_proxy",
 			proxyType: "model_call_request",
@@ -1845,11 +1846,11 @@ describe("combined messages+tools node budget", () => {
 			provider: "test",
 			model: "m",
 			messages: [
-				{ role: "user", content: "x".repeat(900_000) },
-				{ role: "assistant", content: "x".repeat(900_000) },
+				{ role: "user", content: "x".repeat(10_000) },
+				{ role: "assistant", content: "x".repeat(10_000) },
 			],
 		};
-		// decodeJsonValue does not count bytes for strings (envelope-level handles that)
+		// decodeJsonValue now enforces byte budgets (not just node budgets)
 		const r = decodeProviderProxyFrame(raw);
 		expect(r.ok).toBe(true);
 	});
@@ -2057,5 +2058,157 @@ describe("canonical byte preflight — exact count vs JSON.stringify", () => {
 		const r = jsonPreflight(huge);
 		// ~100 * 100k = 10M chars + overhead -> well over 1MiB
 		expect(r.ok).toBe(false);
+	});
+});
+
+// ===========================================================================
+// __proto__ injection resistance
+// ===========================================================================
+
+describe("__proto__ injection resistance", () => {
+	it("decodeJsonValueInner with own __proto__ data key does not poison result prototype", () => {
+		// JSON.parse creates an OWN enumerable data property named __proto__
+		const input = JSON.parse('{"__proto__":{"polluted":true},"realKey":42}');
+		const result = decodeJsonValue(input);
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			// Fresh result has null prototype: no inherited polluted prop
+			expect(Object.getPrototypeOf(result.value)).toBe(null);
+			const asObj = result.value as Record<string, unknown>;
+			expect(asObj["realKey"]).toBe(42);
+			// __proto__ preserved as an own data key, not prototype mutation
+			expect(Object.keys(asObj)).toContain("__proto__");
+		}
+	});
+
+	it("decodeCommandBody with __proto__ in raw input is rejected (isPlainObject catches)", () => {
+		const raw: Record<string, unknown> = { type: "abort" };
+		Object.defineProperty(raw, "__proto__", {
+			value: { polluted: true },
+			enumerable: true,
+			writable: true,
+			configurable: true,
+		});
+		const r = decodeCommandBody(raw);
+		// isPlainObject checks all enumerable own keys including __proto__
+		// The __proto__ value must be a string for valid ID. So should reject.
+		// Actually __proto__ is not in allowed keys for command frames
+		expect(r.ok).toBe(false);
+	});
+
+	it("constructor key does not poison", () => {
+		const input = JSON.parse('{"constructor":{"prototype":{"polluted":true}},"value":1}');
+		const result = decodeJsonValue(input);
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			const asObj = result.value as Record<string, unknown>;
+			expect(asObj["value"]).toBe(1);
+			expect(Object.keys(asObj)).toContain("constructor");
+		}
+	});
+});
+
+// ===========================================================================
+// Proxy reflection trap rejection
+// ===========================================================================
+
+describe("Proxy reflection traps — no throws, no trap text", () => {
+	function throwingProxy(label: string): Record<string, unknown> {
+		return new Proxy({ type: "abort" } as Record<string, unknown>, {
+			getPrototypeOf() {
+				throw new Error(label + " getPrototypeOf");
+			},
+			ownKeys() {
+				throw new Error(label + " ownKeys");
+			},
+			getOwnPropertyDescriptor() {
+				throw new Error(label + " getOwnPropertyDescriptor");
+			},
+			get(_, key) {
+				if (key === "type") return "abort";
+				throw new Error(`${label} get:${String(key)}`);
+			},
+		});
+	}
+
+	it("decodeEnvelope throws Proxy, returns INVALID_FRAME not trap text", () => {
+		const p = new Proxy(
+			{},
+			{
+				getPrototypeOf() {
+					throw new Error("secret trap");
+				},
+			},
+		);
+		const result = decodeEnvelope({
+			type: "frame",
+			frameId: "f-1",
+			protocol: { name: "prime-agent.remote-host", version: 1 },
+			sentAt: "2025-01-15T10:30:00.000Z",
+			frame: p,
+		});
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).not.toContain("secret");
+			expect(result.error.code).toMatch(/^[A-Z_]+$/);
+		}
+	});
+
+	it("jsonPreflight throws Proxy, returns OVERFLOW not trap text", () => {
+		const p = new Proxy(
+			{},
+			{
+				getPrototypeOf() {
+					throw new Error("hidden trap");
+				},
+			},
+		);
+		const result = jsonPreflight(p);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).not.toContain("hidden");
+			expect(result.error.code).toMatch(/^[A-Z_]+$/);
+		}
+	});
+
+	it("canonicalDigest throws Proxy, returns INVALID_DIGEST not trap text", () => {
+		const p = new Proxy(
+			{ a: 1 },
+			{
+				getPrototypeOf() {
+					throw new Error("secret digest trap");
+				},
+			},
+		);
+		const result = canonicalDigest(p);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).not.toContain("secret");
+			expect(result.error.code).toMatch(/^[A-Z_]+$/);
+		}
+	});
+
+	it("decodeFrame throws Proxy, returns INVALID_FRAME not trap text", () => {
+		const p = throwingProxy("frame");
+		const result = decodeFrame(p);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).not.toContain("frame");
+			expect(result.error.code).toMatch(/^[A-Z_]+$/);
+		}
+	});
+
+	it("checkJsonSafe throws Proxy, returns error code not trap text", () => {
+		const p = new Proxy(
+			{},
+			{
+				getPrototypeOf() {
+					throw new Error("check trap");
+				},
+			},
+		);
+		const result = checkJsonSafe(p);
+		expect(result).toBeDefined();
+		expect(result).not.toContain("check");
 	});
 });
