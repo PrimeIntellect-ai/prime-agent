@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { createDurableAgentMessageApplication } from "../src/modes/daemon/durable-agent-message-application.js";
 import { createDurableRelayStore, type DurableRelayStore } from "../src/modes/daemon/durable-relay-store.js";
 import { createOrderedDurableRelay, type OrderedDurableRelay } from "../src/modes/daemon/ordered-durable-relay.js";
 import {
@@ -182,6 +183,23 @@ function capCounts(): CloseCounts {
 	return { journal: 0, marker: 0, recovery: 0, transport: 0, application: 0 };
 }
 
+function agentMessageEnvelope(): RemoteHostFrameEnvelope {
+	return {
+		type: "frame",
+		frameId: "transport-message-frame",
+		protocol: { name: REMOTE_HOST_PROTOCOL_NAME, version: REMOTE_HOST_PROTOCOL_VERSION },
+		sentAt: "2025-01-15T10:30:03.000Z",
+		frame: {
+			type: "agent_message",
+			id: "semantic-message-id",
+			fromActiveSessionId: "source-session",
+			targetActiveSessionId: "target-session",
+			message: "hello across hosts",
+			deliveryMode: "direct",
+		},
+	};
+}
+
 interface RelayHarness {
 	readonly relay: OrderedDurableRelay;
 	readonly incoming: DurableRelayStore;
@@ -302,6 +320,50 @@ describe("ordered durable relay", () => {
 		expect(second.applied).toHaveLength(0);
 		expect(second.sent).toEqual([exactAck]);
 		await second.relay.close();
+	});
+
+	it("composes durable direct agent-to-agent delivery after pending persistence", async () => {
+		const counts = capCounts();
+		const incoming = await openStore("received", counts);
+		const outgoing = await openStore("sent", counts);
+		const delivered: unknown[] = [];
+		const applicationResult = await createDurableAgentMessageApplication({
+			router: {
+				authorize: () => Promise.resolve({ status: "allowed" }),
+				deliverIdempotently: async (raw: unknown) => {
+					const pending = await incoming.query("transport-message-frame");
+					expect(pending.ok && pending.value.state).toBe("pending");
+					delivered.push(raw);
+					return {
+						status: "delivered",
+						messageId: "semantic-message-id",
+						targetActiveSessionId: "target-session",
+					};
+				},
+				close: () => Promise.resolve({ status: "closed" }),
+			},
+		});
+		expect(applicationResult.ok).toBe(true);
+		if (!applicationResult.ok) throw new Error("message application failed");
+		const transport = {
+			send: () => Promise.resolve({ status: "sent" }),
+			close: () => Promise.resolve({ status: "closed" }),
+		};
+		const created = await createOrderedDurableRelay({
+			identity: IDENTITY,
+			incomingStore: incoming,
+			outgoingStore: outgoing,
+			transport,
+			application: applicationResult.application,
+		});
+		expect(created.ok).toBe(true);
+		if (!created.ok) throw new Error("relay failed");
+		const result = await created.relay.receive(agentMessageEnvelope());
+		expect(result.ok && result.value.action).toBe("applied_and_acknowledged");
+		expect(delivered).toHaveLength(1);
+		const completed = await incoming.query("transport-message-frame");
+		expect(completed.ok && completed.value.state).toBe("delivered");
+		await created.relay.close();
 	});
 
 	it("leaves pending durable evidence and poisons after application failure", async () => {
