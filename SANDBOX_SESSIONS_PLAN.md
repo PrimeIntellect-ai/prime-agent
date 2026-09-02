@@ -93,7 +93,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 | B12 | A08, B03, B06 | in_progress | Add sandbox lifecycle, checkpoint, passivation, wake, and deletion |
 | B13 | A09, B01, B11 | queued | Show execution location and connection health in Agents View |
 | B14 | B05, B06, B08, B09 | in_progress | Wire end-to-end sandbox session orchestration |
-| B15 | A13, B03, B04 | queued | Add protocol compatibility and reconnect tests |
+| B15 | A13, B03, B04 | in_progress | Add protocol compatibility and reconnect tests |
 | B16 | A13, B05, B10, B11 | queued | Add auth, messaging, observation, and security integration tests |
 
 ### Wave 3: integration and release readiness
