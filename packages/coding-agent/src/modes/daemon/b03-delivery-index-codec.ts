@@ -124,6 +124,27 @@ export interface IngestError {
 }
 export type IngestResult = IngestOk | IngestError;
 
+export interface CreateAccumulatorOk {
+	readonly ok: true;
+	readonly accumulator: RecoveryAccumulator;
+}
+export interface CreateAccumulatorError {
+	readonly ok: false;
+	readonly error: CodecError;
+}
+export type CreateAccumulatorResult = CreateAccumulatorOk | CreateAccumulatorError;
+
+export interface QueryOutcomeOk {
+	readonly ok: true;
+	readonly state: DeliveryState;
+	readonly action: DeliveryAction;
+}
+export interface QueryOutcomeError {
+	readonly ok: false;
+	readonly error: CodecError;
+}
+export type DeliveryQueryOutcome = QueryOutcomeOk | QueryOutcomeError;
+
 // ===========================================================================
 // Frozen result builders
 // ===========================================================================
@@ -571,6 +592,7 @@ function decodeDeliveryMarkerV1Impl(
 // ===========================================================================
 
 interface TrackedFrameEntry {
+	readonly frameId: string;
 	readonly envelopeDigest: string;
 	readonly journalSeq: number;
 	readonly indexSeq: number;
@@ -581,39 +603,52 @@ export interface RecoveryAccumulator {
 	readonly identity: DeliveryIdentity;
 	readonly direction: JournalDirection;
 	ingest(marker: DeliveryMarkerV1): IngestResult;
-	query(frameId: string): DeliveryQueryResult;
+	query(frameId: string): DeliveryQueryOutcome;
 }
 
 /**
  * Create a pure recovery accumulator for an exact identity and direction.
  *
- * All inputs are validated and deep-copied before any reads or mutations.
- * ingest computes the entire new internal state in locals first, then
- * atomically commits.  Every method is wrapped to return frozen error
- * results on any throw (Proxy, getter, descriptor mismatch).
+ * Returns a frozen result union — never throws.
+ * All inputs are validated via descriptor-value copies before any reads;
+ * ingest computes the entire new state in locals, then commits atomically:
+ * tracked-entry first, cursor last.
  *
  * @param identity - The delivery identity to bind to.
  * @param direction - The delivery direction to bind to.
- * @returns A frozen RecoveryAccumulator.
+ * @returns CreateAccumulatorResult with a frozen RecoveryAccumulator on success.
  */
 export function createRecoveryAccumulator(
 	identity: DeliveryIdentity,
 	direction: JournalDirection,
-): RecoveryAccumulator {
+): CreateAccumulatorResult {
+	try {
+		return createRecoveryAccumulatorImpl(identity, direction);
+	} catch {
+		return Object.freeze({ ok: false, error: Object.freeze({ code: "INVALID_FRAME" as const }) });
+	}
+}
+
+function createRecoveryAccumulatorImpl(
+	identity: DeliveryIdentity,
+	direction: JournalDirection,
+): CreateAccumulatorResult {
 	// ---- Defensive copy of identity ----
-	// copyExactOwnDataObject tolerates Proxy getters and descriptor tricks
-	// by reading descriptor.value instead of invoking [[Get]].
 	const identityKeys = new Set(["hostId", "generation", "sessionId"]);
 	const idCopy = copyExactOwnDataObject(identity, identityKeys, 3);
-	if (typeof idCopy === "string") {
-		throw new TypeError("Invalid identity");
-	}
+	if (typeof idCopy === "string") return fail("INVALID_FRAME");
 	const rawHostId = idCopy.hostId;
 	const rawGeneration = idCopy.generation;
 	const rawSessionId = idCopy.sessionId;
-	if (typeof rawHostId !== "string" || !isValidSafeId(rawHostId)) throw new TypeError("Invalid hostId");
-	if (typeof rawGeneration !== "string" || !isValidSafeId(rawGeneration)) throw new TypeError("Invalid generation");
-	if (typeof rawSessionId !== "string" || !isValidSafeId(rawSessionId)) throw new TypeError("Invalid sessionId");
+	if (typeof rawHostId !== "string" || !isValidSafeId(rawHostId)) {
+		return fail("INVALID_IDENTITY");
+	}
+	if (typeof rawGeneration !== "string" || !isValidSafeId(rawGeneration)) {
+		return fail("INVALID_IDENTITY");
+	}
+	if (typeof rawSessionId !== "string" || !isValidSafeId(rawSessionId)) {
+		return fail("INVALID_IDENTITY");
+	}
 
 	const identityFrozen = deepFreeze({
 		hostId: rawHostId,
@@ -623,7 +658,7 @@ export function createRecoveryAccumulator(
 
 	// Validate direction
 	if (direction !== "sent" && direction !== "received") {
-		throw new TypeError("Invalid direction");
+		return fail("INVALID_FRAME");
 	}
 	const directionVal: JournalDirection = direction;
 
@@ -631,48 +666,59 @@ export function createRecoveryAccumulator(
 	let lastIndexSeq = 0;
 	const frames = new Map<string, TrackedFrameEntry>();
 
-	// ---- Helper: validate a marker defensively ----
-	function validateMarker(marker: DeliveryMarkerV1): TrackedFrameEntry | "IDENTITY_MISMATCH" | "DIRECTION_MISMATCH" {
-		// Defensive copy via hasOwnProperty descriptor inspection.
-		// We can't use copyExactOwnDataObject on the marker because it's
-		// already a deep-frozen DTO and we want to validate its fields
-		// without re-reading through possible Proxy.
-		if (typeof marker !== "object" || marker === null) return "IDENTITY_MISMATCH";
+	// ---- validateMarker: complete exact-schema validation via descriptor.copy ----
+	// Returns a frozen copied entry on success, or a string error code on failure.
+	function validateMarker(
+		marker: DeliveryMarkerV1,
+	):
+		| TrackedFrameEntry
+		| "INVALID_FRAME"
+		| "INVALID_IDENTITY"
+		| "INVALID_SEQUENCE"
+		| "INVALID_DIGEST"
+		| "INVALID_TIMESTAMP"
+		| "MISMATCH" {
+		if (typeof marker !== "object" || marker === null) return "INVALID_FRAME";
 
-		// Read fields via descriptor.value only, never [[Get]]
+		// Proto check
 		let proto: object | null;
 		try {
 			proto = Object.getPrototypeOf(marker);
 		} catch {
-			return "IDENTITY_MISMATCH";
+			return "INVALID_FRAME";
 		}
-		if (proto !== null && proto !== Object.prototype) return "IDENTITY_MISMATCH";
+		if (proto !== null && proto !== Object.prototype) return "INVALID_FRAME";
 
+		// Descriptors
 		let descs: PropertyDescriptorMap;
 		try {
 			descs = Object.getOwnPropertyDescriptors(marker);
 		} catch {
-			return "IDENTITY_MISMATCH";
+			return "INVALID_FRAME";
 		}
 
+		// Keys
 		let keys: string[];
 		try {
 			keys = Object.getOwnPropertyNames(marker);
 		} catch {
-			return "IDENTITY_MISMATCH";
+			return "INVALID_FRAME";
 		}
 
-		// Helper to safely read a field
-		function safeField(key: string): unknown {
-			const desc = descs[key];
-			if (!desc) return undefined;
-			if (desc.get || desc.set) return undefined;
-			if (!desc.enumerable) return undefined;
-			return desc.value;
+		// Reject symbols
+		let symbols: symbol[];
+		try {
+			symbols = Object.getOwnPropertySymbols(marker);
+		} catch {
+			return "INVALID_FRAME";
 		}
+		if (symbols.length > 0) return "INVALID_FRAME";
 
-		// Reject extra keys outside the marker field set
-		const MARKER_FIELD_KEYS: ReadonlySet<string> = new Set([
+		// Exact 11 keys
+		if (keys.length !== 11) return "INVALID_FRAME";
+
+		// Allowed key set
+		const ALLOWED = new Set([
 			"version",
 			"hostId",
 			"generation",
@@ -686,36 +732,75 @@ export function createRecoveryAccumulator(
 			"recordedAt",
 		]);
 		for (const k of keys) {
-			if (!MARKER_FIELD_KEYS.has(k)) return "IDENTITY_MISMATCH";
+			if (!ALLOWED.has(k)) return "INVALID_FRAME";
 		}
 
-		const mHostId = safeField("hostId");
-		const mGeneration = safeField("generation");
-		const mSessionId = safeField("sessionId");
-		const mDirection = safeField("direction");
-		const mFrameId = safeField("frameId");
-		const mEnvelopeDigest = safeField("envelopeDigest");
-		const mJournalSeq = safeField("journalSeq");
-		const mIndexSeq = safeField("indexSeq");
-		const mState = safeField("state");
+		// Helper: read from descriptor.value only
+		function dv(key: string): unknown {
+			const desc = descs[key];
+			if (!desc) return undefined;
+			if (desc.get || desc.set) return undefined;
+			if (!desc.enumerable) return undefined;
+			return desc.value;
+		}
 
-		if (typeof mHostId !== "string" || mHostId !== identityFrozen.hostId) return "IDENTITY_MISMATCH";
-		if (typeof mGeneration !== "string" || mGeneration !== identityFrozen.generation) return "IDENTITY_MISMATCH";
-		if (typeof mSessionId !== "string" || mSessionId !== identityFrozen.sessionId) return "IDENTITY_MISMATCH";
-		if (typeof mDirection !== "string" || mDirection !== directionVal) return "DIRECTION_MISMATCH";
-		if (typeof mFrameId !== "string") return "IDENTITY_MISMATCH";
-		if (typeof mEnvelopeDigest !== "string") return "IDENTITY_MISMATCH";
-		if (typeof mJournalSeq !== "number" || !Number.isSafeInteger(mJournalSeq) || mJournalSeq <= 0)
-			return "IDENTITY_MISMATCH";
-		if (typeof mIndexSeq !== "number" || !Number.isSafeInteger(mIndexSeq) || mIndexSeq <= 0)
-			return "IDENTITY_MISMATCH";
-		if (mState !== "pending" && mState !== "delivered") return "IDENTITY_MISMATCH";
+		const version = dv("version");
+		if (version !== 1) return "INVALID_FRAME";
+
+		const rawHostId = dv("hostId");
+		if (typeof rawHostId !== "string" || !isValidSafeId(rawHostId)) return "INVALID_IDENTITY";
+
+		const rawGeneration = dv("generation");
+		if (typeof rawGeneration !== "string" || !isValidSafeId(rawGeneration)) return "INVALID_IDENTITY";
+
+		const rawSessionId = dv("sessionId");
+		if (typeof rawSessionId !== "string" || !isValidSafeId(rawSessionId)) return "INVALID_IDENTITY";
+
+		const rawDirection = dv("direction");
+		if (rawDirection !== "sent" && rawDirection !== "received") return "INVALID_FRAME";
+
+		const rawFrameId = dv("frameId");
+		if (typeof rawFrameId !== "string" || !isValidSafeId(rawFrameId)) return "INVALID_IDENTITY";
+
+		const rawDigest = dv("envelopeDigest");
+		if (typeof rawDigest !== "string" || !isValidDigest(rawDigest)) return "INVALID_DIGEST";
+
+		const rawJournalSeq = dv("journalSeq");
+		if (
+			typeof rawJournalSeq !== "number" ||
+			!Number.isSafeInteger(rawJournalSeq) ||
+			(rawJournalSeq as number) <= 0 ||
+			(rawJournalSeq as number) > MAX_JOURNAL_SEQ
+		)
+			return "INVALID_SEQUENCE";
+
+		const rawIndexSeq = dv("indexSeq");
+		if (
+			typeof rawIndexSeq !== "number" ||
+			!Number.isSafeInteger(rawIndexSeq) ||
+			(rawIndexSeq as number) <= 0 ||
+			(rawIndexSeq as number) > MAX_INDEX_SEQ
+		)
+			return "INVALID_SEQUENCE";
+
+		const rawState = dv("state");
+		if (rawState !== "pending" && rawState !== "delivered") return "INVALID_FRAME";
+
+		const rawRecordedAt = dv("recordedAt");
+		if (typeof rawRecordedAt !== "string" || !isCanonicalUtcTimestamp(rawRecordedAt)) return "INVALID_TIMESTAMP";
+
+		// Identity/direction binding check
+		if ((rawHostId as string) !== identityFrozen.hostId) return "MISMATCH";
+		if ((rawGeneration as string) !== identityFrozen.generation) return "MISMATCH";
+		if ((rawSessionId as string) !== identityFrozen.sessionId) return "MISMATCH";
+		if ((rawDirection as string) !== directionVal) return "MISMATCH";
 
 		return {
-			envelopeDigest: mEnvelopeDigest as string,
-			journalSeq: mJournalSeq as number,
-			indexSeq: mIndexSeq as number,
-			state: mState as "pending" | "delivered",
+			frameId: rawFrameId as string,
+			envelopeDigest: rawDigest as string,
+			journalSeq: rawJournalSeq as number,
+			indexSeq: rawIndexSeq as number,
+			state: rawState as "pending" | "delivered",
 		};
 	}
 
@@ -724,28 +809,30 @@ export function createRecoveryAccumulator(
 		get identity(): DeliveryIdentity {
 			return identityFrozen;
 		},
-
 		get direction(): JournalDirection {
 			return directionVal;
 		},
 
 		ingest(marker: DeliveryMarkerV1): IngestResult {
 			try {
-				// Step 1: defensively validate the marker (reads descriptor.value only)
+				// Step 1: fully validate + extract safe copy of marker
 				const entry = validateMarker(marker);
 				if (typeof entry === "string") {
-					if (entry === "IDENTITY_MISMATCH") return fail("MISMATCH");
-					if (entry === "DIRECTION_MISMATCH") return fail("MISMATCH");
+					if (entry === "MISMATCH") return fail("MISMATCH");
+					if (entry === "INVALID_FRAME") return fail("INVALID_FRAME");
+					if (entry === "INVALID_IDENTITY") return fail("INVALID_IDENTITY");
+					if (entry === "INVALID_SEQUENCE") return fail("INVALID_SEQUENCE");
+					if (entry === "INVALID_DIGEST") return fail("INVALID_DIGEST");
+					if (entry === "INVALID_TIMESTAMP") return fail("INVALID_TIMESTAMP");
 					return fail("INVALID_FRAME");
 				}
 
-				// Step 2: validate contiguous indexSeq in local
+				// Step 2: validate contiguous indexSeq in locals
 				const expectedNext = lastIndexSeq + 1;
 				if (entry.indexSeq !== expectedNext) return fail("INVALID_SEQUENCE");
-				const newLastIndexSeq = entry.indexSeq;
 
-				// Step 3: look up existing frame state in local
-				const existing = frames.get(marker.frameId);
+				// Step 3: look up existing frame state in locals (no caller reads)
+				const existing = frames.get(entry.frameId);
 
 				let newState: "pending" | "delivered";
 				let action: DeliveryAction;
@@ -753,38 +840,33 @@ export function createRecoveryAccumulator(
 				if (!existing) {
 					// First marker for this frame -- must be pending
 					if (entry.state !== "pending") return fail("INVALID_FRAME");
-
 					newState = "pending";
 					action = "apply_idempotently";
 				} else if (existing.state === "delivered") {
-					// Second delivered on same frame
 					return fail("INVALID_FRAME");
 				} else {
 					// existing.state === "pending"
-					if (entry.state === "pending") {
-						// Duplicate pending
-						return fail("INVALID_FRAME");
-					}
-
-					// Transition: delivered
+					if (entry.state === "pending") return fail("INVALID_FRAME");
 					if (entry.state !== "delivered") return fail("INVALID_FRAME");
-
-					// Validate digest + journalSeq match the existing pending
 					if (entry.envelopeDigest !== existing.envelopeDigest) return fail("MISMATCH");
 					if (entry.journalSeq !== existing.journalSeq) return fail("MISMATCH");
-
 					newState = "delivered";
 					action = "send_replay_ack";
 				}
 
 				// ---- Atomic commit ----
-				lastIndexSeq = newLastIndexSeq;
-				frames.set(marker.frameId, {
+				// Build tracked entry first (no side effects)
+				const trackedEntry: TrackedFrameEntry = {
+					frameId: entry.frameId,
 					envelopeDigest: entry.envelopeDigest,
 					journalSeq: entry.journalSeq,
 					indexSeq: entry.indexSeq,
 					state: newState,
-				});
+				};
+				// frames.set is safe on a native Map
+				frames.set(entry.frameId, trackedEntry);
+				// Commit cursor last
+				lastIndexSeq = entry.indexSeq;
 
 				return okIngest(action, newState);
 			} catch {
@@ -792,38 +874,42 @@ export function createRecoveryAccumulator(
 			}
 		},
 
-		query(frameId: string): DeliveryQueryResult {
+		query(frameId: string): DeliveryQueryOutcome {
 			try {
-				// Validate frameId
+				// Validate frameId — invalid IDs return error, never new
 				if (typeof frameId !== "string" || !isValidSafeId(frameId)) {
-					return Object.freeze({
-						state: "new" as DeliveryState,
-						action: "persist_pending_then_apply" as DeliveryAction,
-					});
+					return Object.freeze({ ok: false, error: Object.freeze({ code: "INVALID_IDENTITY" as const }) });
 				}
 
 				const tracked = frames.get(frameId);
 				if (!tracked) {
 					return Object.freeze({
+						ok: true,
 						state: "new" as DeliveryState,
 						action: "persist_pending_then_apply" as DeliveryAction,
 					});
 				}
 				if (tracked.state === "pending") {
 					return Object.freeze({
+						ok: true,
 						state: "pending" as DeliveryState,
 						action: "apply_idempotently" as DeliveryAction,
 					});
 				}
-				return Object.freeze({ state: "delivered" as DeliveryState, action: "send_replay_ack" as DeliveryAction });
-			} catch {
 				return Object.freeze({
-					state: "new" as DeliveryState,
-					action: "persist_pending_then_apply" as DeliveryAction,
+					ok: true,
+					state: "delivered" as DeliveryState,
+					action: "send_replay_ack" as DeliveryAction,
 				});
+			} catch {
+				return Object.freeze({ ok: false, error: Object.freeze({ code: "INVALID_FRAME" as const }) });
 			}
 		},
 	};
 
-	return Object.freeze(accumulator);
+	const accFrozen = Object.freeze(accumulator);
+	const fresh = Object.create(null);
+	fresh.ok = true;
+	fresh.accumulator = accFrozen;
+	return Object.freeze(fresh) as CreateAccumulatorOk;
 }
