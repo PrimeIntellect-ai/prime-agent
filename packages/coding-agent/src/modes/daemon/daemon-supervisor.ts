@@ -1080,6 +1080,18 @@ export class DaemonSupervisor {
 		};
 	}
 
+	/** A schedule whose root file sits outside the enumerable sessions root is invisible to the wake scan; keep it resident. */
+	private isWakeBlindScheduledWorker(worker: ResidentWorker): boolean {
+		const sessionFile = worker.descriptor.sessionFile ?? worker.descriptor.createCommand.sessionPath;
+		const agentDir = this.defaultSessionConfig.agentDir;
+		if (!sessionFile || !agentDir) return false;
+		const sessionsRoot = canonicalSessionPath(this.defaultSessionConfig.sessionDir ?? getSessionsDir(agentDir));
+		if (dirname(canonicalSessionPath(sessionFile)) === sessionsRoot) return false;
+		return this.workerRosterEntries(worker).some(
+			(entry) => entry.summary.hasRegisteredHeartbeat === true || entry.summary.hasRegisteredCronJob === true,
+		);
+	}
+
 	private async runIdleEvictionSweep(now = Date.now()): Promise<void> {
 		if (this.shuttingDown || this.updateRestartPhase !== undefined || this.idleEvictionFence) return;
 		await this.settingsManager.reload();
@@ -1098,8 +1110,10 @@ export class DaemonSupervisor {
 				}
 			}),
 		);
-		const candidates = [...refreshed].filter((worker) =>
-			canEvictWorker(this.workerEvictionSnapshot(worker), idleEvictionMinutes, now),
+		const candidates = [...refreshed].filter(
+			(worker) =>
+				!this.isWakeBlindScheduledWorker(worker) &&
+				canEvictWorker(this.workerEvictionSnapshot(worker), idleEvictionMinutes, now),
 		);
 		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
 		// Whole-tree candidates skip child work because stopWorker releases everything.

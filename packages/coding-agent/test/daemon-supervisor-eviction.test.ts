@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getSessionsDir } from "../src/config.js";
 import { type AgentCronJob, AgentCronJobStore, SESSION_SCHEDULED_JOBS_FILENAME } from "../src/core/cron-jobs.js";
 import { getSessionArtifactPathForFile, type SessionInfo } from "../src/core/session-manager.js";
 import { workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
@@ -155,10 +156,18 @@ describe("daemon supervisor whole-tree eviction", () => {
 		const heartbeat = makeWorker("heartbeat", [makeSummary("heartbeat-root", now, { hasRegisteredHeartbeat: true })]);
 		const cron = makeWorker("cron", [makeSummary("cron-root", now, { hasRegisteredCronJob: true })]);
 		const attached = makeWorker("attached", [makeSummary("attached-root", now)]);
-		for (const worker of [idle, active, heartbeat, cron, attached]) {
+		// A schedule outside the enumerable sessions root cannot be re-woken; it must stay resident.
+		const sessionsRoot = getSessionsDir(supervisor.defaultSessionConfig.agentDir ?? "");
+		mkdirSync(sessionsRoot, { recursive: true });
+		heartbeat.descriptor.sessionFile = join(sessionsRoot, "heartbeat-root.jsonl");
+		const blindDir = mkdtempSync(join(tmpdir(), "prime-custom-session-dir-"));
+		tempDirs.push(blindDir);
+		const blind = makeWorker("blind-heartbeat", [makeSummary("blind-root", now, { hasRegisteredHeartbeat: true })]);
+		blind.descriptor.sessionFile = join(blindDir, "blind-root.jsonl");
+		for (const worker of [idle, active, heartbeat, cron, attached, blind]) {
 			supervisor.workers.set(worker.descriptor.workerId, worker);
 		}
-		seedSupervisorRoster(supervisor, idle, active, heartbeat, cron, attached);
+		seedSupervisorRoster(supervisor, idle, active, heartbeat, cron, attached, blind);
 		supervisor.clients.add({ id: "viewer", attachedActiveSessionIds: new Set(["attached-root"]) });
 
 		await supervisor.runIdleEvictionSweep(now);
@@ -169,7 +178,7 @@ describe("daemon supervisor whole-tree eviction", () => {
 		expect(supervisor.log).toHaveBeenCalledWith(
 			expect.stringMatching(/Evicted idle worker idle .*idleMinutes=120 sessions=2/),
 		);
-		expect([...supervisor.workers.keys()].sort()).toEqual(["active", "attached", "cron"]);
+		expect([...supervisor.workers.keys()].sort()).toEqual(["active", "attached", "blind-heartbeat", "cron"]);
 	});
 
 	it("delegates capped child passivation only to live non-evictable workers", async () => {
