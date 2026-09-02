@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { types } from "node:util";
 import {
@@ -26,6 +27,7 @@ export type OrderedRelayErrorCode =
 	| "INVALID_ARGUMENT"
 	| "PERSISTENCE_FAILED"
 	| "POISONED"
+	| "REENTRANT_CALL"
 	| "TRANSPORT_UNCERTAIN";
 
 export type OrderedRelayFailure = Readonly<{
@@ -370,6 +372,7 @@ function acceptedApplicationEnvelope(envelope: RemoteHostFrameEnvelope): boolean
 export class OrderedDurableRelay {
 	private tail: Promise<void> = Promise.resolve();
 	private closePromise: Promise<OrderedRelayResult<void>> | null = null;
+	private readonly applicationContext = new AsyncLocalStorage<boolean>();
 	private closed = false;
 	private poisoned = false;
 
@@ -461,6 +464,7 @@ export class OrderedDurableRelay {
 	}
 
 	receive(raw: unknown): Promise<OrderedRelayResult<OrderedRelayReceiveResult>> {
+		if (this.applicationContext.getStore() === true) return Promise.resolve(failure("REENTRANT_CALL"));
 		if (this.closed) return Promise.resolve(failure("CLOSED"));
 		const decoded = decodeEnvelope(raw);
 		if (!decoded.ok || !acceptedApplicationEnvelope(decoded.value)) {
@@ -470,6 +474,7 @@ export class OrderedDurableRelay {
 	}
 
 	send(raw: unknown): Promise<OrderedRelayResult<OrderedRelaySendResult>> {
+		if (this.applicationContext.getStore() === true) return Promise.resolve(failure("REENTRANT_CALL"));
 		if (this.closed) return Promise.resolve(failure("CLOSED"));
 		const decoded = decodeEnvelope(raw);
 		if (!decoded.ok || !acceptedApplicationEnvelope(decoded.value)) {
@@ -479,11 +484,13 @@ export class OrderedDurableRelay {
 	}
 
 	replayOutgoing(raw: unknown): Promise<OrderedRelayResult<OrderedRelayReplayResult>> {
+		if (this.applicationContext.getStore() === true) return Promise.resolve(failure("REENTRANT_CALL"));
 		if (this.closed) return Promise.resolve(failure("CLOSED"));
 		return this.enqueue(() => this.replayOutgoingOrdered(raw));
 	}
 
 	close(): Promise<OrderedRelayResult<void>> {
+		if (this.applicationContext.getStore() === true) return Promise.resolve(failure("REENTRANT_CALL"));
 		if (this.closePromise !== null) return this.closePromise;
 		this.closed = true;
 		this.closePromise = this.tail.then(
@@ -542,7 +549,9 @@ export class OrderedDurableRelay {
 	}
 
 	private async apply(envelope: RemoteHostFrameEnvelope): Promise<boolean> {
-		const observed = await invoke(() => this.application.apply(Object.freeze({ envelope })), APPLY_TIMEOUT_MS);
+		const observed = await this.applicationContext.run(true, () =>
+			invoke(() => this.application.apply(Object.freeze({ envelope })), APPLY_TIMEOUT_MS),
+		);
 		if (observed.status !== "fulfilled") return false;
 		const result = exact(observed.value, STATUS_KEYS);
 		return result?.status?.value === "applied";

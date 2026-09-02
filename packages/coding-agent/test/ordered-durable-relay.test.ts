@@ -386,6 +386,22 @@ describe("ordered durable relay", () => {
 		await harness.relay.close();
 	});
 
+	it("rejects relay reentry from an application async context without deadlock", async () => {
+		let relay: OrderedDurableRelay;
+		const harness = await openRelay({
+			applicationApply: async () => {
+				await Promise.resolve();
+				expect(await code(relay.send(eventEnvelope("reentrant")))).toBe("REENTRANT_CALL");
+				expect(await code(relay.replayOutgoing({ cursor: null, maxCount: 64 }))).toBe("REENTRANT_CALL");
+				expect(await code(relay.close())).toBe("REENTRANT_CALL");
+				return { status: "applied" };
+			},
+		});
+		relay = harness.relay;
+		expect((await relay.receive(eventEnvelope())).ok).toBe(true);
+		await relay.close();
+	});
+
 	it("serializes receive operations through awaited application", async () => {
 		const gate: { release: (() => void) | null } = { release: null };
 		let calls = 0;
