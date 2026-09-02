@@ -2,6 +2,7 @@ import { join } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model, ServiceTier } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../config.js";
+import type { SandboxOptions } from "../modes/daemon/daemon-protocol.js";
 import type { AgentSessionMessageController } from "./agent-messages.js";
 import type { AgentObserveController } from "./agent-observe.js";
 import type { AgentExecutionMode } from "./agent-session-config.js";
@@ -70,6 +71,10 @@ export interface AgentSessionCreationOptions {
 	executionMode?: AgentExecutionMode;
 	telemetryDisabled?: true;
 	initialGoal?: { objective: string; tokenBudget?: number };
+	/** Request a fresh sandbox for this subagent. Default false inherits the current execution host. */
+	sandbox?: boolean;
+	/** Sandbox descriptor options. Rejected unless sandbox is true. */
+	sandboxOptions?: SandboxOptions;
 }
 
 export interface CreateAgentSessionFromServicesOptions extends AgentSessionCreationOptions {

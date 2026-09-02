@@ -222,6 +222,8 @@ import {
 	createRlmRunHostHandler,
 	findRlmModelMatches,
 	normalizeRequestedRlmSubagentModel,
+	normalizeRequestedRlmSubagentSandbox,
+	normalizeRequestedRlmSubagentSandboxOptions,
 	normalizeRequestedRlmSubagentSessionName,
 	normalizeRequestedRlmSubagentThinkingLevel,
 	type RlmDeleteSubagentResult,
@@ -9460,10 +9462,14 @@ export class AgentSession {
 		sessionDir: string;
 		model: Model<any>;
 		thinkingLevel?: ThinkingLevel;
+		sandbox?: boolean;
+		sandboxOptions?: { region?: string };
 	}): CreateRlmSubagentRuntimeOptions {
 		return {
 			parentSession: this,
 			id: options.id,
+			sandbox: options.sandbox,
+			sandboxOptions: options.sandboxOptions,
 			prompt: options.prompt,
 			sessionName: options.sessionName,
 			spawnCode: options.spawnCode,
@@ -10404,7 +10410,14 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
-		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
+		const {
+			name: rawName,
+			model: rawModel,
+			thinking: rawThinking,
+			sandbox: rawSandbox,
+			sandbox_options: rawSandboxOptions,
+			...unsupported
+		} = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
 			throw new Error(`Unsupported rlm.run kwargs: ${unsupportedKwargs.sort().join(", ")}`);
@@ -10412,6 +10425,9 @@ export class AgentSession {
 		const requestedSessionName = normalizeRequestedRlmSubagentSessionName(rawName);
 		const requestedModel = normalizeRequestedRlmSubagentModel(rawModel);
 		const requestedThinkingLevel = normalizeRequestedRlmSubagentThinkingLevel(rawThinking);
+		const requestedSandbox = normalizeRequestedRlmSubagentSandbox(rawSandbox);
+		const requestedSandboxOptions = normalizeRequestedRlmSubagentSandboxOptions(rawSandboxOptions, requestedSandbox);
+		const sandboxOptions = requestedSandboxOptions ? { region: requestedSandboxOptions.region } : undefined;
 		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
 		if (this._rlmDepth >= this._rlmMaxDepth) {
 			throw new Error(
@@ -10497,6 +10513,8 @@ export class AgentSession {
 				sessionDir: childSessionDir,
 				model: modelSelection.model,
 				thinkingLevel: requestedThinkingLevel,
+				sandbox: requestedSandbox,
+				sandboxOptions: requestedSandbox ? sandboxOptions : undefined,
 			}),
 			onSessionPublished: publishChildSession,
 		};

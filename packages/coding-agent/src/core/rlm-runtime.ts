@@ -1,5 +1,6 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
+import type { SandboxOptions } from "../modes/daemon/daemon-protocol.js";
 import type { AgentSession } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
@@ -102,6 +103,48 @@ export function normalizeRequestedRlmSubagentModel(value: unknown): string | und
 		throw new Error("rlm.run model must not be empty");
 	}
 	return model;
+}
+
+export function normalizeRequestedRlmSubagentSandbox(value: unknown): boolean | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (typeof value !== "boolean") {
+		throw new Error("rlm.run sandbox must be a boolean");
+	}
+	return value;
+}
+
+export function normalizeRequestedRlmSubagentSandboxOptions(
+	value: unknown,
+	sandbox: boolean | undefined,
+): { region?: string } | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new Error("rlm.run sandbox_options must be a plain object");
+	}
+	if (!sandbox) {
+		throw new Error("rlm.run sandbox_options requires sandbox=true");
+	}
+	const obj = value as Record<string, unknown>;
+	const keys = Object.keys(obj);
+	for (const key of keys) {
+		if (key !== "region") {
+			throw new Error(`rlm.run sandbox_options contains unsupported key: ${key}`);
+		}
+	}
+	if (obj.region !== undefined) {
+		if (typeof obj.region !== "string") {
+			throw new Error("rlm.run sandbox_options.region must be a string");
+		}
+		if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(obj.region)) {
+			throw new Error("rlm.run sandbox_options.region contains invalid characters or is too long");
+		}
+		return { region: obj.region };
+	}
+	return {};
 }
 
 /** Create a readable, collision-resistant default name usable as an agent-message selector. */
@@ -224,6 +267,10 @@ export interface CreateRlmSubagentRuntimeOptions {
 	model: Model<any>;
 	thinkingLevel: ThinkingLevel;
 	serviceTier: ServiceTier;
+	/** Request a fresh sandbox for this subagent. Default false inherits the current execution host. */
+	sandbox?: boolean;
+	/** Sandbox descriptor options. Rejected unless sandbox is true. */
+	sandboxOptions?: SandboxOptions;
 	scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 	activeToolNames: string[];
 	allowedToolNames?: string[];

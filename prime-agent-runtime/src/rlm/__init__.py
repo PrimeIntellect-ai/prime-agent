@@ -95,6 +95,10 @@ async def run(prompt: str, **kwargs: Any) -> RLMSpawnHandle:
     ``model`` selects a child with an exact ``provider/model`` selector.
     ``thinking`` sets the child reasoning level (e.g. 'off', 'low', 'medium', 'high');
     defaults to the parent level; levels invalid for the resolved model fail the spawn.
+    ``sandbox`` (bool) requests a fresh sandbox for the child when true; default false
+    inherits the current execution host.
+    ``sandbox_options`` (dict, optional) provides sandbox descriptor options (e.g.
+    ``{"region": "us-east-1"}``). Only accepted when ``sandbox=True``.
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
