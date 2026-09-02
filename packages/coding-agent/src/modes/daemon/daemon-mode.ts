@@ -90,7 +90,12 @@ import {
 } from "../../core/cron-jobs.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
-import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../../core/rlm-runtime.js";
+import type {
+	CreateRlmRootSessionOptions,
+	CreateRlmSubagentRuntimeOptions,
+	RlmCreateSessionResult,
+	SubagentRuntimeHost,
+} from "../../core/rlm-runtime.js";
 import {
 	canPassivateSession,
 	type IdleEvictionMinutes,
@@ -2328,6 +2333,7 @@ export class AgentDaemon {
 	private createSubagentRuntimeHost(parentState: ActiveSessionState): SubagentRuntimeHost {
 		return {
 			createRlmSubagentRuntime: async (options) => this.createRlmSubagentRuntime(parentState, options),
+			createRlmRootSession: async (options) => this.createRlmRootSession(parentState, options),
 			completeRlmSubagentRuntime: (childId, session) => {
 				const state = [...this.sessions.values()].find(
 					(candidate) =>
@@ -2475,6 +2481,79 @@ export class AgentDaemon {
 				}
 			},
 		};
+	}
+
+	private async createRlmRootSession(
+		parentState: ActiveSessionState,
+		options: CreateRlmRootSessionOptions,
+	): Promise<RlmCreateSessionResult> {
+		const supervisorSocketPath = this.supervisorSocketPathFromEnv();
+		if (!this.options.worker || !supervisorSocketPath) {
+			throw new Error("rlm.create_session requires a daemon worker connected to its supervisor");
+		}
+
+		const client = new DaemonClient(supervisorSocketPath);
+		let activeSessionId: string | undefined;
+		try {
+			await client.connect(3000);
+			await client.waitForHello(3000);
+			const runtimeConfig = parentState.runtime.runtimeConfig;
+			const createResponse = await client.request(
+				{
+					type: "create",
+					lifecycle: "resident",
+					...(options.sessionName ? { name: options.sessionName } : {}),
+					config: {
+						cwd: options.cwd,
+						agentDir: parentState.runtime.services.agentDir,
+						...(runtimeConfig?.sessionDir ? { sessionDir: runtimeConfig.sessionDir } : {}),
+						provider: options.model.provider,
+						model: options.model.id,
+						thinking: options.thinkingLevel,
+						...(runtimeConfig?.telemetryDisabled ? { telemetryDisabled: true as const } : {}),
+					},
+				},
+				120_000,
+			);
+			if (!createResponse.success) throw deserializeDaemonError(createResponse);
+			const summary = createResponse.data as Partial<SessionSummary> | undefined;
+			activeSessionId = summary?.activeSessionId ?? summary?.id;
+			if (
+				!activeSessionId ||
+				typeof summary?.sessionId !== "string" ||
+				!summary.sessionId ||
+				typeof summary.sessionFile !== "string" ||
+				!summary.sessionFile ||
+				(summary.rlmDepth !== undefined && summary.rlmDepth !== 0)
+			) {
+				throw new Error("Daemon supervisor returned an invalid depth-0 session summary");
+			}
+
+			const promptResponse = await client.request(
+				{
+					type: "prompt",
+					activeSessionId,
+					message: options.prompt,
+					source: "rpc",
+				},
+				30_000,
+			);
+			if (!promptResponse.success) throw deserializeDaemonError(promptResponse);
+			return {
+				active_session_id: activeSessionId,
+				session_id: summary.sessionId,
+				name: summary.sessionName ?? activeSessionId,
+				session_file: summary.sessionFile,
+				model: `${options.model.provider}/${options.model.id}`,
+			};
+		} catch (error) {
+			if (activeSessionId) {
+				await client.request({ type: "kill", activeSessionId }, 30_000).catch(() => undefined);
+			}
+			throw error;
+		} finally {
+			client.close();
+		}
 	}
 
 	private async createRlmSubagentRuntime(

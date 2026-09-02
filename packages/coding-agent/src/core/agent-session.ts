@@ -216,6 +216,7 @@ import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.j
 import {
 	type CreateRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
+	createRlmCreateSessionHostHandler,
 	createRlmDeleteSubagentHostHandler,
 	createRlmFindModelsHostHandler,
 	createRlmListSubagentsHostHandler,
@@ -224,6 +225,7 @@ import {
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
 	normalizeRequestedRlmSubagentThinkingLevel,
+	type RlmCreateSessionResult,
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
 	type RlmListSubagentsResult,
@@ -9211,6 +9213,9 @@ export class AgentSession {
 			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }) => ({
 				...(await this.runRlmChild(prompt, kwargs, cellSourceCode)),
 			})),
+			"rlm.create_session": createRlmCreateSessionHostHandler(async ({ prompt, kwargs }) => ({
+				...(await this.createRlmSession(prompt, kwargs)),
+			})),
 			"rlm.find_models": createRlmFindModelsHostHandler((query, limit) => this.findRlmModels(query, limit)),
 			"rlm.list_subagents": createRlmListSubagentsHostHandler(() => this.listRlmSubagents()),
 			"rlm.delete_subagent": createRlmDeleteSubagentHostHandler((target) => this.deleteRlmSubagent(target)),
@@ -10372,7 +10377,10 @@ export class AgentSession {
 		};
 	}
 
-	private async _resolveRlmSubagentModel(reference: string | undefined): Promise<RlmSubagentModelSelection> {
+	private async _resolveRlmSubagentModel(
+		reference: string | undefined,
+		target = "subagent",
+	): Promise<RlmSubagentModelSelection> {
 		const parentModel = this.model;
 		if (!parentModel) {
 			throw new Error(formatNoModelSelectedMessage());
@@ -10389,12 +10397,12 @@ export class AgentSession {
 			(candidate) => `${candidate.provider}/${candidate.id}`.toLowerCase() === normalizedReference,
 		);
 		if (!model) {
-			throw new Error(`Requested subagent model "${reference}" is unavailable, unauthenticated, or expired`);
+			throw new Error(`Requested ${target} model "${reference}" is unavailable, unauthenticated, or expired`);
 		}
 
 		const auth = await this._modelRegistry.getApiKeyAndHeaders(model);
 		if (!auth.ok) {
-			throw new Error(`Requested subagent model "${reference}" failed authentication preflight`);
+			throw new Error(`Requested ${target} model "${reference}" failed authentication preflight`);
 		}
 		return { model };
 	}
@@ -10783,6 +10791,61 @@ export class AgentSession {
 			session_dir: childSessionDir,
 			model: `${modelSelection.model.provider}/${modelSelection.model.id}`,
 		};
+	}
+
+	async createRlmSession(prompt: string, kwargs: Record<string, unknown> = {}): Promise<RlmCreateSessionResult> {
+		const { name: rawName, model: rawModel, thinking: rawThinking, cwd: rawCwd, ...unsupported } = kwargs;
+		const unsupportedKeys = Object.keys(unsupported);
+		if (unsupportedKeys.length > 0) {
+			throw new Error(`Unsupported rlm.create_session kwargs: ${unsupportedKeys.sort().join(", ")}`);
+		}
+		if (!prompt.trim()) {
+			throw new Error("rlm.create_session prompt must not be empty");
+		}
+		if (this._rlmDepth !== 0) {
+			throw new Error("rlm.create_session is available only from a depth-0 session");
+		}
+		if (this._disposed || this._disposing) {
+			throw new Error("Cannot create a top-level session after the current session was disposed");
+		}
+		const host = this._subagentRuntimeHost;
+		if (!host?.createRlmRootSession) {
+			throw new Error("rlm.create_session requires a daemon-backed depth-0 session");
+		}
+
+		const operation = "rlm.create_session";
+		const sessionName = normalizeRequestedRlmSubagentSessionName(rawName, operation);
+		const requestedModel = normalizeRequestedRlmSubagentModel(rawModel, operation);
+		const requestedThinkingLevel = normalizeRequestedRlmSubagentThinkingLevel(rawThinking, operation);
+		if (sessionName) {
+			assertDirectAgentMessageTarget(sessionName);
+			const controller = this._agentMessageController;
+			if (controller?.assertSessionNameAvailable) {
+				await controller.assertSessionNameAvailable({ name: sessionName, depth: 0 });
+			}
+		}
+		if (rawCwd !== undefined && (typeof rawCwd !== "string" || !rawCwd.trim())) {
+			throw new Error("rlm.create_session cwd must be a non-empty string");
+		}
+		const cwd = rawCwd === undefined ? this._cwd : resolve(this._cwd, rawCwd.trim());
+		const modelSelection = await this._resolveRlmSubagentModel(requestedModel, "top-level session");
+		if (requestedThinkingLevel !== undefined) {
+			const supported = getSupportedThinkingLevels(modelSelection.model) as ThinkingLevel[];
+			if (!supported.includes(requestedThinkingLevel)) {
+				throw new Error(
+					`Requested thinking level "${requestedThinkingLevel}" is not supported by model "${modelSelection.model.provider}/${modelSelection.model.id}"; supported levels: ${supported.join(", ")}`,
+				);
+			}
+		}
+		const thinkingLevel =
+			requestedThinkingLevel ?? (clampThinkingLevel(modelSelection.model, this.thinkingLevel) as ThinkingLevel);
+		return host.createRlmRootSession({
+			prompt,
+			sessionName,
+			cwd,
+			model: modelSelection.model,
+			thinkingLevel,
+		});
 	}
 
 	async runRlmChild(

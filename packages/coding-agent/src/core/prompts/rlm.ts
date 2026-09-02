@@ -146,6 +146,13 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		);
 	}
 
+	if (depth === 0 && hasIpython) {
+		parts.push(
+			"",
+			"Use `await rlm.create_session('task', name='researcher')` when you need a separate top-level Prime Agent session instead of a recursive child. It asks the daemon to create a resident depth-0 sibling, submits its initial task, and returns after admission with `active_session_id`, `session_id`, `name`, `session_file`, and `model`. This is distinct from `rlm(...)`, which always creates a child.",
+		);
+	}
+
 	if (allowRecursion && hasIpython) {
 		parts.push(
 			"",

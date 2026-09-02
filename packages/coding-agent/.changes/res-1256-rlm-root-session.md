@@ -1,0 +1,1 @@
+- Added `rlm.create_session(...)` so a depth-0 agent can create and prompt an independent resident top-level session.
