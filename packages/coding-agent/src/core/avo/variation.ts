@@ -127,11 +127,16 @@ export function updateAvoLineage<T = unknown>(
 /**
  * Detects stagnation patterns within the agent's recent working trajectory.
  */
-export function detectAvoStagnation(trajectory: AvoWorkingAttempt[], threshold = 3): AvoStagnationPattern {
+export function detectAvoStagnation(
+	trajectory: AvoWorkingAttempt[],
+	threshold = 3,
+	baselineScore?: Record<string, number>,
+	scoreDimensions?: AvoScoreDimension[],
+): AvoStagnationPattern {
 	const evalAttempts = trajectory.filter((a) => a.actionType === "evaluate" && a.receipt);
 
 	let consecutiveFailures = 0;
-	const consecutiveRegressions = 0;
+	let consecutiveRegressions = 0;
 	const repeatedErrors: string[] = [];
 
 	for (let i = evalAttempts.length - 1; i >= 0; i--) {
@@ -144,14 +149,25 @@ export function detectAvoStagnation(trajectory: AvoWorkingAttempt[], threshold =
 				repeatedErrors.push(receipt.logs.slice(0, 100));
 			}
 		} else {
+			if (baselineScore && scoreDimensions) {
+				const improves = isScoreImproving(receipt.scores, baselineScore, scoreDimensions);
+				const matches = Object.entries(baselineScore).every(([k, v]) => receipt.scores[k] === v);
+				if (!improves && !matches) {
+					consecutiveRegressions++;
+					continue;
+				}
+			}
 			break;
 		}
 	}
 
-	const isStagnating = consecutiveFailures >= threshold;
-	const rationale = isStagnating
-		? `Detected ${consecutiveFailures} consecutive failed evaluations exceeding threshold ${threshold}.`
-		: "Trajectory is progressing normally.";
+	const isStagnating = consecutiveFailures >= threshold || consecutiveRegressions >= threshold;
+	let rationale = "Trajectory is progressing normally.";
+	if (consecutiveFailures >= threshold) {
+		rationale = `Detected ${consecutiveFailures} consecutive failed evaluations exceeding threshold ${threshold}.`;
+	} else if (consecutiveRegressions >= threshold) {
+		rationale = `Detected ${consecutiveRegressions} consecutive score regressions without improvement exceeding threshold ${threshold}.`;
+	}
 
 	return {
 		isStagnating,
@@ -344,7 +360,12 @@ export class AvoVariationEpisodeController<T = unknown> {
 		// Check for stagnation and trigger conditional supervisor steering if configured
 		if (this.contract.supervisor?.enabled && this.contract.supervisor.steer) {
 			const threshold = this.contract.supervisor.maxConsecutiveFailuresBeforeIntervention ?? 3;
-			const stagnation = detectAvoStagnation(this.trajectory, threshold);
+			const stagnation = detectAvoStagnation(
+				this.trajectory,
+				threshold,
+				this.contract.lineage.baselineScore,
+				this.contract.scorer.scoreDimensions,
+			);
 
 			if (stagnation.isStagnating) {
 				const steering = await this.contract.supervisor.steer(this.trajectory, stagnation);

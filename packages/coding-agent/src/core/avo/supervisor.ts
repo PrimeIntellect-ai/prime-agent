@@ -77,7 +77,8 @@ export function shouldActivateStagnationSupervisor(stagnation: {
 export function shouldActivateAvoSupervisor(state: AvoRunState, checkpoint?: AvoCheckpoint): boolean {
 	if (requiresAvoAdversarialReview(state, checkpoint?.cycleId)) return true;
 	if (state.routing.horizon === "direct") return false;
-	if (state.routing.horizon === "long") return true;
+	// Under paper AVO (arXiv:2603.24517 Section 3.2), long horizon alone is not sufficient
+	// to activate the stagnation supervisor without demonstrated intervention need or stagnation.
 	return checkpoint?.interventionNeeded === true;
 }
 
