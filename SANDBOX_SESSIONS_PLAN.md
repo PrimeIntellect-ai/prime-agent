@@ -81,7 +81,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 |---|---|---|---|
 | B01 | A01, A03 | done | Add `ExecutionLocation` and opaque remote session DTOs |
 | B02 | A01, A07 | queued | Introduce location-neutral `HostedSubagent` and preserve local behavior |
-| B03 | A02, A16 | in_progress | Add capability-gated remote host protocol and replay primitives |
+| B03 | A02, A16 | done | Add capability-gated remote host protocol and replay primitives |
 | B04 | A02, A16 | queued | Add authenticated link state machine and fake relay transport |
 | B05 | A04, A14 | in_progress | Add typed streaming home-provider proxy |
 | B06 | A05, A15 | in_progress | Add Prime Sandbox provisioner and exact-build bootstrap |
@@ -139,3 +139,5 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Integrated B01 as `68c8c5704`; its remote-safe DTOs passed 49 focused tests after credential-field and error-sanitization review.
 
 - Started B02 after B01 integration; it will replace concrete child-session coupling with a local adapter while preserving current behavior.
+
+- Integrated B03 as `d609d182f`; 57 focused tests verify exact-build admission, path-free frames, durable journals, directional replay, and cursor identity. Started B04 managed relay and B09 top-level API plumbing.
