@@ -31,20 +31,40 @@ if [ -n "$prime_agent_script_dir" ] && [ -f "$prime_agent_script_dir/.install-pa
 		_persisted_cmd=$(basename "$_persisted_symlink")
 	fi
 	_persisted_versions_physical=
-	_persisted_target_dir=
+	_persisted_command_valid=0
+	_persisted_destination_valid=0
+	case "$_persisted_symlink" in
+		/*)
+			if [ -n "$_persisted_cmd" ] && [ "$(basename "$_persisted_symlink")" = "$_persisted_cmd" ]; then
+				_persisted_destination_valid=1
+			fi
+			;;
+	esac
 	if [ -d "$_persisted_versions" ]; then
 		_persisted_versions_physical=$(CDPATH= cd -P "$_persisted_versions" 2>/dev/null && pwd)
 	fi
 	if [ -L "$_persisted_symlink" ]; then
 		_persisted_target=$(readlink "$_persisted_symlink" 2>/dev/null || printf '')
-		if [ -n "$_persisted_target" ] && [ -d "$(dirname "$_persisted_target")" ]; then
-			_persisted_target_dir=$(CDPATH= cd -P "$(dirname "$_persisted_target")" 2>/dev/null && pwd)
+		_persisted_target_dir=$(dirname "$_persisted_target")
+		if [ -n "$_persisted_target" ] && [ -d "$_persisted_target_dir" ]; then
+			_persisted_target_physical=$(CDPATH= cd -P "$_persisted_target_dir" 2>/dev/null && pwd || printf '')
+			if [ "$(dirname "$_persisted_target_physical")" = "$_persisted_versions_physical" ]; then
+				_persisted_command_valid=1
+			fi
+		elif [ -n "$_persisted_target" ] &&
+			[ "$(dirname "$_persisted_target_dir")" = "$_persisted_versions_physical" ]; then
+			# A direct-child target may be absent after an interrupted repair.
+			_persisted_command_valid=1
 		fi
+	elif [ ! -e "$_persisted_symlink" ]; then
+		# The activated command may be missing after an interrupted update. The
+		# sidecar remains anchored to its physical versions root and can repair it.
+		_persisted_command_valid=1
 	fi
 	if [ -n "$_persisted_versions_physical" ] &&
 		[ "$_persisted_versions_physical" = "$(dirname "$prime_agent_script_dir")" ] &&
-		[ "$(dirname "$_persisted_target_dir")" = "$_persisted_versions_physical" ] &&
-		[ "$(basename "$_persisted_symlink")" = "$_persisted_cmd" ]; then
+		[ "$_persisted_command_valid" = 1 ] &&
+		[ "$_persisted_destination_valid" = 1 ]; then
 		prime_agent_persisted_versions_dir="$_persisted_versions_physical"
 		prime_agent_persisted_symlink="$_persisted_symlink"
 		if [ -z "${PRIME_AGENT_CMD:-}" ]; then
@@ -1470,7 +1490,7 @@ prime_agent_configure_binary_path() {
 		printf '\nPrime Agent was installed to %s.\n' "$_bin_dir"
 	fi
 
-	_profile=$(detect_shell_profile)
+	_profile=$(detect_shell_profile || printf '')
 	_quoted_bin_dir=$(prime_agent_shell_quote "$_bin_dir")
 	_quoted_cmd=$(prime_agent_shell_quote "$prime_agent_cmd")
 	if [ -n "$_profile" ] && [ -w "$_profile" ] 2>/dev/null; then

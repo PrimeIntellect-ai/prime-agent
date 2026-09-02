@@ -88,7 +88,7 @@ function corruptReleaseArchive(root: string, version: string): void {
 	);
 }
 
-function installerEnv(root: string, overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
+function installerEnv(root: string, overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 	const home = join(root, "home");
 	mkdirSync(join(home, ".prime"), { recursive: true });
 	writeFileSync(join(home, ".prime", "sentinel"), "user data");
@@ -106,7 +106,7 @@ function installerEnv(root: string, overrides: Record<string, string> = {}): Nod
 function runInstaller(
 	root: string,
 	args: string[],
-	env: Record<string, string> = {},
+	env: NodeJS.ProcessEnv = {},
 ): { exitCode: number; stdout: string; stderr: string } {
 	const result = spawnSync("sh", [installer, ...args], {
 		cwd: root,
@@ -247,6 +247,88 @@ describe("compiled binary installer", () => {
 		expect(result.status, result.stderr).toBe(0);
 		expect(readlinkSync(join(root, "bin", "prime-agent"))).toContain("v2.0.0/prime-agent");
 		expect(() => readlinkSync(join(isolatedHome, ".local", "bin", "prime-agent"))).toThrow();
+	});
+
+	test("repairs a missing public command from the bundled installer sidecar", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+		const link = join(root, "bin", "prime-agent");
+		const sidecar = join(root, "apps", "versions", "v1.2.3", "install.sh");
+		writeFileSync(sidecar, readFileSync(installer));
+		chmodSync(sidecar, 0o755);
+		rmSync(link);
+		const isolatedHome = join(root, "isolated-home");
+		mkdirSync(isolatedHome);
+
+		const result = spawnSync("sh", [sidecar, "--update", "1.2.3"], {
+			cwd: root,
+			env: {
+				...process.env,
+				HOME: isolatedHome,
+				PRIME_AGENT_DOWNLOAD_BASE_URL: `file://${join(root, "server")}`,
+				PRIME_AGENT_VERSIONS_DIR: undefined,
+				PRIME_AGENT_BIN_DIR: undefined,
+				XDG_DATA_HOME: undefined,
+				XDG_BIN_HOME: undefined,
+				TERM: "dumb",
+			},
+			encoding: "utf8",
+		});
+		expect(result.status, result.stderr).toBe(0);
+		expect(readlinkSync(link)).toContain("v1.2.3/prime-agent");
+		expect(() => readlinkSync(join(isolatedHome, ".local", "bin", "prime-agent"))).toThrow();
+	});
+
+	test("rejects a persisted command routed through a symlinked version directory", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+		const link = join(root, "bin", "prime-agent");
+		const sidecar = join(root, "apps", "versions", "v1.2.3", "install.sh");
+		writeFileSync(sidecar, readFileSync(installer));
+		chmodSync(sidecar, 0o755);
+		const outside = join(root, "outside");
+		mkdirSync(outside);
+		writeFileSync(join(outside, "prime-agent"), goodExecutable("attacker"));
+		chmodSync(join(outside, "prime-agent"), 0o755);
+		symlinkSync(outside, join(root, "apps", "versions", "escape"), "dir");
+		rmSync(link);
+		symlinkSync(join(root, "apps", "versions", "escape", "prime-agent"), link);
+
+		const result = spawnSync("sh", [sidecar, "--update", "1.2.3"], {
+			cwd: root,
+			env: {
+				...process.env,
+				PRIME_AGENT_DOWNLOAD_BASE_URL: `file://${join(root, "server")}`,
+				PRIME_AGENT_VERSIONS_DIR: undefined,
+				PRIME_AGENT_BIN_DIR: undefined,
+				TERM: "dumb",
+			},
+			encoding: "utf8",
+		});
+		expect(result.status).not.toBe(0);
+		expect(result.stderr).toContain("path metadata does not match");
+		expect(readlinkSync(link)).toContain("versions/escape/prime-agent");
+	});
+
+	test("completes an explicit-path install without HOME when the command is not on PATH", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+
+		const result = runInstaller(root, ["1.2.3"], {
+			HOME: undefined,
+			XDG_DATA_HOME: undefined,
+			XDG_BIN_HOME: undefined,
+			PRIME_AGENT_SHELL_PROFILE: undefined,
+			PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+		});
+		expect(result.exitCode, result.stderr).toBe(0);
+		expect(readlinkSync(join(root, "bin", "prime-agent"))).toContain("v1.2.3/prime-agent");
+		expect(result.stdout).toContain("Add to your shell profile");
 	});
 
 	test("rejects a fresh install that fails through the activated command symlink", () => {
