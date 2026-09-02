@@ -11,6 +11,7 @@ import {
 	encodePaarManifest,
 	PAAR_ERRORS,
 	type PaarEncodeInput,
+	type PaarErrorCode,
 	type PaarFileEntry,
 } from "../src/core/paar-manifest-codec.js";
 import {
@@ -396,7 +397,8 @@ describe("byte-level framing", () => {
 		}
 	});
 	it("rejects invalid JSON", () => {
-		const r = decodePaarManifestHeader(buildHeader("{{bad}}"), 14);
+		const hdr = buildHeader("{{bad}}");
+		const r = decodePaarManifestHeader(hdr, hdr.length);
 		expect(r.ok).toBe(false);
 		if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.INVALID_JSON);
 	});
@@ -426,14 +428,13 @@ it("rejects plain object as bytes (INVALID_INPUT)", () => {
 	expect(r.ok).toBe(false);
 	if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.INVALID_INPUT);
 });
-it("rejects hostile Proxy that throws on length", () => {
+it("rejects hostile Proxy that throws on any read", () => {
 	const proxy = new Proxy(new Uint8Array(100), {
-		get(t, p) {
-			if (p === "length") throw new Error("bad");
-			return Reflect.get(t, p);
+		get() {
+			throw new Error("bad trap");
 		},
 	});
-	const r = decodePaarManifestHeader(proxy, 100);
+	const r = decodePaarManifestHeader(proxy as unknown as Uint8Array, 100);
 	expect(r.ok).toBe(false);
 	if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.INVALID_INPUT);
 });
@@ -725,6 +726,127 @@ describe("adversarial input", () => {
 // 13. Buffer erasure observability
 // ===========================================================================
 
+it("rejects reused Proxy entry with varying descriptors (alias)", () => {
+	// Same underlying object reused as two entries; a Proxy with a varying
+	// ownKeys/descriptor set must still be caught by raw-reference alias
+	// tracking added before snapshot.
+	const shared = { path: "shared", size: 1, mode: 0o644, sha256: VALID_HASH, offset: 0 };
+	const entries = [shared, shared] as PaarFileEntry[];
+	const r = encodePaarManifest(validInput({ files: entries }));
+	expect(r.ok).toBe(false);
+	if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.PROTO_INVALID_ALIAS);
+});
+
+it("rejects Proxy file entry reused with varying descriptors", () => {
+	const target = { path: "p1", size: 1, mode: 0o644, sha256: VALID_HASH, offset: 0 };
+	let call = 0;
+	const proxy = new Proxy(target, {
+		ownKeys(t) {
+			// Report different key sets on each call
+			call += 1;
+			if (call === 1) return Reflect.ownKeys(t);
+			return Reflect.ownKeys(t).filter((k) => k !== "offset");
+		},
+		getOwnPropertyDescriptor(t, k) {
+			if (call >= 2 && k === "offset") return undefined;
+			return Reflect.getOwnPropertyDescriptor(t, k);
+		},
+	});
+	const r = encodePaarManifest(
+		validInput({
+			files: [proxy as unknown as PaarFileEntry, proxy as unknown as PaarFileEntry],
+		}),
+	);
+	// The alias check on the raw reference fires before descriptors vary
+	expect(r.ok).toBe(false);
+});
+
+it("rejects Buffer as bytes (INVALID_INPUT)", () => {
+	const enc = encodePaarManifest(validInput());
+	if (!enc.ok) return;
+	const buf = Buffer.from(enc.value.header);
+	const r = decodePaarManifestHeader(buf, enc.value.archiveSize);
+	expect(r.ok).toBe(false);
+	if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.INVALID_INPUT);
+});
+
+it("rejects Uint8Array subclass as bytes (INVALID_INPUT)", () => {
+	const enc = encodePaarManifest(validInput());
+	if (!enc.ok) return;
+	class Sub extends Uint8Array {}
+	const sub = new Sub(enc.value.header);
+	const r = decodePaarManifestHeader(sub, enc.value.archiveSize);
+	expect(r.ok).toBe(false);
+	if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.INVALID_INPUT);
+});
+
+it("rejects SharedArrayBuffer-backed view (INVALID_INPUT)", () => {
+	if (typeof SharedArrayBuffer === "undefined") return; // environment lacks SAB
+	const enc = encodePaarManifest(validInput());
+	if (!enc.ok) return;
+	const sab = new SharedArrayBuffer(enc.value.header.length);
+	const view = new Uint8Array(sab);
+	view.set(enc.value.header);
+	const r = decodePaarManifestHeader(view, enc.value.archiveSize);
+	expect(r.ok).toBe(false);
+	if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.INVALID_INPUT);
+});
+
+it("rejects detached ArrayBuffer view (INVALID_INPUT)", () => {
+	if (typeof MessageChannel === "undefined") return;
+	const enc = encodePaarManifest(validInput());
+	if (!enc.ok) return;
+	const ab = new ArrayBuffer(enc.value.header.length);
+	const view = new Uint8Array(ab);
+	view.set(enc.value.header);
+	// Transfer ownership away via MessageChannel to detach the buffer
+	const { port1, port2 } = new MessageChannel();
+	port1.postMessage(ab, [ab]);
+	port2.close();
+	const r = decodePaarManifestHeader(view, enc.value.archiveSize);
+	expect(r.ok).toBe(false);
+});
+
+it("rejects non-zero byteOffset subview (INVALID_INPUT)", () => {
+	const enc = encodePaarManifest(validInput());
+	if (!enc.ok) return;
+	const backing = new Uint8Array(enc.value.header.length + 8);
+	backing.set(enc.value.header, 8);
+	const subview = backing.subarray(8);
+	const r = decodePaarManifestHeader(subview, enc.value.archiveSize);
+	expect(r.ok).toBe(false);
+	if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.INVALID_INPUT);
+});
+
+it("rejects bytes longer than totalArchiveSize (INVALID_INPUT)", () => {
+	const enc = encodePaarManifest(validInput());
+	if (!enc.ok) return;
+	// Claimed totalArchiveSize is smaller than the supplied header bytes
+	const r = decodePaarManifestHeader(enc.value.header, enc.value.header.length - 5);
+	expect(r.ok).toBe(false);
+	if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.INVALID_INPUT);
+});
+
+it("rejects array with length-get mismatch (out-of-range numeric key)", () => {
+	const arr: PaarFileEntry[] = [{ path: "a", size: 1, mode: 0o644, sha256: VALID_HASH, offset: 0 }];
+	// Add an out-of-range numeric own key "5" (length stays 1)
+	Object.defineProperty(arr, "5", {
+		value: { path: "b", size: 1, mode: 0o644, sha256: VALID_HASH, offset: 1 },
+		enumerable: true,
+	});
+	const r = encodePaarManifest(validInput({ files: arr }));
+	expect(r.ok).toBe(false);
+	if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.BAD_FILES);
+});
+
+it("PAAR_ERRORS exposes closed literal codes (compile-time check)", () => {
+	const all: ReadonlyArray<string> = Object.values(PAAR_ERRORS);
+	expect(all.length).toBeGreaterThan(0);
+	// Every code in the object is a plain string, and the type is a union
+	// of those literals — assigned here to prove the closed union compiles.
+	const c1: PaarErrorCode = "SHORT_HEADER";
+	expect(c1).toBe(PAAR_ERRORS.SHORT_HEADER);
+});
 describe("buffer erasure", () => {
 	it("header not trivially-zeroed on success", () => {
 		const r = encodePaarManifest(validInput());

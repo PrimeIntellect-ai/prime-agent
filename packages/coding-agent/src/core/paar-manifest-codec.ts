@@ -36,10 +36,10 @@ const HEX64_RE = /^[0-9a-f]{64}$/;
 const HEX40_RE = /^[0-9a-f]{40}$/;
 
 // ===========================================================================
-// Error Codes — fixed set, runtime-frozen, no raw values/paths attached
+// Error Codes — fixed set, runtime-frozen, literal types preserved
 // ===========================================================================
 
-export const PAAR_ERRORS: Readonly<Record<string, string>> = Object.freeze({
+export const PAAR_ERRORS = Object.freeze({
 	SHORT_HEADER: "SHORT_HEADER",
 	BAD_MAGIC: "BAD_MAGIC",
 	MANIFEST_TOO_LARGE: "MANIFEST_TOO_LARGE",
@@ -82,7 +82,7 @@ export const PAAR_ERRORS: Readonly<Record<string, string>> = Object.freeze({
 	INVALID_INPUT: "INVALID_INPUT",
 });
 
-export type PaarErrorCode = string;
+export type PaarErrorCode = (typeof PAAR_ERRORS)[keyof typeof PAAR_ERRORS];
 
 // ===========================================================================
 // Result types
@@ -171,10 +171,6 @@ function isNonNegativeSafeInt(v: unknown): v is number {
 // ===========================================================================
 // File path validation
 // ===========================================================================
-
-function nfc(s: string): string {
-	return s.normalize("NFC");
-}
 
 function isNfc(s: string): boolean {
 	try {
@@ -292,13 +288,51 @@ function readUint32BE(bytes: Uint8Array, offset: number): number {
 	return view.getUint32(0, false);
 }
 
+function writeUint32BE(header: Uint8Array, offset: number, value: number): void {
+	const view = new DataView(header.buffer, header.byteOffset + offset, 4);
+	view.setUint32(0, value, false);
+}
+
+// ===========================================================================
+// Buffer genuineness: exact non-shared Uint8Array with zero byteOffset
+// ===========================================================================
+
+function isSharedBuffer(buf: ArrayBuffer): boolean {
+	try {
+		return !(buf instanceof ArrayBuffer);
+	} catch {
+		return true;
+	}
+}
+
+function isGenuineUint8Array(bytes: unknown): bytes is Uint8Array {
+	if (bytes === null || typeof bytes !== "object") return false;
+	try {
+		if (Object.getPrototypeOf(bytes) !== Uint8Array.prototype) return false;
+	} catch {
+		return false;
+	}
+	const b = bytes as Uint8Array;
+	if (b.byteOffset !== 0) return false;
+	if (b.buffer === null || typeof b.buffer !== "object") return false;
+	if (isSharedBuffer(b.buffer as ArrayBuffer)) return false;
+	if (!Number.isSafeInteger(b.byteLength) || b.byteLength < 0) return false;
+	// Reject detached buffer: the backing store must be at least as large as
+	// the view claims. Detached buffers report byteLength=0.
+	let bufLen: number;
+	try {
+		bufLen = (b.buffer as ArrayBuffer).byteLength;
+	} catch {
+		return false;
+	}
+	if (typeof bufLen !== "number" || !Number.isSafeInteger(bufLen) || bufLen < b.byteLength) {
+		return false;
+	}
+	return true;
+}
+
 // ===========================================================================
 // Descriptor-based snapshots — no `in`, no direct Proxy reads
-//
-// Given an unknown value and a set of expected own-data property names,
-// extracts every property via its descriptor `.value` accessor, verifying
-// the value is not undefined.  Returns the snapshot as a fresh object.
-// This prevents Proxy getter traps and subclass hallucinated properties.
 // ===========================================================================
 
 function snapshotOwnData(value: unknown, expectedKeys: ReadonlySet<string>): PaarResult<Record<string, unknown>> {
@@ -306,7 +340,6 @@ function snapshotOwnData(value: unknown, expectedKeys: ReadonlySet<string>): Paa
 		return { ok: false as const, error: { code: PAAR_ERRORS.INPUT_NOT_PLAIN } };
 	}
 
-	// Own-property verification — reject non-plain prototypes
 	let proto: object | null;
 	try {
 		proto = Object.getPrototypeOf(value);
@@ -317,7 +350,7 @@ function snapshotOwnData(value: unknown, expectedKeys: ReadonlySet<string>): Paa
 		return { ok: false as const, error: { code: PAAR_ERRORS.INPUT_NOT_PLAIN } };
 	}
 
-	let descs: PropertyDescriptorMap;
+	let descs: ReturnType<typeof Object.getOwnPropertyDescriptors>;
 	try {
 		descs = Object.getOwnPropertyDescriptors(value);
 	} catch {
@@ -341,7 +374,6 @@ function snapshotOwnData(value: unknown, expectedKeys: ReadonlySet<string>): Paa
 		return { ok: false as const, error: { code: PAAR_ERRORS.INPUT_NOT_PLAIN } };
 	}
 
-	// Check accessors/nonenumerable/undefined and extract values via .value
 	const result: Record<string, unknown> = Object.create(null);
 	for (const key of ownKeys) {
 		const desc = descs[key];
@@ -351,7 +383,6 @@ function snapshotOwnData(value: unknown, expectedKeys: ReadonlySet<string>): Paa
 		if (!desc.enumerable) {
 			return { ok: false as const, error: { code: PAAR_ERRORS.INPUT_NOT_PLAIN } };
 		}
-		// Use desc.value directly — never `value[key]` (avoids Proxy getter)
 		if (desc.value === undefined) {
 			return { ok: false as const, error: { code: PAAR_ERRORS.INPUT_NOT_PLAIN } };
 		}
@@ -361,11 +392,94 @@ function snapshotOwnData(value: unknown, expectedKeys: ReadonlySet<string>): Paa
 		result[key] = desc.value;
 	}
 
-	// Check all expected keys present
 	for (const key of expectedKeys) {
-		if (!(key in result)) {
+		if (result[key] === undefined) {
 			return { ok: false as const, error: { code: PAAR_ERRORS.MISSING_MANIFEST_FIELD } };
 		}
+	}
+
+	return { ok: true as const, value: result };
+}
+
+// ===========================================================================
+// Snapshot exact array descriptor set: ordinary Array prototype, exact length
+// descriptor, indices 0..length-1, no extras/symbols/accessors/undefined.
+// ===========================================================================
+
+function snapshotArrayIndices(raw: unknown): PaarResult<unknown[]> {
+	if (!Array.isArray(raw)) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+	let proto: object | null;
+	try {
+		proto = Object.getPrototypeOf(raw);
+	} catch {
+		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+	}
+	if (proto !== null && proto !== Array.prototype) {
+		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+	}
+
+	let lenDesc: PropertyDescriptor | undefined;
+	try {
+		lenDesc = Object.getOwnPropertyDescriptor(raw, "length");
+	} catch {
+		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+	}
+	if (!lenDesc) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+	if (lenDesc.get !== undefined || lenDesc.set !== undefined) {
+		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+	}
+	const rawLen = lenDesc.value;
+	if (typeof rawLen !== "number" || !Number.isSafeInteger(rawLen) || rawLen < 0) {
+		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+	}
+	if (rawLen === 0) return { ok: false as const, error: { code: PAAR_ERRORS.FILES_EMPTY } };
+	if (rawLen > MAX_FILES) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+
+	let descs: ReturnType<typeof Object.getOwnPropertyDescriptors>;
+	try {
+		descs = Object.getOwnPropertyDescriptors(raw);
+	} catch {
+		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+	}
+	let ownKeys: string[];
+	try {
+		ownKeys = Object.getOwnPropertyNames(raw);
+	} catch {
+		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+	}
+	let symbols: symbol[];
+	try {
+		symbols = Object.getOwnPropertySymbols(raw);
+	} catch {
+		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+	}
+	if (symbols.length > 0) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+
+	// Must have exactly length+1 own names: "length" + indices 0..rawLen-1
+	if (ownKeys.length !== rawLen + 1) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+
+	const indexSet = new Set<string>();
+	for (const key of ownKeys) {
+		if (key === "length") continue;
+		const num = Number(key);
+		if (key !== String(num) || !Number.isSafeInteger(num) || num < 0 || num >= rawLen) {
+			return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+		}
+		if (indexSet.has(key)) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+		indexSet.add(key);
+	}
+	if (indexSet.size !== rawLen) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+
+	const result: unknown[] = [];
+	for (let i = 0; i < rawLen; i++) {
+		const idxDesc = descs[String(i)];
+		if (!idxDesc) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+		if (idxDesc.get !== undefined || idxDesc.set !== undefined) {
+			return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+		}
+		if (!idxDesc.enumerable) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+		if (idxDesc.value === undefined) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+		result.push(idxDesc.value);
 	}
 
 	return { ok: true as const, value: result };
@@ -383,36 +497,7 @@ function rejectAliases(value: unknown, seen: ReadonlySet<object>): PaarErrorCode
 }
 
 // ===========================================================================
-// Deep freeze
-// ===========================================================================
-
-function deepFreeze<T>(obj: T): Readonly<T> {
-	if (obj === null || typeof obj !== "object") return obj;
-	// Skip TypedArrays, ArrayBuffers, and DataViews
-	if (ArrayBuffer.isView(obj) || obj instanceof ArrayBuffer) return obj as unknown as Readonly<T>;
-	const names = Object.getOwnPropertyNames(obj);
-	for (const name of names) {
-		const val = (obj as Record<string, unknown>)[name];
-		if (val !== null && typeof val === "object") deepFreeze(val);
-	}
-	return Object.freeze(obj);
-}
-
-// ===========================================================================
-// Freeze a PaarResult<T> — freezes both success and error containers
-// ===========================================================================
-
-function freezeResult<T>(r: PaarResult<T>): PaarResult<T> {
-	if (r.ok) {
-		const v = r.value;
-		if (typeof v === "object" && v !== null) deepFreeze(v);
-		return Object.freeze({ ok: true as const, value: v }) as PaarResult<T>;
-	}
-	return Object.freeze({ ok: false as const, error: Object.freeze({ code: r.error.code }) }) as PaarResult<T>;
-}
-
-// ===========================================================================
-// Strict-copy a file entry, snapshot via descriptors, no `in`/`value[key]`
+// Strict-copy a file entry — raw reference added to `seen` BEFORE snapshot
 // ===========================================================================
 
 function strictCopyFileEntry(raw: unknown, seen: Set<object>): PaarResult<PaarFileEntry> {
@@ -420,9 +505,9 @@ function strictCopyFileEntry(raw: unknown, seen: Set<object>): PaarResult<PaarFi
 		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILE_ENTRY } };
 	}
 
-	// Alias check
 	const aliasErr = rejectAliases(raw, seen);
 	if (aliasErr) return { ok: false as const, error: { code: aliasErr } };
+	seen.add(raw);
 
 	const expected = new Set(["path", "size", "mode", "sha256", "offset"]);
 	const snap = snapshotOwnData(raw, expected);
@@ -430,11 +515,9 @@ function strictCopyFileEntry(raw: unknown, seen: Set<object>): PaarResult<PaarFi
 
 	const s = snap.value;
 
-	// Validate path
 	const pathCheck = checkFilePath(s.path);
 	if (pathCheck) return { ok: false as const, error: { code: pathCheck } };
 
-	// Validate mode (numeric 0o644 or 0o755)
 	if (typeof s.mode !== "number" || !Number.isSafeInteger(s.mode)) {
 		return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_FILE_MODE } };
 	}
@@ -442,16 +525,14 @@ function strictCopyFileEntry(raw: unknown, seen: Set<object>): PaarResult<PaarFi
 		return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_FILE_MODE } };
 	}
 
-	// Validate size
 	if (!isNonNegativeSafeInt(s.size)) return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_FILE_SIZE } };
 	if ((s.size as number) > MAX_FILE_SIZE)
 		return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_FILE_SIZE } };
 
-	// Validate sha256
-	if (typeof s.sha256 !== "string" || !isHex64(s.sha256))
+	if (typeof s.sha256 !== "string" || !isHex64(s.sha256)) {
 		return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_FILE_HASH } };
+	}
 
-	// Validate offset
 	if (!isNonNegativeSafeInt(s.offset)) return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_FILE_OFFSET } };
 
 	return {
@@ -464,6 +545,30 @@ function strictCopyFileEntry(raw: unknown, seen: Set<object>): PaarResult<PaarFi
 			offset: s.offset as number,
 		}) as PaarFileEntry,
 	};
+}
+
+// ===========================================================================
+// Deep freeze (skips TypedArray views — they cannot be frozen)
+// ===========================================================================
+
+function deepFreeze<T>(obj: T): Readonly<T> {
+	if (obj === null || typeof obj !== "object") return obj;
+	if (ArrayBuffer.isView(obj) || obj instanceof ArrayBuffer) return obj as unknown as Readonly<T>;
+	const names = Object.getOwnPropertyNames(obj);
+	for (const name of names) {
+		const val = (obj as Record<string, unknown>)[name];
+		if (val !== null && typeof val === "object") deepFreeze(val);
+	}
+	return Object.freeze(obj);
+}
+
+function freezeResult<T>(r: PaarResult<T>): PaarResult<T> {
+	if (r.ok) {
+		const v = r.value;
+		if (typeof v === "object" && v !== null) deepFreeze(v);
+		return Object.freeze({ ok: true as const, value: v }) as PaarResult<T>;
+	}
+	return Object.freeze({ ok: false as const, error: Object.freeze({ code: r.error.code }) }) as PaarResult<T>;
 }
 
 // ===========================================================================
@@ -484,7 +589,6 @@ export function encodePaarManifest(input: PaarEncodeInput): PaarResult<PaarEncod
 function encodePaarManifestImpl(input: PaarEncodeInput): PaarResult<PaarEncodeResult> {
 	const seen = new Set<object>();
 
-	// Top-level input must be a plain object or null-prototype object
 	if (typeof input !== "object" || input === null) {
 		return { ok: false as const, error: { code: PAAR_ERRORS.INPUT_NOT_PLAIN } };
 	}
@@ -498,105 +602,79 @@ function encodePaarManifestImpl(input: PaarEncodeInput): PaarResult<PaarEncodeRe
 		return { ok: false as const, error: { code: PAAR_ERRORS.INPUT_NOT_PLAIN } };
 	}
 
-	// Snapshot top-level input via descriptors (no `in`/direct Proxy reads)
-	const inputDescs = Object.getOwnPropertyDescriptors(input);
-	const inputKeys = Object.getOwnPropertyNames(input);
-	const inputSymbols = Object.getOwnPropertySymbols(input);
+	let inputDescs: PropertyDescriptorMap;
+	try {
+		inputDescs = Object.getOwnPropertyDescriptors(input);
+	} catch {
+		return { ok: false as const, error: { code: PAAR_ERRORS.INPUT_NOT_PLAIN } };
+	}
+	let inputKeys: string[];
+	try {
+		inputKeys = Object.getOwnPropertyNames(input);
+	} catch {
+		return { ok: false as const, error: { code: PAAR_ERRORS.INPUT_NOT_PLAIN } };
+	}
+	let inputSymbols: symbol[];
+	try {
+		inputSymbols = Object.getOwnPropertySymbols(input);
+	} catch {
+		return { ok: false as const, error: { code: PAAR_ERRORS.INPUT_NOT_PLAIN } };
+	}
 	if (inputSymbols.length > 0) return { ok: false as const, error: { code: PAAR_ERRORS.INPUT_NOT_PLAIN } };
 
 	const allowedInput = new Set(["sourceCommit", "target", "daemonProtocolVersion", "daemonSchemaRevision", "files"]);
 
-	// Use descriptor `.value` to read — rejects getter traps
 	const inp: Record<string, unknown> = Object.create(null);
 	for (const key of inputKeys) {
 		if (!allowedInput.has(key)) return { ok: false as const, error: { code: PAAR_ERRORS.EXTRA_MANIFEST_FIELD } };
 		const desc = inputDescs[key];
-		if (desc.get !== undefined || desc.set !== undefined)
+		if (desc.get !== undefined || desc.set !== undefined) {
 			return { ok: false as const, error: { code: PAAR_ERRORS.INPUT_NOT_PLAIN } };
+		}
 		if (!desc.enumerable) return { ok: false as const, error: { code: PAAR_ERRORS.INPUT_NOT_PLAIN } };
 		if (desc.value === undefined) return { ok: false as const, error: { code: PAAR_ERRORS.INPUT_NOT_PLAIN } };
 		inp[key] = desc.value;
 	}
-	// Check all required keys present in the fresh snapshot
-	if (!("sourceCommit" in inp)) return { ok: false as const, error: { code: PAAR_ERRORS.MISSING_MANIFEST_FIELD } };
-	if (!("target" in inp)) return { ok: false as const, error: { code: PAAR_ERRORS.MISSING_MANIFEST_FIELD } };
-	if (!("daemonProtocolVersion" in inp))
+	if (
+		inp.sourceCommit === undefined ||
+		inp.target === undefined ||
+		inp.daemonProtocolVersion === undefined ||
+		inp.daemonSchemaRevision === undefined ||
+		inp.files === undefined
+	) {
 		return { ok: false as const, error: { code: PAAR_ERRORS.MISSING_MANIFEST_FIELD } };
-	if (!("daemonSchemaRevision" in inp))
-		return { ok: false as const, error: { code: PAAR_ERRORS.MISSING_MANIFEST_FIELD } };
-	if (!("files" in inp)) return { ok: false as const, error: { code: PAAR_ERRORS.MISSING_MANIFEST_FIELD } };
+	}
 
-	// sourceCommit
 	if (typeof inp.sourceCommit !== "string" || !isHex40(inp.sourceCommit)) {
 		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_SOURCE_COMMIT } };
 	}
-
-	// target
 	if (inp.target !== "linux-x64" && inp.target !== "linux-arm64") {
 		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_TARGET } };
 	}
-
-	// daemonProtocolVersion
 	if (!isPositiveSafeInt(inp.daemonProtocolVersion)) {
 		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_DAEMON_PROTOCOL_VERSION } };
 	}
-
-	// daemonSchemaRevision
 	if (!isNonNegativeSafeInt(inp.daemonSchemaRevision)) {
 		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_DAEMON_SCHEMA_REVISION } };
 	}
 
-	// files array — check via own-data (not `in`)
-	const rawFiles = inp.files;
-	if (!Array.isArray(rawFiles)) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-	if (rawFiles.length === 0) return { ok: false as const, error: { code: PAAR_ERRORS.FILES_EMPTY } };
-	if (rawFiles.length > MAX_FILES) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-	for (let i = 0; i < rawFiles.length; i++) {
-		if (!(i in rawFiles)) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-	}
+	// files array — snapshot exact descriptor set
+	const arrResult = snapshotArrayIndices(inp.files);
+	if (!arrResult.ok) return arrResult;
+	const rawFiles = arrResult.value;
 
-	// Check the array object itself has no extra own properties, symbols, non-plain prototype
-	const arrProto = Object.getPrototypeOf(rawFiles);
-	if (arrProto !== null && arrProto !== Array.prototype) {
-		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-	}
-	const arrDescs = Object.getOwnPropertyDescriptors(rawFiles);
-	const arrOwnKeys = Object.getOwnPropertyNames(rawFiles);
-	const arrSymbols = Object.getOwnPropertySymbols(rawFiles);
-	if (arrSymbols.length > 0) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-	for (const key of arrOwnKeys) {
-		if (key === "length") continue;
-		// Reject any non-index own key (extra property on the array object)
-		if (!/^[0-9]+$/.test(key)) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-		const desc = arrDescs[key];
-		if (desc.get !== undefined || desc.set !== undefined)
-			return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-		if (!desc.enumerable) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-		if (desc.value === undefined) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-	}
-
-	// Strict-copy each file entry
 	const entries: PaarFileEntry[] = [];
 	const pathSet = new Set<string>();
 
 	for (let i = 0; i < rawFiles.length; i++) {
-		// Access by indexed subscript (not rawFiles[i] due to Proxy)
-		const idxDesc = Object.getOwnPropertyDescriptor(rawFiles, String(i));
-		if (!idxDesc) return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-		if (idxDesc.get !== undefined || idxDesc.set !== undefined) {
-			return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILE_ENTRY } };
-		}
-		const rawEntry = idxDesc.value;
+		const rawEntry = rawFiles[i];
 		const feResult = strictCopyFileEntry(rawEntry, seen);
 		if (!feResult.ok) return feResult;
 		const fe = feResult.value;
-		seen.add(fe);
 
-		// NFC check
-		const nfcPath = nfc(fe.path);
+		const nfcPath = fe.path.normalize("NFC");
 		if (nfcPath !== fe.path) return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_FILE_PATH } };
 
-		// Duplicate path check
 		if (pathSet.has(fe.path)) return { ok: false as const, error: { code: PAAR_ERRORS.DUPLICATE_FILE_PATH } };
 		pathSet.add(fe.path);
 
@@ -619,11 +697,9 @@ function encodePaarManifestImpl(input: PaarEncodeInput): PaarResult<PaarEncodeRe
 	const payloadSize = runningOff;
 	if (payloadSize > MAX_TOTAL_PAYLOAD) return { ok: false as const, error: { code: PAAR_ERRORS.PAYLOAD_OVERFLOW } };
 
-	// filesDigest
 	const filesDigestStr = encodeFilesArray(entries);
 	const filesDigest = createHash("sha256").update(filesDigestStr, "utf-8").digest("hex");
 
-	// Protocol info
 	const protocol: PaarProtocolInfo = Object.freeze({
 		name: REMOTE_HOST_PROTOCOL_NAME,
 		version: REMOTE_HOST_PROTOCOL_VERSION,
@@ -631,11 +707,9 @@ function encodePaarManifestImpl(input: PaarEncodeInput): PaarResult<PaarEncodeRe
 		daemonSchemaRevision: inp.daemonSchemaRevision as number,
 	});
 
-	// buildId
 	const buildIdStr = `{"sourceCommit":${jsonStr(inp.sourceCommit as string)},"target":${jsonStr(inp.target as string)},"protocol":${encodeProtocolJson(protocol)},"filesDigest":${jsonStr(filesDigest)}}`;
 	const buildId = createHash("sha256").update(buildIdStr, "utf-8").digest("hex");
 
-	// Build manifest
 	const manifest: PaarManifest = Object.freeze({
 		format: "prime-agent-artifact",
 		version: 1 as const,
@@ -647,7 +721,6 @@ function encodePaarManifestImpl(input: PaarEncodeInput): PaarResult<PaarEncodeRe
 		files: Object.freeze(entries),
 	});
 
-	// Encode to canonical JSON
 	const manifestJson = encodeManifestJson(manifest);
 	const manifestBytes = utf8Encode(manifestJson);
 	if (manifestBytes.length > MAX_MANIFEST_BYTES) {
@@ -655,7 +728,6 @@ function encodePaarManifestImpl(input: PaarEncodeInput): PaarResult<PaarEncodeRe
 		return { ok: false as const, error: { code: PAAR_ERRORS.MANIFEST_TOO_LARGE } };
 	}
 
-	// Build header
 	const headerSize = HEADER_PREFIX + manifestBytes.length;
 	const header = new Uint8Array(headerSize);
 	header[0] = MAGIC0;
@@ -663,10 +735,7 @@ function encodePaarManifestImpl(input: PaarEncodeInput): PaarResult<PaarEncodeRe
 	header[2] = MAGIC2;
 	header[3] = MAGIC3;
 	header[4] = MAGIC4;
-	header[5] = (manifestBytes.length >> 24) & 0xff;
-	header[6] = (manifestBytes.length >> 16) & 0xff;
-	header[7] = (manifestBytes.length >> 8) & 0xff;
-	header[8] = manifestBytes.length & 0xff;
+	writeUint32BE(header, 5, manifestBytes.length);
 	header.set(manifestBytes, HEADER_PREFIX);
 	manifestBytes.fill(0);
 
@@ -693,16 +762,16 @@ function encodePaarManifestImpl(input: PaarEncodeInput): PaarResult<PaarEncodeRe
 // ===========================================================================
 
 export function decodePaarManifestHeader(bytes: Uint8Array, totalArchiveSize: number): PaarResult<PaarDecodeResult> {
-	// Fixed-map hostile byte views: a Proxy/subclass that throws while being
-	// read must not be misclassified as INVALID_UTF8 (that code is reserved
-	// for genuine byte content that fails UTF-8 validation).
-	let inputOk = false;
+	// Enforce exact non-shared Uint8Array — reject Buffer, subclass, shared
+	// array buffer, detached buffer, and non-zero byteOffset views. Any throw
+	// from reading the view (hostile Proxy/subclass traps) maps to INVALID_INPUT.
+	let genuine = false;
 	try {
-		inputOk = bytes instanceof Uint8Array && Number.isSafeInteger(bytes.length) && bytes.length >= 0;
+		genuine = isGenuineUint8Array(bytes);
 	} catch {
-		inputOk = false;
+		genuine = false;
 	}
-	if (!inputOk) {
+	if (!genuine) {
 		return Object.freeze({
 			ok: false as const,
 			error: Object.freeze({ code: PAAR_ERRORS.INVALID_INPUT }),
@@ -711,8 +780,6 @@ export function decodePaarManifestHeader(bytes: Uint8Array, totalArchiveSize: nu
 	try {
 		return freezeResult(decodePaarManifestHeaderImpl(bytes, totalArchiveSize));
 	} catch {
-		// Hostile Proxy/subclass traps threw during decode — fixed-map, do not
-		// misclassify as INVALID_UTF8.
 		return Object.freeze({
 			ok: false as const,
 			error: Object.freeze({ code: PAAR_ERRORS.INVALID_INPUT }),
@@ -726,12 +793,16 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 		return { ok: false as const, error: { code: PAAR_ERRORS.ARCHIVE_TOO_LARGE } };
 	}
 
+	// Claimed total archive must not exceed supplied bytes
+	if (bytes.byteLength > totalArchiveSize) {
+		return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_INPUT } };
+	}
+
 	// must at least have magic + length
-	if (bytes.length < HEADER_PREFIX) {
+	if (bytes.byteLength < HEADER_PREFIX) {
 		return { ok: false as const, error: { code: PAAR_ERRORS.SHORT_HEADER } };
 	}
 
-	// magic
 	if (
 		bytes[0] !== MAGIC0 ||
 		bytes[1] !== MAGIC1 ||
@@ -742,21 +813,18 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_MAGIC } };
 	}
 
-	// manifest length via DataView
 	const manifestLen = readUint32BE(bytes, 5);
 	if (manifestLen > MAX_MANIFEST_BYTES) {
 		return { ok: false as const, error: { code: PAAR_ERRORS.MANIFEST_TOO_LARGE } };
 	}
 
 	const headerSize = HEADER_PREFIX + manifestLen;
-	if (bytes.length < headerSize) {
+	if (bytes.byteLength < headerSize) {
 		return { ok: false as const, error: { code: PAAR_ERRORS.MANIFEST_TRUNCATED } };
 	}
 
-	// Extract manifest bytes (subarray — does not copy)
 	const manifestSlice = bytes.subarray(HEADER_PREFIX, HEADER_PREFIX + manifestLen);
 
-	// Validate UTF-8 with fatal TextDecoder
 	const manifestStr = utf8Decode(manifestSlice);
 	if (manifestStr === null) {
 		return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_UTF8 } };
@@ -764,18 +832,17 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 
 	// Verify no replacement chars: roundtrip must produce same bytes
 	const reencoded = utf8Encode(manifestStr);
-	if (reencoded.length !== manifestSlice.length) {
+	if (reencoded.byteLength !== manifestSlice.byteLength) {
 		reencoded.fill(0);
 		return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_UTF8 } };
 	}
-	for (let i = 0; i < manifestSlice.length; i++) {
+	for (let i = 0; i < manifestSlice.byteLength; i++) {
 		if (manifestSlice[i] !== reencoded[i]) {
 			reencoded.fill(0);
 			return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_UTF8 } };
 		}
 	}
 
-	// Parse JSON
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(manifestStr);
@@ -784,8 +851,6 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 		return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_JSON } };
 	}
 
-	// Must be a plain object — reject class instances, Proxy, etc.
-	// snapshotOwnData does this check and returns INPUT_NOT_PLAIN for bad ones
 	const manifestObjResult = snapshotOwnData(
 		parsed,
 		new Set(["format", "version", "target", "sourceCommit", "protocol", "filesDigest", "buildId", "files"]),
@@ -796,31 +861,23 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 	}
 	const mobj = manifestObjResult.value;
 
-	// Validate format
 	if (mobj.format !== "prime-agent-artifact") {
 		reencoded.fill(0);
 		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FORMAT } };
 	}
-
-	// Version
 	if (mobj.version !== 1) {
 		reencoded.fill(0);
 		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_VERSION } };
 	}
-
-	// Target
 	if (mobj.target !== "linux-x64" && mobj.target !== "linux-arm64") {
 		reencoded.fill(0);
 		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_TARGET } };
 	}
-
-	// sourceCommit
 	if (typeof mobj.sourceCommit !== "string" || !isHex40(mobj.sourceCommit)) {
 		reencoded.fill(0);
 		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_SOURCE_COMMIT } };
 	}
 
-	// Protocol
 	const protoResult = snapshotOwnData(
 		mobj.protocol,
 		new Set(["name", "version", "daemonProtocolVersion", "daemonSchemaRevision"]),
@@ -848,7 +905,6 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_DAEMON_SCHEMA_REVISION } };
 	}
 
-	// filesDigest / buildId format
 	if (typeof mobj.filesDigest !== "string" || !isHex64(mobj.filesDigest)) {
 		reencoded.fill(0);
 		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES_DIGEST } };
@@ -858,91 +914,30 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_BUILD_ID } };
 	}
 
-	// Files array
-	const rawFiles = mobj.files;
-	if (!Array.isArray(rawFiles)) {
+	// Files array — snapshot exact descriptor set
+	const rawFilesResult = snapshotArrayIndices(mobj.files);
+	if (!rawFilesResult.ok) {
 		reencoded.fill(0);
-		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
+		return rawFilesResult;
 	}
-	if (rawFiles.length === 0) {
-		reencoded.fill(0);
-		return { ok: false as const, error: { code: PAAR_ERRORS.FILES_EMPTY } };
-	}
-	if (rawFiles.length > MAX_FILES) {
-		reencoded.fill(0);
-		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-	}
-	for (let i = 0; i < rawFiles.length; i++) {
-		if (!(i in rawFiles)) {
-			reencoded.fill(0);
-			return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-		}
-	}
+	const rawFiles = rawFilesResult.value;
 
-	// Check array prototype/own-properties
-	const arrProto = Object.getPrototypeOf(rawFiles);
-	if (arrProto !== null && arrProto !== Array.prototype) {
-		reencoded.fill(0);
-		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-	}
-	const arrDescs = Object.getOwnPropertyDescriptors(rawFiles);
-	const arrOwnKeys = Object.getOwnPropertyNames(rawFiles);
-	const arrSymbols = Object.getOwnPropertySymbols(rawFiles);
-	if (arrSymbols.length > 0) {
-		reencoded.fill(0);
-		return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-	}
-	for (const key of arrOwnKeys) {
-		if (key === "length") continue;
-		if (!/^[0-9]+$/.test(key)) {
-			reencoded.fill(0);
-			return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-		}
-		const desc = arrDescs[key];
-		if (desc.get !== undefined || desc.set !== undefined) {
-			reencoded.fill(0);
-			return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-		}
-		if (!desc.enumerable) {
-			reencoded.fill(0);
-			return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-		}
-		if (desc.value === undefined) {
-			reencoded.fill(0);
-			return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-		}
-	}
-
-	// Parse each file entry via descriptor snapshots
 	const parsedFiles: PaarFileEntry[] = [];
 	const pathSet = new Set<string>();
 
 	for (let i = 0; i < rawFiles.length; i++) {
-		const idxDesc = Object.getOwnPropertyDescriptor(rawFiles, String(i));
-		if (!idxDesc) {
-			reencoded.fill(0);
-			return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILES } };
-		}
-		if (idxDesc.get !== undefined || idxDesc.set !== undefined) {
-			reencoded.fill(0);
-			return { ok: false as const, error: { code: PAAR_ERRORS.BAD_FILE_ENTRY } };
-		}
-
-		const feResult = snapshotOwnData(idxDesc.value, new Set(["path", "size", "mode", "sha256", "offset"]));
+		const feResult = snapshotOwnData(rawFiles[i], new Set(["path", "size", "mode", "sha256", "offset"]));
 		if (!feResult.ok) {
 			reencoded.fill(0);
 			return feResult;
 		}
 		const fe = feResult.value;
 
-		// Validate path
 		const pathCheck = checkFilePath(fe.path);
 		if (pathCheck) {
 			reencoded.fill(0);
 			return { ok: false as const, error: { code: pathCheck } };
 		}
-
-		// Validate mode
 		if (typeof fe.mode !== "number" || !Number.isSafeInteger(fe.mode)) {
 			reencoded.fill(0);
 			return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_FILE_MODE } };
@@ -951,20 +946,14 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 			reencoded.fill(0);
 			return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_FILE_MODE } };
 		}
-
-		// Validate size
 		if (!isNonNegativeSafeInt(fe.size) || (fe.size as number) > MAX_FILE_SIZE) {
 			reencoded.fill(0);
 			return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_FILE_SIZE } };
 		}
-
-		// Validate sha256
 		if (typeof fe.sha256 !== "string" || !isHex64(fe.sha256)) {
 			reencoded.fill(0);
 			return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_FILE_HASH } };
 		}
-
-		// Validate offset
 		if (!isNonNegativeSafeInt(fe.offset)) {
 			reencoded.fill(0);
 			return { ok: false as const, error: { code: PAAR_ERRORS.INVALID_FILE_OFFSET } };
@@ -986,7 +975,6 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 		});
 	}
 
-	// UTF-8 byte order
 	for (let i = 1; i < parsedFiles.length; i++) {
 		const bufA = Buffer.from(parsedFiles[i - 1].path, "utf-8");
 		const bufB = Buffer.from(parsedFiles[i].path, "utf-8");
@@ -996,7 +984,6 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 		}
 	}
 
-	// Offsets contiguous from 0
 	let expectedOff = 0;
 	for (const f of parsedFiles) {
 		if (f.offset !== expectedOff) {
@@ -1011,13 +998,11 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 		return { ok: false as const, error: { code: PAAR_ERRORS.PAYLOAD_OVERFLOW } };
 	}
 
-	// totalArchiveSize == headerSize + payloadSize
 	if (totalArchiveSize !== headerSize + payloadSize) {
 		reencoded.fill(0);
 		return { ok: false as const, error: { code: PAAR_ERRORS.TOTAL_ARCHIVE_MISMATCH } };
 	}
 
-	// Recompute filesDigest
 	const computedFDStr = encodeFilesArray(parsedFiles);
 	const computedFD = createHash("sha256").update(computedFDStr, "utf-8").digest("hex");
 	if (computedFD !== mobj.filesDigest) {
@@ -1025,7 +1010,6 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 		return { ok: false as const, error: { code: PAAR_ERRORS.FILES_DIGEST_MISMATCH } };
 	}
 
-	// Protocol info for buildId
 	const protocolInfo: PaarProtocolInfo = Object.freeze({
 		name: REMOTE_HOST_PROTOCOL_NAME,
 		version: REMOTE_HOST_PROTOCOL_VERSION,
@@ -1033,7 +1017,6 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 		daemonSchemaRevision: proto.daemonSchemaRevision as number,
 	});
 
-	// Recompute buildId
 	const computedBIDStr = `{"sourceCommit":${jsonStr(mobj.sourceCommit as string)},"target":${jsonStr(mobj.target as string)},"protocol":${encodeProtocolJson(protocolInfo)},"filesDigest":${jsonStr(computedFD)}}`;
 	const computedBID = createHash("sha256").update(computedBIDStr, "utf-8").digest("hex");
 	if (computedBID !== mobj.buildId) {
@@ -1041,7 +1024,6 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 		return { ok: false as const, error: { code: PAAR_ERRORS.BUILD_ID_MISMATCH } };
 	}
 
-	// Build fresh manifest
 	const freshManifest: PaarManifest = {
 		format: "prime-agent-artifact",
 		version: 1,
@@ -1053,10 +1035,10 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 		files: parsedFiles,
 	};
 
-	// Canonical encoding check — raw manifest bytes must constant-time equal canonical re-encoding
-	// This catches whitespace, key reorder, duplicate keys, escaped equivalents, -0, trailing bytes, etc.
+	// Canonical raw-byte equality — catches whitespace, key reorder, duplicate
+	// keys, escaped equivalents, -0, case, and trailing bytes.
 	const reCanon = utf8Encode(encodeManifestJson(freshManifest));
-	if (reCanon.length !== manifestSlice.length) {
+	if (reCanon.byteLength !== manifestSlice.byteLength) {
 		reCanon.fill(0);
 		reencoded.fill(0);
 		return { ok: false as const, error: { code: PAAR_ERRORS.NON_CANONICAL } };
@@ -1075,7 +1057,6 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 	reCanon.fill(0);
 	reencoded.fill(0);
 
-	// Freeze the result DTOs
 	const frozenFileEntries = Object.freeze(parsedFiles.map(deepFreeze));
 	const frozenManifest = deepFreeze({
 		...freshManifest,
