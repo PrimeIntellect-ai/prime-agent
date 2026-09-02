@@ -788,6 +788,7 @@ export interface AvoRunState {
 	status: AvoRunStatus;
 	delivery: AvoDeliveryState;
 	candidates: AvoCandidate[];
+	workingAttempts?: AvoWorkingAttempt[];
 	evaluations: AvoEvaluationReceipt[];
 	experiments: AvoExperiment[];
 	trials: AvoTrial[];
