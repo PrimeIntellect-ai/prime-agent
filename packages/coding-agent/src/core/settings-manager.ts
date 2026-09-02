@@ -71,6 +71,15 @@ export interface BundledSkillsSettings {
 	websearch?: boolean; // default: true
 }
 
+export interface WorktreeSettings {
+	/** Parent directory for new worktrees; default `<repoRoot>/.worktrees`. */
+	dir?: string;
+	/** Script path (relative to the repo root) or shell command run in a new worktree. */
+	setupScript?: string;
+	/** Timeout for the setup script; default 600000 (10 minutes). */
+	setupTimeoutMs?: number;
+}
+
 export interface WarningSettings {
 	anthropicExtraUsage?: boolean; // default: true
 }
@@ -172,6 +181,7 @@ export interface Settings {
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
+	worktree?: WorktreeSettings; // Agents-view git worktree creation
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 }
 
@@ -1114,6 +1124,11 @@ export class SettingsManager {
 
 	getThinkingBudgets(): ThinkingBudgetsSettings | undefined {
 		return this.settings.thinkingBudgets;
+	}
+
+	/** Raw worktree settings; env overrides are applied by the worktree helpers. */
+	getWorktreeSettings(): WorktreeSettings {
+		return { ...this.settings.worktree };
 	}
 
 	getShowImages(): boolean {

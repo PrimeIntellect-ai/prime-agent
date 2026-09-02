@@ -21,7 +21,7 @@ export interface CreateGitWorktreeOptions {
 	cwd: string;
 	/** User-supplied worktree and branch name; sanitized into a single path segment. */
 	name: string;
-	/** Overrides the parent directory of the worktree; defaults to the env var or `<repoRoot>/.worktrees`. */
+	/** `worktree.dir` setting; the env var still wins over it. */
 	worktreeDir?: string;
 	runGit?: GitCommandRunner;
 	pathExists?: (path: string) => boolean;
@@ -79,12 +79,12 @@ export async function resolveGitRepoRoot(cwd: string, runGit: GitCommandRunner =
 }
 
 /**
- * Resolution order: explicit `worktreeDir`, then `PRIME_AGENT_WORKTREE_DIR`,
- * then `<repoRoot>/.worktrees`. A relative override resolves against the repo root.
+ * Resolution order: `PRIME_AGENT_WORKTREE_DIR`, then the `worktree.dir` setting
+ * passed as `worktreeDir`, then `<repoRoot>/.worktrees`. A relative value
+ * resolves against the repo root.
  */
 export function resolveWorktreeParentDir(repoRoot: string, worktreeDir?: string): string {
-	const override = worktreeDir ?? process.env[WORKTREE_DIR_ENV_VAR];
-	const trimmed = override?.trim();
+	const trimmed = process.env[WORKTREE_DIR_ENV_VAR]?.trim() || worktreeDir?.trim();
 	if (!trimmed) {
 		return join(repoRoot, DEFAULT_WORKTREE_DIR_NAME);
 	}

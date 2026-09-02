@@ -1,1 +1,1 @@
-- Added `alt+w` in the agents view to create a git worktree and start a session in it, with the location overridable via `PRIME_AGENT_WORKTREE_DIR`.
+- Added `alt+w` in the agents view to create a git worktree and start a session in it, with the location and an optional setup script configurable through the `worktree` settings section or the `PRIME_AGENT_WORKTREE_*` environment variables.

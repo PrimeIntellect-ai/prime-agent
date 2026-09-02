@@ -13,7 +13,14 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { APP_TITLE, appendRotatingLog, getAgentDir, getClientErrorLogPath, VERSION } from "../../config.js";
+import {
+	APP_TITLE,
+	appendRotatingLog,
+	getAgentDir,
+	getClientErrorLogPath,
+	getWorktreeSetupLogPath,
+	VERSION,
+} from "../../config.js";
 import type { AgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import { KeybindingsManager } from "../../core/keybindings.js";
 import { SessionManager } from "../../core/session-manager.js";
@@ -27,6 +34,12 @@ import {
 import { createGitWorktree } from "../../utils/git-worktree.js";
 import { canonicalizePath } from "../../utils/paths.js";
 import { ensureTool } from "../../utils/tools-manager.js";
+import {
+	resolveWorktreeSetupScript,
+	resolveWorktreeSetupTimeoutMs,
+	runWorktreeSetup,
+	WorktreeSetupError,
+} from "../../utils/worktree-setup.js";
 import { DaemonAgentConnection } from "../agent-connection/daemon-agent-connection.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/types.js";
 import { DaemonClient, getDaemonSocketCloseReason } from "../daemon/daemon-client.js";
@@ -1667,16 +1680,43 @@ export class AgentsViewMode implements Component, Focusable {
 		if (this.creatingNewSession || this.stopped) {
 			return false;
 		}
+		const settings = this.options.uiServices.settingsManager.getWorktreeSettings();
 		this.setStatusMessage(`Creating worktree ${name}...`);
 		try {
-			const worktree = await createGitWorktree({ cwd: this.getSavedSessionCwd(), name });
+			const worktree = await createGitWorktree({
+				cwd: this.getSavedSessionCwd(),
+				name,
+				worktreeDir: settings.dir,
+			});
 			if (this.stopped) {
 				return false;
 			}
+			const script = resolveWorktreeSetupScript(settings.setupScript);
+			if (script) {
+				this.setStatusMessage("Running worktree setup...");
+				await runWorktreeSetup({
+					script,
+					worktreePath: worktree.path,
+					branch: worktree.branch,
+					repoRoot: worktree.repoRoot,
+					timeoutMs: resolveWorktreeSetupTimeoutMs(settings.setupTimeoutMs),
+					shellPath: this.options.uiServices.settingsManager.getShellPath(),
+					logPath: getWorktreeSetupLogPath(worktree.branch),
+				});
+				if (this.stopped) {
+					return false;
+				}
+			}
 			return await this.createNewSession({ ...this.options.config, cwd: worktree.path });
 		} catch (error) {
+			// A failed setup script keeps the worktree; only the session is skipped.
 			if (!this.stopped) {
-				this.setStatusMessage(formatError("Failed to create worktree", error));
+				this.setStatusMessage(
+					formatError(
+						error instanceof WorktreeSetupError ? "Failed to run worktree setup" : "Failed to create worktree",
+						error,
+					),
+				);
 			}
 			return false;
 		}

@@ -196,6 +196,62 @@ When a provider requests a retry delay longer than `retry.provider.maxRetryDelay
 
 Normally the package manager's global modules location is queried using `root -g`. As a special case, if the first element of `npmCommand` is `"bun"`, the modules location will instead be queried with `pm bin -g`.
 
+### Git Worktrees
+
+Used by the agents view action that creates a git worktree and starts a session in it
+(`app.agents.newWorktree`, default `alt+w`).
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `worktree.dir` | string | `<repoRoot>/.worktrees` | Parent directory for new worktrees; a relative value resolves against the repository root |
+| `worktree.setupScript` | string | - | Script path or shell command run in the new worktree before the session starts |
+| `worktree.setupTimeoutMs` | number | `600000` | Timeout for the setup script (10 minutes) |
+
+```json
+{
+  "worktree": {
+    "dir": "~/worktrees",
+    "setupScript": "scripts/setup-worktree.sh",
+    "setupTimeoutMs": 600000
+  }
+}
+```
+
+Environment variables override the settings for one run:
+
+| Variable | Overrides |
+|----------|-----------|
+| `PRIME_AGENT_WORKTREE_DIR` | `worktree.dir` |
+| `PRIME_AGENT_WORKTREE_SETUP` | `worktree.setupScript` |
+| `PRIME_AGENT_WORKTREE_SETUP_TIMEOUT_MS` | `worktree.setupTimeoutMs` |
+
+Resolution order for each value: environment variable, then the setting, then the default.
+
+`setupScript` runs through the configured shell (`shellPath`) with the new worktree as the
+working directory. A value that names an existing file runs as that script; a relative path
+resolves against the repository root. Any other value runs verbatim as a shell command.
+These variables are exported to the script:
+
+| Variable | Value |
+|----------|-------|
+| `PRIME_AGENT_WORKTREE_PATH` | Absolute path of the new worktree |
+| `PRIME_AGENT_WORKTREE_BRANCH` | Branch checked out in the worktree |
+| `PRIME_AGENT_WORKTREE_REPO_ROOT` | Repository root the worktree was created from |
+
+Example script that copies `.env` from the main worktree and picks a free port:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+cp "$PRIME_AGENT_WORKTREE_REPO_ROOT/.env" "$PRIME_AGENT_WORKTREE_PATH/.env"
+port=$(node -e 'const s=require("net").createServer();s.listen(0,()=>{console.log(s.address().port);s.close()})')
+echo "PORT=$port" >> "$PRIME_AGENT_WORKTREE_PATH/.env"
+```
+
+Full stdout and stderr go to `~/.prime/agent/logs/worktree-setup-<branch>.log`. On a
+non-zero exit or a timeout, the agents view shows the last output lines and the log path,
+keeps the created worktree, and does not start the session.
+
 ### Daemon
 
 | Setting | Type | Default | Description |

@@ -129,12 +129,16 @@ one path segment and used as the branch name. Confirming runs `git worktree add`
 attaches an existing branch instead of creating one. The worktree path resolves in this
 order:
 
-1. `$PRIME_AGENT_WORKTREE_DIR/<name>` when that environment variable is set (a relative
-   value resolves against the repository root); then
-2. `<repoRoot>/.worktrees/<name>`.
+1. `$PRIME_AGENT_WORKTREE_DIR/<name>` when that environment variable is set;
+2. `<worktree.dir>/<name>` from settings; then
+3. `<repoRoot>/.worktrees/<name>`.
 
-An existing worktree at that path is reused. The new session starts with the worktree as
-its working directory.
+A relative directory value resolves against the repository root. An existing worktree at
+that path is reused.
+
+An optional setup script runs in the new worktree before the session starts. See
+[Settings](settings.md#git-worktrees). The new session starts with the worktree as its
+working directory.
 
 ### Models and Thinking
 

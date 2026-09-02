@@ -545,6 +545,11 @@ export function getClientErrorLogPath(): string {
 	return join(getLogsDir(), "client-errors.log");
 }
 
+/** Log file capturing the output of one worktree setup script run. */
+export function getWorktreeSetupLogPath(branch: string): string {
+	return join(getLogsDir(), `worktree-setup-${branch.replace(/[^A-Za-z0-9._-]+/g, "-")}.log`);
+}
+
 export function getAgentTracesLogPath(): string {
 	return join(getLogsDir(), "agent-traces.log");
 }

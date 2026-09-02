@@ -1,9 +1,10 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setKeybindings } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import type { WorktreeSettings } from "../src/core/settings-manager.js";
 import { AgentsViewMode } from "../src/modes/agents-view/agents-view-mode.js";
 import {
 	createGitWorktree,
@@ -13,6 +14,15 @@ import {
 	runGitCommand,
 	sanitizeWorktreeName,
 } from "../src/utils/git-worktree.js";
+import {
+	buildWorktreeSetupCommand,
+	DEFAULT_WORKTREE_SETUP_TIMEOUT_MS,
+	resolveWorktreeSetupScript,
+	resolveWorktreeSetupTimeoutMs,
+	runWorktreeSetup,
+	type WorktreeSetupCommand,
+	WorktreeSetupError,
+} from "../src/utils/worktree-setup.js";
 
 const keybindings = new KeybindingsManager();
 
@@ -25,6 +35,13 @@ function invoke(method: string, self: object, ...args: unknown[]): unknown {
 // Raw sequences for the defaults asserted in "binds the worktree prompt to alt+w".
 const NEW_WORKTREE_KEY = "\x1bw";
 const CANCEL_KEY = "\x1b";
+
+async function initRepo(repoRoot: string): Promise<void> {
+	await runGitCommand(["init", "-b", "main"], repoRoot);
+	await runGitCommand(["config", "user.email", "test@example.com"], repoRoot);
+	await runGitCommand(["config", "user.name", "test"], repoRoot);
+	await runGitCommand(["commit", "--allow-empty", "-m", "init"], repoRoot);
+}
 
 function ok(stdout = ""): GitCommandResult {
 	return { stdout, stderr: "", exitCode: 0 };
@@ -55,6 +72,13 @@ function createEditorStub(): {
 	return editor;
 }
 
+function createSettingsStub(worktree: WorktreeSettings = {}): {
+	getWorktreeSettings: () => WorktreeSettings;
+	getShellPath: () => string | undefined;
+} {
+	return { getWorktreeSettings: () => worktree, getShellPath: () => undefined };
+}
+
 function createViewStub(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	const editor = createEditorStub();
 	const self: Record<string, unknown> = {
@@ -71,7 +95,10 @@ function createViewStub(overrides: Record<string, unknown> = {}): Record<string,
 		actionModeSearchQuery: undefined,
 		pendingDeleteAgent: undefined,
 		pendingKillSubagent: undefined,
-		options: { config: { cwd: "/repo" }, uiServices: { getInitialCwd: () => "/repo" } },
+		options: {
+			config: { cwd: "/repo" },
+			uiServices: { getInitialCwd: () => "/repo", settingsManager: createSettingsStub() },
+		},
 		ui: { requestRender: vi.fn() },
 		setStatusMessage: vi.fn(),
 		clearStickyStatusMessage: vi.fn(),
@@ -104,7 +131,11 @@ function createViewStub(overrides: Record<string, unknown> = {}): Record<string,
 }
 
 // A developer-set override must not change the expected default locations.
-beforeEach(() => vi.stubEnv("PRIME_AGENT_WORKTREE_DIR", ""));
+beforeEach(() => {
+	vi.stubEnv("PRIME_AGENT_WORKTREE_DIR", "");
+	vi.stubEnv("PRIME_AGENT_WORKTREE_SETUP", "");
+	vi.stubEnv("PRIME_AGENT_WORKTREE_SETUP_TIMEOUT_MS", "");
+});
 afterEach(() => vi.unstubAllEnvs());
 
 describe("git worktree helper", () => {
@@ -207,6 +238,95 @@ describe("git worktree helper", () => {
 	});
 });
 
+describe("worktree setup script", () => {
+	it("prefers the env override over the configured script", () => {
+		expect(resolveWorktreeSetupScript("scripts/setup.sh")).toBe("scripts/setup.sh");
+		expect(resolveWorktreeSetupScript(undefined)).toBeUndefined();
+		vi.stubEnv("PRIME_AGENT_WORKTREE_SETUP", "make bootstrap");
+		expect(resolveWorktreeSetupScript("scripts/setup.sh")).toBe("make bootstrap");
+	});
+
+	it("resolves the timeout from env, settings, then the default", () => {
+		expect(resolveWorktreeSetupTimeoutMs(undefined)).toBe(DEFAULT_WORKTREE_SETUP_TIMEOUT_MS);
+		expect(resolveWorktreeSetupTimeoutMs(1000)).toBe(1000);
+		vi.stubEnv("PRIME_AGENT_WORKTREE_SETUP_TIMEOUT_MS", "2500");
+		expect(resolveWorktreeSetupTimeoutMs(1000)).toBe(2500);
+	});
+
+	it("runs an existing file as a script and anything else as a shell command", () => {
+		const exists = (path: string) => path === join("/repo", "scripts", "setup.sh");
+		expect(buildWorktreeSetupCommand("scripts/setup.sh", "/repo", exists)).toBe(
+			`"${join("/repo", "scripts", "setup.sh")}"`,
+		);
+		expect(buildWorktreeSetupCommand("cp ../.env .env", "/repo", exists)).toBe("cp ../.env .env");
+	});
+
+	it("runs the script in the worktree with the worktree env exported", async () => {
+		const seen: WorktreeSetupCommand[] = [];
+		const written: { path: string; contents: string }[] = [];
+		const result = await runWorktreeSetup({
+			script: "setup",
+			worktreePath: "/repo/.worktrees/feature",
+			branch: "feature",
+			repoRoot: "/repo",
+			logPath: "/logs/worktree-setup-feature.log",
+			fileExists: () => false,
+			writeLog: (path, contents) => written.push({ path, contents }),
+			runSetup: async (command) => {
+				seen.push(command);
+				return { stdout: "ready\n", stderr: "", exitCode: 0, timedOut: false };
+			},
+		});
+
+		expect(seen[0]?.cwd).toBe("/repo/.worktrees/feature");
+		expect(seen[0]?.command).toBe("setup");
+		expect(seen[0]?.env.PRIME_AGENT_WORKTREE_PATH).toBe("/repo/.worktrees/feature");
+		expect(seen[0]?.env.PRIME_AGENT_WORKTREE_BRANCH).toBe("feature");
+		expect(seen[0]?.env.PRIME_AGENT_WORKTREE_REPO_ROOT).toBe("/repo");
+		expect(seen[0]?.timeoutMs).toBe(DEFAULT_WORKTREE_SETUP_TIMEOUT_MS);
+		expect(written[0]?.path).toBe("/logs/worktree-setup-feature.log");
+		expect(written[0]?.contents).toContain("ready");
+		expect(result.logPath).toBe("/logs/worktree-setup-feature.log");
+	});
+
+	it("reports the exit code, the last stderr lines, and the log path", async () => {
+		const error = await runWorktreeSetup({
+			script: "setup",
+			worktreePath: "/worktree",
+			branch: "feature",
+			repoRoot: "/repo",
+			logPath: "/logs/setup.log",
+			fileExists: () => false,
+			writeLog: () => undefined,
+			runSetup: async () => ({ stdout: "", stderr: "line1\nboom: no free port\n", exitCode: 3, timedOut: false }),
+		}).catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(WorktreeSetupError);
+		const failure = error as WorktreeSetupError;
+		expect(failure.timedOut).toBe(false);
+		expect(failure.logPath).toBe("/logs/setup.log");
+		expect(failure.message).toContain("exited with code 3");
+		expect(failure.message).toContain("boom: no free port");
+		expect(failure.message).toContain("/logs/setup.log");
+	});
+
+	it("reports a timeout", async () => {
+		const error = await runWorktreeSetup({
+			script: "sleep 100",
+			worktreePath: "/worktree",
+			branch: "feature",
+			repoRoot: "/repo",
+			timeoutMs: 50,
+			fileExists: () => false,
+			runSetup: async () => ({ stdout: "", stderr: "", exitCode: 1, timedOut: true }),
+		}).catch((caught: unknown) => caught);
+
+		expect(error).toBeInstanceOf(WorktreeSetupError);
+		expect((error as WorktreeSetupError).timedOut).toBe(true);
+		expect((error as WorktreeSetupError).message).toContain("timed out after 50ms");
+	});
+});
+
 describe("AgentsViewMode worktree prompt", () => {
 	beforeAll(() => setKeybindings(keybindings));
 	afterEach(() => vi.restoreAllMocks());
@@ -247,15 +367,15 @@ describe("AgentsViewMode worktree prompt", () => {
 	it("creates the worktree and a session rooted in it on confirm", async () => {
 		const repoRoot = realpathSync(mkdtempSync(join(tmpdir(), "prime-worktree-repo-")));
 		try {
-			await runGitCommand(["init", "-b", "main"], repoRoot);
-			await runGitCommand(["config", "user.email", "test@example.com"], repoRoot);
-			await runGitCommand(["config", "user.name", "test"], repoRoot);
-			await runGitCommand(["commit", "--allow-empty", "-m", "init"], repoRoot);
+			await initRepo(repoRoot);
 
 			const createNewSession = vi.fn(async () => true);
 			const self = createViewStub({
 				createNewSession,
-				options: { config: { cwd: repoRoot }, uiServices: { getInitialCwd: () => repoRoot } },
+				options: {
+					config: { cwd: repoRoot },
+					uiServices: { getInitialCwd: () => repoRoot, settingsManager: createSettingsStub() },
+				},
 			});
 
 			invoke("handleInput", self, NEW_WORKTREE_KEY);
@@ -272,13 +392,83 @@ describe("AgentsViewMode worktree prompt", () => {
 		}
 	});
 
+	it("runs the configured setup script in the new worktree before starting the session", async () => {
+		const repoRoot = realpathSync(mkdtempSync(join(tmpdir(), "prime-worktree-setup-")));
+		try {
+			await initRepo(repoRoot);
+			vi.stubEnv("PRIME_AGENT_CODING_AGENT_DIR", join(repoRoot, "agent-dir"));
+			const createNewSession = vi.fn(async () => true);
+			const self = createViewStub({
+				createNewSession,
+				options: {
+					config: { cwd: repoRoot },
+					uiServices: {
+						getInitialCwd: () => repoRoot,
+						settingsManager: createSettingsStub({
+							setupScript: 'printf "%s" "$PRIME_AGENT_WORKTREE_BRANCH" > branch.txt',
+						}),
+					},
+				},
+			});
+
+			invoke("handleInput", self, NEW_WORKTREE_KEY);
+			await invoke("submit", self, "setup-me");
+
+			const worktreePath = join(repoRoot, ".worktrees", "setup-me");
+			expect(readFileSync(join(worktreePath, "branch.txt"), "utf-8")).toBe("setup-me");
+			expect(createNewSession).toHaveBeenCalledWith({ cwd: worktreePath });
+			const statuses = (self.setStatusMessage as ReturnType<typeof vi.fn>).mock.calls.map((call) => String(call[0]));
+			expect(statuses).toContain("Running worktree setup...");
+		} finally {
+			rmSync(repoRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps the worktree but skips the session when the setup script fails", async () => {
+		const repoRoot = realpathSync(mkdtempSync(join(tmpdir(), "prime-worktree-setup-fail-")));
+		try {
+			await initRepo(repoRoot);
+			vi.stubEnv("PRIME_AGENT_CODING_AGENT_DIR", join(repoRoot, "agent-dir"));
+			const createNewSession = vi.fn(async () => true);
+			const self = createViewStub({
+				createNewSession,
+				options: {
+					config: { cwd: repoRoot },
+					uiServices: {
+						getInitialCwd: () => repoRoot,
+						settingsManager: createSettingsStub({ setupScript: "echo no-free-port >&2; exit 3" }),
+					},
+				},
+			});
+
+			invoke("handleInput", self, NEW_WORKTREE_KEY);
+			await invoke("submit", self, "broken-setup");
+
+			expect(createNewSession).not.toHaveBeenCalled();
+			expect(existsSync(join(repoRoot, ".worktrees", "broken-setup"))).toBe(true);
+			const statuses = (self.setStatusMessage as ReturnType<typeof vi.fn>).mock.calls.map((call) => String(call[0]));
+			const failure = statuses.find((status) => status.startsWith("Failed to run worktree setup"));
+			expect(failure).toBeDefined();
+			expect(failure).toContain("no-free-port");
+			expect(failure).toContain("worktree-setup-broken-setup.log");
+			expect(
+				readFileSync(join(repoRoot, "agent-dir", "logs", "worktree-setup-broken-setup.log"), "utf-8"),
+			).toContain("no-free-port");
+		} finally {
+			rmSync(repoRoot, { recursive: true, force: true });
+		}
+	});
+
 	it("reports a status message when the directory is not a git repository", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "prime-worktree-plain-"));
 		try {
 			const createNewSession = vi.fn(async () => true);
 			const self = createViewStub({
 				createNewSession,
-				options: { config: { cwd: dir }, uiServices: { getInitialCwd: () => dir } },
+				options: {
+					config: { cwd: dir },
+					uiServices: { getInitialCwd: () => dir, settingsManager: createSettingsStub() },
+				},
 			});
 
 			invoke("handleInput", self, NEW_WORKTREE_KEY);
