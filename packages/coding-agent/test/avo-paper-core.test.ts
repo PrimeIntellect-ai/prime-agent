@@ -233,6 +233,58 @@ describe("Paper-Faithful AVO Core (arXiv:2603.24517)", () => {
 		]);
 	});
 
+	it("[Issue #49] demonstrates second valid trajectory with inverted retrieval and evaluation ordering", async () => {
+		const lineage = createAvoLineage("lineage-inverted-order", seedSolution);
+
+		let attempt = 0;
+		const scorer = createMockScorer({
+			evaluatorFn: () => {
+				attempt++;
+				return attempt === 1
+					? { correctness: false, tflops: 0, logs: "Warp divergence detected" }
+					: { correctness: true, tflops: 1550 };
+			},
+		});
+
+		const contract: AvoVariationContract<string> = {
+			taskContext: "Agent edits first, evaluates, then inspects lineage/knowledge on failure",
+			lineage,
+			knowledge: knowledgeBase,
+			scorer,
+		};
+
+		// Trajectory: Edit first -> Evaluate -> Failure -> Sample Lineage -> Sample Knowledge -> Repair -> Evaluate
+		const result = await executeAvoVariationEpisode(contract, async (agent) => {
+			agent.recordEdit("speculative-v1", "fast_unverified_kernel()");
+			const receipt1 = await agent.evaluateCandidate("speculative-v1", "fast_unverified_kernel()");
+			expect(receipt1.passedCorrectness).toBe(false);
+
+			// Interleaved inspection only triggered because of runtime failure
+			agent.sampleLineage("v0-seed", "Compare register usage with baseline");
+			agent.sampleKnowledge("blackwell-warp-spec", "Check divergence barrier spec");
+
+			agent.recordDiagnosis("Need to avoid branch inside warp; use branchless ballot");
+			agent.recordRepair("speculative-v2", "branchless_ballot_kernel()");
+			const receipt2 = await agent.evaluateCandidate("speculative-v2", "branchless_ballot_kernel()");
+			expect(receipt2.passedCorrectness).toBe(true);
+		});
+
+		expect(result.status).toBe("committed");
+		expect(result.evaluationCount).toBe(2);
+		expect(result.candidateSolution?.scores.throughput_tflops).toBe(1550);
+
+		const actionTypes = result.trajectory.map((a) => a.actionType);
+		expect(actionTypes).toEqual([
+			"edit",
+			"evaluate",
+			"inspect_lineage",
+			"inspect_knowledge",
+			"diagnose",
+			"repair",
+			"evaluate",
+		]);
+	});
+
 	// -----------------------------------------------------------------------
 	// Issue #50: Keep failed working attempts out of the committed lineage
 	// -----------------------------------------------------------------------

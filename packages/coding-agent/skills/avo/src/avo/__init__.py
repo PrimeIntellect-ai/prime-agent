@@ -25,16 +25,8 @@ def execution_contract() -> dict[str, Any]:
             "subjective",
         ],
         "sequence": [
-            "preregister_obligations and critical assumptions before candidate work",
-            "for coding only: run_coding_baseline before modifying the workspace",
-            "add_candidate",
-            (
-                "run_evaluation for host-observed executable checks, bind every factual "
-                "claim to external evidence, or record model_opinion"
-            ),
-            "cover every declared candidate obligation with directly relevant host receipts",
-            "complete_cycle",
-            "inspect checkpoint and stop_gate",
+            "the variation agent autonomously schedules sampling, editing, evaluating, diagnosing, and repairing",
+            "host governance records candidates, evaluates receipts, and checks stopping conditions",
         ],
         "calls": {
             "resume": "state = (await avo.get_state())['state']",
