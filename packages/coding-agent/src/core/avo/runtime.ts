@@ -27,7 +27,10 @@ import type {
 	AvoRunState,
 	AvoStopGate,
 	AvoTrialInput,
+	AvoVariationContract,
+	AvoVariationResult,
 } from "./types.js";
+import { type AvoVariationEpisodeController, executeAvoVariationEpisode } from "./variation.js";
 
 export class AvoSessionRuntime {
 	readonly store: AvoStore;
@@ -595,6 +598,13 @@ export class AvoSessionRuntime {
 		return statePath ? join(dirname(dirname(statePath)), "autoresearch", "state.json") : undefined;
 	}
 
+	async runVariationEpisode<T = unknown>(
+		contract: AvoVariationContract<T>,
+		agentFn: (agent: AvoVariationEpisodeController<T>) => Promise<void>,
+	): Promise<AvoVariationResult<T>> {
+		return executeAvoVariationEpisode(contract, agentFn);
+	}
+
 	dispose(): void {
 		this.memoryBridge?.close();
 	}
@@ -608,7 +618,7 @@ export function buildAvoRuntimePrompt(state: AvoRunState, memoryContext = ""): s
 	const obligationCoverageRequired = !ablations.has("obligations") && state.obligations.length > 0;
 	const requiredPremortemAssumptions = requiredAvoPremortemAssumptionCount(state);
 	return [
-		"AVO is Prime's default operating architecture for every root task. It is not a user-selected mode.",
+		"AVO provides the variation operator (arXiv:2603.24517) and verified candidate-evaluate lifecycle for optimization tasks.",
 		`Active AVO task run=${state.runId}. The host automatically selected evaluation adapter=${state.routing.environment}, horizon=${state.routing.horizon}, verification_class=${state.verificationClass}, and verification_policy=${state.verificationPolicy}.`,
 		state.routing.reasons.length > 0 ? `Route evidence: ${state.routing.reasons.join("; ")}.` : undefined,
 		state.verificationReasons.length > 0
@@ -621,7 +631,7 @@ export function buildAvoRuntimePrompt(state: AvoRunState, memoryContext = ""): s
 		"Environment routing is host-authoritative. Model calls cannot select general, coding, or research and may only escalate the current horizon to iterative or long.",
 		ablations.has("nooa")
 			? undefined
-			: "Prime automatically recalls NOOA memory before root turns. Proposed task memory may surface as a hypothesis; proposed project memory is deliberate-only and proposed global persistence is forbidden. Verified memories are host-cleared, and live references are re-resolved at recall time. Never treat recall alone as task evidence or authority.",
+			: "Prime optionally recalls NOOA memory before root turns as an experiential memory extension. Proposed task memory may surface as a hypothesis; proposed project memory is deliberate-only and proposed global persistence is forbidden. Verified memories are host-cleared, and live references are re-resolved at recall time. Never treat recall alone as task evidence or authority.",
 		ablations.has("nooa") ? undefined : memoryContext || undefined,
 		requiredPremortemAssumptions > 0
 			? `AVO_PREMORTEM=required. Before any task workspace change or first candidate, register at least ${requiredPremortemAssumptions} distinct critical assumptions with concrete, non-duplicated falsification plans and direct evidence kinds using avo.register_critical_assumptions. These are competing ways the intended solution could fail, not generic implementation steps. After recording the candidate and host checks, resolve each assumption with its own candidate-bound host receipt from a distinct check; one generic evaluation or repeated command cannot resolve multiple assumptions. Open or refuted assumptions block completion.`

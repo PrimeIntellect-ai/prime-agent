@@ -31,6 +31,7 @@ export const AVO_HOST_REQUEST_TYPES = [
 	"avo.checkpoint",
 	"avo.stop_gate",
 	"avo.complete",
+	"avo.variation.run",
 ] as const;
 
 export const AVO_ENVIRONMENTS = ["general", "coding", "research"] as const;
@@ -865,4 +866,150 @@ export interface AvoDashboardProjection {
 	metrics: AvoDashboardMetric[];
 	sections: AvoDashboardSection[];
 	stopGate: AvoStopGate;
+}
+
+// ---------------------------------------------------------------------------
+// Paper-Faithful AVO Core Types (arXiv:2603.24517)
+// ---------------------------------------------------------------------------
+
+export const AVO_PAPER_CORE_VERSION = "avo_paper_core_v1" as const;
+
+export type AvoKnowledgeKind = "doc" | "specification" | "reference_kernel" | "constraint" | "note";
+
+export interface AvoKnowledgeEntry {
+	knowledgeId: string;
+	title: string;
+	kind: AvoKnowledgeKind;
+	content: string;
+	digest: string;
+	uriOrPath?: string;
+	metadata?: Record<string, unknown>;
+}
+
+export interface AvoCommittedSolution<T = unknown> {
+	solutionId: string;
+	solutionRef: string;
+	payload?: T;
+	scores: Record<string, number>;
+	passedCorrectness: boolean;
+	parentSolutionId?: string;
+	trajectoryRef?: string;
+	timestamp: string;
+	metadata?: Record<string, unknown>;
+}
+
+export interface AvoLineage<T = unknown> {
+	lineageId: string;
+	entries: AvoCommittedSolution<T>[];
+	bestSolutionId?: string;
+	baselineScore?: Record<string, number>;
+	metadata?: Record<string, unknown>;
+}
+
+export interface AvoScoreDimension {
+	name: string;
+	direction: "maximize" | "minimize";
+	unit?: string;
+	weight?: number;
+}
+
+export interface AvoScoringReceipt {
+	scorerId: string;
+	scorerVersion: string;
+	scorerDigest: string;
+	candidateDigest: string;
+	passedCorrectness: boolean;
+	scores: Record<string, number>;
+	executionStatus: "pass" | "fail" | "error";
+	logs?: string;
+	logsRef?: string;
+	timestamp: string;
+}
+
+export interface AvoScoringRunInput {
+	candidateRef: string;
+	content?: string;
+	parameters?: Record<string, unknown>;
+}
+
+export interface AvoScoringUtility {
+	scorerId: string;
+	version: string;
+	scorerDigest: string;
+	scoreDimensions: AvoScoreDimension[];
+	evaluate: (input: AvoScoringRunInput) => Promise<AvoScoringReceipt>;
+}
+
+export interface AvoVariationBudget {
+	maxEvaluations?: number;
+	maxWallClockSeconds?: number;
+	maxEdits?: number;
+}
+
+export type AvoVariationActionType =
+	| "inspect_lineage"
+	| "inspect_knowledge"
+	| "edit"
+	| "evaluate"
+	| "diagnose"
+	| "repair";
+
+export interface AvoWorkingAttempt {
+	attemptId: string;
+	actionType: AvoVariationActionType;
+	timestamp: string;
+	targetId?: string;
+	reason?: string;
+	candidateRef?: string;
+	contentDigest?: string;
+	receipt?: AvoScoringReceipt;
+	diagnostics?: string;
+}
+
+export interface AvoStagnationPattern {
+	isStagnating: boolean;
+	consecutiveFailures: number;
+	consecutiveRegressions: number;
+	repeatedErrors: string[];
+	rationale: string;
+}
+
+export interface AvoSupervisorSteering {
+	detectedPattern: string;
+	suggestedDirections: string[];
+	rationale: string;
+	timestamp: string;
+}
+
+export interface AvoVariationContract<T = unknown> {
+	taskContext: string;
+	lineage: AvoLineage<T>;
+	knowledge: AvoKnowledgeEntry[];
+	scorer: AvoScoringUtility;
+	budget?: AvoVariationBudget;
+	supervisor?: {
+		enabled: boolean;
+		maxConsecutiveFailuresBeforeIntervention?: number;
+		steer?: (
+			trajectory: AvoWorkingAttempt[],
+			stagnation: AvoStagnationPattern,
+		) => Promise<AvoSupervisorSteering | null>;
+	};
+	extensions?: {
+		enableNooaMemory?: boolean;
+		enableObligations?: boolean;
+		enableCanonicalDelivery?: boolean;
+	};
+}
+
+export interface AvoVariationResult<T = unknown> {
+	status: "committed" | "uncommitted_exhausted" | "budget_exceeded";
+	paperCoreVersion: typeof AVO_PAPER_CORE_VERSION;
+	candidateSolution?: AvoCommittedSolution<T>;
+	trajectory: AvoWorkingAttempt[];
+	sampledLineageIds: string[];
+	sampledKnowledgeIds: string[];
+	evaluationCount: number;
+	enabledExtensions: string[];
+	supervisorInterventions: AvoSupervisorSteering[];
 }

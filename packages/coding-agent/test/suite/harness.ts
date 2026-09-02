@@ -79,6 +79,7 @@ export interface HarnessOptions {
 	autoRefineReviewer?: AutoRefineReviewer;
 	serializedRefine?: boolean;
 	initialGoal?: { objective: string; tokenBudget?: number };
+	enableAvo?: boolean;
 	enforceAvoCompletion?: boolean;
 }
 
@@ -204,6 +205,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		autoRefineReviewer: options.autoRefineReviewer,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
+		enableAvo: options.enableAvo,
 		enforceAvoCompletion: options.enforceAvoCompletion ?? false,
 	});
 

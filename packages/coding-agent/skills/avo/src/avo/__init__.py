@@ -63,6 +63,7 @@ def execution_contract() -> dict[str, Any]:
             "experiment_complete": "await avo.complete_experiment(experiment_id)",
             "cycle": "await avo.complete_cycle({'candidate_id': candidate_id})",
             "gate": "await avo.stop_gate()",
+            "variation": "await avo.run_variation(contract_dict)",
         },
         "canonical_rule": (
             "callers may issue only model_opinion; authoritative success requires an immutable "
@@ -461,6 +462,22 @@ async def reflect_memory(trigger: str = "manual", *, cycle_id: str | None = None
     )
 
 
+async def run_variation(
+    contract: dict[str, Any],
+    *,
+    actions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Execute a paper-faithful AVO variation episode (arXiv:2603.24517).
+
+    Receives the variation contract (lineage P_t, knowledge K, scorer f, task context, budget)
+    and executes an autonomous variation episode returning (x_{t+1}, f(x_{t+1}), trajectory).
+    """
+    payload: dict[str, Any] = {"contract": _object(contract, "contract")}
+    if actions is not None:
+        payload["actions"] = actions
+    return await host_request("avo.variation.run", payload)
+
+
 __all__ = [
     "add_candidate",
     "bind_tool_result",
@@ -489,6 +506,7 @@ __all__ = [
     "run_coding_baseline",
     "run_evaluation",
     "run_trial",
+    "run_variation",
 	"resolve_critical_assumption",
     "spontaneous_recall",
     "stop_gate",

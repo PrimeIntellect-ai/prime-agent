@@ -70,6 +70,8 @@ export interface AgentSessionCreationOptions {
 	executionMode?: AgentExecutionMode;
 	telemetryDisabled?: true;
 	initialGoal?: { objective: string; tokenBudget?: number };
+	/** Override root-turn AVO variation operator and completion enforcement. */
+	enableAvo?: boolean;
 	/** Override root-turn AVO completion enforcement. Defaults to true. */
 	enforceAvoCompletion?: boolean;
 }
