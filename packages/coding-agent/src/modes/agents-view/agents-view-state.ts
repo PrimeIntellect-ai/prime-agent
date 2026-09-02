@@ -705,17 +705,22 @@ export function buildAgentsViewRows(
 	// The parent's own hasRunningRlmChildren snapshot goes stale between its
 	// flushes; the live descendant rows are the truth the indicator shows. The
 	// tally runs before heartbeat propagation so it counts intrinsically busy
-	// rows only, never promotion-inflated ancestors.
-	const tallyRunningDescendants = (row: MutableAgentsViewRow): number => {
+	// rows only, never promotion-inflated ancestors. Iterative (the nesting loop
+	// gives every row at most one parent, so this is a forest): a deep child
+	// chain must not overflow the stack just by opening the view.
+	const tallyOrder = baseRows.filter((row) => !nestedRows.has(row));
+	for (let index = 0; index < tallyOrder.length; index++) {
+		for (const child of childrenByParent.get(tallyOrder[index]!) ?? []) {
+			tallyOrder.push(child);
+		}
+	}
+	for (let index = tallyOrder.length - 1; index >= 0; index--) {
+		const row = tallyOrder[index]!;
 		let count = 0;
 		for (const child of childrenByParent.get(row) ?? []) {
-			count += (child.section === "running" ? 1 : 0) + tallyRunningDescendants(child);
+			count += (child.section === "running" ? 1 : 0) + child.runningSubagentCount;
 		}
 		row.runningSubagentCount = count;
-		return count;
-	};
-	for (const row of baseRows) {
-		if (!nestedRows.has(row)) tallyRunningDescendants(row);
 	}
 	propagateHeartbeatStateToAncestors(baseRows, parentByChild);
 

@@ -503,6 +503,39 @@ describe("agents view state", () => {
 		expect(expanded.find((row) => row.title === "Child")?.runningSubagentCount).toBe(1);
 	});
 
+	test("tallies a very deep child chain without overflowing the stack", () => {
+		const summaries = [
+			makeSummary({
+				id: "chain-root",
+				activeSessionId: "chain-root",
+				sessionId: "chain-root-session",
+				sessionName: "Chain root",
+				activity: "idle",
+				taskState: "completed",
+				messageCount: 2,
+			}),
+		];
+		const depth = 10_000;
+		for (let level = 1; level <= depth; level++) {
+			summaries.push(
+				makeSummary({
+					id: `chain-${level}`,
+					activeSessionId: `chain-${level}`,
+					sessionId: `chain-${level}-session`,
+					sessionName: `Chain ${level}`,
+					runtimeKind: "subagent",
+					parentActiveSessionId: level === 1 ? "chain-root" : `chain-${level - 1}`,
+					...(level === depth
+						? { activity: "working" as const, isSessionActive: true, isStreaming: true }
+						: { activity: "idle" as const, taskState: "completed" as const }),
+				}),
+			);
+		}
+
+		const rows = buildAgentsViewRows(summaries);
+		expect(rows[0]).toMatchObject({ kind: "agent", section: "idle", runningSubagentCount: 1 });
+	});
+
 	test("ranks idle rows with busy descendants above plain idle rows", () => {
 		const rows = buildAgentsViewRows([
 			makeSummary({
