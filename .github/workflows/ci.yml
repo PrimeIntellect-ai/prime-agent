@@ -353,7 +353,7 @@ jobs:
           test/bash-close-hang-windows.test.ts
           test/child-process.test.ts
           test/command-recovery-journal.test.ts
-          test/config.test.ts
+          test/config-windows-hardening.test.ts
           test/daemon-command.test.ts
           test/daemon-socket.test.ts
           test/exec.test.ts

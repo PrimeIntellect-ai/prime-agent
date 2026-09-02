@@ -21,8 +21,12 @@ const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 const originalProgramFiles = process.env.ProgramFiles;
 const originalProgramFilesX86 = process.env["ProgramFiles(x86)"];
 
+function stubPlatform(value: NodeJS.Platform): void {
+	Object.defineProperty(process, "platform", { value });
+}
+
 function stubWin32(): void {
-	Object.defineProperty(process, "platform", { value: "win32" });
+	stubPlatform("win32");
 	// Keep realistic Windows environment values while platform behavior is stubbed.
 	process.env.ProgramFiles = "C:\\Program Files";
 	(process.env as Record<string, string>)["ProgramFiles(x86)"] = "C:\\Program Files (x86)";
@@ -121,6 +125,7 @@ describe("getShellConfig on win32", () => {
 
 describe("getShellConfig on non-win32", () => {
 	it("returns /bin/bash when it exists", () => {
+		stubPlatform("linux");
 		mocks.existsSync.mockImplementation((path: string) => path === "/bin/bash");
 
 		const config = getShellConfig();
@@ -129,6 +134,7 @@ describe("getShellConfig on non-win32", () => {
 	});
 
 	it("falls back to sh when /bin/bash and which bash are absent", () => {
+		stubPlatform("linux");
 		mocks.existsSync.mockReturnValue(false);
 		mocks.spawnSync.mockReturnValue({
 			status: 1,
@@ -145,6 +151,7 @@ describe("getShellConfig on non-win32", () => {
 	});
 
 	it("uses bash on PATH when /bin/bash is absent", () => {
+		stubPlatform("linux");
 		mocks.existsSync.mockReturnValue(false);
 		mocks.spawnSync.mockReturnValue({
 			status: 0,
