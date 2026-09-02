@@ -6,7 +6,6 @@ import {
 	ftruncateSync,
 	mkdirSync,
 	openSync,
-	readFileSync,
 	readSync,
 	statSync,
 	writeSync,
@@ -20,12 +19,13 @@ import { dirname } from "node:path";
  * Appends are single O_APPEND writes (PIPE_BUF-scale sizes, whose atomicity
  * multi-writer consumers rely on for interleaving), fsynced only when the
  * caller needs durability. Replay tolerates exactly one torn FINAL line
- * (unparseable AND unterminated: a crashed writer's in-progress append) and
- * fails closed on any malformed interior line. Repair happens only on
- * append, never on read — a viewer may replay a live writer's log: an
- * unparseable torn tail is truncated at its byte offset, and a parseable
- * unterminated tail is completed by prefixing the next append's payload with
- * its missing newline.
+ * (rejected by the consumer's parser AND unterminated: a crashed writer's
+ * in-progress append) and fails closed on any malformed interior line.
+ * Repair happens only on append, never on read — a viewer may replay a live
+ * writer's log. EVERY unterminated tail is truncated at its byte offset,
+ * even one that parses as JSON: completing it with a newline would turn a
+ * line a strict consumer parser rejects into permanent fail-closed interior
+ * poison. Unifying consumers keeps the union of their safety behaviors.
  */
 
 export interface EventLogOptions {
@@ -35,10 +35,11 @@ export interface EventLogOptions {
 	log?: (message: string) => void;
 }
 
-function readAllSync(fd: number, maxBytes: number | undefined): Buffer {
+/** Bounded read through the descriptor: the size check and the allocation see the same fd, so a concurrent grow cannot bypass the bound. */
+function readAllSync(fd: number, maxBytes: number | undefined, path: string): Buffer {
 	const size = fstatSync(fd).size;
 	if (maxBytes !== undefined && size > maxBytes) {
-		throw new Error(`event log exceeds ${maxBytes} bytes (${size}); refusing to read`);
+		throw new Error(`event log ${path} exceeds ${maxBytes} bytes (${size}); refusing to read`);
 	}
 	const buffer = Buffer.alloc(size);
 	let offset = 0;
@@ -48,6 +49,14 @@ function readAllSync(fd: number, maxBytes: number | undefined): Buffer {
 		offset += bytesRead;
 	}
 	return buffer.subarray(0, offset);
+}
+
+function serializeLine(event: unknown): string {
+	const serialized = JSON.stringify(event);
+	if (typeof serialized !== "string") {
+		throw new TypeError("event is not JSON-serializable");
+	}
+	return `${serialized}\n`;
 }
 
 export class EventLog {
@@ -62,13 +71,20 @@ export class EventLog {
 	 * returns undefined for a line it deliberately skips.
 	 */
 	replaySync<T>(parse: (line: string, index: number) => T | undefined): T[] {
-		if (!existsSync(this.path)) return [];
 		const { maxBytes, maxRecords } = this.options;
-		const size = statSync(this.path).size;
-		if (maxBytes !== undefined && size > maxBytes) {
-			throw new Error(`event log ${this.path} exceeds ${maxBytes} bytes (${size}); refusing to read`);
+		let fd: number;
+		try {
+			fd = openSync(this.path, "r");
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+			throw error;
 		}
-		const contents = readFileSync(this.path, "utf8");
+		let contents: string;
+		try {
+			contents = readAllSync(fd, maxBytes, this.path).toString("utf8");
+		} finally {
+			closeSync(fd);
+		}
 		const endsWithNewline = contents.endsWith("\n");
 		const rawLines = contents.split("\n");
 		const events: T[] = [];
@@ -97,17 +113,19 @@ export class EventLog {
 	/**
 	 * Append events as one write; `durable` fsyncs before returning. When the
 	 * file is created by this append, `onCreate`'s records lead the payload.
+	 * An unserializable event throws before any byte (including repair) is
+	 * written.
 	 */
 	appendSync(events: unknown[], options?: { durable?: boolean; onCreate?: () => unknown[] }): void {
+		const lines = events.map(serializeLine);
 		mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
-		let lead: unknown[] = [];
-		let prefix = "";
+		let leadLines: string[] = [];
 		if (existsSync(this.path)) {
-			prefix = this.repairTailSync();
+			this.repairTailSync();
 		} else {
-			lead = options?.onCreate?.() ?? [];
+			leadLines = (options?.onCreate?.() ?? []).map(serializeLine);
 		}
-		const payload = prefix + [...lead, ...events].map((event) => `${JSON.stringify(event)}\n`).join("");
+		const payload = [...leadLines, ...lines].join("");
 		const handle = openSync(this.path, "a", 0o600);
 		try {
 			writeSync(handle, payload);
@@ -118,21 +136,19 @@ export class EventLog {
 	}
 
 	/**
-	 * Repair a torn final line from a crashed writer before appending:
+	 * Truncate a torn final line from a crashed writer before appending:
 	 * otherwise the append would turn a tolerable torn tail into a fail-closed
-	 * interior line. Returns the newline that completes a parseable
-	 * unterminated tail (its bytes are committed data), after truncating an
-	 * unparseable one (its bytes never were).
+	 * interior line. The torn bytes were never readable data.
 	 */
-	private repairTailSync(): "" | "\n" {
+	private repairTailSync(): void {
 		const { maxBytes } = this.options;
 		let size: number;
 		try {
 			size = statSync(this.path).size;
 		} catch {
-			return "";
+			return;
 		}
-		if (size === 0) return "";
+		if (size === 0) return;
 		// Fail closed loudly at the read bound BEFORE the swallowing repair
 		// try-block: an oversized log must never trigger a file-sized
 		// allocation, and the error must not be silenced as a repair failure.
@@ -146,30 +162,23 @@ export class EventLog {
 			const fd = openSync(this.path, "r+");
 			try {
 				const lastByte = Buffer.alloc(1);
-				if (readSync(fd, lastByte, 0, 1, size - 1) !== 1 || lastByte[0] === 0x0a) return "";
-				const first = readAllSync(fd, maxBytes);
-				const tail = first.subarray(first.lastIndexOf(0x0a) + 1).toString("utf8");
-				try {
-					JSON.parse(tail);
-					return "\n";
-				} catch {
-					// Unparseable tail: truncate, guarded by a double-read stability
-					// check (cheap cross-process hardening; a racing append between
-					// the check and the ftruncate stays in the same trust bucket as
-					// the documented O_APPEND small-write atomicity assumption).
-					const second = readAllSync(fd, maxBytes);
-					if (second.length !== first.length || !second.equals(first)) return "";
-					if (fstatSync(fd).size !== first.length) return "";
-					const keep = first.lastIndexOf(0x0a) + 1;
-					ftruncateSync(fd, keep);
-					this.options.log?.(`truncated torn final line (${first.length - keep} bytes)`);
-				}
+				if (readSync(fd, lastByte, 0, 1, size - 1) !== 1 || lastByte[0] === 0x0a) return;
+				// Truncate guarded by a double-read stability check (cheap
+				// cross-process hardening; a racing append between the check and
+				// the ftruncate stays in the same trust bucket as the documented
+				// O_APPEND small-write atomicity assumption).
+				const first = readAllSync(fd, maxBytes, this.path);
+				const second = readAllSync(fd, maxBytes, this.path);
+				if (second.length !== first.length || !second.equals(first)) return;
+				if (fstatSync(fd).size !== first.length) return;
+				const keep = first.lastIndexOf(0x0a) + 1;
+				ftruncateSync(fd, keep);
+				this.options.log?.(`truncated torn final line (${first.length - keep} bytes)`);
 			} finally {
 				closeSync(fd);
 			}
 		} catch {
 			// Leave the tail for the reader's torn-line tolerance.
 		}
-		return "";
 	}
 }
