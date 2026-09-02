@@ -384,7 +384,8 @@ describe("byte-level framing", () => {
 		expect(r.ok).toBe(false);
 	});
 	it("rejects truncated", () => {
-		const r = decodePaarManifestHeader(header.subarray(0, 9), archiveSize);
+		const short = header.slice(0, 9); // standalone copy with own 9-byte buffer
+		const r = decodePaarManifestHeader(short, archiveSize);
 		expect(r.ok).toBe(false);
 		if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.MANIFEST_TRUNCATED);
 	});
@@ -437,6 +438,36 @@ it("rejects hostile Proxy that throws on any read", () => {
 	const r = decodePaarManifestHeader(proxy as unknown as Uint8Array, 100);
 	expect(r.ok).toBe(false);
 	if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.INVALID_INPUT);
+});
+
+it("rejects offset-zero short subview (INVALID_INPUT)", () => {
+	const enc = encodePaarManifest(validInput());
+	if (!enc.ok) return;
+	const big = new ArrayBuffer(enc.value.header.length + 100);
+	const shortView = new Uint8Array(big, 0, enc.value.header.length);
+	shortView.set(enc.value.header);
+	const r = decodePaarManifestHeader(shortView, enc.value.archiveSize);
+	expect(r.ok).toBe(false);
+	if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.INVALID_INPUT);
+});
+
+it("rejects detached ArrayBuffer by exact error code (INVALID_INPUT, not SHORT_HEADER)", () => {
+	if (typeof MessageChannel === "undefined") return;
+	const enc = encodePaarManifest(validInput());
+	if (!enc.ok) return;
+	const ab = new ArrayBuffer(enc.value.header.length);
+	const view = new Uint8Array(ab);
+	view.set(enc.value.header);
+	const { port1, port2 } = new MessageChannel();
+	port1.postMessage(ab, [ab]);
+	port2.close();
+	const r = decodePaarManifestHeader(view, enc.value.archiveSize);
+	expect(r.ok).toBe(false);
+	if (!r.ok) {
+		// Detached view must map to INVALID_INPUT, not SHORT_HEADER or
+		// any other byte-level framing error.
+		expect(r.error.code).toBe(PAAR_ERRORS.INVALID_INPUT);
+	}
 });
 describe("canonical encoding", () => {
 	const FD = computeFilesDigest([{ path: "f.dat", size: 10, mode: 0o644, sha256: VALID_HASH, offset: 0 }]);
@@ -799,12 +830,12 @@ it("rejects detached ArrayBuffer view (INVALID_INPUT)", () => {
 	const ab = new ArrayBuffer(enc.value.header.length);
 	const view = new Uint8Array(ab);
 	view.set(enc.value.header);
-	// Transfer ownership away via MessageChannel to detach the buffer
 	const { port1, port2 } = new MessageChannel();
 	port1.postMessage(ab, [ab]);
 	port2.close();
 	const r = decodePaarManifestHeader(view, enc.value.archiveSize);
 	expect(r.ok).toBe(false);
+	if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.INVALID_INPUT);
 });
 
 it("rejects non-zero byteOffset subview (INVALID_INPUT)", () => {
@@ -813,6 +844,18 @@ it("rejects non-zero byteOffset subview (INVALID_INPUT)", () => {
 	const backing = new Uint8Array(enc.value.header.length + 8);
 	backing.set(enc.value.header, 8);
 	const subview = backing.subarray(8);
+	const r = decodePaarManifestHeader(subview, enc.value.archiveSize);
+	expect(r.ok).toBe(false);
+	if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.INVALID_INPUT);
+});
+
+it("rejects zero-offset short subview (INVALID_INPUT)", () => {
+	const enc = encodePaarManifest(validInput());
+	if (!enc.ok) return;
+	const backing = new ArrayBuffer(enc.value.header.length + 8);
+	const full = new Uint8Array(backing);
+	full.set(enc.value.header, 0);
+	const subview = new Uint8Array(backing, 0, enc.value.header.length);
 	const r = decodePaarManifestHeader(subview, enc.value.archiveSize);
 	expect(r.ok).toBe(false);
 	if (!r.ok) expect(r.error.code).toBe(PAAR_ERRORS.INVALID_INPUT);

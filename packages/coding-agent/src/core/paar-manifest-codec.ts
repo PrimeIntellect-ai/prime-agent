@@ -315,17 +315,28 @@ function isGenuineUint8Array(bytes: unknown): bytes is Uint8Array {
 	const b = bytes as Uint8Array;
 	if (b.byteOffset !== 0) return false;
 	if (b.buffer === null || typeof b.buffer !== "object") return false;
-	if (isSharedBuffer(b.buffer as ArrayBuffer)) return false;
-	if (!Number.isSafeInteger(b.byteLength) || b.byteLength < 0) return false;
-	// Reject detached buffer: the backing store must be at least as large as
-	// the view claims. Detached buffers report byteLength=0.
-	let bufLen: number;
 	try {
-		bufLen = (b.buffer as ArrayBuffer).byteLength;
+		if (Object.getPrototypeOf(b.buffer) !== ArrayBuffer.prototype) return false;
 	} catch {
 		return false;
 	}
-	if (typeof bufLen !== "number" || !Number.isSafeInteger(bufLen) || bufLen < b.byteLength) {
+	if (isSharedBuffer(b.buffer as ArrayBuffer)) return false;
+	if (!Number.isSafeInteger(b.byteLength) || b.byteLength < 0) return false;
+	// Exact view length must equal the backing buffer's byteLength.
+	// A subarray view e.g. new Uint8Array(largeBuffer, 0, smallLen) must be
+	// rejected because it aliases an unexpectedly large buffer.
+	const bufLen = (b.buffer as ArrayBuffer).byteLength;
+	if (typeof bufLen !== "number" || !Number.isSafeInteger(bufLen)) return false;
+	if (b.byteLength !== bufLen) return false;
+
+	// Detect detachment: slice(0,0) on a detached buffer throws in engines
+	// that enforce detachment through the spec (Node 22+, V8). Catch the
+	// throw or empty result. A non-detached buffer always produces a
+	// zero-length result.
+	try {
+		const empty = ArrayBuffer.prototype.slice.call(b.buffer, 0, 0);
+		if (empty === null || typeof empty !== "object" || empty.byteLength !== 0) return false;
+	} catch {
 		return false;
 	}
 	return true;
@@ -681,11 +692,18 @@ function encodePaarManifestImpl(input: PaarEncodeInput): PaarResult<PaarEncodeRe
 		entries.push(fe);
 	}
 
-	// UTF-8 byte order
+	// UTF-8 byte order (erase temp buffers after comparison)
 	for (let i = 1; i < entries.length; i++) {
 		const bufA = Buffer.from(entries[i - 1].path, "utf-8");
 		const bufB = Buffer.from(entries[i].path, "utf-8");
-		if (Buffer.compare(bufA, bufB) >= 0) return { ok: false as const, error: { code: PAAR_ERRORS.FILES_UNSORTED } };
+		let cmp = 0;
+		try {
+			cmp = Buffer.compare(bufA, bufB);
+		} finally {
+			bufA.fill(0);
+			bufB.fill(0);
+		}
+		if (cmp >= 0) return { ok: false as const, error: { code: PAAR_ERRORS.FILES_UNSORTED } };
 	}
 
 	// Contiguous offsets from 0
@@ -978,7 +996,14 @@ function decodePaarManifestHeaderImpl(bytes: Uint8Array, totalArchiveSize: numbe
 	for (let i = 1; i < parsedFiles.length; i++) {
 		const bufA = Buffer.from(parsedFiles[i - 1].path, "utf-8");
 		const bufB = Buffer.from(parsedFiles[i].path, "utf-8");
-		if (Buffer.compare(bufA, bufB) >= 0) {
+		let cmp = 0;
+		try {
+			cmp = Buffer.compare(bufA, bufB);
+		} finally {
+			bufA.fill(0);
+			bufB.fill(0);
+		}
+		if (cmp >= 0) {
 			reencoded.fill(0);
 			return { ok: false as const, error: { code: PAAR_ERRORS.FILES_UNSORTED } };
 		}
