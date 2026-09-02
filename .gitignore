@@ -43,4 +43,3 @@ collect.sh
 
 __pycache__/
 *.pyc
-*.tgz

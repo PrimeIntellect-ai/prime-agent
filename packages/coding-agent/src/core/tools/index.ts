@@ -1,3 +1,4 @@
+export { acpMcpToolNames, createAcpMcpToolDefinitions } from "./acp-mcp.js";
 export {
 	type BashOperations,
 	type BashSpawnContext,
@@ -37,7 +38,6 @@ export {
 	truncateTail,
 } from "./truncate.js";
 
-export { createAcpMcpToolDefinitions } from "./acp-mcp.js";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ToolDefinition } from "../extensions/types.js";
 import { createIpythonToolDefinition, type IpythonToolOptions } from "./ipython.js";

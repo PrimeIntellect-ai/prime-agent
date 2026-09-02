@@ -223,8 +223,8 @@ export class McpManager {
 		return [...this.acpServers.values()];
 	}
 
-	getEnabledGenericServers(): string[] {
-		const servers = Array.from(this.integrations.values())
+	getEnabledPersistentGenericServers(): string[] {
+		return Array.from(this.integrations.values())
 			.filter(
 				(integration) =>
 					integration.userDeclared &&
@@ -232,9 +232,14 @@ export class McpManager {
 					!getCatalogEntry(integration.server) &&
 					this.isAuthed(integration),
 			)
-			.map((integration) => integration.server);
-		for (const server of this.acpServers.keys()) servers.push(server);
-		return [...new Set(servers)].sort((left, right) => left.localeCompare(right));
+			.map((integration) => integration.server)
+			.sort((left, right) => left.localeCompare(right));
+	}
+
+	getEnabledGenericServers(): string[] {
+		return [...new Set([...this.getEnabledPersistentGenericServers(), ...this.acpServers.keys()])].sort(
+			(left, right) => left.localeCompare(right),
+		);
 	}
 
 	/** Status for the /mcp list command. */
