@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getModel } from "../src/models.js";
+import { streamAnthropic } from "../src/providers/anthropic.js";
 import { loginAnthropic, refreshAnthropicToken } from "../src/utils/oauth/anthropic.js";
 
 function jsonResponse(body: unknown, status: number = 200): Response {
@@ -95,5 +97,31 @@ describe.sequential("Anthropic OAuth", () => {
 		expect(credentials.access).toBe("new-access-token");
 		expect(credentials.refresh).toBe("new-refresh-token");
 		expect(fetchMock).toHaveBeenCalledOnce();
+	});
+});
+
+describe.sequential("Anthropic OAuth request identity", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it("sends the Claude Code version in the user-agent for OAuth tokens", async () => {
+		let userAgent: string | null = null;
+		const fetchMock = vi.fn(async (input: unknown, init?: RequestInit): Promise<Response> => {
+			const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
+			userAgent = headers.get("user-agent");
+			return jsonResponse({ type: "error", error: { type: "invalid_request_error", message: "nope" } }, 400);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const stream = streamAnthropic(
+			getModel("anthropic", "claude-fable-5"),
+			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+			{ apiKey: "sk-ant-oat01-test" },
+		);
+		await stream.result();
+
+		// Fable 5.x requires Claude Code >= 2.1.251; the API rejects older versions.
+		expect(userAgent).toBe("claude-cli/2.1.257");
 	});
 });
