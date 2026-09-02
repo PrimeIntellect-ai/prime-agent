@@ -56,22 +56,22 @@ Status values are `queued`, `in_progress`, `blocked`, `review`, and `done`.
 
 | ID | Status | Work package | Output |
 |---|---|---|---|
-| A01 | in_progress | Current RLM child lifecycle and concrete `AgentSession` coupling | Refactor seam report |
-| A02 | in_progress | Daemon protocol capability and compatibility requirements | Wire-change report |
-| A03 | in_progress | Agent connection DTO and remote path assumptions | Remote DTO report |
-| A04 | in_progress | Provider registry, streaming, cancellation, and auth flow | Provider-proxy report |
-| A05 | in_progress | Prime Sandbox SDK, lifecycle, bootstrap, and image constraints | Sandbox adapter report |
+| A01 | done | Current RLM child lifecycle and concrete `AgentSession` coupling | Refactor seam report recovered |
+| A02 | done | Daemon protocol capability and compatibility requirements | Wire-change report recovered |
+| A03 | done | Agent connection DTO and remote path assumptions | Remote DTO report received |
+| A04 | done | Provider registry, streaming, cancellation, and auth flow | Provider-proxy report recovered |
+| A05 | done | Prime Sandbox SDK, lifecycle, bootstrap, and image constraints | SDK v0.2.35 adapter report received |
 | A06 | in_progress | Direct agent-to-agent communication routing and delivery guarantees | Messaging report |
-| A07 | in_progress | Observation, transcript, recap, and usage attribution | Observation report |
-| A08 | in_progress | Session catalog, passivation, rehydration, and deletion | Lifecycle report |
-| A09 | in_progress | Agents View status and connection-state presentation | UI report |
-| A10 | in_progress | Workspace snapshot and conflict-safe sync-back | Workspace report |
+| A07 | done | Observation, transcript, recap, and usage attribution | Observation report recovered |
+| A08 | done | Session catalog, passivation, rehydration, and deletion | Lifecycle report received |
+| A09 | done | Agents View status and connection-state presentation | UI report received |
+| A10 | done | Workspace snapshot and conflict-safe sync-back | Workspace report recovered |
 | A11 | in_progress | Top-level session creation APIs and CLI integration | Top-level API report |
-| A12 | in_progress | Python RLM bridge and public API compatibility | RLM API report |
+| A12 | done | Python RLM bridge and public API compatibility | RLM API report received |
 | A13 | in_progress | Test harnesses and protocol compatibility coverage | Test topology report |
-| A14 | in_progress | Security threat model and secret-exposure audit | Threat model |
-| A15 | in_progress | Runtime packaging, exact-build bootstrap, and update behavior | Packaging report |
-| A16 | in_progress | Failure injection, reconnect, idempotency, and recovery behavior | Recovery report |
+| A14 | done | Security threat model and secret-exposure audit | Threat model received |
+| A15 | done | Runtime packaging, exact-build bootstrap, and update behavior | Packaging report received |
+| A16 | done | Failure injection, reconnect, idempotency, and recovery behavior | Recovery report received |
 
 ### Wave 2: implementation packages
 
@@ -124,3 +124,10 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Created the clean integration worktree from `origin/main` on branch `feat/sandbox-backed-sessions`.
 - Started the persistent goal and five-minute feature heartbeat.
 - Started Wave 1 architecture audits in parallel.
+- Completed A09. The existing three activity sections stay unchanged; execution location and link health will be added as orthogonal row metadata.
+- Completed A15. Remote startup will bind to the exact daemon build identity and reject protocol skew before session admission.
+- Completed A05 and A08. The installed sandbox SDK supports idempotent creation and background jobs; sandbox ownership will reuse daemon leases, recovery journals, and passivation semantics.
+- Completed A01, A02, A10, and A14. Contracts cover the hosted-child seam, capability-gated protocol, safe workspace sync, and feature-specific secret isolation.
+- Completed A03 and A12. Remote DTOs will use opaque IDs and ISO timestamps; the Python RLM layer can forward the new kwargs without a protocol change.
+- Completed A16. Remote recovery will extend existing idempotency journals, ownership checks, reconnect cursors, and interrupted-operation records.
+- Completed A04 and A07. The home proxy will implement the existing `StreamFn` contract; remote observation will mirror serializable event and usage records into the home catalog.
