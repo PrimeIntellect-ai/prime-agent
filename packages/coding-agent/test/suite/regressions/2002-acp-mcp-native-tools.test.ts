@@ -80,6 +80,20 @@ describe("PR 2002 ACP MCP native tools", () => {
 		expect(() => acpMcpToolNames([httpServer("task"), httpServer("task")])).toThrow("Duplicate ACP MCP server");
 	});
 
+	it("rejects ACP MCP servers when the built-in cpython runtime is unavailable", async () => {
+		const harness = await createHarness({ tools: [] });
+		const manager = new McpManager({ authStorage: harness.authStorage });
+		Reflect.set(harness.session, "_mcpManager", manager);
+		try {
+			expect(() => harness.session.replaceAcpMcpServers([httpServer("task")], "owner-a")).toThrow(
+				"require the built-in cpython tool",
+			);
+			expect(manager.getAcpServers()).toEqual([]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("rebinds proxies on reload, removes them on release, and rejects custom-tool collisions", async () => {
 		const harness = await createHarness();
 		const manager = new McpManager({ authStorage: harness.authStorage });

@@ -1343,6 +1343,9 @@ export class AgentSession {
 			if (servers.length > 0) throw new Error("MCP is unavailable in this session");
 			return;
 		}
+		if (servers.length > 0 && !this._ipythonKernelProvisioner) {
+			throw new Error("ACP MCP servers require the built-in cpython tool");
+		}
 		this._assertAcpMcpToolNamesAvailable(acpMcpToolNames(servers));
 		if (!this._mcpManager.replaceAcpServers(servers, ownerId)) return;
 		this._rebuildRuntimeForAcpMcpServers();
@@ -9182,6 +9185,9 @@ export class AgentSession {
 
 		const previousAcpMcpToolNames = new Set(this._acpMcpTools.map((tool) => tool.name));
 		const acpServers = this._mcpManager?.getAcpServers() ?? [];
+		if (acpServers.length > 0 && !this._ipythonKernelProvisioner) {
+			throw new Error("ACP MCP servers require the built-in cpython tool");
+		}
 		const acpMcpTools = this._ipythonKernelProvisioner
 			? createAcpMcpToolDefinitions(acpServers, this._ipythonKernelProvisioner)
 			: [];
