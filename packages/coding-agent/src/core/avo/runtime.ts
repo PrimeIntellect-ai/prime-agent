@@ -28,6 +28,8 @@ import type {
 	AvoObligationCoverageInput,
 	AvoObligationInput,
 	AvoRunState,
+	AvoScoringReceipt,
+	AvoScoringUtility,
 	AvoStopGate,
 	AvoTrialInput,
 	AvoVariationContract,
@@ -43,6 +45,7 @@ export class AvoSessionRuntime {
 	private readonly workspaceExcludedRoots: string[];
 	private _currentLineage?: AvoLineage;
 	private _currentKnowledge?: AvoKnowledgeEntry[];
+	private _currentScorer?: AvoScoringUtility;
 
 	constructor(
 		artifactDir?: string,
@@ -694,12 +697,57 @@ export class AvoSessionRuntime {
 		return item;
 	}
 
+	setScoringUtility(scorer: AvoScoringUtility): void {
+		this._currentScorer = scorer;
+	}
+
+	getScoringUtility(): AvoScoringUtility | undefined {
+		return this._currentScorer;
+	}
+
+	getScoringManifest(): {
+		scorerId: string;
+		version: string;
+		scorerDigest: string;
+		scoreDimensions: Array<{ name: string; direction: "maximize" | "minimize"; unit?: string }>;
+	} {
+		if (!this._currentScorer) {
+			throw new Error("No scoring utility manifest is configured for the current task");
+		}
+		return {
+			scorerId: this._currentScorer.scorerId,
+			version: this._currentScorer.version,
+			scorerDigest: this._currentScorer.scorerDigest,
+			scoreDimensions: this._currentScorer.scoreDimensions.map((d) => ({
+				name: d.name,
+				direction: d.direction,
+				unit: d.unit,
+			})),
+		};
+	}
+
+	async evaluateWithScorer(candidateRef: string, content: unknown): Promise<AvoScoringReceipt> {
+		if (!this._currentScorer) {
+			throw new Error("No scoring utility is configured for evaluation");
+		}
+		const contentStr = typeof content === "string" ? content : JSON.stringify(content);
+		const receipt = await this._currentScorer.evaluate({ candidateRef, content: contentStr });
+
+		if (receipt.scorerDigest !== this._currentScorer.scorerDigest) {
+			throw new Error(
+				`Scorer digest mismatch: expected ${this._currentScorer.scorerDigest}, received ${receipt.scorerDigest}`,
+			);
+		}
+		return receipt;
+	}
+
 	async runVariationEpisode<T = unknown>(
 		contract: AvoVariationContract<T>,
 		agentFn: (agent: AvoVariationEpisodeController<T>) => Promise<void>,
 	): Promise<AvoVariationResult<T>> {
 		this._currentLineage = contract.lineage as unknown as AvoLineage;
 		this._currentKnowledge = contract.knowledge;
+		this._currentScorer = contract.scorer;
 		return executeAvoVariationEpisode(contract, agentFn);
 	}
 

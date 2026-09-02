@@ -36,6 +36,8 @@ export const AVO_HOST_REQUEST_TYPES = [
 	"avo.lineage.sample",
 	"avo.knowledge.list",
 	"avo.knowledge.sample",
+	"avo.scoring.manifest.get",
+	"avo.scoring.evaluate",
 ] as const;
 
 export const AVO_ENVIRONMENTS = ["general", "coding", "research"] as const;

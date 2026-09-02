@@ -60,6 +60,8 @@ def execution_contract() -> dict[str, Any]:
             "lineage_sample": "await avo.sample_lineage(solution_id, reason=reason)",
             "knowledge_list": "await avo.list_knowledge()",
             "knowledge_sample": "await avo.sample_knowledge(knowledge_id, reason=reason)",
+            "scoring_manifest": "await avo.get_scoring_manifest()",
+            "scoring_evaluate": "await avo.score_candidate(candidate_ref, content=candidate_content)",
         },
         "canonical_rule": (
             "callers may issue only model_opinion; authoritative success requires an immutable "
@@ -500,6 +502,23 @@ async def sample_knowledge(knowledge_id: str, *, reason: str | None = None) -> d
     return await host_request("avo.knowledge.sample", payload)
 
 
+async def get_scoring_manifest() -> dict[str, Any]:
+    """Inspect the immutable scoring utility f manifest (dimensions, directions, digest)."""
+    return await host_request("avo.scoring.manifest.get", {})
+
+
+async def score_candidate(candidate_ref: str, content: Any = None) -> dict[str, Any]:
+    """Invoke the immutable scoring utility f(candidate) against a candidate.
+
+    Applies the fixed correctness gate and returns the performance score vector
+    as a trusted immutable receipt. The caller cannot override the evaluation command.
+    """
+    payload: dict[str, Any] = {"candidateRef": _string(candidate_ref, "candidate_ref")}
+    if content is not None:
+        payload["content"] = content
+    return await host_request("avo.scoring.evaluate", payload)
+
+
 __all__ = [
     "add_candidate",
     "bind_tool_result",
@@ -514,6 +533,7 @@ __all__ = [
     "configure",
     "execution_contract",
     "fetch_external_source",
+    "get_scoring_manifest",
     "get_state",
     "initialize",
     "list_knowledge",
@@ -534,6 +554,7 @@ __all__ = [
 	"resolve_critical_assumption",
     "sample_knowledge",
     "sample_lineage",
+    "score_candidate",
     "spontaneous_recall",
     "stop_gate",
     "sync_nooa_memory",

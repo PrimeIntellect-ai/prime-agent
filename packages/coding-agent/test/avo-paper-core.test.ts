@@ -561,7 +561,13 @@ describe("Paper-Faithful AVO Core (arXiv:2603.24517)", () => {
 
 	it("[Issue #52] enforces evaluation budget bounds", async () => {
 		const lineage = createAvoLineage("lineage-budget", seedSolution);
-		const scorer = createMockScorer();
+		let evaluationCount = 0;
+		const scorer = createMockScorer({
+			evaluatorFn: () => {
+				evaluationCount++;
+				return { correctness: true, tflops: 1400 };
+			},
+		});
 
 		const contract: AvoVariationContract<string> = {
 			taskContext: "Budget enforcement",
@@ -584,6 +590,46 @@ describe("Paper-Faithful AVO Core (arXiv:2603.24517)", () => {
 				await agent.evaluateCandidate("c3", "c3");
 			}),
 		).rejects.toThrow(/Evaluation budget exceeded/);
+		expect(evaluationCount).toBe(2);
+	});
+
+	it("[Issue #52 Integration] returns immutable scoring manifest and rejects model command overrides via host RPC", async () => {
+		const harness = await createHarness({ enableAvo: true });
+		const scorer = createMockScorer({ digest: "immutable-manifest-v100" });
+
+		const runtime = (
+			harness.session as unknown as {
+				_avoRuntime: { setScoringUtility: (s: unknown) => void };
+			}
+		)._avoRuntime;
+		runtime.setScoringUtility(scorer);
+
+		// 1. Inspect manifest
+		const manifestRes = await harness.session.handleAvoHostRequest("avo.scoring.manifest.get");
+		expect(manifestRes.manifest).toMatchObject({
+			scorerId: scorer.scorerId,
+			version: scorer.version,
+			scorerDigest: "immutable-manifest-v100",
+		});
+
+		// 2. Evaluate candidate with immutable scorer handle
+		const evalRes = await harness.session.handleAvoHostRequest("avo.scoring.evaluate", {
+			candidateRef: "kernel-candidate-v1",
+			content: "__global__ void fast_kernel() {}",
+		});
+		expect(evalRes.receipt).toMatchObject({
+			scorerDigest: "immutable-manifest-v100",
+			passedCorrectness: true,
+			candidateDigest: expect.any(String),
+		});
+
+		// 3. Reject model-supplied command override
+		await expect(
+			harness.session.handleAvoHostRequest("avo.scoring.evaluate", {
+				candidateRef: "kernel-candidate-v1",
+				command: "pytest -s -k mock_pass",
+			}),
+		).rejects.toThrow(/rejects model-supplied command overrides; scorer is immutable/);
 	});
 
 	// -----------------------------------------------------------------------
