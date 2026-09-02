@@ -7531,6 +7531,7 @@ export class AgentSession {
 
 		const semanticCompaction = this._semanticEdges.beginCompaction();
 		let compactionRecorded = false;
+		const uncommittedSlices: string[] = [];
 		let summary: string;
 		let firstKeptEntryId: string;
 		let tokensBefore: number;
@@ -7559,7 +7560,10 @@ export class AgentSession {
 				({ summary, firstKeptEntryId, tokensBefore, details } = extensionCompaction);
 			} else {
 				// Each summary wire call gets its own request ID: split turns send two
-				// different bodies, and one Idempotency-Key must never cover both.
+				// different bodies, and one Idempotency-Key must never cover both. A slice
+				// that succeeds on the wire stays uncommitted until the compaction itself
+				// commits: a racing sibling's failure (or an abort) must leave no committed
+				// summary request for the next turn's continuation edge to attach to.
 				const summaryCall = async <T>(
 					call: (callHeaders: Record<string, string> | undefined) => Promise<T>,
 				): Promise<T> => {
@@ -7567,20 +7571,14 @@ export class AgentSession {
 					if (requestId === undefined) {
 						return call(headers);
 					}
-					let result: T;
 					try {
-						result = await call({ ...headers, ...modelRequestHeaders(requestId) });
+						const result = await call({ ...headers, ...modelRequestHeaders(requestId) });
+						uncommittedSlices.push(requestId);
+						return result;
 					} catch (error) {
 						this._semanticEdges.failRequest(requestId);
 						throw error;
 					}
-					// An aborted summary may be partial; it must not commit into the chain.
-					if (signal.aborted) {
-						this._semanticEdges.failRequest(requestId);
-					} else {
-						this._semanticEdges.finishRequest(requestId);
-					}
-					return result;
 				};
 				({ summary, firstKeptEntryId, tokensBefore, details } = await compact(
 					preparation,
@@ -7602,6 +7600,9 @@ export class AgentSession {
 			// commits it. Marked first: the ID is consumed even when the write throws, and a
 			// second finish attempt would mask the original I/O error.
 			compactionRecorded = true;
+			for (const requestId of uncommittedSlices.splice(0)) {
+				this._semanticEdges.finishRequest(requestId);
+			}
 			this._semanticEdges.finishCompaction(semanticCompaction.compactionId, "completed");
 			this.sessionManager.appendCompaction(
 				summary,
@@ -7612,6 +7613,9 @@ export class AgentSession {
 				customInstructions,
 			);
 		} catch (error) {
+			for (const requestId of uncommittedSlices.splice(0)) {
+				this._semanticEdges.failRequest(requestId);
+			}
 			if (!compactionRecorded) {
 				const cancelled =
 					error instanceof Error && (error.name === "AbortError" || error.message === "Compaction cancelled");
@@ -10485,8 +10489,10 @@ export class AgentSession {
 		kwargs: Record<string, unknown> = {},
 		spawnCode?: string,
 	): Promise<RlmSpawnHandle> {
-		// Snapshot before any await: the spawning request is the turn whose tool call is executing now.
-		const spawnedByRequestId = this._semanticEdges.lastTurnRequestId;
+		// Snapshot before any await: the spawning request is the turn whose tool call is
+		// executing now. A spawn arriving outside an active run (a detached kernel task
+		// firing while the parent is idle) has no such turn; an absent edge beats a wrong one.
+		const spawnedByRequestId = this.isStreaming ? this._semanticEdges.lastTurnRequestId : undefined;
 		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
 		const unsupportedKwargs = Object.keys(unsupported);
 		if (unsupportedKwargs.length > 0) {
