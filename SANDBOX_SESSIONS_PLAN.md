@@ -137,3 +137,5 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Completed A11 from its retained transcript after the subagent failed to send a final summary. Top-level support enters through CLI create options and the capability-gated daemon create command.
 
 - Integrated B01 as `68c8c5704`; its remote-safe DTOs passed 49 focused tests after credential-field and error-sanitization review.
+
+- Started B02 after B01 integration; it will replace concrete child-session coupling with a local adapter while preserving current behavior.
