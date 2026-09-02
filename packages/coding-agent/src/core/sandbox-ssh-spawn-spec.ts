@@ -91,7 +91,6 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 		if (types.isProxy(v)) return false;
 		const proto = Object.getPrototypeOf(v);
 		if (proto !== null && proto !== Object.prototype) return false;
-		if (v.constructor !== undefined && v.constructor !== Object) return false;
 		return true;
 	} catch {
 		return false;
