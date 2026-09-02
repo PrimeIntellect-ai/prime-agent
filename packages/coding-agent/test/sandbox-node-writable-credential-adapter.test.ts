@@ -42,6 +42,15 @@ describe("createNodeWritableCredentialAdapter input", () => {
 		expect(createNodeWritableCredentialAdapter({ writable: proxy })).toEqual({ ok: false, code: "INVALID_INPUT" });
 	});
 
+	test("rejects outer symbols and proxied methods", () => {
+		const stream = new Writable({ write() {} });
+		const outer = { writable: stream, [Symbol("extra")]: true };
+		expect(createNodeWritableCredentialAdapter(outer)).toEqual({ ok: false, code: "INVALID_INPUT" });
+		const write = new Proxy((_chunk: Uint8Array, _callback: (error?: unknown) => void): boolean => true, {});
+		const hostile = { write, end: (_callback: (error?: unknown) => void): void => {} };
+		expect(createNodeWritableCredentialAdapter({ writable: hostile })).toEqual({ ok: false, code: "INVALID_INPUT" });
+	});
+
 	test("accepts a genuine Node Writable", () => {
 		const stream = new Writable({
 			write(_chunk, _encoding, callback) {
@@ -76,7 +85,7 @@ describe("createNodeWritableCredentialAdapter input", () => {
 
 describe("composed write lifecycle", () => {
 	test("sync callback completes write+end successfully", async () => {
-		let written: Uint8Array | undefined; // biome-ignore lint/correctness/noUnusedVariables: captured for assertion
+		let written: Uint8Array | undefined;
 		const stream = new Writable({
 			write(chunk, _encoding, callback) {
 				written = chunk;
@@ -96,6 +105,8 @@ describe("composed write lifecycle", () => {
 		// Wait for completion
 		const completion = await result.handle.completion;
 		expect(completion).toEqual({ ok: true, code: "WRITTEN" });
+		expect(written).toBeDefined();
+		expect(written?.every((byte) => byte === 0)).toBe(true);
 	});
 
 	test("async callback still succeeds", async () => {
@@ -375,9 +386,11 @@ describe("cap method contracts", () => {
 		const adapter = createNodeWritableCredentialAdapter({ writable: stream });
 		if (!adapter.ok) throw new Error("unexpected");
 
-		expect(() => adapter.writable.write("not-a-uint8array" as unknown as Uint8Array, () => {})).toThrow();
-		expect(() => adapter.writable.write(null as unknown as Uint8Array, () => {})).toThrow();
-		expect(() => adapter.writable.write(new Uint8Array([1]), null as unknown as () => void)).toThrow();
+		expect(adapter.writable.write("not-a-uint8array" as unknown as Uint8Array, () => {})).toEqual({
+			status: "error",
+		});
+		expect(adapter.writable.write(null as unknown as Uint8Array, () => {})).toEqual({ status: "error" });
+		expect(adapter.writable.write(new Uint8Array([1]), null as unknown as () => void)).toEqual({ status: "error" });
 	});
 
 	test("write rejects non-function callback", () => {
@@ -389,7 +402,9 @@ describe("cap method contracts", () => {
 		const adapter = createNodeWritableCredentialAdapter({ writable: stream });
 		if (!adapter.ok) throw new Error("unexpected");
 
-		expect(() => adapter.writable.write(new Uint8Array([1]), "not-function" as unknown as () => void)).toThrow();
+		expect(adapter.writable.write(new Uint8Array([1]), "not-function" as unknown as () => void)).toEqual({
+			status: "error",
+		});
 	});
 
 	test("release callback gets released when write already done", async () => {

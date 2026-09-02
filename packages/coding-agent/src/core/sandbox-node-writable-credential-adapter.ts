@@ -78,9 +78,8 @@ function extractWriteEnd(raw: object): BoundWritableMethods | null {
 			if (!needed.has(key)) continue;
 			const d = descs[key];
 			if (!d) continue;
-			// Reject getter/setter
 			if (d.get !== undefined || d.set !== undefined) return null;
-			if (typeof d.value !== "function") return null;
+			if (typeof d.value !== "function" || util.types.isProxy(d.value)) return null;
 			found[key] = d.value;
 			needed.delete(key);
 		}
@@ -178,6 +177,7 @@ function exactDescriptors(
 	if (typeof raw !== "object" || raw === null) return null;
 	try {
 		if (util.types.isProxy(raw) || Object.getPrototypeOf(raw) !== Object.prototype) return null;
+		if (Object.getOwnPropertySymbols(raw).length !== 0) return null;
 		const names = Object.getOwnPropertyNames(raw);
 		if (names.length !== keys.size || names.some((n) => !keys.has(n))) return null;
 		const descs = Object.getOwnPropertyDescriptors(raw);
@@ -234,6 +234,7 @@ export function createNodeWritableCredentialAdapter(raw: unknown): CreateNodeWri
 	let endState: EndPhase = "idle";
 	let userEndCallback: ((result: unknown) => void) | null = null;
 	let nodeEndCallbackFired = false;
+	let nodeEndStatus: typeof STATUS_ENDED | typeof STATUS_ERROR = STATUS_ERROR;
 
 	// -- Write method (one-shot) -------------------------------------------
 
@@ -251,10 +252,8 @@ export function createNodeWritableCredentialAdapter(raw: unknown): CreateNodeWri
 	 * synchronously before the throw, its definitive result stands.
 	 */
 	function capWrite(frame: Uint8Array, callback: (result: unknown) => void): unknown {
-		if (writeState !== "idle") throw new Error("write already initiated");
-		if (typeof callback !== "function") throw new Error("callback must be a function");
-		if (!isGenuineFullBackingUint8Array(frame))
-			throw new Error("frame must be a genuine full-backing nonshared Uint8Array");
+		if (writeState !== "idle" || typeof callback !== "function") return STATUS_ERROR;
+		if (!isGenuineFullBackingUint8Array(frame)) return STATUS_ERROR;
 
 		writeState = "writing";
 		userWriteCallback = callback;
@@ -342,7 +341,7 @@ export function createNodeWritableCredentialAdapter(raw: unknown): CreateNodeWri
 	 * - Never fabricate cancellation.
 	 */
 	function capRelease(callback: (result: unknown) => void): unknown {
-		if (typeof callback !== "function") throw new Error("callback must be a function");
+		if (typeof callback !== "function") return STATUS_ERROR;
 
 		// Consume one release attempt
 		if (releaseConsumed) {
@@ -392,12 +391,14 @@ export function createNodeWritableCredentialAdapter(raw: unknown): CreateNodeWri
 		endState = "ending";
 		userEndCallback = callback;
 		nodeEndCallbackFired = false;
+		nodeEndStatus = STATUS_ERROR;
 
 		function nodeEndCallback(err?: unknown): void {
 			if (nodeEndCallbackFired) return;
 			nodeEndCallbackFired = true;
 
 			if (err) {
+				nodeEndStatus = STATUS_ERROR;
 				const cb = userEndCallback;
 				if (cb) {
 					userEndCallback = null;
@@ -408,6 +409,7 @@ export function createNodeWritableCredentialAdapter(raw: unknown): CreateNodeWri
 					}
 				}
 			} else {
+				nodeEndStatus = STATUS_ENDED;
 				const cb = userEndCallback;
 				if (cb) {
 					userEndCallback = null;
@@ -426,8 +428,7 @@ export function createNodeWritableCredentialAdapter(raw: unknown): CreateNodeWri
 			nodeEnd(nodeEndCallback);
 		} catch {
 			if (nodeEndCallbackFired) {
-				// Callback fired synchronously before throw — result stands.
-				return STATUS_ENDED;
+				return nodeEndStatus;
 			}
 			// throw before callback
 			return STATUS_ERROR;
@@ -435,7 +436,7 @@ export function createNodeWritableCredentialAdapter(raw: unknown): CreateNodeWri
 
 		// If node callback fired synchronously, return definitive status.
 		if (nodeEndCallbackFired) {
-			return STATUS_ENDED;
+			return nodeEndStatus;
 		}
 
 		// Callback will fire later.
