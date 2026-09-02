@@ -108,9 +108,12 @@ expectCompat.poll ??= (actual: () => unknown | Promise<unknown>, options?: { tim
 				async (...args: unknown[]) =>
 					vi.waitFor(async () => {
 						const received = await actual();
-						return (expect(received) as unknown as Record<string, (...values: unknown[]) => unknown>)[matcher]?.(
-							...args,
-						);
+						const expectation = expect(received) as unknown as Record<string, unknown>;
+						const assertion = expectation[matcher];
+						if (typeof assertion !== "function") {
+							throw new Error(`expect.poll does not support matcher: ${matcher}`);
+						}
+						return assertion.apply(expectation, args);
 					}, options),
 		},
 	);

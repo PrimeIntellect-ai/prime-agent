@@ -43,7 +43,7 @@ if [ -n "$prime_agent_script_dir" ] && [ -f "$prime_agent_script_dir/.install-pa
 	fi
 	if [ -n "$_persisted_versions_physical" ] &&
 		[ "$_persisted_versions_physical" = "$(dirname "$prime_agent_script_dir")" ] &&
-		[ "$_persisted_target_dir" = "$prime_agent_script_dir" ] &&
+		[ "$(dirname "$_persisted_target_dir")" = "$_persisted_versions_physical" ] &&
 		[ "$(basename "$_persisted_symlink")" = "$_persisted_cmd" ]; then
 		prime_agent_persisted_versions_dir="$_persisted_versions_physical"
 		prime_agent_persisted_symlink="$_persisted_symlink"
@@ -99,6 +99,7 @@ prime_agent_screen_layout_lab_width=0
 prime_agent_screen_render_lab_width=0
 prime_agent_screen_compact=0
 prime_agent_download_dir=
+prime_agent_binary_staging_dir=
 prime_agent_screen_title=
 prime_agent_screen_status=
 prime_agent_screen_detail=
@@ -186,6 +187,9 @@ prime_agent_cleanup() {
 	status=$?
 	if [ -n "${prime_agent_download_dir:-}" ] && [ -d "$prime_agent_download_dir" ]; then
 		rm -rf "$prime_agent_download_dir"
+	fi
+	if [ -n "${prime_agent_binary_staging_dir:-}" ] && [ -d "$prime_agent_binary_staging_dir" ]; then
+		rm -rf "$prime_agent_binary_staging_dir"
 	fi
 	if [ -n "${prime_agent_binary_lock_dir:-}" ] && [ -d "$prime_agent_binary_lock_dir" ]; then
 		rm -rf "$prime_agent_binary_lock_dir"
@@ -1124,10 +1128,23 @@ prime_agent_binary_fresh_install() {
 
 	prime_agent_verify_binary_checksum "$_checksums_path" "$_artifact_path"
 
-	# Extract to a clean versioned directory
-	rm -rf "$_version_dir"
-	mkdir -p "$_version_dir"
-	prime_agent_run_quiet_with_animation 		"Extracting Prime Agent" 		"Extracting Prime Agent v$_version" 		"Installing to $_version_dir" 		tar -xzf "$_artifact_path" -C "$_version_dir"
+	# Build and validate away from any directory the active command may still use.
+	_final_version_dir="$_version_dir"
+	if [ -L "$prime_agent_binary_symlink" ]; then
+		_active_target=$(readlink "$prime_agent_binary_symlink" 2>/dev/null || printf '')
+		_active_target_dir=
+		if [ -n "$_active_target" ]; then
+			_active_target_dir=$(CDPATH= cd -P "$(dirname "$_active_target")" 2>/dev/null && pwd || printf '')
+		fi
+		if [ "$_active_target_dir" = "$_version_dir" ]; then
+			_final_version_dir="${_version_dir}.repair.$$"
+		fi
+	fi
+	prime_agent_binary_staging_dir="${_final_version_dir}.tmp.$$"
+	rm -rf "$prime_agent_binary_staging_dir"
+	mkdir -p "$prime_agent_binary_staging_dir"
+	_version_dir="$prime_agent_binary_staging_dir"
+	prime_agent_run_quiet_with_animation 		"Extracting Prime Agent" 		"Extracting Prime Agent v$_version" 		"Installing to $_final_version_dir" 		tar -xzf "$_artifact_path" -C "$_version_dir"
 
 	# Find the binary inside the extracted archive.
 	# The archive may contain a wrapper dir (e.g. pi/) or be flat.
@@ -1176,9 +1193,15 @@ prime_agent_binary_fresh_install() {
 	fi
 	if ! prime_agent_binary_validate_layout "$_version_dir" "$_binary_path"; then
 		rm -rf "$_version_dir" "$_download_dir"
+		prime_agent_binary_staging_dir=
 		prime_agent_download_dir=
 		exit 1
 	fi
+	rm -rf "$_final_version_dir"
+	mv "$_version_dir" "$_final_version_dir"
+	prime_agent_binary_staging_dir=
+	_binary_path="$_final_version_dir/$(basename "$_binary_path")"
+	_version_dir="$_final_version_dir"
 	prime_agent_binary_write_install_paths "$_version_dir"
 
 	# Create and verify the stable symlink. Restore a healthy prior target if the
@@ -1248,10 +1271,11 @@ prime_agent_binary_update() {
 	_artifact_url="$prime_agent_base_url/releases/v$_update_version/$_artifact_name"
 	_version_dir="$(prime_agent_binary_target_version_dir "$_update_version")"
 	prime_agent_binary_rollback_version=
+	_old_version_dir=
 	if [ -L "$prime_agent_binary_symlink" ]; then
 		_old_target=$(readlink "$prime_agent_binary_symlink" 2>/dev/null || printf '')
 		_old_version_dir=$(dirname "$_old_target" 2>/dev/null || printf '')
-		if [ "$_old_version_dir" != "$_version_dir" ]; then
+		if [ -d "$_old_version_dir" ]; then
 			prime_agent_binary_rollback_version="$_old_version_dir"
 		fi
 	fi
@@ -1276,9 +1300,15 @@ prime_agent_binary_update() {
 
 	prime_agent_verify_binary_checksum "$_checksums_path" "$_artifact_path"
 
-	# Extract to a fresh version directory
-	rm -rf "$_version_dir"
-	mkdir -p "$_version_dir"
+	# Build and validate away from any directory the active command may still use.
+	_final_version_dir="$_version_dir"
+	if [ "$_old_version_dir" = "$_version_dir" ]; then
+		_final_version_dir="${_version_dir}.repair.$$"
+	fi
+	prime_agent_binary_staging_dir="${_final_version_dir}.tmp.$$"
+	rm -rf "$prime_agent_binary_staging_dir"
+	mkdir -p "$prime_agent_binary_staging_dir"
+	_version_dir="$prime_agent_binary_staging_dir"
 	prime_agent_run_quiet_with_animation 		"Extracting Prime Agent" 		"Extracting Prime Agent v$_update_version" 		"Preparing the update." 		tar -xzf "$_artifact_path" -C "$_version_dir"
 
 	# Find the binary
@@ -1327,9 +1357,15 @@ prime_agent_binary_update() {
 	fi
 	if ! prime_agent_binary_validate_layout "$_version_dir" "$_binary_path"; then
 		rm -rf "$_version_dir" "$_download_dir"
+		prime_agent_binary_staging_dir=
 		prime_agent_download_dir=
 		exit 1
 	fi
+	rm -rf "$_final_version_dir"
+	mv "$_version_dir" "$_final_version_dir"
+	prime_agent_binary_staging_dir=
+	_binary_path="$_final_version_dir/$(basename "$_binary_path")"
+	_version_dir="$_final_version_dir"
 	prime_agent_binary_write_install_paths "$_version_dir"
 
 	# Atomically switch the symlink, then verify the activated path. If activation

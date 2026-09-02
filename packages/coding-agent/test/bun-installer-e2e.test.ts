@@ -74,6 +74,20 @@ function makeRelease(
 	writeFileSync(join(releaseDir, "SHA256SUMS"), `${checksum}  ${archiveName}\n`);
 }
 
+function corruptReleaseArchive(root: string, version: string): void {
+	const platform = `${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch === "arm64" ? "arm64" : "x64"}`;
+	const releaseDir = join(root, "server", "releases", `v${version}`);
+	const archiveName = `prime-agent-${version}-${platform}.tar.gz`;
+	const archive = join(releaseDir, archiveName);
+	writeFileSync(archive, "not a tar archive");
+	const checksum = createHash("sha256").update(readFileSync(archive)).digest("hex");
+	writeFileSync(
+		join(releaseDir, "SHA256SUMS"),
+		`${checksum}  ${archiveName}
+`,
+	);
+}
+
 function installerEnv(root: string, overrides: Record<string, string> = {}): NodeJS.ProcessEnv {
 	const home = join(root, "home");
 	mkdirSync(join(home, ".prime"), { recursive: true });
@@ -203,6 +217,38 @@ describe("compiled binary installer", () => {
 		expect(() => readlinkSync(join(isolatedHome, ".local", "bin", "prime-agent"))).toThrow();
 	});
 
+	test("accepts persisted paths from an old resident version after activation advances", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+		const oldSidecar = join(root, "apps", "versions", "v1.2.3", "install.sh");
+		writeFileSync(oldSidecar, readFileSync(installer));
+		chmodSync(oldSidecar, 0o755);
+		makeRelease(root, "2.0.0", goodExecutable("2.0.0"));
+		expect(runInstaller(root, ["--update", "2.0.0"]).exitCode).toBe(0);
+
+		const isolatedHome = join(root, "isolated-home");
+		mkdirSync(isolatedHome);
+		const result = spawnSync("sh", [oldSidecar, "--update", "2.0.0"], {
+			cwd: root,
+			env: {
+				...process.env,
+				HOME: isolatedHome,
+				PRIME_AGENT_DOWNLOAD_BASE_URL: `file://${join(root, "server")}`,
+				PRIME_AGENT_VERSIONS_DIR: undefined,
+				PRIME_AGENT_BIN_DIR: undefined,
+				XDG_DATA_HOME: undefined,
+				XDG_BIN_HOME: undefined,
+				TERM: "dumb",
+			},
+			encoding: "utf8",
+		});
+		expect(result.status, result.stderr).toBe(0);
+		expect(readlinkSync(join(root, "bin", "prime-agent"))).toContain("v2.0.0/prime-agent");
+		expect(() => readlinkSync(join(isolatedHome, ".local", "bin", "prime-agent"))).toThrow();
+	});
+
 	test("rejects a fresh install that fails through the activated command symlink", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
 		temporaryRoots.push(root);
@@ -259,6 +305,24 @@ describe("compiled binary installer", () => {
 		expect(smoke.stdout).toContain("1.2.3");
 	});
 
+	test("keeps the active same-version install when repair extraction fails", () => {
+		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
+		temporaryRoots.push(root);
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+		const link = join(root, "bin", "prime-agent");
+		const target = readlinkSync(link);
+		rmSync(join(dirname(target), "theme", "prime.json"));
+		makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+		corruptReleaseArchive(root, "1.2.3");
+
+		const result = runInstaller(root, ["--update", "1.2.3"]);
+		expect(result.exitCode).not.toBe(0);
+		expect(readlinkSync(link)).toBe(target);
+		expect(spawnSync(link, ["--version"], { encoding: "utf8" }).status).toBe(0);
+		expect(readFileSync(join(dirname(target), "package.json"), "utf8").length).toBeGreaterThan(0);
+	});
+
 	test("does not use the repaired version as its own rollback target", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
 		temporaryRoots.push(root);
@@ -276,7 +340,7 @@ describe("compiled binary installer", () => {
 		expect(result.exitCode).not.toBe(0);
 		expect(result.stderr).toContain("no healthy rollback version was available");
 		expect(() => readlinkSync(link)).toThrow();
-		expect(() => readFileSync(join(root, "apps", "versions", "v1.2.3", "package.json"))).toThrow();
+		expect(readFileSync(join(root, "apps", "versions", "v1.2.3", "package.json"), "utf8").length).toBeGreaterThan(0);
 	});
 
 	test("does not self-rollback through an aliased versions directory", () => {
@@ -300,7 +364,7 @@ describe("compiled binary installer", () => {
 		const result = runInstaller(root, ["1.2.3"], pathEnv);
 		expect(result.exitCode).not.toBe(0);
 		expect(() => readlinkSync(link)).toThrow();
-		expect(() => readFileSync(join(physicalVersions, "v1.2.3", "package.json"))).toThrow();
+		expect(readFileSync(join(physicalVersions, "v1.2.3", "package.json"), "utf8").length).toBeGreaterThan(0);
 	});
 
 	test("keeps the previous symlink when an update fails its smoke test", () => {

@@ -1575,6 +1575,7 @@ export async function handlePackageCommand(args: string[]): Promise<boolean> {
 						selfUpdateNpmCommand,
 						selfUpdatePlan.installSpec,
 						selfUpdatePlan.packageName,
+						selfUpdatePlan.targetVersion,
 					);
 					if (!selfUpdateCommand) {
 						printSelfUpdateUnavailable(

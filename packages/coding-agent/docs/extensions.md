@@ -241,7 +241,7 @@ This pattern makes the fetched models available during normal startup and to `pr
 ~/.prime/agent/extensions/
 └── my-extension/
     ├── package.json    # Declares dependencies and entry points
-    ├── package-lock.json
+    ├── bun.lock
     ├── node_modules/   # After bun install
     └── src/
         └── index.ts

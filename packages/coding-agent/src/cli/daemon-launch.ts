@@ -24,7 +24,7 @@ import {
 	DAEMON_WORKER_TOKEN_ENV,
 } from "../modes/daemon/daemon-worker-protocol.js";
 import { isHelpCommandRequest, PUBLIC_COMMAND_NAMES, REMOVED_COMMAND_NAMES } from "./command-registry.js";
-import { createCliSubprocessEnv, formatCurrentCliCommand } from "./subprocess-launch.js";
+import { createCliSubprocessEnv, createCliSubprocessLaunchSpec, formatCurrentCliCommand } from "./subprocess-launch.js";
 
 const DAEMON_STARTUP_TIMEOUT_MS = 30_000;
 const DAEMON_STARTUP_LOG_TAIL_BYTES = 4 * 1024;
@@ -384,11 +384,6 @@ Then retry the original command.`,
 		if (disposition === "busy") throw new StaleDaemonError(socketPath, probe.hello);
 	}
 
-	const entrypoint = process.argv[1];
-	if (!entrypoint) {
-		throw new Error("Cannot determine current CLI entrypoint for daemon launch");
-	}
-
 	// Strip inherited daemon worker/supervisor role env vars so the spawned
 	// daemon supervisor does not inherit worker-mode behavior. Without this,
 	// a CLI running inside a daemon worker (e.g. a test spawned by the Prime
@@ -405,19 +400,22 @@ Then retry the original command.`,
 	delete env[SESSION_LEASE_OWNER_ID_ENV];
 
 	const logOffset = currentDaemonLogSize(socketPath);
-	const child = spawn(
+	const launch = createCliSubprocessLaunchSpec(
+		["--mode", "daemon", "--daemon-socket", socketPath],
 		process.execPath,
-		[...process.execArgv, entrypoint, "--mode", "daemon", "--daemon-socket", socketPath],
-		{
-			cwd: spawnCwd ?? process.cwd(),
-			detached: true,
-			env,
-			// A pipe would tie the daemon's stderr to this short-lived CLI
-			// (EPIPE once it exits); crash details come from the daemon log,
-			// which the supervisor writes to before rethrowing startup errors.
-			stdio: "ignore",
-		},
+		process.execArgv,
+		process.argv[1],
+		env,
 	);
+	const child = spawn(launch.command, launch.args, {
+		cwd: spawnCwd ?? process.cwd(),
+		detached: true,
+		env,
+		// A pipe would tie the daemon's stderr to this short-lived CLI
+		// (EPIPE once it exits); crash details come from the daemon log,
+		// which the supervisor writes to before rethrowing startup errors.
+		stdio: "ignore",
+	});
 	let childFailure:
 		| { type: "error"; error: Error }
 		| { type: "exit"; code: number | null; signal: NodeJS.Signals | null }

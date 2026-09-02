@@ -40,6 +40,20 @@ function fixture(): { root: string; binaries: string; sidecars: string; output: 
 		mkdirSync(join(sidecars, name));
 		writeFileSync(join(sidecars, name, ".keep"), "fixture");
 	}
+	for (const name of [
+		"prime-agent-runtime/pyproject.toml",
+		"theme/prime.json",
+		"theme/dark.json",
+		"theme/light.json",
+		"theme/theme-schema.json",
+		"export-html/template.html",
+		"export-html/template.css",
+		"export-html/template.js",
+		"export-html/vendor/.keep",
+	]) {
+		mkdirSync(dirname(join(sidecars, name)), { recursive: true });
+		writeFileSync(join(sidecars, name), "fixture");
+	}
 	writeFileSync(join(sidecars, "package.json"), JSON.stringify({ name: "prime-agent", version: "1.2.3" }));
 	writeFileSync(join(sidecars, "README.md"), "readme");
 	writeFileSync(join(sidecars, "CHANGELOG.md"), "changelog");
@@ -141,6 +155,14 @@ describe("compiled release archives", () => {
 		expect(result.stderr).toContain("Missing required sidecars");
 	});
 
+	test("fails closed when a nested required sidecar is missing", () => {
+		const f = fixture();
+		rmSync(join(f.sidecars, "prime-agent-runtime", "pyproject.toml"));
+		const result = pack(f);
+		expect(result.status).not.toBe(0);
+		expect(result.stderr).toContain("prime-agent-runtime/pyproject.toml");
+	});
+
 	test("rejects dependency directories in release sidecars", () => {
 		const f = fixture();
 		mkdirSync(join(f.sidecars, "examples", "node_modules"));
@@ -154,6 +176,7 @@ describe("compiled release archives", () => {
 		expect(result.status, result.stderr).toBe(0);
 		const manifest = JSON.parse(readFileSync(join(f.output, "artifacts", "latest.json"), "utf8"));
 		expect(manifest.version).toBe("v1.2.3");
+		expect(manifest.package).toBe("@earendil-works/pi-coding-agent");
 		expect(manifest.baseUrl).toBe("https://downloads.example.test/releases/v1.2.3");
 		expect(existsSync(join(f.output, "artifacts", "prime-agent-1.2.3-darwin-arm64.tar.gz"))).toBe(true);
 	});

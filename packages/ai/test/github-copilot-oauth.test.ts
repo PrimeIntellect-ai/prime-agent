@@ -27,7 +27,7 @@ function getUrl(input: unknown): string {
 	if (input instanceof Request) {
 		return input.url;
 	}
-	throw new Error(`Unsupported fetch input: \${String(input)}`);
+	throw new Error(`Unsupported fetch input: ${String(input)}`);
 }
 
 describe("GitHub Copilot OAuth device flow", () => {
@@ -99,7 +99,7 @@ describe("GitHub Copilot OAuth device flow", () => {
 				return new Response("", { status: 200 });
 			}
 
-			throw new Error(`Unexpected fetch URL: \${url}`);
+			throw new Error(`Unexpected fetch URL: ${url}`);
 		});
 
 		origFetchGH = globalThis.fetch;
@@ -171,7 +171,7 @@ describe("GitHub Copilot OAuth device flow", () => {
 				if (!response) throw new Error("Unexpected extra access token poll");
 				return response;
 			}
-			throw new Error(`Unexpected fetch URL: \${url}`);
+			throw new Error(`Unexpected fetch URL: ${url}`);
 		});
 
 		origFetchGH = globalThis.fetch;
