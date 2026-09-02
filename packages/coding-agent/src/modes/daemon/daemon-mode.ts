@@ -7,11 +7,11 @@
  */
 
 import { spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { type Api, getLogger, type Model } from "@earendil-works/pi-ai";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
@@ -68,10 +68,12 @@ import { type PromptOptions, rlmChildLabel } from "../../core/agent-session.js";
 import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import {
 	type AgentSessionRuntime,
+	type AgentSessionRuntimeDisposeOptions,
 	type AgentSessionRuntimeMetadata,
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionRuntime,
 } from "../../core/agent-session-runtime.js";
+import { flushAllPendingAgentTraceUploads } from "../../core/agent-traces.js";
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
@@ -124,6 +126,13 @@ import {
 	type DaemonSocketClient,
 	resolveActiveSessionState,
 } from "./active-session-state.js";
+import {
+	passivatedWorkerRosterEntry,
+	type RosterSessionSummary,
+	rosterAgentIdForSummary,
+	type WorkerRosterEntry,
+	workerRosterEntryFromSummary,
+} from "./agent-roster.js";
 import { createCompactAssistantDelta } from "./compact-session-stream.js";
 import { DaemonClient } from "./daemon-client.js";
 import { filterClientEnv, withClientEnv } from "./daemon-client-env.js";
@@ -153,6 +162,7 @@ import {
 	isDaemonCommandEnvelope,
 	isDaemonDialogExtensionUiRequest,
 	isDaemonMutatingCommand,
+	isSessionPlaneDaemonCommand,
 	salvageDaemonCommandId,
 	success,
 	UPDATE_RESTART_DRAIN_COMMANDS,
@@ -165,6 +175,7 @@ import {
 	inactiveLifecycleForSession,
 	isActiveSessionBusy,
 	type SessionSummary,
+	scheduledJobRegistrations,
 	summaryForActiveSession,
 } from "./daemon-session-list.js";
 import { DaemonSessionSummarizer } from "./daemon-session-summarizer.js";
@@ -180,13 +191,18 @@ import {
 import { assertDaemonSupervisorOwnerCurrent, isDaemonShutdownAdmissionActive } from "./daemon-supervisor-ownership.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
+	DAEMON_WORKER_PEER_TRANSPORT_CAPABILITY,
 	DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
 	DAEMON_WORKER_ROLE_ENV,
+	DAEMON_WORKER_ROSTER_CAPABILITY,
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 	DAEMON_WORKER_TOKEN_ENV,
 	type DaemonWorkerCommand,
 	type DaemonWorkerFrameHeader,
+	type DaemonWorkerPeerGrant,
+	type DaemonWorkerRosterOutbound,
 	isDaemonWorkerFrameHeader,
+	ROSTER_HEARTBEAT_INTERVAL_MS,
 	SESSION_LEASE_OWNER_ID_ENV,
 	SESSION_LEASES_ENABLED_ENV,
 } from "./daemon-worker-protocol.js";
@@ -198,6 +214,7 @@ import {
 	type RlmLedgerEdge,
 	RlmSpawnLedger,
 	readLegacyRlmSubagentRegistry as readLegacyRlmSubagentRegistryFile,
+	tombstoneSavedSessionDelete,
 } from "./rlm-ledger.js";
 import {
 	readRlmSubagentDisplayEntry,
@@ -218,6 +235,7 @@ export interface DaemonModeOptions {
 	createRuntime: CreateAgentSessionRuntimeFactory;
 	worker?: {
 		authenticationToken: string;
+		workerInstanceId?: string;
 		restoreActiveSessionId?: string;
 	};
 }
@@ -380,6 +398,10 @@ interface BoundSupervisorGenerationClaim {
 	ownerFingerprint: string;
 }
 
+const PEER_GRANT_TTL_LIMIT_MS = 30_000;
+// Only the supervisor registers grants, so the cap is a tripwire, never an eviction policy.
+const PEER_GRANT_LIMIT = 1024;
+
 const RLM_SUBAGENT_REGISTRY_FILE = "rlm-subagents.jsonl";
 
 /**
@@ -524,6 +546,9 @@ export class AgentDaemon {
 	private supervisorFenceTimer?: ReturnType<typeof setTimeout>;
 	private supervisorLaunchInProgress = false;
 	private readonly supervisorClaims = new Map<DaemonSocketClient, BoundSupervisorGenerationClaim>();
+	private readonly peerGrants = new Map<string, DaemonWorkerPeerGrant>();
+	private readonly peerClaims = new Map<DaemonSocketClient, DaemonWorkerPeerGrant>();
+	private peerAdmissionsFenced = false;
 	private agentMessagesPaused = false;
 	private readonly summarizer = new DaemonSessionSummarizer(
 		() => [...this.sessions.values()],
@@ -541,6 +566,15 @@ export class AgentDaemon {
 		},
 	);
 	private readonly recoveryJournal?: WorkerRecoveryJournal;
+	private readonly rosterReporter: WorkerRosterReporterState = {
+		lastComposed: new Map(),
+		lastComposedJson: new Map(),
+		queuedChildren: new Map(),
+		removedAgentIds: new Map(),
+		snapshotPending: false,
+	};
+	private rosterFlushScheduled = false;
+	private rosterHeartbeatTimer?: ReturnType<typeof setInterval>;
 	private rlmSpawnLedgerInstance?: RlmSpawnLedger;
 	/** In-flight admission spawn appends, awaited (and consumed) by createRlmSubagentRuntime. */
 	private readonly pendingRlmSpawnAppends = new Map<string, Promise<void>>();
@@ -571,7 +605,10 @@ export class AgentDaemon {
 				this.log(`Cron job ${job.id} failed: ${error instanceof Error ? error.message : String(error)}`);
 			},
 		});
-		this.cronStore.onHeartbeatChange(() => this.broadcastGlobal({ type: "heartbeats_changed" }));
+		this.cronStore.onHeartbeatChange(() => {
+			this.broadcastGlobal({ type: "heartbeats_changed" });
+			this.scheduleRosterFlush();
+		});
 	}
 
 	// The daemon runs detached with no terminal, so route its diagnostics to its
@@ -646,6 +683,13 @@ export class AgentDaemon {
 		if (!this.shuttingDown) {
 			this.cronScheduler.start();
 		}
+		if (this.options.worker) {
+			this.rosterHeartbeatTimer = setInterval(
+				() => this.broadcastRosterFrame({ type: "roster_heartbeat" }),
+				ROSTER_HEARTBEAT_INTERVAL_MS,
+			);
+			this.rosterHeartbeatTimer.unref();
+		}
 		this.startSupervisorMonitor();
 	}
 
@@ -707,6 +751,18 @@ export class AgentDaemon {
 			this.cancelPreparedUpdateRestart(this.updateRestart.id);
 		}
 		return true;
+	}
+
+	/** Burn every outstanding grant and end direct peers; admissions stay fenced until an update cancel. */
+	private fencePeerTransports(closingReason?: DaemonClosingReason): void {
+		this.peerAdmissionsFenced = true;
+		this.peerGrants.clear();
+		for (const client of [...this.peerClaims.keys()]) {
+			this.peerClaims.delete(client);
+			// The reason reaches the client before FIN so its close maps to shutdown/update, not a transport loss.
+			if (closingReason) this.write(client, { type: "daemon_closing", reason: closingReason });
+			client.socket.end();
+		}
 	}
 
 	private clearSupervisorAvailabilityCheck(): void {
@@ -998,7 +1054,8 @@ export class AgentDaemon {
 			// Mark handled so an early rejection cannot surface as an
 			// unhandled-rejection crash before the admission path awaits it.
 			spawnAppend.catch(() => undefined);
-			this.pendingRlmSpawnAppends.set(input.childId, spawnAppend);
+			// Child ids are only unique per parent; the parent scopes the pending-append key.
+			this.pendingRlmSpawnAppends.set(`${parentState.activeSessionId}#${input.childId}`, spawnAppend);
 		}
 		try {
 			writeRlmSubagentDisplayEntry({
@@ -1103,6 +1160,13 @@ export class AgentDaemon {
 		// dual-write era it has no other writer to fall back on, so a failed
 		// append is a failed deletion.
 		await this.rlmSpawnLedger().appendDelete({ childId, child: entry.sessionFile, reason });
+		if (this.options.worker) {
+			this.rosterReporter.removedAgentIds.set(
+				this.rosterAgentIdForRlmChild(childId, entry.parentSessionFile),
+				basename(entry.sessionFile, ".jsonl"),
+			);
+			this.scheduleRosterFlush();
+		}
 		// Deletion boundary: transcript + display tombstone are the durable
 		// record and stay; the nested artifact dir is a runtime cache and goes.
 		await this.deleteRlmSubagentArtifacts(childId, entry.sessionFile);
@@ -1409,6 +1473,7 @@ export class AgentDaemon {
 				}
 			}
 			onStateBound?.(state);
+			this.scheduleRosterFlush();
 		} catch (error) {
 			state.unsubscribe?.();
 			this.sessions.delete(state.activeSessionId);
@@ -2308,11 +2373,19 @@ export class AgentDaemon {
 						candidate.runtime.metadata.rlmChildId === options.id &&
 						candidate.runtime.session === runtime.session,
 				);
+				const disposal = status === "cancelled" ? { kernelSnapshot: false } : undefined;
 				try {
 					if (state) {
-						await this.closeSession(state, status === "cancelled" ? "killed" : "completed");
+						await this.closeSession(
+							state,
+							status === "cancelled" ? "killed" : "completed",
+							true,
+							true,
+							undefined,
+							disposal,
+						);
 					} else {
-						await runtime.session.disposeAsync();
+						await runtime.session.disposeAsync(disposal);
 					}
 				} finally {
 					// Sweep even when teardown throws (see deleteRlmSubagentRuntime);
@@ -2369,12 +2442,12 @@ export class AgentDaemon {
 				try {
 					try {
 						if (state) {
-							await this.closeSession(state, "killed", false);
+							await this.closeSession(state, "killed", false, true, undefined, { kernelSnapshot: false });
 						} else {
-							await session?.disposeAsync();
+							await session?.disposeAsync({ kernelSnapshot: false });
 						}
 					} finally {
-						await staleSession?.disposeAsync();
+						await staleSession?.disposeAsync({ kernelSnapshot: false });
 					}
 				} finally {
 					// Runs even when teardown throws: the jobs-cancel rewrite and the
@@ -2519,7 +2592,7 @@ export class AgentDaemon {
 				},
 			);
 		} catch (error) {
-			this.pendingRlmSpawnAppends.delete(options.id);
+			this.pendingRlmSpawnAppends.delete(`${parentState.activeSessionId}#${options.id}`);
 			throw error;
 		}
 		// Admission is complete only once the spawn record is durably in the
@@ -2528,8 +2601,8 @@ export class AgentDaemon {
 		// failed append therefore FAILS admission — the just-added child is
 		// closed like any other admission failure rather than admitted as a
 		// ghost the ledger-driven listing and hydration could never find.
-		const spawnAppend = this.pendingRlmSpawnAppends.get(options.id);
-		this.pendingRlmSpawnAppends.delete(options.id);
+		const spawnAppend = this.pendingRlmSpawnAppends.get(`${parentState.activeSessionId}#${options.id}`);
+		this.pendingRlmSpawnAppends.delete(`${parentState.activeSessionId}#${options.id}`);
 		try {
 			await spawnAppend;
 		} catch (error) {
@@ -3187,10 +3260,12 @@ export class AgentDaemon {
 			this.detachClient(client);
 			client.detachInput();
 			this.clients.delete(client);
-			const wasAuthenticated = client.authenticated === true;
+			this.peerClaims.delete(client);
+			// The fence check revokes a stale claim before ending the socket; the role survives.
+			const wasSupervisor = client.authenticationRole === "supervisor";
 			this.revokeSupervisorClaim(client);
 			const supervisorSocketPath = this.supervisorSocketPathFromEnv();
-			if (this.options.worker && wasAuthenticated && supervisorSocketPath) {
+			if (this.options.worker && wasSupervisor && supervisorSocketPath) {
 				this.scheduleSupervisorAvailabilityCheck(supervisorSocketPath, 100);
 			}
 		};
@@ -3252,6 +3327,9 @@ export class AgentDaemon {
 				id?: unknown;
 				type?: unknown;
 				token?: unknown;
+				grantId?: unknown;
+				workerInstanceId?: unknown;
+				purpose?: unknown;
 				supervisorGeneration?: unknown;
 				supervisorPid?: unknown;
 				supervisorProcessStartId?: unknown;
@@ -3281,9 +3359,52 @@ export class AgentDaemon {
 			// Public supervisor authentication has already bound this socket's identity.
 			if (this.options.worker && client.authenticated !== true) {
 				const commandId = typeof parsed.id === "string" ? parsed.id : undefined;
+				if (parsed.type === "peer_auth") {
+					// Single use: the grant is burned before its token is checked.
+					const grant = typeof parsed.grantId === "string" ? this.peerGrants.get(parsed.grantId) : undefined;
+					if (typeof parsed.grantId === "string") this.peerGrants.delete(parsed.grantId);
+					const presentedTokenHash =
+						typeof parsed.token === "string" ? createHash("sha256").update(parsed.token).digest() : undefined;
+					const expectedTokenHash = grant ? createHash("sha256").update(grant.token).digest() : undefined;
+					const expiresAt = grant ? Date.parse(grant.expiresAt) : Number.NaN;
+					if (
+						this.peerAdmissionsFenced ||
+						!grant ||
+						!presentedTokenHash ||
+						!expectedTokenHash ||
+						!timingSafeEqual(presentedTokenHash, expectedTokenHash) ||
+						parsed.workerInstanceId !== grant.workerInstanceId ||
+						parsed.purpose !== grant.purpose ||
+						!Number.isFinite(expiresAt) ||
+						expiresAt <= Date.now()
+					) {
+						clearParsedAdmission();
+						this.write(client, failure(commandId, "peer_auth", "Peer authentication failed"));
+						client.socket.end();
+						return;
+					}
+					client.authenticated = true;
+					client.authenticationRole = "session_client";
+					this.peerClaims.set(client, grant);
+					this.write(client, {
+						id: commandId,
+						type: "response",
+						command: "peer_auth",
+						success: true,
+						data: {
+							workerInstanceId: grant.workerInstanceId,
+							activeSessionId: grant.activeSessionId,
+							purpose: grant.purpose,
+						},
+					});
+					return;
+				}
 				if (
 					parsed.type !== "worker_auth" ||
 					parsed.token !== this.options.worker.authenticationToken ||
+					// Enforced only when presented: a downgraded (pre-instance-id) supervisor must still adopt live workers.
+					(parsed.workerInstanceId !== undefined &&
+						parsed.workerInstanceId !== this.options.worker.workerInstanceId) ||
 					typeof parsed.supervisorGeneration !== "string" ||
 					!Number.isInteger(parsed.supervisorPid) ||
 					(parsed.supervisorPid as number) <= 0 ||
@@ -3318,6 +3439,7 @@ export class AgentDaemon {
 					}
 				}
 				client.authenticated = true;
+				client.authenticationRole = "supervisor";
 				this.supervisorClaims.set(client, { claim, ownerFingerprint });
 				this.clearSupervisorAvailabilityCheck();
 				this.scheduleSupervisorFenceCheck();
@@ -3326,10 +3448,42 @@ export class AgentDaemon {
 					type: "response",
 					command: "worker_auth",
 					success: true,
+					data: {
+						capabilities: [
+							DAEMON_WORKER_ROSTER_CAPABILITY,
+							...(this.options.worker.workerInstanceId !== undefined
+								? [DAEMON_WORKER_PEER_TRANSPORT_CAPABILITY]
+								: []),
+						],
+					},
 				});
+				this.rosterReporter.snapshotPending = true;
+				this.scheduleRosterFlush();
 				return;
 			}
-			if (this.options.worker) {
+			const peerClaim = this.options.worker ? this.peerClaims.get(client) : undefined;
+			if (peerClaim) {
+				const commandId = typeof parsed.id === "string" ? parsed.id : undefined;
+				const commandName = typeof parsed.type === "string" ? parsed.type : "unknown";
+				// Reachable only through shutdown, which fences admissions without ending live peers.
+				if (this.peerAdmissionsFenced) {
+					clearParsedAdmission();
+					this.write(client, failure(commandId, commandName, "Direct peer transport is fenced"));
+					return;
+				}
+				if (
+					typeof parsed.type !== "string" ||
+					!isSessionPlaneDaemonCommand(parsed.type) ||
+					parsed.activeSessionId !== peerClaim.activeSessionId
+				) {
+					clearParsedAdmission();
+					this.write(
+						client,
+						failure(commandId, commandName, "Command is not allowed on this direct peer transport"),
+					);
+					return;
+				}
+			} else if (this.options.worker) {
 				const boundClaim = this.supervisorClaims.get(client);
 				if (!boundClaim) {
 					clearParsedAdmission();
@@ -3468,6 +3622,35 @@ export class AgentDaemon {
 				case "worker_auth":
 					this.write(client, failure(command.id, command.type, "Worker is already authenticated"));
 					return;
+				case "worker_register_peer_transport": {
+					const grant = command.grant;
+					const boundClaim = this.supervisorClaims.get(client);
+					const expiresAt = Date.parse(grant.expiresAt);
+					const now = Date.now();
+					for (const [grantId, pending] of this.peerGrants) {
+						if (Date.parse(pending.expiresAt) < now) this.peerGrants.delete(grantId);
+					}
+					if (
+						this.peerAdmissionsFenced ||
+						!boundClaim ||
+						grant.issuerGeneration !== boundClaim.claim.supervisorGeneration ||
+						grant.purpose !== "session_client" ||
+						!grant.grantId ||
+						!grant.token ||
+						grant.workerInstanceId !== this.options.worker?.workerInstanceId ||
+						!this.sessions.has(grant.activeSessionId) ||
+						this.peerGrants.size >= PEER_GRANT_LIMIT ||
+						!Number.isFinite(expiresAt) ||
+						expiresAt <= now ||
+						expiresAt - now > PEER_GRANT_TTL_LIMIT_MS
+					) {
+						this.write(client, failure(command.id, command.type, "Peer transport grant is invalid"));
+						return;
+					}
+					this.peerGrants.set(grant.grantId, grant);
+					this.writeWorkerSuccess(client, command);
+					return;
+				}
 				case "worker_subscribe": {
 					const state = this.getBoundSessionState(command.activeSessionId);
 					setDaemonClientSessionCapabilities(
@@ -3487,9 +3670,12 @@ export class AgentDaemon {
 					return;
 				}
 				case "worker_archive_and_shutdown": {
+					// Close sessions first so direct peers read session_closed "killed", not a daemon shutdown.
 					for (const state of [...this.sessions.values()]) {
 						await this.closeSession(state, "killed");
 					}
+					await flushAllPendingAgentTraceUploads();
+					this.fencePeerTransports();
 					this.writeWorkerSuccess(client, command);
 					setImmediate(() => void this.shutdown(0));
 					return;
@@ -3511,6 +3697,7 @@ export class AgentDaemon {
 					return;
 				}
 				case "worker_prepare_update": {
+					this.fencePeerTransports("update");
 					const transaction = this.beginUpdateRestartTransaction(client);
 					const manifest = await this.runUpdateRestartPreparation(transaction);
 					this.writeWorkerSuccess(client, command, manifest);
@@ -3552,6 +3739,7 @@ export class AgentDaemon {
 						throw new Error("Daemon update checkpoint is already committing");
 					}
 					if (transaction) this.cancelPreparedUpdateRestart(transaction.id);
+					this.peerAdmissionsFenced = false;
 					this.writeWorkerSuccess(client, command);
 					return;
 				}
@@ -3719,6 +3907,8 @@ export class AgentDaemon {
 				}
 				state.clients.add(client);
 				client.attachedActiveSessionIds.add(state.activeSessionId);
+				// Carrier-less mutation: a direct viewer changes directAttachedClients with no session event.
+				if (client.authenticationRole === "session_client") this.scheduleRosterFlush();
 				if (deferClientEnv && clientEnv) {
 					this.updateRestart?.deferredClientEnv.push({
 						client,
@@ -3874,11 +4064,29 @@ export class AgentDaemon {
 				if (this.findActiveSessionByFile(command.sessionPath)) {
 					throw new Error("Cannot delete the currently active session");
 				}
+				const composedEntry = this.rosterEntryForSessionPath(canonicalSessionPath(command.sessionPath));
+				const { deletedInfo, ledgerEdge } = await tombstoneSavedSessionDelete(
+					this.rlmSpawnLedger(),
+					command.sessionPath,
+					composedEntry?.summary,
+				);
 				const result = await this.deleteSavedSessionFile(command.sessionPath, {
 					afterFileRemoved: () => {
 						this.cancelScheduledJobsForSessionFile(command.sessionPath);
 					},
 				});
+				if (result.ok && this.options.worker) {
+					const removedAgentId =
+						composedEntry?.agentId ??
+						(ledgerEdge ? this.rosterAgentIdForRlmChild(ledgerEdge.childId, ledgerEdge.parent) : deletedInfo?.id);
+					if (removedAgentId) {
+						this.rosterReporter.removedAgentIds.set(
+							removedAgentId,
+							composedEntry?.summary.sessionId ?? deletedInfo?.id,
+						);
+						this.scheduleRosterFlush();
+					}
+				}
 				return success(command.id, "delete_saved_session", result);
 			}
 
@@ -4196,7 +4404,11 @@ export class AgentDaemon {
 				const state = this.getSessionState(command.activeSessionId);
 				const bash = state.runtime.session.executeBash(command.command);
 				state.inFlightBash = Promise.allSettled([state.inFlightBash, bash]).then(() => undefined);
-				return success(command.id, "execute_bash_and_wait", await bash);
+				try {
+					return success(command.id, "execute_bash_and_wait", await bash);
+				} finally {
+					this.scheduleRosterFlush();
+				}
 			}
 
 			case "abort_bash": {
@@ -4494,6 +4706,7 @@ export class AgentDaemon {
 			case "cron_add": {
 				const state = this.getSessionState(command.activeSessionId);
 				const job = this.createCronJobForState(state, command.schedule, command.prompt);
+				this.scheduleRosterFlush();
 				return success(command.id, "cron_add", { job });
 			}
 
@@ -4507,6 +4720,7 @@ export class AgentDaemon {
 					this.removeQueuedHeartbeatFollowUp(state, job);
 				}
 				this.cronScheduler.wake();
+				this.scheduleRosterFlush();
 				return success(command.id, "cron_cancel", { job });
 			}
 
@@ -4546,6 +4760,7 @@ export class AgentDaemon {
 				await session.setModel(model, {
 					waitForExtensions: !(session.isStreaming || session.isCompacting),
 				});
+				this.scheduleRosterFlush();
 				return success(command.id, "set_model", model);
 			}
 
@@ -4555,6 +4770,7 @@ export class AgentDaemon {
 				const result = await session.cycleModel(command.direction, {
 					waitForExtensions: !(session.isStreaming || session.isCompacting),
 				});
+				this.scheduleRosterFlush();
 				return success(command.id, "cycle_model", result ?? null);
 			}
 
@@ -5783,6 +5999,7 @@ export class AgentDaemon {
 		this.abortSideQuestionsFor(client, state.activeSessionId);
 		abortClientSnapshotStreaming(client, state.activeSessionId);
 		detachClientFromActiveSession(client, state);
+		if (client.authenticationRole === "session_client") this.scheduleRosterFlush();
 		this.write(client, {
 			type: "session_detached",
 			activeSessionId: state.activeSessionId,
@@ -6041,6 +6258,7 @@ export class AgentDaemon {
 			}
 		}
 		for (const state of [...this.sessions.values()]) await this.closeSession(state, "killed");
+		await flushAllPendingAgentTraceUploads();
 		return manifest;
 	}
 
@@ -6064,7 +6282,10 @@ export class AgentDaemon {
 		transaction.deferredClientEnv.length = 0;
 		for (const pause of this.updateRestartQueuePauses.values()) pause.release();
 		this.updateRestartQueuePauses.clear();
-		if (!this.shuttingDown) this.cronScheduler.start();
+		if (!this.shuttingDown) {
+			this.peerAdmissionsFenced = false;
+			this.cronScheduler.start();
+		}
 	}
 
 	private async prepareUpdateRestart(): Promise<DaemonUpdateRestartManifest> {
@@ -6105,10 +6326,10 @@ export class AgentDaemon {
 	}
 
 	private findActiveSessionByFile(sessionPath: string): ActiveSessionState | undefined {
-		const resolvedSessionPath = resolve(sessionPath);
+		const canonicalPath = canonicalSessionPath(sessionPath);
 		for (const state of this.sessions.values()) {
 			const sessionFile = state.runtime.session.sessionFile;
-			if (sessionFile && resolve(sessionFile) === resolvedSessionPath) {
+			if (sessionFile && canonicalSessionPath(sessionFile) === canonicalPath) {
 				return state;
 			}
 		}
@@ -6130,6 +6351,7 @@ export class AgentDaemon {
 		waitForAbort = true,
 		cascadeChildren = true,
 		descendantCollector?: Set<ActiveSessionState>,
+		disposal?: AgentSessionRuntimeDisposeOptions,
 	): Promise<void> {
 		this.abortWaitingPromptAdmissionsForSession(state.activeSessionId);
 		for (const client of state.clients) {
@@ -6168,7 +6390,7 @@ export class AgentDaemon {
 		}
 		const descendants = new Set<ActiveSessionState>();
 		const closePromise = Promise.resolve().then(() =>
-			this.closeSessionOnce(state, reason, waitForAbort, cascadeChildren, descendants),
+			this.closeSessionOnce(state, reason, waitForAbort, cascadeChildren, descendants, disposal),
 		);
 		const close = { promise: closePromise, reason, descendants };
 		this.closingSessions.set(state.activeSessionId, close);
@@ -6241,6 +6463,7 @@ export class AgentDaemon {
 		waitForAbort: boolean,
 		cascadeChildren: boolean,
 		descendants: Set<ActiveSessionState>,
+		disposal?: AgentSessionRuntimeDisposeOptions,
 	): Promise<void> {
 		if (!this.sessions.has(state.activeSessionId)) {
 			return;
@@ -6254,7 +6477,7 @@ export class AgentDaemon {
 		// agent_status to a session being torn down.
 		this.summarizer.forget(state.activeSessionId);
 		const cascadeError = cascadeChildren
-			? await this.closeChildSessions(state, reason, waitForAbort, descendants)
+			? await this.closeChildSessions(state, reason, waitForAbort, descendants, disposal)
 			: undefined;
 		// Empty draft (no messages, config, or jobs): discard rather than persist an
 		// empty session file. Mirrors the detach-time discard so a config-bearing
@@ -6289,7 +6512,7 @@ export class AgentDaemon {
 		state.unsubscribe?.();
 		let disposeError: unknown;
 		try {
-			await state.runtime.dispose();
+			await state.runtime.dispose(disposal);
 		} catch (error) {
 			disposeError = error;
 		}
@@ -6304,6 +6527,11 @@ export class AgentDaemon {
 		state.clients.clear();
 		this.acpMcpOwners.delete(state.activeSessionId);
 		this.sessions.delete(state.activeSessionId);
+		// Archived top-level sessions leave the worker's list; subagent rows mirror the registry and stay.
+		if (!keepsResumeEntry && state.runtime.metadata.kind !== "subagent" && this.options.worker) {
+			this.rosterReporter.removedAgentIds.set(this.rosterAgentIdForState(state), state.runtime.session.sessionId);
+		}
+		this.scheduleRosterFlush();
 		if (isEmptyDraftSession) {
 			const sessionFile = state.runtime.session.sessionFile;
 			if (sessionFile) {
@@ -6326,12 +6554,13 @@ export class AgentDaemon {
 		reason: DaemonSessionClosedReason,
 		waitForAbort = true,
 		descendants = new Set<ActiveSessionState>(),
+		disposal?: AgentSessionRuntimeDisposeOptions,
 	): Promise<unknown> {
 		let cascadeError: unknown;
 		for (const childState of getChildActiveSessionStates(this.sessions, parentState)) {
 			descendants.add(childState);
 			try {
-				await this.closeSession(childState, reason, waitForAbort, true, descendants);
+				await this.closeSession(childState, reason, waitForAbort, true, descendants, disposal);
 			} catch (error) {
 				cascadeError ??= error;
 			}
@@ -6360,6 +6589,7 @@ export class AgentDaemon {
 			}
 		}
 		this.stampRlmChildActiveSessionId(message);
+		this.observeRosterEvent(state, message);
 		const sequencedMessage = this.addSessionEventMeta(state, message);
 		let serialized: string | undefined;
 		for (const client of state.clients) {
@@ -6486,6 +6716,237 @@ export class AgentDaemon {
 		for (const client of this.clients) {
 			this.write(client, message);
 		}
+	}
+
+	private rosterEntryForSessionPath(canonicalPath: string): WorkerRosterEntry | undefined {
+		for (const entry of this.rosterReporter.lastComposed.values()) {
+			if (entry.summary.sessionFile && canonicalSessionPath(entry.summary.sessionFile) === canonicalPath) {
+				return entry;
+			}
+		}
+		return undefined;
+	}
+
+	private rosterAgentIdForState(state: ActiveSessionState): string {
+		const session = state.runtime.session;
+		const metadata = state.runtime.metadata;
+		if (metadata.kind === "subagent" && metadata.rlmChildId) {
+			return rosterAgentIdForSummary({
+				runtimeKind: "subagent",
+				rlmChildId: metadata.rlmChildId,
+				sessionId: metadata.rlmChildId,
+				parentSessionPath: metadata.parentSessionFile,
+				parentActiveSessionId: metadata.parentActiveSessionId,
+			});
+		}
+		return session.sessionId;
+	}
+
+	private rosterAgentIdForRlmChild(childId: string, parentSessionPath: string | undefined): string {
+		return rosterAgentIdForSummary({
+			runtimeKind: "subagent",
+			rlmChildId: childId,
+			sessionId: childId,
+			parentSessionPath,
+		});
+	}
+
+	private observeRosterEvent(state: ActiveSessionState, message: DaemonOutbound): void {
+		if (!this.options.worker) return;
+		if (message.type === "session_event") {
+			if (message.event.type === "rlm_child_update") {
+				this.observeRosterChildUpdate(state, message.event.child);
+				return;
+			}
+			if (!ROSTER_SESSION_EVENT_TRIGGERS.has(message.event.type)) return;
+		} else if (
+			message.type !== "session_status" &&
+			message.type !== "session_closed" &&
+			message.type !== "session_replaced"
+		) {
+			return;
+		}
+		this.scheduleRosterFlush();
+	}
+
+	private observeRosterChildUpdate(state: ActiveSessionState, child: AgentConnectionRlmChildAgentSnapshot): void {
+		const bound = child.activeSessionId !== undefined || this.hasSessionForRlmChild(state, child.id);
+		const entry = this.queuedChildRosterEntry(state, child);
+		if (!bound && (child.status === "queued" || child.status === "running")) {
+			this.rosterReporter.queuedChildren.set(entry.agentId, entry);
+		} else {
+			this.rosterReporter.queuedChildren.delete(entry.agentId);
+		}
+		this.scheduleRosterFlush();
+	}
+
+	private hasSessionForRlmChild(parentState: ActiveSessionState, childId: string): boolean {
+		for (const candidate of this.sessions.values()) {
+			const metadata = candidate.runtime.metadata;
+			if (metadata.rlmChildId === childId && metadata.parentActiveSessionId === parentState.activeSessionId) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private queuedChildRosterEntry(
+		state: ActiveSessionState,
+		child: AgentConnectionRlmChildAgentSnapshot,
+	): WorkerRosterEntry {
+		const parentSession = state.runtime.session;
+		const summary: RosterSessionSummary = {
+			id: child.id,
+			lifecycle: "live",
+			activity: "idle",
+			isSessionActive: false,
+			runtimeKind: "subagent",
+			rlmDepth: (parentSession.rlmDepth ?? 0) + 1,
+			sessionId: child.id,
+			sessionName: child.sessionName,
+			cwd: parentSession.sessionManager.getCwd(),
+			isStreaming: false,
+			isCompacting: false,
+			attachedClients: 0,
+			messageCount: 0,
+			firstMessage: child.label,
+			parentActiveSessionId: state.activeSessionId,
+			parentSessionId: parentSession.sessionId,
+			parentSessionPath: parentSession.sessionFile,
+			rlmChildId: child.id,
+		};
+		return { agentId: rosterAgentIdForSummary(summary), queuedChild: true, summary };
+	}
+
+	private scheduleRosterFlush(): void {
+		if (!this.options.worker || this.rosterFlushScheduled || this.shuttingDown) return;
+		this.rosterFlushScheduled = true;
+		setImmediate(() => {
+			this.rosterFlushScheduled = false;
+			try {
+				this.flushRoster();
+			} catch (error) {
+				this.log(`could not publish roster delta: ${String(error)}`);
+			}
+		});
+	}
+
+	private flushRoster(): void {
+		const reporter = this.rosterReporter;
+		const entries = new Map<string, WorkerRosterEntry>();
+		const scheduledJobs = this.cronStore.list();
+		for (const summary of buildSessionList([...this.sessions.values()], [], scheduledJobs)) {
+			const entry = workerRosterEntryFromSummary(summary);
+			entries.set(entry.agentId, entry);
+		}
+		for (const [agentId, queued] of reporter.queuedChildren) {
+			if (entries.has(agentId)) {
+				reporter.queuedChildren.delete(agentId);
+				continue;
+			}
+			entries.set(agentId, queued);
+		}
+		// A terminal unbound child run owns no transcript: it is a removal, never a passivated row.
+		// A vanished row whose state lives on under a new sessionId was swapped in place
+		// (new_session/switch/fork): also a removal — plain list never served the old transcript.
+		const composedActiveIds = new Set<string>();
+		for (const entry of entries.values()) {
+			if (entry.summary.activeSessionId !== undefined) composedActiveIds.add(entry.summary.activeSessionId);
+		}
+		for (const [agentId, previous] of reporter.lastComposed) {
+			if (entries.has(agentId)) continue;
+			const swapped =
+				previous.summary.activeSessionId !== undefined && composedActiveIds.has(previous.summary.activeSessionId);
+			if (previous.queuedChild === true || swapped) {
+				reporter.removedAgentIds.set(agentId, previous.summary.sessionId);
+			}
+		}
+		for (const [agentId, targetSessionId] of reporter.removedAgentIds) {
+			const composed = entries.get(agentId);
+			// A new incarnation cancels the stale removal, as does a revived resident top-level row
+			// (switch-back, resume-after-archive); a resident subagent row with the removed sessionId
+			// is the mid-teardown race and stays suppressed.
+			const revived = composed?.summary.activeSessionId !== undefined && composed.summary.runtimeKind !== "subagent";
+			if (composed && (composed.queuedChild === true || composed.summary.sessionId !== targetSessionId || revived)) {
+				reporter.removedAgentIds.delete(agentId);
+				continue;
+			}
+			entries.delete(agentId);
+			reporter.queuedChildren.delete(agentId);
+		}
+		const registrations = scheduledJobRegistrations(scheduledJobs);
+		for (const [agentId, previous] of reporter.lastComposed) {
+			if (!entries.has(agentId) && !reporter.removedAgentIds.has(agentId)) {
+				const file = previous.summary.sessionFile ? resolve(previous.summary.sessionFile) : undefined;
+				entries.set(
+					agentId,
+					passivatedWorkerRosterEntry(previous, {
+						hasRegisteredHeartbeat: file !== undefined && registrations.heartbeatSessionFiles.has(file),
+						hasRegisteredCronJob: file !== undefined && registrations.cronSessionFiles.has(file),
+					}),
+				);
+			}
+		}
+		const changed: WorkerRosterEntry[] = [];
+		const nextJson = new Map<string, string>();
+		for (const entry of entries.values()) {
+			const json = JSON.stringify(entry);
+			nextJson.set(entry.agentId, json);
+			if (reporter.lastComposedJson.get(entry.agentId) !== json) changed.push(entry);
+		}
+		const removedAgentIds = [...reporter.removedAgentIds.keys()];
+		reporter.lastComposed = new Map(entries);
+		reporter.lastComposedJson = nextJson;
+		if (!this.hasAuthenticatedSupervisorClient()) {
+			if (changed.length > 0 || removedAgentIds.length > 0) reporter.snapshotPending = true;
+			return;
+		}
+		if (reporter.snapshotPending) {
+			const delivered = this.broadcastRosterFrame({
+				type: "roster_delta",
+				snapshot: true,
+				entries: [...entries.values()],
+				...(removedAgentIds.length > 0 ? { removedAgentIds } : {}),
+			});
+			if (delivered) {
+				reporter.snapshotPending = false;
+				reporter.removedAgentIds.clear();
+			}
+			return;
+		}
+		if (changed.length === 0 && removedAgentIds.length === 0) return;
+		const delivered = this.broadcastRosterFrame({
+			type: "roster_delta",
+			entries: changed,
+			...(removedAgentIds.length > 0 ? { removedAgentIds } : {}),
+		});
+		if (delivered) reporter.removedAgentIds.clear();
+		else reporter.snapshotPending = true;
+	}
+
+	private hasAuthenticatedSupervisorClient(): boolean {
+		for (const client of this.clients) {
+			if (this.supervisorClaims.has(client) && !client.socket.destroyed) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private broadcastRosterFrame(message: DaemonWorkerRosterOutbound): boolean {
+		const payload = Buffer.from(serializeJsonLine(message));
+		let delivered = false;
+		for (const client of this.clients) {
+			if (!this.supervisorClaims.has(client) || client.socket.destroyed) {
+				continue;
+			}
+			// socket.write queues under backpressure, so a queued frame is delivered, never a loss gap.
+			client.socket.write(
+				encodePrivateFrame<DaemonWorkerFrameHeader>({ kind: "outbound", outboundType: message.type }, payload),
+			);
+			delivered = true;
+		}
+		return delivered;
 	}
 
 	private recordWorkerRecoveryState(state: ActiveSessionState, operation: string, busyOverride?: boolean): void {
@@ -6724,7 +7185,11 @@ export class AgentDaemon {
 	}
 
 	private write(client: DaemonSocketClient, message: DaemonOutbound): boolean {
-		const compactDelta = client.transport === "private-framed" ? createCompactAssistantDelta(message) : undefined;
+		// Direct session peers decode plain jsonl payloads only; compact deltas are a supervisor optimization.
+		const compactDelta =
+			client.transport === "private-framed" && client.authenticationRole !== "session_client"
+				? createCompactAssistantDelta(message)
+				: undefined;
 		return this.writeSerialized(
 			client,
 			serializeJsonLine(compactDelta ?? message),
@@ -6815,6 +7280,8 @@ export class AgentDaemon {
 			process.exit(exitCode);
 		}
 		this.shuttingDown = true;
+		this.peerAdmissionsFenced = true;
+		this.peerGrants.clear();
 		if (this.supervisorMonitorTimer) {
 			clearTimeout(this.supervisorMonitorTimer);
 			this.supervisorMonitorTimer = undefined;
@@ -6822,6 +7289,10 @@ export class AgentDaemon {
 		if (this.supervisorFenceTimer) {
 			clearTimeout(this.supervisorFenceTimer);
 			this.supervisorFenceTimer = undefined;
+		}
+		if (this.rosterHeartbeatTimer) {
+			clearInterval(this.rosterHeartbeatTimer);
+			this.rosterHeartbeatTimer = undefined;
 		}
 		this.log(`shutting down (exit ${exitCode}); closing ${this.sessions.size} active session(s)`);
 		const closingReason = this.getShutdownClosingReason();
@@ -6835,8 +7306,12 @@ export class AgentDaemon {
 			cleanup();
 		}
 		this.cronScheduler.stop();
-		for (const state of [...this.sessions.values()]) {
-			await this.closeSession(state, closingReason);
+		try {
+			for (const state of [...this.sessions.values()]) {
+				await this.closeSession(state, closingReason);
+			}
+		} finally {
+			await flushAllPendingAgentTraceUploads();
 		}
 		for (const client of this.clients) {
 			client.detachInput();
@@ -6853,6 +7328,32 @@ export class AgentDaemon {
 		process.exit(exitCode);
 	}
 }
+
+interface WorkerRosterReporterState {
+	lastComposed: Map<string, WorkerRosterEntry>;
+	lastComposedJson: Map<string, string>;
+	queuedChildren: Map<string, WorkerRosterEntry>;
+	/** Pending removals: agentId -> removed sessionId; a new incarnation of the id cancels it. */
+	removedAgentIds: Map<string, string | undefined>;
+	snapshotPending: boolean;
+}
+
+const ROSTER_SESSION_EVENT_TRIGGERS = new Set([
+	"turn_start",
+	"turn_end",
+	"bash_start",
+	"bash_end",
+	"compaction_start",
+	"compaction_end",
+	"auto_retry_start",
+	"auto_retry_end",
+	"tool_execution_start",
+	"tool_execution_end",
+	"message_end",
+	"session_action_update",
+	"session_info_changed",
+	"thinking_level_changed",
+]);
 
 function hasDaemonOutboundActiveSessionId(
 	message: DaemonOutbound,

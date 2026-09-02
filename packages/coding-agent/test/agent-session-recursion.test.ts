@@ -102,6 +102,8 @@ interface InspectableRlmRun {
 	settled: boolean;
 	error?: string;
 	abandonedForQuiescence?: boolean;
+	activity?: { kind: string };
+	emitUpdate?: () => void;
 	publication?: { promise: Promise<void>; resolve(): void; reject(error: Error): void };
 	settlement?: { promise: Promise<void>; resolve(): void; reject(error: Error): void };
 	detachedDeletion?: Awaited<ReturnType<AgentSession["listRlmSubagents"]>>["subagents"][number];
@@ -1255,6 +1257,12 @@ describe("AgentSession rlm recursion", () => {
 				deleteRlmSubagentRuntime: async () => {},
 			},
 		});
+		const childUpdates: Array<{ status: string; error?: string }> = [];
+		root.subscribe((event) => {
+			if (event.type === "rlm_child_update") {
+				childUpdates.push({ status: event.child.status, error: event.child.error });
+			}
+		});
 
 		const spawned = await root.runRlmChild("start failing child", { name: "failing-worker" });
 		await vi.waitFor(async () => {
@@ -1274,6 +1282,10 @@ describe("AgentSession rlm recursion", () => {
 				expect.objectContaining({ content: expect.stringContaining("kernel startup failed") }),
 			);
 		});
+		// A terminal run that never bound a session leaves no row anywhere: the
+		// terminal update is the cancelled removal signal and snapshots skip the run.
+		expect(childUpdates.at(-1)).toEqual({ status: "cancelled", error: "kernel startup failed" });
+		expect(root.getRlmChildSnapshots()).toEqual([]);
 	});
 
 	it("injects exactly one cancellation notice when a child run is cancelled", async () => {
@@ -2362,6 +2374,44 @@ describe("AgentSession rlm recursion", () => {
 
 		releaseChild();
 		await waitFor(() => rootRun.status === "done");
+	});
+
+	it("suppresses repeated child updates whose snapshot did not change", async () => {
+		let releaseChild: () => void = () => {};
+		const release = new Promise<void>((resolve) => {
+			releaseChild = resolve;
+		});
+		let childStarted = false;
+		const root = createSession({
+			streamFn: (_model, context) => {
+				const text = userText(context);
+				const stream = createAssistantMessageEventStream();
+				childStarted = true;
+				void release.then(() => {
+					stream.push({ type: "done", reason: "stop", message: assistantMessage(`child answer: ${text}`) });
+				});
+				return stream;
+			},
+		});
+		let updates = 0;
+		root.subscribe((event) => {
+			if (event.type === "rlm_child_update") updates += 1;
+		});
+
+		await root.runRlmChild("slow shard");
+		await waitFor(() => childStarted);
+		const run = [...(root as unknown as InspectableRlmSession)._activeRlmChildRuns.values()][0];
+		if (!run?.emitUpdate || !run.session) throw new Error("Missing child run emit");
+		await waitFor(() => run.activity?.kind === "waiting");
+		const before = updates;
+		run.emitUpdate();
+		run.emitUpdate();
+		expect(updates).toBe(before);
+		run.session.setCurrentRecap("changed recap");
+		await waitFor(() => updates === before + 1);
+
+		releaseChild();
+		await waitFor(() => run.status === "done");
 	});
 
 	it("runs a child agent without requiring ripgrep", async () => {

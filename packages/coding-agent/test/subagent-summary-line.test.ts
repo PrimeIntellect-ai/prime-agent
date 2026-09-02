@@ -3,8 +3,11 @@ import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../src/modes/agent-connection/types.js";
+import { isDirectAgentChild } from "../src/modes/agents-view/agents-view-state.js";
+import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import {
 	countDirectSubagentStatuses,
+	countRosterSubagentStatuses,
 	SubagentSummaryLine,
 } from "../src/modes/interactive/components/subagent-summary-line.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
@@ -31,7 +34,7 @@ describe("SubagentSummaryLine", () => {
 		line.setSubagentCounts({ total: 1, running: 1, idle: 0, inactive: 0 });
 		let rendered = line.render(120).map(stripAnsi);
 		expect(rendered).toHaveLength(3);
-		expect(rendered[0]).toContain("╭─ agents ─");
+		expect(rendered[0]).toContain("╭─ subagents ─");
 		expect(rendered[1]).toContain("● 1 running   ◐ 0 idle   ○ 0 inactive");
 
 		line.setSubagentCounts({ total: 2, running: 1, idle: 1, inactive: 0 });
@@ -206,7 +209,7 @@ describe("SubagentSummaryLine", () => {
 		Reflect.set(mode, "rlmNodeId", "me");
 		seed.call(mode, [worker]);
 
-		expect(stripAnsi(line.render(100).join("\n"))).toContain("╭─ agents ─");
+		expect(stripAnsi(line.render(100).join("\n"))).toContain("╭─ subagents ─");
 	});
 
 	it("clears a resident session id when a terminal update reports an evicted child", () => {
@@ -233,6 +236,84 @@ describe("SubagentSummaryLine", () => {
 		update.call(mode, child("worker", "done"));
 
 		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 0 idle   ○ 1 inactive");
+	});
+
+	it("removes a run on the producer's cancelled signal and keeps transcript-backed rows through repeated dones", () => {
+		const line = new SubagentSummaryLine();
+		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;
+		Object.assign(mode, {
+			subagentSnapshots: new Map<string, AgentConnectionRlmChildAgentSnapshot>(),
+			rlmNodeId: undefined,
+			heartbeatCatalog: [],
+			subagentSummaryLine: line,
+			updateWorkingPulse: vi.fn(),
+			syncWorkingLoader: vi.fn(),
+			updateWorkingLoaderMessage: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		});
+		const update = Reflect.get(InteractiveMode.prototype, "updateSubagentSummary") as (
+			this: typeof mode,
+			value: AgentConnectionRlmChildAgentSnapshot,
+		) => void;
+		const snapshots = Reflect.get(mode, "subagentSnapshots") as Map<string, AgentConnectionRlmChildAgentSnapshot>;
+
+		// A pre-bind failure arrives as cancelled: the queued row goes, never an inactive phantom.
+		update.call(mode, child("never-bound", "queued"));
+		update.call(mode, child("never-bound", "cancelled", { error: "boom" }));
+		expect(snapshots.has("never-bound")).toBe(false);
+
+		update.call(mode, child("worker", "running", { activeSessionId: "resident-worker" }));
+		update.call(mode, child("worker", "done"));
+		update.call(mode, child("worker", "done"));
+		expect(snapshots.has("worker")).toBe(true);
+		expect(stripAnsi(line.render(100).join("\n"))).toContain("● 0 running   ◐ 0 idle   ○ 1 inactive");
+	});
+
+	it("counts parentSessionId-only roster children exactly like the agents view", () => {
+		const rosterChild = {
+			id: "c1",
+			sessionId: "c1",
+			lifecycle: "live",
+			runtimeKind: "subagent",
+			rlmChildId: "c1",
+			parentSessionId: "root-session",
+			rosterStatus: "idle",
+		} as SessionSummary;
+		expect(isDirectAgentChild(rosterChild, { sessionId: "root-session" })).toBe(true);
+		expect(countRosterSubagentStatuses([rosterChild], { sessionId: "root-session" }, new Set())).toEqual({
+			total: 1,
+			running: 0,
+			idle: 1,
+			inactive: 0,
+		});
+	});
+
+	it("keeps chat alive with the snapshot-fed bar when the roster subscribe fails", async () => {
+		const line = new SubagentSummaryLine();
+		const mode = Object.create(InteractiveMode.prototype) as InteractiveMode & Record<string, unknown>;
+		Object.assign(mode, {
+			agentConnection: {
+				subscribeAgentRoster: vi.fn(async () => {
+					throw new Error("Daemon is stale");
+				}),
+			},
+			subagentSnapshots: new Map<string, AgentConnectionRlmChildAgentSnapshot>(),
+			rlmNodeId: undefined,
+			heartbeatCatalog: [],
+			subagentSummaryLine: line,
+			connectionState: undefined,
+			scheduleHeartbeatManagerRefresh: vi.fn(),
+			updateWorkingPulse: vi.fn(),
+			syncWorkingLoader: vi.fn(),
+			updateWorkingLoaderMessage: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		});
+		const subscribe = Reflect.get(InteractiveMode.prototype, "subscribeToRosterBar") as (
+			this: typeof mode,
+		) => Promise<void>;
+
+		await expect(subscribe.call(mode)).resolves.toBeUndefined();
+		expect(Reflect.get(mode, "rosterBar")).toBeUndefined();
 	});
 
 	it("turns a selection into the scoped agents-view run result", async () => {

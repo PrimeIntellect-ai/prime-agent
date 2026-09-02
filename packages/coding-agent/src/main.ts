@@ -74,10 +74,11 @@ import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
-import { deserializeDaemonError } from "./modes/daemon/daemon-errors.js";
+import { DaemonSessionCreateError, deserializeDaemonCreateError } from "./modes/daemon/daemon-errors.js";
 import { collectDaemonClientEnv, collectDaemonLaunchEnv } from "./modes/daemon/daemon-protocol.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
+	daemonWorkerInstanceId,
 	isDaemonWorkerProcess,
 	requireDaemonWorkerAuthenticationToken,
 	waitForDaemonWorkerStartupGate,
@@ -1006,7 +1007,7 @@ async function createDaemonClientConnection(options: {
 			launchEnv: collectDaemonLaunchEnv(),
 		});
 		if (!response.success) {
-			throw deserializeDaemonError(response);
+			throw deserializeDaemonCreateError(response);
 		}
 		if (!isDaemonSessionSummary(response.data)) {
 			throw new Error("Daemon returned an invalid create response");
@@ -1330,6 +1331,7 @@ export async function main(args: string[], options?: MainOptions) {
 				createRuntime,
 				worker: {
 					authenticationToken: requireDaemonWorkerAuthenticationToken(),
+					workerInstanceId: daemonWorkerInstanceId(),
 					restoreActiveSessionId: process.env[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV],
 				},
 			});
@@ -1452,17 +1454,27 @@ export async function main(args: string[], options?: MainOptions) {
 		// no DeferredAgentConnection is needed to avoid creating it up front.
 		const isFreshDefaultSession =
 			!activeDaemonSessionSummary && !getInteractiveDaemonSessionPath(parsed, sessionManager);
-		const { connection, summary } = await createDaemonClientConnection({
-			socketPath: daemonSocketPath,
-			config: defaultSessionConfig,
-			activeSessionId: activeDaemonSessionSummary
-				? getDaemonSummaryActiveSessionId(activeDaemonSessionSummary)
-				: undefined,
-			sessionPath: getInteractiveDaemonSessionPath(parsed, sessionManager),
-			clientOwned: parsed.noSession,
-			noSession: parsed.noSession,
-			supportsExtensionUi: true,
-		});
+		let connection: DaemonAgentConnection;
+		let summary: SessionSummary;
+		try {
+			({ connection, summary } = await createDaemonClientConnection({
+				socketPath: daemonSocketPath,
+				config: defaultSessionConfig,
+				activeSessionId: activeDaemonSessionSummary
+					? getDaemonSummaryActiveSessionId(activeDaemonSessionSummary)
+					: undefined,
+				sessionPath: getInteractiveDaemonSessionPath(parsed, sessionManager),
+				clientOwned: parsed.noSession,
+				noSession: parsed.noSession,
+				supportsExtensionUi: true,
+			}));
+		} catch (error) {
+			if (error instanceof DaemonSessionCreateError) {
+				console.error(chalk.red(`Error: ${error.message}`));
+				process.exit(1);
+			}
+			throw error;
+		}
 		const agentConnection: AgentConnection = connection;
 		const attachModelFallbackMessage = isFreshDefaultSession
 			? startupModel.modelFallbackMessage
@@ -1544,7 +1556,7 @@ export async function main(args: string[], options?: MainOptions) {
 				supportsExtensionUi: appMode === "rpc",
 			}));
 		} catch (error) {
-			if (error instanceof SessionAlreadyActiveError) {
+			if (error instanceof SessionAlreadyActiveError || error instanceof DaemonSessionCreateError) {
 				console.error(chalk.red(`Error: ${error.message}`));
 				process.exit(1);
 			}

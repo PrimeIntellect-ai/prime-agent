@@ -187,12 +187,16 @@ function isLeaseOwnerAlive(owner: SessionLeaseOwner): boolean {
 
 function withLeaseGuard<T>(directory: string, action: () => T): T {
 	let release: (() => void) | undefined;
+	let guardCompromised = false;
 	for (let attempt = 0; attempt < 100; attempt++) {
 		try {
 			release = lockSync(directory, {
 				realpath: false,
 				lockfilePath: `${directory}.guard`,
 				stale: 5000,
+				onCompromised: () => {
+					guardCompromised = true;
+				},
 			});
 			break;
 		} catch (error) {
@@ -208,10 +212,24 @@ function withLeaseGuard<T>(directory: string, action: () => T): T {
 	if (!release) {
 		throw new Error(`Could not coordinate session lease: ${directory}`);
 	}
+	const assertGuardHeld = () => {
+		if (guardCompromised) throw new Error(`Session lease guard was compromised: ${directory}`);
+	};
 	try {
-		return action();
+		assertGuardHeld();
+		const result = action();
+		assertGuardHeld();
+		return result;
 	} finally {
-		release();
+		if (guardCompromised) {
+			try {
+				release();
+			} catch {
+				// The compromised guard no longer owns a lock that can be safely released.
+			}
+		} else {
+			release();
+		}
 	}
 }
 

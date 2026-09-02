@@ -48,6 +48,7 @@ import {
 	launchDaemonUpdateRestartCoordinator,
 	resolveDaemonUpdateRestartSocketPath,
 } from "../../cli/daemon-update-restart.js";
+import { type CliSubprocessLaunchSpec, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
 	APP_NAME,
 	APP_TITLE,
@@ -166,6 +167,7 @@ import type {
 	AgentConnectionToolDefinition,
 } from "../agent-connection/index.js";
 import { AgentConnectionPromptAdmissionError } from "../agent-connection/index.js";
+import type { SessionSummary } from "../daemon/daemon-session-list.js";
 import { getModelArgumentCompletions } from "../model-autocomplete.js";
 import {
 	checkForPackageUpdates,
@@ -222,7 +224,11 @@ import {
 	styleSlashCommandText,
 } from "./components/slash-command-message.js";
 import { SlashCommandResultMessageComponent } from "./components/slash-command-result-message.js";
-import { countDirectSubagentStatuses, SubagentSummaryLine } from "./components/subagent-summary-line.js";
+import {
+	countDirectSubagentStatuses,
+	countRosterSubagentStatuses,
+	SubagentSummaryLine,
+} from "./components/subagent-summary-line.js";
 import { ThinkingSelectorComponent } from "./components/thinking-selector.js";
 import {
 	selectLatestToolExpandHint,
@@ -765,6 +771,53 @@ export function buildUpdateRelaunchArgs(args: readonly string[], sessionFile: st
 	return relaunchArgs;
 }
 
+type UpdateRelaunchExecve = (file: string, args: string[], environment: Record<string, string>) => never;
+
+interface UpdateRelaunchExecOptions {
+	platform: string;
+	nodeVersion: string;
+	cwd: string;
+	previousCwd: string;
+	environment: NodeJS.ProcessEnv;
+	chdir: (directory: string) => void;
+	execve?: UpdateRelaunchExecve;
+}
+
+function execveFailureThrows(nodeVersion: string): boolean {
+	// Before Node 26.1, a failed execve syscall aborts the process instead of throwing for the fallback below.
+	const match = /^(\d+)\.(\d+)\./.exec(nodeVersion);
+	if (!match) {
+		return false;
+	}
+	const major = Number(match[1]);
+	const minor = Number(match[2]);
+	return major > 26 || (major === 26 && minor >= 1);
+}
+
+export function tryExecUpdateRelaunch(launch: CliSubprocessLaunchSpec, options: UpdateRelaunchExecOptions): boolean {
+	// Process replacement preserves the shell job and foreground terminal without retaining the old TUI.
+	if (
+		!options.execve ||
+		options.platform === "win32" ||
+		options.platform === "os400" ||
+		!execveFailureThrows(options.nodeVersion)
+	) {
+		return false;
+	}
+	const environment = Object.fromEntries(
+		Object.entries(options.environment).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+	);
+	options.chdir(options.cwd);
+	try {
+		options.execve(launch.command, [launch.command, ...launch.args], environment);
+	} catch (error) {
+		// A thrown execve must not leave the fallback's process on a changed cwd.
+		options.chdir(options.previousCwd);
+		throw error;
+	}
+	return true;
+}
+
 export function buildUpdateChildArgs(args: readonly string[], daemonSocketPath: string): string[] {
 	return args.includes("--daemon-socket") ? [...args] : [...args, "--daemon-socket", daemonSocketPath];
 }
@@ -974,6 +1027,7 @@ export class InteractiveMode {
 	private subagentSummaryLine: SubagentSummaryLine;
 	private subagentSnapshots = new Map<string, AgentConnectionRlmChildAgentSnapshot>();
 	private rlmNodeId: string | undefined;
+	private rosterBar: { summaries(): SessionSummary[]; dispose(): Promise<void> } | undefined;
 
 	private toolOutputExpanded = false;
 	private agentMessagesExpanded = false;
@@ -2790,6 +2844,8 @@ export class InteractiveMode {
 	private async rebindCurrentSession(): Promise<void> {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		void this.rosterBar?.dispose();
+		this.rosterBar = undefined;
 		if (this.localSessionHost) {
 			this.uiServices = this.localSessionHost.createUiServices();
 		}
@@ -2804,6 +2860,7 @@ export class InteractiveMode {
 			this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 		}
 		this.subscribeToAgent();
+		await this.subscribeToRosterBar();
 		// A session_action_update in the unsubscribed gap above is lost; re-sync the queue post-subscription.
 		this.patchConnectionState({ sessionActions: (await this.agentConnection.getState()).sessionActions });
 		this.refreshQueueSelectionFromState();
@@ -5079,6 +5136,19 @@ export class InteractiveMode {
 		};
 	}
 
+	private async subscribeToRosterBar(): Promise<void> {
+		if (!this.agentConnection.subscribeAgentRoster) return;
+		try {
+			this.rosterBar = await this.agentConnection.subscribeAgentRoster(() => {
+				this.updateSubagentSummaryLine();
+				this.ui.requestRender();
+			});
+		} catch {
+			this.rosterBar = undefined;
+		}
+		this.updateSubagentSummaryLine();
+	}
+
 	private subscribeToAgent(): void {
 		this.unsubscribe = this.agentConnection.subscribe(async (event) => {
 			try {
@@ -5927,6 +5997,7 @@ export class InteractiveMode {
 	}
 
 	private updateSubagentSummary(child: AgentConnectionRlmChildAgentSnapshot): void {
+		// "cancelled" also covers never-bound terminal runs; AgentSession owns that rule.
 		if (child.status === "cancelled") {
 			this.removeSubagentSnapshot(child.id);
 		} else {
@@ -5951,8 +6022,23 @@ export class InteractiveMode {
 				.filter((heartbeat) => heartbeat.job.status === "active")
 				.map((heartbeat) => heartbeat.job.activeSessionId),
 		);
+		const rosterSummaries = this.rosterBar?.summaries();
+		// A client-owned session has no row on the public roster; only then do the
+		// snapshots carry the bar. A public parent with zero roster children shows zero.
+		const sessionOnRoster =
+			rosterSummaries?.some((row) => row.sessionId === this.connectionState?.sessionId) === true;
 		this.subagentSummaryLine.setSubagentCounts(
-			countDirectSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId, activeHeartbeatSessionIds),
+			rosterSummaries && sessionOnRoster
+				? countRosterSubagentStatuses(
+						rosterSummaries,
+						{
+							activeSessionId: this.connectionState?.activeSessionId,
+							sessionId: this.connectionState?.sessionId,
+							sessionFile: this.connectionState?.sessionFile,
+						},
+						activeHeartbeatSessionIds,
+					)
+				: countDirectSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId, activeHeartbeatSessionIds),
 		);
 		if (!this.subagentSummaryLine.isSelectable() && this.subagentSummaryLine.focused) this.focusEditor();
 	}
@@ -8771,7 +8857,28 @@ export class InteractiveMode {
 					);
 				}
 			}
-			const relaunchResult = spawnSync(process.execPath, [...process.execArgv, entrypoint, ...relaunchArgs], {
+			const relaunch = createCliSubprocessLaunchSpec(relaunchArgs);
+			const updateProcess = process as NodeJS.Process & { execve?: UpdateRelaunchExecve };
+			try {
+				if (
+					tryExecUpdateRelaunch(relaunch, {
+						platform: process.platform,
+						nodeVersion: process.versions.node,
+						cwd: updateCwd,
+						previousCwd: process.cwd(),
+						environment: process.env,
+						chdir: (directory) => process.chdir(directory),
+						execve: updateProcess.execve,
+					})
+				) {
+					return;
+				}
+			} catch (error: unknown) {
+				console.error(
+					`Could not replace the current ${APP_NAME} process (${error instanceof Error ? error.message : String(error)}). Falling back to a child relaunch.`,
+				);
+			}
+			const relaunchResult = spawnSync(relaunch.command, relaunch.args, {
 				stdio: "inherit",
 				cwd: updateCwd,
 				env: process.env,
@@ -10023,6 +10130,8 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 		if (this.unsubscribe) {
 			this.unsubscribe();
 		}
+		void this.rosterBar?.dispose();
+		this.rosterBar = undefined;
 		if (this.isInitialized) {
 			this.ui.stop({
 				preserveAltScreen: options.preserveAltScreen,

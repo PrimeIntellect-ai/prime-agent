@@ -10,6 +10,10 @@ import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js"
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import type { ActiveSessionState } from "./active-session-state.js";
 
+import { type AgentRosterStatus, isSessionSummaryBusy } from "./agent-roster.js";
+
+export { classifySessionRosterStatus, isSessionSummaryBusy } from "./agent-roster.js";
+
 // Durable lifecycle; decides agents-view visibility. Only "live" is shown.
 // "draft" = no message sent yet (discarded on close); "archived" = ctrl+x'd,
 // reachable only via --resume <selector>.
@@ -18,7 +22,6 @@ export type SessionLifecycle = "draft" | "live" | "archived";
 // Heuristic activity of a live session. Classification-in-flight counts as
 // "working" so the view never sees an unlabeled idle session.
 export type SessionActivity = "working" | "idle";
-export type SessionRosterStatus = "running" | "idle" | "inactive";
 
 // Upper bound on the spawn-code source carried in a session summary. Generous
 // enough for real spawn cells while keeping the daemon wire payload bounded.
@@ -55,6 +58,8 @@ export interface SessionSummary {
 	/** True while the agent is streaming with tool calls pending; drives the "running tools" label. */
 	isRunningTools?: boolean;
 	attachedClients: number;
+	/** Clients attached over the direct worker transport; the supervisor adds these to its own count. */
+	directAttachedClients?: number;
 	messageCount: number;
 	unfinishedActionCount?: number;
 	sessionActions: SessionActionSnapshot;
@@ -76,6 +81,10 @@ export interface SessionSummary {
 	summary?: string;
 	/** Completion verdict for an idle session; absent while working or unjudged. */
 	taskState?: AgentTaskState;
+	rosterStatus?: AgentRosterStatus;
+	statusLabel?: "queued" | "recovering" | "failed";
+	/** Set while the owning worker has been silent past the staleness threshold. */
+	lastHeardFromAt?: string;
 	/** Resident session-host process state, populated by the global supervisor. */
 	workerState?: "starting" | "ready" | "recovering" | "stopping" | "failed";
 	/** Diagnostic process identity; clients must not use this as a stable session identifier. */
@@ -100,14 +109,40 @@ export function resolveAttachModelFallbackMessage(
 	return summary.model ? undefined : startupModelFallbackMessage;
 }
 
-export function classifySessionRosterStatus(summary: SessionSummary): SessionRosterStatus {
-	if (!summary.activeSessionId) return "inactive";
-	if (summary.hasActiveHeartbeat || summary.activity === "working" || isSessionSummaryBusy(summary)) return "running";
-	return "idle";
+export function scheduledJobRegistrations(scheduledJobs: readonly AgentCronJob[]): {
+	activeHeartbeatSessionIds: Set<string>;
+	heartbeatSessionIds: Set<string>;
+	cronSessionIds: Set<string>;
+	heartbeatSessionFiles: Set<string>;
+	cronSessionFiles: Set<string>;
+} {
+	const activeHeartbeatSessionIds = new Set<string>();
+	const heartbeatSessionIds = new Set<string>();
+	const cronSessionIds = new Set<string>();
+	const heartbeatSessionFiles = new Set<string>();
+	const cronSessionFiles = new Set<string>();
+	for (const job of scheduledJobs) {
+		const heartbeat = isHeartbeatCronJob(job);
+		if (heartbeat && job.status === "active") activeHeartbeatSessionIds.add(job.activeSessionId);
+		// A paused heartbeat cannot fire, so unlike a live heartbeat (or a registered
+		// cron job) it must not silently pin a worker forever.
+		const registered = heartbeat ? job.status === "active" : job.status === "active" || job.status === "paused";
+		if (!registered) continue;
+		(heartbeat ? heartbeatSessionIds : cronSessionIds).add(job.activeSessionId);
+		(heartbeat ? heartbeatSessionFiles : cronSessionFiles).add(resolve(job.sessionFile));
+	}
+	return { activeHeartbeatSessionIds, heartbeatSessionIds, cronSessionIds, heartbeatSessionFiles, cronSessionFiles };
 }
 
-export function isSessionSummaryBusy(summary: SessionSummary): boolean {
-	return summary.isSessionActive || summary.hasRunningRlmChildren === true;
+/** Naming signals intent to return, so named sessions are exempt even when empty. */
+export function isEvictableEmptySessionSummary(summary: SessionSummary): boolean {
+	return (
+		summary.messageCount === 0 &&
+		!summary.sessionName &&
+		!isSessionSummaryBusy(summary) &&
+		summary.hasRegisteredHeartbeat !== true &&
+		summary.hasRegisteredCronJob !== true
+	);
 }
 
 export function buildSessionList(
@@ -116,23 +151,13 @@ export function buildSessionList(
 	scheduledJobs: readonly AgentCronJob[] = [],
 ): SessionSummary[] {
 	const activeBySessionFile = new Map<string, ActiveSessionState>();
-	const heartbeatSessionIds = new Set<string>();
-	const registeredHeartbeatSessionIds = new Set<string>();
-	const registeredCronSessionIds = new Set<string>();
-	const registeredHeartbeatSessionFiles = new Set<string>();
-	const registeredCronSessionFiles = new Set<string>();
-	for (const job of scheduledJobs) {
-		const heartbeat = isHeartbeatCronJob(job);
-		if (heartbeat && job.status === "active") heartbeatSessionIds.add(job.activeSessionId);
-		// A paused heartbeat cannot fire, so unlike a live heartbeat (or a registered
-		// cron job) it must not silently pin a worker forever.
-		const registered = heartbeat ? job.status === "active" : job.status === "active" || job.status === "paused";
-		if (!registered) continue;
-		const ids = heartbeat ? registeredHeartbeatSessionIds : registeredCronSessionIds;
-		const files = heartbeat ? registeredHeartbeatSessionFiles : registeredCronSessionFiles;
-		ids.add(job.activeSessionId);
-		files.add(resolve(job.sessionFile));
-	}
+	const {
+		activeHeartbeatSessionIds: heartbeatSessionIds,
+		heartbeatSessionIds: registeredHeartbeatSessionIds,
+		cronSessionIds: registeredCronSessionIds,
+		heartbeatSessionFiles: registeredHeartbeatSessionFiles,
+		cronSessionFiles: registeredCronSessionFiles,
+	} = scheduledJobRegistrations(scheduledJobs);
 
 	for (const activeSession of activeSessions) {
 		const sessionFile = activeSession.runtime.session.sessionFile;
@@ -208,6 +233,9 @@ export function summaryForActiveSession(
 		}
 	}
 
+	const directAttachedClients = [...activeSession.clients].filter(
+		(client) => client.authenticationRole === "session_client",
+	).length;
 	return {
 		id: activeSession.activeSessionId,
 		lifecycle: activeLifecycleForSession(activeSession),
@@ -233,6 +261,7 @@ export function summaryForActiveSession(
 		hasRunningRlmChildren: session.hasRunningRlmChildren(),
 		isRunningTools: session.isStreaming && session.state.pendingToolCalls.size > 0,
 		attachedClients: activeSession.clients.size,
+		...(directAttachedClients > 0 ? { directAttachedClients } : {}),
 		messageCount: session.messages.length,
 		unfinishedActionCount: session.unfinishedActionCount,
 		sessionActions: session.getSessionActionSnapshot(),
@@ -395,6 +424,10 @@ export function activeActivityForSession(activeSession: ActiveSessionState): Ses
 	if (activeSession.runtime.metadata?.kind === "subagent") {
 		return "idle";
 	}
+	// An empty session never gets a summarizer verdict; don't hold it at "working" forever.
+	if (activeSession.runtime.session.messages.length === 0) {
+		return "idle";
+	}
 	// Hold at "working" until the idle verdict is current, so the view never
 	// buckets an unlabeled idle session.
 	return isSummaryCurrent(activeSession) ? "idle" : "working";
@@ -416,6 +449,8 @@ export function inactiveLifecycleForSession(session: SessionInfo): SessionLifecy
 }
 
 export function activeLifecycleForSession(activeSession: ActiveSessionState): SessionLifecycle {
+	// A resident subagent is a spawned worker, not a user draft; it is visible before its first message lands.
+	if (activeSession.runtime.metadata?.kind === "subagent") return "live";
 	// Lifecycle drives agents-view visibility and is message-based: a session
 	// becomes live once a message is sent. A message-less session is a draft (hidden
 	// from the view) even if the user changed its model/name first — that config is

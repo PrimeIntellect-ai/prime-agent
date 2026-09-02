@@ -1457,6 +1457,7 @@ describe("InteractiveMode connection events", () => {
 		).rebindCurrentSession;
 		const updatePendingMessagesDisplay = vi.fn();
 		const subscribeToAgent = vi.fn();
+		const subscribeToRosterBar = vi.fn(async () => {});
 		const getState = vi.fn(async () => createConnectionState());
 		const harness = {
 			unsubscribe: undefined,
@@ -1466,6 +1467,7 @@ describe("InteractiveMode connection events", () => {
 			bindLocalSessionExtensions: true,
 			bindCurrentSessionExtensions: vi.fn(async () => {}),
 			subscribeToAgent,
+			subscribeToRosterBar,
 			agentConnection: { getState },
 			patchConnectionState: vi.fn(),
 			refreshQueueSelectionFromState: vi.fn(),

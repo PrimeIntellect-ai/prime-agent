@@ -497,12 +497,14 @@ export class RlmSpawnLedger {
 		});
 	}
 
-	private async familyUnlocked(): Promise<SessionInfo[]> {
-		const edges = [...this.replaySync().values()].filter((edge) => !edge.deleted);
-		const byChild = new Map<string, RlmLedgerEdge>();
-		for (const edge of edges) {
-			byChild.set(canonicalSessionPath(edge.child), edge);
-		}
+	/** Live edges reconciled by stat, exactly like family(): a dead parent or child drops the edge. */
+	liveEdges(): Promise<RlmLedgerEdge[]> {
+		return this.enqueue(() => this.liveEdgesUnlocked());
+	}
+
+	private async liveEdgesUnlocked(
+		edges = [...this.replaySync().values()].filter((edge) => !edge.deleted),
+	): Promise<RlmLedgerEdge[]> {
 		const statCache = new Map<string, boolean>();
 		const exists = async (path: string): Promise<boolean> => {
 			const cached = statCache.get(path);
@@ -516,11 +518,24 @@ export class RlmSpawnLedger {
 			statCache.set(path, ok);
 			return ok;
 		};
-		let alive: RlmLedgerEdge[] = [];
+		const alive: RlmLedgerEdge[] = [];
 		for (const edge of edges) {
 			if ((await exists(canonicalSessionPath(edge.child))) && (await exists(canonicalSessionPath(edge.parent)))) {
 				alive.push(edge);
 			}
+		}
+		return alive;
+	}
+
+	private async familyUnlocked(): Promise<SessionInfo[]> {
+		// One replay, one stat snapshot: byChild comes from the same alive set that emits child rows,
+		// so a child whose dead edge was reconciled away degrades to a root row instead of vanishing.
+		let alive: RlmLedgerEdge[] = await this.liveEdgesUnlocked(
+			[...this.replaySync().values()].filter((candidate) => !candidate.deleted),
+		);
+		const byChild = new Map<string, RlmLedgerEdge>();
+		for (const edge of alive) {
+			byChild.set(canonicalSessionPath(edge.child), edge);
 		}
 		const rootPaths: string[] = [];
 		let rootEntries: string[] = [];
@@ -840,4 +855,30 @@ export class RlmSpawnLedger {
 		}
 		return edges;
 	}
+}
+
+// Shared user-delete policy: only a readable no-parent transcript is positively top-level; children and
+// unknown targets tombstone via the ledger BEFORE the file delete (a tombstoned-but-undeleted file is
+// the accepted orphan of a failed delete).
+export async function tombstoneSavedSessionDelete(
+	ledger: RlmSpawnLedger,
+	sessionPath: string,
+	knownSummary: { runtimeKind?: "top-level" | "subagent" } | undefined,
+): Promise<{ deletedInfo: SessionInfo | undefined; ledgerEdge: RlmLedgerEdge | undefined }> {
+	const deletedPath = canonicalSessionPath(sessionPath);
+	const deletedInfo = (await readSessionInfo(sessionPath).catch(() => null)) ?? undefined;
+	const knownChild =
+		knownSummary?.runtimeKind === "subagent" ||
+		deletedInfo?.parentSessionPath !== undefined ||
+		(deletedInfo?.rlmDepth ?? 0) > 0;
+	const positivelyTopLevel = !knownChild && (knownSummary !== undefined || deletedInfo !== undefined);
+	if (positivelyTopLevel) return { deletedInfo, ledgerEdge: undefined };
+	const edges = await ledger.edges();
+	// Tombstone every matching edge: a duplicate edge for the path (corrupt or raced appends) left
+	// live would resurrect a later recreation at that path as a subagent.
+	const matching = edges.filter((edge) => canonicalSessionPath(edge.child) === deletedPath);
+	for (const edge of matching) {
+		await ledger.appendDelete({ childId: edge.childId, child: sessionPath, reason: "user" });
+	}
+	return { deletedInfo, ledgerEdge: matching[0] };
 }

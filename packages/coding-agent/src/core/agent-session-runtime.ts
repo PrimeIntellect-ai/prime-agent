@@ -7,7 +7,7 @@ import type {
 	AgentSessionRuntimeDiagnostic,
 	AgentSessionServices,
 } from "./agent-session-services.js";
-import { flushAgentTraceUpload } from "./agent-traces.js";
+import { flushAgentTraceUpload, logDetachedAgentTraceFlushFailure } from "./agent-traces.js";
 import { isNoModelsAvailableMessage } from "./auth-guidance.js";
 import type { ReplacedSessionContext, SessionShutdownEvent, SessionStartEvent } from "./extensions/index.js";
 import { emitSessionShutdownEvent } from "./extensions/runner.js";
@@ -59,6 +59,11 @@ function extractUserMessageText(content: string | Array<{ type: string; text?: s
 		.filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")
 		.map((part) => part.text)
 		.join("");
+}
+
+export interface AgentSessionRuntimeDisposeOptions {
+	/** Set false when the session's artifact dir is deleted right after disposal (default true). */
+	kernelSnapshot?: boolean;
 }
 
 export class AgentSessionRuntime implements SubagentRuntimeHost {
@@ -199,7 +204,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 			reason,
 			targetSessionFile,
 		});
-		await flushAgentTraceUpload(this.session.sessionManager).catch(() => undefined);
+		this.detachTraceFlush();
 		this.beforeSessionInvalidate?.();
 		// Await the kernel's final snapshot flush before invalidating the session.
 		await this.session.disposeAsync();
@@ -683,7 +688,14 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		return { cancelled: false };
 	}
 
-	private async disposeOnce(): Promise<void> {
+	private detachTraceFlush(): void {
+		const sessionManager = this.session.sessionManager;
+		void flushAgentTraceUpload(sessionManager).catch((error) =>
+			logDetachedAgentTraceFlushFailure(sessionManager.getSessionFile(), error),
+		);
+	}
+
+	private async disposeOnce(options: AgentSessionRuntimeDisposeOptions): Promise<void> {
 		let disposeError: unknown;
 		try {
 			await emitSessionShutdownEvent(this.session.extensionRunner, {
@@ -693,11 +705,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		} catch (error) {
 			disposeError ??= error;
 		}
-		try {
-			await flushAgentTraceUpload(this.session.sessionManager);
-		} catch (error) {
-			disposeError ??= error;
-		}
+		this.detachTraceFlush();
 		try {
 			this.beforeSessionInvalidate?.();
 		} catch (error) {
@@ -705,7 +713,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		}
 		try {
 			// Await the kernel's final snapshot flush before tearing the session down.
-			await this.session.disposeAsync();
+			await this.session.disposeAsync({ kernelSnapshot: options.kernelSnapshot ?? true });
 		} catch (error) {
 			disposeError ??= error;
 		}
@@ -723,9 +731,9 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 		}
 	}
 
-	async dispose(): Promise<void> {
+	async dispose(options?: AgentSessionRuntimeDisposeOptions): Promise<void> {
 		if (!this.disposePromise) {
-			this.disposePromise = this.disposeOnce();
+			this.disposePromise = this.disposeOnce(options ?? {});
 		}
 		await this.disposePromise;
 	}

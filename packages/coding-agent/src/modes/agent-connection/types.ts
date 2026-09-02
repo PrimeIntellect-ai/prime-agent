@@ -27,6 +27,7 @@ import type {
 } from "../../core/session-action-store.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import type { SessionStats } from "../../core/session-stats.js";
+import type { SessionSummary } from "../daemon/daemon-session-list.js";
 
 /**
  * Client-side interaction boundary consumed by InteractiveMode.
@@ -692,6 +693,7 @@ export interface AgentConnection {
 	getToolDefinition(name: string): Promise<AgentConnectionToolDefinition | undefined>;
 	setSessionEntryLabel(entryId: string, label: string | undefined): Promise<void>;
 	respondToExtensionUiRequest(requestId: string, response: AgentConnectionExtensionUiResponse): Promise<void>;
+	subscribeAgentRoster?(listener: () => void): Promise<{ summaries(): SessionSummary[]; dispose(): Promise<void> }>;
 	supportsAcpMcpServers?(): boolean;
 	replaceAcpMcpServers?(servers: readonly AcpMcpServerConfig[], ownerId: string): Promise<void>;
 	releaseAcpMcpServers?(ownerId: string, serverNames: readonly string[]): Promise<void>;

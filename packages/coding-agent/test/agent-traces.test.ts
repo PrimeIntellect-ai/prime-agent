@@ -8,6 +8,7 @@ import { ENV_AGENT_DIR, getAgentTracesLogPath } from "../src/config.js";
 import {
 	findAgentTraceFiles,
 	flushAgentTraceUpload,
+	flushAllPendingAgentTraceUploads,
 	installAgentTraceUpload,
 	previewAgentTraceFile,
 	uploadAgentTraceFile,
@@ -385,6 +386,55 @@ describe("agent trace upload", () => {
 
 		expect(results.map((result) => result?.status)).toEqual(["uploaded", "uploaded"]);
 		expect(calls).toHaveLength(1);
+	});
+
+	it("drains scheduled and in-flight uploads through the exit barrier", async () => {
+		const cwd = join(tempDir, "project");
+		const sessionDir = join(tempDir, "sessions");
+		mkdirSync(cwd, { recursive: true });
+		let releaseFetch: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			releaseFetch = resolve;
+		});
+		const calls: string[] = [];
+		const fetchFn: typeof fetch = async (input) => {
+			calls.push(String(input));
+			await gate;
+			return new Response(JSON.stringify({ bytes_stored: 1 }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		};
+		const install = (sessionManager: SessionManager) => {
+			installAgentTraceUpload(sessionManager, {
+				authStorage: AuthStorage.inMemory({
+					[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+				}),
+				settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
+				baseUrl: "https://api.example.test",
+				fetchFn,
+			});
+			sessionManager.appendMessage(createUserMessage("hello"));
+			sessionManager.appendMessage(createAssistantMessage("hi"));
+		};
+		const scheduled = SessionManager.create(cwd, sessionDir);
+		scheduled.newSession({ id: "barrier-scheduled" });
+		install(scheduled);
+		const inFlight = SessionManager.create(cwd, sessionDir);
+		inFlight.newSession({ id: "barrier-in-flight" });
+		install(inFlight);
+		const detached = flushAgentTraceUpload(inFlight);
+
+		let drained = false;
+		const barrier = flushAllPendingAgentTraceUploads().then(() => {
+			drained = true;
+		});
+		await vi.waitFor(() => expect(calls).toHaveLength(2));
+		expect(drained).toBe(false);
+		releaseFetch();
+		await barrier;
+		await detached;
+		expect(calls).toHaveLength(2);
 	});
 
 	it("schedules automatic uploads at most once per minute and only after new entries persist", async () => {

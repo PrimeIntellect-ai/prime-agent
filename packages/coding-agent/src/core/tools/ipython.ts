@@ -311,6 +311,8 @@ export class IpythonKernelProvisioner {
 	private lastStartupMessage?: string;
 	private _lastRestore?: RestoreResult;
 	private readonly disposeController = new AbortController();
+	/** Snapshot policy of the dispose that aborted a startup, honored by startKernel's failure teardown. */
+	private disposeSnapshot = true;
 
 	constructor(
 		private readonly cwd: string,
@@ -351,7 +353,8 @@ export class IpythonKernelProvisioner {
 	}
 
 	/** Dispose the kernel owned by this provisioner, including one still starting up. */
-	async dispose(): Promise<void> {
+	async dispose(options?: { snapshot?: boolean }): Promise<void> {
+		this.disposeSnapshot = options?.snapshot ?? true;
 		// Drops a still-queued boot out of the semaphore and short-circuits an
 		// in-flight startKernel before it spawns, so a disposed session's boot
 		// doesn't waste a slot during a fan-out.
@@ -362,7 +365,7 @@ export class IpythonKernelProvisioner {
 		if (!pending) return;
 		try {
 			const m = await pending;
-			await m.shutdown({ snapshot: true, drainHostRequests: true });
+			await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true });
 		} catch {
 			// a failed startup already cleaned up after itself
 		}
@@ -514,7 +517,7 @@ export class IpythonKernelProvisioner {
 				// surface the failure before the teardown (final snapshot flush included)
 				// finished, or a replacement provisioner gated on this dispose could
 				// race the still-flushing kernel over the same snapshot files.
-				await m.shutdown({ snapshot: true, drainHostRequests: true }).catch(() => undefined);
+				await m.shutdown({ snapshot: this.disposeSnapshot, drainHostRequests: true }).catch(() => undefined);
 				throw error;
 			}
 			// Only tell the model what was revived once the kernel is actually usable —

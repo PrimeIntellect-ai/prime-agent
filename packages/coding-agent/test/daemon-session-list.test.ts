@@ -5,6 +5,7 @@ import type { RlmChildAgentSnapshot } from "../src/core/agent-session.js";
 import type { AgentCronJob } from "../src/core/cron-jobs.js";
 import type { SessionInfo } from "../src/core/session-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
+import { passivatedWorkerRosterEntry, workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import {
 	buildRlmChildSnapshots,
 	buildSessionList,
@@ -55,6 +56,20 @@ describe("buildSessionList", () => {
 			["needs-user", "live", "idle"],
 			["done", "live", "idle"],
 		]);
+	});
+
+	it("counts direct peers separately so the supervisor can add them to its own attachment count", () => {
+		const state = makeState({ activeSessionId: "direct", sessionFile: "/tmp/direct.jsonl" });
+		state.clients.add({ id: "supervisor", authenticationRole: "supervisor" } as unknown as DaemonSocketClient);
+		state.clients.add({ id: "peer", authenticationRole: "session_client" } as unknown as DaemonSocketClient);
+
+		const [summary] = buildSessionList([state], []);
+
+		expect(summary).toMatchObject({ attachedClients: 2, directAttachedClients: 1 });
+		// Passivated roster rows describe a session without a runtime; the live-only count must not survive.
+		expect(
+			passivatedWorkerRosterEntry(workerRosterEntryFromSummary(summary!)).summary.directAttachedClients,
+		).toBeUndefined();
 	});
 
 	it("uses the stable session header time for active rows without a saved catalog entry", () => {
@@ -230,6 +245,12 @@ describe("buildSessionList", () => {
 
 		expect(summary.sessionActions).toMatchObject({ queuedCount: 0, active: { kind: "turn" } });
 		expect(summary.unfinishedActionCount).toBe(3);
+		expect(summary.activity).toBe("working");
+	});
+
+	it("marks an empty resident session idle instead of holding it at working", () => {
+		const summary = summaryForActiveSession(makeState({ activeSessionId: "empty" }));
+		expect(summary.activity).toBe("idle");
 	});
 
 	it("marks a finished subagent idle instead of holding it at working", () => {
@@ -320,6 +341,24 @@ describe("buildSessionList", () => {
 			["saved-crashed", "saved-crashed", "archived", "idle"],
 		]);
 		expect(entries[0]!.sessionName).toBe("session active-1");
+	});
+
+	it("keeps a resident message-less subagent live while a top-level one stays a draft", () => {
+		const entries = buildSessionList(
+			[
+				makeState({
+					activeSessionId: "child",
+					metadata: { kind: "subagent", createdAt: 1, rlmChildId: "child-1" },
+				}),
+				makeState({ activeSessionId: "top" }),
+			],
+			[],
+		);
+
+		expect(entries.map((entry) => [entry.id, entry.lifecycle])).toEqual([
+			["child", "live"],
+			["top", "draft"],
+		]);
 	});
 
 	it("treats a message-less on-disk active session as a hidden draft", () => {
