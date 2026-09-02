@@ -82,8 +82,8 @@ function parseDaemonClientCommand(args: string[]): ParsedDaemonClientCommand {
 			continue;
 		}
 
-		// send/cron parse "--" themselves as an end-of-flags separator
-		if (arg === "--" && (command === "cron" || command === "send")) {
+		// create/send/cron parse "--" themselves as an end-of-flags separator
+		if (arg === "--" && (command === "create" || command === "cron" || command === "send")) {
 			positionals.push(arg);
 			passthrough = true;
 			continue;
@@ -775,7 +775,19 @@ function parseListArgs(args: string[]): { all: boolean } {
 }
 
 async function runCreate(client: DaemonClient, args: string[], json: boolean): Promise<void> {
-	const sessionArgs = parseSessionArgs(args);
+	const separatorIndex = args.indexOf("--");
+	const sessionArgs = parseSessionArgs(separatorIndex === -1 ? args : args.slice(0, separatorIndex));
+	const initialMessage =
+		separatorIndex === -1
+			? undefined
+			: args
+					.slice(separatorIndex + 1)
+					.join(" ")
+					.trim();
+	if (separatorIndex !== -1 && !initialMessage) {
+		throw new Error("Initial message must not be empty");
+	}
+
 	const response = await client.request({
 		type: "create",
 		name: sessionArgs.name,
@@ -784,6 +796,14 @@ async function runCreate(client: DaemonClient, args: string[], json: boolean): P
 		continueRecent: sessionArgs.continueRecent,
 	});
 	const data = requireSuccess(response);
+	if (initialMessage) {
+		if (!isLiveSessionSummary(data)) {
+			throw new Error("Daemon returned an invalid create response");
+		}
+		await requireSuccessAsync(
+			client.request({ type: "prompt", activeSessionId: data.activeSessionId, message: initialMessage }),
+		);
+	}
 	if (json) {
 		printJson(data);
 		return;

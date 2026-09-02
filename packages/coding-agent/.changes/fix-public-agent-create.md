@@ -1,0 +1,1 @@
+- Added a public `prime-agent create` command for starting top-level agents with an initial message.

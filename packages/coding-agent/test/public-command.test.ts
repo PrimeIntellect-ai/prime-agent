@@ -125,6 +125,24 @@ describe("public command routing", () => {
 		expect(mocks.daemonCommands).toEqual([["daemon", "list", "--all", "--json"]]);
 	});
 
+	it("routes agent creation with an initial prompt through the internal protocol adapter", async () => {
+		await expect(
+			handlePublicCommand(["create", "--cwd", "/tmp/project", "reviewer", "--json", "--", "Review the fix"]),
+		).resolves.toMatchObject({ handled: true });
+		expect(mocks.daemonCommands).toEqual([
+			["daemon", "create", "--cwd", "/tmp/project", "reviewer", "--json", "--", "Review the fix"],
+		]);
+	});
+
+	it("rejects agent creation without an initial prompt", async () => {
+		await expect(handlePublicCommand(["create", "reviewer"])).resolves.toMatchObject({ handled: true });
+		await expect(handlePublicCommand(["create", "reviewer", "--"])).resolves.toMatchObject({ handled: true });
+
+		expect(mocks.daemonCommands).toEqual([]);
+		expect(process.exitCode).toBe(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("prime-agent create"));
+	});
+
 	it("forwards a custom daemon socket when stopping an agent", async () => {
 		await expect(
 			handlePublicCommand(["stop", "worker", "--daemon-socket", "/tmp/custom-daemon.sock"]),

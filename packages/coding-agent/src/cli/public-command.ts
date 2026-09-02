@@ -77,6 +77,19 @@ async function runPublicCommand(args: string[]): Promise<PublicCommandResult> {
 			return { handled: false, args: args.slice(1), explicitAgentsView: true };
 		case "list":
 			return runInternalAgentCommand("list", args.slice(1));
+		case "create": {
+			const separatorIndex = args.indexOf("--", 1);
+			if (
+				separatorIndex === -1 ||
+				!args
+					.slice(separatorIndex + 1)
+					.join(" ")
+					.trim()
+			) {
+				return fail(`Usage: ${APP_NAME} ${getCommandSpec(["create"])!.usage}`);
+			}
+			return runInternalAgentCommand("create", args.slice(1));
+		}
 		case "attach": {
 			const rest = args.slice(1);
 			const agent = rest[0];

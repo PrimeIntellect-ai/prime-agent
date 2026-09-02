@@ -581,6 +581,7 @@ export function shouldStartDaemonEarly(args: readonly string[], startupBenchmark
 		(REMOVED_COMMAND_NAMES.has(firstPositional.value) ||
 			(PUBLIC_COMMAND_NAMES.has(firstPositional.value) &&
 				firstPositional.value !== "agents" &&
+				firstPositional.value !== "create" &&
 				(firstPositional.value !== "help" || isHelpCommand)))
 	) {
 		return false;

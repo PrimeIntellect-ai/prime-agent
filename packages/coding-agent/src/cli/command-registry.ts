@@ -27,6 +27,21 @@ export const COMMAND_SPECS: readonly CommandSpec[] = [
 		options: ["-a, --all  Include saved agents", "--json      Print JSON"],
 	},
 	{
+		path: ["create"],
+		usage: "create [options] [name] -- <message>",
+		summary: "Create and start an agent",
+		description: "Creates a top-level agent and starts it with the supplied message.",
+		options: [
+			"--cwd <dir>              Use a specific working directory",
+			"--provider <name>        Select a model provider",
+			"--model <id>             Select a model",
+			"--thinking <level>       Set the reasoning level",
+			"--tools <list>           Allowlist comma-separated tool names",
+			"--daemon-socket <path>  Use a specific daemon socket",
+			"--json                   Print JSON",
+		],
+	},
+	{
 		path: ["attach"],
 		usage: "attach <agent>",
 		summary: "Attach the interactive UI to an agent",

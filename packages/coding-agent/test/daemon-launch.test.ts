@@ -217,6 +217,7 @@ describe("shouldStartDaemonEarly", () => {
 		["json", ["--mode", "json", "hello"]],
 		["rpc", ["--mode", "rpc"]],
 		["no-session", ["--no-session"]],
+		["agent creation", ["--daemon-socket", "/tmp/prime.sock", "create", "reviewer", "--", "Review"]],
 	])("starts early for the %s client", (_label, args) => {
 		expect(shouldStartDaemonEarly(args, false)).toBe(true);
 	});

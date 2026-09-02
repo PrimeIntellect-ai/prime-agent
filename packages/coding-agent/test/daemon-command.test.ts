@@ -31,6 +31,7 @@ const daemonClientMock = vi.hoisted(() => {
 		emitStaleAgentEndOnAttach: false,
 		connectFails: false,
 		sessions: [] as Array<Record<string, unknown>>,
+		createdSession: undefined as Record<string, unknown> | undefined,
 	};
 
 	class MockDaemonClient {
@@ -52,6 +53,9 @@ const daemonClientMock = vi.hoisted(() => {
 			this.requests.push(command);
 			if (command.type === "list") {
 				return { type: "response", command: command.type, success: true, data: { sessions: behavior.sessions } };
+			}
+			if (command.type === "create") {
+				return { type: "response", command: command.type, success: true, data: behavior.createdSession };
 			}
 			if (command.type === "attach" && behavior.emitStaleAgentEndOnAttach) {
 				this.emitMessage({ type: "session_event", activeSessionId: "active-1", event: { type: "agent_end" } });
@@ -138,6 +142,7 @@ describe("daemon command", () => {
 		daemonClientMock.behavior.emitStaleAgentEndOnAttach = false;
 		daemonClientMock.behavior.connectFails = false;
 		daemonClientMock.behavior.sessions = [];
+		daemonClientMock.behavior.createdSession = undefined;
 		consoleErrorMessages = [];
 		vi.spyOn(process, "exit").mockImplementation(((code?: string | number | null | undefined) => {
 			throw new Error(`exit ${code}`);
@@ -230,6 +235,52 @@ describe("daemon command", () => {
 		expect(client?.requests[0]).toEqual({ type: "list", all: true });
 		expect(client?.requests[1]).toMatchObject({ type: "create", name: "1" });
 		expect(client?.requests[1]?.name).not.toBe(unsafeIntegerName);
+	});
+
+	it("creates a session and submits an initial prompt after the separator", async () => {
+		daemonClientMock.behavior.promptSucceeds = true;
+		daemonClientMock.behavior.createdSession = makeSessionSummary("active-created", "session-created", "created");
+
+		await expect(
+			handleDaemonCommand([
+				"daemon",
+				"--socket",
+				"/tmp/prime-agent.sock",
+				"--json",
+				"create",
+				"--cwd",
+				"/tmp/project",
+				"my-session",
+				"--",
+				"--review",
+				"the fix",
+			]),
+		).resolves.toBe(true);
+
+		expect(daemonClientMock.instances[0]?.requests).toEqual([
+			{
+				type: "create",
+				name: "my-session",
+				config: { cwd: "/tmp/project" },
+				sessionPath: undefined,
+				continueRecent: undefined,
+			},
+			{ type: "prompt", activeSessionId: "active-created", message: "--review the fix" },
+		]);
+		expect(console.log).toHaveBeenCalledWith(JSON.stringify(daemonClientMock.behavior.createdSession, null, 2));
+	});
+
+	it("rejects an empty initial prompt before creating a session", async () => {
+		await expect(
+			handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", "create", "my-session", "--"]),
+		).resolves.toBe(true);
+
+		expect(daemonClientMock.instances[0]?.requests).toEqual([]);
+		expect(
+			consoleErrorMessages.some(
+				(message) => typeof message === "string" && message.includes("Initial message must not be empty"),
+			),
+		).toBe(true);
 	});
 
 	it("keeps create session name after an unknown boolean extension flag", async () => {
