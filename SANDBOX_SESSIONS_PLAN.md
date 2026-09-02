@@ -86,7 +86,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 | B05 | A04, A14 | done | Add typed streaming home-provider proxy |
 | B06 | A05, A15 | done | Add Prime Sandbox provisioner and background-job lifecycle |
 | B07 | A10, A14 | done | Add Git workspace snapshot and safe sync-back |
-| B08 | A12, B01, B02 | in_progress | Add `sandbox` and `sandbox_options` to RLM APIs |
+| B08 | A12, B01, B02 | done | Add `sandbox` and `sandbox_options` to RLM APIs |
 | B09 | A11, B01, B03 | done | Add top-level sandbox session creation APIs and CLI flags |
 | B10 | A06, B03, B04 | in_progress | Route durable direct agent-to-agent communication across hosts |
 | B11 | A07, B03, B04 | in_progress | Mirror observation, transcript, recap, and usage events |
@@ -112,8 +112,8 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 ## Current integration baseline
 
 - Branch: `feat/sandbox-backed-sessions` in `/Users/milkkarten/prime-agent-sandbox-sessions`.
-- Reviewed integration tip: `9df8a3da9`.
-- Latest full root `npm run check` is green across 1013 files, TypeScript, Biome, installer rendering, and browser smoke.
+- Reviewed integration tip: `f6ede58e5`.
+- Latest full root `npm run check` is green across 1014 files, TypeScript, Biome, installer rendering, and browser smoke.
 - Accepted B03 foundations: exact frame codec `55b40d7f1`, journal-record codec `5551582bd`, delivery index `5e8e926b4`, direct-final immutable journal publication `8bd83db6c`, immutable delivery-marker publication `df846c08f`, and page-atomic bounded directory recovery `9df8a3da9`.
 - Accepted B11 foundations: observation core `939a7baaf`, exact snapshots `62e8b073a`.
 - Accepted B14 foundations: provider client `2195c7a23`, tunnel manager `a636f7d99`, PAB1 `d21f53c1a`, FD3 reader `723a8db52`, PAAR codec `a17f5588d`, stdin frame reader `4beeaa5da`, TypeScript correction `1d63a72c0`, SSH spawn specification `4dd8790db`, SSH specification tests `af83a786f`/`a7add61a4`, one-use upgrade authentication `a4976298c`, and Node stdin normalization `4a8962b54`.
@@ -239,4 +239,4 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Rejected durable-store candidate `e95f0277` after direct review found premature recovery exposure, fabricated state, incomplete persistence/byte accounting, unbounded replay, unbound delivery transitions, and unsafe close/erasure semantics. Started clean accepted-recovery-backed durable-store v2.
 - Rejected PAAR verifier `c985ed406`, installer `5f3d3bbe3`, and builder `22b1d1e3e` after direct review found compilation/tuple crashes, partial-read/write failures, incomplete identity and expected-tuple checks, output ownership leaks, unsafe cleanup, and close uncertainty that did not dominate. Started independent clean verifier v4, installer v5, and builder v5 tracks.
 - Rejected listener/server `f0291bc9` after direct review found duplicate socket ownership, uncancelled late admissions, post-close upgrade races, unbounded connections, unchecked setup cleanup, and timeouts that fabricated server/WebSocket/socket closure. Started clean listener/server v5.
-- B08 candidate `3bdb4f81d` now places options in the core contract and moves no-host rejection before generic allocation, but remains in correction for revoked-proxy validation and missing proof of exact frozen shapes/no local allocation.
+- Integrated B08 RLM sandbox options through `26ffef380` and `f6ede58e5`. `SandboxOptions` now lives in the core execution-location contract; strict revoked-proxy-safe normalization returns frozen exact snapshots, omitted/false preserve option shapes, no-host rejection occurs before model/filesystem/map/event allocation, and concrete local hosts reject before local session allocation. Its 45 focused and 87 combined boundary tests pass; the 1014-file root check is green.
