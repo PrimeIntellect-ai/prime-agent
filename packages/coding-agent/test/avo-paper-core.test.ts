@@ -6,11 +6,15 @@ import {
 	type AvoLineage,
 	type AvoScoreDimension,
 	type AvoScoringUtility,
+	type AvoStagnationPattern,
+	AvoStore,
 	type AvoVariationContract,
 	type AvoVariationResult,
 	createAvoLineage,
 	digestContent,
 	executeAvoVariationEpisode,
+	requiresAvoAdversarialReviewExtension,
+	shouldActivateAvoSupervisor,
 	updateAvoLineage,
 } from "../src/core/avo/index.js";
 import { createHarness } from "./suite/harness.js";
@@ -727,6 +731,84 @@ describe("Paper-Faithful AVO Core (arXiv:2603.24517)", () => {
 		expect(result.status).toBe("committed");
 		expect(supervisorCalled).toBe(false);
 		expect(result.supervisorInterventions.length).toBe(0);
+	});
+
+	it("[Issue #54] long horizon alone does not activate supervisor and activates only on demonstrated stagnation", () => {
+		const store = new AvoStore(undefined, "run-sup-h54", () => new Date().toISOString());
+		store.initialize("Long horizon stagnation check");
+		store.setHorizon("long");
+
+		// Acceptance criteria: Long horizon alone is NOT sufficient to activate the supervisor
+		expect(shouldActivateAvoSupervisor(store.getState())).toBe(false);
+
+		// Verified extension separation: requiresAvoAdversarialReviewExtension is distinct
+		expect(typeof requiresAvoAdversarialReviewExtension).toBe("function");
+
+		// Demonstrated intervention or stagnation needed
+		expect(
+			shouldActivateAvoSupervisor(store.getState(), {
+				checkpointId: "chk-1",
+				cycleId: "c-1",
+				status: "intervene",
+				interventionNeeded: true,
+				reason: "stagnation detected",
+				triggeredHeuristics: ["stagnation"],
+				progressIndicators: {
+					cyclesSinceAcceptedProgress: 3,
+					repeatedFailureCount: 3,
+					repeatedTrajectoryCount: 0,
+					repeatedCandidateKindCount: 0,
+				},
+				createdAt: new Date().toISOString(),
+			}),
+		).toBe(true);
+	});
+
+	it("[Issue #54] activates stagnation steering on consecutive regressions below baseline", async () => {
+		const lineage = createAvoLineage("lineage-regress", seedSolution);
+		let _evalTurn = 0;
+		const scorer = createMockScorer({
+			evaluatorFn: () => {
+				_evalTurn++;
+				// Passed correctness but throughput 1200 is below baseline 1400
+				return { correctness: true, tflops: 1200 };
+			},
+		});
+
+		let stagnationReported: AvoStagnationPattern | undefined;
+		const contract: AvoVariationContract<string> = {
+			taskContext: "Regression stagnation test",
+			lineage,
+			knowledge: knowledgeBase,
+			scorer,
+			supervisor: {
+				enabled: true,
+				maxConsecutiveFailuresBeforeIntervention: 2,
+				steer: async (_traj, stagnation) => {
+					stagnationReported = stagnation;
+					return {
+						detectedPattern: "Sub-baseline performance plateau",
+						suggestedDirections: ["Increase block size", "Use shared memory double buffering"],
+						rationale: "Throughput remains below 1400 TFLOPS baseline across multiple edits.",
+						timestamp: new Date().toISOString(),
+					};
+				},
+			},
+		};
+
+		const result = await executeAvoVariationEpisode(contract, async (agent) => {
+			agent.recordEdit("regress-1", "code1");
+			await agent.evaluateCandidate("regress-1", "code1");
+
+			agent.recordEdit("regress-2", "code2");
+			await agent.evaluateCandidate("regress-2", "code2");
+		});
+
+		expect(stagnationReported).toBeDefined();
+		expect(stagnationReported?.isStagnating).toBe(true);
+		expect(stagnationReported?.consecutiveRegressions).toBe(2);
+		expect(result.supervisorInterventions.length).toBe(1);
+		expect(result.supervisorInterventions[0].suggestedDirections).toContain("Increase block size");
 	});
 
 	it("[Issue #48] does not automatically redefine normal root tasks as AVO variation episodes when enableAvo is false", async () => {

@@ -7242,13 +7242,31 @@ describe("AVO routing and adapters", () => {
 		).toThrow(/omitted/);
 	});
 
-	test("activates retained supervision only for long work or an iterative intervention", () => {
+	test("activates retained supervision only for demonstrated intervention or stagnation, not long horizon alone", () => {
 		const store = new AvoStore(undefined, "run-supervision", clock());
 		store.initialize("Check activation rules");
 		expect(shouldActivateAvoSupervisor(store.getState())).toBe(false);
 		store.setHorizon("iterative");
 		expect(shouldActivateAvoSupervisor(store.getState())).toBe(false);
 		store.setHorizon("long");
-		expect(shouldActivateAvoSupervisor(store.getState())).toBe(true);
+		// Per arXiv:2603.24517 Section 3.2 and Issue #54, long horizon alone does not activate supervisor
+		expect(shouldActivateAvoSupervisor(store.getState())).toBe(false);
+		expect(
+			shouldActivateAvoSupervisor(store.getState(), {
+				checkpointId: "chk-1",
+				cycleId: "cycle-1",
+				status: "intervene",
+				interventionNeeded: true,
+				reason: "stagnation",
+				triggeredHeuristics: ["stagnation"],
+				progressIndicators: {
+					cyclesSinceAcceptedProgress: 3,
+					repeatedFailureCount: 3,
+					repeatedTrajectoryCount: 0,
+					repeatedCandidateKindCount: 0,
+				},
+				createdAt: new Date().toISOString(),
+			}),
+		).toBe(true);
 	});
 });
