@@ -84,15 +84,15 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 | B03 | A02, A16 | done | Add capability-gated remote host protocol and replay primitives |
 | B04 | A02, A16 | in_progress | Add authenticated link state machine and fake relay transport |
 | B05 | A04, A14 | done | Add typed streaming home-provider proxy |
-| B06 | A05, A15 | done | Add Prime Sandbox provisioner and exact-build bootstrap |
+| B06 | A05, A15 | done | Add Prime Sandbox provisioner and background-job lifecycle |
 | B07 | A10, A14 | done | Add Git workspace snapshot and safe sync-back |
 | B08 | A12, B01, B02 | queued | Add `sandbox` and `sandbox_options` to RLM APIs |
 | B09 | A11, B01, B03 | done | Add top-level sandbox session creation APIs and CLI flags |
 | B10 | A06, B03, B04 | queued | Route durable direct agent-to-agent communication across hosts |
 | B11 | A07, B03, B04 | queued | Mirror observation, transcript, recap, and usage events |
-| B12 | A08, B03, B06 | queued | Add sandbox lifecycle, checkpoint, passivation, wake, and deletion |
+| B12 | A08, B03, B06 | in_progress | Add sandbox lifecycle, checkpoint, passivation, wake, and deletion |
 | B13 | A09, B01, B11 | queued | Show execution location and connection health in Agents View |
-| B14 | B05, B06, B08, B09 | queued | Wire end-to-end sandbox session orchestration |
+| B14 | B05, B06, B08, B09 | in_progress | Wire end-to-end sandbox session orchestration |
 | B15 | A13, B03, B04 | queued | Add protocol compatibility and reconnect tests |
 | B16 | A13, B05, B10, B11 | queued | Add auth, messaging, observation, and security integration tests |
 
@@ -151,3 +151,6 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Integrated B09 as `42a914cba`; 62 focused tests cover default-local compatibility, strict sandbox options, protocol gates, and explicit unsupported-host failures.
 
 - Integrated B06 as `d458e2308`; 80 focused tests cover Prime Sandbox CLI preflight/provisioning, strict DTO parsing, atomic background completion metadata, separate logs, and process-group termination with escalation. No sandbox resource was created.
+  Exact-build packaging/bootstrap and admission remain part of B14; B03 already supplies the build/protocol/schema compatibility gate.
+
+- Started B12 after B06 integration. Started transport-neutral B14a provider-client and B14b authenticated Prime Tunnel foundations early because they depend only on already-integrated contracts and touch separate files.
