@@ -105,6 +105,7 @@ import {
 	type AvoVerificationBaseline,
 	type AvoVerificationClass,
 	type AvoVerificationPolicy,
+	type AvoWorkingAttempt,
 } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -572,6 +573,7 @@ function emptyState(sessionId: string, now: string): AvoRunState {
 		status: "active",
 		delivery: { phase: "working", runId },
 		candidates: [],
+		workingAttempts: [],
 		evaluations: [],
 		experiments: [],
 		trials: [],
@@ -3549,6 +3551,19 @@ export class AvoStore {
 		assumption.resolvedAt = this.now();
 		this.save();
 		return structuredClone(assumption);
+	}
+
+	recordWorkingAttempt(attempt: AvoWorkingAttempt): AvoWorkingAttempt {
+		if (!this.state.workingAttempts) {
+			this.state.workingAttempts = [];
+		}
+		this.state.workingAttempts.push(attempt);
+		this.save();
+		return structuredClone(attempt);
+	}
+
+	getWorkingAttempts(): AvoWorkingAttempt[] {
+		return structuredClone(this.state.workingAttempts ?? []);
 	}
 
 	recordCandidate(input: AvoCandidateInput): AvoCandidate {
