@@ -245,23 +245,18 @@ describe("durable relay store", () => {
 			frameId: "f-1",
 			recordedAt: "2025-01-15T10:30:01.000Z",
 		});
-		const delivered = await first.markDelivered({
+		await first.markDelivered({
 			frameId: "f-1",
 			recordedAt: "2025-01-15T10:30:02.000Z",
 		});
+		const original = await first.query("f-1");
+		expect(journal.ok).toBe(true);
+		expect(pending.ok).toBe(true);
 		expect((await first.close()).ok).toBe(true);
 		const secondCaps = standardCaps(firstCaps.files);
 		const { store: second } = await opened(secondCaps);
 		const recovered = await second.query("f-1");
-		expect(recovered).toEqual({
-			ok: true,
-			value: {
-				state: "delivered",
-				journal: journal.ok ? journal.value : null,
-				pending: pending.ok ? pending.value : null,
-				delivered: delivered.ok ? delivered.value : null,
-			},
-		});
+		expect(recovered).toEqual(original);
 		await second.close();
 	});
 

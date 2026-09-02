@@ -75,6 +75,7 @@ export interface DurableReceipt {
 
 export interface DurableFrameState {
 	readonly state: DeliveryState;
+	readonly record: JournalRecordV1;
 	readonly journal: DurableReceipt;
 	readonly pending: DurableReceipt | null;
 	readonly delivered: DurableReceipt | null;
@@ -128,6 +129,7 @@ interface RecoveryCapability {
 }
 
 interface FrameRecord {
+	readonly record: JournalRecordV1;
 	readonly envelopeDigest: string;
 	readonly journal: DurableReceipt;
 	readonly pending: DurableReceipt | null;
@@ -399,6 +401,7 @@ function rebuildMemory(
 		frames.set(
 			record.envelope.frameId,
 			Object.freeze({
+				record,
 				envelopeDigest: record.envelopeDigest,
 				journal: recordReceipt,
 				pending: null,
@@ -580,6 +583,7 @@ export class DurableRelayStore {
 				success(
 					Object.freeze({
 						state,
+						record: frame.record,
 						journal: frame.journal,
 						pending: frame.pending,
 						delivered: frame.delivered,
@@ -783,6 +787,7 @@ export class DurableRelayStore {
 			frames.set(
 				record.envelope.frameId,
 				Object.freeze({
+					record,
 					envelopeDigest: record.envelopeDigest,
 					journal: recordReceipt,
 					pending: null,
