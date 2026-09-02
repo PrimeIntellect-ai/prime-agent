@@ -7,6 +7,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const packageRoot = resolve(__dirname, "..");
 const aiEntryUrl = new URL("../src/index.ts", import.meta.url).href;
+const bedrockProviderEntryUrl = new URL("../src/bedrock-provider.ts", import.meta.url).href;
 
 const SDK_SPECIFIERS = [
 	"@anthropic-ai/sdk",
@@ -56,6 +57,40 @@ describe("lazy provider module loading", () => {
 	it("does not load provider SDKs when importing the root barrel", () => {
 		const result = runProbe("");
 		expect(result.loadedSpecifiers).toEqual([]);
+	});
+
+	it("does not load the Bedrock SDK when registering its compiled-binary loader", () => {
+		const result = runProbe(
+			`mod.setBedrockProviderModuleLoader(async () => (await import("${bedrockProviderEntryUrl}")).bedrockProviderModule);`,
+		);
+		expect(result.loadedSpecifiers).toEqual([]);
+	});
+
+	it("loads the Bedrock SDK when the registered loader is first used", () => {
+		const result = runProbe(
+			[
+				`mod.setBedrockProviderModuleLoader(async () => {`,
+				`  await import("${bedrockProviderEntryUrl}");`,
+				`  const fail = () => { throw new Error("probe"); };`,
+				`  return { streamBedrock: fail, streamSimpleBedrock: fail };`,
+				`});`,
+				`const model = {`,
+				`  id: "anthropic.claude-3-5-sonnet-20241022-v2:0",`,
+				`  api: "bedrock-converse-stream",`,
+				`  provider: "amazon-bedrock",`,
+				`  baseUrl: "http://127.0.0.1:9",`,
+				`  reasoning: false,`,
+				`  input: ["text"],`,
+				`  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },`,
+				`  contextWindow: 200000,`,
+				`  maxTokens: 8192,`,
+				`};`,
+				`const context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }] };`,
+				`try { await mod.streamSimple(model, context).result(); } catch (_e) {}`,
+			].join("\n"),
+		);
+
+		expect(result.loadedSpecifiers).toEqual(["@aws-sdk/client-bedrock-runtime"]);
 	});
 
 	it("loads only the Anthropic SDK when calling the root lazy wrapper", () => {

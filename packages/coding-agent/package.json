@@ -34,7 +34,7 @@
 		"clean": "bun ../../scripts/remove-paths.ts dist",
 		"dev": "bun --bun tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"build": "bun --bun tsgo -p tsconfig.build.json && bun scripts/copy-assets.ts package && bun run bundle",
-		"build:binary": "bun run --cwd ../tui build && bun run --cwd ../ai build && bun run --cwd ../agent build && bun run build && bun build --compile ./dist/bun/cli.js --outfile dist/pi && bun scripts/copy-assets.ts binary",
+		"build:binary": "bun run --cwd ../tui build && bun run --cwd ../ai build && bun run --cwd ../agent build && bun run build && bun build --compile --minify --keep-names --bytecode --format=esm ./dist/bun/cli.js --outfile dist/pi && bun scripts/copy-assets.ts binary",
 		"copy-assets": "bun scripts/copy-assets.ts package",
 		"copy-binary-assets": "bun scripts/copy-assets.ts binary",
 		"test": "bun ../../scripts/run-with-clean-env.ts bun scripts/run-tests.ts",
