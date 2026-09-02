@@ -407,7 +407,7 @@ describe("buildSandboxSshSpawnSpec", () => {
 	});
 
 	it("rejects homeEnv with Symbol property", () => {
-		var env = { PATH: "/usr/bin" } as Record<string, unknown>;
+		var env = { PATH: "/usr/bin" } as Record<PropertyKey, unknown>;
 		env[Symbol("test")] = "nope";
 		var result = buildSandboxSshSpawnSpec({ ...GOLDEN, homeEnv: env });
 		expect(result.ok).toBe(false);
@@ -465,7 +465,7 @@ describe("buildSandboxSshSpawnSpec", () => {
 
 	it("rejects non-plain-object homeEnv (wrong prototype)", () => {
 		class Foo {}
-		var env = new Foo();
+		var env = new Foo() as Foo & { PATH: string };
 		env.PATH = "/usr/bin";
 		var result = buildSandboxSshSpawnSpec({ ...GOLDEN, homeEnv: env });
 		expect(result.ok).toBe(false);
@@ -485,7 +485,7 @@ describe("buildSandboxSshSpawnSpec", () => {
 	});
 
 	it("rejects raw input with Symbol key", () => {
-		const obj: Record<string, unknown> = { ...GOLDEN };
+		const obj: Record<PropertyKey, unknown> = { ...GOLDEN };
 		obj[Symbol("x")] = "y";
 		const result = buildSandboxSshSpawnSpec(obj);
 		expect(result.ok).toBe(false);
