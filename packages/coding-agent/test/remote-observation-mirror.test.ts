@@ -102,17 +102,17 @@ describe("B11-a: RemoteObservationMirror", () => {
 		expect(m.ingestEvent(42).accepted).toBe(false);
 	});
 
-	it("rejects frame with extra/missing keys (exact 6 keys: type/id/sequence/cursor/emittedAt/body)", () => {
+	it("rejects frame with extra/missing keys (exactObjectKeys guard)", () => {
 		const m = mirror();
 		const evt = makeEvent();
-		// extra key
-		expect(m.ingestEvent({ ...evt, extraKey: "x" }).rejectionCode).toBe("UNKNOWN_FIELD");
+		// extra key → exactObjectKeys rejects
+		expect(m.ingestEvent({ ...evt, extraKey: "x" }).rejectionCode).toBe("NOT_AN_OBJECT");
 		// missing body
 		const { body: _, ...noBody } = evt;
-		expect(m.ingestEvent(noBody).rejectionCode).toBe("MALFORMED_OPTIONAL");
+		expect(m.ingestEvent(noBody).rejectionCode).toBe("NOT_AN_OBJECT");
 		// missing cursor
 		const { cursor: _c, ...noCursor } = evt;
-		expect(m.ingestEvent(noCursor).rejectionCode).toBe("MALFORMED_OPTIONAL");
+		expect(m.ingestEvent(noCursor).rejectionCode).toBe("NOT_AN_OBJECT");
 	});
 
 	it("rejects wrong type field", () => {
@@ -141,7 +141,7 @@ describe("B11-a: RemoteObservationMirror", () => {
 		const evt = makeEvent();
 		expect(m.ingestEvent({ ...evt, cursor: null }).rejectionCode).toBe("INVALID_CURSOR_TYPE");
 		expect(m.ingestEvent({ ...evt, cursor: "string" }).rejectionCode).toBe("INVALID_CURSOR_TYPE");
-		expect(m.ingestEvent({ ...evt, cursor: {} }).rejectionCode).toBe("MALFORMED_OPTIONAL");
+		expect(m.ingestEvent({ ...evt, cursor: {} }).rejectionCode).toBe("INVALID_CURSOR_TYPE");
 	});
 
 	it("rejects cursor with extra/missing keys", () => {
@@ -150,9 +150,9 @@ describe("B11-a: RemoteObservationMirror", () => {
 		expect(
 			m.ingestEvent({ ...evt, cursor: { hostId: "h", generation: "g", sessionId: "s", sequence: 1, extra: "x" } })
 				.rejectionCode,
-		).toBe("MALFORMED_OPTIONAL");
+		).toBe("INVALID_CURSOR_TYPE");
 		expect(m.ingestEvent({ ...evt, cursor: { hostId: "h", generation: "g", sessionId: "s" } }).rejectionCode).toBe(
-			"MALFORMED_OPTIONAL",
+			"INVALID_CURSOR_TYPE",
 		);
 	});
 
@@ -209,7 +209,7 @@ describe("B11-a: RemoteObservationMirror", () => {
 		const m = mirror();
 		const evt = makeEvent();
 		const { body: _b, ...noBody } = evt;
-		expect(m.ingestEvent(noBody).rejectionCode).toBe("MALFORMED_OPTIONAL");
+		expect(m.ingestEvent(noBody).rejectionCode).toBe("NOT_AN_OBJECT");
 	});
 
 	it("rejects body with unknown type", () => {
@@ -392,6 +392,22 @@ describe("B11-a: RemoteObservationMirror", () => {
 		expect(r.accepted).toBe(true);
 	});
 
+	it("gap-at-start recovery via markReplayRecovered(0) then seq 1", () => {
+		const m = new RemoteObservationMirror({ hostId: "host-1", generation: "gen-1", sessionId: "sess-1" });
+		// First observed event is future seq 2 at cursor 0
+		m.ingestEvent(makeEvent({ sequence: 2 }, makeBody("session_created")));
+		expect(m.hasGapFlag).toBe(true);
+		expect(m.currentCursor).toBe(0);
+		// Recover at cursor 0
+		expect(m.markReplayRecovered(0)).toBe(true);
+		expect(m.hasGapFlag).toBe(false);
+		expect(m.needsReplayFlag).toBe(false);
+		expect(m.currentCursor).toBe(0);
+		// Now seq 1 should be accepted
+		const r = m.ingestEvent(makeEvent({ sequence: 1 }, makeBody("session_created")));
+		expect(r.accepted).toBe(true);
+	});
+
 	it("markReplayRecovered rejects cursor !== current", () => {
 		const m = mirror();
 		ingestAccepted(m, 1, "session_created");
@@ -416,6 +432,10 @@ describe("B11-a: RemoteObservationMirror", () => {
 		const r = m.ingestEvent(makeEvent({ sequence: 5 }, makeBody("agent_text_delta", { index: 3, text: "jump" })));
 		expect(r.accepted).toBe(false);
 		expect(r.rejectionCode).toBe("GAP_DETECTED");
+		expect(r.hasGap).toBe(true);
+		expect(r.needsReplay).toBe(true);
+		expect(m.hasGapFlag).toBe(true);
+		expect(m.needsReplayFlag).toBe(true);
 	});
 
 	it("existing delta updates existing record by index", () => {
@@ -762,7 +782,7 @@ describe("B11-a: RemoteObservationMirror", () => {
 		expect(
 			m.ingestEvent(makeEvent({ cursor: { hostId: "h", generation: "g", sessionId: "s", sequence: 1, extra: "x" } }))
 				.rejectionCode,
-		).toBe("MALFORMED_OPTIONAL");
+		).toBe("INVALID_CURSOR_TYPE");
 	});
 
 	it("adversarial: non-JSON values (undefined symbol)", () => {
@@ -771,7 +791,7 @@ describe("B11-a: RemoteObservationMirror", () => {
 		(evt as any).body = undefined;
 		const r = m.ingestEvent(evt);
 		expect(r.accepted).toBe(false);
-		expect(r.rejectionCode).toBe("INVALID_BODY_TYPE");
+		expect(r.rejectionCode).toBe("NOT_AN_OBJECT");
 	});
 
 	it("adversarial: mutated enum body fields", () => {
@@ -868,10 +888,13 @@ it("validates full body even while gap-gated", () => {
 it("accessor property on frame is rejected", () => {
 	const m = mirror();
 	const evt = makeEvent() as Record<string, unknown>;
+	// An otherwise-valid frame is accepted
+	expect(m.ingestEvent(makeEvent())).toHaveProperty("accepted", true);
+	// Same frame with an accessor property is rejected
 	Object.defineProperty(evt, "malicious", { get: () => "x", enumerable: true });
 	const r = m.ingestEvent(evt);
 	expect(r.accepted).toBe(false);
-	expect(r.rejectionCode).toBe("UNKNOWN_FIELD");
+	expect(r.rejectionCode).toBe("NOT_AN_OBJECT");
 });
 
 it("accessor property on cursor is rejected", () => {
@@ -882,17 +905,19 @@ it("accessor property on cursor is rejected", () => {
 	evt.cursor = cursor;
 	const r = m.ingestEvent(evt);
 	expect(r.accepted).toBe(false);
-	expect(r.rejectionCode).toBe("MALFORMED_OPTIONAL");
+	expect(r.rejectionCode).toBe("INVALID_CURSOR_TYPE");
 });
 
-it("symbol key on frame is rejected", () => {
+it("symbol key on frame is rejected (exactObjectKeys checks getOwnPropertySymbols)", () => {
 	const m = mirror();
+	// Otherwise-valid frame is accepted
+	expect(m.ingestEvent(makeEvent())).toHaveProperty("accepted", true);
+	// With a symbol key, it should now be rejected
 	const evt = makeEvent() as Record<string, unknown>;
-	(evt as any)[Symbol("hidden")] = "x";
-	// Symbol keys don't show up in Object.keys, so frame structure passes
-	// But Object.keys returns the 6 expected keys, so it should be accepted
+	Object.defineProperty(evt, Symbol("hidden"), { value: "x", enumerable: true });
 	const r = m.ingestEvent(evt);
-	expect(r.accepted).toBe(true);
+	expect(r.accepted).toBe(false);
+	expect(r.rejectionCode).toBe("NOT_AN_OBJECT");
 });
 
 it("own-undefined optional body field is rejected", () => {
@@ -917,8 +942,11 @@ it("initialNextIndex empty record map accepts only d.index===nextMsgIdx", () => 
 	const r1 = m.ingestEvent(makeEvent({ sequence: 2 }, makeBody("agent_text_delta", { index: 0, text: "hi" })));
 	expect(r1.accepted).toBe(false);
 	expect(r1.rejectionCode).toBe("GAP_DETECTED");
+	// Clear gap before trying valid index
+	expect(m.markReplayRecovered(1)).toBe(true);
 	// Index 42 should be accepted (reuse seq 2 since cursor didn't advance)
-	ingestAccepted(m, 2, "agent_text_delta", { index: 42, text: "hi" });
+	const r2 = m.ingestEvent(makeEvent({ sequence: 2 }, makeBody("agent_text_delta", { index: 42, text: "hi" })));
+	expect(r2.accepted).toBe(true);
 	expect(m.currentNextMessageIndex).toBe(43);
 });
 
@@ -1019,9 +1047,10 @@ it("lastFailureMarker stored for error/compact_failed/checkpoint_failed", () => 
 	ingestAccepted(m, 5, "checkpoint_start");
 	ingestAccepted(m, 6, "checkpoint_failed", { error: "disk" });
 	expect(m.lastFailureValue).toEqual({ type: "checkpoint_failed" });
-	// Normal event resets to none
+	// Non-failure events preserve the marker (only session_created resets)
 	ingestAccepted(m, 7, "bash_start", { command: "ls" });
-	expect(m.lastFailureValue).toEqual({ type: "none" });
+	expect(m.lastFailureValue).toEqual({ type: "checkpoint_failed" });
+	expect(Object.isFrozen(m.lastFailureValue)).toBe(true);
 });
 
 it("validates IDs with safe grammar (not just length)", () => {
@@ -1043,27 +1072,39 @@ it("non-plain-object for body fields is rejected", () => {
 	expect(r.rejectionCode).toBe("INVALID_BODY_TYPE");
 });
 
-it("nonenumerable extra property on frame is ignored (only own enumerable)", () => {
+it("nonenumerable extra property on frame is rejected (exactObjectKeys checks getOwnPropertyNames)", () => {
 	const m = mirror();
+	// Otherwise-valid frame is accepted
+	expect(m.ingestEvent(makeEvent())).toHaveProperty("accepted", true);
+	// With non-enumerable property, rejected
 	const evt = makeEvent() as Record<string, unknown>;
 	Object.defineProperty(evt, "hidden", { value: "x", enumerable: false });
-	// hidden doesn't appear in Object.keys, so frame passes
 	const r = m.ingestEvent(evt);
-	expect(r.accepted).toBe(true);
+	expect(r.accepted).toBe(false);
+	expect(r.rejectionCode).toBe("NOT_AN_OBJECT");
 });
 
 it("canonical timestamp roundtrip", () => {
 	const m = mirror();
-	// Test with project-approved timezone form
+	// Test with project-approved Z-suffixed form
 	const r1 = m.ingestEvent(makeEvent({ sequence: 1, emittedAt: "2025-01-01T00:00:00.000Z" }));
 	expect(r1.accepted).toBe(true);
-	// With timezone offset
-	const r2 = m.ingestEvent(makeEvent({ sequence: 2, emittedAt: "2025-06-15T12:30:45.123+05:30" }));
+	// Roundtrip: re-serialize toISOString must match
+	const ts = new Date();
+	const iso = ts.toISOString();
+	const r2 = m.ingestEvent(makeEvent({ sequence: 2, emittedAt: iso }));
 	expect(r2.accepted).toBe(true);
-	// Without timezone (lenient) should be rejected
-	const r3 = m.ingestEvent(makeEvent({ sequence: 3, emittedAt: "2025-01-01T00:00:00" }));
+	// Timezone offset (+05:30) should be rejected — only Z suffix allowed
+	const r3 = m.ingestEvent(makeEvent({ sequence: 3, emittedAt: "2025-06-15T12:30:45.123+05:30" }));
 	expect(r3.accepted).toBe(false);
 	expect(r3.rejectionCode).toBe("INVALID_EMITTED_AT");
+	// Without timezone (lenient) should be rejected
+	const r4 = m.ingestEvent(makeEvent({ sequence: 3, emittedAt: "2025-01-01T00:00:00" }));
+	expect(r4.accepted).toBe(false);
+	expect(r4.rejectionCode).toBe("INVALID_EMITTED_AT");
+	// Valid Z-suffixed form (reuse seq 3 since r3/r4 were rejected)
+	const r5 = m.ingestEvent(makeEvent({ sequence: 3, emittedAt: "2025-01-01T00:00:01.000Z" }));
+	expect(r5.accepted).toBe(true);
 });
 
 it("negative exitCode is a safe integer but reject unsafe int", () => {

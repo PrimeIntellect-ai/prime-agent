@@ -2,7 +2,6 @@
  * B11-a: remote observation event decoder + bounded in-memory transition/transcript core.
  * No snapshot/restore, name, usage, pending, connection health, or observer DTO.
  */
-import { isValidISODateString } from "../../core/execution-location.js";
 import type { RemoteHostEventSequence, RemoteHostSessionState } from "./remote-agent-host-protocol.js";
 
 const MAX_ID = 128,
@@ -38,12 +37,15 @@ const KNOWN_ERR = new Set([
 	"CAPABILITY_MISMATCH",
 	"UNKNOWN",
 ]);
+/** Exact ISO 8601 millisecond with Z suffix: YYYY-MM-DDTHH:mm:ss.sssZ — must roundtrip. */
+const EXACT_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function isSafePosInt(v: unknown): v is number {
 	return typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
-}
-function isSafeGt0Int(v: unknown): v is number {
-	return typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
 }
 function isBoundedStr(v: unknown, max: number): v is string {
 	return typeof v === "string" && v.length > 0 && v.length <= max;
@@ -53,22 +55,33 @@ function isValidId(v: unknown): v is string {
 }
 
 /**
- * Strict exact-key validation: require every own enumerable data key in `req`,
- * reject prototype-chain/accessor/symbol/nonenumerable keys, reject own-undefined
- * optionals, reject non-plain-object input.
+ * Verify `value` is a plain object whose own enumerable + nonenumerable data
+ * property names and symbols match exactly `required` + `optional`.
+ *
+ * Checks:
+ *  - prototype is Object.prototype (plain object)
+ *  - every own descriptor is a data descriptor (no accessors)
+ *  - every required key is present as an own data property
+ *  - every optional key, if present, has a defined value (not own-undefined)
+ *  - no extra own property names or symbols beyond the allowed set
  */
-function exactKeys(obj: Record<string, unknown>, req: readonly string[], opt: readonly string[]): boolean {
-	if (Object.getPrototypeOf(obj) !== Object.prototype) return false;
-	const allowed = new Set(req);
-	for (const k of opt) allowed.add(k);
-	const seen = new Set<string>();
-	for (const key of Object.keys(obj)) {
-		if (!allowed.has(key)) return false;
-		seen.add(key);
-		if (obj[key] === undefined) return false;
+function isPlainDataObject(value: unknown): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return false;
+	if (Object.getOwnPropertySymbols(value).length > 0) return false;
+	for (const key of Object.getOwnPropertyNames(value)) {
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor || !descriptor.enumerable || !("value" in descriptor) || descriptor.value === undefined) {
+			return false;
+		}
 	}
-	for (const k of req) if (!seen.has(k)) return false;
 	return true;
+}
+
+function exactObjectKeys(value: unknown, required: readonly string[], optional: readonly string[]): boolean {
+	if (!isPlainDataObject(value)) return false;
+	const allowed = new Set<string>([...required, ...optional]);
+	const keys = Object.keys(value);
+	return keys.every((key) => allowed.has(key)) && required.every((key) => keys.includes(key));
 }
 
 function deepFreeze<T>(o: T): T {
@@ -83,6 +96,17 @@ function deepFreeze<T>(o: T): T {
 	Object.freeze(o);
 	return o;
 }
+
+/** Exact canonical ISO 8601 millisecond timestamp: must produce same string when roundtripped. */
+function isValidEmittedAt(s: string): boolean {
+	if (!EXACT_ISO_RE.test(s)) return false;
+	const d = new Date(s);
+	return !Number.isNaN(d.getTime()) && d.toISOString() === s;
+}
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 export type MirrorRejectionCode =
 	| "NOT_AN_OBJECT"
@@ -151,7 +175,6 @@ export interface MirrorIngestResult {
 	readonly hasGap: boolean;
 	readonly needsReplay: boolean;
 }
-/** Safe fixed last-failure marker — never contains raw error message. */
 export type LastFailureMarker =
 	| { readonly type: "error"; readonly code: string }
 	| { readonly type: "compact_failed" }
@@ -213,21 +236,9 @@ type DecodedBody =
 	| { type: "checkpoint_failed" }
 	| { type: "session_state"; state: RemoteHostSessionState };
 
-interface PreflightState {
-	readonly cursor: RemoteHostEventSequence;
-	readonly hasGap: boolean;
-	readonly needsReplay: boolean;
-	readonly nextMsgIdx: number;
-	readonly agentRunning: boolean;
-	readonly msgCount: number;
-	readonly sessionState: RemoteHostSessionState | null;
-	readonly compacting: boolean;
-	readonly checkpointing: boolean;
-	readonly bash: BashState | null;
-	readonly recap: readonly RecapEntry[];
-	readonly records: ReadonlyMap<number, MirrorAssistantRecord>;
-	readonly recOrder: readonly number[];
-}
+// ---------------------------------------------------------------------------
+// Mirror class
+// ---------------------------------------------------------------------------
 
 export class RemoteObservationMirror {
 	private readonly hostId: string;
@@ -247,6 +258,7 @@ export class RemoteObservationMirror {
 	private checkpointing = false;
 	private bash: BashState | null = null;
 	private readonly recap: RecapEntry[] = [];
+	/** Preserved until an explicit session-success boundary or recovery clears it. */
 	private lastFailure: LastFailureMarker = { type: "none" };
 
 	constructor(opts: { hostId: string; generation: string; sessionId: string; initialNextIndex?: number }) {
@@ -270,50 +282,41 @@ export class RemoteObservationMirror {
 	// ingestEvent
 	// -----------------------------------------------------------------------
 	ingestEvent(raw: unknown): MirrorIngestResult {
-		if (!raw || typeof raw !== "object" || Object.getPrototypeOf(raw) !== Object.prototype)
+		// Validate frame as exact plain object with 6 own data keys
+		if (!exactObjectKeys(raw, ["type", "id", "sequence", "cursor", "emittedAt", "body"], []))
 			return rej("NOT_AN_OBJECT");
 		const frame = raw as Record<string, unknown>;
-		const fkeys = Object.keys(frame);
-		const reqKeys = ["type", "id", "sequence", "cursor", "emittedAt", "body"] as const;
-		const allowedKeys = new Set<string>(reqKeys as unknown as string[]);
-		if (fkeys.some((k) => !allowedKeys.has(k)) || reqKeys.some((k) => !fkeys.includes(k)))
-			return rej(fkeys.length < reqKeys.length ? "MALFORMED_OPTIONAL" : "UNKNOWN_FIELD");
 
-		// Reject accessor/nonenumerable/symbol by checking if Object.keys returned the right set
-		// and every value is own enumerable data descriptor
 		if (frame.type !== "event") return rej("INVALID_TYPE");
 		if (!isValidId(frame.id as string)) return rej("INVALID_ID");
-		if (!isSafeGt0Int(frame.sequence)) return rej("INVALID_SEQUENCE");
+		if (!isSafePosInt(frame.sequence) || (frame.sequence as number) < 1) return rej("INVALID_SEQUENCE");
 
-		if (!frame.cursor || typeof frame.cursor !== "object") return rej("INVALID_CURSOR_TYPE");
+		// Validate cursor as exact plain object with 4 keys
+		if (!exactObjectKeys(frame.cursor, ["hostId", "generation", "sessionId", "sequence"], []))
+			return rej("INVALID_CURSOR_TYPE");
 		const cursor = frame.cursor as Record<string, unknown>;
-		if (!exactKeys(cursor, ["hostId", "generation", "sessionId", "sequence"], [])) return rej("MALFORMED_OPTIONAL");
 		if (!isValidId(cursor.hostId) || cursor.hostId !== this.hostId) return rej("IDENTITY_MISMATCH");
 		if (!isValidId(cursor.generation) || cursor.generation !== this.generation) return rej("IDENTITY_MISMATCH");
 		if (!isValidId(cursor.sessionId) || cursor.sessionId !== this.sessionId) return rej("IDENTITY_MISMATCH");
-		if (!isSafeGt0Int(cursor.sequence) || (cursor.sequence as number) !== (frame.sequence as number))
-			return rej("CURSOR_MISMATCH");
+		if (!isSafePosInt(cursor.sequence) || (cursor.sequence as number) < 1) return rej("CURSOR_MISMATCH");
+		if ((cursor.sequence as number) !== (frame.sequence as number)) return rej("CURSOR_MISMATCH");
 
-		if (
-			typeof frame.emittedAt !== "string" ||
-			!frame.emittedAt.length ||
-			frame.emittedAt.length > 64 ||
-			!isValidISODateString(frame.emittedAt)
-		)
+		if (typeof frame.emittedAt !== "string" || !isValidEmittedAt(frame.emittedAt as string))
 			return rej("INVALID_EMITTED_AT");
 
 		const seq = frame.sequence as RemoteHostEventSequence;
 		const emittedAt = frame.emittedAt as string;
 
-		if (seq <= this.cursor) return stale();
+		if (seq <= this.cursor) {
+			return { accepted: false, hasGap: this.hasGap, needsReplay: this.needsReplay };
+		}
 
-		// Validate body structure even if gap-gated — rejection code tells caller WHY
-		if (!frame.body || typeof frame.body !== "object" || Object.getPrototypeOf(frame.body) !== Object.prototype)
-			return rej("INVALID_BODY_TYPE");
-		const body = frame.body as Record<string, unknown>;
+		// Validate all descriptors before reading body.type.
+		if (!isPlainDataObject(frame.body)) return rej("INVALID_BODY_TYPE");
+		const body = frame.body;
 		if (typeof body.type !== "string" || !body.type.length) return rej("INVALID_BODY_TYPE");
 
-		// For future sequence: decode fully then set gap flags, no cursor/content mutation
+		// Future sequence: decode fully, set gap flags, no cursor/content mutation
 		if (seq > this.cursor + 1) {
 			if (!this.decodeBody(body)) return rej("INVALID_BODY_TYPE");
 			this.hasGap = true;
@@ -321,8 +324,8 @@ export class RemoteObservationMirror {
 			return rej("GAP_DETECTED", true, true);
 		}
 
+		// Gap-gated: validate body structurally for caller's rejection evidence
 		if (this.hasGap) {
-			// Validate body for structural rejection codes even while gap-gated
 			if (!this.decodeBody(body))
 				return { accepted: false, rejectionCode: "INVALID_BODY_TYPE", hasGap: true, needsReplay: true };
 			return { accepted: false, rejectionCode: "GAP_DETECTED", hasGap: true, needsReplay: true };
@@ -332,15 +335,24 @@ export class RemoteObservationMirror {
 		if (!decoded) return rej("INVALID_BODY_TYPE");
 		const pre = this.capturePreflight();
 		const preErr = this.validatePreflight(decoded, pre);
-		if (preErr) return { ...preErr, hasGap: this.hasGap, needsReplay: this.needsReplay };
+		if (preErr) {
+			if (preErr.hasGap || preErr.needsReplay) {
+				this.hasGap = true;
+				this.needsReplay = true;
+			}
+			return { ...preErr, hasGap: this.hasGap, needsReplay: this.needsReplay };
+		}
 
 		this.commit(decoded, seq, emittedAt);
 		return ok();
 	}
 
-	/** Clear gap ONLY when expectedCursor === currentCursor — no cursor jump without content. */
+	/**
+	 * Clear gap ONLY when expectedCursor exactly equals current cursor.
+	 * Accepts cursor 0 for gap-at-start recovery.
+	 */
 	markReplayRecovered(expectedCursor: RemoteHostEventSequence): boolean {
-		if (!isSafeGt0Int(expectedCursor)) return false;
+		if (!isSafePosInt(expectedCursor)) return false;
 		if (expectedCursor !== this.cursor) return false;
 		this.hasGap = false;
 		this.needsReplay = false;
@@ -354,7 +366,7 @@ export class RemoteObservationMirror {
 		const t = body.type as string;
 		switch (t) {
 			case "session_created":
-				if (!exactKeys(body, ["type", "sessionId", "workspaceId"], [])) return null;
+				if (!exactObjectKeys(body, ["type", "sessionId", "workspaceId"], [])) return null;
 				if (!isValidId(body.sessionId) || !isValidId(body.workspaceId)) return null;
 				return {
 					type: "session_created",
@@ -362,7 +374,7 @@ export class RemoteObservationMirror {
 					workspaceId: body.workspaceId as string,
 				};
 			case "session_destroyed": {
-				if (!exactKeys(body, ["type"], ["reason"])) return null;
+				if (!exactObjectKeys(body, ["type"], ["reason"])) return null;
 				if (
 					body.reason !== undefined &&
 					(typeof body.reason !== "string" || (body.reason as string).length > MAX_REASON)
@@ -373,15 +385,15 @@ export class RemoteObservationMirror {
 				return d;
 			}
 			case "agent_start":
-				return exactKeys(body, ["type"], []) ? { type: "agent_start" } : null;
+				return exactObjectKeys(body, ["type"], []) ? { type: "agent_start" } : null;
 			case "agent_end": {
-				if (!exactKeys(body, ["type", "messages"], [])) return null;
+				if (!exactObjectKeys(body, ["type", "messages"], [])) return null;
 				return isSafePosInt(body.messages) ? { type: "agent_end", messages: body.messages as number } : null;
 			}
 			case "agent_text_delta":
 			case "agent_thinking_delta":
 			case "agent_toolcall_delta": {
-				if (!exactKeys(body, ["type", "index", "text"], [])) return null;
+				if (!exactObjectKeys(body, ["type", "index", "text"], [])) return null;
 				if (!isSafePosInt(body.index) || typeof body.text !== "string") return null;
 				const perMax =
 					t === "agent_thinking_delta" ? MAX_DTHINK : t === "agent_toolcall_delta" ? MAX_DTOOL : MAX_DTEXT;
@@ -390,17 +402,17 @@ export class RemoteObservationMirror {
 					: null;
 			}
 			case "bash_start":
-				if (!exactKeys(body, ["type", "command"], [])) return null;
+				if (!exactObjectKeys(body, ["type", "command"], [])) return null;
 				return typeof body.command === "string" && (body.command as string).length <= MAX_CMD
 					? { type: "bash_start", command: body.command as string }
 					: null;
 			case "bash_delta": {
-				if (!exactKeys(body, ["type", "text"], [])) return null;
+				if (!exactObjectKeys(body, ["type", "text"], [])) return null;
 				if (typeof body.text !== "string" || (body.text as string).length > MAX_BASH_DELTA) return null;
 				return { type: "bash_delta", text: body.text as string };
 			}
 			case "bash_end": {
-				if (!exactKeys(body, ["type", "exitCode", "cancelled", "truncated"], [])) return null;
+				if (!exactObjectKeys(body, ["type", "exitCode", "cancelled", "truncated"], [])) return null;
 				if (!Number.isSafeInteger(body.exitCode)) return null;
 				if (typeof body.cancelled !== "boolean" || typeof body.truncated !== "boolean") return null;
 				return {
@@ -411,42 +423,40 @@ export class RemoteObservationMirror {
 				};
 			}
 			case "compact_start":
-				return exactKeys(body, ["type"], []) ? { type: "compact_start" } : null;
+				return exactObjectKeys(body, ["type"], []) ? { type: "compact_start" } : null;
 			case "compact_end": {
-				if (!exactKeys(body, ["type", "keptMessages"], [])) return null;
+				if (!exactObjectKeys(body, ["type", "keptMessages"], [])) return null;
 				return isSafePosInt(body.keptMessages)
 					? { type: "compact_end", keptMessages: body.keptMessages as number }
 					: null;
 			}
 			case "compact_failed": {
-				if (!exactKeys(body, ["type", "error"], [])) return null;
-				// Bounded discard: accept only string, bound length
+				if (!exactObjectKeys(body, ["type", "error"], [])) return null;
 				if (typeof body.error !== "string" || (body.error as string).length > MAX_ERR_MSG) return null;
 				return { type: "compact_failed" };
 			}
 			case "error": {
-				if (!exactKeys(body, ["type", "code", "message"], [])) return null;
+				if (!exactObjectKeys(body, ["type", "code", "message"], [])) return null;
 				if (typeof body.code !== "string" || body.code.length === 0 || (body.code as string).length > MAX_ERR_CODE)
 					return null;
-				// Bound raw message before discard
 				if (typeof body.message !== "string" || (body.message as string).length > MAX_ERR_MSG) return null;
 				return { type: "error", code: KNOWN_ERR.has(body.code as string) ? (body.code as string) : "UNKNOWN" };
 			}
 			case "checkpoint_start":
-				return exactKeys(body, ["type"], []) ? { type: "checkpoint_start" } : null;
+				return exactObjectKeys(body, ["type"], []) ? { type: "checkpoint_start" } : null;
 			case "checkpoint_complete": {
-				if (!exactKeys(body, ["type", "snapshotId"], [])) return null;
+				if (!exactObjectKeys(body, ["type", "snapshotId"], [])) return null;
 				return isBoundedStr(body.snapshotId, MAX_SNAP_ID)
 					? { type: "checkpoint_complete", snapshotId: body.snapshotId as string }
 					: null;
 			}
 			case "checkpoint_failed": {
-				if (!exactKeys(body, ["type", "error"], [])) return null;
+				if (!exactObjectKeys(body, ["type", "error"], [])) return null;
 				if (typeof body.error !== "string" || (body.error as string).length > MAX_ERR_MSG) return null;
 				return { type: "checkpoint_failed" };
 			}
 			case "session_state": {
-				if (!exactKeys(body, ["type", "state"], [])) return null;
+				if (!exactObjectKeys(body, ["type", "state"], [])) return null;
 				return typeof body.state === "string" && SESSION_STATES.has(body.state)
 					? { type: "session_state", state: body.state as RemoteHostSessionState }
 					: null;
@@ -459,7 +469,21 @@ export class RemoteObservationMirror {
 	// -----------------------------------------------------------------------
 	// Preflight (immutable snapshot for semantic validation)
 	// -----------------------------------------------------------------------
-	private capturePreflight(): PreflightState {
+	private capturePreflight(): {
+		cursor: RemoteHostEventSequence;
+		hasGap: boolean;
+		needsReplay: boolean;
+		nextMsgIdx: number;
+		agentRunning: boolean;
+		msgCount: number;
+		sessionState: RemoteHostSessionState | null;
+		compacting: boolean;
+		checkpointing: boolean;
+		bash: BashState | null;
+		recap: readonly RecapEntry[];
+		records: ReadonlyMap<number, MirrorAssistantRecord>;
+		recOrder: readonly number[];
+	} {
 		return {
 			cursor: this.cursor,
 			hasGap: this.hasGap,
@@ -477,7 +501,24 @@ export class RemoteObservationMirror {
 		};
 	}
 
-	private validatePreflight(d: DecodedBody, pre: PreflightState): MirrorIngestResult | null {
+	private validatePreflight(
+		d: DecodedBody,
+		pre: {
+			cursor: RemoteHostEventSequence;
+			hasGap: boolean;
+			needsReplay: boolean;
+			nextMsgIdx: number;
+			agentRunning: boolean;
+			msgCount: number;
+			sessionState: RemoteHostSessionState | null;
+			compacting: boolean;
+			checkpointing: boolean;
+			bash: BashState | null;
+			recap: readonly RecapEntry[];
+			records: ReadonlyMap<number, MirrorAssistantRecord>;
+			recOrder: readonly number[];
+		},
+	): MirrorIngestResult | null {
 		switch (d.type) {
 			case "session_created":
 			case "session_destroyed":
@@ -496,18 +537,15 @@ export class RemoteObservationMirror {
 			case "agent_toolcall_delta": {
 				if (!isSafePosInt(d.index) || typeof d.text !== "string") return rej("INVALID_MESSAGE_INDEX");
 				if (pre.records.size === 0) {
-					// Empty map: must match nextMsgIdx (not hardcoded 0)
 					if (d.index !== pre.nextMsgIdx)
 						return { accepted: false, hasGap: true, needsReplay: true, rejectionCode: "GAP_DETECTED" };
 					return null;
 				}
 				const maxIdx = Math.max(...pre.recOrder);
-				// After eviction, older missing index signals replay
 				if (d.index < maxIdx - MAX_RECORDS)
 					return { accepted: false, hasGap: true, needsReplay: true, rejectionCode: "GAP_DETECTED" };
 				if (d.index > maxIdx + 1)
 					return { accepted: false, hasGap: true, needsReplay: true, rejectionCode: "GAP_DETECTED" };
-				// New index must equal nextMessageIndex; existing delta iff Map.has
 				if (!pre.records.has(d.index) && d.index !== pre.nextMsgIdx)
 					return { accepted: false, hasGap: true, needsReplay: true, rejectionCode: "GAP_DETECTED" };
 				return null;
@@ -557,6 +595,13 @@ export class RemoteObservationMirror {
 		this.cursorTimestamp = emittedAt;
 		this.hasGap = false;
 		this.needsReplay = false;
+
+		// Preserve the last fixed failure marker until a new session is created.
+		if (d.type === "error") this.lastFailure = { type: "error", code: d.code };
+		else if (d.type === "compact_failed") this.lastFailure = { type: "compact_failed" };
+		else if (d.type === "checkpoint_failed") this.lastFailure = { type: "checkpoint_failed" };
+		else if (d.type === "session_created") this.lastFailure = { type: "none" };
+
 		switch (d.type) {
 			case "session_created":
 			case "session_destroyed":
@@ -614,15 +659,6 @@ export class RemoteObservationMirror {
 				this.sessionState = d.state;
 				break;
 		}
-		// Safe fixed failure marker
-		this.lastFailure =
-			d.type === "error"
-				? { type: "error", code: d.code }
-				: d.type === "compact_failed"
-					? { type: "compact_failed" }
-					: d.type === "checkpoint_failed"
-						? { type: "checkpoint_failed" }
-						: { type: "none" };
 
 		this.recap.push({
 			eventSequence: seq,
@@ -695,9 +731,6 @@ export class RemoteObservationMirror {
 		return { entries, signalGap: from + 1 < oldest || this.hasGap || (entries.length === 0 && from < this.cursor) };
 	}
 
-	// -----------------------------------------------------------------------
-	// Immutable core state DTO for persistence layer
-	// -----------------------------------------------------------------------
 	captureCoreState(): CoreStateDTO {
 		return deepFreeze({
 			hostId: this.hostId,
@@ -745,7 +778,7 @@ export class RemoteObservationMirror {
 		});
 	}
 
-	// Getters (all return immutable/deep-frozen snapshots)
+	// Getters
 	get currentCursor(): RemoteHostEventSequence {
 		return this.cursor;
 	}
@@ -799,15 +832,12 @@ export class RemoteObservationMirror {
 		return r ? Object.freeze({ ...r }) : undefined;
 	}
 	get lastFailureValue(): LastFailureMarker {
-		return this.lastFailure;
+		return Object.freeze({ ...this.lastFailure });
 	}
 }
 
 function ok(): MirrorIngestResult {
 	return { accepted: true, hasGap: false, needsReplay: false };
-}
-function stale(): MirrorIngestResult {
-	return { accepted: false, hasGap: false, needsReplay: false };
 }
 function rej(code: MirrorRejectionCode, hasGap = false, needsReplay = false): MirrorIngestResult {
 	return { accepted: false, rejectionCode: code, hasGap, needsReplay };
