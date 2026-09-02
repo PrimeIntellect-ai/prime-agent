@@ -606,6 +606,72 @@ describe("buildSandboxSshSpawnSpec", () => {
 		expect(result.value.options.env.PATH).toBe("/usr/bin");
 	});
 
+	// -----------------------------------------------------------------------
+	// Getter invocation safety (isPlainObject reads no getters)
+	// -----------------------------------------------------------------------
+
+	it("isPlainObject does not invoke getters on raw input", () => {
+		let accessCount = 0;
+		const obj: Record<string, unknown> = {
+			sandboxId: "x",
+			remoteExecutable: "/x",
+			homeCwd: "/",
+			readyNonce: "00000000000000000000000000000000",
+			get homeEnv() {
+				accessCount++;
+				return { PATH: "/usr/bin" };
+			},
+		};
+		buildSandboxSshSpawnSpec(obj);
+		expect(accessCount).toBe(0);
+	});
+
+	it("isPlainObject does not invoke constructor getter on raw input", () => {
+		let accessCount = 0;
+		const proto = Object.create(null, {
+			constructor: {
+				get: () => {
+					accessCount++;
+					return Object;
+				},
+				enumerable: false,
+				configurable: true,
+			},
+		});
+		const obj = Object.create(proto);
+		obj.sandboxId = "x";
+		obj.remoteExecutable = "/x";
+		obj.homeCwd = "/";
+		obj.readyNonce = "00000000000000000000000000000000";
+		obj.homeEnv = { PATH: "/usr/bin" };
+		buildSandboxSshSpawnSpec(obj);
+		expect(accessCount).toBe(0);
+	});
+
+	it("isPlainObject does not invoke constructor getter on homeEnv", () => {
+		let accessCount = 0;
+		const proto = Object.create(null, {
+			constructor: {
+				get: () => {
+					accessCount++;
+					return Object;
+				},
+				enumerable: false,
+				configurable: true,
+			},
+		});
+		const env = Object.create(proto);
+		env.PATH = "/usr/bin";
+		const result = buildSandboxSshSpawnSpec({
+			sandboxId: "x",
+			remoteExecutable: "/x",
+			homeCwd: "/",
+			readyNonce: "00000000000000000000000000000000",
+			homeEnv: env,
+		});
+		expect(accessCount).toBe(0);
+	});
+
 	// Mutation protection
 	// -----------------------------------------------------------------------
 
