@@ -560,6 +560,7 @@ export async function launchDaemonUpdateRestartCoordinator(
 	const child = spawn(launch.command, launch.args, {
 		cwd: options.cwd ?? process.cwd(),
 		detached: true,
+		windowsHide: process.platform === "win32",
 		env: coordinatorEnvironment(agentDir),
 		stdio: "ignore",
 	});

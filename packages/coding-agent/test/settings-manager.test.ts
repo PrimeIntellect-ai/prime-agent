@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -566,6 +566,45 @@ describe("SettingsManager", () => {
 			manager.applyOverrides({ telemetry: { enabled: true } });
 
 			expect(manager.getTelemetryEnabled()).toBe(false);
+		});
+	});
+	describe("atomic file writes", () => {
+		it("writes through an atomic replace without temp-file residue", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setTheme("atomic");
+			await manager.flush();
+
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"))).toMatchObject({ theme: "atomic" });
+			expect(readdirSync(agentDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
+		});
+
+		it.skipIf(process.platform === "win32")("preserves existing POSIX permissions", async () => {
+			const settingsPath = join(agentDir, "settings.json");
+			writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }), { mode: 0o644 });
+			chmodSync(settingsPath, 0o644);
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setTheme("saved");
+			await manager.flush();
+			expect(statSync(settingsPath).mode & 0o777).toBe(0o644);
+		});
+
+		it.skipIf(process.platform === "win32")("creates private POSIX settings files", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setTheme("private");
+			await manager.flush();
+			expect(statSync(join(agentDir, "settings.json")).mode & 0o777).toBe(0o600);
+		});
+
+		it("survives repeated writes without stale temp files", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			for (let index = 0; index < 20; index++) {
+				manager.setTheme(`cycle-${index}`);
+				await manager.flush();
+				expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"))).toMatchObject({
+					theme: `cycle-${index}`,
+				});
+			}
+			expect(readdirSync(agentDir).filter((name) => name.includes(".tmp-"))).toEqual([]);
 		});
 	});
 });

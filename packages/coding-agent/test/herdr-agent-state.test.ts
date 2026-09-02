@@ -7,6 +7,7 @@ import {
 	createHerdrAgentStateExtension,
 	hasFileBasedHerdrIntegration,
 	herdrAgentStateExtension,
+	resolveHerdrSocketPath,
 } from "../src/core/extensions/builtin/herdr-agent-state.js";
 import type { ExtensionAPI } from "../src/core/extensions/types.js";
 
@@ -40,6 +41,16 @@ function createMockPi() {
 		},
 	} as unknown as ExtensionAPI;
 	return { pi, handlers, busHandlers };
+}
+
+/**
+ * The endpoint the extension will dial for a given HERDR_SOCKET_PATH. Windows
+ * has no Unix domain sockets, so Herdr listens on a named pipe whose name
+ * embeds the socket path; mirror that here or the fake server and the
+ * extension never meet.
+ */
+function listenEndpoint(socketPath: string): string {
+	return process.platform === "win32" ? `\\\\.\\pipe\\${socketPath}` : socketPath;
 }
 
 async function startFakeHerdrServer(socketPath: string): Promise<{
@@ -76,7 +87,7 @@ async function startFakeHerdrServer(socketPath: string): Promise<{
 
 	await new Promise<void>((resolve, reject) => {
 		server.on("error", reject);
-		server.listen(socketPath, resolve);
+		server.listen(listenEndpoint(socketPath), resolve);
 	});
 
 	const waitForRequests = (count: number, timeoutMs = 3000): Promise<void> => {
@@ -490,5 +501,61 @@ describe("herdrAgentStateExtension", () => {
 
 		const seqs = requests.map((r) => r.params.seq as number);
 		expect(seqs[1]).toBeGreaterThan(seqs[0]);
+	});
+});
+
+describe("resolveHerdrSocketPath", () => {
+	const cleanupServers: Server[] = [];
+	const savedEnv = Object.fromEntries(
+		["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HERDR_PI_IDLE_DEBOUNCE_MS"].map((key) => [
+			key,
+			process.env[key],
+		]),
+	);
+
+	afterEach(async () => {
+		while (cleanupServers.length > 0) {
+			const server = cleanupServers.pop();
+			await new Promise<void>((resolve) => server?.close(() => resolve()));
+		}
+		for (const [key, value] of Object.entries(savedEnv)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	});
+
+	it("keeps Unix socket paths unchanged", () => {
+		expect(resolveHerdrSocketPath("/tmp/herdr.sock", "linux")).toBe("/tmp/herdr.sock");
+		expect(resolveHerdrSocketPath("herdr-pi.sock", "darwin")).toBe("herdr-pi.sock");
+	});
+
+	it("maps a bare Windows endpoint onto the named pipe namespace", () => {
+		expect(resolveHerdrSocketPath("herdr-pi.sock", "win32")).toBe(`\\\\.\\pipe\\herdr-pi.sock`);
+		expect(resolveHerdrSocketPath("pi-instance-1", "win32")).toBe(`\\\\.\\pipe\\pi-instance-1`);
+	});
+
+	it("keeps an already-qualified Windows pipe name unchanged", () => {
+		const qualified = `\\\\.\\pipe\\herdr-pi.sock`;
+		expect(resolveHerdrSocketPath(qualified, "win32")).toBe(qualified);
+	});
+
+	it.skipIf(process.platform !== "win32")("reports through a real Windows named pipe endpoint", async () => {
+		// Bare name: Windows pipe names must not contain path separators, and
+		// Herdr embeds the socket path into the pipe name.
+		const socketName = `pi-herdr-test-${process.pid}-${Date.now()}.sock`;
+		const { server, requests, waitForRequests } = await startFakeHerdrServer(socketName);
+		cleanupServers.push(server);
+		process.env.HERDR_ENV = "1";
+		process.env.HERDR_SOCKET_PATH = socketName;
+		process.env.HERDR_PANE_ID = "w1:p1";
+		process.env.HERDR_PI_IDLE_DEBOUNCE_MS = "10";
+
+		const { pi, handlers } = createMockPi();
+		herdrAgentStateExtension(pi);
+
+		const ctx = { sessionManager: { getSessionFile: () => undefined, getSessionId: () => "s" } };
+		handlers.get("session_start")?.[0]?.({ type: "session_start", reason: "startup" }, ctx);
+		await waitForRequests(1);
+		expect(requests[0]?.params.state).toBe("idle");
 	});
 });

@@ -207,6 +207,20 @@ describe("buildRlmPrompt", () => {
 });
 
 describe("buildSystemPrompt", () => {
+	test("documents the session scratch directory for default and custom prompts", () => {
+		for (const customPrompt of [undefined, "Custom prompt"]) {
+			const prompt = buildSystemPrompt({
+				cwd: "D:\\project",
+				scratchPath: "D:\\PrimeAgent\\sessions\\abc\\tmp",
+				customPrompt,
+			});
+			expect(prompt).toContain("# Session Scratch Directory");
+			expect(prompt).toContain("D:/PrimeAgent/sessions/abc/tmp");
+			expect(prompt).toContain("PRIME_AGENT_SESSION_TMP");
+			expect(prompt).toContain("never use a drive root or POSIX /tmp");
+		}
+	});
+
 	test("adds generic MCP guidance to default and custom IPython prompts", () => {
 		for (const customPrompt of [undefined, "custom body"]) {
 			const prompt = buildSystemPrompt({

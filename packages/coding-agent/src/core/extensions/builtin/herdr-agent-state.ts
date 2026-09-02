@@ -2,7 +2,7 @@
  * Built-in Herdr integration extension.
  *
  * Reports agent lifecycle state (working/idle/blocked) to the Herdr terminal
- * workspace manager via its Unix socket. This is the in-tree equivalent of
+ * workspace manager via its Unix socket or Windows named pipe. This is the in-tree equivalent of
  * the extension that `herdr integration install pi` writes, so Prime Agent
  * works inside Herdr panes out of the box without a manual install step.
  *
@@ -21,6 +21,25 @@ import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionFactory } from "../types.js";
 
 type AgentState = "working" | "blocked" | "idle";
+
+const WINDOWS_PIPE_PREFIX = `\\\\.\\pipe\\`;
+const WINDOWS_QUALIFIED_PIPE_PREFIX = /^\\\\[.?]\\pipe\\/i;
+
+/**
+ * Resolve the socket endpoint for the current platform.
+ * On Windows, Herdr exposes a named pipe and the path must be mapped
+ * to the pipe namespace. Idempotent: an already-qualified pipe name
+ * (`\\.\pipe\...`) is returned unchanged.
+ */
+export function resolveHerdrSocketPath(socketPath: string, platform: NodeJS.Platform = process.platform): string {
+	if (platform !== "win32") {
+		return socketPath;
+	}
+	if (WINDOWS_QUALIFIED_PIPE_PREFIX.test(socketPath)) {
+		return socketPath;
+	}
+	return `${WINDOWS_PIPE_PREFIX}${socketPath}`;
+}
 
 /**
  * True when Herdr's own file-based Pi integration (`herdr integration
@@ -171,7 +190,7 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 				resolve();
 			};
 
-			const socket = createConnection(socketPath!);
+			const socket = createConnection(resolveHerdrSocketPath(socketPath!));
 			socket.on("error", finish);
 			socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
 			socket.on("data", finish);

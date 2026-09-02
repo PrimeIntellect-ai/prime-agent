@@ -21,6 +21,8 @@ export interface BuildSystemPromptOptions {
 	cwd: string;
 	/** Conversation log path. */
 	messagesPath?: string;
+	/** Session-owned directory for disposable files. */
+	scratchPath?: string;
 	/** Pre-loaded context files. */
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded skills. */
@@ -53,6 +55,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	} = options;
 	const promptCwd = cwd.replace(/\\/g, "/");
 	const promptMessagesPath = (messagesPath ?? "not persisted").replace(/\\/g, "/");
+	const scratchSection = options.scratchPath
+		? formatSessionScratchGuidance(options.scratchPath.replace(/\\/g, "/"))
+		: "";
 
 	const now = new Date();
 	const year = now.getFullYear();
@@ -94,6 +99,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		// Add date and working directory last
 		prompt += `\nCurrent date: ${date}`;
 		prompt += `\nCurrent working directory: ${promptCwd}`;
+		if (scratchSection) prompt += `\n\n${scratchSection}`;
 
 		const childDoctrine = buildChildAgentDoctrine({
 			depth: options.rlmDepth,
@@ -129,6 +135,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		depth: options.rlmDepth,
 		parentAgent: options.rlmParentAgent,
 	});
+	if (scratchSection) prompt += `\n\n${scratchSection}`;
 
 	// Appended AFTER the trained buildRlmPrompt prefix, and before the harness-state
 	// menu, so the model reads when/why to delegate and then sees the concrete subagent
@@ -177,6 +184,17 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	}
 
 	return prompt;
+}
+
+function formatSessionScratchGuidance(scratchPath: string): string {
+	return [
+		"# Session Scratch Directory",
+		"",
+		`Use \`${scratchPath}\` for disposable downloads, caches, and helper scripts.`,
+		"The persistent kernel exposes the same path as PRIME_AGENT_SESSION_TMP, TMP, TEMP, and TMPDIR.",
+		"On Windows, never use a drive root or POSIX /tmp for scratch work.",
+		"Keep durable project outputs in the working directory, not in the scratch directory.",
+	].join("\n");
 }
 
 function formatGenericMcpGuidance(servers: string[] | undefined): string {

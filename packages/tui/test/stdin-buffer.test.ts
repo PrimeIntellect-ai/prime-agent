@@ -391,6 +391,77 @@ describe("StdinBuffer", () => {
 		});
 	});
 
+	describe("Raw Multiline Paste", () => {
+		let emittedPaste: string[];
+
+		beforeEach(() => {
+			buffer = new StdinBuffer({ timeout: 10 });
+			emittedSequences = [];
+			emittedPaste = [];
+			buffer.on("data", (sequence) => emittedSequences.push(sequence));
+			buffer.on("paste", (data) => emittedPaste.push(data));
+		});
+
+		for (const [name, input] of [
+			["CRLF", "line1\r\nline2"],
+			["LF", "line1\nline2"],
+			["CR", "line1\rline2"],
+			["leading newline", "\rhello"],
+			["trailing newline", "hello\r"],
+			["trailing CRLF", "hello\r\n"],
+			["blank lines", "line1\r\n\r\nline2"],
+			["mixed line endings", "a\rb\nc"],
+			["Unicode", "Hello 世界\n🎉"],
+		] as const) {
+			it(`emits ${name} text in one raw chunk as paste`, () => {
+				processInput(input);
+				assert.deepStrictEqual(emittedPaste, [input]);
+				assert.deepStrictEqual(emittedSequences, []);
+			});
+		}
+
+		it("emits multiline Buffer input as paste", () => {
+			processInput(Buffer.from("line1\r\nline2"));
+			assert.deepStrictEqual(emittedPaste, ["line1\r\nline2"]);
+			assert.deepStrictEqual(emittedSequences, []);
+		});
+
+		for (const input of ["\r", "\n", "\r\n", "\r\r\r"] as const) {
+			it(`keeps linebreak-only chunk ${JSON.stringify(input)} as key data`, () => {
+				processInput(input);
+				assert.deepStrictEqual(emittedPaste, []);
+				assert.deepStrictEqual(emittedSequences, [...input]);
+			});
+		}
+
+		it("does not disturb bracketed paste", () => {
+			processInput("\x1b[200~pasted\r\ntext\x1b[201~");
+			assert.deepStrictEqual(emittedPaste, ["pasted\r\ntext"]);
+			assert.deepStrictEqual(emittedSequences, []);
+		});
+
+		it("keeps escape-containing chunks on the escape parser path", () => {
+			processInput("a\x1b[Aline1\r\nline2");
+			assert.deepStrictEqual(emittedPaste, []);
+			assert.deepStrictEqual(emittedSequences, [
+				"a",
+				"\x1b[A",
+				"l",
+				"i",
+				"n",
+				"e",
+				"1",
+				"\r",
+				"\n",
+				"l",
+				"i",
+				"n",
+				"e",
+				"2",
+			]);
+		});
+	});
+
 	describe("Destroy", () => {
 		it("should clear buffer on destroy", () => {
 			processInput("\x1b[<35");

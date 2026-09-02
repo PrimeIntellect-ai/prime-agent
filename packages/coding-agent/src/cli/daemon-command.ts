@@ -691,6 +691,7 @@ async function runStart(parsed: ParsedDaemonClientCommand): Promise<void> {
 	const child = spawn(process.execPath, daemonArgs, {
 		cwd: sessionArgs.config?.cwd ?? process.cwd(),
 		detached: true,
+		windowsHide: process.platform === "win32",
 		env: process.env,
 		stdio: "ignore",
 	});

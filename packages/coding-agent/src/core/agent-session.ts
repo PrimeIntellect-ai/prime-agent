@@ -912,6 +912,7 @@ interface RlmChildRun {
 	deletionCleanupFailed?: boolean;
 	deletionRunFinished?: boolean;
 	deletionNotice?: Promise<void>;
+	deletionFailureNotice?: Promise<void>;
 	deletionNeedsCompletionNotice?: boolean;
 	completeDeletion?: () => Promise<void>;
 	reportDeletionCleanupFailure?: (error: unknown) => Promise<void>;
@@ -4384,6 +4385,7 @@ export class AgentSession {
 			customPrompt: loaderSystemPrompt,
 			appendSystemPrompt,
 			messagesPath: this.sessionManager.getSessionFile(),
+			scratchPath: this._ensureSessionScratchDir(),
 			selectedTools: validToolNames,
 			toolSnippets,
 			promptGuidelines,
@@ -9351,6 +9353,13 @@ export class AgentSession {
 			RLM_MAX_DEPTH: String(this._rlmMaxDepth),
 			RLM_GLOBAL_HARNESS_STATE_DIR: getGlobalHarnessStateDir(),
 		};
+		const scratchDir = this._ensureSessionScratchDir();
+		if (scratchDir) {
+			env.PRIME_AGENT_SESSION_TMP = scratchDir;
+			env.TMP = scratchDir;
+			env.TEMP = scratchDir;
+			env.TMPDIR = scratchDir;
+		}
 		const rlmSessionDir = this._ensureRlmSessionDir();
 		if (rlmSessionDir) {
 			env.RLM_SESSION_DIR = rlmSessionDir;
@@ -9384,6 +9393,14 @@ export class AgentSession {
 		if (resolved) {
 			env[SERPER_ENV_VAR] = resolved;
 		}
+	}
+
+	private _ensureSessionScratchDir(): string | undefined {
+		const sessionArtifactDir = this.sessionManager.getSessionArtifactDir();
+		if (!sessionArtifactDir) return undefined;
+		const scratchDir = join(sessionArtifactDir, "tmp");
+		mkdirSync(scratchDir, { recursive: true });
+		return scratchDir;
 	}
 
 	// Undefined when there's no persistent artifact dir (e.g. the viewer client):
@@ -9985,7 +10002,10 @@ export class AgentSession {
 				// Reset retry coordination only after selector preflight reaches the
 				// resolved child. A failed preflight must leave the prior retry boundary
 				// intact so a later call can acquire it.
+				// Also reset the failure-notice memo so a fresh retry emits exactly one
+				// notice per attempt rather than suppressing later retry failures forever
 				run.deletionCleanupFailed = false;
+				run.deletionFailureNotice = undefined;
 				run.deletionReservation = createAgentMessageDeferred();
 			}
 			// The detached task remains the sole lifecycle owner. Mark deletion before
@@ -10526,14 +10546,18 @@ export class AgentSession {
 
 		run.reportDeletionCleanupFailure = (error) => {
 			if (run.suppressTerminalNotice || this._disposed || this._disposing) return Promise.resolve();
+			// Send at most one cleanup failure notice per explicit delete attempt.
+			if (run.deletionFailureNotice) return run.deletionFailureNotice;
 			const cleanupError = error instanceof Error ? error.message : String(error);
-			return deliverTerminalMessageToParent(
+			const notice = deliverTerminalMessageToParent(
 				createRlmChildFailureMessage({
 					childId: run.id,
 					sessionName,
 					error: `Deletion cleanup failed; retry rlm.delete_subagent("${run.id}") before completion: ${cleanupError}`,
 				}),
 			);
+			run.deletionFailureNotice = notice;
+			return notice;
 		};
 
 		// Runtime startup and the task run are deliberately detached. The public

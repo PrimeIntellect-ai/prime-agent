@@ -349,12 +349,39 @@ jobs:
       - name: Run Windows behavior tests
         working-directory: packages/coding-agent
         run: >-
-          bun test
+          bun test --isolate --timeout 120000
           test/bash-close-hang-windows.test.ts
           test/child-process.test.ts
+          test/command-recovery-journal.test.ts
+          test/config-windows-hardening.test.ts
+          test/daemon-command.test.ts
           test/daemon-socket.test.ts
           test/exec.test.ts
+          test/frontmatter.test.ts
+          test/herdr-agent-state.test.ts
           test/kernel-bash-shell.test.ts
+          test/kernel-bootstrap-windows.test.ts
+          test/path-utils.test.ts
+          test/rlm-subagent-display.test.ts
+          test/rlm-subagent-display-windows.test.ts
+          test/session-lease.test.ts
+          test/settings-manager.test.ts
+          test/settings-manager-bug.test.ts
+          test/shell-windows-hardening.test.ts
+          test/system-prompt.test.ts
+
+      - name: Test Windows RLM deletion races
+        working-directory: packages/coding-agent
+        run: >-
+          bun test --isolate --timeout 120000
+          --test-name-pattern
+          "emits exactly one failure notice per delete retry|keeps a child live when its durable deletion boundary cannot be read|reconciles a stale display status|uses the persistent artifact dir and sets RLM_SESSION_DIR"
+          test/agent-session-recursion.test.ts
+          test/daemon-mode.test.ts
+
+      - name: Test daemon worker named-pipe lifecycle
+        working-directory: packages/coding-agent
+        run: bun test --isolate --timeout 240000 test/daemon-named-pipe-lifecycle.test.ts
 
       - name: Test terminal behavior
         working-directory: packages/tui
