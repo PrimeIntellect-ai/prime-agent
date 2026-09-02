@@ -408,11 +408,10 @@ function readMessageText(content: unknown): string {
 		.join("\n");
 }
 
-// Agent doing work, ignoring the classification verdict.
+// Agent doing work itself, ignoring the classification verdict; delegated
+// child work is the badge's signal, not this session's activity.
 export function isActiveSessionBusy(activeSession: ActiveSessionState): boolean {
-	const session = activeSession.runtime.session;
-	// Background subagents keep the parent "working" even after its own turn ends.
-	return session.isSessionActive || session.hasRunningRlmChildren();
+	return activeSession.runtime.session.isSessionActive;
 }
 
 export function activeActivityForSession(activeSession: ActiveSessionState): SessionActivity {

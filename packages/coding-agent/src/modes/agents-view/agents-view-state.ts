@@ -1025,9 +1025,6 @@ function getSessionStatusLabel(summary: SessionSummary, hasActiveHeartbeat = sum
 	if (summary.isBashRunning === true) {
 		return "running bash";
 	}
-	if (summary.hasRunningRlmChildren === true) {
-		return "subagents running";
-	}
 	if (summary.sessionActions.active) {
 		return summary.sessionActions.active.label ?? summary.sessionActions.active.kind.replace("_", " ");
 	}

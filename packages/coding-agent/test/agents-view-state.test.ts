@@ -400,6 +400,7 @@ describe("agents view state", () => {
 				sessionName: "Parent",
 				activity: "idle",
 				taskState: "completed",
+				hasRunningRlmChildren: true,
 				messageCount: 2,
 			}),
 			makeSummary({
@@ -417,6 +418,8 @@ describe("agents view state", () => {
 
 		const collapsed = buildAgentsViewRows(summaries);
 		expect(collapsed[0]).toMatchObject({ kind: "agent", section: "idle", runningSubagentCount: 1 });
+		// The label agrees with Idle; the badge, not the label, carries the delegation signal.
+		expect(collapsed[0]?.statusLabel).toBe("completed");
 		expect(collapsed[1]).toMatchObject({ kind: "subagent-summary", section: "idle", title: "1 subagent running" });
 	});
 
@@ -555,6 +558,7 @@ describe("agents view state", () => {
 				sessionName: "Busy-subtree parent",
 				activity: "idle",
 				taskState: "completed",
+				hasRunningRlmChildren: true,
 				messageCount: 2,
 				lastActivityAt: "2026-08-01T00:00:00Z",
 			}),

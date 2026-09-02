@@ -522,7 +522,7 @@ describe("daemon mode helpers", () => {
 		});
 	});
 
-	it("classifies local roster status with heartbeat and running-child activity", () => {
+	it("classifies local roster status from the session's own work, not delegated children", () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-status-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			createRuntime: vi.fn(),
@@ -551,7 +551,8 @@ describe("daemon mode helpers", () => {
 		const getHeartbeat = vi.spyOn(internals.cronStore, "getHeartbeat").mockReturnValue(undefined);
 		const listRlmHeartbeats = vi.spyOn(internals.cronStore, "listRlmHeartbeats").mockReturnValue([]);
 
-		expect(internals.createAgentMessageAgentSummary(state).status).toBe("running");
+		// Delegated child work is not the session's own work.
+		expect(internals.createAgentMessageAgentSummary(state).status).toBe("idle");
 		hasRunningChildren = false;
 		state.runtime = {
 			...state.runtime,

@@ -20,6 +20,8 @@ export function classifyAgentStatus(input: AgentStatusInput): AgentRosterStatus 
 	return input.busy || input.hasActiveHeartbeat ? "running" : "idle";
 }
 
+// Residency and shutdown-safety busy: delegated child work counts. The section
+// classifier below deliberately does not use it - Running means the session itself.
 export function isSessionSummaryBusy(
 	summary: Pick<SessionSummary, "isSessionActive" | "hasRunningRlmChildren">,
 ): boolean {
@@ -27,16 +29,13 @@ export function isSessionSummaryBusy(
 }
 
 export function classifySessionRosterStatus(
-	summary: Pick<
-		SessionSummary,
-		"activeSessionId" | "activity" | "isSessionActive" | "hasRunningRlmChildren" | "hasActiveHeartbeat"
-	>,
+	summary: Pick<SessionSummary, "activeSessionId" | "activity" | "isSessionActive" | "hasActiveHeartbeat">,
 	queuedChild = false,
 ): AgentRosterStatus {
 	return classifyAgentStatus({
 		resident: !!summary.activeSessionId,
 		queuedChild,
-		busy: summary.activity === "working" || isSessionSummaryBusy(summary),
+		busy: summary.activity === "working" || summary.isSessionActive === true,
 		hasActiveHeartbeat: summary.hasActiveHeartbeat === true,
 	});
 }
