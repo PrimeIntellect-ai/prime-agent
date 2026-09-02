@@ -722,6 +722,65 @@ describe("metadata validation", () => {
 // Grant isolation
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Proxy get trap / descriptor erasure
+// ---------------------------------------------------------------------------
+
+describe("Proxy get trap erasure", () => {
+	it("encode erases grant from descriptor before Proxy get trap throws", () => {
+		const grant = new Uint8Array(50).fill(0x41);
+		const meta = validMetadata({ hostId: "" }); // invalid metadata
+		// Proxy: getOwnPropertyDescriptor returns data descriptors with valid
+		// .value for both keys, but the get() trap throws for every property
+		// read. This proves the code reads optsDescs.grant.value instead of
+		// re-reading opts.grant (which would trigger the get trap and throw).
+		const proxy = new Proxy(
+			{},
+			{
+				ownKeys() {
+					return ["metadata", "grant"];
+				},
+				getOwnPropertyDescriptor(_target: unknown, key: string) {
+					if (key === "grant") return { value: grant, writable: true, enumerable: true, configurable: true };
+					if (key === "metadata") return { value: meta, writable: true, enumerable: true, configurable: true };
+					return undefined;
+				},
+				get(_target: unknown, key: string | symbol) {
+					throw new Error(`would trigger proxy get trap for: ${String(key)}`);
+				},
+			},
+		);
+		const result = encodeSandboxBootstrapPayload(proxy as unknown as EncodeSandboxBootstrapPayloadOpts);
+		expect(result.ok).toBe(false);
+		// Grant is zeroed even though metadata validation fails later
+		expect(isZeroed(grant)).toBe(true);
+	});
+});
+// Malformed percent decode
+// ---------------------------------------------------------------------------
+
+describe("malformed percent URL", () => {
+	it("decode rejects malformed percent path and erases payload", () => {
+		const meta = JSON.stringify({
+			version: 1,
+			hostId: "h-1",
+			generation: "g-abc",
+			sessionId: "s-1",
+			relayUrl: "wss://relay.example.com/prime%ZZv1",
+			buildIdentity: { buildId: VALID_BUILD_ID, daemonProtocolVersion: 7, daemonSchemaRevision: 25 },
+			connectTimeoutMs: 30000,
+		});
+		const metaBytes = new TextEncoder().encode(meta);
+		const grant = new Uint8Array(50).fill(0x41);
+		const payload = buildRawPayload(metaBytes, grant);
+		const copy = new Uint8Array(payload);
+		const r = decodeSandboxBootstrapPayload(copy);
+		expect(r.ok).toBe(false);
+		// Payload must be erased even though URL caused no throw
+		expect(isZeroed(copy)).toBe(true);
+	});
+});
+
 describe("grant isolation", () => {
 	it("grant bytes not in metadata", () => {
 		const d = decodeOk(encodeOk(validOpts(cloneGrant())));

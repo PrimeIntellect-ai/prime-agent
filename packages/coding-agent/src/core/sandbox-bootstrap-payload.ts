@@ -198,7 +198,6 @@ function copyGrant(grant: Uint8Array): Result<Uint8Array> {
 // OneUseBootstrapGrant — module-private implementation
 // ---------------------------------------------------------------------------
 
-const _GRANT_BRAND = Symbol("OneUseBootstrapGrant");
 const grantBrandSet = new WeakSet<object>();
 
 /** Public interface for a one-time-use bootstrap grant. */
@@ -302,9 +301,6 @@ function isPositiveInt(v: unknown): v is number {
 // URL validation
 // ---------------------------------------------------------------------------
 
-/** Safe path pattern: alphanumeric, unreserved, sub-delims, colon, @, percent. No dot segments. */
-const SAFE_PATH_SEGMENT = /^[a-zA-Z0-9._~!$&'()*+,;=:@%-]+$/;
-
 function isValidRelayUrl(url: unknown): Pab1ErrorCode | undefined {
 	if (typeof url !== "string") return "PAB1_ERR_RELAY_URL";
 	if (!url.startsWith("wss://")) return "PAB1_ERR_RELAY_URL";
@@ -361,15 +357,25 @@ function isValidRelayUrl(url: unknown): Pab1ErrorCode | undefined {
 	// Path validation: safe segments, nonempty, bounded
 	if (!parsed.pathname || parsed.pathname === "/") return "PAB1_ERR_URL_PATH";
 	if (parsed.pathname.length > MAX_URL_PATH_LENGTH) return "PAB1_ERR_URL_PATH";
+	// Path segments: only unreserved ASCII characters, no percent-encoding,
+	// no dot segments. Prime Tunnel uses DNS hostnames only, no literal IPs.
 	const segments = parsed.pathname.split("/").filter(Boolean);
 	for (const seg of segments) {
 		if (seg === ".." || seg === ".") return "PAB1_ERR_URL_PATH";
-		if (!SAFE_PATH_SEGMENT.test(seg)) return "PAB1_ERR_URL_PATH";
-		// Reject percent-encoded control characters (%00-%1F, %7F, %0A/%0D etc)
-		const decoded = decodeURIComponent(seg);
-		for (let i = 0; i < decoded.length; i++) {
-			const cp = decoded.charCodeAt(i);
-			if (cp < 0x20 || cp === 0x7f) return "PAB1_ERR_URL_PATH";
+		if (seg.length === 0) return "PAB1_ERR_URL_PATH";
+		for (let i = 0; i < seg.length; i++) {
+			const cp = seg.charCodeAt(i);
+			// Allow A-Z, a-z, 0-9, ., _, ~, -
+			if (
+				!(cp >= 0x41 && cp <= 0x5a) &&
+				!(cp >= 0x61 && cp <= 0x7a) &&
+				!(cp >= 0x30 && cp <= 0x39) &&
+				cp !== 0x2e &&
+				cp !== 0x5f &&
+				cp !== 0x7e &&
+				cp !== 0x2d
+			)
+				return "PAB1_ERR_URL_PATH";
 		}
 	}
 
@@ -757,8 +763,14 @@ export function encodeSandboxBootstrapPayload(opts: EncodeSandboxBootstrapPayloa
 			return fail("PAB1_ERR_META_MISSING");
 		}
 
-		// Copy and erase grant immediately
-		const grantResult = copyGrant(opts.grant);
+		// Take grant from descriptor, never re-read opts.grant
+		let grantValue: unknown;
+		try {
+			grantValue = optsDescs.grant.value;
+		} catch {
+			return fail("PAB1_ERR_META_DESCRIPTOR");
+		}
+		const grantResult = copyGrant(grantValue as Uint8Array);
 		if (!grantResult.ok) {
 			return fail(grantResult.code);
 		}
@@ -773,7 +785,14 @@ export function encodeSandboxBootstrapPayload(opts: EncodeSandboxBootstrapPayloa
 		}
 
 		// --- Validate metadata (after grant is safe) ---
-		const metaResult = sanitizeMetadata(opts.metadata);
+		// Take metadata from descriptor, never re-read opts.metadata
+		let metaValue: unknown;
+		try {
+			metaValue = optsDescs.metadata.value;
+		} catch {
+			return fail("PAB1_ERR_META_DESCRIPTOR");
+		}
+		const metaResult = sanitizeMetadata(metaValue);
 		if (!metaResult.ok) {
 			safeZero(grantCopy);
 			grantCopy = undefined;
@@ -887,7 +906,7 @@ export function decodeSandboxBootstrapPayload(payload: Uint8Array): Result<Sandb
 			try {
 				const proto = Object.getPrototypeOf(payload);
 				if (proto !== Uint8Array.prototype) {
-					if (proto === Buffer?.prototype) return fail("PAB1_ERR_INPUT_SUBCLASS");
+					if (typeof Buffer !== "undefined" && proto === Buffer.prototype) return fail("PAB1_ERR_INPUT_SUBCLASS");
 					return fail("PAB1_ERR_INPUT_PROXY");
 				}
 				const bufProto = Object.getPrototypeOf((payload as Uint8Array).buffer);
