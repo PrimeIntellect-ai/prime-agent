@@ -1171,13 +1171,15 @@ describe("oversized decode rejection", () => {
 // 17. Proxy expected with benign descriptors then throwing getters
 // ===========================================================================
 
-describe("Proxy expected TOCTOU resistance", () => {
-	it("rejects Proxy expected that passes descriptor checks but throws on field read", () => {
+describe("Proxy expected TOCTOU resistance -- get trap never invoked", () => {
+	it("Proxy expected with descriptor values A and get values B uses descriptor values (get trap never invoked)", () => {
 		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
 		expect(enc.ok).toBe(true);
 		if (!enc.ok) return;
 
-		// Proxy with benign ownKeys/getOwnPropertyDescriptor but throwing get
+		let getCallCount = 0;
+		// Proxy that returns correct data via getOwnPropertyDescriptor but
+		// returns WRONG data via [[Get]] and tracks every [[Get]] call.
 		const benignData = { journalSeq: 1, hostId: "h-1", generation: "g-1", sessionId: "s-1" };
 		const trap = new Proxy({} as Record<string, unknown>, {
 			ownKeys() {
@@ -1192,29 +1194,90 @@ describe("Proxy expected TOCTOU resistance", () => {
 				};
 			},
 			get(_t: unknown, key: string) {
+				getCallCount++;
 				if (key === "direction") return undefined;
-				throw new Error("getter trap");
+				return "wrong-value-from-get-trap";
 			},
 		});
+
 		const dec = decodeJournalRecordV1(enc.bytes, trap);
-		expect(dec.ok).toBe(false);
+		expect(dec.ok).toBe(true); // should succeed using descriptor values
+		// [[Get]] should never have been invoked by validateExpected
+		expect(getCallCount).toBe(0);
 	});
 
-	it("rejects Proxy expected that throws on one field after passing descriptor checks", () => {
+	it("get-accessor on expected is caught by descriptor check without invoking getter", () => {
 		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
 		expect(enc.ok).toBe(true);
 		if (!enc.ok) return;
 
-		// Object with a benign `ownKeys` but a throwing getter for `sessionId`
+		let accessorCalled = false;
+		// Object with an accessor descriptor -- copyExactOwnDataObject rejects
+		// via desc.get check without ever invoking the getter.
 		const obj: Record<string, unknown> = { journalSeq: 1, hostId: "h-1", generation: "g-1" };
 		Object.defineProperty(obj, "sessionId", {
 			get: () => {
-				throw new Error("trapped");
+				accessorCalled = true;
+				return "s-1";
 			},
 			enumerable: true,
 			configurable: true,
 		});
 		const dec = decodeJournalRecordV1(enc.bytes, obj);
 		expect(dec.ok).toBe(false);
+		// The accessor getter should never have been invoked.
+		expect(accessorCalled).toBe(false);
+	});
+
+	it("Proxy throwing get trap is caught by outer catch, returning frozen INVALID_FRAME", () => {
+		const enc = encodeJournalRecordV1(makeRecordRaw(validEnvelope()));
+		expect(enc.ok).toBe(true);
+		if (!enc.ok) return;
+
+		const trap = new Proxy({} as Record<string, unknown>, {
+			ownKeys() {
+				throw new Error("ownKeys trap");
+			},
+		});
+		const dec = decodeJournalRecordV1(enc.bytes, trap);
+		expect(dec.ok).toBe(false);
+		if (!dec.ok) expect(dec.error.code).toBe("INVALID_FRAME");
+	});
+
+	describe("encode input descriptor-vs-get mismatch", () => {
+		it("Proxy encode input with descriptor values A and get values B uses descriptor values (get trap never invoked)", () => {
+			let getCallCount = 0;
+			const benignData = {
+				version: 1,
+				journalSeq: 1,
+				direction: "sent",
+				hostId: "h-1",
+				generation: "g-1",
+				sessionId: "s-1",
+				recordedAt: "2025-01-15T10:30:00.000Z",
+				envelope: validEnvelope(),
+			};
+			const trap = new Proxy({} as Record<string, unknown>, {
+				ownKeys() {
+					return Object.keys(benignData);
+				},
+				getOwnPropertyDescriptor(_t: unknown, key: string) {
+					return {
+						value: (benignData as Record<string, unknown>)[key],
+						writable: true,
+						enumerable: true,
+						configurable: true,
+					};
+				},
+				get() {
+					getCallCount++;
+					return "wrong-value";
+				},
+			});
+			const enc = encodeJournalRecordV1(trap);
+			expect(enc.ok).toBe(true);
+			// [[Get]] should never have been invoked by copyExactOwnDataObject
+			expect(getCallCount).toBe(0);
+		});
 	});
 });

@@ -149,11 +149,42 @@ function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
 }
 
 // ===========================================================================
-// Validate raw input is a plain object (no Proxy/getter/symbol/nonenumerable)
+// copyExactOwnDataObject -- single-pass guarded copy from descriptor.value
+//
+// Checks prototype, symbols, accessors, non-enumerable, undefined values
+// ONCE.  Returns a fresh null-prototype object populated exclusively from
+// descriptor.value -- never invokes the raw object's [[Get]] trap.
+// Returns the copy on success, or a CodecErrorCode string on failure.
+// When exactCount >= 0, rejects a different number of own enumerable keys.
 // ===========================================================================
 
-function rawError(raw: unknown): CodecErrorCode | undefined {
+const TYPED_ARRAY_CTORS = [
+	Uint8Array,
+	Int8Array,
+	Uint16Array,
+	Int16Array,
+	Uint32Array,
+	Int32Array,
+	Float32Array,
+	Float64Array,
+	DataView,
+];
+
+function copyExactOwnDataObject(
+	raw: unknown,
+	allowed: ReadonlySet<string>,
+	exactCount: number | null,
+): Record<string, unknown> | CodecErrorCode {
+	// Reject non-object / null / array
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return "INVALID_FRAME";
+
+	// Reject TypedArray / DataView
+	for (const Ctor of TYPED_ARRAY_CTORS) {
+		if (raw instanceof Ctor) return "INVALID_FRAME";
+	}
+
+	// Guard prototype, descriptors, symbols -- all wrapped so Proxy throws
+	// become INVALID_FRAME.
 	let proto: object | null;
 	try {
 		proto = Object.getPrototypeOf(raw);
@@ -161,26 +192,21 @@ function rawError(raw: unknown): CodecErrorCode | undefined {
 		return "INVALID_FRAME";
 	}
 	if (proto !== null && proto !== Object.prototype) return "INVALID_FRAME";
-	if (
-		raw instanceof Uint8Array ||
-		raw instanceof Int8Array ||
-		raw instanceof Uint16Array ||
-		raw instanceof Int16Array ||
-		raw instanceof Uint32Array ||
-		raw instanceof Int32Array ||
-		raw instanceof Float32Array ||
-		raw instanceof Float64Array ||
-		raw instanceof DataView
-	) {
-		return "INVALID_FRAME";
-	}
+
 	let descs: PropertyDescriptorMap;
 	try {
 		descs = Object.getOwnPropertyDescriptors(raw);
 	} catch {
 		return "INVALID_FRAME";
 	}
-	const keys = Object.getOwnPropertyNames(raw);
+
+	let keys: string[];
+	try {
+		keys = Object.getOwnPropertyNames(raw);
+	} catch {
+		return "INVALID_FRAME";
+	}
+
 	let symbols: symbol[];
 	try {
 		symbols = Object.getOwnPropertySymbols(raw);
@@ -188,21 +214,33 @@ function rawError(raw: unknown): CodecErrorCode | undefined {
 		return "INVALID_FRAME";
 	}
 	if (symbols.length > 0) return "INVALID_FRAME";
+
+	// Exact count check (for encoder input with exactly 8 keys)
+	if (exactCount !== null && keys.length !== exactCount) return "INVALID_FRAME";
+
+	// Populate from descriptor.value only -- never [[Get]].
+	// This guarantees that a Proxy whose getOwnPropertyDescriptor returns
+	// benign data values but whose [[Get]] trap throws or returns different
+	// values is caught here: the getter is never invoked.
+	const out: Record<string, unknown> = Object.create(null);
 	for (const k of keys) {
+		if (!allowed.has(k)) return "INVALID_FRAME";
 		const desc = descs[k];
 		if (desc.get || desc.set) return "INVALID_FRAME";
 		if (!desc.enumerable) return "INVALID_FRAME";
-		try {
-			if ((raw as Record<string, unknown>)[k] === undefined) return "INVALID_FRAME";
-		} catch {
-			return "INVALID_FRAME";
-		}
+		// Read from descriptor.value (which IS the data value for a plain data
+		// property).  For a Proxy that returns {value: X, ...}, desc.value is X
+		// without invoking [[Get]].
+		const v = desc.value;
+		if (v === undefined) return "INVALID_FRAME";
+		out[k] = v;
 	}
-	return undefined;
+
+	return out;
 }
 
 // ===========================================================================
-// Encode input keys (8 -- no envelopeDigest)
+// Allowed-key sets
 // ===========================================================================
 
 const ENCODE_REQUIRED_KEYS: readonly string[] = [
@@ -216,6 +254,7 @@ const ENCODE_REQUIRED_KEYS: readonly string[] = [
 	"envelope",
 ];
 const ENCODE_KEY_SET = new Set(ENCODE_REQUIRED_KEYS);
+const EXPECTED_ALLOWED = new Set(["journalSeq", "hostId", "generation", "sessionId", "direction"]);
 
 // ===========================================================================
 // Build record in CANONICAL_KEYS insertion order
@@ -258,16 +297,12 @@ export function encodeJournalRecordV1(raw: unknown): EncodeJournalResult {
 }
 
 function encodeJournalRecordV1Impl(raw: unknown): EncodeJournalResult {
-	const err = rawError(raw);
-	if (err) return fail(err);
-	const obj = raw as Record<string, unknown>;
-	const keys = Object.getOwnPropertyNames(obj);
+	// Single-pass descriptor copy -- never re-reads raw.
+	const copyErr = copyExactOwnDataObject(raw, ENCODE_KEY_SET, ENCODE_REQUIRED_KEYS.length);
+	if (typeof copyErr === "string") return fail(copyErr);
+	const obj = copyErr; // fresh safe copy
 
-	if (keys.length !== ENCODE_REQUIRED_KEYS.length) return fail("INVALID_FRAME");
-	for (const k of keys) {
-		if (!ENCODE_KEY_SET.has(k)) return fail("INVALID_FRAME");
-	}
-
+	// Validate fields from the safe copy.
 	if (obj.version !== RECORD_VERSION) return fail("INVALID_FRAME");
 	const journalSeq = obj.journalSeq;
 	if (
@@ -320,69 +355,52 @@ function encodeJournalRecordV1Impl(raw: unknown): EncodeJournalResult {
 }
 
 // ===========================================================================
-// Decode key set
+// Decode key set (all 9 keys required)
 // ===========================================================================
 
 const DECODE_KEYS = new Set(CANONICAL_KEYS);
 
 // ===========================================================================
-// validateExpected -- copies descriptor values to avoid TOCTOU Proxy traps
+// validateExpected -- uses copyExactOwnDataObject for TOCTOU safety
 // ===========================================================================
 
 function validateExpected(expected: unknown): ExpectedFields | undefined {
 	if (expected === undefined) return undefined;
 
-	// Reject Proxy/accessor/symbol/nonenumerable via rawError
-	const err = rawError(expected);
-	if (err) return undefined;
+	// Single-pass descriptor copy -- never invokes [[Get]] on expected.
+	// exactCount is null because direction is optional (4-5 keys present).
+	const copyErr = copyExactOwnDataObject(expected, EXPECTED_ALLOWED, null);
+	if (typeof copyErr === "string") return undefined;
+	const obj = copyErr; // fresh safe copy
 
-	// Copy every own enumerable data descriptor value BEFORE reading any field,
-	// so that a Proxy with benign descriptors but throwing getters cannot
-	// escape after passing rawError.
-	const obj = expected as Record<string, unknown>;
-	const keys = Object.getOwnPropertyNames(obj);
-	const vals: Record<string, unknown> = Object.create(null);
-	const allowed = new Set(["journalSeq", "hostId", "generation", "sessionId", "direction"]);
-
-	for (const k of keys) {
-		if (!allowed.has(k)) return undefined;
-		// Read from the descriptor value directly (not through a getter).
-		// rawError already verified no accessors, so this is a plain data value.
-		try {
-			vals[k] = obj[k];
-		} catch {
-			return undefined;
-		}
-	}
-
-	// journalSeq, hostId, generation, sessionId all required
+	// journalSeq, hostId, generation, sessionId all required.
 	if (
-		vals.journalSeq === undefined ||
-		vals.hostId === undefined ||
-		vals.generation === undefined ||
-		vals.sessionId === undefined
+		obj.journalSeq === undefined ||
+		obj.hostId === undefined ||
+		obj.generation === undefined ||
+		obj.sessionId === undefined
 	)
 		return undefined;
 	if (
-		typeof vals.journalSeq !== "number" ||
-		!Number.isSafeInteger(vals.journalSeq as number) ||
-		(vals.journalSeq as number) <= 0 ||
-		(vals.journalSeq as number) > MAX_JOURNAL_SEQ
+		typeof obj.journalSeq !== "number" ||
+		!Number.isSafeInteger(obj.journalSeq as number) ||
+		(obj.journalSeq as number) <= 0 ||
+		(obj.journalSeq as number) > MAX_JOURNAL_SEQ
 	)
 		return undefined;
 	for (const idField of ["hostId", "generation", "sessionId"] as const) {
-		if (typeof vals[idField] !== "string" || !isValidSafeId(vals[idField] as string)) return undefined;
+		if (typeof obj[idField] !== "string" || !isValidSafeId(obj[idField] as string)) return undefined;
 	}
-	if (vals.direction !== undefined && vals.direction !== "sent" && vals.direction !== "received") return undefined;
+	if (obj.direction !== undefined && obj.direction !== "sent" && obj.direction !== "received") return undefined;
 
-	// Return a fresh plain object with the validated values (no aliases to input)
+	// Build fresh ExpectedFields from safe values.
 	const out: ExpectedFields = {
-		journalSeq: vals.journalSeq as number,
-		hostId: vals.hostId as string,
-		generation: vals.generation as string,
-		sessionId: vals.sessionId as string,
+		journalSeq: obj.journalSeq as number,
+		hostId: obj.hostId as string,
+		generation: obj.generation as string,
+		sessionId: obj.sessionId as string,
 	};
-	if (typeof vals.direction === "string") (out as unknown as Record<string, unknown>).direction = vals.direction;
+	if (typeof obj.direction === "string") (out as unknown as Record<string, unknown>).direction = obj.direction;
 	return out;
 }
 
@@ -391,7 +409,6 @@ function validateExpected(expected: unknown): ExpectedFields | undefined {
 // ===========================================================================
 
 export function decodeJournalRecordV1(bytes: Uint8Array, expected: unknown): DecodeJournalResult {
-	// ownBuffers tracks all allocated byte buffers for erasure in finally.
 	const ownBuffers: Uint8Array[] = [];
 	let erased = false;
 	const eraseAll = () => {
@@ -403,8 +420,6 @@ export function decodeJournalRecordV1(bytes: Uint8Array, expected: unknown): Dec
 	try {
 		return decodeJournalRecordV1Impl(bytes, expected, ownBuffers);
 	} catch {
-		// Any unexpected throw from the implementation becomes a frozen error.
-		// ownBuffers already includes the caller bytes, so finally erases them.
 		return fail("INVALID_FRAME");
 	} finally {
 		eraseAll();
@@ -445,8 +460,6 @@ function decodeJournalRecordV1Impl(
 
 	// ---- Step 2: reject oversized before allocating originalBytes ----
 	if (bytes.byteLength > MAX_ENCODED_BYTES) {
-		// ownBuffers is not yet populated -- push bytes so the outer finally
-		// erases the caller buffer even on this early path.
 		ownBuffers.push(bytes);
 		return fail("OVERFLOW");
 	}
@@ -481,16 +494,13 @@ function decodeJournalRecordV1Impl(
 	}
 
 	// ---- Step 6: validate parsed object ----
-	const parseErr = rawError(parsed);
-	if (parseErr) return fail(parseErr);
-	const obj = parsed as Record<string, unknown>;
-	const keys = Object.getOwnPropertyNames(obj);
-	if (keys.length !== CANONICAL_KEYS.length) return fail("INVALID_FRAME");
-	for (const k of keys) {
-		if (!DECODE_KEYS.has(k)) return fail("INVALID_FRAME");
-	}
+	// JSON.parse output is always plain and safe (no Proxy), but we still
+	// guard with a bounded descriptor copy that allows all CANONICAL_KEYS.
+	const parseErr = copyExactOwnDataObject(parsed, DECODE_KEYS, CANONICAL_KEYS.length);
+	if (typeof parseErr === "string") return fail(parseErr);
+	const obj = parseErr; // fresh safe copy
 
-	// ---- Step 7: validate schema ----
+	// ---- Step 7: validate schema from safe copy ----
 	if (obj.version !== RECORD_VERSION) return fail("INVALID_FRAME");
 	const journalSeq = obj.journalSeq;
 	if (
