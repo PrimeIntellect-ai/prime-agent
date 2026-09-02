@@ -1,5 +1,20 @@
 import type { Usage } from "@earendil-works/pi-ai";
 
+/** Own-session spend published on session rows: excludes descendants' attributed usage. */
+export interface SessionUsageSummary {
+	inputTokens: number;
+	outputTokens: number;
+	cost: number;
+}
+
+export function sessionUsageSummaryFrom(usage: Usage): SessionUsageSummary {
+	return {
+		inputTokens: usage.input + usage.cacheRead + usage.cacheWrite,
+		outputTokens: usage.output,
+		cost: usage.cost.total,
+	};
+}
+
 export function emptyUsage(): Usage {
 	return {
 		input: 0,

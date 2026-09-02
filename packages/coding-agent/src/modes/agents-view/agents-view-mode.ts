@@ -44,6 +44,7 @@ import {
 	listDaemonSavedSessions,
 	renameDaemonSavedSession,
 } from "../daemon/saved-session-catalog.js";
+import { formatTokenCount } from "../interactive/agent-activity.js";
 import { CustomEditor } from "../interactive/components/custom-editor.js";
 import { keyText } from "../interactive/components/keybinding-hints.js";
 import { BrandSplashHeader, InteractiveMode } from "../interactive/interactive-mode.js";
@@ -2540,8 +2541,9 @@ export class AgentsViewMode implements Component, Focusable {
 		const icon = this.formatRowIcon(row.section, rawIcon);
 		const indent = "  ".repeat(row.depth);
 		const age = formatSessionDuration(row.summary);
-		const details = row.section === "inactive" ? `${row.summary.messageCount} · ${age}` : age;
-		const detailsWidth = row.section === "inactive" ? Math.max(10, visibleWidth(details)) : 10;
+		const usageText = formatRowUsage(row);
+		const details = usageText ? `${usageText} · ${age}` : age;
+		const detailsWidth = Math.max(10, visibleWidth(details));
 		const heartbeatBadge = !pendingDelete && !pendingKill ? formatHeartbeatBadge(row.heartbeat) : "";
 		const heartbeatCell = heartbeatBadge ? theme.fg("error", heartbeatBadge) : "";
 		const heartbeatWidth = visibleWidth(heartbeatBadge);
@@ -2821,6 +2823,16 @@ function rowHasSpawnCode(row: AgentsViewRow): boolean {
 
 function isRunningSessionSummary(summary: SessionSummary): boolean {
 	return summary.activity === "working";
+}
+
+/** `<input>/<output> | $<own> ($<own + descendants>)`, empty when the session has no usage data. */
+function formatRowUsage(row: AgentsViewRow): string {
+	const usage = row.summary.usage;
+	if (!usage) {
+		return "";
+	}
+	const tokens = `${formatTokenCount(usage.inputTokens)}/${formatTokenCount(usage.outputTokens)}`;
+	return `${tokens} | $${usage.cost.toFixed(2)} ($${row.recursiveCost.toFixed(2)})`;
 }
 
 // Explicit session names read bold so they stand out from fallback titles

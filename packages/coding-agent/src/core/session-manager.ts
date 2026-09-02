@@ -28,7 +28,14 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.js";
-import { cloneUsage } from "./usage.js";
+import {
+	addAssistantUsage,
+	cloneUsage,
+	emptyUsage,
+	type SessionUsageSummary,
+	sessionUsageSummaryFrom,
+	subtractAssistantUsage,
+} from "./usage.js";
 
 export const CURRENT_SESSION_VERSION = 3;
 const SESSION_LIST_SEARCH_TEXT_MAX_CHARS = 64 * 1024;
@@ -255,6 +262,8 @@ export interface SessionInfo {
 	firstMessage: string;
 	allMessagesText: string;
 	agentStatus?: AgentStatus;
+	/** Whole-file own spend (attributed child usage subtracted); absent when no usage was recorded. */
+	usage?: SessionUsageSummary;
 }
 
 export type ReadonlySessionManager = Pick<
@@ -953,6 +962,8 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 		let state: SessionState | undefined;
 		let agentStatus: AgentStatus | undefined;
 		let lastActivityTime: number | undefined;
+		const usageTotal = emptyUsage();
+		let sawUsage = false;
 
 		for await (const lineBuffer of readLinesAsBuffers(filePath)) {
 			const line = lineBuffer.toString("utf8");
@@ -999,6 +1010,9 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			if (entry.type === "agent_status") {
 				agentStatus = (entry as AgentStatusEntry).status;
 			}
+			if (entry.type === "child_usage_attributed") {
+				subtractAssistantUsage(usageTotal, (entry as ChildUsageAttributionEntry).childUsage);
+			}
 
 			if (!header) {
 				if (entry.type !== "session") {
@@ -1013,6 +1027,10 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			messageCount++;
 
 			const message = (entry as SessionMessageEntry).message;
+			if (message.role === "assistant" && (message as { usage?: Usage }).usage) {
+				sawUsage = true;
+				addAssistantUsage(usageTotal, (message as { usage: Usage }).usage);
+			}
 			if (!isMessageWithContent(message)) continue;
 			if (message.role !== "user" && message.role !== "assistant") continue;
 
@@ -1045,6 +1063,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText,
 			agentStatus,
+			...(sawUsage ? { usage: sessionUsageSummaryFrom(usageTotal) } : {}),
 		};
 	} catch {
 		return null;

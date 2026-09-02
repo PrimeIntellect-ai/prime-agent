@@ -1,4 +1,5 @@
 import { setKeybindings } from "@earendil-works/pi-tui";
+import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
@@ -681,6 +682,45 @@ describe("AgentsViewMode", () => {
 		try {
 			expect(invoke("renderRow", view, rows[0], 160)).toContain("recovering");
 			expect(invoke("renderRow", view, rows[1], 160)).toContain("last heard");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("renders token and cost details in the exact format, dropping the message count", () => {
+		const parent = summary({
+			id: "spender",
+			activeSessionId: "spender",
+			sessionId: "spender-session",
+			usage: { inputTokens: 12437, outputTokens: 1234, cost: 0.42 },
+		});
+		const child = summary({
+			id: "spender-child",
+			activeSessionId: "spender-child",
+			sessionId: "spender-child-session",
+			sessionFile: "/tmp/spender-child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "spender",
+			usage: { inputTokens: 500, outputTokens: 50, cost: 0.68 },
+		});
+		const inactive = summary({
+			id: "saved-only",
+			activeSessionId: undefined,
+			sessionId: "saved-only-session",
+			sessionFile: "/tmp/saved-only.jsonl",
+			rosterStatus: "inactive",
+			messageCount: 7,
+		});
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+
+		try {
+			const rows = buildAgentsViewRows([parent, child, inactive]);
+			Reflect.set(view, "rows", rows);
+			const parentRow = rows.find((row) => row.summary.sessionId === "spender-session");
+			expect(stripAnsi(invoke("renderRow", view, parentRow, 200) as string)).toContain("12k/1.2k | $0.42 ($1.10)");
+			const inactiveRow = rows.find((row) => row.summary.sessionId === "saved-only-session");
+			const inactiveLine = stripAnsi(invoke("renderRow", view, inactiveRow, 200) as string);
+			expect(inactiveLine).not.toContain("7 ·");
 		} finally {
 			stopThemeWatcher();
 		}

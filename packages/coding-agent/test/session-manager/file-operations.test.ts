@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { computeOwnAndTotalUsage } from "../../src/core/context-tree.js";
 import {
 	findMostRecentSession,
 	loadEntriesFromFile,
@@ -10,6 +11,7 @@ import {
 	resolveSessionRlmDepth,
 	SessionManager,
 } from "../../src/core/session-manager.js";
+import { sessionUsageSummaryFrom } from "../../src/core/usage.js";
 
 describe("loadEntriesFromFile", () => {
 	let tempDir: string;
@@ -585,5 +587,100 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		const sm2 = SessionManager.open(corruptedFile, tempDir);
 		expect(sm2.getSessionId()).toBe(sessionId);
 		expect(sm2.getHeader()?.type).toBe("session");
+	});
+});
+
+describe("session info usage totals", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `session-usage-test-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	function usage(input: number, output: number, cost: number) {
+		return {
+			input,
+			output,
+			cacheRead: 10,
+			cacheWrite: 5,
+			totalTokens: input + output,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
+		};
+	}
+
+	it("accumulates own usage during the catalog scan, subtracting attributed child usage", async () => {
+		const file = join(tempDir, "usage.jsonl");
+		const lines = [
+			{ type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
+			{ type: "message", id: "m1", message: { role: "user", content: "hi", timestamp: 1 } },
+			{
+				type: "message",
+				id: "m2",
+				message: { role: "assistant", content: "ok", timestamp: 2, usage: usage(1000, 200, 0.5) },
+			},
+			{
+				type: "message",
+				id: "m3",
+				message: { role: "assistant", content: "done", timestamp: 3, usage: usage(2000, 300, 1.0) },
+			},
+			{
+				type: "child_usage_attributed",
+				id: "a1",
+				targetId: "m3",
+				childUsage: usage(500, 100, 0.4),
+				aggregateUsage: usage(500, 100, 0.4),
+			},
+		];
+		writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+
+		const info = await readSessionInfo(file);
+
+		// input tokens include cache reads/writes, matching the /usage spend total.
+		expect(info?.usage).toEqual({ inputTokens: 1000 + 2000 + 2 * 15 - 515, outputTokens: 400, cost: 1.1 });
+	});
+
+	it("matches the resident whole-file computation on a file with a forked-away branch", async () => {
+		const file = join(tempDir, "forked.jsonl");
+		const lines = [
+			{ type: "session", id: "s3", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
+			{ type: "message", id: "m1", parentId: null, message: { role: "user", content: "hi", timestamp: 1 } },
+			// Forked-away assistant: not on the surviving branch, still paid for.
+			{
+				type: "message",
+				id: "m2",
+				parentId: "m1",
+				message: { role: "assistant", content: "draft", timestamp: 2, usage: usage(1000, 200, 0.5) },
+			},
+			{
+				type: "message",
+				id: "m3",
+				parentId: "m1",
+				message: { role: "assistant", content: "final", timestamp: 3, usage: usage(2000, 300, 1.0) },
+			},
+		];
+		writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+
+		const manager = SessionManager.open(file);
+		const entries = manager.getEntries();
+		const resident = sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
+
+		expect((await readSessionInfo(file))?.usage).toEqual(resident);
+		expect(resident.cost).toBeCloseTo(1.5);
+	});
+
+	it("reports no usage for sessions without assistant usage", async () => {
+		const file = join(tempDir, "no-usage.jsonl");
+		const lines = [
+			{ type: "session", id: "s2", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
+			{ type: "message", id: "m1", message: { role: "user", content: "hi", timestamp: 1 } },
+		];
+		writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+
+		expect((await readSessionInfo(file))?.usage).toBeUndefined();
 	});
 });

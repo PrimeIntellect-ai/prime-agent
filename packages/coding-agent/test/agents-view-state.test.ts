@@ -506,6 +506,44 @@ describe("agents view state", () => {
 		expect(expanded.find((row) => row.title === "Child")?.runningSubagentCount).toBe(1);
 	});
 
+	test("sums recursive cost over descendants while each row keeps its own cost", () => {
+		const summaries = [
+			makeSummary({
+				id: "parent-active",
+				activeSessionId: "parent-active",
+				sessionId: "parent-session",
+				sessionName: "Parent",
+				usage: { inputTokens: 1000, outputTokens: 100, cost: 0.42 },
+			}),
+			makeSummary({
+				id: "child-active",
+				activeSessionId: "child-active",
+				sessionId: "child-session",
+				sessionName: "Child",
+				runtimeKind: "subagent",
+				parentActiveSessionId: "parent-active",
+				usage: { inputTokens: 500, outputTokens: 50, cost: 0.5 },
+			}),
+			makeSummary({
+				id: "grandchild-active",
+				activeSessionId: "grandchild-active",
+				sessionId: "grandchild-session",
+				sessionName: "Grandchild",
+				runtimeKind: "subagent",
+				parentActiveSessionId: "child-active",
+				usage: { inputTokens: 200, outputTokens: 20, cost: 0.18 },
+			}),
+		];
+
+		const collapsed = buildAgentsViewRows(summaries);
+		expect(collapsed[0]?.summary.usage?.cost).toBe(0.42);
+		expect(collapsed[0]?.recursiveCost).toBeCloseTo(1.1);
+		const expanded = buildAgentsViewRows(summaries, new Set([collapsed[0]?.identity ?? ""]));
+		const childRow = expanded.find((row) => row.title === "Child");
+		expect(childRow?.summary.usage?.cost).toBe(0.5);
+		expect(childRow?.recursiveCost).toBeCloseTo(0.68);
+	});
+
 	test("tallies a very deep child chain without overflowing the stack", () => {
 		const summaries = [
 			makeSummary({
@@ -529,7 +567,12 @@ describe("agents view state", () => {
 					runtimeKind: "subagent",
 					parentActiveSessionId: level === 1 ? "chain-root" : `chain-${level - 1}`,
 					...(level === depth
-						? { activity: "working" as const, isSessionActive: true, isStreaming: true }
+						? {
+								activity: "working" as const,
+								isSessionActive: true,
+								isStreaming: true,
+								usage: { inputTokens: 100, outputTokens: 10, cost: 0.5 },
+							}
 						: { activity: "idle" as const, taskState: "completed" as const }),
 				}),
 			);
@@ -537,6 +580,7 @@ describe("agents view state", () => {
 
 		const rows = buildAgentsViewRows(summaries);
 		expect(rows[0]).toMatchObject({ kind: "agent", section: "idle", runningSubagentCount: 1 });
+		expect(rows[0]?.recursiveCost).toBeCloseTo(0.5);
 	});
 
 	test("ranks idle rows with busy descendants above plain idle rows", () => {

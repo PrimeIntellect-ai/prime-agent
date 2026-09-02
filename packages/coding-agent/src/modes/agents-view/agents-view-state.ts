@@ -75,6 +75,8 @@ export interface AgentsViewRow {
 	depth: number;
 	selectable: boolean;
 	runningSubagentCount: number;
+	/** Own cost plus all descendants' own costs, from the same traversal as the tally. */
+	recursiveCost: number;
 	/** Unique selection identity for this row. */
 	identity: string;
 	/** Identity of the agent row this row is nested under. */
@@ -247,6 +249,7 @@ export function summaryForUnifiedRecord(record: UnifiedSessionRecord): SessionSu
 			...record.daemon,
 			sessionName: record.daemon.sessionName ?? saved.name,
 			firstMessage: record.daemon.firstMessage ?? saved.firstMessage,
+			usage: record.daemon.usage ?? saved.usage,
 			sessionFile: record.daemon.sessionFile ?? canonicalSessionPath(saved.path),
 			parentSessionPath: record.daemon.parentSessionPath ?? saved.parentSessionPath,
 			rlmDepth: record.daemon.rlmDepth ?? saved.rlmDepth,
@@ -280,6 +283,7 @@ export function summaryForUnifiedRecord(record: UnifiedSessionRecord): SessionSu
 		firstMessage: saved.firstMessage,
 		summary: saved.agentStatus?.summary,
 		taskState: saved.agentStatus?.taskState,
+		usage: saved.usage,
 	};
 }
 
@@ -676,6 +680,7 @@ export function buildAgentsViewRows(
 			depth: 0,
 			selectable: true,
 			runningSubagentCount: 0,
+			recursiveCost: summary.usage?.cost ?? 0,
 			identity: record?.identity ?? getAgentsViewSummaryIdentity(summary),
 			...(record ? { record, heartbeat: record.heartbeat } : {}),
 		}),
@@ -717,10 +722,13 @@ export function buildAgentsViewRows(
 	for (let index = tallyOrder.length - 1; index >= 0; index--) {
 		const row = tallyOrder[index]!;
 		let count = 0;
+		let descendantsCost = 0;
 		for (const child of childrenByParent.get(row) ?? []) {
 			count += (child.section === "running" ? 1 : 0) + child.runningSubagentCount;
+			descendantsCost += child.recursiveCost;
 		}
 		row.runningSubagentCount = count;
+		row.recursiveCost = (row.summary.usage?.cost ?? 0) + descendantsCost;
 	}
 	propagateHeartbeatStateToAncestors(baseRows, parentByChild);
 
@@ -818,6 +826,7 @@ function createSubagentSummaryRow(
 		depth,
 		selectable: true,
 		runningSubagentCount: running,
+		recursiveCost: 0,
 		identity: `subagents:${parent.identity}`,
 		parentIdentity: parent.identity,
 		hasSpawnCode,
@@ -872,6 +881,7 @@ function buildSpawnCodeRows(
 		// Code rows are read-only context; selection skips over them.
 		selectable: false,
 		runningSubagentCount: 0,
+		recursiveCost: 0,
 		identity: `code:${parent.identity}:${groupIndex}:${lineIndex}`,
 		parentIdentity: parent.identity,
 		code,
