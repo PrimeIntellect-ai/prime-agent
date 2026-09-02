@@ -410,11 +410,7 @@ function jsonSafePreflight(
 export function jsonPreflight(value: unknown): DecodeResult<number> {
 	try {
 		return jsonPreflightImpl(value);
-	} catch (e: unknown) {
-		const err = e as { code?: string };
-		if (err.code && err.code in CODEC_ERRORS) {
-			return { ok: false, error: { code: err.code as CodecErrorCode } };
-		}
+	} catch {
 		return fail(CODEC_ERRORS.OVERFLOW);
 	}
 }
@@ -581,33 +577,37 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 const ARTIFACT_KEYS = new Set(["workspaceId", "snapshotId", "changesetId"]);
 
 export function decodeArtifactRef(raw: unknown): DecodeResult<ArtifactRef> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
-	const jsonErr = checkJsonSafe(raw);
-	if (jsonErr) return fail(jsonErr);
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+		const jsonErr = checkJsonSafe(raw);
+		if (jsonErr) return fail(jsonErr);
 
-	const obj = raw as Record<string, unknown>;
-	for (const k of Object.keys(obj)) {
-		if (!ARTIFACT_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
-	}
-	if (typeof obj.workspaceId !== "string" || obj.workspaceId.length === 0 || obj.workspaceId.length > 128) {
+		const obj = raw as Record<string, unknown>;
+		for (const k of Object.keys(obj)) {
+			if (!ARTIFACT_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+		}
+		if (typeof obj.workspaceId !== "string" || obj.workspaceId.length === 0 || obj.workspaceId.length > 128) {
+			return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+		}
+		if (
+			obj.snapshotId !== undefined &&
+			(typeof obj.snapshotId !== "string" || obj.snapshotId.length === 0 || obj.snapshotId.length > 128)
+		) {
+			return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+		}
+		if (
+			obj.changesetId !== undefined &&
+			(typeof obj.changesetId !== "string" || obj.changesetId.length === 0 || obj.changesetId.length > 128)
+		) {
+			return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+		}
+		const fresh: ArtifactRef = { workspaceId: obj.workspaceId as string };
+		if (typeof obj.snapshotId === "string") fresh.snapshotId = obj.snapshotId;
+		if (typeof obj.changesetId === "string") fresh.changesetId = obj.changesetId;
+		return ok(fresh);
+	} catch {
 		return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
 	}
-	if (
-		obj.snapshotId !== undefined &&
-		(typeof obj.snapshotId !== "string" || obj.snapshotId.length === 0 || obj.snapshotId.length > 128)
-	) {
-		return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
-	}
-	if (
-		obj.changesetId !== undefined &&
-		(typeof obj.changesetId !== "string" || obj.changesetId.length === 0 || obj.changesetId.length > 128)
-	) {
-		return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
-	}
-	const fresh: ArtifactRef = { workspaceId: obj.workspaceId as string };
-	if (typeof obj.snapshotId === "string") fresh.snapshotId = obj.snapshotId;
-	if (typeof obj.changesetId === "string") fresh.changesetId = obj.changesetId;
-	return ok(fresh);
 }
 
 // ===========================================================================
@@ -617,20 +617,24 @@ export function decodeArtifactRef(raw: unknown): DecodeResult<ArtifactRef> {
 const PROTO_KEYS = new Set(["name", "version"]);
 
 export function decodeProtocolInfo(raw: unknown): DecodeResult<RemoteHostProtocolInfo> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_PROTOCOL);
-	const obj = raw as Record<string, unknown>;
-	for (const k of Object.keys(obj)) {
-		if (!PROTO_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_PROTOCOL);
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_PROTOCOL);
+		const obj = raw as Record<string, unknown>;
+		for (const k of Object.keys(obj)) {
+			if (!PROTO_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_PROTOCOL);
+		}
+		if (obj.name !== REMOTE_HOST_PROTOCOL_NAME || typeof obj.name !== "string")
+			return fail(CODEC_ERRORS.INVALID_PROTOCOL);
+		if (
+			obj.version !== REMOTE_HOST_PROTOCOL_VERSION ||
+			typeof obj.version !== "number" ||
+			!Number.isSafeInteger(obj.version)
+		)
+			return fail(CODEC_ERRORS.INVALID_PROTOCOL);
+		return ok({ name: REMOTE_HOST_PROTOCOL_NAME, version: REMOTE_HOST_PROTOCOL_VERSION });
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_PROTOCOL);
 	}
-	if (obj.name !== REMOTE_HOST_PROTOCOL_NAME || typeof obj.name !== "string")
-		return fail(CODEC_ERRORS.INVALID_PROTOCOL);
-	if (
-		obj.version !== REMOTE_HOST_PROTOCOL_VERSION ||
-		typeof obj.version !== "number" ||
-		!Number.isSafeInteger(obj.version)
-	)
-		return fail(CODEC_ERRORS.INVALID_PROTOCOL);
-	return ok({ name: REMOTE_HOST_PROTOCOL_NAME, version: REMOTE_HOST_PROTOCOL_VERSION });
 }
 
 // ===========================================================================
@@ -640,26 +644,30 @@ export function decodeProtocolInfo(raw: unknown): DecodeResult<RemoteHostProtoco
 const BUILD_KEYS = new Set(["buildId", "daemonProtocolVersion", "daemonSchemaRevision", "appVersion"]);
 
 export function decodeBuildIdentity(raw: unknown): DecodeResult<RemoteHostBuildIdentity> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	const jsonErr = checkJsonSafe(raw);
-	if (jsonErr) return fail(jsonErr);
-	const obj = raw as Record<string, unknown>;
-	for (const k of Object.keys(obj)) {
-		if (!BUILD_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		const jsonErr = checkJsonSafe(raw);
+		if (jsonErr) return fail(jsonErr);
+		const obj = raw as Record<string, unknown>;
+		for (const k of Object.keys(obj)) {
+			if (!BUILD_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		}
+		if (typeof obj.buildId !== "string" || obj.buildId.length === 0 || obj.buildId.length > 128)
+			return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (!isNonNegativeInt(obj.daemonProtocolVersion)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (!isNonNegativeInt(obj.daemonSchemaRevision)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (obj.appVersion !== undefined && (typeof obj.appVersion !== "string" || obj.appVersion.length > 64))
+			return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		const fresh: RemoteHostBuildIdentity = {
+			buildId: obj.buildId as string,
+			daemonProtocolVersion: obj.daemonProtocolVersion as number,
+			daemonSchemaRevision: obj.daemonSchemaRevision as number,
+		};
+		if (typeof obj.appVersion === "string") fresh.appVersion = obj.appVersion;
+		return ok(fresh);
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_IDENTITY);
 	}
-	if (typeof obj.buildId !== "string" || obj.buildId.length === 0 || obj.buildId.length > 128)
-		return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (!isNonNegativeInt(obj.daemonProtocolVersion)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (!isNonNegativeInt(obj.daemonSchemaRevision)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (obj.appVersion !== undefined && (typeof obj.appVersion !== "string" || obj.appVersion.length > 64))
-		return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	const fresh: RemoteHostBuildIdentity = {
-		buildId: obj.buildId as string,
-		daemonProtocolVersion: obj.daemonProtocolVersion as number,
-		daemonSchemaRevision: obj.daemonSchemaRevision as number,
-	};
-	if (typeof obj.appVersion === "string") fresh.appVersion = obj.appVersion;
-	return ok(fresh);
 }
 
 // ===========================================================================
@@ -669,21 +677,25 @@ export function decodeBuildIdentity(raw: unknown): DecodeResult<RemoteHostBuildI
 const CURSOR_KEYS = new Set(["hostId", "generation", "sessionId", "sequence"]);
 
 export function decodeEventCursor(raw: unknown): DecodeResult<RemoteHostEventCursor> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	const obj = raw as Record<string, unknown>;
-	for (const k of Object.keys(obj)) {
-		if (!CURSOR_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		const obj = raw as Record<string, unknown>;
+		for (const k of Object.keys(obj)) {
+			if (!CURSOR_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		}
+		if (!checkId(obj.hostId)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (!checkId(obj.generation)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (!checkId(obj.sessionId)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (!isNonNegativeInt(obj.sequence)) return fail(CODEC_ERRORS.INVALID_SEQUENCE);
+		return ok({
+			hostId: obj.hostId as string,
+			generation: obj.generation as string,
+			sessionId: obj.sessionId as string,
+			sequence: obj.sequence as number,
+		});
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_IDENTITY);
 	}
-	if (!checkId(obj.hostId)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (!checkId(obj.generation)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (!checkId(obj.sessionId)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (!isNonNegativeInt(obj.sequence)) return fail(CODEC_ERRORS.INVALID_SEQUENCE);
-	return ok({
-		hostId: obj.hostId as string,
-		generation: obj.generation as string,
-		sessionId: obj.sessionId as string,
-		sequence: obj.sequence as number,
-	});
 }
 
 // ===========================================================================
@@ -731,7 +743,11 @@ function decodeClientCapabilities(raw: unknown): DecodeResult<RemoteHostClientCa
 // ===========================================================================
 
 export function decodeJsonValue(raw: unknown): DecodeResult<JsonValue> {
-	return decodeJsonValueInner(raw, 0, { nodes: MAX_JSON_NODES, bytes: MAX_ENCODED_BYTES });
+	try {
+		return decodeJsonValueInner(raw, 0, { nodes: MAX_JSON_NODES, bytes: MAX_ENCODED_BYTES });
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+	}
 }
 
 function decodeJsonValueInner(
@@ -858,39 +874,43 @@ const CMD_FIELD_VAL: Record<string, (v: unknown) => boolean> = {
 };
 
 export function decodeCommandBody(raw: unknown): DecodeResult<RemoteHostCommandFrameBody> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
-	const jsonErr = checkJsonSafe(raw);
-	if (jsonErr) return fail(jsonErr);
-	const type = raw.type;
-	if (typeof type !== "string" || type.length === 0) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
-	const keys = CMD_KEYS[type];
-	if (!keys) return fail(CODEC_ERRORS.UNSUPPORTED_COMMAND);
-	const has = new Set(Object.keys(raw));
-	for (const k of keys.required) {
-		if (!has.has(k)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+		const jsonErr = checkJsonSafe(raw);
+		if (jsonErr) return fail(jsonErr);
+		const type = raw.type;
+		if (typeof type !== "string" || type.length === 0) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+		const keys = CMD_KEYS[type];
+		if (!keys) return fail(CODEC_ERRORS.UNSUPPORTED_COMMAND);
+		const has = new Set(Object.keys(raw));
+		for (const k of keys.required) {
+			if (!has.has(k)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+		}
+		const allowed = new Set([...keys.required, ...keys.optional]);
+		for (const k of has) {
+			if (!allowed.has(k)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+		}
+		for (const k of has) {
+			if (k === "type") continue;
+			const validator = CMD_FIELD_VAL[k];
+			if (!validator || !validator(raw[k])) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+		}
+		const fresh: Record<string, unknown> = { type };
+		for (const k of keys.required) {
+			if (k !== "type") fresh[k] = raw[k];
+		}
+		for (const k of keys.optional) {
+			if (has.has(k)) fresh[k] = raw[k];
+		}
+		if (type === "sync_workspace") {
+			const artResult = decodeArtifactRef(raw.artifact);
+			if (!artResult.ok) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+			fresh.artifact = artResult.value;
+		}
+		return ok(fresh as RemoteHostCommandFrameBody);
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
 	}
-	const allowed = new Set([...keys.required, ...keys.optional]);
-	for (const k of has) {
-		if (!allowed.has(k)) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
-	}
-	for (const k of has) {
-		if (k === "type") continue;
-		const validator = CMD_FIELD_VAL[k];
-		if (!validator || !validator(raw[k])) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
-	}
-	const fresh: Record<string, unknown> = { type };
-	for (const k of keys.required) {
-		if (k !== "type") fresh[k] = raw[k];
-	}
-	for (const k of keys.optional) {
-		if (has.has(k)) fresh[k] = raw[k];
-	}
-	if (type === "sync_workspace") {
-		const artResult = decodeArtifactRef(raw.artifact);
-		if (!artResult.ok) return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
-		fresh.artifact = artResult.value;
-	}
-	return ok(fresh as RemoteHostCommandFrameBody);
 }
 
 // ===========================================================================
@@ -938,34 +958,38 @@ const EVT_FIELD_VAL: Record<string, (v: unknown) => boolean> = {
 };
 
 export function decodeEventBody(raw: unknown): DecodeResult<RemoteHostEventBody> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_EVENT_BODY);
-	const jsonErr = checkJsonSafe(raw);
-	if (jsonErr) return fail(jsonErr);
-	const type = raw.type;
-	if (typeof type !== "string" || type.length === 0) return fail(CODEC_ERRORS.INVALID_EVENT_BODY);
-	const keys = EVT_KEYS[type];
-	if (!keys) return fail(CODEC_ERRORS.UNSUPPORTED_EVENT);
-	const has = new Set(Object.keys(raw));
-	for (const k of keys.required) {
-		if (!has.has(k)) return fail(CODEC_ERRORS.INVALID_EVENT_BODY);
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_EVENT_BODY);
+		const jsonErr = checkJsonSafe(raw);
+		if (jsonErr) return fail(jsonErr);
+		const type = raw.type;
+		if (typeof type !== "string" || type.length === 0) return fail(CODEC_ERRORS.INVALID_EVENT_BODY);
+		const keys = EVT_KEYS[type];
+		if (!keys) return fail(CODEC_ERRORS.UNSUPPORTED_EVENT);
+		const has = new Set(Object.keys(raw));
+		for (const k of keys.required) {
+			if (!has.has(k)) return fail(CODEC_ERRORS.INVALID_EVENT_BODY);
+		}
+		const allowed = new Set([...keys.required, ...keys.optional]);
+		for (const k of has) {
+			if (!allowed.has(k)) return fail(CODEC_ERRORS.INVALID_EVENT_BODY);
+		}
+		for (const k of has) {
+			if (k === "type") continue;
+			const validator = EVT_FIELD_VAL[k];
+			if (!validator || !validator(raw[k])) return fail(CODEC_ERRORS.INVALID_EVENT_BODY);
+		}
+		const fresh: Record<string, unknown> = { type };
+		for (const k of keys.required) {
+			if (k !== "type") fresh[k] = raw[k];
+		}
+		for (const k of keys.optional) {
+			if (has.has(k)) fresh[k] = raw[k];
+		}
+		return ok(fresh as RemoteHostEventBody);
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_EVENT_BODY);
 	}
-	const allowed = new Set([...keys.required, ...keys.optional]);
-	for (const k of has) {
-		if (!allowed.has(k)) return fail(CODEC_ERRORS.INVALID_EVENT_BODY);
-	}
-	for (const k of has) {
-		if (k === "type") continue;
-		const validator = EVT_FIELD_VAL[k];
-		if (!validator || !validator(raw[k])) return fail(CODEC_ERRORS.INVALID_EVENT_BODY);
-	}
-	const fresh: Record<string, unknown> = { type };
-	for (const k of keys.required) {
-		if (k !== "type") fresh[k] = raw[k];
-	}
-	for (const k of keys.optional) {
-		if (has.has(k)) fresh[k] = raw[k];
-	}
-	return ok(fresh as RemoteHostEventBody);
 }
 
 // ===========================================================================
@@ -976,60 +1000,64 @@ const HANDSHAKE_REQUIRED = ["type", "direction", "hostId", "generation", "capabi
 const HANDSHAKE_OPTIONAL = new Set(["sessionId", "clientCapabilities", "resumeCursor"]);
 
 export function decodeHandshakeFrame(raw: unknown): DecodeResult<RemoteHostHandshakeFrame> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	const jsonErr = checkJsonSafe(raw);
-	if (jsonErr) return fail(jsonErr);
-	const obj = raw as Record<string, unknown>;
-	if (obj.type !== "handshake") return fail(CODEC_ERRORS.INVALID_FRAME);
-	const allowedKeys = new Set([...HANDSHAKE_REQUIRED, ...HANDSHAKE_OPTIONAL]);
-	for (const k of Object.keys(obj)) {
-		if (!allowedKeys.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	}
-	if (typeof obj.direction !== "string" || !VALID_DIRECTIONS.has(obj.direction as RemoteHostLinkDirection))
-		return fail(CODEC_ERRORS.INVALID_FRAME);
-	if (!checkId(obj.hostId)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (!checkId(obj.generation)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (obj.sessionId !== undefined && !checkId(obj.sessionId as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	const capsResult = decodeCapabilities(obj.capabilities);
-	if (!capsResult.ok) return capsResult;
-	let clientCaps: RemoteHostClientCapability[] | undefined;
-	if (obj.clientCapabilities !== undefined) {
-		const ccResult = decodeClientCapabilities(obj.clientCapabilities);
-		if (!ccResult.ok) return ccResult;
-		clientCaps = ccResult.value;
-	}
-	const runtimeResult = decodeBuildIdentity(obj.runtime);
-	if (!runtimeResult.ok) return runtimeResult;
-	const protoResult = decodeProtocolInfo(obj.protocol);
-	if (!protoResult.ok) return protoResult;
-	let resumeCursor: RemoteHostEventCursor | undefined;
-	if (obj.resumeCursor !== undefined) {
-		const rcResult = decodeEventCursor(obj.resumeCursor);
-		if (!rcResult.ok) return rcResult;
-		resumeCursor = rcResult.value;
-		if (typeof obj.sessionId === "string") {
-			if (
-				resumeCursor.hostId !== obj.hostId ||
-				resumeCursor.generation !== obj.generation ||
-				resumeCursor.sessionId !== obj.sessionId
-			) {
-				return fail(CODEC_ERRORS.MISMATCH);
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		const jsonErr = checkJsonSafe(raw);
+		if (jsonErr) return fail(jsonErr);
+		const obj = raw as Record<string, unknown>;
+		if (obj.type !== "handshake") return fail(CODEC_ERRORS.INVALID_FRAME);
+		const allowedKeys = new Set([...HANDSHAKE_REQUIRED, ...HANDSHAKE_OPTIONAL]);
+		for (const k of Object.keys(obj)) {
+			if (!allowedKeys.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		}
+		if (typeof obj.direction !== "string" || !VALID_DIRECTIONS.has(obj.direction as RemoteHostLinkDirection))
+			return fail(CODEC_ERRORS.INVALID_FRAME);
+		if (!checkId(obj.hostId)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (!checkId(obj.generation)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (obj.sessionId !== undefined && !checkId(obj.sessionId as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		const capsResult = decodeCapabilities(obj.capabilities);
+		if (!capsResult.ok) return capsResult;
+		let clientCaps: RemoteHostClientCapability[] | undefined;
+		if (obj.clientCapabilities !== undefined) {
+			const ccResult = decodeClientCapabilities(obj.clientCapabilities);
+			if (!ccResult.ok) return ccResult;
+			clientCaps = ccResult.value;
+		}
+		const runtimeResult = decodeBuildIdentity(obj.runtime);
+		if (!runtimeResult.ok) return runtimeResult;
+		const protoResult = decodeProtocolInfo(obj.protocol);
+		if (!protoResult.ok) return protoResult;
+		let resumeCursor: RemoteHostEventCursor | undefined;
+		if (obj.resumeCursor !== undefined) {
+			const rcResult = decodeEventCursor(obj.resumeCursor);
+			if (!rcResult.ok) return rcResult;
+			resumeCursor = rcResult.value;
+			if (typeof obj.sessionId === "string") {
+				if (
+					resumeCursor.hostId !== obj.hostId ||
+					resumeCursor.generation !== obj.generation ||
+					resumeCursor.sessionId !== obj.sessionId
+				) {
+					return fail(CODEC_ERRORS.MISMATCH);
+				}
 			}
 		}
+		const fresh: RemoteHostHandshakeFrame = {
+			type: "handshake",
+			direction: obj.direction as RemoteHostLinkDirection,
+			hostId: obj.hostId as string,
+			generation: obj.generation as string,
+			capabilities: capsResult.value,
+			runtime: runtimeResult.value,
+			protocol: protoResult.value,
+		};
+		if (typeof obj.sessionId === "string") fresh.sessionId = obj.sessionId;
+		if (clientCaps) fresh.clientCapabilities = clientCaps;
+		if (resumeCursor) fresh.resumeCursor = resumeCursor;
+		return ok(fresh);
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_FRAME);
 	}
-	const fresh: RemoteHostHandshakeFrame = {
-		type: "handshake",
-		direction: obj.direction as RemoteHostLinkDirection,
-		hostId: obj.hostId as string,
-		generation: obj.generation as string,
-		capabilities: capsResult.value,
-		runtime: runtimeResult.value,
-		protocol: protoResult.value,
-	};
-	if (typeof obj.sessionId === "string") fresh.sessionId = obj.sessionId;
-	if (clientCaps) fresh.clientCapabilities = clientCaps;
-	if (resumeCursor) fresh.resumeCursor = resumeCursor;
-	return ok(fresh);
 }
 
 // ===========================================================================
@@ -1049,50 +1077,54 @@ const HANDSHAKE_ACK_REQUIRED = [
 const HANDSHAKE_ACK_OPTIONAL = new Set(["rejectReason", "cursor"]);
 
 export function decodeHandshakeAckFrame(raw: unknown): DecodeResult<RemoteHostHandshakeAckFrame> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	const jsonErr = checkJsonSafe(raw);
-	if (jsonErr) return fail(jsonErr);
-	const obj = raw as Record<string, unknown>;
-	if (obj.type !== "handshake_ack") return fail(CODEC_ERRORS.INVALID_FRAME);
-	const allowedKeys = new Set([...HANDSHAKE_ACK_REQUIRED, ...HANDSHAKE_ACK_OPTIONAL]);
-	for (const k of Object.keys(obj)) {
-		if (!allowedKeys.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		const jsonErr = checkJsonSafe(raw);
+		if (jsonErr) return fail(jsonErr);
+		const obj = raw as Record<string, unknown>;
+		if (obj.type !== "handshake_ack") return fail(CODEC_ERRORS.INVALID_FRAME);
+		const allowedKeys = new Set([...HANDSHAKE_ACK_REQUIRED, ...HANDSHAKE_ACK_OPTIONAL]);
+		for (const k of Object.keys(obj)) {
+			if (!allowedKeys.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		}
+		if (typeof obj.accepted !== "boolean") return fail(CODEC_ERRORS.INVALID_FRAME);
+		if (!checkId(obj.hostId as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (!checkId(obj.sessionId as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (!checkId(obj.linkId as string)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		const protoResult = decodeProtocolInfo(obj.protocol);
+		if (!protoResult.ok) return protoResult;
+		const capsResult = decodeCapabilities(obj.capabilities);
+		if (!capsResult.ok) return capsResult;
+		const buildResult = decodeBuildIdentity(obj.remoteBuildIdentity);
+		if (!buildResult.ok) return buildResult;
+		if (obj.rejectReason !== undefined) {
+			if (obj.accepted === true) return fail(CODEC_ERRORS.INVALID_FRAME);
+			if (typeof obj.rejectReason !== "string" || obj.rejectReason.length > 256)
+				return fail(CODEC_ERRORS.INVALID_FRAME);
+		}
+		let cursor: RemoteHostEventCursor | undefined;
+		if (obj.cursor !== undefined) {
+			if (obj.accepted !== true) return fail(CODEC_ERRORS.INVALID_FRAME);
+			const curResult = decodeEventCursor(obj.cursor);
+			if (!curResult.ok) return curResult;
+			cursor = curResult.value;
+		}
+		const fresh: RemoteHostHandshakeAckFrame = {
+			type: "handshake_ack",
+			hostId: obj.hostId as string,
+			sessionId: obj.sessionId as string,
+			protocol: protoResult.value,
+			accepted: obj.accepted as boolean,
+			capabilities: capsResult.value,
+			linkId: obj.linkId as string,
+			remoteBuildIdentity: buildResult.value,
+		};
+		if (typeof obj.rejectReason === "string") fresh.rejectReason = obj.rejectReason;
+		if (cursor) fresh.cursor = cursor;
+		return ok(fresh);
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_FRAME);
 	}
-	if (typeof obj.accepted !== "boolean") return fail(CODEC_ERRORS.INVALID_FRAME);
-	if (!checkId(obj.hostId as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (!checkId(obj.sessionId as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (!checkId(obj.linkId as string)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	const protoResult = decodeProtocolInfo(obj.protocol);
-	if (!protoResult.ok) return protoResult;
-	const capsResult = decodeCapabilities(obj.capabilities);
-	if (!capsResult.ok) return capsResult;
-	const buildResult = decodeBuildIdentity(obj.remoteBuildIdentity);
-	if (!buildResult.ok) return buildResult;
-	if (obj.rejectReason !== undefined) {
-		if (obj.accepted === true) return fail(CODEC_ERRORS.INVALID_FRAME);
-		if (typeof obj.rejectReason !== "string" || obj.rejectReason.length > 256)
-			return fail(CODEC_ERRORS.INVALID_FRAME);
-	}
-	let cursor: RemoteHostEventCursor | undefined;
-	if (obj.cursor !== undefined) {
-		if (obj.accepted !== true) return fail(CODEC_ERRORS.INVALID_FRAME);
-		const curResult = decodeEventCursor(obj.cursor);
-		if (!curResult.ok) return curResult;
-		cursor = curResult.value;
-	}
-	const fresh: RemoteHostHandshakeAckFrame = {
-		type: "handshake_ack",
-		hostId: obj.hostId as string,
-		sessionId: obj.sessionId as string,
-		protocol: protoResult.value,
-		accepted: obj.accepted as boolean,
-		capabilities: capsResult.value,
-		linkId: obj.linkId as string,
-		remoteBuildIdentity: buildResult.value,
-	};
-	if (typeof obj.rejectReason === "string") fresh.rejectReason = obj.rejectReason;
-	if (cursor) fresh.cursor = cursor;
-	return ok(fresh);
 }
 
 // ===========================================================================
@@ -1102,16 +1134,20 @@ export function decodeHandshakeAckFrame(raw: unknown): DecodeResult<RemoteHostHa
 const CMD_FRAME_KEYS = new Set(["type", "commandId", "body"]);
 
 export function decodeCommandFrame(raw: unknown): DecodeResult<RemoteHostCommandFrame> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	const obj = raw as Record<string, unknown>;
-	if (obj.type !== "command") return fail(CODEC_ERRORS.INVALID_FRAME);
-	for (const k of Object.keys(obj)) {
-		if (!CMD_FRAME_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		const obj = raw as Record<string, unknown>;
+		if (obj.type !== "command") return fail(CODEC_ERRORS.INVALID_FRAME);
+		for (const k of Object.keys(obj)) {
+			if (!CMD_FRAME_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		}
+		if (!checkId(obj.commandId as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		const bodyResult = decodeCommandBody(obj.body);
+		if (!bodyResult.ok) return bodyResult;
+		return ok({ type: "command", commandId: obj.commandId as string, body: bodyResult.value });
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_FRAME);
 	}
-	if (!checkId(obj.commandId as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	const bodyResult = decodeCommandBody(obj.body);
-	if (!bodyResult.ok) return bodyResult;
-	return ok({ type: "command", commandId: obj.commandId as string, body: bodyResult.value });
 }
 
 // ===========================================================================
@@ -1121,28 +1157,32 @@ export function decodeCommandFrame(raw: unknown): DecodeResult<RemoteHostCommand
 const EVT_FRAME_KEYS = new Set(["type", "id", "sequence", "cursor", "emittedAt", "body"]);
 
 export function decodeEventFrame(raw: unknown): DecodeResult<RemoteHostEventFrame> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	const obj = raw as Record<string, unknown>;
-	if (obj.type !== "event") return fail(CODEC_ERRORS.INVALID_FRAME);
-	for (const k of Object.keys(obj)) {
-		if (!EVT_FRAME_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		const obj = raw as Record<string, unknown>;
+		if (obj.type !== "event") return fail(CODEC_ERRORS.INVALID_FRAME);
+		for (const k of Object.keys(obj)) {
+			if (!EVT_FRAME_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		}
+		if (!checkId(obj.id as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (!isPositiveInt(obj.sequence)) return fail(CODEC_ERRORS.INVALID_SEQUENCE);
+		const cursorResult = decodeEventCursor(obj.cursor);
+		if (!cursorResult.ok) return cursorResult;
+		if (obj.sequence !== cursorResult.value.sequence) return fail(CODEC_ERRORS.MISMATCH);
+		if (!isCanonicalUtcTimestamp(obj.emittedAt as string)) return fail(CODEC_ERRORS.INVALID_TIMESTAMP);
+		const bodyResult = decodeEventBody(obj.body);
+		if (!bodyResult.ok) return bodyResult;
+		return ok({
+			type: "event",
+			id: obj.id as string,
+			sequence: obj.sequence as number,
+			cursor: cursorResult.value,
+			emittedAt: obj.emittedAt as string,
+			body: bodyResult.value,
+		});
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_FRAME);
 	}
-	if (!checkId(obj.id as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (!isPositiveInt(obj.sequence)) return fail(CODEC_ERRORS.INVALID_SEQUENCE);
-	const cursorResult = decodeEventCursor(obj.cursor);
-	if (!cursorResult.ok) return cursorResult;
-	if (obj.sequence !== cursorResult.value.sequence) return fail(CODEC_ERRORS.MISMATCH);
-	if (!isCanonicalUtcTimestamp(obj.emittedAt as string)) return fail(CODEC_ERRORS.INVALID_TIMESTAMP);
-	const bodyResult = decodeEventBody(obj.body);
-	if (!bodyResult.ok) return bodyResult;
-	return ok({
-		type: "event",
-		id: obj.id as string,
-		sequence: obj.sequence as number,
-		cursor: cursorResult.value,
-		emittedAt: obj.emittedAt as string,
-		body: bodyResult.value,
-	});
 }
 
 // ===========================================================================
@@ -1152,28 +1192,33 @@ export function decodeEventFrame(raw: unknown): DecodeResult<RemoteHostEventFram
 const ACK_KEYS = new Set(["type", "ackId", "acknowledges", "status", "rejectReason"]);
 
 export function decodeAckFrame(raw: unknown): DecodeResult<RemoteHostAckFrame> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	const obj = raw as Record<string, unknown>;
-	if (obj.type !== "ack") return fail(CODEC_ERRORS.INVALID_FRAME);
-	for (const k of Object.keys(obj)) {
-		if (!ACK_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	}
-	if (!checkId(obj.ackId as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (!checkId(obj.acknowledges as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (typeof obj.status !== "string" || !VALID_ACK_STATUSES.has(obj.status)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	if (obj.rejectReason !== undefined) {
-		if (obj.status !== "rejected") return fail(CODEC_ERRORS.INVALID_FRAME);
-		if (typeof obj.rejectReason !== "string" || obj.rejectReason.length > 256)
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		const obj = raw as Record<string, unknown>;
+		if (obj.type !== "ack") return fail(CODEC_ERRORS.INVALID_FRAME);
+		for (const k of Object.keys(obj)) {
+			if (!ACK_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		}
+		if (!checkId(obj.ackId as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (!checkId(obj.acknowledges as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (typeof obj.status !== "string" || !VALID_ACK_STATUSES.has(obj.status))
 			return fail(CODEC_ERRORS.INVALID_FRAME);
+		if (obj.rejectReason !== undefined) {
+			if (obj.status !== "rejected") return fail(CODEC_ERRORS.INVALID_FRAME);
+			if (typeof obj.rejectReason !== "string" || obj.rejectReason.length > 256)
+				return fail(CODEC_ERRORS.INVALID_FRAME);
+		}
+		const fresh: RemoteHostAckFrame = {
+			type: "ack",
+			ackId: obj.ackId as string,
+			acknowledges: obj.acknowledges as string,
+			status: obj.status as "delivered" | "replayed" | "rejected",
+		};
+		if (typeof obj.rejectReason === "string") fresh.rejectReason = obj.rejectReason;
+		return ok(fresh);
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_FRAME);
 	}
-	const fresh: RemoteHostAckFrame = {
-		type: "ack",
-		ackId: obj.ackId as string,
-		acknowledges: obj.acknowledges as string,
-		status: obj.status as "delivered" | "replayed" | "rejected",
-	};
-	if (typeof obj.rejectReason === "string") fresh.rejectReason = obj.rejectReason;
-	return ok(fresh);
 }
 
 // ===========================================================================
@@ -1183,35 +1228,39 @@ export function decodeAckFrame(raw: unknown): DecodeResult<RemoteHostAckFrame> {
 const AGENT_KEYS = new Set(["type", "id", "fromActiveSessionId", "targetActiveSessionId", "message", "deliveryMode"]);
 
 export function decodeAgentMessageFrame(raw: unknown): DecodeResult<RemoteHostAgentMessageFrame> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	const obj = raw as Record<string, unknown>;
-	if (obj.type !== "agent_message") return fail(CODEC_ERRORS.INVALID_FRAME);
-	for (const k of Object.keys(obj)) {
-		if (!AGENT_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		const obj = raw as Record<string, unknown>;
+		if (obj.type !== "agent_message") return fail(CODEC_ERRORS.INVALID_FRAME);
+		for (const k of Object.keys(obj)) {
+			if (!AGENT_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		}
+		if (!checkId(obj.id as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (!checkId(obj.fromActiveSessionId as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (!checkId(obj.targetActiveSessionId as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
+		if (
+			typeof obj.message !== "string" ||
+			obj.message.length === 0 ||
+			Buffer.byteLength(obj.message, "utf-8") > 10_000_000
+		)
+			return fail(CODEC_ERRORS.INVALID_FRAME);
+		if (
+			obj.deliveryMode !== undefined &&
+			(typeof obj.deliveryMode !== "string" || !VALID_DELIVERY_MODES.has(obj.deliveryMode))
+		)
+			return fail(CODEC_ERRORS.INVALID_FRAME);
+		const fresh: RemoteHostAgentMessageFrame = {
+			type: "agent_message",
+			id: obj.id as string,
+			fromActiveSessionId: obj.fromActiveSessionId as string,
+			targetActiveSessionId: obj.targetActiveSessionId as string,
+			message: obj.message as string,
+		};
+		if (typeof obj.deliveryMode === "string") fresh.deliveryMode = obj.deliveryMode as "queued" | "direct";
+		return ok(fresh);
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_FRAME);
 	}
-	if (!checkId(obj.id as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (!checkId(obj.fromActiveSessionId as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (!checkId(obj.targetActiveSessionId as string)) return fail(CODEC_ERRORS.INVALID_IDENTITY);
-	if (
-		typeof obj.message !== "string" ||
-		obj.message.length === 0 ||
-		Buffer.byteLength(obj.message, "utf-8") > 10_000_000
-	)
-		return fail(CODEC_ERRORS.INVALID_FRAME);
-	if (
-		obj.deliveryMode !== undefined &&
-		(typeof obj.deliveryMode !== "string" || !VALID_DELIVERY_MODES.has(obj.deliveryMode))
-	)
-		return fail(CODEC_ERRORS.INVALID_FRAME);
-	const fresh: RemoteHostAgentMessageFrame = {
-		type: "agent_message",
-		id: obj.id as string,
-		fromActiveSessionId: obj.fromActiveSessionId as string,
-		targetActiveSessionId: obj.targetActiveSessionId as string,
-		message: obj.message as string,
-	};
-	if (typeof obj.deliveryMode === "string") fresh.deliveryMode = obj.deliveryMode as "queued" | "direct";
-	return ok(fresh);
 }
 
 // ===========================================================================
@@ -1362,27 +1411,31 @@ function decodeProxyCancel(raw: Record<string, unknown>): DecodeResult<RemoteHos
 }
 
 export function decodeProviderProxyFrame(raw: unknown): DecodeResult<RemoteHostProviderProxyFrame> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	const jsonErr = checkJsonSafe(raw);
-	if (jsonErr) return fail(jsonErr);
-	const obj = raw as Record<string, unknown>;
-	if (obj.type !== "provider_proxy") return fail(CODEC_ERRORS.INVALID_FRAME);
-	if (typeof obj.proxyType !== "string" || !VALID_PROXY_TYPES.has(obj.proxyType))
-		return fail(CODEC_ERRORS.INVALID_FRAME);
-	if (typeof obj.callId !== "string" || obj.callId.length === 0) return fail(CODEC_ERRORS.INVALID_FRAME);
-	switch (obj.proxyType) {
-		case "model_call_request":
-			return decodeProxyRequest(obj);
-		case "model_call_chunk":
-			return decodeProxyChunk(obj);
-		case "model_call_complete":
-			return decodeProxyComplete(obj);
-		case "model_call_error":
-			return decodeProxyError(obj);
-		case "model_call_cancel":
-			return decodeProxyCancel(obj);
-		default:
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		const jsonErr = checkJsonSafe(raw);
+		if (jsonErr) return fail(jsonErr);
+		const obj = raw as Record<string, unknown>;
+		if (obj.type !== "provider_proxy") return fail(CODEC_ERRORS.INVALID_FRAME);
+		if (typeof obj.proxyType !== "string" || !VALID_PROXY_TYPES.has(obj.proxyType))
 			return fail(CODEC_ERRORS.INVALID_FRAME);
+		if (typeof obj.callId !== "string" || obj.callId.length === 0) return fail(CODEC_ERRORS.INVALID_FRAME);
+		switch (obj.proxyType) {
+			case "model_call_request":
+				return decodeProxyRequest(obj);
+			case "model_call_chunk":
+				return decodeProxyChunk(obj);
+			case "model_call_complete":
+				return decodeProxyComplete(obj);
+			case "model_call_error":
+				return decodeProxyError(obj);
+			case "model_call_cancel":
+				return decodeProxyCancel(obj);
+			default:
+				return fail(CODEC_ERRORS.INVALID_FRAME);
+		}
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_FRAME);
 	}
 }
 
@@ -1393,28 +1446,32 @@ export function decodeProviderProxyFrame(raw: unknown): DecodeResult<RemoteHostP
 const HEALTH_KEYS = new Set(["type", "healthSeq", "status", "lastReceivedFrameId", "lastReceivedEventSequence"]);
 
 export function decodeHealthFrame(raw: unknown): DecodeResult<RemoteHostHealthFrame> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	const obj = raw as Record<string, unknown>;
-	if (obj.type !== "health") return fail(CODEC_ERRORS.INVALID_FRAME);
-	for (const k of Object.keys(obj)) {
-		if (!HEALTH_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		const obj = raw as Record<string, unknown>;
+		if (obj.type !== "health") return fail(CODEC_ERRORS.INVALID_FRAME);
+		for (const k of Object.keys(obj)) {
+			if (!HEALTH_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		}
+		if (!isNonNegativeInt(obj.healthSeq)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		if (typeof obj.status !== "string" || !VALID_LINK_STATUSES.has(obj.status as RemoteHostLinkStatus))
+			return fail(CODEC_ERRORS.INVALID_FRAME);
+		if (obj.lastReceivedFrameId !== undefined && !checkId(obj.lastReceivedFrameId as string))
+			return fail(CODEC_ERRORS.INVALID_FRAME);
+		if (obj.lastReceivedEventSequence !== undefined && !isNonNegativeInt(obj.lastReceivedEventSequence))
+			return fail(CODEC_ERRORS.INVALID_FRAME);
+		const fresh: RemoteHostHealthFrame = {
+			type: "health",
+			healthSeq: obj.healthSeq as number,
+			status: obj.status as RemoteHostLinkStatus,
+		};
+		if (typeof obj.lastReceivedFrameId === "string") fresh.lastReceivedFrameId = obj.lastReceivedFrameId;
+		if (typeof obj.lastReceivedEventSequence === "number")
+			fresh.lastReceivedEventSequence = obj.lastReceivedEventSequence;
+		return ok(fresh);
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_FRAME);
 	}
-	if (!isNonNegativeInt(obj.healthSeq)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	if (typeof obj.status !== "string" || !VALID_LINK_STATUSES.has(obj.status as RemoteHostLinkStatus))
-		return fail(CODEC_ERRORS.INVALID_FRAME);
-	if (obj.lastReceivedFrameId !== undefined && !checkId(obj.lastReceivedFrameId as string))
-		return fail(CODEC_ERRORS.INVALID_FRAME);
-	if (obj.lastReceivedEventSequence !== undefined && !isNonNegativeInt(obj.lastReceivedEventSequence))
-		return fail(CODEC_ERRORS.INVALID_FRAME);
-	const fresh: RemoteHostHealthFrame = {
-		type: "health",
-		healthSeq: obj.healthSeq as number,
-		status: obj.status as RemoteHostLinkStatus,
-	};
-	if (typeof obj.lastReceivedFrameId === "string") fresh.lastReceivedFrameId = obj.lastReceivedFrameId;
-	if (typeof obj.lastReceivedEventSequence === "number")
-		fresh.lastReceivedEventSequence = obj.lastReceivedEventSequence;
-	return ok(fresh);
 }
 
 // ===========================================================================
@@ -1424,19 +1481,23 @@ export function decodeHealthFrame(raw: unknown): DecodeResult<RemoteHostHealthFr
 const ERROR_FRAME_KEYS = new Set(["type", "code", "message", "inReplyTo"]);
 
 export function decodeErrorFrame(raw: unknown): DecodeResult<RemoteHostErrorFrame> {
-	if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	const obj = raw as Record<string, unknown>;
-	if (obj.type !== "error") return fail(CODEC_ERRORS.INVALID_FRAME);
-	for (const k of Object.keys(obj)) {
-		if (!ERROR_FRAME_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	}
-	if (typeof obj.code !== "string" || obj.code.length === 0 || obj.code.length > 100)
+	try {
+		if (!isPlainObject(raw)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		const obj = raw as Record<string, unknown>;
+		if (obj.type !== "error") return fail(CODEC_ERRORS.INVALID_FRAME);
+		for (const k of Object.keys(obj)) {
+			if (!ERROR_FRAME_KEYS.has(k)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		}
+		if (typeof obj.code !== "string" || obj.code.length === 0 || obj.code.length > 100)
+			return fail(CODEC_ERRORS.INVALID_FRAME);
+		if (typeof obj.message !== "string" || obj.message.length > 1000) return fail(CODEC_ERRORS.INVALID_FRAME);
+		if (obj.inReplyTo !== undefined && !checkId(obj.inReplyTo as string)) return fail(CODEC_ERRORS.INVALID_FRAME);
+		const fresh: RemoteHostErrorFrame = { type: "error", code: obj.code as string, message: obj.message as string };
+		if (typeof obj.inReplyTo === "string") fresh.inReplyTo = obj.inReplyTo;
+		return ok(fresh);
+	} catch {
 		return fail(CODEC_ERRORS.INVALID_FRAME);
-	if (typeof obj.message !== "string" || obj.message.length > 1000) return fail(CODEC_ERRORS.INVALID_FRAME);
-	if (obj.inReplyTo !== undefined && !checkId(obj.inReplyTo as string)) return fail(CODEC_ERRORS.INVALID_FRAME);
-	const fresh: RemoteHostErrorFrame = { type: "error", code: obj.code as string, message: obj.message as string };
-	if (typeof obj.inReplyTo === "string") fresh.inReplyTo = obj.inReplyTo;
-	return ok(fresh);
+	}
 }
 
 // ===========================================================================
@@ -1446,11 +1507,7 @@ export function decodeErrorFrame(raw: unknown): DecodeResult<RemoteHostErrorFram
 export function decodeFrame(raw: unknown): DecodeResult<RemoteHostFrame> {
 	try {
 		return decodeFrameImpl(raw);
-	} catch (e: unknown) {
-		const err = e as { code?: string };
-		if (err.code && err.code in CODEC_ERRORS) {
-			return { ok: false, error: { code: err.code as CodecErrorCode } };
-		}
+	} catch {
 		return fail(CODEC_ERRORS.INVALID_FRAME);
 	}
 }
@@ -1504,11 +1561,7 @@ export function preflightEnvelope(raw: unknown): DecodeResult<void> {
 export function decodeEnvelope(raw: unknown): DecodeResult<RemoteHostFrameEnvelope> {
 	try {
 		return decodeEnvelopeImpl(raw);
-	} catch (e: unknown) {
-		const err = e as { code?: string };
-		if (err.code && err.code in CODEC_ERRORS) {
-			return { ok: false, error: { code: err.code as CodecErrorCode } };
-		}
+	} catch {
 		return fail(CODEC_ERRORS.INVALID_ENVELOPE);
 	}
 }
@@ -1551,11 +1604,7 @@ function decodeEnvelopeImpl(raw: unknown): DecodeResult<RemoteHostFrameEnvelope>
 export function canonicalDigest(value: unknown): DecodeResult<string> {
 	try {
 		return canonicalDigestImpl(value);
-	} catch (e: unknown) {
-		const err = e as { code?: string };
-		if (err.code && err.code in CODEC_ERRORS) {
-			return { ok: false, error: { code: err.code as CodecErrorCode } };
-		}
+	} catch {
 		return fail(CODEC_ERRORS.INVALID_DIGEST);
 	}
 }
@@ -1636,17 +1685,25 @@ export function isValidDigest(d: string): boolean {
 export function decodeAndDigestCommandBody(
 	raw: unknown,
 ): DecodeResult<{ body: RemoteHostCommandFrameBody; digest: string }> {
-	const decoded = decodeCommandBody(raw);
-	if (!decoded.ok) return { ok: false, error: decoded.error };
-	const digestResult = canonicalDigest(decoded.value);
-	if (!digestResult.ok) return { ok: false, error: digestResult.error };
-	return ok({ body: decoded.value, digest: digestResult.value });
+	try {
+		const decoded = decodeCommandBody(raw);
+		if (!decoded.ok) return { ok: false, error: decoded.error };
+		const digestResult = canonicalDigest(decoded.value);
+		if (!digestResult.ok) return { ok: false, error: digestResult.error };
+		return ok({ body: decoded.value, digest: digestResult.value });
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_COMMAND_BODY);
+	}
 }
 
 export function decodeAndDigestEventBody(raw: unknown): DecodeResult<{ body: RemoteHostEventBody; digest: string }> {
-	const decoded = decodeEventBody(raw);
-	if (!decoded.ok) return { ok: false, error: decoded.error };
-	const digestResult = canonicalDigest(decoded.value);
-	if (!digestResult.ok) return { ok: false, error: digestResult.error };
-	return ok({ body: decoded.value, digest: digestResult.value });
+	try {
+		const decoded = decodeEventBody(raw);
+		if (!decoded.ok) return { ok: false, error: decoded.error };
+		const digestResult = canonicalDigest(decoded.value);
+		if (!digestResult.ok) return { ok: false, error: digestResult.error };
+		return ok({ body: decoded.value, digest: digestResult.value });
+	} catch {
+		return fail(CODEC_ERRORS.INVALID_EVENT_BODY);
+	}
 }

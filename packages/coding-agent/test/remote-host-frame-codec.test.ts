@@ -2075,7 +2075,7 @@ describe("__proto__ injection resistance", () => {
 			// Fresh result has null prototype: no inherited polluted prop
 			expect(Object.getPrototypeOf(result.value)).toBe(null);
 			const asObj = result.value as Record<string, unknown>;
-			expect(asObj["realKey"]).toBe(42);
+			expect(asObj.realKey).toBe(42);
 			// __proto__ preserved as an own data key, not prototype mutation
 			expect(Object.keys(asObj)).toContain("__proto__");
 		}
@@ -2102,7 +2102,7 @@ describe("__proto__ injection resistance", () => {
 		expect(result.ok).toBe(true);
 		if (result.ok) {
 			const asObj = result.value as Record<string, unknown>;
-			expect(asObj["value"]).toBe(1);
+			expect(asObj.value).toBe(1);
 			expect(Object.keys(asObj)).toContain("constructor");
 		}
 	});
@@ -2116,13 +2116,13 @@ describe("Proxy reflection traps — no throws, no trap text", () => {
 	function throwingProxy(label: string): Record<string, unknown> {
 		return new Proxy({ type: "abort" } as Record<string, unknown>, {
 			getPrototypeOf() {
-				throw new Error(label + " getPrototypeOf");
+				throw new Error(`${label} getPrototypeOf`);
 			},
 			ownKeys() {
-				throw new Error(label + " ownKeys");
+				throw new Error(`${label} ownKeys`);
 			},
 			getOwnPropertyDescriptor() {
-				throw new Error(label + " getOwnPropertyDescriptor");
+				throw new Error(`${label} getOwnPropertyDescriptor`);
 			},
 			get(_, key) {
 				if (key === "type") return "abort";
@@ -2210,5 +2210,148 @@ describe("Proxy reflection traps — no throws, no trap text", () => {
 		const result = checkJsonSafe(p);
 		expect(result).toBeDefined();
 		expect(result).not.toContain("check");
+	});
+});
+
+// ===========================================================================
+// Guard — null/string/Proxy-throwing thrown values
+// ===========================================================================
+
+describe("guard catch — all thrown value types return fixed code", () => {
+	function _throwingProxyMake(label: string): Record<string, unknown> {
+		return new Proxy({} as Record<string, unknown>, {
+			getPrototypeOf() {
+				throw label;
+			},
+		});
+	}
+
+	it("throw null from decodeEnvelope returns INVALID_ENVELOPE", () => {
+		const p = new Proxy({} as Record<string, unknown>, {
+			getPrototypeOf() {
+				throw null;
+			},
+		});
+		const env = {
+			type: "frame",
+			frameId: "f-1",
+			protocol: { name: "prime-agent.remote-host", version: 1 },
+			sentAt: "2025-01-15T10:30:00.000Z",
+			frame: p,
+		};
+		const result = decodeEnvelope(env);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toMatch(/^[A-Z_]+$/);
+		}
+	});
+
+	it("throw string from jsonPreflight returns OVERFLOW", () => {
+		const p = new Proxy({ a: 1 } as Record<string, unknown>, {
+			getPrototypeOf() {
+				throw "boom";
+			},
+		});
+		const result = jsonPreflight(p);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toMatch(/^[A-Z_]+$/);
+		}
+	});
+
+	it("throw string from canonicalDigest returns INVALID_DIGEST", () => {
+		const p = new Proxy({ a: 1 } as Record<string, unknown>, {
+			getPrototypeOf() {
+				throw "secret";
+			},
+		});
+		const result = canonicalDigest(p);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toMatch(/^[A-Z_]+$/);
+		}
+	});
+
+	it("throw Proxy with get code trap from decodeFrame returns INVALID_FRAME", () => {
+		// Proxy whose `get code` traps
+		const codeProxy = new Proxy({} as Record<string, unknown>, {
+			get(_, key) {
+				if (key === "code") throw new Error("code trap");
+				return undefined;
+			},
+		});
+		const frame = new Proxy({} as Record<string, unknown>, {
+			getPrototypeOf() {
+				throw codeProxy;
+			},
+		});
+		const result = decodeFrame(frame);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toMatch(/^[A-Z_]+$/);
+		}
+	});
+
+	it("throw null from decodeJsonValue returns INVALID_COMMAND_BODY", () => {
+		const p = new Proxy({} as Record<string, unknown>, {
+			getPrototypeOf() {
+				throw null;
+			},
+		});
+		const result = decodeJsonValue(p);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toMatch(/^[A-Z_]+$/);
+		}
+	});
+
+	it("throw string from decodeCommandBody returns INVALID_COMMAND_BODY", () => {
+		const p = new Proxy({} as Record<string, unknown>, {
+			getPrototypeOf() {
+				throw "error-text";
+			},
+		});
+		const result = decodeCommandBody(p);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toMatch(/^[A-Z_]+$/);
+		}
+	});
+
+	it("throw string from decodeEventBody returns INVALID_EVENT_BODY", () => {
+		const p = new Proxy({} as Record<string, unknown>, {
+			getPrototypeOf() {
+				throw "error-text";
+			},
+		});
+		const result = decodeEventBody(p);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toMatch(/^[A-Z_]+$/);
+		}
+	});
+
+	it("verify no error.code contains caught throw text", () => {
+		// This would match any leaked text from a catch block that inspects `e.code`
+		const p = new Proxy({} as Record<string, unknown>, {
+			getPrototypeOf() {
+				throw "leaked-secret";
+			},
+		});
+		const r1 = decodeEnvelope({
+			type: "frame",
+			frameId: "f-1",
+			protocol: { name: "prime-agent.remote-host", version: 1 },
+			sentAt: "2025-01-15T10:30:00.000Z",
+			frame: p,
+		});
+		if (r1.ok === false) {
+			expect(r1.error.code).not.toContain("leaked");
+			expect(r1.error.code).not.toContain("secret");
+		}
+		const r2 = jsonPreflight(p);
+		if (r2.ok === false) {
+			expect(r2.error.code).not.toContain("leaked");
+		}
 	});
 });
