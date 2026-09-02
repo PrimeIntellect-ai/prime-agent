@@ -68,6 +68,7 @@ interface SupervisorInternals {
 	cancelEphemeralWorkerScheduledJobs(worker: WorkerFixture): Promise<boolean>;
 	pendingEphemeralCancels: Map<string, { rootSessionId: string; rootSessionFile: string; worker: WorkerFixture }>;
 	stopWorkerUntracked(worker: WorkerFixture, removeDescriptor: boolean, force?: boolean): Promise<void>;
+	promoteOwnedWorker(client: object, worker: WorkerFixture): Promise<void>;
 	loadWorkerDescriptors(): void;
 	adoptOrRecoverWorker(worker: WorkerFixture): Promise<void>;
 	assertRecoveryAllowed: () => Promise<void>;
@@ -891,6 +892,38 @@ describe("daemon supervisor scheduled-session wake", () => {
 
 		expect(root.store.list().map((job) => job.status)).toEqual(["cancelled"]);
 		expect(child.store.list().map((job) => job.status)).toEqual(["cancelled"]);
+	});
+
+	it("keeps schedules that were promoted public while the ephemeral cancel was in flight", async () => {
+		const supervisor = makeSupervisor();
+		const { sessionFile, store } = makeScheduledSessionFile("promoted-root");
+		armHeartbeat(store, "promoted-root", sessionFile, now);
+		let releaseFamily = () => {};
+		const familyGate = new Promise<void>((resolve) => {
+			releaseFamily = resolve;
+		});
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => {
+				await familyGate;
+				return [makeSavedInfo(sessionFile, "promoted-root")];
+			}),
+			liveEdges: vi.fn(async () => []),
+		};
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-promote-"));
+		tempDirs.push(directory);
+		const owned = makeWorker("owned", []);
+		owned.descriptor.ownerClientId = "owner";
+		owned.descriptor.rootSessionId = "promoted-root";
+		owned.descriptor.sessionFile = sessionFile;
+		owned.descriptorPath = join(directory, "owned.json");
+
+		const cancel = supervisor.cancelEphemeralWorkerScheduledJobs(owned);
+		await supervisor.promoteOwnedWorker({ id: "owner", attachedActiveSessionIds: new Set<string>() }, owned);
+		releaseFamily();
+
+		expect(await cancel).toBe(true);
+		expect(owned.descriptor.ownerClientId).toBeUndefined();
+		expect(store.list().map((job) => job.status)).toEqual(["active"]);
 	});
 
 	it("keeps a tree wake-ineligible after a failed ephemeral cancel until an enumeration retry lands", async () => {

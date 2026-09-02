@@ -6501,7 +6501,11 @@ export class DaemonSupervisor {
 		}
 	}
 
-	private async cancelScheduledJobsForSessionTree(rootSessionId: string, rootSessionFile: string): Promise<void> {
+	private async cancelScheduledJobsForSessionTree(
+		rootSessionId: string,
+		rootSessionFile: string,
+		stillWanted?: () => boolean,
+	): Promise<void> {
 		const store = AgentCronJobStore.forSessionArtifacts();
 		const sessions = [{ sessionId: rootSessionId, sessionFile: rootSessionFile }];
 		const childrenByParent = new Map<string, SessionInfo[]>();
@@ -6529,6 +6533,8 @@ export class DaemonSupervisor {
 			registered = true;
 		}
 		if (!registered) return;
+		// Re-checked in the same synchronous turn as the walk: a promotion committed during the family read keeps its schedules.
+		if (stillWanted && !stillWanted()) return;
 		for (const { sessionFile } of sessions) {
 			store.cancelJobsForSession({ sessionFile });
 		}
@@ -6551,7 +6557,11 @@ export class DaemonSupervisor {
 			return true;
 		}
 		try {
-			await this.cancelScheduledJobsForSessionTree(worker.descriptor.rootSessionId, context.sessionFile);
+			await this.cancelScheduledJobsForSessionTree(
+				worker.descriptor.rootSessionId,
+				context.sessionFile,
+				() => worker.descriptor.ownerClientId !== undefined,
+			);
 			this.pendingEphemeralCancels.delete(rootKey);
 			return true;
 		} catch (error) {
