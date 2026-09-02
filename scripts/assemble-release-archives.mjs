@@ -246,7 +246,7 @@ function renderPackageManifest(path, version) {
 	manifest.name = publicPackageName;
 	manifest.version = version;
 	manifest.bin = { [binaryName]: `./${binaryName}` };
-	manifest.packageManager = "bun@1.3.14";
+	manifest.packageManager = "bun@1.4.0";
 	writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 

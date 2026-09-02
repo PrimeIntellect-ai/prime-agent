@@ -44,7 +44,7 @@
 ## Dependencies
 
 - A 7-day minimum release age applies to all dependency updates: `bunfig.toml` sets `minimumReleaseAge = 604800` and `.github/dependabot.yml` uses a matching `cooldown`. Never bypass it for routine updates.
-- Bun 1.3.14 enforces this setting for dependency updates.
+- Bun 1.4.0 enforces this setting for dependency updates.
 - For an urgent security patch younger than 7 days, override explicitly: `bun add --minimum-release-age=0 <pkg>`.
 
 ## GitHub Workflow

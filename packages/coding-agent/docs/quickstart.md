@@ -25,7 +25,7 @@ cd /path/to/project
 prime-agent
 ```
 
-To run a source checkout instead, use Bun 1.3.14:
+To run a source checkout instead, use Bun 1.4.0:
 
 ```bash
 git clone https://github.com/PrimeIntellect-ai/prime-agent
