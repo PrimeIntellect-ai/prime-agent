@@ -356,6 +356,18 @@ jobs:
           test/exec.test.ts
           test/kernel-bash-shell.test.ts
 
+      - name: Test terminal behavior
+        working-directory: packages/tui
+        run: >-
+          bun test
+          test/fullscreen.test.ts
+          test/input.test.ts
+          test/stdin-buffer.test.ts
+          test/terminal.test.ts
+          test/terminal-image.test.ts
+          test/tui-cell-size-input.test.ts
+          test/tui-render.test.ts
+
       - name: Bootstrap the CPython kernel
         working-directory: packages/coding-agent
         env:

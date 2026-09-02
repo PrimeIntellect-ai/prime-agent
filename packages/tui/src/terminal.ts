@@ -13,6 +13,61 @@ import {
 
 const cjsRequire = createRequire(import.meta.url);
 
+interface WindowsKernel32 {
+	symbols: {
+		GetStdHandle(handle: number): unknown;
+		GetConsoleMode(handle: unknown, mode: unknown): boolean;
+		SetConsoleMode(handle: unknown, mode: number): boolean;
+	};
+	close(): void;
+}
+
+interface BunFfi {
+	dlopen(library: string, symbols: Record<string, { args: string[]; returns: string }>): WindowsKernel32;
+	ptr(buffer: Uint32Array): unknown;
+}
+
+function enableWindowsVirtualTerminalInput(): void {
+	if (process.platform !== "win32") return;
+	try {
+		const STD_INPUT_HANDLE = -10;
+		const ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200;
+
+		const bunRuntime = Reflect.get(globalThis, "Bun") as { FFI?: BunFfi } | undefined;
+		const bunFfi = bunRuntime?.FFI;
+		if (bunFfi) {
+			const kernel32 = bunFfi.dlopen("kernel32.dll", {
+				GetStdHandle: { args: ["i32"], returns: "ptr" },
+				GetConsoleMode: { args: ["ptr", "ptr"], returns: "bool" },
+				SetConsoleMode: { args: ["ptr", "u32"], returns: "bool" },
+			});
+			try {
+				const handle = kernel32.symbols.GetStdHandle(STD_INPUT_HANDLE);
+				const mode = new Uint32Array(1);
+				if (handle && kernel32.symbols.GetConsoleMode(handle, bunFfi.ptr(mode))) {
+					kernel32.symbols.SetConsoleMode(handle, mode[0]! | ENABLE_VIRTUAL_TERMINAL_INPUT);
+				}
+			} finally {
+				kernel32.close();
+			}
+			return;
+		}
+
+		const koffi = cjsRequire("koffi");
+		const kernel32 = koffi.load("kernel32.dll");
+		const GetStdHandle = kernel32.func("void* __stdcall GetStdHandle(int)");
+		const GetConsoleMode = kernel32.func("bool __stdcall GetConsoleMode(void*, _Out_ uint32_t*)");
+		const SetConsoleMode = kernel32.func("bool __stdcall SetConsoleMode(void*, uint32_t)");
+		const handle = GetStdHandle(STD_INPUT_HANDLE);
+		const mode = new Uint32Array(1);
+		if (handle && GetConsoleMode(handle, mode)) {
+			SetConsoleMode(handle, mode[0]! | ENABLE_VIRTUAL_TERMINAL_INPUT);
+		}
+	} catch {
+		// The terminal remains usable, but modified key events may be unavailable.
+	}
+}
+
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
@@ -356,27 +411,9 @@ export class ProcessTerminal implements Terminal {
 	 * (e.g. \x1b[Z for Shift+Tab). Without this, libuv's ReadConsoleInputW
 	 * discards modifier state and Shift+Tab arrives as plain \t.
 	 */
-	private enableWindowsVTInput(): void {
-		if (process.platform !== "win32") return;
-		try {
-			// Dynamic require to avoid bundling koffi's 74MB of cross-platform
-			// native binaries into every compiled binary. Koffi is only needed
-			// on Windows for VT input support.
-			const koffi = cjsRequire("koffi");
-			const k32 = koffi.load("kernel32.dll");
-			const GetStdHandle = k32.func("void* __stdcall GetStdHandle(int)");
-			const GetConsoleMode = k32.func("bool __stdcall GetConsoleMode(void*, _Out_ uint32_t*)");
-			const SetConsoleMode = k32.func("bool __stdcall SetConsoleMode(void*, uint32_t)");
 
-			const STD_INPUT_HANDLE = -10;
-			const ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200;
-			const handle = GetStdHandle(STD_INPUT_HANDLE);
-			const mode = new Uint32Array(1);
-			GetConsoleMode(handle, mode);
-			SetConsoleMode(handle, mode[0]! | ENABLE_VIRTUAL_TERMINAL_INPUT);
-		} catch {
-			// koffi not available — Shift+Tab won't be distinguishable from Tab
-		}
+	private enableWindowsVTInput(): void {
+		enableWindowsVirtualTerminalInput();
 	}
 
 	async drainInput(maxMs = 1000, idleMs = 50): Promise<void> {
