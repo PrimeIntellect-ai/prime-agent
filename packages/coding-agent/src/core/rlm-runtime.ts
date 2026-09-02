@@ -12,7 +12,7 @@ export interface RlmRunRequest {
 	cellSourceCode?: string;
 }
 
-export interface RlmCreateSessionRequest {
+interface RlmCreateSessionRequest {
 	prompt: string;
 	kwargs: Record<string, unknown>;
 }
@@ -64,7 +64,7 @@ export interface RlmFindModelsResult {
 }
 
 export type RlmRunHandler = (request: RlmRunRequest) => Promise<Record<string, unknown>>;
-export type RlmCreateSessionHandler = (request: RlmCreateSessionRequest) => Promise<RlmCreateSessionResult>;
+type RlmCreateSessionHandler = (request: RlmCreateSessionRequest) => Promise<RlmCreateSessionResult>;
 export type RlmListSubagentsHandler = () => RlmListSubagentsResult | Promise<RlmListSubagentsResult>;
 export type RlmDeleteSubagentHandler = (target: string) => Promise<RlmDeleteSubagentResult>;
 export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindModelsResult | Promise<RlmFindModelsResult>;
@@ -178,7 +178,6 @@ export function findRlmModelMatches(query: string, models: Model<Api>[], limit: 
 		}));
 }
 
-/** Adapt a user-provided `rlm.create_session` handler for the kernel host bridge. */
 export function createRlmCreateSessionHostHandler(handler: RlmCreateSessionHandler): HostRequestHandler {
 	return async (payload) => {
 		if (typeof payload.prompt !== "string") {
@@ -272,13 +271,12 @@ export interface CreateRlmRootSessionOptions {
 	prompt: string;
 	sessionName?: string;
 	cwd: string;
-	model: Model<any>;
+	model: Model<Api>;
 	thinkingLevel: ThinkingLevel;
 }
 
 export interface SubagentRuntimeHost {
 	createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime>;
-	/** Ask the daemon supervisor to create an independent resident depth-0 session. */
 	createRlmRootSession?(options: CreateRlmRootSessionOptions): Promise<RlmCreateSessionResult>;
 	/** Persist host-owned completion before the child becomes passivation-eligible. */
 	completeRlmSubagentRuntime?(childId: string, session: AgentSession): boolean;

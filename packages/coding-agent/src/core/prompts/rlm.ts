@@ -149,7 +149,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 	if (depth === 0 && hasIpython) {
 		parts.push(
 			"",
-			"Use `await rlm.create_session('task', name='researcher')` from a daemon-backed depth-0 session when you need a separate top-level Prime Agent session instead of a recursive child. Inline sessions cannot create resident siblings. The call asks the daemon to create the sibling, submits its initial task, and returns after admission with `active_session_id`, `session_id`, `name`, `session_file`, and `model`. This is distinct from `rlm(...)`, which always creates a child.",
+			"From a daemon-backed depth-0 session, use `await rlm.create_session('task', name='researcher')` to start a separate top-level session. The call returns after the daemon creates the session and accepts its first prompt. Inline and nested sessions cannot use it. `rlm(...)` still creates a child.",
 		);
 	}
 

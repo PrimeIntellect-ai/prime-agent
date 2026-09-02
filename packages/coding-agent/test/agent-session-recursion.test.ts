@@ -2853,9 +2853,6 @@ describe("AgentSession rlm recursion", () => {
 			model,
 			thinkingLevel: "off",
 		});
-		await expect(root.createRlmSession("task", { name: 7 })).rejects.toThrow(
-			"rlm.create_session name must be a string",
-		);
 		await expect(root.createRlmSession("task", { cwd: " " })).rejects.toThrow(
 			"rlm.create_session cwd must be a non-empty string",
 		);

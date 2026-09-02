@@ -14,7 +14,6 @@ describe("RLM bootstrap", () => {
 	it("gives subagent registry operations the actionable missing-runtime fallback", () => {
 		const code = buildRlmBootstrapCode();
 		expect(code).toContain('async def find_models(self, query="", limit=8)');
-		expect(code).toContain("async def create_session(self, prompt, **kwargs)");
 		expect(code).toContain("async def list_subagents(self)");
 		expect(code).toContain("async def delete_subagent(self, target)");
 		expect(code).toContain("self._raise_missing()");

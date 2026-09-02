@@ -21,10 +21,6 @@ class RLMSpawnHandle:
 
 @dataclass(frozen=True)
 class RLMCreateSessionHandle:
-    """Handle returned by await rlm.create_session(...).
-
-    Represents an explicit top-level daemon session (rlmDepth 0, root-only).
-    """
     active_session_id: str
     session_id: str
     name: str
@@ -68,7 +64,6 @@ def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
 
 
 def _create_session_handle_from_payload(payload: Any) -> RLMCreateSessionHandle:
-    """Parse a host response payload into an RLMCreateSessionHandle."""
     if not isinstance(payload, dict):
         raise RuntimeError("rlm.create_session returned an invalid payload")
     active_session_id = payload.get("active_session_id")
@@ -154,18 +149,10 @@ async def create_session(
     thinking: str | None = None,
     cwd: str | None = None,
 ) -> RLMCreateSessionHandle:
-    """Create a new top-level daemon session (root-only, rlmDepth 0).
+    """Create and prompt a resident depth-0 daemon session.
 
-    ``name`` sets the session name (used as an agent-message selector).
-    ``model`` selects a session with an exact ``provider/model`` selector.
-    ``thinking`` sets the session reasoning level (e.g. 'off', 'low', 'medium',
-    'high'); defaults to the parent level; levels invalid for the resolved model
-    fail the spawn.
-    ``cwd`` sets the working directory for the new session (defaults to the
-    current session's working directory).
-
-    Returns a typed handle with active_session_id, session_id, name, session_file,
-    and model.
+    Only daemon-backed depth-0 sessions support this operation. The optional
+    arguments set the session name, model, thinking level, and working directory.
     """
     if not isinstance(prompt, str):
         raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
@@ -177,8 +164,6 @@ async def create_session(
     if thinking is not None:
         kwargs["thinking"] = thinking
     if cwd is not None:
-        if not isinstance(cwd, str) or not cwd.strip():
-            raise ValueError("cwd must be a non-empty string when provided")
         kwargs["cwd"] = cwd
     payload = await host_request("rlm.create_session", {"prompt": prompt, "kwargs": kwargs})
     return _create_session_handle_from_payload(payload)

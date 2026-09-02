@@ -1,1 +1,1 @@
-- Added `rlm.create_session(...)` so a depth-0 agent can create and prompt an independent resident top-level session.
+- Added `rlm.create_session(...)` so daemon-backed root agents can start separate top-level sessions.
