@@ -1120,3 +1120,724 @@ const MAX_DELTA_TEXT_PER_FRAME = 50_000;
 const MAX_DELTA_THINKING_PER_FRAME = 100_000;
 const MAX_DELTA_TOOLCALL_PER_FRAME = 25_000;
 const MAX_TEXT_LENGTH = 100_000;
+
+// ===========================================================================
+// B11-b: RemoteObservationSnapshotV1 codec — capture/restore tests
+// ===========================================================================
+
+import {
+	decodeRemoteObservationSnapshotV1,
+	type RemoteObservationSnapshotV1,
+	type SnapshotRejectionCode,
+} from "../src/modes/daemon/remote-observation-snapshot.js";
+
+const IDENTITY = { hostId: "host-1", generation: "gen-1", sessionId: "sess-1" } as const;
+
+function makeSnapshot(overrides?: Partial<RemoteObservationSnapshotV1>): RemoteObservationSnapshotV1 {
+	return {
+		version: "1" as const,
+		hostId: "host-1",
+		generation: "gen-1",
+		sessionId: "sess-1",
+		capturedAt: "2025-01-01T00:00:00.000Z",
+		cursor: 10,
+		cursorTimestamp: "2025-01-01T00:00:00.000Z",
+		hasGap: false,
+		needsReplay: false,
+		nextMessageIndex: 2,
+		records: [
+			{
+				index: 0,
+				text: "hello",
+				thinking: "hmm",
+				toolCallText: "tool",
+				emittedAt: "2025-01-01T00:00:00.000Z",
+				updatedAt: "2025-01-01T00:00:00.000Z",
+				textTruncated: false,
+				thinkingTruncated: false,
+				toolCallTruncated: false,
+			},
+			{
+				index: 1,
+				text: "world",
+				thinking: "",
+				toolCallText: "",
+				emittedAt: "2025-01-01T00:00:00.000Z",
+				updatedAt: "2025-01-01T00:00:00.000Z",
+				textTruncated: false,
+				thinkingTruncated: false,
+				toolCallTruncated: false,
+			},
+		],
+		messageCount: 5,
+		agentRunning: false,
+		sessionState: "running",
+		compacting: false,
+		checkpointing: false,
+		bash: null,
+		recap: [
+			{ eventSequence: 1, type: "session_created" },
+			{ eventSequence: 2, type: "agent_start" },
+			{ eventSequence: 3, type: "agent_text_delta", messageIndex: 0 },
+			{ eventSequence: 4, type: "agent_text_delta", messageIndex: 1 },
+			{ eventSequence: 5, type: "agent_end", messageIndex: 1 },
+			{ eventSequence: 6, type: "session_created" },
+			{ eventSequence: 7, type: "session_created" },
+			{ eventSequence: 8, type: "session_created" },
+			{ eventSequence: 9, type: "session_created" },
+			{ eventSequence: 10, type: "session_created" },
+		],
+		lastFailure: { type: "none" },
+		...overrides,
+	};
+}
+
+function decodeOk(raw: unknown): RemoteObservationSnapshotV1 {
+	const r = decodeRemoteObservationSnapshotV1(raw, IDENTITY);
+	if (!r.success) throw new Error(`Expected success, got ${r.code as string}`);
+	return r.value;
+}
+
+function decodeFail(raw: unknown, expectedCode: SnapshotRejectionCode): void {
+	const r = decodeRemoteObservationSnapshotV1(raw, IDENTITY);
+	if (r.success) throw new Error("Expected failure, got success");
+	expect(r.code).toBe(expectedCode);
+}
+
+describe("B11-b: RemoteObservationSnapshotV1 codec", () => {
+	// ---- JSON roundtrip ----
+	it("roundtrips through JSON.parse/stringify", () => {
+		const m = mirror();
+		ingestAccepted(m, 1, "session_created");
+		ingestAccepted(m, 2, "agent_start");
+		ingestAccepted(m, 3, "agent_text_delta", { index: 0, text: "hello" });
+		ingestAccepted(m, 4, "agent_end", { messages: 1 });
+
+		const snap = m.captureSnapshot();
+		const json = JSON.stringify(snap);
+		const parsed = JSON.parse(json);
+		const decoded = decodeOk(parsed);
+
+		expect(decoded.version).toBe("1");
+		expect(decoded.hostId).toBe("host-1");
+		expect(decoded.generation).toBe("gen-1");
+		expect(decoded.sessionId).toBe("sess-1");
+		expect(typeof decoded.capturedAt).toBe("string");
+		expect(decoded.cursor).toBe(4);
+		expect(decoded.cursorTimestamp).toBe("2025-01-01T00:00:00.000Z");
+		expect(decoded.hasGap).toBe(false);
+		expect(decoded.needsReplay).toBe(false);
+		expect(decoded.nextMessageIndex).toBe(1);
+		expect(decoded.records.length).toBe(1);
+		expect(decoded.records[0].text).toBe("hello");
+		expect(decoded.messageCount).toBe(1);
+		expect(decoded.lastFailure).toEqual({ type: "none" });
+
+		// Verify deep freeze
+		expect(Object.isFrozen(decoded)).toBe(true);
+		expect(Object.isFrozen(decoded.records)).toBe(true);
+		expect(Object.isFrozen(decoded.records[0])).toBe(true);
+	});
+
+	it("captureSnapshot returns correct version and capturedAt", () => {
+		const m = mirror();
+		ingestAccepted(m, 1, "session_created");
+		const snap = m.captureSnapshot();
+		expect(snap.version).toBe("1");
+		expect(typeof snap.capturedAt).toBe("string");
+		expect(snap.capturedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+	});
+
+	// ---- Identity mismatch ----
+	it("rejects identity mismatch (hostId)", () => {
+		decodeFail({ ...makeSnapshot(), hostId: "wrong" }, "IDENTITY_MISMATCH");
+	});
+	it("rejects identity mismatch (generation)", () => {
+		decodeFail({ ...makeSnapshot(), generation: "wrong" }, "IDENTITY_MISMATCH");
+	});
+	it("rejects identity mismatch (sessionId)", () => {
+		decodeFail({ ...makeSnapshot(), sessionId: "wrong" }, "IDENTITY_MISMATCH");
+	});
+
+	// ---- Key/type validation ----
+	it("rejects missing version", () => {
+		const raw = { ...makeSnapshot() };
+		delete (raw as Record<string, unknown>).version;
+		decodeFail(raw, "MISSING_VERSION");
+	});
+	it("rejects wrong version literal", () => {
+		decodeFail({ ...makeSnapshot(), version: "2" }, "INVALID_VERSION");
+	});
+	it("rejects null value", () => {
+		decodeFail(null, "NOT_AN_OBJECT");
+	});
+	it("rejects non-object value", () => {
+		decodeFail("string", "NOT_AN_OBJECT");
+	});
+	it("rejects extra top-level key", () => {
+		decodeFail({ ...makeSnapshot(), extraKey: "x" }, "UNKNOWN_FIELD");
+	});
+	it("rejects missing required key", () => {
+		const raw = { ...makeSnapshot() };
+		delete (raw as Record<string, unknown>).records;
+		decodeFail(raw, "UNKNOWN_FIELD");
+	});
+	it("rejects invalid hostId grammar", () => {
+		decodeFail({ ...makeSnapshot(), hostId: "has space" }, "INVALID_ID");
+	});
+	it("rejects hostId over length limit", () => {
+		decodeFail({ ...makeSnapshot(), hostId: "a".repeat(129) }, "INVALID_ID");
+	});
+	it("rejects empty hostId", () => {
+		decodeFail({ ...makeSnapshot(), hostId: "" }, "INVALID_ID");
+	});
+
+	// ---- Timestamps ----
+	it("rejects non-canonical capturedAt", () => {
+		decodeFail({ ...makeSnapshot(), capturedAt: "2025-01-01T00:00:00.000+00:00" }, "INVALID_CAPTURED_AT");
+	});
+	it("rejects capturedAt without Z suffix", () => {
+		decodeFail({ ...makeSnapshot(), capturedAt: "2025-01-01T00:00:00.000" }, "INVALID_CAPTURED_AT");
+	});
+	it("rejects capturedAt empty string", () => {
+		decodeFail({ ...makeSnapshot(), capturedAt: "" }, "INVALID_CAPTURED_AT");
+	});
+	it("rejects cursorTimestamp empty when cursor nonzero", () => {
+		decodeFail({ ...makeSnapshot(), cursor: 5, cursorTimestamp: "" }, "INVALID_CURSOR_TIMESTAMP");
+	});
+	it("rejects cursorTimestamp non-empty when cursor is 0", () => {
+		decodeFail(
+			{ ...makeSnapshot(), cursor: 0, cursorTimestamp: "2025-01-01T00:00:00.000Z" },
+			"INVALID_CURSOR_TIMESTAMP",
+		);
+	});
+	it("accepts cursor 0 with empty cursorTimestamp", () => {
+		const r = decodeOk({ ...makeSnapshot(), cursor: 0, cursorTimestamp: "", records: [], recap: [] });
+		expect(r.cursor).toBe(0);
+		expect(r.cursorTimestamp).toBe("");
+	});
+	it("rejects cursorTimestamp > capturedAt", () => {
+		decodeFail(
+			{
+				...makeSnapshot(),
+				capturedAt: "2025-01-01T00:00:00.000Z",
+				cursorTimestamp: "2025-01-02T00:00:00.000Z",
+			},
+			"INVALID_TIMESTAMP_ORDER",
+		);
+	});
+
+	// ---- Gap invariant ----
+	it("rejects hasGap !== needsReplay", () => {
+		decodeFail({ ...makeSnapshot(), hasGap: true, needsReplay: false }, "INVALID_GAP_INVARIANT");
+		decodeFail({ ...makeSnapshot(), hasGap: false, needsReplay: true }, "INVALID_GAP_INVARIANT");
+	});
+	it("accepts hasGap === needsReplay", () => {
+		decodeOk({ ...makeSnapshot(), hasGap: true, needsReplay: true });
+	});
+
+	// ---- Booleans ----
+	it("rejects non-boolean hasGap", () => {
+		decodeFail({ ...makeSnapshot(), hasGap: "true" as any }, "INVALID_BOOLEAN");
+	});
+	it("rejects non-boolean agentRunning", () => {
+		decodeFail({ ...makeSnapshot(), agentRunning: 1 as any }, "INVALID_BOOLEAN");
+	});
+	it("rejects non-boolean compacting", () => {
+		decodeFail({ ...makeSnapshot(), compacting: "false" as any }, "INVALID_BOOLEAN");
+	});
+	it("rejects non-boolean checkpointing", () => {
+		decodeFail({ ...makeSnapshot(), checkpointing: null as any }, "INVALID_BOOLEAN");
+	});
+	it("rejects non-boolean textTruncated in record", () => {
+		let snap = makeSnapshot();
+		snap = { ...snap, records: [{ ...snap.records[0], textTruncated: 1 as any }] };
+		decodeFail(snap, "INVALID_BOOLEAN");
+	});
+
+	// ---- Records ----
+	it("rejects records not a plain array", () => {
+		decodeFail({ ...makeSnapshot(), records: "not-array" }, "INVALID_RECORD_STRUCTURE");
+	});
+	it("rejects sparse records array", () => {
+		const sparse = makeSnapshot().records.slice();
+		(sparse as any)[5] = sparse[0]; // sparse hole at 2,3,4
+		decodeFail({ ...makeSnapshot(), records: sparse }, "INVALID_RECORD_STRUCTURE");
+	});
+	it("rejects records with non-plain objects", () => {
+		const recs = [makeSnapshot().records[0]];
+		Object.setPrototypeOf(recs[0] as any, { malicious: true });
+		decodeFail({ ...makeSnapshot(), records: recs }, "INVALID_RECORD_STRUCTURE");
+	});
+	it("rejects record with extra key", () => {
+		const recs = [makeSnapshot().records[0]];
+		(recs[0] as any).extra = "x";
+		decodeFail({ ...makeSnapshot(), records: recs }, "INVALID_RECORD_STRUCTURE");
+	});
+	it("rejects record index >= nextMessageIndex", () => {
+		const recs = [makeSnapshot().records[0]];
+		recs[0] = { ...recs[0], index: 5 }; // nextMessageIndex is 5, index 5 is >=
+		decodeFail({ ...makeSnapshot(), nextMessageIndex: 5, records: recs }, "INVALID_RECORD_INDEX");
+	});
+	it("rejects duplicate record index", () => {
+		const recs = [makeSnapshot().records[0], { ...makeSnapshot().records[0], index: 0 }];
+		decodeFail({ ...makeSnapshot(), nextMessageIndex: 2, records: recs }, "INVALID_RECORD_INDEX");
+	});
+	it("rejects record count > 200", () => {
+		const recs = Array.from({ length: 201 }, (_, i) => ({
+			index: i,
+			text: "",
+			thinking: "",
+			toolCallText: "",
+			emittedAt: "2025-01-01T00:00:00.000Z",
+			updatedAt: "2025-01-01T00:00:00.000Z",
+			textTruncated: false,
+			thinkingTruncated: false,
+			toolCallTruncated: false,
+		}));
+		decodeFail(
+			{ ...makeSnapshot(), nextMessageIndex: 201, messageCount: 201, records: recs },
+			"INVALID_RECORD_COUNT",
+		);
+	});
+	it("rejects records not ending at nextMessageIndex-1 (retained suffix)", () => {
+		// Records end at index 1 (lastRecordIndex=1), nextMessageIndex=5 => last should be 4
+		const recs = makeSnapshot().records.slice(); // indices 0,1 with nextMessageIndex=5
+		decodeFail({ ...makeSnapshot(), nextMessageIndex: 5, records: recs }, "INVALID_RECORD_INDEX");
+	});
+
+	// ---- Recap ----
+	it("rejects recap count > 100", () => {
+		const recap = Array.from({ length: 101 }, (_, i) => ({
+			eventSequence: i + 1,
+			type: "session_created" as const,
+		}));
+		decodeFail(
+			{ ...makeSnapshot(), cursor: 101, records: [], nextMessageIndex: 0, messageCount: 0, recap },
+			"INVALID_RECAP_COUNT",
+		);
+	});
+	it("rejects recap not strictly increasing", () => {
+		const recap = [
+			{ eventSequence: 2, type: "session_created" as const },
+			{ eventSequence: 1, type: "session_created" as const },
+		];
+		decodeFail(
+			{ ...makeSnapshot(), cursor: 2, records: [], nextMessageIndex: 0, messageCount: 0, recap },
+			"INVALID_RECAP_SEQUENCE",
+		);
+	});
+	it("rejects recap eventSequence duplicate", () => {
+		const recap = [
+			{ eventSequence: 1, type: "session_created" as const },
+			{ eventSequence: 1, type: "session_created" as const },
+		];
+		decodeFail(
+			{ ...makeSnapshot(), cursor: 1, records: [], nextMessageIndex: 0, messageCount: 0, recap },
+			"INVALID_RECAP_SEQUENCE",
+		);
+	});
+	it("rejects recap eventSequence > cursor", () => {
+		const recap = [{ eventSequence: 11, type: "session_created" as const }];
+		decodeFail(
+			{ ...makeSnapshot(), cursor: 10, records: [], nextMessageIndex: 0, messageCount: 0, recap },
+			"INVALID_RECAP_SEQUENCE",
+		);
+	});
+	it("rejects unknown recap type", () => {
+		const recap = [{ eventSequence: 1, type: "unknown_type" }];
+		decodeFail(
+			{ ...makeSnapshot(), cursor: 1, records: [], nextMessageIndex: 0, messageCount: 0, recap },
+			"INVALID_RECAP_TYPE",
+		);
+	});
+	it("rejects recap messageIndex >= nextMessageIndex", () => {
+		const recap = [{ eventSequence: 1, type: "agent_text_delta", messageIndex: 5 }];
+		decodeFail({ ...makeSnapshot(), cursor: 1, nextMessageIndex: 5, records: [], recap }, "INVALID_NUMBER");
+	});
+
+	// ---- Last failure ----
+	it("rejects lastFailure with extra key", () => {
+		decodeFail({ ...makeSnapshot(), lastFailure: { type: "none", extra: "x" } }, "INVALID_LAST_FAILURE");
+	});
+	it("rejects lastFailure missing type", () => {
+		decodeFail({ ...makeSnapshot(), lastFailure: {} }, "INVALID_LAST_FAILURE");
+	});
+	it("accepts lastFailure error with code", () => {
+		decodeOk({ ...makeSnapshot(), lastFailure: { type: "error", code: "INTERNAL_ERROR" } });
+	});
+	it("rejects lastFailure error without code", () => {
+		decodeFail({ ...makeSnapshot(), lastFailure: { type: "error" } }, "INVALID_LAST_FAILURE");
+	});
+	it("rejects lastFailure error with empty code", () => {
+		decodeFail({ ...makeSnapshot(), lastFailure: { type: "error", code: "" } }, "INVALID_LAST_FAILURE");
+	});
+	it("accepts all four lastFailure variants", () => {
+		decodeOk({ ...makeSnapshot(), lastFailure: { type: "none" } });
+		decodeOk({ ...makeSnapshot(), lastFailure: { type: "error", code: "BASH_FAILED" } });
+		decodeOk({ ...makeSnapshot(), lastFailure: { type: "compact_failed" } });
+		decodeOk({ ...makeSnapshot(), lastFailure: { type: "checkpoint_failed" } });
+	});
+
+	// ---- Bash validation ----
+	it("rejects bash with missing required keys", () => {
+		decodeFail({ ...makeSnapshot(), bash: { command: "ls", output: "", exitCode: 0 } }, "INVALID_BASH_STRUCTURE");
+	});
+	it("rejects bash with extra key", () => {
+		decodeFail(
+			{
+				...makeSnapshot(),
+				bash: { command: "ls", output: "", exitCode: null, cancelled: false, truncated: false, extra: "x" },
+			},
+			"INVALID_BASH_STRUCTURE",
+		);
+	});
+	it("accepts bash null or valid", () => {
+		decodeOk({ ...makeSnapshot(), bash: null });
+		decodeOk({
+			...makeSnapshot(),
+			bash: { command: "ls", output: "", exitCode: null, cancelled: false, truncated: false },
+		});
+	});
+	it("rejects bash running when agentRunning is true", () => {
+		decodeFail(
+			{
+				...makeSnapshot(),
+				agentRunning: true,
+				bash: { command: "ls", output: "", exitCode: null, cancelled: false, truncated: false },
+			},
+			"INVALID_ACTIVITY_STATE",
+		);
+	});
+
+	// ---- Compact/checkpoint state ----
+	it("rejects compacting and checkpointing both true", () => {
+		decodeFail({ ...makeSnapshot(), compacting: true, checkpointing: true }, "INVALID_COMPACT_STATE");
+	});
+
+	// ---- Accessor/rejection tests ----
+	it("rejects input with accessor property", () => {
+		const raw: Record<string, unknown> = { ...makeSnapshot() };
+		Object.defineProperty(raw, "malicious", { get: () => "x", enumerable: true });
+		decodeFail(raw, "NOT_AN_OBJECT");
+	});
+	it("rejects input with symbol key", () => {
+		const raw: Record<string, unknown> = { ...makeSnapshot() };
+		Object.defineProperty(raw, Symbol("hidden"), { value: "x", enumerable: true });
+		decodeFail(raw, "NOT_AN_OBJECT");
+	});
+	it("rejects input with non-plain prototype", () => {
+		const raw: Record<string, unknown> = { ...makeSnapshot() };
+		Object.setPrototypeOf(raw, { malicious: true });
+		decodeFail(raw, "NOT_AN_OBJECT");
+	});
+	it("rejects nonenumerable property on input", () => {
+		const raw: Record<string, unknown> = { ...makeSnapshot() };
+		Object.defineProperty(raw, "hidden", { value: "x", enumerable: false });
+		decodeFail(raw, "NOT_AN_OBJECT");
+	});
+
+	// ---- String overflow ----
+	it("rejects record text over 100k chars", () => {
+		const recs = [makeSnapshot().records[0]];
+		recs[0] = { ...recs[0], text: "x".repeat(100_001) };
+		decodeFail({ ...makeSnapshot(), nextMessageIndex: 1, records: recs }, "STRING_OVERFLOW");
+	});
+	it("rejects bash output over 500k chars", () => {
+		decodeFail(
+			{
+				...makeSnapshot(),
+				bash: { command: "ls", output: "x".repeat(500_001), exitCode: 0, cancelled: false, truncated: false },
+			},
+			"STRING_OVERFLOW",
+		);
+	});
+	it("rejects bash command over 10k chars", () => {
+		decodeFail(
+			{
+				...makeSnapshot(),
+				bash: { command: "x".repeat(10_001), output: "", exitCode: null, cancelled: false, truncated: false },
+			},
+			"INVALID_STRING",
+		);
+	});
+
+	// ---- Cross-field safe integer ----
+	it("rejects non-safe-integer cursor", () => {
+		decodeFail({ ...makeSnapshot(), cursor: Number.MAX_SAFE_INTEGER + 1 }, "INVALID_CURSOR");
+	});
+	it("rejects negative nextMessageIndex", () => {
+		decodeFail({ ...makeSnapshot(), nextMessageIndex: -1 }, "INVALID_NEXT_MESSAGE_INDEX");
+	});
+	it("rejects messageCount < nextMessageIndex", () => {
+		decodeFail({ ...makeSnapshot(), messageCount: 3, nextMessageIndex: 5 }, "INVALID_MESSAGE_COUNT");
+	});
+
+	// ---- Nonzero next index with empty retained window ----
+	it("accepts nonzero nextMessageIndex with empty records (retained window evicted)", () => {
+		const r = decodeOk({ ...makeSnapshot(), nextMessageIndex: 10, records: [], messageCount: 10 });
+		expect(r.nextMessageIndex).toBe(10);
+		expect(r.records.length).toBe(0);
+	});
+
+	// ---- Budget: node overflow ----
+	it("accepts exactly 200 record snapshot (306 containers, within budget)", () => {
+		const records = Array.from({ length: 200 }, (_, i) => ({
+			index: i,
+			text: "x",
+			thinking: "",
+			toolCallText: "",
+			emittedAt: "2025-01-01T00:00:00.000Z",
+			updatedAt: "2025-01-01T00:00:00.000Z",
+			textTruncated: false,
+			thinkingTruncated: false,
+			toolCallTruncated: false,
+		}));
+		const recap = Array.from({ length: 100 }, (_, i) => ({
+			eventSequence: i + 1,
+			type: "session_created" as const,
+		}));
+		const r = decodeRemoteObservationSnapshotV1(
+			{ ...makeSnapshot(), nextMessageIndex: 200, messageCount: 200, records, cursor: 100, recap },
+			IDENTITY,
+		);
+		expect(r.success).toBe(true);
+	});
+
+	it("rejects 2001+ container objects (breadth overflow)", () => {
+		const records = Array.from({ length: 2001 }, () => ({}));
+		decodeFail({ ...makeSnapshot(), records, nextMessageIndex: 0, messageCount: 0, recap: [] }, "OVERFLOW_NODES");
+	});
+
+	it("rejects deeply nested object (depth overflow)", () => {
+		// Nest text field 9 levels deep (top=0, records=1, record=2, text=3, a=4...i=12 > MAX_DEPTH=8)
+		const deep = { a: { b: { c: { d: { e: { f: { g: { h: { i: 1 } } } } } } } } };
+		decodeFail(
+			{
+				...makeSnapshot(),
+				records: [
+					{
+						index: 0,
+						text: deep as any,
+						thinking: "",
+						toolCallText: "",
+						emittedAt: "2025-01-01T00:00:00.000Z",
+						updatedAt: "2025-01-01T00:00:00.000Z",
+						textTruncated: false,
+						thinkingTruncated: false,
+						toolCallTruncated: false,
+					},
+				],
+				nextMessageIndex: 1,
+				messageCount: 1,
+				recap: [],
+			},
+			"OVERFLOW_DEPTH",
+		);
+	});
+
+	it("rejects cyclic reference (CORRUPT_SNAPSHOT)", () => {
+		const raw: Record<string, unknown> = {
+			...makeSnapshot(),
+			records: [],
+			nextMessageIndex: 0,
+			messageCount: 0,
+			recap: [],
+		};
+		raw.cycle = raw;
+		decodeFail(raw, "CORRUPT_SNAPSHOT");
+	});
+
+	it("rejects byte overflow (200 records x 100KB text = 20MB > 1 MiB)", () => {
+		const records = Array.from({ length: 200 }, (_, i) => ({
+			index: i,
+			text: "x".repeat(100_000),
+			thinking: "",
+			toolCallText: "",
+			emittedAt: "2025-01-01T00:00:00.000Z",
+			updatedAt: "2025-01-01T00:00:00.000Z",
+			textTruncated: false,
+			thinkingTruncated: false,
+			toolCallTruncated: false,
+		}));
+		const recap = Array.from({ length: 100 }, (_, i) => ({
+			eventSequence: i + 1,
+			type: "session_created" as const,
+		}));
+		decodeFail(
+			{ ...makeSnapshot(), nextMessageIndex: 200, messageCount: 200, records, cursor: 100, recap },
+			"OVERFLOW_BYTES",
+		);
+	});
+
+	// ---- Session state validation ----
+	it("rejects invalid sessionState", () => {
+		decodeFail({ ...makeSnapshot(), sessionState: "invalid" }, "INVALID_SESSION_STATE");
+	});
+	it("accepts null sessionState", () => {
+		decodeOk({ ...makeSnapshot(), sessionState: null });
+	});
+});
+
+describe("B11-b: RemoteObservationMirror.fromSnapshot restore", () => {
+	it("fromSnapshot roundtrips through captureSnapshot", () => {
+		const m = mirror();
+		ingestAccepted(m, 1, "session_created");
+		ingestAccepted(m, 2, "agent_start");
+		ingestAccepted(m, 3, "agent_text_delta", { index: 0, text: "hello" });
+		ingestAccepted(m, 4, "agent_end", { messages: 1 });
+		ingestAccepted(m, 5, "bash_start", { command: "ls" });
+		ingestAccepted(m, 6, "bash_delta", { text: "file1\nfile2\n" });
+		ingestAccepted(m, 7, "bash_end", { exitCode: 0, cancelled: false, truncated: false });
+
+		const snap = m.captureSnapshot();
+		const json = JSON.stringify(snap);
+		const parsed = JSON.parse(json);
+
+		const restored = RemoteObservationMirror.fromSnapshot(parsed, IDENTITY);
+		expect(restored.success).toBe(true);
+		if (!restored.success) return;
+		const m2 = restored.mirror;
+
+		// Verify identity
+		expect(m2.identity).toEqual({ hostId: "host-1", generation: "gen-1", sessionId: "sess-1" });
+		// Verify cursor
+		expect(m2.currentCursor).toBe(7);
+		// Verify record
+		expect(m2.getRecord(0)?.text).toBe("hello");
+		expect(m2.currentNextMessageIndex).toBe(1);
+		// Verify bash
+		expect(m2.currentBash?.command).toBe("ls");
+		expect(m2.currentBash?.exitCode).toBe(0);
+		expect(m2.currentBash?.output).toBe("file1\nfile2\n");
+		// Verify activity
+		expect(m2.agentRunningVal).toBe(false);
+		expect(m2.msgCountVal).toBe(1);
+		expect(m2.compactingVal).toBe(false);
+		expect(m2.checkpointingVal).toBe(false);
+		// Verify recap
+		expect(m2.recapEntries.length).toBe(7);
+		// Verify no gap
+		expect(m2.hasGapFlag).toBe(false);
+		expect(m2.needsReplayFlag).toBe(false);
+		// Verify last failure
+		expect(m2.lastFailureValue).toEqual({ type: "none" });
+	});
+
+	it("fromSnapshot restores gap flags", () => {
+		const snap = { ...makeSnapshot(), hasGap: true, needsReplay: true };
+		const parsed = JSON.parse(JSON.stringify(snap));
+		const restored = RemoteObservationMirror.fromSnapshot(parsed, IDENTITY);
+		expect(restored.success).toBe(true);
+		if (!restored.success) return;
+		expect(restored.mirror.hasGapFlag).toBe(true);
+		expect(restored.mirror.needsReplayFlag).toBe(true);
+	});
+
+	it("fromSnapshot restores lastFailure markers", () => {
+		// error
+		const snap1 = { ...makeSnapshot(), lastFailure: { type: "error", code: "BASH_FAILED" } };
+		const r1 = RemoteObservationMirror.fromSnapshot(JSON.parse(JSON.stringify(snap1)), IDENTITY);
+		expect(r1.success).toBe(true);
+		if (!r1.success) return;
+		expect(r1.mirror.lastFailureValue).toEqual({ type: "error", code: "BASH_FAILED" });
+
+		// compact_failed
+		const snap2 = { ...makeSnapshot(), lastFailure: { type: "compact_failed" } };
+		const r2 = RemoteObservationMirror.fromSnapshot(JSON.parse(JSON.stringify(snap2)), IDENTITY);
+		expect(r2.success).toBe(true);
+		if (!r2.success) return;
+		expect(r2.mirror.lastFailureValue).toEqual({ type: "compact_failed" });
+	});
+
+	it("fromSnapshot rejects identity mismatch", () => {
+		const snap = { ...makeSnapshot(), hostId: "wrong" };
+		const r = RemoteObservationMirror.fromSnapshot(snap, IDENTITY);
+		expect(r.success).toBe(false);
+		if (r.success) return;
+		expect(r.code).toBe("IDENTITY_MISMATCH");
+	});
+
+	it("fromSnapshot rejects corrupt input", () => {
+		const r = RemoteObservationMirror.fromSnapshot(null, IDENTITY);
+		expect(r.success).toBe(false);
+		if (r.success) return;
+		expect(r.code).toBe("NOT_AN_OBJECT");
+	});
+
+	it("fromSnapshot restores truncated records", () => {
+		const m = mirror();
+		ingestAccepted(m, 1, "session_created");
+		ingestAccepted(m, 2, "agent_start");
+		// Fill beyond max with per-frame bounded deltas
+		for (let i = 0; i < 2; i++) {
+			ingestAccepted(m, 3 + i, "agent_text_delta", { index: 0, text: "x".repeat(50_000) });
+		}
+		// Total = 100,000 (exactly MAX_TEXT), one more delta triggers overflow
+		ingestAccepted(m, 5, "agent_text_delta", { index: 0, text: "y" });
+		ingestAccepted(m, 6, "agent_end", { messages: 1 });
+		const snap = m.captureSnapshot();
+		expect(snap.records[0].textTruncated).toBe(true);
+		expect(snap.records[0].text.length).toBe(100_000);
+
+		const parsed = JSON.parse(JSON.stringify(snap));
+		const restored = RemoteObservationMirror.fromSnapshot(parsed, IDENTITY);
+		if (!restored.success) {
+			throw new Error(`fromSnapshot failed with: ${restored.code}`);
+		}
+		expect(restored.mirror.getRecord(0)?.textTruncated).toBe(true);
+		expect(restored.mirror.getRecord(0)?.text.length).toBe(100_000);
+	});
+
+	it("fromSnapshot restores empty mirror (no events)", () => {
+		const m = mirror();
+		const snap = m.captureSnapshot(); // cursor 0, no events
+		const json = JSON.stringify(snap);
+		const parsed = JSON.parse(json);
+		const restored = RemoteObservationMirror.fromSnapshot(parsed, IDENTITY);
+		expect(restored.success).toBe(true);
+		if (!restored.success) return;
+		expect(restored.mirror.currentCursor).toBe(0);
+		expect(restored.mirror.currentNextMessageIndex).toBe(0);
+		expect(restored.mirror.transcriptRecordCount).toBe(0);
+		expect(restored.mirror.recapEntries.length).toBe(0);
+	});
+
+	it("fromSnapshot does not alias input arrays", () => {
+		const m = mirror();
+		ingestAccepted(m, 1, "session_created");
+		ingestAccepted(m, 2, "agent_start");
+		ingestAccepted(m, 3, "agent_text_delta", { index: 0, text: "hi" });
+		ingestAccepted(m, 4, "agent_end", { messages: 1 });
+		const snap = m.captureSnapshot();
+		const json = JSON.parse(JSON.stringify(snap));
+		const restored = RemoteObservationMirror.fromSnapshot(json, IDENTITY);
+		if (!restored.success) {
+			throw new Error(`fromSnapshot failed with: ${restored.code}`);
+		}
+		// Mutating the input should not affect the restored mirror
+		json.records[0].text = "mutated";
+		expect(restored.mirror.getRecord(0)?.text).toBe("hi");
+	});
+});
+
+describe("B11-b: sessionState and bash null roundtrip", () => {
+	it("captures and restores sessionState null", () => {
+		const m = mirror();
+		ingestAccepted(m, 1, "session_created");
+		const snap = m.captureSnapshot();
+		expect(snap.sessionState).toBeNull();
+		const json = JSON.parse(JSON.stringify(snap));
+		const decoded = decodeOk(json);
+		expect(decoded.sessionState).toBeNull();
+	});
+	it("captures and restores bash null", () => {
+		const m = mirror();
+		ingestAccepted(m, 1, "session_created");
+		const snap = m.captureSnapshot();
+		expect(snap.bash).toBeNull();
+		const json = JSON.parse(JSON.stringify(snap));
+		const decoded = decodeOk(json);
+		expect(decoded.bash).toBeNull();
+	});
+});

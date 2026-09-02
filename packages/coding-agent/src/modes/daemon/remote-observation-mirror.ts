@@ -3,6 +3,11 @@
  * No snapshot/restore, name, usage, pending, connection health, or observer DTO.
  */
 import type { RemoteHostEventSequence, RemoteHostSessionState } from "./remote-agent-host-protocol.js";
+import {
+	decodeRemoteObservationSnapshotV1,
+	type RemoteObservationSnapshotV1,
+	type SnapshotRejectionCode,
+} from "./remote-observation-snapshot.js";
 
 const MAX_ID = 128,
 	MAX_SNAP_ID = 128;
@@ -180,41 +185,7 @@ export type LastFailureMarker =
 	| { readonly type: "compact_failed" }
 	| { readonly type: "checkpoint_failed" }
 	| { readonly type: "none" };
-export interface CoreStateDTO {
-	readonly hostId: string;
-	readonly generation: string;
-	readonly sessionId: string;
-	readonly cursor: RemoteHostEventSequence;
-	readonly cursorTimestamp: string;
-	readonly hasGap: boolean;
-	readonly needsReplay: boolean;
-	readonly nextMessageIndex: number;
-	readonly records: ReadonlyArray<{
-		readonly index: number;
-		readonly text: string;
-		readonly thinking: string;
-		readonly toolCallText: string;
-		readonly emittedAt: string;
-		readonly updatedAt: string;
-		readonly textTruncated: boolean;
-		readonly thinkingTruncated: boolean;
-		readonly toolCallTruncated: boolean;
-	}>;
-	readonly messageCount: number;
-	readonly agentRunning: boolean;
-	readonly sessionState: RemoteHostSessionState | null;
-	readonly compacting: boolean;
-	readonly checkpointing: boolean;
-	readonly bash: {
-		readonly command: string;
-		readonly output: string;
-		readonly exitCode: number | null;
-		readonly cancelled: boolean;
-		readonly truncated: boolean;
-	} | null;
-	readonly recap: ReadonlyArray<RecapEntry>;
-	readonly lastFailure: LastFailureMarker;
-}
+export type CoreStateDTO = RemoteObservationSnapshotV1;
 
 type DecodedBody =
 	| { type: "session_created"; sessionId: string; workspaceId: string }
@@ -733,9 +704,11 @@ export class RemoteObservationMirror {
 
 	captureCoreState(): CoreStateDTO {
 		return deepFreeze({
+			version: "1" as const,
 			hostId: this.hostId,
 			generation: this.generation,
 			sessionId: this.sessionId,
+			capturedAt: new Date().toISOString(),
 			cursor: this.cursor,
 			cursorTimestamp: this.cursorTimestamp,
 			hasGap: this.hasGap,
@@ -833,6 +806,96 @@ export class RemoteObservationMirror {
 	}
 	get lastFailureValue(): LastFailureMarker {
 		return Object.freeze({ ...this.lastFailure });
+	}
+	// -----------------------------------------------------------------------
+	// captureSnapshot — alias for captureCoreState (RemoteObservationSnapshotV1)
+	// -----------------------------------------------------------------------
+	captureSnapshot(): RemoteObservationSnapshotV1 {
+		return this.captureCoreState();
+	}
+
+	// -----------------------------------------------------------------------
+	// fromSnapshot — decode + construct from a snapshot value (atomic)
+	// -----------------------------------------------------------------------
+	/**
+	 * Decode and validate a snapshot, then construct a new mirror with exact
+	 * restored state. Fully decodes/preflights before constructing/mutating.
+	 * Requires exact caller-bound identity. No partial restore/default repair.
+	 * Returns { success: true, mirror } on success, or { success: false, code }
+	 * on validation failure.
+	 */
+	static fromSnapshot(
+		snapshot: unknown,
+		expectedIdentity: { hostId: string; generation: string; sessionId: string },
+	): { success: true; mirror: RemoteObservationMirror } | { success: false; code: SnapshotRejectionCode } {
+		const decoded = decodeRemoteObservationSnapshotV1(snapshot, expectedIdentity);
+		if (!decoded.success) return { success: false, code: decoded.code };
+
+		const s = decoded.value;
+
+		// Construct mirror with identity and initial next message index
+		const m = new RemoteObservationMirror({
+			hostId: s.hostId,
+			generation: s.generation,
+			sessionId: s.sessionId,
+			initialNextIndex: s.nextMessageIndex,
+		});
+
+		// Restore cursor/cursorTimestamp
+		m.cursor = s.cursor;
+		m.cursorTimestamp = s.cursorTimestamp;
+
+		// Restore gap flags
+		m.hasGap = s.hasGap;
+		m.needsReplay = s.needsReplay;
+
+		// Restore records
+		for (const rec of s.records) {
+			m.records.set(rec.index, {
+				index: rec.index,
+				text: rec.text,
+				thinking: rec.thinking,
+				toolCallText: rec.toolCallText,
+				emittedAt: rec.emittedAt,
+				updatedAt: rec.updatedAt,
+				textTruncated: rec.textTruncated,
+				thinkingTruncated: rec.thinkingTruncated,
+				toolCallTruncated: rec.toolCallTruncated,
+			});
+			m.recOrder.push(rec.index);
+		}
+
+		// Restore activity/state
+		m.msgCount = s.messageCount;
+		m.agentRunning = s.agentRunning;
+		m.sessionState = s.sessionState;
+		m.compacting = s.compacting;
+		m.checkpointing = s.checkpointing;
+
+		// Restore bash
+		m.bash = s.bash
+			? {
+					command: s.bash.command,
+					output: s.bash.output,
+					exitCode: s.bash.exitCode,
+					cancelled: s.bash.cancelled,
+					truncated: s.bash.truncated,
+				}
+			: null;
+
+		// Restore recap
+		for (const e of s.recap) {
+			m.recap.push({
+				eventSequence: e.eventSequence,
+				type: e.type,
+				...(e.messageIndex !== undefined ? { messageIndex: e.messageIndex } : {}),
+			});
+		}
+
+		// Restore lastFailure
+		m.lastFailure = s.lastFailure;
+
+		return { success: true, mirror: m };
 	}
 }
 
