@@ -31,6 +31,22 @@ export {
 export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.js";
 export type { CompactionResult } from "./compaction/index.js";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.js";
+export {
+	type ExecutionLocation,
+	ExecutionLocationError,
+	isValidISODateString,
+	normalizeExecutionLocation,
+	normalizeRemoteModelDescriptor,
+	normalizeRemoteSessionDescriptor,
+	normalizeSandboxConnectionHealth,
+	type RemoteModelDescriptor,
+	type RemoteSessionDescriptor,
+	type SandboxConnectionHealth,
+	validateExecutionLocation,
+	validateRemoteModelDescriptor,
+	validateRemoteSessionDescriptor,
+	validateSandboxConnectionHealth,
+} from "./execution-location.js";
 // Extensions system
 export {
 	type AgentEndEvent,
