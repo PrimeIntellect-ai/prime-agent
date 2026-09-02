@@ -24,15 +24,15 @@ export type ConsumeResult<T> = Readonly<{ ok: true; value: T }> | Readonly<{ ok:
 
 export interface ReadOptions {
 	/** Total wall-clock timeout in ms (default 30 000, bounded 1..120000). */
-	totalTimeoutMs?: number;
+	readonly totalTimeoutMs?: number;
 	/** Bounded close-callback confirmation timeout in ms (default 2 000, bounded 1..10000). */
-	closeConfirmTimeoutMs?: number;
+	readonly closeConfirmTimeoutMs?: number;
 	/**
 	 * Internal/test-only: inject a custom FsFdAdapter.
 	 * Enables synthetic delay, never-callback reads/closes, and
 	 * deterministic error injection without inspecting raw Error objects.
 	 */
-	_adapter?: FsFdAdapter;
+	readonly _adapter?: FsFdAdapter;
 }
 
 /**
@@ -295,6 +295,11 @@ export function readSandboxBootstrapFrame(fd: number, options?: ReadOptions): Pr
 			settled = true;
 			clearTimers();
 			eraseCleanBuffers();
+			// Erase freshPayload for every non-ok result; preserve only for ok success.
+			if (!result.ok) {
+				erase(freshPayload);
+				freshPayload = null;
+			}
 			resolve(Object.freeze(result));
 		}
 

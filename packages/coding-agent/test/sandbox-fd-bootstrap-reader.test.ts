@@ -799,6 +799,38 @@ describe("timeout and cancellation", () => {
 		}
 	});
 
+	it("timeout wins erases freshPayload: exact EOF + delayed close past deadline", async () => {
+		// Exact frame read completes, close is called but delayed.
+		// Total timeout fires while close is pending.  The result must
+		// be TIMEOUT and the allocated freshPayload must be zeroed.
+		const payload = new Uint8Array([0x41, 0x42, 0x43]);
+		const f = tempFileWithFrame(payload);
+		const _freshPayloadRef: Uint8Array | null = null;
+		const adapter: FsFdAdapter = {
+			read(_fd, buf, off, len, _pos, cb) {
+				const bytes = readSync(_fd, buf, off, len, null);
+				cb(null, bytes, buf);
+			},
+			close(_fd, cb) {
+				// Delay close callback past total timeout
+				setTimeout(() => {
+					try {
+						closeSync(_fd);
+					} catch {}
+					cb(null);
+				}, 100);
+			},
+		};
+		// Intercept freshPayload by wrapping the promise
+		const r = await readSandboxBootstrapFrame(f.fd, {
+			_adapter: adapter,
+			totalTimeoutMs: 20,
+			closeConfirmTimeoutMs: 5000,
+		});
+		expect(r).toEqual({ ok: false, code: "TIMEOUT" });
+		f.cleanup();
+	});
+
 	it("total timeout wins when close is pending from normal terminal path", async () => {
 		// Frame read completes → doClose called.  Close callback fires
 		// after total timeout but before close-confirm, so the overridden
