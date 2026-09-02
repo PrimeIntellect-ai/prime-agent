@@ -13,6 +13,7 @@ import { shouldActivateAvoSupervisor } from "./supervisor.js";
 import type {
 	AvoAssumptionResolutionInput,
 	AvoCandidateInput,
+	AvoCommittedSolution,
 	AvoCriticalAssumptionInput,
 	AvoDashboardProjection,
 	AvoDeliveryState,
@@ -20,6 +21,8 @@ import type {
 	AvoEvaluationInput,
 	AvoExperimentInput,
 	AvoHorizonSelection,
+	AvoKnowledgeEntry,
+	AvoLineage,
 	AvoMemory,
 	AvoMemoryReflection,
 	AvoObligationCoverageInput,
@@ -38,6 +41,8 @@ export class AvoSessionRuntime {
 	readonly memoryBridge?: AvoNooaMemoryBridge;
 	private readonly workspaceCwd: string;
 	private readonly workspaceExcludedRoots: string[];
+	private _currentLineage?: AvoLineage;
+	private _currentKnowledge?: AvoKnowledgeEntry[];
 
 	constructor(
 		artifactDir?: string,
@@ -598,10 +603,103 @@ export class AvoSessionRuntime {
 		return statePath ? join(dirname(dirname(statePath)), "autoresearch", "state.json") : undefined;
 	}
 
+	setLineage<T = unknown>(lineage: AvoLineage<T>): void {
+		this._currentLineage = lineage as unknown as AvoLineage;
+	}
+
+	getLineage<T = unknown>(): AvoLineage<T> | undefined {
+		return this._currentLineage as unknown as AvoLineage<T> | undefined;
+	}
+
+	setKnowledgeBase(knowledge: AvoKnowledgeEntry[]): void {
+		this._currentKnowledge = knowledge;
+	}
+
+	getKnowledgeBase(): AvoKnowledgeEntry[] | undefined {
+		return this._currentKnowledge;
+	}
+
+	listLineage(): Array<{
+		solutionId: string;
+		solutionRef: string;
+		scores: Record<string, number>;
+		passedCorrectness: boolean;
+		timestamp: string;
+	}> {
+		if (this._currentLineage) {
+			return this._currentLineage.entries.map((entry) => ({
+				solutionId: entry.solutionId,
+				solutionRef: entry.solutionRef,
+				scores: { ...entry.scores },
+				passedCorrectness: entry.passedCorrectness,
+				timestamp: entry.timestamp,
+			}));
+		}
+		const state = this.store.getState();
+		return state.candidates.map((c) => ({
+			solutionId: c.candidateId,
+			solutionRef: c.candidateId,
+			scores: {},
+			passedCorrectness: true,
+			timestamp: c.createdAt,
+		}));
+	}
+
+	sampleLineage<T = unknown>(solutionId: string, _reason?: string): AvoCommittedSolution<T> {
+		if (this._currentLineage) {
+			const solution = this._currentLineage.entries.find((e) => e.solutionId === solutionId);
+			if (!solution) {
+				throw new Error(`Lineage solution '${solutionId}' not found in P_t`);
+			}
+			return solution as unknown as AvoCommittedSolution<T>;
+		}
+		const state = this.store.getState();
+		const candidate = state.candidates.find((c) => c.candidateId === solutionId);
+		if (!candidate) {
+			throw new Error(`Lineage solution '${solutionId}' not found in P_t`);
+		}
+		return {
+			solutionId: candidate.candidateId,
+			solutionRef: candidate.candidateId,
+			scores: {},
+			passedCorrectness: true,
+			trajectoryRef: "store",
+			timestamp: candidate.createdAt,
+		};
+	}
+
+	listKnowledge(): Array<{
+		knowledgeId: string;
+		title: string;
+		kind: string;
+	}> {
+		if (this._currentKnowledge) {
+			return this._currentKnowledge.map((entry) => ({
+				knowledgeId: entry.knowledgeId,
+				title: entry.title,
+				kind: entry.kind,
+			}));
+		}
+		return [];
+	}
+
+	sampleKnowledge(knowledgeId: string, _reason?: string): AvoKnowledgeEntry {
+		if (!this._currentKnowledge) {
+			throw new Error(`Knowledge base is empty; knowledge item '${knowledgeId}' not found in K`);
+		}
+		const item = this._currentKnowledge.find((e) => e.knowledgeId === knowledgeId);
+		if (!item) {
+			throw new Error(`Knowledge item '${knowledgeId}' not found in K`);
+		}
+		return item;
+	}
+
 	async runVariationEpisode<T = unknown>(
 		contract: AvoVariationContract<T>,
 		agentFn: (agent: AvoVariationEpisodeController<T>) => Promise<void>,
 	): Promise<AvoVariationResult<T>> {
+		this._currentLineage = contract.lineage as unknown as AvoLineage;
+		this._currentKnowledge = contract.knowledge;
 		return executeAvoVariationEpisode(contract, agentFn);
 	}
 

@@ -438,6 +438,72 @@ describe("Paper-Faithful AVO Core (arXiv:2603.24517)", () => {
 		expect(lineageAudit?.reason).toBe("Inspect initial tiling parameters");
 	});
 
+	it("[Issue #51 Integration] lists and deliberately samples lineage and knowledge via host RPC with trace attribution", async () => {
+		const harness = await createHarness({ enableAvo: true });
+		const v1: AvoCommittedSolution<string> = {
+			solutionId: "v1-sol",
+			solutionRef: "commit-v1",
+			scores: { throughput_tflops: 1450 },
+			passedCorrectness: true,
+			timestamp: new Date().toISOString(),
+		};
+		const lineage = createAvoLineage("lineage-rpc-sample", seedSolution);
+		lineage.entries.push(v1);
+
+		const runtime = (
+			harness.session as unknown as {
+				_avoRuntime: { setLineage: (l: unknown) => void; setKnowledgeBase: (k: unknown) => void };
+			}
+		)._avoRuntime;
+		runtime.setLineage(lineage);
+		runtime.setKnowledgeBase(knowledgeBase);
+
+		// 1. List lineage via host RPC
+		const lineageListResponse = await harness.session.handleAvoHostRequest("avo.lineage.list");
+		const lineageEntries = lineageListResponse.entries as Array<{ solutionId: string }>;
+		expect(lineageEntries.length).toBe(2);
+		expect(lineageEntries.map((e) => e.solutionId)).toEqual(["v0-seed", "v1-sol"]);
+
+		// 2. Deliberately sample an older lineage entry via host RPC
+		const lineageSampleResponse = await harness.session.handleAvoHostRequest("avo.lineage.sample", {
+			solutionId: "v0-seed",
+			reason: "Inspect initial register tiling baseline",
+		});
+		expect(lineageSampleResponse.solution).toMatchObject({ solutionId: "v0-seed" });
+		expect(lineageSampleResponse.trace).toMatchObject({
+			sourceType: "lineage",
+			sourceId: "v0-seed",
+			reason: "Inspect initial register tiling baseline",
+		});
+
+		// 3. List knowledge via host RPC
+		const knowledgeListResponse = await harness.session.handleAvoHostRequest("avo.knowledge.list");
+		const knowledgeEntries = knowledgeListResponse.entries as Array<{ knowledgeId: string }>;
+		expect(knowledgeEntries.length).toBe(2);
+		expect(knowledgeEntries.map((e) => e.knowledgeId)).toEqual(["blackwell-warp-spec", "online-softmax-branchless"]);
+
+		// 4. Deliberately sample knowledge via host RPC
+		const knowledgeSampleResponse = await harness.session.handleAvoHostRequest("avo.knowledge.sample", {
+			knowledgeId: "blackwell-warp-spec",
+			reason: "Review TMA barrier specifications",
+		});
+		expect(knowledgeSampleResponse.knowledge).toMatchObject({ knowledgeId: "blackwell-warp-spec" });
+		expect(knowledgeSampleResponse.trace).toMatchObject({
+			sourceType: "knowledge",
+			sourceId: "blackwell-warp-spec",
+			reason: "Review TMA barrier specifications",
+		});
+
+		// 5. Fail-closed security tests
+		await expect(
+			harness.session.handleAvoHostRequest("avo.lineage.sample", { solutionId: "nonexistent-sol" }),
+		).rejects.toThrow("not found in P_t");
+
+		await expect(
+			harness.session.handleAvoHostRequest("avo.knowledge.sample", { knowledgeId: "nonexistent-doc" }),
+		).rejects.toThrow("not found in K");
+	});
+
 	// -----------------------------------------------------------------------
 	// Issue #52: Make scoring utility immutable but agent-scheduled
 	// -----------------------------------------------------------------------

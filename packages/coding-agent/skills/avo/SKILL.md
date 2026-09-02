@@ -35,6 +35,13 @@ In paper-aligned AVO (arXiv:2603.24517), the agent autonomously directs its vari
 it may sample earlier solutions ($P_t$), consult domain knowledge ($K$), edit candidates, invoke the
 scoring utility ($f$), diagnose failures, repair, and re-evaluate in any sequence appropriate for the task.
 
+### Agent-directed lineage and knowledge sampling
+
+- `await avo.list_lineage()`: Inspect all committed solution-score entries in $P_t$.
+- `await avo.sample_lineage(solution_id, reason="...")`: Deliberately retrieve an earlier solution. The selection reason and exact solution are captured in the trajectory.
+- `await avo.list_knowledge()`: Inspect available architecture references, constraints, and guides in $K$.
+- `await avo.sample_knowledge(knowledge_id, reason="...")`: Deliberately retrieve domain knowledge into working context.
+
 1. Read `verificationClass`, `verificationPolicy`, and the host-derived
    `obligations` from state. Before candidate work, decompose any additional
    multi-part specification into immutable obligations with

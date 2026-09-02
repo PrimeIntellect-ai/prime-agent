@@ -32,6 +32,10 @@ export const AVO_HOST_REQUEST_TYPES = [
 	"avo.stop_gate",
 	"avo.complete",
 	"avo.variation.run",
+	"avo.lineage.list",
+	"avo.lineage.sample",
+	"avo.knowledge.list",
+	"avo.knowledge.sample",
 ] as const;
 
 export const AVO_ENVIRONMENTS = ["general", "coding", "research"] as const;
