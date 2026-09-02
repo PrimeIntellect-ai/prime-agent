@@ -1,0 +1,1 @@
+- Fixed the stable installer failing under npm 12 when resolving verified release dependencies. ([Discussion #1988](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1988))

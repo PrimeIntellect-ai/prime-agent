@@ -1589,6 +1589,27 @@ confirm_kernel_runtime_setup() {
 	fi
 }
 
+prime_agent_npm_requires_remote_policy() {
+	npm_version=$(npm --version 2>/dev/null) || return 1
+	npm_major=${npm_version%%.*}
+	case "$npm_major" in
+		""|*[!0-9]*) return 1 ;;
+	esac
+	[ "$npm_major" -ge 12 ]
+}
+
+prime_agent_npm_install() {
+	tarball_path="$1"
+	shift
+	if prime_agent_npm_requires_remote_policy; then
+		# npm 12 blocks the release package's R2 dependencies by default.
+		# Scope the override to this verified install.
+		env "$@" npm install -g --no-fund --no-audit --loglevel=error --progress=false --allow-remote=all "$tarball_path"
+	else
+		env "$@" npm install -g --no-fund --no-audit --loglevel=error --progress=false "$tarball_path"
+	fi
+}
+
 install_prime_agent_package() {
 	tarball_path="$1"
 	if [ "$prime_agent_bootstrap_kernel_on_install" = 1 ]; then
@@ -1602,7 +1623,7 @@ Finalizing npm install."
 			"Installing Prime Agent" \
 			"Installing Prime Agent" \
 			"$npm_install_details" \
-			env PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1 PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=1 PRIME_AGENT_INSTALL_UV=1 npm install -g --no-fund --no-audit --loglevel=error --progress=false "$tarball_path"
+			prime_agent_npm_install "$tarball_path" PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1 PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=1 PRIME_AGENT_INSTALL_UV=1
 	else
 		npm_install_details="Preparing global install.
 Linking command binaries.
@@ -1613,7 +1634,7 @@ Finalizing npm install."
 			"Installing Prime Agent" \
 			"Installing Prime Agent" \
 			"$npm_install_details" \
-			env PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1 npm install -g --no-fund --no-audit --loglevel=error --progress=false "$tarball_path"
+			prime_agent_npm_install "$tarball_path" PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1
 	fi
 }
 
