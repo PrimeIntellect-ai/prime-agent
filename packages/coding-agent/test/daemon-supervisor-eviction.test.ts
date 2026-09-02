@@ -1038,6 +1038,16 @@ describe("daemon supervisor scheduled-session wake", () => {
 		const cancelled = await supervisor.handleCommand(client, { id: "cancel-1", type: "cron_cancel", jobId: job.id });
 		expect(cancelled).toMatchObject({ success: true, data: { job: { id: job.id, status: "cancelled" } } });
 		expect(store.list().map((candidate) => candidate.status)).toEqual(["cancelled"]);
+
+		// Terminal jobs stay reachable through an inclusive listing, exactly like resident sessions.
+		const relisted = await supervisor.handleCommand(client, { id: "list-2", type: "cron_list" });
+		expect(relisted).toMatchObject({ success: true, data: { jobs: [] } });
+		const inclusive = await supervisor.handleCommand(client, {
+			id: "list-3",
+			type: "cron_list",
+			includeInactive: true,
+		});
+		expect(inclusive).toMatchObject({ success: true, data: { jobs: [{ id: job.id, status: "cancelled" }] } });
 	});
 
 	it("drops a stale ephemeral-cancel intent once a worker covers the tree again", async () => {

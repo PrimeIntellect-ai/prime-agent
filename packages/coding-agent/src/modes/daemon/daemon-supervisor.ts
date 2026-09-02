@@ -918,9 +918,9 @@ export class DaemonSupervisor {
 	}
 
 	/** Durable truth: the ledger family (fork headers stripped) plus each session's scheduled-jobs artifact. */
-	private async collectPassiveScheduledJobs(): Promise<
-		Array<{ rootSessionFile: string; job: AgentCronJob; info: SessionInfo }>
-	> {
+	private async collectPassiveScheduledJobs(
+		includeInactive = false,
+	): Promise<Array<{ rootSessionFile: string; job: AgentCronJob; info: SessionInfo }>> {
 		for (const [rootKey, pending] of [...this.pendingEphemeralCancels]) {
 			try {
 				// A worker covering the tree owns its store again; a stale intent must not kill new schedules.
@@ -970,7 +970,7 @@ export class DaemonSupervisor {
 				continue;
 			}
 			for (const job of jobs) {
-				if (job.status !== "active" && job.status !== "paused") continue;
+				if (!includeInactive && job.status !== "active" && job.status !== "paused") continue;
 				const info = infoBySessionId.get(job.sessionId);
 				if (!info) continue;
 				const rootSessionFile = rootSessionFileFor(info);
@@ -2247,7 +2247,7 @@ export class DaemonSupervisor {
 						jobs.set(job.id, job);
 					}
 				}
-				for (const { job } of await this.collectPassiveScheduledJobs()) {
+				for (const { job } of await this.collectPassiveScheduledJobs(command.includeInactive === true)) {
 					if (!jobs.has(job.id)) jobs.set(job.id, job);
 				}
 				return success(command.id, "cron_list", { jobs: sortCronJobs([...jobs.values()]) });
