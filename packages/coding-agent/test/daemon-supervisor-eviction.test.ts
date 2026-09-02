@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
+import { type AgentCronJob, AgentCronJobStore, SESSION_SCHEDULED_JOBS_FILENAME } from "../src/core/cron-jobs.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
 import { getSessionArtifactPathForFile, type SessionInfo } from "../src/core/session-manager.js";
 import { workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
@@ -744,6 +744,34 @@ describe("daemon supervisor scheduled-session wake", () => {
 		expect(supervisor.createOrReuseWorker).toHaveBeenCalledWith("scheduled-wake", {
 			type: "create",
 			sessionPath: root.sessionFile,
+		});
+	});
+
+	it("skips a corrupt scheduled-jobs artifact but still wakes the other passive sessions", async () => {
+		const supervisor = makeSupervisor();
+		const healthy = makeScheduledSessionFile("healthy-root");
+		const corrupt = makeScheduledSessionFile("corrupt-root");
+		armHeartbeat(healthy.store, "healthy-root", healthy.sessionFile, now - 10 * 60_000);
+		armHeartbeat(corrupt.store, "corrupt-root", corrupt.sessionFile, now - 10 * 60_000);
+		writeFileSync(
+			join(getSessionArtifactPathForFile(corrupt.sessionFile, "corrupt-root"), SESSION_SCHEDULED_JOBS_FILENAME),
+			"{ not json",
+		);
+		supervisor.rlmSpawnLedgerInstance = {
+			family: vi.fn(async () => [
+				makeSavedInfo(healthy.sessionFile, "healthy-root"),
+				makeSavedInfo(corrupt.sessionFile, "corrupt-root"),
+			]),
+			liveEdges: vi.fn(async () => []),
+		};
+		supervisor.createOrReuseWorker = vi.fn(async () => makeWorker("woken", []));
+
+		await supervisor.wakeDueScheduledSessions(now);
+
+		expect(supervisor.createOrReuseWorker).toHaveBeenCalledTimes(1);
+		expect(supervisor.createOrReuseWorker).toHaveBeenCalledWith("scheduled-wake", {
+			type: "create",
+			sessionPath: healthy.sessionFile,
 		});
 	});
 

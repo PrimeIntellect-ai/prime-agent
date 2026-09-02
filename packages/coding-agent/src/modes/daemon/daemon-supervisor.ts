@@ -933,13 +933,15 @@ export class DaemonSupervisor {
 		}
 		const infos = await this.rlmSpawnLedger().family();
 		const infoByPath = new Map(infos.map((info) => [canonicalSessionPath(info.path), info] as const));
-		const store = AgentCronJobStore.forSessionArtifacts();
+		const storeBySessionId = new Map<string, AgentCronJobStore>();
 		const infoBySessionId = new Map<string, SessionInfo>();
 		for (const info of infos) {
 			if (info.state !== undefined && info.state.status !== "active") continue;
 			const artifactDir = getSessionArtifactPathForFile(resolve(info.path), info.id);
 			if (!existsSync(join(artifactDir, SESSION_SCHEDULED_JOBS_FILENAME))) continue;
+			const store = AgentCronJobStore.forSessionArtifacts();
 			store.registerSessionArtifact(info.id, artifactDir);
+			storeBySessionId.set(info.id, store);
 			infoBySessionId.set(info.id, info);
 		}
 		if (infoBySessionId.size === 0) return [];
@@ -955,18 +957,27 @@ export class DaemonSupervisor {
 			return current.path;
 		};
 		const results: Array<{ rootSessionFile: string; job: AgentCronJob; info: SessionInfo }> = [];
-		for (const job of store.list()) {
-			if (job.status !== "active" && job.status !== "paused") continue;
-			const info = infoBySessionId.get(job.sessionId);
-			if (!info) continue;
-			const rootSessionFile = rootSessionFileFor(info);
-			if (this.pendingEphemeralCancels.has(canonicalSessionPath(rootSessionFile))) continue;
+		for (const [artifactSessionId, store] of storeBySessionId) {
+			let jobs: AgentCronJob[];
 			try {
-				if (this.findWorkerBySessionFile(rootSessionFile)) continue;
-			} catch {
+				jobs = store.list();
+			} catch (error) {
+				this.log(`Skipping unreadable scheduled jobs for session ${artifactSessionId}: ${String(error)}`);
 				continue;
 			}
-			results.push({ rootSessionFile, job, info });
+			for (const job of jobs) {
+				if (job.status !== "active" && job.status !== "paused") continue;
+				const info = infoBySessionId.get(job.sessionId);
+				if (!info) continue;
+				const rootSessionFile = rootSessionFileFor(info);
+				if (this.pendingEphemeralCancels.has(canonicalSessionPath(rootSessionFile))) continue;
+				try {
+					if (this.findWorkerBySessionFile(rootSessionFile)) continue;
+				} catch {
+					continue;
+				}
+				results.push({ rootSessionFile, job, info });
+			}
 		}
 		return results;
 	}
