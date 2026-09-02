@@ -219,12 +219,12 @@ describe("createSshProcessMonitor preflight", () => {
 
 	it("rejects missing key", () => {
 		const inp = validInput() as Record<string, unknown>;
-		const { process, expectedNonce, confirmRelayAdmission, ...rest } = inp as any;
+		const { process, expectedNonce, confirmRelayAdmission, ...rest } = inp as unknown as Record<string, unknown>;
 		assertFail(makeMonitor({ ...rest, process, expectedNonce }));
 	});
 
 	it("rejects extra key", () => {
-		const inp = { ...(validInput() as any), extra: 1 };
+		const inp = { ...validInput(), extra: 1 } as Record<string, unknown>;
 		assertFail(makeMonitor(inp));
 	});
 
@@ -257,7 +257,7 @@ describe("createSshProcessMonitor preflight", () => {
 	});
 
 	it("rejects accessor property", () => {
-		const inp: any = {};
+		const inp: Record<string, unknown> = {};
 		const _process = validProcess();
 		const _nonce = nonce();
 		const _admission = validAdmission();
@@ -280,17 +280,17 @@ describe("createSshProcessMonitor preflight", () => {
 	});
 
 	it("rejects process with missing key", () => {
-		const proc = validProcess() as any;
+		const proc = validProcess() as Record<string, unknown>;
 		const { subscribe, ...rest } = proc;
 		assertFail(makeMonitor(validInput({ process: rest })));
 	});
 
 	it("rejects process with extra key", () => {
-		assertFail(makeMonitor(validInput({ process: { ...(validProcess() as any), extra: 1 } })));
+		assertFail(makeMonitor(validInput({ process: { ...(validProcess() as Record<string, unknown>), extra: 1 } })));
 	});
 
 	it("rejects process with non-function subscribe", () => {
-		assertFail(makeMonitor(validInput({ process: validProcess({ subscribe: 42 as any }) })));
+		assertFail(makeMonitor(validInput({ process: validProcess({ subscribe: (42 as unknown) as (listener: SshProcessEventListener) => object }) })));
 	});
 
 	it("rejects process with Proxy subscribe", () => {
@@ -300,15 +300,15 @@ describe("createSshProcessMonitor preflight", () => {
 	});
 
 	it("rejects process with non-function signalGroup", () => {
-		assertFail(makeMonitor(validInput({ process: validProcess({ signalGroup: 42 as any }) })));
+		assertFail(makeMonitor(validInput({ process: validProcess({ signalGroup: (42 as unknown) as (signal: "SIGINT" | "SIGTERM" | "SIGKILL") => object }) })));
 	});
 
 	it("rejects process with non-function destroyStdio", () => {
-		assertFail(makeMonitor(validInput({ process: validProcess({ destroyStdio: 42 as any }) })));
+		assertFail(makeMonitor(validInput({ process: validProcess({ destroyStdio: (42 as unknown) as () => object }) })));
 	});
 
 	it("rejects non-string expectedNonce", () => {
-		assertFail(makeMonitor(validInput({ expectedNonce: 42 as any })));
+		assertFail(makeMonitor(validInput({ expectedNonce: (42 as unknown) as string })));
 	});
 
 	it("rejects short nonce", () => {
@@ -324,7 +324,7 @@ describe("createSshProcessMonitor preflight", () => {
 	});
 
 	it("rejects non-function confirmRelayAdmission", () => {
-		assertFail(makeMonitor(validInput({ confirmRelayAdmission: "bad" as any })));
+		assertFail(makeMonitor(validInput({ confirmRelayAdmission: ("bad" as unknown) as () => unknown })));
 	});
 
 	it("rejects Proxy confirmRelayAdmission", () => {
@@ -337,13 +337,13 @@ describe("createSshProcessMonitor preflight", () => {
 	});
 
 	it("rejects timeout with missing key", () => {
-		const t = validTimeouts() as any;
+		const t = validTimeouts() as Record<string, unknown>;
 		const { readyTimeoutMs, ...rest } = t;
 		assertFail(makeMonitor(validInput({ timeouts: rest })));
 	});
 
 	it("rejects timeout with extra key", () => {
-		assertFail(makeMonitor(validInput({ timeouts: { ...(validTimeouts() as any), extra: 1 } })));
+		assertFail(makeMonitor(validInput({ timeouts: { ...(validTimeouts() as Record<string, unknown>), extra: 1 } })));
 	});
 
 	it("rejects non-number readyTimeoutMs", () => {
@@ -367,31 +367,31 @@ describe("createSshProcessMonitor preflight", () => {
 	});
 
 	it("rejects missing admissionTimeoutMs", () => {
-		const t = validTimeouts() as any;
+		const t = validTimeouts() as Record<string, unknown>;
 		const { admissionTimeoutMs, ...rest } = t;
 		assertFail(makeMonitor(validInput({ timeouts: rest })));
 	});
 
 	it("rejects missing sigintTimeoutMs", () => {
-		const t = validTimeouts() as any;
+		const t = validTimeouts() as Record<string, unknown>;
 		const { sigintTimeoutMs, ...rest } = t;
 		assertFail(makeMonitor(validInput({ timeouts: rest })));
 	});
 
 	it("rejects missing sigtermTimeoutMs", () => {
-		const t = validTimeouts() as any;
+		const t = validTimeouts() as Record<string, unknown>;
 		const { sigtermTimeoutMs, ...rest } = t;
 		assertFail(makeMonitor(validInput({ timeouts: rest })));
 	});
 
 	it("rejects missing sigkillTimeoutMs", () => {
-		const t = validTimeouts() as any;
+		const t = validTimeouts() as Record<string, unknown>;
 		const { sigkillTimeoutMs, ...rest } = t;
 		assertFail(makeMonitor(validInput({ timeouts: rest })));
 	});
 
 	it("rejects missing closeConfirmTimeoutMs", () => {
-		const t = validTimeouts() as any;
+		const t = validTimeouts() as Record<string, unknown>;
 		const { closeConfirmTimeoutMs, ...rest } = t;
 		assertFail(makeMonitor(validInput({ timeouts: rest })));
 	});
@@ -479,6 +479,250 @@ describe("subscribe outcomes", () => {
 		});
 	});
 });
+
+// ── Synchronous terminal events before subscribe failure ─────────────────
+
+describe("synchronous exit+close before subscribe failure", () => {
+	it("sync exit+close then subscribe throws — zero signals sent", async () => {
+		const n = nonce();
+		const signals: string[] = [];
+		const proc = validProcess({
+			subscribe: (listener: SshProcessEventListener): never => {
+				listener.onExit(Object.freeze({ code: 0, signal: null }));
+				listener.onClose();
+				throw new Error("subscribe failed");
+			},
+			signalGroup: (sig: "SIGINT" | "SIGTERM" | "SIGKILL"): object => {
+				signals.push(sig);
+				return Object.freeze({ status: "sent" });
+			},
+		});
+		const result = makeMonitor(validInput({
+			process: proc,
+			expectedNonce: n,
+			timeouts: { ...validTimeouts(), closeConfirmTimeoutMs: 10 },
+		}));
+		assertOk(result);
+		if (!result.ok) return;
+		const m = result.monitor;
+
+		const r = await m.ready;
+		expect(r.ok).toBe(false);
+		// exitObserved + closeObserved means beginCleanup waits for close confirm.
+		// Since no close timer scenario, it should resolve.
+		// Zero signals because terminal events were observed.
+		expect(signals.length).toBe(0);
+	});
+
+	it("sync exit+close then subscribe returns invalid object — zero signals sent", async () => {
+		const n = nonce();
+		const signals: string[] = [];
+		const proc = validProcess({
+			subscribe: (listener: SshProcessEventListener): object => {
+				listener.onExit(Object.freeze({ code: 0, signal: null }));
+				listener.onClose();
+				return Object.freeze({});
+			},
+			signalGroup: (sig: "SIGINT" | "SIGTERM" | "SIGKILL"): object => {
+				signals.push(sig);
+				return Object.freeze({ status: "sent" });
+			},
+		});
+		const result = makeMonitor(validInput({
+			process: proc,
+			expectedNonce: n,
+			timeouts: { ...validTimeouts(), closeConfirmTimeoutMs: 10 },
+		}));
+		assertOk(result);
+		if (!result.ok) return;
+		const m = result.monitor;
+
+		const r = await m.ready;
+		expect(r.ok).toBe(false);
+		// Zero signals because terminal events were observed before backout.
+		expect(signals.length).toBe(0);
+	});
+
+	it("sync exit+close then subscribe returns error status — zero signals sent", async () => {
+		const n = nonce();
+		const signals: string[] = [];
+		const proc = validProcess({
+			subscribe: (listener: SshProcessEventListener): object => {
+				listener.onExit(Object.freeze({ code: 0, signal: null }));
+				listener.onClose();
+				return Object.freeze({ status: "error" });
+			},
+			signalGroup: (sig: "SIGINT" | "SIGTERM" | "SIGKILL"): object => {
+				signals.push(sig);
+				return Object.freeze({ status: "sent" });
+			},
+		});
+		const result = makeMonitor(validInput({
+			process: proc,
+			expectedNonce: n,
+			timeouts: { ...validTimeouts(), sigintTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
+		}));
+		assertOk(result);
+		if (!result.ok) return;
+		const m = result.monitor;
+
+		const r = await m.ready;
+		expect(r.ok).toBe(false);
+		expect(signals.length).toBe(0);
+	});
+
+	it("sync exit+close then subscribe returns subscribed but no unsubscribe — zero signals", async () => {
+		const n = nonce();
+		const signals: string[] = [];
+		const proc = validProcess({
+			subscribe: (listener: SshProcessEventListener): object => {
+				listener.onExit(Object.freeze({ code: 0, signal: null }));
+				listener.onClose();
+				return Object.freeze({ status: "subscribed" });
+			},
+			signalGroup: (sig: "SIGINT" | "SIGTERM" | "SIGKILL"): object => {
+				signals.push(sig);
+				return Object.freeze({ status: "sent" });
+			},
+		});
+		const result = makeMonitor(validInput({
+			process: proc,
+			expectedNonce: n,
+			timeouts: { ...validTimeouts(), sigintTimeoutMs: 5, closeConfirmTimeoutMs: 5 },
+		}));
+		assertOk(result);
+		if (!result.ok) return;
+		const m = result.monitor;
+
+		const r = await m.ready;
+		expect(r.ok).toBe(false);
+		expect(signals.length).toBe(0);
+	});
+});
+
+// ── Pending admission during close ────────────────────────────────────────
+
+describe("pending admission during close", () => {
+	it("admission pending when close() is called — cleanup cancels admission task", async () => {
+		const n = nonce();
+		let captured: SshProcessEventListener | null = null;
+		let admissionResolve!: (v: object) => void;
+		const admission = (): Promise<object> => new Promise((r) => { admissionResolve = r; });
+
+		const proc = validProcess({
+			subscribe: (listener: SshProcessEventListener): object => {
+				captured = listener;
+				return subscriptionOk();
+			},
+		});
+		const result = makeMonitor(validInput({
+			process: proc,
+			expectedNonce: n,
+			confirmRelayAdmission: admission,
+			timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 10000 },
+		}));
+		assertOk(result);
+		if (!result.ok) return;
+		const m = result.monitor;
+
+		// Send ready line to start admission.
+		const line = `PRIME_AGENT_READY ${n} 12345\n`;
+		const ab = zeroBuffer(line);
+		captured!.onStdout(new Uint8Array(ab));
+
+		// Close before admission resolves.
+		const closePromise = m.close();
+
+		// Resolve admission late — should be suppressed.
+		admissionResolve(Object.freeze({ status: "admitted" }));
+
+		// Ready should fail, close should settle as cleanup failure.
+		const readyResult = await m.ready;
+		expect(readyResult.ok).toBe(false);
+
+		const closeResult = await closePromise;
+		expect(closeResult.ok).toBe(false);
+	});
+
+	it("admission rejection handler does not fire after cleanup", async () => {
+		const n = nonce();
+		let captured: SshProcessEventListener | null = null;
+		let rejectAdmission!: (reason: unknown) => void;
+		const admission = (): Promise<object> => new Promise<object>((_resolve, reject) => { rejectAdmission = reject; });
+
+		const proc = validProcess({
+			subscribe: (listener: SshProcessEventListener): object => {
+				captured = listener;
+				return subscriptionOk();
+			},
+		});
+		const result = makeMonitor(validInput({
+			process: proc,
+			expectedNonce: n,
+			confirmRelayAdmission: admission,
+			timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 10000 },
+		}));
+		assertOk(result);
+		if (!result.ok) return;
+		const m = result.monitor;
+
+		const line = `PRIME_AGENT_READY ${n} 12345\n`;
+		const ab = zeroBuffer(line);
+		captured!.onStdout(new Uint8Array(ab));
+
+		// Close starts cleanup.
+		m.close();
+
+		// Reject admission late — should not trigger beginCleanup because
+		// admissionTaskActive was cleared by cleanup.
+		setTimeout(() => { rejectAdmission(new Error("late")); }, 0);
+
+		await new Promise((r) => setTimeout(r, 30));
+
+		const readyResult = await m.ready;
+		expect(readyResult.ok).toBe(false);
+	});
+
+	it("close triggers exit+close while admission never settles — closed fails CLEANUP_UNCONFIRMED", async () => {
+		const n = nonce();
+		let captured: SshProcessEventListener | null = null;
+		const admission = (): Promise<object> => new Promise<object>(() => {});
+
+		const proc = validProcess({
+			subscribe: (listener: SshProcessEventListener): object => {
+				captured = listener;
+				return subscriptionOk();
+			},
+		});
+		const result = makeMonitor(validInput({
+			process: proc,
+			expectedNonce: n,
+			confirmRelayAdmission: admission,
+			timeouts: { ...validTimeouts(), readyTimeoutMs: 100, admissionTimeoutMs: 10000 },
+		}));
+		assertOk(result);
+		if (!result.ok) return;
+		const m = result.monitor;
+
+		const line = `PRIME_AGENT_READY ${n} 12345\n`;
+		const ab = zeroBuffer(line);
+		captured!.onStdout(new Uint8Array(ab));
+
+		// Close triggers cleanup. Exit+close fire immediately.
+		setTimeout(() => captured!.onExit(Object.freeze({ code: 0, signal: null })), 0);
+		setTimeout(() => captured!.onClose(), 5);
+
+		const closeResult = await m.close();
+		// Even though exit+close observed, admission was still pending at finalization.
+		expect(closeResult.ok).toBe(false);
+		if (!closeResult.ok) expect(closeResult.code).toBe("CLEANUP_UNCONFIRMED");
+
+		const readyResult = await m.ready;
+		expect(readyResult.ok).toBe(false);
+	});
+
+});
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests: Happy path
@@ -2106,7 +2350,7 @@ describe("race conditions", () => {
 				captured = listener;
 				return subscriptionOk();
 			},
-			signalGroup: (sig: string): object => {
+			signalGroup: (sig: "SIGINT" | "SIGTERM" | "SIGKILL"): object => {
 				signals.push(sig);
 				return Object.freeze({ status: "sent" });
 			},

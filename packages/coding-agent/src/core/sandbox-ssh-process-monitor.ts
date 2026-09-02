@@ -429,7 +429,6 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 	let stdoutBuffer = new Uint8Array(0);
 	let totalStdoutBytes = 0;
 	let primaryFailure: SshMonitorFailureCode | null = null;
-	let cleanupRequestedByCaller = false;
 	let exitObserved = false;
 	let closeObserved = false;
 	let signalUncertain = false;
@@ -444,6 +443,7 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 	let admissionTimer: ReturnType<typeof setTimeout> | null = null;
 	let stageTimer: ReturnType<typeof setTimeout> | null = null;
 	let closeTimer: ReturnType<typeof setTimeout> | null = null;
+	let admissionState: 0 | 1 | 2 | 3 = 0; // 0=inactive, 1=active-pending, 2=settled, 3=cancelled
 
 	// Synchronous events collected before subscribe returns.
 	const synchronousEvents: OwnedEvent[] = [];
@@ -500,6 +500,8 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 		if (cleanupFinalized) return;
 		cleanupFinalized = true;
 		phase = "finalizing";
+		const admissionPending = admissionState === 1;
+		if (admissionState === 1) admissionState = 3;
 		clearOperationTimers();
 		eraseStdout();
 
@@ -527,7 +529,7 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 			}
 		}
 
-		const cleanupConfirmed = processConfirmed && unsubscribeOk && destroyOk && !signalUncertain;
+		const cleanupConfirmed = processConfirmed && !admissionPending && unsubscribeOk && destroyOk && !signalUncertain;
 
 		phase = "done";
 		resolveReadyFailure(cleanupConfirmed);
@@ -602,10 +604,9 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 
 	// ── Begin cleanup sequence ────────────────────────────────────────────
 
-	function beginCleanup(code: SshMonitorFailureCode, requestedByCaller = false): void {
+	function beginCleanup(code: SshMonitorFailureCode): void {
 		if (phase === "done" || phase === "finalizing") return;
 		if (primaryFailure === null) primaryFailure = code;
-		if (requestedByCaller) cleanupRequestedByCaller = true;
 		if (phase === "cleanup") return;
 		phase = "cleanup";
 		clearTimer(readyTimer);
@@ -650,8 +651,11 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 				beginCleanup("ADMISSION_ERROR");
 				return;
 			}
+			admissionState = 1;
 			(admission as Promise<unknown>).then(
 				(result: unknown) => {
+					if (admissionState !== 1) return;
+					admissionState = 2;
 					if (phase !== "admission") return;
 					clearTimer(admissionTimer);
 					admissionTimer = null;
@@ -670,6 +674,8 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 					}
 				},
 				() => {
+					if (admissionState !== 1) return;
+					admissionState = 2;
 					if (phase === "admission") beginCleanup("ADMISSION_ERROR");
 				},
 			);
@@ -869,11 +875,17 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 	try {
 		rawSubscription = input.process.subscribe(listener);
 	} catch {
-		// Subscribe threw — backout: registration not confirmed, drain queue.
+		// Subscribe threw — backout: scan for validated terminal events before drain.
 		phase = "reading";
 		registrationConfirmed = false;
 		for (const event of synchronousEvents) {
-			if (event.type === "stdout") event.bytes.fill(0);
+			if (event.type === "exit") {
+				exitObserved = true;
+			} else if (event.type === "close") {
+				closeObserved = true;
+			} else if (event.type === "stdout") {
+				event.bytes.fill(0);
+			}
 		}
 		synchronousEvents.length = 0;
 		beginCleanup("SUBSCRIBE_REJECTED");
@@ -901,8 +913,15 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 	phase = "reading";
 
 	if (!registrationConfirmed || unsubscribe === null || synchronousOverflow) {
+		// Backout: scan for validated terminal events before drain.
 		for (const event of synchronousEvents) {
-			if (event.type === "stdout") event.bytes.fill(0);
+			if (event.type === "exit") {
+				exitObserved = true;
+			} else if (event.type === "close") {
+				closeObserved = true;
+			} else if (event.type === "stdout") {
+				event.bytes.fill(0);
+			}
 		}
 		synchronousEvents.length = 0;
 		beginCleanup(synchronousOverflow ? "SYNCHRONOUS_OVERFLOW" : "SUBSCRIBE_REJECTED");
@@ -949,9 +968,7 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 	function successMonitor(): CreateSshProcessMonitorResult {
 		const close = (): Promise<SshMonitorCloseResult> => {
 			if (phase !== "cleanup" && phase !== "finalizing" && phase !== "done") {
-				beginCleanup("CLOSED", true);
-			} else {
-				cleanupRequestedByCaller = true;
+				beginCleanup("CLOSED");
 			}
 			return closed;
 		};
