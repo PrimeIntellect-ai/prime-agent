@@ -81,8 +81,8 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 |---|---|---|---|
 | B01 | A01, A03 | done | Add `ExecutionLocation` and opaque remote session DTOs |
 | B02 | A01, A07 | in_progress | Introduce location-neutral `HostedSubagent` and preserve local behavior |
-| B03 | A02, A16 | done | Add capability-gated remote host protocol and replay primitives |
-| B04 | A02, A16 | done | Add authenticated link state machine and fake relay transport |
+| B03 | A02, A16 | in_progress | Exact remote protocol, frame/journal codecs, delivery index, immutable publication, and bounded recovery |
+| B04 | A02, A16 | in_progress | Replace the initial relay with ordered durable receipt/delivery handling |
 | B05 | A04, A14 | done | Add typed streaming home-provider proxy |
 | B06 | A05, A15 | done | Add Prime Sandbox provisioner and background-job lifecycle |
 | B07 | A10, A14 | done | Add Git workspace snapshot and safe sync-back |
@@ -100,14 +100,28 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 
 | ID | Depends on | Status | Work package |
 |---|---|---|---|
-| C01 | B01-B16 | queued | Integrate commits and resolve shared-file conflicts |
-| C02 | C01 | queued | Run all directly changed test files and `npm run check` |
+| C01 | B01-B16 | in_progress | Integrate source-reviewed commits in dependency order and resolve shared-file conflicts |
+| C02 | C01 | in_progress | Run focused suites and `npm run check` after each accepted integration; final pass remains pending |
 | C03 | C01 | queued | Run a real Prime Sandbox smoke test without paid model calls where possible |
 | C04 | C02, C03 | queued | Audit secret handling, orphan cleanup, and final workspace sync |
 | C05 | C04 | queued | Update README, API docs, changelog, and migration notes |
 | C06 | C05 | queued | Independent PR cleanup and regression review |
 | C07 | C06 | queued | Push branch and open GitHub PR |
 | C08 | C07 | queued | Verify PR diff, checks, and unresolved review threads |
+
+## Current integration baseline
+
+- Branch: `feat/sandbox-backed-sessions` in `/Users/milkkarten/prime-agent-sandbox-sessions`.
+- Reviewed integration tip: `a7add61a4`.
+- Latest full root `npm run check` is green across 998 files, TypeScript, Biome, installer rendering, and browser smoke.
+- Accepted B03 foundations: exact frame codec `55b40d7f1`, journal-record codec `5551582bd`, delivery index `5e8e926b4`.
+- Accepted B11 foundations: observation core `939a7baaf`, exact snapshots `62e8b073a`.
+- Accepted B14 foundations: provider client `2195c7a23`, tunnel manager `a636f7d99`, PAB1 `d21f53c1a`, FD3 reader `723a8db52`, PAAR codec `a17f5588d`, stdin frame reader `4beeaa5da`, TypeScript correction `1d63a72c0`, SSH spawn specification `4dd8790db`, and SSH specification tests `af83a786f`/`a7add61a4`.
+- Active B03 work: direct-final immutable journal publication and a clean one-list-call paginated recovery scanner. Ordered relay and B10 durable communication wait for both.
+- Active B14 work: strict one-use upgrade authentication, credential-frame write ownership, Node stdin normalization, SSH readiness/cleanup, trusted-tree PAAR builder, streaming PAAR verifier, offline runtime packaging, and later installer/listener/orchestration.
+- Active B02 work: hosted runtime boundary correction using the accepted remote frame and observation types without changing local runtime behavior.
+- Rejected commits remain isolated and unmerged. This includes `a772e27a`, `f1f5cad9`, `35fb1c61`, `d7b56367`, `bce99cd9`, and `610c696c` plus their earlier rejected chains.
+- No paid sandbox, tunnel, VM, GPU, or live provider resource has been created during the resource-free implementation stage.
 
 ## Integration rules
 
@@ -211,4 +225,6 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Integrated the reviewed B03 receipt/application-delivery index codec and recovery accumulator through `5e8e926b4`. Canonical pending/delivered markers bind exact host/generation/session/direction/frame/digest/journal sequence, recovery validates contiguous index sequences without mutation on rejection, and deterministic actions distinguish new admission, pending idempotent reapplication, and delivered replay ACK. The integrated journal/index/frame/protocol suite passes 584 tests.
 - Integrated the reviewed streaming SSH-stdin bootstrap frame reader through `4beeaa5da`. It waits for exact EOF, uses only a fixed header and exact payload allocation, rejects trailing/hostile chunks, snapshots its source adapter, handles synchronous registration races, removes only owned listeners, keeps its deadline referenced, and does not erase bytes while callbacks own them. The integrated stdin/FD3/PAB1 suite passes 254 tests. HOME credential-write ownership and the production Buffer-copy adapter remain separate.
 - Integrated the reviewed pure HOME SSH spawn specification through `4dd8790db`. It emits exactly `prime` plus the nine required `sandbox ssh --plain` arguments, an explicit absolute HOME cwd, detached process-group settings, piped stdio, shell disabled, and only the PATH/HOME/USER/TMPDIR environment allowlist. Strict descriptor-based inputs and fixed secret-free errors reject hostile or extra values. Its integrated PAB1 suite passes 166 tests. Credential-write ownership and process lifecycle/readiness remain separate tracks.
-- The immutable publisher remains unaccepted pending one-shot handle closure, strict adapter/input snapshots, evidence-preserving link uncertainty, and safe staging cleanup. One-use upgrade authentication remains under direct correction review.
+- Rejected immutable publisher chains that used staging/link/unlink cleanup. The current correction uses direct-final `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW` publication, preserves all post-open evidence, and remains under review for caller erasure, allocator aliasing, exact stat snapshots, and one checked close per acquired handle.
+- Rejected paginated scanner `f1f5cad9` after direct review found cursor advancement past unprocessed entries, pre-commit accumulator mutation, incomplete handle/read validation, and unsafe marker ordering across pages. Started a clean one-list-call, page-atomic scanner that defers full marker binding and accumulator construction until recovery completion.
+- Rejected hosted boundary `35fb1c61`, upgrade authenticator `d7b56367`, PAAR builder `bce99cd9`, verifier `610c696c`, and the first SSH lifecycle/Node stdin adapter attempts after committed-source review. Their clean or focused correction tracks are active; none is present on the integration branch.
