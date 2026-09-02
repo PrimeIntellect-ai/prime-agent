@@ -56,6 +56,10 @@ def execution_contract() -> dict[str, Any]:
             "cycle": "await avo.complete_cycle({'candidate_id': candidate_id})",
             "gate": "await avo.stop_gate()",
             "variation": "await avo.run_variation(contract_dict)",
+            "lineage_list": "await avo.list_lineage()",
+            "lineage_sample": "await avo.sample_lineage(solution_id, reason=reason)",
+            "knowledge_list": "await avo.list_knowledge()",
+            "knowledge_sample": "await avo.sample_knowledge(knowledge_id, reason=reason)",
         },
         "canonical_rule": (
             "callers may issue only model_opinion; authoritative success requires an immutable "
@@ -470,6 +474,32 @@ async def run_variation(
     return await host_request("avo.variation.run", payload)
 
 
+async def list_lineage() -> dict[str, Any]:
+    """List all committed lineage entries P_t available for agent-directed sampling."""
+    return await host_request("avo.lineage.list", {})
+
+
+async def sample_lineage(solution_id: str, *, reason: str | None = None) -> dict[str, Any]:
+    """Deliberately sample a specific committed solution from lineage P_t with trace attribution."""
+    payload: dict[str, Any] = {"solutionId": _string(solution_id, "solution_id")}
+    if reason is not None:
+        payload["reason"] = _string(reason, "reason")
+    return await host_request("avo.lineage.sample", payload)
+
+
+async def list_knowledge() -> dict[str, Any]:
+    """List all domain knowledge entries K available for agent-directed sampling."""
+    return await host_request("avo.knowledge.list", {})
+
+
+async def sample_knowledge(knowledge_id: str, *, reason: str | None = None) -> dict[str, Any]:
+    """Deliberately sample a domain knowledge entry from K with trace attribution."""
+    payload: dict[str, Any] = {"knowledgeId": _string(knowledge_id, "knowledge_id")}
+    if reason is not None:
+        payload["reason"] = _string(reason, "reason")
+    return await host_request("avo.knowledge.sample", payload)
+
+
 __all__ = [
     "add_candidate",
     "bind_tool_result",
@@ -486,6 +516,8 @@ __all__ = [
     "fetch_external_source",
     "get_state",
     "initialize",
+    "list_knowledge",
+    "list_lineage",
     "nooa_backend_status",
     "recall",
     "record_evaluation",
@@ -500,6 +532,8 @@ __all__ = [
     "run_trial",
     "run_variation",
 	"resolve_critical_assumption",
+    "sample_knowledge",
+    "sample_lineage",
     "spontaneous_recall",
     "stop_gate",
     "sync_nooa_memory",

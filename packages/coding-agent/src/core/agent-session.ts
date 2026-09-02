@@ -8029,6 +8029,28 @@ export class AgentSession {
 				});
 				return { result: result as unknown as Record<string, unknown> };
 			}
+			case "avo.lineage.list": {
+				return { entries: runtime.listLineage() };
+			}
+			case "avo.lineage.sample": {
+				if (typeof payload.solutionId !== "string") {
+					throw new Error("avo.lineage.sample requires solutionId string");
+				}
+				const reason = typeof payload.reason === "string" ? payload.reason : undefined;
+				const solution = runtime.sampleLineage(payload.solutionId, reason);
+				return { solution, trace: { sourceType: "lineage", sourceId: payload.solutionId, reason } };
+			}
+			case "avo.knowledge.list": {
+				return { entries: runtime.listKnowledge() };
+			}
+			case "avo.knowledge.sample": {
+				if (typeof payload.knowledgeId !== "string") {
+					throw new Error("avo.knowledge.sample requires knowledgeId string");
+				}
+				const reason = typeof payload.reason === "string" ? payload.reason : undefined;
+				const knowledge = runtime.sampleKnowledge(payload.knowledgeId, reason);
+				return { knowledge, trace: { sourceType: "knowledge", sourceId: payload.knowledgeId, reason } };
+			}
 			default:
 				throw new Error(`unknown AVO request type "${type}"`);
 		}
