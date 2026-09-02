@@ -1,6 +1,6 @@
 /**
- * B11-a: remote observation event decoder + bounded in-memory transition/transcript core.
- * No snapshot/restore, name, usage, pending, connection health, or observer DTO.
+ * B11-a/b: remote observation event decoder + bounded in-memory transition/transcript core.
+ * B11-b adds captureSnapshot/fromSnapshot via remote-observation-snapshot.ts codec.
  */
 import type { RemoteHostEventSequence, RemoteHostSessionState } from "./remote-agent-host-protocol.js";
 import {
@@ -26,7 +26,7 @@ const MAX_DTEXT = 50_000,
 const MAX_RECORDS = 200,
 	MAX_RECAP = 100;
 const SESSION_STATES = new Set(["running", "idle", "inactive"]);
-const KNOWN_ERR = new Set([
+export const KNOWN_ERR_CODES = new Set([
 	"INTERNAL_ERROR",
 	"UNKNOWN_COMMAND",
 	"INVALID_SESSION",
@@ -41,7 +41,7 @@ const KNOWN_ERR = new Set([
 	"BUILD_MISMATCH",
 	"CAPABILITY_MISMATCH",
 	"UNKNOWN",
-]);
+] as const);
 /** Exact ISO 8601 millisecond with Z suffix: YYYY-MM-DDTHH:mm:ss.sssZ — must roundtrip. */
 const EXACT_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
@@ -411,7 +411,10 @@ export class RemoteObservationMirror {
 				if (typeof body.code !== "string" || body.code.length === 0 || (body.code as string).length > MAX_ERR_CODE)
 					return null;
 				if (typeof body.message !== "string" || (body.message as string).length > MAX_ERR_MSG) return null;
-				return { type: "error", code: KNOWN_ERR.has(body.code as string) ? (body.code as string) : "UNKNOWN" };
+				return {
+					type: "error",
+					code: KNOWN_ERR_CODES.has(body.code as any) ? (body.code as string) : "UNKNOWN",
+				};
 			}
 			case "checkpoint_start":
 				return exactObjectKeys(body, ["type"], []) ? { type: "checkpoint_start" } : null;
@@ -540,7 +543,7 @@ export class RemoteObservationMirror {
 					? rej("INVALID_BASH_STATE")
 					: null;
 			case "compact_start":
-				return pre.compacting ? rej("INVALID_COMPACT_STATE") : null;
+				return pre.compacting || pre.checkpointing ? rej("INVALID_COMPACT_STATE") : null;
 			case "compact_end":
 				return !pre.compacting || !isSafePosInt(d.keptMessages) ? rej("INVALID_COMPACT_STATE") : null;
 			case "compact_failed":
@@ -548,7 +551,7 @@ export class RemoteObservationMirror {
 			case "error":
 				return d.code.length > 0 ? null : rej("INVALID_ERROR_CODE");
 			case "checkpoint_start":
-				return pre.checkpointing ? rej("INVALID_CHECKPOINT_STATE") : null;
+				return pre.checkpointing || pre.compacting ? rej("INVALID_CHECKPOINT_STATE") : null;
 			case "checkpoint_complete":
 				return !pre.checkpointing || !isBoundedStr(d.snapshotId, MAX_SNAP_ID)
 					? rej("INVALID_CHECKPOINT_STATE")
