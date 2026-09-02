@@ -885,3 +885,25 @@ describe("strict request snapshot and scrub order", () => {
 		expect(Object.hasOwn(request.headers, "x-prime-grant")).toBe(false);
 	});
 });
+
+describe("terminal authenticator scrubbing", () => {
+	it("scrubs credential slots before returning ALREADY_USED after authentication", () => {
+		const grant = makeGrant();
+		const candidate = gs(new Uint8Array(grant));
+		const authenticator = expectOk(createWebSocketUpgradeRequestAuth({ grant, path: VP }));
+		expectAuth(authenticator.authenticate(okReq(candidate)), "AUTHENTICATED", true);
+		const second = okReq("replacement-credential-that-must-be-scrubbed");
+		expectAuth(authenticator.authenticate(second), "ALREADY_USED", false);
+		expect(second.rawHeaders.slice(-2)).toEqual(["", ""]);
+		expect(Object.hasOwn(second.headers, "x-prime-grant")).toBe(false);
+	});
+
+	it("scrubs credential slots before returning ALREADY_USED after disposal", () => {
+		const authenticator = expectOk(okAuth());
+		authenticator.dispose();
+		const request = okReq("replacement-credential-that-must-be-scrubbed");
+		expectAuth(authenticator.authenticate(request), "ALREADY_USED", false);
+		expect(request.rawHeaders.slice(-2)).toEqual(["", ""]);
+		expect(Object.hasOwn(request.headers, "x-prime-grant")).toBe(false);
+	});
+});

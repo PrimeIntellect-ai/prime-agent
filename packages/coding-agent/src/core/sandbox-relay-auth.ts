@@ -377,14 +377,17 @@ export function createWebSocketUpgradeRequestAuth(input: unknown): CreateWebSock
 		};
 		const authenticator = Object.freeze({
 			authenticate(request: unknown): UpgradeAuthResult {
-				if (state !== "LIVE") return failure("ALREADY_USED");
 				try {
 					const requestInspection = ownDataDescriptors(request);
 					const descriptors = requestInspection?.descriptors;
 					const raw = inspectRawHeaders(descriptors?.rawHeaders?.value);
 					const headers = inspectHeaders(descriptors?.headers?.value);
 					const scrubbed = scrubCredentials(raw, headers);
-					if (!scrubbed) return consumeFailure("SCRUB_FAILED");
+					if (!scrubbed) {
+						if (state !== "LIVE") return failure("SCRUB_FAILED");
+						return consumeFailure("SCRUB_FAILED");
+					}
+					if (state !== "LIVE") return failure("ALREADY_USED");
 					if (
 						!requestInspection ||
 						requestInspection.prototype !== Object.prototype ||
