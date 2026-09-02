@@ -340,7 +340,7 @@ describe("strict options preflight", () => {
 	});
 
 	it("adapter get-trap counter stays zero during actual read and close", async () => {
-		let _getTrapCount = 0;
+		let getTrapCount = 0;
 		const payload = new Uint8Array([0x42]);
 		const f = tempFileWithFrame(payload);
 		const rawRead = (
@@ -372,6 +372,7 @@ describe("strict options preflight", () => {
 		const r = await readSandboxBootstrapFrame(f.fd, {
 			_adapter: proxy as unknown as FsFdAdapter,
 		});
+		expect(getTrapCount).toBe(0);
 		expect(r.ok).toBe(true);
 		if (r.ok) expect(Array.from(r.payload)).toEqual([0x42]);
 		f.cleanup();
