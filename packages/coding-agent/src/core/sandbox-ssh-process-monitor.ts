@@ -400,8 +400,9 @@ function discoverUnsubscribe(raw: unknown): (() => unknown) | null {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorResult {
-	const input = preflight(raw);
-	if (!input) return INVALID_INPUT;
+	const inspected = preflight(raw);
+	if (!inspected) return INVALID_INPUT;
+	const input: BoundInput = inspected;
 
 	// ── Internal mutable state ────────────────────────────────────────────
 
@@ -911,6 +912,10 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 		if (phase === "reading") beginCleanup("READY_TIMEOUT");
 	}, input.timeouts.readyTimeoutMs);
 
+	function hasCleanupStarted(): boolean {
+		return phase === "cleanup" || phase === "finalizing" || phase === "done";
+	}
+
 	// Replay queued synchronous events.
 	for (let index = 0; index < synchronousEvents.length; index += 1) {
 		const event = synchronousEvents[index];
@@ -927,7 +932,7 @@ export function createSshProcessMonitor(raw: unknown): CreateSshProcessMonitorRe
 		} else {
 			handleProcessError();
 		}
-		if (phase === "cleanup" || phase === "finalizing" || phase === "done") {
+		if (hasCleanupStarted()) {
 			// Erase any remaining queued chunks.
 			for (let rest = index + 1; rest < synchronousEvents.length; rest += 1) {
 				const pending = synchronousEvents[rest];

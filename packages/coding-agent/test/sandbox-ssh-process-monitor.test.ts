@@ -64,10 +64,10 @@ function validAdmission(): () => Promise<object> {
 
 function validInput(
 	overrides?: Partial<{
-		process: object | null;
+		process: unknown;
 		expectedNonce: string;
 		confirmRelayAdmission: () => unknown;
-		timeouts: object | null;
+		timeouts: unknown;
 	}>,
 ): object {
 	const merged: Record<string, unknown> = {
@@ -85,7 +85,7 @@ function validInput(
 	return Object.freeze(merged);
 }
 
-function makeMonitor(input: object): CreateSshProcessMonitorResult {
+function makeMonitor(input: unknown): CreateSshProcessMonitorResult {
 	return createSshProcessMonitor(input);
 }
 
@@ -96,81 +96,6 @@ function assertOk(result: CreateSshProcessMonitorResult): void {
 function assertFail(result: CreateSshProcessMonitorResult): void {
 	expect(result.ok).toBe(false);
 	if (!result.ok) expect(result.code).toBe("INVALID_INPUT");
-}
-
-function _sendRawStdout(_m: CreateSshProcessMonitorResult & { ok: true }, _text: string): void {
-	// We need access to the listener. Since the test drives events via the
-	// subscribe callback, we capture the listener when subscribe is called.
-	// Use a helper that wraps the process subscribe.
-}
-
-/** Creates a process that captures the listener for manual event injection. */
-function _capturingProcess(): {
-	process: object;
-	listener: SshProcessEventListener | null;
-	fireStdout: (text: string) => void;
-	fireStderr: (text: string) => void;
-	fireExit: (code: number | null, signal: string | null) => void;
-	fireClose: () => void;
-	fireProcessError: () => void;
-} {
-	let captured: SshProcessEventListener | null = null;
-	const fireStdout = (text: string): void => {
-		if (!captured) throw new Error("listener not captured yet");
-		const enc = new TextEncoder();
-		const raw = enc.encode(text);
-		// Create exact transferred Uint8Array (full buffer, offset 0)
-		const ab = new ArrayBuffer(raw.byteLength);
-		const view = new Uint8Array(ab);
-		view.set(raw);
-		captured.onStdout(view);
-	};
-	const fireStderr = (text: string): void => {
-		if (!captured) throw new Error("listener not captured yet");
-		const enc = new TextEncoder();
-		const raw = enc.encode(text);
-		const ab = new ArrayBuffer(raw.byteLength);
-		const view = new Uint8Array(ab);
-		view.set(raw);
-		captured.onStderr(view);
-	};
-	const fireExit = (code: number | null, signal: string | null): void => {
-		if (!captured) throw new Error("listener not captured yet");
-		captured.onExit(Object.freeze({ code, signal }));
-	};
-	const fireClose = (): void => {
-		if (!captured) throw new Error("listener not captured yet");
-		captured.onClose();
-	};
-	const fireProcessError = (): void => {
-		if (!captured) throw new Error("listener not captured yet");
-		captured.onProcessError();
-	};
-	const process = validProcess({
-		subscribe: (listener: SshProcessEventListener): object => {
-			captured = listener;
-			return subscriptionOk();
-		},
-	});
-	return {
-		process,
-		listener: captured,
-		fireStdout,
-		fireStderr,
-		fireExit,
-		fireClose,
-		fireProcessError,
-		get listener_() {
-			return captured;
-		},
-	};
-}
-
-/** A sentinel promise that never settles — used to test timeouts. */
-function _neverPromise(): Promise<object> {
-	return new Promise<object>(() => {
-		/* never */
-	});
 }
 
 function zeroBuffer(text: string): ArrayBuffer {
@@ -1596,7 +1521,7 @@ describe("admission outcomes", () => {
 		});
 		const sym = Symbol("own");
 		const p = new Promise<object>(() => {});
-		(p as Record<symbol, unknown>)[sym] = 1;
+		(p as unknown as Record<symbol, unknown>)[sym] = 1;
 		const admission = (): unknown => p;
 
 		const result = makeMonitor(
