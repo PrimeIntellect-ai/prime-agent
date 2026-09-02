@@ -74,6 +74,7 @@ import {
 	type AgentsViewSelectionKey,
 	buildAgentsViewRows,
 	buildUnifiedSessionIndex,
+	computeRecursiveCosts,
 	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
@@ -1286,6 +1287,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.expandedSubagentParents,
 			this.programShownParents,
 			this.scopeKey,
+			computeRecursiveCosts(this.unifiedRecords, this.unifiedIndex),
 		);
 		const index =
 			selectedIdentity === undefined ? -1 : this.rows.findIndex((row) => row.identity === selectedIdentity);
@@ -2172,6 +2174,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.expandedSubagentParents,
 			this.programShownParents,
 			this.scopeKey,
+			computeRecursiveCosts(this.unifiedRecords, this.unifiedIndex),
 		);
 		this.applyPendingAncestorExpansion();
 		this.restoreSelection();

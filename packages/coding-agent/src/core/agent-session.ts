@@ -11772,15 +11772,16 @@ export class AgentSession {
 		return (provider, modelId) => this._modelRegistry.find(provider, modelId)?.contextWindow;
 	}
 
-	private _ownUsageMemo?: { count: number; tailId: string | undefined; usage: SessionUsageSummary };
+	private _ownUsageMemo?: { count: number; tailId: string | undefined; usage: SessionUsageSummary | undefined };
 
 	/**
 	 * Whole-file own spend (every branch, forks included, attributed child usage
-	 * subtracted): the money view's number, deliberately broader than /usage's
-	 * current-branch context answer, and identical to the catalog scan so a row
-	 * never shifts at passivation or revival. Memoized until entries change.
+	 * subtracted from the in-memory aggregates): the money view's number,
+	 * deliberately broader than /usage's current-branch context answer, and
+	 * identical to the catalog scan so a row never shifts at passivation or
+	 * revival. Memoized until entries change.
 	 */
-	getOwnUsageSummary(): SessionUsageSummary {
+	getOwnUsageSummary(): SessionUsageSummary | undefined {
 		const entries = this.sessionManager.getEntries();
 		const tailId = entries.at(-1)?.id;
 		const memo = this._ownUsageMemo;

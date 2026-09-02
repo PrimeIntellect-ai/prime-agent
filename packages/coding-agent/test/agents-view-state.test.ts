@@ -27,6 +27,7 @@ import {
 	buildAgentsViewRows,
 	buildUnifiedSessionIndex,
 	classifyAgentsViewSession,
+	computeRecursiveCosts,
 	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
@@ -542,6 +543,32 @@ describe("agents view state", () => {
 		const childRow = expanded.find((row) => row.title === "Child");
 		expect(childRow?.summary.usage?.cost).toBe(0.5);
 		expect(childRow?.recursiveCost).toBeCloseTo(0.68);
+	});
+
+	test("keeps the recursive total complete when search filters out a descendant", () => {
+		const parent = makeSummary({
+			id: "parent-active",
+			activeSessionId: "parent-active",
+			sessionId: "parent-session",
+			sessionName: "Searchable parent",
+			usage: { inputTokens: 100, outputTokens: 10, cost: 0.42 },
+		});
+		const child = makeSummary({
+			id: "child-active",
+			activeSessionId: "child-active",
+			sessionId: "child-session",
+			sessionName: "unrelated worker",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "parent-active",
+			usage: { inputTokens: 50, outputTokens: 5, cost: 0.68 },
+		});
+		const records = reconcileUnifiedSessions([parent, child], []);
+		const costs = computeRecursiveCosts(records);
+		const filtered = filterUnifiedSessions(records, (text) => text.includes("Searchable"));
+
+		expect(filtered).toHaveLength(1);
+		const rows = buildAgentsViewRows(filtered, new Set(), new Set(), undefined, costs);
+		expect(rows[0]?.recursiveCost).toBeCloseTo(1.1);
 	});
 
 	test("tallies a very deep child chain without overflowing the stack", () => {

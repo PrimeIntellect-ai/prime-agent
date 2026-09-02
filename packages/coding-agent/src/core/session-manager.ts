@@ -962,8 +962,13 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 		let state: SessionState | undefined;
 		let agentStatus: AgentStatus | undefined;
 		let lastActivityTime: number | undefined;
-		const usageTotal = emptyUsage();
-		let sawUsage = false;
+		// Mirrors the loader's usage semantics: fold attribution aggregates onto
+		// their target assistants (disk may carry originals or, after a full-file
+		// rewrite, already-folded aggregates), then subtract the child usage —
+		// either representation cancels to the same own spend the resident
+		// computation reports.
+		const assistantUsageById = new Map<string, Usage>();
+		const attributedChildUsages: Usage[] = [];
 
 		for await (const lineBuffer of readLinesAsBuffers(filePath)) {
 			const line = lineBuffer.toString("utf8");
@@ -1011,9 +1016,12 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 				agentStatus = (entry as AgentStatusEntry).status;
 			}
 			if (entry.type === "child_usage_attributed") {
-				subtractAssistantUsage(usageTotal, (entry as ChildUsageAttributionEntry).childUsage);
+				const attribution = entry as ChildUsageAttributionEntry;
+				if (assistantUsageById.has(attribution.targetId)) {
+					assistantUsageById.set(attribution.targetId, attribution.aggregateUsage);
+					attributedChildUsages.push(attribution.childUsage);
+				}
 			}
-
 			if (!header) {
 				if (entry.type !== "session") {
 					return null;
@@ -1028,8 +1036,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 
 			const message = (entry as SessionMessageEntry).message;
 			if (message.role === "assistant" && (message as { usage?: Usage }).usage) {
-				sawUsage = true;
-				addAssistantUsage(usageTotal, (message as { usage: Usage }).usage);
+				assistantUsageById.set(entry.id, (message as { usage: Usage }).usage);
 			}
 			if (!isMessageWithContent(message)) continue;
 			if (message.role !== "user" && message.role !== "assistant") continue;
@@ -1044,6 +1051,13 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 		}
 
 		if (!header) return null;
+		const usageTotal = emptyUsage();
+		for (const usage of assistantUsageById.values()) {
+			addAssistantUsage(usageTotal, usage);
+		}
+		for (const childUsage of attributedChildUsages) {
+			subtractAssistantUsage(usageTotal, childUsage);
+		}
 		const cwd = typeof header.cwd === "string" ? header.cwd : "";
 		const parentSessionPath = header.parentSession;
 		const rlmDepth = resolveSessionRlmDepth(header, filePath);
@@ -1063,7 +1077,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText,
 			agentStatus,
-			...(sawUsage ? { usage: sessionUsageSummaryFrom(usageTotal) } : {}),
+			usage: sessionUsageSummaryFrom(usageTotal),
 		};
 	} catch {
 		return null;

@@ -421,6 +421,35 @@ export interface UnifiedSessionIndex {
 	childrenByParent: Map<UnifiedSessionRecord, UnifiedSessionRecord[]>;
 }
 
+/**
+ * Own cost plus all descendants', over the UNFILTERED record hierarchy: search
+ * and scope filters must never change the parenthesized total on a row.
+ */
+export function computeRecursiveCosts(
+	records: readonly UnifiedSessionRecord[],
+	index: UnifiedSessionIndex = buildUnifiedSessionIndex(records),
+): ReadonlyMap<UnifiedSessionRecord, number> {
+	const order = records.filter((record) => {
+		const parent = findParentRecord(record, index.byKey);
+		return !parent || parent === record;
+	});
+	for (let position = 0; position < order.length; position++) {
+		for (const child of index.childrenByParent.get(order[position]!) ?? []) {
+			order.push(child);
+		}
+	}
+	const costs = new Map<UnifiedSessionRecord, number>();
+	for (let position = order.length - 1; position >= 0; position--) {
+		const record = order[position]!;
+		let total = record.daemon?.usage?.cost ?? record.saved?.usage?.cost ?? 0;
+		for (const child of index.childrenByParent.get(record) ?? []) {
+			total += costs.get(child) ?? 0;
+		}
+		costs.set(record, total);
+	}
+	return costs;
+}
+
 export function buildUnifiedSessionIndex(records: readonly UnifiedSessionRecord[]): UnifiedSessionIndex {
 	const byKey = new Map<string, UnifiedSessionRecord>();
 	for (const record of records) {
@@ -653,6 +682,7 @@ export function buildAgentsViewRows(
 	expandedSubagentParents: ReadonlySet<string> = new Set(),
 	programShownParents: ReadonlySet<string> = new Set(),
 	scope?: AgentsViewScopeKey,
+	recursiveCosts?: ReadonlyMap<UnifiedSessionRecord, number>,
 ): AgentsViewRow[] {
 	const inputs = summariesOrRecords.map((input) =>
 		isUnifiedSessionRecord(input) ? { summary: summaryForUnifiedRecord(input), record: input } : { summary: input },
@@ -728,7 +758,9 @@ export function buildAgentsViewRows(
 			descendantsCost += child.recursiveCost;
 		}
 		row.runningSubagentCount = count;
-		row.recursiveCost = (row.summary.usage?.cost ?? 0) + descendantsCost;
+		// The caller's unfiltered rollup wins: visible rows may be missing filtered-out descendants.
+		row.recursiveCost =
+			(row.record ? recursiveCosts?.get(row.record) : undefined) ?? (row.summary.usage?.cost ?? 0) + descendantsCost;
 	}
 	propagateHeartbeatStateToAncestors(baseRows, parentByChild);
 

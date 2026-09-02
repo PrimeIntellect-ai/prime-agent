@@ -11,7 +11,7 @@ import {
 	resolveSessionRlmDepth,
 	SessionManager,
 } from "../../src/core/session-manager.js";
-import { sessionUsageSummaryFrom } from "../../src/core/usage.js";
+import { emptyUsage, sessionUsageSummaryFrom } from "../../src/core/usage.js";
 
 describe("loadEntriesFromFile", () => {
 	let tempDir: string;
@@ -602,38 +602,43 @@ describe("session info usage totals", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	function usage(input: number, output: number, cost: number) {
+	function usage(input: number, output: number, cost: number, cacheRead = 10, cacheWrite = 5) {
 		return {
 			input,
 			output,
-			cacheRead: 10,
-			cacheWrite: 5,
+			cacheRead,
+			cacheWrite,
 			totalTokens: input + output,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
 		};
 	}
 
-	it("accumulates own usage during the catalog scan, subtracting attributed child usage", async () => {
+	it("folds attribution aggregates and subtracts child usage like the loader", async () => {
 		const file = join(tempDir, "usage.jsonl");
+		// Mirrors the append-only writer: assistant lines keep their ORIGINAL
+		// model-response usage on disk; the attribution carries child + aggregate.
 		const lines = [
-			{ type: "session", id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
-			{ type: "message", id: "m1", message: { role: "user", content: "hi", timestamp: 1 } },
+			{ type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
+			{ type: "message", id: "m1", parentId: null, message: { role: "user", content: "hi", timestamp: 1 } },
 			{
 				type: "message",
 				id: "m2",
+				parentId: "m1",
 				message: { role: "assistant", content: "ok", timestamp: 2, usage: usage(1000, 200, 0.5) },
 			},
 			{
 				type: "message",
 				id: "m3",
+				parentId: "m2",
 				message: { role: "assistant", content: "done", timestamp: 3, usage: usage(2000, 300, 1.0) },
 			},
 			{
 				type: "child_usage_attributed",
 				id: "a1",
+				parentId: "m3",
 				targetId: "m3",
 				childUsage: usage(500, 100, 0.4),
-				aggregateUsage: usage(500, 100, 0.4),
+				aggregateUsage: usage(2500, 400, 1.4, 20, 10),
 			},
 		];
 		writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
@@ -641,13 +646,13 @@ describe("session info usage totals", () => {
 		const info = await readSessionInfo(file);
 
 		// input tokens include cache reads/writes, matching the /usage spend total.
-		expect(info?.usage).toEqual({ inputTokens: 1000 + 2000 + 2 * 15 - 515, outputTokens: 400, cost: 1.1 });
+		expect(info?.usage).toEqual({ inputTokens: 3030, outputTokens: 500, cost: 1.5 });
 	});
 
-	it("matches the resident whole-file computation on a file with a forked-away branch", async () => {
+	it("matches the resident computation on a file with a forked branch and a flushed attribution", async () => {
 		const file = join(tempDir, "forked.jsonl");
 		const lines = [
-			{ type: "session", id: "s3", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
+			{ type: "session", version: 3, id: "s3", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
 			{ type: "message", id: "m1", parentId: null, message: { role: "user", content: "hi", timestamp: 1 } },
 			// Forked-away assistant: not on the surviving branch, still paid for.
 			{
@@ -662,6 +667,15 @@ describe("session info usage totals", () => {
 				parentId: "m1",
 				message: { role: "assistant", content: "final", timestamp: 3, usage: usage(2000, 300, 1.0) },
 			},
+			// The loader folds this aggregate into m3 in memory; the disk line above keeps the original.
+			{
+				type: "child_usage_attributed",
+				id: "a1",
+				parentId: "m3",
+				targetId: "m3",
+				childUsage: usage(500, 100, 0.4),
+				aggregateUsage: usage(2500, 400, 1.4, 20, 10),
+			},
 		];
 		writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
 
@@ -669,18 +683,21 @@ describe("session info usage totals", () => {
 		const entries = manager.getEntries();
 		const resident = sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
 
+		expect(resident).toBeDefined();
 		expect((await readSessionInfo(file))?.usage).toEqual(resident);
-		expect(resident.cost).toBeCloseTo(1.5);
+		expect(resident?.cost).toBeCloseTo(1.5);
 	});
 
 	it("reports no usage for sessions without assistant usage", async () => {
 		const file = join(tempDir, "no-usage.jsonl");
 		const lines = [
-			{ type: "session", id: "s2", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
-			{ type: "message", id: "m1", message: { role: "user", content: "hi", timestamp: 1 } },
+			{ type: "session", version: 3, id: "s2", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
+			{ type: "message", id: "m1", parentId: null, message: { role: "user", content: "hi", timestamp: 1 } },
 		];
 		writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
 
 		expect((await readSessionInfo(file))?.usage).toBeUndefined();
+		// The resident producer shares the same zero-spend rule.
+		expect(sessionUsageSummaryFrom(emptyUsage())).toBeUndefined();
 	});
 });

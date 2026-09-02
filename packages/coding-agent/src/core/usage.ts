@@ -7,12 +7,13 @@ export interface SessionUsageSummary {
 	cost: number;
 }
 
-export function sessionUsageSummaryFrom(usage: Usage): SessionUsageSummary {
-	return {
-		inputTokens: usage.input + usage.cacheRead + usage.cacheWrite,
-		outputTokens: usage.output,
-		cost: usage.cost.total,
-	};
+/** Undefined when nothing was spent, so rows stay age-only until real usage exists. */
+export function sessionUsageSummaryFrom(usage: Usage): SessionUsageSummary | undefined {
+	const inputTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+	if (inputTokens === 0 && usage.output === 0 && usage.cost.total === 0) {
+		return undefined;
+	}
+	return { inputTokens, outputTokens: usage.output, cost: usage.cost.total };
 }
 
 export function emptyUsage(): Usage {
