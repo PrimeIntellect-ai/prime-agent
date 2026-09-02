@@ -80,14 +80,14 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 | ID | Depends on | Status | Work package |
 |---|---|---|---|
 | B01 | A01, A03 | done | Add `ExecutionLocation` and opaque remote session DTOs |
-| B02 | A01, A07 | queued | Introduce location-neutral `HostedSubagent` and preserve local behavior |
+| B02 | A01, A07 | in_progress | Introduce location-neutral `HostedSubagent` and preserve local behavior |
 | B03 | A02, A16 | done | Add capability-gated remote host protocol and replay primitives |
-| B04 | A02, A16 | queued | Add authenticated link state machine and fake relay transport |
+| B04 | A02, A16 | in_progress | Add authenticated link state machine and fake relay transport |
 | B05 | A04, A14 | done | Add typed streaming home-provider proxy |
 | B06 | A05, A15 | in_progress | Add Prime Sandbox provisioner and exact-build bootstrap |
 | B07 | A10, A14 | done | Add Git workspace snapshot and safe sync-back |
 | B08 | A12, B01, B02 | queued | Add `sandbox` and `sandbox_options` to RLM APIs |
-| B09 | A11, B01, B03 | queued | Add top-level sandbox session creation APIs and CLI flags |
+| B09 | A11, B01, B03 | done | Add top-level sandbox session creation APIs and CLI flags |
 | B10 | A06, B03, B04 | queued | Route durable direct agent-to-agent communication across hosts |
 | B11 | A07, B03, B04 | queued | Mirror observation, transcript, recap, and usage events |
 | B12 | A08, B03, B06 | queued | Add sandbox lifecycle, checkpoint, passivation, wake, and deletion |
@@ -147,3 +147,5 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - The integration branch passes full `npm run check` after B01, B03, and B05 integration.
 
 - Integrated B07 as `7c193eb17`; 65 focused tests cover binary-safe snapshots, secret exclusion, traversal/symlink defenses, base-hash conflicts, and atomic sync-back.
+
+- Integrated B09 as `42a914cba`; 62 focused tests cover default-local compatibility, strict sandbox options, protocol gates, and explicit unsupported-host failures.
