@@ -2,7 +2,7 @@
 // (`python -m rlm.repl`) — requests on stdin, events on stdout, stderr kept as
 // a diagnostics tail. The protocol is documented in prime-agent-runtime/src/rlm/repl.md.
 import { type ChildProcess, spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync, renameSync, rmSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { v4 as uuid } from "uuid";
@@ -248,7 +248,18 @@ export class ReplKernelManager {
 		let fileTail = "";
 		if (this.options.stderrLogPath) {
 			try {
-				fileTail = readFileSync(this.options.stderrLogPath).subarray(-1024).toString("utf8");
+				// Positional read of the tail only: a kernel that spewed until the
+				// ready timeout can leave a log far too large to read whole.
+				const fd = openSync(this.options.stderrLogPath, "r");
+				try {
+					const size = fstatSync(fd).size;
+					const length = Math.min(size, 1024);
+					const buffer = Buffer.alloc(length);
+					readSync(fd, buffer, 0, length, size - length);
+					fileTail = buffer.toString("utf8");
+				} finally {
+					closeSync(fd);
+				}
 			} catch {
 				// Unreadable log; host diagnostics below still surface.
 			}
