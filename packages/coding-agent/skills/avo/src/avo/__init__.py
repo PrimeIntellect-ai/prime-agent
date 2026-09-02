@@ -93,6 +93,12 @@ def _object(value: dict[str, Any], label: str) -> dict[str, Any]:
     return value
 
 
+def _string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be a non-empty string, got {value!r}")
+    return value
+
+
 async def initialize(
     objective: str,
 ) -> dict[str, Any]:
