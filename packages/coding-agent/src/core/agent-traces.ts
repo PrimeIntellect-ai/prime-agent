@@ -28,6 +28,7 @@ const TRACE_UPLOAD_ALL_CONCURRENCY = 4;
 const TRACE_UPLOAD_RATE_LIMIT_REQUESTS = 5;
 const TRACE_UPLOAD_RATE_LIMIT_WINDOW_MS = 60_000;
 const TRACE_UPLOAD_RATE_LIMIT_SAFETY_MS = 100;
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 const TRACE_UPLOAD_ALL_MIN_REQUEST_INTERVAL_MS =
 	Math.ceil(TRACE_UPLOAD_RATE_LIMIT_WINDOW_MS / TRACE_UPLOAD_RATE_LIMIT_REQUESTS) + TRACE_UPLOAD_RATE_LIMIT_SAFETY_MS;
 
@@ -687,18 +688,20 @@ function signatureEquals(a: AgentTraceUploadedSignature | null | undefined, b: A
 const locallyManagedSessionFiles = new Set<string>();
 
 /** Best-effort and synchronous: upload intent must be on disk the moment the transcript persist returns. */
-function markAgentTraceOutboxPendingSync(sessionFile: string): void {
+function markAgentTraceOutboxPendingSync(sessionFile: string): boolean {
 	try {
 		const entryPath = agentTraceOutboxEntryPath(sessionFile);
 		if (existsSync(entryPath)) {
-			return;
+			return true;
 		}
 		mkdirSync(getAgentTraceOutboxDir(), { recursive: true });
 		const tempPath = `${entryPath}.${process.pid}.${randomUUID()}.tmp`;
 		writeFileSync(tempPath, `${JSON.stringify({ sessionFile })}\n`, "utf8");
 		renameSync(tempPath, entryPath);
+		return true;
 	} catch {
 		// A broken agent dir must not break session persists.
+		return false;
 	}
 }
 
@@ -982,7 +985,7 @@ async function performAgentTraceUpload(
 			status: "failed",
 			statusCode: response.status,
 			message: await readResponseMessage(response),
-			retryAfterMs: retryAfterDelay(response, Number.POSITIVE_INFINITY),
+			retryAfterMs: retryAfterDelay(response, MAX_TIMER_DELAY_MS),
 		};
 	}
 
@@ -1028,9 +1031,8 @@ class AgentTraceUploadController {
 	schedule = (): void => {
 		this.pending = true;
 		const sessionFile = this.sessionManager.getSessionFile();
-		if (sessionFile && !locallyManagedSessionFiles.has(sessionFile)) {
+		if (sessionFile && !locallyManagedSessionFiles.has(sessionFile) && markAgentTraceOutboxPendingSync(sessionFile)) {
 			locallyManagedSessionFiles.add(sessionFile);
-			markAgentTraceOutboxPendingSync(sessionFile);
 		}
 		this.arm();
 	};

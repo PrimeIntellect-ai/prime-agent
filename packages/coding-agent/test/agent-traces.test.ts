@@ -1274,6 +1274,68 @@ describe("agent trace upload", () => {
 		expect(attempts).toBe(2);
 	});
 
+	it("retries the intent marker on the next persist after a failed write", async () => {
+		vi.useFakeTimers();
+		const cwd = join(tempDir, "project");
+		const sessionDir = join(tempDir, "sessions");
+		mkdirSync(cwd, { recursive: true });
+		const sessionManager = SessionManager.create(cwd, sessionDir);
+		sessionManager.newSession({ id: "marker-retry-session" });
+		const blocker = join(tempDir, "agent-traces-outbox");
+		writeFileSync(blocker, "not a directory");
+
+		const calls: FetchCall[] = [];
+		installAgentTraceUpload(sessionManager, {
+			authStorage: AuthStorage.inMemory({
+				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+			}),
+			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
+			baseUrl: "https://api.example.test",
+			fetchFn: createFetchRecorder(calls),
+		});
+
+		sessionManager.appendMessage(createUserMessage("hello"));
+		sessionManager.appendMessage(createAssistantMessage("hi"));
+		const sessionFile = sessionManager.getSessionFile() as string;
+		expect(readOutboxEntry(tempDir, sessionFile)).toBeUndefined();
+
+		rmSync(blocker);
+		sessionManager.appendMessage(createUserMessage("again"));
+		expect(readOutboxEntry(tempDir, sessionFile)).toEqual({ sessionFile });
+	});
+
+	it("caps an absurd Retry-After at the max timer delay instead of retrying immediately", async () => {
+		vi.useFakeTimers();
+		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+		const cwd = join(tempDir, "project");
+		const sessionDir = join(tempDir, "sessions");
+		mkdirSync(cwd, { recursive: true });
+		const sessionManager = SessionManager.create(cwd, sessionDir);
+		sessionManager.newSession({ id: "absurd-retry-after-session" });
+
+		let attempts = 0;
+		const fetchFn: typeof fetch = async () => {
+			attempts += 1;
+			// 30 days, far beyond Node's ~24.8-day timer maximum.
+			return new Response(null, { status: 429, headers: { "retry-after": "2592000" } });
+		};
+
+		installAgentTraceUpload(sessionManager, {
+			authStorage: AuthStorage.inMemory({
+				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+			}),
+			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
+			baseUrl: "https://api.example.test",
+			fetchFn,
+		});
+
+		sessionManager.appendMessage(createUserMessage("hello"));
+		sessionManager.appendMessage(createAssistantMessage("hi"));
+		await advanceTimersUntil(() => attempts === 1);
+		await advanceTimersUntil(() => vi.getTimerCount() > 0);
+		expect(Number(setTimeoutSpy.mock.calls.at(-1)?.[1])).toBe(2_147_483_647);
+	});
+
 	it("returns a retryable failure when the upload cursor cannot be persisted", async () => {
 		const session = writeSession(tempDir, join(tempDir, "sessions"), "cursor-persist-failure");
 		writeFileSync(join(tempDir, "agent-traces-outbox"), "not a directory");
