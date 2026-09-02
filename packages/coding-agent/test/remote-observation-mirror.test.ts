@@ -1125,7 +1125,10 @@ const MAX_TEXT_LENGTH = 100_000;
 // B11-b: RemoteObservationSnapshotV1 codec — capture/restore tests
 // ===========================================================================
 
-import { isKnownObservationErrorCode } from "../src/modes/daemon/remote-observation-constants.js";
+import {
+	isKnownObservationErrorCode,
+	KNOWN_OBSERVATION_ERROR_CODES,
+} from "../src/modes/daemon/remote-observation-constants.js";
 import {
 	decodeRemoteObservationSnapshotV1,
 	type RemoteObservationSnapshotV1,
@@ -1906,7 +1909,16 @@ describe("B11-b: sessionState and bash null roundtrip", () => {
 		const decoded = decodeOk(json);
 		expect(decoded.bash).toBeNull();
 	});
-	it("isKnownObservationErrorCode validates known codes", () => {
+	it("KNOWN_OBSERVATION_ERROR_CODES is frozen at runtime", () => {
+		expect(Object.isFrozen(KNOWN_OBSERVATION_ERROR_CODES)).toBe(true);
+		expect(() => {
+			(KNOWN_OBSERVATION_ERROR_CODES as unknown as string[]).push("INJECTED");
+		}).toThrow();
+		expect(() => {
+			(KNOWN_OBSERVATION_ERROR_CODES as unknown as string[]).pop();
+		}).toThrow();
+	});
+	it("isKnownObservationErrorCode validates known codes and rejects unknown", () => {
 		expect(isKnownObservationErrorCode("INTERNAL_ERROR")).toBe(true);
 		expect(isKnownObservationErrorCode("BASH_FAILED")).toBe(true);
 		expect(isKnownObservationErrorCode("UNKNOWN")).toBe(true);
