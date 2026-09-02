@@ -2,7 +2,7 @@
 Tests for the PAAR v1 manifest/framing codec (Python port).
 
 Parity with TS test at packages/coding-agent/test/paar-manifest-codec.test.ts.
-Run from repo root: python -m pytest prime-agent-runtime/test/test_paar_manifest_codec.py -v
+Run from prime-agent-runtime: python -m unittest discover -s test
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import json
 import pathlib
 import sys
 import unicodedata
+import unittest
 
 _src = str(pathlib.Path(__file__).resolve().parent.parent / "src")
 if _src not in sys.path:
@@ -115,7 +116,7 @@ def encode_valid(**overrides):
 # 1. Deterministic golden bytes & protocol import
 # ===========================================================================
 
-class TestGoldenBytes:
+class TestGoldenBytes(unittest.TestCase):
     def test_encodes_linux_x64_deterministically(self):
         files = sorted_files([{"path": "data.bin", "size": 42, "mode": 0o644, "sha256": "d" * 64, "offset": 0}])
         r = encode_paar_manifest(VALID_SRC, "linux-x64", 7, 25, files)
@@ -157,7 +158,7 @@ class TestGoldenBytes:
 # 2. Protocol constants import regression
 # ===========================================================================
 
-class TestProtocol:
+class TestProtocol(unittest.TestCase):
     def test_protocol_binding_matches(self):
         fd = compute_files_digest([{"path": "f", "size": 1, "mode": 0o644, "sha256": "0" * 64, "offset": 0}])
         bid = compute_build_id(VALID_SRC, "linux-x64", 7, 25, fd)
@@ -198,7 +199,7 @@ class TestProtocol:
 # 3. Numeric mode
 # ===========================================================================
 
-class TestMode:
+class TestMode(unittest.TestCase):
     def test_accepts_0o644(self):
         r = encode_paar_manifest(**valid_input(files=[
             {"path": "f", "size": 1, "mode": 0o644, "sha256": VALID_HASH, "offset": 0}
@@ -236,7 +237,7 @@ class TestMode:
 # 4. Cardinality, size, offset, total
 # ===========================================================================
 
-class TestConstraints:
+class TestConstraints(unittest.TestCase):
     def test_rejects_empty_files(self):
         r = encode_paar_manifest(**valid_input(files=[]))
         assert not r.ok
@@ -296,7 +297,7 @@ class TestConstraints:
 # 5. UTF-8 sorting
 # ===========================================================================
 
-class TestSorting:
+class TestSorting(unittest.TestCase):
     def test_rejects_unsorted_input(self):
         r = encode_paar_manifest(**valid_input(files=[
             {"path": "z", "size": 1, "mode": 0o644, "sha256": VALID_HASH, "offset": 2},
@@ -318,7 +319,7 @@ class TestSorting:
 # 6. Path validation
 # ===========================================================================
 
-class TestPathValidation:
+class TestPathValidation(unittest.TestCase):
     @staticmethod
     def _good(p):
         return encode_paar_manifest(**valid_input(files=[
@@ -361,7 +362,7 @@ class TestPathValidation:
 # 7. Byte-level framing
 # ===========================================================================
 
-class TestFraming:
+class TestFraming(unittest.TestCase):
     def test_rejects_empty(self):
         hdr = encode_valid()
         r = decode_paar_manifest_header(bytes(0), hdr.archiveSize)
@@ -423,7 +424,7 @@ class TestFraming:
 # 8. Canonical encoding violations
 # ===========================================================================
 
-class TestCanonical:
+class TestCanonical(unittest.TestCase):
     _fd = compute_files_digest([{"path": "f.dat", "size": 10, "mode": 0o644, "sha256": VALID_HASH, "offset": 0}])
     _bid = compute_build_id(VALID_SRC, "linux-x64", 7, 25, _fd)
     _good = (
@@ -520,7 +521,7 @@ class TestCanonical:
 # 9. totalArchiveSize
 # ===========================================================================
 
-class TestArchiveSize:
+class TestArchiveSize(unittest.TestCase):
     def test_archive_size_too_small(self):
         hdr = encode_valid()
         r = decode_paar_manifest_header(hdr.header, 5)
@@ -551,7 +552,7 @@ class TestArchiveSize:
 # 10. Digest / buildId mutations
 # ===========================================================================
 
-class TestDigests:
+class TestDigests(unittest.TestCase):
     def test_rejects_mutated_files_digest(self):
         r = encode_paar_manifest(**valid_input())
         assert r.ok
@@ -585,7 +586,7 @@ class TestDigests:
 # 11. Immutable DTOs
 # ===========================================================================
 
-class TestImmutability:
+class TestImmutability(unittest.TestCase):
     def test_encode_result_is_namedtuple(self):
         r = encode_paar_manifest(**valid_input())
         assert r.ok
@@ -619,7 +620,7 @@ class TestImmutability:
 # 12. Adversarial input
 # ===========================================================================
 
-class TestAdversarial:
+class TestAdversarial(unittest.TestCase):
     def test_rejects_class_instance_file_entry(self):
         class Entry:
             path = "f"
@@ -669,7 +670,7 @@ class TestAdversarial:
 # 13. Buffer erasure
 # ===========================================================================
 
-class TestHeaderContent:
+class TestHeaderContent(unittest.TestCase):
     def test_header_not_trivially_zeroed(self):
         r = encode_paar_manifest(**valid_input())
         assert r.ok
@@ -681,7 +682,7 @@ class TestHeaderContent:
 # 14. Payload after header
 # ===========================================================================
 
-class TestPayload:
+class TestPayload(unittest.TestCase):
     def test_decodes_with_extra_payload_present(self):
         r = encode_paar_manifest(**valid_input())
         assert r.ok
@@ -695,7 +696,7 @@ class TestPayload:
 # 15. Roundtrip integrity
 # ===========================================================================
 
-class TestRoundtrip:
+class TestRoundtrip(unittest.TestCase):
     def _roundtrip(self, sourceCommit, target, dpv, dsr, files):
         r = encode_paar_manifest(sourceCommit, target, dpv, dsr, files)
         assert r.ok, f"encode failed: {r}"
@@ -736,7 +737,7 @@ class TestRoundtrip:
 # 16. Archive size boundary
 # ===========================================================================
 
-class TestArchiveBoundary:
+class TestArchiveBoundary(unittest.TestCase):
     def test_rejects_over_1gb_archive(self):
         r = encode_paar_manifest(
             sourceCommit=VALID_SRC, target="linux-x64",
@@ -768,7 +769,7 @@ class TestArchiveBoundary:
 # 17. Bool rejection (strict type(x) is int)
 # ===========================================================================
 
-class TestBoolRejection:
+class TestBoolRejection(unittest.TestCase):
     def test_rejects_bool_for_size(self):
         r = encode_paar_manifest(**valid_input(files=[
             {"path": "f", "size": True, "mode": 0o644, "sha256": VALID_HASH, "offset": 0}
@@ -800,7 +801,7 @@ class TestBoolRejection:
 # 18. Safe integer boundary tests (matches Number.isSafeInteger)
 # ===========================================================================
 
-class TestSafeIntegerBoundary:
+class TestSafeIntegerBoundary(unittest.TestCase):
     """Python must reject integers > SAFE_INT_MAX wherever TS uses
     Number.isSafeInteger.  SAFE_INT_MAX = 9_007_199_254_740_991."""
 
@@ -898,7 +899,7 @@ class TestSafeIntegerBoundary:
 # 19. Non-bytes decode input
 # ===========================================================================
 
-class TestDecodeInputType:
+class TestDecodeInputType(unittest.TestCase):
     def test_rejects_none(self):
         r = decode_paar_manifest_header(None, 100)  # type: ignore[arg-type]
         assert not r.ok
@@ -916,5 +917,4 @@ class TestDecodeInputType:
 
 
 if __name__ == "__main__":
-    import pytest
-    sys.exit(pytest.main([__file__, "-v", "--tb=short"]))
+    unittest.main()
