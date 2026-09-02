@@ -61,14 +61,14 @@ Status values are `queued`, `in_progress`, `blocked`, `review`, and `done`.
 | A03 | done | Agent connection DTO and remote path assumptions | Remote DTO report received |
 | A04 | done | Provider registry, streaming, cancellation, and auth flow | Provider-proxy report recovered |
 | A05 | done | Prime Sandbox SDK, lifecycle, bootstrap, and image constraints | SDK v0.2.35 adapter report received |
-| A06 | in_progress | Direct agent-to-agent communication routing and delivery guarantees | Messaging report |
+| A06 | done | Direct agent-to-agent communication routing and delivery guarantees | Messaging report received |
 | A07 | done | Observation, transcript, recap, and usage attribution | Observation report recovered |
 | A08 | done | Session catalog, passivation, rehydration, and deletion | Lifecycle report received |
 | A09 | done | Agents View status and connection-state presentation | UI report received |
 | A10 | done | Workspace snapshot and conflict-safe sync-back | Workspace report recovered |
-| A11 | in_progress | Top-level session creation APIs and CLI integration | Top-level API report |
+| A11 | done | Top-level session creation APIs and CLI integration | Integration points recovered from transcript |
 | A12 | done | Python RLM bridge and public API compatibility | RLM API report received |
-| A13 | in_progress | Test harnesses and protocol compatibility coverage | Test topology report |
+| A13 | done | Test harnesses and protocol compatibility coverage | Test topology report received |
 | A14 | done | Security threat model and secret-exposure audit | Threat model received |
 | A15 | done | Runtime packaging, exact-build bootstrap, and update behavior | Packaging report received |
 | A16 | done | Failure injection, reconnect, idempotency, and recovery behavior | Recovery report received |
@@ -79,13 +79,13 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 
 | ID | Depends on | Status | Work package |
 |---|---|---|---|
-| B01 | A01, A03 | queued | Add `ExecutionLocation` and opaque remote session DTOs |
+| B01 | A01, A03 | in_progress | Add `ExecutionLocation` and opaque remote session DTOs |
 | B02 | A01, A07 | queued | Introduce location-neutral `HostedSubagent` and preserve local behavior |
-| B03 | A02, A16 | queued | Add capability-gated remote host protocol and replay primitives |
+| B03 | A02, A16 | in_progress | Add capability-gated remote host protocol and replay primitives |
 | B04 | A02, A16 | queued | Add authenticated link state machine and fake relay transport |
-| B05 | A04, A14 | queued | Add typed streaming home-provider proxy |
-| B06 | A05, A15 | queued | Add Prime Sandbox provisioner and exact-build bootstrap |
-| B07 | A10, A14 | queued | Add Git workspace snapshot and safe sync-back |
+| B05 | A04, A14 | in_progress | Add typed streaming home-provider proxy |
+| B06 | A05, A15 | in_progress | Add Prime Sandbox provisioner and exact-build bootstrap |
+| B07 | A10, A14 | in_progress | Add Git workspace snapshot and safe sync-back |
 | B08 | A12, B01, B02 | queued | Add `sandbox` and `sandbox_options` to RLM APIs |
 | B09 | A11, B01, B03 | queued | Add top-level sandbox session creation APIs and CLI flags |
 | B10 | A06, B03, B04 | queued | Route durable direct agent-to-agent communication across hosts |
@@ -131,3 +131,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Completed A03 and A12. Remote DTOs will use opaque IDs and ISO timestamps; the Python RLM layer can forward the new kwargs without a protocol change.
 - Completed A16. Remote recovery will extend existing idempotency journals, ownership checks, reconnect cursors, and interrupted-operation records.
 - Completed A04 and A07. The home proxy will implement the existing `StreamFn` contract; remote observation will mirror serializable event and usage records into the home catalog.
+
+- Started B01, B03, B05, B06, and B07 in isolated worktrees after their architecture dependencies completed.
+- Completed A06 and A13. Remote message delivery needs receiver-side ID deduplication; integration tests will extend the existing faux-provider and injectable subagent-host harnesses.
+- Completed A11 from its retained transcript after the subagent failed to send a final summary. Top-level support enters through CLI create options and the capability-gated daemon create command.
