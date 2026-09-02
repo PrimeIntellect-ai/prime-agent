@@ -5,6 +5,7 @@ import {
 	chmodSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	readlinkSync,
 	realpathSync,
@@ -340,7 +341,7 @@ describe("compiled binary installer", () => {
 		const link = join(root, "bin", "prime-agent");
 		expect(readlinkSync(link)).toContain("v2.0.0/prime-agent");
 		expect(spawnSync(link, ["--version"], { encoding: "utf8" }).status).toBe(0);
-		expect(() => readFileSync(join(staleRoot, "1-99999991", "pid"))).toThrow();
+		expect(readdirSync(staleRoot)).toEqual([]);
 	});
 
 	test("recovers an install lock whose recorded process is gone", () => {
