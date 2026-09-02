@@ -65,7 +65,7 @@
 	"scripts": {
 		"clean": "bun ../../scripts/remove-paths.ts dist",
 		"generate-models": "bun scripts/generate-models.ts",
-		"build": "bun run generate-models && bun --bun tsgo -p tsconfig.build.json",
+		"build": "bun --bun tsgo -p tsconfig.build.json",
 		"dev": "bun --bun tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"dev:tsc": "bun --bun tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"test": "bun ../../scripts/run-with-clean-env.ts bun test --isolate --timeout 30000",

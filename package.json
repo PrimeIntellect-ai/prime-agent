@@ -15,6 +15,7 @@
 		"build": "bun run --cwd packages/tui build && bun run --cwd packages/ai build && bun run --cwd packages/agent build && bun run --cwd packages/coding-agent build",
 		"dev": "bun scripts/dev.ts",
 		"dev:tsc": "bun run --cwd packages/ai dev:tsc",
+		"models:refresh": "bun run --cwd packages/ai generate-models",
 		"check": "bun --bun biome check --write --error-on-warnings . && bun run check:type && bun run check:installer && bun run check:browser-smoke",
 		"check:installer": "bun scripts/check-installer-render.mjs",
 		"check:browser-smoke": "bun scripts/check-browser-smoke.mjs",

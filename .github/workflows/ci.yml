@@ -59,16 +59,6 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Check model catalog drift
-        run: |
-          if ! git diff --exit-code packages/ai/src/models.generated.ts; then
-            echo "ERROR: Model catalog has drifted from committed state."
-            echo "Run 'bun run build' in packages/ai to regenerate, then commit the updated models.generated.ts."
-            echo "Diff:"
-            git diff packages/ai/src/models.generated.ts
-            exit 1
-          fi
-
       - name: Check
         run: bun run check
 
