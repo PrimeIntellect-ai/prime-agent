@@ -23,9 +23,9 @@ export type ReadResult = Readonly<{ ok: true; payload: Uint8Array }> | Readonly<
 export type ConsumeResult<T> = Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; code: ErrorCode }>;
 
 export interface ReadOptions {
-	/** Total wall-clock timeout in ms (default 30 000). */
+	/** Total wall-clock timeout in ms (default 30 000, bounded 1..120000). */
 	totalTimeoutMs?: number;
-	/** Bounded close-callback confirmation timeout in ms (default 2 000). */
+	/** Bounded close-callback confirmation timeout in ms (default 2 000, bounded 1..10000). */
 	closeConfirmTimeoutMs?: number;
 	/**
 	 * Internal/test-only: inject a custom FsFdAdapter.
@@ -73,6 +73,10 @@ const MAX_PAYLOAD_BYTES = 65_536; // 64 KiB
 const HEADER_BYTES = 4;
 const TRAILING_BYTES = 1;
 const MAX_SYNC_DEPTH = 128;
+const MIN_TOTAL_TIMEOUT_MS = 1;
+const MAX_TOTAL_TIMEOUT_MS = 120_000;
+const MIN_CLOSE_CONFIRM_TIMEOUT_MS = 1;
+const MAX_CLOSE_CONFIRM_TIMEOUT_MS = 10_000;
 
 const DEFAULT_ADAPTER: FsFdAdapter = Object.freeze({ read: fsRead, close: fsClose });
 
@@ -98,6 +102,9 @@ function copyOptions(raw: unknown): ParsedOptions | null {
 	}
 	if (typeof raw !== "object" || Array.isArray(raw)) return null;
 
+	// Reject non-plain prototype (e.g. class instances, Date, etc.)
+	if (Object.getPrototypeOf(raw) !== Object.prototype) return null;
+
 	// Get own property descriptors — throws immediately on some hostile Proxy.
 	let descs: Record<string, PropertyDescriptor>;
 	try {
@@ -106,6 +113,10 @@ function copyOptions(raw: unknown): ParsedOptions | null {
 		return null;
 	}
 
+	// Reject symbol keys — they are returned by getOwnPropertyDescriptors.
+	const ownSymbols = Object.getOwnPropertySymbols(raw);
+	if (ownSymbols.length > 0) return null;
+
 	// Only own enumerable data descriptors permitted.
 	const keys = Object.keys(descs);
 	for (const k of keys) {
@@ -113,28 +124,70 @@ function copyOptions(raw: unknown): ParsedOptions | null {
 		if (!d) return null;
 		if (!d.enumerable) return null;
 		if (d.get !== undefined || d.set !== undefined) return null;
-		// d.value may be undefined; that's fine.
 		if (!OPT_ALLOWED.has(k)) return null;
 	}
 
 	let totalTimeoutMs = DEFAULT_TOTAL_TIMEOUT_MS;
 	if ("totalTimeoutMs" in descs) {
 		const v = descs.totalTimeoutMs.value;
-		if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || !Number.isInteger(v)) return null;
+		if (
+			typeof v !== "number" ||
+			!Number.isFinite(v) ||
+			!Number.isInteger(v) ||
+			v < MIN_TOTAL_TIMEOUT_MS ||
+			v > MAX_TOTAL_TIMEOUT_MS
+		)
+			return null;
 		totalTimeoutMs = v;
 	}
 
 	let closeConfirmTimeoutMs = DEFAULT_CLOSE_CONFIRM_TIMEOUT_MS;
 	if ("closeConfirmTimeoutMs" in descs) {
 		const v = descs.closeConfirmTimeoutMs.value;
-		if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || !Number.isInteger(v)) return null;
+		if (
+			typeof v !== "number" ||
+			!Number.isFinite(v) ||
+			!Number.isInteger(v) ||
+			v < MIN_CLOSE_CONFIRM_TIMEOUT_MS ||
+			v > MAX_CLOSE_CONFIRM_TIMEOUT_MS
+		)
+			return null;
 		closeConfirmTimeoutMs = v;
 	}
 
-	let adapter = DEFAULT_ADAPTER;
+	let adapter: FsFdAdapter = DEFAULT_ADAPTER;
+
+	// Validate _adapter: must be own enumerable data descriptor with
+	// read/close own data descriptor function values (no getters).
 	if ("_adapter" in descs) {
 		const a = descs._adapter.value;
-		if (!a || typeof a !== "object" || typeof a.read !== "function" || typeof a.close !== "function") return null;
+		if (!a || typeof a !== "object") return null;
+
+		// Prototype must be Object.prototype (plain object).
+		if (Object.getPrototypeOf(a) !== Object.prototype) return null;
+
+		// read must be own enumerable data descriptor, value is function.
+		const rDesc = Object.getOwnPropertyDescriptor(a, "read");
+		if (
+			!rDesc ||
+			!rDesc.enumerable ||
+			rDesc.get !== undefined ||
+			rDesc.set !== undefined ||
+			typeof rDesc.value !== "function"
+		)
+			return null;
+
+		// close must be own enumerable data descriptor, value is function.
+		const cDesc = Object.getOwnPropertyDescriptor(a, "close");
+		if (
+			!cDesc ||
+			!cDesc.enumerable ||
+			cDesc.get !== undefined ||
+			cDesc.set !== undefined ||
+			typeof cDesc.value !== "function"
+		)
+			return null;
+
 		adapter = a;
 	}
 
@@ -204,9 +257,7 @@ export function readSandboxBootstrapFrame(fd: number, options?: ReadOptions): Pr
 		// Close-outcome dispatcher, installed by doClose.
 		let closeDispatch: ((code: "CLOSE_OK" | "CLOSE_FAILED" | "CLOSE_UNCONFIRMED") => void) | null = null;
 
-		// Synchronous-call-depth guard.  Every continuation from a read
-		// callback increments this; when it reaches MAX_SYNC_DEPTH the
-		// continuation is deferred via setImmediate to prevent stack overflow.
+		// Synchronous-call-depth guard.
 		let syncDepth = 0;
 
 		// ---- helpers -----------------------------------------------------
@@ -247,7 +298,7 @@ export function readSandboxBootstrapFrame(fd: number, options?: ReadOptions): Pr
 
 		function doClose(onDone: (code: "CLOSE_OK" | "CLOSE_FAILED" | "CLOSE_UNCONFIRMED") => void): void {
 			if (closeCalled) {
-				(onDone as (code: string) => void)("INTERNAL");
+				// Double close — silently ignore.
 				return;
 			}
 			closeCalled = true;
@@ -276,7 +327,6 @@ export function readSandboxBootstrapFrame(fd: number, options?: ReadOptions): Pr
 					}
 				});
 			} catch {
-				// Synchronous throw from adapter.close
 				if (closeConfirmTimer !== null) {
 					clearTimeout(closeConfirmTimer);
 					closeConfirmTimer = null;
@@ -293,11 +343,14 @@ export function readSandboxBootstrapFrame(fd: number, options?: ReadOptions): Pr
 
 		/**
 		 * Called from every adapter.read callback.
-		 * Validates the token matches the active operation, manages buffer
-		 * lifecycle (ignore stale callbacks; on cancel erase the token's
-		 * buffer since it was retained; map adapter errors to phase codes).
+		 * Validates the token matches the active operation.
+		 * bytesRead validation:
+		 *   - undefined/non-integer/negative/ > requested → phase error
+		 *   - 0 READ in header/payload phase → premature EOF → phase error
+		 *   - 0 READ in trailing phase → successful EOF (success)
 		 * Continuations are deferred with setImmediate when the
-		 * synchronous depth exceeds the limit.
+		 * synchronous depth exceeds the limit; the deferred callback
+		 * re-checks cancelled/settled before running onOk.
 		 */
 		function onReadCallback(
 			token: ReadToken,
@@ -307,7 +360,6 @@ export function readSandboxBootstrapFrame(fd: number, options?: ReadOptions): Pr
 			onOk: (br: number) => void,
 		): void {
 			// Stale/double callback: token does not match current operation.
-			// Ignore completely — do NOT touch the buffer.
 			if (pendingReadToken !== token) {
 				return;
 			}
@@ -322,11 +374,14 @@ export function readSandboxBootstrapFrame(fd: number, options?: ReadOptions): Pr
 				return;
 			}
 
-			// Normalize bytesRead: undefined/non-number → 0 (retry);
-			// negative or too-large → error.
-			const rawBr = typeof bytesReadArg === "number" && Number.isSafeInteger(bytesReadArg) ? bytesReadArg : 0;
+			// Validate bytesRead.
+			const isValid =
+				typeof bytesReadArg === "number" &&
+				Number.isSafeInteger(bytesReadArg) &&
+				bytesReadArg >= 0 &&
+				bytesReadArg <= token.requested;
 
-			if (err || rawBr < 0 || rawBr > token.requested) {
+			if (err || !isValid) {
 				const code: ErrorCode =
 					phase === "header" ? "READ_HEADER" : phase === "payload" ? "READ_PAYLOAD" : "READ_TRAILING";
 				erase(token.buf);
@@ -334,14 +389,28 @@ export function readSandboxBootstrapFrame(fd: number, options?: ReadOptions): Pr
 				return;
 			}
 
-			// Defer continuation if sync depth limit exceeded
+			const bytesRead = bytesReadArg;
+
+			// Zero bytes in header or payload phase → premature EOF.
+			if (bytesRead === 0 && phase !== "trailing") {
+				const code: ErrorCode = phase === "header" ? "READ_HEADER" : "READ_PAYLOAD";
+				erase(token.buf);
+				doClose((cc) => settle({ ok: false, code: cc === "CLOSE_OK" ? code : cc }));
+				return;
+			}
+
+			// Defer continuation if sync depth limit exceeded.
 			syncDepth++;
 			if (syncDepth >= MAX_SYNC_DEPTH) {
-				const br = rawBr;
+				const br = bytesRead;
 				syncDepth = 0;
-				setImmediate(() => onOk(br));
+				setImmediate(() => {
+					// Re-check settlement/cancellation before continuing.
+					if (settled || cancelled) return;
+					onOk(br);
+				});
 			} else {
-				onOk(rawBr);
+				onOk(bytesRead);
 			}
 		}
 
@@ -363,7 +432,6 @@ export function readSandboxBootstrapFrame(fd: number, options?: ReadOptions): Pr
 					onReadCallback(token, err, br, phase, onCb);
 				});
 			} catch {
-				// Synchronous throw from adapter.read
 				if (pendingReadToken === token) {
 					pendingReadToken = null;
 				}
@@ -407,9 +475,8 @@ export function readSandboxBootstrapFrame(fd: number, options?: ReadOptions): Pr
 		// ---- phase completion handlers -----------------------------------
 
 		function onHeaderComplete(): void {
-			// Use DataView for unsigned uint32 (avoids signed bitwise ops)
 			const view = new DataView(headerBuf.buffer, headerBuf.byteOffset, headerBuf.byteLength);
-			frameLength = view.getUint32(0, false); // big-endian
+			frameLength = view.getUint32(0, false);
 
 			if (frameLength === 0) {
 				erase(headerBuf);
