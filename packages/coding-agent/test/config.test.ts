@@ -6,6 +6,7 @@ import {
 	detectInstallMethod,
 	ENV_LEGACY_SESSION_DIR,
 	ENV_SESSION_DIR,
+	expandTildePath,
 	getDaemonLogPath,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
@@ -445,6 +446,33 @@ describe("session paths", () => {
 		const sessionDir = getDefaultSessionDir(cwd, join(tempDir, "agent"));
 
 		expect(sessionDir).toBe(sessionRoot);
+	});
+});
+
+describe("expandTildePath", () => {
+	test("expands a bare tilde to the home directory", () => {
+		expect(expandTildePath("~")).toBe(homedir());
+	});
+
+	test("expands a forward-slash tilde prefix", () => {
+		expect(expandTildePath("~/prime-agent-sessions")).toBe(join(homedir(), "prime-agent-sessions"));
+	});
+
+	test("expands a backslash tilde prefix only on Windows", () => {
+		const input = "~\\prime-agent-sessions";
+		expect(expandTildePath(input)).toBe(
+			process.platform === "win32" ? join(homedir(), "prime-agent-sessions") : input,
+		);
+	});
+
+	test("preserves non-native separators outside Windows", () => {
+		const input = "~/foo\\bar";
+		expect(expandTildePath(input)).toBe(join(homedir(), "foo\\bar"));
+	});
+
+	test("leaves non-tilde paths unchanged", () => {
+		expect(expandTildePath("/absolute/path")).toBe("/absolute/path");
+		expect(expandTildePath("relative/path")).toBe("relative/path");
 	});
 });
 

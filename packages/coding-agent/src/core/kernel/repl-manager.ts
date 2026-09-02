@@ -256,6 +256,7 @@ export class ReplKernelManager {
 			env: {
 				...process.env,
 				...this.options.env,
+				...(process.platform === "win32" ? { PYTHONUTF8: "1" } : {}),
 				PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid),
 			},
 			stdio: ["pipe", "pipe", "pipe"],

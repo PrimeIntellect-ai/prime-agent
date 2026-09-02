@@ -1059,7 +1059,7 @@ export class AgentDaemon {
 			this.pendingRlmSpawnAppends.set(`${parentState.activeSessionId}#${input.childId}`, spawnAppend);
 		}
 		try {
-			writeRlmSubagentDisplayEntry({
+			const written = writeRlmSubagentDisplayEntry({
 				type: "rlm_subagent",
 				childId: input.childId,
 				sessionName: input.sessionName,
@@ -1070,7 +1070,10 @@ export class AgentDaemon {
 				createdAt: input.createdAt ?? Date.now(),
 				updatedAt: new Date().toISOString(),
 			});
-			return true;
+			if (!written) {
+				this.log(`skipped RLM subagent display entry for ${input.childId}: deleted tombstone exists`);
+			}
+			return written;
 		} catch (error) {
 			this.log(
 				`failed to persist RLM subagent display entry: ${error instanceof Error ? error.message : String(error)}`,
@@ -1102,8 +1105,28 @@ export class AgentDaemon {
 		} else if (edges.length > 0) {
 			// Only tombstoned edges: the tombstones are already durable, nothing
 			// to re-append. A prior deletion may have crashed before its artifact
-			// sweep, so retry it here.
+			// sweep. Restore the display tombstone before sweeping artifacts.
 			for (const tombstoned of edges) {
+				try {
+					const currentDisplay = await readRlmSubagentDisplayEntry(dirname(tombstoned.child));
+					if (!currentDisplay || currentDisplay.status !== "deleted") {
+						writeRlmSubagentDisplayEntry({
+							type: "rlm_subagent",
+							childId,
+							sessionName: currentDisplay?.sessionName ?? tombstoned.name,
+							sessionDir: dirname(tombstoned.child),
+							sessionFile: currentDisplay?.sessionFile ?? tombstoned.child,
+							...rlmSubagentMetadataFields(currentDisplay ?? {}),
+							status: "deleted",
+							createdAt: currentDisplay?.createdAt ?? 0,
+							updatedAt: new Date().toISOString(),
+						});
+					}
+				} catch {
+					// Best-effort: the ledger tombstone is the authority; the display
+					// file is display-grade and the sweep below will remove artifacts.
+					this.log(`failed to reconcile display entry for tombstoned RLM subagent ${childId}`);
+				}
 				await this.deleteRlmSubagentArtifacts(childId, tombstoned.child);
 			}
 			return;

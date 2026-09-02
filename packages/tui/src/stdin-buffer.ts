@@ -168,6 +168,12 @@ function parseUnmodifiedKittyPrintableCodepoint(sequence: string): number | unde
 	return codepoint >= 32 ? codepoint : undefined;
 }
 
+function isRawMultilinePaste(data: string): boolean {
+	if (data.includes(ESC)) return false;
+	if (!data.includes("\r") && !data.includes("\n")) return false;
+	return /[^\r\n]/.test(data);
+}
+
 function extractCompleteSequences(buffer: string): { sequences: string[]; remainder: string } {
 	const sequences: string[] = [];
 	let pos = 0;
@@ -316,6 +322,14 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 					this.process(remaining);
 				}
 			}
+			return;
+		}
+
+		if (isRawMultilinePaste(this.buffer)) {
+			const pastedContent = this.buffer;
+			this.buffer = "";
+			this.pendingKittyPrintableCodepoint = undefined;
+			this.emit("paste", pastedContent);
 			return;
 		}
 

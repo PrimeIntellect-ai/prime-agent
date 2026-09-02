@@ -6554,6 +6554,52 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("reconciles a stale display status on a tombstoned ledger edge (idempotent delete)", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-reconcile-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			const host = internals.createSubagentRuntimeHost(parentState);
+			const displayPath = join(fixture.childSessionDir, "rlm-subagent.json");
+
+			// First delete: write the deletion tombstone to the display and
+			// append a delete record to the ledger.
+			await host.deleteRlmSubagentRuntime(fixture.childId);
+			expect(JSON.parse(readFileSync(displayPath, "utf8"))).toMatchObject({ status: "deleted" });
+
+			// Simulate a stale overwrite by a completion write that raced
+			// before the ledger tombstone was durable. The display now claims
+			// the child is running again.
+			writeFileSync(
+				displayPath,
+				`${JSON.stringify({
+					type: "rlm_subagent",
+					childId: fixture.childId,
+					sessionName: "stale",
+					sessionDir: fixture.childSessionDir,
+					sessionFile: fixture.childSessionFile,
+					status: "running",
+					createdAt: 1,
+					updatedAt: new Date().toISOString(),
+				})}\n`,
+			);
+
+			// Retry the delete: the tombstoned-edge path must reconcile the
+			// display back to "deleted" and sweep the artifact dir.
+			await host.deleteRlmSubagentRuntime(fixture.childId);
+
+			expect(JSON.parse(readFileSync(displayPath, "utf8"))).toMatchObject({ status: "deleted" });
+			expect(existsSync(fixture.childArtifactDir)).toBe(false);
+			expect(existsSync(fixture.childSessionFile)).toBe(true);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("resolves a delete that joins an in-flight passivation close without awaiting the trace upload", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-passivation-flush-"));
 		let releaseDispose!: () => void;

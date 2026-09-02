@@ -3475,6 +3475,60 @@ describe("AgentSession rlm recursion", () => {
 		});
 	});
 
+	it("emits exactly one failure notice per delete retry (coalesced, then reset)", async () => {
+		const { child: hostedChild, completion: childCompletion, hasStarted } = createAbortInsensitiveChild();
+		let cleanupAttempts = 0;
+		const root = createSession({
+			agentMessageController: {
+				listAgents: async () => ({
+					current: { activeSessionId: "parent-active", sessionId: "parent-session" },
+					agents: [],
+				}),
+				sendAgentMessage: async () => {
+					throw new Error("unexpected direct send");
+				},
+			},
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: async () => ({ session: hostedChild }),
+				deleteRlmSubagentRuntime: () => {
+					cleanupAttempts++;
+					throw new Error("cleanup failed");
+				},
+			},
+		});
+
+		const spawned = await root.runRlmChild("coalesced-notice test", { name: "notice-worker" });
+		await waitFor(hasStarted);
+		const internals = root as unknown as InspectableRlmSession;
+
+		// First delete attempt: cleanup fails.
+		await expect(root.deleteRlmSubagent(spawned.rlm_child_id)).resolves.toMatchObject({
+			subagent: { rlm_child_id: spawned.rlm_child_id },
+		});
+		await waitFor(() => internals._rlmChildCleanupFailures.size === 1);
+		expect(cleanupAttempts).toBe(1);
+
+		// Exactly one failure notice for the first attempt.
+		const failureNotices = () =>
+			root.messages.filter((message) => message.role === "custom" && message.customType === "rlm_child_failure");
+		await vi.waitFor(() => {
+			expect(failureNotices()).toHaveLength(1);
+			expect(failureNotices()[0]).toMatchObject({
+				details: { childId: spawned.rlm_child_id },
+			});
+		});
+
+		// Second delete attempt (retry): resets deletionFailureNotice, emits a fresh notice.
+		await expect(root.deleteRlmSubagent(spawned.rlm_child_id)).resolves.toMatchObject({
+			subagent: { rlm_child_id: spawned.rlm_child_id },
+		});
+		await vi.waitFor(() => expect(failureNotices()).toHaveLength(2));
+
+		// Let the child finish so the terminal settlement can proceed.
+		childCompletion.resolve();
+		await sleep(50);
+	});
+
 	it("settles a pre-existing deletion cleanup failure during parent disposal", async () => {
 		const { child: hostedChild, completion: childCompletion, hasStarted } = createAbortInsensitiveChild();
 		const disposeHostedChild = vi.spyOn(hostedChild, "disposeAsync");
@@ -4041,6 +4095,7 @@ print(_result.name)
 
 interface InspectableRlmDirSession {
 	_ensureRlmSessionDir(): string | undefined;
+	_ensureSessionScratchDir(): string | undefined;
 	_rlmKernelEnv(): Record<string, string>;
 }
 
@@ -4113,6 +4168,7 @@ describe("AgentSession RLM session dir", () => {
 		const env = inspectable._rlmKernelEnv();
 		expect(env.RLM_SESSION_DIR).toBeUndefined();
 		expect(env.RLM_HARNESS_STATE_DIR).toBeUndefined();
+		expect(env.PRIME_AGENT_SESSION_TMP).toBeUndefined();
 		expect(env.RLM_GLOBAL_HARNESS_STATE_DIR).toBeDefined();
 		expect(env).toMatchObject({ RLM_DEPTH: "0" });
 
@@ -4128,9 +4184,20 @@ describe("AgentSession RLM session dir", () => {
 		const artifactDir = sessionManager.getSessionArtifactDir();
 		expect(artifactDir).toBeDefined();
 		expect(inspectable._ensureRlmSessionDir()).toBe(artifactDir);
-		expect(inspectable._rlmKernelEnv().RLM_SESSION_DIR).toBe(artifactDir);
-		expect(inspectable._rlmKernelEnv().RLM_HARNESS_STATE_DIR).toBe(join(artifactDir!, "harness"));
-		expect(inspectable._rlmKernelEnv().RLM_GLOBAL_HARNESS_STATE_DIR).toBeDefined();
+		const scratchDir = join(artifactDir!, "tmp");
+		expect(inspectable._ensureSessionScratchDir()).toBe(scratchDir);
+		const env = inspectable._rlmKernelEnv();
+		expect(env.RLM_SESSION_DIR).toBe(artifactDir);
+		expect(env.RLM_HARNESS_STATE_DIR).toBe(join(artifactDir!, "harness"));
+		expect(env.RLM_GLOBAL_HARNESS_STATE_DIR).toBeDefined();
+		expect(env).toMatchObject({
+			PRIME_AGENT_SESSION_TMP: scratchDir,
+			TMP: scratchDir,
+			TEMP: scratchDir,
+			TMPDIR: scratchDir,
+		});
+		expect(root.agent.state.systemPrompt).toContain("# Session Scratch Directory");
+		expect(root.agent.state.systemPrompt).toContain(scratchDir.replace(/\\/g, "/"));
 	});
 
 	it("points RLM_HARNESS_STATE_DIR at the session's own artifact dir for subagent sessions", () => {

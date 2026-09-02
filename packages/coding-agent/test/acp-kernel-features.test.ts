@@ -196,12 +196,13 @@ print(json.dumps({
 			const manager = await provisioner.ensure();
 
 			const result = await manager.execute(`
-import json, os
+import json, os, sys
 children = await rlm.list_subagents()
 removed = await rlm.delete_subagent(children[0])
 print(json.dumps({
     "depth": os.environ.get("RLM_DEPTH"),
     "max_depth": os.environ.get("RLM_MAX_DEPTH"),
+    "utf8_mode": sys.flags.utf8_mode,
     "names": [child.session_name for child in children],
     "removed": removed.session_name,
 }, sort_keys=True))
@@ -212,6 +213,7 @@ print(json.dumps({
 			expect(payload.removed).toBe("reviewer");
 			expect(payload.depth).toBe("0");
 			expect(payload.max_depth).toBe("1");
+			if (process.platform === "win32") expect(payload.utf8_mode).toBe(1);
 		},
 	);
 

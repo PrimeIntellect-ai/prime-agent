@@ -1,0 +1,1 @@
+- Fixed Windows daemon startup delays, session and bootstrap lock races, RLM deletion races, Git Bash selection, durable settings writes, multiline paste handling, path normalization, and session scratch isolation.

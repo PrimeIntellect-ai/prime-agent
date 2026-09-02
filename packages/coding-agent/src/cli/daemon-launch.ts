@@ -411,6 +411,7 @@ Then retry the original command.`,
 		{
 			cwd: spawnCwd ?? process.cwd(),
 			detached: true,
+			windowsHide: process.platform === "win32",
 			env,
 			// A pipe would tie the daemon's stderr to this short-lived CLI
 			// (EPIPE once it exits); crash details come from the daemon log,

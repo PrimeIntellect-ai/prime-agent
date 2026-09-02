@@ -127,6 +127,18 @@ export interface DaemonTransportClient {
 	close(): void;
 }
 
+const DEFAULT_DAEMON_REQUEST_TIMEOUT_MS = 30_000;
+/** Windows AV/EDR real-time scanning can delay session-worker startup to 30-50s.
+ *  Only the session-create request waits longer on win32; every other command
+ *  keeps the 30s default so unrelated requests are not extended. */
+const WINDOWS_DAEMON_CREATE_TIMEOUT_MS = 120_000;
+
+function defaultDaemonRequestTimeout(command: DaemonCommandBody): number {
+	return command.type === "create" && process.platform === "win32"
+		? WINDOWS_DAEMON_CREATE_TIMEOUT_MS
+		: DEFAULT_DAEMON_REQUEST_TIMEOUT_MS;
+}
+
 const DEFAULT_RECONNECT_TIMEOUT_MS = 60_000;
 const RECONNECT_CONNECT_TIMEOUT_MS = 1000;
 const RECONNECT_HELLO_TIMEOUT_MS = 3000;
@@ -321,7 +333,7 @@ export class DaemonClient {
 
 	async request(
 		command: DaemonCommandBody,
-		timeoutMs = 30000,
+		timeoutMs = defaultDaemonRequestTimeout(command),
 		options: DaemonClientRequestOptions = {},
 	): Promise<DaemonResponse> {
 		if (!this.socket || this.socket.destroyed) {
