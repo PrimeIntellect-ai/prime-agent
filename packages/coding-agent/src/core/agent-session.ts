@@ -155,6 +155,7 @@ import {
 	type AvoRunState,
 	AvoSessionRuntime,
 	type AvoStopGate,
+	type AvoVariationContract,
 	type AvoVerificationBrokerReceipt,
 	applyAvoSpecContractStopGate,
 	assertAvoClaimSourceContextSafe,
@@ -592,6 +593,11 @@ export interface AgentSessionConfig {
 	 * is 0 and no persisted thread_goal_state entry exists in the branch.
 	 */
 	initialGoal?: { objective: string; tokenBudget?: number };
+	/**
+	 * Whether AVO variation operator and lifecycle is enabled.
+	 * When false, normal root tasks run without being redefined as AVO variation episodes.
+	 */
+	enableAvo?: boolean;
 	/** Enforce the default AVO gate and canonical delivery at root turn completion. Default: true. */
 	enforceAvoCompletion?: boolean;
 }
@@ -1537,19 +1543,26 @@ export class AgentSession {
 		const resolvedRlmMaxDepth = this._resolveRlmMaxDepth();
 		this._rlmMaxDepth = resolvedRlmMaxDepth.maxDepth;
 		this._rlmMaxDepthSource = resolvedRlmMaxDepth.source;
-		this._avoRuntime =
-			this._rlmDepth === 0
-				? new AvoSessionRuntime(
-						this.sessionManager.getSessionArtifactDir(),
-						this.sessionManager.getSessionId(),
-						undefined,
-						this._cwd,
-						this._agentDir ?? getAgentDir(),
-						undefined,
-						this._avoWorkspaceExcludedRoots(),
-					)
-				: undefined;
-		this._enforceAvoCompletion = config.enforceAvoCompletion ?? true;
+		const avoActive =
+			this._rlmDepth === 0 &&
+			config.enableAvo !== false &&
+			(config.enableAvo === true ||
+				config.enforceAvoCompletion === true ||
+				process.env.PRIME_ENABLE_AVO === "true" ||
+				process.env.PRIME_ENABLE_AVO === "1");
+
+		this._avoRuntime = avoActive
+			? new AvoSessionRuntime(
+					this.sessionManager.getSessionArtifactDir(),
+					this.sessionManager.getSessionId(),
+					undefined,
+					this._cwd,
+					this._agentDir ?? getAgentDir(),
+					undefined,
+					this._avoWorkspaceExcludedRoots(),
+				)
+			: undefined;
+		this._enforceAvoCompletion = avoActive && (config.enforceAvoCompletion ?? config.enableAvo === true);
 		this._autoresearchStore =
 			this._rlmDepth === 0
 				? new AutoresearchStore(this.sessionManager.getSessionArtifactDir(), undefined, this._cwd)
@@ -1628,6 +1641,11 @@ export class AgentSession {
 	/** Refreshes MCP provider registrations without rebuilding the session runtime. */
 	refreshMcpProviders(): void {
 		this._mcpManager?.refresh();
+	}
+
+	/** Whether AVO variation operator and lifecycle is enabled in this session. */
+	get isAvoEnabled(): boolean {
+		return this._avoRuntime !== undefined;
 	}
 
 	/**
@@ -7984,6 +8002,32 @@ export class AgentSession {
 						completion_deferred_to_host_delivery: true,
 					};
 				});
+			}
+			case "avo.variation.run": {
+				if (!payload.contract || typeof payload.contract !== "object") {
+					throw new Error("avo.variation.run requires a contract object");
+				}
+				const contract = payload.contract as unknown as AvoVariationContract;
+				const result = await runtime.runVariationEpisode(contract, async (agent) => {
+					if (Array.isArray(payload.actions)) {
+						for (const action of payload.actions as Array<{ type: string; [k: string]: unknown }>) {
+							if (action.type === "sample_knowledge" && typeof action.knowledgeId === "string") {
+								agent.sampleKnowledge(action.knowledgeId, action.reason as string | undefined);
+							} else if (action.type === "sample_lineage" && typeof action.solutionId === "string") {
+								agent.sampleLineage(action.solutionId, action.reason as string | undefined);
+							} else if (action.type === "edit" && typeof action.candidateRef === "string") {
+								agent.recordEdit(action.candidateRef, (action.content as string) ?? "");
+							} else if (action.type === "evaluate" && typeof action.candidateRef === "string") {
+								await agent.evaluateCandidate(action.candidateRef, (action.content as string) ?? "");
+							} else if (action.type === "diagnose" && typeof action.diagnostics === "string") {
+								agent.recordDiagnosis(action.diagnostics);
+							} else if (action.type === "repair" && typeof action.candidateRef === "string") {
+								agent.recordRepair(action.candidateRef, (action.content as string) ?? "");
+							}
+						}
+					}
+				});
+				return { result: result as unknown as Record<string, unknown> };
 			}
 			default:
 				throw new Error(`unknown AVO request type "${type}"`);

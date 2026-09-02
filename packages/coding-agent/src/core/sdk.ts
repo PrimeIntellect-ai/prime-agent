@@ -376,6 +376,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		autonomous: options.autonomous,
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
+		enableAvo: options.enableAvo,
 		enforceAvoCompletion: options.enforceAvoCompletion,
 	});
 	const extensionsResult = resourceLoader.getExtensions();

@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 
 import { Agent, type AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { AGENT_MESSAGE_SOURCE, createAgentSessionMessage } from "../../src/core/agent-messages.js";
 import { AgentSession } from "../../src/core/agent-session.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
@@ -114,6 +114,18 @@ function writeExecutableSpecFixture(root: string): void {
 }
 
 describe("AgentSession universal AVO runtime", () => {
+	const originalAvoEnv = process.env.PRIME_ENABLE_AVO;
+	beforeAll(() => {
+		process.env.PRIME_ENABLE_AVO = "true";
+	});
+	afterAll(() => {
+		if (originalAvoEnv === undefined) {
+			delete process.env.PRIME_ENABLE_AVO;
+		} else {
+			process.env.PRIME_ENABLE_AVO = originalAvoEnv;
+		}
+	});
+
 	it("advertises every obligation and assumption bridge to the Python kernel", () => {
 		for (const type of [
 			"avo.obligations.register",
@@ -230,7 +242,7 @@ describe("AgentSession universal AVO runtime", () => {
 			horizonSelection: "auto",
 			routing: { environment: "coding", horizon: "iterative", source: "host_auto" },
 		});
-		expect(harness.session.systemPrompt).toContain("AVO is Prime's default operating architecture");
+		expect(harness.session.systemPrompt).toContain("AVO provides the variation operator");
 		expect(harness.session.systemPrompt).toContain(
 			"adapter=coding, horizon=iterative, verification_class=coding, and verification_policy=required",
 		);

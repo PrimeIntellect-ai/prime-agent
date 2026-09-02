@@ -184,6 +184,7 @@ export {
 	parseAvoTrialRunInput,
 } from "./store.js";
 export {
+	buildAvoStagnationSteeringPrompt,
 	buildAvoSupervisorBootstrapPrompt,
 	buildAvoSupervisorMessage,
 	buildAvoSupervisorPacket,
@@ -191,10 +192,13 @@ export {
 	findAvoSupervisorResponseText,
 	parseAvoSupervisorMessage,
 	requiresAvoAdversarialReview,
+	requiresAvoAdversarialReviewExtension,
 	requiresAvoTrajectoryVerification,
 	shouldActivateAvoSupervisor,
+	shouldActivateStagnationSupervisor,
 } from "./supervisor.js";
 export * from "./types.js";
+export * from "./variation.js";
 export {
 	AVO_VERIFICATION_BROKER_PYTHON_AUTHORITY_ENV,
 	AVO_VERIFICATION_BROKER_SOCKET_ENV,

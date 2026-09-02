@@ -1,24 +1,24 @@
 ---
 name: avo
-description: Prime's default candidate-evaluate-revise lifecycle for every root task. Always use this skill before completing general, coding, or research work; the host automatically chooses the internal evaluation adapter and task horizon, keeping direct tasks lightweight while enabling lineage, NOOA memory, recovery, and trajectory supervision when needed.
+description: Agentic Variation Operator (AVO, arXiv:2603.24517) candidate-evaluate-revise lifecycle. Used for autonomous optimization tasks; the host provides the internal evaluation adapter and task horizon, keeping direct tasks lightweight while enabling lineage, memory, and trajectory supervision when needed.
 ---
 
-# Universal AVO
+# Agentic Variation Operator (AVO)
 
-Prime has one AVO substrate. General, coding, and research are evaluation
-adapters; direct, iterative, and long are task horizons. The TypeScript host
-owns canonical state and lineage. This Python package is a typed bridge.
+AVO replaces the classical variation operator with an autonomous agent loop (arXiv:2603.24517)
+having access to the committed solution lineage ($P_t$), domain knowledge ($K$), and scoring utility ($f$).
+General, coding, and research are evaluation adapters; direct, iterative, and long are task horizons.
+The TypeScript host owns canonical state and lineage. This Python package is a typed bridge.
 
-AVO is always active for a root task; it is not a mode the user has to enter.
-The host selects the adapter and horizon automatically from the task. Do not ask
-the user to choose an adapter. The model cannot select an environment and may
-only escalate the horizon to `iterative` or `long`. A user may override the
-horizon through the `/avo horizon` command.
+AVO operates within optimization and evolutionary variation tasks. The host selects the adapter
+and horizon automatically from the task. Do not ask the user to choose an adapter. The model
+cannot select an environment and may only escalate the horizon to `iterative` or `long`. A user
+may override the horizon through the `/avo horizon` command.
 The host also selects `verificationClass`: `external_factual`,
 `deterministic_local`, `coding`, `research`, `artifact`, or `subjective`.
 Required `external_factual` candidates cannot be recorded without explicit
 verbatim claims.
-After a task passes its stop gate, the next root task starts a fresh task run;
+After an optimization task passes its stop gate, the next task starts a fresh task run;
 the prior candidate/evaluation lineage is archived while verified memory remains
 available across runs.
 
@@ -140,12 +140,19 @@ Never pass or request an environment override.
    workspace edit or fresh candidate by itself no longer counts as qualified
    progress. Reading,
    narrating, repeating the same failed check, inspecting Prime internals, or
-   merely saying done does not. Six consecutive tool batches without a
-   milestone inject an immediate steering intervention. A host-bounded tool
-   timeout intervenes immediately without waiting for six batches and requires
-   a bounded reproducer plus a nontermination fix before retrying. At blocked root-turn
-   boundaries, one empty turn triggers a corrective watch, two trigger
-   intervention, and three escalate an automatic horizon to long.
+   merely saying done does not. Four consecutive tool batches without a
+   milestone inject immediate steering and activate state-aware IPython
+   probation: the next cell must invoke the exact next AVO action permitted by
+   current host state. A host-bounded tool timeout intervenes immediately
+   without waiting for four batches and requires a bounded reproducer plus a
+   nontermination fix before retrying. At blocked root-turn boundaries, one
+   empty turn triggers a corrective watch, two trigger intervention, and three
+   may escalate an automatic horizon to long only before the coding
+   candidate-admission contract is locked. Once a coding baseline execution,
+   candidate, evaluation, or experiment has begun, watchdog steering cannot
+   add new horizon-derived candidate prerequisites. Follow the exact recovery
+   action in the intervention rather than probing the API or repeating an
+   unchanged verifier.
    Repeatedly changing or decorating an already verified canonical delivery
    triggers a separate delivery intervention without weakening its exact bind.
    Automatic routing never lowers an active horizon.

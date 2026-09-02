@@ -56,11 +56,55 @@ export function requiresAvoAdversarialReview(state: AvoRunState, cycleId?: strin
 	);
 }
 
+/**
+ * Explicit alias identifying post-acceptance adversarial review as a Prime host extension,
+ * distinct from the paper-faithful AVO stagnation supervisor.
+ */
+export const requiresAvoAdversarialReviewExtension = requiresAvoAdversarialReview;
+
+/**
+ * Decides whether the paper-aligned AVO stagnation supervisor should activate.
+ * In accordance with Section 3.3 of arXiv:2603.24517, the supervisor activates ONLY
+ * conditionally when progress stalls or an unproductive failure loop occurs.
+ */
+export function shouldActivateStagnationSupervisor(stagnation: {
+	isStagnating: boolean;
+	consecutiveFailures: number;
+}): boolean {
+	return stagnation.isStagnating || stagnation.consecutiveFailures >= 3;
+}
+
 export function shouldActivateAvoSupervisor(state: AvoRunState, checkpoint?: AvoCheckpoint): boolean {
 	if (requiresAvoAdversarialReview(state, checkpoint?.cycleId)) return true;
 	if (state.routing.horizon === "direct") return false;
 	if (state.routing.horizon === "long") return true;
 	return checkpoint?.interventionNeeded === true;
+}
+
+export function buildAvoStagnationSteeringPrompt(
+	taskContext: string,
+	stagnationPattern: {
+		consecutiveFailures: number;
+		rationale: string;
+		repeatedErrors?: string[];
+	},
+): string {
+	return [
+		"You are the AVO Stagnation Supervisor (arXiv:2603.24517 Section 3.3).",
+		"The variation agent has hit an unproductive failure plateau or stagnation point.",
+		`Task Context: ${taskContext.slice(0, 1000)}`,
+		`Stagnation Details: ${stagnationPattern.rationale} (${stagnationPattern.consecutiveFailures} consecutive failures).`,
+		stagnationPattern.repeatedErrors && stagnationPattern.repeatedErrors.length > 0
+			? `Recent Observed Errors:\n${stagnationPattern.repeatedErrors.join("\n")}`
+			: undefined,
+		"Your role is conditional high-level steering only:",
+		"- Propose 2-3 alternative optimization directions, hypotheses, or reference materials to consult.",
+		"- Explain your rationale tied to the observed stagnation pattern.",
+		"- Do NOT write code, issue scores, declare success, or mandate specific tool API sequences.",
+		'Return JSON: {"detected_pattern": string, "suggested_directions": string[], "rationale": string}',
+	]
+		.filter((line): line is string => line !== undefined)
+		.join("\n\n");
 }
 
 export function buildAvoSupervisorBootstrapPrompt(): string {
