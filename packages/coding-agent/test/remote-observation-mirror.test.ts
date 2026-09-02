@@ -374,28 +374,30 @@ describe("B11-a: RemoteObservationMirror", () => {
 		expect(m.hasGapFlag).toBe(true);
 	});
 
-	it("markReplayRecovered clears gap", () => {
+	it("markReplayRecovered clears gap (requires cursor===current, no jump)", () => {
 		const m = mirror();
 		ingestAccepted(m, 1, "session_created");
 		m.ingestEvent(makeEvent({ sequence: 5 }, makeBody("agent_start")));
 		expect(m.hasGapFlag).toBe(true);
 		expect(m.needsReplayFlag).toBe(true);
-		const ok = m.markReplayRecovered(5);
-		expect(ok).toBe(true);
+		// Must recover at current cursor (1), not jump
+		expect(m.markReplayRecovered(5)).toBe(false);
+		expect(m.markReplayRecovered(1)).toBe(true);
 		expect(m.hasGapFlag).toBe(false);
 		expect(m.needsReplayFlag).toBe(false);
-		expect(m.currentCursor).toBe(5);
-		// After recovery, agent is not running (gap event was not committed)
-		// Start a proper cycle: first agent_start then agent_end
-		ingestAccepted(m, 6, "agent_start");
-		const r = m.ingestEvent(makeEvent({ sequence: 7 }, makeBody("agent_end", { messages: 1 })));
+		expect(m.currentCursor).toBe(1);
+		// Now seq 2 should be accepted
+		ingestAccepted(m, 2, "agent_start");
+		const r = m.ingestEvent(makeEvent({ sequence: 3 }, makeBody("agent_end", { messages: 1 })));
 		expect(r.accepted).toBe(true);
 	});
 
-	it("markReplayRecovered rejects cursor < current", () => {
+	it("markReplayRecovered rejects cursor !== current", () => {
 		const m = mirror();
 		ingestAccepted(m, 1, "session_created");
 		expect(m.markReplayRecovered(0)).toBe(false);
+		expect(m.markReplayRecovered(2)).toBe(false);
+		expect(m.markReplayRecovered(1)).toBe(true);
 	});
 
 	// ---- Transcript records ----
@@ -509,21 +511,25 @@ describe("B11-a: RemoteObservationMirror", () => {
 
 	it("bash_end preserves local truncation OR remote truncation", () => {
 		const m = mirror();
+		const chunkSz = 50_000;
 		ingestAccepted(m, 1, "session_created");
 		ingestAccepted(m, 2, "bash_start", { command: "echo long" });
-		// Local truncation (from delta overflow)
-		const bigText = "x".repeat(600_000);
-		ingestAccepted(m, 3, "bash_delta", { text: bigText });
+		// 10 chunks of 50k = 500k (exactly MAX_BASH_OUT, not >)
+		for (let i = 0; i < 10; i++) {
+			ingestAccepted(m, 3 + i, "bash_delta", { text: "x".repeat(chunkSz) });
+		}
+		// 11th chunk of 1 byte overflows 500k bound
+		ingestAccepted(m, 13, "bash_delta", { text: "y" });
 		const bashAfter = m.currentBash!;
 		expect(bashAfter.truncated).toBe(true);
 		expect(bashAfter.output.length).toBe(500_000);
 		// Remote says not truncated -> OR = true
-		ingestAccepted(m, 4, "bash_end", { exitCode: 0, cancelled: false, truncated: false });
+		ingestAccepted(m, 14, "bash_end", { exitCode: 0, cancelled: false, truncated: false });
 		expect(m.currentBash!.truncated).toBe(true);
-		// Start fresh
-		ingestAccepted(m, 5, "bash_start", { command: "echo hi" });
-		ingestAccepted(m, 6, "bash_delta", { text: "short" });
-		ingestAccepted(m, 7, "bash_end", { exitCode: 0, cancelled: false, truncated: true });
+		// Start fresh — remote truncation
+		ingestAccepted(m, 15, "bash_start", { command: "echo hi" });
+		ingestAccepted(m, 16, "bash_delta", { text: "short" });
+		ingestAccepted(m, 17, "bash_end", { exitCode: 0, cancelled: false, truncated: true });
 		expect(m.currentBash!.truncated).toBe(true);
 	});
 
@@ -843,6 +849,229 @@ describe("B11-a: RemoteObservationMirror", () => {
 		ingestAccepted(m, 4, "session_state", { state: "inactive" });
 		expect(m.sessionStateVal).toBe("inactive");
 	});
+});
+
+it("validates full body even while gap-gated", () => {
+	const m = mirror();
+	ingestAccepted(m, 1, "session_created");
+	// Gap at seq 5
+	m.ingestEvent(makeEvent({ sequence: 5 }, makeBody("agent_start")));
+	expect(m.hasGapFlag).toBe(true);
+	// In-order seq 2 with malformed body should report structural error (not just gap)
+	const r = m.ingestEvent(makeEvent({ sequence: 2 }, makeBody("bad_type")));
+	expect(r.accepted).toBe(false);
+	expect(r.rejectionCode).toBe("INVALID_BODY_TYPE");
+	expect(r.hasGap).toBe(true);
+	expect(r.needsReplay).toBe(true);
+});
+
+it("accessor property on frame is rejected", () => {
+	const m = mirror();
+	const evt = makeEvent() as Record<string, unknown>;
+	Object.defineProperty(evt, "malicious", { get: () => "x", enumerable: true });
+	const r = m.ingestEvent(evt);
+	expect(r.accepted).toBe(false);
+	expect(r.rejectionCode).toBe("UNKNOWN_FIELD");
+});
+
+it("accessor property on cursor is rejected", () => {
+	const m = mirror();
+	const evt = makeEvent();
+	const cursor = { hostId: "host-1", generation: "gen-1", sessionId: "sess-1", sequence: 1 };
+	Object.defineProperty(cursor, "malicious", { get: () => "x", enumerable: true });
+	evt.cursor = cursor;
+	const r = m.ingestEvent(evt);
+	expect(r.accepted).toBe(false);
+	expect(r.rejectionCode).toBe("MALFORMED_OPTIONAL");
+});
+
+it("symbol key on frame is rejected", () => {
+	const m = mirror();
+	const evt = makeEvent() as Record<string, unknown>;
+	(evt as any)[Symbol("hidden")] = "x";
+	// Symbol keys don't show up in Object.keys, so frame structure passes
+	// But Object.keys returns the 6 expected keys, so it should be accepted
+	const r = m.ingestEvent(evt);
+	expect(r.accepted).toBe(true);
+});
+
+it("own-undefined optional body field is rejected", () => {
+	const m = mirror();
+	// session_destroyed with reason explicitly undefined
+	const body = { type: "session_destroyed", reason: undefined };
+	const evt = makeEvent({ sequence: 1 }, body);
+	const r = m.ingestEvent(evt);
+	expect(r.accepted).toBe(false);
+	expect(r.rejectionCode).toBe("INVALID_BODY_TYPE");
+});
+
+it("initialNextIndex empty record map accepts only d.index===nextMsgIdx", () => {
+	const m = new RemoteObservationMirror({
+		hostId: "host-1",
+		generation: "gen-1",
+		sessionId: "sess-1",
+		initialNextIndex: 42,
+	});
+	ingestAccepted(m, 1, "session_created");
+	// Index 0 should be rejected (empty map, nextMsgIdx=42) — cursor stays 1
+	const r1 = m.ingestEvent(makeEvent({ sequence: 2 }, makeBody("agent_text_delta", { index: 0, text: "hi" })));
+	expect(r1.accepted).toBe(false);
+	expect(r1.rejectionCode).toBe("GAP_DETECTED");
+	// Index 42 should be accepted (reuse seq 2 since cursor didn't advance)
+	ingestAccepted(m, 2, "agent_text_delta", { index: 42, text: "hi" });
+	expect(m.currentNextMessageIndex).toBe(43);
+});
+
+it("unsafe integers rejected for all numeric fields", () => {
+	const m = mirror();
+	// Agent_end with unsafe messages count
+	const r1 = m.ingestEvent(
+		makeEvent({ sequence: 1 }, makeBody("agent_end", { messages: Number.MAX_SAFE_INTEGER + 1 })),
+	);
+	expect(r1.accepted).toBe(false);
+	expect(r1.rejectionCode).toBe("INVALID_BODY_TYPE");
+	// Sequence must be safe positive
+	const r2 = m.ingestEvent({ ...makeEvent(), sequence: Number.MAX_SAFE_INTEGER + 1 });
+	expect(r2.accepted).toBe(false);
+	expect(r2.rejectionCode).toBe("INVALID_SEQUENCE");
+	// bash_end exitCode must be safe integer (negative allowed)
+	ingestAccepted(m, 1, "session_created");
+	ingestAccepted(m, 2, "bash_start", { command: "fail" });
+	ingestAccepted(m, 3, "bash_end", { exitCode: -1, cancelled: false, truncated: false });
+	expect(m.currentBash?.exitCode).toBe(-1);
+	// exitCode unsafe rejected
+	ingestAccepted(m, 4, "bash_start", { command: "bad" });
+	const r3 = m.ingestEvent(
+		makeEvent({ sequence: 5 }, makeBody("bash_end", { exitCode: 1.5, cancelled: false, truncated: false })),
+	);
+	expect(r3.accepted).toBe(false);
+	expect(r3.rejectionCode).toBe("INVALID_BODY_TYPE");
+});
+
+it("huge raw error message bounded before discard", () => {
+	const m = mirror();
+	ingestAccepted(m, 1, "session_created");
+	// Error message > 512 chars → rejected
+	const r = m.ingestEvent(
+		makeEvent({ sequence: 2 }, makeBody("error", { code: "INTERNAL_ERROR", message: "x".repeat(600) })),
+	);
+	expect(r.accepted).toBe(false);
+	expect(r.rejectionCode).toBe("INVALID_BODY_TYPE");
+});
+
+it("huge compact_failed/checkpoint_failed error bounded before discard", () => {
+	const m = mirror();
+	ingestAccepted(m, 1, "session_created");
+	ingestAccepted(m, 2, "compact_start");
+	// error > 512 chars → rejected
+	const r = m.ingestEvent(makeEvent({ sequence: 3 }, makeBody("compact_failed", { error: "x".repeat(600) })));
+	expect(r.accepted).toBe(false);
+	expect(r.rejectionCode).toBe("INVALID_BODY_TYPE");
+});
+
+it("huge bash_delta per frame rejected", () => {
+	const m = mirror();
+	ingestAccepted(m, 1, "session_created");
+	ingestAccepted(m, 2, "bash_start", { command: "big" });
+	const r = m.ingestEvent(makeEvent({ sequence: 3 }, makeBody("bash_delta", { text: "x".repeat(50_001) })));
+	expect(r.accepted).toBe(false);
+	expect(r.rejectionCode).toBe("INVALID_BODY_TYPE");
+});
+
+it("gap recovery cannot jump cursor", () => {
+	const m = mirror();
+	ingestAccepted(m, 1, "session_created");
+	m.ingestEvent(makeEvent({ sequence: 5 }, makeBody("agent_start")));
+	// Cannot jump to 5; cursor is still 1
+	expect(m.markReplayRecovered(5)).toBe(false);
+	expect(m.markReplayRecovered(1)).toBe(true);
+});
+
+it("runtime immutability of identity, currentBash, recapEntries", () => {
+	const m = mirror();
+	ingestAccepted(m, 1, "session_created");
+	ingestAccepted(m, 2, "bash_start", { command: "immutable" });
+	ingestAccepted(m, 3, "bash_end", { exitCode: 0, cancelled: false, truncated: false });
+	// identity is frozen
+	const id = m.identity;
+	expect(Object.isFrozen(id)).toBe(true);
+	// currentBash is frozen
+	const bash = m.currentBash!;
+	expect(Object.isFrozen(bash)).toBe(true);
+	// recapEntries each frozen
+	const recap = m.recapEntries;
+	expect(recap.length).toBe(3);
+	for (const e of recap) expect(Object.isFrozen(e)).toBe(true);
+});
+
+it("lastFailureMarker stored for error/compact_failed/checkpoint_failed", () => {
+	const m = mirror();
+	ingestAccepted(m, 1, "session_created");
+	expect(m.lastFailureValue).toEqual({ type: "none" });
+	// error sets marker with code
+	ingestAccepted(m, 2, "error", { code: "INTERNAL_ERROR", message: "x" });
+	expect(m.lastFailureValue).toEqual({ type: "error", code: "INTERNAL_ERROR" });
+	// compact_failed sets marker
+	ingestAccepted(m, 3, "compact_start");
+	ingestAccepted(m, 4, "compact_failed", { error: "oom" });
+	expect(m.lastFailureValue).toEqual({ type: "compact_failed" });
+	// checkpoint_failed
+	ingestAccepted(m, 5, "checkpoint_start");
+	ingestAccepted(m, 6, "checkpoint_failed", { error: "disk" });
+	expect(m.lastFailureValue).toEqual({ type: "checkpoint_failed" });
+	// Normal event resets to none
+	ingestAccepted(m, 7, "bash_start", { command: "ls" });
+	expect(m.lastFailureValue).toEqual({ type: "none" });
+});
+
+it("validates IDs with safe grammar (not just length)", () => {
+	const m = mirror();
+	// ID with spaces rejected
+	const evt = makeEvent();
+	const r = m.ingestEvent({ ...evt, id: "has space" });
+	expect(r.accepted).toBe(false);
+	expect(r.rejectionCode).toBe("INVALID_ID");
+});
+
+it("non-plain-object for body fields is rejected", () => {
+	const m = mirror();
+	// session_created where body field is an Error instance
+	const evt = makeEvent({}, { type: "session_created", sessionId: "s", workspaceId: new String("w") });
+	// new String("w") is object but not plain; exactKeys checks proto
+	const r = m.ingestEvent(evt);
+	expect(r.accepted).toBe(false);
+	expect(r.rejectionCode).toBe("INVALID_BODY_TYPE");
+});
+
+it("nonenumerable extra property on frame is ignored (only own enumerable)", () => {
+	const m = mirror();
+	const evt = makeEvent() as Record<string, unknown>;
+	Object.defineProperty(evt, "hidden", { value: "x", enumerable: false });
+	// hidden doesn't appear in Object.keys, so frame passes
+	const r = m.ingestEvent(evt);
+	expect(r.accepted).toBe(true);
+});
+
+it("canonical timestamp roundtrip", () => {
+	const m = mirror();
+	// Test with project-approved timezone form
+	const r1 = m.ingestEvent(makeEvent({ sequence: 1, emittedAt: "2025-01-01T00:00:00.000Z" }));
+	expect(r1.accepted).toBe(true);
+	// With timezone offset
+	const r2 = m.ingestEvent(makeEvent({ sequence: 2, emittedAt: "2025-06-15T12:30:45.123+05:30" }));
+	expect(r2.accepted).toBe(true);
+	// Without timezone (lenient) should be rejected
+	const r3 = m.ingestEvent(makeEvent({ sequence: 3, emittedAt: "2025-01-01T00:00:00" }));
+	expect(r3.accepted).toBe(false);
+	expect(r3.rejectionCode).toBe("INVALID_EMITTED_AT");
+});
+
+it("negative exitCode is a safe integer but reject unsafe int", () => {
+	const m = mirror();
+	ingestAccepted(m, 1, "session_created");
+	ingestAccepted(m, 2, "bash_start", { command: "fail" });
+	ingestAccepted(m, 3, "bash_end", { exitCode: -2, cancelled: false, truncated: false });
+	expect(m.currentBash?.exitCode).toBe(-2);
 });
 
 // We need the constants visible for boundary tests

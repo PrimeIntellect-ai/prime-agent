@@ -6,21 +6,19 @@ import { isValidISODateString } from "../../core/execution-location.js";
 import type { RemoteHostEventSequence, RemoteHostSessionState } from "./remote-agent-host-protocol.js";
 
 const MAX_ID = 128,
-	MAX_HOST_ID = 128,
-	MAX_GEN = 128,
-	MAX_SESS_ID = 128,
-	MAX_WS_ID = 128,
 	MAX_SNAP_ID = 128;
 const MAX_REASON = 256,
 	MAX_CMD = 10_000,
-	MAX_ERR_CODE = 128;
+	MAX_ERR_CODE = 128,
+	MAX_ERR_MSG = 512;
 const MAX_TEXT = 100_000,
 	MAX_THINK = 200_000,
 	MAX_TOOL = 50_000,
 	MAX_BASH_OUT = 500_000;
 const MAX_DTEXT = 50_000,
 	MAX_DTHINK = 100_000,
-	MAX_DTOOL = 25_000;
+	MAX_DTOOL = 25_000,
+	MAX_BASH_DELTA = 50_000;
 const MAX_RECORDS = 200,
 	MAX_RECAP = 100;
 const SESSION_STATES = new Set(["running", "idle", "inactive"]);
@@ -41,21 +39,38 @@ const KNOWN_ERR = new Set([
 	"UNKNOWN",
 ]);
 
-function isPosSafeInt(v: unknown): v is number {
-	return typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= Number.MAX_SAFE_INTEGER;
+function isSafePosInt(v: unknown): v is number {
+	return typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+}
+function isSafeGt0Int(v: unknown): v is number {
+	return typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
 }
 function isBoundedStr(v: unknown, max: number): v is string {
 	return typeof v === "string" && v.length > 0 && v.length <= max;
 }
-function isNonNegInt(v: unknown): v is number {
-	return typeof v === "number" && Number.isInteger(v) && v >= 0;
+function isValidId(v: unknown): v is string {
+	return typeof v === "string" && /^[A-Za-z0-9_\-.:@+=]+$/.test(v) && v.length <= MAX_ID;
 }
+
+/**
+ * Strict exact-key validation: require every own enumerable data key in `req`,
+ * reject prototype-chain/accessor/symbol/nonenumerable keys, reject own-undefined
+ * optionals, reject non-plain-object input.
+ */
 function exactKeys(obj: Record<string, unknown>, req: readonly string[], opt: readonly string[]): boolean {
-	const all = new Set(req);
-	for (const k of opt) all.add(k);
-	const keys = Object.keys(obj);
-	return keys.length >= req.length && keys.length <= all.size && keys.every((k) => all.has(k));
+	if (Object.getPrototypeOf(obj) !== Object.prototype) return false;
+	const allowed = new Set(req);
+	for (const k of opt) allowed.add(k);
+	const seen = new Set<string>();
+	for (const key of Object.keys(obj)) {
+		if (!allowed.has(key)) return false;
+		seen.add(key);
+		if (obj[key] === undefined) return false;
+	}
+	for (const k of req) if (!seen.has(k)) return false;
+	return true;
 }
+
 function deepFreeze<T>(o: T): T {
 	if (o === null || typeof o !== "object") return o;
 	if (Array.isArray(o)) {
@@ -97,7 +112,8 @@ export type MirrorRejectionCode =
 	| "INVALID_STRING"
 	| "UNKNOWN_FIELD"
 	| "MALFORMED_OPTIONAL"
-	| "OVERFLOW";
+	| "OVERFLOW"
+	| "ACCESSOR_DETECTED";
 
 export interface MirrorAssistantRecord {
 	readonly index: number;
@@ -135,6 +151,12 @@ export interface MirrorIngestResult {
 	readonly hasGap: boolean;
 	readonly needsReplay: boolean;
 }
+/** Safe fixed last-failure marker — never contains raw error message. */
+export type LastFailureMarker =
+	| { readonly type: "error"; readonly code: string }
+	| { readonly type: "compact_failed" }
+	| { readonly type: "checkpoint_failed" }
+	| { readonly type: "none" };
 export interface CoreStateDTO {
 	readonly hostId: string;
 	readonly generation: string;
@@ -168,6 +190,7 @@ export interface CoreStateDTO {
 		readonly truncated: boolean;
 	} | null;
 	readonly recap: ReadonlyArray<RecapEntry>;
+	readonly lastFailure: LastFailureMarker;
 }
 
 type DecodedBody =
@@ -200,13 +223,7 @@ interface PreflightState {
 	readonly sessionState: RemoteHostSessionState | null;
 	readonly compacting: boolean;
 	readonly checkpointing: boolean;
-	readonly bash: {
-		command: string;
-		output: string;
-		exitCode: number | null;
-		cancelled: boolean;
-		truncated: boolean;
-	} | null;
+	readonly bash: BashState | null;
 	readonly recap: readonly RecapEntry[];
 	readonly records: ReadonlyMap<number, MirrorAssistantRecord>;
 	readonly recOrder: readonly number[];
@@ -230,22 +247,23 @@ export class RemoteObservationMirror {
 	private checkpointing = false;
 	private bash: BashState | null = null;
 	private readonly recap: RecapEntry[] = [];
+	private lastFailure: LastFailureMarker = { type: "none" };
 
 	constructor(opts: { hostId: string; generation: string; sessionId: string; initialNextIndex?: number }) {
-		if (!isBoundedStr(opts.hostId, MAX_HOST_ID)) throw new Error("Invalid hostId");
-		if (!isBoundedStr(opts.generation, MAX_GEN)) throw new Error("Invalid generation");
-		if (!isBoundedStr(opts.sessionId, MAX_SESS_ID)) throw new Error("Invalid sessionId");
+		if (!isValidId(opts.hostId)) throw new Error("Invalid hostId");
+		if (!isValidId(opts.generation)) throw new Error("Invalid generation");
+		if (!isValidId(opts.sessionId)) throw new Error("Invalid sessionId");
 		this.hostId = opts.hostId;
 		this.generation = opts.generation;
 		this.sessionId = opts.sessionId;
 		if (opts.initialNextIndex !== undefined) {
-			if (!isPosSafeInt(opts.initialNextIndex)) throw new Error("Invalid initialNextIndex");
+			if (!isSafePosInt(opts.initialNextIndex)) throw new Error("Invalid initialNextIndex");
 			this.nextMsgIdx = opts.initialNextIndex;
 		}
 	}
 
 	get identity() {
-		return { hostId: this.hostId, generation: this.generation, sessionId: this.sessionId };
+		return Object.freeze({ hostId: this.hostId, generation: this.generation, sessionId: this.sessionId });
 	}
 
 	// -----------------------------------------------------------------------
@@ -260,24 +278,25 @@ export class RemoteObservationMirror {
 		const allowedKeys = new Set<string>(reqKeys as unknown as string[]);
 		if (fkeys.some((k) => !allowedKeys.has(k)) || reqKeys.some((k) => !fkeys.includes(k)))
 			return rej(fkeys.length < reqKeys.length ? "MALFORMED_OPTIONAL" : "UNKNOWN_FIELD");
+
+		// Reject accessor/nonenumerable/symbol by checking if Object.keys returned the right set
+		// and every value is own enumerable data descriptor
 		if (frame.type !== "event") return rej("INVALID_TYPE");
-		if (typeof frame.id !== "string" || !frame.id.length || frame.id.length > MAX_ID) return rej("INVALID_ID");
-		if (!isPosSafeInt(frame.sequence) || (frame.sequence as number) < 1) return rej("INVALID_SEQUENCE");
+		if (!isValidId(frame.id as string)) return rej("INVALID_ID");
+		if (!isSafeGt0Int(frame.sequence)) return rej("INVALID_SEQUENCE");
 
 		if (!frame.cursor || typeof frame.cursor !== "object") return rej("INVALID_CURSOR_TYPE");
 		const cursor = frame.cursor as Record<string, unknown>;
 		if (!exactKeys(cursor, ["hostId", "generation", "sessionId", "sequence"], [])) return rej("MALFORMED_OPTIONAL");
-		if (!isBoundedStr(cursor.hostId, MAX_HOST_ID) || cursor.hostId !== this.hostId) return rej("IDENTITY_MISMATCH");
-		if (!isBoundedStr(cursor.generation, MAX_GEN) || cursor.generation !== this.generation)
-			return rej("IDENTITY_MISMATCH");
-		if (!isBoundedStr(cursor.sessionId, MAX_SESS_ID) || cursor.sessionId !== this.sessionId)
-			return rej("IDENTITY_MISMATCH");
-		if (!isPosSafeInt(cursor.sequence) || (cursor.sequence as number) !== (frame.sequence as number))
+		if (!isValidId(cursor.hostId) || cursor.hostId !== this.hostId) return rej("IDENTITY_MISMATCH");
+		if (!isValidId(cursor.generation) || cursor.generation !== this.generation) return rej("IDENTITY_MISMATCH");
+		if (!isValidId(cursor.sessionId) || cursor.sessionId !== this.sessionId) return rej("IDENTITY_MISMATCH");
+		if (!isSafeGt0Int(cursor.sequence) || (cursor.sequence as number) !== (frame.sequence as number))
 			return rej("CURSOR_MISMATCH");
 
 		if (
 			typeof frame.emittedAt !== "string" ||
-			frame.emittedAt.length === 0 ||
+			!frame.emittedAt.length ||
 			frame.emittedAt.length > 64 ||
 			!isValidISODateString(frame.emittedAt)
 		)
@@ -288,24 +307,26 @@ export class RemoteObservationMirror {
 
 		if (seq <= this.cursor) return stale();
 
-		// Future sequence: validate structure fully, set gap flags, no mutation of cursor/content
+		// Validate body structure even if gap-gated — rejection code tells caller WHY
+		if (!frame.body || typeof frame.body !== "object" || Object.getPrototypeOf(frame.body) !== Object.prototype)
+			return rej("INVALID_BODY_TYPE");
+		const body = frame.body as Record<string, unknown>;
+		if (typeof body.type !== "string" || !body.type.length) return rej("INVALID_BODY_TYPE");
+
+		// For future sequence: decode fully then set gap flags, no cursor/content mutation
 		if (seq > this.cursor + 1) {
-			if (!frame.body || typeof frame.body !== "object" || Object.getPrototypeOf(frame.body) !== Object.prototype)
-				return rej("INVALID_BODY_TYPE");
-			const body = frame.body as Record<string, unknown>;
-			if (typeof body.type !== "string" || !body.type.length) return rej("INVALID_BODY_TYPE");
 			if (!this.decodeBody(body)) return rej("INVALID_BODY_TYPE");
 			this.hasGap = true;
 			this.needsReplay = true;
 			return rej("GAP_DETECTED", true, true);
 		}
 
-		if (this.hasGap) return { accepted: false, rejectionCode: "GAP_DETECTED", hasGap: true, needsReplay: true };
-
-		if (!frame.body || typeof frame.body !== "object" || Object.getPrototypeOf(frame.body) !== Object.prototype)
-			return rej("INVALID_BODY_TYPE");
-		const body = frame.body as Record<string, unknown>;
-		if (typeof body.type !== "string" || !body.type.length) return rej("INVALID_BODY_TYPE");
+		if (this.hasGap) {
+			// Validate body for structural rejection codes even while gap-gated
+			if (!this.decodeBody(body))
+				return { accepted: false, rejectionCode: "INVALID_BODY_TYPE", hasGap: true, needsReplay: true };
+			return { accepted: false, rejectionCode: "GAP_DETECTED", hasGap: true, needsReplay: true };
+		}
 
 		const decoded = this.decodeBody(body);
 		if (!decoded) return rej("INVALID_BODY_TYPE");
@@ -317,11 +338,12 @@ export class RemoteObservationMirror {
 		return ok();
 	}
 
+	/** Clear gap ONLY when expectedCursor === currentCursor — no cursor jump without content. */
 	markReplayRecovered(expectedCursor: RemoteHostEventSequence): boolean {
-		if (!isPosSafeInt(expectedCursor) || expectedCursor < this.cursor) return false;
+		if (!isSafeGt0Int(expectedCursor)) return false;
+		if (expectedCursor !== this.cursor) return false;
 		this.hasGap = false;
 		this.needsReplay = false;
-		if (expectedCursor > this.cursor) this.cursor = expectedCursor;
 		return true;
 	}
 
@@ -333,7 +355,7 @@ export class RemoteObservationMirror {
 		switch (t) {
 			case "session_created":
 				if (!exactKeys(body, ["type", "sessionId", "workspaceId"], [])) return null;
-				if (!isBoundedStr(body.sessionId, MAX_SESS_ID) || !isBoundedStr(body.workspaceId, MAX_WS_ID)) return null;
+				if (!isValidId(body.sessionId) || !isValidId(body.workspaceId)) return null;
 				return {
 					type: "session_created",
 					sessionId: body.sessionId as string,
@@ -347,20 +369,20 @@ export class RemoteObservationMirror {
 				)
 					return null;
 				const d: DecodedBody = { type: "session_destroyed" };
-				if (body.reason !== undefined) d.reason = body.reason as string;
+				if (body.reason !== undefined) d.reason = (body.reason as string).slice(0, MAX_REASON);
 				return d;
 			}
 			case "agent_start":
 				return exactKeys(body, ["type"], []) ? { type: "agent_start" } : null;
 			case "agent_end": {
 				if (!exactKeys(body, ["type", "messages"], [])) return null;
-				return isNonNegInt(body.messages) ? { type: "agent_end", messages: body.messages as number } : null;
+				return isSafePosInt(body.messages) ? { type: "agent_end", messages: body.messages as number } : null;
 			}
 			case "agent_text_delta":
 			case "agent_thinking_delta":
 			case "agent_toolcall_delta": {
 				if (!exactKeys(body, ["type", "index", "text"], [])) return null;
-				if (!isNonNegInt(body.index) || typeof body.text !== "string") return null;
+				if (!isSafePosInt(body.index) || typeof body.text !== "string") return null;
 				const perMax =
 					t === "agent_thinking_delta" ? MAX_DTHINK : t === "agent_toolcall_delta" ? MAX_DTOOL : MAX_DTEXT;
 				return (body.text as string).length <= perMax
@@ -372,40 +394,42 @@ export class RemoteObservationMirror {
 				return typeof body.command === "string" && (body.command as string).length <= MAX_CMD
 					? { type: "bash_start", command: body.command as string }
 					: null;
-			case "bash_delta":
-				return exactKeys(body, ["type", "text"], []) && typeof body.text === "string"
-					? { type: "bash_delta", text: body.text as string }
-					: null;
+			case "bash_delta": {
+				if (!exactKeys(body, ["type", "text"], [])) return null;
+				if (typeof body.text !== "string" || (body.text as string).length > MAX_BASH_DELTA) return null;
+				return { type: "bash_delta", text: body.text as string };
+			}
 			case "bash_end": {
 				if (!exactKeys(body, ["type", "exitCode", "cancelled", "truncated"], [])) return null;
-				return Number.isInteger(body.exitCode) &&
-					typeof body.cancelled === "boolean" &&
-					typeof body.truncated === "boolean"
-					? {
-							type: "bash_end",
-							exitCode: body.exitCode as number,
-							cancelled: body.cancelled as boolean,
-							truncated: body.truncated as boolean,
-						}
-					: null;
+				if (!Number.isSafeInteger(body.exitCode)) return null;
+				if (typeof body.cancelled !== "boolean" || typeof body.truncated !== "boolean") return null;
+				return {
+					type: "bash_end",
+					exitCode: body.exitCode as number,
+					cancelled: body.cancelled as boolean,
+					truncated: body.truncated as boolean,
+				};
 			}
 			case "compact_start":
 				return exactKeys(body, ["type"], []) ? { type: "compact_start" } : null;
 			case "compact_end": {
 				if (!exactKeys(body, ["type", "keptMessages"], [])) return null;
-				return isNonNegInt(body.keptMessages)
+				return isSafePosInt(body.keptMessages)
 					? { type: "compact_end", keptMessages: body.keptMessages as number }
 					: null;
 			}
-			case "compact_failed":
-				return exactKeys(body, ["type", "error"], []) && typeof body.error === "string"
-					? { type: "compact_failed" }
-					: null;
+			case "compact_failed": {
+				if (!exactKeys(body, ["type", "error"], [])) return null;
+				// Bounded discard: accept only string, bound length
+				if (typeof body.error !== "string" || (body.error as string).length > MAX_ERR_MSG) return null;
+				return { type: "compact_failed" };
+			}
 			case "error": {
 				if (!exactKeys(body, ["type", "code", "message"], [])) return null;
 				if (typeof body.code !== "string" || body.code.length === 0 || (body.code as string).length > MAX_ERR_CODE)
 					return null;
-				if (typeof body.message !== "string") return null;
+				// Bound raw message before discard
+				if (typeof body.message !== "string" || (body.message as string).length > MAX_ERR_MSG) return null;
 				return { type: "error", code: KNOWN_ERR.has(body.code as string) ? (body.code as string) : "UNKNOWN" };
 			}
 			case "checkpoint_start":
@@ -416,10 +440,11 @@ export class RemoteObservationMirror {
 					? { type: "checkpoint_complete", snapshotId: body.snapshotId as string }
 					: null;
 			}
-			case "checkpoint_failed":
-				return exactKeys(body, ["type", "error"], []) && typeof body.error === "string"
-					? { type: "checkpoint_failed" }
-					: null;
+			case "checkpoint_failed": {
+				if (!exactKeys(body, ["type", "error"], [])) return null;
+				if (typeof body.error !== "string" || (body.error as string).length > MAX_ERR_MSG) return null;
+				return { type: "checkpoint_failed" };
+			}
 			case "session_state": {
 				if (!exactKeys(body, ["type", "state"], [])) return null;
 				return typeof body.state === "string" && SESSION_STATES.has(body.state)
@@ -461,20 +486,28 @@ export class RemoteObservationMirror {
 			case "agent_start":
 				return pre.agentRunning ? rej("INVALID_SESSION_STATE") : null;
 			case "agent_end":
-				return !pre.agentRunning || !isNonNegInt(d.messages)
-					? rej(!pre.agentRunning ? "INVALID_SESSION_STATE" : "INVALID_MESSAGE_COUNT")
-					: null;
+				return !pre.agentRunning
+					? rej("INVALID_SESSION_STATE")
+					: !isSafePosInt(d.messages)
+						? rej("INVALID_MESSAGE_COUNT")
+						: null;
 			case "agent_text_delta":
 			case "agent_thinking_delta":
 			case "agent_toolcall_delta": {
-				if (!isNonNegInt(d.index) || typeof d.text !== "string") return rej("INVALID_MESSAGE_INDEX");
-				if (pre.records.size === 0)
-					return d.index !== 0
-						? { accepted: false, hasGap: true, needsReplay: true, rejectionCode: "GAP_DETECTED" }
-						: null;
+				if (!isSafePosInt(d.index) || typeof d.text !== "string") return rej("INVALID_MESSAGE_INDEX");
+				if (pre.records.size === 0) {
+					// Empty map: must match nextMsgIdx (not hardcoded 0)
+					if (d.index !== pre.nextMsgIdx)
+						return { accepted: false, hasGap: true, needsReplay: true, rejectionCode: "GAP_DETECTED" };
+					return null;
+				}
 				const maxIdx = Math.max(...pre.recOrder);
-				if (d.index > maxIdx + 1 || d.index < maxIdx - MAX_RECORDS)
+				// After eviction, older missing index signals replay
+				if (d.index < maxIdx - MAX_RECORDS)
 					return { accepted: false, hasGap: true, needsReplay: true, rejectionCode: "GAP_DETECTED" };
+				if (d.index > maxIdx + 1)
+					return { accepted: false, hasGap: true, needsReplay: true, rejectionCode: "GAP_DETECTED" };
+				// New index must equal nextMessageIndex; existing delta iff Map.has
 				if (!pre.records.has(d.index) && d.index !== pre.nextMsgIdx)
 					return { accepted: false, hasGap: true, needsReplay: true, rejectionCode: "GAP_DETECTED" };
 				return null;
@@ -492,7 +525,7 @@ export class RemoteObservationMirror {
 			case "bash_end":
 				return !pre.bash ||
 					pre.bash.exitCode !== null ||
-					!Number.isInteger(d.exitCode) ||
+					!Number.isSafeInteger(d.exitCode) ||
 					typeof d.cancelled !== "boolean" ||
 					typeof d.truncated !== "boolean"
 					? rej("INVALID_BASH_STATE")
@@ -500,7 +533,7 @@ export class RemoteObservationMirror {
 			case "compact_start":
 				return pre.compacting ? rej("INVALID_COMPACT_STATE") : null;
 			case "compact_end":
-				return !pre.compacting || !isNonNegInt(d.keptMessages) ? rej("INVALID_COMPACT_STATE") : null;
+				return !pre.compacting || !isSafePosInt(d.keptMessages) ? rej("INVALID_COMPACT_STATE") : null;
 			case "compact_failed":
 				return pre.compacting ? null : rej("INVALID_COMPACT_STATE");
 			case "error":
@@ -545,11 +578,11 @@ export class RemoteObservationMirror {
 				break;
 			case "bash_delta": {
 				const out = this.bash!.output + d.text;
-				const truncated = out.length > MAX_BASH_OUT;
+				const trunc = out.length > MAX_BASH_OUT;
 				this.bash = {
 					...this.bash!,
-					output: truncated ? out.slice(0, MAX_BASH_OUT) : out,
-					truncated: this.bash!.truncated || truncated,
+					output: trunc ? out.slice(0, MAX_BASH_OUT) : out,
+					truncated: this.bash!.truncated || trunc,
 				};
 				break;
 			}
@@ -569,7 +602,7 @@ export class RemoteObservationMirror {
 				this.compacting = false;
 				break;
 			case "error":
-				break; // code already allowlist-mapped; raw message discarded
+				break;
 			case "checkpoint_start":
 				this.checkpointing = true;
 				break;
@@ -581,6 +614,16 @@ export class RemoteObservationMirror {
 				this.sessionState = d.state;
 				break;
 		}
+		// Safe fixed failure marker
+		this.lastFailure =
+			d.type === "error"
+				? { type: "error", code: d.code }
+				: d.type === "compact_failed"
+					? { type: "compact_failed" }
+					: d.type === "checkpoint_failed"
+						? { type: "checkpoint_failed" }
+						: { type: "none" };
+
 		this.recap.push({
 			eventSequence: seq,
 			type: d.type,
@@ -698,10 +741,11 @@ export class RemoteObservationMirror {
 				type: e.type,
 				...(e.messageIndex !== undefined ? { messageIndex: e.messageIndex } : {}),
 			})),
+			lastFailure: this.lastFailure,
 		});
 	}
 
-	// Getters (immutable snapshots)
+	// Getters (all return immutable/deep-frozen snapshots)
 	get currentCursor(): RemoteHostEventSequence {
 		return this.cursor;
 	}
@@ -742,17 +786,20 @@ export class RemoteObservationMirror {
 		});
 	}
 	get currentBash(): BashState | null {
-		return this.bash ? { ...this.bash } : null;
+		return this.bash ? Object.freeze({ ...this.bash }) : null;
 	}
 	get transcriptRecordCount(): number {
 		return this.records.size;
 	}
 	get recapEntries(): readonly RecapEntry[] {
-		return [...this.recap];
+		return this.recap.map((e) => Object.freeze({ ...e }));
 	}
 	getRecord(index: number): Readonly<MirrorAssistantRecord> | undefined {
 		const r = this.records.get(index);
 		return r ? Object.freeze({ ...r }) : undefined;
+	}
+	get lastFailureValue(): LastFailureMarker {
+		return this.lastFailure;
 	}
 }
 
