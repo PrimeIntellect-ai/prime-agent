@@ -1317,5 +1317,4 @@ describe("DurableTargetInbox", () => {
 		expect(counts.ensure).toBe(3);
 		await inbox.close();
 	});
-
 });
