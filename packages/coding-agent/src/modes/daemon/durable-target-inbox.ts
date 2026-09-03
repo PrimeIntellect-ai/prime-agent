@@ -224,29 +224,6 @@ function snapshotIdentity(raw: unknown): DeliveryIdentity | null {
 	return Object.freeze({ hostId, generation, sessionId });
 }
 
-function snapshotDispatcherCloseOnly(raw: unknown): OwnedClose | null {
-	if (typeof raw !== "object" || raw === null) return null;
-	try {
-		if (types.isProxy(raw)) return null;
-		const descriptor = Object.getOwnPropertyDescriptor(raw, "close");
-		if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return null;
-		if (typeof descriptor.value !== "function" || types.isProxy(descriptor.value)) return null;
-		const bound = (...args: readonly unknown[]): unknown =>
-			Reflect.apply(descriptor.value as CallableFunction, raw, args);
-		let used = false;
-		return async (): Promise<boolean> => {
-			if (used) return false;
-			used = true;
-			const observation = await invokeAndObserve(() => bound(), CLOSE_TIMEOUT_MS);
-			if (observation.status !== "fulfilled") return false;
-			const result = exact(observation.value, ENSURE_RESULT_KEYS);
-			return result?.status?.value === "closed";
-		};
-	} catch {
-		return null;
-	}
-}
-
 function snapshotDispatcherClose(raw: unknown): OwnedClose | null {
 	if (typeof raw !== "object" || raw === null) return null;
 	try {
@@ -272,7 +249,7 @@ function snapshotDispatcherClose(raw: unknown): OwnedClose | null {
 
 function snapshotDispatcher(
 	raw: unknown,
-	ownClose?: OwnedClose | null,
+	ownClose: OwnedClose,
 ): Readonly<{
 	ensure: BoundMethod;
 	close: OwnedClose;
@@ -280,8 +257,8 @@ function snapshotDispatcher(
 	const descriptors = exact(raw, DISPATCHER_KEYS);
 	if (!descriptors || typeof raw !== "object" || raw === null) return null;
 	const ensure = method(descriptors, raw, "ensure");
-	const close = ownClose ?? snapshotDispatcherClose(raw);
-	return ensure && close ? Object.freeze({ ensure, close }) : null;
+	const close = ownClose;
+	return ensure ? Object.freeze({ ensure, close }) : null;
 }
 
 // ===========================================================================
@@ -339,30 +316,34 @@ export class DurableTargetInbox {
 				: undefined;
 		const dispatcherRaw =
 			preliminary?.dispatcher && "value" in preliminary.dispatcher ? preliminary.dispatcher.value : undefined;
-
-		// ---- Phase 2: invoke Store.create FIRST with candidate preliminary values ----
-		// Always invoke so publisher/recovery caps are acquired/closed by Store.create.
-		// Use preliminary descriptor values for direction/identity/journalDir (unvalidated).
-		const storeResult = await DurableRelayStore.create(
+		// ---- Phase 2: invoke Store.create with candidate preliminary values ----
+		// Always invoke first so publisher/recovery ownership is acquired before validation.
+		const storePromise = DurableRelayStore.create(
 			Object.freeze({
 				deliveryPublisher: deliveryRaw,
-				direction: (preliminary?.direction && "value" in preliminary.direction
-					? preliminary.direction.value
-					: "received") as "received",
-				identity:
-					preliminary?.identity && "value" in preliminary.identity
-						? preliminary.identity.value
-						: Object.freeze({ hostId: "", generation: "", sessionId: "" }),
-				journalDir: (preliminary?.journalDir && "value" in preliminary.journalDir
-					? preliminary.journalDir.value
-					: "/tmp/inbox") as string,
+				direction:
+					preliminary?.direction && "value" in preliminary.direction ? preliminary.direction.value : undefined,
+				identity: preliminary?.identity && "value" in preliminary.identity ? preliminary.identity.value : undefined,
+				journalDir:
+					preliminary?.journalDir && "value" in preliminary.journalDir ? preliminary.journalDir.value : undefined,
 				journalPublisher: journalRaw,
 				recoveryBackend: recoveryRaw,
 			}),
 		);
 
-		// ---- Phase 3: acquire dispatcher close ownership ----
-		const dispatcherClose = snapshotDispatcherCloseOnly(dispatcherRaw);
+		// Snapshot the remaining input and dispatcher ownership before the first await.
+		const descriptors = exact(raw, INPUT_KEYS);
+		const direction = descriptors?.direction.value;
+		const identity = snapshotIdentity(descriptors?.identity.value);
+		const journalDir = descriptors?.journalDir.value;
+		const dispatcherAliased =
+			dispatcherRaw !== undefined &&
+			(dispatcherRaw === journalRaw || dispatcherRaw === deliveryRaw || dispatcherRaw === recoveryRaw);
+		const dispatcherClose = dispatcherAliased ? null : snapshotDispatcherClose(dispatcherRaw);
+		const dispatcher = dispatcherClose ? snapshotDispatcher(dispatcherRaw, dispatcherClose) : null;
+		const storeResult = await storePromise;
+
+		// ---- Phase 3: register every independently acquired close ----
 		const ownedCloses: (() => Promise<boolean>)[] = [];
 		if (storeResult.ok) {
 			const s = storeResult.store;
@@ -382,25 +363,21 @@ export class DurableTargetInbox {
 			return closed ? failure(code) : failure("CLOSE_UNCERTAIN");
 		};
 
-		// Dispatcher close must exist
-		if (!dispatcherClose) return await finalize("INVALID_ARGUMENT");
-
-		// Store must exist
 		if (!storeResult.ok) {
-			return await finalize(storeResult.error.code === "CLOSE_UNCERTAIN" ? "CLOSE_UNCERTAIN" : "RECOVERY_FAILED");
+			const code: TargetInboxErrorCode =
+				storeResult.error.code === "CLOSE_UNCERTAIN"
+					? "CLOSE_UNCERTAIN"
+					: storeResult.error.code === "INVALID_ARGUMENT" || !dispatcherClose
+						? "INVALID_ARGUMENT"
+						: "RECOVERY_FAILED";
+			return await finalize(code);
 		}
+		if (!dispatcherClose) return await finalize("INVALID_ARGUMENT");
 
 		const store = storeResult.store;
 
-		// ---- Phase 4: validate input shape ----
-		const descriptors = exact(raw, INPUT_KEYS);
-		if (!descriptors) return await finalize("INVALID_ARGUMENT");
-
-		const direction = descriptors.direction.value;
-		if (direction !== "received") return await finalize("INVALID_ARGUMENT");
-
-		const identity = snapshotIdentity(descriptors.identity.value);
-		const journalDir = descriptors.journalDir.value;
+		// ---- Phase 4: validate the synchronously captured input ----
+		if (!descriptors || direction !== "received") return await finalize("INVALID_ARGUMENT");
 		if (
 			!identity ||
 			typeof journalDir !== "string" ||
@@ -411,8 +388,6 @@ export class DurableTargetInbox {
 			return await finalize("INVALID_ARGUMENT");
 		}
 
-		// Validate dispatcher ensure shape (pass already-acquired close)
-		const dispatcher = snapshotDispatcher(dispatcherRaw, dispatcherClose);
 		if (!dispatcher) return await finalize("INVALID_ARGUMENT");
 
 		// ---- Phase 5: replay journals for semantic index + recovery ----
@@ -530,6 +505,24 @@ export class DurableTargetInbox {
 		this.requestDrain();
 	}
 
+	dispatchPending(): Promise<TargetInboxResult<void>> {
+		if (this.closed) return Promise.resolve(failure("CLOSED"));
+		if (this.poisoned) return Promise.resolve(failure("POISONED"));
+		this.started = true;
+		this.requestDrain();
+		const pending = this.drainTail;
+		return pending.then(
+			() => {
+				if (this.closed) return failure("CLOSED");
+				return this.poisoned ? failure("POISONED") : success(undefined);
+			},
+			() => {
+				this.poisoned = true;
+				return failure("POISONED");
+			},
+		);
+	}
+
 	// -----------------------------------------------------------------------
 	// Close
 	//   1. closed=true (stop admission)
@@ -541,39 +534,54 @@ export class DurableTargetInbox {
 	close(): Promise<TargetInboxResult<void>> {
 		if (this.closePromise !== null) return this.closePromise;
 
+		let resolveClose: (result: TargetInboxResult<void>) => void = () => undefined;
+		const shared = new Promise<TargetInboxResult<void>>((resolve) => {
+			resolveClose = resolve;
+		});
+		this.closePromise = shared;
 		this.closed = true;
 
-		this.closePromise = new Promise<TargetInboxResult<void>>((resolve) => {
-			const dp = this.dispatcherClose();
-			void Promise.all([this.operationTail, this.drainTail])
-				.then(async () => {
-					const dpOk = await dp;
-					let storeOk = false;
-					try {
-						const result = await Reflect.apply(DurableRelayStore.prototype.close, this.store, []);
-						storeOk = result.ok;
-					} catch {
-						storeOk = false;
-					}
-					resolve(dpOk && storeOk ? success(undefined) : failure("CLOSE_UNCERTAIN"));
-				})
-				.catch(async () => {
-					// close chain threw — still try store
-					const dpOk = await dp;
-					let storeOk = false;
-					try {
-						const result = await Reflect.apply(DurableRelayStore.prototype.close, this.store, []);
-						storeOk = result.ok;
-					} catch {
-						storeOk = false;
-					}
-					resolve(dpOk && storeOk ? success(undefined) : failure("CLOSE_UNCERTAIN"));
-				});
-		});
+		const operationTail = this.operationTail;
+		const drainTail = this.drainTail;
+		let dispatcherClose: Promise<boolean>;
+		try {
+			dispatcherClose = this.dispatcherClose();
+		} catch {
+			dispatcherClose = Promise.resolve(false);
+		}
+		void this.finishClose(operationTail, drainTail, dispatcherClose, resolveClose);
 
-		this.operationTail = this.closePromise.then(() => undefined);
-		this.drainTail = this.closePromise.then(() => undefined);
-		return this.closePromise;
+		this.operationTail = shared.then(() => undefined);
+		this.drainTail = shared.then(() => undefined);
+		return shared;
+	}
+
+	private async finishClose(
+		operationTail: Promise<void>,
+		drainTail: Promise<void>,
+		dispatcherClose: Promise<boolean>,
+		resolve: (result: TargetInboxResult<void>) => void,
+	): Promise<void> {
+		let tailsOk = true;
+		try {
+			await Promise.all([operationTail, drainTail]);
+		} catch {
+			tailsOk = false;
+		}
+		let dispatcherOk = false;
+		try {
+			dispatcherOk = await dispatcherClose;
+		} catch {
+			dispatcherOk = false;
+		}
+		let storeOk = false;
+		try {
+			const result = await Reflect.apply(DurableRelayStore.prototype.close, this.store, []);
+			storeOk = result.ok;
+		} catch {
+			storeOk = false;
+		}
+		resolve(tailsOk && dispatcherOk && storeOk ? success(undefined) : failure("CLOSE_UNCERTAIN"));
 	}
 
 	get status(): DurableTargetInboxStatus {
@@ -618,8 +626,9 @@ export class DurableTargetInbox {
 		this.drainRequested = true;
 		if (this.drainRunning) return;
 		this.drainRunning = true;
-		this.drainTail = this.drainTail.then(
-			() => this.runDrain(),
+		const run = this.drainTail.then(() => this.runDrain());
+		this.drainTail = run.then(
+			() => undefined,
 			() => {
 				this.poisoned = true;
 				this.drainRunning = false;
@@ -665,16 +674,6 @@ export class DurableTargetInbox {
 			if (!this.drainRequested) break;
 		}
 		this.drainRunning = false;
-		if (this.drainRequested && !this.closed && !this.poisoned && this.started) {
-			this.drainRunning = true;
-			this.drainTail = this.drainTail.then(
-				() => this.runDrain(),
-				() => {
-					this.poisoned = true;
-					this.drainRunning = false;
-				},
-			);
-		}
 	}
 
 	// =======================================================================
@@ -682,14 +681,21 @@ export class DurableTargetInbox {
 	// =======================================================================
 
 	private async dispatchOne(record: JournalRecordV1, _receipt: DurableReceipt): Promise<void> {
-		if (record.envelope.frame.type !== "agent_message") return;
+		if (record.envelope.frame.type !== "agent_message") {
+			this.poisoned = true;
+			return;
+		}
 
 		const decoded = decodeAgentMessageFrame(record.envelope.frame);
-		if (!decoded.ok) return;
-		// Skip records that don't target this inbox
-		if (decoded.value.targetActiveSessionId !== this.identity.sessionId) return;
+		if (!decoded.ok || decoded.value.targetActiveSessionId !== this.identity.sessionId) {
+			this.poisoned = true;
+			return;
+		}
 		const digestResult = canonicalDigest(decoded.value);
-		if (!digestResult.ok) return;
+		if (!digestResult.ok) {
+			this.poisoned = true;
+			return;
+		}
 		const semDigest = digestResult.value;
 
 		const state = (await Reflect.apply(DurableRelayStore.prototype.query, this.store, [
@@ -793,16 +799,11 @@ export class DurableTargetInbox {
 			}),
 		])) as DurableRelayStoreResult<unknown>;
 		if (!published.ok) {
-			// UNCERTAIN/POISONED → poison inbox
-			if (
-				published.error.code === "UNCERTAIN" ||
-				published.error.code === "POISONED" ||
-				published.error.code === "MISMATCH"
-			) {
+			const code = published.error.code;
+			if (code === "UNCERTAIN" || code === "POISONED" || code === "MISMATCH") {
 				this.poisoned = true;
-				return failure("MISMATCH");
 			}
-			return failure("COLLISION");
+			return failure(code);
 		}
 		const journalReceipt = published.value as DurableReceipt;
 
@@ -811,7 +812,7 @@ export class DurableTargetInbox {
 		])) as DurableRelayStoreResult<unknown>;
 		if (!pending.ok) {
 			this.poisoned = true;
-			return failure("UNCERTAIN");
+			return failure(pending.error.code);
 		}
 
 		this.semanticIndex.set(

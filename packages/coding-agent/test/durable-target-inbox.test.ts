@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { DurableRelayStore } from "../src/modes/daemon/durable-relay-store.js";
 import {
 	type AdmitReceipt,
 	createDurableTargetInbox,
@@ -809,7 +810,7 @@ describe("DurableTargetInbox", () => {
 		const envelope = makeEnvelope("tf-1", "sm-1", "2025-01-01T00:00:00.000Z", "hello");
 		const result = await inbox.admit({ envelope });
 		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.error.code).toBe("MISMATCH");
+		if (!result.ok) expect(result.error.code).toBe("UNCERTAIN");
 		await expectCode(inbox.admit({ envelope }), "POISONED");
 		await inbox.close();
 	});
@@ -1233,5 +1234,85 @@ describe("DurableTargetInbox", () => {
 		expect(closeCounts.journal).toBe(1);
 		expect(closeCounts.delivery).toBe(1);
 		expect(closeCounts.recovery).toBe(1);
+	});
+
+	it("installs the shared close promise before synchronous dispatcher reentry", async () => {
+		const counts = zeroCounts();
+		const disk = createDisk();
+		let inboxRef: DurableTargetInbox | null = null;
+		let reentered: Promise<unknown> | null = null;
+		const dispatcher: DispatcherCapability = {
+			ensure(): Promise<EnsureResult> {
+				return Promise.resolve(Object.freeze({ status: "persisted" as const }));
+			},
+			close(): Promise<Readonly<{ status: "closed" | "error" }>> {
+				if (inboxRef) reentered = inboxRef.close();
+				return Promise.resolve(Object.freeze({ status: "closed" as const }));
+			},
+		};
+		const created = await createDurableTargetInbox({
+			...makeInput(counts, { status: "persisted" }, disk),
+			dispatcher,
+		});
+		expect(created.ok).toBe(true);
+		if (!created.ok) return;
+		inboxRef = created.inbox;
+		const primary = created.inbox.close();
+		expect(reentered).toBe(primary);
+		expect(await primary).toMatchObject({ ok: true });
+	});
+
+	it("poisons when the current drain run rejects", async () => {
+		const { inbox } = await openedInbox();
+		await inbox.admit({ envelope: makeEnvelope("tf-1", "sm-1", "2025-01-01T00:00:00.000Z", "hello") });
+		const original = DurableRelayStore.prototype.replayJournals;
+		DurableRelayStore.prototype.replayJournals = function rejectReplay(): ReturnType<
+			DurableRelayStore["replayJournals"]
+		> {
+			return Promise.reject(new Error("injected replay rejection"));
+		};
+		try {
+			inbox.start();
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			await expectCode(
+				inbox.admit({ envelope: makeEnvelope("tf-2", "sm-2", "2025-01-01T00:00:01.000Z", "again") }),
+				"POISONED",
+			);
+		} finally {
+			DurableRelayStore.prototype.replayJournals = original;
+			await inbox.close();
+		}
+	});
+
+	it("exposes an awaitable dispatch pass and retries deferred records", async () => {
+		const counts = zeroCounts();
+		const disk = createDisk();
+		let status: EnsureResult["status"] = "deferred";
+		const dispatcher: DispatcherCapability = {
+			ensure(): Promise<EnsureResult> {
+				counts.ensure += 1;
+				return Promise.resolve(Object.freeze({ status }));
+			},
+			close(): Promise<Readonly<{ status: "closed" | "error" }>> {
+				counts.ensureClose += 1;
+				return Promise.resolve(Object.freeze({ status: "closed" as const }));
+			},
+		};
+		const created = await createDurableTargetInbox({
+			...makeInput(counts, { status: "persisted" }, disk),
+			dispatcher,
+		});
+		expect(created.ok).toBe(true);
+		if (!created.ok) return;
+		const { inbox } = created;
+		await inbox.admit({ envelope: makeEnvelope("tf-1", "sm-1", "2025-01-01T00:00:00.000Z", "hello") });
+		expect(await inbox.dispatchPending()).toMatchObject({ ok: true });
+		expect(counts.ensure).toBe(1);
+		status = "persisted";
+		expect(await inbox.dispatchPending()).toMatchObject({ ok: true });
+		expect(counts.ensure).toBe(2);
+		expect(await inbox.dispatchPending()).toMatchObject({ ok: true });
+		expect(counts.ensure).toBe(3);
+		await inbox.close();
 	});
 });
