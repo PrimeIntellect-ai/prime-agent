@@ -780,7 +780,7 @@ export class DurableTargetInbox {
 				Object.freeze({
 					status: "queued" as const,
 					receipt: existing.receipt,
-					frameId: existing.frameId,
+					frameId: envelope.frameId,
 					semanticId,
 					semanticDigest: semDigest,
 				}),
