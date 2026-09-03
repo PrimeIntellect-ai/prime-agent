@@ -10433,50 +10433,59 @@ export class AgentSession {
 	 * was suppressed; false when the id is unknown or the run already settled.
 	 */
 	cancelRlmChildRun(childId: string, reason = "Cancelled by user"): boolean {
-		const run = this._activeRlmChildRuns.get(childId);
-		if (run) {
-			if (run.status !== "running" && run.status !== "queued" && !run.settled) {
-				if (this._sessionInputPumpSuspended) this._abandonRlmRunForQuiescence(run);
-				else run.suppressTerminalNotice = true;
-				return true;
+		for (const session of this._rlmSubtreeSessions()) {
+			const run = session._activeRlmChildRuns.get(childId);
+			if (run) {
+				if (run.status !== "running" && run.status !== "queued" && !run.settled) {
+					if (session._sessionInputPumpSuspended) session._abandonRlmRunForQuiescence(run);
+					else run.suppressTerminalNotice = true;
+					return true;
+				}
+				// Cancel AND descend: the abort cascade only reaches active runs, never
+				// running work retained under a settled descendant.
+				const cancelled = session._cancelRlmChildRun(run, reason);
+				const descendantsCancelled = run.session?.cancelRunningRlmDescendants(reason) ?? false;
+				return cancelled || descendantsCancelled;
 			}
-			// Cancel AND descend: the abort cascade only reaches active runs, never
-			// running work retained under a settled descendant.
-			const cancelled = this._cancelRlmChildRun(run, reason);
-			const descendantsCancelled = run.session?.cancelRunningRlmDescendants(reason) ?? false;
-			return cancelled || descendantsCancelled;
-		}
-		const retainedTarget = this._rlmChildSessions.get(childId)?.session;
-		if (retainedTarget?.cancelRunningRlmDescendants(reason)) {
-			return true;
-		}
-		for (const candidate of this._activeRlmChildRuns.values()) {
-			if (candidate.session?.cancelRlmChildRun(childId, reason)) {
-				return true;
-			}
-		}
-		for (const { session: retained } of this._rlmChildSessions.values()) {
-			if (retained.cancelRlmChildRun(childId, reason)) {
-				return true;
+			const retainedTarget = session._rlmChildSessions.get(childId)?.session;
+			if (retainedTarget) {
+				return retainedTarget.cancelRunningRlmDescendants(reason);
 			}
 		}
 		return false;
 	}
 
-	/** Cancel every running or queued run in this session's subtree; cancel AND descend at every node. */
-	cancelRunningRlmDescendants(reason = "Cancelled by user"): boolean {
-		let cancelled = false;
-		for (const run of this._activeRlmChildRuns.values()) {
-			if (run.status === "running" || run.status === "queued") {
-				if (this._cancelRlmChildRun(run, reason)) cancelled = true;
+	// One traversal owner for the run tree: a done child is often in BOTH maps
+	// (its run until passivation, its session while retained), so walking both
+	// recursively re-walks whole subtrees exponentially; the visited set makes
+	// dual membership free and bounds the walk at one visit per session.
+	private *_rlmSubtreeSessions(): Generator<AgentSession> {
+		const visited = new Set<AgentSession>([this]);
+		const stack: AgentSession[] = [this];
+		while (stack.length > 0) {
+			const session = stack.pop()!;
+			yield session;
+			for (const run of session._activeRlmChildRuns.values()) {
+				if (run.session && !visited.has(run.session)) {
+					visited.add(run.session);
+					stack.push(run.session);
+				}
 			}
-			if (run.session?.cancelRunningRlmDescendants(reason)) {
-				cancelled = true;
+			for (const { session: retained } of session._rlmChildSessions.values()) {
+				if (!visited.has(retained)) {
+					visited.add(retained);
+					stack.push(retained);
+				}
 			}
 		}
-		for (const { session } of this._rlmChildSessions.values()) {
-			if (session.cancelRunningRlmDescendants(reason)) {
-				cancelled = true;
+	}
+
+	/** Cancel every running or queued run in this session's subtree. */
+	cancelRunningRlmDescendants(reason = "Cancelled by user"): boolean {
+		let cancelled = false;
+		for (const session of this._rlmSubtreeSessions()) {
+			for (const run of session._activeRlmChildRuns.values()) {
+				if (session._cancelRlmChildRun(run, reason)) cancelled = true;
 			}
 		}
 		return cancelled;
