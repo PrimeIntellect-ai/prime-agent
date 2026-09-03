@@ -2548,7 +2548,8 @@ export class AgentsViewMode implements Component, Focusable {
 		const details = usageText ? `${usageText} · ${age}` : age;
 		const detailsWidth = Math.max(10, visibleWidth(details));
 		const heartbeatBadge = !pendingDelete && !pendingKill ? formatHeartbeatBadge(row.heartbeat) : "";
-		const heartbeatCell = heartbeatBadge ? theme.fg("error", heartbeatBadge) : "";
+		const heartbeatPausedOnly = (row.heartbeat?.activeCount ?? 0) < 1;
+		const heartbeatCell = heartbeatBadge ? theme.fg(heartbeatPausedOnly ? "dim" : "error", heartbeatBadge) : "";
 		const heartbeatWidth = visibleWidth(heartbeatBadge);
 		const titleWidth = Math.max(
 			0,
@@ -2559,10 +2560,12 @@ export class AgentsViewMode implements Component, Focusable {
 				2 -
 				(heartbeatWidth > 0 ? heartbeatWidth + 1 : 0),
 		);
+		const armedHeartbeat = row.summary.hasActiveHeartbeat === true || (row.heartbeat?.activeCount ?? 0) > 0;
+		const heartbeatWarning = armedHeartbeat ? "has an armed heartbeat — " : "";
 		const title = pendingDelete
-			? this.getPendingDeleteTitle()
+			? `${heartbeatWarning}${this.getPendingDeleteTitle()}`
 			: pendingKill
-				? `${keyText("app.agents.delete")} again to ${row.section === "running" ? "stop" : "delete"}`
+				? `${heartbeatWarning}${keyText("app.agents.delete")} again to ${row.section === "running" ? "stop" : "delete"}`
 				: styleRowTitle(row);
 		// Keep stable model information ahead of the variable summary so narrow rows truncate the summary first.
 		const summaryText = !pendingDelete && !pendingKill ? row.summary.summary : undefined;

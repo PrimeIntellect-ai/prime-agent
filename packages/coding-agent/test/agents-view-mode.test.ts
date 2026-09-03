@@ -16,6 +16,7 @@ import {
 import {
 	type AgentsViewRow,
 	buildAgentsViewRows,
+	reconcileUnifiedSessions,
 	resolveAgentsViewLeftResult,
 } from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
@@ -763,6 +764,60 @@ describe("AgentsViewMode", () => {
 			const idleSummaryRow = idleRows.find((row) => row.kind === "subagent-summary");
 			Reflect.set(view, "rows", idleRows);
 			expect(invoke("renderRow", view, idleSummaryRow, 160)).toContain(theme.fg("dim", "▸ 1 subagent"));
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("dims a paused-only heartbeat badge and keeps active badges in the error color", () => {
+		const job = (status: "active" | "paused") => ({
+			job: {
+				id: `${status}-job`,
+				status,
+				activeSessionId: "scope-active",
+				sessionId: "scope-session",
+				sessionFile: "/tmp/scope.jsonl",
+				cwd: "/tmp",
+				prompt: "tick",
+				schedule: { kind: "interval" as const, expression: "5m" },
+				createdAt: "2026-01-01T00:00:00Z",
+				updatedAt: "2026-01-01T00:00:00Z",
+				runCount: 0,
+			},
+		});
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+
+		try {
+			const [pausedRow] = buildAgentsViewRows(reconcileUnifiedSessions([summary()], [], [job("paused")]));
+			Reflect.set(view, "rows", [pausedRow]);
+			const pausedLine = invoke("renderRow", view, pausedRow, 160) as string;
+			expect(pausedLine).toContain(theme.fg("dim", "♥ 1"));
+			expect(pausedRow).toMatchObject({ section: "idle" });
+
+			const [activeRow] = buildAgentsViewRows(reconcileUnifiedSessions([summary()], [], [job("active")]));
+			Reflect.set(view, "rows", [activeRow]);
+			const activeLine = invoke("renderRow", view, activeRow, 160) as string;
+			expect(activeLine).toContain(theme.fg("error", "♥ 1"));
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("warns about the armed heartbeat in the delete confirmation", () => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "deleteConfirmExpiresAt", Date.now() + 10_000);
+		const confirmLine = (row: AgentsViewRow): string => {
+			Reflect.set(view, "rows", [row]);
+			Reflect.set(view, "pendingDeleteAgent", { identity: row.identity, summary: row.summary, stopped: false });
+			return stripAnsi(invoke("renderRow", view, row, 160) as string);
+		};
+
+		try {
+			const [armedRow] = buildAgentsViewRows([summary({ hasActiveHeartbeat: true })]);
+			expect(confirmLine(armedRow!)).toContain("has an armed heartbeat — ");
+			const [plainRow] = buildAgentsViewRows([summary()]);
+			expect(confirmLine(plainRow!)).not.toContain("armed heartbeat");
+			expect(confirmLine(plainRow!)).toContain("again to remove");
 		} finally {
 			stopThemeWatcher();
 		}

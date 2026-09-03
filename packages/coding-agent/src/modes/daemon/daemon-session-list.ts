@@ -143,7 +143,6 @@ export function isEvictableEmptySessionSummary(summary: SessionSummary): boolean
 		summary.messageCount === 0 &&
 		!summary.sessionName &&
 		!isSessionSummaryBusy(summary) &&
-		summary.hasRegisteredHeartbeat !== true &&
 		summary.hasRegisteredCronJob !== true
 	);
 }

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
 	chmodSync,
@@ -12,9 +13,10 @@ import {
 } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.js";
 import {
 	AGENT_FAMILY_REACH_ERROR,
 	type AgentSessionMessageController,
@@ -24,9 +26,9 @@ import {
 } from "../src/core/agent-messages.js";
 import type { AgentObserveController } from "../src/core/agent-observe.js";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
-import { flushAgentTraceUpload, installAgentTraceUpload } from "../src/core/agent-traces.js";
+import { installAgentTraceUpload } from "../src/core/agent-traces.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import type { AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
+import { type AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
 import { PRIME_AGENT_TRACES_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
@@ -34,7 +36,12 @@ import {
 	type SubagentRuntimeHost,
 } from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
-import { readSessionInfo, type SessionInfo, SessionManager } from "../src/core/session-manager.js";
+import {
+	getSessionArtifactPathForFile,
+	readSessionInfo,
+	type SessionInfo,
+	SessionManager,
+} from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import {
@@ -523,7 +530,7 @@ describe("daemon mode helpers", () => {
 		});
 	});
 
-	it("classifies local roster status from the session's own work, not delegated children", () => {
+	it("classifies local roster status from the session's own work, not heartbeats or delegated children", () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-status-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			createRuntime: vi.fn(),
@@ -549,8 +556,8 @@ describe("daemon mode helpers", () => {
 			};
 			createAgentMessageAgentSummary(state: ActiveSessionState): { status?: string };
 		};
-		const getHeartbeat = vi.spyOn(internals.cronStore, "getHeartbeat").mockReturnValue(undefined);
-		const listRlmHeartbeats = vi.spyOn(internals.cronStore, "listRlmHeartbeats").mockReturnValue([]);
+		vi.spyOn(internals.cronStore, "getHeartbeat").mockReturnValue({ status: "active" } as AgentCronJob);
+		vi.spyOn(internals.cronStore, "listRlmHeartbeats").mockReturnValue([{ status: "active" } as AgentCronJob]);
 
 		// Delegated child work is not the session's own work.
 		expect(internals.createAgentMessageAgentSummary(state).status).toBe("idle");
@@ -560,11 +567,6 @@ describe("daemon mode helpers", () => {
 			metadata: { kind: "subagent", createdAt: 1 },
 		} as ActiveSessionState["runtime"];
 		expect(internals.createAgentMessageAgentSummary(state).status).toBe("idle");
-		getHeartbeat.mockReturnValue({ status: "active" } as AgentCronJob);
-		expect(internals.createAgentMessageAgentSummary(state).status).toBe("running");
-		getHeartbeat.mockReturnValue(undefined);
-		listRlmHeartbeats.mockReturnValue([{ status: "active" } as AgentCronJob]);
-		expect(internals.createAgentMessageAgentSummary(state).status).toBe("running");
 	});
 
 	it("records live delegated child work as busy for worker recovery while activity stays idle", () => {
@@ -1052,6 +1054,67 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("plumbs semantic-edge ancestry into daemon-hosted child session options", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-lineage-ancestry-"));
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const parentManager = SessionManager.create(tempDir, sessionDir);
+			parentManager.newSession();
+			parentManager.appendSessionInfo("parent");
+			const parentSessionFile = parentManager.getSessionFile();
+			if (!parentSessionFile) throw new Error("Missing parent session file");
+			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => ({
+				session: makeRuntimeSession(options.sessionManager),
+				extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
+					ReturnType<CreateAgentSessionRuntimeFactory>
+				>["extensionsResult"],
+				services: { cwd: options.cwd, agentDir: options.agentDir } as Awaited<
+					ReturnType<CreateAgentSessionRuntimeFactory>
+				>["services"],
+				diagnostics: [],
+			}));
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
+				createRuntime,
+			});
+			const internals = daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				createRlmSubagentRuntime(
+					parentState: ActiveSessionState,
+					options: CreateRlmSubagentRuntimeOptions,
+				): Promise<ActiveSessionState["runtime"]>;
+			};
+			const parentState = await internals.createRuntime({ type: "create", sessionPath: parentSessionFile });
+			const spawnedByRequestId = "b".repeat(32);
+			await internals.createRlmSubagentRuntime(parentState, {
+				parentSession: parentState.runtime.session,
+				id: "lineage-child",
+				prompt: "carry ancestry",
+				sessionName: "lineage-worker",
+				sessionDir: join(parentManager.getSessionArtifactDir()!, "lineage-child"),
+				model: { provider: "test", id: "model" } as Model<Api>,
+				thinkingLevel: "off",
+				serviceTier: null,
+				scopedModels: [],
+				activeToolNames: [],
+				customTools: [],
+				includeGoals: false,
+				includeCompactSkill: false,
+				rlmDepth: 1,
+				rlmMaxDepth: 4,
+				rlmParentNodeId: "lineage-child",
+				spawnedByRequestId,
+			});
+
+			const childCreate = createRuntime.mock.calls.at(-1)?.[0];
+			expect(childCreate?.sessionOptions).toMatchObject({
+				semanticParentSessionId: parentState.runtime.session.sessionId,
+				semanticSpawnedByRequestId: spawnedByRequestId,
+			});
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
 	it("discovers a non-resident child left running in the persisted registry", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-orphan-running-child-"));
 		try {
@@ -4058,6 +4121,57 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("registers passive descendants' scheduled jobs when their root becomes resident", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-descendant-jobs-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const childSessionId = basename(fixture.childArtifactDir);
+			const grandchildSessionId = basename(fixture.grandchildSessionFile, ".jsonl");
+			const seedStore = AgentCronJobStore.forSessionArtifacts();
+			seedStore.registerSessionArtifact(childSessionId, fixture.childArtifactDir);
+			seedStore.registerSessionArtifact(
+				grandchildSessionId,
+				getSessionArtifactPathForFile(fixture.grandchildSessionFile, grandchildSessionId),
+			);
+			const makeJob = (sessionId: string, sessionFile: string) =>
+				seedStore.createRlmHeartbeat({
+					activeSessionId: `stale-${sessionId}`,
+					sessionId,
+					sessionFile,
+					cwd: tempDir,
+					runtimeKind: "subagent",
+					scheduleText: "every 30s",
+					prompt: "report exactly: hi",
+				});
+			makeJob(childSessionId, fixture.childSessionFile);
+			const grandchildHeartbeat = makeJob(grandchildSessionId, fixture.grandchildSessionFile);
+
+			const workerDaemon = new AgentDaemon(join(tempDir, "worker-daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: join(tempDir, "sessions") },
+				createRuntime: fixture.createRuntime,
+				worker: { authenticationToken: "worker-token" },
+			});
+			const internals = workerDaemon as unknown as {
+				cronStore: AgentCronJobStore;
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+			};
+			// A corrupt child artifact must not strand the remaining descendants.
+			const recover = internals.cronStore.recoverSessionArtifact.bind(internals.cronStore);
+			vi.spyOn(internals.cronStore, "recoverSessionArtifact").mockImplementation((sessionId) => {
+				if (sessionId === childSessionId) throw new Error("corrupt scheduled-jobs.json");
+				return recover(sessionId);
+			});
+
+			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+
+			await vi.waitFor(() =>
+				expect(internals.cronStore.list().some((job) => job.id === grandchildHeartbeat.id)).toBe(true),
+			);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("replaces a resident top-level RLM child when restoring its heartbeat", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-replace-child-heartbeat-"));
 		try {
@@ -6075,7 +6189,6 @@ describe("daemon mode helpers", () => {
 		internals.sessionPassivationSnapshot = vi.fn(async (state: ActiveSessionState) => ({
 			isSessionActive: false,
 			attachedClients: 0,
-			hasRegisteredHeartbeat: false,
 			hasRegisteredCronJob: false,
 			lastActivityAt: order.get(state) ?? 99,
 			hasParent: state !== root,
@@ -6561,8 +6674,10 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
-	it("deletes a resident child without awaiting its pending trace upload and skips the doomed kernel snapshot", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-trace-flush-"));
+	it("resolves delete_subagent while the child's trace upload is still in flight, then the transcript upload completes", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-trace-outbox-"));
+		const originalAgentDir = process.env[ENV_AGENT_DIR];
+		process.env[ENV_AGENT_DIR] = tempDir;
 		try {
 			const fixture = makePersistedRlmDaemonFixture(tempDir);
 			const internals = fixture.daemon as unknown as {
@@ -6575,24 +6690,40 @@ describe("daemon mode helpers", () => {
 			const { calls, releaseFetch } = installGatedTraceUpload(childManager);
 			childManager.appendMessage({ role: "user", content: "pending trace data", timestamp: 3 });
 			childManager.flushNow();
+			await vi.waitFor(() => expect(calls).toHaveLength(1), { timeout: 5_000 });
+			const transcriptAtUpload = readFileSync(fixture.childSessionFile, "utf8");
 
 			// The fetch gate is still held: the delete must not await the upload.
 			await internals
 				.createSubagentRuntimeHost(parentState)
 				.deleteRlmSubagentRuntime(fixture.childId, childState.runtime.session);
-
-			await vi.waitFor(() => expect(calls).toHaveLength(1));
-			expect(childState.runtime.session.disposeAsync).toHaveBeenCalledWith({ kernelSnapshot: false });
-			releaseFetch();
-			await flushAgentTraceUpload(childManager);
 			expect(calls).toHaveLength(1);
+			expect(childState.runtime.session.disposeAsync).toHaveBeenCalledWith({ kernelSnapshot: false });
+
+			// The transcript survives deletion and its upload completes independently.
+			releaseFetch();
+			const entryKey = createHash("sha256").update(fixture.childSessionFile).digest("hex").slice(0, 32);
+			await vi.waitFor(() => {
+				const entry = JSON.parse(
+					readFileSync(join(tempDir, "agent-traces-outbox", `${entryKey}.json`), "utf8"),
+				) as { sessionFile: string; size?: number };
+				expect(entry.size).toBeGreaterThan(0);
+			});
+			expect(calls[0]?.body).toBe(transcriptAtUpload);
 		} finally {
+			if (originalAgentDir === undefined) {
+				delete process.env[ENV_AGENT_DIR];
+			} else {
+				process.env[ENV_AGENT_DIR] = originalAgentDir;
+			}
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
 	it("resolves a delete that joins an in-flight passivation close without awaiting the trace upload", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-delete-passivation-flush-"));
+		const originalAgentDir = process.env[ENV_AGENT_DIR];
+		process.env[ENV_AGENT_DIR] = tempDir;
 		let releaseDispose!: () => void;
 		const disposeGate = new Promise<void>((resolve) => {
 			releaseDispose = resolve;
@@ -6620,6 +6751,7 @@ describe("daemon mode helpers", () => {
 			const { calls, releaseFetch } = installGatedTraceUpload(childManager);
 			childManager.appendMessage({ role: "user", content: "pending trace data", timestamp: 3 });
 			childManager.flushNow();
+			await vi.waitFor(() => expect(calls).toHaveLength(1), { timeout: 5_000 });
 
 			const passivation = internals.passivateIdleChildren(90, Date.parse("2036-08-01T12:00:00Z"), 1);
 			await disposeStarted;
@@ -6632,9 +6764,13 @@ describe("daemon mode helpers", () => {
 			expect(calls).toHaveLength(1);
 			expect(childState.runtime.session.disposeAsync).toHaveBeenCalledWith({ kernelSnapshot: true });
 			releaseFetch();
-			await flushAgentTraceUpload(childManager);
 		} finally {
 			releaseDispose();
+			if (originalAgentDir === undefined) {
+				delete process.env[ENV_AGENT_DIR];
+			} else {
+				process.env[ENV_AGENT_DIR] = originalAgentDir;
+			}
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
@@ -9061,10 +9197,10 @@ function makeCronJob(input: {
 
 /** Gated fetch stub on a session's trace-upload controller: observes whether a close awaits the upload. */
 function installGatedTraceUpload(sessionManager: SessionManager): {
-	calls: string[];
+	calls: Array<{ url: string; body: string }>;
 	releaseFetch: () => void;
 } {
-	const calls: string[] = [];
+	const calls: Array<{ url: string; body: string }> = [];
 	let releaseFetch: () => void = () => {};
 	const gate = new Promise<void>((resolveGate) => {
 		releaseFetch = resolveGate;
@@ -9075,8 +9211,8 @@ function installGatedTraceUpload(sessionManager: SessionManager): {
 		}),
 		settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
 		baseUrl: "https://api.example.test",
-		fetchFn: (async (input: unknown) => {
-			calls.push(String(input));
+		fetchFn: (async (input: unknown, init?: RequestInit) => {
+			calls.push({ url: String(input), body: String(init?.body ?? "") });
 			await gate;
 			return new Response(JSON.stringify({ bytes_stored: 1 }), {
 				status: 200,

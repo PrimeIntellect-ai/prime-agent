@@ -1,0 +1,1 @@
+- Added native callable tools for MCP servers supplied by ACP clients. ([#2002](https://github.com/PrimeIntellect-ai/prime-agent/pull/2002))
