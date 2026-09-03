@@ -397,7 +397,7 @@ export class DurableTargetInbox {
 			const page = (await Reflect.apply(DurableRelayStore.prototype.replayJournals, store, [
 				Object.freeze({ cursor, maxCount: 64 }),
 			])) as DurableRelayStoreResult<unknown>;
-			if (!page.ok) return await finalize("RECOVERY_FAILED");
+			if (!page.ok) return await finalize(page.error.code);
 			const pv = page.value as {
 				entries: readonly { record: JournalRecordV1; receipt: DurableReceipt }[];
 				nextCursor: number | null;
@@ -435,13 +435,13 @@ export class DurableTargetInbox {
 			const state = (await Reflect.apply(DurableRelayStore.prototype.query, store, [
 				record.envelope.frameId,
 			])) as DurableRelayStoreResult<unknown>;
-			if (!state.ok) return await finalize("RECOVERY_FAILED");
+			if (!state.ok) return await finalize(state.error.code);
 			const sv = state.value as { state: "new" | "pending" | "delivered" };
 			if (sv.state === "new") {
 				const pending = (await Reflect.apply(DurableRelayStore.prototype.markPending, store, [
 					Object.freeze({ frameId: record.envelope.frameId, recordedAt: record.recordedAt }),
 				])) as DurableRelayStoreResult<unknown>;
-				if (!pending.ok) return await finalize("RECOVERY_FAILED");
+				if (!pending.ok) return await finalize(pending.error.code);
 			}
 		}
 
