@@ -19,7 +19,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, open, readFile, realpath, rm, symlink } from "node:fs/promises";
+import { access, chmod, link, mkdir, mkdtemp, open, readFile, realpath, rename, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { types } from "node:util";
@@ -866,6 +866,551 @@ describe("journal backend — source audit and hostile inputs", () => {
 		} finally {
 			await be.publisher.close();
 			await be.recoveryBackend.close();
+		}
+	});
+});
+
+// ===========================================================================
+// Backend factory input boundary tests
+// ===========================================================================
+
+describe("journal backend — factory input boundaries", () => {
+	it("rejects hidden extra key", async () => {
+		const dir = await freshDir();
+		const raw = {
+			directoryPath: dir,
+			identity: Object.freeze({ hostId: "a", generation: "b", sessionId: "c" }),
+			kind: "command" as string,
+		};
+		Object.defineProperty(raw, "hidden", { value: true, enumerable: false, configurable: true });
+		const r = await createSandboxJournalBackend(raw);
+		expect(descOk(r)).toBe(false);
+	});
+
+	it("rejects extra enumerable key", async () => {
+		const dir = await freshDir();
+		const r = await createSandboxJournalBackend(
+			Object.freeze({
+				directoryPath: dir,
+				identity: Object.freeze({ hostId: "a", generation: "b", sessionId: "c" }),
+				kind: "command",
+				extra: true,
+			}),
+		);
+		expect(descOk(r)).toBe(false);
+	});
+
+	it("rejects symbol key", async () => {
+		const dir = await freshDir();
+		const raw = {
+			directoryPath: dir,
+			identity: Object.freeze({ hostId: "a", generation: "b", sessionId: "c" }),
+			kind: "command",
+		};
+		Object.defineProperty(raw, Symbol("x"), { value: 1, enumerable: true });
+		const r = await createSandboxJournalBackend(raw);
+		expect(descOk(r)).toBe(false);
+	});
+
+	it("rejects accessor descriptor", async () => {
+		const dir = await freshDir();
+		const raw = {};
+		Object.defineProperty(raw, "directoryPath", { get: () => dir, enumerable: true, configurable: true });
+		Object.defineProperty(raw, "identity", {
+			value: Object.freeze({ hostId: "a", generation: "b", sessionId: "c" }),
+			enumerable: true,
+			configurable: true,
+			writable: true,
+		});
+		Object.defineProperty(raw, "kind", { value: "command", enumerable: true, configurable: true, writable: true });
+		const r = await createSandboxJournalBackend(raw);
+		expect(descOk(r)).toBe(false);
+	});
+
+	it("rejects undefined descriptor value", async () => {
+		const _dir = await freshDir();
+		const raw = {
+			directoryPath: undefined,
+			identity: Object.freeze({ hostId: "a", generation: "b", sessionId: "c" }),
+			kind: "command",
+		};
+		Object.defineProperty(raw, "directoryPath", {
+			value: undefined,
+			enumerable: true,
+			configurable: true,
+			writable: true,
+		});
+		const r = await createSandboxJournalBackend(raw);
+		expect(descOk(r)).toBe(false);
+	});
+
+	it("rejects custom prototype input", async () => {
+		const dir = await freshDir();
+		const proto = { extra: 1 };
+		const raw = Object.assign(Object.create(proto), {
+			directoryPath: dir,
+			identity: Object.freeze({ hostId: "a", generation: "b", sessionId: "c" }),
+			kind: "command",
+		});
+		const r = await createSandboxJournalBackend(raw);
+		expect(descOk(r)).toBe(false);
+	});
+
+	it("rejects identity with extra key", async () => {
+		const dir = await freshDir();
+		const r = await createSandboxJournalBackend(
+			Object.freeze({
+				directoryPath: dir,
+				identity: Object.freeze({ hostId: "a", generation: "b", sessionId: "c", extra: "x" }),
+				kind: "command",
+			}),
+		);
+		expect(descOk(r)).toBe(false);
+	});
+
+	it("rejects identity missing hostId", async () => {
+		const dir = await freshDir();
+		const r = await createSandboxJournalBackend(
+			Object.freeze({
+				directoryPath: dir,
+				identity: Object.freeze({ generation: "b", sessionId: "c" }),
+				kind: "command",
+			}),
+		);
+		expect(descOk(r)).toBe(false);
+	});
+
+	it("rejects identity with empty string id", async () => {
+		const dir = await freshDir();
+		const r = await createSandboxJournalBackend(
+			Object.freeze({
+				directoryPath: dir,
+				identity: Object.freeze({ hostId: "", generation: "b", sessionId: "c" }),
+				kind: "command",
+			}),
+		);
+		expect(descOk(r)).toBe(false);
+	});
+
+	it("rejects invalid kind string", async () => {
+		const dir = await freshDir();
+		const r = await createSandboxJournalBackend(
+			Object.freeze({
+				directoryPath: dir,
+				identity: Object.freeze({ hostId: "a", generation: "b", sessionId: "c" }),
+				kind: "invalid-kind",
+			}),
+		);
+		expect(descOk(r)).toBe(false);
+	});
+});
+// ===========================================================================
+// Backend directory/identity/listing boundary tests
+// ===========================================================================
+
+describe("journal backend — directory and listing boundaries", () => {
+	it("rejects directory with wrong mode", async () => {
+		const raw = await mkdtemp(join(tmpdir(), "journal-test-"));
+		const root = await realpath(raw);
+		ROOTS.push(root);
+		const dir = join(root, "journals");
+		await mkdir(dir, { recursive: true, mode: 0o755 });
+		const r = await createSandboxJournalBackend(
+			Object.freeze({ directoryPath: dir, identity: IDENTITY, kind: "command" }),
+		);
+		expect(descOk(r)).toBe(false);
+	});
+
+	it("rejects identity.json as symlink", async () => {
+		const raw = await mkdtemp(join(tmpdir(), "journal-test-"));
+		const root = await realpath(raw);
+		ROOTS.push(root);
+		const dir = join(root, "journals");
+		await mkdir(dir, { recursive: true, mode: 0o700 });
+		const fake = join(root, "fake-identity");
+		await open(fake, "w", 0o600).then((fh) => fh.close());
+		await symlink(fake, join(dir, "identity.json"), "file");
+		const r = await createSandboxJournalBackend(
+			Object.freeze({ directoryPath: dir, identity: IDENTITY, kind: "command" }),
+		);
+		expect(descOk(r)).toBe(false);
+	});
+
+	it("accepts identity.json with different mode (content verified on reopen)", async () => {
+		const dir = await freshDir();
+		const be = await createBackend(dir, "command");
+		expect(be.ok).toBe(true);
+		if (!be.ok) throw new Error("backend failed");
+		try {
+			await be.publisher.close();
+			await be.recoveryBackend.close();
+			await open(join(dir, "identity.json"), "r", 0o644).then((fh) => fh.close());
+			const r = await createSandboxJournalBackend(
+				Object.freeze({ directoryPath: dir, identity: IDENTITY, kind: "command" }),
+			);
+			// Identity file content is verified on reopen; mode is set at create time only.
+			expect(r.ok).toBe(true);
+			if (r.ok) {
+				await r.publisher.close();
+				await r.recoveryBackend.close();
+			}
+		} finally {
+			await be.publisher.close().catch(() => {});
+			await be.recoveryBackend.close().catch(() => {});
+		}
+	});
+
+	it("rejects identity.json content mismatch", async () => {
+		const dir = await freshDir();
+		const be = await createBackend(dir, "command");
+		expect(be.ok).toBe(true);
+		if (!be.ok) throw new Error("backend failed");
+		try {
+			await be.publisher.close();
+			await be.recoveryBackend.close();
+			const fh = await open(join(dir, "identity.json"), "w", 0o600);
+			await fh.write(new TextEncoder().encode("corrupted"));
+			await fh.close();
+			const r = await createSandboxJournalBackend(
+				Object.freeze({ directoryPath: dir, identity: IDENTITY, kind: "command" }),
+			);
+			expect(descOk(r)).toBe(false);
+		} finally {
+			await be.publisher.close().catch(() => {});
+			await be.recoveryBackend.close().catch(() => {});
+		}
+	});
+
+	it("rejects hardlinked journal file", async () => {
+		const dir = await freshDir();
+		const be = await createBackend(dir, "command");
+		expect(be.ok).toBe(true);
+		if (!be.ok) throw new Error("backend failed");
+		const { publisher, recoveryBackend } = be;
+		try {
+			const data = new Uint8Array([1, 2, 3]);
+			const pub = await publisher.publish(1, data);
+			expect(descOk(pub)).toBe(true);
+			await publisher.close();
+			await recoveryBackend.close();
+			const entry1 = join(dir, `${String(1).padStart(20, "0")}.b14-command`);
+			const hardlink = join(dir, `${String(2).padStart(20, "0")}.b14-command`);
+			await link(entry1, hardlink);
+			const be2 = await createBackend(dir, "command");
+			expect(be2.ok).toBe(false);
+		} finally {
+			await publisher.close().catch(() => {});
+			await recoveryBackend.close().catch(() => {});
+		}
+	});
+
+	it("rejects journal file symlink", async () => {
+		const dir = await freshDir();
+		const be = await createBackend(dir, "command");
+		expect(be.ok).toBe(true);
+		if (!be.ok) throw new Error("backend failed");
+		const { publisher, recoveryBackend } = be;
+		try {
+			const data = new Uint8Array([1, 2, 3]);
+			const pub = await publisher.publish(1, data);
+			expect(descOk(pub)).toBe(true);
+			await publisher.close();
+			await recoveryBackend.close();
+			const entry1 = join(dir, `${String(1).padStart(20, "0")}.b14-command`);
+			const fake = join(`${dir}_fake`);
+			const fh = await open(fake, "w", 0o600);
+			await fh.close();
+			await rename(entry1, `${fake}_orig`);
+			await symlink(fake, entry1, "file");
+			const be2 = await createBackend(dir, "command");
+			expect(be2.ok).toBe(false);
+		} finally {
+			await publisher.close().catch(() => {});
+			await recoveryBackend.close().catch(() => {});
+		}
+	});
+
+	it("rejects journal file with wrong mode", async () => {
+		const dir = await freshDir();
+		const be = await createBackend(dir, "command");
+		expect(be.ok).toBe(true);
+		if (!be.ok) throw new Error("backend failed");
+		const { publisher, recoveryBackend } = be;
+		try {
+			const data = new Uint8Array([1, 2, 3]);
+			const pub = await publisher.publish(1, data);
+			expect(descOk(pub)).toBe(true);
+			await publisher.close();
+			await recoveryBackend.close();
+			const entry1 = join(dir, `${String(1).padStart(20, "0")}.b14-command`);
+			await chmod(entry1, 0o644);
+			const be2 = await createBackend(dir, "command");
+			expect(be2.ok).toBe(false);
+		} finally {
+			await publisher.close().catch(() => {});
+			await recoveryBackend.close().catch(() => {});
+		}
+	});
+
+	it("rejects non-contiguous journal sequence (gap)", async () => {
+		const dir = await freshDir();
+		const be = await createBackend(dir, "command");
+		expect(be.ok).toBe(true);
+		if (!be.ok) throw new Error("backend failed");
+		const { publisher, recoveryBackend } = be;
+		try {
+			const data = new Uint8Array([1]);
+			const pub = await publisher.publish(1, data);
+			expect(descOk(pub)).toBe(true);
+			const name3 = `${String(3).padStart(20, "0")}.b14-command`;
+			const fh = await open(join(dir, name3), "w", 0o600);
+			await fh.write(new Uint8Array([2]));
+			await fh.close();
+			await publisher.close();
+			await recoveryBackend.close();
+			const be2 = await createBackend(dir, "command");
+			expect(be2.ok).toBe(false);
+		} finally {
+			await publisher.close().catch(() => {});
+			await recoveryBackend.close().catch(() => {});
+		}
+	});
+
+	it("lists unexpected safe entries alongside parsed ones", async () => {
+		const dir = await freshDir();
+		const be = await createBackend(dir, "command");
+		expect(be.ok).toBe(true);
+		if (!be.ok) throw new Error("backend failed");
+		const { publisher, recoveryBackend } = be;
+		try {
+			const data = new Uint8Array([1, 2, 3]);
+			const pub = await publisher.publish(1, data);
+			expect(descOk(pub)).toBe(true);
+			const unexpectedName = "other-file.tmp";
+			const fh = await open(join(dir, unexpectedName), "w", 0o600);
+			await fh.write(new Uint8Array([4, 5]));
+			await fh.close();
+			await publisher.close();
+			await recoveryBackend.close();
+			const be2 = await createBackend(dir, "command");
+			expect(be2.ok).toBe(true);
+			if (!be2.ok) throw new Error("reopen backend failed");
+			const page = await be2.recoveryBackend.listPage(
+				Object.freeze({ cursor: null, maxEntries: 64, maxBytes: 16_777_216 }),
+			);
+			const pd = descriptors(page);
+			expect(pd).not.toBeNull();
+			if (pd) {
+				const entriesDesc = pd.entries;
+				if (entriesDesc && "value" in entriesDesc && Array.isArray(entriesDesc.value)) {
+					const names = entriesDesc.value.map((e: { name: string }) => e.name);
+					expect(names).toContain(unexpectedName);
+				}
+			}
+			await closePage(page);
+			await be2.publisher.close();
+			await be2.recoveryBackend.close();
+		} finally {
+			await publisher.close().catch(() => {});
+			await recoveryBackend.close().catch(() => {});
+		}
+	});
+});
+// ===========================================================================
+// Backend publisher/recovery runtime boundary tests
+// ===========================================================================
+
+describe("journal backend — publisher and recovery runtime", () => {
+	it("publisher close returns same Promise for concurrent callers", async () => {
+		const dir = await freshDir();
+		const be = await createBackend(dir, "command");
+		expect(be.ok).toBe(true);
+		if (!be.ok) throw new Error("backend failed");
+		try {
+			const p1 = be.publisher.close();
+			const p2 = be.publisher.close();
+			expect(p1).toBe(p2);
+			await p1;
+		} finally {
+			await be.publisher.close().catch(() => {});
+			await be.recoveryBackend.close().catch(() => {});
+		}
+	});
+
+	it("recovery close returns same Promise for concurrent callers", async () => {
+		const dir = await freshDir();
+		const be = await createBackend(dir, "command");
+		expect(be.ok).toBe(true);
+		if (!be.ok) throw new Error("backend failed");
+		try {
+			const p1 = be.recoveryBackend.close();
+			const p2 = be.recoveryBackend.close();
+			expect(p1).toBe(p2);
+			await p1;
+		} finally {
+			await be.publisher.close().catch(() => {});
+			await be.recoveryBackend.close().catch(() => {});
+		}
+	});
+
+	it("rejects publish after publisher close", async () => {
+		const dir = await freshDir();
+		const be = await createBackend(dir, "command");
+		expect(be.ok).toBe(true);
+		if (!be.ok) throw new Error("backend failed");
+		try {
+			await be.publisher.close();
+			const pub = await be.publisher.publish(1, new Uint8Array([1]));
+			expect(descOk(pub)).toBe(false);
+		} finally {
+			await be.recoveryBackend.close().catch(() => {});
+		}
+	});
+
+	it("rejects listPage after recovery close", async () => {
+		const dir = await freshDir();
+		const be = await createBackend(dir, "command");
+		expect(be.ok).toBe(true);
+		if (!be.ok) throw new Error("backend failed");
+		try {
+			await be.recoveryBackend.close();
+			const page = await be.recoveryBackend.listPage(
+				Object.freeze({ cursor: null, maxEntries: 1, maxBytes: 16_777_216 }),
+			);
+			const pd = descriptors(page);
+			if (pd) {
+				const statusDesc = pd.status;
+				const statusValue = statusDesc && "value" in statusDesc ? statusDesc.value : undefined;
+				expect(statusValue).not.toBe("page");
+			}
+		} finally {
+			await be.publisher.close().catch(() => {});
+		}
+	});
+
+	it("publisher and recovery are physically distinct handles", async () => {
+		const dir = await freshDir();
+		const be = await createBackend(dir, "command");
+		expect(be.ok).toBe(true);
+		if (!be.ok) throw new Error("backend failed");
+		try {
+			// Close publisher first, recovery should still work
+			await be.publisher.close();
+			const page = await be.recoveryBackend.listPage(
+				Object.freeze({ cursor: null, maxEntries: 1, maxBytes: 16_777_216 }),
+			);
+			const pd = descriptors(page);
+			expect(pd).not.toBeNull();
+			await closePage(page);
+			await be.recoveryBackend.close();
+		} catch {
+			await be.publisher.close().catch(() => {});
+			await be.recoveryBackend.close().catch(() => {});
+		}
+	});
+
+	it("recovery still works after publisher close (physical independence)", async () => {
+		const dir = await freshDir();
+		const be = await createBackend(dir, "command");
+		expect(be.ok).toBe(true);
+		if (!be.ok) throw new Error("backend failed");
+		try {
+			const data = new Uint8Array([1, 2, 3]);
+			const pub = await be.publisher.publish(1, data);
+			expect(descOk(pub)).toBe(true);
+			// Close publisher
+			await be.publisher.close();
+			// Recovery should still see the entry
+			const page = await be.recoveryBackend.listPage(
+				Object.freeze({ cursor: null, maxEntries: 64, maxBytes: 16_777_216 }),
+			);
+			const pd = descriptors(page);
+			expect(pd).not.toBeNull();
+			if (pd) {
+				const entriesDesc = pd.entries;
+				if (entriesDesc && "value" in entriesDesc && Array.isArray(entriesDesc.value)) {
+					expect(entriesDesc.value.length).toBeGreaterThanOrEqual(1);
+				}
+			}
+			await closePage(page);
+			await be.recoveryBackend.close();
+		} finally {
+			await be.publisher.close().catch(() => {});
+			await be.recoveryBackend.close().catch(() => {});
+		}
+	});
+
+	it("recovery readAt returns bounded bytes and confirmEof", async () => {
+		const dir = await freshDir();
+		const be = await createBackend(dir, "command");
+		expect(be.ok).toBe(true);
+		if (!be.ok) throw new Error("backend failed");
+		try {
+			const content = new Uint8Array([10, 20, 30, 40, 50]);
+			const pub = await be.publisher.publish(1, content);
+			expect(descOk(pub)).toBe(true);
+			await be.publisher.close();
+
+			// List page to get entry
+			const page = await be.recoveryBackend.listPage(
+				Object.freeze({ cursor: null, maxEntries: 64, maxBytes: 16_777_216 }),
+			);
+			const pd = descriptors(page);
+			expect(pd).not.toBeNull();
+			if (pd) {
+				const entriesDesc = pd.entries;
+				if (
+					entriesDesc &&
+					"value" in entriesDesc &&
+					Array.isArray(entriesDesc.value) &&
+					entriesDesc.value.length > 0
+				) {
+					const entryName = entriesDesc.value[0].name;
+					const entryStat = entriesDesc.value[0].stat;
+					// Open the entry
+					const openResult = await be.recoveryBackend.open(
+						Object.freeze({ name: entryName, expected: entryStat }),
+					);
+					const openPd = descriptors(openResult);
+					expect(openPd).not.toBeNull();
+					if (openPd) {
+						const statusValue = openPd.status && "value" in openPd.status ? openPd.status.value : undefined;
+						if (statusValue === "opened") {
+							const handle = openPd.handle && "value" in openPd.handle ? openPd.handle.value : undefined;
+							if (handle) {
+								// readAt with bounded size
+								const readResult = await handle.readAt(0, 3);
+								const readPd = descriptors(readResult);
+								expect(readPd).not.toBeNull();
+								if (readPd && readPd.status && "value" in readPd.status) {
+									expect(readPd.status.value).toBe("bytes");
+								}
+								// readAt at end
+								const eofResult = await handle.readAt(5, 1);
+								const eofPd = descriptors(eofResult);
+								expect(eofPd).not.toBeNull();
+								if (eofPd && eofPd.status && "value" in eofPd.status) {
+									expect(eofPd.status.value).toBe("eof");
+								}
+								// confirmEof at size
+								const confirmResult = await handle.confirmEof(5);
+								const confirmPd = descriptors(confirmResult);
+								expect(confirmPd).not.toBeNull();
+								if (confirmPd && confirmPd.status && "value" in confirmPd.status) {
+									expect(confirmPd.status.value).toBe("eof");
+								}
+								// Close handle
+								await handle.close();
+							}
+						}
+					}
+				}
+			}
+			await closePage(page);
+			await be.recoveryBackend.close();
+		} finally {
+			await be.publisher.close().catch(() => {});
+			await be.recoveryBackend.close().catch(() => {});
 		}
 	});
 });

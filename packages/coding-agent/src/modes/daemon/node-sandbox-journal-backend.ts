@@ -728,6 +728,7 @@ async function openDirectoryOwner(path: string, expected: DirIdBs): Promise<File
 async function scanJournalDir(
 	dir: string,
 	kind: JournalKindDescriptor,
+	uidStr: string,
 ): Promise<readonly SandboxJournalEntry[] | null> {
 	let names: string[];
 	try {
@@ -753,10 +754,10 @@ async function scanJournalDir(
 			if (!snap) return null;
 			parsedEntries.push(Object.freeze({ name, stat: snap }));
 		} else {
-			if (snap) {
+			if (snap && snap.uid === uidStr) {
 				others.push(Object.freeze({ name, stat: snap }));
 			}
-			// Skip entries that fail stat validation silently — they aren't safe journal records.
+			// Skip entries that fail stat validation or have mismatched uid — not safe.
 		}
 	}
 	// (E) Validate: safe 0600 one-link current-UID entries, total <=256MiB, no gaps
@@ -810,6 +811,8 @@ const _taFill: Uint8Array["fill"] | null = TA_PROTO && typeof TA_PROTO.fill === 
 function takeTransferredBytes(value: unknown): Uint8Array | null {
 	// Non-mutating preflight: type checks that never throw on Proxy
 	if (typeof value !== "object" || value === null) return null;
+	// Require _taFill before any copy — erasure guarantee is mandatory
+	if (!_taFill) return null;
 	// Proxy detection before any property access
 	try {
 		if (types.isProxy(value)) return null;
@@ -1411,7 +1414,7 @@ function makeRecoveryBackend(
 					poisoned = true;
 					return Object.freeze({ status: "error" });
 				}
-				const entries = await scanJournalDir(dirPath, kind);
+				const entries = await scanJournalDir(dirPath, kind, uidStr);
 				if (entries === null || !(await checkStorage())) {
 					await closeHandle(pageDir);
 					poisoned = true;
@@ -1814,7 +1817,7 @@ export async function createSandboxJournalBackend(raw: unknown): Promise<CreateS
 			) {
 				return Object.freeze({ ok: false, error: Object.freeze({ code: "DIRECTORY_UNSAFE" }) });
 			}
-			const rawEntries = await scanJournalDir(directory.resolved, kind);
+			const rawEntries = await scanJournalDir(directory.resolved, kind, uidStr);
 			if (rawEntries === null) {
 				return Object.freeze({ ok: false, error: Object.freeze({ code: "DIRECTORY_UNSAFE" }) });
 			}
