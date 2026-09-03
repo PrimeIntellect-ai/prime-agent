@@ -10429,11 +10429,11 @@ export class AgentSession {
 				else run.suppressTerminalNotice = true;
 				return true;
 			}
-			if (this._cancelRlmChildRun(run, reason)) {
-				return true;
-			}
-			// The targeted run settled, but its subtree may still work: stop that.
-			return run.session?.cancelRunningRlmDescendants(reason) ?? false;
+			// Cancel AND descend: the abort cascade only reaches active runs, never
+			// running work retained under a settled descendant.
+			const cancelled = this._cancelRlmChildRun(run, reason);
+			const descendantsCancelled = run.session?.cancelRunningRlmDescendants(reason) ?? false;
+			return cancelled || descendantsCancelled;
 		}
 		const retainedTarget = this._rlmChildSessions.get(childId)?.session;
 		if (retainedTarget?.cancelRunningRlmDescendants(reason)) {
@@ -10452,13 +10452,14 @@ export class AgentSession {
 		return false;
 	}
 
-	/** Cancel every running or queued run in this session's subtree, mirroring hasRunningRlmChildren's walk. */
+	/** Cancel every running or queued run in this session's subtree; cancel AND descend at every node. */
 	cancelRunningRlmDescendants(reason = "Cancelled by user"): boolean {
 		let cancelled = false;
 		for (const run of this._activeRlmChildRuns.values()) {
 			if (run.status === "running" || run.status === "queued") {
 				if (this._cancelRlmChildRun(run, reason)) cancelled = true;
-			} else if (run.session?.cancelRunningRlmDescendants(reason)) {
+			}
+			if (run.session?.cancelRunningRlmDescendants(reason)) {
 				cancelled = true;
 			}
 		}
