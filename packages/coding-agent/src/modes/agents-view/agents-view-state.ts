@@ -719,10 +719,7 @@ export function buildAgentsViewRows(
 		siblings.push(row);
 		childrenByParent.set(parent, siblings);
 	}
-	// The parent's own hasRunningRlmChildren snapshot goes stale between its
-	// flushes; the live descendant rows are the truth the indicator shows.
-	// Iterative (the nesting loop gives every row at most one parent, so this is
-	// a forest): a deep child chain must not overflow the stack on view open.
+	// Busy-descendant tally from the live rows: iterative over the parent forest so deep chains cannot overflow.
 	const tallyOrder = baseRows.filter((row) => !nestedRows.has(row));
 	for (let index = 0; index < tallyOrder.length; index++) {
 		for (const child of childrenByParent.get(tallyOrder[index]!) ?? []) {

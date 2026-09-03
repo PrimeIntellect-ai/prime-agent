@@ -133,6 +133,35 @@ describe("AgentsViewMode", () => {
 		expect(self.savedSearchFetchStarted).toBe(true);
 	});
 
+	it("stops instead of deleting when an idle row's subtree still works", async () => {
+		const request = vi.fn(async () => ({ success: true as const, data: { cancelled: true } }));
+		const self = {
+			requireClient: () => ({ request, supportsServerCapability: () => true }),
+			setStatusMessage: vi.fn(),
+			refreshSessions: vi.fn(async () => true),
+		};
+		const idleWithBusyCrew = {
+			kind: "subagent",
+			section: "idle",
+			runningSubagentCount: 1,
+			summary: summary({ id: "crew-parent", activeSessionId: "crew-parent", sessionId: "crew-parent-session" }),
+		};
+
+		await invoke(
+			"killSubagent",
+			self,
+			{ identity: "child-row", rootActiveSessionId: "root-active", childId: "crew-parent-child" },
+			idleWithBusyCrew,
+		);
+
+		expect(request).toHaveBeenCalledWith({
+			type: "cancel_rlm_child",
+			activeSessionId: "root-active",
+			childId: "crew-parent-child",
+		});
+		expect(request).not.toHaveBeenCalledWith(expect.objectContaining({ type: "delete_rlm_subagent" }));
+	});
+
 	it("re-resolves subagent state before choosing stop or delete intent", async () => {
 		const child = summary({
 			id: "passive-child-session",
@@ -241,7 +270,7 @@ describe("AgentsViewMode", () => {
 			"killSubagent",
 			self,
 			{ identity: "child-row", rootActiveSessionId: "root-active", childId: "passive-child" },
-			{ section: "inactive" },
+			{ section: "inactive", runningSubagentCount: 0, summary: summary() },
 		);
 		expect(request).toHaveBeenCalledWith({
 			type: "cancel_rlm_child",
