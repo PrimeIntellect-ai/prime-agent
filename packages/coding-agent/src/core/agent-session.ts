@@ -7562,6 +7562,7 @@ export class AgentSession {
 		let firstKeptEntryId: string;
 		let tokensBefore: number;
 		let details: CompactionResult["details"];
+		let usage: CompactionResult["usage"];
 		try {
 			if (this._extensionRunner.hasHandlers("session_before_compact")) {
 				const result = (await this._extensionRunner.emit({
@@ -7583,7 +7584,7 @@ export class AgentSession {
 			}
 
 			if (extensionCompaction) {
-				({ summary, firstKeptEntryId, tokensBefore, details } = extensionCompaction);
+				({ summary, firstKeptEntryId, tokensBefore, details, usage } = extensionCompaction);
 			} else {
 				// Each summary wire call gets its own request ID: split turns send two
 				// different bodies, and one Idempotency-Key must never cover both. A slice
@@ -7606,7 +7607,7 @@ export class AgentSession {
 						throw error;
 					}
 				};
-				({ summary, firstKeptEntryId, tokensBefore, details } = await compact(
+				({ summary, firstKeptEntryId, tokensBefore, details, usage } = await compact(
 					preparation,
 					model,
 					apiKey,
@@ -7637,6 +7638,7 @@ export class AgentSession {
 				details,
 				fromExtension,
 				customInstructions,
+				usage,
 			);
 		} catch (error) {
 			for (const requestId of uncommittedSlices.splice(0)) {
@@ -11721,6 +11723,7 @@ export class AgentSession {
 
 			let summaryText: string | undefined;
 			let summaryDetails: unknown;
+			let summaryUsage: Usage | undefined;
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
 				const model = this.model!;
 				const { apiKey, headers } = await this._getRequiredRequestAuth(model);
@@ -11741,6 +11744,7 @@ export class AgentSession {
 					throw new Error(result.error);
 				}
 				summaryText = result.summary;
+				summaryUsage = result.usage;
 				summaryDetails = {
 					readFiles: result.readFiles || [],
 					modifiedFiles: result.modifiedFiles || [],
@@ -11776,6 +11780,7 @@ export class AgentSession {
 					summaryText,
 					summaryDetails,
 					fromExtension,
+					summaryUsage,
 				);
 				summaryEntry = this.sessionManager.getEntry(summaryId) as BranchSummaryEntry;
 

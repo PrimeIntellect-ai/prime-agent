@@ -15,6 +15,7 @@ import {
 	createCustomMessage,
 } from "../messages.js";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.js";
+import { addAssistantUsage, emptyUsage } from "../usage.js";
 import {
 	computeFileLists,
 	createFileOps,
@@ -28,6 +29,11 @@ import {
 export interface CompactionDetails {
 	readFiles: string[];
 	modifiedFiles: string[];
+}
+
+export interface SummarySlice {
+	summary: string;
+	usage?: Usage;
 }
 
 /**
@@ -98,6 +104,8 @@ export interface CompactionResult<T = unknown> {
 	tokensBefore: number;
 	/** Extension-specific data (e.g., ArtifactIndex, version markers for structured compaction) */
 	details?: T;
+	/** What the summarization call(s) billed; persisted on the compaction entry. */
+	usage?: Usage;
 }
 export const COMPACT_SKILL_NAME = "compact";
 
@@ -515,7 +523,7 @@ export async function generateSummary(
 	customInstructions?: string,
 	previousSummary?: string,
 	thinkingLevel?: ThinkingLevel,
-): Promise<string> {
+): Promise<SummarySlice> {
 	const maxTokens = Math.floor(0.8 * reserveTokens);
 
 	const basePrompt = buildSummarizationPrompt(customInstructions, previousSummary);
@@ -556,7 +564,7 @@ export async function generateSummary(
 		.map((c) => c.text)
 		.join("\n");
 
-	return textContent;
+	return { summary: textContent, usage: response.usage };
 }
 export interface CompactionPreparation {
 	/** UUID of first entry to keep */
@@ -696,6 +704,7 @@ export async function compact(
 		settings,
 	} = preparation;
 	let summary: string;
+	const slices: SummarySlice[] = [];
 
 	if (isSplitTurn && turnPrefixMessages.length > 0) {
 		// Split turns make two wire calls with different bodies; each needs its own identity.
@@ -714,7 +723,7 @@ export async function compact(
 							thinkingLevel,
 						),
 					)
-				: Promise.resolve("No prior history."),
+				: Promise.resolve<SummarySlice>({ summary: "No prior history." }),
 			summaryCall((callHeaders) =>
 				generateTurnPrefixSummary(
 					turnPrefixMessages,
@@ -727,9 +736,10 @@ export async function compact(
 				),
 			),
 		]);
-		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
+		slices.push(historyResult, turnPrefixResult);
+		summary = `${historyResult.summary}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult.summary}`;
 	} else {
-		summary = await summaryCall((callHeaders) =>
+		const result = await summaryCall((callHeaders) =>
 			generateSummary(
 				messagesToSummarize,
 				model,
@@ -742,6 +752,8 @@ export async function compact(
 				thinkingLevel,
 			),
 		);
+		slices.push(result);
+		summary = result.summary;
 	}
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	summary += formatFileOperations(readFiles, modifiedFiles);
@@ -750,11 +762,18 @@ export async function compact(
 		throw new Error("First kept entry has no UUID - session may need migration");
 	}
 
+	let usage: Usage | undefined;
+	for (const slice of slices) {
+		if (!slice.usage) continue;
+		usage ??= emptyUsage();
+		addAssistantUsage(usage, slice.usage);
+	}
 	return {
 		summary,
 		firstKeptEntryId,
 		tokensBefore,
 		details: { readFiles, modifiedFiles } as CompactionDetails,
+		usage,
 	};
 }
 
@@ -769,7 +788,7 @@ async function generateTurnPrefixSummary(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
-): Promise<string> {
+): Promise<SummarySlice> {
 	const maxTokens = Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
 	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversation(llmMessages);
@@ -794,8 +813,11 @@ async function generateTurnPrefixSummary(
 		throw new Error(`Turn prefix summarization failed: ${response.errorMessage || "Unknown error"}`);
 	}
 
-	return response.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map((c) => c.text)
-		.join("\n");
+	return {
+		summary: response.content
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map((c) => c.text)
+			.join("\n"),
+		usage: response.usage,
+	};
 }

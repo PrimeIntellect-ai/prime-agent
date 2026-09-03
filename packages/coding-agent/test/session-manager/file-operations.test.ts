@@ -621,14 +621,34 @@ describe("session info usage totals", () => {
 					childUsage: usage(500, 100, 0.4),
 					aggregateUsage: usage(2500, 400, 1.4, 20, 10),
 				},
+				// Summarization calls bill the session too: both folds must count them.
+				{
+					type: "compaction",
+					id: "c1",
+					parentId: "m3",
+					summary: "compacted",
+					firstKeptEntryId: "m3",
+					tokensBefore: 5000,
+					usage: usage(100, 20, 0.05),
+				},
+				{
+					type: "branch_summary",
+					id: "b1",
+					parentId: "c1",
+					fromId: "m1",
+					summary: "left",
+					usage: usage(60, 8, 0.02),
+				},
 			];
 			writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
 
 			const entries = SessionManager.open(file).getEntries();
 			const resident = sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
 
-			expect((await readSessionInfo(file))?.usage).toEqual({ inputTokens: 3030, outputTokens: 500, cost: 1.5 });
-			expect(resident).toEqual({ inputTokens: 3030, outputTokens: 500, cost: 1.5 });
+			const scanned = (await readSessionInfo(file))?.usage;
+			expect(scanned).toMatchObject({ inputTokens: 3220, outputTokens: 528 });
+			expect(scanned?.cost).toBeCloseTo(1.57);
+			expect(resident).toEqual(scanned);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

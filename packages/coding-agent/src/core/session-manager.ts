@@ -136,6 +136,7 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	details?: T;
 	fromHook?: boolean;
 	customInstructions?: string;
+	usage?: Usage;
 }
 
 export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
@@ -144,6 +145,7 @@ export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
 	summary: string;
 	details?: T;
 	fromHook?: boolean;
+	usage?: Usage;
 }
 
 export interface CustomEntry<T = unknown> extends SessionEntryBase {
@@ -964,6 +966,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 		// Fold attribution aggregates like the loader: either disk representation cancels to the same own spend.
 		const assistantUsageById = new Map<string, Usage>();
 		const attributedChildUsages: Usage[] = [];
+		const summarizationUsages: Usage[] = [];
 
 		for await (const lineBuffer of readLinesAsBuffers(filePath)) {
 			const line = lineBuffer.toString("utf8");
@@ -1017,6 +1020,10 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 					attributedChildUsages.push(attribution.childUsage);
 				}
 			}
+			if (entry.type === "compaction" || entry.type === "branch_summary") {
+				const summarizationUsage = (entry as CompactionEntry | BranchSummaryEntry).usage;
+				if (summarizationUsage) summarizationUsages.push(summarizationUsage);
+			}
 			if (!header) {
 				if (entry.type !== "session") {
 					return null;
@@ -1048,6 +1055,9 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 		if (!header) return null;
 		const usageTotal = emptyUsage();
 		for (const usage of assistantUsageById.values()) {
+			addAssistantUsage(usageTotal, usage);
+		}
+		for (const usage of summarizationUsages) {
 			addAssistantUsage(usageTotal, usage);
 		}
 		for (const childUsage of attributedChildUsages) {
@@ -1475,6 +1485,7 @@ export class SessionManager {
 		details?: T,
 		fromHook?: boolean,
 		customInstructions?: string,
+		usage?: Usage,
 	): string {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
@@ -1487,6 +1498,7 @@ export class SessionManager {
 			details,
 			fromHook,
 			customInstructions,
+			usage,
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1864,7 +1876,13 @@ export class SessionManager {
 		this.leafId = null;
 	}
 
-	branchWithSummary(branchFromId: string | null, summary: string, details?: unknown, fromHook?: boolean): string {
+	branchWithSummary(
+		branchFromId: string | null,
+		summary: string,
+		details?: unknown,
+		fromHook?: boolean,
+		usage?: Usage,
+	): string {
 		if (branchFromId !== null && !this.byId.has(branchFromId)) {
 			throw new Error(`Entry ${branchFromId} not found`);
 		}
@@ -1878,6 +1896,7 @@ export class SessionManager {
 			summary,
 			details,
 			fromHook,
+			usage,
 		};
 		this._appendEntry(entry);
 		return entry.id;

@@ -1,6 +1,12 @@
 import { appendFileSync } from "node:fs";
 import { AgentContinueError, type AgentMessage, type ShouldStopAfterTurnContext } from "@earendil-works/pi-agent-core";
-import { type AssistantMessage, fauxAssistantMessage, type Model, type ToolResultMessage } from "@earendil-works/pi-ai";
+import {
+	type AssistantMessage,
+	fauxAssistantMessage,
+	type Model,
+	type ToolResultMessage,
+	type Usage,
+} from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
@@ -144,6 +150,7 @@ describe("AgentSession compaction characterization", () => {
 		]);
 		await harness.session.prompt("one");
 		await harness.session.prompt("two");
+		const usageBeforeCompaction = harness.session.getOwnUsageSummary();
 
 		const result = await harness.session.compact();
 		const entry = harness.sessionManager.getEntries().find((candidate) => candidate.type === "compaction");
@@ -157,7 +164,19 @@ describe("AgentSession compaction characterization", () => {
 			firstKeptEntryId: result.firstKeptEntryId,
 			tokensBefore: result.tokensBefore,
 			fromHook: false,
+			// Both split-turn summarizer calls billed tokens; their fold is persisted with the entry.
+			usage: expect.objectContaining({ input: expect.any(Number), output: expect.any(Number) }),
 		});
+		const compactionUsage = (entry as { usage: Usage }).usage;
+		expect(compactionUsage.input).toBeGreaterThan(0);
+		expect(compactionUsage.output).toBeGreaterThan(0);
+		// Own spend grows by exactly what the compaction entry recorded.
+		const ownUsage = harness.session.getOwnUsageSummary();
+		expect((ownUsage?.inputTokens ?? 0) - (usageBeforeCompaction?.inputTokens ?? 0)).toBe(
+			compactionUsage.input + compactionUsage.cacheRead + compactionUsage.cacheWrite,
+		);
+		expect((ownUsage?.outputTokens ?? 0) - (usageBeforeCompaction?.outputTokens ?? 0)).toBe(compactionUsage.output);
+		expect((ownUsage?.cost ?? 0) - (usageBeforeCompaction?.cost ?? 0)).toBeCloseTo(compactionUsage.cost.total);
 		expect(harness.session.messages[0]).toMatchObject({
 			role: "compactionSummary",
 			summary: expect.stringContaining("model-generated summary"),

@@ -83,6 +83,8 @@ export function computeOwnAndTotalUsage(
 		if (isAssistantEntry(entry)) {
 			branchAssistantIds.add(entry.id);
 			addAssistantUsage(totalUsage, entry.message.usage);
+		} else if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage) {
+			addAssistantUsage(totalUsage, entry.usage);
 		}
 	}
 	const ownUsage = cloneUsage(totalUsage);
