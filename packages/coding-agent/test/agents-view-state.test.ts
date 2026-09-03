@@ -1559,6 +1559,13 @@ describe("agents view state", () => {
 				[root, registryChild],
 				[
 					makeSessionInfo({ path: rootPath, id: "root-session", rlmDepth: 0 }),
+					// The catalog also lists the resident child's file: it must merge, not duplicate.
+					makeSessionInfo({
+						path: "/tmp/project/registry-child.jsonl",
+						id: "registry-child",
+						parentSessionPath: rootPath,
+						rlmDepth: 1,
+					}),
 					makeSessionInfo({
 						path: "/tmp/project/saved-child.jsonl",
 						id: "saved-child",

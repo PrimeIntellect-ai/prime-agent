@@ -166,6 +166,7 @@ import {
 	type RlmLedgerEdge,
 	RlmSpawnLedger,
 	tombstoneSavedSessionDelete,
+	withPassiveRlmDescendantInfos,
 } from "./rlm-ledger.js";
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import { SNAPSHOT_TARGET_CHUNK_BYTES, SnapshotTranscriptCache } from "./snapshot-transcript-cache.js";
@@ -2831,7 +2832,11 @@ export class DaemonSupervisor {
 				}
 			: undefined;
 		const saved = await this.catalog.list(command.scope === "current" ? cwd : undefined, sessionDir, callbacks);
-		return success(command.id, "list_saved_sessions", { sessions: saved.map(serializeSavedSessionInfo) });
+		const sessions = await withPassiveRlmDescendantInfos(saved, this.rlmSpawnLedger(), {
+			...(command.scope === "current" ? { cwd } : {}),
+			...(callbacks ? { onSession: callbacks.onSession } : {}),
+		});
+		return success(command.id, "list_saved_sessions", { sessions: sessions.map(serializeSavedSessionInfo) });
 	}
 
 	private async createOrReuseWorker(clientId: string, command: DaemonCreateCommand): Promise<ResidentWorker> {
