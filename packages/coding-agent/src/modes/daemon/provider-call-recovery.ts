@@ -10,7 +10,7 @@
 import { createHash } from "node:crypto";
 import { types } from "node:util";
 import type { ProviderCallRecordV1 } from "./provider-call-record-codec.js";
-import { decodeProviderCallRecordV1 } from "./provider-call-record-codec.js";
+import { type DurableReceipt, decodeProviderCallRecordV1 } from "./provider-call-record-codec.js";
 
 // ===========================================================================
 // Constants
@@ -170,6 +170,7 @@ export interface ProviderCallRecoveryInput {
 export interface ProviderCallRecoveryOutput {
 	readonly identity: ProviderCallIdentity;
 	readonly records: readonly ProviderCallRecordV1[];
+	readonly fileReceipts: readonly DurableReceipt[];
 	readonly totalBytes: number;
 	readonly nextJournalSeq: number;
 	readonly interruptedCallIds: readonly string[];
@@ -1563,6 +1564,17 @@ async function runRecovery(raw: unknown, closeGuard: CloseGuard): Promise<RunRec
 	}
 
 	const frozenRecords: readonly ProviderCallRecordV1[] = Object.freeze(records.map((r) => r));
+	const frozenReceipts: readonly DurableReceipt[] = Object.freeze(
+		records.map((r) => {
+			const fm = fileMetas.get(r.journalSeq);
+			if (!fm) throw new Error("unreachable: missing fileMeta for record");
+			return Object.freeze({
+				sequence: fm.journalSeq,
+				size: fm.fileSize,
+				sha256: fm.sha256,
+			});
+		}),
+	);
 
 	const output: ProviderCallRecoveryOutput = Object.freeze({
 		identity: Object.freeze({
@@ -1571,6 +1583,7 @@ async function runRecovery(raw: unknown, closeGuard: CloseGuard): Promise<RunRec
 			sessionId: identity.sessionId,
 		}),
 		records: frozenRecords,
+		fileReceipts: frozenReceipts,
 		totalBytes,
 		nextJournalSeq: nextSequence,
 		interruptedCallIds: Object.freeze(interruptedCallIds),
