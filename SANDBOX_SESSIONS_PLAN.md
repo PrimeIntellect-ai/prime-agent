@@ -81,8 +81,8 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 |---|---|---|---|
 | B01 | A01, A03 | done | Add `ExecutionLocation` and opaque remote session DTOs |
 | B02 | A01, A07 | done | Introduce location-neutral `HostedSubagent` and preserve local behavior |
-| B03 | A02, A16 | in_progress | Exact remote protocol, frame/journal codecs, delivery index, immutable publication, and bounded recovery |
-| B04 | A02, A16 | in_progress | Replace the initial relay with ordered durable receipt/delivery handling |
+| B03 | A02, A16 | done | Exact remote protocol, frame/journal codecs, delivery index, immutable publication, and bounded recovery |
+| B04 | A02, A16 | done | Replace the initial relay with ordered durable receipt/delivery handling |
 | B05 | A04, A14 | done | Add typed streaming home-provider proxy |
 | B06 | A05, A15 | done | Add Prime Sandbox provisioner and background-job lifecycle |
 | B07 | A10, A14 | done | Add Git workspace snapshot and safe sync-back |
@@ -112,14 +112,14 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 ## Current integration baseline
 
 - Branch: `feat/sandbox-backed-sessions` in `/Users/milkkarten/prime-agent-sandbox-sessions`.
-- Reviewed integration tip: `55fe678a8`.
-- Latest full root `npm run check` is green across 1016 files, TypeScript, Biome, installer rendering, and browser smoke.
+- Reviewed integration tip: `9d40331f6`.
+- Latest full root `npm run check` is green across 1045 files, TypeScript, Biome, installer rendering, and browser smoke.
 - Accepted B03 foundations: exact frame codec `55b40d7f1`, journal-record codec `5551582bd`, delivery index `5e8e926b4`, direct-final immutable journal publication `8bd83db6c`, immutable delivery-marker publication `df846c08f`, and page-atomic bounded directory recovery `9df8a3da9`.
 - Accepted B11 foundations: observation core `939a7baaf`, exact snapshots `62e8b073a`.
 - Accepted B14 foundations: provider client `2195c7a23`, tunnel manager `a636f7d99`, PAB1 `d21f53c1a`, FD3 reader `723a8db52`, PAAR codec `a17f5588d`, stdin frame reader `4beeaa5da`, TypeScript correction `1d63a72c0`, SSH spawn specification `4dd8790db`, SSH specification tests `af83a786f`/`a7add61a4`, one-use upgrade authentication `a4976298c`, and Node stdin normalization `4a8962b54`.
-- Active B03 work: the recovered-state durable store. Ordered relay and B10 durable communication now wait only for the store boundary.
+- B03 and B04 are complete: the recovered-state durable store and ordered relay are integrated. B10 now needs their production Home router/admission composition.
 - Accepted B14 SSH readiness/process cleanup monitor: integration commits `169c29526`, `7fd5770b5`, and `2da8baa52`; 133 focused tests verify synchronous registration backout, durable admission, independent exit/close evidence, no post-exit signal, shared cleanup, pending-admission uncertainty, and intrinsic Promise handling.
-- Active B14 work: clean PAAR builder v6, verifier v6, installer v7, offline runtime composer v2, FD3 wrapper v4, listener/server v7, and later orchestration on top of accepted foundations. Rejected commits `68821a32a`, `bc85d4388`, `9a116a2b0`, `cc1dff993`, `2c1800ad0`, and `8d361990c` remain isolated after direct source review.
+- Active B14 work: the accepted listener ownership core is integrated; its production Node adapter is under review. The fixed runtime launcher, early CLI wiring, and hosted orchestration remain. Rejected commits `68821a32a`, `bc85d4388`, `9a116a2b0`, `cc1dff993`, `2c1800ad0`, and `8d361990c` remain isolated after direct source review.
 - Accepted B02 boundary: `2da8b4357` uses the existing `RemoteHostFrameEnvelope`, `RemoteObservationSnapshotV1`, and provider-usage semantics; it snapshots capabilities, owns subscription cleanup, and preserves local runtime behavior.
 - Rejected commits remain isolated and unmerged. This includes `a772e27a`, `f1f5cad9`, `35fb1c61`, `d7b56367`, `bce99cd9`, and `610c696c` plus their earlier rejected chains.
 - No paid sandbox, tunnel, VM, GPU, or live provider resource has been created during the resource-free implementation stage.
@@ -276,3 +276,5 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Rejected B03 scanner candidate `f9e5391f0` after committed-source comparison with the current `9df8a3da9` recovery. The candidate removed proxy rejection, full cursor-cycle detection, `IO_UNCONFIRMED` classification, malformed-result close discovery, and ten adversarial ownership/binding tests, and left debug logging in production. Its page-atomic decode-then-commit, explicit EOF/final-fstat checks, and typed result improvements should be ported separately without replacing the accepted current protections.
 
 - Integrated the independently accepted production Node durable-observation backend as `d86e7d600`. A dedicated mode-0700 Home directory is bound by a canonical write-once `identity.json` held open for the backend lifetime; path and open-handle identities are rechecked before recovery and publication. Observation records use contiguous one-based `.b11-observation` files created with `O_EXCL | O_NOFOLLOW`, full positional writes, file fsync, checked writer close, read-only reopen with short-read/EOF/stat/hash/byte verification, directory fsync, and no deletion on uncertainty. Recovery is byte/count bounded and paginated, returns full-backing owned bytes plus page-owned open handles, enforces cursor progress, and retains strict pending/applied parity. All operations serialize, publication aliases are rejected, publication bytes are erased, and root/page/file handles have shared checked close. Nine backend, thirteen application, and eight codec tests pass, including restart recovery, identity mismatch/mutation, sequence gaps, tampering, symlinks, byte-boundary pagination, alias rejection, and ownership; the 1041-file root check is green and independent adversarial review returned ACCEPT.
+
+- Integrated the independently accepted single-use relay listener ownership core as `9d40331f6`. The core creates and owns the one-use authenticator from transferred grant bytes and a fixed path, scrubs the actual request header containers before every semantic rejection, erases every authenticated Node upgrade head, persists durable admission before one native upgrade promise, installs the handler subscription before resume, and retains independent socket/WebSocket/server closure evidence without reusing consumed aliases. Exact capability snapshots reject proxies, subclasses, aliases, non-native promises, malformed results, duplicate TCP/upgrades, and late owners. One shared close drains dynamically appearing cleanup tasks to a bounded fixed point. Eleven listener-core plus eighty-one auth tests pass; the 1045-file root check is green and independent final adversarial review returned ACCEPT. The production Node HTTP/WebSocket adapter remains under direct review.
