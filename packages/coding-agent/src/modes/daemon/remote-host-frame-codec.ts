@@ -1675,6 +1675,19 @@ export function digestsEqual(a: string, b: string): boolean {
 	return a === b;
 }
 
+/**
+ * Produce the canonical JSON bytes for a validated value.
+ * Returns owned full-backing Uint8Array with known sha256 digest.
+ * Caller assumes ownership and must erase.
+ */
+export function canonicalJsonBytes(value: unknown): { bytes: Uint8Array; digest: string } | undefined {
+	const canon = buildCanonicalString(value, 0);
+	if (!canon.ok) return undefined;
+	const bytes = new TextEncoder().encode(canon.value);
+	const digest = createHash("sha256").update(canon.value, "utf-8").digest("hex");
+	return { bytes, digest };
+}
+
 export function isValidDigest(d: string): boolean {
 	return typeof d === "string" && /^[0-9a-f]{64}$/.test(d);
 }

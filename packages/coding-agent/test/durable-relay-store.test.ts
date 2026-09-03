@@ -7,6 +7,21 @@ import {
 	type RemoteHostFrameEnvelope,
 } from "../src/modes/daemon/remote-agent-host-protocol.js";
 
+// ===========================================================================
+// Owned Promise helpers (no live Promise.resolve/Proxy access)
+// ===========================================================================
+function ownResolve<T>(value: T): Promise<T> {
+	return new Promise((resolve) => {
+		resolve(value);
+	});
+}
+
+function ownReject<T = never>(reason: unknown): Promise<T> {
+	return new Promise<T>((_resolve, reject) => {
+		reject(reason);
+	});
+}
+
 const IDENTITY = Object.freeze({ hostId: "h-1", generation: "g-1", sessionId: "s-1" });
 
 interface CapState {
@@ -37,7 +52,7 @@ function sha256(bytes: Uint8Array): string {
 }
 
 function closeResult(): Promise<unknown> {
-	return Promise.resolve({ status: "closed" });
+	return ownResolve({ status: "closed" });
 }
 
 function standardCaps(initialFiles: readonly StoredFile[] = []): TestCaps {
@@ -84,7 +99,7 @@ function standardCaps(initialFiles: readonly StoredFile[] = []): TestCaps {
 			};
 			files.push(makeStored(`${String(value.seq).padStart(20, "0")}.b03-journal`, value.bytes));
 			value.bytes.fill(0);
-			return Promise.resolve(result);
+			return ownResolve(result);
 		},
 		close(): Promise<unknown> {
 			state.journalCloses += 1;
@@ -103,7 +118,7 @@ function standardCaps(initialFiles: readonly StoredFile[] = []): TestCaps {
 			};
 			files.push(makeStored(`${String(value.indexSeq).padStart(20, "0")}.b03-delivery`, value.bytes));
 			value.bytes.fill(0);
-			return Promise.resolve(result);
+			return ownResolve(result);
 		},
 		close(): Promise<unknown> {
 			state.markerCloses += 1;
@@ -116,31 +131,31 @@ function standardCaps(initialFiles: readonly StoredFile[] = []): TestCaps {
 			const entries = [...files]
 				.sort((left, right) => left.name.localeCompare(right.name))
 				.map((file) => ({ name: file.name, stat: file.stat }));
-			return Promise.resolve({ entries, nextCursor: null });
+			return ownResolve({ entries, nextCursor: null });
 		},
 		open(request: unknown): Promise<unknown> {
 			const name = (request as { name: string }).name;
 			const file = files.find((candidate) => candidate.name === name);
-			if (!file) return Promise.resolve({ status: "error" });
+			if (!file) return ownResolve({ status: "error" });
 			const handle = {
 				readAt(offset: number, size: number): Promise<unknown> {
-					if (offset >= file.bytes.byteLength) return Promise.resolve({ status: "eof" });
-					return Promise.resolve({
+					if (offset >= file.bytes.byteLength) return ownResolve({ status: "eof" });
+					return ownResolve({
 						status: "bytes",
 						bytes: file.bytes.slice(offset, Math.min(offset + size, file.bytes.byteLength)),
 					});
 				},
 				confirmEof(size: number): Promise<unknown> {
-					return Promise.resolve({ status: size === file.bytes.byteLength ? "eof" : "error" });
+					return ownResolve({ status: size === file.bytes.byteLength ? "eof" : "error" });
 				},
 				fstat(): Promise<unknown> {
-					return Promise.resolve(file.stat);
+					return ownResolve(file.stat);
 				},
 				close(): Promise<unknown> {
 					return closeResult();
 				},
 			};
-			return Promise.resolve({ status: "opened", handle });
+			return ownResolve({ status: "opened", handle });
 		},
 		close(): Promise<unknown> {
 			state.recoveryCloses += 1;
@@ -406,7 +421,7 @@ describe("durable relay store", () => {
 			publish: caps.journalPublisher.publish,
 			close(): Promise<unknown> {
 				caps.state.journalCloses += 1;
-				return Promise.reject(new Error("uncertain"));
+				return ownReject(new Error("uncertain"));
 			},
 		};
 		const invalid = {

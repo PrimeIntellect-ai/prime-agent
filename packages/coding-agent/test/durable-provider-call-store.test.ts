@@ -28,6 +28,21 @@ import type {
 } from "../src/modes/daemon/provider-call-recovery.js";
 import { canonicalDigest } from "../src/modes/daemon/remote-host-frame-codec.js";
 
+// ===========================================================================
+// Owned Promise helpers (no live Promise.resolve/Proxy access)
+// ===========================================================================
+function ownResolve<T>(value: T): Promise<T> {
+	return new Promise((resolve) => {
+		resolve(value);
+	});
+}
+
+function _ownReject<T = never>(reason: unknown): Promise<T> {
+	return new Promise<T>((_resolve, reject) => {
+		reject(reason);
+	});
+}
+
 function sha256Of(bytes: Uint8Array): string {
 	return createHash("sha256").update(bytes).digest("hex");
 }
@@ -213,15 +228,15 @@ function makePublisher(s: MockPubState): ProviderCallPublisher {
 					| "INVALID_ARGUMENT";
 				s.nextError = null;
 				const failOutcome: ProviderCallPublishOutcome = Object.freeze({ ok: false, error: errVal });
-				return Promise.resolve(failOutcome);
+				return ownResolve(failOutcome);
 			}
 			const okOutcome: ProviderCallPublishOutcome = Object.freeze({ ok: true, receipt });
-			return Promise.resolve(okOutcome);
+			return ownResolve(okOutcome);
 		},
 		close() {
 			s.closes += 1;
 			const status: "closed" | "error" = s.closeReturnsError ? "error" : "closed";
-			return Promise.resolve(Object.freeze({ status }));
+			return ownResolve(Object.freeze({ status }));
 		},
 	};
 }
@@ -258,40 +273,40 @@ function makeRecoveryBackend(output: ProviderCallRecoveryOutput) {
 		listPage() {
 			const entries = listed ? [] : [...files].map(([name, file]) => Object.freeze({ name, stat: file.stat }));
 			listed = true;
-			return Promise.resolve({
+			return ownResolve({
 				status: "page",
 				entries,
 				nextCursor: null,
 				close() {
-					return Promise.resolve({ status: "closed" });
+					return ownResolve({ status: "closed" });
 				},
 			});
 		},
 		open(request: ProviderCallOpenRequest) {
 			const file = files.get(request.name);
-			if (!file) return Promise.resolve({ status: "missing" });
-			return Promise.resolve({
+			if (!file) return ownResolve({ status: "missing" });
+			return ownResolve({
 				status: "opened",
 				handle: {
 					readAt(offset: number, size: number) {
 						const end = Math.min(file.bytes.byteLength, offset + size);
-						return Promise.resolve({ status: "bytes", bytes: new Uint8Array(file.bytes.slice(offset, end)) });
+						return ownResolve({ status: "bytes", bytes: new Uint8Array(file.bytes.slice(offset, end)) });
 					},
 					confirmEof(size: number) {
-						return Promise.resolve({ status: size === file.bytes.byteLength ? "eof" : "more" });
+						return ownResolve({ status: size === file.bytes.byteLength ? "eof" : "more" });
 					},
 					fstat() {
-						return Promise.resolve(file.stat);
+						return ownResolve(file.stat);
 					},
 					close() {
-						return Promise.resolve({ status: "closed" });
+						return ownResolve({ status: "closed" });
 					},
 				},
 			});
 		},
 		close() {
 			for (const file of files.values()) file.bytes.fill(0);
-			return Promise.resolve({ status: "closed" });
+			return ownResolve({ status: "closed" });
 		},
 	};
 }
@@ -727,13 +742,13 @@ describe("createDurableProviderCallStore", () => {
 							sha256: sha256Of(bytes),
 						});
 						const okOutcome: ProviderCallPublishOutcome = Object.freeze({ ok: true, receipt });
-						return Promise.resolve(okOutcome);
+						return ownResolve(okOutcome);
 					}
 					// Second call throws synchronously
 					throw new Error("sync throw from publish");
 				},
 				close() {
-					return Promise.resolve(Object.freeze({ status: "closed" }));
+					return ownResolve(Object.freeze({ status: "closed" }));
 				},
 			};
 			const backend = makeRecoveryBackend(emptyRecovery());
@@ -964,11 +979,11 @@ describe("createDurableProviderCallStore", () => {
 			let closes = 0;
 			function sharedClose() {
 				closes += 1;
-				return Promise.resolve({ status: "closed" });
+				return ownResolve({ status: "closed" });
 			}
 			const publisher = {
 				publish(seq: number, bytes: Uint8Array) {
-					return Promise.resolve({
+					return ownResolve({
 						ok: true,
 						receipt: { sequence: seq, size: bytes.byteLength, sha256: sha256Of(bytes) },
 					});
@@ -1108,10 +1123,10 @@ describe("createDurableProviderCallStore", () => {
 			const publisher = {
 				publish(seq: number, bytes: Uint8Array) {
 					const receipt = { sequence: seq, size: bytes.byteLength, sha256: "a".repeat(64) };
-					return Promise.resolve({ ok: true, receipt });
+					return ownResolve({ ok: true, receipt });
 				},
 				close() {
-					return Promise.resolve({ status: "closed" });
+					return ownResolve({ status: "closed" });
 				},
 			};
 			const backend = makeRecoveryBackend(emptyRecovery());
@@ -1218,11 +1233,11 @@ describe("createDurableProviderCallStore", () => {
 			const publisher = {
 				publish(seq: number, bytes: Uint8Array) {
 					const receipt = { sequence: seq, size: bytes.byteLength, sha256: "a".repeat(64) };
-					return Promise.resolve({ ok: true, receipt });
+					return ownResolve({ ok: true, receipt });
 				},
 				close() {
 					closeCalled = true;
-					return Promise.resolve({ status: "closed" });
+					return ownResolve({ status: "closed" });
 				},
 			};
 			const backend = makeRecoveryBackend(emptyRecovery());
@@ -1278,11 +1293,11 @@ describe("createDurableProviderCallStore", () => {
 			const publisher = {
 				publish(seq: number, bytes: Uint8Array) {
 					const receipt: DurableReceipt = { sequence: seq, size: bytes.byteLength, sha256: sha256Of(bytes) };
-					return Promise.resolve({ ok: true, receipt });
+					return ownResolve({ ok: true, receipt });
 				},
 				close() {
 					closeCalled += 1;
-					return Promise.resolve({ status: "closed" });
+					return ownResolve({ status: "closed" });
 				},
 			};
 			const backend = makeRecoveryBackend(emptyRecovery());
@@ -1306,11 +1321,11 @@ describe("createDurableProviderCallStore", () => {
 			const publisher = {
 				publish(seq: number, bytes: Uint8Array) {
 					const receipt: DurableReceipt = { sequence: seq, size: bytes.byteLength, sha256: sha256Of(bytes) };
-					return Promise.resolve({ ok: true, receipt });
+					return ownResolve({ ok: true, receipt });
 				},
 				close() {
 					closeCalled += 1;
-					return Promise.resolve({ status: "closed" });
+					return ownResolve({ status: "closed" });
 				},
 			};
 			// Invalid identity should trigger failWith -> closeOnce
@@ -1328,13 +1343,13 @@ describe("createDurableProviderCallStore", () => {
 			const _reentryDetected = false;
 			const publisher = {
 				publish(seq: number, bytes: Uint8Array) {
-					return Promise.resolve({
+					return ownResolve({
 						ok: true,
 						receipt: { sequence: seq, size: bytes.byteLength, sha256: sha256Of(bytes) },
 					});
 				},
 				close() {
-					return Promise.resolve({ status: "closed" });
+					return ownResolve({ status: "closed" });
 				},
 			};
 			const backend = makeRecoveryBackend(emptyRecovery());
@@ -1361,7 +1376,7 @@ describe("createDurableProviderCallStore", () => {
 		it("close raw throw returns CLOSE_UNCERTAIN, does not reject promise", async () => {
 			const publisher = {
 				publish(seq: number, bytes: Uint8Array) {
-					return Promise.resolve({
+					return ownResolve({
 						ok: true,
 						receipt: { sequence: seq, size: bytes.byteLength, sha256: sha256Of(bytes) },
 					});
@@ -1424,14 +1439,14 @@ describe("createDurableProviderCallStore", () => {
 			let closeCalled = 0;
 			const publisher = {
 				publish(seq: number, bytes: Uint8Array) {
-					return Promise.resolve({
+					return ownResolve({
 						ok: true,
 						receipt: { sequence: seq, size: bytes.byteLength, sha256: sha256Of(bytes) },
 					});
 				},
 				close() {
 					closeCalled += 1;
-					return Promise.resolve({ status: "closed" });
+					return ownResolve({ status: "closed" });
 				},
 			};
 			// Valid creation does not close
@@ -1616,13 +1631,13 @@ describe("createDurableProviderCallStore", () => {
 			// Publisher with close that returns error — must get CLOSE_UNCERTAIN (not INVALID_ARGUMENT)
 			const publisher = {
 				publish(seq: number, bytes: Uint8Array) {
-					return Promise.resolve({
+					return ownResolve({
 						ok: true,
 						receipt: { sequence: seq, size: bytes.byteLength, sha256: sha256Of(bytes) },
 					});
 				},
 				close() {
-					return Promise.resolve({ status: "error" });
+					return ownResolve({ status: "error" });
 				},
 			};
 			const r = await createDurableProviderCallStore({
@@ -1641,13 +1656,13 @@ describe("createDurableProviderCallStore", () => {
 			// identity as non-object should be rejected
 			const publisher = {
 				publish(seq: number, bytes: Uint8Array) {
-					return Promise.resolve({
+					return ownResolve({
 						ok: true,
 						receipt: { sequence: seq, size: bytes.byteLength, sha256: sha256Of(bytes) },
 					});
 				},
 				close() {
-					return Promise.resolve({ status: "closed" });
+					return ownResolve({ status: "closed" });
 				},
 			};
 			const backend = makeRecoveryBackend(emptyRecovery());
@@ -1692,7 +1707,7 @@ describe("createDurableProviderCallStore", () => {
 			let closeCount = 0;
 			const publisher = {
 				publish(seq: number, bytes: Uint8Array) {
-					return Promise.resolve({
+					return ownResolve({
 						ok: true,
 						receipt: { sequence: seq, size: bytes.byteLength, sha256: sha256Of(bytes) },
 					});
@@ -1701,7 +1716,7 @@ describe("createDurableProviderCallStore", () => {
 			Object.defineProperty(publisher, "close", {
 				get() {
 					closeCount += 1;
-					return () => Promise.resolve({ status: "closed" });
+					return () => ownResolve({ status: "closed" });
 				},
 				enumerable: true,
 				configurable: true,
@@ -1725,13 +1740,13 @@ describe("createDurableProviderCallStore", () => {
 			const inner = {
 				publisher: {
 					publish(seq: number, bytes: Uint8Array) {
-						return Promise.resolve({
+						return ownResolve({
 							ok: true,
 							receipt: { sequence: seq, size: bytes.byteLength, sha256: sha256Of(bytes) },
 						});
 					},
 					close() {
-						return Promise.resolve({ status: "closed" });
+						return ownResolve({ status: "closed" });
 					},
 				},
 				recoveryBackend: {},
@@ -1750,13 +1765,13 @@ describe("createDurableProviderCallStore", () => {
 			const pub = new Proxy(
 				{
 					publish(seq: number, bytes: Uint8Array) {
-						return Promise.resolve({
+						return ownResolve({
 							ok: true,
 							receipt: { sequence: seq, size: bytes.byteLength, sha256: sha256Of(bytes) },
 						});
 					},
 					close() {
-						return Promise.resolve({ status: "closed" });
+						return ownResolve({ status: "closed" });
 					},
 				},
 				{},
@@ -1846,7 +1861,7 @@ describe("createDurableProviderCallStore", () => {
 				const r = await createDurableProviderCallStore({
 					publisher: {
 						publish() {
-							return Promise.resolve({ ok: true, receipt: { sequence: 1, size: 1, sha256: "a".repeat(64) } });
+							return ownResolve({ ok: true, receipt: { sequence: 1, size: 1, sha256: "a".repeat(64) } });
 						},
 					},
 					recoveryBackend: {},
@@ -1863,7 +1878,7 @@ describe("createDurableProviderCallStore", () => {
 				const r = await createDurableProviderCallStore({
 					publisher: {
 						publish() {
-							return Promise.resolve({ ok: true, receipt: { sequence: 1, size: 1, sha256: "a".repeat(64) } });
+							return ownResolve({ ok: true, receipt: { sequence: 1, size: 1, sha256: "a".repeat(64) } });
 						},
 						close: 42,
 					},
@@ -1881,10 +1896,10 @@ describe("createDurableProviderCallStore", () => {
 				const pub = new Proxy(
 					{
 						publish() {
-							return Promise.resolve({ ok: true, receipt: { sequence: 1, size: 1, sha256: "a".repeat(64) } });
+							return ownResolve({ ok: true, receipt: { sequence: 1, size: 1, sha256: "a".repeat(64) } });
 						},
 						close() {
-							return Promise.resolve({ status: "closed" });
+							return ownResolve({ status: "closed" });
 						},
 					},
 					{},
@@ -1905,13 +1920,13 @@ describe("createDurableProviderCallStore", () => {
 				let closeCalled = false;
 				const pub = {
 					publish() {
-						return Promise.resolve({ ok: true, receipt: { sequence: 1, size: 1, sha256: "a".repeat(64) } });
+						return ownResolve({ ok: true, receipt: { sequence: 1, size: 1, sha256: "a".repeat(64) } });
 					},
 				};
 				Object.defineProperty(pub, "close", {
 					get() {
 						closeCalled = true;
-						return () => Promise.resolve({ status: "closed" });
+						return () => ownResolve({ status: "closed" });
 					},
 					enumerable: true,
 				});
@@ -1959,14 +1974,14 @@ describe("createDurableProviderCallStore", () => {
 				let closeCalled = false;
 				const pub = {
 					publish(_seq: number, _bytes: Uint8Array) {
-						return Promise.resolve({ ok: true, receipt: { sequence: 1, size: 1, sha256: sha256Of(utf8("")) } });
+						return ownResolve({ ok: true, receipt: { sequence: 1, size: 1, sha256: sha256Of(utf8("")) } });
 					},
 				};
 				// Add non-enumerable close
 				Object.defineProperty(pub, "close", {
 					value: () => {
 						closeCalled = true;
-						return Promise.resolve(Object.freeze({ status: "closed" }));
+						return ownResolve(Object.freeze({ status: "closed" }));
 					},
 					enumerable: false,
 					writable: false,
@@ -1990,14 +2005,14 @@ describe("createDurableProviderCallStore", () => {
 				let closeCalled = false;
 				const pub = {
 					publish(_seq: number, _bytes: Uint8Array) {
-						return Promise.resolve({ ok: true, receipt: { sequence: 1, size: 1, sha256: sha256Of(utf8("")) } });
+						return ownResolve({ ok: true, receipt: { sequence: 1, size: 1, sha256: sha256Of(utf8("")) } });
 					},
 				};
 				// Add enumerable close — should be accepted as owner
 				Object.defineProperty(pub, "close", {
 					value: () => {
 						closeCalled = true;
-						return Promise.resolve(Object.freeze({ status: "closed" }));
+						return ownResolve(Object.freeze({ status: "closed" }));
 					},
 					enumerable: true,
 				});

@@ -343,6 +343,7 @@ export interface ProviderCallStoreCapability {
 		cursor: number | null,
 		maxCount: number,
 	) => Promise<StoreResult<ProviderCallUndeliveredPage>>;
+	readonly queryReplayableRequest: (callId: string) => Promise<StoreResult<ProviderCallJournaledRecordV1>>;
 	readonly close: () => Promise<StoreResult<void>>;
 	readonly status: () => Promise<StoreResult<ProviderCallStoreStatus>>;
 }
@@ -1914,6 +1915,33 @@ class DurableProviderCallStore {
 		}
 	}
 
+	async _queryReplayableRequestImpl(callId: string): Promise<StoreResult<ProviderCallJournaledRecordV1>> {
+		if (this._insidePublish) {
+			return errValue("POISONED");
+		}
+		return await this._serialized(async () => {
+			const entry = this._index.byCallId.get(callId);
+			if (!entry) return errValue("NOT_FOUND");
+			if (entry.computedState !== "journaled") return errValue("CLOSED");
+			const original = entry.journaledRecord;
+			const fresh: ProviderCallJournaledRecordV1 = Object.freeze({
+				version: original.version,
+				recordKind: original.recordKind,
+				journalSeq: original.journalSeq,
+				callId: original.callId,
+				hostId: original.hostId,
+				generation: original.generation,
+				sessionId: original.sessionId,
+				recordedAt: original.recordedAt,
+				requestFrameId: original.requestFrameId,
+				requestDigest: original.requestDigest,
+				requestBytes: new Uint8Array(original.requestBytes),
+				canonicalRequestDigest: original.canonicalRequestDigest,
+			});
+			return okValue(fresh);
+		});
+	}
+
 	private async _queryOp(callId: string): Promise<StoreResult<ProviderCallState>> {
 		if (!safeId(callId)) return publicArgValue();
 		const entry = this._index.byCallId.get(callId);
@@ -2674,8 +2702,15 @@ function rebuildIndex(output: unknown, identity: ProviderCallIdentity): Recovere
 	}
 }
 
+/** Module-private branding: only createDurableProviderCallStore adds instances. */
+const providerCallStoreBrand = new WeakSet<object>();
+
+export function isProviderCallStoreCapability(value: unknown): value is ProviderCallStoreCapability {
+	return typeof value === "object" && value !== null && !Array.isArray(value) && providerCallStoreBrand.has(value);
+}
+
 function buildCapability(store: DurableProviderCallStore): ProviderCallStoreCapability {
-	return Object.freeze({
+	const result = Object.freeze({
 		journalProviderCall(r: ProviderCallJournaledRecordV1) {
 			return store._journalProviderCallImpl(r);
 		},
@@ -2715,6 +2750,9 @@ function buildCapability(store: DurableProviderCallStore): ProviderCallStoreCapa
 		replayUndelivered(cursor: number | null, maxCount: number) {
 			return store._replayUndeliveredImpl(cursor, maxCount);
 		},
+		queryReplayableRequest(callId: string) {
+			return store._queryReplayableRequestImpl(callId);
+		},
 		close() {
 			if (store._internalGetInsidePublish()) {
 				const pResult: StoreResult<void> = Object.freeze({ ok: false, error: Object.freeze({ code: "POISONED" }) });
@@ -2738,6 +2776,9 @@ function buildCapability(store: DurableProviderCallStore): ProviderCallStoreCapa
 			return store._internalSerialized(async () => okValue(store._status()));
 		},
 	});
+	const capability: ProviderCallStoreCapability = result;
+	providerCallStoreBrand.add(capability);
+	return capability;
 }
 export async function createDurableProviderCallStore(raw: unknown): Promise<StoreResult<ProviderCallStoreCapability>> {
 	return await DurableProviderCallStore.create(raw);

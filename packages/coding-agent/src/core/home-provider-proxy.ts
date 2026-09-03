@@ -315,12 +315,16 @@ function validateRequest(input: unknown): ValidationResult {
 
 // ─── HomeProviderProxy ────────────────────────────────────────────────────
 
+/** Module-private branding: only the constructor adds instances. */
+const homeProviderProxyBrand = new WeakSet<object>();
+
 export class HomeProviderProxy {
 	private config: HomeProviderProxyConfig;
 	private activeStreams: Map<string, AbortController> = new Map();
 	private pendingCancel: Map<string, true> = new Map();
 
 	constructor(config: HomeProviderProxyConfig) {
+		homeProviderProxyBrand.add(this);
 		this.config = config;
 	}
 
@@ -486,6 +490,10 @@ export class HomeProviderProxy {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
+
+export function isHomeProviderProxyInstance(value: unknown): value is HomeProviderProxy {
+	return typeof value === "object" && value !== null && !Array.isArray(value) && homeProviderProxyBrand.has(value);
+}
 
 export function createExactAllowlistPolicy(
 	allowed: readonly { provider: string; modelId: string }[],

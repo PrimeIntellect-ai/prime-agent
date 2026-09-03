@@ -467,6 +467,17 @@ function validateReceipt(raw: unknown): DurableReceipt | null {
 	}
 }
 
+/** Module-private branding: only createOrderedDurableRelay adds instances. */
+const orderedRelayBrand = new WeakSet<object>();
+const relayEvidencePortBrand = new WeakSet<object>();
+
+export interface OrderedDurableRelayDeliveryEvidencePort {
+	readonly send: (envelope: unknown) => Promise<OrderedRelayResult<OrderedRelaySendResult>>;
+	readonly queryOutgoingAcknowledgment: (
+		frameId: unknown,
+	) => Promise<OrderedRelayResult<OutgoingAcknowledgmentEvidence | null>>;
+}
+
 export class OrderedDurableRelay {
 	private tail: Promise<void> = Promise.resolve();
 	private closePromise: Promise<OrderedRelayResult<void>> | null = null;
@@ -555,9 +566,11 @@ export class OrderedDurableRelay {
 		) {
 			return await failCreate("INVALID_ARGUMENT");
 		}
+		const relay = new OrderedDurableRelay(identity, incoming, outgoing, transport, application);
+		orderedRelayBrand.add(relay);
 		return Object.freeze({
 			ok: true as const,
-			relay: new OrderedDurableRelay(identity, incoming, outgoing, transport, application),
+			relay,
 		});
 	}
 
@@ -579,6 +592,36 @@ export class OrderedDurableRelay {
 			return Promise.resolve(failure("INVALID_ARGUMENT"));
 		}
 		return this.enqueue(() => this.sendOrdered(decoded.value));
+	}
+
+	/** Borrowed send that bypasses application context check. For background tasks that
+	 *  were started outside the relay's application context and need to enqueue after
+	 *  the current receive completes. Never called from within an application.apply() context. */
+	sendBorrowed(raw: unknown): Promise<OrderedRelayResult<OrderedRelaySendResult>> {
+		if (this.closed) return Promise.resolve(failure("CLOSED"));
+		const decoded = decodeEnvelope(raw);
+		if (!decoded.ok || !acceptedDomainSendEnvelope(decoded.value)) {
+			return Promise.resolve(failure("INVALID_ARGUMENT"));
+		}
+		// Exit application ALS context to avoid REENTRANT_CALL for background sends.
+		if (this.applicationContext.getStore() === true) {
+			return this.enqueue(() => this.applicationContext.exit(() => this.sendOrdered(decoded.value)));
+		}
+		return this.enqueue(() => this.sendOrdered(decoded.value));
+	}
+
+	/** Borrowed ACK query that bypasses application context check. */
+	queryOutgoingAcknowledgmentBorrowed(
+		frameId: unknown,
+	): Promise<OrderedRelayResult<OutgoingAcknowledgmentEvidence | null>> {
+		if (this.closed) return Promise.resolve(failure("CLOSED"));
+		if (!validId(frameId)) return Promise.resolve(failure("INVALID_ARGUMENT"));
+		if (this.applicationContext.getStore() === true) {
+			return this.enqueue(() =>
+				this.applicationContext.exit(() => this.queryOutgoingAcknowledgmentOrdered(frameId)),
+			);
+		}
+		return this.enqueue(() => this.queryOutgoingAcknowledgmentOrdered(frameId));
 	}
 
 	replayOutgoing(raw: unknown): Promise<OrderedRelayResult<OrderedRelayReplayResult>> {
@@ -990,6 +1033,32 @@ export class OrderedDurableRelay {
 		this.poisoned = true;
 		return failure(code);
 	}
+}
+
+export function isOrderedDurableRelay(value: unknown): value is OrderedDurableRelay {
+	return typeof value === "object" && value !== null && !Array.isArray(value) && orderedRelayBrand.has(value);
+}
+
+export function isRelayEvidencePort(value: unknown): value is OrderedDurableRelayDeliveryEvidencePort {
+	return typeof value === "object" && value !== null && !Array.isArray(value) && relayEvidencePortBrand.has(value);
+}
+
+export function createRelayEvidencePort(relay: OrderedDurableRelay): OrderedDurableRelayDeliveryEvidencePort | null {
+	if (!isOrderedDurableRelay(relay)) {
+		return null;
+	}
+	const port = Object.freeze({
+		send: (envelope: unknown): Promise<OrderedRelayResult<OrderedRelaySendResult>> => {
+			return relay.sendBorrowed(envelope);
+		},
+		queryOutgoingAcknowledgment: (
+			frameId: unknown,
+		): Promise<OrderedRelayResult<OutgoingAcknowledgmentEvidence | null>> => {
+			return relay.queryOutgoingAcknowledgmentBorrowed(frameId);
+		},
+	});
+	relayEvidencePortBrand.add(port);
+	return port;
 }
 
 export async function createOrderedDurableRelay(raw: unknown): Promise<CreateOrderedDurableRelayResult> {
