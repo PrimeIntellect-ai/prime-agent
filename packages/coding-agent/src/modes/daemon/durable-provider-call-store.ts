@@ -1036,11 +1036,27 @@ class DurableProviderCallStore {
 			outcome = fallback;
 		} finally {
 			// Nested finally: always erase bytes despite mutation detection errors
+			// Accept unchanged bytes OR fully-zeroed same-length buffer
+			// (legitimate ownership erasure by publisher after successful copy).
+			// Reject partial/nonzero mutation, size change, detachment.
 			try {
-				const postSha = digestSha256(bytes);
 				const postSize = bytes.byteLength;
-				if (postSha !== expectedSha || postSize !== expectedSize) {
+				if (postSize !== expectedSize) {
 					mutationDetected = true;
+				} else if (postSize > 0) {
+					let allZero = true;
+					for (let i = 0; i < postSize; i++) {
+						if (bytes[i] !== 0) {
+							allZero = false;
+							break;
+						}
+					}
+					if (!allZero) {
+						const postSha = digestSha256(bytes);
+						if (postSha !== expectedSha) {
+							mutationDetected = true;
+						}
+					}
 				}
 			} catch {
 				mutationDetected = true;
