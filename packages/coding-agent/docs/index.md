@@ -24,6 +24,7 @@ Public releases are currently installed from versioned release artifacts. The in
 ## Start Here
 
 - [Quickstart](quickstart.md) - install, authenticate, and run a first session.
+- [Security and sandboxing](security.md) - trust boundaries, runtime controls, external isolation, and unattended-run checklist.
 - [Using Prime Agent](usage.md) - interactive mode, RLM subagents, slash commands, context files, and CLI reference.
 - [Architecture overview](architecture.md) - client, daemon, worker, session, kernel, provider, and storage boundaries.
 - [RLM programming model](rlm.md) - programmatic execution, native subagents, Python skills, and durable state.

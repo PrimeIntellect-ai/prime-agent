@@ -1129,6 +1129,10 @@ export class SessionManager {
 
 		if (sessionFile) {
 			this.setSessionFile(sessionFile, preloadedEntries);
+		} else if (preloadedEntries) {
+			this.fileEntries = preloadedEntries;
+			this.sessionId = (preloadedEntries[0] as SessionHeader).id;
+			this._buildIndex();
 		} else {
 			this.newSession();
 		}
@@ -1294,7 +1298,7 @@ export class SessionManager {
 		};
 	}
 
-	isPersisted(): boolean {
+	allowsPersistence(): boolean {
 		return this.persist;
 	}
 
@@ -1315,35 +1319,43 @@ export class SessionManager {
 	}
 
 	materializeSessionFile(sessionDir?: string): string {
-		if (this.sessionFile) {
-			return this.sessionFile;
-		}
-		const dir = sessionDir ?? (this.sessionDir || getDefaultSessionDir(this.cwd));
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
-		const previousHeader = this.getHeader();
-		const target = createUniqueSessionFileTarget(dir);
-		this.sessionDir = dir;
-		this.sessionId = target.sessionId;
-		this.sessionFile = target.sessionFile;
+		if (this.sessionFile) return this.sessionFile;
+		const target = this.writeCheckpointFile(sessionDir);
+		this.sessionDir = dirname(target);
+		this.sessionFile = target;
 		this.persist = true;
-		const timestamp = new Date().toISOString();
-		const git = captureGitContext(this.cwd) ?? undefined;
-		const header: SessionHeader = {
+		this.flushed = true;
+		this._notifyPersistListeners();
+		return target;
+	}
+
+	writeCheckpointFile(sessionDir?: string): string {
+		if (this.sessionFile) return this.sessionFile;
+		const dir = sessionDir ?? (this.sessionDir || getDefaultSessionDir(this.cwd));
+		const target = createUniqueSessionFileTarget(dir);
+		const header = this.getHeader();
+		const checkpointHeader: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
 			id: this.sessionId,
-			timestamp,
+			timestamp: new Date().toISOString(),
 			cwd: this.cwd,
-			parentSession: previousHeader?.parentSession,
-			rlmDepth: resolveSessionRlmDepth(previousHeader ?? {}, target.sessionFile),
-			git,
+			parentSession: header?.parentSession,
+			rlmDepth: resolveSessionRlmDepth(header ?? {}, target.sessionFile),
+			git: captureGitContext(this.cwd) ?? undefined,
 		};
-		this.fileEntries = [header, ...this.getEntries()];
-		this._rewriteFile();
-		this.flushed = true;
-		return this.sessionFile;
+		mkdirSync(dir, { recursive: true });
+		const tempPath = join(dir, `.${basename(target.sessionFile)}.${process.pid}.${randomUUID()}.tmp`);
+		try {
+			writeFileSync(
+				tempPath,
+				`${[checkpointHeader, ...this.getEntries()].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+			);
+			renameSync(tempPath, target.sessionFile);
+		} finally {
+			rmSync(tempPath, { force: true });
+		}
+		return target.sessionFile;
 	}
 
 	getSessionArtifactDir(): string | undefined {
@@ -1994,6 +2006,20 @@ export class SessionManager {
 		return new SessionManager(cwd ?? process.cwd(), dir, path, true, entries);
 	}
 
+	static async openInMemoryAsync(path: string, sessionDir?: string, cwdOverride?: string): Promise<SessionManager> {
+		const entries = await loadEntriesFromFileAsync(path);
+		if (entries.length === 0) throw new Error(`Session file is empty or invalid: ${path}`);
+		migrateToCurrentVersion(entries);
+		const cwd = cwdOverride ?? (entries[0] as SessionHeader).cwd;
+		const dir = sessionDir ?? resolve(path, "..");
+		return new SessionManager(cwd ?? process.cwd(), dir, undefined, false, entries);
+	}
+
+	/**
+	 * Continue the most recent session, or create new if none.
+	 * @param cwd Working directory
+	 * @param sessionDir Optional session directory. If omitted, uses the configured session root.
+	 */
 	static continueRecent(cwd: string, sessionDir?: string): SessionManager {
 		const dir = sessionDir ?? getDefaultSessionDir(cwd);
 		const mostRecent = findMostRecentSessionForCwd(dir, cwd);

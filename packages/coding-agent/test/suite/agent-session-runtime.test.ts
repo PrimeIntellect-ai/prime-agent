@@ -328,7 +328,7 @@ describe("AgentSessionRuntime characterization", () => {
 	});
 
 	it("publishes in-process RLM sessions before create resolves and rejects cancelled startup", async () => {
-		const { runtime, faux, tempDir } = await createRuntimeForTest(() => {});
+		const { runtime, faux, tempDir } = await createRuntimeForTest(() => {}, { inMemory: true });
 		const parentSession = runtime.session;
 		const getRunStatus = vi.spyOn(parentSession, "getRlmChildRunStatus").mockReturnValue("running");
 		let createResolved = false;
@@ -361,6 +361,11 @@ describe("AgentSessionRuntime characterization", () => {
 		});
 		createResolved = true;
 		expect(onSessionPublished).toHaveBeenCalledOnce();
+		expect(childRuntime.session.sessionManager.allowsPersistence()).toBe(false);
+		expect(childRuntime.session.sessionManager.getHeader()).toMatchObject({
+			rlmDepth: 1,
+			parentSession: undefined,
+		});
 		await runtime.deleteRlmSubagentRuntime("in-process-child", childRuntime.session);
 
 		getRunStatus.mockReturnValue("cancelled");
