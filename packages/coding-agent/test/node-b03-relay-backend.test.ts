@@ -382,7 +382,7 @@ describe("node B03 relay backend", () => {
 			Object.freeze({ cursor: null, maxEntries: 64, maxBytes: 16_777_216 }),
 		);
 		expect(page).toMatchObject({ nextCursor: null });
-		if ("entries" in page && Array.isArray(page.entries)) {
+		if (typeof page === "object" && page !== null && "entries" in page && Array.isArray(page.entries)) {
 			expect(page.entries.length).toBe(1);
 			const entry = page.entries[0] as Record<string, unknown>;
 			expect(typeof entry.name).toBe("string");
@@ -418,7 +418,7 @@ describe("node B03 relay backend", () => {
 		const page = await result.recoveryBackend.listPage(
 			Object.freeze({ cursor: null, maxEntries: 64, maxBytes: 16_777_216 }),
 		);
-		if ("entries" in page && Array.isArray(page.entries)) {
+		if (typeof page === "object" && page !== null && "entries" in page && Array.isArray(page.entries)) {
 			expect(page.entries.length).toBe(3);
 			const names = page.entries.map((e: Record<string, unknown>) => e.name);
 			expect(names).toEqual([
@@ -449,7 +449,13 @@ describe("node B03 relay backend", () => {
 		const page = await result.recoveryBackend.listPage(
 			Object.freeze({ cursor: null, maxEntries: 64, maxBytes: 16_777_216 }),
 		);
-		if (!("entries" in page) || !Array.isArray(page.entries) || page.entries.length === 0) {
+		if (
+			typeof page !== "object" ||
+			page === null ||
+			!("entries" in page) ||
+			!Array.isArray(page.entries) ||
+			page.entries.length === 0
+		) {
 			expect(false).toBe(true); // should have entries
 			return;
 		}
@@ -616,7 +622,7 @@ describe("node B03 relay backend", () => {
 				expected: Object.freeze({
 					dev: "0",
 					ino: "0",
-					uid: String(process.getuid()),
+					uid: String(process.getuid?.()),
 					mode: 0o600,
 					size: 1,
 					nlink: 1,
@@ -706,7 +712,7 @@ describe("node B03 relay backend", () => {
 		const page1 = await result.recoveryBackend.listPage(
 			Object.freeze({ cursor: null, maxEntries: 3, maxBytes: 16_777_216 }),
 		);
-		if ("entries" in page1 && Array.isArray(page1.entries)) {
+		if (typeof page1 === "object" && page1 !== null && "entries" in page1 && Array.isArray(page1.entries)) {
 			expect(page1.entries.length).toBe(3);
 		}
 
@@ -714,7 +720,7 @@ describe("node B03 relay backend", () => {
 		const page2 = await result.recoveryBackend.listPage(
 			Object.freeze({ cursor: "00000000000000000003.b03-journal", maxEntries: 3, maxBytes: 16_777_216 }),
 		);
-		if ("entries" in page2 && Array.isArray(page2.entries)) {
+		if (typeof page2 === "object" && page2 !== null && "entries" in page2 && Array.isArray(page2.entries)) {
 			expect(page2.entries.length).toBe(3);
 		}
 
@@ -722,7 +728,7 @@ describe("node B03 relay backend", () => {
 		const page3 = await result.recoveryBackend.listPage(
 			Object.freeze({ cursor: "00000000000000000006.b03-journal", maxEntries: 3, maxBytes: 16_777_216 }),
 		);
-		if ("entries" in page3 && Array.isArray(page3.entries)) {
+		if (typeof page3 === "object" && page3 !== null && "entries" in page3 && Array.isArray(page3.entries)) {
 			expect(page3.entries.length).toBe(3);
 		}
 
@@ -730,7 +736,7 @@ describe("node B03 relay backend", () => {
 		const page4 = await result.recoveryBackend.listPage(
 			Object.freeze({ cursor: "00000000000000000009.b03-journal", maxEntries: 3, maxBytes: 16_777_216 }),
 		);
-		if ("entries" in page4 && Array.isArray(page4.entries)) {
+		if (typeof page4 === "object" && page4 !== null && "entries" in page4 && Array.isArray(page4.entries)) {
 			expect(page4.entries.length).toBe(1);
 		}
 
@@ -838,12 +844,25 @@ describe("node B03 relay backend", () => {
 		const page = await result.recoveryBackend.listPage(
 			Object.freeze({ cursor: null, maxEntries: 64, maxBytes: 16_777_216 }),
 		);
-		if (!("entries" in page) || !Array.isArray(page.entries) || page.entries.length !== 1)
+		if (
+			typeof page !== "object" ||
+			page === null ||
+			!("entries" in page) ||
+			!Array.isArray(page.entries) ||
+			page.entries.length !== 1
+		)
 			throw new Error("missing entry");
 		const opened = await result.recoveryBackend.open(
 			Object.freeze({ name: page.entries[0].name, expected: page.entries[0].stat }),
 		);
-		if (!("status" in opened) || opened.status !== "opened" || !("handle" in opened)) throw new Error("open failed");
+		if (
+			typeof opened !== "object" ||
+			opened === null ||
+			!("status" in opened) ||
+			opened.status !== "opened" ||
+			!("handle" in opened)
+		)
+			throw new Error("open failed");
 		const handle = opened.handle as { readAt(offset: number, size: number): unknown };
 		const read = handle.readAt(0, 4);
 		const closeOne = result.recoveryBackend.close();
