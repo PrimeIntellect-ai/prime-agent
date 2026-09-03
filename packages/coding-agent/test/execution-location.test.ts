@@ -71,38 +71,43 @@ describe("normalizeExecutionLocation", () => {
 		expect(normalizeExecutionLocation({ type: "remote" })).toBeUndefined();
 	});
 
-	it("returns prime-sandbox with sandboxId and region", () => {
-		const result = normalizeExecutionLocation({
-			type: "prime-sandbox",
-			sandboxId: "sbx-abc",
-			region: "us-west",
-		});
-		expect(result).toEqual({ type: "prime-sandbox", sandboxId: "sbx-abc", region: "us-west" });
+	it("accepts opaque prime-sandbox", () => {
+		expect(normalizeExecutionLocation({ type: "prime-sandbox" })).toEqual({ type: "prime-sandbox" });
 	});
 
-	it("returns prime-sandbox without optional region", () => {
-		const result = normalizeExecutionLocation({
-			type: "prime-sandbox",
-			sandboxId: "sbx-abc",
-		});
-		expect(result).toEqual({ type: "prime-sandbox", sandboxId: "sbx-abc" });
+	it("rejects prime-sandbox with sandboxId", () => {
+		expect(normalizeExecutionLocation({ type: "prime-sandbox", sandboxId: "sbx-abc" })).toBeUndefined();
 	});
 
-	it("returns undefined when sandboxId is missing", () => {
-		expect(normalizeExecutionLocation({ type: "prime-sandbox" })).toBeUndefined();
+	it("rejects prime-sandbox with region", () => {
+		expect(normalizeExecutionLocation({ type: "prime-sandbox", region: "us-west" })).toBeUndefined();
 	});
 
-	it("returns undefined when sandboxId is empty", () => {
-		expect(normalizeExecutionLocation({ type: "prime-sandbox", sandboxId: "" })).toBeUndefined();
+	it("rejects prime-sandbox with extra keys", () => {
+		expect(normalizeExecutionLocation({ type: "prime-sandbox", apiKey: "sk-xxx" })).toBeUndefined();
 	});
 
-	it("extra keys like apiKey do not break normaliser", () => {
-		const result = normalizeExecutionLocation({
-			type: "prime-sandbox",
-			sandboxId: "sbx-1",
-			apiKey: "sk-xxx",
-		});
-		expect(result).toEqual({ type: "prime-sandbox", sandboxId: "sbx-1" });
+	it("rejects Proxy-wrapped input", () => {
+		const target = { type: "prime-sandbox" };
+		const proxy = new Proxy(target, {});
+		expect(normalizeExecutionLocation(proxy)).toBeUndefined();
+	});
+
+	it("rejects input with getter descriptors", () => {
+		const obj = {};
+		Object.defineProperty(obj, "type", { get: () => "prime-sandbox", enumerable: true });
+		expect(normalizeExecutionLocation(obj)).toBeUndefined();
+	});
+
+	it("rejects input with Symbol keys", () => {
+		const obj = { type: "prime-sandbox" };
+		Object.defineProperty(obj, Symbol("extra"), { value: 1, enumerable: true });
+		expect(normalizeExecutionLocation(obj)).toBeUndefined();
+	});
+
+	it("rejects non-plain prototype", () => {
+		class FakeLocation {}
+		expect(normalizeExecutionLocation(new FakeLocation())).toBeUndefined();
 	});
 });
 
@@ -137,6 +142,41 @@ describe("normalizeSandboxConnectionHealth", () => {
 		).toEqual({ status: "unreachable", error: "timeout", failedAt: "2026-09-02T06:44:00Z" });
 	});
 
+	it("accepts all safe unreachable error codes", () => {
+		const codes = ["timeout", "auth_failed", "not_found", "provider_error", "network_error", "unknown"];
+		const iso = "2026-09-02T06:44:00Z";
+		for (const code of codes) {
+			const result = normalizeSandboxConnectionHealth({ status: "unreachable", error: code, failedAt: iso });
+			expect(result).toBeDefined();
+			if (result?.status === "unreachable") {
+				expect(result.error).toBe(code);
+			}
+		}
+	});
+
+	it("rejects arbitrary exception text in unreachable error", () => {
+		expect(
+			normalizeSandboxConnectionHealth({
+				status: "unreachable",
+				error: "API key 'sk-abc123' invalid",
+				failedAt: "2026-09-02T06:44:00Z",
+			}),
+		).toBeUndefined();
+		expect(
+			normalizeSandboxConnectionHealth({
+				status: "unreachable",
+				error: "Error: connection refused",
+				failedAt: "2026-09-02T06:44:00Z",
+			}),
+		).toBeUndefined();
+	});
+
+	it("rejects unreachable with empty error string", () => {
+		expect(
+			normalizeSandboxConnectionHealth({ status: "unreachable", error: "", failedAt: "2026-09-02T06:44:00Z" }),
+		).toBeUndefined();
+	});
+
 	it("returns closed", () => {
 		expect(normalizeSandboxConnectionHealth({ status: "closed" })).toEqual({ status: "closed" });
 	});
@@ -157,8 +197,73 @@ describe("normalizeSandboxConnectionHealth", () => {
 		).toBeUndefined();
 	});
 
+	it("returns undefined when reconnecting attempt is NaN", () => {
+		expect(
+			normalizeSandboxConnectionHealth({ status: "reconnecting", attempt: NaN, since: "2026-09-02T06:44:00Z" }),
+		).toBeUndefined();
+	});
+
+	it("returns undefined when reconnecting attempt is Infinity", () => {
+		expect(
+			normalizeSandboxConnectionHealth({ status: "reconnecting", attempt: Infinity, since: "2026-09-02T06:44:00Z" }),
+		).toBeUndefined();
+	});
+
+	it("returns undefined when reconnecting attempt is a fraction", () => {
+		expect(
+			normalizeSandboxConnectionHealth({ status: "reconnecting", attempt: 1.5, since: "2026-09-02T06:44:00Z" }),
+		).toBeUndefined();
+	});
+
 	it("returns undefined for null", () => {
 		expect(normalizeSandboxConnectionHealth(null)).toBeUndefined();
+	});
+
+	it("rejects Proxy-wrapped connected status", () => {
+		const target = { status: "connected", connectedAt: "2026-09-02T06:44:00Z" };
+		const proxy = new Proxy(target, {});
+		expect(normalizeSandboxConnectionHealth(proxy)).toBeUndefined();
+	});
+
+	it("rejects getter-based accessor for status", () => {
+		const obj = {};
+		Object.defineProperty(obj, "status", { get: () => "closed", enumerable: true });
+		expect(normalizeSandboxConnectionHealth(obj)).toBeUndefined();
+	});
+
+	it("rejects extra unknown key in connected", () => {
+		expect(
+			normalizeSandboxConnectionHealth({ status: "connected", connectedAt: "2026-09-02T06:44:00Z", extra: true }),
+		).toBeUndefined();
+	});
+
+	it("rejects Symbol-keyed input", () => {
+		const obj = { status: "closed" };
+		Object.defineProperty(obj, Symbol("x"), { value: 1, enumerable: true });
+		expect(normalizeSandboxConnectionHealth(obj)).toBeUndefined();
+	});
+
+	it("rejects non-plain prototype", () => {
+		class FakeHealth {}
+		expect(normalizeSandboxConnectionHealth(new FakeHealth())).toBeUndefined();
+	});
+
+	it("rejects non-enumerable status", () => {
+		const obj = {};
+		Object.defineProperty(obj, "status", { value: "closed", enumerable: false });
+		expect(normalizeSandboxConnectionHealth(obj)).toBeUndefined();
+	});
+
+	it("rejects unreachable with missing failedAt", () => {
+		expect(normalizeSandboxConnectionHealth({ status: "unreachable", error: "timeout" })).toBeUndefined();
+	});
+
+	it("rejects reconnecting with missing since", () => {
+		expect(normalizeSandboxConnectionHealth({ status: "reconnecting", attempt: 1 })).toBeUndefined();
+	});
+
+	it("rejects connected with missing connectedAt", () => {
+		expect(normalizeSandboxConnectionHealth({ status: "connected" })).toBeUndefined();
 	});
 });
 
@@ -200,8 +305,57 @@ describe("normalizeRemoteModelDescriptor", () => {
 		expect(normalizeRemoteModelDescriptor({ modelId: "gpt-4o" })).toBeUndefined();
 	});
 
+	it("rejects present name that is undefined", () => {
+		expect(
+			normalizeRemoteModelDescriptor({ provider: "openai", modelId: "gpt-4o", name: undefined }),
+		).toBeUndefined();
+	});
+
+	it("rejects present name that is empty string", () => {
+		expect(normalizeRemoteModelDescriptor({ provider: "openai", modelId: "gpt-4o", name: "" })).toBeUndefined();
+	});
+
+	it("rejects present name that is non-string (number)", () => {
+		expect(normalizeRemoteModelDescriptor({ provider: "openai", modelId: "gpt-4o", name: 42 })).toBeUndefined();
+	});
+
 	it("rejects null", () => {
 		expect(normalizeRemoteModelDescriptor(null)).toBeUndefined();
+	});
+
+	it("rejects Proxy-wrapped input", () => {
+		const target = { provider: "anthropic", modelId: "claude-sonnet-4" };
+		const proxy = new Proxy(target, {});
+		expect(normalizeRemoteModelDescriptor(proxy)).toBeUndefined();
+	});
+
+	it("rejects getter-based accessor for provider", () => {
+		const obj = {};
+		Object.defineProperty(obj, "provider", { get: () => "anthropic", enumerable: true });
+		Object.defineProperty(obj, "modelId", { value: "claude-3", enumerable: true });
+		expect(normalizeRemoteModelDescriptor(obj)).toBeUndefined();
+	});
+
+	it("rejects unknown extra key", () => {
+		expect(normalizeRemoteModelDescriptor({ provider: "openai", modelId: "gpt-4o", unknown: "x" })).toBeUndefined();
+	});
+
+	it("rejects Symbol-keyed input", () => {
+		const obj = { provider: "o", modelId: "m" };
+		Object.defineProperty(obj, Symbol("x"), { value: 1, enumerable: true });
+		expect(normalizeRemoteModelDescriptor(obj)).toBeUndefined();
+	});
+
+	it("rejects non-plain prototype", () => {
+		class FakeModel {}
+		expect(normalizeRemoteModelDescriptor(new FakeModel())).toBeUndefined();
+	});
+
+	it("rejects non-enumerable modelId", () => {
+		const obj = {};
+		Object.defineProperty(obj, "provider", { value: "o", enumerable: true });
+		Object.defineProperty(obj, "modelId", { value: "m", enumerable: false });
+		expect(normalizeRemoteModelDescriptor(obj)).toBeUndefined();
 	});
 });
 
@@ -239,6 +393,60 @@ describe("normalizeRemoteSessionDescriptor", () => {
 	it("rejects missing executionLocation", () => {
 		const { executionLocation: _, ...rest } = SESSION;
 		expect(normalizeRemoteSessionDescriptor(rest)).toBeUndefined();
+	});
+
+	it("rejects Proxy-wrapped input", () => {
+		const target = {
+			sessionId: "sess-1",
+			createdAt: "2026-09-02T06:44:00Z",
+			lastActiveAt: "2026-09-02T06:45:00Z",
+			executionLocation: { type: "local" },
+		};
+		const proxy = new Proxy(target, {});
+		expect(normalizeRemoteSessionDescriptor(proxy)).toBeUndefined();
+	});
+
+	it("rejects getter-based accessor for sessionId", () => {
+		const obj = {};
+		Object.defineProperty(obj, "sessionId", { get: () => "sess-1", enumerable: true });
+		Object.defineProperty(obj, "createdAt", { value: "2026-09-02T06:44:00Z", enumerable: true });
+		Object.defineProperty(obj, "lastActiveAt", { value: "2026-09-02T06:45:00Z", enumerable: true });
+		Object.defineProperty(obj, "executionLocation", { value: { type: "local" }, enumerable: true });
+		expect(normalizeRemoteSessionDescriptor(obj)).toBeUndefined();
+	});
+
+	it("rejects unknown extra key", () => {
+		expect(normalizeRemoteSessionDescriptor({ ...SESSION, unknown: "x" })).toBeUndefined();
+	});
+
+	it("rejects Symbol-keyed input", () => {
+		const obj = {
+			sessionId: "sess-1",
+			createdAt: "2026-09-02T06:44:00Z",
+			lastActiveAt: "2026-09-02T06:45:00Z",
+			executionLocation: { type: "local" },
+		};
+		Object.defineProperty(obj, Symbol("x"), { value: 1, enumerable: true });
+		expect(normalizeRemoteSessionDescriptor(obj)).toBeUndefined();
+	});
+
+	it("rejects non-plain prototype", () => {
+		class FakeSession {}
+		const s = new FakeSession();
+		(s as Record<string, unknown>).sessionId = "s1";
+		(s as Record<string, unknown>).createdAt = "2026-09-02T06:44:00Z";
+		(s as Record<string, unknown>).lastActiveAt = "2026-09-02T06:45:00Z";
+		(s as Record<string, unknown>).executionLocation = { type: "local" };
+		expect(normalizeRemoteSessionDescriptor(s as unknown)).toBeUndefined();
+	});
+
+	it("rejects model with credential leak at session level", () => {
+		expect(
+			normalizeRemoteSessionDescriptor({
+				...SESSION,
+				model: { provider: "anthropic", modelId: "claude", apiKey: "sk-xxx" },
+			}),
+		).toBeUndefined();
 	});
 });
 

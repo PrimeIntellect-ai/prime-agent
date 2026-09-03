@@ -17,7 +17,7 @@ export type SandboxConnectionHealth =
 	| { readonly status: "connected"; readonly connectedAt: string }
 	| { readonly status: "connecting"; readonly startedAt: string }
 	| { readonly status: "reconnecting"; readonly attempt: number; readonly since: string }
-	| { readonly status: "unreachable"; readonly error: string; readonly failedAt: string }
+	| { readonly status: "unreachable"; readonly error: UnreachableErrorCode; readonly failedAt: string }
 	| { readonly status: "closed" };
 
 export interface RemoteModelDescriptor {
@@ -34,10 +34,37 @@ export interface RemoteSessionDescriptor {
 	readonly model?: RemoteModelDescriptor;
 }
 
-export type ExecutionLocation =
-	| { readonly type: "local" }
-	| { readonly type: "prime-sandbox"; readonly sandboxId: string; readonly region?: string };
+export type ExecutionLocation = { readonly type: "local" } | { readonly type: "prime-sandbox" };
 
+// ---------------------------------------------------------------------------
+// Descriptor snapshot helper — strict hostile-proof validation
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate an unknown value as a plain object with only own enumerable
+ * value properties.  Returns the names and descriptors if valid;
+ * returns undefined for Proxy, custom/null prototype, symbols, accessors,
+ * non-enumerable keys, throwing getters, or non-object primitives.
+ */
+function snapshotDescriptor(
+	value: unknown,
+): { readonly names: readonly string[]; readonly descriptors: Readonly<PropertyDescriptorMap> } | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	try {
+		if (Array.isArray(value)) return undefined;
+		if (types.isProxy(value) || Object.getPrototypeOf(value) !== Object.prototype) return undefined;
+	} catch {
+		return undefined;
+	}
+	if (Object.getOwnPropertySymbols(value).length !== 0) return undefined;
+	const names = Object.getOwnPropertyNames(value);
+	const descriptors = Object.getOwnPropertyDescriptors(value);
+	for (const name of names) {
+		const d = descriptors[name];
+		if (!d || !("value" in d) || !d.enumerable) return undefined;
+	}
+	return { names, descriptors };
+}
 // ---------------------------------------------------------------------------
 // SandboxOptions – validated daemon-protocol descriptor (no secrets, no raw values)
 // ---------------------------------------------------------------------------
@@ -75,7 +102,9 @@ export function normalizeSandboxOptions(value: unknown): SandboxOptions | undefi
 		if (!d || !("value" in d) || !d.enumerable) return undefined;
 	}
 	if (names.length === 1) {
-		const regionValue = descriptors.region!.value;
+		const dRegion = descriptors.region;
+		if (!dRegion || !("value" in dRegion) || !dRegion.enumerable) return undefined;
+		const regionValue = dRegion.value;
 		if (regionValue !== undefined) {
 			if (typeof regionValue !== "string") return undefined;
 			if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(regionValue)) return undefined;
@@ -90,18 +119,91 @@ export function normalizeSandboxOptions(value: unknown): SandboxOptions | undefi
 // Helpers
 // ---------------------------------------------------------------------------
 
+const ISO8601_STRICT_RE =
+	/^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-](?:0\d|1[0-3]):[0-5]\d)$/;
+
+const DAYS_IN_MONTH: readonly number[] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+function isLeapYear(y: number): boolean {
+	return (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+}
+
 /**
- * Returns true when `s` is a valid ISO-8601 date string that parses to
- * a finite number *and* ends with a timezone indicator (Z, +HH:mm, -HH:mm).
- * Rejects bare dates, impossible month/day values, and timestamps that
- * omit an explicit offset.
+ * Returns true when `s` is a strict canonical ISO-8601 string with explicit
+ * timezone offset, bounded length (max 29 chars), and component validation
+ * that rejects impossible dates (Feb 30, Apr 31, etc.).  The strict regex
+ * ensures format; component bounds reject overflow dates.  Maximum length
+ * prevents ReDoS from pathological patterns.
  */
 export function isValidISODateString(s: string): boolean {
 	if (typeof s !== "string") return false;
+	if (s.length > 29) return false;
+	const m = ISO8601_STRICT_RE.exec(s);
+	if (!m) return false;
+	const year = Number(s.slice(0, 4));
+	const month = Number(s.slice(5, 7));
+	const day = Number(s.slice(8, 10));
+	if (month < 1 || month > 12) return false;
+	const maxDay = DAYS_IN_MONTH[month] + (month === 2 && isLeapYear(year) ? 1 : 0);
+	if (day < 1 || day > maxDay) return false;
 	const ms = Date.parse(s);
-	if (!Number.isFinite(ms)) return false;
-	// Require an explicit timezone suffix: Z, +HH:mm, or -HH:mm
-	return /[Zz]|[+-]\d{2}:\d{2}$/.test(s);
+	return Number.isFinite(ms);
+}
+
+// ---------------------------------------------------------------------------
+// Safe unreachable error codes — never arbitrary exception text
+// ---------------------------------------------------------------------------
+
+export type UnreachableErrorCode =
+	| "timeout"
+	| "auth_failed"
+	| "not_found"
+	| "provider_error"
+	| "network_error"
+	| "unknown";
+
+const VALID_UNREACHABLE_CODES: ReadonlySet<string> = new Set<UnreachableErrorCode>([
+	"timeout",
+	"auth_failed",
+	"not_found",
+	"provider_error",
+	"network_error",
+	"unknown",
+]);
+
+/** Type predicate for UnreachableErrorCode. No cast needed. */
+function isUnreachableErrorCode(value: string): value is UnreachableErrorCode {
+	return VALID_UNREACHABLE_CODES.has(value);
+}
+
+/**
+ * Convert an arbitrary error string to a safe UnreachableErrorCode.
+ * Unknown values map to "unknown".  Never leaks arbitrary text.
+ */
+export function toUnreachableErrorCode(error: string | undefined): UnreachableErrorCode {
+	if (typeof error === "string" && isUnreachableErrorCode(error)) return error;
+	return "unknown";
+}
+
+// ---------------------------------------------------------------------------
+// Bounded printable text — control / length / non-printable rejection
+// ---------------------------------------------------------------------------
+
+const MAX_PRINTABLE_LENGTH = 256;
+
+/**
+ * Returns true when `s` is a non-empty string of printable ASCII characters
+ * (code points 0x21–0x7E) with length at most MAX_PRINTABLE_LENGTH.
+ * Rejects empty string, control characters, non-printable, and oversized input.
+ */
+function isValidPrintableText(s: unknown): s is string {
+	if (typeof s !== "string") return false;
+	if (s.length === 0 || s.length > MAX_PRINTABLE_LENGTH) return false;
+	for (let i = 0; i < s.length; i++) {
+		const code = s.charCodeAt(i);
+		if (code < 0x20 || code > 0x7e) return false;
+	}
+	return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,94 +212,179 @@ export function isValidISODateString(s: string): boolean {
 
 export function normalizeExecutionLocation(value: unknown): ExecutionLocation | undefined {
 	if (typeof value !== "object" || value === null) return undefined;
-
-	const obj = value as Record<string, unknown>;
-	const type = obj.type;
-
-	if (type === "local") {
-		return { type: "local" };
+	try {
+		if (Array.isArray(value)) return undefined;
+		if (types.isProxy(value) || Object.getPrototypeOf(value) !== Object.prototype) return undefined;
+	} catch {
+		return undefined;
 	}
-
-	if (type === "prime-sandbox") {
-		if (typeof obj.sandboxId !== "string" || obj.sandboxId.length === 0) return undefined;
-		const region = typeof obj.region === "string" && obj.region.length > 0 ? obj.region : undefined;
-		return { type: "prime-sandbox", sandboxId: obj.sandboxId, region };
+	if (Object.getOwnPropertySymbols(value).length !== 0) return undefined;
+	const names = Object.getOwnPropertyNames(value);
+	const descriptors = Object.getOwnPropertyDescriptors(value);
+	for (const name of names) {
+		const d = descriptors[name];
+		if (!d || !("value" in d) || !d.enumerable) return undefined;
 	}
-
+	if (names.length === 1 && names[0] === "type") {
+		const dType = descriptors.type;
+		if (!dType || !("value" in dType) || !dType.enumerable) return undefined;
+		if (dType.value === "local") return Object.freeze({ type: "local" });
+		if (dType.value === "prime-sandbox") return Object.freeze({ type: "prime-sandbox" });
+	}
 	return undefined;
 }
 
 export function normalizeSandboxConnectionHealth(value: unknown): SandboxConnectionHealth | undefined {
-	if (typeof value !== "object" || value === null) return undefined;
-	const obj = value as Record<string, unknown>;
-	const status = obj.status;
+	const d = snapshotDescriptor(value);
+	if (!d) return undefined;
+	const { names, descriptors } = d;
+	const dStatus = descriptors.status;
+	if (!dStatus || !("value" in dStatus) || !dStatus.enumerable) return undefined;
+	const status = dStatus.value;
 
 	if (status === "connected") {
-		if (typeof obj.connectedAt !== "string" || !isValidISODateString(obj.connectedAt)) return undefined;
-		return { status: "connected", connectedAt: obj.connectedAt };
+		if (names.length !== 2 || !names.includes("status") || !names.includes("connectedAt")) return undefined;
+		const dConnectedAt = descriptors.connectedAt;
+		if (!dConnectedAt || !("value" in dConnectedAt) || !dConnectedAt.enumerable) return undefined;
+		const connectedAt = dConnectedAt.value;
+		if (typeof connectedAt !== "string" || !isValidISODateString(connectedAt)) return undefined;
+		return Object.freeze({ status: "connected", connectedAt });
 	}
 
 	if (status === "connecting") {
-		if (typeof obj.startedAt !== "string" || !isValidISODateString(obj.startedAt)) return undefined;
-		return { status: "connecting", startedAt: obj.startedAt };
+		if (names.length !== 2 || !names.includes("status") || !names.includes("startedAt")) return undefined;
+		const dStartedAt = descriptors.startedAt;
+		if (!dStartedAt || !("value" in dStartedAt) || !dStartedAt.enumerable) return undefined;
+		const startedAt = dStartedAt.value;
+		if (typeof startedAt !== "string" || !isValidISODateString(startedAt)) return undefined;
+		return Object.freeze({ status: "connecting", startedAt });
 	}
 
 	if (status === "reconnecting") {
-		if (typeof obj.attempt !== "number" || obj.attempt < 0) return undefined;
-		if (typeof obj.since !== "string" || !isValidISODateString(obj.since)) return undefined;
-		return { status: "reconnecting", attempt: obj.attempt, since: obj.since };
+		if (names.length !== 3 || !names.includes("status") || !names.includes("attempt") || !names.includes("since"))
+			return undefined;
+		const dAttempt = descriptors.attempt;
+		if (!dAttempt || !("value" in dAttempt) || !dAttempt.enumerable) return undefined;
+		const attempt = dAttempt.value;
+		if (typeof attempt !== "number" || !Number.isSafeInteger(attempt) || attempt < 0) return undefined;
+		const dSince = descriptors.since;
+		if (!dSince || !("value" in dSince) || !dSince.enumerable) return undefined;
+		const since = dSince.value;
+		if (typeof since !== "string" || !isValidISODateString(since)) return undefined;
+		return Object.freeze({ status: "reconnecting", attempt, since });
 	}
 
 	if (status === "unreachable") {
-		if (typeof obj.error !== "string" || obj.error.length === 0) return undefined;
-		if (typeof obj.failedAt !== "string" || !isValidISODateString(obj.failedAt)) return undefined;
-		return { status: "unreachable", error: obj.error, failedAt: obj.failedAt };
+		if (names.length !== 3 || !names.includes("status") || !names.includes("error") || !names.includes("failedAt"))
+			return undefined;
+		const dError = descriptors.error;
+		if (!dError || !("value" in dError) || !dError.enumerable) return undefined;
+		const error = dError.value;
+		if (typeof error !== "string" || !isUnreachableErrorCode(error)) return undefined;
+		const dFailedAt = descriptors.failedAt;
+		if (!dFailedAt || !("value" in dFailedAt) || !dFailedAt.enumerable) return undefined;
+		const failedAt = dFailedAt.value;
+		if (typeof failedAt !== "string" || !isValidISODateString(failedAt)) return undefined;
+		return Object.freeze({ status: "unreachable", error, failedAt });
 	}
 
 	if (status === "closed") {
-		return { status: "closed" };
+		if (names.length !== 1 || names[0] !== "status") return undefined;
+		return Object.freeze({ status: "closed" });
 	}
 
 	return undefined;
 }
 
 export function normalizeRemoteModelDescriptor(value: unknown): RemoteModelDescriptor | undefined {
-	if (typeof value !== "object" || value === null) return undefined;
-	const obj = value as Record<string, unknown>;
+	const d = snapshotDescriptor(value);
+	if (!d) return undefined;
+	const { names, descriptors } = d;
 
-	if (typeof obj.provider !== "string" || obj.provider.length === 0) return undefined;
-	if (typeof obj.modelId !== "string" || obj.modelId.length === 0) return undefined;
+	// Reject secret-bearing keys unconditionally.
+	if (names.includes("apiKey") || names.includes("baseUrl") || names.includes("token")) return undefined;
 
-	// Reject known secret-bearing keys.
-	if (typeof obj.apiKey !== "undefined") return undefined;
-	if (typeof obj.baseUrl !== "undefined") return undefined;
-	if (typeof obj.token !== "undefined") return undefined;
+	// Accept only the known keys: provider, modelId (required), name (optional).
+	const known = new Set(["provider", "modelId", "name"]);
+	if (names.some((n) => !known.has(n))) return undefined;
 
-	const name = typeof obj.name === "string" && obj.name.length > 0 ? obj.name : undefined;
+	if (names.length < 2 || !names.includes("provider") || !names.includes("modelId")) return undefined;
 
-	return { provider: obj.provider, modelId: obj.modelId, name };
+	const dProvider = descriptors.provider;
+	if (!dProvider || !("value" in dProvider) || !dProvider.enumerable) return undefined;
+	const provider = dProvider.value;
+	if (!isValidPrintableText(provider)) return undefined;
+
+	const dModelId = descriptors.modelId;
+	if (!dModelId || !("value" in dModelId) || !dModelId.enumerable) return undefined;
+	const modelId = dModelId.value;
+	if (!isValidPrintableText(modelId)) return undefined;
+
+	let name: string | undefined;
+	if (names.includes("name")) {
+		const dName = descriptors.name;
+		if (!dName || !("value" in dName) || !dName.enumerable) return undefined;
+		const nameVal = dName.value;
+		if (!isValidPrintableText(nameVal)) return undefined;
+		name = nameVal;
+	}
+
+	return Object.freeze({ provider, modelId, ...(name !== undefined ? { name } : {}) });
 }
 
 export function normalizeRemoteSessionDescriptor(value: unknown): RemoteSessionDescriptor | undefined {
-	if (typeof value !== "object" || value === null) return undefined;
-	const obj = value as Record<string, unknown>;
+	const d = snapshotDescriptor(value);
+	if (!d) return undefined;
+	const { names, descriptors } = d;
 
-	if (typeof obj.sessionId !== "string" || obj.sessionId.length === 0) return undefined;
-	if (typeof obj.createdAt !== "string" || !isValidISODateString(obj.createdAt)) return undefined;
-	if (typeof obj.lastActiveAt !== "string" || !isValidISODateString(obj.lastActiveAt)) return undefined;
+	// Accept only known keys: sessionId, createdAt, lastActiveAt, executionLocation (required), model (optional).
+	const known = new Set(["sessionId", "createdAt", "lastActiveAt", "executionLocation", "model"]);
+	if (names.some((n) => !known.has(n))) return undefined;
 
-	const executionLocation = normalizeExecutionLocation(obj.executionLocation);
+	if (
+		names.length < 4 ||
+		!names.includes("sessionId") ||
+		!names.includes("createdAt") ||
+		!names.includes("lastActiveAt") ||
+		!names.includes("executionLocation")
+	)
+		return undefined;
+
+	const dSessionId = descriptors.sessionId;
+	if (!dSessionId || !("value" in dSessionId) || !dSessionId.enumerable) return undefined;
+	const sessionId = dSessionId.value;
+	if (!isValidPrintableText(sessionId)) return undefined;
+
+	const dCreatedAt = descriptors.createdAt;
+	if (!dCreatedAt || !("value" in dCreatedAt) || !dCreatedAt.enumerable) return undefined;
+	const createdAt = dCreatedAt.value;
+	if (typeof createdAt !== "string" || !isValidISODateString(createdAt)) return undefined;
+
+	const dLastActiveAt = descriptors.lastActiveAt;
+	if (!dLastActiveAt || !("value" in dLastActiveAt) || !dLastActiveAt.enumerable) return undefined;
+	const lastActiveAt = dLastActiveAt.value;
+	if (typeof lastActiveAt !== "string" || !isValidISODateString(lastActiveAt)) return undefined;
+
+	const dExecLoc = descriptors.executionLocation;
+	if (!dExecLoc || !("value" in dExecLoc) || !dExecLoc.enumerable) return undefined;
+	const executionLocation = normalizeExecutionLocation(dExecLoc.value);
 	if (!executionLocation) return undefined;
 
-	const model = obj.model ? normalizeRemoteModelDescriptor(obj.model) : undefined;
+	let model: RemoteModelDescriptor | undefined;
+	if (names.includes("model")) {
+		const dModel = descriptors.model;
+		if (!dModel || !("value" in dModel) || !dModel.enumerable) return undefined;
+		model = normalizeRemoteModelDescriptor(dModel.value);
+		if (!model) return undefined;
+	}
 
-	return {
-		sessionId: obj.sessionId,
-		createdAt: obj.createdAt,
-		lastActiveAt: obj.lastActiveAt,
+	return Object.freeze({
+		sessionId,
+		createdAt,
+		lastActiveAt,
 		executionLocation,
-		model,
-	};
+		...(model !== undefined ? { model } : {}),
+	});
 }
 
 // ---------------------------------------------------------------------------

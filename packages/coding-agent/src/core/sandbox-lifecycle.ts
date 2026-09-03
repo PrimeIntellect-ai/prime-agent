@@ -16,6 +16,7 @@
  *   Only classifier not_found from provider delete is DELETE_GONE.
  */
 
+import { randomUUID } from "node:crypto";
 import type { OwnershipClaim, SandboxOwnershipState, SandboxOwnershipStore } from "./sandbox-ownership.js";
 import { createClaim, OwnershipError } from "./sandbox-ownership.js";
 import type { BackgroundJobStatus, SandboxProvider } from "./sandbox-provider.js";
@@ -147,6 +148,7 @@ export class SandboxLifecycle {
 	private readonly provider: SandboxProvider;
 	private readonly options: ResolvedLifecycleOptions;
 	private identity: SandboxIdentity | null = null;
+	private lifecycleKey_: string | null = null;
 	private readonly events_: LifecycleEvent[] = [];
 	private sessionId_: string | null = null;
 
@@ -173,12 +175,13 @@ export class SandboxLifecycle {
 	get events(): readonly LifecycleEvent[] {
 		return this.events_;
 	}
-	get sandboxId(): string | null {
+	private get sandboxId(): string | null {
 		return this.identity?.id ?? null;
 	}
-	get sandboxIdentity(): SandboxIdentity | null {
-		return this.identity;
+	get lifecycleKey(): string | null {
+		return this.lifecycleKey_;
 	}
+
 	get ownershipStore(): SandboxOwnershipStore | undefined {
 		return this.options.ownershipStore;
 	}
@@ -284,7 +287,9 @@ export class SandboxLifecycle {
 			}
 			try {
 				const claim = this.claimFor("provisioning");
-				await this.options.ownershipStore.create(claim, identity.id, sid);
+				const lifecycleKey = randomUUID();
+				this.lifecycleKey_ = lifecycleKey;
+				await this.options.ownershipStore.create(claim, lifecycleKey, sid);
 			} catch {
 				const c = this.boundedCleanup();
 				let cleanupSucceeded = false;
@@ -323,10 +328,10 @@ export class SandboxLifecycle {
 			});
 			this.identity = identity;
 
-			if (this.options.ownershipStore) {
+			if (this.options.ownershipStore && this.lifecycleKey_) {
 				try {
 					const claim = this.claimFor("provisioning");
-					await this.options.ownershipStore.markActive(claim, id);
+					await this.options.ownershipStore.markActive(claim, this.lifecycleKey_);
 				} catch {
 					this.emit("wait-ready", "success", LIFECYCLE_CODES.RECOVERY_REQUIRED, Date.now() - start);
 					throw this.lcError(LIFECYCLE_CODES.RECOVERY_REQUIRED);
@@ -353,10 +358,10 @@ export class SandboxLifecycle {
 			} finally {
 				c.clear();
 			}
-			if (cleanupSucceeded && this.options.ownershipStore) {
+			if (cleanupSucceeded && this.options.ownershipStore && this.lifecycleKey_) {
 				try {
 					const claim = this.claimFor("provisioning");
-					await this.options.ownershipStore.markTerminated(claim, id, "provisioning_failed");
+					await this.options.ownershipStore.markTerminated(claim, this.lifecycleKey_, "provisioning_failed");
 				} catch {
 					/* best-effort */
 				}
@@ -376,11 +381,11 @@ export class SandboxLifecycle {
 		try {
 			// OWNERSHIP READ: fail closed — corrupt/error is RECOVERY_REQUIRED,
 			// retaining identity and record.
-			if (this.options.ownershipStore) {
-				const record = await this.options.ownershipStore.read(id);
+			if (this.options.ownershipStore && this.lifecycleKey_) {
+				const record = await this.options.ownershipStore.read(this.lifecycleKey_);
 				if (record) {
 					const claim = this.claimFor(record.state);
-					await this.options.ownershipStore.markTerminating(claim, id);
+					await this.options.ownershipStore.markTerminating(claim, this.lifecycleKey_);
 				}
 			}
 
@@ -400,10 +405,10 @@ export class SandboxLifecycle {
 			}
 
 			// OWNERSHIP PERSIST: after platform delete succeeded.
-			if (this.options.ownershipStore) {
+			if (this.options.ownershipStore && this.lifecycleKey_) {
 				try {
 					const claim = this.claimFor("terminating");
-					await this.options.ownershipStore.markTerminated(claim, id, "user_deleted");
+					await this.options.ownershipStore.markTerminated(claim, this.lifecycleKey_, "user_deleted");
 				} catch {
 					this.emit("delete", "success", LIFECYCLE_CODES.RECOVERY_REQUIRED, Date.now() - start);
 					c.clear();

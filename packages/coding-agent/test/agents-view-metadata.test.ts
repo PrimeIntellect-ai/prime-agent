@@ -16,8 +16,8 @@ function localLocation(): ExecutionLocation {
 	return { type: "local" };
 }
 
-function sandboxLocation(sandboxId = "sb-abc123", region?: string): ExecutionLocation {
-	return region ? { type: "prime-sandbox", sandboxId, region } : { type: "prime-sandbox", sandboxId };
+function sandboxLocation(): ExecutionLocation {
+	return { type: "prime-sandbox" };
 }
 
 function makeSummary(overrides: Partial<SessionSummary> & Pick<SessionSummary, "id" | "sessionId">): SessionSummary {
@@ -149,7 +149,7 @@ describe("projectSessionExecutionMetadata", () => {
 	});
 
 	test("Proxy-wrapped valid location is rejected", () => {
-		const target: ExecutionLocation = { type: "prime-sandbox", sandboxId: "sb-proxy" };
+		const target: ExecutionLocation = { type: "prime-sandbox" };
 		const proxy = new Proxy(target, {});
 		expect(projectSessionExecutionMetadata(proxy, "closed")).toEqual({ kind: "unavailable" });
 	});
@@ -168,7 +168,7 @@ describe("projectSessionExecutionMetadata", () => {
 
 	// ----- never local -----
 	test("invalid sandbox metadata never defaults to local", () => {
-		expect(projectSessionExecutionMetadata({ type: "prime-sandbox", sandboxId: "" }, undefined)).toEqual({
+		expect(projectSessionExecutionMetadata({ type: "prime-sandbox", extra: "key" }, undefined)).toEqual({
 			kind: "unavailable",
 		});
 	});
@@ -260,13 +260,13 @@ describe("secret absence in projected metadata", () => {
 	});
 
 	test("sandboxId never leaks into projected metadata", () => {
-		const result = projectSessionExecutionMetadata(sandboxLocation("sb-secret-987"), "connected");
+		const result = projectSessionExecutionMetadata(sandboxLocation(), "connected");
 		const raw = JSON.stringify(result);
 		expect(raw).not.toContain("sb-secret-987");
 	});
 
 	test("region never leaks into projected metadata", () => {
-		const result = projectSessionExecutionMetadata(sandboxLocation("sb-abc", "us-east-1"), "connected");
+		const result = projectSessionExecutionMetadata(sandboxLocation(), "connected");
 		const raw = JSON.stringify(result);
 		expect(raw).not.toContain("us-east-1");
 	});

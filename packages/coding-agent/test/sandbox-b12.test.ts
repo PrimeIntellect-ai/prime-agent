@@ -63,12 +63,12 @@ function tc(): OwnershipClaim {
 	return createClaim(GEN, TOK, "terminated");
 }
 
-async function prov(store: SandboxOwnershipStore, sbxId = "sbx-1", sessionId = "sess-1"): Promise<void> {
-	await store.create(pc(), sbxId, sessionId);
+async function prov(store: SandboxOwnershipStore, lk = "lk-1", sessionId = "sess-1"): Promise<void> {
+	await store.create(pc(), lk, sessionId);
 }
-async function setupActive(store: SandboxOwnershipStore, sbxId = "sbx-1"): Promise<void> {
-	await prov(store, sbxId);
-	await store.markActive(pc(), sbxId);
+async function setupActive(store: SandboxOwnershipStore, lk = "lk-1"): Promise<void> {
+	await prov(store, lk);
+	await store.markActive(pc(), lk);
 }
 
 // =========================================================================
@@ -116,17 +116,17 @@ describe("state machine", () => {
 // =========================================================================
 describe("ID validation", () => {
 	it("rejects invalid sandboxId/sessionId", async () => {
-		await expect(makeStore().create(pc(), "", "s")).rejects.toThrow(/invalid sandboxId/);
+		await expect(makeStore().create(pc(), "", "s")).rejects.toThrow(/invalid lifecycleKey/);
 		await expect(makeStore().create(pc(), "x", "")).rejects.toThrow(/invalid sessionId/);
 	});
 	it("uses hashed filenames", async () => {
 		const dir = tempDir();
 		const store = makeStore(dir);
-		await store.create(pc(), "my-sbx", "s1");
+		await store.create(pc(), "my-lk", "s1");
 		const f = readdirSync(dir).filter((x: string) => x.endsWith(".sandbox-ownership.json"));
 		expect(f.length).toBe(1);
 		expect(f[0]).toMatch(/^[0-9a-f]{64}\.sandbox-ownership\.json$/);
-		expect(f[0]).not.toContain("my-sbx");
+		expect(f[0]).not.toContain("my-lk");
 	});
 });
 
@@ -137,7 +137,7 @@ describe("lock and CAS", () => {
 	it("rejects wrong generation", async () => {
 		const store = makeStore();
 		await prov(store);
-		await expect(store.markActive(createClaim("x", TOK, "provisioning"), "sbx-1")).rejects.toThrow(
+		await expect(store.markActive(createClaim("x", TOK, "provisioning"), "lk-1")).rejects.toThrow(
 			/claim_generation_mismatch/,
 		);
 	});
@@ -145,13 +145,13 @@ describe("lock and CAS", () => {
 		const store = makeStore();
 		await prov(store);
 		await expect(
-			store.markActive(createClaim(GEN, "11111111-1111-4111-a111-111111111111", "provisioning"), "sbx-1"),
+			store.markActive(createClaim(GEN, "11111111-1111-4111-a111-111111111111", "provisioning"), "lk-1"),
 		).rejects.toThrow(/claim_token_mismatch/);
 	});
 	it("rejects wrong state", async () => {
 		const store = makeStore();
 		await prov(store);
-		await expect(store.markActive(createClaim(GEN, TOK, "active"), "sbx-1")).rejects.toThrow(/claim_state_mismatch/);
+		await expect(store.markActive(createClaim(GEN, TOK, "active"), "lk-1")).rejects.toThrow(/claim_state_mismatch/);
 	});
 	it("two stores see committed", async () => {
 		const dir = tempDir();
@@ -192,7 +192,7 @@ describe("CRUD", () => {
 	it("read returns record for existing", async () => {
 		const store = makeStore();
 		await prov(store, "r");
-		expect((await store.read("r"))!.sandboxId).toBe("r");
+		expect((await store.read("r"))!.lifecycleKey).toBe("r");
 	});
 	it("read throws record_corrupt for corrupt file", async () => {
 		const dir = tempDir();
@@ -220,8 +220,9 @@ describe("CRUD", () => {
 		await store.create(pc(), "sbx", "sess-original");
 		await store.markActive(pc(), "sbx");
 		const r = await store.read("sbx");
-		expect(r!.sessionId).toBe("sess-original");
-		expect(r!.ownerGeneration).toBe(GEN);
+		expect(r).toBeDefined();
+		expect(r?.sessionId).toBe("sess-original");
+		expect(r?.ownerGeneration).toBe(GEN);
 	});
 	it("deleteRecord uses full assertClaimMatches", async () => {
 		const store = makeStore();
@@ -363,7 +364,7 @@ describe("markPassivated clock and TTL", () => {
 		await setupActive(store, "mp");
 		await store.markPassivated(ac(), "mp", 3600_000);
 		const r = await store.read("mp");
-		expect(r!.softReservationExpiresAt).toBe("2026-09-02T13:00:00.000Z");
+		expect(r?.softReservationExpiresAt).toBe("2026-09-02T13:00:00.000Z");
 	});
 	it("rejects invalid TTL", async () => {
 		const store = makeStore();
@@ -400,7 +401,7 @@ describe("wake and reconnect", () => {
 		await setupActive(store, "w2");
 		await store.markPassivated(ac(), "w2");
 		const r = await store.tryWake(pasc(), "w2");
-		expect(r!.state).toBe("rehydrating");
+		expect(r?.state).toBe("rehydrating");
 	});
 	it("resolveWake alive", async () => {
 		const store = makeStore();
@@ -408,8 +409,8 @@ describe("wake and reconnect", () => {
 		await store.markPassivated(ac(), "rw");
 		await store.markRehydrating(pasc(), "rw");
 		const r = await store.resolveWake(ac(), "rw", "alive", "ckpt-abc");
-		expect(r!.state).toBe("active");
-		expect(r!.checkpointId).toBe("ckpt-abc");
+		expect(r?.state).toBe("active");
+		expect(r?.checkpointId).toBe("ckpt-abc");
 	});
 	it("resolveWake terminated_by_platform", async () => {
 		const store = makeStore();
@@ -417,7 +418,7 @@ describe("wake and reconnect", () => {
 		await store.markPassivated(ac(), "rw2");
 		await store.markRehydrating(pasc(), "rw2");
 		const r = await store.resolveWake(ac(), "rw2", "terminated_by_platform");
-		expect(r!.state).toBe("terminated");
+		expect(r?.state).toBe("terminated");
 	});
 	it("resolveWake timeout", async () => {
 		const store = makeStore();
@@ -425,8 +426,8 @@ describe("wake and reconnect", () => {
 		await store.markPassivated(ac(), "rw3");
 		await store.markRehydrating(pasc(), "rw3");
 		const r = await store.resolveWake(ac(), "rw3", "timeout");
-		expect(r!.state).toBe("terminated");
-		expect(r!.terminationReason).toBe("wake_timeout");
+		expect(r?.state).toBe("terminated");
+		expect(r?.terminationReason).toBe("wake_timeout");
 	});
 });
 
@@ -547,8 +548,8 @@ describe("sanitized records", () => {
 		await store.create(pc(), "hash-record", "s1");
 		const rec = await store.read("hash-record");
 		expect(rec).toBeDefined();
-		expect(rec!.ownerTokenHash).toMatch(/^[0-9a-f]{64}$/);
-		expect(rec!.ownerTokenHash).not.toBe(TOK);
+		expect(rec?.ownerTokenHash).toMatch(/^[0-9a-f]{64}$/);
+		expect(rec?.ownerTokenHash).not.toBe(TOK);
 		const json = JSON.stringify(rec);
 		expect(json).not.toContain(TOK);
 		expect(json).not.toContain('"ownerToken":');
@@ -564,7 +565,7 @@ describe("sanitized records", () => {
 		const rec = await store.read("xfer-hash");
 		const json = JSON.stringify(rec);
 		expect(json).not.toContain(newTok);
-		expect(rec!.ownerTokenHash).toMatch(/^[0-9a-f]{64}$/);
+		expect(rec?.ownerTokenHash).toMatch(/^[0-9a-f]{64}$/);
 		const { records } = await store.list();
 		expect(JSON.stringify(records)).not.toContain(newTok);
 	});
@@ -649,14 +650,28 @@ describe("lifecycle fail-closed", () => {
 			ownerToken: TOK,
 		});
 		await life.create({ image: "img", sessionLabel: "t" }, "sess-lc");
-		let rec = (await store.read("sbx-full-001"))!;
-		expect(rec.state).toBe("provisioning");
+		const lk2: string = life.lifecycleKey as string;
+		let rec = await store.read(lk2);
+		expect(rec).toBeDefined();
+		expect(rec?.state).toBe("provisioning");
 		await life.waitForReady();
-		rec = (await store.read("sbx-full-001"))!;
-		expect(rec.state).toBe("active");
+		rec = await store.read(lk2);
+		expect(rec).toBeDefined();
+		expect(rec?.state).toBe("active");
 		await life.delete();
-		rec = (await store.read("sbx-full-001"))!;
-		expect(rec.state).toBe("terminated");
+		rec = await store.read(lk2);
+		expect(rec).toBeDefined();
+		expect(rec?.state).toBe("terminated");
+
+		// Verify persisted file name is hashed and lacks raw provider sandbox ID + region
+		const files = readdirSync(dir).filter((x: string) => x.endsWith(".sandbox-ownership.json"));
+		expect(files.length).toBe(1);
+		expect(files[0]).toMatch(/^[0-9a-f]{64}\.sandbox-ownership\.json$/);
+		const fileContent = readFileSync(join(dir, files[0]), "utf8");
+		expect(fileContent).not.toContain("sbx-full-001");
+		expect(fileContent).not.toContain("us-west");
+		expect(fileContent).not.toContain("us-east");
+		expect(fileContent).not.toContain(TOK);
 	});
 
 	it("events use fixed codes only", async () => {
@@ -800,7 +815,22 @@ describe("compensation on missing sessionId", () => {
 		});
 		await expect(life.create({ image: "img", sessionLabel: "t" })).rejects.toThrow(/recovery_required/);
 		expect(deleteThrows).toBe(true);
-		expect(life.sandboxId).toBe("sbx-cf");
+		expect(
+			(
+				life as unknown as {
+					readonly identity: {
+						readonly id: string;
+						readonly name: string;
+						readonly status: string;
+						readonly image: string;
+						readonly region: string;
+						readonly createdAt: string;
+						readonly labels: readonly string[];
+						readonly resources: string;
+					} | null;
+				}
+			).identity?.id,
+		).toBe("sbx-cf");
 		const errorCodes = events.filter((e) => e.status === "error").map((e) => e.code);
 		expect(errorCodes).toContain(LIFECYCLE_CODES.RECOVERY_REQUIRED);
 	});
@@ -831,7 +861,22 @@ describe("compensation on missing sessionId", () => {
 			onEvent: (e) => events.push({ code: e.code, status: e.status }),
 		});
 		await expect(life.create({ image: "img", sessionLabel: "t" })).rejects.toThrow(/create_session_required/);
-		expect(life.sandboxId).toBeNull();
+		expect(
+			(
+				life as unknown as {
+					readonly identity: {
+						readonly id: string;
+						readonly name: string;
+						readonly status: string;
+						readonly image: string;
+						readonly region: string;
+						readonly createdAt: string;
+						readonly labels: readonly string[];
+						readonly resources: string;
+					} | null;
+				}
+			).identity?.id,
+		).toBeUndefined();
 		const errorCodes = events.filter((e) => e.status === "error").map((e) => e.code);
 		expect(errorCodes).toContain(LIFECYCLE_CODES.CREATE_SESSION_REQUIRED);
 	});

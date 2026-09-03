@@ -103,15 +103,8 @@ function snapshotExecutionLocation(raw: unknown): ExecutionLocation | undefined 
 		}
 		const type = descriptors.type?.value;
 		if (type === "local" && names.length === 1) return Object.freeze({ type: "local" });
-		if (type !== "prime-sandbox" || !names.includes("sandboxId")) return undefined;
-		if (names.some((name) => !["region", "sandboxId", "type"].includes(name))) return undefined;
-		const sandboxId = descriptors.sandboxId?.value;
-		const region = descriptors.region?.value;
-		if (typeof sandboxId !== "string" || sandboxId.length === 0) return undefined;
-		if (region !== undefined && (typeof region !== "string" || region.length === 0)) return undefined;
-		return region === undefined
-			? Object.freeze({ type: "prime-sandbox", sandboxId })
-			: Object.freeze({ type: "prime-sandbox", sandboxId, region });
+		if (type === "prime-sandbox" && names.length === 1) return Object.freeze({ type: "prime-sandbox" });
+		return undefined;
 	} catch {
 		return undefined;
 	}

@@ -881,7 +881,7 @@ describe("SandboxLifecycle", () => {
 		await life.download("/remote/f", "/local/f");
 		expect(await life.getLogs()).toBe("boot log\n");
 		await life.delete();
-		expect(life.sandboxId).toBeNull();
+		expect((life as unknown as { identity: { id: string } | null }).identity?.id).toBeUndefined();
 
 		const stepNames = life.events.map((e) => `${e.step}:${e.status}`);
 		expect(stepNames).toContain("preflight:success");
@@ -928,7 +928,7 @@ describe("SandboxLifecycle", () => {
 		});
 		const life = lifeWithId(createPrimeSandboxProvider(runner), { id: "gone-sbx", status: "TERMINATED" });
 		await life.delete();
-		expect(life.sandboxId).toBeNull();
+		expect((life as unknown as { identity: { id: string } | null }).identity?.id).toBeUndefined();
 	});
 
 	it("delete throws on unexpected errors (sanitized)", async () => {

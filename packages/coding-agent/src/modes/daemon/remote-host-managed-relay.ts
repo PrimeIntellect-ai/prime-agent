@@ -4,6 +4,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { SandboxConnectionHealth } from "../../core/execution-location.js";
+import { toUnreachableErrorCode } from "../../core/execution-location.js";
 import type { RemoteHostEventCursor, RemoteHostEventSequence } from "./remote-agent-host-protocol.js";
 import {
 	isRemoteHostBuildCompatible,
@@ -285,7 +286,11 @@ export class ManagedRelayLink {
 					since: this.reconnectingSince ?? nowISO(),
 				};
 			case "unreachable":
-				return { status: "unreachable", error: this._state.error, failedAt: this._state.failedAt };
+				return {
+					status: "unreachable",
+					error: toUnreachableErrorCode(this._state.error),
+					failedAt: this._state.failedAt,
+				};
 			case "closed":
 				return { status: "closed" };
 			default:

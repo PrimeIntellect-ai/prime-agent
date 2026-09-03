@@ -15,6 +15,23 @@
  * DELETED tombstones store a SHA-256 hash of the owner token, never the
  * raw token. Corrupt-record descriptors expose only opaque filenames and
  * fixed error codes, never raw paths or error text.
+ *
+ * ## Lifecycle key vs provider sandbox ID
+ *
+ * The ownership record uses a Home-generated opaque lifecycleKey (a UUID)
+ * as its identity.  No raw provider sandbox ID, region, URL, or host path
+ * is ever persisted in the record or tombstone.
+ *
+ * Physical provider deletion requires a live provider sandbox identity.
+ * Same-process lifecycle retains the raw provider sandbox ID in its
+ * private `identity` field for the required CLI argv operations.  After
+ * restart the in-memory identity is lost and deletion is unavailable;
+ * durable persistence stores only the lifecycleKey.
+ *
+ * When hosted orchestration is wired, a Home-private injected resolver
+ * capability must translate a lifecycleKey to a provider sandbox ID for
+ * restart- durable deletion.  Without that resolver, deletion of an
+ * already-persisted sandbox record fails closed.
  */
 
 import { createHash, randomUUID } from "node:crypto";
@@ -49,8 +66,8 @@ const LOCK_RETRY_MS = 10;
 // Opaque ID validation
 // -------------------------------------------------------------------------
 
-const SBX_ID_RE = /^[!-~]{1,128}$/;
 const SESSION_ID_RE = /^[!-~]{1,128}$/;
+const LIFECYCLE_KEY_RE = /^[0-9a-zA-Z._-]{1,64}$/;
 const GENERATION_RE = /^[0-9a-zA-Z._-]{1,64}$/;
 const TOKEN_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CHECKPOINT_RE = /^[a-zA-Z0-9._-]{1,256}$/;
@@ -228,7 +245,8 @@ export function createClaim(generation: string, token: string, state: SandboxOwn
 
 export interface SandboxOwnershipRecord {
 	version: 1;
-	sandboxId: string;
+	/** Home-generated opaque lifecycle key — UUID. Never a raw provider sandbox ID. */
+	lifecycleKey: string;
 	sessionId: string;
 	state: SandboxOwnershipState;
 	epoch: SandboxOwnershipEpoch;
@@ -263,7 +281,8 @@ export interface CorruptRecordDescriptor {
 
 export interface DeletedTombstone {
 	version: 1;
-	sandboxId: string;
+	/** Home-generated opaque lifecycle key — UUID. Never a raw provider sandbox ID. */
+	lifecycleKey: string;
 	sessionId: string;
 	terminationReason: SandboxTerminationReason;
 	ownerGeneration: string;
@@ -273,20 +292,78 @@ export interface DeletedTombstone {
 }
 
 function validateTombstone(data: unknown): DeletedTombstone {
-	const d = data as Record<string, unknown>;
-	if (d.version !== 1) throw new Error("sandbox-ownership: invalid tombstone version");
-	if (typeof d.sandboxId !== "string" || !SBX_ID_RE.test(d.sandboxId))
-		throw new Error("sandbox-ownership: invalid tombstone sandboxId");
-	if (typeof d.sessionId !== "string" || !SESSION_ID_RE.test(d.sessionId))
+	if (typeof data !== "object" || data === null || Array.isArray(data)) {
+		throw new Error("sandbox-ownership: invalid tombstone");
+	}
+	const keys = new Set([
+		"version",
+		"lifecycleKey",
+		"sessionId",
+		"terminationReason",
+		"ownerGeneration",
+		"ownerTokenHash",
+		"deletedAt",
+	]);
+	let descriptors: PropertyDescriptorMap;
+	try {
+		if (Object.getPrototypeOf(data) !== Object.prototype || Object.getOwnPropertySymbols(data).length !== 0) {
+			throw new Error("sandbox-ownership: invalid tombstone");
+		}
+		const names = Object.getOwnPropertyNames(data);
+		if (names.length !== keys.size || names.some((name) => !keys.has(name))) {
+			throw new Error("sandbox-ownership: invalid tombstone");
+		}
+		descriptors = Object.getOwnPropertyDescriptors(data);
+		for (const name of names) {
+			const descriptor = descriptors[name];
+			if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+				throw new Error("sandbox-ownership: invalid tombstone");
+			}
+		}
+	} catch {
+		throw new Error("sandbox-ownership: invalid tombstone");
+	}
+	const version = descriptors.version.value;
+	const lifecycleKey = descriptors.lifecycleKey.value;
+	const sessionId = descriptors.sessionId.value;
+	const terminationReason = descriptors.terminationReason.value;
+	const ownerGeneration = descriptors.ownerGeneration.value;
+	const ownerTokenHash = descriptors.ownerTokenHash.value;
+	const deletedAt = descriptors.deletedAt.value;
+	if (version !== 1) throw new Error("sandbox-ownership: invalid tombstone version");
+	if (typeof lifecycleKey !== "string" || !LIFECYCLE_KEY_RE.test(lifecycleKey))
+		throw new Error("sandbox-ownership: invalid tombstone lifecycleKey");
+	if (typeof sessionId !== "string" || !SESSION_ID_RE.test(sessionId))
 		throw new Error("sandbox-ownership: invalid tombstone sessionId");
-	if (typeof d.ownerGeneration !== "string" || !GENERATION_RE.test(d.ownerGeneration))
+	if (typeof ownerGeneration !== "string" || !GENERATION_RE.test(ownerGeneration))
 		throw new Error("sandbox-ownership: invalid tombstone ownerGeneration");
-	if (typeof d.ownerTokenHash !== "string") throw new Error("sandbox-ownership: invalid tombstone ownerTokenHash");
-	if (typeof d.deletedAt !== "string" || !ISO_RE.test(d.deletedAt))
+	if (typeof ownerTokenHash !== "string" || !HASH_RE.test(ownerTokenHash))
+		throw new Error("sandbox-ownership: invalid tombstone ownerTokenHash");
+	if (typeof deletedAt !== "string" || !ISO_RE.test(deletedAt))
 		throw new Error("sandbox-ownership: invalid tombstone deletedAt");
-	if (typeof d.terminationReason !== "string" || !TERMINATION_REASONS.has(d.terminationReason))
-		throw new Error("sandbox-ownership: invalid tombstone terminationReason");
-	return d as unknown as DeletedTombstone;
+	let validatedReason: SandboxTerminationReason;
+	switch (terminationReason) {
+		case "user_deleted":
+		case "idle_ttl":
+		case "hard_ttl":
+		case "daemon_shutdown":
+		case "provisioning_failed":
+		case "wake_timeout":
+		case "platform_deleted":
+			validatedReason = terminationReason;
+			break;
+		default:
+			throw new Error("sandbox-ownership: invalid tombstone terminationReason");
+	}
+	return Object.freeze({
+		version: 1,
+		lifecycleKey,
+		sessionId,
+		terminationReason: validatedReason,
+		ownerGeneration,
+		ownerTokenHash,
+		deletedAt,
+	});
 }
 
 // -------------------------------------------------------------------------
@@ -341,17 +418,17 @@ export class SandboxOwnershipStore {
 		}
 	}
 
-	private filename(sandboxId: string): string {
-		return `${createHash("sha256").update(sandboxId).digest("hex")}${RECORD_SUFFIX}`;
+	private filename(lifecycleKey: string): string {
+		return `${createHash("sha256").update(lifecycleKey).digest("hex")}${RECORD_SUFFIX}`;
 	}
-	private tombstoneFilename(sandboxId: string): string {
-		return `${createHash("sha256").update(sandboxId).digest("hex")}${TOMBSTONE_SUFFIX}`;
+	private tombstoneFilename(lifecycleKey: string): string {
+		return `${createHash("sha256").update(lifecycleKey).digest("hex")}${TOMBSTONE_SUFFIX}`;
 	}
-	private recordPath(sandboxId: string): string {
-		return join(this.baseDir, this.filename(sandboxId));
+	private recordPath(lifecycleKey: string): string {
+		return join(this.baseDir, this.filename(lifecycleKey));
 	}
-	private tombstonePath(sandboxId: string): string {
-		return join(this.baseDir, this.tombstoneFilename(sandboxId));
+	private tombstonePath(lifecycleKey: string): string {
+		return join(this.baseDir, this.tombstoneFilename(lifecycleKey));
 	}
 
 	private listRecordFiles(): string[] {
@@ -377,16 +454,16 @@ export class SandboxOwnershipStore {
 	// CRUD
 	// ------------------------------------------------------------------
 
-	async create(claim: OwnershipClaim, sandboxId: string, sessionId: string): Promise<SandboxOwnershipRecord> {
-		validateId(sandboxId, "sandboxId", SBX_ID_RE);
+	async create(claim: OwnershipClaim, lifecycleKey: string, sessionId: string): Promise<SandboxOwnershipRecord> {
+		validateId(lifecycleKey, "lifecycleKey", LIFECYCLE_KEY_RE);
 		validateId(sessionId, "sessionId", SESSION_ID_RE);
 		if (claim.expectedState !== "provisioning") throw new OwnershipError("create_requires_provisioning");
 		if (claim.expectedEpoch !== 0) throw new OwnershipError("create_requires_epoch_0");
-		const path = this.recordPath(sandboxId);
+		const path = this.recordPath(lifecycleKey);
 		const now = this.now();
 		const record: SandboxOwnershipRecord = {
 			version: 1,
-			sandboxId,
+			lifecycleKey,
 			sessionId,
 			state: "provisioning",
 			epoch: 0,
@@ -410,9 +487,9 @@ export class SandboxOwnershipStore {
 		return record;
 	}
 
-	async read(sandboxId: string): Promise<SandboxOwnershipRecord | undefined> {
+	async read(lifecycleKey: string): Promise<SandboxOwnershipRecord | undefined> {
 		try {
-			return parseAndValidateFull(readFileSync(this.recordPath(sandboxId), "utf8"));
+			return parseAndValidateFull(readFileSync(this.recordPath(lifecycleKey), "utf8"));
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 			if ((err as Error).message.startsWith("sandbox-ownership: record_corrupt")) throw err;
@@ -420,9 +497,9 @@ export class SandboxOwnershipStore {
 		}
 	}
 
-	private readSync(sandboxId: string): SandboxOwnershipRecord | undefined {
+	private readSync(lifecycleKey: string): SandboxOwnershipRecord | undefined {
 		try {
-			return parseAndValidateFull(readFileSync(this.recordPath(sandboxId), "utf8"));
+			return parseAndValidateFull(readFileSync(this.recordPath(lifecycleKey), "utf8"));
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 			if ((err as Error).message.startsWith("sandbox-ownership: record_corrupt")) throw err;
@@ -439,17 +516,17 @@ export class SandboxOwnershipStore {
 
 	async update(
 		claim: OwnershipClaim,
-		sandboxId: string,
+		lifecycleKey: string,
 		mutator: (r: SandboxOwnershipRecord) => SandboxOwnershipRecord,
 	): Promise<SandboxOwnershipRecord> {
 		let updated: SandboxOwnershipRecord;
 		await this.withLock(() => {
-			const record = this.readSync(sandboxId);
+			const record = this.readSync(lifecycleKey);
 			if (!record) throw new OwnershipError("record_not_found");
 			this.assertClaimMatches(claim, record);
 			updated = mutator({ ...record });
 			updated.updatedAt = this.now();
-			updated.sandboxId = record.sandboxId;
+			updated.lifecycleKey = record.lifecycleKey;
 			updated.sessionId = record.sessionId;
 			updated.ownerGeneration = record.ownerGeneration;
 			updated.ownerTokenHash = record.ownerTokenHash;
@@ -464,7 +541,7 @@ export class SandboxOwnershipStore {
 				updated.epoch = epochForState(updated.state);
 			}
 			this.validateRecordFields(updated);
-			this.writeAtomic(this.recordPath(sandboxId), updated);
+			this.writeAtomic(this.recordPath(lifecycleKey), updated);
 		});
 		return updated!;
 	}
@@ -473,28 +550,28 @@ export class SandboxOwnershipStore {
 	// Deletion — durable DELETED tombstone + fenced purge + fsync removals
 	// ------------------------------------------------------------------
 
-	async markDeleted(claim: OwnershipClaim, sandboxId: string): Promise<void> {
+	async markDeleted(claim: OwnershipClaim, lifecycleKey: string): Promise<void> {
 		await this.withLock(() => {
-			const record = this.readSync(sandboxId);
+			const record = this.readSync(lifecycleKey);
 			if (!record) return;
 			this.assertClaimMatches(claim, record);
 			if (record.state !== "terminated") throw new OwnershipError("markDeleted_requires_terminated");
 			const tombstone: DeletedTombstone = {
 				version: 1,
-				sandboxId: record.sandboxId,
+				lifecycleKey: record.lifecycleKey,
 				sessionId: record.sessionId,
 				terminationReason: record.terminationReason ?? "user_deleted",
 				ownerGeneration: record.ownerGeneration,
 				ownerTokenHash: record.ownerTokenHash,
 				deletedAt: this.now(),
 			};
-			this.writeAtomic(this.tombstonePath(sandboxId), tombstone);
+			this.writeAtomic(this.tombstonePath(lifecycleKey), tombstone);
 			try {
-				rmSync(this.recordPath(sandboxId), { force: true });
+				rmSync(this.recordPath(lifecycleKey), { force: true });
 			} catch {
 				/* best-effort */
 			}
-			const parentFd = openSync(resolve(this.recordPath(sandboxId), ".."), "r");
+			const parentFd = openSync(resolve(this.recordPath(lifecycleKey), ".."), "r");
 			try {
 				fsyncSync(parentFd);
 			} finally {
@@ -503,9 +580,9 @@ export class SandboxOwnershipStore {
 		});
 	}
 
-	async purge(claim: OwnershipClaim, sandboxId: string): Promise<void> {
+	async purge(claim: OwnershipClaim, lifecycleKey: string): Promise<void> {
 		await this.withLock(() => {
-			const tPath = this.tombstonePath(sandboxId);
+			const tPath = this.tombstonePath(lifecycleKey);
 			if (!existsSync(tPath)) return;
 			const raw = readFileSync(tPath, "utf8");
 			const tombstone = validateTombstone(JSON.parse(raw));
@@ -526,11 +603,11 @@ export class SandboxOwnershipStore {
 		});
 	}
 
-	async deleteRecord(claim: OwnershipClaim, sandboxId: string): Promise<void> {
+	async deleteRecord(claim: OwnershipClaim, lifecycleKey: string): Promise<void> {
 		await this.withLock(() => {
-			const record = this.readSync(sandboxId);
+			const record = this.readSync(lifecycleKey);
 			if (!record) {
-				const tPath = this.tombstonePath(sandboxId);
+				const tPath = this.tombstonePath(lifecycleKey);
 				if (existsSync(tPath)) {
 					const raw = readFileSync(tPath, "utf8");
 					const tombstone = validateTombstone(JSON.parse(raw));
@@ -554,11 +631,11 @@ export class SandboxOwnershipStore {
 			}
 			this.assertClaimMatches(claim, record);
 			try {
-				rmSync(this.recordPath(sandboxId), { force: true });
+				rmSync(this.recordPath(lifecycleKey), { force: true });
 			} catch {
 				/* idempotent */
 			}
-			const parentFd = openSync(resolve(this.recordPath(sandboxId), ".."), "r");
+			const parentFd = openSync(resolve(this.recordPath(lifecycleKey), ".."), "r");
 			try {
 				fsyncSync(parentFd);
 			} finally {
@@ -599,8 +676,8 @@ export class SandboxOwnershipStore {
 	// State helpers
 	// ------------------------------------------------------------------
 
-	async markActive(claim: OwnershipClaim, sandboxId: string): Promise<SandboxOwnershipRecord> {
-		return this.update(claim, sandboxId, (r) => ({
+	async markActive(claim: OwnershipClaim, lifecycleKey: string): Promise<SandboxOwnershipRecord> {
+		return this.update(claim, lifecycleKey, (r) => ({
 			...r,
 			state: "active",
 			lastHeartbeatAt: this.now(),
@@ -610,7 +687,7 @@ export class SandboxOwnershipStore {
 
 	async markPassivated(
 		claim: OwnershipClaim,
-		sandboxId: string,
+		lifecycleKey: string,
 		softReservationTtlMs?: number,
 	): Promise<SandboxOwnershipRecord> {
 		let softReservationExpiresAt: string | null = null;
@@ -618,7 +695,7 @@ export class SandboxOwnershipStore {
 			validatePositiveInt(softReservationTtlMs, "softReservationTtlMs");
 			softReservationExpiresAt = new Date(Date.parse(this.now()) + softReservationTtlMs).toISOString();
 		}
-		return this.update(claim, sandboxId, (r) => ({
+		return this.update(claim, lifecycleKey, (r) => ({
 			...r,
 			state: "passivated",
 			softReservationExpiresAt,
@@ -626,36 +703,36 @@ export class SandboxOwnershipStore {
 		}));
 	}
 
-	async markRehydrating(claim: OwnershipClaim, sandboxId: string): Promise<SandboxOwnershipRecord> {
-		return this.update(claim, sandboxId, (r) => ({ ...r, state: "rehydrating" }));
+	async markRehydrating(claim: OwnershipClaim, lifecycleKey: string): Promise<SandboxOwnershipRecord> {
+		return this.update(claim, lifecycleKey, (r) => ({ ...r, state: "rehydrating" }));
 	}
-	async markTerminating(claim: OwnershipClaim, sandboxId: string): Promise<SandboxOwnershipRecord> {
-		return this.update(claim, sandboxId, (r) => ({ ...r, state: "terminating" }));
+	async markTerminating(claim: OwnershipClaim, lifecycleKey: string): Promise<SandboxOwnershipRecord> {
+		return this.update(claim, lifecycleKey, (r) => ({ ...r, state: "terminating" }));
 	}
 	async markTerminated(
 		claim: OwnershipClaim,
-		sandboxId: string,
+		lifecycleKey: string,
 		reason: SandboxTerminationReason,
 	): Promise<SandboxOwnershipRecord> {
-		return this.update(claim, sandboxId, (r) => ({ ...r, state: "terminated", terminationReason: reason }));
+		return this.update(claim, lifecycleKey, (r) => ({ ...r, state: "terminated", terminationReason: reason }));
 	}
 	async setCheckpoint(
 		claim: OwnershipClaim,
-		sandboxId: string,
+		lifecycleKey: string,
 		checkpointId: string,
 	): Promise<SandboxOwnershipRecord> {
 		validateOptionalId(checkpointId, "checkpointId", CHECKPOINT_RE);
-		return this.update(claim, sandboxId, (r) => ({ ...r, checkpointId }));
+		return this.update(claim, lifecycleKey, (r) => ({ ...r, checkpointId }));
 	}
-	async heartbeat(claim: OwnershipClaim, sandboxId: string): Promise<SandboxOwnershipRecord> {
-		return this.update(claim, sandboxId, (r) => ({ ...r, lastHeartbeatAt: this.now() }));
+	async heartbeat(claim: OwnershipClaim, lifecycleKey: string): Promise<SandboxOwnershipRecord> {
+		return this.update(claim, lifecycleKey, (r) => ({ ...r, lastHeartbeatAt: this.now() }));
 	}
 
-	async markPlatformDeleted(claim: OwnershipClaim, sandboxId: string): Promise<SandboxOwnershipRecord> {
-		await this.update(claim, sandboxId, (r) => ({ ...r, state: "terminating" }));
-		const record = await this.read(sandboxId);
+	async markPlatformDeleted(claim: OwnershipClaim, lifecycleKey: string): Promise<SandboxOwnershipRecord> {
+		await this.update(claim, lifecycleKey, (r) => ({ ...r, state: "terminating" }));
+		const record = await this.read(lifecycleKey);
 		if (!record) throw new OwnershipError("record_vanished");
-		return this.update({ ...claim, expectedState: "terminating", expectedEpoch: 1 }, sandboxId, (r) => ({
+		return this.update({ ...claim, expectedState: "terminating", expectedEpoch: 1 }, lifecycleKey, (r) => ({
 			...r,
 			state: "terminated",
 			platformDeleted: true,
@@ -663,34 +740,34 @@ export class SandboxOwnershipStore {
 		}));
 	}
 
-	async tryWake(claim: OwnershipClaim, sandboxId: string): Promise<SandboxOwnershipRecord | undefined> {
-		const record = await this.read(sandboxId);
+	async tryWake(claim: OwnershipClaim, lifecycleKey: string): Promise<SandboxOwnershipRecord | undefined> {
+		const record = await this.read(lifecycleKey);
 		if (!record || record.state !== "passivated") return undefined;
-		return this.markRehydrating(createClaim(claim.ownerGeneration, claim.ownerToken, record.state), sandboxId);
+		return this.markRehydrating(createClaim(claim.ownerGeneration, claim.ownerToken, record.state), lifecycleKey);
 	}
 
 	async resolveWake(
 		claim: OwnershipClaim,
-		sandboxId: string,
+		lifecycleKey: string,
 		outcome: SandboxWakeOutcome,
 		checkpointId?: string,
 	): Promise<SandboxOwnershipRecord | undefined> {
-		const record = await this.read(sandboxId);
+		const record = await this.read(lifecycleKey);
 		if (!record) return undefined;
 		const cc = createClaim(claim.ownerGeneration, claim.ownerToken, record.state);
 		if (outcome === "alive") {
-			const updated = await this.markActive(cc, sandboxId);
+			const updated = await this.markActive(cc, lifecycleKey);
 			if (checkpointId)
 				return this.setCheckpoint(
 					createClaim(claim.ownerGeneration, claim.ownerToken, "active"),
-					sandboxId,
+					lifecycleKey,
 					checkpointId,
 				);
 			return updated;
 		}
 		return this.markTerminated(
 			cc,
-			sandboxId,
+			lifecycleKey,
 			outcome === "terminated_by_platform" ? "platform_deleted" : "wake_timeout",
 		);
 	}
@@ -701,7 +778,7 @@ export class SandboxOwnershipStore {
 
 	async reclaimStale(
 		claim: OwnershipClaim,
-		sandboxId: string,
+		lifecycleKey: string,
 		staleState: "provisioning" | "active",
 		staleLeaseMs: number = STALE_LEASE_MS,
 	): Promise<SandboxOwnershipRecord> {
@@ -710,7 +787,7 @@ export class SandboxOwnershipStore {
 		assertValidState(claim.expectedState);
 		if (claim.expectedEpoch !== epochForState(claim.expectedState)) throw new OwnershipError("claim_epoch_mismatch");
 		return this.withLock(() => {
-			const record = this.readSync(sandboxId);
+			const record = this.readSync(lifecycleKey);
 			if (!record) throw new OwnershipError("record_not_found", "sandbox-ownership: record not found for reclaim");
 			const now = Date.parse(this.now());
 			if (staleState === "provisioning") {
@@ -728,21 +805,21 @@ export class SandboxOwnershipStore {
 				updatedAt: this.now(),
 				terminationReason: null,
 			};
-			this.writeAtomic(this.recordPath(sandboxId), updated);
+			this.writeAtomic(this.recordPath(lifecycleKey), updated);
 			return updated;
 		});
 	}
 
 	async transferOwnership(
 		claim: OwnershipClaim,
-		sandboxId: string,
+		lifecycleKey: string,
 		newGeneration: string,
 		newToken: string,
 	): Promise<SandboxOwnershipRecord> {
 		validateId(newGeneration, "new generation", GENERATION_RE);
 		validateId(newToken, "new token", TOKEN_RE);
 		return this.withLock(() => {
-			const record = this.readSync(sandboxId);
+			const record = this.readSync(lifecycleKey);
 			if (!record) throw new OwnershipError("record_not_found", "sandbox-ownership: record not found for transfer");
 			this.assertClaimMatches(claim, record);
 			const updated: SandboxOwnershipRecord = {
@@ -751,7 +828,7 @@ export class SandboxOwnershipStore {
 				ownerTokenHash: hashToken(newToken),
 				updatedAt: this.now(),
 			};
-			this.writeAtomic(this.recordPath(sandboxId), updated);
+			this.writeAtomic(this.recordPath(lifecycleKey), updated);
 			return updated;
 		});
 	}
@@ -832,7 +909,7 @@ export class SandboxOwnershipStore {
 	}
 
 	private validateRecordFields(record: SandboxOwnershipRecord): void {
-		validateId(record.sandboxId, "sandboxId", SBX_ID_RE);
+		validateId(record.lifecycleKey, "lifecycleKey", LIFECYCLE_KEY_RE);
 		validateId(record.sessionId, "sessionId", SESSION_ID_RE);
 		validateId(record.ownerGeneration, "ownerGeneration", GENERATION_RE);
 		validateId(record.ownerTokenHash, "ownerTokenHash", HASH_RE);
@@ -864,7 +941,7 @@ export function parseAndValidateFull(raw: string): SandboxOwnershipRecord {
 
 	const KEYS = new Set([
 		"version",
-		"sandboxId",
+		"lifecycleKey",
 		"sessionId",
 		"state",
 		"epoch",
@@ -888,8 +965,8 @@ export function parseAndValidateFull(raw: string): SandboxOwnershipRecord {
 	}
 
 	if (data.version !== 1) throw new Error("sandbox-ownership: record_corrupt version");
-	if (typeof data.sandboxId !== "string" || !SBX_ID_RE.test(data.sandboxId))
-		throw new Error("sandbox-ownership: record_corrupt sandboxId");
+	if (typeof data.lifecycleKey !== "string" || !LIFECYCLE_KEY_RE.test(data.lifecycleKey))
+		throw new Error("sandbox-ownership: record_corrupt lifecycleKey");
 	if (typeof data.sessionId !== "string" || !SESSION_ID_RE.test(data.sessionId))
 		throw new Error("sandbox-ownership: record_corrupt sessionId");
 	assertValidState(data.state);
