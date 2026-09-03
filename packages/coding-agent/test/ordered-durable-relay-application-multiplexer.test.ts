@@ -1495,8 +1495,8 @@ describe("hostile — alias cleanup closes each raw object/close fn once", () =>
 			return Object.freeze({ status: "closed" });
 		};
 
-		const cmd = makeCapability({ close: closeFn as () => Promise<unknown> });
-		const evt = makeCapability({ close: closeFn as () => Promise<unknown> });
+		const cmd = makeCapability({ close: closeFn });
+		const evt = makeCapability({ close: closeFn });
 
 		// Different owner objects share the same close function reference.
 		// Per spec: the same close on two distinct owners does NOT prove one
@@ -1917,6 +1917,29 @@ describe("hostile — symbol data vs accessor classification", () => {
 		const result = await createRelayApplicationMultiplexer(factory);
 		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
 	});
+
+	it("string accessor descriptor on capability is CLOSE_UNCERTAIN without getter invocation", async () => {
+		let getterCalled = false;
+		const inner: Record<string, unknown> = {
+			apply: async () => Object.freeze({ status: "applied" }),
+			close: async () => Object.freeze({ status: "closed" }),
+		};
+		Object.defineProperty(inner, "hiddenOwner", {
+			get: () => {
+				getterCalled = true;
+				return makeCapability();
+			},
+			enumerable: false,
+		});
+		const result = await createRelayApplicationMultiplexer({
+			command: inner,
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		});
+		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
+		expect(getterCalled).toBe(false);
+	});
 });
 
 // ===========================================================================
@@ -1931,8 +1954,8 @@ describe("hostile — same close function on distinct owners", () => {
 			return Object.freeze({ status: "closed" });
 		};
 
-		const own1 = makeCapability({ close: sharedClose as () => Promise<unknown> });
-		const own2 = makeCapability({ close: sharedClose as () => Promise<unknown> });
+		const own1 = makeCapability({ close: sharedClose });
+		const own2 = makeCapability({ close: sharedClose });
 
 		const factory: Record<string, unknown> = {
 			command: own1,
@@ -1962,9 +1985,9 @@ describe("hostile — same close function on distinct owners", () => {
 			return Object.freeze({ status: "closed" });
 		};
 
-		const obj1 = makeCapability({ close: sharedClose as () => Promise<unknown> });
-		const obj2 = makeCapability({ close: sharedClose as () => Promise<unknown> });
-		const obj3 = makeCapability({ close: sharedClose as () => Promise<unknown> });
+		const obj1 = makeCapability({ close: sharedClose });
+		const obj2 = makeCapability({ close: sharedClose });
+		const obj3 = makeCapability({ close: sharedClose });
 
 		const factory: Record<string, unknown> = {
 			command: obj1,

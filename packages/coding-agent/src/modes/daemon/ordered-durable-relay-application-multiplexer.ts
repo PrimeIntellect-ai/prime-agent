@@ -228,7 +228,9 @@ function hasCapabilityUncertainty(raw: unknown): boolean {
 		for (const sym of rawSymbolKeys) {
 			const d = Object.getOwnPropertyDescriptor(raw, sym);
 			if (!d || !("value" in d)) return true; // accessor → uncertain
-			if (typeof d.value === "object" && d.value !== null && types.isProxy(d.value)) return true;
+			if ((typeof d.value === "object" && d.value !== null) || typeof d.value === "function") {
+				if (types.isProxy(d.value)) return true;
+			}
 		}
 	} catch {
 		return true;
@@ -386,14 +388,14 @@ function extractPreliminary(raw: unknown): PrelimResult {
 	let symbolUncertain = false;
 	const symbolKeys = Object.getOwnPropertySymbols(raw);
 	for (const sym of symbolKeys) {
-		const d = ownDescriptors[sym as unknown as string];
+		const d = Object.getOwnPropertyDescriptor(raw, sym);
 		if (!d || !("value" in d)) {
 			// Accessor or missing descriptor — uncertainty
 			symbolUncertain = true;
 			break;
 		}
 		// Data descriptor — check if value itself is a Proxy (cannot inspect)
-		if (typeof d.value === "object" && d.value !== null) {
+		if ((typeof d.value === "object" && d.value !== null) || typeof d.value === "function") {
 			try {
 				if (types.isProxy(d.value)) {
 					symbolUncertain = true;
@@ -655,7 +657,10 @@ function captureAllOwners(raw: unknown): AllOwnersResult {
 		// Scan string-keyed own properties (one bounded level)
 		for (const subName of Object.getOwnPropertyNames(parentDescs)) {
 			const sd = parentDescs[subName];
-			if (!sd || !("value" in sd)) continue; // accessor — skip
+			if (!sd || !("value" in sd)) {
+				anyAccessorUncertain = true;
+				continue;
+			}
 			if (sd.enumerable === false && subName === "close") continue; // skip the capability's own close
 			if (sd.enumerable === false && subName === "apply") continue; // skip the capability's own apply
 			maybeAddOwner(sd.value);
@@ -665,11 +670,14 @@ function captureAllOwners(raw: unknown): AllOwnersResult {
 			const subSymbols = Object.getOwnPropertySymbols(parent);
 			for (const sym of subSymbols) {
 				const sd = Object.getOwnPropertyDescriptor(parent, sym);
-				if (!sd || !("value" in sd)) continue; // accessor — skip
+				if (!sd || !("value" in sd)) {
+					anyAccessorUncertain = true;
+					continue;
+				}
 				maybeAddOwner(sd.value);
 			}
 		} catch {
-			// reflection failure — skip
+			anyAccessorUncertain = true;
 		}
 	};
 
