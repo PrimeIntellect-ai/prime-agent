@@ -1,16 +1,17 @@
 /**
- * ProviderCallJournal recovery scanner — reads durable provider-call journal
- * files through a paginated backend, validates per-call state machines,
- * and returns a deep-frozen recovered snapshot.
+ * SandboxCommand journal recovery scanner — reads durable `<N>.b14-command`
+ * journal files through a paginated backend, validates exact contiguous
+ * 1-based ordered records with identity binding, and returns a deep-frozen
+ * recovered snapshot with per-file receipts.
  *
- * Pure scanner: no store, publisher, provider execution, or filesystem
- * backend included.  Backend is injected at the call site.
+ * Pure scanner: no store, publisher, or filesystem backend included.
+ * Backend is injected at the call site.
  */
 
 import { createHash } from "node:crypto";
 import { types } from "node:util";
-import type { ProviderCallRecordV1 } from "./provider-call-record-codec.js";
-import { decodeProviderCallRecordV1 } from "./provider-call-record-codec.js";
+import type { SandboxCommandRecordV1 } from "./sandbox-command-record-codec.js";
+import { decodeSandboxCommandRecordV1 } from "./sandbox-command-record-codec.js";
 
 // ===========================================================================
 // Constants
@@ -19,13 +20,13 @@ import { decodeProviderCallRecordV1 } from "./provider-call-record-codec.js";
 const PAGE_MAX_ENTRIES = 64;
 const PAGE_MAX_BYTES = 16_777_216; // 16 MiB
 const TOTAL_MAX_BYTES = 268_435_456; // 256 MiB
-const FILE_MAX_BYTES = 1_310_720; // 1.25 MiB
+const FILE_MAX_BYTES = 1_310_720; // 1.25 MiB (matches codec MAX_ENCODED_BYTES)
 const READ_MAX_BYTES = 65_536; // 64 KiB
 const MAX_FILES = 20_000;
 const MAX_PAGES = MAX_FILES;
 const PROMISE_TIMEOUT_MS = 30_000; // 30 s
 
-const FILE_NAME = /^(\d{20})\.b10-provider-call$/;
+const FILE_NAME = /^(\d{20})\.b14-command$/;
 const CURSOR = /^[A-Za-z0-9._~-]{1,256}$/;
 const DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 
@@ -54,14 +55,14 @@ const U8_FILL = Uint8Array.prototype.fill;
 // Error codes
 // ===========================================================================
 
-export const PROVIDER_RECOVERY_ERRORS = Object.freeze({
+export const SANDBOX_RECOVERY_ERRORS = Object.freeze({
 	INVALID_ARGUMENT: "INVALID_ARGUMENT",
 	RECOVERY_FAILED: "RECOVERY_FAILED",
 	IO_UNCONFIRMED: "IO_UNCONFIRMED",
 	CLOSE_UNCERTAIN: "CLOSE_UNCERTAIN",
 });
 
-export type ProviderRecoveryErrorCode = (typeof PROVIDER_RECOVERY_ERRORS)[keyof typeof PROVIDER_RECOVERY_ERRORS];
+export type SandboxRecoveryErrorCode = (typeof SANDBOX_RECOVERY_ERRORS)[keyof typeof SANDBOX_RECOVERY_ERRORS];
 
 // ---------------------------------------------------------------------------
 // CloseDiscovery — tagged result for discoverClose: distinct "close found",
@@ -99,13 +100,13 @@ function isExactNativePromise(raw: unknown): boolean {
 // Input/output types
 // ===========================================================================
 
-export interface ProviderCallIdentity {
+export interface SandboxCommandIdentity {
 	readonly hostId: string;
 	readonly generation: string;
 	readonly sessionId: string;
 }
 
-export interface ProviderCallEntryStat {
+export interface SandboxCommandEntryStat {
 	readonly dev: string;
 	readonly ino: string;
 	readonly uid: string;
@@ -118,74 +119,80 @@ export interface ProviderCallEntryStat {
 	readonly ctimeNs: string;
 }
 
-export interface ProviderCallEntry {
+export interface SandboxCommandEntry {
 	readonly name: string;
-	readonly stat: ProviderCallEntryStat;
+	readonly stat: SandboxCommandEntryStat;
 }
 
-export interface ProviderCallListPageRequest {
+export interface SandboxCommandListPageRequest {
 	readonly cursor: string | null;
 	readonly maxEntries: 64;
 	readonly maxBytes: 16_777_216;
 }
 
-export interface ProviderCallPageResult {
+export interface SandboxCommandPageResult {
 	readonly status: "page";
-	readonly entries: readonly ProviderCallEntry[];
+	readonly entries: readonly SandboxCommandEntry[];
 	readonly nextCursor: string | null;
 	readonly close: () => unknown;
 }
 
-export interface ProviderCallOpenRequest {
+export interface SandboxCommandOpenRequest {
 	readonly name: string;
-	readonly expected: ProviderCallEntryStat;
+	readonly expected: SandboxCommandEntryStat;
 }
 
-export interface ProviderCallReadHandle {
+export interface SandboxCommandReadHandle {
 	readonly readAt: (offset: number, size: number) => unknown;
 	readonly confirmEof: (size: number) => unknown;
 	readonly fstat: () => unknown;
 	readonly close: () => unknown;
 }
 
-export type ProviderCallOpenResult =
-	| Readonly<{ status: "opened"; handle: ProviderCallReadHandle }>
+export type SandboxCommandOpenResult =
+	| Readonly<{ status: "opened"; handle: SandboxCommandReadHandle }>
 	| Readonly<{ status: "missing" }>;
 
-export interface ProviderCallBackend {
-	readonly listPage: (request: ProviderCallListPageRequest) => unknown;
-	readonly open: (request: ProviderCallOpenRequest) => unknown;
+export interface SandboxCommandBackend {
+	readonly listPage: (request: SandboxCommandListPageRequest) => unknown;
+	readonly open: (request: SandboxCommandOpenRequest) => unknown;
 	readonly close: () => unknown;
 }
 
-export interface ProviderCallRecoveryInput {
-	readonly backend: ProviderCallBackend;
-	readonly identity: ProviderCallIdentity;
+export interface SandboxCommandRecoveryInput {
+	readonly backend: SandboxCommandBackend;
+	readonly identity: SandboxCommandIdentity;
 }
 
 // ===========================================================================
 // Output types
 // ===========================================================================
 
-export interface ProviderCallRecoveryOutput {
-	readonly identity: ProviderCallIdentity;
-	readonly records: readonly ProviderCallRecordV1[];
+export interface SandboxCommandFileReceipt {
+	readonly sequence: number;
+	readonly size: number;
+	readonly sha256: string;
+}
+
+export interface SandboxCommandRecoveryOutput {
+	readonly identity: SandboxCommandIdentity;
+	readonly records: readonly SandboxCommandRecordV1[];
+	readonly receipts: readonly SandboxCommandFileReceipt[];
 	readonly totalBytes: number;
-	readonly nextJournalSeq: number;
-	readonly interruptedCallIds: readonly string[];
+	readonly nextSequence: number;
 }
 
-export interface ProviderCallRecoveryOk {
+export interface SandboxCommandRecoveryOk {
 	readonly ok: true;
-	readonly value: ProviderCallRecoveryOutput;
+	readonly value: SandboxCommandRecoveryOutput;
 }
 
-export interface ProviderCallRecoveryError {
+export interface SandboxCommandRecoveryError {
 	readonly ok: false;
-	readonly error: Readonly<{ code: ProviderRecoveryErrorCode }>;
+	readonly error: Readonly<{ code: SandboxRecoveryErrorCode }>;
 }
 
-export type ProviderCallRecoveryResult = ProviderCallRecoveryOk | ProviderCallRecoveryError;
+export type SandboxCommandRecoveryResult = SandboxCommandRecoveryOk | SandboxCommandRecoveryError;
 
 // ===========================================================================
 // Internal types
@@ -194,8 +201,8 @@ export type ProviderCallRecoveryResult = ProviderCallRecoveryOk | ProviderCallRe
 type Descriptors = Readonly<Record<string, PropertyDescriptor>>;
 
 type BoundBackend = Readonly<{
-	listPage: (request: ProviderCallListPageRequest) => unknown;
-	open: (request: ProviderCallOpenRequest) => unknown;
+	listPage: (request: SandboxCommandListPageRequest) => unknown;
+	open: (request: SandboxCommandOpenRequest) => unknown;
 }>;
 
 type BoundHandle = Readonly<{
@@ -206,22 +213,22 @@ type BoundHandle = Readonly<{
 
 type ParsedName = Readonly<{ sequence: number }>;
 
-/** Observation result union — no Error objects are created or propagated. */
+/** Observation result union — no Error objects created or propagated. */
 type ObserveResult = Readonly<{ ok: true; value: unknown }> | Readonly<{ ok: false }>;
 
 // ===========================================================================
 // Helpers
 // ===========================================================================
 
-function fail(code: ProviderRecoveryErrorCode): ProviderCallRecoveryError {
+function fail(code: SandboxRecoveryErrorCode): SandboxCommandRecoveryError {
 	return Object.freeze({
 		ok: false,
 		error: Object.freeze({ code }),
-	});
+	}) satisfies SandboxCommandRecoveryError;
 }
 
 // ---------------------------------------------------------------------------
-// exactDtor   – validate a plain object has exactly the given own property set
+// exactDtor — validate a plain object has exactly the given own property set
 // ---------------------------------------------------------------------------
 
 function exactDtor(raw: unknown, keys: ReadonlySet<string>): Descriptors | null {
@@ -245,7 +252,7 @@ function exactDtor(raw: unknown, keys: ReadonlySet<string>): Descriptors | null 
 }
 
 // ---------------------------------------------------------------------------
-// methodFn    – pull a function-typed own data descriptor, reject Proxy
+// methodFn — pull a function-typed own data descriptor, reject Proxy
 // ---------------------------------------------------------------------------
 
 function methodFn(values: Descriptors, owner: object, name: string): ((...args: readonly unknown[]) => unknown) | null {
@@ -261,7 +268,7 @@ function methodFn(values: Descriptors, owner: object, name: string): ((...args: 
 }
 
 // ---------------------------------------------------------------------------
-// validId    – printable ASCII, 1..128 chars
+// validId — printable ASCII, 1..128 chars
 // ---------------------------------------------------------------------------
 
 function validId(raw: unknown): raw is string {
@@ -277,7 +284,7 @@ function validId(raw: unknown): raw is string {
 // snapshotIdentity
 // ---------------------------------------------------------------------------
 
-function snapshotIdentity(raw: unknown): ProviderCallIdentity | null {
+function snapshotIdentity(raw: unknown): SandboxCommandIdentity | null {
 	const values = exactDtor(raw, IDENTITY_KEYS);
 	if (!values) return null;
 	const hostId = values.hostId?.value;
@@ -288,7 +295,7 @@ function snapshotIdentity(raw: unknown): ProviderCallIdentity | null {
 }
 
 // ---------------------------------------------------------------------------
-// bindBackend – extract listPage & open (close extracted upstream)
+// bindBackend — extract listPage & open (close extracted upstream)
 // ---------------------------------------------------------------------------
 
 function bindBackend(raw: unknown): BoundBackend | null {
@@ -298,8 +305,8 @@ function bindBackend(raw: unknown): BoundBackend | null {
 	const open = methodFn(values, raw, "open");
 	if (!listPage || !open) return null;
 	return Object.freeze({
-		listPage: (request: ProviderCallListPageRequest): unknown => Reflect.apply(listPage, undefined, [request]),
-		open: (request: ProviderCallOpenRequest): unknown => Reflect.apply(open, undefined, [request]),
+		listPage: (request: SandboxCommandListPageRequest): unknown => Reflect.apply(listPage, undefined, [request]),
+		open: (request: SandboxCommandOpenRequest): unknown => Reflect.apply(open, undefined, [request]),
 	});
 }
 
@@ -319,7 +326,7 @@ function safeInteger(raw: unknown): raw is number {
 // snapshotStat
 // ---------------------------------------------------------------------------
 
-function snapshotStat(raw: unknown): ProviderCallEntryStat | null {
+function snapshotStat(raw: unknown): SandboxCommandEntryStat | null {
 	const value = exactDtor(raw, STAT_KEYS);
 	if (!value) return null;
 	const dev = value.dev?.value;
@@ -363,7 +370,7 @@ function snapshotStat(raw: unknown): ProviderCallEntryStat | null {
 // snapshotEntry
 // ---------------------------------------------------------------------------
 
-function snapshotEntry(raw: unknown): ProviderCallEntry | null {
+function snapshotEntry(raw: unknown): SandboxCommandEntry | null {
 	const value = exactDtor(raw, ENTRY_KEYS);
 	if (!value) return null;
 	const name = value.name?.value;
@@ -372,12 +379,23 @@ function snapshotEntry(raw: unknown): ProviderCallEntry | null {
 }
 
 // ---------------------------------------------------------------------------
-// discoverClose – extract bare close function from own descriptor, reject
-//                 Proxy / non-function / accessor / custom proto.
-//                 When guard is provided, prior-owner aliases return null.
+// seenCloseOwners — track object identity across backend/page/handle
+// transfers so aliases never invoke a physical close twice.
+// A fresh WeakSet is created per runRecovery call.
 // ---------------------------------------------------------------------------
 
 type CloseGuard = WeakSet<object>;
+
+// ---------------------------------------------------------------------------
+// discoverClose — extract bare close from own descriptor, reject
+//                 Proxy / non-function / accessor / custom proto.
+//                 Returns CloseDiscovery tagged union:
+//                   kind:"close"  – close function available (registered in
+//                                   guard only after proven valid)
+//                   kind:"absent" – no close found (proto wrong, no desc, etc.)
+//                   kind:"alias"  – guard already contains this raw object
+//                                   (caller must produce CLOSE_UNCERTAIN)
+// ---------------------------------------------------------------------------
 
 function discoverClose(raw: unknown, guard?: CloseGuard): CloseDiscovery {
 	if (typeof raw !== "object" || raw === null) return { kind: "absent" };
@@ -402,7 +420,7 @@ function discoverClose(raw: unknown, guard?: CloseGuard): CloseDiscovery {
 }
 
 // ---------------------------------------------------------------------------
-// consumeCloseOnce – wrap a close function so it can be called at most once
+// consumeCloseOnce — wrap a close function so it can be called at most once
 // ---------------------------------------------------------------------------
 
 function consumeCloseOnce(closeFn: () => unknown): () => unknown {
@@ -415,13 +433,13 @@ function consumeCloseOnce(closeFn: () => unknown): () => unknown {
 }
 
 // ---------------------------------------------------------------------------
-// observeExact – validate a host-guaranteed bare native Promise and observe
+// observeExact — validate a host-guaranteed bare native Promise and observe
 //                it, returning an ObserveResult union (no Error objects).
 //
 // Validates: non-proxy, Promise.prototype, zero own names/symbols,
-// types.isPromise.  Uses Reflect.apply(Promise.prototype.then, raw, [])
+// types.isPromise. Uses Reflect.apply(Promise.prototype.then, raw, [])
 // to avoid invoking any custom-then from a hostile object that somehow
-// passed the own-property check.  Bounded referenced timer.
+// passed the own-property check. Bounded referenced timer.
 // ---------------------------------------------------------------------------
 
 function observeExact(raw: unknown, timeout: number = PROMISE_TIMEOUT_MS): Promise<ObserveResult> {
@@ -480,9 +498,8 @@ function observeExact(raw: unknown, timeout: number = PROMISE_TIMEOUT_MS): Promi
 }
 
 // ---------------------------------------------------------------------------
-// checkedCloseExact – observe a close function via observeExact and verify
-//                     the result is {status:"closed"}.
-//                     No arbitrary await closeFn() / thenables.
+// checkedCloseExact — observe a close via observeExact and verify the result
+//                     is {status:"closed"}. No arbitrary await closeFn().
 // ---------------------------------------------------------------------------
 
 async function checkedCloseExact(closeFn: () => unknown): Promise<boolean> {
@@ -498,7 +515,7 @@ async function checkedCloseExact(closeFn: () => unknown): Promise<boolean> {
 }
 
 // ---------------------------------------------------------------------------
-// eraseTransferred – zero-fill a Uint8Array in place
+// eraseTransferred — zero-fill a Uint8Array in place
 // ---------------------------------------------------------------------------
 
 function eraseTransferred(raw: unknown): void {
@@ -512,9 +529,9 @@ function eraseTransferred(raw: unknown): void {
 }
 
 // ---------------------------------------------------------------------------
-// exactTransferred – validate a full-backing genuine Uint8Array with no own
-//                    property overrides on the prototype chain getters, no
-//                    named extras, dense numeric indices, zero-offset and
+// exactTransferred — validate a full-backing genuine Uint8Array with no own
+//                    property overrides on prototype chain getters, no named
+//                    extras, dense numeric indices, zero-offset and
 //                    zero-own-buffer.
 // ---------------------------------------------------------------------------
 
@@ -567,7 +584,7 @@ function exactTransferred(raw: unknown): raw is Uint8Array {
 }
 
 // ---------------------------------------------------------------------------
-// bindHandle – extracts readAt, confirmEof, fstat (but NOT close – that is
+// bindHandle — extracts readAt, confirmEof, fstat (but NOT close — that is
 //              acquired separately before validation)
 // ---------------------------------------------------------------------------
 
@@ -602,7 +619,7 @@ function parseName(name: string): ParsedName | null {
 // statEqual
 // ---------------------------------------------------------------------------
 
-function statEqual(left: ProviderCallEntryStat, right: ProviderCallEntryStat): boolean {
+function statEqual(left: SandboxCommandEntryStat, right: SandboxCommandEntryStat): boolean {
 	return (
 		left.dev === right.dev &&
 		left.ino === right.ino &&
@@ -618,15 +635,15 @@ function statEqual(left: ProviderCallEntryStat, right: ProviderCallEntryStat): b
 }
 
 // ---------------------------------------------------------------------------
-// parseAndClosePage – validate page shape, snapshot entries, close page
+// parseAndClosePage — validate page shape, snapshot entries, close page
 //
-// "acquire page.close before page validation" – close is extracted first,
-// before validating page content.  Then validate entries, then close page
-// before returning.  close dominance reported.
+// "acquire page.close before page validation" — close is extracted first,
+// before validating page content. Then validate entries, then close page
+// before returning. Close dominance reported.
 // ---------------------------------------------------------------------------
 
 interface ParsedPage {
-	readonly entries: readonly ProviderCallEntry[];
+	readonly entries: readonly SandboxCommandEntry[];
 	readonly nextCursor: string | null;
 }
 
@@ -703,7 +720,7 @@ async function parseAndClosePage(
 	}
 
 	// Snapshot entries
-	const entries: ProviderCallEntry[] = [];
+	const entries: SandboxCommandEntry[] = [];
 	for (let i = 0; i < entriesRaw.length; i += 1) {
 		if (!Object.hasOwn(entriesRaw, i)) {
 			const closeOk = await discoveryCloseOk(pageClose);
@@ -738,12 +755,12 @@ async function parseAndClosePage(
 }
 
 // ---------------------------------------------------------------------------
-// acquireHandle – extract handle state and close from a raw open result
+// acquireHandle — extract handle state and close from a raw open result
 //
 // Acquire handle.close from raw opened result's direct own "handle" data
 // descriptor before validating the outer open result or handle itself.
 // If the outer result is malformed but a valid close is discoverable, it
-// is returned for invocation.  A legitimate exact {status:"missing"} has
+// is returned for invocation. A legitimate exact {status:"missing"} has
 // no handle and needs no handle close (closeOk=true).
 // ---------------------------------------------------------------------------
 
@@ -819,28 +836,32 @@ function acquireHandle(rawOpen: unknown, guard?: CloseGuard): AcquiredHandle {
 	return Object.freeze({ close, handleRaw: undefined, state: "malformed", closeAlias, closeUncertain });
 }
 
+// ---------------------------------------------------------------------------
+// Decoded file metadata
+// ---------------------------------------------------------------------------
+
 interface FileMeta {
 	readonly sha256: string;
 	readonly fileSize: number;
-	readonly journalSeq: number;
+	readonly sequence: number;
 }
 
 // ---------------------------------------------------------------------------
-// readSingleFile – open, validate, read, confirmEof, close handle, decode
+// readSingleFile — open, validate, read, confirmEof, close handle, decode
 //
 // "acquire handle.close before validation, close handle on every path before
 //  returning; close failure dominates"
 // ---------------------------------------------------------------------------
 
 async function readSingleFile(
-	entry: ProviderCallEntry,
+	entry: SandboxCommandEntry,
 	parsed: ParsedName,
-	identity: ProviderCallIdentity,
+	identity: SandboxCommandIdentity,
 	backend: BoundBackend,
 	closeGuard: CloseGuard,
 	closeDominates: boolean,
 ): Promise<
-	{ ok: true; record: ProviderCallRecordV1; fileMeta: FileMeta } | { ok: false; code: ProviderRecoveryErrorCode }
+	{ ok: true; record: SandboxCommandRecordV1; fileMeta: FileMeta } | { ok: false; code: SandboxRecoveryErrorCode }
 > {
 	// --- open ---
 	let rawOpenPromise: unknown;
@@ -913,7 +934,7 @@ async function readSingleFile(
 	let readUncertain = false;
 
 	// fstat before read
-	let initialStat: ProviderCallEntryStat | null = null;
+	let initialStat: SandboxCommandEntryStat | null = null;
 	try {
 		const initialRaw = hnd.fstat();
 		const observedStat = await observeExact(initialRaw);
@@ -986,6 +1007,9 @@ async function readSingleFile(
 		}
 
 		// Descriptor-snapshot bytes field BEFORE any validation.
+		// If the resolved value is a Proxy or has accessor/non-enumerable
+		// bytes, that is uncertainty. If it holds a genuine exact-transferred
+		// Uint8Array, erase it on every invalid-path exit.
 		let promisedBytesDesc: PropertyDescriptor | undefined;
 		let bytesIsUncertain = false;
 		const rawVal = readObserved.value;
@@ -1014,6 +1038,7 @@ async function readSingleFile(
 
 		const bytesResult = exactDtor(rawVal, BYTES_KEYS);
 		if (!bytesResult || bytesResult.status?.value !== "bytes") {
+			// Erase genuine bytes even when status/keys are invalid.
 			if (promisedBytesDesc && exactTransferred(promisedBytesDesc.value)) {
 				eraseTransferred(promisedBytesDesc.value);
 			}
@@ -1034,6 +1059,8 @@ async function readSingleFile(
 			break;
 		}
 		if (!exactTransferred(transferred)) {
+			// Genuine bytes already extracted via exactDtor; if the result
+			// diverges from the descriptor snapshot, erase the genuine copy.
 			if (promisedBytesDesc && exactTransferred(promisedBytesDesc.value)) {
 				eraseTransferred(promisedBytesDesc.value);
 			}
@@ -1080,7 +1107,7 @@ async function readSingleFile(
 
 	// Final fstat
 	if (readOk) {
-		let finalStat: ProviderCallEntryStat | null = null;
+		let finalStat: SandboxCommandEntryStat | null = null;
 		try {
 			const finalRaw = hnd.fstat();
 			const finalObserved = await observeExact(finalRaw);
@@ -1127,7 +1154,7 @@ async function readSingleFile(
 	}
 
 	// --- decode after close ---
-	const decoded = decodeProviderCallRecordV1(ownBytes);
+	const decoded = decodeSandboxCommandRecordV1(ownBytes);
 	ownBytes.fill(0);
 	if (!decoded.ok) {
 		if (closeDominates) return { ok: false, code: "CLOSE_UNCERTAIN" };
@@ -1137,7 +1164,7 @@ async function readSingleFile(
 	// --- verify decoded record identity ---
 	const record = decoded.record;
 	if (
-		record.journalSeq !== parsed.sequence ||
+		record.recordSeq !== parsed.sequence ||
 		record.hostId !== identity.hostId ||
 		record.generation !== identity.generation ||
 		record.sessionId !== identity.sessionId
@@ -1149,69 +1176,10 @@ async function readSingleFile(
 	const fileMeta: FileMeta = Object.freeze({
 		sha256: canonicalSha256,
 		fileSize: entry.stat.size,
-		journalSeq: parsed.sequence,
+		sequence: parsed.sequence,
 	});
 
 	return { ok: true, record, fileMeta };
-}
-
-// ---------------------------------------------------------------------------
-// Per-call state machine helpers
-// ---------------------------------------------------------------------------
-
-type ProviderCallState = "none" | "journaled" | "started" | "chunking" | "terminal" | "delivered";
-
-interface CallTracking {
-	readonly callId: string;
-	state: ProviderCallState;
-	readonly requestDigest: string | null;
-	chunkCount: number;
-	readonly startJournalSeq: number;
-	cancelRequested: boolean;
-}
-
-function validateStateTransition(kind: ProviderCallRecordV1["recordKind"], entry: CallTracking | null): string | null {
-	if (!entry) {
-		if (kind === "journaled") return null;
-		return "INVALID_SEQUENCE";
-	}
-	switch (entry.state) {
-		case "journaled":
-			if (kind === "started") return null;
-			return "INVALID_SEQUENCE";
-		case "started":
-			if (kind === "chunk" || kind === "terminal" || kind === "cancel_requested") return null;
-			return "INVALID_SEQUENCE";
-		case "chunking":
-			if (kind === "chunk" || kind === "terminal" || kind === "cancel_requested") return null;
-			return "INVALID_SEQUENCE";
-		case "terminal":
-			if (kind === "delivered") return null;
-			return "INVALID_SEQUENCE";
-		case "delivered":
-			return "INVALID_SEQUENCE";
-		case "none":
-			return "INVALID_SEQUENCE";
-	}
-	return "INVALID_SEQUENCE";
-}
-
-function determineState(kind: ProviderCallRecordV1["recordKind"], current: ProviderCallState): ProviderCallState {
-	switch (kind) {
-		case "journaled":
-			return "journaled";
-		case "started":
-			return "started";
-		case "chunk":
-			return "chunking";
-		case "terminal":
-			return "terminal";
-		case "delivered":
-			return "delivered";
-		case "cancel_requested":
-			return current;
-	}
-	return current;
 }
 
 // ---------------------------------------------------------------------------
@@ -1277,14 +1245,64 @@ function tryPreliminaryClose(raw: unknown, guard?: CloseGuard): PreliminaryState
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Sandbox command state machine — validates recordKind transitions and
+// command identity (commandId/bodyDigest/commandType) across records.
+// Valid sequences: none -> pending -> started -> completed | interrupted
+// Invalid: duplicate pending, started without pending, transition after
+// terminal, mutated command identity; cross-command interleaving allowed.
+// ---------------------------------------------------------------------------
+
+type SandboxCommandState = "none" | "pending" | "started" | "terminal";
+
+interface CommandTracking {
+	readonly commandId: string;
+	state: SandboxCommandState;
+	readonly bodyDigest: string;
+	readonly commandType: string;
+}
+
+function validateCommandTransition(record: SandboxCommandRecordV1, entry: CommandTracking | null): string | null {
+	if (!entry) {
+		if (record.recordKind === "pending") return null;
+		return "RECOVERY_FAILED";
+	}
+	switch (entry.state) {
+		case "pending":
+			if (record.recordKind === "started") return null;
+			return "RECOVERY_FAILED";
+		case "started":
+			if (record.recordKind === "completed" || record.recordKind === "interrupted") return null;
+			return "RECOVERY_FAILED";
+		case "terminal":
+			return "RECOVERY_FAILED";
+		case "none":
+			return "RECOVERY_FAILED";
+	}
+	return "RECOVERY_FAILED";
+}
+
+function determineCommandState(record: SandboxCommandRecordV1, _current: SandboxCommandState): SandboxCommandState {
+	switch (record.recordKind) {
+		case "pending":
+			return "pending";
+		case "started":
+			return "started";
+		case "completed":
+		case "interrupted":
+			return "terminal";
+	}
+	return _current;
+}
+
 // ===========================================================================
-// runRecovery – inner scan logic, never closes the backend itself.
+// runRecovery — inner scan logic, never closes the backend itself.
 //               Returns success/error code; caller handles backend close.
 // ===========================================================================
 
 type RunRecoveryResult =
-	| Readonly<{ ok: true; output: ProviderCallRecoveryOutput }>
-	| Readonly<{ ok: false; code: ProviderRecoveryErrorCode }>;
+	| Readonly<{ ok: true; output: SandboxCommandRecoveryOutput }>
+	| Readonly<{ ok: false; code: SandboxRecoveryErrorCode }>;
 
 async function runRecovery(raw: unknown, closeGuard: CloseGuard): Promise<RunRecoveryResult> {
 	// Validate outer input, identity, backend shape
@@ -1304,7 +1322,7 @@ async function runRecovery(raw: unknown, closeGuard: CloseGuard): Promise<RunRec
 	let lastName: string | null = null;
 	let nextSequence = 1;
 	let totalBytes = 0;
-	let allEntries: ProviderCallEntry[] = [];
+	let allEntries: SandboxCommandEntry[] = [];
 	let pageCount = 0;
 	let closeDominates = false;
 	const seenCursors = new Set<string | null>();
@@ -1384,7 +1402,7 @@ async function runRecovery(raw: unknown, closeGuard: CloseGuard): Promise<RunRec
 		let prospectiveLast: string | null = lastName;
 		let prospectiveSeq = nextSequence;
 		let pageBytes = 0;
-		const pageEntries: ProviderCallEntry[] = [];
+		const pageEntries: SandboxCommandEntry[] = [];
 
 		for (const entry of page.entries) {
 			const parsedName = parseName(entry.name);
@@ -1442,8 +1460,8 @@ async function runRecovery(raw: unknown, closeGuard: CloseGuard): Promise<RunRec
 	// -----------------------------------------------------------------------
 	// Pass 2: open files serially, read, close handle, decode
 	// -----------------------------------------------------------------------
-	const records: ProviderCallRecordV1[] = [];
-	const fileMetas = new Map<number, FileMeta>(); // journalSeq -> FileMeta
+	const records: SandboxCommandRecordV1[] = [];
+	const receipts: SandboxCommandFileReceipt[] = [];
 
 	for (const entry of allEntries) {
 		const parsedName = parseName(entry.name);
@@ -1460,120 +1478,81 @@ async function runRecovery(raw: unknown, closeGuard: CloseGuard): Promise<RunRec
 			return { ok: false, code: fileResult.code };
 		}
 
-		fileMetas.set(fileResult.fileMeta.journalSeq, fileResult.fileMeta);
+		receipts.push(
+			Object.freeze({
+				sequence: fileResult.fileMeta.sequence,
+				size: fileResult.fileMeta.fileSize,
+				sha256: fileResult.fileMeta.sha256,
+			}),
+		);
 		records.push(fileResult.record);
 	}
 
 	// -----------------------------------------------------------------------
-	// Build per-call state, classify interrupted calls, freeze output
+	// Command state-machine validation — verify legal state transitions
+	// per commandId and exact command identity (bodyDigest/commandType).
 	// -----------------------------------------------------------------------
-	const callStates = new Map<string, CallTracking>();
-	const requestFrameIds = new Set<string>();
-	const interruptedCallIds: string[] = [];
-
+	const commandStates = new Map<string, CommandTracking>();
 	for (const record of records) {
-		if (record.recordKind === "journaled") {
-			if (requestFrameIds.has(record.requestFrameId)) return { ok: false, code: "RECOVERY_FAILED" };
-			requestFrameIds.add(record.requestFrameId);
-		}
-		const existing = callStates.get(record.callId) ?? null;
-		const stateErr = validateStateTransition(record.recordKind, existing);
-		if (stateErr !== null) return { ok: false, code: "RECOVERY_FAILED" };
-
-		// Cross-record field validation
-		if (record.recordKind === "started") {
-			if (existing === null || existing.requestDigest === null) {
-				// started must have prior journaled record
-				return { ok: false, code: "RECOVERY_FAILED" };
-			}
-			if (record.requestDigest !== existing.requestDigest || record.requestJournalSeq !== existing.startJournalSeq) {
-				return { ok: false, code: "RECOVERY_FAILED" };
-			}
-			// Validate requestReceipt against the journaled file's actual bytes.
-			// sha256 must match the canonical file bytes before erasure.
-			// sequence must match the journaled file's journalSeq.
-			// size must match the journaled file's actual file size.
-			if (record.requestReceipt) {
-				const journalMeta = fileMetas.get(existing.startJournalSeq);
-				if (!journalMeta) return { ok: false, code: "RECOVERY_FAILED" };
-				if (
-					record.requestReceipt.sha256 !== journalMeta.sha256 ||
-					record.requestReceipt.size !== journalMeta.fileSize ||
-					record.requestReceipt.sequence !== journalMeta.journalSeq
-				) {
-					return { ok: false, code: "RECOVERY_FAILED" };
-				}
-			}
-		}
-
-		if (record.recordKind === "chunk") {
-			if (existing === null) return { ok: false, code: "RECOVERY_FAILED" };
-			if (record.chunkIndex !== existing.chunkCount) {
-				// chunkIndex must equal the current chunk count (0, 1, 2, ...)
+		const existing = commandStates.get(record.commandId) ?? null;
+		if (existing !== null) {
+			// Verify command identity consistency across transitions
+			if (existing.bodyDigest !== record.bodyDigest || existing.commandType !== record.commandType) {
+				if (closeDominates) return { ok: false, code: "CLOSE_UNCERTAIN" };
 				return { ok: false, code: "RECOVERY_FAILED" };
 			}
 		}
-
-		if (record.recordKind === "terminal") {
-			if (existing === null) return { ok: false, code: "RECOVERY_FAILED" };
-			if (record.chunkCount !== existing.chunkCount) {
-				// terminal chunkCount must match number of preceding chunk records
-				return { ok: false, code: "RECOVERY_FAILED" };
-			}
-			// cancelled terminal requires prior cancel_requested
-			if (record.terminalKind === "cancelled" && !existing.cancelRequested) {
-				return { ok: false, code: "RECOVERY_FAILED" };
-			}
+		const stateErr = validateCommandTransition(record, existing);
+		if (stateErr !== null) {
+			if (closeDominates) return { ok: false, code: "CLOSE_UNCERTAIN" };
+			return { ok: false, code: "RECOVERY_FAILED" };
 		}
-
-		if (record.recordKind === "cancel_requested") {
-			if (existing === null) return { ok: false, code: "RECOVERY_FAILED" };
-			if (existing.cancelRequested) {
-				// Only one cancel_requested allowed
-				return { ok: false, code: "RECOVERY_FAILED" };
-			}
-		}
-
-		if (existing === null) {
-			callStates.set(record.callId, {
-				callId: record.callId,
-				state: determineState(record.recordKind, "none"),
-				requestDigest: record.recordKind === "journaled" ? record.requestDigest : null,
-				chunkCount: 0,
-				startJournalSeq: record.journalSeq,
-				cancelRequested: false,
+		if (!existing) {
+			commandStates.set(record.commandId, {
+				commandId: record.commandId,
+				state: determineCommandState(record, "none"),
+				bodyDigest: record.bodyDigest,
+				commandType: record.commandType,
 			});
 		} else {
-			const newState = determineState(record.recordKind, existing.state);
-			const chunkDelta = record.recordKind === "chunk" ? 1 : 0;
-			const cancelDelta = record.recordKind === "cancel_requested" ? 1 : 0;
-			callStates.set(record.callId, {
-				...existing,
-				state: newState,
-				chunkCount: existing.chunkCount + chunkDelta,
-				cancelRequested: existing.cancelRequested || cancelDelta > 0,
-			});
+			existing.state = determineCommandState(record, existing.state);
 		}
 	}
 
-	for (const [callId, tracking] of callStates) {
-		if (tracking.state === "started" || tracking.state === "chunking") {
-			interruptedCallIds.push(callId);
+	// -----------------------------------------------------------------------
+	// Verify record ordering — each recordSeq must match the file order
+	// (contiguous 1-based sequence already enforced by parseName checks in
+	// pass 1, but we also verify decoded recordSeq matches parsed sequence)
+	// -----------------------------------------------------------------------
+	for (let i = 0; i < records.length; i += 1) {
+		const expectedSeq = i + 1;
+		if (records[i].recordSeq !== expectedSeq) {
+			if (closeDominates) return { ok: false, code: "CLOSE_UNCERTAIN" };
+			return { ok: false, code: "RECOVERY_FAILED" };
 		}
 	}
 
-	const frozenRecords: readonly ProviderCallRecordV1[] = Object.freeze(records.map((r) => r));
+	// Verify receipts match their decoded records in ordering
+	for (let i = 0; i < receipts.length; i += 1) {
+		if (receipts[i].sequence !== i + 1) {
+			if (closeDominates) return { ok: false, code: "CLOSE_UNCERTAIN" };
+			return { ok: false, code: "RECOVERY_FAILED" };
+		}
+	}
 
-	const output: ProviderCallRecoveryOutput = Object.freeze({
+	const frozenRecords: readonly SandboxCommandRecordV1[] = Object.freeze(records.map((r) => r));
+	const frozenReceipts: readonly SandboxCommandFileReceipt[] = Object.freeze(receipts.map((r) => r));
+
+	const output: SandboxCommandRecoveryOutput = Object.freeze({
 		identity: Object.freeze({
 			hostId: identity.hostId,
 			generation: identity.generation,
 			sessionId: identity.sessionId,
 		}),
 		records: frozenRecords,
+		receipts: frozenReceipts,
 		totalBytes,
-		nextJournalSeq: nextSequence,
-		interruptedCallIds: Object.freeze(interruptedCallIds),
+		nextSequence,
 	});
 
 	// Close dominance: if ANY page/handle close failed during scan,
@@ -1584,14 +1563,14 @@ async function runRecovery(raw: unknown, closeGuard: CloseGuard): Promise<RunRec
 }
 
 // ===========================================================================
-// recoverProviderCallJournal — main export
+// recoverSandboxCommandJournal — main export
 //
 // Structure: acquire backend.close preliminarily, run scan, then close
 // backend and return CLOSE_UNCERTAIN if close is not exact. Closure of
 // backend is always last after all page/handle cleanup.
 // ===========================================================================
 
-export async function recoverProviderCallJournal(raw: unknown): Promise<ProviderCallRecoveryResult> {
+export async function recoverSandboxCommandJournal(raw: unknown): Promise<SandboxCommandRecoveryResult> {
 	// ONE ownership registry from preliminary backend acquisition through pages/handles.
 	const closeGuard: CloseGuard = new WeakSet();
 
@@ -1616,5 +1595,5 @@ export async function recoverProviderCallJournal(raw: unknown): Promise<Provider
 
 	if (!backendCloseOk) return fail("CLOSE_UNCERTAIN");
 	if (!scan.ok) return fail(scan.code);
-	return Object.freeze({ ok: true, value: scan.output }) satisfies ProviderCallRecoveryOk;
+	return Object.freeze({ ok: true, value: scan.output }) satisfies SandboxCommandRecoveryOk;
 }

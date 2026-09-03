@@ -1198,16 +1198,16 @@ describe("close dominance", () => {
 
 describe("input validation", () => {
 	beforeEach(() => _clearJournalCache());
-	it("rejects null", async () => {
+	it("rejects null -> INVALID_ARGUMENT", async () => {
 		const result = await recoverProviderCallJournal(null);
 		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+		if (!result.ok) expect(result.error.code).toBe("INVALID_ARGUMENT");
 	});
 
-	it("rejects non-object", async () => {
+	it("rejects non-object -> INVALID_ARGUMENT", async () => {
 		const result = await recoverProviderCallJournal(42);
 		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+		if (!result.ok) expect(result.error.code).toBe("INVALID_ARGUMENT");
 	});
 
 	it("rejects missing backend", async () => {
@@ -1215,7 +1215,7 @@ describe("input validation", () => {
 			identity: IDENTITY,
 		});
 		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+		if (!result.ok) expect(result.error.code).toBe("INVALID_ARGUMENT");
 	});
 
 	it("rejects missing identity", async () => {
@@ -2436,5 +2436,161 @@ describe("recovery ownership and identity regressions", () => {
 		const result = await recoverProviderCallJournal({ backend, identity: IDENTITY });
 		expect(result).toEqual({ ok: false, error: { code: "INVALID_ARGUMENT" } });
 		expect(backendCloses).toBe(1);
+	});
+});
+
+// ===========================================================================
+// Focused hardening tests
+// ===========================================================================
+
+describe("hardening", () => {
+	it("rejects Proxy zero-prototype traps on backend open/list/close", async () => {
+		let closeCalled = false;
+		const handler: ProxyHandler<object> = {
+			get(_target, prop) {
+				if (prop === "close")
+					return () => {
+						closeCalled = true;
+						return { status: "closed" };
+					};
+				if (prop === "listPage" || prop === "open") return () => Promise.reject(new Error("nope"));
+				return undefined;
+			},
+		};
+		const backend = new Proxy(Object.create(null), handler);
+		const result = await recoverProviderCallJournal({ backend, identity: IDENTITY });
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+		expect(closeCalled).toBe(false);
+	});
+
+	it("invalid sync bytes (own symbol) unchanged; genuine sync bytes erased", async () => {
+		const jf = encodeJournaled("call-1", 1);
+		let readCount = 0;
+		const backend: ProviderCallBackend = {
+			listPage(): unknown {
+				return Promise.resolve({
+					status: "page",
+					entries: [{ name: fileName(1), stat: makeStat({ size: jf.length }) }],
+					nextCursor: null,
+					close: () => Promise.resolve({ status: "closed" }),
+				});
+			},
+			open(): unknown {
+				return Promise.resolve({
+					status: "opened",
+					handle: {
+						readAt(_offset: number, _size: number): unknown {
+							readCount += 1;
+							if (readCount === 1) {
+								const bytes = new Uint8Array(10);
+								Object.defineProperty(bytes, Symbol("taint"), { value: true });
+								return { status: "bytes", bytes };
+							}
+							return { status: "bytes", bytes: new Uint8Array(jf) };
+						},
+						confirmEof(): unknown {
+							return { status: "eof" };
+						},
+						fstat(): unknown {
+							return Promise.resolve(makeStat({ size: jf.length }));
+						},
+						close(): unknown {
+							return Promise.resolve({ status: "closed" });
+						},
+					},
+				});
+			},
+			close(): unknown {
+				return Promise.resolve({ status: "closed" });
+			},
+		};
+		const result = await recoverProviderCallJournal({ backend, identity: IDENTITY });
+		expect(result.ok).toBe(false);
+	});
+
+	it("sync close rejection -> CLOSE_UNCERTAIN", async () => {
+		const backend: ProviderCallBackend = {
+			listPage(): unknown {
+				return {
+					status: "page",
+					entries: [],
+					nextCursor: null,
+					close: () => {
+						throw new Error("sync close fail");
+					},
+				};
+			},
+			open(): unknown {
+				return Promise.resolve({ status: "missing" });
+			},
+			close(): unknown {
+				return Promise.resolve({ status: "closed" });
+			},
+		};
+		const result = await recoverProviderCallJournal({ backend, identity: IDENTITY });
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+	});
+
+	it("backend/handle alias close <= 1 and backend-last ordering", async () => {
+		let closeCount = 0;
+		const closeOrder: string[] = [];
+		const sharedHandle: ProviderCallReadHandle = {
+			readAt(): unknown {
+				return Promise.resolve({ status: "bytes", bytes: new Uint8Array([1, 2, 3, 4, 5]) });
+			},
+			confirmEof(): unknown {
+				return Promise.resolve({ status: "eof" });
+			},
+			fstat(): unknown {
+				return Promise.resolve(makeStat({ size: 5 }));
+			},
+			close: () => {
+				closeCount += 1;
+				closeOrder.push("handle");
+				return Promise.resolve({ status: "closed" });
+			},
+		};
+		const backend: ProviderCallBackend = {
+			listPage(): unknown {
+				return Promise.resolve({
+					status: "page",
+					entries: [
+						{ name: fileName(1), stat: makeStat({ size: 5 }) },
+						{ name: fileName(2), stat: makeStat({ size: 5 }) },
+					],
+					nextCursor: null,
+					close: () => {
+						closeOrder.push("page");
+						return Promise.resolve({ status: "closed" });
+					},
+				});
+			},
+			open(): unknown {
+				return Promise.resolve({ status: "opened", handle: sharedHandle });
+			},
+			close: () => {
+				closeOrder.push("backend");
+				return Promise.resolve({ status: "closed" });
+			},
+		};
+		const result = await recoverProviderCallJournal({ backend, identity: IDENTITY });
+		expect(result.ok).toBe(false);
+		expect(closeCount).toBeLessThanOrEqual(1);
+		expect(closeOrder[closeOrder.length - 1]).toBe("backend");
+	});
+
+	it("accessor uncertainty and exact result freeze", async () => {
+		const backendWithAccessorClose = Object.defineProperty({}, "close", {
+			get: () => (): unknown => Promise.resolve({ status: "closed" }),
+			enumerable: true,
+		});
+		const result = await recoverProviderCallJournal({
+			backend: backendWithAccessorClose,
+			identity: IDENTITY,
+		});
+		expect(result.ok).toBe(false);
+		if (!result.ok) expect(result.error.code).toBe("CLOSE_UNCERTAIN");
 	});
 });
