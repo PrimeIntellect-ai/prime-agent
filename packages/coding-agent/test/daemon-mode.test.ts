@@ -13,7 +13,8 @@ import {
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { Agent } from "@earendil-works/pi-agent-core";
+import { type Api, createAssistantMessageEventStream, getModel, type Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import {
 	AGENT_FAMILY_REACH_ERROR,
@@ -23,14 +24,18 @@ import {
 	sessionNameReservationKey,
 } from "../src/core/agent-messages.js";
 import type { AgentObserveController } from "../src/core/agent-observe.js";
+import { AgentSession } from "../src/core/agent-session.js";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
 import { flushAgentTraceUpload, installAgentTraceUpload } from "../src/core/agent-traces.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
+import { convertToLlm } from "../src/core/messages.js";
+import { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_AGENT_TRACES_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
 	createDefaultRlmSubagentSessionName,
+	type RlmSubagentRuntime,
 	type SubagentRuntimeHost,
 } from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
@@ -60,6 +65,7 @@ import {
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DAEMON_WORKER_SUPERVISOR_SOCKET_ENV } from "../src/modes/daemon/daemon-worker-protocol.js";
 import { RlmSpawnLedger } from "../src/modes/daemon/rlm-ledger.js";
+import { createTestResourceLoader } from "./utilities.js";
 
 describe("daemon mode helpers", () => {
 	it("preserves envelope client identity while registering prompt admission", () => {
@@ -826,6 +832,10 @@ describe("daemon mode helpers", () => {
 		});
 		const parentState = makeState("parent");
 		const childState = makeState("child", parentState.activeSessionId);
+		const brandedRoot = mkdtempSync(join(tmpdir(), "prime-agent-daemon-release-brand-"));
+		const childManager = SessionManager.create(brandedRoot, join(brandedRoot, "sessions"));
+		childManager.newSession();
+		Object.assign(childState.runtime, { session: makeBrandedTestSession(brandedRoot, childManager) });
 		Object.assign(childState.runtime.metadata, {
 			kind: "subagent",
 			parentActiveSessionId: parentState.activeSessionId,
@@ -890,6 +900,7 @@ describe("daemon mode helpers", () => {
 			kernelSnapshot: false,
 		});
 		expect(internals.sessions.has(childState.activeSessionId)).toBe(false);
+		rmSync(brandedRoot, { recursive: true, force: true });
 	});
 
 	it("persists a real child completion for passive discovery, roster, and listing", async () => {
@@ -903,7 +914,7 @@ describe("daemon mode helpers", () => {
 			if (!parentSessionFile) throw new Error("Missing parent session file");
 			const childSessionDir = join(parentManager.getSessionArtifactDir()!, "child-1");
 			const createRuntime = vi.fn(async (options: Parameters<CreateAgentSessionRuntimeFactory>[0]) => ({
-				session: makeRuntimeSession(options.sessionManager),
+				session: makeBrandedTestSession(tempDir, options.sessionManager),
 				extensionsResult: { extensions: [], errors: [], runtime: {} } as unknown as Awaited<
 					ReturnType<CreateAgentSessionRuntimeFactory>
 				>["extensionsResult"],
@@ -936,16 +947,7 @@ describe("daemon mode helpers", () => {
 				): Promise<Array<{ sessionFile?: string; rlmChildId?: string }>>;
 			};
 			const parentState = await internals.createRuntime({ type: "create", sessionPath: parentSessionFile });
-			Object.assign(parentState.runtime.session, {
-				isSessionActive: false,
-				isStreaming: false,
-				isCompacting: false,
-				isBashRunning: false,
-				state: { pendingToolCalls: new Set(), streamingMessage: undefined },
-				thinkingLevel: "off",
-				hasRunningRlmChildren: () => false,
-				getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
-			});
+
 			const childRuntime = await internals.createRlmSubagentRuntime(parentState, {
 				parentSession: parentState.runtime.session,
 				id: "child-1",
@@ -969,7 +971,7 @@ describe("daemon mode helpers", () => {
 			);
 			if (!childState?.runtime.session.sessionFile) throw new Error("Missing child state");
 			const host = internals.createSubagentRuntimeHost(parentState);
-			expect(host.completeRlmSubagentRuntime?.("child-1", childRuntime.session)).toBe(true);
+			expect(host.completeRlmSubagentRuntime?.("child-1", { session: childRuntime.session })).toBe(true);
 			await (
 				daemon as unknown as { closeSession(state: ActiveSessionState, reason: "shutdown"): Promise<void> }
 			).closeSession(childState, "shutdown");
@@ -1403,7 +1405,7 @@ describe("daemon mode helpers", () => {
 			sessions: Map<string, ActiveSessionState>;
 			closeSession: typeof closeSession;
 			createSubagentRuntimeHost(parent: ActiveSessionState): {
-				deleteRlmSubagentRuntime(childId: string, session: ActiveSessionState["runtime"]["session"]): Promise<void>;
+				deleteRlmSubagentRuntime(childId: string, runtime?: RlmSubagentRuntime): Promise<void>;
 			};
 		};
 		internals.sessions.set(childState.activeSessionId, childState);
@@ -1414,7 +1416,11 @@ describe("daemon mode helpers", () => {
 			disposeAsync: vi.fn(async () => {}),
 		} as unknown as ActiveSessionState["runtime"]["session"];
 		const host = internals.createSubagentRuntimeHost(parentState);
-		await host.deleteRlmSubagentRuntime("child-1", staleParentReference);
+		await expect(host.deleteRlmSubagentRuntime("child-1", { session: staleParentReference })).rejects.toThrow(
+			"Invalid subagent runtime",
+		);
+		expect(closeSession).not.toHaveBeenCalled();
+		await host.deleteRlmSubagentRuntime("child-1");
 
 		expect(closeSession).toHaveBeenCalledOnce();
 		expect(closeSession).toHaveBeenCalledWith(childState, "killed", false, true, undefined, {
@@ -1422,13 +1428,15 @@ describe("daemon mode helpers", () => {
 		});
 		expect(closeSession).not.toHaveBeenCalledWith(foreignChildState, expect.anything());
 		expect(childSession.disposeAsync).not.toHaveBeenCalled();
-		expect(staleParentReference.disposeAsync).toHaveBeenCalledOnce();
+		expect(staleParentReference.disposeAsync).not.toHaveBeenCalled();
 
 		const missingSession = {
 			disposeAsync: vi.fn(async () => {}),
 		} as unknown as ActiveSessionState["runtime"]["session"];
-		await host.deleteRlmSubagentRuntime("missing-child", missingSession);
-		expect(missingSession.disposeAsync).toHaveBeenCalledOnce();
+		await expect(host.deleteRlmSubagentRuntime("missing-child", { session: missingSession })).rejects.toThrow(
+			"Invalid subagent runtime",
+		);
+		expect(missingSession.disposeAsync).not.toHaveBeenCalled();
 	});
 
 	it("cancels child jobs when deletion joins an in-flight passivation close", async () => {
@@ -1467,9 +1475,7 @@ describe("daemon mode helpers", () => {
 				scheduleText: "every 5m",
 				prompt: "scheduled child work",
 			});
-			const deletion = internals
-				.createSubagentRuntimeHost(parentState)
-				.deleteRlmSubagentRuntime(fixture.childId, childState.runtime.session);
+			const deletion = internals.createSubagentRuntimeHost(parentState).deleteRlmSubagentRuntime(fixture.childId);
 			releaseDispose();
 
 			await Promise.all([passivation, deletion]);
@@ -1514,19 +1520,14 @@ describe("daemon mode helpers", () => {
 				sessions: Map<string, ActiveSessionState>;
 				closeSession: typeof closeSession;
 				createSubagentRuntimeHost(parent: ActiveSessionState): {
-					deleteRlmSubagentRuntime(
-						childId: string,
-						session: ActiveSessionState["runtime"]["session"],
-					): Promise<void>;
+					deleteRlmSubagentRuntime(childId: string, runtime?: RlmSubagentRuntime): Promise<void>;
 				};
 			};
 			internals.sessions.set(childState.activeSessionId, childState);
 			internals.closeSession = closeSession;
 
 			await expect(
-				internals
-					.createSubagentRuntimeHost(parentState)
-					.deleteRlmSubagentRuntime("child-1", childState.runtime.session),
+				internals.createSubagentRuntimeHost(parentState).deleteRlmSubagentRuntime("child-1"),
 			).rejects.toThrow();
 			expect(closeSession).not.toHaveBeenCalled();
 			expect(internals.sessions.get(childState.activeSessionId)).toBe(childState);
@@ -6331,7 +6332,7 @@ describe("daemon mode helpers", () => {
 					}
 				)
 					.createSubagentRuntimeHost(parentState)
-					.deleteRlmSubagentRuntime(childId, childState.runtime.session);
+					.deleteRlmSubagentRuntime(childId);
 				return "deleted" as const;
 			});
 			parentSession.deleteInactiveRlmSubagent = deleteSpy;
@@ -6531,9 +6532,7 @@ describe("daemon mode helpers", () => {
 			childManager.flushNow();
 
 			// The fetch gate is still held: the delete must not await the upload.
-			await internals
-				.createSubagentRuntimeHost(parentState)
-				.deleteRlmSubagentRuntime(fixture.childId, childState.runtime.session);
+			await internals.createSubagentRuntimeHost(parentState).deleteRlmSubagentRuntime(fixture.childId);
 
 			await vi.waitFor(() => expect(calls).toHaveLength(1));
 			expect(childState.runtime.session.disposeAsync).toHaveBeenCalledWith({ kernelSnapshot: false });
@@ -6577,9 +6576,7 @@ describe("daemon mode helpers", () => {
 
 			const passivation = internals.passivateIdleChildren(90, Date.parse("2036-08-01T12:00:00Z"), 1);
 			await disposeStarted;
-			const deletion = internals
-				.createSubagentRuntimeHost(parentState)
-				.deleteRlmSubagentRuntime(fixture.childId, childState.runtime.session);
+			const deletion = internals.createSubagentRuntimeHost(parentState).deleteRlmSubagentRuntime(fixture.childId);
 			releaseDispose();
 			// Both resolve while the fetch gate is still held.
 			await Promise.all([passivation, deletion]);
@@ -6665,21 +6662,22 @@ describe("daemon mode helpers", () => {
 				createSubagentRuntimeHost(parent: ActiveSessionState): SubagentRuntimeHost;
 			};
 			const parentState = await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
-			// A dispose that flushes a fresh kernel snapshot (recreating the
-			// artifact dir) and then fails.
-			const throwingSession = {
-				disposeAsync: vi.fn(async () => {
-					mkdirSync(fixture.childArtifactDir, { recursive: true });
-					writeFileSync(join(fixture.childArtifactDir, "kernel-state.dill"), "flushed");
-					throw new Error("dispose failed");
-				}),
-			} as unknown as ActiveSessionState["runtime"]["session"];
+			const childManager = SessionManager.open(fixture.childSessionFile, fixture.childSessionDir);
+			const throwingSession = makeBrandedTestSession(tempDir, childManager);
+			const disposeAsync = vi.fn(async () => {
+				mkdirSync(fixture.childArtifactDir, { recursive: true });
+				writeFileSync(join(fixture.childArtifactDir, "kernel-state.dill"), "flushed");
+				throw new Error("dispose failed");
+			});
+			throwingSession.disposeAsync = disposeAsync;
 
 			await expect(
-				internals.createSubagentRuntimeHost(parentState).deleteRlmSubagentRuntime(fixture.childId, throwingSession),
+				internals
+					.createSubagentRuntimeHost(parentState)
+					.deleteRlmSubagentRuntime(fixture.childId, { session: throwingSession }),
 			).rejects.toThrow("dispose failed");
 
-			expect(throwingSession.disposeAsync).toHaveBeenCalledOnce();
+			expect(disposeAsync).toHaveBeenCalledOnce();
 			expect(existsSync(fixture.childArtifactDir)).toBe(false);
 			expect(existsSync(fixture.childSessionFile)).toBe(true);
 		} finally {
@@ -9217,6 +9215,26 @@ function makePersistedRlmDaemonFixture(
 	};
 }
 
+function makeBrandedTestSession(rootDir: string, sessionManager: SessionManager): AgentSession {
+	const authStorage = AuthStorage.create(join(rootDir, "brand-test-auth.json"));
+	authStorage.setRuntimeApiKey("anthropic", "test-key");
+	const model = getModel("anthropic", "claude-opus-4-5");
+	const agent = new Agent({
+		convertToLlm,
+		getApiKey: () => "test-key",
+		initialState: { model, systemPrompt: "", tools: [], thinkingLevel: "off" },
+		streamFn: () => createAssistantMessageEventStream(),
+	});
+	return new AgentSession({
+		agent,
+		sessionManager,
+		settingsManager: SettingsManager.create(rootDir, rootDir),
+		cwd: rootDir,
+		modelRegistry: ModelRegistry.create(authStorage, join(rootDir, "brand-test-models.json")),
+		resourceLoader: createTestResourceLoader(),
+	});
+}
+
 function makeRuntimeSession(
 	sessionManager: Parameters<CreateAgentSessionRuntimeFactory>[0]["sessionManager"],
 ): Awaited<ReturnType<CreateAgentSessionRuntimeFactory>>["session"] {
@@ -9235,7 +9253,7 @@ function makeRuntimeSession(
 		setSubagentRuntimeHost: vi.fn(),
 		getRlmChildRunStatus: vi.fn(() => "running"),
 		getRlmChildSnapshots: vi.fn(() => []),
-		registerRlmChildSession: vi.fn(() => true),
+		registerRlmChildSession: vi.fn(async () => true),
 		releaseRlmChildSession: vi.fn(() => vi.fn()),
 		subscribe: vi.fn(() => vi.fn()),
 		bindExtensions: vi.fn(async () => {}),

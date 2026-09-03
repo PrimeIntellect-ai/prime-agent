@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, getModel } from "@earendil-works/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { normalizeSandboxOptions } from "../src/core/execution-location.js";
@@ -68,6 +68,33 @@ describe("B08 rlm.run sandbox options", () => {
 	afterEach(() => {
 		session?.dispose();
 		session = undefined;
+	});
+
+	it("rejects an unbranded child before host completion or map mutation", async () => {
+		const complete = vi.fn(() => true);
+		const root = createSession({
+			subagentRuntimeHost: {
+				async createRlmSubagentRuntime() {
+					throw new Error("not used");
+				},
+				completeRlmSubagentRuntime: complete,
+				async deleteRlmSubagentRuntime() {},
+			},
+		});
+		const disposeAsync = vi.fn(async () => {});
+		const fake = Object.create(AgentSession.prototype);
+		Object.defineProperty(fake, "disposeAsync", {
+			value: disposeAsync,
+			enumerable: true,
+			configurable: true,
+		});
+		const registered = await Reflect.apply(root.registerRlmChildSession, root, ["fake-child", fake]);
+		expect(registered).toBe(false);
+		expect(complete).not.toHaveBeenCalled();
+		expect(disposeAsync).not.toHaveBeenCalled();
+		expect((await root.listRlmSubagents()).subagents.some((child) => child.rlm_child_id === "fake-child")).toBe(
+			false,
+		);
 	});
 
 	// -- normalizeSandboxOptions (core) --
@@ -411,6 +438,28 @@ describe("B08 rlm.run sandbox options", () => {
 	});
 
 	// -- Host delegation: options reach SubagentRuntimeHost correctly --
+
+	it("cleans an invalid raw host result by child ID without forwarding it", async () => {
+		const deleteRuntime = vi.fn(async (_childId: string, _runtime?: unknown) => {});
+		const host: SubagentRuntimeHost = {
+			async createRlmSubagentRuntime() {
+				throw new Error("replaced below");
+			},
+			deleteRlmSubagentRuntime: deleteRuntime,
+		};
+		Object.defineProperty(host, "createRlmSubagentRuntime", {
+			value: () => Promise.resolve({ invalid: true }),
+			enumerable: true,
+			configurable: true,
+		});
+		const root = createSession({ maxDepth: 3, subagentRuntimeHost: host });
+		const handle = await root.runRlmChild("test prompt");
+		for (let attempt = 0; attempt < 100 && deleteRuntime.mock.calls.length === 0; attempt += 1) {
+			await sleep(10);
+		}
+		expect(deleteRuntime).toHaveBeenCalledTimes(1);
+		expect(deleteRuntime.mock.calls[0]).toEqual([handle.rlm_child_id]);
+	});
 
 	it("sandbox=true reaches host with sandbox=true, no options", async () => {
 		let receivedOpts: CreateRlmSubagentRuntimeOptions | undefined;
