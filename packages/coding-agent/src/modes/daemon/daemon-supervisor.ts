@@ -1,6 +1,15 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { Writable } from "node:stream";
@@ -31,6 +40,7 @@ import {
 import {
 	type AgentCronJob,
 	AgentCronJobStore,
+	isHeartbeatCronJob,
 	migrateLegacyCronJobsToSessionArtifacts,
 	SESSION_SCHEDULED_JOBS_FILENAME,
 } from "../../core/cron-jobs.js";
@@ -199,6 +209,9 @@ const IDLE_EVICTION_MAX_SWEEP_INTERVAL_MS = 5 * 60_000;
 const IDLE_EVICTION_MIN_SWEEP_INTERVAL_MS = 60_000;
 const IDLE_EVICTION_DRAIN_TIMEOUT_MS = 5_000;
 const CHILD_PASSIVATION_PER_WORKER_CAP = 2;
+const SCHEDULED_WAKE_RETRY_MS = 60_000;
+const SCHEDULED_WAKE_MAX_TIMEOUT_MS = 2_147_483_647;
+const SCHEDULED_WAKE_CLIENT_ID = "scheduled-wake";
 const SUPERVISOR_CONFIG_FILE_NAME = "supervisor-config";
 const WORKER_STARTUP_GATE_FD = 3;
 
@@ -717,6 +730,10 @@ export class DaemonSupervisor {
 	private idleEvictionTimer?: ReturnType<typeof setTimeout>;
 	private idleEvictionSweep?: Promise<void>;
 	private idleEvictionFence?: Promise<void>;
+	private scheduledWakeTimer?: ReturnType<typeof setTimeout>;
+	private scheduledWakeRecompute?: Promise<void>;
+	private scheduledWakeRecomputeQueued = false;
+	private readonly scheduledWakeFailures = new Map<string, number>();
 
 	constructor(
 		private readonly socketPath: string,
@@ -819,6 +836,7 @@ export class DaemonSupervisor {
 				this.scheduleOwnedWorkerCleanup(worker);
 			}
 			this.scheduleIdleEvictionSweep();
+			this.scheduleScheduledSessionWakeRecompute();
 			this.rosterWatchdogTimer = setInterval(() => this.sweepRosterStaleness(), ROSTER_WATCHDOG_INTERVAL_MS);
 			this.rosterWatchdogTimer.unref();
 			this.assertSocketLeaseHeld();
@@ -870,6 +888,159 @@ export class DaemonSupervisor {
 		this.rosterWatchdogTimer = undefined;
 	}
 
+	private clearScheduledWakeTimer(): void {
+		if (!this.scheduledWakeTimer) return;
+		clearTimeout(this.scheduledWakeTimer);
+		this.scheduledWakeTimer = undefined;
+	}
+
+	// The supervisor only wakes non-resident trees; firing and delivery stay worker-owned.
+	private scheduleScheduledSessionWakeRecompute(): void {
+		if (this.shuttingDown) return;
+		if (this.scheduledWakeRecompute) {
+			this.scheduledWakeRecomputeQueued = true;
+			return;
+		}
+		this.scheduledWakeRecompute = this.recomputeScheduledSessionWake()
+			.catch((error) => this.log(`Scheduled-session wake recompute failed: ${String(error)}`))
+			.finally(() => {
+				this.scheduledWakeRecompute = undefined;
+				if (this.scheduledWakeRecomputeQueued) {
+					this.scheduledWakeRecomputeQueued = false;
+					this.scheduleScheduledSessionWakeRecompute();
+				}
+			});
+	}
+
+	/** Durable truth: the ledger family (fork headers stripped) plus each session's scheduled-jobs artifact. */
+	private async collectPassiveScheduledJobs(
+		includeInactive = false,
+	): Promise<Array<{ rootSessionFile: string; job: AgentCronJob; info: SessionInfo }>> {
+		const pendingCancelRoots = new Set<string>();
+		for (const intent of this.collectEphemeralCancelIntents()) {
+			const context = this.workerSessionArtifactContext(intent);
+			if (!context || !intent.descriptor.rootSessionId) continue;
+			try {
+				await this.cancelScheduledJobsForSessionTree(intent.descriptor.rootSessionId, context.sessionFile);
+				this.deleteWorkerDescriptor(intent);
+			} catch {
+				// Still owned until the cancel lands; the tree stays excluded below.
+				pendingCancelRoots.add(canonicalSessionPath(context.sessionFile));
+			}
+		}
+		const infos = await this.rlmSpawnLedger().family();
+		const infoByPath = new Map(infos.map((info) => [canonicalSessionPath(info.path), info] as const));
+		const storeBySessionId = new Map<string, AgentCronJobStore>();
+		const infoBySessionId = new Map<string, SessionInfo>();
+		for (const info of infos) {
+			if (info.state !== undefined && info.state.status !== "active") continue;
+			const artifactDir = getSessionArtifactPathForFile(resolve(info.path), info.id);
+			if (!existsSync(join(artifactDir, SESSION_SCHEDULED_JOBS_FILENAME))) continue;
+			const store = AgentCronJobStore.forSessionArtifacts();
+			store.registerSessionArtifact(info.id, artifactDir);
+			storeBySessionId.set(info.id, store);
+			infoBySessionId.set(info.id, info);
+		}
+		if (infoBySessionId.size === 0) return [];
+		const uncoveredRootFor = (info: SessionInfo): string | undefined => {
+			let current = info;
+			const visited = new Set([canonicalSessionPath(current.path)]);
+			while (true) {
+				try {
+					if (this.findWorkerBySessionFile(current.path)) return undefined;
+				} catch {
+					return undefined;
+				}
+				if (!current.parentSessionPath) break;
+				const parent = infoByPath.get(canonicalSessionPath(current.parentSessionPath));
+				if (!parent || visited.has(canonicalSessionPath(parent.path))) break;
+				visited.add(canonicalSessionPath(parent.path));
+				current = parent;
+			}
+			return current.path;
+		};
+		const results: Array<{ rootSessionFile: string; job: AgentCronJob; info: SessionInfo }> = [];
+		for (const [artifactSessionId, store] of storeBySessionId) {
+			let jobs: AgentCronJob[];
+			try {
+				jobs = store.list();
+			} catch (error) {
+				this.log(`Skipping unreadable scheduled jobs for session ${artifactSessionId}: ${String(error)}`);
+				continue;
+			}
+			for (const job of jobs) {
+				if (!includeInactive && job.status !== "active" && job.status !== "paused") continue;
+				const info = infoBySessionId.get(job.sessionId);
+				if (!info) continue;
+				const rootSessionFile = uncoveredRootFor(info);
+				if (rootSessionFile === undefined) continue;
+				if (pendingCancelRoots.has(canonicalSessionPath(rootSessionFile))) continue;
+				results.push({ rootSessionFile, job, info });
+			}
+		}
+		return results;
+	}
+
+	private async recomputeScheduledSessionWake(): Promise<void> {
+		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
+		const candidates = await this.collectPassiveScheduledJobs();
+		this.clearScheduledWakeTimer();
+		if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
+		const now = Date.now();
+		const wakeTimes: number[] = [];
+		const candidateRoots = new Set(candidates.map(({ rootSessionFile }) => canonicalSessionPath(rootSessionFile)));
+		for (const root of [...this.scheduledWakeFailures.keys()]) {
+			if (!candidateRoots.has(root)) this.scheduledWakeFailures.delete(root);
+		}
+		for (const { rootSessionFile, job } of candidates) {
+			if (job.status !== "active" || job.nextRunAt === undefined) continue;
+			const runAt = Date.parse(job.nextRunAt);
+			if (!Number.isFinite(runAt)) continue;
+			// The failure floor keeps an overdue job off a hot retry loop.
+			const failedAt = this.scheduledWakeFailures.get(canonicalSessionPath(rootSessionFile));
+			wakeTimes.push(failedAt !== undefined ? Math.max(runAt, failedAt + SCHEDULED_WAKE_RETRY_MS) : runAt);
+		}
+		if (wakeTimes.length === 0) return;
+		const delay = Math.min(Math.max(0, Math.min(...wakeTimes) - now), SCHEDULED_WAKE_MAX_TIMEOUT_MS);
+		this.scheduledWakeTimer = setTimeout(() => {
+			this.scheduledWakeTimer = undefined;
+			void this.wakeDueScheduledSessions().catch((error) =>
+				this.log(`Scheduled-session wake failed: ${String(error)}`),
+			);
+		}, delay);
+		this.scheduledWakeTimer.unref();
+	}
+
+	private async wakeDueScheduledSessions(now = Date.now()): Promise<void> {
+		// Disarmed during update-restart preparation; the phase transition or next boot re-arms once.
+		if (this.shuttingDown || this.updateRestartPhase !== undefined) {
+			this.clearScheduledWakeTimer();
+			return;
+		}
+		try {
+			const due = new Map<string, string>();
+			for (const { rootSessionFile, job } of await this.collectPassiveScheduledJobs()) {
+				if (job.status !== "active" || job.nextRunAt === undefined) continue;
+				const runAt = Date.parse(job.nextRunAt);
+				if (!Number.isFinite(runAt) || runAt > now) continue;
+				due.set(canonicalSessionPath(rootSessionFile), rootSessionFile);
+			}
+			for (const [rootKey, sessionPath] of due) {
+				if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
+				try {
+					await this.createOrReuseWorker(SCHEDULED_WAKE_CLIENT_ID, { type: "create", sessionPath });
+					this.scheduledWakeFailures.delete(rootKey);
+					this.log(`Woke session worker for a due scheduled job: ${sessionPath}`);
+				} catch (error) {
+					this.scheduledWakeFailures.set(rootKey, Date.now());
+					this.log(`Scheduled wake failed for ${sessionPath}: ${String(error)}`);
+				}
+			}
+		} finally {
+			this.scheduleScheduledSessionWakeRecompute();
+		}
+	}
+
 	private scheduleIdleEvictionSweep(): void {
 		if (this.shuttingDown || this.idleEvictionTimer || this.idleEvictionSweep) return;
 		const delayMs = idleEvictionSweepIntervalMs(this.settingsManager.getIdleEvictionMinutes());
@@ -894,6 +1065,7 @@ export class DaemonSupervisor {
 			hasOwnerClient: worker.descriptor.ownerClientId !== undefined,
 			isPreparingUpdateRestart:
 				this.updateRestartPhase !== undefined || worker.updateRestartPrepareClient !== undefined,
+			hasWakeBlindSchedule: this.isWakeBlindScheduledWorker(worker),
 			sessions: this.workerRosterEntries(worker)
 				.filter((entry) => !entry.queuedChild)
 				.map(sessionSummaryFromRosterEntry)
@@ -902,12 +1074,23 @@ export class DaemonSupervisor {
 					return {
 						isSessionActive: isSessionSummaryBusy(summary),
 						attachedClients: this.attachedClientCount(summary, activeSessionId),
-						hasRegisteredHeartbeat: summary.hasRegisteredHeartbeat === true,
 						hasRegisteredCronJob: summary.hasRegisteredCronJob === true,
 						lastActivityAt: Date.parse(summary.lastActivityAt ?? ""),
 					};
 				}),
 		};
+	}
+
+	/** A schedule whose root file sits outside the enumerable sessions root is invisible to the wake scan; keep it resident. */
+	private isWakeBlindScheduledWorker(worker: ResidentWorker): boolean {
+		const sessionFile = worker.descriptor.sessionFile ?? worker.descriptor.createCommand.sessionPath;
+		const agentDir = this.defaultSessionConfig.agentDir;
+		if (!sessionFile || !agentDir) return false;
+		const sessionsRoot = canonicalSessionPath(this.defaultSessionConfig.sessionDir ?? getSessionsDir(agentDir));
+		if (dirname(canonicalSessionPath(sessionFile)) === sessionsRoot) return false;
+		return this.workerRosterEntries(worker).some(
+			(entry) => entry.summary.hasRegisteredHeartbeat === true || entry.summary.hasRegisteredCronJob === true,
+		);
 	}
 
 	private async runIdleEvictionSweep(now = Date.now()): Promise<void> {
@@ -1063,7 +1246,8 @@ export class DaemonSupervisor {
 			this.shuttingDown ||
 			this.updateRestartPhase !== undefined ||
 			this.workers.get(worker.descriptor.workerId) !== worker ||
-			this.isWorkerStopping(worker)
+			this.isWorkerStopping(worker) ||
+			this.isWakeBlindScheduledWorker(worker)
 		) {
 			return false;
 		}
@@ -1155,6 +1339,32 @@ export class DaemonSupervisor {
 		}
 	}
 
+	/** Trees whose ephemeral-stop cancel failed stay owned until a retry lands: tombstoned client-owned descriptors with no resident worker. */
+	private collectEphemeralCancelIntents(): Array<{ descriptor: DaemonWorkerDescriptor; descriptorPath: string }> {
+		const intents: Array<{ descriptor: DaemonWorkerDescriptor; descriptorPath: string }> = [];
+		let names: string[];
+		try {
+			names = readdirSync(this.descriptorDir);
+		} catch {
+			return intents;
+		}
+		for (const name of names) {
+			if (name === SUPERVISOR_CONFIG_FILE_NAME || !name.endsWith(".json")) continue;
+			const descriptorPath = join(this.descriptorDir, name);
+			let descriptor: unknown;
+			try {
+				descriptor = JSON.parse(readFileSync(descriptorPath, "utf8"));
+			} catch {
+				continue;
+			}
+			if (!isDaemonWorkerDescriptor(descriptor, this.socketPath)) continue;
+			if (descriptor.stopRequestedAt === undefined || descriptor.ownerClientId === undefined) continue;
+			if (this.workers.has(descriptor.workerId)) continue;
+			intents.push({ descriptor, descriptorPath });
+		}
+		return intents;
+	}
+
 	private loadPersistedSupervisorConfig(): AgentSessionRuntimeConfig | undefined {
 		try {
 			const parsed = JSON.parse(
@@ -1203,7 +1413,7 @@ export class DaemonSupervisor {
 		renameSync(tempPath, worker.descriptorPath);
 	}
 
-	private deleteWorkerDescriptor(worker: ResidentWorker): void {
+	private deleteWorkerDescriptor(worker: { descriptorPath: string; descriptor: DaemonWorkerDescriptor }): void {
 		try {
 			rmSync(worker.descriptorPath, { force: true });
 			rmSync(worker.descriptor.recoveryJournalPath, { force: true });
@@ -2072,6 +2282,9 @@ export class DaemonSupervisor {
 						jobs.set(job.id, job);
 					}
 				}
+				for (const { job } of await this.collectPassiveScheduledJobs(command.includeInactive === true)) {
+					if (!jobs.has(job.id)) jobs.set(job.id, job);
+				}
 				return success(command.id, "cron_list", { jobs: sortCronJobs([...jobs.values()]) });
 			}
 			case "heartbeats_list": {
@@ -2119,6 +2332,15 @@ export class DaemonSupervisor {
 						heartbeats.set(heartbeat.job.id, heartbeat);
 					}
 				}
+				// Passivated sessions keep their armed heartbeats; no worker can list them.
+				for (const { job, info } of await this.collectPassiveScheduledJobs()) {
+					if (!isHeartbeatCronJob(job) || heartbeats.has(job.id)) continue;
+					heartbeats.set(job.id, {
+						job,
+						...(info.name !== undefined ? { sessionName: info.name } : {}),
+						...(info.firstMessage !== undefined ? { firstMessage: info.firstMessage } : {}),
+					});
+				}
 				return success(command.id, "heartbeats_list", { heartbeats: [...heartbeats.values()] });
 			}
 			case "heartbeat_manage": {
@@ -2128,6 +2350,24 @@ export class DaemonSupervisor {
 							heartbeat.job.id === command.jobId && heartbeat.job.activeSessionId === command.activeSessionId,
 					),
 				);
+				if (!cachedWorker) {
+					// Passive jobs are managed against their durable store; no wake just to flip a status.
+					const passive = (await this.collectPassiveScheduledJobs()).find(
+						({ job }) => job.id === command.jobId && job.activeSessionId === command.activeSessionId,
+					);
+					if (passive) {
+						const store = AgentCronJobStore.forSessionArtifacts();
+						store.registerSessionArtifact(
+							passive.info.id,
+							getSessionArtifactPathForFile(resolve(passive.info.path), passive.info.id),
+						);
+						const heartbeat = store.manageHeartbeat(command.activeSessionId, command.jobId, command.action);
+						if (heartbeat) {
+							this.broadcastHeartbeatsChanged();
+							return success(command.id, "heartbeat_manage", { heartbeat });
+						}
+					}
+				}
 				const worker = cachedWorker ?? (await this.findWorkerForClient(client, command.activeSessionId)).worker;
 				this.assertWorkerAccessibleToClient(client, worker, command.activeSessionId);
 				const response = await this.forwardToWorker(worker, command);
@@ -2182,6 +2422,19 @@ export class DaemonSupervisor {
 						cronJobsFromResponse(candidate.response).some((job) => job.id === command.jobId)
 					) {
 						return this.forwardToWorker(candidate.worker, command);
+					}
+				}
+				const passive = (await this.collectPassiveScheduledJobs()).find(({ job }) => job.id === command.jobId);
+				if (passive) {
+					const store = AgentCronJobStore.forSessionArtifacts();
+					store.registerSessionArtifact(
+						passive.info.id,
+						getSessionArtifactPathForFile(resolve(passive.info.path), passive.info.id),
+					);
+					const job = store.cancel(command.jobId);
+					if (job) {
+						this.broadcastHeartbeatsChanged();
+						return success(command.id, "cron_cancel", { job });
 					}
 				}
 				throw new Error(`No cron job found: ${command.jobId}`);
@@ -4245,7 +4498,13 @@ export class DaemonSupervisor {
 				this.roster().delete(entry.agentId);
 				continue;
 			}
-			this.writeRosterEntry(passivatedWorkerRosterEntry(entry));
+			// Registration marks survive eviction: passive rows still have schedules behind them.
+			this.writeRosterEntry(
+				passivatedWorkerRosterEntry(entry, {
+					hasRegisteredHeartbeat: entry.summary.hasRegisteredHeartbeat === true,
+					hasRegisteredCronJob: entry.summary.hasRegisteredCronJob === true,
+				}),
+			);
 		}
 	}
 
@@ -4620,11 +4879,12 @@ export class DaemonSupervisor {
 		});
 	}
 
-	private findWorkerBySessionFile(sessionFile: string): ResidentWorker | undefined {
+	private findWorkerBySessionFile(sessionFile: string, exclude?: ResidentWorker): ResidentWorker | undefined {
 		const target = canonicalSessionPath(sessionFile);
 		const targetEntry = this.roster().bySessionFile(target);
 		const matches = new Set<ResidentWorker>();
 		for (const worker of this.workers.values()) {
+			if (worker === exclude) continue;
 			// The roster is the one live ownership source; the stale pull cache must not resurrect a match.
 			const summaryMatches = targetEntry?.workerId === worker.descriptor.workerId;
 			const descriptorPath = worker.descriptor.sessionFile
@@ -5760,6 +6020,7 @@ export class DaemonSupervisor {
 			return manifest;
 		} catch (error) {
 			this.updateRestartPhase = undefined;
+			this.scheduleScheduledSessionWakeRecompute();
 			throw error;
 		}
 	}
@@ -6143,9 +6404,16 @@ export class DaemonSupervisor {
 			assertStopStillApplies();
 		}
 		this.invalidateWorkerSessionInputPauses(worker, "Session worker stopped while input was paused");
+		// Client-owned schedules die with the registration, like their roster rows. Cancel
+		// before the worker leaves the map, so no recompute sees the tree uncovered mid-stop.
+		let ephemeralCancelSettled = true;
+		if (removeDescriptor && worker.descriptor.ownerClientId !== undefined) {
+			ephemeralCancelSettled = await this.cancelEphemeralWorkerScheduledJobs(worker);
+		}
 		this.workers.delete(worker.descriptor.workerId);
 		this.flipWorkerRosterEntriesInactive(worker);
-		if (removeDescriptor) {
+		// A failed cancel keeps the stop tombstone as the durable intent; the enumeration retry or the next boot finishes it.
+		if (removeDescriptor && ephemeralCancelSettled) {
 			this.deleteWorkerDescriptor(worker);
 		}
 		if (!this.shuttingDown) {
@@ -6268,6 +6536,79 @@ export class DaemonSupervisor {
 		}
 	}
 
+	private async cancelScheduledJobsForSessionTree(
+		rootSessionId: string,
+		rootSessionFile: string,
+		stillWanted?: () => boolean,
+		exclude?: ResidentWorker,
+	): Promise<void> {
+		const store = AgentCronJobStore.forSessionArtifacts();
+		const sessions = [{ sessionId: rootSessionId, sessionFile: rootSessionFile }];
+		const childrenByParent = new Map<string, SessionInfo[]>();
+		for (const info of await this.rlmSpawnLedger().family()) {
+			if (!info.parentSessionPath) continue;
+			const key = canonicalSessionPath(info.parentSessionPath);
+			childrenByParent.set(key, [...(childrenByParent.get(key) ?? []), info]);
+		}
+		const queue = [canonicalSessionPath(rootSessionFile)];
+		const visited = new Set(queue);
+		while (queue.length > 0) {
+			for (const info of childrenByParent.get(queue.shift()!) ?? []) {
+				const child = canonicalSessionPath(info.path);
+				if (visited.has(child)) continue;
+				visited.add(child);
+				sessions.push({ sessionId: info.id, sessionFile: info.path });
+				queue.push(child);
+			}
+		}
+		// A worker covering any tree member owns its stores again; a stale intent must not kill new schedules.
+		for (const { sessionFile } of sessions) {
+			try {
+				if (this.findWorkerBySessionFile(sessionFile, exclude)) return;
+			} catch {
+				return;
+			}
+		}
+		let registered = false;
+		for (const { sessionId, sessionFile } of sessions) {
+			const artifactDir = getSessionArtifactPathForFile(sessionFile, sessionId);
+			if (!existsSync(join(artifactDir, SESSION_SCHEDULED_JOBS_FILENAME))) continue;
+			store.registerSessionArtifact(sessionId, artifactDir);
+			registered = true;
+		}
+		if (!registered) return;
+		// Re-checked in the same synchronous turn as the walk: a promotion committed during the family read keeps its schedules.
+		if (stillWanted && !stillWanted()) return;
+		for (const { sessionFile } of sessions) {
+			store.cancelJobsForSession({ sessionFile });
+		}
+	}
+
+	private async cancelEphemeralWorkerScheduledJobs(worker: ResidentWorker): Promise<boolean> {
+		const context = this.workerSessionArtifactContext(worker);
+		if (!context || !worker.descriptor.rootSessionId) {
+			return true;
+		}
+		try {
+			await this.cancelScheduledJobsForSessionTree(
+				worker.descriptor.rootSessionId,
+				context.sessionFile,
+				() => worker.descriptor.ownerClientId !== undefined,
+				worker,
+			);
+			return true;
+		} catch (error) {
+			// A promotion that landed during the failed read means the cancel is no longer wanted.
+			if (worker.descriptor.ownerClientId === undefined) {
+				return true;
+			}
+			this.log(
+				`Could not cancel scheduled jobs for client-owned worker ${worker.descriptor.workerId}: ${String(error)}`,
+			);
+			return false;
+		}
+	}
+
 	private reclaimStoppedWorkerCronLock(worker: ResidentWorker): void {
 		const context = this.workerSessionArtifactContext(worker);
 		if (!context) {
@@ -6276,9 +6617,9 @@ export class DaemonSupervisor {
 		rmSync(join(context.artifactDir, `${SESSION_SCHEDULED_JOBS_FILENAME}.lock`), { recursive: true, force: true });
 	}
 
-	private workerSessionArtifactContext(
-		worker: ResidentWorker,
-	): { sessionFile: string; artifactDir: string } | undefined {
+	private workerSessionArtifactContext(worker: {
+		descriptor: DaemonWorkerDescriptor;
+	}): { sessionFile: string; artifactDir: string } | undefined {
 		const sessionFile = worker.descriptor.sessionFile ?? worker.descriptor.createCommand.sessionPath;
 		if (!sessionFile || !worker.descriptor.rootSessionId) {
 			return undefined;
@@ -6301,6 +6642,7 @@ export class DaemonSupervisor {
 	}
 
 	private broadcastHeartbeatsChanged(): void {
+		this.scheduleScheduledSessionWakeRecompute();
 		for (const client of this.clients) {
 			this.write(client, { type: "heartbeats_changed" });
 		}
@@ -6396,6 +6738,7 @@ export class DaemonSupervisor {
 	private async cleanupSupervisorResourcesOnce(): Promise<void> {
 		this.shuttingDown = true;
 		this.clearIdleEvictionTimer();
+		this.clearScheduledWakeTimer();
 		this.clearRosterWatchdogTimer();
 		await this.idleEvictionSweep?.catch(() => undefined);
 		for (const cleanup of this.signalCleanupHandlers.splice(0)) {
@@ -6496,6 +6839,7 @@ export class DaemonSupervisor {
 		}
 		this.shuttingDown = true;
 		this.clearIdleEvictionTimer();
+		this.clearScheduledWakeTimer();
 		this.clearRosterWatchdogTimer();
 		await this.idleEvictionSweep?.catch(() => undefined);
 		if (closingReason) {

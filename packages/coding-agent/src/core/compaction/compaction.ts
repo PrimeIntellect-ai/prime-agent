@@ -670,6 +670,11 @@ Be concise. Focus on what's needed to understand the kept suffix.`;
  * @param preparation - Pre-calculated preparation from prepareCompaction()
  * @param customInstructions - Optional custom focus for the summary
  */
+/** Runs one summary wire call; hosts decorate each call with its own request identity. */
+export type SummaryCallRunner = <T>(
+	call: (callHeaders: Record<string, string> | undefined) => Promise<T>,
+) => Promise<T>;
+
 export async function compact(
 	preparation: CompactionPreparation,
 	model: Model<any>,
@@ -678,6 +683,7 @@ export async function compact(
 	customInstructions?: string,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	summaryCall: SummaryCallRunner = (call) => call(headers),
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -692,42 +698,49 @@ export async function compact(
 	let summary: string;
 
 	if (isSplitTurn && turnPrefixMessages.length > 0) {
+		// Split turns make two wire calls with different bodies; each needs its own identity.
 		const [historyResult, turnPrefixResult] = await Promise.all([
 			messagesToSummarize.length > 0
-				? generateSummary(
-						messagesToSummarize,
-						model,
-						settings.reserveTokens,
-						apiKey,
-						headers,
-						signal,
-						customInstructions,
-						previousSummary,
-						thinkingLevel,
+				? summaryCall((callHeaders) =>
+						generateSummary(
+							messagesToSummarize,
+							model,
+							settings.reserveTokens,
+							apiKey,
+							callHeaders,
+							signal,
+							customInstructions,
+							previousSummary,
+							thinkingLevel,
+						),
 					)
 				: Promise.resolve("No prior history."),
-			generateTurnPrefixSummary(
-				turnPrefixMessages,
-				model,
-				settings.reserveTokens,
-				apiKey,
-				headers,
-				signal,
-				thinkingLevel,
+			summaryCall((callHeaders) =>
+				generateTurnPrefixSummary(
+					turnPrefixMessages,
+					model,
+					settings.reserveTokens,
+					apiKey,
+					callHeaders,
+					signal,
+					thinkingLevel,
+				),
 			),
 		]);
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
 	} else {
-		summary = await generateSummary(
-			messagesToSummarize,
-			model,
-			settings.reserveTokens,
-			apiKey,
-			headers,
-			signal,
-			customInstructions,
-			previousSummary,
-			thinkingLevel,
+		summary = await summaryCall((callHeaders) =>
+			generateSummary(
+				messagesToSummarize,
+				model,
+				settings.reserveTokens,
+				apiKey,
+				callHeaders,
+				signal,
+				customInstructions,
+				previousSummary,
+				thinkingLevel,
+			),
 		);
 	}
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
