@@ -1076,7 +1076,9 @@ describe("passive descendants in the saved catalog", () => {
 			const { sessionsDir, parent, parentFile } = makeRoots(tempDir);
 			const parentArtifactDir = parent.getSessionArtifactDir();
 			if (!parentArtifactDir) throw new Error("Missing parent artifact directory");
-			const child = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), parentFile, 1, "worker");
+			// The transcript header points at a forked-away ancestor; the ledger edge is the truth.
+			const staleParent = join(tempDir, "forked-away-parent.jsonl");
+			const child = makeChildSession(tempDir, join(parentArtifactDir, "sub-11111111"), staleParent, 2, "worker");
 			child.manager.appendMessage({ role: "user", content: "shard", timestamp: 1 });
 			child.manager.flushNow();
 			const deleted = makeChildSession(tempDir, join(parentArtifactDir, "sub-22222222"), parentFile, 1, "gone");
@@ -1116,13 +1118,17 @@ describe("passive descendants in the saved catalog", () => {
 				}
 			).sessions;
 			expect(sessions.map(({ id }) => id)).toEqual([parentInfo.id, child.manager.getSessionId()]);
-			expect(sessions[1]).toMatchObject({ parentSessionPath: parentFile, rlmDepth: 1, messageCount: 1 });
+			expect(sessions[1]).toMatchObject({
+				parentSessionPath: canonicalSessionPath(parentFile),
+				rlmDepth: 1,
+				messageCount: 1,
+			});
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("merges passivated descendants into the worker daemon's saved catalog", async () => {
+	it("merges passivated descendants into the worker daemon's saved catalog from the requested dir's ledger", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-catalog-daemon-"));
 		try {
 			const { internals, sessionsDir } = makeDaemonFixture(tempDir);
@@ -1137,19 +1143,69 @@ describe("passive descendants in the saved catalog", () => {
 				depth: 1,
 				name: "worker",
 			});
+			// A second sessions-dir family with its own ledger: listings must not cross.
+			const otherDir = join(tempDir, "other-sessions");
+			const otherParent = SessionManager.create(tempDir, otherDir);
+			otherParent.newSession();
+			otherParent.appendSessionInfo("other-parent");
+			otherParent.flushNow();
+			const otherParentFile = otherParent.getSessionFile();
+			if (!otherParentFile) throw new Error("Missing other parent session file");
+			const otherChild = makeChildSession(
+				tempDir,
+				join(tempDir, "other-artifacts", "sub-44444444"),
+				otherParentFile,
+				1,
+				"other-worker",
+			);
+			await new RlmSpawnLedger(tempDir, otherDir).appendSpawn({
+				childId: "sub-44444444",
+				parent: otherParentFile,
+				child: otherChild.file,
+				depth: 1,
+				name: "other-worker",
+			});
 
+			const handle = internals as unknown as {
+				handleCommand(client: object, command: Record<string, unknown>): Promise<DaemonResponse | undefined>;
+			};
+			const list = async (dir: string) => {
+				const response = (await handle.handleCommand(
+					{},
+					{ type: "list_saved_sessions", cwd: tempDir, sessionDir: dir, scope: "all" },
+				)) as { success: boolean; data: { sessions: Array<{ id: string; parentSessionPath?: string }> } };
+				expect(response.success).toBe(true);
+				return response.data.sessions.map(({ id }) => id);
+			};
+			const defaultIds = await list(sessionsDir);
+			expect(defaultIds).toContain(child.manager.getSessionId());
+			expect(defaultIds).not.toContain(otherChild.manager.getSessionId());
+			const otherIds = await list(otherDir);
+			expect(otherIds).toContain(otherChild.manager.getSessionId());
+			expect(otherIds).not.toContain(child.manager.getSessionId());
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("serves the scanned catalog even when the ledger cannot be read", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-rlm-ledger-catalog-broken-"));
+		try {
+			const { internals, sessionsDir } = makeDaemonFixture(tempDir);
+			const { parent, parentFile } = makeRoots(tempDir);
+			void parentFile;
+			// A directory where the ledger file should be: every read throws.
+			mkdirSync(rlmLedgerPath(tempDir, sessionsDir), { recursive: true });
 			const response = (await (
 				internals as unknown as {
 					handleCommand(client: object, command: Record<string, unknown>): Promise<DaemonResponse | undefined>;
 				}
 			).handleCommand({}, { type: "list_saved_sessions", cwd: tempDir, sessionDir: sessionsDir, scope: "all" })) as {
 				success: boolean;
-				data: { sessions: Array<{ id: string; parentSessionPath?: string }> };
+				data: { sessions: Array<{ id: string }> };
 			};
 			expect(response.success).toBe(true);
-			expect(response.data.sessions.filter(({ id }) => id === child.manager.getSessionId())).toEqual([
-				expect.objectContaining({ parentSessionPath: parentFile }),
-			]);
+			expect(response.data.sessions.map(({ id }) => id)).toEqual([parent.getSessionId()]);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

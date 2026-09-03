@@ -2832,9 +2832,10 @@ export class DaemonSupervisor {
 				}
 			: undefined;
 		const saved = await this.catalog.list(command.scope === "current" ? cwd : undefined, sessionDir, callbacks);
-		const sessions = await withPassiveRlmDescendantInfos(saved, this.rlmSpawnLedger(), {
+		const sessions = await withPassiveRlmDescendantInfos(saved, this.rlmSpawnLedgerFor(sessionDir), {
 			...(command.scope === "current" ? { cwd } : {}),
 			...(callbacks ? { onSession: callbacks.onSession } : {}),
+			log: (message) => this.log(message),
 		});
 		return success(command.id, "list_saved_sessions", { sessions: sessions.map(serializeSavedSessionInfo) });
 	}
@@ -4556,6 +4557,21 @@ export class DaemonSupervisor {
 			(message) => this.log(message),
 		);
 		return this.rlmSpawnLedgerInstance;
+	}
+
+	// Ledgers are per sessions-dir family: a catalog request for another dir must read that dir's ledger.
+	private rlmSpawnLedgerFor(sessionDir: string | undefined): RlmSpawnLedger {
+		const agentDir = this.defaultSessionConfig.agentDir;
+		const defaultDir = this.defaultSessionConfig.sessionDir ?? (agentDir ? getSessionsDir(agentDir) : undefined);
+		if (sessionDir === undefined || (defaultDir !== undefined && resolve(sessionDir) === resolve(defaultDir))) {
+			return this.rlmSpawnLedger();
+		}
+		if (!agentDir) {
+			throw new Error("Daemon supervisor config is missing agentDir");
+		}
+		return new RlmSpawnLedger(agentDir, sessionDir, createRlmLedgerRegistrySeedSource(), (message) =>
+			this.log(message),
+		);
 	}
 
 	/**

@@ -982,6 +982,16 @@ export class AgentDaemon {
 		return this.rlmSpawnLedgerInstance;
 	}
 
+	// Ledgers are per sessions-dir family: a catalog request for another dir must read that dir's ledger.
+	private rlmSpawnLedgerFor(sessionDir: string | undefined): RlmSpawnLedger {
+		if (sessionDir === undefined || resolve(sessionDir) === resolve(this.rlmLedgerSessionsDir())) {
+			return this.rlmSpawnLedger();
+		}
+		return new RlmSpawnLedger(this.agentDir, sessionDir, createRlmLedgerRegistrySeedSource(), (message) =>
+			this.log(message),
+		);
+	}
+
 	private async appendRlmLedgerRenameForState(state: ActiveSessionState, name: string): Promise<void> {
 		const childId = state.runtime.metadata.rlmChildId;
 		const child = state.runtime.session.sessionFile;
@@ -3876,9 +3886,10 @@ export class AgentDaemon {
 					command.scope === "current"
 						? await SessionManager.list(cwd, sessionDir, callbacks)
 						: await SessionManager.listAll(callbacks, sessionDir);
-				const sessions = await withPassiveRlmDescendantInfos(savedSessions, this.rlmSpawnLedger(), {
+				const sessions = await withPassiveRlmDescendantInfos(savedSessions, this.rlmSpawnLedgerFor(sessionDir), {
 					...(command.scope === "current" ? { cwd } : {}),
 					...(callbacks ? { onSession: callbacks.onSession } : {}),
+					log: (message) => this.log(message),
 				});
 				return success(command.id, "list_saved_sessions", {
 					sessions: sessions.map(serializeSavedSessionInfo),
