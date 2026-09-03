@@ -564,12 +564,16 @@ describe("UTF-8", () => {
 // ===========================================================================
 
 describe("trailing bytes", () => {
-  it("rejects trailing data", () => {
+  it("rejects trailing data including declared payload bytes", () => {
     const r = ok(encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("f", 10)] }));
-    // Pure manifest decode accepts only header bytes
+    // Pure manifest decode accepts only header bytes; payload bytes are streaming verifier's domain
     const hdr = new Uint8Array(r.bytes);
     ok(decodePawsManifestBytes(hdr));
-    // Extra trailing byte is rejected
+    // Even exactly the declared payload count appended is TRAILING_BYTES
+    const withPayload = new Uint8Array(hdr.length + r.payloadSize);
+    withPayload.set(hdr);
+    fail(decodePawsManifestBytes(withPayload));
+    // One extra garbage byte is TRAILING_BYTES
     const withTrailing = new Uint8Array(hdr.length + 1);
     withTrailing.set(hdr);
     fail(decodePawsManifestBytes(withTrailing));

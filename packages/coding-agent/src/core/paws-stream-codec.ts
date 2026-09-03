@@ -1262,7 +1262,8 @@ function decodePawsManifestBytesImpl(raw: unknown): PawsResult<PawsDecodeResult>
     if (manifestStr === null) return failErr(PAWS_ERRORS.INVALID_UTF8);
 
     const reencoded = utf8Encode(manifestStr);
-    if (reencoded.byteLength !== manifestLen) { eraseBytes(reencoded); return failErr(PAWS_ERRORS.INVALID_UTF8); }
+    const reencodedLen: number = reencoded.byteLength;
+    if (reencodedLen !== manifestLen) { eraseBytes(reencoded); return failErr(PAWS_ERRORS.INVALID_UTF8); }
     for (let i = 0; i < manifestLen; i++) {
       if (manifestSlice[i] !== reencoded[i]) { eraseBytes(reencoded); return failErr(PAWS_ERRORS.INVALID_UTF8); }
     }
