@@ -74,7 +74,7 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 26 publishes own-session usage totals on session summary and saved-session rows.
 // Revision 27 adds capability-gated sandbox session creation options.
 export const DAEMON_SCHEMA_REVISION = 27;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-27-ba2349db6f07";
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-27-bf6a716337b3";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
