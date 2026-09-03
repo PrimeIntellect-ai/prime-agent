@@ -11,13 +11,12 @@ export interface AgentStatusInput {
 	queuedChild: boolean;
 	/** Actively working: streaming, running tools/bash, or running children. */
 	busy: boolean;
-	hasActiveHeartbeat: boolean;
 }
 
 export function classifyAgentStatus(input: AgentStatusInput): AgentRosterStatus {
 	if (input.queuedChild) return "running";
 	if (!input.resident) return "inactive";
-	return input.busy || input.hasActiveHeartbeat ? "running" : "idle";
+	return input.busy ? "running" : "idle";
 }
 
 export function isSessionSummaryBusy(
@@ -27,17 +26,13 @@ export function isSessionSummaryBusy(
 }
 
 export function classifySessionRosterStatus(
-	summary: Pick<
-		SessionSummary,
-		"activeSessionId" | "activity" | "isSessionActive" | "hasRunningRlmChildren" | "hasActiveHeartbeat"
-	>,
+	summary: Pick<SessionSummary, "activeSessionId" | "activity" | "isSessionActive" | "hasRunningRlmChildren">,
 	queuedChild = false,
 ): AgentRosterStatus {
 	return classifyAgentStatus({
 		resident: !!summary.activeSessionId,
 		queuedChild,
 		busy: summary.activity === "working" || isSessionSummaryBusy(summary),
-		hasActiveHeartbeat: summary.hasActiveHeartbeat === true,
 	});
 }
 

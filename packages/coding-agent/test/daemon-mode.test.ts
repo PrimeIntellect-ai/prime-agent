@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
@@ -28,7 +28,7 @@ import type { AgentObserveController } from "../src/core/agent-observe.js";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
 import { installAgentTraceUpload } from "../src/core/agent-traces.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import type { AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
+import { type AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
 import { PRIME_AGENT_TRACES_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
@@ -36,7 +36,12 @@ import {
 	type SubagentRuntimeHost,
 } from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
-import { readSessionInfo, type SessionInfo, SessionManager } from "../src/core/session-manager.js";
+import {
+	getSessionArtifactPathForFile,
+	readSessionInfo,
+	type SessionInfo,
+	SessionManager,
+} from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import {
@@ -524,7 +529,7 @@ describe("daemon mode helpers", () => {
 		});
 	});
 
-	it("classifies local roster status with heartbeat and running-child activity", () => {
+	it("classifies local roster status from running-child activity, not armed heartbeats", () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-status-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			createRuntime: vi.fn(),
@@ -550,8 +555,8 @@ describe("daemon mode helpers", () => {
 			};
 			createAgentMessageAgentSummary(state: ActiveSessionState): { status?: string };
 		};
-		const getHeartbeat = vi.spyOn(internals.cronStore, "getHeartbeat").mockReturnValue(undefined);
-		const listRlmHeartbeats = vi.spyOn(internals.cronStore, "listRlmHeartbeats").mockReturnValue([]);
+		vi.spyOn(internals.cronStore, "getHeartbeat").mockReturnValue({ status: "active" } as AgentCronJob);
+		vi.spyOn(internals.cronStore, "listRlmHeartbeats").mockReturnValue([{ status: "active" } as AgentCronJob]);
 
 		expect(internals.createAgentMessageAgentSummary(state).status).toBe("running");
 		hasRunningChildren = false;
@@ -560,11 +565,6 @@ describe("daemon mode helpers", () => {
 			metadata: { kind: "subagent", createdAt: 1 },
 		} as ActiveSessionState["runtime"];
 		expect(internals.createAgentMessageAgentSummary(state).status).toBe("idle");
-		getHeartbeat.mockReturnValue({ status: "active" } as AgentCronJob);
-		expect(internals.createAgentMessageAgentSummary(state).status).toBe("running");
-		getHeartbeat.mockReturnValue(undefined);
-		listRlmHeartbeats.mockReturnValue([{ status: "active" } as AgentCronJob]);
-		expect(internals.createAgentMessageAgentSummary(state).status).toBe("running");
 	});
 
 	it("reserves a session name across equivalent session-relative parent headers", async () => {
@@ -4075,6 +4075,57 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("registers passive descendants' scheduled jobs when their root becomes resident", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-descendant-jobs-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const childSessionId = basename(fixture.childArtifactDir);
+			const grandchildSessionId = basename(fixture.grandchildSessionFile, ".jsonl");
+			const seedStore = AgentCronJobStore.forSessionArtifacts();
+			seedStore.registerSessionArtifact(childSessionId, fixture.childArtifactDir);
+			seedStore.registerSessionArtifact(
+				grandchildSessionId,
+				getSessionArtifactPathForFile(fixture.grandchildSessionFile, grandchildSessionId),
+			);
+			const makeJob = (sessionId: string, sessionFile: string) =>
+				seedStore.createRlmHeartbeat({
+					activeSessionId: `stale-${sessionId}`,
+					sessionId,
+					sessionFile,
+					cwd: tempDir,
+					runtimeKind: "subagent",
+					scheduleText: "every 30s",
+					prompt: "report exactly: hi",
+				});
+			makeJob(childSessionId, fixture.childSessionFile);
+			const grandchildHeartbeat = makeJob(grandchildSessionId, fixture.grandchildSessionFile);
+
+			const workerDaemon = new AgentDaemon(join(tempDir, "worker-daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: join(tempDir, "sessions") },
+				createRuntime: fixture.createRuntime,
+				worker: { authenticationToken: "worker-token" },
+			});
+			const internals = workerDaemon as unknown as {
+				cronStore: AgentCronJobStore;
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+			};
+			// A corrupt child artifact must not strand the remaining descendants.
+			const recover = internals.cronStore.recoverSessionArtifact.bind(internals.cronStore);
+			vi.spyOn(internals.cronStore, "recoverSessionArtifact").mockImplementation((sessionId) => {
+				if (sessionId === childSessionId) throw new Error("corrupt scheduled-jobs.json");
+				return recover(sessionId);
+			});
+
+			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+
+			await vi.waitFor(() =>
+				expect(internals.cronStore.list().some((job) => job.id === grandchildHeartbeat.id)).toBe(true),
+			);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("replaces a resident top-level RLM child when restoring its heartbeat", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-replace-child-heartbeat-"));
 		try {
@@ -6092,7 +6143,6 @@ describe("daemon mode helpers", () => {
 		internals.sessionPassivationSnapshot = vi.fn(async (state: ActiveSessionState) => ({
 			isSessionActive: false,
 			attachedClients: 0,
-			hasRegisteredHeartbeat: false,
 			hasRegisteredCronJob: false,
 			lastActivityAt: order.get(state) ?? 99,
 			hasParent: state !== root,

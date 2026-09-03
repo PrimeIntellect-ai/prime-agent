@@ -36,35 +36,20 @@ describe("classifyAgentStatus", () => {
 	it("classifies once and both surface adapters agree with it", () => {
 		// The formula's three defining rows: a queued child runs before any session
 		// exists, nothing else resurrects a non-resident agent, residents split on work.
-		expect(classifyAgentStatus({ resident: false, queuedChild: true, busy: false, hasActiveHeartbeat: false })).toBe(
-			"running",
-		);
-		expect(classifyAgentStatus({ resident: false, queuedChild: false, busy: true, hasActiveHeartbeat: true })).toBe(
-			"inactive",
-		);
-		expect(classifySubagentSnapshotStatus({ ...childFor(false, false), status: "queued" }, new Set())).toBe(
-			"running",
-		);
+		expect(classifyAgentStatus({ resident: false, queuedChild: true, busy: false })).toBe("running");
+		expect(classifyAgentStatus({ resident: false, queuedChild: false, busy: true })).toBe("inactive");
+		expect(classifySubagentSnapshotStatus({ ...childFor(false, false), status: "queued" })).toBe("running");
 		for (const busy of [false, true]) {
+			const expected = classifyAgentStatus({ resident: true, queuedChild: false, busy });
+			expect(expected).toBe(busy ? "running" : "idle");
 			for (const heartbeat of [false, true]) {
-				const expected = classifyAgentStatus({
-					resident: true,
-					queuedChild: false,
-					busy,
-					hasActiveHeartbeat: heartbeat,
-				});
-				expect(expected).toBe(busy || heartbeat ? "running" : "idle");
-				const heartbeatIds = new Set(heartbeat ? ["as-1"] : []);
 				expect(classifySessionRosterStatus(summaryFor(true, busy, heartbeat)), `busy=${busy} hb=${heartbeat}`).toBe(
 					expected,
 				);
-				expect(
-					classifySubagentSnapshotStatus(childFor(true, busy), heartbeatIds),
-					`busy=${busy} hb=${heartbeat}`,
-				).toBe(expected);
 			}
+			expect(classifySubagentSnapshotStatus(childFor(true, busy)), `busy=${busy}`).toBe(expected);
 		}
-		expect(classifySessionRosterStatus(summaryFor(false, false, false))).toBe("inactive");
-		expect(classifySubagentSnapshotStatus(childFor(false, false), new Set())).toBe("inactive");
+		expect(classifySessionRosterStatus(summaryFor(false, false, true))).toBe("inactive");
+		expect(classifySubagentSnapshotStatus(childFor(false, false))).toBe("inactive");
 	});
 });

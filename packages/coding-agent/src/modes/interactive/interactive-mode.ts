@@ -6017,11 +6017,6 @@ export class InteractiveMode {
 	}
 
 	private updateSubagentSummaryLine(): void {
-		const activeHeartbeatSessionIds = new Set(
-			this.heartbeatCatalog
-				.filter((heartbeat) => heartbeat.job.status === "active")
-				.map((heartbeat) => heartbeat.job.activeSessionId),
-		);
 		const rosterSummaries = this.rosterBar?.summaries();
 		// A client-owned session has no row on the public roster; only then do the
 		// snapshots carry the bar. A public parent with zero roster children shows zero.
@@ -6029,16 +6024,12 @@ export class InteractiveMode {
 			rosterSummaries?.some((row) => row.sessionId === this.connectionState?.sessionId) === true;
 		this.subagentSummaryLine.setSubagentCounts(
 			rosterSummaries && sessionOnRoster
-				? countRosterSubagentStatuses(
-						rosterSummaries,
-						{
-							activeSessionId: this.connectionState?.activeSessionId,
-							sessionId: this.connectionState?.sessionId,
-							sessionFile: this.connectionState?.sessionFile,
-						},
-						activeHeartbeatSessionIds,
-					)
-				: countDirectSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId, activeHeartbeatSessionIds),
+				? countRosterSubagentStatuses(rosterSummaries, {
+						activeSessionId: this.connectionState?.activeSessionId,
+						sessionId: this.connectionState?.sessionId,
+						sessionFile: this.connectionState?.sessionFile,
+					})
+				: countDirectSubagentStatuses(this.subagentSnapshots.values(), this.rlmNodeId),
 		);
 		if (!this.subagentSummaryLine.isSelectable() && this.subagentSummaryLine.focused) this.focusEditor();
 	}
