@@ -1509,30 +1509,19 @@ function decodePawsManifestBytesImpl(raw: unknown): PawsResult<PawsDecodeResult>
 		const headerSize = HEADER_PREFIX + manifestLen;
 		if (bl < headerSize) return failErr(PAWS_ERRORS.MANIFEST_TRUNCATED);
 
-		// Capture manifest bytes via intrinsic subarray; erased on all paths
+		// Capture manifest bytes via intrinsic subarray (required by isGenuineUint8Array)
+		if (PAWS_TA_SUBARRAY === undefined) {
+			return failErr(PAWS_ERRORS.INVALID_INPUT);
+		}
 		let manifestSlice: Uint8Array;
-		if (PAWS_TA_SUBARRAY !== undefined) {
-			try {
-				const rawSlice: unknown = Reflect.apply(PAWS_TA_SUBARRAY, bytes, [
-					HEADER_PREFIX,
-					HEADER_PREFIX + manifestLen,
-				]);
-				if (!types.isUint8Array(rawSlice)) {
-					return failErr(PAWS_ERRORS.INVALID_INPUT);
-				}
-				manifestSlice = rawSlice;
-				if (!types.isUint8Array(manifestSlice)) {
-					return failErr(PAWS_ERRORS.INVALID_INPUT);
-				}
-			} catch {
+		try {
+			const rawSlice: unknown = Reflect.apply(PAWS_TA_SUBARRAY, bytes, [HEADER_PREFIX, HEADER_PREFIX + manifestLen]);
+			if (!types.isUint8Array(rawSlice)) {
 				return failErr(PAWS_ERRORS.INVALID_INPUT);
 			}
-		} else {
-			manifestSlice = new Uint8Array(manifestLen);
-			for (let k = 0; k < manifestLen; k++) {
-				const rawV: unknown = Reflect.get(bytes, String(HEADER_PREFIX + k));
-				manifestSlice[k] = typeof rawV === "number" ? rawV : 0;
-			}
+			manifestSlice = rawSlice;
+		} catch {
+			return failErr(PAWS_ERRORS.INVALID_INPUT);
 		}
 		if (hasNonCanonicalUtf8(manifestSlice)) return failErr(PAWS_ERRORS.INVALID_UTF8);
 
@@ -1567,11 +1556,11 @@ function decodePawsManifestBytesImpl(raw: unknown): PawsResult<PawsDecodeResult>
 		if (kindVal === undefined) return failErr(PAWS_ERRORS.MISSING_FIELD);
 		if (kindVal !== "snapshot" && kindVal !== "changeset") return failErr(PAWS_ERRORS.BAD_KIND);
 
-		// Route to kind-specific decoder
+		// Route to kind-specific decoder with manifest bytes for canonical JSON validation
 		if (kindVal === "snapshot") {
-			return decodeSnapshot(parsed, headerSize, manifestLen, bl, doErase, failErr);
+			return decodeSnapshot(parsed, manifestSlice, headerSize, manifestLen, bl, doErase, failErr);
 		}
-		return decodeChangeset(parsed, headerSize, manifestLen, bl, doErase, failErr);
+		return decodeChangeset(parsed, manifestSlice, headerSize, manifestLen, bl, doErase, failErr);
 	} catch {
 		doErase();
 		return { ok: false, error: Object.freeze({ code: PAWS_ERRORS.INVALID_INPUT }) };
@@ -1580,6 +1569,7 @@ function decodePawsManifestBytesImpl(raw: unknown): PawsResult<PawsDecodeResult>
 
 function decodeSnapshot(
 	parsed: unknown,
+	originalManifestBytes: Uint8Array,
 	headerSize: number,
 	manifestLen: number,
 	byteLen: number,
@@ -1640,7 +1630,7 @@ function decodeSnapshot(
 	const computedSnapId = computeSnapshotIdFromFields(fields.paths, fields.sizes, fields.modes, fields.sha256s);
 	if (computedSnapId !== declSnapId) return failErr(PAWS_ERRORS.SNAPSHOT_ID_MISMATCH);
 
-	// Verify canonical re-encode byte equality
+	// Verify canonical re-encode byte equality against original manifest bytes
 	const entries = buildSnapshotEntries(fields);
 	const tempManifest: PawsSnapshotManifest = {
 		format: "prime-agent-workspace",
@@ -1651,13 +1641,19 @@ function decodeSnapshot(
 		totalBytes: declTotal,
 		entries: Object.freeze(entries),
 	};
-	const freshJson = encodeSnapshotManifestJson(tempManifest);
-	const freshBytes = utf8Encode(freshJson);
-	// Compare with original manifest bytes (need to re-read from parsed manifest string area)
-	// This is done via the outer function's manifestSlice — for canonical check we'd need to pass it.
-	// For now: the inner JSON is canonical by construction. The outer re-encode check is done here:
-	// We trust the canonical encoding is correct. The manifest was validated by JSON.parse + field check.
-	eraseBytes(freshBytes);
+	const expectedJson = encodeSnapshotManifestJson(tempManifest);
+	const expectedBytes = utf8Encode(expectedJson);
+	if (expectedBytes.byteLength !== originalManifestBytes.length) {
+		eraseBytes(expectedBytes);
+		return failErr(PAWS_ERRORS.NON_CANONICAL);
+	}
+	for (let i = 0; i < expectedBytes.byteLength; i++) {
+		if (expectedBytes[i] !== originalManifestBytes[i]) {
+			eraseBytes(expectedBytes);
+			return failErr(PAWS_ERRORS.NON_CANONICAL);
+		}
+	}
+	eraseBytes(expectedBytes);
 
 	doErase();
 
@@ -1685,6 +1681,7 @@ function decodeSnapshot(
 
 function decodeChangeset(
 	parsed: unknown,
+	originalManifestBytes: Uint8Array,
 	headerSize: number,
 	manifestLen: number,
 	byteLen: number,
@@ -1751,6 +1748,32 @@ function decodeChangeset(
 
 	if (!checkArchiveSize(headerSize, declTotal)) return failErr(PAWS_ERRORS.ARCHIVE_TOO_LARGE);
 	if (byteLen !== headerSize) return failErr(PAWS_ERRORS.TRAILING_BYTES);
+
+	// Build expected manifest to verify canonical re-encode
+	const chgEntriesForVerify = buildChangesetEntries(fields);
+	const tempChgManifest: PawsChangesetManifest = {
+		format: "prime-agent-workspace",
+		version: 1,
+		kind: "changeset",
+		workspaceId: wId,
+		baseSnapshotId: baseSnapId,
+		snapshotId: declSnapId,
+		totalBytes: declTotal,
+		entries: chgEntriesForVerify,
+	};
+	const expectedChgJson = encodeChangesetManifestJson(tempChgManifest);
+	const expectedChgBytes = utf8Encode(expectedChgJson);
+	if (expectedChgBytes.byteLength !== originalManifestBytes.length) {
+		eraseBytes(expectedChgBytes);
+		return failErr(PAWS_ERRORS.NON_CANONICAL);
+	}
+	for (let i = 0; i < expectedChgBytes.byteLength; i++) {
+		if (expectedChgBytes[i] !== originalManifestBytes[i]) {
+			eraseBytes(expectedChgBytes);
+			return failErr(PAWS_ERRORS.NON_CANONICAL);
+		}
+	}
+	eraseBytes(expectedChgBytes);
 
 	// Compute changesetId (domain-separated)
 	const entries = buildChangesetEntries(fields);

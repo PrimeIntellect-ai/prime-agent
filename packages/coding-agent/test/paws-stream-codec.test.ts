@@ -698,6 +698,78 @@ describe("UTF-8", () => {
 // 10. Trailing bytes
 // ===========================================================================
 
+describe("canonical JSON", () => {
+	it("rejects whitespace in snapshot JSON", () => {
+		// Build valid manifest, then corrupt with whitespace
+		const r = ok(encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("f", 10)] }));
+		const origBytes = r.bytes;
+		const origJson = new TextDecoder().decode(origBytes.subarray(13));
+		// Re-encode with extra whitespace
+		const parsed = JSON.parse(origJson);
+		const whitespaceJson = JSON.stringify(parsed, null, 2);
+		const paddedBytes = buildPawsBytes(whitespaceJson);
+		expectFail(decodePawsManifestBytes(paddedBytes), PAWS_ERRORS.NON_CANONICAL);
+	});
+	it("rejects reordered keys in snapshot JSON", () => {
+		const r = ok(encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("f", 10)] }));
+		const origBytes = r.bytes;
+		const origJson = new TextDecoder().decode(origBytes.subarray(13));
+		// Reorder keys via manual construction
+		const parsed = JSON.parse(origJson);
+		const reorderedJson = `{"version":${parsed.version},"format":"${parsed.format}","kind":"${parsed.kind}","workspaceId":"${parsed.workspaceId}","snapshotId":"${parsed.snapshotId}","totalBytes":${parsed.totalBytes},"entries":${JSON.stringify(parsed.entries)}}`;
+		const reorderedBytes = buildPawsBytes(reorderedJson);
+		expectFail(decodePawsManifestBytes(reorderedBytes), PAWS_ERRORS.NON_CANONICAL);
+	});
+	it("rejects whitespace in changeset JSON", () => {
+		const BASE = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+		const TARGET = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+		const r = ok(
+			encodePawsManifest({
+				kind: "changeset",
+				workspaceId: WS,
+				baseSnapshotId: BASE,
+				snapshotId: TARGET,
+				entries: [makeAdd("f", 10)],
+			}),
+		);
+		const origBytes = r.bytes;
+		const origJson = new TextDecoder().decode(origBytes.subarray(13));
+		const parsed = JSON.parse(origJson);
+		const whitespaceJson = JSON.stringify(parsed, null, 2);
+		const paddedBytes = buildPawsBytes(whitespaceJson);
+		expectFail(decodePawsManifestBytes(paddedBytes), PAWS_ERRORS.NON_CANONICAL);
+	});
+	it("rejects reordered keys in changeset JSON", () => {
+		const BASE = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+		const TARGET = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+		const r = ok(
+			encodePawsManifest({
+				kind: "changeset",
+				workspaceId: WS,
+				baseSnapshotId: BASE,
+				snapshotId: TARGET,
+				entries: [makeAdd("f", 10)],
+			}),
+		);
+		const origBytes = r.bytes;
+		const origJson = new TextDecoder().decode(origBytes.subarray(13));
+		const parsed = JSON.parse(origJson);
+		const reorderedJson = `{"version":${parsed.version},"format":"${parsed.format}","kind":"${parsed.kind}","workspaceId":"${parsed.workspaceId}","baseSnapshotId":"${parsed.baseSnapshotId}","snapshotId":"${parsed.snapshotId}","totalBytes":${parsed.totalBytes},"entries":${JSON.stringify(parsed.entries)}}`;
+		const reorderedBytes = buildPawsBytes(reorderedJson);
+		expectFail(decodePawsManifestBytes(reorderedBytes), PAWS_ERRORS.NON_CANONICAL);
+	});
+	it("canonical JSON respects input erasure on failure", () => {
+		const r = ok(encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("f", 10)] }));
+		const origBytes = r.bytes;
+		const origJson = new TextDecoder().decode(origBytes.subarray(13));
+		const parsed = JSON.parse(origJson);
+		const whitespaceJson = JSON.stringify(parsed, null, 2);
+		const paddedBytes = buildPawsBytes(whitespaceJson);
+		const copy = new Uint8Array(paddedBytes);
+		expectFail(decodePawsManifestBytes(copy), PAWS_ERRORS.NON_CANONICAL);
+		for (const b of copy) expect(b).toBe(0);
+	});
+});
 describe("trailing bytes", () => {
 	it("rejects trailing data including declared payload", () => {
 		const r = ok(encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("f", 10)] }));
