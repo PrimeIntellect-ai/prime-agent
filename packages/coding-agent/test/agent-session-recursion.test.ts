@@ -3144,6 +3144,33 @@ describe("AgentSession rlm recursion", () => {
 		expect(root.cancelRlmChildRun(childId)).toBe(false);
 	});
 
+	it("keeps a colliding child id reachable past a finished retained match", async () => {
+		const root = createSession({ rlmSessionDir: join(tempDir, "collide-root") });
+		const finished = createSession({ rlmSessionDir: join(tempDir, "collide-finished") });
+		const otherParent = createSession({ rlmSessionDir: join(tempDir, "collide-other") });
+		const rootMaps = root as unknown as { _rlmChildSessions: Map<string, { session: AgentSession }> };
+		// Child ids are only mkdir-unique among siblings: "sub-dup" exists twice.
+		rootMaps._rlmChildSessions.set("sub-dup", { session: finished });
+		rootMaps._rlmChildSessions.set("other-parent", { session: otherParent });
+		const abort = vi.fn();
+		const collidingRun = {
+			id: "sub-dup",
+			status: "running",
+			settled: false,
+			abort,
+			publication: { reject: vi.fn() },
+			emitUpdate: vi.fn(),
+		};
+		(otherParent as unknown as { _activeRlmChildRuns: Map<string, typeof collidingRun> })._activeRlmChildRuns.set(
+			"sub-dup",
+			collidingRun,
+		);
+
+		expect(root.cancelRlmChildRun("sub-dup")).toBe(true);
+		expect(collidingRun.status).toBe("cancelled");
+		expect(abort).toHaveBeenCalled();
+	});
+
 	it("cancels a deep dual-membership chain in one visit per session", async () => {
 		const levels = 20;
 		const sessions = Array.from({ length: levels + 1 }, (_, level) =>

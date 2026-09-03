@@ -10418,11 +10418,14 @@ export class AgentSession {
 				// The abort cascade never reaches running work retained under a settled descendant.
 				const cancelled = session._cancelRlmChildRun(run, reason);
 				const descendantsCancelled = run.session?.cancelRunningRlmDescendants(reason) ?? false;
-				return cancelled || descendantsCancelled;
+				if (cancelled || descendantsCancelled) {
+					return true;
+				}
 			}
-			const retainedTarget = session._rlmChildSessions.get(childId)?.session;
-			if (retainedTarget) {
-				return retainedTarget.cancelRunningRlmDescendants(reason);
+			// A fruitless match keeps walking: child ids are only mkdir-unique among
+			// siblings, so a colliding live run elsewhere must stay reachable.
+			if (session._rlmChildSessions.get(childId)?.session.cancelRunningRlmDescendants(reason)) {
+				return true;
 			}
 		}
 		return false;
