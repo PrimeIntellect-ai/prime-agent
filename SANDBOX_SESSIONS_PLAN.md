@@ -85,12 +85,12 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 | B04 | A02, A16 | done | Replace the initial relay with ordered durable receipt/delivery handling |
 | B05 | A04, A14 | done | Add typed streaming home-provider proxy |
 | B06 | A05, A15 | done | Add Prime Sandbox provisioner and background-job lifecycle |
-| B07 | A10, A14 | done | Add Git workspace snapshot and safe sync-back |
+| B07 | A10, A14 | in_progress | Replace the unwired legacy workspace prototype with PAWS-backed immutable publication, extraction, checkpoint evidence, and final sync-back |
 | B08 | A12, B01, B02 | done | Add `sandbox` and `sandbox_options` to RLM APIs |
 | B09 | A11, B01, B03 | done | Add top-level sandbox session creation APIs and CLI flags |
 | B10 | A06, B03, B04 | in_progress | Durable target inbox, pre-admission authorization, transcript dispatch, permanent registry, remote dispatcher, and bidirectional relay entry are accepted; complete daemon routing and managed relay retry composition |
 | B11 | A07, B03, B04 | done | Mirror observation, transcript, recap, and usage events; exact snapshots, durable application, and production Node backend are integrated |
-| B12 | A08, B03, B06 | done | Lifecycle/checkpoint/passivation/wake, opaque restart resolution, fenced physical deletion, and verified tombstones are integrated |
+| B12 | A08, B03, B06 | in_progress | Lifecycle deletion is integrated; opaque pre-admission and truthful no-platform-resource cleanup remain under review |
 | B13 | A09, B01, B11 | done | Show execution location and connection health in Agents View |
 | B14 | B05, B06, B08, B09 | in_progress | Wire end-to-end sandbox session orchestration; fixed FD3 child launch and hosted factory remain |
 | B15 | A13, B03, B04 | done | Add protocol compatibility and reconnect tests |
@@ -106,15 +106,31 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 | C04 | C02, C03 | queued | Audit secret handling, orphan cleanup, and final workspace sync |
 | C05 | C04 | queued | Update README, API docs, changelog, and migration notes |
 | C06 | C05 | queued | Independent PR cleanup and regression review |
-| C07 | C06 | queued | Push branch and open GitHub PR |
-| C08 | C07 | queued | Verify PR diff, checks, and unresolved review threads |
+| C07 | C06 | done | Push branch and open draft GitHub PR #2025 |
+| C08 | C07 | in_progress | Verify PR diff, checks, and unresolved review threads; Node 22 coding-agent shards remain red |
+
+## Active correction roster
+
+| Track | Status | Current gate |
+|---|---|---|
+| Node 22 exact-Promise/ALS compatibility | in_progress | Context-shaped opaque marker implementation plus Node 22 shard reruns |
+| Home provider coordinator | in_progress | v13b must prove genuine bytes and cleanup-uncertainty dominance |
+| Sandbox provider relay | review | Candidate `6976c230d`; independent v8 audit running |
+| PAWS streaming verifier | in_progress | v7 must unify checked erasure and pass native FileHandle tests |
+| Relay application gate | review | Candidate `21d69176b`; independent v5 audit and Node 22 adaptation pending |
+| Sandbox trusted-Home inbox application | in_progress | v4 must use real durable-inbox branding and remove wrapper/test assertions |
+| Hosted child ledger | in_progress | v6 must remove direct external awaits/assertions while preserving real FileHandle behavior |
+| Opaque sandbox pre-admission | in_progress | Durable pre-provider admission and truthful no-resource tombstone implementation |
+| Workspace coordinator | in_progress | v13 rejected; source-valid v14 design correcting private API/path and extraction defects |
+| B10/B14/hosted runtime composition | blocked | Waits on accepted gate, inbox, provider, workspace, ledger, and Node 22 foundations |
 
 ## Current integration baseline
 
 - Branch: `feat/sandbox-backed-sessions` in `/Users/milkkarten/prime-agent-sandbox-sessions`.
-- Reviewed implementation and plan tip: `8aaa1aeba`.
-- Latest full repository hook is green across 1,105 files at `8aaa1aeba`, including strict Biome, root `tsgo --noEmit`, installer rendering, and browser smoke.
-- The accepted command/event/provider durability baseline remains green. Restart-safe relay evidence plus the ordered application multiplexer add a 148/148 integrated relay/dispatcher/multiplexer matrix. Earlier focused matrices also cover lifecycle deletion, hosted port/controller/transport, the exact branded-local/hosted runtime union, permanent target registry/dispatcher/bidirectional entry, ordered target application, authorization, transcript scanning/dispatch, durable target inbox, and the remote frame codec.
+- Draft PR: [#2025](https://github.com/PrimeIntellect-ai/prime-agent/pull/2025), linked to [RES-1264](https://linear.app/primeintellect/issue/RES-1264/complete-sandbox-backed-prime-agent-sessions).
+- Pushed reviewed tip: `c27957bf7`. Local reviewed tip: `9c023004e` (detail-only catch documentation); the current plan update remains uncommitted until the Node 22 correction is accepted.
+- The last root `npm run check` passed after the `origin/main` merge. PR policy, build/check, agent-core, AI, TUI, process-smoke, kernel, runtime-Python, and CodeQL checks pass. Coding-agent shards 1/3 and 3/3 fail because Node 22 attaches `AsyncLocalStorage` runtime symbols to genuine Promises, while the current exact-Promise guards require zero symbols. The failure is reproduced locally and a context-shaped exact validator is under review; PR CI is not yet verified.
+- The accepted command/event/provider durability baseline remains green under the normal local runtime. Restart-safe relay evidence plus the ordered application multiplexer add a 148/148 integrated relay/dispatcher/multiplexer matrix. Earlier focused matrices also cover lifecycle deletion, hosted port/controller/transport, the exact branded-local/hosted runtime union, permanent target registry/dispatcher/bidirectional entry, ordered target application, authorization, transcript scanning/dispatch, durable target inbox, and the remote frame codec.
 - Accepted B03 foundations: exact frame codec `55b40d7f1`, journal-record codec `5551582bd`, delivery index `5e8e926b4`, direct-final immutable journal publication `8bd83db6c`, immutable delivery-marker publication `df846c08f`, and page-atomic bounded directory recovery `9df8a3da9`.
 - Accepted B11 foundations: observation core `939a7baaf`, exact snapshots `62e8b073a`.
 - Accepted B14 foundations: provider client `2195c7a23`, tunnel manager `a636f7d99`, PAB1 `d21f53c1a`, FD3 reader `723a8db52`, PAAR codec `a17f5588d`, stdin frame reader `4beeaa5da`, TypeScript correction `1d63a72c0`, SSH spawn specification `4dd8790db`, SSH specification tests `af83a786f`/`a7add61a4`, one-use upgrade authentication `a4976298c`, and Node stdin normalization `4a8962b54`.
@@ -423,3 +439,5 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Published the reviewed integration branch and opened draft PR [#2025](https://github.com/PrimeIntellect-ai/prime-agent/pull/2025). Merged current `origin/main` without rebasing, resolved the hosted-runtime union against upstream semantic-edge/deletion changes, passed 348/348 focused daemon/recursion/runtime tests and the full root `npm run check`, and restored a clean mergeable branch. Future pushes include only directly accepted integration commits; isolated rejected candidates remain local.
 
 - Integrated the independently accepted pre-B03 side-specific ingress classifier. Home accepts event, provider request/cancel, and `agent_message`; sandbox accepts command, provider chunk/complete/error, and `agent_message`; both route ACK and accepted domain envelopes only through `OrderedDurableRelay.receive`; handshake/health/error remain transport control; impossible directions and codec failures return fixed detail-free results before journal mutation. The accepted candidate is `2bc639818`; its 61 classifier plus 242 codec tests passed. Added Research tracking ticket [RES-1264](https://linear.app/primeintellect/issue/RES-1264/complete-sandbox-backed-prime-agent-sessions) and the required draft changelog fragment.
+
+- Pushed side-specific ingress integration as `c27957bf7`; PR #2025 is mergeable and all policy, build, package, smoke, runtime, and CodeQL checks completed successfully. Coding-agent shards exposed a Node 22 compatibility defect: exact native Promise checks reject Node-owned `AsyncLocalStorage` symbols, causing cascading failures in relay, command, observation, publisher, and dispatcher tests, plus unhandled rejected Promises. This is reproduced locally with Node 22 and is being corrected without globally permitting caller-added symbols. The independent provider-relay v7 audit rejected `94b06ca8b` because public capability/result/evidence/apply inputs incorrectly accepted codec-only null prototypes. PAWS verifier `2d69df899`, HostedChildLedger `3b7571232`, relay gate `d35c0dc90`, provider coordinator `60a231cbd`, and trusted-inbox candidates remain isolated after direct review found unchecked erasure, wrong real FileHandle APIs, residual casts/live Promise operations, incomplete rollback dominance, or branding gaps. No rejected candidate is in the PR.
