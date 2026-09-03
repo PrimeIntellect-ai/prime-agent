@@ -15,7 +15,11 @@ import {
 } from "../../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../../src/core/auth-storage.js";
 import type { SubagentRuntimeHost } from "../../src/core/rlm-runtime.js";
-import { readSemanticEdgeLedger, SEMANTIC_EDGES_LEDGER_FILENAME } from "../../src/core/semantic-edges.js";
+import {
+	deriveSemanticEdges,
+	readSemanticEdgeLedger,
+	SEMANTIC_EDGES_LEDGER_FILENAME,
+} from "../../src/core/semantic-edges.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import type {
 	ExtensionAPI,
@@ -25,6 +29,7 @@ import type {
 	SessionShutdownEvent,
 	SessionStartEvent,
 } from "../../src/index.js";
+import { createDefaultRuntimeFactory } from "../../src/main.js";
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
@@ -447,6 +452,85 @@ describe("AgentSessionRuntime characterization", () => {
 			spawned_by_request_id: spawnedByRequestId,
 		});
 		await runtime.deleteRlmSubagentRuntime("lineage-child", childRuntime.session);
+	});
+
+	it("keeps semantic spawn lineage through the production runtime factory", async () => {
+		const tempDir = join(tmpdir(), `pi-runtime-factory-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanups.push(() => rmSync(tempDir, { recursive: true, force: true }));
+		const faux = registerFauxProvider({ models: [{ id: "faux-1", reasoning: false }] });
+		cleanups.push(() => faux.unregister());
+
+		// The PRODUCTION factory (daemon workers and runtime hosts create every
+		// session through it), not a test factory that forwards all options: the
+		// original defect lived in its sessionOptions whitelist and stayed
+		// invisible to factory-boundary assertions.
+		const factory = createDefaultRuntimeFactory(
+			{
+				agentDir: tempDir,
+				cwd: tempDir,
+				sessionDir: join(tempDir, "sessions"),
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				telemetryDisabled: true,
+			},
+			[
+				(pi: ExtensionAPI) => {
+					pi.registerProvider(faux.getModel().provider, {
+						baseUrl: faux.getModel().baseUrl,
+						apiKey: "faux-key",
+						api: faux.api,
+						models: faux.models.map((registeredModel) => ({
+							id: registeredModel.id,
+							name: registeredModel.name,
+							api: registeredModel.api,
+							reasoning: registeredModel.reasoning,
+							input: registeredModel.input,
+							cost: registeredModel.cost,
+							contextWindow: registeredModel.contextWindow,
+							maxTokens: registeredModel.maxTokens,
+						})),
+					});
+				},
+			],
+		);
+
+		const childSessionDir = join(tempDir, "lineage-child");
+		const spawnedByRequestId = "a".repeat(32);
+		const created = await factory({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.create(tempDir, childSessionDir),
+			sessionStartEvent: { type: "session_start", reason: "startup" },
+			sessionOptions: {
+				model: faux.getModel(),
+				thinkingLevel: "off",
+				rlmDepth: 1,
+				rlmMaxDepth: 2,
+				rlmSessionDir: childSessionDir,
+				rlmParentNodeId: "lineage-child",
+				rlmParentAgent: "parent-worker",
+				semanticParentSessionId: "parent-session-id",
+				semanticSpawnedByRequestId: spawnedByRequestId,
+			},
+		});
+		cleanups.push(() => created.session.dispose());
+		await created.session.bindExtensions({});
+
+		const ledgerPath = join(childSessionDir, SEMANTIC_EDGES_LEDGER_FILENAME);
+		expect(readSemanticEdgeLedger(ledgerPath)[0]).toMatchObject({
+			type: "session_registered",
+			parent_session_id: "parent-session-id",
+			spawned_by_request_id: spawnedByRequestId,
+		});
+
+		faux.setResponses([fauxAssistantMessage("child work")]);
+		await created.session.prompt("do the work");
+		const edges = deriveSemanticEdges([readSemanticEdgeLedger(ledgerPath)]).edges;
+		expect(edges.filter((edge) => edge.type === "subagent_call")).toMatchObject([
+			{ source_request_id: spawnedByRequestId },
+		]);
 	});
 
 	it("disposes hosted RLM children during session replacement", async () => {

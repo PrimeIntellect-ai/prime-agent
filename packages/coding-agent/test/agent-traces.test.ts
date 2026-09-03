@@ -90,15 +90,29 @@ function writeOutboxEntry(agentDir: string, sessionFile: string, signature?: { s
 function readOutboxEntry(
 	agentDir: string,
 	sessionFile: string,
-): { sessionFile: string; size?: number; mtimeMs?: number } | undefined {
+): { sessionFile: string; kind?: string; size?: number; mtimeMs?: number; uploadedBytes?: number } | undefined {
 	if (!existsSync(outboxEntryPath(agentDir, sessionFile))) {
 		return undefined;
 	}
 	return JSON.parse(readFileSync(outboxEntryPath(agentDir, sessionFile), "utf8")) as {
 		sessionFile: string;
+		kind?: string;
 		size?: number;
 		mtimeMs?: number;
+		uploadedBytes?: number;
 	};
+}
+
+function writeLedgerOutboxEntry(agentDir: string, ledgerFile: string, uploadedBytes?: number): void {
+	mkdirSync(join(agentDir, "agent-traces-outbox"), { recursive: true });
+	writeFileSync(
+		outboxEntryPath(agentDir, ledgerFile),
+		JSON.stringify({
+			sessionFile: ledgerFile,
+			kind: "semantic-edges",
+			...(uploadedBytes === undefined ? {} : { uploadedBytes }),
+		}),
+	);
 }
 
 async function advanceTimersUntil(condition: () => boolean): Promise<void> {
@@ -1202,10 +1216,152 @@ describe("agent trace upload", () => {
 			reloadConfig: false,
 		});
 
-		expect(result).toEqual({ pruned: 1, results: [] });
+		expect(result).toEqual({ pruned: 1, semanticEdgeLedgersPending: 0, results: [] });
 		expect(calls).toHaveLength(0);
 		expect(existsSync(outboxEntryPath(tempDir, deletedFile))).toBe(false);
 		expect(readOutboxEntry(tempDir, keptFile)).toEqual({ sessionFile: keptFile, ...keptSignature });
+	});
+
+	it("registers the semantic-edge ledger with a kind-tagged durable intent at persist", async () => {
+		vi.useFakeTimers();
+		const cwd = join(tempDir, "project");
+		const sessionDir = join(tempDir, "sessions");
+		mkdirSync(cwd, { recursive: true });
+		const sessionManager = SessionManager.create(cwd, sessionDir);
+		sessionManager.newSession({ id: "ledger-intent-session" });
+		const ledgerPath = join(tempDir, "artifacts", "semantic-edges.jsonl");
+
+		const calls: FetchCall[] = [];
+		installAgentTraceUpload(sessionManager, {
+			authStorage: AuthStorage.inMemory({
+				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+			}),
+			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
+			baseUrl: "https://api.example.test",
+			fetchFn: createFetchRecorder(calls),
+			semanticEdgesLedgerPath: ledgerPath,
+		});
+		sessionManager.appendMessage(createUserMessage("hello"));
+		sessionManager.appendMessage(createAssistantMessage("hi"));
+
+		// Synchronously durable, tagged with its own delivery kind, before any wire call.
+		expect(readOutboxEntry(tempDir, ledgerPath)).toEqual({ sessionFile: ledgerPath, kind: "semantic-edges" });
+		expect(calls).toHaveLength(0);
+
+		// A re-install with a DIFFERENT ledger path registers the new ledger at the next persist.
+		const movedLedgerPath = join(tempDir, "artifacts-moved", "semantic-edges.jsonl");
+		installAgentTraceUpload(sessionManager, {
+			authStorage: AuthStorage.inMemory({
+				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+			}),
+			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
+			baseUrl: "https://api.example.test",
+			fetchFn: createFetchRecorder(calls),
+			semanticEdgesLedgerPath: movedLedgerPath,
+		});
+		sessionManager.appendMessage(createAssistantMessage("after re-install"));
+		expect(readOutboxEntry(tempDir, movedLedgerPath)).toEqual({
+			sessionFile: movedLedgerPath,
+			kind: "semantic-edges",
+		});
+		expect(calls).toHaveLength(0);
+	});
+
+	it("creates no outbox intent while trace sharing is disabled", async () => {
+		vi.useFakeTimers();
+		const cwd = join(tempDir, "project");
+		const sessionDir = join(tempDir, "sessions");
+		mkdirSync(cwd, { recursive: true });
+		const sessionManager = SessionManager.create(cwd, sessionDir);
+		sessionManager.newSession({ id: "opted-out-session" });
+		const ledgerPath = join(tempDir, "artifacts", "semantic-edges.jsonl");
+
+		installAgentTraceUpload(sessionManager, {
+			authStorage: AuthStorage.inMemory({
+				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+			}),
+			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: false } }),
+			baseUrl: "https://api.example.test",
+			fetchFn: createFetchRecorder([]),
+			semanticEdgesLedgerPath: ledgerPath,
+		});
+		sessionManager.appendMessage(createUserMessage("private"));
+		sessionManager.appendMessage(createAssistantMessage("also private"));
+
+		// Neither kind leaves a durable entry: enabling sharing later must not
+		// retroactively collect sessions recorded while sharing was off.
+		expect(readOutboxEntry(tempDir, sessionManager.getSessionFile() as string)).toBeUndefined();
+		expect(readOutboxEntry(tempDir, ledgerPath)).toBeUndefined();
+	});
+
+	it("re-registers the ledger at the next persist after its entry is pruned", async () => {
+		vi.useFakeTimers();
+		const cwd = join(tempDir, "project");
+		const sessionDir = join(tempDir, "sessions");
+		mkdirSync(cwd, { recursive: true });
+		const sessionManager = SessionManager.create(cwd, sessionDir);
+		sessionManager.newSession({ id: "pruned-ledger-session" });
+		const ledgerPath = join(tempDir, "artifacts", "semantic-edges.jsonl");
+
+		installAgentTraceUpload(sessionManager, {
+			authStorage: AuthStorage.inMemory({
+				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+			}),
+			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
+			baseUrl: "https://api.example.test",
+			fetchFn: createFetchRecorder([]),
+			semanticEdgesLedgerPath: ledgerPath,
+		});
+		sessionManager.appendMessage(createUserMessage("hello"));
+		sessionManager.appendMessage(createAssistantMessage("hi"));
+		expect(readOutboxEntry(tempDir, ledgerPath)).toEqual({ sessionFile: ledgerPath, kind: "semantic-edges" });
+
+		// A concurrent catch-up pruned the entry (missing ledger file at scan time).
+		rmSync(outboxEntryPath(tempDir, ledgerPath));
+		sessionManager.appendMessage(createUserMessage("still here"));
+		expect(readOutboxEntry(tempDir, ledgerPath)).toEqual({ sessionFile: ledgerPath, kind: "semantic-edges" });
+	});
+
+	it("counts appended ledger bytes as pending, stays quiet at the cursor, and prunes deleted ledgers", async () => {
+		const sessionDir = join(tempDir, "sessions");
+		mkdirSync(sessionDir, { recursive: true });
+		const ledgerFile = join(sessionDir, "semantic-edges.jsonl");
+		writeFileSync(ledgerFile, `${JSON.stringify({ type: "session_registered", session_id: "s" })}\n`);
+		writeLedgerOutboxEntry(tempDir, ledgerFile);
+		const deletedLedger = join(sessionDir, "gone", "semantic-edges.jsonl");
+		writeLedgerOutboxEntry(tempDir, deletedLedger);
+
+		const calls: FetchCall[] = [];
+		const options = {
+			authStorage: AuthStorage.inMemory({
+				[PRIME_AGENT_TRACES_PROVIDER_ID]: { type: "api_key", key: "trace-key" },
+			}),
+			settingsManager: SettingsManager.inMemory({ agentTraces: { enabled: true } }),
+			baseUrl: "https://api.example.test",
+			fetchFn: createFetchRecorder(calls),
+			reloadConfig: false,
+		};
+
+		// Catch-up after a kill: the never-delivered ledger is pending; the deleted one is pruned.
+		const first = await catchUpAgentTraceUploads(options);
+		expect(first).toEqual({ pruned: 1, semanticEdgeLedgersPending: 1, results: [] });
+		expect(existsSync(outboxEntryPath(tempDir, deletedLedger))).toBe(false);
+		// The cursor stays untouched: the first real sender must deliver the whole backlog.
+		expect(readOutboxEntry(tempDir, ledgerFile)).toEqual({ sessionFile: ledgerFile, kind: "semantic-edges" });
+
+		// A cursor at the file size means unchanged: never re-counted, never resent.
+		const { size } = await stat(ledgerFile);
+		writeLedgerOutboxEntry(tempDir, ledgerFile, size);
+		const second = await catchUpAgentTraceUploads(options);
+		expect(second).toEqual({ pruned: 0, semanticEdgeLedgersPending: 0, results: [] });
+
+		// Appended bytes beyond the cursor become pending again.
+		writeFileSync(ledgerFile, `${JSON.stringify({ type: "request_started", request_id: "r", session_id: "s" })}\n`, {
+			flag: "a",
+		});
+		const third = await catchUpAgentTraceUploads(options);
+		expect(third).toEqual({ pruned: 0, semanticEdgeLedgersPending: 1, results: [] });
+		expect(calls).toHaveLength(0);
 	});
 
 	it("arms upload timers that never hold the process open", async () => {
@@ -1381,7 +1537,7 @@ describe("agent trace upload", () => {
 		};
 
 		const result = await catchUpAgentTraceUploads(options);
-		expect(result).toEqual({ pruned: 1, results: [] });
+		expect(result).toEqual({ pruned: 1, semanticEdgeLedgersPending: 0, results: [] });
 		expect(calls).toHaveLength(0);
 		expect(existsSync(join(tempDir, "agent-traces-outbox", "deadbeef.json"))).toBe(false);
 		expect(await uploadAgentTraceFile({ ...options, sessionFile: keptFile })).toEqual({ status: "unchanged" });

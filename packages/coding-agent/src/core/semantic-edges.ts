@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, truncateSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 
 /**
@@ -92,6 +92,15 @@ export interface SemanticEdge {
 	source_request_id: string;
 	target_request_id: string;
 	type: SemanticEdgeType;
+}
+
+/** The one derivation of where a session's ledger lives; recorder and outbox must agree. */
+export function semanticEdgeLedgerPath(options: {
+	rlmSessionDir?: string;
+	sessionArtifactDir?: string;
+}): string | undefined {
+	const dir = options.rlmSessionDir ?? options.sessionArtifactDir;
+	return dir ? join(dir, SEMANTIC_EDGES_LEDGER_FILENAME) : undefined;
 }
 
 export function modelRequestHeaders(requestId: string): Record<string, string> {
