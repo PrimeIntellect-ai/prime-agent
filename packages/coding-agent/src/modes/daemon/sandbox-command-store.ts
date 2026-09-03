@@ -1913,8 +1913,22 @@ function freshReceiptCopy(receipt: SandboxCommandFileReceipt): SandboxCommandFil
 		sha256: receipt.sha256,
 	});
 }
+// ===========================================================================
+// WeakSet brand — only buildCapability adds instances.
+// ===========================================================================
+
+const sandboxCommandStoreBrand = new WeakSet<object>();
+
+export function isSandboxCommandStoreInstance(value: unknown): value is SandboxCommandStoreCapability {
+	return typeof value === "object" && value !== null && sandboxCommandStoreBrand.has(value);
+}
+
+// ===========================================================================
+// Capability builder
+// ===========================================================================
+
 function buildCapability(store: SandboxCommandStore): SandboxCommandStoreCapability {
-	return Object.freeze({
+	const cap = Object.freeze({
 		admit(input: SandboxCommandAdmitInput) {
 			return store._admitImpl(input);
 		},
@@ -1962,6 +1976,8 @@ function buildCapability(store: SandboxCommandStore): SandboxCommandStoreCapabil
 			}
 		},
 	});
+	sandboxCommandStoreBrand.add(cap);
+	return cap;
 }
 
 // ===========================================================================

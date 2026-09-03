@@ -15,6 +15,7 @@ import { describe, expect, test } from "vitest";
 import { isAgentSessionInstance } from "../src/core/agent-session.js";
 import {
 	createSandboxCommandEffect,
+	isSandboxCommandEffectInstance,
 	type SandboxCommandEffectCapability,
 } from "../src/modes/daemon/sandbox-command-effect.js";
 import { createHarness } from "./suite/harness.js";
@@ -141,6 +142,49 @@ describe("factory (createSandboxCommandEffect)", () => {
 // Codec attacks
 // ===========================================================================
 
+// ===========================================================================
+// WeakSet brand
+// ===========================================================================
+
+describe("WeakSet brand (isSandboxCommandEffectInstance)", () => {
+	test("returns false for null", () => {
+		expect(isSandboxCommandEffectInstance(null)).toBe(false);
+	});
+
+	test("returns false for undefined", () => {
+		expect(isSandboxCommandEffectInstance(undefined)).toBe(false);
+	});
+
+	test("returns false for plain object", () => {
+		expect(isSandboxCommandEffectInstance({})).toBe(false);
+	});
+
+	test("returns false for number", () => {
+		expect(isSandboxCommandEffectInstance(42)).toBe(false);
+	});
+
+	test("returns true for actual capability from factory", async () => {
+		const h = await createHarness();
+		try {
+			const r = createSandboxCommandEffect(h.session);
+			if (!r.ok) throw new Error("expected ok");
+			expect(isSandboxCommandEffectInstance(r.capability)).toBe(true);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	test("capability is frozen", async () => {
+		const h = await createHarness();
+		try {
+			const r = createSandboxCommandEffect(h.session);
+			if (!r.ok) throw new Error("expected ok");
+			expect(Object.isFrozen(r.capability)).toBe(true);
+		} finally {
+			h.cleanup();
+		}
+	});
+});
 describe("codec attacks", () => {
 	test("Proxy frame is rejected (INVALID_INPUT)", async () => {
 		const h = await createHarness();

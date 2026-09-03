@@ -20,6 +20,25 @@ import type { RemoteHostCommandFrameBody } from "./remote-agent-host-protocol.js
 import { decodeCommandFrame } from "./remote-host-frame-codec.js";
 
 // ===========================================================================
+// WeakSet brand — the capability is branded module-privately so
+// downstream consumers (e.g. the relay application) can verify it.
+// ===========================================================================
+
+/** Module-private brand: only newCapability adds instances. */
+const sandboxCommandEffectBrand = new WeakSet<object>();
+
+/**
+ * Branded predicate: rejects any object not created by newCapability
+ * (which is called only from createSandboxCommandEffect).
+ *
+ * Safe against Object.create(SandboxCommandEffectCapability.prototype)
+ * and manual WeakSet.add — brand membership is module-private.
+ */
+export function isSandboxCommandEffectInstance(value: unknown): value is SandboxCommandEffectCapability {
+	return typeof value === "object" && value !== null && sandboxCommandEffectBrand.has(value);
+}
+
+// ===========================================================================
 // Fresh-result constructors — every call returns a NEW frozen object so
 // callers can never share identity with a prior caller's result.
 // ===========================================================================
@@ -301,7 +320,9 @@ function newCapability(session: AgentSession): SandboxCommandEffectCapability {
 		return closePromise;
 	};
 
-	return Object.freeze({ execute, close });
+	const cap = Object.freeze({ execute, close });
+	sandboxCommandEffectBrand.add(cap);
+	return cap;
 }
 
 // ===========================================================================
