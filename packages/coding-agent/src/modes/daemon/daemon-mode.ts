@@ -6048,7 +6048,6 @@ export class AgentDaemon {
 		if (state.runtime.metadata.kind === "subagent") {
 			return false;
 		}
-		// A running bash, in-flight turn, or running child means live work to preserve.
 		if (state.runtime.session.isBashRunning || hasLiveSessionWork(state)) {
 			return false;
 		}

@@ -19,8 +19,7 @@ export function classifyAgentStatus(input: AgentStatusInput): AgentRosterStatus 
 	return input.busy ? "running" : "idle";
 }
 
-// Residency and shutdown-safety busy: delegated child work counts. The section
-// classifier below deliberately does not use it - Running means the session itself.
+// Residency/shutdown-safety busy: delegated child work counts; the section classifier deliberately does not use it.
 export function isSessionSummaryBusy(
 	summary: Pick<SessionSummary, "isSessionActive" | "hasRunningRlmChildren">,
 ): boolean {
