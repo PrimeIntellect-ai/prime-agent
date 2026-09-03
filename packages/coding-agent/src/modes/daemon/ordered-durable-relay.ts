@@ -286,8 +286,12 @@ function bindStore(raw: unknown, close: OwnedClose): BoundStore | null {
 }
 
 async function closeAll(closes: readonly OwnedClose[]): Promise<boolean> {
-	const results = await Promise.all([...new Set(closes)].map((close) => close()));
-	return results.every((closed) => closed);
+	let confirmed = true;
+	const unique = [...new Set(closes)];
+	for (let index = unique.length - 1; index >= 0; index -= 1) {
+		if (!(await unique[index]())) confirmed = false;
+	}
+	return confirmed;
 }
 
 function snapshotTransport(raw: unknown, close: OwnedClose): TransportCapability | null {

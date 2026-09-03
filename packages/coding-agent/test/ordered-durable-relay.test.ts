@@ -907,4 +907,68 @@ describe("ordered durable relay", () => {
 		}
 		await reopened.relay.close();
 	});
+	it("closes owners in reverse acquisition order sequentially", async () => {
+		const order: string[] = [];
+		const counts = capCounts();
+		const incoming = await openStore("received", counts);
+		const outgoing = await openStore("sent", counts);
+		const transport = {
+			send: async () => Object.freeze({ status: "sent" }),
+			close: async () => {
+				order.push("transport");
+				return Object.freeze({ status: "closed" });
+			},
+		};
+		const application = {
+			apply: async () => Object.freeze({ status: "applied" }),
+			close: async () => {
+				order.push("application");
+				return Object.freeze({ status: "closed" });
+			},
+		};
+		const created = await createOrderedDurableRelay({
+			identity: IDENTITY,
+			incomingStore: incoming,
+			outgoingStore: outgoing,
+			transport,
+			application,
+		});
+		expect(created.ok).toBe(true);
+		if (!created.ok) return;
+		await created.relay.close();
+		// Acquisition order: incoming store, outgoing store, transport, application
+		// Reverse close: application, transport, outgoing store, incoming store
+		expect(order).toEqual(["application", "transport"]);
+		expect(counts.journal).toBe(2);
+		expect(counts.marker).toBe(2);
+		expect(counts.recovery).toBe(2);
+	});
+
+	it("returns CLOSE_UNCERTAIN when transport close fails on normal close", async () => {
+		const counts = capCounts();
+		const incoming = await openStore("received", counts);
+		const outgoing = await openStore("sent", counts);
+		const transport = {
+			send: async () => Object.freeze({ status: "sent" }),
+			close: async () => Object.freeze({ status: "error" }),
+		};
+		const application = {
+			apply: async () => Object.freeze({ status: "applied" }),
+			close: async () => Object.freeze({ status: "closed" }),
+		};
+		const created = await createOrderedDurableRelay({
+			identity: IDENTITY,
+			incomingStore: incoming,
+			outgoingStore: outgoing,
+			transport,
+			application,
+		});
+		expect(created.ok).toBe(true);
+		if (!created.ok) return;
+		const result = await created.relay.close();
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+		}
+	});
 });

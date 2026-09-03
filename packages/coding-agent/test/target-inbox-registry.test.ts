@@ -443,4 +443,73 @@ describe("target inbox registry", () => {
 		});
 		expect(calls).toBe(0);
 	});
+	it("returns CLOSE_UNCERTAIN when factory close fails during registry close", async () => {
+		const order: string[] = [];
+		const entry = {
+			receive: async () => success(),
+			send: async () => success(),
+			dispatchPending: async () => success(),
+			close: async () => {
+				order.push("entry");
+				return Object.freeze({ status: "closed" });
+			},
+		};
+		const registry = expectSuccess(
+			await createTargetInboxRegistry({
+				catalog: {
+					isCurrent: async () => Object.freeze({ status: "current" }),
+					close: async () => {
+						order.push("catalog");
+						return Object.freeze({ status: "closed" });
+					},
+				},
+				factory: {
+					create: async () => Object.freeze({ ok: true, value: entry }),
+					close: async () => {
+						order.push("factory");
+						return Object.freeze({ status: "error" });
+					},
+				},
+			}),
+		);
+		await registry.get(IDENTITY);
+		const result = await registry.close();
+		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
+		expect(order).toEqual(["entry", "factory", "catalog"]);
+	});
+
+	it("returns CLOSE_UNCERTAIN when catalog close fails during registry close", async () => {
+		const order: string[] = [];
+		const entry = {
+			receive: async () => success(),
+			send: async () => success(),
+			dispatchPending: async () => success(),
+			close: async () => {
+				order.push("entry");
+				return Object.freeze({ status: "closed" });
+			},
+		};
+		const registry = expectSuccess(
+			await createTargetInboxRegistry({
+				catalog: {
+					isCurrent: async () => Object.freeze({ status: "current" }),
+					close: async () => {
+						order.push("catalog");
+						return Object.freeze({ status: "error" });
+					},
+				},
+				factory: {
+					create: async () => Object.freeze({ ok: true, value: entry }),
+					close: async () => {
+						order.push("factory");
+						return Object.freeze({ status: "closed" });
+					},
+				},
+			}),
+		);
+		await registry.get(IDENTITY);
+		const result = await registry.close();
+		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
+		expect(order).toEqual(["entry", "factory", "catalog"]);
+	});
 });
