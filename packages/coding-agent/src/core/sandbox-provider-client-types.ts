@@ -42,8 +42,8 @@ export interface FrameTransport {
 export interface SandboxProviderClientConfig {
 	/** Transport over which frames are sent and received. */
 	transport: FrameTransport;
-	/** Model lookup for resolving ProxyModelRef to Model objects. */
-	modelLookup: ModelLookup;
+	/** Model lookup for resolving ProxyModelRef to Model objects. Null disables lookup. */
+	modelLookup: ModelLookup | null;
 }
 
 export interface ModelLookup {
