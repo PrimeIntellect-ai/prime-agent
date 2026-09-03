@@ -260,6 +260,7 @@ function hasInvalidPathChar(path: string): boolean {
 	for (let i = 0; i < path.length; i++) {
 		const cp = path.charCodeAt(i);
 		if (cp <= 0x1f) return true;
+		if (cp >= 0x80 && cp <= 0x9f) return true;
 		if (cp === 0x7f) return true;
 		if (cp === 0xfeff) return true;
 		if (cp === 0x5c) return true;

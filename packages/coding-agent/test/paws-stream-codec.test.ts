@@ -480,6 +480,12 @@ describe("boundaries", () => {
 			PAWS_ERRORS.INVALID_PATH,
 		);
 	});
+	it("rejects C1 control char (U+0085)", () => {
+		expectFail(
+			encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("a\u0085b", 10)] }),
+			PAWS_ERRORS.INVALID_PATH,
+		);
+	});
 	it("rejects non-NFC path", () => {
 		expectFail(
 			encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("e\u0301.txt", 10)] }),
