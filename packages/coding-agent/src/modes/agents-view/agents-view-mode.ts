@@ -2833,16 +2833,12 @@ function hasLiveWork(row: AgentsViewRow): boolean {
 	return row.section === "running" || row.runningSubagentCount > 0 || row.summary.hasRunningRlmChildren === true;
 }
 
-/** `↑<input> ↓<output> · $<own>`, plus `($<total> w/ subagents)` when descendants added visible spend. */
+/** Every row renders the full cell, zeros included: `↑<up> ↓<down> · $<own> ($<total> w/ subagents)`. */
 function formatRowUsage(row: AgentsViewRow): string {
 	const usage = row.summary.usage;
-	if (!usage) {
-		return "";
-	}
-	const own = usage.cost.toFixed(2);
-	const recursive = row.recursiveCost.toFixed(2);
-	const tokens = `↑${formatTokenCount(usage.inputTokens)} ↓${formatTokenCount(usage.outputTokens)}`;
-	return `${tokens} · $${own}${recursive !== own ? ` ($${recursive} w/ subagents)` : ""}`;
+	return `↑${formatTokenCount(usage?.inputTokens ?? 0)} ↓${formatTokenCount(usage?.outputTokens ?? 0)} · $${(
+		usage?.cost ?? 0
+	).toFixed(2)} ($${row.recursiveCost.toFixed(2)} w/ subagents)`;
 }
 
 // Explicit session names read bold so they stand out from fallback titles

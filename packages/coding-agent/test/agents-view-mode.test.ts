@@ -751,16 +751,23 @@ describe("AgentsViewMode", () => {
 			expect(stripAnsi(invoke("renderRow", view, parentRow, 200) as string)).toContain(
 				"↑12k ↓1.2k · $0.42 ($1.10 w/ subagents)",
 			);
-			// A leaf with no descendant spend shows its own cost alone.
 			const childRow = rows.find(
 				(row) => row.summary.sessionId === "spender-child-session" && row.kind === "subagent",
 			);
-			const childLine = stripAnsi(invoke("renderRow", view, childRow, 200) as string);
-			expect(childLine).toContain("↑500 ↓50 · $0.68");
-			expect(childLine).not.toContain("w/ subagents");
+			expect(stripAnsi(invoke("renderRow", view, childRow, 200) as string)).toContain(
+				"↑500 ↓50 · $0.68 ($0.68 w/ subagents)",
+			);
+			// Zeros render as zeros; the message-count detail stays gone.
 			const inactiveRow = rows.find((row) => row.summary.sessionId === "saved-only-session");
 			const inactiveLine = stripAnsi(invoke("renderRow", view, inactiveRow, 200) as string);
 			expect(inactiveLine).not.toContain("7 ·");
+			expect(inactiveLine).toContain("↑0 ↓0 · $0.00 ($0.00 w/ subagents)");
+			// Descendant-only spend still shows the money on a zero-usage parent.
+			const bareParent = { ...rows.find((row) => row.summary.sessionId === "spender-session")! };
+			bareParent.summary = { ...bareParent.summary, usage: undefined };
+			expect(stripAnsi(invoke("renderRow", view, bareParent, 200) as string)).toContain(
+				"↑0 ↓0 · $0.00 ($1.10 w/ subagents)",
+			);
 		} finally {
 			stopThemeWatcher();
 		}
