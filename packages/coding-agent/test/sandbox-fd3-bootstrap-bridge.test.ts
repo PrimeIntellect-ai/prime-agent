@@ -185,6 +185,14 @@ describe("sandbox FD3 bootstrap bridge", () => {
 		expect(h.closeCalls.value).toBe(1);
 	});
 
+	it("accepts an exact cleanup-confirmed terminal monitor result", async () => {
+		const h = harness();
+		const result = await createSandboxFd3BootstrapBridge(h.input);
+		if (!result.ok) throw new Error("bridge failed");
+		h.closeRuntime(Object.freeze({ ok: false, code: "CLOSED", cleanupConfirmed: true }));
+		expect(await result.session.lifetime).toEqual({ ok: true });
+	});
+
 	it("waits for write callbacks before it observes readiness", async () => {
 		const h = harness();
 		let writeCallback: unknown = null;
@@ -353,5 +361,369 @@ describe("sandbox bootstrap reserved mode parser", () => {
 		const argv = ["--prime-agent-fd3-bootstrap", "--ready-nonce", NONCE];
 		Object.defineProperty(argv, "extra", { value: true });
 		expect(parseSandboxBootstrapMode(argv)).toEqual({ ok: false });
+	});
+});
+describe("nativePromise edge cases", () => {
+	it("rejects a Promise subclass in monitor", async () => {
+		class SubPromise extends Promise<number> {
+			constructor() {
+				super((resolve) => {
+					resolve(42);
+				});
+			}
+		}
+		const sub = new SubPromise();
+		const h = harness();
+		const wrongMonitor = Object.freeze({
+			ready: sub,
+			closed: sub,
+			close: (): Promise<unknown> => sub,
+		});
+		// Build a launcher that returns a started result with a bad monitor
+		const badMonitor = wrongMonitor;
+		// Cast-free: use the harness writable from a known-good base
+		const dummyWritable = Object.freeze({
+			write: (_chunk: Uint8Array, cb: (result: unknown) => void): unknown => {
+				cb(Object.freeze({ status: "written" }));
+				return Object.freeze({ status: "started" });
+			},
+			release: (cb: (result: unknown) => void): unknown => {
+				cb(Object.freeze({ status: "released" }));
+				return Object.freeze({ status: "started" });
+			},
+			end: (cb: (result: unknown) => void): unknown => {
+				cb(Object.freeze({ status: "ended" }));
+				return Object.freeze({ status: "started" });
+			},
+		});
+		const launcher = {
+			async launch(_raw: unknown): Promise<unknown> {
+				return Object.freeze({ status: "started", monitor: badMonitor, writable: dummyWritable });
+			},
+		};
+		const result = await createSandboxFd3BootstrapBridge({ ...h.input, launcher });
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toMatch(/^(INPUT_INVALID|CLEANUP_UNCERTAIN)$/);
+		}
+	});
+
+	it("rejects a Promise with wrong prototype in monitor", async () => {
+		const fakePromise = Object.create(Object.prototype);
+		// biome-ignore lint/suspicious/noThenProperty: intentional wrong-prototype test
+		Object.defineProperty(fakePromise, "then", { value: () => {} });
+		const h = harness();
+		const wrongMonitor = Object.freeze({
+			ready: fakePromise,
+			closed: fakePromise,
+			close: (): Promise<unknown> => Promise.resolve(Object.freeze({ ok: true })),
+		});
+		// Build a launcher that returns a started result with a bad monitor
+		const badMonitor = wrongMonitor;
+		// Cast-free: use the harness writable from a known-good base
+		const dummyWritable = Object.freeze({
+			write: (_chunk: Uint8Array, cb: (result: unknown) => void): unknown => {
+				cb(Object.freeze({ status: "written" }));
+				return Object.freeze({ status: "started" });
+			},
+			release: (cb: (result: unknown) => void): unknown => {
+				cb(Object.freeze({ status: "released" }));
+				return Object.freeze({ status: "started" });
+			},
+			end: (cb: (result: unknown) => void): unknown => {
+				cb(Object.freeze({ status: "ended" }));
+				return Object.freeze({ status: "started" });
+			},
+		});
+		const launcher = {
+			async launch(_raw: unknown): Promise<unknown> {
+				return Object.freeze({ status: "started", monitor: badMonitor, writable: dummyWritable });
+			},
+		};
+		const result = await createSandboxFd3BootstrapBridge({ ...h.input, launcher });
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toMatch(/^(INPUT_INVALID|CLEANUP_UNCERTAIN)$/);
+		}
+	});
+
+	it("rejects hostile stdin (missing methods)", async () => {
+		const bridgeInput = Object.freeze({
+			stdinSource: { on: () => {} }, // missing removeListener, resume
+			launcher: Object.freeze({
+				launch: (): Promise<unknown> => Promise.resolve(Object.freeze({ status: "error", code: "LAUNCH_FAILED" })),
+			}),
+			publisher: Object.freeze({
+				publish: (): Promise<unknown> => Promise.resolve(Object.freeze({ status: "published" })),
+			}),
+			readyNonce: "0123456789abcdef0123456789abcdef",
+			timeouts: Object.freeze({
+				frameReadTimeoutMs: 100,
+				credentialWriteTimeoutMs: 100,
+				launchTimeoutMs: 100,
+				monitorTimeoutMs: 100,
+				publishTimeoutMs: 100,
+			}),
+		});
+		const result = await createSandboxFd3BootstrapBridge(bridgeInput);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toBe("INPUT_INVALID");
+		}
+	});
+
+	it("rejects hostile stdin (accessor methods)", async () => {
+		const stdinAccessor: Record<string, unknown> = {};
+		Object.defineProperty(stdinAccessor, "on", { enumerable: true, get: () => () => {} });
+		Object.defineProperty(stdinAccessor, "removeListener", { enumerable: true, value: () => {} });
+		Object.defineProperty(stdinAccessor, "resume", { enumerable: true, value: () => {} });
+		const bridgeInput = Object.freeze({
+			stdinSource: stdinAccessor,
+			launcher: Object.freeze({
+				launch: (): Promise<unknown> => Promise.resolve(Object.freeze({ status: "error", code: "LAUNCH_FAILED" })),
+			}),
+			publisher: Object.freeze({
+				publish: (): Promise<unknown> => Promise.resolve(Object.freeze({ status: "published" })),
+			}),
+			readyNonce: "0123456789abcdef0123456789abcdef",
+			timeouts: Object.freeze({
+				frameReadTimeoutMs: 100,
+				credentialWriteTimeoutMs: 100,
+				launchTimeoutMs: 100,
+				monitorTimeoutMs: 100,
+				publishTimeoutMs: 100,
+			}),
+		});
+		const result = await createSandboxFd3BootstrapBridge(bridgeInput);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toBe("INPUT_INVALID");
+		}
+	});
+
+	it("rejects hostile stdin (prototype with Proxy)", async () => {
+		const proxyProto = new Proxy({ on: () => {}, removeListener: () => {}, resume: () => {} }, {});
+		const stdinObj = Object.create(proxyProto);
+		const bridgeInput = Object.freeze({
+			stdinSource: stdinObj,
+			launcher: Object.freeze({
+				launch: (): Promise<unknown> => Promise.resolve(Object.freeze({ status: "error", code: "LAUNCH_FAILED" })),
+			}),
+			publisher: Object.freeze({
+				publish: (): Promise<unknown> => Promise.resolve(Object.freeze({ status: "published" })),
+			}),
+			readyNonce: "0123456789abcdef0123456789abcdef",
+			timeouts: Object.freeze({
+				frameReadTimeoutMs: 100,
+				credentialWriteTimeoutMs: 100,
+				launchTimeoutMs: 100,
+				monitorTimeoutMs: 100,
+				publishTimeoutMs: 100,
+			}),
+		});
+		const result = await createSandboxFd3BootstrapBridge(bridgeInput);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toBe("INPUT_INVALID");
+		}
+	});
+
+	describe("ownership-first malformed result handling", () => {
+		it("closes monitor on custom-prototype outer object with valid monitor", async () => {
+			const h = harness();
+			// Create a valid monitor that reports close success
+			const monitor = Object.freeze({
+				ready: Promise.resolve(Object.freeze({ ok: true, pid: 712 })),
+				closed: Promise.resolve(Object.freeze({ ok: true })),
+				close: (): Promise<unknown> => {
+					h.closeCalls.value += 1;
+					return Promise.resolve(Object.freeze({ ok: true }));
+				},
+			});
+			const writable = Object.freeze({
+				write: (_value: Uint8Array, cb: (result: unknown) => void): unknown => {
+					cb(Object.freeze({ status: "written" }));
+					return Object.freeze({ status: "started" });
+				},
+				release: (cb: (result: unknown) => void): unknown => {
+					cb(Object.freeze({ status: "released" }));
+					return Object.freeze({ status: "started" });
+				},
+				end: (cb: (result: unknown) => void): unknown => {
+					cb(Object.freeze({ status: "ended" }));
+					return Object.freeze({ status: "started" });
+				},
+			});
+			// Create an outer result with wrong prototype (not Object.prototype)
+			const outerProto = Object.create(null);
+			outerProto.status = "started";
+			outerProto.monitor = monitor;
+			outerProto.writable = writable;
+			// But the monitor is valid; allowing launcher to pass it direct
+			const launcher = {
+				async launch(_raw: unknown): Promise<unknown> {
+					// Return the null-prototype result that has valid monitor
+					return outerProto;
+				},
+			};
+			const result = await createSandboxFd3BootstrapBridge({ ...h.input, launcher });
+			expect(result.ok).toBe(false);
+			if (!result.ok) {
+				// Valid monitor with confirmed close → LAUNCH_FAILED (close confirmed, just launcher result was malformed)
+				expect(result.error.code).toBe("LAUNCH_FAILED");
+			}
+			expect(h.closeCalls.value).toBe(1);
+		});
+
+		it("CLEANUP_UNCERTAIN for accessor monitor descriptor", async () => {
+			const h = harness();
+			// Create an outer result where "monitor" is an accessor (getter)
+			const monitor = Object.freeze({
+				ready: Promise.resolve(Object.freeze({ ok: true, pid: 712 })),
+				closed: Promise.resolve(Object.freeze({ ok: true })),
+				close: (): Promise<unknown> => Promise.resolve(Object.freeze({ ok: true })),
+			});
+			const accessorObj: Record<string, unknown> = {};
+			Object.defineProperty(accessorObj, "monitor", {
+				enumerable: true,
+				get: (): unknown => monitor,
+			});
+			const writable = Object.freeze({
+				write: (_chunk: Uint8Array, cb: (result: unknown) => void): unknown => {
+					cb(Object.freeze({ status: "written" }));
+					return Object.freeze({ status: "started" });
+				},
+				release: (cb: (result: unknown) => void): unknown => {
+					cb(Object.freeze({ status: "released" }));
+					return Object.freeze({ status: "started" });
+				},
+				end: (cb: (result: unknown) => void): unknown => {
+					cb(Object.freeze({ status: "ended" }));
+					return Object.freeze({ status: "started" });
+				},
+			});
+			const launcher = {
+				async launch(_raw: unknown): Promise<unknown> {
+					accessorObj.status = "started";
+					accessorObj.writable = writable;
+					return accessorObj;
+				},
+			};
+			const result = await createSandboxFd3BootstrapBridge({ ...h.input, launcher });
+			expect(result.ok).toBe(false);
+			if (!result.ok) {
+				// Accessor descriptor -> ownership uncertain -> CLEANUP_UNCERTAIN
+				expect(result.error.code).toBe("CLEANUP_UNCERTAIN");
+			}
+		});
+
+		it("CLEANUP_UNCERTAIN for accessor monitor in late second-window", async () => {
+			// Similar to above but with a delayed launcher that times out
+			const h = harness();
+			const monitor = Object.freeze({
+				ready: Promise.resolve(Object.freeze({ ok: true, pid: 712 })),
+				closed: Promise.resolve(Object.freeze({ ok: true })),
+				close: (): Promise<unknown> => Promise.resolve(Object.freeze({ ok: true })),
+			});
+			const accessorObj: Record<string, unknown> = {};
+			Object.defineProperty(accessorObj, "monitor", {
+				enumerable: true,
+				get: (): unknown => monitor,
+			});
+			accessorObj.status = "started";
+			const writable = Object.freeze({
+				write: (_value: Uint8Array, cb: (result: unknown) => void): unknown => {
+					cb(Object.freeze({ status: "written" }));
+					return Object.freeze({ status: "started" });
+				},
+				release: (cb: (result: unknown) => void): unknown => {
+					cb(Object.freeze({ status: "released" }));
+					return Object.freeze({ status: "started" });
+				},
+				end: (cb: (result: unknown) => void): unknown => {
+					cb(Object.freeze({ status: "ended" }));
+					return Object.freeze({ status: "started" });
+				},
+			});
+			// Launcher with a long delay to trigger timeout
+			let resolveLate: (value: unknown) => void = (): void => {};
+			const latePromise = new Promise<unknown>((resolve) => {
+				resolveLate = resolve;
+			});
+			const launcher = {
+				launch(_raw: unknown): Promise<unknown> {
+					// Resolve after a delay > launchTimeoutMs
+					setTimeout(() => {
+						accessorObj.writable = writable;
+						resolveLate(accessorObj);
+					}, 200);
+					return latePromise;
+				},
+			};
+			const shortTimeouts = Object.freeze({
+				frameReadTimeoutMs: 50,
+				credentialWriteTimeoutMs: 50,
+				launchTimeoutMs: 10,
+				monitorTimeoutMs: 300,
+				publishTimeoutMs: 50,
+			});
+			const result = await createSandboxFd3BootstrapBridge({
+				...h.input,
+				launcher,
+				timeouts: shortTimeouts,
+			});
+			expect(result.ok).toBe(false);
+			if (!result.ok) {
+				// Accessor monitor in second window -> CLEANUP_UNCERTAIN
+				expect(result.error.code).toBe("CLEANUP_UNCERTAIN");
+			}
+		});
+	});
+
+	describe("ownership-first with preliminary acquire", () => {
+		it("returns uncertain for Proxy with no monitor", async () => {
+			// Proxy can lie about own keys. acquireMonitorRaw rejects Proxy as uncertain.
+			const proxy = new Proxy({ status: "started" }, {});
+			const h = harness();
+			const launcher = {
+				async launch(_raw: unknown): Promise<unknown> {
+					return proxy;
+				},
+			};
+			const result = await createSandboxFd3BootstrapBridge({ ...h.input, launcher });
+			expect(result.ok).toBe(false);
+			if (!result.ok) {
+				expect(result.error.code).toBe("CLEANUP_UNCERTAIN");
+			}
+		});
+
+		it("owned-monitor + error shape returns CLEANUP_UNCERTAIN", async () => {
+			const h = harness();
+			// Launcher returns an error result (with ok:false) BUT also has an own monitor
+			// Ownership dominates: must close monitor and report uncertainty.
+			const monitorWithError = Object.freeze({
+				ready: Promise.resolve(Object.freeze({ ok: true, pid: 712 })),
+				closed: Promise.resolve(Object.freeze({ ok: true })),
+				close: (): Promise<unknown> =>
+					Promise.resolve(Object.freeze({ ok: false, code: "CLEANUP_UNCONFIRMED", cleanupConfirmed: false })),
+			});
+			const errorWithMonitor = Object.freeze({
+				ok: false,
+				code: "SPAWN_FAILED",
+				cleanupConfirmed: true,
+				monitor: monitorWithError,
+			});
+			const launcher = {
+				async launch(_raw: unknown): Promise<unknown> {
+					return errorWithMonitor;
+				},
+			};
+			const result = await createSandboxFd3BootstrapBridge({ ...h.input, launcher });
+			expect(result.ok).toBe(false);
+			if (!result.ok) {
+				// Ownership with failed close → CLEANUP_UNCERTAIN
+				expect(result.error.code).toBe("CLEANUP_UNCERTAIN");
+			}
+		});
 	});
 });

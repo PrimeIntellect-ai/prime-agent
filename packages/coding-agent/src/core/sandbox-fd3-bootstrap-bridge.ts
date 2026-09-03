@@ -21,6 +21,23 @@ const STARTED_KEYS = new Set(["monitor", "status", "writable"]);
 const MONITOR_KEYS = new Set(["close", "closed", "ready"]);
 const READY_OK_KEYS = new Set(["ok", "pid"]);
 const STATUS_KEYS = new Set(["status"]);
+const MONITOR_FAILURE_CODES = new Set([
+	"CLOSED",
+	"CLEANUP_UNCONFIRMED",
+	"EXIT",
+	"INVALID_CHUNK",
+	"INVALID_INPUT",
+	"INVALID_PID",
+	"LINE_TOO_LONG",
+	"NONCE_MISMATCH",
+	"PROCESS_ERROR",
+	"PROCESS_EVENT",
+	"READY_TIMEOUT",
+	"STDERR",
+	"SUBSCRIBE_REJECTED",
+	"SYNCHRONOUS_OVERFLOW",
+	"TRAILING_DATA",
+]);
 const NONCE_RE = /^[0-9a-f]{32}$/;
 const MAX_TIMEOUT_MS = 300_000;
 const MAX_FRAME_READ_TIMEOUT_MS = 120_000;
@@ -107,6 +124,7 @@ function nativePromise(raw: unknown): raw is Promise<unknown> {
 	try {
 		return (
 			!types.isProxy(raw) &&
+			types.isPromise(raw) &&
 			Object.getPrototypeOf(raw) === Promise.prototype &&
 			Object.getOwnPropertyNames(raw).length === 0 &&
 			Object.getOwnPropertySymbols(raw).length === 0
@@ -116,7 +134,7 @@ function nativePromise(raw: unknown): raw is Promise<unknown> {
 	}
 }
 
-function observe(raw: unknown, timeoutMs: number, late?: (value: unknown) => void): Promise<Observed> {
+function observe(raw: unknown, timeoutMs: number): Promise<Observed> {
 	if (!nativePromise(raw)) return Promise.resolve(Object.freeze({ status: "invalid" as const }));
 	return new Promise<Observed>((resolve) => {
 		let settled = false;
@@ -128,10 +146,7 @@ function observe(raw: unknown, timeoutMs: number, late?: (value: unknown) => voi
 		try {
 			Reflect.apply(Promise.prototype.then, raw, [
 				(value: unknown) => {
-					if (settled) {
-						late?.(value);
-						return;
-					}
+					if (settled) return;
 					settled = true;
 					clearTimeout(timer);
 					resolve(Object.freeze({ status: "fulfilled" as const, value }));
@@ -161,8 +176,7 @@ function bind(raw: unknown, descriptors: Descriptors, key: string): BoundMethod 
 	} catch {
 		return null;
 	}
-	const callable = value as CallableFunction;
-	return (...args: readonly unknown[]): unknown => Reflect.apply(callable, raw, args);
+	return (...args: readonly unknown[]): unknown => Reflect.apply(value, raw, args);
 }
 
 function snapshot(raw: unknown): Snapshot | null {
@@ -208,7 +222,7 @@ function snapshot(raw: unknown): Snapshot | null {
 		timeoutSnapshot[key] = value;
 	}
 	return Object.freeze({
-		stdinSource,
+		stdinSource: stdinSource,
 		launch,
 		launcherIdentity: launcherRaw,
 		publish,
@@ -219,13 +233,14 @@ function snapshot(raw: unknown): Snapshot | null {
 }
 
 function discoverMonitor(raw: unknown): BoundMonitor | null {
+	if (typeof raw !== "object" || raw === null) return null;
 	const descriptors = exact(raw, MONITOR_KEYS);
 	if (!descriptors) return null;
 	const close = bind(raw, descriptors, "close");
 	const ready = descriptors.ready.value;
 	const closed = descriptors.closed.value;
 	if (!close || !nativePromise(ready) || !nativePromise(closed)) return null;
-	return Object.freeze({ identity: raw as object, ready, closed, close });
+	return Object.freeze({ identity: raw, ready, closed, close });
 }
 
 function started(raw: unknown): Readonly<{ monitor: BoundMonitor; writable: object }> | null {
@@ -247,6 +262,18 @@ function status(raw: unknown, expected: string): boolean {
 	return descriptors?.status?.value === expected;
 }
 
+function cleanupConfirmed(raw: unknown): boolean {
+	const ok = exact(raw, new Set(["ok"]));
+	if (ok?.ok?.value === true) return true;
+	const failed = exact(raw, new Set(["cleanupConfirmed", "code", "ok"]));
+	return (
+		failed?.ok?.value === false &&
+		failed.cleanupConfirmed?.value === true &&
+		typeof failed.code?.value === "string" &&
+		MONITOR_FAILURE_CODES.has(failed.code.value)
+	);
+}
+
 function closeMonitor(monitor: BoundMonitor, timeoutMs: number): () => Promise<SandboxFd3BridgeCloseResult> {
 	let shared: Promise<SandboxFd3BridgeCloseResult> | null = null;
 	return (): Promise<SandboxFd3BridgeCloseResult> => {
@@ -259,7 +286,7 @@ function closeMonitor(monitor: BoundMonitor, timeoutMs: number): () => Promise<S
 			return shared;
 		}
 		shared = observe(raw, timeoutMs).then((observed) =>
-			observed.status === "fulfilled" && exact(observed.value, new Set(["ok"]))?.ok?.value === true
+			observed.status === "fulfilled" && cleanupConfirmed(observed.value)
 				? Object.freeze({ ok: true as const })
 				: Object.freeze({ ok: false as const, code: "CLEANUP_UNCERTAIN" as const }),
 		);
@@ -280,14 +307,20 @@ function readyPid(raw: unknown): number | null {
 }
 
 function lifetime(monitor: BoundMonitor): Promise<SandboxFd3BridgeLifetimeResult> {
-	return Promise.prototype.then.call(
-		monitor.closed,
-		(value: unknown) =>
-			exact(value, new Set(["ok"]))?.ok?.value === true
-				? Object.freeze({ ok: true as const })
-				: Object.freeze({ ok: false as const, code: "RUNTIME_CLOSED_UNCONFIRMED" as const }),
-		() => Object.freeze({ ok: false as const, code: "RUNTIME_CLOSED_UNCONFIRMED" as const }),
-	) as Promise<SandboxFd3BridgeLifetimeResult>;
+	return new Promise<SandboxFd3BridgeLifetimeResult>((resolve) => {
+		Reflect.apply(Promise.prototype.then, monitor.closed, [
+			(value: unknown) => {
+				resolve(
+					cleanupConfirmed(value)
+						? Object.freeze({ ok: true as const })
+						: Object.freeze({ ok: false as const, code: "RUNTIME_CLOSED_UNCONFIRMED" as const }),
+				);
+			},
+			() => {
+				resolve(Object.freeze({ ok: false as const, code: "RUNTIME_CLOSED_UNCONFIRMED" as const }));
+			},
+		]);
+	});
 }
 
 function erase(bytes: Uint8Array): void {
@@ -306,23 +339,114 @@ async function cleanupFailure(
 	return result.ok ? failure(code) : failure("CLEANUP_UNCERTAIN");
 }
 
-function closeLateStarted(raw: unknown, timeoutMs: number): void {
-	const value = started(raw);
-	if (value) {
-		void closeMonitor(value.monitor, timeoutMs)();
-		return;
+/**
+ * Try to acquire a monitor directly from a raw launch result value, BEFORE
+ * validating the outer object shape (prototype, symbols, extra keys).
+ *
+ * Uses Object.getOwnPropertyDescriptor directly on the raw value to check
+ * for an own "monitor" key.  Returns:
+ *   - { monitor, uncertain: false } on a valid data-descriptor monitor
+ *   - { monitor: null, uncertain: true } for an accessor descriptor (ownership uncertain)
+ *   - { monitor: null, uncertain: false } for no own "monitor" key (no owner)
+ *
+ * Caller is expected to close the returned monitor (if any) and produce the
+ * appropriate error code.
+ */
+function acquireMonitorRaw(raw: unknown): Readonly<{ monitor: BoundMonitor | null; uncertain: boolean }> {
+	if (typeof raw !== "object" || raw === null) {
+		return Object.freeze({ monitor: null, uncertain: false });
 	}
-	const preliminary = rawDescriptors(raw);
-	const descriptor = preliminary?.monitor;
-	const monitor = discoverMonitor(descriptor && "value" in descriptor ? descriptor.value : undefined);
-	if (monitor) void closeMonitor(monitor, timeoutMs)();
+	let desc: PropertyDescriptor | undefined;
+	try {
+		if (types.isProxy(raw)) return Object.freeze({ monitor: null, uncertain: true });
+		desc = Object.getOwnPropertyDescriptor(raw, "monitor");
+	} catch {
+		// Hostile getOwnPropertyDescriptor on the value — ownership uncertain
+		return Object.freeze({ monitor: null, uncertain: true });
+	}
+	if (desc === undefined) {
+		return Object.freeze({ monitor: null, uncertain: false });
+	}
+	// Accessor descriptor — ownership is uncertain (not just no-owner)
+	if (desc.get !== undefined || desc.set !== undefined) {
+		return Object.freeze({ monitor: null, uncertain: true });
+	}
+	// Must be enumerable data descriptor
+	if (!desc.enumerable || !("value" in desc)) {
+		return Object.freeze({ monitor: null, uncertain: true });
+	}
+	const monitor = discoverMonitor(desc.value);
+	if (!monitor) {
+		// Has an own monitor key but value is not a valid monitor — uncertain
+		return Object.freeze({ monitor: null, uncertain: true });
+	}
+	return Object.freeze({ monitor, uncertain: false });
 }
 
+const LAUNCHER_ERROR_KEYS = new Set(["code", "status"]);
+const LAUNCHER_ERROR_CODES = new Set(["CLEANUP_UNCERTAIN", "LAUNCH_FAILED"]);
+
+function decodeLauncherError(raw: unknown): { code: SandboxFd3BridgeErrorCode } | null {
+	const descriptors = exact(raw, LAUNCHER_ERROR_KEYS);
+	if (!descriptors) return null;
+	const statusVal = descriptors.status?.value;
+	const codeVal = descriptors.code?.value;
+	if (statusVal !== "error" || typeof codeVal !== "string" || !LAUNCHER_ERROR_CODES.has(codeVal)) return null;
+	// Narrow the code string via exact literal check to avoid casts
+	if (codeVal === "LAUNCH_FAILED" || codeVal === "CLEANUP_UNCERTAIN") {
+		return Object.freeze({ code: codeVal });
+	}
+	return null;
+}
+
+// Local interface that matches StdinSource shape structurally.
+function bindStdinSourceCapability(raw: object): StdinSource | null {
+	try {
+		if (types.isProxy(raw)) return null;
+	} catch {
+		return null;
+	}
+	// Exact own-enumerable data descriptor validation — no prototype chain scan
+	const ownKeySet: ReadonlySet<string> = Object.freeze(new Set(["on", "removeListener", "resume"]));
+	const descriptors = exact(raw, ownKeySet);
+	if (!descriptors) return null;
+	const rawOn = descriptors.on.value;
+	const rawRemoveListener = descriptors.removeListener.value;
+	const rawResume = descriptors.resume.value;
+	if (typeof rawOn !== "function" || typeof rawRemoveListener !== "function" || typeof rawResume !== "function")
+		return null;
+	try {
+		if (types.isProxy(rawOn) || types.isProxy(rawRemoveListener) || types.isProxy(rawResume)) return null;
+	} catch {
+		return null;
+	}
+	// Bind to original owner via Reflect.apply
+	const on: {
+		(event: "data", cb: (chunk: Uint8Array) => void): void;
+		(event: "end", cb: () => void): void;
+		(event: "error", cb: (err: Error) => void): void;
+	} = (event: unknown, cb: unknown): void => {
+		Reflect.apply(rawOn, raw, [event, cb]);
+	};
+	const removeListener: {
+		(event: "data", cb: (chunk: Uint8Array) => void): void;
+		(event: "end", cb: () => void): void;
+		(event: "error", cb: (err: Error) => void): void;
+	} = (event: unknown, cb: unknown): void => {
+		Reflect.apply(rawRemoveListener, raw, [event, cb]);
+	};
+	const resume: () => void = (): void => {
+		Reflect.apply(rawResume, raw, []);
+	};
+	return Object.freeze({ on, removeListener, resume });
+}
 export async function createSandboxFd3BootstrapBridge(raw: unknown): Promise<CreateSandboxFd3BridgeResult> {
 	const input = snapshot(raw);
 	if (!input) return failure("INPUT_INVALID");
+	const stdinCap = bindStdinSourceCapability(input.stdinSource);
+	if (!stdinCap) return failure("INPUT_INVALID");
 	const read = await consumeStdinBootstrapFrame(
-		input.stdinSource as StdinSource,
+		stdinCap,
 		async (payload: Uint8Array) => decodeSandboxBootstrapPayload(payload),
 		Object.freeze({ totalTimeoutMs: input.timeouts.frameReadTimeoutMs }),
 	);
@@ -345,23 +469,70 @@ export async function createSandboxFd3BootstrapBridge(raw: unknown): Promise<Cre
 		erase(payload);
 		return failure("LAUNCH_FAILED");
 	}
-	const launched = await observe(launchRaw, input.timeouts.launchTimeoutMs, (late) =>
-		closeLateStarted(late, input.timeouts.monitorTimeoutMs),
-	);
+	const launched = await observe(launchRaw, input.timeouts.launchTimeoutMs);
+
 	if (launched.status !== "fulfilled") {
 		erase(payload);
-		return failure(launched.status === "timeout" ? "LAUNCH_UNCERTAIN" : "LAUNCH_FAILED");
+		if (launched.status === "timeout") {
+			// Bounded second window: the launch Promise may still resolve late.
+			const lateLaunched = await observe(launchRaw, input.timeouts.monitorTimeoutMs);
+			if (lateLaunched.status === "fulfilled") {
+				// Ownership-first: acquire preliminary monitor before full validation
+				const lateAcquire = acquireMonitorRaw(lateLaunched.value);
+				const lateStart = started(lateLaunched.value);
+				if (lateStart) {
+					const lateCloseResult = await closeMonitor(lateStart.monitor, input.timeouts.monitorTimeoutMs)();
+					const lateCloseObserved = await observe(lateCloseResult, input.timeouts.monitorTimeoutMs);
+					const uncertain =
+						lateCloseObserved.status !== "fulfilled" ||
+						exact(lateCloseObserved.value, new Set(["ok"]))?.ok?.value !== true;
+					return failure(uncertain ? "CLEANUP_UNCERTAIN" : "LAUNCH_UNCERTAIN");
+				}
+				if (lateAcquire.monitor) {
+					const lateCloseResult2 = await closeMonitor(lateAcquire.monitor, input.timeouts.monitorTimeoutMs)();
+					const lateCloseObserved2 = await observe(lateCloseResult2, input.timeouts.monitorTimeoutMs);
+					const closeOk2 =
+						lateCloseObserved2.status === "fulfilled" &&
+						exact(lateCloseObserved2.value, new Set(["ok"]))?.ok?.value === true;
+					return failure(closeOk2 ? "LAUNCH_UNCERTAIN" : "CLEANUP_UNCERTAIN");
+				}
+				if (lateAcquire.uncertain) {
+					return failure("CLEANUP_UNCERTAIN");
+				}
+			}
+			return failure("LAUNCH_UNCERTAIN");
+		}
+		return failure("LAUNCH_FAILED");
+	}
+	// Ownership-first: acquire preliminary monitor BEFORE full validation
+	const preliminaryAcquire = acquireMonitorRaw(launched.value);
+	const launcherError = decodeLauncherError(launched.value);
+	if (launcherError) {
+		erase(payload);
+		if (preliminaryAcquire.monitor) {
+			return await cleanupFailure(
+				"LAUNCH_FAILED",
+				closeMonitor(preliminaryAcquire.monitor, input.timeouts.monitorTimeoutMs),
+			);
+		}
+		if (preliminaryAcquire.uncertain) {
+			return failure("CLEANUP_UNCERTAIN");
+		}
+		return failure(launcherError.code);
 	}
 	const start = started(launched.value);
 	if (!start) {
 		erase(payload);
-		const preliminary = rawDescriptors(launched.value);
-		const monitorDescriptor = preliminary?.monitor;
-		const monitor = discoverMonitor(
-			monitorDescriptor && "value" in monitorDescriptor ? monitorDescriptor.value : undefined,
-		);
-		if (!monitor) return failure("LAUNCH_FAILED");
-		return await cleanupFailure("LAUNCH_FAILED", closeMonitor(monitor, input.timeouts.monitorTimeoutMs));
+		if (preliminaryAcquire.monitor) {
+			return await cleanupFailure(
+				"LAUNCH_FAILED",
+				closeMonitor(preliminaryAcquire.monitor, input.timeouts.monitorTimeoutMs),
+			);
+		}
+		if (preliminaryAcquire.uncertain) {
+			return failure("CLEANUP_UNCERTAIN");
+		}
+		return failure("LAUNCH_FAILED");
 	}
 	if (
 		start.monitor.identity === input.stdinSource ||
