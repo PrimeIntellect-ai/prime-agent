@@ -1556,11 +1556,11 @@ function decodePawsManifestBytesImpl(raw: unknown): PawsResult<PawsDecodeResult>
 		if (kindVal === undefined) return failErr(PAWS_ERRORS.MISSING_FIELD);
 		if (kindVal !== "snapshot" && kindVal !== "changeset") return failErr(PAWS_ERRORS.BAD_KIND);
 
-		// Route to kind-specific decoder with manifest bytes for canonical JSON validation
+		// Route to kind-specific decoder with manifest string for canonical JSON validation
 		if (kindVal === "snapshot") {
-			return decodeSnapshot(parsed, manifestSlice, headerSize, manifestLen, bl, doErase, failErr);
+			return decodeSnapshot(parsed, manifestStr, headerSize, manifestLen, bl, doErase, failErr);
 		}
-		return decodeChangeset(parsed, manifestSlice, headerSize, manifestLen, bl, doErase, failErr);
+		return decodeChangeset(parsed, manifestStr, headerSize, manifestLen, bl, doErase, failErr);
 	} catch {
 		doErase();
 		return { ok: false, error: Object.freeze({ code: PAWS_ERRORS.INVALID_INPUT }) };
@@ -1569,7 +1569,7 @@ function decodePawsManifestBytesImpl(raw: unknown): PawsResult<PawsDecodeResult>
 
 function decodeSnapshot(
 	parsed: unknown,
-	originalManifestBytes: Uint8Array,
+	manifestStr: string,
 	headerSize: number,
 	manifestLen: number,
 	byteLen: number,
@@ -1630,7 +1630,7 @@ function decodeSnapshot(
 	const computedSnapId = computeSnapshotIdFromFields(fields.paths, fields.sizes, fields.modes, fields.sha256s);
 	if (computedSnapId !== declSnapId) return failErr(PAWS_ERRORS.SNAPSHOT_ID_MISMATCH);
 
-	// Verify canonical re-encode byte equality against original manifest bytes
+	// Verify canonical re-encode string equality against original manifest JSON
 	const entries = buildSnapshotEntries(fields);
 	const tempManifest: PawsSnapshotManifest = {
 		format: "prime-agent-workspace",
@@ -1642,18 +1642,9 @@ function decodeSnapshot(
 		entries: Object.freeze(entries),
 	};
 	const expectedJson = encodeSnapshotManifestJson(tempManifest);
-	const expectedBytes = utf8Encode(expectedJson);
-	if (expectedBytes.byteLength !== originalManifestBytes.length) {
-		eraseBytes(expectedBytes);
+	if (expectedJson !== manifestStr) {
 		return failErr(PAWS_ERRORS.NON_CANONICAL);
 	}
-	for (let i = 0; i < expectedBytes.byteLength; i++) {
-		if (expectedBytes[i] !== originalManifestBytes[i]) {
-			eraseBytes(expectedBytes);
-			return failErr(PAWS_ERRORS.NON_CANONICAL);
-		}
-	}
-	eraseBytes(expectedBytes);
 
 	doErase();
 
@@ -1681,7 +1672,7 @@ function decodeSnapshot(
 
 function decodeChangeset(
 	parsed: unknown,
-	originalManifestBytes: Uint8Array,
+	manifestStr: string,
 	headerSize: number,
 	manifestLen: number,
 	byteLen: number,
@@ -1762,18 +1753,9 @@ function decodeChangeset(
 		entries: chgEntriesForVerify,
 	};
 	const expectedChgJson = encodeChangesetManifestJson(tempChgManifest);
-	const expectedChgBytes = utf8Encode(expectedChgJson);
-	if (expectedChgBytes.byteLength !== originalManifestBytes.length) {
-		eraseBytes(expectedChgBytes);
+	if (expectedChgJson !== manifestStr) {
 		return failErr(PAWS_ERRORS.NON_CANONICAL);
 	}
-	for (let i = 0; i < expectedChgBytes.byteLength; i++) {
-		if (expectedChgBytes[i] !== originalManifestBytes[i]) {
-			eraseBytes(expectedChgBytes);
-			return failErr(PAWS_ERRORS.NON_CANONICAL);
-		}
-	}
-	eraseBytes(expectedChgBytes);
 
 	// Compute changesetId (domain-separated)
 	const entries = buildChangesetEntries(fields);
