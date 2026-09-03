@@ -113,8 +113,8 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 
 | Track | Status | Current gate |
 |---|---|---|
-| Node 22 exact-Promise/ALS compatibility | in_progress | Context-shaped opaque marker implementation plus Node 22 shard reruns |
-| Home provider coordinator | in_progress | v13b must prove genuine bytes and cleanup-uncertainty dominance |
+| Node 22 exact-Promise/ALS compatibility | in_progress | Exact opaque two-marker helper accepted as `5ab7744dc`; producer-context migrations split across daemon stores, applications, messaging, and core before full Node 22 shard reruns |
+| Home provider coordinator | integrated | Accepted v13d integrated as `a0a84bf7e`; 429/429 merged related tests pass; shared Node 22 store migration pending |
 | Sandbox provider relay | integrated | Accepted v8 source is integrated as `719d90cf4`; 47/47 focused tests pass under normal Node and Node 22 |
 | PAWS streaming verifier | in_progress | v7 must unify checked erasure and pass native FileHandle tests |
 | Relay application gate | integrated | Accepted v5 source is integrated as `4c9a31539`; 77/77 normal tests pass; Node 22 adaptation remains required |
@@ -128,7 +128,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 
 - Branch: `feat/sandbox-backed-sessions` in `/Users/milkkarten/prime-agent-sandbox-sessions`.
 - Draft PR: [#2025](https://github.com/PrimeIntellect-ai/prime-agent/pull/2025), linked to [RES-1264](https://linear.app/primeintellect/issue/RES-1264/complete-sandbox-backed-prime-agent-sessions).
-- Pushed reviewed tip: `c27957bf7`. Local reviewed tip: `4c9a31539`, including the current `origin/main` merge, provider relay v8, and relay application gate v5. The Node 22 correction remains isolated.
+- Pushed reviewed tip: `c27957bf7`. Local reviewed source includes `a0a84bf7e` (provider coordinator v13d), `e51860ecf` (reverse-order relay cleanup), and `5ab7744dc` (exact Node 22 Promise helper). Producer-context migrations remain isolated.
 - The last root `npm run check` passed after the `origin/main` merge. PR policy, build/check, agent-core, AI, TUI, process-smoke, kernel, runtime-Python, and CodeQL checks pass. Coding-agent shards 1/3 and 3/3 fail because Node 22 attaches `AsyncLocalStorage` runtime symbols to genuine Promises, while the current exact-Promise guards require zero symbols. The failure is reproduced locally. The first context-shaped validator failed the actual Node 22 matrix (70 failures across 315 tests) and remains isolated while producer-context observation is redesigned; PR CI is not yet verified.
 - The accepted command/event/provider durability baseline remains green under the normal local runtime. Restart-safe relay evidence plus the ordered application multiplexer add a 148/148 integrated relay/dispatcher/multiplexer matrix. Earlier focused matrices also cover lifecycle deletion, hosted port/controller/transport, the exact branded-local/hosted runtime union, permanent target registry/dispatcher/bidirectional entry, ordered target application, authorization, transcript scanning/dispatch, durable target inbox, and the remote frame codec.
 - Accepted B03 foundations: exact frame codec `55b40d7f1`, journal-record codec `5551582bd`, delivery index `5e8e926b4`, direct-final immutable journal publication `8bd83db6c`, immutable delivery-marker publication `df846c08f`, and page-atomic bounded directory recovery `9df8a3da9`.
