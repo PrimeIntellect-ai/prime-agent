@@ -27,15 +27,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { types } from "node:util";
 import type { RemoteHostFrameEnvelope } from "./remote-agent-host-protocol.js";
 import { decodeEnvelope } from "./remote-host-frame-codec.js";
-import {
-	isSandboxCommandEffectInstance,
-	type SandboxCommandEffectCapability,
-	type SandboxCommandEffectHandle,
-} from "./sandbox-command-effect.js";
-import {
-	isSandboxCommandStoreInstance,
-	type SandboxCommandStoreCapability,
-} from "./sandbox-command-store.js";
+import { isSandboxCommandEffectInstance, type SandboxCommandEffectCapability } from "./sandbox-command-effect.js";
+import { isSandboxCommandStoreInstance, type SandboxCommandStoreCapability } from "./sandbox-command-store.js";
 
 // ===========================================================================
 // Constants
@@ -43,10 +36,7 @@ import {
 
 const FACTORY_KEYS = new Set(["effect", "store"]);
 const APPLY_INPUT_KEYS = new Set(["envelope"]);
-const APPLY_RESULT_KEYS = new Set(["status"]);
-const CLOSE_RESULT_KEYS = new Set(["status"]);
 const STORE_OK_KEYS = new Set(["ok", "value"]);
-const STORE_ERR_KEYS = new Set(["ok", "error"]);
 const HANDLE_KEYS = new Set(["commandId", "completion"]);
 
 const MAX_REPLAY_RANGE = 20_000;
@@ -119,12 +109,6 @@ interface BoundEffect {
 	readonly execute: BoundMethod;
 }
 
-/** Synchronous execute result from callSyncEffect. */
-type SyncExecuteResult =
-	| { readonly kind: "ok"; readonly handle: SandboxCommandEffectHandle }
-	| { readonly kind: "throw" }
-	| { readonly kind: "invalid" };
-
 // ===========================================================================
 // Typed constructors
 // ===========================================================================
@@ -157,9 +141,7 @@ function recoveryFailedError(): CreateSandboxCommandApplicationResult {
 	return Object.freeze({ ok: false, error: Object.freeze({ code: "RECOVERY_FAILED" }) });
 }
 
-function successResult(
-	application: SandboxCommandApplication,
-): CreateSandboxCommandApplicationResult {
+function successResult(application: SandboxCommandApplication): CreateSandboxCommandApplicationResult {
 	return Object.freeze({ ok: true, application });
 }
 
@@ -186,6 +168,36 @@ function exact(raw: unknown, keys: ReadonlySet<string>): Descriptors | null {
 	if (ownKeys.length !== keys.size) return null;
 	for (let i = 0; i < ownKeys.length; i++) {
 		if (!keys.has(ownKeys[i])) return null;
+	}
+	// Every expected key must be an enumerable data descriptor with non-undefined value
+	for (const k of keys) {
+		const d = descriptors[k];
+		if (!d) return null;
+		if (!("value" in d)) return null;
+		if (d.enumerable !== true) return null;
+		if (d.value === undefined) return null;
+	}
+	return descriptors;
+}
+
+/**
+ * Like exact() but permits undefined values for expected keys.
+ * Still requires: Object.prototype, no Proxy, no symbols, exact own names,
+ * enumerable data descriptors for every expected key.
+ */
+function exactDataAllowUndefined(raw: unknown, keys: ReadonlySet<string>): Descriptors | null {
+	const descriptors = rawDescriptors(raw);
+	if (!descriptors) return null;
+	const ownKeys = Object.keys(descriptors);
+	if (ownKeys.length !== keys.size) return null;
+	for (let i = 0; i < ownKeys.length; i++) {
+		if (!keys.has(ownKeys[i])) return null;
+	}
+	for (const k of keys) {
+		const d = descriptors[k];
+		if (!d) return null;
+		if (!("value" in d)) return null;
+		if (d.enumerable !== true) return null;
 	}
 	return descriptors;
 }
@@ -215,9 +227,7 @@ function bindMethod(raw: unknown, descriptor: PropertyDescriptor): BoundMethod |
 // Exact native Promise observation
 // ===========================================================================
 
-type PromiseObservation =
-	| { readonly fulfilled: true; readonly value: unknown }
-	| { readonly fulfilled: false };
+type PromiseObservation = { readonly fulfilled: true; readonly value: unknown } | { readonly fulfilled: false };
 
 function isExactNativePromise(raw: unknown): raw is Promise<unknown> {
 	if (typeof raw !== "object" || raw === null) return false;
@@ -353,16 +363,30 @@ function captureOwnedClose(raw: unknown): OwnedSlot | null {
 		used = true;
 		const observation = await invoke(() => Reflect.apply(closeFnValue, raw, []));
 		if (!observation.fulfilled) return false;
-		const r = exact(observation.value, CLOSE_RESULT_KEYS);
-		if (r !== null && value(r, "status") === "closed") return true;
-		// Check {ok:true} generically — works for effect {ok:true} and store {ok:true, value:...}
-		if (typeof observation.value === "object" && observation.value !== null) {
-			try {
-				const od = Object.getOwnPropertyDescriptor(observation.value, "ok");
-				if (od && "value" in od && od.value === true) return true;
-			} catch {
-				return false;
-			}
+		const rawValue = observation.value;
+		if (typeof rawValue !== "object" || rawValue === null) return false;
+		// Exact {status:"closed"} — MultiplexerApplication shape
+		const statusKeys: ReadonlySet<string> = Object.freeze(new Set(["status"]));
+		const statusDesc = exact(rawValue, statusKeys);
+		if (statusDesc !== null) {
+			const sv = value(statusDesc, "status");
+			return sv === "closed";
+		}
+		// Exact {ok:true} — effect close shape (CommandEffectResult)
+		const effectCloseKeys: ReadonlySet<string> = Object.freeze(new Set(["ok"]));
+		const effectDesc = exact(rawValue, effectCloseKeys);
+		if (effectDesc !== null) {
+			const ov = value(effectDesc, "ok");
+			return ov === true;
+		}
+		// Exact {ok:true, value:...} — store close shape (StoreResult<void>)
+		// Use exactDataAllowUndefined because value is exactly undefined.
+		const storeCloseKeys: ReadonlySet<string> = Object.freeze(new Set(["ok", "value"]));
+		const storeDesc = exactDataAllowUndefined(rawValue, storeCloseKeys);
+		if (storeDesc !== null) {
+			const ov = value(storeDesc, "ok");
+			const vv = value(storeDesc, "value");
+			if (ov === true && vv === undefined) return true;
 		}
 		return false;
 	};
@@ -501,6 +525,32 @@ function captureAllOwners(raw: unknown): AllOwnersResult {
 		maybeAddOwner(d.value);
 	}
 
+	// Also scan symbol-keyed own descriptors — a provable data owner on a
+	// symbol key must be captured; accessor/Proxy symbols cause uncertainty.
+	try {
+		const symbolKeys = Object.getOwnPropertySymbols(raw);
+		for (const sym of symbolKeys) {
+			const d = Object.getOwnPropertyDescriptor(raw, sym);
+			if (!d) continue;
+			if (!("value" in d)) {
+				anyAccessorUncertain = true;
+				continue;
+			}
+			// Proxy data value on a symbol key is uncertain
+			if (typeof d.value === "object" && d.value !== null && types.isProxy(d.value)) {
+				anyAccessorUncertain = true;
+				continue;
+			}
+			if (typeof d.value === "function" && types.isProxy(d.value)) {
+				anyAccessorUncertain = true;
+				continue;
+			}
+			maybeAddOwner(d.value);
+		}
+	} catch {
+		anyAccessorUncertain = true;
+	}
+
 	return Object.freeze({ owners, anyAlias, anyAccessorUncertain });
 }
 
@@ -539,6 +589,7 @@ function scanOwnDescUncertainty(raw: unknown): OwnDescMonitorResult {
 // ===========================================================================
 
 async function closeAllReverse(closes: readonly OwnedClose[]): Promise<boolean> {
+	let allOk = true;
 	for (let index = closes.length - 1; index >= 0; index -= 1) {
 		let ok = false;
 		try {
@@ -546,9 +597,9 @@ async function closeAllReverse(closes: readonly OwnedClose[]): Promise<boolean> 
 		} catch {
 			ok = false;
 		}
-		if (!ok) return false;
+		if (!ok) allOk = false;
 	}
-	return true;
+	return allOk;
 }
 
 // ===========================================================================
@@ -733,11 +784,7 @@ class SandboxCommandApplicationImpl {
 	private _closed = false;
 	private _poisoned = false;
 
-	constructor(
-		boundEffect: BoundEffect,
-		boundStore: BoundStore,
-		ownedCloses: readonly OwnedClose[],
-	) {
+	constructor(boundEffect: BoundEffect, boundStore: BoundStore, ownedCloses: readonly OwnedClose[]) {
 		this._boundEffect = boundEffect;
 		this._boundStore = boundStore;
 		this._ownedCloses = ownedCloses;
@@ -763,9 +810,7 @@ class SandboxCommandApplicationImpl {
 		return this._enqueue(() => this._applyOrdered(envelope));
 	}
 
-	private _enqueue(
-		operation: () => Promise<SandboxCommandApplyResult>,
-	): Promise<SandboxCommandApplyResult> {
+	private _enqueue(operation: () => Promise<SandboxCommandApplyResult>): Promise<SandboxCommandApplyResult> {
 		const attempted = this._tail.then(
 			() => {
 				if (this._poisoned) return errorResult();
@@ -815,7 +860,10 @@ class SandboxCommandApplicationImpl {
 
 		// 3. callSyncEffect — sync execute, immediately markStarted
 		const syncResult = await callSyncEffect(
-			this._boundEffect.execute, frame, commandId, this._boundStore.markStarted,
+			this._boundEffect.execute,
+			frame,
+			commandId,
+			this._boundStore.markStarted,
 		);
 		if (syncResult.kind === "error") {
 			return this._poison();
@@ -849,10 +897,12 @@ class SandboxCommandApplicationImpl {
 
 		// 5. Persist terminal state — must succeed
 		const terminalAt = new Date().toISOString();
-		const effectOk = completionObs.fulfilled && (() => {
-			const d = exact(completionObs.value, new Set(["ok"]));
-			return d !== null && value(d, "ok") === true;
-		})();
+		const effectOk =
+			completionObs.fulfilled &&
+			(() => {
+				const d = exact(completionObs.value, new Set(["ok"]));
+				return d !== null && value(d, "ok") === true;
+			})();
 
 		if (effectOk) {
 			const writeObs = await invoke(() =>
@@ -909,10 +959,7 @@ class SandboxCommandApplicationImpl {
 // Replay pending commands — bound methods only, no fire-forget
 // ===========================================================================
 
-async function replayPending(
-	boundStore: BoundStore,
-	boundEffect: BoundEffect,
-): Promise<boolean> {
+async function replayPending(boundStore: BoundStore, boundEffect: BoundEffect): Promise<boolean> {
 	let cursor: number | null = null;
 	let hasMore = true;
 	let totalPages = 0;
@@ -990,9 +1037,7 @@ async function replayPending(
 			const command = commandDesc.value;
 
 			// All pending commands go through effect
-			const syncResult = await callSyncEffect(
-				boundEffect.execute, command, commandId, boundStore.markStarted,
-			);
+			const syncResult = await callSyncEffect(boundEffect.execute, command, commandId, boundStore.markStarted);
 			if (syncResult.kind === "error") return false;
 
 			if (syncResult.kind === "throw" || syncResult.kind === "invalid_after_start") {
@@ -1010,10 +1055,12 @@ async function replayPending(
 			const terminalObs = await observePromise(syncResult.completion);
 			const terminalAt = new Date().toISOString();
 
-			const settledOk = terminalObs.fulfilled && (() => {
-				const d = exact(terminalObs.value, new Set(["ok"]));
-				return d !== null && value(d, "ok") === true;
-			})();
+			const settledOk =
+				terminalObs.fulfilled &&
+				(() => {
+					const d = exact(terminalObs.value, new Set(["ok"]));
+					return d !== null && value(d, "ok") === true;
+				})();
 
 			if (settledOk) {
 				const writeObs = await invoke(() =>
@@ -1022,9 +1069,7 @@ async function replayPending(
 				if (!isStoreOkResult(writeObs)) return false;
 			} else {
 				const writeObs = await invoke(() =>
-					boundStore.markInterrupted(
-						Object.freeze({ commandId, outcome: "INTERRUPTED", recordedAt: terminalAt }),
-					),
+					boundStore.markInterrupted(Object.freeze({ commandId, outcome: "INTERRUPTED", recordedAt: terminalAt })),
 				);
 				if (!isStoreOkResult(writeObs)) return false;
 			}
@@ -1056,9 +1101,7 @@ async function replayPending(
 // Factory
 // ===========================================================================
 
-export async function createSandboxCommandApplication(
-	raw: unknown,
-): Promise<CreateSandboxCommandApplicationResult> {
+export async function createSandboxCommandApplication(raw: unknown): Promise<CreateSandboxCommandApplicationResult> {
 	if (typeof raw !== "object" || raw === null) {
 		return invalidArgumentError();
 	}
@@ -1144,10 +1187,7 @@ export async function createSandboxCommandApplication(
 
 	// Normal close order: store first, effect second.
 	// Reverse close (done by closeAllReverse) = effect first, store last.
-	const normalCloses: readonly OwnedClose[] = Object.freeze([
-		storeOwned.close,
-		effectOwned.close,
-	]);
+	const normalCloses: readonly OwnedClose[] = Object.freeze([storeOwned.close, effectOwned.close]);
 
 	const replayOk = await replayPending(boundStore, boundEffect);
 	if (!replayOk) {

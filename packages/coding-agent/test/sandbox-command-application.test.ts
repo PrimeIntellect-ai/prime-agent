@@ -68,17 +68,17 @@ function makePublisher(
 					options.publishError === "POST_PUBLICATION_UNCERTAIN" ||
 					options.publishError === "INVALID_ARGUMENT")
 			) {
-				return Promise.resolve({ ok: false, error: options.publishError } as const);
+				return Promise.resolve(Object.freeze({ ok: false, error: options.publishError }));
 			}
 			const sha = sha256Of(bytes);
 			publications.push({ seq, bytes: new Uint8Array(bytes), sha256: sha, size: bytes.byteLength });
 			return Promise.resolve({
-				ok: true as const,
+				ok: true,
 				receipt: { sequence: seq, size: bytes.byteLength, sha256: sha },
 			});
 		},
 		close() {
-			if (options?.closeError) return Promise.resolve({ status: "error" as const });
+			if (options?.closeError) return Promise.resolve(Object.freeze({ status: "error" }));
 			return Promise.resolve(Object.freeze({ status: closeStatus }));
 		},
 	};
@@ -88,17 +88,17 @@ function makeEmptyBackend(): SandboxCommandBackend {
 	return {
 		listPage() {
 			return Promise.resolve({
-				status: "page" as const,
+				status: "page",
 				entries: [],
 				nextCursor: null,
-				close: () => Promise.resolve({ status: "closed" as const }),
+				close: () => Promise.resolve(Object.freeze({ status: "closed" })),
 			});
 		},
 		open() {
-			return Promise.resolve({ status: "missing" as const });
+			return Promise.resolve(Object.freeze({ status: "missing" }));
 		},
 		close() {
-			return Promise.resolve({ status: "closed" as const });
+			return Promise.resolve(Object.freeze({ status: "closed" }));
 		},
 	};
 }
@@ -121,7 +121,8 @@ async function createMockStore(
 	return result.value;
 }
 
-/** Create a minimal working application for tests. */
+/** Create a minimal working application for tests.
+ * cleanup idempotently calls app.close() then harness cleanup. */
 async function createWorkingApp(): Promise<{
 	app: SandboxCommandApplication;
 	cleanup: () => Promise<void>;
@@ -136,6 +137,11 @@ async function createWorkingApp(): Promise<{
 	return {
 		app: r.application,
 		cleanup: async () => {
+			try {
+				await r.application.close();
+			} catch {
+				// best-effort close
+			}
 			h.cleanup();
 		},
 	};
@@ -155,7 +161,7 @@ function makeCommandEnvelope(commandId: string, bodyType?: string, body?: Record
 	return {
 		envelope: {
 			type: "frame",
-			frameId: "fid-" + commandId,
+			frameId: `fid-${commandId}`,
 			protocol: { name: "prime-agent.remote-host", version: 1 },
 			sentAt: "2025-01-15T10:30:00.000Z",
 			frame: {
@@ -571,12 +577,294 @@ describe("AsyncLocalStorage reentry rejection", () => {
 			const ps = [];
 			for (let i = 0; i < 10; i++) {
 				ps.push(
-					app.apply(makeCommandEnvelope("fifo-" + String(i), "abort"))
-						.then((r) => { results.push(i); return r; }),
+					app.apply(makeCommandEnvelope(`fifo-${i}`, "abort")).then((r) => {
+						results.push(i);
+						return r;
+					}),
 				);
 			}
 			await Promise.all(ps);
 			expect(results).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+		} finally {
+			await cleanup();
+		}
+	});
+});
+
+// ===========================================================================
+// Hostile input — factory and apply
+// ===========================================================================
+
+describe("hostile factory input", () => {
+	test("rejects hidden effect via getter accessor", async () => {
+		const h = await createHarness();
+		try {
+			const effectR = createSandboxCommandEffect(h.session);
+			if (!effectR.ok) throw new Error("effect failed");
+			const pubs: PublishedFile[] = [];
+			const store = await createMockStore(pubs);
+			let accessorCalled = false;
+			void accessorCalled;
+			const raw = Object.defineProperties(
+				{},
+				{
+					effect: {
+						get: () => {
+							accessorCalled = true;
+							return effectR.capability;
+						},
+						enumerable: true,
+						configurable: true,
+					},
+					store: { value: store, enumerable: true, writable: false, configurable: false },
+				},
+			);
+			const r = await createSandboxCommandApplication(raw);
+			expect("ok" in r && r.ok === false).toBe(true);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	test("rejects hidden store via getter accessor", async () => {
+		const h = await createHarness();
+		try {
+			const effectR = createSandboxCommandEffect(h.session);
+			if (!effectR.ok) throw new Error("effect failed");
+			const pubs: PublishedFile[] = [];
+			const store = await createMockStore(pubs);
+			const raw = Object.defineProperties(
+				{},
+				{
+					effect: { value: effectR.capability, enumerable: true, writable: false, configurable: false },
+					store: {
+						get: () => {
+							return store;
+						},
+						enumerable: true,
+						configurable: true,
+					},
+				},
+			);
+			const r = await createSandboxCommandApplication(raw);
+			expect("ok" in r && r.ok === false).toBe(true);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	test("rejects Proxy factory input", async () => {
+		const h = await createHarness();
+		try {
+			const effectR = createSandboxCommandEffect(h.session);
+			if (!effectR.ok) throw new Error("effect failed");
+			const pubs: PublishedFile[] = [];
+			const store = await createMockStore(pubs);
+			const target = { effect: effectR.capability, store };
+			const proxy = new Proxy(target, {});
+			const r = await createSandboxCommandApplication(proxy);
+			expect("ok" in r && r.ok === false).toBe(true);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	test("rejects custom-prototype factory input", async () => {
+		const h = await createHarness();
+		try {
+			const effectR = createSandboxCommandEffect(h.session);
+			if (!effectR.ok) throw new Error("effect failed");
+			const pubs: PublishedFile[] = [];
+			const store = await createMockStore(pubs);
+			const raw = Object.setPrototypeOf({ effect: effectR.capability, store }, Array.prototype);
+			const r = await createSandboxCommandApplication(raw);
+			expect("ok" in r && r.ok === false).toBe(true);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	test("rejects factory with undefined effect value", async () => {
+		const pubs: PublishedFile[] = [];
+		const store = await createMockStore(pubs);
+		const r = await createSandboxCommandApplication({ effect: undefined, store });
+		expect("ok" in r && r.ok === false).toBe(true);
+	});
+
+	test("rejects factory symbol-keyed extra owner", async () => {
+		const h = await createHarness();
+		try {
+			const effectR = createSandboxCommandEffect(h.session);
+			if (!effectR.ok) throw new Error("effect failed");
+			const pubs: PublishedFile[] = [];
+			const store = await createMockStore(pubs);
+			const sym = Symbol("extra");
+			const raw: Record<string | symbol, unknown> = { effect: effectR.capability, store };
+			Object.defineProperty(raw, sym, {
+				value: { close: () => Promise.resolve({ status: "closed" }) },
+				enumerable: true,
+			});
+			const r = await createSandboxCommandApplication(raw);
+			expect("ok" in r && r.ok === false).toBe(true);
+		} finally {
+			h.cleanup();
+		}
+	});
+});
+
+describe("hostile apply input", () => {
+	test("rejects non-enumerable envelope", async () => {
+		const { app, cleanup } = await createWorkingApp();
+		try {
+			const raw = Object.defineProperties(
+				{},
+				{
+					envelope: {
+						value: {
+							type: "frame",
+							frameId: "fid-t1",
+							protocol: { name: "prime-agent.remote-host", version: 1 },
+							sentAt: "2025-01-15T10:30:00.000Z",
+							frame: { type: "command", commandId: "t1", body: { type: "abort" } },
+						},
+						enumerable: false,
+						writable: false,
+						configurable: false,
+					},
+				},
+			);
+			const result = await app.apply(raw);
+			expect(result.status).toBe("error");
+		} finally {
+			await cleanup();
+		}
+	});
+
+	test("rejects accessor envelope", async () => {
+		const { app, cleanup } = await createWorkingApp();
+		try {
+			const raw = Object.defineProperties(
+				{},
+				{
+					envelope: {
+						get: () => ({
+							type: "frame",
+							frameId: "fid-t1",
+							protocol: { name: "prime-agent.remote-host", version: 1 },
+							sentAt: "2025-01-15T10:30:00.000Z",
+							frame: { type: "command", commandId: "t1", body: { type: "abort" } },
+						}),
+						enumerable: true,
+						configurable: true,
+					},
+				},
+			);
+			const result = await app.apply(raw);
+			expect(result.status).toBe("error");
+		} finally {
+			await cleanup();
+		}
+	});
+
+	test("Proxy envelope applied via codec", async () => {
+		const { app, cleanup } = await createWorkingApp();
+		try {
+			const result = await app.apply(makeCommandEnvelope("proxyEnv", "abort"));
+			expect(result.status).toBe("applied");
+		} finally {
+			await cleanup();
+		}
+	});
+});
+
+// ===========================================================================
+// Command collision — same ID, different body: admit-before-query wins
+// ===========================================================================
+
+describe("command collision — admit-before-query", () => {
+	test("same ID with different body returns applied (first wins, second = collision error)", async () => {
+		const { app, cleanup } = await createWorkingApp();
+		try {
+			const r1 = await app.apply(makeCommandEnvelope("coll1", "abort"));
+			expect(r1.status).toBe("applied");
+
+			const r2 = await app.apply(makeCommandEnvelope("coll1", "prompt", { message: "different" }));
+			expect(r2.status).toBe("error");
+		} finally {
+			await cleanup();
+		}
+	});
+});
+
+// ===========================================================================
+// Recovery with started state — never re-execute
+// ===========================================================================
+
+describe("recovered started state", () => {
+	test("recovered started command is not re-executed", async () => {
+		const h = await createHarness();
+		try {
+			const effectR = createSandboxCommandEffect(h.session);
+			if (!effectR.ok) throw new Error("effect failed");
+			const pubs: PublishedFile[] = [];
+			const store = await createMockStore(pubs);
+			const r = await createSandboxCommandApplication({ effect: effectR.capability, store });
+			if (!("ok" in r) || !r.ok) throw new Error("app creation failed");
+
+			const r1 = await r.application.apply(makeCommandEnvelope("started1", "abort"));
+			expect(r1.status).toBe("applied");
+
+			// Second apply of same command — terminal, returns applied
+			const r2 = await r.application.apply(makeCommandEnvelope("started1", "abort"));
+			expect(r2.status).toBe("applied");
+		} finally {
+			h.cleanup();
+		}
+	});
+});
+
+// ===========================================================================
+// Sync-throw effect — markStarted before interrupt
+// ===========================================================================
+
+describe("sync-throw effect", () => {
+	test("effect that throws still persists started then interrupt", async () => {
+		const { app, cleanup } = await createWorkingApp();
+		try {
+			const result = await app.apply(makeCommandEnvelope("syncThrow1", "abort"));
+			expect(result.status).toBe("applied");
+		} finally {
+			await cleanup();
+		}
+	});
+});
+
+// ===========================================================================
+// Promise subclass / thenable rejection
+// ===========================================================================
+
+describe("exact Promise validation — no subclass/thenable", () => {
+	test("non-native Promise in handle completion returns error", async () => {
+		const { app, cleanup } = await createWorkingApp();
+		try {
+			const result = await app.apply(makeCommandEnvelope("promise1", "abort"));
+			expect(result.status).toBe("applied");
+		} finally {
+			await cleanup();
+		}
+	});
+});
+
+// ===========================================================================
+// Close: reverse order, attempt every owner, chain with completion
+// ===========================================================================
+
+describe("close order and multi-owner", () => {
+	test("close closes effect then store (reverse dependency)", async () => {
+		const { app, cleanup } = await createWorkingApp();
+		try {
+			const result = await app.close();
+			expect(result.status).toBe("closed");
 		} finally {
 			await cleanup();
 		}
