@@ -829,3 +829,59 @@ describe("non-owning boundary", () => {
 		}
 	});
 });
+
+// ===========================================================================
+// Post-factory mutation — captured methods ignore session replacement
+// ===========================================================================
+
+describe("post-factory mutation resistance", () => {
+	test("session method replacement after factory is ignored by captured method", async () => {
+		const h = await createHarness();
+		try {
+			// 1. Create effect with a known abort that returns good result
+			let initialAbortCalled = false;
+			const savedAbort = Object.getOwnPropertyDescriptor(h.session, "abort");
+			Object.defineProperty(h.session, "abort", {
+				value: () => {
+					initialAbortCalled = true;
+					return Promise.resolve(undefined);
+				},
+				configurable: true,
+				writable: true,
+			});
+
+			const r = createSandboxCommandEffect(h.session);
+			if (!r.ok) throw new Error("effect failed");
+
+			// 2. Replace session.abort with a different function
+			let replacementAbortCalled = false;
+			Object.defineProperty(h.session, "abort", {
+				value: () => {
+					replacementAbortCalled = true;
+					return Promise.resolve(undefined);
+				},
+				configurable: true,
+				writable: true,
+			});
+
+			// 3. Execute via the captured capability — should use original, not replacement
+			const handle = r.capability.execute({
+				type: "command",
+				commandId: "mutation1",
+				body: { type: "abort" },
+			});
+			await handle.completion;
+
+			expect(initialAbortCalled).toBe(true);
+			expect(replacementAbortCalled).toBe(false);
+
+			if (savedAbort) {
+				Object.defineProperty(h.session, "abort", savedAbort);
+			} else {
+				Reflect.deleteProperty(h.session, "abort");
+			}
+		} finally {
+			h.cleanup();
+		}
+	});
+});

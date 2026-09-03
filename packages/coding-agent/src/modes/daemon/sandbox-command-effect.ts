@@ -2,7 +2,11 @@
  * sandbox-command-effect.ts — session-backed command effect port.
  *
  * Uses existing decodeCommandFrame for exact proxy-safe protocol
- * validation.  Dispatches to real AgentSession methods.
+ * validation.  Seven AgentSession methods are captured from own or
+ * prototype data descriptors at factory creation and bound via
+ * Reflect.apply; no live session property reads occur after the
+ * factory returns.  Post-factory method replacement is ignored.
+ *
  * Non-owning frozen capability {execute, close}.  No per-handle
  * abort method: protocol control commands (abort, abort_bash,
  * compact_abort) serve that role.
@@ -10,8 +14,7 @@
  * Factory returns {ok:true,capability} for a branded AgentSession
  * or {ok:false,error:{code:"INVALID_SESSION"}} otherwise.
  *
- * ~300-450 source lines.  Zero casts, assertions, any, dynamic
- * imports, sync fs, timers.
+ * Zero casts, assertions, any, dynamic imports, sync fs, timers.
  */
 
 import { types } from "node:util";
@@ -98,6 +101,105 @@ const KIND_BASH = 2;
 const KIND_COMPACT = 3;
 
 // ===========================================================================
+// Method capture — bind an AgentSession method from own or prototype
+// data descriptor at factory creation.  Rejects Proxy / accessor /
+// non-function / missing.  Returns a bound function or undefined.
+// ===========================================================================
+
+type BoundMethod = (...args: readonly unknown[]) => unknown;
+
+function captureMethod(session: AgentSession, name: string): BoundMethod | undefined {
+	let fn: unknown;
+
+	// Try own data descriptor first
+	try {
+		const ownDesc = Object.getOwnPropertyDescriptor(session, name);
+		if (ownDesc !== undefined && "value" in ownDesc && typeof ownDesc.value === "function") {
+			if (!types.isProxy(ownDesc.value)) {
+				fn = ownDesc.value;
+			}
+		}
+	} catch {
+		return undefined;
+	}
+
+	// Fall back to prototype data descriptor
+	if (fn === undefined) {
+		try {
+			const proto = Object.getPrototypeOf(session);
+			if (proto !== null) {
+				const protoDesc = Object.getOwnPropertyDescriptor(proto, name);
+				if (protoDesc !== undefined && "value" in protoDesc && typeof protoDesc.value === "function") {
+					if (!types.isProxy(protoDesc.value)) {
+						fn = protoDesc.value;
+					}
+				}
+			}
+		} catch {
+			return undefined;
+		}
+	}
+
+	if (fn === undefined) return undefined;
+
+	// Always bind against the session instance — own or prototype methods
+	// need the session as `this`.
+	return (...args: readonly unknown[]): unknown => {
+		try {
+			return Reflect.apply(fn as (...args: readonly unknown[]) => unknown, session, args);
+		} catch {
+			throw new Error("CAPTURED_METHOD_ERROR");
+		}
+	};
+}
+
+// ===========================================================================
+// Bound method collection — all seven AgentSession methods captured once.
+// ===========================================================================
+
+interface BoundMethods {
+	readonly promptUntilAccepted: BoundMethod;
+	readonly prompt: BoundMethod;
+	readonly abort: BoundMethod;
+	readonly runUserBash: BoundMethod;
+	readonly abortBash: BoundMethod;
+	readonly compact: BoundMethod;
+	readonly abortCompaction: BoundMethod;
+}
+
+function captureAllMethods(session: AgentSession): BoundMethods | null {
+	const promptUntilAccepted = captureMethod(session, "promptUntilAccepted");
+	const prompt = captureMethod(session, "prompt");
+	const abort = captureMethod(session, "abort");
+	const runUserBash = captureMethod(session, "runUserBash");
+	const abortBash = captureMethod(session, "abortBash");
+	const compact = captureMethod(session, "compact");
+	const abortCompaction = captureMethod(session, "abortCompaction");
+
+	if (
+		promptUntilAccepted === undefined ||
+		prompt === undefined ||
+		abort === undefined ||
+		runUserBash === undefined ||
+		abortBash === undefined ||
+		compact === undefined ||
+		abortCompaction === undefined
+	) {
+		return null;
+	}
+
+	return Object.freeze({
+		promptUntilAccepted,
+		prompt,
+		abort,
+		runUserBash,
+		abortBash,
+		compact,
+		abortCompaction,
+	});
+}
+
+// ===========================================================================
 // Helpers
 // ===========================================================================
 
@@ -161,6 +263,20 @@ export function createSandboxCommandEffect(session: unknown): SandboxCommandEffe
 // ===========================================================================
 
 function newCapability(session: AgentSession): SandboxCommandEffectCapability {
+	// Capture all seven methods from own/prototype data descriptors NOW.
+	// No live property reads from `session` after this point.
+	const methods = captureAllMethods(session);
+	if (methods === null) {
+		// This should never happen for a legitimate branded AgentSession,
+		// but guard defensively: return a capability that rejects everything.
+		return Object.freeze({
+			execute: () => frozenHandle("", Promise.resolve(freshError("INTERNAL_ERROR"))),
+			close: () => Promise.resolve(freshError("INTERNAL_ERROR")),
+		});
+	}
+	// Discard session reference so executors never read live properties.
+	void session;
+
 	// -- mutable state -------------------------------------------------------
 	const activeTasks: Array<{
 		commandId: string;
@@ -211,7 +327,7 @@ function newCapability(session: AgentSession): SandboxCommandEffectCapability {
 			return frozenHandle(commandId, Promise.resolve(freshError("UNSUPPORTED_COMMAND")));
 		}
 
-		return dispatchCommand(commandId, body, session, trackTask);
+		return dispatchCommand(commandId, body, methods, trackTask);
 	};
 
 	// -- close --------------------------------------------------------------
@@ -257,10 +373,10 @@ function newCapability(session: AgentSession): SandboxCommandEffectCapability {
 			);
 		}
 
-		// Observe session.abort() if KIND_PROMPT_STEER is active
+		// Use bound abort() if KIND_PROMPT_STEER is active
 		if (hasKind[KIND_PROMPT_STEER]) {
 			try {
-				const p = session.abort();
+				const p = methods.abort();
 				if (isExactPromise(p)) {
 					observations.push(
 						new Promise((resolve) => {
@@ -281,17 +397,17 @@ function newCapability(session: AgentSession): SandboxCommandEffectCapability {
 			}
 		}
 
-		// Initiate sync abort methods
+		// Initiate sync abort methods via bound methods
 		if (hasKind[KIND_BASH]) {
 			try {
-				session.abortBash();
+				methods.abortBash();
 			} catch {
 				observations.push(Promise.resolve(false));
 			}
 		}
 		if (hasKind[KIND_COMPACT]) {
 			try {
-				session.abortCompaction();
+				methods.abortCompaction();
 			} catch {
 				observations.push(Promise.resolve(false));
 			}
@@ -312,7 +428,6 @@ function newCapability(session: AgentSession): SandboxCommandEffectCapability {
 				closeResolve(anyError ? freshError("CLOSE_ABORT_FAILED") : freshOk());
 			},
 			(): void => {
-				// joined should never reject, but handle defensively.
 				closeResolve(freshError("CLOSE_ABORT_FAILED"));
 			},
 		]);
@@ -326,51 +441,50 @@ function newCapability(session: AgentSession): SandboxCommandEffectCapability {
 }
 
 // ===========================================================================
-// Dispatch a supported command to the real AgentSession method
+// Dispatch a supported command using bound methods (no live session access)
 // ===========================================================================
 
 function dispatchCommand(
 	commandId: string,
 	body: RemoteHostCommandFrameBody,
-	session: AgentSession,
+	methods: BoundMethods,
 	trackTask: (commandId: string, kind: number, completion: Promise<CommandEffectResult>) => void,
 ): SandboxCommandEffectHandle {
 	switch (body.type) {
 		case "prompt":
-			return execPrompt(commandId, body, session, trackTask);
+			return execPrompt(commandId, body, methods, trackTask);
 		case "steer":
-			return execSteer(commandId, body, session, trackTask);
+			return execSteer(commandId, body, methods, trackTask);
 		case "abort":
-			return execAbort(commandId, session, trackTask);
+			return execAbort(commandId, methods, trackTask);
 		case "execute_bash":
-			return execBash(commandId, body, session, trackTask);
+			return execBash(commandId, body, methods, trackTask);
 		case "abort_bash":
-			return execAbortBash(commandId, session);
+			return execAbortBash(commandId, methods);
 		case "compact":
-			return execCompact(commandId, body, session, trackTask);
+			return execCompact(commandId, body, methods, trackTask);
 		case "compact_abort":
-			return execCompactAbort(commandId, session);
+			return execCompactAbort(commandId, methods);
 	}
-	// Unreachable — all supported types handled exhaustively before dispatch.
 	return frozenHandle(commandId, Promise.resolve(freshOk()));
 }
 
 // ===========================================================================
-// Per-command executors
+// Per-command executors — use bound methods only, no live session access
 // ===========================================================================
 
 function execPrompt(
 	commandId: string,
 	body: RemoteHostCommandFrameBody & { type: "prompt" },
-	session: AgentSession,
+	methods: BoundMethods,
 	trackTask: (commandId: string, kind: number, completion: Promise<CommandEffectResult>) => void,
 ): SandboxCommandEffectHandle {
 	let sessionPromise: Promise<unknown>;
 	try {
-		const opts: Parameters<typeof session.promptUntilAccepted>[1] = {};
+		const opts: Record<string, unknown> = {};
 		if (body.admissionId !== undefined) opts.agentMessageId = body.admissionId;
 		opts.admissionCommitted = () => {};
-		sessionPromise = session.promptUntilAccepted(body.message, opts);
+		sessionPromise = methods.promptUntilAccepted(body.message, opts) as Promise<unknown>;
 	} catch {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
@@ -387,19 +501,19 @@ function execPrompt(
 function execSteer(
 	commandId: string,
 	body: RemoteHostCommandFrameBody & { type: "steer" },
-	session: AgentSession,
+	methods: BoundMethods,
 	trackTask: (commandId: string, kind: number, completion: Promise<CommandEffectResult>) => void,
 ): SandboxCommandEffectHandle {
 	let sessionPromise: Promise<unknown>;
 	try {
-		const opts: Parameters<typeof session.prompt>[1] = {
+		const opts: Record<string, unknown> = {
 			streamingBehavior: "steer",
 		};
 		if (body.queueKey !== undefined && body.queueKey.length > 0) {
 			opts.followUpQueueKey = body.queueKey;
 		}
 		opts.admissionCommitted = () => {};
-		sessionPromise = session.prompt(body.message, opts);
+		sessionPromise = methods.prompt(body.message, opts) as Promise<unknown>;
 	} catch {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
@@ -415,12 +529,12 @@ function execSteer(
 
 function execAbort(
 	commandId: string,
-	session: AgentSession,
+	methods: BoundMethods,
 	trackTask: (commandId: string, kind: number, completion: Promise<CommandEffectResult>) => void,
 ): SandboxCommandEffectHandle {
 	let sessionPromise: Promise<unknown>;
 	try {
-		sessionPromise = session.abort();
+		sessionPromise = methods.abort() as Promise<unknown>;
 	} catch {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
@@ -437,16 +551,16 @@ function execAbort(
 function execBash(
 	commandId: string,
 	body: RemoteHostCommandFrameBody & { type: "execute_bash" },
-	session: AgentSession,
+	methods: BoundMethods,
 	trackTask: (commandId: string, kind: number, completion: Promise<CommandEffectResult>) => void,
 ): SandboxCommandEffectHandle {
 	let sessionPromise: Promise<unknown>;
 	try {
-		const opts: Parameters<typeof session.runUserBash>[1] = {
+		const opts: Record<string, unknown> = {
 			transient: body.transient ?? false,
 		};
 		if (body.runId !== undefined) opts.runId = body.runId;
-		sessionPromise = session.runUserBash(body.command, opts);
+		sessionPromise = methods.runUserBash(body.command, opts) as Promise<unknown>;
 	} catch {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
@@ -460,9 +574,9 @@ function execBash(
 	return frozenHandle(commandId, completion);
 }
 
-function execAbortBash(commandId: string, session: AgentSession): SandboxCommandEffectHandle {
+function execAbortBash(commandId: string, methods: BoundMethods): SandboxCommandEffectHandle {
 	try {
-		session.abortBash();
+		methods.abortBash();
 	} catch {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
@@ -472,12 +586,12 @@ function execAbortBash(commandId: string, session: AgentSession): SandboxCommand
 function execCompact(
 	commandId: string,
 	body: RemoteHostCommandFrameBody & { type: "compact" },
-	session: AgentSession,
+	methods: BoundMethods,
 	trackTask: (commandId: string, kind: number, completion: Promise<CommandEffectResult>) => void,
 ): SandboxCommandEffectHandle {
 	let sessionPromise: Promise<unknown>;
 	try {
-		sessionPromise = session.compact(body.customInstructions);
+		sessionPromise = methods.compact(body.customInstructions) as Promise<unknown>;
 	} catch {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
@@ -491,9 +605,9 @@ function execCompact(
 	return frozenHandle(commandId, completion);
 }
 
-function execCompactAbort(commandId: string, session: AgentSession): SandboxCommandEffectHandle {
+function execCompactAbort(commandId: string, methods: BoundMethods): SandboxCommandEffectHandle {
 	try {
-		session.abortCompaction();
+		methods.abortCompaction();
 	} catch {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}

@@ -512,16 +512,17 @@ describe("FIFO ordering", () => {
 // ===========================================================================
 
 describe("real reentry — sync execute-time and close", () => {
-	test("sync execute-time apply reentry returns error", async () => {
+	test("sync execute-time apply reentry and close reentry return error", async () => {
 		// Override session.abort BEFORE creating the effect so the bound
 		// execute closure captures the overridden method. The override
 		// uses a closure variable `reentryApp` set after app creation.
+		// Also calls reentryApp.close() synchronously — ALS reentry check
+		// must return error. A later external close succeeds normally.
 		const h = await createHarness();
 		try {
-			// Mutable app reference — set after app creation
 			let reentryApp: SandboxCommandApplication | null = null;
-			const innerResults: Array<{ status: string }> = [];
-
+			const innerResults: Array<Record<string, unknown>> = [];
+			let closeReentryResult: Record<string, unknown> | null = null;
 			let reentryTriggered = false;
 
 			const savedAbort = Object.getOwnPropertyDescriptor(h.session, "abort");
@@ -536,6 +537,9 @@ describe("real reentry — sync execute-time and close", () => {
 						void reentryApp.apply(makeCommandEnvelope("inner2", "abort")).then((ir) => {
 							innerResults.push(ir);
 						});
+						void reentryApp.close().then((cr) => {
+							closeReentryResult = cr;
+						});
 					}
 					return Promise.resolve(undefined);
 				},
@@ -543,7 +547,6 @@ describe("real reentry — sync execute-time and close", () => {
 				writable: true,
 			});
 
-			// Create effect AFTER the override
 			const effectR = createSandboxCommandEffect(h.session);
 			if (!effectR.ok) throw new Error("effect failed");
 			const pubs: PublishedFile[] = [];
@@ -555,34 +558,41 @@ describe("real reentry — sync execute-time and close", () => {
 			const outer = await reentryApp.apply(makeCommandEnvelope("outer1", "abort"));
 			expect(outer.status).toBe("applied");
 
-			// Flush microtasks so the .then callbacks fire
+			// Flush microtasks so .then callbacks fire
 			await Promise.resolve();
 			await Promise.resolve();
 			await Promise.resolve();
 
+			// Inner applies rejected by ALS reentry
 			expect(innerResults.length).toBe(2);
 			for (const ir of innerResults) {
 				expect(ir.status).toBe("error");
 			}
+
+			// Close reentry also returns error (not closed — ALS detected)
+			expect(closeReentryResult).not.toBeNull();
+			// biome-ignore lint/style/noNonNullAssertion: guarded by previous not.toBeNull
+			expect(closeReentryResult!.status).toBe("error");
+
+			// Later external close succeeds (no ALS context anymore)
+			const closePromise = reentryApp.close();
+			const closeResult = await closePromise;
+			expect(closeResult.status).toBe("closed");
+
 			if (savedAbort) {
 				Object.defineProperty(h.session, "abort", savedAbort);
 			} else {
 				Reflect.deleteProperty(h.session, "abort");
 			}
-
-			await reentryApp.close();
 		} finally {
 			h.cleanup();
 		}
 	});
-
 	test("async completion-context reentry is also rejected", async () => {
-		// Override session.abort BEFORE effect creation. The override
-		// schedules an inner apply on the next microtask while the outer
-		// apply is running inside the ALS scope.
 		const h = await createHarness();
 		try {
 			let reentryApp: SandboxCommandApplication | null = null;
+			let sawInner = false;
 			let deferredResolve: (v: unknown) => void = () => {};
 			const deferred = new Promise<unknown>((resolve) => {
 				deferredResolve = resolve;
@@ -590,14 +600,14 @@ describe("real reentry — sync execute-time and close", () => {
 
 			const savedAbort = Object.getOwnPropertyDescriptor(h.session, "abort");
 			Object.defineProperty(h.session, "abort", {
-				value: () => {
-					void Promise.resolve().then(() => {
-						if (reentryApp !== null) {
-							void reentryApp.apply(makeCommandEnvelope("inner", "abort")).then((ir) => {
-								expect(ir.status).toBe("error");
-							});
-						}
-					});
+				value: async () => {
+					// Yield once (microtask boundary), then call apply synchronously
+					await Promise.resolve();
+					if (reentryApp !== null) {
+						const ir = await reentryApp.apply(makeCommandEnvelope("inner", "abort"));
+						sawInner = true;
+						expect(ir.status).toBe("error");
+					}
 					return deferred;
 				},
 				configurable: true,
@@ -615,9 +625,12 @@ describe("real reentry — sync execute-time and close", () => {
 			void reentryApp.apply(makeCommandEnvelope("outer", "abort"));
 			deferredResolve(undefined);
 
-			await Promise.resolve();
-			await Promise.resolve();
-			await Promise.resolve();
+			// Flush microtasks — the enqueue chain, async abort yield, inner apply
+			for (let i = 0; i < 100; i++) {
+				await Promise.resolve();
+				if (sawInner) break;
+			}
+			expect(sawInner).toBe(true);
 
 			if (savedAbort) {
 				Object.defineProperty(h.session, "abort", savedAbort);
@@ -630,26 +643,23 @@ describe("real reentry — sync execute-time and close", () => {
 			h.cleanup();
 		}
 	});
-}); // ===========================================================================
-// Hostile input — factory and apply
-// ===========================================================================
+});
 
 describe("hostile factory input", () => {
-	test("rejects hidden effect via getter accessor", async () => {
+	test("rejects hidden effect via getter accessor — zero getter calls", async () => {
 		const h = await createHarness();
 		try {
 			const effectR = createSandboxCommandEffect(h.session);
 			if (!effectR.ok) throw new Error("effect failed");
 			const pubs: PublishedFile[] = [];
 			const store = await createMockStore(pubs);
-			let accessorCalled = false;
-			void accessorCalled;
+			let getterCalls = 0;
 			const raw = Object.defineProperties(
 				{},
 				{
 					effect: {
 						get: () => {
-							accessorCalled = true;
+							getterCalls += 1;
 							return effectR.capability;
 						},
 						enumerable: true,
@@ -660,6 +670,7 @@ describe("hostile factory input", () => {
 			);
 			const r = await createSandboxCommandApplication(raw);
 			expect("ok" in r && r.ok === false).toBe(true);
+			expect(getterCalls).toBe(0);
 		} finally {
 			h.cleanup();
 		}
@@ -779,20 +790,24 @@ describe("hostile apply input", () => {
 		}
 	});
 
-	test("rejects accessor envelope", async () => {
+	test("rejects accessor envelope — zero getter calls", async () => {
 		const { app, cleanup } = await createWorkingApp();
 		try {
+			let getterCalls = 0;
 			const raw = Object.defineProperties(
 				{},
 				{
 					envelope: {
-						get: () => ({
-							type: "frame",
-							frameId: "fid-t1",
-							protocol: { name: "prime-agent.remote-host", version: 1 },
-							sentAt: "2025-01-15T10:30:00.000Z",
-							frame: { type: "command", commandId: "t1", body: { type: "abort" } },
-						}),
+						get: () => {
+							getterCalls += 1;
+							return {
+								type: "frame",
+								frameId: "fid-t1",
+								protocol: { name: "prime-agent.remote-host", version: 1 },
+								sentAt: "2025-01-15T10:30:00.000Z",
+								frame: { type: "command", commandId: "t1", body: { type: "abort" } },
+							};
+						},
 						enumerable: true,
 						configurable: true,
 					},
@@ -800,6 +815,7 @@ describe("hostile apply input", () => {
 			);
 			const result = await app.apply(raw);
 			expect(result.status).toBe("error");
+			expect(getterCalls).toBe(0);
 		} finally {
 			await cleanup();
 		}
