@@ -1,5 +1,6 @@
 import { types } from "node:util";
-import type { RemoteHostFrameEnvelope } from "./remote-agent-host-protocol.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { RemoteHostFrame, RemoteHostFrameEnvelope } from "./remote-agent-host-protocol.js";
 import { decodeEnvelope } from "./remote-host-frame-codec.js";
 
 // ===========================================================================
@@ -12,8 +13,9 @@ const APPLY_INPUT_KEYS = new Set(["envelope"]);
 const APPLY_RESULT_KEYS = new Set(["status"]);
 const CLOSE_RESULT_KEYS = new Set(["status"]);
 
-const MAX_DEEP_FREEZE_NODES = 1024;
-const MAX_DEEP_FREEZE_DEPTH = 32;
+// Codec-aligned bounds (matched to remote-host-frame-codec internals)
+const MAX_DEEP_FREEZE_NODES = 10_000;
+const MAX_DEEP_FREEZE_DEPTH = 64;
 
 // ===========================================================================
 // Result types
@@ -119,7 +121,8 @@ function value(descriptors: Descriptors, name: string): unknown {
 	return d && "value" in d ? d.value : undefined;
 }
 
-function bindMethod(raw: object, descriptor: PropertyDescriptor): BoundMethod | null {
+function bindMethod(raw: unknown, descriptor: PropertyDescriptor): BoundMethod | null {
+	if (typeof raw !== "object" || raw === null) return null;
 	const dValue = descriptor.value;
 	if (typeof dValue !== "function") return null;
 	try {
@@ -181,15 +184,35 @@ function invoke(call: () => unknown): Promise<PromiseObservation> {
 }
 
 // ===========================================================================
+// Own descriptor uncertainty helpers
+// ===========================================================================
+
+function hasAccessorDescriptor(raw: unknown): boolean {
+	if (typeof raw !== "object" || raw === null) return false;
+	try {
+		const descs = Object.getOwnPropertyDescriptors(raw);
+		for (const name of Object.getOwnPropertyNames(descs)) {
+			const d = descs[name];
+			if (d && !("value" in d)) return true;
+		}
+	} catch {
+		return false;
+	}
+	return false;
+}
+
+
+// ===========================================================================
 // Ownership-first close acquisition
 //
 // Examine the raw object's OWN descriptors (via Object.getOwnPropertyDescriptors
 // which works on any object regardless of prototype). If there is an own
-// enumerable `close` function, capture it as an owner. Do NOT validate the
-// {apply,close} shape yet — that happens later as capability validation.
+// `close` function (data descriptor, any enumerability), capture it as an
+// owner. Do NOT validate the {apply,close} shape yet — that happens later
+// as capability validation.
 //
-// This ensures that even if the apply descriptor is malformed, missing, or
-// the object has symbols/hidden keys, the close owner is still captured.
+// Non-enumerable data close: provable ownership, capture it.
+// Accessor close: ownership uncertainty, return null (never invoke getter).
 // ===========================================================================
 
 function hasCapabilityUncertainty(raw: unknown): boolean {
@@ -204,6 +227,11 @@ function hasCapabilityUncertainty(raw: unknown): boolean {
 	} catch {
 		return true;
 	}
+	try {
+		if (hasAccessorDescriptor(raw)) return true;
+	} catch {
+		return true;
+	}
 	return false;
 }
 
@@ -215,7 +243,6 @@ function captureOwnedClose(raw: unknown): OwnedSlot | null {
 		return null;
 	}
 
-	// Use Object.getOwnPropertyDescriptors — works on any prototypal shape.
 	let ownDescs: Record<string, PropertyDescriptor>;
 	try {
 		ownDescs = Object.getOwnPropertyDescriptors(raw);
@@ -224,24 +251,25 @@ function captureOwnedClose(raw: unknown): OwnedSlot | null {
 	}
 
 	const closeDesc = ownDescs.close;
-	if (!closeDesc || !("value" in closeDesc) || !closeDesc.enumerable) return null;
-	const closeFn = closeDesc.value;
-	if (typeof closeFn !== "function") return null;
-
-	// Symbol-check on the raw object is handled by hasCapabilityUncertainty;
-	// still capture the close function here so cleanup can call it.
+	// Accessor descriptor — never invoke getter, ownership uncertain
+	if (!closeDesc || !("value" in closeDesc)) return null;
+	// Data-function close regardless of enumerability (non-enumerable is still provable)
+	const closeFnValue = closeDesc.value;
+	if (typeof closeFnValue !== "function") return null;
 
 	try {
-		if (types.isProxy(closeFn)) return null;
+		if (types.isProxy(closeFnValue)) return null;
 	} catch {
 		return null;
 	}
+
+	const closeFn: object = closeFnValue;
 
 	let used = false;
 	const close: OwnedClose = async (): Promise<boolean> => {
 		if (used) return false;
 		used = true;
-		const observation = await invoke(() => Reflect.apply(closeFn, raw, []));
+		const observation = await invoke(() => Reflect.apply(closeFnValue, raw, []));
 		if (!observation.fulfilled) return false;
 		const r = exact(observation.value, CLOSE_RESULT_KEYS);
 		return r !== null && value(r, "status") === "closed";
@@ -311,7 +339,6 @@ function extractPreliminary(raw: unknown): PrelimResult {
 
 	let ownDescriptors: Record<string, PropertyDescriptor>;
 	try {
-		// Always check for symbols AFTER capturing descriptors
 		ownDescriptors = Object.getOwnPropertyDescriptors(raw);
 	} catch {
 		return uncertain;
@@ -325,7 +352,11 @@ function extractPreliminary(raw: unknown): PrelimResult {
 	): { readonly value: unknown; readonly present: boolean; readonly uncertain: boolean } => {
 		const d = ownDescriptors[name];
 		if (d === undefined) return { value: undefined, present: false, uncertain: false };
-		if (!("value" in d) || !d.enumerable) return { value: undefined, present: false, uncertain: true };
+		// Accessor descriptor — never invoke getter, ownership uncertain
+		if (!("value" in d)) return { value: undefined, present: false, uncertain: true };
+		// Non-enumerable data descriptor is provable (fully observable via getOwnPropertyDescriptors)
+		// Extra non-enumerable keys are provably invalid shape, not uncertainty
+		if (!d.enumerable) return { value: d.value, present: true, uncertain: false };
 		return { value: d.value, present: true, uncertain: false };
 	};
 
@@ -362,68 +393,270 @@ function slotForFrameType(frameType: string): SlotName | null {
 }
 
 // ===========================================================================
-// Deep freeze — recursively freezes JSON-safe objects/arrays with bounds
+// Bounded JSON-safe deep clone (codec-normalized, cast-free)
+// Clones only JSON-safe values: null, boolean, number, string, Array, plain Object
+// Uses the same node/depth bounds as remote-host-frame-codec.
+// Returns an explicit Ok/Fail discriminated result.
 // ===========================================================================
 
-function deepFreeze(raw: unknown, depth: number, budget: { nodes: number }): unknown {
-	if (budget.nodes <= 0 || depth > MAX_DEEP_FREEZE_DEPTH) return raw;
-	if (typeof raw !== "object" || raw === null) return raw;
-	if (Object.isFrozen(raw)) return raw;
+type CloneOk<T> = { readonly ok: true; readonly value: T };
+type CloneFail = { readonly ok: false };
+
+type CloneResult<T> = CloneOk<T> | CloneFail;
+
+interface CloneBudget {
+	nodes: number;
+}
+
+function cloneOk<T>(value: T): CloneResult<T> {
+	return { ok: true, value };
+}
+
+function cloneFail(): CloneResult<never> {
+	return { ok: false };
+}
+
+function isJsonPrimitiveOrNull(raw: unknown): raw is null | boolean | number | string {
+	if (raw === null) return true;
+	if (typeof raw === "boolean") return true;
+	if (typeof raw === "number") return Number.isFinite(raw);
+	if (typeof raw === "string") return true;
+	return false;
+}
+
+function deepCloneSafe<T>(raw: T, depth: number, budget: CloneBudget): CloneResult<T> {
+	if (budget.nodes <= 0 || depth > MAX_DEEP_FREEZE_DEPTH) return cloneFail();
+	if (isJsonPrimitiveOrNull(raw)) return cloneOk(raw) as unknown as CloneResult<T>;
+
+	if (typeof raw !== "object" || raw === null) return cloneFail();
+
+	budget.nodes -= 1;
+
+	if (Array.isArray(raw)) {
+		const cloned: unknown[] = [];
+		for (let i = 0; i < raw.length; i += 1) {
+			const item = deepCloneSafe(raw[i], depth + 1, budget);
+			if (!item.ok) return cloneFail();
+			cloned.push(item.value);
+		}
+		return cloneOk(cloned) as unknown as CloneResult<T>;
+	}
+
+	// Accept both Object.prototype and null-prototype objects (codec returns
+	// Object.create(null) for decoded JSON values). Reject other prototypes.
+	const proto = Object.getPrototypeOf(raw);
+	if (proto !== Object.prototype && proto !== null) return cloneFail();
+
+	const keys = Object.getOwnPropertyNames(raw);
+	const cloned: Record<string, unknown> = {};
+	for (const key of keys) {
+		const d = Object.getOwnPropertyDescriptor(raw, key);
+		if (!d || !("value" in d)) return cloneFail();
+		const val = deepCloneSafe(d.value, depth + 1, budget);
+		if (!val.ok) return cloneFail();
+		cloned[key] = val.value;
+	}
+	return cloneOk(cloned) as unknown as CloneResult<T>;
+}
+
+// ===========================================================================
+// All-or-fail deep freeze with codec bounds
+// Returns {ok, value} — fails (ok: false) if budget or depth exceeded,
+// ensuring no partially frozen tree escapes.
+// ===========================================================================
+
+function deepFreezeAllOrFail<T>(raw: T, depth: number, budget: CloneBudget): CloneResult<T> {
+	if (budget.nodes <= 0 || depth > MAX_DEEP_FREEZE_DEPTH) return cloneFail();
+	if (typeof raw !== "object" || raw === null) return cloneOk(raw) as unknown as CloneResult<T>;
+	if (Object.isFrozen(raw)) return cloneOk(raw) as unknown as CloneResult<T>;
 
 	budget.nodes -= 1;
 
 	if (Array.isArray(raw)) {
 		for (let i = 0; i < raw.length; i += 1) {
-			raw[i] = deepFreeze(raw[i], depth + 1, budget);
+			const result = deepFreezeAllOrFail(raw[i], depth + 1, budget);
+			if (!result.ok) return cloneFail();
 		}
 		Object.freeze(raw);
-		return raw;
+		return cloneOk(raw) as unknown as CloneResult<T>;
 	}
 
-	if (Object.getPrototypeOf(raw) !== Object.prototype) return raw;
+	// Accept both Object.prototype and null-prototype objects
+	const proto = Object.getPrototypeOf(raw);
+	if (proto !== Object.prototype && proto !== null) return cloneFail();
 
 	const keys = Object.getOwnPropertyNames(raw);
 	for (const key of keys) {
 		const d = Object.getOwnPropertyDescriptor(raw, key);
 		if (d && "value" in d) {
-			raw[key] = deepFreeze(d.value, depth + 1, budget);
+			const result = deepFreezeAllOrFail(d.value, depth + 1, budget);
+			if (!result.ok) return cloneFail();
 		}
 	}
 	Object.freeze(raw);
-	return raw;
+	return cloneOk(raw) as unknown as CloneResult<T>;
 }
 
 // ===========================================================================
-// Deep fresh envelope with deep freeze — constructs a fully isolated snapshot
+// Deep fresh envelope — constructs a fully isolated snapshot via bounded
+// codec-normalized clone + all-or-fail freeze.
+// Returns Ok/Fail so the caller can poison without delivering a sentinel.
 // ===========================================================================
 
-function deepFreshEnvelope(envelope: RemoteHostFrameEnvelope): RemoteHostFrameEnvelope {
+interface FreshEnvelopeOk {
+	readonly ok: true;
+	readonly envelope: RemoteHostFrameEnvelope;
+}
+
+type FreshEnvelopeResult = FreshEnvelopeOk | CloneFail;
+
+function deepFreshEnvelope(envelope: RemoteHostFrameEnvelope): FreshEnvelopeResult {
 	const freshProtocol = Object.freeze({
 		name: envelope.protocol.name,
 		version: envelope.protocol.version,
 	});
 
-	// Deep freeze the frame recursively — it's a JSON-safe value tree
-	const frameClone = JSON.parse(JSON.stringify(envelope.frame));
-	const frozenFrame = deepFreeze(frameClone, 0, { nodes: MAX_DEEP_FREEZE_NODES }) as typeof envelope.frame;
+	// Cast-free bounded deep clone of the frame (codec-normalized JSON-safe values)
+	const cloneResult = deepCloneSafe(envelope.frame, 0, { nodes: MAX_DEEP_FREEZE_NODES });
+	if (!cloneResult.ok) return { ok: false };
+
+	// All-or-fail deep freeze with same bounds
+	const freezeResult = deepFreezeAllOrFail(cloneResult.value, 0, { nodes: MAX_DEEP_FREEZE_NODES });
+	if (!freezeResult.ok) return { ok: false };
+
+	const frozenFrame = freezeResult.value;
 
 	if (envelope.lastReceivedEventSequence === undefined) {
-		return Object.freeze({
+		return {
+			ok: true,
+			envelope: Object.freeze({
+				type: "frame",
+				frameId: envelope.frameId,
+				protocol: freshProtocol,
+				sentAt: envelope.sentAt,
+				frame: frozenFrame,
+			}),
+		};
+	}
+	return {
+		ok: true,
+		envelope: Object.freeze({
 			type: "frame",
 			frameId: envelope.frameId,
 			protocol: freshProtocol,
 			sentAt: envelope.sentAt,
 			frame: frozenFrame,
-		});
+			lastReceivedEventSequence: envelope.lastReceivedEventSequence,
+		}),
+	};
+}
+
+// ===========================================================================
+// OwnDescriptor monitor: detects accessor/hidden descriptors on any value.
+// Returns uncertainty when an accessible own descriptor could conceal an owner.
+// ===========================================================================
+
+interface OwnDescMonitorResult {
+	anyAccessor: boolean;
+}
+
+function scanOwnDescUncertainty(raw: unknown): OwnDescMonitorResult {
+	const result: OwnDescMonitorResult = { anyAccessor: false };
+	if (typeof raw !== "object" || raw === null) return result;
+	try {
+		if (types.isProxy(raw)) {
+			result.anyAccessor = true;
+			return result;
+		}
+	} catch {
+		result.anyAccessor = true;
+		return result;
 	}
-	return Object.freeze({
-		type: "frame",
-		frameId: envelope.frameId,
-		protocol: freshProtocol,
-		sentAt: envelope.sentAt,
-		frame: frozenFrame,
-		lastReceivedEventSequence: envelope.lastReceivedEventSequence,
-	});
+	try {
+		const descs = Object.getOwnPropertyDescriptors(raw);
+		for (const name of Object.getOwnPropertyNames(descs)) {
+			const d = descs[name];
+			if (d && !("value" in d)) {
+				// Accessor descriptor — could conceal an owner, never invoke
+				result.anyAccessor = true;
+			}
+		}
+	} catch {
+		result.anyAccessor = true;
+	}
+	return result;
+}
+
+// ===========================================================================
+// Capture all known capability-like owners from a raw factory object.
+// Scans every OWN value-descriptor property (including non-enumerable)
+// for capability-like sub-objects and captures their close owners.
+// Also reports accessor uncertainty for merge into totalUncertain.
+// This prevents close leaks when hidden/accessor descriptors exist.
+// ===========================================================================
+
+interface AllOwnersResult {
+	readonly owners: readonly OwnedSlot[];
+	readonly anyAlias: boolean;
+	readonly anyAccessorUncertain: boolean;
+}
+
+function captureAllOwners(raw: unknown): AllOwnersResult {
+	const owners: OwnedSlot[] = [];
+	const objectSet = new Set<object>();
+	const closeFnSet = new Set<object>();
+	let anyAlias = false;
+	let anyAccessorUncertain = false;
+
+	if (typeof raw !== "object" || raw === null) {
+		return { owners, anyAlias, anyAccessorUncertain };
+	}
+
+	let ownDescs: Record<string, PropertyDescriptor>;
+	try {
+		ownDescs = Object.getOwnPropertyDescriptors(raw);
+	} catch {
+		return { owners, anyAlias: false, anyAccessorUncertain: true };
+	}
+
+	for (const name of Object.getOwnPropertyNames(ownDescs)) {
+		const d = ownDescs[name];
+		if (!d) continue;
+
+		// Accessor descriptor — never invoke getter, flag uncertainty
+		if (!("value" in d)) {
+			anyAccessorUncertain = true;
+			continue;
+		}
+
+		const val = d.value;
+		if (typeof val !== "object" || val === null) continue;
+		if (Array.isArray(val)) continue;
+
+		// Try to capture close owner from this value
+		const slot = captureOwnedClose(val);
+		if (!slot) {
+			// Object exists but no close captured — may still have hidden close
+			if (hasCapabilityUncertainty(val)) {
+				anyAccessorUncertain = true;
+			}
+			continue;
+		}
+
+		// Dedup by raw object AND raw close function (not wrapper)
+		const isObjectAlias = objectSet.has(slot.object);
+		const isFnAlias = closeFnSet.has(slot.closeFn);
+		objectSet.add(slot.object);
+		closeFnSet.add(slot.closeFn);
+
+		if (isObjectAlias || isFnAlias) {
+			anyAlias = true;
+		} else {
+			owners.push(slot);
+		}
+	}
+
+	return { owners, anyAlias, anyAccessorUncertain };
 }
 
 // ===========================================================================
@@ -431,58 +664,33 @@ function deepFreshEnvelope(envelope: RemoteHostFrameEnvelope): RemoteHostFrameEn
 // ===========================================================================
 
 export async function createRelayApplicationMultiplexer(raw: unknown): Promise<CreateMultiplexerResult> {
+	// Phase 0: capture ALL known owners from the raw factory object before any extraction
+	// This ensures hidden/accessor data slots have their closes captured even when
+	// extractPreliminary cannot confirm the value.
+	const allOwners = captureAllOwners(raw);
+
 	const prelim = extractPreliminary(raw);
 
-	// Per-slot uncertainty (symbols, proxies on individual capabilities)
+	// Also scan factory-level accessor descriptors that could conceal owners
+	const factoryDescMonitor = scanOwnDescUncertainty(raw);
+
+	// Per-slot uncertainty (symbols, proxies, accessors, non-enumerable on individual capabilities)
 	const slotUncertain =
 		hasCapabilityUncertainty(prelim.command) ||
 		hasCapabilityUncertainty(prelim.event) ||
 		hasCapabilityUncertainty(prelim.agentMessage) ||
 		hasCapabilityUncertainty(prelim.providerProxy);
 
-	const totalUncertain = prelim.ownershipUncertain || slotUncertain;
+	const totalUncertain =
+		prelim.ownershipUncertain ||
+		slotUncertain ||
+		allOwners.anyAccessorUncertain ||
+		factoryDescMonitor.anyAccessor;
 
-	// Phase 2: capture close owners FIRST (ownership-first), BEFORE any validation
-	const commandOwned = captureOwnedClose(prelim.command);
-	const eventOwned = captureOwnedClose(prelim.event);
-	const agentMessageOwned = captureOwnedClose(prelim.agentMessage);
-	const providerProxyOwned = captureOwnedClose(prelim.providerProxy);
+	// Build closeList from all captured owners in original discovery order
+	const closeList = [...allOwners.owners.map((s) => s.close)];
 
-	// Build deduped close list from all captured owners
-	const objectSet = new Set<object>();
-	const closeFnSet = new Set<object>();
-	const closeSet = new Set<OwnedClose>();
-	const closeList: OwnedClose[] = [];
-
-	const addOwner = (slot: OwnedSlot | null): boolean => {
-		if (slot === null) return false;
-		const objectAlias = objectSet.has(slot.object);
-		const fnAlias = closeFnSet.has(slot.closeFn);
-		objectSet.add(slot.object);
-		closeFnSet.add(slot.closeFn);
-		if (!closeSet.has(slot.close)) {
-			closeSet.add(slot.close);
-			closeList.push(slot.close);
-		}
-		return objectAlias || fnAlias;
-	};
-
-	const a0 = addOwner(commandOwned);
-	const a1 = addOwner(eventOwned);
-	const a2 = addOwner(agentMessageOwned);
-	const a3 = addOwner(providerProxyOwned);
-
-	const allOwned =
-		commandOwned !== null && eventOwned !== null && agentMessageOwned !== null && providerProxyOwned !== null;
-	const hasAlias = a0 || a1 || a2 || a3;
-
-	if (!allOwned || hasAlias) {
-		const allClosed = await closeAllReverse(closeList);
-		if (!allClosed || totalUncertain) return closeUncertainError();
-		return invalidArgumentError();
-	}
-
-	// Phase 3: validate factory input shape
+	// Phase 1: validate factory input shape
 	const inputDescriptors = exact(raw, FACTORY_KEYS);
 	if (!inputDescriptors) {
 		const allClosed = await closeAllReverse(closeList);
@@ -490,14 +698,69 @@ export async function createRelayApplicationMultiplexer(raw: unknown): Promise<C
 		return invalidArgumentError();
 	}
 
-	// Phase 4: validate capabilities (apply binding)
+	// Phase 2: capture close owners for the 4 named slots (ownership-first)
+	const commandOwned = captureOwnedClose(prelim.command);
+	const eventOwned = captureOwnedClose(prelim.event);
+	const agentMessageOwned = captureOwnedClose(prelim.agentMessage);
+	const providerProxyOwned = captureOwnedClose(prelim.providerProxy);
+
+	// Merge named-slot owners into a deduplicated close list in discovery order.
+	// Dedup by raw closeFn object identity to prevent double-close.
+	const rawObjectSet = new Set<object>();
+	const rawCloseFnSet = new Set<object>();
+	const mergedCloses: OwnedClose[] = [];
+
+	for (const s of allOwners.owners) {
+		if (rawObjectSet.has(s.object)) continue;
+		if (rawCloseFnSet.has(s.closeFn)) continue;
+		rawObjectSet.add(s.object);
+		rawCloseFnSet.add(s.closeFn);
+		mergedCloses.push(s.close);
+	}
+
+	// Add named-slot owners that are genuinely new
+	for (const slot of [commandOwned, eventOwned, agentMessageOwned, providerProxyOwned]) {
+		if (slot === null) continue;
+		if (rawObjectSet.has(slot.object)) continue;
+		if (rawCloseFnSet.has(slot.closeFn)) continue;
+		rawObjectSet.add(slot.object);
+		rawCloseFnSet.add(slot.closeFn);
+		mergedCloses.push(slot.close);
+	}
+
+	const allOwned =
+		commandOwned !== null && eventOwned !== null && agentMessageOwned !== null && providerProxyOwned !== null;
+
+	// Detect alias across named slots: same raw object or same raw close function
+	const namedObjectSet = new Set<object>();
+	const namedFnSet = new Set<object>();
+	let hasAlias = false;
+	for (const slot of [commandOwned, eventOwned, agentMessageOwned, providerProxyOwned]) {
+		if (slot === null) continue;
+		if (namedObjectSet.has(slot.object) || namedFnSet.has(slot.closeFn)) {
+			hasAlias = true;
+		}
+		namedObjectSet.add(slot.object);
+		namedFnSet.add(slot.closeFn);
+	}
+
+	// Also propagate any alias from the all-owners scan
+	if (allOwners.anyAlias) hasAlias = true;
+
+	if (!allOwned || hasAlias) {
+		const allClosed = await closeAllReverse(mergedCloses);
+		if (!allClosed || totalUncertain) return closeUncertainError();
+		return invalidArgumentError();
+	}
+
+	// Phase 3: validate capabilities (apply binding)
 	const validate = validateCapability(prelim.command, commandOwned);
 	const validate1 = validateCapability(prelim.event, eventOwned);
 	const validate2 = validateCapability(prelim.agentMessage, agentMessageOwned);
 	const validate3 = validateCapability(prelim.providerProxy, providerProxyOwned);
 
 	if (!validate || !validate1 || !validate2 || !validate3) {
-		const allClosed = await closeAllReverse(closeList);
+		const allClosed = await closeAllReverse(mergedCloses);
 		if (!allClosed || totalUncertain) return closeUncertainError();
 		return invalidArgumentError();
 	}
@@ -507,7 +770,7 @@ export async function createRelayApplicationMultiplexer(raw: unknown): Promise<C
 		validate1.apply,
 		validate2.apply,
 		validate3.apply,
-		closeList,
+		mergedCloses,
 	);
 
 	return successResult(
@@ -522,12 +785,13 @@ export async function createRelayApplicationMultiplexer(raw: unknown): Promise<C
 // Implementation
 // ===========================================================================
 
+const applyContext = new AsyncLocalStorage<boolean>();
+
 class RelayApplicationMultiplexerImpl {
 	private tail: Promise<void> = Promise.resolve();
 	private closePromise: Promise<MultiplexerCloseResult> | null = null;
 	private closed = false;
 	private poisoned = false;
-	private insideApply = false;
 
 	constructor(
 		private readonly commandApply: BoundMethod,
@@ -542,7 +806,9 @@ class RelayApplicationMultiplexerImpl {
 	// -----------------------------------------------------------------------
 
 	async apply(raw: unknown): Promise<MultiplexerApplyResult> {
-		if (this.insideApply) return errorResult();
+		if (applyContext.getStore()) {
+			return errorResult();
+		}
 		if (this.closed) return errorResult();
 		if (this.poisoned) return errorResult();
 
@@ -563,16 +829,20 @@ class RelayApplicationMultiplexerImpl {
 	private async applyOrdered(envelope: RemoteHostFrameEnvelope, slot: SlotName): Promise<MultiplexerApplyResult> {
 		if (this.poisoned) return errorResult();
 
-		const freshEnvelope = deepFreshEnvelope(envelope);
+		const freshResult = deepFreshEnvelope(envelope);
+		if (!freshResult.ok) return this.poison();
 		const applyFn = this.selectApply(slot);
 
-		this.insideApply = true;
+		// Use AsyncLocalStorage to reject async reentry without blocking external callers.
+		// Capture the raw return value (a Promise from applyFn) WITHOUT await so that
+		// observePromise can validate it as a native Promise.
 		let rawResult: unknown;
 		try {
-			rawResult = applyFn(Object.freeze({ envelope: freshEnvelope }));
-			this.insideApply = false;
-		} finally {
-			this.insideApply = false;
+			rawResult = applyContext.run(true, () =>
+				applyFn(Object.freeze({ envelope: freshResult.envelope })),
+			);
+		} catch {
+			return this.poison();
 		}
 
 		const observation = await observePromise(rawResult);

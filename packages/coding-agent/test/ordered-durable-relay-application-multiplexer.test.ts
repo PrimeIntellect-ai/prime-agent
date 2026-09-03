@@ -1167,3 +1167,382 @@ describe("deep fresh envelope isolation", () => {
 		await result.application.close();
 	});
 });
+// ===========================================================================
+
+// ===========================================================================
+
+// ===========================================================================
+// Hostile tests — audit-blacker corrections for v1
+// ===========================================================================
+
+describe("hostile — cast-free codec-normalized clone", () => {
+	it("rejects frame with non-JSON-safe Date value (cast-free clone returns sentinel)", async () => {
+		const input = makeFactoryInput();
+		const result = await createRelayApplicationMultiplexer(input);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		const app = result.application;
+
+		// Envelope with a Date value — deepCloneSafe returns undefined for
+		// non-plain-object values, producing a sentinel frame that poisons.
+		const env: Record<string, unknown> = {
+			type: "frame",
+			frameId: "f-1",
+			protocol: { name: "prime-agent.remote-host", version: 1 },
+			sentAt: "2025-01-01T00:00:00.000Z",
+			frame: { type: "command", body: new Date("2025-01-01") },
+		};
+		const applyResult = await app.apply({ envelope: env });
+		expect(applyResult.status).toBe("error");
+		await app.close();
+	});
+
+	it("rejects frame with undefined in tree (non-JSON-safe undefined)", async () => {
+		const input = makeFactoryInput();
+		const result = await createRelayApplicationMultiplexer(input);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		const app = result.application;
+
+		const env: Record<string, unknown> = {
+			type: "frame",
+			frameId: "f-1",
+			protocol: { name: "prime-agent.remote-host", version: 1 },
+			sentAt: "2025-01-01T00:00:00.000Z",
+			frame: { type: "command", body: { a: undefined } },
+		};
+		const applyResult = await app.apply({ envelope: env });
+		expect(applyResult.status).toBe("error");
+		await app.close();
+	});
+
+	it("rejects frame with Function value (non-JSON-safe)", async () => {
+		const input = makeFactoryInput();
+		const result = await createRelayApplicationMultiplexer(input);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		const app = result.application;
+
+		const env: Record<string, unknown> = {
+			type: "frame",
+			frameId: "f-1",
+			protocol: { name: "prime-agent.remote-host", version: 1 },
+			sentAt: "2025-01-01T00:00:00.000Z",
+			frame: { type: "command", body: () => "nope" },
+		};
+		const applyResult = await app.apply({ envelope: env });
+		expect(applyResult.status).toBe("error");
+		await app.close();
+	});
+
+	it("rejects frame with Set (non-plain-object)", async () => {
+		const input = makeFactoryInput();
+		const result = await createRelayApplicationMultiplexer(input);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		const app = result.application;
+
+		const env: Record<string, unknown> = {
+			type: "frame",
+			frameId: "f-1",
+			protocol: { name: "prime-agent.remote-host", version: 1 },
+			sentAt: "2025-01-01T00:00:00.000Z",
+			frame: { type: "command", body: new Set([1, 2, 3]) },
+		};
+		const applyResult = await app.apply({ envelope: env });
+		expect(applyResult.status).toBe("error");
+		await app.close();
+	});
+});
+
+describe("hostile — all-or-fail deep freeze at codec bounds", () => {
+	it("rejects frame that exceeds max depth (64)", async () => {
+		const input = makeFactoryInput();
+		const result = await createRelayApplicationMultiplexer(input);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		const app = result.application;
+
+		// Build a nested object at depth 65
+		let deep: Record<string, unknown> = { leaf: true };
+		for (let i = 0; i < 65; i++) {
+			deep = { nested: deep };
+		}
+		const env: Record<string, unknown> = {
+			type: "frame",
+			frameId: "f-1",
+			protocol: { name: "prime-agent.remote-host", version: 1 },
+			sentAt: "2025-01-01T00:00:00.000Z",
+			frame: { type: "command", body: deep },
+		};
+		const applyResult = await app.apply({ envelope: env });
+		expect(applyResult.status).toBe("error");
+		await app.close();
+	});
+
+	it("rejects frame that exceeds max node count (10k)", async () => {
+		const input = makeFactoryInput();
+		const result = await createRelayApplicationMultiplexer(input);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		const app = result.application;
+
+		// Array with 10001 items — exceeds 10000 node budget
+		const bigBody: number[] = [];
+		for (let i = 0; i < 10001; i++) {
+			bigBody.push(i);
+		}
+		const env: Record<string, unknown> = {
+			type: "frame",
+			frameId: "f-1",
+			protocol: { name: "prime-agent.remote-host", version: 1 },
+			sentAt: "2025-01-01T00:00:00.000Z",
+			frame: { type: "command", body: bigBody },
+		};
+		const applyResult = await app.apply({ envelope: env });
+		expect(applyResult.status).toBe("error");
+		await app.close();
+	});
+});
+
+describe("hostile — hidden parent data slot captures close before rejection", () => {
+	it("captures close from non-enumerable factory slot and returns INVALID_ARGUMENT (non-enumerable data is provable, not uncertain)", async () => {
+		let hiddenClosed = false;
+		const hiddenCap = makeCapability({
+			close: async () => {
+				hiddenClosed = true;
+				return Object.freeze({ status: "closed" });
+			},
+		});
+
+		// Create factory with non-enumerable `command` property
+		const factory: Record<string, unknown> = {
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		Object.defineProperty(factory, "command", {
+			value: hiddenCap,
+			enumerable: false,
+			writable: false,
+			configurable: false,
+		});
+
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		// Non-enumerable data descriptor is provable — no uncertainty.
+		// Hidden close is captured, shape is valid → INVALID_ARGUMENT only.
+		expect(result.error.code).toBe("INVALID_ARGUMENT");
+
+		// The hidden close MUST be called during rejection cleanup
+		expect(hiddenClosed).toBe(true);
+	});
+
+	it("non-enumerable extra data key on a slot is provably invalid, not uncertain", async () => {
+		let closeCalled = false;
+		// Build unfrozen capability so we can add non-enumerable extra key
+		const cmdCap: Record<string, unknown> = {
+			apply: async () => Object.freeze({ status: "applied" }),
+			close: async () => {
+				closeCalled = true;
+				return Object.freeze({ status: "closed" });
+			},
+		};
+		Object.defineProperty(cmdCap, "extra", {
+			value: true,
+			enumerable: false,
+		});
+
+		const factory: Record<string, unknown> = {
+			command: cmdCap,
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		// Non-enumerable extra key is provable data → no uncertainty → INVALID_ARGUMENT
+		expect(result.error.code).toBe("INVALID_ARGUMENT");
+		expect(closeCalled).toBe(true);
+	});
+
+	it("rejects accessor-descriptor factory slot with CLOSE_UNCERTAIN (no getter invocation)", async () => {
+		let accessorClosed = false;
+		const accessorCap = makeCapability({
+			close: async () => {
+				accessorClosed = true;
+				return Object.freeze({ status: "closed" });
+			},
+		});
+
+		const factory: Record<string, unknown> = {
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		Object.defineProperty(factory, "command", {
+			get: () => accessorCap,
+			enumerable: true,
+			configurable: true,
+		});
+
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		// Accessor descriptor → ownership uncertain → total uncertain
+		expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+
+		// The accessor is NOT invoked — captureAllOwners skips accessor descriptors
+		expect(accessorClosed).toBe(false);
+	});
+
+	it("rejects proxy-slotted capability with CLOSE_UNCERTAIN (cannot inspect proxy)", async () => {
+		let proxyClosed = false;
+		const realCap = makeCapability({
+			close: async () => {
+				proxyClosed = true;
+				return Object.freeze({ status: "closed" });
+			},
+		});
+		const proxy = new Proxy(realCap, {});
+
+		const factory: Record<string, unknown> = {
+			command: proxy,
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		// Proxy → captureOwnedClose returns null, hasCapabilityUncertainty true
+		expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+
+		// The proxy's close is NOT called — cannot safely capture from proxies
+		expect(proxyClosed).toBe(false);
+	});
+});
+
+describe("hostile — alias cleanup closes each raw object/close fn once", () => {
+	it("closes shared raw object only once when same object is used in multiple slots", async () => {
+		let closeCount = 0;
+		const shared = makeCapability({
+			close: async () => {
+				closeCount++;
+				return Object.freeze({ status: "closed" });
+			},
+		});
+
+		// Same object for command and event — alias: rejection expected
+		const factory: Record<string, unknown> = {
+			command: shared,
+			event: shared,
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.code).toBe("INVALID_ARGUMENT");
+
+		// closeCount should be exactly 1 (shared object closed once, not twice)
+		expect(closeCount).toBe(1);
+	});
+
+	it("closes shared raw close function only once when slots share closeFn by reference", async () => {
+		let closeCount = 0;
+		const closeFn = async (): Promise<unknown> => {
+			closeCount++;
+			return Object.freeze({ status: "closed" });
+		};
+
+		const cmd = makeCapability({ close: closeFn });
+		const evt = makeCapability({ close: closeFn });
+
+		// Different objects but same closeFn — alias: rejection expected
+		const factory: Record<string, unknown> = {
+			command: cmd,
+			event: evt,
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.code).toBe("INVALID_ARGUMENT");
+
+		// closeFn called exactly once (not twice)
+		expect(closeCount).toBe(1);
+	});
+
+	it("closes three distinct capabilities in reverse order", async () => {
+		const order: number[] = [];
+		const cap1 = makeCapability({
+			close: async () => {
+				order.push(1);
+				return Object.freeze({ status: "closed" });
+			},
+		});
+		const cap2 = makeCapability({
+			close: async () => {
+				order.push(2);
+				return Object.freeze({ status: "closed" });
+			},
+		});
+		const cap3 = makeCapability({
+			close: async () => {
+				order.push(3);
+				return Object.freeze({ status: "closed" });
+			},
+		});
+
+		const factory = makeFactoryInput({ command: cap1, event: cap2, agentMessage: cap3 });
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+
+		await result.application.close();
+		// Reverse order: agentMessage (3) → event (2) → command (1)
+		expect(order).toEqual([3, 2, 1]);
+	});
+});
+
+describe("hostile — close uncertainty dominates", () => {
+	it("returns CLOSE_UNCERTAIN when factory has symbols and validation fails", async () => {
+		const factory: Record<string, unknown> = {
+			command: makeCapability(),
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		// Add a symbol — triggers ownership uncertainty
+		(factory as Record<symbol, unknown>)[Symbol("hidden")] = true;
+
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+
+		// Symbols cause ownership uncertainty → CLOSE_UNCERTAIN, not INVALID_ARGUMENT
+		expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+	});
+
+	it("returns CLOSE_UNCERTAIN when slot has capability uncertainty (proxy)", async () => {
+		const proxyCap = new Proxy(makeCapability(), {});
+		const factory: Record<string, unknown> = {
+			command: proxyCap,
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+
+		// Proxy causes capability uncertainty → CLOSE_UNCERTAIN, not INVALID_ARGUMENT
+		expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+	});
+});
