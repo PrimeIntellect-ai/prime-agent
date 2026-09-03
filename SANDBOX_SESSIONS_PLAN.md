@@ -112,7 +112,7 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 ## Current integration baseline
 
 - Branch: `feat/sandbox-backed-sessions` in `/Users/milkkarten/prime-agent-sandbox-sessions`.
-- Reviewed integration tip: `c07f16d66`.
+- Reviewed integration tip: `adf4057ca`.
 - Latest full root `npm run check` is green across 1,045 files, TypeScript, Biome, installer rendering, and browser smoke.
 - Accepted B03 foundations: exact frame codec `55b40d7f1`, journal-record codec `5551582bd`, delivery index `5e8e926b4`, direct-final immutable journal publication `8bd83db6c`, immutable delivery-marker publication `df846c08f`, and page-atomic bounded directory recovery `9df8a3da9`.
 - Accepted B11 foundations: observation core `939a7baaf`, exact snapshots `62e8b073a`.
@@ -285,3 +285,4 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Rejected two B10 designs that incorrectly treated the volatile `SessionActionStore` or non-fsynced `SessionManager.flushNow()` as a crash-durable admission boundary. The replacement uses a permanent B03-backed target inbox, independent transport and semantic IDs, a canonical semantic collision index, `pending` before queued ACK, and recovery-time verification of every record including `delivered` records.
 - Started isolated implementations for the B10 durable target inbox, the B14 FD3 child-readiness monitor, and the missing production Node B03 relay backend. Direct review returned concrete ownership, paging, scheduling, identity-binding, and path-safety corrections before integration.
 - Audited and terminated 43 orphaned test, daemon, Python, and esbuild processes left by completed isolated review worktrees; a follow-up process scan found none remaining from those completed worktrees. No paid resources were created.
+- Integrated the independently accepted dependency-free FD3 child-readiness monitor as `adf4057ca`. It validates one exact canonical readiness line without claiming relay admission, owns transferred stdout/stderr bytes, preserves synchronous terminal evidence even at queue overflow, requires independent exit and close evidence, and performs referenced process-group `SIGINT → SIGTERM → SIGKILL` cleanup without signaling after observed exit. Eighty-five focused and 229 composed FD3/SSH monitor tests pass; independent adversarial review returned ACCEPT. The fixed child launcher is active in an isolated worktree.
