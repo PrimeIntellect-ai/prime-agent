@@ -162,6 +162,11 @@ const IDLE_EVICTION_DRAIN_TIMEOUT_MS = 5_000;
 const CHILD_PASSIVATION_PER_WORKER_CAP = 2;
 const SUPERVISOR_CONFIG_FILE_NAME = "supervisor-config";
 const WORKER_STARTUP_GATE_FD = 3;
+// getProcessStartId() shells out to a synchronous powershell.exe on Windows (measured ~400ms per
+// call, and the worker_auth path makes several). That blocks the worker's event loop well past
+// the 1s handshake budget that is generous on Unix, so hello/auth time out. The timeout must sit
+// above measured latency, not at it.
+const WORKER_HANDSHAKE_TIMEOUT_MS = process.platform === "win32" ? 15_000 : 1_000;
 
 const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
@@ -2647,11 +2652,11 @@ export class DaemonSupervisor {
 			const client = new DaemonWorkerClient(worker.descriptor.socketPath);
 			try {
 				await client.connect(Math.min(500, Math.max(50, deadline - Date.now())));
-				await client.waitForHello(1000);
+				await client.waitForHello(WORKER_HANDSHAKE_TIMEOUT_MS);
 				await client.authenticateWorker(
 					worker.descriptor.authenticationToken,
 					this.supervisorAuthenticationClaim(),
-					1000,
+					WORKER_HANDSHAKE_TIMEOUT_MS,
 				);
 				await this.assertRecoveryAllowed();
 				client.onFrame((frame) => this.handleWorkerFrame(worker, frame));

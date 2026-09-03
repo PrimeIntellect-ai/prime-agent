@@ -292,7 +292,10 @@ export class DaemonClient {
 
 	async request(
 		command: DaemonCommandBody,
-		timeoutMs = 30000,
+		// Windows cold start is far slower than Unix: the worker runs through tsx and the
+		// daemon's identity checks shell out to synchronous powershell.exe calls. A measured
+		// supervisor->worker-ready cycle took ~16s, so a 30s budget for "create" is marginal.
+		timeoutMs = process.platform === "win32" ? 120_000 : 30_000,
 		options: DaemonClientRequestOptions = {},
 	): Promise<DaemonResponse> {
 		if (!this.socket || this.socket.destroyed) {
