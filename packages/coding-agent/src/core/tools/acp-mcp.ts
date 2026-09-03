@@ -3,7 +3,8 @@ import type { ExecuteResult } from "../kernel/index.js";
 import type { AcpMcpServerConfig } from "../mcp/acp-mcp-types.js";
 import type { IpythonKernelProvisioner } from "./ipython.js";
 
-const ACP_MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+// 48 keeps `mcp_list_tools_<name>` within providers' 64-char tool-name limits.
+const ACP_MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,48}$/;
 
 export function acpMcpToolNames(servers: readonly AcpMcpServerConfig[]): string[] {
 	const names: string[] = [];
