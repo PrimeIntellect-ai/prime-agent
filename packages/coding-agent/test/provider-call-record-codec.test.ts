@@ -33,6 +33,12 @@ function utf8(s: string): Uint8Array {
 	return new TextEncoder().encode(s);
 }
 
+function byteField(raw: Record<string, unknown>, key: string): Uint8Array {
+	const candidate = Reflect.get(raw, key);
+	if (!(candidate instanceof Uint8Array)) throw new Error("expected byte field");
+	return candidate;
+}
+
 function digestOfFrame(frame: Record<string, unknown>): string {
 	const r = canonicalDigest(frame);
 	if (!r.ok) throw new Error("canonicalDigest failed");
@@ -484,25 +490,25 @@ describe("digest verification", () => {
 	});
 	it("rejects Uint8Array with named own extra property", () => {
 		const raw = makeJournaledInput("c-nx");
-		const bytes = raw.requestBytes as Uint8Array;
+		const bytes = byteField(raw, "requestBytes");
 		Object.defineProperty(bytes, "extraField", { value: "x", enumerable: true });
 		expect(encodeProviderCallRecordV1(raw).ok).toBe(false);
 	});
 	it("rejects Uint8Array with own byteLength override", () => {
 		const raw = makeJournaledInput("c-bl");
-		const bytes = raw.requestBytes as Uint8Array;
+		const bytes = byteField(raw, "requestBytes");
 		Object.defineProperty(bytes, "byteLength", { value: 9999, enumerable: true, configurable: true });
 		expect(encodeProviderCallRecordV1(raw).ok).toBe(false);
 	});
 	it("rejects Uint8Array with own buffer override", () => {
 		const raw = makeJournaledInput("c-bo");
-		const bytes = raw.requestBytes as Uint8Array;
+		const bytes = byteField(raw, "requestBytes");
 		Object.defineProperty(bytes, "buffer", { value: new ArrayBuffer(5), enumerable: true, configurable: true });
 		expect(encodeProviderCallRecordV1(raw).ok).toBe(false);
 	});
 	it("rejects Uint8Array with own symbol property", () => {
 		const raw = makeJournaledInput("c-sp");
-		const bytes = raw.requestBytes as Uint8Array;
+		const bytes = byteField(raw, "requestBytes");
 		Object.defineProperty(bytes, Symbol("secret"), { value: 42, enumerable: true });
 		expect(encodeProviderCallRecordV1(raw).ok).toBe(false);
 	});
@@ -526,7 +532,7 @@ describe("digest verification", () => {
 	it("rejects genuine Proxy wrapping ArrayBuffer in backing buffer", () => {
 		const raw = makeJournaledInput("c-ap");
 		// Can't easily make a Uint8Array with a proxy ArrayBuffer, so skip if impossible.
-		const bytes = raw.requestBytes as Uint8Array;
+		const bytes = byteField(raw, "requestBytes");
 		const proxyBuf = new Proxy(bytes.buffer, {});
 		Object.defineProperty(bytes, "buffer", { value: proxyBuf, enumerable: true, configurable: true });
 		expect(encodeProviderCallRecordV1(raw).ok).toBe(false);
@@ -704,7 +710,7 @@ describe("terminal without usage", () => {
 
 describe("hostile decode inputs", () => {
 	it("rejects non-Uint8Array input", () => {
-		expect(decodeProviderCallRecordV1("not bytes" as unknown as Uint8Array).ok).toBe(false);
+		expect(Reflect.apply(decodeProviderCallRecordV1, undefined, ["not bytes"]).ok).toBe(false);
 	});
 	it("rejects empty Uint8Array", () => {
 		expect(decodeProviderCallRecordV1(new Uint8Array(0)).ok).toBe(false);
@@ -815,7 +821,7 @@ it("rejects non-genuine Uint8Array with own symbol on decode", () => {
 });
 it("rejects Proxy wrapping plain object on decode", () => {
 	const proxy = new Proxy({}, {});
-	expect(decodeProviderCallRecordV1(proxy as unknown as Uint8Array).ok).toBe(false);
+	expect(Reflect.apply(decodeProviderCallRecordV1, undefined, [proxy]).ok).toBe(false);
 });
 it("rejects revoked Proxy on decode", () => {
 	const { proxy, revoke } = Proxy.revocable(new Uint8Array(10), {});
@@ -941,7 +947,7 @@ describe("owned copy independence", () => {
 		if (!enc.ok) return;
 		if (enc.record.recordKind !== "journaled") throw new Error("expected journaled");
 		const r: ProviderCallJournaledRecordV1 = enc.record;
-		const originalBytes = raw.requestBytes as Uint8Array;
+		const originalBytes = byteField(raw, "requestBytes");
 		// Mutate original (technically allowed in test).
 		originalBytes[0] = 0;
 		// The returned copy should be unchanged.
@@ -996,6 +1002,65 @@ describe("base64 strictness", () => {
 		parsed.canonicalRequestBase64 = "";
 		const tampered = utf8(JSON.stringify(parsed));
 		expect(decodeProviderCallRecordV1(tampered).ok).toBe(false);
+	});
+});
+
+// ===========================================================================
+// 14. Decode byte ownership and erasure
+// ===========================================================================
+
+describe("fixed failure isolation", () => {
+	it("returns fresh recursively frozen encode and decode failures", () => {
+		const encodeOne = encodeProviderCallRecordV1(Object.freeze({}));
+		const encodeTwo = encodeProviderCallRecordV1(Object.freeze({}));
+		const decodeOne = Reflect.apply(decodeProviderCallRecordV1, undefined, ["invalid"]);
+		const decodeTwo = Reflect.apply(decodeProviderCallRecordV1, undefined, ["invalid"]);
+		for (const result of [encodeOne, encodeTwo, decodeOne, decodeTwo]) {
+			expect(result.ok).toBe(false);
+			expect(Object.isFrozen(result)).toBe(true);
+			if (!result.ok) expect(Object.isFrozen(result.error)).toBe(true);
+		}
+		expect(encodeOne).not.toBe(encodeTwo);
+		expect(decodeOne).not.toBe(decodeTwo);
+	});
+});
+
+describe("decode byte ownership and erasure", () => {
+	it("erases accepted input bytes after successful decode but preserves the fresh record bytes", () => {
+		const request = makeJournaledInput("call-erase-success");
+		const encoded = encodeProviderCallRecordV1(request);
+		expect(encoded.ok).toBe(true);
+		if (!encoded.ok) return;
+		const inputBytes = new Uint8Array(encoded.bytes);
+		const expectedFrameBytes = new Uint8Array(request.requestBytes instanceof Uint8Array ? request.requestBytes : []);
+		const decoded = decodeProviderCallRecordV1(inputBytes);
+		expect(decoded.ok).toBe(true);
+		expect(Array.from(inputBytes).every((value) => value === 0)).toBe(true);
+		if (!decoded.ok || decoded.record.recordKind !== "journaled") return;
+		expect(decoded.record.requestBytes).toEqual(expectedFrameBytes);
+		expect(decoded.record.requestBytes).not.toBe(inputBytes);
+	});
+
+	it("erases genuine input after invalid canonical JSON and overflow", () => {
+		for (const inputBytes of [utf8("  {}"), new Uint8Array(1_310_721).fill(7)]) {
+			const decoded = decodeProviderCallRecordV1(inputBytes);
+			expect(decoded.ok).toBe(false);
+			expect(Array.from(inputBytes).every((value) => value === 0)).toBe(true);
+		}
+	});
+
+	it("does not erase rejected Buffer, Proxy, or subview inputs", () => {
+		const buffer = Buffer.from([1, 2, 3]);
+		const proxyTarget = new Uint8Array([4, 5, 6]);
+		const proxied = new Proxy(proxyTarget, {});
+		const backing = new Uint8Array([7, 8, 9, 10]);
+		const subview = backing.subarray(1, 3);
+		expect(decodeProviderCallRecordV1(buffer).ok).toBe(false);
+		expect(decodeProviderCallRecordV1(proxied).ok).toBe(false);
+		expect(decodeProviderCallRecordV1(subview).ok).toBe(false);
+		expect(Array.from(buffer)).toEqual([1, 2, 3]);
+		expect(Array.from(proxyTarget)).toEqual([4, 5, 6]);
+		expect(Array.from(backing)).toEqual([7, 8, 9, 10]);
 	});
 });
 
@@ -1098,7 +1163,7 @@ describe("DurableReceipt validation", () => {
 		};
 		for (const [code, kind] of Object.entries(CODE_KIND_MAP)) {
 			it(`accepts: ${code}`, () => {
-				const raw = makeTerminalInput(`call-${code.substring(0, 16)}`, kind as string);
+				const raw = makeTerminalInput(`call-${code.substring(0, 16)}`, kind);
 				const errFrame = makeErrorFrame(`call-${code.substring(0, 16)}`, code);
 				const errBytes = utf8(JSON.stringify(errFrame));
 				raw.terminalFrameBytes = new Uint8Array(errBytes);

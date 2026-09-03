@@ -186,6 +186,10 @@ function codecError(code: ProviderCallCodecErrorCode): CodecErrorObj {
 	return Object.freeze({ code });
 }
 
+function codecFailure(code: ProviderCallCodecErrorCode): ProviderCallEncodeError {
+	return Object.freeze({ ok: false, error: codecError(code) });
+}
+
 function encOk(bytes: Uint8Array, record: ProviderCallRecordV1): ProviderCallEncodeOk {
 	return Object.freeze({ ok: true, bytes, record });
 }
@@ -202,9 +206,14 @@ function ownCopy(source: Uint8Array): Uint8Array {
 	return copy;
 }
 
-/** Base64 encode. */
+/** Base64 encode without retaining the temporary byte copy. */
 function b64Encode(bytes: Uint8Array): string {
-	return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
+	const temporary = Buffer.from(bytes);
+	try {
+		return temporary.toString("base64");
+	} finally {
+		eraseOwnedBytes(temporary);
+	}
 }
 
 // Strict base64 character pattern.
@@ -218,15 +227,26 @@ function b64DecodeStrict(b64: string): Uint8Array | undefined {
 	if (b64.length === 0) return undefined;
 	if (!BASE64_STRICT.test(b64)) return undefined;
 	let decoded: Uint8Array;
+	let temporary: Buffer | null = null;
 	try {
-		const buf = Buffer.from(b64, "base64");
-		decoded = new Uint8Array(buf);
+		temporary = Buffer.from(b64, "base64");
+		decoded = new Uint8Array(temporary);
 	} catch {
+		if (temporary) eraseOwnedBytes(temporary);
 		return undefined;
 	}
-	// Verify strict roundtrip — reject non-canonical encodings.
-	if (Buffer.from(decoded).toString("base64") !== b64) return undefined;
-	return decoded;
+	eraseOwnedBytes(temporary);
+	let roundtrip: Buffer | null = null;
+	try {
+		roundtrip = Buffer.from(decoded);
+		if (roundtrip.toString("base64") === b64) return decoded;
+	} catch {
+		// The decoded copy is erased below.
+	} finally {
+		if (roundtrip) eraseOwnedBytes(roundtrip);
+	}
+	eraseOwnedBytes(decoded);
+	return undefined;
 }
 
 function sha256Of(bytes: Uint8Array): string {
@@ -269,6 +289,19 @@ const INTRINSIC_AB_BYTE_LENGTH_GETTER: (() => number) | undefined = Object.getOw
 	ArrayBuffer.prototype,
 	"byteLength",
 )?.get;
+const INTRINSIC_FILL: ((value: number) => Uint8Array) | undefined =
+	TYPED_ARRAY_PROTO !== null && TYPED_ARRAY_PROTO !== Object.prototype
+		? Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, "fill")?.value
+		: undefined;
+
+function eraseOwnedBytes(bytes: Uint8Array): void {
+	if (INTRINSIC_FILL === undefined) return;
+	try {
+		Reflect.apply(INTRINSIC_FILL, bytes, [0]);
+	} catch {
+		// Best-effort erasure of an already-owned buffer.
+	}
+}
 
 /**
  * Validate that `input` is a genuine full-backing Uint8Array with no
@@ -525,9 +558,14 @@ function extractRecordKind(raw: unknown): ProviderCallRecordKind | undefined {
 function decodeAndVerifyFrame(base64: string, expectedDigest: string): Uint8Array | undefined {
 	const bytes = b64DecodeStrict(base64);
 	if (bytes === undefined) return undefined;
-	const computedDigest = sha256Of(bytes);
-	if (!digestsEqual(computedDigest, expectedDigest)) return undefined;
-	return bytes;
+	try {
+		const computedDigest = sha256Of(bytes);
+		if (digestsEqual(computedDigest, expectedDigest)) return bytes;
+	} catch {
+		// The owned decoded bytes are erased below.
+	}
+	eraseOwnedBytes(bytes);
+	return undefined;
 }
 
 function parseAndMatchFrame(bytes: Uint8Array, check: FrameCheck): RemoteHostProviderProxyFrame | undefined {
@@ -535,18 +573,26 @@ function parseAndMatchFrame(bytes: Uint8Array, check: FrameCheck): RemoteHostPro
 	try {
 		frameStr = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 	} catch {
+		eraseOwnedBytes(bytes);
 		return undefined;
 	}
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(frameStr);
 	} catch {
+		eraseOwnedBytes(bytes);
 		return undefined;
 	}
 	const decoded = decodeProviderProxyFrame(parsed);
-	if (!decoded.ok) return undefined;
+	if (!decoded.ok) {
+		eraseOwnedBytes(bytes);
+		return undefined;
+	}
 	const err = validateFrame(decoded.value, check);
-	if (err !== undefined) return undefined;
+	if (err !== undefined) {
+		eraseOwnedBytes(bytes);
+		return undefined;
+	}
 	return decoded.value;
 }
 
@@ -558,13 +604,13 @@ export function encodeProviderCallRecordV1(raw: unknown): ProviderCallEncodeResu
 	try {
 		return encodeV1Impl(raw);
 	} catch {
-		return { ok: false, error: codecError("INVALID_RECORD") };
+		return codecFailure("INVALID_RECORD");
 	}
 }
 
 function encodeV1Impl(raw: unknown): ProviderCallEncodeResult {
 	const kind = extractRecordKind(raw);
-	if (kind === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (kind === undefined) return codecFailure("INVALID_RECORD");
 
 	switch (kind) {
 		case "journaled":
@@ -602,46 +648,40 @@ const JOURNALED_KEY_COUNT = 12;
 
 function encodeJournaled(raw: unknown): ProviderCallEncodeResult {
 	const obj = copyExactOwnRecordObject(raw, JOURNALED_ENCODE_KEYS, JOURNALED_KEY_COUNT);
-	if (obj === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (obj === undefined) return codecFailure("INVALID_RECORD");
 	const version = obj.version;
-	if (version !== 1) return { ok: false, error: codecError("UNSUPPORTED_VERSION") };
+	if (version !== 1) return codecFailure("UNSUPPORTED_VERSION");
 	const journalSeq = obj.journalSeq;
 	if (typeof journalSeq !== "number" || !isPositiveSafeInt(journalSeq) || journalSeq > MAX_JOURNAL_SEQ)
-		return { ok: false, error: codecError("INVALID_SEQUENCE") };
+		return codecFailure("INVALID_SEQUENCE");
 	const callId = obj.callId;
-	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId)) return codecFailure("INVALID_IDENTITY");
 	const hostId = obj.hostId;
-	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId)) return codecFailure("INVALID_IDENTITY");
 	const generation = obj.generation;
-	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation)) return codecFailure("INVALID_IDENTITY");
 	const sessionId = obj.sessionId;
-	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId)) return codecFailure("INVALID_IDENTITY");
 	const recordedAt = obj.recordedAt;
 	if (typeof recordedAt !== "string" || !CANONICAL_UTC_RE.test(recordedAt) || !isCanonicalUtcTimestamp(recordedAt))
-		return { ok: false, error: codecError("INVALID_TIMESTAMP") };
+		return codecFailure("INVALID_TIMESTAMP");
 	// requestFrameId is the transport envelope frameId, NOT related to the
 	// contained provider frame.  requestBytes store only the provider frame
 	// (type: "provider_proxy", proxyType: "model_call_request"), not the
 	// full envelope.  requestDigest is canonicalDigest(decoded provider frame).
 	const requestFrameId = obj.requestFrameId;
-	if (typeof requestFrameId !== "string" || !SAFE_ID_RE.test(requestFrameId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof requestFrameId !== "string" || !SAFE_ID_RE.test(requestFrameId)) return codecFailure("INVALID_IDENTITY");
 	const requestDigest = obj.requestDigest;
-	if (typeof requestDigest !== "string" || !isValidDigest(requestDigest))
-		return { ok: false, error: codecError("INVALID_DIGEST") };
+	if (typeof requestDigest !== "string" || !isValidDigest(requestDigest)) return codecFailure("INVALID_DIGEST");
 	const requestBytes = obj.requestBytes;
-	if (!isGenuineUint8Array(requestBytes)) return { ok: false, error: codecError("INVALID_FRAME") };
+	if (!isGenuineUint8Array(requestBytes)) return codecFailure("INVALID_FRAME");
 	const canonicalRequestDigest = obj.canonicalRequestDigest;
 	if (typeof canonicalRequestDigest !== "string" || !isValidDigest(canonicalRequestDigest))
-		return { ok: false, error: codecError("INVALID_DIGEST") };
+		return codecFailure("INVALID_DIGEST");
 
 	// Verify digest matches the bytes.
 	const computedDigest = sha256Of(requestBytes);
-	if (!digestsEqual(computedDigest, canonicalRequestDigest)) return { ok: false, error: codecError("INVALID_DIGEST") };
+	if (!digestsEqual(computedDigest, canonicalRequestDigest)) return codecFailure("INVALID_DIGEST");
 
 	// Decode and verify contained frame.
 	const frameBytes = ownCopy(requestBytes);
@@ -650,7 +690,7 @@ function encodeJournaled(raw: unknown): ProviderCallEncodeResult {
 		callId,
 		digest: requestDigest,
 	});
-	if (frame === undefined) return { ok: false, error: codecError("FRAME_MISMATCH") };
+	if (frame === undefined) return codecFailure("FRAME_MISMATCH");
 
 	// Build canonical JSON object with base64-encoded bytes.
 	const canonicalRequestBase64 = b64Encode(frameBytes);
@@ -670,7 +710,10 @@ function encodeJournaled(raw: unknown): ProviderCallEncodeResult {
 
 	const jsonStr = JSON.stringify(jsonObj);
 	const encodedBytes = new TextEncoder().encode(jsonStr);
-	if (encodedBytes.byteLength > MAX_ENCODED_BYTES) return { ok: false, error: codecError("OVERFLOW") };
+	if (encodedBytes.byteLength > MAX_ENCODED_BYTES) {
+		eraseOwnedBytes(encodedBytes);
+		return codecFailure("OVERFLOW");
+	}
 
 	const record: ProviderCallJournaledRecordV1 = Object.freeze({
 		version: 1,
@@ -708,39 +751,34 @@ const STARTED_KEY_COUNT = 11;
 
 function encodeStarted(raw: unknown): ProviderCallEncodeResult {
 	const obj = copyExactOwnRecordObject(raw, STARTED_ENCODE_KEYS, STARTED_KEY_COUNT);
-	if (obj === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (obj === undefined) return codecFailure("INVALID_RECORD");
 	const version = obj.version;
-	if (version !== 1) return { ok: false, error: codecError("UNSUPPORTED_VERSION") };
+	if (version !== 1) return codecFailure("UNSUPPORTED_VERSION");
 	const journalSeq = obj.journalSeq;
 	if (typeof journalSeq !== "number" || !isPositiveSafeInt(journalSeq) || journalSeq > MAX_JOURNAL_SEQ)
-		return { ok: false, error: codecError("INVALID_SEQUENCE") };
+		return codecFailure("INVALID_SEQUENCE");
 	const callId = obj.callId;
-	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId)) return codecFailure("INVALID_IDENTITY");
 	const hostId = obj.hostId;
-	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId)) return codecFailure("INVALID_IDENTITY");
 	const generation = obj.generation;
-	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation)) return codecFailure("INVALID_IDENTITY");
 	const sessionId = obj.sessionId;
-	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId)) return codecFailure("INVALID_IDENTITY");
 	const recordedAt = obj.recordedAt;
 	if (typeof recordedAt !== "string" || !CANONICAL_UTC_RE.test(recordedAt) || !isCanonicalUtcTimestamp(recordedAt))
-		return { ok: false, error: codecError("INVALID_TIMESTAMP") };
+		return codecFailure("INVALID_TIMESTAMP");
 	const requestDigest = obj.requestDigest;
-	if (typeof requestDigest !== "string" || !isValidDigest(requestDigest))
-		return { ok: false, error: codecError("INVALID_DIGEST") };
+	if (typeof requestDigest !== "string" || !isValidDigest(requestDigest)) return codecFailure("INVALID_DIGEST");
 	const requestJournalSeq = obj.requestJournalSeq;
 	if (
 		typeof requestJournalSeq !== "number" ||
 		!isPositiveSafeInt(requestJournalSeq) ||
 		requestJournalSeq > MAX_JOURNAL_SEQ
 	)
-		return { ok: false, error: codecError("INVALID_SEQUENCE") };
+		return codecFailure("INVALID_SEQUENCE");
 	const requestReceipt = decodeDurableReceipt(obj.requestReceipt);
-	if (requestReceipt === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (requestReceipt === undefined) return codecFailure("INVALID_RECORD");
 
 	const jsonObj: Record<string, unknown> = Object.create(null);
 	jsonObj.version = 1;
@@ -757,7 +795,10 @@ function encodeStarted(raw: unknown): ProviderCallEncodeResult {
 
 	const jsonStr = JSON.stringify(jsonObj);
 	const encodedBytes = new TextEncoder().encode(jsonStr);
-	if (encodedBytes.byteLength > MAX_ENCODED_BYTES) return { ok: false, error: codecError("OVERFLOW") };
+	if (encodedBytes.byteLength > MAX_ENCODED_BYTES) {
+		eraseOwnedBytes(encodedBytes);
+		return codecFailure("OVERFLOW");
+	}
 
 	const record: ProviderCallStartedRecordV1 = Object.freeze({
 		version: 1,
@@ -794,38 +835,32 @@ const CHUNK_KEY_COUNT = 11;
 
 function encodeChunk(raw: unknown): ProviderCallEncodeResult {
 	const obj = copyExactOwnRecordObject(raw, CHUNK_ENCODE_KEYS, CHUNK_KEY_COUNT);
-	if (obj === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (obj === undefined) return codecFailure("INVALID_RECORD");
 	const version = obj.version;
-	if (version !== 1) return { ok: false, error: codecError("UNSUPPORTED_VERSION") };
+	if (version !== 1) return codecFailure("UNSUPPORTED_VERSION");
 	const journalSeq = obj.journalSeq;
 	if (typeof journalSeq !== "number" || !isPositiveSafeInt(journalSeq) || journalSeq > MAX_JOURNAL_SEQ)
-		return { ok: false, error: codecError("INVALID_SEQUENCE") };
+		return codecFailure("INVALID_SEQUENCE");
 	const callId = obj.callId;
-	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId)) return codecFailure("INVALID_IDENTITY");
 	const hostId = obj.hostId;
-	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId)) return codecFailure("INVALID_IDENTITY");
 	const generation = obj.generation;
-	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation)) return codecFailure("INVALID_IDENTITY");
 	const sessionId = obj.sessionId;
-	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId)) return codecFailure("INVALID_IDENTITY");
 	const recordedAt = obj.recordedAt;
 	if (typeof recordedAt !== "string" || !CANONICAL_UTC_RE.test(recordedAt) || !isCanonicalUtcTimestamp(recordedAt))
-		return { ok: false, error: codecError("INVALID_TIMESTAMP") };
+		return codecFailure("INVALID_TIMESTAMP");
 	const chunkIndex = obj.chunkIndex;
-	if (typeof chunkIndex !== "number" || !isNonNegativeSafeInt(chunkIndex))
-		return { ok: false, error: codecError("INVALID_CHUNK_INDEX") };
+	if (typeof chunkIndex !== "number" || !isNonNegativeSafeInt(chunkIndex)) return codecFailure("INVALID_CHUNK_INDEX");
 	const chunkFrameBytes = obj.chunkFrameBytes;
-	if (!isGenuineUint8Array(chunkFrameBytes)) return { ok: false, error: codecError("INVALID_FRAME") };
+	if (!isGenuineUint8Array(chunkFrameBytes)) return codecFailure("INVALID_FRAME");
 	const chunkFrameDigest = obj.chunkFrameDigest;
-	if (typeof chunkFrameDigest !== "string" || !isValidDigest(chunkFrameDigest))
-		return { ok: false, error: codecError("INVALID_DIGEST") };
+	if (typeof chunkFrameDigest !== "string" || !isValidDigest(chunkFrameDigest)) return codecFailure("INVALID_DIGEST");
 
 	const computedDigest = sha256Of(chunkFrameBytes);
-	if (!digestsEqual(computedDigest, chunkFrameDigest)) return { ok: false, error: codecError("INVALID_DIGEST") };
+	if (!digestsEqual(computedDigest, chunkFrameDigest)) return codecFailure("INVALID_DIGEST");
 
 	const frameBytes = ownCopy(chunkFrameBytes);
 	const frame = parseAndMatchFrame(frameBytes, {
@@ -833,7 +868,7 @@ function encodeChunk(raw: unknown): ProviderCallEncodeResult {
 		callId,
 		index: chunkIndex,
 	});
-	if (frame === undefined) return { ok: false, error: codecError("FRAME_MISMATCH") };
+	if (frame === undefined) return codecFailure("FRAME_MISMATCH");
 
 	const chunkFrameBase64 = b64Encode(frameBytes);
 	const jsonObj: Record<string, unknown> = Object.create(null);
@@ -851,7 +886,10 @@ function encodeChunk(raw: unknown): ProviderCallEncodeResult {
 
 	const jsonStr = JSON.stringify(jsonObj);
 	const encodedBytes = new TextEncoder().encode(jsonStr);
-	if (encodedBytes.byteLength > MAX_ENCODED_BYTES) return { ok: false, error: codecError("OVERFLOW") };
+	if (encodedBytes.byteLength > MAX_ENCODED_BYTES) {
+		eraseOwnedBytes(encodedBytes);
+		return codecFailure("OVERFLOW");
+	}
 
 	const record: ProviderCallChunkRecordV1 = Object.freeze({
 		version: 1,
@@ -890,50 +928,44 @@ const TERMINAL_ENCODE_KEYS = new Set([
 
 function encodeTerminal(raw: unknown): ProviderCallEncodeResult {
 	const obj = copyExactOwnRecordObject(raw, TERMINAL_ENCODE_KEYS, null);
-	if (obj === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (obj === undefined) return codecFailure("INVALID_RECORD");
 	const version = obj.version;
-	if (version !== 1) return { ok: false, error: codecError("UNSUPPORTED_VERSION") };
+	if (version !== 1) return codecFailure("UNSUPPORTED_VERSION");
 	const journalSeq = obj.journalSeq;
 	if (typeof journalSeq !== "number" || !isPositiveSafeInt(journalSeq) || journalSeq > MAX_JOURNAL_SEQ)
-		return { ok: false, error: codecError("INVALID_SEQUENCE") };
+		return codecFailure("INVALID_SEQUENCE");
 	const callId = obj.callId;
-	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId)) return codecFailure("INVALID_IDENTITY");
 	const hostId = obj.hostId;
-	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId)) return codecFailure("INVALID_IDENTITY");
 	const generation = obj.generation;
-	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation)) return codecFailure("INVALID_IDENTITY");
 	const sessionId = obj.sessionId;
-	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId)) return codecFailure("INVALID_IDENTITY");
 	const recordedAt = obj.recordedAt;
 	if (typeof recordedAt !== "string" || !CANONICAL_UTC_RE.test(recordedAt) || !isCanonicalUtcTimestamp(recordedAt))
-		return { ok: false, error: codecError("INVALID_TIMESTAMP") };
+		return codecFailure("INVALID_TIMESTAMP");
 	const terminalKind = obj.terminalKind;
-	if (typeof terminalKind !== "string" || !isTerminalKind(terminalKind))
-		return { ok: false, error: codecError("INVALID_TERMINAL_KIND") };
+	if (typeof terminalKind !== "string" || !isTerminalKind(terminalKind)) return codecFailure("INVALID_TERMINAL_KIND");
 	const chunkCount = obj.chunkCount;
-	if (typeof chunkCount !== "number" || !isNonNegativeSafeInt(chunkCount))
-		return { ok: false, error: codecError("INVALID_CHUNK_INDEX") };
+	if (typeof chunkCount !== "number" || !isNonNegativeSafeInt(chunkCount)) return codecFailure("INVALID_CHUNK_INDEX");
 	const terminalFrameBytes = obj.terminalFrameBytes;
-	if (!isGenuineUint8Array(terminalFrameBytes)) return { ok: false, error: codecError("INVALID_FRAME") };
+	if (!isGenuineUint8Array(terminalFrameBytes)) return codecFailure("INVALID_FRAME");
 	const terminalFrameDigest = obj.terminalFrameDigest;
 	if (typeof terminalFrameDigest !== "string" || !isValidDigest(terminalFrameDigest))
-		return { ok: false, error: codecError("INVALID_DIGEST") };
+		return codecFailure("INVALID_DIGEST");
 
 	const usageInputTokensRaw = obj.usageInputTokens;
 	const usageOutputTokensRaw = obj.usageOutputTokens;
 	const hasUsageInput = usageInputTokensRaw !== undefined;
 	const hasUsageOutput = usageOutputTokensRaw !== undefined;
 	if (hasUsageInput && (typeof usageInputTokensRaw !== "number" || !isNonNegativeSafeInt(usageInputTokensRaw)))
-		return { ok: false, error: codecError("INVALID_USAGE") };
+		return codecFailure("INVALID_USAGE");
 	if (hasUsageOutput && (typeof usageOutputTokensRaw !== "number" || !isNonNegativeSafeInt(usageOutputTokensRaw)))
-		return { ok: false, error: codecError("INVALID_USAGE") };
+		return codecFailure("INVALID_USAGE");
 
 	const computedDigest = sha256Of(terminalFrameBytes);
-	if (!digestsEqual(computedDigest, terminalFrameDigest)) return { ok: false, error: codecError("INVALID_DIGEST") };
+	if (!digestsEqual(computedDigest, terminalFrameDigest)) return codecFailure("INVALID_DIGEST");
 
 	const frameBytes = ownCopy(terminalFrameBytes);
 
@@ -943,48 +975,46 @@ function encodeTerminal(raw: unknown): ProviderCallEncodeResult {
 	try {
 		parsed = JSON.parse(frameStr);
 	} catch {
-		return { ok: false, error: codecError("FRAME_MISMATCH") };
+		return codecFailure("FRAME_MISMATCH");
 	}
 	const decoded = decodeProviderProxyFrame(parsed);
-	if (!decoded.ok) return { ok: false, error: codecError("FRAME_MISMATCH") };
+	if (!decoded.ok) return codecFailure("FRAME_MISMATCH");
 	const proxyType = decoded.value.proxyType;
-	if (proxyType !== "model_call_complete" && proxyType !== "model_call_error")
-		return { ok: false, error: codecError("FRAME_MISMATCH") };
+	if (proxyType !== "model_call_complete" && proxyType !== "model_call_error") return codecFailure("FRAME_MISMATCH");
 	const err = validateFrame(decoded.value, {
 		expectKind: proxyType,
 		callId,
 	});
-	if (err !== undefined) return { ok: false, error: codecError(err) };
+	if (err !== undefined) return codecFailure(err);
 
 	// Enforce terminalKind mapping per contract:
 	//   normal ↔ model_call_complete OR model_call_error with non-INTERRUPTED/CANCELLED code
 	//   interrupted ↔ model_call_error + PROVIDER_CALL_INTERRUPTED
 	//   cancelled ↔ model_call_error + PROVIDER_CALL_CANCELLED
 	if (proxyType === "model_call_complete") {
-		if (terminalKind !== "normal") return { ok: false, error: codecError("INVALID_TERMINAL_KIND") };
+		if (terminalKind !== "normal") return codecFailure("INVALID_TERMINAL_KIND");
 		// Usage must match frame: both present OR both absent, equal when present.
 		const frameUsage = decoded.value.usage;
-		if (hasUsageInput !== (frameUsage !== undefined)) return { ok: false, error: codecError("INVALID_USAGE") };
-		if (hasUsageOutput !== (frameUsage !== undefined)) return { ok: false, error: codecError("INVALID_USAGE") };
+		if (hasUsageInput !== (frameUsage !== undefined)) return codecFailure("INVALID_USAGE");
+		if (hasUsageOutput !== (frameUsage !== undefined)) return codecFailure("INVALID_USAGE");
 		if (frameUsage !== undefined) {
 			if (usageInputTokensRaw !== frameUsage.inputTokens || usageOutputTokensRaw !== frameUsage.outputTokens)
-				return { ok: false, error: codecError("INVALID_USAGE") };
+				return codecFailure("INVALID_USAGE");
 		}
 	} else {
 		// model_call_error — no usage allowed, kind depends on error code.
-		if (hasUsageInput || hasUsageOutput) return { ok: false, error: codecError("INVALID_USAGE") };
+		if (hasUsageInput || hasUsageOutput) return codecFailure("INVALID_USAGE");
 		const frameError = decoded.value.error;
 		if (terminalKind === "interrupted") {
-			if (frameError !== "PROVIDER_CALL_INTERRUPTED")
-				return { ok: false, error: codecError("INVALID_TERMINAL_KIND") };
+			if (frameError !== "PROVIDER_CALL_INTERRUPTED") return codecFailure("INVALID_TERMINAL_KIND");
 		} else if (terminalKind === "cancelled") {
-			if (frameError !== "PROVIDER_CALL_CANCELLED") return { ok: false, error: codecError("INVALID_TERMINAL_KIND") };
+			if (frameError !== "PROVIDER_CALL_CANCELLED") return codecFailure("INVALID_TERMINAL_KIND");
 		} else if (terminalKind === "normal") {
 			// normal allows model_call_error with non-INTERRUPTED/non-CANCELLED codes.
 			if (frameError === "PROVIDER_CALL_INTERRUPTED" || frameError === "PROVIDER_CALL_CANCELLED")
-				return { ok: false, error: codecError("INVALID_TERMINAL_KIND") };
+				return codecFailure("INVALID_TERMINAL_KIND");
 		} else {
-			return { ok: false, error: codecError("INVALID_TERMINAL_KIND") };
+			return codecFailure("INVALID_TERMINAL_KIND");
 		}
 	}
 
@@ -1007,7 +1037,10 @@ function encodeTerminal(raw: unknown): ProviderCallEncodeResult {
 
 	const jsonStr2 = JSON.stringify(jsonObj);
 	const encodedBytes = new TextEncoder().encode(jsonStr2);
-	if (encodedBytes.byteLength > MAX_ENCODED_BYTES) return { ok: false, error: codecError("OVERFLOW") };
+	if (encodedBytes.byteLength > MAX_ENCODED_BYTES) {
+		eraseOwnedBytes(encodedBytes);
+		return codecFailure("OVERFLOW");
+	}
 
 	const record: ProviderCallTerminalRecordV1 = Object.freeze({
 		version: 1,
@@ -1047,35 +1080,30 @@ const DELIVERED_KEY_COUNT = 11;
 
 function encodeDelivered(raw: unknown): ProviderCallEncodeResult {
 	const obj = copyExactOwnRecordObject(raw, DELIVERED_ENCODE_KEYS, DELIVERED_KEY_COUNT);
-	if (obj === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (obj === undefined) return codecFailure("INVALID_RECORD");
 	const version = obj.version;
-	if (version !== 1) return { ok: false, error: codecError("UNSUPPORTED_VERSION") };
+	if (version !== 1) return codecFailure("UNSUPPORTED_VERSION");
 	const journalSeq = obj.journalSeq;
 	if (typeof journalSeq !== "number" || !isPositiveSafeInt(journalSeq) || journalSeq > MAX_JOURNAL_SEQ)
-		return { ok: false, error: codecError("INVALID_SEQUENCE") };
+		return codecFailure("INVALID_SEQUENCE");
 	const callId = obj.callId;
-	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId)) return codecFailure("INVALID_IDENTITY");
 	const hostId = obj.hostId;
-	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId)) return codecFailure("INVALID_IDENTITY");
 	const generation = obj.generation;
-	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation)) return codecFailure("INVALID_IDENTITY");
 	const sessionId = obj.sessionId;
-	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId)) return codecFailure("INVALID_IDENTITY");
 	const recordedAt = obj.recordedAt;
 	if (typeof recordedAt !== "string" || !CANONICAL_UTC_RE.test(recordedAt) || !isCanonicalUtcTimestamp(recordedAt))
-		return { ok: false, error: codecError("INVALID_TIMESTAMP") };
+		return codecFailure("INVALID_TIMESTAMP");
 	const ackEnvelopeId = obj.ackEnvelopeId;
-	if (typeof ackEnvelopeId !== "string" || !SAFE_ID_RE.test(ackEnvelopeId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof ackEnvelopeId !== "string" || !SAFE_ID_RE.test(ackEnvelopeId)) return codecFailure("INVALID_IDENTITY");
 	const ackEnvelopeDigest = obj.ackEnvelopeDigest;
 	if (typeof ackEnvelopeDigest !== "string" || !isValidDigest(ackEnvelopeDigest))
-		return { ok: false, error: codecError("INVALID_DIGEST") };
+		return codecFailure("INVALID_DIGEST");
 	const outgoingRelayReceipt = decodeDurableReceipt(obj.outgoingRelayReceipt);
-	if (outgoingRelayReceipt === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (outgoingRelayReceipt === undefined) return codecFailure("INVALID_RECORD");
 
 	const jsonObj: Record<string, unknown> = Object.create(null);
 	jsonObj.version = 1;
@@ -1092,7 +1120,10 @@ function encodeDelivered(raw: unknown): ProviderCallEncodeResult {
 
 	const jsonStr = JSON.stringify(jsonObj);
 	const encodedBytes = new TextEncoder().encode(jsonStr);
-	if (encodedBytes.byteLength > MAX_ENCODED_BYTES) return { ok: false, error: codecError("OVERFLOW") };
+	if (encodedBytes.byteLength > MAX_ENCODED_BYTES) {
+		eraseOwnedBytes(encodedBytes);
+		return codecFailure("OVERFLOW");
+	}
 
 	const record: ProviderCallDeliveredRecordV1 = Object.freeze({
 		version: 1,
@@ -1126,27 +1157,23 @@ const CANCEL_KEY_COUNT = 8;
 
 function encodeCancel(raw: unknown): ProviderCallEncodeResult {
 	const obj = copyExactOwnRecordObject(raw, CANCEL_ENCODE_KEYS, CANCEL_KEY_COUNT);
-	if (obj === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (obj === undefined) return codecFailure("INVALID_RECORD");
 	const version = obj.version;
-	if (version !== 1) return { ok: false, error: codecError("UNSUPPORTED_VERSION") };
+	if (version !== 1) return codecFailure("UNSUPPORTED_VERSION");
 	const journalSeq = obj.journalSeq;
 	if (typeof journalSeq !== "number" || !isPositiveSafeInt(journalSeq) || journalSeq > MAX_JOURNAL_SEQ)
-		return { ok: false, error: codecError("INVALID_SEQUENCE") };
+		return codecFailure("INVALID_SEQUENCE");
 	const callId = obj.callId;
-	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId)) return codecFailure("INVALID_IDENTITY");
 	const hostId = obj.hostId;
-	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId)) return codecFailure("INVALID_IDENTITY");
 	const generation = obj.generation;
-	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation)) return codecFailure("INVALID_IDENTITY");
 	const sessionId = obj.sessionId;
-	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId)) return codecFailure("INVALID_IDENTITY");
 	const recordedAt = obj.recordedAt;
 	if (typeof recordedAt !== "string" || !CANONICAL_UTC_RE.test(recordedAt) || !isCanonicalUtcTimestamp(recordedAt))
-		return { ok: false, error: codecError("INVALID_TIMESTAMP") };
+		return codecFailure("INVALID_TIMESTAMP");
 
 	const jsonObj: Record<string, unknown> = Object.create(null);
 	jsonObj.version = 1;
@@ -1160,7 +1187,10 @@ function encodeCancel(raw: unknown): ProviderCallEncodeResult {
 
 	const jsonStr = JSON.stringify(jsonObj);
 	const encodedBytes = new TextEncoder().encode(jsonStr);
-	if (encodedBytes.byteLength > MAX_ENCODED_BYTES) return { ok: false, error: codecError("OVERFLOW") };
+	if (encodedBytes.byteLength > MAX_ENCODED_BYTES) {
+		eraseOwnedBytes(encodedBytes);
+		return codecFailure("OVERFLOW");
+	}
 
 	const record: ProviderCallCancelRequestedRecordV1 = Object.freeze({
 		version: 1,
@@ -1180,37 +1210,37 @@ function encodeCancel(raw: unknown): ProviderCallEncodeResult {
 // ===========================================================================
 
 export function decodeProviderCallRecordV1(encoded: Uint8Array): ProviderCallDecodeResult {
+	if (!isGenuineUint8Array(encoded)) return codecFailure("INVALID_ARGUMENT");
 	try {
 		return decodeV1Impl(encoded);
 	} catch {
-		return { ok: false, error: codecError("INVALID_RECORD") };
+		return codecFailure("INVALID_RECORD");
+	} finally {
+		eraseOwnedBytes(encoded);
 	}
 }
 
 function decodeV1Impl(encoded: Uint8Array): ProviderCallDecodeResult {
-	// Validate the byte input as a genuine full-backing Uint8Array.
-	if (!isGenuineUint8Array(encoded)) return { ok: false, error: codecError("INVALID_ARGUMENT") };
-
 	// Enforce max bytes before parsing.
-	if (encoded.byteLength > MAX_ENCODED_BYTES) return { ok: false, error: codecError("OVERFLOW") };
+	if (encoded.byteLength > MAX_ENCODED_BYTES) return codecFailure("OVERFLOW");
 
 	// Decode UTF-8 with fatal error on invalid sequences.
 	let jsonStr: string;
 	try {
 		jsonStr = new TextDecoder("utf-8", { fatal: true }).decode(encoded);
 	} catch {
-		return { ok: false, error: codecError("INVALID_RECORD") };
+		return codecFailure("INVALID_RECORD");
 	}
 
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(jsonStr);
 	} catch {
-		return { ok: false, error: codecError("INVALID_RECORD") };
+		return codecFailure("INVALID_RECORD");
 	}
 
 	const kind = extractRecordKind(parsed);
-	if (kind === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (kind === undefined) return codecFailure("INVALID_RECORD");
 
 	// Pass the original encoded bytes so variant decoders can re-encode and
 	// compare byte-for-byte, detecting whitespace/duplicate-key/reordered-key
@@ -1279,73 +1309,89 @@ function verifyCanonicalKeyOrder(parsed: unknown, allowedKeys: ReadonlySet<strin
 function verifyCanonicalReencode(originalBytes: Uint8Array, canonicalObj: Record<string, unknown>): boolean {
 	const canonJson = JSON.stringify(canonicalObj);
 	const canonBytes = new TextEncoder().encode(canonJson);
-	if (canonBytes.byteLength !== originalBytes.byteLength) return false;
-	for (let i = 0; i < canonBytes.byteLength; i++) {
-		if (canonBytes[i] !== originalBytes[i]) return false;
+	try {
+		if (canonBytes.byteLength !== originalBytes.byteLength) return false;
+		for (let i = 0; i < canonBytes.byteLength; i++) {
+			if (canonBytes[i] !== originalBytes[i]) return false;
+		}
+		return true;
+	} finally {
+		eraseOwnedBytes(canonBytes);
 	}
-	return true;
 }
 
 function decodeJournaled(parsed: unknown, originalBytes: Uint8Array): ProviderCallDecodeResult {
 	// Verify canonical key ordering by re-serializing with explicit canonical order.
-	if (!verifyCanonicalKeyOrder(parsed, JOURNALED_DECODE_KEYS))
-		return { ok: false, error: codecError("INVALID_RECORD") };
+	if (!verifyCanonicalKeyOrder(parsed, JOURNALED_DECODE_KEYS)) return codecFailure("INVALID_RECORD");
 	const obj = copyExactOwnRecordObject(parsed, JOURNALED_DECODE_KEYS, JOURNALED_DECODE_COUNT);
-	if (obj === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (obj === undefined) return codecFailure("INVALID_RECORD");
 
 	const version = obj.version;
-	if (version !== 1) return { ok: false, error: codecError("UNSUPPORTED_VERSION") };
+	if (version !== 1) return codecFailure("UNSUPPORTED_VERSION");
 	const journalSeq = obj.journalSeq;
 	if (typeof journalSeq !== "number" || !isPositiveSafeInt(journalSeq) || journalSeq > MAX_JOURNAL_SEQ)
-		return { ok: false, error: codecError("INVALID_SEQUENCE") };
+		return codecFailure("INVALID_SEQUENCE");
 	const callId = obj.callId;
-	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId)) return codecFailure("INVALID_IDENTITY");
 	const hostId = obj.hostId;
-	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId)) return codecFailure("INVALID_IDENTITY");
 	const generation = obj.generation;
-	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation)) return codecFailure("INVALID_IDENTITY");
 	const sessionId = obj.sessionId;
-	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId)) return codecFailure("INVALID_IDENTITY");
 	const recordedAt = obj.recordedAt;
 	if (typeof recordedAt !== "string" || !CANONICAL_UTC_RE.test(recordedAt) || !isCanonicalUtcTimestamp(recordedAt))
-		return { ok: false, error: codecError("INVALID_TIMESTAMP") };
+		return codecFailure("INVALID_TIMESTAMP");
 
 	// requestFrameId is the transport envelope frameId, NOT related to the
 	// contained provider frame.  requestBytes store only the provider frame
 	// (type: "provider_proxy", proxyType: "model_call_request"), not the
 	// full envelope.  requestDigest is canonicalDigest(decoded provider frame).
 	const requestFrameId = obj.requestFrameId;
-	if (typeof requestFrameId !== "string" || !SAFE_ID_RE.test(requestFrameId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof requestFrameId !== "string" || !SAFE_ID_RE.test(requestFrameId)) return codecFailure("INVALID_IDENTITY");
 	const requestDigest = obj.requestDigest;
-	if (typeof requestDigest !== "string" || !isValidDigest(requestDigest))
-		return { ok: false, error: codecError("INVALID_DIGEST") };
+	if (typeof requestDigest !== "string" || !isValidDigest(requestDigest)) return codecFailure("INVALID_DIGEST");
 	const canonicalRequestBase64 = obj.canonicalRequestBase64;
 	if (typeof canonicalRequestBase64 !== "string" || canonicalRequestBase64.length === 0)
-		return { ok: false, error: codecError("INVALID_BASE64") };
+		return codecFailure("INVALID_BASE64");
 	const canonicalRequestDigest = obj.canonicalRequestDigest;
 	if (typeof canonicalRequestDigest !== "string" || !isValidDigest(canonicalRequestDigest))
-		return { ok: false, error: codecError("INVALID_DIGEST") };
+		return codecFailure("INVALID_DIGEST");
 
 	// Decode base64, verify digest.
 	const bytes = decodeAndVerifyFrame(canonicalRequestBase64, canonicalRequestDigest);
-	if (bytes === undefined) return { ok: false, error: codecError("INVALID_DIGEST") };
+	if (bytes === undefined) return codecFailure("INVALID_DIGEST");
 
-	// Decode and verify contained frame.
-	const frame = parseAndMatchFrame(bytes, {
-		expectKind: "model_call_request",
-		callId,
-		digest: requestDigest,
-	});
-	if (frame === undefined) return { ok: false, error: codecError("FRAME_MISMATCH") };
+	let retainBytes = false;
+	try {
+		// Decode and verify contained frame.
+		const frame = parseAndMatchFrame(bytes, {
+			expectKind: "model_call_request",
+			callId,
+			digest: requestDigest,
+		});
+		if (frame === undefined) return codecFailure("FRAME_MISMATCH");
 
-	// Prove canonical encoding: re-encode and compare byte-for-byte.
-	if (
-		!verifyCanonicalReencode(originalBytes, {
+		// Prove canonical encoding: re-encode and compare byte-for-byte.
+		if (
+			!verifyCanonicalReencode(originalBytes, {
+				version: 1,
+				recordKind: "journaled",
+				journalSeq,
+				callId,
+				hostId,
+				generation,
+				sessionId,
+				recordedAt,
+				requestFrameId,
+				requestDigest,
+				canonicalRequestBase64: b64Encode(bytes),
+				canonicalRequestDigest,
+			})
+		)
+			return codecFailure("INVALID_RECORD");
+
+		const record: ProviderCallJournaledRecordV1 = Object.freeze({
 			version: 1,
 			recordKind: "journaled",
 			journalSeq,
@@ -1356,27 +1402,14 @@ function decodeJournaled(parsed: unknown, originalBytes: Uint8Array): ProviderCa
 			recordedAt,
 			requestFrameId,
 			requestDigest,
-			canonicalRequestBase64: b64Encode(bytes),
+			requestBytes: bytes,
 			canonicalRequestDigest,
-		})
-	)
-		return { ok: false, error: codecError("INVALID_RECORD") };
-
-	const record: ProviderCallJournaledRecordV1 = Object.freeze({
-		version: 1,
-		recordKind: "journaled",
-		journalSeq,
-		callId,
-		hostId,
-		generation,
-		sessionId,
-		recordedAt,
-		requestFrameId,
-		requestDigest,
-		requestBytes: bytes,
-		canonicalRequestDigest,
-	});
-	return decOk(record);
+		});
+		retainBytes = true;
+		return decOk(record);
+	} finally {
+		if (!retainBytes) eraseOwnedBytes(bytes);
+	}
 }
 
 // ── Started decode ────────────────────────────────────────────────────
@@ -1398,42 +1431,37 @@ const STARTED_DECODE_COUNT = 11;
 
 function decodeStarted(parsed: unknown, originalBytes: Uint8Array): ProviderCallDecodeResult {
 	const obj = copyExactOwnRecordObject(parsed, STARTED_DECODE_KEYS, STARTED_DECODE_COUNT);
-	if (obj === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (obj === undefined) return codecFailure("INVALID_RECORD");
 
 	const version = obj.version;
-	if (version !== 1) return { ok: false, error: codecError("UNSUPPORTED_VERSION") };
+	if (version !== 1) return codecFailure("UNSUPPORTED_VERSION");
 	const journalSeq = obj.journalSeq;
 	if (typeof journalSeq !== "number" || !isPositiveSafeInt(journalSeq) || journalSeq > MAX_JOURNAL_SEQ)
-		return { ok: false, error: codecError("INVALID_SEQUENCE") };
+		return codecFailure("INVALID_SEQUENCE");
 	const callId = obj.callId;
-	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId)) return codecFailure("INVALID_IDENTITY");
 	const hostId = obj.hostId;
-	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId)) return codecFailure("INVALID_IDENTITY");
 	const generation = obj.generation;
-	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation)) return codecFailure("INVALID_IDENTITY");
 	const sessionId = obj.sessionId;
-	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId)) return codecFailure("INVALID_IDENTITY");
 	const recordedAt = obj.recordedAt;
 	if (typeof recordedAt !== "string" || !CANONICAL_UTC_RE.test(recordedAt) || !isCanonicalUtcTimestamp(recordedAt))
-		return { ok: false, error: codecError("INVALID_TIMESTAMP") };
+		return codecFailure("INVALID_TIMESTAMP");
 
 	const requestDigest = obj.requestDigest;
-	if (typeof requestDigest !== "string" || !isValidDigest(requestDigest))
-		return { ok: false, error: codecError("INVALID_DIGEST") };
+	if (typeof requestDigest !== "string" || !isValidDigest(requestDigest)) return codecFailure("INVALID_DIGEST");
 	const requestJournalSeq = obj.requestJournalSeq;
 	if (
 		typeof requestJournalSeq !== "number" ||
 		!isPositiveSafeInt(requestJournalSeq) ||
 		requestJournalSeq > MAX_JOURNAL_SEQ
 	)
-		return { ok: false, error: codecError("INVALID_SEQUENCE") };
+		return codecFailure("INVALID_SEQUENCE");
 
 	const requestReceipt = decodeDurableReceipt(obj.requestReceipt);
-	if (requestReceipt === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (requestReceipt === undefined) return codecFailure("INVALID_RECORD");
 
 	// Prove canonical encoding.
 	if (
@@ -1451,7 +1479,7 @@ function decodeStarted(parsed: unknown, originalBytes: Uint8Array): ProviderCall
 			requestReceipt,
 		})
 	)
-		return { ok: false, error: codecError("INVALID_RECORD") };
+		return codecFailure("INVALID_RECORD");
 
 	const record: ProviderCallStartedRecordV1 = Object.freeze({
 		version: 1,
@@ -1488,52 +1516,63 @@ const CHUNK_DECODE_COUNT = 11;
 
 function decodeChunk(parsed: unknown, originalBytes: Uint8Array): ProviderCallDecodeResult {
 	const obj = copyExactOwnRecordObject(parsed, CHUNK_DECODE_KEYS, CHUNK_DECODE_COUNT);
-	if (obj === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (obj === undefined) return codecFailure("INVALID_RECORD");
 
 	const version = obj.version;
-	if (version !== 1) return { ok: false, error: codecError("UNSUPPORTED_VERSION") };
+	if (version !== 1) return codecFailure("UNSUPPORTED_VERSION");
 	const journalSeq = obj.journalSeq;
 	if (typeof journalSeq !== "number" || !isPositiveSafeInt(journalSeq) || journalSeq > MAX_JOURNAL_SEQ)
-		return { ok: false, error: codecError("INVALID_SEQUENCE") };
+		return codecFailure("INVALID_SEQUENCE");
 	const callId = obj.callId;
-	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId)) return codecFailure("INVALID_IDENTITY");
 	const hostId = obj.hostId;
-	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId)) return codecFailure("INVALID_IDENTITY");
 	const generation = obj.generation;
-	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation)) return codecFailure("INVALID_IDENTITY");
 	const sessionId = obj.sessionId;
-	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId)) return codecFailure("INVALID_IDENTITY");
 	const recordedAt = obj.recordedAt;
 	if (typeof recordedAt !== "string" || !CANONICAL_UTC_RE.test(recordedAt) || !isCanonicalUtcTimestamp(recordedAt))
-		return { ok: false, error: codecError("INVALID_TIMESTAMP") };
+		return codecFailure("INVALID_TIMESTAMP");
 
 	const chunkIndex = obj.chunkIndex;
-	if (typeof chunkIndex !== "number" || !isNonNegativeSafeInt(chunkIndex))
-		return { ok: false, error: codecError("INVALID_CHUNK_INDEX") };
+	if (typeof chunkIndex !== "number" || !isNonNegativeSafeInt(chunkIndex)) return codecFailure("INVALID_CHUNK_INDEX");
 	const chunkFrameBase64 = obj.chunkFrameBase64;
-	if (typeof chunkFrameBase64 !== "string" || chunkFrameBase64.length === 0)
-		return { ok: false, error: codecError("INVALID_BASE64") };
+	if (typeof chunkFrameBase64 !== "string" || chunkFrameBase64.length === 0) return codecFailure("INVALID_BASE64");
 	const chunkFrameDigest = obj.chunkFrameDigest;
-	if (typeof chunkFrameDigest !== "string" || !isValidDigest(chunkFrameDigest))
-		return { ok: false, error: codecError("INVALID_DIGEST") };
+	if (typeof chunkFrameDigest !== "string" || !isValidDigest(chunkFrameDigest)) return codecFailure("INVALID_DIGEST");
 
 	const bytes = decodeAndVerifyFrame(chunkFrameBase64, chunkFrameDigest);
-	if (bytes === undefined) return { ok: false, error: codecError("INVALID_DIGEST") };
+	if (bytes === undefined) return codecFailure("INVALID_DIGEST");
 
-	const frame = parseAndMatchFrame(bytes, {
-		expectKind: "model_call_chunk",
-		callId,
-		index: chunkIndex,
-	});
-	if (frame === undefined) return { ok: false, error: codecError("FRAME_MISMATCH") };
+	let retainBytes = false;
+	try {
+		const frame = parseAndMatchFrame(bytes, {
+			expectKind: "model_call_chunk",
+			callId,
+			index: chunkIndex,
+		});
+		if (frame === undefined) return codecFailure("FRAME_MISMATCH");
 
-	// Prove canonical encoding.
-	if (
-		!verifyCanonicalReencode(originalBytes, {
+		// Prove canonical encoding.
+		if (
+			!verifyCanonicalReencode(originalBytes, {
+				version: 1,
+				recordKind: "chunk",
+				journalSeq,
+				callId,
+				hostId,
+				generation,
+				sessionId,
+				recordedAt,
+				chunkIndex,
+				chunkFrameBase64: chunkFrameBase64,
+				chunkFrameDigest,
+			})
+		)
+			return codecFailure("INVALID_RECORD");
+
+		const record: ProviderCallChunkRecordV1 = Object.freeze({
 			version: 1,
 			recordKind: "chunk",
 			journalSeq,
@@ -1543,26 +1582,14 @@ function decodeChunk(parsed: unknown, originalBytes: Uint8Array): ProviderCallDe
 			sessionId,
 			recordedAt,
 			chunkIndex,
-			chunkFrameBase64: chunkFrameBase64,
+			chunkFrameBytes: bytes,
 			chunkFrameDigest,
-		})
-	)
-		return { ok: false, error: codecError("INVALID_RECORD") };
-
-	const record: ProviderCallChunkRecordV1 = Object.freeze({
-		version: 1,
-		recordKind: "chunk",
-		journalSeq,
-		callId,
-		hostId,
-		generation,
-		sessionId,
-		recordedAt,
-		chunkIndex,
-		chunkFrameBytes: bytes,
-		chunkFrameDigest,
-	});
-	return decOk(record);
+		});
+		retainBytes = true;
+		return decOk(record);
+	} finally {
+		if (!retainBytes) eraseOwnedBytes(bytes);
+	}
 }
 
 // ── Terminal decode ───────────────────────────────────────────────────
@@ -1585,139 +1612,136 @@ const TERMINAL_DECODE_KEYS = new Set([
 ]);
 
 function decodeTerminal(parsed: unknown, _originalBytes: Uint8Array): ProviderCallDecodeResult {
-	if (!verifyCanonicalKeyOrder(parsed, TERMINAL_DECODE_KEYS))
-		return { ok: false, error: codecError("INVALID_RECORD") };
+	if (!verifyCanonicalKeyOrder(parsed, TERMINAL_DECODE_KEYS)) return codecFailure("INVALID_RECORD");
 	const obj = copyExactOwnRecordObject(parsed, TERMINAL_DECODE_KEYS, null);
-	if (obj === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (obj === undefined) return codecFailure("INVALID_RECORD");
 
 	const version = obj.version;
-	if (version !== 1) return { ok: false, error: codecError("UNSUPPORTED_VERSION") };
+	if (version !== 1) return codecFailure("UNSUPPORTED_VERSION");
 	const journalSeq = obj.journalSeq;
 	if (typeof journalSeq !== "number" || !isPositiveSafeInt(journalSeq) || journalSeq > MAX_JOURNAL_SEQ)
-		return { ok: false, error: codecError("INVALID_SEQUENCE") };
+		return codecFailure("INVALID_SEQUENCE");
 	const callId = obj.callId;
-	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId)) return codecFailure("INVALID_IDENTITY");
 	const hostId = obj.hostId;
-	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId)) return codecFailure("INVALID_IDENTITY");
 	const generation = obj.generation;
-	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation)) return codecFailure("INVALID_IDENTITY");
 	const sessionId = obj.sessionId;
-	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId)) return codecFailure("INVALID_IDENTITY");
 	const recordedAt = obj.recordedAt;
 	if (typeof recordedAt !== "string" || !CANONICAL_UTC_RE.test(recordedAt) || !isCanonicalUtcTimestamp(recordedAt))
-		return { ok: false, error: codecError("INVALID_TIMESTAMP") };
+		return codecFailure("INVALID_TIMESTAMP");
 
 	const terminalKind = obj.terminalKind;
-	if (typeof terminalKind !== "string" || !isTerminalKind(terminalKind))
-		return { ok: false, error: codecError("INVALID_TERMINAL_KIND") };
+	if (typeof terminalKind !== "string" || !isTerminalKind(terminalKind)) return codecFailure("INVALID_TERMINAL_KIND");
 	const chunkCount = obj.chunkCount;
-	if (typeof chunkCount !== "number" || !isNonNegativeSafeInt(chunkCount))
-		return { ok: false, error: codecError("INVALID_CHUNK_INDEX") };
+	if (typeof chunkCount !== "number" || !isNonNegativeSafeInt(chunkCount)) return codecFailure("INVALID_CHUNK_INDEX");
 	const terminalFrameBase64 = obj.terminalFrameBase64;
 	if (typeof terminalFrameBase64 !== "string" || terminalFrameBase64.length === 0)
-		return { ok: false, error: codecError("INVALID_BASE64") };
+		return codecFailure("INVALID_BASE64");
 	const terminalFrameDigest = obj.terminalFrameDigest;
 	if (typeof terminalFrameDigest !== "string" || !isValidDigest(terminalFrameDigest))
-		return { ok: false, error: codecError("INVALID_DIGEST") };
+		return codecFailure("INVALID_DIGEST");
 
 	const usageInputTokensRaw = obj.usageInputTokens;
 	const usageOutputTokensRaw = obj.usageOutputTokens;
 	const hasUsageInput = usageInputTokensRaw !== undefined;
 	const hasUsageOutput = usageOutputTokensRaw !== undefined;
 	if (hasUsageInput && (typeof usageInputTokensRaw !== "number" || !isNonNegativeSafeInt(usageInputTokensRaw)))
-		return { ok: false, error: codecError("INVALID_USAGE") };
+		return codecFailure("INVALID_USAGE");
 	if (hasUsageOutput && (typeof usageOutputTokensRaw !== "number" || !isNonNegativeSafeInt(usageOutputTokensRaw)))
-		return { ok: false, error: codecError("INVALID_USAGE") };
+		return codecFailure("INVALID_USAGE");
 
 	const bytes = decodeAndVerifyFrame(terminalFrameBase64, terminalFrameDigest);
-	if (bytes === undefined) return { ok: false, error: codecError("INVALID_DIGEST") };
+	if (bytes === undefined) return codecFailure("INVALID_DIGEST");
 
-	// Terminal frame must be model_call_complete or model_call_error.
-	const frameStr = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-	let frameParsed: unknown;
+	let retainBytes = false;
 	try {
-		frameParsed = JSON.parse(frameStr);
-	} catch {
-		return { ok: false, error: codecError("FRAME_MISMATCH") };
-	}
-	const decoded = decodeProviderProxyFrame(frameParsed);
-	if (!decoded.ok) return { ok: false, error: codecError("FRAME_MISMATCH") };
-	const proxyType = decoded.value.proxyType;
-	if (proxyType !== "model_call_complete" && proxyType !== "model_call_error")
-		return { ok: false, error: codecError("FRAME_MISMATCH") };
-	const verr = validateFrame(decoded.value, {
-		expectKind: proxyType,
-		callId,
-	});
-	if (verr !== undefined) return { ok: false, error: codecError(verr) };
-
-	// Enforce terminalKind mapping per contract.
-	if (proxyType === "model_call_complete") {
-		if (terminalKind !== "normal") return { ok: false, error: codecError("INVALID_TERMINAL_KIND") };
-		const frameUsage = decoded.value.usage;
-		if (hasUsageInput !== (frameUsage !== undefined)) return { ok: false, error: codecError("INVALID_USAGE") };
-		if (hasUsageOutput !== (frameUsage !== undefined)) return { ok: false, error: codecError("INVALID_USAGE") };
-		if (frameUsage !== undefined) {
-			if (usageInputTokensRaw !== frameUsage.inputTokens || usageOutputTokensRaw !== frameUsage.outputTokens)
-				return { ok: false, error: codecError("INVALID_USAGE") };
+		// Terminal frame must be model_call_complete or model_call_error.
+		const frameStr = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+		let frameParsed: unknown;
+		try {
+			frameParsed = JSON.parse(frameStr);
+		} catch {
+			return codecFailure("FRAME_MISMATCH");
 		}
-	} else {
-		// model_call_error — no usage allowed, kind depends on error code.
-		if (hasUsageInput || hasUsageOutput) return { ok: false, error: codecError("INVALID_USAGE") };
-		const frameError = decoded.value.error;
-		if (terminalKind === "interrupted") {
-			if (frameError !== "PROVIDER_CALL_INTERRUPTED")
-				return { ok: false, error: codecError("INVALID_TERMINAL_KIND") };
-		} else if (terminalKind === "cancelled") {
-			if (frameError !== "PROVIDER_CALL_CANCELLED") return { ok: false, error: codecError("INVALID_TERMINAL_KIND") };
-		} else if (terminalKind === "normal") {
-			if (frameError === "PROVIDER_CALL_INTERRUPTED" || frameError === "PROVIDER_CALL_CANCELLED")
-				return { ok: false, error: codecError("INVALID_TERMINAL_KIND") };
+		const decoded = decodeProviderProxyFrame(frameParsed);
+		if (!decoded.ok) return codecFailure("FRAME_MISMATCH");
+		const proxyType = decoded.value.proxyType;
+		if (proxyType !== "model_call_complete" && proxyType !== "model_call_error")
+			return codecFailure("FRAME_MISMATCH");
+		const verr = validateFrame(decoded.value, {
+			expectKind: proxyType,
+			callId,
+		});
+		if (verr !== undefined) return codecFailure(verr);
+
+		// Enforce terminalKind mapping per contract.
+		if (proxyType === "model_call_complete") {
+			if (terminalKind !== "normal") return codecFailure("INVALID_TERMINAL_KIND");
+			const frameUsage = decoded.value.usage;
+			if (hasUsageInput !== (frameUsage !== undefined)) return codecFailure("INVALID_USAGE");
+			if (hasUsageOutput !== (frameUsage !== undefined)) return codecFailure("INVALID_USAGE");
+			if (frameUsage !== undefined) {
+				if (usageInputTokensRaw !== frameUsage.inputTokens || usageOutputTokensRaw !== frameUsage.outputTokens)
+					return codecFailure("INVALID_USAGE");
+			}
 		} else {
-			return { ok: false, error: codecError("INVALID_TERMINAL_KIND") };
+			// model_call_error — no usage allowed, kind depends on error code.
+			if (hasUsageInput || hasUsageOutput) return codecFailure("INVALID_USAGE");
+			const frameError = decoded.value.error;
+			if (terminalKind === "interrupted") {
+				if (frameError !== "PROVIDER_CALL_INTERRUPTED") return codecFailure("INVALID_TERMINAL_KIND");
+			} else if (terminalKind === "cancelled") {
+				if (frameError !== "PROVIDER_CALL_CANCELLED") return codecFailure("INVALID_TERMINAL_KIND");
+			} else if (terminalKind === "normal") {
+				if (frameError === "PROVIDER_CALL_INTERRUPTED" || frameError === "PROVIDER_CALL_CANCELLED")
+					return codecFailure("INVALID_TERMINAL_KIND");
+			} else {
+				return codecFailure("INVALID_TERMINAL_KIND");
+			}
 		}
+
+		// Prove canonical encoding.
+		const canonTerminal: Record<string, unknown> = Object.create(null);
+		canonTerminal.version = 1;
+		canonTerminal.recordKind = "terminal";
+		canonTerminal.journalSeq = journalSeq;
+		canonTerminal.callId = callId;
+		canonTerminal.hostId = hostId;
+		canonTerminal.generation = generation;
+		canonTerminal.sessionId = sessionId;
+		canonTerminal.recordedAt = recordedAt;
+		canonTerminal.terminalKind = terminalKind;
+		canonTerminal.chunkCount = chunkCount;
+		canonTerminal.terminalFrameBase64 = terminalFrameBase64;
+		canonTerminal.terminalFrameDigest = terminalFrameDigest;
+		if (hasUsageInput) canonTerminal.usageInputTokens = usageInputTokensRaw;
+		if (hasUsageOutput) canonTerminal.usageOutputTokens = usageOutputTokensRaw;
+		if (!verifyCanonicalReencode(_originalBytes, canonTerminal)) return codecFailure("INVALID_RECORD");
+
+		const record: ProviderCallTerminalRecordV1 = Object.freeze({
+			version: 1,
+			recordKind: "terminal",
+			journalSeq,
+			callId,
+			hostId,
+			generation,
+			sessionId,
+			recordedAt,
+			terminalKind,
+			chunkCount,
+			terminalFrameBytes: bytes,
+			terminalFrameDigest,
+			...(hasUsageInput ? { usageInputTokens: usageInputTokensRaw } : {}),
+			...(hasUsageOutput ? { usageOutputTokens: usageOutputTokensRaw } : {}),
+		});
+		retainBytes = true;
+		return decOk(record);
+	} finally {
+		if (!retainBytes) eraseOwnedBytes(bytes);
 	}
-
-	// Prove canonical encoding.
-	const canonTerminal: Record<string, unknown> = Object.create(null);
-	canonTerminal.version = 1;
-	canonTerminal.recordKind = "terminal";
-	canonTerminal.journalSeq = journalSeq;
-	canonTerminal.callId = callId;
-	canonTerminal.hostId = hostId;
-	canonTerminal.generation = generation;
-	canonTerminal.sessionId = sessionId;
-	canonTerminal.recordedAt = recordedAt;
-	canonTerminal.terminalKind = terminalKind;
-	canonTerminal.chunkCount = chunkCount;
-	canonTerminal.terminalFrameBase64 = terminalFrameBase64;
-	canonTerminal.terminalFrameDigest = terminalFrameDigest;
-	if (hasUsageInput) canonTerminal.usageInputTokens = usageInputTokensRaw;
-	if (hasUsageOutput) canonTerminal.usageOutputTokens = usageOutputTokensRaw;
-	if (!verifyCanonicalReencode(_originalBytes, canonTerminal))
-		return { ok: false, error: codecError("INVALID_RECORD") };
-
-	const record: ProviderCallTerminalRecordV1 = Object.freeze({
-		version: 1,
-		recordKind: "terminal",
-		journalSeq,
-		callId,
-		hostId,
-		generation,
-		sessionId,
-		recordedAt,
-		terminalKind,
-		chunkCount,
-		terminalFrameBytes: bytes,
-		terminalFrameDigest,
-		...(hasUsageInput ? { usageInputTokens: usageInputTokensRaw } : {}),
-		...(hasUsageOutput ? { usageOutputTokens: usageOutputTokensRaw } : {}),
-	});
-	return decOk(record);
 }
 
 // ── Delivered decode ──────────────────────────────────────────────────
@@ -1738,40 +1762,34 @@ const DELIVERED_DECODE_KEYS = new Set([
 const DELIVERED_DECODE_COUNT = 11;
 
 function decodeDelivered(parsed: unknown, originalBytes: Uint8Array): ProviderCallDecodeResult {
-	if (!verifyCanonicalKeyOrder(parsed, DELIVERED_DECODE_KEYS))
-		return { ok: false, error: codecError("INVALID_RECORD") };
+	if (!verifyCanonicalKeyOrder(parsed, DELIVERED_DECODE_KEYS)) return codecFailure("INVALID_RECORD");
 	const obj = copyExactOwnRecordObject(parsed, DELIVERED_DECODE_KEYS, DELIVERED_DECODE_COUNT);
-	if (obj === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (obj === undefined) return codecFailure("INVALID_RECORD");
 
 	const version = obj.version;
-	if (version !== 1) return { ok: false, error: codecError("UNSUPPORTED_VERSION") };
+	if (version !== 1) return codecFailure("UNSUPPORTED_VERSION");
 	const journalSeq = obj.journalSeq;
 	if (typeof journalSeq !== "number" || !isPositiveSafeInt(journalSeq) || journalSeq > MAX_JOURNAL_SEQ)
-		return { ok: false, error: codecError("INVALID_SEQUENCE") };
+		return codecFailure("INVALID_SEQUENCE");
 	const callId = obj.callId;
-	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId)) return codecFailure("INVALID_IDENTITY");
 	const hostId = obj.hostId;
-	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId)) return codecFailure("INVALID_IDENTITY");
 	const generation = obj.generation;
-	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation)) return codecFailure("INVALID_IDENTITY");
 	const sessionId = obj.sessionId;
-	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId)) return codecFailure("INVALID_IDENTITY");
 	const recordedAt = obj.recordedAt;
 	if (typeof recordedAt !== "string" || !CANONICAL_UTC_RE.test(recordedAt) || !isCanonicalUtcTimestamp(recordedAt))
-		return { ok: false, error: codecError("INVALID_TIMESTAMP") };
+		return codecFailure("INVALID_TIMESTAMP");
 
 	const ackEnvelopeId = obj.ackEnvelopeId;
-	if (typeof ackEnvelopeId !== "string" || !SAFE_ID_RE.test(ackEnvelopeId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof ackEnvelopeId !== "string" || !SAFE_ID_RE.test(ackEnvelopeId)) return codecFailure("INVALID_IDENTITY");
 	const ackEnvelopeDigest = obj.ackEnvelopeDigest;
 	if (typeof ackEnvelopeDigest !== "string" || !isValidDigest(ackEnvelopeDigest))
-		return { ok: false, error: codecError("INVALID_DIGEST") };
+		return codecFailure("INVALID_DIGEST");
 	const outgoingRelayReceipt = decodeDurableReceipt(obj.outgoingRelayReceipt);
-	if (outgoingRelayReceipt === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (outgoingRelayReceipt === undefined) return codecFailure("INVALID_RECORD");
 
 	// Prove canonical encoding.
 	if (
@@ -1789,7 +1807,7 @@ function decodeDelivered(parsed: unknown, originalBytes: Uint8Array): ProviderCa
 			outgoingRelayReceipt,
 		})
 	)
-		return { ok: false, error: codecError("INVALID_RECORD") };
+		return codecFailure("INVALID_RECORD");
 
 	const record: ProviderCallDeliveredRecordV1 = Object.freeze({
 		version: 1,
@@ -1823,28 +1841,24 @@ const CANCEL_DECODE_COUNT = 8;
 
 function decodeCancel(parsed: unknown, originalBytes: Uint8Array): ProviderCallDecodeResult {
 	const obj = copyExactOwnRecordObject(parsed, CANCEL_DECODE_KEYS, CANCEL_DECODE_COUNT);
-	if (obj === undefined) return { ok: false, error: codecError("INVALID_RECORD") };
+	if (obj === undefined) return codecFailure("INVALID_RECORD");
 
 	const version = obj.version;
-	if (version !== 1) return { ok: false, error: codecError("UNSUPPORTED_VERSION") };
+	if (version !== 1) return codecFailure("UNSUPPORTED_VERSION");
 	const journalSeq = obj.journalSeq;
 	if (typeof journalSeq !== "number" || !isPositiveSafeInt(journalSeq) || journalSeq > MAX_JOURNAL_SEQ)
-		return { ok: false, error: codecError("INVALID_SEQUENCE") };
+		return codecFailure("INVALID_SEQUENCE");
 	const callId = obj.callId;
-	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof callId !== "string" || !SAFE_ID_RE.test(callId)) return codecFailure("INVALID_IDENTITY");
 	const hostId = obj.hostId;
-	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof hostId !== "string" || !SAFE_ID_RE.test(hostId)) return codecFailure("INVALID_IDENTITY");
 	const generation = obj.generation;
-	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof generation !== "string" || !SAFE_ID_RE.test(generation)) return codecFailure("INVALID_IDENTITY");
 	const sessionId = obj.sessionId;
-	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId))
-		return { ok: false, error: codecError("INVALID_IDENTITY") };
+	if (typeof sessionId !== "string" || !SAFE_ID_RE.test(sessionId)) return codecFailure("INVALID_IDENTITY");
 	const recordedAt = obj.recordedAt;
 	if (typeof recordedAt !== "string" || !CANONICAL_UTC_RE.test(recordedAt) || !isCanonicalUtcTimestamp(recordedAt))
-		return { ok: false, error: codecError("INVALID_TIMESTAMP") };
+		return codecFailure("INVALID_TIMESTAMP");
 
 	// Prove canonical encoding.
 	if (
@@ -1859,7 +1873,7 @@ function decodeCancel(parsed: unknown, originalBytes: Uint8Array): ProviderCallD
 			recordedAt,
 		})
 	)
-		return { ok: false, error: codecError("INVALID_RECORD") };
+		return codecFailure("INVALID_RECORD");
 
 	const record: ProviderCallCancelRequestedRecordV1 = Object.freeze({
 		version: 1,
