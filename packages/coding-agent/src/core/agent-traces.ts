@@ -1068,7 +1068,6 @@ class AgentTraceUploadController {
 	private inFlight: Promise<void> | undefined;
 	private lastUploadStartedAt: number | undefined;
 	private notBeforeAt = 0;
-	private ledgerIntentMarked = false;
 
 	constructor(
 		private readonly sessionManager: SessionManager,
@@ -1076,21 +1075,28 @@ class AgentTraceUploadController {
 	) {}
 
 	update(options: AgentTraceUploadInstallOptions): void {
-		if (options.semanticEdgesLedgerPath !== this.options.semanticEdgesLedgerPath) {
-			this.ledgerIntentMarked = false;
-		}
 		this.options = options;
 	}
 
 	schedule = (): void => {
 		this.pending = true;
-		const sessionFile = this.sessionManager.getSessionFile();
-		if (sessionFile && !locallyManagedSessionFiles.has(sessionFile) && markAgentTraceOutboxPendingSync(sessionFile)) {
-			locallyManagedSessionFiles.add(sessionFile);
-		}
-		const ledgerPath = this.options.semanticEdgesLedgerPath;
-		if (ledgerPath && !this.ledgerIntentMarked) {
-			this.ledgerIntentMarked = markAgentTraceOutboxPendingSync(ledgerPath, SEMANTIC_EDGES_OUTBOX_KIND);
+		// Intent is consent-gated at persist time: an entry created while sharing
+		// is off would turn a later enable into retroactive collection of
+		// opted-out sessions. Marking re-runs every persist (existsSync-cheap),
+		// so an entry pruned by a racing catch-up is re-registered.
+		if (this.options.settingsManager.getAgentTracesEnabled()) {
+			const sessionFile = this.sessionManager.getSessionFile();
+			if (
+				sessionFile &&
+				!locallyManagedSessionFiles.has(sessionFile) &&
+				markAgentTraceOutboxPendingSync(sessionFile)
+			) {
+				locallyManagedSessionFiles.add(sessionFile);
+			}
+			const ledgerPath = this.options.semanticEdgesLedgerPath;
+			if (ledgerPath) {
+				markAgentTraceOutboxPendingSync(ledgerPath, SEMANTIC_EDGES_OUTBOX_KIND);
+			}
 		}
 		this.arm();
 	};
