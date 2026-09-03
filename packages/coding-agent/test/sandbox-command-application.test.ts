@@ -513,16 +513,11 @@ describe("FIFO ordering", () => {
 
 describe("real reentry — sync execute-time and close", () => {
 	test("sync execute-time apply reentry and close reentry return error", async () => {
-		// Override session.abort BEFORE creating the effect so the bound
-		// execute closure captures the overridden method. The override
-		// uses a closure variable `reentryApp` set after app creation.
-		// Also calls reentryApp.close() synchronously — ALS reentry check
-		// must return error. A later external close succeeds normally.
 		const h = await createHarness();
 		try {
 			let reentryApp: SandboxCommandApplication | null = null;
 			const innerResults: Array<Record<string, unknown>> = [];
-			let closeReentryResult: Record<string, unknown> | null = null;
+			let closeReentryStatus: string | null = null;
 			let reentryTriggered = false;
 
 			const savedAbort = Object.getOwnPropertyDescriptor(h.session, "abort");
@@ -538,7 +533,10 @@ describe("real reentry — sync execute-time and close", () => {
 							innerResults.push(ir);
 						});
 						void reentryApp.close().then((cr) => {
-							closeReentryResult = cr;
+							const d = Object.getOwnPropertyDescriptor(cr, "status");
+							if (d && "value" in d && typeof d.value === "string") {
+								closeReentryStatus = d.value;
+							}
 						});
 					}
 					return Promise.resolve(undefined);
@@ -558,23 +556,18 @@ describe("real reentry — sync execute-time and close", () => {
 			const outer = await reentryApp.apply(makeCommandEnvelope("outer1", "abort"));
 			expect(outer.status).toBe("applied");
 
-			// Flush microtasks so .then callbacks fire
 			await Promise.resolve();
 			await Promise.resolve();
 			await Promise.resolve();
 
-			// Inner applies rejected by ALS reentry
 			expect(innerResults.length).toBe(2);
 			for (const ir of innerResults) {
 				expect(ir.status).toBe("error");
 			}
 
-			// Close reentry also returns error (not closed — ALS detected)
-			expect(closeReentryResult).not.toBeNull();
-			// biome-ignore lint/style/noNonNullAssertion: guarded by previous not.toBeNull
-			expect(closeReentryResult!.status).toBe("error");
+			expect(closeReentryStatus).not.toBeNull();
+			expect(closeReentryStatus).toBe("error");
 
-			// Later external close succeeds (no ALS context anymore)
 			const closePromise = reentryApp.close();
 			const closeResult = await closePromise;
 			expect(closeResult.status).toBe("closed");

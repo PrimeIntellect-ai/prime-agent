@@ -885,3 +885,71 @@ describe("post-factory mutation resistance", () => {
 		}
 	});
 });
+
+// ===========================================================================
+// Shadowed own descriptor — accessor/Proxy shadows prototype method
+// ===========================================================================
+
+describe("shadowed own descriptor", () => {
+	test("own accessor descriptor on session rejects factory (INVALID_SESSION)", async () => {
+		const h = await createHarness();
+		try {
+			// Place an accessor own descriptor that shadows the prototype method
+			let accessorCalled = false;
+			Object.defineProperty(h.session, "abort", {
+				get: () => {
+					accessorCalled = true;
+					return () => Promise.resolve(undefined);
+				},
+				enumerable: true,
+				configurable: true,
+			});
+
+			const r = createSandboxCommandEffect(h.session);
+			// captureMethod sees own accessor descriptor — returns undefined,
+			// captureAllMethods returns null, newCapability returns error cap.
+			expect(r.ok).toBe(false);
+			if (!r.ok) expect(r.error.code).toBe("INVALID_SESSION");
+			expect(accessorCalled).toBe(false);
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	test("own Proxy function descriptor on session rejects factory (INVALID_SESSION)", async () => {
+		const h = await createHarness();
+		try {
+			const proxyFn = new Proxy(() => Promise.resolve(undefined), {});
+			Object.defineProperty(h.session, "abort", {
+				value: proxyFn,
+				enumerable: true,
+				writable: true,
+				configurable: true,
+			});
+
+			const r = createSandboxCommandEffect(h.session);
+			expect(r.ok).toBe(false);
+			if (!r.ok) expect(r.error.code).toBe("INVALID_SESSION");
+		} finally {
+			h.cleanup();
+		}
+	});
+
+	test("own non-function value descriptor on session rejects factory (INVALID_SESSION)", async () => {
+		const h = await createHarness();
+		try {
+			Object.defineProperty(h.session, "abort", {
+				value: "not-a-function",
+				enumerable: true,
+				writable: true,
+				configurable: true,
+			});
+
+			const r = createSandboxCommandEffect(h.session);
+			expect(r.ok).toBe(false);
+			if (!r.ok) expect(r.error.code).toBe("INVALID_SESSION");
+		} finally {
+			h.cleanup();
+		}
+	});
+});

@@ -109,29 +109,34 @@ const KIND_COMPACT = 3;
 type BoundMethod = (...args: readonly unknown[]) => unknown;
 
 function captureMethod(session: AgentSession, name: string): BoundMethod | undefined {
-	let fn: unknown;
+	// Check own descriptor first. If it exists and is NOT a valid callable
+	// data descriptor (accessor, Proxy, non-function), reject — do NOT
+	// fall through to prototype (which would bypass a shadowing hostile descriptor).
+	let callable: ((...args: readonly unknown[]) => unknown) | undefined;
 
-	// Try own data descriptor first
 	try {
 		const ownDesc = Object.getOwnPropertyDescriptor(session, name);
-		if (ownDesc !== undefined && "value" in ownDesc && typeof ownDesc.value === "function") {
-			if (!types.isProxy(ownDesc.value)) {
-				fn = ownDesc.value;
-			}
+		if (ownDesc !== undefined) {
+			// Own descriptor exists — must be an enumerable data descriptor
+			// with a non-Proxy function value.
+			if (!("value" in ownDesc)) return undefined; // accessor -> reject
+			if (typeof ownDesc.value !== "function") return undefined;
+			if (types.isProxy(ownDesc.value)) return undefined;
+			callable = ownDesc.value;
 		}
 	} catch {
 		return undefined;
 	}
 
-	// Fall back to prototype data descriptor
-	if (fn === undefined) {
+	// No own descriptor — fall back to prototype data descriptor.
+	if (callable === undefined) {
 		try {
 			const proto = Object.getPrototypeOf(session);
 			if (proto !== null) {
 				const protoDesc = Object.getOwnPropertyDescriptor(proto, name);
 				if (protoDesc !== undefined && "value" in protoDesc && typeof protoDesc.value === "function") {
 					if (!types.isProxy(protoDesc.value)) {
-						fn = protoDesc.value;
+						callable = protoDesc.value;
 					}
 				}
 			}
@@ -140,17 +145,17 @@ function captureMethod(session: AgentSession, name: string): BoundMethod | undef
 		}
 	}
 
-	if (fn === undefined) return undefined;
+	if (callable === undefined) return undefined;
 
-	// Always bind against the session instance — own or prototype methods
-	// need the session as `this`.
-	return (...args: readonly unknown[]): unknown => {
+	// Bind against the session instance so `this` works.
+	const bound: (...args: readonly unknown[]) => unknown = (...args: readonly unknown[]): unknown => {
 		try {
-			return Reflect.apply(fn as (...args: readonly unknown[]) => unknown, session, args);
+			return Reflect.apply(callable, session, args);
 		} catch {
 			throw new Error("CAPTURED_METHOD_ERROR");
 		}
 	};
+	return bound;
 }
 
 // ===========================================================================
@@ -255,26 +260,26 @@ export function createSandboxCommandEffect(session: unknown): SandboxCommandEffe
 		});
 	}
 
-	return Object.freeze({ ok: true, capability: newCapability(session) });
+	// Validate all seven methods are capturable from own/prototype data
+	// descriptors BEFORE building the capability. A shadowing accessor,
+	// Proxy, or non-function own descriptor causes INVALID_SESSION.
+	const methods = captureAllMethods(session);
+	if (methods === null) {
+		return Object.freeze({
+			ok: false,
+			error: Object.freeze({ code: "INVALID_SESSION" }),
+		});
+	}
+
+	return Object.freeze({ ok: true, capability: newCapabilityFromMethods(session, methods) });
 }
 
 // ===========================================================================
 // Capability constructor (called after brand check)
 // ===========================================================================
 
-function newCapability(session: AgentSession): SandboxCommandEffectCapability {
-	// Capture all seven methods from own/prototype data descriptors NOW.
-	// No live property reads from `session` after this point.
-	const methods = captureAllMethods(session);
-	if (methods === null) {
-		// This should never happen for a legitimate branded AgentSession,
-		// but guard defensively: return a capability that rejects everything.
-		return Object.freeze({
-			execute: () => frozenHandle("", Promise.resolve(freshError("INTERNAL_ERROR"))),
-			close: () => Promise.resolve(freshError("INTERNAL_ERROR")),
-		});
-	}
-	// Discard session reference so executors never read live properties.
+function newCapabilityFromMethods(session: AgentSession, methods: BoundMethods): SandboxCommandEffectCapability {
+	// Discard session reference — executors use only bound methods.
 	void session;
 
 	// -- mutable state -------------------------------------------------------
@@ -479,19 +484,20 @@ function execPrompt(
 	methods: BoundMethods,
 	trackTask: (commandId: string, kind: number, completion: Promise<CommandEffectResult>) => void,
 ): SandboxCommandEffectHandle {
-	let sessionPromise: Promise<unknown>;
+	let raw: unknown;
 	try {
 		const opts: Record<string, unknown> = {};
 		if (body.admissionId !== undefined) opts.agentMessageId = body.admissionId;
 		opts.admissionCommitted = () => {};
-		sessionPromise = methods.promptUntilAccepted(body.message, opts) as Promise<unknown>;
+		raw = methods.promptUntilAccepted(body.message, opts);
 	} catch {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
 
-	if (!isExactPromise(sessionPromise)) {
+	if (!isExactPromise(raw)) {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
+	const sessionPromise: Promise<unknown> = raw;
 
 	const completion = mapCompletion(sessionPromise);
 	trackTask(commandId, KIND_PROMPT_STEER, completion);
@@ -504,7 +510,7 @@ function execSteer(
 	methods: BoundMethods,
 	trackTask: (commandId: string, kind: number, completion: Promise<CommandEffectResult>) => void,
 ): SandboxCommandEffectHandle {
-	let sessionPromise: Promise<unknown>;
+	let raw: unknown;
 	try {
 		const opts: Record<string, unknown> = {
 			streamingBehavior: "steer",
@@ -513,14 +519,15 @@ function execSteer(
 			opts.followUpQueueKey = body.queueKey;
 		}
 		opts.admissionCommitted = () => {};
-		sessionPromise = methods.prompt(body.message, opts) as Promise<unknown>;
+		raw = methods.prompt(body.message, opts);
 	} catch {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
 
-	if (!isExactPromise(sessionPromise)) {
+	if (!isExactPromise(raw)) {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
+	const sessionPromise: Promise<unknown> = raw;
 
 	const completion = mapCompletion(sessionPromise);
 	trackTask(commandId, KIND_PROMPT_STEER, completion);
@@ -532,16 +539,17 @@ function execAbort(
 	methods: BoundMethods,
 	trackTask: (commandId: string, kind: number, completion: Promise<CommandEffectResult>) => void,
 ): SandboxCommandEffectHandle {
-	let sessionPromise: Promise<unknown>;
+	let raw: unknown;
 	try {
-		sessionPromise = methods.abort() as Promise<unknown>;
+		raw = methods.abort();
 	} catch {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
 
-	if (!isExactPromise(sessionPromise)) {
+	if (!isExactPromise(raw)) {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
+	const sessionPromise: Promise<unknown> = raw;
 
 	const completion = mapCompletion(sessionPromise);
 	trackTask(commandId, KIND_ABORT, completion);
@@ -554,20 +562,21 @@ function execBash(
 	methods: BoundMethods,
 	trackTask: (commandId: string, kind: number, completion: Promise<CommandEffectResult>) => void,
 ): SandboxCommandEffectHandle {
-	let sessionPromise: Promise<unknown>;
+	let raw: unknown;
 	try {
 		const opts: Record<string, unknown> = {
 			transient: body.transient ?? false,
 		};
 		if (body.runId !== undefined) opts.runId = body.runId;
-		sessionPromise = methods.runUserBash(body.command, opts) as Promise<unknown>;
+		raw = methods.runUserBash(body.command, opts);
 	} catch {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
 
-	if (!isExactPromise(sessionPromise)) {
+	if (!isExactPromise(raw)) {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
+	const sessionPromise: Promise<unknown> = raw;
 
 	const completion = mapCompletion(sessionPromise);
 	trackTask(commandId, KIND_BASH, completion);
@@ -589,16 +598,17 @@ function execCompact(
 	methods: BoundMethods,
 	trackTask: (commandId: string, kind: number, completion: Promise<CommandEffectResult>) => void,
 ): SandboxCommandEffectHandle {
-	let sessionPromise: Promise<unknown>;
+	let raw: unknown;
 	try {
-		sessionPromise = methods.compact(body.customInstructions) as Promise<unknown>;
+		raw = methods.compact(body.customInstructions);
 	} catch {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
 
-	if (!isExactPromise(sessionPromise)) {
+	if (!isExactPromise(raw)) {
 		return frozenHandle(commandId, Promise.resolve(freshError("INTERNAL_ERROR")));
 	}
+	const sessionPromise: Promise<unknown> = raw;
 
 	const completion = mapCompletion(sessionPromise);
 	trackTask(commandId, KIND_COMPACT, completion);
