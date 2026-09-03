@@ -822,7 +822,7 @@ function isGenuineUint8Array(bytes: unknown): bytes is Uint8Array {
     if (PAWS_TA_BUFFER_GETTER === undefined) return false;
     if (PAWS_AB_BYTE_LENGTH_GETTER === undefined) return false;
     if (PAWS_TA_FILL === undefined) return false;
-    // PAWS_TA_SUBARRAY may be undefined if host does not support it; fallback uses indexed loop
+    if (PAWS_TA_SUBARRAY === undefined) return false;
     const bl = Reflect.apply(PAWS_TA_BYTE_LENGTH_GETTER, bytes, []);
     const bo = Reflect.apply(PAWS_TA_BYTE_OFFSET_GETTER, bytes, []);
     const buf = Reflect.apply(PAWS_TA_BUFFER_GETTER, bytes, []);
@@ -1262,14 +1262,12 @@ function decodePawsManifestBytesImpl(raw: unknown): PawsResult<PawsDecodeResult>
     if (manifestStr === null) return failErr(PAWS_ERRORS.INVALID_UTF8);
 
     const reencoded = utf8Encode(manifestStr);
-    if (reencoded.byteLength !== manifestSlice.byteLength) { eraseBytes(reencoded); return failErr(PAWS_ERRORS.INVALID_UTF8); }
-    for (let i = 0; i < manifestSlice.byteLength; i++) {
+    if (reencoded.byteLength !== manifestLen) { eraseBytes(reencoded); return failErr(PAWS_ERRORS.INVALID_UTF8); }
+    for (let i = 0; i < manifestLen; i++) {
       if (manifestSlice[i] !== reencoded[i]) { eraseBytes(reencoded); return failErr(PAWS_ERRORS.INVALID_UTF8); }
     }
     eraseBytes(reencoded);
-    // If manifestSlice is an aliased subarray, input erasure clears it.
-    // If it's a fallback copy (PAWS_TA_SUBARRAY was undefined), erase explicitly.
-    if (PAWS_TA_SUBARRAY === undefined) { eraseBytes(manifestSlice); }
+    // manifestSlice aliases input buffer; input erasure clears it
 
     let parsed: unknown;
     try { parsed = JSON.parse(manifestStr); } catch { return failErr(PAWS_ERRORS.INVALID_JSON); }
@@ -1336,9 +1334,10 @@ function decodeSnapshot(
   const offErr = validateOffsetsTotal(fields.offsets, fields.sizes, fields.isDelete, declTotal);
   if (offErr !== undefined) return failErr(offErr);
 
-  // Verify archive size
-  if (byteLen !== headerSize + declTotal) return failErr(PAWS_ERRORS.TRAILING_BYTES);
+  // Enforce archive bound without requiring payload bytes present
   if (!checkArchiveSize(headerSize, declTotal)) return failErr(PAWS_ERRORS.ARCHIVE_TOO_LARGE);
+  // Pure manifest decode accepts only header+manifest bytes; payload validation is streaming verifier's role
+  if (byteLen !== headerSize) return failErr(PAWS_ERRORS.TRAILING_BYTES);
 
   // Recompute snapshotId
   const computedSnapId = computeSnapshotIdFromFields(fields.paths, fields.sizes, fields.modes, fields.sha256s);
@@ -1431,8 +1430,8 @@ function decodeChangeset(
   const offErr = validateOffsetsTotal(fields.offsets, fields.sizes, fields.isDelete, declTotal);
   if (offErr !== undefined) return failErr(offErr);
 
-  if (byteLen !== headerSize + declTotal) return failErr(PAWS_ERRORS.TRAILING_BYTES);
   if (!checkArchiveSize(headerSize, declTotal)) return failErr(PAWS_ERRORS.ARCHIVE_TOO_LARGE);
+  if (byteLen !== headerSize) return failErr(PAWS_ERRORS.TRAILING_BYTES);
 
   // Compute changesetId (domain-separated)
   const entries = buildChangesetEntries(fields);

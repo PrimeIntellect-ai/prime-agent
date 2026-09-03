@@ -73,11 +73,8 @@ function ok<T>(r: { ok: boolean; value: T }): T {
 }
 
 function fullArchiveBytes(enc: PawsEncodeResult): Uint8Array {
-  // Build full archive: header bytes + zero-filled payload
-  // (test doesn't have real payload data, but decode just validates offsets)
-  const full = new Uint8Array(enc.bytes.length + enc.payloadSize);
-  full.set(enc.bytes);
-  return full;
+  // Pure manifest decode accepts only header+manifest bytes; payload bytes not required
+  return new Uint8Array(enc.bytes);
 }
 
 function fail(r: { ok: boolean }): asserts r is { ok: false; error: { code: string } } {
@@ -95,7 +92,7 @@ describe("snapshot", () => {
     expect(r.manifest.snapshotId).toMatch(/^[0-9a-f]{64}$/);
     expect(r.manifest.entries.length).toBe(0);
     expect(r.payloadSize).toBe(0);
-    const d = ok(decodePawsManifestBytes(fullArchiveBytes(r)));
+    const d = ok(decodePawsManifestBytes(new Uint8Array(r.bytes)));
     expect(d.manifest.snapshotId).toBe(r.manifest.snapshotId);
   });
 
@@ -103,14 +100,14 @@ describe("snapshot", () => {
     const r = ok(encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("a.txt", 100)] }));
     expect(r.manifest.totalBytes).toBe(100);
     expect(r.manifest.entries.length).toBe(1);
-    const d = ok(decodePawsManifestBytes(fullArchiveBytes(r)));
+    const d = ok(decodePawsManifestBytes(new Uint8Array(r.bytes)));
     expect(d.manifest.entries[0].path).toBe("a.txt");
   });
 
   it("empty file (size 0)", () => {
     const r = ok(encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("empty.bin", 0)] }));
     expect(r.manifest.totalBytes).toBe(0);
-    const d = ok(decodePawsManifestBytes(fullArchiveBytes(r)));
+    const d = ok(decodePawsManifestBytes(new Uint8Array(r.bytes)));
     expect(d.manifest.entries[0].size).toBe(0);
   });
 
@@ -124,7 +121,7 @@ describe("snapshot", () => {
     expect(r.manifest.entries[0].path).toBe("a.txt");
     expect(r.manifest.entries[0].offset).toBe(0);
     expect(r.manifest.entries[1].offset).toBe(10);
-    const d = ok(decodePawsManifestBytes(fullArchiveBytes(r)));
+    const d = ok(decodePawsManifestBytes(new Uint8Array(r.bytes)));
     expect(d.manifest.entries.length).toBe(2);
   });
 
@@ -158,13 +155,13 @@ describe("changeset", () => {
     const r = ok(encodePawsManifest({ kind: "changeset", workspaceId: WS, baseSnapshotId: BASE, snapshotId: TARGET, entries: [makeAdd("new.txt", 50)] }));
     expect(r.manifest.kind).toBe("changeset");
     expect(r.payloadSize).toBe(50);
-    const d = ok(decodePawsManifestBytes(fullArchiveBytes(r)));
+    const d = ok(decodePawsManifestBytes(new Uint8Array(r.bytes)));
     expect(d.manifest.kind).toBe("changeset");
   });
 
   it("change operation with baseHash", () => {
     const r = ok(encodePawsManifest({ kind: "changeset", workspaceId: WS, baseSnapshotId: BASE, snapshotId: TARGET, entries: [makeChg("old.txt", 30, 100644, S0, 0, S0)] }));
-    const d = ok(decodePawsManifestBytes(fullArchiveBytes(r)));
+    const d = ok(decodePawsManifestBytes(new Uint8Array(r.bytes)));
     if (d.manifest.kind === "changeset") {
       const e0 = d.manifest.entries[0];
       expect(e0.operation).toBe("change");
@@ -178,7 +175,7 @@ describe("changeset", () => {
     const r = ok(encodePawsManifest({ kind: "changeset", workspaceId: WS, baseSnapshotId: BASE, snapshotId: TARGET, entries: [makeDel("gone.txt", S0)] }));
     expect(r.payloadSize).toBe(0);
     expect(r.manifest.totalBytes).toBe(0);
-    const d = ok(decodePawsManifestBytes(fullArchiveBytes(r)));
+    const d = ok(decodePawsManifestBytes(new Uint8Array(r.bytes)));
     if (d.manifest.kind === "changeset") {
       const e0 = d.manifest.entries[0];
       expect(e0.operation).toBe("delete");
@@ -193,14 +190,14 @@ describe("changeset", () => {
     ]);
     const r = ok(encodePawsManifest({ kind: "changeset", workspaceId: WS, baseSnapshotId: BASE, snapshotId: TARGET, entries }));
     expect(r.payloadSize).toBe(50);
-    const d = ok(decodePawsManifestBytes(fullArchiveBytes(r)));
+    const d = ok(decodePawsManifestBytes(new Uint8Array(r.bytes)));
     expect(d.manifest.entries.length).toBe(3);
   });
 
   it("empty changeset (no entries, no-op)", () => {
     const r = ok(encodePawsManifest({ kind: "changeset", workspaceId: WS, baseSnapshotId: BASE, snapshotId: TARGET, entries: [] }));
     expect(r.payloadSize).toBe(0);
-    const d = ok(decodePawsManifestBytes(fullArchiveBytes(r)));
+    const d = ok(decodePawsManifestBytes(new Uint8Array(r.bytes)));
     expect(d.manifest.totalBytes).toBe(0);
   });
 
@@ -213,7 +210,7 @@ describe("changeset", () => {
   it("delete round-trip preserves baseHash", () => {
     const delHash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
     const r = ok(encodePawsManifest({ kind: "changeset", workspaceId: WS, baseSnapshotId: BASE, snapshotId: TARGET, entries: [makeDel("gone.txt", delHash)] }));
-    const d = ok(decodePawsManifestBytes(fullArchiveBytes(r)));
+    const d = ok(decodePawsManifestBytes(new Uint8Array(r.bytes)));
     if (d.manifest.kind === "changeset") {
       const e0 = d.manifest.entries[0];
       expect(e0.operation).toBe("delete");
@@ -461,9 +458,8 @@ describe("offsets", () => {
 describe("byte erasure", () => {
   it("erases on successful decode", () => {
     const r = ok(encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("f", 10)] }));
-    const full = new Uint8Array(r.bytes.length + r.payloadSize);
-    full.set(r.bytes);
-    const copy = new Uint8Array(full);
+    const copy = new Uint8Array(r.bytes.length);
+    copy.set(r.bytes);
     ok(decodePawsManifestBytes(copy));
     for (const b of copy) expect(b).toBe(0);
   });
@@ -497,7 +493,7 @@ describe("symmetry", () => {
       makeSnap("empty", 0, 100644, S0, 300),
     ];
     const enc = ok(encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries }));
-    const dec = ok(decodePawsManifestBytes(fullArchiveBytes(enc)));
+    const dec = ok(decodePawsManifestBytes(new Uint8Array(enc.bytes)));
     expect(dec.manifest.snapshotId).toBe(enc.manifest.snapshotId);
     expect(dec.manifest.totalBytes).toBe(enc.manifest.totalBytes);
     dec.manifest.entries.forEach((e, i) => {
@@ -515,7 +511,7 @@ describe("symmetry", () => {
       makeAdd("new.txt", 50),
     ];
     const enc = ok(encodePawsManifest({ kind: "changeset", workspaceId: WS, baseSnapshotId: BASE, snapshotId: TARGET, entries }));
-    const dec = ok(decodePawsManifestBytes(fullArchiveBytes(enc)));
+    const dec = ok(decodePawsManifestBytes(new Uint8Array(enc.bytes)));
     expect(dec.manifest.snapshotId).toBe(enc.manifest.snapshotId);
     expect(dec.identity.changesetId).toBe(enc.identity.changesetId);
   });
@@ -570,15 +566,12 @@ describe("UTF-8", () => {
 describe("trailing bytes", () => {
   it("rejects trailing data", () => {
     const r = ok(encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("f", 10)] }));
-    // Build full archive: header + payload
-    const headerOnly = r.bytes;
-    const fullArchive = new Uint8Array(headerOnly.length + r.payloadSize);
-    fullArchive.set(headerOnly);
-    // Decode should succeed with exact archive
-    ok(decodePawsManifestBytes(new Uint8Array(fullArchive)));
-    // Decode should fail with extra trailing byte
-    const withTrailing = new Uint8Array(fullArchive.length + 1);
-    withTrailing.set(fullArchive);
+    // Pure manifest decode accepts only header bytes
+    const hdr = new Uint8Array(r.bytes);
+    ok(decodePawsManifestBytes(hdr));
+    // Extra trailing byte is rejected
+    const withTrailing = new Uint8Array(hdr.length + 1);
+    withTrailing.set(hdr);
     fail(decodePawsManifestBytes(withTrailing));
   });
 });
@@ -603,7 +596,7 @@ describe("frozen results", () => {
     const r = ok(encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("f", 10)] }));
     const full = new Uint8Array(r.bytes.length + r.payloadSize);
     full.set(r.bytes);
-    const d = decodePawsManifestBytes(fullArchiveBytes(r));
+    const d = decodePawsManifestBytes(new Uint8Array(r.bytes));
     if (d.ok) {
       expect(Object.isFrozen(d)).toBe(true);
       expect(Object.isFrozen(d.value)).toBe(true);
