@@ -10429,7 +10429,15 @@ export class AgentSession {
 				else run.suppressTerminalNotice = true;
 				return true;
 			}
-			return this._cancelRlmChildRun(run, reason);
+			if (this._cancelRlmChildRun(run, reason)) {
+				return true;
+			}
+			// The targeted run settled, but its subtree may still work: stop that.
+			return run.session?.cancelRunningRlmDescendants(reason) ?? false;
+		}
+		const retainedTarget = this._rlmChildSessions.get(childId)?.session;
+		if (retainedTarget?.cancelRunningRlmDescendants(reason)) {
+			return true;
 		}
 		for (const candidate of this._activeRlmChildRuns.values()) {
 			if (candidate.session?.cancelRlmChildRun(childId, reason)) {
@@ -10442,6 +10450,24 @@ export class AgentSession {
 			}
 		}
 		return false;
+	}
+
+	/** Cancel every running or queued run in this session's subtree, mirroring hasRunningRlmChildren's walk. */
+	cancelRunningRlmDescendants(reason = "Cancelled by user"): boolean {
+		let cancelled = false;
+		for (const run of this._activeRlmChildRuns.values()) {
+			if (run.status === "running" || run.status === "queued") {
+				if (this._cancelRlmChildRun(run, reason)) cancelled = true;
+			} else if (run.session?.cancelRunningRlmDescendants(reason)) {
+				cancelled = true;
+			}
+		}
+		for (const { session } of this._rlmChildSessions.values()) {
+			if (session.cancelRunningRlmDescendants(reason)) {
+				cancelled = true;
+			}
+		}
+		return cancelled;
 	}
 
 	private async _assertRlmSubagentSessionNameAvailable(name: string, ignorePendingReservation = false): Promise<void> {
