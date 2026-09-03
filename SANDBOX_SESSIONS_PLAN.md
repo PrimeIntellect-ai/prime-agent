@@ -88,13 +88,13 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 | B07 | A10, A14 | done | Add Git workspace snapshot and safe sync-back |
 | B08 | A12, B01, B02 | done | Add `sandbox` and `sandbox_options` to RLM APIs |
 | B09 | A11, B01, B03 | done | Add top-level sandbox session creation APIs and CLI flags |
-| B10 | A06, B03, B04 | in_progress | Route durable direct agent-to-agent communication across hosts |
-| B11 | A07, B03, B04 | in_progress | Mirror observation, transcript, recap, and usage events |
+| B10 | A06, B03, B04 | in_progress | Route durable direct agent-to-agent communication across hosts; durable target-inbox implementation is under direct review |
+| B11 | A07, B03, B04 | done | Mirror observation, transcript, recap, and usage events; exact snapshots, durable application, and production Node backend are integrated |
 | B12 | A08, B03, B06 | done | Add sandbox lifecycle, checkpoint, passivation, wake, and deletion |
 | B13 | A09, B01, B11 | done | Show execution location and connection health in Agents View |
-| B14 | B05, B06, B08, B09 | in_progress | Wire end-to-end sandbox session orchestration |
+| B14 | B05, B06, B08, B09 | in_progress | Wire end-to-end sandbox session orchestration; fixed FD3 child launch and hosted factory remain |
 | B15 | A13, B03, B04 | done | Add protocol compatibility and reconnect tests |
-| B16 | A13, B05, B10, B11 | queued | Add auth, messaging, observation, and security integration tests |
+| B16 | A13, B05, B10, B11 | blocked | Add auth, messaging, observation, and security integration tests after B10 and B14 production composition |
 
 ### Wave 3: integration and release readiness
 
@@ -112,8 +112,8 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 ## Current integration baseline
 
 - Branch: `feat/sandbox-backed-sessions` in `/Users/milkkarten/prime-agent-sandbox-sessions`.
-- Reviewed integration tip: `cf826a0c6`.
-- Latest full root `npm run check` is green across 1045 files, TypeScript, Biome, installer rendering, and browser smoke.
+- Reviewed integration tip: `c07f16d66`.
+- Latest full root `npm run check` is green across 1,045 files, TypeScript, Biome, installer rendering, and browser smoke.
 - Accepted B03 foundations: exact frame codec `55b40d7f1`, journal-record codec `5551582bd`, delivery index `5e8e926b4`, direct-final immutable journal publication `8bd83db6c`, immutable delivery-marker publication `df846c08f`, and page-atomic bounded directory recovery `9df8a3da9`.
 - Accepted B11 foundations: observation core `939a7baaf`, exact snapshots `62e8b073a`.
 - Accepted B14 foundations: provider client `2195c7a23`, tunnel manager `a636f7d99`, PAB1 `d21f53c1a`, FD3 reader `723a8db52`, PAAR codec `a17f5588d`, stdin frame reader `4beeaa5da`, TypeScript correction `1d63a72c0`, SSH spawn specification `4dd8790db`, SSH specification tests `af83a786f`/`a7add61a4`, one-use upgrade authentication `a4976298c`, and Node stdin normalization `4a8962b54`.
@@ -280,3 +280,8 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 - Integrated the independently accepted single-use relay listener ownership core as `9d40331f6`. The core creates and owns the one-use authenticator from transferred grant bytes and a fixed path, scrubs the actual request header containers before every semantic rejection, erases every authenticated Node upgrade head, persists durable admission before one native upgrade promise, installs the handler subscription before resume, and retains independent socket/WebSocket/server closure evidence without reusing consumed aliases. Exact capability snapshots reject proxies, subclasses, aliases, non-native promises, malformed results, duplicate TCP/upgrades, and late owners. One shared close drains dynamically appearing cleanup tasks to a bounded fixed point. Eleven listener-core plus eighty-one auth tests pass; the 1045-file root check is green and independent final adversarial review returned ACCEPT. The production Node HTTP/WebSocket adapter is integrated as `cf826a0c6`.
 
 - Integrated the independently accepted production Node HTTP/WebSocket relay adapter as `cf826a0c6`, with a direct `ws` dependency. It binds only `127.0.0.1` on an ephemeral port, caps the server at one concurrent connection, reports dropped or sequential duplicate TCP connections to the semantic core, and transfers exactly one paused socket through `WebSocketServer.handleUpgrade`. The adapter passes the actual Node upgrade head and authenticates through a plain view that aliases the actual `IncomingMessage.rawHeaders` and `headers` containers; the upgrade path verifies those containers were scrubbed before HTTP 101. Callback aborts, late WebSockets, terminal calls, normal HTTP requests, and unrouted requests erase/scrub and close fail-closed. WebSocket cleanup has a referenced terminate fallback and independent socket/WebSocket/server closure evidence. Five adapter, twelve listener-core, and eighty-one auth tests pass; the 1045-file root check is green and independent final adversarial review returned ACCEPT.
+
+- Reconciled the plan at integration tip `c07f16d66`: B11 is complete through the accepted exact snapshot, durable application, and production Node backend; B10 remains in progress on restart-durable target admission; B14 remains in progress on the fixed numeric-FD3 child launcher and hosted orchestration; B16 is blocked only on those production compositions.
+- Rejected two B10 designs that incorrectly treated the volatile `SessionActionStore` or non-fsynced `SessionManager.flushNow()` as a crash-durable admission boundary. The replacement uses a permanent B03-backed target inbox, independent transport and semantic IDs, a canonical semantic collision index, `pending` before queued ACK, and recovery-time verification of every record including `delivered` records.
+- Started isolated implementations for the B10 durable target inbox, the B14 FD3 child-readiness monitor, and the missing production Node B03 relay backend. Direct review returned concrete ownership, paging, scheduling, identity-binding, and path-safety corrections before integration.
+- Audited and terminated 43 orphaned test, daemon, Python, and esbuild processes left by completed isolated review worktrees; a follow-up process scan found none remaining from those completed worktrees. No paid resources were created.
