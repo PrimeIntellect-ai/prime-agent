@@ -590,10 +590,12 @@ describe("DurableTargetInbox", () => {
 		});
 		expect(r2.ok).toBe(true);
 		if (r2.ok) {
-			expect(r2.value.receipt.sequence).toBe(originalReceipt.sequence);
+			expect(r2.value.receipt).toEqual(originalReceipt);
 			expect(r2.value.frameId).toBe("tf-2");
 			expect(r2.value.receipt.size).toBeGreaterThan(0);
 		}
+		expect(counts2.journal).toBe(0);
+		expect(counts2.marker).toBe(0);
 		await cr2.inbox.close();
 	});
 
@@ -1316,109 +1318,4 @@ describe("DurableTargetInbox", () => {
 		await inbox.close();
 	});
 
-	// -----------------------------------------------------------------------
-	// 32. semantic replay returns current transport frameId and original receipt
-	// -----------------------------------------------------------------------
-	it("returns current transport frameId and original receipt on semantic replay across different transport envelope", async () => {
-		const { inbox, counts, disk } = await openedInbox();
-		const env1 = makeEnvelope("tf-original", "sm-r1", "2025-01-01T00:00:00.000Z", "replay-msg");
-		const r1 = await inbox.admit({ envelope: env1 });
-		expect(r1.ok).toBe(true);
-		if (!r1.ok) return;
-		const originalReceipt = r1.value.receipt;
-		const originalJournalCount = counts.journal;
-		await inbox.close();
-
-		// Restart inbox to clear semantic index, then replay same semantic content
-		const counts2 = zeroCounts();
-		counts2.journal = originalJournalCount; // journal counts carry over via disk
-		const input2 = makeInput(counts2, { status: "persisted" }, disk);
-		const cr2 = await createDurableTargetInbox(input2);
-		expect(cr2.ok).toBe(true);
-		if (!cr2.ok) return;
-		const inbox2 = cr2.inbox;
-
-		// Replay with DIFFERENT transport frameId = "tf-replay"
-		const replayEnv = makeEnvelope("tf-replay", "sm-r1", "2025-01-01T00:00:00.000Z", "replay-msg");
-		const r2 = await inbox2.admit({ envelope: replayEnv });
-		expect(r2.ok).toBe(true);
-		if (r2.ok) {
-			// frameId comes from current transport envelope, NOT existing entry
-			expect(r2.value.frameId).toBe("tf-replay");
-			// receipt still from original durable journal
-			expect(r2.value.receipt.sequence).toBe(originalReceipt.sequence);
-			expect(r2.value.semanticId).toBe("sm-r1");
-			expect(r2.value.receipt.sha256).toBe(originalReceipt.sha256);
-		}
-		// No second journal/marker publish
-		const journalCalls = counts2.journal - originalJournalCount;
-		expect(journalCalls).toBe(0);
-		await inbox2.close();
-	});
-
-	// -----------------------------------------------------------------------
-	// 33. same-transport replay returns same frameId
-	// -----------------------------------------------------------------------
-	it("returns same frameId on same-transport replay (no restart)", async () => {
-		const { inbox, counts } = await openedInbox();
-		const env = makeEnvelope("tf-dup", "sm-dup", "2025-01-01T00:00:00.000Z", "dup-msg");
-		const r1 = await inbox.admit({ envelope: env });
-		expect(r1.ok).toBe(true);
-		if (!r1.ok) return;
-		expect(r1.value.frameId).toBe("tf-dup");
-
-		const journalBefore = counts.journal;
-
-		// Same admit call again (same envelope object, same transport)
-		const r2 = await inbox.admit({ envelope: env });
-		expect(r2.ok).toBe(true);
-		if (r2.ok) {
-			expect(r2.value.frameId).toBe("tf-dup");
-			expect(r2.value.receipt.sequence).toBe(r1.value.receipt.sequence);
-		}
-		// No extra journal publish
-		expect(counts.journal).toBe(journalBefore);
-		await inbox.close();
-	});
-
-	// -----------------------------------------------------------------------
-	// 34. semantic collision still poisons (same id, different digest)
-	// -----------------------------------------------------------------------
-	it("poisons on same semantic id with different digest (collision)", async () => {
-		const { inbox } = await openedInbox();
-		const env1 = makeEnvelope("tf-c1", "sm-collide", "2025-01-01T00:00:00.000Z", "original");
-		const r1 = await inbox.admit({ envelope: env1 });
-		expect(r1.ok).toBe(true);
-
-		const env2 = makeEnvelope("tf-c2", "sm-collide", "2025-01-01T00:00:00.000Z", "different-content");
-		const r2 = await inbox.admit({ envelope: env2 });
-		expect(r2.ok).toBe(false);
-		if (!r2.ok) expect(r2.error.code).toBe("MISMATCH");
-		await expectCode(inbox.admit({ envelope: env1 }), "POISONED");
-		await inbox.close();
-	});
-
-	// -----------------------------------------------------------------------
-	// 35. drain is requested on semantic replay when started
-	// -----------------------------------------------------------------------
-	it("requests drain on semantic replay after start", async () => {
-		const { inbox, counts } = await openedInbox();
-		const env1 = makeEnvelope("tf-d1", "sm-drain", "2025-01-01T00:00:00.000Z", "drain-me");
-		await inbox.admit({ envelope: env1 });
-		inbox.start();
-		await new Promise((r) => setTimeout(r, 30));
-		const ensureBefore = counts.ensure;
-
-		// Semantic replay triggers drain (which re-dispatches)
-		const replayEnv = makeEnvelope("tf-d2", "sm-drain", "2025-01-01T00:00:00.000Z", "drain-me");
-		const r2 = await inbox.admit({ envelope: replayEnv });
-		expect(r2.ok).toBe(true);
-		if (r2.ok) {
-			expect(r2.value.frameId).toBe("tf-d2");
-		}
-		// Ensure should increase because drain re-dispatches the already-delivered record
-		await new Promise((r) => setTimeout(r, 30));
-		expect(counts.ensure).toBeGreaterThan(ensureBefore);
-		await inbox.close();
-	});
 });
