@@ -659,12 +659,8 @@ describe("ordered durable relay", () => {
 		const counts = capCounts();
 		const secondIncoming = await openStore("received", counts);
 		const secondOutgoing = await openStore("sent", counts, outgoingDisk);
-		const sent: RemoteHostFrameEnvelope[] = [];
-		const applied: RemoteHostFrameEnvelope[] = [];
 		const transport = {
-			send(raw: unknown): Promise<unknown> {
-				const envelope = (raw as { envelope: RemoteHostFrameEnvelope }).envelope;
-				sent.push(envelope);
+			send(_raw: unknown): Promise<unknown> {
 				return Promise.resolve({ status: "sent" });
 			},
 			close(): Promise<unknown> {
@@ -673,9 +669,7 @@ describe("ordered durable relay", () => {
 			},
 		};
 		const application = {
-			apply(raw: unknown): Promise<unknown> {
-				const envelope = (raw as { envelope: RemoteHostFrameEnvelope }).envelope;
-				applied.push(envelope);
+			apply(_raw: unknown): Promise<unknown> {
 				return Promise.resolve({ status: "applied" });
 			},
 			close(): Promise<unknown> {

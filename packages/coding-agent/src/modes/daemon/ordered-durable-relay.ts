@@ -796,6 +796,10 @@ export class OrderedDurableRelay {
 		if (!pubReceipt) return this.poison("PERSISTENCE_FAILED");
 		const queried = await this.outgoing.query(envelope.frameId);
 		if (!queried.ok) return this.poison("PERSISTENCE_FAILED");
+		const queriedRecord = revalidateRecord({ record: queried.value.record, receipt: queried.value.journal });
+		if (!queriedRecord || queriedRecord.envelope.frameId !== envelope.frameId) {
+			return this.poison("PERSISTENCE_FAILED");
+		}
 		// Validate query receipt through validateReceipt before comparison
 		const qjr = validateReceipt(queried.value.journal);
 		if (!qjr) return this.poison("PERSISTENCE_FAILED");
@@ -861,8 +865,9 @@ export class OrderedDurableRelay {
 		const outgoingJournalReceipt = validateReceipt(outgoingState.journal);
 		if (!outgoingJournalReceipt) return this.poison("EVIDENCE_CONFLICT");
 
-		// Revalidate outgoing record through codec/digest/journal binding
-		if (!revalidateRecord({ record: outgoingState.record, receipt: outgoingState.journal })) {
+		// Revalidate outgoing record through codec/digest/journal binding.
+		const freshOutgoing = revalidateRecord({ record: outgoingState.record, receipt: outgoingState.journal });
+		if (!freshOutgoing || freshOutgoing.envelope.frameId !== frameId) {
 			return this.poison("EVIDENCE_CONFLICT");
 		}
 

@@ -30,8 +30,20 @@ function input(value = envelope()): Readonly<{ envelope: RemoteHostFrameEnvelope
 	return Object.freeze({ envelope: value, semanticDigest: digest.value });
 }
 
-function journalReceipt(seq = 1): Readonly<{ sequence: number; size: number; sha256: string }> {
+function journalReceipt(seq = 1): DurableReceipt {
 	return Object.freeze({ sequence: seq, size: 100, sha256: "a".repeat(64) });
+}
+
+type RelaySendSuccess = Readonly<{
+	ok: true;
+	value: Readonly<{ frameId: string; replay: false; journalReceipt: DurableReceipt }>;
+}>;
+
+function relaySendSuccess(frameId: string, sequence = 1): RelaySendSuccess {
+	return Object.freeze({
+		ok: true,
+		value: Object.freeze({ frameId, replay: false, journalReceipt: journalReceipt(sequence) }),
+	});
 }
 
 function successfulRelay(onSend?: (raw: unknown) => unknown) {
@@ -39,16 +51,7 @@ function successfulRelay(onSend?: (raw: unknown) => unknown) {
 		send(raw: unknown): unknown {
 			if (onSend) return onSend(raw);
 			const source = inputEnvelope(raw);
-			return Promise.resolve(
-				Object.freeze({
-					ok: true as const,
-					value: Object.freeze({
-						frameId: source?.frameId ?? "invalid",
-						replay: false,
-						journalReceipt: journalReceipt(),
-					}),
-				}),
-			);
+			return Promise.resolve(relaySendSuccess(source?.frameId ?? "invalid"));
 		},
 	});
 }
@@ -216,42 +219,28 @@ describe("B10 remote relay dispatcher", () => {
 	});
 
 	it("serializes admitted sends FIFO", async () => {
-		const gate =
-			deferred<
-				Readonly<{ ok: true; value: Readonly<{ frameId: string; replay: false; journalReceipt: DurableReceipt }> }>
-			>();
+		const gate = deferred<RelaySendSuccess>();
 		const calls: string[] = [];
 		const relay = successfulRelay((raw) => {
 			const source = inputEnvelope(raw);
 			const frameId = source?.frameId ?? "invalid";
 			calls.push(frameId);
 			if (frameId === "first") return gate.promise;
-			return Promise.resolve({
-				ok: true as const,
-				value: { frameId, replay: false as const, journalReceipt: journalReceipt() },
-			});
+			return Promise.resolve(relaySendSuccess(frameId));
 		});
 		const subject = await dispatcher(() => ({ status: "available", relay }));
 		const first = subject.ensure(input(envelope("first", "message-first")));
 		const second = subject.ensure(input(envelope("second", "message-second")));
 		await Promise.resolve();
 		expect(calls).toEqual(["first"]);
-		gate.resolve(
-			Object.freeze({
-				ok: true as const,
-				value: Object.freeze({ frameId: "first", replay: false, journalReceipt: journalReceipt(1) }),
-			}),
-		);
+		gate.resolve(relaySendSuccess("first"));
 		expect(await first).toEqual({ status: "persisted" });
 		expect(await second).toEqual({ status: "persisted" });
 		expect(calls).toEqual(["first", "second"]);
 	});
 
 	it("drains admitted work before one shared logical close", async () => {
-		const gate =
-			deferred<
-				Readonly<{ ok: true; value: Readonly<{ frameId: string; replay: false; journalReceipt: DurableReceipt }> }>
-			>();
+		const gate = deferred<RelaySendSuccess>();
 		const subject = await dispatcher(() => ({
 			status: "available",
 			relay: successfulRelay(() => gate.promise),
@@ -267,12 +256,7 @@ describe("B10 remote relay dispatcher", () => {
 		});
 		await Promise.resolve();
 		expect(closeSettled).toBe(false);
-		gate.resolve(
-			Object.freeze({
-				ok: true as const,
-				value: Object.freeze({ frameId: "frame-1", replay: false, journalReceipt: journalReceipt(1) }),
-			}),
-		);
+		gate.resolve(relaySendSuccess("frame-1"));
 		expect(await admitted).toEqual({ status: "persisted" });
 		expect(await firstClose).toEqual({ status: "closed" });
 	});
