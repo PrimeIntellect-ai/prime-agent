@@ -3120,6 +3120,45 @@ describe("AgentSession rlm recursion", () => {
 		expect(root.cancelRlmChildRun(childId)).toBe(false);
 	});
 
+	it("stops live descendants when the targeted child run already settled", async () => {
+		const root = createSession({
+			streamFn: (_model, context) => {
+				const stream = createAssistantMessageEventStream();
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistantMessage(`child answer: ${userText(context)}`),
+				});
+				return stream;
+			},
+		});
+
+		await root.runRlmChild("quick shard");
+		const runs = (root as unknown as InspectableRlmSession)._activeRlmChildRuns;
+		await waitFor(() => runs.size === 0);
+		const retained = (root as unknown as { _rlmChildSessions: Map<string, { session: AgentSession }> })
+			._rlmChildSessions;
+		expect(retained.size).toBe(1);
+		const [childId, { session: childSession }] = [...retained.entries()][0]!;
+		const abort = vi.fn();
+		const grandchild = {
+			id: "grandchild-1",
+			status: "running",
+			settled: false,
+			abort,
+			publication: { reject: vi.fn() },
+			emitUpdate: vi.fn(),
+		};
+		(childSession as unknown as { _activeRlmChildRuns: Map<string, typeof grandchild> })._activeRlmChildRuns.set(
+			"grandchild-1",
+			grandchild,
+		);
+
+		expect(root.cancelRlmChildRun(childId)).toBe(true);
+		expect(grandchild.status).toBe("cancelled");
+		expect(abort).toHaveBeenCalled();
+	});
+
 	it("reports a shared running outcome to concurrent inactive-delete callers", async () => {
 		let runningChecks = 0;
 		const isExternallyRunning = () => ++runningChecks >= 5;
