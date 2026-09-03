@@ -174,6 +174,19 @@ describe("createRelayApplicationMultiplexer factory", () => {
 		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
 	});
 
+	it("rejects a Proxy outer input without invoking reflection traps", async () => {
+		let traps = 0;
+		const outer = new Proxy(makeFactoryInput(), {
+			ownKeys: () => {
+				traps += 1;
+				throw new Error("must not run");
+			},
+		});
+		const result = await createRelayApplicationMultiplexer(outer);
+		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
+		expect(traps).toBe(0);
+	});
+
 	it("reports CLOSE_UNCERTAIN for a Proxy capability", async () => {
 		const proxy = new Proxy(makeCapability(), {});
 		const input = makeFactoryInput({ command: proxy });

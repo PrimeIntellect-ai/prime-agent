@@ -607,6 +607,13 @@ function captureAllOwners(raw: unknown): AllOwnersResult {
 	if (typeof raw !== "object" || raw === null) {
 		return { owners, anyAlias, anyAccessorUncertain };
 	}
+	try {
+		if (types.isProxy(raw)) {
+			return { owners, anyAlias: false, anyAccessorUncertain: true };
+		}
+	} catch {
+		return { owners, anyAlias: false, anyAccessorUncertain: true };
+	}
 
 	let ownDescs: Record<string, PropertyDescriptor>;
 	try {
