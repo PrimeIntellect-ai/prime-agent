@@ -37,6 +37,7 @@ function harness(
 	const wsClosed = deferred<Readonly<{ status: "closed" }>>();
 	const admissionGate = deferred<Readonly<{ status: "admitted" }>>();
 	const upgradeGate = deferred<void>();
+	let onDrop: (() => void) | null = null;
 	let onTcp: ((raw: unknown) => void) | null = null;
 	let onUpgrade: ((request: unknown, head: unknown) => void) | null = null;
 	let wsCloseCalls = 0;
@@ -101,7 +102,9 @@ function harness(
 		closed: serverClosed.promise,
 		listen: async (raw: unknown) => {
 			log.push("listen");
-			onTcp = (raw as { onTcp: (value: unknown) => void }).onTcp;
+			const request = raw as { onDrop: () => void; onTcp: (value: unknown) => void };
+			onDrop = request.onDrop;
+			onTcp = request.onTcp;
 			return Object.freeze({ status: "listening", host: "127.0.0.1", port: 34567 });
 		},
 		close: async () => {
@@ -139,6 +142,10 @@ function harness(
 		setup,
 		admissionGate,
 		upgradeGate,
+		emitDrop: () => {
+			if (!onDrop) throw new Error("not listening");
+			onDrop();
+		},
 		emitTcp: () => {
 			if (!onTcp) throw new Error("not listening");
 			onTcp(socket);
@@ -345,6 +352,18 @@ describe("sandbox relay listener ownership core", () => {
 		await Promise.resolve();
 		await started.listener.close();
 		expect(h.counts().wsCloseCalls).toBe(1);
+	});
+
+	it("fails closed when the production server reports a dropped excess TCP connection", async () => {
+		const auth = authFixture();
+		const h = harness();
+		const started = await startSandboxRelayListenerCore(input(auth.grant, h));
+		expect(started.ok).toBe(true);
+		if (!started.ok) return;
+		h.emitTcp();
+		h.emitDrop();
+		expect(await started.listener.connected).toEqual({ ok: false, code: "DUPLICATE_CONNECTION" });
+		expect(await started.listener.close()).toEqual({ ok: true });
 	});
 
 	it("drains a WebSocket close task that appears after close starts during upgrade", async () => {

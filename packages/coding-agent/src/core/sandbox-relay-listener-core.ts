@@ -851,7 +851,11 @@ class ListenerCoreImplementation {
 
 	async listen(): Promise<Readonly<{ ok: true; port: number }> | Readonly<{ ok: false }>> {
 		this.phase = "listening";
-		const request = Object.freeze({ host: LOOPBACK_HOST, onTcp: (raw: unknown) => this.onTcp(raw) });
+		const request = Object.freeze({
+			host: LOOPBACK_HOST,
+			onDrop: () => this.beginFailure("DUPLICATE_CONNECTION"),
+			onTcp: (raw: unknown) => this.onTcp(raw),
+		});
 		const observed = await invoke(this.input.server.listen, [request], this.input.timeouts.upgradeMs);
 		if (observed.status !== "fulfilled") return Object.freeze({ ok: false as const });
 		const result = exact(observed.value, LISTEN_RESULT_KEYS);
