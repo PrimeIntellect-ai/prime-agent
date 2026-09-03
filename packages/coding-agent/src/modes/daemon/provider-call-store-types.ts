@@ -167,6 +167,27 @@ export interface ProviderCallReplayPage {
 }
 
 // ===========================================================================
+// ProviderCallUndeliveredRecord -- secret-free summary for non-delivered calls
+// ===========================================================================
+
+export interface ProviderCallUndeliveredRecord {
+	readonly callId: string;
+	readonly state: "journaled" | "started" | "streaming" | "terminal";
+	readonly requestDigest: string;
+	readonly firstJournalSequence: number;
+	readonly chunkCount: number;
+}
+
+// ===========================================================================
+// ProviderCallUndeliveredPage -- bounded page of undelivered summaries
+// ===========================================================================
+
+export interface ProviderCallUndeliveredPage {
+	readonly records: readonly ProviderCallUndeliveredRecord[];
+	readonly nextCursor: number | null;
+}
+
+// ===========================================================================
 // ProviderCallStoreStatus
 // ===========================================================================
 

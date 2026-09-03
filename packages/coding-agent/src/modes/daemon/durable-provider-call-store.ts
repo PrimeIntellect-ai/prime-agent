@@ -47,6 +47,8 @@ import type {
 	ProviderCallState,
 	ProviderCallStoreStatus,
 	ProviderCallTerminalReceipt,
+	ProviderCallUndeliveredPage,
+	ProviderCallUndeliveredRecord,
 } from "./provider-call-store-types.js";
 import { decodeProviderProxyFrame, isValidDigest } from "./remote-host-frame-codec.js";
 
@@ -337,6 +339,10 @@ export interface ProviderCallStoreCapability {
 		maxCount: number,
 	) => Promise<StoreResult<ProviderCallReplayPage>>;
 	readonly replayCallRecords: (callId: string) => Promise<StoreResult<readonly ProviderCallRecordV1[]>>;
+	readonly replayUndelivered: (
+		cursor: number | null,
+		maxCount: number,
+	) => Promise<StoreResult<ProviderCallUndeliveredPage>>;
 	readonly close: () => Promise<StoreResult<void>>;
 	readonly status: () => Promise<StoreResult<ProviderCallStoreStatus>>;
 }
@@ -1241,6 +1247,16 @@ class DurableProviderCallStore {
 		return await this._serialized(async () => this._replayCallRecordsOp(callId));
 	}
 
+	async _replayUndeliveredImpl(
+		cursor: number | null,
+		maxCount: number,
+	): Promise<StoreResult<ProviderCallUndeliveredPage>> {
+		if (this._insidePublish) {
+			return errValue("POISONED");
+		}
+		return await this._serialized(async () => this._replayUndeliveredOp(cursor, maxCount));
+	}
+
 	_closeImpl(): Promise<StoreResult<void>> {
 		if (this._closeP !== null) return this._closeP;
 		this._closed = true;
@@ -2100,6 +2116,88 @@ class DurableProviderCallStore {
 		}
 	}
 
+	async _replayUndeliveredOp(
+		cursor: number | null,
+		maxCount: number,
+	): Promise<StoreResult<ProviderCallUndeliveredPage>> {
+		// Validate cursor: null (start from beginning) or non-negative safe integer
+		if (cursor !== null && (!Number.isSafeInteger(cursor) || cursor < 0)) return publicArgValue();
+		// Validate maxCount: 1..64
+		if (!Number.isSafeInteger(maxCount) || maxCount < 1 || maxCount > 64) return publicArgValue();
+
+		const allCallIds = this._index.allCallIds;
+		const startIdx = cursor !== null ? cursor : 0;
+		if (startIdx > allCallIds.length) return publicArgValue();
+
+		const undeliveredRecords: Array<{
+			callId: string;
+			state: "journaled" | "started" | "streaming" | "terminal";
+			requestDigest: string;
+			firstJournalSequence: number;
+			chunkCount: number;
+		}> = [];
+
+		let idx = startIdx;
+
+		// Scan in deterministic allCallIds (original first-journal-sequence) order
+		while (idx < allCallIds.length && undeliveredRecords.length < maxCount) {
+			const callId = allCallIds[idx];
+			const entry = this._index.byCallId.get(callId);
+			if (entry === undefined) {
+				return errValue("RECOVERY_FAILED");
+			}
+			const computedState = entry.computedState;
+
+			// Skip delivered calls
+			if (computedState !== "delivered") {
+				let undeliveredState: "journaled" | "started" | "streaming" | "terminal";
+				if (computedState === "journaled") {
+					undeliveredState = "journaled";
+				} else if (computedState === "started") {
+					undeliveredState = "started";
+				} else if (computedState === "streaming") {
+					undeliveredState = "streaming";
+				} else if (computedState === "terminal") {
+					undeliveredState = "terminal";
+				} else {
+					// delivered — skipped above, unreachable
+					idx += 1;
+					continue;
+				}
+
+				const requestDigest = entry.requestDigest ?? entry.journaledRecord.requestDigest;
+				if (typeof requestDigest !== "string") return errValue("RECOVERY_FAILED");
+
+				undeliveredRecords.push({
+					callId: entry.callId,
+					state: undeliveredState,
+					requestDigest,
+					firstJournalSequence: entry.journaledRecord.journalSeq,
+					chunkCount: entry.chunkRecords.length,
+				});
+			}
+
+			idx += 1;
+		}
+
+		// nextCursor: null when exhausted, otherwise the next index to scan
+		const nextCursor: number | null = idx < allCallIds.length ? idx : null;
+
+		const frozenRecords: readonly ProviderCallUndeliveredRecord[] = Object.freeze(
+			undeliveredRecords.map((r) =>
+				Object.freeze({
+					callId: r.callId,
+					state: r.state,
+					requestDigest: r.requestDigest,
+					firstJournalSequence: r.firstJournalSequence,
+					chunkCount: r.chunkCount,
+				}),
+			),
+		);
+
+		return okValue(Object.freeze({ records: frozenRecords, nextCursor }));
+	}
+
 	// =========================================================================
 	// Internal helpers
 	// =========================================================================
@@ -2585,6 +2683,9 @@ function buildCapability(store: DurableProviderCallStore): ProviderCallStoreCapa
 		},
 		replayCallRecords(callId: string) {
 			return store._replayCallRecordsImpl(callId);
+		},
+		replayUndelivered(cursor: number | null, maxCount: number) {
+			return store._replayUndeliveredImpl(cursor, maxCount);
 		},
 		close() {
 			if (store._internalGetInsidePublish()) {

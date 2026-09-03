@@ -2061,4 +2061,378 @@ describe("createDurableProviderCallStore", () => {
 			});
 		});
 	});
+
+	describe("replayUndelivered", () => {
+		it("returns INVALID_ARGUMENT for maxCount > 64", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const r = await store.replayUndelivered(null, 65);
+			expect(r.ok).toBe(false);
+			if (!r.ok) {
+				expect(r.error.code).toBe("INVALID_ARGUMENT");
+			}
+			await store.close();
+		});
+
+		it("returns INVALID_ARGUMENT for maxCount < 1", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const r = await store.replayUndelivered(null, 0);
+			expect(r.ok).toBe(false);
+			if (!r.ok) {
+				expect(r.error.code).toBe("INVALID_ARGUMENT");
+			}
+			await store.close();
+		});
+
+		it("returns INVALID_ARGUMENT for negative cursor", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const r = await store.replayUndelivered(-1, 1);
+			expect(r.ok).toBe(false);
+			if (!r.ok) {
+				expect(r.error.code).toBe("INVALID_ARGUMENT");
+			}
+			await store.close();
+		});
+
+		it("returns INVALID_ARGUMENT for cursor past end", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const r = await store.replayUndelivered(9999, 1);
+			expect(r.ok).toBe(false);
+			if (!r.ok) {
+				expect(r.error.code).toBe("INVALID_ARGUMENT");
+			}
+			await store.close();
+		});
+
+		it("returns INVALID_ARGUMENT for non-integer cursor", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const r = await store.replayUndelivered(1.5, 1);
+			expect(r.ok).toBe(false);
+			if (!r.ok) {
+				expect(r.error.code).toBe("INVALID_ARGUMENT");
+			}
+			await store.close();
+		});
+
+		it("excludes delivered calls", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const ja = buildJournaledRecord("call-a", 1);
+			await store.journalProviderCall(ja);
+			const jb = buildJournaledRecord("call-b", 2);
+			await store.journalProviderCall(jb);
+			await store.journalStarted(
+				"call-b",
+				jb.requestDigest,
+				canonicalReceiptForRecord(jb),
+				"2025-01-15T10:30:01.000Z",
+			);
+			const cb = buildChunkRecord("call-b", 4, 0);
+			await store.journalChunk(cb);
+			const tb = buildTerminalRecord("call-b", 5, "normal", 1);
+			await store.journalTerminal(tb);
+			await store.markDelivered(
+				"call-b",
+				"env-b",
+				"b".repeat(64),
+				canonicalReceiptForRecord(tb),
+				"2025-01-15T10:30:04.000Z",
+			);
+			const r = await store.replayUndelivered(null, 64);
+			expect(r.ok).toBe(true);
+			if (!r.ok) return;
+			expect(r.value.records.length).toBe(1);
+			expect(r.value.records[0].callId).toBe("call-a");
+			expect(r.value.records[0].state).toBe("journaled");
+			expect("requestBytes" in r.value.records[0]).toBe(false);
+			expect(r.value.records[0].firstJournalSequence).toBe(1);
+			await store.close();
+		});
+
+		it("includes journaled calls", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const jr = buildJournaledRecord("call-journaled", 1);
+			await store.journalProviderCall(jr);
+			const r = await store.replayUndelivered(null, 64);
+			expect(r.ok).toBe(true);
+			if (!r.ok) return;
+			expect(r.value.records.length).toBe(1);
+			expect(r.value.records[0].callId).toBe("call-journaled");
+			expect(r.value.records[0].state).toBe("journaled");
+			expect(r.value.records[0].chunkCount).toBe(0);
+			expect(Object.isFrozen(r.value.records[0])).toBe(true);
+			await store.close();
+		});
+
+		it("includes started calls", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const jr = buildJournaledRecord("call-started", 1);
+			await store.journalProviderCall(jr);
+			await store.journalStarted(
+				"call-started",
+				jr.requestDigest,
+				canonicalReceiptForRecord(jr),
+				"2025-01-15T10:30:01.000Z",
+			);
+			const r = await store.replayUndelivered(null, 64);
+			expect(r.ok).toBe(true);
+			if (!r.ok) return;
+			expect(r.value.records.length).toBe(1);
+			expect(r.value.records[0].callId).toBe("call-started");
+			expect(r.value.records[0].state).toBe("started");
+			await store.close();
+		});
+
+		it("includes streaming calls", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const jr = buildJournaledRecord("call-streaming", 1);
+			await store.journalProviderCall(jr);
+			await store.journalStarted(
+				"call-streaming",
+				jr.requestDigest,
+				canonicalReceiptForRecord(jr),
+				"2025-01-15T10:30:01.000Z",
+			);
+			const cr = buildChunkRecord("call-streaming", 3, 0);
+			await store.journalChunk(cr);
+			const r = await store.replayUndelivered(null, 64);
+			expect(r.ok).toBe(true);
+			if (!r.ok) return;
+			expect(r.value.records.length).toBe(1);
+			expect(r.value.records[0].callId).toBe("call-streaming");
+			expect(r.value.records[0].state).toBe("streaming");
+			expect(r.value.records[0].chunkCount).toBe(1);
+			await store.close();
+		});
+
+		it("includes terminal non-delivered calls", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const jr = buildJournaledRecord("call-terminal", 1);
+			await store.journalProviderCall(jr);
+			await store.journalStarted(
+				"call-terminal",
+				jr.requestDigest,
+				canonicalReceiptForRecord(jr),
+				"2025-01-15T10:30:01.000Z",
+			);
+			const tr = buildTerminalRecord("call-terminal", 3, "normal", 0);
+			await store.journalTerminal(tr);
+			const r = await store.replayUndelivered(null, 64);
+			expect(r.ok).toBe(true);
+			if (!r.ok) return;
+			expect(r.value.records.length).toBe(1);
+			expect(r.value.records[0].callId).toBe("call-terminal");
+			expect(r.value.records[0].state).toBe("terminal");
+			await store.close();
+		});
+
+		it("includes recovered interrupted call", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const jr = buildJournaledRecord("call-interrupted", 1);
+			await store.journalProviderCall(jr);
+			await store.journalStarted(
+				"call-interrupted",
+				jr.requestDigest,
+				canonicalReceiptForRecord(jr),
+				"2025-01-15T10:30:01.000Z",
+			);
+			const ir = await store.journalInterrupted("call-interrupted", 0, "2025-01-15T10:30:02.000Z");
+			expect(ir.ok).toBe(true);
+			const r = await store.replayUndelivered(null, 64);
+			expect(r.ok).toBe(true);
+			if (!r.ok) return;
+			expect(r.value.records.length).toBe(1);
+			expect(r.value.records[0].callId).toBe("call-interrupted");
+			expect(r.value.records[0].state).toBe("terminal");
+			expect(Object.isFrozen(r.value.records[0])).toBe(true);
+			expect("requestBytes" in r.value.records[0]).toBe(false);
+			expect("terminalFrameBytes" in r.value.records[0]).toBe(false);
+			await store.close();
+		});
+
+		it("preserves deterministic first-journal-sequence order", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const ja = buildJournaledRecord("call-a", 1);
+			await store.journalProviderCall(ja);
+			const jb = buildJournaledRecord("call-b", 2);
+			await store.journalProviderCall(jb);
+			const jc = buildJournaledRecord("call-c", 3);
+			await store.journalProviderCall(jc);
+			const r = await store.replayUndelivered(null, 64);
+			expect(r.ok).toBe(true);
+			if (!r.ok) return;
+			expect(r.value.records.length).toBe(3);
+			expect(r.value.records[0].callId).toBe("call-a");
+			expect(r.value.records[0].firstJournalSequence).toBe(1);
+			expect(r.value.records[1].callId).toBe("call-b");
+			expect(r.value.records[1].firstJournalSequence).toBe(2);
+			expect(r.value.records[2].callId).toBe("call-c");
+			expect(r.value.records[2].firstJournalSequence).toBe(3);
+			await store.journalStarted(
+				"call-b",
+				jb.requestDigest,
+				canonicalReceiptForRecord(jb),
+				"2025-01-15T10:30:01.000Z",
+			);
+			const cb = buildChunkRecord("call-b", 5, 0);
+			await store.journalChunk(cb);
+			const tb = buildTerminalRecord("call-b", 6, "normal", 1);
+			await store.journalTerminal(tb);
+			await store.markDelivered(
+				"call-b",
+				"env-b",
+				"b".repeat(64),
+				canonicalReceiptForRecord(tb),
+				"2025-01-15T10:30:04.000Z",
+			);
+			const r2 = await store.replayUndelivered(null, 64);
+			expect(r2.ok).toBe(true);
+			if (!r2.ok) return;
+			expect(r2.value.records.length).toBe(2);
+			expect(r2.value.records[0].callId).toBe("call-a");
+			expect(r2.value.records[0].firstJournalSequence).toBe(1);
+			expect(r2.value.records[1].callId).toBe("call-c");
+			expect(r2.value.records[1].firstJournalSequence).toBe(3);
+			await store.close();
+		});
+
+		it("cursor pagination works correctly", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			for (let i = 0; i < 5; i++) {
+				const jr = buildJournaledRecord(`call-${i}`, i + 1);
+				await store.journalProviderCall(jr);
+			}
+			const r1 = await store.replayUndelivered(null, 2);
+			expect(r1.ok).toBe(true);
+			if (!r1.ok) return;
+			expect(r1.value.records.length).toBe(2);
+			expect(r1.value.records[0].callId).toBe("call-0");
+			expect(r1.value.records[1].callId).toBe("call-1");
+			expect(typeof r1.value.nextCursor).toBe("number");
+			const c1 = r1.value.nextCursor as number;
+			const r2 = await store.replayUndelivered(c1, 2);
+			expect(r2.ok).toBe(true);
+			if (!r2.ok) return;
+			expect(r2.value.records.length).toBe(2);
+			expect(r2.value.records[0].callId).toBe("call-2");
+			expect(r2.value.records[1].callId).toBe("call-3");
+			const c2 = r2.value.nextCursor as number;
+			const r3 = await store.replayUndelivered(c2, 2);
+			expect(r3.ok).toBe(true);
+			if (!r3.ok) return;
+			expect(r3.value.records.length).toBe(1);
+			expect(r3.value.records[0].callId).toBe("call-4");
+			expect(r3.value.nextCursor).toBeNull();
+			const r4 = await store.replayUndelivered(5, 2);
+			expect(r4.ok).toBe(true);
+			if (!r4.ok) return;
+			expect(r4.value.records.length).toBe(0);
+			expect(r4.value.nextCursor).toBeNull();
+			await store.close();
+		});
+
+		it("mutation isolation: output deeply frozen", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const jr = buildJournaledRecord("call-mut", 1);
+			await store.journalProviderCall(jr);
+			const r = await store.replayUndelivered(null, 64);
+			expect(r.ok).toBe(true);
+			if (!r.ok) return;
+			expect(r.value.records.length).toBe(1);
+			expect(Object.isFrozen(r.value.records[0])).toBe(true);
+			expect(Object.isFrozen(r.value)).toBe(true);
+			expect(Object.isFrozen(r.value.records)).toBe(true);
+			await store.close();
+		});
+
+		it("close race: replayUndelivered after close returns CLOSED", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			await store.close();
+			const r = await store.replayUndelivered(null, 1);
+			expect(r.ok).toBe(false);
+			if (!r.ok) {
+				expect(r.error.code).toBe("CLOSED");
+			}
+		});
+
+		it("shared Promise FIFO: concurrent calls serialize correctly", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const jr = buildJournaledRecord("call-fifo", 1);
+			await store.journalProviderCall(jr);
+			const p1 = store.replayUndelivered(null, 64);
+			const p2 = store.replayUndelivered(null, 64);
+			const [r1, r2] = await Promise.all([p1, p2]);
+			expect(r1.ok).toBe(true);
+			expect(r2.ok).toBe(true);
+			if (!r1.ok || !r2.ok) return;
+			expect(r1.value.records.length).toBe(1);
+			expect(r2.value.records.length).toBe(1);
+			await store.close();
+		});
+
+		it("no secret fields exposed in output", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const jr = buildJournaledRecord("call-secret", 1);
+			await store.journalProviderCall(jr);
+			await store.journalStarted(
+				"call-secret",
+				jr.requestDigest,
+				canonicalReceiptForRecord(jr),
+				"2025-01-15T10:30:01.000Z",
+			);
+			const cr = buildChunkRecord("call-secret", 3, 0);
+			await store.journalChunk(cr);
+			const tr = buildTerminalRecord("call-secret", 4, "normal", 1);
+			await store.journalTerminal(tr);
+			const r = await store.replayUndelivered(null, 64);
+			expect(r.ok).toBe(true);
+			if (!r.ok) return;
+			expect(r.value.records.length).toBe(1);
+			const rec = r.value.records[0];
+			expect("requestBytes" in rec).toBe(false);
+			expect("chunkFrameBytes" in rec).toBe(false);
+			expect("terminalFrameBytes" in rec).toBe(false);
+			expect("hostId" in rec).toBe(false);
+			expect("generation" in rec).toBe(false);
+			expect("sessionId" in rec).toBe(false);
+			expect("recordedAt" in rec).toBe(false);
+			expect("provider" in rec).toBe(false);
+			expect("model" in rec).toBe(false);
+			expect("messages" in rec).toBe(false);
+			expect("rawRecords" in rec).toBe(false);
+			expect("receipt" in rec).toBe(false);
+			expect(rec.callId).toBe("call-secret");
+			expect(rec.state).toBe("terminal");
+			expect(rec.requestDigest).toBe(jr.requestDigest);
+			expect(rec.firstJournalSequence).toBe(1);
+			expect(rec.chunkCount).toBe(1);
+			await store.close();
+		});
+
+		it("empty store returns empty page with null cursor", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			const r = await store.replayUndelivered(null, 64);
+			expect(r.ok).toBe(true);
+			if (!r.ok) return;
+			expect(r.value.records.length).toBe(0);
+			expect(r.value.nextCursor).toBeNull();
+			await store.close();
+		});
+	});
 });
