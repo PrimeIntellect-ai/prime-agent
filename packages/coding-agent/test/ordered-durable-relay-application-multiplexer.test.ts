@@ -1017,7 +1017,7 @@ describe("ownership-first close acquisition", () => {
 		expect(closeCalled).toBe(true);
 	});
 
-	it("captures close owner when capability has symbols", async () => {
+	it("captures close owner when capability has symbol data descriptors — provable data, returns INVALID_ARGUMENT", async () => {
 		let closeCalled = false;
 		const inner: Record<string | symbol, unknown> = {
 			apply: async () => ({ status: "applied" }),
@@ -1027,11 +1027,12 @@ describe("ownership-first close acquisition", () => {
 			},
 		};
 		inner[Symbol("extra")] = true;
-		// Pass inner directly — makeFactoryInput accepts Record<string, unknown>,
-		// and inner's symbol keys don't affect the string-key contract.
-		const input = makeFactoryInput({ command: Object.assign(Object.create(null), inner) });
+		// Use Object.prototype prototype so rawDescriptors/exact can inspect shape.
+		// The symbol data descriptor is provable data — extra keys cause
+		// exact() to fail with INVALID_ARGUMENT, not CLOSE_UNCERTAIN.
+		const input = makeFactoryInput({ command: Object.freeze(Object.assign(Object.create(Object.prototype), inner)) });
 		const result = await createRelayApplicationMultiplexer(input);
-		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
+		expect(result).toEqual({ ok: false, error: { code: "INVALID_ARGUMENT" } });
 		expect(closeCalled).toBe(true);
 	});
 });
@@ -1041,18 +1042,20 @@ describe("ownership-first close acquisition", () => {
 // ===========================================================================
 
 describe("preliminary parent extraction with symbols", () => {
-	it("captures slot values and marks uncertainty when parent has symbols", async () => {
+	it("captures slot values and marks INVALID_ARGUMENT when parent has symbol data descriptors", async () => {
 		const caps = makeFactoryInput();
 		const outer: Record<string | symbol, unknown> = {};
 		for (const name of Object.getOwnPropertyNames(caps)) {
 			outer[name] = ownValue(caps, name);
 		}
 		outer[Symbol("extra")] = true;
+		// Symbol data descriptor with primitive value is provably invalid shape,
+		// not uncertain — returns INVALID_ARGUMENT.
 		const result = await createRelayApplicationMultiplexer(outer);
-		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
+		expect(result).toEqual({ ok: false, error: { code: "INVALID_ARGUMENT" } });
 	});
 
-	it("captures slot values despite symbol, closes owners", async () => {
+	it("captures slot values despite symbol data descriptor, closes owners, returns INVALID_ARGUMENT", async () => {
 		let commandClosed = false;
 		const caps = makeFactoryInput({
 			command: Object.freeze({
@@ -1068,8 +1071,9 @@ describe("preliminary parent extraction with symbols", () => {
 			outer[name] = ownValue(caps, name);
 		}
 		outer[Symbol("extra")] = true;
+		// Symbol data descriptor with primitive value — provably invalid, not uncertain.
 		const result = await createRelayApplicationMultiplexer(outer);
-		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
+		expect(result).toEqual({ ok: false, error: { code: "INVALID_ARGUMENT" } });
 		expect(commandClosed).toBe(true);
 	});
 });
@@ -1484,30 +1488,40 @@ describe("hostile — alias cleanup closes each raw object/close fn once", () =>
 		expect(closeCount).toBe(1);
 	});
 
-	it("closes shared raw close function only once when slots share closeFn by reference", async () => {
-		let closeCount = 0;
-		const closeFn = async (): Promise<unknown> => {
-			closeCount++;
+	it("invokes shared close function twice — once per distinct owner with own this", async () => {
+		const thisValues: unknown[] = [];
+		const closeFn = async function (this: unknown): Promise<unknown> {
+			thisValues.push(this);
 			return Object.freeze({ status: "closed" });
 		};
 
-		const cmd = makeCapability({ close: closeFn });
-		const evt = makeCapability({ close: closeFn });
+		const cmd = makeCapability({ close: closeFn as () => Promise<unknown> });
+		const evt = makeCapability({ close: closeFn as () => Promise<unknown> });
 
-		// Different objects but same closeFn — alias: rejection expected
+		// Different owner objects share the same close function reference.
+		// Per spec: the same close on two distinct owners does NOT prove one
+		// physical owner; each must be invoked with its own `this`.
+		// Trigger factory failure by missing providerProxy apply:
 		const factory: Record<string, unknown> = {
 			command: cmd,
 			event: evt,
 			agentMessage: makeCapability(),
-			providerProxy: makeCapability(),
+			providerProxy: Object.freeze({
+				close: async () => Object.freeze({ status: "closed" }),
+			}),
 		};
 		const result = await createRelayApplicationMultiplexer(factory);
 		expect(result.ok).toBe(false);
 		if (result.ok) return;
 		expect(result.error.code).toBe("INVALID_ARGUMENT");
 
-		// closeFn called exactly once (not twice)
-		expect(closeCount).toBe(1);
+		// closeFn invoked twice — once per distinct owner, each with own `this`
+		expect(thisValues.length).toBe(2);
+		// Reverse close order: pprox (closed first), then amsg, evt, cmd
+		// Both evt and cmd share closeFn, but evt's close is called first
+		// (discovered after cmd, so closed before cmd in reverse order)
+		expect(thisValues[0]).toBe(evt);
+		expect(thisValues[1]).toBe(cmd);
 	});
 
 	it("closes three distinct capabilities in reverse order", async () => {
@@ -1543,9 +1557,9 @@ describe("hostile — alias cleanup closes each raw object/close fn once", () =>
 });
 
 describe("hostile — close uncertainty dominates", () => {
-	it("returns CLOSE_UNCERTAIN when factory has symbols and validation fails", async () => {
+	it("returns INVALID_ARGUMENT when factory has symbol data descriptors and validation fails", async () => {
 		const factoryBase = makeFactoryInput();
-		// Build factory with symbol key — no cast needed since we use Record<string | symbol, unknown>
+		// Build factory with symbol key
 		const factory: Record<string | symbol, unknown> = {};
 		for (const name of Object.getOwnPropertyNames(factoryBase)) {
 			factory[name] = ownValue(factoryBase, name);
@@ -1556,8 +1570,9 @@ describe("hostile — close uncertainty dominates", () => {
 		expect(result.ok).toBe(false);
 		if (result.ok) return;
 
-		// Symbols cause ownership uncertainty → CLOSE_UNCERTAIN, not INVALID_ARGUMENT
-		expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+		// Symbol data descriptor with primitive value is provable extra key →
+		// INVALID_ARGUMENT, not CLOSE_UNCERTAIN.
+		expect(result.error.code).toBe("INVALID_ARGUMENT");
 	});
 
 	it("returns CLOSE_UNCERTAIN when slot has capability uncertainty (proxy)", async () => {
@@ -1658,7 +1673,7 @@ describe("cross-instance apply", () => {
 // ===========================================================================
 
 describe("symbol factory key owner capture", () => {
-	it("captures close owner from symbol-keyed factory value", async () => {
+	it("captures close owner from symbol-keyed factory data value and returns INVALID_ARGUMENT", async () => {
 		let symbolClosed = false;
 		const symbolOwned = makeCapability({
 			close: async () => {
@@ -1668,9 +1683,8 @@ describe("symbol factory key owner capture", () => {
 		});
 
 		// Build factory with a symbol-keyed data value that has a close owner.
-		// Symbols on the factory cause rawDescriptors to reject the shape,
-		// returning CLOSE_UNCERTAIN, but the symbol-keyed close is still captured
-		// and called during rejection cleanup.
+		// The symbol data descriptor is provably readable — the extra key makes
+		// the shape invalid (INVALID_ARGUMENT), not uncertain.
 		const factory: Record<string | symbol, unknown> = {
 			command: makeCapability(),
 			event: makeCapability(),
@@ -1682,7 +1696,7 @@ describe("symbol factory key owner capture", () => {
 		const result = await createRelayApplicationMultiplexer(factory);
 		expect(result.ok).toBe(false);
 		if (result.ok) return;
-		expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+		expect(result.error.code).toBe("INVALID_ARGUMENT");
 
 		// The symbol-keyed owner's close is captured and called in cleanup
 		expect(symbolClosed).toBe(true);
@@ -1761,5 +1775,375 @@ describe("Proxy close uncertainty", () => {
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		await result.application.close();
+	});
+});
+
+// ===========================================================================
+// Hostile — null/primitive factory → INVALID_ARGUMENT
+// ===========================================================================
+
+describe("hostile — null/primitive factory returns INVALID_ARGUMENT", () => {
+	it("rejects null factory input with INVALID_ARGUMENT", async () => {
+		expect(await createRelayApplicationMultiplexer(null)).toEqual({
+			ok: false,
+			error: { code: "INVALID_ARGUMENT" },
+		});
+	});
+
+	it("rejects undefined factory input with INVALID_ARGUMENT", async () => {
+		expect(await createRelayApplicationMultiplexer(undefined)).toEqual({
+			ok: false,
+			error: { code: "INVALID_ARGUMENT" },
+		});
+	});
+
+	it("rejects number factory input with INVALID_ARGUMENT", async () => {
+		expect(await createRelayApplicationMultiplexer(42)).toEqual({
+			ok: false,
+			error: { code: "INVALID_ARGUMENT" },
+		});
+	});
+
+	it("rejects string factory input with INVALID_ARGUMENT", async () => {
+		expect(await createRelayApplicationMultiplexer("bad")).toEqual({
+			ok: false,
+			error: { code: "INVALID_ARGUMENT" },
+		});
+	});
+
+	it("rejects boolean factory input with INVALID_ARGUMENT", async () => {
+		expect(await createRelayApplicationMultiplexer(true)).toEqual({
+			ok: false,
+			error: { code: "INVALID_ARGUMENT" },
+		});
+	});
+});
+
+// ===========================================================================
+// Hostile — symbol data vs accessor classification at both levels
+// ===========================================================================
+
+describe("hostile — symbol data vs accessor classification", () => {
+	it("symbol data descriptor on factory is provably invalid (INVALID_ARGUMENT)", async () => {
+		const factory: Record<string | symbol, unknown> = {
+			command: makeCapability(),
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		factory[Symbol("data")] = "plain value";
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result).toEqual({ ok: false, error: { code: "INVALID_ARGUMENT" } });
+	});
+
+	it("symbol accessor descriptor on factory is CLOSE_UNCERTAIN", async () => {
+		const factory: Record<string | symbol, unknown> = {
+			command: makeCapability(),
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		let accessorCalled = false;
+		Object.defineProperty(factory, Symbol("accessor"), {
+			get: () => {
+				accessorCalled = true;
+				return "hidden";
+			},
+			enumerable: false,
+			configurable: true,
+		});
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
+		// Accessor is never invoked
+		expect(accessorCalled).toBe(false);
+	});
+
+	it("symbol Proxy data value on factory is CLOSE_UNCERTAIN", async () => {
+		const factory: Record<string | symbol, unknown> = {
+			command: makeCapability(),
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		factory[Symbol("proxyVal")] = new Proxy({}, {});
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
+	});
+
+	it("symbol data descriptor on capability is provably invalid (INVALID_ARGUMENT)", async () => {
+		let closeCalled = false;
+		const inner: Record<string | symbol, unknown> = {
+			apply: async () => Object.freeze({ status: "applied" }),
+			close: async () => {
+				closeCalled = true;
+				return Object.freeze({ status: "closed" });
+			},
+		};
+		// Add a symbol data descriptor to the capability object BEFORE freezing
+		const withSymbol = Object.assign(Object.create(Object.prototype), inner);
+		Object.defineProperty(withSymbol, Symbol("data"), {
+			value: "extra",
+			enumerable: false,
+		});
+		Object.freeze(withSymbol);
+		const factory: Record<string, unknown> = {
+			command: withSymbol,
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result).toEqual({ ok: false, error: { code: "INVALID_ARGUMENT" } });
+		expect(closeCalled).toBe(true);
+	});
+
+	it("symbol accessor descriptor on capability is CLOSE_UNCERTAIN", async () => {
+		const inner: Record<string, unknown> = {
+			apply: async () => Object.freeze({ status: "applied" }),
+			close: async () => Object.freeze({ status: "closed" }),
+		};
+		const sym = Symbol("accessor");
+		Object.defineProperty(inner, sym, {
+			get: () => "hidden",
+			enumerable: false,
+			configurable: true,
+		});
+		const factory: Record<string, unknown> = {
+			command: Object.freeze(inner),
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
+	});
+});
+
+// ===========================================================================
+// Hostile — same close function on two distinct objects
+// ===========================================================================
+
+describe("hostile — same close function on distinct owners", () => {
+	it("two objects sharing one close fn: each invoked with own this in reverse order", async () => {
+		const thisValues: unknown[] = [];
+		const sharedClose = async function (this: unknown): Promise<unknown> {
+			thisValues.push(this);
+			return Object.freeze({ status: "closed" });
+		};
+
+		const own1 = makeCapability({ close: sharedClose as () => Promise<unknown> });
+		const own2 = makeCapability({ close: sharedClose as () => Promise<unknown> });
+
+		const factory: Record<string, unknown> = {
+			command: own1,
+			event: own2,
+			agentMessage: makeCapability(),
+			// Missing apply on providerProxy triggers factory failure
+			providerProxy: Object.freeze({
+				close: async () => Object.freeze({ status: "closed" }),
+			}),
+		};
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.code).toBe("INVALID_ARGUMENT");
+
+		// Both distinct owners shared the same close fn — each invoked with own this
+		expect(thisValues.length).toBe(2);
+		// Reverse close order: pprox (index 3), amsg (2), own2/evt (1), own1/cmd (0)
+		expect(thisValues[0]).toBe(own2);
+		expect(thisValues[1]).toBe(own1);
+	});
+
+	it("same close fn on three distinct objects: all three invoked", async () => {
+		const callOrder: number[] = [];
+		const sharedClose = async function (this: unknown): Promise<unknown> {
+			callOrder.push(this === obj1 ? 1 : this === obj2 ? 2 : 3);
+			return Object.freeze({ status: "closed" });
+		};
+
+		const obj1 = makeCapability({ close: sharedClose as () => Promise<unknown> });
+		const obj2 = makeCapability({ close: sharedClose as () => Promise<unknown> });
+		const obj3 = makeCapability({ close: sharedClose as () => Promise<unknown> });
+
+		const factory: Record<string, unknown> = {
+			command: obj1,
+			event: obj2,
+			agentMessage: obj3,
+			providerProxy: Object.freeze({
+				close: async () => Object.freeze({ status: "closed" }),
+			}),
+		};
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+
+		// All three distinct owners called in reverse discovery order
+		expect(callOrder).toEqual([3, 2, 1]);
+	});
+});
+
+// ===========================================================================
+// Hostile — raw object alias is rejected, closed once
+// ===========================================================================
+
+describe("hostile — raw object alias", () => {
+	it("same raw object in two slots: alias rejected, closed once", async () => {
+		let closeCount = 0;
+		const shared = makeCapability({
+			close: async () => {
+				closeCount++;
+				return Object.freeze({ status: "closed" });
+			},
+		});
+
+		const factory: Record<string, unknown> = {
+			command: shared,
+			event: shared,
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result).toEqual({ ok: false, error: { code: "INVALID_ARGUMENT" } });
+		expect(closeCount).toBe(1);
+	});
+
+	it("three slots pointing to same raw object: closed once, alias rejected", async () => {
+		let closeCount = 0;
+		const shared = makeCapability({
+			close: async () => {
+				closeCount++;
+				return Object.freeze({ status: "closed" });
+			},
+		});
+
+		const factory: Record<string, unknown> = {
+			command: shared,
+			event: shared,
+			agentMessage: shared,
+			providerProxy: makeCapability(),
+		};
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result).toEqual({ ok: false, error: { code: "INVALID_ARGUMENT" } });
+		expect(closeCount).toBe(1);
+	});
+});
+
+// ===========================================================================
+// Hostile — hidden owner slot discovery on capabilities
+// ===========================================================================
+
+describe("hostile — hidden owner slot discovery on capabilities", () => {
+	it("captures extra data owner field on a capability on factory failure path", async () => {
+		let extraClosed = false;
+		const extraOwner: Record<string, unknown> = Object.freeze({
+			apply: async () => Object.freeze({ status: "applied" }),
+			close: async () => {
+				extraClosed = true;
+				return Object.freeze({ status: "closed" });
+			},
+		});
+
+		// Capability with an extra property that is itself a close-owning object.
+		// Extra key on capability makes exact({apply,close}) fail — factory fails
+		// with INVALID_ARGUMENT, but the extra owner and capability close are still
+		// captured and called during rejection cleanup.
+		const cmdCap: Record<string, unknown> = Object.freeze({
+			apply: async () => Object.freeze({ status: "applied" }),
+			close: async () => Object.freeze({ status: "closed" }),
+			extraProc: extraOwner,
+		});
+
+		const factory: Record<string, unknown> = {
+			command: cmdCap,
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.code).toBe("INVALID_ARGUMENT");
+
+		// The extra owner on the capability should have its close captured and called
+		expect(extraClosed).toBe(true);
+	});
+
+	it("captures extra data owner on failure path", async () => {
+		let extraClosed = false;
+		const extraOwner: Record<string, unknown> = Object.freeze({
+			close: async () => {
+				extraClosed = true;
+				return Object.freeze({ status: "closed" });
+			},
+		});
+
+		const cmdCap: Record<string, unknown> = Object.freeze({
+			apply: async () => Object.freeze({ status: "applied" }),
+			close: async () => Object.freeze({ status: "closed" }),
+			extraProc: extraOwner,
+		});
+
+		// Missing providerProxy apply to trigger failure
+		const factory: Record<string, unknown> = {
+			command: cmdCap,
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: Object.freeze({
+				close: async () => Object.freeze({ status: "closed" }),
+			}),
+		};
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+
+		// Extra owner on capability captured and closed during failure cleanup
+		expect(extraClosed).toBe(true);
+	});
+});
+
+// ===========================================================================
+// Hostile — symbol-keyed hidden owners on capability captured
+// ===========================================================================
+
+describe("hostile — symbol-keyed hidden owners on capability", () => {
+	it("captures symbol-keyed data owner on capability on factory failure path", async () => {
+		let cmdClosed = false;
+		let symClosed = false;
+		const symOwner: Record<string, unknown> = Object.freeze({
+			close: async () => {
+				symClosed = true;
+				return Object.freeze({ status: "closed" });
+			},
+		});
+
+		const cmdCapBase: Record<string | symbol, unknown> = {
+			apply: async () => Object.freeze({ status: "applied" }),
+			close: async () => {
+				cmdClosed = true;
+				return Object.freeze({ status: "closed" });
+			},
+		};
+		cmdCapBase[Symbol("hiddenOwner")] = symOwner;
+
+		// Build with Object.prototype so captureOwnedClose works
+		const cmdCap = Object.assign(Object.create(Object.prototype), cmdCapBase);
+
+		const factory: Record<string, unknown> = {
+			command: cmdCap,
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		// Capability has Symbol keys → rawDescriptors returns null → exact returns null
+		// → validateCapability fails → factory fails INVALID_ARGUMENT (no total uncertainty).
+		expect(result.error.code).toBe("INVALID_ARGUMENT");
+
+		// Both the main capability close and the symbol-keyed sub-owner close are captured
+		expect(cmdClosed).toBe(true);
+		expect(symClosed).toBe(true);
 	});
 });

@@ -222,7 +222,14 @@ function hasCapabilityUncertainty(raw: unknown): boolean {
 		return true;
 	}
 	try {
-		if (Object.getOwnPropertySymbols(raw).length !== 0) return true;
+		// Scan symbol-keyed descriptors — only accessor/Proxy symbols cause uncertainty.
+		// Plain data-descriptor symbol values are provable data.
+		const rawSymbolKeys = Object.getOwnPropertySymbols(raw);
+		for (const sym of rawSymbolKeys) {
+			const d = Object.getOwnPropertyDescriptor(raw, sym);
+			if (!d || !("value" in d)) return true; // accessor → uncertain
+			if (typeof d.value === "object" && d.value !== null && types.isProxy(d.value)) return true;
+		}
 	} catch {
 		return true;
 	}
@@ -354,7 +361,6 @@ function extractPreliminary(raw: unknown): PrelimResult {
 		return uncertain;
 	}
 
-	const hasSymbols = Object.getOwnPropertySymbols(raw).length !== 0;
 	const _ownKeys = Object.getOwnPropertyNames(ownDescriptors);
 
 	const getDataValue = (
@@ -375,9 +381,32 @@ function extractPreliminary(raw: unknown): PrelimResult {
 	const am = getDataValue("agentMessage");
 	const pp = getDataValue("providerProxy");
 
-	// Uncertainty: any hidden/accessor descriptor, OR presence of symbols.
+	// Scan symbol-keyed own descriptors — only accessor/Proxy/reflection symbols cause uncertainty.
+	// A plain data-descriptor symbol value is provable data, not uncertainty.
+	let symbolUncertain = false;
+	const symbolKeys = Object.getOwnPropertySymbols(raw);
+	for (const sym of symbolKeys) {
+		const d = ownDescriptors[sym as unknown as string];
+		if (!d || !("value" in d)) {
+			// Accessor or missing descriptor — uncertainty
+			symbolUncertain = true;
+			break;
+		}
+		// Data descriptor — check if value itself is a Proxy (cannot inspect)
+		if (typeof d.value === "object" && d.value !== null) {
+			try {
+				if (types.isProxy(d.value)) {
+					symbolUncertain = true;
+					break;
+				}
+			} catch {
+				symbolUncertain = true;
+				break;
+			}
+		}
+	}
 	// Extra own value-type keys do NOT cause uncertainty (they're provable data).
-	const ownershipUncertain = cd.uncertain || ev.uncertain || am.uncertain || pp.uncertain || hasSymbols;
+	const ownershipUncertain = cd.uncertain || ev.uncertain || am.uncertain || pp.uncertain || symbolUncertain;
 
 	return Object.freeze({
 		command: cd.value,
@@ -570,7 +599,6 @@ interface AllOwnersResult {
 function captureAllOwners(raw: unknown): AllOwnersResult {
 	const owners: OwnedSlot[] = [];
 	const objectSet = new Set<object>();
-	const closeFnSet = new Set<object>();
 	let anyAlias = false;
 	let anyAccessorUncertain = false;
 
@@ -584,6 +612,66 @@ function captureAllOwners(raw: unknown): AllOwnersResult {
 	} catch {
 		return { owners, anyAlias: false, anyAccessorUncertain: true };
 	}
+
+	// Helper: try to capture a close owner from a value and add to owners list.
+	// Returns true if a new owner was added.
+	const maybeAddOwner = (val: unknown): boolean => {
+		if (typeof val !== "object" || val === null) return false;
+		if (Array.isArray(val)) return false;
+
+		const slot = captureOwnedClose(val);
+		if (!slot) {
+			// Object exists but no close captured — may still have hidden close
+			if (hasCapabilityUncertainty(val)) {
+				anyAccessorUncertain = true;
+			}
+			if (hasProxyCloseFunction(val)) {
+				anyAccessorUncertain = true;
+			}
+			return false;
+		}
+
+		// Dedup by raw object only — the same close function on two distinct
+		// objects does NOT prove one physical owner; each must be invoked with
+		// its own `this` in reverse discovery order.
+		if (objectSet.has(slot.object)) {
+			anyAlias = true;
+			return false;
+		}
+		objectSet.add(slot.object);
+		owners.push(slot);
+		return true;
+	};
+
+	// Helper: scan one bounded level into a parent object's own data-descriptor
+	// properties for nested close owners (extra data owner fields on capabilities).
+	const scanSubOwners = (parent: object): void => {
+		let parentDescs: Record<string, PropertyDescriptor>;
+		try {
+			parentDescs = Object.getOwnPropertyDescriptors(parent);
+		} catch {
+			return;
+		}
+		// Scan string-keyed own properties (one bounded level)
+		for (const subName of Object.getOwnPropertyNames(parentDescs)) {
+			const sd = parentDescs[subName];
+			if (!sd || !("value" in sd)) continue; // accessor — skip
+			if (sd.enumerable === false && subName === "close") continue; // skip the capability's own close
+			if (sd.enumerable === false && subName === "apply") continue; // skip the capability's own apply
+			maybeAddOwner(sd.value);
+		}
+		// Also scan symbol-keyed own data descriptors on sub-objects
+		try {
+			const subSymbols = Object.getOwnPropertySymbols(parent);
+			for (const sym of subSymbols) {
+				const sd = Object.getOwnPropertyDescriptor(parent, sym);
+				if (!sd || !("value" in sd)) continue; // accessor — skip
+				maybeAddOwner(sd.value);
+			}
+		} catch {
+			// reflection failure — skip
+		}
+	};
 
 	for (const name of Object.getOwnPropertyNames(ownDescs)) {
 		const d = ownDescs[name];
@@ -600,58 +688,27 @@ function captureAllOwners(raw: unknown): AllOwnersResult {
 		if (Array.isArray(val)) continue;
 
 		// Try to capture close owner from this value
-		const slot = captureOwnedClose(val);
-		if (!slot) {
-			// Object exists but no close captured — may still have hidden close
-			if (hasCapabilityUncertainty(val)) {
-				anyAccessorUncertain = true;
-			}
-			if (hasProxyCloseFunction(val)) {
-				anyAccessorUncertain = true;
-			}
-			continue;
-		}
+		maybeAddOwner(val);
 
-		// Dedup by raw object AND raw close function (not wrapper)
-		const isObjectAlias = objectSet.has(slot.object);
-		const isFnAlias = closeFnSet.has(slot.closeFn);
-		objectSet.add(slot.object);
-		closeFnSet.add(slot.closeFn);
-
-		if (isObjectAlias || isFnAlias) {
-			anyAlias = true;
-		} else {
-			owners.push(slot);
+		// Also scan one bounded level into the value for extra data owner fields
+		if (typeof val === "object" && val !== null && !Array.isArray(val)) {
+			scanSubOwners(val);
 		}
 	}
 
 	// Also scan symbol-keyed own data descriptors for capability owners.
-	// Symbol presence keeps ownershipUncertain true in extractPreliminary,
-	// but we still capture any provable data-value owners so their close
-	// runs in the correct order on factory failure.
+	// We still capture provable data-value owners so their close runs in the
+	// correct order on factory failure. Uncertainty classification is handled
+	// separately by extractPreliminary.
 	const symbolKeys = Object.getOwnPropertySymbols(raw);
 	for (const sym of symbolKeys) {
 		const d = Object.getOwnPropertyDescriptor(raw, sym);
 		if (!d || !("value" in d)) {
-			// Accessor or missing — uncertainty is already set by extractPreliminary
 			continue;
 		}
-		const val = d.value;
-		if (typeof val !== "object" || val === null) continue;
-		if (Array.isArray(val)) continue;
-
-		const slot = captureOwnedClose(val);
-		if (!slot) continue;
-
-		const isObjectAlias = objectSet.has(slot.object);
-		const isFnAlias = closeFnSet.has(slot.closeFn);
-		objectSet.add(slot.object);
-		closeFnSet.add(slot.closeFn);
-
-		if (isObjectAlias || isFnAlias) {
-			anyAlias = true;
-		} else {
-			owners.push(slot);
+		maybeAddOwner(d.value);
+		if (typeof d.value === "object" && d.value !== null && !Array.isArray(d.value)) {
+			scanSubOwners(d.value);
 		}
 	}
 
@@ -663,6 +720,12 @@ function captureAllOwners(raw: unknown): AllOwnersResult {
 // ===========================================================================
 
 export async function createRelayApplicationMultiplexer(raw: unknown): Promise<CreateMultiplexerResult> {
+	// Phase -1: null/primitive factory inputs have no possible owner and must
+	// return INVALID_ARGUMENT, not CLOSE_UNCERTAIN.
+	if (typeof raw !== "object" || raw === null) {
+		return invalidArgumentError();
+	}
+
 	// Phase 0: capture ALL known owners from the raw factory object before any extraction
 	// This ensures hidden/accessor data slots have their closes captured even when
 	// extractPreliminary cannot confirm the value.
@@ -708,16 +771,15 @@ export async function createRelayApplicationMultiplexer(raw: unknown): Promise<C
 	const providerProxyOwned = captureOwnedClose(prelim.providerProxy);
 
 	// Merge named-slot owners into a deduplicated close list in discovery order.
-	// Dedup by raw closeFn object identity to prevent double-close.
+	// Dedup by raw object only — the same close function on two distinct objects
+	// does NOT prove one physical owner; each must be invoked with its own `this`
+	// in true reverse discovery order.
 	const rawObjectSet = new Set<object>();
-	const rawCloseFnSet = new Set<object>();
 	const mergedCloses: OwnedClose[] = [];
 
 	for (const s of allOwners.owners) {
 		if (rawObjectSet.has(s.object)) continue;
-		if (rawCloseFnSet.has(s.closeFn)) continue;
 		rawObjectSet.add(s.object);
-		rawCloseFnSet.add(s.closeFn);
 		mergedCloses.push(s.close);
 	}
 
@@ -725,26 +787,23 @@ export async function createRelayApplicationMultiplexer(raw: unknown): Promise<C
 	for (const slot of [commandOwned, eventOwned, agentMessageOwned, providerProxyOwned]) {
 		if (slot === null) continue;
 		if (rawObjectSet.has(slot.object)) continue;
-		if (rawCloseFnSet.has(slot.closeFn)) continue;
 		rawObjectSet.add(slot.object);
-		rawCloseFnSet.add(slot.closeFn);
 		mergedCloses.push(slot.close);
 	}
 
 	const allOwned =
 		commandOwned !== null && eventOwned !== null && agentMessageOwned !== null && providerProxyOwned !== null;
 
-	// Detect alias across named slots: same raw object or same raw close function
+	// Detect alias across named slots: same raw object proves alias.
+	// Same close function on two distinct objects does NOT prove one owner.
 	const namedObjectSet = new Set<object>();
-	const namedFnSet = new Set<object>();
 	let hasAlias = false;
 	for (const slot of [commandOwned, eventOwned, agentMessageOwned, providerProxyOwned]) {
 		if (slot === null) continue;
-		if (namedObjectSet.has(slot.object) || namedFnSet.has(slot.closeFn)) {
+		if (namedObjectSet.has(slot.object)) {
 			hasAlias = true;
 		}
 		namedObjectSet.add(slot.object);
-		namedFnSet.add(slot.closeFn);
 	}
 
 	// Also propagate any alias from the all-owners scan
