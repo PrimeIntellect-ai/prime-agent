@@ -21,8 +21,8 @@ const STATUS_KEYS = new Set(["status"]);
 const SEND_TIMEOUT_MS = 30_000;
 const APPLY_TIMEOUT_MS = 30_000;
 const CLOSE_TIMEOUT_MS = 5_000;
-const QUERY_MAX_PAGES = 128;
-const QUERY_MAX_RECORDS = 8_192;
+const QUERY_MAX_PAGES = 313;
+const QUERY_MAX_RECORDS = 20_000;
 
 export type OrderedRelayErrorCode =
 	| "APPLICATION_FAILED"

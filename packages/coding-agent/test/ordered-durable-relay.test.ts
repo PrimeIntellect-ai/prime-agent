@@ -854,6 +854,24 @@ describe("ordered durable relay", () => {
 		await harness.relay.close();
 	});
 
+	it("queryOutgoingAcknowledgment scans beyond the former 8192-record limit", async () => {
+		const harness = await openRelay();
+		for (let index = 0; index < 4_097; index += 1) {
+			const received = await harness.relay.receive(eventEnvelope(`long-history-${index}`));
+			expect(received.ok).toBe(true);
+		}
+		await harness.relay.send(eventEnvelope("late-outbound"));
+		const acknowledged = await harness.relay.receive(ackEnvelope("late-outbound", "late-ack"));
+		expect(acknowledged.ok).toBe(true);
+		const evidence = await harness.relay.queryOutgoingAcknowledgment("late-outbound");
+		expect(evidence.ok).toBe(true);
+		if (evidence.ok && evidence.value !== null) {
+			expect(evidence.value.frameId).toBe("late-outbound");
+			expect(evidence.value.ackEnvelopeId).toBe("late-ack");
+		}
+		await harness.relay.close();
+	});
+
 	it("queryOutgoingAcknowledgment rejects recovered rejected ACK evidence", async () => {
 		const incomingDisk = emptyDisk();
 		const outgoingDisk = emptyDisk();
