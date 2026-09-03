@@ -340,6 +340,73 @@ function recoveredStartedOutput(callId: string): ProviderCallRecoveryOutput {
 	}
 }
 
+function recoveredStartedStreamingOutput(startedCallId: string, streamingCallId: string): ProviderCallRecoveryOutput {
+	// Journaled + started record for the started (no-chunks) call
+	const startedJournaled = buildJournaledRecord(startedCallId, 1);
+	const startedRequestReceipt = canonicalReceiptForRecord(startedJournaled);
+	const startedEncoded = encodeProviderCallRecordV1({
+		version: 1,
+		recordKind: "started",
+		journalSeq: 2,
+		callId: startedCallId,
+		hostId: IDENTITY.hostId,
+		generation: IDENTITY.generation,
+		sessionId: IDENTITY.sessionId,
+		recordedAt: "2025-01-15T10:30:01.000Z",
+		requestDigest: startedJournaled.requestDigest,
+		requestJournalSeq: 1,
+		requestReceipt: startedRequestReceipt,
+	});
+	if (!startedEncoded.ok || startedEncoded.record.recordKind !== "started") {
+		if (startedEncoded.ok) startedEncoded.bytes.fill(0);
+		throw new Error("encode started call recovery fixture failed");
+	}
+
+	// Journaled + started + chunk records for the streaming call
+	const streamingJournaled = buildJournaledRecord(streamingCallId, 3);
+	const streamingRequestReceipt = canonicalReceiptForRecord(streamingJournaled);
+	const streamingStartedEncoded = encodeProviderCallRecordV1({
+		version: 1,
+		recordKind: "started",
+		journalSeq: 4,
+		callId: streamingCallId,
+		hostId: IDENTITY.hostId,
+		generation: IDENTITY.generation,
+		sessionId: IDENTITY.sessionId,
+		recordedAt: "2025-01-15T10:30:02.000Z",
+		requestDigest: streamingJournaled.requestDigest,
+		requestJournalSeq: 3,
+		requestReceipt: streamingRequestReceipt,
+	});
+	if (!streamingStartedEncoded.ok || streamingStartedEncoded.record.recordKind !== "started") {
+		if (streamingStartedEncoded.ok) streamingStartedEncoded.bytes.fill(0);
+		throw new Error("encode streaming start recovery fixture failed");
+	}
+
+	// Chunk record (seq=5, chunkIndex=0)
+	const streamingChunk = buildChunkRecord(streamingCallId, 5, 0);
+
+	try {
+		return {
+			identity: IDENTITY,
+			records: [
+				startedJournaled,
+				startedEncoded.record,
+				streamingJournaled,
+				streamingStartedEncoded.record,
+				streamingChunk,
+			],
+			fileReceipts: [],
+			totalBytes: 0,
+			nextJournalSeq: 6,
+			interruptedCallIds: [startedCallId, streamingCallId],
+		};
+	} finally {
+		startedEncoded.bytes.fill(0);
+		streamingStartedEncoded.bytes.fill(0);
+	}
+}
+
 async function createStore(s: MockPubState, output?: ProviderCallRecoveryOutput) {
 	const publisher = makePublisher(s);
 	const backend = makeRecoveryBackend(output ?? emptyRecovery());
@@ -2234,28 +2301,86 @@ describe("createDurableProviderCallStore", () => {
 			await store.close();
 		});
 
-		it("includes recovered interrupted call", async () => {
+		it("real recovery terminalizes interrupted call and replayUndelivered includes it", async () => {
+			// Use recoveredStartedOutput which contains journaled + started records
+			// with interruptedCallIds: [callId]. The factory terminalizes the started
+			// call via _terminalizeInterrupted before returning the capability.
+			const output = recoveredStartedOutput("call-real-recovery");
 			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
-			const store = await createStore(s);
-			const jr = buildJournaledRecord("call-interrupted", 1);
-			await store.journalProviderCall(jr);
-			await store.journalStarted(
-				"call-interrupted",
-				jr.requestDigest,
-				canonicalReceiptForRecord(jr),
-				"2025-01-15T10:30:01.000Z",
-			);
-			const ir = await store.journalInterrupted("call-interrupted", 0, "2025-01-15T10:30:02.000Z");
-			expect(ir.ok).toBe(true);
+			const result = await createDurableProviderCallStore({
+				publisher: makePublisher(s),
+				recoveryBackend: makeRecoveryBackend(output),
+				identity: IDENTITY,
+				recordedAt: "2025-01-15T10:30:00.000Z",
+			});
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			const store = result.value;
+			// Recovery terminalized the interrupted started call.
+			// query should show terminal state.
+			const state = await store.query("call-real-recovery");
+			expect(state.ok).toBe(true);
+			if (!state.ok) return;
+			expect(state.value.state).toBe("terminal");
+			// replayUndelivered should include it
 			const r = await store.replayUndelivered(null, 64);
 			expect(r.ok).toBe(true);
 			if (!r.ok) return;
 			expect(r.value.records.length).toBe(1);
-			expect(r.value.records[0].callId).toBe("call-interrupted");
+			expect(r.value.records[0].callId).toBe("call-real-recovery");
 			expect(r.value.records[0].state).toBe("terminal");
 			expect(Object.isFrozen(r.value.records[0])).toBe(true);
 			expect("requestBytes" in r.value.records[0]).toBe(false);
 			expect("terminalFrameBytes" in r.value.records[0]).toBe(false);
+			await store.close();
+		});
+
+		it("factory recovery with started and streaming interrupted calls enumerates both in replayUndelivered", async () => {
+			// Use recoveredStartedStreamingOutput which contains both a started call
+			// (journaled+started) and a streaming call (journaled+started+chunk).
+			// The factory terminalizes both interrupted calls via _terminalizeInterrupted
+			// before returning the capability — do NOT manually invoke journalInterrupted.
+			const output = recoveredStartedStreamingOutput("call-started-int", "call-streaming-int");
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const result = await createDurableProviderCallStore({
+				publisher: makePublisher(s),
+				recoveryBackend: makeRecoveryBackend(output),
+				identity: IDENTITY,
+				recordedAt: "2025-01-15T10:30:00.000Z",
+			});
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			const store = result.value;
+
+			// Both calls should now be terminalized by the factory
+			const state1 = await store.query("call-started-int");
+			expect(state1.ok).toBe(true);
+			if (!state1.ok) return;
+			expect(state1.value.state).toBe("terminal");
+
+			const state2 = await store.query("call-streaming-int");
+			expect(state2.ok).toBe(true);
+			if (!state2.ok) return;
+			expect(state2.value.state).toBe("terminal");
+
+			// replayUndelivered must enumerate both terminalized calls in journal order
+			const r = await store.replayUndelivered(null, 64);
+			expect(r.ok).toBe(true);
+			if (!r.ok) return;
+			expect(r.value.records.length).toBe(2);
+			expect(r.value.records[0].callId).toBe("call-started-int");
+			expect(r.value.records[0].state).toBe("terminal");
+			expect(r.value.records[0].firstJournalSequence).toBe(1);
+			expect(r.value.records[0].chunkCount).toBe(0);
+			expect(r.value.records[1].callId).toBe("call-streaming-int");
+			expect(r.value.records[1].state).toBe("terminal");
+			expect(r.value.records[1].firstJournalSequence).toBe(3);
+			expect(r.value.records[1].chunkCount).toBe(1);
+			// No requestBytes or terminalFrameBytes leaked
+			expect("requestBytes" in r.value.records[0]).toBe(false);
+			expect("terminalFrameBytes" in r.value.records[0]).toBe(false);
+			expect("requestBytes" in r.value.records[1]).toBe(false);
+			expect("terminalFrameBytes" in r.value.records[1]).toBe(false);
 			await store.close();
 		});
 
@@ -2320,14 +2445,18 @@ describe("createDurableProviderCallStore", () => {
 			expect(r1.value.records[0].callId).toBe("call-0");
 			expect(r1.value.records[1].callId).toBe("call-1");
 			expect(typeof r1.value.nextCursor).toBe("number");
-			const c1 = r1.value.nextCursor as number;
+			const nc1 = r1.value.nextCursor;
+			if (nc1 === null) throw new Error("expected cursor");
+			const c1 = nc1;
 			const r2 = await store.replayUndelivered(c1, 2);
 			expect(r2.ok).toBe(true);
 			if (!r2.ok) return;
 			expect(r2.value.records.length).toBe(2);
 			expect(r2.value.records[0].callId).toBe("call-2");
 			expect(r2.value.records[1].callId).toBe("call-3");
-			const c2 = r2.value.nextCursor as number;
+			const nc2 = r2.value.nextCursor;
+			if (nc2 === null) throw new Error("expected cursor");
+			const c2 = nc2;
 			const r3 = await store.replayUndelivered(c2, 2);
 			expect(r3.ok).toBe(true);
 			if (!r3.ok) return;
@@ -2368,7 +2497,7 @@ describe("createDurableProviderCallStore", () => {
 			}
 		});
 
-		it("shared Promise FIFO: concurrent calls serialize correctly", async () => {
+		it("concurrent snapshots: concurrent read calls both succeed without crash", async () => {
 			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
 			const store = await createStore(s);
 			const jr = buildJournaledRecord("call-fifo", 1);
@@ -2421,6 +2550,67 @@ describe("createDurableProviderCallStore", () => {
 			expect(rec.requestDigest).toBe(jr.requestDigest);
 			expect(rec.firstJournalSequence).toBe(1);
 			expect(rec.chunkCount).toBe(1);
+			await store.close();
+		});
+
+		it("pages >64 undelivered calls correctly (130 calls, pages 64/64/2)", async () => {
+			const s: MockPubState = { publishes: 0, closes: 0, nextError: null, closeReturnsError: false };
+			const store = await createStore(s);
+			// Create 130 journaled (undelivered) calls
+			for (let i = 0; i < 130; i++) {
+				const jr = buildJournaledRecord(`call-${i}`, i + 1);
+				await store.journalProviderCall(jr);
+			}
+			// Page 1: first 64
+			const r1 = await store.replayUndelivered(null, 64);
+			expect(r1.ok).toBe(true);
+			if (!r1.ok) return;
+			expect(r1.value.records.length).toBe(64);
+			// Verify no duplicates and correct order
+			const seen1 = new Set<string>();
+			for (let j = 0; j < 64; j++) {
+				const rec = r1.value.records[j];
+				expect(seen1.has(rec.callId)).toBe(false);
+				seen1.add(rec.callId);
+				expect(rec.callId).toBe(`call-${j}`);
+				expect(rec.firstJournalSequence).toBe(j + 1);
+			}
+			const nc1 = r1.value.nextCursor;
+			if (nc1 === null) throw new Error("expected cursor");
+			const c1 = nc1;
+			expect(c1).toBe(64);
+			// Page 2: next 64
+			const r2 = await store.replayUndelivered(c1, 64);
+			expect(r2.ok).toBe(true);
+			if (!r2.ok) return;
+			expect(r2.value.records.length).toBe(64);
+			const seen2 = new Set<string>();
+			for (let j = 0; j < 64; j++) {
+				const rec = r2.value.records[j];
+				expect(seen2.has(rec.callId)).toBe(false);
+				seen2.add(rec.callId);
+				expect(rec.callId).toBe(`call-${j + 64}`);
+				expect(rec.firstJournalSequence).toBe(j + 65);
+			}
+			// Verify no overlap with page 1
+			for (const id of seen2) {
+				expect(seen1.has(id)).toBe(false);
+			}
+			const nc2 = r2.value.nextCursor;
+			if (nc2 === null) throw new Error("expected cursor");
+			const c2 = nc2;
+			expect(c2).toBe(128);
+			// Page 3: last 2
+			const r3 = await store.replayUndelivered(c2, 64);
+			expect(r3.ok).toBe(true);
+			if (!r3.ok) return;
+			expect(r3.value.records.length).toBe(2);
+			expect(r3.value.records[0].callId).toBe("call-128");
+			expect(r3.value.records[0].firstJournalSequence).toBe(129);
+			expect(r3.value.records[1].callId).toBe("call-129");
+			expect(r3.value.records[1].firstJournalSequence).toBe(130);
+			// No more pages
+			expect(r3.value.nextCursor).toBeNull();
 			await store.close();
 		});
 
