@@ -1530,9 +1530,15 @@ function decodePawsManifestBytesImpl(raw: unknown): PawsResult<PawsDecodeResult>
 
 		const reencoded = utf8Encode(manifestStr);
 		const lengthGetter = PAWS_TA_BYTE_LENGTH_GETTER;
-		if (lengthGetter === undefined) { eraseBytes(reencoded); return failErr(PAWS_ERRORS.INVALID_INPUT); }
+		if (lengthGetter === undefined) {
+			eraseBytes(reencoded);
+			return failErr(PAWS_ERRORS.INVALID_INPUT);
+		}
 		const rawReencodedLen: unknown = Reflect.apply(lengthGetter, reencoded, []);
-		if (typeof rawReencodedLen !== "number" || !Number.isSafeInteger(rawReencodedLen)) { eraseBytes(reencoded); return failErr(PAWS_ERRORS.INVALID_INPUT); }
+		if (typeof rawReencodedLen !== "number" || !Number.isSafeInteger(rawReencodedLen)) {
+			eraseBytes(reencoded);
+			return failErr(PAWS_ERRORS.INVALID_INPUT);
+		}
 		const reencodedLen = rawReencodedLen;
 		if (reencodedLen !== manifestLen) {
 			eraseBytes(reencoded);
