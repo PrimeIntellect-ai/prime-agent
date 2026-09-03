@@ -112,9 +112,9 @@ Wave 2 begins after the related Wave 1 contracts are integrated. Each package us
 ## Current integration baseline
 
 - Branch: `feat/sandbox-backed-sessions` in `/Users/milkkarten/prime-agent-sandbox-sessions`.
-- Reviewed implementation tip: `191695e7a`; plan reconciliation tip: `80dee87f2`.
-- Latest full root `npm run check` is green across 1,091 files at `80dee87f2`, including TypeScript, Biome, installer rendering, and browser smoke.
-- The latest accepted focused matrices cover lifecycle deletion, provider codec/recovery, hosted port/controller/transport, the exact branded-local/hosted runtime union, permanent target registry/dispatcher/bidirectional entry, ordered target application, authorization, transcript scanning/dispatch, durable target inbox, and the remote frame codec.
+- Reviewed implementation tip: `180a7f694`; plan reconciliation and validation tip: `fa2442a18`.
+- Latest full root `npm run check` is green across 1,098 files at `fa2442a18`, including TypeScript, Biome, installer rendering, and browser smoke.
+- The latest accepted durability baseline passes 680/680 focused tests across the command, event-outbox, and provider codecs and recovery scanners plus the durable provider-call store. Earlier focused matrices also cover lifecycle deletion, hosted port/controller/transport, the exact branded-local/hosted runtime union, permanent target registry/dispatcher/bidirectional entry, ordered target application, authorization, transcript scanning/dispatch, durable target inbox, and the remote frame codec.
 - Accepted B03 foundations: exact frame codec `55b40d7f1`, journal-record codec `5551582bd`, delivery index `5e8e926b4`, direct-final immutable journal publication `8bd83db6c`, immutable delivery-marker publication `df846c08f`, and page-atomic bounded directory recovery `9df8a3da9`.
 - Accepted B11 foundations: observation core `939a7baaf`, exact snapshots `62e8b073a`.
 - Accepted B14 foundations: provider client `2195c7a23`, tunnel manager `a636f7d99`, PAB1 `d21f53c1a`, FD3 reader `723a8db52`, PAAR codec `a17f5588d`, stdin frame reader `4beeaa5da`, TypeScript correction `1d63a72c0`, SSH spawn specification `4dd8790db`, SSH specification tests `af83a786f`/`a7add61a4`, one-use upgrade authentication `a4976298c`, and Node stdin normalization `4a8962b54`.
