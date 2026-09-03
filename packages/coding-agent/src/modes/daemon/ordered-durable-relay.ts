@@ -434,14 +434,28 @@ function revalidateRecord(entry: DurableJournalEntry): JournalRecordV1 | null {
 
 function validateReceipt(raw: unknown): DurableReceipt | null {
 	if (typeof raw !== "object" || raw === null) return null;
-	const d = Object.getOwnPropertyDescriptors(raw);
-	const seq = d.sequence?.value;
-	const size = d.size?.value;
-	const sha = d.sha256?.value;
-	if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 1 || seq > 20000) return null;
-	if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 1 || size > 1310720) return null;
-	if (typeof sha !== "string" || !/^[0-9a-f]{64}$/.test(sha)) return null;
-	return Object.freeze({ sequence: seq, size, sha256: sha });
+	try {
+		if (types.isProxy(raw)) return null;
+		if (Object.getPrototypeOf(raw) !== Object.prototype) return null;
+		if (Object.getOwnPropertySymbols(raw).length !== 0) return null;
+		const d = Object.getOwnPropertyDescriptors(raw);
+		const names = Object.getOwnPropertyNames(d);
+		if (names.length !== 3) return null;
+		if (!names.includes("sequence") || !names.includes("size") || !names.includes("sha256")) return null;
+		for (const name of names) {
+			const desc = d[name];
+			if (!desc || !desc.enumerable || !("value" in desc) || desc.value === undefined) return null;
+		}
+		const seq = d.sequence.value;
+		const size = d.size.value;
+		const sha = d.sha256.value;
+		if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 1 || seq > 20000) return null;
+		if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 1 || size > 1310720) return null;
+		if (typeof sha !== "string" || !/^[0-9a-f]{64}$/.test(sha)) return null;
+		return Object.freeze({ sequence: seq, size, sha256: sha });
+	} catch {
+		return null;
+	}
 }
 
 export class OrderedDurableRelay {
@@ -770,8 +784,9 @@ export class OrderedDurableRelay {
 		if (!pubReceipt) return this.poison("PERSISTENCE_FAILED");
 		const queried = await this.outgoing.query(envelope.frameId);
 		if (!queried.ok) return this.poison("PERSISTENCE_FAILED");
-		// Validate that query receipt matches the published receipt exactly
-		const qjr = queried.value.journal;
+		// Validate query receipt through validateReceipt before comparison
+		const qjr = validateReceipt(queried.value.journal);
+		if (!qjr) return this.poison("PERSISTENCE_FAILED");
 		if (qjr.sequence !== pubReceipt.sequence || qjr.size !== pubReceipt.size || qjr.sha256 !== pubReceipt.sha256) {
 			return this.poison("PERSISTENCE_FAILED");
 		}
@@ -833,6 +848,10 @@ export class OrderedDurableRelay {
 		// Validate and fresh-copy outgoing journal receipt
 		const outgoingJournalReceipt = validateReceipt(outgoingState.journal);
 		if (!outgoingJournalReceipt) return this.poison("EVIDENCE_CONFLICT");
+		// Require non-null delivered receipt when outgoing is delivered
+		if (outgoingState.state === "delivered" && !validateReceipt(outgoingState.delivered)) {
+			return this.poison("EVIDENCE_CONFLICT");
+		}
 
 		// Require outgoing delivered before returning evidence
 		if (outgoingState.state !== "delivered") return success(null);
@@ -881,6 +900,8 @@ export class OrderedDurableRelay {
 				// Verify ACK is durably delivered in incoming store
 				const ackIncoming = await this.incoming.query(freshRecord.envelope.frameId);
 				if (!ackIncoming.ok || ackIncoming.value.state !== "delivered") return success(null);
+				// Require non-null delivered receipt
+				if (!validateReceipt(ackIncoming.value.delivered)) return this.poison("EVIDENCE_CONFLICT");
 
 				// Full identity binding: frameId, envelopeDigest, journal seq+size+sha
 				const ai = ackIncoming.value;
@@ -914,8 +935,9 @@ export class OrderedDurableRelay {
 			cursor = page.nextCursor;
 		}
 
-		// If max pages reached and cursor remains non-null, scan was incomplete
-		if (pages >= QUERY_MAX_PAGES && cursor !== null) return this.poison("EVIDENCE_CONFLICT");
+		// Track whether the scan actually completed (nextCursor was null on final page)
+		const scanComplete = cursor === null;
+		if (!scanComplete) return this.poison("EVIDENCE_CONFLICT");
 
 		// 3. If no matching ACK found, conflict
 		if (foundRecord === null || foundReceipt === null) return this.poison("EVIDENCE_CONFLICT");

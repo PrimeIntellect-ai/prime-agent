@@ -4,6 +4,7 @@ import {
 	type RemoteRelayDispatcher,
 	type RemoteRelayEnsureResult,
 } from "../src/modes/daemon/b10-remote-relay-dispatcher.js";
+import type { DurableReceipt } from "../src/modes/daemon/durable-relay-store.js";
 import type { RemoteHostFrameEnvelope } from "../src/modes/daemon/remote-agent-host-protocol.js";
 import { canonicalDigest } from "../src/modes/daemon/remote-host-frame-codec.js";
 
@@ -29,6 +30,10 @@ function input(value = envelope()): Readonly<{ envelope: RemoteHostFrameEnvelope
 	return Object.freeze({ envelope: value, semanticDigest: digest.value });
 }
 
+function journalReceipt(seq = 1): Readonly<{ sequence: number; size: number; sha256: string }> {
+	return Object.freeze({ sequence: seq, size: 100, sha256: "a".repeat(64) });
+}
+
 function successfulRelay(onSend?: (raw: unknown) => unknown) {
 	return Object.freeze({
 		send(raw: unknown): unknown {
@@ -37,7 +42,11 @@ function successfulRelay(onSend?: (raw: unknown) => unknown) {
 			return Promise.resolve(
 				Object.freeze({
 					ok: true as const,
-					value: Object.freeze({ frameId: source?.frameId ?? "invalid", replay: false }),
+					value: Object.freeze({
+						frameId: source?.frameId ?? "invalid",
+						replay: false,
+						journalReceipt: journalReceipt(),
+					}),
 				}),
 			);
 		},
@@ -106,11 +115,37 @@ describe("B10 remote relay dispatcher", () => {
 		},
 	);
 
+	it("rejects send result with missing or malformed journalReceipt", async () => {
+		const missing = await dispatcher(() => ({
+			status: "available",
+			relay: successfulRelay(() => Promise.resolve({ ok: true, value: { frameId: "frame-1", replay: false } })),
+		}));
+		expect(await missing.ensure(input())).toEqual({ status: "error" });
+
+		const badSha = await dispatcher(() => ({
+			status: "available",
+			relay: successfulRelay(() =>
+				Promise.resolve({
+					ok: true,
+					value: {
+						frameId: "frame-1",
+						replay: false,
+						journalReceipt: { sequence: 1, size: 100, sha256: "not-a-valid-sha" },
+					},
+				}),
+			),
+		}));
+		expect(await badSha.ensure(input())).toEqual({ status: "error" });
+	});
+
 	it("poisons on malformed or fatal relay outcomes", async () => {
 		let calls = 0;
 		const relay = successfulRelay(() => {
 			calls += 1;
-			return Promise.resolve({ ok: true, value: { frameId: "wrong", replay: false } });
+			return Promise.resolve({
+				ok: true,
+				value: { frameId: "wrong", replay: false, journalReceipt: journalReceipt() },
+			});
 		});
 		const subject = await dispatcher(() => ({ status: "available", relay }));
 		expect(await subject.ensure(input())).toEqual({ status: "error" });
@@ -163,40 +198,60 @@ describe("B10 remote relay dispatcher", () => {
 
 		class PromiseSubclass<T> extends Promise<T> {}
 		const subclassRelay = successfulRelay(() =>
-			PromiseSubclass.resolve({ ok: true, value: { frameId: "frame-1", replay: false } }),
+			PromiseSubclass.resolve({
+				ok: true,
+				value: { frameId: "frame-1", replay: false, journalReceipt: journalReceipt() },
+			}),
 		);
 		const second = await dispatcher(() => ({ status: "available", relay: subclassRelay }));
 		expect(await second.ensure(input())).toEqual({ status: "deferred" });
 
-		const owned = Promise.resolve({ ok: true, value: { frameId: "frame-1", replay: false } });
+		const owned = Promise.resolve({
+			ok: true,
+			value: { frameId: "frame-1", replay: false, journalReceipt: journalReceipt() },
+		});
 		Object.defineProperty(owned, "extra", { value: true });
 		const third = await dispatcher(() => ({ status: "available", relay: successfulRelay(() => owned) }));
 		expect(await third.ensure(input())).toEqual({ status: "deferred" });
 	});
 
 	it("serializes admitted sends FIFO", async () => {
-		const gate = deferred<Readonly<{ ok: true; value: Readonly<{ frameId: string; replay: false }> }>>();
+		const gate =
+			deferred<
+				Readonly<{ ok: true; value: Readonly<{ frameId: string; replay: false; journalReceipt: DurableReceipt }> }>
+			>();
 		const calls: string[] = [];
 		const relay = successfulRelay((raw) => {
 			const source = inputEnvelope(raw);
 			const frameId = source?.frameId ?? "invalid";
 			calls.push(frameId);
 			if (frameId === "first") return gate.promise;
-			return Promise.resolve({ ok: true as const, value: { frameId, replay: false as const } });
+			return Promise.resolve({
+				ok: true as const,
+				value: { frameId, replay: false as const, journalReceipt: journalReceipt() },
+			});
 		});
 		const subject = await dispatcher(() => ({ status: "available", relay }));
 		const first = subject.ensure(input(envelope("first", "message-first")));
 		const second = subject.ensure(input(envelope("second", "message-second")));
 		await Promise.resolve();
 		expect(calls).toEqual(["first"]);
-		gate.resolve(Object.freeze({ ok: true as const, value: Object.freeze({ frameId: "first", replay: false }) }));
+		gate.resolve(
+			Object.freeze({
+				ok: true as const,
+				value: Object.freeze({ frameId: "first", replay: false, journalReceipt: journalReceipt(1) }),
+			}),
+		);
 		expect(await first).toEqual({ status: "persisted" });
 		expect(await second).toEqual({ status: "persisted" });
 		expect(calls).toEqual(["first", "second"]);
 	});
 
 	it("drains admitted work before one shared logical close", async () => {
-		const gate = deferred<Readonly<{ ok: true; value: Readonly<{ frameId: string; replay: false }> }>>();
+		const gate =
+			deferred<
+				Readonly<{ ok: true; value: Readonly<{ frameId: string; replay: false; journalReceipt: DurableReceipt }> }>
+			>();
 		const subject = await dispatcher(() => ({
 			status: "available",
 			relay: successfulRelay(() => gate.promise),
@@ -212,7 +267,12 @@ describe("B10 remote relay dispatcher", () => {
 		});
 		await Promise.resolve();
 		expect(closeSettled).toBe(false);
-		gate.resolve(Object.freeze({ ok: true as const, value: Object.freeze({ frameId: "frame-1", replay: false }) }));
+		gate.resolve(
+			Object.freeze({
+				ok: true as const,
+				value: Object.freeze({ frameId: "frame-1", replay: false, journalReceipt: journalReceipt(1) }),
+			}),
+		);
 		expect(await admitted).toEqual({ status: "persisted" });
 		expect(await firstClose).toEqual({ status: "closed" });
 	});
@@ -234,7 +294,10 @@ describe("B10 remote relay dispatcher", () => {
 		let nested: Promise<RemoteRelayEnsureResult> | null = null;
 		const relay = successfulRelay(() => {
 			nested = subject?.ensure(input()) ?? null;
-			return Promise.resolve({ ok: true, value: { frameId: "frame-1", replay: false } });
+			return Promise.resolve({
+				ok: true,
+				value: { frameId: "frame-1", replay: false, journalReceipt: journalReceipt() },
+			});
 		});
 		subject = await dispatcher(() => ({ status: "available", relay }));
 		expect(await subject.ensure(input())).toEqual({ status: "persisted" });

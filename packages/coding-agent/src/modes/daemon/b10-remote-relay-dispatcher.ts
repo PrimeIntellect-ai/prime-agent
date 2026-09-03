@@ -15,7 +15,7 @@ const UNAVAILABLE_KEYS = new Set(["status"]);
 const RELAY_KEYS = new Set(["send"]);
 const SEND_SUCCESS_KEYS = new Set(["ok", "value"]);
 const SEND_FAILURE_KEYS = new Set(["error", "ok"]);
-const SEND_VALUE_KEYS = new Set(["frameId", "replay"]);
+const SEND_VALUE_KEYS = new Set(["frameId", "replay", "journalReceipt"]);
 const ERROR_KEYS = new Set(["code"]);
 const SEND_TIMEOUT_MS = 30_000;
 const CLOSE_TIMEOUT_MS = 5_000;
@@ -244,6 +244,25 @@ function sendOutcome(raw: unknown, frameId: string): "persisted" | "deferred" | 
 	if (success && value(success, "ok") === true) {
 		const payload = exact(value(success, "value"), SEND_VALUE_KEYS);
 		if (!payload) return "fatal";
+		const receiptRaw = value(payload, "journalReceipt");
+		const receipt = exact(receiptRaw, new Set(["sequence", "size", "sha256"]));
+		if (!receipt) return "fatal";
+		const seq = value(receipt, "sequence");
+		const size = value(receipt, "size");
+		const sha = value(receipt, "sha256");
+		if (
+			typeof seq !== "number" ||
+			!Number.isSafeInteger(seq) ||
+			seq < 1 ||
+			seq > 20000 ||
+			typeof size !== "number" ||
+			!Number.isSafeInteger(size) ||
+			size < 1 ||
+			size > 1310720 ||
+			typeof sha !== "string" ||
+			!/^[0-9a-f]{64}$/.test(sha)
+		)
+			return "fatal";
 		return value(payload, "frameId") === frameId && typeof value(payload, "replay") === "boolean"
 			? "persisted"
 			: "fatal";
