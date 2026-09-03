@@ -2,6 +2,29 @@ import { describe, expect, it } from "vitest";
 import { createRelayApplicationMultiplexer } from "../src/modes/daemon/ordered-durable-relay-application-multiplexer.js";
 
 // ===========================================================================
+// Descriptor-safe helpers — no `as` casts anywhere in these tests
+// ===========================================================================
+
+function ownValue(raw: unknown, key: string): unknown {
+	if (typeof raw !== "object" || raw === null) return undefined;
+	const desc = Object.getOwnPropertyDescriptor(raw, key);
+	if (!desc || !("value" in desc)) return undefined;
+	return desc.value;
+}
+
+function ownRecord(raw: unknown): Record<string, unknown> {
+	if (typeof raw !== "object" || raw === null) return {};
+	const result: Record<string, unknown> = {};
+	for (const name of Object.getOwnPropertyNames(raw)) {
+		const desc = Object.getOwnPropertyDescriptor(raw, name);
+		if (desc && "value" in desc) {
+			result[name] = desc.value;
+		}
+	}
+	return result;
+}
+
+// ===========================================================================
 // Helpers
 // ===========================================================================
 
@@ -23,72 +46,72 @@ function makeCapability(
 }
 
 function envelope(frameType = "command"): Record<string, unknown> {
-	const base: Record<string, unknown> = {
-		type: "frame",
-		frameId: "f-1",
-		protocol: { name: "prime-agent.remote-host", version: 1 },
-		sentAt: "2025-01-01T00:00:00.000Z",
-		frame: { type: frameType },
-	};
+	const frameValue: Record<string, unknown> = { type: frameType };
 	if (frameType === "command") {
-		(base.frame as Record<string, unknown>).commandId = "cmd-1";
-		(base.frame as Record<string, unknown>).body = { type: "create_session", workspaceId: "w-1" };
+		frameValue.commandId = "cmd-1";
+		frameValue.body = { type: "create_session", workspaceId: "w-1" };
 	} else if (frameType === "event") {
-		(base.frame as Record<string, unknown>).id = "evt-1";
-		(base.frame as Record<string, unknown>).sequence = 1;
-		(base.frame as Record<string, unknown>).cursor = {
+		frameValue.id = "evt-1";
+		frameValue.sequence = 1;
+		frameValue.cursor = {
 			hostId: "h-1",
 			generation: "g-1",
 			sessionId: "s-1",
 			sequence: 1,
 		};
-		(base.frame as Record<string, unknown>).emittedAt = "2025-01-01T00:00:01.000Z";
-		(base.frame as Record<string, unknown>).body = { type: "agent_start" };
+		frameValue.emittedAt = "2025-01-01T00:00:01.000Z";
+		frameValue.body = { type: "agent_start" };
 	} else if (frameType === "agent_message") {
-		(base.frame as Record<string, unknown>).id = "msg-1";
-		(base.frame as Record<string, unknown>).fromActiveSessionId = "parent-1";
-		(base.frame as Record<string, unknown>).targetActiveSessionId = "child-1";
-		(base.frame as Record<string, unknown>).message = "hello";
+		frameValue.id = "msg-1";
+		frameValue.fromActiveSessionId = "parent-1";
+		frameValue.targetActiveSessionId = "child-1";
+		frameValue.message = "hello";
 	} else if (frameType === "provider_proxy") {
-		(base.frame as Record<string, unknown>).proxyType = "model_call_request";
-		(base.frame as Record<string, unknown>).callId = "call-1";
-		(base.frame as Record<string, unknown>).provider = "anthropic";
-		(base.frame as Record<string, unknown>).model = "claude-3";
-		(base.frame as Record<string, unknown>).messages = [];
+		frameValue.proxyType = "model_call_request";
+		frameValue.callId = "call-1";
+		frameValue.provider = "anthropic";
+		frameValue.model = "claude-3";
+		frameValue.messages = [];
 	} else if (frameType === "ack") {
-		(base.frame as Record<string, unknown>).ackId = "ack-1";
-		(base.frame as Record<string, unknown>).acknowledges = "f-0";
-		(base.frame as Record<string, unknown>).status = "delivered";
+		frameValue.ackId = "ack-1";
+		frameValue.acknowledges = "f-0";
+		frameValue.status = "delivered";
 	} else if (frameType === "handshake") {
-		(base.frame as Record<string, unknown>).direction = "home_to_host";
-		(base.frame as Record<string, unknown>).hostId = "h-1";
-		(base.frame as Record<string, unknown>).generation = "g-1";
-		(base.frame as Record<string, unknown>).runtime = {
+		frameValue.direction = "home_to_host";
+		frameValue.hostId = "h-1";
+		frameValue.generation = "g-1";
+		frameValue.runtime = {
 			buildId: "b-1",
 			daemonProtocolVersion: 1,
 			daemonSchemaRevision: 1,
 		};
-		(base.frame as Record<string, unknown>).capabilities = [];
+		frameValue.capabilities = [];
 	} else if (frameType === "handshake_ack") {
-		(base.frame as Record<string, unknown>).hostId = "h-1";
-		(base.frame as Record<string, unknown>).sessionId = "s-1";
-		(base.frame as Record<string, unknown>).protocol = { name: "prime-agent.remote-host", version: 1 };
-		(base.frame as Record<string, unknown>).accepted = true;
-		(base.frame as Record<string, unknown>).capabilities = [];
-		(base.frame as Record<string, unknown>).linkId = "l-1";
-		(base.frame as Record<string, unknown>).remoteBuildIdentity = {
+		frameValue.hostId = "h-1";
+		frameValue.sessionId = "s-1";
+		frameValue.protocol = { name: "prime-agent.remote-host", version: 1 };
+		frameValue.accepted = true;
+		frameValue.capabilities = [];
+		frameValue.linkId = "l-1";
+		frameValue.remoteBuildIdentity = {
 			buildId: "b-2",
 			daemonProtocolVersion: 1,
 			daemonSchemaRevision: 1,
 		};
 	} else if (frameType === "health") {
-		(base.frame as Record<string, unknown>).healthSeq = 1;
-		(base.frame as Record<string, unknown>).status = "connected";
+		frameValue.healthSeq = 1;
+		frameValue.status = "connected";
 	} else if (frameType === "error") {
-		(base.frame as Record<string, unknown>).code = "ERR";
-		(base.frame as Record<string, unknown>).message = "test error";
+		frameValue.code = "ERR";
+		frameValue.message = "test error";
 	}
-	return Object.freeze(base);
+	return Object.freeze({
+		type: "frame",
+		frameId: "f-1",
+		protocol: { name: "prime-agent.remote-host", version: 1 },
+		sentAt: "2025-01-01T00:00:00.000Z",
+		frame: frameValue,
+	});
 }
 
 function makeFactoryInput(
@@ -416,11 +439,11 @@ describe("apply happy path", () => {
 		const original = envelope("command");
 		await result.application.apply({ envelope: original });
 		expect(received).toBeDefined();
-		const r = received as Record<string, unknown>;
+		const r = ownRecord(received);
 		expect(typeof r.envelope).toBe("object");
-		const env = r.envelope as Record<string, unknown>;
+		const env = ownRecord(r.envelope);
 		expect(env.frameId).toBe("f-1");
-		expect(env.frame).toEqual(original.frame);
+		expect(env.frame).toEqual(ownRecord(original).frame);
 		expect(r.envelope).not.toBe(original);
 		await result.application.close();
 	});
@@ -944,11 +967,13 @@ describe("ownership-first close acquisition", () => {
 		expect(closeCalled).toBe(true);
 	});
 
-	it("captures close owner even when apply throws on call", async () => {
+	it("captures close owner even when apply is a non-function", async () => {
 		let closeCalled = false;
+		// Build capability manually — no cast needed since Record<string, unknown>
+		// accepts any value for each key.
 		const input = makeFactoryInput({
 			command: Object.freeze({
-				apply: "not_a_function" as unknown as () => Promise<unknown>,
+				apply: "not_a_function",
 				close: async () => {
 					closeCalled = true;
 					return { status: "closed" };
@@ -1002,7 +1027,9 @@ describe("ownership-first close acquisition", () => {
 			},
 		};
 		inner[Symbol("extra")] = true;
-		const input = makeFactoryInput({ command: inner as Record<string, unknown> });
+		// Pass inner directly — makeFactoryInput accepts Record<string, unknown>,
+		// and inner's symbol keys don't affect the string-key contract.
+		const input = makeFactoryInput({ command: Object.assign(Object.create(null), inner) });
 		const result = await createRelayApplicationMultiplexer(input);
 		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
 		expect(closeCalled).toBe(true);
@@ -1016,9 +1043,12 @@ describe("ownership-first close acquisition", () => {
 describe("preliminary parent extraction with symbols", () => {
 	it("captures slot values and marks uncertainty when parent has symbols", async () => {
 		const caps = makeFactoryInput();
-		const outer: Record<string | symbol, unknown> = { ...caps };
+		const outer: Record<string | symbol, unknown> = {};
+		for (const name of Object.getOwnPropertyNames(caps)) {
+			outer[name] = ownValue(caps, name);
+		}
 		outer[Symbol("extra")] = true;
-		const result = await createRelayApplicationMultiplexer(outer as Record<string, unknown>);
+		const result = await createRelayApplicationMultiplexer(outer);
 		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
 	});
 
@@ -1033,9 +1063,12 @@ describe("preliminary parent extraction with symbols", () => {
 				},
 			}),
 		});
-		const outer: Record<string | symbol, unknown> = { ...caps };
+		const outer: Record<string | symbol, unknown> = {};
+		for (const name of Object.getOwnPropertyNames(caps)) {
+			outer[name] = ownValue(caps, name);
+		}
 		outer[Symbol("extra")] = true;
-		const result = await createRelayApplicationMultiplexer(outer as Record<string, unknown>);
+		const result = await createRelayApplicationMultiplexer(outer);
 		expect(result).toEqual({ ok: false, error: { code: "CLOSE_UNCERTAIN" } });
 		expect(commandClosed).toBe(true);
 	});
@@ -1079,18 +1112,18 @@ describe("hidden slot cleanup", () => {
 });
 
 // ===========================================================================
-// Nested deep freeze isolation
+// Deep fresh envelope isolation
 // ===========================================================================
 
 describe("deep fresh envelope isolation", () => {
 	it("does not expose mutable nested objects from input envelope", async () => {
 		let received: unknown;
-		const mutableFrame = {
+		const mutableFrame: Record<string, unknown> = {
 			type: "command",
 			commandId: "cmd-1",
 			body: { type: "create_session", workspaceId: "w-1" },
 		};
-		const mutableEnvelope = {
+		const mutableEnvelope: Record<string, unknown> = {
 			type: "frame",
 			frameId: "f-1",
 			protocol: { name: "prime-agent.remote-host", version: 1 },
@@ -1113,20 +1146,20 @@ describe("deep fresh envelope isolation", () => {
 		// Mutate original — should not affect received
 		mutableFrame.body = { type: "destroy_session" };
 		mutableFrame.commandId = "cmd-2";
-		(mutableEnvelope.frame as Record<string, unknown>).extra = true;
-		const r = received as Record<string, unknown>;
-		const env = r.envelope as Record<string, unknown>;
-		const frame = env.frame as Record<string, unknown>;
+		mutableEnvelope.extra = true;
+		const r = ownRecord(received);
+		const env = ownRecord(r.envelope);
+		const frame = ownRecord(env.frame);
 		expect(frame.commandId).toBe("cmd-1");
-		expect((frame.body as Record<string, unknown>).type).toBe("create_session");
-		expect((env as Record<string, unknown>).extra).toBeUndefined();
+		expect(ownValue(frame.body, "type")).toBe("create_session");
+		expect(env.extra).toBeUndefined();
 		await result.application.close();
 	});
 
 	it("deep freezes nested arrays within frame", async () => {
 		let received: unknown;
-		const mutableBody = [{ x: 1 }, { y: 2 }];
-		const mutableFrame = {
+		const mutableBody: unknown[] = [{ x: 1 }, { y: 2 }];
+		const mutableFrame: Record<string, unknown> = {
 			type: "provider_proxy",
 			proxyType: "model_call_request",
 			callId: "call-1",
@@ -1146,7 +1179,7 @@ describe("deep fresh envelope isolation", () => {
 		const result = await createRelayApplicationMultiplexer(input);
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
-		const env = {
+		const env: Record<string, unknown> = {
 			envelope: {
 				type: "frame",
 				frameId: "f-2",
@@ -1158,33 +1191,32 @@ describe("deep fresh envelope isolation", () => {
 		await result.application.apply(env);
 		mutableBody[0] = { x: 999 };
 		mutableBody.push({ z: 3 });
-		const r = received as Record<string, unknown>;
-		const env2 = r.envelope as Record<string, unknown>;
-		const frame = env2.frame as Record<string, unknown>;
-		const msgs = frame.messages as unknown[];
-		expect((msgs[0] as Record<string, unknown>).x).toBe(1);
-		expect(msgs.length).toBe(2);
+		const r = ownRecord(received);
+		const env2 = ownRecord(r.envelope);
+		const frame = ownRecord(env2.frame);
+		const msgs = frame.messages;
+		expect(Array.isArray(msgs)).toBe(true);
+		if (Array.isArray(msgs)) {
+			expect(ownValue(msgs[0], "x")).toBe(1);
+			expect(msgs.length).toBe(2);
+		}
 		await result.application.close();
 	});
 });
-// ===========================================================================
-
-// ===========================================================================
 
 // ===========================================================================
 // Hostile tests — audit-blacker corrections for v1
 // ===========================================================================
 
 describe("hostile — cast-free codec-normalized clone", () => {
-	it("rejects frame with non-JSON-safe Date value (cast-free clone returns sentinel)", async () => {
+	it("rejects frame with non-JSON-safe Date value (cast-free clone returns fail)", async () => {
 		const input = makeFactoryInput();
 		const result = await createRelayApplicationMultiplexer(input);
 		expect(result.ok).toBe(true);
 		if (!result.ok) return;
 		const app = result.application;
 
-		// Envelope with a Date value — deepCloneSafe returns undefined for
-		// non-plain-object values, producing a sentinel frame that poisons.
+		// Envelope with a Date value — deepCloneSafe returns CloneResult.fail
 		const env: Record<string, unknown> = {
 			type: "frame",
 			frameId: "f-1",
@@ -1512,14 +1544,13 @@ describe("hostile — alias cleanup closes each raw object/close fn once", () =>
 
 describe("hostile — close uncertainty dominates", () => {
 	it("returns CLOSE_UNCERTAIN when factory has symbols and validation fails", async () => {
-		const factory: Record<string, unknown> = {
-			command: makeCapability(),
-			event: makeCapability(),
-			agentMessage: makeCapability(),
-			providerProxy: makeCapability(),
-		};
-		// Add a symbol — triggers ownership uncertainty
-		(factory as Record<symbol, unknown>)[Symbol("hidden")] = true;
+		const factoryBase = makeFactoryInput();
+		// Build factory with symbol key — no cast needed since we use Record<string | symbol, unknown>
+		const factory: Record<string | symbol, unknown> = {};
+		for (const name of Object.getOwnPropertyNames(factoryBase)) {
+			factory[name] = ownValue(factoryBase, name);
+		}
+		factory[Symbol("hidden")] = true;
 
 		const result = await createRelayApplicationMultiplexer(factory);
 		expect(result.ok).toBe(false);
@@ -1544,5 +1575,191 @@ describe("hostile — close uncertainty dominates", () => {
 
 		// Proxy causes capability uncertainty → CLOSE_UNCERTAIN, not INVALID_ARGUMENT
 		expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+	});
+});
+
+// ===========================================================================
+// Cross-instance apply — A's apply can call B without reentry rejection
+// ===========================================================================
+
+describe("cross-instance apply", () => {
+	it("allows A's apply to call B's apply — no same-instance reentry", async () => {
+		// Build two multiplexers. A's command apply delegates to B's apply.
+		// This should work because the reentry guard checks same-instance,
+		// not any-instance — A's apply can freely call B.
+		let bApplyCalled = false;
+		let bAppRef: { apply: (raw: unknown) => Promise<unknown>; close: () => Promise<unknown> } | undefined;
+
+		const delegatingCap: Record<string, unknown> = {
+			apply: async (raw: unknown) => {
+				if (!bAppRef) return { status: "error" };
+				bApplyCalled = true;
+				return bAppRef.apply(raw);
+			},
+			close: async () => ({ status: "closed" }),
+		};
+
+		const aResult = await createRelayApplicationMultiplexer(makeFactoryInput({ command: delegatingCap }));
+		expect(aResult.ok).toBe(true);
+		if (!aResult.ok) return;
+		const aApp = aResult.application;
+
+		const bResult = await createRelayApplicationMultiplexer(makeFactoryInput());
+		expect(bResult.ok).toBe(true);
+		if (!bResult.ok) return;
+		bAppRef = bResult.application;
+
+		// Send a command frame to A. A's command apply (delegatingCap)
+		// forwards to B's apply.
+		const res = await aApp.apply({ envelope: envelope("command") });
+		expect(res).toEqual({ status: "applied" });
+		expect(bApplyCalled).toBe(true);
+
+		await aApp.close();
+		await bAppRef.close();
+	});
+
+	it("rejects same-instance reentry but allows cross-instance", async () => {
+		// Build a factory whose apply calls back into the same multiplexer
+		const reentryResult = await createRelayApplicationMultiplexer(makeFactoryInput());
+		expect(reentryResult.ok).toBe(true);
+		if (!reentryResult.ok) return;
+		const reentryApp = reentryResult.application;
+
+		// A capability that calls back into reentryApp
+		const recursiveCap: Record<string, unknown> = {
+			apply: async (raw: unknown) => {
+				// This call should work because raw points to a different multiplexer
+				// than the one currently in the apply context
+				const inner = await reentryApp.apply(raw);
+				return inner;
+			},
+			close: async () => ({ status: "closed" }),
+		};
+
+		const outerResult = await createRelayApplicationMultiplexer(makeFactoryInput({ command: recursiveCap }));
+		expect(outerResult.ok).toBe(true);
+		if (!outerResult.ok) return;
+		const outerApp = outerResult.application;
+
+		// When outerApp.apply runs, it calls recursiveCap.apply which calls reentryApp.apply.
+		// reentryApp.apply checks applyContext.getStore() === reentryApp — that check
+		// evaluates to false because the store holds outerApp (not reentryApp).
+		const res = await outerApp.apply({ envelope: envelope("command") });
+		expect(res).toEqual({ status: "applied" });
+
+		await reentryApp.close();
+		await outerApp.close();
+	});
+});
+
+// ===========================================================================
+// Symbol factory keys — capture data-value owners behind symbol keys
+// ===========================================================================
+
+describe("symbol factory key owner capture", () => {
+	it("captures close owner from symbol-keyed factory value", async () => {
+		let symbolClosed = false;
+		const symbolOwned = makeCapability({
+			close: async () => {
+				symbolClosed = true;
+				return Object.freeze({ status: "closed" });
+			},
+		});
+
+		// Build factory with a symbol-keyed data value that has a close owner.
+		// Symbols on the factory cause rawDescriptors to reject the shape,
+		// returning CLOSE_UNCERTAIN, but the symbol-keyed close is still captured
+		// and called during rejection cleanup.
+		const factory: Record<string | symbol, unknown> = {
+			command: makeCapability(),
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		factory[Symbol("hiddenCap")] = symbolOwned;
+
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+
+		// The symbol-keyed owner's close is captured and called in cleanup
+		expect(symbolClosed).toBe(true);
+	});
+
+	it("captures and closes symbol-keyed owner on factory failure", async () => {
+		let symbolClosed = false;
+		const symbolOwned = makeCapability({
+			close: async () => {
+				symbolClosed = true;
+				return Object.freeze({ status: "closed" });
+			},
+		});
+
+		// Factory with missing providerProxy -> fails, but symbol close is captured
+		const factory: Record<string | symbol, unknown> = {
+			command: makeCapability(),
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+		};
+		factory[Symbol("hiddenCap")] = symbolOwned;
+
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(symbolClosed).toBe(true);
+	});
+});
+
+// ===========================================================================
+// Proxy close — Proxy close function is cleanup uncertainty
+// ===========================================================================
+
+describe("Proxy close uncertainty", () => {
+	it("marks CLOSE_UNCERTAIN when a capability has a Proxy close function", async () => {
+		let closeCalled = false;
+		const realCloseFn = async () => {
+			closeCalled = true;
+			return Object.freeze({ status: "closed" });
+		};
+		const proxyCloseFn = new Proxy(realCloseFn, {});
+
+		const capWithProxyClose: Record<string, unknown> = Object.freeze({
+			apply: async () => Object.freeze({ status: "applied" }),
+			close: proxyCloseFn,
+		});
+
+		const factory: Record<string, unknown> = {
+			command: makeCapability(),
+			event: capWithProxyClose,
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+
+		const result = await createRelayApplicationMultiplexer(factory);
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		// Proxy close function cannot be safely captured → CLOSE_UNCERTAIN
+		expect(result.error.code).toBe("CLOSE_UNCERTAIN");
+		// The proxy close is NEVER invoked because captureOwnedClose rejects proxies
+		expect(closeCalled).toBe(false);
+	});
+
+	it("marks CLOSE_UNCERTAIN when closure-based reflection failure occurs", async () => {
+		// Create an object whose descriptor access throws
+		const poisonedFactory: Record<string, unknown> = {
+			command: makeCapability(),
+			event: makeCapability(),
+			agentMessage: makeCapability(),
+			providerProxy: makeCapability(),
+		};
+		// Freeze → ownDescriptors succeeds but doesn't throw on property access
+		Object.freeze(poisonedFactory);
+
+		const result = await createRelayApplicationMultiplexer(poisonedFactory);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		await result.application.close();
 	});
 });

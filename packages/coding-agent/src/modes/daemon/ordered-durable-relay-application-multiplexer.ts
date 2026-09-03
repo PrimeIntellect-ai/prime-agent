@@ -1,6 +1,6 @@
-import { types } from "node:util";
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { RemoteHostFrame, RemoteHostFrameEnvelope } from "./remote-agent-host-protocol.js";
+import { types } from "node:util";
+import type { RemoteHostFrameEnvelope } from "./remote-agent-host-protocol.js";
 import { decodeEnvelope } from "./remote-host-frame-codec.js";
 
 // ===========================================================================
@@ -201,7 +201,6 @@ function hasAccessorDescriptor(raw: unknown): boolean {
 	return false;
 }
 
-
 // ===========================================================================
 // Ownership-first close acquisition
 //
@@ -233,6 +232,17 @@ function hasCapabilityUncertainty(raw: unknown): boolean {
 		return true;
 	}
 	return false;
+}
+
+function hasProxyCloseFunction(raw: unknown): boolean {
+	if (typeof raw !== "object" || raw === null) return false;
+	try {
+		const desc = Object.getOwnPropertyDescriptor(raw, "close");
+		if (!desc || !("value" in desc)) return false;
+		return types.isProxy(desc.value);
+	} catch {
+		return false;
+	}
 }
 
 function captureOwnedClose(raw: unknown): OwnedSlot | null {
@@ -399,21 +409,18 @@ function slotForFrameType(frameType: string): SlotName | null {
 // Returns an explicit Ok/Fail discriminated result.
 // ===========================================================================
 
-type CloneOk<T> = { readonly ok: true; readonly value: T };
-type CloneFail = { readonly ok: false };
-
-type CloneResult<T> = CloneOk<T> | CloneFail;
+type CloneResult = Readonly<{ readonly ok: true; readonly value: unknown }> | Readonly<{ readonly ok: false }>;
 
 interface CloneBudget {
 	nodes: number;
 }
 
-function cloneOk<T>(value: T): CloneResult<T> {
-	return { ok: true, value };
+function cloneOk(value: unknown): CloneResult {
+	return Object.freeze({ ok: true, value });
 }
 
-function cloneFail(): CloneResult<never> {
-	return { ok: false };
+function cloneFail(): CloneResult {
+	return Object.freeze({ ok: false });
 }
 
 function isJsonPrimitiveOrNull(raw: unknown): raw is null | boolean | number | string {
@@ -424,132 +431,91 @@ function isJsonPrimitiveOrNull(raw: unknown): raw is null | boolean | number | s
 	return false;
 }
 
-function deepCloneSafe<T>(raw: T, depth: number, budget: CloneBudget): CloneResult<T> {
+function deepCloneSafe(raw: unknown, depth: number, budget: CloneBudget): CloneResult {
 	if (budget.nodes <= 0 || depth > MAX_DEEP_FREEZE_DEPTH) return cloneFail();
-	if (isJsonPrimitiveOrNull(raw)) return cloneOk(raw) as unknown as CloneResult<T>;
-
+	budget.nodes -= 1;
+	if (isJsonPrimitiveOrNull(raw)) return cloneOk(raw);
 	if (typeof raw !== "object" || raw === null) return cloneFail();
 
-	budget.nodes -= 1;
-
-	if (Array.isArray(raw)) {
-		const cloned: unknown[] = [];
-		for (let i = 0; i < raw.length; i += 1) {
-			const item = deepCloneSafe(raw[i], depth + 1, budget);
-			if (!item.ok) return cloneFail();
-			cloned.push(item.value);
+	try {
+		if (types.isProxy(raw) || Object.getOwnPropertySymbols(raw).length !== 0) return cloneFail();
+		if (Array.isArray(raw)) {
+			const names = Object.getOwnPropertyNames(raw);
+			if (names.length !== raw.length + 1 || names[names.length - 1] !== "length") return cloneFail();
+			const cloned: unknown[] = [];
+			for (let index = 0; index < raw.length; index += 1) {
+				if (names[index] !== String(index)) return cloneFail();
+				const descriptor = Object.getOwnPropertyDescriptor(raw, String(index));
+				if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return cloneFail();
+				const item = deepCloneSafe(descriptor.value, depth + 1, budget);
+				if (!item.ok) return cloneFail();
+				cloned.push(item.value);
+			}
+			return cloneOk(cloned);
 		}
-		return cloneOk(cloned) as unknown as CloneResult<T>;
+		const prototype = Object.getPrototypeOf(raw);
+		if (prototype !== Object.prototype && prototype !== null) return cloneFail();
+		const names = Object.getOwnPropertyNames(raw);
+		const cloned: Record<string, unknown> = {};
+		for (const name of names) {
+			const descriptor = Object.getOwnPropertyDescriptor(raw, name);
+			if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return cloneFail();
+			const item = deepCloneSafe(descriptor.value, depth + 1, budget);
+			if (!item.ok) return cloneFail();
+			cloned[name] = item.value;
+		}
+		return cloneOk(cloned);
+	} catch {
+		return cloneFail();
 	}
-
-	// Accept both Object.prototype and null-prototype objects (codec returns
-	// Object.create(null) for decoded JSON values). Reject other prototypes.
-	const proto = Object.getPrototypeOf(raw);
-	if (proto !== Object.prototype && proto !== null) return cloneFail();
-
-	const keys = Object.getOwnPropertyNames(raw);
-	const cloned: Record<string, unknown> = {};
-	for (const key of keys) {
-		const d = Object.getOwnPropertyDescriptor(raw, key);
-		if (!d || !("value" in d)) return cloneFail();
-		const val = deepCloneSafe(d.value, depth + 1, budget);
-		if (!val.ok) return cloneFail();
-		cloned[key] = val.value;
-	}
-	return cloneOk(cloned) as unknown as CloneResult<T>;
 }
 
-// ===========================================================================
-// All-or-fail deep freeze with codec bounds
-// Returns {ok, value} — fails (ok: false) if budget or depth exceeded,
-// ensuring no partially frozen tree escapes.
-// ===========================================================================
-
-function deepFreezeAllOrFail<T>(raw: T, depth: number, budget: CloneBudget): CloneResult<T> {
-	if (budget.nodes <= 0 || depth > MAX_DEEP_FREEZE_DEPTH) return cloneFail();
-	if (typeof raw !== "object" || raw === null) return cloneOk(raw) as unknown as CloneResult<T>;
-	if (Object.isFrozen(raw)) return cloneOk(raw) as unknown as CloneResult<T>;
-
+function deepFreezeAllOrFail(raw: unknown, depth: number, budget: CloneBudget): boolean {
+	if (budget.nodes <= 0 || depth > MAX_DEEP_FREEZE_DEPTH) return false;
 	budget.nodes -= 1;
-
-	if (Array.isArray(raw)) {
-		for (let i = 0; i < raw.length; i += 1) {
-			const result = deepFreezeAllOrFail(raw[i], depth + 1, budget);
-			if (!result.ok) return cloneFail();
+	if (isJsonPrimitiveOrNull(raw)) return true;
+	if (typeof raw !== "object" || raw === null) return false;
+	try {
+		if (types.isProxy(raw) || Object.getOwnPropertySymbols(raw).length !== 0) return false;
+		if (Array.isArray(raw)) {
+			for (let index = 0; index < raw.length; index += 1) {
+				if (!deepFreezeAllOrFail(raw[index], depth + 1, budget)) return false;
+			}
+			Object.freeze(raw);
+			return true;
+		}
+		const prototype = Object.getPrototypeOf(raw);
+		if (prototype !== Object.prototype && prototype !== null) return false;
+		for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(raw))) {
+			if (!("value" in descriptor) || !descriptor.enumerable) return false;
+			if (!deepFreezeAllOrFail(descriptor.value, depth + 1, budget)) return false;
 		}
 		Object.freeze(raw);
-		return cloneOk(raw) as unknown as CloneResult<T>;
+		return true;
+	} catch {
+		return false;
 	}
-
-	// Accept both Object.prototype and null-prototype objects
-	const proto = Object.getPrototypeOf(raw);
-	if (proto !== Object.prototype && proto !== null) return cloneFail();
-
-	const keys = Object.getOwnPropertyNames(raw);
-	for (const key of keys) {
-		const d = Object.getOwnPropertyDescriptor(raw, key);
-		if (d && "value" in d) {
-			const result = deepFreezeAllOrFail(d.value, depth + 1, budget);
-			if (!result.ok) return cloneFail();
-		}
-	}
-	Object.freeze(raw);
-	return cloneOk(raw) as unknown as CloneResult<T>;
 }
 
-// ===========================================================================
-// Deep fresh envelope — constructs a fully isolated snapshot via bounded
-// codec-normalized clone + all-or-fail freeze.
-// Returns Ok/Fail so the caller can poison without delivering a sentinel.
-// ===========================================================================
+// Decode a cloned tree again so the returned envelope has a proven protocol type
+// without assertions. The second codec pass also prevents clone/type drift.
+function deepFreshEnvelope(envelope: RemoteHostFrameEnvelope): FreshEnvelopeResult {
+	const cloneResult = deepCloneSafe(envelope, 0, { nodes: MAX_DEEP_FREEZE_NODES });
+	if (!cloneResult.ok) return Object.freeze({ ok: false });
+	const decoded = decodeEnvelope(cloneResult.value);
+	if (!decoded.ok) return Object.freeze({ ok: false });
+	if (!deepFreezeAllOrFail(decoded.value, 0, { nodes: MAX_DEEP_FREEZE_NODES })) {
+		return Object.freeze({ ok: false });
+	}
+	return Object.freeze({ ok: true, envelope: decoded.value });
+}
 
 interface FreshEnvelopeOk {
 	readonly ok: true;
 	readonly envelope: RemoteHostFrameEnvelope;
 }
 
-type FreshEnvelopeResult = FreshEnvelopeOk | CloneFail;
-
-function deepFreshEnvelope(envelope: RemoteHostFrameEnvelope): FreshEnvelopeResult {
-	const freshProtocol = Object.freeze({
-		name: envelope.protocol.name,
-		version: envelope.protocol.version,
-	});
-
-	// Cast-free bounded deep clone of the frame (codec-normalized JSON-safe values)
-	const cloneResult = deepCloneSafe(envelope.frame, 0, { nodes: MAX_DEEP_FREEZE_NODES });
-	if (!cloneResult.ok) return { ok: false };
-
-	// All-or-fail deep freeze with same bounds
-	const freezeResult = deepFreezeAllOrFail(cloneResult.value, 0, { nodes: MAX_DEEP_FREEZE_NODES });
-	if (!freezeResult.ok) return { ok: false };
-
-	const frozenFrame = freezeResult.value;
-
-	if (envelope.lastReceivedEventSequence === undefined) {
-		return {
-			ok: true,
-			envelope: Object.freeze({
-				type: "frame",
-				frameId: envelope.frameId,
-				protocol: freshProtocol,
-				sentAt: envelope.sentAt,
-				frame: frozenFrame,
-			}),
-		};
-	}
-	return {
-		ok: true,
-		envelope: Object.freeze({
-			type: "frame",
-			frameId: envelope.frameId,
-			protocol: freshProtocol,
-			sentAt: envelope.sentAt,
-			frame: frozenFrame,
-			lastReceivedEventSequence: envelope.lastReceivedEventSequence,
-		}),
-	};
-}
+type FreshEnvelopeResult = FreshEnvelopeOk | Readonly<{ readonly ok: false }>;
 
 // ===========================================================================
 // OwnDescriptor monitor: detects accessor/hidden descriptors on any value.
@@ -640,10 +606,43 @@ function captureAllOwners(raw: unknown): AllOwnersResult {
 			if (hasCapabilityUncertainty(val)) {
 				anyAccessorUncertain = true;
 			}
+			if (hasProxyCloseFunction(val)) {
+				anyAccessorUncertain = true;
+			}
 			continue;
 		}
 
 		// Dedup by raw object AND raw close function (not wrapper)
+		const isObjectAlias = objectSet.has(slot.object);
+		const isFnAlias = closeFnSet.has(slot.closeFn);
+		objectSet.add(slot.object);
+		closeFnSet.add(slot.closeFn);
+
+		if (isObjectAlias || isFnAlias) {
+			anyAlias = true;
+		} else {
+			owners.push(slot);
+		}
+	}
+
+	// Also scan symbol-keyed own data descriptors for capability owners.
+	// Symbol presence keeps ownershipUncertain true in extractPreliminary,
+	// but we still capture any provable data-value owners so their close
+	// runs in the correct order on factory failure.
+	const symbolKeys = Object.getOwnPropertySymbols(raw);
+	for (const sym of symbolKeys) {
+		const d = Object.getOwnPropertyDescriptor(raw, sym);
+		if (!d || !("value" in d)) {
+			// Accessor or missing — uncertainty is already set by extractPreliminary
+			continue;
+		}
+		const val = d.value;
+		if (typeof val !== "object" || val === null) continue;
+		if (Array.isArray(val)) continue;
+
+		const slot = captureOwnedClose(val);
+		if (!slot) continue;
+
 		const isObjectAlias = objectSet.has(slot.object);
 		const isFnAlias = closeFnSet.has(slot.closeFn);
 		objectSet.add(slot.object);
@@ -675,17 +674,21 @@ export async function createRelayApplicationMultiplexer(raw: unknown): Promise<C
 	const factoryDescMonitor = scanOwnDescUncertainty(raw);
 
 	// Per-slot uncertainty (symbols, proxies, accessors, non-enumerable on individual capabilities)
+	// Proxy close functions make the slot uncertain even when the
+	// capability object itself is inspectable — we cannot safely capture
+	// the close from a Proxy-wrapped function.
 	const slotUncertain =
 		hasCapabilityUncertainty(prelim.command) ||
 		hasCapabilityUncertainty(prelim.event) ||
 		hasCapabilityUncertainty(prelim.agentMessage) ||
-		hasCapabilityUncertainty(prelim.providerProxy);
+		hasCapabilityUncertainty(prelim.providerProxy) ||
+		hasProxyCloseFunction(prelim.command) ||
+		hasProxyCloseFunction(prelim.event) ||
+		hasProxyCloseFunction(prelim.agentMessage) ||
+		hasProxyCloseFunction(prelim.providerProxy);
 
 	const totalUncertain =
-		prelim.ownershipUncertain ||
-		slotUncertain ||
-		allOwners.anyAccessorUncertain ||
-		factoryDescMonitor.anyAccessor;
+		prelim.ownershipUncertain || slotUncertain || allOwners.anyAccessorUncertain || factoryDescMonitor.anyAccessor;
 
 	// Build closeList from all captured owners in original discovery order
 	const closeList = [...allOwners.owners.map((s) => s.close)];
@@ -785,9 +788,8 @@ export async function createRelayApplicationMultiplexer(raw: unknown): Promise<C
 // Implementation
 // ===========================================================================
 
-const applyContext = new AsyncLocalStorage<boolean>();
-
 class RelayApplicationMultiplexerImpl {
+	// See applyContext below class definition — it references this class.
 	private tail: Promise<void> = Promise.resolve();
 	private closePromise: Promise<MultiplexerCloseResult> | null = null;
 	private closed = false;
@@ -806,7 +808,7 @@ class RelayApplicationMultiplexerImpl {
 	// -----------------------------------------------------------------------
 
 	async apply(raw: unknown): Promise<MultiplexerApplyResult> {
-		if (applyContext.getStore()) {
+		if (applyContext.getStore() === this) {
 			return errorResult();
 		}
 		if (this.closed) return errorResult();
@@ -838,9 +840,7 @@ class RelayApplicationMultiplexerImpl {
 		// observePromise can validate it as a native Promise.
 		let rawResult: unknown;
 		try {
-			rawResult = applyContext.run(true, () =>
-				applyFn(Object.freeze({ envelope: freshResult.envelope })),
-			);
+			rawResult = applyContext.run(this, () => applyFn(Object.freeze({ envelope: freshResult.envelope })));
 		} catch {
 			return this.poison();
 		}
@@ -926,3 +926,5 @@ class RelayApplicationMultiplexerImpl {
 		return errorResult();
 	}
 }
+
+const applyContext = new AsyncLocalStorage<RelayApplicationMultiplexerImpl>();
