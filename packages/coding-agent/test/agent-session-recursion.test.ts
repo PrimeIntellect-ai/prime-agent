@@ -3105,9 +3105,33 @@ describe("AgentSession rlm recursion", () => {
 		expect(root.cancelRlmChildRun("unknown-child")).toBe(false);
 		expect(run?.status).toBe("running");
 
+		// Running work retained under the LIVE child: the abort cascade only
+		// reaches active runs, so the cancel walk must descend here itself.
+		await waitFor(() => run?.session !== undefined);
+		const deepHost = createSession({ rlmSessionDir: join(tempDir, "deep-host") });
+		const deepAbort = vi.fn();
+		const deepRun = {
+			id: "deep-1",
+			status: "running",
+			settled: false,
+			abort: deepAbort,
+			publication: { reject: vi.fn() },
+			emitUpdate: vi.fn(),
+		};
+		(deepHost as unknown as { _activeRlmChildRuns: Map<string, typeof deepRun> })._activeRlmChildRuns.set(
+			"deep-1",
+			deepRun,
+		);
+		(run?.session as unknown as { _rlmChildSessions: Map<string, { session: AgentSession }> })._rlmChildSessions.set(
+			"deep-host",
+			{ session: deepHost },
+		);
+
 		expect(root.cancelRlmChildRun(childId)).toBe(true);
 		expect(run?.status).toBe("cancelled");
 		expect(run?.error).toBe("Cancelled by user");
+		expect(deepRun.status).toBe("cancelled");
+		expect(deepAbort).toHaveBeenCalled();
 		// The cancelled update is pushed at cancel time, before the (possibly
 		// stuck) child unwinds; viewers must not keep showing a running child.
 		expect(childStatuses[childStatuses.length - 1]).toBe("cancelled");
