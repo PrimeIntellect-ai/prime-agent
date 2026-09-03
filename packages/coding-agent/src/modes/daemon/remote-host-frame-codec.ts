@@ -1594,7 +1594,8 @@ function decodeEnvelopeImpl(raw: unknown): DecodeResult<RemoteHostFrameEnvelope>
 	};
 	if (typeof obj.lastReceivedEventSequence === "number")
 		fresh.lastReceivedEventSequence = obj.lastReceivedEventSequence;
-	return ok(fresh);
+	Object.freeze(fresh.frame);
+	return ok(Object.freeze(fresh));
 }
 
 // ===========================================================================
