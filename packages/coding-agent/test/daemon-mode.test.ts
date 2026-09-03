@@ -559,7 +559,6 @@ describe("daemon mode helpers", () => {
 		vi.spyOn(internals.cronStore, "getHeartbeat").mockReturnValue({ status: "active" } as AgentCronJob);
 		vi.spyOn(internals.cronStore, "listRlmHeartbeats").mockReturnValue([{ status: "active" } as AgentCronJob]);
 
-		// Delegated child work is not the session's own work.
 		expect(internals.createAgentMessageAgentSummary(state).status).toBe("idle");
 		hasRunningChildren = false;
 		state.runtime = {

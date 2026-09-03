@@ -414,38 +414,6 @@ describe("agents view state", () => {
 		});
 	});
 
-	test("shows a busy settled child on its collapsed idle parent without promoting it", () => {
-		const summaries = [
-			makeSummary({
-				id: "parent-active",
-				activeSessionId: "parent-active",
-				sessionId: "parent-session",
-				sessionName: "Parent",
-				activity: "idle",
-				taskState: "completed",
-				hasRunningRlmChildren: true,
-				messageCount: 2,
-			}),
-			makeSummary({
-				id: "busy-child",
-				activeSessionId: "busy-child",
-				sessionId: "busy-child-session",
-				sessionName: "Busy child",
-				runtimeKind: "subagent",
-				parentActiveSessionId: "parent-active",
-				activity: "working",
-				isSessionActive: true,
-				isStreaming: true,
-			}),
-		];
-
-		const collapsed = buildAgentsViewRows(summaries);
-		expect(collapsed[0]).toMatchObject({ kind: "agent", section: "idle", runningSubagentCount: 1 });
-		// The label agrees with Idle; the badge, not the label, carries the delegation signal.
-		expect(collapsed[0]?.statusLabel).toBe("completed");
-		expect(collapsed[1]).toMatchObject({ kind: "subagent-summary", section: "idle", title: "1 subagent running" });
-	});
-
 	test("counts a busy grandchild on every idle ancestor without promoting them", () => {
 		const summaries = [
 			makeSummary({
@@ -455,6 +423,7 @@ describe("agents view state", () => {
 				sessionName: "Parent",
 				activity: "idle",
 				taskState: "completed",
+				hasRunningRlmChildren: true,
 				messageCount: 2,
 			}),
 			makeSummary({
@@ -482,6 +451,7 @@ describe("agents view state", () => {
 
 		const collapsed = buildAgentsViewRows(summaries);
 		expect(collapsed[0]).toMatchObject({ kind: "agent", section: "idle", runningSubagentCount: 1 });
+		expect(collapsed[0]?.statusLabel).toBe("completed");
 		expect(collapsed[1]).toMatchObject({ kind: "subagent-summary", section: "idle", title: "1 subagent running" });
 
 		const expanded = buildAgentsViewRows(summaries, new Set([collapsed[0]?.identity ?? ""]));

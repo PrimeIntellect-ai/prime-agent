@@ -407,9 +407,7 @@ function readMessageText(content: unknown): string {
 		.join("\n");
 }
 
-// Live work that dies with the worker: the session's own turn or any running
-// RLM child. Recovery and draft-discard gates use this; the display activity
-// axis deliberately does not (delegated work is the badge's signal there).
+// Live work that dies with the worker; the display activity axis deliberately excludes delegated work.
 export function hasLiveSessionWork(activeSession: ActiveSessionState): boolean {
 	const session = activeSession.runtime.session;
 	return session.isSessionActive || session.hasRunningRlmChildren();

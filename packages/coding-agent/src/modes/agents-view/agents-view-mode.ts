@@ -2528,7 +2528,6 @@ export class AgentsViewMode implements Component, Focusable {
 		if (row.kind === "subagent-summary") {
 			const indent = "  ".repeat(row.depth);
 			const hint = row.hasSpawnCode ? theme.fg("dim", ` · ${keyText("app.agents.program")} show program`) : "";
-			// Busy descendants must be legible on a collapsed group, not dimmed away.
 			const titleColor = row.runningSubagentCount > 0 ? ("success" as const) : ("dim" as const);
 			const label = `${theme.fg(titleColor, `${row.expanded ? "▾" : "▸"} ${row.title}`)}${hint}`;
 			const line = padLine(truncateToWidth(`${indent}${label}`, width, ""), width);
@@ -2822,8 +2821,7 @@ function rowHasSpawnCode(row: AgentsViewRow): boolean {
 	return typeof code === "string" && code.trim().length > 0;
 }
 
-// Destructive actions use live-work semantics: the session itself or anything
-// in its subtree still working must be stopped, never deleted outright.
+// Destructive actions gate on live work anywhere in the subtree, never on the display section.
 function hasLiveWork(row: AgentsViewRow): boolean {
 	return row.section === "running" || row.runningSubagentCount > 0 || row.summary.hasRunningRlmChildren === true;
 }
