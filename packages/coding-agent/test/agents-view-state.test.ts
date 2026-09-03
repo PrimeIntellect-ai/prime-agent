@@ -536,6 +536,45 @@ describe("agents view state", () => {
 		expect(rows[0]?.recursiveCost).toBeCloseTo(1.28);
 	});
 
+	test("keeps a parent's recursive total when a passivated child survives only as a catalog row", () => {
+		const parent = makeSummary({
+			id: "parent-active",
+			activeSessionId: "parent-active",
+			sessionId: "parent-session",
+			sessionFile: "/tmp/project/parent.jsonl",
+			usage: { inputTokens: 100, outputTokens: 10, cost: 0.42 },
+		});
+		const liveChild = makeSummary({
+			id: "child-active",
+			activeSessionId: "child-active",
+			sessionId: "child-session",
+			sessionFile: "/tmp/project/child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "parent-active",
+			usage: { inputTokens: 50, outputTokens: 5, cost: 0.68 },
+		});
+		const before = reconcileUnifiedSessions([parent, liveChild], []);
+		const beforeTotal = computeRecursiveCosts(before).get(before[0]!);
+
+		// After a restart the child exists only as a saved-catalog row.
+		const after = reconcileUnifiedSessions(
+			[parent],
+			[
+				makeSessionInfo({
+					path: "/tmp/project/child.jsonl",
+					id: "child-session",
+					parentSessionPath: "/tmp/project/parent.jsonl",
+					rlmDepth: 1,
+					usage: { inputTokens: 50, outputTokens: 5, cost: 0.68 },
+				}),
+			],
+		);
+		const afterTotal = computeRecursiveCosts(after).get(after[0]!);
+
+		expect(beforeTotal).toBeCloseTo(1.1);
+		expect(afterTotal).toBe(beforeTotal);
+	});
+
 	test("tallies a very deep child chain without overflowing the stack", () => {
 		const summaries = [
 			makeSummary({
@@ -1762,6 +1801,13 @@ describe("agents view state", () => {
 				[root, registryChild],
 				[
 					makeSessionInfo({ path: rootPath, id: "root-session", rlmDepth: 0 }),
+					// The catalog also lists the resident child's file: it must merge, not duplicate.
+					makeSessionInfo({
+						path: "/tmp/project/registry-child.jsonl",
+						id: "registry-child",
+						parentSessionPath: rootPath,
+						rlmDepth: 1,
+					}),
 					makeSessionInfo({
 						path: "/tmp/project/saved-child.jsonl",
 						id: "saved-child",
@@ -1858,6 +1904,7 @@ function makeSessionInfo(overrides: Partial<SessionInfo> & { path: string; id: s
 		firstMessage: overrides.firstMessage ?? "hello",
 		allMessagesText: overrides.allMessagesText ?? "hello",
 		agentStatus: overrides.agentStatus,
+		usage: overrides.usage,
 	};
 }
 

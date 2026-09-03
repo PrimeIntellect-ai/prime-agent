@@ -757,6 +757,34 @@ export class RlmSpawnLedger {
 	}
 }
 
+// The catalog scan never visits session-artifacts, where RLM children persist:
+// without this merge a passivated descendant's row (and its spend) survives only
+// as long as some resident roster remembers it.
+export async function withPassiveRlmDescendantInfos(
+	savedSessions: SessionInfo[],
+	ledger: RlmSpawnLedger,
+	options: { cwd?: string; onSession?: (info: SessionInfo) => void } = {},
+): Promise<SessionInfo[]> {
+	const sessions = [...savedSessions];
+	const seen = new Set(savedSessions.map((info) => canonicalSessionPath(info.path)));
+	for (const edge of await ledger.liveEdges()) {
+		const childPath = canonicalSessionPath(edge.child);
+		if (seen.has(childPath)) continue;
+		seen.add(childPath);
+		const info = await readSessionInfo(childPath);
+		if (!info) continue;
+		if (options.cwd !== undefined && (!info.cwd || resolve(info.cwd) !== resolve(options.cwd))) continue;
+		const merged: SessionInfo = {
+			...info,
+			parentSessionPath: info.parentSessionPath ?? edge.parent,
+			rlmDepth: info.rlmDepth ?? edge.depth,
+		};
+		sessions.push(merged);
+		options.onSession?.(merged);
+	}
+	return sessions;
+}
+
 // Shared user-delete policy: only a readable no-parent transcript is positively top-level; children and
 // unknown targets tombstone via the ledger BEFORE the file delete (a tombstoned-but-undeleted file is
 // the accepted orphan of a failed delete).

@@ -214,6 +214,7 @@ import {
 	RlmSpawnLedger,
 	readLegacyRlmSubagentRegistry as readLegacyRlmSubagentRegistryFile,
 	tombstoneSavedSessionDelete,
+	withPassiveRlmDescendantInfos,
 } from "./rlm-ledger.js";
 import {
 	readRlmSubagentDisplayEntry,
@@ -3875,8 +3876,12 @@ export class AgentDaemon {
 					command.scope === "current"
 						? await SessionManager.list(cwd, sessionDir, callbacks)
 						: await SessionManager.listAll(callbacks, sessionDir);
+				const sessions = await withPassiveRlmDescendantInfos(savedSessions, this.rlmSpawnLedger(), {
+					...(command.scope === "current" ? { cwd } : {}),
+					...(callbacks ? { onSession: callbacks.onSession } : {}),
+				});
 				return success(command.id, "list_saved_sessions", {
-					sessions: savedSessions.map(serializeSavedSessionInfo),
+					sessions: sessions.map(serializeSavedSessionInfo),
 				});
 			}
 
