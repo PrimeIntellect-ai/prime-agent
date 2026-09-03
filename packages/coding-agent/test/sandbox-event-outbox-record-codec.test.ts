@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { canonicalDigest, decodeEventFrame, decodeAckFrame } from "../src/modes/daemon/remote-host-frame-codec.js";
+import { canonicalDigest } from "../src/modes/daemon/remote-host-frame-codec.js";
 
 import {
 	decodeSandboxEventOutboxRecordV1,
@@ -58,7 +58,7 @@ function makeEventBody(type: string): Record<string, unknown> {
 		case "session_state":
 			return { type: "session_state", state: "running" };
 		default:
-			throw new Error("unknown event body type: " + type);
+			throw new Error(`unknown event body type: ${type}`);
 	}
 }
 
@@ -81,7 +81,11 @@ function digestOfFrame(evt: Record<string, unknown>): string {
 	return r.value;
 }
 
-function makeAckFrame(ackId: string, acknowledges: string, status: "delivered" | "replayed" | "rejected"): Record<string, unknown> {
+function makeAckFrame(
+	ackId: string,
+	acknowledges: string,
+	status: "delivered" | "replayed" | "rejected",
+): Record<string, unknown> {
 	return {
 		type: "ack",
 		ackId,
@@ -331,7 +335,10 @@ describe("ID and digest mismatch", () => {
 		const tampered = new Uint8Array(enc.bytes);
 		// Find the digest hex string and flip a character.
 		const decStr = new TextDecoder().decode(tampered);
-		const tamperedStr = decStr.replace(enc.record.eventDigest, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+		const tamperedStr = decStr.replace(
+			enc.record.eventDigest,
+			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		);
 		const tamperedBytes = new TextEncoder().encode(tamperedStr);
 		const dec = decodeSandboxEventOutboxRecordV1(tamperedBytes);
 		expect(dec.ok).toBe(false);
@@ -516,7 +523,6 @@ describe("ID and digest mismatch", () => {
 		const dec = decodeSandboxEventOutboxRecordV1(tamperedBytes);
 		expect(dec.ok).toBe(false);
 	});
-
 });
 
 // ===========================================================================
@@ -641,7 +647,7 @@ describe("canonical encoding verification", () => {
 		const enc = encodeSandboxEventOutboxRecordV1(raw);
 		expect(enc.ok).toBe(true);
 		if (!enc.ok) return;
-		const withSpace = utf8("  " + new TextDecoder().decode(enc.bytes));
+		const withSpace = utf8(`  ${new TextDecoder().decode(enc.bytes)}`);
 		const dec = decodeSandboxEventOutboxRecordV1(withSpace);
 		expect(dec.ok).toBe(false);
 	});
@@ -651,7 +657,7 @@ describe("canonical encoding verification", () => {
 		const enc = encodeSandboxEventOutboxRecordV1(raw);
 		expect(enc.ok).toBe(true);
 		if (!enc.ok) return;
-		const withNewline = utf8(new TextDecoder().decode(enc.bytes) + "\n");
+		const withNewline = utf8(`${new TextDecoder().decode(enc.bytes)}\n`);
 		const dec = decodeSandboxEventOutboxRecordV1(withNewline);
 		expect(dec.ok).toBe(false);
 	});
@@ -1165,10 +1171,14 @@ describe("hostile nested ack frame", () => {
 		const raw = makeDeliveredInput("evt-ha1");
 		const cleanAck = { type: "ack", ackId: "a-1", acknowledges: "evt-ha1", status: "delivered" };
 		const precomputedDigest = digestOfAck(cleanAck);
-		const ackProxy = new Proxy(
-			cleanAck,
-			{ get() { throw new Error("getter called"); }, set() { throw new Error("setter called"); } },
-		);
+		const ackProxy = new Proxy(cleanAck, {
+			get() {
+				throw new Error("getter called");
+			},
+			set() {
+				throw new Error("setter called");
+			},
+		});
 		Reflect.set(raw, "ack", ackProxy);
 		raw.ackDigest = precomputedDigest;
 		const enc = encodeSandboxEventOutboxRecordV1(raw);
@@ -1177,7 +1187,12 @@ describe("hostile nested ack frame", () => {
 
 	it("encode rejects ack with accessor property", () => {
 		const raw = makeDeliveredInput("evt-ha2");
-		const cleanAck: Record<string, unknown> = { type: "ack", ackId: "a-1", acknowledges: "evt-ha2", status: "delivered" };
+		const cleanAck: Record<string, unknown> = {
+			type: "ack",
+			ackId: "a-1",
+			acknowledges: "evt-ha2",
+			status: "delivered",
+		};
 		const precomputedDigest = digestOfAck(cleanAck);
 		Object.defineProperty(cleanAck, "status", { get: () => "delivered", enumerable: true, configurable: true });
 		Reflect.set(raw, "ack", cleanAck);
@@ -1199,9 +1214,19 @@ describe("hostile nested ack frame", () => {
 
 	it("encode rejects ack with symbol key", () => {
 		const raw = makeDeliveredInput("evt-ha4");
-		const cleanAck: Record<string, unknown> = { type: "ack", ackId: "a-1", acknowledges: "evt-ha4", status: "delivered" };
+		const cleanAck: Record<string, unknown> = {
+			type: "ack",
+			ackId: "a-1",
+			acknowledges: "evt-ha4",
+			status: "delivered",
+		};
 		const precomputedDigest = digestOfAck(cleanAck);
-		Object.defineProperty(cleanAck, Symbol("x"), { value: "x", enumerable: true, configurable: true, writable: true });
+		Object.defineProperty(cleanAck, Symbol("x"), {
+			value: "x",
+			enumerable: true,
+			configurable: true,
+			writable: true,
+		});
 		Reflect.set(raw, "ack", cleanAck);
 		raw.ackDigest = precomputedDigest;
 		const enc = encodeSandboxEventOutboxRecordV1(raw);
@@ -1210,7 +1235,12 @@ describe("hostile nested ack frame", () => {
 
 	it("encode rejects ack with non-enumerable key", () => {
 		const raw = makeDeliveredInput("evt-ha5");
-		const cleanAck: Record<string, unknown> = { type: "ack", ackId: "a-1", acknowledges: "evt-ha5", status: "delivered" };
+		const cleanAck: Record<string, unknown> = {
+			type: "ack",
+			ackId: "a-1",
+			acknowledges: "evt-ha5",
+			status: "delivered",
+		};
 		const precomputedDigest = digestOfAck(cleanAck);
 		Object.defineProperty(cleanAck, "hidden", { value: "x", enumerable: false });
 		Reflect.set(raw, "ack", cleanAck);
@@ -1221,7 +1251,12 @@ describe("hostile nested ack frame", () => {
 
 	it("encode rejects ack with undefined field", () => {
 		const raw = makeDeliveredInput("evt-ha6");
-		const cleanAck: Record<string, unknown> = { type: "ack", ackId: "a-1", acknowledges: "evt-ha6", status: "delivered" };
+		const cleanAck: Record<string, unknown> = {
+			type: "ack",
+			ackId: "a-1",
+			acknowledges: "evt-ha6",
+			status: "delivered",
+		};
 		const precomputedDigest = digestOfAck(cleanAck);
 		cleanAck.status = undefined;
 		Reflect.set(raw, "ack", cleanAck);
@@ -1232,7 +1267,12 @@ describe("hostile nested ack frame", () => {
 
 	it("encode rejects ack with extra field", () => {
 		const raw = makeDeliveredInput("evt-ha7");
-		const cleanAck: Record<string, unknown> = { type: "ack", ackId: "a-1", acknowledges: "evt-ha7", status: "delivered" };
+		const cleanAck: Record<string, unknown> = {
+			type: "ack",
+			ackId: "a-1",
+			acknowledges: "evt-ha7",
+			status: "delivered",
+		};
 		const precomputedDigest = digestOfAck(cleanAck);
 		cleanAck.extra = "x";
 		Reflect.set(raw, "ack", cleanAck);
@@ -1308,9 +1348,15 @@ describe("true recursive deep freeze", () => {
 		const enc = encodeSandboxEventOutboxRecordV1(raw);
 		expect(enc.ok).toBe(true);
 		if (!enc.ok) return;
-		expect(() => { Object.defineProperty(enc.record.event, "id", { value: "x" }); }).toThrow();
-		expect(() => { Object.defineProperty(enc.record.event.cursor, "hostId", { value: "x" }); }).toThrow();
-		expect(() => { Object.defineProperty(enc.record.event.body, "type", { value: "x" }); }).toThrow();
+		expect(() => {
+			Object.defineProperty(enc.record.event, "id", { value: "x" });
+		}).toThrow();
+		expect(() => {
+			Object.defineProperty(enc.record.event.cursor, "hostId", { value: "x" });
+		}).toThrow();
+		expect(() => {
+			Object.defineProperty(enc.record.event.body, "type", { value: "x" });
+		}).toThrow();
 	});
 
 	it("mutation at every level throws in strict mode — delivered encode event + ack", () => {
@@ -1320,10 +1366,18 @@ describe("true recursive deep freeze", () => {
 		if (!enc.ok) return;
 		if (enc.record.recordKind !== "delivered") return;
 		const r = enc.record;
-		expect(() => { Object.defineProperty(r.event, "id", { value: "x" }); }).toThrow();
-		expect(() => { Object.defineProperty(r.event.cursor, "hostId", { value: "x" }); }).toThrow();
-		expect(() => { Object.defineProperty(r.event.body, "type", { value: "x" }); }).toThrow();
-		expect(() => { Object.defineProperty(r.ack, "status", { value: "x" }); }).toThrow();
+		expect(() => {
+			Object.defineProperty(r.event, "id", { value: "x" });
+		}).toThrow();
+		expect(() => {
+			Object.defineProperty(r.event.cursor, "hostId", { value: "x" });
+		}).toThrow();
+		expect(() => {
+			Object.defineProperty(r.event.body, "type", { value: "x" });
+		}).toThrow();
+		expect(() => {
+			Object.defineProperty(r.ack, "status", { value: "x" });
+		}).toThrow();
 	});
 
 	it("mutation at every level throws in strict mode — decode pending", () => {
@@ -1334,9 +1388,15 @@ describe("true recursive deep freeze", () => {
 		const dec = decodeSandboxEventOutboxRecordV1(new Uint8Array(enc.bytes));
 		expect(dec.ok).toBe(true);
 		if (!dec.ok) return;
-		expect(() => { Object.defineProperty(dec.record.event, "id", { value: "x" }); }).toThrow();
-		expect(() => { Object.defineProperty(dec.record.event.cursor, "hostId", { value: "x" }); }).toThrow();
-		expect(() => { Object.defineProperty(dec.record.event.body, "type", { value: "x" }); }).toThrow();
+		expect(() => {
+			Object.defineProperty(dec.record.event, "id", { value: "x" });
+		}).toThrow();
+		expect(() => {
+			Object.defineProperty(dec.record.event.cursor, "hostId", { value: "x" });
+		}).toThrow();
+		expect(() => {
+			Object.defineProperty(dec.record.event.body, "type", { value: "x" });
+		}).toThrow();
 	});
 
 	it("mutation at every level throws in strict mode — decode delivered", () => {
@@ -1349,10 +1409,18 @@ describe("true recursive deep freeze", () => {
 		if (!dec.ok) return;
 		if (dec.record.recordKind !== "delivered") return;
 		const r = dec.record;
-		expect(() => { Object.defineProperty(r.event, "id", { value: "x" }); }).toThrow();
-		expect(() => { Object.defineProperty(r.event.cursor, "hostId", { value: "x" }); }).toThrow();
-		expect(() => { Object.defineProperty(r.event.body, "type", { value: "x" }); }).toThrow();
-		expect(() => { Object.defineProperty(r.ack, "status", { value: "x" }); }).toThrow();
+		expect(() => {
+			Object.defineProperty(r.event, "id", { value: "x" });
+		}).toThrow();
+		expect(() => {
+			Object.defineProperty(r.event.cursor, "hostId", { value: "x" });
+		}).toThrow();
+		expect(() => {
+			Object.defineProperty(r.event.body, "type", { value: "x" });
+		}).toThrow();
+		expect(() => {
+			Object.defineProperty(r.ack, "status", { value: "x" });
+		}).toThrow();
 	});
 });
 
@@ -1474,5 +1542,3 @@ describe("null prototype rejection for inner objects", () => {
 		expect(enc.ok).toBe(false);
 	});
 });
-
-
