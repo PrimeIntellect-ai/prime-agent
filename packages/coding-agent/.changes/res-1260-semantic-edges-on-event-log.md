@@ -1,0 +1,1 @@
+- Moved the semantic-edge ledger's append and replay IO onto the shared event-log substrate. One behavior unified across both ledgers: an unterminated final line is an uncommitted append — skipped on read and truncated before the next append, never newline-completed.

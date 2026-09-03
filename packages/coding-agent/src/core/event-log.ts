@@ -18,14 +18,15 @@ import { dirname } from "node:path";
  *
  * Appends are single O_APPEND writes (PIPE_BUF-scale sizes, whose atomicity
  * multi-writer consumers rely on for interleaving), fsynced only when the
- * caller needs durability. Replay tolerates exactly one torn FINAL line
- * (rejected by the consumer's parser AND unterminated: a crashed writer's
- * in-progress append) and fails closed on any malformed interior line.
- * Repair happens only on append, never on read — a viewer may replay a live
- * writer's log. EVERY unterminated tail is truncated at its byte offset,
- * even one that parses as JSON: completing it with a newline would turn a
- * line a strict consumer parser rejects into permanent fail-closed interior
- * poison. Unifying consumers keeps the union of their safety behaviors.
+ * caller needs durability. An unterminated final line is a crashed writer's
+ * uncommitted append: replay never surfaces it (even when it parses — data
+ * the next append truncates must never be acted on) and fails closed on any
+ * malformed interior line. Repair happens only on append, never on read — a
+ * viewer may replay a live writer's log. EVERY unterminated tail is
+ * truncated at its byte offset, even one that parses as JSON: completing it
+ * with a newline would turn a line a strict consumer parser rejects into
+ * permanent fail-closed interior poison. Unifying consumers keeps the union
+ * of their safety behaviors.
  */
 
 export interface EventLogOptions {
@@ -66,9 +67,9 @@ export class EventLog {
 	) {}
 
 	/**
-	 * Replay every line through `parse`. `parse` throws for a line it rejects
-	 * (fail-closed for interior lines, tolerated for a torn final line) and
-	 * returns undefined for a line it deliberately skips.
+	 * Replay every terminated line through `parse`. `parse` throws for a line
+	 * it rejects (fail-closed) and returns undefined for a line it deliberately
+	 * skips; an unterminated final line never reaches it.
 	 */
 	replaySync<T>(parse: (line: string, index: number) => T | undefined): T[] {
 		const { maxBytes, maxRecords } = this.options;
@@ -92,19 +93,14 @@ export class EventLog {
 		for (let index = 0; index < rawLines.length; index++) {
 			const line = rawLines[index].trim();
 			if (!line) continue;
+			if (index === rawLines.length - 1 && !endsWithNewline) {
+				this.options.log?.("ignored torn final line");
+				continue;
+			}
 			if (maxRecords !== undefined && ++recordCount > maxRecords) {
 				throw new Error(`event log ${this.path} exceeds ${maxRecords} records; refusing to read`);
 			}
-			let event: T | undefined;
-			try {
-				event = parse(line, index);
-			} catch (error) {
-				if (index === rawLines.length - 1 && !endsWithNewline) {
-					this.options.log?.(`ignored torn final line: ${error instanceof Error ? error.message : String(error)}`);
-					continue;
-				}
-				throw error;
-			}
+			const event = parse(line, index);
 			if (event !== undefined) events.push(event);
 		}
 		return events;

@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, truncateSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { statSync } from "node:fs";
+import { join } from "node:path";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
+import { EventLog } from "./event-log.js";
 
 /**
  * ACP semantic-edges-v1 producer: a durable per-agent ledger of model-request
@@ -158,7 +159,7 @@ export function hashTurnBody(
 export class SemanticEdgeRecorder {
 	readonly sessionId: string;
 	private readonly _ledgerPath?: string;
-	private _pendingRepair?: { truncateToBytes: number } | { terminateLine: true };
+	private readonly _eventLog?: EventLog;
 	private _disabled = false;
 	private _epoch = 0;
 	private _lastTurn?: { requestId: string; epoch: number; bodyHash?: string };
@@ -174,10 +175,11 @@ export class SemanticEdgeRecorder {
 	}) {
 		this.sessionId = options.sessionId;
 		this._ledgerPath = options.ledgerPath;
+		this._eventLog = options.ledgerPath ? new EventLog(options.ledgerPath) : undefined;
 
 		let existing: SemanticEdgeLedgerEvent[] = [];
 		try {
-			existing = this._loadExisting();
+			existing = this._eventLog?.replaySync(parseSemanticEdgeLine) ?? [];
 		} catch (error) {
 			this._disable(error);
 			return;
@@ -330,41 +332,15 @@ export class SemanticEdgeRecorder {
 		}
 	}
 
-	// Construction never mutates the file: a viewer may be reading a live
-	// writer's ledger. Torn-tail repair is deferred to this recorder's first append.
-	private _loadExisting(): SemanticEdgeLedgerEvent[] {
-		if (!this._ledgerPath || !existsSync(this._ledgerPath)) {
-			return [];
-		}
-		const raw = readFileSync(this._ledgerPath, "utf8");
-		const parsed = parseLedgerContent(raw);
-		if (parsed.validLength < raw.length) {
-			this._pendingRepair = { truncateToBytes: Buffer.byteLength(raw.slice(0, parsed.validLength)) };
-		} else if (raw.length > 0 && !raw.endsWith("\n")) {
-			this._pendingRepair = { terminateLine: true };
-		}
-		return parsed.events;
-	}
-
 	// Durable append first, in-memory state second: a failed write must not leave
 	// commit state pointing at events that never reached the ledger.
 	private _append(event: SemanticEdgeLedgerEvent): boolean {
 		if (this._disabled) {
 			return false;
 		}
-		if (this._ledgerPath) {
+		if (this._eventLog) {
 			try {
-				mkdirSync(dirname(this._ledgerPath), { recursive: true });
-				if (this._pendingRepair) {
-					if ("truncateToBytes" in this._pendingRepair) {
-						// Discard the torn tail line so it never becomes mid-file corruption.
-						truncateSync(this._ledgerPath, this._pendingRepair.truncateToBytes);
-					} else {
-						appendFileSync(this._ledgerPath, "\n");
-					}
-					this._pendingRepair = undefined;
-				}
-				appendFileSync(this._ledgerPath, `${JSON.stringify(event)}\n`);
+				this._eventLog.appendSync([event]);
 			} catch (error) {
 				this._disable(error);
 				return false;
@@ -375,39 +351,18 @@ export class SemanticEdgeRecorder {
 	}
 }
 
-/**
- * Parse a ledger, tolerating only a torn final line: malformed AND
- * unterminated (a killed mid-append). A newline-terminated malformed line is
- * real corruption anywhere in the file and throws.
- */
-function parseLedgerContent(raw: string): { events: SemanticEdgeLedgerEvent[]; validLength: number } {
-	const events: SemanticEdgeLedgerEvent[] = [];
-	let offset = 0;
-	let validLength = 0;
-	let lineNumber = 0;
-	while (offset < raw.length) {
-		const newlineIndex = raw.indexOf("\n", offset);
-		const end = newlineIndex === -1 ? raw.length : newlineIndex + 1;
-		const line = raw.slice(offset, end);
-		lineNumber += 1;
-		if (line.trim().length > 0) {
-			try {
-				events.push(JSON.parse(line) as SemanticEdgeLedgerEvent);
-			} catch (error) {
-				if (newlineIndex === -1) {
-					return { events, validLength };
-				}
-				throw new Error(`corrupt semantic-edge ledger line ${lineNumber}: ${String(error)}`);
-			}
-		}
-		offset = end;
-		validLength = end;
+function parseSemanticEdgeLine(line: string, index: number): SemanticEdgeLedgerEvent {
+	try {
+		return JSON.parse(line) as SemanticEdgeLedgerEvent;
+	} catch (error) {
+		throw new Error(`corrupt semantic-edge ledger line ${index + 1}: ${String(error)}`);
 	}
-	return { events, validLength };
 }
 
 export function readSemanticEdgeLedger(path: string): SemanticEdgeLedgerEvent[] {
-	return parseLedgerContent(readFileSync(path, "utf8")).events;
+	// A missing ledger stays loud for explicit readers; the recorder treats absence as empty.
+	statSync(path);
+	return new EventLog(path).replaySync(parseSemanticEdgeLine);
 }
 
 interface FoldSession {
