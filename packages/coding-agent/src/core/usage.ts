@@ -1,13 +1,11 @@
 import type { Usage } from "@earendil-works/pi-ai";
 
-/** Own-session spend published on session rows: excludes descendants' attributed usage. */
 export interface SessionUsageSummary {
 	inputTokens: number;
 	outputTokens: number;
 	cost: number;
 }
 
-/** Undefined when nothing was spent, so rows stay age-only until real usage exists. */
 export function sessionUsageSummaryFrom(usage: Usage): SessionUsageSummary | undefined {
 	const inputTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 	if (inputTokens === 0 && usage.output === 0 && usage.cost.total === 0) {

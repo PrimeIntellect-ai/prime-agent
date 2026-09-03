@@ -11947,13 +11947,7 @@ export class AgentSession {
 
 	private _ownUsageMemo?: { count: number; tailId: string | undefined; usage: SessionUsageSummary | undefined };
 
-	/**
-	 * Whole-file own spend (every branch, forks included, attributed child usage
-	 * subtracted from the in-memory aggregates): the money view's number,
-	 * deliberately broader than /usage's current-branch context answer, and
-	 * identical to the catalog scan so a row never shifts at passivation or
-	 * revival. Memoized until entries change.
-	 */
+	// Whole-file own spend, identical to the catalog scan so rows never shift at passivation.
 	getOwnUsageSummary(): SessionUsageSummary | undefined {
 		const entries = this.sessionManager.getEntries();
 		const tailId = entries.at(-1)?.id;

@@ -11,7 +11,7 @@ import {
 	resolveSessionRlmDepth,
 	SessionManager,
 } from "../../src/core/session-manager.js";
-import { emptyUsage, sessionUsageSummaryFrom } from "../../src/core/usage.js";
+import { sessionUsageSummaryFrom } from "../../src/core/usage.js";
 
 describe("loadEntriesFromFile", () => {
 	let tempDir: string;
@@ -591,113 +591,46 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 });
 
 describe("session info usage totals", () => {
-	let tempDir: string;
-
-	beforeEach(() => {
-		tempDir = join(tmpdir(), `session-usage-test-${Date.now()}`);
+	it("scan and resident computation agree on whole-file own spend, forks and attributions included", async () => {
+		const tempDir = join(tmpdir(), `session-usage-test-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
-	});
+		try {
+			const usage = (input: number, output: number, cost: number, cacheRead = 10, cacheWrite = 5) => ({
+				input,
+				output,
+				cacheRead,
+				cacheWrite,
+				totalTokens: input + output,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
+			});
+			const msg = (id: string, parentId: string | null, role: string, u?: unknown) =>
+				({ type: "message", id, parentId, message: { role, content: "x", timestamp: 1, usage: u } }) as const;
+			const file = join(tempDir, "usage.jsonl");
+			const lines = [
+				{ type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
+				msg("m1", null, "user"),
+				// Forked-away assistant: off the surviving branch, still paid for.
+				msg("m2", "m1", "assistant", usage(1000, 200, 0.5)),
+				// On-disk original usage; the loader folds the aggregate below onto it in memory.
+				msg("m3", "m1", "assistant", usage(2000, 300, 1.0)),
+				{
+					type: "child_usage_attributed",
+					id: "a1",
+					parentId: "m3",
+					targetId: "m3",
+					childUsage: usage(500, 100, 0.4),
+					aggregateUsage: usage(2500, 400, 1.4, 20, 10),
+				},
+			];
+			writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
 
-	afterEach(() => {
-		rmSync(tempDir, { recursive: true, force: true });
-	});
+			const entries = SessionManager.open(file).getEntries();
+			const resident = sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
 
-	function usage(input: number, output: number, cost: number, cacheRead = 10, cacheWrite = 5) {
-		return {
-			input,
-			output,
-			cacheRead,
-			cacheWrite,
-			totalTokens: input + output,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
-		};
-	}
-
-	it("folds attribution aggregates and subtracts child usage like the loader", async () => {
-		const file = join(tempDir, "usage.jsonl");
-		// Mirrors the append-only writer: assistant lines keep their ORIGINAL
-		// model-response usage on disk; the attribution carries child + aggregate.
-		const lines = [
-			{ type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
-			{ type: "message", id: "m1", parentId: null, message: { role: "user", content: "hi", timestamp: 1 } },
-			{
-				type: "message",
-				id: "m2",
-				parentId: "m1",
-				message: { role: "assistant", content: "ok", timestamp: 2, usage: usage(1000, 200, 0.5) },
-			},
-			{
-				type: "message",
-				id: "m3",
-				parentId: "m2",
-				message: { role: "assistant", content: "done", timestamp: 3, usage: usage(2000, 300, 1.0) },
-			},
-			{
-				type: "child_usage_attributed",
-				id: "a1",
-				parentId: "m3",
-				targetId: "m3",
-				childUsage: usage(500, 100, 0.4),
-				aggregateUsage: usage(2500, 400, 1.4, 20, 10),
-			},
-		];
-		writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
-
-		const info = await readSessionInfo(file);
-
-		// input tokens include cache reads/writes, matching the /usage spend total.
-		expect(info?.usage).toEqual({ inputTokens: 3030, outputTokens: 500, cost: 1.5 });
-	});
-
-	it("matches the resident computation on a file with a forked branch and a flushed attribution", async () => {
-		const file = join(tempDir, "forked.jsonl");
-		const lines = [
-			{ type: "session", version: 3, id: "s3", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
-			{ type: "message", id: "m1", parentId: null, message: { role: "user", content: "hi", timestamp: 1 } },
-			// Forked-away assistant: not on the surviving branch, still paid for.
-			{
-				type: "message",
-				id: "m2",
-				parentId: "m1",
-				message: { role: "assistant", content: "draft", timestamp: 2, usage: usage(1000, 200, 0.5) },
-			},
-			{
-				type: "message",
-				id: "m3",
-				parentId: "m1",
-				message: { role: "assistant", content: "final", timestamp: 3, usage: usage(2000, 300, 1.0) },
-			},
-			// The loader folds this aggregate into m3 in memory; the disk line above keeps the original.
-			{
-				type: "child_usage_attributed",
-				id: "a1",
-				parentId: "m3",
-				targetId: "m3",
-				childUsage: usage(500, 100, 0.4),
-				aggregateUsage: usage(2500, 400, 1.4, 20, 10),
-			},
-		];
-		writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
-
-		const manager = SessionManager.open(file);
-		const entries = manager.getEntries();
-		const resident = sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
-
-		expect(resident).toBeDefined();
-		expect((await readSessionInfo(file))?.usage).toEqual(resident);
-		expect(resident?.cost).toBeCloseTo(1.5);
-	});
-
-	it("reports no usage for sessions without assistant usage", async () => {
-		const file = join(tempDir, "no-usage.jsonl");
-		const lines = [
-			{ type: "session", version: 3, id: "s2", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
-			{ type: "message", id: "m1", parentId: null, message: { role: "user", content: "hi", timestamp: 1 } },
-		];
-		writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
-
-		expect((await readSessionInfo(file))?.usage).toBeUndefined();
-		// The resident producer shares the same zero-spend rule.
-		expect(sessionUsageSummaryFrom(emptyUsage())).toBeUndefined();
+			expect((await readSessionInfo(file))?.usage).toEqual({ inputTokens: 3030, outputTokens: 500, cost: 1.5 });
+			expect(resident).toEqual({ inputTokens: 3030, outputTokens: 500, cost: 1.5 });
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 });

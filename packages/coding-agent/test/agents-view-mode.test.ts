@@ -717,7 +717,7 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("renders token and cost details in the exact format, dropping the message count", () => {
+	it("renders the unconditional usage cell and drops the message count", () => {
 		const parent = summary({
 			id: "spender",
 			activeSessionId: "spender",
@@ -747,27 +747,17 @@ describe("AgentsViewMode", () => {
 			const collapsed = buildAgentsViewRows([parent, child, inactive]);
 			const rows = buildAgentsViewRows([parent, child, inactive], new Set(collapsed.map((row) => row.identity)));
 			Reflect.set(view, "rows", rows);
-			const parentRow = rows.find((row) => row.summary.sessionId === "spender-session");
-			expect(stripAnsi(invoke("renderRow", view, parentRow, 200) as string)).toContain(
-				"↑12k ↓1.2k · $0.42 ($1.10 w/ subagents)",
-			);
-			const childRow = rows.find(
-				(row) => row.summary.sessionId === "spender-child-session" && row.kind === "subagent",
-			);
-			expect(stripAnsi(invoke("renderRow", view, childRow, 200) as string)).toContain(
-				"↑500 ↓50 · $0.68 ($0.68 w/ subagents)",
-			);
-			// Zeros render as zeros; the message-count detail stays gone.
-			const inactiveRow = rows.find((row) => row.summary.sessionId === "saved-only-session");
-			const inactiveLine = stripAnsi(invoke("renderRow", view, inactiveRow, 200) as string);
-			expect(inactiveLine).not.toContain("7 ·");
+			const line = (row: AgentsViewRow | undefined) => stripAnsi(invoke("renderRow", view, row, 200) as string);
+			const byId = (sessionId: string, kind?: string) =>
+				rows.find((row) => row.summary.sessionId === sessionId && (!kind || row.kind === kind));
+
+			expect(line(byId("spender-session"))).toContain("↑12k ↓1.2k · $0.42 ($1.10 w/ subagents)");
+			expect(line(byId("spender-child-session", "subagent"))).toContain("↑500 ↓50 · $0.68 ($0.68 w/ subagents)");
+			const inactiveLine = line(byId("saved-only-session"));
 			expect(inactiveLine).toContain("↑0 ↓0 · $0.00 ($0.00 w/ subagents)");
-			// Descendant-only spend still shows the money on a zero-usage parent.
-			const bareParent = { ...rows.find((row) => row.summary.sessionId === "spender-session")! };
-			bareParent.summary = { ...bareParent.summary, usage: undefined };
-			expect(stripAnsi(invoke("renderRow", view, bareParent, 200) as string)).toContain(
-				"↑0 ↓0 · $0.00 ($1.10 w/ subagents)",
-			);
+			expect(inactiveLine).not.toContain("7 ·");
+			const bare = { ...byId("spender-session")!, summary: { ...parent, usage: undefined } };
+			expect(line(bare)).toContain("↑0 ↓0 · $0.00 ($1.10 w/ subagents)");
 		} finally {
 			stopThemeWatcher();
 		}

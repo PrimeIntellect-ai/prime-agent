@@ -56,7 +56,6 @@ export interface SessionSummary {
 	isCompacting: boolean;
 	isBashRunning?: boolean;
 	hasRunningRlmChildren?: boolean;
-	/** Own-session spend (descendants excluded); the view derives recursive totals from rows. */
 	usage?: SessionUsageSummary;
 	/** True while the agent is streaming with tool calls pending; drives the "running tools" label. */
 	isRunningTools?: boolean;

@@ -2833,7 +2833,6 @@ function hasLiveWork(row: AgentsViewRow): boolean {
 	return row.section === "running" || row.runningSubagentCount > 0 || row.summary.hasRunningRlmChildren === true;
 }
 
-/** Every row renders the full cell, zeros included: `↑<up> ↓<down> · $<own> ($<total> w/ subagents)`. */
 function formatRowUsage(row: AgentsViewRow): string {
 	const usage = row.summary.usage;
 	return `↑${formatTokenCount(usage?.inputTokens ?? 0)} ↓${formatTokenCount(usage?.outputTokens ?? 0)} · $${(

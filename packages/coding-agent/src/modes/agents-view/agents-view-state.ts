@@ -76,7 +76,6 @@ export interface AgentsViewRow {
 	depth: number;
 	selectable: boolean;
 	runningSubagentCount: number;
-	/** Own cost plus all descendants' own costs, from the same traversal as the tally. */
 	recursiveCost: number;
 	/** Unique selection identity for this row. */
 	identity: string;
@@ -422,10 +421,7 @@ export interface UnifiedSessionIndex {
 	childrenByParent: Map<UnifiedSessionRecord, UnifiedSessionRecord[]>;
 }
 
-/**
- * Own cost plus all descendants', over the UNFILTERED record hierarchy: search
- * and scope filters must never change the parenthesized total on a row.
- */
+// Rolls costs over the UNFILTERED hierarchy: filters must never change a row's total.
 export function computeRecursiveCosts(
 	records: readonly UnifiedSessionRecord[],
 	index: UnifiedSessionIndex = buildUnifiedSessionIndex(records),
@@ -770,7 +766,6 @@ export function buildAgentsViewRows(
 			descendantsCost += child.recursiveCost;
 		}
 		row.runningSubagentCount = count;
-		// The caller's unfiltered rollup wins: visible rows may be missing filtered-out descendants.
 		row.recursiveCost =
 			(row.record ? recursiveCosts?.get(row.record) : undefined) ?? (row.summary.usage?.cost ?? 0) + descendantsCost;
 	}

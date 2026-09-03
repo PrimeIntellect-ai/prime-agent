@@ -262,7 +262,6 @@ export interface SessionInfo {
 	firstMessage: string;
 	allMessagesText: string;
 	agentStatus?: AgentStatus;
-	/** Whole-file own spend (attributed child usage subtracted); absent when no usage was recorded. */
 	usage?: SessionUsageSummary;
 }
 
@@ -962,11 +961,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 		let state: SessionState | undefined;
 		let agentStatus: AgentStatus | undefined;
 		let lastActivityTime: number | undefined;
-		// Mirrors the loader's usage semantics: fold attribution aggregates onto
-		// their target assistants (disk may carry originals or, after a full-file
-		// rewrite, already-folded aggregates), then subtract the child usage —
-		// either representation cancels to the same own spend the resident
-		// computation reports.
+		// Fold attribution aggregates like the loader: either disk representation cancels to the same own spend.
 		const assistantUsageById = new Map<string, Usage>();
 		const attributedChildUsages: Usage[] = [];
 

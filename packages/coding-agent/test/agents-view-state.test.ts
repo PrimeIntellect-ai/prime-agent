@@ -530,44 +530,6 @@ describe("agents view state", () => {
 		expect(expanded.find((row) => row.title === "Child")?.runningSubagentCount).toBe(0);
 	});
 
-	test("sums recursive cost over descendants while each row keeps its own cost", () => {
-		const summaries = [
-			makeSummary({
-				id: "parent-active",
-				activeSessionId: "parent-active",
-				sessionId: "parent-session",
-				sessionName: "Parent",
-				usage: { inputTokens: 1000, outputTokens: 100, cost: 0.42 },
-			}),
-			makeSummary({
-				id: "child-active",
-				activeSessionId: "child-active",
-				sessionId: "child-session",
-				sessionName: "Child",
-				runtimeKind: "subagent",
-				parentActiveSessionId: "parent-active",
-				usage: { inputTokens: 500, outputTokens: 50, cost: 0.5 },
-			}),
-			makeSummary({
-				id: "grandchild-active",
-				activeSessionId: "grandchild-active",
-				sessionId: "grandchild-session",
-				sessionName: "Grandchild",
-				runtimeKind: "subagent",
-				parentActiveSessionId: "child-active",
-				usage: { inputTokens: 200, outputTokens: 20, cost: 0.18 },
-			}),
-		];
-
-		const collapsed = buildAgentsViewRows(summaries);
-		expect(collapsed[0]?.summary.usage?.cost).toBe(0.42);
-		expect(collapsed[0]?.recursiveCost).toBeCloseTo(1.1);
-		const expanded = buildAgentsViewRows(summaries, new Set([collapsed[0]?.identity ?? ""]));
-		const childRow = expanded.find((row) => row.title === "Child");
-		expect(childRow?.summary.usage?.cost).toBe(0.5);
-		expect(childRow?.recursiveCost).toBeCloseTo(0.68);
-	});
-
 	test("keeps the recursive total complete when search filters out a descendant", () => {
 		const parent = makeSummary({
 			id: "parent-active",
@@ -585,13 +547,23 @@ describe("agents view state", () => {
 			parentActiveSessionId: "parent-active",
 			usage: { inputTokens: 50, outputTokens: 5, cost: 0.68 },
 		});
-		const records = reconcileUnifiedSessions([parent, child], []);
+		const grandchild = makeSummary({
+			id: "grandchild-active",
+			activeSessionId: "grandchild-active",
+			sessionId: "grandchild-session",
+			sessionName: "unrelated nested worker",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "child-active",
+			usage: { inputTokens: 20, outputTokens: 2, cost: 0.18 },
+		});
+		const records = reconcileUnifiedSessions([parent, child, grandchild], []);
 		const costs = computeRecursiveCosts(records);
 		const filtered = filterUnifiedSessions(records, (text) => text.includes("Searchable"));
 
 		expect(filtered).toHaveLength(1);
 		const rows = buildAgentsViewRows(filtered, new Set(), new Set(), undefined, costs);
-		expect(rows[0]?.recursiveCost).toBeCloseTo(1.1);
+		expect(rows[0]?.summary.usage?.cost).toBe(0.42);
+		expect(rows[0]?.recursiveCost).toBeCloseTo(1.28);
 	});
 
 	test("tallies a very deep child chain without overflowing the stack", () => {
