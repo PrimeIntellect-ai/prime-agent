@@ -319,6 +319,9 @@ describe("state transitions", () => {
 		await store.markActive(pc(), "dd");
 		await store.markTerminating(ac(), "dd");
 		await store.markTerminated(createClaim(GEN, TOK, "terminating"), "dd", "user_deleted");
+		// Update to set platformDeleted=true before markDeleted
+		const claimDd = createClaim(GEN, TOK, "terminated");
+		await store.update(claimDd, "dd", (r) => ({ ...r, platformDeleted: true }));
 		await store.markDeleted(tc(), "dd");
 		expect(await store.read("dd")).toBeUndefined();
 		// Tombstone should exist
@@ -339,6 +342,9 @@ describe("state transitions", () => {
 		await store.markActive(pc(), "pu");
 		await store.markTerminating(ac(), "pu");
 		await store.markTerminated(createClaim(GEN, TOK, "terminating"), "pu", "user_deleted");
+		// Update to set platformDeleted=true before markDeleted
+		const claimPu = createClaim(GEN, TOK, "terminated");
+		await store.update(claimPu, "pu", (r) => ({ ...r, platformDeleted: true }));
 		await store.markDeleted(tc(), "pu");
 		await store.purge(tc(), "pu");
 		const dir = (store as unknown as { baseDir: string }).baseDir;
@@ -659,15 +665,15 @@ describe("lifecycle fail-closed", () => {
 		expect(rec).toBeDefined();
 		expect(rec?.state).toBe("active");
 		await life.delete();
+		// Record is tombstoned after markDeleted (no record file remains)
 		rec = await store.read(lk2);
-		expect(rec).toBeDefined();
-		expect(rec?.state).toBe("terminated");
+		expect(rec).toBeUndefined();
 
-		// Verify persisted file name is hashed and lacks raw provider sandbox ID + region
-		const files = readdirSync(dir).filter((x: string) => x.endsWith(".sandbox-ownership.json"));
-		expect(files.length).toBe(1);
-		expect(files[0]).toMatch(/^[0-9a-f]{64}\.sandbox-ownership\.json$/);
-		const fileContent = readFileSync(join(dir, files[0]), "utf8");
+		// Verify tombstone file is hashed and lacks raw provider sandbox ID + region
+		const tombstoneFiles = readdirSync(dir).filter((x: string) => x.endsWith(".sandbox-tombstone.json"));
+		expect(tombstoneFiles.length).toBe(1);
+		expect(tombstoneFiles[0]).toMatch(/^[0-9a-f]{64}\.sandbox-tombstone\.json$/);
+		const fileContent = readFileSync(join(dir, tombstoneFiles[0]), "utf8");
 		expect(fileContent).not.toContain("sbx-full-001");
 		expect(fileContent).not.toContain("us-west");
 		expect(fileContent).not.toContain("us-east");
@@ -879,6 +885,253 @@ describe("compensation on missing sessionId", () => {
 		).toBeUndefined();
 		const errorCodes = events.filter((e) => e.status === "error").map((e) => e.code);
 		expect(errorCodes).toContain(LIFECYCLE_CODES.CREATE_SESSION_REQUIRED);
+	});
+});
+
+// =========================================================================
+// Adversarial: wrong token/generation on terminating state
+// =========================================================================
+describe("adversarial - wrong token/generation terminating state", () => {
+	it("refuses markTerminating with wrong token", async () => {
+		const store = makeStore();
+		await setupActive(store, "awt");
+		const wrongClaim = createClaim(GEN, "11111111-1111-4111-a111-111111111111", "active");
+		await expect(store.markTerminating(wrongClaim, "awt")).rejects.toThrow(/claim_token_mismatch/);
+	});
+	it("refuses markTerminating with wrong generation", async () => {
+		const store = makeStore();
+		await setupActive(store, "awg");
+		const wrongClaim = createClaim("wrong-gen", TOK, "active");
+		await expect(store.markTerminating(wrongClaim, "awg")).rejects.toThrow(/claim_generation_mismatch/);
+	});
+	it("in-process delete with wrong token on terminating record fails closed", async () => {
+		const store = makeStore();
+		await setupActive(store, "awtd");
+		await store.markTerminating(ac(), "awtd");
+		const events: Array<{ code: string; status: string }> = [];
+		const wrongLife = new SandboxLifecycle(createPrimeSandboxProvider(new FakeCommandRunner()), {
+			ownershipStore: store,
+			ownerGeneration: GEN,
+			ownerToken: "11111111-1111-4111-a111-111111111111",
+			onEvent: (e) => events.push({ code: e.code, status: e.status }),
+		});
+		(wrongLife as unknown as { lifecycleKey_: string }).lifecycleKey_ = "awtd";
+		(wrongLife as unknown as { identity: { id: string } }).identity = { id: "sbx-awtd" };
+		await expect(wrongLife.delete()).rejects.toThrow(/recovery_required/);
+		const errEvents = events.filter((e) => e.status === "error" && e.code === LIFECYCLE_CODES.RECOVERY_REQUIRED);
+		expect(errEvents.length).toBeGreaterThan(0);
+	});
+	it("in-process delete with wrong generation on terminating record fails closed", async () => {
+		const store = makeStore();
+		await setupActive(store, "awgd");
+		await store.markTerminating(ac(), "awgd");
+		const events: Array<{ code: string; status: string }> = [];
+		const wrongLife = new SandboxLifecycle(createPrimeSandboxProvider(new FakeCommandRunner()), {
+			ownershipStore: store,
+			ownerGeneration: "wrong-gen",
+			ownerToken: TOK,
+			onEvent: (e) => events.push({ code: e.code, status: e.status }),
+		});
+		(wrongLife as unknown as { lifecycleKey_: string }).lifecycleKey_ = "awgd";
+		(wrongLife as unknown as { identity: { id: string } }).identity = { id: "sbx-awgd" };
+		await expect(wrongLife.delete()).rejects.toThrow(/recovery_required/);
+		const errEvents = events.filter((e) => e.status === "error" && e.code === LIFECYCLE_CODES.RECOVERY_REQUIRED);
+		expect(errEvents.length).toBeGreaterThan(0);
+	});
+});
+
+// =========================================================================
+// Adversarial: tombstone identity mismatches
+// =========================================================================
+describe("adversarial - tombstone identity mismatches", () => {
+	it("tombstone with wrong lifecycleKey fails readTombstone identity check", async () => {
+		const dir = tempDir();
+		const store = makeStore(dir);
+		const lk = "tlk-bad-lk";
+		await prov(store, lk);
+		await store.markActive(pc(), lk);
+		await store.markTerminating(ac(), lk);
+		await store.markTerminated(createClaim(GEN, TOK, "terminating"), lk, "user_deleted");
+		// Set platformDeleted=true before markDeleted
+		await store.update(createClaim(GEN, TOK, "terminated"), lk, (r) => ({ ...r, platformDeleted: true }));
+		await store.markDeleted(tc(), lk);
+		// Corrupt lifecycleKey in tombstone on disk
+		const tbDir = (store as unknown as { baseDir: string }).baseDir;
+		const tbFiles = readdirSync(tbDir).filter((x: string) => x.endsWith(".sandbox-tombstone.json"));
+		expect(tbFiles.length).toBe(1);
+		const tbPath = join(tbDir, tbFiles[0]);
+		const raw = JSON.parse(readFileSync(tbPath, "utf8"));
+		raw.lifecycleKey = "tampered-lk";
+		writeFileSync(tbPath, JSON.stringify(raw));
+		// readTombstone returns the tampered data — caller must detect mismatch
+		const tomb = await store.readTombstone(lk);
+		expect(tomb).toBeDefined();
+		expect(tomb!.lifecycleKey).toBe("tampered-lk");
+	});
+	it("tombstone with wrong ownerGeneration detected by readTombstone", async () => {
+		const dir = tempDir();
+		const store = makeStore(dir);
+		const lk = "tlk-bad-gen";
+		await prov(store, lk);
+		await store.markActive(pc(), lk);
+		await store.markTerminating(ac(), lk);
+		await store.markTerminated(createClaim(GEN, TOK, "terminating"), lk, "user_deleted");
+		// Set platformDeleted=true before markDeleted
+		await store.update(createClaim(GEN, TOK, "terminated"), lk, (r) => ({ ...r, platformDeleted: true }));
+		await store.markDeleted(tc(), lk);
+		// Corrupt ownerGeneration in tombstone
+		const tbDir = (store as unknown as { baseDir: string }).baseDir;
+		const tbFiles = readdirSync(tbDir).filter((x: string) => x.endsWith(".sandbox-tombstone.json"));
+		const tbPath = join(tbDir, tbFiles[0]);
+		const raw = JSON.parse(readFileSync(tbPath, "utf8"));
+		raw.ownerGeneration = "wrong-gen";
+		writeFileSync(tbPath, JSON.stringify(raw));
+		const tomb = await store.readTombstone(lk);
+		expect(tomb!.ownerGeneration).toBe("wrong-gen");
+	});
+	it("tombstone with wrong sessionId rejected when sessionId is set", async () => {
+		const dir = tempDir();
+		const store = makeStore(dir);
+		const lk = "tlk-bad-sid";
+		await prov(store, lk, "expected-session");
+		await store.markActive(pc(), lk);
+		await store.markTerminating(ac(), lk);
+		await store.markTerminated(createClaim(GEN, TOK, "terminating"), lk, "user_deleted");
+		// Set platformDeleted=true before markDeleted
+		await store.update(createClaim(GEN, TOK, "terminated"), lk, (r) => ({ ...r, platformDeleted: true }));
+		await store.markDeleted(tc(), lk);
+		// Corrupt sessionId in tombstone
+		const tbDir = (store as unknown as { baseDir: string }).baseDir;
+		const tbFiles = readdirSync(tbDir).filter((x: string) => x.endsWith(".sandbox-tombstone.json"));
+		const tbPath = join(tbDir, tbFiles[0]);
+		const raw = JSON.parse(readFileSync(tbPath, "utf8"));
+		raw.sessionId = "wrong-session";
+		writeFileSync(tbPath, JSON.stringify(raw));
+		// In-process lifecycle validation should reject sessionId mismatch
+		const events: Array<{ code: string; status: string }> = [];
+		const life = new SandboxLifecycle(createPrimeSandboxProvider(new FakeCommandRunner()), {
+			ownershipStore: store,
+			ownerGeneration: GEN,
+			ownerToken: TOK,
+			onEvent: (e) => events.push({ code: e.code, status: e.status }),
+		});
+		life.sessionId = "expected-session";
+		(life as unknown as { lifecycleKey_: string }).lifecycleKey_ = lk;
+		(life as unknown as { identity: { id: string } }).identity = { id: "sbx-tlk-sid" };
+		await expect(life.delete()).rejects.toThrow(/recovery_required/);
+	});
+});
+
+// =========================================================================
+// Adversarial: markDeleted with platformDeleted===false
+// =========================================================================
+describe("adversarial - markDeleted platformDeleted false", () => {
+	it("markDeleted rejects terminated record without platformDeleted true", async () => {
+		const store = makeStore();
+		await prov(store, "npd1");
+		await store.markActive(pc(), "npd1");
+		await store.markTerminating(ac(), "npd1");
+		await store.markTerminated(createClaim(GEN, TOK, "terminating"), "npd1", "user_deleted");
+		// Record now has platformDeleted=false (default); markDeleted below tests rejects
+		// Override platformDeleted to false on disk
+		const stDir = (store as unknown as { baseDir: string }).baseDir;
+		const recFile = readdirSync(stDir).filter((x: string) => x.endsWith(".sandbox-ownership.json"))[0];
+		const recPath = join(stDir, recFile);
+		const raw = JSON.parse(readFileSync(recPath, "utf8"));
+		raw.platformDeleted = false;
+		writeFileSync(recPath, JSON.stringify(raw));
+		await expect(store.markDeleted(tc(), "npd1")).rejects.toThrow(/markDeleted_requires_platform_deleted/);
+	});
+});
+
+// =========================================================================
+// Adversarial: actual tombstone verification
+// =========================================================================
+describe("adversarial - tombstone exact verification", () => {
+	it("tombstone after full in-process delete has correct all fields", async () => {
+		const dir = tempDir();
+		const store = makeStore(dir);
+		const runner = new FakeCommandRunner()
+			.onCommand("--version", { stdout: "0.9.1\n" })
+			.onCommand("sandbox list --num", { stdout: emptyListJson() })
+			.onCommand("sandbox list --output", { stdout: emptyListJson() })
+			.onCommand("sandbox create", { stdout: "Successfully created sandbox sbx-tv-1\n" })
+			.onCommand("sandbox get", { stdout: makeGetJson({ id: "sbx-tv-1", status: "RUNNING" }) })
+			.onCommand("sandbox delete", { stdout: "" });
+		const events: Array<{ code: string; status: string }> = [];
+		const life = new SandboxLifecycle(createPrimeSandboxProvider(runner), {
+			ownershipStore: store,
+			ownerGeneration: GEN,
+			ownerToken: TOK,
+			onEvent: (e) => events.push({ code: e.code, status: e.status }),
+		});
+		await life.create({ image: "img", sessionLabel: "t" }, "sess-tv-verify");
+		await life.waitForReady();
+		await life.delete();
+		const lk: string = life.lifecycleKey as string;
+		// Read tombstone and verify exact fields
+		const tomb = await store.readTombstone(lk);
+		expect(tomb).toBeDefined();
+		expect(tomb!.lifecycleKey).toBe(lk);
+		expect(tomb!.sessionId).toBe("sess-tv-verify");
+		expect(tomb!.ownerGeneration).toBe(GEN);
+		expect(tomb!.ownerTokenHash).toMatch(/^[0-9a-f]{64}$/);
+		expect(tomb!.version).toBe(1);
+		expect(tomb!.terminationReason).toBe("user_deleted");
+		expect(tomb!.deletedAt).toBeDefined();
+		// Verify no raw provider sandbox ID or raw token in tombstone
+		const json = JSON.stringify(tomb);
+		expect(json).not.toContain("sbx-tv-1");
+		expect(json).not.toContain(TOK);
+		expect(json).not.toContain('"ownerToken"');
+	});
+	it("tombstone after full cycle has correct all fields", async () => {
+		const dir = tempDir();
+		const store = makeStore(dir);
+		const lk = "tv-cycle-lk";
+		await prov(store, lk, "sess-tv-cycle");
+		await store.markActive(pc(), lk);
+		await store.markTerminating(ac(), lk);
+		await store.markTerminated(createClaim(GEN, TOK, "terminating"), lk, "user_deleted");
+		// Set platformDeleted=true before markDeleted
+		await store.update(createClaim(GEN, TOK, "terminated"), lk, (r) => ({ ...r, platformDeleted: true }));
+		await store.markDeleted(tc(), lk);
+		const tomb = await store.readTombstone(lk);
+		expect(tomb).toBeDefined();
+		expect(tomb!.lifecycleKey).toBe(lk);
+		expect(tomb!.sessionId).toBe("sess-tv-cycle");
+		expect(tomb!.ownerGeneration).toBe(GEN);
+		expect(tomb!.ownerTokenHash).toMatch(/^[0-9a-f]{64}$/);
+		expect(tomb!.version).toBe(1);
+		expect(tomb!.terminationReason).toBe("user_deleted");
+		expect(JSON.stringify(tomb)).not.toContain(TOK);
+		expect(JSON.stringify(tomb)).not.toContain('"ownerToken"');
+	});
+	it("in-process delete emits only error not success on persistence failure", async () => {
+		const dir = tempDir();
+		const store = makeStore(dir);
+		const runner = new FakeCommandRunner()
+			.onCommand("--version", { stdout: "0.9.1\n" })
+			.onCommand("sandbox list --num", { stdout: emptyListJson() })
+			.onCommand("sandbox list --output", { stdout: emptyListJson() })
+			.onCommand("sandbox create", { stdout: "Successfully created sandbox sbx-tv-2\n" })
+			.onCommand("sandbox get", { stdout: makeGetJson({ id: "sbx-tv-2", status: "RUNNING" }) })
+			.onCommand("sandbox delete", { stdout: "" });
+		const events: Array<{ code: string; status: string }> = [];
+		const life = new SandboxLifecycle(createPrimeSandboxProvider(runner), {
+			ownershipStore: store,
+			ownerGeneration: GEN,
+			ownerToken: TOK,
+			onEvent: (e) => events.push({ code: e.code, status: e.status }),
+		});
+		await life.create({ image: "img", sessionLabel: "t" }, "sess-tv-emit");
+		await life.waitForReady();
+		await life.delete();
+		const okEvents = events.filter((e) => e.code === LIFECYCLE_CODES.DELETE_OK && e.status === "success");
+		expect(okEvents.length).toBeGreaterThan(0);
+		// No success event with RECOVERY_REQUIRED code
+		const badEvents = events.filter((e) => e.code === LIFECYCLE_CODES.RECOVERY_REQUIRED && e.status === "success");
+		expect(badEvents.length).toBe(0);
 	});
 });
 

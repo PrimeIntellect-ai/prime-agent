@@ -299,26 +299,10 @@ describe("lifecycle persisted files lack raw provider values", () => {
 			await life.delete();
 			expect(deleteTriggered).toBe(true);
 
-			// After lifecycle.delete the record is terminated (still present as a file).
-			// Verify the terminated record lacks sentinels, then create the tombstone.
+			// After lifecycle.delete the record is tombstoned (markDeleted in delete path).
+			// Verify the tombstone lacks sentinels.
 			const lk = life.lifecycleKey;
 			if (lk === null) throw new Error("missing lifecycle key");
-			const terminatedRecord = await store.read(lk);
-			expect(terminatedRecord).toBeDefined();
-			expect(terminatedRecord?.state).toBe("terminated");
-			const termFile = (await readdir(dir)).filter((x: string) => x.endsWith(".sandbox-ownership.json"));
-			expect(termFile.length).toBe(1);
-			const termContent = await readFile(join(dir, termFile[0]), "utf8");
-			expect(termContent).not.toContain(sentinelId);
-			expect(termContent).not.toContain(sentinelRegion);
-			expect(termContent).not.toContain(tok);
-			const leaked: string[] = [];
-			scanForRawProviderValues(JSON.parse(termContent), termFile[0], leaked);
-			expect(leaked).toEqual([]);
-
-			// Create tombstone via store.markDeleted, verify record removed and tombstone exists
-			const terminateClaim = createClaim(gen, tok, "terminated");
-			await store.markDeleted(terminateClaim, lk);
 			const tombstoneFiles = (await readdir(dir)).filter((x: string) => x.endsWith(".sandbox-tombstone.json"));
 			expect(tombstoneFiles.length).toBe(1);
 			expect(await store.read(lk)).toBeUndefined();
@@ -330,6 +314,7 @@ describe("lifecycle persisted files lack raw provider values", () => {
 			const decodedTombstone: unknown = JSON.parse(tombContent);
 			scanForRawProviderValues(decodedTombstone, tombstoneFiles[0], leakedTomb);
 			expect(leakedTomb).toEqual([]);
+			const terminateClaim = createClaim(gen, tok, "terminated");
 
 			if (typeof decodedTombstone !== "object" || decodedTombstone === null) {
 				throw new Error("invalid tombstone fixture");

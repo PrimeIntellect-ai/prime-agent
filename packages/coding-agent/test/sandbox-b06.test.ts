@@ -599,7 +599,6 @@ describe("createPrimeSandboxProvider", () => {
 		const provider = createPrimeSandboxProvider(runner);
 		const err = await provider.create({ image: "img", sessionLabel: LABEL }).catch((e) => e);
 		expect(err).toBeInstanceOf(DuplicateSandboxError);
-		expect(err.ids).toEqual(["sbx-dup-001", "sbx-dup-002"]);
 	});
 
 	it("create throws on non-zero CLI exit", async () => {

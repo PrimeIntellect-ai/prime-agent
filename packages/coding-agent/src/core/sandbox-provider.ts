@@ -4,6 +4,10 @@
  *
  * Every public method accepts an optional AbortSignal through the
  * runner options.
+ *
+ * `lookupByLabel` and `deleteResolved` are narrow internal
+ * capabilities wired through the factory-returned object for the
+ * lifecycle resolver.  Their result shapes are module-private.
  */
 
 import { randomBytes } from "node:crypto";
@@ -45,9 +49,17 @@ const VALID_STATUSES = new Set<SandboxApiStatus>([
 ]);
 
 function normalizeStatus(raw: unknown): SandboxApiStatus {
-	const s = String(raw).toUpperCase().trim();
-	if (VALID_STATUSES.has(s as SandboxApiStatus)) return s as SandboxApiStatus;
-	throw new Error(`sandbox-provider: unknown API status "${String(raw)}"`);
+	// Exact string check -- no String() coercion, no trim
+	if (typeof raw !== "string" || raw.length === 0) {
+		throw new Error(`sandbox-provider: unknown API status "${String(raw)}"`);
+	}
+	const upper = raw.toUpperCase();
+	// Check against valid statuses without casting
+	// Use Array.from to iterate -- the Set has string values by construction
+	for (const valid of VALID_STATUSES) {
+		if (upper === valid) return valid;
+	}
+	throw new Error(`sandbox-provider: unknown API status "${raw}"`);
 }
 
 // -------------------------------------------------------------------------
@@ -61,7 +73,7 @@ function stringField(value: unknown, field: string): string {
 	return value.trim();
 }
 
-function stringArray(value: unknown): string[] {
+function _stringArray(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
 	return value.filter((v): v is string => typeof v === "string");
 }
@@ -71,56 +83,125 @@ function stringArray(value: unknown): string[] {
 // -------------------------------------------------------------------------
 
 function parseSandboxGetJson(raw: string): SandboxIdentity {
-	let data: Record<string, unknown>;
+	let parsed: unknown;
 	try {
-		data = JSON.parse(raw) as Record<string, unknown>;
+		parsed = JSON.parse(raw);
 	} catch {
 		throw new Error("sandbox-provider: malformed get JSON");
 	}
-	const id = stringField(data.id, "id");
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		throw new Error("sandbox-provider: get JSON is not an object");
+	}
+	// Read every field via descriptor — no direct property access on unknown
+	const readField = (key: string): unknown => {
+		const desc = Object.getOwnPropertyDescriptor(parsed, key);
+		if (!desc || !("value" in desc) || !desc.enumerable) return undefined;
+		return desc.value;
+	};
+	const rawId = readField("id");
+	const id = stringField(rawId, "id");
+	const rawName = readField("name");
+	const name = typeof rawName === "string" && rawName.length > 0 ? rawName : "";
+	const rawStatus = readField("status");
+	const rawImage = readField("docker_image");
+	const image = typeof rawImage === "string" && rawImage.length > 0 ? rawImage : "";
+	const rawRegion = readField("region");
+	const region = typeof rawRegion === "string" ? rawRegion : "";
+	const rawCreatedAt = readField("created_at");
+	const createdAt = stringField(rawCreatedAt, "created_at");
+	const rawLabels = readField("labels");
+	const labels: string[] = [];
+	if (Array.isArray(rawLabels)) {
+		for (const l of rawLabels) {
+			if (typeof l === "string") labels.push(l);
+		}
+	}
 	return {
 		id,
-		name: stringField(data.name, "name"),
-		status: normalizeStatus(data.status),
-		image: stringField(data.docker_image, "docker_image"),
-		region: String(data.region ?? ""),
-		createdAt: stringField(data.created_at, "created_at"),
-		labels: stringArray(data.labels),
+		name,
+		status: normalizeStatus(rawStatus),
+		image,
+		region,
+		createdAt,
+		labels,
 		resources: "",
 	};
 }
 
 function parseSandboxListJson(raw: string, labels: string[]): SandboxIdentity[] {
-	let data: { sandboxes?: Array<Record<string, unknown>> };
+	let parsed: unknown;
 	try {
-		data = JSON.parse(raw) as {
-			sandboxes?: Array<Record<string, unknown>>;
-		};
+		parsed = JSON.parse(raw);
 	} catch {
 		return [];
 	}
-	const out: SandboxIdentity[] = [];
-	for (const entry of data.sandboxes ?? []) {
-		const entryLabels = stringArray(entry.labels);
+	// Build result without type assertions
+	const result: SandboxIdentity[] = [];
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		return result;
+	}
+	// Read sandboxes descriptor -- reject non-enumerable or accessor
+	const sbDesc = Object.getOwnPropertyDescriptor(parsed, "sandboxes");
+	if (!sbDesc || !sbDesc.enumerable || !("value" in sbDesc)) {
+		return result;
+	}
+	const sandboxesVal = sbDesc.value;
+	if (!Array.isArray(sandboxesVal)) {
+		return result;
+	}
+	for (const entry of sandboxesVal) {
+		if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+			continue;
+		}
+		// Validate labels -- exact string check, no trimming, no silent filter
+		const labelDesc = Object.getOwnPropertyDescriptor(entry, "labels");
+		if (!labelDesc || !labelDesc.enumerable || !("value" in labelDesc)) {
+			continue;
+		}
+		const rawLabels = labelDesc.value;
+		const entryLabels: string[] = [];
+		if (Array.isArray(rawLabels)) {
+			for (const l of rawLabels) {
+				if (typeof l !== "string") continue;
+				entryLabels.push(l);
+			}
+		}
 		const hasAll = labels.every((l) => entryLabels.includes(l));
 		if (!hasAll) continue;
+		const idDesc = Object.getOwnPropertyDescriptor(entry, "id");
+		if (!idDesc || !idDesc.enumerable || !("value" in idDesc)) {
+			continue;
+		}
+		const rawId = idDesc.value;
+		if (typeof rawId !== "string" || rawId.length === 0) continue;
+		const nameDesc = Object.getOwnPropertyDescriptor(entry, "name");
+		const rawName = nameDesc && "value" in nameDesc ? nameDesc.value : "";
+		const nameVal = typeof rawName === "string" ? rawName : "";
+		const statusDesc = Object.getOwnPropertyDescriptor(entry, "status");
+		const rawStatus = statusDesc && "value" in statusDesc ? statusDesc.value : "";
+		const imageDesc = Object.getOwnPropertyDescriptor(entry, "image");
+		const rawImage = imageDesc && "value" in imageDesc ? imageDesc.value : "";
+		const regionDesc = Object.getOwnPropertyDescriptor(entry, "region");
+		const rawRegion = regionDesc && "value" in regionDesc ? regionDesc.value : "";
+		const caDesc = Object.getOwnPropertyDescriptor(entry, "created_at");
+		const rawCa = caDesc && "value" in caDesc ? caDesc.value : "";
+		const resourcesDesc = Object.getOwnPropertyDescriptor(entry, "resources");
+		const rawResources = resourcesDesc && "value" in resourcesDesc ? resourcesDesc.value : "";
 		try {
-			const id = stringField(entry.id, "id");
-			out.push({
-				id,
-				name: String(entry.name ?? ""),
-				status: normalizeStatus(entry.status),
-				image: stringField(entry.image, "image"),
-				region: String(entry.region ?? ""),
-				createdAt: stringField(entry.created_at, "created_at"),
+			result.push({
+				id: rawId,
+				name: nameVal,
+				status: normalizeStatus(rawStatus),
+				image: typeof rawImage === "string" && rawImage.length > 0 ? rawImage : "",
+				region: typeof rawRegion === "string" ? rawRegion : "",
+				createdAt: typeof rawCa === "string" && rawCa.length > 0 ? rawCa : "",
 				labels: entryLabels,
-				resources: String(entry.resources ?? ""),
+				resources: typeof rawResources === "string" ? rawResources : "",
 			});
 		} catch {}
 	}
-	return out;
+	return result;
 }
-
 function parseCreateSandboxId(stdout: string): string {
 	const match = stdout.match(/Successfully created sandbox (\S+)/);
 	if (!match) throw new Error("sandbox-provider: create did not produce an id");
@@ -133,12 +214,14 @@ function parseCreateSandboxId(stdout: string): string {
 
 export class DuplicateSandboxError extends Error {
 	readonly tag = "DuplicateSandbox" as const;
-	readonly ids: string[];
 
-	constructor(ids: string[]) {
-		super(`sandbox-provider: duplicate sandboxes: ${ids.join(", ")}`);
+	constructor(count?: number) {
+		const msg =
+			count !== undefined
+				? `sandbox-provider: ${count} duplicate sandboxes`
+				: "sandbox-provider: duplicate sandboxes";
+		super(msg);
 		this.name = "DuplicateSandboxError";
-		this.ids = ids;
 	}
 }
 
@@ -179,6 +262,124 @@ export function validateJobId(jobId: string): void {
 	if (!/^[0-9a-f]{16}$/.test(jobId)) {
 		throw new Error(`sandbox-provider: invalid job id "${jobId}"`);
 	}
+}
+
+/**
+ * Forward reference — the full type is defined below at the Provider interface.
+ */
+type PrivateLabelLookupResult_Internal =
+	| { readonly status: "absent" }
+	| { readonly status: "found"; readonly identity: { readonly id: string } }
+	| { readonly status: "collision" };
+
+/**
+ * Parse a single-entry label-filtered sandbox list result.
+ *
+ * Strict validation — every field is checked before any match is counted.
+ * Malformed outer JSON, non-object, missing/extra own keys, non-array sandboxes,
+ * malformed entries, or entries missing the requested label all throw → UNCERTAIN.
+ * Never silently filters entries to produce false absence.
+ */
+function parseLabelLookupJson(raw: string, label: string): PrivateLabelLookupResult_Internal {
+	// Parse outer JSON without type assertion
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		throw new Error("sandbox-provider: malformed list JSON during label lookup");
+	}
+
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+		throw new Error("sandbox-provider: list JSON is not an object");
+	}
+
+	// Exact own enumerable key check — only "sandboxes" allowed
+	const ownKeys = Object.getOwnPropertyNames(parsed);
+	if (ownKeys.length !== 1 || ownKeys[0] !== "sandboxes") {
+		throw new Error("sandbox-provider: list JSON has unexpected keys");
+	}
+
+	// Check descriptor is enumerable value
+	const sandboxDescriptor = Object.getOwnPropertyDescriptor(parsed, "sandboxes");
+	if (!sandboxDescriptor || !sandboxDescriptor.enumerable || !("value" in sandboxDescriptor)) {
+		throw new Error("sandbox-provider: list JSON sandboxes not enumerable value");
+	}
+
+	const sandboxes = sandboxDescriptor.value;
+	if (!Array.isArray(sandboxes)) {
+		throw new Error("sandbox-provider: list JSON sandboxes is not an array");
+	}
+
+	// Validate EVERY entry before counting matches
+	const matching: string[] = [];
+	const SANDBOX_ENTRY_KEYS = new Set(["id", "name", "image", "status", "region", "created_at", "labels", "resources"]);
+	const SANDBOX_REQUIRED_KEYS = new Set(["id", "labels"]);
+
+	for (let i = 0; i < sandboxes.length; i++) {
+		const entry = sandboxes[i];
+		if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+			throw new Error("sandbox-provider: malformed entry in label lookup — not an object");
+		}
+
+		// Exact own enumerable keys check
+		const entryKeys = Object.getOwnPropertyNames(entry);
+		// Require ALL expected keys -- no missing fields
+		for (const requiredKey of SANDBOX_REQUIRED_KEYS) {
+			if (!entryKeys.includes(requiredKey)) {
+				throw new Error(`sandbox-provider: malformed entry — missing required key ${requiredKey}`);
+			}
+		}
+		for (const ek of entryKeys) {
+			if (!SANDBOX_ENTRY_KEYS.has(ek)) {
+				throw new Error("sandbox-provider: malformed entry — unexpected key");
+			}
+		}
+
+		// Every descriptor must be enumerable value
+		const entryDesc = Object.getOwnPropertyDescriptors(entry);
+		for (const ek of entryKeys) {
+			const d = entryDesc[ek];
+			if (!d || !("value" in d) || !d.enumerable) {
+				throw new Error("sandbox-provider: malformed entry — non-enumerable or accessor property");
+			}
+		}
+
+		// Validate labels array -- every element must be a string
+		const entryLabels: string[] = [];
+		const labelsVal = entryDesc.labels?.value;
+		if (Array.isArray(labelsVal)) {
+			for (const l of labelsVal) {
+				if (typeof l !== "string") {
+					throw new Error("sandbox-provider: malformed entry — non-string label");
+				}
+				entryLabels.push(l);
+			}
+		}
+
+		// If any entry does NOT have the requested label, that is a protocol error → UNCERTAIN
+		if (!entryLabels.includes(label)) {
+			throw new Error("sandbox-provider: entry missing requested label");
+		}
+
+		// Validate id is a non-empty string
+		const eid = entryDesc.id?.value;
+		if (typeof eid !== "string" || eid.length === 0) {
+			throw new Error("sandbox-provider: malformed entry id in label lookup");
+		}
+
+		matching.push(eid);
+	}
+
+	if (matching.length === 0) {
+		return Object.freeze({ status: "absent" });
+	}
+	if (matching.length > 1) {
+		return Object.freeze({ status: "collision" });
+	}
+	return Object.freeze({
+		status: "found",
+		identity: Object.freeze({ id: matching[0] }),
+	});
 }
 
 /**
@@ -374,6 +575,19 @@ export interface SandboxProvider {
 
 	create(options: SandboxCreateOptions, signal?: AbortSignal): Promise<SandboxIdentity>;
 
+	/**
+	 * Narrow provider-private label lookup.
+	 * Returns a discriminated union:
+	 *  - `{status:"absent"}` — 0 exact matches
+	 *  - `{status:"found", identity: {id}}` — 1 exact match
+	 *  - `{status:"collision"}` — >1 exact match (IDs never exposed)
+	 * Malformed JSON, CLI failure, exceptions reject the promise → UNCERTAIN.
+	 *
+	 * Part of the provider interface for lifecycle resolver; its result
+	 * shape is module-private and not exported from the package index.
+	 */
+	lookupByLabel(label: string, signal?: AbortSignal): Promise<PrivateLabelLookupResult_Internal>;
+
 	get(sandboxId: string, signal?: AbortSignal): Promise<SandboxIdentity>;
 
 	waitForStatus(
@@ -403,6 +617,14 @@ export interface SandboxProvider {
 	getLogs(sandboxId: string, signal?: AbortSignal): Promise<string>;
 
 	delete(sandboxId: string, signal?: AbortSignal): Promise<void>;
+
+	/**
+	 * Narrow provider-private resolved delete.
+	 * Returns/rejects only on exit 0.  Never parses stderr for "not found".
+	 * The facade uses this for unambiguous result after a successful resolution.
+	 * Intentionally NOT exported from the package index.
+	 */
+	deleteResolved(sandboxId: string, signal?: AbortSignal): Promise<void>;
 
 	startBackgroundJob(sandboxId: string, command: string[], signal?: AbortSignal): Promise<string>;
 
@@ -494,7 +716,7 @@ export function createPrimeSandboxProvider(runner: CommandRunner): SandboxProvid
 		if (listAfter.exitCode === 0) {
 			const afterMatches = parseSandboxListJson(listAfter.stdout, [label]);
 			if (afterMatches.length > 1) {
-				throw new DuplicateSandboxError(afterMatches.map((m) => m.id));
+				throw new DuplicateSandboxError(afterMatches.length);
 			}
 			if (afterMatches.length === 1) {
 				return afterMatches[0];
@@ -585,10 +807,27 @@ export function createPrimeSandboxProvider(runner: CommandRunner): SandboxProvid
 		return result.stdout;
 	};
 
+	const lookupByLabel = async (label: string, signal?: AbortSignal): Promise<PrivateLabelLookupResult_Internal> => {
+		const result = await runner.run([PRIME_CLI, "sandbox", "list", "--output", "json", "--plain", "--label", label], {
+			signal,
+		});
+		if (result.exitCode !== 0) {
+			throw new Error(`sandbox-provider: label lookup CLI failed (exit ${result.exitCode})`);
+		}
+		return parseLabelLookupJson(result.stdout, label);
+	};
+
 	const _delete = async (sandboxId: string, signal?: AbortSignal): Promise<void> => {
 		const result = await runner.run([PRIME_CLI, "sandbox", "delete", "--yes", "--plain", sandboxId], { signal });
 		if (result.exitCode !== 0 && !isNotFoundError(result.stderr)) {
 			throw providerError("delete", result.exitCode);
+		}
+	};
+
+	const deleteResolved = async (sandboxId: string, signal?: AbortSignal): Promise<void> => {
+		const result = await runner.run([PRIME_CLI, "sandbox", "delete", "--yes", "--plain", sandboxId], { signal });
+		if (result.exitCode !== 0) {
+			throw providerError("deleteResolved", result.exitCode);
 		}
 	};
 
@@ -647,6 +886,8 @@ export function createPrimeSandboxProvider(runner: CommandRunner): SandboxProvid
 		runCommand,
 		getLogs,
 		delete: _delete,
+		deleteResolved,
+		lookupByLabel,
 		startBackgroundJob,
 		getBackgroundJobStatus,
 		getBackgroundJobLogs,

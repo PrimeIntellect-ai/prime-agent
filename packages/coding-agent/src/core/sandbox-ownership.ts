@@ -176,10 +176,10 @@ export type SandboxOwnershipState =
 export type SandboxOwnershipEpoch = 0 | 1 | null;
 
 const VALID_TRANSITIONS: Record<SandboxOwnershipState, SandboxOwnershipState[]> = {
-	provisioning: ["active", "terminated"],
+	provisioning: ["active", "terminated", "terminating"],
 	active: ["passivated", "terminating"],
-	passivated: ["rehydrating", "terminated"],
-	rehydrating: ["active", "terminated"],
+	passivated: ["rehydrating", "terminated", "terminating"],
+	rehydrating: ["active", "terminated", "terminating"],
 	terminating: ["terminated"],
 	terminated: ["deleted"],
 	deleted: [],
@@ -556,6 +556,7 @@ export class SandboxOwnershipStore {
 			if (!record) return;
 			this.assertClaimMatches(claim, record);
 			if (record.state !== "terminated") throw new OwnershipError("markDeleted_requires_terminated");
+			if (!record.platformDeleted) throw new OwnershipError("markDeleted_requires_platform_deleted");
 			const tombstone: DeletedTombstone = {
 				version: 1,
 				lifecycleKey: record.lifecycleKey,
@@ -658,6 +659,15 @@ export class SandboxOwnershipStore {
 		}
 		records.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 		return { records, corrupt };
+	}
+
+	async readTombstone(lifecycleKey: string): Promise<DeletedTombstone | undefined> {
+		const tPath = this.tombstonePath(lifecycleKey);
+		try {
+			return validateTombstone(JSON.parse(readFileSync(tPath, "utf8")));
+		} catch {
+			return undefined;
+		}
 	}
 
 	async listTombstones(): Promise<DeletedTombstone[]> {
