@@ -606,8 +606,13 @@ function checkDuplicatePaths(paths: string[]): PawsErrorCode | undefined {
 }
 
 function validateEntryOrder(paths: string[]): PawsErrorCode | undefined {
+  const n = paths.length;
+  if (n < 2) return undefined;
+
   let prevBytes = utf8Encode(paths[0]);
-  for (let i = 1; i < paths.length; i++) {
+  let result: PawsErrorCode | undefined = undefined;
+
+  for (let i = 1; i < n; i++) {
     const currBytes = utf8Encode(paths[i]);
     const prevLen = prevBytes.length;
     const currLen = currBytes.length;
@@ -618,23 +623,24 @@ function validateEntryOrder(paths: string[]): PawsErrorCode | undefined {
     }
     if (cmp === 0) {
       if (prevLen < currLen) {
-        if (currBytes[prevLen] === 0x2f) { eraseBytes(currBytes); return PAWS_ERRORS.PREFIX_CONFLICT; }
+        if (currBytes[prevLen] === 0x2f) { result = PAWS_ERRORS.PREFIX_CONFLICT; }
         // "a" vs "ab" — sorted, not a conflict
       } else if (prevLen > currLen) {
-        if (prevBytes[currLen] === 0x2f) { eraseBytes(currBytes); return PAWS_ERRORS.PREFIX_CONFLICT; }
-        eraseBytes(currBytes);
-        return PAWS_ERRORS.ENTRIES_UNSORTED;
+        if (prevBytes[currLen] === 0x2f) { result = PAWS_ERRORS.PREFIX_CONFLICT; }
+        else { result = PAWS_ERRORS.ENTRIES_UNSORTED; }
       } else {
-        eraseBytes(currBytes);
-        return PAWS_ERRORS.DUPLICATE_ENTRY_PATH;
+        result = PAWS_ERRORS.DUPLICATE_ENTRY_PATH;
       }
     } else if (cmp > 0) {
-      eraseBytes(currBytes);
-      return PAWS_ERRORS.ENTRIES_UNSORTED;
+      result = PAWS_ERRORS.ENTRIES_UNSORTED;
     }
+
     eraseBytes(prevBytes);
+    eraseBytes(currBytes);
+    if (result !== undefined) return result;
     prevBytes = currBytes;
   }
+
   eraseBytes(prevBytes);
   return undefined;
 }

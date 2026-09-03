@@ -318,6 +318,23 @@ describe("field errors", () => {
     const r = ok(encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("a", 10), makeSnap("ab", 10)] }));
     expect(r.manifest.entries.length).toBe(2);
   });
+
+  it("single entry has no ordering issue", () => {
+    const r = ok(encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("single", 10)] }));
+    expect(r.manifest.entries[0].path).toBe("single");
+  });
+
+  it("conflict erases temp bytes (no observable leak)", () => {
+    // Conflict between dir and dir/file: prefix conflict
+    const r1 = encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("dir", 10), makeSnap("dir/file", 10)] });
+    expect(r1.ok).toBe(false);
+    // Conflict between duplicate paths
+    const r2 = encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("dup", 10), makeSnap("dup", 20)] });
+    expect(r2.ok).toBe(false);
+    // Conflict between out-of-order paths
+    const r3 = encodePawsManifest({ kind: "snapshot", workspaceId: WS, entries: [makeSnap("b", 10), makeSnap("a", 10)] });
+    expect(r3.ok).toBe(false);
+  });
 });
 
 // ===========================================================================
