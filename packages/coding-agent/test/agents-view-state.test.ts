@@ -279,6 +279,29 @@ describe("agents view state", () => {
 		expect(rows.map((row) => row.section)).toEqual(["running", "idle", "idle", "idle"]);
 	});
 
+	test("armed heartbeats rank first within the inactive section", () => {
+		const rows = buildAgentsViewRows([
+			makeSummary({
+				id: "recent",
+				activeSessionId: undefined,
+				sessionId: "recent",
+				sessionName: "recent",
+				lastActivityAt: "2026-01-03T00:00:00Z",
+			}),
+			makeSummary({
+				id: "beating",
+				activeSessionId: undefined,
+				sessionId: "beating",
+				sessionName: "beating",
+				hasActiveHeartbeat: true,
+				lastActivityAt: "2026-01-01T00:00:00Z",
+			}),
+		]);
+
+		expect(rows.map((row) => row.section)).toEqual(["inactive", "inactive"]);
+		expect(rows.map((row) => row.summary.sessionId)).toEqual(["beating", "recent"]);
+	});
+
 	test("summarizes subagents on their parent and omits subagent rows", () => {
 		const rows = buildAgentsViewRows([
 			makeSummary({

@@ -872,6 +872,13 @@ function compareAgentsViewRows(a: AgentsViewRow, b: AgentsViewRow): number {
 	if (sectionDiff !== 0) {
 		return sectionDiff;
 	}
+	if (a.section === "inactive") {
+		const heartbeatDiff =
+			Number(b.summary.hasActiveHeartbeat ?? false) - Number(a.summary.hasActiveHeartbeat ?? false);
+		if (heartbeatDiff !== 0) {
+			return heartbeatDiff;
+		}
+	}
 	if (a.section !== "running") {
 		const activityDiff = getTimestamp(b.summary.lastActivityAt) - getTimestamp(a.summary.lastActivityAt);
 		if (activityDiff !== 0) {
