@@ -1,0 +1,1 @@
+- Extracted the RLM spawn ledger's crash-safety mechanics (single O_APPEND writes with optional fsync, bounded fail-closed replay, torn-final-line tolerance, repair-on-append) into a shared append-only event-log substrate; ledger behavior and public API are unchanged.

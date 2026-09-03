@@ -140,7 +140,6 @@ export function isEvictableEmptySessionSummary(summary: SessionSummary): boolean
 		summary.messageCount === 0 &&
 		!summary.sessionName &&
 		!isSessionSummaryBusy(summary) &&
-		summary.hasRegisteredHeartbeat !== true &&
 		summary.hasRegisteredCronJob !== true
 	);
 }
@@ -408,15 +407,15 @@ function readMessageText(content: unknown): string {
 		.join("\n");
 }
 
-// Agent doing work, ignoring the classification verdict.
-export function isActiveSessionBusy(activeSession: ActiveSessionState): boolean {
+// Live work that dies with the worker; the display activity axis deliberately excludes delegated work.
+export function hasLiveSessionWork(activeSession: ActiveSessionState): boolean {
 	const session = activeSession.runtime.session;
-	// Background subagents keep the parent "working" even after its own turn ends.
 	return session.isSessionActive || session.hasRunningRlmChildren();
 }
 
 export function activeActivityForSession(activeSession: ActiveSessionState): SessionActivity {
-	if (isActiveSessionBusy(activeSession)) {
+	// The session's own work only, ignoring the classification verdict.
+	if (activeSession.runtime.session.isSessionActive) {
 		return "working";
 	}
 	// A finished subagent is resident but never gets a summarizer verdict, so don't hold

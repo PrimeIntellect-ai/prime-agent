@@ -145,7 +145,7 @@ describe("McpManager", () => {
 		});
 		expect(manager.listStatus().find((s) => s.server === "remote")?.enabled).toBe(false);
 		expect(manager.listStatus().find((s) => s.server === "unbound")?.enabled).toBe(false);
-		expect(manager.getEnabledGenericServers()).toEqual([]);
+		expect(manager.getEnabledPersistentGenericServers()).toEqual([]);
 	});
 
 	it("honors a bearer-token env var for user-declared servers", () => {
@@ -175,7 +175,7 @@ describe("McpManager", () => {
 			}),
 		});
 
-		expect(manager.getEnabledGenericServers()).toEqual(["alpha", "zebra"]);
+		expect(manager.getEnabledPersistentGenericServers()).toEqual(["alpha", "zebra"]);
 	});
 
 	it("picks up mcpServers added after construction on refresh()", () => {
@@ -267,7 +267,7 @@ describe("McpManager", () => {
 			credentialSource: "acp",
 		});
 		await expect(handlers["mcp.refresh"]({ server: "task" })).rejects.toThrow("does not use host OAuth");
-		expect(manager.getEnabledGenericServers()).toContain("task");
+		expect(manager.getAcpServers().map((server) => server.name)).toContain("task");
 
 		expect(manager.replaceAcpServers([], "owner-b")).toBe(false);
 		expect(() =>

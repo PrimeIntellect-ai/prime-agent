@@ -127,7 +127,7 @@ describe("buildSessionList", () => {
 		expect(summary.lastActivityAt).toBe(new Date(validTimestamp).toISOString());
 	});
 
-	it("keeps a session working while background subagents run", () => {
+	it("keeps background subagents on the wire while the settled parent goes idle", () => {
 		const oneMessage = [{ role: "user", content: "hi" }] as unknown as AgentMessage[];
 		const entries = buildSessionList(
 			[
@@ -142,7 +142,7 @@ describe("buildSessionList", () => {
 			],
 			[],
 		);
-		expect(entries[0]?.activity).toBe("working");
+		expect(entries[0]?.activity).toBe("idle");
 		expect(entries[0]?.hasRunningRlmChildren).toBe(true);
 	});
 

@@ -384,6 +384,20 @@ describe("runtime session option resolution", () => {
 		expect(resolved.rlmParentAgent).toBe("parent-worker");
 	});
 
+	test("forwards semantic spawn lineage to the created child session", () => {
+		const resolved = resolveRuntimeSessionOptions(
+			{},
+			{
+				rlmDepth: 1,
+				semanticParentSessionId: "parent-session-id",
+				semanticSpawnedByRequestId: "a".repeat(32),
+			},
+		);
+
+		expect(resolved.semanticParentSessionId).toBe("parent-session-id");
+		expect(resolved.semanticSpawnedByRequestId).toBe("a".repeat(32));
+	});
+
 	test("deep-merges autonomous runtime session overrides", () => {
 		const resolved = resolveRuntimeSessionOptions(
 			{
