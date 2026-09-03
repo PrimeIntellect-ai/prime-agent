@@ -385,10 +385,15 @@ const PAWS_TA_FILL: ((this: unknown, value: number) => Uint8Array) | undefined =
   PAWS_TYPED_ARRAY_PROTO !== null && PAWS_TYPED_ARRAY_PROTO !== Object.prototype
     ? Object.getOwnPropertyDescriptor(PAWS_TYPED_ARRAY_PROTO, "fill")?.value
     : undefined;
+const PAWS_TA_SUBARRAY: ((this: unknown, begin: number, end?: number) => Uint8Array) | undefined =
+  PAWS_TYPED_ARRAY_PROTO !== null && PAWS_TYPED_ARRAY_PROTO !== Object.prototype
+    ? Object.getOwnPropertyDescriptor(PAWS_TYPED_ARRAY_PROTO, "subarray")?.value
+    : undefined;
 
 function eraseBytes(bytes: Uint8Array): void {
-  if (PAWS_TA_FILL === undefined) return;
-  Reflect.apply(PAWS_TA_FILL, bytes, [0]);
+  const fill = PAWS_TA_FILL;
+  if (fill === undefined) return;
+  Reflect.apply(fill, bytes, [0]);
 }
 
 // ===========================================================================
@@ -816,6 +821,8 @@ function isGenuineUint8Array(bytes: unknown): bytes is Uint8Array {
     if (PAWS_TA_BYTE_OFFSET_GETTER === undefined) return false;
     if (PAWS_TA_BUFFER_GETTER === undefined) return false;
     if (PAWS_AB_BYTE_LENGTH_GETTER === undefined) return false;
+    if (PAWS_TA_FILL === undefined) return false;
+    // PAWS_TA_SUBARRAY may be undefined if host does not support it; fallback uses indexed loop
     const bl = Reflect.apply(PAWS_TA_BYTE_LENGTH_GETTER, bytes, []);
     const bo = Reflect.apply(PAWS_TA_BYTE_OFFSET_GETTER, bytes, []);
     const buf = Reflect.apply(PAWS_TA_BUFFER_GETTER, bytes, []);
@@ -1187,8 +1194,10 @@ function decodePawsManifestBytesImpl(raw: unknown): PawsResult<PawsDecodeResult>
 
   let erased = false;
   function doErase(): void {
-    if (!erased && PAWS_TA_FILL !== undefined) {
-      Reflect.apply(PAWS_TA_FILL, bytes, [0]);
+    if (!erased) {
+      const fill = PAWS_TA_FILL;
+      if (fill === undefined) return;
+      Reflect.apply(fill, bytes, [0]);
       erased = true;
     }
   }
@@ -1212,7 +1221,7 @@ function decodePawsManifestBytesImpl(raw: unknown): PawsResult<PawsDecodeResult>
     for (const key of ownKeys) {
       if (allowedBufKeys.has(key)) continue;
       const num = Number(key);
-      if (key !== String(num) || !Number.isSafeInteger(num) || num < 0 || num >= bytes.byteLength) {
+      if (key !== String(num) || !Number.isSafeInteger(num) || num < 0 || num >= bl) {
         return failErr(PAWS_ERRORS.BUFFER_EXTRA_PROPS);
       }
     }
@@ -1229,13 +1238,23 @@ function decodePawsManifestBytesImpl(raw: unknown): PawsResult<PawsDecodeResult>
     if (manifestLen > MAX_MANIFEST_BYTES) return failErr(PAWS_ERRORS.MANIFEST_TOO_LARGE);
 
     const headerSize = HEADER_PREFIX + manifestLen;
-    if (bytes.byteLength < headerSize) return failErr(PAWS_ERRORS.MANIFEST_TRUNCATED);
+    if (bl < headerSize) return failErr(PAWS_ERRORS.MANIFEST_TRUNCATED);
 
-    // Copy manifest bytes by indexed loop instead of subarray
-    const manifestSlice = new Uint8Array(manifestLen);
-    for (let k = 0; k < manifestLen; k++) {
-      const rawV: unknown = Reflect.get(bytes, String(HEADER_PREFIX + k));
-      manifestSlice[k] = typeof rawV === "number" ? rawV : 0;
+    // Capture manifest bytes via intrinsic subarray; erased on all paths
+    let manifestSlice: Uint8Array;
+    if (PAWS_TA_SUBARRAY !== undefined) {
+      try {
+        const rawSlice: unknown = Reflect.apply(PAWS_TA_SUBARRAY, bytes, [HEADER_PREFIX, HEADER_PREFIX + manifestLen]);
+        if (!types.isUint8Array(rawSlice)) { return failErr(PAWS_ERRORS.INVALID_INPUT); }
+        manifestSlice = rawSlice;
+        if (!types.isUint8Array(manifestSlice)) { return failErr(PAWS_ERRORS.INVALID_INPUT); }
+      } catch { return failErr(PAWS_ERRORS.INVALID_INPUT); }
+    } else {
+      manifestSlice = new Uint8Array(manifestLen);
+      for (let k = 0; k < manifestLen; k++) {
+        const rawV: unknown = Reflect.get(bytes, String(HEADER_PREFIX + k));
+        manifestSlice[k] = typeof rawV === "number" ? rawV : 0;
+      }
     }
     if (hasNonCanonicalUtf8(manifestSlice)) return failErr(PAWS_ERRORS.INVALID_UTF8);
 
@@ -1248,6 +1267,9 @@ function decodePawsManifestBytesImpl(raw: unknown): PawsResult<PawsDecodeResult>
       if (manifestSlice[i] !== reencoded[i]) { eraseBytes(reencoded); return failErr(PAWS_ERRORS.INVALID_UTF8); }
     }
     eraseBytes(reencoded);
+    // If manifestSlice is an aliased subarray, input erasure clears it.
+    // If it's a fallback copy (PAWS_TA_SUBARRAY was undefined), erase explicitly.
+    if (PAWS_TA_SUBARRAY === undefined) { eraseBytes(manifestSlice); }
 
     let parsed: unknown;
     try { parsed = JSON.parse(manifestStr); } catch { return failErr(PAWS_ERRORS.INVALID_JSON); }
@@ -1260,9 +1282,9 @@ function decodePawsManifestBytesImpl(raw: unknown): PawsResult<PawsDecodeResult>
 
     // Route to kind-specific decoder
     if (kindVal === "snapshot") {
-      return decodeSnapshot(parsed, headerSize, manifestLen, bytes.byteLength, doErase, failErr);
+      return decodeSnapshot(parsed, headerSize, manifestLen, bl, doErase, failErr);
     }
-    return decodeChangeset(parsed, headerSize, manifestLen, bytes.byteLength, doErase, failErr);
+    return decodeChangeset(parsed, headerSize, manifestLen, bl, doErase, failErr);
   } catch {
     doErase();
     return { ok: false, error: Object.freeze({ code: PAWS_ERRORS.INVALID_INPUT }) };
