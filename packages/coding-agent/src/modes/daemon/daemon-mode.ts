@@ -6048,7 +6048,9 @@ export class AgentDaemon {
 			// runs, in which case the draft is no longer abandoned and must be kept.
 			queueMicrotask(() => {
 				if (this.sessions.has(state.activeSessionId) && this.isDiscardableDraft(state)) {
-					void this.closeSession(state, "killed");
+					void this.closeSession(state, "killed").catch((error) =>
+						this.log(`failed to discard empty draft ${state.activeSessionId}: ${String(error)}`),
+					);
 				}
 			});
 		}
@@ -6059,6 +6061,9 @@ export class AgentDaemon {
 			return false;
 		}
 		if (state.clients.size > 0) {
+			return false;
+		}
+		if (state.pendingAttaches > 0) {
 			return false;
 		}
 		if (state.runtime.metadata.kind === "subagent") {
@@ -6616,7 +6621,9 @@ export class AgentDaemon {
 				(eventType === "turn_end" || eventType === "compaction_end" || eventType === "bash_end") &&
 				this.isDiscardableDraft(state)
 			) {
-				void this.closeSession(state, "killed");
+				void this.closeSession(state, "killed").catch((error) =>
+					this.log(`failed to discard empty draft ${state.activeSessionId}: ${String(error)}`),
+				);
 			}
 			if (RECOVERY_CHECKPOINT_EVENTS.has(eventType)) {
 				this.recordWorkerRecoveryState(state, eventType);

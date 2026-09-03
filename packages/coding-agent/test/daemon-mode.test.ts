@@ -3595,6 +3595,75 @@ describe("daemon mode helpers", () => {
 		expect(client.attachedActiveSessionIds).not.toContain(state.activeSessionId);
 	});
 
+	it("does not treat a client-less draft as discardable while an attach is in flight", () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const state = makeEmptyTopLevelDraft("draft");
+		const internals = daemon as unknown as {
+			isDiscardableDraft(state: ActiveSessionState): boolean;
+		};
+		expect(state.clients.size).toBe(0);
+		expect(state.pendingAttaches).toBe(0);
+		expect(internals.isDiscardableDraft(state)).toBe(true);
+
+		state.pendingAttaches = 1;
+		expect(internals.isDiscardableDraft(state)).toBe(false);
+	});
+
+	it.each(["broadcast", "detach"] as const)(
+		"observes closeSession rejection on %s draft discard instead of unhandledRejection",
+		async (site) => {
+			const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
+				defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
+				createRuntime: vi.fn(),
+			});
+			const state = makeEmptyTopLevelDraft("draft");
+			const closeSession = vi.fn(() => Promise.reject(new Error("teardown failed")));
+			const log = vi.fn();
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				closeSession: typeof closeSession;
+				log: typeof log;
+				broadcastToSession(state: ActiveSessionState, message: DaemonOutbound): void;
+				detachClientFromSession(client: DaemonSocketClient, state: ActiveSessionState): void;
+				write: ReturnType<typeof vi.fn>;
+			};
+			internals.sessions.set(state.activeSessionId, state);
+			internals.closeSession = closeSession;
+			internals.log = log;
+			internals.write = vi.fn();
+
+			const unhandled: unknown[] = [];
+			const onUnhandled = (reason: unknown) => unhandled.push(reason);
+			process.on("unhandledRejection", onUnhandled);
+			try {
+				if (site === "broadcast") {
+					internals.broadcastToSession(state, {
+						type: "session_event",
+						activeSessionId: state.activeSessionId,
+						event: { type: "bash_end", exitCode: 0, cancelled: false, truncated: false },
+					});
+				} else {
+					const client = makeClient("client-1", state.activeSessionId);
+					state.clients.add(client);
+					internals.detachClientFromSession(client, state);
+				}
+				await Promise.resolve();
+				await Promise.resolve();
+				await new Promise((resolve) => setImmediate(resolve));
+				expect(closeSession).toHaveBeenCalledWith(state, "killed");
+				expect(log).toHaveBeenCalledWith(
+					expect.stringContaining(`failed to discard empty draft ${state.activeSessionId}`),
+				);
+				expect(unhandled).toEqual([]);
+			} finally {
+				process.off("unhandledRejection", onUnhandled);
+			}
+		},
+	);
+
 	it("drops a backpressure catch-up when the client detaches during snapshot creation", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },
@@ -9478,6 +9547,23 @@ function makeAgentFamilyState(
 		},
 	} as never;
 	return { state, acceptAgentMessagePrompt };
+}
+
+function makeEmptyTopLevelDraft(activeSessionId: string): ActiveSessionState {
+	const state = makeState(activeSessionId);
+	state.extensionUiRequests = new Map();
+	state.runtime = {
+		...state.runtime,
+		metadata: { kind: "top-level", createdAt: 1 },
+		session: {
+			messages: [],
+			isBashRunning: false,
+			isSessionActive: false,
+			hasRunningRlmChildren: () => false,
+			sessionManager: { hasUserContent: () => false },
+		},
+	} as unknown as ActiveSessionState["runtime"];
+	return state;
 }
 
 function makeState(activeSessionId: string, parentActiveSessionId?: string): ActiveSessionState {
