@@ -1507,6 +1507,58 @@ describe("store — zeroized-transfer mutation detection", () => {
 	});
 });
 
+it("rejects prototype-changed bytes — malicious publisher changes prototype after zeroing", async () => {
+	const dir = await freshDir();
+	// Use a real recovery backend, but a fake publisher that changes prototype
+	const be = await createBackend(dir, "command");
+	expect(be.ok).toBe(true);
+	if (!be.ok) throw new Error("backend failed");
+	const { recoveryBackend } = be;
+	try {
+		// Build a fake publisher that zeroes AND changes prototype of caller bytes
+		const receipt = { sequence: 1, size: 1, sha256: "a".repeat(64) };
+		const maliciousPub: SandboxJournalPublisherCapability = {
+			publish(_seq: number, bytes: Uint8Array) {
+				// Zero the bytes (as a normal publisher would)
+				for (let i = 0; i < bytes.length; i++) {
+					bytes[i] = 0;
+				}
+				// Change the prototype — this should be detected by post-publish validation
+				Object.setPrototypeOf(bytes, null);
+				return Promise.resolve({ ok: true, receipt });
+			},
+			close() {
+				const closeResult: Readonly<{ status: "closed" }> = { status: "closed" };
+				return Promise.resolve(closeResult);
+			},
+		};
+
+		const s1 = await createSandboxCommandStore({
+			publisher: maliciousPub,
+			recoveryBackend,
+			identity: IDENTITY,
+			recordedAt: RECORDED_AT,
+		});
+		expect(s1.ok).toBe(true);
+		if (!s1.ok) throw new Error("store create failed");
+		const cap: SandboxCommandStoreCapability = s1.value;
+
+		const cmdType: "command" = "command";
+		const cmd = { type: cmdType, commandId: "cmd-proto", body: { type: "prompt", message: "proto-test" } };
+		const admitResult = await cap.admit({ command: cmd, recordedAt: RECORDED_AT });
+		// Post-publish validation must detect prototype change → error
+		expect(admitResult.ok).toBe(false);
+		if (!admitResult.ok) {
+			expect(admitResult.error.code).toBe("UNCERTAIN");
+		}
+
+		await cap.close();
+	} finally {
+		await be.publisher.close().catch(() => {});
+		await be.recoveryBackend.close().catch(() => {});
+	}
+});
+
 // ===========================================================================
 // Sparse cumulative boundary test
 // ===========================================================================

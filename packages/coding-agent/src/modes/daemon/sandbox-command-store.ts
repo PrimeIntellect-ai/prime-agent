@@ -1249,23 +1249,35 @@ class SandboxCommandStore {
 		} finally {
 			// Accept unchanged bytes OR fully-zeroed same-length buffer
 			// (legitimate ownership erasure by publisher after successful copy).
-			// Reject partial/nonzero mutation, size change, detachment.
+			// Reject partial/nonzero mutation, size change, detachment, prototype change.
 			try {
-				const postSize = bytes.byteLength;
-				if (postSize !== expectedSize) {
-					mutationDetected = true;
-				} else if (postSize > 0) {
-					let allZero = true;
-					for (let i = 0; i < postSize; i++) {
-						if (bytes[i] !== 0) {
-							allZero = false;
-							break;
-						}
+				// Verify bytes is still a genuine Uint8Array before trusting byteLength/index reads.
+				// A malicious publisher could zero bytes then replace the prototype, making
+				// further property reads unreliable.
+				try {
+					if (Object.getPrototypeOf(bytes) !== Uint8Array.prototype) {
+						mutationDetected = true;
 					}
-					if (!allZero) {
-						const postSha = digestSha256(bytes);
-						if (postSha !== expectedSha) {
-							mutationDetected = true;
+				} catch {
+					mutationDetected = true;
+				}
+				if (!mutationDetected) {
+					const postSize = bytes.byteLength;
+					if (postSize !== expectedSize) {
+						mutationDetected = true;
+					} else if (postSize > 0) {
+						let allZero = true;
+						for (let i = 0; i < postSize; i++) {
+							if (bytes[i] !== 0) {
+								allZero = false;
+								break;
+							}
+						}
+						if (!allZero) {
+							const postSha = digestSha256(bytes);
+							if (postSha !== expectedSha) {
+								mutationDetected = true;
+							}
 						}
 					}
 				}
