@@ -3150,6 +3150,7 @@ describe("AgentSession rlm recursion", () => {
 			createSession({ rlmSessionDir: join(tempDir, `chain-${level}`) }),
 		);
 		let cancelPrimitiveCalls = 0;
+		let runMapIterations = 0;
 		for (const [level, session] of sessions.entries()) {
 			const target = session as unknown as {
 				_activeRlmChildRuns: Map<string, unknown>;
@@ -3160,6 +3161,11 @@ describe("AgentSession rlm recursion", () => {
 			target._cancelRlmChildRun = (run, reason) => {
 				cancelPrimitiveCalls++;
 				return original(run, reason);
+			};
+			const originalValues = target._activeRlmChildRuns.values.bind(target._activeRlmChildRuns);
+			target._activeRlmChildRuns.values = () => {
+				runMapIterations++;
+				return originalValues();
 			};
 			if (level === 0) continue;
 			// A finished intermediate lives in BOTH parent maps until passivation.
@@ -3192,12 +3198,15 @@ describe("AgentSession rlm recursion", () => {
 			leafRun,
 		);
 
+		expect(sessions[0]!.hasRunningRlmChildren()).toBe(true);
+		expect(runMapIterations).toBeLessThanOrEqual(3 * (levels + 1));
+
 		expect(sessions[0]!.cancelRunningRlmDescendants()).toBe(true);
 		expect(leafRun.status).toBe("cancelled");
 		expect(leafAbort).toHaveBeenCalled();
-		// One visit per session: the done intermediates' runs are each offered to
-		// the primitive exactly once, not 2^depth times.
+		// One visit per session, not 2^depth.
 		expect(cancelPrimitiveCalls).toBeLessThanOrEqual(levels + 1);
+		expect(sessions[0]!.hasRunningRlmChildren()).toBe(false);
 	});
 
 	it("stops live descendants when the targeted child run already settled", async () => {
