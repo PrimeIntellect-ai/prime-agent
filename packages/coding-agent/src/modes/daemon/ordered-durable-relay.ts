@@ -423,6 +423,11 @@ function revalidateRecord(entry: DurableJournalEntry): JournalRecordV1 | null {
 		erase(encoded.bytes);
 		return null;
 	}
+	// Verify journal sequence is bound to receipt sequence
+	if (entry.receipt.sequence !== entry.record.journalSeq) {
+		erase(encoded.bytes);
+		return null;
+	}
 	const rehash = createHash("sha256").update(encoded.bytes).digest("hex");
 	if (rehash !== entry.receipt.sha256 || encoded.bytes.byteLength !== entry.receipt.size) {
 		erase(encoded.bytes);
@@ -724,6 +729,13 @@ export class OrderedDurableRelay {
 		if (!state || state.state !== "pending") return this.poison("PERSISTENCE_FAILED");
 		if (state.record.envelope.frame.type === "ack") {
 			const acknowledgment = state.record.envelope.frame as RemoteHostAckFrame;
+			// Rejected ACK: peer explicitly failed the message
+			if (acknowledgment.status === "rejected") {
+				// Finish incoming (deterministic persistence of the rejection)
+				if (!(await this.finishIncoming(state))) return this.poison("PERSISTENCE_FAILED");
+				// Return failure: outgoing stays pending, seeker must recover
+				return this.poison("APPLICATION_FAILED");
+			}
 			const outgoing = await this.outgoing.query(acknowledgment.acknowledges);
 			if (!outgoing.ok || outgoing.value.state === "new") {
 				return this.poison("PERSISTENCE_FAILED");
@@ -848,6 +860,12 @@ export class OrderedDurableRelay {
 		// Validate and fresh-copy outgoing journal receipt
 		const outgoingJournalReceipt = validateReceipt(outgoingState.journal);
 		if (!outgoingJournalReceipt) return this.poison("EVIDENCE_CONFLICT");
+
+		// Revalidate outgoing record through codec/digest/journal binding
+		if (!revalidateRecord({ record: outgoingState.record, receipt: outgoingState.journal })) {
+			return this.poison("EVIDENCE_CONFLICT");
+		}
+
 		// Require non-null delivered receipt when outgoing is delivered
 		if (outgoingState.state === "delivered" && !validateReceipt(outgoingState.delivered)) {
 			return this.poison("EVIDENCE_CONFLICT");
@@ -894,6 +912,9 @@ export class OrderedDurableRelay {
 				if (ackFrame.type !== "ack") continue;
 				if (ackFrame.acknowledges !== frameId) continue;
 
+				// Reject rejected ACK -- peer explicitly failed the message
+				if (ackFrame.status === "rejected") return this.poison("EVIDENCE_CONFLICT");
+
 				// Found a matching ACK -- reject duplicates
 				if (foundRecord !== null) return this.poison("EVIDENCE_CONFLICT");
 
@@ -931,7 +952,10 @@ export class OrderedDurableRelay {
 				if (!foundReceipt) return this.poison("EVIDENCE_CONFLICT");
 			}
 
-			if (page.nextCursor === null) break;
+			if (page.nextCursor === null) {
+				cursor = null;
+				break;
+			}
 			cursor = page.nextCursor;
 		}
 

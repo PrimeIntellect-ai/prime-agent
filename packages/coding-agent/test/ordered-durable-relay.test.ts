@@ -164,7 +164,11 @@ function eventEnvelope(frameId = "incoming-1"): RemoteHostFrameEnvelope {
 	};
 }
 
-function ackEnvelope(acknowledges: string, frameId = "incoming-ack"): RemoteHostFrameEnvelope {
+function ackEnvelope(
+	acknowledges: string,
+	frameId = "incoming-ack",
+	status: "delivered" | "replayed" | "rejected" = "delivered",
+): RemoteHostFrameEnvelope {
 	return {
 		type: "frame",
 		frameId,
@@ -174,7 +178,7 @@ function ackEnvelope(acknowledges: string, frameId = "incoming-ack"): RemoteHost
 			type: "ack",
 			ackId: `semantic-${frameId}`,
 			acknowledges,
-			status: "delivered",
+			status,
 		},
 	};
 }
@@ -799,5 +803,96 @@ describe("ordered durable relay", () => {
 			expect(Object.isFrozen(evidence.value.outgoingJournalReceipt)).toBe(true);
 		}
 		await second.relay.close();
+	});
+
+	it("rejected ACK returns APPLICATION_FAILED and outgoing stays pending", async () => {
+		const harness = await openRelay();
+		await harness.relay.send(eventEnvelope("outbound-1"));
+		const rejected = ackEnvelope("outbound-1", "incoming-ack", "rejected");
+		const result = await harness.relay.receive(rejected);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toBe("APPLICATION_FAILED");
+		}
+		// Outgoing stays pending
+		const outgoing = await harness.outgoing.query("outbound-1");
+		expect(outgoing.ok && outgoing.value.state).toBe("pending");
+		// Incoming ACK was marked delivered (deterministic persistence)
+		const incoming = await harness.incoming.query("incoming-ack");
+		expect(incoming.ok && incoming.value.state).toBe("delivered");
+		// Application was never called for ACK frames
+		expect(harness.applied).toHaveLength(0);
+		await harness.relay.close();
+	});
+
+	it("replayed ACK marks outgoing delivered", async () => {
+		const harness = await openRelay();
+		await harness.relay.send(eventEnvelope("outbound-1"));
+		const replayed = ackEnvelope("outbound-1", "incoming-ack", "replayed");
+		const result = await harness.relay.receive(replayed);
+		expect(result.ok && result.value.action).toBe("acknowledged_outbound");
+		// Outgoing is delivered (peer indicates prior-session delivery)
+		const outgoing = await harness.outgoing.query("outbound-1");
+		expect(outgoing.ok && outgoing.value.state).toBe("delivered");
+		await harness.relay.close();
+	});
+
+	it("queryOutgoingAcknowledgment scans multiple incoming pages without reopening", async () => {
+		// Fill incoming with >64 event frames so the target ACK falls on page 2
+		const harness = await openRelay();
+		for (let i = 0; i < 65; i++) {
+			await harness.relay.receive(eventEnvelope(`noise-${i}`));
+		}
+		await harness.relay.send(eventEnvelope("outbound-1"));
+		const ack = ackEnvelope("outbound-1", "target-ack");
+		const ackResult = await harness.relay.receive(ack);
+		expect(ackResult.ok && ackResult.value.action).toBe("acknowledged_outbound");
+		// queryOutgoingAcknowledgment must scan multiple pages and find the ACK
+		const evidence = await harness.relay.queryOutgoingAcknowledgment("outbound-1");
+		expect(evidence.ok).toBe(true);
+		if (evidence.ok && evidence.value !== null) {
+			expect(evidence.value.frameId).toBe("outbound-1");
+			expect(typeof evidence.value.ackEnvelopeId).toBe("string");
+			expect(evidence.value.ackEnvelopeDigest.length).toBe(64);
+			expect(Object.isFrozen(evidence.value)).toBe(true);
+			expect(Object.isFrozen(evidence.value.outgoingJournalReceipt)).toBe(true);
+		}
+		await harness.relay.close();
+	});
+
+	it("queryOutgoingAcknowledgment rejects recovered rejected ACK evidence", async () => {
+		const incomingDisk = emptyDisk();
+		const outgoingDisk = emptyDisk();
+		const first = await openRelay({ incomingDisk, outgoingDisk });
+		await first.relay.send(eventEnvelope("outbound-1"));
+		// Receive a rejected ACK - outgoing stays pending
+		const rejected = ackEnvelope("outbound-1", "incoming-rejected", "rejected");
+		const result = await first.relay.receive(rejected);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toBe("APPLICATION_FAILED");
+		}
+		await first.relay.close();
+
+		// Reopen: outgoing is still pending (no delivered ACK was received)
+		const reopened = await openRelay({ incomingDisk, outgoingDisk });
+		// queryOutgoingAcknowledgment returns null since outgoing is pending
+		const pendingEvidence = await reopened.relay.queryOutgoingAcknowledgment("outbound-1");
+		expect(pendingEvidence.ok).toBe(true);
+		if (pendingEvidence.ok) {
+			expect(pendingEvidence.value).toBeNull();
+		}
+		// Now inject a delivered ACK - marks outgoing delivered
+		const delivered = ackEnvelope("outbound-1", "incoming-delivered", "delivered");
+		const deliveredResult = await reopened.relay.receive(delivered);
+		expect(deliveredResult.ok && deliveredResult.value.action).toBe("acknowledged_outbound");
+		// queryOutgoingAcknowledgment should now scan and find the REJECTED ACK first (lower seq)
+		// which should trigger EVIDENCE_CONFLICT
+		const conflicted = await reopened.relay.queryOutgoingAcknowledgment("outbound-1");
+		expect(conflicted.ok).toBe(false);
+		if (!conflicted.ok) {
+			expect(conflicted.error.code).toBe("EVIDENCE_CONFLICT");
+		}
+		await reopened.relay.close();
 	});
 });
