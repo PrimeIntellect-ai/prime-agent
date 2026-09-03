@@ -1952,7 +1952,7 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	private async killSubagent(pending: PendingKillSubagent, currentRow: AgentsViewRow): Promise<void> {
-		const running = currentRow.section === "running";
+		const running = hasLiveWork(currentRow);
 		const client = this.requireClient();
 		this.setStatusMessage(running ? "Stopping subagent..." : "Deleting subagent...");
 		try {
@@ -2018,7 +2018,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.showDeleteConfirmation();
 			return;
 		}
-		if (!isRunningSessionSummary(row.summary)) {
+		if (!hasLiveWork(row)) {
 			this.pendingDeleteAgent = {
 				identity,
 				activeSessionId,
@@ -2565,7 +2565,7 @@ export class AgentsViewMode implements Component, Focusable {
 		const title = pendingDelete
 			? `${heartbeatWarning}${this.getPendingDeleteTitle()}`
 			: pendingKill
-				? `${heartbeatWarning}${keyText("app.agents.delete")} again to ${row.section === "running" ? "stop" : "delete"}`
+				? `${heartbeatWarning}${keyText("app.agents.delete")} again to ${hasLiveWork(row) ? "stop" : "delete"}`
 				: styleRowTitle(row);
 		// Keep stable model information ahead of the variable summary so narrow rows truncate the summary first.
 		const summaryText = !pendingDelete && !pendingKill ? row.summary.summary : undefined;
@@ -2827,8 +2827,10 @@ function rowHasSpawnCode(row: AgentsViewRow): boolean {
 	return typeof code === "string" && code.trim().length > 0;
 }
 
-function isRunningSessionSummary(summary: SessionSummary): boolean {
-	return summary.activity === "working";
+// Destructive actions use live-work semantics: the session itself or anything
+// in its subtree still working must be stopped, never deleted outright.
+function hasLiveWork(row: AgentsViewRow): boolean {
+	return row.section === "running" || row.runningSubagentCount > 0 || row.summary.hasRunningRlmChildren === true;
 }
 
 /** `↑<input> ↓<output> · $<own>`, plus `($<total> w/ subagents)` when descendants added visible spend. */
