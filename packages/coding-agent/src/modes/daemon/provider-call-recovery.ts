@@ -1444,6 +1444,7 @@ async function runRecovery(raw: unknown, closeGuard: CloseGuard): Promise<RunRec
 	// Pass 2: open files serially, read, close handle, decode
 	// -----------------------------------------------------------------------
 	const records: ProviderCallRecordV1[] = [];
+	const fileReceipts: DurableReceipt[] = [];
 	const fileMetas = new Map<number, FileMeta>(); // journalSeq -> FileMeta
 
 	for (const entry of allEntries) {
@@ -1463,6 +1464,13 @@ async function runRecovery(raw: unknown, closeGuard: CloseGuard): Promise<RunRec
 
 		fileMetas.set(fileResult.fileMeta.journalSeq, fileResult.fileMeta);
 		records.push(fileResult.record);
+		fileReceipts.push(
+			Object.freeze({
+				sequence: fileResult.fileMeta.journalSeq,
+				size: fileResult.fileMeta.fileSize,
+				sha256: fileResult.fileMeta.sha256,
+			}),
+		);
 	}
 
 	// -----------------------------------------------------------------------
@@ -1564,17 +1572,7 @@ async function runRecovery(raw: unknown, closeGuard: CloseGuard): Promise<RunRec
 	}
 
 	const frozenRecords: readonly ProviderCallRecordV1[] = Object.freeze(records.map((r) => r));
-	const frozenReceipts: readonly DurableReceipt[] = Object.freeze(
-		records.map((r) => {
-			const fm = fileMetas.get(r.journalSeq);
-			if (!fm) throw new Error("unreachable: missing fileMeta for record");
-			return Object.freeze({
-				sequence: fm.journalSeq,
-				size: fm.fileSize,
-				sha256: fm.sha256,
-			});
-		}),
-	);
+	const frozenReceipts: readonly DurableReceipt[] = Object.freeze(fileReceipts.map((receipt) => receipt));
 
 	const output: ProviderCallRecoveryOutput = Object.freeze({
 		identity: Object.freeze({
