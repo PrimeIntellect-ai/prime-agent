@@ -834,6 +834,52 @@ describe("AgentSession semantic edges", () => {
 		]);
 	});
 
+	it("settles a slice that resolves after a sibling already failed the compaction", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			settings: { compaction: { keepRecentTokens: 1 } },
+		});
+		harnesses.push(harness);
+		const ledgerPath = join(harness.sessionManager.getSessionArtifactDir() ?? "", SEMANTIC_EDGES_LEDGER_FILENAME);
+
+		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+		await harness.session.prompt("one");
+		await harness.session.prompt("two");
+		const preCompactionIds = startedRequestIds(readSemanticEdgeLedger(ledgerPath));
+
+		// The first slice rejects immediately; its sibling resolves only after the
+		// compaction has already settled as failed and drained the slice list.
+		const failingStep = () => fauxAssistantMessage("nope", { stopReason: "error", errorMessage: "slice failed" });
+		const lateSuccessStep = async () => {
+			await sleep(25);
+			return fauxAssistantMessage("late summary");
+		};
+		harness.setResponses([failingStep, lateSuccessStep]);
+		await expect(harness.session.compact()).rejects.toThrow(/failed/);
+
+		// Every summary slice settles; a late success must not stay in-flight forever.
+		await waitForAsync(async () => {
+			const events = readSemanticEdgeLedger(ledgerPath);
+			const summaryIds = startedRequestIds(events).filter((requestId) => !preCompactionIds.includes(requestId));
+			const terminal = new Set(
+				events
+					.filter((event) => event.type === "request_failed" || event.type === "request_finished")
+					.map((event) =>
+						event.type === "request_failed" || event.type === "request_finished" ? event.request_id : "",
+					),
+			);
+			return summaryIds.length === 2 && summaryIds.every((requestId) => terminal.has(requestId));
+		});
+		const events = readSemanticEdgeLedger(ledgerPath);
+		const summaryIds = startedRequestIds(events).filter((requestId) => !preCompactionIds.includes(requestId));
+		const finished = events
+			.filter((event) => event.type === "request_finished")
+			.map((event) => (event.type === "request_finished" ? event.request_id : ""));
+		for (const requestId of summaryIds) {
+			expect(finished).not.toContain(requestId);
+		}
+	});
+
 	it("mints a distinct request identity for each split-turn summary call", async () => {
 		const harness = await createHarness({
 			persistSession: true,

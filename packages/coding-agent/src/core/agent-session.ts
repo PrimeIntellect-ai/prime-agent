@@ -7558,6 +7558,7 @@ export class AgentSession {
 		const semanticCompaction = this._semanticEdges.beginCompaction();
 		let compactionRecorded = false;
 		const uncommittedSlices: string[] = [];
+		let compactionSettled = false;
 		let summary: string;
 		let firstKeptEntryId: string;
 		let tokensBefore: number;
@@ -7599,7 +7600,13 @@ export class AgentSession {
 					}
 					try {
 						const result = await call({ ...headers, ...modelRequestHeaders(requestId) });
-						uncommittedSlices.push(requestId);
+						// A slice resolving after a sibling's rejection already settled the
+						// compaction would push into a drained list and stay in-flight forever.
+						if (compactionSettled) {
+							this._semanticEdges.failRequest(requestId);
+						} else {
+							uncommittedSlices.push(requestId);
+						}
 						return result;
 					} catch (error) {
 						this._semanticEdges.failRequest(requestId);
@@ -7626,6 +7633,7 @@ export class AgentSession {
 			// commits it. Marked first: the ID is consumed even when the write throws, and a
 			// second finish attempt would mask the original I/O error.
 			compactionRecorded = true;
+			compactionSettled = true;
 			for (const requestId of uncommittedSlices.splice(0)) {
 				this._semanticEdges.finishRequest(requestId);
 			}
@@ -7639,6 +7647,7 @@ export class AgentSession {
 				customInstructions,
 			);
 		} catch (error) {
+			compactionSettled = true;
 			for (const requestId of uncommittedSlices.splice(0)) {
 				this._semanticEdges.failRequest(requestId);
 			}
