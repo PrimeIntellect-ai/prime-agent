@@ -164,8 +164,6 @@ describe("AgentSession compaction characterization", () => {
 			firstKeptEntryId: result.firstKeptEntryId,
 			tokensBefore: result.tokensBefore,
 			fromHook: false,
-			// Both split-turn summarizer calls billed tokens; their fold is persisted with the entry.
-			usage: expect.objectContaining({ input: expect.any(Number), output: expect.any(Number) }),
 		});
 		const compactionUsage = (entry as { usage: Usage }).usage;
 		expect(compactionUsage.input).toBeGreaterThan(0);

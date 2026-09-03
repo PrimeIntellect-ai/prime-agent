@@ -609,7 +609,6 @@ describe("session info usage totals", () => {
 			const lines = [
 				{ type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
 				msg("m1", null, "user"),
-				// Forked-away assistant: off the surviving branch, still paid for.
 				msg("m2", "m1", "assistant", usage(1000, 200, 0.5)),
 				// On-disk original usage; the loader folds the aggregate below onto it in memory.
 				msg("m3", "m1", "assistant", usage(2000, 300, 1.0)),
@@ -621,7 +620,6 @@ describe("session info usage totals", () => {
 					childUsage: usage(500, 100, 0.4),
 					aggregateUsage: usage(2500, 400, 1.4, 20, 10),
 				},
-				// Summarization calls bill the session too: both folds must count them.
 				{
 					type: "compaction",
 					id: "c1",
