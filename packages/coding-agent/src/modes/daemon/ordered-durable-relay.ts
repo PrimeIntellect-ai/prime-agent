@@ -1,15 +1,17 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { types } from "node:util";
+import { encodeJournalRecordV1, type JournalRecordV1 } from "./b03-journal-record-codec.js";
 import {
 	type DurableFrameState,
 	type DurableJournalEntry,
+	type DurableReceipt,
 	DurableRelayStore,
 	type DurableRelayStoreResult,
 	type DurableReplayPage,
 } from "./durable-relay-store.js";
 import type { RemoteHostAckFrame, RemoteHostFrameEnvelope } from "./remote-agent-host-protocol.js";
-import { decodeEnvelope } from "./remote-host-frame-codec.js";
+import { canonicalDigest, decodeEnvelope } from "./remote-host-frame-codec.js";
 
 const INPUT_KEYS = new Set(["application", "identity", "incomingStore", "outgoingStore", "transport"]);
 const IDENTITY_KEYS = new Set(["generation", "hostId", "sessionId"]);
@@ -19,11 +21,14 @@ const STATUS_KEYS = new Set(["status"]);
 const SEND_TIMEOUT_MS = 30_000;
 const APPLY_TIMEOUT_MS = 30_000;
 const CLOSE_TIMEOUT_MS = 5_000;
+const QUERY_MAX_PAGES = 128;
+const QUERY_MAX_RECORDS = 8_192;
 
 export type OrderedRelayErrorCode =
 	| "APPLICATION_FAILED"
 	| "CLOSED"
 	| "CLOSE_UNCERTAIN"
+	| "EVIDENCE_CONFLICT"
 	| "INVALID_ARGUMENT"
 	| "PERSISTENCE_FAILED"
 	| "POISONED"
@@ -53,6 +58,14 @@ export interface OrderedRelayReceiveResult {
 export interface OrderedRelaySendResult {
 	readonly frameId: string;
 	readonly replay: boolean;
+	readonly journalReceipt: DurableReceipt;
+}
+
+export interface OutgoingAcknowledgmentEvidence {
+	readonly frameId: string;
+	readonly outgoingJournalReceipt: DurableReceipt;
+	readonly ackEnvelopeId: string;
+	readonly ackEnvelopeDigest: string;
 }
 
 export interface OrderedRelayReplayResult {
@@ -366,7 +379,69 @@ function needsAcknowledgment(envelope: RemoteHostFrameEnvelope): boolean {
 }
 
 function acceptedApplicationEnvelope(envelope: RemoteHostFrameEnvelope): boolean {
-	return envelope.frame.type !== "handshake" && envelope.frame.type !== "handshake_ack";
+	return (
+		envelope.frame.type === "command" ||
+		envelope.frame.type === "event" ||
+		envelope.frame.type === "agent_message" ||
+		envelope.frame.type === "provider_proxy" ||
+		envelope.frame.type === "ack"
+	);
+}
+
+function acceptedDomainSendEnvelope(envelope: RemoteHostFrameEnvelope): boolean {
+	return (
+		envelope.frame.type === "command" ||
+		envelope.frame.type === "event" ||
+		envelope.frame.type === "agent_message" ||
+		envelope.frame.type === "provider_proxy"
+	);
+}
+
+function erase(bytes: Uint8Array | null): void {
+	if (bytes === null) return;
+	try {
+		Uint8Array.prototype.fill.call(bytes, 0);
+	} catch {
+		// best effort
+	}
+}
+
+function revalidateRecord(entry: DurableJournalEntry): JournalRecordV1 | null {
+	const input = Object.freeze({
+		version: entry.record.version,
+		journalSeq: entry.record.journalSeq,
+		direction: entry.record.direction,
+		hostId: entry.record.hostId,
+		generation: entry.record.generation,
+		sessionId: entry.record.sessionId,
+		recordedAt: entry.record.recordedAt,
+		envelope: entry.record.envelope,
+	});
+	const encoded = encodeJournalRecordV1(input);
+	if (!encoded.ok) return null;
+	if (encoded.record.envelopeDigest !== entry.record.envelopeDigest) {
+		erase(encoded.bytes);
+		return null;
+	}
+	const rehash = createHash("sha256").update(encoded.bytes).digest("hex");
+	if (rehash !== entry.receipt.sha256 || encoded.bytes.byteLength !== entry.receipt.size) {
+		erase(encoded.bytes);
+		return null;
+	}
+	erase(encoded.bytes);
+	return encoded.record;
+}
+
+function validateReceipt(raw: unknown): DurableReceipt | null {
+	if (typeof raw !== "object" || raw === null) return null;
+	const d = Object.getOwnPropertyDescriptors(raw);
+	const seq = d.sequence?.value;
+	const size = d.size?.value;
+	const sha = d.sha256?.value;
+	if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 1 || seq > 20000) return null;
+	if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 1 || size > 1310720) return null;
+	if (typeof sha !== "string" || !/^[0-9a-f]{64}$/.test(sha)) return null;
+	return Object.freeze({ sequence: seq, size, sha256: sha });
 }
 
 export class OrderedDurableRelay {
@@ -477,7 +552,7 @@ export class OrderedDurableRelay {
 		if (this.applicationContext.getStore() === true) return Promise.resolve(failure("REENTRANT_CALL"));
 		if (this.closed) return Promise.resolve(failure("CLOSED"));
 		const decoded = decodeEnvelope(raw);
-		if (!decoded.ok || !acceptedApplicationEnvelope(decoded.value)) {
+		if (!decoded.ok || !acceptedDomainSendEnvelope(decoded.value)) {
 			return Promise.resolve(failure("INVALID_ARGUMENT"));
 		}
 		return this.enqueue(() => this.sendOrdered(decoded.value));
@@ -487,6 +562,13 @@ export class OrderedDurableRelay {
 		if (this.applicationContext.getStore() === true) return Promise.resolve(failure("REENTRANT_CALL"));
 		if (this.closed) return Promise.resolve(failure("CLOSED"));
 		return this.enqueue(() => this.replayOutgoingOrdered(raw));
+	}
+
+	queryOutgoingAcknowledgment(frameId: unknown): Promise<OrderedRelayResult<OutgoingAcknowledgmentEvidence | null>> {
+		if (this.applicationContext.getStore() === true) return Promise.resolve(failure("REENTRANT_CALL"));
+		if (this.closed) return Promise.resolve(failure("CLOSED"));
+		if (!validId(frameId)) return Promise.resolve(failure("INVALID_ARGUMENT"));
+		return this.enqueue(() => this.queryOutgoingAcknowledgmentOrdered(frameId));
 	}
 
 	close(): Promise<OrderedRelayResult<void>> {
@@ -641,9 +723,6 @@ export class OrderedDurableRelay {
 				);
 				if (!delivered.ok) return this.poison("PERSISTENCE_FAILED");
 			}
-			if (!(await this.apply(state.record.envelope))) {
-				return this.poison("APPLICATION_FAILED");
-			}
 			if (!(await this.finishIncoming(state))) return this.poison("PERSISTENCE_FAILED");
 			return success(
 				Object.freeze({
@@ -686,11 +765,20 @@ export class OrderedDurableRelay {
 	private async sendOrdered(envelope: RemoteHostFrameEnvelope): Promise<OrderedRelayResult<OrderedRelaySendResult>> {
 		const published = await this.outgoing.publish(newPersistenceInput(envelope, "sent", this.identity));
 		if (!published.ok) return this.poison("PERSISTENCE_FAILED");
+		// Fresh-copy the ACTUAL published receipt (never substitute query receipt)
+		const pubReceipt = validateReceipt(published.value);
+		if (!pubReceipt) return this.poison("PERSISTENCE_FAILED");
 		const queried = await this.outgoing.query(envelope.frameId);
 		if (!queried.ok) return this.poison("PERSISTENCE_FAILED");
+		// Validate that query receipt matches the published receipt exactly
+		const qjr = queried.value.journal;
+		if (qjr.sequence !== pubReceipt.sequence || qjr.size !== pubReceipt.size || qjr.sha256 !== pubReceipt.sha256) {
+			return this.poison("PERSISTENCE_FAILED");
+		}
 		const replay = queried.value.state !== "new";
+		const journalReceipt = pubReceipt;
 		if (queried.value.state === "delivered") {
-			return success(Object.freeze({ frameId: envelope.frameId, replay: true }));
+			return success(Object.freeze({ frameId: envelope.frameId, replay: true, journalReceipt }));
 		}
 		if (queried.value.state === "new") {
 			const pending = await this.outgoing.markPending(
@@ -699,7 +787,7 @@ export class OrderedDurableRelay {
 			if (!pending.ok) return this.poison("PERSISTENCE_FAILED");
 		}
 		if (!(await this.sendTransport(envelope))) return this.poison("TRANSPORT_UNCERTAIN");
-		return success(Object.freeze({ frameId: envelope.frameId, replay }));
+		return success(Object.freeze({ frameId: envelope.frameId, replay, journalReceipt }));
 	}
 
 	private async replayOutgoingOrdered(raw: unknown): Promise<OrderedRelayResult<OrderedRelayReplayResult>> {
@@ -729,6 +817,118 @@ export class OrderedDurableRelay {
 			sent += 1;
 		}
 		return success(Object.freeze({ sent, nextCursor: page.value.nextCursor }));
+	}
+
+	private async queryOutgoingAcknowledgmentOrdered(
+		frameId: string,
+	): Promise<OrderedRelayResult<OutgoingAcknowledgmentEvidence | null>> {
+		// 1. Query outgoing store for the frame's delivery state
+		const outgoing = await this.outgoing.query(frameId);
+		if (!outgoing.ok) {
+			if (outgoing.error.code === "NOT_FOUND") return success(null);
+			return this.poison("PERSISTENCE_FAILED");
+		}
+		const outgoingState = outgoing.value;
+
+		// Validate and fresh-copy outgoing journal receipt
+		const outgoingJournalReceipt = validateReceipt(outgoingState.journal);
+		if (!outgoingJournalReceipt) return this.poison("EVIDENCE_CONFLICT");
+
+		// Require outgoing delivered before returning evidence
+		if (outgoingState.state !== "delivered") return success(null);
+
+		// 2. Bounded scan of incoming durable journals for an ACK
+		let cursor: number | null = null;
+		let foundRecord: JournalRecordV1 | null = null;
+		let foundReceipt: DurableReceipt | null = null;
+		let pages = 0;
+		let records = 0;
+
+		while (pages < QUERY_MAX_PAGES) {
+			pages += 1;
+			const pageResult = await this.incoming.replayJournals(Object.freeze({ cursor, maxCount: 64 }));
+			if (!pageResult.ok) return this.poison("PERSISTENCE_FAILED");
+
+			const page = pageResult.value;
+
+			// Verify cursor advances monotonically
+			if (page.nextCursor !== null && cursor !== null && page.nextCursor <= cursor) {
+				return this.poison("EVIDENCE_CONFLICT");
+			}
+
+			// If page cursor does not advance from request cursor, conflict
+			if (page.nextCursor !== null && page.nextCursor === cursor) {
+				return this.poison("EVIDENCE_CONFLICT");
+			}
+
+			for (const entry of page.entries) {
+				records += 1;
+				if (records > QUERY_MAX_RECORDS) return this.poison("EVIDENCE_CONFLICT");
+
+				// Validate every journal entry through codec before reading
+				const freshRecord = revalidateRecord(entry);
+				if (!freshRecord) return this.poison("EVIDENCE_CONFLICT");
+
+				// Skip non-ACK entries
+				if (freshRecord.envelope.frame.type !== "ack") continue;
+				const ackFrame = freshRecord.envelope.frame;
+				if (ackFrame.type !== "ack") continue;
+				if (ackFrame.acknowledges !== frameId) continue;
+
+				// Found a matching ACK -- reject duplicates
+				if (foundRecord !== null) return this.poison("EVIDENCE_CONFLICT");
+
+				// Verify ACK is durably delivered in incoming store
+				const ackIncoming = await this.incoming.query(freshRecord.envelope.frameId);
+				if (!ackIncoming.ok || ackIncoming.value.state !== "delivered") return success(null);
+
+				// Full identity binding: frameId, envelopeDigest, journal seq+size+sha
+				const ai = ackIncoming.value;
+				if (ai.record.envelope.frameId !== freshRecord.envelope.frameId) {
+					return this.poison("EVIDENCE_CONFLICT");
+				}
+				if (ai.record.envelopeDigest !== freshRecord.envelopeDigest) {
+					return this.poison("EVIDENCE_CONFLICT");
+				}
+				if (ai.journal.sequence !== entry.receipt.sequence) {
+					return this.poison("EVIDENCE_CONFLICT");
+				}
+				if (ai.journal.size !== entry.receipt.size) {
+					return this.poison("EVIDENCE_CONFLICT");
+				}
+				if (ai.journal.sha256 !== entry.receipt.sha256) {
+					return this.poison("EVIDENCE_CONFLICT");
+				}
+
+				// Verify recomputed envelope digest matches
+				const ackDigestCheck = canonicalDigest(freshRecord.envelope);
+				if (!ackDigestCheck.ok) return this.poison("EVIDENCE_CONFLICT");
+				if (ackDigestCheck.value !== freshRecord.envelopeDigest) return this.poison("EVIDENCE_CONFLICT");
+
+				foundRecord = freshRecord;
+				foundReceipt = validateReceipt(entry.receipt);
+				if (!foundReceipt) return this.poison("EVIDENCE_CONFLICT");
+			}
+
+			if (page.nextCursor === null) break;
+			cursor = page.nextCursor;
+		}
+
+		// If max pages reached and cursor remains non-null, scan was incomplete
+		if (pages >= QUERY_MAX_PAGES && cursor !== null) return this.poison("EVIDENCE_CONFLICT");
+
+		// 3. If no matching ACK found, conflict
+		if (foundRecord === null || foundReceipt === null) return this.poison("EVIDENCE_CONFLICT");
+
+		// 4. Build secret-free evidence (no outgoingEnvelope or ackEnvelope)
+		return success(
+			Object.freeze({
+				frameId,
+				outgoingJournalReceipt,
+				ackEnvelopeId: foundRecord.envelope.frameId,
+				ackEnvelopeDigest: foundRecord.envelopeDigest,
+			}),
+		);
 	}
 
 	private poison<T>(code: OrderedRelayErrorCode): OrderedRelayResult<T> {

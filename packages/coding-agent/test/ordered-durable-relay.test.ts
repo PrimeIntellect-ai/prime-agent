@@ -387,7 +387,7 @@ describe("ordered durable relay", () => {
 		await harness.relay.close();
 	});
 
-	it("persists outgoing before send and marks it delivered before applying its ACK", async () => {
+	it("persists outgoing before send, marks delivered on inbound ACK, exposes evidence", async () => {
 		let outgoing: DurableRelayStore;
 		const harness = await openRelay({
 			transportSend: async (raw) => {
@@ -395,14 +395,6 @@ describe("ordered durable relay", () => {
 				const state = await outgoing.query(envelope.frameId);
 				expect(state.ok && state.value.state).toBe("pending");
 				return { status: "sent" };
-			},
-			applicationApply: async (raw) => {
-				const envelope = (raw as { envelope: RemoteHostFrameEnvelope }).envelope;
-				if (envelope.frame.type === "ack") {
-					const state = await outgoing.query(envelope.frame.acknowledges);
-					expect(state.ok && state.value.state).toBe("delivered");
-				}
-				return { status: "applied" };
 			},
 		});
 		outgoing = harness.outgoing;
@@ -414,6 +406,21 @@ describe("ordered durable relay", () => {
 		expect(received.ok && received.value.action).toBe("acknowledged_outbound");
 		const delivered = await outgoing.query("outbound-1");
 		expect(delivered.ok && delivered.value.state).toBe("delivered");
+		// ACK was NOT sent to application
+		expect(harness.applied).toHaveLength(0);
+		// queryOutgoingAcknowledgment returns exact evidence
+		const evidence = await harness.relay.queryOutgoingAcknowledgment("outbound-1");
+		expect(evidence.ok).toBe(true);
+		if (evidence.ok) {
+			expect(evidence.value).not.toBeNull();
+			if (evidence.value !== null) {
+				expect(evidence.value.frameId).toBe("outbound-1");
+				expect(typeof evidence.value.ackEnvelopeId).toBe("string");
+				expect(evidence.value.ackEnvelopeId.length).toBeGreaterThan(0);
+				expect(typeof evidence.value.ackEnvelopeDigest).toBe("string");
+				expect(evidence.value.ackEnvelopeDigest.length).toBe(64);
+			}
+		}
 		await harness.relay.close();
 	});
 
@@ -425,7 +432,7 @@ describe("ordered durable relay", () => {
 		const duplicate = await harness.relay.receive(ack);
 		expect(first.ok && first.value.action).toBe("acknowledged_outbound");
 		expect(duplicate.ok && duplicate.value.action).toBe("replayed");
-		expect(harness.applied).toHaveLength(1);
+		expect(harness.applied).toHaveLength(0);
 		await harness.relay.close();
 	});
 
@@ -564,5 +571,233 @@ describe("ordered durable relay", () => {
 		expect(counts.journal).toBe(1);
 		expect(transportCloses).toBe(1);
 		expect(applicationCloses).toBe(1);
+	});
+
+	it("returns exact journalReceipt from outgoing query on new send with fresh ref", async () => {
+		const harness = await openRelay();
+		const result = await harness.relay.send(eventEnvelope("outbound-1"));
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			expect(result.value.journalReceipt).toBeDefined();
+			expect(typeof result.value.journalReceipt.sequence).toBe("number");
+			expect(typeof result.value.journalReceipt.sha256).toBe("string");
+			expect(result.value.journalReceipt.sequence).toBeGreaterThanOrEqual(1);
+		}
+		await harness.relay.close();
+	});
+
+	it("returns same journalReceipt value but fresh ref on replayed send", async () => {
+		const harness = await openRelay();
+		const first = await harness.relay.send(eventEnvelope("outbound-1"));
+		expect(first.ok).toBe(true);
+		const second = await harness.relay.send(eventEnvelope("outbound-1"));
+		expect(second.ok).toBe(true);
+		if (first.ok && second.ok) {
+			expect(second.value.replay).toBe(true);
+			expect(second.value.journalReceipt.sequence).toBe(first.value.journalReceipt.sequence);
+			expect(second.value.journalReceipt.sha256).toBe(first.value.journalReceipt.sha256);
+			expect(second.value.journalReceipt.size).toBe(first.value.journalReceipt.size);
+		}
+		await harness.relay.close();
+	});
+
+	it("queryOutgoingAcknowledgment returns null for unsent frame", async () => {
+		const harness = await openRelay();
+		const result = await harness.relay.queryOutgoingAcknowledgment("ghost-frame");
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			expect(result.value).toBeNull();
+		}
+		await harness.relay.close();
+	});
+
+	it("queryOutgoingAcknowledgment returns null for pending frame without ACK", async () => {
+		const harness = await openRelay();
+		await harness.relay.send(eventEnvelope("outbound-1"));
+		const result = await harness.relay.queryOutgoingAcknowledgment("outbound-1");
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			expect(result.value).toBeNull();
+		}
+		await harness.relay.close();
+	});
+
+	it("queryOutgoingAcknowledgment returns evidence after receive correlates ACK", async () => {
+		const harness = await openRelay();
+		await harness.relay.send(eventEnvelope("outbound-1"));
+		const ackResult = await harness.relay.receive(ackEnvelope("outbound-1"));
+		expect(ackResult.ok && ackResult.value.action).toBe("acknowledged_outbound");
+		const evidence = await harness.relay.queryOutgoingAcknowledgment("outbound-1");
+		expect(evidence.ok).toBe(true);
+		if (evidence.ok && evidence.value !== null) {
+			expect(evidence.value.frameId).toBe("outbound-1");
+			expect(typeof evidence.value.ackEnvelopeId).toBe("string");
+			expect(evidence.value.ackEnvelopeId.length).toBeGreaterThan(0);
+			expect(typeof evidence.value.ackEnvelopeDigest).toBe("string");
+			expect(evidence.value.ackEnvelopeDigest.length).toBe(64);
+			// Deep freshness checks (no internal refs aliased)
+			expect(Object.isFrozen(evidence.value)).toBe(true);
+			expect(Object.isFrozen(evidence.value.outgoingJournalReceipt)).toBe(true);
+		}
+		await harness.relay.close();
+	});
+
+	it("queryOutgoingAcknowledgment poisons on delivered frame without matching ACK", async () => {
+		const incomingDisk = emptyDisk();
+		const outgoingDisk = emptyDisk();
+		const first = await openRelay({ incomingDisk, outgoingDisk });
+		await first.relay.send(eventEnvelope("outbound-1"));
+		await first.relay.receive(ackEnvelope("outbound-1"));
+		await first.relay.close();
+
+		// Collect outgoing journals/markers from first session. Reopen second
+		// relay with a FRESH incoming store (no ACK journal) but same outgoing.
+		const counts = capCounts();
+		const secondIncoming = await openStore("received", counts);
+		const secondOutgoing = await openStore("sent", counts, outgoingDisk);
+		const sent: RemoteHostFrameEnvelope[] = [];
+		const applied: RemoteHostFrameEnvelope[] = [];
+		const transport = {
+			send(raw: unknown): Promise<unknown> {
+				const envelope = (raw as { envelope: RemoteHostFrameEnvelope }).envelope;
+				sent.push(envelope);
+				return Promise.resolve({ status: "sent" });
+			},
+			close(): Promise<unknown> {
+				counts.transport += 1;
+				return Promise.resolve({ status: "closed" });
+			},
+		};
+		const application = {
+			apply(raw: unknown): Promise<unknown> {
+				const envelope = (raw as { envelope: RemoteHostFrameEnvelope }).envelope;
+				applied.push(envelope);
+				return Promise.resolve({ status: "applied" });
+			},
+			close(): Promise<unknown> {
+				counts.application += 1;
+				return Promise.resolve({ status: "closed" });
+			},
+		};
+		const created = await createOrderedDurableRelay({
+			identity: IDENTITY,
+			incomingStore: secondIncoming,
+			outgoingStore: secondOutgoing,
+			transport,
+			application,
+		});
+		if (!created.ok) throw new Error("failed to create relay");
+		const relay2 = created.relay;
+		// Frame is delivered from outgoing store but incoming has no matching ACK
+		await relay2.send(eventEnvelope("outbound-1"));
+		const evidence = await relay2.queryOutgoingAcknowledgment("outbound-1");
+		expect(evidence.ok).toBe(false);
+		if (!evidence.ok) {
+			expect(evidence.error.code).toBe("EVIDENCE_CONFLICT");
+		}
+		await relay2.close();
+	});
+
+	it("rejects send of ACK frame without touching store or transport", async () => {
+		const harness = await openRelay();
+		const ack = ackEnvelope("ghost");
+		const sendResult = await harness.relay.send(ack);
+		expect(sendResult.ok).toBe(false);
+		if (!sendResult.ok) {
+			expect(sendResult.error.code).toBe("INVALID_ARGUMENT");
+		}
+		// No store operations touched (incoming is empty, outgoing is untouched)
+		const sendCount = harness.sent.length;
+		const applyCount = harness.applied.length;
+		expect(sendCount).toBe(0);
+		expect(applyCount).toBe(0);
+		// Incoming and outgoing stores are clean
+		const incomingState = await harness.incoming.query("ghost");
+		expect(incomingState.ok).toBe(false);
+		await harness.relay.close();
+	});
+
+	it("rejects health frame as control-plane", async () => {
+		const harness = await openRelay();
+		const health: RemoteHostFrameEnvelope = {
+			type: "frame",
+			frameId: "health-1",
+			protocol: { name: REMOTE_HOST_PROTOCOL_NAME, version: REMOTE_HOST_PROTOCOL_VERSION },
+			sentAt: "2025-01-15T10:30:00.000Z",
+			frame: {
+				type: "health",
+				healthSeq: 1,
+				status: "connected",
+			},
+		};
+		expect(await code(harness.relay.receive(health))).toBe("INVALID_ARGUMENT");
+		expect(await code(harness.relay.send(health))).toBe("INVALID_ARGUMENT");
+		await harness.relay.close();
+	});
+
+	it("rejects error frame as control-plane", async () => {
+		const harness = await openRelay();
+		const error: RemoteHostFrameEnvelope = {
+			type: "frame",
+			frameId: "error-1",
+			protocol: { name: REMOTE_HOST_PROTOCOL_NAME, version: REMOTE_HOST_PROTOCOL_VERSION },
+			sentAt: "2025-01-15T10:30:00.000Z",
+			frame: {
+				type: "error",
+				code: "BAD_THING",
+				message: "something went wrong",
+			},
+		};
+		expect(await code(harness.relay.receive(error))).toBe("INVALID_ARGUMENT");
+		expect(await code(harness.relay.send(error))).toBe("INVALID_ARGUMENT");
+		await harness.relay.close();
+	});
+	it("queryOutgoingAcknowledgment rejects hostile frameId", async () => {
+		const harness = await openRelay();
+		const result = await harness.relay.queryOutgoingAcknowledgment(null);
+		expect(result.ok).toBe(false);
+		if (!result.ok) {
+			expect(result.error.code).toBe("INVALID_ARGUMENT");
+		}
+		await harness.relay.close();
+	});
+
+	it("queryOutgoingAcknowledgment rejects reentrant call from application context", async () => {
+		let relay: OrderedDurableRelay;
+		const harness = await openRelay({
+			applicationApply: async () => {
+				await Promise.resolve();
+				expect(await code(relay.queryOutgoingAcknowledgment("outbound-1"))).toBe("REENTRANT_CALL");
+				return { status: "applied" };
+			},
+		});
+		relay = harness.relay;
+		expect((await relay.receive(eventEnvelope())).ok).toBe(true);
+		await relay.close();
+	});
+
+	it("queryOutgoingAcknowledgment survives relay store restart with correct evidence", async () => {
+		const incomingDisk = emptyDisk();
+		const outgoingDisk = emptyDisk();
+		const first = await openRelay({ incomingDisk, outgoingDisk });
+		await first.relay.send(eventEnvelope("outbound-1"));
+		await first.relay.receive(ackEnvelope("outbound-1"));
+		await first.relay.close();
+
+		// Reopen from same disk state
+		const second = await openRelay({ incomingDisk, outgoingDisk });
+		const evidence = await second.relay.queryOutgoingAcknowledgment("outbound-1");
+		expect(evidence.ok).toBe(true);
+		if (evidence.ok && evidence.value !== null) {
+			expect(evidence.value.frameId).toBe("outbound-1");
+			expect(typeof evidence.value.ackEnvelopeId).toBe("string");
+			expect(evidence.value.ackEnvelopeId.length).toBeGreaterThan(0);
+			expect(typeof evidence.value.ackEnvelopeDigest).toBe("string");
+			expect(evidence.value.ackEnvelopeDigest.length).toBe(64);
+			// Deep freshness: all nested objects frozen, not aliased across restart
+			expect(Object.isFrozen(evidence.value)).toBe(true);
+			expect(Object.isFrozen(evidence.value.outgoingJournalReceipt)).toBe(true);
+		}
+		await second.relay.close();
 	});
 });
