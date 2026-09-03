@@ -910,10 +910,14 @@ export class SandboxOwnershipStore {
 			if (fd !== undefined)
 				try {
 					closeSync(fd);
-				} catch {}
+				} catch {
+					// Preserve the original atomic-write failure; this descriptor is already best-effort cleanup.
+				}
 			try {
 				rmSync(tmpPath, { force: true });
-			} catch {}
+			} catch {
+				// Preserve the original atomic-write failure; the temporary file may already be absent.
+			}
 			throw err;
 		}
 	}

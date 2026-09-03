@@ -198,7 +198,9 @@ function parseSandboxListJson(raw: string, labels: string[]): SandboxIdentity[] 
 				labels: entryLabels,
 				resources: typeof rawResources === "string" ? rawResources : "",
 			});
-		} catch {}
+		} catch {
+			// Ignore one malformed CLI row while retaining other independently valid sandbox records.
+		}
 	}
 	return result;
 }
