@@ -98,6 +98,14 @@ function getFirstTool(body: Record<string, unknown>): Record<string, unknown> {
 	return tools[0] as Record<string, unknown>;
 }
 
+function getInputSchema(body: Record<string, unknown>): Record<string, unknown> {
+	const inputSchema = getFirstTool(body).input_schema;
+	if (typeof inputSchema !== "object" || inputSchema === null || Array.isArray(inputSchema)) {
+		throw new Error("Expected input schema on first tool");
+	}
+	return inputSchema as Record<string, unknown>;
+}
+
 describe("Anthropic eager tool input streaming compatibility", () => {
 	it("sends per-tool eager_input_streaming by default", async () => {
 		const request = await captureAnthropicRequest(undefined, createContext());
@@ -118,5 +126,132 @@ describe("Anthropic eager tool input streaming compatibility", () => {
 
 		expect(request.body.tools).toBeUndefined();
 		expect(request.headers["anthropic-beta"]).toBeUndefined();
+	});
+});
+
+describe("Anthropic tool schema compatibility", () => {
+	it("normalizes catch-all record patterns to additionalProperties recursively", async () => {
+		const parameters = Type.Object({
+			metadata: Type.Record(Type.String(), Type.Unknown()),
+			labels: Type.Record(Type.String(), Type.String()),
+			nested: Type.Array(Type.Record(Type.String(), Type.Number())),
+		});
+		const request = await captureAnthropicRequest(
+			undefined,
+			createContext([
+				{
+					name: "report",
+					description: "Report metadata",
+					parameters,
+				},
+			]),
+		);
+		const properties = getInputSchema(request.body).properties as Record<string, unknown>;
+
+		expect(properties.metadata).toEqual({ type: "object", additionalProperties: true });
+		expect(properties.labels).toEqual({ type: "object", additionalProperties: { type: "string" } });
+		expect(properties.nested).toEqual({
+			type: "array",
+			items: { type: "object", additionalProperties: { type: "number" } },
+		});
+		expect(parameters.properties.metadata).toHaveProperty("patternProperties");
+	});
+
+	it("preserves non-catch-all patternProperties", async () => {
+		const request = await captureAnthropicRequest(
+			undefined,
+			createContext([
+				{
+					name: "report",
+					description: "Report metadata",
+					parameters: Type.Object({
+						metadata: Type.Unsafe({
+							type: "object",
+							patternProperties: { "^x-": Type.String() },
+						}),
+					}),
+				},
+			]),
+		);
+		const properties = getInputSchema(request.body).properties as Record<string, unknown>;
+
+		expect(properties.metadata).toEqual({
+			type: "object",
+			patternProperties: { "^x-": { type: "string" } },
+		});
+	});
+
+	it("preserves catch-all patternProperties when named properties share the schema", async () => {
+		const request = await captureAnthropicRequest(
+			undefined,
+			createContext([
+				{
+					name: "report",
+					description: "Report metadata",
+					parameters: Type.Object({
+						metadata: Type.Unsafe({
+							type: "object",
+							properties: { fixed: Type.String() },
+							patternProperties: { "^.*$": Type.Number() },
+						}),
+					}),
+				},
+			]),
+		);
+		const properties = getInputSchema(request.body).properties as Record<string, unknown>;
+
+		expect(properties.metadata).toEqual({
+			type: "object",
+			properties: { fixed: { type: "string" } },
+			patternProperties: { "^.*$": { type: "number" } },
+		});
+	});
+
+	it("normalizes a record used as the root tool schema", async () => {
+		const request = await captureAnthropicRequest(
+			undefined,
+			createContext([
+				{
+					name: "labels",
+					description: "Submit labels",
+					parameters: Type.Record(Type.String(), Type.String()),
+				},
+			]),
+		);
+
+		expect(getInputSchema(request.body)).toEqual({
+			type: "object",
+			additionalProperties: { type: "string" },
+			properties: {},
+			required: [],
+		});
+	});
+
+	it("does not forward root schema metadata", async () => {
+		const request = await captureAnthropicRequest(
+			undefined,
+			createContext([
+				{
+					name: "labels",
+					description: "Submit labels",
+					parameters: Type.Unsafe({
+						$schema: "https://json-schema.org/draft/2020-12/schema",
+						$defs: { label: Type.String() },
+						definitions: { legacyLabel: Type.String() },
+						type: "object",
+						properties: { label: Type.String() },
+						required: ["label"],
+						additionalProperties: false,
+					}),
+				},
+			]),
+		);
+
+		expect(getInputSchema(request.body)).toEqual({
+			type: "object",
+			properties: { label: { type: "string" } },
+			required: ["label"],
+			additionalProperties: false,
+		});
 	});
 });
