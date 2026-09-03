@@ -15,7 +15,8 @@ import {
 	type SandboxCommandApplication,
 } from "../src/modes/daemon/sandbox-command-application.js";
 import { createSandboxCommandEffect } from "../src/modes/daemon/sandbox-command-effect.js";
-import type { SandboxCommandBackend, SandboxCommandEntryStat } from "../src/modes/daemon/sandbox-command-recovery.js";
+import { decodeSandboxCommandRecordV1 } from "../src/modes/daemon/sandbox-command-record-codec.js";
+import type { SandboxCommandBackend } from "../src/modes/daemon/sandbox-command-recovery.js";
 import {
 	createSandboxCommandStore,
 	type SandboxCommandPublisher,
@@ -29,22 +30,6 @@ import { createHarness } from "./suite/harness.js";
 
 function sha256Of(bytes: Uint8Array): string {
 	return createHash("sha256").update(bytes).digest("hex");
-}
-
-function makeStat(overrides?: Partial<SandboxCommandEntryStat>): SandboxCommandEntryStat {
-	return {
-		dev: "1234",
-		ino: "5678",
-		uid: "501",
-		mode: 0o600,
-		size: 0,
-		nlink: 1,
-		isFile: true,
-		isSymlink: false,
-		mtimeNs: "1000000000",
-		ctimeNs: "1000000000",
-		...overrides,
-	};
 }
 
 interface PublishedFile {
@@ -526,72 +511,126 @@ describe("FIFO ordering", () => {
 // Reentry detection — sync apply, async completion, close
 // ===========================================================================
 
-describe("AsyncLocalStorage reentry rejection", () => {
-	test("synchronous execute-time apply reentry returns error", async () => {
-		const { app, cleanup } = await createWorkingApp();
+describe("real reentry — sync execute-time and close", () => {
+	test("sync execute-time apply reentry returns error", async () => {
+		// Override session.abort BEFORE creating the effect so the bound
+		// execute closure captures the overridden method. The override
+		// uses a closure variable `reentryApp` set after app creation.
+		const h = await createHarness();
 		try {
-			// First apply succeeds
-			const r1 = await app.apply(makeCommandEnvelope("re1", "abort"));
-			expect(r1.status).toBe("applied");
+			// Mutable app reference — set after app creation
+			let reentryApp: SandboxCommandApplication | null = null;
+			const innerResults: Array<{ status: string }> = [];
 
-			// Second independent apply also succeeds (different command)
-			const r2 = await app.apply(makeCommandEnvelope("re2", "abort"));
-			expect(r2.status).toBe("applied");
-		} finally {
-			await cleanup();
-		}
-	});
+			let reentryTriggered = false;
 
-	test("close reentry from within apply returns error", async () => {
-		const { app, cleanup } = await createWorkingApp();
-		try {
-			// Close normally first, then verify apply returns error
-			await app.close();
+			const savedAbort = Object.getOwnPropertyDescriptor(h.session, "abort");
+			Object.defineProperty(h.session, "abort", {
+				value: () => {
+					if (reentryTriggered) return Promise.resolve(undefined);
+					reentryTriggered = true;
+					if (reentryApp !== null) {
+						void reentryApp.apply(makeCommandEnvelope("inner1", "abort")).then((ir) => {
+							innerResults.push(ir);
+						});
+						void reentryApp.apply(makeCommandEnvelope("inner2", "abort")).then((ir) => {
+							innerResults.push(ir);
+						});
+					}
+					return Promise.resolve(undefined);
+				},
+				configurable: true,
+				writable: true,
+			});
 
-			// Apply after close should be error
-			const r = await app.apply(makeCommandEnvelope("re3", "abort"));
-			expect(r.status).toBe("error");
-		} finally {
-			await cleanup();
-		}
-	});
+			// Create effect AFTER the override
+			const effectR = createSandboxCommandEffect(h.session);
+			if (!effectR.ok) throw new Error("effect failed");
+			const pubs: PublishedFile[] = [];
+			const store = await createMockStore(pubs);
+			const r = await createSandboxCommandApplication({ effect: effectR.capability, store });
+			if (!("ok" in r) || !r.ok) throw new Error("app creation failed");
+			reentryApp = r.application;
 
-	test("close is idempotent across concurrent calls", async () => {
-		const { app, cleanup } = await createWorkingApp();
-		try {
-			// Multiple close calls return same promise
-			const p1 = app.close();
-			const p2 = app.close();
-			expect(p1).toBe(p2);
-			const r1 = await p1;
-			expect(r1.status).toBe("closed");
-		} finally {
-			await cleanup();
-		}
-	});
+			const outer = await reentryApp.apply(makeCommandEnvelope("outer1", "abort"));
+			expect(outer.status).toBe("applied");
 
-	test("FIFO order maintained with rapid concurrent applies", async () => {
-		const { app, cleanup } = await createWorkingApp();
-		try {
-			const results: number[] = [];
-			const ps = [];
-			for (let i = 0; i < 10; i++) {
-				ps.push(
-					app.apply(makeCommandEnvelope(`fifo-${i}`, "abort")).then((r) => {
-						results.push(i);
-						return r;
-					}),
-				);
+			// Flush microtasks so the .then callbacks fire
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+
+			expect(innerResults.length).toBe(2);
+			for (const ir of innerResults) {
+				expect(ir.status).toBe("error");
 			}
-			await Promise.all(ps);
-			expect(results).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+			if (savedAbort) {
+				Object.defineProperty(h.session, "abort", savedAbort);
+			} else {
+				Reflect.deleteProperty(h.session, "abort");
+			}
+
+			await reentryApp.close();
 		} finally {
-			await cleanup();
+			h.cleanup();
 		}
 	});
-});
 
-// ===========================================================================
+	test("async completion-context reentry is also rejected", async () => {
+		// Override session.abort BEFORE effect creation. The override
+		// schedules an inner apply on the next microtask while the outer
+		// apply is running inside the ALS scope.
+		const h = await createHarness();
+		try {
+			let reentryApp: SandboxCommandApplication | null = null;
+			let deferredResolve: (v: unknown) => void = () => {};
+			const deferred = new Promise<unknown>((resolve) => {
+				deferredResolve = resolve;
+			});
+
+			const savedAbort = Object.getOwnPropertyDescriptor(h.session, "abort");
+			Object.defineProperty(h.session, "abort", {
+				value: () => {
+					void Promise.resolve().then(() => {
+						if (reentryApp !== null) {
+							void reentryApp.apply(makeCommandEnvelope("inner", "abort")).then((ir) => {
+								expect(ir.status).toBe("error");
+							});
+						}
+					});
+					return deferred;
+				},
+				configurable: true,
+				writable: true,
+			});
+
+			const effectR = createSandboxCommandEffect(h.session);
+			if (!effectR.ok) throw new Error("effect failed");
+			const pubs: PublishedFile[] = [];
+			const store = await createMockStore(pubs);
+			const r = await createSandboxCommandApplication({ effect: effectR.capability, store });
+			if (!("ok" in r) || !r.ok) throw new Error("app creation failed");
+			reentryApp = r.application;
+
+			void reentryApp.apply(makeCommandEnvelope("outer", "abort"));
+			deferredResolve(undefined);
+
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+
+			if (savedAbort) {
+				Object.defineProperty(h.session, "abort", savedAbort);
+			} else {
+				Reflect.deleteProperty(h.session, "abort");
+			}
+
+			await reentryApp.close();
+		} finally {
+			h.cleanup();
+		}
+	});
+}); // ===========================================================================
 // Hostile input — factory and apply
 // ===========================================================================
 
@@ -800,26 +839,171 @@ describe("command collision — admit-before-query", () => {
 // Recovery with started state — never re-execute
 // ===========================================================================
 
-describe("recovered started state", () => {
-	test("recovered started command is not re-executed", async () => {
-		const h = await createHarness();
+describe("real recovered started — CRASH interruption", () => {
+	test("recovery from started-without-terminal produces CRASH interruption; app does not re-execute", async () => {
+		// Phase 1: create store1, admit + markStarted command1, close.
+		const identity = { hostId: "h1", generation: "g1", sessionId: "s1" };
+		const ts = "2025-01-15T10:30:00.000Z";
+
+		const pub1: PublishedFile[] = [];
+		const p1 = makePublisher(pub1);
+		const store1 = await createSandboxCommandStore({
+			identity,
+			publisher: p1,
+			recoveryBackend: makeEmptyBackend(),
+			recordedAt: ts,
+		});
+		if (!store1.ok) throw new Error("store1 creation failed");
+
+		const admitR = await store1.value.admit(
+			Object.freeze({
+				command: Object.freeze({
+					type: "command",
+					commandId: "cr1",
+					body: Object.freeze({ type: "abort" }),
+				}),
+				recordedAt: ts,
+			}),
+		);
+		if (!admitR.ok) throw new Error("admit failed");
+
+		const startR = await store1.value.markStarted({ commandId: "cr1", recordedAt: ts });
+		if (!startR.ok) throw new Error("markStarted failed");
+
+		await store1.value.close();
+
+		// Retain the published bytes and receipts from pub1 (pending + started)
+		const pad = (seq: number): string => String(seq).padStart(20, "0");
+		const recoveredEntries = pub1.map((pf, i) => ({
+			name: `${pad(i + 1)}.b14-command`,
+			stat: {
+				dev: "1234",
+				ino: String(5678 + i),
+				uid: "501",
+				mode: 0o600,
+				size: pf.size,
+				nlink: 1,
+				isFile: true,
+				isSymlink: false,
+				mtimeNs: "1000000000",
+				ctimeNs: "1000000000",
+			},
+		}));
+		const openedSet = new Set<number>();
+
+		const recoveryBackend: SandboxCommandBackend = {
+			listPage() {
+				return Promise.resolve({
+					status: "page",
+					entries: recoveredEntries,
+					nextCursor: null,
+					close: () => Promise.resolve(Object.freeze({ status: "closed" })),
+				});
+			},
+			open(request: { name: string }) {
+				const idx = recoveredEntries.findIndex((e) => e.name === request.name);
+				if (idx < 0) return Promise.resolve({ status: "missing" });
+				if (openedSet.has(idx)) return Promise.resolve({ status: "missing" });
+				openedSet.add(idx);
+				const pf = pub1[idx];
+				return Promise.resolve({
+					status: "opened",
+					handle: {
+						readAt(_offset: number, _size: number) {
+							return Promise.resolve(Object.freeze({ status: "bytes", bytes: pf.bytes }));
+						},
+						confirmEof(totalSize: number) {
+							if (totalSize >= pf.bytes.byteLength) return Promise.resolve({ status: "eof" });
+							return Promise.resolve({ status: "bytes", bytes: new Uint8Array(0) });
+						},
+						fstat() {
+							return Promise.resolve({
+								dev: "1234",
+								ino: String(5678 + idx),
+								uid: "501",
+								mode: 0o600,
+								size: pf.bytes.byteLength,
+								nlink: 1,
+								isFile: true,
+								isSymlink: false,
+								mtimeNs: "1000000000",
+								ctimeNs: "1000000000",
+							});
+						},
+						close() {
+							return Promise.resolve({ status: "closed" });
+						},
+					},
+				});
+			},
+			close() {
+				return Promise.resolve(Object.freeze({ status: "closed" }));
+			},
+		};
+
+		// Phase 2: create store2 from recovery — must append CRASH interruption.
+		const pub2: PublishedFile[] = [];
+		const p2 = makePublisher(pub2);
+		const store2 = await createSandboxCommandStore({
+			identity,
+			publisher: p2,
+			recoveryBackend,
+			recordedAt: ts,
+		});
+		if (!store2.ok) throw new Error("store2 creation failed");
+
+		// Query state — should be interrupted with CRASH outcome
+		const qr = await store2.value.query("cr1");
+		if (!qr.ok) throw new Error("query failed");
+		expect(qr.value.state).toBe("interrupted");
+		expect(qr.value.outcome).toBe("CRASH");
+
+		// Phase 3: create app from recovered store, prove no session method execution
+		let sessionMethodCalled = false;
+		const h2 = await createHarness();
 		try {
-			const effectR = createSandboxCommandEffect(h.session);
-			if (!effectR.ok) throw new Error("effect failed");
-			const pubs: PublishedFile[] = [];
-			const store = await createMockStore(pubs);
-			const r = await createSandboxCommandApplication({ effect: effectR.capability, store });
-			if (!("ok" in r) || !r.ok) throw new Error("app creation failed");
+			const savedAbort = Object.getOwnPropertyDescriptor(h2.session, "abort");
+			Object.defineProperty(h2.session, "abort", {
+				value: () => {
+					sessionMethodCalled = true;
+					return Promise.resolve(undefined);
+				},
+				configurable: true,
+				writable: true,
+			});
 
-			const r1 = await r.application.apply(makeCommandEnvelope("started1", "abort"));
-			expect(r1.status).toBe("applied");
+			const effectR2 = createSandboxCommandEffect(h2.session);
+			if (!effectR2.ok) throw new Error("effect2 failed");
 
-			// Second apply of same command — terminal, returns applied
-			const r2 = await r.application.apply(makeCommandEnvelope("started1", "abort"));
-			expect(r2.status).toBe("applied");
+			const appR = await createSandboxCommandApplication({
+				effect: effectR2.capability,
+				store: store2.value,
+			});
+			if (!("ok" in appR) || !appR.ok) throw new Error("app creation failed");
+
+			// Apply the same command — should return applied without calling session method
+			const appResult = await appR.application.apply(makeCommandEnvelope("cr1", "abort"));
+			expect(appResult.status).toBe("applied");
+			expect(sessionMethodCalled).toBe(false);
+
+			// Query still shows interrupted/CRASH
+			const qr2 = await store2.value.query("cr1");
+			if (!qr2.ok) throw new Error("query2 failed");
+			expect(qr2.value.state).toBe("interrupted");
+			expect(qr2.value.outcome).toBe("CRASH");
+
+			if (savedAbort) {
+				Object.defineProperty(h2.session, "abort", savedAbort);
+			} else {
+				Reflect.deleteProperty(h2.session, "abort");
+			}
+
+			await appR.application.close();
 		} finally {
-			h.cleanup();
+			h2.cleanup();
 		}
+
+		await store2.value.close();
 	});
 });
 
@@ -827,14 +1011,73 @@ describe("recovered started state", () => {
 // Sync-throw effect — markStarted before interrupt
 // ===========================================================================
 
-describe("sync-throw effect", () => {
-	test("effect that throws still persists started then interrupt", async () => {
-		const { app, cleanup } = await createWorkingApp();
+describe("real sync-throw — override session method to throw", () => {
+	test("session method throw causes pending→started→interrupted chronology via published records", async () => {
+		// Override session.abort BEFORE effect creation so the bound
+		// execute closure captures the throwing version.
+		const h = await createHarness();
 		try {
-			const result = await app.apply(makeCommandEnvelope("syncThrow1", "abort"));
+			const savedAbort = Object.getOwnPropertyDescriptor(h.session, "abort");
+			Object.defineProperty(h.session, "abort", {
+				value: () => {
+					throw new Error("sync boom");
+				},
+				configurable: true,
+				writable: true,
+			});
+
+			const effectR = createSandboxCommandEffect(h.session);
+			if (!effectR.ok) throw new Error("effect failed");
+			const pubs: PublishedFile[] = [];
+			const p = makePublisher(pubs);
+			const storeR = await createSandboxCommandStore({
+				identity: IDENTITY,
+				publisher: p,
+				recoveryBackend: makeEmptyBackend(),
+				recordedAt: TIMESTAMP,
+			});
+			if (!storeR.ok) throw new Error("store creation failed");
+
+			const r = await createSandboxCommandApplication({ effect: effectR.capability, store: storeR.value });
+			if (!("ok" in r) || !r.ok) throw new Error("app creation failed");
+			const app = r.application;
+
+			const result = await app.apply(makeCommandEnvelope("throw1", "abort"));
 			expect(result.status).toBe("applied");
+
+			// Close the app so publisher has all bytes
+			await app.close();
+
+			// Decode each published record to prove chronology
+			// pubs contains [pending, started, interrupted] in order
+			expect(pubs.length).toBe(3);
+			expect(pubs[0].seq).toBe(1);
+			expect(pubs[1].seq).toBe(2);
+			expect(pubs[2].seq).toBe(3);
+
+			const decoded0 = decodeSandboxCommandRecordV1(pubs[0].bytes);
+			if (!decoded0.ok) throw new Error("decode failed for record 0");
+			if (decoded0.record.recordKind !== "pending") throw new Error("expected pending");
+			expect(decoded0.record.commandId).toBe("throw1");
+
+			const decoded1 = decodeSandboxCommandRecordV1(pubs[1].bytes);
+			if (!decoded1.ok) throw new Error("decode failed for record 1");
+			if (decoded1.record.recordKind !== "started") throw new Error("expected started");
+			expect(decoded1.record.commandId).toBe("throw1");
+
+			const decoded2 = decodeSandboxCommandRecordV1(pubs[2].bytes);
+			if (!decoded2.ok) throw new Error("decode failed for record 2");
+			if (decoded2.record.recordKind !== "interrupted") throw new Error("expected interrupted");
+			expect(decoded2.record.outcome).toBe("INTERRUPTED");
+			expect(decoded2.record.commandId).toBe("throw1");
+
+			if (savedAbort) {
+				Object.defineProperty(h.session, "abort", savedAbort);
+			} else {
+				Reflect.deleteProperty(h.session, "abort");
+			}
 		} finally {
-			await cleanup();
+			h.cleanup();
 		}
 	});
 });
@@ -843,14 +1086,98 @@ describe("sync-throw effect", () => {
 // Promise subclass / thenable rejection
 // ===========================================================================
 
-describe("exact Promise validation — no subclass/thenable", () => {
-	test("non-native Promise in handle completion returns error", async () => {
-		const { app, cleanup } = await createWorkingApp();
+describe("real invalid Promise — subclass/thenable rejection", () => {
+	test("session abort returns Promise subclass; effect maps to INTERNAL_ERROR, app durably interrupts", async () => {
+		const h = await createHarness();
 		try {
-			const result = await app.apply(makeCommandEnvelope("promise1", "abort"));
+			// Create a Promise subclass — does not pass isExactNativePromise
+			class MyPromise extends Promise<unknown> {
+				// biome-ignore lint/complexity/noUselessConstructor: extends Promise needs constructor
+				constructor(executor: (resolve: (v: unknown) => void, reject: (e: unknown) => void) => void) {
+					super(executor);
+				}
+			}
+
+			const savedAbort = Object.getOwnPropertyDescriptor(h.session, "abort");
+			Object.defineProperty(h.session, "abort", {
+				value: () => {
+					return new MyPromise((resolve) => {
+						resolve(undefined);
+					});
+				},
+				configurable: true,
+				writable: true,
+			});
+
+			const effectR = createSandboxCommandEffect(h.session);
+			if (!effectR.ok) throw new Error("effect failed");
+			const pubs: PublishedFile[] = [];
+			const store = await createMockStore(pubs);
+			const r = await createSandboxCommandApplication({ effect: effectR.capability, store });
+			if (!("ok" in r) || !r.ok) throw new Error("app creation failed");
+			const app = r.application;
+
+			// Apply — effect.execute returns a Promise subclass, isExactPromise fails,
+			// effect maps to INTERNAL_ERROR, app durably interrupts
+			const result = await app.apply(makeCommandEnvelope("badPromise1", "abort"));
 			expect(result.status).toBe("applied");
+
+			// Query store — state must be interrupted
+			const qr = await store.query("badPromise1");
+			if (!qr.ok) throw new Error("query failed");
+			expect(qr.value.state).toBe("interrupted");
+
+			if (savedAbort) {
+				Object.defineProperty(h.session, "abort", savedAbort);
+			} else {
+				Reflect.deleteProperty(h.session, "abort");
+			}
+
+			await app.close();
 		} finally {
-			await cleanup();
+			h.cleanup();
+		}
+	});
+
+	test("thenable with own then property is rejected; durably interrupted", async () => {
+		const h = await createHarness();
+		try {
+			// biome-ignore lint/suspicious/noThenProperty: intentional thenable with own then
+			const thenable = Object.setPrototypeOf({ then() {} }, null);
+
+			const savedAbort = Object.getOwnPropertyDescriptor(h.session, "abort");
+			Object.defineProperty(h.session, "abort", {
+				value: () => thenable,
+				configurable: true,
+				writable: true,
+			});
+
+			const effectR = createSandboxCommandEffect(h.session);
+			if (!effectR.ok) throw new Error("effect failed");
+			const pubs: PublishedFile[] = [];
+			const store = await createMockStore(pubs);
+			const r = await createSandboxCommandApplication({ effect: effectR.capability, store });
+			if (!("ok" in r) || !r.ok) throw new Error("app creation failed");
+			const app = r.application;
+
+			const result = await app.apply(makeCommandEnvelope("thenable1", "abort"));
+			expect(result.status).toBe("applied");
+
+			// No thenable getter/call — effect already rejected in isExactPromise
+			const qr = await store.query("thenable1");
+			if (!qr.ok) throw new Error("query failed");
+			expect(qr.value.state).toBe("interrupted");
+			expect(qr.value.outcome).toBe("INTERRUPTED");
+
+			if (savedAbort) {
+				Object.defineProperty(h.session, "abort", savedAbort);
+			} else {
+				Reflect.deleteProperty(h.session, "abort");
+			}
+
+			await app.close();
+		} finally {
+			h.cleanup();
 		}
 	});
 });
@@ -859,14 +1186,52 @@ describe("exact Promise validation — no subclass/thenable", () => {
 // Close: reverse order, attempt every owner, chain with completion
 // ===========================================================================
 
-describe("close order and multi-owner", () => {
-	test("close closes effect then store (reverse dependency)", async () => {
-		const { app, cleanup } = await createWorkingApp();
+describe("close order and publisher failure", () => {
+	test("store publisher close-failure returns error from application close", async () => {
+		const h = await createHarness();
 		try {
-			const result = await app.close();
-			expect(result.status).toBe("closed");
+			const effectR = createSandboxCommandEffect(h.session);
+			if (!effectR.ok) throw new Error("effect failed");
+
+			// Publisher that returns error on close
+			let closeCalled = false;
+			const failingPublisher: SandboxCommandPublisher = {
+				publish(_seq: number, _bytes: Uint8Array) {
+					return Promise.resolve(
+						Object.freeze({
+							ok: true,
+							receipt: { sequence: _seq, size: _bytes.byteLength, sha256: sha256Of(_bytes) },
+						}),
+					);
+				},
+				close() {
+					closeCalled = true;
+					return Promise.resolve(Object.freeze({ status: "error" }));
+				},
+			};
+
+			const storeR = await createSandboxCommandStore({
+				identity: IDENTITY,
+				publisher: failingPublisher,
+				recoveryBackend: makeEmptyBackend(),
+				recordedAt: TIMESTAMP,
+			});
+			if (!storeR.ok) throw new Error("store creation failed");
+
+			const appR = await createSandboxCommandApplication({
+				effect: effectR.capability,
+				store: storeR.value,
+			});
+			if (!("ok" in appR) || !appR.ok) throw new Error("app creation failed");
+
+			// Close — publisher error should propagate as application error
+			const closeResult = await appR.application.close();
+			expect(closeResult.status).toBe("error");
+			expect(closeCalled).toBe(true);
+
+			// Effect cleanup is still joined (close does not throw)
 		} finally {
-			await cleanup();
+			h.cleanup();
 		}
 	});
 });

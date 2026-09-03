@@ -68,21 +68,6 @@ export type CreateSandboxCommandApplicationResult =
 	| Readonly<{ readonly ok: false; readonly error: Readonly<{ readonly code: "RECOVERY_FAILED" }> }>;
 
 // ===========================================================================
-// Lifecycle/workspace command types
-// ===========================================================================
-
-const LIFECYCLE_TYPES = new Set([
-	"create_session",
-	"destroy_session",
-	"checkpoint",
-	"wake",
-	"shutdown",
-	"sync_workspace",
-]);
-
-const SUPPORTED_TYPES = new Set(["prompt", "steer", "abort", "execute_bash", "abort_bash", "compact", "compact_abort"]);
-
-// ===========================================================================
 // Internal types
 // ===========================================================================
 
