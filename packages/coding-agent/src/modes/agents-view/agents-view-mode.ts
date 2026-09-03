@@ -44,6 +44,7 @@ import {
 	listDaemonSavedSessions,
 	renameDaemonSavedSession,
 } from "../daemon/saved-session-catalog.js";
+import { formatTokenCount } from "../interactive/agent-activity.js";
 import { CustomEditor } from "../interactive/components/custom-editor.js";
 import { keyText } from "../interactive/components/keybinding-hints.js";
 import { BrandSplashHeader, InteractiveMode } from "../interactive/interactive-mode.js";
@@ -73,6 +74,7 @@ import {
 	type AgentsViewSelectionKey,
 	buildAgentsViewRows,
 	buildUnifiedSessionIndex,
+	computeRecursiveCosts,
 	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
@@ -1286,6 +1288,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.expandedSubagentParents,
 			this.programShownParents,
 			this.scopeKey,
+			computeRecursiveCosts(this.unifiedRecords, this.unifiedIndex),
 		);
 		const index =
 			selectedIdentity === undefined ? -1 : this.rows.findIndex((row) => row.identity === selectedIdentity);
@@ -2172,6 +2175,7 @@ export class AgentsViewMode implements Component, Focusable {
 			this.expandedSubagentParents,
 			this.programShownParents,
 			this.scopeKey,
+			computeRecursiveCosts(this.unifiedRecords, this.unifiedIndex),
 		);
 		this.applyPendingAncestorExpansion();
 		this.restoreSelection();
@@ -2540,8 +2544,9 @@ export class AgentsViewMode implements Component, Focusable {
 		const icon = this.formatRowIcon(row.section, rawIcon);
 		const indent = "  ".repeat(row.depth);
 		const age = formatSessionDuration(row.summary);
-		const details = row.section === "inactive" ? `${row.summary.messageCount} · ${age}` : age;
-		const detailsWidth = row.section === "inactive" ? Math.max(10, visibleWidth(details)) : 10;
+		const usageText = formatRowUsage(row);
+		const details = usageText ? `${usageText} · ${age}` : age;
+		const detailsWidth = Math.max(10, visibleWidth(details));
 		const heartbeatBadge = !pendingDelete && !pendingKill ? formatHeartbeatBadge(row.heartbeat) : "";
 		const heartbeatPausedOnly = (row.heartbeat?.activeCount ?? 0) < 1;
 		const heartbeatCell = heartbeatBadge ? theme.fg(heartbeatPausedOnly ? "dim" : "error", heartbeatBadge) : "";
@@ -2827,6 +2832,13 @@ function rowHasSpawnCode(row: AgentsViewRow): boolean {
 // Destructive actions gate on live work anywhere in the subtree, never on the display section.
 function hasLiveWork(row: AgentsViewRow): boolean {
 	return row.section === "running" || row.runningSubagentCount > 0 || row.summary.hasRunningRlmChildren === true;
+}
+
+function formatRowUsage(row: AgentsViewRow): string {
+	const usage = row.summary.usage;
+	return `↑${formatTokenCount(usage?.inputTokens ?? 0)} ↓${formatTokenCount(usage?.outputTokens ?? 0)} · $${(
+		usage?.cost ?? 0
+	).toFixed(2)} ($${row.recursiveCost.toFixed(2)} w/ subagents)`;
 }
 
 // Explicit session names read bold so they stand out from fallback titles

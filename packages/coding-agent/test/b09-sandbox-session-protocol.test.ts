@@ -28,7 +28,7 @@ describe("B09 sandbox session creation protocol", () => {
 		const r = compat.find((c) => c.capability === "sandbox_sessions");
 		expect(r).toBeDefined();
 		expect(r!.minProtocol).toBe(7);
-		expect(r!.minSchemaRevision).toBe(26);
+		expect(r?.minSchemaRevision).toBe(27);
 	});
 
 	it("sandboxOptions without sandbox also requires sandbox_sessions capability", () => {
@@ -46,7 +46,7 @@ describe("B09 sandbox session creation protocol", () => {
 		const sandboxReq = compat.find((c) => c.capability === "sandbox_sessions")!;
 		const oldHello = {
 			protocol: { name: "prime-agent.daemon" as const, version: 7 },
-			schemaRevision: 25,
+			schemaRevision: 26,
 			serverCapabilities: [] as const,
 		};
 		expect(meetsDaemonCommandCompatibility(oldHello, sandboxReq)).toBe(false);
@@ -57,7 +57,7 @@ describe("B09 sandbox session creation protocol", () => {
 		const sandboxReq = compat.find((c) => c.capability === "sandbox_sessions")!;
 		const currentHello = {
 			protocol: { name: "prime-agent.daemon" as const, version: 7 },
-			schemaRevision: 26,
+			schemaRevision: 27,
 			serverCapabilities: ["sandbox_sessions" as const],
 		};
 		expect(meetsDaemonCommandCompatibility(currentHello, sandboxReq)).toBe(true);

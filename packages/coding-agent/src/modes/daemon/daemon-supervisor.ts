@@ -167,6 +167,7 @@ import {
 	type RlmLedgerEdge,
 	RlmSpawnLedger,
 	tombstoneSavedSessionDelete,
+	withPassiveRlmDescendantInfos,
 } from "./rlm-ledger.js";
 import { serializeSavedSessionInfo } from "./saved-session-info.js";
 import { SNAPSHOT_TARGET_CHUNK_BYTES, SnapshotTranscriptCache } from "./snapshot-transcript-cache.js";
@@ -2844,7 +2845,12 @@ export class DaemonSupervisor {
 				}
 			: undefined;
 		const saved = await this.catalog.list(command.scope === "current" ? cwd : undefined, sessionDir, callbacks);
-		return success(command.id, "list_saved_sessions", { sessions: saved.map(serializeSavedSessionInfo) });
+		const sessions = await withPassiveRlmDescendantInfos(saved, this.rlmSpawnLedgerFor(sessionDir), {
+			...(command.scope === "current" ? { cwd } : {}),
+			...(callbacks ? { onSession: callbacks.onSession } : {}),
+			log: (message) => this.log(message),
+		});
+		return success(command.id, "list_saved_sessions", { sessions: sessions.map(serializeSavedSessionInfo) });
 	}
 
 	private async createOrReuseWorker(clientId: string, command: DaemonCreateCommand): Promise<ResidentWorker> {
@@ -4564,6 +4570,21 @@ export class DaemonSupervisor {
 			(message) => this.log(message),
 		);
 		return this.rlmSpawnLedgerInstance;
+	}
+
+	// Ledgers are per sessions-dir family: a catalog request for another dir must read that dir's ledger.
+	private rlmSpawnLedgerFor(sessionDir: string | undefined): RlmSpawnLedger {
+		const agentDir = this.defaultSessionConfig.agentDir;
+		const defaultDir = this.defaultSessionConfig.sessionDir ?? (agentDir ? getSessionsDir(agentDir) : undefined);
+		if (sessionDir === undefined || (defaultDir !== undefined && resolve(sessionDir) === resolve(defaultDir))) {
+			return this.rlmSpawnLedger();
+		}
+		if (!agentDir) {
+			throw new Error("Daemon supervisor config is missing agentDir");
+		}
+		return new RlmSpawnLedger(agentDir, sessionDir, createRlmLedgerRegistrySeedSource(), (message) =>
+			this.log(message),
+		);
 	}
 
 	/**

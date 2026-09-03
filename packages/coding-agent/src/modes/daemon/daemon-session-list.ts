@@ -7,6 +7,7 @@ import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-ser
 import { type AgentCronJob, isHeartbeatCronJob } from "../../core/cron-jobs.js";
 import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
+import type { SessionUsageSummary } from "../../core/usage.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import type { ActiveSessionState } from "./active-session-state.js";
 
@@ -55,6 +56,7 @@ export interface SessionSummary {
 	isCompacting: boolean;
 	isBashRunning?: boolean;
 	hasRunningRlmChildren?: boolean;
+	usage?: SessionUsageSummary;
 	/** True while the agent is streaming with tool calls pending; drives the "running tools" label. */
 	isRunningTools?: boolean;
 	attachedClients: number;
@@ -258,6 +260,7 @@ export function summaryForActiveSession(
 		isCompacting: session.isCompacting,
 		isBashRunning: session.isBashRunning,
 		hasRunningRlmChildren: session.hasRunningRlmChildren(),
+		usage: session.getOwnUsageSummary?.(),
 		isRunningTools: session.isStreaming && session.state.pendingToolCalls.size > 0,
 		attachedClients: activeSession.clients.size,
 		...(directAttachedClients > 0 ? { directAttachedClients } : {}),
@@ -346,6 +349,7 @@ export function summaryForInactiveSession(
 		firstMessage: session.firstMessage,
 		parentSessionPath: session.parentSessionPath,
 		rlmDepth: session.rlmDepth,
+		usage: session.usage,
 		// Carry the persisted recap/verdict so an off-daemon session keeps its
 		// agents-view bucket (e.g. Completed) instead of defaulting to Needs Input.
 		// Gate on message-count currency like isSummaryCurrent does for resident

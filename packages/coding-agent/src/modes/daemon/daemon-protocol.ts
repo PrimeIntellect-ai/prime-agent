@@ -22,6 +22,7 @@ import type { CustomMessage } from "../../core/messages.js";
 import type { QueuedMessageLane, QueuedMessageMutation } from "../../core/session-action-store.js";
 import type { SessionCwdIssue } from "../../core/session-cwd.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
+import type { SessionUsageSummary } from "../../core/usage.js";
 import type {
 	AgentConnectionAgentStatus,
 	AgentConnectionHeartbeat,
@@ -70,8 +71,10 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 23 lets workers query the supervisor agent roster on demand.
 // Revision 24 adds the capability-gated agent-roster subscription and push.
 // Revision 25 adds capability-gated direct worker peer transport discovery.
-export const DAEMON_SCHEMA_REVISION = 26;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-26-f2e0aced4a3e";
+// Revision 26 publishes own-session usage totals on session summary and saved-session rows.
+// Revision 27 adds capability-gated sandbox session creation options.
+export const DAEMON_SCHEMA_REVISION = 27;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-27-ba2349db6f07";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -1005,7 +1008,7 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 	if (command.type === "create" && (command.sandbox === true || command.sandboxOptions !== undefined)) {
 		requirements.push({
 			minProtocol: 7,
-			minSchemaRevision: 26,
+			minSchemaRevision: 27,
 			capability: "sandbox_sessions",
 		});
 	}
@@ -1093,6 +1096,7 @@ export interface DaemonSavedSessionInfo {
 	firstMessage: string;
 	allMessagesText: string;
 	agentStatus?: AgentConnectionAgentStatus;
+	usage?: SessionUsageSummary;
 }
 
 export type DaemonDeleteSavedSessionResult = DeleteSessionFileResult;

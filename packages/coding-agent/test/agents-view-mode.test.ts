@@ -717,6 +717,52 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
+	it("renders the unconditional usage cell and drops the message count", () => {
+		const parent = summary({
+			id: "spender",
+			activeSessionId: "spender",
+			sessionId: "spender-session",
+			usage: { inputTokens: 12437, outputTokens: 1234, cost: 0.42 },
+		});
+		const child = summary({
+			id: "spender-child",
+			activeSessionId: "spender-child",
+			sessionId: "spender-child-session",
+			sessionFile: "/tmp/spender-child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "spender",
+			usage: { inputTokens: 500, outputTokens: 50, cost: 0.68 },
+		});
+		const inactive = summary({
+			id: "saved-only",
+			activeSessionId: undefined,
+			sessionId: "saved-only-session",
+			sessionFile: "/tmp/saved-only.jsonl",
+			rosterStatus: "inactive",
+			messageCount: 7,
+		});
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+
+		try {
+			const collapsed = buildAgentsViewRows([parent, child, inactive]);
+			const rows = buildAgentsViewRows([parent, child, inactive], new Set(collapsed.map((row) => row.identity)));
+			Reflect.set(view, "rows", rows);
+			const line = (row: AgentsViewRow | undefined) => stripAnsi(invoke("renderRow", view, row, 200) as string);
+			const byId = (sessionId: string, kind?: string) =>
+				rows.find((row) => row.summary.sessionId === sessionId && (!kind || row.kind === kind));
+
+			expect(line(byId("spender-session"))).toContain("↑12k ↓1.2k · $0.42 ($1.10 w/ subagents)");
+			expect(line(byId("spender-child-session", "subagent"))).toContain("↑500 ↓50 · $0.68 ($0.68 w/ subagents)");
+			const inactiveLine = line(byId("saved-only-session"));
+			expect(inactiveLine).toContain("↑0 ↓0 · $0.00 ($0.00 w/ subagents)");
+			expect(inactiveLine).not.toContain("7 ·");
+			const bare = { ...byId("spender-session")!, summary: { ...parent, usage: undefined } };
+			expect(line(bare)).toContain("↑0 ↓0 · $0.00 ($1.10 w/ subagents)");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
 	it("renders a collapsed group's busy-subagent badge legibly instead of dimmed", () => {
 		const parent = summary({ id: "parent", activeSessionId: "parent", sessionId: "parent-session" });
 		const busyChild = summary({

@@ -27,6 +27,7 @@ import {
 	buildAgentsViewRows,
 	buildUnifiedSessionIndex,
 	classifyAgentsViewSession,
+	computeRecursiveCosts,
 	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
@@ -499,6 +500,81 @@ describe("agents view state", () => {
 		expect(expanded.find((row) => row.title === "Child")?.runningSubagentCount).toBe(0);
 	});
 
+	test("keeps the recursive total complete when search filters out a descendant", () => {
+		const parent = makeSummary({
+			id: "parent-active",
+			activeSessionId: "parent-active",
+			sessionId: "parent-session",
+			sessionName: "Searchable parent",
+			usage: { inputTokens: 100, outputTokens: 10, cost: 0.42 },
+		});
+		const child = makeSummary({
+			id: "child-active",
+			activeSessionId: "child-active",
+			sessionId: "child-session",
+			sessionName: "unrelated worker",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "parent-active",
+			usage: { inputTokens: 50, outputTokens: 5, cost: 0.68 },
+		});
+		const grandchild = makeSummary({
+			id: "grandchild-active",
+			activeSessionId: "grandchild-active",
+			sessionId: "grandchild-session",
+			sessionName: "unrelated nested worker",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "child-active",
+			usage: { inputTokens: 20, outputTokens: 2, cost: 0.18 },
+		});
+		const records = reconcileUnifiedSessions([parent, child, grandchild], []);
+		const costs = computeRecursiveCosts(records);
+		const filtered = filterUnifiedSessions(records, (text) => text.includes("Searchable"));
+
+		expect(filtered).toHaveLength(1);
+		const rows = buildAgentsViewRows(filtered, new Set(), new Set(), undefined, costs);
+		expect(rows[0]?.summary.usage?.cost).toBe(0.42);
+		expect(rows[0]?.recursiveCost).toBeCloseTo(1.28);
+	});
+
+	test("keeps a parent's recursive total when a passivated child survives only as a catalog row", () => {
+		const parent = makeSummary({
+			id: "parent-active",
+			activeSessionId: "parent-active",
+			sessionId: "parent-session",
+			sessionFile: "/tmp/project/parent.jsonl",
+			usage: { inputTokens: 100, outputTokens: 10, cost: 0.42 },
+		});
+		const liveChild = makeSummary({
+			id: "child-active",
+			activeSessionId: "child-active",
+			sessionId: "child-session",
+			sessionFile: "/tmp/project/child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "parent-active",
+			usage: { inputTokens: 50, outputTokens: 5, cost: 0.68 },
+		});
+		const before = reconcileUnifiedSessions([parent, liveChild], []);
+		const beforeTotal = computeRecursiveCosts(before).get(before[0]!);
+
+		// After a restart the child exists only as a saved-catalog row.
+		const after = reconcileUnifiedSessions(
+			[parent],
+			[
+				makeSessionInfo({
+					path: "/tmp/project/child.jsonl",
+					id: "child-session",
+					parentSessionPath: "/tmp/project/parent.jsonl",
+					rlmDepth: 1,
+					usage: { inputTokens: 50, outputTokens: 5, cost: 0.68 },
+				}),
+			],
+		);
+		const afterTotal = computeRecursiveCosts(after).get(after[0]!);
+
+		expect(beforeTotal).toBeCloseTo(1.1);
+		expect(afterTotal).toBe(beforeTotal);
+	});
+
 	test("tallies a very deep child chain without overflowing the stack", () => {
 		const summaries = [
 			makeSummary({
@@ -522,7 +598,12 @@ describe("agents view state", () => {
 					runtimeKind: "subagent",
 					parentActiveSessionId: level === 1 ? "chain-root" : `chain-${level - 1}`,
 					...(level === depth
-						? { activity: "working" as const, isSessionActive: true, isStreaming: true }
+						? {
+								activity: "working" as const,
+								isSessionActive: true,
+								isStreaming: true,
+								usage: { inputTokens: 100, outputTokens: 10, cost: 0.5 },
+							}
 						: { activity: "idle" as const, taskState: "completed" as const }),
 				}),
 			);
@@ -530,6 +611,7 @@ describe("agents view state", () => {
 
 		const rows = buildAgentsViewRows(summaries);
 		expect(rows[0]).toMatchObject({ kind: "agent", section: "idle", runningSubagentCount: 1 });
+		expect(rows[0]?.recursiveCost).toBeCloseTo(0.5);
 	});
 
 	test("ranks idle rows with busy descendants above plain idle rows", () => {
@@ -1719,6 +1801,13 @@ describe("agents view state", () => {
 				[root, registryChild],
 				[
 					makeSessionInfo({ path: rootPath, id: "root-session", rlmDepth: 0 }),
+					// The catalog also lists the resident child's file: it must merge, not duplicate.
+					makeSessionInfo({
+						path: "/tmp/project/registry-child.jsonl",
+						id: "registry-child",
+						parentSessionPath: rootPath,
+						rlmDepth: 1,
+					}),
 					makeSessionInfo({
 						path: "/tmp/project/saved-child.jsonl",
 						id: "saved-child",
@@ -1815,6 +1904,7 @@ function makeSessionInfo(overrides: Partial<SessionInfo> & { path: string; id: s
 		firstMessage: overrides.firstMessage ?? "hello",
 		allMessagesText: overrides.allMessagesText ?? "hello",
 		agentStatus: overrides.agentStatus,
+		usage: overrides.usage,
 	};
 }
 

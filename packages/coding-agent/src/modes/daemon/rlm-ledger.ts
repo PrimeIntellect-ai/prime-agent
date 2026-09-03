@@ -757,6 +757,44 @@ export class RlmSpawnLedger {
 	}
 }
 
+// The catalog scan never visits session-artifacts, where RLM children persist:
+// without this merge a passivated descendant's row (and its spend) survives only
+// as long as some resident roster remembers it.
+export async function withPassiveRlmDescendantInfos(
+	savedSessions: SessionInfo[],
+	ledger: RlmSpawnLedger,
+	options: { cwd?: string; onSession?: (info: SessionInfo) => void; log?: (message: string) => void } = {},
+): Promise<SessionInfo[]> {
+	const sessions = [...savedSessions];
+	const seen = new Set(savedSessions.map((info) => canonicalSessionPath(info.path)));
+	let edges: RlmLedgerEdge[];
+	try {
+		edges = await ledger.liveEdges();
+	} catch (error) {
+		// A broken ledger must not take the whole catalog down with it.
+		options.log?.(`Could not merge passive RLM descendants: ${String(error)}`);
+		return sessions;
+	}
+	for (const edge of edges) {
+		const childPath = canonicalSessionPath(edge.child);
+		if (seen.has(childPath)) continue;
+		seen.add(childPath);
+		const info = await readSessionInfo(childPath);
+		if (!info) continue;
+		if (options.cwd !== undefined && (!info.cwd || resolve(info.cwd) !== resolve(options.cwd))) continue;
+		// The ledger edge is the authoritative topology (family() semantics); a fork
+		// can leave the transcript header pointing at a dead ancestor path.
+		const merged: SessionInfo = {
+			...info,
+			parentSessionPath: edge.parent,
+			rlmDepth: edge.depth,
+		};
+		sessions.push(merged);
+		options.onSession?.(merged);
+	}
+	return sessions;
+}
+
 // Shared user-delete policy: only a readable no-parent transcript is positively top-level; children and
 // unknown targets tombstone via the ledger BEFORE the file delete (a tombstoned-but-undeleted file is
 // the accepted orphan of a failed delete).

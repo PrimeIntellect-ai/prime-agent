@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { computeOwnAndTotalUsage } from "../../src/core/context-tree.js";
 import {
 	findMostRecentSession,
 	loadEntriesFromFile,
@@ -10,6 +11,7 @@ import {
 	resolveSessionRlmDepth,
 	SessionManager,
 } from "../../src/core/session-manager.js";
+import { sessionUsageSummaryFrom } from "../../src/core/usage.js";
 
 describe("loadEntriesFromFile", () => {
 	let tempDir: string;
@@ -585,5 +587,68 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		const sm2 = SessionManager.open(corruptedFile, tempDir);
 		expect(sm2.getSessionId()).toBe(sessionId);
 		expect(sm2.getHeader()?.type).toBe("session");
+	});
+});
+
+describe("session info usage totals", () => {
+	it("scan and resident computation agree on whole-file own spend, forks and attributions included", async () => {
+		const tempDir = join(tmpdir(), `session-usage-test-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+		try {
+			const usage = (input: number, output: number, cost: number, cacheRead = 10, cacheWrite = 5) => ({
+				input,
+				output,
+				cacheRead,
+				cacheWrite,
+				totalTokens: input + output,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
+			});
+			const msg = (id: string, parentId: string | null, role: string, u?: unknown) =>
+				({ type: "message", id, parentId, message: { role, content: "x", timestamp: 1, usage: u } }) as const;
+			const file = join(tempDir, "usage.jsonl");
+			const lines = [
+				{ type: "session", version: 3, id: "s1", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" },
+				msg("m1", null, "user"),
+				msg("m2", "m1", "assistant", usage(1000, 200, 0.5)),
+				// On-disk original usage; the loader folds the aggregate below onto it in memory.
+				msg("m3", "m1", "assistant", usage(2000, 300, 1.0)),
+				{
+					type: "child_usage_attributed",
+					id: "a1",
+					parentId: "m3",
+					targetId: "m3",
+					childUsage: usage(500, 100, 0.4),
+					aggregateUsage: usage(2500, 400, 1.4, 20, 10),
+				},
+				{
+					type: "compaction",
+					id: "c1",
+					parentId: "m3",
+					summary: "compacted",
+					firstKeptEntryId: "m3",
+					tokensBefore: 5000,
+					usage: usage(100, 20, 0.05),
+				},
+				{
+					type: "branch_summary",
+					id: "b1",
+					parentId: "c1",
+					fromId: "m1",
+					summary: "left",
+					usage: usage(60, 8, 0.02),
+				},
+			];
+			writeFileSync(file, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+
+			const entries = SessionManager.open(file).getEntries();
+			const resident = sessionUsageSummaryFrom(computeOwnAndTotalUsage(entries, entries).ownUsage);
+
+			const scanned = (await readSessionInfo(file))?.usage;
+			expect(scanned).toMatchObject({ inputTokens: 3220, outputTokens: 528 });
+			expect(scanned?.cost).toBeCloseTo(1.57);
+			expect(resident).toEqual(scanned);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 });

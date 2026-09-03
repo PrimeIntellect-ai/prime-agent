@@ -41,6 +41,7 @@ export {
 	buildAgentsViewRows,
 	buildUnifiedSessionIndex,
 	classifyAgentsViewSession,
+	computeRecursiveCosts,
 	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
