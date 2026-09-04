@@ -5,10 +5,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 type WriteSync = typeof writeSync;
 const shortWrites = vi.hoisted(() => ({ remaining: 0 }));
+const rmFault = vi.hoisted(() => ({ error: undefined as Error | undefined }));
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
 	return {
 		...actual,
+		rmSync: ((path: Parameters<typeof actual.rmSync>[0], options?: Parameters<typeof actual.rmSync>[1]) => {
+			if (rmFault.error && String(path).includes(".candidate-")) throw rmFault.error;
+			return actual.rmSync(path, options);
+		}) as typeof actual.rmSync,
 		writeSync: ((fd: number, data: NodeJS.ArrayBufferView | string, offset?: number, length?: number) => {
 			if (shortWrites.remaining > 0 && typeof data === "string" && data.length > 1) {
 				shortWrites.remaining--;
@@ -72,6 +77,29 @@ describe("writeFileAtomicSync", () => {
 });
 
 describe("tryAcquireDirLock", () => {
+	it("reports held instead of reclaiming when the owner cannot be read", async () => {
+		const dir = createTempDir();
+		const lockDir = join(dir, "opaque.lock");
+		// Legacy lock whose pid entry is a directory: every read fails non-ENOENT.
+		mkdirSync(join(lockDir, "pid"), { recursive: true });
+
+		expect(await tryAcquireDirLock(lockDir, () => false)).toBe("held");
+		expect(readdirSync(dir)).toEqual(["opaque.lock"]);
+	});
+
+	it("keeps a settled acquisition when candidate cleanup fails", async () => {
+		const dir = createTempDir();
+		const lockPath = join(dir, "cleanup.lock");
+		rmFault.error = new Error("EBUSY: held by scanner");
+
+		try {
+			expect(await tryAcquireDirLock(lockPath, () => false)).toBe("acquired");
+		} finally {
+			rmFault.error = undefined;
+		}
+		expect(readFileSync(lockPath, "utf8").trim()).toBe(String(process.pid));
+	});
+
 	it("publishes the lock as a file born with its owner and puts back a swapped file lock", async () => {
 		const dir = createTempDir();
 		const lockPath = join(dir, "file.lock");
@@ -132,6 +160,19 @@ describe("tryAcquireDirLock", () => {
 
 		expect(result).toBe("held");
 		expect(readFileSync(join(lockDir, "pid"), "utf8").trim()).toBe("424242");
+
+		// Cross-shape swap: a judged FILE lock replaced by a rival's legacy DIR must
+		// be put back by the moved entry's actual type (link would fail on a dir).
+		rmSync(lockDir, { recursive: true, force: true });
+		writeFileSync(lockDir, "999999999\n");
+		const crossType = await tryAcquireDirLock(lockDir, () => {
+			rmSync(lockDir, { recursive: true, force: true });
+			mkdirSync(lockDir);
+			writeFileSync(join(lockDir, "pid"), "555555\n");
+			return false;
+		});
+		expect(crossType).toBe("held");
+		expect(readFileSync(join(lockDir, "pid"), "utf8").trim()).toBe("555555");
 	});
 
 	it("acquires over a stale lock without deleting a lock that changed owners", async () => {

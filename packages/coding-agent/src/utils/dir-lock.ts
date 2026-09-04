@@ -32,9 +32,12 @@ export async function tryAcquireDirLock(
 				throw error;
 			}
 		}
-		const legacyDir = isDirectory(lockPath);
-		const judged = readOwnerRaw(lockPath, legacyDir);
-		if (await ownerAlive(strictPid(judged))) {
+		const judged = readOwnerRaw(lockPath, isDirectory(lockPath));
+		if (judged === "unreadable") {
+			// A transient read failure may hide a LIVE lock: never judge it stale.
+			return "held";
+		}
+		if (await ownerAlive(strictPid(judged === "absent" ? undefined : judged))) {
 			return "held";
 		}
 		const asidePath = `${lockPath}.stale-${token}`;
@@ -47,11 +50,12 @@ export async function tryAcquireDirLock(
 			}
 			return "reclaimed";
 		}
-		// Identity check: the lock may have changed owners between the staleness
-		// judgment and the rename; a moved LIVE lock must be put back, not deleted.
-		if (readOwnerRaw(asidePath, legacyDir) !== judged) {
+		// Identity check on the MOVED entry's actual shape: both the owner and the
+		// file-vs-directory type may have changed since the staleness judgment.
+		const asideIsDir = isDirectory(asidePath);
+		if (readOwnerRaw(asidePath, asideIsDir) !== judged) {
 			try {
-				if (legacyDir) {
+				if (asideIsDir) {
 					renameSync(asidePath, lockPath);
 					return "held";
 				}
@@ -65,7 +69,11 @@ export async function tryAcquireDirLock(
 		rmSync(asidePath, { recursive: true, force: true });
 		return "reclaimed";
 	} finally {
-		rmSync(tempPath, { force: true });
+		try {
+			rmSync(tempPath, { force: true });
+		} catch {
+			// Cleanup only: a leaked candidate must never mask a settled acquisition.
+		}
 	}
 }
 
@@ -77,12 +85,12 @@ function isDirectory(path: string): boolean {
 	}
 }
 
-function readOwnerRaw(path: string, legacyDir: boolean): string | undefined {
+// "absent" is safely stale territory; "unreadable" may be a LIVE lock (transient EPERM/EBUSY).
+function readOwnerRaw(path: string, legacyDir: boolean): string | "absent" | "unreadable" {
 	try {
 		return readFileSync(legacyDir ? join(path, "pid") : path, "utf8");
-	} catch {
-		// The owner judgment for a missing or unreadable pid belongs to the caller.
-		return undefined;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unreadable";
 	}
 }
 
