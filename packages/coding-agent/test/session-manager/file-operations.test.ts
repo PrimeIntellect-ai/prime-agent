@@ -576,7 +576,7 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		}
 	});
 
-it("repairs a damaged transcript through its symlink alias at the real file", () => {
+	it("repairs a damaged transcript through its symlink alias at the real file", () => {
 		const realFile = join(tempDir, "real.jsonl");
 		const alias = join(tempDir, "alias.jsonl");
 		const header = { type: "session", version: 3, id: "sym-session", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" };
