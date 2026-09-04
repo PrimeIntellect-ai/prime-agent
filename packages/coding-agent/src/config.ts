@@ -13,7 +13,7 @@ import {
 	statSync,
 } from "fs";
 import { homedir } from "os";
-import { basename, dirname, join, resolve, sep, win32 } from "path";
+import { basename, dirname, join, posix, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
 import { normalizeSocketPath } from "./utils/daemon-socket-path.js";
@@ -366,9 +366,7 @@ export function getPackageDir(): string {
 	// Allow override via environment variable (useful for Nix/Guix where store paths tokenize poorly)
 	const envDir = process.env.PI_PACKAGE_DIR;
 	if (envDir) {
-		if (envDir === "~") return homedir();
-		if (envDir.startsWith("~/")) return homedir() + envDir.slice(1);
-		return envDir;
+		return expandTildePath(envDir);
 	}
 
 	if (isBunBinary) {
@@ -503,9 +501,9 @@ export const ENV_AGENT_DIR = `${envPrefix}_CODING_AGENT_DIR`;
 export const ENV_SESSION_DIR = `${envPrefix}_SESSION_DIR`;
 export const ENV_LEGACY_SESSION_DIR = `${envPrefix}_CODING_AGENT_SESSION_DIR`;
 
-export function expandTildePath(path: string): string {
+export function expandTildePath(path: string, platform: NodeJS.Platform = process.platform): string {
 	if (path === "~") return homedir();
-	if (path.startsWith("~/")) return homedir() + path.slice(1);
+	if (path.startsWith("~/")) return (platform === "win32" ? win32 : posix).join(homedir(), path.slice(2));
 	return path;
 }
 
