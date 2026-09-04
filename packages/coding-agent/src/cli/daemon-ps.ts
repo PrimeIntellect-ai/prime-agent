@@ -19,7 +19,7 @@ import {
 import { defaultDaemonSocketDir, defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
 import { acquireDaemonShutdownAdmission } from "../modes/daemon/daemon-supervisor-ownership.js";
 import type { DaemonWorkerDescriptor } from "../modes/daemon/daemon-worker-protocol.js";
-import { isProcessAlive, signalProcessGroupOrProcess } from "../utils/child-process.js";
+import { isProcessAlive, processGroupExists, signalProcessGroupOrProcess } from "../utils/child-process.js";
 import { formatDaemonListTable } from "./daemon-ps-format.js";
 import { promptYesNo } from "./daemon-stop-confirm.js";
 
@@ -1061,7 +1061,7 @@ async function stopTrackedProcess(
 	expectedStartId: string | undefined,
 	assertAdmission: () => Promise<void>,
 ): Promise<boolean> {
-	if (!isProcessAlive(pid)) {
+	if (trackedProcessStopped(pid)) {
 		return true;
 	}
 	if (!expectedStartId || getProcessStartId(pid) !== expectedStartId) {
@@ -1073,10 +1073,10 @@ async function stopTrackedProcess(
 	}
 	signalProcessGroupOrProcess(pid, "SIGTERM");
 	let deadline = Date.now() + 500;
-	while (isProcessAlive(pid) && Date.now() < deadline) {
+	while (!trackedProcessStopped(pid) && Date.now() < deadline) {
 		await delay(25);
 	}
-	if (!isProcessAlive(pid)) {
+	if (trackedProcessStopped(pid)) {
 		return true;
 	}
 	await assertAdmission();
@@ -1085,10 +1085,18 @@ async function stopTrackedProcess(
 	}
 	signalProcessGroupOrProcess(pid, "SIGKILL");
 	deadline = Date.now() + 1000;
-	while (isProcessAlive(pid) && Date.now() < deadline) {
+	while (!trackedProcessStopped(pid) && Date.now() < deadline) {
 		await delay(25);
 	}
-	return !isProcessAlive(pid);
+	return trackedProcessStopped(pid);
+}
+
+/**
+ * This is a process-GROUP stop: a zombie or reaped leader has exited, but
+ * descendants in its group can still run, so completion needs both gone.
+ */
+function trackedProcessStopped(pid: number): boolean {
+	return !isProcessAlive(pid) && !processGroupExists(pid);
 }
 
 export async function runReap(json: boolean, force: boolean): Promise<void> {

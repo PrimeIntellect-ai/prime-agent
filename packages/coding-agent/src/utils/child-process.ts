@@ -51,6 +51,22 @@ export function isProcessAlive(pid: number): boolean {
 	return processIdExists(pid) && !isZombieProcess(pid);
 }
 
+/**
+ * True while the process group has any member left (zombies included). A group
+ * can outlive its leader, so group teardown must not complete on leader death.
+ */
+export function processGroupExists(pgid: number): boolean {
+	if (process.platform === "win32") {
+		return false;
+	}
+	try {
+		process.kill(-pgid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
 export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals): void {
 	try {
 		process.kill(-pid, signal);

@@ -14,7 +14,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { getProcessStartId } from "../../core/session-lease.js";
-import { isProcessAlive } from "../../utils/child-process.js";
+import { isProcessAlive, isZombieProcess, processIdExists } from "../../utils/child-process.js";
 import { defaultDaemonSocketDir, normalizeSocketPath } from "./daemon-socket.js";
 
 const DAEMON_SUPERVISOR_REGISTRY_DIR_ENV = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
@@ -507,6 +507,30 @@ export async function acquireDaemonSupervisorOwnership(
 	return new DaemonSupervisorOwnership(record, registryDir, ownerDirectory);
 }
 
+// The fence poll asserts every bound claim every 250ms; the zombie check spawns
+// `ps` on macOS/BSD, so confirm it at most this often per owner pid. Existence
+// stays checked on every tick, which catches reaped owners immediately.
+const OWNER_ZOMBIE_CONFIRM_INTERVAL_MS = 5000;
+const ownerZombieConfirmations = new Map<number, number>();
+
+function isOwnerProcessAlive(pid: number): boolean {
+	if (!processIdExists(pid)) {
+		ownerZombieConfirmations.delete(pid);
+		return false;
+	}
+	const now = Date.now();
+	const confirmedAt = ownerZombieConfirmations.get(pid);
+	if (confirmedAt !== undefined && now - confirmedAt < OWNER_ZOMBIE_CONFIRM_INTERVAL_MS) {
+		return true;
+	}
+	if (isZombieProcess(pid)) {
+		ownerZombieConfirmations.delete(pid);
+		return false;
+	}
+	ownerZombieConfirmations.set(pid, now);
+	return true;
+}
+
 export async function assertDaemonSupervisorOwnerCurrent(
 	owner: {
 		generation: string;
@@ -527,7 +551,7 @@ export async function assertDaemonSupervisorOwnerCurrent(
 		current.pid !== owner.pid ||
 		current.processStartId !== owner.processStartId ||
 		current.socketPath !== normalizeSocketPath(owner.socketPath) ||
-		!isProcessAlive(current.pid)
+		!isOwnerProcessAlive(current.pid)
 	) {
 		throw new DaemonSupervisorOwnershipLostError(owner.generation, { socketPath: owner.socketPath, registryDir });
 	}

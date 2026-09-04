@@ -1,7 +1,13 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
-import { isProcessAlive, isZombieProcess, waitForChildProcess } from "../src/utils/child-process.js";
+import {
+	isProcessAlive,
+	isZombieProcess,
+	processGroupExists,
+	signalProcessGroupOrProcess,
+	waitForChildProcess,
+} from "../src/utils/child-process.js";
 
 describe("waitForChildProcess", () => {
 	it("reports signaled already-exited children as failures", async () => {
@@ -56,6 +62,33 @@ describe("process liveness", () => {
 			expect(isProcessAlive(zombiePid)).toBe(false);
 		} finally {
 			parent.kill("SIGKILL");
+		}
+	});
+
+	it.skipIf(process.platform === "win32")("keeps a process group alive after its leader exits", async () => {
+		const childless = spawn("sh", ["-c", "exit 0"], { detached: true, stdio: "ignore" });
+		const childlessExited = new Promise<void>((resolveExit) => childless.once("exit", () => resolveExit()));
+		const leader = spawn("sh", ["-c", "sleep 30 & echo started"], {
+			detached: true,
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		const leaderExited = new Promise<void>((resolveExit) => leader.once("exit", () => resolveExit()));
+		const pgid = leader.pid!;
+		try {
+			await new Promise<void>((resolveStart, rejectStart) => {
+				const timer = setTimeout(() => rejectStart(new Error("Timed out waiting for the group member")), 5000);
+				leader.stdout?.once("data", () => {
+					clearTimeout(timer);
+					resolveStart();
+				});
+			});
+			await leaderExited;
+			expect(isProcessAlive(pgid)).toBe(false);
+			expect(processGroupExists(pgid)).toBe(true);
+			await childlessExited;
+			expect(processGroupExists(childless.pid!)).toBe(false);
+		} finally {
+			signalProcessGroupOrProcess(pgid, "SIGKILL");
 		}
 	});
 });
