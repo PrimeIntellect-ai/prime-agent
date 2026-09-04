@@ -50,7 +50,8 @@ function selectableLevels(model: CatalogRowLike): string {
 // Plain openai-format completions send reasoning params only when compat allows; the
 // zai/qwen/deepseek/openrouter formats use the map as an enable toggle instead.
 function effortIsSendable(model: CatalogRowLike): boolean {
-	const compat = getCompat(model as Model<"openai-completions">);
+	// Model requires baseUrl, so rows without one behave like the empty-string rows: provider-only detection.
+	const compat = getCompat({ ...model, baseUrl: model.baseUrl ?? "" } as Model<"openai-completions">);
 	return compat.thinkingFormat !== "openai" || compat.supportsReasoningEffort;
 }
 

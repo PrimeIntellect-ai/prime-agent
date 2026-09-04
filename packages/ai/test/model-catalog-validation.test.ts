@@ -68,8 +68,10 @@ describe("model catalog validation", () => {
 			],
 		],
 		[
-			"selectable levels on a transport that cannot send reasoning effort",
-			catalogOf(row({ id: "model-z", provider: "moonshotai", reasoning: true, thinkingLevelMap: NULL_MAP })),
+			"selectable levels on a transport that cannot send reasoning effort, without crashing on a missing baseUrl",
+			catalogOf(
+				row({ id: "model-z", provider: "moonshotai", reasoning: true, thinkingLevelMap: NULL_MAP, baseUrl: undefined }),
+			),
 			["moonshotai/model-z: thinkingLevelMap offers [max] but the transport cannot send reasoning effort"],
 		],
 		[
