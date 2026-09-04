@@ -6,13 +6,10 @@
  * - Direct calls from modes that need bash execution
  */
 
-import { randomBytes } from "node:crypto";
-import { createWriteStream, type WriteStream } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import stripAnsi from "strip-ansi";
 import { sanitizeBinaryOutput } from "../utils/shell.js";
 import type { BashOperations } from "./tools/bash.js";
+import { OutputSpill } from "./tools/output-accumulator.js";
 import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.js";
 export interface BashExecutorOptions {
 	/** Callback for streaming output chunks (already sanitized) */
@@ -47,32 +44,8 @@ export async function executeBashWithOperations(
 	let outputBytes = 0;
 	const maxOutputBytes = DEFAULT_MAX_BYTES * 2;
 
-	let tempFilePath: string | undefined;
-	let tempFileStream: WriteStream | undefined;
-	let tempFileFailed = false;
+	const spill = new OutputSpill("pi-bash");
 	let totalBytes = 0;
-
-	const ensureTempFile = () => {
-		if (tempFilePath || tempFileFailed) {
-			return;
-		}
-		const id = randomBytes(8).toString("hex");
-		tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
-		const stream = createWriteStream(tempFilePath);
-		// An unlistened 'error' (ENOSPC, unwritable tmpdir) would crash the
-		// process; the spill degrades to the truncated in-memory tail instead.
-		stream.on("error", () => {
-			tempFileFailed = true;
-			if (tempFileStream === stream) {
-				tempFileStream = undefined;
-				tempFilePath = undefined;
-			}
-		});
-		tempFileStream = stream;
-		for (const chunk of outputChunks) {
-			stream.write(chunk);
-		}
-	};
 
 	const decoder = new TextDecoder();
 
@@ -80,12 +53,10 @@ export async function executeBashWithOperations(
 		totalBytes += data.length;
 		const text = sanitizeBinaryOutput(stripAnsi(decoder.decode(data, { stream: true }))).replace(/\r/g, "");
 		if (totalBytes > DEFAULT_MAX_BYTES) {
-			ensureTempFile();
+			spill.open(outputChunks);
 		}
 
-		if (tempFileStream) {
-			tempFileStream.write(text);
-		}
+		spill.write(text);
 		outputChunks.push(text);
 		outputBytes += text.length;
 		while (outputBytes > maxOutputBytes && outputChunks.length > 1) {
@@ -106,11 +77,10 @@ export async function executeBashWithOperations(
 		const fullOutput = outputChunks.join("");
 		const truncationResult = truncateTail(fullOutput);
 		if (truncationResult.truncated) {
-			ensureTempFile();
+			spill.open(outputChunks);
 		}
-		if (tempFileStream) {
-			tempFileStream.end();
-		}
+		// Settled before advertising: the path refers to the COMPLETE file or is undefined.
+		const fullOutputPath = await spill.finalize();
 		const cancelled = options?.signal?.aborted ?? false;
 
 		return {
@@ -118,30 +88,26 @@ export async function executeBashWithOperations(
 			exitCode: cancelled ? undefined : (result.exitCode ?? undefined),
 			cancelled,
 			truncated: truncationResult.truncated,
-			fullOutputPath: tempFilePath,
+			fullOutputPath,
 		};
 	} catch (err) {
 		if (options?.signal?.aborted) {
 			const fullOutput = outputChunks.join("");
 			const truncationResult = truncateTail(fullOutput);
 			if (truncationResult.truncated) {
-				ensureTempFile();
+				spill.open(outputChunks);
 			}
-			if (tempFileStream) {
-				tempFileStream.end();
-			}
+			const fullOutputPath = await spill.finalize();
 			return {
 				output: truncationResult.truncated ? truncationResult.content : fullOutput,
 				exitCode: undefined,
 				cancelled: true,
 				truncated: truncationResult.truncated,
-				fullOutputPath: tempFilePath,
+				fullOutputPath,
 			};
 		}
 
-		if (tempFileStream) {
-			tempFileStream.end();
-		}
+		void spill.finalize();
 
 		throw err;
 	}
