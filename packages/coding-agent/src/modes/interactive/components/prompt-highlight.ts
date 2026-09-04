@@ -8,12 +8,13 @@ const FG_SGR_PATTERN = /\x1b\[(?:0|39|3[0-7]|9[0-7]|38;[0-9;]+)m/g;
 /** Escape sequences the editor splices into displayed text (cursor highlight, IME marker). */
 const CURSOR_ESCAPE_PATTERN = /\x1b\[[0-9;]*m|\x1b_[^\x07]*\x07/g;
 
-const MASK_BASE = "\uE000";
+const MASK_BASE_START = 0xe000;
+/** Each masked grapheme gets its own private-use base char, so restoring is a lookup, not positional. */
+const MASK_CAPACITY = 0xf8ff - MASK_BASE_START + 1;
 const MASK_EXTRA_WIDTH = "\uFF9E";
-const MASK_ZERO_WIDTH = "\u2060";
-const MASK_PATTERN = /\u2060|\uE000\uFF9E*/gu;
+const MASK_PATTERN = /[\uE000-\uF8FF]\uFF9E*/gu;
 /** Literal mask-range characters would alias generated placeholders; messages containing them skip masking. */
-const MASK_LITERAL_PATTERN = /[\u2060\uE000\uFF9E]/u;
+const MASK_LITERAL_PATTERN = /[\uE000-\uF8FF\uFF9E]/u;
 
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
@@ -51,11 +52,6 @@ function activeFgBefore(line: string, index: number): string {
 	return active;
 }
 
-function maskGrapheme(grapheme: string): string {
-	const width = visibleWidth(grapheme);
-	return width === 0 ? MASK_ZERO_WIDTH : MASK_BASE + MASK_EXTRA_WIDTH.repeat(width - 1);
-}
-
 /** Styles @path references and --flags in a plain (unrendered) string. */
 export function styleArgumentTokens(
 	text: string,
@@ -78,8 +74,7 @@ export function styleArgumentTokens(
  */
 export class PromptTokenMask {
 	readonly text: string;
-	private readonly graphemes: { segment: string; color: ThemeColor }[] = [];
-	private offset = 0;
+	private graphemes: { segment: string; color: ThemeColor }[] = [];
 
 	constructor(source: string, commandEnd = 0) {
 		if (MASK_LITERAL_PATTERN.test(source)) {
@@ -97,17 +92,33 @@ export class PromptTokenMask {
 		for (const token of tokens) {
 			text += source.slice(cursor, token.start);
 			for (const { segment } of graphemeSegmenter.segment(source.slice(token.start, token.end))) {
+				const width = visibleWidth(segment);
+				if (width === 0) {
+					// Zero-width graphemes stay literal: invisible either way, and
+					// leaving them keeps extracted text (cell content) exact.
+					text += segment;
+					continue;
+				}
+				if (this.graphemes.length === MASK_CAPACITY) {
+					this.text = source;
+					this.graphemes = [];
+					return;
+				}
+				text += String.fromCharCode(MASK_BASE_START + this.graphemes.length) + MASK_EXTRA_WIDTH.repeat(width - 1);
 				this.graphemes.push({ segment, color: token.color });
-				text += maskGrapheme(segment);
 			}
 			cursor = token.end;
 		}
 		this.text = text + source.slice(cursor);
 	}
 
-	/** Placeholders are consumed in order across lines; rewind before each render pass. */
-	reset(): void {
-		this.offset = 0;
+	private graphemeFor(placeholder: string): { segment: string; color: ThemeColor } | undefined {
+		return this.graphemes[placeholder.charCodeAt(0) - MASK_BASE_START];
+	}
+
+	/** Restores masked graphemes in text extracted from a render, e.g. selection-region cell content. */
+	restoreText(text: string): string {
+		return text.replace(MASK_PATTERN, (placeholder) => this.graphemeFor(placeholder)?.segment ?? placeholder);
 	}
 
 	restoreLine(line: string): string {
@@ -121,9 +132,8 @@ export class PromptTokenMask {
 			run = undefined;
 		};
 		for (const match of line.matchAll(MASK_PATTERN)) {
-			const grapheme = this.graphemes[this.offset];
-			if (!grapheme) break; // literal mask-range character from the source; leave it untouched
-			this.offset++;
+			const grapheme = this.graphemeFor(match[0]);
+			if (!grapheme) continue; // literal mask-range character from an unmasked source; leave it untouched
 			if (run && run.color === grapheme.color && run.end === match.index) {
 				run.text += grapheme.segment;
 				run.end += match[0].length;

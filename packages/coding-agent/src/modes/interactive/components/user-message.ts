@@ -26,12 +26,14 @@ class HighlightedMarkdown implements Component {
 	}
 
 	render(width: number): string[] {
-		this.mask.reset();
 		return this.markdown.render(width).map((line) => this.mask.restoreLine(line));
 	}
 
 	getSelectionRegions(): ReadonlyArray<TableCellSelectionRegion> {
-		return this.markdown.getSelectionRegions();
+		return this.markdown.getSelectionRegions().map((region) => ({
+			...region,
+			content: this.mask.restoreText(region.content),
+		}));
 	}
 
 	invalidate(): void {

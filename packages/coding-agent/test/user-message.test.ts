@@ -190,14 +190,16 @@ describe("UserMessageComponent", () => {
 		expect(lines.every((line) => visibleWidth(line) === 8)).toBe(true);
 	});
 
-	test("forwards table-cell selection regions from sent messages", () => {
+	test("forwards table-cell selection regions with unmasked content", () => {
 		initTheme("dark");
-		const component = new UserMessageComponent("| alpha | beta |\n| --- | --- |\n| one | two |");
+		const component = new UserMessageComponent("| alpha | beta |\n| --- | --- |\n| @src/a.ts | two |");
 		component.render(60);
 
-		const regions = component.getSelectionRegions();
+		const contents = component.getSelectionRegions().map((region) => region.content);
 
-		expect(regions.map((region) => region.content)).toContain("one");
+		// Copying the token cell must yield its literal text, not mask placeholders.
+		expect(contents).toContain("@src/a.ts");
+		expect(contents).toContain("two");
 	});
 
 	test("renders a literal mask-range character before an @token uncorrupted", () => {
