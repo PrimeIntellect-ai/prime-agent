@@ -10,6 +10,8 @@ import {
 import type { AppKeybinding, KeybindingsManager } from "../../../core/keybindings.js";
 import { ArgTokenHighlighter } from "./prompt-highlight.js";
 
+const COMMAND_TOKEN_PATTERN = /^(\s*)\/(\S+)/;
+
 export interface CustomEditorOptions extends EditorOptions {
 	placeholder?: string;
 	placeholderColor?: (text: string) => string;
@@ -94,7 +96,7 @@ export class CustomEditor extends Editor {
 			return displayText;
 		}
 
-		const match = /^(\s*)\/(\S+)/.exec(lineText);
+		const match = COMMAND_TOKEN_PATTERN.exec(lineText);
 		if (!match) {
 			return displayText;
 		}
@@ -142,7 +144,7 @@ export class CustomEditor extends Editor {
 	}
 
 	override render(width: number): string[] {
-		const commandMatch = /^(\s*)\/(\S+)/.exec(this.getLines()[0] ?? "");
+		const commandMatch = COMMAND_TOKEN_PATTERN.exec(this.getLines()[0] ?? "");
 		const isArgumentCommandLine = commandMatch !== null && this.isArgumentCommand(commandMatch[2]!);
 		this.argTokenHighlighter.reset(this.getLines(), isArgumentCommandLine);
 		let lines = super.render(width);
