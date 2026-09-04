@@ -188,6 +188,15 @@ import type { ModelRegistry } from "./model-registry.js";
 import { throwIfPromptAdmissionCancelled } from "./prompt-admission.js";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.js";
 import {
+	isAgentLifecycleFailure,
+	isFauxProviderQueueExhausted,
+	isPermanentProviderFailureKind,
+	providerRetryDelay,
+	providerStreamFailureDetails,
+	providerStreamFailureKind,
+	providerStreamFailureRetryAfterMs,
+} from "./provider-retry.js";
+import {
 	type AutoRefineReason,
 	type AutoRefineReview,
 	appendGlobalRefinement,
@@ -10978,40 +10987,23 @@ export class AgentSession {
 	}
 
 	private _isFauxProviderQueueExhausted(message: AssistantMessage): boolean {
-		return message.provider === "faux" && message.errorMessage === "No more faux responses queued";
+		return isFauxProviderQueueExhausted(message);
 	}
 
 	private _isAgentLifecycleFailure(message: AssistantMessage): boolean {
-		return message.diagnostics?.some((diagnostic) => diagnostic.type === "agent_lifecycle_failure") ?? false;
+		return isAgentLifecycleFailure(message);
 	}
 
 	private _getProviderStreamFailureDetails(message: AssistantMessage): Record<string, unknown> | undefined {
-		const failure = message.diagnostics?.find((diagnostic) => diagnostic.type === "provider_stream_failure");
-		const details = failure?.details;
-		if (!details || typeof details !== "object") {
-			return undefined;
-		}
-		return details;
+		return providerStreamFailureDetails(message);
 	}
 
 	private _getProviderStreamFailureKind(message: AssistantMessage): string | undefined {
-		const kind = this._getProviderStreamFailureDetails(message)?.kind;
-		return typeof kind === "string" ? kind : undefined;
-	}
-
-	private _getProviderStreamFailureRetryAfterMs(message: AssistantMessage): number | undefined {
-		const value = this._getProviderStreamFailureDetails(message)?.retryAfterMs;
-		return typeof value === "number" && value >= 0 ? value : undefined;
+		return providerStreamFailureKind(message);
 	}
 
 	private _isStructuredPermanentProviderRetryExhausted(message: AssistantMessage): boolean {
-		const kind = this._getProviderStreamFailureKind(message);
-		// Deterministic rejections never warrant a retry; auth failures get one
-		// retry so a transient auth hiccup does not immediately mark auth stale.
-		if (kind === "invalid_request" || kind === "refusal") {
-			return true;
-		}
-		return this._retryAttempt > 0 && kind === "auth";
+		return isPermanentProviderFailureKind(this._getProviderStreamFailureKind(message), this._retryAttempt);
 	}
 
 	private _getProviderStreamFailureAuthStatus(message: AssistantMessage): number | undefined {
@@ -11168,15 +11160,18 @@ export class AgentSession {
 
 		// Honor the provider's requested wait (Retry-After / usage-limit reset),
 		// capped by retry.provider.maxRetryDelayMs (0 disables the cap).
-		const retryAfterMs = this._getProviderStreamFailureRetryAfterMs(message);
 		const maxRetryDelayMs = this.settingsManager.getProviderRetrySettings().maxRetryDelayMs;
-		if (retryAfterMs !== undefined && maxRetryDelayMs > 0 && retryAfterMs > maxRetryDelayMs) {
+		const delay = providerRetryDelay(this._retryAttempt, providerStreamFailureRetryAfterMs(message), {
+			baseDelayMs: settings.baseDelayMs,
+			maxRetryDelayMs,
+		});
+		if (delay.kind === "exceeds-cap") {
 			this._markProviderAuthStaleForRetryFailure(message, options);
 			this._emit({
 				type: "auto_retry_end",
 				success: false,
 				attempt: this._retryAttempt - 1,
-				finalError: `Provider requested a ${Math.ceil(retryAfterMs / 1000)}s wait before retrying (above retry.provider.maxRetryDelayMs=${maxRetryDelayMs}ms): ${message.errorMessage || "unknown error"}`,
+				finalError: `Provider requested a ${Math.ceil(delay.retryAfterMs / 1000)}s wait before retrying (above retry.provider.maxRetryDelayMs=${maxRetryDelayMs}ms): ${message.errorMessage || "unknown error"}`,
 			});
 			this._retryAttempt = 0;
 			this._retryAuthFailureSources = [];
@@ -11184,7 +11179,7 @@ export class AgentSession {
 			return false;
 		}
 
-		const delayMs = Math.max(settings.baseDelayMs * 2 ** (this._retryAttempt - 1), retryAfterMs ?? 0);
+		const delayMs = delay.delayMs;
 		// Park now: the retry re-issues the failed call and must reuse its Idempotency-Key.
 		// Payload hooks mutate the wire body after the hash point, so reuse is forfeited.
 		if (!this._extensionRunner.hasHandlers("before_provider_request")) {

@@ -113,6 +113,38 @@ describe("ENG-4509 side questions", () => {
 		}
 	});
 
+	it("retries a transient provider error once and completes", async () => {
+		const harness = await createHarness();
+		try {
+			harness.setResponses([fauxAssistantMessage("main answer")]);
+			await harness.session.prompt("Main context message.");
+
+			harness.setResponses([
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "500 Internal Server Error" }),
+				fauxAssistantMessage("recovered side answer"),
+			]);
+			const callsBefore = harness.faux.state.callCount;
+
+			const events: SideQuestionEvent[] = [];
+			const run = startSideQuestion(
+				harness.session.agent,
+				"retry-1",
+				"Does this survive a transient failure?",
+				(event) => {
+					events.push(event);
+				},
+				[],
+				{ enabled: true, maxRetries: 3, baseDelayMs: 1, maxRetryDelayMs: 60_000 },
+			);
+			await run.done;
+
+			expect(harness.faux.state.callCount - callsBefore).toBe(2);
+			expect(events.at(-1)).toMatchObject({ status: "complete", answer: "recovered side answer" });
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("can finish while the main agent is still working", async () => {
 		const harness = await createHarness();
 		const mainStarted = deferred();
