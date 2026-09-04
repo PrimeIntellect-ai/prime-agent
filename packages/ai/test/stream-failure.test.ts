@@ -48,6 +48,10 @@ describe("classifyStreamFailure", () => {
 		["content_filter", undefined, "safety"],
 		["guardrail_intervened", undefined, "safety"],
 		["authentication_error", undefined, "auth"],
+		[undefined, 401, "auth"],
+		["permission_error", 403, "permission"],
+		["PermissionDeniedError", 403, "permission"],
+		[undefined, 403, "permission"],
 		["invalid_request_error", undefined, "invalid_request"],
 		["api_error", undefined, "server_error"],
 		[undefined, 503, "server_error"],
@@ -126,6 +130,17 @@ describe("extractStreamFailureInfo", () => {
 	test("falls back to classifying the message text", () => {
 		expect(extractStreamFailureInfo(new Error("provider overloaded, retry later")).kind).toBe("overloaded");
 		expect(extractStreamFailureInfo("not an error").kind).toBe("unknown");
+	});
+
+	test.each([
+		["Unauthorized: authentication failed", undefined, "unknown"],
+		["permission denied by policy", undefined, "unknown"],
+		["upstream authentication failed", 500, "server_error"],
+		["Unauthorized", 401, "auth"],
+		["permission denied", 403, "permission"],
+	] as const)("auth/permission need more than message text: %s / %s -> %s", (message, status, expected) => {
+		// Without a structured error type, only the status may decide auth or permission.
+		expect(extractStreamFailureInfo(Object.assign(new Error(message), { status })).kind).toBe(expected);
 	});
 });
 

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { AnthropicMessagesCompat, Api, Context, Model, OpenAICompletionsCompat } from "@earendil-works/pi-ai";
 import { getApiProvider } from "@earendil-works/pi-ai";
 import { getOAuthProvider, registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.js";
 
@@ -1483,6 +1483,58 @@ describe("ModelRegistry", () => {
 				});
 				expect(registry.getAvailable().some((model) => model.provider === "custom-provider")).toBe(true);
 				await expect(registry.getApiKeyForProvider("custom-provider")).resolves.toBe("fresh-key");
+			});
+
+			test("clearProviderAuthStale restores availability for explicit model selection", async () => {
+				writeRawModelsJson({
+					"custom-provider": providerWithApiKey("literal_api_key_value"),
+				});
+
+				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+
+				await expect(registry.getApiKeyForProvider("custom-provider")).resolves.toBe("literal_api_key_value");
+				expect(registry.markProviderAuthStale("custom-provider")).toBe(true);
+				expect(registry.getAvailable().some((model) => model.provider === "custom-provider")).toBe(false);
+
+				registry.clearProviderAuthStale("custom-provider");
+
+				expect(registry.getAvailable().some((model) => model.provider === "custom-provider")).toBe(true);
+				await expect(registry.getApiKeyForProvider("custom-provider")).resolves.toBe("literal_api_key_value");
+			});
+
+			test("preserves stale-auth entitlements only for the same prime-inference team", async () => {
+				authStorage.setRuntimeApiKey("prime-inference", "prime-key");
+				const headerSpy = vi
+					.spyOn(authStorage, "getProviderHeaders")
+					.mockReturnValue({ "X-Prime-Team-ID": "team-a" });
+				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+				const internals = registry as unknown as {
+					authorizedPrivatePrimeInferenceModelIds: Set<string>;
+					authorizedPrivatePrimeInferenceTeamId: string | undefined;
+				};
+				internals.authorizedPrivatePrimeInferenceModelIds.add("internal/private-model");
+				internals.authorizedPrivatePrimeInferenceTeamId = "team-a";
+				expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
+
+				await registry.refreshAvailableModels();
+				expect(internals.authorizedPrivatePrimeInferenceModelIds.has("internal/private-model")).toBe(true);
+
+				// A team switch invalidates entitlements fetched for the old team.
+				headerSpy.mockReturnValue({ "X-Prime-Team-ID": "team-b" });
+				await registry.refreshAvailableModels();
+				expect(internals.authorizedPrivatePrimeInferenceModelIds.size).toBe(0);
+			});
+
+			test("concurrent stale-auth refreshes do not drop preserved entitlements", async () => {
+				authStorage.setRuntimeApiKey("prime-inference", "prime-key");
+				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+				const internals = registry as unknown as { authorizedPrivatePrimeInferenceModelIds: Set<string> };
+				internals.authorizedPrivatePrimeInferenceModelIds.add("internal/private-model");
+				expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
+
+				await Promise.all([registry.refreshAvailableModels(), registry.refreshAvailableModels()]);
+
+				expect(internals.authorizedPrivatePrimeInferenceModelIds.has("internal/private-model")).toBe(true);
 			});
 
 			test("provider auth status reports command apiKey values from models.json without executing them", () => {

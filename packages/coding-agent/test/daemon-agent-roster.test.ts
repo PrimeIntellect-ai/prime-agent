@@ -467,7 +467,9 @@ describe("worker roster reporter", () => {
 
 		// set_model has no session-event carrier either; its explicit flush publishes the new model.
 		const session = state.runtime.session as unknown as Record<string, unknown>;
-		session.modelRegistry = { refreshAvailableModels: async () => [{ provider: "prov", id: "m2" }] };
+		session.modelRegistry = {
+			refreshAvailableModels: async () => [{ provider: "prov", id: "m2" }],
+		};
 		session.setModel = async (model: unknown) => {
 			session.model = model;
 		};

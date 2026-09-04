@@ -21,7 +21,7 @@ function normalizeEventOrder(events: Harness["events"]): string[] {
 	return normalized;
 }
 
-function structuredProviderFailure(kind: "auth" | "invalid_request" | "refusal"): AssistantMessage {
+function structuredProviderFailure(kind: "auth" | "invalid_request" | "refusal" | "permission"): AssistantMessage {
 	return {
 		...fauxAssistantMessage("", {
 			stopReason: "error",
@@ -294,7 +294,7 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.session.isRetrying).toBe(false);
 	});
 
-	for (const kind of ["invalid_request", "refusal"] as const) {
+	for (const kind of ["invalid_request", "refusal", "permission"] as const) {
 		it(`does not retry structured permanent provider ${kind} failures`, async () => {
 			const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
 			harnesses.push(harness);

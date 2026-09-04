@@ -448,10 +448,13 @@ export class InProcessAgentConnection implements AgentConnection {
 	}
 
 	async setModel(provider: string, modelId: string): Promise<AgentConnectionModel> {
-		const availableModels = await this.session.modelRegistry.refreshAvailableModels();
-		const model = availableModels.find((candidate) => {
-			return candidate.provider === provider && candidate.id === modelId;
-		});
+		const registry = this.session.modelRegistry;
+		const availableModels = await registry.refreshAvailableModels();
+		const model =
+			availableModels.find((candidate) => candidate.provider === provider && candidate.id === modelId) ??
+			// Stale-auth providers are excluded from the available list; the lookup
+			// never mutates stale state (session.setModel owns the clear).
+			(registry.getProviderAuthStatus(provider).source === "stale" ? registry.find(provider, modelId) : undefined);
 		if (!model) {
 			throw new Error(`Model not found: ${provider}/${modelId}`);
 		}
