@@ -968,6 +968,19 @@ describe("AuthStorage", () => {
 	});
 
 	describe("persistence semantics", () => {
+		test("a dangling symlinked auth.json gets its target created with the alias intact", () => {
+			const targetPath = join(tempDir, "vault", "auth.json");
+			mkdirSync(join(tempDir, "vault"), { recursive: true });
+			symlinkSync(targetPath, authJsonPath);
+			authStorage = AuthStorage.create(authJsonPath);
+
+			authStorage.set("openai", { type: "api_key", key: "fresh-key" });
+
+			expect(lstatSync(authJsonPath).isSymbolicLink()).toBe(true);
+			const real = JSON.parse(readFileSync(targetPath, "utf-8")) as Record<string, { key: string }>;
+			expect(real.openai.key).toBe("fresh-key");
+		});
+
 		test("writes through a symlinked auth.json instead of replacing the alias", () => {
 			const realPath = join(tempDir, "real-auth.json");
 			writeFileSync(realPath, JSON.stringify({ anthropic: { type: "api_key", key: "old-key" } }));

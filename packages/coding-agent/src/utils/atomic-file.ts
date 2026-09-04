@@ -1,6 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, fsyncSync, openSync, realpathSync, renameSync, rmSync, writeSync } from "node:fs";
-import { dirname } from "node:path";
+import {
+	chmodSync,
+	closeSync,
+	fsyncSync,
+	openSync,
+	readlinkSync,
+	realpathSync,
+	renameSync,
+	rmSync,
+	writeSync,
+} from "node:fs";
+import { dirname, resolve } from "node:path";
 
 const WIN32_RENAME_ATTEMPTS = 5;
 
@@ -82,7 +92,21 @@ export function realpathIfPresentSync(path: string): string {
 	try {
 		return realpathSync(path);
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return path;
-		throw error;
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+			throw error;
+		}
 	}
+	// ENOENT covers both a missing file and a DANGLING symlink chain; in-place
+	// writes followed the latter to its (absent) target, so the replace must too.
+	let current = path;
+	for (let hop = 0; hop < 8; hop++) {
+		let target: string;
+		try {
+			target = readlinkSync(current);
+		} catch {
+			return current;
+		}
+		current = resolve(dirname(current), target);
+	}
+	return current;
 }

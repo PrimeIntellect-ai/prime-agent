@@ -1,4 +1,15 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -151,6 +162,22 @@ describe("auth migration ordering", () => {
 
 		expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
 		expect(JSON.parse(readFileSync(settingsPath, "utf-8")).apiKeys).toBeUndefined();
+	});
+
+	it("strips apiKeys through a symlinked settings.json without replacing the alias", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-auth-migration-symlink-"));
+		tempDirs.push(agentDir);
+		process.env[ENV_AGENT_DIR] = agentDir;
+		const realSettings = join(agentDir, "dotfiles-settings.json");
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(realSettings, JSON.stringify({ theme: "dark", apiKeys: { openai: "sk-key" } }));
+		symlinkSync(realSettings, settingsPath);
+
+		migrateAuthToAuthJson();
+
+		expect(lstatSync(settingsPath).isSymbolicLink()).toBe(true);
+		expect(JSON.parse(readFileSync(realSettings, "utf-8")).apiKeys).toBeUndefined();
+		expect(JSON.parse(readFileSync(join(agentDir, "auth.json"), "utf-8")).openai.key).toBe("sk-key");
 	});
 
 	it("keeps every credential source when the auth.json write fails", () => {
