@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { appendFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -650,5 +650,81 @@ describe("session info usage totals", () => {
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("readSessionInfo incremental scans", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `session-scan-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	const header = { type: "session", version: 3, id: "scan1", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" };
+	const msg = (id: string, parentId: string | null, role: string, text: string) => ({
+		type: "message",
+		id,
+		parentId,
+		timestamp: "2026-01-01T00:00:01Z",
+		message: { role, content: text, timestamp: 1 },
+	});
+	const line = (entry: unknown) => `${JSON.stringify(entry)}\n`;
+
+	it("shares one in-flight scan between concurrent readers of the same path", async () => {
+		const file = join(tempDir, "concurrent.jsonl");
+		writeFileSync(file, line(header) + line(msg("m1", null, "user", "hello")));
+
+		const [first, second] = await Promise.all([readSessionInfo(file), readSessionInfo(file)]);
+
+		expect(first?.messageCount).toBe(1);
+		expect(second).toBe(first);
+	});
+
+	it("resumes an appended file from the scanned offset instead of re-reading the prefix", async () => {
+		const file = join(tempDir, "incremental.jsonl");
+		writeFileSync(file, line(header) + line(msg("m1", null, "user", "original question")));
+		expect((await readSessionInfo(file))?.firstMessage).toBe("original question");
+
+		// Same-length in-place edit of the scanned prefix: an incremental scan
+		// must not observe it, because consumed bytes are never re-read.
+		const content = readFileSync(file, "utf8");
+		writeFileSync(file, content.replace("original question", "modified question"));
+		appendFileSync(file, line(msg("m2", "m1", "assistant", "answer")));
+
+		const info = await readSessionInfo(file);
+		expect(info?.messageCount).toBe(2);
+		expect(info?.firstMessage).toBe("original question");
+	});
+
+	it("rescans from byte 0 when a grown file no longer ends its scanned prefix with the same bytes", async () => {
+		const file = join(tempDir, "rewrite.jsonl");
+		writeFileSync(file, line(header) + line(msg("m1", null, "user", "first draft")));
+		expect((await readSessionInfo(file))?.firstMessage).toBe("first draft");
+
+		writeFileSync(
+			file,
+			line(header) +
+				line(msg("m1", null, "user", "rewritten opening line")) +
+				line(msg("m2", "m1", "assistant", "reply")),
+		);
+
+		const info = await readSessionInfo(file);
+		expect(info?.messageCount).toBe(2);
+		expect(info?.firstMessage).toBe("rewritten opening line");
+	});
+
+	it("leaves a torn trailing line unconsumed and folds it exactly once after completion", async () => {
+		const file = join(tempDir, "torn.jsonl");
+		const torn = line(msg("m2", "m1", "assistant", "partial"));
+		writeFileSync(file, line(header) + line(msg("m1", null, "user", "hi")) + torn.slice(0, 20));
+		expect((await readSessionInfo(file))?.messageCount).toBe(1);
+
+		appendFileSync(file, torn.slice(20));
+		expect((await readSessionInfo(file))?.messageCount).toBe(2);
 	});
 });
