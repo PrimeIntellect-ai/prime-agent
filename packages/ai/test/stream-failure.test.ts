@@ -132,12 +132,17 @@ describe("extractStreamFailureInfo", () => {
 		expect(extractStreamFailureInfo("not an error").kind).toBe("unknown");
 	});
 
-	test("never classifies auth from message text alone", () => {
-		// No structured type and no status: an auth verdict would lock the whole
-		// provider, so free-form text must not produce one.
+	test("never classifies auth or permission from message text alone", () => {
+		// Without a structured error type, only the status may decide auth (which
+		// locks the whole provider) or permission (which is terminal).
 		expect(extractStreamFailureInfo(new Error("Unauthorized: authentication failed")).kind).toBe("unknown");
+		expect(extractStreamFailureInfo(new Error("permission denied by policy")).kind).toBe("unknown");
+		const authText500 = Object.assign(new Error("upstream authentication failed"), { status: 500 });
+		expect(extractStreamFailureInfo(authText500).kind).toBe("server_error");
 		const with401 = Object.assign(new Error("Unauthorized"), { status: 401 });
 		expect(extractStreamFailureInfo(with401).kind).toBe("auth");
+		const with403 = Object.assign(new Error("permission denied"), { status: 403 });
+		expect(extractStreamFailureInfo(with403).kind).toBe("permission");
 	});
 });
 

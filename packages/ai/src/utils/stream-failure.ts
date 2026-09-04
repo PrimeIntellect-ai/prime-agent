@@ -169,10 +169,11 @@ function extractStreamFailureParts(error: unknown): { info: StreamFailureInfo; d
 		typeof err.retryAfterMs === "number" && err.retryAfterMs >= 0 ? err.retryAfterMs : parseRetryAfterMs(headers);
 
 	let kind = classifyStreamFailure(providerErrorType ?? error.message, status);
-	// An auth verdict drives the provider-wide stale-auth lockout; free-form
-	// message text without a status is too weak to justify it.
-	if (kind === "auth" && providerErrorType === undefined && status === undefined) {
-		kind = "unknown";
+	// Auth locks the whole provider and permission is terminal: free-form
+	// message text is too weak for either verdict, so with no structured error
+	// type only the HTTP status decides them (401 -> auth, 403 -> permission).
+	if ((kind === "auth" || kind === "permission") && providerErrorType === undefined) {
+		kind = classifyStreamFailure(undefined, status);
 	}
 
 	return {
