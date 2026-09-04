@@ -23,7 +23,7 @@ import {
 	isProcessAlive,
 	processGroupHasLiveMember,
 	processIdExists,
-	signalProcessGroupOrProcess,
+	signalProcessGroupIfHeld,
 } from "../utils/child-process.js";
 import { formatDaemonListTable } from "./daemon-ps-format.js";
 import { promptYesNo } from "./daemon-stop-confirm.js";
@@ -1076,7 +1076,7 @@ async function stopTrackedProcess(
 	if (!trackedLeaderIdentityCurrent(pid, expectedStartId)) {
 		return false;
 	}
-	signalProcessGroupOrProcess(pid, "SIGTERM");
+	signalProcessGroupIfHeld(pid, "SIGTERM");
 	let deadline = Date.now() + 500;
 	while (!trackedProcessStopped(pid) && Date.now() < deadline) {
 		await delay(25);
@@ -1088,7 +1088,7 @@ async function stopTrackedProcess(
 	if (!trackedLeaderIdentityCurrent(pid, expectedStartId)) {
 		return false;
 	}
-	signalProcessGroupOrProcess(pid, "SIGKILL");
+	signalProcessGroupIfHeld(pid, "SIGKILL");
 	deadline = Date.now() + 1000;
 	while (!trackedProcessStopped(pid) && Date.now() < deadline) {
 		await delay(25);

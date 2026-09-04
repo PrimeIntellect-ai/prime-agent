@@ -85,6 +85,19 @@ export function processGroupHasLiveMember(pgid: number): boolean {
 	}
 }
 
+/**
+ * Signal the group only while it is provably still the target: the leader process (even a zombie)
+ * anchors its pgid against reuse; once the leader is gone, a live member must hold the pgid at
+ * signal time, narrowing reuse exposure to the inherent kill() TOCTOU of any single-pid signal.
+ */
+export function signalProcessGroupIfHeld(pgid: number, signal: NodeJS.Signals): boolean {
+	if (!processIdExists(pgid) && !processGroupHasLiveMember(pgid)) {
+		return false;
+	}
+	signalProcessGroupOrProcess(pgid, signal);
+	return true;
+}
+
 export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals): void {
 	try {
 		process.kill(-pid, signal);

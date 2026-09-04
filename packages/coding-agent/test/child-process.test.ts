@@ -6,6 +6,7 @@ import {
 	isZombieProcess,
 	processGroupExists,
 	processGroupHasLiveMember,
+	signalProcessGroupIfHeld,
 	signalProcessGroupOrProcess,
 	waitForChildProcess,
 } from "../src/utils/child-process.js";
@@ -81,8 +82,11 @@ describe("process liveness", () => {
 			expect(isProcessAlive(pgid)).toBe(false);
 			expect(processGroupExists(pgid)).toBe(true);
 			expect(processGroupHasLiveMember(pgid)).toBe(true);
+			// A held group signals; a fully-gone group refuses (pgid-reuse gate).
+			expect(signalProcessGroupIfHeld(pgid, "SIGKILL")).toBe(true);
 			await childlessExited;
 			expect(processGroupExists(childless.pid!)).toBe(false);
+			expect(signalProcessGroupIfHeld(childless.pid!, "SIGKILL")).toBe(false);
 		} finally {
 			signalProcessGroupOrProcess(pgid, "SIGKILL");
 		}
