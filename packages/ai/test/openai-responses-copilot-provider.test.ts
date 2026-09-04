@@ -212,6 +212,32 @@ describe("openai-responses provider defaults", () => {
 		expect(captured).toEqual({ sessionId: null, clientRequestId: null });
 	});
 
+	it("omits service_tier from the wire body for the default tier", async () => {
+		const model = getModel("openai", "gpt-5.4");
+		const sse = `data: ${JSON.stringify({
+			type: "response.completed",
+			response: {
+				status: "completed",
+				usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2, input_tokens_details: { cached_tokens: 0 } },
+			},
+		})}\n\n`;
+		let wireBody: Record<string, unknown> | undefined;
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+			wireBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+		});
+
+		const result = await streamOpenAIResponses(
+			model,
+			{ systemPrompt: "sys", messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+			{ apiKey: "test-key", serviceTier: "default" },
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		// Absence IS the default; sending it explicitly breaks strict endpoints (e.g. Copilot).
+		expect(wireBody && "service_tier" in wireBody).toBe(false);
+	});
+
 	it.each([
 		["gpt-5.4", "priority", 2],
 		["gpt-5.5", "priority", 2.5],

@@ -237,7 +237,8 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		params.temperature = options?.temperature;
 	}
 
-	if (options?.serviceTier !== undefined) {
+	// "default" means "no tier request": sending it explicitly breaks strict endpoints (e.g. Copilot).
+	if (options?.serviceTier !== undefined && options.serviceTier !== "default") {
 		params.service_tier = options.serviceTier;
 	}
 

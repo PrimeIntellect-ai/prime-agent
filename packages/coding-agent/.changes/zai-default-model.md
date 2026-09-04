@@ -1,0 +1,1 @@
+- The zai provider default model now points at glm-5.3; the previous default was removed from the catalog and silently fell back to a template model.

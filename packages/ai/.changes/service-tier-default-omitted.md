@@ -1,0 +1,1 @@
+- The default service tier is no longer sent explicitly on OpenAI Responses and Codex requests (absence means default; strict endpoints such as Copilot reject the field), and Anthropic cache-write pricing now reprices from a message_delta usage breakdown instead of keeping the message_start rate.

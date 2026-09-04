@@ -153,6 +153,52 @@ describe("Anthropic raw SSE parsing", () => {
 		expect(result.usage.cost.cacheWrite).toBeCloseTo(testCase.expectedCacheWriteCost);
 	});
 
+	it("reprices cache writes from a message_delta usage breakdown", async () => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		const response = createSseResponse([
+			{
+				event: "message_start",
+				data: JSON.stringify({
+					type: "message_start",
+					message: {
+						id: "msg_delta_reprice",
+						usage: {
+							input_tokens: 12,
+							output_tokens: 0,
+							cache_read_input_tokens: 0,
+							cache_creation_input_tokens: 1000,
+							cache_creation: { ephemeral_5m_input_tokens: 1000, ephemeral_1h_input_tokens: 0 },
+						},
+					},
+				}),
+			},
+			{
+				event: "message_delta",
+				data: JSON.stringify({
+					type: "message_delta",
+					delta: { stop_reason: "end_turn" },
+					usage: {
+						input_tokens: 12,
+						output_tokens: 5,
+						cache_read_input_tokens: 0,
+						cache_creation_input_tokens: 2000,
+						cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 2000 },
+					},
+				}),
+			},
+			{ event: "message_stop", data: JSON.stringify({ type: "message_stop" }) },
+		]);
+		const result = await streamAnthropic(
+			model,
+			{ messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }] },
+			{ client: createFakeAnthropicClient(response), cacheRetention: "long" },
+		).result();
+
+		expect(result.usage.cacheWrite).toBe(2000);
+		// 2000 one-hour tokens at 2x input cost, not the stale 1.25x rate from message_start.
+		expect(result.usage.cost.cacheWrite).toBeCloseTo(0.004, 6);
+	});
+
 	it("preserves configured cache write pricing for non-Anthropic models", async () => {
 		const model = getModel("minimax", "MiniMax-M2.7-highspeed");
 		const response = createSseResponse(
