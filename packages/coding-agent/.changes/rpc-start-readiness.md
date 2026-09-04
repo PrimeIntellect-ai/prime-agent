@@ -1,0 +1,1 @@
+- Removed the fixed delay when starting an RPC client.
