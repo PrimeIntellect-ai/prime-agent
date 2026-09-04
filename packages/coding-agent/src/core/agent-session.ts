@@ -255,7 +255,13 @@ import {
 	transitionSessionAction,
 	type WakePolicy,
 } from "./session-action-store.js";
-import type { BranchSummaryEntry, CompactionEntry, SessionContext, SessionMessageEntry } from "./session-manager.js";
+import type {
+	BranchSummaryEntry,
+	ChildUsageAttributionEntry,
+	CompactionEntry,
+	SessionContext,
+	SessionMessageEntry,
+} from "./session-manager.js";
 import {
 	CURRENT_SESSION_VERSION,
 	getLatestCompactionEntry,
@@ -10599,6 +10605,30 @@ export class AgentSession {
 		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
 		const startedAt = Date.now();
 		const parentAssistantForUsage = this._findLastAssistantMessage();
+		// Child completions accumulate in memory and flush one durable attribution
+		// entry per settle boundary (child agent_end, run settlement) instead of
+		// one journal append per child assistant message.
+		let pendingChildUsage: Usage | undefined;
+		let pendingChildUsageOrigin: ChildUsageAttributionEntry["origin"];
+		const flushPendingChildUsageAttribution = () => {
+			if (!pendingChildUsage || !parentAssistantForUsage) return;
+			const childUsage = pendingChildUsage;
+			const origin = pendingChildUsageOrigin;
+			pendingChildUsage = undefined;
+			pendingChildUsageOrigin = undefined;
+			const parentEntry = this._findAssistantEntryForMessage(parentAssistantForUsage);
+			if (!parentEntry) return;
+			try {
+				this.sessionManager.appendChildUsageAttribution(
+					parentEntry.id,
+					childUsage,
+					parentAssistantForUsage.usage,
+					origin,
+				);
+			} catch {
+				// Attribution is recoverable bookkeeping; a failed append must not break run settlement.
+			}
+		};
 		let runningToolCount = 0;
 		let childSession: AgentSession | undefined;
 		const run: RlmChildRun = {
@@ -10712,6 +10742,7 @@ export class AgentSession {
 						run.activity = { kind: "waiting" };
 						emitChildUpdate();
 					} else if (event.type === "agent_end") {
+						flushPendingChildUsageAttribution();
 						run.activity = undefined;
 						emitChildUpdate();
 					} else if (event.type === "message_end" && event.message.role === "assistant") {
@@ -10719,27 +10750,22 @@ export class AgentSession {
 						if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
 							attributeChildUsage(parentAssistantForUsage?.usage ?? emptyUsage(), assistant.usage);
 							if (parentAssistantForUsage) {
-								const parentEntry = this._findAssistantEntryForMessage(parentAssistantForUsage);
-								if (parentEntry) {
+								if (!pendingChildUsage) {
+									pendingChildUsage = emptyUsage();
 									const messages = child.messages;
 									const assistantIndex = messages.lastIndexOf(assistant);
 									const precedingPrompt = messages
 										.slice(0, assistantIndex)
 										.reverse()
 										.find((message) => message.role === "user" || message.role === "custom");
-									const origin =
+									pendingChildUsageOrigin =
 										precedingPrompt?.role === "custom" && isAgentSessionMessage(precedingPrompt)
 											? precedingPrompt.details.id.startsWith("spawn:")
 												? "spawn_task"
 												: "agent_message"
 											: "direct_user";
-									this.sessionManager.appendChildUsageAttribution(
-										parentEntry.id,
-										assistant.usage,
-										parentAssistantForUsage.usage,
-										origin,
-									);
 								}
+								addAssistantUsage(pendingChildUsage, assistant.usage);
 							}
 						}
 						const text = compactRlmText(readAssistantText(assistant));
@@ -10901,6 +10927,7 @@ export class AgentSession {
 					}
 				}
 			} finally {
+				flushPendingChildUsageAttribution();
 				if (run.detachedDeletion) {
 					run.deletionRunFinished = true;
 					if (!run.settled) {
