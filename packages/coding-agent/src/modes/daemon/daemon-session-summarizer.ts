@@ -319,10 +319,11 @@ export class DaemonSessionSummarizer {
 			return;
 		}
 		// A generation that keeps failing on identical idle content will keep
-		// failing: stop re-attempting until the content changes (count plus last
-		// timestamp, so a branch/edit back to the same length re-arms) or the
-		// backoff elapses for externally-caused failures.
-		const contentKey = `${messageCount}:${messages[messageCount - 1]?.timestamp ?? 0}`;
+		// failing: stop re-attempting until the content changes or the backoff
+		// elapses for externally-caused failures. The leaf entry id is the branch
+		// tip identity: appends, edits, and branch navigation all move it, while
+		// message counts and timestamps can collide across sibling branches.
+		const contentKey = `${session.sessionManager.getLeafId() ?? "root"}:${messageCount}`;
 		const failed = this.failedIdleGenerations.get(id);
 		if (
 			!isWorking &&

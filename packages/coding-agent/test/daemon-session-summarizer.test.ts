@@ -162,6 +162,7 @@ describe("daemon session summarizer", () => {
 			summaryState?: AgentStatus;
 			persistedStatus?: AgentStatus;
 			appendAgentStatus?: (status: AgentStatus) => void;
+			getLeafId?: () => string | null;
 		}): ActiveSessionState {
 			return {
 				activeSessionId: "active-1",
@@ -175,6 +176,7 @@ describe("daemon session summarizer", () => {
 						sessionManager: {
 							appendAgentStatus: options.appendAgentStatus ?? (() => {}),
 							getLatestAgentStatus: () => options.persistedStatus,
+							getLeafId: options.getLeafId ?? (() => null),
 						},
 					},
 				},
@@ -226,8 +228,13 @@ describe("daemon session summarizer", () => {
 			expect(state.summaryState).toEqual({ summary: "", taskState: "needs_input", basedOnMessageCount: 1 });
 		});
 
-		test("the idle retry ceiling re-arms when the settled content changes at the same length", async () => {
-			const state = makeState({ messages: [userMessage("hi")], isSessionActive: false });
+		test("the idle retry ceiling re-arms when branch navigation moves the leaf at the same length", async () => {
+			let leafId = "leaf-a";
+			const state = makeState({
+				messages: [userMessage("hi")],
+				isSessionActive: false,
+				getLeafId: () => leafId,
+			});
 			const generate = vi.fn(async () => undefined);
 			const summarizer = new DaemonSessionSummarizer(() => [state], undefined, generate);
 			const internal = summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> };
@@ -237,9 +244,9 @@ describe("daemon session summarizer", () => {
 			}
 			expect(generate).toHaveBeenCalledTimes(3);
 
-			// A branch/edit can land back on the same message count with new content.
-			const replacement = { ...userMessage("hi again"), timestamp: 42 } as AgentMessage;
-			(state.runtime.session as unknown as { messages: AgentMessage[] }).messages = [replacement];
+			// Branch navigation to a sibling can keep the count and even the
+			// message timestamps; only the leaf entry id reliably moves.
+			leafId = "leaf-b";
 			await internal.summarize(state);
 			expect(generate).toHaveBeenCalledTimes(4);
 		});
