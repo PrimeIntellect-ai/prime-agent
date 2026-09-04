@@ -1436,6 +1436,12 @@ export class AgentDaemon {
 				const sessionKey = resolve(entry.sessionFile);
 				if (entry.status === "deleted" || visited.has(sessionKey)) continue;
 				visited.add(sessionKey);
+				// A resident child walks its own subtree as an outer root below. Avoid
+				// duplicate rows and attributing its descendants to an ancestor - and
+				// keep its actively-streamed transcript out of the input set, where
+				// every append would needlessly bust the memo (the roster axis
+				// already carries resident identity).
+				if (!includeResident && this.findSessionBySessionFile(entry.sessionFile)) continue;
 				const childStat = await recordInputStat(entry.sessionFile);
 				const info = await readSessionInfo(entry.sessionFile);
 				if (!info) {
@@ -1444,9 +1450,6 @@ export class AgentDaemon {
 					if (childStat !== "absent") degraded = true;
 					continue;
 				}
-				// A resident child walks its own subtree as an outer root below. Avoid
-				// both duplicate rows and attributing its descendants to an ancestor.
-				if (!includeResident && this.findSessionBySessionFile(entry.sessionFile)) continue;
 				const chain = [...parentChain, entry];
 				passive.push({ ...root, entry, info, chain });
 				await visit(root, { sessionId: info.id, sessionFile: entry.sessionFile }, chain, visited);

@@ -4501,6 +4501,39 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("keeps the memo across appends to a resident child's transcript", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-resident-append-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				listPassiveRlmSubagents(): Promise<Array<{ entry: { childId: string } }>>;
+			};
+			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			await internals.createRuntime({ type: "create", sessionPath: fixture.childSessionFile });
+			await internals.listPassiveRlmSubagents();
+			const first = await internals.listPassiveRlmSubagents();
+			expect(first.map(({ entry }) => entry.childId)).toContain(fixture.grandchildId);
+			expect(first.map(({ entry }) => entry.childId)).not.toContain(fixture.childId);
+
+			// A resident child's identity comes from the roster, not its transcript:
+			// its streaming appends must not invalidate the passive memo.
+			appendFileSync(
+				fixture.childSessionFile,
+				`${JSON.stringify({
+					type: "message",
+					id: "m9",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:09.000Z",
+					message: { role: "user", content: "streamed while resident", timestamp: 9 },
+				})}\n`,
+			);
+			expect(await internals.listPassiveRlmSubagents()).toBe(first);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("cancels a detached subagent heartbeat when its parent is archived", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-archived-subagent-heartbeat-"));
 		try {
