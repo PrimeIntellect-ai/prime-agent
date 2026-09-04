@@ -32,8 +32,10 @@ export async function tryAcquireDirLock(
 		} catch {
 			// The owner judgment for a missing or unreadable pid belongs to the caller.
 		}
-		const parsed = judgedPid === undefined ? Number.NaN : Number.parseInt(judgedPid.trim(), 10);
-		// kill(0)/kill(-n) probe the caller's own process group: only positive pids can own a lock.
+		// Strict parse: kill(0)/kill(-n) probe the caller's own process group, and
+		// parseInt would accept "123garbage" — only an exact positive integer owns a lock.
+		const trimmed = judgedPid?.trim();
+		const parsed = trimmed !== undefined && /^\d+$/.test(trimmed) ? Number.parseInt(trimmed, 10) : Number.NaN;
 		if (await ownerAlive(Number.isInteger(parsed) && parsed > 0 ? parsed : undefined)) {
 			return "held";
 		}

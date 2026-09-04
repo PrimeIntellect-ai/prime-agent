@@ -72,6 +72,17 @@ describe("writeFileAtomicSync", () => {
 });
 
 describe("tryAcquireDirLock", () => {
+	it("treats a garbage pid file as stale instead of trusting its numeric prefix", async () => {
+		const dir = createTempDir();
+		const lockDir = join(dir, "garbage.lock");
+		mkdirSync(lockDir);
+		writeFileSync(join(lockDir, "pid"), "123garbage\n");
+
+		const alive = (ownerPid: number | undefined) => ownerPid === 123;
+		expect(await tryAcquireDirLock(lockDir, alive)).toBe("reclaimed");
+		expect(await tryAcquireDirLock(lockDir, alive)).toBe("acquired");
+	});
+
 	it("treats pid 0 in a lock as stale instead of probing the caller's own process group", async () => {
 		const dir = createTempDir();
 		const lockDir = join(dir, "zero.lock");
