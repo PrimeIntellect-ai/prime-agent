@@ -95,13 +95,17 @@ describe("UserMessageComponent", () => {
 		expect(rendered).toContain(theme.fg("success", "@src/foo.ts"));
 	});
 
-	test("highlights a bare -- separator only in recognized slash commands", () => {
+	test("highlights a bare -- separator only in argument-taking slash commands", () => {
 		initTheme("dark");
-		const recognized = (name: string) => name === "new";
+		const recognized = (name: string) => name === "new" || name === "compact";
 		const command = new UserMessageComponent("/new --name bla -- hello", undefined, recognized).render(60).join("\n");
+		// /compact is recognized but takes no argument; the editor shows no
+		// separator there, so the sent message must match.
+		const noArgument = new UserMessageComponent("/compact -- hello", undefined, recognized).render(60).join("\n");
 		const plain = new UserMessageComponent("this -- however -- is fine", undefined, recognized).render(60).join("\n");
 
 		expect(command).toContain(theme.fg("mdLink", "--"));
+		expect(noArgument).not.toContain(theme.fg("mdLink", "--"));
 		expect(plain).not.toContain(theme.fg("mdLink", "--"));
 	});
 

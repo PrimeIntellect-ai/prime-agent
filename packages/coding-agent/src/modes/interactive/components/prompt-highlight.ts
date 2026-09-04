@@ -76,7 +76,7 @@ export class PromptTokenMask {
 	readonly text: string;
 	private graphemes: { segment: string; color: ThemeColor }[] = [];
 
-	constructor(source: string, commandEnd = 0) {
+	constructor(source: string, commandEnd = 0, includeBareSeparator = false) {
 		if (MASK_LITERAL_PATTERN.test(source)) {
 			this.text = source;
 			return;
@@ -85,7 +85,7 @@ export class PromptTokenMask {
 		if (commandEnd > 0) {
 			tokens.push({ start: 0, end: commandEnd, color: "accent" });
 		}
-		tokens.push(...findArgTokens(source, commandEnd, commandEnd > 0));
+		tokens.push(...findArgTokens(source, commandEnd, includeBareSeparator));
 
 		let text = "";
 		let cursor = 0;

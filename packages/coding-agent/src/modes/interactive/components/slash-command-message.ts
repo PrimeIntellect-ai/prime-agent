@@ -1,5 +1,5 @@
 import { Box, Container, Text } from "@earendil-works/pi-tui";
-import { parseSlashCommand } from "../../../core/slash-commands.js";
+import { builtinSlashCommandTakesArgument, parseSlashCommand } from "../../../core/slash-commands.js";
 import { theme } from "../theme/theme.js";
 import { styleArgumentTokens } from "./prompt-highlight.js";
 
@@ -14,11 +14,15 @@ export function isLeadingSlashCommand(text: string, isRecognized: (name: string)
 
 export function styleSlashCommandText(
 	text: string,
-	styleRest: (rest: string) => string = (rest) => styleArgumentTokens(rest, undefined, true),
+	styleRest: (rest: string, includeBareSeparator: boolean) => string = (rest, includeBareSeparator) =>
+		styleArgumentTokens(rest, undefined, includeBareSeparator),
 ): string {
 	const parsed = parseSlashCommand(text);
 	const commandEnd = parsed ? parsed.name.length + 1 : text.length;
-	return `${theme.fg("accent", text.slice(0, commandEnd))}${styleRest(text.slice(commandEnd))}`;
+	// The bare -- separator is only meaningful in commands that take arguments,
+	// matching the editor's isArgumentCommand gate.
+	const includeBareSeparator = parsed !== undefined && builtinSlashCommandTakesArgument(parsed.name);
+	return `${theme.fg("accent", text.slice(0, commandEnd))}${styleRest(text.slice(commandEnd), includeBareSeparator)}`;
 }
 
 /** Renders a durable session command with the same layout as a user message. */

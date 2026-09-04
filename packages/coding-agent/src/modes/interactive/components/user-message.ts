@@ -6,7 +6,7 @@ import {
 	type MarkdownTheme,
 	type TableCellSelectionRegion,
 } from "@earendil-works/pi-tui";
-import { parseSlashCommand } from "../../../core/slash-commands.js";
+import { builtinSlashCommandTakesArgument, parseSlashCommand } from "../../../core/slash-commands.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
 import { PromptTokenMask } from "./prompt-highlight.js";
 
@@ -18,8 +18,8 @@ class HighlightedMarkdown implements Component {
 	private readonly markdown: Markdown;
 	private readonly mask: PromptTokenMask;
 
-	constructor(text: string, markdownTheme: MarkdownTheme, commandEnd = 0) {
-		this.mask = new PromptTokenMask(text, commandEnd);
+	constructor(text: string, markdownTheme: MarkdownTheme, commandEnd = 0, includeBareSeparator = false) {
+		this.mask = new PromptTokenMask(text, commandEnd, includeBareSeparator);
 		this.markdown = new Markdown(this.mask.text, 0, 0, markdownTheme, {
 			color: (content: string) => theme.fg("userMessageText", content),
 		});
@@ -52,8 +52,10 @@ export class UserMessageComponent extends Container {
 		super();
 		const command = parseSlashCommand(text);
 		const commandEnd = command && isRecognizedSlashCommand(command.name) ? command.name.length + 1 : 0;
+		const includeBareSeparator =
+			command !== undefined && commandEnd > 0 && builtinSlashCommandTakesArgument(command.name);
 		this.contentBox = new Box(2, 1, (content: string) => theme.getUserMessageBackgroundColor()(content));
-		this.contentBox.addChild(new HighlightedMarkdown(text, markdownTheme, commandEnd));
+		this.contentBox.addChild(new HighlightedMarkdown(text, markdownTheme, commandEnd, includeBareSeparator));
 		this.addChild(this.contentBox);
 	}
 
