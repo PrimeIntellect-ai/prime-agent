@@ -81,12 +81,24 @@ async function acquireAttempt(
 				throw error;
 			}
 		}
-		const lockShape = pathShape(lockPath);
-		if (lockShape === "unknown") {
+		// One immutable identity capture keys every later decision: the judged lock
+		// IS this dev+ino, whatever else happens to the path meanwhile.
+		let captured: { dev: bigint; ino: bigint; isDir: boolean };
+		try {
+			const measured = statSync(lockPath, { bigint: true });
+			captured = { dev: measured.dev, ino: measured.ino, isDir: measured.isDirectory() };
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+				return "reclaimed";
+			}
 			// An unjudgeable lock may be live: fail safe.
 			return "held";
 		}
-		const judged = readOwnerRaw(lockPath, lockShape === "directory");
+		if (captured.ino === 0n) {
+			// Some Windows filesystems report no stable file index: identity unavailable.
+			return "held";
+		}
+		const judged = readOwnerRaw(lockPath, captured.isDir);
 		if (judged === "unreadable") {
 			// A transient read failure may hide a LIVE lock: never judge it stale.
 			return "held";
@@ -99,38 +111,38 @@ async function acquireAttempt(
 			renameSync(lockPath, asidePath);
 		} catch (reclaimError) {
 			// ENOENT: a racing reclaimer moved it first.
-			if ((reclaimError as NodeJS.ErrnoException).code !== "ENOENT") {
+			if ((reclaimError as NodeJS.ErrnoException).code === "ENOENT") {
+				return "reclaimed";
+			}
+			// Ambiguous failure (NFS can lose the reply of a completed rename): re-probe.
+			if (statIdentity(lockPath) !== undefined) {
 				throw reclaimError;
 			}
-			return "reclaimed";
+			const moved = statIdentity(asidePath);
+			if (!(moved !== undefined && moved.dev === captured.dev && moved.ino === captured.ino)) {
+				return "reclaimed";
+			}
+			// The rename completed; continue as its success path.
 		}
-		// Identity check on the MOVED entry's actual shape: the owner and the
-		// file-vs-directory type may both have changed since the staleness judgment.
-		const asideShape = pathShape(asidePath);
-		if (asideShape !== "unknown" && readOwnerRaw(asidePath, asideShape === "directory") === judged) {
+		const aside = statIdentity(asidePath);
+		if (aside !== undefined && aside.dev === captured.dev && aside.ino === captured.ino) {
 			rmSync(asidePath, { recursive: true, force: true });
 			return "reclaimed";
 		}
-		// Changed owners since the judgment, or no longer judgeable: restore, never
-		// delete. A file links back so a third acquirer is never clobbered; anything
-		// else renames back (shape-agnostic, and a directory rename cannot clobber).
+		// The moved entry is not the judged lock: restore it, never delete. A file
+		// links back so a rival re-acquirer is never clobbered; a directory renames
+		// back (a directory rename cannot clobber). Any failure leaves it aside.
 		try {
-			if (asideShape === "file") {
+			if (captured.isDir) {
+				renameSync(asidePath, lockPath);
+			} else {
 				linkSync(asidePath, lockPath);
 				rmSync(asidePath, { force: true });
-			} else {
-				renameSync(asidePath, lockPath);
 			}
-			return "held";
 		} catch {
-			if (asideShape === "unknown") {
-				// Never delete what cannot be judged; the displaced copy stays aside.
-				return "held";
-			}
-			// A third acquirer already owns the path; discard the displaced copy.
-			rmSync(asidePath, { recursive: true, force: true });
-			return "reclaimed";
+			// The displaced entry stays aside rather than risk deleting a live lock.
 		}
+		return "held";
 	} finally {
 		try {
 			rmSync(tempPath, { force: true });
@@ -140,14 +152,12 @@ async function acquireAttempt(
 	}
 }
 
-type PathShape = "file" | "directory" | "absent" | "unknown";
-
-// A probe failure must never collapse into a definite shape: "unknown" is not destructible.
-function pathShape(path: string): PathShape {
+function statIdentity(path: string): { dev: bigint; ino: bigint } | undefined {
 	try {
-		return statSync(path).isDirectory() ? "directory" : "file";
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unknown";
+		const measured = statSync(path, { bigint: true });
+		return { dev: measured.dev, ino: measured.ino };
+	} catch {
+		return undefined;
 	}
 }
 

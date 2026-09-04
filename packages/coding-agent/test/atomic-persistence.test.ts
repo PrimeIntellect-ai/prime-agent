@@ -17,10 +17,19 @@ const shortWrites = vi.hoisted(() => ({ remaining: 0 }));
 const rmFault = vi.hoisted(() => ({ error: undefined as Error | undefined }));
 const linkSweep = vi.hoisted(() => ({ remaining: 0 }));
 const asideStatFault = vi.hoisted(() => ({ remaining: 0 }));
+const renamePerformThenThrow = vi.hoisted(() => ({ remaining: 0 }));
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
 	return {
 		...actual,
+		renameSync: ((from: Parameters<typeof actual.renameSync>[0], to: Parameters<typeof actual.renameSync>[1]) => {
+			if (renamePerformThenThrow.remaining > 0 && String(to).includes(".stale-")) {
+				renamePerformThenThrow.remaining--;
+				actual.renameSync(from, to);
+				throw Object.assign(new Error("EIO: reply lost"), { code: "EIO" });
+			}
+			return actual.renameSync(from, to);
+		}) as typeof actual.renameSync,
 		statSync: ((path: Parameters<typeof actual.statSync>[0], options?: never) => {
 			if (asideStatFault.remaining > 0 && String(path).includes(".stale-")) {
 				asideStatFault.remaining--;
@@ -103,6 +112,21 @@ describe("writeFileAtomicSync", () => {
 });
 
 describe("tryAcquireDirLock", () => {
+	it("recovers a rename whose success reply was lost and still reclaims cleanly", async () => {
+		const dir = createTempDir();
+		const lockPath = join(dir, "eio.lock");
+		writeFileSync(lockPath, "999999999\n");
+		renamePerformThenThrow.remaining = 1;
+
+		try {
+			expect(await tryAcquireDirLock(lockPath, () => false)).toBe("reclaimed");
+		} finally {
+			renamePerformThenThrow.remaining = 0;
+		}
+		expect(readdirSync(dir)).toEqual([]);
+		expect(await tryAcquireDirLock(lockPath, () => false)).toBe("acquired");
+	});
+
 	it("restores instead of deleting a moved lock whose shape cannot be probed", async () => {
 		const dir = createTempDir();
 		const lockDir = join(dir, "shape.lock");
@@ -233,8 +257,9 @@ describe("tryAcquireDirLock", () => {
 		expect(result).toBe("held");
 		expect(readFileSync(join(lockDir, "pid"), "utf8").trim()).toBe("424242");
 
-		// Cross-shape swap: a judged FILE lock replaced by a rival's legacy DIR must
-		// be put back by the moved entry's actual type (link would fail on a dir).
+		// Cross-shape swap: a judged FILE lock replaced by a rival's legacy DIR is
+		// reported held and the rival's lock is preserved (restored or left aside),
+		// never deleted.
 		rmSync(lockDir, { recursive: true, force: true });
 		writeFileSync(lockDir, "999999999\n");
 		const crossType = await tryAcquireDirLock(lockDir, () => {
@@ -244,7 +269,16 @@ describe("tryAcquireDirLock", () => {
 			return false;
 		});
 		expect(crossType).toBe("held");
-		expect(readFileSync(join(lockDir, "pid"), "utf8").trim()).toBe("555555");
+		const survivors = readdirSync(dir)
+			.map((name) => {
+				try {
+					return readFileSync(join(dir, name, "pid"), "utf8").trim();
+				} catch {
+					return undefined;
+				}
+			})
+			.filter((pid) => pid !== undefined);
+		expect(survivors).toEqual(["555555"]);
 	});
 
 	it("acquires over a stale lock without deleting a lock that changed owners", async () => {
