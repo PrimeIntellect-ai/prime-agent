@@ -785,9 +785,8 @@ export class ModelRegistry {
 		const teamHeaders = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID);
 		const teamId = teamHeaders?.["X-Prime-Team-ID"];
 		if (!apiKey || !teamHeaders || !teamId) {
-			// Stale-marked credentials are not a logout: keep the previously
-			// fetched entitlements so an explicit re-selection can validate
-			// against them (the auth filter still hides the models while stale).
+			// Stale is not logout: keep fetched entitlements for explicit re-selection
+			// (the auth filter still hides the models while stale).
 			if (this.authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID).source === "stale") {
 				this.authorizedPrivatePrimeInferenceModelIds = previousPrivateModelIds;
 				this.authorizedPrivatePrimeInferenceTeamId = previousTeamId;
@@ -952,16 +951,10 @@ export class ModelRegistry {
 		};
 	}
 
-	/**
-	 * `assumeAuthConfigured` evaluates availability as if the provider's auth
-	 * were usable (explicit selection of a stale-auth provider validates
-	 * BEFORE the lockout is cleared, so nothing mutates on a failed selection).
-	 */
+	/** `assumeAuthConfigured` validates an explicit stale-provider selection BEFORE the clear commits. */
 	async canUseModel(model: Model<Api>, options?: { assumeAuthConfigured?: boolean }): Promise<boolean> {
 		if (options?.assumeAuthConfigured) {
-			// Validation under a hypothetical stale-auth clear must be
-			// side-effect-free: a refresh here would run keyless and drop the
-			// cached entitlements it needs, so answer from current state.
+			// Must be side-effect-free: a keyless refresh would drop the cached entitlements it needs.
 			return !isPrivatePrimeInferenceModel(model) || this.isAuthorizedPrivatePrimeInferenceModel(model);
 		}
 		if (!this.hasConfiguredAuth(model)) {
@@ -1217,11 +1210,7 @@ export class ModelRegistry {
 		return token ? this.markProviderAuthSourceStale(token) : false;
 	}
 
-	/**
-	 * Forget stale-auth markings for a provider. Called when the user
-	 * explicitly selects one of its models: the request runs again and a
-	 * structured auth failure re-marks the provider if auth is still bad.
-	 */
+	/** Forget stale-auth markings; a structured auth failure on the next request re-marks the provider. */
 	clearProviderAuthStale(provider: string): void {
 		this.staleProviderRequestAuthSources.delete(provider);
 		this.authStorage.clearAuthStale(provider);

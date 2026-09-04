@@ -4796,9 +4796,8 @@ export class AgentDaemon {
 					availableModels.find(
 						(candidate) => candidate.provider === command.provider && candidate.id === command.modelId,
 					) ??
-					// A stale-auth provider's models are excluded from the available
-					// list; explicit selection may still target them. The lookup never
-					// mutates stale state: session.setModel owns the clear on success.
+					// Stale-auth providers are excluded from the available list; the lookup
+					// never mutates stale state (session.setModel owns the clear).
 					(session.modelRegistry.getProviderAuthStatus(command.provider).source === "stale"
 						? session.modelRegistry.find(command.provider, command.modelId)
 						: undefined);

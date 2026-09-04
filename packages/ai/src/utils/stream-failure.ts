@@ -78,9 +78,7 @@ export function classifyStreamFailure(providerErrorType?: string, status?: numbe
 	if (/rate_limit|usage_limit|usage_not_included|throttl/.test(type) || status === 429) {
 		return "rate_limit";
 	}
-	// Only bad credentials (401 / explicit authentication types) are auth.
-	// Permission/403 shapes are entitlement or policy denials (model access,
-	// org policy, region) and must not trigger a stale-auth lockout.
+	// Permission/403 shapes are entitlement or policy denials, not bad credentials: never auth-stale.
 	if (/authentication|unauthorized/.test(type) || status === 401) return "auth";
 	if (/permission|forbidden|access.?denied/.test(type) || status === 403) return "permission";
 	if (type.includes("invalid_request") || type.includes("not_found_error") || status === 400 || status === 404) {
@@ -169,9 +167,7 @@ function extractStreamFailureParts(error: unknown): { info: StreamFailureInfo; d
 		typeof err.retryAfterMs === "number" && err.retryAfterMs >= 0 ? err.retryAfterMs : parseRetryAfterMs(headers);
 
 	let kind = classifyStreamFailure(providerErrorType ?? error.message, status);
-	// Auth locks the whole provider and permission is terminal: free-form
-	// message text is too weak for either verdict, so with no structured error
-	// type only the HTTP status decides them (401 -> auth, 403 -> permission).
+	// Message text is too weak for these verdicts: without a structured type, only the status decides.
 	if ((kind === "auth" || kind === "permission") && providerErrorType === undefined) {
 		kind = classifyStreamFailure(undefined, status);
 	}

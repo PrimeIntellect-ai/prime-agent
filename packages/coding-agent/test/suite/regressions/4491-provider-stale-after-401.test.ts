@@ -5,21 +5,15 @@ import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtim
 import { InProcessAgentConnection } from "../../../src/modes/agent-connection/in-process-agent-connection.js";
 import { createHarness, type Harness } from "../harness.js";
 
-function provider401Message(): AssistantMessage {
+function structuredFailureMessage(kind: string, status: number, errorMessage: string): AssistantMessage {
 	return {
-		...fauxAssistantMessage("", {
-			stopReason: "error",
-			errorMessage: "401 Unauthorized: invalid API key",
-		}),
-		diagnostics: [
-			{
-				type: "provider_stream_failure",
-				timestamp: Date.now(),
-				details: { kind: "auth", status: 401 },
-			},
-		],
+		...fauxAssistantMessage("", { stopReason: "error", errorMessage }),
+		diagnostics: [{ type: "provider_stream_failure", timestamp: Date.now(), details: { kind, status } }],
 	};
 }
+
+const provider401Message = () => structuredFailureMessage("auth", 401, "401 Unauthorized: invalid API key");
+const provider500Message = () => structuredFailureMessage("server_error", 500, "500 Internal Server Error");
 
 function unstructured401Message(): AssistantMessage {
 	return fauxAssistantMessage("", {
@@ -28,21 +22,20 @@ function unstructured401Message(): AssistantMessage {
 	});
 }
 
-function provider500Message(): AssistantMessage {
-	return {
-		...fauxAssistantMessage("", {
-			stopReason: "error",
-			errorMessage: "500 Internal Server Error",
-		}),
-		diagnostics: [
-			{
-				type: "provider_stream_failure",
-				timestamp: Date.now(),
-				details: { kind: "server_error", status: 500 },
-			},
-		],
-	};
+/** The harness configures two auth sources; mark both so the provider is fully locked out. */
+function lockOutProvider(harness: Harness, provider: string): void {
+	const registry = harness.session.modelRegistry;
+	for (let i = 0; i < 2 && registry.getProviderAuthStatus(provider).source !== "stale"; i++) {
+		expect(registry.markProviderAuthStale(provider)).toBe(true);
+	}
+	expect(registry.getProviderAuthStatus(provider)).toMatchObject({ configured: false, source: "stale" });
 }
+
+const privateModelHarnessOptions = {
+	provider: "prime-inference",
+	models: [{ id: "regular-model" }, { id: "internal/private-model" }],
+	settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
+};
 
 describe("issue #4491 provider stale after repeated 401", () => {
 	const harnesses: Harness[] = [];
@@ -128,20 +121,10 @@ describe("issue #4491 provider stale after repeated 401", () => {
 			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
 		});
 		harnesses.push(harness);
-		const permissionDenied: AssistantMessage = {
-			...fauxAssistantMessage("", {
-				stopReason: "error",
-				errorMessage: "403 model access denied by organization policy",
-			}),
-			diagnostics: [
-				{
-					type: "provider_stream_failure",
-					timestamp: Date.now(),
-					details: { kind: "permission", status: 403 },
-				},
-			],
-		};
-		harness.setResponses([permissionDenied, fauxAssistantMessage("unused")]);
+		harness.setResponses([
+			structuredFailureMessage("permission", 403, "403 model access denied by organization policy"),
+			fauxAssistantMessage("unused"),
+		]);
 
 		await harness.session.prompt("hello");
 
@@ -161,13 +144,7 @@ describe("issue #4491 provider stale after repeated 401", () => {
 
 		const provider = harness.getModel().provider;
 		expect(harness.authStorage.hasAuth(provider)).toBe(false);
-		// The harness configures a second auth source (provider request config);
-		// mark it stale too so the provider is fully locked out, as in the field.
-		expect(harness.session.modelRegistry.markProviderAuthStale(provider)).toBe(true);
-		expect(harness.session.modelRegistry.getProviderAuthStatus(provider)).toMatchObject({
-			configured: false,
-			source: "stale",
-		});
+		lockOutProvider(harness, provider);
 
 		await harness.session.setModel(harness.getModel());
 
@@ -292,15 +269,8 @@ describe("issue #4491 provider stale after repeated 401", () => {
 			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
 		});
 		harnesses.push(harness);
-		harness.setResponses([provider401Message()]);
-		await harness.session.prompt("hello");
 		const provider = harness.getModel().provider;
-		expect(harness.authStorage.hasAuth(provider)).toBe(false);
-		expect(harness.session.modelRegistry.markProviderAuthStale(provider)).toBe(true);
-		expect(harness.session.modelRegistry.getProviderAuthStatus(provider)).toMatchObject({
-			configured: false,
-			source: "stale",
-		});
+		lockOutProvider(harness, provider);
 
 		const runtime = {
 			session: harness.session,
@@ -321,54 +291,24 @@ describe("issue #4491 provider stale after repeated 401", () => {
 		expect(harness.session.modelRegistry.getProviderAuthStatus(provider).source).not.toBe("stale");
 	});
 
-	it("keeps the lockout when private-model validation rejects the selection", async () => {
-		const harness = await createHarness({
-			provider: "prime-inference",
-			models: [{ id: "regular-model" }, { id: "internal/private-model" }],
-			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
-		});
+	it("rejects an unauthorized private model under a lockout, recovers a cached-authorized one", async () => {
+		const harness = await createHarness(privateModelHarnessOptions);
 		harnesses.push(harness);
 		const registry = harness.session.modelRegistry;
-		// Both auth sources stale: the provider is fully locked out.
-		expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
-		expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
-		expect(registry.getProviderAuthStatus("prime-inference")).toMatchObject({
-			configured: false,
-			source: "stale",
-		});
-
+		lockOutProvider(harness, "prime-inference");
 		const privateModel = harness.models.find((model) => model.id === "internal/private-model");
 		expect(privateModel).toBeDefined();
 
-		// Validation rejects the unauthorized private model BEFORE any clear.
+		// Not team-authorized: validation rejects BEFORE any clear.
 		await expect(harness.session.setModel(privateModel!)).rejects.toThrow("not available");
 		expect(registry.getProviderAuthStatus("prime-inference")).toMatchObject({ source: "stale" });
-	});
 
-	it("recovers a cached team-authorized private model from a stale-auth lockout", async () => {
-		const harness = await createHarness({
-			provider: "prime-inference",
-			models: [{ id: "regular-model" }, { id: "internal/private-model" }],
-			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
-		});
-		harnesses.push(harness);
-		const registry = harness.session.modelRegistry;
 		const internals = registry as unknown as { authorizedPrivatePrimeInferenceModelIds: Set<string> };
 		internals.authorizedPrivatePrimeInferenceModelIds.add("internal/private-model");
-
-		expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
-		expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
-		expect(registry.getProviderAuthStatus("prime-inference")).toMatchObject({
-			configured: false,
-			source: "stale",
-		});
-
 		// Refreshes during the stale window run keyless; they must preserve the
 		// cached entitlements the explicit re-selection validates against.
 		await registry.refreshAvailableModels();
 
-		const privateModel = harness.models.find((model) => model.id === "internal/private-model");
-		expect(privateModel).toBeDefined();
 		await harness.session.setModel(privateModel!);
 
 		expect(registry.getProviderAuthStatus("prime-inference").source).not.toBe("stale");

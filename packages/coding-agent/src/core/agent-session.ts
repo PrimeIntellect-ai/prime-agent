@@ -7126,10 +7126,8 @@ export class AgentSession {
 	}
 
 	async setModel(model: Model<any>, options: ModelSelectOptions = {}): Promise<void> {
-		// Explicit selection is the recovery path from a stale-auth lockout, but
-		// validation runs first under an assumed clear: only a fully validated
-		// switch commits the clear (single owner), so failed selections never
-		// unlock a provider. A structured auth failure later re-marks it.
+		// Explicit selection recovers from a stale-auth lockout, but only a fully
+		// validated switch commits the clear (single owner): failed selections never unlock.
 		const staleOnly =
 			!this._modelRegistry.hasConfiguredAuth(model) &&
 			this._modelRegistry.getProviderAuthStatus(model.provider).source === "stale";

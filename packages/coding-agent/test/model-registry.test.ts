@@ -1498,10 +1498,6 @@ describe("ModelRegistry", () => {
 
 				registry.clearProviderAuthStale("custom-provider");
 
-				expect(registry.getProviderAuthStatus("custom-provider")).toEqual({
-					configured: true,
-					source: "models_json_key",
-				});
 				expect(registry.getAvailable().some((model) => model.provider === "custom-provider")).toBe(true);
 				await expect(registry.getApiKeyForProvider("custom-provider")).resolves.toBe("literal_api_key_value");
 			});

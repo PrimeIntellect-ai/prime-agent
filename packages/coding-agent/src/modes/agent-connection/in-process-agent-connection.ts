@@ -452,9 +452,8 @@ export class InProcessAgentConnection implements AgentConnection {
 		const availableModels = await registry.refreshAvailableModels();
 		const model =
 			availableModels.find((candidate) => candidate.provider === provider && candidate.id === modelId) ??
-			// A stale-auth provider's models are excluded from the available list;
-			// explicit selection may still target them. The lookup never mutates
-			// stale state: session.setModel owns the clear on a successful switch.
+			// Stale-auth providers are excluded from the available list; the lookup
+			// never mutates stale state (session.setModel owns the clear).
 			(registry.getProviderAuthStatus(provider).source === "stale" ? registry.find(provider, modelId) : undefined);
 		if (!model) {
 			throw new Error(`Model not found: ${provider}/${modelId}`);
