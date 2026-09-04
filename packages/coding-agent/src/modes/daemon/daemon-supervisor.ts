@@ -3720,8 +3720,11 @@ export class DaemonSupervisor {
 	): void {
 		const published = worker.transcriptCaches.get(activeSessionId)?.snapshotId === snapshotId;
 		this.failWorkerSnapshotCache(worker, activeSessionId, error, false, snapshotId);
-		if (published && (snapshotPurpose === "replacement" || snapshotPurpose === "catchup")) {
-			this.queueSnapshotResync(activeSessionId, snapshotPurpose);
+		// The resync is driven by the published-cache drop, not the failing frame's
+		// purpose: a published transfer can be serving any attached client's
+		// catch-up wait, whose queue entry drainClientCatchups already cleared.
+		if (published) {
+			this.queueSnapshotResync(activeSessionId, snapshotPurpose === "replacement" ? "replacement" : "catchup");
 		}
 	}
 

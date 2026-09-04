@@ -527,7 +527,9 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		);
 		await failedCatchup;
 
-		expect(request).not.toHaveBeenCalled();
+		// The rejected catch-up waiter is requeued by the published-cache drop and
+		// retries with a fresh worker snapshot request instead of staying stale.
+		expect(request).toHaveBeenCalledWith(expect.objectContaining({ type: "attach", activeSessionId }));
 		expect(streamSnapshot).not.toHaveBeenCalled();
 		expect(worker.snapshotCache.has(activeSessionId)).toBe(false);
 		expect(worker.transcriptCaches.has(activeSessionId)).toBe(false);
