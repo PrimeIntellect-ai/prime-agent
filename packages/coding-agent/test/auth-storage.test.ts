@@ -968,6 +968,26 @@ describe("AuthStorage", () => {
 	});
 
 	describe("persistence semantics", () => {
+		test("a dangling relative symlink under a symlinked directory resolves to the physical target", () => {
+			const realDir = join(tempDir, "real-dir");
+			mkdirSync(realDir, { recursive: true });
+			const aliasDir = join(tempDir, "alias-dir");
+			symlinkSync(realDir, aliasDir);
+			rmSync(authJsonPath, { force: true });
+			// Relative dangling target: must land in real-dir, not beside the alias.
+			symlinkSync("./credentials.json", join(aliasDir, "auth.json"));
+			authStorage = AuthStorage.create(join(aliasDir, "auth.json"));
+
+			authStorage.set("openai", { type: "api_key", key: "physical-key" });
+
+			expect(lstatSync(join(aliasDir, "auth.json")).isSymbolicLink()).toBe(true);
+			const real = JSON.parse(readFileSync(join(realDir, "credentials.json"), "utf-8")) as Record<
+				string,
+				{ key: string }
+			>;
+			expect(real.openai.key).toBe("physical-key");
+		});
+
 		test("a dangling symlinked auth.json gets its target created with the alias intact", () => {
 			const targetPath = join(tempDir, "vault", "auth.json");
 			mkdirSync(join(tempDir, "vault"), { recursive: true });

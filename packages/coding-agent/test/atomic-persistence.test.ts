@@ -257,6 +257,17 @@ describe("tryAcquireDirLock", () => {
 		expect(result).toBe("held");
 		expect(readFileSync(join(lockDir, "pid"), "utf8").trim()).toBe("424242");
 
+		// Pid reuse: a NEW lock with the SAME pid content is a different inode and
+		// must be restored, not judged identical and deleted.
+		const reused = await tryAcquireDirLock(lockDir, () => {
+			rmSync(lockDir, { recursive: true, force: true });
+			mkdirSync(lockDir);
+			writeFileSync(join(lockDir, "pid"), "424242\n");
+			return false;
+		});
+		expect(reused).toBe("held");
+		expect(readFileSync(join(lockDir, "pid"), "utf8").trim()).toBe("424242");
+
 		// Cross-shape swap: a judged FILE lock replaced by a rival's legacy DIR is
 		// reported held and the rival's lock is preserved (restored or left aside),
 		// never deleted.

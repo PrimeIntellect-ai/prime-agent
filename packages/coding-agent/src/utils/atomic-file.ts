@@ -106,7 +106,14 @@ export function realpathIfPresentSync(path: string): string {
 		} catch {
 			return current;
 		}
-		current = resolve(dirname(current), target);
+		// A relative target resolves against the link's PHYSICAL parent directory.
+		let parent = dirname(current);
+		try {
+			parent = realpathSync(parent);
+		} catch {
+			// The parent itself is unresolvable; fall back to the alias parent.
+		}
+		current = resolve(parent, target);
 	}
 	return current;
 }
