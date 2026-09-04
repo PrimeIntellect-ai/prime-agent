@@ -1,0 +1,5 @@
+- Fixed GitHub Copilot Grok and MAI-Code models failing on chat completions by routing them through the Copilot Responses API.
+- Raised the Codex subscription (openai-codex) context window for the GPT-5.6 family from 272k to the full 1,050,000 measured on the API side.
+- Added low/high reasoning effort levels for Kimi K3 on all providers, matching the levels the model supports on OpenRouter and Prime Inference.
+- Fixed thinkingmachines/Inkling-Small advertising a maxTokens above its context window.
+- Catalog regeneration now validates invariants (maxTokens vs context window, Copilot API classification, Codex context divergence, cross-provider thinking-level consistency) and fails instead of writing a violating catalog.

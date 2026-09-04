@@ -4249,7 +4249,7 @@ export const MODELS = {
 			provider: "fireworks",
 			baseUrl: "https://api.fireworks.ai/inference",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -4386,7 +4386,7 @@ export const MODELS = {
 			provider: "fireworks",
 			baseUrl: "https://api.fireworks.ai/inference",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 4.5,
@@ -4801,11 +4801,10 @@ export const MODELS = {
 		"grok-4.5": {
 			id: "grok-4.5",
 			name: "Grok 4.5",
-			api: "openai-completions",
+			api: "openai-responses",
 			provider: "github-copilot",
 			baseUrl: "https://api.individual.githubcopilot.com",
 			headers: {"User-Agent":"GitHubCopilotChat/0.35.0","Editor-Version":"vscode/1.107.0","Editor-Plugin-Version":"copilot-chat/0.35.0","Copilot-Integration-Id":"vscode-chat"},
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false},
 			reasoning: true,
 			input: ["text", "image"],
 			cost: {
@@ -4816,15 +4815,14 @@ export const MODELS = {
 			},
 			contextWindow: 500000,
 			maxTokens: 128000,
-		} satisfies Model<"openai-completions">,
+		} satisfies Model<"openai-responses">,
 		"grok-4.6": {
 			id: "grok-4.6",
 			name: "Grok 4.6",
-			api: "openai-completions",
+			api: "openai-responses",
 			provider: "github-copilot",
 			baseUrl: "https://api.individual.githubcopilot.com",
 			headers: {"User-Agent":"GitHubCopilotChat/0.35.0","Editor-Version":"vscode/1.107.0","Editor-Plugin-Version":"copilot-chat/0.35.0","Copilot-Integration-Id":"vscode-chat"},
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false},
 			reasoning: true,
 			input: ["text", "image"],
 			cost: {
@@ -4835,7 +4833,7 @@ export const MODELS = {
 			},
 			contextWindow: 500000,
 			maxTokens: 128000,
-		} satisfies Model<"openai-completions">,
+		} satisfies Model<"openai-responses">,
 		"kimi-k2.7-code": {
 			id: "kimi-k2.7-code",
 			name: "Kimi K2.7 Code",
@@ -4864,7 +4862,7 @@ export const MODELS = {
 			headers: {"User-Agent":"GitHubCopilotChat/0.35.0","Editor-Version":"vscode/1.107.0","Editor-Plugin-Version":"copilot-chat/0.35.0","Copilot-Integration-Id":"vscode-chat"},
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false},
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -4878,11 +4876,10 @@ export const MODELS = {
 		"mai-code-1-flash-picker": {
 			id: "mai-code-1-flash-picker",
 			name: "MAI-Code-1-Flash",
-			api: "openai-completions",
+			api: "openai-responses",
 			provider: "github-copilot",
 			baseUrl: "https://api.individual.githubcopilot.com",
 			headers: {"User-Agent":"GitHubCopilotChat/0.35.0","Editor-Version":"vscode/1.107.0","Editor-Plugin-Version":"copilot-chat/0.35.0","Copilot-Integration-Id":"vscode-chat"},
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false},
 			reasoning: true,
 			input: ["text"],
 			cost: {
@@ -4893,15 +4890,14 @@ export const MODELS = {
 			},
 			contextWindow: 256000,
 			maxTokens: 128000,
-		} satisfies Model<"openai-completions">,
+		} satisfies Model<"openai-responses">,
 		"mai-code-1.1-flash": {
 			id: "mai-code-1.1-flash",
 			name: "MAI-Code-1.1-Flash",
-			api: "openai-completions",
+			api: "openai-responses",
 			provider: "github-copilot",
 			baseUrl: "https://api.individual.githubcopilot.com",
 			headers: {"User-Agent":"GitHubCopilotChat/0.35.0","Editor-Version":"vscode/1.107.0","Editor-Plugin-Version":"copilot-chat/0.35.0","Copilot-Integration-Id":"vscode-chat"},
-			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false},
 			reasoning: true,
 			input: ["text", "image"],
 			cost: {
@@ -4912,7 +4908,7 @@ export const MODELS = {
 			},
 			contextWindow: 256000,
 			maxTokens: 128000,
-		} satisfies Model<"openai-completions">,
+		} satisfies Model<"openai-responses">,
 	},
 	"google": {
 		"gemini-2.5-flash": {
@@ -6492,7 +6488,7 @@ export const MODELS = {
 			baseUrl: "https://router.huggingface.co/v1",
 			compat: {"supportsDeveloperRole":false},
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -6627,7 +6623,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 524288,
-			maxTokens: 1048576,
+			maxTokens: 524288,
 		} satisfies Model<"openai-completions">,
 		"zai-org/GLM-4.5": {
 			id: "zai-org/GLM-4.5",
@@ -6855,7 +6851,7 @@ export const MODELS = {
 			baseUrl: "https://api.kimi.com/coding",
 			headers: {"User-Agent":"KimiCLI/1.5"},
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 0,
@@ -6874,7 +6870,7 @@ export const MODELS = {
 			baseUrl: "https://api.kimi.com/coding",
 			headers: {"User-Agent":"KimiCLI/1.5"},
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 0,
@@ -7711,7 +7707,7 @@ export const MODELS = {
 			baseUrl: "https://api.moonshot.ai/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -7894,7 +7890,7 @@ export const MODELS = {
 			baseUrl: "https://api.moonshot.cn/v1",
 			compat: {"supportsStore":false,"supportsDeveloperRole":false,"supportsReasoningEffort":false,"maxTokensField":"max_tokens","supportsStrictMode":false},
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -8823,7 +8819,7 @@ export const MODELS = {
 				cacheRead: 0.1,
 				cacheWrite: 1.25,
 			},
-			contextWindow: 272000,
+			contextWindow: 1050000,
 			maxTokens: 128000,
 		} satisfies Model<"openai-codex-responses">,
 		"gpt-5.6-sol": {
@@ -8841,7 +8837,7 @@ export const MODELS = {
 				cacheRead: 0.5,
 				cacheWrite: 6.25,
 			},
-			contextWindow: 272000,
+			contextWindow: 1050000,
 			maxTokens: 128000,
 		} satisfies Model<"openai-codex-responses">,
 		"gpt-5.6-terra": {
@@ -8859,7 +8855,7 @@ export const MODELS = {
 				cacheRead: 0.25,
 				cacheWrite: 3.125,
 			},
-			contextWindow: 272000,
+			contextWindow: 1050000,
 			maxTokens: 128000,
 		} satisfies Model<"openai-codex-responses">,
 	},
@@ -9759,7 +9755,7 @@ export const MODELS = {
 			provider: "opencode",
 			baseUrl: "https://opencode.ai/zen/v1",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -10211,7 +10207,7 @@ export const MODELS = {
 			provider: "opencode-go",
 			baseUrl: "https://opencode.ai/zen/go/v1",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -11262,9 +11258,9 @@ export const MODELS = {
 			thinkingLevelMap: {"minimal":null,"low":null,"medium":null,"high":"high","xhigh":"max","max":null},
 			input: ["text", "image"],
 			cost: {
-				input: 0.44,
-				output: 1.32,
-				cacheRead: 0.014,
+				input: 0.22,
+				output: 0.66,
+				cacheRead: 0.007,
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
@@ -20016,7 +20012,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 3,
@@ -20034,7 +20030,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			thinkingLevelMap: {"off":null,"minimal":null,"low":null,"medium":null,"high":null,"xhigh":null,"max":"max"},
+			thinkingLevelMap: {"off":null,"minimal":null,"low":"low","medium":null,"high":"high","xhigh":null,"max":"max"},
 			input: ["text", "image"],
 			cost: {
 				input: 4.5,
