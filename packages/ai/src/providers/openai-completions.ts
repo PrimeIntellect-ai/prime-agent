@@ -566,7 +566,6 @@ function createClient(
 		baseURL: isCloudflareProvider(model.provider) ? resolveCloudflareBaseUrl(model) : model.baseUrl,
 		dangerouslyAllowBrowser: true,
 		defaultHeaders,
-		// Retries are owned by the session-layer auto-retry loop, never the SDK.
 		maxRetries: 0,
 	});
 }

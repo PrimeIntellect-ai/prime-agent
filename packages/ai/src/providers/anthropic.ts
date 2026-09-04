@@ -858,7 +858,6 @@ function createClient(
 		betaFeatures.push(INTERLEAVED_THINKING_BETA);
 	}
 
-	// All four clients set maxRetries 0: the session-layer auto-retry loop owns retries.
 	if (model.provider === "cloudflare-ai-gateway") {
 		const client = new Anthropic({
 			maxRetries: 0,

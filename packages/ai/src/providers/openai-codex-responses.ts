@@ -193,7 +193,6 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				throw new Error("Request was aborted");
 			}
 
-			// Single attempt: the session-layer auto-retry loop owns retries.
 			let response: Response;
 			try {
 				response = await fetch(resolveCodexUrl(model.baseUrl), {

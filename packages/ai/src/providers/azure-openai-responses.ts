@@ -230,7 +230,6 @@ function createClient(model: Model<"azure-openai-responses">, apiKey: string, op
 		dangerouslyAllowBrowser: true,
 		defaultHeaders: headers,
 		baseURL: baseUrl,
-		// Retries are owned by the session-layer auto-retry loop, never the SDK.
 		maxRetries: 0,
 	});
 }
