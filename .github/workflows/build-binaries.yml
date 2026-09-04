@@ -354,11 +354,32 @@ jobs:
           test -n "$R2_BUCKET"
           test -n "$R2_ENDPOINT_URL"
 
+          archive_count=0
           for artifact in "$PRODUCTION_DIR"/*.tar.gz; do
             test -f "$artifact" || continue
+            archive_count=$((archive_count + 1))
+            test -f "${artifact%.tar.gz}.manifest.json"
+          done
+          manifest_count=0
+          for manifest in "$PRODUCTION_DIR"/*.manifest.json; do
+            test -f "$manifest" || continue
+            manifest_count=$((manifest_count + 1))
+            test -f "${manifest%.manifest.json}.tar.gz"
+          done
+          if [ "$archive_count" -ne 4 ]; then echo "Expected 4 production archives, got ${archive_count}" >&2; exit 1; fi
+          if [ "$manifest_count" -ne 4 ]; then echo "Expected 4 production manifests, got ${manifest_count}" >&2; exit 1; fi
+          if [ "$archive_count" -ne "$manifest_count" ]; then echo "Production archive/manifest count mismatch" >&2; exit 1; fi
+
+          for artifact in "$PRODUCTION_DIR"/*.tar.gz; do
             aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
               --content-type application/gzip \
+              --cache-control 'public, max-age=31536000, immutable'
+          done
+          for manifest in "$PRODUCTION_DIR"/*.manifest.json; do
+            aws s3 cp "$manifest" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$manifest")" \
+              --endpoint-url "$R2_ENDPOINT_URL" \
+              --content-type application/json \
               --cache-control 'public, max-age=31536000, immutable'
           done
 
@@ -421,11 +442,32 @@ jobs:
           test -n "$R2_BUCKET"
           test -n "$R2_ENDPOINT_URL"
 
+          archive_count=0
           for artifact in "$BETA_DIR"/*.tar.gz; do
             test -f "$artifact" || continue
+            archive_count=$((archive_count + 1))
+            test -f "${artifact%.tar.gz}.manifest.json"
+          done
+          manifest_count=0
+          for manifest in "$BETA_DIR"/*.manifest.json; do
+            test -f "$manifest" || continue
+            manifest_count=$((manifest_count + 1))
+            test -f "${manifest%.manifest.json}.tar.gz"
+          done
+          if [ "$archive_count" -eq 0 ]; then echo "No beta archives to upload" >&2; exit 1; fi
+          if [ "$manifest_count" -eq 0 ]; then echo "No beta manifests to upload" >&2; exit 1; fi
+          if [ "$archive_count" -ne "$manifest_count" ]; then echo "Beta archive/manifest count mismatch" >&2; exit 1; fi
+
+          for artifact in "$BETA_DIR"/*.tar.gz; do
             aws s3 cp "$artifact" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$artifact")" \
               --endpoint-url "$R2_ENDPOINT_URL" \
               --content-type application/gzip \
+              --cache-control 'public, max-age=31536000, immutable'
+          done
+          for manifest in "$BETA_DIR"/*.manifest.json; do
+            aws s3 cp "$manifest" "s3://${R2_BUCKET}/${RELEASE_PREFIX}/$(basename "$manifest")" \
+              --endpoint-url "$R2_ENDPOINT_URL" \
+              --content-type application/json \
               --cache-control 'public, max-age=31536000, immutable'
           done
 
