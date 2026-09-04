@@ -1,6 +1,6 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { completeWithProviderRetry } from "../src/core/provider-retry.js";
+import { completeWithProviderRetry, providerRetryDelay } from "../src/core/provider-retry.js";
 
 function providerError(): AssistantMessage {
 	return {
@@ -48,5 +48,13 @@ describe("completeWithProviderRetry", () => {
 
 		expect(attempts).toBe(1);
 		expect(result.stopReason).toBe("error");
+	});
+
+	it("clamps uncapped server delays to Node's max timer instead of overflowing setTimeout", () => {
+		const ninetyDaysMs = 90 * 24 * 3600 * 1000;
+		expect(providerRetryDelay(1, ninetyDaysMs, { baseDelayMs: 2000, maxRetryDelayMs: 0 })).toEqual({
+			kind: "wait",
+			delayMs: 2_147_483_647,
+		});
 	});
 });

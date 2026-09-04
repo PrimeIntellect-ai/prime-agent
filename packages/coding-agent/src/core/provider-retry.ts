@@ -61,6 +61,9 @@ export function isPermanentProviderFailureKind(kind: string | undefined, retries
 
 export type ProviderRetryDelay = { kind: "wait"; delayMs: number } | { kind: "exceeds-cap"; retryAfterMs: number };
 
+/** Node caps timers at 2^31-1 ms; longer delays overflow setTimeout and fire after ~1ms. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 /** Delay before retry `attempt` (1-based), honoring a server-requested wait. */
 export function providerRetryDelay(
 	attempt: number,
@@ -70,7 +73,10 @@ export function providerRetryDelay(
 	if (retryAfterMs !== undefined && policy.maxRetryDelayMs > 0 && retryAfterMs > policy.maxRetryDelayMs) {
 		return { kind: "exceeds-cap", retryAfterMs };
 	}
-	return { kind: "wait", delayMs: Math.max(policy.baseDelayMs * 2 ** (attempt - 1), retryAfterMs ?? 0) };
+	return {
+		kind: "wait",
+		delayMs: Math.min(Math.max(policy.baseDelayMs * 2 ** (attempt - 1), retryAfterMs ?? 0), MAX_TIMER_DELAY_MS),
+	};
 }
 
 /**
