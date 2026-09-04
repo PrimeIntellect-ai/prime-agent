@@ -38,19 +38,22 @@ describe("event log fault injection", () => {
 		rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("reclaims its torn prefix and fails the append on a short write", () => {
+	it("fails the append on a short write, leaving a repairable torn tail", () => {
 		const path = join(dir, "log.jsonl");
 		const log = new EventLog(path);
 		log.appendSync([{ v: 1, id: "committed" }]);
-		const before = readFileSync(path, "utf8");
 		faults.shortWriteOnce = true;
 
-		// Completing the write could interleave with a rival process's append;
-		// failing with a clean file is the only safe terminal state.
+		// Neither completed (could weld into a rival's append) nor reclaimed
+		// (could destroy a rival's committed record): the torn tail is the one
+		// tolerated shape, and the next append repairs it.
 		expect(() => log.appendSync([{ v: 1, id: "short-write" }])).toThrow(/short write/);
-		expect(readFileSync(path, "utf8")).toBe(before);
-		expect(new EventLog(path).replaySync((line) => JSON.parse(line) as { id?: string })).toEqual([
+		const parse = (line: string) => JSON.parse(line) as { id?: string };
+		expect(new EventLog(path).replaySync(parse)).toEqual([{ v: 1, id: "committed" }]);
+		log.appendSync([{ v: 1, id: "next" }]);
+		expect(new EventLog(path).replaySync(parse)).toEqual([
 			{ v: 1, id: "committed" },
+			{ v: 1, id: "next" },
 		]);
 	});
 

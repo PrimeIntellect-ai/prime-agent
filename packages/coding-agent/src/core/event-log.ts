@@ -122,24 +122,17 @@ export class EventLog {
 			leadLines = (options?.onCreate?.() ?? []).map(serializeLine);
 		}
 		const payload = [...leadLines, ...lines].join("");
-		const handle = openSync(this.path, "a+", 0o600);
+		const handle = openSync(this.path, "a", 0o600);
 		try {
 			const buffer = Buffer.from(payload, "utf8");
 			const written = writeSync(handle, buffer);
 			if (written < buffer.length) {
-				// A short O_APPEND write (ENOSPC-class) reported as success would
-				// break write-before-action callers, and completing it with a second
-				// write could interleave with a rival process's append (rlm-ledger is
-				// multi-writer), welding two records. Reclaim the torn prefix while
-				// we still own the tail, then fail: a torn tail is read-tolerated.
-				const size = fstatSync(handle).size;
-				const tail = Buffer.alloc(written);
-				if (
-					readSync(handle, tail, 0, written, size - written) === written &&
-					tail.equals(buffer.subarray(0, written))
-				) {
-					ftruncateSync(handle, size - written);
-				}
+				// A short O_APPEND write (ENOSPC-class) fails the append: reporting
+				// success would break write-before-action callers, completing it with
+				// a second write could weld into a rival process's append, and
+				// reclaiming the prefix could destroy a rival's committed record that
+				// merely ends in the same bytes. The torn tail is the one tolerated
+				// shape: skipped on read, truncated by any writer's next repair.
 				throw new Error(`event log ${this.path}: short write (${written} of ${buffer.length} bytes)`);
 			}
 			if (options?.durable) fsyncSync(handle);
