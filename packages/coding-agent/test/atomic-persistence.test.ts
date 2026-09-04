@@ -1,4 +1,13 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, type writeSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	utimesSync,
+	writeFileSync,
+	type writeSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -77,6 +86,24 @@ describe("writeFileAtomicSync", () => {
 });
 
 describe("tryAcquireDirLock", () => {
+	it("sweeps abandoned candidates on acquire while sparing fresh ones and the lock", async () => {
+		const dir = createTempDir();
+		const lockPath = join(dir, "swept.lock");
+		const abandoned = join(dir, "swept.lock.candidate-1234-dead");
+		const fresh = join(dir, "swept.lock.candidate-5678-mid-publish");
+		writeFileSync(abandoned, "1234\n");
+		const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+		utimesSync(abandoned, twoHoursAgo, twoHoursAgo);
+		writeFileSync(fresh, "5678\n");
+
+		expect(await tryAcquireDirLock(lockPath, () => false)).toBe("acquired");
+
+		const names = readdirSync(dir).sort();
+		expect(names).not.toContain("swept.lock.candidate-1234-dead");
+		expect(names).toContain("swept.lock.candidate-5678-mid-publish");
+		expect(readFileSync(lockPath, "utf8").trim()).toBe(String(process.pid));
+	});
+
 	it("reports held instead of reclaiming when the owner cannot be read", async () => {
 		const dir = createTempDir();
 		const lockDir = join(dir, "opaque.lock");

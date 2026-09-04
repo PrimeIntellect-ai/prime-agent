@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { linkSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { linkSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 
 export type DirLockAttempt = "acquired" | "held" | "reclaimed";
 
@@ -11,10 +11,36 @@ export type DirLockAttempt = "acquired" | "held" | "reclaimed";
  * deletion and linked back if it changed owners after the staleness judgment.
  * A directory at the lock path is a legacy lock from the previous protocol.
  */
+const CANDIDATE_SWEEP_AGE_MS = 60 * 60 * 1000;
+
+// Litter collection for candidates leaked by crashed or cleanup-blocked acquirers;
+// the prefix can never match the lock itself and the age gate spares mid-publish rivals.
+function sweepAbandonedCandidates(lockPath: string): void {
+	try {
+		const directory = dirname(lockPath);
+		const prefix = `${basename(lockPath)}.candidate-`;
+		const cutoff = Date.now() - CANDIDATE_SWEEP_AGE_MS;
+		for (const name of readdirSync(directory)) {
+			if (!name.startsWith(prefix)) continue;
+			try {
+				const abandoned = join(directory, name);
+				if (statSync(abandoned).mtimeMs < cutoff) {
+					rmSync(abandoned, { force: true });
+				}
+			} catch {
+				// Litter collection only: the next acquire retries.
+			}
+		}
+	} catch {
+		// Litter collection only: the next acquire retries.
+	}
+}
+
 export async function tryAcquireDirLock(
 	lockPath: string,
 	ownerAlive: (ownerPid: number | undefined) => Promise<boolean> | boolean,
 ): Promise<DirLockAttempt> {
+	sweepAbandonedCandidates(lockPath);
 	const token = `${process.pid}-${randomUUID()}`;
 	const tempPath = `${lockPath}.candidate-${token}`;
 	writeFileSync(tempPath, `${process.pid}\n`, { mode: 0o600 });
