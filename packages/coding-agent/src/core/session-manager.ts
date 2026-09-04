@@ -583,8 +583,7 @@ async function parseEntriesFromBufferAsync(buffer: Buffer): Promise<FileEntry[]>
 // same physical line, so the file is repaired once at open, not tolerated in memory.
 const REPAIR_SUSPICION_WINDOW_BYTES = 1024 * 1024;
 
-// Crash damage lands at or near the tail, so a bounded tail read decides whether
-// the full (synchronous) repair scan is worth it; clean opens stay O(window).
+// A bounded tail read gates the full repair scan: clean opens stay O(window).
 function tailLooksDamaged(targetPath: string): boolean {
 	let descriptor: number;
 	try {
@@ -657,7 +656,6 @@ function repairJsonlDamage(filePath: string): void {
 				droppedLines++;
 			}
 		} else if (end + 1 >= buffer.length && line.length > 0 && !parsesAsJson(line)) {
-			// A torn tail left newline-terminated by an earlier crash/resume cycle.
 			dirty = true;
 			droppedLines++;
 		} else {
@@ -673,8 +671,7 @@ function repairJsonlDamage(filePath: string): void {
 			...(metadata === undefined ? {} : { mode: metadata.mode }),
 			beforeRename: (tempPath) => {
 				if (metadata !== undefined) chownSync(tempPath, metadata.uid, metadata.gid);
-				// Another writer appending between the snapshot and this rename must win;
-				// skipping the repair is always safe (the next open retries).
+				// A concurrent appender wins; skipping the repair is safe (next open retries).
 				const current = statSync(targetPath);
 				if (current.size !== snapshot.size || current.mtimeMs !== snapshot.mtimeMs) {
 					throw new RepairSupersededError();

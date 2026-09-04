@@ -119,8 +119,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 	private ensureFileExists(): void {
 		let descriptor: number;
 		try {
-			// Exclusive create: a racing initializer must never replace credentials another
-			// process saved between an existence check and this write.
+			// Exclusive create: a racing initializer must never replace saved credentials.
 			descriptor = openSync(this.authPath, "wx", 0o600);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
@@ -130,8 +129,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 		}
 		try {
 			writeSync(descriptor, "{}");
-			// openSync's mode is masked by the umask; enforce the exact bits.
-			fchmodSync(descriptor, 0o600);
+			fchmodSync(descriptor, 0o600); // Exact bits despite the umask.
 		} finally {
 			closeSync(descriptor);
 		}

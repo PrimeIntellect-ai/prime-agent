@@ -150,10 +150,15 @@ describe("auth migration ordering", () => {
 		}
 	});
 
-	it("preserves the settings file's own mode when stripping apiKeys", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-auth-migration-mode-"));
+	function makeAgentDir(): string {
+		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-auth-migration-"));
 		tempDirs.push(agentDir);
 		process.env[ENV_AGENT_DIR] = agentDir;
+		return agentDir;
+	}
+
+	it("preserves the settings file's own mode when stripping apiKeys", () => {
+		const agentDir = makeAgentDir();
 		const settingsPath = join(agentDir, "settings.json");
 		writeFileSync(settingsPath, JSON.stringify({ theme: "dark", apiKeys: { openai: "sk-key" } }));
 		chmodSync(settingsPath, 0o600);
@@ -165,9 +170,7 @@ describe("auth migration ordering", () => {
 	});
 
 	it("strips apiKeys through a symlinked settings.json without replacing the alias", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-auth-migration-symlink-"));
-		tempDirs.push(agentDir);
-		process.env[ENV_AGENT_DIR] = agentDir;
+		const agentDir = makeAgentDir();
 		const realSettings = join(agentDir, "dotfiles-settings.json");
 		const settingsPath = join(agentDir, "settings.json");
 		writeFileSync(realSettings, JSON.stringify({ theme: "dark", apiKeys: { openai: "sk-key" } }));
@@ -181,9 +184,7 @@ describe("auth migration ordering", () => {
 	});
 
 	it("migrates credentials through a dangling auth.json symlink to its target", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-auth-migration-dangling-"));
-		tempDirs.push(agentDir);
-		process.env[ENV_AGENT_DIR] = agentDir;
+		const agentDir = makeAgentDir();
 		writeFileSync(join(agentDir, "oauth.json"), JSON.stringify({ anthropic: { access: "token" } }));
 		const target = join(agentDir, "vault-auth.json");
 		symlinkSync(target, join(agentDir, "auth.json"));
@@ -195,9 +196,7 @@ describe("auth migration ordering", () => {
 	});
 
 	it("keeps every credential source when the auth.json write fails", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-auth-migration-"));
-		tempDirs.push(agentDir);
-		process.env[ENV_AGENT_DIR] = agentDir;
+		const agentDir = makeAgentDir();
 		const oauthPath = join(agentDir, "oauth.json");
 		const settingsPath = join(agentDir, "settings.json");
 		writeFileSync(oauthPath, JSON.stringify({ anthropic: { access: "token" } }));

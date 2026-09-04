@@ -84,9 +84,9 @@ function createTempDir(): string {
 }
 
 describe("writeFileAtomicSync", () => {
-	it("writes the complete payload even when the kernel returns short counts", () => {
+	it("completes short kernel writes and preserves the destination when a write fails", () => {
 		const dir = createTempDir();
-		const path = join(dir, "short.json");
+		const path = join(dir, "state.json");
 		shortWrites.remaining = 3;
 		try {
 			writeFileAtomicSync(path, JSON.stringify({ key: "value".repeat(10) }));
@@ -94,12 +94,6 @@ describe("writeFileAtomicSync", () => {
 			shortWrites.remaining = 0;
 		}
 		expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ key: "value".repeat(10) });
-	});
-
-	it("leaves the destination untouched and no temp file behind when the write fails", () => {
-		const dir = createTempDir();
-		const path = join(dir, "state.json");
-		writeFileSync(path, "previous");
 
 		expect(() =>
 			writeFileAtomicSync(path, "next", {
@@ -108,39 +102,24 @@ describe("writeFileAtomicSync", () => {
 				},
 			}),
 		).toThrow("validation failed");
-
-		expect(readFileSync(path, "utf8")).toBe("previous");
+		expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ key: "value".repeat(10) });
 		expect(readdirSync(dir).filter((name) => name.endsWith(".tmp"))).toEqual([]);
 	});
 });
 
+function seedDirLock(dir: string, name: string, pid: string): string {
+	const lockDir = join(dir, name);
+	mkdirSync(lockDir);
+	writeFileSync(join(lockDir, "pid"), pid);
+	return lockDir;
+}
+
 describe("tryAcquireDirLock", () => {
-	it("restores a rival lock when the lost-reply rename moved a swapped entry", async () => {
-		const dir = createTempDir();
-		const lockPath = join(dir, "swapped-eio.lock");
-		writeFileSync(lockPath, "999999999\n");
-		renamePerformThenThrow.remaining = 1;
-
-		try {
-			const result = await tryAcquireDirLock(lockPath, () => {
-				// A rival replaces the judged-stale lock before the rename fires.
-				rmSync(lockPath, { force: true });
-				writeFileSync(lockPath, "777777\n");
-				return false;
-			});
-			expect(result).toBe("held");
-		} finally {
-			renamePerformThenThrow.remaining = 0;
-		}
-		expect(readFileSync(lockPath, "utf8").trim()).toBe("777777");
-	});
-
-	it("recovers a rename whose success reply was lost and still reclaims cleanly", async () => {
+	it("recovers a lost-reply rename: reclaims a stale lock, restores a swapped rival", async () => {
 		const dir = createTempDir();
 		const lockPath = join(dir, "eio.lock");
 		writeFileSync(lockPath, "999999999\n");
 		renamePerformThenThrow.remaining = 1;
-
 		try {
 			expect(await tryAcquireDirLock(lockPath, () => false)).toBe("reclaimed");
 		} finally {
@@ -148,6 +127,22 @@ describe("tryAcquireDirLock", () => {
 		}
 		expect(readdirSync(dir)).toEqual([]);
 		expect(await tryAcquireDirLock(lockPath, () => false)).toBe("acquired");
+
+		rmSync(lockPath, { force: true });
+		writeFileSync(lockPath, "999999999\n");
+		renamePerformThenThrow.remaining = 1;
+		try {
+			const swapped = await tryAcquireDirLock(lockPath, () => {
+				// A rival replaces the judged-stale lock before the rename fires.
+				rmSync(lockPath, { force: true });
+				writeFileSync(lockPath, "777777\n");
+				return false;
+			});
+			expect(swapped).toBe("held");
+		} finally {
+			renamePerformThenThrow.remaining = 0;
+		}
+		expect(readFileSync(lockPath, "utf8").trim()).toBe("777777");
 	});
 
 	it("parks a moved lock whose shape cannot be probed instead of deleting or clobbering", async () => {
@@ -247,34 +242,26 @@ describe("tryAcquireDirLock", () => {
 		expect(readFileSync(lockPath, "utf8").trim()).toBe("424242");
 	});
 
-	it("treats a garbage pid file as stale instead of trusting its numeric prefix", async () => {
+	// kill(0) probes our own process group; parseInt would trust "123garbage" as 123.
+	it.each([
+		[
+			"0\n",
+			(ownerPid: number | undefined) => (ownerPid === undefined ? false : process.kill(ownerPid, 0) !== undefined),
+		],
+		["123garbage\n", (ownerPid: number | undefined) => ownerPid === 123],
+	])("treats a legacy lock with pid content %j as stale", async (pidContent, alive) => {
 		const dir = createTempDir();
-		const lockDir = join(dir, "garbage.lock");
+		const lockDir = join(dir, "hygiene.lock");
 		mkdirSync(lockDir);
-		writeFileSync(join(lockDir, "pid"), "123garbage\n");
+		writeFileSync(join(lockDir, "pid"), pidContent);
 
-		const alive = (ownerPid: number | undefined) => ownerPid === 123;
-		expect(await tryAcquireDirLock(lockDir, alive)).toBe("reclaimed");
-		expect(await tryAcquireDirLock(lockDir, alive)).toBe("acquired");
-	});
-
-	it("treats pid 0 in a lock as stale instead of probing the caller's own process group", async () => {
-		const dir = createTempDir();
-		const lockDir = join(dir, "zero.lock");
-		mkdirSync(lockDir);
-		writeFileSync(join(lockDir, "pid"), "0\n");
-
-		const alive = (ownerPid: number | undefined) =>
-			ownerPid === undefined ? false : process.kill(ownerPid, 0) !== undefined;
 		expect(await tryAcquireDirLock(lockDir, alive)).toBe("reclaimed");
 		expect(await tryAcquireDirLock(lockDir, alive)).toBe("acquired");
 	});
 
 	it("puts back a lock that changed owners between the staleness judgment and the reclaim", async () => {
 		const dir = createTempDir();
-		const lockDir = join(dir, "raced.lock");
-		mkdirSync(lockDir);
-		writeFileSync(join(lockDir, "pid"), "2147483647\n");
+		const lockDir = seedDirLock(dir, "raced.lock", "2147483647\n");
 
 		const result = await tryAcquireDirLock(lockDir, () => {
 			// The stale owner releases and a rival acquires while this judgment runs.

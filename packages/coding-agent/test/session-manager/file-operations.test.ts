@@ -545,57 +545,49 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("opens a clean large session with one full read: the repair scan stays bounded to the tail", () => {
-		const file = join(tempDir, "large-clean.jsonl");
-		const header = {
-			type: "session",
-			version: 3,
-			id: "large-session",
-			timestamp: "2026-01-01T00:00:00Z",
-			cwd: "/tmp",
-		};
-		const filler = "x".repeat(2048);
-		const lines = [JSON.stringify(header)];
-		for (let index = 0; index < 2000; index++) {
-			lines.push(
+	// The suspicion gate must keep clean opens at ONE full read (the loader's own).
+	it.each([
+		[
+			"a clean large session",
+			(): string[] => {
+				const filler = "x".repeat(2048);
+				const lines: string[] = [];
+				for (let index = 0; index < 2000; index++) {
+					lines.push(
+						JSON.stringify({
+							type: "message",
+							id: `m${index}`,
+							parentId: index === 0 ? null : `m${index - 1}`,
+							message: { role: "user", content: filler, timestamp: index },
+						}),
+					);
+				}
+				return lines;
+			},
+		],
+		[
+			"a benign trailing blank line",
+			(): string[] => [
 				JSON.stringify({
 					type: "message",
-					id: `m${index}`,
-					parentId: index === 0 ? null : `m${index - 1}`,
-					message: { role: "user", content: filler, timestamp: index },
+					id: "m1",
+					parentId: null,
+					message: { role: "user", content: "hi", timestamp: 1 },
 				}),
-			);
-		}
-		writeFileSync(file, `${lines.join("\n")}\n`);
-		fullReadCounter.suffix = "large-clean.jsonl";
-		fullReadCounter.count = 0;
-
-		try {
-			const sm = SessionManager.open(file, tempDir);
-			expect(sm.getEntries().length).toBe(2000);
-			expect(fullReadCounter.count).toBe(1);
-		} finally {
-			fullReadCounter.suffix = undefined;
-		}
-	});
-
-	it("does not full-scan on every open for a benign trailing blank line", () => {
-		const file = join(tempDir, "blank-tail.jsonl");
+				"",
+			],
+		],
+	])("opens %s with exactly one full read", (_name, buildLines) => {
+		const file = join(tempDir, "gate.jsonl");
 		const header = {
 			type: "session",
 			version: 3,
-			id: "blank-session",
+			id: "gate-session",
 			timestamp: "2026-01-01T00:00:00Z",
 			cwd: "/tmp",
 		};
-		const message = {
-			type: "message",
-			id: "m1",
-			parentId: null,
-			message: { role: "user", content: "hi", timestamp: 1 },
-		};
-		writeFileSync(file, `${JSON.stringify(header)}\n${JSON.stringify(message)}\n\n`);
-		fullReadCounter.suffix = "blank-tail.jsonl";
+		writeFileSync(file, `${[JSON.stringify(header), ...buildLines()].join("\n")}\n`);
+		fullReadCounter.suffix = "gate.jsonl";
 		fullReadCounter.count = 0;
 
 		try {

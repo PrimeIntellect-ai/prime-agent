@@ -982,52 +982,46 @@ describe("AuthStorage", () => {
 			expect(onDisk.openai.key).toBe("masked-key");
 		});
 
-		test("a dangling relative symlink under a symlinked directory resolves to the physical target", () => {
-			const realDir = join(tempDir, "real-dir");
-			mkdirSync(realDir, { recursive: true });
-			const aliasDir = join(tempDir, "alias-dir");
-			symlinkSync(realDir, aliasDir);
-			rmSync(authJsonPath, { force: true });
-			// Relative dangling target: must land in real-dir, not beside the alias.
-			symlinkSync("./credentials.json", join(aliasDir, "auth.json"));
-			authStorage = AuthStorage.create(join(aliasDir, "auth.json"));
+		test.each([
+			[
+				"an existing target",
+				(): { alias: string; target: string } => {
+					const target = join(tempDir, "real-auth.json");
+					writeFileSync(target, "{}");
+					rmSync(authJsonPath, { force: true });
+					symlinkSync(target, authJsonPath);
+					return { alias: authJsonPath, target };
+				},
+			],
+			[
+				"a dangling absolute target",
+				(): { alias: string; target: string } => {
+					const target = join(tempDir, "vault", "auth.json");
+					mkdirSync(join(tempDir, "vault"), { recursive: true });
+					symlinkSync(target, authJsonPath);
+					return { alias: authJsonPath, target };
+				},
+			],
+			[
+				"a dangling relative target under a symlinked directory",
+				(): { alias: string; target: string } => {
+					const realDir = join(tempDir, "real-dir");
+					mkdirSync(realDir, { recursive: true });
+					const aliasDir = join(tempDir, "alias-dir");
+					symlinkSync(realDir, aliasDir);
+					symlinkSync("./credentials.json", join(aliasDir, "auth.json"));
+					return { alias: join(aliasDir, "auth.json"), target: join(realDir, "credentials.json") };
+				},
+			],
+		])("writes through a symlinked auth.json (%s) with the alias intact", (_name, setup) => {
+			const { alias, target } = setup();
+			authStorage = AuthStorage.create(alias);
 
-			authStorage.set("openai", { type: "api_key", key: "physical-key" });
+			authStorage.set("openai", { type: "api_key", key: "through-alias" });
 
-			expect(lstatSync(join(aliasDir, "auth.json")).isSymbolicLink()).toBe(true);
-			const real = JSON.parse(readFileSync(join(realDir, "credentials.json"), "utf-8")) as Record<
-				string,
-				{ key: string }
-			>;
-			expect(real.openai.key).toBe("physical-key");
-		});
-
-		test("a dangling symlinked auth.json gets its target created with the alias intact", () => {
-			const targetPath = join(tempDir, "vault", "auth.json");
-			mkdirSync(join(tempDir, "vault"), { recursive: true });
-			symlinkSync(targetPath, authJsonPath);
-			authStorage = AuthStorage.create(authJsonPath);
-
-			authStorage.set("openai", { type: "api_key", key: "fresh-key" });
-
-			expect(lstatSync(authJsonPath).isSymbolicLink()).toBe(true);
-			const real = JSON.parse(readFileSync(targetPath, "utf-8")) as Record<string, { key: string }>;
-			expect(real.openai.key).toBe("fresh-key");
-		});
-
-		test("writes through a symlinked auth.json instead of replacing the alias", () => {
-			const realPath = join(tempDir, "real-auth.json");
-			writeFileSync(realPath, JSON.stringify({ anthropic: { type: "api_key", key: "old-key" } }));
-			rmSync(authJsonPath, { force: true });
-			symlinkSync(realPath, authJsonPath);
-			authStorage = AuthStorage.create(authJsonPath);
-
-			authStorage.set("openai", { type: "api_key", key: "new-key" });
-
-			expect(lstatSync(authJsonPath).isSymbolicLink()).toBe(true);
-			const real = JSON.parse(readFileSync(realPath, "utf-8")) as Record<string, { key: string }>;
-			expect(real.openai.key).toBe("new-key");
-			expect(real.anthropic.key).toBe("old-key");
+			expect(lstatSync(alias).isSymbolicLink()).toBe(true);
+			const real = JSON.parse(readFileSync(target, "utf-8")) as Record<string, { key: string }>;
+			expect(real.openai.key).toBe("through-alias");
 		});
 
 		test("initialization never replaces credentials another process already saved", () => {

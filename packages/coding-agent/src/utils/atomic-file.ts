@@ -96,8 +96,7 @@ export function realpathIfPresentSync(path: string): string {
 			throw error;
 		}
 	}
-	// ENOENT covers both a missing file and a DANGLING symlink chain; in-place
-	// writes followed the latter to its (absent) target, so the replace must too.
+	// ENOENT also means a DANGLING symlink chain: follow it like in-place writes did.
 	let current = path;
 	for (let hop = 0; hop < 32; hop++) {
 		let target: string;
@@ -111,7 +110,7 @@ export function realpathIfPresentSync(path: string): string {
 		try {
 			parent = realpathSync(parent);
 		} catch {
-			// The parent itself is unresolvable; fall back to the alias parent.
+			// Fall back to the alias parent.
 		}
 		current = resolve(parent, target);
 	}

@@ -87,8 +87,7 @@ export function migrateAuthToAuthJson(): string[] {
 			fsyncDir: true,
 		});
 	}
-	// Source cleanup stays best-effort: with auth.json durable, a leftover source is
-	// inert (the migration skips when auth.json exists).
+	// Source cleanup is best-effort: with auth.json durable, leftovers are inert.
 	try {
 		if (oauthReadable) {
 			renameSync(oauthPath, `${oauthPath}.migrated`);

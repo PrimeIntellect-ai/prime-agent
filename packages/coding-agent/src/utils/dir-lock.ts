@@ -16,16 +16,13 @@ import { basename, dirname, join } from "node:path";
 export type DirLockAttempt = "acquired" | "held" | "reclaimed";
 
 /**
- * link(2)-published lock file: the owner pid is written to a private temp file
- * and published with a hard link, so the lock is born with its content and
- * EEXIST is the only collision signal. A stale lock is renamed aside before
- * deletion and linked back if it changed owners after the staleness judgment.
- * A directory at the lock path is a legacy lock from the previous protocol.
+ * link(2)-published lock file: born with its owner content, EEXIST the only
+ * collision signal; stale locks are renamed aside, verified, then deleted or
+ * restored. A directory at the lock path is a legacy lock from the old protocol.
  */
 const CANDIDATE_SWEEP_AGE_MS = 60 * 60 * 1000;
 
-// Litter collection for candidates leaked by crashed or cleanup-blocked acquirers;
-// the prefix can never match the lock itself and the age gate spares mid-publish rivals.
+// The candidate prefix can never match the lock; the age gate spares mid-publish rivals.
 function sweepAbandonedCandidates(lockPath: string): void {
 	try {
 		const directory = dirname(lockPath);
@@ -68,15 +65,13 @@ async function acquireAttempt(
 			linkSync(tempPath, lockPath);
 			return "acquired";
 		} catch (error) {
-			// NFS can report failure for a link that landed: a second name for the
-			// temp inode means the publish succeeded.
+			// NFS can report failure for a link that landed: nlink 2 means it published.
 			let candidateSwept = false;
 			let recheckedNlink: number | undefined;
 			try {
 				recheckedNlink = statSync(tempPath).nlink;
 			} catch (statError) {
-				// Only a definite ENOENT means a rival's sweep claimed the candidate;
-				// a transient probe failure must not invent that answer.
+				// Only a definite ENOENT means the candidate was swept.
 				if ((statError as NodeJS.ErrnoException).code !== "ENOENT") {
 					throw error;
 				}
@@ -92,8 +87,7 @@ async function acquireAttempt(
 				throw error;
 			}
 		}
-		// One immutable identity capture keys every later decision: the judged lock
-		// IS this dev+ino, whatever else happens to the path meanwhile.
+		// One immutable dev+ino capture keys every later decision about the judged lock.
 		let captured: { dev: bigint; ino: bigint; isDir: boolean };
 		try {
 			const measured = statSync(lockPath, { bigint: true });
@@ -109,8 +103,7 @@ async function acquireAttempt(
 			// Some Windows filesystems report no stable file index: identity unavailable.
 			return "held";
 		}
-		// Pin the judged inode: an open descriptor keeps its number from being
-		// recycled into a rival's fresh lock (Linux reuses inodes immediately).
+		// An open descriptor pins the inode number against Linux's immediate reuse.
 		let pinned: number | undefined;
 		try {
 			try {
@@ -121,8 +114,7 @@ async function acquireAttempt(
 					return "held";
 				}
 			} catch {
-				// Unpinnable (Windows directories): stat identity applies without the
-				// recycling guarantee.
+				// Unpinnable (Windows directories): stat identity without the reuse guarantee.
 			}
 			return await judgeAndReclaim(lockPath, ownerAlive, captured, token);
 		} finally {
@@ -160,9 +152,7 @@ async function judgeAndReclaim(
 			if ((reclaimError as NodeJS.ErrnoException).code === "ENOENT") {
 				return "reclaimed";
 			}
-			// Ambiguous failure (NFS can lose the reply of a completed rename): if the
-			// lock path is gone, SOMETHING moved aside - fall through to the verify,
-			// which reclaims on an inode match and restores on a mismatch.
+			// A lost-reply rename: if the lock path is gone, something moved - fall to verify.
 			if (statIdentity(lockPath) !== undefined) {
 				throw reclaimError;
 			}
@@ -172,10 +162,8 @@ async function judgeAndReclaim(
 			rmSync(asidePath, { recursive: true, force: true });
 			return "reclaimed";
 		}
-		// The moved entry is not the judged lock: restore it, never delete. A known
-		// directory renames back (a directory rename cannot clobber); everything
-		// else - files AND unreadable shapes - links back, because only link can
-		// never replace a rival's freshly published lock. Any failure leaves it aside.
+		// Not the judged lock: restore, never delete. Known dirs rename back; everything
+		// else links back (link can never replace a rival). Any failure leaves it aside.
 		try {
 			if (aside?.isDir === true) {
 				renameSync(asidePath, lockPath);
@@ -184,7 +172,7 @@ async function judgeAndReclaim(
 				rmSync(asidePath, { force: true });
 			}
 		} catch {
-			// The displaced entry stays aside rather than risk deleting a live lock.
+			// Preserved aside.
 		}
 		return "held";
 	}
@@ -208,8 +196,7 @@ function readOwnerRaw(path: string, legacyDir: boolean): string | "absent" | "un
 	}
 }
 
-// kill(0)/kill(-n) probe the caller's own process group, and parseInt would
-// accept "123garbage" - only an exact positive integer names an owner.
+// kill(0)/kill(-n) probe our own process group: only an exact positive integer owns.
 function strictPid(raw: string | undefined): number | undefined {
 	const trimmed = raw?.trim();
 	if (trimmed === undefined || !/^\d+$/.test(trimmed)) {

@@ -297,8 +297,7 @@ class HarnessState:
             },
             "refinements": [asdict(event) for event in self.refinements],
         }
-        # Atomic replace on the real file: a symlinked state path keeps its alias,
-        # and a concurrent reader must never observe a truncated file.
+        # Atomic replace on the real file: aliases survive, readers never see a torn file.
         target_path = Path(os.path.realpath(self.file_path))
         temp_path = target_path.with_name(f"{target_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
         try:
