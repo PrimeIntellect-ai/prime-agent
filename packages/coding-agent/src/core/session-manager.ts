@@ -947,6 +947,9 @@ interface SessionScanAccumulator {
 interface SessionScanState {
 	fileSize: number;
 	mtimeMs: number;
+	/** Identity of the scanned file: a rename rewrite replaces the inode and invalidates the resume state. */
+	dev: number;
+	ino: number;
 	/** Bytes consumed as complete newline-terminated lines; the resume point for the next scan. */
 	offset: number;
 	/** Last bytes of the consumed prefix; a resume only proceeds while the file still starts with them. */
@@ -957,21 +960,46 @@ interface SessionScanState {
 
 const SESSION_SCAN_RESUME_TAIL_BYTES = 16;
 const NEWLINE_BUFFER = Buffer.from("\n");
+// Bounds the resumable-state heap: an evicted file just pays one full rescan.
+const SESSION_SCAN_STATE_MAX_FILES = 1024;
 
 // Session files are append-only between whole-file rewrites, so a scan resumes
 // from the previous scan's byte offset instead of re-reading from byte 0. A
-// rewrite is detected by size shrink, same-size mtime change, or a consumed
-// prefix that no longer ends with the recorded tail bytes.
+// rewrite is detected by size shrink, same-size mtime change, a replaced
+// inode, or a consumed prefix that no longer ends with the recorded tail
+// bytes. In-place interior edits that keep the inode, grow the file, and
+// preserve those tail bytes are outside the writer model (appendFileSync plus
+// rename-based whole-file rewrites) and stay invisible until the next rewrite.
 const sessionScanStates = new Map<string, SessionScanState>();
-// Concurrent readers of the same path share one scan instead of stampeding.
-const sessionScanInFlight = new Map<string, Promise<SessionInfo | null>>();
+// Scans of the same path run strictly one at a time. A later caller never
+// joins an earlier scan's result: it chains its own pass, whose stat sees
+// every append that preceded the call, and unchanged files settle in the
+// cached-hit path with a single stat.
+const sessionScanQueue = new Map<string, Promise<SessionInfo | null>>();
 
 export function readSessionInfo(filePath: string): Promise<SessionInfo | null> {
-	const pending = sessionScanInFlight.get(filePath);
-	if (pending) return pending;
-	const scan = scanSessionInfo(filePath).finally(() => sessionScanInFlight.delete(filePath));
-	sessionScanInFlight.set(filePath, scan);
+	const previous = sessionScanQueue.get(filePath);
+	const scan = previous
+		? previous.then(
+				() => scanSessionInfo(filePath),
+				() => scanSessionInfo(filePath),
+			)
+		: scanSessionInfo(filePath);
+	sessionScanQueue.set(filePath, scan);
+	void scan.finally(() => {
+		if (sessionScanQueue.get(filePath) === scan) sessionScanQueue.delete(filePath);
+	});
 	return scan;
+}
+
+/** Refresh LRU recency and enforce the resumable-state bound. */
+function storeSessionScanState(filePath: string, state: SessionScanState): void {
+	sessionScanStates.delete(filePath);
+	sessionScanStates.set(filePath, state);
+	for (const key of sessionScanStates.keys()) {
+		if (sessionScanStates.size <= SESSION_SCAN_STATE_MAX_FILES) break;
+		sessionScanStates.delete(key);
+	}
 }
 
 function createSessionScanAccumulator(): SessionScanAccumulator {
@@ -1016,21 +1044,24 @@ async function scanSessionInfo(filePath: string): Promise<SessionInfo | null> {
 		return null;
 	}
 	const previous = sessionScanStates.get(filePath);
-	if (previous && previous.fileSize === stats.size && previous.mtimeMs === stats.mtimeMs) {
+	const sameFile = previous !== undefined && previous.dev === stats.dev && previous.ino === stats.ino;
+	if (sameFile && previous.fileSize === stats.size && previous.mtimeMs === stats.mtimeMs) {
+		storeSessionScanState(filePath, previous);
 		return previous.info;
 	}
-	const resume = previous !== undefined && stats.size > previous.fileSize && scannedPrefixIntact(filePath, previous);
-	const state: SessionScanState =
-		resume && previous !== undefined
-			? previous
-			: {
-					fileSize: 0,
-					mtimeMs: 0,
-					offset: 0,
-					tail: Buffer.alloc(0),
-					acc: createSessionScanAccumulator(),
-					info: null,
-				};
+	const resume = sameFile && stats.size > previous.fileSize && scannedPrefixIntact(filePath, previous);
+	const state: SessionScanState = resume
+		? previous
+		: {
+				fileSize: 0,
+				mtimeMs: 0,
+				dev: stats.dev,
+				ino: stats.ino,
+				offset: 0,
+				tail: Buffer.alloc(0),
+				acc: createSessionScanAccumulator(),
+				info: null,
+			};
 	try {
 		const tornTail = await scanSessionLines(filePath, state, stats.size);
 		state.info = snapshotSessionInfo(state.acc, tornTail, filePath, stats);
@@ -1040,7 +1071,7 @@ async function scanSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	}
 	state.fileSize = stats.size;
 	state.mtimeMs = stats.mtimeMs;
-	sessionScanStates.set(filePath, state);
+	storeSessionScanState(filePath, state);
 	return state.info;
 }
 
@@ -1211,6 +1242,9 @@ async function listSessionsFromDir(
 ): Promise<SessionInfo[]> {
 	const sessions: SessionInfo[] = [];
 	if (!existsSync(dir)) {
+		for (const key of sessionScanStates.keys()) {
+			if (dirname(key) === dir) sessionScanStates.delete(key);
+		}
 		return sessions;
 	}
 
