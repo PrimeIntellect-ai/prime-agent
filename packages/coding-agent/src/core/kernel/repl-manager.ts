@@ -232,25 +232,28 @@ export class ReplKernelManager {
 	}
 
 	/**
-	 * Rotation at open plus the per-spawn write budget cap per-session disk at
-	 * roughly 2x MAX_KERNEL_STDERR_LOG_BYTES (current file + `.old`).
+	 * The write budget is the file's remaining capacity, not a fresh allowance,
+	 * so current file and `.old` each stay near MAX_KERNEL_STDERR_LOG_BYTES and
+	 * per-session disk near 2x — even when rotation fails and the file is kept.
 	 */
-	private openStderrLogFd(): number | undefined {
+	private openStderrLog(): { fd: number; budget: number } | undefined {
 		const path = this.options.stderrLogPath;
 		if (!path) return undefined;
 		try {
 			mkdirSync(dirname(path), { recursive: true });
-			if (existsSync(path) && statSync(path).size > MAX_KERNEL_STDERR_LOG_BYTES) {
+			let size = existsSync(path) ? statSync(path).size : 0;
+			if (size > MAX_KERNEL_STDERR_LOG_BYTES) {
 				try {
 					// Drop any prior .old first: rename fails on Windows if it exists.
 					rmSync(`${path}.old`, { force: true });
 					renameSync(path, `${path}.old`);
+					size = 0;
 				} catch (error) {
 					// A failed rotation must not cost the log: keep appending instead.
 					this.appendKernelDiagnostic(`cannot rotate kernel stderr log: ${errorMessage(error)}`);
 				}
 			}
-			return openSync(path, "a");
+			return { fd: openSync(path, "a"), budget: Math.max(0, MAX_KERNEL_STDERR_LOG_BYTES - size) };
 		} catch (error) {
 			this.appendKernelDiagnostic(`cannot open kernel stderr log: ${errorMessage(error)}`);
 			return undefined;
@@ -385,19 +388,19 @@ export class ReplKernelManager {
 		// _setup_fds), so this pipe only ever carries pre-ready bytes; the write
 		// budget caps what lands on disk, and once it is spent the handler keeps
 		// draining but discards (a blocked pipe would wedge a pre-ready kernel).
-		const stderrLogFd = this.openStderrLogFd();
+		const stderrLog = this.openStderrLog();
 		const stderrDecoder = new StringDecoder("utf8");
-		let stderrLogBudget = MAX_KERNEL_STDERR_LOG_BYTES;
-		let stderrLogWritable = stderrLogFd !== undefined;
+		let stderrLogBudget = stderrLog?.budget ?? 0;
+		let stderrLogWritable = stderrLog !== undefined;
 		child.stderr?.on("data", (buf: Buffer) => {
 			this.appendKernelStderrText(stderrDecoder.write(buf));
-			if (!stderrLogWritable || stderrLogFd === undefined) return;
+			if (!stderrLogWritable || stderrLog === undefined) return;
 			try {
 				if (buf.length <= stderrLogBudget) {
-					writeFullySync(stderrLogFd, buf);
+					writeFullySync(stderrLog.fd, buf);
 					stderrLogBudget -= buf.length;
 				} else {
-					writeFullySync(stderrLogFd, Buffer.from(KERNEL_STDERR_LOG_BUDGET_MARKER));
+					writeFullySync(stderrLog.fd, Buffer.from(KERNEL_STDERR_LOG_BUDGET_MARKER));
 					stderrLogWritable = false;
 				}
 			} catch (error) {
@@ -413,9 +416,9 @@ export class ReplKernelManager {
 		child.stderr?.once("end", () => this.appendKernelStderrText(stderrDecoder.end()));
 		child.stderr?.once("close", () => {
 			this.appendKernelStderrText(stderrDecoder.end());
-			if (stderrLogFd === undefined) return;
+			if (stderrLog === undefined) return;
 			try {
-				closeSync(stderrLogFd);
+				closeSync(stderrLog.fd);
 			} catch (error) {
 				this.appendKernelDiagnostic(`kernel stderr log close failed: ${errorMessage(error)}`);
 			}
@@ -1261,8 +1264,13 @@ export class ReplKernelManager {
 		if (child) {
 			child.stdin?.destroy();
 			child.stdout?.destroy();
-			// stderr is not destroyed here: the exit-drain in wireChild owns it, so
-			// the kernel's buffered last words still reach the tail and the log.
+			// An exited child keeps its stderr: the post-exit drain owns it, and
+			// destroying here would drop its buffered last words. A still-alive
+			// child may ignore the kill signal and never emit 'exit', so that
+			// drain would never run — destroy now to bound the pipe's lifetime.
+			if (child.exitCode === null && child.signalCode === null) {
+				child.stderr?.destroy();
+			}
 			const pid = child.pid;
 			let signaled = false;
 			try {

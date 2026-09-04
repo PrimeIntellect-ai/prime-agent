@@ -194,22 +194,47 @@ describe("ReplKernelManager startup", () => {
 		}
 	});
 
-	it("keeps logging to the oversized file when rotation fails", async () => {
+	it("stops writing at capacity when the oversized file cannot rotate", async () => {
 		const python = join(tempDir, "python");
 		writeExecutable(python, ["#!/bin/sh", 'echo "fresh incarnation" >&2', "exit 42", ""].join("\n"));
 		const stderrLogPath = join(tempDir, "kernel-stderr.log");
-		writeFileSync(stderrLogPath, Buffer.alloc(5 * 1024 * 1024 + 1, "x"));
+		const previous = Buffer.alloc(5 * 1024 * 1024 + 1, "x");
+		writeFileSync(stderrLogPath, previous);
 		// A directory at the .old path makes the rotation's rm/rename throw.
 		mkdirSync(`${stderrLogPath}.old`);
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const manager = new ReplKernelManager({ python, cwd: tempDir, stderrLogPath });
 
 		try {
+			// The tail still carries the stderr; the file, already over capacity,
+			// gains only the marker — not another per-spawn budget.
 			await expect(manager.execute("print(1)")).rejects.toThrow(
 				/cannot rotate kernel stderr log[\s\S]*fresh incarnation/,
 			);
 			await manager.shutdown({ snapshot: true, drainHostRequests: true });
-			expect(readFileSync(stderrLogPath, "utf8").endsWith("fresh incarnation\n")).toBe(true);
+			const marker = "[stderr log budget exhausted]\n";
+			expect(statSync(stderrLogPath).size).toBe(previous.length + marker.length);
+			expect(readFileSync(stderrLogPath, "utf8").endsWith(marker)).toBe(true);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("grants only the file's remaining capacity as the write budget", async () => {
+		const python = join(tempDir, "python");
+		writeExecutable(python, ["#!/bin/sh", 'echo "fresh incarnation" >&2', "exit 42", ""].join("\n"));
+		const stderrLogPath = join(tempDir, "kernel-stderr.log");
+		// Exactly at capacity: not oversized, so no rotation — and no room left.
+		writeFileSync(stderrLogPath, Buffer.alloc(5 * 1024 * 1024, "x"));
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const manager = new ReplKernelManager({ python, cwd: tempDir, stderrLogPath });
+
+		try {
+			await expect(manager.execute("print(1)")).rejects.toThrow(/Kernel exited before ready/);
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+			const marker = "[stderr log budget exhausted]\n";
+			expect(statSync(stderrLogPath).size).toBe(5 * 1024 * 1024 + marker.length);
+			expect(readFileSync(stderrLogPath, "utf8").endsWith(marker)).toBe(true);
 		} finally {
 			errorSpy.mockRestore();
 		}

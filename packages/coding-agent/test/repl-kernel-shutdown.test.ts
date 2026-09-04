@@ -277,6 +277,23 @@ describe("ReplKernelManager graceful shutdown", () => {
 		expect(start).not.toHaveBeenCalled();
 	});
 
+	it("kill() destroys stderr only while the child has not exited", async () => {
+		// Alive child: it may ignore the signal and never emit 'exit', so the
+		// post-exit drain would never bound the pipe — teardown must.
+		const alive = configuredManager(() => {});
+		const aliveChild = alive.internals.child;
+		await alive.manager.kill();
+		expect(aliveChild.stderr?.destroy).toHaveBeenCalledTimes(1);
+
+		// Exited child: the post-exit drain owns the stream; destroying it in
+		// teardown would drop the kernel's buffered last words.
+		const exited = configuredManager(() => {});
+		const exitedChild = exited.internals.child;
+		exitedChild.exitCode = 42;
+		await exited.manager.kill();
+		expect(exitedChild.stderr?.destroy).not.toHaveBeenCalled();
+	});
+
 	it("waits for the matching shutdown done and removes its waiter", async () => {
 		const { manager, internals } = configuredManager(async (request, state) => {
 			expect(request.type).toBe("shutdown");
