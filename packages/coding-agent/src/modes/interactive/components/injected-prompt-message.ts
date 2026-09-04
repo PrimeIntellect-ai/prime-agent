@@ -127,7 +127,7 @@ export class InjectedPromptMessageComponent extends Container {
 		}
 		if (this.message.customType === IPYTHON_STATE_RESTORED_CUSTOM_TYPE) {
 			const details = this.message.details as IpythonStateRestoredDetails | undefined;
-			const label = details?.restored === false ? "Started fresh IPython kernel" : "Restored IPython kernel state";
+			const label = details?.restored === false ? "Started fresh Python kernel" : "Restored Python kernel state";
 			return `${theme.fg("accent", "◆")} ${theme.fg("muted", label)}`;
 		}
 		if (

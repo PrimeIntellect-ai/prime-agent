@@ -20,6 +20,20 @@ export function serializeDaemonError(error: unknown): DaemonErrorInfo | undefine
 	return undefined;
 }
 
+export class DaemonSessionCreateError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "DaemonSessionCreateError";
+	}
+}
+
+/** Wraps untyped create failures so the CLI prints one line instead of rethrowing. */
+export function deserializeDaemonCreateError(response: Extract<DaemonResponse, { success: false }>): Error {
+	const error = deserializeDaemonError(response);
+	if (response.errorInfo) return error;
+	return new DaemonSessionCreateError(error.message);
+}
+
 export function deserializeDaemonError(response: Extract<DaemonResponse, { success: false }>): Error {
 	const { errorInfo } = response;
 	if (errorInfo?.code === "missing_session_cwd") {

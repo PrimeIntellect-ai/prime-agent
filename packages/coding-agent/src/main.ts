@@ -74,10 +74,11 @@ import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
-import { deserializeDaemonError } from "./modes/daemon/daemon-errors.js";
+import { DaemonSessionCreateError, deserializeDaemonCreateError } from "./modes/daemon/daemon-errors.js";
 import { collectDaemonClientEnv, collectDaemonLaunchEnv } from "./modes/daemon/daemon-protocol.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
+	daemonWorkerInstanceId,
 	isDaemonWorkerProcess,
 	requireDaemonWorkerAuthenticationToken,
 	waitForDaemonWorkerStartupGate,
@@ -302,20 +303,17 @@ export function shouldEnsureDaemonBeforeActiveSessionLookup(options: DaemonActiv
 	);
 }
 
-type ActiveDaemonSessionSummaryLookup = (socketPath: string, selector: string) => Promise<SessionSummary | undefined>;
-
 interface ActiveDaemonSessionSummaryLookupOptions {
 	fallbackOnError?: boolean;
-	lookup?: ActiveDaemonSessionSummaryLookup;
 }
 
-export async function findActiveDaemonSessionSummaryForInteractiveStartup(
+async function findActiveDaemonSessionSummaryForInteractiveStartup(
 	socketPath: string,
 	selector: string,
 	options: ActiveDaemonSessionSummaryLookupOptions = {},
 ): Promise<SessionSummary | undefined> {
 	try {
-		return await (options.lookup ?? findActiveDaemonSessionSummary)(socketPath, selector);
+		return await findActiveDaemonSessionSummary(socketPath, selector);
 	} catch (error) {
 		if (options.fallbackOnError === false) {
 			throw error;
@@ -721,7 +719,64 @@ export function resolveRuntimeSessionOptions(
 		rlmSessionDir: runtimeSessionOptions?.rlmSessionDir,
 		rlmParentNodeId: runtimeSessionOptions?.rlmParentNodeId,
 		rlmParentAgent: runtimeSessionOptions?.rlmParentAgent,
+		semanticParentSessionId: runtimeSessionOptions?.semanticParentSessionId,
+		semanticSpawnedByRequestId: runtimeSessionOptions?.semanticSpawnedByRequestId,
 		subagentRuntimeHost: runtimeSessionOptions?.subagentRuntimeHost,
+	};
+}
+
+/** The production runtime factory: every daemon-hosted and runtime-hosted session is created through this path. */
+export function createDefaultRuntimeFactory(
+	runtimeDefaultSessionConfig: AgentSessionRuntimeConfig,
+	extensionFactories?: ExtensionFactory[],
+): CreateAgentSessionRuntimeFactory {
+	return async ({
+		cwd,
+		agentDir,
+		sessionManager,
+		sessionStartEvent,
+		sessionConfig,
+		sessionOptions: runtimeSessionOptions,
+	}) => {
+		const config = mergeAgentSessionRuntimeConfig(runtimeDefaultSessionConfig, sessionConfig);
+		const prepared = await prepareRuntimeServices({
+			config,
+			cwd,
+			agentDir,
+			sessionManager,
+			extensionFactories,
+			sessionOptionsOverride: runtimeSessionOptions,
+		});
+		const { services, sessionOptions, diagnostics } = prepared;
+		const resolvedSessionOptions = resolveRuntimeSessionOptions(sessionOptions, runtimeSessionOptions);
+
+		const created = await createAgentSessionFromServices({
+			services,
+			sessionManager,
+			sessionStartEvent,
+			...resolvedSessionOptions,
+			// Main agents boot their kernel in the background at session creation;
+			// subagent sessions (rlmDepth > 0) keep the lazy first-call start.
+			prewarmIpythonKernel: true,
+			// Read serializedRefine from the merged runtime config (passed
+			// from the JSON/print client through AgentSessionRuntimeConfig)
+			// so it survives the daemon worker's appMode="daemon" context.
+			serializedRefine: config.serializedRefine ?? false,
+			executionMode: config.executionMode,
+			telemetryDisabled: config.telemetryDisabled,
+			// Only seed initial goal for top-level sessions (rlmDepth 0).
+			initialGoal: (runtimeSessionOptions?.rlmDepth ?? 0) === 0 ? config.initialGoal : undefined,
+		});
+		const cliThinkingOverride = config.thinking !== undefined || prepared.cliThinkingFromModel;
+		if (created.session.model && cliThinkingOverride) {
+			created.session.setThinkingLevel(created.session.thinkingLevel);
+		}
+
+		return {
+			...created,
+			services,
+			diagnostics,
+		};
 	};
 }
 
@@ -1009,7 +1064,7 @@ async function createDaemonClientConnection(options: {
 			launchEnv: collectDaemonLaunchEnv(),
 		});
 		if (!response.success) {
-			throw deserializeDaemonError(response);
+			throw deserializeDaemonCreateError(response);
 		}
 		if (!isDaemonSessionSummary(response.data)) {
 			throw new Error("Daemon returned an invalid create response");
@@ -1271,54 +1326,7 @@ export async function main(args: string[], options?: MainOptions) {
 	// daemon fallback must not seed that goal into unrelated future sessions.
 	const daemonDefaultSessionConfig = daemonServerDefaultSessionConfig(defaultSessionConfig);
 	const runtimeDefaultSessionConfig = appMode === "daemon" ? daemonDefaultSessionConfig : defaultSessionConfig;
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
-		cwd,
-		agentDir,
-		sessionManager,
-		sessionStartEvent,
-		sessionConfig,
-		sessionOptions: runtimeSessionOptions,
-	}) => {
-		const config = mergeAgentSessionRuntimeConfig(runtimeDefaultSessionConfig, sessionConfig);
-		const prepared = await prepareRuntimeServices({
-			config,
-			cwd,
-			agentDir,
-			sessionManager,
-			extensionFactories: options?.extensionFactories,
-			sessionOptionsOverride: runtimeSessionOptions,
-		});
-		const { services, sessionOptions, diagnostics } = prepared;
-		const resolvedSessionOptions = resolveRuntimeSessionOptions(sessionOptions, runtimeSessionOptions);
-
-		const created = await createAgentSessionFromServices({
-			services,
-			sessionManager,
-			sessionStartEvent,
-			...resolvedSessionOptions,
-			// Main agents boot their kernel in the background at session creation;
-			// subagent sessions (rlmDepth > 0) keep the lazy first-call start.
-			prewarmIpythonKernel: true,
-			// Read serializedRefine from the merged runtime config (passed
-			// from the JSON/print client through AgentSessionRuntimeConfig)
-			// so it survives the daemon worker's appMode="daemon" context.
-			serializedRefine: config.serializedRefine ?? false,
-			executionMode: config.executionMode,
-			telemetryDisabled: config.telemetryDisabled,
-			// Only seed initial goal for top-level sessions (rlmDepth 0).
-			initialGoal: (runtimeSessionOptions?.rlmDepth ?? 0) === 0 ? config.initialGoal : undefined,
-		});
-		const cliThinkingOverride = config.thinking !== undefined || prepared.cliThinkingFromModel;
-		if (created.session.model && cliThinkingOverride) {
-			created.session.setThinkingLevel(created.session.thinkingLevel);
-		}
-
-		return {
-			...created,
-			services,
-			diagnostics,
-		};
-	};
+	const createRuntime = createDefaultRuntimeFactory(runtimeDefaultSessionConfig, options?.extensionFactories);
 	time("createRuntime");
 	// Daemon mode never uses the bootstrap runtime, so skip the heavy
 	// createAgentSessionRuntime below and start listening immediately; sessions
@@ -1333,6 +1341,7 @@ export async function main(args: string[], options?: MainOptions) {
 				createRuntime,
 				worker: {
 					authenticationToken: requireDaemonWorkerAuthenticationToken(),
+					workerInstanceId: daemonWorkerInstanceId(),
 					restoreActiveSessionId: process.env[DAEMON_WORKER_ACTIVE_SESSION_ID_ENV],
 				},
 			});
@@ -1455,17 +1464,27 @@ export async function main(args: string[], options?: MainOptions) {
 		// no DeferredAgentConnection is needed to avoid creating it up front.
 		const isFreshDefaultSession =
 			!activeDaemonSessionSummary && !getInteractiveDaemonSessionPath(parsed, sessionManager);
-		const { connection, summary } = await createDaemonClientConnection({
-			socketPath: daemonSocketPath,
-			config: defaultSessionConfig,
-			activeSessionId: activeDaemonSessionSummary
-				? getDaemonSummaryActiveSessionId(activeDaemonSessionSummary)
-				: undefined,
-			sessionPath: getInteractiveDaemonSessionPath(parsed, sessionManager),
-			clientOwned: parsed.noSession,
-			noSession: parsed.noSession,
-			supportsExtensionUi: true,
-		});
+		let connection: DaemonAgentConnection;
+		let summary: SessionSummary;
+		try {
+			({ connection, summary } = await createDaemonClientConnection({
+				socketPath: daemonSocketPath,
+				config: defaultSessionConfig,
+				activeSessionId: activeDaemonSessionSummary
+					? getDaemonSummaryActiveSessionId(activeDaemonSessionSummary)
+					: undefined,
+				sessionPath: getInteractiveDaemonSessionPath(parsed, sessionManager),
+				clientOwned: parsed.noSession,
+				noSession: parsed.noSession,
+				supportsExtensionUi: true,
+			}));
+		} catch (error) {
+			if (error instanceof DaemonSessionCreateError) {
+				console.error(chalk.red(`Error: ${error.message}`));
+				process.exit(1);
+			}
+			throw error;
+		}
 		const agentConnection: AgentConnection = connection;
 		const attachModelFallbackMessage = isFreshDefaultSession
 			? startupModel.modelFallbackMessage
@@ -1547,7 +1566,7 @@ export async function main(args: string[], options?: MainOptions) {
 				supportsExtensionUi: appMode === "rpc",
 			}));
 		} catch (error) {
-			if (error instanceof SessionAlreadyActiveError) {
+			if (error instanceof SessionAlreadyActiveError || error instanceof DaemonSessionCreateError) {
 				console.error(chalk.red(`Error: ${error.message}`));
 				process.exit(1);
 			}

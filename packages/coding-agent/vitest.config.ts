@@ -12,6 +12,7 @@ export default defineConfig({
 		globals: true,
 		environment: "node",
 		testTimeout: 30000,
+		env: { DO_NOT_TRACK: "1" },
 		tags: [
 			{
 				name: "process-stress",
@@ -19,7 +20,7 @@ export default defineConfig({
 			},
 			{
 				name: "kernel-heavy",
-				description: "Boots a real IPython kernel and syncs skills into the shared venv",
+				description: "Boots a real Python kernel and syncs skills into the shared venv",
 			},
 		],
 		// Kernel-heavy tests are excluded from the default sharded run: several files

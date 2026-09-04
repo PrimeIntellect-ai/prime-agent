@@ -519,4 +519,88 @@ describe("AgentSession bash and persistence characterization", () => {
 		releaseExec?.();
 		await first;
 	});
+
+	it("keeps an earlier bash abortable after a concurrent later bash finishes", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const abortableOperations: BashOperations = {
+			exec: async (_command, _cwd, options) =>
+				await new Promise<{ exitCode: number | null }>((_resolve, reject) => {
+					options.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				}),
+		};
+		let releaseSecond: (() => void) | undefined;
+		const secondOperations: BashOperations = {
+			exec: async () => {
+				await new Promise<void>((resolve) => {
+					releaseSecond = resolve;
+				});
+				return { exitCode: 0 };
+			},
+		};
+
+		const first = harness.session.executeBash("first", undefined, { operations: abortableOperations });
+		const second = harness.session.executeBash("second", undefined, { operations: secondOperations });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		releaseSecond?.();
+		const secondResult = await second;
+		expect(secondResult.cancelled).toBe(false);
+
+		// The earlier command stays running and abortable on its own controller.
+		expect(harness.session.isBashRunning).toBe(true);
+		harness.session.abortBash();
+		const firstResult = await first;
+		expect(firstResult.cancelled).toBe(true);
+		expect(harness.session.isBashRunning).toBe(false);
+	});
+
+	it("cancels a pending user bash when abortBash arrives while another bash is in flight", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const operations: BashOperations = {
+			exec: async (_command, _cwd, options) =>
+				await new Promise<{ exitCode: number | null }>((_resolve, reject) => {
+					options.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				}),
+		};
+
+		// The user bash claims its slot first, then a concurrent wait-style
+		// command (unguarded executeBash path) occupies the controller set while
+		// the user bash is still in extension dispatch.
+		const run = harness.session.runUserBash("echo should-not-run");
+		const waitBash = harness.session.executeBash("wait", undefined, { operations });
+		harness.session.abortBash();
+		await run;
+		expect((await waitBash).cancelled).toBe(true);
+
+		const userBashMessage = harness.session.messages
+			.slice()
+			.reverse()
+			.find((message) => message.role === "bashExecution" && message.command === "echo should-not-run");
+		expect(userBashMessage?.role).toBe("bashExecution");
+		if (userBashMessage?.role === "bashExecution") {
+			expect(userBashMessage.cancelled).toBe(true);
+			expect(userBashMessage.output).toBe("");
+		}
+	});
+
+	it("aborts every in-flight bash command with abortBash", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const makeAbortableOperations = (): BashOperations => ({
+			exec: async (_command, _cwd, options) =>
+				await new Promise<{ exitCode: number | null }>((_resolve, reject) => {
+					options.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				}),
+		});
+
+		const first = harness.session.executeBash("first", undefined, { operations: makeAbortableOperations() });
+		const second = harness.session.executeBash("second", undefined, { operations: makeAbortableOperations() });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		harness.session.abortBash();
+		expect((await first).cancelled).toBe(true);
+		expect((await second).cancelled).toBe(true);
+	});
 });

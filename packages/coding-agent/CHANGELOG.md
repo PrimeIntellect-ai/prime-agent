@@ -1,5 +1,141 @@
 # Changelog
 
+## [0.9.1] - 2026-09-01
+
+- Fixed a v0.9.0 regression: the agents view's Inactive section was empty on a fresh view until a search was typed. The saved-session catalog now loads (progressively) when the view opens; it was previously deferred to search because the roster's boot seed carried the saved corpus, which the seed scoping removed.
+
+## [0.9.0] - 2026-09-01
+
+- Fixed background (unattributed) kernel output missing from the expanded IPython cell view: it is now surfaced in the tool details and rendered under a "background output (unattributed)" label after stdout/stderr/result.
+- Fixed a protocol interrupt during a REPL state restore leaving a mixed old/new namespace: names are now staged first and applied atomically with SIGINT parked across the apply, and an interrupt landing anywhere between a committed snapshot or restore and its request finishing is recovered instead of misreporting the completed operation as failed.
+- Fixed the REPL snapshot writer leaving a new payload beside a truncated manifest on mid-write failures: payload and manifest now commit via unique same-directory temp files and atomic renames with guaranteed cleanup, and an interrupt during cleanup can no longer misreport a completed destructive snapshot as failed.
+- Fixed the REPL runtime `list_names` request crashing the serve loop when the namespace held a non-string key; non-string keys are now skipped and every runtime request fails individually through the shared backstop instead of killing the loop.
+- Addressed REPL host-swap review findings: reworded stale IPython-specific busy/restart messages for the default kernel and stopped `restart()` from resurrecting a concurrently killed REPL kernel.
+- Fixed graceful REPL kernel `shutdown()` losing teardown ownership to its own child's exit handler, which made `restart()` misread the shutdown as superseded and never start the kernel again.
+- Fixed REPL kernel `start()` waiting out the full 30s ready timeout when the kernel process fails to spawn; the spawn error now rejects startup immediately.
+- Fixed a cell that rebound or ignored SIGINT (or a restored prior handler) permanently breaking protocol interrupts: the REPL runtime now re-asserts its SIGINT handler between cells.
+- Fixed the Python REPL runtime surviving its owning process's death while a non-yielding cell runs: an owner-watchdog thread now hard-exits the runtime (killing live bash children first) when the owner process dies.
+- Fixed an interrupt parked during a snapshot's prune window misreporting the completed destructive snapshot as failed; it is now consumed once the manifest is committed, and an interrupt landing just after a completed snapshot/restore request is consumed too instead of failing its done.
+- Fixed a REPL runtime interrupt gap where an interrupt landing during a cell's trailing-expression repr or output drain was dropped; the request now stays interruptible until its done event is emitted, so a slow user __repr__ can be cancelled.
+- Fixed two REPL runtime request-lifecycle bugs: a cell closing sys.stdout/sys.stderr no longer kills the serve loop (done still arrives and later cells run), and an untargeted interrupt parked for a request that fails to compile is consumed with that request instead of spuriously cancelling the next cell.
+- Fixed the REPL runtime leaking a finished cell's id onto late background-thread output: the current cell is now cleared right after the post-cell drain, so `done` stays the last event with that id and between-cell output carries a null id.
+- Fixed bash() cells failing under strict-POSIX shells (dash) when the status pipe landed on a multi-digit fd.
+- Fixed rlm.run outside a live kernel hanging forever instead of failing fast, which stalled CI shard 3 until timeout.
+- Fixed two bash() spawn races: status-channel fds no longer leak when pipe creation fails mid-setup, and a status-socket gate keeps the command from starting until its pid is journaled (a kernel kill in that window now stops the child instead of orphaning it past the reaper).
+- Fixed a compile-phase crash (e.g. RecursionError from a pathologically deep attribute chain) killing the REPL runtime instead of failing the one cell: any per-request failure now becomes error+done and the serve loop keeps running; rebinding sys.stdout/sys.stderr to flush-less objects no longer kills it either.
+- Fixed the REPL runtime hanging before done when a cell closes fd 1/2 and a later open() reclaims the number: drain sync tokens now go through a private dup of the capture pipe, with a pump-liveness backstop so a dead pump can no longer wedge the serve loop.
+- Fixed the Windows orphan reaper killing only the journaled bash() shell pid; it now uses taskkill /T so descendants die with the tree, matching the in-kernel bash() kill paths, and resolves taskkill via an absolute System32 path (with NoDefaultCurrentDirectoryInExePath) so a planted CWD taskkill.exe cannot hijack cleanup.
+- Fixed a snapshot request with identical `path` and `manifest_path` silently clobbering the just-written state payload; the runtime now rejects it as a failed request.
+- Fixed a snapshot request with a negative `max_bytes`/`max_variable_bytes` and `prune_oversized` writing an empty payload and then deleting every user variable; size caps must now be non-negative integers.
+- Fixed an interrupt landing mid-snapshot leaving prune deletions half-applied: once the snapshot manifest is committed, SIGINT is deferred until every oversized name is removed, so the namespace always matches the on-disk snapshot.
+- Hardened bash(): cancelling `await bash(cmd)` now kills the command's process group (background handles are unaffected), Windows helper binaries resolve via absolute System32 paths, kill() retries taskkill for already-reaped Windows trees, and orphan-journal enrollment fails closed when configured.
+- Fixed cross-cell output misattribution in the REPL runtime: stream events are attributed at write time via context, and raw fd or user-thread output is emitted with a null id instead of being credited to whichever cell is running.
+- REPL kernel: output from user threads, other cells' leftovers, and raw fd writes is no longer merged into the running cell's stdout; it is surfaced separately as unattributed background output.
+- Hardened bash() further: the host now injects an absolute default shell into the kernel (no PATH lookup; /bin/bash else /bin/sh on POSIX), macOS start-id lookup uses /bin/ps, and Windows worker-teardown orphan kills go through hardened taskkill /T.
+- Hardened Windows bash execution: the kernel shell is resolved only from trusted absolute paths (never PATH), and bash children are contained by kill-on-close job objects so a crashed kernel cannot leak process trees (taskkill remains only as a fallback when job creation fails).
+- Hardened Windows bash() containment: children are now created directly inside the kill-on-close job (PROC_THREAD_ATTRIBUTE_JOB_LIST at CreateProcessW time), so no window exists in which a kernel kill can leak a suspended, never-run process; handle inheritance is restricted to exactly the child's stdio handles (PROC_THREAD_ATTRIBUTE_HANDLE_LIST), so concurrent spawns cannot leak each other's handles; the journal start-id query still runs only while the job-contained child is suspended, and bash() still raises instead of falling back to jobless taskkill when containment fails.
+- Fixed a Windows bash() PID-reuse hazard: the child process handle is now retained through job cleanup and every taskkill-by-pid fallback (watch reap, kill(), cancel escalation, shutdown cleanup) and closed exactly once only after the handle is marked reaped, so a recycled pid can never be killed by the fallback.
+- Added an async-by-default `bash()` callable to the kernel runtime: it returns a live handle immediately (pid/tail/poll/kill/await), bounds in-memory output, and enrolls children in the orphan-process journal so kernel teardown reaps them.
+- Fixed bash() orphan-journal writes marking a child inactive even when the kill signal was not delivered; the record now stays active on delivery failure so the host reaper still owns the process (on Windows a shell that already exited counts as delivered, so clean exits still retire their record).
+- Changed the kernel to run on a minimal CPython REPL runtime speaking JSON lines over stdio.
+- Changed the kernel to a minimal Python REPL: `%%bash` cells, `%cd`, `%env`, and `!` escapes were replaced by `bash('cmd')` and `os.chdir(...)`/`os.environ[...]` (magic-style cells fail with a plain Python `SyntaxError`); startup is faster and memory use is lower.
+- Removed the Jupyter/ipykernel kernel client; existing kernel venvs are rebuilt once (slimmer, no ipykernel) on next start.
+- Fixed supervised session renames failing after the supervisor approved an available name.
+- Made session path detection consistent across direct and daemon commands.
+- Removed internal test-only configuration cache reset hooks.
+- Fixed new-chat hints to use the session message count.
+- Kept available model lists in sync with the current catalog and configured providers.
+- Removed unused host-request capability helpers and the `kernelManagerRef` option from `IpythonToolOptions`.
+- Fixed `bash()` to capture all foreground command output before finalizing results by using an ordered per-command completion marker; output written after the marker (e.g. by `EXIT` traps or background jobs) is not in the awaited result but stays visible via `handle.output()`/`tail()`.
+- Agent messages now use core session admission to choose immediate or queued delivery.
+- Made cross-worker agent lists current without broadcasting duplicate peer rosters.
+- Namespaced kernel host handler results so handler fields cannot overwrite host reply protocol metadata.
+- Fixed graceful Python kernel disposal so timed-out final snapshots are cancelled before teardown.
+- Fixed invalid kernel protocol frames hanging requests by rejecting the affected request and replacing the kernel from its latest state snapshot.
+- Fixed kernel teardown so session cleanup and signal handling share one bounded graceful shutdown path.
+- Fixed remote agent messages being delivered twice when the daemon request timed out or the response was lost: the message is now sent exactly once per call, and post-send failures surface as errors instead of triggering a resend.
+- Simplified model resolution and feature hint shuffling internals.
+- Fixed saved-session resume when its resident worker is still recovering after a daemon restart.
+- Fixed queued-message editing so duplicate prompts always target the selected queue entry.
+- Fixed reattached sessions omitting queued child agents or showing the wrong child activity.
+- Fixed passive RLM child metadata recovery from legacy registries without a session directory.
+- Stopped treating `NODE_ENV=test` as an implicit telemetry opt-out.
+- Removed delayed cancellation callbacks from empty interactive selectors.
+- Kept heartbeat lists current when session or subagent scope changes.
+- Removed the delay before continuing sessions after compaction.
+- Wait for RLM session activity changes without zero-delay polling.
+- Fixed concurrent `execute_bash_and_wait` commands sharing one bash abort controller: each `executeBash` invocation now gets its own controller, so a finishing command no longer clears a still-running command's abort state and `abortBash` cancels every in-flight command.
+- Removed the test-only daemon active-session lookup override.
+- Made daemon shutdown wait for Bash completion without polling.
+- Fixed a race where a concurrent open of a session already being opened by another client bypassed the session ownership check instead of failing with session-already-active.
+- Accept contributions from sirouk as a vouched external contributor.
+- Render Mermaid code blocks in assistant messages as inline Unicode diagrams, with a "Mermaid diagrams" setting (off/final/streaming, default streaming).
+- Tell the model explicitly to run shell commands through `bash()` instead of `subprocess`/`os.system`.
+- Fixed `prime-agent list` pinning an abandoned empty session at "working" forever; an empty session with nothing in flight now reports "idle".
+- Evict an empty, unnamed session's worker as soon as its last client disconnects, instead of parking it for the idle sweep; the on-disk draft session is preserved.
+- Fixed daemon session create when the worker process cannot be spawned (e.g. EMFILE from fd exhaustion): the create now fails with the real spawn error plus a resident-worker/ulimit hint, and the CLI prints a one-line error instead of crashing with a TypeError stack dump.
+- Fixed the agents view hiding running subagents whose worker is starting or recovering; the worker state now shows as the row's status label.
+- Made spawned subagent sessions visible from creation, before their first message lands.
+- Renamed the subagent summary bar label from "agents" to "subagents" and unified the status formula behind both surfaces.
+- Made the daemon supervisor own an event-driven agent roster: workers push roster deltas on session events and `list` is served from the supervisor's ledger with zero worker round-trips. Rows are as fresh as the owning worker's last delta; a silent worker's rows are annotated (recovering, last-heard-from) rather than dropped, and the surfaces that display those annotations ship in the follow-up PR.
+- Tracked admitted subagent runs in the supervisor roster from the moment they are queued (they appear in `list` once their session exists), and kept passivated or evicted agents listed as inactive rows instead of disappearing (client-owned workers stay private: their rows are dropped when the worker goes away).
+- Tracked worker liveness in the supervisor roster: a dead worker's rows are flagged "recovering" the moment its socket closes, and rows of silent workers carry a last-heard-from time. These fields are supervisor-internal here; the roster surfaces that display them ship in the follow-up PR.
+- Replaced the agents view's 1-second polling with a subscription to the daemon's agent roster: the supervisor pushes coalesced roster updates, scope transitions reuse one shared connection and store without refetching, and rows render the ledger's statuses and lifecycle labels (queued, recovering, failed, last-heard-from staleness). Removed the poll path: the agents view now requires the daemon's agent_roster capability and fails fast against a daemon lacking it (unreachable in practice, since launch replaces daemons on any schema mismatch); the chat subagents bar degrades to snapshot-driven counts.
+- Loaded the saved-session catalog only when a search query needs deep message text, once per view, instead of on every navigation.
+- Fixed a reconnect deadlock where a daemon socket close during recovery or post-update restore parked the reconnect loop's own attach, snapshot, and list requests behind a hello that the stuck loop could never produce ([#1905](https://github.com/PrimeIntellect-ai/prime-agent/issues/1905)).
+- Collapsed ipython cells that call the bash skill with a literal command now preview as `bash · <command>` instead of the python wrapper.
+- Added a direct session transport: the TUI now talks to its session's worker over a supervisor-issued single-use ticket, falls back to supervisor routing on any direct-path failure, and keeps the session streaming while a lost supervisor socket reconnects in the background.
+- Workers bind their identity to a fresh per-process instance id, enforced only when the authenticating supervisor presents one, so a downgraded supervisor can still adopt live workers.
+- Fixed daemon startup and recovery to preserve slow live processes and fail closed after socket lock loss.
+- Recovery never signals a live worker process it cannot verify as its own: a persistently failing live worker parks as failed with its process left running (reclaimed automatically by the next fresh create once its identity is verified or it exits). The one deliberate exception is replacing an authenticated pre-roster worker during adoption. A live worker that stays silent through ten probe rounds (~2.5 minutes) also parks as failed instead of probing forever.
+- Reduced kernel memory spikes during namespace snapshots: the payload now pickles straight into the staged file instead of building serialized copies in memory (peak snapshot overhead ~3.9x payload -> ~1x; ENG-5819).
+- Fixed empty draft sessions lingering as zombie rows after the last viewer quit: a direct-transport client's detach or socket drop now triggers the same last-detach eviction as supervisor-routed clients.
+- Stopped re-emitting `rlm_child_update` events whose child snapshot did not change; identical per-token progress updates no longer reach attached clients.
+- Fixed `/update` keeping the old TUI process alive until the relaunched TUI quit by replacing the process in place on POSIX platforms running Node 26.1 and newer; Windows and IBM i keep the previous child relaunch.
+- Fixed sent agent messages under Python cells not showing the expand/collapse keybinding hint that received agent messages show.
+- Scoped the roster's restart seed to registered workers' families: the saved-session corpus stays owned by the disk catalog, so a supervisor restart no longer publishes thousands of inactive rows (and one header read per row) to every roster subscriber. `prime list --all` output is unchanged: subagent rows of families without a registered worker are now served on demand from the spawn ledger.
+- Session disposal no longer blocks on the final trace upload (uploads finish detached; daemon exit, update restarts, and worker archive-and-shutdown drain them through a single barrier), and deleting an RLM subagent no longer writes a kernel snapshot that the deletion sweep removes right away.
+
+## [0.8.1] - 2026-08-26
+
+- Fixed syntax highlighting in the expanded python tool-call view: triple-quoted strings spanning multiple lines now keep their string color instead of only the first line.
+- Changed the default RLM maximum recursion depth for new sessions from 1 to 2.
+- Changed ACP prompt requests to resolve only after all causally admitted subagent and parent work has settled.
+- Changed the Cloudflare AI Gateway default model to claude-sonnet-4.5 after the catalog dropped the gateway's workers-ai mirror ids.
+- Fixed ACP assistant chunks to identify message boundaries across autonomous turns.
+
+## [0.8.0] - 2026-08-21
+
+- Fixed an OAuth login that finishes after its server was retargeted arming the old-endpoint token against the new URL: credentials are endpoint-bound at issuance, and the host and kernel only use a token bound to the configured endpoint. **Breaking**: generic MCP OAuth credentials stored before this release lack the binding and require one `/mcp login <server>`.
+- Fixed `mcp add` keeping a stored `mcp:<name>` credential when the entry was new: any add now drops the name's credential, so tokens for authored non-catalog skills (e.g. slack) cannot replay to a user-configured URL.
+- Fixed kernel MCP shutdown budgets exceeding the host's kill deadline; graceful close now finishes inside it, and a kernel that exits without a `shutdown_reply` no longer stalls shutdown for the full deadline.
+- Fixed a shutdown race that could leave an MCP server process running after its generation was dropped from the registry.
+- Fixed the kernel MCP regression test and the Python runtime tests not running in CI.
+- Fixed first IPython calls after an upgrade failing with a raw "Operation was not possible or timed out": kernel startup now tolerates cold venv boots (30s budget; crashes still fail fast via the exit handler), and zmq socket-teardown rejections surface as actionable retriable kernel errors.
+- Fixed headless completion reporting a clean finish when a post-compaction continuation failed to start: ACP and print-mode idle waiters now see the failure, while interactive idle behavior is unchanged.
+- Added a pre-imported generic MCP API and shell/TUI commands to manage persistent Streamable HTTP and stdio servers in user settings.
+- **Breaking**: removed the documented catalog-name override — an `mcpServers` entry named after a built-in integration (e.g. `linear`) no longer repoints the built-in at a custom `url`/`bearerTokenEnvVar`; it now disables the built-in skill and is not served by the generic runtime. Rename the entry (e.g. `linear-proxy`) to keep using a custom endpoint via the generic API. This closes a credential-replay surface where name-keyed tokens could be sent to an override URL.
+- Fixed agents overlooking enabled generic MCP connections by advertising their names and pre-imported `mcp` API usage in the system prompt.
+- Fixed `/mcp` management feedback disappearing during resource reload and limited server details in TUI output to names and transports.
+- Fixed credentials configured as env var names resolving to the literal variable name when the variable is set but empty; an empty env var now reports a missing credential ([#1468](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1468)).
+- Fixed ACP rejecting an immediate follow-up prompt when injected work restarted the session; follow-ups now queue behind in-flight work, and cancellation drops queued follow-ups before they start.
+- Added correlated ACP terminal-quiescence metadata, resident session settlement, and fail-closed daemon input fencing; prevented recovery state from persisting runtime credentials or model configuration.
+- Fixed explicit RLM child deletion leaving hidden unsettled work after runtime teardown, including reporting cleanup failures and notifying the parent when deletion completes.
+- Added changelog fragments (`packages/<pkg>/.changes/*.md`) with a CI check and release-time aggregation, eliminating `[Unreleased]` merge conflicts.
+- Fixed the queued-message browse controls (Option+Up) rendering in the same style as typed prompt text inside the input box; the header is now dimmed like other hints so it cannot be mistaken for part of the prompt.
+- Fixed IPython kernels and forkserver processes outliving their owner after a hard crash: kernels now arm ipykernel's parent-death poller via JPY_PARENT_PID, the forkserver watches its parent pid, and both pids are registered in the orphan process journal for supervisor recovery.
+- Fixed a pid-reuse race for forked IPython kernels: signaling and liveness now go through the forkserver (the kernels' parent) instead of raw pid operations from Node, and the orphan journal's inactive record is only written on a confirmed kill outcome.
+- Added session-scoped ACP MCP servers through the kernel MCP program API ([#1378](https://github.com/PrimeIntellect-ai/prime-agent/pull/1378) by [@hallerite](https://github.com/hallerite)).
+- Changed the subagents summary under the prompt into a bordered `agents` tile with color-coded running/idle/inactive counts and a right-aligned open hint.
+- Enabled `/fast` with OpenAI API-key authentication for GPT-5.4/GPT-5.5/GPT-5.6 and updated the unavailable message ([#1595](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1595)).
+- Fixed `/goal` re-prompting a parent that had correctly delegated to subagents and ended its turn: the continuation now waits until descendant work settles, then resumes automatically.
+- Changed post-compaction continuation error classification to typed `AgentContinueError` codes instead of matching error message text.
+- Fixed the working-status elapsed timer (e.g. "Waiting · 5s") restarting at 0s after leaving and re-entering a session or re-attaching to it; the timer is now anchored to the in-flight turn's user message and keeps counting.
+- Added a `session_before_refine` extension hook: extensions can replace `/refine` and auto-refine planning with their own proposal (for example using a cheaper model — see `examples/extensions/custom-refinement.ts`) or skip a refinement round; rollbacks bypass the hook and extension edits go through the normal apply-time validation. Also documents `refine_complete`.
+- Added a durable `[refinement]` transcript message after each refinement showing the applied harness edits (expandable to exact before/after diffs via the shared tool-output toggle), and a live loader while a user-issued /refine runs.
+- Fixed the Agents View heartbeat refresh failing entirely ("Cannot list heartbeats while session worker is failed") when any resident worker was terminally failed: failed workers are now excluded from the global catalog while recovering and disconnected workers still fail closed.
+- Refreshed MCP providers immediately after server changes so OAuth connections can be started without restarting Prime Agent.
+
 ## [0.7.4] - 2026-08-19
 
 - Fixed model searches ranking stronger matches ahead of weaker signed-in matches while preferring signed-in providers for equivalent results ([#539](https://github.com/PrimeIntellect-ai/prime-agent/pull/539) by [@eliebak](https://github.com/eliebak)).

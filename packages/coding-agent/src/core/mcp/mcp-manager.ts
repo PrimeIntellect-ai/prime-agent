@@ -10,6 +10,7 @@ import {
 import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import type { AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
+import type { AcpMcpServerConfig } from "./acp-mcp-types.js";
 
 export interface McpManagerOptions {
 	authStorage: AuthStorage;
@@ -36,6 +37,8 @@ export class McpManager {
 	private readonly getUserServers: () => Record<string, McpServerConfig> | undefined;
 	private readonly beginLogin?: (server: string) => Promise<void>;
 	private integrations = new Map<string, ResolvedIntegration>();
+	private acpServers = new Map<string, AcpMcpServerConfig>();
+	private acpOwnerId?: string;
 	/** Provider ids we registered for user servers, so refresh can drop removed ones. */
 	private registeredUserProviderIds = new Set<string>();
 
@@ -51,6 +54,33 @@ export class McpManager {
 	refresh(): void {
 		this.resolveIntegrations();
 		this.registerProviders();
+	}
+
+	canReleaseAcpServers(ownerId: string): boolean {
+		return this.acpOwnerId === undefined || this.acpOwnerId === ownerId;
+	}
+
+	replaceAcpServers(servers: readonly AcpMcpServerConfig[], ownerId: string): boolean {
+		if (!ownerId) throw new Error("ACP MCP owner id is required");
+		if (servers.length === 0 && this.acpOwnerId !== ownerId) return false;
+		if (servers.length > 0 && this.acpOwnerId && this.acpOwnerId !== ownerId) {
+			throw new Error("ACP MCP configuration is owned by another client");
+		}
+
+		const next = new Map<string, AcpMcpServerConfig>();
+		for (const server of servers) {
+			if (next.has(server.name)) throw new Error(`Duplicate ACP MCP server: ${server.name}`);
+			next.set(server.name, server);
+		}
+		const unchanged =
+			next.size === this.acpServers.size &&
+			Array.from(next).every(
+				([name, config]) => JSON.stringify(this.acpServers.get(name)) === JSON.stringify(config),
+			);
+		if (unchanged) return false;
+		this.acpServers = next;
+		this.acpOwnerId = next.size > 0 ? ownerId : undefined;
+		return true;
 	}
 
 	private providerId(server: string): string {
@@ -151,6 +181,7 @@ export class McpManager {
 			"mcp.refresh": async (payload) => {
 				const server = String(payload.server ?? "");
 				if (!server) throw new Error("mcp.refresh requires a server");
+				if (this.acpServers.has(server)) throw new Error(`ACP MCP server ${server} does not use host OAuth`);
 				// getApiKey refreshes + rewrites auth.json under lock; Python re-reads.
 				// Surface failure (throw) instead of a false success so the kernel can
 				// report a refresh error rather than a misleading "not enabled".
@@ -163,6 +194,11 @@ export class McpManager {
 			"mcp.config": async (payload) => {
 				const server = String(payload.server ?? "");
 				if (!server) throw new Error("mcp.config requires a server");
+				const acpServer = this.acpServers.get(server);
+				if (acpServer) {
+					const { name: _name, ...config } = acpServer;
+					return { ...config, credentialSource: "acp" };
+				}
 				const integration = this.integrations.get(server);
 				if (!integration?.userDeclared || getCatalogEntry(server)) return {};
 				return { ...integration.config };
@@ -182,8 +218,13 @@ export class McpManager {
 		return handlers;
 	}
 
-	/** Enabled user servers available through the generic kernel API. */
-	getEnabledGenericServers(): string[] {
+	/** Session-scoped servers supplied by the active ACP client. */
+	getAcpServers(): AcpMcpServerConfig[] {
+		return [...this.acpServers.values()];
+	}
+
+	/** Enabled user-declared servers available through the generic kernel API. */
+	getEnabledPersistentGenericServers(): string[] {
 		return Array.from(this.integrations.values())
 			.filter(
 				(integration) =>

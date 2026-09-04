@@ -7,7 +7,6 @@ import hashlib
 import io
 import os
 import re
-import sys
 import threading
 import time
 from contextlib import AsyncExitStack
@@ -357,9 +356,9 @@ class _Registry:
 
     async def _get_locked(self, server: str) -> _Generation:
         self._accepting_work()
+        current = self._generations.get(server)
         config = await _config(server)
         self._accepting_work()
-        current = self._generations.get(server)
         if current and current.config == config and not current.closed:
             return current
         if current:
@@ -508,7 +507,8 @@ async def _config(server: str) -> dict[str, Any]:
         raise RuntimeError(f"MCP server '{server}' is disabled")
     if config.get("type") == "http":
         config = dict(config)
-        config["_authIdentity"] = await _auth_identity(server, config)
+        if config.get("credentialSource") != "acp":
+            config["_authIdentity"] = await _auth_identity(server, config)
     return config
 
 
@@ -552,6 +552,8 @@ async def _headers(server: str, config: dict[str, Any]) -> dict[str, str]:
     if not isinstance(raw, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items()):
         raise ValueError("MCP HTTP headers must contain strings")
     headers = dict(raw)
+    if config.get("credentialSource") == "acp":
+        return headers
     env_name = config.get("bearerTokenEnvVar")
     token = os.environ.get(env_name, "").strip() if isinstance(env_name, str) else ""
     if config.get("oauth") is True and not token:
@@ -569,6 +571,11 @@ def _stdio_env(config: dict[str, Any]) -> dict[str, str]:
     raw = config.get("env", {})
     if not isinstance(raw, dict):
         raise ValueError("MCP stdio env must be an object")
+    if config.get("credentialSource") == "acp":
+        if not all(isinstance(key, str) and isinstance(value, str) for key, value in raw.items()):
+            raise ValueError("ACP MCP stdio env must contain string values")
+        env.update(raw)
+        return env
     for key, reference in raw.items():
         if not isinstance(key, str) or not isinstance(reference, dict) or set(reference) != {"env"}:
             raise ValueError("MCP stdio env values must use {\"env\": \"NAME\"} references")
@@ -649,27 +656,3 @@ def _seconds(value: Any, default: float) -> float:
 
 def _strings(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
-
-
-def install_shutdown_hook() -> None:
-    try:
-        kernel = get_ipython().kernel  # type: ignore[name-defined]
-    except (AttributeError, NameError):
-        return
-    if getattr(kernel, "_prime_agent_mcp_shutdown", False):
-        return
-    _registry.bind_owner()
-    original = kernel.do_shutdown
-
-    async def do_shutdown(restart: bool):
-        try:
-            await close()
-        except BaseException as exc:
-            print(f"Prime Agent MCP shutdown failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-        result = original(restart)
-        if hasattr(result, "__await__"):
-            return await result
-        return result
-
-    kernel.do_shutdown = do_shutdown
-    kernel._prime_agent_mcp_shutdown = True

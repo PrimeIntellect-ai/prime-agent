@@ -37,7 +37,6 @@ import {
 } from "./prime-inference-models.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.js";
 import {
-	clearConfigValueCache,
 	resolveConfigValueOrThrow,
 	resolveConfigValueUncached,
 	resolveHeadersOrThrow,
@@ -348,9 +347,6 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 
 	return result;
 }
-
-/** Clear the config value command cache. Exported for testing. */
-export const clearApiKeyCache = clearConfigValueCache;
 
 function readOpenAICodexAccountId(token: string): string | undefined {
 	try {

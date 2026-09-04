@@ -1499,15 +1499,26 @@ function withCronJobsStateLocks<T>(paths: readonly string[], action: () => T): T
 		for (const path of [...new Set(paths)].sort()) {
 			mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 			let release: (() => void) | undefined;
+			let lockCompromised = false;
 			for (let attempt = 0; attempt < 100; attempt++) {
 				try {
 					release = lockSync(path, {
 						realpath: false,
 						lockfilePath: `${path}.lock`,
 						stale: 30_000,
+						onCompromised: () => {
+							lockCompromised = true;
+						},
 					});
+					if (lockCompromised) {
+						release();
+						throw new Error(`Cron jobs lock compromised: ${path}`);
+					}
 					break;
 				} catch (error) {
+					if (lockCompromised) {
+						throw new Error(`Cron jobs lock compromised: ${path}`);
+					}
 					if ((error as NodeJS.ErrnoException).code !== "ELOCKED" || attempt === 99) {
 						throw error;
 					}

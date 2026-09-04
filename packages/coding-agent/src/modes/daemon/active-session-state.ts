@@ -18,7 +18,11 @@ export interface DaemonSocketClient {
 	/** Delayed retry after transient catch-up snapshot preparation failure. */
 	catchupRetryTimer?: NodeJS.Timeout;
 	backpressured?: boolean;
+	rosterSubscribed?: boolean;
+	/** A push hit backpressure; one full-roster resync goes out on drain. */
+	rosterResyncPending?: boolean;
 	authenticated?: boolean;
+	authenticationRole?: "supervisor" | "session_client";
 	transport?: "jsonl" | "private-framed";
 	snapshotStreaming?: boolean;
 	snapshotActiveSessionIds?: Set<string>;
@@ -40,6 +44,7 @@ export interface ActiveSessionState {
 	extensionUiRequests: Map<string, ActiveSessionExtensionUiRequest>;
 	eventGeneration: string;
 	lastEventSequence: DaemonEventSequence;
+	inFlightBash?: Promise<void>;
 	unsubscribe?: () => void;
 	/** Latest background status summary, surfaced in the agents view. */
 	summaryState?: AgentStatus;

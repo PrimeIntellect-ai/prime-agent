@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getBundledSkillsDir } from "../src/config.js";
-import { KernelManager, type KernelSentAgentMessage } from "../src/core/kernel/index.js";
+import { type KernelSentAgentMessage, ReplKernelManager } from "../src/core/kernel/index.js";
 import type { PythonSkillRuntimeInfo } from "../src/core/skills.js";
 import { IpythonKernelProvisioner } from "../src/core/tools/ipython.js";
 
@@ -266,7 +266,7 @@ background_send = asyncio.create_task(send_later())`,
 	});
 
 	it("bounds retained handlers for late sent messages", async () => {
-		const manager = new KernelManager({ cwd: tempDir });
+		const manager = new ReplKernelManager({ cwd: tempDir });
 		const host = manager as unknown as LateHandlerRetentionHost;
 		const handler = () => {};
 
@@ -277,6 +277,6 @@ background_send = asyncio.create_task(send_later())`,
 		expect(host.lateSentAgentMessageHandlers.size).toBe(256);
 		expect(host.lateSentAgentMessageHandlers.has("request-0")).toBe(false);
 		expect(host.lateSentAgentMessageHandlers.has("request-299")).toBe(true);
-		await manager.dispose();
+		await manager.shutdown({ snapshot: true, drainHostRequests: true });
 	});
 });

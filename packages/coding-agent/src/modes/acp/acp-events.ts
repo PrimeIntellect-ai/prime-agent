@@ -19,7 +19,7 @@ export interface AcpSessionUpdate {
 	[key: string]: unknown;
 }
 
-/** prime-agent's model-facing tool is IPython; bash is the secondary escape hatch. */
+/** prime-agent's model-facing tool is the Python REPL; bash is the secondary escape hatch. */
 export const IPYTHON_TOOL_NAME = "ipython";
 
 export function acpToolKind(toolName: string): AcpToolKind {
@@ -54,17 +54,17 @@ function textContent(text: string): { type: "text"; text: string } {
  * `thinking_delta`) and carries a plain string, so reasoning and visible answer
  * text are distinct ACP update kinds a client can render or hide separately.
  */
-function assistantDeltaUpdates(event: AssistantMessageEvent): AcpSessionUpdate[] {
+function assistantDeltaUpdates(event: AssistantMessageEvent, messageId: string): AcpSessionUpdate[] {
 	if (event.type === "thinking_delta" && event.delta.length > 0) {
-		return [{ sessionUpdate: "agent_thought_chunk", content: textContent(event.delta) }];
+		return [{ sessionUpdate: "agent_thought_chunk", messageId, content: textContent(event.delta) }];
 	}
 	if (event.type === "text_delta" && event.delta.length > 0) {
-		return [{ sessionUpdate: "agent_message_chunk", content: textContent(event.delta) }];
+		return [{ sessionUpdate: "agent_message_chunk", messageId, content: textContent(event.delta) }];
 	}
 	return [];
 }
 
-/** Extract the IPython cell source so a client can show what is executing. */
+/** Extract the Python cell source so a client can show what is executing. */
 function ipythonCellSource(args: unknown): string | undefined {
 	if (!args || typeof args !== "object") return undefined;
 	const code = (args as { code?: unknown }).code;
@@ -91,7 +91,7 @@ function toolResultText(result: unknown): string | undefined {
 }
 
 /**
- * Rich IPython output that ACP has no content type for.
+ * Rich kernel output that ACP has no content type for.
  *
  * The ipython tool reports media and diffs under `details` (images additionally
  * ride along as ACP image content blocks); mirror those exact fields rather than
@@ -121,15 +121,18 @@ function ipythonRichOutput(result: unknown): PrimeAgentIpythonMeta | undefined {
 	return meta.attachments || meta.diffCount !== undefined ? meta : undefined;
 }
 
-/**
- * Correlates streaming bash output with its run.
- *
- * `bash_output` carries no `runId`, so the id of the most recent `bash_start` is
- * tracked here. Output would otherwise be attributed to a bare fallback id that
- * no `bash_start` ever used, leaving the chunks unattached to any tool call.
- */
+/** Correlates streamed bash output and assistant chunks with their owning run or message. */
 export interface AcpEventMappingState {
 	activeBashRunId?: string;
+	activeAssistantMessageId?: string;
+	nextAssistantMessageSequence?: number;
+}
+
+function startAssistantMessage(state: AcpEventMappingState): string {
+	const sequence = (state.nextAssistantMessageSequence ?? 0) + 1;
+	state.nextAssistantMessageSequence = sequence;
+	state.activeAssistantMessageId = `prime-agent-assistant-${sequence}`;
+	return state.activeAssistantMessageId;
 }
 
 export function acpUpdatesForSessionEvent(
@@ -137,9 +140,20 @@ export function acpUpdatesForSessionEvent(
 	state: AcpEventMappingState = {},
 ): AcpSessionUpdate[] {
 	switch (event.type) {
+		case "message_start":
+			if (event.message.role === "assistant") startAssistantMessage(state);
+			return [];
+
 		case "message_update":
 			if (event.message.role !== "assistant") return [];
-			return assistantDeltaUpdates(event.assistantMessageEvent);
+			return assistantDeltaUpdates(
+				event.assistantMessageEvent,
+				state.activeAssistantMessageId ?? startAssistantMessage(state),
+			);
+
+		case "message_end":
+			if (event.message.role === "assistant") state.activeAssistantMessageId = undefined;
+			return [];
 
 		case "tool_execution_start": {
 			const cell = event.toolName === IPYTHON_TOOL_NAME ? ipythonCellSource(event.args) : undefined;
@@ -147,7 +161,7 @@ export function acpUpdatesForSessionEvent(
 				{
 					sessionUpdate: "tool_call",
 					toolCallId: event.toolCallId,
-					title: event.toolName === IPYTHON_TOOL_NAME ? "IPython cell" : event.toolName,
+					title: event.toolName === IPYTHON_TOOL_NAME ? "Python cell" : event.toolName,
 					kind: acpToolKind(event.toolName),
 					status: "in_progress" satisfies AcpToolStatus,
 					rawInput: cell !== undefined ? { code: cell } : event.args,

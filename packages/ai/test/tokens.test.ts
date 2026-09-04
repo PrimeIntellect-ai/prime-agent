@@ -9,7 +9,7 @@ type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
 import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.js";
 import { hasBedrockCredentials } from "./bedrock-utils.js";
-import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.js";
+import { hasCloudflareWorkersAICredentials } from "./cloudflare-utils.js";
 import { resolveApiKey } from "./oauth.js";
 
 const oauthTokens = await Promise.all([
@@ -159,14 +159,6 @@ describe("Token Statistics on Abort", () => {
 		});
 	});
 
-	describe.skipIf(!hasCloudflareAiGatewayCredentials())("Cloudflare AI Gateway Provider", () => {
-		const llm = getModel("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6");
-
-		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
-			await testTokensOnAbort(llm);
-		});
-	});
-
 	describe.skipIf(!process.env.HF_TOKEN)("Hugging Face Provider", () => {
 		const llm = getModel("huggingface", "moonshotai/Kimi-K2.5");
 
@@ -274,7 +266,7 @@ describe("Token Statistics on Abort", () => {
 			"claude-sonnet-4 - should include token stats when aborted mid-stream",
 			{ retry: 3, timeout: 30000 },
 			async () => {
-				const llm = getModel("github-copilot", "claude-sonnet-4.5");
+				const llm = getModel("github-copilot", "claude-sonnet-4.6");
 				await testTokensOnAbort(llm, { apiKey: githubCopilotToken });
 			},
 		);

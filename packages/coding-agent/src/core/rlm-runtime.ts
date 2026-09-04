@@ -233,7 +233,9 @@ export interface CreateRlmSubagentRuntimeOptions {
 	rlmDepth: number;
 	rlmMaxDepth: number;
 	rlmParentNodeId: string;
-	/** Source of the IPython cell that spawned this subagent, for display. */
+	/** Request ID of the parent model call whose tool call caused this spawn. */
+	spawnedByRequestId?: string;
+	/** Source of the Python cell that spawned this subagent, for display. */
 	spawnCode?: string;
 	/** Publish the session to the parent before a host makes the runtime addressable. */
 	onSessionPublished?: (session: AgentSession) => void;

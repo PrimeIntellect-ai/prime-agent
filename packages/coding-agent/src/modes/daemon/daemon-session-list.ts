@@ -2,14 +2,18 @@ import { statSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
-import { compactRlmText, rlmChildLabel } from "../../core/agent-session.js";
-import type { AgentSessionRuntimeMetadata } from "../../core/agent-session-runtime.js";
+import { compactRlmText } from "../../core/agent-session.js";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.js";
 import { type AgentCronJob, isHeartbeatCronJob } from "../../core/cron-jobs.js";
 import type { SessionActionSnapshot } from "../../core/session-action-store.js";
 import type { AgentTaskState, SessionInfo } from "../../core/session-manager.js";
+import type { SessionUsageSummary } from "../../core/usage.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import type { ActiveSessionState } from "./active-session-state.js";
+
+import { type AgentRosterStatus, isSessionSummaryBusy } from "./agent-roster.js";
+
+export { classifySessionRosterStatus, isSessionSummaryBusy } from "./agent-roster.js";
 
 // Durable lifecycle; decides agents-view visibility. Only "live" is shown.
 // "draft" = no message sent yet (discarded on close); "archived" = ctrl+x'd,
@@ -19,7 +23,6 @@ export type SessionLifecycle = "draft" | "live" | "archived";
 // Heuristic activity of a live session. Classification-in-flight counts as
 // "working" so the view never sees an unlabeled idle session.
 export type SessionActivity = "working" | "idle";
-export type SessionRosterStatus = "running" | "idle" | "inactive";
 
 // Upper bound on the spawn-code source carried in a session summary. Generous
 // enough for real spawn cells while keeping the daemon wire payload bounded.
@@ -53,9 +56,12 @@ export interface SessionSummary {
 	isCompacting: boolean;
 	isBashRunning?: boolean;
 	hasRunningRlmChildren?: boolean;
+	usage?: SessionUsageSummary;
 	/** True while the agent is streaming with tool calls pending; drives the "running tools" label. */
 	isRunningTools?: boolean;
 	attachedClients: number;
+	/** Clients attached over the direct worker transport; the supervisor adds these to its own count. */
+	directAttachedClients?: number;
 	messageCount: number;
 	unfinishedActionCount?: number;
 	sessionActions: SessionActionSnapshot;
@@ -69,7 +75,7 @@ export interface SessionSummary {
 	rlmChildId?: string;
 	repliedSinceTask?: boolean;
 	rlmParentNodeId?: string;
-	/** Source of the IPython cell that spawned this subagent, for display. */
+	/** Source of the Python cell that spawned this subagent, for display. */
 	spawnCode?: string;
 	modelFallbackMessage?: string;
 	diagnostics?: AgentSessionRuntimeDiagnostic[];
@@ -77,6 +83,10 @@ export interface SessionSummary {
 	summary?: string;
 	/** Completion verdict for an idle session; absent while working or unjudged. */
 	taskState?: AgentTaskState;
+	rosterStatus?: AgentRosterStatus;
+	statusLabel?: "queued" | "recovering" | "failed";
+	/** Set while the owning worker has been silent past the staleness threshold. */
+	lastHeardFromAt?: string;
 	/** Resident session-host process state, populated by the global supervisor. */
 	workerState?: "starting" | "ready" | "recovering" | "stopping" | "failed";
 	/** Diagnostic process identity; clients must not use this as a stable session identifier. */
@@ -101,14 +111,39 @@ export function resolveAttachModelFallbackMessage(
 	return summary.model ? undefined : startupModelFallbackMessage;
 }
 
-export function classifySessionRosterStatus(summary: SessionSummary): SessionRosterStatus {
-	if (!summary.activeSessionId) return "inactive";
-	if (summary.hasActiveHeartbeat || summary.activity === "working" || isSessionSummaryBusy(summary)) return "running";
-	return "idle";
+export function scheduledJobRegistrations(scheduledJobs: readonly AgentCronJob[]): {
+	activeHeartbeatSessionIds: Set<string>;
+	heartbeatSessionIds: Set<string>;
+	cronSessionIds: Set<string>;
+	heartbeatSessionFiles: Set<string>;
+	cronSessionFiles: Set<string>;
+} {
+	const activeHeartbeatSessionIds = new Set<string>();
+	const heartbeatSessionIds = new Set<string>();
+	const cronSessionIds = new Set<string>();
+	const heartbeatSessionFiles = new Set<string>();
+	const cronSessionFiles = new Set<string>();
+	for (const job of scheduledJobs) {
+		const heartbeat = isHeartbeatCronJob(job);
+		if (heartbeat && job.status === "active") activeHeartbeatSessionIds.add(job.activeSessionId);
+		// A paused heartbeat cannot fire, so unlike a live heartbeat (or a registered
+		// cron job) it must not silently pin a worker forever.
+		const registered = heartbeat ? job.status === "active" : job.status === "active" || job.status === "paused";
+		if (!registered) continue;
+		(heartbeat ? heartbeatSessionIds : cronSessionIds).add(job.activeSessionId);
+		(heartbeat ? heartbeatSessionFiles : cronSessionFiles).add(resolve(job.sessionFile));
+	}
+	return { activeHeartbeatSessionIds, heartbeatSessionIds, cronSessionIds, heartbeatSessionFiles, cronSessionFiles };
 }
 
-export function isSessionSummaryBusy(summary: SessionSummary): boolean {
-	return summary.isSessionActive || summary.hasRunningRlmChildren === true;
+/** Naming signals intent to return, so named sessions are exempt even when empty. */
+export function isEvictableEmptySessionSummary(summary: SessionSummary): boolean {
+	return (
+		summary.messageCount === 0 &&
+		!summary.sessionName &&
+		!isSessionSummaryBusy(summary) &&
+		summary.hasRegisteredCronJob !== true
+	);
 }
 
 export function buildSessionList(
@@ -117,23 +152,13 @@ export function buildSessionList(
 	scheduledJobs: readonly AgentCronJob[] = [],
 ): SessionSummary[] {
 	const activeBySessionFile = new Map<string, ActiveSessionState>();
-	const heartbeatSessionIds = new Set<string>();
-	const registeredHeartbeatSessionIds = new Set<string>();
-	const registeredCronSessionIds = new Set<string>();
-	const registeredHeartbeatSessionFiles = new Set<string>();
-	const registeredCronSessionFiles = new Set<string>();
-	for (const job of scheduledJobs) {
-		const heartbeat = isHeartbeatCronJob(job);
-		if (heartbeat && job.status === "active") heartbeatSessionIds.add(job.activeSessionId);
-		// A paused heartbeat cannot fire, so unlike a live heartbeat (or a registered
-		// cron job) it must not silently pin a worker forever.
-		const registered = heartbeat ? job.status === "active" : job.status === "active" || job.status === "paused";
-		if (!registered) continue;
-		const ids = heartbeat ? registeredHeartbeatSessionIds : registeredCronSessionIds;
-		const files = heartbeat ? registeredHeartbeatSessionFiles : registeredCronSessionFiles;
-		ids.add(job.activeSessionId);
-		files.add(resolve(job.sessionFile));
-	}
+	const {
+		activeHeartbeatSessionIds: heartbeatSessionIds,
+		heartbeatSessionIds: registeredHeartbeatSessionIds,
+		cronSessionIds: registeredCronSessionIds,
+		heartbeatSessionFiles: registeredHeartbeatSessionFiles,
+		cronSessionFiles: registeredCronSessionFiles,
+	} = scheduledJobRegistrations(scheduledJobs);
 
 	for (const activeSession of activeSessions) {
 		const sessionFile = activeSession.runtime.session.sessionFile;
@@ -209,6 +234,9 @@ export function summaryForActiveSession(
 		}
 	}
 
+	const directAttachedClients = [...activeSession.clients].filter(
+		(client) => client.authenticationRole === "session_client",
+	).length;
 	return {
 		id: activeSession.activeSessionId,
 		lifecycle: activeLifecycleForSession(activeSession),
@@ -232,8 +260,10 @@ export function summaryForActiveSession(
 		isCompacting: session.isCompacting,
 		isBashRunning: session.isBashRunning,
 		hasRunningRlmChildren: session.hasRunningRlmChildren(),
+		usage: session.getOwnUsageSummary?.(),
 		isRunningTools: session.isStreaming && session.state.pendingToolCalls.size > 0,
 		attachedClients: activeSession.clients.size,
+		...(directAttachedClients > 0 ? { directAttachedClients } : {}),
 		messageCount: session.messages.length,
 		unfinishedActionCount: session.unfinishedActionCount,
 		sessionActions: session.getSessionActionSnapshot(),
@@ -319,6 +349,7 @@ export function summaryForInactiveSession(
 		firstMessage: session.firstMessage,
 		parentSessionPath: session.parentSessionPath,
 		rlmDepth: session.rlmDepth,
+		usage: session.usage,
 		// Carry the persisted recap/verdict so an off-daemon session keeps its
 		// agents-view bucket (e.g. Completed) instead of defaulting to Needs Input.
 		// Gate on message-count currency like isSummaryCurrent does for resident
@@ -329,87 +360,23 @@ export function summaryForInactiveSession(
 	};
 }
 
-/**
- * Build snapshots for all RLM child sessions hosted by the daemon under the
- * given session, including grandchildren. Mirrors the shape of live
- * rlm_child_update events so attach clients can seed their subagent state
- * from daemon memory instead of replaying the event stream.
- */
+/** Build the root AgentSession projection with daemon-only active session ids. */
 export function buildRlmChildSnapshots(
 	rootActiveSessionId: string,
 	activeSessions: readonly ActiveSessionState[],
 ): AgentConnectionRlmChildAgentSnapshot[] {
-	const childrenByParent = new Map<string, ActiveSessionState[]>();
-	for (const candidate of activeSessions) {
-		const metadata = candidate.runtime.metadata;
-		if (metadata.kind !== "subagent" || !metadata.parentActiveSessionId) {
-			continue;
-		}
-		const siblings = childrenByParent.get(metadata.parentActiveSessionId) ?? [];
-		siblings.push(candidate);
-		childrenByParent.set(metadata.parentActiveSessionId, siblings);
-	}
-
-	const snapshots: AgentConnectionRlmChildAgentSnapshot[] = [];
-	const visit = (parent: ActiveSessionState | undefined, parentActiveSessionId: string): void => {
-		const parentNodeId = parent?.runtime.metadata.rlmChildId;
-		for (const child of childrenByParent.get(parentActiveSessionId) ?? []) {
-			snapshots.push(rlmChildSnapshotForActiveSession(child, child.runtime.metadata, parentNodeId, parent));
-			// A child passes its own node id to its children as their parent id.
-			visit(child, child.activeSessionId);
-		}
-	};
 	const root = activeSessions.find((candidate) => candidate.activeSessionId === rootActiveSessionId);
-	visit(root, rootActiveSessionId);
-	return snapshots;
-}
-
-function rlmChildSnapshotForActiveSession(
-	activeSession: ActiveSessionState,
-	metadata: AgentSessionRuntimeMetadata,
-	parentNodeId: string | undefined,
-	parent: ActiveSessionState | undefined,
-): AgentConnectionRlmChildAgentSnapshot {
-	const session = activeSession.runtime.session;
-	let answerPreview: string | undefined;
-	let toolUseCount = 0;
-	const messages =
-		session.state.streamingMessage?.role === "assistant"
-			? [...session.messages, session.state.streamingMessage]
-			: session.messages;
-	for (const message of messages) {
-		if (message.role === "assistant") {
-			const text = compactRlmText(readMessageText(message.content));
-			if (text) {
-				answerPreview = text;
-			}
-			toolUseCount += message.content.filter((block) => block.type === "toolCall").length;
-		}
-	}
-	// The parent session's run tracker is the source of truth for child status;
-	// a daemon-hosted child whose agent is momentarily idle is still part of an
-	// active run. The streaming heuristic only covers parents the daemon does
-	// not host (e.g. children attributed to a session created by an older build).
-	const runStatus = metadata.rlmChildId
-		? parent?.runtime.session.getRlmChildRunStatus(metadata.rlmChildId)
-		: undefined;
-	const status = runStatus ?? (session.isSessionActive ? "running" : "done");
-	const isActive = status === "running" || session.isSessionActive;
-	return {
-		id: metadata.rlmChildId ?? activeSession.activeSessionId,
-		parentId: parentNodeId,
-		activeSessionId: activeSession.activeSessionId,
-		sessionName: session.sessionName,
-		model: session.model ? `${session.model.provider}/${session.model.id}` : undefined,
-		label: rlmChildLabel(metadata.prompt ?? ""),
-		status,
-		answerPreview,
-		toolUseCount: toolUseCount > 0 ? toolUseCount : undefined,
-		tokenCount: session._contextTokensForCurrentMessages(),
-		recap: session.getCurrentRecap(),
-		sessionDir: metadata.sessionDir ?? session.sessionManager.getSessionDir(),
-		activity: isActive ? { kind: session.isStreaming ? "writing" : "waiting" } : undefined,
-	};
+	if (!root) return [];
+	const activeSessionIds = new Map(
+		activeSessions.flatMap((candidate) => {
+			const childId = candidate.runtime.metadata.rlmChildId;
+			return childId ? [[childId, candidate.activeSessionId] as const] : [];
+		}),
+	);
+	return root.runtime.session.getRlmChildSnapshots().map((snapshot) => ({
+		...snapshot,
+		activeSessionId: activeSessionIds.get(snapshot.id),
+	}));
 }
 
 function firstUserMessageText(session: ActiveSessionState["runtime"]["session"]): string | undefined {
@@ -444,20 +411,24 @@ function readMessageText(content: unknown): string {
 		.join("\n");
 }
 
-// Agent doing work, ignoring the classification verdict.
-export function isActiveSessionBusy(activeSession: ActiveSessionState): boolean {
+// Live work that dies with the worker; the display activity axis deliberately excludes delegated work.
+export function hasLiveSessionWork(activeSession: ActiveSessionState): boolean {
 	const session = activeSession.runtime.session;
-	// Background subagents keep the parent "working" even after its own turn ends.
 	return session.isSessionActive || session.hasRunningRlmChildren();
 }
 
 export function activeActivityForSession(activeSession: ActiveSessionState): SessionActivity {
-	if (isActiveSessionBusy(activeSession)) {
+	// The session's own work only, ignoring the classification verdict.
+	if (activeSession.runtime.session.isSessionActive) {
 		return "working";
 	}
 	// A finished subagent is resident but never gets a summarizer verdict, so don't hold
 	// it at "working" waiting for one — a not-busy subagent is simply idle/done.
 	if (activeSession.runtime.metadata?.kind === "subagent") {
+		return "idle";
+	}
+	// An empty session never gets a summarizer verdict; don't hold it at "working" forever.
+	if (activeSession.runtime.session.messages.length === 0) {
 		return "idle";
 	}
 	// Hold at "working" until the idle verdict is current, so the view never
@@ -481,6 +452,8 @@ export function inactiveLifecycleForSession(session: SessionInfo): SessionLifecy
 }
 
 export function activeLifecycleForSession(activeSession: ActiveSessionState): SessionLifecycle {
+	// A resident subagent is a spawned worker, not a user draft; it is visible before its first message lands.
+	if (activeSession.runtime.metadata?.kind === "subagent") return "live";
 	// Lifecycle drives agents-view visibility and is message-based: a session
 	// becomes live once a message is sent. A message-less session is a draft (hidden
 	// from the view) even if the user changed its model/name first — that config is

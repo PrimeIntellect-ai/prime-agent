@@ -18,6 +18,7 @@ import {
 } from "../../../src/modes/daemon/daemon-worker-protocol.js";
 import { SnapshotTranscriptCache } from "../../../src/modes/daemon/snapshot-transcript-cache.js";
 import { type PrivateFrame, PrivateFrameDecoder } from "../../../src/modes/session-worker/private-framing.js";
+import { seedSupervisorRoster } from "../../fixtures/roster-seed.js";
 
 const activeSessionId = "active-4602";
 const snapshotId = "snapshot-4602";
@@ -350,6 +351,7 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		};
 		internals.clients.add(client);
 		internals.workers.set(worker.descriptor.workerId, worker);
+		seedSupervisorRoster(supervisor, worker);
 		internals.syncWorkerExtensionUi = vi.fn(async () => {});
 		internals.streamSnapshot = streamSnapshot;
 		const messages: AgentMessage[] = [{ role: "user", content: "stable", timestamp: 1 }];
@@ -434,6 +436,7 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		};
 		internals.clients.add(client);
 		internals.workers.set(worker.descriptor.workerId, worker);
+		seedSupervisorRoster(supervisor, worker);
 		internals.streamSnapshot = streamSnapshot;
 		const frames = snapshotFrames([{ role: "user", content: "stable", timestamp: 1 }]);
 		for (const message of [frames.begin, frames.chunk, frames.end]) {
@@ -501,6 +504,7 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		};
 		internals.clients.add(client);
 		internals.workers.set(worker.descriptor.workerId, worker);
+		seedSupervisorRoster(supervisor, worker);
 		internals.shuttingDown = true;
 		internals.streamSnapshot = streamSnapshot;
 		internals.persistWorker = persistWorker;
@@ -581,19 +585,16 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		});
 		const recoverWorker = vi.fn(async () => {});
 		const persistWorker = vi.fn();
-		const syncAgentPeers = vi.fn(async () => {});
 		const assertRecoveryAllowed = vi.fn(async () => {});
 		const internals = supervisor as unknown as {
 			workers: Map<string, WorkerHarness>;
 			recoverWorker: typeof recoverWorker;
 			persistWorker: typeof persistWorker;
-			syncAgentPeers: typeof syncAgentPeers;
 			assertRecoveryAllowed: typeof assertRecoveryAllowed;
 			handleWorkerFrame(worker: WorkerHarness, frame: PrivateFrame<DaemonWorkerFrameHeader>): void;
 		};
 		internals.recoverWorker = recoverWorker;
 		internals.persistWorker = persistWorker;
-		internals.syncAgentPeers = syncAgentPeers;
 		internals.assertRecoveryAllowed = assertRecoveryAllowed;
 		const frames = snapshotFrames([{ role: "user", content: "stable", timestamp: 1 }]);
 

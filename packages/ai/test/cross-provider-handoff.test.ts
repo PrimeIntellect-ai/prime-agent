@@ -40,8 +40,8 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	{ provider: "azure-openai-responses", model: "gpt-4o-mini", label: "azure-openai-responses-gpt-4o-mini" },
 	{ provider: "openai-codex", model: "gpt-5.2-codex", label: "openai-codex-gpt-5.2-codex" },
 	{ provider: "prime-inference", model: "openai/gpt-5.5", label: "prime-inference-gpt-5.5" },
-	{ provider: "github-copilot", model: "claude-sonnet-4.5", label: "copilot-claude-sonnet-4.5" },
-	{ provider: "github-copilot", model: "gpt-5.2-codex", label: "copilot-gpt-5.2-codex" },
+	{ provider: "github-copilot", model: "claude-sonnet-4.6", label: "copilot-claude-sonnet-4.6" },
+	{ provider: "github-copilot", model: "gpt-5.3-codex", label: "copilot-gpt-5.3-codex" },
 	{ provider: "github-copilot", model: "gemini-3.5-flash", label: "copilot-gemini-3.5-flash" },
 	{ provider: "github-copilot", model: "grok-4.5", label: "copilot-grok-4.5" },
 	{
@@ -52,11 +52,6 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	{ provider: "xai", model: "grok-code-fast-1", label: "xai-grok-code-fast-1" },
 	{ provider: "cerebras", model: "gpt-oss-120b", label: "cerebras-gpt-oss-120b" },
 	{ provider: "cloudflare-workers-ai", model: "@cf/moonshotai/kimi-k2.6", label: "cloudflare-kimi-k2.6" },
-	{
-		provider: "cloudflare-ai-gateway",
-		model: "workers-ai/@cf/moonshotai/kimi-k2.6",
-		label: "cloudflare-gateway-kimi-k2.6",
-	},
 	{
 		provider: "cloudflare-ai-gateway",
 		model: "claude-sonnet-4.5",

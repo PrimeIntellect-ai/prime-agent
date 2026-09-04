@@ -1565,8 +1565,8 @@ confirm_kernel_runtime_setup() {
 	esac
 
 	if prime_agent_prompt_yes_no \
-		"Prepare IPython runtime now?" \
-		"Installs uv, Python 3.11, ipykernel, and Prime Agent runtime." \
+		"Prepare Python runtime now?" \
+		"Installs uv, Python 3.11, and the Prime Agent runtime." \
 		"Prepare? [Y/n]"; then
 		prime_agent_bootstrap_kernel_on_install=1
 		return
@@ -1575,17 +1575,38 @@ confirm_kernel_runtime_setup() {
 	fi
 
 	if [ "$prompt_status" -eq 2 ]; then
-		printf 'No terminal detected; preparing the IPython runtime during install.\n'
+		printf 'No terminal detected; preparing the Python runtime during install.\n'
 		prime_agent_bootstrap_kernel_on_install=1
 		return
 	fi
 
 	prime_agent_bootstrap_kernel_on_install=0
 	if [ "$prime_agent_screen_enabled" = 1 ]; then
-		prime_agent_screen "IPython setup skipped" "" "The runtime can be prepared on first ipython use." ""
+		prime_agent_screen "Python setup skipped" "" "The runtime can be prepared on first ipython use." ""
 		sleep 0.4
 	else
-		printf '\nSkipping IPython runtime setup.\n'
+		printf '\nSkipping Python runtime setup.\n'
+	fi
+}
+
+prime_agent_npm_requires_remote_policy() {
+	npm_version=$(npm --version 2>/dev/null) || return 1
+	npm_major=${npm_version%%.*}
+	case "$npm_major" in
+		""|*[!0-9]*) return 1 ;;
+	esac
+	[ "$npm_major" -ge 12 ]
+}
+
+prime_agent_npm_install() {
+	tarball_path="$1"
+	shift
+	if prime_agent_npm_requires_remote_policy; then
+		# Limit npm 12's required policy overrides to the verified root package.
+		env "$@" npm install -g --no-fund --no-audit --loglevel=error --progress=false \
+			--allow-remote=all --allow-scripts="$tarball_path" "$tarball_path"
+	else
+		env "$@" npm install -g --no-fund --no-audit --loglevel=error --progress=false "$tarball_path"
 	fi
 }
 
@@ -1596,13 +1617,13 @@ install_prime_agent_package() {
 Linking command binaries.
 Installing runtime packages.
 Preloading search tools.
-Preparing IPython kernel.
+Preparing Python kernel.
 Finalizing npm install."
 		prime_agent_run_quiet_with_animation_steps \
 			"Installing Prime Agent" \
 			"Installing Prime Agent" \
 			"$npm_install_details" \
-			env PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1 PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=1 PRIME_AGENT_INSTALL_UV=1 npm install -g --no-fund --no-audit --loglevel=error --progress=false "$tarball_path"
+			prime_agent_npm_install "$tarball_path" PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1 PRIME_AGENT_BOOTSTRAP_KERNEL_ON_INSTALL=1 PRIME_AGENT_INSTALL_UV=1
 	else
 		npm_install_details="Preparing global install.
 Linking command binaries.
@@ -1613,7 +1634,7 @@ Finalizing npm install."
 			"Installing Prime Agent" \
 			"Installing Prime Agent" \
 			"$npm_install_details" \
-			env PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1 npm install -g --no-fund --no-audit --loglevel=error --progress=false "$tarball_path"
+			prime_agent_npm_install "$tarball_path" PRIME_AGENT_BOOTSTRAP_TOOLS_ON_INSTALL=1
 	fi
 }
 

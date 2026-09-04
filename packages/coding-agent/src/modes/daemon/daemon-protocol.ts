@@ -17,10 +17,12 @@ import type {
 	AgentHeartbeatUpdateAction,
 } from "../../core/cron-jobs.js";
 import type { InputSource } from "../../core/extensions/types.js";
+import type { AcpMcpServerConfig } from "../../core/mcp/acp-mcp-types.js";
 import type { CustomMessage } from "../../core/messages.js";
 import type { QueuedMessageLane, QueuedMessageMutation } from "../../core/session-action-store.js";
 import type { SessionCwdIssue } from "../../core/session-cwd.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
+import type { SessionUsageSummary } from "../../core/usage.js";
 import type {
 	AgentConnectionAgentStatus,
 	AgentConnectionHeartbeat,
@@ -38,6 +40,7 @@ import type {
 	AgentConnectionSideQuestionTurn,
 	AgentConnectionState,
 } from "../agent-connection/types.js";
+import type { AgentRosterEntry } from "./agent-roster.js";
 import type { SessionSummary } from "./daemon-session-list.js";
 
 /**
@@ -64,8 +67,13 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 18 adds the opt-in RLM quiescence barrier to headless completion.
 // Revision 19 adds daemon-held session input pauses.
 // Revision 20 lets cancellation target a prompt the session owns but has not started.
-export const DAEMON_SCHEMA_REVISION = 20;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-20-ed994cc39507";
+// Revision 21 adds capability-gated, session-scoped ACP MCP server replacement.
+// Revision 23 lets workers query the supervisor agent roster on demand.
+// Revision 24 adds the capability-gated agent-roster subscription and push.
+// Revision 25 adds capability-gated direct worker peer transport discovery.
+// Revision 26 publishes own-session usage totals on session summary and saved-session rows.
+export const DAEMON_SCHEMA_REVISION = 26;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-26-962b8b4c5e35";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -102,6 +110,7 @@ export type DaemonServerCapability =
 	// carry the transient marker and echoed runId so clients correlate runs by
 	// identity). Clients must check before sending.
 	| "transient_bash"
+	| "agent_roster"
 	| "session_input_admission"
 	| "prompt_admission_cancellation"
 	| "queue_message_mutation"
@@ -109,7 +118,9 @@ export type DaemonServerCapability =
 	| "owned_session_recovery_context"
 	| "rlm_quiescence_barrier"
 	| "session_input_pause"
-	| "owned_prompt_cancellation";
+	| "owned_prompt_cancellation"
+	| "acp_mcp_servers"
+	| "direct_peer_transport";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -153,7 +164,21 @@ export const DAEMON_DEFAULT_SERVER_CAPABILITIES: readonly DaemonServerCapability
 	"owned_session_recovery_context",
 	"rlm_quiescence_barrier",
 	"session_input_pause",
+	"acp_mcp_servers",
 ];
+
+/** Single-use short-lived credential for one direct TUI connection to one worker process incarnation. */
+export interface DaemonPeerTransportTicket {
+	purpose: "session_client";
+	socketPath: string;
+	/** Filesystem identity of the worker socket at issue time; re-checked by the client before connecting. */
+	socketIdentity: { dev: number; ino: number };
+	workerInstanceId: string;
+	activeSessionId: string;
+	grantId: string;
+	token: string;
+	expiresAt: string;
+}
 
 export interface DaemonRuntimeIdentity {
 	buildId: string;
@@ -372,6 +397,10 @@ export type DaemonCommand =
 			includeClientOwned?: boolean;
 	  }
 	| DaemonSavedSessionListCommand
+	| { id?: string; type: "list_agent_peers"; workerToken: string }
+	| { id?: string; type: "get_direct_worker_transport"; activeSessionId: string }
+	| { id?: string; type: "roster_subscribe" }
+	| { id?: string; type: "roster_unsubscribe" }
 	| ({
 			id?: string;
 			type: "create";
@@ -534,6 +563,13 @@ export type DaemonCommand =
 	| { id?: string; type: "get_context_tree"; activeSessionId: string }
 	| { id?: string; type: "get_commands"; activeSessionId: string }
 	| { id?: string; type: "get_resource_snapshot"; activeSessionId: string }
+	| {
+			id?: string;
+			type: "replace_acp_mcp_servers";
+			activeSessionId: string;
+			ownerId: string;
+			servers: AcpMcpServerConfig[];
+	  }
 	| { id?: string; type: "get_model_catalog"; activeSessionId: string }
 	| { id?: string; type: "get_available_models"; activeSessionId: string }
 	| { id?: string; type: "get_queue"; activeSessionId: string }
@@ -700,11 +736,19 @@ const SESSION_INPUT_PAUSE_COMMAND = {
 	minSchemaRevision: 19,
 	capability: "session_input_pause",
 } as const;
+const AGENT_PEER_LIST_COMMAND = { minProtocol: 7, minSchemaRevision: 23 } as const;
+const DIRECT_PEER_TRANSPORT_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 25,
+	capability: "direct_peer_transport",
+} as const;
 
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
 	list: LEGACY_DAEMON_COMMAND,
 	list_saved_sessions: LEGACY_DAEMON_COMMAND,
+	list_agent_peers: AGENT_PEER_LIST_COMMAND,
+	get_direct_worker_transport: DIRECT_PEER_TRANSPORT_COMMAND,
 	create: LEGACY_DAEMON_COMMAND,
 	attach: LEGACY_DAEMON_COMMAND,
 	reattach: LEGACY_DAEMON_COMMAND,
@@ -745,6 +789,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	get_context_tree: LEGACY_DAEMON_COMMAND,
 	get_commands: LEGACY_DAEMON_COMMAND,
 	get_resource_snapshot: LEGACY_DAEMON_COMMAND,
+	replace_acp_mcp_servers: { minProtocol: 7, minSchemaRevision: 22, capability: "acp_mcp_servers" },
 	get_model_catalog: { minProtocol: 7, capability: "model_catalog" },
 	get_available_models: LEGACY_DAEMON_COMMAND,
 	get_queue: LEGACY_DAEMON_COMMAND,
@@ -755,6 +800,8 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	release_session_input_pause: SESSION_INPUT_PAUSE_COMMAND,
 	cron_list: LEGACY_DAEMON_COMMAND,
 	heartbeats_list: { minProtocol: 7, capability: "heartbeat_catalog" },
+	roster_subscribe: { minProtocol: 7, capability: "agent_roster" },
+	roster_unsubscribe: { minProtocol: 7, capability: "agent_roster" },
 	heartbeat_manage: { minProtocol: 7, capability: "heartbeat_management" },
 	cron_add: LEGACY_DAEMON_COMMAND,
 	cron_cancel: LEGACY_DAEMON_COMMAND,
@@ -805,6 +852,128 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	shutdown: LEGACY_DAEMON_COMMAND,
 } as const satisfies Record<DaemonCommandName, DaemonCommandCompatibility>;
 
+/**
+ * Which endpoint serves each command when a client holds both a supervisor
+ * (control-plane) and a direct worker (session-plane) connection. Session is
+ * the default for session-addressed commands; "control" marks supervisor
+ * semantics: worker lifecycle, cross-worker targeting, daemon-global
+ * registries, and names a worker resolves differently (a worker's "list" is
+ * only its own sessions). Total over DaemonCommand["type"], so an
+ * unclassified command is a compile error and never routes direct.
+ */
+export const DAEMON_COMMAND_PLANE = {
+	ack_result: "control",
+	list: "control",
+	list_saved_sessions: "control",
+	list_agent_peers: "control",
+	get_direct_worker_transport: "control",
+	create: "control",
+	attach: "session",
+	reattach: "control",
+	detach: "session",
+	complete_owned_session: "control",
+	promote_owned_session: "control",
+	kill: "control",
+	rename: "control",
+	prompt: "session",
+	cancel_prompt_admission: "session",
+	prompt_and_wait: "session",
+	steer: "session",
+	follow_up: "session",
+	restore_next_turn: "session",
+	restore_actions: "session",
+	append_custom_message: "session",
+	resume_queue: "session",
+	send_message: "control",
+	agent_messages_status: "control",
+	agent_messages_pause: "control",
+	agent_messages_resume: "control",
+	agent_messages_clear: "control",
+	abort: "session",
+	start_side_question: "session",
+	abort_side_question: "session",
+	execute_bash: "session",
+	abort_bash: "session",
+	cancel_rlm_child: "session",
+	delete_rlm_subagent: "session",
+	wait_for_idle: "session",
+	wait_for_headless_completion: "session",
+	get_session_header: "session",
+	get_state: "session",
+	get_connection_state: "session",
+	get_messages: "session",
+	get_rlm_children: "session",
+	get_session_stats: "session",
+	get_context_tree: "session",
+	get_commands: "session",
+	get_resource_snapshot: "session",
+	replace_acp_mcp_servers: "session",
+	get_model_catalog: "session",
+	get_available_models: "session",
+	get_queue: "session",
+	mutate_queued_message: "session",
+	clear_queue: "session",
+	abort_and_clear_queue: "session",
+	acquire_session_input_pause: "session",
+	release_session_input_pause: "session",
+	cron_list: "control",
+	heartbeats_list: "control",
+	roster_subscribe: "control",
+	roster_unsubscribe: "control",
+	heartbeat_manage: "control",
+	cron_add: "control",
+	cron_cancel: "control",
+	heartbeat_get: "control",
+	heartbeat_set: "control",
+	heartbeat_update: "control",
+	set_model: "session",
+	cycle_model: "session",
+	set_scoped_models: "session",
+	set_thinking_level: "session",
+	set_service_tier: "session",
+	cycle_thinking_level: "session",
+	set_transport: "session",
+	set_steering_mode: "session",
+	set_follow_up_mode: "session",
+	set_auto_compaction: "session",
+	set_auto_retry: "session",
+	compact: "session",
+	refine: "session",
+	abort_compaction: "session",
+	abort_branch_summary: "session",
+	abort_retry: "session",
+	execute_bash_and_wait: "session",
+	reload: "session",
+	new_session: "session",
+	switch_session: "session",
+	fork: "session",
+	navigate_tree: "session",
+	import_jsonl: "session",
+	export_html: "session",
+	export_jsonl: "session",
+	set_session_name: "control",
+	get_rlm_max_depth_status: "session",
+	set_rlm_max_depth: "session",
+	rename_saved_session: "control",
+	delete_saved_session: "control",
+	get_session_context: "session",
+	get_session_tree: "session",
+	get_user_messages_for_forking: "session",
+	get_last_assistant_text: "session",
+	get_system_prompt: "session",
+	get_tool_definition: "session",
+	set_session_entry_label: "session",
+	extension_ui_response: "session",
+	prepare_update_restart: "control",
+	retry_worker: "control",
+	restart: "control",
+	shutdown: "control",
+} as const satisfies Record<DaemonCommandName, "session" | "control">;
+
+export function isSessionPlaneDaemonCommand(type: string): boolean {
+	return (DAEMON_COMMAND_PLANE as Record<string, "session" | "control" | undefined>)[type] === "session";
+}
+
 export function getDaemonCommandCompatibilities(command: DaemonCommand): readonly DaemonCommandCompatibility[] {
 	const requirements: DaemonCommandCompatibility[] = [];
 	if ((command.type === "attach" || command.type === "reattach") && command.recoveryConfig !== undefined) {
@@ -824,6 +993,22 @@ export function getDaemonCommandCompatibilities(command: DaemonCommand): readonl
 		requirements.push(OWNED_PROMPT_CANCELLATION_COMMAND);
 	}
 	return [...requirements, DAEMON_COMMAND_COMPATIBILITY[command.type]];
+}
+
+export function meetsDaemonCommandCompatibility(
+	hello: {
+		protocol: DaemonProtocolInfo;
+		schemaRevision?: number;
+		serverCapabilities?: readonly DaemonServerCapability[];
+	},
+	compatibility: DaemonCommandCompatibility,
+): boolean {
+	return (
+		hello.protocol.version >= compatibility.minProtocol &&
+		(compatibility.minSchemaRevision === undefined ||
+			(hello.schemaRevision ?? 0) >= compatibility.minSchemaRevision) &&
+		(compatibility.capability === undefined || hello.serverCapabilities?.includes(compatibility.capability) === true)
+	);
 }
 
 export type DaemonResponse =
@@ -891,6 +1076,7 @@ export interface DaemonSavedSessionInfo {
 	firstMessage: string;
 	allMessagesText: string;
 	agentStatus?: AgentConnectionAgentStatus;
+	usage?: SessionUsageSummary;
 }
 
 export type DaemonDeleteSavedSessionResult = DeleteSessionFileResult;
@@ -933,6 +1119,7 @@ export type DaemonOutbound =
 	  }
 	| { type: "daemon_closing"; reason: DaemonClosingReason }
 	| { type: "heartbeats_changed" }
+	| { type: "roster_update"; changed: AgentRosterEntry[]; removed?: string[]; resync?: true }
 	| { type: "session_event"; activeSessionId: string; event: AgentConnectionSessionEvent; meta?: DaemonEventMeta }
 	| { type: "side_question_event"; activeSessionId: string; event: AgentConnectionSideQuestionEvent }
 	| { type: "session_status"; activeSessionId: string; recap?: string; meta?: DaemonEventMeta }
@@ -1015,6 +1202,7 @@ export const DAEMON_OUTBOUND_COMPATIBILITY = {
 	daemon_hello: LEGACY_DAEMON_COMMAND,
 	daemon_closing: LEGACY_DAEMON_COMMAND,
 	heartbeats_changed: { minProtocol: 7, capability: "heartbeat_catalog" },
+	roster_update: { minProtocol: 7, capability: "agent_roster" },
 	session_event: LEGACY_DAEMON_COMMAND,
 	side_question_event: LEGACY_DAEMON_COMMAND,
 	session_status: LEGACY_DAEMON_COMMAND,
@@ -1093,8 +1281,12 @@ const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"ack_result",
 	"list",
 	"list_saved_sessions",
+	"list_agent_peers",
+	"get_direct_worker_transport",
 	"attach",
 	"reattach",
+	"roster_subscribe",
+	"roster_unsubscribe",
 	"agent_messages_status",
 	"wait_for_idle",
 	"get_session_header",

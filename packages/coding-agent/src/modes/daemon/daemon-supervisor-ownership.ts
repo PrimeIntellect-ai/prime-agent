@@ -7,6 +7,7 @@ import {
 	realpathSync,
 	renameSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -356,11 +357,16 @@ function readLegacyOwnersForSocket(
 
 async function withDaemonSupervisorRegistryGuard<T>(registryDir: string, action: () => T | Promise<T>): Promise<T> {
 	mkdirSync(registryDir, { recursive: true, mode: 0o700 });
+	const guardPath = resolve(registryDir, ".guard");
+	let compromisedError: Error | undefined;
 	const release = await lockfile.lock(registryDir, {
 		realpath: false,
-		lockfilePath: resolve(registryDir, ".guard"),
+		lockfilePath: guardPath,
 		stale: REGISTRY_LOCK_STALE_MS,
 		update: REGISTRY_LOCK_UPDATE_MS,
+		onCompromised: (error) => {
+			compromisedError ??= error;
+		},
 		retries: {
 			retries: REGISTRY_LOCK_RETRIES,
 			factor: 1,
@@ -368,10 +374,44 @@ async function withDaemonSupervisorRegistryGuard<T>(registryDir: string, action:
 			maxTimeout: REGISTRY_LOCK_RETRY_MS,
 		},
 	});
+	// Compromise detection is timer-driven and cannot preempt a synchronous stall: a stalled action's
+	// writes may already be on disk when a successor reclaims the stale guard. The guard directory's
+	// inode is the ownership identity (a steal is rmdir+mkdir), checked synchronously where the timer
+	// cannot run; when the inode is unobservable, only timer-driven detection applies.
+	const guardIno = (() => {
+		try {
+			return statSync(guardPath, { bigint: true }).ino;
+		} catch {
+			return undefined;
+		}
+	})();
+	const guardStolen = () => {
+		if (guardIno === undefined) return false;
+		try {
+			return statSync(guardPath, { bigint: true }).ino !== guardIno;
+		} catch {
+			return true;
+		}
+	};
+	const assertGuardHeld = () => {
+		if (compromisedError)
+			throw new Error(`Daemon supervisor registry guard was compromised: ${compromisedError.message}`);
+		if (guardStolen())
+			throw new Error("Daemon supervisor registry guard was compromised: the guard lock changed hands");
+	};
 	try {
-		return await action();
+		assertGuardHeld();
+		const result = await action();
+		assertGuardHeld();
+		return result;
 	} finally {
-		await release();
+		if (compromisedError) {
+			await release().catch(() => undefined);
+		} else if (!guardStolen()) {
+			await release();
+		}
+		// A stolen-but-undetected guard is never released: that would delete the successor's lock.
+		// The abandoned updater notices the foreign mtime on its next tick and cleans itself up.
 	}
 }
 
