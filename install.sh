@@ -1080,7 +1080,7 @@ prime_agent_binary_write_install_paths() {
 	_state_path="$_version_dir/.install-paths"
 	_state_tmp="${_state_path}.tmp.$$"
 	printf '%s\n%s\n%s\n' "$prime_agent_binary_versions_dir" "$prime_agent_binary_symlink" "$prime_agent_cmd" > "$_state_tmp"
-	mv -f "$_state_tmp" "$_state_path"
+	mv -f "$_state_tmp" "$_state_path" || return 1
 }
 
 prime_agent_binary_atomic_symlink() {
@@ -1093,15 +1093,148 @@ prime_agent_binary_atomic_symlink() {
 	if [ ! -d "$_link_dir" ]; then
 		mkdir -p "$_link_dir"
 	fi
+	# Refuse to replace a real directory.
 	if [ -d "$_link" ] && [ ! -L "$_link" ]; then
 		printf 'error: cannot activate Prime Agent because the command path is a directory: %s\n' "$_link" >&2
 		return 1
 	fi
-	# Atomic replacement with temp symlink
+	# Bounded no-clobber temp symlink using ln -s (not ln -sf).
+	# Each PID tries a deterministic base candidate first, then falls
+	# back to numbered slots. Never overwrites an existing entity.
 	_tmp="${_link}.tmp.$$"
-	ln -sf "$_target" "$_tmp"
-	mv -f "$_tmp" "$_link"
+	_i=0
+	while [ -e "$_tmp" ] || [ -L "$_tmp" ]; do
+		_i=$((_i + 1))
+		if [ "$_i" -gt 100 ]; then
+			printf 'error: could not create temp symlink for %s after 100 collisions\n' "$_link" >&2
+			return 1
+		fi
+		_tmp="${_link}.tmp.$$.$_i"
+	done
+	ln -s "$_target" "$_tmp" || return 1
+	# Atomic replacement. mv is atomic on the same filesystem per POSIX, but a
+	# concurrent process can interleave between mv and the subsequent readlink
+	# verification below — no fd-relative operation is available in shell.
+	# On mv failure, clean only the temp symlink we just created.
+	mv -f "$_tmp" "$_link" || {
+		rm -f "$_tmp"
+		return 1
+	}
+	# Verify the final public path is a symlink pointing where we intended.
+	if [ ! -L "$_link" ] || [ "$(readlink "$_link" 2>/dev/null || printf '')" != "$_target" ]; then
+		# Fail closed: a concurrent process may have replaced the public path.
+		# Never delete what we cannot verify we own.
+		return 1
+	fi
 }
+prime_agent_claim_path() {
+	_base="$1"
+	_seed="${2:-$$}"
+	_old_umask=$(umask)
+	umask 077
+	_path="${_base}.${_seed}"
+	_i=0
+	while ! mkdir "$_path" 2>/dev/null; do
+		# Only treat mkdir failure as collision if something exists at the path.
+		# A non-existent path means a real error (permission, disk full, etc.)
+		# and must fail immediately instead of misreporting a collision.
+		if [ ! -e "$_path" ] && [ ! -L "$_path" ]; then
+			umask "$_old_umask"
+			return 1
+		fi
+		_i=$((_i + 1))
+		if [ "$_i" -gt 100 ]; then
+			umask "$_old_umask"
+			printf 'error: could not claim directory %s after 100 collisions\n' "$_base" >&2
+			return 1
+		fi
+		_path="${_base}.${_seed}.$_i"
+	done
+	umask "$_old_umask"
+	printf '%s' "$_path"
+}
+
+
+prime_agent_binary_repair_copy() {
+	# Copy staging contents into a claimed destination directory and re-validate
+	# the full layout. On failure, cleans owned + staging + download and exits.
+	# On success, sets _version_dir and _binary_path. Does not modify _owned_dest.
+	_dest="$1"
+	_dest_bin="$_dest/$(basename "$_binary_path")"
+	if ! cp -R "$_version_dir/." "$_dest/"; then
+		rm -rf "$_dest" "$_version_dir" "$_download_dir"
+		prime_agent_binary_staging_dir=
+		prime_agent_download_dir=
+		exit 1
+	fi
+	if ! prime_agent_binary_validate_layout "$_dest" "$_dest_bin"; then
+		rm -rf "$_dest" "$_version_dir" "$_download_dir"
+		prime_agent_binary_staging_dir=
+		prime_agent_download_dir=
+		exit 1
+	fi
+	rm -rf "$_version_dir"
+	prime_agent_binary_staging_dir=
+	_version_dir="$_dest"
+	_binary_path="$_dest_bin"
+}
+
+prime_agent_binary_publish_staging() {
+	# Publish validated staging to its final version directory.
+	# Never rm -rf any pre-existing path. Uses mkdir for atomic claim.
+	# On copy/validation failure, deletes only owned destination.
+	# Sets: _owned_dest (caller cleanup), _version_dir, _binary_path (resolved)
+	# Exits on unrecoverable failure; returns with values set on success.
+	_owned_dest=
+	# Only reuse the canonical version path, never a repair path.
+	# A pre-existing repair path (e.g. v1.2.3.repair.$$) must never be reused
+	# without going through claim_path — a same-UID attacker could seed it.
+	if [ -d "$_final_version_dir" ] && [ ! -L "$_final_version_dir" ] && [ "$_final_version_dir" = "$_canonical_version_dir" ]; then
+		_e_bin="$_final_version_dir/$prime_agent_cmd"
+		if [ ! -x "$_e_bin" ] && [ -x "$_final_version_dir/pi" ]; then _e_bin="$_final_version_dir/pi"; fi
+		if [ ! -x "$_e_bin" ] && [ -x "$_final_version_dir/prime-agent" ]; then _e_bin="$_final_version_dir/prime-agent"; fi
+		if [ -x "$_e_bin" ] && prime_agent_binary_validate_layout "$_final_version_dir" "$_e_bin"; then
+			# Healthy existing -- reuse in-place.
+			rm -rf "$_version_dir"
+			prime_agent_binary_staging_dir=
+			_version_dir="$_final_version_dir"
+			_binary_path="$_e_bin"
+			return
+		fi
+		# Unhealthy existing -- claim repair directory.
+		_repair_dir="$(prime_agent_claim_path "${_final_version_dir}.repair" "$$")" || {
+			rm -rf "$_version_dir" "$_download_dir"
+			prime_agent_binary_staging_dir=
+			prime_agent_download_dir=
+			exit 1
+		}
+		_owned_dest="$_repair_dir"
+		prime_agent_binary_repair_copy "$_repair_dir"
+	elif mkdir "$_final_version_dir" 2>/dev/null; then
+		# Fresh claimed directory.
+		_owned_dest="$_final_version_dir"
+		prime_agent_binary_repair_copy "$_final_version_dir"
+	else
+		# mkdir failed. Only treat as collision if something exists at the path.
+		if [ ! -e "$_final_version_dir" ] && [ ! -L "$_final_version_dir" ]; then
+			# Non-collision failure (permission, I/O, full disk, etc.).
+			rm -rf "$_version_dir" "$_download_dir"
+			prime_agent_binary_staging_dir=
+			prime_agent_download_dir=
+			exit 1
+		fi
+		# Something exists at the destination -- use repair path.
+		_repair_dir="$(prime_agent_claim_path "${_final_version_dir}.repair" "$$")" || {
+			rm -rf "$_version_dir" "$_download_dir"
+			prime_agent_binary_staging_dir=
+			prime_agent_download_dir=
+			exit 1
+		}
+		_owned_dest="$_repair_dir"
+		prime_agent_binary_repair_copy "$_repair_dir"
+	fi
+}
+
 
 prime_agent_binary_fresh_install() {
 	_version=
@@ -1115,6 +1248,7 @@ prime_agent_binary_fresh_install() {
 	prime_agent_binary_canonicalize_install_paths
 	_versions_dir="$prime_agent_binary_versions_dir"
 	_version_dir="$(prime_agent_binary_target_version_dir "$_version")"
+	_canonical_version_dir="$_version_dir"
 
 	_download_dir=$(create_temp_dir)
 	prime_agent_download_dir="$_download_dir"
@@ -1131,15 +1265,42 @@ prime_agent_binary_fresh_install() {
 	if [ ! -x "$_existing_binary" ] && [ -x "$_version_dir/prime-agent" ]; then
 		_existing_binary="$_version_dir/prime-agent"
 	fi
-	if [ -x "$_existing_binary" ] && prime_agent_binary_validate_layout "$_version_dir" "$_existing_binary"; then
-		prime_agent_binary_write_install_paths "$_version_dir"
-		prime_agent_binary_atomic_symlink "$_existing_binary" "$prime_agent_binary_symlink"
-		if prime_agent_binary_smoke_binary "$prime_agent_binary_symlink"; then
+	# Capture old symlink target before any symlink change so we can restore
+	# on activation failure (both early healthy-reuse and download paths).
+	_old_target=
+	if [ -L "$prime_agent_binary_symlink" ]; then
+		_old_target=$(readlink "$prime_agent_binary_symlink" 2>/dev/null || printf '')
+	fi
+	# Only reuse a real directory, not a symlink (which we never follow).
+	if [ -d "$_version_dir" ] && [ ! -L "$_version_dir" ] && 		[ -x "$_existing_binary" ] && prime_agent_binary_validate_layout "$_version_dir" "$_existing_binary"; then
+		# Do not modify the pre-existing immutable version directory.
+		# Try to activate. Track whether we placed the symlink so rollback failure
+		# never deletes a pre-existing public symlink.
+		_prime_agent_symlink_placed=0
+		if prime_agent_binary_atomic_symlink "$_existing_binary" "$prime_agent_binary_symlink"; then
+			_prime_agent_symlink_placed=1
+		fi
+		if [ "$_prime_agent_symlink_placed" = 1 ] && 			prime_agent_binary_smoke_binary "$prime_agent_binary_symlink"; then
 			prime_agent_configure_binary_path "$_version"
 			return
 		fi
+		# Healthy reuse activation failed: restore old target.
+		_restored=0
+		if [ -n "$_old_target" ] && prime_agent_binary_smoke_binary "$_old_target"; then
+			if prime_agent_binary_atomic_symlink "$_old_target" "$prime_agent_binary_symlink"; then
+				_restored=1
+			fi
+		fi
+		if [ "$_restored" = 1 ]; then
+			printf 'error: existing Prime Agent installation failed smoke test; restored prior version.\n' >&2
+		elif [ "$_prime_agent_symlink_placed" = 1 ]; then
+			rm -f "$prime_agent_binary_symlink"
+			printf 'error: existing Prime Agent installation failed smoke test and no healthy prior version was available.\n' >&2
+		else
+			printf 'error: existing Prime Agent installation failed smoke test and the previous symlink was left unchanged (atomic link could not be placed).\n' >&2
+		fi
+		exit 1
 	fi
-
 	prime_agent_run_quiet_with_animation 		"Downloading Prime Agent v$_version" 		"Downloading Prime Agent v$_version" 		"Fetching the compiled binary for $_platform." 		curl -fsSL "$_artifact_url" -o "$_artifact_path"
 
 	_checksums_url="$prime_agent_base_url/releases/v$_version/SHA256SUMS"
@@ -1148,8 +1309,10 @@ prime_agent_binary_fresh_install() {
 
 	prime_agent_verify_binary_checksum "$_checksums_path" "$_artifact_path"
 
-	# Build and validate away from any directory the active command may still use.
+	# Choose staging directory. Claim with mkdir; never rm -rf a path we didn't create.
 	_final_version_dir="$_version_dir"
+	_owned_dest=
+	prime_agent_binary_staging_dir=
 	if [ -L "$prime_agent_binary_symlink" ]; then
 		_active_target=$(readlink "$prime_agent_binary_symlink" 2>/dev/null || printf '')
 		_active_target_dir=
@@ -1160,9 +1323,11 @@ prime_agent_binary_fresh_install() {
 			_final_version_dir="${_version_dir}.repair.$$"
 		fi
 	fi
-	prime_agent_binary_staging_dir="${_final_version_dir}.tmp.$$"
-	rm -rf "$prime_agent_binary_staging_dir"
-	mkdir -p "$prime_agent_binary_staging_dir"
+	prime_agent_binary_staging_dir="$(prime_agent_claim_path "${_final_version_dir}.tmp" "$$")" || {
+		rm -rf "$_download_dir"
+		prime_agent_download_dir=
+		exit 1
+	}
 	_version_dir="$prime_agent_binary_staging_dir"
 	prime_agent_run_quiet_with_animation 		"Extracting Prime Agent" 		"Extracting Prime Agent v$_version" 		"Installing to $_final_version_dir" 		tar -xzf "$_artifact_path" -C "$_version_dir"
 
@@ -1217,33 +1382,43 @@ prime_agent_binary_fresh_install() {
 		prime_agent_download_dir=
 		exit 1
 	fi
-	rm -rf "$_final_version_dir"
-	mv "$_version_dir" "$_final_version_dir"
-	prime_agent_binary_staging_dir=
-	_binary_path="$_final_version_dir/$(basename "$_binary_path")"
-	_version_dir="$_final_version_dir"
-	prime_agent_binary_write_install_paths "$_version_dir"
-
-	# Create and verify the stable symlink. Restore a healthy prior target if the
-	# activated command cannot run through its public path.
-	_old_target=
-	if [ -L "$prime_agent_binary_symlink" ]; then
-		_old_target=$(readlink "$prime_agent_binary_symlink" 2>/dev/null || printf '')
-	fi
+	prime_agent_binary_write_install_paths "$_version_dir" || {
+		rm -rf "$_version_dir" "$_download_dir"
+		prime_agent_binary_staging_dir=
+		prime_agent_download_dir=
+		exit 1
+	}
+	prime_agent_binary_publish_staging
 	mkdir -p "$(dirname "$prime_agent_binary_symlink")"
-	prime_agent_binary_atomic_symlink "$_binary_path" "$prime_agent_binary_symlink"
-	if ! prime_agent_binary_smoke_binary "$prime_agent_binary_symlink"; then
+	# Place the symlink, then verify the activated path runs correctly.
+	# Track placement so rollback failure does not delete a pre-existing symlink
+	# we never replaced.
+	_prime_agent_symlink_placed=0
+	if prime_agent_binary_atomic_symlink "$_binary_path" "$prime_agent_binary_symlink"; then
+		_prime_agent_symlink_placed=1
+	fi
+	if [ "$_prime_agent_symlink_placed" = 0 ] || \
+		! prime_agent_binary_smoke_binary "$prime_agent_binary_symlink"; then
 		_old_target_dir=
 		if [ -n "$_old_target" ]; then
 			_old_target_dir=$(dirname "$_old_target")
 		fi
+		_restored=0
 		if [ -n "$_old_target" ] && [ "$_old_target_dir" != "$_version_dir" ] &&
 			prime_agent_binary_smoke_binary "$_old_target"; then
-			prime_agent_binary_atomic_symlink "$_old_target" "$prime_agent_binary_symlink"
-		else
+			if prime_agent_binary_atomic_symlink "$_old_target" "$prime_agent_binary_symlink"; then
+				_restored=1
+			fi
+		fi
+		# Remove the symlink only if we placed it and could not restore.
+		if [ "$_restored" != 1 ] && [ "$_prime_agent_symlink_placed" = 1 ]; then
 			rm -f "$prime_agent_binary_symlink"
 		fi
-		rm -rf "$_version_dir" "$_download_dir"
+		# Clean only the destination this invocation created.
+		if [ -n "$_owned_dest" ]; then
+			rm -rf "$_owned_dest"
+		fi
+		rm -rf "$_download_dir"
 		prime_agent_download_dir=
 		printf 'error: the installed Prime Agent command did not run correctly.\n' >&2
 		exit 1
@@ -1290,6 +1465,7 @@ prime_agent_binary_update() {
 	_artifact_name="$(prime_agent_binary_artifact_name "$_update_version" "$_platform")"
 	_artifact_url="$prime_agent_base_url/releases/v$_update_version/$_artifact_name"
 	_version_dir="$(prime_agent_binary_target_version_dir "$_update_version")"
+	_canonical_version_dir="$_version_dir"
 	prime_agent_binary_rollback_version=
 	_old_version_dir=
 	if [ -L "$prime_agent_binary_symlink" ]; then
@@ -1320,14 +1496,18 @@ prime_agent_binary_update() {
 
 	prime_agent_verify_binary_checksum "$_checksums_path" "$_artifact_path"
 
-	# Build and validate away from any directory the active command may still use.
+	# Choose staging directory. Claim with mkdir; never rm -rf a path we didn't create.
 	_final_version_dir="$_version_dir"
+	_owned_dest=
+	prime_agent_binary_staging_dir=
 	if [ "$_old_version_dir" = "$_version_dir" ]; then
 		_final_version_dir="${_version_dir}.repair.$$"
 	fi
-	prime_agent_binary_staging_dir="${_final_version_dir}.tmp.$$"
-	rm -rf "$prime_agent_binary_staging_dir"
-	mkdir -p "$prime_agent_binary_staging_dir"
+	prime_agent_binary_staging_dir="$(prime_agent_claim_path "${_final_version_dir}.tmp" "$$")" || {
+		rm -rf "$_download_dir"
+		prime_agent_download_dir=
+		exit 1
+	}
 	_version_dir="$prime_agent_binary_staging_dir"
 	prime_agent_run_quiet_with_animation 		"Extracting Prime Agent" 		"Extracting Prime Agent v$_update_version" 		"Preparing the update." 		tar -xzf "$_artifact_path" -C "$_version_dir"
 
@@ -1381,24 +1561,36 @@ prime_agent_binary_update() {
 		prime_agent_download_dir=
 		exit 1
 	fi
-	rm -rf "$_final_version_dir"
-	mv "$_version_dir" "$_final_version_dir"
-	prime_agent_binary_staging_dir=
-	_binary_path="$_final_version_dir/$(basename "$_binary_path")"
-	_version_dir="$_final_version_dir"
-	prime_agent_binary_write_install_paths "$_version_dir"
-
-	# Atomically switch the symlink, then verify the activated path. If activation
-	# fails, restore the previous immutable version before returning an error.
-	prime_agent_binary_atomic_symlink "$_binary_path" "$prime_agent_binary_symlink"
-	if ! prime_agent_binary_smoke_binary "$prime_agent_binary_symlink"; then
+	prime_agent_binary_write_install_paths "$_version_dir" || {
+		rm -rf "$_version_dir" "$_download_dir"
+		prime_agent_binary_staging_dir=
+		prime_agent_download_dir=
+		exit 1
+	}
+	prime_agent_binary_publish_staging
+	# Place the symlink, then verify the activated path runs correctly.
+	# Track placement so rollback failure does not delete a pre-existing symlink
+	# we never replaced.
+	_prime_agent_symlink_placed=0
+	if prime_agent_binary_atomic_symlink "$_binary_path" "$prime_agent_binary_symlink"; then
+		_prime_agent_symlink_placed=1
+	fi
+	if [ "$_prime_agent_symlink_placed" = 0 ] || \
+		! prime_agent_binary_smoke_binary "$prime_agent_binary_symlink"; then
 		if prime_agent_binary_rollback; then
 			printf 'error: activation failed; restored the previous Prime Agent version.\n' >&2
 		else
-			rm -f "$prime_agent_binary_symlink"
+			# Remove the symlink only if we placed it and could not restore.
+			if [ "$_prime_agent_symlink_placed" = 1 ]; then
+				rm -f "$prime_agent_binary_symlink"
+			fi
 			printf 'error: activation failed and no healthy rollback version was available.\n' >&2
 		fi
-		rm -rf "$_version_dir" "$_download_dir"
+		# Clean only the destination this invocation created.
+		if [ -n "$_owned_dest" ]; then
+			rm -rf "$_owned_dest"
+		fi
+		rm -rf "$_download_dir"
 		prime_agent_download_dir=
 		exit 1
 	fi
@@ -1416,7 +1608,7 @@ prime_agent_binary_update() {
 }
 
 prime_agent_binary_rollback() {
-	if [ -z "$prime_agent_binary_rollback_version" ] || [ ! -d "$prime_agent_binary_rollback_version" ]; then
+	if [ -z "$prime_agent_binary_rollback_version" ] || [ ! -d "$prime_agent_binary_rollback_version" ] || [ -L "$prime_agent_binary_rollback_version" ]; then
 		return 1
 	fi
 	_rollback_binary=

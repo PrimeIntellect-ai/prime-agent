@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	chmodSync,
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
@@ -14,7 +15,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const installer = join(dirname(fileURLToPath(import.meta.url)), "../../../install.sh");
@@ -124,6 +125,52 @@ function goodExecutable(version: string): string {
 	return `#!/bin/sh\nif [ "${"$"}1" = "--version" ]; then echo "prime-agent ${version}"; exit 0; fi\nexit 0\n`;
 }
 
+function installVersionDir(root: string, version: string, executable: string, corrupt = false): string {
+	const versionsDir = join(root, "apps", "versions");
+	const verDir = join(versionsDir, `v${version}`);
+	mkdirSync(verDir, { recursive: true });
+	const binPath = join(verDir, "prime-agent");
+	if (corrupt) {
+		writeFileSync(binPath, "#!/bin/sh\nexit 1\n");
+	} else {
+		writeFileSync(binPath, executable);
+	}
+	chmodSync(binPath, 0o755);
+	const requiredFiles = [
+		"package.json",
+		"README.md",
+		"CHANGELOG.md",
+		"install.sh",
+		"photon_rs_bg.wasm",
+		"prime-agent-runtime/pyproject.toml",
+		"theme/prime.json",
+		"theme/dark.json",
+		"theme/light.json",
+		"theme/theme-schema.json",
+		"export-html/template.html",
+		"export-html/template.css",
+		"export-html/template.js",
+	];
+	for (const relative of requiredFiles) {
+		const dir = dirname(join(verDir, relative));
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(verDir, relative),
+			relative === "package.json" ? JSON.stringify({ name: "prime-agent", version }) : "fixture",
+		);
+	}
+	for (const relative of ["skills", "assets", "docs", "examples", "export-html/vendor"]) {
+		mkdirSync(join(verDir, relative), { recursive: true });
+		writeFileSync(join(verDir, relative, ".keep"), "fixture");
+	}
+	writeFileSync(join(verDir, "install.sh"), readFileSync(installer));
+	chmodSync(join(verDir, "install.sh"), 0o755);
+	return verDir;
+}
+
+function failExec(): string {
+	return '#!/bin/sh\ncase "$0" in */bin/prime-agent) exit 1 ;; esac\nif [ "$1" = "--version" ]; then exit 0; fi\nexit 0\n';
+}
 describe("compiled binary installer", () => {
 	test("installs a flat archive into a versioned app directory and preserves user data", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-agent-installer-"));
@@ -579,5 +626,642 @@ describe("compiled binary installer", () => {
 		expect(readlinkSync(join(root, "bin", "prime-agent"))).toBe(
 			join(realpathSync(root), "relative", "versions", "v1.2.3", "prime-agent"),
 		);
+	});
+	// ============================================================================
+
+	// ============================================================================
+	// ============================================================================
+	describe("version-directory preservation", () => {
+		test.each([
+			["inactive healthy dir preserved on same-version install", "1.2.3", false, "1.2.3", false, "", ""],
+			["inactive unhealthy dir repaired (fresh install)", "1.2.3", true, "1.2.3", false, "", ""],
+			["inactive unhealthy dir repaired (update)", "2.0.0", true, "2.0.0", true, "1.2.3", "1.2.3"],
+		])(
+			"preserves dir: %s",
+			(_name: string, preDirVer: string, isCorrupt: boolean, installVer: string, isUpdate: boolean, firstInstallVer: string, activeVerRelease: string) => {
+				const root = mkdtempSync(join(tmpdir(), "pi-vdp-"));
+				temporaryRoots.push(root);
+				makeRelease(root, installVer, goodExecutable(installVer));
+				if (activeVerRelease) makeRelease(root, activeVerRelease, goodExecutable(activeVerRelease));
+				const exec = isCorrupt ? "#!/bin/sh\\nexit 1\\n" : goodExecutable(installVer);
+				const dir = installVersionDir(root, preDirVer, exec, isCorrupt);
+				const pkgPre = readFileSync(join(dir, "package.json"), "utf8");
+				const hashPre = createHash("sha256").update(pkgPre).digest("hex");
+				if (firstInstallVer) {
+					makeRelease(root, firstInstallVer, goodExecutable(firstInstallVer));
+					expect(runInstaller(root, [firstInstallVer]).exitCode).toBe(0);
+				}
+				const args = isUpdate ? ["--update", installVer] : [installVer];
+				const result = runInstaller(root, args);
+				expect(result.exitCode, result.stderr).toBe(0);
+				const pkgPost = readFileSync(join(dir, "package.json"), "utf8");
+				expect(pkgPost).toBe(pkgPre);
+				expect(createHash("sha256").update(pkgPost).digest("hex")).toBe(hashPre);
+				const link = readlinkSync(join(root, "bin", "prime-agent"));
+				expect(spawnSync(link, ["--version"], { encoding: "utf8" }).status).toBe(0);
+			},
+		);
+	});
+	describe("collision-path safety", () => {
+		// --- atomic wrappers with mkdir sentinels ---
+		function createCpWrapper(toolsDir: string, mode: "fail" | "succeed-then-rm"): { cpSentinel: string } {
+			const cpSentinel = join(toolsDir, "cp_publication_sentinel");
+			const failScript = "exit 1\n";
+			const succeedScript =
+				'/bin/cp -R "$@"\n' +
+				"rc=$?\n" +
+				'if [ "$rc" = 0 ]; then\n' +
+				'  rm -f "$_last/theme/prime.json"\n' +
+				"fi\n" +
+				"exit $rc\n";
+			const postCopyAction = mode === "fail" ? failScript : succeedScript;
+			const script =
+				"#!/bin/sh\n" +
+				'SENT="' +
+				cpSentinel.replace(/'/g, "'''") +
+				'"\n' +
+				"# Get last positional arg (destination) without eval\n" +
+				"for _last do :; done\n" +
+				"# Only count publication cp (dest is final or repair path, not .tmp.)\n" +
+				'case "$_last" in\n' +
+				'  *.tmp.*) exec /bin/cp -R "$@" ;;\n' +
+				"  *.repair.*|*/apps/versions/v*) ;;\n" +
+				'  *) exec /bin/cp -R "$@" ;;\n' +
+				"esac\n" +
+				"c=0\n" +
+				'while ! mkdir "$SENT/__cp__$((c+1))" 2>/dev/null; do\n' +
+				"  c=$((c + 1))\n" +
+				'  if [ "$c" -gt 100 ]; then exit 1; fi\n' +
+				"done\n" +
+				"c=$((c + 1))\n" +
+				postCopyAction;
+			mkdirSync(cpSentinel, { recursive: true });
+			writeFileSync(join(toolsDir, "cp"), script);
+			chmodSync(join(toolsDir, "cp"), 0o755);
+			return { cpSentinel };
+		}
+		function createMvWrapper(toolsDir: string, failOn: number): { mvSentinel: string } {
+			const mvSentinel = join(toolsDir, "mv_link_sentinel");
+			const script =
+				"#!/bin/sh\n" +
+				'SENT="' +
+				mvSentinel.replace(/'/g, "'''") +
+				'"\n' +
+				"# Only intercept atomic symlink mv where dest is prime-agent\n" +
+				"# and source ends prime-agent.tmp.* (skip .install-paths mv).\n" +
+				'case "$2" in\n' +
+				"  *prime-agent.tmp.*) ;;\n" +
+				'  *) exec /bin/mv "$@" ;;\n' +
+				"esac\n" +
+				"c=0\n" +
+				'while ! mkdir "$SENT/__mv__$((c+1))" 2>/dev/null; do\n' +
+				"  c=$((c + 1))\n" +
+				'  if [ "$c" -gt 100 ]; then exit 1; fi\n' +
+				"done\n" +
+				"c=$((c + 1))\n" +
+				'if [ "$c" -eq ' +
+				failOn +
+				" ]; then\n" +
+				"  exit 1\n" +
+				"fi\n" +
+				'exec /bin/mv "$@"\n';
+			mkdirSync(mvSentinel, { recursive: true });
+			writeFileSync(join(toolsDir, "mv"), script);
+			chmodSync(join(toolsDir, "mv"), 0o755);
+			return { mvSentinel };
+		}
+		function createReadlinkWrapper(toolsDir: string): { rdlSentinel: string } {
+			const rdlSentinel = join(toolsDir, "rdl_public_verification");
+			const script =
+				"#!/bin/sh\n" +
+				'SENT="' +
+				rdlSentinel.replace(/'/g, "'''") +
+				'"\n' +
+				"# Count invocations targeting */bin/prime-agent\n" +
+				'case "$1" in\n' +
+				"  */bin/prime-agent) ;;\n" +
+				'  *) exec /usr/bin/readlink "$@" ;;\n' +
+				"esac\n" +
+				"c=0\n" +
+				'while ! mkdir "$SENT/__rdl__$((c+1))" 2>/dev/null; do\n' +
+				"  c=$((c + 1))\n" +
+				'  if [ "$c" -gt 100 ]; then exit 1; fi\n' +
+				"done\n" +
+				"c=$((c + 1))\n" +
+				"# On 1st invocation (post-mv verification), return wrong target\n" +
+				'if [ "$c" -eq 1 ]; then\n' +
+				'  printf "/wrong/target\n"\n' +
+				"  exit 0\n" +
+				"fi\n" +
+				'exec /usr/bin/readlink "$@"\n';
+			mkdirSync(rdlSentinel, { recursive: true });
+			writeFileSync(join(toolsDir, "readlink"), script);
+			chmodSync(join(toolsDir, "readlink"), 0o755);
+			return { rdlSentinel };
+		}
+		// --- pre-existing entity tests ---
+		const preExistingEntityCases: readonly (readonly [string, "symlink" | "file", string])[] = [
+			["broken symlink at version path", "symlink", "/nonexistent"],
+			["regular file at version path", "file", "I am a file, not a directory"],
+		];
+		test.each(preExistingEntityCases)("pre-existing entity not removed: %s", (_name, beforeType, beforeContent) => {
+			const root = mkdtempSync(join(tmpdir(), "pi-col-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			const cp = join(root, "apps", "versions", "v1.2.3");
+			mkdirSync(dirname(cp), { recursive: true });
+			if (beforeType === "symlink") symlinkSync(beforeContent, cp);
+			else writeFileSync(cp, beforeContent);
+
+			const r = runInstaller(root, ["1.2.3"]);
+			expect(r.exitCode, r.stderr).toBe(0);
+			if (beforeType === "symlink") expect(readlinkSync(cp)).toBe(beforeContent);
+			else expect(readFileSync(cp, "utf8")).toBe(beforeContent);
+			expect(readlinkSync(join(root, "bin", "prime-agent"))).toContain("v1.2.3.repair.");
+		});
+
+		test("pre-existing repair dir does not block install", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-col-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			const vd = join(root, "apps", "versions");
+			const pr1 = join(vd, "v1.2.3.repair.32767");
+			const pr2 = join(vd, "v1.2.3.repair.32767.0");
+			mkdirSync(pr1, { recursive: true });
+			mkdirSync(pr2, { recursive: true });
+			writeFileSync(join(pr1, "stale"), "stale");
+			writeFileSync(join(pr2, "stale"), "stale");
+			expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+			expect(readFileSync(join(pr1, "stale"), "utf8")).toBe("stale");
+			expect(readFileSync(join(pr2, "stale"), "utf8")).toBe("stale");
+		});
+
+		test("repair-path symlink preserves exact target", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-col-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			installVersionDir(root, "1.2.3", "#!/bin/sh\\nexit 1\\n");
+			const vd = join(root, "apps", "versions");
+			const wrapper = join(root, "rsw.sh");
+			const ws =
+				"#! /bin/sh\n" +
+				"set -eu\n" +
+				'final="$1"\n' +
+				'installer="$2"\n' +
+				'mkdir -p "$final"\n' +
+				'printf "#!/bin/sh\\\\nexit 1\\\\n" > "$final/prime-agent"\n' +
+				'chmod +x "$final/prime-agent"\n' +
+				'ln -sf /nonexistent "$final.repair.$$"\n' +
+				'printf blocker > "$final.repair.$$.1"\n' +
+				'exec sh "$installer" "1.2.3"\n';
+			writeFileSync(wrapper, ws);
+			chmodSync(wrapper, 0o755);
+			const env = installerEnv(root);
+			const r = spawnSync("sh", [wrapper, join(vd, "v1.2.3"), installer], {
+				cwd: root,
+				env,
+				encoding: "utf8",
+			});
+			expect(r.status, r.stderr).toBe(0);
+			// Pre-existing symlink at repair path must retain its target
+			if (existsSync(join(vd, "v1.2.3.repair." + r.pid + ".0"))) {
+				expect(readFileSync(join(vd, "v1.2.3.repair." + r.pid + ".0"), "utf8")).toBe("blocker");
+			}
+		});
+
+		test("bounded repair exhaustion fails closed preserving collision bytes", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-col-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			const vd = join(root, "apps", "versions");
+			const wrapper = join(root, "bcw.sh");
+			const ws =
+				"#! /bin/sh\n" +
+				"set -eu\n" +
+				'final="$1"\n' +
+				'installer="$2"\n' +
+				'mkdir -p "$final"\n' +
+				'printf "#!/bin/sh\\\\nexit 1\\\\n" > "$final/prime-agent"\n' +
+				'chmod +x "$final/prime-agent"\n' +
+				'i=0; while [ "$i" -le 100 ]; do\n' +
+				'  p="$final.repair.$$"\n' +
+				'  [ "$i" -ge 1 ] && p="$p.$i"\n' +
+				'  mkdir -p "$p" && printf blocker > "$p/blocker"\n' +
+				"  i=$((i+1))\n" +
+				"done\n" +
+				'exec sh "$installer" "1.2.3"\n';
+			writeFileSync(wrapper, ws);
+			chmodSync(wrapper, 0o755);
+			const env = installerEnv(root);
+			const r = spawnSync("sh", [wrapper, join(vd, "v1.2.3"), installer], {
+				cwd: root,
+				env,
+				encoding: "utf8",
+			});
+			expect(r.status).not.toBe(0);
+			expect(r.stderr).toContain("could not claim directory");
+			// All pre-existing dirs still have their content
+			for (let i = 0; i <= 100; i++) {
+				const d = join(vd, `v1.2.3.repair.${r.pid}` + (i === 0 ? "" : "." + i));
+				if (existsSync(join(d, "blocker"))) expect(readFileSync(join(d, "blocker"), "utf8")).toBe("blocker");
+			}
+		});
+
+		test("healthy-reuse activation failure restores prior symlink", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-col-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.0.0", goodExecutable("1.0.0"));
+			makeRelease(root, "1.2.3", failExec());
+			expect(runInstaller(root, ["1.0.0"]).exitCode).toBe(0);
+			const link = join(root, "bin", "prime-agent");
+			const oldTarget = readlinkSync(link);
+			installVersionDir(root, "1.2.3", failExec());
+			const r = runInstaller(root, ["--update", "1.2.3"]);
+			expect(r.exitCode).not.toBe(0);
+			expect(readlinkSync(link)).toBe(join(realpathSync(dirname(oldTarget)), basename(oldTarget)));
+			expect(spawnSync(link, ["--version"], { encoding: "utf8" }).status).toBe(0);
+		});
+
+		// --- same-PID staging collision uses installer shell $$ ---
+		test("same-PID staging collision preserves prior staging dir", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-col-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			const vd = join(root, "apps", "versions", "v1.2.3");
+			const wrapper = join(root, "spid.sh");
+			const ws =
+				"#! /bin/sh\n" +
+				"set -eu\n" +
+				'collision_dir="$1.tmp.$$"\n' +
+				'mkdir -p "$collision_dir"\n' +
+				'printf "leftover" > "$collision_dir/leftover"\n' +
+				'exec sh "$2" "1.2.3"\n';
+			writeFileSync(wrapper, ws);
+			chmodSync(wrapper, 0o755);
+			const env = installerEnv(root);
+			const result = spawnSync("sh", [wrapper, vd, installer], {
+				cwd: root,
+				env,
+				encoding: "utf8",
+			});
+			expect(result.status, result.stderr).toBe(0);
+			// Pre-existing collision dir must still exist with content
+			const collisionDir = join(root, "apps", "versions", `v1.2.3.tmp.${result.pid}`);
+			expect(readFileSync(join(collisionDir, "leftover"), "utf8")).toBe("leftover");
+			expect(readlinkSync(join(root, "bin", "prime-agent"))).toContain("v1.2.3");
+		});
+
+		// --- atomic-link mv failure tests ---
+		test("atomic-link failure preserves prior symlink when present", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-col-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.0.0", goodExecutable("1.0.0"));
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			expect(runInstaller(root, ["1.0.0"]).exitCode).toBe(0);
+			const link = join(root, "bin", "prime-agent");
+			const oldTarget = readlinkSync(link);
+			const ld = dirname(link);
+			const wrapper = join(root, "alf.sh");
+			const ws =
+				"#! /bin/sh\n" +
+				"set -eu\n" +
+				'ld="$1"\n' +
+				'installer="$2"\n' +
+				'i=0; while [ "$i" -le 100 ]; do\n' +
+				'  s="$ld/prime-agent.tmp.$$"\n' +
+				'  [ "$i" -ge 1 ] && s="$s.$i"\n' +
+				'  ln -sf /nonexistent "$s"\n' +
+				"  i=$((i+1))\n" +
+				"done\n" +
+				'exec sh "$installer" "--update" "1.2.3"\n';
+			writeFileSync(wrapper, ws);
+			chmodSync(wrapper, 0o755);
+			const r = spawnSync("sh", [wrapper, ld, installer], {
+				cwd: root,
+				env: installerEnv(root),
+				encoding: "utf8",
+			});
+			expect(r.status).not.toBe(0);
+			expect(readlinkSync(link)).toBe(oldTarget);
+		});
+
+		test("atomic-link failure with no prior leaves no symlink", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-col-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			const ld = join(root, "bin");
+			mkdirSync(ld, { recursive: true });
+			const wrapper = join(root, "alf2.sh");
+			const ws =
+				"#! /bin/sh\n" +
+				"set -eu\n" +
+				'ld="$1"\n' +
+				'installer="$2"\n' +
+				'i=0; while [ "$i" -le 100 ]; do\n' +
+				'  s="$ld/prime-agent.tmp.$$"\n' +
+				'  [ "$i" -ge 1 ] && s="$s.$i"\n' +
+				'  ln -sf /nonexistent "$s"\n' +
+				"  i=$((i+1))\n" +
+				"done\n" +
+				'exec sh "$installer" "1.2.3"\n';
+			writeFileSync(wrapper, ws);
+			chmodSync(wrapper, 0o755);
+			const r = spawnSync("sh", [wrapper, ld, installer], {
+				cwd: root,
+				env: installerEnv(root),
+				encoding: "utf8",
+			});
+			expect(r.status).not.toBe(0);
+			expect(() => readlinkSync(join(root, "bin", "prime-agent"))).toThrow();
+		});
+
+		test("rollback rejects symlinked version directory", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-col-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+			const link = join(root, "bin", "prime-agent");
+			const oldTarget = readlinkSync(link);
+			const ovd = dirname(oldTarget);
+			const outside = join(root, "outside-v");
+			mkdirSync(outside);
+			writeFileSync(join(outside, "prime-agent"), goodExecutable("1.2.3"));
+			chmodSync(join(outside, "prime-agent"), 0o755);
+			rmSync(ovd, { recursive: true, force: true });
+			symlinkSync(outside, ovd, "dir");
+			makeRelease(root, "2.0.0", failExec());
+			const r = runInstaller(root, ["--update", "2.0.0"]);
+			expect(r.exitCode).not.toBe(0);
+			expect(r.stderr).toContain("no healthy rollback version was available");
+		});
+
+		test("no staging inside version dir", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-col-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+			for (const e of readdirSync(join(root, "apps", "versions", "v1.2.3"))) {
+				expect(e).not.toMatch(/\.(tmp|repair)\./);
+			}
+		});
+
+		// --- write-install-paths mv failure ---
+		test("write-install-paths mv failure cleans staging and exits", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-wip-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			const toolsDir = join(root, "tools");
+			mkdirSync(toolsDir);
+			const wipSentinel = join(toolsDir, "wip_sentinel");
+			// mv wrapper that fails only for .install-paths.tmp mv
+			const script =
+				"#!/bin/sh\n" +
+				'SENT="' +
+				wipSentinel.replace(/'/g, "'''") +
+				'"\n' +
+				'case "$2" in\n' +
+				'  *.install-paths.tmp.*) mkdir -p "$SENT"; exit 1 ;;\n' +
+				'  *) exec /bin/mv "$@" ;;\n' +
+				"esac\n";
+			writeFileSync(join(toolsDir, "mv"), script);
+			chmodSync(join(toolsDir, "mv"), 0o755);
+			const r = runInstaller(root, ["1.2.3"], { PATH: `${toolsDir}:/usr/bin:/bin` });
+			expect(r.exitCode).not.toBe(0);
+			// Assert the .install-paths mv branch was reached
+			expect(existsSync(wipSentinel)).toBe(true);
+			// Staging and download dirs must be cleaned; no version dir created
+			const entries = readdirSync(join(root, "apps", "versions")).filter(
+				(e: string) => !e.startsWith(".install-locks"),
+			);
+			expect(entries).toEqual([]);
+		});
+
+		// --- mkdir real-failure (not collision) ---
+		test("mkdir real failure cleans staging and does not fall through to repair", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-mkf-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			// Interpose mkdir to fail only for the final version dir path.
+			const toolsDir = join(root, "tools");
+			mkdirSync(toolsDir);
+			const mkdirSentinel = join(toolsDir, "mkdir_fail_sentinel");
+			const script =
+				"#!/bin/sh\n" +
+				'SENT="' +
+				mkdirSentinel.replace(/'/g, "'''") +
+				'"\n' +
+				'case "$1" in\n' +
+				'  */apps/versions/v1.2.3) mkdir -p "$SENT"; exit 1 ;;\n' +
+				'  *) exec /bin/mkdir "$@" ;;\n' +
+				"esac\n";
+			writeFileSync(join(toolsDir, "mkdir"), script);
+			chmodSync(join(toolsDir, "mkdir"), 0o755);
+			const r = runInstaller(root, ["1.2.3"], { PATH: `${toolsDir}:/usr/bin:/bin` });
+			expect(r.exitCode).not.toBe(0);
+			// Assert the mkdir failure branch was reached
+			expect(existsSync(mkdirSentinel)).toBe(true);
+			// Staging and download cleaned; no version or repair dir persists
+			const vd = join(root, "apps", "versions");
+			const entries = readdirSync(vd).filter((e: string) => !e.startsWith(".install-locks"));
+			expect(entries).toEqual([]);
+		});
+
+		// --- cp failure inside repair_copy (publication) ---
+		test("copy failure into owned dest cleans only owned dirs", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-cf-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			// Pre-existing file at version path so publish_staging uses repair path
+			const vp = join(root, "apps", "versions", "v1.2.3");
+			mkdirSync(dirname(vp), { recursive: true });
+			writeFileSync(vp, "pre-existing file");
+			const toolsDir = join(root, "tools");
+			mkdirSync(toolsDir);
+			const { cpSentinel } = createCpWrapper(toolsDir, "fail");
+			const r = runInstaller(root, ["1.2.3"], { PATH: `${toolsDir}:/usr/bin:/bin` });
+			expect(r.exitCode).not.toBe(0);
+			// Assert publication cp branch was reached (cpSentinel has __cp__1)
+			expect(existsSync(join(cpSentinel, "__cp__1"))).toBe(true);
+			// Pre-existing file preserved (not deleted by cleanup)
+			expect(readFileSync(vp, "utf8")).toBe("pre-existing file");
+		});
+
+		test("copy failure into fresh claimed destination", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-cf2-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			const toolsDir = join(root, "tools");
+			mkdirSync(toolsDir);
+			const { cpSentinel } = createCpWrapper(toolsDir, "fail");
+			const r = runInstaller(root, ["1.2.3"], { PATH: `${toolsDir}:/usr/bin:/bin` });
+			expect(r.exitCode).not.toBe(0);
+			// Assert publication cp branch was reached
+			expect(existsSync(join(cpSentinel, "__cp__1"))).toBe(true);
+			// No v1.2.3 version dir should exist (all cleanup was owned)
+			const entries = readdirSync(join(root, "apps", "versions")).filter(
+				(e: string) => !e.startsWith(".install-locks"),
+			);
+			expect(entries).toEqual([]);
+		});
+
+		// --- cp succeeds, then post-copy validation fails ---
+		test("post-copy validation failure cleans owned destination", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-pcv-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			const toolsDir = join(root, "tools");
+			mkdirSync(toolsDir);
+			const { cpSentinel } = createCpWrapper(toolsDir, "succeed-then-rm");
+			const r = runInstaller(root, ["1.2.3"], { PATH: `${toolsDir}:/usr/bin:/bin` });
+			expect(r.exitCode).not.toBe(0);
+			// Assert publication cp was reached and the post-copy rm happened
+			expect(existsSync(join(cpSentinel, "__cp__1"))).toBe(true);
+			// No v1.2.3 version dir should exist
+			const entries = readdirSync(join(root, "apps", "versions")).filter(
+				(e: string) => !e.startsWith(".install-locks"),
+			);
+			expect(entries).toEqual([]);
+		});
+
+		// --- atomic mv failure after ln -s success ---
+		test("atomic mv failure cleans temp symlink", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-amv-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			const toolsDir = join(root, "tools");
+			mkdirSync(toolsDir);
+			const { mvSentinel } = createMvWrapper(toolsDir, 1); // fail first atomic-link mv
+			const r = runInstaller(root, ["1.2.3"], { PATH: `${toolsDir}:/usr/bin:/bin` });
+			expect(r.exitCode).not.toBe(0);
+			// Assert the atomic-link mv branch was reached
+			expect(existsSync(join(mvSentinel, "__mv__1"))).toBe(true);
+			// No temp symlink should remain (rm -f in atomic_symlink on mv failure)
+			const leftovers = readdirSync(join(root, "bin")).filter((e: string) => e.includes("prime-agent.tmp"));
+			expect(leftovers).toEqual([]);
+		});
+
+		// --- rollback mv failure (second atomic-link mv fails) ---
+		test("rollback atomic symlink mv failure cleans temp symlinks", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-rsf-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+			const link = join(root, "bin", "prime-agent");
+			const oldTarget = readlinkSync(link);
+			// Corrupt the binary so update will need to repair and rollback
+			writeFileSync(oldTarget, "#!/bin/sh\nexit 1\n");
+			chmodSync(oldTarget, 0o755);
+			makeRelease(root, "1.2.3", failExec());
+			// Interpose mv: fail second atomic-link mv (first is placement, second is rollback)
+			const toolsDir = join(root, "tools");
+			mkdirSync(toolsDir);
+			const { mvSentinel } = createMvWrapper(toolsDir, 2);
+			const r = runInstaller(root, ["--update", "1.2.3"], { PATH: `${toolsDir}:/usr/bin:/bin` });
+			expect(r.exitCode).not.toBe(0);
+			// Assert both placement (__mv__1) and rollback (__mv__2) mv calls were reached
+			expect(existsSync(join(mvSentinel, "__mv__1"))).toBe(true);
+			expect(existsSync(join(mvSentinel, "__mv__2"))).toBe(true);
+			// When placement mv succeeds but rollback mv fails, _prime_agent_symlink_placed=1
+			// and installer deletes the public symlink (no healthy rollback available)
+			expect(existsSync(link)).toBe(false);
+			// The original version dir is intact
+			expect(existsSync(join(dirname(oldTarget), "package.json"))).toBe(true);
+			// No temp symlinks remain
+			const leftovers = readdirSync(dirname(link)).filter((e: string) => e.includes("prime-agent.tmp"));
+			expect(leftovers).toEqual([]);
+		});
+
+		// --- post-mv readlink mismatch preserves public path ---
+		test("post-mv readlink mismatch preserves public path", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-rdl-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			const toolsDir = join(root, "tools");
+			mkdirSync(toolsDir);
+			const { rdlSentinel } = createReadlinkWrapper(toolsDir);
+			const r = runInstaller(root, ["1.2.3"], { PATH: `${toolsDir}:/usr/bin:/bin` });
+			expect(r.exitCode).not.toBe(0);
+			// Assert post-mv verification readlink branch was reached
+			expect(existsSync(join(rdlSentinel, "__rdl__1"))).toBe(true);
+			// mv succeeded so the symlink entry exists; the public path was NOT
+			// deleted by the readlink mismatch handler (fail closed).
+			// readlinkSync works on dangling symlinks; confirms entry not deleted.
+			const linkPath = join(root, "bin", "prime-agent");
+			expect(readlinkSync(linkPath)).toContain("v1.2.3/prime-agent");
+		});
+
+		// --- malicious healthy repair collision ---
+		// Pre-create repair.$$ as a healthy-looking directory that would pass
+		// validation. The installer must claim a new path ($.0) and not reuse
+		// the pre-existing one. The pre-existing dir must remain exactly intact.
+		test("malicious healthy repair collision never reused", () => {
+			const root = mkdtempSync(join(tmpdir(), "pi-hrc-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			const vd = join(root, "apps", "versions");
+			const wrapper = join(root, "hrc.sh");
+			const ws =
+				"#! /bin/sh\n" +
+				"set -eu\n" +
+				'final="$1"\n' +
+				'installer="$2"\n' +
+				'versions="$3"\n' +
+				"# Pre-create a file at the version path to force repair path\n" +
+				'mkdir -p "$(dirname "$final")"\n' +
+				'printf "blocker" > "$final"\n' +
+				"# Pre-create repair REPAIR_BASE = $$ -- the exact PID name that\n" +
+				"# publish_staging passes to claim_path.  This ensures the first\n" +
+				"# candidate claim_path tries ($final.repair.$$) already exists\n" +
+				"# and is a HEALTHY real directory.  The installer must NOT reuse\n" +
+				"# this pre-existing dir; it must claim the next counter ($.0).\n" +
+				'rp="$versions/v1.2.3.repair.$$"\n' +
+				'mkdir -p "$rp"\n' +
+				"# Populate with genuinely healthy content that would pass validation\n" +
+				'printf "#!/bin/sh\\nprintf fake-v > /dev/null\\n" > "$rp/prime-agent"\n' +
+				'chmod +x "$rp/prime-agent"\n' +
+				'mkdir -p "$rp/theme"\n' +
+				'printf "{}" > "$rp/theme/prime.json"\n' +
+				'printf "{}" > "$rp/theme/dark.json"\n' +
+				'printf "{}" > "$rp/theme/light.json"\n' +
+				'printf "{}" > "$rp/theme/theme-schema.json"\n' +
+				'printf "pkg" > "$rp/package.json"\n' +
+				'printf "readme" > "$rp/README.md"\n' +
+				'printf "changelog" > "$rp/CHANGELOG.md"\n' +
+				'printf "fake atop" > "$rp/install.sh"\n' +
+				'printf ".wasm" > "$rp/photon_rs_bg.wasm"\n' +
+				'mkdir -p "$rp/prime-agent-runtime"\n' +
+				'printf "toml" > "$rp/prime-agent-runtime/pyproject.toml"\n' +
+				'mkdir -p "$rp/export-html"\n' +
+				'printf "html" > "$rp/export-html/template.html"\n' +
+				'printf "css" > "$rp/export-html/template.css"\n' +
+				'printf "js" > "$rp/export-html/template.js"\n' +
+				'mkdir -p "$rp/export-html/vendor"\n' +
+				'printf "v" > "$rp/export-html/vendor/.keep"\n' +
+				'mkdir -p "$rp/skills"\n' +
+				'printf "s" > "$rp/skills/.keep"\n' +
+				'mkdir -p "$rp/assets"\n' +
+				'printf "a" > "$rp/assets/.keep"\n' +
+				'mkdir -p "$rp/docs"\n' +
+				'printf "d" > "$rp/docs/.keep"\n' +
+				'mkdir -p "$rp/examples"\n' +
+				'printf "e" > "$rp/examples/.keep"\n' +
+				'exec sh "$installer" "1.2.3"\n';
+			writeFileSync(wrapper, ws);
+			chmodSync(wrapper, 0o755);
+			const env = installerEnv(root);
+			const r = spawnSync("sh", [wrapper, join(vd, "v1.2.3"), installer, vd], {
+				cwd: root,
+				env,
+				encoding: "utf8",
+			});
+			expect(r.status, r.stderr).toBe(0);
+			// Pre-existing repair dir at $$ base must still be intact
+			const repairDir = join(vd, `v1.2.3.repair.${r.pid}`);
+			expect(readFileSync(join(repairDir, "README.md"), "utf8")).toBe("readme");
+			// The installed link must NOT point to the pre-existing repair dir
+			const installedLink = readlinkSync(join(root, "bin", "prime-agent"));
+			expect(installedLink).toContain("v1.2.3");
+			expect(readFileSync(join(dirname(installedLink), "README.md"), "utf8")).not.toBe("readme");
+		});
 	});
 });

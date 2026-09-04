@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -149,41 +149,25 @@ describe("atomic symlink function", () => {
 		// Match installer pwd -P canonicalization (macOS /var -> /private/var).
 		const resolvedTmp = realpathSync(tmp);
 		const resolvedV2 = `${resolvedTmp}/versions/v2`;
-		const cmd =
-			'eval "$(sed \'s/^main "$@"$/# &/\' "$1")" 2>/dev/null' +
-			"; mkdir -p " +
-			v1 +
-			" " +
-			v2 +
-			"; touch " +
-			v1 +
-			"/pi " +
-			v2 +
-			"/pi" +
-			"; chmod +x " +
-			v1 +
-			"/pi " +
-			v2 +
-			"/pi" +
-			"; mkdir -p " +
-			tmp +
-			"/bin" +
-			"; prime_agent_binary_symlink=" +
-			link +
-			"; prime_agent_binary_atomic_symlink " +
-			v1 +
-			"/pi " +
-			link +
-			"; prime_agent_binary_atomic_symlink " +
-			v2 +
-			"/pi " +
-			link +
-			'; [ "$(readlink ' +
-			link +
-			')" = "' +
-			resolvedV2 +
-			"/pi\" ] && printf 'OK'";
-		const result = execFileSync("sh", ["-c", cmd, "--", installer], {
+		const helper = `${tmp}/atomic-symlink-helper.sh`;
+		writeFileSync(
+			helper,
+			[
+				"#! /bin/sh",
+				"set -eu",
+				'eval "$(sed \'s/^main "$@"$/# &/\' "$1")" 2>/dev/null',
+				'mkdir -p "$2" "$3"',
+				'touch "$2/pi" "$3/pi"',
+				'chmod +x "$2/pi" "$3/pi"',
+				'mkdir -p "$(dirname "$5")"',
+				'prime_agent_binary_symlink="$5"',
+				'prime_agent_binary_atomic_symlink "$2/pi" "$5"',
+				'prime_agent_binary_atomic_symlink "$3/pi" "$5"',
+				'[ "$(readlink "$5")" = "$4/pi" ] && printf "OK"',
+			].join("\n"),
+		);
+		chmodSync(helper, 0o755);
+		const result = execFileSync("sh", [helper, installer, v1, v2, resolvedV2, link], {
 			encoding: "utf-8",
 			env: process.env as any,
 		}).trim();
