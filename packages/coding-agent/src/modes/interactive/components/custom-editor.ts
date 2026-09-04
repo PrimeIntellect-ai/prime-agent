@@ -79,8 +79,7 @@ export class CustomEditor extends Editor {
 		if (sourceLine === undefined || sourceStart === undefined || this.getBashPromptInfo(this.getLines()[0] ?? "")) {
 			return this.styleCommandToken(displayText, layoutLineIndex, lineText, cursorCol);
 		}
-		// Arg tokens are styled first: their spans start after the command
-		// token, so the command offsets below stay valid.
+		// Arg tokens are styled first; their spans start after the command token, so the command offsets stay valid.
 		const highlighted = this.argTokenHighlighter.highlightLine(displayText, lineText, sourceLine, sourceStart);
 		return this.styleCommandToken(highlighted, layoutLineIndex, lineText, cursorCol);
 	}

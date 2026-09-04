@@ -2,7 +2,7 @@ import { clearDefaultTerminalColors, setDefaultTerminalColors, visibleWidth } fr
 import { afterEach, describe, expect, test } from "vitest";
 import { styleArgumentTokens } from "../src/modes/interactive/components/prompt-highlight.js";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.js";
-import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, type ThemeColor, theme } from "../src/modes/interactive/theme/theme.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -84,75 +84,57 @@ describe("UserMessageComponent", () => {
 		expect(plainLines).toEqual(expectedLines);
 	});
 
-	test("highlights flags and @path references in slash command arguments", () => {
+	const renderMessage = (text: string, width = 60, recognized: (name: string) => boolean = () => false) => {
 		initTheme("dark");
-		const rendered = new UserMessageComponent("/new --name foo @src/foo.ts", undefined, (name) => name === "new")
-			.render(60)
-			.join("\n");
+		return new UserMessageComponent(text, undefined, recognized).render(width).join("\n");
+	};
 
-		expect(rendered).toContain(theme.fg("accent", "/new"));
-		expect(rendered).toContain(theme.fg("mdLink", "--name"));
-		expect(rendered).toContain(theme.fg("success", "@src/foo.ts"));
+	const commandText = "/new --name foo @src/foo.ts";
+
+	test.each<{ name: string; text: string; width?: number; color: ThemeColor; has?: string[]; lacks?: string[] }>([
+		{ name: "the command accent", text: commandText, color: "accent", has: ["/new"] },
+		{ name: "--flags in command arguments", text: commandText, color: "mdLink", has: ["--name"] },
+		{ name: "@paths in command arguments", text: commandText, color: "success", has: ["@src/foo.ts"] },
+		{ name: "@paths in plain messages", text: "check @src/foo.ts please", color: "success", has: ["@src/foo.ts"] },
+		{ name: "a leading @path", text: "@src/foo.ts please", color: "success", has: ["@src/foo.ts"] },
+		{ name: "a newline-leading @path", text: "hello\n@foo", color: "success", has: ["@foo"] },
+		{
+			name: "every wrapped fragment of a long @path",
+			text: "check @src/very-long-file-name.ts please",
+			width: 16,
+			color: "success",
+			has: ["@src/very-lo", "ng-file-name", ".ts"],
+		},
+		{
+			name: "quoted @paths across narrow wraps",
+			text: 'open @"docs/some very long name.txt" now',
+			width: 16,
+			color: "success",
+			has: ['@"docs/some ', "very long na", 'me.txt"'],
+		},
+		{ name: "no mid-word @ (emails)", text: "email me@example.com", color: "success", lacks: ["@example.com"] },
+		{ name: "no glued dashes", text: "a---b", color: "mdLink", lacks: ["--b"] },
+	])("styles tokens: $name", ({ text, width, color, has, lacks }) => {
+		const rendered = renderMessage(text, width, (name) => name === "new");
+
+		for (const fragment of has ?? []) expect(rendered).toContain(theme.fg(color, fragment));
+		for (const fragment of lacks ?? []) expect(rendered).not.toContain(theme.fg(color, fragment));
 	});
 
 	test("highlights a bare -- separator only in argument-taking slash commands", () => {
-		initTheme("dark");
 		const recognized = (name: string) => name === "new" || name === "compact";
-		const command = new UserMessageComponent("/new --name bla -- hello", undefined, recognized).render(60).join("\n");
-		// /compact is recognized but takes no argument; the editor shows no
-		// separator there, so the sent message must match.
-		const noArgument = new UserMessageComponent("/compact -- hello", undefined, recognized).render(60).join("\n");
-		const plain = new UserMessageComponent("this -- however -- is fine", undefined, recognized).render(60).join("\n");
+		const separator = theme.fg("mdLink", "--");
 
-		expect(command).toContain(theme.fg("mdLink", "--"));
-		expect(noArgument).not.toContain(theme.fg("mdLink", "--"));
-		expect(plain).not.toContain(theme.fg("mdLink", "--"));
-	});
-
-	test("does not highlight --- or glued -- as a separator", () => {
-		initTheme("dark");
-		const recognized = (name: string) => name === "new";
-		const triple = new UserMessageComponent("/new a --- b", undefined, recognized).render(60).join("\n");
-		const glued = new UserMessageComponent("/new x-- y", undefined, recognized).render(60).join("\n");
-		const plain = new UserMessageComponent("a --- b").render(60).join("\n");
-
-		expect(triple).not.toContain(theme.fg("mdLink", "--"));
-		expect(glued).not.toContain(theme.fg("mdLink", "--"));
-		expect(plain).not.toContain(theme.fg("mdLink", "--"));
-	});
-
-	test("highlights @path references in plain user messages", () => {
-		initTheme("dark");
-		const rendered = new UserMessageComponent("check @src/foo.ts please").render(60).join("\n");
-
-		expect(rendered).toContain(theme.fg("success", "@src/foo.ts"));
-	});
-
-	test("highlights leading and newline-leading @path references in plain user messages", () => {
-		initTheme("dark");
-		const leading = new UserMessageComponent("@src/foo.ts please").render(60).join("\n");
-		const newline = new UserMessageComponent("hello\n@foo").render(60).join("\n");
-
-		expect(leading).toContain(theme.fg("success", "@src/foo.ts"));
-		expect(newline).toContain(theme.fg("success", "@foo"));
-	});
-
-	test("highlights every wrapped fragment of a long @path", () => {
-		initTheme("dark");
-		const rendered = new UserMessageComponent("check @src/very-long-file-name.ts please").render(16).join("\n");
-
-		expect(rendered).toContain(theme.fg("success", "@src/very-lo"));
-		expect(rendered).toContain(theme.fg("success", "ng-file-name"));
-		expect(rendered).toContain(theme.fg("success", ".ts"));
-	});
-
-	test("keeps quoted @paths highlighted across narrow wraps", () => {
-		initTheme("dark");
-		const rendered = new UserMessageComponent('open @"docs/some very long name.txt" now').render(16).join("\n");
-
-		expect(rendered).toContain(theme.fg("success", '@"docs/some '));
-		expect(rendered).toContain(theme.fg("success", "very long na"));
-		expect(rendered).toContain(theme.fg("success", 'me.txt"'));
+		expect(renderMessage("/new --name bla -- hello", 60, recognized)).toContain(separator);
+		// /compact is recognized but takes no argument, so it must match the editor and show no separator.
+		const unhighlighted = [
+			"/compact -- hello",
+			"this -- however -- is fine",
+			"/new a --- b",
+			"/new x-- y",
+			"a --- b",
+		];
+		for (const text of unhighlighted) expect(renderMessage(text, 60, recognized)).not.toContain(separator);
 	});
 
 	test("keeps multi-line quoted @paths on separate lines", () => {
@@ -164,15 +146,6 @@ describe("UserMessageComponent", () => {
 		expect(lines.every((line) => !line.includes("\n"))).toBe(true);
 		expect(content).toEqual(['@"a', 'b"']);
 		expect(lines.join("\n")).toContain(theme.fg("success", '@"a'));
-	});
-
-	test("does not highlight @ or -- without a whitespace boundary", () => {
-		initTheme("dark");
-		const email = new UserMessageComponent("email me@example.com").render(60).join("\n");
-		const dashes = new UserMessageComponent("a---b").render(60).join("\n");
-
-		expect(email).not.toContain(theme.fg("success", "@example.com"));
-		expect(dashes).not.toContain(theme.fg("mdLink", "--b"));
 	});
 
 	test("normalizes tabs inside quoted @paths like Markdown does", () => {

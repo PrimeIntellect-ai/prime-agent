@@ -2,7 +2,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { type ThemeColor, theme } from "../theme/theme.js";
 
 const ARG_TOKEN_PATTERN = /@"[^"\n]*"|@[^\s\x1b]+|--[A-Za-z0-9][A-Za-z0-9-]*/g;
-/** Also matches a bare `--` end-of-options separator; only used in recognized slash-command text. */
+/** Also matches a bare `--` end-of-options separator; only used for argument-taking slash commands. */
 const ARG_TOKEN_PATTERN_WITH_SEPARATOR = /@"[^"\n]*"|@[^\s\x1b]+|--[A-Za-z0-9][A-Za-z0-9-]*|--(?=\s|$)/g;
 const FG_SGR_PATTERN = /\x1b\[(?:0|39|3[0-7]|9[0-7]|38;[0-9;]+)m/g;
 /** Escape sequences the editor splices into displayed text (cursor highlight, IME marker). */
@@ -32,7 +32,6 @@ function hasTokenBoundary(text: string, index: number): boolean {
 	return index === 0 || /\s/.test(text.charAt(index - 1));
 }
 
-/** Finds @path references and --flags in plain (unrendered) text; includeBareSeparator also matches a bare `--`. */
 function findArgTokens(text: string, fromIndex = 0, includeBareSeparator = false): ArgTokenSpan[] {
 	const spans: ArgTokenSpan[] = [];
 	const pattern = includeBareSeparator ? ARG_TOKEN_PATTERN_WITH_SEPARATOR : ARG_TOKEN_PATTERN;
@@ -52,7 +51,6 @@ function activeFgBefore(line: string, index: number): string {
 	return active;
 }
 
-/** Styles @path references and --flags in a plain (unrendered) string. */
 export function styleArgumentTokens(
 	text: string,
 	styleOther: (segment: string) => string = (segment) => segment,
@@ -67,18 +65,13 @@ export function styleArgumentTokens(
 	return result + styleOther(text.slice(offset));
 }
 
-/**
- * Replaces the leading slash command (optional) and every @path/--flag token
- * in a prompt with same-width placeholders before markdown layout, so the
- * themed text can be spliced back into rendered lines after wrapping.
- */
+/** Masks the slash command and @path/--flag tokens with same-width placeholders before markdown layout. */
 export class PromptTokenMask {
 	readonly text: string;
 	private graphemes: { segment: string; color: ThemeColor }[] = [];
 
 	constructor(source: string, commandEnd = 0, includeBareSeparator = false) {
-		// Markdown normalizes tabs to three spaces; masking a raw tab would
-		// restore it into a layout computed for three columns, so normalize first.
+		// Markdown turns tabs into three spaces; a masked raw tab would be restored into a three-column layout.
 		source = source.replace(/\t/g, "   ");
 		if (MASK_LITERAL_PATTERN.test(source)) {
 			this.text = source;
@@ -97,8 +90,7 @@ export class PromptTokenMask {
 			for (const { segment } of graphemeSegmenter.segment(source.slice(token.start, token.end))) {
 				const width = visibleWidth(segment);
 				if (width === 0) {
-					// Zero-width graphemes stay literal: invisible either way, and
-					// leaving them keeps extracted text (cell content) exact.
+					// Zero-width graphemes stay literal: invisible either way, and extracted text stays exact.
 					text += segment;
 					continue;
 				}
@@ -155,13 +147,7 @@ export class PromptTokenMask {
 	}
 }
 
-/**
- * Styles @path references and --flags in laid-out editor lines. Token spans
- * are computed on the logical source lines before wrapping, so wrapped
- * fragments, quoted paths with spaces, and line-leading tokens are all
- * colored exactly. Call reset() with the current lines before each render
- * pass; each chunk carries its exact source coordinates.
- */
+/** Styles tokens in laid-out editor lines from spans on the logical source lines; reset() before each render pass. */
 export class ArgTokenHighlighter {
 	private spans: ArgTokenSpan[][] = [];
 
@@ -169,11 +155,7 @@ export class ArgTokenHighlighter {
 		this.spans = lines.map((line) => findArgTokens(line, 0, includeBareSeparator));
 	}
 
-	/**
-	 * Styles the tokens covered by one laid-out chunk. displayText is the
-	 * chunk with any cursor escape sequences already spliced in; chunkText is
-	 * the raw chunk text starting at sourceStart within source line sourceLine.
-	 */
+	/** displayText is chunkText with cursor escapes spliced in; chunkText starts at sourceStart within sourceLine. */
 	highlightLine(displayText: string, chunkText: string, sourceLine: number, sourceStart: number): string {
 		const rangeEnd = sourceStart + chunkText.length;
 		const spans: ArgTokenSpan[] = [];
@@ -188,8 +170,7 @@ export class ArgTokenHighlighter {
 		}
 		if (spans.length === 0) return displayText;
 
-		// Map visible code-unit offsets to displayText offsets, skipping the
-		// escape sequences the editor spliced in for the cursor.
+		// Maps visible code-unit offsets to displayText offsets, skipping the editor's cursor escapes.
 		const visibleStart: number[] = [];
 		let pos = 0;
 		for (const seq of displayText.matchAll(CURSOR_ESCAPE_PATTERN)) {
@@ -203,8 +184,7 @@ export class ArgTokenHighlighter {
 		for (const span of spans) {
 			const start = visibleStart[span.start] ?? displayText.length;
 			const end = (visibleStart[span.end - 1] ?? displayText.length - 1) + 1;
-			// The cursor splice may carry a full reset (\x1b[0m) mid-span; wrap
-			// each segment so the token color survives past it.
+			// The cursor splice may carry a full reset mid-span; wrap each segment so the token color survives it.
 			const styled = displayText
 				.slice(start, end)
 				.split("\x1b[0m")

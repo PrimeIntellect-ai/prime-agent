@@ -19,8 +19,7 @@ export function styleSlashCommandText(
 ): string {
 	const parsed = parseSlashCommand(text);
 	const commandEnd = parsed ? parsed.name.length + 1 : text.length;
-	// The bare -- separator is only meaningful in commands that take arguments,
-	// matching the editor's isArgumentCommand gate.
+	// Matches the editor's gate: a bare -- is only meaningful in commands that take arguments.
 	const includeBareSeparator = parsed !== undefined && builtinSlashCommandTakesArgument(parsed.name);
 	return `${theme.fg("accent", text.slice(0, commandEnd))}${styleRest(text.slice(commandEnd), includeBareSeparator)}`;
 }

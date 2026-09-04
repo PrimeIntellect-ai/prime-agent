@@ -3,7 +3,7 @@ import { CURSOR_MARKER, setKeybindings, visibleWidth } from "@earendil-works/pi-
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { CustomEditor } from "../src/modes/interactive/components/custom-editor.js";
-import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, type ThemeColor, theme } from "../src/modes/interactive/theme/theme.js";
 
 const passthrough = (text: string) => text;
 
@@ -280,99 +280,62 @@ describe("CustomEditor", () => {
 		}
 	});
 
-	it("highlights @path references and --flags in the input text", () => {
+	const makeHighlightEditor = (text: string, options?: { isArgumentCommand?: (name: string) => boolean }) => {
 		initTheme("dark");
-		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
-		editor.setText("/new --name foo @src/foo.ts");
+		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager(), options);
+		editor.setText(text);
+		return editor;
+	};
 
-		const line = editor.render(40)[1]!;
+	it.each<{ name: string; text: string; width: number; color: ThemeColor; has?: string[]; lacks?: string[] }>([
+		{ name: "--flags in the input text", text: "/new --name @a.ts", width: 40, color: "mdLink", has: ["--name"] },
+		{ name: "@paths in the input text", text: "/new --name @a.ts", width: 40, color: "success", has: ["@a.ts"] },
+		{
+			name: "wrapped @path fragments across editor lines",
+			text: "check @src/very-long-file-name.ts please",
+			width: 16,
+			color: "success",
+			has: ["@src/very-lon", "g-file-name.t", "s"],
+		},
+		{
+			name: "quoted @paths across wrapped editor lines",
+			text: 'open @"docs/some very long name.txt" now',
+			width: 16,
+			color: "success",
+			has: ['@"docs/some ', "very long ", 'name.txt"'],
+		},
+		{ name: "no line bleed", text: "@abcde\nfoo bar", width: 11, color: "success", has: ["@abcde"], lacks: ["foo"] },
+	])("highlights $name", ({ text, width, color, has, lacks }) => {
+		const rendered = makeHighlightEditor(text).render(width).join("\n");
 
-		expect(line).toContain(theme.fg("mdLink", "--name"));
-		expect(line).toContain(theme.fg("success", "@src/foo.ts"));
+		for (const fragment of has ?? []) expect(rendered).toContain(theme.fg(color, fragment));
+		for (const fragment of lacks ?? []) expect(rendered).not.toContain(theme.fg(color, fragment));
 	});
 
 	it("highlights a bare -- separator only for argument commands", () => {
-		initTheme("dark");
-		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager(), {
-			isArgumentCommand: (name) => name === "new",
-		});
-		editor.setText("/new --name bla -- hello");
+		const options = { isArgumentCommand: (name: string) => name === "new" };
+		const separator = theme.fg("mdLink", "--");
 
-		const commandLine = editor.render(60)[1]!;
-
-		expect(commandLine).toContain(theme.fg("mdLink", "--"));
-
-		editor.setText("this -- however -- is fine");
-		const plain = editor.render(60).join("\n");
-
-		expect(plain).not.toContain(theme.fg("mdLink", "--"));
-
-		editor.setText("/unknown -- hello");
-		const unknownCommand = editor.render(60).join("\n");
-
-		expect(unknownCommand).not.toContain(theme.fg("mdLink", "--"));
+		expect(makeHighlightEditor("/new --name bla -- hello", options).render(60).join("\n")).toContain(separator);
+		expect(makeHighlightEditor("this -- however -- is fine", options).render(60).join("\n")).not.toContain(separator);
+		expect(makeHighlightEditor("/unknown -- hello", options).render(60).join("\n")).not.toContain(separator);
 	});
 
-	it("highlights wrapped @path fragments across editor lines", () => {
-		initTheme("dark");
-		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
-		editor.setText("check @src/very-long-file-name.ts please");
+	it("does not mis-color visible text matching a scrolled-away token", () => {
+		// 9 lines with the cursor at the end scroll @foo out of view; the visible plain "foo" must stay uncolored.
+		const rendered = makeHighlightEditor("@foo\nhidden\nfoo\nl3\nl4\nl5\nl6\nl7\nl8").render(20).join("\n");
 
-		const rendered = editor.render(16).join("\n");
-
-		expect(rendered).toContain(theme.fg("success", "@src/very-lon"));
-		expect(rendered).toContain(theme.fg("success", "g-file-name.t"));
-		expect(rendered).toContain(theme.fg("success", "s"));
-	});
-
-	it("keeps quoted @paths highlighted across wrapped editor lines", () => {
-		initTheme("dark");
-		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
-		editor.setText('open @"docs/some very long name.txt" now');
-
-		const rendered = editor.render(16).join("\n");
-
-		expect(rendered).toContain(theme.fg("success", '@"docs/some '));
-		expect(rendered).toContain(theme.fg("success", "very long "));
-		expect(rendered).toContain(theme.fg("success", 'name.txt"'));
-	});
-
-	it("does not bleed @path highlighting onto the next line", () => {
-		initTheme("dark");
-		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
-		editor.setText("@abcde\nfoo bar");
-
-		const rendered = editor.render(11).join("\n");
-
-		expect(rendered).toContain(theme.fg("success", "@abcde"));
+		expect(rendered).toContain("↑ 2 more");
 		expect(rendered).not.toContain(theme.fg("success", "foo"));
 	});
 
 	it("keeps the token tail colored when the cursor sits inside the token", () => {
-		initTheme("dark");
-		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
-		editor.setText("check @src/foo.ts");
+		const editor = makeHighlightEditor("check @src/foo.ts");
 		editor.handleInput("\x1b[D");
 		editor.handleInput("\x1b[D");
-
-		const line = editor.render(40)[1]!;
 
 		// The cursor's full reset sits before the final "s"; the tail must be re-colored.
-		expect(line).toContain(`\x1b[0m${theme.fg("success", "s")}`);
-	});
-
-	it("does not mis-color visible text matching a scrolled-away token", () => {
-		initTheme("dark");
-		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
-		// 9 logical lines with the cursor at the end scroll the first two
-		// (including the @foo token) out of view; the visible plain "foo"
-		// must not inherit the hidden token's color.
-		editor.setText("@foo\nhidden\nfoo\nl3\nl4\nl5\nl6\nl7\nl8");
-
-		const rendered = editor.render(20).join("\n");
-
-		expect(rendered).toContain("↑ 2 more");
-		expect(rendered).not.toContain(theme.fg("success", "foo"));
+		expect(editor.render(40)[1]!).toContain(`\x1b[0m${theme.fg("success", "s")}`);
 	});
 
 	it("renders no header when the callback returns undefined", () => {
