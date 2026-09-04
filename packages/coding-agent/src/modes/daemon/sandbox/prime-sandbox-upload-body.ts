@@ -30,6 +30,7 @@ export type ArchiveUploadCompletion = Readonly<{ ok: true }> | ArchiveUploadFail
 export type ArchiveUploadCloseResult = Readonly<{ ok: true }> | Readonly<{ ok: false; code: "CLEANUP_UNCERTAIN" }>;
 
 export interface ArchiveUploadBody {
+	readonly archiveSize: number;
 	readonly contentType: string;
 	readonly contentLength: number;
 	readonly stream: ReadableStream<Uint8Array<ArrayBuffer>>;
@@ -38,9 +39,12 @@ export interface ArchiveUploadBody {
 	retryCleanup(): Promise<ArchiveUploadCloseResult>;
 }
 
-export interface PreparedArchiveUpload {
-	take(): Readonly<{ ok: true; value: ArchiveUploadBody }> | ArchiveUploadFailure;
-	close(): Promise<ArchiveUploadCloseResult>;
+export type PreparedArchiveUpload = PreparedArchiveUploadImpl;
+
+const issuedPreparedUploads = new WeakSet<object>();
+
+export function isPreparedArchiveUpload(value: unknown): value is PreparedArchiveUpload {
+	return typeof value === "object" && value !== null && issuedPreparedUploads.has(value);
 }
 
 interface FileIdentity {
@@ -403,6 +407,7 @@ function buildBody(state: UploadState): ArchiveUploadBody {
 	);
 
 	const body: ArchiveUploadBody = Object.freeze({
+		archiveSize: state.expectedSize,
 		contentType: state.contentType,
 		contentLength: state.contentLength,
 		stream,
@@ -434,11 +439,12 @@ function buildBody(state: UploadState): ArchiveUploadBody {
 	return body;
 }
 
-class PreparedArchiveUploadImpl implements PreparedArchiveUpload {
+class PreparedArchiveUploadImpl {
 	readonly #state: UploadState;
 
 	constructor(state: UploadState) {
 		this.#state = state;
+		issuedPreparedUploads.add(this);
 		Object.freeze(this);
 	}
 
