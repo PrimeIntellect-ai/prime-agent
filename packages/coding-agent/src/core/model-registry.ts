@@ -762,11 +762,7 @@ export class ModelRegistry {
 	 */
 	getAvailable(): Model<Api>[] {
 		return this.models.filter((model) => {
-			if (
-				isPrivatePrimeInferenceModel(model) &&
-				!this.explicitPrivatePrimeInferenceModelIds.has(model.id) &&
-				!this.authorizedPrivatePrimeInferenceModelIds.has(model.id)
-			) {
+			if (isPrivatePrimeInferenceModel(model) && !this.isAuthorizedPrivatePrimeInferenceModel(model)) {
 				return false;
 			}
 			return this.hasConfiguredAuth(model);
@@ -948,8 +944,13 @@ export class ModelRegistry {
 		};
 	}
 
-	async canUseModel(model: Model<Api>): Promise<boolean> {
-		if (!this.hasConfiguredAuth(model)) {
+	/**
+	 * `assumeAuthConfigured` evaluates availability as if the provider's auth
+	 * were usable (explicit selection of a stale-auth provider validates
+	 * BEFORE the lockout is cleared, so nothing mutates on a failed selection).
+	 */
+	async canUseModel(model: Model<Api>, options?: { assumeAuthConfigured?: boolean }): Promise<boolean> {
+		if (!options?.assumeAuthConfigured && !this.hasConfiguredAuth(model)) {
 			return false;
 		}
 		if (!isPrivatePrimeInferenceModel(model)) {
@@ -957,7 +958,19 @@ export class ModelRegistry {
 		}
 
 		const availableModels = await this.refreshAvailableModels();
-		return availableModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id);
+		if (availableModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id)) {
+			return true;
+		}
+		// Stale auth excludes the provider from the available list; answer the
+		// private-authorization question the refresh just updated directly.
+		return options?.assumeAuthConfigured === true && this.isAuthorizedPrivatePrimeInferenceModel(model);
+	}
+
+	private isAuthorizedPrivatePrimeInferenceModel(model: Model<Api>): boolean {
+		return (
+			this.explicitPrivatePrimeInferenceModelIds.has(model.id) ||
+			this.authorizedPrivatePrimeInferenceModelIds.has(model.id)
+		);
 	}
 
 	async getExecutableModels(): Promise<Model<Api>[]> {

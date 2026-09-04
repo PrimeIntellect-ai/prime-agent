@@ -321,6 +321,30 @@ describe("issue #4491 provider stale after repeated 401", () => {
 		expect(harness.session.modelRegistry.getProviderAuthStatus(provider).source).not.toBe("stale");
 	});
 
+	it("keeps the lockout when private-model validation rejects the selection", async () => {
+		const harness = await createHarness({
+			provider: "prime-inference",
+			models: [{ id: "regular-model" }, { id: "internal/private-model" }],
+			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
+		});
+		harnesses.push(harness);
+		const registry = harness.session.modelRegistry;
+		// Both auth sources stale: the provider is fully locked out.
+		expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
+		expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
+		expect(registry.getProviderAuthStatus("prime-inference")).toMatchObject({
+			configured: false,
+			source: "stale",
+		});
+
+		const privateModel = harness.models.find((model) => model.id === "internal/private-model");
+		expect(privateModel).toBeDefined();
+
+		// Validation rejects the unauthorized private model BEFORE any clear.
+		await expect(harness.session.setModel(privateModel!)).rejects.toThrow("not available");
+		expect(registry.getProviderAuthStatus("prime-inference")).toMatchObject({ source: "stale" });
+	});
+
 	it("resolves retry state for auth failures surfaced only on agent_end", async () => {
 		const harness = await createHarness({
 			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },

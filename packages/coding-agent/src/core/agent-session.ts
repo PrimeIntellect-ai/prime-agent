@@ -7126,20 +7126,24 @@ export class AgentSession {
 	}
 
 	async setModel(model: Model<any>, options: ModelSelectOptions = {}): Promise<void> {
-		if (!this._modelRegistry.hasConfiguredAuth(model)) {
-			// Explicit selection is the recovery path from a stale-auth lockout:
-			// clear (single owner of the clear) only when staleness is the sole
-			// blocker; a structured auth failure on the next request re-marks it.
-			if (this._modelRegistry.getProviderAuthStatus(model.provider).source !== "stale") {
-				throw new Error(`No API key for ${model.provider}/${model.id}`);
-			}
+		// Explicit selection is the recovery path from a stale-auth lockout, but
+		// validation runs first under an assumed clear: only a fully validated
+		// switch commits the clear (single owner), so failed selections never
+		// unlock a provider. A structured auth failure later re-marks it.
+		const staleOnly =
+			!this._modelRegistry.hasConfiguredAuth(model) &&
+			this._modelRegistry.getProviderAuthStatus(model.provider).source === "stale";
+		if (!staleOnly && !this._modelRegistry.hasConfiguredAuth(model)) {
+			throw new Error(`No API key for ${model.provider}/${model.id}`);
+		}
+		if (!(await this._modelRegistry.canUseModel(model, { assumeAuthConfigured: staleOnly }))) {
+			throw new Error(`Model "${model.provider}/${model.id}" is not available for the current Prime team.`);
+		}
+		if (staleOnly) {
 			this._modelRegistry.clearProviderAuthStale(model.provider);
 			if (!this._modelRegistry.hasConfiguredAuth(model)) {
 				throw new Error(`No API key for ${model.provider}/${model.id}`);
 			}
-		}
-		if (!(await this._modelRegistry.canUseModel(model))) {
-			throw new Error(`Model "${model.provider}/${model.id}" is not available for the current Prime team.`);
 		}
 
 		const previousModel = this.model;
