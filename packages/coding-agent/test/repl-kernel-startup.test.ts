@@ -48,7 +48,8 @@ describe("ReplKernelManager startup", () => {
 				"printf 'progress 1\\rprogress 2\\rcaf\\303' >&2",
 				"sleep 0.2",
 				"printf '\\251\\n' >&2",
-				'printf "final stderr line" >&2',
+				// Trailing lone \303: the kernel dies mid-character.
+				'printf "final stderr line\\303" >&2',
 				"exit 42",
 				"",
 			].join("\n"),
@@ -59,10 +60,15 @@ describe("ReplKernelManager startup", () => {
 
 		try {
 			await expect(manager.execute("print(1)")).rejects.toThrow(
-				/Kernel exited before ready[\s\S]*caf\u00e9[\s\S]*final stderr line/,
+				// The \ufffd from the flushed decoder can land after the host's exit
+				// diagnostic (exit/EOF order differs by platform).
+				/Kernel exited before ready[\s\S]*caf\u00e9[\s\S]*final stderr line[\s\S]*\ufffd/,
 			);
 			await manager.shutdown({ snapshot: true, drainHostRequests: true });
-			const expected = Buffer.from("progress 1\rprogress 2\rcaf\u00e9\nfinal stderr line", "utf8");
+			const expected = Buffer.concat([
+				Buffer.from("progress 1\rprogress 2\rcaf\u00e9\nfinal stderr line", "utf8"),
+				Buffer.from([0o303]),
+			]);
 			expect(readFileSync(stderrLogPath).equals(expected)).toBe(true);
 		} finally {
 			errorSpy.mockRestore();

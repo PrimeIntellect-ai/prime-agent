@@ -19,7 +19,11 @@ type ShutdownInternals = {
 		pid?: number;
 		stdin: { destroyed: boolean; destroy: () => void };
 		stdout?: { destroy: () => void; on: (event: string, listener: (...args: unknown[]) => void) => void };
-		stderr?: { destroy: () => void; on: (event: string, listener: (...args: unknown[]) => void) => void };
+		stderr?: {
+			destroy: () => void;
+			on: (event: string, listener: (...args: unknown[]) => void) => void;
+			once: (event: string, listener: (...args: unknown[]) => void) => void;
+		};
 	};
 };
 
@@ -44,7 +48,7 @@ function configuredManager(
 		pid: undefined,
 		stdin: { destroyed: false, destroy: vi.fn() },
 		stdout: { destroy: vi.fn(), on: vi.fn() },
-		stderr: { destroy: vi.fn(), on: vi.fn() },
+		stderr: { destroy: vi.fn(), on: vi.fn(), once: vi.fn() },
 	});
 	Object.assign(internals, {
 		state: "running",

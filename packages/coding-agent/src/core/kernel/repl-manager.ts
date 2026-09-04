@@ -394,9 +394,16 @@ export class ReplKernelManager {
 				this.appendKernelDiagnostic(`kernel stderr log write failed: ${errorMessage(error)}`);
 			}
 		});
-		if (stderrLogFd !== undefined) {
-			child.stderr?.once("close", () => closeSync(stderrLogFd));
-		}
+		// A kernel that dies mid-character leaves bytes buffered in the decoder;
+		// flush them so the tail keeps the truncated final character. Both events,
+		// because each can be the only one to precede the tail build: 'end' beats
+		// 'exit' on natural EOF (whose 'close' emission can land after it), while
+		// a drain-destroyed stream skips 'end'. The second end() returns "".
+		child.stderr?.once("end", () => this.appendKernelStderrText(stderrDecoder.end()));
+		child.stderr?.once("close", () => {
+			this.appendKernelStderrText(stderrDecoder.end());
+			if (stderrLogFd !== undefined) closeSync(stderrLogFd);
+		});
 		child.once("exit", () => {
 			// Drain already-buffered stderr to quiescence, then destroy the stream:
 			// its EOF may never come (an orphaned grandchild can inherit the write
