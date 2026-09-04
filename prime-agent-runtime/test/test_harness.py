@@ -134,6 +134,30 @@ class HarnessStateTest(unittest.TestCase):
             self.assertIn("receiver_role='child'", overview)
             self.assertIn("refinements: 1", reloaded.overview())
 
+    def test_save_failure_preserves_previous_state_on_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Durable fact", "Written before the crash.")
+
+            crashing = HarnessState(state.file_path)
+            original_dump = json.dump
+
+            def torn_dump(data: object, fh: object, **kwargs: object) -> None:
+                fh.write('{"schema": 1, "entr')  # type: ignore[attr-defined]
+                raise OSError("disk full")
+
+            json.dump = torn_dump  # type: ignore[assignment]
+            try:
+                with self.assertRaises(OSError):
+                    crashing.create_memory("Doomed fact", "Interrupted mid-write.")
+            finally:
+                json.dump = original_dump
+
+            # The interrupted save must not have truncated the durable state.
+            reloaded = HarnessState(state.file_path)
+            titles = [entry.title for entry in reloaded.entries["memory"].values()]
+            self.assertEqual(titles, ["Durable fact"])
+
     def test_load_ignores_unknown_json_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "harness_state.json"

@@ -295,8 +295,14 @@ class HarnessState:
             },
             "refinements": [asdict(event) for event in self.refinements],
         }
-        with self.file_path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        # Atomic replace: a concurrent reader must never observe a truncated file.
+        temp_path = self.file_path.with_name(f"{self.file_path.name}.{os.getpid()}.tmp")
+        try:
+            with temp_path.open("w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(temp_path, self.file_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
         self._loaded_mtime = self._disk_mtime()
         return self
 
