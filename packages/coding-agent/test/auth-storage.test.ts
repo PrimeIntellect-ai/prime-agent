@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 
 const renameFault = vi.hoisted(() => ({ error: undefined as Error | undefined }));
+const absenceIllusion = vi.hoisted(() => ({ paths: new Set<string>() }));
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
 	return {
@@ -14,6 +15,10 @@ vi.mock("node:fs", async (importOriginal) => {
 		renameSync: (from: Parameters<typeof actual.renameSync>[0], to: Parameters<typeof actual.renameSync>[1]) => {
 			if (renameFault.error && String(to).endsWith("auth.json")) throw renameFault.error;
 			return actual.renameSync(from, to);
+		},
+		existsSync: (path: Parameters<typeof actual.existsSync>[0]) => {
+			if (absenceIllusion.paths.has(String(path))) return false;
+			return actual.existsSync(path);
 		},
 	};
 });
@@ -963,6 +968,23 @@ describe("AuthStorage", () => {
 	});
 
 	describe("persistence semantics", () => {
+		test("initialization never replaces credentials another process already saved", () => {
+			authStorage = AuthStorage.create(authJsonPath);
+			// A rival process persists credentials between the absence check and the write.
+			writeAuthJson({ anthropic: { type: "api_key", key: "already-saved" } });
+			absenceIllusion.paths.add(authJsonPath);
+
+			try {
+				const backend = (authStorage as unknown as { storage: { ensureFileExists(): void } }).storage;
+				backend.ensureFileExists();
+			} finally {
+				absenceIllusion.paths.delete(authJsonPath);
+			}
+
+			const onDisk = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<string, { key: string }>;
+			expect(onDisk.anthropic.key).toBe("already-saved");
+		});
+
 		test("a write failing at the replace boundary leaves the previous credentials intact", () => {
 			writeAuthJson({ anthropic: { type: "api_key", key: "old-key" } });
 			authStorage = AuthStorage.create(authJsonPath);

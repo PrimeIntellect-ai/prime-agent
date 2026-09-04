@@ -587,10 +587,11 @@ async function parseEntriesFromBufferAsync(buffer: Buffer): Promise<FileEntry[]>
 
 // Crash damage (torn tail, zero-filled append) poisons the NEXT append into the
 // same physical line, so the file is repaired once at open, not tolerated in memory.
-export function repairJsonlDamage(filePath: string): void {
+function repairJsonlDamage(filePath: string): void {
+	const targetPath = realpathIfPresent(filePath);
 	let buffer: Buffer;
 	try {
-		buffer = readFileSync(filePath);
+		buffer = readFileSync(targetPath);
 	} catch {
 		return;
 	}
@@ -635,11 +636,16 @@ export function repairJsonlDamage(filePath: string): void {
 		start = end + 1;
 	}
 	if (!dirty) return;
-	const metadata = statMetadataIfPresent(filePath);
+	const metadata = statMetadataIfPresent(targetPath);
 	const content = keptLines.length > 0 ? `${keptLines.map((kept) => kept.toString("utf8")).join("\n")}\n` : "";
-	writeFileAtomicSync(filePath, content, metadata === undefined ? {} : { mode: metadata.mode });
+	writeFileAtomicSync(targetPath, content, {
+		...(metadata === undefined ? {} : { mode: metadata.mode }),
+		beforeRename: (tempPath) => {
+			if (metadata !== undefined) chownSync(tempPath, metadata.uid, metadata.gid);
+		},
+	});
 	console.error(
-		`Repaired crash damage in ${filePath}: recovered ${recoveredNulLines} zero-filled line(s), dropped ${droppedLines} unrecoverable line(s)${repairedTail ? ", restored the trailing newline" : ""}`,
+		`Repaired crash damage in ${targetPath}: recovered ${recoveredNulLines} zero-filled line(s), dropped ${droppedLines} unrecoverable line(s)${repairedTail ? ", restored the trailing newline" : ""}`,
 	);
 }
 

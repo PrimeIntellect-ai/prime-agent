@@ -44,7 +44,14 @@ export function writeFileAtomicSync(path: string, data: string, options: WriteFi
 	try {
 		const descriptor = options.mode === undefined ? openSync(tempPath, "wx") : openSync(tempPath, "wx", options.mode);
 		try {
-			writeSync(descriptor, data);
+			// writeSync may return a short count without throwing; a partial temp must never be renamed in.
+			const bytes = Buffer.from(data, "utf8");
+			let offset = 0;
+			while (offset < bytes.length) {
+				const written = writeSync(descriptor, bytes, offset, bytes.length - offset);
+				if (written <= 0) throw new Error(`Short write persisting ${path}`);
+				offset += written;
+			}
 			if (options.fsync) fsyncSync(descriptor);
 		} finally {
 			closeSync(descriptor);

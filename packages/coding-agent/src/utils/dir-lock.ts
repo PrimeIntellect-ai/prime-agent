@@ -26,26 +26,43 @@ export async function tryAcquireDirLock(
 		if (code !== "EEXIST" && code !== "ENOTEMPTY" && code !== "EPERM" && code !== "EACCES") {
 			throw error;
 		}
-		let ownerPid: number | undefined;
+		let judgedPid: string | undefined;
 		try {
-			const parsed = Number.parseInt(readFileSync(join(lockDir, "pid"), "utf8").trim(), 10);
-			ownerPid = Number.isFinite(parsed) ? parsed : undefined;
+			judgedPid = readFileSync(join(lockDir, "pid"), "utf8");
 		} catch {
 			// The owner judgment for a missing or unreadable pid belongs to the caller.
 		}
-		if (await ownerAlive(ownerPid)) {
+		const parsed = judgedPid === undefined ? Number.NaN : Number.parseInt(judgedPid.trim(), 10);
+		if (await ownerAlive(Number.isFinite(parsed) ? parsed : undefined)) {
 			return "held";
 		}
 		const staleDirectory = `${lockDir}.stale-${process.pid}-${token}`;
 		try {
 			renameSync(lockDir, staleDirectory);
-			rmSync(staleDirectory, { recursive: true, force: true });
 		} catch (reclaimError) {
 			// ENOENT: a racing reclaimer moved it first.
 			if ((reclaimError as NodeJS.ErrnoException).code !== "ENOENT") {
 				throw reclaimError;
 			}
+			return "reclaimed";
 		}
+		// Identity check: the lock may have changed owners between the staleness
+		// judgment and the rename; a moved LIVE lock must be put back, not deleted.
+		let movedPid: string | undefined;
+		try {
+			movedPid = readFileSync(join(staleDirectory, "pid"), "utf8");
+		} catch {
+			// Unreadable after the move: treat as the judged-stale lock.
+		}
+		if (movedPid !== judgedPid) {
+			try {
+				renameSync(staleDirectory, lockDir);
+				return "held";
+			} catch {
+				// A third acquirer already owns the path; discard the displaced copy.
+			}
+		}
+		rmSync(staleDirectory, { recursive: true, force: true });
 		return "reclaimed";
 	}
 }

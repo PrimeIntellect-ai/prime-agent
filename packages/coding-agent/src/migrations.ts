@@ -79,7 +79,7 @@ export function migrateAuthToAuthJson(): string[] {
 	// The destination must be durable before any source is destroyed.
 	if (Object.keys(migrated).length > 0) {
 		mkdirSync(dirname(authPath), { recursive: true });
-		writeFileAtomicSync(authPath, JSON.stringify(migrated, null, 2), { mode: 0o600 });
+		writeFileAtomicSync(authPath, JSON.stringify(migrated, null, 2), { mode: 0o600, fsync: true, fsyncDir: true });
 	}
 	// Source cleanup stays best-effort: with auth.json durable, a leftover source is
 	// inert (the migration skips when auth.json exists).

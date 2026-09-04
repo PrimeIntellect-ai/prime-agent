@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 from typing import Any, Literal
 
 HarnessKind = Literal["prompt", "memory", "skill", "subagent"]
@@ -296,10 +298,14 @@ class HarnessState:
             "refinements": [asdict(event) for event in self.refinements],
         }
         # Atomic replace: a concurrent reader must never observe a truncated file.
-        temp_path = self.file_path.with_name(f"{self.file_path.name}.{os.getpid()}.tmp")
+        temp_path = self.file_path.with_name(f"{self.file_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
         try:
             with temp_path.open("w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
+            try:
+                temp_path.chmod(stat.S_IMODE(os.stat(self.file_path).st_mode))
+            except FileNotFoundError:
+                pass
             os.replace(temp_path, self.file_path)
         finally:
             temp_path.unlink(missing_ok=True)

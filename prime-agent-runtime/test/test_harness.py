@@ -158,6 +158,16 @@ class HarnessStateTest(unittest.TestCase):
             titles = [entry.title for entry in reloaded.entries["memory"].values()]
             self.assertEqual(titles, ["Durable fact"])
 
+    def test_save_preserves_restrictive_file_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("First", "Creates the file.")
+            os.chmod(state.file_path, 0o600)
+
+            state.create_memory("Second", "Replaces the file.")
+
+            self.assertEqual(os.stat(state.file_path).st_mode & 0o777, 0o600)
+
     def test_load_ignores_unknown_json_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "harness_state.json"
