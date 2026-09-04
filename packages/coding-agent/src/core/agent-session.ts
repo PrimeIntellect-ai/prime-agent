@@ -193,7 +193,6 @@ import {
 	isPermanentProviderFailureKind,
 	providerRetryDelay,
 	providerRetryPolicy,
-	providerStreamFailureDetails,
 	providerStreamFailureKind,
 	providerStreamFailureRetryAfterMs,
 } from "./provider-retry.js";
@@ -11000,10 +10999,6 @@ export class AgentSession {
 		return isAgentLifecycleFailure(message);
 	}
 
-	private _getProviderStreamFailureDetails(message: AssistantMessage): Record<string, unknown> | undefined {
-		return providerStreamFailureDetails(message);
-	}
-
 	private _getProviderStreamFailureKind(message: AssistantMessage): string | undefined {
 		return providerStreamFailureKind(message);
 	}
@@ -11014,9 +11009,7 @@ export class AgentSession {
 
 	private _isConcreteProviderAuthFailure(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
-		// Trust only the provider's structured classification: every provider
-		// records provider_stream_failure diagnostics, so message-text sniffing
-		// would only add false positives (e.g. region-block 403s).
+		// Only the provider's structured classification counts as an auth failure.
 		return this._getProviderStreamFailureKind(message) === "auth";
 	}
 
