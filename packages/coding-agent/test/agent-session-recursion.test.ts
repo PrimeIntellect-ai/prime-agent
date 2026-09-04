@@ -248,6 +248,51 @@ describe("AgentSession rlm recursion", () => {
 		return session;
 	}
 
+	/** Session with a zero-usage parent assistant whose child answers a tool loop: usages[i] per request, tool calls until the last, then stop. */
+	function createToolLoopSession(requests: number, usages: Usage[], onRequest?: (toolResultCount: number) => void) {
+		const tool = {
+			name: "echo",
+			description: "Echo a value",
+			label: "echo",
+			parameters: Type.Object({ value: Type.String() }),
+			execute: async (_toolCallId: string, params: { value: string }) => ({
+				content: [{ type: "text" as const, text: params.value }],
+				details: {},
+			}),
+		};
+		const root = createSession({
+			customTools: [tool],
+			streamFn: (_model, context) => {
+				const toolResultCount = context.messages.filter((message) => message.role === "toolResult").length;
+				onRequest?.(toolResultCount);
+				const last = toolResultCount >= requests - 1;
+				const stream = createAssistantMessageEventStream();
+				queueMicrotask(() => {
+					const message = last
+						? assistantMessage("done", usages[toolResultCount])
+						: {
+								...assistantMessage("", usages[toolResultCount]),
+								content: [
+									{
+										type: "toolCall" as const,
+										id: `echo-${toolResultCount}`,
+										name: "echo",
+										arguments: { value: "ok" },
+									},
+								],
+								stopReason: "toolUse" as const,
+							};
+					stream.push({ type: "done", reason: last ? "stop" : "toolUse", message });
+				});
+				return stream;
+			},
+		});
+		const parentAssistant = assistantMessage("running ipython", usage(0, 0));
+		root.agent.state.messages.push(parentAssistant);
+		root.sessionManager.appendMessage(parentAssistant);
+		return root;
+	}
+
 	function createAbortInsensitiveChild(): {
 		child: AgentSession;
 		completion: ReturnType<typeof deferred<void>>;
@@ -2463,44 +2508,7 @@ describe("AgentSession rlm recursion", () => {
 	});
 
 	it("coalesces the admitted task's tool-loop turns into one flushed spawn-usage attribution", async () => {
-		const tool = {
-			name: "echo",
-			description: "Echo a value",
-			label: "echo",
-			parameters: Type.Object({ value: Type.String() }),
-			execute: async (_toolCallId: string, params: { value: string }) => ({
-				content: [{ type: "text" as const, text: params.value }],
-				details: {},
-			}),
-		};
-		const root = createSession({
-			customTools: [tool],
-			streamFn: (_model, context) => {
-				const toolResultCount = context.messages.filter((message) => message.role === "toolResult").length;
-				const stream = createAssistantMessageEventStream();
-				queueMicrotask(() => {
-					const message =
-						toolResultCount === 0
-							? {
-									...assistantMessage("", usage(1, 1)),
-									content: [
-										{ type: "toolCall" as const, id: "echo-1", name: "echo", arguments: { value: "ok" } },
-									],
-									stopReason: "toolUse" as const,
-								}
-							: assistantMessage("done", usage(2, 2));
-					stream.push({
-						type: "done",
-						reason: toolResultCount === 0 ? "toolUse" : "stop",
-						message,
-					});
-				});
-				return stream;
-			},
-		});
-		const parentAssistant = assistantMessage("running ipython", usage(0, 0));
-		root.agent.state.messages.push(parentAssistant);
-		root.sessionManager.appendMessage(parentAssistant);
+		const root = createToolLoopSession(2, [usage(1, 1), usage(2, 2)]);
 
 		await root.runRlmChild("use a tool");
 		await vi.waitFor(() => {
@@ -2517,54 +2525,11 @@ describe("AgentSession rlm recursion", () => {
 	it("flushes a stale pending usage batch before extending it, bounding crash loss", async () => {
 		vi.useFakeTimers({ toFake: ["Date"] });
 		try {
-			const tool = {
-				name: "echo",
-				description: "Echo a value",
-				label: "echo",
-				parameters: Type.Object({ value: Type.String() }),
-				execute: async (_toolCallId: string, params: { value: string }) => ({
-					content: [{ type: "text" as const, text: params.value }],
-					details: {},
-				}),
-			};
-			const root = createSession({
-				customTools: [tool],
-				streamFn: (_model, context) => {
-					const toolResultCount = context.messages.filter((message) => message.role === "toolResult").length;
-					if (toolResultCount === 2) {
-						// The pending batch from the first two completions is now older
-						// than the staleness bound when the third completion lands.
-						vi.setSystemTime(Date.now() + 61_000);
-					}
-					const stream = createAssistantMessageEventStream();
-					queueMicrotask(() => {
-						const message =
-							toolResultCount < 2
-								? {
-										...assistantMessage("", usage(toolResultCount + 1, toolResultCount + 1)),
-										content: [
-											{
-												type: "toolCall" as const,
-												id: `echo-${toolResultCount}`,
-												name: "echo",
-												arguments: { value: "ok" },
-											},
-										],
-										stopReason: "toolUse" as const,
-									}
-								: assistantMessage("done", usage(4, 4));
-						stream.push({
-							type: "done",
-							reason: toolResultCount < 2 ? "toolUse" : "stop",
-							message,
-						});
-					});
-					return stream;
-				},
+			// The batch from the first two completions is older than the staleness
+			// bound when the third lands.
+			const root = createToolLoopSession(3, [usage(1, 1), usage(2, 2), usage(4, 4)], (toolResultCount) => {
+				if (toolResultCount === 2) vi.setSystemTime(Date.now() + 61_000);
 			});
-			const parentAssistant = assistantMessage("running ipython", usage(0, 0));
-			root.agent.state.messages.push(parentAssistant);
-			root.sessionManager.appendMessage(parentAssistant);
 
 			await root.runRlmChild("use a tool");
 			await vi.waitFor(() => {
@@ -2576,25 +2541,19 @@ describe("AgentSession rlm recursion", () => {
 					[4, 4],
 				]);
 				expect(attributions.map((entry) => entry.origin)).toEqual(["spawn_task", "spawn_task"]);
-				// Each persisted aggregate covers exactly the completions whose
-				// childUsage is durable with or before it, so a replay at any
-				// prefix reproduces the parent's own spend exactly.
+				// Each aggregate covers exactly the completions durable with or
+				// before it, so any prefix replays to the exact own spend.
 				expect(attributions.map((entry) => entry.aggregateUsage.input)).toEqual([3, 7]);
 			});
 
 			const sessionFile = root.sessionManager.getSessionFile();
 			if (!sessionFile) throw new Error("parent session file was not created");
-			const reloaded = SessionManager.open(sessionFile, join(tempDir, "sessions")).getEntries();
-			const reloadedParent = reloaded.find(
-				(entry) => entry.type === "message" && entry.message.role === "assistant",
-			);
-			if (!reloadedParent || reloadedParent.type !== "message" || reloadedParent.message.role !== "assistant") {
-				throw new Error("parent assistant entry was not reloaded");
-			}
-			const reloadedChildTotal = reloaded
-				.filter((entry) => entry.type === "child_usage_attributed")
-				.reduce((total, entry) => total + entry.childUsage.input, 0);
-			expect(reloadedParent.message.usage.input - reloadedChildTotal).toBe(0);
+			const reloadedAttributions = SessionManager.open(sessionFile, join(tempDir, "sessions"))
+				.getEntries()
+				.filter((entry) => entry.type === "child_usage_attributed");
+			const childTotal = reloadedAttributions.reduce((total, entry) => total + entry.childUsage.input, 0);
+			// Parent own spend is zero here, so the reloaded aggregate must equal the summed child usage.
+			expect(reloadedAttributions.at(-1)?.aggregateUsage.input).toBe(childTotal);
 		} finally {
 			vi.useRealTimers();
 		}

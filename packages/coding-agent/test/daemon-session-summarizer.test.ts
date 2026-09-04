@@ -208,88 +208,73 @@ describe("daemon session summarizer", () => {
 			expect(onStatusChanged).toHaveBeenCalledOnce();
 		});
 
-		test("a failing idle generation never persists its fabricated fallback and stops retrying", async () => {
-			const appendAgentStatus = vi.fn();
-			const state = makeState({
-				messages: [userMessage("hi")],
-				isSessionActive: false,
-				appendAgentStatus,
-			});
-			const generate = vi.fn(async () => undefined);
+		function failingIdleSetup(
+			stateOptions: Parameters<typeof makeState>[0],
+			generateFn: () => Promise<undefined> = async () => undefined,
+		) {
+			const state = makeState(stateOptions);
+			const generate = vi.fn(generateFn);
 			const summarizer = new DaemonSessionSummarizer(() => [state], undefined, generate);
-			const internal = summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> };
+			const internal = summarizer as unknown as {
+				summarize(state: ActiveSessionState): Promise<void>;
+				failedIdleGenerations: Map<string, unknown>;
+			};
+			return { state, generate, summarizer, internal };
+		}
 
-			for (let sweep = 0; sweep < 5; sweep++) {
-				await internal.summarize(state);
-			}
-
-			expect(appendAgentStatus).not.toHaveBeenCalled();
-			expect(generate).toHaveBeenCalledTimes(3);
-			expect(state.summaryState).toEqual({ summary: "", taskState: "needs_input", basedOnMessageCount: 1 });
-		});
-
-		test("the idle retry ceiling re-arms when branch navigation moves the leaf at the same length", async () => {
-			let leafId = "leaf-a";
-			const state = makeState({
-				messages: [userMessage("hi")],
-				isSessionActive: false,
-				getLeafId: () => leafId,
-			});
-			const generate = vi.fn(async () => undefined);
-			const summarizer = new DaemonSessionSummarizer(() => [state], undefined, generate);
-			const internal = summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> };
-
-			for (let sweep = 0; sweep < 4; sweep++) {
-				await internal.summarize(state);
-			}
-			expect(generate).toHaveBeenCalledTimes(3);
-
-			// Branch navigation to a sibling can keep the count and even the
-			// message timestamps; only the leaf entry id reliably moves.
-			leafId = "leaf-b";
-			await internal.summarize(state);
-			expect(generate).toHaveBeenCalledTimes(4);
-		});
-
-		test("the idle retry ceiling expires after the backoff so external failures recover", async () => {
+		// Warmup pins the ceiling itself: repeated failing idle sweeps stop paying
+		// after three attempts and never persist the fabricated in-memory fallback.
+		test.each([
+			{
+				rearm: "branch navigation moving the leaf at the same length",
+				trigger: (leaf: { id: string }) => {
+					leaf.id = "leaf-b";
+				},
+			},
+			{
+				rearm: "the backoff elapsing so external failures recover",
+				trigger: () => vi.setSystemTime(Date.now() + 31 * 60_000),
+			},
+		])("the exhausted idle retry ceiling re-arms on $rearm", async ({ trigger }) => {
 			vi.useFakeTimers();
 			try {
-				const state = makeState({ messages: [userMessage("hi")], isSessionActive: false });
-				const generate = vi.fn(async () => undefined);
-				const summarizer = new DaemonSessionSummarizer(() => [state], undefined, generate);
-				const internal = summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> };
+				const appendAgentStatus = vi.fn();
+				const leaf = { id: "leaf-a" };
+				const { state, generate, internal } = failingIdleSetup({
+					messages: [userMessage("hi")],
+					isSessionActive: false,
+					appendAgentStatus,
+					getLeafId: () => leaf.id,
+				});
 
-				for (let sweep = 0; sweep < 4; sweep++) {
+				for (let sweep = 0; sweep < 5; sweep++) {
 					await internal.summarize(state);
 				}
 				expect(generate).toHaveBeenCalledTimes(3);
+				expect(appendAgentStatus).not.toHaveBeenCalled();
+				expect(state.summaryState).toEqual({ summary: "", taskState: "needs_input", basedOnMessageCount: 1 });
 
-				vi.setSystemTime(Date.now() + 31 * 60_000);
+				trigger(leaf);
 				await internal.summarize(state);
 				expect(generate).toHaveBeenCalledTimes(4);
+				expect(appendAgentStatus).not.toHaveBeenCalled();
 			} finally {
 				vi.useRealTimers();
 			}
 		});
 
 		test("a forget() during an in-flight idle generation leaves no failure record behind", async () => {
-			const state = makeState({ messages: [userMessage("hi")], isSessionActive: false });
 			let release!: () => void;
 			const gate = new Promise<void>((resolveGate) => {
 				release = resolveGate;
 			});
-			const summarizer = new DaemonSessionSummarizer(
-				() => [state],
-				undefined,
+			const { state, summarizer, internal } = failingIdleSetup(
+				{ messages: [userMessage("hi")], isSessionActive: false },
 				async () => {
 					await gate;
 					return undefined;
 				},
 			);
-			const internal = summarizer as unknown as {
-				summarize(state: ActiveSessionState): Promise<void>;
-				failedIdleGenerations: Map<string, unknown>;
-			};
 
 			const pass = internal.summarize(state);
 			summarizer.forget("active-1");

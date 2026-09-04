@@ -1043,8 +1043,7 @@ function waitForPromiseOrAbort<T>(
 	});
 }
 
-// Bounds how much accumulated child usage a parent process crash can lose
-// before the batch is flushed durable.
+// Bounds how much accumulated child usage a parent process crash can lose.
 const RLM_CHILD_USAGE_FLUSH_MAX_PENDING_MS = 60_000;
 
 /** Label a child completion's usage by the nearest preceding prompt that triggered it. */
@@ -10626,13 +10625,9 @@ export class AgentSession {
 		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
 		const startedAt = Date.now();
 		const parentAssistantForUsage = this._findLastAssistantMessage();
-		// Child completions accumulate per origin and flush one durable attribution
-		// entry per settle boundary (child agent_end, run settlement) instead of
-		// one journal append per child assistant message. Crash durability is
-		// bounded, not per-message: a batch older than the staleness bound flushes
-		// at the next checkpoint (accumulation, tool start) or on the wall-clock
-		// timer backstop, so process death loses at most that window of
-		// accumulated child usage.
+		// Child completions accumulate per origin and flush one durable entry per
+		// settle boundary (agent_end, settlement); the staleness checkpoints and
+		// timer bound crash loss to one window of accumulated usage.
 		const pendingChildUsage = new Map<ChildUsageAttributionEntry["origin"], Usage>();
 		let pendingChildUsageSince = 0;
 		let pendingChildUsageTimer: ReturnType<typeof setTimeout> | undefined;
@@ -10786,18 +10781,15 @@ export class AgentSession {
 					} else if (event.type === "message_end" && event.message.role === "assistant") {
 						const assistant = event.message as AssistantMessage;
 						if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
-							// A stale batch must flush before this completion folds into the
-							// parent aggregate: the persisted aggregateUsage of an entry may
-							// only include completions whose childUsage is durable with or
-							// before it, or replay would inflate the parent's own spend.
+							// Flush before the fold: a persisted aggregate may only include
+							// completions whose childUsage is durable with or before it.
 							flushPendingChildUsageIfStale();
 							attributeChildUsage(parentAssistantForUsage?.usage ?? emptyUsage(), assistant.usage);
 							if (parentAssistantForUsage) {
 								const origin = rlmChildUsageOrigin(child.messages, assistant);
 								if (pendingChildUsage.size === 0) {
 									pendingChildUsageSince = Date.now();
-									// Wall-clock backstop: a long tool execution has no event
-									// checkpoints, so the batch flushes on time regardless.
+									// Wall-clock backstop for long tool runs without checkpoints.
 									pendingChildUsageTimer = setTimeout(
 										flushPendingChildUsageAttribution,
 										RLM_CHILD_USAGE_FLUSH_MAX_PENDING_MS,

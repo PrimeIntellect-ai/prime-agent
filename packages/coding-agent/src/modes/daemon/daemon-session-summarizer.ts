@@ -8,9 +8,8 @@ import type { ActiveSessionState } from "./active-session-state.js";
 const SWEEP_INTERVAL_MS = 25_000;
 // Collapse a tool-use loop's rapid turn_end bursts into one summarization.
 const SETTLE_DEBOUNCE_MS = 2_000;
-// An idle session whose generation keeps failing on the same settled content
-// stops retrying (and paying for model calls) until new activity arrives or
-// the backoff elapses, so transient outages and late credentials recover.
+// Idle generations stop retrying (and paying) on unchanged content until the
+// backoff elapses, so transient outages and late credentials still recover.
 const IDLE_GENERATION_ATTEMPT_LIMIT = 3;
 const IDLE_GENERATION_RETRY_BACKOFF_MS = 30 * 60_000;
 
@@ -318,11 +317,8 @@ export class DaemonSessionSummarizer {
 		if (contentUnchanged && !isWorking && !owesIdleVerdict && !owesSummary) {
 			return;
 		}
-		// A generation that keeps failing on identical idle content will keep
-		// failing: stop re-attempting until the content changes or the backoff
-		// elapses for externally-caused failures. The leaf entry id is the branch
-		// tip identity: appends, edits, and branch navigation all move it, while
-		// message counts and timestamps can collide across sibling branches.
+		// The leaf entry id is the branch-tip identity (appends, edits, and branch
+		// navigation all move it; counts and timestamps collide across siblings).
 		const contentKey = `${session.sessionManager.getLeafId() ?? "root"}:${messageCount}`;
 		const failed = this.failedIdleGenerations.get(id);
 		if (
@@ -349,8 +345,7 @@ export class DaemonSessionSummarizer {
 			if (generated) {
 				this.failedIdleGenerations.delete(id);
 			} else if (!isWorking && !controller.signal.aborted) {
-				// The aborted check keeps a forget() during the call from
-				// repopulating the map for a closed session.
+				// The aborted check keeps a racing forget() from repopulating the map.
 				this.failedIdleGenerations.set(id, {
 					contentKey,
 					attempts: failed?.contentKey === contentKey ? failed.attempts + 1 : 1,
@@ -394,9 +389,8 @@ export class DaemonSessionSummarizer {
 				previous?.taskState !== status.taskState ||
 				(!isWorking && previous?.basedOnMessageCount !== status.basedOnMessageCount);
 			state.summaryState = status;
-			// Persist only settled idle verdicts from real classifications, never
-			// mid-stream, never a fabricated fallback, and never a duplicate of the
-			// latest persisted entry: an idle sweep must not grow the journal.
+			// Persist only settled idle verdicts from real classifications that
+			// differ from the latest persisted entry: idle sweeps must not grow the journal.
 			if (!isWorking && generated) {
 				const persisted = session.sessionManager.getLatestAgentStatus();
 				if (
