@@ -9,8 +9,10 @@ const SWEEP_INTERVAL_MS = 25_000;
 // Collapse a tool-use loop's rapid turn_end bursts into one summarization.
 const SETTLE_DEBOUNCE_MS = 2_000;
 // An idle session whose generation keeps failing on the same settled content
-// stops retrying (and paying for model calls) until new activity arrives.
+// stops retrying (and paying for model calls) until new activity arrives or
+// the backoff elapses, so transient outages and late credentials recover.
 const IDLE_GENERATION_ATTEMPT_LIMIT = 3;
+const IDLE_GENERATION_RETRY_BACKOFF_MS = 30 * 60_000;
 
 const SUMMARY_MODEL_PROVIDER = "prime-inference";
 const SUMMARY_MODEL_ID = "qwen/qwen3-30b-a3b-instruct-2507";
@@ -210,8 +212,11 @@ export class DaemonSessionSummarizer {
 	private readonly inFlight = new Map<string, AbortController>();
 	// Sessions requested while one was running; get one more pass on completion.
 	private readonly rerunRequested = new Set<string>();
-	// Failed idle generations per session, keyed to the message count they saw.
-	private readonly failedIdleGenerations = new Map<string, { messageCount: number; attempts: number }>();
+	// Failed idle generations per session, keyed to the settled content they saw.
+	private readonly failedIdleGenerations = new Map<
+		string,
+		{ contentKey: string; attempts: number; lastFailureAt: number }
+	>();
 
 	constructor(
 		private readonly listSessions: () => readonly ActiveSessionState[],
@@ -314,9 +319,17 @@ export class DaemonSessionSummarizer {
 			return;
 		}
 		// A generation that keeps failing on identical idle content will keep
-		// failing: stop re-attempting until the session produces new messages.
+		// failing: stop re-attempting until the content changes (count plus last
+		// timestamp, so a branch/edit back to the same length re-arms) or the
+		// backoff elapses for externally-caused failures.
+		const contentKey = `${messageCount}:${messages[messageCount - 1]?.timestamp ?? 0}`;
 		const failed = this.failedIdleGenerations.get(id);
-		if (!isWorking && failed?.messageCount === messageCount && failed.attempts >= IDLE_GENERATION_ATTEMPT_LIMIT) {
+		if (
+			!isWorking &&
+			failed?.contentKey === contentKey &&
+			failed.attempts >= IDLE_GENERATION_ATTEMPT_LIMIT &&
+			Date.now() - failed.lastFailureAt < IDLE_GENERATION_RETRY_BACKOFF_MS
+		) {
 			return;
 		}
 		// Include the in-progress message so a long streaming turn gets a live recap.
@@ -334,10 +347,13 @@ export class DaemonSessionSummarizer {
 			});
 			if (generated) {
 				this.failedIdleGenerations.delete(id);
-			} else if (!isWorking) {
+			} else if (!isWorking && !controller.signal.aborted) {
+				// The aborted check keeps a forget() during the call from
+				// repopulating the map for a closed session.
 				this.failedIdleGenerations.set(id, {
-					messageCount,
-					attempts: failed?.messageCount === messageCount ? failed.attempts + 1 : 1,
+					contentKey,
+					attempts: failed?.contentKey === contentKey ? failed.attempts + 1 : 1,
+					lastFailureAt: Date.now(),
 				});
 			}
 			// A failed classification on an idle session would spin at "working"

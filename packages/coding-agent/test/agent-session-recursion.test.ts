@@ -2514,6 +2514,74 @@ describe("AgentSession rlm recursion", () => {
 		});
 	});
 
+	it("flushes a stale pending usage batch before extending it, bounding crash loss", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			const tool = {
+				name: "echo",
+				description: "Echo a value",
+				label: "echo",
+				parameters: Type.Object({ value: Type.String() }),
+				execute: async (_toolCallId: string, params: { value: string }) => ({
+					content: [{ type: "text" as const, text: params.value }],
+					details: {},
+				}),
+			};
+			const root = createSession({
+				customTools: [tool],
+				streamFn: (_model, context) => {
+					const toolResultCount = context.messages.filter((message) => message.role === "toolResult").length;
+					if (toolResultCount === 2) {
+						// The pending batch from the first two completions is now older
+						// than the staleness bound when the third completion lands.
+						vi.setSystemTime(Date.now() + 61_000);
+					}
+					const stream = createAssistantMessageEventStream();
+					queueMicrotask(() => {
+						const message =
+							toolResultCount < 2
+								? {
+										...assistantMessage("", usage(toolResultCount + 1, toolResultCount + 1)),
+										content: [
+											{
+												type: "toolCall" as const,
+												id: `echo-${toolResultCount}`,
+												name: "echo",
+												arguments: { value: "ok" },
+											},
+										],
+										stopReason: "toolUse" as const,
+									}
+								: assistantMessage("done", usage(4, 4));
+						stream.push({
+							type: "done",
+							reason: toolResultCount < 2 ? "toolUse" : "stop",
+							message,
+						});
+					});
+					return stream;
+				},
+			});
+			const parentAssistant = assistantMessage("running ipython", usage(0, 0));
+			root.agent.state.messages.push(parentAssistant);
+			root.sessionManager.appendMessage(parentAssistant);
+
+			await root.runRlmChild("use a tool");
+			await vi.waitFor(() => {
+				const attributions = root.sessionManager
+					.getEntries()
+					.filter((entry) => entry.type === "child_usage_attributed");
+				expect(attributions.map((entry) => [entry.childUsage.input, entry.childUsage.output])).toEqual([
+					[3, 3],
+					[4, 4],
+				]);
+				expect(attributions.map((entry) => entry.origin)).toEqual(["spawn_task", "spawn_task"]);
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("gets and persists per-chat max-depth changes without transcript messages", async () => {
 		const root = createSession();
 		const originalMessages = [...root.messages];

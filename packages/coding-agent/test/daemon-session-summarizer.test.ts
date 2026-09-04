@@ -226,6 +226,72 @@ describe("daemon session summarizer", () => {
 			expect(state.summaryState).toEqual({ summary: "", taskState: "needs_input", basedOnMessageCount: 1 });
 		});
 
+		test("the idle retry ceiling re-arms when the settled content changes at the same length", async () => {
+			const state = makeState({ messages: [userMessage("hi")], isSessionActive: false });
+			const generate = vi.fn(async () => undefined);
+			const summarizer = new DaemonSessionSummarizer(() => [state], undefined, generate);
+			const internal = summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> };
+
+			for (let sweep = 0; sweep < 4; sweep++) {
+				await internal.summarize(state);
+			}
+			expect(generate).toHaveBeenCalledTimes(3);
+
+			// A branch/edit can land back on the same message count with new content.
+			const replacement = { ...userMessage("hi again"), timestamp: 42 } as AgentMessage;
+			(state.runtime.session as unknown as { messages: AgentMessage[] }).messages = [replacement];
+			await internal.summarize(state);
+			expect(generate).toHaveBeenCalledTimes(4);
+		});
+
+		test("the idle retry ceiling expires after the backoff so external failures recover", async () => {
+			vi.useFakeTimers();
+			try {
+				const state = makeState({ messages: [userMessage("hi")], isSessionActive: false });
+				const generate = vi.fn(async () => undefined);
+				const summarizer = new DaemonSessionSummarizer(() => [state], undefined, generate);
+				const internal = summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> };
+
+				for (let sweep = 0; sweep < 4; sweep++) {
+					await internal.summarize(state);
+				}
+				expect(generate).toHaveBeenCalledTimes(3);
+
+				vi.setSystemTime(Date.now() + 31 * 60_000);
+				await internal.summarize(state);
+				expect(generate).toHaveBeenCalledTimes(4);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		test("a forget() during an in-flight idle generation leaves no failure record behind", async () => {
+			const state = makeState({ messages: [userMessage("hi")], isSessionActive: false });
+			let release!: () => void;
+			const gate = new Promise<void>((resolveGate) => {
+				release = resolveGate;
+			});
+			const summarizer = new DaemonSessionSummarizer(
+				() => [state],
+				undefined,
+				async () => {
+					await gate;
+					return undefined;
+				},
+			);
+			const internal = summarizer as unknown as {
+				summarize(state: ActiveSessionState): Promise<void>;
+				failedIdleGenerations: Map<string, unknown>;
+			};
+
+			const pass = internal.summarize(state);
+			summarizer.forget("active-1");
+			release();
+			await pass;
+
+			expect(internal.failedIdleGenerations.size).toBe(0);
+		});
+
 		test("an idle re-settle matching the latest persisted status appends nothing", async () => {
 			const appendAgentStatus = vi.fn();
 			const persisted: AgentStatus = {

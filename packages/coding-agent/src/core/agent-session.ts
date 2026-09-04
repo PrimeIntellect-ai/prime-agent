@@ -1043,6 +1043,27 @@ function waitForPromiseOrAbort<T>(
 	});
 }
 
+// Bounds how much accumulated child usage a parent process crash can lose
+// before the batch is flushed durable.
+const RLM_CHILD_USAGE_FLUSH_MAX_PENDING_MS = 60_000;
+
+/** Label a child completion's usage by the nearest preceding prompt that triggered it. */
+function rlmChildUsageOrigin(
+	messages: readonly AgentMessage[],
+	assistant: AssistantMessage,
+): ChildUsageAttributionEntry["origin"] {
+	for (let index = messages.lastIndexOf(assistant) - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message.role !== "user" && message.role !== "custom") continue;
+		return message.role === "custom" && isAgentSessionMessage(message)
+			? message.details.id.startsWith("spawn:")
+				? "spawn_task"
+				: "agent_message"
+			: "direct_user";
+	}
+	return "direct_user";
+}
+
 function attributeChildUsage(parentUsage: Usage, childUsage: Usage): void {
 	const parentContextTokens =
 		parentUsage.totalTokens ||
@@ -10605,28 +10626,39 @@ export class AgentSession {
 		if (!requestedSessionName) await this._assertRlmSubagentSessionNameAvailable(sessionName);
 		const startedAt = Date.now();
 		const parentAssistantForUsage = this._findLastAssistantMessage();
-		// Child completions accumulate in memory and flush one durable attribution
+		// Child completions accumulate per origin and flush one durable attribution
 		// entry per settle boundary (child agent_end, run settlement) instead of
-		// one journal append per child assistant message.
-		let pendingChildUsage: Usage | undefined;
-		let pendingChildUsageOrigin: ChildUsageAttributionEntry["origin"];
+		// one journal append per child assistant message. Crash durability is
+		// bounded, not per-message: a batch older than the staleness bound flushes
+		// before it grows or a tool starts, so process death loses at most that
+		// window of accumulated child usage.
+		const pendingChildUsage = new Map<ChildUsageAttributionEntry["origin"], Usage>();
+		let pendingChildUsageSince = 0;
 		const flushPendingChildUsageAttribution = () => {
-			if (!pendingChildUsage || !parentAssistantForUsage) return;
-			const childUsage = pendingChildUsage;
-			const origin = pendingChildUsageOrigin;
-			pendingChildUsage = undefined;
-			pendingChildUsageOrigin = undefined;
+			if (pendingChildUsage.size === 0 || !parentAssistantForUsage) return;
+			const batches = [...pendingChildUsage.entries()];
+			pendingChildUsage.clear();
 			const parentEntry = this._findAssistantEntryForMessage(parentAssistantForUsage);
 			if (!parentEntry) return;
-			try {
-				this.sessionManager.appendChildUsageAttribution(
-					parentEntry.id,
-					childUsage,
-					parentAssistantForUsage.usage,
-					origin,
-				);
-			} catch {
-				// Attribution is recoverable bookkeeping; a failed append must not break run settlement.
+			for (const [origin, childUsage] of batches) {
+				try {
+					this.sessionManager.appendChildUsageAttribution(
+						parentEntry.id,
+						childUsage,
+						parentAssistantForUsage.usage,
+						origin,
+					);
+				} catch {
+					// Attribution is recoverable bookkeeping; a failed append must not break run settlement.
+				}
+			}
+		};
+		const flushPendingChildUsageIfStale = () => {
+			if (
+				pendingChildUsage.size > 0 &&
+				Date.now() - pendingChildUsageSince >= RLM_CHILD_USAGE_FLUSH_MAX_PENDING_MS
+			) {
+				flushPendingChildUsageAttribution();
 			}
 		};
 		let runningToolCount = 0;
@@ -10750,22 +10782,12 @@ export class AgentSession {
 						if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
 							attributeChildUsage(parentAssistantForUsage?.usage ?? emptyUsage(), assistant.usage);
 							if (parentAssistantForUsage) {
-								if (!pendingChildUsage) {
-									pendingChildUsage = emptyUsage();
-									const messages = child.messages;
-									const assistantIndex = messages.lastIndexOf(assistant);
-									const precedingPrompt = messages
-										.slice(0, assistantIndex)
-										.reverse()
-										.find((message) => message.role === "user" || message.role === "custom");
-									pendingChildUsageOrigin =
-										precedingPrompt?.role === "custom" && isAgentSessionMessage(precedingPrompt)
-											? precedingPrompt.details.id.startsWith("spawn:")
-												? "spawn_task"
-												: "agent_message"
-											: "direct_user";
-								}
-								addAssistantUsage(pendingChildUsage, assistant.usage);
+								flushPendingChildUsageIfStale();
+								const origin = rlmChildUsageOrigin(child.messages, assistant);
+								if (pendingChildUsage.size === 0) pendingChildUsageSince = Date.now();
+								const bucket = pendingChildUsage.get(origin) ?? emptyUsage();
+								addAssistantUsage(bucket, assistant.usage);
+								pendingChildUsage.set(origin, bucket);
 							}
 						}
 						const text = compactRlmText(readAssistantText(assistant));
@@ -10779,6 +10801,7 @@ export class AgentSession {
 							emitChildUpdate();
 						}
 					} else if (event.type === "tool_execution_start") {
+						flushPendingChildUsageIfStale();
 						run.toolUseCount += 1;
 						runningToolCount += 1;
 						run.activity = { kind: "executing", toolName: event.toolName };
