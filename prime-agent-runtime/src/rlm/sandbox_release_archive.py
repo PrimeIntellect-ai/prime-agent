@@ -700,10 +700,35 @@ def _parent_path(path: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+class _TarSink:
+    """Synchronous bounded sink used by the shared archive parser."""
+
+    def compressed_data(self, chunk: memoryview) -> ArchiveErrorCode | None:
+        return None
+
+    def directory(self, path: str, mode: int, entry: ManifestEntry) -> ArchiveErrorCode | None:
+        return None
+
+    def begin_file(
+        self, path: str, mode: int, size: int, entry: ManifestEntry
+    ) -> ArchiveErrorCode | None:
+        return None
+
+    def write_file(self, chunk: memoryview) -> ArchiveErrorCode | None:
+        return None
+
+    def finish_file(self) -> ArchiveErrorCode | None:
+        return None
+
+    def finish_archive(self) -> ArchiveErrorCode | None:
+        return None
+
+
 def _verify_streaming(
     fd: int,
     compressed_limit: int,
     manifest: Manifest,
+    sink: _TarSink | None = None,
 ) -> ArchiveErrorCode | None:
     """Incremental preadv -> zlib -> tar verifier.
 
@@ -750,6 +775,19 @@ def _verify_streaming(
     zc = 0                      # consecutive zero block count
     past = False                # end-of-tar marker passed
 
+    def _finish_file() -> ArchiveErrorCode | None:
+        nonlocal fin, h
+        dig = h.hexdigest()
+        if dig != fsha:
+            return ArchiveErrorCode.FILE_SHA_MISMATCH
+        if sink is not None:
+            sink_error = sink.finish_file()
+            if sink_error is not None:
+                return sink_error
+        h = hashlib.sha256()
+        fin = False
+        return None
+
     def _process_data(data: bytes) -> ArchiveErrorCode | None:
         nonlocal fin, fres, fsha, fpad, h
         nonlocal mc, fc, dc, tfb, dtot
@@ -760,24 +798,28 @@ def _verify_streaming(
             if fin:
                 # Zero-length file guard: finalize immediately if no content
                 if fres == 0:
-                    dig = h.hexdigest()
-                    if dig != fsha:
-                        return ArchiveErrorCode.FILE_SHA_MISMATCH
-                    h = hashlib.sha256()
-                    fin = False
+                    finish_error = _finish_file()
+                    if finish_error is not None:
+                        return finish_error
                     continue
 
                 hash_avail = min(fres, len(data) - pos)
                 if hash_avail > 0:
-                    h.update(data[pos:pos + hash_avail])
+                    chunk_view = memoryview(data)[pos:pos + hash_avail]
+                    try:
+                        if sink is not None:
+                            sink_error = sink.write_file(chunk_view)
+                            if sink_error is not None:
+                                return sink_error
+                        h.update(chunk_view)
+                    finally:
+                        chunk_view.release()
                     pos += hash_avail
                     fres -= hash_avail
                     if fres == 0:
-                        dig = h.hexdigest()
-                        if dig != fsha:
-                            return ArchiveErrorCode.FILE_SHA_MISMATCH
-                        h = hashlib.sha256()
-                        fin = False
+                        finish_error = _finish_file()
+                        if finish_error is not None:
+                            return finish_error
                 if fin:
                     continue
 
@@ -901,6 +943,10 @@ def _verify_streaming(
                 if dc > MAX_DIRECTORIES:
                     return ArchiveErrorCode.TOO_MANY_DIRS
                 dirs.add(norm_path)
+                if sink is not None:
+                    sink_error = sink.directory(norm_path, mode_val, mentry)
+                    if sink_error is not None:
+                        return sink_error
             else:
                 fc += 1
                 if fc > MAX_REGULAR_FILES:
@@ -913,6 +959,10 @@ def _verify_streaming(
                 total_data = ((size_val + _TAR_BLOCK - 1) // _TAR_BLOCK) * _TAR_BLOCK
                 fpad = total_data - size_val
                 fsha = mentry.sha256 if mentry.sha256 is not None else ""
+                if sink is not None:
+                    sink_error = sink.begin_file(norm_path, mode_val, size_val, mentry)
+                    if sink_error is not None:
+                        return sink_error
                 fin = True
 
         return None
@@ -955,6 +1005,10 @@ def _verify_streaming(
                 comp_offset += count
                 input_view = memoryview(compressed_buffer)[:count]
                 try:
+                    if sink is not None:
+                        sink_error = sink.compressed_data(input_view)
+                        if sink_error is not None:
+                            return sink_error
                     try:
                         output = decomp.decompress(input_view, _D_BUF)
                     except zlib.error:
@@ -1016,6 +1070,10 @@ def _verify_streaming(
         if dtot % _TAR_BLOCK != 0:
             return ArchiveErrorCode.TOTAL_NOT_MULTIPLE_512
 
+        if sink is not None:
+            sink_error = sink.finish_archive()
+            if sink_error is not None:
+                return sink_error
         return None
 
     finally:
