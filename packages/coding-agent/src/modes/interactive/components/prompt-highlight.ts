@@ -77,6 +77,9 @@ export class PromptTokenMask {
 	private graphemes: { segment: string; color: ThemeColor }[] = [];
 
 	constructor(source: string, commandEnd = 0, includeBareSeparator = false) {
+		// Markdown normalizes tabs to three spaces; masking a raw tab would
+		// restore it into a layout computed for three columns, so normalize first.
+		source = source.replace(/\t/g, "   ");
 		if (MASK_LITERAL_PATTERN.test(source)) {
 			this.text = source;
 			return;

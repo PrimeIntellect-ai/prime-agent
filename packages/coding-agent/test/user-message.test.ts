@@ -175,6 +175,14 @@ describe("UserMessageComponent", () => {
 		expect(dashes).not.toContain(theme.fg("mdLink", "--b"));
 	});
 
+	test("normalizes tabs inside quoted @paths like Markdown does", () => {
+		initTheme("dark");
+		const lines = new UserMessageComponent('open @"a\tb.txt" now').render(30);
+
+		expect(lines.some((line) => line.includes("\t"))).toBe(false);
+		expect(lines.join("\n")).toContain(theme.fg("success", '@"a   b.txt"'));
+	});
+
 	test("styleArgumentTokens highlights quoted @paths", () => {
 		initTheme("dark");
 		expect(styleArgumentTokens('open @"a b.txt" now')).toBe(`open ${theme.fg("success", '@"a b.txt"')} now`);
