@@ -39,6 +39,7 @@ describe("classifyStreamFailure", () => {
 		[undefined, 529, "overloaded"],
 		["rate_limit_error", undefined, "rate_limit"],
 		["usage_limit_reached", undefined, "rate_limit"],
+		["usage_not_included", 403, "rate_limit"],
 		[undefined, 429, "rate_limit"],
 		["refusal", undefined, "refusal"],
 		["sensitive", undefined, "safety"],
@@ -115,6 +116,12 @@ describe("extractStreamFailureInfo", () => {
 			headers: { "retry-after-ms": "1500", "retry-after": "2" },
 		});
 		expect(extractStreamFailureInfo(withMs).retryAfterMs).toBe(1500);
+
+		const withRecordCase = Object.assign(new Error("429"), {
+			status: 429,
+			headers: { "Retry-After": "120" },
+		});
+		expect(extractStreamFailureInfo(withRecordCase).retryAfterMs).toBe(120000);
 
 		const withDate = Object.assign(new Error("429"), {
 			status: 429,

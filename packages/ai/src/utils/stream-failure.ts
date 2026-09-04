@@ -72,7 +72,9 @@ export function classifyStreamFailure(providerErrorType?: string, status?: numbe
 		return "safety";
 	}
 	if (type.includes("overloaded") || status === 529) return "overloaded";
-	if (type.includes("rate_limit") || type.includes("usage_limit") || type.includes("throttl") || status === 429) {
+	// usage_not_included is Codex's plan-entitlement rejection: a usage-limit
+	// shape, not bad credentials, whatever status code carries it.
+	if (/rate_limit|usage_limit|usage_not_included|throttl/.test(type) || status === 429) {
 		return "rate_limit";
 	}
 	if (/authentication|permission|unauthorized/.test(type) || status === 401 || status === 403) return "auth";
@@ -178,8 +180,13 @@ function headerValue(headers: unknown, name: string): string | undefined {
 	if (typeof (headers as Headers).get === "function") {
 		return (headers as Headers).get(name) ?? undefined;
 	}
-	const value = (headers as Record<string, unknown>)[name];
-	return typeof value === "string" ? value : undefined;
+	// Record-shaped headers must match case-insensitively, like real Headers.
+	for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
+		if (key.toLowerCase() === name && typeof value === "string") {
+			return value;
+		}
+	}
+	return undefined;
 }
 
 /** Parse Retry-After / Retry-After-Ms headers into a millisecond wait. */

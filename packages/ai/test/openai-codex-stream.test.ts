@@ -1121,4 +1121,55 @@ describe("openai-codex streaming", () => {
 		// resets_at has second granularity, so allow the rounding slack.
 		expect(details?.retryAfterMs).toBeLessThanOrEqual(2 * 3600 * 1000 + 1000);
 	});
+	it("waits for the longer of Retry-After header and usage-limit reset", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
+		process.env.PI_CODING_AGENT_DIR = tempDir;
+		const token = mockToken();
+		const resetsAt = Math.round(Date.now() / 1000) + 10;
+
+		global.fetch = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
+				return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
+			}
+			if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
+				return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
+			}
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				return new Response(
+					JSON.stringify({
+						error: { type: "usage_limit_reached", message: "Usage limit reached", resets_at: resetsAt },
+					}),
+					{ status: 429, headers: { "retry-after": "60" } },
+				);
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch;
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const context: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		const result = await streamOpenAICodexResponses(model, context, { apiKey: token, transport: "sse" }).result();
+
+		expect(result.stopReason).toBe("error");
+		const details =
+			result.diagnostics?.at(-1)?.type === "provider_stream_failure"
+				? (result.diagnostics.at(-1) as { details?: { retryAfterMs?: number } }).details
+				: undefined;
+		expect(details?.retryAfterMs).toBe(60000);
+	});
 });

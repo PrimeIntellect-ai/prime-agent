@@ -1197,7 +1197,11 @@ async function parseErrorResponse(response: Response): Promise<CodexApiError> {
 			const usageLimit = codexUsageLimitMessage(err, response.status);
 			if (usageLimit) {
 				message = usageLimit.friendlyMessage;
-				retryAfterMs = usageLimit.retryAfterMs ?? retryAfterMs;
+				// Two server-provided delays (Retry-After header, resets_at body):
+				// neither may undercut the other, so wait for the longer one.
+				if (usageLimit.retryAfterMs !== undefined) {
+					retryAfterMs = Math.max(retryAfterMs ?? 0, usageLimit.retryAfterMs);
+				}
 			} else {
 				message = err.message || message;
 			}
