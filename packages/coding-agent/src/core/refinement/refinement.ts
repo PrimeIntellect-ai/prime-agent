@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model, Usage } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../../config.js";
 import { serializeConversation } from "../compaction/utils.js";
@@ -887,6 +887,7 @@ export async function planRefinement(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	reportUsage?: (usage: Usage) => void,
 ): Promise<RefinementPlan> {
 	const id = generateRefinementId();
 	if (options.rollbackId) {
@@ -932,6 +933,7 @@ export async function planRefinement(
 		},
 		{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers },
 	);
+	reportUsage?.(response.usage);
 
 	if (response.stopReason === "error") {
 		throw new Error(`Refinement failed: ${response.errorMessage || "Unknown error"}`);
@@ -970,6 +972,7 @@ export async function reviewAutoRefine(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	reportUsage?: (usage: Usage) => void,
 ): Promise<AutoRefineReview> {
 	const conversationText = serializeConversation(convertToLlm(messages)).slice(-40_000);
 	const userPrompt = [
@@ -998,6 +1001,7 @@ ${conversationText}
 		},
 		{ maxTokens: autoRefineReviewMaxOutputTokens(model), signal, apiKey, headers },
 	);
+	reportUsage?.(response.usage);
 	if (response.stopReason === "error") {
 		throw new Error(`Auto-refine review failed: ${response.errorMessage || "Unknown error"}`);
 	}
@@ -1021,8 +1025,20 @@ export async function refineHarness(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	reportUsage?: (usage: Usage) => void,
 ): Promise<RefinementResult> {
-	const plan = await planRefinement(messages, state, history, model, apiKey, options, headers, signal, thinkingLevel);
+	const plan = await planRefinement(
+		messages,
+		state,
+		history,
+		model,
+		apiKey,
+		options,
+		headers,
+		signal,
+		thinkingLevel,
+		reportUsage,
+	);
 	return applyRefinementProposal(state, plan.proposal, {
 		id: plan.id,
 		rollbackOf: plan.rollbackOf,

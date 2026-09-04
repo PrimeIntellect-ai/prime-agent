@@ -67,6 +67,12 @@ except Exception as _prime_agent_rlm_error:
         rlm._raise_missing()
 `.trim();
 
+const INSPECTION_ONLY_RESTRICTION_CODE = `
+from rlm.inspection import enforce_inspection_only as _prime_agent_enforce_inspection_only
+_prime_agent_enforce_inspection_only()
+del _prime_agent_enforce_inspection_only
+`.trim();
+
 export function buildRlmBootstrapCode(pythonSkills: readonly PythonSkillRuntimeInfo[] = []): string {
 	const baseCode = [RLM_BOOTSTRAP_HEADER_CODE, RLM_BOOTSTRAP_RUNTIME_CODE].join("\n\n");
 	const importNames = [...new Set(pythonSkills.map((skill) => skill.importName))];
@@ -282,6 +288,7 @@ export interface IpythonToolOptions {
 	/** Typed host request handlers for the kernel↔host bridge (rlm.run, goal.*, …). */
 	hostHandlers?: HostRequestHandlers;
 	pythonSkills?: readonly PythonSkillRuntimeInfo[];
+	executionProfile?: "inspection_only";
 	/** Per-session artifact dir where the kernel namespace snapshot is stored. Omit to disable snapshots. */
 	snapshotDir?: string;
 	/** Resolves before this kernel starts — e.g. the previous provisioner's dispose, so a
@@ -494,6 +501,16 @@ export class IpythonKernelProvisioner {
 						signal: startupSignal,
 					});
 				}, startupSignal);
+				if (this.options?.executionProfile === "inspection_only") {
+					this.emitStartupProgress("Restricting IPython execution...");
+					const restriction = await m.execute(INSPECTION_ONLY_RESTRICTION_CODE, { signal: startupSignal });
+					if (restriction.status !== "ok") {
+						const details = [restriction.stderr, restriction.error?.traceback.join("\n")]
+							.filter(Boolean)
+							.join("\n");
+						throw new Error(`Failed to enforce the IPython execution profile:\n${details}`);
+					}
+				}
 				// Revive a prior session's namespace before the bootstrap, so the bootstrap
 				// then overwrites live handles (rlm, skills) on top of anything restored.
 				if (snapshotDir) {

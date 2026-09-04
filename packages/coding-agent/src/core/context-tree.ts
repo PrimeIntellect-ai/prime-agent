@@ -12,7 +12,11 @@ export type ContextWindowResolver = (provider: string, modelId: string) => numbe
 
 /**
  * One agent in the context overview: the main session or an RLM (sub-)agent.
- * `ownUsage` excludes descendants; `totalUsage` includes completed descendants, matching /usage.
+ *
+ * `ownUsage` excludes descendant usage (child usage attributions subtracted),
+ * so own usage summed over a tree never double-counts. `totalUsage` reconciles
+ * that attribution ledger with structurally known children, including active
+ * descendants and completed children without an attribution target.
  */
 export interface ContextTreeNode {
 	/** "root" for the session itself; sub-xxxx for an RLM child. */
@@ -76,7 +80,12 @@ function compactLabel(text: string, maxLength = 80): string {
 export function computeOwnAndTotalUsage(
 	branch: SessionEntry[],
 	allEntries: SessionEntry[],
-): { ownUsage: Usage; totalUsage: Usage } {
+): {
+	ownUsage: Usage;
+	totalUsage: Usage;
+	identifiedChildUsage: ReadonlyMap<string, Usage>;
+	unidentifiedChildUsage: Usage;
+} {
 	const totalUsage = emptyUsage();
 	const branchAssistantIds = new Set<string>();
 	for (const entry of branch) {
@@ -88,12 +97,85 @@ export function computeOwnAndTotalUsage(
 		}
 	}
 	const ownUsage = cloneUsage(totalUsage);
+	const identifiedChildUsage = new Map<string, Usage>();
+	const unidentifiedChildUsage = emptyUsage();
 	for (const entry of allEntries) {
 		if (entry.type === "child_usage_attributed" && branchAssistantIds.has(entry.targetId)) {
+			const ownTotalTokens = ownUsage.totalTokens;
 			subtractAssistantUsage(ownUsage, entry.childUsage);
+			// Child attribution intentionally changes billable aggregates without
+			// changing the parent assistant's model-facing context-token count.
+			ownUsage.totalTokens = ownTotalTokens;
+			if (entry.childId) {
+				const childUsage = identifiedChildUsage.get(entry.childId) ?? emptyUsage();
+				addAssistantUsage(childUsage, entry.childUsage);
+				identifiedChildUsage.set(entry.childId, childUsage);
+			} else {
+				addAssistantUsage(unidentifiedChildUsage, entry.childUsage);
+			}
 		}
 	}
-	return { ownUsage, totalUsage };
+	return { ownUsage, totalUsage, identifiedChildUsage, unidentifiedChildUsage };
+}
+
+/**
+ * Reconcile persisted child attribution with the recursively discovered tree.
+ *
+ * A child spawned during its parent's first assistant turn has no durable
+ * assistant entry to receive usage attribution, while a disposed child may be
+ * represented only by that persisted attribution. Current attribution entries
+ * carry the stable child id, so represented children are deduplicated exactly
+ * and disposed children are restored from the ledger. Pre-v0.7.7 entries have
+ * no child id and retain the conservative component-wise fallback.
+ */
+export function reconcileContextTreeTotalUsage(
+	ownUsage: Usage,
+	attributedTotalUsage: Usage,
+	children: readonly ContextTreeNode[],
+	identifiedChildUsage: ReadonlyMap<string, Usage> = new Map(),
+	unidentifiedChildUsage: Usage = emptyUsage(),
+): Usage {
+	const structuralTotal = cloneUsage(ownUsage);
+	const representedChildIds = new Set<string>();
+	for (const child of children) {
+		representedChildIds.add(child.id);
+		addAssistantUsage(structuralTotal, child.totalUsage);
+	}
+	for (const [childId, usage] of identifiedChildUsage) {
+		if (!representedChildIds.has(childId)) addAssistantUsage(structuralTotal, usage);
+	}
+	if (usageIsEmpty(unidentifiedChildUsage)) return structuralTotal;
+	const legacyAttributedTotal = cloneUsage(attributedTotalUsage);
+	legacyAttributedTotal.totalTokens += unidentifiedChildUsage.totalTokens;
+	return componentMaxUsage(legacyAttributedTotal, structuralTotal);
+}
+
+function usageIsEmpty(usage: Usage): boolean {
+	return (
+		usage.input === 0 &&
+		usage.output === 0 &&
+		usage.cacheRead === 0 &&
+		usage.cacheWrite === 0 &&
+		usage.totalTokens === 0 &&
+		usage.cost.total === 0
+	);
+}
+
+function componentMaxUsage(left: Usage, right: Usage): Usage {
+	return {
+		input: Math.max(left.input, right.input),
+		output: Math.max(left.output, right.output),
+		cacheRead: Math.max(left.cacheRead, right.cacheRead),
+		cacheWrite: Math.max(left.cacheWrite, right.cacheWrite),
+		totalTokens: Math.max(left.totalTokens, right.totalTokens),
+		cost: {
+			input: Math.max(left.cost.input, right.cost.input),
+			output: Math.max(left.cost.output, right.cost.output),
+			cacheRead: Math.max(left.cost.cacheRead, right.cost.cacheRead),
+			cacheWrite: Math.max(left.cost.cacheWrite, right.cost.cacheWrite),
+			total: Math.max(left.cost.total, right.cost.total),
+		},
+	};
 }
 
 /**
@@ -261,7 +343,12 @@ export function loadContextTreeChildFromDisk(
 		return undefined;
 	}
 
-	const { ownUsage, totalUsage } = computeOwnAndTotalUsage(branch, allEntries);
+	const {
+		ownUsage,
+		totalUsage: attributedTotalUsage,
+		identifiedChildUsage,
+		unidentifiedChildUsage,
+	} = computeOwnAndTotalUsage(branch, allEntries);
 
 	let model: { provider: string; id: string } | undefined;
 	for (const entry of branch) {
@@ -282,15 +369,22 @@ export function loadContextTreeChildFromDisk(
 
 	const contextWindow = model ? resolveContextWindow(model.provider, model.id) : undefined;
 
+	const children = loadContextTreeChildrenFromDisk(childSessionDir, resolveContextWindow);
 	return {
 		id: basename(childSessionDir),
 		label: label || "child agent",
 		status: statusFromBranch(branch),
 		model,
 		ownUsage,
-		totalUsage,
+		totalUsage: reconcileContextTreeTotalUsage(
+			ownUsage,
+			attributedTotalUsage,
+			children,
+			identifiedChildUsage,
+			unidentifiedChildUsage,
+		),
 		contextUsage: computeContextUsageFromEntries(allEntries, branch, contextWindow),
-		children: loadContextTreeChildrenFromDisk(childSessionDir, resolveContextWindow),
+		children,
 	};
 }
 

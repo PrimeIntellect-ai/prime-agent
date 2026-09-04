@@ -7,7 +7,11 @@ import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { type ContextTreeNode, loadContextTreeChildrenFromDisk } from "../src/core/context-tree.js";
+import {
+	type ContextTreeNode,
+	loadContextTreeChildrenFromDisk,
+	reconcileContextTreeTotalUsage,
+} from "../src/core/context-tree.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
@@ -117,7 +121,14 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		// exactly like _attributeRlmChildUsageToParent does.
 		const aggregate = cloneUsage(childUsage);
 		addAssistantUsage(aggregate, grandchildUsage);
-		child.sessionManager.appendChildUsageAttribution(child.assistantEntryId, grandchildUsage, aggregate);
+		aggregate.totalTokens = childUsage.totalTokens;
+		child.sessionManager.appendChildUsageAttribution(
+			child.assistantEntryId,
+			grandchildUsage,
+			aggregate,
+			undefined,
+			"sub-bbbb2222",
+		);
 
 		const nodes = loadContextTreeChildrenFromDisk(rlmDir, resolveContextWindow);
 		expect(nodes).toHaveLength(1);
@@ -129,9 +140,11 @@ describe("loadContextTreeChildrenFromDisk", () => {
 		expect(childNode.model).toEqual({ provider: model.provider, id: model.id });
 		// Aggregate includes the grandchild; own does not.
 		expect(childNode.totalUsage.input).toBe(1400);
+		expect(childNode.totalUsage.totalTokens).toBe(1650);
 		expect(childNode.totalUsage.cost.total).toBeCloseTo(0.14);
 		expect(childNode.ownUsage.input).toBe(1000);
 		expect(childNode.ownUsage.output).toBe(200);
+		expect(childNode.ownUsage.totalTokens).toBe(1200);
 		expect(childNode.ownUsage.cost.total).toBeCloseTo(0.1);
 
 		expect(childNode.children).toHaveLength(1);
@@ -306,6 +319,81 @@ describe("loadContextTreeChildrenFromDisk", () => {
 	});
 });
 
+describe("reconcileContextTreeTotalUsage", () => {
+	it("counts recursively discovered children when first-turn fan-out has no attribution target", () => {
+		const own = createUsage(100, 10, 0.01);
+		const child = createUsage(500, 50, 0.05);
+		const total = reconcileContextTreeTotalUsage(own, own, [
+			{
+				id: "sub-first-turn",
+				label: "first-turn child",
+				status: "done",
+				ownUsage: child,
+				totalUsage: child,
+				children: [],
+			},
+		]);
+
+		expect(total.input).toBe(600);
+		expect(total.output).toBe(60);
+		expect(total.totalTokens).toBe(660);
+		expect(total.cost.total).toBeCloseTo(0.06);
+	});
+
+	it("does not double-count children already represented by persisted attribution", () => {
+		const own = createUsage(100, 10, 0.01);
+		const child = createUsage(500, 50, 0.05);
+		const attributed = cloneUsage(own);
+		addAssistantUsage(attributed, child);
+		const total = reconcileContextTreeTotalUsage(
+			own,
+			attributed,
+			[
+				{
+					id: "sub-attributed",
+					label: "attributed child",
+					status: "done",
+					ownUsage: child,
+					totalUsage: child,
+					children: [],
+				},
+			],
+			new Map([["sub-attributed", child]]),
+		);
+
+		expect(total).toEqual(attributed);
+	});
+
+	it("adds a disposed attributed child beside a different structural child", () => {
+		const own = createUsage(100, 10, 0.01);
+		const disposed = createUsage(300, 30, 0.03);
+		const live = createUsage(500, 50, 0.05);
+		const attributed = cloneUsage(own);
+		addAssistantUsage(attributed, disposed);
+
+		const total = reconcileContextTreeTotalUsage(
+			own,
+			attributed,
+			[
+				{
+					id: "sub-live",
+					label: "live child",
+					status: "active",
+					ownUsage: live,
+					totalUsage: live,
+					children: [],
+				},
+			],
+			new Map([["sub-disposed", disposed]]),
+		);
+
+		expect(total.input).toBe(900);
+		expect(total.output).toBe(90);
+		expect(total.totalTokens).toBe(990);
+		expect(total.cost.total).toBeCloseTo(0.09);
+	});
+});
+
 describe("AgentSession.getContextTree", () => {
 	function createSession() {
 		const settingsManager = SettingsManager.inMemory();
@@ -344,6 +432,7 @@ describe("AgentSession.getContextTree", () => {
 
 		const childUsage = createUsage(500, 100, 0.05);
 		const aggregate = createUsage(3500, 700, 0.35);
+		aggregate.totalTokens = 3600;
 		sessionManager.appendChildUsageAttribution(assistantEntryId, childUsage, aggregate);
 		syncAgentMessages(session, sessionManager);
 
@@ -352,8 +441,10 @@ describe("AgentSession.getContextTree", () => {
 		expect(tree.status).toBe("active");
 		expect(tree.model).toEqual({ provider: model.provider, id: model.id });
 		expect(tree.totalUsage.input).toBe(3500);
+		expect(tree.totalUsage.totalTokens).toBe(4200);
 		expect(tree.totalUsage.cost.total).toBeCloseTo(0.35);
 		expect(tree.ownUsage.input).toBe(3000);
+		expect(tree.ownUsage.totalTokens).toBe(3600);
 		expect(tree.ownUsage.cost.total).toBeCloseTo(0.3);
 		// In-memory session, no rlm dir: completed children cannot be discovered.
 		expect(tree.children).toEqual([]);

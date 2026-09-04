@@ -73,6 +73,8 @@ export interface GenerateBranchSummaryOptions {
 	replaceInstructions?: boolean;
 	/** Tokens reserved for prompt + LLM response (default 16384) */
 	reserveTokens?: number;
+	/** Records the model call in the owning run's usage ledger. */
+	reportUsage?: (usage: Usage) => void;
 }
 /**
  * Collect entries that should be summarized when navigating from one position to another.

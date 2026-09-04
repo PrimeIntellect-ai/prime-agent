@@ -39,6 +39,7 @@ plans/
 .prime/agent/
 collect.sh
 .kernel-venv/
+.venv/
 .worktrees/
 
 __pycache__/

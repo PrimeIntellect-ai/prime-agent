@@ -31,6 +31,8 @@ export interface BuildSystemPromptOptions {
 	rlmDepth?: number;
 	/** Human-readable parent name or id for child communication doctrine. */
 	rlmParentAgent?: string;
+	/** Whether this session participates in Prime's durable task graph. */
+	coordinatedTasks?: boolean;
 	/** Global harness state to inject as compact persistent context. */
 	harnessState?: HarnessState;
 	/** Enabled user-configured servers available through the generic kernel MCP API. */
@@ -100,6 +102,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			parentAgent: options.rlmParentAgent,
 			installedSkills: visiblePythonSkillImportNames,
 			activeTools: tools,
+			coordinatedTasks: options.coordinatedTasks,
 		});
 		if (childDoctrine) {
 			prompt += `\n\n${childDoctrine}`;
@@ -128,6 +131,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 		allowRecursion,
 		depth: options.rlmDepth,
 		parentAgent: options.rlmParentAgent,
+		coordinatedTasks: options.coordinatedTasks,
 	});
 
 	// Appended AFTER the trained buildRlmPrompt prefix, and before the harness-state
@@ -141,6 +145,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			includeRefineExamples: hasRefineSkill,
 			hasAgentMessage: visiblePythonSkillNames.has("agent_message"),
 			hasAgentObserve: visiblePythonSkillNames.has("agent_observe"),
+			coordinatedTasks: options.coordinatedTasks,
 		})}`;
 	}
 

@@ -14,11 +14,12 @@ import type { SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { ModelRegistry } from "./model-registry.js";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.js";
-import type { SubagentRuntimeHost } from "./rlm-runtime.js";
+import type { RlmSubagentCapacityPool, SubagentRuntimeHost } from "./rlm-runtime.js";
 import { type CreateAgentSessionResult, createAgentSession } from "./sdk.js";
 import { semanticEdgeLedgerPath } from "./semantic-edges.js";
 import type { SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
+import type { AgentTaskGraph } from "./task-graph.js";
 import { installAgentTelemetry, isTelemetryEnabled } from "./telemetry.js";
 
 export interface AgentSessionRuntimeDiagnostic {
@@ -65,6 +66,16 @@ export interface AgentSessionCreationOptions {
 	rlmParentAgent?: string;
 	semanticParentSessionId?: string;
 	semanticSpawnedByRequestId?: string;
+	/** Shared durable task graph for this run. */
+	taskGraph?: AgentTaskGraph;
+	/** Task owned by this session inside taskGraph. */
+	taskId?: string;
+	/** Task charged for model usage when this session does not own a task. */
+	taskAccountingTaskId?: string;
+	/** Immutable actor identity authorized for task mutations in this session. */
+	taskActorId?: string;
+	/** Shared capacity acquired for every child turn, including retained follow-ups. */
+	turnCapacityPool?: RlmSubagentCapacityPool;
 	subagentRuntimeHost?: SubagentRuntimeHost;
 	rlmHeartbeatController?: AgentRlmHeartbeatController;
 	prewarmIpythonKernel?: boolean;
@@ -260,6 +271,11 @@ export async function createAgentSessionFromServices(
 		rlmParentAgent: options.rlmParentAgent,
 		semanticParentSessionId: options.semanticParentSessionId,
 		semanticSpawnedByRequestId: options.semanticSpawnedByRequestId,
+		taskGraph: options.taskGraph,
+		taskId: options.taskId,
+		taskAccountingTaskId: options.taskAccountingTaskId,
+		taskActorId: options.taskActorId,
+		turnCapacityPool: options.turnCapacityPool,
 		subagentRuntimeHost: options.subagentRuntimeHost,
 		rlmHeartbeatController: options.rlmHeartbeatController,
 		sessionStartEvent: options.sessionStartEvent,

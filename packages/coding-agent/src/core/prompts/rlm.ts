@@ -9,6 +9,7 @@ export interface RlmPromptOptions {
 	depth?: number;
 	parentAgent?: string;
 	activeTools?: string[];
+	coordinatedTasks?: boolean;
 }
 
 const LONG_RUNNING_WORK_PROMPT = [
@@ -56,6 +57,7 @@ export interface ChildAgentDoctrineOptions {
 	parentAgent?: string;
 	installedSkills?: string[];
 	activeTools?: string[];
+	coordinatedTasks?: boolean;
 }
 
 export function buildChildAgentDoctrine(options: ChildAgentDoctrineOptions): string | undefined {
@@ -70,6 +72,11 @@ export function buildChildAgentDoctrine(options: ChildAgentDoctrineOptions): str
 	if (hasAgentMessage && hasIpython) {
 		lines.push(
 			'When a task calls for an answer, reply explicitly with `await agent_message.send(message, receiver_role="parent")`. Not every message or task needs a reply; continue cleanup after sending and go idle normally.',
+		);
+	}
+	if (options.coordinatedTasks && hasIpython) {
+		lines.push(
+			"Your complete owned assignment is available through `await rlm.task.current()`. Before broad exploration, record whether you are a leaf or coordinator with `await rlm.task.plan(...)`. Persist reusable findings with `await rlm.task.handoff(...)`; complete the task with a structured result before going idle.",
 		);
 	}
 	return lines.join("\n");
@@ -153,9 +160,20 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 			"Choose a stable child name with `await rlm('sub-task', name='api-reviewer')`; names must be unique among siblings. If omitted, the host generates a readable unique name.",
 			"A child inherits your model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector. An unavailable requested model fails spawn; decide whether to retry or omit `model`. Children also inherit your thinking level; the `thinking` option overrides it with any level the resolved child model supports, and an unsupported level fails spawn.",
 		);
+		if (options.coordinatedTasks) {
+			parts.push(
+				"This run has a durable task graph. Inspect it with `await rlm.task.current()` and `await rlm.task.snapshot()`; snapshots include generic supervision alerts for blocked, stalled, uncertain, or synthesis-ready tasks.",
+				"Delegate coordinated work with `await rlm.delegate(prompt, task={...})`. The task must be genuinely narrower, transfer exclusive claims you own, include a stable behavioral contractKey, explicit scope and exclusions, and enough context to avoid repository-wide rediscovery.",
+				"Every delegated owner must first call `await rlm.task.plan(...)` as either a leaf or coordinator. Coordinators recursively transfer disjoint narrower scopes; leaves investigate directly. After transfer, coordinate instead of repeating child exploration. Before yielding or when useful findings accumulate, persist a compact `await rlm.task.handoff(...)`; Prime also synthesizes a fallback handoff on runtime failure.",
+				"Successor tasks must reference the latest terminal predecessorTaskId and a concrete repeatReason, and may own only claims the predecessor handoff marked remaining. Contract keys are behavioral labels, not permission to repeat historical claim coverage. Only host-recorded evidence advances convergence; task.update references are notes, not proof. Report missing context with `await rlm.task.report_gap(...)`, persist progress with `await rlm.task.update(...)`, and finish with `await rlm.task.complete(result)`.",
+				"When delegated descendants are still active, call `await rlm.task.defer_until_children_complete()` once and end the turn. Prime durably suspends the coordinator and resumes it with one synthesis turn after the whole descendant subtree is terminal; never poll, sleep, or repeatedly inspect task status.",
+			);
+		}
 		if (hasAgentMessage) {
 			parts.push(
-				"Children reply explicitly with `await agent_message.send(message, receiver_role='parent')` when an answer is needed. Replies and follow-ups arrive as ordinary agent messages; not every task requires a reply.",
+				options.coordinatedTasks
+					? "For coordinated work, put the completion result in `rlm.task.complete(...)`; do not duplicate it in an agent message. Use `agent_message.send(...)` only for an urgent question or intermediate coordination that cannot wait for synthesis."
+					: "Children reply explicitly with `await agent_message.send(message, receiver_role='parent')` when an answer is needed. Replies and follow-ups arrive as ordinary agent messages; not every task requires a reply.",
 				"Use `await agent_message.list_agents()` to discover family and `await rlm.list_subagents()` to recover direct child handles. Use `agent_message.send(..., receiver_role='child', receiver_name=child.name)` for follow-ups.",
 			);
 		} else {
@@ -169,7 +187,9 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 			parts.push("Inspect files a child wrote when you need to collect its work without an observation capability.");
 		}
 		parts.push(
-			"Spawn independent children in separate calls and end your turn instead of awaiting completion. Multiple replies may arrive over multiple turns. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed.",
+			options.coordinatedTasks
+				? "Spawn independent children in separate calls, register the task-graph wait, and end your turn. Prime coalesces coordinated completion into one synthesis resume. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed."
+				: "Spawn independent children in separate calls and end your turn instead of awaiting completion. Multiple replies may arrive over multiple turns. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed.",
 		);
 	}
 
@@ -195,7 +215,12 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
  * harness-state block.
  */
 export function buildSubagentGuidance(
-	options: { includeRefineExamples?: boolean; hasAgentMessage?: boolean; hasAgentObserve?: boolean } = {},
+	options: {
+		includeRefineExamples?: boolean;
+		hasAgentMessage?: boolean;
+		hasAgentObserve?: boolean;
+		coordinatedTasks?: boolean;
+	} = {},
 ): string {
 	const lines = [
 		"# Delegating to sub-agents",
@@ -215,6 +240,12 @@ export function buildSubagentGuidance(
 		"Have children write files and read those files for fan-in.",
 		"Delegate parallel context-heavy research or independent implementation; do a single known lookup, edit, or command inline.",
 	);
+	if (options.coordinatedTasks) {
+		lines.push(
+			"For owned work, prefer `rlm.delegate(...)`: Prime atomically transfers exclusive claims, persists inherited context, and binds the child to the new task. Use plain `rlm(...)` only for work that intentionally has no ownership contract.",
+			"Every task may decompose recursively, but responsibility must strictly narrow and the delegating parent must stop broad exploration of the transferred scope.",
+		);
+	}
 	if (options.includeRefineExamples ?? true) {
 		lines.push("Persist genuinely reusable delegation patterns with `await refine.run()`.");
 	}

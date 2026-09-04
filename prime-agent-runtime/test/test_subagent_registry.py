@@ -22,6 +22,7 @@ class RlmSubagentRegistryTest(unittest.TestCase):
                         "session_name": "subagent-check-api-a1b2c3d4",
                         "session_dir": "/tmp/parent/sub-a1b2c3d4",
                         "status": "completed",
+                        "task_id": "task-api",
                     }
                 ]
             }
@@ -37,6 +38,7 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         self.assertEqual(subagents[0].session_name, "subagent-check-api-a1b2c3d4")
         self.assertEqual(subagents[0].session_dir, Path("/tmp/parent/sub-a1b2c3d4"))
         self.assertEqual(subagents[0].status, "completed")
+        self.assertEqual(subagents[0].task_id, "task-api")
         host_request.assert_awaited_once_with("rlm.list_subagents")
 
 
@@ -93,6 +95,154 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         self.assertEqual(result.rlm_child_id, "sub-a1b2c3d4")
         self.assertEqual(result.name, "api-reviewer")
         self.assertEqual(result.model, "deepseek/deepseek-v4-flash")
+
+    def test_delegates_a_structured_task_atomically(self) -> None:
+        host_request = AsyncMock(
+            return_value={
+                "rlm_child_id": "sub-task",
+                "name": "runtime-reviewer",
+                "session_dir": "/tmp/parent/sub-task",
+                "model": "zero/balanced",
+                "task_id": "task-runtime",
+            }
+        )
+        task = {
+            "objective": "Review runtime behavior",
+            "scope": "runtime.py",
+            "exclusiveClaims": [{"namespace": "repo:file", "key": "runtime.py"}],
+            "delegationReason": "Independent runtime boundary",
+        }
+
+        with patch.object(rlm_module, "host_request", host_request):
+            result = asyncio.run(
+                rlm_module.rlm.delegate(
+                    "Complete the assigned task contract",
+                    task,
+                    name="runtime-reviewer",
+                )
+            )
+
+        host_request.assert_awaited_once_with(
+            "rlm.delegate",
+            {
+                "prompt": "Complete the assigned task contract",
+                "task": task,
+                "kwargs": {"name": "runtime-reviewer"},
+            },
+        )
+        self.assertEqual(result.task_id, "task-runtime")
+
+    def test_replaces_a_task_owner_atomically(self) -> None:
+        host_request = AsyncMock(
+            return_value={
+                "rlm_child_id": "sub-replacement",
+                "name": "replacement",
+                "session_dir": "/tmp/parent/sub-replacement",
+                "model": "zero/balanced",
+                "task_id": "task-runtime",
+            }
+        )
+
+        with patch.object(rlm_module, "host_request", host_request):
+            result = asyncio.run(
+                rlm_module.rlm.replace(
+                    "task-runtime",
+                    "Continue from the durable task state",
+                    name="replacement",
+                )
+            )
+
+        host_request.assert_awaited_once_with(
+            "rlm.replace",
+            {
+                "task_id": "task-runtime",
+                "prompt": "Continue from the durable task state",
+                "kwargs": {"name": "replacement"},
+            },
+        )
+        self.assertEqual(result.task_id, "task-runtime")
+
+    def test_exposes_task_progress_and_tree_operations(self) -> None:
+        host_request = AsyncMock(side_effect=[{"task": {"id": "task-a"}}, {"snapshot": {"totalTasks": 1}}, {"task": {"id": "task-a"}}])
+
+        with patch.object(rlm_module, "host_request", host_request):
+            current = asyncio.run(rlm_module.rlm.task.current())
+            snapshot = asyncio.run(rlm_module.rlm.task.snapshot(limit=20))
+            updated = asyncio.run(
+                rlm_module.rlm.task.update(
+                    "Inspected runtime",
+                    evidence_refs=["artifact://runtime"],
+                    completed_questions=["Concurrency remains bounded"],
+                )
+            )
+
+        self.assertEqual(current["task"]["id"], "task-a")
+        self.assertEqual(snapshot["snapshot"]["totalTasks"], 1)
+        self.assertEqual(updated["task"]["id"], "task-a")
+        self.assertEqual(
+            host_request.await_args_list[2].args,
+            (
+                "rlm.task.update",
+                {
+                    "summary": "Inspected runtime",
+                    "evidence_refs": ["artifact://runtime"],
+                    "completed_questions": ["Concurrency remains bounded"],
+                },
+            ),
+        )
+
+    def test_records_task_plan_and_reusable_handoff(self) -> None:
+        host_request = AsyncMock(side_effect=[{"task": {"id": "task-a"}}, {"task": {"id": "task-a"}}])
+        handoff = {
+            "summary": "One caller remains",
+            "evidenceIds": ["evidence-1"],
+            "recommendedNextScopes": ["Inspect the caller"],
+        }
+
+        with patch.object(rlm_module, "host_request", host_request):
+            asyncio.run(
+                rlm_module.rlm.task.plan(
+                    "coordinator",
+                    "Two independent boundaries",
+                    boundaries=["payload", "caller"],
+                    expected_evidence=["pinned diff"],
+                )
+            )
+            asyncio.run(rlm_module.rlm.task.handoff(handoff))
+
+        self.assertEqual(
+            host_request.await_args_list[0].args,
+            (
+                "rlm.task.plan",
+                {
+                    "plan": {
+                        "mode": "coordinator",
+                        "rationale": "Two independent boundaries",
+                        "boundaries": ["payload", "caller"],
+                        "expectedEvidence": ["pinned diff"],
+                    }
+                },
+            ),
+        )
+        self.assertEqual(host_request.await_args_list[1].args, ("rlm.task.handoff", {"handoff": handoff}))
+
+    def test_fetches_full_root_context_on_demand(self) -> None:
+        host_request = AsyncMock(return_value={"rootContext": {"manifest": ["a.ts"]}})
+
+        with patch.object(rlm_module, "host_request", host_request):
+            context = asyncio.run(rlm_module.rlm.task.root_context())
+
+        self.assertEqual(context, {"manifest": ["a.ts"]})
+        host_request.assert_awaited_once_with("rlm.task.root_context")
+
+    def test_defers_coordinator_until_descendants_complete(self) -> None:
+        host_request = AsyncMock(return_value={"state": "waiting"})
+
+        with patch.object(rlm_module, "host_request", host_request):
+            result = asyncio.run(rlm_module.rlm.task.defer_until_children_complete())
+
+        self.assertEqual(result, {"state": "waiting"})
+        host_request.assert_awaited_once_with("rlm.task.defer_until_children_complete")
 
     def test_finds_authenticated_models_through_host(self) -> None:
         host_request = AsyncMock(

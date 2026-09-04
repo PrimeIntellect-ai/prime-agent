@@ -27,9 +27,30 @@ handle = await rlm("inspect the API", name="api-reviewer")
 print(handle.rlm_child_id, handle.name, handle.session_dir, handle.model)
 ```
 
-the call travels as a `host_request` event over the runtime's stdio protocol. `ReplKernelManager` dispatches request type `rlm.run` to the parent `AgentSession`, which starts a child through the same TypeScript agent machinery as the parent. The call returns over the same bridge immediately after task admission with a child handle; it never waits for or returns the child's answer. Results arrive only through explicit `agent_message` replies or files.
+the call travels as a `host_request` event over the runtime's stdio protocol. `ReplKernelManager` dispatches request type `rlm.run` to the parent `AgentSession`, which starts a child through the same TypeScript agent machinery as the parent. The call returns over the same bridge immediately after task admission with a child handle; it never waits for or returns the child's answer. Uncontracted results arrive through explicit `agent_message` replies or files; `rlm.delegate` results and handoffs are also retained in the durable task graph.
 
 The same bridge supports other typed host requests. Bundled Python skills such as `goal` call `rlm.host_request("goal.get", ...)`; state and policy remain in the TypeScript host.
+
+## Durable Task Coordination
+
+Hosts can attach an `AgentTaskGraph` to a session and use `rlm.delegate(prompt, task)` to atomically transfer exclusive claims to a child. A delegated owner inspects its bounded context with `rlm.task.current()` and records a plan before exploration:
+
+```python
+await rlm.task.plan(
+    "coordinator",
+    "The owned scope has independent queue and transport boundaries",
+    boundaries=["queue", "transport"],
+    expected_evidence=["pinned repository reads", "focused verification"],
+)
+```
+
+Leaf tasks work directly. Coordinator tasks recursively delegate disjoint claims to grandchildren, wait for descendants, and synthesize their results. Every attempt has a durable handoff; agents can update it explicitly with `rlm.task.handoff({...})`, while completion, replacement, interruption, and cancellation create or finalize one atomically before claims move.
+
+Task evidence is content-addressed and deduplicated across the run. Host integrations preflight claimed inspection scope with `assertEvidenceScopeAvailable()` and call `recordEvidence()` after trusted reads or verification, so convergence tracks only novel host-recorded evidence rather than model-authored reference strings. Evidence already recorded for a transferred claim is injected into its new owner's context. Context envelopes also include predecessor and descendant handoffs, not raw sibling transcripts. This keeps completed grandchild work visible to a supervising ancestor even if an intermediate coordinator fails before synthesis.
+
+Delegation contracts may include a stable `contractKey` as a behavioral label, but it is not an authority boundary. Once any terminal task in the graph has covered an exclusive claim, the graph rejects another delegation of that claim regardless of parent or model-selected key. A narrower successor must identify the latest terminal `predecessorTaskId`, provide a `repeatReason`, and own only claims that predecessor's handoff marked as remaining.
+
+Hosts may configure `maxTotalTokens` as one budget shared by the root and every descendant. Usage is already attributed to tasks, so new delegation and exploration stop when the graph-wide budget is exhausted; a configured convergence policy steers an active child into bounded finalization. The context envelope exposes used and remaining shared budget.
 
 ## Delegation Flow
 

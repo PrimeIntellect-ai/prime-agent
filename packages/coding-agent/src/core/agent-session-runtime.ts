@@ -16,6 +16,7 @@ import { assertSessionCwdExists } from "./session-cwd.js";
 import { SessionImportFileNotFoundError } from "./session-import-errors.js";
 import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "./session-lease.js";
 import { SessionManager } from "./session-manager.js";
+import type { AgentTaskResumeDispatch } from "./task-graph.js";
 
 export { SessionImportFileNotFoundError } from "./session-import-errors.js";
 
@@ -43,6 +44,8 @@ export interface AgentSessionRuntimeMetadata {
 	parentSessionFile?: string;
 	rlmChildId?: string;
 	rlmParentNodeId?: string;
+	taskId?: string;
+	/** Runtime restored from an already-persisted completed registry entry. */
 	rehydratedCompleted?: boolean;
 	prompt?: string;
 	spawnCode?: string;
@@ -345,6 +348,11 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 					rlmParentAgent: options.parentSession.sessionName ?? options.parentSession.sessionId,
 					semanticParentSessionId: options.parentSession.sessionId,
 					semanticSpawnedByRequestId: options.spawnedByRequestId,
+					taskGraph: options.parentSession.taskGraph,
+					taskId: options.taskId,
+					taskAccountingTaskId: options.taskAccountingTaskId,
+					taskActorId: options.taskActorId,
+					turnCapacityPool: options.turnCapacityPool,
 				},
 				runtimeMetadata: {
 					kind: "subagent",
@@ -353,6 +361,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 					parentSessionFile: options.parentSession.sessionFile,
 					rlmChildId: options.id,
 					rlmParentNodeId: options.rlmParentNodeId,
+					taskId: options.taskId,
 					prompt: options.prompt,
 					spawnCode: options.spawnCode,
 					sessionDir: options.sessionDir,
@@ -375,6 +384,18 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 			throw error;
 		}
 		return runtime;
+	}
+
+	async resumeTaskOwner(request: AgentTaskResumeDispatch): Promise<"admitted" | "owner_unavailable"> {
+		for (const runtime of this.subagentRuntimes.values()) {
+			if (runtime.metadata.taskId === request.taskId) {
+				const direct = await runtime.session.admitTaskResume(request);
+				if (direct === "admitted") return direct;
+			}
+			const nested = await runtime.resumeTaskOwner(request);
+			if (nested === "admitted") return nested;
+		}
+		return "owner_unavailable";
 	}
 
 	async deleteRlmSubagentRuntime(childId: string, session: AgentSession): Promise<void> {

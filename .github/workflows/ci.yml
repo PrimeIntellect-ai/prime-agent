@@ -143,16 +143,43 @@ jobs:
         working-directory: ${{ matrix.package }}
         run: ${{ matrix.command }}
 
+  prime-runtime-test:
+    name: Prime runtime tests
+    needs: trust
+    if: needs.trust.outputs.allowed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Install uv
+        run: |
+          python3 -m pip install --user uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Test
+        run: npm run test:prime-runtime
+
   build-check-test:
     name: build-check-test
     if: always() && needs.trust.outputs.allowed == 'true'
-    needs: [trust, build-check, test]
+    needs: [trust, build-check, test, prime-runtime-test]
     runs-on: ubuntu-latest
     steps:
       - name: Verify CI results
         env:
           BUILD_CHECK_RESULT: ${{ needs.build-check.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          PRIME_RUNTIME_TEST_RESULT: ${{ needs.prime-runtime-test.result }}
         run: |
           test "$BUILD_CHECK_RESULT" = success
           test "$TEST_RESULT" = success
+          test "$PRIME_RUNTIME_TEST_RESULT" = success

@@ -1,0 +1,1 @@
+- Added a durable recursive task graph with scoped delegation plans, inherited handoffs, trusted shared evidence, historical claim coverage, and a graph-wide token budget.

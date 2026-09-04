@@ -162,6 +162,8 @@ export interface CustomEntry<T = unknown> extends SessionEntryBase {
 export interface ChildUsageAttributionEntry extends SessionEntryBase {
 	type: "child_usage_attributed";
 	targetId: string;
+	/** Stable context-tree child id. Missing on sessions written before v0.7.7. */
+	childId?: string;
 	childUsage: Usage;
 	aggregateUsage: Usage;
 	origin?: "spawn_task" | "agent_message" | "direct_user";
@@ -1526,6 +1528,7 @@ export class SessionManager {
 		childUsage: Usage,
 		aggregateUsage: Usage,
 		origin?: ChildUsageAttributionEntry["origin"],
+		childId?: string,
 	): string {
 		const target = this.byId.get(targetId);
 		if (target?.type !== "message" || target.message.role !== "assistant") {
@@ -1539,6 +1542,7 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			targetId,
+			...(childId ? { childId } : {}),
 			childUsage: cloneUsage(childUsage),
 			aggregateUsage: cloneUsage(aggregateUsage),
 			...(origin ? { origin } : {}),

@@ -1313,6 +1313,7 @@ describe("global refinement history", () => {
 	it("plans a proposal without mutating harness state", async () => {
 		const dir = makeTempDir();
 		const state = loadHarnessState(dir);
+		const reportUsage = vi.fn();
 		completeSimpleMock.mockResolvedValueOnce(
 			assistantText(
 				JSON.stringify({
@@ -1339,6 +1340,10 @@ describe("global refinement history", () => {
 			createRefineModel(false),
 			"api-key",
 			{},
+			undefined,
+			undefined,
+			undefined,
+			reportUsage,
 		);
 
 		// planRefinement must not touch state: the host re-reads the file before applying,
@@ -1358,6 +1363,8 @@ describe("global refinement history", () => {
 		expect(request.systemPrompt).not.toContain("asyncio.gather(rlm");
 		expect(state.entries.memory.planned_memory).toBeUndefined();
 		expect(state.refinements).toHaveLength(0);
+		expect(reportUsage).toHaveBeenCalledOnce();
+		expect(reportUsage).toHaveBeenCalledWith(expect.objectContaining({ input: 1, output: 1 }));
 
 		const result = applyRefinementProposal(state, plan.proposal, { id: plan.id });
 		expect(result.appliedEdits[0]).toMatchObject({ id: "planned_memory", applied: true });

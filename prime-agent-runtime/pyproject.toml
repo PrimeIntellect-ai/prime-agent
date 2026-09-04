@@ -10,6 +10,7 @@ dependencies = [
 
 [dependency-groups]
 dev = ["dill"]
+test = ["httpx", "mcp"]
 
 [build-system]
 requires = ["hatchling"]
