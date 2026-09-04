@@ -309,7 +309,7 @@ describe("IpythonKernelProvisioner", () => {
 	it("drops a dead kernel memo so ensure() restarts instead of reusing it", async () => {
 		const { python, countRuns } = writeFakePython();
 		const provisioner = new IpythonKernelProvisioner(tempDir, { python });
-		const dead = { isRunning: false } as unknown as KernelClient;
+		const dead = { isRunning: false, isDefunct: true } as unknown as KernelClient;
 		Object.assign(
 			provisioner as unknown as {
 				managerPromise: Promise<KernelClient>;
@@ -323,6 +323,27 @@ describe("IpythonKernelProvisioner", () => {
 
 		await expect(provisioner.ensure()).rejects.toThrow(/Kernel exited before ready/);
 		expect(countRuns()).toBe(1);
+	});
+
+	it("keeps the memo for a kernel that is repairing itself, not defunct", async () => {
+		const { countRuns } = writeFakePython();
+		const provisioner = new IpythonKernelProvisioner(tempDir, {});
+		const repairing = { isRunning: false, isDefunct: false } as unknown as KernelClient;
+		Object.assign(
+			provisioner as unknown as {
+				managerPromise: Promise<KernelClient>;
+				startedManager: KernelClient;
+			},
+			{
+				managerPromise: Promise.resolve(repairing),
+				startedManager: repairing,
+			},
+		);
+
+		// A protocol repair parks the SAME manager in idle/starting while it
+		// respawns; a second provisioner kernel would split the snapshot dir.
+		await expect(provisioner.ensure()).resolves.toBe(repairing);
+		expect(countRuns()).toBe(0);
 	});
 
 	it("removes startup progress listeners when an ensure caller is aborted", async () => {

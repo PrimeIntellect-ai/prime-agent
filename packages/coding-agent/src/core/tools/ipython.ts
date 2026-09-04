@@ -388,8 +388,9 @@ export class IpythonKernelProvisioner {
 		if (signal?.aborted) {
 			return Promise.reject(createAbortError());
 		}
-		// A kernel that died after a successful startup must not be handed out again.
-		if (this.startedManager && !this.startedManager.isRunning) {
+		// A kernel that died for good must not be handed out again; a manager
+		// mid-protocol-repair (idle/starting) recovers itself and keeps the memo.
+		if (this.startedManager?.isDefunct) {
 			this.managerPromise = undefined;
 			this.startedManager = undefined;
 		}
