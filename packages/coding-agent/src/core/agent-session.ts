@@ -10630,11 +10630,17 @@ export class AgentSession {
 		// entry per settle boundary (child agent_end, run settlement) instead of
 		// one journal append per child assistant message. Crash durability is
 		// bounded, not per-message: a batch older than the staleness bound flushes
-		// before it grows or a tool starts, so process death loses at most that
-		// window of accumulated child usage.
+		// at the next checkpoint (accumulation, tool start) or on the wall-clock
+		// timer backstop, so process death loses at most that window of
+		// accumulated child usage.
 		const pendingChildUsage = new Map<ChildUsageAttributionEntry["origin"], Usage>();
 		let pendingChildUsageSince = 0;
+		let pendingChildUsageTimer: ReturnType<typeof setTimeout> | undefined;
 		const flushPendingChildUsageAttribution = () => {
+			if (pendingChildUsageTimer !== undefined) {
+				clearTimeout(pendingChildUsageTimer);
+				pendingChildUsageTimer = undefined;
+			}
 			if (pendingChildUsage.size === 0 || !parentAssistantForUsage) return;
 			const batches = [...pendingChildUsage.entries()];
 			pendingChildUsage.clear();
@@ -10780,11 +10786,24 @@ export class AgentSession {
 					} else if (event.type === "message_end" && event.message.role === "assistant") {
 						const assistant = event.message as AssistantMessage;
 						if (assistant.stopReason !== "error" && assistant.stopReason !== "aborted") {
+							// A stale batch must flush before this completion folds into the
+							// parent aggregate: the persisted aggregateUsage of an entry may
+							// only include completions whose childUsage is durable with or
+							// before it, or replay would inflate the parent's own spend.
+							flushPendingChildUsageIfStale();
 							attributeChildUsage(parentAssistantForUsage?.usage ?? emptyUsage(), assistant.usage);
 							if (parentAssistantForUsage) {
-								flushPendingChildUsageIfStale();
 								const origin = rlmChildUsageOrigin(child.messages, assistant);
-								if (pendingChildUsage.size === 0) pendingChildUsageSince = Date.now();
+								if (pendingChildUsage.size === 0) {
+									pendingChildUsageSince = Date.now();
+									// Wall-clock backstop: a long tool execution has no event
+									// checkpoints, so the batch flushes on time regardless.
+									pendingChildUsageTimer = setTimeout(
+										flushPendingChildUsageAttribution,
+										RLM_CHILD_USAGE_FLUSH_MAX_PENDING_MS,
+									);
+									pendingChildUsageTimer.unref?.();
+								}
 								const bucket = pendingChildUsage.get(origin) ?? emptyUsage();
 								addAssistantUsage(bucket, assistant.usage);
 								pendingChildUsage.set(origin, bucket);

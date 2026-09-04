@@ -2576,7 +2576,25 @@ describe("AgentSession rlm recursion", () => {
 					[4, 4],
 				]);
 				expect(attributions.map((entry) => entry.origin)).toEqual(["spawn_task", "spawn_task"]);
+				// Each persisted aggregate covers exactly the completions whose
+				// childUsage is durable with or before it, so a replay at any
+				// prefix reproduces the parent's own spend exactly.
+				expect(attributions.map((entry) => entry.aggregateUsage.input)).toEqual([3, 7]);
 			});
+
+			const sessionFile = root.sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("parent session file was not created");
+			const reloaded = SessionManager.open(sessionFile, join(tempDir, "sessions")).getEntries();
+			const reloadedParent = reloaded.find(
+				(entry) => entry.type === "message" && entry.message.role === "assistant",
+			);
+			if (!reloadedParent || reloadedParent.type !== "message" || reloadedParent.message.role !== "assistant") {
+				throw new Error("parent assistant entry was not reloaded");
+			}
+			const reloadedChildTotal = reloaded
+				.filter((entry) => entry.type === "child_usage_attributed")
+				.reduce((total, entry) => total + entry.childUsage.input, 0);
+			expect(reloadedParent.message.usage.input - reloadedChildTotal).toBe(0);
 		} finally {
 			vi.useRealTimers();
 		}
