@@ -233,9 +233,14 @@ export class ReplKernelManager {
 		try {
 			mkdirSync(dirname(path), { recursive: true });
 			if (existsSync(path) && statSync(path).size > MAX_KERNEL_STDERR_LOG_BYTES) {
-				// Drop any prior .old first: rename fails on Windows if it exists.
-				rmSync(`${path}.old`, { force: true });
-				renameSync(path, `${path}.old`);
+				try {
+					// Drop any prior .old first: rename fails on Windows if it exists.
+					rmSync(`${path}.old`, { force: true });
+					renameSync(path, `${path}.old`);
+				} catch (error) {
+					// A failed rotation must not cost the log: keep appending instead.
+					this.appendKernelDiagnostic(`cannot rotate kernel stderr log: ${errorMessage(error)}`);
+				}
 			}
 			return openSync(path, "a");
 		} catch (error) {

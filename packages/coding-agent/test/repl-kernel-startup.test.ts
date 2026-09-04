@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -102,6 +102,27 @@ describe("ReplKernelManager startup", () => {
 			const log = readFileSync(stderrLogPath, "utf8");
 			expect(log.endsWith(marker)).toBe(true);
 			expect(statSync(stderrLogPath).size).toBeLessThanOrEqual(5 * 1024 * 1024 + marker.length);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("keeps logging to the oversized file when rotation fails", async () => {
+		const python = join(tempDir, "python");
+		writeExecutable(python, ["#!/bin/sh", 'echo "fresh incarnation" >&2', "exit 42", ""].join("\n"));
+		const stderrLogPath = join(tempDir, "kernel-stderr.log");
+		writeFileSync(stderrLogPath, Buffer.alloc(5 * 1024 * 1024 + 1, "x"));
+		// A directory at the .old path makes the rotation's rm/rename throw.
+		mkdirSync(`${stderrLogPath}.old`);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const manager = new ReplKernelManager({ python, cwd: tempDir, stderrLogPath });
+
+		try {
+			await expect(manager.execute("print(1)")).rejects.toThrow(
+				/cannot rotate kernel stderr log[\s\S]*fresh incarnation/,
+			);
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+			expect(readFileSync(stderrLogPath, "utf8").endsWith("fresh incarnation\n")).toBe(true);
 		} finally {
 			errorSpy.mockRestore();
 		}
