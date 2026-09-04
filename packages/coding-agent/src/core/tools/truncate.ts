@@ -185,10 +185,11 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 
 		if (outputBytesCount + lineBytes > maxBytes) {
 			truncatedBy = "bytes";
-			// Edge case: if we haven't added ANY lines yet and this line exceeds maxBytes,
-			// take the end of the line (partial)
-			if (outputLinesArr.length === 0) {
+			// An oversized line rescues into a partial tail; trailing blank lines
+			// (a newline-terminated buffer) must not defeat the rescue.
+			if (outputLinesArr.every((collected) => collected.length === 0)) {
 				const truncatedLine = truncateStringToBytesFromEnd(line, maxBytes);
+				outputLinesArr.length = 0;
 				outputLinesArr.unshift(truncatedLine);
 				outputBytesCount = Buffer.byteLength(truncatedLine, "utf-8");
 				lastLinePartial = true;

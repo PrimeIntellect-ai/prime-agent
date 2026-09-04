@@ -51,6 +51,7 @@ export class OutputAccumulator {
 
 	private tempFilePath: string | undefined;
 	private tempFileStream: WriteStream | undefined;
+	private tempFileFailed = false;
 
 	constructor(options: OutputAccumulatorOptions = {}) {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
@@ -203,13 +204,23 @@ export class OutputAccumulator {
 	}
 
 	private ensureTempFile(): void {
-		if (this.tempFilePath) {
+		if (this.tempFilePath || this.tempFileFailed) {
 			return;
 		}
 		this.tempFilePath = defaultTempFilePath(this.tempFilePrefix);
-		this.tempFileStream = createWriteStream(this.tempFilePath);
+		const stream = createWriteStream(this.tempFilePath);
+		// An unlistened 'error' (ENOSPC, unwritable tmpdir) would crash the
+		// process; the spill degrades to the truncated in-memory tail instead.
+		stream.on("error", () => {
+			this.tempFileFailed = true;
+			if (this.tempFileStream === stream) {
+				this.tempFileStream = undefined;
+				this.tempFilePath = undefined;
+			}
+		});
+		this.tempFileStream = stream;
 		for (const chunk of this.rawChunks) {
-			this.tempFileStream.write(chunk);
+			stream.write(chunk);
 		}
 		this.rawChunks = [];
 	}

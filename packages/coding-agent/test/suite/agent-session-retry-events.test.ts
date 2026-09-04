@@ -1,7 +1,7 @@
-import type { AgentEvent, AgentTool } from "@earendil-works/pi-agent-core";
+import { AgentContinueError, type AgentEvent, type AgentTool } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, type Harness } from "./harness.js";
 
 function normalizeEventOrder(events: Harness["events"]): string[] {
@@ -77,6 +77,26 @@ describe("AgentSession retry and event characterization", () => {
 		expect(retryEvents).toEqual(["start:1", "end:true"]);
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(harness.session.isRetrying).toBe(false);
+	});
+
+	it("ends the retry when the scheduled continue cannot run", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
+		harnesses.push(harness);
+		const retryEvents: string[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "auto_retry_start") retryEvents.push(`start:${event.attempt}`);
+			if (event.type === "auto_retry_end") retryEvents.push(`end:${event.success}:${event.finalError}`);
+		});
+		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })]);
+		vi.spyOn(harness.session.agent, "continue").mockRejectedValue(
+			new AgentContinueError("nothing-to-continue", "Nothing to continue"),
+		);
+
+		// Pre-fix this hangs: the swallowed rejection leaves the retry unresolved forever.
+		await harness.session.prompt("test");
+
+		expect(harness.session.isRetrying).toBe(false);
+		expect(retryEvents).toEqual(["start:1", "end:false:Nothing to continue"]);
 	});
 
 	it("retries multiple transient failures and succeeds on the final attempt", async () => {

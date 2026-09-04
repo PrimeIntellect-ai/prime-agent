@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { parseFrontmatter, stripFrontmatter } from "../src/utils/frontmatter.js";
 
 describe("parseFrontmatter", () => {
+	it("parses frontmatter behind a UTF-8 BOM", () => {
+		const input = "\uFEFF---\nname: bom-skill\n---\nBody";
+		const result = parseFrontmatter(input);
+		expect(result.frontmatter).toEqual({ name: "bom-skill" });
+		expect(result.body).toBe("Body");
+	});
+
 	it("parses keys, strips quotes, and returns body", () => {
 		const input = "---\nname: \"skill-name\"\ndescription: 'A desc'\nfoo-bar: value\n---\n\nBody text";
 		const { frontmatter, body } = parseFrontmatter<Record<string, string>>(input);

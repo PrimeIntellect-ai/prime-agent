@@ -49,17 +49,28 @@ export async function executeBashWithOperations(
 
 	let tempFilePath: string | undefined;
 	let tempFileStream: WriteStream | undefined;
+	let tempFileFailed = false;
 	let totalBytes = 0;
 
 	const ensureTempFile = () => {
-		if (tempFilePath) {
+		if (tempFilePath || tempFileFailed) {
 			return;
 		}
 		const id = randomBytes(8).toString("hex");
 		tempFilePath = join(tmpdir(), `pi-bash-${id}.log`);
-		tempFileStream = createWriteStream(tempFilePath);
+		const stream = createWriteStream(tempFilePath);
+		// An unlistened 'error' (ENOSPC, unwritable tmpdir) would crash the
+		// process; the spill degrades to the truncated in-memory tail instead.
+		stream.on("error", () => {
+			tempFileFailed = true;
+			if (tempFileStream === stream) {
+				tempFileStream = undefined;
+				tempFilePath = undefined;
+			}
+		});
+		tempFileStream = stream;
 		for (const chunk of outputChunks) {
-			tempFileStream.write(chunk);
+			stream.write(chunk);
 		}
 	};
 

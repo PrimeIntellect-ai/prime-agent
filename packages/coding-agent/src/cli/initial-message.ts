@@ -37,7 +37,7 @@ export function buildInitialMessage({
 	}
 
 	return {
-		initialMessage: parts.length > 0 ? parts.join("") : undefined,
+		initialMessage: parts.length > 0 ? parts.join("\n\n") : undefined,
 		initialImages: fileImages && fileImages.length > 0 ? fileImages : undefined,
 	};
 }

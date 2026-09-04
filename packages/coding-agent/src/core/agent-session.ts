@@ -11202,7 +11202,21 @@ export class AgentSession {
 		this._retryAbortController = undefined;
 
 		setTimeout(() => {
-			this.agent.continue().catch(() => {});
+			this.agent.continue().catch((error: unknown) => {
+				// A continue that never starts would otherwise leave the retry
+				// unresolved forever (isRetrying stuck, waiters parked).
+				if (!this.isRetrying) return;
+				const attempt = this._retryAttempt;
+				this._retryAttempt = 0;
+				this._retryAuthFailureSources = [];
+				this._emit({
+					type: "auto_retry_end",
+					success: false,
+					attempt,
+					finalError: error instanceof Error ? error.message : String(error),
+				});
+				this._resolveRetry();
+			});
 		}, 0);
 
 		return true;
