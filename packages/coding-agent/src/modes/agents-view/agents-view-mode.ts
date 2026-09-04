@@ -29,6 +29,7 @@ import { ensureTool } from "../../utils/tools-manager.js";
 import { DaemonAgentConnection } from "../agent-connection/daemon-agent-connection.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/types.js";
 import { DaemonClient, getDaemonSocketCloseReason } from "../daemon/daemon-client.js";
+import { DaemonSessionRecoveringError } from "../daemon/daemon-errors.js";
 import {
 	collectDaemonClientEnv,
 	type DaemonClosingReason,
@@ -344,7 +345,12 @@ async function openAgentsViewSession(
 			return { connection, summary };
 		} catch (error) {
 			client.close();
-			if (!summary.sessionFile || !isUnknownActiveSessionError(error)) {
+			// A recovering session takes the saved-session path too: the create/open
+			// route waits for or retries the worker's recovery.
+			if (
+				!summary.sessionFile ||
+				!(isUnknownActiveSessionError(error) || error instanceof DaemonSessionRecoveringError)
+			) {
 				throw error;
 			}
 			client = await connectAgentsViewDaemonClient(socketPath);

@@ -1,0 +1,1 @@
+- Fixed daemon sessions bricking behind a terminal failed worker state: attach, create, and retry now re-run recovery for a failed worker whose process is verified alive, and a known-but-still-recovering session answers with a structured retryable error instead of "Unknown active session".

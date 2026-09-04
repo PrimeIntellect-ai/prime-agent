@@ -1799,6 +1799,71 @@ describe("daemon worker supervisor monitoring", () => {
 		);
 	});
 
+	it("retries recovery on create reuse for a failed worker with a current process identity", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "failed-live",
+				rootActiveSessionId: "active-failed-live",
+				lifecycle: "failed" as string,
+				consecutiveFailures: 3,
+				pid: process.pid,
+				processStartId: getProcessStartId(process.pid),
+			},
+			intentionalStop: true,
+			deferredRecoveryRounds: 11,
+		};
+		const recoverWorker = vi.fn(async () => {
+			worker.descriptor.lifecycle = "ready";
+		});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			persistWorker: vi.fn(),
+			recoverWorker,
+			isWorkerReadyForCreate: (target: typeof worker) => target.descriptor.lifecycle === "ready",
+		}) as unknown as {
+			reuseWorkerForCreate(
+				target: typeof worker,
+				ownerClientId: undefined,
+				sessionPath: string,
+			): Promise<typeof worker>;
+		};
+
+		await expect(supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/failed-live.jsonl")).resolves.toBe(worker);
+		expect(recoverWorker).toHaveBeenCalledWith(worker);
+		expect(worker.intentionalStop).toBe(false);
+		expect(worker.deferredRecoveryRounds).toBe(0);
+	});
+
+	it("answers a descriptor-known unaddressable root session with a structured recovering error", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "worker-gap",
+				rootActiveSessionId: "active-gap",
+				rootSessionId: "session-gap",
+				lifecycle: "recovering" as string,
+			},
+			intentionalStop: false,
+			summaries: new Map(),
+		};
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			matchWorkers: () => [],
+			refreshWorkerSummaries: vi.fn(async () => {}),
+		}) as unknown as { findWorker(selector: string): Promise<unknown> };
+
+		await expect(supervisor.findWorker("active-gap")).rejects.toMatchObject({
+			name: "DaemonSessionRecoveringError",
+			code: "session_recovering",
+			activeSessionId: "active-gap",
+		});
+		// A failed worker keeps the unknown answer so clients fall back to the
+		// create path, which reclaims or retries it.
+		worker.descriptor.lifecycle = "failed";
+		await expect(supervisor.findWorker("active-gap")).rejects.toThrow("Unknown active session: active-gap");
+		await expect(supervisor.findWorker("missing")).rejects.toThrow("Unknown active session: missing");
+	});
+
 	it("waits for worker recovery before reusing a saved session", async () => {
 		const root = { id: "active-root", activeSessionId: "active-root", sessionId: "session-root", cwd: "/tmp" };
 		const recovery = createDeferred<void>();

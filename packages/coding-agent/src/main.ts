@@ -958,7 +958,9 @@ async function findActiveDaemonSessionSummary(
 	try {
 		const response = await client.request({ type: "get_state", activeSessionId: selector }, 3000);
 		if (!response.success) {
-			if (isUnknownActiveSessionError(response.error)) {
+			// A recovering session falls back to the saved-session path too: the
+			// create/open route waits for or retries the worker's recovery.
+			if (isUnknownActiveSessionError(response.error) || response.errorInfo?.code === "session_recovering") {
 				return undefined;
 			}
 			throw new Error(response.error);
