@@ -9,6 +9,7 @@ import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { getPackageDir } from "../../config.js";
+import { tryAcquireDirLock } from "../../utils/dir-lock.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 
 const BOOTSTRAP_SCHEMA = 9;
@@ -449,16 +450,6 @@ function processIsRunning(pid: number): boolean {
 	}
 }
 
-async function readLockPid(lockDir: string): Promise<number | null> {
-	try {
-		const raw = await readFile(path.join(lockDir, "pid"), "utf8");
-		const pid = Number.parseInt(raw.trim(), 10);
-		return Number.isInteger(pid) && pid > 0 ? pid : null;
-	} catch {
-		return null;
-	}
-}
-
 async function lockMissingPidIsStale(lockDir: string): Promise<boolean> {
 	try {
 		const lockStat = await stat(lockDir);
@@ -473,19 +464,13 @@ async function acquireBootstrapLock(venv: string): Promise<() => Promise<void>> 
 	await mkdir(path.dirname(lockDir), { recursive: true });
 
 	for (;;) {
-		try {
-			await mkdir(lockDir);
-			await writeFile(path.join(lockDir, "pid"), `${process.pid}\n`, "utf8");
+		const attempt = await tryAcquireDirLock(lockDir, async (ownerPid) =>
+			ownerPid === undefined ? !(await lockMissingPidIsStale(lockDir)) : processIsRunning(ownerPid),
+		);
+		if (attempt === "acquired") {
 			return () => rm(lockDir, { recursive: true, force: true });
-		} catch (error) {
-			if (!isNodeError(error, "EEXIST")) throw error;
-
-			const pid = await readLockPid(lockDir);
-			if (pid === null ? await lockMissingPidIsStale(lockDir) : !processIsRunning(pid)) {
-				await rm(lockDir, { recursive: true, force: true });
-				continue;
-			}
-
+		}
+		if (attempt === "held") {
 			await sleep(BOOTSTRAP_LOCK_RETRY_MS);
 		}
 	}
