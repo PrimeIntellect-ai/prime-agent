@@ -69,15 +69,20 @@ export class EventLog {
 	/**
 	 * Replay every terminated line through `parse`. `parse` throws for a line
 	 * it rejects (fail-closed) and returns undefined for a line it deliberately
-	 * skips; an unterminated final line never reaches it.
+	 * skips; an unterminated final line never reaches it. A missing log is an
+	 * empty history for owners and an error for explicit readers; the choice is
+	 * made at the open so no check-then-read window exists.
 	 */
-	replaySync<T>(parse: (line: string, index: number) => T | undefined): T[] {
+	replaySync<T>(
+		parse: (line: string, index: number) => T | undefined,
+		options?: { missingFileThrows?: boolean },
+	): T[] {
 		const { maxBytes, maxRecords } = this.options;
 		let fd: number;
 		try {
 			fd = openSync(this.path, "r");
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+			if (!options?.missingFileThrows && (error as NodeJS.ErrnoException).code === "ENOENT") return [];
 			throw error;
 		}
 		let contents: string;

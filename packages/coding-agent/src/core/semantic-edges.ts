@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
 import { join } from "node:path";
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { EventLog } from "./event-log.js";
@@ -361,8 +360,7 @@ function parseSemanticEdgeLine(line: string, index: number): SemanticEdgeLedgerE
 
 export function readSemanticEdgeLedger(path: string): SemanticEdgeLedgerEvent[] {
 	// A missing ledger stays loud for explicit readers; the recorder treats absence as empty.
-	statSync(path);
-	return new EventLog(path).replaySync(parseSemanticEdgeLine);
+	return new EventLog(path).replaySync(parseSemanticEdgeLine, { missingFileThrows: true });
 }
 
 interface FoldSession {
