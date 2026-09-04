@@ -38,13 +38,17 @@
 import { createHash } from "node:crypto";
 import {
 	chmodSync,
+	closeSync,
 	cpSync,
 	existsSync,
 	lstatSync,
 	mkdirSync,
+	openSync,
+	readSync,
 	readFileSync,
 	readdirSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -220,19 +224,234 @@ function assertSafeOutputDir(outDir) {
 	}
 }
 
-function sha256File(path) {
-	const hash = createHash("sha256");
-	hash.update(readFileSync(path));
-	return hash.digest("hex");
+const MANIFEST_VERSION = 1;
+const MAX_ARCHIVE_BYTES = 96 * 1024 * 1024;
+const MAX_DECOMPRESSED_TAR_BYTES = 256 * 1024 * 1024;
+const MAX_MANIFEST_BYTES = 1024 * 1024;
+const MAX_MEMBERS = 1024;
+const MAX_REGULAR_FILES = 512;
+const MAX_DIRECTORIES = 512;
+const MAX_PER_FILE_BYTES = 192 * 1024 * 1024;
+const MAX_TOTAL_FILE_BYTES = 224 * 1024 * 1024;
+const MAX_PATH_UTF8_BYTES = 512;
+const MAX_COMPONENT_UTF8_BYTES = 255;
+
+function sha256FileBounded(path) {
+	const fd = openSync(path, "r");
+	try {
+		const hash = createHash("sha256");
+		const buf = Buffer.alloc(1048576);
+		let bytesRead;
+		while ((bytesRead = readSync(fd, buf, 0, buf.length, null)) > 0) {
+			if (bytesRead < buf.length) {
+				hash.update(buf.subarray(0, bytesRead));
+			} else {
+				hash.update(buf);
+			}
+		}
+		return hash.digest("hex");
+	} finally {
+		closeSync(fd);
+	}
+}
+
+function sha256Bytes(data) {
+	return createHash("sha256").update(data).digest("hex");
+}
+
+function buildEntryManifest(stagingDir, version, platform, archiveName) {
+	const entries = [];
+	const seenPaths = new Set();
+	let totalFiles = 0;
+	let totalDirectories = 0;
+	let totalSize = 0;
+	const rootStat = lstatSync(stagingDir);
+	if (!rootStat.isDirectory()) throw new Error(`Staging root is not a directory: ${stagingDir}`);
+
+	// Root directory entry
+	entries.push({
+		path: ".",
+		type: "directory",
+		mode: "0755",
+		size: 0,
+	});
+	seenPaths.add(".");
+	totalDirectories++;
+	chmodSync(stagingDir, 0o755);
+
+	function walk(currentDir, relativePath) {
+		const dirEntries = readdirSync(currentDir, { withFileTypes: true }).sort((a, b) => bytewiseCompare(a.name, b.name));
+		for (const entry of dirEntries) {
+			const childPath = join(currentDir, entry.name);
+			const childRelative = relativePath === "" ? entry.name : `${relativePath}/${entry.name}`;
+
+			if (seenPaths.has(childRelative)) throw new Error(`Path collision: ${childRelative}`);
+			// Reject links and special files (lstat to detect symlinks)
+			const rawStat = lstatSync(childPath);
+			if (rawStat.isSymbolicLink()) throw new Error(`Refusing to package symlink: ${childRelative}`);
+			if (!rawStat.isFile() && !rawStat.isDirectory()) throw new Error(`Refusing to package special file: ${childRelative}`);
+
+			if (rawStat.isDirectory()) {
+				chmodSync(childPath, 0o755);
+				entries.push({
+					path: childRelative,
+					type: "directory",
+					mode: "0755",
+					size: 0,
+				});
+				seenPaths.add(childRelative);
+				totalDirectories++;
+				walk(childPath, childRelative);
+			} else {
+				const isExecutable = (rawStat.mode & 0o111) !== 0;
+				const normalizedMode = isExecutable ? "0755" : "0644";
+				const modeNum = isExecutable ? 0o755 : 0o644;
+				chmodSync(childPath, modeNum);
+				const preStat = lstatSync(childPath);
+				const sha256 = sha256FileBounded(childPath);
+				const postStat = lstatSync(childPath);
+				if (
+					!preStat.isFile() ||
+					!postStat.isFile() ||
+					preStat.nlink !== 1 ||
+					postStat.nlink !== 1 ||
+					(preStat.mode & 0o7777) !== modeNum ||
+					(postStat.mode & 0o7777) !== modeNum ||
+					preStat.dev !== postStat.dev ||
+					preStat.ino !== postStat.ino ||
+					preStat.size !== postStat.size ||
+					preStat.mtimeMs !== postStat.mtimeMs
+				) {
+					throw new Error(`File changed during hashing: ${childRelative}`);
+				}
+				const fileStat = postStat;
+
+				entries.push({
+					path: childRelative,
+					type: "file",
+					mode: normalizedMode,
+					size: fileStat.size,
+					sha256,
+				});
+				seenPaths.add(childRelative);
+				totalFiles++;
+				totalSize += fileStat.size;
+			}
+		}
+	}
+
+	walk(stagingDir, "");
+	entries.sort((a, b) => bytewiseCompare(a.path, b.path));
+
+	return {
+		manifestVersion: MANIFEST_VERSION,
+		version,
+		platform,
+		archive: archiveName,
+		totalFiles,
+		totalDirectories,
+		totalSize,
+		entries,
+	};
+}
+
+function bytewiseCompare(a, b) {
+	return Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+}
+
+function validateManifestPath(path) {
+	if (typeof path !== "string" || path.length === 0 || path.startsWith("/") || path.includes("\\")) {
+		throw new Error("Invalid release manifest path");
+	}
+	const encoded = Buffer.from(path, "utf8");
+	if (encoded.toString("utf8") !== path || encoded.byteLength > MAX_PATH_UTF8_BYTES) {
+		throw new Error("Invalid release manifest path");
+	}
+	if (path === ".") return;
+	for (const component of path.split("/")) {
+		if (
+			component.length === 0 ||
+			component === "." ||
+			component === ".." ||
+			Buffer.byteLength(component, "utf8") > MAX_COMPONENT_UTF8_BYTES ||
+			/[\u0000-\u001f\u007f]/.test(component)
+		) {
+			throw new Error("Invalid release manifest path");
+		}
+	}
+}
+
+function verifyEntryManifest(manifest) {
+	const { totalFiles, totalDirectories, totalSize, entries } = manifest;
+	if (!Array.isArray(entries) || entries.length === 0 || entries.length > MAX_MEMBERS) {
+		throw new Error("Invalid release manifest member count");
+	}
+	if (entries[0]?.path !== "." || entries[0]?.type !== "directory") {
+		throw new Error("Release manifest root must be first");
+	}
+	const seen = new Set();
+	const directories = new Set();
+	let countedFiles = 0;
+	let countedDirectories = 0;
+	let countedSize = 0;
+	let previousPath;
+	for (const entry of entries) {
+		validateManifestPath(entry.path);
+		if (seen.has(entry.path)) throw new Error("Duplicate release manifest path");
+		if (previousPath !== undefined && bytewiseCompare(previousPath, entry.path) >= 0) {
+			throw new Error("Release manifest paths are not in bytewise order");
+		}
+		previousPath = entry.path;
+		seen.add(entry.path);
+		if (entry.path !== ".") {
+			const slash = entry.path.lastIndexOf("/");
+			const parent = slash < 0 ? "." : entry.path.slice(0, slash);
+			if (!directories.has(parent)) throw new Error("Release manifest parent is missing or out of order");
+		}
+		if (entry.type === "file") {
+			countedFiles++;
+			if (
+				(entry.mode !== "0644" && entry.mode !== "0755") ||
+				!Number.isSafeInteger(entry.size) ||
+				entry.size < 0 ||
+				entry.size > MAX_PER_FILE_BYTES ||
+				typeof entry.sha256 !== "string" ||
+				!/^[a-f0-9]{64}$/.test(entry.sha256)
+			) {
+				throw new Error("Invalid release manifest file entry");
+			}
+			countedSize += entry.size;
+		} else if (entry.type === "directory") {
+			countedDirectories++;
+			if (entry.mode !== "0755" || entry.sha256 !== undefined || entry.size !== 0) {
+				throw new Error("Invalid release manifest directory entry");
+			}
+			directories.add(entry.path);
+		} else {
+			throw new Error("Invalid release manifest entry type");
+		}
+	}
+	if (
+		countedFiles !== totalFiles ||
+		countedDirectories !== totalDirectories ||
+		countedSize !== totalSize ||
+		countedFiles > MAX_REGULAR_FILES ||
+		countedDirectories > MAX_DIRECTORIES ||
+		countedSize > MAX_TOTAL_FILE_BYTES
+	) {
+		throw new Error("Release manifest totals are invalid");
+	}
+	return manifest;
 }
 
 function createArchive(sourceDir, archivePath) {
-	const result = spawnSync("tar", ["-czf", archivePath, "-C", sourceDir, "."], {
+	const result = spawnSync("tar", ["--format=ustar", "-czf", archivePath, "-C", sourceDir, "."], {
 		stdio: "pipe",
 		encoding: "utf8",
 	});
 	if (result.status !== 0) throw new Error(`tar failed: ${result.stderr || result.stdout}`);
 }
+
 
 function validateSidecars(sidecarDir) {
 	const missingFiles = REQUIRED_SIDECAR_FILES.filter((name) => {
@@ -246,14 +465,24 @@ function validateSidecars(sidecarDir) {
 	return [...missingFiles, ...missingDirectories];
 }
 
-const FORBIDDEN_RELEASE_DIRECTORIES = new Set(["node_modules", ".venv", "__pycache__", ".pytest_cache"]);
 
-function findForbiddenReleaseDirectory(root, relativePath = "") {
-	for (const entry of readdirSync(join(root, relativePath), { withFileTypes: true })) {
-		const child = join(relativePath, entry.name);
-		if (FORBIDDEN_RELEASE_DIRECTORIES.has(entry.name)) return child;
-		if (entry.isDirectory()) {
-			const found = findForbiddenReleaseDirectory(root, child);
+function validateStagingDir(root, relativePath) {
+	const dirEntries = readdirSync(join(root, relativePath), { withFileTypes: true });
+	for (const entry of dirEntries) {
+		const child = relativePath === "" ? entry.name : `${relativePath}/${entry.name}`;
+		const fullPath = join(root, child);
+		const stat = lstatSync(fullPath);
+		if (stat.isSymbolicLink()) {
+			return { kind: "symlink", path: child };
+		}
+		if (!stat.isFile() && !stat.isDirectory()) {
+			return { kind: "special", path: child };
+		}
+		if (entry.name === "node_modules" || entry.name === ".venv" || entry.name === "__pycache__" || entry.name === ".pytest_cache") {
+			return { kind: "forbidden", path: child };
+		}
+		if (stat.isDirectory()) {
+			const found = validateStagingDir(root, child);
 			if (found) return found;
 		}
 	}
@@ -280,6 +509,35 @@ function renderInstaller(path, baseUrl, channel) {
 	chmodSync(path, 0o755);
 }
 
+function readGzipUncompressedSize(path) {
+	const archiveStat = statSync(path);
+	if (archiveStat.size < 18) throw new Error("Archive is too small for gzip");
+	const fd = openSync(path, "r");
+	try {
+		const buffer = Buffer.alloc(4);
+		let completed = 0;
+		while (completed < buffer.byteLength) {
+			const count = readSync(
+				fd,
+				buffer,
+				completed,
+				buffer.byteLength - completed,
+				archiveStat.size - buffer.byteLength + completed,
+			);
+			if (count <= 0) throw new Error("Short read while reading gzip ISIZE");
+			completed += count;
+		}
+		const isize = buffer.readUInt32LE(0);
+		if (isize === 0 || isize > MAX_DECOMPRESSED_TAR_BYTES || isize % 512 !== 0) {
+			throw new Error("Gzip ISIZE is outside release safety bounds");
+		}
+		return isize;
+	} finally {
+		closeSync(fd);
+	}
+}
+
+
 function main() {
 	const args = parseArgs(process.argv.slice(2));
 	const outDir = resolve(args.outDir);
@@ -292,9 +550,15 @@ function main() {
 			`Run "bun run copy-binary-assets" first.`,
 		);
 	}
-	const forbiddenDirectory = findForbiddenReleaseDirectory(args.sidecarDir);
-	if (forbiddenDirectory) {
-		throw new Error(`Release sidecars contain a forbidden dependency or cache directory: ${forbiddenDirectory}`);
+	const preflight = validateStagingDir(args.sidecarDir, "");
+	if (preflight) {
+		if (preflight.kind === "symlink") {
+			throw new Error(`Release sidecars contain a symlink: ${preflight.path}`);
+		}
+		if (preflight.kind === "special") {
+			throw new Error(`Release sidecars contain a special file: ${preflight.path}`);
+		}
+		throw new Error(`Release sidecars contain a forbidden dependency or cache directory: ${preflight.path}`);
 	}
 
 	const binarySources = new Map();
@@ -302,6 +566,14 @@ function main() {
 		const binarySource = join(args.binaryDir, platform, "pi");
 		if (!existsSync(binarySource)) {
 			throw new Error(`Binary not found for platform ${platform}: ${binarySource}`);
+		}
+		// Reject symlinks in binary source path; require regular file
+		const binStat = lstatSync(binarySource);
+		if (binStat.isSymbolicLink()) {
+			throw new Error(`Binary for ${platform} is a symlink: ${binarySource}`);
+		}
+		if (!binStat.isFile()) {
+			throw new Error(`Binary for ${platform} is not a regular file: ${binarySource}`);
 		}
 		binarySources.set(platform, binarySource);
 	}
@@ -330,26 +602,60 @@ function main() {
 		renderInstaller(join(stagingDir, "install.sh"), args.baseUrl, args.channel);
 
 		const archiveName = `prime-agent-${args.version}-${platform}.tar.gz`;
+		const manifestName = `prime-agent-${args.version}-${platform}.manifest.json`;
+
+		const rawManifest = buildEntryManifest(stagingDir, args.version, platform, archiveName);
+		const verifiedManifest = verifyEntryManifest(rawManifest);
 		const archivePath = join(versionDir, archiveName);
 		createArchive(stagingDir, archivePath);
 
-		const sha256 = sha256File(archivePath);
-		archives.push({ platform, file: archiveName, sha256 });
+		const archiveByteSize = statSync(archivePath).size;
+		if (archiveByteSize <= 0 || archiveByteSize > MAX_ARCHIVE_BYTES) {
+			throw new Error("Archive is outside release safety bounds");
+		}
+		const archiveSha256 = sha256FileBounded(archivePath);
+		const decompressedTarBytes = readGzipUncompressedSize(archivePath);
+		verifiedManifest.decompressedTarBytes = decompressedTarBytes;
+		const finalManifestContent = `${JSON.stringify(verifiedManifest, null, 2)}\n`;
+		const manifestByteSize = Buffer.byteLength(finalManifestContent, "utf8");
+		if (manifestByteSize <= 0 || manifestByteSize > MAX_MANIFEST_BYTES) {
+			throw new Error("Entry manifest is outside release safety bounds");
+		}
+		const manifestPath = join(versionDir, manifestName);
+		writeFileSync(manifestPath, finalManifestContent);
+		const finalManifestSha256 = sha256Bytes(finalManifestContent);
+		archives.push({
+			platform,
+			file: archiveName,
+			sha256: archiveSha256,
+			byteSize: archiveByteSize,
+			decompressedTarBytes,
+			manifestFile: manifestName,
+			manifestSha256: finalManifestSha256,
+			manifestByteSize,
+		});
 		console.log(`Created ${archivePath}`);
+		console.log(`Created ${manifestPath} (${verifiedManifest.totalFiles} files, ${verifiedManifest.totalDirectories} dirs, ${verifiedManifest.totalSize} bytes, ${decompressedTarBytes} decompressed)`);
 
 		rmSync(join(outDir, "staging"), { force: true, recursive: true });
 	}
 
 	if (archives.length === 0) throw new Error("No platform archives created");
 
-	archives.sort((a, b) => a.file.localeCompare(b.file));
-	const sumsContent = archives.map((a) => `${a.sha256}  ${a.file}`).join("\n") + "\n";
+	archives.sort((a, b) => { if (a.file < b.file) return -1; if (a.file > b.file) return 1; return 0; });
+	const sumsEntries = [];
+	for (const a of archives) {
+		sumsEntries.push({ sha256: a.sha256, file: a.file });
+		sumsEntries.push({ sha256: a.manifestSha256, file: a.manifestFile });
+	}
+	sumsEntries.sort((a, b) => { if (a.file < b.file) return -1; if (a.file > b.file) return 1; return 0; });
+	const sumsContent = sumsEntries.map((e) => `${e.sha256}  ${e.file}`).join("\n") + "\n";
 	writeFileSync(join(versionDir, "SHA256SUMS"), sumsContent);
 	writeFileSync(join(versionDir, args.channel), `v${args.version}\n`);
 
-	const manifestName = args.channel === "stable" ? "latest.json" : "beta.json";
+	const channelManifestName = args.channel === "stable" ? "latest.json" : "beta.json";
 	writeFileSync(
-		join(versionDir, manifestName),
+		join(versionDir, channelManifestName),
 		JSON.stringify(
 			{
 				version: `v${args.version}`,
@@ -358,6 +664,11 @@ function main() {
 					platform: a.platform,
 					file: a.file,
 					sha256: a.sha256,
+					byteSize: a.byteSize,
+					decompressedTarBytes: a.decompressedTarBytes,
+					manifestFile: a.manifestFile,
+					manifestSha256: a.manifestSha256,
+					manifestByteSize: a.manifestByteSize,
 				})),
 				baseUrl: `${args.baseUrl}/releases/v${args.version}`,
 			},
@@ -367,7 +678,7 @@ function main() {
 	);
 
 	console.log(`\nSHA256SUMS -> ${join(versionDir, "SHA256SUMS")}`);
-	console.log(`${manifestName} -> ${join(versionDir, manifestName)}`);
+	console.log(`${channelManifestName} -> ${join(versionDir, channelManifestName)}`);
 }
 
 try {
