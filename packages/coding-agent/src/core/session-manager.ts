@@ -962,26 +962,17 @@ interface SessionScanState {
 
 const SESSION_SCAN_RESUME_TAIL_BYTES = 16;
 const NEWLINE_BUFFER = Buffer.from("\n");
-// Bounds the resumable-state heap by what actually grows with transcripts: the
-// per-assistant-message usage entries (~a few hundred bytes each, so roughly a
-// few tens of MB at the bound). Whole states LRU-evict only while over the
-// bound - an evicted file just pays one full rescan - and states with small
-// maps never evict, so listings larger than any fixed file count cannot
-// thrash the cache.
+// Memory bound (~tens of MB): LRU whole-state eviction only while over it, so
+// small states never thrash and an evicted file just pays one full rescan.
 const SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES = 100_000;
 
-// Session files are append-only between whole-file rewrites, so a scan resumes
-// from the previous scan's byte offset instead of re-reading from byte 0. A
-// rewrite is detected by size shrink, same-size mtime change, a replaced
-// inode, or a consumed prefix that no longer ends with the recorded tail
-// bytes. In-place interior edits that keep the inode, grow the file, and
-// preserve those tail bytes are outside the writer model (appendFileSync plus
-// rename-based whole-file rewrites) and stay invisible until the next rewrite.
+// Session files are append-only between whole-file rewrites, so scans resume
+// from the last consumed byte offset; rewrites are detected by shrink,
+// same-size mtime change, replaced inode, or a changed prefix tail. In-place
+// interior edits that defeat all four are outside the writer model.
 const sessionScanStates = new Map<string, SessionScanState>();
-// Scans of the same path run strictly one at a time. A later caller never
-// joins an earlier scan's result: it chains its own pass, whose stat sees
-// every append that preceded the call, and unchanged files settle in the
-// cached-hit path with a single stat.
+// Scans of a path run one at a time; a later caller chains its own pass (its
+// stat sees every prior append) instead of joining an earlier scan's result.
 const sessionScanQueue = new Map<string, Promise<SessionInfo | null>>();
 
 export function readSessionInfo(filePath: string): Promise<SessionInfo | null> {
@@ -1088,9 +1079,8 @@ async function scanSessionInfo(filePath: string, retryOnReplacement = true): Pro
 		dropSessionScanState(filePath);
 		return null;
 	}
-	// A rename rewrite racing the scan (between the stat and the reads) can mix
-	// two files' bytes into one accumulator: a changed inode after the scan
-	// discards the state and scans once more from scratch.
+	// A rename rewrite racing the scan can mix two files' bytes into one
+	// accumulator: a changed inode afterwards discards the state and rescans.
 	let after: Awaited<ReturnType<typeof stat>> | undefined;
 	try {
 		after = await stat(filePath);
@@ -1108,10 +1098,9 @@ async function scanSessionInfo(filePath: string, retryOnReplacement = true): Pro
 }
 
 /**
- * Fold the complete lines in [state.offset, size) into the accumulator. A final
- * line without its terminating newline is returned instead of consumed: it may
- * be an in-progress append that a later scan sees completed, so it can only be
- * folded into that scan's snapshot, never into the resumable accumulator.
+ * Fold the complete lines in [state.offset, size) into the accumulator. An
+ * unterminated final line may be an in-progress append: it is returned for
+ * snapshot-only folding, never consumed into the resumable accumulator.
  */
 async function scanSessionLines(filePath: string, state: SessionScanState, size: number): Promise<Buffer | undefined> {
 	if (state.acc.invalid || state.offset >= size) return undefined;
