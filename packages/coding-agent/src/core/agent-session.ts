@@ -7126,11 +7126,17 @@ export class AgentSession {
 	}
 
 	async setModel(model: Model<any>, options: ModelSelectOptions = {}): Promise<void> {
-		// Explicit selection overrides a stale-auth lockout; a structured auth
-		// failure on the next request re-marks the provider.
-		this._modelRegistry.clearProviderAuthStale(model.provider);
 		if (!this._modelRegistry.hasConfiguredAuth(model)) {
-			throw new Error(`No API key for ${model.provider}/${model.id}`);
+			// Explicit selection is the recovery path from a stale-auth lockout:
+			// clear (single owner of the clear) only when staleness is the sole
+			// blocker; a structured auth failure on the next request re-marks it.
+			if (this._modelRegistry.getProviderAuthStatus(model.provider).source !== "stale") {
+				throw new Error(`No API key for ${model.provider}/${model.id}`);
+			}
+			this._modelRegistry.clearProviderAuthStale(model.provider);
+			if (!this._modelRegistry.hasConfiguredAuth(model)) {
+				throw new Error(`No API key for ${model.provider}/${model.id}`);
+			}
 		}
 		if (!(await this._modelRegistry.canUseModel(model))) {
 			throw new Error(`Model "${model.provider}/${model.id}" is not available for the current Prime team.`);

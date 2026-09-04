@@ -49,8 +49,9 @@ describe("classifyStreamFailure", () => {
 		["guardrail_intervened", undefined, "safety"],
 		["authentication_error", undefined, "auth"],
 		[undefined, 401, "auth"],
-		["permission_error", 403, "auth"],
-		[undefined, 403, "unknown"],
+		["permission_error", 403, "permission"],
+		["PermissionDeniedError", 403, "permission"],
+		[undefined, 403, "permission"],
 		["invalid_request_error", undefined, "invalid_request"],
 		["api_error", undefined, "server_error"],
 		[undefined, 503, "server_error"],
@@ -129,6 +130,14 @@ describe("extractStreamFailureInfo", () => {
 	test("falls back to classifying the message text", () => {
 		expect(extractStreamFailureInfo(new Error("provider overloaded, retry later")).kind).toBe("overloaded");
 		expect(extractStreamFailureInfo("not an error").kind).toBe("unknown");
+	});
+
+	test("never classifies auth from message text alone", () => {
+		// No structured type and no status: an auth verdict would lock the whole
+		// provider, so free-form text must not produce one.
+		expect(extractStreamFailureInfo(new Error("Unauthorized: authentication failed")).kind).toBe("unknown");
+		const with401 = Object.assign(new Error("Unauthorized"), { status: 401 });
+		expect(extractStreamFailureInfo(with401).kind).toBe("auth");
 	});
 });
 

@@ -53,7 +53,7 @@ export function providerStreamFailureRetryAfterMs(message: AssistantMessage): nu
 
 /** Deterministic rejections never retry; auth gets one retry before it can be marked stale. */
 export function isPermanentProviderFailureKind(kind: string | undefined, retriesPerformed: number): boolean {
-	if (kind === "invalid_request" || kind === "refusal") {
+	if (kind === "invalid_request" || kind === "refusal" || kind === "permission") {
 		return true;
 	}
 	return retriesPerformed > 0 && kind === "auth";

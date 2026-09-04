@@ -15,6 +15,7 @@ export type StreamFailureKind =
 	| "rate_limit"
 	| "server_error"
 	| "auth"
+	| "permission"
 	| "invalid_request"
 	| "malformed_response"
 	| "unknown";
@@ -48,6 +49,7 @@ const KIND_MESSAGES: Record<StreamFailureKind, string> = {
 	rate_limit: "Provider rate limit exceeded",
 	server_error: "Provider server error",
 	auth: "Provider authentication failed",
+	permission: "Provider denied access to the requested resource",
 	invalid_request: "Provider rejected the request",
 	malformed_response: "Provider returned a malformed response",
 	unknown: "Provider stream failed",
@@ -76,10 +78,11 @@ export function classifyStreamFailure(providerErrorType?: string, status?: numbe
 	if (/rate_limit|usage_limit|usage_not_included|throttl/.test(type) || status === 429) {
 		return "rate_limit";
 	}
-	// 403 alone is NOT auth: providers return it for region blocks, org
-	// policy, and model-access denials. Require an explicit auth/permission
-	// error type unless the status is 401.
-	if (/authentication|permission|unauthorized/.test(type) || status === 401) return "auth";
+	// Only bad credentials (401 / explicit authentication types) are auth.
+	// Permission/403 shapes are entitlement or policy denials (model access,
+	// org policy, region) and must not trigger a stale-auth lockout.
+	if (/authentication|unauthorized/.test(type) || status === 401) return "auth";
+	if (/permission|forbidden|access.?denied/.test(type) || status === 403) return "permission";
 	if (type.includes("invalid_request") || type.includes("not_found_error") || status === 400 || status === 404) {
 		return "invalid_request";
 	}
@@ -165,9 +168,16 @@ function extractStreamFailureParts(error: unknown): { info: StreamFailureInfo; d
 	const retryAfterMs =
 		typeof err.retryAfterMs === "number" && err.retryAfterMs >= 0 ? err.retryAfterMs : parseRetryAfterMs(headers);
 
+	let kind = classifyStreamFailure(providerErrorType ?? error.message, status);
+	// An auth verdict drives the provider-wide stale-auth lockout; free-form
+	// message text without a status is too weak to justify it.
+	if (kind === "auth" && providerErrorType === undefined && status === undefined) {
+		kind = "unknown";
+	}
+
 	return {
 		info: {
-			kind: classifyStreamFailure(providerErrorType ?? error.message, status),
+			kind,
 			providerErrorType,
 			status,
 			requestId,

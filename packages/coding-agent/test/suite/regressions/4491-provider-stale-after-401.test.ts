@@ -1,6 +1,8 @@
 import type { AgentEvent } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.js";
+import { InProcessAgentConnection } from "../../../src/modes/agent-connection/in-process-agent-connection.js";
 import { createHarness, type Harness } from "../harness.js";
 
 function provider401Message(): AssistantMessage {
@@ -121,6 +123,33 @@ describe("issue #4491 provider stale after repeated 401", () => {
 		expect(harness.authStorage.hasAuth("prime-inference")).toBe(true);
 	});
 
+	it("does not mark auth stale for structured permission (403) failures", async () => {
+		const harness = await createHarness({
+			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
+		});
+		harnesses.push(harness);
+		const permissionDenied: AssistantMessage = {
+			...fauxAssistantMessage("", {
+				stopReason: "error",
+				errorMessage: "403 model access denied by organization policy",
+			}),
+			diagnostics: [
+				{
+					type: "provider_stream_failure",
+					timestamp: Date.now(),
+					details: { kind: "permission", status: 403 },
+				},
+			],
+		};
+		harness.setResponses([permissionDenied, fauxAssistantMessage("unused")]);
+
+		await harness.session.prompt("hello");
+
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.eventsOfType("auth_stale")).toHaveLength(0);
+		expect(harness.authStorage.hasAuth(harness.getModel().provider)).toBe(true);
+	});
+
 	it("explicit model selection clears a stale-auth lockout", async () => {
 		const harness = await createHarness({
 			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
@@ -132,11 +161,18 @@ describe("issue #4491 provider stale after repeated 401", () => {
 
 		const provider = harness.getModel().provider;
 		expect(harness.authStorage.hasAuth(provider)).toBe(false);
+		// The harness configures a second auth source (provider request config);
+		// mark it stale too so the provider is fully locked out, as in the field.
+		expect(harness.session.modelRegistry.markProviderAuthStale(provider)).toBe(true);
+		expect(harness.session.modelRegistry.getProviderAuthStatus(provider)).toMatchObject({
+			configured: false,
+			source: "stale",
+		});
 
 		await harness.session.setModel(harness.getModel());
 
 		expect(harness.authStorage.hasAuth(provider)).toBe(true);
-		expect(harness.authStorage.getAuthStatus(provider).source).not.toBe("stale");
+		expect(harness.session.modelRegistry.getProviderAuthStatus(provider).source).not.toBe("stale");
 	});
 
 	it("creates retry promises for exhausted structured auth failures so cleanup is awaited", async () => {
@@ -249,6 +285,40 @@ describe("issue #4491 provider stale after repeated 401", () => {
 		expect(harness.eventsOfType("auto_retry_start")).toHaveLength(0);
 		expect(harness.authStorage.hasAuth(harness.getModel().provider)).toBe(false);
 		await expect(harness.authStorage.getApiKey(harness.getModel().provider)).resolves.toBeUndefined();
+	});
+
+	it("keeps the lockout when an explicit selection fails to resolve a model", async () => {
+		const harness = await createHarness({
+			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([provider401Message()]);
+		await harness.session.prompt("hello");
+		const provider = harness.getModel().provider;
+		expect(harness.authStorage.hasAuth(provider)).toBe(false);
+		expect(harness.session.modelRegistry.markProviderAuthStale(provider)).toBe(true);
+		expect(harness.session.modelRegistry.getProviderAuthStatus(provider)).toMatchObject({
+			configured: false,
+			source: "stale",
+		});
+
+		const runtime = {
+			session: harness.session,
+			setRebindSession() {},
+			setBeforeSessionInvalidate() {},
+		} as unknown as AgentSessionRuntime;
+		const connection = new InProcessAgentConnection(runtime);
+
+		// A mistyped model id must not unlock the provider it failed to switch to.
+		await expect(connection.setModel(provider, "not-a-model")).rejects.toThrow("Model not found");
+		expect(harness.authStorage.hasAuth(provider)).toBe(false);
+		expect(harness.session.modelRegistry.getProviderAuthStatus(provider)).toMatchObject({ source: "stale" });
+
+		// The same explicit selection with a real model still recovers.
+		const model = harness.getModel();
+		await connection.setModel(model.provider, model.id);
+		expect(harness.authStorage.hasAuth(provider)).toBe(true);
+		expect(harness.session.modelRegistry.getProviderAuthStatus(provider).source).not.toBe("stale");
 	});
 
 	it("resolves retry state for auth failures surfaced only on agent_end", async () => {

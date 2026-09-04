@@ -8877,7 +8877,6 @@ describe("daemon mode helpers", () => {
 			runtime: ActiveSessionState["runtime"] & {
 				session: {
 					modelRegistry: {
-						clearProviderAuthStale(provider: string): void;
 						refreshAvailableModels(): Promise<unknown[]>;
 					};
 					isStreaming: boolean;
@@ -8888,7 +8887,6 @@ describe("daemon mode helpers", () => {
 		};
 		state.runtime.session = {
 			modelRegistry: {
-				clearProviderAuthStale: vi.fn(),
 				refreshAvailableModels: vi.fn(async () => [model]),
 			},
 			isStreaming: true,
@@ -8936,7 +8934,6 @@ describe("daemon mode helpers", () => {
 			runtime: ActiveSessionState["runtime"] & {
 				session: {
 					modelRegistry: {
-						clearProviderAuthStale(provider: string): void;
 						refreshAvailableModels(): Promise<unknown[]>;
 					};
 					isStreaming: boolean;
@@ -8947,7 +8944,6 @@ describe("daemon mode helpers", () => {
 		};
 		state.runtime.session = {
 			modelRegistry: {
-				clearProviderAuthStale: vi.fn(),
 				refreshAvailableModels: vi.fn(async () => [model]),
 			},
 			isStreaming: false,
