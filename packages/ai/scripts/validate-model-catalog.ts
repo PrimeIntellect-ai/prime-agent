@@ -1,12 +1,18 @@
-import type { Api } from "../src/types.js";
+import { getSupportedThinkingLevels } from "../src/models.js";
+import { getCompat } from "../src/providers/openai-completions.js";
+import type { Api, Model } from "../src/types.js";
 
 /** The subset of a catalog row the invariants read; MODELS rows satisfy it. */
 export interface CatalogRowLike {
 	id: string;
 	api: string;
+	provider: string;
 	contextWindow: number;
 	maxTokens: number;
+	reasoning: boolean;
+	baseUrl?: string;
 	thinkingLevelMap?: Readonly<Record<string, string | null>>;
+	compat?: Readonly<Record<string, unknown>>;
 }
 
 export type CatalogLike = Readonly<Record<string, Readonly<Record<string, CatalogRowLike>>>>;
@@ -38,16 +44,25 @@ function familyKey(modelId: string): string {
 }
 
 /**
- * Thinking levels a user can select from a map. The "off" level is excluded:
- * whether thinking can be disabled legitimately varies per provider transport
- * (e.g. reasoning effort "none" exists only on the native OpenAI Responses API).
+ * Thinking levels a user can actually select at runtime, from the same
+ * function the UI uses. The "off" level is excluded from comparisons: whether
+ * thinking can be disabled legitimately varies per provider transport (e.g.
+ * reasoning effort "none" exists only on the native OpenAI Responses API).
  */
-function selectableLevels(map: Readonly<Record<string, string | null>>): string {
-	return Object.entries(map)
-		.filter(([level, mapped]) => level !== "off" && mapped !== null)
-		.map(([level]) => level)
-		.sort()
+function selectableLevels(model: CatalogRowLike): string {
+	return getSupportedThinkingLevels(model as Model<Api>)
+		.filter((level) => level !== "off")
 		.join(",");
+}
+
+/**
+ * On plain openai-format chat completions, reasoning parameters are only sent
+ * when the resolved compat supports reasoning effort; the zai/qwen/deepseek/
+ * openrouter formats use the map as an enable toggle instead.
+ */
+function effortIsSendable(model: CatalogRowLike): boolean {
+	const compat = getCompat(model as Model<"openai-completions">);
+	return compat.thinkingFormat !== "openai" || compat.supportsReasoningEffort;
 }
 
 /** Generation-time catalog invariants; an empty return means the catalog is valid. */
@@ -89,10 +104,19 @@ export function validateModelCatalog(catalog: CatalogLike): string[] {
 	const familyLevels = new Map<string, Map<string, string>>();
 	for (const [provider, models] of Object.entries(catalog)) {
 		for (const model of Object.values(models)) {
-			if (!model.thinkingLevelMap) continue;
+			if (!model.thinkingLevelMap || !model.reasoning) continue;
+			if (model.api === "openai-completions" && !effortIsSendable(model)) {
+				const levels = selectableLevels(model);
+				if (levels.length > 0) {
+					violations.push(
+						`${provider}/${model.id}: thinkingLevelMap offers [${levels}] but the transport cannot send reasoning effort`,
+					);
+				}
+				continue;
+			}
 			const key = `${familyKey(model.id)} [${model.api}]`;
 			const seen = familyLevels.get(key) ?? new Map<string, string>();
-			seen.set(`${provider}/${model.id}`, selectableLevels(model.thinkingLevelMap));
+			seen.set(`${provider}/${model.id}`, selectableLevels(model));
 			familyLevels.set(key, seen);
 		}
 	}
@@ -100,7 +124,7 @@ export function validateModelCatalog(catalog: CatalogLike): string[] {
 		const distinct = new Set(seen.values());
 		if (distinct.size > 1) {
 			const detail = [...seen.entries()].map(([row, levels]) => `${row}=[${levels}]`).join(", ");
-			violations.push(`${key}: thinkingLevelMap selectable levels disagree across providers: ${detail}`);
+			violations.push(`${key}: selectable thinking levels disagree across providers: ${detail}`);
 		}
 	}
 

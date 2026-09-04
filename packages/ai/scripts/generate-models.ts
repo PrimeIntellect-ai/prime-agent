@@ -5,6 +5,7 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
+import { getCompat } from "../src/providers/openai-completions.js";
 import { copilotModelApi, validateModelCatalog } from "./validate-model-catalog.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
 import {
@@ -2368,6 +2369,23 @@ async function generateModels() {
 
 	for (const model of allModels) {
 		applyThinkingLevelMetadata(model);
+	}
+
+	// Family-level maps can land on rows whose transport never sends reasoning
+	// effort (plain openai-format completions with supportsReasoningEffort
+	// false); null their selectable entries so the UI does not offer levels the
+	// request silently drops.
+	for (const model of allModels) {
+		if (model.api !== "openai-completions" || !model.reasoning || !model.thinkingLevelMap) continue;
+		const compat = getCompat(model as Model<"openai-completions">);
+		if (compat.thinkingFormat !== "openai" || compat.supportsReasoningEffort) continue;
+		const selectable = Object.entries(model.thinkingLevelMap).filter(([, mapped]) => mapped !== null);
+		if (selectable.length === 0) continue;
+		console.log(
+			`Nulling unsendable thinking levels on ${model.provider}/${model.id}: ${selectable.map(([level]) => level).join(", ")}`,
+		);
+		// All levels explicitly null: absent keys read as supported at runtime.
+		model.thinkingLevelMap = { off: null, minimal: null, low: null, medium: null, high: null, xhigh: null, max: null };
 	}
 
 	// Group by provider and deduplicate by model ID
