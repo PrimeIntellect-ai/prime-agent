@@ -529,6 +529,53 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
+	it("repairs crash damage at open: torn tail truncated, zero-filled record recovered, appends stay separate lines", () => {
+		const file = join(tempDir, "crashed.jsonl");
+		const header = {
+			type: "session",
+			version: 3,
+			id: "crashed-session",
+			timestamp: "2026-01-01T00:00:00Z",
+			cwd: "/tmp",
+		};
+		const kept = {
+			type: "message",
+			id: "m1",
+			parentId: null,
+			message: { role: "user", content: "kept", timestamp: 1 },
+		};
+		const zeroFilled = {
+			type: "message",
+			id: "m2",
+			parentId: "m1",
+			message: { role: "user", content: "recovered", timestamp: 2 },
+		};
+		const damaged = `${JSON.stringify(header)}\n${JSON.stringify(kept)}\n\u0000\u0000\u0000\u0000${JSON.stringify(zeroFilled)}\n{"type":"message","id":"torn`;
+		writeFileSync(file, damaged);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			const sm = SessionManager.open(file, tempDir);
+			expect(sm.getHeader()?.id).toBe("crashed-session");
+			expect(sm.getEntries().map((entry) => entry.id)).toEqual(["m1", "m2"]);
+			sm.appendMessage({ role: "user", content: "after crash", timestamp: 3 });
+			sm.flushNow();
+
+			const lines = readFileSync(file, "utf-8").split("\n").filter(Boolean);
+			const parsed = lines.map((line) => JSON.parse(line));
+			expect(parsed.map((entry) => entry.id ?? entry.type)).toEqual([
+				"crashed-session",
+				"m1",
+				"m2",
+				expect.any(String),
+			]);
+			expect(parsed.at(-1)?.message?.content).toBe("after crash");
+			expect(errorSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
 	it("truncates and rewrites empty file with valid header", () => {
 		const emptyFile = join(tempDir, "empty.jsonl");
 		writeFileSync(emptyFile, "");

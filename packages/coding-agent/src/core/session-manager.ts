@@ -3,22 +3,19 @@ import type { AssistantMessage, ImageContent, Message, ServiceTier, TextContent,
 import { randomUUID } from "crypto";
 import {
 	appendFileSync,
-	chmodSync,
 	chownSync,
 	existsSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
 	realpathSync,
-	renameSync,
-	rmSync,
 	statSync,
-	writeFileSync,
 } from "fs";
 import { readdir, readFile, stat } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { v7 as uuidv7 } from "uuid";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
+import { writeFileAtomicSync } from "../utils/atomic-file.js";
 import { readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
 import {
@@ -586,6 +583,73 @@ async function parseEntriesFromBufferAsync(buffer: Buffer): Promise<FileEntry[]>
 		}
 	}
 	return entries;
+}
+
+// Crash damage (torn tail, zero-filled append) poisons the NEXT append into the
+// same physical line, so the file is repaired once at open, not tolerated in memory.
+export function repairJsonlDamage(filePath: string): void {
+	let buffer: Buffer;
+	try {
+		buffer = readFileSync(filePath);
+	} catch {
+		return;
+	}
+	if (buffer.length === 0) return;
+	const keptLines: Buffer[] = [];
+	let recoveredNulLines = 0;
+	let droppedLines = 0;
+	let repairedTail = false;
+	let dirty = false;
+	let start = 0;
+	while (start < buffer.length) {
+		let end = buffer.indexOf(0x0a, start);
+		const terminated = end !== -1;
+		if (!terminated) end = buffer.length;
+		let lineStart = start;
+		while (lineStart < end && buffer[lineStart] === 0) lineStart++;
+		const line = buffer.subarray(lineStart, end);
+		if (lineStart > start) {
+			dirty = true;
+			if (line.length > 0 && parsesAsJson(line)) {
+				keptLines.push(line);
+				recoveredNulLines++;
+			} else {
+				droppedLines++;
+			}
+		} else if (!terminated) {
+			// An unterminated tail merges with the next append: re-terminate or truncate.
+			dirty = true;
+			if (line.length > 0 && parsesAsJson(line)) {
+				keptLines.push(line);
+				repairedTail = true;
+			} else {
+				droppedLines++;
+			}
+		} else if (end + 1 >= buffer.length && line.length > 0 && !parsesAsJson(line)) {
+			// A torn tail left newline-terminated by an earlier crash/resume cycle.
+			dirty = true;
+			droppedLines++;
+		} else {
+			keptLines.push(line);
+		}
+		start = end + 1;
+	}
+	if (!dirty) return;
+	const metadata = statMetadataIfPresent(filePath);
+	const content = keptLines.length > 0 ? `${keptLines.map((kept) => kept.toString("utf8")).join("\n")}\n` : "";
+	writeFileAtomicSync(filePath, content, metadata === undefined ? {} : { mode: metadata.mode });
+	console.error(
+		`Repaired crash damage in ${filePath}: recovered ${recoveredNulLines} zero-filled line(s), dropped ${droppedLines} unrecoverable line(s)${repairedTail ? ", restored the trailing newline" : ""}`,
+	);
+}
+
+function parsesAsJson(line: Buffer): boolean {
+	try {
+		JSON.parse(line.toString("utf8"));
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 function finalizeLoadedEntries(entries: FileEntry[]): FileEntry[] {
@@ -1180,6 +1244,7 @@ export class SessionManager {
 	setSessionFile(sessionFile: string, preloadedEntries?: FileEntry[]): void {
 		this.sessionFile = resolve(sessionFile);
 		if (existsSync(this.sessionFile)) {
+			if (this.persist && preloadedEntries === undefined) repairJsonlDamage(this.sessionFile);
 			this.fileEntries = preloadedEntries ?? loadEntriesFromFile(this.sessionFile);
 
 			// If file was empty or corrupted (no valid header), truncate and start fresh
@@ -1297,18 +1362,13 @@ export class SessionManager {
 		const targetPath = realpathIfPresent(this.sessionFile);
 		const directory = dirname(targetPath);
 		mkdirSync(directory, { recursive: true });
-		const tempPath = join(directory, `.${basename(targetPath)}.${process.pid}.${randomUUID()}.tmp`);
-		try {
-			const metadata = statMetadataIfPresent(targetPath);
-			writeFileSync(tempPath, content, metadata === undefined ? undefined : { mode: metadata.mode });
-			if (metadata !== undefined) {
-				chownSync(tempPath, metadata.uid, metadata.gid);
-				chmodSync(tempPath, metadata.mode);
-			}
-			renameSync(tempPath, targetPath);
-		} finally {
-			rmSync(tempPath, { force: true });
-		}
+		const metadata = statMetadataIfPresent(targetPath);
+		writeFileAtomicSync(targetPath, content, {
+			...(metadata === undefined ? {} : { mode: metadata.mode }),
+			beforeRename: (tempPath) => {
+				if (metadata !== undefined) chownSync(tempPath, metadata.uid, metadata.gid);
+			},
+		});
 		this._notifyPersistListeners();
 	}
 
@@ -2032,6 +2092,7 @@ export class SessionManager {
 		if (!existsSync(path)) {
 			return SessionManager.open(path, sessionDir, cwdOverride);
 		}
+		repairJsonlDamage(path);
 		const entries = await loadEntriesFromFileAsync(path);
 		if (entries.length === 0) {
 			return SessionManager.open(path, sessionDir, cwdOverride);
