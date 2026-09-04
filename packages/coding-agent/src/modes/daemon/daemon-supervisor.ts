@@ -3705,6 +3705,36 @@ export class DaemonSupervisor {
 		}
 	}
 
+	/**
+	 * Settle a snapshot transfer anomaly with the transfer itself as the blast
+	 * radius: the worker channel (and every other session on it) stays up, and
+	 * attached clients resync from a fresh snapshot instead of riding a worker
+	 * reconnect.
+	 */
+	private failSnapshotTransfer(
+		worker: ResidentWorker,
+		activeSessionId: string,
+		snapshotId: string,
+		error: Error,
+		snapshotPurpose: Extract<DaemonWorkerFrameHeader, { kind: "outbound" }>["snapshotPurpose"],
+	): void {
+		const published = worker.transcriptCaches.get(activeSessionId)?.snapshotId === snapshotId;
+		this.failWorkerSnapshotCache(worker, activeSessionId, error, false, snapshotId);
+		if (published && (snapshotPurpose === "replacement" || snapshotPurpose === "catchup")) {
+			this.queueSnapshotResync(activeSessionId, snapshotPurpose);
+		}
+	}
+
+	private queueSnapshotResync(activeSessionId: string, snapshotPurpose: "replacement" | "catchup"): void {
+		for (const client of this.clients) {
+			if (!client.attachedActiveSessionIds.has(activeSessionId)) continue;
+			this.queueCatchup(client, activeSessionId, snapshotPurpose === "replacement" ? "replacement" : "resync");
+			void this.catchUpClient(client).catch((error) =>
+				this.log(`Failed to catch up client ${client.id}: ${String(error)}`),
+			);
+		}
+	}
+
 	private retireWorkerSnapshotCache(
 		worker: ResidentWorker,
 		activeSessionId: string,
@@ -5511,12 +5541,12 @@ export class DaemonSupervisor {
 				const generations = this.snapshotGenerationsFor(worker, activeSessionId);
 				let generation = generations.get(begin.snapshotId);
 				if (generation?.incoming) {
-					this.failWorkerSnapshotCache(
+					this.failSnapshotTransfer(
 						worker,
 						activeSessionId,
-						new Error(`Snapshot ${begin.snapshotId} restarted before completion`),
-						true,
 						begin.snapshotId,
+						new Error(`Snapshot ${begin.snapshotId} restarted before completion`),
+						snapshotPurpose,
 					);
 					return;
 				}
@@ -5533,12 +5563,12 @@ export class DaemonSupervisor {
 					generation.result.snapshot.lastEventCursor?.generation === result.snapshot.lastEventCursor?.generation &&
 					generation.result.snapshot.lastEventCursor?.sequence === result.snapshot.lastEventCursor?.sequence;
 				if (generation?.transcript.complete && !duplicate) {
-					this.failWorkerSnapshotCache(
+					this.failSnapshotTransfer(
 						worker,
 						activeSessionId,
-						new Error(`Snapshot ${begin.snapshotId} did not match the cached transfer`),
-						true,
 						begin.snapshotId,
+						new Error(`Snapshot ${begin.snapshotId} did not match the cached transfer`),
+						snapshotPurpose,
 					);
 					return;
 				}
@@ -5647,12 +5677,12 @@ export class DaemonSupervisor {
 						generation.duplicateChunkIndex = duplicateIndex + 1;
 					}
 				} catch (error) {
-					this.failWorkerSnapshotCache(
+					this.failSnapshotTransfer(
 						worker,
 						activeSessionId,
-						error instanceof Error ? error : new Error(String(error)),
-						true,
 						generation.transcript.snapshotId,
+						error instanceof Error ? error : new Error(String(error)),
+						snapshotPurpose,
 					);
 				}
 			}
@@ -5704,12 +5734,12 @@ export class DaemonSupervisor {
 				generation.duplicateChunkIndex = undefined;
 				generation.duplicateResult = undefined;
 			} catch (error) {
-				this.failWorkerSnapshotCache(
+				this.failSnapshotTransfer(
 					worker,
 					activeSessionId,
-					error instanceof Error ? error : new Error(String(error)),
-					true,
 					transcript.snapshotId,
+					error instanceof Error ? error : new Error(String(error)),
+					snapshotPurpose,
 				);
 				return;
 			}
@@ -5719,13 +5749,7 @@ export class DaemonSupervisor {
 				transcript.dispose();
 			}
 			if (published && (snapshotPurpose === "replacement" || snapshotPurpose === "catchup")) {
-				for (const client of this.clients) {
-					if (!client.attachedActiveSessionIds.has(activeSessionId)) continue;
-					this.queueCatchup(client, activeSessionId, snapshotPurpose === "replacement" ? "replacement" : "resync");
-					void this.catchUpClient(client).catch((error) =>
-						this.log(`Failed to catch up client ${client.id}: ${String(error)}`),
-					);
-				}
+				this.queueSnapshotResync(activeSessionId, snapshotPurpose);
 			}
 			return;
 		}
@@ -5751,21 +5775,13 @@ export class DaemonSupervisor {
 				if (!generation) {
 					return;
 				}
-				const published = worker.transcriptCaches.get(activeSessionId) === generation.transcript;
-				this.failWorkerSnapshotCache(worker, activeSessionId, new Error(failed.error), false, failed.snapshotId);
-				if (published && (snapshotPurpose === "replacement" || snapshotPurpose === "catchup")) {
-					for (const client of this.clients) {
-						if (!client.attachedActiveSessionIds.has(activeSessionId)) continue;
-						this.queueCatchup(
-							client,
-							activeSessionId,
-							snapshotPurpose === "replacement" ? "replacement" : "resync",
-						);
-						void this.catchUpClient(client).catch((error) =>
-							this.log(`Failed to catch up client ${client.id}: ${String(error)}`),
-						);
-					}
-				}
+				this.failSnapshotTransfer(
+					worker,
+					activeSessionId,
+					failed.snapshotId,
+					new Error(failed.error),
+					snapshotPurpose,
+				);
 			} catch (error) {
 				this.failWorkerSnapshotCache(
 					worker,

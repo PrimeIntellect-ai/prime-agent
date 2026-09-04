@@ -232,6 +232,53 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		expect(unhandled).not.toHaveBeenCalled();
 	});
 
+	it("derives the chunked transfer id from the materialized snapshot cursor", async () => {
+		const daemon = new AgentDaemon("/tmp/eng-4602-worker-cursor.sock", {
+			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		});
+		// The session cursor has advanced past the materialized snapshot cut.
+		const state = {
+			activeSessionId,
+			clients: new Set<DaemonSocketClient>(),
+			eventGeneration: "generation-4602",
+			lastEventSequence: 5,
+			runtime: { metadata: { kind: "top-level", createdAt: 1 } },
+		} as unknown as ActiveSessionState;
+		const socket = new PassThrough();
+		const client = {
+			id: "supervisor",
+			socket: socket as unknown as Socket,
+			transport: "private-framed",
+			attachedActiveSessionIds: new Set<string>(),
+			detachInput: () => {},
+			supportsExtensionUi: false,
+			capabilities: new Set<string>(),
+		} as DaemonSocketClient;
+		const streamWorkerSnapshot = vi.fn(async () => {});
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			createAttachResult(): DaemonAttachResult;
+			streamWorkerSnapshot: typeof streamWorkerSnapshot;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(activeSessionId, state);
+		internals.createAttachResult = () => streamedResult([]);
+		internals.streamWorkerSnapshot = streamWorkerSnapshot;
+		try {
+			const response = (await internals.handleCommand(client, {
+				type: "attach",
+				activeSessionId,
+				capabilities: ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"],
+			})) as { data?: DaemonAttachResult };
+			expect(response.data?.snapshotStream?.id).toBe(`${activeSessionId}-generation-4602-1`);
+		} finally {
+			socket.destroy();
+		}
+	});
+
 	it("fails one worker snapshot without dropping another session on the supervisor channel", async () => {
 		const daemon = new AgentDaemon("/tmp/eng-4602-stream.sock", {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
@@ -339,7 +386,7 @@ describe("ENG-4602 snapshot transfer containment", () => {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			descriptorDir: "/tmp/eng-4602-supervisor-state",
 		});
-		const { close, worker } = workerHarness();
+		const { close, request, worker } = workerHarness();
 		const client = socketClient("public", new PassThrough());
 		const streamSnapshot = vi.fn(async () => {});
 		const internals = supervisor as unknown as {
@@ -416,7 +463,11 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		expect(worker.transcriptCaches.has(activeSessionId)).toBe(false);
 		expect(worker.snapshotCache.has(activeSessionId)).toBe(false);
 		expect(streamSnapshot).not.toHaveBeenCalled();
-		expect(close).toHaveBeenCalledOnce();
+		expect(close).not.toHaveBeenCalled();
+		expect(worker.descriptor.lifecycle).toBe("ready");
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(request).toHaveBeenCalledWith(expect.objectContaining({ type: "attach" }));
 	});
 
 	it("holds catch-up behind duplicate validation and rejects it on mismatch", async () => {
@@ -480,7 +531,8 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		expect(streamSnapshot).not.toHaveBeenCalled();
 		expect(worker.snapshotCache.has(activeSessionId)).toBe(false);
 		expect(worker.transcriptCaches.has(activeSessionId)).toBe(false);
-		expect(close).toHaveBeenCalledOnce();
+		expect(close).not.toHaveBeenCalled();
+		expect(worker.descriptor.lifecycle).toBe("ready");
 	});
 
 	it("rejects a quarantined catch-up before intentional worker stop", async () => {
@@ -603,18 +655,18 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		internals.handleWorkerFrame(reentrant.worker, frame(frames.begin));
 		internals.handleWorkerFrame(reentrant.worker, frame(frames.begin));
 		await new Promise<void>((resolve) => setImmediate(resolve));
-		expect(reentrant.close).toHaveBeenCalledOnce();
+		expect(reentrant.close).not.toHaveBeenCalled();
 		expect(reentrant.worker.transcriptCaches.has(activeSessionId)).toBe(false);
-		expect(reentrant.worker.client).toBeUndefined();
-		expect(reentrant.worker.descriptor.lifecycle).toBe("recovering");
-		expect(recoverWorker).toHaveBeenCalledWith(reentrant.worker);
+		expect(reentrant.worker.client).toBeDefined();
+		expect(reentrant.worker.descriptor.lifecycle).toBe("ready");
+		expect(recoverWorker).not.toHaveBeenCalled();
 
 		const completed = workerHarness();
 		for (const message of [frames.begin, frames.chunk, frames.end]) {
 			internals.handleWorkerFrame(completed.worker, frame(message));
 		}
 		internals.handleWorkerFrame(completed.worker, frame({ ...frames.begin, messageCount: 2 }));
-		expect(completed.close).toHaveBeenCalledOnce();
+		expect(completed.close).not.toHaveBeenCalled();
 		expect(completed.worker.transcriptCaches.has(activeSessionId)).toBe(false);
 
 		const mismatchedEnd = workerHarness();
@@ -622,7 +674,7 @@ describe("ENG-4602 snapshot transfer containment", () => {
 			internals.handleWorkerFrame(mismatchedEnd.worker, frame(message));
 		}
 		internals.handleWorkerFrame(mismatchedEnd.worker, frame({ ...frames.end, lastEventSequence: 2 }));
-		expect(mismatchedEnd.close).toHaveBeenCalledOnce();
+		expect(mismatchedEnd.close).not.toHaveBeenCalled();
 		expect(mismatchedEnd.worker.transcriptCaches.has(activeSessionId)).toBe(false);
 
 		const replaced = workerHarness();
