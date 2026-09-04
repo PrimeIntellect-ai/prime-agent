@@ -1269,15 +1269,18 @@ export class AgentDaemon {
 	// agent-observe, agent-message, family catalog, passivation) reads the same
 	// cached walk instead of re-walking the persisted tree per request. A hit
 	// requires the spawn ledger stat, the resident roster, the live saved
-	// roots, every listed child file's stat, and every root-state identity to
-	// be unchanged; ledger appends, residency changes, and child appends all
-	// invalidate. Walks of the same shape run strictly one at a time, and a
-	// caller never joins an earlier walk: its own pass re-validates against
-	// state at or after its call time.
+	// roots, every root-state identity, and the stat of every file input the
+	// walk visited (child transcripts, display records, legacy registries,
+	// including absent ones) to be unchanged; ledger appends, residency
+	// changes, child appends, and display rewrites all invalidate. Input stats
+	// are captured before each read, so a write landing mid-walk can only
+	// cause one extra re-walk, never a stale memo. Walks of the same shape run
+	// strictly one at a time, and a caller never joins an earlier walk: its
+	// own pass re-validates against state at or after its call time.
 	private readonly passiveRlmSubagentWalks = new Map<string, Promise<PassiveRlmSubagent[]>>();
 	private readonly passiveRlmSubagentMemo = new Map<
 		string,
-		{ fingerprint: string; childStats: string[]; result: PassiveRlmSubagent[] }
+		{ fingerprint: string; inputStats: Map<string, string>; result: PassiveRlmSubagent[] }
 	>();
 	private static readonly PASSIVE_RLM_MEMO_MAX_KEYS = 4;
 
@@ -1306,8 +1309,11 @@ export class AgentDaemon {
 		}
 	}
 
-	private passiveRlmChildStats(result: PassiveRlmSubagent[]): Promise<string[]> {
-		return Promise.all(result.map((passive) => this.passiveRlmStatString(passive.entry.sessionFile)));
+	private async passiveRlmInputStatsUnchanged(inputStats: Map<string, string>): Promise<boolean> {
+		const checks = await Promise.all(
+			[...inputStats].map(async ([path, statString]) => (await this.passiveRlmStatString(path)) === statString),
+		);
+		return checks.every(Boolean);
 	}
 
 	private passiveRlmRootsStillResident(result: PassiveRlmSubagent[]): boolean {
@@ -1338,20 +1344,22 @@ export class AgentDaemon {
 				memo &&
 				memo.fingerprint === before &&
 				this.passiveRlmRootsStillResident(memo.result) &&
-				(await this.passiveRlmChildStats(memo.result)).join("\n") === memo.childStats.join("\n")
+				(await this.passiveRlmInputStatsUnchanged(memo.inputStats))
 			) {
 				return memo.result;
 			}
-			const result = await this.walkPassiveRlmSubagents(savedRootInfos, includeResident);
-			// Only a walk whose inputs held still is a valid memo (the first walk
-			// seeds the ledger from legacy registries and never qualifies).
+			const walked = await this.walkPassiveRlmSubagents(savedRootInfos, includeResident);
+			// Only a walk whose inputs held still qualifies as a memo: not the
+			// first walk (it seeds the ledger from legacy registries) and not a
+			// degraded walk (a present child file that failed to read may list
+			// again without any stat change).
 			const after = await this.passiveRlmTopologyFingerprint(savedRootInfos);
-			if (after === before) {
+			if (after === before && !walked.degraded) {
 				this.passiveRlmSubagentMemo.delete(key);
 				this.passiveRlmSubagentMemo.set(key, {
 					fingerprint: after,
-					childStats: await this.passiveRlmChildStats(result),
-					result,
+					inputStats: walked.inputStats,
+					result: walked.result,
 				});
 				for (const staleKey of this.passiveRlmSubagentMemo.keys()) {
 					if (this.passiveRlmSubagentMemo.size <= AgentDaemon.PASSIVE_RLM_MEMO_MAX_KEYS) break;
@@ -1360,14 +1368,18 @@ export class AgentDaemon {
 			} else {
 				this.passiveRlmSubagentMemo.delete(key);
 			}
-			return result;
+			return walked.result;
 		};
 		const previous = this.passiveRlmSubagentWalks.get(key);
 		const walk = previous ? previous.then(run, run) : run();
 		this.passiveRlmSubagentWalks.set(key, walk);
-		void walk.finally(() => {
+		// then(cleanup, cleanup), not finally(): a discarded finally() promise
+		// would turn a rejecting walk into an unhandled rejection and crash the
+		// daemon; the rejection still reaches the caller through `walk` itself.
+		const cleanup = () => {
 			if (this.passiveRlmSubagentWalks.get(key) === walk) this.passiveRlmSubagentWalks.delete(key);
-		});
+		};
+		walk.then(cleanup, cleanup);
 		return walk;
 	}
 
@@ -1375,14 +1387,28 @@ export class AgentDaemon {
 	private async walkPassiveRlmSubagents(
 		savedRootInfos: SessionInfo[],
 		includeResident: boolean,
-	): Promise<PassiveRlmSubagent[]> {
+	): Promise<{ result: PassiveRlmSubagent[]; inputStats: Map<string, string>; degraded: boolean }> {
+		// Every file input's stat is captured before its read so the memo's
+		// invalidation identity can only be older than the derived content.
+		const inputStats = new Map<string, string>();
+		let degraded = false;
+		const recordInputStat = async (path: string): Promise<string> => {
+			const resolved = resolve(path);
+			const existing = inputStats.get(resolved);
+			if (existing !== undefined) return existing;
+			const statString = await this.passiveRlmStatString(path);
+			inputStats.set(resolved, statString);
+			return statString;
+		};
 		const residentRoots: Array<{ parentState: ActiveSessionState; sessionFile: string }> = [];
 		for (const parentState of this.sessions.values()) {
 			const parentFile = parentState.runtime.session.sessionFile;
 			// An in-memory session cannot own persisted children.
 			if (parentFile) residentRoots.push({ parentState, sessionFile: parentFile });
 		}
-		if (residentRoots.length === 0 && savedRootInfos.length === 0) return [];
+		if (residentRoots.length === 0 && savedRootInfos.length === 0) {
+			return { result: [], inputStats, degraded };
+		}
 		const edges = await this.rlmSpawnLedger().edges();
 		const childrenByParent = new Map<string, RlmLedgerEdge[]>();
 		for (const edge of edges) {
@@ -1400,6 +1426,8 @@ export class AgentDaemon {
 			visited: Set<string>,
 		): Promise<void> => {
 			for (const edge of childrenByParent.get(canonicalSessionPath(parent.sessionFile)) ?? []) {
+				await recordInputStat(rlmSubagentDisplayPath(dirname(edge.child)));
+				await recordInputStat(this.legacyRlmSubagentRegistryPath(parent.sessionFile, parent.sessionId));
 				// The ledger stores realpath-canonical paths while the rest of the
 				// daemon keys by resolve(): work with the writer-recorded path from
 				// the metadata entry so passive rows keep matching residency,
@@ -1408,8 +1436,14 @@ export class AgentDaemon {
 				const sessionKey = resolve(entry.sessionFile);
 				if (entry.status === "deleted" || visited.has(sessionKey)) continue;
 				visited.add(sessionKey);
+				const childStat = await recordInputStat(entry.sessionFile);
 				const info = await readSessionInfo(entry.sessionFile);
-				if (!info) continue;
+				if (!info) {
+					// A present file that fails to list may succeed again without any
+					// stat change (transient read error): such walks must not memoize.
+					if (childStat !== "absent") degraded = true;
+					continue;
+				}
 				// A resident child walks its own subtree as an outer root below. Avoid
 				// both duplicate rows and attributing its descendants to an ancestor.
 				if (!includeResident && this.findSessionBySessionFile(entry.sessionFile)) continue;
@@ -1434,7 +1468,7 @@ export class AgentDaemon {
 			if (residentRootPaths.has(rootPath)) continue;
 			await visit({ rootInfo }, { sessionId: rootInfo.id, sessionFile: rootInfo.path }, [], new Set([rootPath]));
 		}
-		return passive;
+		return { result: passive, inputStats, degraded };
 	}
 
 	private async passiveRlmSubagentsByPath(

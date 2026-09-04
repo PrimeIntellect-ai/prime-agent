@@ -8,6 +8,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
 	symlinkSync,
 	writeFileSync,
@@ -4399,6 +4400,102 @@ describe("daemon mode helpers", () => {
 			expect(third).not.toBe(first);
 			const child = third.find(({ entry }) => entry.childId === fixture.childId);
 			expect(child?.info.messageCount).toBe(2);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps a rejecting topology walk request-scoped and retries on the next call", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-reject-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				listPassiveRlmSubagents(): Promise<Array<{ entry: { childId: string } }>>;
+			};
+			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			await internals.listPassiveRlmSubagents();
+
+			const ledgerDir = join(tempDir, "rlm-ledger");
+			const ledgerFile = readdirSync(ledgerDir).find((name) => name.endsWith(".jsonl"));
+			if (!ledgerFile) throw new Error("Missing spawn ledger file");
+			const ledgerPath = join(ledgerDir, ledgerFile);
+			const intact = readFileSync(ledgerPath, "utf8");
+			appendFileSync(ledgerPath, "not json\n");
+
+			// The walk rejects to its caller only; a discarded cleanup promise
+			// must not surface as an unhandled rejection (the daemon crashes on
+			// those).
+			await expect(internals.listPassiveRlmSubagents()).rejects.toThrow();
+
+			writeFileSync(ledgerPath, intact);
+			const listed = await internals.listPassiveRlmSubagents();
+			expect(listed.map(({ entry }) => entry.childId)).toContain(fixture.childId);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("re-lists a child whose session file returns after being absent", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-absent-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				listPassiveRlmSubagents(): Promise<Array<{ entry: { childId: string } }>>;
+			};
+			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			await internals.listPassiveRlmSubagents();
+
+			const asideFile = `${fixture.grandchildSessionFile}.aside`;
+			renameSync(fixture.grandchildSessionFile, asideFile);
+			const without = await internals.listPassiveRlmSubagents();
+			expect(without.map(({ entry }) => entry.childId)).not.toContain(fixture.grandchildId);
+			await internals.listPassiveRlmSubagents();
+
+			// An absent input is a stat identity too: the file reappearing must
+			// invalidate the memo even though no listed child changed.
+			renameSync(asideFile, fixture.grandchildSessionFile);
+			const restored = await internals.listPassiveRlmSubagents();
+			expect(restored.map(({ entry }) => entry.childId)).toContain(fixture.grandchildId);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("re-derives passive metadata when a child display record is rewritten", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-display-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const display = {
+				type: "rlm_subagent" as const,
+				childId: fixture.childId,
+				sessionName: "spawn-worker",
+				sessionDir: fixture.childSessionDir,
+				sessionFile: fixture.childSessionFile,
+				rlmParentNodeId: fixture.childId,
+				status: "running" as const,
+				createdAt: 1,
+				updatedAt: "2026-01-01T00:00:00.000Z",
+			};
+			writeFileSync(join(fixture.childSessionDir, "rlm-subagent.json"), `${JSON.stringify(display)}\n`);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				listPassiveRlmSubagents(): Promise<Array<{ entry: { childId: string; status: string } }>>;
+			};
+			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+			await internals.listPassiveRlmSubagents();
+			const running = await internals.listPassiveRlmSubagents();
+			expect(running.find(({ entry }) => entry.childId === fixture.childId)?.entry.status).toBe("running");
+
+			// A cross-process completion rewrites only the display record; the
+			// memo must treat it as a walk input and re-derive.
+			writeFileSync(
+				join(fixture.childSessionDir, "rlm-subagent.json"),
+				`${JSON.stringify({ ...display, status: "completed", updatedAt: "2026-01-01T00:00:05.000Z" })}\n`,
+			);
+			const completed = await internals.listPassiveRlmSubagents();
+			expect(completed.find(({ entry }) => entry.childId === fixture.childId)?.entry.status).toBe("completed");
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
