@@ -1,6 +1,6 @@
-import { spawnSync } from "node:child_process";
 import { closeSync, fsyncSync, openSync, readFileSync, rmSync, writeSync } from "node:fs";
 import { win32 } from "node:path";
+import { spawnSyncHidden } from "../utils/child-process.js";
 import { getProcessStartId } from "./session-lease.js";
 
 export const ORPHAN_PROCESS_JOURNAL_ENV = "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL";
@@ -150,7 +150,7 @@ export function reapKernelOrphanProcesses(kernelPid: number): void {
 export function killOrphanProcess(pid: number): boolean {
 	if (process.platform === "win32") {
 		// In-kernel bash() kill paths use taskkill /T; the reaper must kill the same tree, not just the shell pid.
-		const result = spawnSync(
+		const result = spawnSyncHidden(
 			win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe"),
 			["/F", "/T", "/PID", String(pid)],
 			{

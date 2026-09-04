@@ -1,9 +1,85 @@
-import { type ChildProcess, execFileSync } from "node:child_process";
+import {
+	type ChildProcess,
+	type ExecFileException,
+	type ExecFileOptionsWithStringEncoding,
+	type ExecFileSyncOptions,
+	type ExecFileSyncOptionsWithStringEncoding,
+	type ExecSyncOptions,
+	type ExecSyncOptionsWithStringEncoding,
+	execFile,
+	execFileSync,
+	execSync,
+	type SpawnOptions,
+	type SpawnSyncOptions,
+	type SpawnSyncOptionsWithStringEncoding,
+	type SpawnSyncReturns,
+	spawn,
+	spawnSync,
+} from "node:child_process";
 import { readFileSync } from "node:fs";
 import { constants } from "node:os";
 import { basename } from "node:path";
 
 const EXIT_STDIO_GRACE_MS = 100;
+
+/**
+ * Hidden-window child-process wrappers. Node's `windowsHide` defaults to
+ * false, so a console-subsystem child of a windowless parent (the daemon, a
+ * detached worker) allocates a fresh console on Windows and flashes or steals
+ * focus on every spawn. Every non-interactive spawn goes through these
+ * wrappers; only spawns that intentionally hand the user a console (editors,
+ * inherit-stdio installers and relaunches) call node:child_process directly.
+ */
+export function spawnHidden(command: string, args: readonly string[], options: SpawnOptions = {}): ChildProcess {
+	return spawn(command, args, { ...options, windowsHide: true });
+}
+
+export function spawnSyncHidden(
+	command: string,
+	args: readonly string[],
+	options: SpawnSyncOptionsWithStringEncoding,
+): SpawnSyncReturns<string>;
+export function spawnSyncHidden(
+	command: string,
+	args?: readonly string[],
+	options?: SpawnSyncOptions,
+): SpawnSyncReturns<Buffer>;
+export function spawnSyncHidden(
+	command: string,
+	args: readonly string[] = [],
+	options: SpawnSyncOptions = {},
+): SpawnSyncReturns<string | Buffer> {
+	return spawnSync(command, args, { ...options, windowsHide: true });
+}
+
+export function execSyncHidden(command: string, options: ExecSyncOptionsWithStringEncoding): string;
+export function execSyncHidden(command: string, options?: ExecSyncOptions): Buffer;
+export function execSyncHidden(command: string, options: ExecSyncOptions = {}): string | Buffer {
+	return execSync(command, { ...options, windowsHide: true });
+}
+
+export function execFileHidden(
+	file: string,
+	args: readonly string[],
+	options: ExecFileOptionsWithStringEncoding,
+	callback: (error: ExecFileException | null, stdout: string, stderr: string) => void,
+): ChildProcess {
+	return execFile(file, args, { ...options, windowsHide: true }, callback);
+}
+
+export function execFileSyncHidden(
+	file: string,
+	args: readonly string[],
+	options: ExecFileSyncOptionsWithStringEncoding,
+): string;
+export function execFileSyncHidden(file: string, args?: readonly string[], options?: ExecFileSyncOptions): Buffer;
+export function execFileSyncHidden(
+	file: string,
+	args: readonly string[] = [],
+	options: ExecFileSyncOptions = {},
+): string | Buffer {
+	return execFileSync(file, args, { ...options, windowsHide: true });
+}
 
 const WINDOWS_SHELL_COMMANDS = new Set(["npm", "npx", "pnpm", "yarn", "yarnpkg", "corepack"]);
 
@@ -39,7 +115,7 @@ export function isZombieProcess(pid: number): boolean {
 		// Fall through to the portable process listing used on macOS and BSD.
 	}
 	try {
-		const state = execFileSync("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" }).trim();
+		const state = execFileSyncHidden("ps", ["-p", String(pid), "-o", "stat="], { encoding: "utf8" }).trim();
 		return state.startsWith("Z");
 	} catch {
 		return false;

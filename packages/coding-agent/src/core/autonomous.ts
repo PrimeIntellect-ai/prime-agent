@@ -1,10 +1,9 @@
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, readlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { AssistantMessage, Usage, UserMessage } from "@earendil-works/pi-ai";
-import { waitForChildProcess } from "../utils/child-process.js";
+import { spawnHidden, waitForChildProcess } from "../utils/child-process.js";
 import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../utils/shell.js";
 
 export interface AgentAutonomousConfig {
@@ -491,7 +490,7 @@ function runChildProcess(
 ): Promise<ChildProcessResult> {
 	options.signal?.throwIfAborted();
 	return new Promise((resolve) => {
-		const child = spawn(command, args, {
+		const child = spawnHidden(command, args, {
 			cwd: options.cwd,
 			detached: process.platform !== "win32",
 			shell: options.shell === true,

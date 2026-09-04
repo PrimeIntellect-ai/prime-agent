@@ -1,4 +1,4 @@
-import { type ChildProcess, type StdioOptions, spawn } from "node:child_process";
+import type { ChildProcess, StdioOptions } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmodSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -14,6 +14,7 @@ import {
 } from "../core/orphan-process-journal.js";
 import { SESSION_LEASE_OWNER_ID_ENV, SESSION_LEASES_ENABLED_ENV } from "../core/session-lease.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../modes/rpc/jsonl.js";
+import { spawnHidden } from "../utils/child-process.js";
 import { isHelpCommandRequest, PUBLIC_COMMAND_NAMES, REMOVED_COMMAND_NAMES } from "./command-registry.js";
 import { type CliSubprocessLaunchSpec, createCliSubprocessLaunchSpec } from "./subprocess-launch.js";
 
@@ -335,7 +336,7 @@ export async function runOwnedSessionWorkerFrontend(
 		const stdio: StdioOptions = interactive
 			? ["inherit", "inherit", "inherit", "ipc"]
 			: [bridgeStdin ? "pipe" : "inherit", "pipe", "pipe", "ipc"];
-		const child = spawn(launch.command, launch.args, {
+		const child = spawnHidden(launch.command, launch.args, {
 			cwd: process.cwd(),
 			detached: process.platform !== "win32",
 			env: {

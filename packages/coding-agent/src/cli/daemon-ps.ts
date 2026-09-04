@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import chalk from "chalk";
@@ -19,7 +18,7 @@ import {
 import { defaultDaemonSocketDir, defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
 import { acquireDaemonShutdownAdmission } from "../modes/daemon/daemon-supervisor-ownership.js";
 import type { DaemonWorkerDescriptor } from "../modes/daemon/daemon-worker-protocol.js";
-import { signalProcessGroupOrProcess } from "../utils/child-process.js";
+import { signalProcessGroupOrProcess, spawnSyncHidden } from "../utils/child-process.js";
 import { formatDaemonListTable } from "./daemon-ps-format.js";
 import { promptYesNo } from "./daemon-stop-confirm.js";
 
@@ -175,18 +174,18 @@ function scanListeningDaemons(): DiscoveredDaemonProcess[] {
 	if (process.platform === "win32") {
 		return [];
 	}
-	const ss = spawnSync("ss", ["-lxp"], { encoding: "utf8" });
+	const ss = spawnSyncHidden("ss", ["-lxp"], { encoding: "utf8" });
 	if (!ss.error && ss.status === 0 && typeof ss.stdout === "string") {
 		return enrichUptimes(parseSsListeners(ss.stdout, APP_NAME));
 	}
-	const lsof = spawnSync("lsof", ["-nP", "-F", "pn", "-U", "-a", "-c", APP_NAME], { encoding: "utf8" });
+	const lsof = spawnSyncHidden("lsof", ["-nP", "-F", "pn", "-U", "-a", "-c", APP_NAME], { encoding: "utf8" });
 	const byName = !lsof.error && typeof lsof.stdout === "string" ? parseLsofListeners(lsof.stdout) : [];
 	let byPid: DiscoveredDaemonProcess[] = [];
-	const ps = spawnSync("ps", ["-axo", "pid=,comm=,args="], { encoding: "utf8" });
+	const ps = spawnSyncHidden("ps", ["-axo", "pid=,comm=,args="], { encoding: "utf8" });
 	if (!ps.error && ps.status === 0 && typeof ps.stdout === "string") {
 		const pids = parsePrimeAgentProcessIds(ps.stdout, APP_NAME);
 		if (pids.length > 0) {
-			const lsofByPid = spawnSync("lsof", ["-nP", "-F", "pn", "-U", "-a", "-p", pids.join(",")], {
+			const lsofByPid = spawnSyncHidden("lsof", ["-nP", "-F", "pn", "-U", "-a", "-p", pids.join(",")], {
 				encoding: "utf8",
 			});
 			if (!lsofByPid.error && typeof lsofByPid.stdout === "string") {
@@ -207,7 +206,7 @@ function enrichUptimes(daemons: DiscoveredDaemonProcess[]): DiscoveredDaemonProc
 	if (pids.length === 0) {
 		return daemons;
 	}
-	const ps = spawnSync("ps", ["-o", "pid=,etimes=", "-p", pids.join(",")], { encoding: "utf8" });
+	const ps = spawnSyncHidden("ps", ["-o", "pid=,etimes=", "-p", pids.join(",")], { encoding: "utf8" });
 	if (ps.error || typeof ps.stdout !== "string") {
 		return daemons;
 	}
@@ -803,7 +802,7 @@ function recordResidualListenerFailures(
 	}
 }
 function describeDaemonParent(pid: number): string {
-	const result = spawnSync("ps", ["-o", "ppid=,tty=,command=", "-p", String(pid)], { encoding: "utf8" });
+	const result = spawnSyncHidden("ps", ["-o", "ppid=,tty=,command=", "-p", String(pid)], { encoding: "utf8" });
 	if (result.error || result.status !== 0 || typeof result.stdout !== "string") {
 		return "";
 	}

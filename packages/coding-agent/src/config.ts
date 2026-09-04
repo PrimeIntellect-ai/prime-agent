@@ -1,4 +1,3 @@
-import { spawnSync } from "child_process";
 import { createHash } from "crypto";
 import {
 	accessSync,
@@ -15,7 +14,7 @@ import {
 import { homedir } from "os";
 import { basename, dirname, join, posix, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
-import { shouldUseWindowsShell } from "./utils/child-process.js";
+import { shouldUseWindowsShell, spawnSyncHidden } from "./utils/child-process.js";
 import { normalizeSocketPath } from "./utils/daemon-socket-path.js";
 
 // =============================================================================
@@ -207,7 +206,7 @@ function readCommandOutput(
 	args: string[],
 	options: { requireSuccess?: boolean } = {},
 ): string | undefined {
-	const result = spawnSync(command, args, {
+	const result = spawnSyncHidden(command, args, {
 		encoding: "utf-8",
 		stdio: ["ignore", "pipe", "pipe"],
 		shell: shouldUseWindowsShell(command),

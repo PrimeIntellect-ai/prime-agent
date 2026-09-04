@@ -787,7 +787,7 @@ export class TUI extends Container {
 							href,
 						]
 					: ["xdg-open", href];
-		execFile(command, args, () => {});
+		execFile(command, args, { windowsHide: true }, () => {});
 	}
 
 	private copySelection(text: string): void {

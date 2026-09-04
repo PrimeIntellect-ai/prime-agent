@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
 import { delimiter } from "node:path";
-import { spawn, spawnSync } from "child_process";
 import { getBinDir } from "../config.js";
 import { recordOrphanProcessState } from "../core/orphan-process-journal.js";
+import { spawnHidden, spawnSyncHidden } from "./child-process.js";
 
 export interface ShellConfig {
 	shell: string;
@@ -11,7 +11,7 @@ export interface ShellConfig {
 
 /**
  * Order `where bash.exe` matches so anything under %SystemRoot% (the WSL
- * launcher at System32\\bash.exe, which runs Linux-side, not a Windows shell)
+ * launcher at System32\bash.exe, which runs Linux-side, not a Windows shell)
  * is only used when no other bash exists.
  */
 export function orderWindowsBashCandidates(matches: readonly string[], systemRoot: string | undefined): string[] {
@@ -27,7 +27,7 @@ function findBashOnPath(): string | null {
 	if (process.platform === "win32") {
 		// Windows: Use 'where' and verify file exists (where can return non-existent paths)
 		try {
-			const result = spawnSync("where", ["bash.exe"], { encoding: "utf-8", timeout: 5000 });
+			const result = spawnSyncHidden("where", ["bash.exe"], { encoding: "utf-8", timeout: 5000 });
 			if (result.status === 0 && result.stdout) {
 				const matches = result.stdout.trim().split(/\r?\n/).filter(Boolean);
 				for (const match of orderWindowsBashCandidates(matches, process.env.SystemRoot)) {
@@ -44,7 +44,7 @@ function findBashOnPath(): string | null {
 
 	// Unix: Use 'which' and trust its output (handles Termux and special filesystems)
 	try {
-		const result = spawnSync("which", ["bash"], { encoding: "utf-8", timeout: 5000 });
+		const result = spawnSyncHidden("which", ["bash"], { encoding: "utf-8", timeout: 5000 });
 		if (result.status === 0 && result.stdout) {
 			const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
 			if (firstMatch) {
@@ -232,7 +232,7 @@ export function killProcessTree(pid: number): void {
 	if (process.platform === "win32") {
 		// Use taskkill on Windows to kill process tree
 		try {
-			spawn("taskkill", ["/F", "/T", "/PID", String(pid)], {
+			spawnHidden("taskkill", ["/F", "/T", "/PID", String(pid)], {
 				stdio: "ignore",
 				detached: true,
 			});

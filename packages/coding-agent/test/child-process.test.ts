@@ -1,7 +1,52 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
-import { isProcessAlive, isZombieProcess, waitForChildProcess } from "../src/utils/child-process.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+	execFileHidden,
+	execFileSyncHidden,
+	execSyncHidden,
+	isProcessAlive,
+	isZombieProcess,
+	spawnHidden,
+	spawnSyncHidden,
+	waitForChildProcess,
+} from "../src/utils/child-process.js";
+
+const recordedWindowsHide = vi.hoisted(() => [] as Array<boolean | undefined>);
+
+vi.mock("node:child_process", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:child_process")>();
+	const recordWindowsHide = (options: unknown) => {
+		recordedWindowsHide.push(
+			typeof options === "object" && options !== null
+				? (options as { windowsHide?: boolean }).windowsHide
+				: undefined,
+		);
+	};
+	return {
+		...actual,
+		spawn(...args: Parameters<typeof actual.spawn>) {
+			recordWindowsHide(args[2]);
+			return actual.spawn(...args);
+		},
+		spawnSync(...args: Parameters<typeof actual.spawnSync>) {
+			recordWindowsHide(args[2]);
+			return actual.spawnSync(...args);
+		},
+		execSync(...args: Parameters<typeof actual.execSync>) {
+			recordWindowsHide(args[1]);
+			return actual.execSync(...args);
+		},
+		execFileSync(...args: Parameters<typeof actual.execFileSync>) {
+			recordWindowsHide(args[2]);
+			return actual.execFileSync(...args);
+		},
+		execFile(...args: Parameters<typeof actual.execFile>) {
+			recordWindowsHide(args[2]);
+			return actual.execFile(...args);
+		},
+	};
+});
 
 describe("waitForChildProcess", () => {
 	it("reports signaled already-exited children as failures", async () => {
@@ -57,5 +102,20 @@ describe("process liveness", () => {
 		} finally {
 			parent.kill("SIGKILL");
 		}
+	});
+});
+
+describe("hidden child-process wrappers", () => {
+	it("force windowsHide on every wrapped spawn/exec form", async () => {
+		recordedWindowsHide.length = 0;
+		const child = spawnHidden(process.execPath, ["--version"], { stdio: "ignore" });
+		await waitForChildProcess(child);
+		spawnSyncHidden(process.execPath, ["--version"], { stdio: "ignore" });
+		execSyncHidden(`"${process.execPath}" --version`, { stdio: "ignore" });
+		execFileSyncHidden(process.execPath, ["--version"], { stdio: "ignore" });
+		await new Promise<void>((resolveDone) => {
+			execFileHidden(process.execPath, ["--version"], {}, () => resolveDone());
+		});
+		expect(recordedWindowsHide).toEqual([true, true, true, true, true]);
 	});
 });
