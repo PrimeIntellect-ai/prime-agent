@@ -1,0 +1,1 @@
+- Fixed daemon request latency on large agent trees: the passive-subagent topology is derived once and memoized, with every consumer (session list, snapshots, cron recovery, agent messaging, passivation) reading the cached walk until the spawn ledger, residency, or a child session file changes.

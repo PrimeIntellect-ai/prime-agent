@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
+	appendFileSync,
 	chmodSync,
 	existsSync,
 	mkdirSync,
@@ -4358,6 +4359,47 @@ describe("daemon mode helpers", () => {
 		} finally {
 			releasePassiveList();
 			releaseBinding();
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("memoizes the passive topology walk until a topology input changes", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-passive-memo-"));
+		try {
+			const fixture = makePersistedRlmDaemonFixture(tempDir);
+			const internals = fixture.daemon as unknown as {
+				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
+				listPassiveRlmSubagents(): Promise<Array<{ entry: { childId: string }; info: { messageCount: number } }>>;
+			};
+			await internals.createRuntime({ type: "create", sessionPath: fixture.parentSessionFile });
+
+			// The first walk seeds the ledger from the legacy registries, so it
+			// never memoizes; the second is the first stable derivation and the
+			// third must reuse it.
+			await internals.listPassiveRlmSubagents();
+			const first = await internals.listPassiveRlmSubagents();
+			expect(first.map(({ entry }) => entry.childId)).toEqual(
+				expect.arrayContaining([fixture.childId, fixture.grandchildId]),
+			);
+			const second = await internals.listPassiveRlmSubagents();
+			expect(second).toBe(first);
+
+			// A child session append invalidates the memo and re-derives fresh infos.
+			appendFileSync(
+				fixture.childSessionFile,
+				`${JSON.stringify({
+					type: "message",
+					id: "m2",
+					parentId: null,
+					timestamp: "2026-01-01T00:00:02.000Z",
+					message: { role: "user", content: "one more instruction", timestamp: 3 },
+				})}\n`,
+			);
+			const third = await internals.listPassiveRlmSubagents();
+			expect(third).not.toBe(first);
+			const child = third.find(({ entry }) => entry.childId === fixture.childId);
+			expect(child?.info.messageCount).toBe(2);
+		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
