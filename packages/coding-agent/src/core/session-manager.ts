@@ -956,12 +956,19 @@ interface SessionScanState {
 	tail: Buffer;
 	acc: SessionScanAccumulator;
 	info: SessionInfo | null;
+	/** Usage entries counted against the retained bound at the last store. */
+	accountedUsageEntries: number;
 }
 
 const SESSION_SCAN_RESUME_TAIL_BYTES = 16;
 const NEWLINE_BUFFER = Buffer.from("\n");
-// Bounds the resumable-state heap: an evicted file just pays one full rescan.
-const SESSION_SCAN_STATE_MAX_FILES = 1024;
+// Bounds the resumable-state heap by what actually grows with transcripts: the
+// per-assistant-message usage entries (~a few hundred bytes each, so roughly a
+// few tens of MB at the bound). Whole states LRU-evict only while over the
+// bound - an evicted file just pays one full rescan - and states with small
+// maps never evict, so listings larger than any fixed file count cannot
+// thrash the cache.
+const SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES = 100_000;
 
 // Session files are append-only between whole-file rewrites, so a scan resumes
 // from the previous scan's byte offset instead of re-reading from byte 0. A
@@ -992,13 +999,24 @@ export function readSessionInfo(filePath: string): Promise<SessionInfo | null> {
 	return scan;
 }
 
-/** Refresh LRU recency and enforce the resumable-state bound. */
-function storeSessionScanState(filePath: string, state: SessionScanState): void {
+let retainedUsageEntries = 0;
+
+function dropSessionScanState(filePath: string): void {
+	const state = sessionScanStates.get(filePath);
+	if (!state) return;
+	retainedUsageEntries -= state.accountedUsageEntries;
 	sessionScanStates.delete(filePath);
+}
+
+/** Refresh LRU recency and enforce the retained-usage bound. */
+function storeSessionScanState(filePath: string, state: SessionScanState): void {
+	dropSessionScanState(filePath);
+	state.accountedUsageEntries = state.acc.assistantUsageById.size;
+	retainedUsageEntries += state.accountedUsageEntries;
 	sessionScanStates.set(filePath, state);
 	for (const key of sessionScanStates.keys()) {
-		if (sessionScanStates.size <= SESSION_SCAN_STATE_MAX_FILES) break;
-		sessionScanStates.delete(key);
+		if (retainedUsageEntries <= SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES || key === filePath) break;
+		dropSessionScanState(key);
 	}
 }
 
@@ -1035,12 +1053,12 @@ function advanceScanTail(tail: Buffer, line: Buffer): Buffer {
 		: Buffer.from(combined.subarray(combined.length - SESSION_SCAN_RESUME_TAIL_BYTES));
 }
 
-async function scanSessionInfo(filePath: string): Promise<SessionInfo | null> {
+async function scanSessionInfo(filePath: string, retryOnReplacement = true): Promise<SessionInfo | null> {
 	let stats: Awaited<ReturnType<typeof stat>>;
 	try {
 		stats = await stat(filePath);
 	} catch {
-		sessionScanStates.delete(filePath);
+		dropSessionScanState(filePath);
 		return null;
 	}
 	const previous = sessionScanStates.get(filePath);
@@ -1061,13 +1079,27 @@ async function scanSessionInfo(filePath: string): Promise<SessionInfo | null> {
 				tail: Buffer.alloc(0),
 				acc: createSessionScanAccumulator(),
 				info: null,
+				accountedUsageEntries: 0,
 			};
 	try {
 		const tornTail = await scanSessionLines(filePath, state, stats.size);
 		state.info = snapshotSessionInfo(state.acc, tornTail, filePath, stats);
 	} catch {
-		sessionScanStates.delete(filePath);
+		dropSessionScanState(filePath);
 		return null;
+	}
+	// A rename rewrite racing the scan (between the stat and the reads) can mix
+	// two files' bytes into one accumulator: a changed inode after the scan
+	// discards the state and scans once more from scratch.
+	let after: Awaited<ReturnType<typeof stat>> | undefined;
+	try {
+		after = await stat(filePath);
+	} catch {
+		after = undefined;
+	}
+	if (!after || after.dev !== stats.dev || after.ino !== stats.ino) {
+		dropSessionScanState(filePath);
+		return retryOnReplacement ? scanSessionInfo(filePath, false) : null;
 	}
 	state.fileSize = stats.size;
 	state.mtimeMs = stats.mtimeMs;
@@ -1243,7 +1275,7 @@ async function listSessionsFromDir(
 	const sessions: SessionInfo[] = [];
 	if (!existsSync(dir)) {
 		for (const key of sessionScanStates.keys()) {
-			if (dirname(key) === dir) sessionScanStates.delete(key);
+			if (dirname(key) === dir) dropSessionScanState(key);
 		}
 		return sessions;
 	}
@@ -1256,7 +1288,7 @@ async function listSessionsFromDir(
 		const present = new Set(files);
 		for (const key of sessionScanStates.keys()) {
 			if (dirname(key) === dir && !present.has(key)) {
-				sessionScanStates.delete(key);
+				dropSessionScanState(key);
 			}
 		}
 
