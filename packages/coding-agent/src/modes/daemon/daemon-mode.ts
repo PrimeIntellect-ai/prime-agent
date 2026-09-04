@@ -1264,19 +1264,12 @@ export class AgentDaemon {
 		return { ...base, rlmDepth: edge.depth, status: "completed", createdAt };
 	}
 
-	// One memoized derivation of the passive-subagent topology per argument
-	// shape: every daemon consumer (session list, snapshots, cron recovery,
-	// agent-observe, agent-message, family catalog, passivation) reads the same
-	// cached walk instead of re-walking the persisted tree per request. A hit
-	// requires the spawn ledger stat, the resident roster, the live saved
-	// roots, every root-state identity, and the stat of every file input the
-	// walk visited (child transcripts, display records, legacy registries,
-	// including absent ones) to be unchanged; ledger appends, residency
-	// changes, child appends, and display rewrites all invalidate. Input stats
-	// are captured before each read, so a write landing mid-walk can only
-	// cause one extra re-walk, never a stale memo. Walks of the same shape run
-	// strictly one at a time, and a caller never joins an earlier walk: its
-	// own pass re-validates against state at or after its call time.
+	// One memoized passive-topology derivation per argument shape; all daemon
+	// consumers read the cached walk. A hit requires the ledger stat, roster,
+	// live roots, root-state identities, and every visited file input's stat
+	// (captured before its read, so mid-walk writes cost one extra re-walk,
+	// never a stale memo) to be unchanged. Same-shape walks run one at a time;
+	// a caller never joins an earlier walk.
 	private readonly passiveRlmSubagentWalks = new Map<string, Promise<PassiveRlmSubagent[]>>();
 	private readonly passiveRlmSubagentMemo = new Map<
 		string,
@@ -1350,9 +1343,7 @@ export class AgentDaemon {
 			}
 			const walked = await this.walkPassiveRlmSubagents(savedRootInfos, includeResident);
 			// Only a walk whose inputs held still qualifies as a memo: not the
-			// first walk (it seeds the ledger from legacy registries) and not a
-			// degraded walk (a present child file that failed to read may list
-			// again without any stat change).
+			// ledger-seeding first walk, not a degraded one.
 			const after = await this.passiveRlmTopologyFingerprint(savedRootInfos);
 			if (after === before && !walked.degraded) {
 				this.passiveRlmSubagentMemo.delete(key);
@@ -1373,9 +1364,8 @@ export class AgentDaemon {
 		const previous = this.passiveRlmSubagentWalks.get(key);
 		const walk = previous ? previous.then(run, run) : run();
 		this.passiveRlmSubagentWalks.set(key, walk);
-		// then(cleanup, cleanup), not finally(): a discarded finally() promise
-		// would turn a rejecting walk into an unhandled rejection and crash the
-		// daemon; the rejection still reaches the caller through `walk` itself.
+		// Not finally(): its discarded promise would turn a rejecting walk into a
+		// daemon-crashing unhandled rejection. The caller still sees the rejection.
 		const cleanup = () => {
 			if (this.passiveRlmSubagentWalks.get(key) === walk) this.passiveRlmSubagentWalks.delete(key);
 		};
@@ -1388,8 +1378,7 @@ export class AgentDaemon {
 		savedRootInfos: SessionInfo[],
 		includeResident: boolean,
 	): Promise<{ result: PassiveRlmSubagent[]; inputStats: Map<string, string>; degraded: boolean }> {
-		// Every file input's stat is captured before its read so the memo's
-		// invalidation identity can only be older than the derived content.
+		// Captured before each read: the identity can only be older than the content.
 		const inputStats = new Map<string, string>();
 		let degraded = false;
 		const recordInputStat = async (path: string): Promise<string> => {
@@ -1436,17 +1425,13 @@ export class AgentDaemon {
 				const sessionKey = resolve(entry.sessionFile);
 				if (entry.status === "deleted" || visited.has(sessionKey)) continue;
 				visited.add(sessionKey);
-				// A resident child walks its own subtree as an outer root below. Avoid
-				// duplicate rows and attributing its descendants to an ancestor - and
-				// keep its actively-streamed transcript out of the input set, where
-				// every append would needlessly bust the memo (the roster axis
-				// already carries resident identity).
+				// A resident child walks as an outer root below; skipping before the
+				// stat capture keeps its streamed transcript out of the input set.
 				if (!includeResident && this.findSessionBySessionFile(entry.sessionFile)) continue;
 				const childStat = await recordInputStat(entry.sessionFile);
 				const info = await readSessionInfo(entry.sessionFile);
 				if (!info) {
-					// A present file that fails to list may succeed again without any
-					// stat change (transient read error): such walks must not memoize.
+					// A present file that fails to list may recover without a stat change.
 					if (childStat !== "absent") degraded = true;
 					continue;
 				}
