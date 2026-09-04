@@ -95,8 +95,12 @@ export async function completeWithProviderRetry(
 	let retriesPerformed = 0;
 	for (;;) {
 		const message = await attemptCompletion();
-		if (message.stopReason !== "error" || options?.signal?.aborted) {
+		if (message.stopReason !== "error") {
 			return message;
+		}
+		if (options?.signal?.aborted) {
+			// A cancel that raced the failure is an abort, not a provider failure.
+			return { ...message, stopReason: "aborted" };
 		}
 		if (retriesPerformed >= maxRetries || isAgentLifecycleFailure(message) || isFauxProviderQueueExhausted(message)) {
 			return message;
@@ -112,7 +116,7 @@ export async function completeWithProviderRetry(
 		try {
 			await sleep(delay.delayMs, options?.signal);
 		} catch {
-			return message;
+			return { ...message, stopReason: "aborted" };
 		}
 		retriesPerformed++;
 	}
