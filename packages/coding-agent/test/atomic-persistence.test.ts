@@ -15,10 +15,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 type WriteSync = typeof writeSync;
 const shortWrites = vi.hoisted(() => ({ remaining: 0 }));
 const rmFault = vi.hoisted(() => ({ error: undefined as Error | undefined }));
+const linkSweep = vi.hoisted(() => ({ remaining: 0 }));
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
 	return {
 		...actual,
+		linkSync: ((existing: Parameters<typeof actual.linkSync>[0], created: Parameters<typeof actual.linkSync>[1]) => {
+			if (linkSweep.remaining > 0) {
+				linkSweep.remaining--;
+				// A rival's sweep claims the candidate between write and publish.
+				actual.rmSync(existing, { force: true });
+			}
+			return actual.linkSync(existing, created);
+		}) as typeof actual.linkSync,
 		rmSync: ((path: Parameters<typeof actual.rmSync>[0], options?: Parameters<typeof actual.rmSync>[1]) => {
 			if (rmFault.error && String(path).includes(".candidate-")) throw rmFault.error;
 			return actual.rmSync(path, options);
@@ -86,6 +95,19 @@ describe("writeFileAtomicSync", () => {
 });
 
 describe("tryAcquireDirLock", () => {
+	it("retries with a fresh candidate when a rival's sweep claims the first mid-publish", async () => {
+		const dir = createTempDir();
+		const lockPath = join(dir, "suspended.lock");
+		linkSweep.remaining = 1;
+
+		try {
+			expect(await tryAcquireDirLock(lockPath, () => false)).toBe("acquired");
+		} finally {
+			linkSweep.remaining = 0;
+		}
+		expect(readFileSync(lockPath, "utf8").trim()).toBe(String(process.pid));
+	});
+
 	it("sweeps abandoned candidates on acquire while sparing fresh ones and the lock", async () => {
 		const dir = createTempDir();
 		const lockPath = join(dir, "swept.lock");

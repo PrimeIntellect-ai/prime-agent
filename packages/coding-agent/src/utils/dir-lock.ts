@@ -27,7 +27,9 @@ function sweepAbandonedCandidates(lockPath: string): void {
 				if (statSync(abandoned).mtimeMs < cutoff) {
 					rmSync(abandoned, { force: true });
 				}
-			} catch {}
+			} catch {
+				// Litter collection only.
+			}
 		}
 	} catch {
 		// Litter collection only: the next acquire retries.
@@ -39,6 +41,14 @@ export async function tryAcquireDirLock(
 	ownerAlive: (ownerPid: number | undefined) => Promise<boolean> | boolean,
 ): Promise<DirLockAttempt> {
 	sweepAbandonedCandidates(lockPath);
+	return acquireAttempt(lockPath, ownerAlive, true);
+}
+
+async function acquireAttempt(
+	lockPath: string,
+	ownerAlive: (ownerPid: number | undefined) => Promise<boolean> | boolean,
+	retryOnSweptCandidate: boolean,
+): Promise<DirLockAttempt> {
 	const token = `${process.pid}-${randomUUID()}`;
 	const tempPath = `${lockPath}.candidate-${token}`;
 	writeFileSync(tempPath, `${process.pid}\n`, { mode: 0o600 });
@@ -49,8 +59,17 @@ export async function tryAcquireDirLock(
 		} catch (error) {
 			// NFS can report failure for a link that landed: a second name for the
 			// temp inode means the publish succeeded.
-			if (statSync(tempPath).nlink === 2) {
+			let recheckedNlink: number | undefined;
+			try {
+				recheckedNlink = statSync(tempPath).nlink;
+			} catch {
+				// The candidate is gone: an acquirer suspended past the sweep age lost it.
+			}
+			if (recheckedNlink === 2) {
 				return "acquired";
+			}
+			if (recheckedNlink === undefined && retryOnSweptCandidate) {
+				return acquireAttempt(lockPath, ownerAlive, false);
 			}
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
 				throw error;

@@ -89,7 +89,9 @@ export function migrateAuthToAuthJson(): string[] {
 		if (oauthReadable) {
 			renameSync(oauthPath, `${oauthPath}.migrated`);
 		}
-	} catch {}
+	} catch {
+		// Skip on error
+	}
 	try {
 		if (settingsWithoutApiKeys !== undefined) {
 			writeFileAtomicSync(
@@ -98,7 +100,9 @@ export function migrateAuthToAuthJson(): string[] {
 				settingsMode === undefined ? {} : { mode: settingsMode },
 			);
 		}
-	} catch {}
+	} catch {
+		// Skip on error
+	}
 
 	return providers;
 }
