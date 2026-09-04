@@ -16,7 +16,7 @@ type WriteSync = typeof writeSync;
 const shortWrites = vi.hoisted(() => ({ remaining: 0 }));
 const rmFault = vi.hoisted(() => ({ error: undefined as Error | undefined }));
 const linkSweep = vi.hoisted(() => ({ remaining: 0 }));
-const asideStatFault = vi.hoisted(() => ({ remaining: 0 }));
+const asideStatFault = vi.hoisted(() => ({ remaining: 0, plantRivalAt: undefined as string | undefined }));
 const renamePerformThenThrow = vi.hoisted(() => ({ remaining: 0 }));
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
@@ -33,6 +33,9 @@ vi.mock("node:fs", async (importOriginal) => {
 		statSync: ((path: Parameters<typeof actual.statSync>[0], options?: never) => {
 			if (asideStatFault.remaining > 0 && String(path).includes(".stale-")) {
 				asideStatFault.remaining--;
+				if (asideStatFault.plantRivalAt !== undefined) {
+					actual.writeFileSync(asideStatFault.plantRivalAt, "31337\n");
+				}
 				throw Object.assign(new Error("EPERM: probe blocked"), { code: "EPERM" });
 			}
 			return actual.statSync(path, options);
@@ -147,19 +150,26 @@ describe("tryAcquireDirLock", () => {
 		expect(await tryAcquireDirLock(lockPath, () => false)).toBe("acquired");
 	});
 
-	it("restores instead of deleting a moved lock whose shape cannot be probed", async () => {
+	it("parks a moved lock whose shape cannot be probed instead of deleting or clobbering", async () => {
 		const dir = createTempDir();
-		const lockDir = join(dir, "shape.lock");
-		mkdirSync(lockDir);
-		writeFileSync(join(lockDir, "pid"), "999999999\n");
+		const lockPath = join(dir, "shape.lock");
+		writeFileSync(lockPath, "999999999\n");
+		// A rival publishes at the path while the aside probe is failing: only a
+		// link-back (which cannot replace it) is a safe restore attempt.
 		asideStatFault.remaining = 1;
+		asideStatFault.plantRivalAt = lockPath;
 
 		try {
-			expect(await tryAcquireDirLock(lockDir, () => false)).toBe("held");
+			expect(await tryAcquireDirLock(lockPath, () => false)).toBe("held");
 		} finally {
 			asideStatFault.remaining = 0;
+			asideStatFault.plantRivalAt = undefined;
 		}
-		expect(readFileSync(join(lockDir, "pid"), "utf8").trim()).toBe("999999999");
+		expect(readFileSync(lockPath, "utf8").trim()).toBe("31337");
+		const parked = readdirSync(dir)
+			.filter((name) => name.includes(".stale-"))
+			.map((name) => readFileSync(join(dir, name), "utf8").trim());
+		expect(parked).toEqual(["999999999"]);
 	});
 
 	it("retries with a fresh candidate when a rival's sweep claims the first mid-publish", async () => {

@@ -1,5 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { linkSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	closeSync,
+	fstatSync,
+	linkSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { basename, dirname, join } from "node:path";
 
 export type DirLockAttempt = "acquired" | "held" | "reclaimed";
@@ -98,6 +109,41 @@ async function acquireAttempt(
 			// Some Windows filesystems report no stable file index: identity unavailable.
 			return "held";
 		}
+		// Pin the judged inode: an open descriptor keeps its number from being
+		// recycled into a rival's fresh lock (Linux reuses inodes immediately).
+		let pinned: number | undefined;
+		try {
+			pinned = openSync(lockPath, "r");
+			const pinnedIdentity = fstatSync(pinned, { bigint: true });
+			if (pinnedIdentity.dev !== captured.dev || pinnedIdentity.ino !== captured.ino) {
+				// The lock changed hands between the capture and the pin: treat as live.
+				return "held";
+			}
+		} catch {
+			// Unpinnable (Windows directories): stat identity applies without the
+			// recycling guarantee.
+		}
+		try {
+			return await judgeAndReclaim(lockPath, ownerAlive, captured, token);
+		} finally {
+			if (pinned !== undefined) closeSync(pinned);
+		}
+	} finally {
+		try {
+			rmSync(tempPath, { force: true });
+		} catch {
+			// Cleanup only: a leaked candidate must never mask a settled acquisition.
+		}
+	}
+}
+
+async function judgeAndReclaim(
+	lockPath: string,
+	ownerAlive: (ownerPid: number | undefined) => Promise<boolean> | boolean,
+	captured: { dev: bigint; ino: bigint; isDir: boolean },
+	token: string,
+): Promise<DirLockAttempt> {
+	{
 		const judged = readOwnerRaw(lockPath, captured.isDir);
 		if (judged === "unreadable") {
 			// A transient read failure may hide a LIVE lock: never judge it stale.
@@ -126,27 +172,21 @@ async function acquireAttempt(
 			rmSync(asidePath, { recursive: true, force: true });
 			return "reclaimed";
 		}
-		// The moved entry is not the judged lock: restore it, never delete. Its own
-		// shape picks the operation - a file links back so a rival re-acquirer is
-		// never clobbered, anything else renames back (a directory rename cannot
-		// clobber). Any failure leaves it aside.
+		// The moved entry is not the judged lock: restore it, never delete. A known
+		// directory renames back (a directory rename cannot clobber); everything
+		// else - files AND unreadable shapes - links back, because only link can
+		// never replace a rival's freshly published lock. Any failure leaves it aside.
 		try {
-			if (aside?.isDir === false) {
+			if (aside?.isDir === true) {
+				renameSync(asidePath, lockPath);
+			} else {
 				linkSync(asidePath, lockPath);
 				rmSync(asidePath, { force: true });
-			} else {
-				renameSync(asidePath, lockPath);
 			}
 		} catch {
 			// The displaced entry stays aside rather than risk deleting a live lock.
 		}
 		return "held";
-	} finally {
-		try {
-			rmSync(tempPath, { force: true });
-		} catch {
-			// Cleanup only: a leaked candidate must never mask a settled acquisition.
-		}
 	}
 }
 
