@@ -4387,10 +4387,8 @@ describe("daemon worker supervisor monitoring", () => {
 
 	it("derives per-attempt handshake budgets from the remaining outer connect deadline", () => {
 		const now = 1_000_000;
-		// A fresh 30s outer budget must reach the handshake attempt whole, not as a fixed 1s clock.
 		expect(handshakeBudgetMs(now + 30_000, now)).toBe(30_000);
 		expect(handshakeBudgetMs(now + 2_500, now)).toBe(2_500);
-		// Near-expired deadlines keep a tiny floor so the attempt can still fail cleanly.
 		expect(handshakeBudgetMs(now - 1, now)).toBe(50);
 	});
 });

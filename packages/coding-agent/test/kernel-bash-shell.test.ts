@@ -62,12 +62,10 @@ describe("resolveKernelBashShell on win32", () => {
 	});
 });
 
-describe("orderWindowsBashCandidates", () => {
-	it("prefers any other bash over WSL's System32 trampoline, keeping it only as a last resort", () => {
-		const wsl = "C:\\Windows\\System32\\bash.exe";
-		const scoopGitBash = "C:\\Users\\u\\scoop\\shims\\bash.exe";
-		expect(orderWindowsBashCandidates([wsl, scoopGitBash], "C:\\Windows")).toEqual([scoopGitBash, wsl]);
-		expect(orderWindowsBashCandidates([wsl], "C:\\Windows")).toEqual([wsl]);
-		expect(orderWindowsBashCandidates([wsl, scoopGitBash], undefined)).toEqual([wsl, scoopGitBash]);
-	});
+it("orderWindowsBashCandidates prefers any other bash over WSL's System32 trampoline, keeping it only as a last resort", () => {
+	const wsl = "C:\\Windows\\System32\\bash.exe";
+	const scoopGitBash = "C:\\Users\\u\\scoop\\shims\\bash.exe";
+	expect(orderWindowsBashCandidates([wsl, scoopGitBash], "C:\\Windows")).toEqual([scoopGitBash, wsl]);
+	expect(orderWindowsBashCandidates([wsl], "C:\\Windows")).toEqual([wsl]);
+	expect(orderWindowsBashCandidates([wsl, scoopGitBash], undefined)).toEqual([wsl, scoopGitBash]);
 });

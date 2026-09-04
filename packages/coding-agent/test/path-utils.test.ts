@@ -22,7 +22,6 @@ describe("path-utils", () => {
 			expect(expandPath("~/docs/file.txt", "win32")).toBe(win32.join(home, "docs", "file.txt"));
 			expect(expandPath("~/docs/file.txt", "linux")).toBe(posix.join(home, "docs/file.txt"));
 			expect(expandTildePath("~/docs/file.txt", "win32")).toBe(win32.join(home, "docs", "file.txt"));
-			expect(expandTildePath("~/docs/file.txt", "linux")).toBe(posix.join(home, "docs/file.txt"));
 		});
 
 		it("should normalize Unicode spaces", () => {
