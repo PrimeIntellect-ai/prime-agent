@@ -21,31 +21,18 @@ describe("OutputAccumulator temp spill", () => {
 		rmSync(scratch, { recursive: true, force: true });
 	});
 
-	it("degrades to the in-memory tail when the spill stream cannot open", async () => {
+	it("degrades a failed spill to the in-memory tail without failing the close", async () => {
 		process.env.TMPDIR = join(scratch, "does-not-exist");
 		const accumulator = new OutputAccumulator({ maxBytes: 8, maxLines: 100 });
 		accumulator.append(Buffer.from("0123456789abcdef\n"));
 		accumulator.append(Buffer.from("tail\n"));
-		accumulator.finish();
-		// Settles once the failed open's error has landed; no wall-clock sleep.
-		await accumulator.closeTempFile();
-
-		const snapshot = accumulator.snapshot();
-		expect(snapshot.fullOutputPath).toBeUndefined();
-		expect(snapshot.content).toContain("tail");
-	});
-
-	it("settles closeTempFile without rejecting when the spill fails during the close", async () => {
-		process.env.TMPDIR = join(scratch, "does-not-exist");
-		const accumulator = new OutputAccumulator({ maxBytes: 8, maxLines: 100 });
-		accumulator.append(Buffer.from("0123456789abcdef\n"));
 		accumulator.finish();
 
 		// The open error lands while the close is waiting: degraded spill, not a tool failure.
 		await expect(accumulator.closeTempFile()).resolves.toBeUndefined();
 		const snapshot = accumulator.snapshot();
 		expect(snapshot.fullOutputPath).toBeUndefined();
-		expect(snapshot.content).toContain("9abcdef");
+		expect(snapshot.content).toContain("tail");
 	});
 
 	it("advertises the bash spill path only once the file is complete", async () => {

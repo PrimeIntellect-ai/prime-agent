@@ -58,8 +58,7 @@ export class OutputSpill {
 			if (this.stream === stream) {
 				this.stream = undefined;
 			}
-			// The forgotten partial file would squat on the very disk pressure
-			// that degraded the spill; cleanup failure is never a tool failure.
+			// The partial file would squat on the disk pressure that degraded the spill.
 			stream.once("close", () => {
 				if (partial) rmSync(partial, { force: true });
 			});

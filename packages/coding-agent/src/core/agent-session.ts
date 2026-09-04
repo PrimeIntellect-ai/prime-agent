@@ -11203,8 +11203,7 @@ export class AgentSession {
 
 		setTimeout(() => {
 			this.agent.continue().catch((error: unknown) => {
-				// A continue that never starts would otherwise leave the retry
-				// unresolved forever (isRetrying stuck, waiters parked).
+				// A continue that never starts must still resolve the retry (else isRetrying sticks forever).
 				if (!this.isRetrying) return;
 				this._markProviderAuthStaleForRetryFailure(message, options);
 				const attempt = this._retryAttempt;

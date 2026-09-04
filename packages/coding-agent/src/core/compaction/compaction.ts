@@ -392,8 +392,7 @@ export function findCutPoint(
 		const messageTokens = estimateTokens(entry.message);
 		accumulatedTokens += messageTokens;
 		if (accumulatedTokens >= keepRecentTokens) {
-			// Crossing inside a trailing tool-result run has no cut point at or after
-			// i: keep only the final turn instead of silently keeping everything.
+			// No cut point at/after i (trailing tool results): keep only the final turn, not everything.
 			cutIndex = cutPoints[cutPoints.length - 1];
 			for (let c = 0; c < cutPoints.length; c++) {
 				if (cutPoints[c] >= i) {

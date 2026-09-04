@@ -185,10 +185,7 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 
 		if (outputBytesCount + lineBytes > maxBytes) {
 			truncatedBy = "bytes";
-			// An oversized line rescues into a partial tail; trailing blank lines
-			// (a newline-terminated buffer) must not defeat the rescue. As many
-			// blanks as the budget allows stay in the output (their join newlines
-			// charged to it) so line metadata keeps describing the real file.
+			// Trailing blanks must not defeat the oversized-line rescue; keep as many as the budget allows.
 			if (outputLinesArr.every((collected) => collected.length === 0)) {
 				const keptBlanks = Math.min(outputLinesArr.length, Math.max(0, maxBytes - 1));
 				outputLinesArr.length = keptBlanks;
