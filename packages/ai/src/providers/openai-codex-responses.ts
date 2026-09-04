@@ -342,8 +342,7 @@ function buildRequestBody(
 		body.temperature = options.temperature;
 	}
 
-	// "default" means "no tier request": sending it explicitly breaks strict endpoints (e.g. Copilot).
-	if (options?.serviceTier !== undefined && options.serviceTier !== "default") {
+	if (options?.serviceTier !== undefined) {
 		body.service_tier = options.serviceTier;
 	}
 

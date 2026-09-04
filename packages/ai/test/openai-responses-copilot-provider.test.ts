@@ -212,8 +212,13 @@ describe("openai-responses provider defaults", () => {
 		expect(captured).toEqual({ sessionId: null, clientRequestId: null });
 	});
 
-	it("omits service_tier from the wire body for the default tier", async () => {
-		const model = getModel("openai", "gpt-5.4");
+	it.each([
+		["github-copilot" as const, "auto" as const, false],
+		["github-copilot" as const, "default" as const, false],
+		["openai" as const, "default" as const, true],
+	])("scopes service_tier serialization to the provider (%s, %s)", async (provider, serviceTier, expected) => {
+		const base = getModel("openai", "gpt-5.4");
+		const model = { ...base, provider };
 		const sse = `data: ${JSON.stringify({
 			type: "response.completed",
 			response: {
@@ -230,12 +235,16 @@ describe("openai-responses provider defaults", () => {
 		const result = await streamOpenAIResponses(
 			model,
 			{ systemPrompt: "sys", messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
-			{ apiKey: "test-key", serviceTier: "default" },
+			{ apiKey: "test-key", serviceTier },
 		).result();
 
 		expect(result.stopReason).toBe("stop");
-		// Absence IS the default; sending it explicitly breaks strict endpoints (e.g. Copilot).
-		expect(wireBody && "service_tier" in wireBody).toBe(false);
+		// Copilot rejects the FIELD for every value; elsewhere absence means "auto"
+		// (the project tier), so an explicit "default" must stay on the wire.
+		expect(wireBody && "service_tier" in wireBody).toBe(expected);
+		if (expected) {
+			expect((wireBody as Record<string, unknown>).service_tier).toBe(serviceTier);
+		}
 	});
 
 	it.each([

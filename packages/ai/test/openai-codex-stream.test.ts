@@ -561,7 +561,7 @@ describe("openai-codex streaming", () => {
 		await streamResult.result();
 	});
 
-	it("omits service_tier from the Codex wire body for the default tier", async () => {
+	it("keeps an explicit default tier on the Codex wire body", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
 		process.env.PI_CODING_AGENT_DIR = tempDir;
 		const token = mockToken();
@@ -583,7 +583,8 @@ describe("openai-codex streaming", () => {
 			}
 			if (url === "https://chatgpt.com/backend-api/codex/responses") {
 				const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
-				expect("service_tier" in body).toBe(false);
+				// Absence means "auto" (the project tier); an explicit "default" must survive.
+				expect(body.service_tier).toBe("default");
 				const stream = new ReadableStream<Uint8Array>({
 					start(controller) {
 						controller.enqueue(encoder.encode(sse));

@@ -237,8 +237,9 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		params.temperature = options?.temperature;
 	}
 
-	// "default" means "no tier request": sending it explicitly breaks strict endpoints (e.g. Copilot).
-	if (options?.serviceTier !== undefined && options.serviceTier !== "default") {
+	// GitHub Copilot rejects the service_tier FIELD itself (400) for every value.
+	// Elsewhere it is always sent: absence means "auto" (project tier), not "default".
+	if (options?.serviceTier !== undefined && model.provider !== "github-copilot") {
 		params.service_tier = options.serviceTier;
 	}
 
