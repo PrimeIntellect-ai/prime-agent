@@ -112,6 +112,26 @@ describe("writeFileAtomicSync", () => {
 });
 
 describe("tryAcquireDirLock", () => {
+	it("restores a rival lock when the lost-reply rename moved a swapped entry", async () => {
+		const dir = createTempDir();
+		const lockPath = join(dir, "swapped-eio.lock");
+		writeFileSync(lockPath, "999999999\n");
+		renamePerformThenThrow.remaining = 1;
+
+		try {
+			const result = await tryAcquireDirLock(lockPath, () => {
+				// A rival replaces the judged-stale lock before the rename fires.
+				rmSync(lockPath, { force: true });
+				writeFileSync(lockPath, "777777\n");
+				return false;
+			});
+			expect(result).toBe("held");
+		} finally {
+			renamePerformThenThrow.remaining = 0;
+		}
+		expect(readFileSync(lockPath, "utf8").trim()).toBe("777777");
+	});
+
 	it("recovers a rename whose success reply was lost and still reclaims cleanly", async () => {
 		const dir = createTempDir();
 		const lockPath = join(dir, "eio.lock");
@@ -269,8 +289,7 @@ describe("tryAcquireDirLock", () => {
 		expect(readFileSync(join(lockDir, "pid"), "utf8").trim()).toBe("424242");
 
 		// Cross-shape swap: a judged FILE lock replaced by a rival's legacy DIR is
-		// reported held and the rival's lock is preserved (restored or left aside),
-		// never deleted.
+		// restored at the path by the moved entry's own shape (rename-back).
 		rmSync(lockDir, { recursive: true, force: true });
 		writeFileSync(lockDir, "999999999\n");
 		const crossType = await tryAcquireDirLock(lockDir, () => {
@@ -280,16 +299,7 @@ describe("tryAcquireDirLock", () => {
 			return false;
 		});
 		expect(crossType).toBe("held");
-		const survivors = readdirSync(dir)
-			.map((name) => {
-				try {
-					return readFileSync(join(dir, name, "pid"), "utf8").trim();
-				} catch {
-					return undefined;
-				}
-			})
-			.filter((pid) => pid !== undefined);
-		expect(survivors).toEqual(["555555"]);
+		expect(readFileSync(join(lockDir, "pid"), "utf8").trim()).toBe("555555");
 	});
 
 	it("acquires over a stale lock without deleting a lock that changed owners", async () => {

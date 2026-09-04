@@ -114,30 +114,28 @@ async function acquireAttempt(
 			if ((reclaimError as NodeJS.ErrnoException).code === "ENOENT") {
 				return "reclaimed";
 			}
-			// Ambiguous failure (NFS can lose the reply of a completed rename): re-probe.
+			// Ambiguous failure (NFS can lose the reply of a completed rename): if the
+			// lock path is gone, SOMETHING moved aside - fall through to the verify,
+			// which reclaims on an inode match and restores on a mismatch.
 			if (statIdentity(lockPath) !== undefined) {
 				throw reclaimError;
 			}
-			const moved = statIdentity(asidePath);
-			if (!(moved !== undefined && moved.dev === captured.dev && moved.ino === captured.ino)) {
-				return "reclaimed";
-			}
-			// The rename completed; continue as its success path.
 		}
 		const aside = statIdentity(asidePath);
 		if (aside !== undefined && aside.dev === captured.dev && aside.ino === captured.ino) {
 			rmSync(asidePath, { recursive: true, force: true });
 			return "reclaimed";
 		}
-		// The moved entry is not the judged lock: restore it, never delete. A file
-		// links back so a rival re-acquirer is never clobbered; a directory renames
-		// back (a directory rename cannot clobber). Any failure leaves it aside.
+		// The moved entry is not the judged lock: restore it, never delete. Its own
+		// shape picks the operation - a file links back so a rival re-acquirer is
+		// never clobbered, anything else renames back (a directory rename cannot
+		// clobber). Any failure leaves it aside.
 		try {
-			if (captured.isDir) {
-				renameSync(asidePath, lockPath);
-			} else {
+			if (aside?.isDir === false) {
 				linkSync(asidePath, lockPath);
 				rmSync(asidePath, { force: true });
+			} else {
+				renameSync(asidePath, lockPath);
 			}
 		} catch {
 			// The displaced entry stays aside rather than risk deleting a live lock.
@@ -152,10 +150,10 @@ async function acquireAttempt(
 	}
 }
 
-function statIdentity(path: string): { dev: bigint; ino: bigint } | undefined {
+function statIdentity(path: string): { dev: bigint; ino: bigint; isDir: boolean } | undefined {
 	try {
 		const measured = statSync(path, { bigint: true });
-		return { dev: measured.dev, ino: measured.ino };
+		return { dev: measured.dev, ino: measured.ino, isDir: measured.isDirectory() };
 	} catch {
 		return undefined;
 	}
