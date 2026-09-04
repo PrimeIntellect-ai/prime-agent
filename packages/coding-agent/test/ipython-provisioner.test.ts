@@ -306,20 +306,17 @@ describe("IpythonKernelProvisioner", () => {
 		expect(provisioner.manager).toBe(manager);
 	});
 
+	function primeKernelMemo(provisioner: IpythonKernelProvisioner, manager: KernelClient) {
+		Object.assign(provisioner as unknown as { managerPromise: Promise<KernelClient>; startedManager: KernelClient }, {
+			managerPromise: Promise.resolve(manager),
+			startedManager: manager,
+		});
+	}
+
 	it("drops a dead kernel memo so ensure() restarts instead of reusing it", async () => {
 		const { python, countRuns } = writeFakePython();
 		const provisioner = new IpythonKernelProvisioner(tempDir, { python });
-		const dead = { isRunning: false, isDefunct: true } as unknown as KernelClient;
-		Object.assign(
-			provisioner as unknown as {
-				managerPromise: Promise<KernelClient>;
-				startedManager: KernelClient;
-			},
-			{
-				managerPromise: Promise.resolve(dead),
-				startedManager: dead,
-			},
-		);
+		primeKernelMemo(provisioner, { isRunning: false, isDefunct: true } as unknown as KernelClient);
 
 		await expect(provisioner.ensure()).rejects.toThrow(/Kernel exited before ready/);
 		expect(countRuns()).toBe(1);
@@ -329,19 +326,9 @@ describe("IpythonKernelProvisioner", () => {
 		const { countRuns } = writeFakePython();
 		const provisioner = new IpythonKernelProvisioner(tempDir, {});
 		const repairing = { isRunning: false, isDefunct: false } as unknown as KernelClient;
-		Object.assign(
-			provisioner as unknown as {
-				managerPromise: Promise<KernelClient>;
-				startedManager: KernelClient;
-			},
-			{
-				managerPromise: Promise.resolve(repairing),
-				startedManager: repairing,
-			},
-		);
+		primeKernelMemo(provisioner, repairing);
 
-		// A protocol repair parks the SAME manager in idle/starting while it
-		// respawns; a second provisioner kernel would split the snapshot dir.
+		// A second provisioner kernel during protocol repair would split the snapshot dir.
 		await expect(provisioner.ensure()).resolves.toBe(repairing);
 		expect(countRuns()).toBe(0);
 	});
