@@ -215,12 +215,68 @@ export interface RlmSubagentRuntime {
 	session: AgentSession;
 }
 
+export const RLM_SANDBOX_UNAVAILABLE_MESSAGE = "Sandbox execution is not available for this session";
+
+export function normalizeRequestedRlmSandbox(value: unknown): boolean {
+	if (value === undefined || value === false) return false;
+	if (value === true) return true;
+	throw new Error("rlm.run sandbox must be a boolean");
+}
+
+export type RlmRunKwargsSnapshot = Readonly<{
+	name: unknown;
+	model: unknown;
+	thinking: unknown;
+	sandbox: unknown;
+	unsupported: readonly string[];
+}>;
+
+export function snapshotRlmRunKwargs(value: unknown): RlmRunKwargsSnapshot {
+	let keys: readonly (string | symbol)[];
+	try {
+		if (typeof value !== "object" || value === null || Object.getPrototypeOf(value) !== Object.prototype) {
+			throw new Error("invalid");
+		}
+		keys = Reflect.ownKeys(value);
+	} catch {
+		throw new Error("rlm.run kwargs are invalid");
+	}
+	if (keys.length > 64) throw new Error("rlm.run kwargs are invalid");
+	let name: unknown;
+	let model: unknown;
+	let thinking: unknown;
+	let sandbox: unknown;
+	const unsupported: string[] = [];
+	for (const key of keys) {
+		if (typeof key !== "string" || key.length === 0 || key.length > 64 || /[\x00-\x1f\x7f]/.test(key)) {
+			throw new Error("rlm.run kwargs are invalid");
+		}
+		let descriptor: PropertyDescriptor | undefined;
+		try {
+			descriptor = Object.getOwnPropertyDescriptor(value, key);
+		} catch {
+			throw new Error("rlm.run kwargs are invalid");
+		}
+		if (descriptor === undefined || !Object.hasOwn(descriptor, "value") || !descriptor.enumerable) {
+			throw new Error("rlm.run kwargs are invalid");
+		}
+		if (key === "name") name = descriptor.value;
+		else if (key === "model") model = descriptor.value;
+		else if (key === "thinking") thinking = descriptor.value;
+		else if (key === "sandbox") sandbox = descriptor.value;
+		else unsupported.push(key);
+	}
+	return Object.freeze({ name, model, thinking, sandbox, unsupported: Object.freeze(unsupported) });
+}
+
 export interface CreateRlmSubagentRuntimeOptions {
 	parentSession: AgentSession;
 	id: string;
 	prompt: string;
 	sessionName: string;
 	sessionDir: string;
+	/** Reserved fail-closed request marker. Local runtimes must reject it. */
+	sandbox?: true;
 	model: Model<any>;
 	thinkingLevel: ThinkingLevel;
 	serviceTier: ServiceTier;

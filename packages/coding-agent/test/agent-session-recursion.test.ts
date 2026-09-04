@@ -2814,6 +2814,56 @@ describe("AgentSession rlm recursion", () => {
 		);
 	});
 
+	it("treats sandbox false exactly like an omitted request", async () => {
+		const root = createSession();
+		const spawned = await root.runRlmChild("local child", { sandbox: false });
+		expect(spawned.rlm_child_id).toBeTruthy();
+		expect(spawned.session_dir).toBeTruthy();
+	});
+
+	it("rejects sandbox true before reserving or publishing a child", async () => {
+		const root = createSession();
+		const beforeEntries = readdirSync(join(tempDir, "sessions")).sort();
+		await expect(root.runRlmChild("sandbox child", { sandbox: true })).rejects.toThrow(
+			"Sandbox execution is not available for this session",
+		);
+		expect((root as unknown as InspectableRlmSession)._activeRlmChildRuns.size).toBe(0);
+		expect((await root.listRlmSubagents()).subagents).toEqual([]);
+		expect(readdirSync(join(tempDir, "sessions")).sort()).toEqual(beforeEntries);
+	});
+
+	it("rejects non-boolean sandbox values with a fixed error", async () => {
+		const root = createSession();
+		await expect(root.runRlmChild("sandbox child", { sandbox: "true" })).rejects.toThrow(
+			"rlm.run sandbox must be a boolean",
+		);
+	});
+
+	it("rejects accessor and throwing Proxy kwargs without invoking values", async () => {
+		const root = createSession();
+		let getterCalled = false;
+		const accessor: Record<string, unknown> = {};
+		Object.defineProperty(accessor, "sandbox", {
+			enumerable: true,
+			get() {
+				getterCalled = true;
+				return true;
+			},
+		});
+		await expect(root.runRlmChild("accessor", accessor)).rejects.toThrow("rlm.run kwargs are invalid");
+		expect(getterCalled).toBe(false);
+
+		const hostile = new Proxy<Record<string, unknown>>(
+			{},
+			{
+				ownKeys() {
+					throw new Error("secret proxy failure");
+				},
+			},
+		);
+		await expect(root.runRlmChild("proxy", hostile)).rejects.toThrow("rlm.run kwargs are invalid");
+	});
+
 	it("rejects a non-string rlm.run thinking kwarg", async () => {
 		const root = createSession();
 

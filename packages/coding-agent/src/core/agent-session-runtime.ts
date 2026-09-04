@@ -10,7 +10,12 @@ import type {
 import { isNoModelsAvailableMessage } from "./auth-guidance.js";
 import type { ReplacedSessionContext, SessionShutdownEvent, SessionStartEvent } from "./extensions/index.js";
 import { emitSessionShutdownEvent } from "./extensions/runner.js";
-import type { CreateRlmSubagentRuntimeOptions, RlmSubagentRuntime, SubagentRuntimeHost } from "./rlm-runtime.js";
+import {
+	type CreateRlmSubagentRuntimeOptions,
+	RLM_SANDBOX_UNAVAILABLE_MESSAGE,
+	type RlmSubagentRuntime,
+	type SubagentRuntimeHost,
+} from "./rlm-runtime.js";
 import type { CreateAgentSessionResult } from "./sdk.js";
 import { assertSessionCwdExists } from "./session-cwd.js";
 import { SessionImportFileNotFoundError } from "./session-import-errors.js";
@@ -314,6 +319,7 @@ export class AgentSessionRuntime implements SubagentRuntimeHost {
 	}
 
 	async createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime> {
+		if (options.sandbox === true) throw new Error(RLM_SANDBOX_UNAVAILABLE_MESSAGE);
 		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
 		if (options.parentSession.sessionFile) {
 			sessionManager.newSession({
