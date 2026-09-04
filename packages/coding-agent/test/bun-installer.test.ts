@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -146,6 +146,9 @@ describe("atomic symlink function", () => {
 		const v1 = `${tmp}/versions/v1`;
 		const v2 = `${tmp}/versions/v2`;
 		const link = `${tmp}/bin/prime-agent`;
+		// Match installer pwd -P canonicalization (macOS /var -> /private/var).
+		const resolvedTmp = realpathSync(tmp);
+		const resolvedV2 = `${resolvedTmp}/versions/v2`;
 		const cmd =
 			'eval "$(sed \'s/^main "$@"$/# &/\' "$1")" 2>/dev/null' +
 			"; mkdir -p " +
@@ -178,7 +181,7 @@ describe("atomic symlink function", () => {
 			'; [ "$(readlink ' +
 			link +
 			')" = "' +
-			v2 +
+			resolvedV2 +
 			"/pi\" ] && printf 'OK'";
 		const result = execFileSync("sh", ["-c", cmd, "--", installer], {
 			encoding: "utf-8",
