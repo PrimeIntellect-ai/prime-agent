@@ -10,6 +10,17 @@ export interface ShellConfig {
 }
 
 /**
+ * Order `where bash.exe` matches so anything under %SystemRoot% (the WSL
+ * launcher at System32\\bash.exe, which runs Linux-side, not a Windows shell)
+ * is only used when no other bash exists.
+ */
+export function orderWindowsBashCandidates(matches: readonly string[], systemRoot: string | undefined): string[] {
+	if (!systemRoot) return [...matches];
+	const underSystemRoot = (match: string) => match.toLowerCase().startsWith(`${systemRoot.toLowerCase()}\\`);
+	return [...matches.filter((match) => !underSystemRoot(match)), ...matches.filter(underSystemRoot)];
+}
+
+/**
  * Find bash executable on PATH (cross-platform)
  */
 function findBashOnPath(): string | null {
@@ -18,9 +29,11 @@ function findBashOnPath(): string | null {
 		try {
 			const result = spawnSync("where", ["bash.exe"], { encoding: "utf-8", timeout: 5000 });
 			if (result.status === 0 && result.stdout) {
-				const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
-				if (firstMatch && existsSync(firstMatch)) {
-					return firstMatch;
+				const matches = result.stdout.trim().split(/\r?\n/).filter(Boolean);
+				for (const match of orderWindowsBashCandidates(matches, process.env.SystemRoot)) {
+					if (existsSync(match)) {
+						return match;
+					}
 				}
 			}
 		} catch {
