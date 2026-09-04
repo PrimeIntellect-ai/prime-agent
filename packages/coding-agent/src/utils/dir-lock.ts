@@ -27,9 +27,7 @@ function sweepAbandonedCandidates(lockPath: string): void {
 				if (statSync(abandoned).mtimeMs < cutoff) {
 					rmSync(abandoned, { force: true });
 				}
-			} catch {
-				// Litter collection only: the next acquire retries.
-			}
+			} catch {}
 		}
 	} catch {
 		// Litter collection only: the next acquire retries.
