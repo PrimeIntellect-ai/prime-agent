@@ -58,8 +58,10 @@ export function migrateAuthToAuthJson(): string[] {
 	}
 
 	let settingsWithoutApiKeys: string | undefined;
+	let settingsMode: number | undefined;
 	if (existsSync(settingsPath)) {
 		try {
+			settingsMode = statSync(settingsPath).mode & 0o777;
 			const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 			if (settings.apiKeys && typeof settings.apiKeys === "object") {
 				for (const [provider, key] of Object.entries(settings.apiKeys)) {
@@ -92,7 +94,11 @@ export function migrateAuthToAuthJson(): string[] {
 	}
 	try {
 		if (settingsWithoutApiKeys !== undefined) {
-			writeFileAtomicSync(settingsPath, settingsWithoutApiKeys, {});
+			writeFileAtomicSync(
+				settingsPath,
+				settingsWithoutApiKeys,
+				settingsMode === undefined ? {} : { mode: settingsMode },
+			);
 		}
 	} catch {
 		// Skip on error

@@ -33,7 +33,8 @@ export async function tryAcquireDirLock(
 			// The owner judgment for a missing or unreadable pid belongs to the caller.
 		}
 		const parsed = judgedPid === undefined ? Number.NaN : Number.parseInt(judgedPid.trim(), 10);
-		if (await ownerAlive(Number.isFinite(parsed) ? parsed : undefined)) {
+		// kill(0)/kill(-n) probe the caller's own process group: only positive pids can own a lock.
+		if (await ownerAlive(Number.isInteger(parsed) && parsed > 0 ? parsed : undefined)) {
 			return "held";
 		}
 		const staleDirectory = `${lockDir}.stale-${process.pid}-${token}`;

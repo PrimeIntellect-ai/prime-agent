@@ -590,12 +590,15 @@ async function parseEntriesFromBufferAsync(buffer: Buffer): Promise<FileEntry[]>
 function repairJsonlDamage(filePath: string): void {
 	const targetPath = realpathIfPresent(filePath);
 	let buffer: Buffer;
+	let snapshot: { size: number; mtimeMs: number };
 	try {
 		buffer = readFileSync(targetPath);
+		const measured = statSync(targetPath);
+		snapshot = { size: measured.size, mtimeMs: measured.mtimeMs };
 	} catch {
 		return;
 	}
-	if (buffer.length === 0) return;
+	if (buffer.length === 0 || snapshot.size !== buffer.length) return;
 	const keptLines: Buffer[] = [];
 	let recoveredNulLines = 0;
 	let droppedLines = 0;
@@ -638,16 +641,29 @@ function repairJsonlDamage(filePath: string): void {
 	if (!dirty) return;
 	const metadata = statMetadataIfPresent(targetPath);
 	const content = keptLines.length > 0 ? `${keptLines.map((kept) => kept.toString("utf8")).join("\n")}\n` : "";
-	writeFileAtomicSync(targetPath, content, {
-		...(metadata === undefined ? {} : { mode: metadata.mode }),
-		beforeRename: (tempPath) => {
-			if (metadata !== undefined) chownSync(tempPath, metadata.uid, metadata.gid);
-		},
-	});
+	try {
+		writeFileAtomicSync(targetPath, content, {
+			...(metadata === undefined ? {} : { mode: metadata.mode }),
+			beforeRename: (tempPath) => {
+				if (metadata !== undefined) chownSync(tempPath, metadata.uid, metadata.gid);
+				// Another writer appending between the snapshot and this rename must win;
+				// skipping the repair is always safe (the next open retries).
+				const current = statSync(targetPath);
+				if (current.size !== snapshot.size || current.mtimeMs !== snapshot.mtimeMs) {
+					throw new RepairSupersededError();
+				}
+			},
+		});
+	} catch (error) {
+		if (error instanceof RepairSupersededError) return;
+		throw error;
+	}
 	console.error(
 		`Repaired crash damage in ${targetPath}: recovered ${recoveredNulLines} zero-filled line(s), dropped ${droppedLines} unrecoverable line(s)${repairedTail ? ", restored the trailing newline" : ""}`,
 	);
 }
+
+class RepairSupersededError extends Error {}
 
 function parsesAsJson(line: Buffer): boolean {
 	try {

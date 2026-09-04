@@ -72,6 +72,18 @@ describe("writeFileAtomicSync", () => {
 });
 
 describe("tryAcquireDirLock", () => {
+	it("treats pid 0 in a lock as stale instead of probing the caller's own process group", async () => {
+		const dir = createTempDir();
+		const lockDir = join(dir, "zero.lock");
+		mkdirSync(lockDir);
+		writeFileSync(join(lockDir, "pid"), "0\n");
+
+		const alive = (ownerPid: number | undefined) =>
+			ownerPid === undefined ? false : process.kill(ownerPid, 0) !== undefined;
+		expect(await tryAcquireDirLock(lockDir, alive)).toBe("reclaimed");
+		expect(await tryAcquireDirLock(lockDir, alive)).toBe("acquired");
+	});
+
 	it("puts back a lock that changed owners between the staleness judgment and the reclaim", async () => {
 		const dir = createTempDir();
 		const lockDir = join(dir, "raced.lock");

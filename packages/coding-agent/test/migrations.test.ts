@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -137,6 +137,20 @@ describe("auth migration ordering", () => {
 		for (const dir of tempDirs.splice(0)) {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+
+	it("preserves the settings file's own mode when stripping apiKeys", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-auth-migration-mode-"));
+		tempDirs.push(agentDir);
+		process.env[ENV_AGENT_DIR] = agentDir;
+		const settingsPath = join(agentDir, "settings.json");
+		writeFileSync(settingsPath, JSON.stringify({ theme: "dark", apiKeys: { openai: "sk-key" } }));
+		chmodSync(settingsPath, 0o600);
+
+		migrateAuthToAuthJson();
+
+		expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+		expect(JSON.parse(readFileSync(settingsPath, "utf-8")).apiKeys).toBeUndefined();
 	});
 
 	it("keeps every credential source when the auth.json write fails", () => {

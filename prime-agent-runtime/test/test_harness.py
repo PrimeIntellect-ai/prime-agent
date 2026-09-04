@@ -168,6 +168,29 @@ class HarnessStateTest(unittest.TestCase):
 
             self.assertEqual(os.stat(state.file_path).st_mode & 0o777, 0o600)
 
+    def test_save_temp_file_is_never_looser_than_the_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("First", "Creates the file.")
+            os.chmod(state.file_path, 0o600)
+
+            observed_modes: list[int] = []
+            original_open = os.open
+
+            def observing_open(path: object, flags: int, mode: int = 0o777, **kwargs: object) -> int:
+                if str(path).endswith(".tmp"):
+                    observed_modes.append(mode)
+                return original_open(path, flags, mode, **kwargs)
+
+            os.open = observing_open  # type: ignore[assignment]
+            try:
+                state.create_memory("Second", "Replaces the file.")
+            finally:
+                os.open = original_open
+
+            self.assertEqual(observed_modes, [0o600])
+            self.assertEqual(os.stat(state.file_path).st_mode & 0o777, 0o600)
+
     def test_load_ignores_unknown_json_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "harness_state.json"

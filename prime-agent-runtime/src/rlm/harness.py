@@ -300,12 +300,14 @@ class HarnessState:
         # Atomic replace: a concurrent reader must never observe a truncated file.
         temp_path = self.file_path.with_name(f"{self.file_path.name}.{os.getpid()}.{uuid4().hex}.tmp")
         try:
-            with temp_path.open("w", encoding="utf-8") as f:
+            mode = stat.S_IMODE(os.stat(self.file_path).st_mode)
+        except FileNotFoundError:
+            mode = 0o600
+        try:
+            # The temp carries its final mode from creation: no umask-open window.
+            descriptor = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-            try:
-                temp_path.chmod(stat.S_IMODE(os.stat(self.file_path).st_mode))
-            except FileNotFoundError:
-                pass
             os.replace(temp_path, self.file_path)
         finally:
             temp_path.unlink(missing_ok=True)
