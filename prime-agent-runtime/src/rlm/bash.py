@@ -43,11 +43,30 @@ _COMPLETION_SUFFIX = b"\x1f"
 # wait for a confirmed group exit before CancelledError propagates.
 _CANCEL_TERM_GRACE = 0.5
 _CANCEL_KILL_WAIT = 2.0
+_COMPLETION_NOTICE_COMMAND_CAP = 1000
 
 _live_handles: set["BashHandle"] = set()
 _live_lock = threading.Lock()
 _hook_installed = False
 _hook_lock = threading.Lock()
+
+
+def _current_cell_finished_event() -> asyncio.Event | None:
+    """Get the creating REPL cell's completion barrier without coupling standalone use to repl."""
+    try:
+        from . import repl
+
+        if repl.is_active():
+            return repl.current_cell_finished_event()
+    except (ImportError, RuntimeError):
+        pass
+    return None
+
+
+def _consume_notice_task(task: asyncio.Task[None]) -> None:
+    """Retrieve detached notifier failures so they never become loop warnings."""
+    if not task.cancelled():
+        task.exception()
 
 
 @dataclass(frozen=True)
@@ -117,6 +136,8 @@ class BashHandle:
 
     def __init__(self, command: str) -> None:
         self.command = command
+        self._creating_cell_finished = _current_cell_finished_event()
+        self._await_started = False
         self._buffer = _BoundedBuffer()
         self._done = threading.Event()
         self._eof = threading.Event()
@@ -235,6 +256,7 @@ class BashHandle:
         threading.Thread(target=self._pump, daemon=True).start()
         threading.Thread(target=self._report, daemon=True).start()
         threading.Thread(target=self._watch, daemon=True).start()
+        self._schedule_background_completion_notice()
 
     @property
     def pid(self) -> int:
@@ -515,6 +537,45 @@ class BashHandle:
                 return
         callback()
 
+    def _schedule_background_completion_notice(self) -> None:
+        cell_finished = self._creating_cell_finished
+        if cell_finished is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self._notify_background_completion(cell_finished))
+        task.add_done_callback(_consume_notice_task)
+
+    async def _notify_background_completion(self, cell_finished: asyncio.Event) -> None:
+        result = await self._wait()
+        # The cell may do other work before awaiting this handle. Do not classify
+        # it as detached until that whole cell has crossed its completion barrier.
+        await cell_finished.wait()
+        if self._await_started:
+            return
+        try:
+            from . import repl
+
+            if not repl.is_active():
+                return
+            command = self.command
+            if len(command) > _COMPLETION_NOTICE_COMMAND_CAP:
+                command = command[:_COMPLETION_NOTICE_COMMAND_CAP] + "\n... [command truncated]"
+            await repl.host_request(
+                {
+                    "type": "bash.completed",
+                    "pid": self._pid,
+                    "command": command,
+                    "exitCode": result.exit_code,
+                }
+            )
+        except (OSError, RuntimeError):
+            # Standalone runtimes have no host handler, and teardown can close
+            # the bridge while a process is finishing. Shell results stay usable.
+            return
+
     async def _wait(self) -> BashResult:
         # Asyncio-native wakeup: no executor thread is parked for the command's
         # duration, so many concurrent awaits cannot exhaust the default pool.
@@ -639,6 +700,7 @@ class BashHandle:
         # A handle awaited before any other API use is a one-shot command tied
         # to the await (kill-on-cancel); touching the handle API first marks it
         # as a deliberate background handle whose awaits only wait.
+        self._await_started = True
         if self._released:
             return self._wait().__await__()
         self._released = True

@@ -22,7 +22,7 @@ import { AgentSession, type RlmChildAgentSnapshot } from "../src/core/agent-sess
 import { AuthStorage } from "../src/core/auth-storage.js";
 import type { LoadExtensionsResult } from "../src/core/extensions/index.js";
 import { type HostRequestHandlers, ReplKernelManager } from "../src/core/kernel/index.js";
-import { convertToLlm } from "../src/core/messages.js";
+import { ASYNC_BASH_COMPLETION_CUSTOM_TYPE, convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import {
 	createDefaultRlmSubagentSessionName,
@@ -818,6 +818,33 @@ describe("AgentSession rlm recursion", () => {
 		// Context tokens from the child's own assistant usage (input 7 + output 3); no tools ran.
 		expect(doneUpdate?.tokenCount).toBe(10);
 		expect(doneUpdate?.toolUseCount).toBeUndefined();
+	});
+
+	it("wakes the agent with a follow-up when a detached bash handle completes", async () => {
+		const prompts: string[] = [];
+		const root = createSession({
+			streamFn: (_model, context) => {
+				prompts.push(userText(context));
+				return streamAnswer("checked shell result");
+			},
+		});
+		const handlers = (root as unknown as InspectableRlmSession)._createKernelHostHandlers();
+		const completed = handlers["bash.completed"];
+		if (!completed) throw new Error("Missing bash.completed host handler");
+
+		await expect(completed({ pid: 42, command: "npm test", exitCode: 1 })).resolves.toEqual({});
+		await root.waitForIdle();
+
+		expect(prompts).toEqual([
+			expect.stringContaining("Inspect the saved BashHandle with .poll(), .output(), or .tail()"),
+		]);
+		expect(root.messages).toContainEqual(
+			expect.objectContaining({
+				role: "custom",
+				customType: ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+				details: { pid: 42, command: "npm test", exitCode: 1 },
+			}),
+		);
 	});
 
 	it("marks an in-cell roled send to the parent as replied", async () => {

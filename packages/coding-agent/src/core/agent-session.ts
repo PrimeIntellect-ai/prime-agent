@@ -165,11 +165,13 @@ import { type RestoreResult, snapshotPathIn } from "./kernel/state-snapshot.js";
 import type { AcpMcpServerConfig } from "./mcp/acp-mcp-types.js";
 import type { McpManager } from "./mcp/mcp-manager.js";
 import {
+	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
 	type BashExecutionMessage,
 	type CompactionOutcome,
 	type CompactionOutcomeReason,
 	type CustomMessage,
 	convertToLlm,
+	createAsyncBashCompletionMessage,
 	createCompactionOutcomeMessage,
 	createHeartbeatPromptMessage,
 	createRefinementOutcomeMessage,
@@ -214,6 +216,7 @@ import { resolveConfigValue } from "./resolve-config-value.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
+	createAsyncBashCompletionHostHandler,
 	createDefaultRlmSubagentSessionName,
 	createRlmDeleteSubagentHostHandler,
 	createRlmFindModelsHostHandler,
@@ -811,6 +814,8 @@ function injectedMessagePreviewLabel(message: CustomMessage): string | undefined
 	switch (message.customType) {
 		case HEARTBEAT_PROMPT_CUSTOM_TYPE:
 			return HEARTBEAT_PROMPT_PREVIEW_LABEL;
+		case ASYNC_BASH_COMPLETION_CUSTOM_TYPE:
+			return "Async shell completed";
 		case GOAL_CONTEXT_CUSTOM_TYPE:
 			return GOAL_CONTEXT_PREVIEW_LABEL;
 		default:
@@ -9346,6 +9351,16 @@ export class AgentSession {
 			"rlm.run": createRlmRunHostHandler(async ({ prompt, kwargs, cellSourceCode }) => ({
 				...(await this.runRlmChild(prompt, kwargs, cellSourceCode)),
 			})),
+			"bash.completed": createAsyncBashCompletionHostHandler(async (details) => {
+				const message = createAsyncBashCompletionMessage(details);
+				await this._promptInjectedMessage(message.content, message, {
+					streamingBehavior: "followUp",
+					queueIfBusy: true,
+					resumeIfIdle: true,
+					returnAfterAccepted: true,
+					suppressAutonomousContinuation: true,
+				});
+			}),
 			"rlm.find_models": createRlmFindModelsHostHandler((query, limit) => this.findRlmModels(query, limit)),
 			"rlm.list_subagents": createRlmListSubagentsHostHandler(() => this.listRlmSubagents()),
 			"rlm.delete_subagent": createRlmDeleteSubagentHostHandler((target) => this.deleteRlmSubagent(target)),
