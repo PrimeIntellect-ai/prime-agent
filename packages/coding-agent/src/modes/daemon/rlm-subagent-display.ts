@@ -1,6 +1,7 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, rmSync, writeSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { writeFileAtomicSync } from "../../utils/atomic-file.js";
 
 /**
  * Per-child RLM subagent hydration/display metadata.
@@ -54,21 +55,7 @@ function isRlmSubagentDisplayEntry(value: unknown): value is RlmSubagentDisplayE
 export function writeRlmSubagentDisplayEntry(entry: RlmSubagentDisplayEntry): void {
 	const path = rlmSubagentDisplayPath(entry.sessionDir);
 	mkdirSync(entry.sessionDir, { recursive: true });
-	const tempPath = `${path}.tmp-${process.pid}-${Date.now()}`;
-	const handle = openSync(tempPath, "wx", 0o600);
-	try {
-		try {
-			writeSync(handle, `${JSON.stringify(entry)}\n`);
-			fsyncSync(handle);
-		} finally {
-			closeSync(handle);
-		}
-		renameSync(tempPath, path);
-	} catch (error) {
-		// A failed write, fsync, or rename must not leak the temp file.
-		rmSync(tempPath, { force: true });
-		throw error;
-	}
+	writeFileAtomicSync(path, `${JSON.stringify(entry)}\n`, { mode: 0o600, fsync: true });
 }
 
 export async function readRlmSubagentDisplayEntry(sessionDir: string): Promise<RlmSubagentDisplayEntry | undefined> {

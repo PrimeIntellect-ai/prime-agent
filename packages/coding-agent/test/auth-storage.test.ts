@@ -6,6 +6,18 @@ import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 
+const renameFault = vi.hoisted(() => ({ error: undefined as Error | undefined }));
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return {
+		...actual,
+		renameSync: (from: Parameters<typeof actual.renameSync>[0], to: Parameters<typeof actual.renameSync>[1]) => {
+			if (renameFault.error && String(to).endsWith("auth.json")) throw renameFault.error;
+			return actual.renameSync(from, to);
+		},
+	};
+});
+
 describe("AuthStorage", () => {
 	let tempDir: string;
 	let authJsonPath: string;
@@ -951,6 +963,24 @@ describe("AuthStorage", () => {
 	});
 
 	describe("persistence semantics", () => {
+		test("a write failing at the replace boundary leaves the previous credentials intact", () => {
+			writeAuthJson({ anthropic: { type: "api_key", key: "old-key" } });
+			authStorage = AuthStorage.create(authJsonPath);
+			renameFault.error = new Error("disk full");
+
+			try {
+				authStorage.set("anthropic", { type: "api_key", key: "new-key" });
+			} finally {
+				renameFault.error = undefined;
+			}
+
+			expect(authStorage.drainErrors().map((error) => String(error))).toEqual([
+				expect.stringContaining("disk full"),
+			]);
+			const onDisk = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<string, { key: string }>;
+			expect(onDisk.anthropic.key).toBe("old-key");
+		});
+
 		test("set preserves unrelated external edits", () => {
 			writeAuthJson({
 				anthropic: { type: "api_key", key: "old-anthropic" },

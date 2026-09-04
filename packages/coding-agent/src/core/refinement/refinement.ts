@@ -1,19 +1,10 @@
-import { randomUUID } from "node:crypto";
-import {
-	appendFileSync,
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	renameSync,
-	statSync,
-	unlinkSync,
-	writeFileSync,
-} from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../../config.js";
+import { writeFileAtomicSync } from "../../utils/atomic-file.js";
 import { serializeConversation } from "../compaction/utils.js";
 import { convertToLlm } from "../messages.js";
 import type { CustomEntry } from "../session-manager.js";
@@ -344,17 +335,9 @@ export function mergeHarnessStates(globalState: HarnessState, localState?: Harne
 
 export function saveHarnessState(harnessStateDir: string, state: HarnessState): string {
 	const statePath = getHarnessStatePath(harnessStateDir);
-	const tempPath = `${statePath}.${process.pid}.${randomUUID()}.tmp`;
 	mkdirSync(harnessStateDir, { recursive: true });
-	try {
-		const mode = existsSync(statePath) ? statSync(statePath).mode & 0o777 : 0o600;
-		writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode });
-		renameSync(tempPath, statePath);
-	} finally {
-		if (existsSync(tempPath)) {
-			unlinkSync(tempPath);
-		}
-	}
+	const mode = existsSync(statePath) ? statSync(statePath).mode & 0o777 : 0o600;
+	writeFileAtomicSync(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode });
 	return statePath;
 }
 

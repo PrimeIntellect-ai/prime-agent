@@ -1,19 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	realpathSync,
-	renameSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { getProcessStartId } from "../../core/session-lease.js";
+import { writeFileAtomicSync } from "../../utils/atomic-file.js";
 import { defaultDaemonSocketDir, normalizeSocketPath } from "./daemon-socket.js";
 
 const DAEMON_SUPERVISOR_REGISTRY_DIR_ENV = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
@@ -933,14 +924,7 @@ function readShutdownAdmission(path: string): DaemonShutdownAdmissionRecord | un
 }
 
 function writeJsonAtomically(path: string, value: unknown): void {
-	const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-	try {
-		writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-		renameSync(tempPath, path);
-	} catch (error) {
-		rmSync(tempPath, { force: true });
-		throw error;
-	}
+	writeFileAtomicSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
 
 function startupFencePath(directory: string, socketPath: string): string {
