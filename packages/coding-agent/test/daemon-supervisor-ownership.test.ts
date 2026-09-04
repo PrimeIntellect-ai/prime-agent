@@ -1,8 +1,10 @@
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { afterEach, describe, expect, it } from "vitest";
+import { getProcessStartId } from "../src/core/session-lease.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import {
 	acquireDaemonShutdownAdmission,
@@ -10,6 +12,7 @@ import {
 	assertDaemonSupervisorOwnerCurrent,
 	persistDaemonStartupFenceFromOwner,
 } from "../src/modes/daemon/daemon-supervisor-ownership.js";
+import { isZombieProcess } from "../src/utils/child-process.js";
 
 type Ownership = Awaited<ReturnType<typeof acquireDaemonSupervisorOwnership>>;
 
@@ -173,6 +176,49 @@ describe("daemon supervisor ownership registry", () => {
 		await expect(reaped.assertCurrent()).rejects.toMatchObject({ code: "supervisor_generation_stale" });
 		expect(existsSync(reapedDir)).toBe(false);
 		await reaped.release();
+	});
+
+	it.skipIf(process.platform === "win32")("treats a zombie owner process as reclaimable", async () => {
+		const paths = createPaths();
+		const zombieParent = spawn(
+			"perl",
+			["-e", '$| = 1; my $pid = fork(); if ($pid) { print "$pid\\n"; sleep 30 } else { exit 0 }'],
+			{ stdio: ["ignore", "pipe", "ignore"] },
+		);
+		try {
+			const zombiePid = await new Promise<number>((resolvePid, rejectPid) => {
+				let output = "";
+				const timer = setTimeout(() => rejectPid(new Error("Timed out waiting for the zombie pid")), 5000);
+				zombieParent.stdout?.on("data", (chunk: Buffer) => {
+					output += chunk.toString();
+					const parsed = Number.parseInt(output.trim(), 10);
+					if (Number.isInteger(parsed) && parsed > 0) {
+						clearTimeout(timer);
+						resolvePid(parsed);
+					}
+				});
+			});
+			const deadline = Date.now() + 5000;
+			while (!isZombieProcess(zombiePid) && Date.now() < deadline) {
+				await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+			}
+			expect(isZombieProcess(zombiePid)).toBe(true);
+
+			const stale = await acquire(paths, "zombie-owner");
+			const ownerPath = join(ownerDir(paths, "zombie-owner"), "owner.json");
+			const record = readJson(ownerPath);
+			record.pid = zombiePid;
+			const zombieStartId = getProcessStartId(zombiePid);
+			if (zombieStartId) record.processStartId = zombieStartId;
+			else delete record.processStartId;
+			writeFileSync(ownerPath, `${JSON.stringify(record, null, 2)}\n`);
+
+			const successor = await acquire(paths, "successor-owner");
+			await successor.release();
+			await stale.release();
+		} finally {
+			zombieParent.kill("SIGKILL");
+		}
 	});
 
 	it("does not resurrect the shutdown admission when release overtakes an in-flight renew", async () => {
