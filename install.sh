@@ -215,13 +215,26 @@ prime_agent_cleanup() {
 		rm -rf "$prime_agent_binary_lock_dir"
 		prime_agent_binary_lock_dir=
 	fi
+	prime_agent_safe_rm_owned_dest
 	prime_agent_restore_terminal
 	return "$status"
 }
 
 prime_agent_signal_cleanup() {
-	prime_agent_restore_terminal
+	prime_agent_cleanup
 	exit "$1"
+}
+
+prime_agent_safe_rm_owned_dest() {
+	_od_path="${_owned_dest:-}"
+	trap '' INT TERM
+	_owned_dest=
+	if [ -n "$_od_path" ] && { [ -e "$_od_path" ] || [ -L "$_od_path" ]; }; then
+		rm -rf "$_od_path" || true
+	fi
+	trap 'prime_agent_cleanup' EXIT
+	trap 'prime_agent_signal_cleanup 130' INT
+	trap 'prime_agent_signal_cleanup 143' TERM
 }
 
 prime_agent_restore_terminal() {
@@ -990,7 +1003,7 @@ prime_agent_binary_canonicalize_install_paths() {
 prime_agent_binary_acquire_lock() {
 	_versions_dir="$1"
 	_lock_root="$_versions_dir/.install-locks"
-	_timeout="${PRIME_AGENT_INSTALL_LOCK_TIMEOUT_SECONDS:-60}"
+	_timeout="${PRIME_AGENT_INSTALL_LOCK_TIMEOUT_SECONDS:-900}"
 	case "$_timeout" in
 		''|*[!0-9]*)
 			printf 'error: PRIME_AGENT_INSTALL_LOCK_TIMEOUT_SECONDS must be a non-negative integer.\n' >&2
@@ -1076,11 +1089,30 @@ prime_agent_binary_acquire_lock() {
 }
 
 prime_agent_binary_write_install_paths() {
-	_version_dir="$1"
-	_state_path="$_version_dir/.install-paths"
-	_state_tmp="${_state_path}.tmp.$$"
-	printf '%s\n%s\n%s\n' "$prime_agent_binary_versions_dir" "$prime_agent_binary_symlink" "$prime_agent_cmd" > "$_state_tmp"
-	mv -f "$_state_tmp" "$_state_path" || return 1
+	_wip_dest_dir="$1"
+	_wip_state_path="$_wip_dest_dir/.install-paths"
+	if { [ -e "$_wip_state_path" ] || [ -L "$_wip_state_path" ]; } &&
+		{ [ ! -f "$_wip_state_path" ] || [ -L "$_wip_state_path" ]; }; then
+		printf 'error: install metadata path is not a regular file: %s\n' "$_wip_state_path" >&2
+		return 1
+	fi
+	_wip_claim="$(prime_agent_claim_path "${_wip_dest_dir}/.install-paths.tmpdir" "$$")" || return 1
+	_wip_tmp="$_wip_claim/install-paths"
+	printf '%s\n%s\n%s\n' "$prime_agent_binary_versions_dir" "$prime_agent_binary_symlink" "$prime_agent_cmd" > "$_wip_tmp" || {
+		rm -rf "$_wip_claim"
+		return 1
+	}
+	if { [ -e "$_wip_state_path" ] || [ -L "$_wip_state_path" ]; } &&
+		{ [ ! -f "$_wip_state_path" ] || [ -L "$_wip_state_path" ]; }; then
+		rm -rf "$_wip_claim"
+		printf 'error: install metadata path is not a regular file: %s\n' "$_wip_state_path" >&2
+		return 1
+	fi
+	mv -f "$_wip_tmp" "$_wip_state_path" || {
+		rm -rf "$_wip_claim"
+		return 1
+	}
+	rm -rf "$_wip_claim"
 }
 
 prime_agent_binary_atomic_symlink() {
@@ -1194,7 +1226,16 @@ prime_agent_binary_publish_staging() {
 		if [ ! -x "$_e_bin" ] && [ -x "$_final_version_dir/pi" ]; then _e_bin="$_final_version_dir/pi"; fi
 		if [ ! -x "$_e_bin" ] && [ -x "$_final_version_dir/prime-agent" ]; then _e_bin="$_final_version_dir/prime-agent"; fi
 		if [ -x "$_e_bin" ] && prime_agent_binary_validate_layout "$_final_version_dir" "$_e_bin"; then
-			# Healthy existing -- reuse in-place.
+			# Refresh the paths used by the resident self-update sidecar before reuse.
+			_staging_dir="$_version_dir"
+			prime_agent_binary_write_install_paths "$_final_version_dir" || {
+				rm -rf "$_staging_dir" "$_download_dir"
+				prime_agent_binary_staging_dir=
+				prime_agent_download_dir=
+				printf 'error: failed to update install metadata for reuse.\n' >&2
+				exit 1
+			}
+			_version_dir="$_staging_dir"
 			rm -rf "$_version_dir"
 			prime_agent_binary_staging_dir=
 			_version_dir="$_final_version_dir"
@@ -1273,6 +1314,14 @@ prime_agent_binary_fresh_install() {
 	fi
 	# Only reuse a real directory, not a symlink (which we never follow).
 	if [ -d "$_version_dir" ] && [ ! -L "$_version_dir" ] && 		[ -x "$_existing_binary" ] && prime_agent_binary_validate_layout "$_version_dir" "$_existing_binary"; then
+		# Atomically refresh .install-paths so that a sidecar published from this
+		# directory reflects the current canonical paths (versions dir, symlink,
+		# command name). Stale .install-paths would cause subsequent self-updates
+		# to route through wrong directories. Fail closed before symlink activation.
+		prime_agent_binary_write_install_paths "$_version_dir" || {
+			printf 'error: failed to update install metadata for reuse.\n' >&2
+			exit 1
+		}
 		# Do not modify the pre-existing immutable version directory.
 		# Try to activate. Track whether we placed the symlink so rollback failure
 		# never deletes a pre-existing public symlink.
@@ -1415,15 +1464,18 @@ prime_agent_binary_fresh_install() {
 			rm -f "$prime_agent_binary_symlink"
 		fi
 		# Clean only the destination this invocation created.
-		if [ -n "$_owned_dest" ]; then
-			rm -rf "$_owned_dest"
-		fi
+		# prime_agent_safe_rm_owned_dest masks INT/TERM while deleting to
+		# prevent a double-cleanup race with the EXIT trap.
+		prime_agent_safe_rm_owned_dest
 		rm -rf "$_download_dir"
 		prime_agent_download_dir=
 		printf 'error: the installed Prime Agent command did not run correctly.\n' >&2
 		exit 1
 	fi
 
+	# Clear trap ownership immediately after success, before any cleanup/UI,
+	# so a signal cannot delete the active install.
+	_owned_dest=
 	rm -rf "$_download_dir"
 	prime_agent_download_dir=
 
@@ -1587,14 +1639,17 @@ prime_agent_binary_update() {
 			printf 'error: activation failed and no healthy rollback version was available.\n' >&2
 		fi
 		# Clean only the destination this invocation created.
-		if [ -n "$_owned_dest" ]; then
-			rm -rf "$_owned_dest"
-		fi
+		# prime_agent_safe_rm_owned_dest masks INT/TERM while deleting to
+		# prevent a double-cleanup race with the EXIT trap.
+		prime_agent_safe_rm_owned_dest
 		rm -rf "$_download_dir"
 		prime_agent_download_dir=
 		exit 1
 	fi
 
+	# Clear trap ownership immediately after success, before any cleanup/UI,
+	# so a signal cannot delete the active install.
+	_owned_dest=
 	rm -rf "$_download_dir"
 	prime_agent_download_dir=
 

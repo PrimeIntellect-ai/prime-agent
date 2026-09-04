@@ -1013,14 +1013,14 @@ describe("compiled binary installer", () => {
 			const toolsDir = join(root, "tools");
 			mkdirSync(toolsDir);
 			const wipSentinel = join(toolsDir, "wip_sentinel");
-			// mv wrapper that fails only for .install-paths.tmp mv
+			// mv wrapper that fails only for .install-paths mv
 			const script =
 				"#!/bin/sh\n" +
 				'SENT="' +
 				wipSentinel.replace(/'/g, "'''") +
 				'"\n' +
-				'case "$2" in\n' +
-				'  *.install-paths.tmp.*) mkdir -p "$SENT"; exit 1 ;;\n' +
+				'case "$3" in\n' +
+				'  *.install-paths) mkdir -p "$SENT"; exit 1 ;;\n' +
 				'  *) exec /bin/mv "$@" ;;\n' +
 				"esac\n";
 			writeFileSync(join(toolsDir, "mv"), script);
@@ -1262,6 +1262,174 @@ describe("compiled binary installer", () => {
 			const installedLink = readlinkSync(join(root, "bin", "prime-agent"));
 			expect(installedLink).toContain("v1.2.3");
 			expect(readFileSync(join(dirname(installedLink), "README.md"), "utf8")).not.toBe("readme");
+		});
+	});
+
+	describe("installer interruption and metadata refresh", () => {
+		test("removes a claimed destination when publication is interrupted", () => {
+			const root = mkdtempSync(join(tmpdir(), "prime-agent-interrupt-copy-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			const tools = join(root, "tools");
+			const marker = join(root, "copy-interrupted");
+			mkdirSync(tools);
+			writeFileSync(
+				join(tools, "cp"),
+				[
+					"#!/bin/sh",
+					"for _last do :; done",
+					'case "$_last" in',
+					"  */apps/versions/v1.2.3|*/apps/versions/v1.2.3/)",
+					'    mkdir "$INTERRUPT_MARKER"',
+					'    printf partial > "$_last/partial"',
+					'    kill -TERM "$PPID"',
+					"    exit 1",
+					"    ;;",
+					'  *) exec /bin/cp "$@" ;;',
+					"esac",
+				].join("\n"),
+			);
+			chmodSync(join(tools, "cp"), 0o755);
+
+			const result = runInstaller(root, ["1.2.3"], {
+				INTERRUPT_MARKER: marker,
+				PATH: `${tools}:/usr/bin:/bin`,
+			});
+			expect(result.exitCode).not.toBe(0);
+			expect(existsSync(marker)).toBe(true);
+			const entries = readdirSync(join(root, "apps", "versions")).filter((entry) => entry !== ".install-locks");
+			expect(entries).toEqual([]);
+		});
+
+		test("keeps the activated version when download cleanup is interrupted", () => {
+			const root = mkdtempSync(join(tmpdir(), "prime-agent-interrupt-cleanup-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			const tools = join(root, "tools");
+			const marker = join(root, "cleanup-interrupted");
+			mkdirSync(tools);
+			writeFileSync(
+				join(tools, "rm"),
+				[
+					"#!/bin/sh",
+					"for _arg do",
+					'  case "$_arg" in',
+					"    */prime-agent-install.*)",
+					'      if mkdir "$INTERRUPT_MARKER" 2>/dev/null; then',
+					'        /bin/rm "$@"',
+					'        kill -TERM "$PPID"',
+					"        exit 0",
+					"      fi",
+					"      ;;",
+					"  esac",
+					"done",
+					'exec /bin/rm "$@"',
+				].join("\n"),
+			);
+			chmodSync(join(tools, "rm"), 0o755);
+
+			const result = runInstaller(root, ["1.2.3"], {
+				INTERRUPT_MARKER: marker,
+				PATH: `${tools}:/usr/bin:/bin`,
+			});
+			expect(result.exitCode).not.toBe(0);
+			expect(existsSync(marker)).toBe(true);
+			const command = join(root, "bin", "prime-agent");
+			const target = readlinkSync(command);
+			expect(existsSync(target)).toBe(true);
+			expect(spawnSync(command, ["--version"], { encoding: "utf8" }).status).toBe(0);
+		});
+
+		test("refreshes install metadata when a healthy version is reused", () => {
+			const root = mkdtempSync(join(tmpdir(), "prime-agent-refresh-paths-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+			const customBin = join(root, "custom-bin");
+
+			const result = runInstaller(root, ["1.2.3"], { PRIME_AGENT_BIN_DIR: customBin });
+			expect(result.exitCode, result.stderr).toBe(0);
+			const versionDir = join(realpathSync(root), "apps", "versions", "v1.2.3");
+			const paths = readFileSync(join(versionDir, ".install-paths"), "utf8").trim().split("\n");
+			expect(paths).toEqual([
+				join(realpathSync(root), "apps", "versions"),
+				join(realpathSync(customBin), "prime-agent"),
+				"prime-agent",
+			]);
+			expect(readlinkSync(join(customBin, "prime-agent"))).toBe(join(versionDir, "prime-agent"));
+		});
+
+		test.each(["directory", "symlink"] as const)("rejects an unsafe %s at the install metadata path", (kind) => {
+			const root = mkdtempSync(join(tmpdir(), "prime-agent-unsafe-metadata-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+			const versionDir = join(realpathSync(root), "apps", "versions", "v1.2.3");
+			const statePath = join(versionDir, ".install-paths");
+			const outside = join(root, "outside-metadata");
+			rmSync(statePath);
+			if (kind === "directory") {
+				mkdirSync(statePath);
+				writeFileSync(join(statePath, "sentinel"), "directory");
+			} else {
+				writeFileSync(outside, "outside");
+				symlinkSync(outside, statePath);
+			}
+			const customBin = join(root, "custom-bin");
+
+			const result = runInstaller(root, ["1.2.3"], { PRIME_AGENT_BIN_DIR: customBin });
+			expect(result.exitCode).not.toBe(0);
+			expect(result.stderr).toContain("install metadata path is not a regular file");
+			expect(existsSync(join(customBin, "prime-agent"))).toBe(false);
+			if (kind === "directory") {
+				expect(readFileSync(join(statePath, "sentinel"), "utf8")).toBe("directory");
+			} else {
+				expect(readlinkSync(statePath)).toBe(outside);
+				expect(readFileSync(outside, "utf8")).toBe("outside");
+			}
+		});
+
+		test("does not follow a colliding install metadata temp symlink", () => {
+			const root = mkdtempSync(join(tmpdir(), "prime-agent-metadata-collision-"));
+			temporaryRoots.push(root);
+			makeRelease(root, "1.2.3", goodExecutable("1.2.3"));
+			expect(runInstaller(root, ["1.2.3"]).exitCode).toBe(0);
+			const versionDir = join(realpathSync(root), "apps", "versions", "v1.2.3");
+			const outside = join(root, "outside");
+			const wrapper = join(root, "collision.sh");
+			const customBin = join(root, "custom-bin");
+			mkdirSync(outside);
+			writeFileSync(join(outside, "sentinel"), "outside");
+			writeFileSync(
+				wrapper,
+				["#!/bin/sh", "set -eu", 'ln -s "$3" "$1/.install-paths.tmpdir.$$"', 'exec sh "$2" 1.2.3'].join("\n"),
+			);
+			chmodSync(wrapper, 0o755);
+
+			const result = spawnSync("sh", [wrapper, versionDir, installer, outside], {
+				cwd: root,
+				env: installerEnv(root, { PRIME_AGENT_BIN_DIR: customBin }),
+				encoding: "utf8",
+			});
+			expect(result.status, result.stderr).toBe(0);
+			expect(typeof result.pid).toBe("number");
+			const collision = join(versionDir, `.install-paths.tmpdir.${result.pid}`);
+			expect(readlinkSync(collision)).toBe(outside);
+			expect(readFileSync(join(outside, "sentinel"), "utf8")).toBe("outside");
+			expect(readlinkSync(join(customBin, "prime-agent"))).toBe(join(versionDir, "prime-agent"));
+		});
+
+		test("honors an immediate install lock timeout override", () => {
+			const root = mkdtempSync(join(tmpdir(), "prime-agent-lock-timeout-"));
+			temporaryRoots.push(root);
+			const lockRoot = join(root, "apps", "versions", ".install-locks");
+			mkdirSync(join(lockRoot, `1-${process.pid}`), { recursive: true });
+
+			const result = runInstaller(root, ["1.2.3"], {
+				PRIME_AGENT_INSTALL_LOCK_TIMEOUT_SECONDS: "0",
+			});
+			expect(result.exitCode).not.toBe(0);
+			expect(result.stderr).toContain("timed out waiting for another Prime Agent install or update");
 		});
 	});
 });
