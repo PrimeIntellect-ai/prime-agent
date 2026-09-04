@@ -425,18 +425,9 @@ describe("createAgentSessionFromServices", () => {
 			],
 		});
 		unregisters.push(() => faux.unregister());
-		const capable = faux.models[0];
-		const fixedEffort = faux.models[1];
+		const [capable, fixedEffort] = faux.models;
 		// A reasoning model whose transport cannot send effort: every level nulled.
-		fixedEffort.thinkingLevelMap = {
-			off: null,
-			minimal: null,
-			low: null,
-			medium: null,
-			high: null,
-			xhigh: null,
-			max: null,
-		};
+		fixedEffort.thinkingLevelMap = { off: null, minimal: null, low: null, medium: null, high: null, xhigh: null, max: null };
 
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(capable.provider, "faux-key");

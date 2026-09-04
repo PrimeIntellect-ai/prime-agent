@@ -17,15 +17,10 @@ export interface CatalogRowLike {
 
 export type CatalogLike = Readonly<Record<string, Readonly<Record<string, CatalogRowLike>>>>;
 
-/**
- * Explicit API classification for GitHub Copilot models. Copilot serves each
- * model family through exactly one endpoint; a new family must be classified
- * here before it can ship (unclassified ids fail catalog validation).
- */
+/** Copilot serves each model family through exactly one endpoint; unclassified ids fail validation. */
 export function copilotModelApi(modelId: string): Api | undefined {
 	if (modelId.startsWith("claude-")) return "anthropic-messages";
-	// Served only through the Copilot /responses endpoint; /chat/completions
-	// rejects these families (upstream pi-mono PR #906).
+	// Responses-only on Copilot; /chat/completions rejects these families (upstream pi-mono #906).
 	if (
 		modelId.startsWith("gpt-5") ||
 		modelId.startsWith("oswe") ||
@@ -43,28 +38,17 @@ function familyKey(modelId: string): string {
 	return segments[segments.length - 1].toLowerCase();
 }
 
-/**
- * Thinking levels a user can actually select at runtime, from the same
- * function the UI uses. The consistency invariant compares these within one
- * transport (api) and only among rows that declare a thinkingLevelMap:
- * cross-transport level differences are deliberate (native-only "minimal",
- * pro-tier restrictions), and rows without a map fall back to provider
- * defaults, which blind upstream sources emit for dozens of families. The
- * "off" level is also excluded: whether thinking can be disabled legitimately
- * varies per provider transport (e.g. reasoning effort "none" exists only on
- * the native OpenAI Responses API).
- */
+// Runtime-selectable levels via the UI's own function. Compared within one transport (api), only
+// among rows that declare a map, and modulo "off": cross-transport sets, absent-map provider
+// defaults, and off-support all vary legitimately per transport.
 function selectableLevels(model: CatalogRowLike): string {
 	return getSupportedThinkingLevels(model as Model<Api>)
 		.filter((level) => level !== "off")
 		.join(",");
 }
 
-/**
- * On plain openai-format chat completions, reasoning parameters are only sent
- * when the resolved compat supports reasoning effort; the zai/qwen/deepseek/
- * openrouter formats use the map as an enable toggle instead.
- */
+// Plain openai-format completions send reasoning params only when compat allows; the
+// zai/qwen/deepseek/openrouter formats use the map as an enable toggle instead.
 function effortIsSendable(model: CatalogRowLike): boolean {
 	const compat = getCompat(model as Model<"openai-completions">);
 	return compat.thinkingFormat !== "openai" || compat.supportsReasoningEffort;

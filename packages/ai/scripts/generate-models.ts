@@ -1371,8 +1371,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				if (m.tool_call !== true) continue;
 				if (m.status === "deprecated") continue;
 
-				// Unclassified families still ship a row so catalog validation
-				// can report them by name instead of silently misrouting.
+				// Unclassified families still ship a row so validation reports them by name instead of silently misrouting.
 				const api: Api = copilotModelApi(modelId) ?? "openai-completions";
 
 				const anthropicCompat =
@@ -1562,8 +1561,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
-		// models.dev rows occasionally carry an output limit above the context
-		// window (copy-paste errors upstream); clamp to keep the pair coherent.
+		// models.dev rows occasionally carry an output limit above the context window; clamp to keep the pair coherent.
 		for (const model of models) {
 			if (model.maxTokens > model.contextWindow) {
 				console.log(`Clamping ${model.provider}/${model.id} maxTokens ${model.maxTokens} -> ${model.contextWindow}`);
@@ -2117,9 +2115,7 @@ async function generateModels() {
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 	];
-	// The 272k limit was measured on the 2026-01 generation; models the API
-	// side serves at 1M+ (the 5.6 family) accept the larger window on the
-	// ChatGPT backend too, so derive their context from the openai row.
+	// 272k was measured on the 2026-01 generation; models the API side serves at 1M+ accept it on the ChatGPT backend too.
 	for (const codexModel of codexModels) {
 		const openaiTwin = allModels.find((m) => m.provider === "openai" && m.id === codexModel.id);
 		if (openaiTwin && openaiTwin.contextWindow >= 1_000_000) {
@@ -2371,10 +2367,7 @@ async function generateModels() {
 		applyThinkingLevelMetadata(model);
 	}
 
-	// Family-level maps can land on rows whose transport never sends reasoning
-	// effort (plain openai-format completions with supportsReasoningEffort
-	// false); null their selectable entries so the UI does not offer levels the
-	// request silently drops.
+	// Family maps can land on transports that never send reasoning effort; null them so the UI offers nothing the request drops.
 	for (const model of allModels) {
 		if (model.api !== "openai-completions" || !model.reasoning || !model.thinkingLevelMap) continue;
 		const compat = getCompat(model as Model<"openai-completions">);

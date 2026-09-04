@@ -7266,8 +7266,7 @@ export class AgentSession {
 
 		if (isChanging) {
 			this.sessionManager.appendThinkingLevelChange(effectiveLevel);
-			// A model with no selectable levels forces a clamp; that is not a user
-			// preference, so it must not overwrite the persisted default.
+			// A forced clamp on a model with no selectable levels is not a user preference; keep the persisted default.
 			if ((this.supportsThinking() && availableLevels.length > 0) || effectiveLevel !== "off") {
 				this.settingsManager.setDefaultThinkingLevel(effectiveLevel);
 			}
