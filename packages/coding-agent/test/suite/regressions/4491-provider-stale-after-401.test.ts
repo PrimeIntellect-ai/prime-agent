@@ -345,6 +345,36 @@ describe("issue #4491 provider stale after repeated 401", () => {
 		expect(registry.getProviderAuthStatus("prime-inference")).toMatchObject({ source: "stale" });
 	});
 
+	it("recovers a cached team-authorized private model from a stale-auth lockout", async () => {
+		const harness = await createHarness({
+			provider: "prime-inference",
+			models: [{ id: "regular-model" }, { id: "internal/private-model" }],
+			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
+		});
+		harnesses.push(harness);
+		const registry = harness.session.modelRegistry;
+		const internals = registry as unknown as { authorizedPrivatePrimeInferenceModelIds: Set<string> };
+		internals.authorizedPrivatePrimeInferenceModelIds.add("internal/private-model");
+
+		expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
+		expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
+		expect(registry.getProviderAuthStatus("prime-inference")).toMatchObject({
+			configured: false,
+			source: "stale",
+		});
+
+		// Refreshes during the stale window run keyless; they must preserve the
+		// cached entitlements the explicit re-selection validates against.
+		await registry.refreshAvailableModels();
+
+		const privateModel = harness.models.find((model) => model.id === "internal/private-model");
+		expect(privateModel).toBeDefined();
+		await harness.session.setModel(privateModel!);
+
+		expect(registry.getProviderAuthStatus("prime-inference").source).not.toBe("stale");
+		expect(harness.session.model?.id).toBe("internal/private-model");
+	});
+
 	it("resolves retry state for auth failures surfaced only on agent_end", async () => {
 		const harness = await createHarness({
 			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },

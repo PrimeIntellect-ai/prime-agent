@@ -785,6 +785,14 @@ export class ModelRegistry {
 		const teamHeaders = this.authStorage.getProviderHeaders(PRIME_INFERENCE_PROVIDER_ID);
 		const teamId = teamHeaders?.["X-Prime-Team-ID"];
 		if (!apiKey || !teamHeaders || !teamId) {
+			// Stale-marked credentials are not a logout: keep the previously
+			// fetched entitlements so an explicit re-selection can validate
+			// against them (the auth filter still hides the models while stale).
+			if (this.authStorage.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID).source === "stale") {
+				this.authorizedPrivatePrimeInferenceModelIds = previousPrivateModelIds;
+				this.authorizedPrivatePrimeInferenceTeamId = previousTeamId;
+				return;
+			}
 			this.authorizedPrivatePrimeInferenceModelIds.clear();
 			this.authorizedPrivatePrimeInferenceTeamId = undefined;
 			return;
@@ -950,7 +958,13 @@ export class ModelRegistry {
 	 * BEFORE the lockout is cleared, so nothing mutates on a failed selection).
 	 */
 	async canUseModel(model: Model<Api>, options?: { assumeAuthConfigured?: boolean }): Promise<boolean> {
-		if (!options?.assumeAuthConfigured && !this.hasConfiguredAuth(model)) {
+		if (options?.assumeAuthConfigured) {
+			// Validation under a hypothetical stale-auth clear must be
+			// side-effect-free: a refresh here would run keyless and drop the
+			// cached entitlements it needs, so answer from current state.
+			return !isPrivatePrimeInferenceModel(model) || this.isAuthorizedPrivatePrimeInferenceModel(model);
+		}
+		if (!this.hasConfiguredAuth(model)) {
 			return false;
 		}
 		if (!isPrivatePrimeInferenceModel(model)) {
@@ -958,12 +972,7 @@ export class ModelRegistry {
 		}
 
 		const availableModels = await this.refreshAvailableModels();
-		if (availableModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id)) {
-			return true;
-		}
-		// Stale auth excludes the provider from the available list; answer the
-		// private-authorization question the refresh just updated directly.
-		return options?.assumeAuthConfigured === true && this.isAuthorizedPrivatePrimeInferenceModel(model);
+		return availableModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id);
 	}
 
 	private isAuthorizedPrivatePrimeInferenceModel(model: Model<Api>): boolean {
