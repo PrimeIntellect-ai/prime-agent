@@ -31,7 +31,9 @@
 		"release:patch": "node scripts/release.mjs patch",
 		"release:minor": "node scripts/release.mjs minor",
 		"release:major": "node scripts/release.mjs major",
-		"prepare": "husky"
+		"prepare": "husky",
+		"release:verify": "node scripts/verify-prime-agent-release.mjs",
+		"test:release-contract": "node --test scripts/test/release-contract.test.mjs"
 	},
 	"devDependencies": {
 		"@anthropic-ai/sandbox-runtime": "^0.0.55",
