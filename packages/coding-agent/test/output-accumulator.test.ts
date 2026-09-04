@@ -25,10 +25,10 @@ describe("OutputAccumulator temp spill", () => {
 		process.env.TMPDIR = join(scratch, "does-not-exist");
 		const accumulator = new OutputAccumulator({ maxBytes: 8, maxLines: 100 });
 		accumulator.append(Buffer.from("0123456789abcdef\n"));
-		// Let the failed open surface its (handled) error before reading results.
-		await new Promise((resolve) => setTimeout(resolve, 25));
 		accumulator.append(Buffer.from("tail\n"));
 		accumulator.finish();
+		// Settles once the failed open's error has landed; no wall-clock sleep.
+		await accumulator.closeTempFile();
 
 		const snapshot = accumulator.snapshot();
 		expect(snapshot.fullOutputPath).toBeUndefined();
@@ -45,7 +45,7 @@ describe("OutputAccumulator temp spill", () => {
 		await expect(accumulator.closeTempFile()).resolves.toBeUndefined();
 		const snapshot = accumulator.snapshot();
 		expect(snapshot.fullOutputPath).toBeUndefined();
-		expect(snapshot.content).toContain("89abcdef");
+		expect(snapshot.content).toContain("9abcdef");
 	});
 
 	it("advertises the bash spill path only once the file is complete", async () => {
@@ -65,5 +65,6 @@ describe("OutputAccumulator temp spill", () => {
 		expect(result.truncated).toBe(true);
 		expect(result.fullOutputPath).toBeDefined();
 		expect(statSync(result.fullOutputPath as string).size).toBe(chunk.length * chunks);
+		rmSync(result.fullOutputPath as string, { force: true });
 	});
 });

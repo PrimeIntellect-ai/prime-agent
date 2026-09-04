@@ -186,12 +186,14 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 		if (outputBytesCount + lineBytes > maxBytes) {
 			truncatedBy = "bytes";
 			// An oversized line rescues into a partial tail; trailing blank lines
-			// (a newline-terminated buffer) must not defeat the rescue.
+			// (a newline-terminated buffer) must not defeat the rescue. They stay
+			// in the output (their join newlines charged to the budget) so line
+			// metadata keeps describing the real file.
 			if (outputLinesArr.every((collected) => collected.length === 0)) {
-				const truncatedLine = truncateStringToBytesFromEnd(line, maxBytes);
-				outputLinesArr.length = 0;
+				const reserved = outputLinesArr.length;
+				const truncatedLine = truncateStringToBytesFromEnd(line, Math.max(1, maxBytes - reserved));
 				outputLinesArr.unshift(truncatedLine);
-				outputBytesCount = Buffer.byteLength(truncatedLine, "utf-8");
+				outputBytesCount = Buffer.byteLength(truncatedLine, "utf-8") + reserved;
 				lastLinePartial = true;
 			}
 			break;

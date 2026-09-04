@@ -92,11 +92,18 @@ describe("AgentSession retry and event characterization", () => {
 			new AgentContinueError("nothing-to-continue", "Nothing to continue"),
 		);
 
+		const markStale = vi.spyOn(
+			harness.session as unknown as { _markProviderAuthStaleForRetryFailure: () => void },
+			"_markProviderAuthStaleForRetryFailure",
+		);
+
 		// Pre-fix this hangs: the swallowed rejection leaves the retry unresolved forever.
 		await harness.session.prompt("test");
 
 		expect(harness.session.isRetrying).toBe(false);
 		expect(retryEvents).toEqual(["start:1", "end:false:Nothing to continue"]);
+		// Terminal like every other retry end: a captured auth failure goes stale.
+		expect(markStale).toHaveBeenCalled();
 	});
 
 	it("retries multiple transient failures and succeeds on the final attempt", async () => {

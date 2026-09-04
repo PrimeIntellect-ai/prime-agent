@@ -11206,6 +11206,7 @@ export class AgentSession {
 				// A continue that never starts would otherwise leave the retry
 				// unresolved forever (isRetrying stuck, waiters parked).
 				if (!this.isRetrying) return;
+				this._markProviderAuthStaleForRetryFailure(message, options);
 				const attempt = this._retryAttempt;
 				this._retryAttempt = 0;
 				this._retryAuthFailureSources = [];

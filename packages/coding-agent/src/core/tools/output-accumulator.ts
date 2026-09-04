@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { createWriteStream, type WriteStream } from "node:fs";
+import { createWriteStream, rmSync, type WriteStream } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult, truncateTail } from "./truncate.js";
@@ -53,10 +53,16 @@ export class OutputSpill {
 		// An unlistened 'error' (ENOSPC, unwritable tmpdir) would crash the process.
 		stream.on("error", () => {
 			this.failed = true;
+			const partial = this.path;
 			this.path = undefined;
 			if (this.stream === stream) {
 				this.stream = undefined;
 			}
+			// The forgotten partial file would squat on the very disk pressure
+			// that degraded the spill; cleanup failure is never a tool failure.
+			stream.once("close", () => {
+				if (partial) rmSync(partial, { force: true });
+			});
 		});
 		this.stream = stream;
 		for (const chunk of replay) {

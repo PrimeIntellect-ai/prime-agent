@@ -362,8 +362,10 @@ export function createBashToolDefinition(
 					// A degraded spill has no path; never advertise "Full output: undefined".
 					const location = snapshot.fullOutputPath ? `. Full output: ${snapshot.fullOutputPath}` : "";
 					if (truncation.lastLinePartial) {
-						const lastLineSize = formatSize(output.getLastLineBytes());
-						text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize})${location}]`;
+						// The partial line is the first SHOWN line; trailing blanks can follow it.
+						const lastLineBytes = output.getLastLineBytes();
+						const lineSize = lastLineBytes > 0 ? ` (line is ${formatSize(lastLineBytes)})` : "";
+						text += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${startLine}${lineSize}${location}]`;
 					} else if (truncation.truncatedBy === "lines") {
 						text += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}${location}]`;
 					} else {
