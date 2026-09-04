@@ -62,6 +62,14 @@ const MAX_KERNEL_STDERR_CHARS = 8 * 1024;
 const MAX_KERNEL_STDERR_LOG_BYTES = 5 * 1024 * 1024;
 const KERNEL_STDERR_LOG_BUDGET_MARKER = "[stderr log budget exhausted]\n";
 
+/** fs.writeSync may write fewer bytes than asked (partial ENOSPC, signals); loop until done. */
+function writeFullySync(fd: number, data: Buffer): void {
+	let offset = 0;
+	while (offset < data.length) {
+		offset += writeSync(fd, data, offset);
+	}
+}
+
 /** ExecuteResult plus the raw fields of the request's `done` event (state ops). */
 interface InternalExecuteResult extends ExecuteResult {
 	doneFields?: Record<string, unknown>;
@@ -386,10 +394,10 @@ export class ReplKernelManager {
 			if (!stderrLogWritable || stderrLogFd === undefined) return;
 			try {
 				if (buf.length <= stderrLogBudget) {
-					writeSync(stderrLogFd, buf);
+					writeFullySync(stderrLogFd, buf);
 					stderrLogBudget -= buf.length;
 				} else {
-					writeSync(stderrLogFd, KERNEL_STDERR_LOG_BUDGET_MARKER);
+					writeFullySync(stderrLogFd, Buffer.from(KERNEL_STDERR_LOG_BUDGET_MARKER));
 					stderrLogWritable = false;
 				}
 			} catch (error) {

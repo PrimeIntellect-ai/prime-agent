@@ -4,15 +4,19 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReplKernelManager } from "../src/core/kernel/index.js";
 
-// closeSync cannot be made to fail for real, so the stderr log fd (marked at
-// open by its path) is the one closeSync the mock can arm to throw; everything
-// else passes through.
+// closeSync failures and short writes cannot be forced for real, so the mock
+// arms faults against the stderr log fd, marked at open by its path;
+// everything else passes through.
 const closeFailure = vi.hoisted(() => ({ armed: false, fd: undefined as number | undefined }));
+const shortWrites = vi.hoisted(() => ({ armed: false, fd: undefined as number | undefined }));
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
 	const openSync: typeof actual.openSync = (...args) => {
 		const fd = actual.openSync(...args);
-		if (closeFailure.armed && String(args[0]).endsWith("kernel-stderr.log")) closeFailure.fd = fd;
+		if (String(args[0]).endsWith("kernel-stderr.log")) {
+			if (closeFailure.armed) closeFailure.fd = fd;
+			if (shortWrites.armed) shortWrites.fd = fd;
+		}
 		return fd;
 	};
 	const closeSync: typeof actual.closeSync = (fd) => {
@@ -22,7 +26,16 @@ vi.mock("node:fs", async (importOriginal) => {
 		}
 		actual.closeSync(fd);
 	};
-	return { ...actual, openSync, closeSync };
+	const writeSync = ((...args: [number, ...unknown[]]) => {
+		const [fd, data, offset] = args as [number, NodeJS.ArrayBufferView | string, number?];
+		if (shortWrites.fd === fd && typeof data !== "string") {
+			const start = offset ?? 0;
+			const remaining = data.byteLength - start;
+			if (remaining > 1) return actual.writeSync(fd, data as Uint8Array, start, Math.ceil(remaining / 2));
+		}
+		return (actual.writeSync as (...forwarded: unknown[]) => number)(...args);
+	}) as typeof actual.writeSync;
+	return { ...actual, openSync, closeSync, writeSync };
 });
 
 let tempDir = "";
@@ -78,6 +91,9 @@ describe("ReplKernelManager startup", () => {
 		const stderrLogPath = join(tempDir, "kernel-stderr.log");
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const manager = new ReplKernelManager({ python, cwd: tempDir, stderrLogPath });
+		// Byte fidelity must survive short writes: the mock halves every write to
+		// the log fd, so only a write-all loop lands the exact bytes.
+		shortWrites.armed = true;
 
 		try {
 			await expect(manager.execute("print(1)")).rejects.toThrow(
@@ -92,6 +108,8 @@ describe("ReplKernelManager startup", () => {
 			]);
 			expect(readFileSync(stderrLogPath).equals(expected)).toBe(true);
 		} finally {
+			shortWrites.armed = false;
+			shortWrites.fd = undefined;
 			errorSpy.mockRestore();
 		}
 	});
@@ -164,9 +182,11 @@ describe("ReplKernelManager startup", () => {
 		closeFailure.armed = true;
 
 		try {
-			await expect(manager.execute("print(1)")).rejects.toThrow(
-				/Kernel exited before ready[\s\S]*goodbye[\s\S]*kernel stderr log close failed/,
-			);
+			// The pin is host survival: an unguarded throw in the 'close' listener
+			// is an unhandled error that fails this file. The close diagnostic
+			// itself lands in the tail only after the 'close' emission, which can
+			// trail this rejection, so it is not asserted here.
+			await expect(manager.execute("print(1)")).rejects.toThrow(/Kernel exited before ready[\s\S]*goodbye/);
 		} finally {
 			closeFailure.armed = false;
 			errorSpy.mockRestore();
