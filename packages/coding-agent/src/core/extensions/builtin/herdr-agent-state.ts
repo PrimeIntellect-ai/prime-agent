@@ -44,7 +44,9 @@ export function hasFileBasedHerdrIntegration(loadedExtensionPaths: string[]): bo
 
 /** Windows dials local-domain sockets inside \\.\pipe\; Herdr exports a unix-style path, so map it (namespaced paths pass through). */
 export function herdrSocketTarget(socketPath: string, platform: NodeJS.Platform = process.platform): string {
-	if (platform !== "win32" || socketPath.startsWith("\\\\.\\pipe\\") || socketPath.startsWith("\\\\?\\pipe\\")) {
+	// The pipe namespace is case-insensitive, so only the prefix check lowercases.
+	const lowered = socketPath.toLowerCase();
+	if (platform !== "win32" || lowered.startsWith("\\\\.\\pipe\\") || lowered.startsWith("\\\\?\\pipe\\")) {
 		return socketPath;
 	}
 	return win32.join("\\\\.\\pipe\\", socketPath);

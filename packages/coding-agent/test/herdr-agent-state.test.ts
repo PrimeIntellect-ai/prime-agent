@@ -498,6 +498,8 @@ describe("herdrSocketTarget", () => {
 	it("maps unix-style socket paths into the named-pipe namespace on win32 only", () => {
 		expect(herdrSocketTarget("/tmp/herdr/pane.sock", "win32")).toBe("\\\\.\\pipe\\tmp\\herdr\\pane.sock");
 		expect(herdrSocketTarget("\\\\.\\pipe\\herdr-pane", "win32")).toBe("\\\\.\\pipe\\herdr-pane");
+		// The pipe namespace is case-insensitive; a case-variant prefix must pass through with its casing intact.
+		expect(herdrSocketTarget("\\\\.\\PIPE\\herdr-pane", "win32")).toBe("\\\\.\\PIPE\\herdr-pane");
 		expect(herdrSocketTarget("/tmp/herdr/pane.sock", "linux")).toBe("/tmp/herdr/pane.sock");
 	});
 });
