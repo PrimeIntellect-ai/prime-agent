@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { RlmChildAgentSnapshot } from "../src/core/agent-session.js";
 import type { AgentCronJob } from "../src/core/cron-jobs.js";
 import type { SessionInfo } from "../src/core/session-manager.js";
+import type { SessionUsageSummary } from "../src/core/usage.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
 import { passivatedWorkerRosterEntry, workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.js";
 import {
@@ -127,7 +128,17 @@ describe("buildSessionList", () => {
 		expect(summary.lastActivityAt).toBe(new Date(validTimestamp).toISOString());
 	});
 
-	it("keeps a session working while background subagents run", () => {
+	it("publishes own-session usage on active and saved rows", () => {
+		const usage: SessionUsageSummary = { inputTokens: 12437, outputTokens: 1234, cost: 0.42 };
+		const [active, saved] = buildSessionList(
+			[makeState({ activeSessionId: "spender", usage })],
+			[makeSessionInfo({ id: "saved-spender", path: "/tmp/saved-spender.jsonl", usage })],
+		);
+		expect(active?.usage).toEqual(usage);
+		expect(saved?.usage).toEqual(usage);
+	});
+
+	it("keeps background subagents on the wire while the settled parent goes idle", () => {
 		const oneMessage = [{ role: "user", content: "hi" }] as unknown as AgentMessage[];
 		const entries = buildSessionList(
 			[
@@ -142,7 +153,7 @@ describe("buildSessionList", () => {
 			],
 			[],
 		);
-		expect(entries[0]?.activity).toBe("working");
+		expect(entries[0]?.activity).toBe("idle");
 		expect(entries[0]?.hasRunningRlmChildren).toBe(true);
 	});
 
@@ -623,6 +634,7 @@ interface StateOptions {
 	messages?: AgentMessage[];
 	hasUserContent?: boolean;
 	summaryState?: ActiveSessionState["summaryState"];
+	usage?: SessionUsageSummary;
 	hasRunningRlmChildren?: boolean;
 	hasAcceptedPromptInFlight?: boolean;
 	unfinishedActionCount?: number;
@@ -674,6 +686,7 @@ function makeState(options: StateOptions): ActiveSessionState {
 				},
 				messages: options.messages ?? ([] as AgentMessage[]),
 				getRlmChildSnapshots: () => options.childSnapshots ?? [],
+				getOwnUsageSummary: () => options.usage,
 				hasRunningRlmChildren: () => options.hasRunningRlmChildren ?? false,
 				hasAcceptedPromptInFlight: options.hasAcceptedPromptInFlight ?? false,
 				unfinishedActionCount: options.unfinishedActionCount ?? (options.hasAcceptedPromptInFlight ? 1 : 0),
@@ -712,6 +725,7 @@ function makeSessionInfo(overrides: Pick<SessionInfo, "path" | "id"> & Partial<S
 		firstMessage: "hello",
 		allMessagesText: "hello world",
 		agentStatus: overrides.agentStatus,
+		usage: overrides.usage,
 	};
 }
 

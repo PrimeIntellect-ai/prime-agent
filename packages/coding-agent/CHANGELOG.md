@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [0.9.1] - 2026-09-01
+
+- Fixed a v0.9.0 regression: the agents view's Inactive section was empty on a fresh view until a search was typed. The saved-session catalog now loads (progressively) when the view opens; it was previously deferred to search because the roster's boot seed carried the saved corpus, which the seed scoping removed.
+
+## [0.9.0] - 2026-09-01
 
 - Fixed background (unattributed) kernel output missing from the expanded IPython cell view: it is now surfaced in the tool details and rendered under a "background output (unattributed)" label after stdout/stderr/result.
 - Fixed a protocol interrupt during a REPL state restore leaving a mixed old/new namespace: names are now staged first and applied atomically with SIGINT parked across the apply, and an interrupt landing anywhere between a committed snapshot or restore and its request finishing is recovered instead of misreporting the completed operation as failed.
@@ -31,6 +35,66 @@
 - Hardened Windows bash execution: the kernel shell is resolved only from trusted absolute paths (never PATH), and bash children are contained by kill-on-close job objects so a crashed kernel cannot leak process trees (taskkill remains only as a fallback when job creation fails).
 - Hardened Windows bash() containment: children are now created directly inside the kill-on-close job (PROC_THREAD_ATTRIBUTE_JOB_LIST at CreateProcessW time), so no window exists in which a kernel kill can leak a suspended, never-run process; handle inheritance is restricted to exactly the child's stdio handles (PROC_THREAD_ATTRIBUTE_HANDLE_LIST), so concurrent spawns cannot leak each other's handles; the journal start-id query still runs only while the job-contained child is suspended, and bash() still raises instead of falling back to jobless taskkill when containment fails.
 - Fixed a Windows bash() PID-reuse hazard: the child process handle is now retained through job cleanup and every taskkill-by-pid fallback (watch reap, kill(), cancel escalation, shutdown cleanup) and closed exactly once only after the handle is marked reaped, so a recycled pid can never be killed by the fallback.
+- Added an async-by-default `bash()` callable to the kernel runtime: it returns a live handle immediately (pid/tail/poll/kill/await), bounds in-memory output, and enrolls children in the orphan-process journal so kernel teardown reaps them.
+- Fixed bash() orphan-journal writes marking a child inactive even when the kill signal was not delivered; the record now stays active on delivery failure so the host reaper still owns the process (on Windows a shell that already exited counts as delivered, so clean exits still retire their record).
+- Changed the kernel to run on a minimal CPython REPL runtime speaking JSON lines over stdio.
+- Changed the kernel to a minimal Python REPL: `%%bash` cells, `%cd`, `%env`, and `!` escapes were replaced by `bash('cmd')` and `os.chdir(...)`/`os.environ[...]` (magic-style cells fail with a plain Python `SyntaxError`); startup is faster and memory use is lower.
+- Removed the Jupyter/ipykernel kernel client; existing kernel venvs are rebuilt once (slimmer, no ipykernel) on next start.
+- Fixed supervised session renames failing after the supervisor approved an available name.
+- Made session path detection consistent across direct and daemon commands.
+- Removed internal test-only configuration cache reset hooks.
+- Fixed new-chat hints to use the session message count.
+- Kept available model lists in sync with the current catalog and configured providers.
+- Removed unused host-request capability helpers and the `kernelManagerRef` option from `IpythonToolOptions`.
+- Fixed `bash()` to capture all foreground command output before finalizing results by using an ordered per-command completion marker; output written after the marker (e.g. by `EXIT` traps or background jobs) is not in the awaited result but stays visible via `handle.output()`/`tail()`.
+- Agent messages now use core session admission to choose immediate or queued delivery.
+- Made cross-worker agent lists current without broadcasting duplicate peer rosters.
+- Namespaced kernel host handler results so handler fields cannot overwrite host reply protocol metadata.
+- Fixed graceful Python kernel disposal so timed-out final snapshots are cancelled before teardown.
+- Fixed invalid kernel protocol frames hanging requests by rejecting the affected request and replacing the kernel from its latest state snapshot.
+- Fixed kernel teardown so session cleanup and signal handling share one bounded graceful shutdown path.
+- Fixed remote agent messages being delivered twice when the daemon request timed out or the response was lost: the message is now sent exactly once per call, and post-send failures surface as errors instead of triggering a resend.
+- Simplified model resolution and feature hint shuffling internals.
+- Fixed saved-session resume when its resident worker is still recovering after a daemon restart.
+- Fixed queued-message editing so duplicate prompts always target the selected queue entry.
+- Fixed reattached sessions omitting queued child agents or showing the wrong child activity.
+- Fixed passive RLM child metadata recovery from legacy registries without a session directory.
+- Stopped treating `NODE_ENV=test` as an implicit telemetry opt-out.
+- Removed delayed cancellation callbacks from empty interactive selectors.
+- Kept heartbeat lists current when session or subagent scope changes.
+- Removed the delay before continuing sessions after compaction.
+- Wait for RLM session activity changes without zero-delay polling.
+- Fixed concurrent `execute_bash_and_wait` commands sharing one bash abort controller: each `executeBash` invocation now gets its own controller, so a finishing command no longer clears a still-running command's abort state and `abortBash` cancels every in-flight command.
+- Removed the test-only daemon active-session lookup override.
+- Made daemon shutdown wait for Bash completion without polling.
+- Fixed a race where a concurrent open of a session already being opened by another client bypassed the session ownership check instead of failing with session-already-active.
+- Accept contributions from sirouk as a vouched external contributor.
+- Render Mermaid code blocks in assistant messages as inline Unicode diagrams, with a "Mermaid diagrams" setting (off/final/streaming, default streaming).
+- Tell the model explicitly to run shell commands through `bash()` instead of `subprocess`/`os.system`.
+- Fixed `prime-agent list` pinning an abandoned empty session at "working" forever; an empty session with nothing in flight now reports "idle".
+- Evict an empty, unnamed session's worker as soon as its last client disconnects, instead of parking it for the idle sweep; the on-disk draft session is preserved.
+- Fixed daemon session create when the worker process cannot be spawned (e.g. EMFILE from fd exhaustion): the create now fails with the real spawn error plus a resident-worker/ulimit hint, and the CLI prints a one-line error instead of crashing with a TypeError stack dump.
+- Fixed the agents view hiding running subagents whose worker is starting or recovering; the worker state now shows as the row's status label.
+- Made spawned subagent sessions visible from creation, before their first message lands.
+- Renamed the subagent summary bar label from "agents" to "subagents" and unified the status formula behind both surfaces.
+- Made the daemon supervisor own an event-driven agent roster: workers push roster deltas on session events and `list` is served from the supervisor's ledger with zero worker round-trips. Rows are as fresh as the owning worker's last delta; a silent worker's rows are annotated (recovering, last-heard-from) rather than dropped, and the surfaces that display those annotations ship in the follow-up PR.
+- Tracked admitted subagent runs in the supervisor roster from the moment they are queued (they appear in `list` once their session exists), and kept passivated or evicted agents listed as inactive rows instead of disappearing (client-owned workers stay private: their rows are dropped when the worker goes away).
+- Tracked worker liveness in the supervisor roster: a dead worker's rows are flagged "recovering" the moment its socket closes, and rows of silent workers carry a last-heard-from time. These fields are supervisor-internal here; the roster surfaces that display them ship in the follow-up PR.
+- Replaced the agents view's 1-second polling with a subscription to the daemon's agent roster: the supervisor pushes coalesced roster updates, scope transitions reuse one shared connection and store without refetching, and rows render the ledger's statuses and lifecycle labels (queued, recovering, failed, last-heard-from staleness). Removed the poll path: the agents view now requires the daemon's agent_roster capability and fails fast against a daemon lacking it (unreachable in practice, since launch replaces daemons on any schema mismatch); the chat subagents bar degrades to snapshot-driven counts.
+- Loaded the saved-session catalog only when a search query needs deep message text, once per view, instead of on every navigation.
+- Fixed a reconnect deadlock where a daemon socket close during recovery or post-update restore parked the reconnect loop's own attach, snapshot, and list requests behind a hello that the stuck loop could never produce ([#1905](https://github.com/PrimeIntellect-ai/prime-agent/issues/1905)).
+- Collapsed ipython cells that call the bash skill with a literal command now preview as `bash · <command>` instead of the python wrapper.
+- Added a direct session transport: the TUI now talks to its session's worker over a supervisor-issued single-use ticket, falls back to supervisor routing on any direct-path failure, and keeps the session streaming while a lost supervisor socket reconnects in the background.
+- Workers bind their identity to a fresh per-process instance id, enforced only when the authenticating supervisor presents one, so a downgraded supervisor can still adopt live workers.
+- Fixed daemon startup and recovery to preserve slow live processes and fail closed after socket lock loss.
+- Recovery never signals a live worker process it cannot verify as its own: a persistently failing live worker parks as failed with its process left running (reclaimed automatically by the next fresh create once its identity is verified or it exits). The one deliberate exception is replacing an authenticated pre-roster worker during adoption. A live worker that stays silent through ten probe rounds (~2.5 minutes) also parks as failed instead of probing forever.
+- Reduced kernel memory spikes during namespace snapshots: the payload now pickles straight into the staged file instead of building serialized copies in memory (peak snapshot overhead ~3.9x payload -> ~1x; ENG-5819).
+- Fixed empty draft sessions lingering as zombie rows after the last viewer quit: a direct-transport client's detach or socket drop now triggers the same last-detach eviction as supervisor-routed clients.
+- Stopped re-emitting `rlm_child_update` events whose child snapshot did not change; identical per-token progress updates no longer reach attached clients.
+- Fixed `/update` keeping the old TUI process alive until the relaunched TUI quit by replacing the process in place on POSIX platforms running Node 26.1 and newer; Windows and IBM i keep the previous child relaunch.
+- Fixed sent agent messages under Python cells not showing the expand/collapse keybinding hint that received agent messages show.
+- Scoped the roster's restart seed to registered workers' families: the saved-session corpus stays owned by the disk catalog, so a supervisor restart no longer publishes thousands of inactive rows (and one header read per row) to every roster subscriber. `prime list --all` output is unchanged: subagent rows of families without a registered worker are now served on demand from the spawn ledger.
+- Session disposal no longer blocks on the final trace upload (uploads finish detached; daemon exit, update restarts, and worker archive-and-shutdown drain them through a single barrier), and deleting an RLM subagent no longer writes a kernel snapshot that the deletion sweep removes right away.
 
 ## [0.8.1] - 2026-08-26
 

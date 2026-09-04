@@ -1,5 +1,19 @@
 import type { Usage } from "@earendil-works/pi-ai";
 
+export interface SessionUsageSummary {
+	inputTokens: number;
+	outputTokens: number;
+	cost: number;
+}
+
+export function sessionUsageSummaryFrom(usage: Usage): SessionUsageSummary | undefined {
+	const inputTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+	if (inputTokens === 0 && usage.output === 0 && usage.cost.total === 0) {
+		return undefined;
+	}
+	return { inputTokens, outputTokens: usage.output, cost: usage.cost.total };
+}
+
 export function emptyUsage(): Usage {
 	return {
 		input: 0,

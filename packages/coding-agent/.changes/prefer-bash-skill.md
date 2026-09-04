@@ -1,1 +1,0 @@
-- Tell the model explicitly to run shell commands through `bash()` instead of `subprocess`/`os.system`.

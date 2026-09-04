@@ -27,6 +27,7 @@ import {
 	buildAgentsViewRows,
 	buildUnifiedSessionIndex,
 	classifyAgentsViewSession,
+	computeRecursiveCosts,
 	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
@@ -49,11 +50,11 @@ import { formatAgentDepthLabel } from "../src/modes/interactive/interactive-mode
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
 import type { Theme } from "../src/modes/interactive/theme/theme.js";
 
-function heartbeat(id: string, nextRunAt?: string, activeSessionId = "child") {
+function heartbeat(id: string, nextRunAt?: string, activeSessionId = "child", status: "active" | "paused" = "active") {
 	return {
 		job: {
 			id,
-			status: "active" as const,
+			status,
 			activeSessionId,
 			sessionId: `${activeSessionId}-session`,
 			sessionFile: `/tmp/${activeSessionId}.jsonl`,
@@ -109,19 +110,19 @@ describe("agents view state", () => {
 		expect(classifyAgentsViewSession(makeSummary({ activity: "idle", taskState: undefined }))).toBe("idle");
 	});
 
-	test("active heartbeats make sessions Running regardless of current activity", () => {
+	test("armed heartbeats stay Idle between firings; only real work is Running", () => {
 		expect(classifyAgentsViewSession(makeSummary({ activity: "working", hasActiveHeartbeat: true }))).toBe("running");
 		expect(
 			classifyAgentsViewSession(makeSummary({ activity: "idle", taskState: "completed", hasActiveHeartbeat: true })),
-		).toBe("running");
+		).toBe("idle");
 
 		const [row] = buildAgentsViewRows([makeSummary({ activity: "idle", hasActiveHeartbeat: true })]);
-		expect(row).toMatchObject({ section: "running", statusLabel: "heartbeat active" });
+		expect(row).toMatchObject({ section: "idle", statusLabel: "heartbeat active" });
 		const [busyRow] = buildAgentsViewRows([
 			makeSummary({ activity: "working", hasActiveHeartbeat: true, isStreaming: true, isRunningTools: true }),
 		]);
 		expect(busyRow).toMatchObject({ section: "running", statusLabel: "running tools" });
-		expect(sectionTitle("running")).toBe("Running");
+		expect(sectionTitle("idle")).toBe("Idle");
 	});
 
 	test("labels replied subagents with active heartbeats as heartbeat active", () => {
@@ -143,7 +144,7 @@ describe("agents view state", () => {
 		const expanded = buildAgentsViewRows(summaries, new Set([collapsed[0]?.identity ?? ""]));
 
 		expect(expanded.find((row) => row.title === "Replied child")).toMatchObject({
-			section: "running",
+			section: "idle",
 			statusLabel: "heartbeat active",
 		});
 	});
@@ -189,8 +190,8 @@ describe("agents view state", () => {
 			}),
 		]);
 
-		expect(rows.map((row) => row.title)).toEqual(["newer working", "older working", "heartbeat", "completed"]);
-		expect(rows.map((row) => row.section)).toEqual(["running", "running", "running", "idle"]);
+		expect(rows.map((row) => row.title)).toEqual(["newer working", "older working", "completed", "heartbeat"]);
+		expect(rows.map((row) => row.section)).toEqual(["running", "running", "idle", "idle"]);
 	});
 
 	test("keeps row order stable when activity and modification times and daemon input order change", () => {
@@ -277,6 +278,29 @@ describe("agents view state", () => {
 			"created-newest",
 		]);
 		expect(rows.map((row) => row.section)).toEqual(["running", "idle", "idle", "idle"]);
+	});
+
+	test("armed heartbeats rank first within the inactive section", () => {
+		const rows = buildAgentsViewRows([
+			makeSummary({
+				id: "recent",
+				activeSessionId: undefined,
+				sessionId: "recent",
+				sessionName: "recent",
+				lastActivityAt: "2026-01-03T00:00:00Z",
+			}),
+			makeSummary({
+				id: "beating",
+				activeSessionId: undefined,
+				sessionId: "beating",
+				sessionName: "beating",
+				hasActiveHeartbeat: true,
+				lastActivityAt: "2026-01-01T00:00:00Z",
+			}),
+		]);
+
+		expect(rows.map((row) => row.section)).toEqual(["inactive", "inactive"]);
+		expect(rows.map((row) => row.summary.sessionId)).toEqual(["beating", "recent"]);
 	});
 
 	test("summarizes subagents on their parent and omits subagent rows", () => {
@@ -373,25 +397,266 @@ describe("agents view state", () => {
 		const collapsed = buildAgentsViewRows(summaries);
 		expect(collapsed[0]).toMatchObject({
 			kind: "agent",
-			section: "running",
-			statusLabel: "heartbeat active",
+			section: "idle",
+			statusLabel: "completed",
 		});
 		expect(collapsed[1]).toMatchObject({
 			kind: "subagent-summary",
-			section: "running",
-			title: "1 subagent running · 1 heartbeat active",
-			runningSubagentCount: 1,
+			section: "idle",
+			title: "1 subagent · 1 heartbeat active",
+			runningSubagentCount: 0,
 		});
 		const expanded = buildAgentsViewRows(summaries, new Set([collapsed[0]?.identity ?? ""]));
 		expect(expanded[1]).toMatchObject({ kind: "subagent-summary", expanded: true });
 		expect(expanded[2]).toMatchObject({
 			kind: "subagent",
-			section: "running",
+			section: "idle",
 			statusLabel: "heartbeat active",
 		});
 	});
 
-	test("counts every idle heartbeating subagent as running", () => {
+	test("counts a busy grandchild on every idle ancestor without promoting them", () => {
+		const summaries = [
+			makeSummary({
+				id: "parent-active",
+				activeSessionId: "parent-active",
+				sessionId: "parent-session",
+				sessionName: "Parent",
+				activity: "idle",
+				taskState: "completed",
+				hasRunningRlmChildren: true,
+				messageCount: 2,
+			}),
+			makeSummary({
+				id: "child-active",
+				activeSessionId: "child-active",
+				sessionId: "child-session",
+				sessionName: "Child",
+				runtimeKind: "subagent",
+				parentActiveSessionId: "parent-active",
+				activity: "idle",
+				taskState: "completed",
+			}),
+			makeSummary({
+				id: "grandchild-active",
+				activeSessionId: "grandchild-active",
+				sessionId: "grandchild-session",
+				sessionName: "Grandchild",
+				runtimeKind: "subagent",
+				parentActiveSessionId: "child-active",
+				activity: "working",
+				isSessionActive: true,
+				isStreaming: true,
+			}),
+		];
+
+		const collapsed = buildAgentsViewRows(summaries);
+		expect(collapsed[0]).toMatchObject({ kind: "agent", section: "idle", runningSubagentCount: 1 });
+		expect(collapsed[0]?.statusLabel).toBe("completed");
+		expect(collapsed[1]).toMatchObject({ kind: "subagent-summary", section: "idle", title: "1 subagent running" });
+
+		const expanded = buildAgentsViewRows(summaries, new Set([collapsed[0]?.identity ?? ""]));
+		const childRow = expanded.find((row) => row.title === "Child");
+		expect(childRow).toMatchObject({ kind: "subagent", section: "idle", runningSubagentCount: 1 });
+	});
+
+	test("keeps heartbeat-armed descendants out of the busy tally", () => {
+		const summaries = [
+			makeSummary({
+				id: "parent-active",
+				activeSessionId: "parent-active",
+				sessionId: "parent-session",
+				sessionName: "Parent",
+				activity: "idle",
+				taskState: "completed",
+				messageCount: 2,
+			}),
+			makeSummary({
+				id: "child-active",
+				activeSessionId: "child-active",
+				sessionId: "child-session",
+				sessionName: "Child",
+				runtimeKind: "subagent",
+				parentActiveSessionId: "parent-active",
+				activity: "idle",
+				taskState: "completed",
+			}),
+			makeSummary({
+				id: "grandchild-active",
+				activeSessionId: "grandchild-active",
+				sessionId: "grandchild-session",
+				sessionName: "Heartbeat grandchild",
+				runtimeKind: "subagent",
+				parentActiveSessionId: "child-active",
+				hasActiveHeartbeat: true,
+				activity: "idle",
+			}),
+		];
+
+		const collapsed = buildAgentsViewRows(summaries);
+		expect(collapsed[0]?.runningSubagentCount).toBe(0);
+		expect(collapsed[1]).toMatchObject({ kind: "subagent-summary", section: "idle", title: "1 subagent" });
+		const expanded = buildAgentsViewRows(summaries, new Set([collapsed[0]?.identity ?? ""]));
+		expect(expanded.find((row) => row.title === "Child")?.runningSubagentCount).toBe(0);
+	});
+
+	test("keeps the recursive total complete when search filters out a descendant", () => {
+		const parent = makeSummary({
+			id: "parent-active",
+			activeSessionId: "parent-active",
+			sessionId: "parent-session",
+			sessionName: "Searchable parent",
+			usage: { inputTokens: 100, outputTokens: 10, cost: 0.42 },
+		});
+		const child = makeSummary({
+			id: "child-active",
+			activeSessionId: "child-active",
+			sessionId: "child-session",
+			sessionName: "unrelated worker",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "parent-active",
+			usage: { inputTokens: 50, outputTokens: 5, cost: 0.68 },
+		});
+		const grandchild = makeSummary({
+			id: "grandchild-active",
+			activeSessionId: "grandchild-active",
+			sessionId: "grandchild-session",
+			sessionName: "unrelated nested worker",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "child-active",
+			usage: { inputTokens: 20, outputTokens: 2, cost: 0.18 },
+		});
+		const records = reconcileUnifiedSessions([parent, child, grandchild], []);
+		const costs = computeRecursiveCosts(records);
+		const filtered = filterUnifiedSessions(records, (text) => text.includes("Searchable"));
+
+		expect(filtered).toHaveLength(1);
+		const rows = buildAgentsViewRows(filtered, new Set(), new Set(), undefined, costs);
+		expect(rows[0]?.summary.usage?.cost).toBe(0.42);
+		expect(rows[0]?.recursiveCost).toBeCloseTo(1.28);
+	});
+
+	test("keeps a parent's recursive total when a passivated child survives only as a catalog row", () => {
+		const parent = makeSummary({
+			id: "parent-active",
+			activeSessionId: "parent-active",
+			sessionId: "parent-session",
+			sessionFile: "/tmp/project/parent.jsonl",
+			usage: { inputTokens: 100, outputTokens: 10, cost: 0.42 },
+		});
+		const liveChild = makeSummary({
+			id: "child-active",
+			activeSessionId: "child-active",
+			sessionId: "child-session",
+			sessionFile: "/tmp/project/child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "parent-active",
+			usage: { inputTokens: 50, outputTokens: 5, cost: 0.68 },
+		});
+		const before = reconcileUnifiedSessions([parent, liveChild], []);
+		const beforeTotal = computeRecursiveCosts(before).get(before[0]!);
+
+		// After a restart the child exists only as a saved-catalog row.
+		const after = reconcileUnifiedSessions(
+			[parent],
+			[
+				makeSessionInfo({
+					path: "/tmp/project/child.jsonl",
+					id: "child-session",
+					parentSessionPath: "/tmp/project/parent.jsonl",
+					rlmDepth: 1,
+					usage: { inputTokens: 50, outputTokens: 5, cost: 0.68 },
+				}),
+			],
+		);
+		const afterTotal = computeRecursiveCosts(after).get(after[0]!);
+
+		expect(beforeTotal).toBeCloseTo(1.1);
+		expect(afterTotal).toBe(beforeTotal);
+	});
+
+	test("tallies a very deep child chain without overflowing the stack", () => {
+		const summaries = [
+			makeSummary({
+				id: "chain-root",
+				activeSessionId: "chain-root",
+				sessionId: "chain-root-session",
+				sessionName: "Chain root",
+				activity: "idle",
+				taskState: "completed",
+				messageCount: 2,
+			}),
+		];
+		const depth = 10_000;
+		for (let level = 1; level <= depth; level++) {
+			summaries.push(
+				makeSummary({
+					id: `chain-${level}`,
+					activeSessionId: `chain-${level}`,
+					sessionId: `chain-${level}-session`,
+					sessionName: `Chain ${level}`,
+					runtimeKind: "subagent",
+					parentActiveSessionId: level === 1 ? "chain-root" : `chain-${level - 1}`,
+					...(level === depth
+						? {
+								activity: "working" as const,
+								isSessionActive: true,
+								isStreaming: true,
+								usage: { inputTokens: 100, outputTokens: 10, cost: 0.5 },
+							}
+						: { activity: "idle" as const, taskState: "completed" as const }),
+				}),
+			);
+		}
+
+		const rows = buildAgentsViewRows(summaries);
+		expect(rows[0]).toMatchObject({ kind: "agent", section: "idle", runningSubagentCount: 1 });
+		expect(rows[0]?.recursiveCost).toBeCloseTo(0.5);
+	});
+
+	test("ranks idle rows with busy descendants above plain idle rows", () => {
+		const rows = buildAgentsViewRows([
+			makeSummary({
+				id: "plain-idle",
+				activeSessionId: "plain-idle",
+				sessionId: "plain-session",
+				sessionName: "Plain idle",
+				activity: "idle",
+				taskState: "completed",
+				messageCount: 2,
+				lastActivityAt: "2026-09-02T00:00:00Z",
+			}),
+			makeSummary({
+				id: "parent-active",
+				activeSessionId: "parent-active",
+				sessionId: "parent-session",
+				sessionName: "Busy-subtree parent",
+				activity: "idle",
+				taskState: "completed",
+				hasRunningRlmChildren: true,
+				messageCount: 2,
+				lastActivityAt: "2026-08-01T00:00:00Z",
+			}),
+			makeSummary({
+				id: "busy-child",
+				activeSessionId: "busy-child",
+				sessionId: "busy-child-session",
+				sessionName: "Busy child",
+				runtimeKind: "subagent",
+				parentActiveSessionId: "parent-active",
+				activity: "working",
+				isSessionActive: true,
+				isStreaming: true,
+			}),
+		]);
+
+		expect(rows.filter((row) => row.kind === "agent").map((row) => [row.title, row.section])).toEqual([
+			["Busy-subtree parent", "idle"],
+			["Plain idle", "idle"],
+		]);
+	});
+
+	test("keeps idle heartbeating subagents out of the running count", () => {
 		const heartbeatChildren = Array.from({ length: 10 }, (_, index) =>
 			makeSummary({
 				id: `heartbeat-child-${index}`,
@@ -425,15 +690,15 @@ describe("agents view state", () => {
 			}),
 		]);
 
-		expect(rows[0]).toMatchObject({ section: "running", runningSubagentCount: 11 });
+		expect(rows[0]).toMatchObject({ section: "idle", runningSubagentCount: 1 });
 		expect(rows[1]).toMatchObject({
 			kind: "subagent-summary",
-			title: "11 subagents running · 10 heartbeats active",
-			runningSubagentCount: 11,
+			title: "1 subagent running · 10 heartbeats active",
+			runningSubagentCount: 1,
 		});
 	});
 
-	test("propagates a descendant heartbeat through completed subagent ancestors", () => {
+	test("leaves completed ancestors idle while a descendant heartbeat is armed", () => {
 		const summaries = [
 			makeSummary({
 				id: "heartbeat-grandchild",
@@ -469,8 +734,8 @@ describe("agents view state", () => {
 		const rootIdentity = buildAgentsViewRows(summaries)[0]?.identity ?? "";
 		const oneLevel = buildAgentsViewRows(summaries, new Set([rootIdentity]));
 		const child = oneLevel.find((row) => row.title === "Child");
-		expect(oneLevel[0]).toMatchObject({ section: "running", statusLabel: "heartbeat active" });
-		expect(child).toMatchObject({ section: "running", statusLabel: "heartbeat active" });
+		expect(oneLevel[0]).toMatchObject({ section: "idle", statusLabel: "completed" });
+		expect(child).toMatchObject({ section: "idle", statusLabel: "completed" });
 
 		const childIdentity = child?.identity ?? "";
 		const expanded = buildAgentsViewRows(summaries, new Set([rootIdentity, childIdentity]));
@@ -479,9 +744,9 @@ describe("agents view state", () => {
 				.filter((row) => row.kind === "agent" || row.kind === "subagent")
 				.map((row) => [row.title, row.section, row.statusLabel]),
 		).toEqual([
-			["Root", "running", "heartbeat active"],
-			["Child", "running", "heartbeat active"],
-			["Heartbeat grandchild", "running", "heartbeat active"],
+			["Root", "idle", "completed"],
+			["Child", "idle", "completed"],
+			["Heartbeat grandchild", "idle", "heartbeat active"],
 		]);
 	});
 
@@ -577,7 +842,7 @@ describe("agents view state", () => {
 		const oneLevel = buildAgentsViewRows(summaries, new Set([rootIdentity]));
 		expect(oneLevel.map((row) => [row.title, row.kind])).toEqual([
 			["Root", "agent"],
-			["1 subagent running", "subagent-summary"],
+			["2 subagents running", "subagent-summary"],
 			["Child", "subagent"],
 			["1 subagent running", "subagent-summary"],
 		]);
@@ -586,7 +851,7 @@ describe("agents view state", () => {
 		const twoLevel = buildAgentsViewRows(summaries, new Set([rootIdentity, childIdentity]));
 		expect(twoLevel.map((row) => [row.title, row.kind, row.depth])).toEqual([
 			["Root", "agent", 0],
-			["1 subagent running", "subagent-summary", 1],
+			["2 subagents running", "subagent-summary", 1],
 			["Child", "subagent", 1],
 			["1 subagent running", "subagent-summary", 2],
 			["Grandchild", "subagent", 2],
@@ -1075,7 +1340,7 @@ describe("agents view state", () => {
 
 	test("shows a fallback heartbeat count while catalog details are unavailable", () => {
 		const [record] = reconcileUnifiedSessions([makeSummary({ hasActiveHeartbeat: true })], []);
-		expect(record).toMatchObject({ section: "running", heartbeat: { activeCount: 1 } });
+		expect(record).toMatchObject({ section: "idle", heartbeat: { activeCount: 1 } });
 		expect(formatHeartbeatBadge(record?.heartbeat)).toBe("♥ 1");
 	});
 
@@ -1125,8 +1390,8 @@ describe("agents view state", () => {
 		expect(aggregates.get("child")).toEqual({ activeCount: 2, nextRunAt: "2026-01-01T00:05:00Z" });
 		expect(aggregates.get("parent")).toEqual({ activeCount: 2, nextRunAt: "2026-01-01T00:05:00Z" });
 		const rows = buildAgentsViewRows(reconcileUnifiedSessions([parent, child], [], [heartbeat("one")]));
-		expect(rows[0]).toMatchObject({ section: "running", heartbeat: { activeCount: 1 } });
-		expect(rows[1]).toMatchObject({ title: "1 subagent running · 1 heartbeat active" });
+		expect(rows[0]).toMatchObject({ section: "idle", heartbeat: { activeCount: 1 } });
+		expect(rows[1]).toMatchObject({ title: "1 subagent · 1 heartbeat active" });
 		expect(formatHeartbeatBadge(aggregates.get("parent"), Date.parse("2026-01-01T00:00:00Z"))).toBe("♥ 2·5m");
 		expect(
 			formatHeartbeatBadge(
@@ -1154,6 +1419,26 @@ describe("agents view state", () => {
 				Date.parse("2026-01-01T00:00:00Z"),
 			),
 		).toBe("♥ 1·1s");
+
+		const soonRows = buildAgentsViewRows(
+			reconcileUnifiedSessions(
+				[parent],
+				[],
+				[heartbeat("one", new Date(Date.now() + 5 * 60_000).toISOString(), "parent")],
+			),
+		);
+		expect(soonRows[0]).toMatchObject({ section: "idle", statusLabel: "heartbeat · next 5m" });
+	});
+
+	test("counts paused heartbeats separately without affecting the section", () => {
+		const parent = makeSummary({ id: "parent", activeSessionId: "parent", sessionId: "parent-session" });
+		const paused = heartbeat("paused-job", undefined, "parent", "paused");
+		const aggregates = aggregateSessionHeartbeats([parent], [paused]);
+		expect(aggregates.get("parent")).toEqual({ activeCount: 0, pausedCount: 1 });
+		expect(formatHeartbeatBadge(aggregates.get("parent"))).toBe("♥ 1");
+		const [record] = reconcileUnifiedSessions([parent], [], [paused]);
+		expect(record).toMatchObject({ section: "idle", heartbeat: { activeCount: 0, pausedCount: 1 } });
+		expect(record?.daemon?.hasActiveHeartbeat).toBeUndefined();
 	});
 
 	describe("restores selection to the previously open session", () => {
@@ -1516,6 +1801,13 @@ describe("agents view state", () => {
 				[root, registryChild],
 				[
 					makeSessionInfo({ path: rootPath, id: "root-session", rlmDepth: 0 }),
+					// The catalog also lists the resident child's file: it must merge, not duplicate.
+					makeSessionInfo({
+						path: "/tmp/project/registry-child.jsonl",
+						id: "registry-child",
+						parentSessionPath: rootPath,
+						rlmDepth: 1,
+					}),
 					makeSessionInfo({
 						path: "/tmp/project/saved-child.jsonl",
 						id: "saved-child",
@@ -1612,6 +1904,7 @@ function makeSessionInfo(overrides: Partial<SessionInfo> & { path: string; id: s
 		firstMessage: overrides.firstMessage ?? "hello",
 		allMessagesText: overrides.allMessagesText ?? "hello",
 		agentStatus: overrides.agentStatus,
+		usage: overrides.usage,
 	};
 }
 

@@ -1,4 +1,5 @@
 import { setKeybindings } from "@earendil-works/pi-tui";
+import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
@@ -15,11 +16,12 @@ import {
 import {
 	type AgentsViewRow,
 	buildAgentsViewRows,
+	reconcileUnifiedSessions,
 	resolveAgentsViewLeftResult,
 } from "../src/modes/agents-view/agents-view-state.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
-import { stopThemeWatcher } from "../src/modes/interactive/theme/theme.js";
+import { stopThemeWatcher, theme } from "../src/modes/interactive/theme/theme.js";
 
 const modeMocks = vi.hoisted(() => ({
 	interactiveRun: vi.fn<() => Promise<never>>(),
@@ -116,6 +118,48 @@ describe("AgentsViewMode", () => {
 		expect(self.persistentState.query).toBe("matching query");
 		expect(self.rebuildRows).toHaveBeenCalledOnce();
 		expect(self.selectedIndex).toBe(4);
+	});
+
+	it("loads the saved catalog on view entry without a search query", () => {
+		const self = {
+			savedSearchFetchStarted: false,
+			persistentState: {},
+			refreshSavedSessions: vi.fn(async () => true),
+		};
+
+		invoke("armSavedSearchFetch", self);
+
+		expect(self.refreshSavedSessions).toHaveBeenCalledOnce();
+		expect(self.savedSearchFetchStarted).toBe(true);
+	});
+
+	it("stops instead of deleting when an idle row's subtree still works", async () => {
+		const request = vi.fn(async () => ({ success: true as const, data: { cancelled: true } }));
+		const self = {
+			requireClient: () => ({ request, supportsServerCapability: () => true }),
+			setStatusMessage: vi.fn(),
+			refreshSessions: vi.fn(async () => true),
+		};
+		const idleWithBusyCrew = {
+			kind: "subagent",
+			section: "idle",
+			runningSubagentCount: 1,
+			summary: summary({ id: "crew-parent", activeSessionId: "crew-parent", sessionId: "crew-parent-session" }),
+		};
+
+		await invoke(
+			"killSubagent",
+			self,
+			{ identity: "child-row", rootActiveSessionId: "root-active", childId: "crew-parent-child" },
+			idleWithBusyCrew,
+		);
+
+		expect(request).toHaveBeenCalledWith({
+			type: "cancel_rlm_child",
+			activeSessionId: "root-active",
+			childId: "crew-parent-child",
+		});
+		expect(request).not.toHaveBeenCalledWith(expect.objectContaining({ type: "delete_rlm_subagent" }));
 	});
 
 	it("re-resolves subagent state before choosing stop or delete intent", async () => {
@@ -226,7 +270,7 @@ describe("AgentsViewMode", () => {
 			"killSubagent",
 			self,
 			{ identity: "child-row", rootActiveSessionId: "root-active", childId: "passive-child" },
-			{ section: "inactive" },
+			{ section: "inactive", runningSubagentCount: 0, summary: summary() },
 		);
 		expect(request).toHaveBeenCalledWith({
 			type: "cancel_rlm_child",
@@ -668,6 +712,138 @@ describe("AgentsViewMode", () => {
 		try {
 			expect(invoke("renderRow", view, rows[0], 160)).toContain("recovering");
 			expect(invoke("renderRow", view, rows[1], 160)).toContain("last heard");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("renders the unconditional usage cell and drops the message count", () => {
+		const parent = summary({
+			id: "spender",
+			activeSessionId: "spender",
+			sessionId: "spender-session",
+			usage: { inputTokens: 12437, outputTokens: 1234, cost: 0.42 },
+		});
+		const child = summary({
+			id: "spender-child",
+			activeSessionId: "spender-child",
+			sessionId: "spender-child-session",
+			sessionFile: "/tmp/spender-child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "spender",
+			usage: { inputTokens: 500, outputTokens: 50, cost: 0.68 },
+		});
+		const inactive = summary({
+			id: "saved-only",
+			activeSessionId: undefined,
+			sessionId: "saved-only-session",
+			sessionFile: "/tmp/saved-only.jsonl",
+			rosterStatus: "inactive",
+			messageCount: 7,
+		});
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+
+		try {
+			const collapsed = buildAgentsViewRows([parent, child, inactive]);
+			const rows = buildAgentsViewRows([parent, child, inactive], new Set(collapsed.map((row) => row.identity)));
+			Reflect.set(view, "rows", rows);
+			const line = (row: AgentsViewRow | undefined) => stripAnsi(invoke("renderRow", view, row, 200) as string);
+			const byId = (sessionId: string, kind?: string) =>
+				rows.find((row) => row.summary.sessionId === sessionId && (!kind || row.kind === kind));
+
+			expect(line(byId("spender-session"))).toContain("↑12k ↓1.2k · $0.42 ($1.10 w/ subagents)");
+			expect(line(byId("spender-child-session", "subagent"))).toContain("↑500 ↓50 · $0.68 ($0.68 w/ subagents)");
+			const inactiveLine = line(byId("saved-only-session"));
+			expect(inactiveLine).toContain("↑0 ↓0 · $0.00 ($0.00 w/ subagents)");
+			expect(inactiveLine).not.toContain("7 ·");
+			const bare = { ...byId("spender-session")!, summary: { ...parent, usage: undefined } };
+			expect(line(bare)).toContain("↑0 ↓0 · $0.00 ($1.10 w/ subagents)");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("renders a collapsed group's busy-subagent badge legibly instead of dimmed", () => {
+		const parent = summary({ id: "parent", activeSessionId: "parent", sessionId: "parent-session" });
+		const busyChild = summary({
+			id: "busy-child",
+			activeSessionId: "busy-child",
+			sessionId: "busy-child-session",
+			sessionFile: "/tmp/busy-child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "parent",
+			activity: "working",
+			isSessionActive: true,
+			isStreaming: true,
+		});
+		const idleChild = { ...busyChild, activity: "idle" as const, isSessionActive: false, isStreaming: false };
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+
+		try {
+			const busyRows = buildAgentsViewRows([parent, busyChild]);
+			const busySummaryRow = busyRows.find((row) => row.kind === "subagent-summary");
+			expect(busySummaryRow).toMatchObject({ section: "idle", title: "1 subagent running" });
+			Reflect.set(view, "rows", busyRows);
+			expect(invoke("renderRow", view, busySummaryRow, 160)).toContain(theme.fg("success", "▸ 1 subagent running"));
+
+			const idleRows = buildAgentsViewRows([parent, idleChild]);
+			const idleSummaryRow = idleRows.find((row) => row.kind === "subagent-summary");
+			Reflect.set(view, "rows", idleRows);
+			expect(invoke("renderRow", view, idleSummaryRow, 160)).toContain(theme.fg("dim", "▸ 1 subagent"));
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("dims a paused-only heartbeat badge and keeps active badges in the error color", () => {
+		const job = (status: "active" | "paused") => ({
+			job: {
+				id: `${status}-job`,
+				status,
+				activeSessionId: "scope-active",
+				sessionId: "scope-session",
+				sessionFile: "/tmp/scope.jsonl",
+				cwd: "/tmp",
+				prompt: "tick",
+				schedule: { kind: "interval" as const, expression: "5m" },
+				createdAt: "2026-01-01T00:00:00Z",
+				updatedAt: "2026-01-01T00:00:00Z",
+				runCount: 0,
+			},
+		});
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+
+		try {
+			const [pausedRow] = buildAgentsViewRows(reconcileUnifiedSessions([summary()], [], [job("paused")]));
+			Reflect.set(view, "rows", [pausedRow]);
+			const pausedLine = invoke("renderRow", view, pausedRow, 160) as string;
+			expect(pausedLine).toContain(theme.fg("dim", "♥ 1"));
+			expect(pausedRow).toMatchObject({ section: "idle" });
+
+			const [activeRow] = buildAgentsViewRows(reconcileUnifiedSessions([summary()], [], [job("active")]));
+			Reflect.set(view, "rows", [activeRow]);
+			const activeLine = invoke("renderRow", view, activeRow, 160) as string;
+			expect(activeLine).toContain(theme.fg("error", "♥ 1"));
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("warns about the armed heartbeat in the delete confirmation", () => {
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+		Reflect.set(view, "deleteConfirmExpiresAt", Date.now() + 10_000);
+		const confirmLine = (row: AgentsViewRow): string => {
+			Reflect.set(view, "rows", [row]);
+			Reflect.set(view, "pendingDeleteAgent", { identity: row.identity, summary: row.summary, stopped: false });
+			return stripAnsi(invoke("renderRow", view, row, 160) as string);
+		};
+
+		try {
+			const [armedRow] = buildAgentsViewRows([summary({ hasActiveHeartbeat: true })]);
+			expect(confirmLine(armedRow!)).toContain("has an armed heartbeat — ");
+			const [plainRow] = buildAgentsViewRows([summary()]);
+			expect(confirmLine(plainRow!)).not.toContain("armed heartbeat");
+			expect(confirmLine(plainRow!)).toContain("again to remove");
 		} finally {
 			stopThemeWatcher();
 		}

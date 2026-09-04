@@ -1,3 +1,4 @@
+export { acpMcpToolNames, createAcpMcpToolDefinitions } from "./acp-mcp.js";
 export {
 	type BashOperations,
 	type BashSpawnContext,

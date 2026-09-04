@@ -68,6 +68,7 @@ import { type PromptOptions, rlmChildLabel } from "../../core/agent-session.js";
 import { type AgentSessionRuntimeConfig, mergeAgentSessionRuntimeConfig } from "../../core/agent-session-config.js";
 import {
 	type AgentSessionRuntime,
+	type AgentSessionRuntimeDisposeOptions,
 	type AgentSessionRuntimeMetadata,
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionRuntime,
@@ -170,8 +171,8 @@ import {
 	buildRlmChildSnapshots,
 	buildSessionList,
 	classifySessionRosterStatus,
+	hasLiveSessionWork,
 	inactiveLifecycleForSession,
-	isActiveSessionBusy,
 	type SessionSummary,
 	scheduledJobRegistrations,
 	summaryForActiveSession,
@@ -213,6 +214,7 @@ import {
 	RlmSpawnLedger,
 	readLegacyRlmSubagentRegistry as readLegacyRlmSubagentRegistryFile,
 	tombstoneSavedSessionDelete,
+	withPassiveRlmDescendantInfos,
 } from "./rlm-ledger.js";
 import {
 	readRlmSubagentDisplayEntry,
@@ -980,6 +982,16 @@ export class AgentDaemon {
 		return this.rlmSpawnLedgerInstance;
 	}
 
+	// Ledgers are per sessions-dir family: a catalog request for another dir must read that dir's ledger.
+	private rlmSpawnLedgerFor(sessionDir: string | undefined): RlmSpawnLedger {
+		if (sessionDir === undefined || resolve(sessionDir) === resolve(this.rlmLedgerSessionsDir())) {
+			return this.rlmSpawnLedger();
+		}
+		return new RlmSpawnLedger(this.agentDir, sessionDir, createRlmLedgerRegistrySeedSource(), (message) =>
+			this.log(message),
+		);
+	}
+
 	private async appendRlmLedgerRenameForState(state: ActiveSessionState, name: string): Promise<void> {
 		const childId = state.runtime.metadata.rlmChildId;
 		const child = state.runtime.session.sessionFile;
@@ -1528,6 +1540,32 @@ export class AgentDaemon {
 		}
 		if (this.cronStore.registerSessionArtifact(session.sessionId, artifactDir)) {
 			this.cronStore.recoverSessionArtifact(session.sessionId);
+			this.cronScheduler.wake();
+		}
+		// A fresh worker only knows resident sessions' jobs; passive descendants' schedules must fire without hydration.
+		if (state.runtime.metadata.kind !== "subagent") {
+			void this.registerPassiveDescendantCronArtifacts().catch((error) => {
+				this.log(`Could not register passive descendant scheduled jobs: ${String(error)}`);
+			});
+		}
+	}
+
+	private async registerPassiveDescendantCronArtifacts(): Promise<void> {
+		let registered = false;
+		for (const passive of await this.listPassiveRlmSubagents()) {
+			try {
+				const artifactDir = getSessionArtifactPathForFile(resolve(passive.entry.sessionFile), passive.info.id);
+				if (this.cronStore.registerSessionArtifact(passive.info.id, artifactDir)) {
+					registered = true;
+					this.cronStore.recoverSessionArtifact(passive.info.id);
+				}
+			} catch (error) {
+				this.log(
+					`Could not register scheduled jobs for passive subagent ${passive.entry.childId}: ${String(error)}`,
+				);
+			}
+		}
+		if (registered) {
 			this.cronScheduler.wake();
 		}
 	}
@@ -2371,11 +2409,19 @@ export class AgentDaemon {
 						candidate.runtime.metadata.rlmChildId === options.id &&
 						candidate.runtime.session === runtime.session,
 				);
+				const disposal = status === "cancelled" ? { kernelSnapshot: false } : undefined;
 				try {
 					if (state) {
-						await this.closeSession(state, status === "cancelled" ? "killed" : "completed");
+						await this.closeSession(
+							state,
+							status === "cancelled" ? "killed" : "completed",
+							true,
+							true,
+							undefined,
+							disposal,
+						);
 					} else {
-						await runtime.session.disposeAsync();
+						await runtime.session.disposeAsync(disposal);
 					}
 				} finally {
 					// Sweep even when teardown throws (see deleteRlmSubagentRuntime);
@@ -2432,12 +2478,12 @@ export class AgentDaemon {
 				try {
 					try {
 						if (state) {
-							await this.closeSession(state, "killed", false);
+							await this.closeSession(state, "killed", false, true, undefined, { kernelSnapshot: false });
 						} else {
-							await session?.disposeAsync();
+							await session?.disposeAsync({ kernelSnapshot: false });
 						}
 					} finally {
-						await staleSession?.disposeAsync();
+						await staleSession?.disposeAsync({ kernelSnapshot: false });
 					}
 				} finally {
 					// Runs even when teardown throws: the jobs-cancel rewrite and the
@@ -2528,6 +2574,8 @@ export class AgentDaemon {
 					rlmSessionDir: options.sessionDir,
 					rlmParentNodeId: options.rlmParentNodeId,
 					rlmParentAgent: options.parentSession.sessionName ?? options.parentSession.sessionId,
+					semanticParentSessionId: options.parentSession.sessionId,
+					semanticSpawnedByRequestId: options.spawnedByRequestId,
 				},
 				runtimeMetadata: {
 					kind: "subagent",
@@ -2632,7 +2680,6 @@ export class AgentDaemon {
 		return {
 			isSessionActive: summary.isSessionActive || summary.hasRunningRlmChildren === true || hasPendingAdmission,
 			attachedClients: state.clients.size + state.pendingAttaches,
-			hasRegisteredHeartbeat: jobs.some((job) => isHeartbeatCronJob(job) && job.status === "active"),
 			hasRegisteredCronJob: jobs.some((job) => !isHeartbeatCronJob(job)),
 			lastActivityAt: Date.parse(summary.lastActivityAt ?? ""),
 			hasParent: state.runtime.metadata.kind === "subagent" && !!state.runtime.metadata.parentActiveSessionId,
@@ -3839,8 +3886,13 @@ export class AgentDaemon {
 					command.scope === "current"
 						? await SessionManager.list(cwd, sessionDir, callbacks)
 						: await SessionManager.listAll(callbacks, sessionDir);
+				const sessions = await withPassiveRlmDescendantInfos(savedSessions, this.rlmSpawnLedgerFor(sessionDir), {
+					...(command.scope === "current" ? { cwd } : {}),
+					...(callbacks ? { onSession: callbacks.onSession } : {}),
+					log: (message) => this.log(message),
+				});
 				return success(command.id, "list_saved_sessions", {
-					sessions: savedSessions.map(serializeSavedSessionInfo),
+					sessions: sessions.map(serializeSavedSessionInfo),
 				});
 			}
 
@@ -5377,9 +5429,6 @@ export class AgentDaemon {
 				activity: session.isSessionActive ? "working" : "idle",
 				isSessionActive: session.isSessionActive,
 				hasRunningRlmChildren: session.hasRunningRlmChildren?.() ?? false,
-				hasActiveHeartbeat:
-					this.cronStore.getHeartbeat(state.activeSessionId)?.status === "active" ||
-					this.cronStore.listRlmHeartbeats(state.activeSessionId).some((job) => job.status === "active"),
 				isStreaming: session.isStreaming,
 			} as SessionSummary),
 			...(metadata.rlmChildId ? { rlmChildId: metadata.rlmChildId } : {}),
@@ -6015,8 +6064,7 @@ export class AgentDaemon {
 		if (state.runtime.metadata.kind === "subagent") {
 			return false;
 		}
-		// A running bash or in-flight turn means there is live work to preserve.
-		if (state.runtime.session.isBashRunning || isActiveSessionBusy(state)) {
+		if (state.runtime.session.isBashRunning || hasLiveSessionWork(state)) {
 			return false;
 		}
 		return this.isEmptyDraftContent(state);
@@ -6337,6 +6385,7 @@ export class AgentDaemon {
 		waitForAbort = true,
 		cascadeChildren = true,
 		descendantCollector?: Set<ActiveSessionState>,
+		disposal?: AgentSessionRuntimeDisposeOptions,
 	): Promise<void> {
 		this.abortWaitingPromptAdmissionsForSession(state.activeSessionId);
 		for (const client of state.clients) {
@@ -6375,7 +6424,7 @@ export class AgentDaemon {
 		}
 		const descendants = new Set<ActiveSessionState>();
 		const closePromise = Promise.resolve().then(() =>
-			this.closeSessionOnce(state, reason, waitForAbort, cascadeChildren, descendants),
+			this.closeSessionOnce(state, reason, waitForAbort, cascadeChildren, descendants, disposal),
 		);
 		const close = { promise: closePromise, reason, descendants };
 		this.closingSessions.set(state.activeSessionId, close);
@@ -6448,6 +6497,7 @@ export class AgentDaemon {
 		waitForAbort: boolean,
 		cascadeChildren: boolean,
 		descendants: Set<ActiveSessionState>,
+		disposal?: AgentSessionRuntimeDisposeOptions,
 	): Promise<void> {
 		if (!this.sessions.has(state.activeSessionId)) {
 			return;
@@ -6461,7 +6511,7 @@ export class AgentDaemon {
 		// agent_status to a session being torn down.
 		this.summarizer.forget(state.activeSessionId);
 		const cascadeError = cascadeChildren
-			? await this.closeChildSessions(state, reason, waitForAbort, descendants)
+			? await this.closeChildSessions(state, reason, waitForAbort, descendants, disposal)
 			: undefined;
 		// Empty draft (no messages, config, or jobs): discard rather than persist an
 		// empty session file. Mirrors the detach-time discard so a config-bearing
@@ -6496,7 +6546,7 @@ export class AgentDaemon {
 		state.unsubscribe?.();
 		let disposeError: unknown;
 		try {
-			await state.runtime.dispose();
+			await state.runtime.dispose(disposal);
 		} catch (error) {
 			disposeError = error;
 		}
@@ -6538,12 +6588,13 @@ export class AgentDaemon {
 		reason: DaemonSessionClosedReason,
 		waitForAbort = true,
 		descendants = new Set<ActiveSessionState>(),
+		disposal?: AgentSessionRuntimeDisposeOptions,
 	): Promise<unknown> {
 		let cascadeError: unknown;
 		for (const childState of getChildActiveSessionStates(this.sessions, parentState)) {
 			descendants.add(childState);
 			try {
-				await this.closeSession(childState, reason, waitForAbort, true, descendants);
+				await this.closeSession(childState, reason, waitForAbort, true, descendants, disposal);
 			} catch (error) {
 				cascadeError ??= error;
 			}
@@ -6938,7 +6989,7 @@ export class AgentDaemon {
 		}
 		const session = state.runtime.session;
 		const busy =
-			busyOverride ?? (isActiveSessionBusy(state) || session.isRetrying || session.hasAcceptedPromptInFlight);
+			busyOverride ?? (hasLiveSessionWork(state) || session.isRetrying || session.hasAcceptedPromptInFlight);
 		try {
 			this.recoveryJournal.record({
 				activeSessionId: state.activeSessionId,

@@ -680,10 +680,7 @@ describe("agents view slash commands", () => {
 			return { self, persistentState, request, supersede };
 		};
 
-		// An empty query never arms; an already-loaded shared catalog never refetches.
-		const idle = latchHarness("   ", []);
-		invoke("armSavedSearchFetch", idle.self);
-		expect(idle.self.savedSearchFetchStarted).toBe(false);
+		// An already-loaded shared catalog never refetches.
 		const loaded = latchHarness("needle", []);
 		(loaded.persistentState as { savedCatalogLoaded?: boolean }).savedCatalogLoaded = true;
 		invoke("armSavedSearchFetch", loaded.self);

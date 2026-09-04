@@ -9,17 +9,17 @@ export interface AgentStatusInput {
 	resident: boolean;
 	/** Admitted child run whose session has not materialized yet. */
 	queuedChild: boolean;
-	/** Actively working: streaming, running tools/bash, or running children. */
+	/** Actively working: streaming or running tools/bash. */
 	busy: boolean;
-	hasActiveHeartbeat: boolean;
 }
 
 export function classifyAgentStatus(input: AgentStatusInput): AgentRosterStatus {
 	if (input.queuedChild) return "running";
 	if (!input.resident) return "inactive";
-	return input.busy || input.hasActiveHeartbeat ? "running" : "idle";
+	return input.busy ? "running" : "idle";
 }
 
+// Residency/shutdown-safety busy: delegated child work counts; the section classifier deliberately does not use it.
 export function isSessionSummaryBusy(
 	summary: Pick<SessionSummary, "isSessionActive" | "hasRunningRlmChildren">,
 ): boolean {
@@ -27,17 +27,13 @@ export function isSessionSummaryBusy(
 }
 
 export function classifySessionRosterStatus(
-	summary: Pick<
-		SessionSummary,
-		"activeSessionId" | "activity" | "isSessionActive" | "hasRunningRlmChildren" | "hasActiveHeartbeat"
-	>,
+	summary: Pick<SessionSummary, "activeSessionId" | "activity" | "isSessionActive">,
 	queuedChild = false,
 ): AgentRosterStatus {
 	return classifyAgentStatus({
 		resident: !!summary.activeSessionId,
 		queuedChild,
-		busy: summary.activity === "working" || isSessionSummaryBusy(summary),
-		hasActiveHeartbeat: summary.hasActiveHeartbeat === true,
+		busy: summary.activity === "working" || summary.isSessionActive === true,
 	});
 }
 
@@ -118,6 +114,7 @@ export function passivatedWorkerRosterEntry(
 
 export function sessionSummaryFromRosterEntry(entry: WorkerRosterEntry | AgentRosterEntry): SessionSummary {
 	const ledger = "status" in entry ? entry : undefined;
+	// statusLabel/lastHeardFromAt are set only for exceptional states; viewers key label display on their presence.
 	return {
 		...entry.summary,
 		sessionActions: { queuedCount: 0, steering: [], followUps: [] },

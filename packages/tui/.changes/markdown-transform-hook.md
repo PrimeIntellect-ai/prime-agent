@@ -1,1 +1,0 @@
-- Add an optional `transform` hook to `Markdown` so callers can rewrite markdown with the exact content width before rendering.

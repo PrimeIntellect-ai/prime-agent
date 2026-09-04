@@ -1,1 +1,0 @@
-- Made session path detection consistent across direct and daemon commands.
