@@ -124,10 +124,9 @@ function runProcessQuery(command: string, args: string[], options?: ProcessQuery
 	});
 }
 
-// The powershell query blocks the event loop for hundreds of ms under AV
-// scanning, and liveness polls re-ask for the same pid many times per second.
-// A start id is immutable for a live process, so a short TTL only has to stay
-// well under realistic pid-reuse timescales.
+// A start id is immutable for a live pid and the sync powershell query blocks
+// the event loop, so hot liveness polls memoize it; the TTL must stay well
+// under realistic pid-reuse timescales.
 const WINDOWS_PROCESS_START_ID_TTL_MS = 5000;
 const windowsProcessStartIdCache = new Map<number, { id: string; expiresAt: number }>();
 

@@ -183,12 +183,7 @@ type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
 const structuredLog = getLogger("coding-agent.daemon-supervisor");
 const WORKER_CONNECT_TIMEOUT_MS = 30_000;
 
-/**
- * Per-attempt handshake waits derive from the remaining outer connect budget
- * instead of a smaller fixed clock: a slow win32 handshake (AV-scanned
- * powershell probes block both event loops) must be able to use the whole
- * budget rather than tripping a 1s per-attempt timeout on every retry.
- */
+/** Per-attempt handshake waits consume the remaining outer connect budget; a smaller fixed clock makes a consistently slow (win32) handshake fail every retry. */
 export function handshakeBudgetMs(deadline: number, now = Date.now()): number {
 	return Math.max(50, deadline - now);
 }

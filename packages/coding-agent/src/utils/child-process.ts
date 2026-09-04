@@ -23,12 +23,10 @@ import { basename } from "node:path";
 const EXIT_STDIO_GRACE_MS = 100;
 
 /**
- * Hidden-window child-process wrappers. Node's `windowsHide` defaults to
- * false, so a console-subsystem child of a windowless parent (the daemon, a
- * detached worker) allocates a fresh console on Windows and flashes or steals
- * focus on every spawn. Every non-interactive spawn goes through these
- * wrappers; only spawns that intentionally hand the user a console (editors,
- * inherit-stdio installers and relaunches) call node:child_process directly.
+ * Hidden-window wrappers: a console-subsystem child of a windowless parent
+ * flashes a fresh console on Windows unless windowsHide is set. Every
+ * non-interactive spawn uses these; only spawns that intentionally hand the
+ * user a console call node:child_process directly.
  */
 export function spawnHidden(command: string, args: readonly string[], options: SpawnOptions = {}): ChildProcess {
 	return spawn(command, args, { ...options, windowsHide: true });

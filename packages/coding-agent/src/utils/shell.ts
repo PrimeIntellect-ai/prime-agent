@@ -9,11 +9,7 @@ export interface ShellConfig {
 	args: string[];
 }
 
-/**
- * Order `where bash.exe` matches so anything under %SystemRoot% (the WSL
- * launcher at System32\bash.exe, which runs Linux-side, not a Windows shell)
- * is only used when no other bash exists.
- */
+/** System32\bash.exe is the WSL launcher (runs Linux-side), so %SystemRoot% matches are only a last resort. */
 export function orderWindowsBashCandidates(matches: readonly string[], systemRoot: string | undefined): string[] {
 	if (!systemRoot) return [...matches];
 	const underSystemRoot = (match: string) => match.toLowerCase().startsWith(`${systemRoot.toLowerCase()}\\`);
