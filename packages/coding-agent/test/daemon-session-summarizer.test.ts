@@ -160,6 +160,8 @@ describe("daemon session summarizer", () => {
 			messages: AgentMessage[];
 			isSessionActive: boolean;
 			summaryState?: AgentStatus;
+			persistedStatus?: AgentStatus;
+			appendAgentStatus?: (status: AgentStatus) => void;
 		}): ActiveSessionState {
 			return {
 				activeSessionId: "active-1",
@@ -170,7 +172,10 @@ describe("daemon session summarizer", () => {
 						messages: options.messages,
 						modelRegistry: {},
 						state: { streamingMessage: undefined },
-						sessionManager: { appendAgentStatus: () => {} },
+						sessionManager: {
+							appendAgentStatus: options.appendAgentStatus ?? (() => {}),
+							getLatestAgentStatus: () => options.persistedStatus,
+						},
 					},
 				},
 			} as unknown as ActiveSessionState;
@@ -199,6 +204,53 @@ describe("daemon session summarizer", () => {
 
 			expect(state.summaryState?.basedOnMessageCount).toBe(2);
 			expect(onStatusChanged).toHaveBeenCalledOnce();
+		});
+
+		test("a failing idle generation never persists its fabricated fallback and stops retrying", async () => {
+			const appendAgentStatus = vi.fn();
+			const state = makeState({
+				messages: [userMessage("hi")],
+				isSessionActive: false,
+				appendAgentStatus,
+			});
+			const generate = vi.fn(async () => undefined);
+			const summarizer = new DaemonSessionSummarizer(() => [state], undefined, generate);
+			const internal = summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> };
+
+			for (let sweep = 0; sweep < 5; sweep++) {
+				await internal.summarize(state);
+			}
+
+			expect(appendAgentStatus).not.toHaveBeenCalled();
+			expect(generate).toHaveBeenCalledTimes(3);
+			expect(state.summaryState).toEqual({ summary: "", taskState: "needs_input", basedOnMessageCount: 1 });
+		});
+
+		test("an idle re-settle matching the latest persisted status appends nothing", async () => {
+			const appendAgentStatus = vi.fn();
+			const persisted: AgentStatus = {
+				summary: "Awaiting review",
+				taskState: "needs_input",
+				basedOnMessageCount: 1,
+			};
+			const state = makeState({
+				messages: [userMessage("hi")],
+				isSessionActive: false,
+				persistedStatus: persisted,
+				appendAgentStatus,
+			});
+
+			const onStatusChanged = vi.fn();
+			const summarizer = new DaemonSessionSummarizer(
+				() => [state],
+				onStatusChanged,
+				async () => ({ summary: "Awaiting review", taskState: "needs_input" as const }),
+			);
+			await (summarizer as unknown as { summarize(state: ActiveSessionState): Promise<void> }).summarize(state);
+
+			expect(appendAgentStatus).not.toHaveBeenCalled();
+			expect(onStatusChanged).toHaveBeenCalledOnce();
+			expect(state.summaryState).toEqual(persisted);
 		});
 
 		test("a working refresh with unchanged text stays quiet", async () => {

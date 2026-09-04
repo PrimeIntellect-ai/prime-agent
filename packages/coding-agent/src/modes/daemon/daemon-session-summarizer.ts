@@ -8,6 +8,9 @@ import type { ActiveSessionState } from "./active-session-state.js";
 const SWEEP_INTERVAL_MS = 25_000;
 // Collapse a tool-use loop's rapid turn_end bursts into one summarization.
 const SETTLE_DEBOUNCE_MS = 2_000;
+// An idle session whose generation keeps failing on the same settled content
+// stops retrying (and paying for model calls) until new activity arrives.
+const IDLE_GENERATION_ATTEMPT_LIMIT = 3;
 
 const SUMMARY_MODEL_PROVIDER = "prime-inference";
 const SUMMARY_MODEL_ID = "qwen/qwen3-30b-a3b-instruct-2507";
@@ -207,6 +210,8 @@ export class DaemonSessionSummarizer {
 	private readonly inFlight = new Map<string, AbortController>();
 	// Sessions requested while one was running; get one more pass on completion.
 	private readonly rerunRequested = new Set<string>();
+	// Failed idle generations per session, keyed to the message count they saw.
+	private readonly failedIdleGenerations = new Map<string, { messageCount: number; attempts: number }>();
 
 	constructor(
 		private readonly listSessions: () => readonly ActiveSessionState[],
@@ -242,6 +247,7 @@ export class DaemonSessionSummarizer {
 			controller.abort();
 		}
 		this.rerunRequested.clear();
+		this.failedIdleGenerations.clear();
 	}
 
 	/** Drop any pending work for a session that is closing. */
@@ -253,6 +259,7 @@ export class DaemonSessionSummarizer {
 		}
 		this.inFlight.get(activeSessionId)?.abort();
 		this.rerunRequested.delete(activeSessionId);
+		this.failedIdleGenerations.delete(activeSessionId);
 	}
 
 	/** Seed in-memory status from the persisted entry when a session is added. */
@@ -306,6 +313,12 @@ export class DaemonSessionSummarizer {
 		if (contentUnchanged && !isWorking && !owesIdleVerdict && !owesSummary) {
 			return;
 		}
+		// A generation that keeps failing on identical idle content will keep
+		// failing: stop re-attempting until the session produces new messages.
+		const failed = this.failedIdleGenerations.get(id);
+		if (!isWorking && failed?.messageCount === messageCount && failed.attempts >= IDLE_GENERATION_ATTEMPT_LIMIT) {
+			return;
+		}
 		// Include the in-progress message so a long streaming turn gets a live recap.
 		const streaming = isWorking ? session.state.streamingMessage : undefined;
 		const contextMessages = streaming ? [...messages, streaming] : messages;
@@ -319,6 +332,14 @@ export class DaemonSessionSummarizer {
 				isWorking,
 				signal: controller.signal,
 			});
+			if (generated) {
+				this.failedIdleGenerations.delete(id);
+			} else if (!isWorking) {
+				this.failedIdleGenerations.set(id, {
+					messageCount,
+					attempts: failed?.messageCount === messageCount ? failed.attempts + 1 : 1,
+				});
+			}
 			// A failed classification on an idle session would spin at "working"
 			// forever (the activity axis holds unjudged idle sessions there), so
 			// settle it to needs_input.
@@ -356,12 +377,21 @@ export class DaemonSessionSummarizer {
 				previous?.taskState !== status.taskState ||
 				(!isWorking && previous?.basedOnMessageCount !== status.basedOnMessageCount);
 			state.summaryState = status;
-			// Persist only settled idle verdicts, never mid-stream.
-			if (!isWorking) {
-				try {
-					session.sessionManager.appendAgentStatus(status);
-				} catch {
-					// best-effort; in-memory status still shows
+			// Persist only settled idle verdicts from real classifications, never
+			// mid-stream, never a fabricated fallback, and never a duplicate of the
+			// latest persisted entry: an idle sweep must not grow the journal.
+			if (!isWorking && generated) {
+				const persisted = session.sessionManager.getLatestAgentStatus();
+				if (
+					persisted?.summary !== status.summary ||
+					persisted.taskState !== status.taskState ||
+					persisted.basedOnMessageCount !== status.basedOnMessageCount
+				) {
+					try {
+						session.sessionManager.appendAgentStatus(status);
+					} catch {
+						// best-effort; in-memory status still shows
+					}
 				}
 			}
 			if (changed) {
