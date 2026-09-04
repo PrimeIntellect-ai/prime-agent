@@ -381,9 +381,7 @@ export class ReplKernelManager {
 		const stderrDecoder = new StringDecoder("utf8");
 		let stderrLogBudget = MAX_KERNEL_STDERR_LOG_BYTES;
 		let stderrLogWritable = stderrLogFd !== undefined;
-		let stderrChunks = 0;
 		child.stderr?.on("data", (buf: Buffer) => {
-			stderrChunks++;
 			this.appendKernelStderrText(stderrDecoder.write(buf));
 			if (!stderrLogWritable || stderrLogFd === undefined) return;
 			try {
@@ -407,20 +405,19 @@ export class ReplKernelManager {
 		child.stderr?.once("end", () => this.appendKernelStderrText(stderrDecoder.end()));
 		child.stderr?.once("close", () => {
 			this.appendKernelStderrText(stderrDecoder.end());
-			if (stderrLogFd !== undefined) closeSync(stderrLogFd);
+			if (stderrLogFd === undefined) return;
+			try {
+				closeSync(stderrLogFd);
+			} catch (error) {
+				this.appendKernelDiagnostic(`kernel stderr log close failed: ${errorMessage(error)}`);
+			}
 		});
 		child.once("exit", () => {
-			// Drain already-buffered stderr to quiescence, then destroy the stream:
-			// its EOF may never come (an orphaned grandchild can inherit the write
-			// end), and destroying at 'exit' would drop the kernel's last words.
-			const drain = () => {
-				const seen = stderrChunks;
-				globalThis.setImmediate(() => {
-					if (stderrChunks !== seen) drain();
-					else child.stderr?.destroy();
-				});
-			};
-			drain();
+			// One turn for the poll phase to deliver the bytes the kernel wrote
+			// before dying (the pipe buffer bounds them), then destroy: EOF may
+			// never come, and anything later is a surviving grandchild's
+			// post-mortem noise, not the kernel's last words.
+			globalThis.setImmediate(() => child.stderr?.destroy());
 		});
 
 		child.on("error", (err) => {

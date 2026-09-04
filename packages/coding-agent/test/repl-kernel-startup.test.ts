@@ -4,6 +4,27 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ReplKernelManager } from "../src/core/kernel/index.js";
 
+// closeSync cannot be made to fail for real, so the stderr log fd (marked at
+// open by its path) is the one closeSync the mock can arm to throw; everything
+// else passes through.
+const closeFailure = vi.hoisted(() => ({ armed: false, fd: undefined as number | undefined }));
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	const openSync: typeof actual.openSync = (...args) => {
+		const fd = actual.openSync(...args);
+		if (closeFailure.armed && String(args[0]).endsWith("kernel-stderr.log")) closeFailure.fd = fd;
+		return fd;
+	};
+	const closeSync: typeof actual.closeSync = (fd) => {
+		if (closeFailure.fd === fd) {
+			closeFailure.fd = undefined;
+			throw new Error("simulated stderr log close failure");
+		}
+		actual.closeSync(fd);
+	};
+	return { ...actual, openSync, closeSync };
+});
+
 let tempDir = "";
 
 function writeExecutable(filePath: string, content: string): void {
@@ -75,6 +96,33 @@ describe("ReplKernelManager startup", () => {
 		}
 	});
 
+	it("completes teardown while an inherited grandchild keeps writing stderr", async () => {
+		const python = join(tempDir, "python");
+		writeExecutable(
+			python,
+			[
+				"#!/bin/sh",
+				// A busy writer inherits fd 2 and survives the kernel: its stream
+				// never goes quiet and never EOFs.
+				"sh -c 'while :; do echo post-mortem noise; done' >&2 &",
+				"exit 42",
+				"",
+			].join("\n"),
+		);
+		const stderrLogPath = join(tempDir, "kernel-stderr.log");
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const manager = new ReplKernelManager({ python, cwd: tempDir, stderrLogPath });
+
+		try {
+			// Well under the 30s ready timeout: teardown must not wait for the
+			// grandchild (destroying the pipe kills it with SIGPIPE).
+			await expect(manager.execute("print(1)")).rejects.toThrow(/Kernel exited before ready/);
+		} finally {
+			errorSpy.mockRestore();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+		}
+	}, 15000);
+
 	it("caps the stderr log at the write budget while draining pre-ready spew", async () => {
 		const python = join(tempDir, "python");
 		writeExecutable(
@@ -104,6 +152,25 @@ describe("ReplKernelManager startup", () => {
 			expect(statSync(stderrLogPath).size).toBeLessThanOrEqual(5 * 1024 * 1024 + marker.length);
 		} finally {
 			errorSpy.mockRestore();
+		}
+	});
+
+	it("survives a stderr log close failure with a diagnostic", async () => {
+		const python = join(tempDir, "python");
+		writeExecutable(python, ["#!/bin/sh", 'echo "goodbye" >&2', "exit 42", ""].join("\n"));
+		const stderrLogPath = join(tempDir, "kernel-stderr.log");
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const manager = new ReplKernelManager({ python, cwd: tempDir, stderrLogPath });
+		closeFailure.armed = true;
+
+		try {
+			await expect(manager.execute("print(1)")).rejects.toThrow(
+				/Kernel exited before ready[\s\S]*goodbye[\s\S]*kernel stderr log close failed/,
+			);
+		} finally {
+			closeFailure.armed = false;
+			errorSpy.mockRestore();
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
 		}
 	});
 
