@@ -355,8 +355,7 @@ describe("SemanticEdgeRecorder", () => {
 		rmSync(path);
 		appendFileSync(path, raw.slice(0, -1));
 
-		// Never surfaced even though it parses: the next append destroys these bytes,
-		// so acting on them would derive edges from a request the ledger disowns.
+		// Tail rule: uncommitted append — see the EventLog module doc.
 		expect(readSemanticEdgeLedger(path).filter((event) => event.type === "request_started")).toEqual([]);
 		const resumed = createRecorder();
 		const secondId = resumed.startTurnRequest();

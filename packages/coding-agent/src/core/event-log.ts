@@ -16,17 +16,14 @@ import { dirname } from "node:path";
  * Append-only JSONL event log: the shared crash-safety substrate under the
  * RLM spawn ledger and the ACP semantic-edge ledger.
  *
- * Appends are single O_APPEND writes (PIPE_BUF-scale sizes, whose atomicity
- * multi-writer consumers rely on for interleaving), fsynced only when the
- * caller needs durability. An unterminated final line is a crashed writer's
- * uncommitted append: replay never surfaces it (even when it parses — data
- * the next append truncates must never be acted on) and fails closed on any
- * malformed interior line. Repair happens only on append, never on read — a
- * viewer may replay a live writer's log. EVERY unterminated tail is
- * truncated at its byte offset, even one that parses as JSON: completing it
- * with a newline would turn a line a strict consumer parser rejects into
- * permanent fail-closed interior poison. Unifying consumers keeps the union
- * of their safety behaviors.
+ * Appends are single O_APPEND writes (PIPE_BUF-scale atomicity), fsynced only
+ * when the caller needs durability. Tail rule (union of every consumer's
+ * safety): an unterminated final line is an uncommitted append — skipped on
+ * read even when it parses, truncated at its byte offset on the next append,
+ * never newline-completed (completion turns a line a strict parser rejects
+ * into permanent fail-closed interior poison). Interior malformed lines fail
+ * closed. Repair runs only on append, never on read: a viewer may replay a
+ * live writer's log.
  */
 
 export interface EventLogOptions {
@@ -67,11 +64,9 @@ export class EventLog {
 	) {}
 
 	/**
-	 * Replay every terminated line through `parse`. `parse` throws for a line
-	 * it rejects (fail-closed) and returns undefined for a line it deliberately
-	 * skips; an unterminated final line never reaches it. A missing log is an
-	 * empty history for owners and an error for explicit readers; the choice is
-	 * made at the open so no check-then-read window exists.
+	 * Replay every terminated line through `parse`: throw to reject a line,
+	 * return undefined to skip one. The missing-file decision is made at the
+	 * open, so no check-then-read window exists.
 	 */
 	replaySync<T>(
 		parse: (line: string, index: number) => T | undefined,
@@ -136,11 +131,7 @@ export class EventLog {
 		}
 	}
 
-	/**
-	 * Truncate a torn final line from a crashed writer before appending:
-	 * otherwise the append would turn a tolerable torn tail into a fail-closed
-	 * interior line. The torn bytes were never readable data.
-	 */
+	/** Truncate an unterminated tail before appending (the module-doc tail rule). */
 	private repairTailSync(): void {
 		const { maxBytes } = this.options;
 		let size: number;
