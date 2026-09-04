@@ -44,9 +44,7 @@ describe("event log fault injection", () => {
 		log.appendSync([{ v: 1, id: "committed" }]);
 		faults.shortWriteOnce = true;
 
-		// Neither completed (could weld into a rival's append) nor reclaimed
-		// (could destroy a rival's committed record): the torn tail is the one
-		// tolerated shape, and the next append repairs it.
+		// Neither completed nor reclaimed: the torn tail is the tolerated shape.
 		expect(() => log.appendSync([{ v: 1, id: "short-write" }])).toThrow(/short write/);
 		const parse = (line: string) => JSON.parse(line) as { id?: string };
 		expect(new EventLog(path).replaySync(parse)).toEqual([{ v: 1, id: "committed" }]);

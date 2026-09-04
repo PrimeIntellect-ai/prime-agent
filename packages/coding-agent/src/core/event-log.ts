@@ -127,12 +127,8 @@ export class EventLog {
 			const buffer = Buffer.from(payload, "utf8");
 			const written = writeSync(handle, buffer);
 			if (written < buffer.length) {
-				// A short O_APPEND write (ENOSPC-class) fails the append: reporting
-				// success would break write-before-action callers, completing it with
-				// a second write could weld into a rival process's append, and
-				// reclaiming the prefix could destroy a rival's committed record that
-				// merely ends in the same bytes. The torn tail is the one tolerated
-				// shape: skipped on read, truncated by any writer's next repair.
+				// A short write must fail, not complete or reclaim: a second write could weld
+				// into a rival's append, and reclaiming could destroy a rival's committed record.
 				throw new Error(`event log ${this.path}: short write (${written} of ${buffer.length} bytes)`);
 			}
 			if (options?.durable) fsyncSync(handle);
@@ -141,12 +137,7 @@ export class EventLog {
 		}
 	}
 
-	/**
-	 * Truncate an unterminated tail before appending (the module-doc tail
-	 * rule). A repair failure propagates and gates the append: writing through
-	 * an unrepaired tail would weld it to the new record as permanent
-	 * fail-closed interior corruption.
-	 */
+	/** Truncate an unterminated tail before appending (module-doc tail rule); a failure gates the append. */
 	private repairTailSync(): void {
 		const { maxBytes } = this.options;
 		let size: number;
@@ -167,9 +158,7 @@ export class EventLog {
 		try {
 			const lastByte = Buffer.alloc(1);
 			if (readSync(fd, lastByte, 0, 1, size - 1) !== 1 || lastByte[0] === 0x0a) return;
-			// Truncate guarded by a double-read stability check: unstable bytes
-			// mean a live concurrent writer whose own append terminates the tail
-			// (the documented O_APPEND small-write atomicity trust bucket).
+			// Double-read stability: unstable bytes mean a live rival writer whose own append terminates the tail.
 			const first = readAllSync(fd, maxBytes, this.path);
 			const second = readAllSync(fd, maxBytes, this.path);
 			if (second.length !== first.length || !second.equals(first)) return;
