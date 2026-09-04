@@ -507,9 +507,7 @@ export async function acquireDaemonSupervisorOwnership(
 	return new DaemonSupervisorOwnership(record, registryDir, ownerDirectory);
 }
 
-// The fence poll asserts every bound claim every 250ms; the zombie check spawns
-// `ps` on macOS/BSD, so confirm it at most this often per owner pid. Existence
-// stays checked on every tick, which catches reaped owners immediately.
+// The 250ms fence poll must not spawn `ps` (macOS/BSD zombie check) per tick; existence stays kill(0)-checked every tick.
 const OWNER_ZOMBIE_CONFIRM_INTERVAL_MS = 5000;
 const ownerZombieConfirmations = new Map<number, number>();
 
@@ -527,8 +525,7 @@ function isOwnerProcessAlive(pid: number): boolean {
 		ownerZombieConfirmations.delete(pid);
 		return false;
 	}
-	// Expired entries belong to owners nothing asserts anymore (released claims,
-	// replaced supervisors); drop them here so the cache stays bounded.
+	// Expired entries belong to owners nothing asserts anymore; dropping them keeps the cache bounded.
 	for (const [staleOwnerPid, staleConfirmedAt] of ownerZombieConfirmations) {
 		if (now - staleConfirmedAt >= OWNER_ZOMBIE_CONFIRM_INTERVAL_MS) {
 			ownerZombieConfirmations.delete(staleOwnerPid);

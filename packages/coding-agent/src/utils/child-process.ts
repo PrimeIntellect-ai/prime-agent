@@ -51,10 +51,7 @@ export function isProcessAlive(pid: number): boolean {
 	return processIdExists(pid) && !isZombieProcess(pid);
 }
 
-/**
- * True while the process group has any member left (zombies included). A group
- * can outlive its leader, so group teardown must not complete on leader death.
- */
+/** True while the group has any member left, zombies included; a group can outlive its leader. */
 export function processGroupExists(pgid: number): boolean {
 	if (process.platform === "win32") {
 		return false;
@@ -67,11 +64,7 @@ export function processGroupExists(pgid: number): boolean {
 	}
 }
 
-/**
- * True while the group still has a RUNNING member: zombie members have already
- * exited and only their parent can reap them, so they must not block a group
- * stop from completing.
- */
+/** True while the group has a RUNNING member; unreaped zombies have exited and must not block a group stop. */
 export function processGroupHasLiveMember(pgid: number): boolean {
 	if (!processGroupExists(pgid)) {
 		return false;
@@ -87,8 +80,7 @@ export function processGroupHasLiveMember(pgid: number): boolean {
 		}
 		return false;
 	} catch {
-		// Unverifiable listing: report alive so callers keep escalating instead
-		// of dropping records over possibly-live descendants.
+		// Unverifiable listing reads alive: callers keep escalating instead of dropping records over live descendants.
 		return true;
 	}
 }

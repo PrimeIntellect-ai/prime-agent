@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +13,7 @@ import {
 } from "../src/modes/daemon/daemon-supervisor-ownership.js";
 import * as childProcessModule from "../src/utils/child-process.js";
 import { isZombieProcess } from "../src/utils/child-process.js";
+import { spawnZombieProcess } from "./fixtures/zombie-process.js";
 
 type Ownership = Awaited<ReturnType<typeof acquireDaemonSupervisorOwnership>>;
 
@@ -216,30 +216,9 @@ describe("daemon supervisor ownership registry", () => {
 
 	it.skipIf(process.platform === "win32")("treats a zombie owner process as reclaimable", async () => {
 		const paths = createPaths();
-		const zombieParent = spawn(
-			"perl",
-			["-e", '$| = 1; my $pid = fork(); if ($pid) { print "$pid\\n"; sleep 30 } else { exit 0 }'],
-			{ stdio: ["ignore", "pipe", "ignore"] },
-		);
+		const { zombiePid, dispose } = await spawnZombieProcess();
 		try {
-			const zombiePid = await new Promise<number>((resolvePid, rejectPid) => {
-				let output = "";
-				const timer = setTimeout(() => rejectPid(new Error("Timed out waiting for the zombie pid")), 5000);
-				zombieParent.stdout?.on("data", (chunk: Buffer) => {
-					output += chunk.toString();
-					const parsed = Number.parseInt(output.trim(), 10);
-					if (Number.isInteger(parsed) && parsed > 0) {
-						clearTimeout(timer);
-						resolvePid(parsed);
-					}
-				});
-			});
-			const deadline = Date.now() + 5000;
-			while (!isZombieProcess(zombiePid) && Date.now() < deadline) {
-				await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
-			}
 			expect(isZombieProcess(zombiePid)).toBe(true);
-
 			const stale = await acquire(paths, "zombie-owner");
 			const ownerPath = join(ownerDir(paths, "zombie-owner"), "owner.json");
 			const record = readJson(ownerPath);
@@ -253,7 +232,7 @@ describe("daemon supervisor ownership registry", () => {
 			await successor.release();
 			await stale.release();
 		} finally {
-			zombieParent.kill("SIGKILL");
+			dispose();
 		}
 	});
 

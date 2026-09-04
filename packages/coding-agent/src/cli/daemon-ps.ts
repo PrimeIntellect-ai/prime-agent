@@ -1096,20 +1096,12 @@ async function stopTrackedProcess(
 	return trackedProcessStopped(pid);
 }
 
-/**
- * This is a process-GROUP stop: a zombie or reaped leader has exited, but
- * running descendants in its group must still be stopped, so completion needs
- * the leader gone and no live member left (unreaped zombies do not block it).
- */
+/** A GROUP stop completes when the leader is gone AND no live member remains; unreaped zombies do not block it. */
 function trackedProcessStopped(pid: number): boolean {
 	return !isProcessAlive(pid) && !processGroupHasLiveMember(pid);
 }
 
-/**
- * Identity gates protect against pid reuse and only apply while the leader
- * process still exists; a gone leader leaves teardown to the group checks (a
- * pgid cannot be reused while members hold it).
- */
+/** Identity gates guard pid reuse, so they apply only while the leader exists; a pgid cannot be reused while members hold it. */
 function trackedLeaderIdentityCurrent(pid: number, expectedStartId: string): boolean {
 	if (!processIdExists(pid)) {
 		return true;
