@@ -1,4 +1,11 @@
-import { Box, type Component, Container, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
+import {
+	Box,
+	type Component,
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	type TableCellSelectionRegion,
+} from "@earendil-works/pi-tui";
 import { parseSlashCommand } from "../../../core/slash-commands.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
 import { PromptTokenMask } from "./prompt-highlight.js";
@@ -21,6 +28,10 @@ class HighlightedMarkdown implements Component {
 	render(width: number): string[] {
 		this.mask.reset();
 		return this.markdown.render(width).map((line) => this.mask.restoreLine(line));
+	}
+
+	getSelectionRegions(): ReadonlyArray<TableCellSelectionRegion> {
+		return this.markdown.getSelectionRegions();
 	}
 
 	invalidate(): void {

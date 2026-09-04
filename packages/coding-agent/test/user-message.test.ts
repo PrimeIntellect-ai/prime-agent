@@ -190,6 +190,16 @@ describe("UserMessageComponent", () => {
 		expect(lines.every((line) => visibleWidth(line) === 8)).toBe(true);
 	});
 
+	test("forwards table-cell selection regions from sent messages", () => {
+		initTheme("dark");
+		const component = new UserMessageComponent("| alpha | beta |\n| --- | --- |\n| one | two |");
+		component.render(60);
+
+		const regions = component.getSelectionRegions();
+
+		expect(regions.map((region) => region.content)).toContain("one");
+	});
+
 	test("renders a literal mask-range character before an @token uncorrupted", () => {
 		initTheme("dark");
 		const plain = new UserMessageComponent("\uE000 check @foo")
