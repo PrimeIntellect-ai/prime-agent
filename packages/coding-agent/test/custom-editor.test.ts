@@ -348,6 +348,19 @@ describe("CustomEditor", () => {
 		expect(rendered).not.toContain(theme.fg("success", "foo"));
 	});
 
+	it("keeps the token tail colored when the cursor sits inside the token", () => {
+		initTheme("dark");
+		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());
+		editor.setText("check @src/foo.ts");
+		editor.handleInput("\x1b[D");
+		editor.handleInput("\x1b[D");
+
+		const line = editor.render(40)[1]!;
+
+		// The cursor's full reset sits before the final "s"; the tail must be re-colored.
+		expect(line).toContain(`\x1b[0m${theme.fg("success", "s")}`);
+	});
+
 	it("does not mis-color visible text matching a scrolled-away token", () => {
 		initTheme("dark");
 		const editor = new CustomEditor(fakeTui, editorTheme, new KeybindingsManager());

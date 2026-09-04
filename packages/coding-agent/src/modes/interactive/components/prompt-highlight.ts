@@ -190,7 +190,14 @@ export class ArgTokenHighlighter {
 		for (const span of spans) {
 			const start = visibleStart[span.start] ?? displayText.length;
 			const end = (visibleStart[span.end - 1] ?? displayText.length - 1) + 1;
-			result += displayText.slice(copied, start) + theme.fg(span.color, displayText.slice(start, end));
+			// The cursor splice may carry a full reset (\x1b[0m) mid-span; wrap
+			// each segment so the token color survives past it.
+			const styled = displayText
+				.slice(start, end)
+				.split("\x1b[0m")
+				.map((segment) => theme.fg(span.color, segment))
+				.join("\x1b[0m");
+			result += displayText.slice(copied, start) + styled;
 			copied = end;
 		}
 		return result + displayText.slice(copied);
