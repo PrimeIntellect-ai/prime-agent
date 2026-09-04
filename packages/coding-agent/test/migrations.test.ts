@@ -180,6 +180,20 @@ describe("auth migration ordering", () => {
 		expect(JSON.parse(readFileSync(join(agentDir, "auth.json"), "utf-8")).openai.key).toBe("sk-key");
 	});
 
+	it("migrates credentials through a dangling auth.json symlink to its target", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-auth-migration-dangling-"));
+		tempDirs.push(agentDir);
+		process.env[ENV_AGENT_DIR] = agentDir;
+		writeFileSync(join(agentDir, "oauth.json"), JSON.stringify({ anthropic: { access: "token" } }));
+		const target = join(agentDir, "vault-auth.json");
+		symlinkSync(target, join(agentDir, "auth.json"));
+
+		migrateAuthToAuthJson();
+
+		expect(lstatSync(join(agentDir, "auth.json")).isSymbolicLink()).toBe(true);
+		expect(JSON.parse(readFileSync(target, "utf-8")).anthropic.type).toBe("oauth");
+	});
+
 	it("keeps every credential source when the auth.json write fails", () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "prime-agent-auth-migration-"));
 		tempDirs.push(agentDir);

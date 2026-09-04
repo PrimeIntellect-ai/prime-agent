@@ -968,6 +968,20 @@ describe("AuthStorage", () => {
 	});
 
 	describe("persistence semantics", () => {
+		test("first-run initialization survives a restrictive umask", () => {
+			const previousUmask = process.umask(0o700);
+			try {
+				authStorage = AuthStorage.create(authJsonPath);
+				authStorage.set("openai", { type: "api_key", key: "masked-key" });
+			} finally {
+				process.umask(previousUmask);
+			}
+
+			expect(statSync(authJsonPath).mode & 0o777).toBe(0o600);
+			const onDisk = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<string, { key: string }>;
+			expect(onDisk.openai.key).toBe("masked-key");
+		});
+
 		test("a dangling relative symlink under a symlinked directory resolves to the physical target", () => {
 			const realDir = join(tempDir, "real-dir");
 			mkdirSync(realDir, { recursive: true });

@@ -579,6 +579,33 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		}
 	});
 
+	it("does not full-scan on every open for a benign trailing blank line", () => {
+		const file = join(tempDir, "blank-tail.jsonl");
+		const header = {
+			type: "session",
+			version: 3,
+			id: "blank-session",
+			timestamp: "2026-01-01T00:00:00Z",
+			cwd: "/tmp",
+		};
+		const message = {
+			type: "message",
+			id: "m1",
+			parentId: null,
+			message: { role: "user", content: "hi", timestamp: 1 },
+		};
+		writeFileSync(file, `${JSON.stringify(header)}\n${JSON.stringify(message)}\n\n`);
+		fullReadCounter.suffix = "blank-tail.jsonl";
+		fullReadCounter.count = 0;
+
+		try {
+			SessionManager.open(file, tempDir);
+			expect(fullReadCounter.count).toBe(1);
+		} finally {
+			fullReadCounter.suffix = undefined;
+		}
+	});
+
 	it("repairs crash damage at open: torn tail truncated, zero-filled record recovered, appends stay separate lines", () => {
 		const file = join(tempDir, "crashed.jsonl");
 		const header = {

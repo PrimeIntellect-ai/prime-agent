@@ -603,7 +603,9 @@ function tailLooksDamaged(targetPath: string): boolean {
 		const previousNewline = window.lastIndexOf(0x0a, windowBytes - 2);
 		// No boundary inside the window: the final line exceeds it; scan to be sure.
 		if (previousNewline === -1 && windowBytes < size) return true;
-		return !parsesAsJson(window.subarray(previousNewline + 1, windowBytes - 1));
+		const lastLine = window.subarray(previousNewline + 1, windowBytes - 1);
+		// A blank final line is benign (the loader skips it) and appends stay safe.
+		return lastLine.length > 0 && !parsesAsJson(lastLine);
 	} catch {
 		return true;
 	} finally {

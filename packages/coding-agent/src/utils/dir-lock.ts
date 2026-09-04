@@ -113,17 +113,17 @@ async function acquireAttempt(
 		// recycled into a rival's fresh lock (Linux reuses inodes immediately).
 		let pinned: number | undefined;
 		try {
-			pinned = openSync(lockPath, "r");
-			const pinnedIdentity = fstatSync(pinned, { bigint: true });
-			if (pinnedIdentity.dev !== captured.dev || pinnedIdentity.ino !== captured.ino) {
-				// The lock changed hands between the capture and the pin: treat as live.
-				return "held";
+			try {
+				pinned = openSync(lockPath, "r");
+				const pinnedIdentity = fstatSync(pinned, { bigint: true });
+				if (pinnedIdentity.dev !== captured.dev || pinnedIdentity.ino !== captured.ino) {
+					// The lock changed hands between the capture and the pin: treat as live.
+					return "held";
+				}
+			} catch {
+				// Unpinnable (Windows directories): stat identity applies without the
+				// recycling guarantee.
 			}
-		} catch {
-			// Unpinnable (Windows directories): stat identity applies without the
-			// recycling guarantee.
-		}
-		try {
 			return await judgeAndReclaim(lockPath, ownerAlive, captured, token);
 		} finally {
 			if (pinned !== undefined) closeSync(pinned);

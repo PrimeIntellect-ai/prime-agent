@@ -15,7 +15,7 @@ import {
 	type OAuthProviderId,
 } from "@earendil-works/pi-ai";
 import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@earendil-works/pi-ai/oauth";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { closeSync, existsSync, fchmodSync, mkdirSync, openSync, readFileSync, writeSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.js";
@@ -117,14 +117,23 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 	}
 
 	private ensureFileExists(): void {
+		let descriptor: number;
 		try {
 			// Exclusive create: a racing initializer must never replace credentials another
 			// process saved between an existence check and this write.
-			writeFileSync(this.authPath, "{}", { flag: "wx", mode: 0o600 });
+			descriptor = openSync(this.authPath, "wx", 0o600);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
 				throw error;
 			}
+			return;
+		}
+		try {
+			writeSync(descriptor, "{}");
+			// openSync's mode is masked by the umask; enforce the exact bits.
+			fchmodSync(descriptor, 0o600);
+		} finally {
+			closeSync(descriptor);
 		}
 	}
 

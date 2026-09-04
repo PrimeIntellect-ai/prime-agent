@@ -99,7 +99,7 @@ export function realpathIfPresentSync(path: string): string {
 	// ENOENT covers both a missing file and a DANGLING symlink chain; in-place
 	// writes followed the latter to its (absent) target, so the replace must too.
 	let current = path;
-	for (let hop = 0; hop < 8; hop++) {
+	for (let hop = 0; hop < 32; hop++) {
 		let target: string;
 		try {
 			target = readlinkSync(current);
@@ -115,5 +115,6 @@ export function realpathIfPresentSync(path: string): string {
 		}
 		current = resolve(parent, target);
 	}
-	return current;
+	// A loud failure beats silently replacing an intermediate link (or looping on a cycle).
+	throw new Error(`Too many symlink hops resolving ${path}`);
 }
