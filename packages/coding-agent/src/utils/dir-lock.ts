@@ -59,23 +59,34 @@ async function acquireAttempt(
 		} catch (error) {
 			// NFS can report failure for a link that landed: a second name for the
 			// temp inode means the publish succeeded.
+			let candidateSwept = false;
 			let recheckedNlink: number | undefined;
 			try {
 				recheckedNlink = statSync(tempPath).nlink;
-			} catch {
-				// The candidate is gone: an acquirer suspended past the sweep age lost it.
+			} catch (statError) {
+				// Only a definite ENOENT means a rival's sweep claimed the candidate;
+				// a transient probe failure must not invent that answer.
+				if ((statError as NodeJS.ErrnoException).code !== "ENOENT") {
+					throw error;
+				}
+				candidateSwept = true;
 			}
 			if (recheckedNlink === 2) {
 				return "acquired";
 			}
-			if (recheckedNlink === undefined && retryOnSweptCandidate) {
+			if (candidateSwept && retryOnSweptCandidate) {
 				return acquireAttempt(lockPath, ownerAlive, false);
 			}
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
 				throw error;
 			}
 		}
-		const judged = readOwnerRaw(lockPath, isDirectory(lockPath));
+		const lockShape = pathShape(lockPath);
+		if (lockShape === "unknown") {
+			// An unjudgeable lock may be live: fail safe.
+			return "held";
+		}
+		const judged = readOwnerRaw(lockPath, lockShape === "directory");
 		if (judged === "unreadable") {
 			// A transient read failure may hide a LIVE lock: never judge it stale.
 			return "held";
@@ -93,24 +104,33 @@ async function acquireAttempt(
 			}
 			return "reclaimed";
 		}
-		// Identity check on the MOVED entry's actual shape: both the owner and the
-		// file-vs-directory type may have changed since the staleness judgment.
-		const asideIsDir = isDirectory(asidePath);
-		if (readOwnerRaw(asidePath, asideIsDir) !== judged) {
-			try {
-				if (asideIsDir) {
-					renameSync(asidePath, lockPath);
-					return "held";
-				}
+		// Identity check on the MOVED entry's actual shape: the owner and the
+		// file-vs-directory type may both have changed since the staleness judgment.
+		const asideShape = pathShape(asidePath);
+		if (asideShape !== "unknown" && readOwnerRaw(asidePath, asideShape === "directory") === judged) {
+			rmSync(asidePath, { recursive: true, force: true });
+			return "reclaimed";
+		}
+		// Changed owners since the judgment, or no longer judgeable: restore, never
+		// delete. A file links back so a third acquirer is never clobbered; anything
+		// else renames back (shape-agnostic, and a directory rename cannot clobber).
+		try {
+			if (asideShape === "file") {
 				linkSync(asidePath, lockPath);
 				rmSync(asidePath, { force: true });
-				return "held";
-			} catch {
-				// A third acquirer already owns the path; discard the displaced copy.
+			} else {
+				renameSync(asidePath, lockPath);
 			}
+			return "held";
+		} catch {
+			if (asideShape === "unknown") {
+				// Never delete what cannot be judged; the displaced copy stays aside.
+				return "held";
+			}
+			// A third acquirer already owns the path; discard the displaced copy.
+			rmSync(asidePath, { recursive: true, force: true });
+			return "reclaimed";
 		}
-		rmSync(asidePath, { recursive: true, force: true });
-		return "reclaimed";
 	} finally {
 		try {
 			rmSync(tempPath, { force: true });
@@ -120,11 +140,14 @@ async function acquireAttempt(
 	}
 }
 
-function isDirectory(path: string): boolean {
+type PathShape = "file" | "directory" | "absent" | "unknown";
+
+// A probe failure must never collapse into a definite shape: "unknown" is not destructible.
+function pathShape(path: string): PathShape {
 	try {
-		return statSync(path).isDirectory();
-	} catch {
-		return false;
+		return statSync(path).isDirectory() ? "directory" : "file";
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ENOENT" ? "absent" : "unknown";
 	}
 }
 

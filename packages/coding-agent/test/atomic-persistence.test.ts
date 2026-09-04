@@ -16,10 +16,18 @@ type WriteSync = typeof writeSync;
 const shortWrites = vi.hoisted(() => ({ remaining: 0 }));
 const rmFault = vi.hoisted(() => ({ error: undefined as Error | undefined }));
 const linkSweep = vi.hoisted(() => ({ remaining: 0 }));
+const asideStatFault = vi.hoisted(() => ({ remaining: 0 }));
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
 	return {
 		...actual,
+		statSync: ((path: Parameters<typeof actual.statSync>[0], options?: never) => {
+			if (asideStatFault.remaining > 0 && String(path).includes(".stale-")) {
+				asideStatFault.remaining--;
+				throw Object.assign(new Error("EPERM: probe blocked"), { code: "EPERM" });
+			}
+			return actual.statSync(path, options);
+		}) as typeof actual.statSync,
 		linkSync: ((existing: Parameters<typeof actual.linkSync>[0], created: Parameters<typeof actual.linkSync>[1]) => {
 			if (linkSweep.remaining > 0) {
 				linkSweep.remaining--;
@@ -95,6 +103,21 @@ describe("writeFileAtomicSync", () => {
 });
 
 describe("tryAcquireDirLock", () => {
+	it("restores instead of deleting a moved lock whose shape cannot be probed", async () => {
+		const dir = createTempDir();
+		const lockDir = join(dir, "shape.lock");
+		mkdirSync(lockDir);
+		writeFileSync(join(lockDir, "pid"), "999999999\n");
+		asideStatFault.remaining = 1;
+
+		try {
+			expect(await tryAcquireDirLock(lockDir, () => false)).toBe("held");
+		} finally {
+			asideStatFault.remaining = 0;
+		}
+		expect(readFileSync(join(lockDir, "pid"), "utf8").trim()).toBe("999999999");
+	});
+
 	it("retries with a fresh candidate when a rival's sweep claims the first mid-publish", async () => {
 		const dir = createTempDir();
 		const lockPath = join(dir, "suspended.lock");
