@@ -16,7 +16,7 @@ import { completeSimple } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../../config.js";
 import { serializeConversation } from "../compaction/utils.js";
 import { convertToLlm } from "../messages.js";
-import { completeWithProviderRetry } from "../provider-retry.js";
+import { completeWithProviderRetry, type ProviderRetryPolicy } from "../provider-retry.js";
 import type { CustomEntry } from "../session-manager.js";
 
 export const REFINEMENT_CUSTOM_TYPE = "prime-agent.refinement";
@@ -106,6 +106,7 @@ export interface RefineOptions {
 	instructions?: string;
 	rollbackId?: string;
 	global?: boolean;
+	retry?: ProviderRetryPolicy;
 }
 
 export type AutoRefineReason = "turn_interval" | "compact";
@@ -935,7 +936,7 @@ export async function planRefinement(
 				},
 				{ maxTokens: refinementMaxOutputTokens(model), signal, apiKey, headers },
 			),
-		{ signal },
+		{ policy: options.retry, signal },
 	);
 
 	if (response.stopReason === "error") {
@@ -975,6 +976,7 @@ export async function reviewAutoRefine(
 	headers?: Record<string, string>,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
+	retry?: ProviderRetryPolicy,
 ): Promise<AutoRefineReview> {
 	const conversationText = serializeConversation(convertToLlm(messages)).slice(-40_000);
 	const userPrompt = [
@@ -1005,7 +1007,7 @@ ${conversationText}
 				},
 				{ maxTokens: autoRefineReviewMaxOutputTokens(model), signal, apiKey, headers },
 			),
-		{ signal },
+		{ policy: retry, signal },
 	);
 	if (response.stopReason === "error") {
 		throw new Error(`Auto-refine review failed: ${response.errorMessage || "Unknown error"}`);

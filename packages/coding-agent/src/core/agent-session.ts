@@ -192,6 +192,7 @@ import {
 	isFauxProviderQueueExhausted,
 	isPermanentProviderFailureKind,
 	providerRetryDelay,
+	providerRetryPolicy,
 	providerStreamFailureDetails,
 	providerStreamFailureKind,
 	providerStreamFailureRetryAfterMs,
@@ -7634,6 +7635,7 @@ export class AgentSession {
 					signal,
 					this.thinkingLevel,
 					summaryCall,
+					providerRetryPolicy(this.settingsManager),
 				));
 			}
 
@@ -8153,6 +8155,7 @@ export class AgentSession {
 			headers,
 			signal,
 			this.thinkingLevel,
+			providerRetryPolicy(this.settingsManager),
 		);
 	}
 
@@ -8388,7 +8391,7 @@ export class AgentSession {
 			history,
 			model,
 			apiKey,
-			options,
+			{ ...options, retry: providerRetryPolicy(this.settingsManager) },
 			headers,
 			signal,
 			this.thinkingLevel,
@@ -11747,6 +11750,7 @@ export class AgentSession {
 					customInstructions,
 					replaceInstructions,
 					reserveTokens: branchSummarySettings.reserveTokens,
+					retry: providerRetryPolicy(this.settingsManager),
 				});
 				if (result.aborted) {
 					return { cancelled: true, aborted: true };

@@ -35,4 +35,18 @@ describe("completeWithProviderRetry", () => {
 
 		expect(result.stopReason).toBe("aborted");
 	});
+
+	it("makes a single attempt when the policy disables retries", async () => {
+		let attempts = 0;
+		const result = await completeWithProviderRetry(
+			async () => {
+				attempts++;
+				return providerError();
+			},
+			{ policy: { enabled: false, maxRetries: 3, baseDelayMs: 1, maxRetryDelayMs: 60_000 } },
+		);
+
+		expect(attempts).toBe(1);
+		expect(result.stopReason).toBe("error");
+	});
 });
