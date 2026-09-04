@@ -1884,6 +1884,65 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(response.data?.workerState).toBe("ready");
 	});
 
+	it("joins an in-flight recovery instead of failing a concurrent forwarded command", async () => {
+		const root = {
+			id: "active-race",
+			activeSessionId: "active-race",
+			sessionId: "session-race",
+			cwd: "/tmp",
+		} as SessionSummary;
+		const request = vi.fn(async () => ({
+			type: "response",
+			command: "get_state",
+			success: true,
+			data: root,
+		}));
+		const worker = {
+			descriptor: {
+				workerId: "worker-race",
+				rootActiveSessionId: "active-race",
+				rootSessionId: "session-race",
+				lifecycle: "failed" as string,
+				pid: process.pid,
+				processStartId: getProcessStartId(process.pid),
+			},
+			client: undefined as { request: ReturnType<typeof vi.fn> } | undefined,
+			recovery: undefined as Promise<void> | undefined,
+			summaries: new Map<string, SessionSummary>(),
+			intentionalStop: false,
+		};
+		const release = createDeferred<void>();
+		const recoverWorker = vi.fn(() => {
+			worker.recovery = release.promise.then(() => {
+				worker.descriptor.lifecycle = "ready";
+				worker.client = { request };
+				worker.recovery = undefined;
+			});
+			return worker.recovery;
+		});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			clients: new Set(),
+			persistWorker: vi.fn(),
+			recoverWorker,
+		}) as unknown as {
+			forwardToWorker(
+				target: typeof worker,
+				command: { type: "get_state"; activeSessionId: string },
+			): Promise<{ success: boolean }>;
+		};
+
+		const first = supervisor.forwardToWorker(worker, { type: "get_state", activeSessionId: "active-race" });
+		await Promise.resolve();
+		const second = supervisor.forwardToWorker(worker, { type: "get_state", activeSessionId: "active-race" });
+		await Promise.resolve();
+		release.resolve();
+		const [firstResponse, secondResponse] = await Promise.all([first, second]);
+		expect(firstResponse.success).toBe(true);
+		expect(secondResponse.success).toBe(true);
+		expect(recoverWorker).toHaveBeenCalledOnce();
+	});
+
 	it("runs at most one recovery ladder for a single attach touch", async () => {
 		const root = {
 			id: "active-double",

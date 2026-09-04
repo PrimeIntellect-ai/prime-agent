@@ -4987,6 +4987,10 @@ export class DaemonSupervisor {
 		// --attach-agent preflight's get_state lands here before any attach).
 		if (this.canRetryFailedWorker(worker)) {
 			await this.retryWorkerRecovery(worker);
+		} else if (worker.recovery) {
+			// A concurrent touch already started this recovery: join it instead of
+			// throwing mid-ladder (and instead of starting a second ladder).
+			await worker.recovery;
 		}
 		const client = this.requireAvailableWorkerClient(worker, command.type === "kill");
 		const response = await client.request(withoutCommandId(command), timeoutMs);
