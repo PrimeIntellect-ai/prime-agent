@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { SettingsManager } from "../src/core/settings-manager.js";
+import { FileSettingsStorage, SettingsManager } from "../src/core/settings-manager.js";
 
 describe("SettingsManager - External Edit Preservation", () => {
 	const testDir = join(process.cwd(), "test-settings-bug-tmp");
@@ -20,6 +20,26 @@ describe("SettingsManager - External Edit Preservation", () => {
 		if (existsSync(testDir)) {
 			rmSync(testDir, { recursive: true });
 		}
+	});
+
+	it("re-reads under the late first-write lock so a racing first writer is not discarded", () => {
+		const settingsPath = join(agentDir, "settings.json");
+		const storage = new FileSettingsStorage(projectDir, agentDir);
+		expect(existsSync(settingsPath)).toBe(false);
+
+		const seen: Array<string | undefined> = [];
+		storage.withLock("global", (current) => {
+			seen.push(current);
+			if (current === undefined) {
+				// A rival first writer lands between the unlocked read and the lock.
+				writeFileSync(settingsPath, JSON.stringify({ theme: "rival" }));
+				return JSON.stringify({ mine: true });
+			}
+			return JSON.stringify({ ...JSON.parse(current), mine: true });
+		});
+
+		expect(seen).toEqual([undefined, JSON.stringify({ theme: "rival" })]);
+		expect(JSON.parse(readFileSync(settingsPath, "utf-8"))).toEqual({ theme: "rival", mine: true });
 	});
 
 	it("should preserve file changes to packages array when changing unrelated setting", async () => {
