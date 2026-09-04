@@ -1,6 +1,17 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { type FileHandle, lstat, mkdir, open, readdir } from "node:fs/promises";
 import process from "node:process";
+import {
+	type Clock,
+	createSandboxLifecycle,
+	type DelayFn,
+	type DeleteProof,
+	type LifecycleConfig,
+	type ProofConsumer,
+	type RunCommand,
+	type SandboxLifecycle,
+} from "./sandbox/prime-sandbox-lifecycle.js";
 import {
 	createPreAdmitOwnershipRecord,
 	decideNonDeletedOwnershipTransition,
@@ -697,4 +708,423 @@ export async function createOwnershipJournal(
 			dT(u, jP, jD, jI, sessionRoot, rD, rI, tg, i, t),
 	});
 	return Object.freeze({ ok: true, value: Object.freeze(j) });
+}
+
+// ── V4 Deletion composition types ──────────────────────────
+
+export type OwnershipDeletionCode = OwnershipJournalCode | "LIFECYCLE_FAILED" | "PROOF_INVALID";
+
+export type OwnershipDeletionResult = Readonly<{ ok: true } | { ok: false; code: OwnershipDeletionCode }>;
+
+export type OwnershipDeletionFactoryResult = Readonly<
+	| {
+			ok: true;
+			value: Readonly<{
+				lifecycle: SandboxLifecycle;
+				finalizeDeleted: (proof: DeleteProof, recordedAt: string) => Promise<OwnershipDeletionResult>;
+			}>;
+	  }
+	| { ok: false; code: OwnershipDeletionCode }
+>;
+
+// ── V4 typed result constructors (no assertions) ──────────
+
+function delOk(): OwnershipDeletionResult {
+	return Object.freeze({ ok: true });
+}
+
+function delFail(code: OwnershipDeletionCode): OwnershipDeletionResult {
+	return Object.freeze({ ok: false, code });
+}
+
+type DeletionBundle = Readonly<{
+	lifecycle: SandboxLifecycle;
+	finalizeDeleted: (proof: DeleteProof, recordedAt: string) => Promise<OwnershipDeletionResult>;
+}>;
+
+function factOk(value: DeletionBundle): OwnershipDeletionFactoryResult {
+	return Object.freeze({ ok: true, value: Object.freeze(value) });
+}
+
+function factFail(code: OwnershipDeletionCode): OwnershipDeletionFactoryResult {
+	return Object.freeze({ ok: false, code });
+}
+
+// ── V4 canonical timestamp and digest checks ──────────────
+
+const HEX_64_RE: RegExp = /^[0-9a-f]{64}$/;
+
+function validTimestampMs(v: unknown): v is string {
+	if (typeof v !== "string") return false;
+	const d = new Date(v);
+	return Number.isFinite(d.getTime()) && d.toISOString() === v;
+}
+
+function validDigest64(v: unknown): v is string {
+	return typeof v === "string" && HEX_64_RE.test(v);
+}
+
+function canonicalDeletedPrefix(
+	sequence: 6,
+	intent: OwnershipIntent,
+	recordedAt: string,
+	previousDigest: string | null,
+): string {
+	return `{"version":1,"sequence":${sequence},"stage":"deleted","lifecycleKey":${JSON.stringify(intent.lifecycleKey)},"parentSessionId":${JSON.stringify(intent.parentSessionId)},"childSessionId":${JSON.stringify(intent.childSessionId)},"recordedAt":${JSON.stringify(recordedAt)},"previousDigest":${previousDigest === null ? "null" : JSON.stringify(previousDigest)}`;
+}
+
+function digestHex(prefix: string): string | undefined {
+	const bytes = new TextEncoder().encode(prefix);
+	let digest: string;
+	try {
+		digest = createHash("sha256").update(bytes).digest("hex");
+	} catch {
+		ev(bytes);
+		return undefined;
+	}
+	if (!ev(bytes)) return undefined;
+	return digest;
+}
+
+function produceDeletedRecordBytes(
+	intent: OwnershipIntent,
+	recordedAt: string,
+	previousDigest: string | null,
+): Uint8Array | undefined {
+	if (!validTimestampMs(recordedAt)) return undefined;
+	if (previousDigest !== null && !validDigest64(previousDigest)) return undefined;
+	const prefix = canonicalDeletedPrefix(6, intent, recordedAt, previousDigest);
+	const cd = digestHex(prefix);
+	if (cd === undefined) return undefined;
+	const full = new TextEncoder().encode(`${prefix},"contentDigest":${JSON.stringify(cd)}}`);
+	if (full.byteLength > MAX_SZ) {
+		ev(full);
+		return undefined;
+	}
+	return full;
+}
+
+function buildDeletedRecordFromBytes(bytes: Uint8Array): OwnershipRecord | undefined {
+	const dd = decodeOwnershipRecord(bytes);
+	if (!dd.ok) return undefined;
+	return dd.value;
+}
+
+function buildSixChain(existing: ValidatedOwnershipChain, deletedRecord: OwnershipRecord): readonly OwnershipRecord[] {
+	const all = [...existing.records, deletedRecord];
+	return Object.freeze(all);
+}
+
+function validateDeletedCandidateSixChain(existing: ValidatedOwnershipChain, deletedRecord: OwnershipRecord): boolean {
+	const all = buildSixChain(existing, deletedRecord);
+	const cv = validateOwnershipChain(all);
+	return cv.ok;
+}
+
+// ── V4 copyIntentViaPreAdmit (captured descriptor values) ──
+
+const FIXED_COPY_TIMESTAMP = "2026-09-04T01:02:03.004Z";
+
+function copyIntentViaPreAdmit(value: unknown): OwnershipIntent | undefined {
+	if (typeof value !== "object" || value === null) return undefined;
+	try {
+		const proto = Object.getPrototypeOf(value);
+		if (proto !== Object.prototype) return undefined;
+
+		const ownKeys: readonly (string | symbol)[] = Reflect.ownKeys(value);
+		if (ownKeys.length !== 3) return undefined;
+		for (const k of ownKeys) {
+			if (typeof k !== "string") return undefined;
+			if (k !== "lifecycleKey" && k !== "parentSessionId" && k !== "childSessionId") return undefined;
+		}
+
+		// Capture descriptor values — no Proxy get traps
+		const lkD = Object.getOwnPropertyDescriptor(value, "lifecycleKey");
+		if (lkD === undefined || !Object.hasOwn(lkD, "value") || !lkD.enumerable) return undefined;
+		const psD = Object.getOwnPropertyDescriptor(value, "parentSessionId");
+		if (psD === undefined || !Object.hasOwn(psD, "value") || !psD.enumerable) return undefined;
+		const csD = Object.getOwnPropertyDescriptor(value, "childSessionId");
+		if (csD === undefined || !Object.hasOwn(csD, "value") || !csD.enumerable) return undefined;
+
+		const lifecycleKey: unknown = lkD.value;
+		const parentSessionId: unknown = psD.value;
+		const childSessionId: unknown = csD.value;
+
+		if (
+			typeof lifecycleKey !== "string" ||
+			typeof parentSessionId !== "string" ||
+			typeof childSessionId !== "string"
+		) {
+			return undefined;
+		}
+
+		const wrapper: OwnershipIntent = Object.freeze({
+			lifecycleKey,
+			parentSessionId,
+			childSessionId,
+		});
+		const result = createPreAdmitOwnershipRecord(wrapper, FIXED_COPY_TIMESTAMP);
+		if (!result.ok) return undefined;
+
+		const record = result.value.record;
+		const intent: OwnershipIntent = Object.freeze({
+			lifecycleKey: record.lifecycleKey,
+			parentSessionId: record.parentSessionId,
+			childSessionId: record.childSessionId,
+		});
+		if (!result.value.payload.discard()) return undefined;
+		return intent;
+	} catch {
+		return undefined;
+	}
+}
+
+// ── V4 helper predicates ──────────────────────────────────
+
+function sameBoundIntent(a: OwnershipIntent, b: OwnershipIntent): boolean {
+	return (
+		a.lifecycleKey === b.lifecycleKey &&
+		a.parentSessionId === b.parentSessionId &&
+		a.childSessionId === b.childSessionId
+	);
+}
+
+function expectDeletingSeq5(chain: ValidatedOwnershipChain, intent: OwnershipIntent): boolean {
+	const cur = chain.current;
+	if (cur.sequence !== 5) return false;
+	if (cur.stage !== "deleting") return false;
+	if (!sameBoundIntent(chain.intent, intent)) return false;
+	return true;
+}
+
+function laterTimestamp(a: string, b: string): boolean {
+	return Number.isFinite(Date.parse(a)) && Number.isFinite(Date.parse(b)) && Date.parse(a) > Date.parse(b);
+}
+
+// ── V4 Factory ─────────────────────────────────────────────
+
+/**
+ * Create an ownership journal with V4 deletion composition.
+ *
+ * Requires an existing nonempty journal with exact sequence 5 "deleting"
+ * bound to the given OwnershipIntent. Calls createSandboxLifecycle only
+ * after ownership recovery validates the chain. Returns the lifecycle and
+ * a narrow finalizeDeleted closure.
+ */
+export async function createOwnershipJournalWithDeletion(
+	sessionRoot: string,
+	boundIntent: OwnershipIntent,
+	runCommand: RunCommand,
+	config: LifecycleConfig,
+	clock?: Clock,
+	delay?: DelayFn,
+): Promise<OwnershipDeletionFactoryResult> {
+	if (!isValidPath(sessionRoot)) return factFail("INPUT_INVALID");
+
+	const intent = copyIntentViaPreAdmit(boundIntent);
+	if (intent === undefined) return factFail("INPUT_INVALID");
+
+	const u = process.getuid?.();
+	if (u === undefined || typeof u !== "number" || !Number.isFinite(u) || u < 0) return factFail("DIRECTORY_UNSAFE");
+
+	let rs: Awaited<ReturnType<typeof lstat>>;
+	try {
+		rs = await lstat(sessionRoot);
+	} catch {
+		return factFail("DIRECTORY_UNSAFE");
+	}
+	if (rs.isSymbolicLink() || !rs.isDirectory()) return factFail("DIRECTORY_UNSAFE");
+	if (rs.uid !== u || (rs.mode & 0o7777) !== D_MODE) return factFail("DIRECTORY_UNSAFE");
+	const rD = rs.dev,
+		rI = rs.ino;
+
+	const ro = await oD(u, sessionRoot, rD, rI);
+	if (!ro.ok) return factFail("DIRECTORY_UNSAFE");
+	const rc = await cl(ro.fd);
+	if (rc !== "ok") return factFail("IO_UNCERTAIN");
+
+	const jP = `${sessionRoot}/${J_DIR}`;
+
+	let jDirStat: Awaited<ReturnType<typeof lstat>>;
+	try {
+		jDirStat = await lstat(jP);
+	} catch {
+		return factFail("DIRECTORY_UNSAFE");
+	}
+	if (jDirStat.isSymbolicLink() || !jDirStat.isDirectory()) return factFail("DIRECTORY_UNSAFE");
+	if (jDirStat.uid !== u || (jDirStat.mode & 0o7777) !== D_MODE) return factFail("DIRECTORY_UNSAFE");
+	const jDirDev = jDirStat.dev,
+		jDirIno = jDirStat.ino;
+
+	const jo = await oD(u, jP, jDirDev, jDirIno);
+	if (!jo.ok) return factFail(jo.code);
+	const jc = await cl(jo.fd);
+	if (jc !== "ok") return factFail("IO_UNCERTAIN");
+
+	const ss = await sD(u, sessionRoot, rD, rI);
+	if (ss !== "ok") return factFail(ss.code);
+
+	// Recover existing journal — must be nonempty and at seq5 deleting
+	const preRecovered = await rC(u, jP, jDirDev, jDirIno, false);
+	if (!preRecovered.ok) return factFail(preRecovered.code);
+
+	if (!expectDeletingSeq5(preRecovered.chain, intent)) return factFail("CORRUPT");
+
+	// Only now call createSandboxLifecycle
+	const lifecycleResult = await createSandboxLifecycle(runCommand, config, clock, delay);
+	if (!lifecycleResult.ok) return factFail("LIFECYCLE_FAILED");
+
+	const bundle = lifecycleResult.value;
+	const lifecycle: SandboxLifecycle = bundle.lifecycle;
+	const proofConsumer: ProofConsumer = bundle.proofConsumer;
+
+	// Closure-private V4 state
+	const retryState = new WeakMap<DeleteProof, OwnershipRecord>();
+	const completed = new WeakSet<DeleteProof>();
+
+	const finalizeDeleted = async (proof: DeleteProof, recordedAt: string): Promise<OwnershipDeletionResult> => {
+		try {
+			if (completed.has(proof)) return delFail("PROOF_INVALID");
+
+			const expected = retryState.get(proof);
+			const isRetry = expected !== undefined;
+
+			// Recover chain (always first)
+			const chainResult = await rC(u, jP, jDirDev, jDirIno, false);
+			if (!chainResult.ok) return delFail(chainResult.code);
+			const chain = chainResult.chain;
+
+			if (isRetry) {
+				// ── Retry path ──────────────────────────────────────
+
+				// Accept exact full seq6 match before requiring seq5
+				if (chain.records.length === 6) {
+					const last = chain.records[5];
+					if (
+						last.sequence === 6 &&
+						last.stage === "deleted" &&
+						recEq(last, expected) &&
+						sameBoundIntent(chain.intent, intent)
+					) {
+						retryState.delete(proof);
+						completed.add(proof);
+						return delOk();
+					}
+					return delFail("CORRUPT");
+				}
+
+				// Still on seq5 — validate and re-publish
+				if (!expectDeletingSeq5(chain, intent)) return delFail("CORRUPT");
+
+				// A retry is authority for exactly the stored candidate, including its timestamp.
+				if (recordedAt !== expected.recordedAt) return delFail("INPUT_INVALID");
+				const storedRecordedAt: string = expected.recordedAt;
+				const storedPreviousDigest: string | null = expected.previousDigest;
+
+				// Regenerate canonical bytes from stored record
+				const regenBytes = produceDeletedRecordBytes(intent, storedRecordedAt, storedPreviousDigest);
+				if (regenBytes === undefined) return delFail("CORRUPT");
+
+				const pubBytes = new Uint8Array(regenBytes);
+				try {
+					const redecoded = buildDeletedRecordFromBytes(new Uint8Array(regenBytes));
+					if (redecoded === undefined || !recEq(redecoded, expected)) return delFail("CORRUPT");
+
+					const pub = await pRec(u, rp(jP, 6), pubBytes, redecoded, jP, jDirDev, jDirIno, sessionRoot, rD, rI);
+					if (!pub.ok) return delFail(pub.code);
+
+					// Post-publish verification
+					const pp = await rC(u, jP, jDirDev, jDirIno, false);
+					if (!pp.ok || pp.chain.records.length !== 6) return delFail("IO_UNCERTAIN");
+					const pl = pp.chain.records[5];
+					if (
+						pl.sequence !== 6 ||
+						pl.stage !== "deleted" ||
+						!recEq(pl, redecoded) ||
+						!sameBoundIntent(pp.chain.intent, intent)
+					)
+						return delFail("IO_UNCERTAIN");
+
+					retryState.delete(proof);
+					completed.add(proof);
+					return delOk();
+				} finally {
+					ev(pubBytes);
+					ev(regenBytes);
+				}
+			}
+
+			// ── First attempt path ────────────────────────────────
+
+			if (!validTimestampMs(recordedAt)) return delFail("INPUT_INVALID");
+
+			if (!expectDeletingSeq5(chain, intent)) return delFail("CORRUPT");
+
+			if (!laterTimestamp(recordedAt, chain.current.recordedAt)) return delFail("INPUT_INVALID");
+
+			// Build candidate sequence-6 record privately
+			const seq5Digest = chain.current.contentDigest;
+			const candidateBytes = produceDeletedRecordBytes(intent, recordedAt, seq5Digest);
+			if (candidateBytes === undefined) return delFail("INPUT_INVALID");
+
+			let candidateRec: OwnershipRecord | undefined;
+			let pubBytes: Uint8Array | undefined;
+			try {
+				const decodeBytes = new Uint8Array(candidateBytes);
+				candidateRec = buildDeletedRecordFromBytes(decodeBytes);
+				if (!ev(decodeBytes)) return delFail("IO_UNCERTAIN");
+				if (candidateRec === undefined) return delFail("CORRUPT");
+
+				// Validate candidate six-chain BEFORE consuming proof
+				if (!validateDeletedCandidateSixChain(chain, candidateRec)) return delFail("CORRUPT");
+
+				// Consume genuine proof BEFORE setting retry auth
+				const consumeResult = proofConsumer.consumeProof(proof);
+				if (!consumeResult.ok) return delFail("PROOF_INVALID");
+
+				// Set retry authorization synchronously AFTER successful proof consumption
+				retryState.set(proof, candidateRec);
+
+				// Publish with O_EXCL in caught try — auth already set
+				pubBytes = new Uint8Array(candidateBytes);
+				try {
+					const pub = await pRec(u, rp(jP, 6), pubBytes, candidateRec, jP, jDirDev, jDirIno, sessionRoot, rD, rI);
+					if (!pub.ok) {
+						// IO_UNCERTAIN — retryState retains authorization
+						return delFail(pub.code);
+					}
+
+					// Post-publish recovery and exact equality check
+					const pp = await rC(u, jP, jDirDev, jDirIno, false);
+					if (!pp.ok || pp.chain.records.length !== 6) return delFail("IO_UNCERTAIN");
+					const pl = pp.chain.records[5];
+					if (
+						pl.sequence !== 6 ||
+						pl.stage !== "deleted" ||
+						!recEq(pl, candidateRec) ||
+						!sameBoundIntent(pp.chain.intent, intent)
+					)
+						return delFail("IO_UNCERTAIN");
+
+					// Success — clear retry auth
+					retryState.delete(proof);
+					completed.add(proof);
+					return delOk();
+				} finally {
+					ev(pubBytes);
+				}
+			} finally {
+				ev(candidateBytes);
+			}
+		} catch {
+			// Never propagate exception
+			return delFail("IO_UNCERTAIN");
+		}
+	};
+
+	const value: DeletionBundle = Object.freeze({
+		lifecycle,
+		finalizeDeleted,
+	});
+	return factOk(value);
 }
