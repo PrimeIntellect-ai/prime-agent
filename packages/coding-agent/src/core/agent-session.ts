@@ -220,9 +220,11 @@ import {
 	createRlmListSubagentsHostHandler,
 	createRlmRunHostHandler,
 	findRlmModelMatches,
+	normalizeRequestedRlmSandbox,
 	normalizeRequestedRlmSubagentModel,
 	normalizeRequestedRlmSubagentSessionName,
 	normalizeRequestedRlmSubagentThinkingLevel,
+	RLM_SANDBOX_UNAVAILABLE_MESSAGE,
 	type RlmDeleteSubagentResult,
 	type RlmFindModelsResult,
 	type RlmListSubagentsResult,
@@ -230,6 +232,7 @@ import {
 	type RlmSubagentRegistryEntry,
 	type RlmSubagentRuntime,
 	type SubagentRuntimeHost,
+	snapshotRlmRunKwargs,
 } from "./rlm-runtime.js";
 import {
 	modelRequestHeaders,
@@ -9623,6 +9626,7 @@ export class AgentSession {
 	}
 
 	private async _createRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): Promise<RlmSubagentRuntime> {
+		if (options.sandbox === true) throw new Error(RLM_SANDBOX_UNAVAILABLE_MESSAGE);
 		if (this._subagentRuntimeHost) {
 			return await this._subagentRuntimeHost.createRlmSubagentRuntime(options);
 		}
@@ -9631,6 +9635,7 @@ export class AgentSession {
 	}
 
 	private _createInlineRlmSubagentRuntime(options: CreateRlmSubagentRuntimeOptions): RlmSubagentRuntime {
+		if (options.sandbox === true) throw new Error(RLM_SANDBOX_UNAVAILABLE_MESSAGE);
 		const childSessionManager = SessionManager.create(this._cwd, options.sessionDir);
 		if (options.parentSession.sessionFile) {
 			childSessionManager.newSession({
@@ -10556,14 +10561,18 @@ export class AgentSession {
 		// executing now. A spawn arriving outside an active run (a detached kernel task
 		// firing while the parent is idle) has no such turn; an absent edge beats a wrong one.
 		const spawnedByRequestId = this.isStreaming ? this._semanticEdges.lastTurnRequestId : undefined;
-		const { name: rawName, model: rawModel, thinking: rawThinking, ...unsupported } = kwargs;
-		const unsupportedKwargs = Object.keys(unsupported);
+		const kwargSnapshot = snapshotRlmRunKwargs(kwargs);
+		const requestedSandbox = normalizeRequestedRlmSandbox(kwargSnapshot.sandbox);
+		const unsupportedKwargs = [...kwargSnapshot.unsupported];
 		if (unsupportedKwargs.length > 0) {
 			throw new Error(`Unsupported rlm.run kwargs: ${unsupportedKwargs.sort().join(", ")}`);
 		}
-		const requestedSessionName = normalizeRequestedRlmSubagentSessionName(rawName);
-		const requestedModel = normalizeRequestedRlmSubagentModel(rawModel);
-		const requestedThinkingLevel = normalizeRequestedRlmSubagentThinkingLevel(rawThinking);
+		if (requestedSandbox) {
+			throw new Error(RLM_SANDBOX_UNAVAILABLE_MESSAGE);
+		}
+		const requestedSessionName = normalizeRequestedRlmSubagentSessionName(kwargSnapshot.name);
+		const requestedModel = normalizeRequestedRlmSubagentModel(kwargSnapshot.model);
+		const requestedThinkingLevel = normalizeRequestedRlmSubagentThinkingLevel(kwargSnapshot.thinking);
 		if (requestedSessionName) assertDirectAgentMessageTarget(requestedSessionName);
 		if (this._rlmDepth >= this._rlmMaxDepth) {
 			throw new Error(
