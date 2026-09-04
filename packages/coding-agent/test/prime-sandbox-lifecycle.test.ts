@@ -159,7 +159,7 @@ describe("Inspect", () => {
 		has_next: false,
 	});
 
-	it("empty returns permission", async () => {
+	it("empty returns permission+absenceProof pair", async () => {
 		const r = await createSandboxLifecycle(
 			mkR(
 				new Map([
@@ -175,7 +175,7 @@ describe("Inspect", () => {
 		expect(i.ok).toBe(true);
 		if (!i.ok) return;
 		expect(i.kind).toBe("empty");
-		expect(Object.keys(i.value)).toEqual([]);
+		expect(Object.keys(i.value)).toEqual(["createPermission", "absenceProof"]);
 	});
 	it("single returns handle", async () => {
 		const r = await createSandboxLifecycle(
@@ -268,7 +268,7 @@ describe("Create", () => {
 		const insp = await r.value.lifecycle.inspect();
 		expect(insp.ok).toBe(true);
 		if (!insp.ok || insp.kind !== "empty") return;
-		const cr = await r.value.lifecycle.create(insp.value);
+		const cr = await r.value.lifecycle.create(insp.value.createPermission);
 		expect(cr.ok).toBe(true);
 		if (cr.ok) expect(Object.keys(cr.value)).toEqual([]);
 	});
@@ -289,8 +289,8 @@ describe("Create", () => {
 		const insp = await r.value.lifecycle.inspect();
 		expect(insp.ok).toBe(true);
 		if (!insp.ok || insp.kind !== "empty") return;
-		await r.value.lifecycle.create(insp.value);
-		const s = await r.value.lifecycle.create(insp.value);
+		await r.value.lifecycle.create(insp.value.createPermission);
+		const s = await r.value.lifecycle.create(insp.value.createPermission);
 		expect(s.ok).toBe(false);
 		if (!s.ok) expect(s.code).toBe("TOKEN_CONSUMED");
 	});
@@ -318,7 +318,7 @@ describe("Create", () => {
 		const insp = await r.value.lifecycle.inspect();
 		expect(insp.ok).toBe(true);
 		if (!insp.ok || insp.kind !== "empty") return;
-		const cr = await r.value.lifecycle.create(insp.value);
+		const cr = await r.value.lifecycle.create(insp.value.createPermission);
 		expect(cr.ok).toBe(false);
 		if (!cr.ok) expect(cr.code).toBe("RECOVERY_REQUIRED");
 	});
@@ -544,7 +544,7 @@ describe("Edge", () => {
 		const a2 = await createSandboxLifecycle(mkR(new Map([[VK, VR]])), vc());
 		expect(a2.ok).toBe(true);
 		if (!a2.ok) return;
-		const cr = await a2.value.lifecycle.create(insp.value);
+		const cr = await a2.value.lifecycle.create(insp.value.createPermission);
 		expect(cr.ok).toBe(false);
 		if (!cr.ok) expect(cr.code).toBe("TOKEN_INVALID");
 	});
@@ -933,5 +933,84 @@ describe("Hostile runner result validation", () => {
 		});
 		const result = await createSandboxLifecycle(async () => proxiedVersion, vc());
 		expect(result.ok).toBe(true);
+	});
+});
+
+describe("Inspect empty absence proof", () => {
+	it("is genuine, frozen, one-shot, and factory-bound", async () => {
+		const first = await createSandboxLifecycle(
+			mkR(
+				new Map([
+					[VK, VR],
+					[LK, ok(emptyJ())],
+				]),
+			),
+			vc(),
+		);
+		expect(first.ok).toBe(true);
+		if (!first.ok) return;
+		const inspected = await first.value.lifecycle.inspect();
+		expect(inspected.ok).toBe(true);
+		if (!inspected.ok || inspected.kind !== "empty") return;
+		expect(Object.isFrozen(inspected.value)).toBe(true);
+
+		const second = await createSandboxLifecycle(mkR(new Map([[VK, VR]])), vc());
+		expect(second.ok).toBe(true);
+		if (!second.ok) return;
+		expect(second.value.proofConsumer.consumeProof(inspected.value.absenceProof)).toEqual({
+			ok: false,
+			code: "PROOF_INVALID",
+		});
+		expect(first.value.proofConsumer.consumeProof(inspected.value.absenceProof)).toEqual({ ok: true });
+		expect(first.value.proofConsumer.consumeProof(inspected.value.absenceProof)).toEqual({
+			ok: false,
+			code: "PROOF_INVALID",
+		});
+	});
+
+	it("permission use invalidates its paired proof before a failed create", async () => {
+		const runner: RunCommand = (argv) => {
+			const key = mk(argv);
+			if (key === VK) return Promise.resolve(VR);
+			if (key === LK) return Promise.resolve(ok(emptyJ()));
+			return Promise.resolve(fail("SPAWN_FAILED"));
+		};
+		const created = await createSandboxLifecycle(runner, vc());
+		expect(created.ok).toBe(true);
+		if (!created.ok) return;
+		const inspected = await created.value.lifecycle.inspect();
+		expect(inspected.ok).toBe(true);
+		if (!inspected.ok || inspected.kind !== "empty") return;
+		expect(await created.value.lifecycle.create(inspected.value.createPermission)).toEqual({
+			ok: false,
+			code: "RECOVERY_REQUIRED",
+		});
+		expect(created.value.proofConsumer.consumeProof(inspected.value.absenceProof)).toEqual({
+			ok: false,
+			code: "PROOF_INVALID",
+		});
+	});
+
+	it("proof use invalidates its paired permission before provider effects", async () => {
+		let providerEffects = 0;
+		const runner: RunCommand = (argv) => {
+			const key = mk(argv);
+			if (key === VK) return Promise.resolve(VR);
+			if (key === LK) return Promise.resolve(ok(emptyJ()));
+			providerEffects++;
+			return Promise.resolve(ok(""));
+		};
+		const created = await createSandboxLifecycle(runner, vc());
+		expect(created.ok).toBe(true);
+		if (!created.ok) return;
+		const inspected = await created.value.lifecycle.inspect();
+		expect(inspected.ok).toBe(true);
+		if (!inspected.ok || inspected.kind !== "empty") return;
+		expect(created.value.proofConsumer.consumeProof(inspected.value.absenceProof)).toEqual({ ok: true });
+		expect(await created.value.lifecycle.create(inspected.value.createPermission)).toEqual({
+			ok: false,
+			code: "TOKEN_CONSUMED",
+		});
+		expect(providerEffects).toBe(0);
 	});
 });

@@ -88,7 +88,11 @@ class DeleteProofToken {
 export type DeleteProof = DeleteProofToken;
 
 export type InspectOutcome =
-	| Readonly<{ ok: true; kind: "empty"; value: CreatePermission }>
+	| Readonly<{
+			ok: true;
+			kind: "empty";
+			value: Readonly<{ createPermission: CreatePermission; absenceProof: DeleteProof }>;
+	  }>
 	| Readonly<{ ok: true; kind: "single"; value: SandboxHandle }>
 	| Readonly<{ ok: false; code: "COLLISION" }>
 	| LifecycleError;
@@ -330,8 +334,8 @@ function defaultDelay(ms: number, signal?: AbortSignal): Promise<DelayResult> {
 
 // -- Typed result constructors --
 
-function okEmpty(p: CreatePermission): InspectOutcome {
-	return Object.freeze({ ok: true, kind: "empty", value: p });
+function okEmpty(p: CreatePermission, absenceProof: DeleteProof): InspectOutcome {
+	return Object.freeze({ ok: true, kind: "empty", value: Object.freeze({ createPermission: p, absenceProof }) });
 }
 
 function okSingle(h: SandboxHandle): InspectOutcome {
@@ -472,6 +476,9 @@ export async function createSandboxLifecycle(
 	if (versionResult.value.exitCode !== 0 || versionResult.value.stderr !== "") return err("VERSION_MISMATCH");
 	if (!parsePrimeCliVersionOutput(versionResult.value.stdout).ok) return err("VERSION_MISMATCH");
 
+	// One Home session owner serializes lifecycle effects. Provider-side
+	// same-label mutations remain outside this local token protocol.
+
 	// Closure-private state
 	const handleIdMap = new WeakMap<SandboxHandleToken, string>();
 	const deleteIssued = new WeakSet<SandboxHandleToken>();
@@ -479,6 +486,8 @@ export async function createSandboxLifecycle(
 	const createUsed = new WeakSet<CreatePermissionToken>();
 	const proofSet = new WeakSet<DeleteProofToken>();
 	const proofConsumed = new WeakSet<DeleteProofToken>();
+	const permToPairedProof = new WeakMap<CreatePermissionToken, DeleteProofToken>();
+	const proofToPairedPerm = new WeakMap<DeleteProofToken, CreatePermissionToken>();
 
 	function newHandle(id: string): SandboxHandle {
 		const o = new SandboxHandleToken();
@@ -499,6 +508,8 @@ export async function createSandboxLifecycle(
 		if (!createPerms.has(p)) return "invalid";
 		if (createUsed.has(p)) return "used";
 		createUsed.add(p);
+		const pairedProof = permToPairedProof.get(p);
+		if (pairedProof !== undefined) proofConsumed.add(pairedProof);
 		return "ok";
 	}
 
@@ -514,6 +525,8 @@ export async function createSandboxLifecycle(
 		if (!proofSet.has(p)) return false;
 		if (proofConsumed.has(p)) return false;
 		proofConsumed.add(p);
+		const pairedPerm = proofToPairedPerm.get(p);
+		if (pairedPerm !== undefined) createUsed.add(pairedPerm);
 		return true;
 	}
 
@@ -683,7 +696,13 @@ export async function createSandboxLifecycle(
 			const s = await scanAll(d, sig);
 			if (!s.ok) return s;
 
-			if (s.rows.length === 0) return okEmpty(newPerm());
+			if (s.rows.length === 0) {
+				const perm = newPerm();
+				const proof = newProof();
+				permToPairedProof.set(perm, proof);
+				proofToPairedPerm.set(proof, perm);
+				return okEmpty(perm, proof);
+			}
 			for (const r of s.rows) {
 				if (r.status === "TERMINATED") return err("UNCERTAIN");
 			}
