@@ -2,7 +2,7 @@
 // (`python -m rlm.repl`) — requests on stdin, events on stdout, stderr kept as
 // a diagnostics tail. The protocol is documented in prime-agent-runtime/src/rlm/repl.md.
 import { type ChildProcess, spawn } from "node:child_process";
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readSync, renameSync, rmSync, statSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { v4 as uuid } from "uuid";
@@ -60,6 +60,7 @@ const MAX_BACKGROUND_OUTPUT_CHARS = 64 * 1024;
 
 const MAX_KERNEL_STDERR_CHARS = 8 * 1024;
 const MAX_KERNEL_STDERR_LOG_BYTES = 5 * 1024 * 1024;
+const KERNEL_STDERR_LOG_BUDGET_MARKER = "[stderr log budget exhausted]\n";
 
 /** ExecuteResult plus the raw fields of the request's `done` event (state ops). */
 interface InternalExecuteResult extends ExecuteResult {
@@ -223,9 +224,8 @@ export class ReplKernelManager {
 	}
 
 	/**
-	 * The runtime dup2's fd 2 into its protocol pump before ready (repl.py
-	 * _setup_fds), so this file only ever receives startup-bounded pre-ready
-	 * bytes; rotating once per spawn is enough.
+	 * Rotation at open plus the per-spawn write budget cap per-session disk at
+	 * roughly 2x MAX_KERNEL_STDERR_LOG_BYTES (current file + `.old`).
 	 */
 	private openStderrLogFd(): number | undefined {
 		const path = this.options.stderrLogPath;
@@ -242,29 +242,6 @@ export class ReplKernelManager {
 			this.appendKernelDiagnostic(`cannot open kernel stderr log: ${errorMessage(error)}`);
 			return undefined;
 		}
-	}
-
-	private stderrTail(): string {
-		let fileTail = "";
-		if (this.options.stderrLogPath) {
-			try {
-				// Positional read of the tail only: a kernel that spewed until the
-				// ready timeout can leave a log far too large to read whole.
-				const fd = openSync(this.options.stderrLogPath, "r");
-				try {
-					const size = fstatSync(fd).size;
-					const length = Math.min(size, 1024);
-					const buffer = Buffer.alloc(length);
-					readSync(fd, buffer, 0, length, size - length);
-					fileTail = buffer.toString("utf8");
-				} finally {
-					closeSync(fd);
-				}
-			} catch {
-				// Unreadable log; host diagnostics below still surface.
-			}
-		}
-		return `${fileTail}${this.kernelStderr}`.slice(-1024);
 	}
 
 	async start(options: KernelStartOptions = {}): Promise<void> {
@@ -312,23 +289,17 @@ export class ReplKernelManager {
 			throw new Error("Kernel was disposed during startup");
 		}
 
-		const stderrLogFd = this.openStderrLogFd();
-		let child: ChildProcess;
-		try {
-			child = spawn(python, ["-m", "rlm.repl"], {
-				cwd: this.options.cwd,
-				// bash.py journals its process groups under this pid so the host can
-				// reap them if the runtime dies without running its shutdown hook.
-				env: {
-					...process.env,
-					...this.options.env,
-					PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid),
-				},
-				stdio: ["pipe", "pipe", stderrLogFd ?? "pipe"],
-			});
-		} finally {
-			if (stderrLogFd !== undefined) closeSync(stderrLogFd);
-		}
+		const child = spawn(python, ["-m", "rlm.repl"], {
+			cwd: this.options.cwd,
+			// bash.py journals its process groups under this pid so the host can
+			// reap them if the runtime dies without running its shutdown hook.
+			env: {
+				...process.env,
+				...this.options.env,
+				PRIME_AGENT_KERNEL_OWNER_PID: String(process.pid),
+			},
+			stdio: ["pipe", "pipe", "pipe"],
+		});
 		this.child = child;
 		if (child.pid !== undefined) recordOrphanProcessState(child.pid, true);
 		this.readyDeferred = createDeferred<number>();
@@ -397,8 +368,47 @@ export class ReplKernelManager {
 			}
 		});
 
+		// The runtime dup2's fd 2 into its protocol pump before ready (repl.py
+		// _setup_fds), so this pipe only ever carries pre-ready bytes; the write
+		// budget caps what lands on disk, and once it is spent the handler keeps
+		// draining but discards (a blocked pipe would wedge a pre-ready kernel).
+		const stderrLogFd = this.openStderrLogFd();
+		const stderrDecoder = new StringDecoder("utf8");
+		let stderrLogBudget = MAX_KERNEL_STDERR_LOG_BYTES;
+		let stderrLogWritable = stderrLogFd !== undefined;
+		let stderrChunks = 0;
 		child.stderr?.on("data", (buf: Buffer) => {
-			this.appendKernelStderrText(buf.toString());
+			stderrChunks++;
+			this.appendKernelStderrText(stderrDecoder.write(buf));
+			if (!stderrLogWritable || stderrLogFd === undefined) return;
+			try {
+				if (buf.length <= stderrLogBudget) {
+					writeSync(stderrLogFd, buf);
+					stderrLogBudget -= buf.length;
+				} else {
+					writeSync(stderrLogFd, KERNEL_STDERR_LOG_BUDGET_MARKER);
+					stderrLogWritable = false;
+				}
+			} catch (error) {
+				stderrLogWritable = false;
+				this.appendKernelDiagnostic(`kernel stderr log write failed: ${errorMessage(error)}`);
+			}
+		});
+		if (stderrLogFd !== undefined) {
+			child.stderr?.once("close", () => closeSync(stderrLogFd));
+		}
+		child.once("exit", () => {
+			// Drain already-buffered stderr to quiescence, then destroy the stream:
+			// its EOF may never come (an orphaned grandchild can inherit the write
+			// end), and destroying at 'exit' would drop the kernel's last words.
+			const drain = () => {
+				const seen = stderrChunks;
+				globalThis.setImmediate(() => {
+					if (stderrChunks !== seen) drain();
+					else child.stderr?.destroy();
+				});
+			};
+			drain();
 		});
 
 		child.on("error", (err) => {
@@ -657,8 +667,16 @@ export class ReplKernelManager {
 			return await new Promise<number>((resolve, reject) => {
 				ready.promise.then(resolve, reject);
 				onExit = () => {
-					const tail = this.stderrTail();
-					reject(new Error(`Kernel exited before ready. stderr:\n${tail || "(empty)"}`));
+					const finish = () => {
+						const tail = this.kernelStderr.slice(-1024);
+						reject(new Error(`Kernel exited before ready. stderr:\n${tail || "(empty)"}`));
+					};
+					// The final stderr chunks can still be in flight at 'exit'; wait for
+					// the drained pipe so the tail includes the kernel's last words (the
+					// ready timeout stays armed, bounding the wait).
+					const stderr = child.stderr;
+					if (!stderr || stderr.closed) finish();
+					else stderr.once("close", finish);
 				};
 				if (child.exitCode !== null || child.signalCode !== null) {
 					onExit();
@@ -666,7 +684,7 @@ export class ReplKernelManager {
 				}
 				child.once("exit", onExit);
 				timeout = globalThis.setTimeout(() => {
-					const tail = this.stderrTail();
+					const tail = this.kernelStderr.slice(-1024);
 					reject(
 						new Error(
 							`Kernel did not become ready within ${READY_TIMEOUT_MS}ms. stderr tail:\n${tail || "(empty)"}`,
@@ -1226,7 +1244,8 @@ export class ReplKernelManager {
 		if (child) {
 			child.stdin?.destroy();
 			child.stdout?.destroy();
-			child.stderr?.destroy();
+			// stderr is not destroyed here: the exit-drain in wireChild owns it, so
+			// the kernel's buffered last words still reach the tail and the log.
 			const pid = child.pid;
 			let signaled = false;
 			try {

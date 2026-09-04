@@ -69,6 +69,38 @@ describe("ReplKernelManager startup", () => {
 		}
 	});
 
+	it("caps the stderr log at the write budget while draining pre-ready spew", async () => {
+		const python = join(tempDir, "python");
+		writeExecutable(
+			python,
+			[
+				"#!/bin/sh",
+				// 6 MiB of spew: over the 5 MiB write budget, and far beyond the pipe
+				// buffer, so the script only finishes if the host keeps draining.
+				"head -c 6291456 /dev/zero | tr '\\0' x >&2",
+				"printf 'SPEW TAIL' >&2",
+				"exit 42",
+				"",
+			].join("\n"),
+		);
+		const stderrLogPath = join(tempDir, "kernel-stderr.log");
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const manager = new ReplKernelManager({ python, cwd: tempDir, stderrLogPath });
+
+		try {
+			// The in-memory tail still surfaces the kernel's last words even though
+			// the on-disk log stopped at the budget.
+			await expect(manager.execute("print(1)")).rejects.toThrow(/Kernel exited before ready[\s\S]*SPEW TAIL/);
+			await manager.shutdown({ snapshot: true, drainHostRequests: true });
+			const marker = "[stderr log budget exhausted]\n";
+			const log = readFileSync(stderrLogPath, "utf8");
+			expect(log.endsWith(marker)).toBe(true);
+			expect(statSync(stderrLogPath).size).toBeLessThanOrEqual(5 * 1024 * 1024 + marker.length);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
 	it("rotates an oversized stderr log at spawn", async () => {
 		const python = join(tempDir, "python");
 		writeExecutable(python, ["#!/bin/sh", 'echo "fresh incarnation" >&2', "exit 42", ""].join("\n"));
