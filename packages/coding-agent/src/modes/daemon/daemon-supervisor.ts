@@ -3599,6 +3599,9 @@ export class DaemonSupervisor {
 		return (
 			worker.descriptor.lifecycle === "failed" &&
 			(this.workerStopCounts?.get(worker) ?? 0) === 0 &&
+			// A user-stopped worker stays stopped: the persisted stop markers gate
+			// on-touch retries, which only the explicit retry_worker command clears.
+			!this.isWorkerStopping(worker) &&
 			this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId) === "current"
 		);
 	}
@@ -4987,14 +4990,15 @@ export class DaemonSupervisor {
 				worker.descriptor.rootSessionId === command.activeSessionId,
 		);
 		if (descriptorWorker) {
-			const owned = descriptorWorker.descriptor.ownerClientId !== undefined;
-			if (owned && descriptorWorker.descriptor.ownerClientId !== this.protocolClientId(client)) {
-				throw new Error(`Unknown active session: ${command.activeSessionId}`);
-			}
-			this.assertTelemetryAttachAllowed(descriptorWorker, command.telemetryDisabled);
-			descriptorWorker.launchEnv = command.launchEnv ?? descriptorWorker.launchEnv;
-			if (!descriptorWorker.client || descriptorWorker.descriptor.lifecycle !== "ready") {
-				if (owned) {
+			// The descriptor lookup is universal; the owned branch alone carries the
+			// owner-only attach payload (telemetry gate, launchEnv, recovery context).
+			if (descriptorWorker.descriptor.ownerClientId !== undefined) {
+				if (descriptorWorker.descriptor.ownerClientId !== this.protocolClientId(client)) {
+					throw new Error(`Unknown active session: ${command.activeSessionId}`);
+				}
+				this.assertTelemetryAttachAllowed(descriptorWorker, command.telemetryDisabled);
+				descriptorWorker.launchEnv = command.launchEnv ?? descriptorWorker.launchEnv;
+				if (!descriptorWorker.client || descriptorWorker.descriptor.lifecycle !== "ready") {
 					if (command.recoveryConfig) {
 						descriptorWorker.transientCreateCommand = {
 							...descriptorWorker.descriptor.createCommand,
@@ -5011,9 +5015,9 @@ export class DaemonSupervisor {
 						throw new Error("Client-owned session recovery requires the owning client environment");
 					}
 					await this.retryWorkerRecovery(descriptorWorker);
-				} else if (this.canRetryFailedWorker(descriptorWorker)) {
-					await this.retryWorkerRecovery(descriptorWorker);
 				}
+			} else if (this.canRetryFailedWorker(descriptorWorker)) {
+				await this.retryWorkerRecovery(descriptorWorker);
 			}
 		}
 		const match = await this.findWorkerForClient(client, command.activeSessionId);

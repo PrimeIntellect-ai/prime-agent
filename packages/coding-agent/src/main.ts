@@ -74,8 +74,12 @@ import { isTelemetryEnabled } from "./core/telemetry.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
-import { DaemonSessionCreateError, deserializeDaemonCreateError } from "./modes/daemon/daemon-errors.js";
-import { collectDaemonClientEnv, collectDaemonLaunchEnv } from "./modes/daemon/daemon-protocol.js";
+import {
+	DaemonSessionCreateError,
+	deserializeDaemonCreateError,
+	deserializeDaemonError,
+} from "./modes/daemon/daemon-errors.js";
+import { collectDaemonClientEnv, collectDaemonLaunchEnv, type DaemonResponse } from "./modes/daemon/daemon-protocol.js";
 import {
 	DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
 	daemonWorkerInstanceId,
@@ -948,6 +952,25 @@ function isUnknownActiveSessionError(message: string): boolean {
 	return message.startsWith("Unknown active session:");
 }
 
+/**
+ * Unknown means the lookup falls back to the saved-session path (whose
+ * create/open route waits for or retries worker recovery); a recovering
+ * session throws typed instead, so an explicit --attach-agent surfaces the
+ * retryable state rather than "No active agent found". Interactive lookups
+ * swallow the throw into the same saved-session fallback.
+ */
+export function resolveActiveSessionLookupFailure(
+	response: Extract<DaemonResponse, { success: false }>,
+): Error | undefined {
+	if (response.errorInfo?.code === "session_recovering") {
+		return deserializeDaemonError(response);
+	}
+	if (isUnknownActiveSessionError(response.error)) {
+		return undefined;
+	}
+	return new Error(response.error);
+}
+
 async function findActiveDaemonSessionSummary(
 	socketPath: string,
 	selector: string,
@@ -958,12 +981,11 @@ async function findActiveDaemonSessionSummary(
 	try {
 		const response = await client.request({ type: "get_state", activeSessionId: selector }, 3000);
 		if (!response.success) {
-			// A recovering session falls back to the saved-session path too: the
-			// create/open route waits for or retries the worker's recovery.
-			if (isUnknownActiveSessionError(response.error) || response.errorInfo?.code === "session_recovering") {
-				return undefined;
+			const failure = resolveActiveSessionLookupFailure(response);
+			if (failure) {
+				throw failure;
 			}
-			throw new Error(response.error);
+			return undefined;
 		}
 		if (!isDaemonSessionSummary(response.data)) {
 			throw new Error("Daemon returned an invalid active session summary");

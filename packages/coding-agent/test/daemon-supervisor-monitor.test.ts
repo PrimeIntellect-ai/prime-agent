@@ -1809,7 +1809,7 @@ describe("daemon worker supervisor monitoring", () => {
 				pid: process.pid,
 				processStartId: getProcessStartId(process.pid),
 			},
-			intentionalStop: true,
+			intentionalStop: false,
 			deferredRecoveryRounds: 11,
 		};
 		const recoverWorker = vi.fn(async () => {
@@ -1830,8 +1830,47 @@ describe("daemon worker supervisor monitoring", () => {
 
 		await expect(supervisor.reuseWorkerForCreate(worker, undefined, "/tmp/failed-live.jsonl")).resolves.toBe(worker);
 		expect(recoverWorker).toHaveBeenCalledWith(worker);
-		expect(worker.intentionalStop).toBe(false);
 		expect(worker.deferredRecoveryRounds).toBe(0);
+	});
+
+	it("does not revive a stop-marked failed worker on attach", async () => {
+		const worker = {
+			descriptor: {
+				workerId: "worker-stopped",
+				rootActiveSessionId: "active-stopped",
+				rootSessionId: "session-stopped",
+				lifecycle: "failed" as string,
+				stopRequestedAt: new Date().toISOString(),
+				pid: process.pid,
+				processStartId: getProcessStartId(process.pid),
+			},
+			intentionalStop: true,
+			summaries: new Map(),
+		};
+		const recoverWorker = vi.fn(async () => {});
+		const persistWorker = vi.fn();
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			persistWorker,
+			recoverWorker,
+			findWorkerForClient: vi.fn(async () => {
+				throw new Error("Unknown active session: active-stopped");
+			}),
+		}) as unknown as {
+			attachClient(
+				client: DaemonSocketClient,
+				command: { type: "attach"; activeSessionId: string },
+			): Promise<unknown>;
+		};
+
+		await expect(
+			supervisor.attachClient({} as DaemonSocketClient, { type: "attach", activeSessionId: "active-stopped" }),
+		).rejects.toThrow("Unknown active session: active-stopped");
+		expect(recoverWorker).not.toHaveBeenCalled();
+		expect(persistWorker).not.toHaveBeenCalled();
+		expect(worker.intentionalStop).toBe(true);
+		expect(worker.descriptor.stopRequestedAt).toBeDefined();
+		expect(worker.descriptor.lifecycle).toBe("failed");
 	});
 
 	it("answers a descriptor-known unaddressable root session with a structured recovering error", async () => {
