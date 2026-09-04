@@ -40,13 +40,12 @@ import {
 } from "../utils/diagnostics.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
+import { parseRetryAfterMs, recordStreamFailure } from "../utils/stream-failure.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;
-const MAX_RETRIES = 3;
-const BASE_DELAY_MS = 1000;
 const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
 
@@ -85,27 +84,6 @@ interface RequestBody {
 	include?: string[];
 	prompt_cache_key?: string;
 	[key: string]: unknown;
-}
-
-function isRetryableError(status: number, errorText: string): boolean {
-	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
-		return true;
-	}
-	return /rate.?limit|overloaded|service.?unavailable|upstream.?connect|connection.?refused/i.test(errorText);
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-	return new Promise((resolve, reject) => {
-		if (signal?.aborted) {
-			reject(new Error("Request was aborted"));
-			return;
-		}
-		const timeout = setTimeout(resolve, ms);
-		signal?.addEventListener("abort", () => {
-			clearTimeout(timeout);
-			reject(new Error("Request was aborted"));
-		});
-	});
 }
 
 export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses", OpenAICodexResponsesOptions> = (
@@ -211,61 +189,32 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				}
 			}
 
-			let response: Response | undefined;
-			let lastError: Error | undefined;
-
-			for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-				if (options?.signal?.aborted) {
-					throw new Error("Request was aborted");
-				}
-
-				try {
-					response = await fetch(resolveCodexUrl(model.baseUrl), {
-						method: "POST",
-						headers: sseHeaders,
-						body: bodyJson,
-						signal: options?.signal,
-					});
-					await options?.onResponse?.(
-						{ status: response.status, headers: headersToRecord(response.headers) },
-						model,
-					);
-
-					if (response.ok) {
-						break;
-					}
-
-					const errorText = await response.text();
-					if (attempt < MAX_RETRIES && isRetryableError(response.status, errorText)) {
-						const delayMs = BASE_DELAY_MS * 2 ** attempt;
-						await sleep(delayMs, options?.signal);
-						continue;
-					}
-
-					const fakeResponse = new Response(errorText, {
-						status: response.status,
-						statusText: response.statusText,
-					});
-					const info = await parseErrorResponse(fakeResponse);
-					throw new Error(info.friendlyMessage || info.message);
-				} catch (error) {
-					if (error instanceof Error) {
-						if (error.name === "AbortError" || error.message === "Request was aborted") {
-							throw new Error("Request was aborted");
-						}
-					}
-					lastError = error instanceof Error ? error : new Error(String(error));
-					if (attempt < MAX_RETRIES && !lastError.message.includes("usage limit")) {
-						const delayMs = BASE_DELAY_MS * 2 ** attempt;
-						await sleep(delayMs, options?.signal);
-						continue;
-					}
-					throw lastError;
-				}
+			if (options?.signal?.aborted) {
+				throw new Error("Request was aborted");
 			}
 
-			if (!response?.ok) {
-				throw lastError ?? new Error("Failed after retries");
+			// Single attempt: the session-layer auto-retry loop owns retries.
+			let response: Response;
+			try {
+				response = await fetch(resolveCodexUrl(model.baseUrl), {
+					method: "POST",
+					headers: sseHeaders,
+					body: bodyJson,
+					signal: options?.signal,
+				});
+			} catch (error) {
+				if (
+					options?.signal?.aborted ||
+					(error instanceof Error && (error.name === "AbortError" || error.message === "Request was aborted"))
+				) {
+					throw new Error("Request was aborted");
+				}
+				throw error;
+			}
+			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+
+			if (!response.ok) {
+				throw await parseErrorResponse(response);
 			}
 
 			if (!response.body) {
@@ -288,6 +237,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : String(error);
+			recordStreamFailure(model, output, error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}
@@ -437,12 +387,25 @@ async function processStream(
 
 class CodexApiError extends Error {
 	readonly code?: string;
+	readonly status?: number;
+	readonly retryAfterMs?: number;
 	readonly payload?: Record<string, unknown>;
 
-	constructor(message: string, options?: { code?: string; payload?: Record<string, unknown>; cause?: unknown }) {
+	constructor(
+		message: string,
+		options?: {
+			code?: string;
+			status?: number;
+			retryAfterMs?: number;
+			payload?: Record<string, unknown>;
+			cause?: unknown;
+		},
+	) {
 		super(message);
 		this.name = "CodexApiError";
 		this.code = options?.code;
+		this.status = options?.status;
+		this.retryAfterMs = options?.retryAfterMs;
 		this.payload = options?.payload;
 		this.cause = options?.cause;
 	}
@@ -469,12 +432,25 @@ async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): 
 		if (!type) continue;
 
 		if (type === "error") {
-			const code = (event as { code?: string }).code || "";
-			const message = (event as { message?: string }).message || "";
-			throw new CodexApiError(`Codex error: ${message || code || JSON.stringify(event)}`, {
-				code: code || undefined,
-				payload: event,
-			});
+			// Errors arrive flat ({ code, message }) or nested
+			// ({ status_code, error: { type, message, plan_type, resets_at } }).
+			const flatCode = typeof event.code === "string" ? event.code : "";
+			const flatMessage = typeof event.message === "string" ? event.message : "";
+			const nested = event.error && typeof event.error === "object" ? (event.error as CodexErrorPayload) : undefined;
+			const statusCode = (event as { status_code?: unknown }).status_code;
+			const status = typeof statusCode === "number" ? statusCode : undefined;
+			const code = flatCode || nested?.code || nested?.type || undefined;
+			const usageLimit = nested ? codexUsageLimitMessage(nested, status) : undefined;
+			const message = flatMessage || nested?.message || "";
+			throw new CodexApiError(
+				usageLimit?.friendlyMessage ?? `Codex error: ${message || code || JSON.stringify(event)}`,
+				{
+					code,
+					status,
+					retryAfterMs: usageLimit?.retryAfterMs,
+					payload: event,
+				},
+			);
 		}
 
 		if (type === "response.failed") {
@@ -1183,33 +1159,55 @@ async function processWebSocketStream(
 	}
 }
 
-async function parseErrorResponse(response: Response): Promise<{ message: string; friendlyMessage?: string }> {
+interface CodexErrorPayload {
+	code?: string;
+	type?: string;
+	message?: string;
+	plan_type?: string;
+	resets_at?: number;
+}
+
+function codexUsageLimitMessage(
+	err: CodexErrorPayload,
+	status?: number,
+): { friendlyMessage: string; retryAfterMs?: number } | undefined {
+	const code = err.code || err.type || "";
+	if (!/usage_limit_reached|usage_not_included|rate_limit_exceeded/i.test(code) && status !== 429) {
+		return undefined;
+	}
+	const plan = err.plan_type ? ` (${err.plan_type.toLowerCase()} plan)` : "";
+	const retryAfterMs = err.resets_at !== undefined ? Math.max(0, err.resets_at * 1000 - Date.now()) : undefined;
+	const when = retryAfterMs !== undefined ? ` Try again in ~${Math.round(retryAfterMs / 60000)} min.` : "";
+	return {
+		friendlyMessage: `You have hit your ChatGPT usage limit${plan}.${when}`.trim(),
+		retryAfterMs,
+	};
+}
+
+async function parseErrorResponse(response: Response): Promise<CodexApiError> {
 	const raw = await response.text();
 	let message = raw || response.statusText || "Request failed";
-	let friendlyMessage: string | undefined;
+	let code: string | undefined;
+	let retryAfterMs = parseRetryAfterMs(response.headers);
 
 	try {
-		const parsed = JSON.parse(raw) as {
-			error?: { code?: string; type?: string; message?: string; plan_type?: string; resets_at?: number };
-		};
+		const parsed = JSON.parse(raw) as { error?: CodexErrorPayload };
 		const err = parsed?.error;
 		if (err) {
-			const code = err.code || err.type || "";
-			if (/usage_limit_reached|usage_not_included|rate_limit_exceeded/i.test(code) || response.status === 429) {
-				const plan = err.plan_type ? ` (${err.plan_type.toLowerCase()} plan)` : "";
-				const mins = err.resets_at
-					? Math.max(0, Math.round((err.resets_at * 1000 - Date.now()) / 60000))
-					: undefined;
-				const when = mins !== undefined ? ` Try again in ~${mins} min.` : "";
-				friendlyMessage = `You have hit your ChatGPT usage limit${plan}.${when}`.trim();
+			code = err.code || err.type || undefined;
+			const usageLimit = codexUsageLimitMessage(err, response.status);
+			if (usageLimit) {
+				message = usageLimit.friendlyMessage;
+				retryAfterMs = usageLimit.retryAfterMs ?? retryAfterMs;
+			} else {
+				message = err.message || message;
 			}
-			message = err.message || friendlyMessage || message;
 		}
 	} catch {
 		// Unparseable error body: fall back to the raw message.
 	}
 
-	return { message, friendlyMessage };
+	return new CodexApiError(message, { code, status: response.status, retryAfterMs });
 }
 
 function extractAccountId(token: string): string {

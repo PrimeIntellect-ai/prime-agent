@@ -38,6 +38,7 @@ describe("classifyStreamFailure", () => {
 		["overloaded_error", undefined, "overloaded"],
 		[undefined, 529, "overloaded"],
 		["rate_limit_error", undefined, "rate_limit"],
+		["usage_limit_reached", undefined, "rate_limit"],
 		[undefined, 429, "rate_limit"],
 		["refusal", undefined, "refusal"],
 		["sensitive", undefined, "safety"],
@@ -100,6 +101,28 @@ describe("extractStreamFailureInfo", () => {
 			$metadata: { requestId: "aws_req" },
 		});
 		expect(extractStreamFailureInfo(awsError)).toMatchObject({ requestId: "aws_req" });
+	});
+
+	test("extracts the server-requested retry delay from Retry-After headers", () => {
+		const withSeconds = Object.assign(new Error("429"), {
+			status: 429,
+			headers: new Headers({ "retry-after": "120" }),
+		});
+		expect(extractStreamFailureInfo(withSeconds)).toMatchObject({ kind: "rate_limit", retryAfterMs: 120000 });
+
+		const withMs = Object.assign(new Error("429"), {
+			status: 429,
+			headers: { "retry-after-ms": "1500", "retry-after": "2" },
+		});
+		expect(extractStreamFailureInfo(withMs).retryAfterMs).toBe(1500);
+
+		const withDate = Object.assign(new Error("429"), {
+			status: 429,
+			headers: new Headers({ "retry-after": new Date(Date.now() + 60000).toUTCString() }),
+		});
+		const dateMs = extractStreamFailureInfo(withDate).retryAfterMs;
+		expect(dateMs).toBeGreaterThan(0);
+		expect(dateMs).toBeLessThanOrEqual(60000);
 	});
 
 	test("falls back to classifying the message text", () => {

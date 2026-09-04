@@ -1,0 +1,3 @@
+- Changed auto-retry to honor provider Retry-After and usage-limit reset delays, capped by `retry.provider.maxRetryDelayMs`; longer requested waits fail immediately with an informative error instead of sleeping invisibly inside provider SDKs.
+- Removed the `retry.provider.maxRetries` setting; provider SDKs no longer retry internally, so `retry.maxRetries` is the single retry knob.
+- Changed structured `invalid_request`/`refusal` provider failures to fail immediately instead of being retried once.

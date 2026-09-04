@@ -57,7 +57,6 @@ type ProxySerializableStreamOptions = Pick<
 	| "metadata"
 	| "transport"
 	| "thinkingBudgets"
-	| "maxRetryDelayMs"
 >;
 
 export interface ProxyStreamOptions extends ProxySerializableStreamOptions {
@@ -96,7 +95,6 @@ function buildProxyRequestOptions(options: ProxyStreamOptions): ProxySerializabl
 		metadata: options.metadata,
 		transport: options.transport,
 		thinkingBudgets: options.thinkingBudgets,
-		maxRetryDelayMs: options.maxRetryDelayMs,
 	};
 }
 

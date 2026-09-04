@@ -9661,7 +9661,6 @@ export class AgentSession {
 			sessionId: childSessionManager.getSessionId(),
 			thinkingBudgets: this.settingsManager.getThinkingBudgets(),
 			transport: this.settingsManager.getTransport(),
-			maxRetryDelayMs: this.settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 			toolExecution: this.agent.toolExecution,
 		});
 
@@ -11000,13 +10999,19 @@ export class AgentSession {
 		return typeof kind === "string" ? kind : undefined;
 	}
 
-	private _isStructuredPermanentProviderFailure(message: AssistantMessage): boolean {
-		const kind = this._getProviderStreamFailureKind(message);
-		return kind === "auth" || kind === "invalid_request" || kind === "refusal";
+	private _getProviderStreamFailureRetryAfterMs(message: AssistantMessage): number | undefined {
+		const value = this._getProviderStreamFailureDetails(message)?.retryAfterMs;
+		return typeof value === "number" && value >= 0 ? value : undefined;
 	}
 
 	private _isStructuredPermanentProviderRetryExhausted(message: AssistantMessage): boolean {
-		return this._retryAttempt > 0 && this._isStructuredPermanentProviderFailure(message);
+		const kind = this._getProviderStreamFailureKind(message);
+		// Deterministic rejections never warrant a retry; auth failures get one
+		// retry so a transient auth hiccup does not immediately mark auth stale.
+		if (kind === "invalid_request" || kind === "refusal") {
+			return true;
+		}
+		return this._retryAttempt > 0 && kind === "auth";
 	}
 
 	private _getProviderStreamFailureAuthStatus(message: AssistantMessage): number | undefined {
@@ -11161,7 +11166,25 @@ export class AgentSession {
 			return false;
 		}
 
-		const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
+		// Honor the provider's requested wait (Retry-After / usage-limit reset),
+		// capped by retry.provider.maxRetryDelayMs (0 disables the cap).
+		const retryAfterMs = this._getProviderStreamFailureRetryAfterMs(message);
+		const maxRetryDelayMs = this.settingsManager.getProviderRetrySettings().maxRetryDelayMs;
+		if (retryAfterMs !== undefined && maxRetryDelayMs > 0 && retryAfterMs > maxRetryDelayMs) {
+			this._markProviderAuthStaleForRetryFailure(message, options);
+			this._emit({
+				type: "auto_retry_end",
+				success: false,
+				attempt: this._retryAttempt - 1,
+				finalError: `Provider requested a ${Math.ceil(retryAfterMs / 1000)}s wait before retrying (above retry.provider.maxRetryDelayMs=${maxRetryDelayMs}ms): ${message.errorMessage || "unknown error"}`,
+			});
+			this._retryAttempt = 0;
+			this._retryAuthFailureSources = [];
+			this._resolveRetry();
+			return false;
+		}
+
+		const delayMs = Math.max(settings.baseDelayMs * 2 ** (this._retryAttempt - 1), retryAfterMs ?? 0);
 		// Park now: the retry re-issues the failed call and must reuse its Idempotency-Key.
 		// Payload hooks mutate the wire body after the hash point, so reuse is forfeited.
 		if (!this._extensionRunner.hasHandlers("before_provider_request")) {

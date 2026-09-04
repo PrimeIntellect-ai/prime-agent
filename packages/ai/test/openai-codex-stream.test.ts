@@ -1005,4 +1005,120 @@ describe("openai-codex streaming", () => {
 			lastPreviousResponseId: "resp_1",
 		});
 	});
+
+	it("throws a structured failure after a single attempt on HTTP 500", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
+		process.env.PI_CODING_AGENT_DIR = tempDir;
+		const token = mockToken();
+
+		let responsesRequests = 0;
+		global.fetch = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
+				return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
+			}
+			if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
+				return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
+			}
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				responsesRequests++;
+				return new Response(JSON.stringify({ error: { type: "server_error", message: "boom" } }), {
+					status: 500,
+				});
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch;
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const context: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		const result = await streamOpenAICodexResponses(model, context, { apiKey: token, transport: "sse" }).result();
+
+		expect(responsesRequests).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("boom");
+		expect(result.diagnostics?.at(-1)).toMatchObject({
+			type: "provider_stream_failure",
+			details: { kind: "server_error", status: 500 },
+		});
+	});
+
+	it("maps nested streaming usage-limit error payloads to a friendly rate-limit failure", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
+		process.env.PI_CODING_AGENT_DIR = tempDir;
+		const token = mockToken();
+		const encoder = new TextEncoder();
+		const resetsAt = Math.round(Date.now() / 1000) + 2 * 3600;
+		const sse = `data: ${JSON.stringify({
+			type: "error",
+			status_code: 429,
+			error: { type: "usage_limit_reached", message: "Usage limit reached", plan_type: "Plus", resets_at: resetsAt },
+		})}\n\n`;
+
+		global.fetch = vi.fn(async (input: string | URL) => {
+			const url = typeof input === "string" ? input : input.toString();
+			if (url === "https://api.github.com/repos/openai/codex/releases/latest") {
+				return new Response(JSON.stringify({ tag_name: "rust-v0.0.0" }), { status: 200 });
+			}
+			if (url.startsWith("https://raw.githubusercontent.com/openai/codex/")) {
+				return new Response("PROMPT", { status: 200, headers: { etag: '"etag"' } });
+			}
+			if (url === "https://chatgpt.com/backend-api/codex/responses") {
+				const stream = new ReadableStream<Uint8Array>({
+					start(controller) {
+						controller.enqueue(encoder.encode(sse));
+						controller.close();
+					},
+				});
+				return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+			}
+			return new Response("not found", { status: 404 });
+		}) as typeof fetch;
+
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const context: Context = {
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+
+		const result = await streamOpenAICodexResponses(model, context, { apiKey: token, transport: "sse" }).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(
+			"You have hit your ChatGPT usage limit (plus plan). Try again in ~120 min.",
+		);
+		const details =
+			result.diagnostics?.at(-1)?.type === "provider_stream_failure"
+				? (result.diagnostics.at(-1) as { details?: { kind?: string; retryAfterMs?: number } }).details
+				: undefined;
+		expect(details?.kind).toBe("rate_limit");
+		expect(details?.retryAfterMs).toBeGreaterThan(0);
+		// resets_at has second granularity, so allow the rounding slack.
+		expect(details?.retryAfterMs).toBeLessThanOrEqual(2 * 3600 * 1000 + 1000);
+	});
 });

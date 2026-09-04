@@ -99,7 +99,6 @@ export function startSideQuestion(
 		sessionId: parent.sessionId,
 		thinkingBudgets: parent.thinkingBudgets,
 		transport: "sse",
-		maxRetryDelayMs: parent.maxRetryDelayMs,
 		toolExecution: parent.toolExecution,
 	});
 
