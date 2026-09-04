@@ -1300,6 +1300,7 @@ describe("InteractiveMode pending bash components", () => {
 			}),
 			isRecognizedSlashCommand: (name: string) => name === "compact",
 			getAppKeyDisplay: () => "Ctrl+Q",
+			isAgentStreaming: () => false,
 			featureHintSuppressedByQueue: false,
 			clearFeatureHintPresentation: vi.fn(),
 		} as unknown as InteractiveMode;
@@ -1322,6 +1323,30 @@ describe("InteractiveMode pending bash components", () => {
 		expect(rendered).toContain("Goal context: continue goal");
 		expect(rendered).not.toContain("Follow-up: Goal context");
 		expect(rendered).toContain("Follow-up: plain follow-up");
+		expect(rendered).toContain("enter to send · Ctrl+Q to browse and edit queued messages");
+	});
+
+	test("omits the enter-to-send hint while streaming", () => {
+		const queuedMessagesContainer = new Container();
+		const fakeThis = {
+			pendingMessagesContainer: new Container(),
+			queuedMessagesContainer,
+			pendingBashComponents: [],
+			getAllQueuedMessages: () => ({ steering: ["plain steering"], followUp: [] }),
+			isRecognizedSlashCommand: () => false,
+			getAppKeyDisplay: () => "Ctrl+Q",
+			isAgentStreaming: () => true,
+			featureHintSuppressedByQueue: true,
+			clearFeatureHintPresentation: vi.fn(),
+		} as unknown as InteractiveMode;
+
+		(
+			InteractiveMode.prototype as unknown as { updatePendingMessagesDisplay(this: unknown): void }
+		).updatePendingMessagesDisplay.call(fakeThis);
+
+		const rendered = normalizeRenderedOutput(queuedMessagesContainer);
+		expect(rendered).not.toContain("enter to send");
+		expect(rendered).toContain("Ctrl+Q to browse and edit queued messages");
 	});
 
 	test("flushes pending bash components from the pending area to chat", () => {
