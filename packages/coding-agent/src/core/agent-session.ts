@@ -1114,6 +1114,8 @@ export class AgentSession {
 
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
+	/** Bumped by every retry resolution; stale scheduled-continue callbacks check it before touching retry state. */
+	private _retryGeneration = 0;
 	private _retryPromise: Promise<void> | undefined = undefined;
 	private _retryResolve: (() => void) | undefined = undefined;
 	private _retryAuthFailureSources: AuthSourceToken[] = [];
@@ -3760,6 +3762,7 @@ export class AgentSession {
 	}
 
 	private _resolveRetry(): void {
+		this._retryGeneration += 1;
 		this._semanticEdges.clearTurnRetry();
 		if (this._retryResolve) {
 			this._retryResolve();
@@ -11201,10 +11204,12 @@ export class AgentSession {
 		}
 		this._retryAbortController = undefined;
 
+		const retryGeneration = this._retryGeneration;
 		setTimeout(() => {
 			this.agent.continue().catch((error: unknown) => {
-				// A continue that never starts must still resolve the retry (else isRetrying sticks forever).
-				if (!this.isRetrying) return;
+				// A continue that never starts must still resolve the retry (else isRetrying
+				// sticks forever) — unless a newer retry owns the state by now.
+				if (this._retryGeneration !== retryGeneration || !this.isRetrying) return;
 				this._markProviderAuthStaleForRetryFailure(message, options);
 				const attempt = this._retryAttempt;
 				this._retryAttempt = 0;

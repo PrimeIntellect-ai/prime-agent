@@ -60,7 +60,11 @@ export class OutputSpill {
 			}
 			// The partial file would squat on the disk pressure that degraded the spill.
 			stream.once("close", () => {
-				if (partial) rmSync(partial, { force: true });
+				try {
+					if (partial) rmSync(partial, { force: true });
+				} catch {
+					// Best-effort cleanup: an EACCES/EBUSY here must not kill the process.
+				}
 			});
 		});
 		this.stream = stream;

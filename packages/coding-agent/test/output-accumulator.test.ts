@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -29,6 +29,22 @@ describe("OutputAccumulator temp spill", () => {
 		accumulator.finish();
 
 		// The open error lands while the close is waiting: degraded spill, not a tool failure.
+		await expect(accumulator.closeTempFile()).resolves.toBeUndefined();
+		const snapshot = accumulator.snapshot();
+		expect(snapshot.fullOutputPath).toBeUndefined();
+		expect(snapshot.content).toContain("tail");
+	});
+
+	it("swallows spill-cleanup failures, keeping the tail and the process", async () => {
+		// TMPDIR is a FILE: the open fails ENOTDIR and so does the cleanup rm.
+		const blocker = join(scratch, "not-a-dir");
+		writeFileSync(blocker, "x");
+		process.env.TMPDIR = blocker;
+		const accumulator = new OutputAccumulator({ maxBytes: 8, maxLines: 100 });
+		accumulator.append(Buffer.from("0123456789abcdef\n"));
+		accumulator.append(Buffer.from("tail\n"));
+		accumulator.finish();
+
 		await expect(accumulator.closeTempFile()).resolves.toBeUndefined();
 		const snapshot = accumulator.snapshot();
 		expect(snapshot.fullOutputPath).toBeUndefined();

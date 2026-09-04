@@ -106,6 +106,39 @@ describe("AgentSession retry and event characterization", () => {
 		expect(markStale).toHaveBeenCalled();
 	});
 
+	it("ignores a stale continue rejection after the retry was aborted and a newer one runs", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
+		harnesses.push(harness);
+		const retryEvents: string[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "auto_retry_start") retryEvents.push(`start:${event.attempt}`);
+			if (event.type === "auto_retry_end") retryEvents.push(`end:${event.success}:${event.finalError}`);
+		});
+		let rejectStale: (error: Error) => void = () => {};
+		let rejectFresh: (error: Error) => void = () => {};
+		const continueSpy = vi
+			.spyOn(harness.session.agent, "continue")
+			.mockReturnValueOnce(new Promise((_resolve, reject) => (rejectStale = reject)))
+			.mockReturnValueOnce(new Promise((_resolve, reject) => (rejectFresh = reject)));
+
+		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })]);
+		const first = harness.session.prompt("one");
+		await vi.waitFor(() => expect(continueSpy.mock.calls.length).toBe(1));
+		harness.session.abortRetry();
+		await first;
+
+		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })]);
+		const second = harness.session.prompt("two");
+		await vi.waitFor(() => expect(continueSpy.mock.calls.length).toBe(2));
+		// The aborted retry's parked continue settles while the NEWER retry runs:
+		// it must not clear the new retry's state or emit its end event.
+		rejectStale(new AgentContinueError("busy", "Busy"));
+		rejectFresh(new AgentContinueError("nothing-to-continue", "Nothing to continue"));
+		await second;
+
+		expect(retryEvents).toEqual(["start:1", "end:false:Retry cancelled", "start:1", "end:false:Nothing to continue"]);
+	});
+
 	it("retries multiple transient failures and succeeds on the final attempt", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
 		harnesses.push(harness);
