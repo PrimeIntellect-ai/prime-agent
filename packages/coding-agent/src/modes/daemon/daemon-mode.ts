@@ -5443,7 +5443,7 @@ export class AgentDaemon {
 		const client = new DaemonClient(supervisorSocketPath);
 		try {
 			await client.connect(1000);
-			await client.waitForHello(1000);
+			await client.waitForHello();
 			const response = await client.request(
 				{ type: "list_agent_peers", workerToken: this.options.worker.authenticationToken },
 				5000,
@@ -5647,7 +5647,7 @@ export class AgentDaemon {
 		const client = new DaemonClient(supervisorSocketPath);
 		try {
 			await client.connect(1000);
-			await client.waitForHello(1000);
+			await client.waitForHello();
 			const response = await client.request(
 				{
 					type: "set_session_name",
@@ -5947,7 +5947,7 @@ export class AgentDaemon {
 			const candidate = new DaemonClient(supervisorSocketPath);
 			try {
 				await candidate.connect(1000);
-				await candidate.waitForHello(1000);
+				await candidate.waitForHello();
 				client = candidate;
 				break;
 			} catch (error) {

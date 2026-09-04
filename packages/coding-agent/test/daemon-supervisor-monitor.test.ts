@@ -21,7 +21,7 @@ import {
 } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSocketPathLease } from "../src/modes/daemon/daemon-socket.js";
-import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
+import { DaemonSupervisor, handshakeBudgetMs } from "../src/modes/daemon/daemon-supervisor.js";
 import {
 	DaemonWorkerAuthenticationError,
 	DaemonWorkerClient,
@@ -4383,5 +4383,14 @@ describe("daemon worker supervisor monitoring", () => {
 
 		await expect(supervisor.prepareUpdateRestartFenced()).rejects.toThrow(/resident-1.*recovering.*disconnected/);
 		expect(requestWorker).not.toHaveBeenCalled();
+	});
+
+	it("derives per-attempt handshake budgets from the remaining outer connect deadline", () => {
+		const now = 1_000_000;
+		// A fresh 30s outer budget must reach the handshake attempt whole, not as a fixed 1s clock.
+		expect(handshakeBudgetMs(now + 30_000, now)).toBe(30_000);
+		expect(handshakeBudgetMs(now + 2_500, now)).toBe(2_500);
+		// Near-expired deadlines keep a tiny floor so the attempt can still fail cleanly.
+		expect(handshakeBudgetMs(now - 1, now)).toBe(50);
 	});
 });
