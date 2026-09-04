@@ -412,4 +412,68 @@ describe("createAgentSessionFromServices", () => {
 			withMessageController.dispose();
 		}
 	});
+
+	it("keeps the persisted thinking default when a model offers no selectable levels", async () => {
+		const tempDir = join(tmpdir(), `pi-session-fixed-effort-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(tempDir, { recursive: true });
+		cleanupPaths.push(tempDir);
+
+		const faux = registerFauxProvider({
+			models: [
+				{ id: "capable", reasoning: true },
+				{ id: "fixed-effort", reasoning: true },
+			],
+		});
+		unregisters.push(() => faux.unregister());
+		const capable = faux.models[0];
+		const fixedEffort = faux.models[1];
+		// A reasoning model whose transport cannot send effort: every level nulled.
+		fixedEffort.thinkingLevelMap = {
+			off: null,
+			minimal: null,
+			low: null,
+			medium: null,
+			high: null,
+			xhigh: null,
+			max: null,
+		};
+
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(capable.provider, "faux-key");
+		const settingsManager = SettingsManager.inMemory();
+		const services = await createAgentSessionServices({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			settingsManager,
+			resourceLoaderOptions: { noPromptTemplates: true, noThemes: true },
+		});
+		services.modelRegistry.registerProvider(capable.provider, {
+			baseUrl: capable.baseUrl,
+			apiKey: "faux-key",
+			api: faux.api,
+			models: faux.models,
+		});
+
+		const { session } = await createAgentSessionFromServices({
+			services,
+			sessionManager: SessionManager.create(tempDir, join(tempDir, "sessions")),
+			model: capable,
+		});
+		try {
+			session.setThinkingLevel("high");
+			expect(settingsManager.getDefaultThinkingLevel()).toBe("high");
+
+			await session.setModel(fixedEffort, { waitForExtensions: false });
+			expect(session.thinkingLevel).toBe("off");
+			expect(session.cycleThinkingLevel()).toBeUndefined();
+			expect(session.thinkingLevel).toBe("off");
+			expect(settingsManager.getDefaultThinkingLevel()).toBe("high");
+
+			await session.setModel(capable, { waitForExtensions: false });
+			expect(session.thinkingLevel).toBe("high");
+		} finally {
+			session.dispose();
+		}
+	});
 });
