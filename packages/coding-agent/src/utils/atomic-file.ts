@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, closeSync, fsyncSync, openSync, renameSync, rmSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, fsyncSync, openSync, realpathSync, renameSync, rmSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 
 const WIN32_RENAME_ATTEMPTS = 5;
@@ -74,5 +74,15 @@ export function writeFileAtomicSync(path: string, data: string, options: WriteFi
 		} catch {
 			// Unavailable on some platforms; the atomic rename still protects readers.
 		}
+	}
+}
+
+/** Resolve symlink aliases so a replace lands on the real file (in-place-write parity). */
+export function realpathIfPresentSync(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return path;
+		throw error;
 	}
 }

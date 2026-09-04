@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
@@ -968,6 +968,21 @@ describe("AuthStorage", () => {
 	});
 
 	describe("persistence semantics", () => {
+		test("writes through a symlinked auth.json instead of replacing the alias", () => {
+			const realPath = join(tempDir, "real-auth.json");
+			writeFileSync(realPath, JSON.stringify({ anthropic: { type: "api_key", key: "old-key" } }));
+			rmSync(authJsonPath, { force: true });
+			symlinkSync(realPath, authJsonPath);
+			authStorage = AuthStorage.create(authJsonPath);
+
+			authStorage.set("openai", { type: "api_key", key: "new-key" });
+
+			expect(lstatSync(authJsonPath).isSymbolicLink()).toBe(true);
+			const real = JSON.parse(readFileSync(realPath, "utf-8")) as Record<string, { key: string }>;
+			expect(real.openai.key).toBe("new-key");
+			expect(real.anthropic.key).toBe("old-key");
+		});
+
 		test("initialization never replaces credentials another process already saved", () => {
 			authStorage = AuthStorage.create(authJsonPath);
 			// A rival process persists credentials between the absence check and the write.

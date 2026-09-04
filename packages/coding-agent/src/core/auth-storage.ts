@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.js";
-import { writeFileAtomicSync } from "../utils/atomic-file.js";
+import { realpathIfPresentSync, writeFileAtomicSync } from "../utils/atomic-file.js";
 import {
 	clearPrimeCliCredentials,
 	getPrimeCliConfigPath,
@@ -177,7 +177,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			const current = existsSync(this.authPath) ? readFileSync(this.authPath, "utf-8") : undefined;
 			const { result, next } = fn(current);
 			if (next !== undefined) {
-				writeFileAtomicSync(this.authPath, next, { mode: 0o600 });
+				writeFileAtomicSync(realpathIfPresentSync(this.authPath), next, { mode: 0o600 });
 			}
 			return result;
 		} finally {
@@ -221,7 +221,7 @@ export class FileAuthStorageBackend implements AuthStorageBackend {
 			const { result, next } = await fn(current);
 			throwIfCompromised();
 			if (next !== undefined) {
-				writeFileAtomicSync(this.authPath, next, { mode: 0o600 });
+				writeFileAtomicSync(realpathIfPresentSync(this.authPath), next, { mode: 0o600 });
 			}
 			throwIfCompromised();
 			return result;

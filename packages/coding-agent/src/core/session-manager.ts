@@ -4,18 +4,21 @@ import { randomUUID } from "crypto";
 import {
 	appendFileSync,
 	chownSync,
+	closeSync,
 	existsSync,
+	fstatSync,
 	mkdirSync,
+	openSync,
 	readdirSync,
 	readFileSync,
-	realpathSync,
+	readSync,
 	statSync,
 } from "fs";
 import { readdir, readFile, stat } from "fs/promises";
 import { basename, dirname, join, resolve } from "path";
 import { v7 as uuidv7 } from "uuid";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
-import { writeFileAtomicSync } from "../utils/atomic-file.js";
+import { realpathIfPresentSync, writeFileAtomicSync } from "../utils/atomic-file.js";
 import { readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
 import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
 import {
@@ -56,15 +59,6 @@ const CONTENT_ENTRY_TYPES = new Set([
 	"compaction",
 	"branch_summary",
 ]);
-
-function realpathIfPresent(path: string): string {
-	try {
-		return realpathSync(path);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return path;
-		throw error;
-	}
-}
 
 function statMetadataIfPresent(path: string): { mode: number; uid: number; gid: number } | undefined {
 	try {
@@ -587,8 +581,39 @@ async function parseEntriesFromBufferAsync(buffer: Buffer): Promise<FileEntry[]>
 
 // Crash damage (torn tail, zero-filled append) poisons the NEXT append into the
 // same physical line, so the file is repaired once at open, not tolerated in memory.
+const REPAIR_SUSPICION_WINDOW_BYTES = 1024 * 1024;
+
+// Crash damage lands at or near the tail, so a bounded tail read decides whether
+// the full (synchronous) repair scan is worth it; clean opens stay O(window).
+function tailLooksDamaged(targetPath: string): boolean {
+	let descriptor: number;
+	try {
+		descriptor = openSync(targetPath, "r");
+	} catch {
+		return false;
+	}
+	try {
+		const size = fstatSync(descriptor).size;
+		if (size === 0) return false;
+		const windowBytes = Math.min(size, REPAIR_SUSPICION_WINDOW_BYTES);
+		const window = Buffer.allocUnsafe(windowBytes);
+		readSync(descriptor, window, 0, windowBytes, size - windowBytes);
+		if (window.includes(0)) return true;
+		if (window[windowBytes - 1] !== 0x0a) return true;
+		const previousNewline = window.lastIndexOf(0x0a, windowBytes - 2);
+		// No boundary inside the window: the final line exceeds it; scan to be sure.
+		if (previousNewline === -1 && windowBytes < size) return true;
+		return !parsesAsJson(window.subarray(previousNewline + 1, windowBytes - 1));
+	} catch {
+		return true;
+	} finally {
+		closeSync(descriptor);
+	}
+}
+
 function repairJsonlDamage(filePath: string): void {
-	const targetPath = realpathIfPresent(filePath);
+	const targetPath = realpathIfPresentSync(filePath);
+	if (!tailLooksDamaged(targetPath)) return;
 	let buffer: Buffer;
 	let snapshot: { size: number; mtimeMs: number };
 	try {
@@ -1381,7 +1406,7 @@ export class SessionManager {
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
 		const content = `${this.fileEntries.map((e) => JSON.stringify(e)).join("\n")}\n`;
-		const targetPath = realpathIfPresent(this.sessionFile);
+		const targetPath = realpathIfPresentSync(this.sessionFile);
 		const directory = dirname(targetPath);
 		mkdirSync(directory, { recursive: true });
 		const metadata = statMetadataIfPresent(targetPath);

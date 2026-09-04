@@ -4,7 +4,7 @@ import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core"
 import type { Model } from "@earendil-works/pi-ai";
 import { completeSimple } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../../config.js";
-import { writeFileAtomicSync } from "../../utils/atomic-file.js";
+import { realpathIfPresentSync, writeFileAtomicSync } from "../../utils/atomic-file.js";
 import { serializeConversation } from "../compaction/utils.js";
 import { convertToLlm } from "../messages.js";
 import type { CustomEntry } from "../session-manager.js";
@@ -336,8 +336,9 @@ export function mergeHarnessStates(globalState: HarnessState, localState?: Harne
 export function saveHarnessState(harnessStateDir: string, state: HarnessState): string {
 	const statePath = getHarnessStatePath(harnessStateDir);
 	mkdirSync(harnessStateDir, { recursive: true });
-	const mode = existsSync(statePath) ? statSync(statePath).mode & 0o777 : 0o600;
-	writeFileAtomicSync(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode });
+	const targetPath = realpathIfPresentSync(statePath);
+	const mode = existsSync(targetPath) ? statSync(targetPath).mode & 0o777 : 0o600;
+	writeFileAtomicSync(targetPath, `${JSON.stringify(state, null, 2)}\n`, { mode });
 	return statePath;
 }
 

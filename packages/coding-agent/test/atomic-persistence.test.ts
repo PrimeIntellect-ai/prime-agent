@@ -72,6 +72,27 @@ describe("writeFileAtomicSync", () => {
 });
 
 describe("tryAcquireDirLock", () => {
+	it("publishes the lock as a file born with its owner and puts back a swapped file lock", async () => {
+		const dir = createTempDir();
+		const lockPath = join(dir, "file.lock");
+		const alive = (ownerPid: number | undefined) => ownerPid === process.pid || ownerPid === 424242;
+
+		expect(await tryAcquireDirLock(lockPath, alive)).toBe("acquired");
+		expect(readFileSync(lockPath, "utf8").trim()).toBe(String(process.pid));
+		expect(await tryAcquireDirLock(lockPath, alive)).toBe("held");
+
+		// Stale file lock: dead owner content is reclaimed.
+		writeFileSync(lockPath, "999999999\n");
+		const swapped = await tryAcquireDirLock(lockPath, () => {
+			// A rival replaces the lock while the staleness judgment runs.
+			rmSync(lockPath, { force: true });
+			writeFileSync(lockPath, "424242\n");
+			return false;
+		});
+		expect(swapped).toBe("held");
+		expect(readFileSync(lockPath, "utf8").trim()).toBe("424242");
+	});
+
 	it("treats a garbage pid file as stale instead of trusting its numeric prefix", async () => {
 		const dir = createTempDir();
 		const lockDir = join(dir, "garbage.lock");
@@ -123,11 +144,11 @@ describe("tryAcquireDirLock", () => {
 		const alive = (ownerPid: number | undefined) => ownerPid === process.pid;
 		expect(await tryAcquireDirLock(lockDir, alive)).toBe("reclaimed");
 		expect(await tryAcquireDirLock(lockDir, alive)).toBe("acquired");
-		expect(readFileSync(join(lockDir, "pid"), "utf8").trim()).toBe(String(process.pid));
+		expect(readFileSync(lockDir, "utf8").trim()).toBe(String(process.pid));
 
 		// Every rival attempt against the live owner reports "held" and leaves the lock alone.
 		const rivals = await Promise.all(Array.from({ length: 8 }, () => tryAcquireDirLock(lockDir, alive)));
 		expect(rivals).toEqual(Array.from({ length: 8 }, () => "held"));
-		expect(readFileSync(join(lockDir, "pid"), "utf8").trim()).toBe(String(process.pid));
+		expect(readFileSync(lockDir, "utf8").trim()).toBe(String(process.pid));
 	});
 });

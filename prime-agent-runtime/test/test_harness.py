@@ -191,6 +191,20 @@ class HarnessStateTest(unittest.TestCase):
             self.assertEqual(observed_modes, [0o600])
             self.assertEqual(os.stat(state.file_path).st_mode & 0o777, 0o600)
 
+    def test_save_writes_through_a_symlinked_state_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            real_path = Path(temp_dir) / "real_state.json"
+            alias = Path(temp_dir) / "harness_state.json"
+            HarnessState(real_path).create_memory("Seed", "Creates the real file.")
+            alias.symlink_to(real_path)
+
+            state = HarnessState(alias)
+            state.create_memory("Through alias", "Must land in the real file.")
+
+            self.assertTrue(alias.is_symlink())
+            titles = [entry.title for entry in HarnessState(real_path).entries["memory"].values()]
+            self.assertEqual(titles, ["Seed", "Through alias"])
+
     def test_load_ignores_unknown_json_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "harness_state.json"

@@ -2,6 +2,22 @@ import { chmodSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlin
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const fullReadCounter = vi.hoisted(() => ({ suffix: undefined as string | undefined, count: 0 }));
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return {
+		...actual,
+		readFileSync: ((path: Parameters<typeof actual.readFileSync>[0], options?: never) => {
+			// Suffix match: repair resolves the realpath (/private/var vs /var on macOS).
+			if (fullReadCounter.suffix !== undefined && String(path).endsWith(fullReadCounter.suffix)) {
+				fullReadCounter.count++;
+			}
+			return actual.readFileSync(path, options);
+		}) as typeof actual.readFileSync,
+	};
+});
+
 import { computeOwnAndTotalUsage } from "../../src/core/context-tree.js";
 import {
 	findMostRecentSession,
@@ -527,6 +543,40 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 
 	afterEach(() => {
 		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("opens a clean large session with one full read: the repair scan stays bounded to the tail", () => {
+		const file = join(tempDir, "large-clean.jsonl");
+		const header = {
+			type: "session",
+			version: 3,
+			id: "large-session",
+			timestamp: "2026-01-01T00:00:00Z",
+			cwd: "/tmp",
+		};
+		const filler = "x".repeat(2048);
+		const lines = [JSON.stringify(header)];
+		for (let index = 0; index < 2000; index++) {
+			lines.push(
+				JSON.stringify({
+					type: "message",
+					id: `m${index}`,
+					parentId: index === 0 ? null : `m${index - 1}`,
+					message: { role: "user", content: filler, timestamp: index },
+				}),
+			);
+		}
+		writeFileSync(file, `${lines.join("\n")}\n`);
+		fullReadCounter.suffix = "large-clean.jsonl";
+		fullReadCounter.count = 0;
+
+		try {
+			const sm = SessionManager.open(file, tempDir);
+			expect(sm.getEntries().length).toBe(2000);
+			expect(fullReadCounter.count).toBe(1);
+		} finally {
+			fullReadCounter.suffix = undefined;
+		}
 	});
 
 	it("repairs crash damage at open: torn tail truncated, zero-filled record recovered, appends stay separate lines", () => {
