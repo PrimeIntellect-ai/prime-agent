@@ -4866,7 +4866,7 @@ export class DaemonSupervisor {
 				this.isWorkerRecoveryCandidate(worker),
 		);
 		if (recoveringWorker) {
-			throw new DaemonSessionRecoveringError(selector);
+			throw new DaemonSessionRecoveringError(recoveringWorker.descriptor.rootActiveSessionId);
 		}
 		throw new Error(`Unknown active session: ${selector}`);
 	}
@@ -4968,6 +4968,12 @@ export class DaemonSupervisor {
 		command: DaemonCommand,
 		timeoutMs = WORKER_REQUEST_TIMEOUT_MS,
 	): Promise<DaemonResponse> {
+		// Every forwarded command is a touch: a cached failed roster row must not
+		// outrank the descriptor truth that the worker is recoverable (the
+		// --attach-agent preflight's get_state lands here before any attach).
+		if (this.canRetryFailedWorker(worker)) {
+			await this.retryWorkerRecovery(worker);
+		}
 		const client = this.requireAvailableWorkerClient(worker, command.type === "kill");
 		const response = await client.request(withoutCommandId(command), timeoutMs);
 		if (command.type === "get_state" && response.success && isSessionSummary(response.data)) {
@@ -5022,9 +5028,10 @@ export class DaemonSupervisor {
 		}
 		const match = await this.findWorkerForClient(client, command.activeSessionId);
 		this.assertTelemetryAttachAllowed(match.worker, command.telemetryDisabled);
-		if (this.canRetryFailedWorker(match.worker)) {
+		if (match.worker !== descriptorWorker && this.canRetryFailedWorker(match.worker)) {
 			// A child-session attach lands here without a descriptor match; failed
-			// is retryable for an identity-verified live worker on any touch.
+			// is retryable for an identity-verified live worker, but one touch runs
+			// at most one recovery ladder, so the pre-pass worker is not retried twice.
 			await this.retryWorkerRecovery(match.worker);
 		}
 		this.requireAvailableWorkerClient(match.worker);

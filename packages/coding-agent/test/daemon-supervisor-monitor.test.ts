@@ -1833,6 +1833,100 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(worker.deferredRecoveryRounds).toBe(0);
 	});
 
+	it("recovers a failed identity-current worker when a command is forwarded to it", async () => {
+		const root = {
+			id: "active-failed-root",
+			activeSessionId: "active-failed-root",
+			sessionId: "session-failed-root",
+			cwd: "/tmp",
+		} as SessionSummary;
+		const worker = {
+			descriptor: {
+				workerId: "worker-failed-root",
+				rootActiveSessionId: root.activeSessionId,
+				rootSessionId: root.sessionId,
+				lifecycle: "failed" as string,
+				pid: process.pid,
+				processStartId: getProcessStartId(process.pid),
+			},
+			client: undefined as { request: ReturnType<typeof vi.fn> } | undefined,
+			summaries: new Map<string, SessionSummary>(),
+			intentionalStop: false,
+		};
+		const request = vi.fn(async () => ({
+			type: "response",
+			command: "get_state",
+			success: true,
+			data: root,
+		}));
+		const recoverWorker = vi.fn(async () => {
+			worker.descriptor.lifecycle = "ready";
+			worker.client = { request };
+		});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			clients: new Set(),
+			persistWorker: vi.fn(),
+			recoverWorker,
+		}) as unknown as {
+			forwardToWorker(
+				target: typeof worker,
+				command: { type: "get_state"; activeSessionId: string },
+			): Promise<{ success: boolean; data?: SessionSummary }>;
+		};
+
+		const response = await supervisor.forwardToWorker(worker, {
+			type: "get_state",
+			activeSessionId: "active-failed-root",
+		});
+		expect(recoverWorker).toHaveBeenCalledOnce();
+		expect(response.success).toBe(true);
+		expect(response.data?.workerState).toBe("ready");
+	});
+
+	it("runs at most one recovery ladder for a single attach touch", async () => {
+		const root = {
+			id: "active-double",
+			activeSessionId: "active-double",
+			sessionId: "session-double",
+			cwd: "/tmp",
+		} as SessionSummary;
+		const worker = {
+			descriptor: {
+				workerId: "worker-double",
+				rootActiveSessionId: root.activeSessionId,
+				rootSessionId: root.sessionId,
+				lifecycle: "failed" as string,
+				pid: process.pid,
+				processStartId: getProcessStartId(process.pid),
+			},
+			client: undefined,
+			summaries: new Map<string, SessionSummary>([["active-double", root]]),
+			intentionalStop: false,
+		};
+		// Recovery exhausts and parks the same live worker failed again.
+		const recoverWorker = vi.fn(async () => {
+			worker.descriptor.lifecycle = "failed";
+		});
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			shuttingDown: false,
+			persistWorker: vi.fn(),
+			recoverWorker,
+		}) as unknown as {
+			attachClient(
+				client: DaemonSocketClient,
+				command: { type: "attach"; activeSessionId: string },
+			): Promise<unknown>;
+		};
+		seedSupervisorRoster(supervisor as object as Parameters<typeof seedSupervisorRoster>[0], worker);
+
+		await expect(
+			supervisor.attachClient({} as DaemonSocketClient, { type: "attach", activeSessionId: "active-double" }),
+		).rejects.toThrow("Session worker is failed");
+		expect(recoverWorker).toHaveBeenCalledOnce();
+	});
+
 	it("does not revive a stop-marked failed worker on attach", async () => {
 		const worker = {
 			descriptor: {
@@ -1893,6 +1987,11 @@ describe("daemon worker supervisor monitoring", () => {
 
 		await expect(supervisor.findWorker("active-gap")).rejects.toMatchObject({
 			name: "DaemonSessionRecoveringError",
+			code: "session_recovering",
+			activeSessionId: "active-gap",
+		});
+		// A stable-session-id selector still reports the ACTIVE id on the wire.
+		await expect(supervisor.findWorker("session-gap")).rejects.toMatchObject({
 			code: "session_recovering",
 			activeSessionId: "active-gap",
 		});
