@@ -306,6 +306,25 @@ describe("IpythonKernelProvisioner", () => {
 		expect(provisioner.manager).toBe(manager);
 	});
 
+	it("drops a dead kernel memo so ensure() restarts instead of reusing it", async () => {
+		const { python, countRuns } = writeFakePython();
+		const provisioner = new IpythonKernelProvisioner(tempDir, { python });
+		const dead = { isRunning: false } as unknown as KernelClient;
+		Object.assign(
+			provisioner as unknown as {
+				managerPromise: Promise<KernelClient>;
+				startedManager: KernelClient;
+			},
+			{
+				managerPromise: Promise.resolve(dead),
+				startedManager: dead,
+			},
+		);
+
+		await expect(provisioner.ensure()).rejects.toThrow(/Kernel exited before ready/);
+		expect(countRuns()).toBe(1);
+	});
+
 	it("removes startup progress listeners when an ensure caller is aborted", async () => {
 		const provisioner = new IpythonKernelProvisioner(tempDir, {});
 		Object.assign(

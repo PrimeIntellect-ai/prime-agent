@@ -388,6 +388,11 @@ export class IpythonKernelProvisioner {
 		if (signal?.aborted) {
 			return Promise.reject(createAbortError());
 		}
+		// A kernel that died after a successful startup must not be handed out again.
+		if (this.startedManager && !this.startedManager.isRunning) {
+			this.managerPromise = undefined;
+			this.startedManager = undefined;
+		}
 		let cleanupProgressListener: (() => void) | undefined;
 		if (onProgress && !this.startedManager) {
 			this.startupListeners.add(onProgress);

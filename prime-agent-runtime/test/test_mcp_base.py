@@ -169,6 +169,29 @@ class McpIntegrationTest(unittest.TestCase):
         self.assertEqual(out, {"issues": [1, 2]})
         self.assertEqual(session.calls, [("list_issues", {"team": "Eng"})])
 
+    def test_snake_case_input_schema_surfaces(self):
+        # mcp>=2 Tool objects expose input_schema (pydantic field name), not inputSchema.
+        Tool = type("Tool", (), {})
+        tool = Tool()
+        tool.name = "list_issues"
+        tool.description = "List issues"
+        tool.input_schema = {"type": "object", "properties": {"team": {"type": "string"}}}
+        session = _FakeSession(tools=[], result=None)
+
+        async def list_tools():
+            resp = type("Resp", (), {})()
+            resp.tools = [tool]
+            return resp
+
+        session.list_tools = list_tools
+        self._write_auth(
+            {"type": "oauth", "access": "t", "refresh": "r", "expires": (time.time() + 3600) * 1000}
+        )
+        with self._patch_session(session):
+            integration = _Integration()
+            tools = _run(integration.list_tools())
+        self.assertEqual(tools[0]["inputSchema"], tool.input_schema)
+
     def test_unknown_tool_raises_with_available_list(self):
         session = _FakeSession(tools=[("list_issues", "", {})], result=None)
         self._write_auth(
