@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	acquireSessionLease,
 	canonicalSessionPath,
@@ -64,9 +64,30 @@ describe("session leases", () => {
 			return "not-a-start-time";
 		};
 
-		expect(getWindowsProcessStartId(42, query)).toBeUndefined();
+		expect(getWindowsProcessStartId(43, query)).toBeUndefined();
 		expect(getWindowsProcessStartId(0, query)).toBeUndefined();
 		expect(queryCount).toBe(1);
+	});
+
+	it("caches the Windows process start id per pid for a short TTL", () => {
+		vi.useFakeTimers();
+		try {
+			let queryCount = 0;
+			const query = () => {
+				queryCount++;
+				return "638880485809999999\n";
+			};
+
+			expect(getWindowsProcessStartId(4242, query)).toBe("win:638880485809999999");
+			expect(getWindowsProcessStartId(4242, query)).toBe("win:638880485809999999");
+			expect(queryCount).toBe(1);
+
+			vi.advanceTimersByTime(6000);
+			expect(getWindowsProcessStartId(4242, query)).toBe("win:638880485809999999");
+			expect(queryCount).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("rejects a second live owner with a typed active-session error", () => {
