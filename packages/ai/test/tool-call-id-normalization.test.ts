@@ -23,7 +23,7 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 	it.skipIf(!copilotToken || !openrouterKey)(
 		"github-copilot -> openrouter should normalize pipe-separated IDs",
 		async () => {
-			const copilotModel = getModel("github-copilot", "gpt-5.2-codex");
+			const copilotModel = getModel("github-copilot", "gpt-5.3-codex");
 			const openrouterModel = getModel("openrouter", "openai/gpt-5.2-codex");
 
 			const userMessage: Message = {
@@ -88,7 +88,7 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 	it.skipIf(!copilotToken || !codexToken)(
 		"github-copilot -> openai-codex should normalize pipe-separated IDs",
 		async () => {
-			const copilotModel = getModel("github-copilot", "gpt-5.2-codex");
+			const copilotModel = getModel("github-copilot", "gpt-5.3-codex");
 			const codexModel = getModel("openai-codex", "gpt-5.2-codex");
 
 			const userMessage: Message = {

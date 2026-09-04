@@ -1,0 +1,1 @@
+- Refreshed the generated model catalog from live provider sources: 41 models added (including claude-fable-5.1, gemini-3.8-flash, and GLM-5.3 across providers) and 17 removed; GitHub Copilot tests now use claude-sonnet-4.6 and gpt-5.3-codex for the models Copilot dropped.
