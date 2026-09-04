@@ -104,25 +104,16 @@ describe("extractStreamFailureInfo", () => {
 		expect(extractStreamFailureInfo(awsError)).toMatchObject({ requestId: "aws_req" });
 	});
 
-	test("extracts the server-requested retry delay from Retry-After headers", () => {
-		const withSeconds = Object.assign(new Error("429"), {
-			status: 429,
-			headers: new Headers({ "retry-after": "120" }),
-		});
-		expect(extractStreamFailureInfo(withSeconds)).toMatchObject({ kind: "rate_limit", retryAfterMs: 120000 });
+	test.each([
+		["Headers seconds", new Headers({ "retry-after": "120" }), 120000],
+		["retry-after-ms precedence", { "retry-after-ms": "1500", "retry-after": "2" }, 1500],
+		["record with mixed case", { "Retry-After": "120" }, 120000],
+	] as const)("extracts the server-requested retry delay: %s", (_name, headers, expected) => {
+		const error = Object.assign(new Error("429"), { status: 429, headers });
+		expect(extractStreamFailureInfo(error)).toMatchObject({ kind: "rate_limit", retryAfterMs: expected });
+	});
 
-		const withMs = Object.assign(new Error("429"), {
-			status: 429,
-			headers: { "retry-after-ms": "1500", "retry-after": "2" },
-		});
-		expect(extractStreamFailureInfo(withMs).retryAfterMs).toBe(1500);
-
-		const withRecordCase = Object.assign(new Error("429"), {
-			status: 429,
-			headers: { "Retry-After": "120" },
-		});
-		expect(extractStreamFailureInfo(withRecordCase).retryAfterMs).toBe(120000);
-
+	test("parses an HTTP-date Retry-After relative to now", () => {
 		const withDate = Object.assign(new Error("429"), {
 			status: 429,
 			headers: new Headers({ "retry-after": new Date(Date.now() + 60000).toUTCString() }),

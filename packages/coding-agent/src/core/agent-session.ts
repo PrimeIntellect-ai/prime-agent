@@ -11161,8 +11161,7 @@ export class AgentSession {
 			return false;
 		}
 
-		// Honor the provider's requested wait (Retry-After / usage-limit reset),
-		// capped by retry.provider.maxRetryDelayMs (0 disables the cap).
+		// Server-requested waits are honored, capped by retry.provider.maxRetryDelayMs (0 disables).
 		const maxRetryDelayMs = this.settingsManager.getProviderRetrySettings().maxRetryDelayMs;
 		const delay = providerRetryDelay(this._retryAttempt, providerStreamFailureRetryAfterMs(message), {
 			baseDelayMs: settings.baseDelayMs,

@@ -3,12 +3,9 @@ import { sleep } from "../utils/sleep.js";
 import type { SettingsManager } from "./settings-manager.js";
 
 /**
- * Shared provider-retry policy: the single definition of which structured
- * provider failures are permanent and how long to wait before a retry
- * (exponential backoff, raised to a server-requested Retry-After, capped by
- * retry.provider.maxRetryDelayMs). The AgentSession auto-retry loop and the
- * one-shot completion consumers (side questions, compaction, refinement,
- * session summaries) both consume this policy so they cannot drift.
+ * The single retry policy (permanent kinds, Retry-After-aware capped delays),
+ * shared by the AgentSession auto-retry loop and the one-shot completion
+ * consumers (side questions, compaction, refinement, session summaries).
  */
 export interface ProviderRetryPolicy {
 	enabled: boolean;
@@ -54,10 +51,7 @@ export function providerStreamFailureRetryAfterMs(message: AssistantMessage): nu
 	return typeof value === "number" && value >= 0 ? value : undefined;
 }
 
-/**
- * Deterministic rejections never warrant a retry; auth failures get one
- * retry so a transient auth hiccup does not immediately mark auth stale.
- */
+/** Deterministic rejections never retry; auth gets one retry before it can be marked stale. */
 export function isPermanentProviderFailureKind(kind: string | undefined, retriesPerformed: number): boolean {
 	if (kind === "invalid_request" || kind === "refusal") {
 		return true;
@@ -80,11 +74,8 @@ export function providerRetryDelay(
 }
 
 /**
- * Run a one-shot completion with the shared retry policy. For consumers that
- * do not go through the AgentSession auto-retry loop (side questions,
- * compaction/branch summarization, refinement, daemon session summaries):
- * without this they would make exactly one attempt, since provider SDKs no
- * longer retry internally.
+ * One-shot completion with the shared retry policy, for consumers outside the
+ * AgentSession auto-retry loop (provider SDKs never retry internally).
  */
 export async function completeWithProviderRetry(
 	attemptCompletion: () => Promise<AssistantMessage>,

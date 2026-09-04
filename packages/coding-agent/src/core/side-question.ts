@@ -136,15 +136,12 @@ export function startSideQuestion(
 				return;
 			}
 			started = true;
-			// Standalone side agents bypass the AgentSession auto-retry loop and
-			// provider SDKs never retry, so transient failures retry here with
-			// the shared policy.
+			// Standalone side agents bypass the session auto-retry loop; retry here instead.
 			let promptedOnce = false;
 			await completeWithProviderRetry(
 				async () => {
 					if (promptedOnce) {
-						// Same recovery as the session retry loop: drop the failed
-						// assistant turn and re-run the pending side question.
+						// Session-loop recovery: drop the failed assistant turn and re-run.
 						sideAgent.state.messages = sideAgent.state.messages.slice(0, -1);
 						await sideAgent.continue();
 					} else {

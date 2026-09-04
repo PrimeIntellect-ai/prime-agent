@@ -72,8 +72,7 @@ export function classifyStreamFailure(providerErrorType?: string, status?: numbe
 		return "safety";
 	}
 	if (type.includes("overloaded") || status === 529) return "overloaded";
-	// usage_not_included is Codex's plan-entitlement rejection: a usage-limit
-	// shape, not bad credentials, whatever status code carries it.
+	// usage_not_included is Codex's plan-entitlement rejection, not bad credentials.
 	if (/rate_limit|usage_limit|usage_not_included|throttl/.test(type) || status === 429) {
 		return "rate_limit";
 	}

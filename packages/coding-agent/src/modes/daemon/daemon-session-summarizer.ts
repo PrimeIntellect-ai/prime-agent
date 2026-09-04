@@ -163,8 +163,7 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 		return undefined;
 	}
 	try {
-		// A one-attempt transient failure would settle an idle session to a stale
-		// needs_input verdict (no re-sweep until new messages), so retry here.
+		// One failed attempt would settle an idle session to a stale needs_input verdict.
 		const response = await completeWithProviderRetry(
 			() =>
 				completeSimple(

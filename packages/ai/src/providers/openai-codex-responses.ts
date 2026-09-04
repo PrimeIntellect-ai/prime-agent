@@ -431,8 +431,7 @@ async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): 
 		if (!type) continue;
 
 		if (type === "error") {
-			// Errors arrive flat ({ code, message }) or nested
-			// ({ status_code, error: { type, message, plan_type, resets_at } }).
+			// Errors arrive flat ({ code, message }) or nested under event.error.
 			const flatCode = typeof event.code === "string" ? event.code : "";
 			const flatMessage = typeof event.message === "string" ? event.message : "";
 			const nested = event.error && typeof event.error === "object" ? (event.error as CodexErrorPayload) : undefined;
@@ -1197,8 +1196,7 @@ async function parseErrorResponse(response: Response): Promise<CodexApiError> {
 			const usageLimit = codexUsageLimitMessage(err, response.status);
 			if (usageLimit) {
 				message = usageLimit.friendlyMessage;
-				// Two server-provided delays (Retry-After header, resets_at body):
-				// neither may undercut the other, so wait for the longer one.
+				// Neither server delay (Retry-After header, resets_at body) may undercut the other.
 				if (usageLimit.retryAfterMs !== undefined) {
 					retryAfterMs = Math.max(retryAfterMs ?? 0, usageLimit.retryAfterMs);
 				}

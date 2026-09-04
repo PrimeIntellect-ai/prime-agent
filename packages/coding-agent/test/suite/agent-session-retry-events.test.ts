@@ -37,6 +37,19 @@ function structuredProviderFailure(kind: "auth" | "invalid_request" | "refusal")
 	};
 }
 
+function rateLimitedFailure(retryAfterMs: number): AssistantMessage {
+	return {
+		...fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limited" }),
+		diagnostics: [
+			{
+				type: "provider_stream_failure",
+				timestamp: Date.now(),
+				details: { kind: "rate_limit", status: 429, retryAfterMs },
+			},
+		],
+	};
+}
+
 type SessionRetryCompactionInternals = {
 	_retryAttempt: number;
 	_retryPromise: Promise<void> | undefined;
@@ -298,17 +311,7 @@ describe("AgentSession retry and event characterization", () => {
 	it("waits at least the provider-requested Retry-After delay before retrying", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
 		harnesses.push(harness);
-		const rateLimited: AssistantMessage = {
-			...fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limited" }),
-			diagnostics: [
-				{
-					type: "provider_stream_failure",
-					timestamp: Date.now(),
-					details: { kind: "rate_limit", status: 429, retryAfterMs: 50 },
-				},
-			],
-		};
-		harness.setResponses([rateLimited, fauxAssistantMessage("recovered")]);
+		harness.setResponses([rateLimitedFailure(50), fauxAssistantMessage("recovered")]);
 
 		await harness.session.prompt("test");
 
@@ -324,17 +327,7 @@ describe("AgentSession retry and event characterization", () => {
 			},
 		});
 		harnesses.push(harness);
-		const rateLimited: AssistantMessage = {
-			...fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 rate limited" }),
-			diagnostics: [
-				{
-					type: "provider_stream_failure",
-					timestamp: Date.now(),
-					details: { kind: "rate_limit", status: 429, retryAfterMs: 3_600_000 },
-				},
-			],
-		};
-		harness.setResponses([rateLimited, fauxAssistantMessage("unused")]);
+		harness.setResponses([rateLimitedFailure(3_600_000), fauxAssistantMessage("unused")]);
 
 		await harness.session.prompt("test");
 

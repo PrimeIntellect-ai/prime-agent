@@ -28,14 +28,21 @@ async function streamToError(model: Model<"openai-completions">) {
 }
 
 describe("provider retry ownership", () => {
-	it("makes exactly one request on a 500 and records a structured stream failure", async () => {
-		const fetchMock = vi.fn(
-			async () =>
-				new Response(JSON.stringify({ error: { type: "server_error", message: "boom" } }), {
-					status: 500,
-					headers: { "content-type": "application/json" },
-				}),
-		);
+	it.each([
+		[
+			"makes exactly one request on a 500 and records a structured stream failure",
+			{ type: "server_error", message: "boom" },
+			{ status: 500 },
+			{ kind: "server_error", status: 500 },
+		],
+		[
+			"surfaces the server-requested Retry-After delay on rate limits",
+			{ type: "rate_limit_error", message: "slow down" },
+			{ status: 429, headers: { "retry-after": "30" } },
+			{ kind: "rate_limit", status: 429, retryAfterMs: 30000 },
+		],
+	] as const)("%s", async (_name, errorBody, init, expectedDetails) => {
+		const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: errorBody }), init));
 		global.fetch = fetchMock as typeof fetch;
 
 		const output = await streamToError(completionsModel());
@@ -44,26 +51,7 @@ describe("provider retry ownership", () => {
 		expect(output.stopReason).toBe("error");
 		expect(output.diagnostics?.[0]).toMatchObject({
 			type: "provider_stream_failure",
-			details: { kind: "server_error", status: 500 },
-		});
-	});
-
-	it("surfaces the server-requested Retry-After delay on rate limits", async () => {
-		const fetchMock = vi.fn(
-			async () =>
-				new Response(JSON.stringify({ error: { type: "rate_limit_error", message: "slow down" } }), {
-					status: 429,
-					headers: { "content-type": "application/json", "retry-after": "30" },
-				}),
-		);
-		global.fetch = fetchMock as typeof fetch;
-
-		const output = await streamToError(completionsModel());
-
-		expect(fetchMock).toHaveBeenCalledTimes(1);
-		expect(output.diagnostics?.[0]).toMatchObject({
-			type: "provider_stream_failure",
-			details: { kind: "rate_limit", status: 429, retryAfterMs: 30000 },
+			details: expectedDetails,
 		});
 	});
 });

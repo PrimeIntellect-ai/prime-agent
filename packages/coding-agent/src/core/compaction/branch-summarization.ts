@@ -72,7 +72,6 @@ export interface GenerateBranchSummaryOptions {
 	customInstructions?: string;
 	/** If true, customInstructions replaces the default prompt instead of being appended */
 	replaceInstructions?: boolean;
-	/** Retry policy for the summarization call (defaults to the standard policy) */
 	retry?: ProviderRetryPolicy;
 	/** Tokens reserved for prompt + LLM response (default 16384) */
 	reserveTokens?: number;
