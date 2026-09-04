@@ -45,9 +45,14 @@ function familyKey(modelId: string): string {
 
 /**
  * Thinking levels a user can actually select at runtime, from the same
- * function the UI uses. The "off" level is excluded from comparisons: whether
- * thinking can be disabled legitimately varies per provider transport (e.g.
- * reasoning effort "none" exists only on the native OpenAI Responses API).
+ * function the UI uses. The consistency invariant compares these within one
+ * transport (api) and only among rows that declare a thinkingLevelMap:
+ * cross-transport level differences are deliberate (native-only "minimal",
+ * pro-tier restrictions), and rows without a map fall back to provider
+ * defaults, which blind upstream sources emit for dozens of families. The
+ * "off" level is also excluded: whether thinking can be disabled legitimately
+ * varies per provider transport (e.g. reasoning effort "none" exists only on
+ * the native OpenAI Responses API).
  */
 function selectableLevels(model: CatalogRowLike): string {
 	return getSupportedThinkingLevels(model as Model<Api>)
