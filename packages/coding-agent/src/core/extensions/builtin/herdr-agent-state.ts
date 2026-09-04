@@ -17,7 +17,7 @@
  */
 
 import { createConnection } from "node:net";
-import { basename } from "node:path";
+import { basename, win32 } from "node:path";
 import type { ExtensionAPI, ExtensionFactory } from "../types.js";
 
 type AgentState = "working" | "blocked" | "idle";
@@ -40,6 +40,18 @@ export function hasFileBasedHerdrIntegration(loadedExtensionPaths: string[]): bo
 		const base = basename(path);
 		return base === "herdr-agent-state.ts" || base === "herdr-agent-state.js";
 	});
+}
+
+/**
+ * Herdr exports a unix-style socket path; on Windows a local-domain socket
+ * must be dialed inside the named-pipe namespace, so map the path into
+ * \\.\pipe\ (already-namespaced paths pass through unchanged).
+ */
+export function herdrSocketTarget(socketPath: string, platform: NodeJS.Platform = process.platform): string {
+	if (platform !== "win32" || socketPath.startsWith("\\\\.\\pipe\\") || socketPath.startsWith("\\\\?\\pipe\\")) {
+		return socketPath;
+	}
+	return win32.join("\\\\.\\pipe\\", socketPath);
 }
 
 interface QueuedState {
@@ -171,7 +183,7 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 				resolve();
 			};
 
-			const socket = createConnection(socketPath!);
+			const socket = createConnection(herdrSocketTarget(socketPath!));
 			socket.on("error", finish);
 			socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
 			socket.on("data", finish);

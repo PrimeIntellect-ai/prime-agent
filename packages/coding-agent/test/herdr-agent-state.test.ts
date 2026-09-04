@@ -7,6 +7,7 @@ import {
 	createHerdrAgentStateExtension,
 	hasFileBasedHerdrIntegration,
 	herdrAgentStateExtension,
+	herdrSocketTarget,
 } from "../src/core/extensions/builtin/herdr-agent-state.js";
 import type { ExtensionAPI } from "../src/core/extensions/types.js";
 
@@ -490,5 +491,13 @@ describe("herdrAgentStateExtension", () => {
 
 		const seqs = requests.map((r) => r.params.seq as number);
 		expect(seqs[1]).toBeGreaterThan(seqs[0]);
+	});
+});
+
+describe("herdrSocketTarget", () => {
+	it("maps unix-style socket paths into the named-pipe namespace on win32 only", () => {
+		expect(herdrSocketTarget("/tmp/herdr/pane.sock", "win32")).toBe("\\\\.\\pipe\\tmp\\herdr\\pane.sock");
+		expect(herdrSocketTarget("\\\\.\\pipe\\herdr-pane", "win32")).toBe("\\\\.\\pipe\\herdr-pane");
+		expect(herdrSocketTarget("/tmp/herdr/pane.sock", "linux")).toBe("/tmp/herdr/pane.sock");
 	});
 });
