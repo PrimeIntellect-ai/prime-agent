@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -571,6 +571,27 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 			]);
 			expect(parsed.at(-1)?.message?.content).toBe("after crash");
 			expect(errorSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+it("repairs a damaged transcript through its symlink alias at the real file", () => {
+		const realFile = join(tempDir, "real.jsonl");
+		const alias = join(tempDir, "alias.jsonl");
+		const header = { type: "session", version: 3, id: "sym-session", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" };
+		writeFileSync(realFile, `${JSON.stringify(header)}\n{"type":"message","id":"torn`);
+		chmodSync(realFile, 0o600);
+		symlinkSync(realFile, alias);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			SessionManager.open(alias, tempDir);
+			expect(lstatSync(alias).isSymbolicLink()).toBe(true);
+			const repaired = readFileSync(realFile, "utf-8");
+			expect(repaired.endsWith("\n")).toBe(true);
+			expect(repaired).not.toContain("torn");
+			expect(statSync(realFile).mode & 0o777).toBe(0o600);
 		} finally {
 			errorSpy.mockRestore();
 		}
