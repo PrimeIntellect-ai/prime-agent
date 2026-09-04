@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import assert from "node:assert";
+import { describe, it } from "node:test";
 import {
 	extractTableCellSelectionRegions,
 	markTableCell,
@@ -11,6 +12,6 @@ describe("selection metadata", () => {
 		// The lone surrogate is replaced with U+FFFD, not crashed on.
 		const line = markTableEnd(markTableStart("") + markTableCell("cell text", 0, 0, 0, "broken \uD800 surrogate"));
 		const { regions } = extractTableCellSelectionRegions([line], () => ({}));
-		expect(regions[0]?.content).toBe("broken \uFFFD surrogate");
+		assert.equal(regions[0]?.content, "broken \uFFFD surrogate");
 	});
 });
