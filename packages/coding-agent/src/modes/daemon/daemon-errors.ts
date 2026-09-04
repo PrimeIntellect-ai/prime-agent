@@ -3,11 +3,7 @@ import { SessionImportFileNotFoundError } from "../../core/session-import-errors
 import { SessionAlreadyActiveError } from "../../core/session-lease.js";
 import type { DaemonErrorInfo, DaemonResponse } from "./daemon-protocol.js";
 
-/**
- * The supervisor knows the session (a persisted worker descriptor names it) but
- * cannot route to it yet because the worker is still being adopted or recovered.
- * Retryable, unlike "Unknown active session".
- */
+/** A known session (a persisted descriptor names it) that cannot be routed to yet; retryable, unlike "Unknown active session". */
 export class DaemonSessionRecoveringError extends Error {
 	readonly code = "session_recovering" as const;
 

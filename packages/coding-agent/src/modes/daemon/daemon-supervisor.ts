@@ -3590,17 +3590,12 @@ export class DaemonSupervisor {
 		return this.isWorkerRecoveryCandidate(worker) && worker.recovery === undefined;
 	}
 
-	/**
-	 * A failed lifecycle is not terminal for a worker whose process identity is
-	 * verified current: any attach or create touching it retries recovery, the
-	 * same way the manual retry_worker command does.
-	 */
+	/** Failed is not terminal for an identity-verified live worker: any touch retries recovery, like manual retry_worker. */
 	private canRetryFailedWorker(worker: ResidentWorker): boolean {
 		return (
 			worker.descriptor.lifecycle === "failed" &&
 			(this.workerStopCounts?.get(worker) ?? 0) === 0 &&
-			// A user-stopped worker stays stopped: the persisted stop markers gate
-			// on-touch retries, which only the explicit retry_worker command clears.
+			// A user-stopped worker stays stopped; only an explicit retry_worker clears the persisted stop markers.
 			!this.isWorkerStopping(worker) &&
 			this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId) === "current"
 		);
@@ -4854,10 +4849,8 @@ export class DaemonSupervisor {
 		if (matches.length > 1) {
 			throw new Error(`Ambiguous active session "${selector}"`);
 		}
-		// Persisted descriptors are the durable half of session addressability: a
-		// root session on a worker whose roster snapshot has not arrived yet is
-		// recovering, not unknown. Failed workers keep the unknown answer so
-		// clients fall back to the create path, which can reclaim or retry them.
+		// Descriptors are the durable half of addressability: an unhydrated root is recovering, not unknown;
+		// failed workers stay unknown so clients take the create fallback, which reclaims or retries them.
 		const recoveringRoots = (matchesSelector: (worker: ResidentWorker) => boolean) =>
 			[...this.workers.values()].filter(
 				(worker) =>
@@ -4866,8 +4859,7 @@ export class DaemonSupervisor {
 					worker.descriptor.lifecycle !== "failed" &&
 					this.isWorkerRecoveryCandidate(worker),
 			);
-		// Same addressing rule as matchWorkers: exact ids first, then unambiguous
-		// hex suffixes; ambiguous suffixes stay unknown.
+		// matchWorkers' addressing rule: exact ids first, unambiguous hex suffixes second.
 		const exactRecovering = recoveringRoots(
 			(worker) => worker.descriptor.rootActiveSessionId === selector || worker.descriptor.rootSessionId === selector,
 		);
@@ -4982,14 +4974,12 @@ export class DaemonSupervisor {
 		command: DaemonCommand,
 		timeoutMs = WORKER_REQUEST_TIMEOUT_MS,
 	): Promise<DaemonResponse> {
-		// Every forwarded command is a touch: a cached failed roster row must not
-		// outrank the descriptor truth that the worker is recoverable (the
-		// --attach-agent preflight's get_state lands here before any attach).
+		// Every forwarded command is a touch: a cached failed roster row must not outrank
+		// the descriptor truth that the worker is recoverable (--attach-agent's get_state preflight lands here).
 		if (this.canRetryFailedWorker(worker)) {
 			await this.retryWorkerRecovery(worker);
 		} else if (worker.recovery) {
-			// A concurrent touch already started this recovery: join it instead of
-			// throwing mid-ladder (and instead of starting a second ladder).
+			// Join a concurrent touch's in-flight recovery instead of throwing mid-ladder.
 			await worker.recovery;
 		}
 		const client = this.requireAvailableWorkerClient(worker, command.type === "kill");
@@ -5014,8 +5004,7 @@ export class DaemonSupervisor {
 				worker.descriptor.rootSessionId === command.activeSessionId,
 		);
 		if (descriptorWorker) {
-			// The descriptor lookup is universal; the owned branch alone carries the
-			// owner-only attach payload (telemetry gate, launchEnv, recovery context).
+			// The descriptor lookup is universal; owner-only attach payload stays in the owned branch.
 			if (descriptorWorker.descriptor.ownerClientId !== undefined) {
 				if (descriptorWorker.descriptor.ownerClientId !== this.protocolClientId(client)) {
 					throw new Error(`Unknown active session: ${command.activeSessionId}`);
@@ -5047,9 +5036,7 @@ export class DaemonSupervisor {
 		const match = await this.findWorkerForClient(client, command.activeSessionId);
 		this.assertTelemetryAttachAllowed(match.worker, command.telemetryDisabled);
 		if (match.worker !== descriptorWorker && this.canRetryFailedWorker(match.worker)) {
-			// A child-session attach lands here without a descriptor match; failed
-			// is retryable for an identity-verified live worker, but one touch runs
-			// at most one recovery ladder, so the pre-pass worker is not retried twice.
+			// Child-session attaches land here without a descriptor match; one touch runs at most one ladder.
 			await this.retryWorkerRecovery(match.worker);
 		}
 		this.requireAvailableWorkerClient(match.worker);

@@ -1799,25 +1799,50 @@ describe("daemon worker supervisor monitoring", () => {
 		);
 	});
 
-	it("retries recovery on create reuse for a failed worker with a current process identity", async () => {
+	/** A failed worker whose process identity is verifiably current (this test process). */
+	function retryableWorkerFixture(prefix: string) {
+		const root = {
+			id: `active-${prefix}`,
+			activeSessionId: `active-${prefix}`,
+			sessionId: `session-${prefix}`,
+			cwd: "/tmp",
+		} as SessionSummary;
 		const worker = {
 			descriptor: {
-				workerId: "failed-live",
-				rootActiveSessionId: "active-failed-live",
+				workerId: `worker-${prefix}`,
+				rootActiveSessionId: `active-${prefix}`,
+				rootSessionId: `session-${prefix}`,
 				lifecycle: "failed" as string,
-				consecutiveFailures: 3,
 				pid: process.pid,
 				processStartId: getProcessStartId(process.pid),
+				stopRequestedAt: undefined as string | undefined,
 			},
+			client: undefined as { request: ReturnType<typeof vi.fn> } | undefined,
+			recovery: undefined as Promise<void> | undefined,
+			summaries: new Map<string, SessionSummary>(),
 			intentionalStop: false,
-			deferredRecoveryRounds: 11,
+			deferredRecoveryRounds: 0,
 		};
+		return { root, worker };
+	}
+
+	function retrySupervisor(worker: { descriptor: { workerId: string } }, overrides: Record<string, unknown>) {
+		return Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map([[worker.descriptor.workerId, worker]]),
+			clients: new Set(),
+			shuttingDown: false,
+			persistWorker: vi.fn(),
+			...overrides,
+		}) as object;
+	}
+
+	it("retries recovery on create reuse for a failed worker with a current process identity", async () => {
+		const { worker } = retryableWorkerFixture("failed-live");
+		worker.deferredRecoveryRounds = 11;
 		const recoverWorker = vi.fn(async () => {
 			worker.descriptor.lifecycle = "ready";
 		});
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			workers: new Map([[worker.descriptor.workerId, worker]]),
-			persistWorker: vi.fn(),
+		const supervisor = retrySupervisor(worker, {
 			recoverWorker,
 			isWorkerReadyForCreate: (target: typeof worker) => target.descriptor.lifecycle === "ready",
 		}) as unknown as {
@@ -1834,41 +1859,13 @@ describe("daemon worker supervisor monitoring", () => {
 	});
 
 	it("recovers a failed identity-current worker when a command is forwarded to it", async () => {
-		const root = {
-			id: "active-failed-root",
-			activeSessionId: "active-failed-root",
-			sessionId: "session-failed-root",
-			cwd: "/tmp",
-		} as SessionSummary;
-		const worker = {
-			descriptor: {
-				workerId: "worker-failed-root",
-				rootActiveSessionId: root.activeSessionId,
-				rootSessionId: root.sessionId,
-				lifecycle: "failed" as string,
-				pid: process.pid,
-				processStartId: getProcessStartId(process.pid),
-			},
-			client: undefined as { request: ReturnType<typeof vi.fn> } | undefined,
-			summaries: new Map<string, SessionSummary>(),
-			intentionalStop: false,
-		};
-		const request = vi.fn(async () => ({
-			type: "response",
-			command: "get_state",
-			success: true,
-			data: root,
-		}));
+		const { root, worker } = retryableWorkerFixture("failed-root");
+		const request = vi.fn(async () => ({ type: "response", command: "get_state", success: true, data: root }));
 		const recoverWorker = vi.fn(async () => {
 			worker.descriptor.lifecycle = "ready";
 			worker.client = { request };
 		});
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			workers: new Map([[worker.descriptor.workerId, worker]]),
-			clients: new Set(),
-			persistWorker: vi.fn(),
-			recoverWorker,
-		}) as unknown as {
+		const supervisor = retrySupervisor(worker, { recoverWorker }) as unknown as {
 			forwardToWorker(
 				target: typeof worker,
 				command: { type: "get_state"; activeSessionId: string },
@@ -1885,32 +1882,8 @@ describe("daemon worker supervisor monitoring", () => {
 	});
 
 	it("joins an in-flight recovery instead of failing a concurrent forwarded command", async () => {
-		const root = {
-			id: "active-race",
-			activeSessionId: "active-race",
-			sessionId: "session-race",
-			cwd: "/tmp",
-		} as SessionSummary;
-		const request = vi.fn(async () => ({
-			type: "response",
-			command: "get_state",
-			success: true,
-			data: root,
-		}));
-		const worker = {
-			descriptor: {
-				workerId: "worker-race",
-				rootActiveSessionId: "active-race",
-				rootSessionId: "session-race",
-				lifecycle: "failed" as string,
-				pid: process.pid,
-				processStartId: getProcessStartId(process.pid),
-			},
-			client: undefined as { request: ReturnType<typeof vi.fn> } | undefined,
-			recovery: undefined as Promise<void> | undefined,
-			summaries: new Map<string, SessionSummary>(),
-			intentionalStop: false,
-		};
+		const { root, worker } = retryableWorkerFixture("race");
+		const request = vi.fn(async () => ({ type: "response", command: "get_state", success: true, data: root }));
 		const release = createDeferred<void>();
 		const recoverWorker = vi.fn(() => {
 			worker.recovery = release.promise.then(() => {
@@ -1920,12 +1893,7 @@ describe("daemon worker supervisor monitoring", () => {
 			});
 			return worker.recovery;
 		});
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			workers: new Map([[worker.descriptor.workerId, worker]]),
-			clients: new Set(),
-			persistWorker: vi.fn(),
-			recoverWorker,
-		}) as unknown as {
+		const supervisor = retrySupervisor(worker, { recoverWorker }) as unknown as {
 			forwardToWorker(
 				target: typeof worker,
 				command: { type: "get_state"; activeSessionId: string },
@@ -1944,35 +1912,13 @@ describe("daemon worker supervisor monitoring", () => {
 	});
 
 	it("runs at most one recovery ladder for a single attach touch", async () => {
-		const root = {
-			id: "active-double",
-			activeSessionId: "active-double",
-			sessionId: "session-double",
-			cwd: "/tmp",
-		} as SessionSummary;
-		const worker = {
-			descriptor: {
-				workerId: "worker-double",
-				rootActiveSessionId: root.activeSessionId,
-				rootSessionId: root.sessionId,
-				lifecycle: "failed" as string,
-				pid: process.pid,
-				processStartId: getProcessStartId(process.pid),
-			},
-			client: undefined,
-			summaries: new Map<string, SessionSummary>([["active-double", root]]),
-			intentionalStop: false,
-		};
+		const { root, worker } = retryableWorkerFixture("double");
+		worker.summaries.set("active-double", root);
 		// Recovery exhausts and parks the same live worker failed again.
 		const recoverWorker = vi.fn(async () => {
 			worker.descriptor.lifecycle = "failed";
 		});
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			workers: new Map([[worker.descriptor.workerId, worker]]),
-			shuttingDown: false,
-			persistWorker: vi.fn(),
-			recoverWorker,
-		}) as unknown as {
+		const supervisor = retrySupervisor(worker, { recoverWorker }) as unknown as {
 			attachClient(
 				client: DaemonSocketClient,
 				command: { type: "attach"; activeSessionId: string },
@@ -1987,25 +1933,14 @@ describe("daemon worker supervisor monitoring", () => {
 	});
 
 	it("does not revive a stop-marked failed worker on attach", async () => {
-		const worker = {
-			descriptor: {
-				workerId: "worker-stopped",
-				rootActiveSessionId: "active-stopped",
-				rootSessionId: "session-stopped",
-				lifecycle: "failed" as string,
-				stopRequestedAt: new Date().toISOString(),
-				pid: process.pid,
-				processStartId: getProcessStartId(process.pid),
-			},
-			intentionalStop: true,
-			summaries: new Map(),
-		};
+		const { worker } = retryableWorkerFixture("stopped");
+		worker.descriptor.stopRequestedAt = new Date().toISOString();
+		worker.intentionalStop = true;
 		const recoverWorker = vi.fn(async () => {});
 		const persistWorker = vi.fn();
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			workers: new Map([[worker.descriptor.workerId, worker]]),
-			persistWorker,
+		const supervisor = retrySupervisor(worker, {
 			recoverWorker,
+			persistWorker,
 			findWorkerForClient: vi.fn(async () => {
 				throw new Error("Unknown active session: active-stopped");
 			}),
@@ -2027,35 +1962,17 @@ describe("daemon worker supervisor monitoring", () => {
 	});
 
 	it("answers a descriptor-known unaddressable root session with a structured recovering error", async () => {
-		const worker = {
-			descriptor: {
-				workerId: "worker-gap",
-				rootActiveSessionId: "active-gap",
-				rootSessionId: "session-gap",
-				lifecycle: "recovering" as string,
-			},
-			intentionalStop: false,
-			summaries: new Map(),
-		};
-		const hexWorker = {
-			descriptor: {
-				workerId: "worker-hex-gap",
-				rootActiveSessionId: "00ff77aa11bb22cc",
-				rootSessionId: "0123456789abcdef",
-				lifecycle: "recovering" as string,
-			},
-			intentionalStop: false,
-			summaries: new Map(),
-		};
-		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			workers: new Map([
-				[worker.descriptor.workerId, worker],
-				[hexWorker.descriptor.workerId, hexWorker],
-			]),
-			shuttingDown: false,
+		const { worker } = retryableWorkerFixture("gap");
+		worker.descriptor.lifecycle = "recovering";
+		const { worker: hexWorker } = retryableWorkerFixture("hex");
+		hexWorker.descriptor.rootActiveSessionId = "00ff77aa11bb22cc";
+		hexWorker.descriptor.rootSessionId = "0123456789abcdef";
+		hexWorker.descriptor.lifecycle = "recovering";
+		const supervisor = retrySupervisor(worker, {
 			matchWorkers: () => [],
 			refreshWorkerSummaries: vi.fn(async () => {}),
 		}) as unknown as { findWorker(selector: string): Promise<unknown> };
+		(supervisor as unknown as { workers: Map<string, unknown> }).workers.set("worker-hex", hexWorker);
 
 		await expect(supervisor.findWorker("active-gap")).rejects.toMatchObject({
 			name: "DaemonSessionRecoveringError",
@@ -2067,14 +1984,12 @@ describe("daemon worker supervisor monitoring", () => {
 			code: "session_recovering",
 			activeSessionId: "active-gap",
 		});
-		// Suffix addressing follows the roster rule: an unambiguous hex suffix of
-		// a recovering root is recovering, not unknown.
+		// Suffix addressing follows the roster rule: an unambiguous hex suffix of a recovering root is recovering.
 		await expect(supervisor.findWorker("77aa11bb22cc")).rejects.toMatchObject({
 			code: "session_recovering",
 			activeSessionId: "00ff77aa11bb22cc",
 		});
-		// A failed worker keeps the unknown answer so clients fall back to the
-		// create path, which reclaims or retries it.
+		// Failed workers keep the unknown answer so clients take the create fallback that reclaims them.
 		worker.descriptor.lifecycle = "failed";
 		await expect(supervisor.findWorker("active-gap")).rejects.toThrow("Unknown active session: active-gap");
 		await expect(supervisor.findWorker("missing")).rejects.toThrow("Unknown active session: missing");

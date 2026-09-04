@@ -953,11 +953,8 @@ function isUnknownActiveSessionError(message: string): boolean {
 }
 
 /**
- * Unknown means the lookup falls back to the saved-session path (whose
- * create/open route waits for or retries worker recovery); a recovering
- * session throws typed instead, so an explicit --attach-agent surfaces the
- * retryable state rather than "No active agent found". Interactive lookups
- * swallow the throw into the same saved-session fallback.
+ * Unknown falls back to the saved-session path (whose create/open route retries recovery); recovering
+ * throws typed so an explicit --attach-agent surfaces the retryable state, not "No active agent found".
  */
 export function resolveActiveSessionLookupFailure(
 	response: Extract<DaemonResponse, { success: false }>,

@@ -345,8 +345,7 @@ async function openAgentsViewSession(
 			return { connection, summary };
 		} catch (error) {
 			client.close();
-			// A recovering session takes the saved-session path too: the create/open
-			// route waits for or retries the worker's recovery.
+			// Recovering takes the saved-session path too; its create/open route retries the recovery.
 			if (
 				!summary.sessionFile ||
 				!(isUnknownActiveSessionError(error) || error instanceof DaemonSessionRecoveringError)
