@@ -35,7 +35,10 @@ interface TableBounds {
 }
 
 function cellMarker(kind: CellMarker["kind"], row: number, column: number, segment: number, content?: string): string {
-	const encodedContent = content === undefined ? "" : `:${encodeURIComponent(content)}`;
+	// Lone surrogates (split at cell boundaries) would make encodeURIComponent throw.
+	// toWellFormed exists on every supported runtime (engines node >=20); lib is still ES2022.
+	const wellFormed = content as undefined | (string & { toWellFormed(): string });
+	const encodedContent = wellFormed === undefined ? "" : `:${encodeURIComponent(wellFormed.toWellFormed())}`;
 	return `${TABLE_MARKER_PREFIX}${kind}:${row}:${column}:${segment}${encodedContent}\x07`;
 }
 

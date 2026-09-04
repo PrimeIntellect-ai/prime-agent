@@ -1,0 +1,1 @@
+- The WebP EXIF chunk scan reads chunk sizes as unsigned, so a crafted or corrupt image can no longer hang the process in an infinite scan loop.
