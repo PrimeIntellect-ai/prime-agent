@@ -1978,8 +1978,21 @@ describe("daemon worker supervisor monitoring", () => {
 			intentionalStop: false,
 			summaries: new Map(),
 		};
+		const hexWorker = {
+			descriptor: {
+				workerId: "worker-hex-gap",
+				rootActiveSessionId: "00ff77aa11bb22cc",
+				rootSessionId: "0123456789abcdef",
+				lifecycle: "recovering" as string,
+			},
+			intentionalStop: false,
+			summaries: new Map(),
+		};
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
-			workers: new Map([[worker.descriptor.workerId, worker]]),
+			workers: new Map([
+				[worker.descriptor.workerId, worker],
+				[hexWorker.descriptor.workerId, hexWorker],
+			]),
 			shuttingDown: false,
 			matchWorkers: () => [],
 			refreshWorkerSummaries: vi.fn(async () => {}),
@@ -1994,6 +2007,12 @@ describe("daemon worker supervisor monitoring", () => {
 		await expect(supervisor.findWorker("session-gap")).rejects.toMatchObject({
 			code: "session_recovering",
 			activeSessionId: "active-gap",
+		});
+		// Suffix addressing follows the roster rule: an unambiguous hex suffix of
+		// a recovering root is recovering, not unknown.
+		await expect(supervisor.findWorker("77aa11bb22cc")).rejects.toMatchObject({
+			code: "session_recovering",
+			activeSessionId: "00ff77aa11bb22cc",
 		});
 		// A failed worker keeps the unknown answer so clients fall back to the
 		// create path, which reclaims or retries it.

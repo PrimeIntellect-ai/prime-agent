@@ -4858,15 +4858,29 @@ export class DaemonSupervisor {
 		// root session on a worker whose roster snapshot has not arrived yet is
 		// recovering, not unknown. Failed workers keep the unknown answer so
 		// clients fall back to the create path, which can reclaim or retry them.
-		const recoveringWorker = [...this.workers.values()].find(
-			(worker) =>
-				(worker.descriptor.rootActiveSessionId === selector || worker.descriptor.rootSessionId === selector) &&
-				(!includeWorker || includeWorker(worker)) &&
-				worker.descriptor.lifecycle !== "failed" &&
-				this.isWorkerRecoveryCandidate(worker),
+		const recoveringRoots = (matchesSelector: (worker: ResidentWorker) => boolean) =>
+			[...this.workers.values()].filter(
+				(worker) =>
+					matchesSelector(worker) &&
+					(!includeWorker || includeWorker(worker)) &&
+					worker.descriptor.lifecycle !== "failed" &&
+					this.isWorkerRecoveryCandidate(worker),
+			);
+		// Same addressing rule as matchWorkers: exact ids first, then unambiguous
+		// hex suffixes; ambiguous suffixes stay unknown.
+		const exactRecovering = recoveringRoots(
+			(worker) => worker.descriptor.rootActiveSessionId === selector || worker.descriptor.rootSessionId === selector,
 		);
-		if (recoveringWorker) {
-			throw new DaemonSessionRecoveringError(recoveringWorker.descriptor.rootActiveSessionId);
+		const recoveringMatches =
+			exactRecovering.length > 0
+				? exactRecovering
+				: recoveringRoots(
+						(worker) =>
+							matchesSessionIdSuffix(worker.descriptor.rootActiveSessionId, selector) ||
+							matchesSessionIdSuffix(worker.descriptor.rootSessionId ?? "", selector),
+					);
+		if (recoveringMatches.length === 1) {
+			throw new DaemonSessionRecoveringError(recoveringMatches[0]!.descriptor.rootActiveSessionId);
 		}
 		throw new Error(`Unknown active session: ${selector}`);
 	}
