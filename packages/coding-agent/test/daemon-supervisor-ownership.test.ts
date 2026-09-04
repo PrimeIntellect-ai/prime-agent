@@ -197,6 +197,16 @@ describe("daemon supervisor ownership registry", () => {
 			await assertDaemonSupervisorOwnerCurrent(claim, fingerprint, paths.registryDir);
 			await assertDaemonSupervisorOwnerCurrent(claim, fingerprint, paths.registryDir);
 			expect(zombieSpy.mock.calls.length + aliveSpy.mock.calls.length).toBe(0);
+			// Confirmations expire: after the interval the owner is re-probed once
+			// (the same timestamp the cache's bounded prune sweeps on).
+			vi.useFakeTimers();
+			try {
+				vi.setSystemTime(Date.now() + 6000);
+				await assertDaemonSupervisorOwnerCurrent(claim, fingerprint, paths.registryDir);
+				expect(zombieSpy).toHaveBeenCalledTimes(1);
+			} finally {
+				vi.useRealTimers();
+			}
 		} finally {
 			zombieSpy.mockRestore();
 			aliveSpy.mockRestore();

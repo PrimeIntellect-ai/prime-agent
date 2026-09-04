@@ -527,6 +527,13 @@ function isOwnerProcessAlive(pid: number): boolean {
 		ownerZombieConfirmations.delete(pid);
 		return false;
 	}
+	// Expired entries belong to owners nothing asserts anymore (released claims,
+	// replaced supervisors); drop them here so the cache stays bounded.
+	for (const [staleOwnerPid, staleConfirmedAt] of ownerZombieConfirmations) {
+		if (now - staleConfirmedAt >= OWNER_ZOMBIE_CONFIRM_INTERVAL_MS) {
+			ownerZombieConfirmations.delete(staleOwnerPid);
+		}
+	}
 	ownerZombieConfirmations.set(pid, now);
 	return true;
 }

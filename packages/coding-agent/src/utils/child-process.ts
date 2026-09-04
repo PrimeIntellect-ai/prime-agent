@@ -67,6 +67,32 @@ export function processGroupExists(pgid: number): boolean {
 	}
 }
 
+/**
+ * True while the group still has a RUNNING member: zombie members have already
+ * exited and only their parent can reap them, so they must not block a group
+ * stop from completing.
+ */
+export function processGroupHasLiveMember(pgid: number): boolean {
+	if (!processGroupExists(pgid)) {
+		return false;
+	}
+	try {
+		const listing = execFileSync("ps", ["-A", "-o", "pgid=", "-o", "stat="], { encoding: "utf8" });
+		for (const line of listing.split("\n")) {
+			const fields = line.trim().split(/\s+/);
+			if (fields.length < 2) continue;
+			if (Number(fields[0]) === pgid && !fields[1]!.startsWith("Z")) {
+				return true;
+			}
+		}
+		return false;
+	} catch {
+		// Unverifiable listing: report alive so callers keep escalating instead
+		// of dropping records over possibly-live descendants.
+		return true;
+	}
+}
+
 export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals): void {
 	try {
 		process.kill(-pid, signal);

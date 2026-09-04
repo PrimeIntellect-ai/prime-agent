@@ -19,7 +19,12 @@ import {
 import { defaultDaemonSocketDir, defaultDaemonSocketPath, normalizeSocketPath } from "../modes/daemon/daemon-socket.js";
 import { acquireDaemonShutdownAdmission } from "../modes/daemon/daemon-supervisor-ownership.js";
 import type { DaemonWorkerDescriptor } from "../modes/daemon/daemon-worker-protocol.js";
-import { isProcessAlive, processGroupExists, signalProcessGroupOrProcess } from "../utils/child-process.js";
+import {
+	isProcessAlive,
+	processGroupHasLiveMember,
+	processIdExists,
+	signalProcessGroupOrProcess,
+} from "../utils/child-process.js";
 import { formatDaemonListTable } from "./daemon-ps-format.js";
 import { promptYesNo } from "./daemon-stop-confirm.js";
 
@@ -1064,11 +1069,11 @@ async function stopTrackedProcess(
 	if (trackedProcessStopped(pid)) {
 		return true;
 	}
-	if (!expectedStartId || getProcessStartId(pid) !== expectedStartId) {
+	if (!expectedStartId || !trackedLeaderIdentityCurrent(pid, expectedStartId)) {
 		return false;
 	}
 	await assertAdmission();
-	if (getProcessStartId(pid) !== expectedStartId) {
+	if (!trackedLeaderIdentityCurrent(pid, expectedStartId)) {
 		return false;
 	}
 	signalProcessGroupOrProcess(pid, "SIGTERM");
@@ -1080,7 +1085,7 @@ async function stopTrackedProcess(
 		return true;
 	}
 	await assertAdmission();
-	if (getProcessStartId(pid) !== expectedStartId) {
+	if (!trackedLeaderIdentityCurrent(pid, expectedStartId)) {
 		return false;
 	}
 	signalProcessGroupOrProcess(pid, "SIGKILL");
@@ -1093,10 +1098,23 @@ async function stopTrackedProcess(
 
 /**
  * This is a process-GROUP stop: a zombie or reaped leader has exited, but
- * descendants in its group can still run, so completion needs both gone.
+ * running descendants in its group must still be stopped, so completion needs
+ * the leader gone and no live member left (unreaped zombies do not block it).
  */
 function trackedProcessStopped(pid: number): boolean {
-	return !isProcessAlive(pid) && !processGroupExists(pid);
+	return !isProcessAlive(pid) && !processGroupHasLiveMember(pid);
+}
+
+/**
+ * Identity gates protect against pid reuse and only apply while the leader
+ * process still exists; a gone leader leaves teardown to the group checks (a
+ * pgid cannot be reused while members hold it).
+ */
+function trackedLeaderIdentityCurrent(pid: number, expectedStartId: string): boolean {
+	if (!processIdExists(pid)) {
+		return true;
+	}
+	return getProcessStartId(pid) === expectedStartId;
 }
 
 export async function runReap(json: boolean, force: boolean): Promise<void> {

@@ -5,6 +5,7 @@ import {
 	isProcessAlive,
 	isZombieProcess,
 	processGroupExists,
+	processGroupHasLiveMember,
 	signalProcessGroupOrProcess,
 	waitForChildProcess,
 } from "../src/utils/child-process.js";
@@ -65,6 +66,39 @@ describe("process liveness", () => {
 		}
 	});
 
+	it.skipIf(process.platform === "win32")("does not let an unreaped zombie block group-stop completion", async () => {
+		const parent = spawn(
+			"perl",
+			["-e", '$| = 1; my $pid = fork(); if ($pid) { print "$pid\\n"; sleep 30 } else { setpgrp(0, 0); exit 0 }'],
+			{ stdio: ["ignore", "pipe", "ignore"] },
+		);
+		try {
+			const zombiePid = await new Promise<number>((resolvePid, rejectPid) => {
+				let output = "";
+				const timer = setTimeout(() => rejectPid(new Error("Timed out waiting for the zombie pid")), 5000);
+				parent.stdout?.on("data", (chunk: Buffer) => {
+					output += chunk.toString();
+					const parsed = Number.parseInt(output.trim(), 10);
+					if (Number.isInteger(parsed) && parsed > 0) {
+						clearTimeout(timer);
+						resolvePid(parsed);
+					}
+				});
+			});
+			const deadline = Date.now() + 5000;
+			while (!isZombieProcess(zombiePid) && Date.now() < deadline) {
+				await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
+			}
+			expect(isZombieProcess(zombiePid)).toBe(true);
+			// The zombie is its group's only member: the group exists, but a stop
+			// waiting on it must complete because nothing is left running.
+			expect(processGroupExists(zombiePid)).toBe(true);
+			expect(processGroupHasLiveMember(zombiePid)).toBe(false);
+		} finally {
+			parent.kill("SIGKILL");
+		}
+	});
+
 	it.skipIf(process.platform === "win32")("keeps a process group alive after its leader exits", async () => {
 		const childless = spawn("sh", ["-c", "exit 0"], { detached: true, stdio: "ignore" });
 		const childlessExited = new Promise<void>((resolveExit) => childless.once("exit", () => resolveExit()));
@@ -85,6 +119,7 @@ describe("process liveness", () => {
 			await leaderExited;
 			expect(isProcessAlive(pgid)).toBe(false);
 			expect(processGroupExists(pgid)).toBe(true);
+			expect(processGroupHasLiveMember(pgid)).toBe(true);
 			await childlessExited;
 			expect(processGroupExists(childless.pid!)).toBe(false);
 		} finally {
