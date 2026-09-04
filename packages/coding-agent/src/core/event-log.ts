@@ -124,53 +124,57 @@ export class EventLog {
 		const payload = [...leadLines, ...lines].join("");
 		const handle = openSync(this.path, "a", 0o600);
 		try {
-			writeSync(handle, payload);
+			// writeSync may write short (e.g. ENOSPC after a prefix); a partial
+			// append reported as success would break write-before-action callers.
+			// TODO(unify): lift to utils/atomic-file writeFullySync when #2035 lands.
+			let buffer = Buffer.from(payload, "utf8");
+			while (buffer.length > 0) {
+				buffer = buffer.subarray(writeSync(handle, buffer));
+			}
 			if (options?.durable) fsyncSync(handle);
 		} finally {
 			closeSync(handle);
 		}
 	}
 
-	/** Truncate an unterminated tail before appending (the module-doc tail rule). */
+	/**
+	 * Truncate an unterminated tail before appending (the module-doc tail
+	 * rule). A repair failure propagates and gates the append: writing through
+	 * an unrepaired tail would weld it to the new record as permanent
+	 * fail-closed interior corruption.
+	 */
 	private repairTailSync(): void {
 		const { maxBytes } = this.options;
 		let size: number;
 		try {
 			size = statSync(this.path).size;
-		} catch {
-			return;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+			throw error;
 		}
 		if (size === 0) return;
-		// Fail closed loudly at the read bound BEFORE the swallowing repair
-		// try-block: an oversized log must never trigger a file-sized
-		// allocation, and the error must not be silenced as a repair failure.
 		if (maxBytes !== undefined && size > maxBytes) {
 			throw new Error(`event log ${this.path} exceeds ${maxBytes} bytes (${size}); refusing to read`);
 		}
 		// All offsets are BYTE offsets on raw buffers: string indices diverge
 		// from byte offsets as soon as any record carries multi-byte UTF-8,
 		// and ftruncate takes bytes.
+		const fd = openSync(this.path, "r+");
 		try {
-			const fd = openSync(this.path, "r+");
-			try {
-				const lastByte = Buffer.alloc(1);
-				if (readSync(fd, lastByte, 0, 1, size - 1) !== 1 || lastByte[0] === 0x0a) return;
-				// Truncate guarded by a double-read stability check (cheap
-				// cross-process hardening; a racing append between the check and
-				// the ftruncate stays in the same trust bucket as the documented
-				// O_APPEND small-write atomicity assumption).
-				const first = readAllSync(fd, maxBytes, this.path);
-				const second = readAllSync(fd, maxBytes, this.path);
-				if (second.length !== first.length || !second.equals(first)) return;
-				if (fstatSync(fd).size !== first.length) return;
-				const keep = first.lastIndexOf(0x0a) + 1;
-				ftruncateSync(fd, keep);
-				this.options.log?.(`truncated torn final line (${first.length - keep} bytes)`);
-			} finally {
-				closeSync(fd);
-			}
-		} catch {
-			// Leave the tail for the reader's torn-line tolerance.
+			const lastByte = Buffer.alloc(1);
+			if (readSync(fd, lastByte, 0, 1, size - 1) !== 1 || lastByte[0] === 0x0a) return;
+			// Truncate guarded by a double-read stability check: unstable bytes
+			// mean a live concurrent writer whose own append terminates the tail
+			// (the documented O_APPEND small-write atomicity trust bucket).
+			const first = readAllSync(fd, maxBytes, this.path);
+			const second = readAllSync(fd, maxBytes, this.path);
+			if (second.length !== first.length || !second.equals(first)) return;
+			if (fstatSync(fd).size !== first.length) return;
+			const keep = first.lastIndexOf(0x0a) + 1;
+			ftruncateSync(fd, keep);
+			this.options.log?.(`truncated torn final line (${first.length - keep} bytes)`);
+		} finally {
+			closeSync(fd);
 		}
 	}
 }
