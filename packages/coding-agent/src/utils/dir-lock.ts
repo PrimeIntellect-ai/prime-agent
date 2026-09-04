@@ -17,6 +17,7 @@ export async function tryAcquireDirLock(
 	mkdirSync(candidateDirectory, { mode: 0o700 });
 	writeFileSync(join(candidateDirectory, "pid"), `${process.pid}\n`, { mode: 0o600 });
 	try {
+		// The lock is published fully formed; no in-protocol state creates an empty lockDir.
 		renameSync(candidateDirectory, lockDir);
 		return "acquired";
 	} catch (error) {
