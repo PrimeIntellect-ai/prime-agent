@@ -7385,10 +7385,8 @@ const ROSTER_SESSION_EVENT_TRIGGERS = new Set([
 ]);
 
 /**
- * A chunked-snapshot transfer id must name the cursor observed when the message
- * array was materialized, not the live session cursor: events appended between
- * materialization and id computation would let two different byte streams share
- * one snapshot id, which the supervisor rejects as a mismatched transfer.
+ * The transfer id must name the cursor observed at materialization, not the live session cursor:
+ * events appended in between would let two different byte streams share one snapshot id.
  */
 function snapshotTransferId(snapshot: DaemonSessionSnapshot): string {
 	// createSessionSnapshot always sets lastEventCursor; it is optional only on the wire.

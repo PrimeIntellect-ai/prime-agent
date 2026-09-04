@@ -3705,12 +3705,7 @@ export class DaemonSupervisor {
 		}
 	}
 
-	/**
-	 * Settle a snapshot transfer anomaly with the transfer itself as the blast
-	 * radius: the worker channel (and every other session on it) stays up, and
-	 * attached clients resync from a fresh snapshot instead of riding a worker
-	 * reconnect.
-	 */
+	/** Settle a transfer anomaly with the transfer as the blast radius: the worker channel stays up and clients resync fresh. */
 	private failSnapshotTransfer(
 		worker: ResidentWorker,
 		activeSessionId: string,
@@ -3720,9 +3715,8 @@ export class DaemonSupervisor {
 	): void {
 		const published = worker.transcriptCaches.get(activeSessionId)?.snapshotId === snapshotId;
 		this.failWorkerSnapshotCache(worker, activeSessionId, error, false, snapshotId);
-		// The resync is driven by the published-cache drop, not the failing frame's
-		// purpose: a published transfer can be serving any attached client's
-		// catch-up wait, whose queue entry drainClientCatchups already cleared.
+		// The published-cache drop drives the resync, not the frame's purpose: a published transfer
+		// can be serving any client's catch-up wait, whose queue entry drainClientCatchups already cleared.
 		if (published) {
 			this.queueSnapshotResync(activeSessionId, snapshotPurpose === "replacement" ? "replacement" : "catchup");
 		}

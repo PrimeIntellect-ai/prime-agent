@@ -172,8 +172,8 @@ function snapshotFrames(messages: AgentMessage[]) {
 }
 
 describe("ENG-4602 snapshot transfer containment", () => {
-	it("observes the deferred attach snapshot promise", async () => {
-		const daemon = new AgentDaemon("/tmp/eng-4602-worker.sock", {
+	function workerAttachHarness(socketPath: string, lastEventSequence: number) {
+		const daemon = new AgentDaemon(socketPath, {
 			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
 			createRuntime: async () => {
 				throw new Error("unexpected runtime creation");
@@ -183,7 +183,7 @@ describe("ENG-4602 snapshot transfer containment", () => {
 			activeSessionId,
 			clients: new Set<DaemonSocketClient>(),
 			eventGeneration: "generation-4602",
-			lastEventSequence: 1,
+			lastEventSequence,
 			runtime: { metadata: { kind: "top-level", createdAt: 1 } },
 		} as unknown as ActiveSessionState;
 		const socket = new PassThrough();
@@ -196,30 +196,37 @@ describe("ENG-4602 snapshot transfer containment", () => {
 			supportsExtensionUi: false,
 			capabilities: new Set<string>(),
 		} as DaemonSocketClient;
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			createAttachResult(): DaemonAttachResult;
+			streamWorkerSnapshot(): Promise<void>;
+			log(message: string): void;
+			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
+		};
+		internals.sessions.set(activeSessionId, state);
+		internals.createAttachResult = () => streamedResult([]);
+		const attach = () =>
+			internals.handleCommand(client, {
+				type: "attach",
+				activeSessionId,
+				capabilities: ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"],
+			});
+		return { internals, client, socket, attach };
+	}
+
+	it("observes the deferred attach snapshot promise", async () => {
+		const { internals, socket, attach } = workerAttachHarness("/tmp/eng-4602-worker.sock", 1);
 		const streamError = new Error("encoder failed after begin");
 		const log = vi.fn();
 		const streamWorkerSnapshot = vi.fn(async () => {
 			throw streamError;
 		});
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			createAttachResult(): DaemonAttachResult;
-			streamWorkerSnapshot: typeof streamWorkerSnapshot;
-			log: typeof log;
-			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
-		};
-		internals.sessions.set(activeSessionId, state);
-		internals.createAttachResult = () => streamedResult([]);
 		internals.streamWorkerSnapshot = streamWorkerSnapshot;
 		internals.log = log;
 		const unhandled = vi.fn();
 		process.on("unhandledRejection", unhandled);
 		try {
-			await internals.handleCommand(client, {
-				type: "attach",
-				activeSessionId,
-				capabilities: ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"],
-			});
+			await attach();
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			await new Promise<void>((resolve) => setImmediate(resolve));
 		} finally {
@@ -233,46 +240,11 @@ describe("ENG-4602 snapshot transfer containment", () => {
 	});
 
 	it("derives the chunked transfer id from the materialized snapshot cursor", async () => {
-		const daemon = new AgentDaemon("/tmp/eng-4602-worker-cursor.sock", {
-			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
-			createRuntime: async () => {
-				throw new Error("unexpected runtime creation");
-			},
-		});
-		// The session cursor has advanced past the materialized snapshot cut.
-		const state = {
-			activeSessionId,
-			clients: new Set<DaemonSocketClient>(),
-			eventGeneration: "generation-4602",
-			lastEventSequence: 5,
-			runtime: { metadata: { kind: "top-level", createdAt: 1 } },
-		} as unknown as ActiveSessionState;
-		const socket = new PassThrough();
-		const client = {
-			id: "supervisor",
-			socket: socket as unknown as Socket,
-			transport: "private-framed",
-			attachedActiveSessionIds: new Set<string>(),
-			detachInput: () => {},
-			supportsExtensionUi: false,
-			capabilities: new Set<string>(),
-		} as DaemonSocketClient;
-		const streamWorkerSnapshot = vi.fn(async () => {});
-		const internals = daemon as unknown as {
-			sessions: Map<string, ActiveSessionState>;
-			createAttachResult(): DaemonAttachResult;
-			streamWorkerSnapshot: typeof streamWorkerSnapshot;
-			handleCommand(client: DaemonSocketClient, command: DaemonCommand): Promise<unknown>;
-		};
-		internals.sessions.set(activeSessionId, state);
-		internals.createAttachResult = () => streamedResult([]);
-		internals.streamWorkerSnapshot = streamWorkerSnapshot;
+		// The live session cursor (sequence 5) has advanced past the materialized snapshot cut (sequence 1).
+		const { internals, socket, attach } = workerAttachHarness("/tmp/eng-4602-worker-cursor.sock", 5);
+		internals.streamWorkerSnapshot = vi.fn(async () => {});
 		try {
-			const response = (await internals.handleCommand(client, {
-				type: "attach",
-				activeSessionId,
-				capabilities: ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"],
-			})) as { data?: DaemonAttachResult };
+			const response = (await attach()) as { data?: DaemonAttachResult };
 			expect(response.data?.snapshotStream?.id).toBe(`${activeSessionId}-generation-4602-1`);
 		} finally {
 			socket.destroy();
@@ -527,8 +499,7 @@ describe("ENG-4602 snapshot transfer containment", () => {
 		);
 		await failedCatchup;
 
-		// The rejected catch-up waiter is requeued by the published-cache drop and
-		// retries with a fresh worker snapshot request instead of staying stale.
+		// The published-cache drop requeued the rejected waiter: it retries with a fresh snapshot request.
 		expect(request).toHaveBeenCalledWith(expect.objectContaining({ type: "attach", activeSessionId }));
 		expect(streamSnapshot).not.toHaveBeenCalled();
 		expect(worker.snapshotCache.has(activeSessionId)).toBe(false);
