@@ -85,6 +85,8 @@ declare var Bun: {
 			stdout: "pipe" | "inherit";
 			stderr: "pipe" | "inherit";
 			killSignal: number;
+			cwd: string;
+			env: Readonly<Record<string, string>>;
 		},
 	): {
 		stdout: ReadableStream<Uint8Array>;
@@ -101,6 +103,8 @@ function defaultSpawn(cmd: string[]): SpawnedProcess {
 		stdout: "pipe",
 		stderr: "pipe",
 		killSignal: 9,
+		cwd: "/",
+		env: Object.freeze({ PATH: "/usr/bin:/bin" }),
 	});
 	return {
 		stdout: p.stdout,

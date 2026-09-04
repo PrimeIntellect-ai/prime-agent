@@ -740,10 +740,13 @@ it("erases owned chunks and merged buffers on success", async () => {
 });
 
 describe("default spawn (real Bun processes)", () => {
-	it("spawns a real process without injected spawn", async () => {
+	it("spawns a real process without an inherited environment", async () => {
 		const runner = createPrimeCliCommandRunner();
-		const r = await runner.runCommand(["echo", "hi"], 5000);
-		expect(r.ok).toBe(true);
+		const echoResult = await runner.runCommand(["/bin/echo", "hi"], 5000);
+		expect(echoResult.ok).toBe(true);
+		const envResult = await runner.runCommand(["/usr/bin/env"], 5000);
+		expect(envResult.ok).toBe(true);
+		if (envResult.ok) expect(envResult.value.stdout).toBe("PATH=/usr/bin:/bin\n");
 	});
 
 	it("handles missing executable as SPAWN_FAILED", async () => {
