@@ -38,14 +38,19 @@ describe("event log fault injection", () => {
 		rmSync(dir, { recursive: true, force: true });
 	});
 
-	it("persists the full payload even when the kernel writes short", () => {
+	it("reclaims its torn prefix and fails the append on a short write", () => {
 		const path = join(dir, "log.jsonl");
 		const log = new EventLog(path);
+		log.appendSync([{ v: 1, id: "committed" }]);
+		const before = readFileSync(path, "utf8");
 		faults.shortWriteOnce = true;
-		log.appendSync([{ v: 1, id: "short-write-survivor" }]);
 
+		// Completing the write could interleave with a rival process's append;
+		// failing with a clean file is the only safe terminal state.
+		expect(() => log.appendSync([{ v: 1, id: "short-write" }])).toThrow(/short write/);
+		expect(readFileSync(path, "utf8")).toBe(before);
 		expect(new EventLog(path).replaySync((line) => JSON.parse(line) as { id?: string })).toEqual([
-			{ v: 1, id: "short-write-survivor" },
+			{ v: 1, id: "committed" },
 		]);
 	});
 
