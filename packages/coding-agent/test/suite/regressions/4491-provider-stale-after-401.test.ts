@@ -19,7 +19,7 @@ function provider401Message(): AssistantMessage {
 	};
 }
 
-function bareProvider401Message(): AssistantMessage {
+function unstructured401Message(): AssistantMessage {
 	return fauxAssistantMessage("", {
 		stopReason: "error",
 		errorMessage: "401 status code (no body)",
@@ -81,13 +81,13 @@ describe("issue #4491 provider stale after repeated 401", () => {
 		expect(finalAssistant?.errorMessage).toContain("Run /login to update credentials.");
 	});
 
-	it("emits stale auth source tokens for daemon clients after bare 401 auth failures", async () => {
+	it("emits stale auth source tokens for daemon clients after structured 401 auth failures", async () => {
 		const harness = await createHarness({
 			provider: "prime-inference",
 			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
 		});
 		harnesses.push(harness);
-		harness.setResponses([bareProvider401Message()]);
+		harness.setResponses([provider401Message()]);
 
 		await harness.session.prompt("hello");
 
@@ -107,22 +107,36 @@ describe("issue #4491 provider stale after repeated 401", () => {
 		});
 	});
 
-	it("classifies bare status-code auth failures before login guidance is appended", async () => {
+	it("does not mark auth stale from unstructured 401 error text", async () => {
 		const harness = await createHarness({
 			provider: "prime-inference",
-			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } },
+			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
 		});
 		harnesses.push(harness);
-		const message = bareProvider401Message();
-		const event = { type: "agent_end", messages: [message] } as AgentEvent;
-		const session = harness.session as unknown as {
-			_createRetryPromiseForAgentEnd(event: AgentEvent): void;
-		};
+		harness.setResponses([unstructured401Message()]);
 
-		session._createRetryPromiseForAgentEnd(event);
+		await harness.session.prompt("hello");
 
-		expect(harness.session.isRetrying).toBe(true);
-		harness.session.abortRetry();
+		expect(harness.eventsOfType("auth_stale")).toHaveLength(0);
+		expect(harness.authStorage.hasAuth("prime-inference")).toBe(true);
+	});
+
+	it("explicit model selection clears a stale-auth lockout", async () => {
+		const harness = await createHarness({
+			settings: { retry: { enabled: true, maxRetries: 0, baseDelayMs: 1 } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([provider401Message()]);
+
+		await harness.session.prompt("hello");
+
+		const provider = harness.getModel().provider;
+		expect(harness.authStorage.hasAuth(provider)).toBe(false);
+
+		await harness.session.setModel(harness.getModel());
+
+		expect(harness.authStorage.hasAuth(provider)).toBe(true);
+		expect(harness.authStorage.getAuthStatus(provider).source).not.toBe("stale");
 	});
 
 	it("creates retry promises for exhausted structured auth failures so cleanup is awaited", async () => {

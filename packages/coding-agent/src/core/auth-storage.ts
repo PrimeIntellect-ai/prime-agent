@@ -611,6 +611,11 @@ export class AuthStorage {
 		return true;
 	}
 
+	/** Forget every stale marking for a provider (explicit user re-selection). */
+	clearAuthStale(provider: string): void {
+		this.staleAuthSources.delete(provider);
+	}
+
 	private clearStaleAuthSource(provider: string, source: ActiveAuthStatusSource): void {
 		const stale = this.staleAuthSources.get(provider);
 		if (!stale) {

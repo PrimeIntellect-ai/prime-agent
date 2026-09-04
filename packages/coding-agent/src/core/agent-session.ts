@@ -7127,6 +7127,9 @@ export class AgentSession {
 	}
 
 	async setModel(model: Model<any>, options: ModelSelectOptions = {}): Promise<void> {
+		// Explicit selection overrides a stale-auth lockout; a structured auth
+		// failure on the next request re-marks the provider.
+		this._modelRegistry.clearProviderAuthStale(model.provider);
 		if (!this._modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
@@ -11009,44 +11012,12 @@ export class AgentSession {
 		return isPermanentProviderFailureKind(this._getProviderStreamFailureKind(message), this._retryAttempt);
 	}
 
-	private _getProviderStreamFailureAuthStatus(message: AssistantMessage): number | undefined {
-		const details = this._getProviderStreamFailureDetails(message);
-		if (!details) {
-			return undefined;
-		}
-
-		const kind = details.kind;
-		if (kind !== "auth") {
-			return undefined;
-		}
-
-		const status = details.status;
-		if (typeof status === "number") {
-			return status;
-		}
-		if (typeof status === "string") {
-			const parsed = Number(status);
-			return Number.isInteger(parsed) ? parsed : undefined;
-		}
-		return undefined;
-	}
-
 	private _isConcreteProviderAuthFailure(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
-
-		const structuredStatus = this._getProviderStreamFailureAuthStatus(message);
-		if (structuredStatus === 401 || structuredStatus === 403) {
-			return true;
-		}
-
-		if (/\b(?:401|403)\b/.test(message.errorMessage) && /\bstatus code\b/i.test(message.errorMessage)) {
-			return true;
-		}
-
-		return (
-			/\b(?:401|403)\b/.test(message.errorMessage) &&
-			/auth|unauthori[sz]ed|forbidden|api.?key|token|credential/i.test(message.errorMessage)
-		);
+		// Trust only the provider's structured classification: every provider
+		// records provider_stream_failure diagnostics, so message-text sniffing
+		// would only add false positives (e.g. region-block 403s).
+		return this._getProviderStreamFailureKind(message) === "auth";
 	}
 
 	private _captureRetryAuthFailureSource(message: AssistantMessage): AuthSourceToken | undefined {

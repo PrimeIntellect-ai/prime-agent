@@ -1485,6 +1485,27 @@ describe("ModelRegistry", () => {
 				await expect(registry.getApiKeyForProvider("custom-provider")).resolves.toBe("fresh-key");
 			});
 
+			test("clearProviderAuthStale restores availability for explicit model selection", async () => {
+				writeRawModelsJson({
+					"custom-provider": providerWithApiKey("literal_api_key_value"),
+				});
+
+				const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+
+				await expect(registry.getApiKeyForProvider("custom-provider")).resolves.toBe("literal_api_key_value");
+				expect(registry.markProviderAuthStale("custom-provider")).toBe(true);
+				expect(registry.getAvailable().some((model) => model.provider === "custom-provider")).toBe(false);
+
+				registry.clearProviderAuthStale("custom-provider");
+
+				expect(registry.getProviderAuthStatus("custom-provider")).toEqual({
+					configured: true,
+					source: "models_json_key",
+				});
+				expect(registry.getAvailable().some((model) => model.provider === "custom-provider")).toBe(true);
+				await expect(registry.getApiKeyForProvider("custom-provider")).resolves.toBe("literal_api_key_value");
+			});
+
 			test("provider auth status reports command apiKey values from models.json without executing them", () => {
 				const counterFile = join(tempDir, "status-counter");
 				writeFileSync(counterFile, "0");

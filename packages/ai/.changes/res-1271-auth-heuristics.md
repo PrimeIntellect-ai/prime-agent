@@ -1,0 +1,1 @@
+- Changed failure classification to stop treating bare 403 responses as authentication failures; an explicit authentication/permission error type or a 401 status is required.

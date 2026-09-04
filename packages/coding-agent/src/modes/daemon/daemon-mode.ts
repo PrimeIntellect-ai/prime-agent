@@ -4791,6 +4791,9 @@ export class AgentDaemon {
 			case "set_model": {
 				const state = this.getSessionState(command.activeSessionId);
 				const session = state.runtime.session;
+				// Clear before the lookup: a stale-auth provider's models are excluded
+				// from the available list, which would misreport them as not found.
+				session.modelRegistry.clearProviderAuthStale(command.provider);
 				const availableModels = await session.modelRegistry.refreshAvailableModels();
 				const model = availableModels.find((candidate) => {
 					return candidate.provider === command.provider && candidate.id === command.modelId;

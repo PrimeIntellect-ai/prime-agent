@@ -1,0 +1,2 @@
+- Removed the 401/403 message-text sniffing that could mark a whole provider auth-stale from non-auth errors (e.g. region-block 403s); auth-stale now requires a structured provider auth failure.
+- Changed explicit model selection to clear a provider's stale-auth lockout so the request runs again instead of failing with "Model not found"; a structured auth failure re-marks it.

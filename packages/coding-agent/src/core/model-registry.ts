@@ -1195,6 +1195,16 @@ export class ModelRegistry {
 		return token ? this.markProviderAuthSourceStale(token) : false;
 	}
 
+	/**
+	 * Forget stale-auth markings for a provider. Called when the user
+	 * explicitly selects one of its models: the request runs again and a
+	 * structured auth failure re-marks the provider if auth is still bad.
+	 */
+	clearProviderAuthStale(provider: string): void {
+		this.staleProviderRequestAuthSources.delete(provider);
+		this.authStorage.clearAuthStale(provider);
+	}
+
 	getCurrentProviderAuthSourceToken(provider: string): AuthSourceToken | undefined {
 		const lastRequestToken = this.lastProviderAuthSourceTokens.get(provider);
 		if (lastRequestToken) {

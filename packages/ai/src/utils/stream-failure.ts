@@ -76,7 +76,10 @@ export function classifyStreamFailure(providerErrorType?: string, status?: numbe
 	if (/rate_limit|usage_limit|usage_not_included|throttl/.test(type) || status === 429) {
 		return "rate_limit";
 	}
-	if (/authentication|permission|unauthorized/.test(type) || status === 401 || status === 403) return "auth";
+	// 403 alone is NOT auth: providers return it for region blocks, org
+	// policy, and model-access denials. Require an explicit auth/permission
+	// error type unless the status is 401.
+	if (/authentication|permission|unauthorized/.test(type) || status === 401) return "auth";
 	if (type.includes("invalid_request") || type.includes("not_found_error") || status === 400 || status === 404) {
 		return "invalid_request";
 	}
