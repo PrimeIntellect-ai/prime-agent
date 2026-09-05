@@ -81,48 +81,6 @@ describe("adaptive TUI theme colors", () => {
 		expect(editorTheme.borderColor("x")).toBe(theme.fg("borderMuted", "x"));
 	});
 
-	it("keeps the zebra stripe subtle and on the light side of the real terminal background", () => {
-		// Unknown terminal: trust the configured stripe.
-		expect(theme.getAgentsZebraBackgroundColor()?.("x")).toBe(theme.bg("agentsZebraBg", "x"));
-
-		// Matching dark terminal (prime bg): stripe already sits slightly lighter.
-		setDefaultTerminalColors({
-			foreground: { r: 255, g: 255, b: 255 },
-			background: { r: 5, g: 5, b: 6 },
-		});
-		expect(theme.getAgentsZebraBackgroundColor()?.("x")).toBe(theme.bg("agentsZebraBg", "x"));
-
-		// Terminal lighter than the stripe: a darker band would read as black
-		// rows, so the stripe is re-derived just above the terminal background.
-		const terminalLuminance = luminanceRgb({ r: 30, g: 30, b: 30 });
-		setDefaultTerminalColors({
-			foreground: { r: 255, g: 255, b: 255 },
-			background: { r: 30, g: 30, b: 30 },
-		});
-		const adjusted = theme.getAgentsZebraBackgroundColor()?.("x");
-		expect(adjusted).not.toBe(theme.bg("agentsZebraBg", "x"));
-		expect(extractRgbLuminance(adjusted ?? "")).toBeGreaterThan(terminalLuminance);
-	});
-
-	it("re-derives the zebra stripe when 256-color quantization collapses it onto the terminal background", () => {
-		const zebraTheme = new Theme(
-			{} as ConstructorParameters<typeof Theme>[0],
-			{ agentsZebraBg: "#202020" } as ConstructorParameters<typeof Theme>[1],
-			"256color",
-		);
-		// #202020 and #1c1c1c share ansi-256 grayscale cell 234: the configured
-		// value passes a raw delta check but renders invisibly.
-		setDefaultTerminalColors({
-			foreground: { r: 255, g: 255, b: 255 },
-			background: { r: 28, g: 28, b: 28 },
-		});
-		const stripe = zebraTheme.getAgentsZebraBackgroundColor()?.("x");
-		expect(stripe).not.toBe(zebraTheme.bg("agentsZebraBg", "x"));
-		const cell = /48;5;(\d+)m/.exec(stripe ?? "");
-		expect(cell).not.toBeNull();
-		expect(luminanceRgb(ansi256IndexToRgb(Number(cell?.[1])))).toBeGreaterThan(luminanceRgb({ r: 28, g: 28, b: 28 }));
-	});
-
 	it("keeps theme editor chrome on light terminal backgrounds", () => {
 		setDefaultTerminalColors({
 			foreground: { r: 0, g: 0, b: 0 },

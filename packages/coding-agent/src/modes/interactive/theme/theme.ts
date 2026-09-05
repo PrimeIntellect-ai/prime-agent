@@ -61,8 +61,6 @@ const ThemeJsonSchema = Type.Object({
 		toolDiffAddedBg: ColorValueSchema,
 		toolDiffRemovedBg: ColorValueSchema,
 		toolPanelBg: ColorValueSchema,
-		// Optional so existing custom themes stay valid; unset disables striping.
-		agentsZebraBg: Type.Optional(ColorValueSchema),
 		toolTitle: ColorValueSchema,
 		toolOutput: ColorValueSchema,
 		// Markdown (10 colors)
@@ -183,17 +181,13 @@ export type ThemeBg =
 	| "toolErrorBg"
 	| "toolDiffAddedBg"
 	| "toolDiffRemovedBg"
-	| "toolPanelBg"
-	| "agentsZebraBg";
+	| "toolPanelBg";
 
 type ColorMode = "truecolor" | "256color";
 
 const ADAPTIVE_LIGHT_BG_ACCENT: Rgb = { r: 0, g: 95, b: 135 };
 const SURFACE_MIN_LUMINANCE_DELTA = 12;
 const SURFACE_CONTRAST_ALPHA = 0.08;
-// Zebra stripes stay quieter than popup surfaces.
-const ZEBRA_MIN_LUMINANCE_DELTA = 4;
-const ZEBRA_CONTRAST_ALPHA = 0.05;
 // Selection rows must stand out clearly, much more than passive surfaces.
 const SELECTION_MIN_LUMINANCE_DELTA = 28;
 const SELECTION_MAX_BLEND_ALPHA = 0.5;
@@ -428,42 +422,6 @@ export class Theme {
 
 	getPopupBackgroundColor(): (str: string) => string {
 		return this.surfaceBackgroundColor("toolPanelBg");
-	}
-
-	/** Alternate-row background for the agents view; undefined disables striping. */
-	getAgentsZebraBackgroundColor(): ((str: string) => string) | undefined {
-		const value = this.bgColorValues.get("agentsZebraBg");
-		if (value === undefined || value === "") {
-			return undefined;
-		}
-		const terminalBg = getDefaultTerminalColors()?.background;
-		const configuredRgb = colorValueToRgb(value);
-		if (!terminalBg || !configuredRgb) {
-			return (str: string) => this.bg("agentsZebraBg", str);
-		}
-		// Judge what actually renders: 256-color quantization can collapse the
-		// configured stripe onto the terminal background's own palette cell.
-		const stripeRgb = colorValueToRgb(bestAnsiColor(configuredRgb, this.mode)) ?? configuredRgb;
-		// A subtle stripe sits slightly toward white on dark terminals (toward
-		// black on light ones). Keep the configured color when it already does;
-		// when it would vanish into the real terminal background or land on its
-		// wrong side (e.g. a theme darker than the terminal, which reads as black
-		// bands), re-derive the stripe from the terminal background instead.
-		const delta = luminance(stripeRgb) - luminance(terminalBg);
-		const towardWhite = !isLightColor(terminalBg);
-		const wrongDirection = towardWhite ? delta < 0 : delta > 0;
-		if (!wrongDirection && Math.abs(delta) >= ZEBRA_MIN_LUMINANCE_DELTA) {
-			return (str: string) => this.bg("agentsZebraBg", str);
-		}
-		const adjusted = bestAnsiColor(
-			blendColor(towardWhite ? WHITE : BLACK, terminalBg, ZEBRA_CONTRAST_ALPHA),
-			this.mode,
-		);
-		if (adjusted === "") {
-			return (str: string) => this.bg("agentsZebraBg", str);
-		}
-		const ansi = bgAnsi(adjusted, this.mode);
-		return (str: string) => `${ansi}${str}\x1b[49m`;
 	}
 
 	getSelectionBackgroundColor(): (str: string) => string {
@@ -812,7 +770,6 @@ function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string
 		"toolDiffAddedBg",
 		"toolDiffRemovedBg",
 		"toolPanelBg",
-		"agentsZebraBg",
 	]);
 	for (const [key, value] of Object.entries(resolvedColors)) {
 		if (bgColorKeys.has(key)) {

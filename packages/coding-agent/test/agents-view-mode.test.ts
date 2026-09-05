@@ -10,7 +10,6 @@ import {
 	AgentsViewMode,
 	type AgentsViewPersistentState,
 	buildAgentsViewUsageLayout,
-	buildDisplayItems,
 	combineAgentsViewStartupNotices,
 	createInitialAgentsViewPersistentState,
 	runAgentsViewMode,
@@ -800,7 +799,7 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("shows the bold usage legend on every section header and restarts zebra striping per section", () => {
+	it("shows the bold usage legend on every section header", () => {
 		const running = (id: string, created: string) =>
 			summary({
 				id,
@@ -851,32 +850,11 @@ describe("AgentsViewMode", () => {
 				theme.bold(runningLegend),
 			);
 
-			// Zebra: alternate top-level session blocks, nested rows inherit the
-			// parent block's shade, stripe restarts at each section header.
-			const items = buildDisplayItems(rows);
-			const shadedBySession = items.flatMap((item) =>
-				item.type === "row" ? [[`${item.row.summary.sessionId}:${item.row.kind}`, item.shaded]] : [],
-			);
-			expect(shadedBySession).toEqual([
-				["busy-solo-session:agent", false],
-				["busy-parent-session:agent", true],
-				["busy-parent-session:subagent-summary", true],
-				["busy-child-session:subagent", true],
-				["idle-a-session:agent", false],
-				["idle-b-session:agent", true],
-			]);
-
-			// Through finalizeRenderedLine: shaded blocks carry one uniform
-			// background on every line (agent row and its continuation lines);
-			// unshaded lines emit no background codes at all.
+			// Session rows carry no background of their own; only the selection
+			// highlight may paint one.
 			const finalized = rendered.map((line) => invoke("finalizeRenderedLine", view, line, 120) as string);
-			const lineFor = (needle: string) => finalized.find((line) => stripAnsi(line).includes(needle))!;
-			const shadedLines = ["busy-parent", "1 subagent", "busy-child", "idle-b"].map(lineFor);
-			const backgrounds = new Set(shadedLines.map((line) => /\x1b\[48[^m]*m/.exec(line)?.[0]));
-			expect(backgrounds.size).toBe(1);
-			expect(backgrounds.has(undefined)).toBe(false);
-			for (const needle of ["busy-solo", "idle-a", "Running (", "Idle (", "Inactive ("]) {
-				expect(lineFor(needle)).not.toContain("\x1b[48");
+			for (const line of finalized) {
+				expect(line).not.toContain("\x1b[48");
 			}
 		} finally {
 			stopThemeWatcher();

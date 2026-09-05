@@ -184,10 +184,6 @@
 					"$ref": "#/$defs/colorValue",
 					"description": "Tool panel background (ipython cells and tool executions)"
 				},
-				"agentsZebraBg": {
-					"$ref": "#/$defs/colorValue",
-					"description": "Optional alternate-row background in the agents view; omit or use an empty string to disable striping"
-				},
 				"toolTitle": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Tool execution box title color"

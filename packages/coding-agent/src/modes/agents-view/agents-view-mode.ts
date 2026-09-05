@@ -115,7 +115,6 @@ const COMPLETED_ROW_ICON = "✓";
 const NEEDS_INPUT_ROW_ICON = "●";
 const SELECTED_ROW_MARKER = "\0agents-view-selected-row\0";
 const CODE_ROW_MARKER = "\0agents-view-code-row\0";
-const ZEBRA_ROW_MARKER = "\0agents-view-zebra-row\0";
 
 export interface AgentsViewModeOptions {
 	socketPath?: string;
@@ -2526,7 +2525,7 @@ export class AgentsViewMode implements Component, Focusable {
 			if (item.type === "empty") {
 				return theme.fg("dim", "  No agents");
 			}
-			return this.renderRow(item.row, width, usageLayout.details, item.shaded);
+			return this.renderRow(item.row, width, usageLayout.details);
 		});
 		if (showLeadingEllipsis) {
 			lines.unshift(theme.fg("dim", "  ..."));
@@ -2541,11 +2540,9 @@ export class AgentsViewMode implements Component, Focusable {
 		row: AgentsViewRow,
 		width: number,
 		rowDetails: ReadonlyMap<string, string> = buildAgentsViewUsageLayout([row]).details,
-		shaded = false,
 	): string {
 		const selected = row.selectable && row.identity === this.rows[this.selectedIndex]?.identity;
-		const markRow = (line: string): string =>
-			selected ? `${SELECTED_ROW_MARKER}${line}` : shaded ? `${ZEBRA_ROW_MARKER}${line}` : line;
+		const markRow = (line: string): string => (selected ? `${SELECTED_ROW_MARKER}${line}` : line);
 		if (row.kind === "subagent-code") {
 			return this.renderCodeRow(row);
 		}
@@ -2636,14 +2633,11 @@ export class AgentsViewMode implements Component, Focusable {
 	private finalizeRenderedLine(line: string, width: number): string {
 		const code = line.startsWith(CODE_ROW_MARKER);
 		const selected = !code && line.startsWith(SELECTED_ROW_MARKER);
-		const zebra = !code && !selected && line.startsWith(ZEBRA_ROW_MARKER);
 		let content = code
 			? line.slice(CODE_ROW_MARKER.length)
 			: selected
 				? line.slice(SELECTED_ROW_MARKER.length)
-				: zebra
-					? line.slice(ZEBRA_ROW_MARKER.length)
-					: line;
+				: line;
 		// Each rendered line must occupy exactly one terminal row; a stray
 		// newline would shift every line below it and overlap the editor.
 		if (content.includes("\n") || content.includes("\r")) {
@@ -2653,21 +2647,13 @@ export class AgentsViewMode implements Component, Focusable {
 		if (code) {
 			return theme.bg("toolPanelBg", padded);
 		}
-		// Truncating styled cells embeds full \x1b[0m resets; re-open the row
-		// background after each so the highlight spans the whole row. Selection
-		// takes precedence over the zebra stripe.
-		if (selected) {
-			const applySelectionBg = theme.getSelectionBackgroundColor();
-			return padded.split("\x1b[0m").map(applySelectionBg).join("\x1b[0m");
-		}
-		if (!zebra) {
+		if (!selected) {
 			return padded;
 		}
-		const applyZebraBg = theme.getAgentsZebraBackgroundColor();
-		if (!applyZebraBg) {
-			return padded;
-		}
-		return padded.split("\x1b[0m").map(applyZebraBg).join("\x1b[0m");
+		// Truncating styled cells embeds full \x1b[0m resets; re-open the
+		// selection background after each so the highlight spans the whole row.
+		const applySelectionBg = theme.getSelectionBackgroundColor();
+		return padded.split("\x1b[0m").map(applySelectionBg).join("\x1b[0m");
 	}
 
 	private isPendingDeleteRow(row: AgentsViewRow): boolean {
@@ -2808,14 +2794,14 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 }
 
-export type AgentsViewDisplayItem =
+type DisplayItem =
 	| { type: "spacer" }
 	| { type: "heading"; section: AgentsViewSection }
 	| { type: "empty"; section: AgentsViewSection }
-	| { type: "row"; row: AgentsViewRow; shaded: boolean };
+	| { type: "row"; row: AgentsViewRow };
 
-export function buildDisplayItems(rows: readonly AgentsViewRow[]): AgentsViewDisplayItem[] {
-	const items: AgentsViewDisplayItem[] = [];
+function buildDisplayItems(rows: readonly AgentsViewRow[]): DisplayItem[] {
+	const items: DisplayItem[] = [];
 	const sections: AgentsViewSection[] = ["running", "idle", "inactive"];
 	for (const [index, section] of sections.entries()) {
 		if (index > 0) {
@@ -2827,16 +2813,8 @@ export function buildDisplayItems(rows: readonly AgentsViewRow[]): AgentsViewDis
 			items.push({ type: "empty", section });
 			continue;
 		}
-		// Zebra stripe alternates per top-level session block (nested rows inherit
-		// their block's shade) and restarts unshaded at each section header.
-		let blockIndex = 0;
-		let shaded = false;
 		for (const row of sectionRows) {
-			if (row.depth === 0) {
-				shaded = blockIndex % 2 === 1;
-				blockIndex++;
-			}
-			items.push({ type: "row", row, shaded });
+			items.push({ type: "row", row });
 		}
 	}
 	return items;
