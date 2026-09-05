@@ -1,7 +1,36 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
-import { isProcessAlive, isZombieProcess, waitForChildProcess } from "../src/utils/child-process.js";
+import { describe, expect, it, vi } from "vitest";
+import {
+	execFileHidden,
+	execFileSyncHidden,
+	execSyncHidden,
+	isProcessAlive,
+	isZombieProcess,
+	spawnHidden,
+	spawnSyncHidden,
+	waitForChildProcess,
+} from "../src/utils/child-process.js";
+
+const recordedWindowsHide = vi.hoisted(() => [] as Array<boolean | undefined>);
+
+vi.mock("node:child_process", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:child_process")>();
+	const wrap =
+		<A extends unknown[], R>(fn: (...args: A) => R, optionsIndex: number) =>
+		(...args: A): R => {
+			recordedWindowsHide.push((args[optionsIndex] as { windowsHide?: boolean } | undefined)?.windowsHide);
+			return fn(...args);
+		};
+	return {
+		...actual,
+		spawn: wrap(actual.spawn, 2),
+		spawnSync: wrap(actual.spawnSync, 2),
+		execSync: wrap(actual.execSync, 1),
+		execFileSync: wrap(actual.execFileSync, 2),
+		execFile: wrap(actual.execFile, 2),
+	};
+});
 
 describe("waitForChildProcess", () => {
 	it("reports signaled already-exited children as failures", async () => {
@@ -58,4 +87,17 @@ describe("process liveness", () => {
 			parent.kill("SIGKILL");
 		}
 	});
+});
+
+it("hidden child-process wrappers force windowsHide on every wrapped spawn/exec form", async () => {
+	recordedWindowsHide.length = 0;
+	const child = spawnHidden(process.execPath, ["--version"], { stdio: "ignore" });
+	await waitForChildProcess(child);
+	spawnSyncHidden(process.execPath, ["--version"], { stdio: "ignore" });
+	execSyncHidden(`"${process.execPath}" --version`, { stdio: "ignore" });
+	execFileSyncHidden(process.execPath, ["--version"], { stdio: "ignore" });
+	await new Promise<void>((resolveDone) => {
+		execFileHidden(process.execPath, ["--version"], {}, () => resolveDone());
+	});
+	expect(recordedWindowsHide).toEqual([true, true, true, true, true]);
 });

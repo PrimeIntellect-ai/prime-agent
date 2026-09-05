@@ -1,12 +1,11 @@
 import { existsSync } from "node:fs";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Container, Text, truncateToWidth } from "@earendil-works/pi-tui";
-import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
 import { expandCollapseHint } from "../../modes/interactive/components/keybinding-hints.js";
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.js";
 import { theme } from "../../modes/interactive/theme/theme.js";
-import { waitForChildProcess } from "../../utils/child-process.js";
+import { spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import {
 	getShellConfig,
 	getShellEnv,
@@ -72,7 +71,7 @@ export function createLocalBashOperations(options?: { shellPath?: string }): Bas
 					reject(new Error(`Working directory does not exist: ${cwd}\nCannot execute bash commands.`));
 					return;
 				}
-				const child = spawn(shell, [...args, command], {
+				const child = spawnHidden(shell, [...args, command], {
 					cwd,
 					detached: process.platform !== "win32",
 					env: env ?? getShellEnv(),

@@ -1,5 +1,5 @@
-import { execSync, spawn } from "child_process";
 import { platform } from "os";
+import { execSyncHidden, spawnHidden } from "./child-process.js";
 import { isWaylandSession } from "./clipboard-image.js";
 import { clipboard } from "./clipboard-native.js";
 
@@ -11,9 +11,9 @@ type NativeClipboardExecOptions = {
 
 function copyToX11Clipboard(options: NativeClipboardExecOptions): void {
 	try {
-		execSync("xclip -selection clipboard", options);
+		execSyncHidden("xclip -selection clipboard", options);
 	} catch {
-		execSync("xsel --clipboard --input", options);
+		execSyncHidden("xsel --clipboard --input", options);
 	}
 }
 
@@ -66,16 +66,16 @@ export async function copyToClipboard(text: string): Promise<void> {
 	if (!copied) {
 		try {
 			if (p === "darwin") {
-				execSync("pbcopy", options);
+				execSyncHidden("pbcopy", options);
 				copied = true;
 			} else if (p === "win32") {
-				execSync("clip", options);
+				execSyncHidden("clip", options);
 				copied = true;
 			} else {
 				// Linux. Try Termux, Wayland, or X11 clipboard tools.
 				if (process.env.TERMUX_VERSION) {
 					try {
-						execSync("termux-clipboard-set", options);
+						execSyncHidden("termux-clipboard-set", options);
 						copied = true;
 					} catch {
 						// Fall back to Wayland or X11 tools.
@@ -89,14 +89,14 @@ export async function copyToClipboard(text: string): Promise<void> {
 					if (isWayland && hasWaylandDisplay) {
 						try {
 							// Verify wl-copy exists (spawn errors are async and won't be caught)
-							execSync("which wl-copy", { stdio: "ignore" });
+							execSyncHidden("which wl-copy", { stdio: "ignore" });
 							// wl-copy with execSync hangs due to fork behavior; use spawn instead
-							const proc = spawn("wl-copy", [], { stdio: ["pipe", "ignore", "ignore"] });
-							proc.stdin.on("error", () => {
+							const proc = spawnHidden("wl-copy", [], { stdio: ["pipe", "ignore", "ignore"] });
+							proc.stdin?.on("error", () => {
 								// Ignore EPIPE errors if wl-copy exits early
 							});
-							proc.stdin.write(text);
-							proc.stdin.end();
+							proc.stdin?.write(text);
+							proc.stdin?.end();
 							proc.unref();
 							copied = true;
 						} catch {

@@ -1,12 +1,13 @@
-import { type ExecFileException, execFile, spawnSync } from "child_process";
+import type { ExecFileException } from "child_process";
 import { existsSync, type FSWatcher, readFileSync, unwatchFile, watchFile } from "fs";
 import { dirname, join } from "path";
+import { execFileHidden, spawnSyncHidden } from "../utils/child-process.js";
 import { closeWatcher, FS_WATCH_RETRY_DELAY_MS, watchWithErrorHandler } from "../utils/fs-watch.js";
 import { findGitPaths, type GitPaths } from "../utils/git.js";
 
 /** Ask git for the current branch. Returns null on detached HEAD or if git is unavailable. */
 function resolveBranchWithGitSync(repoDir: string): string | null {
-	const result = spawnSync("git", ["--no-optional-locks", "symbolic-ref", "--quiet", "--short", "HEAD"], {
+	const result = spawnSyncHidden("git", ["--no-optional-locks", "symbolic-ref", "--quiet", "--short", "HEAD"], {
 		cwd: repoDir,
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "ignore"],
@@ -18,7 +19,7 @@ function resolveBranchWithGitSync(repoDir: string): string | null {
 /** Ask git for the current branch asynchronously. Returns null on detached HEAD or if git is unavailable. */
 function resolveBranchWithGitAsync(repoDir: string): Promise<string | null> {
 	return new Promise((resolvePromise) => {
-		execFile(
+		execFileHidden(
 			"git",
 			["--no-optional-locks", "symbolic-ref", "--quiet", "--short", "HEAD"],
 			{

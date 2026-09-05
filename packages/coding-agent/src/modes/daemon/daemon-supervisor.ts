@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
 	chmodSync,
@@ -61,7 +61,12 @@ import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } fr
 import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { looksLikeSessionPath } from "../../core/session-resolver.js";
 import { SettingsManager } from "../../core/settings-manager.js";
-import { isProcessAlive, processIdExists, signalProcessGroupOrProcess } from "../../utils/child-process.js";
+import {
+	isProcessAlive,
+	processIdExists,
+	signalProcessGroupOrProcess,
+	spawnHidden,
+} from "../../utils/child-process.js";
 import type { AgentConnectionHeartbeat } from "../agent-connection/types.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import type { PrivateFrame } from "../session-worker/private-framing.js";
@@ -177,6 +182,11 @@ type DaemonCommandBody = DistributiveOmit<DaemonCommand, "id">;
 
 const structuredLog = getLogger("coding-agent.daemon-supervisor");
 const WORKER_CONNECT_TIMEOUT_MS = 30_000;
+
+/** Per-attempt handshake waits consume the remaining outer connect budget; a smaller fixed clock makes a consistently slow (win32) handshake fail every retry. */
+export function handshakeBudgetMs(deadline: number, now = Date.now()): number {
+	return Math.max(50, deadline - now);
+}
 const ROSTER_WATCHDOG_INTERVAL_MS = 15_000;
 const ROSTER_STALE_AFTER_MS = 3 * ROSTER_HEARTBEAT_INTERVAL_MS;
 const SUPERVISOR_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
@@ -3127,7 +3137,7 @@ export class DaemonSupervisor {
 		});
 		delete workerEnvironment.RLM_DEPTH;
 		await this.assertRecoveryAllowed();
-		const child: ChildProcess = spawn(launch.command, launch.args, {
+		const child: ChildProcess = spawnHidden(launch.command, launch.args, {
 			cwd: createCommand.config?.cwd ?? process.cwd(),
 			detached: true,
 			env: workerEnvironment,
@@ -3351,8 +3361,8 @@ export class DaemonSupervisor {
 			await this.assertRecoveryAllowed();
 			const client = new DaemonWorkerClient(worker.descriptor.socketPath);
 			try {
-				await client.connect(Math.min(500, Math.max(50, deadline - Date.now())));
-				await client.waitForHello(1000);
+				await client.connect(Math.min(500, handshakeBudgetMs(deadline)));
+				await client.waitForHello(handshakeBudgetMs(deadline));
 				// Listen before authenticating: the worker flushes its roster snapshot right after auth succeeds.
 				client.onFrame((frame) => this.handleWorkerFrame(worker, frame, client));
 				client.onClose((error) => void this.handleWorkerClose(worker, client, error));
@@ -3366,7 +3376,7 @@ export class DaemonSupervisor {
 								? { workerInstanceId: worker.descriptor.workerInstanceId }
 								: {}),
 						},
-						1000,
+						handshakeBudgetMs(deadline),
 					);
 					await this.assertRecoveryAllowed();
 					if (!workerAuthAdvertisesRoster(authResponse.data)) {
@@ -3429,7 +3439,7 @@ export class DaemonSupervisor {
 				if (worker.descriptor.processStartId === undefined && isProcessAlive(worker.descriptor.pid)) {
 					const observedProcessStartId = getProcessStartId(worker.descriptor.pid);
 					try {
-						await this.connectWorker(worker, 2000);
+						await this.connectWorker(worker, WORKER_CONNECT_TIMEOUT_MS);
 						if (observedProcessStartId) {
 							worker.descriptor.processStartId = observedProcessStartId;
 							this.persistWorker(worker);
@@ -3456,7 +3466,7 @@ export class DaemonSupervisor {
 				throw new Error("Session worker process is no longer running");
 			}
 			observedProcessStartId = getProcessStartId(worker.descriptor.pid);
-			await this.connectWorker(worker, 2000);
+			await this.connectWorker(worker, WORKER_CONNECT_TIMEOUT_MS);
 			await this.subscribeWorker(worker, worker.descriptor.rootActiveSessionId);
 			await this.refreshWorkerSummaries(worker, true);
 			if (worker.descriptor.processStartId === undefined && observedProcessStartId) {
@@ -3868,7 +3878,7 @@ export class DaemonSupervisor {
 						(identityNow === "unknown" && worker.descriptor.processStartId === undefined);
 					if (identityCompatible) {
 						try {
-							await this.connectWorker(worker, 1500);
+							await this.connectWorker(worker, WORKER_CONNECT_TIMEOUT_MS);
 							await this.subscribeWorker(worker, worker.descriptor.rootActiveSessionId);
 							await this.refreshWorkerSummaries(worker, true);
 							if (this.isWorkerRecoveryCancelled(worker)) {
@@ -6924,7 +6934,7 @@ export class DaemonSupervisor {
 			delete environment[ORPHAN_PROCESS_JOURNAL_ENV];
 			delete environment[SESSION_LEASES_ENABLED_ENV];
 			delete environment[SESSION_LEASE_OWNER_ID_ENV];
-			const replacement = spawn(launch.command, launch.args, {
+			const replacement = spawnHidden(launch.command, launch.args, {
 				cwd: this.defaultSessionConfig.cwd ?? process.cwd(),
 				detached: true,
 				env: environment,

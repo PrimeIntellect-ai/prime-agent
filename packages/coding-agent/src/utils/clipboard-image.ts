@@ -1,8 +1,8 @@
-import { spawnSync } from "child_process";
 import { randomUUID } from "crypto";
 import { readFileSync, unlinkSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { spawnSyncHidden } from "./child-process.js";
 
 import { clipboard } from "./clipboard-native.js";
 import { loadPhoton } from "./photon.js";
@@ -79,7 +79,7 @@ function runCommand(
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_READ_TIMEOUT_MS;
 	const maxBufferBytes = options?.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
 
-	const result = spawnSync(command, args, {
+	const result = spawnSyncHidden(command, args, {
 		timeout: timeoutMs,
 		maxBuffer: maxBufferBytes,
 		env: options?.env,

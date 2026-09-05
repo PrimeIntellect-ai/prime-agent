@@ -1,0 +1,1 @@
+- Fixed console windows flashing on Windows from background path-completion and open-link spawns. ([Discussion #1461](https://github.com/PrimeIntellect-ai/prime-agent/discussions/1461))

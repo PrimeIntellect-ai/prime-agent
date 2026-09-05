@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -9,6 +9,7 @@ import { getPackageDir, isBunBinary } from "../../config.js";
 import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
 import { deleteSessionFile } from "../../core/session-file-actions.js";
 import { readSessionInfo, type SessionInfo, SessionManager } from "../../core/session-manager.js";
+import { spawnHidden } from "../../utils/child-process.js";
 
 export const DAEMON_CATALOG_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
 const DAEMON_CATALOG_START_TIMEOUT_MS = 30_000;
@@ -359,7 +360,7 @@ export class DaemonCatalogClient {
 			args = launch.args;
 			environment = createCliSubprocessEnv(environment, catalogEntry, execArgs);
 		}
-		const child = spawn(command, args, {
+		const child = spawnHidden(command, args, {
 			cwd: process.cwd(),
 			env: environment,
 			stdio: ["ignore", "ignore", "ignore", "ipc"],

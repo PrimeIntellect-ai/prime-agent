@@ -17,7 +17,7 @@ vi.mock("child_process", async (importOriginal) => {
 	return { ...actual, spawnSync: mocks.spawnSync };
 });
 
-import { resolveKernelBashShell } from "../src/utils/shell.js";
+import { orderWindowsBashCandidates, resolveKernelBashShell } from "../src/utils/shell.js";
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform");
 
@@ -60,4 +60,12 @@ describe("resolveKernelBashShell on win32", () => {
 		expect(resolveKernelBashShell("D:\\tools\\bash.exe")).toBe("D:\\tools\\bash.exe");
 		expect(mocks.existsSync).not.toHaveBeenCalled();
 	});
+});
+
+it("orderWindowsBashCandidates prefers any other bash over WSL's System32 trampoline, keeping it only as a last resort", () => {
+	const wsl = "C:\\Windows\\System32\\bash.exe";
+	const scoopGitBash = "C:\\Users\\u\\scoop\\shims\\bash.exe";
+	expect(orderWindowsBashCandidates([wsl, scoopGitBash], "C:\\Windows")).toEqual([scoopGitBash, wsl]);
+	expect(orderWindowsBashCandidates([wsl], "C:\\Windows")).toEqual([wsl]);
+	expect(orderWindowsBashCandidates([wsl, scoopGitBash], undefined)).toEqual([wsl, scoopGitBash]);
 });

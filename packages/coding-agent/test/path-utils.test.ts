@@ -1,7 +1,8 @@
 import { mkdtempSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, posix, resolve, win32 } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { expandTildePath } from "../src/config.js";
 import { expandPath, resolveReadPath, resolveToCwd } from "../src/core/tools/path-utils.js";
 
 describe("path-utils", () => {
@@ -14,6 +15,13 @@ describe("path-utils", () => {
 		it("should expand ~/path to home directory", () => {
 			const result = expandPath("~/Documents/file.txt");
 			expect(result).not.toContain("~/");
+		});
+
+		it("joins ~/ paths with the platform separator (win32 must not keep the posix slash)", () => {
+			const home = homedir();
+			expect(expandPath("~/docs/file.txt", "win32")).toBe(win32.join(home, "docs", "file.txt"));
+			expect(expandPath("~/docs/file.txt", "linux")).toBe(posix.join(home, "docs/file.txt"));
+			expect(expandTildePath("~/docs/file.txt", "win32")).toBe(win32.join(home, "docs", "file.txt"));
 		});
 
 		it("should normalize Unicode spaces", () => {
