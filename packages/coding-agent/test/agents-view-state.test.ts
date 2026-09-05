@@ -650,6 +650,12 @@ describe("agents view state", () => {
 		const rollup = computeRecursiveRollups(withChild).get(withChild[0]!);
 		expect(rollup?.descendantCount).toBe(1);
 		expect(rollup?.cost).toBeCloseTo(0.5);
+
+		// The tree shares that definition of "child": the branch renders as its
+		// own top-level session while only the spawned child nests and counts.
+		const rows = buildAgentsViewRows(withChild, new Set(), new Set(), undefined, computeRecursiveRollups(withChild));
+		expect(rows.find((row) => row.summary.sessionId === "branch-session")).toMatchObject({ kind: "agent", depth: 0 });
+		expect(rows.find((row) => row.kind === "subagent-summary")).toMatchObject({ title: "1 subagent" });
 	});
 
 	test("tallies a very deep child chain without overflowing the stack", () => {

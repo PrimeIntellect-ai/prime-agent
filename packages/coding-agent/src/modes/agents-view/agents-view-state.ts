@@ -782,6 +782,13 @@ export function buildAgentsViewRows(
 			row.kind = "agent";
 			continue;
 		}
+		// One definition of "child" with the rollup walk: a branched/forked
+		// session links to its source but is a top-level chat in its own right,
+		// so it must not nest (nor count in the expander) while #sub excludes it.
+		if (row.record && parent.record && !isSubagentDescendantRecord(row.record, parent.record)) {
+			row.kind = "agent";
+			continue;
+		}
 		nestedRows.add(row);
 		const siblings = childrenByParent.get(parent) ?? [];
 		siblings.push(row);
