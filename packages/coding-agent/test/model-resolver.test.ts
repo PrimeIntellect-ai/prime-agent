@@ -1,4 +1,4 @@
-import type { Model } from "@earendil-works/pi-ai";
+import { getModels, type KnownProvider, type Model } from "@earendil-works/pi-ai";
 import { describe, expect, test, vi } from "vitest";
 import {
 	defaultModelPerProvider,
@@ -303,8 +303,19 @@ describe("default model selection", () => {
 		expect(defaultModelPerProvider["prime-inference"]).toBe("z-ai/glm-5.2");
 	});
 
+	test("every per-provider default exists in the model catalog", () => {
+		for (const [provider, modelId] of Object.entries(defaultModelPerProvider)) {
+			const models = getModels(provider as KnownProvider);
+			if (models.length === 0) continue;
+			expect(
+				models.map((model) => model.id),
+				`default for ${provider}`,
+			).toContain(modelId);
+		}
+	});
+
 	test("zai, minimax, and cerebras defaults track current models", () => {
-		expect(defaultModelPerProvider.zai).toBe("glm-5.1");
+		expect(defaultModelPerProvider.zai).toBe("glm-5.3");
 		expect(defaultModelPerProvider.minimax).toBe("MiniMax-M2.7");
 		expect(defaultModelPerProvider["minimax-cn"]).toBe("MiniMax-M2.7");
 		expect(defaultModelPerProvider.cerebras).toBe("gpt-oss-120b");

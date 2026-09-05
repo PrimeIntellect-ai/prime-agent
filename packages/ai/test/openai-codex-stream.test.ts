@@ -562,6 +562,8 @@ describe("openai-codex streaming", () => {
 	});
 
 	it.each([
+		// "default" must stay on the wire: absence means "auto" (the project tier).
+		["gpt-5.1-codex", "default", 1],
 		["gpt-5.1-codex", "flex", 0.5],
 		["gpt-5.1-codex", "priority", 2],
 		["gpt-5.4", "priority", 2],
