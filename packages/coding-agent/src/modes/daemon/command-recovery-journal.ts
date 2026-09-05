@@ -1,5 +1,6 @@
-import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
+import { writeFileAtomicSync } from "../../utils/atomic-file.js";
 import type { DaemonClientId, DaemonCommandId, DaemonResponse } from "./daemon-protocol.js";
 
 interface ReceivedRecord {
@@ -184,7 +185,6 @@ export class CommandRecoveryJournal {
 	}
 
 	private compact(): void {
-		const tempPath = `${this.path}.${process.pid}.tmp`;
 		const records: JournalRecord[] = [];
 		for (const [key, entry] of this.entries) {
 			records.push(entry.received);
@@ -198,20 +198,11 @@ export class CommandRecoveryJournal {
 				});
 			}
 		}
-		const descriptor = openSync(tempPath, "w", 0o600);
-		try {
-			writeSync(descriptor, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
-			fsyncSync(descriptor);
-		} finally {
-			closeSync(descriptor);
-		}
-		renameSync(tempPath, this.path);
-		const directoryDescriptor = openSync(dirname(this.path), "r");
-		try {
-			fsyncSync(directoryDescriptor);
-		} finally {
-			closeSync(directoryDescriptor);
-		}
+		writeFileAtomicSync(this.path, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, {
+			mode: 0o600,
+			fsync: true,
+			fsyncDir: true,
+		});
 		this.recordCount = records.length;
 	}
 }

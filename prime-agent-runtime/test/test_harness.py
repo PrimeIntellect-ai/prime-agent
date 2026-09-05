@@ -134,6 +134,77 @@ class HarnessStateTest(unittest.TestCase):
             self.assertIn("receiver_role='child'", overview)
             self.assertIn("refinements: 1", reloaded.overview())
 
+    def test_save_failure_preserves_previous_state_on_disk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("Durable fact", "Written before the crash.")
+
+            crashing = HarnessState(state.file_path)
+            original_dump = json.dump
+
+            def torn_dump(data: object, fh: object, **kwargs: object) -> None:
+                fh.write('{"schema": 1, "entr')  # type: ignore[attr-defined]
+                raise OSError("disk full")
+
+            json.dump = torn_dump  # type: ignore[assignment]
+            try:
+                with self.assertRaises(OSError):
+                    crashing.create_memory("Doomed fact", "Interrupted mid-write.")
+            finally:
+                json.dump = original_dump
+
+            # The interrupted save must not have truncated the durable state.
+            reloaded = HarnessState(state.file_path)
+            titles = [entry.title for entry in reloaded.entries["memory"].values()]
+            self.assertEqual(titles, ["Durable fact"])
+
+    def test_save_preserves_restrictive_file_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("First", "Creates the file.")
+            os.chmod(state.file_path, 0o600)
+
+            state.create_memory("Second", "Replaces the file.")
+
+            self.assertEqual(os.stat(state.file_path).st_mode & 0o777, 0o600)
+
+    def test_save_temp_file_is_never_looser_than_the_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state = HarnessState(Path(temp_dir) / "harness_state.json")
+            state.create_memory("First", "Creates the file.")
+            os.chmod(state.file_path, 0o600)
+
+            observed_modes: list[int] = []
+            original_open = os.open
+
+            def observing_open(path: object, flags: int, mode: int = 0o777, **kwargs: object) -> int:
+                if str(path).endswith(".tmp"):
+                    observed_modes.append(mode)
+                return original_open(path, flags, mode, **kwargs)
+
+            os.open = observing_open  # type: ignore[assignment]
+            try:
+                state.create_memory("Second", "Replaces the file.")
+            finally:
+                os.open = original_open
+
+            self.assertEqual(observed_modes, [0o600])
+            self.assertEqual(os.stat(state.file_path).st_mode & 0o777, 0o600)
+
+    def test_save_writes_through_a_symlinked_state_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            real_path = Path(temp_dir) / "real_state.json"
+            alias = Path(temp_dir) / "harness_state.json"
+            HarnessState(real_path).create_memory("Seed", "Creates the real file.")
+            alias.symlink_to(real_path)
+
+            state = HarnessState(alias)
+            state.create_memory("Through alias", "Must land in the real file.")
+
+            self.assertTrue(alias.is_symlink())
+            titles = [entry.title for entry in HarnessState(real_path).entries["memory"].values()]
+            self.assertEqual(titles, ["Seed", "Through alias"])
+
     def test_load_ignores_unknown_json_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "harness_state.json"

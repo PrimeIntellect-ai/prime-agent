@@ -1,9 +1,10 @@
 import type { ServiceTier, Transport } from "@earendil-works/pi-ai";
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.js";
+import { writeFileAtomicSync } from "../utils/atomic-file.js";
 
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
@@ -282,20 +283,20 @@ export class FileSettingsStorage implements SettingsStorage {
 				release = this.acquireLockSyncWithRetry(path);
 			}
 			const current = fileExists ? readFileSync(path, "utf-8") : undefined;
-			const next = fn(current);
+			let next = fn(current);
 			if (next !== undefined) {
 				if (!existsSync(dir)) {
 					mkdirSync(dir, { recursive: true });
 				}
 				if (!release) {
 					release = this.acquireLockSyncWithRetry(path);
+					// The first-write read ran unlocked; a racing first writer may have landed since.
+					if (existsSync(path)) {
+						next = fn(readFileSync(path, "utf-8"));
+					}
 				}
-				const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`;
-				try {
-					writeFileSync(temporaryPath, next, { encoding: "utf-8", mode: 0o600 });
-					renameSync(temporaryPath, path);
-				} finally {
-					if (existsSync(temporaryPath)) unlinkSync(temporaryPath);
+				if (next !== undefined) {
+					writeFileAtomicSync(path, next, { mode: 0o600 });
 				}
 			}
 		} finally {

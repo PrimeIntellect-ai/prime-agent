@@ -1,7 +1,23 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const fullReadCounter = vi.hoisted(() => ({ suffix: undefined as string | undefined, count: 0 }));
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return {
+		...actual,
+		readFileSync: ((path: Parameters<typeof actual.readFileSync>[0], options?: never) => {
+			// Suffix match: repair resolves the realpath (/private/var vs /var on macOS).
+			if (fullReadCounter.suffix !== undefined && String(path).endsWith(fullReadCounter.suffix)) {
+				fullReadCounter.count++;
+			}
+			return actual.readFileSync(path, options);
+		}) as typeof actual.readFileSync,
+	};
+});
+
 import { computeOwnAndTotalUsage } from "../../src/core/context-tree.js";
 import {
 	findMostRecentSession,
@@ -527,6 +543,127 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 
 	afterEach(() => {
 		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	// The suspicion gate must keep clean opens at ONE full read (the loader's own).
+	it.each([
+		[
+			"a clean large session",
+			(): string[] => {
+				const filler = "x".repeat(2048);
+				const lines: string[] = [];
+				for (let index = 0; index < 2000; index++) {
+					lines.push(
+						JSON.stringify({
+							type: "message",
+							id: `m${index}`,
+							parentId: index === 0 ? null : `m${index - 1}`,
+							message: { role: "user", content: filler, timestamp: index },
+						}),
+					);
+				}
+				return lines;
+			},
+		],
+		[
+			"a benign trailing blank line",
+			(): string[] => [
+				JSON.stringify({
+					type: "message",
+					id: "m1",
+					parentId: null,
+					message: { role: "user", content: "hi", timestamp: 1 },
+				}),
+				"",
+			],
+		],
+	])("opens %s with exactly one full read", (_name, buildLines) => {
+		const file = join(tempDir, "gate.jsonl");
+		const header = {
+			type: "session",
+			version: 3,
+			id: "gate-session",
+			timestamp: "2026-01-01T00:00:00Z",
+			cwd: "/tmp",
+		};
+		writeFileSync(file, `${[JSON.stringify(header), ...buildLines()].join("\n")}\n`);
+		fullReadCounter.suffix = "gate.jsonl";
+		fullReadCounter.count = 0;
+
+		try {
+			SessionManager.open(file, tempDir);
+			expect(fullReadCounter.count).toBe(1);
+		} finally {
+			fullReadCounter.suffix = undefined;
+		}
+	});
+
+	it("repairs crash damage at open: torn tail truncated, zero-filled record recovered, appends stay separate lines", () => {
+		const file = join(tempDir, "crashed.jsonl");
+		const header = {
+			type: "session",
+			version: 3,
+			id: "crashed-session",
+			timestamp: "2026-01-01T00:00:00Z",
+			cwd: "/tmp",
+		};
+		const kept = {
+			type: "message",
+			id: "m1",
+			parentId: null,
+			message: { role: "user", content: "kept", timestamp: 1 },
+		};
+		const zeroFilled = {
+			type: "message",
+			id: "m2",
+			parentId: "m1",
+			message: { role: "user", content: "recovered", timestamp: 2 },
+		};
+		const damaged = `${JSON.stringify(header)}\n${JSON.stringify(kept)}\n\u0000\u0000\u0000\u0000${JSON.stringify(zeroFilled)}\n{"type":"message","id":"torn`;
+		writeFileSync(file, damaged);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			const sm = SessionManager.open(file, tempDir);
+			expect(sm.getHeader()?.id).toBe("crashed-session");
+			expect(sm.getEntries().map((entry) => entry.id)).toEqual(["m1", "m2"]);
+			sm.appendMessage({ role: "user", content: "after crash", timestamp: 3 });
+			sm.flushNow();
+
+			const lines = readFileSync(file, "utf-8").split("\n").filter(Boolean);
+			const parsed = lines.map((line) => JSON.parse(line));
+			expect(parsed.map((entry) => entry.id ?? entry.type)).toEqual([
+				"crashed-session",
+				"m1",
+				"m2",
+				expect.any(String),
+			]);
+			expect(parsed.at(-1)?.message?.content).toBe("after crash");
+			expect(errorSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("repairs a damaged transcript through its symlink alias at the real file", () => {
+		const realFile = join(tempDir, "real.jsonl");
+		const alias = join(tempDir, "alias.jsonl");
+		const header = { type: "session", version: 3, id: "sym-session", timestamp: "2026-01-01T00:00:00Z", cwd: "/tmp" };
+		writeFileSync(realFile, `${JSON.stringify(header)}\n{"type":"message","id":"torn`);
+		chmodSync(realFile, 0o600);
+		symlinkSync(realFile, alias);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		try {
+			SessionManager.open(alias, tempDir);
+			expect(lstatSync(alias).isSymbolicLink()).toBe(true);
+			const repaired = readFileSync(realFile, "utf-8");
+			expect(repaired.endsWith("\n")).toBe(true);
+			expect(repaired).not.toContain("torn");
+			expect(statSync(realFile).mode & 0o777).toBe(0o600);
+		} finally {
+			errorSpy.mockRestore();
+		}
 	});
 
 	it("truncates and rewrites empty file with valid header", () => {

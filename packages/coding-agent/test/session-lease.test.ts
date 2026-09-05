@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
@@ -114,6 +114,22 @@ describe("session leases", () => {
 		const lease = acquireSessionLease(sessionPath, agentDir, enabledEnvironment("replacement"));
 		expect(lease?.sessionPath).toBe(sessionPath);
 		lease?.release();
+	});
+
+	it("never reclaims a lease whose owner file cannot be read", () => {
+		const agentDir = createTempDir();
+		const sessionPath = canonicalSessionPath(resolve(agentDir, "unreadable.jsonl"));
+		const key = createHash("sha256").update(sessionPath).digest("hex");
+		const lockDirectory = join(agentDir, "session-leases", `${key}.lock`);
+		// owner.json as a directory: every read fails with a non-ENOENT error, the
+		// same shape as a transient EPERM/EBUSY on Windows. That may be a LIVE
+		// lease, so acquisition must fail instead of destroying it.
+		mkdirSync(join(lockDirectory, "owner.json"), { recursive: true });
+
+		expect(() => acquireSessionLease(sessionPath, agentDir, enabledEnvironment("intruder"))).toThrow(
+			"Could not acquire session lease",
+		);
+		expect(existsSync(join(lockDirectory, "owner.json"))).toBe(true);
 	});
 
 	it("reports guard contention as a coordination failure", () => {

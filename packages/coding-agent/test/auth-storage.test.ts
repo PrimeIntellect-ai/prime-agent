@@ -1,10 +1,27 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
+
+const renameFault = vi.hoisted(() => ({ error: undefined as Error | undefined }));
+const absenceIllusion = vi.hoisted(() => ({ paths: new Set<string>() }));
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:fs")>();
+	return {
+		...actual,
+		renameSync: (from: Parameters<typeof actual.renameSync>[0], to: Parameters<typeof actual.renameSync>[1]) => {
+			if (renameFault.error && String(to).endsWith("auth.json")) throw renameFault.error;
+			return actual.renameSync(from, to);
+		},
+		existsSync: (path: Parameters<typeof actual.existsSync>[0]) => {
+			if (absenceIllusion.paths.has(String(path))) return false;
+			return actual.existsSync(path);
+		},
+	};
+});
 
 describe("AuthStorage", () => {
 	let tempDir: string;
@@ -951,6 +968,97 @@ describe("AuthStorage", () => {
 	});
 
 	describe("persistence semantics", () => {
+		test("first-run initialization survives a restrictive umask", () => {
+			const previousUmask = process.umask(0o700);
+			try {
+				authStorage = AuthStorage.create(authJsonPath);
+				authStorage.set("openai", { type: "api_key", key: "masked-key" });
+			} finally {
+				process.umask(previousUmask);
+			}
+
+			expect(statSync(authJsonPath).mode & 0o777).toBe(0o600);
+			const onDisk = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<string, { key: string }>;
+			expect(onDisk.openai.key).toBe("masked-key");
+		});
+
+		test.each([
+			[
+				"an existing target",
+				(): { alias: string; target: string } => {
+					const target = join(tempDir, "real-auth.json");
+					writeFileSync(target, "{}");
+					rmSync(authJsonPath, { force: true });
+					symlinkSync(target, authJsonPath);
+					return { alias: authJsonPath, target };
+				},
+			],
+			[
+				"a dangling absolute target",
+				(): { alias: string; target: string } => {
+					const target = join(tempDir, "vault", "auth.json");
+					mkdirSync(join(tempDir, "vault"), { recursive: true });
+					symlinkSync(target, authJsonPath);
+					return { alias: authJsonPath, target };
+				},
+			],
+			[
+				"a dangling relative target under a symlinked directory",
+				(): { alias: string; target: string } => {
+					const realDir = join(tempDir, "real-dir");
+					mkdirSync(realDir, { recursive: true });
+					const aliasDir = join(tempDir, "alias-dir");
+					symlinkSync(realDir, aliasDir);
+					symlinkSync("./credentials.json", join(aliasDir, "auth.json"));
+					return { alias: join(aliasDir, "auth.json"), target: join(realDir, "credentials.json") };
+				},
+			],
+		])("writes through a symlinked auth.json (%s) with the alias intact", (_name, setup) => {
+			const { alias, target } = setup();
+			authStorage = AuthStorage.create(alias);
+
+			authStorage.set("openai", { type: "api_key", key: "through-alias" });
+
+			expect(lstatSync(alias).isSymbolicLink()).toBe(true);
+			const real = JSON.parse(readFileSync(target, "utf-8")) as Record<string, { key: string }>;
+			expect(real.openai.key).toBe("through-alias");
+		});
+
+		test("initialization never replaces credentials another process already saved", () => {
+			authStorage = AuthStorage.create(authJsonPath);
+			// A rival process persists credentials between the absence check and the write.
+			writeAuthJson({ anthropic: { type: "api_key", key: "already-saved" } });
+			absenceIllusion.paths.add(authJsonPath);
+
+			try {
+				const backend = (authStorage as unknown as { storage: { ensureFileExists(): void } }).storage;
+				backend.ensureFileExists();
+			} finally {
+				absenceIllusion.paths.delete(authJsonPath);
+			}
+
+			const onDisk = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<string, { key: string }>;
+			expect(onDisk.anthropic.key).toBe("already-saved");
+		});
+
+		test("a write failing at the replace boundary leaves the previous credentials intact", () => {
+			writeAuthJson({ anthropic: { type: "api_key", key: "old-key" } });
+			authStorage = AuthStorage.create(authJsonPath);
+			renameFault.error = new Error("disk full");
+
+			try {
+				authStorage.set("anthropic", { type: "api_key", key: "new-key" });
+			} finally {
+				renameFault.error = undefined;
+			}
+
+			expect(authStorage.drainErrors().map((error) => String(error))).toEqual([
+				expect.stringContaining("disk full"),
+			]);
+			const onDisk = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<string, { key: string }>;
+			expect(onDisk.anthropic.key).toBe("old-key");
+		});
+
 		test("set preserves unrelated external edits", () => {
 			writeAuthJson({
 				anthropic: { type: "api_key", key: "old-anthropic" },
