@@ -1,5 +1,6 @@
 import {
 	type Component,
+	getCapabilities,
 	truncateToWidth,
 	VersionedRenderCache,
 	visibleWidth,
@@ -640,9 +641,10 @@ export class IPythonCellComponent implements Component {
 
 		if (imageCount > 0) {
 			startOutput();
-			const text = this.state.showImages
+			const canRenderImages = this.state.showImages && !!getCapabilities().images;
+			const text = canRenderImages
 				? `${imageCount} image${imageCount === 1 ? "" : "s"} rendered below`
-				: `${imageCount} image${imageCount === 1 ? "" : "s"} hidden`;
+				: `${imageCount} image${imageCount === 1 ? "" : "s"} not rendered in this terminal`;
 			this.addWrapped(lines, OUTPUT_INDENT, theme.fg("muted", text), width);
 		}
 	}
