@@ -305,6 +305,13 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.id.includes("gpt-5.6")) {
 		mergeThinkingLevelMap(model, { minimal: null, max: "max" });
 	}
+	if (
+		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
+		model.id.startsWith("gpt-6")
+	) {
+		// gpt-6 reasoning is mandatory with no minimal effort; xhigh/max are supported (OpenRouter capability data).
+		mergeThinkingLevelMap(model, { off: null, minimal: null, xhigh: "xhigh", max: "max" });
+	}
 	// Per-family effort support per the Anthropic effort docs. Opus 4.6 / Sonnet 4.6
 	// have no xhigh; Fable 5 / Mythos 5 / Mythos Preview think every turn (off: null).
 	if (

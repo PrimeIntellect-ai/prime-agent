@@ -85,6 +85,13 @@ describe("getSupportedThinkingLevels", () => {
 		},
 	);
 
+	it("includes xhigh and max but not off or minimal for GPT-6 Astra", () => {
+		for (const model of [getModel("openai", "gpt-6-astra"), getModel("github-copilot", "gpt-6-astra")]) {
+			expect(model).toBeDefined();
+			expect(getSupportedThinkingLevels(model!)).toEqual(["low", "medium", "high", "xhigh", "max"]);
+		}
+	});
+
 	it("supports disabling reasoning for the base GPT-5.6 API alias", () => {
 		const model = getModel("openai", "gpt-5.6");
 		expect(model).toBeDefined();
