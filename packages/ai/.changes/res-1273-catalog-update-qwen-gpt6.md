@@ -1,0 +1,1 @@
+- Refreshed the generated model catalog (1262 -> 1280 models): added GPT-6 Astra across eight providers with correct Responses routing and thinking levels, restored the Prime Inference Qwen 3.8 Max effort metadata after OpenRouter's route rename, and picked up upstream price and listing updates.

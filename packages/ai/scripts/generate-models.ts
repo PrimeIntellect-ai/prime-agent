@@ -212,7 +212,10 @@ const PRIME_INFERENCE_FEATURED_MODELS = new Set([
 // Prime ids whose OpenRouter listing uses a different id. Empty today — Prime
 // currently publishes ids that match OpenRouter's, but HF-style ids show up
 // whenever a new route is added, so the mapping stays.
-const PRIME_INFERENCE_OPENROUTER_ALIASES: Record<string, string> = {};
+const PRIME_INFERENCE_OPENROUTER_ALIASES: Record<string, string> = {
+	// OpenRouter renamed its route to the dated id; Prime still serves the undated one.
+	"qwen/qwen3.8-max": "qwen/qwen3.8-max-0902",
+};
 
 // Conservative fallbacks for catalog models with no OpenRouter match and no
 // override above: an under-declared window degrades gracefully, an
@@ -299,6 +302,13 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	}
 	if (model.id.includes("gpt-5.6")) {
 		mergeThinkingLevelMap(model, { minimal: null, max: "max" });
+	}
+	if (
+		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
+		model.id.startsWith("gpt-6")
+	) {
+		// gpt-6 reasoning is mandatory with no minimal effort; xhigh/max are supported (OpenRouter capability data).
+		mergeThinkingLevelMap(model, { off: null, minimal: null, xhigh: "xhigh", max: "max" });
 	}
 	// Per-family effort support per the Anthropic effort docs. Opus 4.6 / Sonnet 4.6
 	// have no xhigh; Fable 5 / Mythos 5 / Mythos Preview think every turn (off: null).
@@ -1371,8 +1381,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 
 				// Copilot proxies Claude via the Anthropic Messages API
 				const isCopilotClaude = modelId.startsWith("claude-");
-				// gpt-5 models require responses API, others use completions
-				const needsResponsesApi = modelId.startsWith("gpt-5") || modelId.startsWith("oswe");
+				// gpt-5/gpt-6 models require responses API, others use completions
+				const needsResponsesApi =
+					modelId.startsWith("gpt-5") || modelId.startsWith("gpt-6") || modelId.startsWith("oswe");
 
 				const api: Api = isCopilotClaude
 					? "anthropic-messages"
