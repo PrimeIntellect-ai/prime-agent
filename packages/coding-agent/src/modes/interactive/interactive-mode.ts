@@ -7494,20 +7494,24 @@ export class InteractiveMode {
 		// their own container below the execution indicator and recap.
 		this.queuedMessagesContainer.clear();
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
-		// A selected turn leaves the queued lanes while it prepares, but its prompt
-		// has not started (pre-turn compaction can hold it there for a long time),
-		// so the snapshot's active entry keeps the message visible.
-		const activeAction = this.connectionState?.sessionActions.active;
-		const startingTurn =
-			activeAction?.kind === "turn" && activeAction.phase === "preparing" ? activeAction.label : undefined;
+		// Selected turns leave the queued lanes while they prepare, but their prompts
+		// have not started (pre-turn compaction can hold a whole "all"-mode batch
+		// there for a long time), so the snapshot's preparing previews keep them
+		// visible. Older daemons only publish the first one via active.label.
+		const sessionActions = this.connectionState?.sessionActions;
+		const startingTurns =
+			sessionActions?.preparing ??
+			(sessionActions?.active?.kind === "turn" &&
+			sessionActions.active.phase === "preparing" &&
+			sessionActions.active.label !== undefined
+				? [sessionActions.active.label]
+				: []);
 		const hasQueuedMessages = steeringMessages.length > 0 || followUpMessages.length > 0;
-		const queueAreaPopulated = hasQueuedMessages || startingTurn !== undefined;
+		const queueAreaPopulated = hasQueuedMessages || startingTurns.length > 0;
 		if (queueAreaPopulated) {
 			this.queuedMessagesContainer.addChild(new Spacer(1));
-			if (startingTurn !== undefined) {
-				const text = styleQueuedMessagePreview(startingTurn, "Starting", (name) =>
-					this.isRecognizedSlashCommand(name),
-				);
+			for (const message of startingTurns) {
+				const text = styleQueuedMessagePreview(message, "Starting", (name) => this.isRecognizedSlashCommand(name));
 				this.queuedMessagesContainer.addChild(new TruncatedText(text, 1, 0));
 			}
 			for (const message of steeringMessages) {

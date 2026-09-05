@@ -176,11 +176,32 @@ describe("InteractiveMode compaction events", () => {
 					queuedCount: 0,
 					steering: [],
 					followUps: [],
+					preparing: ["queued before compaction", "Agent message received: also queued"],
 					active: { kind: "turn", phase: "preparing", label: "queued before compaction" },
 				},
 			},
 		};
 		updatePendingMessagesDisplay.call(preparing);
+		const preparingRender = stripAnsi(queuedMessagesContainer.render(80).join("\n"));
+		// Every batched preview renders, with the lane preview strings verbatim.
+		expect(preparingRender).toContain("Starting: queued before compaction");
+		expect(preparingRender).toContain("Agent message received: also queued");
+
+		// An older daemon publishes only active.label; the first prompt still renders.
+		queuedMessagesContainer.clear();
+		const legacy = {
+			...base,
+			featureHintSuppressedByQueue: true,
+			connectionState: {
+				sessionActions: {
+					queuedCount: 0,
+					steering: [],
+					followUps: [],
+					active: { kind: "turn", phase: "preparing", label: "queued before compaction" },
+				},
+			},
+		};
+		updatePendingMessagesDisplay.call(legacy);
 		expect(stripAnsi(queuedMessagesContainer.render(80).join("\n"))).toContain("Starting: queued before compaction");
 
 		// A running turn renders through the streaming transcript, not this area.

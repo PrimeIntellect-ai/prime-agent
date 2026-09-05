@@ -324,17 +324,25 @@ describe("AgentSession compaction characterization", () => {
 			fauxAssistantMessage("model-generated summary"),
 			fauxAssistantMessage("queued turn response"),
 		]);
+		harness.session.setFollowUpMode("all");
 		const running = harness.session.prompt("one");
 		await vi.waitFor(() => expect(harness.session.isStreaming).toBe(true));
 		const queued = harness.session.prompt("queued before compaction", {
 			streamingBehavior: "followUp",
 			queueIfBusy: true,
 		});
+		const alsoQueued = harness.session.prompt("also queued before compaction", {
+			streamingBehavior: "followUp",
+			queueIfBusy: true,
+		});
 		await vi.waitFor(() =>
-			expect(harness.session.getSessionActionSnapshot().followUps).toEqual(["queued before compaction"]),
+			expect(harness.session.getSessionActionSnapshot().followUps).toEqual([
+				"queued before compaction",
+				"also queued before compaction",
+			]),
 		);
 		// Hold the pump across the boundary so the context growth lands after the
-		// run and before the queued turn's preparation, like a big final tool result.
+		// run and before the queued turns' preparation, like a big final tool result.
 		const pause = harness.session.acquireQueuedWorkPause();
 		releaseTurn();
 		await running;
@@ -346,17 +354,19 @@ describe("AgentSession compaction characterization", () => {
 			timestamp: Date.now(),
 		});
 		pause.release();
-		// The queued turn's own pre-turn compaction now runs while it prepares. The
-		// lanes are empty by design (preparing turns are pump-owned), so the active
-		// entry must carry the message for the whole compaction window.
+		// The all-mode batch's own pre-turn compaction now runs while it prepares.
+		// The lanes are empty by design (preparing turns are pump-owned), so the
+		// preparing previews must carry EVERY batched message, with the same
+		// preview strings the lanes showed, for the whole compaction window.
 		await vi.waitFor(() => expect(harness.session.isCompacting).toBe(true), { timeout: 3000 });
 		expect(harness.session.getSessionActionSnapshot()).toMatchObject({
 			steering: [],
 			followUps: [],
+			preparing: ["queued before compaction", "also queued before compaction"],
 			active: { kind: "turn", phase: "preparing", label: "queued before compaction" },
 		});
 		releaseCompaction();
-		await Promise.all([running, queued]);
+		await Promise.all([running, queued, alsoQueued]);
 	});
 
 	it("reschedules a pending post-compaction continuation after successful manual compaction", async () => {
