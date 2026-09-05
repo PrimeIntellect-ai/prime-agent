@@ -81,6 +81,29 @@ describe("adaptive TUI theme colors", () => {
 		expect(editorTheme.borderColor("x")).toBe(theme.fg("borderMuted", "x"));
 	});
 
+	it("keeps the zebra stripe subtle and on the light side of the real terminal background", () => {
+		// Unknown terminal: trust the configured stripe.
+		expect(theme.getAgentsZebraBackgroundColor()?.("x")).toBe(theme.bg("agentsZebraBg", "x"));
+
+		// Matching dark terminal (prime bg): stripe already sits slightly lighter.
+		setDefaultTerminalColors({
+			foreground: { r: 255, g: 255, b: 255 },
+			background: { r: 5, g: 5, b: 6 },
+		});
+		expect(theme.getAgentsZebraBackgroundColor()?.("x")).toBe(theme.bg("agentsZebraBg", "x"));
+
+		// Terminal lighter than the stripe: a darker band would read as black
+		// rows, so the stripe is re-derived just above the terminal background.
+		const terminalLuminance = luminanceRgb({ r: 30, g: 30, b: 30 });
+		setDefaultTerminalColors({
+			foreground: { r: 255, g: 255, b: 255 },
+			background: { r: 30, g: 30, b: 30 },
+		});
+		const adjusted = theme.getAgentsZebraBackgroundColor()?.("x");
+		expect(adjusted).not.toBe(theme.bg("agentsZebraBg", "x"));
+		expect(extractRgbLuminance(adjusted ?? "")).toBeGreaterThan(terminalLuminance);
+	});
+
 	it("keeps theme editor chrome on light terminal backgrounds", () => {
 		setDefaultTerminalColors({
 			foreground: { r: 0, g: 0, b: 0 },

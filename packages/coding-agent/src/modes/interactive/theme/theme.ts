@@ -191,6 +191,9 @@ type ColorMode = "truecolor" | "256color";
 const ADAPTIVE_LIGHT_BG_ACCENT: Rgb = { r: 0, g: 95, b: 135 };
 const SURFACE_MIN_LUMINANCE_DELTA = 12;
 const SURFACE_CONTRAST_ALPHA = 0.08;
+// Zebra stripes stay quieter than popup surfaces.
+const ZEBRA_MIN_LUMINANCE_DELTA = 4;
+const ZEBRA_CONTRAST_ALPHA = 0.05;
 // Selection rows must stand out clearly, much more than passive surfaces.
 const SELECTION_MIN_LUMINANCE_DELTA = 28;
 const SELECTION_MAX_BLEND_ALPHA = 0.5;
@@ -433,7 +436,31 @@ export class Theme {
 		if (value === undefined || value === "") {
 			return undefined;
 		}
-		return (str: string) => this.bg("agentsZebraBg", str);
+		const terminalBg = getDefaultTerminalColors()?.background;
+		const stripeRgb = colorValueToRgb(value);
+		if (!terminalBg || !stripeRgb) {
+			return (str: string) => this.bg("agentsZebraBg", str);
+		}
+		// A subtle stripe sits slightly toward white on dark terminals (toward
+		// black on light ones). Keep the configured color when it already does;
+		// when it would vanish into the real terminal background or land on its
+		// wrong side (e.g. a theme darker than the terminal, which reads as black
+		// bands), re-derive the stripe from the terminal background instead.
+		const delta = luminance(stripeRgb) - luminance(terminalBg);
+		const towardWhite = !isLightColor(terminalBg);
+		const wrongDirection = towardWhite ? delta < 0 : delta > 0;
+		if (!wrongDirection && Math.abs(delta) >= ZEBRA_MIN_LUMINANCE_DELTA) {
+			return (str: string) => this.bg("agentsZebraBg", str);
+		}
+		const adjusted = bestAnsiColor(
+			blendColor(towardWhite ? WHITE : BLACK, terminalBg, ZEBRA_CONTRAST_ALPHA),
+			this.mode,
+		);
+		if (adjusted === "") {
+			return (str: string) => this.bg("agentsZebraBg", str);
+		}
+		const ansi = bgAnsi(adjusted, this.mode);
+		return (str: string) => `${ansi}${str}\x1b[49m`;
 	}
 
 	getSelectionBackgroundColor(): (str: string) => string {
