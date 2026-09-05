@@ -28,6 +28,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.js";
+import { isDisposableGhost } from "./session-ghost.js";
 import {
 	addAssistantUsage,
 	cloneUsage,
@@ -59,6 +60,28 @@ const CONTENT_ENTRY_TYPES = new Set([
 	"compaction",
 	"branch_summary",
 ]);
+
+/**
+ * One authoritative user-content rule, shared by SessionManager.hasUserContent
+ * and the saved-session scan. createAgentSession opens a new session with an
+ * optional leading `model_change` followed by `thinking_level_change` and
+ * `service_tier_change`; that creation prefix is skipped, anything beyond it is
+ * user content (including later config changes — see PR #1561 review).
+ */
+export function sessionEntryTypesHaveUserContent(entryTypes: readonly string[]): boolean {
+	const contentTypes = entryTypes.filter((type) => CONTENT_ENTRY_TYPES.has(type));
+	let start = 0;
+	if (contentTypes[start] === "model_change") {
+		start++;
+	}
+	if (contentTypes[start] === "thinking_level_change") {
+		start++;
+	}
+	if (contentTypes[start] === "service_tier_change") {
+		start++;
+	}
+	return contentTypes.length > start;
+}
 
 function realpathIfPresent(path: string): string {
 	try {
@@ -261,6 +284,12 @@ export interface SessionInfo {
 	created: Date;
 	modified: Date;
 	messageCount: number;
+	/**
+	 * Scan-time result of the sessionEntryTypesHaveUserContent rule. Conservative:
+	 * oversized or unparseable lines count as content. Absent on records produced
+	 * by an older scan.
+	 */
+	hasUserContent?: boolean;
 	firstMessage: string;
 	allMessagesText: string;
 	agentStatus?: AgentStatus;
@@ -774,10 +803,49 @@ export function findMostRecentSessionForCwd(sessionDir: string, cwd: string): st
 			.filter((entry): entry is { path: string; mtime: Date } => entry !== undefined)
 			.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
 
-		return files[0]?.path || null;
+		const nowMs = Date.now();
+		return (
+			files.find((entry) => !isDisposableGhostSessionPick(entry.path, entry.mtime.getTime(), nowMs))?.path ?? null
+		);
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * --continue picks the newest non-ghost for the cwd instead of the newest mtime,
+ * so a legacy message-less stub no longer shadows the real last conversation.
+ * Pick-only and non-destructive: daemon-side claims (residency, queued input,
+ * schedules, children, leases) are unknown here and left absent; the sweep's
+ * delete path re-checks them with full truth.
+ */
+function isDisposableGhostSessionPick(path: string, mtimeMs: number, nowMs: number): boolean {
+	let hasUserContent: boolean;
+	let createdAtMs = Number.NaN;
+	try {
+		const entries = loadEntriesFromFile(path);
+		hasUserContent = sessionEntryTypesHaveUserContent(entries.map((entry) => entry.type));
+		const header = entries[0];
+		if (header?.type === "session") {
+			createdAtMs = Date.parse(header.timestamp);
+		}
+	} catch {
+		return false;
+	}
+	return isDisposableGhost(
+		{
+			hasUserContent,
+			createdAtMs,
+			modifiedAtMs: mtimeMs,
+			resident: false,
+			attached: false,
+			leased: false,
+			hasQueuedInput: false,
+			hasScheduledJob: false,
+			hasSpawnLedgerChildren: false,
+		},
+		nowMs,
+	);
 }
 
 function isMessageWithContent(message: AgentMessage): message is Message {
@@ -963,6 +1031,8 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 		let state: SessionState | undefined;
 		let agentStatus: AgentStatus | undefined;
 		let lastActivityTime: number | undefined;
+		const contentEntryTypes: string[] = [];
+		let unscannableContent = false;
 		// Fold attribution aggregates like the loader: either disk representation cancels to the same own spend.
 		const assistantUsageById = new Map<string, Usage>();
 		const attributedChildUsages: Usage[] = [];
@@ -976,6 +1046,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			// session-list metadata we need, and parsing them during every refresh
 			// can exhaust the daemon heap.
 			if (line.length > SESSION_LIST_PARSE_MAX_LINE_CHARS) {
+				unscannableContent = true;
 				if (looksLikeMessageEntry(line)) {
 					messageCount++;
 					const summary = extractOversizedMessageSummary(line);
@@ -994,8 +1065,10 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			try {
 				entry = JSON.parse(trimmed) as FileEntry;
 			} catch {
+				unscannableContent = true;
 				continue;
 			}
+			contentEntryTypes.push(entry.type);
 
 			if (entry.type === "session_info") {
 				const infoEntry = entry as SessionInfoEntry;
@@ -1079,6 +1152,7 @@ async function scanSessionInfo(filePath: string, stats: Awaited<ReturnType<typeo
 			created: new Date(header.timestamp),
 			modified,
 			messageCount,
+			hasUserContent: unscannableContent || sessionEntryTypesHaveUserContent(contentEntryTypes),
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText,
 			agentStatus,
@@ -1602,24 +1676,9 @@ export class SessionManager {
 	 * the default model/thinking entries every new session is created with. Used by
 	 * the daemon discard guard to decide whether a message-less draft is safe to
 	 * delete (that guard always also requires zero messages).
-	 *
-	 * createAgentSession opens a new session with an optional leading `model_change`
-	 * followed by `thinking_level_change` and `service_tier_change`. That creation
-	 * prefix is skipped; anything beyond it is user content.
 	 */
 	hasUserContent(): boolean {
-		const contentEntries = this.getEntries().filter((entry) => CONTENT_ENTRY_TYPES.has(entry.type));
-		let start = 0;
-		if (contentEntries[start]?.type === "model_change") {
-			start++;
-		}
-		if (contentEntries[start]?.type === "thinking_level_change") {
-			start++;
-		}
-		if (contentEntries[start]?.type === "service_tier_change") {
-			start++;
-		}
-		return contentEntries.length > start;
+		return sessionEntryTypesHaveUserContent(this.getEntries().map((entry) => entry.type));
 	}
 
 	appendAgentStatus(status: AgentStatus): string {

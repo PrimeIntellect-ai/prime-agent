@@ -1,10 +1,11 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { computeOwnAndTotalUsage } from "../../src/core/context-tree.js";
 import {
 	findMostRecentSession,
+	findMostRecentSessionForCwd,
 	loadEntriesFromFile,
 	loadEntriesFromFileAsync,
 	readSessionInfo,
@@ -650,5 +651,104 @@ describe("session info usage totals", () => {
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("readSessionInfo user-content flag", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `session-info-content-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	const header = '{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n';
+	const creationPrefix =
+		'{"type":"model_change","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:00Z","provider":"p","modelId":"m"}\n' +
+		'{"type":"thinking_level_change","id":"2","parentId":"1","timestamp":"2025-01-01T00:00:00Z","thinkingLevel":"off"}\n' +
+		'{"type":"service_tier_change","id":"3","parentId":"2","timestamp":"2025-01-01T00:00:00Z","serviceTier":"default"}\n' +
+		'{"type":"session_state","id":"4","parentId":"3","timestamp":"2025-01-01T00:00:00Z","state":{"status":"active"}}\n';
+
+	it("reports no user content for a bare creation-prefix stub", async () => {
+		const file = join(tempDir, "stub.jsonl");
+		writeFileSync(file, header + creationPrefix);
+		expect(await readSessionInfo(file)).toMatchObject({ messageCount: 0, hasUserContent: false });
+	});
+
+	it("reports user content for a config change beyond the creation prefix", async () => {
+		const file = join(tempDir, "configured.jsonl");
+		writeFileSync(
+			file,
+			header +
+				creationPrefix +
+				'{"type":"model_change","id":"5","parentId":"4","timestamp":"2025-01-01T00:01:00Z","provider":"p","modelId":"other"}\n',
+		);
+		expect((await readSessionInfo(file))?.hasUserContent).toBe(true);
+	});
+
+	it("treats unscannable lines as content", async () => {
+		const garbled = join(tempDir, "garbled.jsonl");
+		writeFileSync(garbled, `${header}${creationPrefix}{not json\n`);
+		expect((await readSessionInfo(garbled))?.hasUserContent).toBe(true);
+
+		const oversized = join(tempDir, "oversized.jsonl");
+		writeFileSync(oversized, `${header}${creationPrefix}{"type":"custom","pad":"${"x".repeat(1024 * 1024)}"}\n`);
+		expect((await readSessionInfo(oversized))?.hasUserContent).toBe(true);
+	});
+});
+
+describe("findMostRecentSessionForCwd ghost gating", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `continue-ghost-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	function writeSession(name: string, ageMs: number, extraLines = ""): string {
+		const file = join(tempDir, name);
+		const createdAt = new Date(Date.now() - ageMs).toISOString();
+		writeFileSync(
+			file,
+			`{"type":"session","id":"${name}","timestamp":"${createdAt}","cwd":"/tmp/project"}\n` +
+				`{"type":"model_change","id":"1","parentId":null,"timestamp":"${createdAt}","provider":"p","modelId":"m"}\n` +
+				`{"type":"thinking_level_change","id":"2","parentId":"1","timestamp":"${createdAt}","thinkingLevel":"off"}\n${extraLines}`,
+		);
+		const mtime = new Date(Date.now() - ageMs);
+		utimesSync(file, mtime, mtime);
+		return file;
+	}
+
+	it("skips a stale ghost stub and picks the newest real session for --continue", () => {
+		const real = writeSession(
+			"real.jsonl",
+			30 * 60_000,
+			'{"type":"message","id":"3","parentId":"2","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"hi"}}\n',
+		);
+		writeSession("ghost.jsonl", 20 * 60_000);
+		expect(findMostRecentSessionForCwd(tempDir, "/tmp/project")).toBe(real);
+	});
+
+	it("still picks a fresh stub inside the grace window", () => {
+		writeSession(
+			"real.jsonl",
+			30 * 60_000,
+			'{"type":"session_info","id":"3","parentId":"2","timestamp":"2025-01-01T00:00:00Z","name":"kept"}\n',
+		);
+		const fresh = writeSession("fresh.jsonl", 1000);
+		expect(findMostRecentSessionForCwd(tempDir, "/tmp/project")).toBe(fresh);
+	});
+
+	it("returns null when every candidate is a disposable ghost", () => {
+		writeSession("ghost.jsonl", 20 * 60_000);
+		expect(findMostRecentSessionForCwd(tempDir, "/tmp/project")).toBeNull();
 	});
 });
