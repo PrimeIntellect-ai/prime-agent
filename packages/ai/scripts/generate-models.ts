@@ -214,7 +214,10 @@ const PRIME_INFERENCE_FEATURED_MODELS = new Set([
 // Prime ids whose OpenRouter listing uses a different id. Empty today — Prime
 // currently publishes ids that match OpenRouter's, but HF-style ids show up
 // whenever a new route is added, so the mapping stays.
-const PRIME_INFERENCE_OPENROUTER_ALIASES: Record<string, string> = {};
+const PRIME_INFERENCE_OPENROUTER_ALIASES: Record<string, string> = {
+	// OpenRouter renamed its route to the dated id; Prime still serves the undated one.
+	"qwen/qwen3.8-max": "qwen/qwen3.8-max-0902",
+};
 
 // Conservative fallbacks for catalog models with no OpenRouter match and no
 // override above: an under-declared window degrades gracefully, an

@@ -23,6 +23,7 @@ export function copilotModelApi(modelId: string): Api | undefined {
 	// Responses-only on Copilot; /chat/completions rejects these families (upstream pi-mono #906).
 	if (
 		modelId.startsWith("gpt-5") ||
+		modelId.startsWith("gpt-6") ||
 		modelId.startsWith("oswe") ||
 		modelId.startsWith("grok-") ||
 		modelId.startsWith("mai-")
