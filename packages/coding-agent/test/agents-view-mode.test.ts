@@ -7,8 +7,11 @@ import { SettingsManager } from "../src/core/settings-manager.js";
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import type { AgentConnectionSavedSessionInfo } from "../src/modes/agent-connection/types.js";
 import {
+	AGENTS_VIEW_USAGE_LEGEND,
 	AgentsViewMode,
 	type AgentsViewPersistentState,
+	buildAgentsViewRowDetails,
+	buildDisplayItems,
 	combineAgentsViewStartupNotices,
 	createInitialAgentsViewPersistentState,
 	runAgentsViewMode,
@@ -717,7 +720,7 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("renders the unconditional usage cell and drops the message count", () => {
+	it("renders aligned usage columns with an explicit subagent count and drops the message count", () => {
 		const parent = summary({
 			id: "spender",
 			activeSessionId: "spender",
@@ -741,23 +744,107 @@ describe("AgentsViewMode", () => {
 			rosterStatus: "inactive",
 			messageCount: 7,
 		});
+		const empty = summary({
+			id: "empty-draft",
+			activeSessionId: undefined,
+			sessionId: "empty-draft-session",
+			sessionFile: "/tmp/empty-draft.jsonl",
+			rosterStatus: "inactive",
+			messageCount: 0,
+			modified: new Date(Date.now() - 120_000).toISOString(),
+		});
 		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
 
 		try {
-			const collapsed = buildAgentsViewRows([parent, child, inactive]);
-			const rows = buildAgentsViewRows([parent, child, inactive], new Set(collapsed.map((row) => row.identity)));
+			const collapsed = buildAgentsViewRows([parent, child, inactive, empty]);
+			const rows = buildAgentsViewRows(
+				[parent, child, inactive, empty],
+				new Set(collapsed.map((row) => row.identity)),
+			);
 			Reflect.set(view, "rows", rows);
-			const line = (row: AgentsViewRow | undefined) => stripAnsi(invoke("renderRow", view, row, 200) as string);
+			const details = buildAgentsViewRowDetails(rows);
+			const line = (row: AgentsViewRow | undefined) =>
+				stripAnsi(invoke("renderRow", view, row, 200, details) as string);
 			const byId = (sessionId: string, kind?: string) =>
 				rows.find((row) => row.summary.sessionId === sessionId && (!kind || row.kind === kind));
 
-			expect(line(byId("spender-session"))).toContain("↑12k ↓1.2k · $0.42 ($1.10 w/ subagents)");
-			expect(line(byId("spender-child-session", "subagent"))).toContain("↑500 ↓50 · $0.68 ($0.68 w/ subagents)");
+			// Cross-row column padding: counts right-aligned, token cells left-aligned.
+			expect(line(byId("spender-session"))).toContain("↑12k ↓1.2k · $0.42 · 1 · $1.10 ·");
+			expect(line(byId("spender-child-session", "subagent"))).toContain("↑500 ↓50   · $0.68 · 0 · $0.68 ·");
 			const inactiveLine = line(byId("saved-only-session"));
-			expect(inactiveLine).toContain("↑0 ↓0 · $0.00 ($0.00 w/ subagents)");
+			expect(inactiveLine).toContain("↑0   ↓0    · $0.00 · 0 · $0.00 ·");
 			expect(inactiveLine).not.toContain("7 ·");
+			// Empty sessions keep the age but drop the whole usage segment.
+			const emptyLine = line(byId("empty-draft-session"));
+			expect(emptyLine).not.toContain("↑");
+			expect(emptyLine).not.toContain("$");
+			expect(emptyLine).toMatch(/\d+[smhd]\s*$/);
+			// Without a shared details map the row pads only against itself.
 			const bare = { ...byId("spender-session")!, summary: { ...parent, usage: undefined } };
-			expect(line(bare)).toContain("↑0 ↓0 · $0.00 ($1.10 w/ subagents)");
+			expect(stripAnsi(invoke("renderRow", view, bare, 200) as string)).toContain("↑0 ↓0 · $0.00 · 1 · $1.10 ·");
+		} finally {
+			stopThemeWatcher();
+		}
+	});
+
+	it("shows the bold usage legend on every section header and restarts zebra striping per section", () => {
+		const running = (id: string, created: string) =>
+			summary({
+				id,
+				activeSessionId: id,
+				sessionId: `${id}-session`,
+				activity: "working",
+				isStreaming: true,
+				created,
+			});
+		const parent = running("busy-parent", "2026-01-01T00:00:00Z");
+		const child = summary({
+			id: "busy-child",
+			activeSessionId: "busy-child",
+			sessionId: "busy-child-session",
+			sessionFile: "/tmp/busy-child.jsonl",
+			runtimeKind: "subagent",
+			parentActiveSessionId: "busy-parent",
+		});
+		const summaries = [
+			running("busy-solo", "2026-01-02T00:00:00Z"),
+			parent,
+			child,
+			summary({ id: "idle-a", activeSessionId: "idle-a", sessionId: "idle-a-session" }),
+			summary({ id: "idle-b", activeSessionId: "idle-b", sessionId: "idle-b-session" }),
+		];
+		const parentIdentity = buildAgentsViewRows(summaries).find(
+			(row) => row.summary.sessionId === "busy-parent-session",
+		)!.identity;
+		const rows = buildAgentsViewRows(summaries, new Set([parentIdentity]));
+		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, {});
+
+		try {
+			Reflect.set(view, "rows", rows);
+			Reflect.set(view, "ui", { terminal: { rows: 60 }, requestRender: () => {} });
+			const lines = (invoke("renderSessionRows", view, 120, 40) as string[]).map(stripAnsi);
+			const headings = lines.filter((line) => /^(Running|Idle|Inactive) \(\d+\)/.test(line));
+			expect(headings).toHaveLength(3);
+			for (const heading of headings) {
+				expect(heading).toMatch(/↑in ↓out · \$agent · #sub · \$total · age$/);
+			}
+			// Same bold weight for title and legend.
+			expect(invoke("renderSectionHeading", view, "running", 120)).toContain(theme.bold(AGENTS_VIEW_USAGE_LEGEND));
+
+			// Zebra: alternate top-level session blocks, nested rows inherit the
+			// parent block's shade, stripe restarts at each section header.
+			const items = buildDisplayItems(rows);
+			const shadedBySession = items.flatMap((item) =>
+				item.type === "row" ? [[`${item.row.summary.sessionId}:${item.row.kind}`, item.shaded]] : [],
+			);
+			expect(shadedBySession).toEqual([
+				["busy-solo-session:agent", false],
+				["busy-parent-session:agent", true],
+				["busy-parent-session:subagent-summary", true],
+				["busy-child-session:subagent", true],
+				["idle-a-session:agent", false],
+				["idle-b-session:agent", true],
+			]);
 		} finally {
 			stopThemeWatcher();
 		}

@@ -427,6 +427,7 @@ describe("#502 unified session view regressions", () => {
 			selectable: true,
 			runningSubagentCount: 0,
 			recursiveCost: 0,
+			descendantCount: 0,
 			identity: "archived",
 		};
 		const harness = {
@@ -445,7 +446,7 @@ describe("#502 unified session view regressions", () => {
 				50,
 			),
 		);
-		expect(rendered).toMatch(/↑0 ↓0 · \$0\.00 \(\$0\.00 w\/ subagents\) · 2h\s*$/);
+		expect(rendered).toMatch(/↑0 ↓0 · \$0\.00 · 0 · \$0\.00 · 2h\s*$/);
 	});
 
 	test("scoped subagent rows keep model and effort ahead of summaries", () => {
@@ -469,6 +470,7 @@ describe("#502 unified session view regressions", () => {
 			selectable: true,
 			runningSubagentCount: 0,
 			recursiveCost: 0,
+			descendantCount: 0,
 			identity: "effort-child",
 			parentIdentity: "parent",
 		};

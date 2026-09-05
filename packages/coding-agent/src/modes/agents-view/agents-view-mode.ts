@@ -74,7 +74,7 @@ import {
 	type AgentsViewSelectionKey,
 	buildAgentsViewRows,
 	buildUnifiedSessionIndex,
-	computeRecursiveCosts,
+	computeRecursiveRollups,
 	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
@@ -83,6 +83,7 @@ import {
 	getAgentsViewSummaryIdentity as getSummaryIdentity,
 	getUnifiedSessionAncestorSessionIds,
 	hasUnifiedSessionChildren,
+	isEmptyAgentsViewSession,
 	isSubagentSummary,
 	migrateAgentsViewIdentitySet,
 	reconcileUnifiedSessions,
@@ -114,6 +115,7 @@ const COMPLETED_ROW_ICON = "✓";
 const NEEDS_INPUT_ROW_ICON = "●";
 const SELECTED_ROW_MARKER = "\0agents-view-selected-row\0";
 const CODE_ROW_MARKER = "\0agents-view-code-row\0";
+const ZEBRA_ROW_MARKER = "\0agents-view-zebra-row\0";
 
 export interface AgentsViewModeOptions {
 	socketPath?: string;
@@ -694,6 +696,8 @@ export class AgentsViewMode implements Component, Focusable {
 	private pendingKillSubagent: PendingKillSubagent | undefined;
 	private renameTarget: { activeSessionId?: string; sessionFile?: string; summary: SessionSummary } | undefined;
 	private actionModeSearchQuery: string | undefined;
+	/** Session the view was entered from; exempt from the empty-session sort demotion. */
+	private readonly anchorSessionId: string | undefined;
 	private readonly inactiveAgentIdentities = new Set<string>();
 	private rosterStore: AgentsViewRosterStore | undefined;
 	private unsubscribeRosterUpdate: (() => void) | undefined;
@@ -715,6 +719,7 @@ export class AgentsViewMode implements Component, Focusable {
 				persistentState.backSession ?? options.initialSession,
 			);
 		persistentState.scopeFrames = initialFrames;
+		this.anchorSessionId = (persistentState.backSession ?? options.initialSession)?.sessionId;
 		this.scopeKey = initialFrames.at(-1)?.scope;
 		this.scopeRootSummary = persistentState.scopeRootSummary;
 		this.selectedRowIdentity = persistentState.selectedRowIdentity;
@@ -1287,7 +1292,8 @@ export class AgentsViewMode implements Component, Focusable {
 			this.expandedSubagentParents,
 			this.programShownParents,
 			this.scopeKey,
-			computeRecursiveCosts(this.unifiedRecords, this.unifiedIndex),
+			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
+			this.anchorSessionId,
 		);
 		const index =
 			selectedIdentity === undefined ? -1 : this.rows.findIndex((row) => row.identity === selectedIdentity);
@@ -2174,7 +2180,8 @@ export class AgentsViewMode implements Component, Focusable {
 			this.expandedSubagentParents,
 			this.programShownParents,
 			this.scopeKey,
-			computeRecursiveCosts(this.unifiedRecords, this.unifiedIndex),
+			computeRecursiveRollups(this.unifiedRecords, this.unifiedIndex),
+			this.anchorSessionId,
 		);
 		this.applyPendingAncestorExpansion();
 		this.restoreSelection();
@@ -2477,13 +2484,14 @@ export class AgentsViewMode implements Component, Focusable {
 			return [];
 		}
 		if (this.rows.length === 0) {
-			return [theme.bold(sectionTitle("running")), theme.fg("dim", "  No sessions match your search.")].slice(
-				0,
-				maxRows,
-			);
+			return [
+				this.renderSectionHeading("running", width),
+				theme.fg("dim", "  No sessions match your search."),
+			].slice(0, maxRows);
 		}
 
 		const displayItems = buildDisplayItems(this.rows);
+		const rowDetails = buildAgentsViewRowDetails(this.rows);
 		const selectedIdentity = this.rows[this.selectedIndex]?.identity;
 		const selectedDisplayIndex = displayItems.findIndex(
 			(item) => item.type === "row" && item.row.identity === selectedIdentity,
@@ -2508,12 +2516,12 @@ export class AgentsViewMode implements Component, Focusable {
 				return "";
 			}
 			if (item.type === "heading") {
-				return theme.bold(sectionTitle(item.section));
+				return this.renderSectionHeading(item.section, width);
 			}
 			if (item.type === "empty") {
 				return theme.fg("dim", "  No agents");
 			}
-			return this.renderRow(item.row, width);
+			return this.renderRow(item.row, width, rowDetails, item.shaded);
 		});
 		if (showLeadingEllipsis) {
 			lines.unshift(theme.fg("dim", "  ..."));
@@ -2524,8 +2532,15 @@ export class AgentsViewMode implements Component, Focusable {
 		return lines;
 	}
 
-	private renderRow(row: AgentsViewRow, width: number): string {
+	private renderRow(
+		row: AgentsViewRow,
+		width: number,
+		rowDetails: ReadonlyMap<string, string> = buildAgentsViewRowDetails([row]),
+		shaded = false,
+	): string {
 		const selected = row.selectable && row.identity === this.rows[this.selectedIndex]?.identity;
+		const markRow = (line: string): string =>
+			selected ? `${SELECTED_ROW_MARKER}${line}` : shaded ? `${ZEBRA_ROW_MARKER}${line}` : line;
 		if (row.kind === "subagent-code") {
 			return this.renderCodeRow(row);
 		}
@@ -2535,16 +2550,14 @@ export class AgentsViewMode implements Component, Focusable {
 			const titleColor = row.runningSubagentCount > 0 ? ("success" as const) : ("dim" as const);
 			const label = `${theme.fg(titleColor, `${row.expanded ? "▾" : "▸"} ${row.title}`)}${hint}`;
 			const line = padLine(truncateToWidth(`${indent}${label}`, width, ""), width);
-			return selected ? `${SELECTED_ROW_MARKER}${line}` : line;
+			return markRow(line);
 		}
 		const pendingDelete = row.kind === "agent" && this.isPendingDeleteRow(row);
 		const pendingKill = row.kind === "subagent" && this.isPendingKillSubagentRow(row);
 		const rawIcon = this.getRowIcon(row.section);
 		const icon = this.formatRowIcon(row.section, rawIcon);
 		const indent = "  ".repeat(row.depth);
-		const age = formatSessionDuration(row.summary);
-		const usageText = formatRowUsage(row);
-		const details = usageText ? `${usageText} · ${age}` : age;
+		const details = rowDetails.get(row.identity) ?? "";
 		const detailsWidth = Math.max(10, visibleWidth(details));
 		const heartbeatBadge = !pendingDelete && !pendingKill ? formatHeartbeatBadge(row.heartbeat) : "";
 		const heartbeatPausedOnly = (row.heartbeat?.activeCount ?? 0) < 1;
@@ -2590,7 +2603,18 @@ export class AgentsViewMode implements Component, Focusable {
 		];
 		const base = `${indent}${cells[0]} ${heartbeatCell ? `${heartbeatCell} ` : ""}${cells[1]} ${cells[2]}`;
 		const line = padLine(truncateToWidth(base, width, ""), width);
-		return selected ? `${SELECTED_ROW_MARKER}${line}` : line;
+		return markRow(line);
+	}
+
+	// Bold like the section title so the legend reads as part of the header line.
+	private renderSectionHeading(section: AgentsViewSection, width: number): string {
+		const counts = countRowsBySection(this.rows);
+		const title = `${sectionTitle(section)} (${counts[section]})`;
+		const gap = width - visibleWidth(title) - visibleWidth(AGENTS_VIEW_USAGE_LEGEND);
+		if (gap < 2) {
+			return theme.bold(truncateToWidth(title, width, ""));
+		}
+		return `${theme.bold(title)}${" ".repeat(gap)}${theme.bold(AGENTS_VIEW_USAGE_LEGEND)}`;
 	}
 
 	// Spawn-code rows are read-only context. They render deemphasized — muted
@@ -2605,11 +2629,14 @@ export class AgentsViewMode implements Component, Focusable {
 	private finalizeRenderedLine(line: string, width: number): string {
 		const code = line.startsWith(CODE_ROW_MARKER);
 		const selected = !code && line.startsWith(SELECTED_ROW_MARKER);
+		const zebra = !code && !selected && line.startsWith(ZEBRA_ROW_MARKER);
 		let content = code
 			? line.slice(CODE_ROW_MARKER.length)
 			: selected
 				? line.slice(SELECTED_ROW_MARKER.length)
-				: line;
+				: zebra
+					? line.slice(ZEBRA_ROW_MARKER.length)
+					: line;
 		// Each rendered line must occupy exactly one terminal row; a stray
 		// newline would shift every line below it and overlap the editor.
 		if (content.includes("\n") || content.includes("\r")) {
@@ -2619,13 +2646,21 @@ export class AgentsViewMode implements Component, Focusable {
 		if (code) {
 			return theme.bg("toolPanelBg", padded);
 		}
-		if (!selected) {
+		// Truncating styled cells embeds full \x1b[0m resets; re-open the row
+		// background after each so the highlight spans the whole row. Selection
+		// takes precedence over the zebra stripe.
+		if (selected) {
+			const applySelectionBg = theme.getSelectionBackgroundColor();
+			return padded.split("\x1b[0m").map(applySelectionBg).join("\x1b[0m");
+		}
+		if (!zebra) {
 			return padded;
 		}
-		// Truncating styled cells embeds full \x1b[0m resets; re-open the
-		// selection background after each so the highlight spans the whole row.
-		const applySelectionBg = theme.getSelectionBackgroundColor();
-		return padded.split("\x1b[0m").map(applySelectionBg).join("\x1b[0m");
+		const applyZebraBg = theme.getAgentsZebraBackgroundColor();
+		if (!applyZebraBg) {
+			return padded;
+		}
+		return padded.split("\x1b[0m").map(applyZebraBg).join("\x1b[0m");
 	}
 
 	private isPendingDeleteRow(row: AgentsViewRow): boolean {
@@ -2766,14 +2801,14 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 }
 
-type DisplayItem =
+export type AgentsViewDisplayItem =
 	| { type: "spacer" }
 	| { type: "heading"; section: AgentsViewSection }
 	| { type: "empty"; section: AgentsViewSection }
-	| { type: "row"; row: AgentsViewRow };
+	| { type: "row"; row: AgentsViewRow; shaded: boolean };
 
-function buildDisplayItems(rows: readonly AgentsViewRow[]): DisplayItem[] {
-	const items: DisplayItem[] = [];
+export function buildDisplayItems(rows: readonly AgentsViewRow[]): AgentsViewDisplayItem[] {
+	const items: AgentsViewDisplayItem[] = [];
 	const sections: AgentsViewSection[] = ["running", "idle", "inactive"];
 	for (const [index, section] of sections.entries()) {
 		if (index > 0) {
@@ -2785,8 +2820,16 @@ function buildDisplayItems(rows: readonly AgentsViewRow[]): DisplayItem[] {
 			items.push({ type: "empty", section });
 			continue;
 		}
+		// Zebra stripe alternates per top-level session block (nested rows inherit
+		// their block's shade) and restarts unshaded at each section header.
+		let blockIndex = 0;
+		let shaded = false;
 		for (const row of sectionRows) {
-			items.push({ type: "row", row });
+			if (row.depth === 0) {
+				shaded = blockIndex % 2 === 1;
+				blockIndex++;
+			}
+			items.push({ type: "row", row, shaded });
 		}
 	}
 	return items;
@@ -2831,11 +2874,78 @@ function hasLiveWork(row: AgentsViewRow): boolean {
 	return row.section === "running" || row.runningSubagentCount > 0 || row.summary.hasRunningRlmChildren === true;
 }
 
-function formatRowUsage(row: AgentsViewRow): string {
-	const usage = row.summary.usage;
-	return `↑${formatTokenCount(usage?.inputTokens ?? 0)} ↓${formatTokenCount(usage?.outputTokens ?? 0)} · $${(
-		usage?.cost ?? 0
-	).toFixed(2)} ($${row.recursiveCost.toFixed(2)} w/ subagents)`;
+export const AGENTS_VIEW_USAGE_LEGEND = "↑in ↓out · $agent · #sub · $total · age";
+
+interface AgentsViewRowDetailEntry {
+	identity: string;
+	empty: boolean;
+	inTokens: string;
+	outTokens: string;
+	agentCost: string;
+	count: string;
+	totalCost: string;
+	age: string;
+}
+
+/**
+ * One details string per agent/subagent row: `↑in ↓out · $agent · #sub · $total · age`.
+ * Columns are padded across the whole row set so the count and dollar columns
+ * align vertically; empty sessions render only the age, aligned to the age column.
+ */
+export function buildAgentsViewRowDetails(rows: readonly AgentsViewRow[]): ReadonlyMap<string, string> {
+	const entries: AgentsViewRowDetailEntry[] = rows
+		.filter((row) => row.kind === "agent" || row.kind === "subagent")
+		.map((row) => {
+			const usage = row.summary.usage;
+			return {
+				identity: row.identity,
+				empty: isEmptyAgentsViewSession(row.summary),
+				inTokens: `↑${formatTokenCount(usage?.inputTokens ?? 0)}`,
+				outTokens: `↓${formatTokenCount(usage?.outputTokens ?? 0)}`,
+				agentCost: `$${(usage?.cost ?? 0).toFixed(2)}`,
+				count: String(row.descendantCount),
+				totalCost: `$${row.recursiveCost.toFixed(2)}`,
+				age: formatSessionDuration(row.summary),
+			};
+		});
+	const columnWidth = (select: (entry: AgentsViewRowDetailEntry) => string, includeEmpty = false): number => {
+		let width = 0;
+		for (const entry of entries) {
+			if (entry.empty && !includeEmpty) continue;
+			width = Math.max(width, visibleWidth(select(entry)));
+		}
+		return width;
+	};
+	const inWidth = columnWidth((entry) => entry.inTokens);
+	const outWidth = columnWidth((entry) => entry.outTokens);
+	const agentCostWidth = columnWidth((entry) => entry.agentCost);
+	const countWidth = columnWidth((entry) => entry.count);
+	const totalCostWidth = columnWidth((entry) => entry.totalCost);
+	const ageWidth = columnWidth((entry) => entry.age, true);
+	const details = new Map<string, string>();
+	for (const entry of entries) {
+		details.set(
+			entry.identity,
+			entry.empty
+				? padCellStart(entry.age, ageWidth)
+				: [
+						`${padCellEnd(entry.inTokens, inWidth)} ${padCellEnd(entry.outTokens, outWidth)}`,
+						padCellStart(entry.agentCost, agentCostWidth),
+						padCellStart(entry.count, countWidth),
+						padCellStart(entry.totalCost, totalCostWidth),
+						padCellStart(entry.age, ageWidth),
+					].join(" · "),
+		);
+	}
+	return details;
+}
+
+function padCellStart(value: string, width: number): string {
+	return " ".repeat(Math.max(0, width - visibleWidth(value))) + value;
+}
+
+function padCellEnd(value: string, width: number): string {
+	return value + " ".repeat(Math.max(0, width - visibleWidth(value)));
 }
 
 // Explicit session names read bold so they stand out from fallback titles

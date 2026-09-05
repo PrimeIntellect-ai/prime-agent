@@ -27,7 +27,7 @@ import {
 	buildAgentsViewRows,
 	buildUnifiedSessionIndex,
 	classifyAgentsViewSession,
-	computeRecursiveCosts,
+	computeRecursiveRollups,
 	createUnattachableChildOpenResult,
 	filterUnifiedSessions,
 	formatHeartbeatBadge,
@@ -303,6 +303,48 @@ describe("agents view state", () => {
 		expect(rows.map((row) => row.summary.sessionId)).toEqual(["beating", "recent"]);
 	});
 
+	test("demotes empty sessions to the bottom of their section except the entered-from anchor", () => {
+		const empty = makeSummary({
+			id: "empty",
+			activeSessionId: undefined,
+			sessionId: "empty",
+			sessionName: "empty",
+			messageCount: 0,
+			lastActivityAt: "2026-01-04T00:00:00Z",
+		});
+		const anchor = makeSummary({
+			id: "anchor",
+			activeSessionId: undefined,
+			sessionId: "anchor",
+			sessionName: "anchor",
+			messageCount: 0,
+			lastActivityAt: "2026-01-03T00:00:00Z",
+		});
+		const older = makeSummary({
+			id: "older",
+			activeSessionId: undefined,
+			sessionId: "older",
+			sessionName: "older",
+			messageCount: 3,
+			lastActivityAt: "2026-01-02T00:00:00Z",
+		});
+
+		// The entered-from session keeps its recency slot even while empty.
+		const anchored = buildAgentsViewRows(
+			[empty, anchor, older],
+			new Set(),
+			new Set(),
+			undefined,
+			undefined,
+			"anchor",
+		);
+		expect(anchored.map((row) => row.summary.sessionId)).toEqual(["anchor", "older", "empty"]);
+
+		// Entered from elsewhere, every empty session sinks below non-empty ones.
+		const unanchored = buildAgentsViewRows([empty, anchor, older]);
+		expect(unanchored.map((row) => row.summary.sessionId)).toEqual(["older", "empty", "anchor"]);
+	});
+
 	test("summarizes subagents on their parent and omits subagent rows", () => {
 		const rows = buildAgentsViewRows([
 			makeSummary({
@@ -527,13 +569,14 @@ describe("agents view state", () => {
 			usage: { inputTokens: 20, outputTokens: 2, cost: 0.18 },
 		});
 		const records = reconcileUnifiedSessions([parent, child, grandchild], []);
-		const costs = computeRecursiveCosts(records);
+		const rollups = computeRecursiveRollups(records);
 		const filtered = filterUnifiedSessions(records, (text) => text.includes("Searchable"));
 
 		expect(filtered).toHaveLength(1);
-		const rows = buildAgentsViewRows(filtered, new Set(), new Set(), undefined, costs);
+		const rows = buildAgentsViewRows(filtered, new Set(), new Set(), undefined, rollups);
 		expect(rows[0]?.summary.usage?.cost).toBe(0.42);
 		expect(rows[0]?.recursiveCost).toBeCloseTo(1.28);
+		expect(rows[0]?.descendantCount).toBe(2);
 	});
 
 	test("keeps a parent's recursive total when a passivated child survives only as a catalog row", () => {
@@ -554,7 +597,7 @@ describe("agents view state", () => {
 			usage: { inputTokens: 50, outputTokens: 5, cost: 0.68 },
 		});
 		const before = reconcileUnifiedSessions([parent, liveChild], []);
-		const beforeTotal = computeRecursiveCosts(before).get(before[0]!);
+		const beforeRollup = computeRecursiveRollups(before).get(before[0]!);
 
 		// After a restart the child exists only as a saved-catalog row.
 		const after = reconcileUnifiedSessions(
@@ -569,10 +612,11 @@ describe("agents view state", () => {
 				}),
 			],
 		);
-		const afterTotal = computeRecursiveCosts(after).get(after[0]!);
+		const afterRollup = computeRecursiveRollups(after).get(after[0]!);
 
-		expect(beforeTotal).toBeCloseTo(1.1);
-		expect(afterTotal).toBe(beforeTotal);
+		expect(beforeRollup?.cost).toBeCloseTo(1.1);
+		expect(afterRollup).toEqual(beforeRollup);
+		expect(afterRollup?.descendantCount).toBe(1);
 	});
 
 	test("tallies a very deep child chain without overflowing the stack", () => {
