@@ -48,6 +48,15 @@ result = await bash("npm run check")
 print(result.output)
 ```
 
+For a long command, keep the live handle and let the turn end instead of blocking:
+
+```python
+checks = bash("npm test")
+checks.pid
+```
+
+When an unawaited handle finishes, Prime Agent sends the agent a follow-up with its PID and exit code. The follow-up asks the agent to inspect the saved handle with `poll()`, `output()`, or `tail()` and continue the task. `await bash(...)` stays synchronous from the agent's perspective and does not send a second completion follow-up.
+
 Each `bash()` call is its own process, while Python state, `os.chdir(...)`, and `os.environ[...]` changes persist in the kernel and apply to later `bash()` calls. Prime Agent extensions may intentionally add custom tools, but the built-in RLM design does not require a separate model tool for every capability.
 
 ### 2. Subagents are native RLM calls

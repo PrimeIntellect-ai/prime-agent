@@ -52,6 +52,10 @@ _current_cell: contextvars.ContextVar[str | None] = contextvars.ContextVar("_cur
 _active: dict[str, Any] = {"task": None, "rid": None, "interrupted": False}
 _cell_counter = 0
 _pending_host: dict[str, "asyncio.Future[dict[str, Any]]"] = {}
+# Bash handles use this per-cell barrier to distinguish a detached command from
+# one that the creating cell eventually awaits. Entries live only until the
+# request finishes; late detached tasks receive an already-set event.
+_cell_finished_events: dict[str, asyncio.Event] = {}
 # Set on the loop thread once stdin hits EOF or a shutdown request arrives; no
 # host reply can arrive after that, so waiting (and future) host_request calls fail.
 _host_closed = False
@@ -96,6 +100,28 @@ def emit(data: dict[str, Any]) -> None:
 def is_active() -> bool:
     """True when this process serves the repl protocol (not merely imported)."""
     return _protocol_fd >= 0
+
+
+def current_cell_finished_event() -> asyncio.Event | None:
+    """Return a barrier that opens when the calling cell has fully finished.
+
+    Detached asyncio tasks inherit the creating cell id. If such a task starts
+    after that cell finished, return an already-open barrier instead of retaining
+    completed request ids indefinitely.
+    """
+    cell_id = _current_cell.get()
+    if cell_id is None or _loop is None:
+        return None
+    with _interrupt_lock:
+        if cell_id not in _inflight:
+            event = asyncio.Event()
+            event.set()
+            return event
+        event = _cell_finished_events.get(cell_id)
+        if event is None:
+            event = asyncio.Event()
+            _cell_finished_events[cell_id] = event
+        return event
 
 
 async def host_request(data: dict[str, Any]) -> dict[str, Any]:
@@ -406,6 +432,9 @@ def _consume_handoff_interrupt() -> bool:
 def _finish_locked(rid: str) -> None:
     """Drop a finished request; a parked untargeted interrupt survives while others are inflight."""
     global _finishing_rid, _handoff_interrupted, _sigint_target
+    cell_finished = _cell_finished_events.pop(rid, None)
+    if cell_finished is not None:
+        cell_finished.set()
     if _finishing_rid == rid:
         # An unconsumed handoff interrupt dies with its request (state requests
         # have no cancellable post-run work); it must never hit the next request.

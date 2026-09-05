@@ -713,6 +713,46 @@ class ReplTest(unittest.TestCase):
             time.sleep(0.05)
         self.fail(f"bash child {pid} survived runtime shutdown")
 
+    def test_async_bash_completion_notifies_only_after_an_unawaited_creating_cell(self):
+        direct = self.repl.execute(
+            "bash-direct", "from rlm import bash\n(await bash('printf direct')).exit_code"
+        )
+        self.assertIsNone(one(direct, "host_request"))
+
+        eventual = self.repl.execute(
+            "bash-eventual",
+            "import asyncio\nhandle = bash('printf eventual')\nawait asyncio.sleep(0.1)\n(await handle).exit_code",
+        )
+        self.assertIsNone(one(eventual, "host_request"))
+
+        started = self.repl.execute(
+            "bash-detached", "handle = bash('sleep 0.05; printf detached')\nhandle.pid"
+        )
+        pid = int(one(started, "result")["text"])
+        request = one(started, "host_request")
+        while request is None:
+            event = self.repl.read_event()
+            if event.get("event") == "host_request":
+                request = event
+        self.assertEqual(
+            request["data"],
+            {
+                "type": "bash.completed",
+                "pid": pid,
+                "command": "sleep 0.05; printf detached",
+                "exitCode": 0,
+            },
+        )
+        self.repl.send(
+            {
+                "type": "host_reply",
+                "id": request["id"],
+                "data": {"status": "ok", "result": {}},
+            }
+        )
+        inspected = self.repl.execute("bash-inspect", "handle.poll().output")
+        self.assertIn("detached", one(inspected, "result")["text"])
+
     def test_protocol_framing_under_noise(self):
         setup = "\n".join(
             [
