@@ -20,6 +20,15 @@ class RLMSpawnHandle:
 
 
 @dataclass(frozen=True)
+class RLMCreateSessionHandle:
+    active_session_id: str
+    session_id: str
+    name: str
+    session_file: Path
+    model: str
+
+
+@dataclass(frozen=True)
 class RLMModel:
     provider: str
     id: str
@@ -50,6 +59,25 @@ def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
         rlm_child_id=child_id,
         name=name,
         session_dir=Path(session_dir),
+        model=model,
+    )
+
+
+def _create_session_handle_from_payload(payload: Any) -> RLMCreateSessionHandle:
+    if not isinstance(payload, dict):
+        raise RuntimeError("rlm.create_session returned an invalid payload")
+    active_session_id = payload.get("active_session_id")
+    session_id = payload.get("session_id")
+    name = payload.get("name")
+    session_file = payload.get("session_file")
+    model = payload.get("model")
+    if not all(isinstance(value, str) and value for value in (active_session_id, session_id, name, session_file, model)):
+        raise RuntimeError("rlm.create_session returned an invalid payload structure")
+    return RLMCreateSessionHandle(
+        active_session_id=active_session_id,
+        session_id=session_id,
+        name=name,
+        session_file=Path(session_file),
         model=model,
     )
 
@@ -112,6 +140,33 @@ def _model_from_payload(payload: Any) -> RLMModel:
     if not all(isinstance(value, str) and value for value in (provider, model_id, name, selector)):
         raise RuntimeError("rlm.find_models returned an invalid model entry")
     return RLMModel(provider=provider, id=model_id, name=name, selector=selector)
+
+
+async def create_session(
+    prompt: str,
+    name: str | None = None,
+    model: str | None = None,
+    thinking: str | None = None,
+    cwd: str | None = None,
+) -> RLMCreateSessionHandle:
+    """Create and prompt a resident depth-0 daemon session.
+
+    Only daemon-backed depth-0 sessions support this operation. The optional
+    arguments set the session name, model, thinking level, and working directory.
+    """
+    if not isinstance(prompt, str):
+        raise TypeError(f"prompt must be str, got {type(prompt).__name__}")
+    kwargs: dict[str, Any] = {}
+    if name is not None:
+        kwargs["name"] = name
+    if model is not None:
+        kwargs["model"] = model
+    if thinking is not None:
+        kwargs["thinking"] = thinking
+    if cwd is not None:
+        kwargs["cwd"] = cwd
+    payload = await host_request("rlm.create_session", {"prompt": prompt, "kwargs": kwargs})
+    return _create_session_handle_from_payload(payload)
 
 
 async def find_models(query: str = "", limit: int = 8) -> list[RLMModel]:
@@ -237,6 +292,16 @@ class _RLMCallable:
     async def run(self, prompt: str, **kwargs: Any) -> RLMSpawnHandle:
         return await run(prompt, **kwargs)
 
+    async def create_session(
+        self,
+        prompt: str,
+        name: str | None = None,
+        model: str | None = None,
+        thinking: str | None = None,
+        cwd: str | None = None,
+    ) -> RLMCreateSessionHandle:
+        return await create_session(prompt, name=name, model=model, thinking=thinking, cwd=cwd)
+
     async def find_models(self, query: str = "", limit: int = 8) -> list[RLMModel]:
         return await find_models(query, limit)
 
@@ -270,9 +335,11 @@ __all__ = [
     "McpIntegration",
     "McpToolError",
     "NotEnabled",
+    "RLMCreateSessionHandle",
     "RLMModel",
     "RLMSpawnHandle",
     "RLMSubagent",
+    "create_session",
     "RefinementEvent",
     "bash",
     "delete_subagent",

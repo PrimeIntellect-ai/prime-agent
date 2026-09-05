@@ -2800,6 +2800,86 @@ describe("AgentSession rlm recursion", () => {
 		expect(child.rlmMaxDepth).toBe(3);
 	});
 
+	it("creates an independent root session through the explicit daemon host operation", async () => {
+		const createRlmSubagentRuntime = vi.fn(async () => {
+			throw new Error("unexpected child spawn");
+		});
+		const createRlmRootSession = vi.fn(async () => ({
+			active_session_id: "root-active",
+			session_id: "root-session",
+			name: "researcher",
+			session_file: join(tempDir, "sessions", "root-session.jsonl"),
+			model: `${model.provider}/${model.id}`,
+		}));
+		const assertSessionNameAvailable = vi.fn();
+		const root = createSession({
+			agentMessageController: {
+				assertSessionNameAvailable,
+				listAgents: async () => ({
+					current: { activeSessionId: "current-root", sessionId: "current-session" },
+					agents: [],
+				}),
+				sendAgentMessage: async () => {
+					throw new Error("unexpected message");
+				},
+			},
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime,
+				createRlmRootSession,
+				deleteRlmSubagentRuntime: vi.fn(async () => {}),
+			},
+		});
+
+		await expect(
+			root.createRlmSession("independent task", {
+				name: "researcher",
+				model: `${model.provider}/${model.id}`,
+				thinking: "off",
+				cwd: "other-project",
+			}),
+		).resolves.toEqual({
+			active_session_id: "root-active",
+			session_id: "root-session",
+			name: "researcher",
+			session_file: join(tempDir, "sessions", "root-session.jsonl"),
+			model: `${model.provider}/${model.id}`,
+		});
+		expect(createRlmSubagentRuntime).not.toHaveBeenCalled();
+		expect(assertSessionNameAvailable).toHaveBeenCalledWith({ name: "researcher", depth: 0 });
+		expect(createRlmRootSession).toHaveBeenCalledWith({
+			prompt: "independent task",
+			sessionName: "researcher",
+			cwd: join(tempDir, "other-project"),
+			model,
+			thinkingLevel: "off",
+		});
+		await expect(root.createRlmSession("task", { cwd: " " })).rejects.toThrow(
+			"rlm.create_session cwd must be a non-empty string",
+		);
+		await expect(root.createRlmSession(" ")).rejects.toThrow("rlm.create_session prompt must not be empty");
+		expect(createRlmRootSession).toHaveBeenCalledOnce();
+	});
+
+	it("keeps top-level session creation unavailable to nested or inline sessions", async () => {
+		const createRlmRootSession = vi.fn();
+		const nested = createSession({
+			depth: 1,
+			subagentRuntimeHost: {
+				createRlmSubagentRuntime: vi.fn(),
+				createRlmRootSession,
+				deleteRlmSubagentRuntime: vi.fn(async () => {}),
+			},
+		});
+		await expect(nested.createRlmSession("escape to root")).rejects.toThrow("available only from a depth-0 session");
+		expect(createRlmRootSession).not.toHaveBeenCalled();
+		nested.dispose();
+
+		const inline = createSession();
+		await expect(inline.createRlmSession("detached root")).rejects.toThrow(
+			"requires a daemon-backed depth-0 session",
+		);
+	});
+
 	it("rejects child creation at the configured recursion depth cap", async () => {
 		const root = createSession({ depth: 1, maxDepth: 1 });
 
