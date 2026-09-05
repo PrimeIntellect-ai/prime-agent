@@ -260,14 +260,18 @@ class McpIntegration:
             async with AsyncExitStack() as stack:
                 session = await self._open_session(stack)
                 resp = await session.list_tools()
-                self._tools = {
-                    t.name: {
+                tools: dict[str, Any] = {}
+                for t in resp.tools:
+                    # mcp>=2 exposes the pydantic field input_schema; inputSchema is the wire alias.
+                    schema = getattr(t, "input_schema", None)
+                    if schema is None:
+                        schema = getattr(t, "inputSchema", None)
+                    tools[t.name] = {
                         "name": t.name,
                         "description": getattr(t, "description", "") or "",
-                        "inputSchema": getattr(t, "inputSchema", None) or {},
+                        "inputSchema": schema if isinstance(schema, dict) else {},
                     }
-                    for t in resp.tools
-                }
+                self._tools = tools
 
     async def call_tool(self, tool: str, arguments: dict[str, Any] | None = None) -> Any:
         """Call ``tool`` on the server and return its parsed result.

@@ -1612,4 +1612,8 @@ export class ReplKernelManager {
 	get isRunning(): boolean {
 		return this.state === "running";
 	}
+
+	get isDefunct(): boolean {
+		return this.state === "shutdown";
+	}
 }

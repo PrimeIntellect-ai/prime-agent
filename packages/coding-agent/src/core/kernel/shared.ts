@@ -280,6 +280,8 @@ export interface KernelShutdownOptions {
 export interface KernelClient {
 	readonly ownerSessionId: string | undefined;
 	readonly isRunning: boolean;
+	/** Terminal: the kernel died or was torn down; only a fresh manager can serve again. */
+	readonly isDefunct: boolean;
 	start(options?: KernelStartOptions): Promise<void>;
 	execute(code: string, opts?: ExecuteOptions): Promise<ExecuteResult>;
 	shutdown(opts?: KernelShutdownOptions): Promise<boolean>;
