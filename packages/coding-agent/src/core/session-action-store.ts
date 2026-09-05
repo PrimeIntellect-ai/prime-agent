@@ -23,6 +23,8 @@ export interface SessionActionSnapshot {
 	queuedCount: number;
 	steering: readonly string[];
 	followUps: readonly string[];
+	/** Lane previews of pump-owned turns that have not started (an "all"-mode batch can hold several through one pre-turn compaction). */
+	preparing?: readonly string[];
 	active?: {
 		kind: "turn" | "session_command";
 		phase: "preparing" | "committing" | "running";
