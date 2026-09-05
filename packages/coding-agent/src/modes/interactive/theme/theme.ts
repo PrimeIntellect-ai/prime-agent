@@ -437,10 +437,13 @@ export class Theme {
 			return undefined;
 		}
 		const terminalBg = getDefaultTerminalColors()?.background;
-		const stripeRgb = colorValueToRgb(value);
-		if (!terminalBg || !stripeRgb) {
+		const configuredRgb = colorValueToRgb(value);
+		if (!terminalBg || !configuredRgb) {
 			return (str: string) => this.bg("agentsZebraBg", str);
 		}
+		// Judge what actually renders: 256-color quantization can collapse the
+		// configured stripe onto the terminal background's own palette cell.
+		const stripeRgb = colorValueToRgb(bestAnsiColor(configuredRgb, this.mode)) ?? configuredRgb;
 		// A subtle stripe sits slightly toward white on dark terminals (toward
 		// black on light ones). Keep the configured color when it already does;
 		// when it would vanish into the real terminal background or land on its
