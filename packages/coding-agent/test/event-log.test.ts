@@ -27,9 +27,11 @@ describe("event log substrate", () => {
 		const path = join(dir, "log.jsonl");
 		const log = new EventLog(path);
 		log.appendSync([{ v: 1, keep: true }]);
-		// A newline-completion here would hand this line to strict parsers as
-		// permanent fail-closed interior poison; truncation must win.
+		// Tail rule: uncommitted append — see the EventLog module doc.
 		writeFileSync(path, `${readFileSync(path, "utf8")}{"not":"a valid record"}`);
+		expect(new EventLog(path).replaySync((line) => JSON.parse(line) as { v?: number })).toEqual([
+			{ v: 1, keep: true },
+		]);
 		log.appendSync([{ v: 1, second: true }]);
 		const strict = new EventLog(path).replaySync((line, index) => {
 			const value = JSON.parse(line) as { v?: number };
