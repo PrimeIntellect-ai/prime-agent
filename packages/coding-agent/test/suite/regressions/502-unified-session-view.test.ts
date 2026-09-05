@@ -446,7 +446,7 @@ describe("#502 unified session view regressions", () => {
 				50,
 			),
 		);
-		expect(rendered).toMatch(/↑0 ↓0 · \$0\.00 · 0 · \$0\.00 · 2h\s*$/);
+		expect(rendered).toMatch(/↑0\s+↓0 ·\s+\$0\.00 ·\s+0 ·\s+\$0\.00 ·\s+2h\s*$/);
 	});
 
 	test("scoped subagent rows keep model and effort ahead of summaries", () => {

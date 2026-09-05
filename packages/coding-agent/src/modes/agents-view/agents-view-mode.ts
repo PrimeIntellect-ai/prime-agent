@@ -2484,14 +2484,15 @@ export class AgentsViewMode implements Component, Focusable {
 			return [];
 		}
 		if (this.rows.length === 0) {
+			const emptyLegend = buildAgentsViewUsageLayout([]).legends.get("running") ?? "";
 			return [
-				this.renderSectionHeading("running", width),
+				this.renderSectionHeading("running", width, emptyLegend),
 				theme.fg("dim", "  No sessions match your search."),
 			].slice(0, maxRows);
 		}
 
 		const displayItems = buildDisplayItems(this.rows);
-		const rowDetails = buildAgentsViewRowDetails(this.rows);
+		const usageLayout = buildAgentsViewUsageLayout(this.rows);
 		const selectedIdentity = this.rows[this.selectedIndex]?.identity;
 		const selectedDisplayIndex = displayItems.findIndex(
 			(item) => item.type === "row" && item.row.identity === selectedIdentity,
@@ -2516,12 +2517,12 @@ export class AgentsViewMode implements Component, Focusable {
 				return "";
 			}
 			if (item.type === "heading") {
-				return this.renderSectionHeading(item.section, width);
+				return this.renderSectionHeading(item.section, width, usageLayout.legends.get(item.section) ?? "");
 			}
 			if (item.type === "empty") {
 				return theme.fg("dim", "  No agents");
 			}
-			return this.renderRow(item.row, width, rowDetails, item.shaded);
+			return this.renderRow(item.row, width, usageLayout.details, item.shaded);
 		});
 		if (showLeadingEllipsis) {
 			lines.unshift(theme.fg("dim", "  ..."));
@@ -2535,7 +2536,7 @@ export class AgentsViewMode implements Component, Focusable {
 	private renderRow(
 		row: AgentsViewRow,
 		width: number,
-		rowDetails: ReadonlyMap<string, string> = buildAgentsViewRowDetails([row]),
+		rowDetails: ReadonlyMap<string, string> = buildAgentsViewUsageLayout([row]).details,
 		shaded = false,
 	): string {
 		const selected = row.selectable && row.identity === this.rows[this.selectedIndex]?.identity;
@@ -2607,14 +2608,16 @@ export class AgentsViewMode implements Component, Focusable {
 	}
 
 	// Bold like the section title so the legend reads as part of the header line.
-	private renderSectionHeading(section: AgentsViewSection, width: number): string {
+	// The legend is right-aligned to the same edge as the row details cells, so
+	// its columns sit exactly above the row columns.
+	private renderSectionHeading(section: AgentsViewSection, width: number, legend: string): string {
 		const counts = countRowsBySection(this.rows);
 		const title = `${sectionTitle(section)} (${counts[section]})`;
-		const gap = width - visibleWidth(title) - visibleWidth(AGENTS_VIEW_USAGE_LEGEND);
-		if (gap < 2) {
+		const gap = width - visibleWidth(title) - visibleWidth(legend);
+		if (legend.length === 0 || gap < 2) {
 			return theme.bold(truncateToWidth(title, width, ""));
 		}
-		return `${theme.bold(title)}${" ".repeat(gap)}${theme.bold(AGENTS_VIEW_USAGE_LEGEND)}`;
+		return `${theme.bold(title)}${" ".repeat(gap)}${theme.bold(legend)}`;
 	}
 
 	// Spawn-code rows are read-only context. They render deemphasized — muted
@@ -2874,11 +2877,7 @@ function hasLiveWork(row: AgentsViewRow): boolean {
 	return row.section === "running" || row.runningSubagentCount > 0 || row.summary.hasRunningRlmChildren === true;
 }
 
-export const AGENTS_VIEW_USAGE_LEGEND = "↑in ↓out · $agent · #sub · $total · age";
-
-interface AgentsViewRowDetailEntry {
-	identity: string;
-	empty: boolean;
+interface AgentsViewUsageParts {
 	inTokens: string;
 	outTokens: string;
 	agentCost: string;
@@ -2887,19 +2886,49 @@ interface AgentsViewRowDetailEntry {
 	age: string;
 }
 
+const AGENTS_VIEW_USAGE_LABELS: AgentsViewUsageParts = {
+	inTokens: "↑in",
+	outTokens: "↓out",
+	agentCost: "$agent",
+	count: "#sub",
+	totalCost: "$total",
+	age: "age",
+};
+
+const AGENTS_VIEW_USAGE_COLUMNS = Object.keys(AGENTS_VIEW_USAGE_LABELS) as (keyof AgentsViewUsageParts)[];
+
+export interface AgentsViewUsageLayout {
+	/** Legend line per section, padded to that section's column widths. */
+	legends: ReadonlyMap<AgentsViewSection, string>;
+	/** Details string per row identity, padded to its section's column widths. */
+	details: ReadonlyMap<string, string>;
+}
+
 /**
- * One details string per agent/subagent row: `↑in ↓out · $agent · #sub · $total · age`.
- * Columns are padded across the whole row set so the count and dollar columns
- * align vertically; empty sessions render only the age, aligned to the age column.
+ * One shared column layout per section for the header legend and every row:
+ * each column is as wide as the section's widest value or its legend label,
+ * everything right-aligned, so the ` · ` separators land in the same terminal
+ * column for the legend and every row. Empty sessions render only the age,
+ * aligned to the age column.
  */
-export function buildAgentsViewRowDetails(rows: readonly AgentsViewRow[]): ReadonlyMap<string, string> {
-	const entries: AgentsViewRowDetailEntry[] = rows
-		.filter((row) => row.kind === "agent" || row.kind === "subagent")
-		.map((row) => {
+export function buildAgentsViewUsageLayout(rows: readonly AgentsViewRow[]): AgentsViewUsageLayout {
+	const rowsBySection = new Map<AgentsViewSection, AgentsViewRow[]>();
+	// Nested rows render inside their top-level agent's section block, so group
+	// by the block's section rather than each row's own.
+	let blockSection: AgentsViewSection = "running";
+	for (const row of rows) {
+		if (row.depth === 0) blockSection = row.section;
+		if (row.kind !== "agent" && row.kind !== "subagent") continue;
+		const sectionRows = rowsBySection.get(blockSection) ?? [];
+		sectionRows.push(row);
+		rowsBySection.set(blockSection, sectionRows);
+	}
+	const legends = new Map<AgentsViewSection, string>();
+	const details = new Map<string, string>();
+	for (const section of ["running", "idle", "inactive"] as const) {
+		const entries = (rowsBySection.get(section) ?? []).map((row) => {
 			const usage = row.summary.usage;
-			return {
-				identity: row.identity,
-				empty: isEmptyAgentsViewSession(row.summary),
+			const parts: AgentsViewUsageParts = {
 				inTokens: `↑${formatTokenCount(usage?.inputTokens ?? 0)}`,
 				outTokens: `↓${formatTokenCount(usage?.outputTokens ?? 0)}`,
 				agentCost: `$${(usage?.cost ?? 0).toFixed(2)}`,
@@ -2907,45 +2936,38 @@ export function buildAgentsViewRowDetails(rows: readonly AgentsViewRow[]): Reado
 				totalCost: `$${row.recursiveCost.toFixed(2)}`,
 				age: formatSessionDuration(row.summary),
 			};
+			return { identity: row.identity, empty: isEmptyAgentsViewSession(row.summary), parts };
 		});
-	const columnWidth = (select: (entry: AgentsViewRowDetailEntry) => string, includeEmpty = false): number => {
-		let width = 0;
-		for (const entry of entries) {
-			if (entry.empty && !includeEmpty) continue;
-			width = Math.max(width, visibleWidth(select(entry)));
+		const widths = {} as Record<keyof AgentsViewUsageParts, number>;
+		for (const column of AGENTS_VIEW_USAGE_COLUMNS) {
+			let width = visibleWidth(AGENTS_VIEW_USAGE_LABELS[column]);
+			for (const entry of entries) {
+				// Empty sessions render no usage segment; only their age takes space.
+				if (entry.empty && column !== "age") continue;
+				width = Math.max(width, visibleWidth(entry.parts[column]));
+			}
+			widths[column] = width;
 		}
-		return width;
-	};
-	const inWidth = columnWidth((entry) => entry.inTokens);
-	const outWidth = columnWidth((entry) => entry.outTokens);
-	const agentCostWidth = columnWidth((entry) => entry.agentCost);
-	const countWidth = columnWidth((entry) => entry.count);
-	const totalCostWidth = columnWidth((entry) => entry.totalCost);
-	const ageWidth = columnWidth((entry) => entry.age, true);
-	const details = new Map<string, string>();
-	for (const entry of entries) {
-		details.set(
-			entry.identity,
-			entry.empty
-				? padCellStart(entry.age, ageWidth)
-				: [
-						`${padCellEnd(entry.inTokens, inWidth)} ${padCellEnd(entry.outTokens, outWidth)}`,
-						padCellStart(entry.agentCost, agentCostWidth),
-						padCellStart(entry.count, countWidth),
-						padCellStart(entry.totalCost, totalCostWidth),
-						padCellStart(entry.age, ageWidth),
-					].join(" · "),
-		);
+		const pad = (parts: AgentsViewUsageParts, column: keyof AgentsViewUsageParts): string =>
+			padCellStart(parts[column], widths[column]);
+		const formatLine = (parts: AgentsViewUsageParts): string =>
+			[
+				`${pad(parts, "inTokens")} ${pad(parts, "outTokens")}`,
+				pad(parts, "agentCost"),
+				pad(parts, "count"),
+				pad(parts, "totalCost"),
+				pad(parts, "age"),
+			].join(" · ");
+		legends.set(section, formatLine(AGENTS_VIEW_USAGE_LABELS));
+		for (const entry of entries) {
+			details.set(entry.identity, entry.empty ? pad(entry.parts, "age") : formatLine(entry.parts));
+		}
 	}
-	return details;
+	return { legends, details };
 }
 
 function padCellStart(value: string, width: number): string {
 	return " ".repeat(Math.max(0, width - visibleWidth(value))) + value;
-}
-
-function padCellEnd(value: string, width: number): string {
-	return value + " ".repeat(Math.max(0, width - visibleWidth(value)));
 }
 
 // Explicit session names read bold so they stand out from fallback titles

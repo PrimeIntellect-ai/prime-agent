@@ -7,10 +7,9 @@ import { SettingsManager } from "../src/core/settings-manager.js";
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import type { AgentConnectionSavedSessionInfo } from "../src/modes/agent-connection/types.js";
 import {
-	AGENTS_VIEW_USAGE_LEGEND,
 	AgentsViewMode,
 	type AgentsViewPersistentState,
-	buildAgentsViewRowDetails,
+	buildAgentsViewUsageLayout,
 	buildDisplayItems,
 	combineAgentsViewStartupNotices,
 	createInitialAgentsViewPersistentState,
@@ -762,26 +761,40 @@ describe("AgentsViewMode", () => {
 				new Set(collapsed.map((row) => row.identity)),
 			);
 			Reflect.set(view, "rows", rows);
-			const details = buildAgentsViewRowDetails(rows);
+			const layout = buildAgentsViewUsageLayout(rows);
 			const line = (row: AgentsViewRow | undefined) =>
-				stripAnsi(invoke("renderRow", view, row, 200, details) as string);
+				stripAnsi(invoke("renderRow", view, row, 200, layout.details) as string);
 			const byId = (sessionId: string, kind?: string) =>
 				rows.find((row) => row.summary.sessionId === sessionId && (!kind || row.kind === kind));
 
-			// Cross-row column padding: counts right-aligned, token cells left-aligned.
-			expect(line(byId("spender-session"))).toContain("↑12k ↓1.2k · $0.42 · 1 · $1.10 ·");
-			expect(line(byId("spender-child-session", "subagent"))).toContain("↑500 ↓50   · $0.68 · 0 · $0.68 ·");
+			// Shared per-section layout: every column right-aligned to
+			// max(widest section value, legend label width).
+			expect(line(byId("spender-session"))).toContain("↑12k ↓1.2k ·  $0.42 ·    1 ·  $1.10 ·");
+			expect(line(byId("spender-child-session", "subagent"))).toContain("↑500   ↓50 ·  $0.68 ·    0 ·  $0.68 ·");
 			const inactiveLine = line(byId("saved-only-session"));
-			expect(inactiveLine).toContain("↑0   ↓0    · $0.00 · 0 · $0.00 ·");
+			expect(inactiveLine).toContain("↑0   ↓0 ·  $0.00 ·    0 ·  $0.00 ·");
 			expect(inactiveLine).not.toContain("7 ·");
+			// The ` · ` separators land in the same column for the legend and every
+			// row of its section.
+			const dotColumns = (text: string) => [...text].flatMap((ch, index) => (ch === "·" ? [index] : []));
+			for (const [section, sessionId] of [
+				["idle", "spender-session"],
+				["idle", "spender-child-session"],
+				["inactive", "saved-only-session"],
+			] as const) {
+				const detail = layout.details.get(byId(sessionId)!.identity)!;
+				expect(dotColumns(detail)).toEqual(dotColumns(layout.legends.get(section)!));
+			}
 			// Empty sessions keep the age but drop the whole usage segment.
 			const emptyLine = line(byId("empty-draft-session"));
 			expect(emptyLine).not.toContain("↑");
 			expect(emptyLine).not.toContain("$");
 			expect(emptyLine).toMatch(/\d+[smhd]\s*$/);
-			// Without a shared details map the row pads only against itself.
+			// Without a shared layout the row pads only against its own section of one.
 			const bare = { ...byId("spender-session")!, summary: { ...parent, usage: undefined } };
-			expect(stripAnsi(invoke("renderRow", view, bare, 200) as string)).toContain("↑0 ↓0 · $0.00 · 1 · $1.10 ·");
+			expect(stripAnsi(invoke("renderRow", view, bare, 200) as string)).toContain(
+				" ↑0   ↓0 ·  $0.00 ·    1 ·  $1.10 ·",
+			);
 		} finally {
 			stopThemeWatcher();
 		}
@@ -793,6 +806,7 @@ describe("AgentsViewMode", () => {
 				id,
 				activeSessionId: id,
 				sessionId: `${id}-session`,
+				sessionName: id,
 				activity: "working",
 				isStreaming: true,
 				created,
@@ -802,6 +816,7 @@ describe("AgentsViewMode", () => {
 			id: "busy-child",
 			activeSessionId: "busy-child",
 			sessionId: "busy-child-session",
+			sessionName: "busy-child",
 			sessionFile: "/tmp/busy-child.jsonl",
 			runtimeKind: "subagent",
 			parentActiveSessionId: "busy-parent",
@@ -810,8 +825,8 @@ describe("AgentsViewMode", () => {
 			running("busy-solo", "2026-01-02T00:00:00Z"),
 			parent,
 			child,
-			summary({ id: "idle-a", activeSessionId: "idle-a", sessionId: "idle-a-session" }),
-			summary({ id: "idle-b", activeSessionId: "idle-b", sessionId: "idle-b-session" }),
+			summary({ id: "idle-a", activeSessionId: "idle-a", sessionId: "idle-a-session", sessionName: "idle-a" }),
+			summary({ id: "idle-b", activeSessionId: "idle-b", sessionId: "idle-b-session", sessionName: "idle-b" }),
 		];
 		const parentIdentity = buildAgentsViewRows(summaries).find(
 			(row) => row.summary.sessionId === "busy-parent-session",
@@ -821,15 +836,20 @@ describe("AgentsViewMode", () => {
 
 		try {
 			Reflect.set(view, "rows", rows);
+			Reflect.set(view, "selectedIndex", -1);
 			Reflect.set(view, "ui", { terminal: { rows: 60 }, requestRender: () => {} });
-			const lines = (invoke("renderSessionRows", view, 120, 40) as string[]).map(stripAnsi);
+			const rendered = invoke("renderSessionRows", view, 120, 40) as string[];
+			const lines = rendered.map(stripAnsi);
 			const headings = lines.filter((line) => /^(Running|Idle|Inactive) \(\d+\)/.test(line));
 			expect(headings).toHaveLength(3);
 			for (const heading of headings) {
-				expect(heading).toMatch(/↑in ↓out · \$agent · #sub · \$total · age$/);
+				expect(heading).toMatch(/↑in\s+↓out ·\s+\$agent ·\s+#sub ·\s+\$total ·\s+age$/);
 			}
 			// Same bold weight for title and legend.
-			expect(invoke("renderSectionHeading", view, "running", 120)).toContain(theme.bold(AGENTS_VIEW_USAGE_LEGEND));
+			const runningLegend = buildAgentsViewUsageLayout(rows).legends.get("running")!;
+			expect(invoke("renderSectionHeading", view, "running", 120, runningLegend)).toContain(
+				theme.bold(runningLegend),
+			);
 
 			// Zebra: alternate top-level session blocks, nested rows inherit the
 			// parent block's shade, stripe restarts at each section header.
@@ -845,6 +865,19 @@ describe("AgentsViewMode", () => {
 				["idle-a-session:agent", false],
 				["idle-b-session:agent", true],
 			]);
+
+			// Through finalizeRenderedLine: shaded blocks carry one uniform
+			// background on every line (agent row and its continuation lines);
+			// unshaded lines emit no background codes at all.
+			const finalized = rendered.map((line) => invoke("finalizeRenderedLine", view, line, 120) as string);
+			const lineFor = (needle: string) => finalized.find((line) => stripAnsi(line).includes(needle))!;
+			const shadedLines = ["busy-parent", "1 subagent", "busy-child", "idle-b"].map(lineFor);
+			const backgrounds = new Set(shadedLines.map((line) => /\x1b\[48[^m]*m/.exec(line)?.[0]));
+			expect(backgrounds.size).toBe(1);
+			expect(backgrounds.has(undefined)).toBe(false);
+			for (const needle of ["busy-solo", "idle-a", "Running (", "Idle (", "Inactive ("]) {
+				expect(lineFor(needle)).not.toContain("\x1b[48");
+			}
 		} finally {
 			stopThemeWatcher();
 		}
