@@ -16,6 +16,20 @@ const startCompactionLoader = Reflect.get(InteractiveMode.prototype, "startCompa
 	customInstructions?: string,
 ) => void;
 
+const updatePendingMessagesDisplay = Reflect.get(InteractiveMode.prototype, "updatePendingMessagesDisplay") as (
+	this: unknown,
+) => void;
+
+const getAllQueuedMessages = Reflect.get(InteractiveMode.prototype, "getAllQueuedMessages") as (this: unknown) => {
+	steering: string[];
+	followUp: string[];
+};
+
+const getConnectionQueue = Reflect.get(InteractiveMode.prototype, "getConnectionQueue") as (this: unknown) => {
+	steering: string[];
+	followUp: string[];
+};
+
 function createFakeThis(overrides: Record<string, unknown> = {}) {
 	return {
 		isInitialized: true,
@@ -136,5 +150,75 @@ describe("InteractiveMode compaction events", () => {
 		(Reflect.get(InteractiveMode.prototype, "syncWorkingLoader") as (this: unknown) => void).call(fakeThis);
 
 		expect(stripAnsi(statusContainer.render(80).join("\n"))).toContain("Compacting context");
+	});
+	test("renders a preparing turn's prompt in the queued-messages area", () => {
+		const queuedMessagesContainer = new Container();
+		const base = {
+			pendingMessagesContainer: new Container(),
+			pendingBashComponents: [],
+			queuedMessagesContainer,
+			featureHintSuppressedByQueue: false,
+			clearFeatureHintPresentation: vi.fn(),
+			resumeFeatureHintPresentation: vi.fn(),
+			getAllQueuedMessages(this: Record<string, unknown>) {
+				return getAllQueuedMessages.call(this);
+			},
+			getConnectionQueue(this: Record<string, unknown>) {
+				return getConnectionQueue.call(this);
+			},
+			isRecognizedSlashCommand: () => false,
+			getAppKeyDisplay: () => "Ctrl+O",
+		};
+		const preparing = {
+			...base,
+			connectionState: {
+				sessionActions: {
+					queuedCount: 0,
+					steering: [],
+					followUps: [],
+					preparing: ["queued before compaction", "Agent message received: also queued"],
+					active: { kind: "turn", phase: "preparing", label: "queued before compaction" },
+				},
+			},
+		};
+		updatePendingMessagesDisplay.call(preparing);
+		const preparingRender = stripAnsi(queuedMessagesContainer.render(80).join("\n"));
+		// Every batched preview renders, with the lane preview strings verbatim.
+		expect(preparingRender).toContain("Starting: queued before compaction");
+		expect(preparingRender).toContain("Agent message received: also queued");
+
+		// An older daemon publishes only active.label; the first prompt still renders.
+		queuedMessagesContainer.clear();
+		const legacy = {
+			...base,
+			featureHintSuppressedByQueue: true,
+			connectionState: {
+				sessionActions: {
+					queuedCount: 0,
+					steering: [],
+					followUps: [],
+					active: { kind: "turn", phase: "preparing", label: "queued before compaction" },
+				},
+			},
+		};
+		updatePendingMessagesDisplay.call(legacy);
+		expect(stripAnsi(queuedMessagesContainer.render(80).join("\n"))).toContain("Starting: queued before compaction");
+
+		// A running turn renders through the streaming transcript, not this area.
+		queuedMessagesContainer.clear();
+		const running = {
+			...base,
+			featureHintSuppressedByQueue: true,
+			connectionState: {
+				sessionActions: {
+					queuedCount: 0,
+					steering: [],
+					followUps: [],
+					active: { kind: "turn", phase: "running", label: "queued before compaction" },
+				},
+			},
+		};
+		updatePendingMessagesDisplay.call(running);
+		expect(stripAnsi(queuedMessagesContainer.render(80).join("\n"))).not.toContain("queued before compaction");
 	});
 });
