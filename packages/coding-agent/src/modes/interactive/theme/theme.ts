@@ -61,6 +61,8 @@ const ThemeJsonSchema = Type.Object({
 		toolDiffAddedBg: ColorValueSchema,
 		toolDiffRemovedBg: ColorValueSchema,
 		toolPanelBg: ColorValueSchema,
+		// Optional so existing custom themes stay valid; unset disables striping.
+		agentsZebraBg: Type.Optional(ColorValueSchema),
 		toolTitle: ColorValueSchema,
 		toolOutput: ColorValueSchema,
 		// Markdown (10 colors)
@@ -181,7 +183,8 @@ export type ThemeBg =
 	| "toolErrorBg"
 	| "toolDiffAddedBg"
 	| "toolDiffRemovedBg"
-	| "toolPanelBg";
+	| "toolPanelBg"
+	| "agentsZebraBg";
 
 type ColorMode = "truecolor" | "256color";
 
@@ -422,6 +425,15 @@ export class Theme {
 
 	getPopupBackgroundColor(): (str: string) => string {
 		return this.surfaceBackgroundColor("toolPanelBg");
+	}
+
+	/** Alternate-row background for the agents view; undefined disables striping. */
+	getAgentsZebraBackgroundColor(): ((str: string) => string) | undefined {
+		const value = this.bgColorValues.get("agentsZebraBg");
+		if (value === undefined || value === "") {
+			return undefined;
+		}
+		return (str: string) => this.bg("agentsZebraBg", str);
 	}
 
 	getSelectionBackgroundColor(): (str: string) => string {
@@ -770,6 +782,7 @@ function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string
 		"toolDiffAddedBg",
 		"toolDiffRemovedBg",
 		"toolPanelBg",
+		"agentsZebraBg",
 	]);
 	for (const [key, value] of Object.entries(resolvedColors)) {
 		if (bgColorKeys.has(key)) {
