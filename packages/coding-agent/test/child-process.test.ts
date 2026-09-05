@@ -1,7 +1,16 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
-import { isProcessAlive, isZombieProcess, waitForChildProcess } from "../src/utils/child-process.js";
+import {
+	isProcessAlive,
+	isZombieProcess,
+	processGroupExists,
+	processGroupHasLiveMember,
+	signalProcessGroupIfHeld,
+	signalProcessGroupOrProcess,
+	waitForChildProcess,
+} from "../src/utils/child-process.js";
+import { spawnZombieProcess } from "./fixtures/zombie-process.js";
 
 describe("waitForChildProcess", () => {
 	it("reports signaled already-exited children as failures", async () => {
@@ -30,32 +39,56 @@ describe("process liveness", () => {
 	});
 
 	it.skipIf(process.platform === "win32")("treats a zombie process as dead", async () => {
-		const parent = spawn(
-			"perl",
-			["-e", '$| = 1; my $pid = fork(); if ($pid) { print "$pid\\n"; sleep 30 } else { exit 0 }'],
-			{ stdio: ["ignore", "pipe", "ignore"] },
-		);
+		const { zombiePid, dispose } = await spawnZombieProcess();
 		try {
-			const zombiePid = await new Promise<number>((resolvePid, rejectPid) => {
-				let output = "";
-				const timer = setTimeout(() => rejectPid(new Error("Timed out waiting for the zombie pid")), 5000);
-				parent.stdout.on("data", (chunk: Buffer) => {
-					output += chunk.toString();
-					const parsed = Number.parseInt(output.trim(), 10);
-					if (Number.isInteger(parsed) && parsed > 0) {
-						clearTimeout(timer);
-						resolvePid(parsed);
-					}
-				});
-			});
-			const deadline = Date.now() + 5000;
-			while (!isZombieProcess(zombiePid) && Date.now() < deadline) {
-				await new Promise((resolveDelay) => setTimeout(resolveDelay, 25));
-			}
 			expect(isZombieProcess(zombiePid)).toBe(true);
 			expect(isProcessAlive(zombiePid)).toBe(false);
 		} finally {
-			parent.kill("SIGKILL");
+			dispose();
+		}
+	});
+
+	it.skipIf(process.platform === "win32")("does not let an unreaped zombie block group-stop completion", async () => {
+		// setpgrp makes the zombie its group's only member: the group exists, but
+		// a stop waiting on it must complete because nothing is left running.
+		const { zombiePid, dispose } = await spawnZombieProcess("setpgrp(0, 0);");
+		try {
+			expect(isZombieProcess(zombiePid)).toBe(true);
+			expect(processGroupExists(zombiePid)).toBe(true);
+			expect(processGroupHasLiveMember(zombiePid)).toBe(false);
+		} finally {
+			dispose();
+		}
+	});
+
+	it.skipIf(process.platform === "win32")("keeps a process group alive after its leader exits", async () => {
+		const childless = spawn("sh", ["-c", "exit 0"], { detached: true, stdio: "ignore" });
+		const childlessExited = new Promise<void>((resolveExit) => childless.once("exit", () => resolveExit()));
+		const leader = spawn("sh", ["-c", "sleep 30 & echo started"], {
+			detached: true,
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		const leaderExited = new Promise<void>((resolveExit) => leader.once("exit", () => resolveExit()));
+		const pgid = leader.pid!;
+		try {
+			await new Promise<void>((resolveStart, rejectStart) => {
+				const timer = setTimeout(() => rejectStart(new Error("Timed out waiting for the group member")), 5000);
+				leader.stdout?.once("data", () => {
+					clearTimeout(timer);
+					resolveStart();
+				});
+			});
+			await leaderExited;
+			expect(isProcessAlive(pgid)).toBe(false);
+			expect(processGroupExists(pgid)).toBe(true);
+			expect(processGroupHasLiveMember(pgid)).toBe(true);
+			// A held group signals; a fully-gone group refuses (pgid-reuse gate).
+			expect(signalProcessGroupIfHeld(pgid, "SIGKILL")).toBe(true);
+			await childlessExited;
+			expect(processGroupExists(childless.pid!)).toBe(false);
+			expect(signalProcessGroupIfHeld(childless.pid!, "SIGKILL")).toBe(false);
+		} finally {
+			signalProcessGroupOrProcess(pgid, "SIGKILL");
 		}
 	});
 });

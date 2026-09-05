@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { getProcessStartId } from "../../core/session-lease.js";
+import { isProcessAlive, isZombieProcess, processIdExists } from "../../utils/child-process.js";
 import { defaultDaemonSocketDir, normalizeSocketPath } from "./daemon-socket.js";
 
 const DAEMON_SUPERVISOR_REGISTRY_DIR_ENV = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
@@ -506,6 +507,34 @@ export async function acquireDaemonSupervisorOwnership(
 	return new DaemonSupervisorOwnership(record, registryDir, ownerDirectory);
 }
 
+// The 250ms fence poll must not spawn `ps` (macOS/BSD zombie check) per tick; existence stays kill(0)-checked every tick.
+const OWNER_ZOMBIE_CONFIRM_INTERVAL_MS = 5000;
+const ownerZombieConfirmations = new Map<number, number>();
+
+function isOwnerProcessAlive(pid: number): boolean {
+	if (!processIdExists(pid)) {
+		ownerZombieConfirmations.delete(pid);
+		return false;
+	}
+	const now = Date.now();
+	const confirmedAt = ownerZombieConfirmations.get(pid);
+	if (confirmedAt !== undefined && now - confirmedAt < OWNER_ZOMBIE_CONFIRM_INTERVAL_MS) {
+		return true;
+	}
+	if (isZombieProcess(pid)) {
+		ownerZombieConfirmations.delete(pid);
+		return false;
+	}
+	// Expired entries belong to owners nothing asserts anymore; dropping them keeps the cache bounded.
+	for (const [staleOwnerPid, staleConfirmedAt] of ownerZombieConfirmations) {
+		if (now - staleConfirmedAt >= OWNER_ZOMBIE_CONFIRM_INTERVAL_MS) {
+			ownerZombieConfirmations.delete(staleOwnerPid);
+		}
+	}
+	ownerZombieConfirmations.set(pid, now);
+	return true;
+}
+
 export async function assertDaemonSupervisorOwnerCurrent(
 	owner: {
 		generation: string;
@@ -526,7 +555,7 @@ export async function assertDaemonSupervisorOwnerCurrent(
 		current.pid !== owner.pid ||
 		current.processStartId !== owner.processStartId ||
 		current.socketPath !== normalizeSocketPath(owner.socketPath) ||
-		!isProcessAlive(current.pid)
+		!isOwnerProcessAlive(current.pid)
 	) {
 		throw new DaemonSupervisorOwnershipLostError(owner.generation, { socketPath: owner.socketPath, registryDir });
 	}
@@ -691,15 +720,6 @@ function matchesExactProcessIdentity(identity: ProcessIdentity): boolean {
 		return false;
 	}
 	return identity.processStartId === undefined || getProcessStartId(identity.pid) === identity.processStartId;
-}
-
-function isProcessAlive(pid: number): boolean {
-	try {
-		process.kill(pid, 0);
-	} catch (error) {
-		return (error as NodeJS.ErrnoException).code !== "ESRCH";
-	}
-	return true;
 }
 
 function canonicalizeFilesystemPath(path: string): string {

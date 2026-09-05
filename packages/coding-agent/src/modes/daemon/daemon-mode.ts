@@ -107,6 +107,7 @@ import {
 import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
+import { isProcessAlive } from "../../utils/child-process.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
 import {
 	createAgentConnectionCommands,
@@ -867,7 +868,7 @@ export class AgentDaemon {
 					} catch {
 						// An invalid owner is reclaimed atomically below.
 					}
-					if (ownerPid && this.isProcessAlive(ownerPid)) {
+					if (ownerPid && isProcessAlive(ownerPid)) {
 						return;
 					}
 					const staleDirectory = `${lockDirectory}.stale-${process.pid}-${token}`;
@@ -922,15 +923,6 @@ export class AgentDaemon {
 				rmSync(lockDirectory, { recursive: true, force: true });
 			}
 			this.supervisorLaunchInProgress = false;
-		}
-	}
-
-	private isProcessAlive(pid: number): boolean {
-		try {
-			process.kill(pid, 0);
-			return true;
-		} catch (error) {
-			return (error as NodeJS.ErrnoException).code === "EPERM";
 		}
 	}
 

@@ -51,6 +51,53 @@ export function isProcessAlive(pid: number): boolean {
 	return processIdExists(pid) && !isZombieProcess(pid);
 }
 
+/** True while the group has any member left, zombies included; a group can outlive its leader. */
+export function processGroupExists(pgid: number): boolean {
+	if (process.platform === "win32") {
+		return false;
+	}
+	try {
+		process.kill(-pgid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/** True while the group has a RUNNING member; unreaped zombies have exited and must not block a group stop. */
+export function processGroupHasLiveMember(pgid: number): boolean {
+	if (!processGroupExists(pgid)) {
+		return false;
+	}
+	try {
+		const listing = execFileSync("ps", ["-A", "-o", "pgid=", "-o", "stat="], { encoding: "utf8" });
+		for (const line of listing.split("\n")) {
+			const fields = line.trim().split(/\s+/);
+			if (fields.length < 2) continue;
+			if (Number(fields[0]) === pgid && !fields[1]!.startsWith("Z")) {
+				return true;
+			}
+		}
+		return false;
+	} catch {
+		// Unverifiable listing reads alive: callers keep escalating instead of dropping records over live descendants.
+		return true;
+	}
+}
+
+/**
+ * Signal the group only while it is provably still the target: the leader process (even a zombie)
+ * anchors its pgid against reuse; once the leader is gone, a live member must hold the pgid at
+ * signal time, narrowing reuse exposure to the inherent kill() TOCTOU of any single-pid signal.
+ */
+export function signalProcessGroupIfHeld(pgid: number, signal: NodeJS.Signals): boolean {
+	if (!processIdExists(pgid) && !processGroupHasLiveMember(pgid)) {
+		return false;
+	}
+	signalProcessGroupOrProcess(pgid, signal);
+	return true;
+}
+
 export function signalProcessGroupOrProcess(pid: number, signal: NodeJS.Signals): void {
 	try {
 		process.kill(-pid, signal);
