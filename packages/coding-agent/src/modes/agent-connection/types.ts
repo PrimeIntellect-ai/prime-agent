@@ -132,6 +132,8 @@ export interface AgentConnectionSavedSessionInfo {
 	created: Date;
 	modified: Date;
 	messageCount: number;
+	/** Scan-provided user-content truth (see sessionEntryTypesHaveUserContent); absent from older daemons. */
+	hasUserContent?: boolean;
 	firstMessage: string;
 	allMessagesText: string;
 	agentStatus?: AgentConnectionAgentStatus;

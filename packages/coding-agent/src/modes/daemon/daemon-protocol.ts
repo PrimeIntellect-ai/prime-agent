@@ -72,8 +72,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 24 adds the capability-gated agent-roster subscription and push.
 // Revision 25 adds capability-gated direct worker peer transport discovery.
 // Revision 26 publishes own-session usage totals on session summary and saved-session rows.
-export const DAEMON_SCHEMA_REVISION = 26;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-26-962b8b4c5e35";
+// Revision 27 adds the ghost-session sweep command and the saved-session user-content flag.
+export const DAEMON_SCHEMA_REVISION = 27;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-27-7e8cd27314ad";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -120,7 +121,8 @@ export type DaemonServerCapability =
 	| "session_input_pause"
 	| "owned_prompt_cancellation"
 	| "acp_mcp_servers"
-	| "direct_peer_transport";
+	| "direct_peer_transport"
+	| "ghost_session_sweep";
 
 export type DaemonReplayStatus = "complete" | "partial" | "unavailable";
 
@@ -661,6 +663,7 @@ export type DaemonCommand =
 	| { id?: string; type: "set_rlm_max_depth"; activeSessionId: string; maxDepth: number; global?: boolean }
 	| { id?: string; type: "rename_saved_session"; activeSessionId?: string; sessionPath: string; name: string }
 	| { id?: string; type: "delete_saved_session"; activeSessionId?: string; sessionPath: string }
+	| { id?: string; type: "sweep_ghost_sessions"; sessionPaths: string[] }
 	| { id?: string; type: "get_session_context"; activeSessionId: string }
 	| { id?: string; type: "get_session_tree"; activeSessionId: string }
 	| { id?: string; type: "get_user_messages_for_forking"; activeSessionId: string }
@@ -838,6 +841,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	set_rlm_max_depth: RLM_MAX_DEPTH_COMMAND,
 	rename_saved_session: LEGACY_DAEMON_COMMAND,
 	delete_saved_session: LEGACY_DAEMON_COMMAND,
+	sweep_ghost_sessions: { minProtocol: 7, minSchemaRevision: 27, capability: "ghost_session_sweep" },
 	get_session_context: LEGACY_DAEMON_COMMAND,
 	get_session_tree: FLAT_SESSION_TREE_COMMAND,
 	get_user_messages_for_forking: LEGACY_DAEMON_COMMAND,
@@ -956,6 +960,7 @@ export const DAEMON_COMMAND_PLANE = {
 	set_rlm_max_depth: "session",
 	rename_saved_session: "control",
 	delete_saved_session: "control",
+	sweep_ghost_sessions: "control",
 	get_session_context: "session",
 	get_session_tree: "session",
 	get_user_messages_for_forking: "session",
@@ -1073,6 +1078,7 @@ export interface DaemonSavedSessionInfo {
 	created: string;
 	modified: string;
 	messageCount: number;
+	hasUserContent?: boolean;
 	firstMessage: string;
 	allMessagesText: string;
 	agentStatus?: AgentConnectionAgentStatus;

@@ -1,4 +1,5 @@
 import { basename, resolve } from "node:path";
+import { isDisposableGhost } from "../../core/session-ghost.js";
 import { canonicalizePath } from "../../utils/paths.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/index.js";
 import { rosterAgentIdForSummary } from "../daemon/agent-roster.js";
@@ -179,6 +180,70 @@ function createUnifiedSearchableText(
 	]
 		.filter((part): part is string => typeof part === "string" && part.length > 0)
 		.join(" ");
+}
+
+export interface DisposableGhostPartition {
+	visibleSaved: AgentConnectionSavedSessionInfo[];
+	/** Session file paths eligible for the background sweep, in catalog order. */
+	ghostPaths: string[];
+}
+
+/**
+ * Split the saved catalog into rows to render and disposable ghosts to hide and
+ * queue for the daemon sweep. Residency and attachment come from the unfiltered
+ * daemon summaries; lease and recovery truth are daemon-side only, so they are
+ * left absent here and re-checked by the sweep before any delete.
+ */
+export function partitionDisposableGhostSessions(
+	savedSessions: readonly AgentConnectionSavedSessionInfo[],
+	daemonSummaries: readonly SessionSummary[],
+	heartbeats: readonly AgentConnectionHeartbeat[],
+	nowMs: number,
+): DisposableGhostPartition {
+	const summaryByFile = new Map<string, SessionSummary>();
+	const parentPaths = new Set<string>();
+	for (const summary of daemonSummaries) {
+		if (summary.sessionFile) summaryByFile.set(canonicalSessionPath(summary.sessionFile), summary);
+		if (summary.parentSessionPath) parentPaths.add(canonicalSessionPath(summary.parentSessionPath));
+	}
+	for (const saved of savedSessions) {
+		if (saved.parentSessionPath) parentPaths.add(canonicalSessionPath(saved.parentSessionPath));
+	}
+	const scheduledFiles = new Set(
+		heartbeats
+			.filter((heartbeat) => heartbeat.job.status === "active" || heartbeat.job.status === "paused")
+			.map((heartbeat) => canonicalSessionPath(heartbeat.job.sessionFile)),
+	);
+
+	const visibleSaved: AgentConnectionSavedSessionInfo[] = [];
+	const ghostPaths: string[] = [];
+	for (const saved of savedSessions) {
+		const canonical = canonicalSessionPath(saved.path);
+		const summary = summaryByFile.get(canonical);
+		const ghost = isDisposableGhost(
+			{
+				hasUserContent: saved.hasUserContent,
+				createdAtMs: saved.created.getTime(),
+				modifiedAtMs: saved.modified.getTime(),
+				resident: summary?.activeSessionId !== undefined,
+				attached: (summary?.attachedClients ?? 0) > 0,
+				leased: false,
+				hasQueuedInput: (summary?.unfinishedActionCount ?? 0) > 0 || (summary?.sessionActions.queuedCount ?? 0) > 0,
+				hasScheduledJob:
+					summary?.hasRegisteredHeartbeat === true ||
+					summary?.hasRegisteredCronJob === true ||
+					scheduledFiles.has(canonical),
+				hasSpawnLedgerChildren: parentPaths.has(canonical),
+			},
+			nowMs,
+		);
+		if (ghost) {
+			ghostPaths.push(saved.path);
+		} else {
+			visibleSaved.push(saved);
+		}
+	}
+	return { visibleSaved, ghostPaths };
 }
 
 /**

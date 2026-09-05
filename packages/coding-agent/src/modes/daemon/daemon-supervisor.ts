@@ -57,7 +57,14 @@ import {
 	type IdleEvictionMinutes,
 	type WorkerEvictionSnapshot,
 } from "../../core/session-action-store.js";
-import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } from "../../core/session-lease.js";
+import type { DeleteSessionFileResult } from "../../core/session-file-actions.js";
+import { type DisposableGhostCandidate, isDisposableGhost } from "../../core/session-ghost.js";
+import {
+	canonicalSessionPath,
+	getProcessStartId,
+	isSessionFileLeased,
+	SessionAlreadyActiveError,
+} from "../../core/session-lease.js";
 import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { looksLikeSessionPath } from "../../core/session-resolver.js";
 import { SettingsManager } from "../../core/settings-manager.js";
@@ -183,6 +190,7 @@ const SUPERVISOR_SERVER_CAPABILITIES: readonly DaemonServerCapability[] = [
 	...DAEMON_DEFAULT_SERVER_CAPABILITIES,
 	"agent_roster",
 	"direct_peer_transport",
+	"ghost_session_sweep",
 ];
 const PEER_TRANSPORT_GRANT_TTL_MS = 10_000;
 const WORKER_REQUEST_TIMEOUT_MS = 24 * 60 * 60 * 1000;
@@ -209,6 +217,11 @@ const OWNED_WORKER_DISCONNECT_GRACE_MS = 30_000;
 const IDLE_EVICTION_MAX_SWEEP_INTERVAL_MS = 5 * 60_000;
 const IDLE_EVICTION_MIN_SWEEP_INTERVAL_MS = 60_000;
 const IDLE_EVICTION_DRAIN_TIMEOUT_MS = 5_000;
+// Ghost sweep throttle: bounded batch per command; unswept candidates stay
+// hidden client-side and re-queue on a later agents-view entry.
+const GHOST_SWEEP_MAX_PER_COMMAND = 25;
+// Windows can report transient EPERM/EBUSY on unlink while scanners hold the file (#1935).
+const GHOST_DELETE_TRANSIENT_RETRY_DELAYS_MS = [50, 250] as const;
 const CHILD_PASSIVATION_PER_WORKER_CAP = 2;
 const SCHEDULED_WAKE_RETRY_MS = 60_000;
 const SCHEDULED_WAKE_MAX_TIMEOUT_MS = 2_147_483_647;
@@ -311,6 +324,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"set_rlm_max_depth",
 	"rename_saved_session",
 	"delete_saved_session",
+	"sweep_ghost_sessions",
 	"get_session_context",
 	"get_session_tree",
 	"get_user_messages_for_forking",
@@ -1187,11 +1201,23 @@ export class DaemonSupervisor {
 		};
 	}
 
-	/** Runs a passivation decision under the eviction fence after draining admitted mutations. */
-	private async withEvictionFence(drainMessage: string, action: () => Promise<void>): Promise<void> {
+	/**
+	 * Runs a passivation decision under the eviction fence after draining admitted
+	 * mutations. A mutating command that sweeps from inside its own admission
+	 * passes admittedMutations=1 so its own latch slot does not deadlock the drain.
+	 */
+	private async withEvictionFence(
+		drainMessage: string,
+		action: () => Promise<void>,
+		admittedMutations = 0,
+	): Promise<void> {
 		const releaseFence = await this.acquireIdleEvictionFence();
 		try {
-			await this.mutationDrain.waitForDrain(0, AbortSignal.timeout(IDLE_EVICTION_DRAIN_TIMEOUT_MS), drainMessage);
+			await this.mutationDrain.waitForDrain(
+				admittedMutations,
+				AbortSignal.timeout(IDLE_EVICTION_DRAIN_TIMEOUT_MS),
+				drainMessage,
+			);
 			await action();
 		} finally {
 			releaseFence();
@@ -1259,6 +1285,94 @@ export class DaemonSupervisor {
 			(summary) => this.attachedClientCount(summary, summary.activeSessionId ?? summary.id) > 0,
 		);
 		return summaries.length > 0 && !hasAttachedClient && summaries.every(isEvictableEmptySessionSummary);
+	}
+
+	/**
+	 * Best-effort background deleter for ghost session files queued by the agents
+	 * view. Every path is re-verified with fresh daemon-side truth under the
+	 * eviction fence at delete time, so a create admitted between the client's
+	 * scan and this sweep wins. Per-path failures keep the file and are only
+	 * logged; the command itself never fails for them.
+	 */
+	private async handleGhostSessionSweep(
+		command: Extract<DaemonCommand, { type: "sweep_ghost_sessions" }>,
+	): Promise<DaemonResponse> {
+		const deleted: string[] = [];
+		const candidates = command.sessionPaths.slice(0, GHOST_SWEEP_MAX_PER_COMMAND);
+		if (candidates.length === 0 || this.shuttingDown || this.updateRestartPhase !== undefined) {
+			return success(command.id, "sweep_ghost_sessions", { deleted });
+		}
+		await this.withEvictionFence(
+			"Timed out draining daemon mutations for the ghost-session sweep",
+			async () => {
+				const ledgerParents = new Set(
+					(await this.rlmSpawnLedger().liveEdges()).map((edge) => canonicalSessionPath(edge.parent)),
+				);
+				for (const sessionPath of candidates) {
+					if (this.shuttingDown || this.updateRestartPhase !== undefined) return;
+					const deletedPath = await this.deleteVerifiedGhostSession(sessionPath, ledgerParents);
+					if (deletedPath) deleted.push(deletedPath);
+				}
+			},
+			1,
+		);
+		return success(command.id, "sweep_ghost_sessions", { deleted });
+	}
+
+	private async deleteVerifiedGhostSession(
+		sessionPath: string,
+		ledgerParents: ReadonlySet<string>,
+	): Promise<string | undefined> {
+		const canonical = canonicalSessionPath(sessionPath);
+		if (!canonical.endsWith(".jsonl")) return undefined;
+		const info = await readSessionInfo(canonical);
+		if (!info) return undefined;
+		let worker: ResidentWorker | undefined;
+		try {
+			worker = this.findWorkerBySessionFile(canonical);
+		} catch {
+			// Ambiguous residency is residency for deletion purposes.
+			return undefined;
+		}
+		const entry = this.roster().bySessionFile(canonical);
+		const agentDir = this.defaultSessionConfig.agentDir;
+		const candidate: DisposableGhostCandidate = {
+			hasUserContent: info.hasUserContent,
+			createdAtMs: info.created.getTime(),
+			modifiedAtMs: info.modified.getTime(),
+			resident: worker !== undefined || entry?.summary.activeSessionId !== undefined,
+			attached: (entry?.summary.attachedClients ?? 0) > 0,
+			leased: agentDir !== undefined && isSessionFileLeased(canonical, agentDir),
+			hasQueuedInput: (entry?.summary.unfinishedActionCount ?? 0) > 0 || entry?.queuedChild === true,
+			hasScheduledJob:
+				entry?.summary.hasRegisteredHeartbeat === true ||
+				entry?.summary.hasRegisteredCronJob === true ||
+				existsSync(join(getSessionArtifactPathForFile(canonical, info.id), SESSION_SCHEDULED_JOBS_FILENAME)),
+			hasSpawnLedgerChildren: ledgerParents.has(canonical),
+		};
+		if (!isDisposableGhost(candidate)) return undefined;
+		await tombstoneSavedSessionDelete(this.rlmSpawnLedger(), canonical, entry?.summary);
+		const result = await this.deleteGhostSessionFile(canonical);
+		if (!result.ok) {
+			this.log(`Ghost sweep kept ${canonical}: ${result.error}`);
+			return undefined;
+		}
+		if (entry && this.roster().get(entry.agentId) === entry) {
+			this.roster().delete(entry.agentId);
+		}
+		return canonical;
+	}
+
+	private async deleteGhostSessionFile(sessionPath: string): Promise<DeleteSessionFileResult> {
+		let result = await this.catalog.delete(sessionPath);
+		for (const delayMs of GHOST_DELETE_TRANSIENT_RETRY_DELAYS_MS) {
+			if (result.ok || !/\bE(?:PERM|BUSY)\b/.test(result.error)) {
+				return result;
+			}
+			await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
+			result = await this.catalog.delete(sessionPath);
+		}
+		return result;
 	}
 
 	private async assertCurrentOwnership(): Promise<void> {
@@ -2512,6 +2626,8 @@ export class DaemonSupervisor {
 					return success(command.id, command.type, result);
 				}
 				break;
+			case "sweep_ghost_sessions":
+				return this.handleGhostSessionSweep(command);
 		}
 
 		if (command.type === "send_message") {

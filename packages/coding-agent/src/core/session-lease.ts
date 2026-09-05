@@ -262,6 +262,26 @@ function reclaimStaleLease(directory: string): boolean {
 	return true;
 }
 
+/**
+ * Read-only lease liveness check for the ghost sweep: never reclaims a stale
+ * lease (acquire-time reclaim owns that; see PR #1561 review for the race a
+ * reclaiming reader creates). Unreadable state counts as leased.
+ */
+export function isSessionFileLeased(sessionPath: string, agentDir: string): boolean {
+	const directory = leaseDirectory(agentDir, canonicalSessionPath(sessionPath));
+	if (!existsSync(directory)) {
+		return false;
+	}
+	try {
+		return withLeaseGuard(directory, () => {
+			const owner = readLeaseOwner(directory);
+			return owner !== undefined && isLeaseOwnerAlive(owner);
+		});
+	} catch {
+		return true;
+	}
+}
+
 export function acquireSessionLease(
 	sessionPath: string | undefined,
 	agentDir: string,

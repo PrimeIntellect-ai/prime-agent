@@ -85,6 +85,7 @@ import {
 	hasUnifiedSessionChildren,
 	isSubagentSummary,
 	migrateAgentsViewIdentitySet,
+	partitionDisposableGhostSessions,
 	reconcileUnifiedSessions,
 	resolveAgentsViewLeftResult,
 	resolveAgentsViewScopeFrames,
@@ -672,6 +673,8 @@ export class AgentsViewMode implements Component, Focusable {
 	private savedCatalogGeneration = 0;
 	private heartbeatCatalogGeneration = 0;
 	private savedCatalogRefreshPending = false;
+	private readonly attemptedGhostSweepPaths = new Set<string>();
+	private ghostSweepInFlight = false;
 	private expandedSubagentParents = new Set<string>();
 	// Agent row identities whose full spawn program is currently shown.
 	// The program key toggles each agent shown ↔ hidden.
@@ -2134,6 +2137,32 @@ export class AgentsViewMode implements Component, Focusable {
 		if (this.persistentState.savedCatalogLoaded) void this.refreshSavedSessions({ preserveStatusOnError: true });
 	}
 
+	private maybeSweepGhostSessions(ghostPaths: readonly string[]): void {
+		if (this.stopped || this.ghostSweepInFlight) return;
+		const batch = ghostPaths.filter((path) => !this.attemptedGhostSweepPaths.has(path));
+		if (batch.length === 0) return;
+		this.ghostSweepInFlight = true;
+		for (const path of batch) this.attemptedGhostSweepPaths.add(path);
+		void this.runGhostSweep(batch).finally(() => {
+			this.ghostSweepInFlight = false;
+		});
+	}
+
+	/** Best-effort: ghost rows are already hidden, so sweep failures never surface in the view. */
+	private async runGhostSweep(sessionPaths: string[]): Promise<void> {
+		try {
+			const client = this.requireClient();
+			if (!client.hello) await client.waitForHello();
+			if (!client.supportsServerCapability("ghost_session_sweep")) return;
+			const response = await client.request({ type: "sweep_ghost_sessions", sessionPaths });
+			if (!response.success) return;
+			const deleted = (response.data as { deleted?: string[] } | undefined)?.deleted ?? [];
+			if (deleted.length > 0 && !this.stopped) this.refreshSavedSessionsIfLoaded();
+		} catch {
+			// Deletion retries on a later agents-view entry.
+		}
+	}
+
 	private async refreshSessions(): Promise<void> {
 		if (this.reconnectPromise || this.daemonShutdownReceived || !this.rosterStore) return;
 		this.applySessionList(this.rosterStore.summaries(), true);
@@ -2151,7 +2180,16 @@ export class AgentsViewMode implements Component, Focusable {
 			shouldShowAgentsViewSession(summary, this.inactiveAgentIdentities.has(getSummaryIdentity(summary))),
 		);
 		this.lastVisibleSummaries = this.withPendingDeleteSession(visibleSessions);
-		this.unifiedRecords = reconcileUnifiedSessions(this.lastVisibleSummaries, this.savedSessions, this.heartbeats);
+		// Ghost rows are dropped from render immediately; deletion is a separate
+		// best-effort background sweep that the daemon re-verifies per file.
+		const { visibleSaved, ghostPaths } = partitionDisposableGhostSessions(
+			this.savedSessions,
+			this.lastListedSummaries,
+			this.heartbeats,
+			Date.now(),
+		);
+		this.maybeSweepGhostSessions(ghostPaths);
+		this.unifiedRecords = reconcileUnifiedSessions(this.lastVisibleSummaries, visibleSaved, this.heartbeats);
 		this.unifiedIndex = buildUnifiedSessionIndex(this.unifiedRecords);
 		migrateAgentsViewIdentitySet(this.expandedSubagentParents, this.unifiedIndex.byKey);
 		migrateAgentsViewIdentitySet(this.programShownParents, this.unifiedIndex.byKey);
